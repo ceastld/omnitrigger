@@ -1,0 +1,19 @@
+[package]
+name = "omnitrig-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "OmniTrig 组合输入与提示消息测试界面"
+
+[[bin]]
+name = "omnitrig"
+path = "src/main.rs"
+
+[dependencies]
+omnitrig-core = { path = "../omnitrig-core" }
+omnitrig-windows = { path = "../omnitrig-windows" }
+gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+unicode-segmentation = "=1.13.3"
+raw-window-handle = "0.6"

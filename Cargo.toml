@@ -1,0 +1,14 @@
+[workspace]
+members = ["crates/omnitrig-core", "crates/omnitrig-windows", "crates/omnitrig-app"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

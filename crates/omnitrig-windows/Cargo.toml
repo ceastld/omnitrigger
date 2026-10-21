@@ -1,0 +1,18 @@
+[package]
+name = "omnitrig-windows"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+description = "OmniTrig 的 Windows 输入采集与消费适配"
+
+[dependencies]
+omnitrig-core = { path = "../omnitrig-core" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
