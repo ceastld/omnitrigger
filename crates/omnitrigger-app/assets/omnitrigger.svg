@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1f3a2e"/>
+      <stop offset="1" stop-color="#0b100e"/>
+    </linearGradient>
+    <linearGradient id="cap" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#323b48"/>
+      <stop offset="1" stop-color="#1e242d"/>
+    </linearGradient>
+    <linearGradient id="bolt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#b4f5d5"/>
+      <stop offset="1" stop-color="#5ed49c"/>
+    </linearGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+  </defs>
+  <rect x="12" y="12" width="232" height="232" rx="56" fill="url(#bg)"/>
+  <rect x="12.75" y="12.75" width="230.5" height="230.5" rx="55.25" fill="none" stroke="#7ddfb0" stroke-opacity=".25" stroke-width="1.5"/>
+  <g fill="none" stroke="#7ddfb0" stroke-linecap="round" stroke-width="9">
+    <path d="M192.7 52.9A26 26 0 0 1 211.1 71.3" opacity=".85"/>
+    <path d="M197.4 35.5A44 44 0 0 1 228.5 66.6" opacity=".45"/>
+  </g>
+  <rect x="44" y="84" width="152" height="124" rx="30" fill="#06080b"/>
+  <rect x="44" y="84" width="152" height="124" rx="30" fill="none" stroke="#000" stroke-opacity=".5" stroke-width="2"/>
+  <rect x="52" y="70" width="136" height="116" rx="26" fill="url(#cap)" stroke="#4a5464" stroke-width="2"/>
+  <path d="M60 92a22 22 0 0 1 22-20h76a22 22 0 0 1 22 20" fill="none" stroke="#ffffff" stroke-opacity=".08" stroke-width="2"/>
+  <path d="M130 85 92 133h24l-8 36 40-50h-24z" fill="#7ddfb0" opacity=".6" filter="url(#glow)"/>
+  <path d="M130 85 92 133h24l-8 36 40-50h-24z" fill="url(#bolt)" stroke="#d6fbe8" stroke-opacity=".5" stroke-width="1.5" stroke-linejoin="round"/>
+</svg>

@@ -9,7 +9,7 @@ use assets::{Assets, Icon};
 use gpui::{
     div, point, prelude::*, px, rgb, size, AnyElement, App, Application, Bounds, Context, Div,
     Entity, FontWeight, SharedString, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowHandle, WindowKind, WindowOptions,
+    WindowBounds, WindowControlArea, WindowHandle, WindowKind, WindowOptions,
 };
 use message_input::MessageInput;
 use omnitrigger_core::{Button, TriggerSpec};
@@ -178,10 +178,13 @@ struct Workspace {
     diagnostics: ListenerDiagnostics,
     last_diagnostics_request: Instant,
     listener_generation: u64,
+    /// 已延伸到标题栏的主窗口句柄；未延伸时保留系统标题栏。
+    title_bar: Option<isize>,
+    caption_color: Option<u32>,
 }
 
 impl Workspace {
-    fn new(cx: &mut Context<Self>, ui_smoke: bool) -> Self {
+    fn new(cx: &mut Context<Self>, ui_smoke: bool, title_bar: Result<isize, String>) -> Self {
         let (bindings, load_error) = match settings::load() {
             Ok(bindings) => (bindings, None),
             Err(error) => (Vec::new(), Some(error)),
@@ -225,7 +228,7 @@ impl Workspace {
             message,
             bindings,
             stats: HashMap::new(),
-            error: startup_error.or(load_error),
+            error: startup_error.or(load_error).or(title_bar.clone().err()),
             status: "正在连接键盘和鼠标…".into(),
             hits: VecDeque::new(),
             trigger_count: 0,
@@ -237,6 +240,8 @@ impl Workspace {
             diagnostics: ListenerDiagnostics::default(),
             last_diagnostics_request: Instant::now(),
             listener_generation: 1,
+            title_bar: title_bar.ok(),
+            caption_color: None,
         }
     }
 
@@ -723,7 +728,7 @@ impl Workspace {
 
     // ───────────────────────────── 侧栏 ─────────────────────────────
 
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
+    fn render_sidebar(&self, header: f32, cx: &mut Context<Self>) -> Div {
         let listener = self.listener();
         let enabled = self.bindings.iter().filter(|b| b.enabled).count();
         let (label, sub, color, label_color, card_bg, card_line) = match listener {
@@ -884,19 +889,22 @@ impl Workspace {
             .bg(rgb(theme::SIDEBAR))
             .border_r_1()
             .border_color(rgb(theme::DIVIDER))
-            .pt(px(18.))
             .pb(px(14.))
             .px(px(12.))
             .flex()
             .flex_col()
             .gap(px(18.))
             .child(
+                // 应用名占据标题栏左侧，可拖动窗口。
                 div()
+                    .h(px(header.max(36.)))
+                    .flex_none()
                     .px(px(6.))
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(logo(28.))
+                    .window_control_area(WindowControlArea::Drag)
+                    .child(logo(22.))
                     .child(
                         div()
                             .text_size(px(15.))
@@ -1201,7 +1209,7 @@ impl Workspace {
             .flex_1()
             .min_w_0()
             .h_full()
-            .pt(px(22.))
+            .pt(px(12.))
             .pb(px(16.))
             .pl(px(24.))
             .pr(px(20.))
@@ -1665,7 +1673,7 @@ impl Workspace {
             .bg(rgb(theme::INSPECTOR))
             .border_l_1()
             .border_color(rgb(theme::DIVIDER))
-            .pt(px(22.))
+            .pt(px(12.))
             .pb(px(18.))
             .px(px(20.))
             .flex()
@@ -1786,7 +1794,7 @@ impl Workspace {
             .flex_1()
             .min_w_0()
             .h_full()
-            .pt(px(22.))
+            .pt(px(12.))
             .pb(px(16.))
             .px(px(24.))
             .flex()
@@ -1860,7 +1868,7 @@ impl Workspace {
             .min_w_0()
             .h_full()
             .overflow_y_scroll()
-            .pt(px(22.))
+            .pt(px(12.))
             .pb(px(16.))
             .px(px(24.))
             .flex()
@@ -1980,6 +1988,52 @@ impl Workspace {
             )
     }
 
+    /// 标题栏高度与系统按钮宽度（逻辑像素），并同步按钮下方的底色。
+    fn caption_area(&mut self, window: &Window) -> (f32, f32) {
+        let Some(hwnd) = self.title_bar else {
+            return (0., 0.);
+        };
+        let color = if self.page == Page::Triggers {
+            theme::INSPECTOR
+        } else {
+            theme::BACKGROUND
+        };
+        if self.caption_color != Some(color) {
+            omnitrigger_windows::set_caption_color(hwnd, color);
+            self.caption_color = Some(color);
+        }
+        let scale = window.scale_factor();
+        omnitrigger_windows::caption_buttons(hwnd)
+            .map(|buttons| (buttons.height as f32 / scale, buttons.width as f32 / scale))
+            .unwrap_or((32., 138.))
+    }
+
+    /// 页面各栏的底色延伸进标题栏，右上角留空给系统按钮。
+    fn render_title_bar(&self, height: f32, buttons_width: f32) -> Div {
+        let reserve = div().flex_none().w(px(buttons_width)).h_full();
+        let band = div()
+            .flex_none()
+            .h(px(height))
+            .flex()
+            .window_control_area(WindowControlArea::Drag)
+            .child(div().flex_1().h_full().bg(rgb(theme::BACKGROUND)));
+        if self.page == Page::Triggers {
+            band.child(
+                div()
+                    .w(px(340.))
+                    .flex_none()
+                    .h_full()
+                    .border_l_1()
+                    .border_color(rgb(theme::DIVIDER))
+                    .flex()
+                    .child(div().flex_1().h_full().bg(rgb(theme::INSPECTOR)))
+                    .child(reserve),
+            )
+        } else {
+            band.child(reserve)
+        }
+    }
+
     fn render_status_bar(&self) -> Div {
         let color = match self.listener() {
             Listener::Listening => theme::ACCENT,
@@ -2042,7 +2096,8 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (title_height, buttons_width) = self.caption_area(window);
         let main = match self.page {
             Page::Triggers => div()
                 .flex_1()
@@ -2061,9 +2116,9 @@ impl Render for Workspace {
                 .flex()
                 .child(self.render_diagnostics(cx)),
         };
+        // 根节点不铺底色：系统标题按钮绘制在界面下方，需透出。
         div()
             .size_full()
-            .bg(rgb(theme::BACKGROUND))
             .text_color(rgb(theme::TEXT))
             .font_family(theme::UI_FONT)
             .text_size(px(13.))
@@ -2074,8 +2129,18 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(self.render_sidebar(cx))
-                    .child(main),
+                    .child(self.render_sidebar(title_height, cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .when(title_height > 0., |el| {
+                                el.child(self.render_title_bar(title_height, buttons_width))
+                            })
+                            .child(main.min_h_0().bg(rgb(theme::BACKGROUND))),
+                    ),
             )
             .child(self.render_status_bar())
     }
@@ -2224,7 +2289,16 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let view = cx.new(|cx| Workspace::new(cx, ui_smoke));
+                    let title_bar = match window.window_handle().map(|handle| handle.as_raw()) {
+                        Ok(RawWindowHandle::Win32(handle)) => {
+                            let hwnd = handle.hwnd.get();
+                            omnitrigger_windows::extend_into_title_bar(hwnd)
+                                .map(|()| hwnd)
+                                .map_err(|error| format!("{error}，已改用系统标题栏。"))
+                        }
+                        _ => Err("无法取得主窗口句柄，已改用系统标题栏。".into()),
+                    };
+                    let view = cx.new(|cx| Workspace::new(cx, ui_smoke, title_bar));
                     let closing_view = view.downgrade();
                     window.on_window_should_close(cx, move |_, cx| {
                         let _ = closing_view.update(cx, |view, _| {

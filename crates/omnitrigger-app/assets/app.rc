@@ -1,0 +1,2 @@
+// GPUI 以资源 ID 1 加载窗口类图标；同一图标也用于资源管理器与任务栏。
+1 ICON "omnitrigger.ico"

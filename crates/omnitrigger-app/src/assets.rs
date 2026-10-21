@@ -38,7 +38,7 @@ const ICONS: &[(Icon, &str, &str)] = &[
         Icon::Logo,
         "icons/logo.svg",
         icon!(
-            r##"<rect x="5" y="5" width="14" height="11" rx="3" stroke-width="2.2"/><path d="M7.5 19.5h9" stroke-width="2.2"/>"##
+            r##"<rect x="3.5" y="3.5" width="17" height="14" rx="3.5"/><path d="M7 21h10"/><path d="M13.2 6.2 8.8 11.6h3.1l-.9 3.7 4.3-5.4h-3.1z" fill="#000" stroke-width="1.1"/>"##
         ),
     ),
     (

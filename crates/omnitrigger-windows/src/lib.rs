@@ -48,6 +48,8 @@ pub enum BackendEvent {
 #[cfg(windows)]
 mod platform;
 #[cfg(windows)]
+mod title_bar;
+#[cfg(windows)]
 pub use platform::Backend;
 
 /// 显示由本应用持有的隐藏提示窗口，保留输入焦点和原有扩展样式。
@@ -60,6 +62,27 @@ pub fn show_notification_window(
     height: i32,
 ) -> Result<(), String> {
     platform::show_notification_window(hwnd, x, y, width, height)
+}
+
+#[cfg(windows)]
+pub use title_bar::CaptionButtons;
+
+/// 主窗口内容延伸到标题栏，保留系统绘制的最小化、最大化、关闭按钮。
+#[cfg(windows)]
+pub fn extend_into_title_bar(hwnd: isize) -> Result<(), String> {
+    title_bar::extend_into_title_bar(hwnd)
+}
+
+/// 系统标题按钮在客户区右上角占据的物理像素尺寸。
+#[cfg(windows)]
+pub fn caption_buttons(hwnd: isize) -> Option<CaptionButtons> {
+    title_bar::caption_buttons(hwnd)
+}
+
+/// 设置标题按钮下方的底色，`rgb` 为 0xRRGGBB；系统不支持时保持默认。
+#[cfg(windows)]
+pub fn set_caption_color(hwnd: isize, rgb: u32) {
+    title_bar::set_caption_color(hwnd, rgb)
 }
 
 /// 本地时间的时、分、秒，用于界面记录；不参与触发判定。
