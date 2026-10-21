@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/omnitrig-core", "crates/omnitrig-windows", "crates/omnitrig-app"]
+members = ["crates/omnitrigger-core", "crates/omnitrigger-windows", "crates/omnitrigger-app"]
 resolver = "2"
 
 [workspace.package]

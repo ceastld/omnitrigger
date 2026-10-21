@@ -1,4 +1,4 @@
-# OmniTrig 开发约定
+# OmniTrigger 开发约定
 
 ## 范围
 
@@ -20,7 +20,7 @@
 - 修改前检查 `git status --short`，保留现有改动；不要复制其他项目的代码、配置或密钥。
 - 只搜索当前项目或明确指定的目录；跳过云盘同步目录及云端占位文件，逐步扩大必要搜索范围。
 - 实现状态机时用输入事件序列与预期决策验证行为，优先覆盖前缀回退、释放、重复、注入和恢复边界。
-- 按改动运行 `cargo fmt --check`、定向测试和适用的 `cargo clippy`；文档改动只检查内容与差异。首版可运行 `cargo test --workspace`，真实 Hook 安装/卸载使用 `target\debug\omnitrig.exe --smoke-test`。
-- 交付可试用程序时构建 `cargo build -p omnitrig-app`，明确提供实际 `omnitrig.exe` 路径；用户要求启动 UI 时启动并核验窗口。
+- 按改动运行 `cargo fmt --check`、定向测试和适用的 `cargo clippy`；文档改动只检查内容与差异。首版可运行 `cargo test --workspace`，真实 Hook 安装/卸载使用 `target\debug\omnitrigger.exe --smoke-test`。
+- 交付可试用程序时构建 `cargo build -p omnitrigger-app`，明确提供实际 `omnitrigger.exe` 路径；用户要求启动 UI 时启动并核验窗口。
 - 用户说明、README 和提交说明用中文。提交说明格式为 `type(scope): 中文说明`。
 - 仅在用户授权时提交或推送。不要自动发布仓库、添加开源许可证或修改仓库可见性。

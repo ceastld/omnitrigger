@@ -1,4 +1,4 @@
-# OmniTrig
+# OmniTrigger
 
 统一录制、注册与管理键盘和鼠标组合的 Rust 触发引擎。
 
@@ -15,7 +15,7 @@
 - 输入提示文字，点击“添加触发器”；同一份触发器描述用于录制结果、注册验证和运行时匹配。
 - 触发后在屏幕右下角显示 4 秒提示，并记录命中；提示浮层不激活窗口。
 - 编辑消息、预览提示、启用/停用、删除，以及暂停全部监听。
-- 自动保存到 `%LOCALAPPDATA%\OmniTrig\bindings.json`。初次运行加载示例，之后保留用户配置。
+- 自动保存到 `%LOCALAPPDATA%\OmniTrigger\bindings.json`。初次运行加载示例，之后保留用户配置。
 
 “测试提示”只验证消息显示，真实输入触发会单独累计命中次数。程序退出后移除监听。
 
@@ -25,31 +25,31 @@
 
 ```powershell
 .\start.ps1                       # 构建并打开界面
-cargo run -p omnitrig-app          # 在终端运行
+cargo run -p omnitrigger-app          # 在终端运行
 cargo test --workspace
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo run -p omnitrig-windows --example hook_smoke  # 真实 Hook 安装/卸载检查
+cargo run -p omnitrigger-windows --example hook_smoke  # 真实 Hook 安装/卸载检查
 ```
 
-直接启动产物：`target\debug\omnitrig.exe`。
+直接启动产物：`target\debug\omnitrigger.exe`。
 
 测试建议：先按住 `CapsLock` 再按 `W`，松开后确认提示和命中次数；然后测试侧键加滚轮，最后录制一个自定义组合。单独按下并松开未被组合使用的前缀时，会回放原输入。
 
 ## 与 ScriptDesk 的关系
 
-当前提示由 OmniTrig 自身显示。ScriptDesk 已有脚本内的 `api.notify(message, title?)`，但尚无面向外部应用的通知调用入口，本版不改变 ScriptDesk。后续可通过动作适配接口连接脚本执行与通知能力。
+当前提示由 OmniTrigger 自身显示。ScriptDesk 已有脚本内的 `api.notify(message, title?)`，但尚无面向外部应用的通知调用入口，本版不改变 ScriptDesk。后续可通过动作适配接口连接脚本执行与通知能力。
 
 ## 与其他输入工具并用
 
-Windows 的同类低级 Hook 按后安装在前的顺序处理。其他软件若在上游拦截 CapsLock、侧键或滚轮，OmniTrig 就可能收不到原输入；上游补发的模拟输入仍按原策略过滤，避免动作自触发。仅凭漏触发不能认定具体来源。
+Windows 的同类低级 Hook 按后安装在前的顺序处理。其他软件若在上游拦截 CapsLock、侧键或滚轮，OmniTrigger 就可能收不到原输入；上游补发的模拟输入仍按原策略过滤，避免动作自触发。仅凭漏触发不能认定具体来源。
 
 - 底部诊断每秒更新键盘/鼠标回调数、模拟输入数及当前按住状态。
 - 偶发失效时，松开其他按键后点击“重建监听”：旧监听先按原释放协议收尾，再启动新输入线程、重新安装 Hook，并恢复绑定及暂停状态；清除旧线程残留的按键状态。保留消息、录制结果和用户配置。
 - 程序不定时重装 Hook 抢链首；其他软件稍后再次重装时，仍可能改变输入顺序。
 - 输入线程结束或重建失败时明确显示未监听，不再维持“正在监听”的假状态。
 
-可控优先级检查：`cargo run -p omnitrig-windows --example hook_priority_smoke`。测试 Hook 仅拦截专用标记的 F24 模拟探针，验证上游吞事件及重建后顺序变化；不改变其他应用，也不将探针交给前台窗口。
+可控优先级检查：`cargo run -p omnitrigger-windows --example hook_priority_smoke`。测试 Hook 仅拦截专用标记的 F24 模拟探针，验证上游吞事件及重建后顺序变化；不改变其他应用，也不将探针交给前台窗口。
 
 ## 核心设计
 
@@ -73,6 +73,6 @@ Windows 的同类低级 Hook 按后安装在前的顺序处理。其他软件若
 
 ## 工程结构
 
-- `crates/omnitrig-core`：无外部依赖的事件模型、注册验证、状态机与录制器。
-- `crates/omnitrig-windows`：专用消息线程、低级输入 Hook、消费/补发和生命周期。
-- `crates/omnitrig-app`：GPUI 管理界面、中文消息输入、配置和提示浮层。
+- `crates/omnitrigger-core`：无外部依赖的事件模型、注册验证、状态机与录制器。
+- `crates/omnitrigger-windows`：专用消息线程、低级输入 Hook、消费/补发和生命周期。
+- `crates/omnitrigger-app`：GPUI 管理界面、中文消息输入、配置和提示浮层。

@@ -12,10 +12,10 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 const MAX_CHARACTERS: usize = 2000;
-const KEY_CONTEXT: &str = "OmniTrigMessageInput";
+const KEY_CONTEXT: &str = "OmniTriggerMessageInput";
 
 actions!(
-    omnitrig_message_input,
+    omnitrigger_message_input,
     [
         Backspace,
         Delete,
@@ -68,7 +68,7 @@ pub struct MessageInput {
 
 impl MessageInput {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let content: SharedString = "触发成功，这是来自 OmniTrig 的提示消息。".into();
+        let content: SharedString = "触发成功，这是来自 OmniTrigger 的提示消息。".into();
         let end = content.len();
         Self {
             focus: cx.focus_handle(),
@@ -366,7 +366,7 @@ impl Render for MessageInput {
                 }));
         }
         div()
-            .id("omnitrig-message-input")
+            .id("omnitrigger-message-input")
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)

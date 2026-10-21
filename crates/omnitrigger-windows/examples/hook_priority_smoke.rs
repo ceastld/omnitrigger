@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use omnitrig_windows::{
+use omnitrigger_windows::{
     Backend, BackendCommand, BackendEvent, ListenerDiagnostics, PRIORITY_PROBE_TAG,
 };
 use windows::Win32::{
@@ -232,11 +232,11 @@ fn main() -> Result<(), String> {
     let first_count = COMPETITOR_EVENTS.load(Ordering::Relaxed);
     if first_count != 2 || first_snapshot.probe_events != 0 {
         return Err(format!(
-            "上游拦截验证失败：竞争 Hook={first_count}，OmniTrig={}",
+            "上游拦截验证失败：竞争 Hook={first_count}，OmniTrigger={}",
             first_snapshot.probe_events
         ));
     }
-    println!("阶段 1 通过：后安装的竞争 Hook 吞掉 2 条探针，OmniTrig 收到 0 条");
+    println!("阶段 1 通过：后安装的竞争 Hook 吞掉 2 条探针，OmniTrigger 收到 0 条");
     drop(first);
 
     let mut second = PumpedBackend::start()?;
@@ -246,11 +246,11 @@ fn main() -> Result<(), String> {
     let second_count = COMPETITOR_EVENTS.load(Ordering::Relaxed);
     if second_count != 4 || second_snapshot.probe_events != 2 {
         return Err(format!(
-            "监听重建验证失败：竞争 Hook={second_count}，OmniTrig={}",
+            "监听重建验证失败：竞争 Hook={second_count}，OmniTrigger={}",
             second_snapshot.probe_events
         ));
     }
-    println!("阶段 2 通过：重建后 OmniTrig 先收到 2 条探针，竞争 Hook 累计吞掉 4 条");
+    println!("阶段 2 通过：重建后 OmniTrigger 先收到 2 条探针，竞争 Hook 累计吞掉 4 条");
     drop(second);
     drop(competitor);
     println!(

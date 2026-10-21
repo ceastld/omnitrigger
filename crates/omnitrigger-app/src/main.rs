@@ -9,8 +9,8 @@ use gpui::{
     WindowHandle, WindowKind, WindowOptions,
 };
 use message_input::MessageInput;
-use omnitrig_core::TriggerSpec;
-use omnitrig_windows::{
+use omnitrigger_core::TriggerSpec;
+use omnitrigger_windows::{
     format_button, format_trigger, Backend, BackendCommand, BackendEvent, ListenerDiagnostics,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -375,14 +375,14 @@ impl Workspace {
                 is_resizable: false,
                 is_minimizable: false,
                 is_movable: false,
-                app_id: Some("OmniTrig.Notification".into()),
+                app_id: Some("OmniTrigger.Notification".into()),
                 ..Default::default()
             },
             |window, cx| {
                 let scale = window.scale_factor();
                 match window.window_handle().map(|handle| handle.as_raw()) {
                     Ok(RawWindowHandle::Win32(handle)) => {
-                        popup_error = omnitrig_windows::show_notification_window(
+                        popup_error = omnitrigger_windows::show_notification_window(
                             handle.hwnd.get(),
                             (f32::from(origin.x) * scale) as i32,
                             (f32::from(origin.y) * scale) as i32,
@@ -646,7 +646,7 @@ impl Render for Workspace {
             .child(div().px_7().py_5().border_b_1().border_color(rgb(BORDER)).flex().items_center().justify_between()
                 .child(div().flex().items_center().gap_3()
                     .child(div().size_9().rounded_lg().bg(rgb(0x244537)).text_color(rgb(ACCENT)).flex().items_center().justify_center().text_xl().child("O"))
-                    .child(div().flex().flex_col().child(div().text_xl().font_weight(FontWeight::BOLD).child("OmniTrig"))
+                    .child(div().flex().flex_col().child(div().text_xl().font_weight(FontWeight::BOLD).child("OmniTrigger"))
                         .child(div().text_xs().text_color(rgb(MUTED)).child("组合输入 · 提示消息"))))
                 .child(div().flex().items_center().gap_3()
                     .child(div().text_sm().text_color(rgb(if active { ACCENT } else { MUTED })).child(if self.restarting { "○ 正在重建" } else if self.recording { "● 正在录制" } else if active { "● 正在监听" } else if !self.ready { "○ 监听未就绪" } else { "○ 监听已暂停" }))
@@ -717,7 +717,7 @@ impl Render for Toast {
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(ACCENT))
-                    .child("●  OMNITRIG · 提示消息"),
+                    .child("●  OMNITRIGGER · 提示消息"),
             )
             .child(
                 div()
@@ -746,7 +746,7 @@ fn smoke_test() -> Result<(), String> {
     ))?;
     backend.send(BackendCommand::SetEnabled(false))?;
     drop(backend);
-    println!("OmniTrig smoke test: keyboard/mouse hooks installed and cleanly removed; default registrations valid.");
+    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; default registrations valid.");
     Ok(())
 }
 
@@ -768,10 +768,10 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(920.), px(620.))),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("OmniTrig · 组合输入与提示消息".into()),
+                    title: Some("OmniTrigger · 组合输入与提示消息".into()),
                     ..Default::default()
                 }),
-                app_id: Some("OmniTrig".into()),
+                app_id: Some("OmniTrigger".into()),
                 ..Default::default()
             },
             |window, cx| {
@@ -788,7 +788,7 @@ fn main() {
             },
         );
         if let Err(error) = result {
-            eprintln!("无法启动 OmniTrig 界面：{error}");
+            eprintln!("无法启动 OmniTrigger 界面：{error}");
             cx.quit();
         }
         cx.activate(true);

@@ -1,12 +1,12 @@
 [package]
-name = "omnitrig-windows"
+name = "omnitrigger-windows"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"
-description = "OmniTrig 的 Windows 输入采集与消费适配"
+description = "OmniTrigger 的 Windows 输入采集与消费适配"
 
 [dependencies]
-omnitrig-core = { path = "../omnitrig-core" }
+omnitrigger-core = { path = "../omnitrigger-core" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "=0.61.3", features = [

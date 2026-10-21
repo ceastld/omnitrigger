@@ -1,6 +1,6 @@
 //! Windows 输入适配。Hook 只负责同步决策，触发通知交由外部 UI 处理。
 
-use omnitrig_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirection};
+use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirection};
 
 /// 专用于诊断 Hook 链顺序的注入标记；探针只计数，不进入触发器状态机。
 pub const PRIORITY_PROBE_TAG: usize = 0x4f4d_5052;

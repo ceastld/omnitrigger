@@ -2,8 +2,8 @@
 
 use std::{sync::mpsc::RecvTimeoutError, time::Duration};
 
-use omnitrig_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirection};
-use omnitrig_windows::{Backend, BackendCommand, BackendEvent};
+use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirection};
+use omnitrigger_windows::{Backend, BackendCommand, BackendEvent};
 
 fn main() -> Result<(), String> {
     let (backend, events) = Backend::start()?;

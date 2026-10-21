@@ -2920,12 +2920,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "omnitrig-app"
+name = "omnitrigger-app"
 version = "0.1.0"
 dependencies = [
  "gpui",
- "omnitrig-core",
- "omnitrig-windows",
+ "omnitrigger-core",
+ "omnitrigger-windows",
  "raw-window-handle",
  "serde",
  "serde_json",
@@ -2933,14 +2933,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "omnitrig-core"
+name = "omnitrigger-core"
 version = "0.1.0"
 
 [[package]]
-name = "omnitrig-windows"
+name = "omnitrigger-windows"
 version = "0.1.0"
 dependencies = [
- "omnitrig-core",
+ "omnitrigger-core",
  "windows",
 ]
 

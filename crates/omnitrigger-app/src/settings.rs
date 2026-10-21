@@ -1,5 +1,5 @@
 //! 应用持久化边界。纯核心无需了解文件格式或用户目录。
-use omnitrig_core::{Activation, Button, Engine, MouseButton, TriggerSpec, WheelDirection};
+use omnitrigger_core::{Activation, Button, Engine, MouseButton, TriggerSpec, WheelDirection};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -127,7 +127,7 @@ pub fn defaults() -> Vec<Binding> {
                 held: vec![Button::Key(0x14)],
                 activation: Activation::Press(Button::Key(0x57)),
             },
-            message: "CapsLock + W 已触发，OmniTrig 工作正常。".into(),
+            message: "CapsLock + W 已触发，OmniTrigger 工作正常。".into(),
             enabled: true,
         },
         Binding {
@@ -155,7 +155,7 @@ pub fn path() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("OmniTrig")
+        .join("OmniTrigger")
         .join("bindings.json")
 }
 

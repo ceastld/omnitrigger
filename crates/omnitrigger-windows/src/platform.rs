@@ -1,5 +1,5 @@
 use crate::{BackendCommand, BackendEvent, ListenerDiagnostics, PRIORITY_PROBE_TAG};
-use omnitrig_core::{
+use omnitrigger_core::{
     Axis, Button, Decision, Engine, InputEvent, InputKind, MouseButton, Recorder, TriggerSpec,
 };
 use std::{
@@ -54,7 +54,7 @@ impl Backend {
         let (events_tx, events_rx) = mpsc::sync_channel(EVENT_CAPACITY);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
-            .name("omnitrig-input".into())
+            .name("omnitrigger-input".into())
             .spawn(move || run_input_thread(commands_rx, events_tx, ready_tx))
             .map_err(|error| format!("无法创建输入线程：{error}"))?;
         match ready_rx.recv() {
@@ -942,7 +942,7 @@ mod tests {
             );
         }
         assert!(
-            matches!(rx.try_recv(), Ok(BackendEvent::Recorded(spec)) if spec.held == vec![caps] && spec.activation == omnitrig_core::Activation::Press(w))
+            matches!(rx.try_recv(), Ok(BackendEvent::Recorded(spec)) if spec.held == vec![caps] && spec.activation == omnitrigger_core::Activation::Press(w))
         );
         assert!(state.recording.is_none());
     }
@@ -978,7 +978,7 @@ mod tests {
             .replace_bindings(vec![TriggerSpec {
                 id: 1,
                 held: vec![caps],
-                activation: omnitrig_core::Activation::Press(Button::Key(0x57)),
+                activation: omnitrigger_core::Activation::Press(Button::Key(0x57)),
             }])
             .unwrap();
         assert!(state.input(InputKind::Down(caps), None).consume);
@@ -1009,7 +1009,7 @@ mod tests {
             .replace_bindings(vec![TriggerSpec {
                 id: 1,
                 held: vec![caps],
-                activation: omnitrig_core::Activation::Press(Button::Key(0x57)),
+                activation: omnitrigger_core::Activation::Press(Button::Key(0x57)),
             }])
             .unwrap();
         state.input(InputKind::Down(caps), None);
@@ -1055,7 +1055,7 @@ mod tests {
                 .consume
         );
         assert!(
-            matches!(rx.try_recv(), Ok(BackendEvent::Recorded(spec)) if spec.held == vec![side] && spec.activation == omnitrig_core::Activation::Wheel(omnitrig_core::WheelDirection::Up))
+            matches!(rx.try_recv(), Ok(BackendEvent::Recorded(spec)) if spec.held == vec![side] && spec.activation == omnitrigger_core::Activation::Wheel(omnitrigger_core::WheelDirection::Up))
         );
     }
 
@@ -1100,7 +1100,7 @@ mod tests {
             .replace_bindings(vec![TriggerSpec {
                 id: 9,
                 held: vec![caps],
-                activation: omnitrig_core::Activation::Press(w),
+                activation: omnitrigger_core::Activation::Press(w),
             }])
             .unwrap();
         assert!(
