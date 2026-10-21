@@ -36,6 +36,8 @@ pub enum BackendCommand {
 #[derive(Debug)]
 pub enum BackendEvent {
     Ready,
+    /// 录制期间当前按住的按键（不含录制前已按住的键），按下集合变化时发送。
+    RecordingProgress(Vec<Button>),
     Recorded(TriggerSpec),
     Triggered(u64),
     Error(String),
@@ -58,6 +60,12 @@ pub fn show_notification_window(
     height: i32,
 ) -> Result<(), String> {
     platform::show_notification_window(hwnd, x, y, width, height)
+}
+
+/// 本地时间的时、分、秒，用于界面记录；不参与触发判定。
+#[cfg(windows)]
+pub fn local_clock() -> (u16, u16, u16) {
+    platform::local_clock()
 }
 
 pub fn format_button(button: &Button) -> String {

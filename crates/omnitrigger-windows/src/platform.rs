@@ -476,13 +476,13 @@ impl ThreadState {
                 ..Decision::default()
             };
         }
-        let consume = match event.kind {
-            InputKind::Down(button) => {
-                self.recording_consumed.insert(button);
-                true
+        let (consume, changed) = match event.kind {
+            InputKind::Down(button) => (true, self.recording_consumed.insert(button)),
+            InputKind::Up(button) => {
+                let removed = self.recording_consumed.remove(&button);
+                (removed, removed)
             }
-            InputKind::Up(button) => self.recording_consumed.remove(&button),
-            InputKind::Wheel { .. } => true,
+            InputKind::Wheel { .. } => (true, false),
         };
         if !consume {
             return self.engine.process(event);
@@ -495,6 +495,11 @@ impl ThreadState {
                 self.recording = None;
                 self.notify(BackendEvent::Recorded(spec));
             }
+        }
+        // 只在按下集合变化时通知界面，键盘 repeat 不产生事件。
+        if changed && self.recording.is_some() {
+            let held = self.recording_consumed.iter().copied().collect();
+            self.notify(BackendEvent::RecordingProgress(held));
         }
         Decision {
             consume: true,
@@ -799,6 +804,11 @@ fn replay_input(kind: InputKind, metadata: &BTreeMap<Button, KeyMetadata>) -> IN
     }
 }
 
+pub(crate) fn local_clock() -> (u16, u16, u16) {
+    let time = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    (time.wHour, time.wMinute, time.wSecond)
+}
+
 pub(crate) fn key_name(key: u16) -> Option<String> {
     let scan = unsafe { MapVirtualKeyW(key.into(), MAPVK_VK_TO_VSC_EX) };
     let mut lparam = ((scan & 0xff) << 16) as i32;
@@ -820,8 +830,9 @@ pub(crate) fn show_notification_window(
     use windows::Win32::{
         Foundation::{GetLastError, SetLastError, HWND, WIN32_ERROR},
         UI::WindowsAndMessaging::{
-            GetWindowLongPtrW, IsWindow, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE,
-            HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+            GetWindowLongPtrW, IsWindow, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE,
+            HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW, WS_CAPTION,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_THICKFRAME,
         },
     };
     let hwnd = HWND(hwnd as *mut std::ffi::c_void);
@@ -840,6 +851,18 @@ pub(crate) fn show_notification_window(
         if previous == 0 && error.0 != 0 {
             return Err(format!("无法设置提示窗口样式：{error:?}"));
         }
+        // 去掉窗框，使客户区与给定尺寸一致；否则界面按窗口尺寸布局，右下角会被裁掉。
+        let frame = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        SetLastError(WIN32_ERROR(0));
+        let previous = SetWindowLongPtrW(
+            hwnd,
+            GWL_STYLE,
+            frame & !(WS_CAPTION.0 as isize | WS_THICKFRAME.0 as isize),
+        );
+        let error = GetLastError();
+        if previous == 0 && error.0 != 0 {
+            return Err(format!("无法设置提示窗口边框：{error:?}"));
+        }
         SetWindowPos(
             hwnd,
             Some(HWND_TOPMOST),
@@ -847,7 +870,7 @@ pub(crate) fn show_notification_window(
             y,
             width,
             height,
-            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED,
         )
         .map_err(|error| format!("无法显示提示窗口：{error}"))
     }
@@ -928,6 +951,7 @@ mod tests {
         let w = Button::Key(0x57);
         for kind in [
             InputKind::Down(caps),
+            InputKind::Down(caps),
             InputKind::Down(w),
             InputKind::Up(w),
             InputKind::Up(caps),
@@ -941,8 +965,18 @@ mod tests {
                     .consume
             );
         }
+        let events: Vec<_> = rx.try_iter().collect();
+        let progress: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                BackendEvent::RecordingProgress(held) => Some(held.clone()),
+                _ => None,
+            })
+            .collect();
+        // repeat 不重复通知；完成录制的最后一次释放直接发送 Recorded。
+        assert_eq!(progress, vec![vec![caps], vec![caps, w], vec![caps]]);
         assert!(
-            matches!(rx.try_recv(), Ok(BackendEvent::Recorded(spec)) if spec.held == vec![caps] && spec.activation == omnitrigger_core::Activation::Press(w))
+            matches!(events.last(), Some(BackendEvent::Recorded(spec)) if spec.held == vec![caps] && spec.activation == omnitrigger_core::Activation::Press(w))
         );
         assert!(state.recording.is_none());
     }
@@ -1034,6 +1068,10 @@ mod tests {
                 })
                 .consume
         );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(BackendEvent::RecordingProgress(held)) if held == vec![side]
+        ));
         assert!(
             state
                 .record_input(InputEvent {

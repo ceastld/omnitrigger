@@ -1,5 +1,7 @@
 //! 应用持久化边界。纯核心无需了解文件格式或用户目录。
-use omnitrigger_core::{Activation, Button, Engine, MouseButton, TriggerSpec, WheelDirection};
+use omnitrigger_core::{
+    Activation, Button, Engine, MouseButton, RegistrationError, TriggerSpec, WheelDirection,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -170,16 +172,78 @@ fn decode(text: &str) -> Result<Vec<Binding>, String> {
     Ok(bindings)
 }
 
+/// 录制结果与已有配置的冲突。`other` 指向冲突的已有触发器，不改写任何一方。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Conflict {
+    pub title: &'static str,
+    pub detail: String,
+    pub other: Option<u64>,
+}
+
+pub fn next_id(bindings: &[Binding]) -> u64 {
+    bindings
+        .iter()
+        .map(|binding| binding.spec.id)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+fn bare_primary_click(spec: &TriggerSpec) -> bool {
+    spec.held.is_empty()
+        && matches!(
+            spec.activation,
+            Activation::Press(Button::Mouse(MouseButton::Left | MouseButton::Right))
+        )
+}
+
+/// 在添加前按与注册相同的规则检查录制结果，返回可展示的结构化冲突。
+pub fn check_candidate(bindings: &[Binding], spec: &TriggerSpec) -> Result<(), Conflict> {
+    if bare_primary_click(spec) {
+        return Err(Conflict {
+            title: "不能单独使用",
+            detail: "鼠标左键或右键请与其他键组合使用，以便仍可操作界面。".into(),
+            other: None,
+        });
+    }
+    let id = next_id(bindings);
+    let mut specs: Vec<_> = bindings.iter().map(|b| b.spec.clone()).collect();
+    specs.push(TriggerSpec { id, ..spec.clone() });
+    let error = match Engine::new(specs) {
+        Ok(_) => return Ok(()),
+        Err(error) => error,
+    };
+    let pick = |a: u64, b: u64| Some(if a == id { b } else { a });
+    Err(match error {
+        RegistrationError::DuplicateTrigger { first, second } => Conflict {
+            title: "与已有触发器重复",
+            detail: "该组合已注册，不会覆盖原有绑定。".into(),
+            other: pick(first, second),
+        },
+        RegistrationError::TerminalIsPrefix {
+            terminal_binding,
+            prefix_binding,
+        } => Conflict {
+            title: "与已有触发器的前缀冲突",
+            detail: if terminal_binding == id {
+                "该组合的目标键是另一个触发器的前缀，按住它时无法区分两者。".into()
+            } else {
+                "该组合的前缀是另一个触发器的目标键，按住它时无法区分两者。".into()
+            },
+            other: pick(terminal_binding, prefix_binding),
+        },
+        other => Conflict {
+            title: "无法添加",
+            detail: other.to_string(),
+            other: None,
+        },
+    })
+}
+
 pub fn validate(bindings: &[Binding]) -> Result<(), String> {
     // 禁用项也需要有效、唯一，以免启用时才发现存储中存在冲突。
     Engine::new(bindings.iter().map(|b| b.spec.clone()).collect()).map_err(|e| e.to_string())?;
-    if bindings.iter().any(|b| {
-        b.spec.held.is_empty()
-            && matches!(
-                b.spec.activation,
-                Activation::Press(Button::Mouse(MouseButton::Left | MouseButton::Right))
-            )
-    }) {
+    if bindings.iter().any(|b| bare_primary_click(&b.spec)) {
         return Err("鼠标左键或右键请与其他键组合使用，以便仍可操作界面。".into());
     }
     if bindings
@@ -251,5 +315,42 @@ mod tests {
         values.pop();
         values[0].message = " ".into();
         assert!(validate(&values).is_err());
+    }
+
+    #[test]
+    fn candidate_conflicts_name_the_existing_binding() {
+        let values = defaults();
+        let caps_w = values[0].spec.clone();
+        let duplicate = check_candidate(&values, &caps_w).unwrap_err();
+        assert_eq!(duplicate.other, Some(1));
+        assert_eq!(duplicate.title, "与已有触发器重复");
+
+        // 目标键 CapsLock 已是 CapsLock + W 的前缀。
+        let terminal_is_prefix = TriggerSpec {
+            id: 0,
+            held: vec![Button::Key(0xA0)],
+            activation: Activation::Press(Button::Key(0x14)),
+        };
+        let conflict = check_candidate(&values, &terminal_is_prefix).unwrap_err();
+        assert_eq!(conflict.other, Some(1));
+
+        let bare_left = TriggerSpec {
+            id: 0,
+            held: vec![],
+            activation: Activation::Press(Button::Mouse(MouseButton::Left)),
+        };
+        assert_eq!(
+            check_candidate(&values, &bare_left).unwrap_err().other,
+            None
+        );
+
+        let fresh = TriggerSpec {
+            id: 0,
+            held: vec![Button::Key(0x14)],
+            activation: Activation::Press(Button::Key(0x45)),
+        };
+        assert!(check_candidate(&values, &fresh).is_ok());
+        // 检查不改动已有配置。
+        assert_eq!(values.len(), 3);
     }
 }

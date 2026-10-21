@@ -11,6 +11,8 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::theme;
+
 const MAX_CHARACTERS: usize = 2000;
 const KEY_CONTEXT: &str = "OmniTriggerMessageInput";
 
@@ -56,6 +58,7 @@ pub fn init(cx: &mut App) {
 pub struct MessageInput {
     focus: FocusHandle,
     content: SharedString,
+    placeholder: SharedString,
     anchor: usize,
     head: usize,
     marked: Option<Range<usize>>,
@@ -68,13 +71,12 @@ pub struct MessageInput {
 
 impl MessageInput {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let content: SharedString = "触发成功，这是来自 OmniTrigger 的提示消息。".into();
-        let end = content.len();
         Self {
             focus: cx.focus_handle(),
-            content,
-            anchor: end,
-            head: end,
+            content: SharedString::default(),
+            placeholder: "触发时显示的文字".into(),
+            anchor: 0,
+            head: 0,
             marked: None,
             dragging: false,
             layout: None,
@@ -90,8 +92,9 @@ impl MessageInput {
 
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.content = single_line(&text.into(), MAX_CHARACTERS).into();
-        self.anchor = self.content.len();
-        self.head = self.anchor;
+        // 载入已有消息时从开头显示，避免长消息只露出结尾。
+        self.anchor = 0;
+        self.head = 0;
         self.marked = None;
         self.dragging = false;
         self.layout = None;
@@ -373,19 +376,19 @@ impl Render for MessageInput {
             .w_full()
             .min_w_0()
             .overflow_hidden()
-            .rounded_md()
             .border_1()
+            .rounded(px(9.))
             .border_color(if self.focus.is_focused(window) {
-                rgb(0x648cff)
+                rgb(0x4a7a64)
             } else {
-                rgb(0x3b4351)
+                rgb(theme::BORDER_HI)
             })
-            .bg(rgb(0x171c24))
-            .text_color(rgb(0xe4e9f1))
-            .px_3()
-            .py_2()
-            .text_size(px(14.))
-            .line_height(px(26.))
+            .bg(rgb(theme::BACKGROUND))
+            .text_color(rgb(theme::TEXT))
+            .px(px(12.))
+            .py(px(8.))
+            .text_size(px(13.))
+            .line_height(px(22.))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::select_left))
@@ -414,6 +417,7 @@ struct MessageLine {
 
 struct LinePaint {
     line: ShapedLine,
+    placeholder: Option<ShapedLine>,
     scroll_x: Pixels,
 }
 
@@ -499,6 +503,22 @@ impl Element for MessageLine {
             &runs,
             None,
         );
+        // 占位文字只绘制，不参与命中、选区或输入法坐标。
+        let placeholder = (input.content.is_empty() && !input.placeholder.is_empty()).then(|| {
+            window.text_system().shape_line(
+                input.placeholder.clone(),
+                style.font_size.to_pixels(window.rem_size()),
+                &[TextRun {
+                    len: input.placeholder.len(),
+                    font: style.font(),
+                    color: rgb(theme::TEXT_FAINT).into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                None,
+            )
+        });
         let caret = line.x_for_index(input.head);
         let viewport = if bounds.size.width > px(3.) {
             bounds.size.width - px(3.)
@@ -523,7 +543,11 @@ impl Element for MessageLine {
         if scroll_x < px(0.) {
             scroll_x = px(0.);
         }
-        LinePaint { line, scroll_x }
+        LinePaint {
+            line,
+            placeholder,
+            scroll_x,
+        }
     }
 
     fn paint(
@@ -559,8 +583,11 @@ impl Element for MessageLine {
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(0x648cff60),
+                    rgba(0x7ddfb04d),
                 ));
+            }
+            if let Some(placeholder) = &paint.placeholder {
+                let _ = placeholder.paint(origin, window.line_height(), window, cx);
             }
             let _ = paint.line.paint(origin, window.line_height(), window, cx);
             if focus.is_focused(window) && selection.is_empty() {
@@ -569,7 +596,7 @@ impl Element for MessageLine {
                         point(origin.x + paint.line.x_for_index(head), bounds.top()),
                         size(px(1.5), bounds.size.height),
                     ),
-                    rgb(0x9bb5ff),
+                    rgb(theme::ACCENT),
                 ));
             }
         });
