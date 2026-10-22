@@ -45,7 +45,9 @@ cargo run -p omnitrigger-windows --example hook_smoke  # 真实 Hook 安装/卸�
 
 ## 与 ScriptDesk 的关系
 
-当前提示由 OmniTrigger 自身显示。ScriptDesk 已有脚本内的 `api.notify(message, title?)`，但尚无面向外部应用的通知调用入口，本版不改变 ScriptDesk。后续可通过动作适配接口连接脚本执行与通知能力。
+OmniTrigger 负责触发，ScriptDesk 负责执行。ScriptDesk 界面已按同一视觉语言重写（深色键帽色系、侧栏状态卡、可拖动的页面标题带与底部状态栏），两者仍是独立程序。
+
+当前提示由 OmniTrigger 自身显示。ScriptDesk 已有脚本内的 `api.notify(message, title?)`，但尚无面向外部应用的调用入口，触发到执行尚未接通。后续可通过动作适配接口连接脚本执行与通知能力。
 
 ## 与其他输入工具并用
 
