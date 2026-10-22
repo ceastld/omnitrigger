@@ -1,0 +1,32 @@
+name: 问题报告
+description: 报告可复现的功能缺陷。
+title: "[问题] "
+body:
+  - type: markdown
+    attributes:
+      value: 安全问题请先阅读 SECURITY.md；请勿公开敏感配置、凭据或真实输入内容。
+  - type: textarea
+    id: environment
+    attributes:
+      label: 平台与版本
+      description: Windows 版本、OmniTrigger 版本或提交号；自行构建时附 Rust 版本。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 重现步骤与实际结果
+      description: 使用不含个人信息的最小组合或示例，说明如何触发问题。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期结果
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 诊断信息（选填）
+      description: 可附脱敏后的输入诊断、错误信息或截图，并说明是否与其他输入工具同时运行。

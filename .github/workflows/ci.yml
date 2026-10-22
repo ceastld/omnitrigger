@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.90.0
+
+jobs:
+  windows:
+    name: Windows 检查与构建
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: 安装 Rust 工具链
+        run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+
+      - name: 检查格式
+        run: cargo fmt --all --check
+
+      - name: 运行工作区测试
+        run: cargo test --workspace --locked
+
+      - name: 检查代码
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: 构建应用
+        run: cargo build -p omnitrigger-app --locked

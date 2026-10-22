@@ -6,6 +6,10 @@ resolver = "2"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/ceastld/omnitrigger"
+readme = "README.md"
+publish = false
 
 [profile.dev]
 debug = "line-tables-only"

@@ -2,7 +2,11 @@
 
 统一录制、注册与管理键盘和鼠标组合的 Rust 触发引擎。
 
-目标是让用户录下一个操作，就能将其注册为触发器，例如 `CapsLock + W`、`鼠标侧键 + 滚轮上滚`。触发器的绑定、分配与动作协调通过 API 交给代码或 Agent，减少重复的人类配置。
+录下一个操作，就能将其注册为触发器，例如 `CapsLock + W`、`鼠标侧键 + 滚轮上滚`。当前提供 Windows 桌面测试程序，触发后显示本地提示；面向外部程序的动作调用与自动分配是后续扩展目标。
+
+项目处于 `0.1.0` 早期开发阶段，API 与配置格式可能调整。目前仅支持 Windows，不提供稳定版本或自动更新。
+
+[源码仓库](https://github.com/ceastld/omnitrigger) · [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) · [MIT 许可证](LICENSE)
 
 ## 当前状态
 
@@ -28,26 +32,40 @@
 
 ## 启动与验证
 
-需要 Windows、Rust 1.90+（MSVC 工具链）及 Visual Studio C++ Build Tools。
+需要 Windows、Rust 1.90+（MSVC 工具链）及 Visual Studio C++ Build Tools（含“使用 C++ 的桌面开发”和 Windows SDK）。建议在 PowerShell 7 中执行：
 
 ```powershell
-.\start.ps1                       # 构建并打开界面
-cargo run -p omnitrigger-app          # 在终端运行
-cargo test --workspace
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo run -p omnitrigger-windows --example hook_smoke  # 真实 Hook 安装/卸载检查
+git clone https://github.com/ceastld/omnitrigger.git
+cd omnitrigger
+.\start.ps1                                      # 构建并打开界面
+cargo run -p omnitrigger-app --locked             # 在终端运行
+```
+
+构建和检查：
+
+```powershell
+cargo build -p omnitrigger-app --locked
+cargo test --workspace --locked
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+```
+
+真实 Hook 检查需要交互式 Windows 桌面，CI 不覆盖实际按键、输入焦点或权限差异：
+
+```powershell
+.\target\debug\omnitrigger.exe --smoke-test
+cargo run -p omnitrigger-windows --locked --example hook_smoke
 ```
 
 直接启动产物：`target\debug\omnitrigger.exe`。
 
 测试建议：先按住 `CapsLock` 再按 `W`，松开后确认提示浮层和列表中的命中次数；然后测试侧键加滚轮，最后录制一个自定义组合。单独按下并松开未被组合使用的前缀时，会回放原输入。
 
-## 与 ScriptDesk 的关系
+## 配置与隐私
 
-OmniTrigger 负责触发，ScriptDesk 负责执行。ScriptDesk 界面已按同一视觉语言重写（深色键帽色系、侧栏状态卡、可拖动的页面标题带与底部状态栏），两者仍是独立程序。
+绑定与提示文字保存在 `%LOCALAPPDATA%\OmniTrigger\bindings.json`；没有 `LOCALAPPDATA` 时使用系统临时目录下的 `OmniTrigger\bindings.json`。修改前建议备份，重置配置前先退出程序，再重命名该文件。
 
-当前提示由 OmniTrigger 自身显示。ScriptDesk 已有脚本内的 `api.notify(message, title?)`，但尚无面向外部应用的调用入口，触发到执行尚未接通。后续可通过动作适配接口连接脚本执行与通知能力。
+当前应用不提供遥测、云同步或输入上传。全局监听用于本机匹配与录制；触发记录和输入诊断仅保留在进程内。配置中的提示文字、诊断截图可能包含个人内容，报告问题前请自行脱敏。
 
 ## 与其他输入工具并用
 
@@ -58,14 +76,14 @@ Windows 的同类低级 Hook 按后安装在前的顺序处理。其他软件若
 - 程序不定时重装 Hook 抢链首；其他软件稍后再次重装时，仍可能改变输入顺序。
 - 输入线程结束或重建失败时明确显示未监听，不再维持“正在监听”的假状态。
 
-可控优先级检查：`cargo run -p omnitrigger-windows --example hook_priority_smoke`。测试 Hook 仅拦截专用标记的 F24 模拟探针，验证上游吞事件及重建后顺序变化；不改变其他应用，也不将探针交给前台窗口。
+可控优先级检查：`cargo run -p omnitrigger-windows --locked --example hook_priority_smoke`。测试 Hook 仅拦截专用标记的 F24 模拟探针，验证上游吞事件及重建后顺序变化；不改变其他应用，也不将探针交给前台窗口。
 
 ## 核心设计
 
 - **统一描述**：录制器生成 `TriggerSpec`，注册、冲突检查与运行时匹配共享这一份语义。
 - **确定性状态机**：核心按 `InputEvent → Engine::process → Decision` 工作，输入标准化事件，输出透传、消费、触发通知及必要的补发计划。核心不依赖 UI 或 Windows API。
 - **平台适配**：Windows 适配层负责采集输入、执行消费决策和补发；系统 Hook 的同步路径只做有界匹配，不执行动作、网络请求或 Agent 推理。
-- **程序化协调**：通过 API 管理触发器与动作标识，动作执行与自动分配由调用方协调。冲突应返回结构化诊断，避免静默改变录制结果。
+- **程序化协调**：当前 Rust 库提供触发器注册与决策接口，冲突返回结构化诊断；面向外部程序的动作调用接口与自动分配尚未实现。
 - **轻量界面**：GPUI 作为候选界面，负责录制、展示、编辑与必要确认，与核心引擎解耦。
 
 ## 输入语义边界
@@ -85,3 +103,9 @@ Windows 的同类低级 Hook 按后安装在前的顺序处理。其他软件若
 - `crates/omnitrigger-core`：无外部依赖的事件模型、注册验证、状态机与录制器。
 - `crates/omnitrigger-windows`：专用消息线程、低级输入 Hook、消费/补发和生命周期；主窗口标题栏延伸（DWM 窗框与系统按钮命中）。
 - `crates/omnitrigger-app`：GPUI 管理界面（主题与键帽组件、内置图标）、中文消息输入、配置与冲突检查、提示浮层。`assets/` 存放程序图标的 SVG 源稿（大尺寸与 16–24px 简化版）与生成的 `omnitrigger.ico`，构建时经 `build.rs` 嵌入。
+
+## 参与开发与许可证
+
+问题与建议请使用仓库的 [Issues](https://github.com/ceastld/omnitrigger/issues)，贡献前阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。Windows CI 检查格式、工作区测试、Clippy 和应用构建；实际输入行为仍需桌面验证。
+
+项目自身的代码、文档和资源采用 [MIT 许可证](LICENSE)，允许在保留版权及许可声明的前提下使用、修改、分发和商业使用。第三方依赖遵循各自许可证，参见 [第三方说明](THIRD_PARTY_NOTICES.md)。准备公开源码或分发程序时，参照 [发布检查](docs/RELEASING.md)。

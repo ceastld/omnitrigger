@@ -1,7 +1,13 @@
 [package]
 name = "omnitrigger-core"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish.workspace = true
+description = "OmniTrigger 的确定性输入触发状态机与录制器"
 
 [lib]
 path = "src/lib.rs"

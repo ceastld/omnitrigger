@@ -23,4 +23,6 @@
 - 按改动运行 `cargo fmt --check`、定向测试和适用的 `cargo clippy`；文档改动只检查内容与差异。首版可运行 `cargo test --workspace`，真实 Hook 安装/卸载使用 `target\debug\omnitrigger.exe --smoke-test`。
 - 交付可试用程序时构建 `cargo build -p omnitrigger-app`，明确提供实际 `omnitrigger.exe` 路径；用户要求启动 UI 时启动并核验窗口。
 - 用户说明、README 和提交说明用中文。提交说明格式为 `type(scope): 中文说明`。
-- 仅在用户授权时提交或推送。不要自动发布仓库、添加开源许可证或修改仓库可见性。
+- 本项目自身代码、文档与资源采用 MIT；引入第三方代码或素材时核对授权并保留许可与版权声明，更新 `THIRD_PARTY_NOTICES.md`。变更依赖后重新检查发行所需的第三方通知。
+- 公开说明聚焦本项目的功能与架构，不添加无关产品的关联、对比或内部协作记录。
+- 仅在用户授权时提交、推送、发布或修改仓库可见性；不要自行更换项目许可证。公开源码与分发程序前按 `docs/RELEASING.md` 检查。
