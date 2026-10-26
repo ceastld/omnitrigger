@@ -151,7 +151,7 @@ impl PumpedBackend {
         loop {
             pump_messages();
             match self.events.try_recv() {
-                Ok(BackendEvent::Diagnostics(snapshot)) => return Ok(snapshot),
+                Ok(BackendEvent::Diagnostics(snapshot)) => return Ok(*snapshot),
                 Ok(event) => return Err(format!("读取快照时收到意外事件：{event:?}")),
                 Err(mpsc::TryRecvError::Disconnected) => {
                     return Err("读取快照时输入线程已断开".into())

@@ -2,8 +2,43 @@
 
 use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirection};
 
+mod shortcut;
+pub use shortcut::validate_shortcut;
+#[cfg(windows)]
+pub use shortcut::{capture_shortcut_target, send_shortcut, send_shortcut_to, ShortcutTarget};
+
 /// 专用于诊断 Hook 链顺序的注入标记；探针只计数，不进入触发器状态机。
 pub const PRIORITY_PROBE_TAG: usize = 0x4f4d_5052;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldOutcome {
+    Matched,
+    ShortRelease,
+    Movement,
+    FocusChanged,
+    OtherButton,
+    Wheel,
+    Configuration,
+    Paused,
+    Recording,
+    Recovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoldAttempt {
+    pub outcome: HoldOutcome,
+    pub elapsed_ms: u64,
+    pub threshold_ms: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldStartRejection {
+    Paused,
+    Recording,
+    ExtraHeld,
+    ExistingPress,
+    Unmatched,
+}
 
 /// 监听线程的观测快照。计数表示收到的回调，不代表系统全部输入。
 #[derive(Debug, Clone, Default)]
@@ -12,15 +47,50 @@ pub struct ListenerDiagnostics {
     pub mouse_events: u64,
     pub external_injected: u64,
     pub self_replayed: u64,
+    /// 本应用快捷键动作的注入事件，与原输入补发分别计数。
+    pub self_shortcuts: u64,
     pub probe_events: u64,
     pub foreground_cancellations: u64,
     pub replay_failures: u64,
+    /// code>=0 回调至消费返回或调用下一 Hook 前的最大墙钟耗时，包含补发。
+    pub max_hook_work_us: u64,
+    /// 仅 CallNextHookEx 调用的最大墙钟耗时，不含本项目处理。
+    pub max_hook_chain_us: u64,
+    /// 本项目重放及失败恢复 SendInput 调用的最大墙钟耗时。
+    pub max_replay_us: u64,
+    /// 对应区段严格超过 50 毫秒的次数，包含线程被抢占造成的等待。
+    pub slow_hook_work_count: u64,
+    pub slow_hook_chain_count: u64,
+    pub slow_replay_count: u64,
+    /// 长按实际使用的计时后端；降级不会自动暂停监听。
+    pub hold_timer_backend: &'static str,
     pub held: Vec<Button>,
     pub owned: Vec<Button>,
     /// 距最近键盘回调的毫秒数，None 表示尚未收到。
     pub last_keyboard_ms: Option<u64>,
     /// 距最近鼠标回调的毫秒数，None 表示尚未收到。
     pub last_mouse_ms: Option<u64>,
+    /// 最近一次结束的长按（匹配或取消）的经过时间与配置阈值。
+    pub last_hold_elapsed_ms: Option<u64>,
+    pub last_hold_threshold_ms: Option<u32>,
+    /// 仅最近一次长按成功匹配时有值；取消不计为迟到。
+    pub last_hold_lateness_ms: Option<u64>,
+    pub hold_triggered: u64,
+    pub hold_cancelled_movement: u64,
+    pub hold_cancelled_focus: u64,
+    /// 包括短按释放、其他输入、暂停、录制、替换和错误恢复。
+    pub hold_cancelled_other: u64,
+    /// 最近八次已经开始计时的长按结果，按旧到新排序，不保留按键或坐标历史。
+    pub recent_hold_attempts: Vec<HoldAttempt>,
+    pub hold_started: u64,
+    /// 已注册长按终端的新物理按下/释放边沿，排除重复事件。
+    pub hold_terminal_downs: u64,
+    pub hold_terminal_ups: u64,
+    /// 鼠标终端已有按压时再次收到 Down；键盘自动重复不计入。
+    pub hold_terminal_duplicate_downs: u64,
+    /// 新按下边沿未能开始计时的次数，重复鼠标 Down 由上一字段单独记录。
+    pub hold_not_started: u64,
+    pub last_hold_start_rejection: Option<HoldStartRejection>,
 }
 
 #[derive(Debug)]
@@ -30,7 +100,23 @@ pub enum BackendCommand {
     CancelRecording,
     SetEnabled(bool),
     GetDiagnostics,
+    /// 登记可见面板的窗口，`None` 表示已收起。面板可见且未获前台时，Hook 接管单独按下的导航键。
+    SetPanelWindow(Option<isize>),
     Shutdown,
+}
+
+/// 面板未获前台时由 Hook 接管的导航键；按下与对应释放都被消费，不交给前台窗口。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelKey {
+    Left,
+    Right,
+    Up,
+    Down,
+    /// 方向键选择之后才接管，未选择时回车仍交给前台窗口。
+    Enter,
+    Escape,
+    /// 主键盘或小键盘的 1–9。
+    Digit(u8),
 }
 
 #[derive(Debug)]
@@ -39,10 +125,27 @@ pub enum BackendEvent {
     /// 录制期间当前按住的按键（不含录制前已按住的键），按下集合变化时发送。
     RecordingProgress(Vec<Button>),
     Recorded(TriggerSpec),
+    /// 物理鼠标按下的位置，仅用于当前界面的窗外点击判断，不改变输入决策。
+    PointerPressed {
+        x: i32,
+        y: i32,
+    },
+    /// 物理 Esc 的新按下边沿，仅通知界面收起，不消费原按键；被面板导航接管时不发送。
+    EscapePressed,
+    /// 面板导航消费的按键。方向键随自动重复发送，其余只在新按下时发送；
+    /// Enter 与数字排在更早的输入交付之后。
+    PanelKey(PanelKey),
+    /// 在对应 Triggered 之前发送，时间戳仅供本进程测量匹配后的界面延迟。
+    HoldTiming {
+        id: u64,
+        elapsed_ms: u64,
+        threshold_ms: u32,
+        matched_at: std::time::Instant,
+    },
     Triggered(u64),
     Error(String),
     RecordingCancelled,
-    Diagnostics(ListenerDiagnostics),
+    Diagnostics(Box<ListenerDiagnostics>),
 }
 
 #[cfg(windows)]
@@ -62,6 +165,76 @@ pub fn show_notification_window(
     height: i32,
 ) -> Result<(), String> {
     platform::show_notification_window(hwnd, x, y, width, height)
+}
+
+/// 为面板设置窗口名称并同步隐藏，供界面准备好内容后再显示。
+#[cfg(windows)]
+pub fn prepare_panel_window(hwnd: isize) -> Result<(), String> {
+    platform::prepare_panel_window(hwnd)
+}
+
+/// 为独立轮盘设置窗口名称并同步隐藏；复用浮动面板的不激活与收尾逻辑。
+#[cfg(windows)]
+pub fn prepare_wheel_window(hwnd: isize) -> Result<(), String> {
+    platform::prepare_wheel_window(hwnd)
+}
+
+/// 将本应用的面板以鼠标位置为中心显示，限制在所在屏幕的工作区内；不移动指针或改变输入焦点。
+/// 面板以不激活方式显示，并记录当前前台窗口，供输入筛选后收起时交还。
+#[cfg(windows)]
+pub fn show_panel_at_cursor(hwnd: isize) -> Result<(), String> {
+    platform::show_panel_at_cursor(hwnd, None)
+}
+
+/// 与 `show_panel_at_cursor` 相同，并按目标显示器 DPI 把客户区调整为给定的逻辑尺寸。
+#[cfg(windows)]
+pub fn show_panel_at_cursor_with_size(hwnd: isize, width: f32, height: f32) -> Result<(), String> {
+    platform::show_panel_at_cursor(hwnd, Some((width, height)))
+}
+
+/// 在鼠标位置显示独立轮盘，按目标显示器 DPI 调整客户区并限制在工作区内，不抢占前台。
+#[cfg(windows)]
+pub fn show_wheel_at_cursor_with_size(hwnd: isize, width: f32, height: f32) -> Result<(), String> {
+    platform::show_wheel_at_cursor_with_size(hwnd, width, height)
+}
+
+/// 兼容原有调用，与 `show_panel_at_cursor` 相同。
+#[cfg(windows)]
+pub fn position_panel_near_cursor(hwnd: isize) -> Result<(), String> {
+    show_panel_at_cursor(hwnd)
+}
+
+/// 同步隐藏本应用的面板，供截图动作启动前移除面板画面。
+/// 面板曾为输入筛选取得前台时，隐藏后把前台交还给呼出前的窗口。
+#[cfg(windows)]
+pub fn hide_panel_window(hwnd: isize) {
+    platform::hide_panel_window(hwnd)
+}
+
+/// 按原生前台窗口核验当前状态，避免异步激活通知携带过期状态。
+#[cfg(windows)]
+pub fn is_foreground_window(hwnd: isize) -> bool {
+    platform::is_foreground_window(hwnd)
+}
+
+/// 在拥有窗口的界面线程尝试取得前台与键盘焦点，不注入输入。
+/// 系统拒绝前台切换时返回 `Ok(false)`；调用方应在 GPUI 状态借用之外调用。
+#[cfg(windows)]
+pub fn activate_panel_window(hwnd: isize) -> Result<bool, String> {
+    platform::activate_panel_window(hwnd)
+}
+
+/// 用户点击筛选框时，暂时取消不激活样式并请求前台，使面板可以接收文字输入。
+/// 下次显示时恢复不激活样式；调用方应在 GPUI 状态借用之外调用。
+#[cfg(windows)]
+pub fn activate_panel_for_input(hwnd: isize) -> Result<bool, String> {
+    platform::activate_panel_for_input(hwnd)
+}
+
+/// 判断物理屏幕坐标是否位于面板外接矩形内；句柄或矩形无效时返回 false。
+#[cfg(windows)]
+pub fn panel_contains_point(hwnd: isize, x: i32, y: i32) -> bool {
+    platform::panel_contains_point(hwnd, x, y)
 }
 
 #[cfg(windows)]
@@ -146,6 +319,10 @@ pub fn format_trigger(spec: &TriggerSpec) -> String {
     let mut parts: Vec<String> = spec.held.iter().map(format_button).collect();
     parts.push(match &spec.activation {
         Activation::Press(button) => format_button(button),
+        Activation::Hold {
+            button,
+            duration_ms,
+        } => format!("{}（长按 {duration_ms}ms）", format_button(button)),
         Activation::Wheel(direction) => match direction {
             WheelDirection::Up => "滚轮上滚".into(),
             WheelDirection::Down => "滚轮下滚".into(),
@@ -154,4 +331,22 @@ pub fn format_trigger(spec: &TriggerSpec) -> String {
         },
     });
     parts.join(" + ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hold_description_keeps_the_prefix_button_and_duration() {
+        let spec = TriggerSpec {
+            id: 5,
+            held: vec![Button::Key(0xa2)],
+            activation: Activation::Hold {
+                button: Button::Mouse(MouseButton::Right),
+                duration_ms: 300,
+            },
+        };
+        assert_eq!(format_trigger(&spec), "左 Ctrl + 鼠标右键（长按 300ms）");
+    }
 }

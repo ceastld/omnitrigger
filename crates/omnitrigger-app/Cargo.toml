@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 readme.workspace = true
 publish.workspace = true
-description = "OmniTrigger 组合输入与提示消息测试界面"
+description = "OmniTrigger 组合输入与外部命令执行界面"
 
 [[bin]]
 name = "omnitrigger"

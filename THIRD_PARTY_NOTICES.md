@@ -33,3 +33,11 @@ cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-m
 程序图标的 SVG 源文件与 ICO 位于 `crates/omnitrigger-app/assets/`，界面小图标以内联 SVG 保存在 `src/assets.rs`。这些文件随项目源码提供。引入外部素材时，应同时记录来源并保留其许可声明。
 
 界面请求使用系统安装的 Microsoft YaHei UI、Cascadia Mono 等字体，仓库没有附带字体文件。系统字体不因本项目使用 MIT 而获得再分发许可。
+
+## 可选下载的 RaiShot 运行程序
+
+RaiShot 截图适配描述和 OmniTrigger 安装器属于本项目代码；截图能力由用户选择安装后独立下载的 [RaiShot v0.4.15 发布包](https://github.com/ceastld/raishot/releases/tag/v0.4.15) 提供。该外部程序使用 GPL-3.0-or-later，不能将其二进制、运行库或素材视为本项目 MIT 资源。
+
+安装器下载原始 `RaiShot.0.4.15.0.zip`，校验固定 SHA-256、包内清单和文件哈希，并保留发布包中的 `LICENSE`、`THIRD_PARTY_NOTICES.md`、运行库许可及第三方说明。该包包含三个 RaiShot 程序、VC 运行库和 ONNX Runtime DLL；其具体版权、许可及通知以随包文件为准。截图动作不额外下载 OCR 模型。
+
+本仓库没有复制这些外部二进制，也没有因此新增 Cargo 依赖。插件依赖当前按用户操作下载到本机配置目录；如将来把 RaiShot 或其运行库并入 OmniTrigger 发行包，需按相应上游许可另外核对分发要求并保留完整通知。

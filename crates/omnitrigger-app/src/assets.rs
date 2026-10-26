@@ -31,6 +31,17 @@ pub enum Icon {
     Check,
     Alert,
     Trash,
+    Bell,
+    Terminal,
+    Capture,
+    Search,
+    Sliders,
+    Close,
+    Enter,
+    Bolt,
+    Grid,
+    Layers,
+    Panel,
 }
 
 const ICONS: &[(Icon, &str, &str)] = &[
@@ -125,6 +136,79 @@ const ICONS: &[(Icon, &str, &str)] = &[
         Icon::Trash,
         "icons/trash.svg",
         icon!(r##"<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>"##),
+    ),
+    (
+        Icon::Bell,
+        "icons/bell.svg",
+        icon!(
+            r##"<path d="M6.5 16v-5a5.5 5.5 0 0 1 11 0v5l1.5 2h-14z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>"##
+        ),
+    ),
+    (
+        Icon::Terminal,
+        "icons/terminal.svg",
+        icon!(
+            r##"<rect x="3" y="4.5" width="18" height="15" rx="3"/><path d="m7.5 9.5 3 2.5-3 2.5M13 15h4"/>"##
+        ),
+    ),
+    (
+        Icon::Capture,
+        "icons/capture.svg",
+        icon!(
+            r##"<path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><circle cx="12" cy="12" r="3"/>"##
+        ),
+    ),
+    (
+        Icon::Search,
+        "icons/search.svg",
+        icon!(
+            r##"<circle cx="11" cy="11" r="6.5" stroke-width="2.2"/><path d="m20 20-4.2-4.2" stroke-width="2.2"/>"##
+        ),
+    ),
+    (
+        Icon::Sliders,
+        "icons/sliders.svg",
+        icon!(
+            r##"<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>"##
+        ),
+    ),
+    (
+        Icon::Close,
+        "icons/close.svg",
+        icon!(r##"<path d="M6 6l12 12M18 6 6 18" stroke-width="2.2"/>"##),
+    ),
+    (
+        Icon::Enter,
+        "icons/enter.svg",
+        icon!(
+            r##"<path d="M19 5v5a3 3 0 0 1-3 3H6" stroke-width="2.4"/><path d="m9 9-4 4 4 4" stroke-width="2.4"/>"##
+        ),
+    ),
+    (
+        Icon::Bolt,
+        "icons/bolt.svg",
+        icon!(r##"<path d="M13.5 2.5 4.5 13.5h7l-1 8 9-11h-7z" fill="#000"/>"##),
+    ),
+    (
+        Icon::Grid,
+        "icons/grid.svg",
+        icon!(
+            r##"<rect x="4" y="4" width="6.5" height="6.5" rx="1.8"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.8"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.8"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.8"/>"##
+        ),
+    ),
+    (
+        Icon::Layers,
+        "icons/layers.svg",
+        icon!(
+            r##"<path d="m12 3.5 8.5 4.5-8.5 4.5L3.5 8z"/><path d="m3.5 12.5 8.5 4.5 8.5-4.5M3.5 16.5 12 21l8.5-4.5"/>"##
+        ),
+    ),
+    (
+        Icon::Panel,
+        "icons/panel.svg",
+        icon!(
+            r##"<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M3.5 9.5h17"/><rect x="7" y="12.5" width="4" height="3.5" rx="1" fill="#000" stroke="none"/><rect x="13" y="12.5" width="4" height="3.5" rx="1" fill="#000" stroke="none"/>"##
+        ),
     ),
 ];
 

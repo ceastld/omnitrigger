@@ -1,0 +1,19 @@
+{
+  "version": 4,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [],
+      "activation": {
+        "kind": "hold",
+        "value": {
+          "button": { "kind": "right" },
+          "duration_ms": 300
+        }
+      },
+      "message": "打开触发面板",
+      "enabled": true,
+      "show_panel": true
+    }
+  ]
+}

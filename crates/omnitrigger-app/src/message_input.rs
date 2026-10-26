@@ -56,6 +56,7 @@ pub fn init(cx: &mut App) {
 }
 
 pub struct MessageInput {
+    character_limit: usize,
     focus: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
@@ -67,11 +68,14 @@ pub struct MessageInput {
     bounds: Option<Bounds<Pixels>>,
     scroll_x: Pixels,
     blur_subscription: Option<gpui::Subscription>,
+    embedded: bool,
+    pass_empty_arrows: bool,
 }
 
 impl MessageInput {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
+            character_limit: MAX_CHARACTERS,
             focus: cx.focus_handle(),
             content: SharedString::default(),
             placeholder: "触发时显示的文字".into(),
@@ -83,15 +87,38 @@ impl MessageInput {
             bounds: None,
             scroll_x: px(0.),
             blur_subscription: None,
+            embedded: false,
+            pass_empty_arrows: false,
         }
+    }
+
+    /// 去掉自带边框、底色与内边距，由外层容器绘制输入框外观。
+    pub fn embedded(mut self) -> Self {
+        self.embedded = true;
+        self
+    }
+
+    /// 内容为空时不消费左右键，交给外层处理选择。
+    pub fn pass_arrows_when_empty(mut self) -> Self {
+        self.pass_empty_arrows = true;
+        self
     }
 
     pub fn text(&self) -> String {
         self.content.to_string()
     }
 
+    pub fn set_placeholder(&mut self, text: impl Into<SharedString>) {
+        self.placeholder = text.into();
+    }
+
+    pub fn with_character_limit(mut self, limit: usize) -> Self {
+        self.character_limit = limit;
+        self
+    }
+
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.content = single_line(&text.into(), MAX_CHARACTERS).into();
+        self.content = single_line(&text.into(), self.character_limit).into();
         // 载入已有消息时从开头显示，避免长消息只露出结尾。
         self.anchor = 0;
         self.head = 0;
@@ -130,6 +157,10 @@ impl MessageInput {
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        if self.pass_empty_arrows && self.content.is_empty() {
+            cx.propagate();
+            return;
+        }
         let offset = if self.selection().is_empty() {
             self.previous()
         } else {
@@ -139,6 +170,10 @@ impl MessageInput {
     }
 
     fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        if self.pass_empty_arrows && self.content.is_empty() {
+            cx.propagate();
+            return;
+        }
         let offset = if self.selection().is_empty() {
             self.next()
         } else {
@@ -247,7 +282,8 @@ impl MessageInput {
             .map(|range| from_utf16(&self.content, range))
             .or_else(|| self.marked.clone())
             .unwrap_or_else(|| self.selection());
-        let replacement = replace_content(&self.content, range, text, selected);
+        let replacement =
+            replace_content(&self.content, range, text, selected, self.character_limit);
         self.content = replacement.text.into();
         self.marked = (marked && !replacement.inserted.is_empty()).then_some(replacement.inserted);
         self.anchor = replacement.selection.start;
@@ -376,19 +412,25 @@ impl Render for MessageInput {
             .w_full()
             .min_w_0()
             .overflow_hidden()
-            .border_1()
-            .rounded(px(9.))
-            .border_color(if self.focus.is_focused(window) {
-                rgb(0x4a7a64)
-            } else {
-                rgb(theme::BORDER_HI)
+            .when(!self.embedded, |el| {
+                let focused = self.focus.is_focused(window);
+                el.border_1()
+                    .rounded(px(10.))
+                    .border_color(if focused {
+                        theme::hsla(theme::ACCENT, 0.7)
+                    } else {
+                        rgb(theme::BORDER_MID).into()
+                    })
+                    .when(focused, |el| {
+                        el.shadow(theme::glow(theme::ACCENT, 0.18, 10.))
+                    })
+                    .bg(rgb(0x0a0b11))
+                    .px(px(12.))
+                    .py(px(8.))
             })
-            .bg(rgb(theme::BACKGROUND))
             .text_color(rgb(theme::TEXT))
-            .px(px(12.))
-            .py(px(8.))
             .text_size(px(13.))
-            .line_height(px(22.))
+            .line_height(px(if self.embedded { 20. } else { 22. }))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::select_left))
@@ -638,9 +680,10 @@ fn replace_content(
     range: Range<usize>,
     text: &str,
     selected: Option<Range<usize>>,
+    character_limit: usize,
 ) -> Replacement {
     let outside = content[..range.start].chars().count() + content[range.end..].chars().count();
-    let insertion = single_line(text, MAX_CHARACTERS.saturating_sub(outside));
+    let insertion = single_line(text, character_limit.saturating_sub(outside));
     let mut updated = content[..range.start].to_owned();
     updated.push_str(&insertion);
     updated.push_str(&content[range.end..]);
@@ -712,8 +755,13 @@ mod tests {
 
     #[test]
     fn ime_selection_is_relative_to_inserted_text_in_middle_of_content() {
-        let replacement =
-            replace_content("前旧文后", "前".len().."前旧文".len(), "🦀中", Some(2..3));
+        let replacement = replace_content(
+            "前旧文后",
+            "前".len().."前旧文".len(),
+            "🦀中",
+            Some(2..3),
+            MAX_CHARACTERS,
+        );
         assert_eq!(replacement.text, "前🦀中后");
         assert_eq!(&replacement.text[replacement.selection], "中");
         assert_eq!(&replacement.text[replacement.inserted], "🦀中");
@@ -722,7 +770,7 @@ mod tests {
     #[test]
     fn replacing_at_limit_preserves_existing_suffix() {
         let existing = format!("{}尾", "中".repeat(1999));
-        let replacement = replace_content(&existing, 0.."中".len(), "🦀新", None);
+        let replacement = replace_content(&existing, 0.."中".len(), "🦀新", None, MAX_CHARACTERS);
         assert_eq!(replacement.text.chars().count(), MAX_CHARACTERS);
         assert!(replacement.text.starts_with('🦀'));
         assert!(replacement.text.ends_with('尾'));

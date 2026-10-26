@@ -1,0 +1,45 @@
+{
+  "version": 5,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [{ "kind": "key", "value": 20 }],
+      "activation": { "kind": "press", "value": { "kind": "key", "value": 79 } },
+      "message": "退格",
+      "enabled": true,
+      "action": { "kind": "send_shortcut", "keys": [8] }
+    },
+    {
+      "id": 2,
+      "held": [{ "kind": "key", "value": 20 }],
+      "activation": { "kind": "press", "value": { "kind": "key", "value": 73 } },
+      "message": "光标上移",
+      "enabled": true,
+      "action": { "kind": "send_shortcut", "keys": [38] }
+    },
+    {
+      "id": 3,
+      "held": [{ "kind": "key", "value": 20 }],
+      "activation": { "kind": "press", "value": { "kind": "key", "value": 74 } },
+      "message": "光标左移",
+      "enabled": true,
+      "action": { "kind": "send_shortcut", "keys": [37] }
+    },
+    {
+      "id": 4,
+      "held": [{ "kind": "key", "value": 20 }],
+      "activation": { "kind": "press", "value": { "kind": "key", "value": 75 } },
+      "message": "光标下移",
+      "enabled": true,
+      "action": { "kind": "send_shortcut", "keys": [40] }
+    },
+    {
+      "id": 5,
+      "held": [{ "kind": "key", "value": 20 }],
+      "activation": { "kind": "press", "value": { "kind": "key", "value": 76 } },
+      "message": "光标右移",
+      "enabled": true,
+      "action": { "kind": "send_shortcut", "keys": [39] }
+    }
+  ]
+}

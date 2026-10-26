@@ -48,6 +48,7 @@ pub struct InputEvent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Activation {
     Press(Button),
+    Hold { button: Button, duration_ms: u32 },
     Wheel(WheelDirection),
 }
 
@@ -75,6 +76,10 @@ pub enum RegistrationError {
         id: u64,
         button: Button,
     },
+    InvalidHoldDuration {
+        id: u64,
+        duration_ms: u32,
+    },
     DuplicateId {
         id: u64,
     },
@@ -100,6 +105,7 @@ impl fmt::Display for RegistrationError {
             Self::TooManyBindings => "最多可添加 64 个触发器，请删除不再使用的触发器后重试。",
             Self::TooManyHeld { .. } => "每个组合最多包含 8 个前缀按键，请减少同时按住的按键。",
             Self::InvalidButton { .. } => "组合包含不支持的按键，请重新录制。",
+            Self::InvalidHoldDuration { .. } => "长按时间应为 50 至 10000 毫秒。",
             Self::DuplicateId { .. } => "触发器编号重复，请重新添加该触发器。",
             Self::DuplicateHeld { .. } => "组合中的前缀按键重复，请重新录制。",
             Self::TerminalInHeld { .. } => "目标键不能同时作为当前组合的前缀，请调整组合后重试。",
@@ -120,6 +126,14 @@ enum PressState {
     Draining,
 }
 
+#[derive(Clone, Copy)]
+struct PendingHold {
+    id: u64,
+    button: Button,
+    deadline_ms: u64,
+    pointer_origin: Option<(i32, i32)>,
+}
+
 /// 每个组合要求当前按下集合与 held 完全一致；多余按键不会被静默忽略。
 pub struct Engine {
     bindings: Vec<TriggerSpec>,
@@ -127,6 +141,9 @@ pub struct Engine {
     pending: Vec<InputKind>,
     wheel: [i64; 4],
     enabled: bool,
+    now_ms: u64,
+    hold: Option<PendingHold>,
+    pointer_position: Option<(i32, i32)>,
 }
 
 impl Engine {
@@ -137,6 +154,9 @@ impl Engine {
             pending: Vec::new(),
             wheel: [0; 4],
             enabled: true,
+            now_ms: 0,
+            hold: None,
+            pointer_position: None,
         })
     }
     pub fn replace_bindings(
@@ -156,6 +176,7 @@ impl Engine {
     }
     pub fn cancel(&mut self) {
         self.pending.clear();
+        self.hold = None;
         self.wheel = [0; 4];
         for state in self.pressed.values_mut() {
             if matches!(*state, PressState::Pending | PressState::Consumed) {
@@ -163,15 +184,80 @@ impl Engine {
             }
         }
     }
+    /// 使用最近一次显式提供的时间；本方法不会读取系统时钟。
     pub fn process(&mut self, event: InputEvent) -> Decision {
+        self.process_at(event, self.now_ms)
+    }
+
+    /// 先推进计时，再处理当前物理事件。注入事件完全忽略，不推进时间。
+    pub fn process_at(&mut self, event: InputEvent, now_ms: u64) -> Decision {
         if event.injected {
             return Decision::default();
         }
-        match event.kind {
+        let mut decision = self.advance_time(now_ms);
+        let interrupted = self.hold.is_some_and(|hold| match event.kind {
+            InputKind::Down(button) => button != hold.button && !self.pressed.contains_key(&button),
+            // 释放由 up 按原 Pending/Consumed 语义回放并收尾，避免先转 Passed。
+            InputKind::Up(_) => false,
+            InputKind::Wheel { delta, .. } => delta != 0,
+        });
+        if interrupted {
+            decision.replay.extend(self.flush_pending());
+        }
+        let current = match event.kind {
             InputKind::Down(button) => self.down(button),
             InputKind::Up(button) => self.up(button),
             InputKind::Wheel { axis, delta } => self.scroll(axis, delta),
+        };
+        decision.consume = current.consume;
+        decision.replay.extend(current.replay);
+        decision.triggered.extend(current.triggered);
+        decision
+    }
+
+    /// 时间单调前进；倒退的时间戳按最近时间处理，避免重复触发或延长等待。
+    pub fn advance_time(&mut self, now_ms: u64) -> Decision {
+        self.now_ms = self.now_ms.max(now_ms);
+        let Some(hold) = self.hold else {
+            return Decision::default();
+        };
+        if self.now_ms < hold.deadline_ms {
+            return Decision::default();
         }
+        self.commit_pending();
+        Decision {
+            triggered: vec![hold.id],
+            ..Decision::default()
+        }
+    }
+
+    pub fn next_deadline_ms(&self) -> Option<u64> {
+        self.hold.map(|hold| hold.deadline_ms)
+    }
+
+    /// 只传入物理鼠标位置；平台应在鼠标按下前同步位置，供长按记录起点。
+    /// 鼠标长按在 8 像素半径外取消并回放缓冲；键盘长按不受鼠标移动影响。
+    pub fn pointer_moved(&mut self, position: (i32, i32), now_ms: u64) -> Decision {
+        let mut decision = self.advance_time(now_ms);
+        self.pointer_position = Some(position);
+        let moved = match self.hold.as_mut() {
+            Some(hold) if matches!(hold.button, Button::Mouse(_)) => {
+                if let Some(origin) = hold.pointer_origin {
+                    let dx = i64::from(position.0) - i64::from(origin.0);
+                    let dy = i64::from(position.1) - i64::from(origin.1);
+                    // 先限制各轴，平方运算只处理 -8..=8，极端坐标也不会溢出。
+                    dx.abs() > 8 || dy.abs() > 8 || dx * dx + dy * dy > 64
+                } else {
+                    hold.pointer_origin = Some(position);
+                    false
+                }
+            }
+            _ => false,
+        };
+        if moved {
+            decision.replay.extend(self.flush_pending());
+        }
+        decision
     }
 
     fn down(&mut self, button: Button) -> Decision {
@@ -199,6 +285,33 @@ impl Engine {
             return Decision {
                 consume: true,
                 triggered: vec![id],
+                ..Decision::default()
+            };
+        }
+        if let Some((id, duration_ms)) =
+            self.bindings
+                .iter()
+                .find_map(|binding| match binding.activation {
+                    Activation::Hold {
+                        button: terminal,
+                        duration_ms,
+                    } if terminal == button && self.held_matches(&binding.held) => {
+                        Some((binding.id, duration_ms))
+                    }
+                    _ => None,
+                })
+        {
+            self.wheel = [0; 4];
+            self.pressed.insert(button, PressState::Pending);
+            self.pending.push(InputKind::Down(button));
+            self.hold = Some(PendingHold {
+                id,
+                button,
+                deadline_ms: self.now_ms.saturating_add(u64::from(duration_ms)),
+                pointer_origin: self.pointer_position,
+            });
+            return Decision {
+                consume: true,
                 ..Decision::default()
             };
         }
@@ -313,6 +426,7 @@ impl Engine {
 
     fn commit_pending(&mut self) {
         self.pending.clear();
+        self.hold = None;
         for state in self.pressed.values_mut() {
             if *state == PressState::Pending {
                 *state = PressState::Consumed;
@@ -321,6 +435,7 @@ impl Engine {
     }
 
     fn flush_pending(&mut self) -> Vec<InputKind> {
+        self.hold = None;
         self.wheel = [0; 4];
         for state in self.pressed.values_mut() {
             if *state == PressState::Pending {
@@ -344,7 +459,9 @@ fn validate(mut bindings: Vec<TriggerSpec>) -> Result<Vec<TriggerSpec>, Registra
             return Err(RegistrationError::TooManyHeld { id: binding.id });
         }
         for &button in binding.held.iter().chain(match &binding.activation {
-            Activation::Press(button) => std::slice::from_ref(button),
+            Activation::Press(button) | Activation::Hold { button, .. } => {
+                std::slice::from_ref(button)
+            }
             Activation::Wheel(_) => &[],
         }) {
             if matches!(button, Button::Key(key) if key == 0 || key > 254) {
@@ -354,11 +471,19 @@ fn validate(mut bindings: Vec<TriggerSpec>) -> Result<Vec<TriggerSpec>, Registra
                 });
             }
         }
+        if let Activation::Hold { duration_ms, .. } = binding.activation
+            && !(50..=10000).contains(&duration_ms)
+        {
+            return Err(RegistrationError::InvalidHoldDuration {
+                id: binding.id,
+                duration_ms,
+            });
+        }
         binding.held.sort_unstable();
         if binding.held.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(RegistrationError::DuplicateHeld { id: binding.id });
         }
-        if let Activation::Press(button) = binding.activation
+        if let Some(button) = activation_button(binding.activation)
             && binding.held.contains(&button)
         {
             return Err(RegistrationError::TerminalInHeld { id: binding.id });
@@ -366,14 +491,16 @@ fn validate(mut bindings: Vec<TriggerSpec>) -> Result<Vec<TriggerSpec>, Registra
     }
     for (index, left) in bindings.iter().enumerate() {
         for right in bindings.iter().skip(index + 1) {
-            if left.held == right.held && left.activation == right.activation {
+            let same_button = activation_button(left.activation)
+                .is_some_and(|button| Some(button) == activation_button(right.activation));
+            if left.held == right.held && (left.activation == right.activation || same_button) {
                 return Err(RegistrationError::DuplicateTrigger {
                     first: left.id,
                     second: right.id,
                 });
             }
         }
-        if let Activation::Press(button) = left.activation
+        if let Some(button) = activation_button(left.activation)
             && let Some(prefix) = bindings.iter().find(|other| other.held.contains(&button))
         {
             return Err(RegistrationError::TerminalIsPrefix {
@@ -383,6 +510,13 @@ fn validate(mut bindings: Vec<TriggerSpec>) -> Result<Vec<TriggerSpec>, Registra
         }
     }
     Ok(bindings)
+}
+
+fn activation_button(activation: Activation) -> Option<Button> {
+    match activation {
+        Activation::Press(button) | Activation::Hold { button, .. } => Some(button),
+        Activation::Wheel(_) => None,
+    }
 }
 
 fn direction(axis: Axis, delta: i32) -> WheelDirection {
@@ -467,6 +601,7 @@ mod tests {
     const W: Button = Button::Key(0x57);
     const Q: Button = Button::Key(0x51);
     const SIDE: Button = Button::Mouse(MouseButton::X1);
+    const RIGHT: Button = Button::Mouse(MouseButton::Right);
 
     fn event(kind: InputKind) -> InputEvent {
         InputEvent {
@@ -486,6 +621,16 @@ mod tests {
             id,
             held: held.to_vec(),
             activation: Activation::Wheel(direction),
+        }
+    }
+    fn hold(id: u64, held: &[Button], button: Button, duration_ms: u32) -> TriggerSpec {
+        TriggerSpec {
+            id,
+            held: held.to_vec(),
+            activation: Activation::Hold {
+                button,
+                duration_ms,
+            },
         }
     }
     fn scroll(delta: i32) -> InputEvent {
@@ -811,5 +956,278 @@ mod tests {
             recorder.process(event(InputKind::Up(Q))),
             Some(press(0, &[], Q))
         );
+    }
+
+    #[test]
+    fn hold_timer_fires_once_without_more_input_and_consumes_its_release() {
+        let mut engine = Engine::new(vec![hold(1, &[], RIGHT, 300)]).unwrap();
+        assert!(
+            engine
+                .process_at(event(InputKind::Down(RIGHT)), 1000)
+                .consume
+        );
+        assert_eq!(engine.next_deadline_ms(), Some(1300));
+        assert_eq!(engine.advance_time(1299), Decision::default());
+        assert_eq!(
+            engine.advance_time(1300),
+            Decision {
+                triggered: vec![1],
+                ..Decision::default()
+            }
+        );
+        assert_eq!(engine.next_deadline_ms(), None);
+        assert_eq!(engine.advance_time(5000), Decision::default());
+        let repeat = engine.process_at(event(InputKind::Down(RIGHT)), 5000);
+        assert!(repeat.consume && repeat.triggered.is_empty());
+        let release = engine.process_at(event(InputKind::Up(RIGHT)), 5001);
+        assert!(release.consume && release.replay.is_empty());
+        assert!(!engine.process_at(event(InputKind::Up(RIGHT)), 5002).consume);
+    }
+
+    #[test]
+    fn hold_release_before_deadline_replays_both_edges_but_exact_deadline_fires() {
+        for (release_at, fired) in [(299, false), (300, true), (1000, true)] {
+            let mut engine = Engine::new(vec![hold(1, &[], RIGHT, 300)]).unwrap();
+            engine.process_at(event(InputKind::Down(RIGHT)), 0);
+            let release = engine.process_at(event(InputKind::Up(RIGHT)), release_at);
+            assert!(release.consume);
+            if fired {
+                assert_eq!(release.triggered, vec![1]);
+                assert!(release.replay.is_empty());
+            } else {
+                assert!(release.triggered.is_empty());
+                assert_eq!(
+                    release.replay,
+                    vec![InputKind::Down(RIGHT), InputKind::Up(RIGHT)]
+                );
+            }
+            assert_eq!(engine.next_deadline_ms(), None);
+            assert_eq!(engine.advance_time(2000), Decision::default());
+        }
+    }
+
+    #[test]
+    fn keyboard_hold_repeat_and_backwards_time_do_not_restart_the_deadline() {
+        let mut engine = Engine::new(vec![hold(1, &[], W, 300)]).unwrap();
+        engine.advance_time(1000);
+        assert!(engine.process(event(InputKind::Down(W))).consume);
+        assert_eq!(engine.next_deadline_ms(), Some(1300));
+        assert!(engine.process_at(event(InputKind::Down(W)), 1200).consume);
+        assert!(engine.process_at(event(InputKind::Down(W)), 1100).consume);
+        assert_eq!(engine.next_deadline_ms(), Some(1300));
+        assert_eq!(engine.advance_time(1299), Decision::default());
+        assert_eq!(engine.advance_time(1300).triggered, vec![1]);
+        assert!(engine.process(event(InputKind::Up(W))).consume);
+    }
+
+    #[test]
+    fn injected_input_cannot_advance_cancel_or_release_a_hold() {
+        let mut engine = Engine::new(vec![hold(1, &[], W, 300)]).unwrap();
+        engine.process_at(event(InputKind::Down(W)), 1000);
+        for kind in [InputKind::Up(W), InputKind::Down(Q)] {
+            assert_eq!(
+                engine.process_at(
+                    InputEvent {
+                        kind,
+                        injected: true,
+                    },
+                    5000,
+                ),
+                Decision::default()
+            );
+        }
+        assert_eq!(engine.next_deadline_ms(), Some(1300));
+        assert_eq!(engine.advance_time(1299), Decision::default());
+        assert_eq!(engine.advance_time(1300).triggered, vec![1]);
+        assert!(engine.process_at(event(InputKind::Up(W)), 1301).consume);
+    }
+
+    #[test]
+    fn mouse_hold_has_an_eight_pixel_radius_including_negative_coordinates() {
+        let mut engine = Engine::new(vec![hold(1, &[], RIGHT, 300)]).unwrap();
+        engine.pointer_moved((-1920, -100), 0);
+        engine.process_at(event(InputKind::Down(RIGHT)), 0);
+        assert_eq!(
+            engine.pointer_moved((-1912, -100), 100),
+            Decision::default()
+        );
+        assert_eq!(
+            engine.pointer_moved((-1920, -108), 200),
+            Decision::default()
+        );
+        let moved = engine.pointer_moved((-1914, -94), 299);
+        assert!(!moved.consume);
+        assert_eq!(moved.replay, vec![InputKind::Down(RIGHT)]);
+        assert_eq!(engine.next_deadline_ms(), None);
+        assert_eq!(engine.advance_time(300), Decision::default());
+        assert!(!engine.process_at(event(InputKind::Up(RIGHT)), 301).consume);
+    }
+
+    #[test]
+    fn extreme_pointer_coordinates_do_not_overflow_and_only_mouse_holds_cancel() {
+        for button in [RIGHT, W] {
+            let mut engine = Engine::new(vec![hold(1, &[], button, 300)]).unwrap();
+            engine.pointer_moved((i32::MIN, i32::MIN), 0);
+            engine.process_at(event(InputKind::Down(button)), 0);
+            let moved = engine.pointer_moved((i32::MAX, i32::MAX), 299);
+            if button == RIGHT {
+                assert_eq!(moved.replay, vec![InputKind::Down(RIGHT)]);
+                assert_eq!(engine.advance_time(300), Decision::default());
+                assert!(!engine.process_at(event(InputKind::Up(RIGHT)), 301).consume);
+            } else {
+                assert_eq!(moved, Decision::default());
+                assert_eq!(engine.advance_time(300).triggered, vec![1]);
+                assert!(engine.process_at(event(InputKind::Up(W)), 301).consume);
+            }
+        }
+    }
+
+    #[test]
+    fn pointer_motion_at_the_deadline_fires_before_processing_the_motion() {
+        let mut engine = Engine::new(vec![hold(1, &[], RIGHT, 300)]).unwrap();
+        engine.pointer_moved((0, 0), 0);
+        engine.process_at(event(InputKind::Down(RIGHT)), 0);
+        let moved = engine.pointer_moved((1000, 1000), 300);
+        assert_eq!(moved.triggered, vec![1]);
+        assert!(moved.replay.is_empty());
+        assert!(engine.process_at(event(InputKind::Up(RIGHT)), 301).consume);
+    }
+
+    #[test]
+    fn another_button_or_nonzero_wheel_cancels_and_hands_the_hold_back() {
+        let mut engine = Engine::new(vec![hold(1, &[], RIGHT, 300)]).unwrap();
+        engine.process_at(event(InputKind::Down(RIGHT)), 0);
+        let interrupted = engine.process_at(event(InputKind::Down(Q)), 100);
+        assert!(!interrupted.consume);
+        assert_eq!(interrupted.replay, vec![InputKind::Down(RIGHT)]);
+        assert!(!engine.process_at(event(InputKind::Up(Q)), 101).consume);
+        assert!(!engine.process_at(event(InputKind::Up(RIGHT)), 102).consume);
+        assert_eq!(engine.advance_time(300), Decision::default());
+        engine.process_at(event(InputKind::Down(RIGHT)), 400);
+        assert_eq!(engine.process_at(scroll(0), 499), Decision::default());
+        assert_eq!(engine.next_deadline_ms(), Some(700));
+        let wheel = engine.process_at(scroll(120), 500);
+        assert!(!wheel.consume);
+        assert_eq!(wheel.replay, vec![InputKind::Down(RIGHT)]);
+        assert!(!engine.process_at(event(InputKind::Up(RIGHT)), 501).consume);
+        assert_eq!(engine.advance_time(700), Decision::default());
+        engine.process_at(event(InputKind::Down(RIGHT)), 800);
+        assert_eq!(engine.advance_time(1100).triggered, vec![1]);
+    }
+
+    #[test]
+    fn hold_prefixes_use_the_exact_set_and_release_fallback_stays_paired() {
+        let mut engine = Engine::new(vec![hold(1, &[CAPS], W, 300)]).unwrap();
+        engine.process_at(event(InputKind::Down(SHIFT)), 0);
+        engine.process_at(event(InputKind::Down(CAPS)), 1);
+        engine.process_at(event(InputKind::Down(W)), 2);
+        assert_eq!(engine.next_deadline_ms(), None);
+        for button in [SHIFT, CAPS, W] {
+            engine.process_at(event(InputKind::Up(button)), 3);
+        }
+        engine.process_at(event(InputKind::Down(CAPS)), 100);
+        engine.process_at(event(InputKind::Down(W)), 200);
+        assert_eq!(engine.next_deadline_ms(), Some(500));
+        // 已按住前缀的重复事件同样不是新的按压。
+        engine.process_at(event(InputKind::Down(CAPS)), 250);
+        assert_eq!(engine.next_deadline_ms(), Some(500));
+        let release = engine.process_at(event(InputKind::Up(CAPS)), 300);
+        assert!(release.consume);
+        assert_eq!(
+            release.replay,
+            vec![
+                InputKind::Down(CAPS),
+                InputKind::Down(W),
+                InputKind::Up(CAPS)
+            ]
+        );
+        assert_eq!(engine.next_deadline_ms(), None);
+        assert!(!engine.process_at(event(InputKind::Up(W)), 301).consume);
+        engine.process_at(event(InputKind::Down(CAPS)), 600);
+        engine.process_at(event(InputKind::Down(W)), 700);
+        assert_eq!(engine.advance_time(1000).triggered, vec![1]);
+        assert!(engine.process_at(event(InputKind::Up(CAPS)), 1001).consume);
+        assert!(engine.process_at(event(InputKind::Up(W)), 1002).consume);
+    }
+
+    #[test]
+    fn cancel_disable_and_replace_drop_hold_buffers_and_drain_releases() {
+        let mut engine = Engine::new(vec![hold(1, &[], RIGHT, 300)]).unwrap();
+        for mode in 0..3 {
+            let start = mode * 1000;
+            engine.process_at(event(InputKind::Down(RIGHT)), start);
+            match mode {
+                0 => engine.cancel(),
+                1 => engine.set_enabled(false),
+                _ => engine
+                    .replace_bindings(vec![hold(2, &[], RIGHT, 300)])
+                    .unwrap(),
+            }
+            assert_eq!(engine.next_deadline_ms(), None);
+            assert_eq!(engine.advance_time(start + 500), Decision::default());
+            let release = engine.process_at(event(InputKind::Up(RIGHT)), start + 501);
+            assert!(release.consume && release.replay.is_empty());
+            engine.set_enabled(true);
+        }
+        engine.process_at(event(InputKind::Down(RIGHT)), 3000);
+        assert_eq!(engine.advance_time(3300).triggered, vec![2]);
+    }
+
+    #[test]
+    fn invalid_hold_replacement_preserves_the_original_pending_deadline() {
+        let mut engine = Engine::new(vec![hold(1, &[], RIGHT, 300)]).unwrap();
+        engine.process_at(event(InputKind::Down(RIGHT)), 1000);
+        assert_eq!(
+            engine.replace_bindings(vec![hold(2, &[], RIGHT, 49)]),
+            Err(RegistrationError::InvalidHoldDuration {
+                id: 2,
+                duration_ms: 49,
+            })
+        );
+        assert_eq!(engine.next_deadline_ms(), Some(1300));
+        assert_eq!(engine.advance_time(1300).triggered, vec![1]);
+    }
+
+    #[test]
+    fn hold_registration_rejects_bad_durations_and_ambiguous_bindings() {
+        for duration_ms in [0, 49, 10001, u32::MAX] {
+            assert!(matches!(
+                Engine::new(vec![hold(1, &[], RIGHT, duration_ms)]),
+                Err(RegistrationError::InvalidHoldDuration {
+                    id: 1,
+                    duration_ms: value,
+                }) if value == duration_ms
+            ));
+        }
+        for duration_ms in [50, 10000] {
+            assert!(Engine::new(vec![hold(1, &[], RIGHT, duration_ms)]).is_ok());
+        }
+        for other in [press(2, &[], RIGHT), hold(2, &[], RIGHT, 500)] {
+            assert!(matches!(
+                Engine::new(vec![hold(1, &[], RIGHT, 300), other]),
+                Err(RegistrationError::DuplicateTrigger {
+                    first: 1,
+                    second: 2,
+                })
+            ));
+        }
+        assert!(matches!(
+            Engine::new(vec![
+                hold(1, &[], RIGHT, 300),
+                wheel(2, &[RIGHT], WheelDirection::Up)
+            ]),
+            Err(RegistrationError::TerminalIsPrefix {
+                terminal_binding: 1,
+                prefix_binding: 2,
+            })
+        ));
+        assert!(matches!(
+            Engine::new(vec![hold(1, &[W], W, 300)]),
+            Err(RegistrationError::TerminalInHeld { id: 1 })
+        ));
+        assert!(matches!(
+            Engine::new(vec![hold(1, &[], Button::Key(0), 300)]),
+            Err(RegistrationError::InvalidButton { id: 1, .. })
+        ));
     }
 }

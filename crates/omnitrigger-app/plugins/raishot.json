@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "hostApiVersion": 1,
+  "id": "raishot",
+  "version": "0.1.0",
+  "name": "RaiShot",
+  "description": "通过本机 RaiShot CLI 提供截图动作",
+  "settings": [
+    { "key": "cliPath", "type": "executable_path", "title": "RaiShot CLI", "required": true }
+  ],
+  "actions": [
+    {
+      "id": "capture",
+      "version": 1,
+      "title": "截图",
+      "description": "调用截图入口，具体操作在 RaiShot 中完成",
+      "parameters": [],
+      "defaultTrigger": {
+        "held": [ { "kind": "key", "value": 162 }, { "kind": "key", "value": 164 } ],
+        "activation": { "kind": "press", "value": { "kind": "key", "value": 65 } }
+      },
+      "runner": {
+        "kind": "process",
+        "program": { "setting": "cliPath" },
+        "args": [ { "literal": "--capture" } ],
+        "workingDirectory": { "parentOfSetting": "cliPath" },
+        "completion": "process_exit"
+      },
+      "concurrency": { "group": "capture", "maxRunning": 1, "onBusy": "reject" },
+      "effects": [ "screen_capture" ]
+    }
+  ]
+}

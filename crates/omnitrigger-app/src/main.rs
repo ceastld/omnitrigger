@@ -1,32 +1,59 @@
 #![windows_subsystem = "windows"]
 
+mod action_library;
 mod assets;
+mod event_bridge;
+mod execution;
 mod message_input;
+mod plugin_install;
+mod plugins;
+mod presets;
+mod radial_wheel;
 mod settings;
+mod shortcut;
 mod theme;
+mod trigger_panel;
+mod wheel_editor;
+mod wheel_workspace;
+mod wheels;
 
 use assets::{Assets, Icon};
+use event_bridge::{EventBridge, UiWake};
+use execution::{CommandAction, CommandExecutor, ExecutionOutcome};
 use gpui::{
-    div, point, prelude::*, px, rgb, size, AnyElement, App, Application, Bounds, Context, Div,
-    Entity, FontWeight, SharedString, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowHandle, WindowKind, WindowOptions,
+    div, point, prelude::*, pulsating_between, px, rgb, size, Animation, AnimationExt, AnyElement,
+    AnyWindowHandle, App, Application, Bounds, Context, Div, Entity, FontWeight, SharedString,
+    Stateful, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    WindowHandle, WindowKind, WindowOptions,
 };
 use message_input::MessageInput;
-use omnitrigger_core::{Button, TriggerSpec};
+use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec};
 use omnitrigger_windows::{
-    format_button, local_clock, Backend, BackendCommand, BackendEvent, ListenerDiagnostics,
+    format_button, local_clock, Backend, BackendCommand, BackendEvent, HoldOutcome,
+    HoldStartRejection, ListenerDiagnostics,
 };
+use plugins::{PluginActionRef, Plugins};
+use presets::PRESETS;
+use radial_wheel::{RadialWheel, WheelRequest, WHEEL_SIZE};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use settings::{Binding, Conflict};
+use settings::{ActionSpec, Binding, Conflict};
+use shortcut::ShortcutAction;
 use std::{
     collections::{HashMap, VecDeque},
-    sync::mpsc::{Receiver, TryRecvError},
+    path::Path,
+    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
     time::{Duration, Instant},
 };
 use theme::{
-    button, caps_for, caps_for_buttons, combo, dot, ghost_cap, hsla, icon, icon_button, keycap,
-    logo, plus, small, switch, Cap, CapSize, CapTone, Tone,
+    button, caps_for, caps_for_buttons, combo, combo_toned, dot, ghost_cap, glyph_button, hsla,
+    icon, icon_button, icon_tile, keycap, logo, pill, plus, segment, small, status_pill, switch,
+    Cap, CapSize, CapTone, Tone,
 };
+use trigger_panel::{
+    panel_size, PanelContext, PanelDiagnostics, PanelItem, PanelKind, PanelRequest, PanelState,
+    TriggerPanel,
+};
+use wheels::{WheelAccent, WheelActionRef, Wheels};
 
 const TOAST_SECONDS: f32 = 4.;
 const TOAST_WIDTH: f32 = 380.;
@@ -36,7 +63,10 @@ const TOAST_MARGIN: f32 = 24.;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
+    Actions,
+    Wheels,
     Triggers,
+    Presets,
     History,
     Diagnostics,
 }
@@ -45,7 +75,34 @@ enum Page {
 enum HistoryFilter {
     All,
     Real,
+    Panel,
     Preview,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HitSource {
+    Input,
+    Panel,
+    Wheel,
+    Preview,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PanelBehavior {
+    Toggle,
+    Reposition,
+}
+
+impl PanelBehavior {
+    fn for_activation(activation: Activation) -> Self {
+        match activation {
+            Activation::Hold {
+                button: Button::Mouse(MouseButton::Right),
+                ..
+            } => Self::Reposition,
+            _ => Self::Toggle,
+        }
+    }
 }
 
 /// 侧栏与状态栏共用的监听状态，由后端状态推导，不单独保存。
@@ -63,13 +120,42 @@ struct Hit {
     time: String,
     caps: Vec<Cap>,
     message: String,
-    preview: bool,
+    source: HitSource,
 }
 
 #[derive(Clone, Default)]
 struct Stats {
     hits: u64,
     last: Option<String>,
+}
+
+struct HoldTrace {
+    id: u64,
+    elapsed_ms: u64,
+    threshold_ms: u32,
+    matched_at: Instant,
+    queue_ms: u64,
+}
+
+#[derive(Default)]
+struct PanelShowStats {
+    requested: u64,
+    submitted: u64,
+    skipped: u64,
+    failed: u64,
+    last: &'static str,
+}
+
+struct PanelLatency {
+    threshold_ms: u32,
+    held_ms: u64,
+    queue_ms: u64,
+    display_ms: u64,
+    total_ms: u64,
+}
+
+fn elapsed_ms(since: Instant) -> u64 {
+    since.elapsed().as_millis().min(u64::MAX as u128) as u64
 }
 
 fn clock() -> String {
@@ -93,16 +179,18 @@ fn heading(title: &'static str, subtitle: impl Into<SharedString>) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(px(2.))
+        .gap(px(4.))
+        .min_w_0()
         .child(
             div()
-                .text_size(px(20.))
-                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(24.))
+                .line_height(px(32.))
+                .font_weight(FontWeight::BOLD)
                 .child(title),
         )
         .child(
             div()
-                .text_size(px(12.))
+                .text_size(px(12.5))
                 .text_color(rgb(theme::TEXT_DIM))
                 .child(subtitle.into()),
         )
@@ -110,37 +198,78 @@ fn heading(title: &'static str, subtitle: impl Into<SharedString>) -> Div {
 
 fn caption(text: impl Into<SharedString>) -> Div {
     div()
-        .text_size(px(11.))
+        .text_size(px(11.5))
         .text_color(rgb(theme::TEXT_FAINT))
         .child(text.into())
 }
 
+/// 带渐变强调条的小节标题。
+fn section_title(title: &'static str) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(
+            div()
+                .w(px(3.))
+                .h(px(12.))
+                .rounded(px(2.))
+                .bg(theme::accent_fill(180.)),
+        )
+        .child(
+            div()
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme::TEXT_SOFT))
+                .child(title),
+        )
+}
+
 fn card() -> Div {
     div()
-        .rounded(px(10.))
-        .bg(rgb(theme::SURFACE))
+        .rounded(px(14.))
+        .bg(theme::gradient(
+            180.,
+            theme::hsla(theme::SURFACE, 1.),
+            theme::hsla(theme::ROW, 1.),
+        ))
         .border_1()
         .border_color(rgb(theme::BORDER))
 }
 
-fn stat(label: &'static str, value: impl Into<SharedString>, note: Option<(String, u32)>) -> Div {
+fn stat(
+    label: &'static str,
+    value: impl Into<SharedString>,
+    note: Option<(String, u32)>,
+    glyph: Icon,
+    tint: u32,
+) -> Div {
     card()
         .flex_1()
         .min_w_0()
-        .px(px(16.))
-        .py(px(14.))
+        .p(px(16.))
         .flex()
         .flex_col()
-        .gap(px(4.))
+        .gap(px(8.))
         .child(
             div()
-                .text_size(px(12.))
-                .text_color(rgb(theme::TEXT_DIM))
-                .child(label),
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .child(icon_tile(glyph, tint, 28.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(rgb(theme::TEXT_DIM))
+                        .child(label),
+                ),
         )
         .child(
             div()
-                .text_size(px(22.))
+                .text_size(px(24.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .font_family(theme::MONO_FONT)
                 .child(value.into()),
@@ -150,28 +279,170 @@ fn stat(label: &'static str, value: impl Into<SharedString>, note: Option<(Strin
         })
 }
 
+/// 列表页眉下的统计胶囊。
+fn chip(glyph: Icon, tint: u32, value: impl Into<SharedString>, label: &'static str) -> Div {
+    div()
+        .flex_none()
+        .h(px(32.))
+        .pl(px(7.))
+        .pr(px(12.))
+        .rounded(px(10.))
+        .bg(rgb(theme::ROW))
+        .border_1()
+        .border_color(rgb(theme::BORDER))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(
+            div()
+                .size(px(20.))
+                .rounded(px(6.))
+                .bg(theme::hsla(tint, 0.14))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(glyph, 12., tint)),
+        )
+        .child(
+            div()
+                .font_family(theme::MONO_FONT)
+                .text_size(px(13.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(value.into()),
+        )
+        .child(
+            div()
+                .text_size(px(11.5))
+                .text_color(rgb(theme::TEXT_DIM))
+                .child(label),
+        )
+}
+
+/// 动作的一句话说明；列表与触发面板卡片共用同一措辞。
+fn action_detail(action: &ActionSpec) -> String {
+    match action {
+        ActionSpec::Notification => "仅提示".into(),
+        ActionSpec::ShowPanel => "打开 / 收起触发面板".into(),
+        ActionSpec::ShowWheel(reference) => format!("轨道轮盘 · {}", reference.wheel_id),
+        ActionSpec::SendShortcut(shortcut) => format!("发送快捷键 · {}", shortcut.display()),
+        ActionSpec::Command(command) => {
+            let program = Path::new(&command.program)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&command.program);
+            format!("运行程序 · {program}")
+        }
+        ActionSpec::Plugin(reference) if reference.plugin_id == "raishot" => {
+            "RaiShot · 插件动作".into()
+        }
+        ActionSpec::Plugin(reference) => format!(
+            "{} / {} · 插件动作",
+            reference.plugin_id, reference.action_id
+        ),
+    }
+}
+
+/// 动作类型的图标与色调。
+fn action_look(action: &ActionSpec) -> (Icon, u32) {
+    match action {
+        ActionSpec::Notification => (Icon::Bell, theme::VIOLET),
+        ActionSpec::ShowPanel => (Icon::Panel, theme::ACCENT),
+        ActionSpec::ShowWheel(_) => (Icon::Pulse, theme::VIOLET),
+        ActionSpec::SendShortcut(_) => (Icon::Keyboard, theme::ACCENT_2),
+        ActionSpec::Command(_) => (Icon::Terminal, theme::RECORD),
+        ActionSpec::Plugin(_) => (Icon::Capture, theme::PINK),
+    }
+}
+
+fn activation_label(spec: &TriggerSpec) -> String {
+    match spec.activation {
+        Activation::Press(_) => "按下即触发".into(),
+        Activation::Hold { duration_ms, .. } => format!("长按 {duration_ms}ms 触发"),
+        Activation::Wheel(_) => "滚轮一格即触发".into(),
+    }
+}
+
 struct Workspace {
     backend: Option<Backend>,
-    events: Receiver<BackendEvent>,
+    events: Option<EventBridge<BackendEvent>>,
+    ui_wake: UiWake,
     ready: bool,
+    bindings_need_sync: bool,
     paused: bool,
     recording: bool,
     recording_held: Vec<Button>,
     pending: Option<TriggerSpec>,
+    edited_spec: Option<TriggerSpec>,
+    preset_edit_id: Option<u64>,
+    next_binding_id: Option<u64>,
     conflict: Option<Conflict>,
     selected: Option<u64>,
     confirm_delete: Option<u64>,
     page: Page,
     history_filter: HistoryFilter,
     message: Entity<MessageInput>,
+    hold_mode: bool,
+    hold_duration: Entity<MessageInput>,
+    draft_action: ActionSpec,
+    recording_for_panel: bool,
+    recording_preserve_action: bool,
+    recording_edit_id: Option<u64>,
+    program: Entity<MessageInput>,
+    arguments: Entity<MessageInput>,
+    working_directory: Entity<MessageInput>,
+    shortcut_keys: Entity<MessageInput>,
+    plugin_path: Entity<MessageInput>,
+    action_search: Entity<MessageInput>,
+    plugins: Plugins,
+    plugin_settings_error: Option<String>,
+    wheels: Wheels,
+    wheels_error: Option<String>,
+    wheel_selected: Option<String>,
+    wheel_name: Entity<MessageInput>,
+    wheel_slot_label: Entity<MessageInput>,
+    wheel_slot_shortcut: Entity<MessageInput>,
+    wheel_slot_selected: Option<usize>,
+    wheel_source_binding: Option<u64>,
+    wheel_window: Option<WindowHandle<RadialWheel>>,
+    wheel_registered: Option<isize>,
+    wheel_generation: u64,
+    wheel_active: Option<String>,
+    wheel_target: Option<omnitrigger_windows::ShortcutTarget>,
+    wheel_runtime_ids: HashMap<(String, usize), u64>,
+    wheel_requests: Receiver<WheelRequest>,
+    wheel_sender: SyncSender<WheelRequest>,
+    open_wheel_on_ready: Option<String>,
+    install_events: Option<Receiver<plugin_install::InstallEvent>>,
+    install_status: Option<String>,
+    executor: CommandExecutor,
+    shortcut_executor: CommandExecutor,
+    action_status: HashMap<u64, String>,
+    action_log: VecDeque<String>,
     bindings: Vec<Binding>,
     stats: HashMap<u64, Stats>,
     error: Option<String>,
+    action_error: Option<(u64, String)>,
     status: String,
     hits: VecDeque<Hit>,
     trigger_count: u64,
     toast: Option<WindowHandle<Toast>>,
     toast_time: Option<Instant>,
+    panel: Option<WindowHandle<TriggerPanel>>,
+    panel_prepared: bool,
+    /// 已向输入采集登记的面板窗口；面板收起后撤销。
+    panel_registered: Option<isize>,
+    panel_show_generation: u64,
+    panel_show_stats: PanelShowStats,
+    panel_diagnostics: PanelDiagnostics,
+    last_hold_timing: Option<HoldTrace>,
+    last_panel_latency: Option<PanelLatency>,
+    max_panel_total_ms: u64,
+    max_hold_lateness_ms: u64,
+    panel_requests: Receiver<PanelRequest>,
+    panel_sender: SyncSender<PanelRequest>,
+    main_window: AnyWindowHandle,
+    open_panel_on_ready: bool,
+    panel_click_count: u64,
     ui_smoke: bool,
     started: Instant,
     restarting: bool,
@@ -184,16 +455,50 @@ struct Workspace {
 }
 
 impl Workspace {
-    fn new(cx: &mut Context<Self>, ui_smoke: bool, title_bar: Result<isize, String>) -> Self {
+    fn watch_ui(wake: UiWake, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| loop {
+            wake.wait().await;
+            if this.update(cx, |this, cx| this.poll(cx)).is_err() {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    fn new(
+        cx: &mut Context<Self>,
+        ui_smoke: bool,
+        open_panel: bool,
+        initial_wheel: Option<String>,
+        wheel_editor: bool,
+        main_window: AnyWindowHandle,
+        title_bar: Result<isize, String>,
+    ) -> Self {
         let (bindings, load_error) = match settings::load() {
             Ok(bindings) => (bindings, None),
             Err(error) => (Vec::new(), Some(error)),
         };
-        let (backend, events, startup_error) = match Backend::start() {
+        let (mut backend, events, mut startup_error) = match Backend::start() {
             Ok((backend, events)) => (Some(backend), events, None),
             Err(error) => (None, std::sync::mpsc::channel().1, Some(error)),
         };
+        let events = match EventBridge::new(events) {
+            Ok(events) => Some(events),
+            Err(error) => {
+                backend.take();
+                startup_error = Some(error);
+                None
+            }
+        };
+        let ui_wake = events.as_ref().map(EventBridge::wake).unwrap_or_default();
+        Self::watch_ui(ui_wake.clone(), cx);
         let selected = bindings.first().map(|binding| binding.spec.id);
+        let next_binding_id = bindings
+            .iter()
+            .map(|b| b.spec.id)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1);
         let initial = bindings
             .first()
             .map(|binding| binding.message.clone())
@@ -203,37 +508,209 @@ impl Workspace {
             input.set_text(initial, cx);
             input
         });
+        let draft_action = bindings
+            .first()
+            .map(|b| b.action.clone())
+            .unwrap_or(ActionSpec::Notification);
+        let (wheels, wheels_error) = match Wheels::load(&settings::path()) {
+            Ok(wheels) => (wheels, None),
+            Err(error) => (Wheels { wheels: Vec::new() }, Some(error)),
+        };
+        let initial_definition = wheels.wheels.first();
+        let wheel_selected = initial_definition.map(|wheel| wheel.id.clone());
+        let wheel_name = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(30);
+            input.set_text(
+                initial_definition
+                    .map(|wheel| wheel.name.clone())
+                    .unwrap_or_default(),
+                cx,
+            );
+            input
+        });
+        let wheel_slot_label = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(30);
+            input.set_placeholder("动作名称，例如：复制");
+            input
+        });
+        let wheel_slot_shortcut = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(128);
+            input.set_placeholder("例如 Ctrl+C、Backspace");
+            input.set_text("Ctrl+C", cx);
+            input
+        });
+        for input in [&wheel_name, &wheel_slot_label, &wheel_slot_shortcut] {
+            cx.observe(input, |_, _, cx| cx.notify()).detach();
+        }
+        let command = match &draft_action {
+            ActionSpec::Command(command) => Some(command),
+            _ => None,
+        };
+        let shortcut_keys = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(128);
+            input.set_placeholder("例如：Backspace、Left、Ctrl+C");
+            input.set_text(
+                match &draft_action {
+                    ActionSpec::SendShortcut(shortcut) => shortcut.display(),
+                    _ => "Backspace".into(),
+                },
+                cx,
+            );
+            input
+        });
+        cx.observe(&shortcut_keys, |_, _, cx| cx.notify()).detach();
+        let (plugins, plugin_settings_error) = match Plugins::load(&settings::path()) {
+            Ok(plugins) => (plugins, None),
+            Err(error) => (Plugins::default(), Some(error.to_string())),
+        };
+        let plugin_path = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(32768);
+            input.set_placeholder("已有安装可填写 raishot-cli.exe 的完整路径");
+            input.set_text(plugins.raishot_path().to_string(), cx);
+            input
+        });
+        let action_search = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).embedded();
+            input.set_placeholder("搜索动作，例如：截图");
+            input
+        });
+        cx.observe(&action_search, |_, _, cx| cx.notify()).detach();
+        let initial_activation = bindings.first().map(|binding| binding.spec.activation);
+        let hold_mode = matches!(initial_activation, Some(Activation::Hold { .. }));
+        let hold_duration = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(10);
+            input.set_placeholder("50–10000 毫秒");
+            input.set_text(
+                match initial_activation {
+                    Some(Activation::Hold { duration_ms, .. }) => duration_ms.to_string(),
+                    _ => "300".into(),
+                },
+                cx,
+            );
+            input
+        });
+        let program = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(512 * 1024);
+            input.set_placeholder("可执行文件的完整路径");
+            input.set_text(command.map(|c| c.program.clone()).unwrap_or_default(), cx);
+            input
+        });
+        let arguments = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(512 * 1024);
+            input.set_placeholder(r#"例如：["--capture"]"#);
+            input.set_text(
+                serde_json::to_string(&command.map(|c| c.args.clone()).unwrap_or_default())
+                    .unwrap_or_else(|_| "[]".into()),
+                cx,
+            );
+            input
+        });
+        let working_directory = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(512 * 1024);
+            input.set_placeholder("留空使用 OmniTrigger 的工作目录");
+            input.set_text(
+                command
+                    .and_then(|c| c.working_directory.clone())
+                    .unwrap_or_default(),
+                cx,
+            );
+            input
+        });
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
-                .timer(Duration::from_millis(30))
+                .timer(Duration::from_millis(50))
                 .await;
             if this.update(cx, |this, cx| this.poll(cx)).is_err() {
                 break;
             }
         })
         .detach();
+        let (panel_sender, panel_requests) = mpsc::sync_channel(8);
+        let (wheel_sender, wheel_requests) = mpsc::sync_channel(8);
         Self {
             backend,
             events,
+            ui_wake,
             ready: false,
+            bindings_need_sync: false,
             paused: false,
             recording: false,
             recording_held: Vec::new(),
             pending: None,
+            edited_spec: None,
+            preset_edit_id: None,
+            next_binding_id,
             conflict: None,
             selected,
             confirm_delete: None,
-            page: Page::Triggers,
+            page: if wheel_editor {
+                Page::Wheels
+            } else {
+                Page::Triggers
+            },
             history_filter: HistoryFilter::All,
             message,
+            hold_mode,
+            hold_duration,
+            draft_action,
+            recording_for_panel: false,
+            recording_preserve_action: false,
+            recording_edit_id: None,
+            program,
+            arguments,
+            working_directory,
+            shortcut_keys,
+            plugin_path,
+            action_search,
+            plugins,
+            plugin_settings_error,
+            wheels,
+            wheels_error,
+            wheel_selected,
+            wheel_name,
+            wheel_slot_label,
+            wheel_slot_shortcut,
+            wheel_slot_selected: None,
+            wheel_source_binding: None,
+            wheel_window: None,
+            wheel_registered: None,
+            wheel_generation: 0,
+            wheel_active: None,
+            wheel_target: None,
+            wheel_runtime_ids: HashMap::new(),
+            wheel_requests,
+            wheel_sender,
+            open_wheel_on_ready: initial_wheel,
+            install_events: None,
+            install_status: None,
+            executor: CommandExecutor::new(),
+            shortcut_executor: CommandExecutor::shortcuts(),
+            action_status: HashMap::new(),
+            action_log: VecDeque::new(),
             bindings,
             stats: HashMap::new(),
             error: startup_error.or(load_error).or(title_bar.clone().err()),
+            action_error: None,
             status: "正在连接键盘和鼠标…".into(),
             hits: VecDeque::new(),
             trigger_count: 0,
             toast: None,
             toast_time: None,
+            panel: None,
+            panel_prepared: false,
+            panel_registered: None,
+            panel_show_generation: 0,
+            panel_show_stats: PanelShowStats::default(),
+            panel_diagnostics: PanelDiagnostics::default(),
+            last_hold_timing: None,
+            last_panel_latency: None,
+            max_panel_total_ms: 0,
+            max_hold_lateness_ms: 0,
+            panel_requests,
+            panel_sender,
+            main_window,
+            open_panel_on_ready: open_panel,
+            panel_click_count: 0,
             ui_smoke,
             started: Instant::now(),
             restarting: false,
@@ -271,19 +748,24 @@ impl Workspace {
             return;
         }
         self.restarting = true;
+        self.hide_wheel(cx);
         self.ready = false;
         self.error = None;
         self.status = "正在重建监听，请松开其他按键…".into();
         let previous = self.backend.take();
         // 保留界面、未保存的录制及用户配置；旧按压先按既有退出协议收尾。
         // 不在 UI 线程等待两秒 drain，也不定时重挂与其他软件争抢链首。
-        self.events = std::sync::mpsc::channel().1;
+        self.events = None;
+        self.listener_generation += 1;
+        let ui_wake = self.ui_wake.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     drop(previous);
-                    Backend::start()
+                    let (backend, events) = Backend::start()?;
+                    let events = EventBridge::with_wake(events, ui_wake)?;
+                    Ok::<_, String>((backend, events))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
@@ -292,8 +774,9 @@ impl Workspace {
                 match result {
                     Ok((backend, events)) => {
                         this.backend = Some(backend);
-                        this.events = events;
-                        this.listener_generation += 1;
+                        this.events = Some(events);
+                        // 桥可能在安装前已发出 Ready 唤醒；安装后重新通知，避免等维护 tick。
+                        this.ui_wake.notify();
                         this.status = "新监听已安装，正在恢复触发器配置…".into();
                     }
                     Err(error) => {
@@ -316,6 +799,9 @@ impl Workspace {
         let paused = !self.paused;
         if self.send(BackendCommand::SetEnabled(!paused)) {
             self.paused = paused;
+            if paused {
+                self.hide_wheel(cx);
+            }
             self.status = if paused {
                 "监听已暂停，输入照常交给应用。"
             } else {
@@ -341,23 +827,147 @@ impl Workspace {
     }
 
     fn sync_bindings(&mut self) {
+        if self.recording {
+            self.bindings_need_sync = true;
+            return;
+        }
+        self.bindings_need_sync = false;
         self.send(BackendCommand::SetBindings(
             self.bindings
                 .iter()
-                .filter(|b| b.enabled)
+                .filter(|b| b.enabled && self.action_available(&b.action))
                 .map(|b| b.spec.clone())
                 .collect(),
         ));
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) {
-        let mut changed = false;
+        if !self.panel_prepared {
+            self.panel_prepared = true;
+            if let Err(error) = self.prepare_panel(cx) {
+                self.error = Some(error);
+            }
+        }
+        let mut changed = self.poll_wheel(cx);
+        if let Some(events) = self.install_events.take() {
+            let mut finished = false;
+            loop {
+                match events.try_recv() {
+                    Ok(plugin_install::InstallEvent::Progress(message)) => {
+                        self.install_status = Some(message)
+                    }
+                    Ok(plugin_install::InstallEvent::Finished { cli_path, version }) => {
+                        self.plugin_path.update(cx, |input, cx| {
+                            input.set_text(cli_path.to_string_lossy().into_owned(), cx)
+                        });
+                        let saved = self.save_plugin_settings(true, cx);
+                        self.install_status = Some(if saved {
+                            format!("RaiShot {version} 已安装。可选择截图动作并设置触发。")
+                        } else {
+                            "依赖已安装，插件设置保存失败；请处理错误后保存路径。".into()
+                        });
+                        finished = true;
+                    }
+                    Ok(plugin_install::InstallEvent::Failed(error)) => {
+                        self.install_status = Some(format!("安装失败：{error}"));
+                        finished = true;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        if !finished {
+                            self.install_status = Some("安装线程已结束，未确认安装完成。".into());
+                        }
+                        finished = true;
+                        break;
+                    }
+                }
+                changed = true;
+            }
+            if !finished {
+                self.install_events = Some(events);
+            }
+        }
+        for _ in 0..8 {
+            match self.panel_requests.try_recv() {
+                Ok(PanelRequest::Run(id)) => {
+                    // 请求提交后若面板已被再次呼出，执行截图前也先将其收起。
+                    if let Some(panel) = self.panel {
+                        let _ = panel.update(cx, |view, window, _| view.hide(window));
+                    }
+                    self.fire(id, HitSource::Panel, cx);
+                    changed = true;
+                }
+                Ok(PanelRequest::Configure) => {
+                    self.page = Page::Triggers;
+                    let _ = self
+                        .main_window
+                        .update(cx, |_, window, _| window.activate_window());
+                    changed = true;
+                }
+                Ok(PanelRequest::Close) => changed = true,
+                Err(_) => break,
+            }
+        }
+        let mut panel_visible = false;
+        if let Some(panel) = self.panel {
+            if let Ok((snapshot, visible)) =
+                panel.update(cx, |view, _, _| (view.diagnostics(), view.is_visible()))
+            {
+                panel_visible = visible;
+                if snapshot != self.panel_diagnostics {
+                    self.panel_diagnostics = snapshot;
+                    changed = true;
+                }
+            }
+        }
+        // 面板收起后撤销导航登记；输入采集另外核验窗口可见性，登记滞后也不会吞键。
+        if !panel_visible && self.panel_registered.take().is_some() {
+            self.send(BackendCommand::SetPanelWindow(None));
+        }
+        while let Ok(event) = self
+            .executor
+            .try_recv()
+            .or_else(|_| self.shortcut_executor.try_recv())
+        {
+            changed = true;
+            let (text, failed) = match event.outcome {
+                ExecutionOutcome::ShortcutSent => ("已发送快捷键".into(), false),
+                ExecutionOutcome::Started { pid } => (format!("已启动进程（PID {pid}）"), false),
+                ExecutionOutcome::Finished { code, success } => (
+                    format!(
+                        "进程{}退出（{}）",
+                        if success { "正常" } else { "异常" },
+                        code.map(|c| c.to_string())
+                            .unwrap_or_else(|| "无退出码".into())
+                    ),
+                    !success,
+                ),
+                ExecutionOutcome::Failed { message } => (message, true),
+                ExecutionOutcome::Unknown { message } => (format!("进程状态未知：{message}"), true),
+            };
+            if failed {
+                self.action_error = Some((event.id, format!("动作 #{}：{text}", event.id)));
+            } else if self
+                .action_error
+                .as_ref()
+                .is_some_and(|(id, _)| *id == event.id)
+            {
+                self.action_error = None;
+            }
+            self.record_action_status(event.id, text);
+        }
+        let mut processed_backend = 0;
         for _ in 0..64 {
-            let event = match self.events.try_recv() {
+            let event = match self
+                .events
+                .as_ref()
+                .map_or(Err(TryRecvError::Empty), EventBridge::try_recv)
+            {
                 Ok(event) => event,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     if self.backend.is_some() && !self.restarting {
+                        self.hide_wheel(cx);
                         self.ready = false;
                         self.paused = true;
                         self.recording = false;
@@ -373,6 +983,7 @@ impl Workspace {
                     break;
                 }
             };
+            processed_backend += 1;
             changed = true;
             match event {
                 BackendEvent::Ready => {
@@ -389,21 +1000,133 @@ impl Workspace {
                     self.send(BackendCommand::SetEnabled(!self.paused));
                 }
                 BackendEvent::RecordingProgress(held) => self.recording_held = held,
-                BackendEvent::Recorded(spec) => {
+                BackendEvent::Recorded(mut spec) => {
                     self.recording = false;
                     self.recording_held.clear();
-                    self.conflict = settings::check_candidate(&self.bindings, &spec).err();
-                    self.pending = Some(spec);
+                    let editing = self.recording_edit_id.take();
+                    let reusable = editing.or_else(|| {
+                        if self.recording_preserve_action {
+                            self.pending.as_ref().map(|s| s.id)
+                        } else {
+                            None
+                        }
+                    });
+                    let Some(id) = reusable.or(self.next_binding_id) else {
+                        self.error = Some("触发器编号已用尽，无法添加新绑定。".into());
+                        continue;
+                    };
+                    spec.id = id;
+                    if reusable.is_none() {
+                        self.next_binding_id = id.checked_add(1);
+                    }
+                    self.conflict = self.check_draft_trigger(&spec, editing).err();
+                    self.load_trigger_fields(&spec, cx);
+                    if editing.is_some() {
+                        self.edited_spec = Some(spec);
+                        self.pending = None;
+                    } else {
+                        self.clear_pending();
+                        self.pending = Some(spec);
+                        self.edited_spec = None;
+                    }
                     self.status = if self.conflict.is_some() {
                         "录制的组合无法添加，请重新录制。"
                     } else {
                         "已录制，填写提示消息后点击“添加触发器”。"
                     }
                     .into();
-                    self.message.update(cx, |input, cx| input.set_text("", cx));
+                    if !self.recording_preserve_action {
+                        self.message.update(cx, |input, cx| input.set_text("", cx));
+                        self.load_action(ActionSpec::Notification, cx);
+                    }
+                    let for_panel = self.recording_for_panel;
+                    self.recording_for_panel = false;
+                    if for_panel {
+                        self.draft_action = ActionSpec::ShowPanel;
+                        self.message
+                            .update(cx, |input, cx| input.set_text("打开触发面板", cx));
+                    }
                 }
-                BackendEvent::Triggered(id) => self.fire(id, false, cx),
+                BackendEvent::HoldTiming {
+                    id,
+                    elapsed_ms: held_ms,
+                    threshold_ms,
+                    matched_at,
+                } => {
+                    self.max_hold_lateness_ms = self
+                        .max_hold_lateness_ms
+                        .max(held_ms.saturating_sub(u64::from(threshold_ms)));
+                    self.last_hold_timing = Some(HoldTrace {
+                        id,
+                        elapsed_ms: held_ms,
+                        threshold_ms,
+                        matched_at,
+                        queue_ms: elapsed_ms(matched_at),
+                    });
+                }
+                BackendEvent::Triggered(id) => self.fire(id, HitSource::Input, cx),
+                BackendEvent::PointerPressed { x, y } => {
+                    if let Some(wheel) = self.wheel_window {
+                        let _ = wheel.update(cx, |view, window, _| {
+                            if view.is_visible() {
+                                if let Ok(RawWindowHandle::Win32(handle)) =
+                                    HasWindowHandle::window_handle(&*window)
+                                        .map(|handle| handle.as_raw())
+                                {
+                                    if !omnitrigger_windows::panel_contains_point(
+                                        handle.hwnd.get(),
+                                        x,
+                                        y,
+                                    ) {
+                                        view.dismiss_outside(window);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    if let Some(panel) = self.panel {
+                        let _ = panel.update(cx, |view, window, _| {
+                            if !view.is_visible() {
+                                return;
+                            }
+                            if let Ok(RawWindowHandle::Win32(handle)) =
+                                HasWindowHandle::window_handle(&*window).map(|h| h.as_raw())
+                            {
+                                // 前台面板靠失焦收起；这里只补足未获前台的面板。
+                                // 否则右键按下立即隐藏会切换前台，取消尚未到期的长按。
+                                if !omnitrigger_windows::is_foreground_window(handle.hwnd.get())
+                                    && !omnitrigger_windows::panel_contains_point(
+                                        handle.hwnd.get(),
+                                        x,
+                                        y,
+                                    )
+                                {
+                                    view.dismiss_outside(window);
+                                }
+                            }
+                        });
+                    }
+                }
+                BackendEvent::EscapePressed => {
+                    if let Some(wheel) = self.wheel_window {
+                        let _ = wheel.update(cx, |view, window, _| view.dismiss_escape(window));
+                    }
+                    if let Some(panel) = self.panel {
+                        let _ = panel.update(cx, |view, window, _| view.dismiss_escape(window));
+                    }
+                }
+                BackendEvent::PanelKey(key) => {
+                    if let Some(wheel) = self.wheel_window {
+                        let _ = wheel
+                            .update(cx, |view, window, cx| view.navigation_key(key, window, cx));
+                    }
+                    if let Some(panel) = self.panel {
+                        let _ = panel
+                            .update(cx, |view, window, cx| view.navigation_key(key, window, cx));
+                    }
+                }
                 BackendEvent::Error(error) => {
+                    self.hide_wheel(cx);
                     self.error = Some(error);
                     self.recording = false;
                     self.recording_held.clear();
@@ -415,10 +1138,20 @@ impl Workspace {
                     self.recording = false;
                     self.recording_held.clear();
                     self.status = "已取消录制。".into();
-                    self.load_selected_message(cx);
+                    self.recording_edit_id = None;
+                    if !self.recording_preserve_action && self.pending.is_none() {
+                        self.load_selected_message(cx);
+                    }
                 }
-                BackendEvent::Diagnostics(snapshot) => self.diagnostics = snapshot,
+                BackendEvent::Diagnostics(snapshot) => self.diagnostics = *snapshot,
             }
+        }
+        // 一次只处理有界批次；仍有积压时立即再调度，避免等维护轮询。
+        if processed_backend == 64 {
+            self.ui_wake.notify();
+        }
+        if self.bindings_need_sync && !self.recording {
+            self.sync_bindings();
         }
         if self.ready && self.last_diagnostics_request.elapsed() >= Duration::from_secs(1) {
             self.send(BackendCommand::GetDiagnostics);
@@ -440,12 +1173,23 @@ impl Workspace {
             self.show_message(
                 Vec::new(),
                 "提示消息显示正常。现在可以试用真实组合输入。".into(),
-                true,
+                HitSource::Preview,
                 cx,
             );
         }
         if changed {
+            self.refresh_panel(cx);
+            self.refresh_wheel(cx);
             cx.notify();
+        }
+        if self.open_panel_on_ready && (self.ready || self.backend.is_none()) {
+            self.open_panel_on_ready = false;
+            self.toggle_panel(cx);
+        }
+        if self.open_wheel_on_ready.is_some() && (self.ready || self.backend.is_none()) {
+            if let Some(id) = self.open_wheel_on_ready.take() {
+                self.open_wheel(&id, cx);
+            }
         }
     }
 
@@ -453,16 +1197,630 @@ impl Workspace {
         self.bindings.iter().find(|binding| binding.spec.id == id)
     }
 
-    fn fire(&mut self, id: u64, preview: bool, cx: &mut Context<Self>) {
+    fn action_available(&self, action: &ActionSpec) -> bool {
+        match action {
+            ActionSpec::ShowWheel(_) => self.action_unavailable_reason(action).is_none(),
+            ActionSpec::Plugin(reference) => {
+                self.plugin_settings_error.is_none() && self.plugins.availability(reference).is_ok()
+            }
+            _ => true,
+        }
+    }
+
+    fn action_busy(&self, id: u64, action: &ActionSpec) -> bool {
+        self.executor.is_running(id)
+            || self.shortcut_executor.is_running(id)
+            || match action {
+                ActionSpec::Plugin(reference) => self
+                    .plugins
+                    .concurrency_group(reference)
+                    .is_some_and(|group| self.executor.is_group_running(&group)),
+                _ => false,
+            }
+    }
+
+    fn action_unavailable_reason(&self, action: &ActionSpec) -> Option<String> {
+        match action {
+            ActionSpec::ShowWheel(reference) => self.wheels_error.clone().or_else(|| {
+                (!self
+                    .wheels
+                    .wheels
+                    .iter()
+                    .any(|wheel| wheel.id == reference.wheel_id))
+                .then(|| format!("轮盘“{}”不存在，请重新选择轮盘。", reference.wheel_id))
+            }),
+            ActionSpec::Plugin(reference) => self.plugin_settings_error.clone().or_else(|| {
+                self.plugins
+                    .availability(reference)
+                    .err()
+                    .map(|error| error.to_string())
+            }),
+            _ => None,
+        }
+    }
+
+    fn check_draft_trigger(
+        &self,
+        spec: &TriggerSpec,
+        editing: Option<u64>,
+    ) -> Result<(), Conflict> {
+        let others: Vec<_> = self
+            .bindings
+            .iter()
+            .filter(|b| Some(b.spec.id) != editing)
+            .cloned()
+            .collect();
+        settings::check_candidate(&others, spec)
+    }
+
+    fn load_trigger_fields(&mut self, spec: &TriggerSpec, cx: &mut Context<Self>) {
+        self.hold_mode = matches!(spec.activation, Activation::Hold { .. });
+        let duration = match spec.activation {
+            Activation::Hold { duration_ms, .. } => duration_ms,
+            _ => 300,
+        };
+        self.hold_duration
+            .update(cx, |input, cx| input.set_text(duration.to_string(), cx));
+    }
+
+    fn draft_spec(&self, base: &TriggerSpec, cx: &App) -> Result<TriggerSpec, String> {
+        let base = self
+            .edited_spec
+            .as_ref()
+            .filter(|spec| spec.id == base.id)
+            .unwrap_or(base);
+        let button = match base.activation {
+            Activation::Press(button) | Activation::Hold { button, .. } => button,
+            Activation::Wheel(_) => return Ok(base.clone()),
+        };
+        let activation = if self.hold_mode {
+            let duration_ms: u32 = self
+                .hold_duration
+                .read(cx)
+                .text()
+                .trim()
+                .parse()
+                .map_err(|_| "长按时间请输入 50 至 10000 的整数毫秒。".to_string())?;
+            if !(50..=10000).contains(&duration_ms) {
+                return Err("长按时间应为 50 至 10000 毫秒，不会自动调整输入值。".into());
+            }
+            Activation::Hold {
+                button,
+                duration_ms,
+            }
+        } else {
+            Activation::Press(button)
+        };
+        Ok(TriggerSpec {
+            activation,
+            ..base.clone()
+        })
+    }
+
+    fn set_hold_mode(&mut self, hold: bool, cx: &mut Context<Self>) {
+        self.hold_mode = hold;
+        if let Some(base) = self.pending.clone() {
+            match self.draft_spec(&base, cx) {
+                Ok(spec) => {
+                    self.conflict = settings::check_candidate(&self.bindings, &spec).err();
+                    self.pending = Some(spec);
+                }
+                Err(error) => self.error = Some(error),
+            }
+        }
+        cx.notify();
+    }
+
+    fn choose_preset(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.recording {
+            return;
+        }
+        let Some(preset) = PRESETS.get(index) else {
+            return;
+        };
+        let editing = self
+            .preset_edit_id
+            .take()
+            .filter(|id| self.binding(*id).is_some());
+        let Some(id) = self
+            .pending
+            .as_ref()
+            .map(|spec| spec.id)
+            .or(editing)
+            .or(self.next_binding_id)
+        else {
+            self.error = Some("触发器编号已用尽，无法添加新绑定。".into());
+            cx.notify();
+            return;
+        };
+        if self.pending.is_none() && editing.is_none() {
+            self.next_binding_id = id.checked_add(1);
+        }
+        self.clear_pending();
+        self.edited_spec = None;
+        let spec = preset.spec(id);
+        self.load_trigger_fields(&spec, cx);
+        self.conflict = self.check_draft_trigger(&spec, editing).err();
+        if editing.is_some() {
+            self.edited_spec = Some(spec);
+        } else {
+            self.pending = Some(spec);
+        }
+        if self.message.read(cx).text().trim().is_empty() {
+            self.message
+                .update(cx, |input, cx| input.set_text("新动作", cx));
+        }
+        self.page = Page::Triggers;
+        self.confirm_delete = None;
+        self.error = None;
+        self.status = format!("已选择“{}”，保留当前动作，检查参数后保存。", preset.title);
+        cx.notify();
+    }
+
+    fn panel_items(&self) -> Vec<PanelItem> {
+        self.bindings
+            .iter()
+            .filter(|b| !matches!(b.action, ActionSpec::ShowPanel))
+            .map(|binding| {
+                let id = binding.spec.id;
+                let state = if !binding.enabled {
+                    PanelState::Disabled
+                } else if !self.action_available(&binding.action) {
+                    PanelState::Unavailable
+                } else if self.action_busy(id, &binding.action) {
+                    PanelState::Running
+                } else {
+                    PanelState::Ready
+                };
+                let kind = match &binding.action {
+                    ActionSpec::SendShortcut(_) => PanelKind::Shortcut,
+                    ActionSpec::Command(_) => PanelKind::Command,
+                    ActionSpec::Plugin(_) => PanelKind::Plugin,
+                    _ => PanelKind::Notice,
+                };
+                PanelItem {
+                    id,
+                    title: binding.message.clone(),
+                    caps: caps_for(&binding.spec),
+                    kind,
+                    detail: action_detail(&binding.action),
+                    state,
+                    status: self
+                        .action_unavailable_reason(&binding.action)
+                        .or_else(|| self.action_status.get(&id).cloned()),
+                }
+            })
+            .collect()
+    }
+
+    fn panel_context(&self) -> PanelContext {
+        PanelContext {
+            paused: self.paused,
+            shortcuts: self
+                .bindings
+                .iter()
+                .filter(|b| matches!(b.action, ActionSpec::ShowPanel) && b.enabled)
+                .map(|b| caps_for(&b.spec))
+                .collect(),
+        }
+    }
+
+    fn refresh_panel(&mut self, cx: &mut Context<Self>) {
+        if let Some(panel) = self.panel {
+            let items = self.panel_items();
+            let context = self.panel_context();
+            let error = self
+                .action_error
+                .as_ref()
+                .map(|(_, message)| message.clone());
+            if panel
+                .update(cx, |view, _, cx| {
+                    view.update_items(items, context, error, cx)
+                })
+                .is_err()
+            {
+                self.panel = None;
+            }
+        }
+    }
+
+    fn prepare_panel(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Result<WindowHandle<TriggerPanel>, String> {
+        if let Some(panel) = self.panel {
+            if panel.update(cx, |_, _, _| ()).is_ok() {
+                return Ok(panel);
+            }
+            self.panel = None;
+        }
+        let items = self.panel_items();
+        let context = self.panel_context();
+        let requests = self.panel_sender.clone();
+        let ui_wake = self.ui_wake.clone();
+        let (width, height) = panel_size(items.len());
+        let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
+        let mut preparation_error = None;
+        let panel = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: None,
+                    kind: WindowKind::PopUp,
+                    is_resizable: false,
+                    is_minimizable: false,
+                    is_movable: false,
+                    focus: false,
+                    // 避免 GPUI 缓存待激活的位置；原生窗口在同一创建回调中立即隐藏。
+                    show: true,
+                    app_id: Some("OmniTrigger.Panel".into()),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    if let Ok(RawWindowHandle::Win32(handle)) =
+                        HasWindowHandle::window_handle(&*window).map(|h| h.as_raw())
+                    {
+                        preparation_error =
+                            omnitrigger_windows::prepare_panel_window(handle.hwnd.get()).err();
+                    } else {
+                        preparation_error = Some("无法取得触发面板窗口句柄。".into());
+                    }
+                    cx.new(|cx| TriggerPanel::new(items, context, requests, ui_wake, window, cx))
+                },
+            )
+            .map_err(|error| format!("准备触发面板失败：{error}"))?;
+        if let Some(error) = preparation_error {
+            let _ = panel.update(cx, |_, window, _| window.remove_window());
+            return Err(error);
+        }
+        self.panel = Some(panel);
+        Ok(panel)
+    }
+
+    fn toggle_panel(&mut self, cx: &mut Context<Self>) {
+        self.open_panel(PanelBehavior::Toggle, None, cx);
+    }
+
+    fn open_panel(
+        &mut self,
+        behavior: PanelBehavior,
+        timing: Option<HoldTrace>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.recording {
+            self.status = "请先结束录制，再打开触发面板。".into();
+            cx.notify();
+            return;
+        }
+        self.hide_wheel(cx);
+        let panel = match self.prepare_panel(cx) {
+            Ok(panel) => panel,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        let items = self.panel_items();
+        let context = self.panel_context();
+        // 显示时按动作行数调整窗口高度；筛选不改变尺寸。
+        let (panel_width, panel_height) = panel_size(items.len());
+        let error = self.action_error.as_ref().map(|(_, text)| text.clone());
+        self.panel_show_generation = self.panel_show_generation.wrapping_add(1);
+        let generation = self.panel_show_generation;
+        let result = panel.update(cx, |view, window, cx| {
+            if behavior == PanelBehavior::Toggle && view.is_visible() {
+                view.hide(window);
+                return false;
+            }
+            view.update_items(items, context, error, cx);
+            view.present(window, cx);
+            true
+        });
+        match result {
+            Ok(false) => {}
+            Ok(true) => {
+                self.panel_show_stats.requested = self.panel_show_stats.requested.saturating_add(1);
+                self.panel_show_stats.last = "等待显示提交";
+                cx.spawn(async move |this, cx| {
+                    let handle = this
+                        .update(cx, |this, cx| {
+                            if this.panel_show_generation != generation {
+                                this.panel_show_stats.skipped =
+                                    this.panel_show_stats.skipped.saturating_add(1);
+                                this.panel_show_stats.last = "旧请求被新呼出替代";
+                                return None;
+                            }
+                            if this.recording {
+                                let _ = panel.update(cx, |view, window, _| view.hide(window));
+                                this.panel_show_stats.skipped =
+                                    this.panel_show_stats.skipped.saturating_add(1);
+                                this.panel_show_stats.last = "录制中取消显示";
+                                return None;
+                            }
+                            let handle = panel
+                                .update(cx, |view, window, _| {
+                                    if !view.is_visible() {
+                                        return None;
+                                    }
+                                    HasWindowHandle::window_handle(&*window).ok().and_then(
+                                        |handle| match handle.as_raw() {
+                                            RawWindowHandle::Win32(handle) => {
+                                                Some(handle.hwnd.get())
+                                            }
+                                            _ => None,
+                                        },
+                                    )
+                                })
+                                .ok()
+                                .flatten();
+                            if handle.is_none() {
+                                this.panel_show_stats.skipped =
+                                    this.panel_show_stats.skipped.saturating_add(1);
+                                this.panel_show_stats.last = "显示前已收起或窗口不可用";
+                            }
+                            handle
+                        })
+                        .ok()
+                        .flatten();
+                    let Some(handle) = handle else {
+                        return;
+                    };
+                    // 此处不持有 GPUI App/Window 的可变借用，WM_SHOWWINDOW 可立即绘制。
+                    let result = omnitrigger_windows::show_panel_at_cursor_with_size(
+                        handle,
+                        panel_width,
+                        panel_height,
+                    );
+                    // 面板参照剪贴板面板以不激活方式显示，前台窗口保持不变；
+                    // 只有点击筛选框时才请求前台。
+                    let delay = timing.as_ref().map(|trace| elapsed_ms(trace.matched_at));
+                    let should_hide = this
+                        .update(cx, |this, cx| {
+                            if result.is_ok() {
+                                this.panel_show_stats.submitted =
+                                    this.panel_show_stats.submitted.saturating_add(1);
+                                this.panel_show_stats.last = "原生显示已提交（不激活）";
+                            } else {
+                                this.panel_show_stats.failed =
+                                    this.panel_show_stats.failed.saturating_add(1);
+                                this.panel_show_stats.last = "原生显示失败";
+                            }
+                            if this.panel_show_generation != generation {
+                                return panel
+                                    .update(cx, |view, _, _| !view.is_visible())
+                                    .unwrap_or(true);
+                            }
+                            if let Err(error) = result {
+                                this.error = Some(error);
+                                let _ = panel.update(cx, |view, window, _| view.hide(window));
+                                cx.notify();
+                                return true;
+                            }
+                            if let (Some(trace), Some(delay)) = (timing, delay) {
+                                this.max_panel_total_ms = this
+                                    .max_panel_total_ms
+                                    .max(trace.elapsed_ms.saturating_add(delay));
+                                this.last_panel_latency = Some(PanelLatency {
+                                    threshold_ms: trace.threshold_ms,
+                                    held_ms: trace.elapsed_ms,
+                                    queue_ms: trace.queue_ms,
+                                    display_ms: delay.saturating_sub(trace.queue_ms),
+                                    total_ms: trace.elapsed_ms.saturating_add(delay),
+                                });
+                            }
+                            let visible = panel
+                                .update(cx, |view, _, _| view.is_visible())
+                                .unwrap_or(false);
+                            if visible {
+                                // 每次显示都重新登记，输入采集据此在面板未获前台时接管导航键。
+                                this.send(BackendCommand::SetPanelWindow(Some(handle)));
+                                this.panel_registered = Some(handle);
+                            } else {
+                                this.panel_show_stats.last = "提交时面板已收起";
+                            }
+                            cx.notify();
+                            !visible
+                        })
+                        .unwrap_or(true);
+                    if should_hide {
+                        omnitrigger_windows::hide_panel_window(handle);
+                    }
+                })
+                .detach();
+            }
+            Err(error) => {
+                self.panel = None;
+                self.error = Some(format!("显示触发面板失败：{error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    fn record_panel_shortcut(&mut self, cx: &mut Context<Self>) {
+        self.start_recording(cx);
+        if self.recording {
+            self.recording_for_panel = true;
+            self.status = "录制用于呼出面板的键盘或鼠标组合，全部松开后保存。".into();
+        }
+    }
+
+    fn fire(&mut self, id: u64, source: HitSource, cx: &mut Context<Self>) {
         if let Some(binding) = self.binding(id) {
+            if !binding.enabled || self.recording {
+                return;
+            }
+            if source == HitSource::Panel
+                && (matches!(binding.action, ActionSpec::ShowPanel)
+                    || self.action_busy(id, &binding.action))
+            {
+                return;
+            }
             let caps = caps_for(&binding.spec);
             let message = binding.message.clone();
-            if !preview {
+            let action = binding.action.clone();
+            let panel_behavior = PanelBehavior::for_activation(binding.spec.activation);
+            let is_hold = matches!(binding.spec.activation, Activation::Hold { .. });
+            let timing = if source == HitSource::Input && is_hold {
+                self.last_hold_timing.take().filter(|trace| trace.id == id)
+            } else {
+                None
+            };
+            if source == HitSource::Input {
                 let stats = self.stats.entry(id).or_default();
                 stats.hits += 1;
                 stats.last = Some(clock());
             }
-            self.show_message(caps, message, preview, cx);
+            if matches!(action, ActionSpec::ShowPanel) {
+                self.record_hit(caps, message, source);
+                self.open_panel(panel_behavior, timing, cx);
+            } else if !matches!(action, ActionSpec::Notification) {
+                // 截图等动作可能立即采集屏幕，执行前不弹出自己的提示浮层。
+                self.record_hit(caps, message, source);
+                self.dispatch_action(id, action, cx);
+            } else {
+                self.show_message(caps, message, source, cx);
+            }
+        }
+    }
+
+    fn record_action_status(&mut self, id: u64, text: String) {
+        self.status = format!("动作 #{id}：{text}");
+        self.action_log
+            .push_front(format!("{} · {}", clock(), self.status));
+        self.action_log.truncate(30);
+        // 已删除的绑定仍可能收到进程退出通知，不在详情缓存中积累。
+        if self.binding(id).is_some() || self.pending.as_ref().is_some_and(|spec| spec.id == id) {
+            self.action_status.insert(id, text);
+        }
+    }
+
+    fn submit_action(&mut self, id: u64, command: CommandAction, cx: &mut Context<Self>) {
+        let text = match self.executor.submit(id, command) {
+            Ok(()) => {
+                if self
+                    .action_error
+                    .as_ref()
+                    .is_some_and(|(failed_id, _)| *failed_id == id)
+                {
+                    self.action_error = None;
+                }
+                "等待启动".into()
+            }
+            Err(error) => {
+                self.action_error = Some((id, format!("动作 #{id}：{error}")));
+                error
+            }
+        };
+        self.record_action_status(id, text);
+        cx.notify();
+    }
+
+    fn dispatch_action(&mut self, id: u64, action: ActionSpec, cx: &mut Context<Self>) {
+        match action {
+            ActionSpec::ShowWheel(reference) => self.open_wheel(&reference.wheel_id, cx),
+            ActionSpec::SendShortcut(shortcut) => {
+                match self.shortcut_executor.submit_shortcut(id, shortcut) {
+                    Ok(()) => {
+                        self.action_error = None;
+                        self.record_action_status(id, "等待发送快捷键".into());
+                    }
+                    Err(error) => {
+                        self.action_error = Some((id, error.clone()));
+                        self.record_action_status(id, error);
+                    }
+                }
+                cx.notify();
+            }
+            ActionSpec::Command(command) => self.submit_action(id, command, cx),
+            ActionSpec::Plugin(reference) => {
+                let result = if let Some(error) = &self.plugin_settings_error {
+                    Err(error.clone())
+                } else {
+                    self.plugins
+                        .resolve(&reference)
+                        .map_err(|error| format!("{}（{}）", error, error.code()))
+                        .and_then(|resolved| {
+                            self.executor
+                                .submit_group(id, resolved.command, Some(resolved.group))
+                                .map(|()| {
+                                    format!(
+                                        "{} / {} · 适配 {} · 等待启动",
+                                        reference.plugin_id,
+                                        reference.action_id,
+                                        resolved.plugin_version
+                                    )
+                                })
+                        })
+                };
+                match result {
+                    Ok(text) => {
+                        self.action_error = None;
+                        self.record_action_status(id, text);
+                    }
+                    Err(error) => {
+                        self.action_error = Some((id, error.clone()));
+                        self.record_action_status(id, error);
+                        self.plugins.refresh();
+                        self.sync_bindings();
+                    }
+                }
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    fn draft_command(&self, cx: &App) -> Result<Option<CommandAction>, String> {
+        if !matches!(self.draft_action, ActionSpec::Command(_)) {
+            return Ok(None);
+        }
+        let text = self.arguments.read(cx).text();
+        let args = if text.trim().is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str::<Vec<String>>(&text).map_err(|_| {
+                r#"参数格式有误，请填写字符串数组，例如 ["--capture"]。"#.to_string()
+            })?
+        };
+        let directory = self.working_directory.read(cx).text();
+        let command = CommandAction {
+            program: self.program.read(cx).text(),
+            args,
+            working_directory: (!directory.is_empty()).then_some(directory),
+        };
+        command.validate()?;
+        Ok(Some(command))
+    }
+
+    fn draft_action_spec(&self, cx: &App) -> Result<ActionSpec, String> {
+        if matches!(self.draft_action, ActionSpec::SendShortcut(_)) {
+            return ShortcutAction::parse(&self.shortcut_keys.read(cx).text())
+                .map(ActionSpec::SendShortcut);
+        }
+        if let Some(command) = self.draft_command(cx)? {
+            return Ok(ActionSpec::Command(command));
+        }
+        Ok(self.draft_action.clone())
+    }
+
+    fn test_action(&mut self, cx: &mut Context<Self>) {
+        let id = if let Some(spec) = &self.pending {
+            spec.id
+        } else if let Some(id) = self.selected {
+            id
+        } else {
+            return;
+        };
+        match self.draft_action_spec(cx) {
+            Ok(action) => {
+                self.record_action_status(id, "测试动作（未保存草稿）".into());
+                self.dispatch_action(id, action, cx);
+            }
+            Err(error) => {
+                self.action_error = Some((id, error));
+                cx.notify();
+            }
         }
     }
 
@@ -481,28 +1839,34 @@ impl Workspace {
                     .and_then(|id| self.binding(id))
                     .map(|b| &b.spec)
             })
-            .map(caps_for)
+            .map(|spec| caps_for(&self.draft_spec(spec, cx).unwrap_or_else(|_| spec.clone())))
             .unwrap_or_default();
-        self.show_message(caps, text, true, cx);
+        self.show_message(caps, text, HitSource::Preview, cx);
+    }
+
+    fn record_hit(&mut self, caps: Vec<Cap>, message: String, source: HitSource) {
+        match source {
+            HitSource::Input => self.trigger_count += 1,
+            HitSource::Panel | HitSource::Wheel => self.panel_click_count += 1,
+            HitSource::Preview => {}
+        }
+        self.hits.push_front(Hit {
+            time: clock(),
+            caps,
+            message,
+            source,
+        });
+        self.hits.truncate(30);
     }
 
     fn show_message(
         &mut self,
         caps: Vec<Cap>,
         message: String,
-        preview: bool,
+        source: HitSource,
         cx: &mut Context<Self>,
     ) {
-        if !preview {
-            self.trigger_count += 1;
-        }
-        self.hits.push_front(Hit {
-            time: clock(),
-            caps: caps.clone(),
-            message: message.clone(),
-            preview,
-        });
-        self.hits.truncate(30);
+        self.record_hit(caps.clone(), message.clone(), source);
         self.toast_time = Some(Instant::now());
         let shown = Instant::now();
         if let Some(handle) = self.toast {
@@ -510,7 +1874,7 @@ impl Workspace {
                 .update(cx, |toast, _, cx| {
                     toast.caps = caps.clone();
                     toast.message = message.clone();
-                    toast.preview = preview;
+                    toast.source = source;
                     toast.shown = shown;
                     cx.notify();
                 })
@@ -570,7 +1934,7 @@ impl Workspace {
                 cx.new(|_| Toast {
                     caps,
                     message,
-                    preview,
+                    source,
                     shown,
                 })
             },
@@ -585,6 +1949,19 @@ impl Workspace {
     }
 
     fn load_selected_message(&mut self, cx: &mut Context<Self>) {
+        self.edited_spec = None;
+        if let Some(spec) = self
+            .selected
+            .and_then(|id| self.binding(id))
+            .map(|b| b.spec.clone())
+        {
+            self.load_trigger_fields(&spec, cx);
+        }
+        let action = self
+            .selected
+            .and_then(|id| self.binding(id))
+            .map(|b| b.action.clone())
+            .unwrap_or(ActionSpec::Notification);
         let text = self
             .selected
             .and_then(|id| self.binding(id))
@@ -592,17 +1969,70 @@ impl Workspace {
             .unwrap_or_default();
         self.message
             .update(cx, |input, cx| input.set_text(text, cx));
+        self.load_action(action, cx);
+    }
+
+    fn load_action(&mut self, action: ActionSpec, cx: &mut Context<Self>) {
+        let shortcut_text = match &action {
+            ActionSpec::SendShortcut(shortcut) => shortcut.display(),
+            _ => "Backspace".into(),
+        };
+        self.shortcut_keys
+            .update(cx, |input, cx| input.set_text(shortcut_text, cx));
+        let command = if let ActionSpec::Command(command) = &action {
+            Some(command.clone())
+        } else {
+            None
+        };
+        self.draft_action = action;
+        let command = command.unwrap_or(CommandAction {
+            program: String::new(),
+            args: Vec::new(),
+            working_directory: None,
+        });
+        self.program
+            .update(cx, |input, cx| input.set_text(command.program, cx));
+        self.arguments.update(cx, |input, cx| {
+            input.set_text(
+                serde_json::to_string(&command.args).unwrap_or_else(|_| "[]".into()),
+                cx,
+            )
+        });
+        self.working_directory.update(cx, |input, cx| {
+            input.set_text(command.working_directory.unwrap_or_default(), cx)
+        });
     }
 
     fn start_recording(&mut self, cx: &mut Context<Self>) {
+        self.begin_recording(false, None, cx);
+    }
+
+    fn record_trigger(&mut self, cx: &mut Context<Self>) {
+        let editing = if self.pending.is_none() {
+            self.selected
+        } else {
+            None
+        };
+        self.begin_recording(true, editing, cx);
+    }
+
+    fn begin_recording(
+        &mut self,
+        preserve_action: bool,
+        editing: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
         if self.listener() != Listener::Listening {
             return;
         }
+        self.hide_wheel(cx);
         self.error = None;
+        self.recording_for_panel = false;
+        self.recording_preserve_action = preserve_action;
+        self.recording_edit_id = editing;
         if self.send(BackendCommand::StartRecording) {
             self.recording = true;
             self.recording_held.clear();
-            self.pending = None;
             self.conflict = None;
             self.confirm_delete = None;
             self.page = Page::Triggers;
@@ -612,7 +2042,7 @@ impl Workspace {
     }
 
     fn discard_pending(&mut self, cx: &mut Context<Self>) {
-        self.pending = None;
+        self.clear_pending();
         self.conflict = None;
         self.status = "已放弃录制结果。".into();
         self.load_selected_message(cx);
@@ -624,7 +2054,7 @@ impl Workspace {
             return;
         }
         self.selected = Some(id);
-        self.pending = None;
+        self.clear_pending();
         self.conflict = None;
         self.confirm_delete = None;
         self.page = Page::Triggers;
@@ -637,22 +2067,66 @@ impl Workspace {
             return;
         }
         let text = self.message.read(cx).text();
-        let mut next = self.bindings.clone();
-        let mut added = None;
-        if let Some(spec) = self.pending.clone() {
-            if self.conflict.is_some() {
+        let base = self.pending.as_ref().or_else(|| {
+            self.selected
+                .and_then(|id| self.binding(id))
+                .map(|b| &b.spec)
+        });
+        let spec = match base
+            .ok_or_else(|| "请先录制组合或选择预设。".to_string())
+            .and_then(|base| self.draft_spec(base, cx))
+        {
+            Ok(spec) => spec,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
                 return;
             }
-            let id = settings::next_id(&next);
+        };
+        let action = match self.draft_action_spec(cx) {
+            Ok(action) => action,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(error) = self.action_unavailable_reason(&action) {
+            self.error = Some(format!(
+                "动作尚不可用：{error}。请先在动作库中配置或安装插件。"
+            ));
+            cx.notify();
+            return;
+        }
+        let mut next = self.bindings.clone();
+        if self.pending.is_none() {
+            if let Err(conflict) = self.check_draft_trigger(&spec, self.selected) {
+                self.conflict = Some(conflict.clone());
+                self.error = Some(format!("{}：{}", conflict.title, conflict.detail));
+                cx.notify();
+                return;
+            }
+        }
+        let mut added = None;
+        if self.pending.is_some() {
+            if let Err(conflict) = settings::check_candidate(&next, &spec) {
+                self.conflict = Some(conflict);
+                cx.notify();
+                return;
+            }
+            let id = spec.id;
             next.push(Binding {
                 spec: TriggerSpec { id, ..spec },
                 message: text,
                 enabled: true,
+                action,
             });
             added = Some(id);
         } else if let Some(id) = self.selected {
             if let Some(binding) = next.iter_mut().find(|binding| binding.spec.id == id) {
                 binding.message = text;
+                binding.spec = spec;
+                binding.action = action;
             }
         } else {
             self.error = Some("请先录制一个组合。".into());
@@ -665,8 +2139,10 @@ impl Workspace {
                 self.selected = Some(id);
                 self.status = "触发器已添加，试着在任意窗口触发它。".into();
             } else {
-                self.status = "提示消息已保存。".into();
+                self.status = "触发器动作已保存。".into();
             }
+            self.edited_spec = None;
+            self.load_selected_message(cx);
         }
         cx.notify();
     }
@@ -680,6 +2156,143 @@ impl Workspace {
         self.error = None;
         self.sync_bindings();
         true
+    }
+
+    fn clear_pending(&mut self) {
+        if let Some(spec) = self.pending.take() {
+            self.action_status.remove(&spec.id);
+        }
+    }
+
+    fn choose_capture(&mut self, cx: &mut Context<Self>) {
+        if self.recording {
+            return;
+        }
+        if self.pending.is_some()
+            && self.draft_action == ActionSpec::Plugin(PluginActionRef::raishot_capture())
+        {
+            self.page = Page::Triggers;
+            cx.notify();
+            return;
+        }
+        let Some(id) = self.next_binding_id else {
+            self.error = Some("触发器编号已用尽。".into());
+            cx.notify();
+            return;
+        };
+        let reference = PluginActionRef::raishot_capture();
+        match self.plugins.default_trigger(&reference, id) {
+            Ok(spec) => {
+                self.next_binding_id = id.checked_add(1);
+                self.clear_pending();
+                self.edited_spec = None;
+                self.load_trigger_fields(&spec, cx);
+                self.conflict = settings::check_candidate(&self.bindings, &spec).err();
+                self.pending = Some(spec);
+                self.load_action(ActionSpec::Plugin(reference), cx);
+                self.message
+                    .update(cx, |input, cx| input.set_text("截图", cx));
+                self.page = Page::Triggers;
+                self.error = None;
+                self.status = "已选择 RaiShot 截图，默认快捷键已填入草稿，可修改后保存。".into();
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
+    fn restore_default_trigger(&mut self, cx: &mut Context<Self>) {
+        let ActionSpec::Plugin(reference) = &self.draft_action else {
+            return;
+        };
+        let id = self.pending.as_ref().map(|s| s.id).or(self.selected);
+        let Some(id) = id else {
+            return;
+        };
+        match self.plugins.default_trigger(reference, id) {
+            Ok(spec) => {
+                let editing = if self.pending.is_none() {
+                    Some(id)
+                } else {
+                    None
+                };
+                self.conflict = self.check_draft_trigger(&spec, editing).err();
+                self.load_trigger_fields(&spec, cx);
+                if editing.is_some() {
+                    self.edited_spec = Some(spec);
+                } else {
+                    self.pending = Some(spec);
+                }
+                self.status = "默认快捷键已恢复到草稿，检查冲突后保存才会生效。".into();
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+        cx.notify();
+    }
+
+    fn save_plugin_settings(&mut self, enabled: bool, cx: &mut Context<Self>) -> bool {
+        let result = if let Some(error) = &self.plugin_settings_error {
+            Err(error.clone())
+        } else {
+            let mut candidate = self.plugins.clone();
+            candidate
+                .configure_raishot(self.plugin_path.read(cx).text().trim().to_string(), enabled)
+                .and_then(|()| candidate.save(&settings::path()))
+                .map(|()| candidate)
+                .map_err(|error| error.to_string())
+                .map(|candidate| {
+                    self.plugins = candidate;
+                })
+        };
+        if let Err(error) = result {
+            self.error = Some(error);
+            cx.notify();
+            return false;
+        }
+        self.error = None;
+        self.sync_bindings();
+        self.refresh_panel(cx);
+        self.status = if enabled {
+            "RaiShot 插件设置已保存，所有绑定共用该程序路径。"
+        } else {
+            "RaiShot 插件已停用，绑定配置已保留。"
+        }
+        .into();
+        cx.notify();
+        true
+    }
+
+    fn refresh_plugins(&mut self, cx: &mut Context<Self>) {
+        match Plugins::load(&settings::path()) {
+            Ok(plugins) => {
+                self.plugins = plugins;
+                self.plugin_settings_error = None;
+            }
+            Err(error) => self.plugin_settings_error = Some(error.to_string()),
+        }
+        self.plugins.refresh();
+        self.sync_bindings();
+        self.refresh_panel(cx);
+        self.status = "已刷新插件状态。".into();
+        cx.notify();
+    }
+
+    fn install_raishot(&mut self, cx: &mut Context<Self>) {
+        if self.install_events.is_some() {
+            return;
+        }
+        if self.plugin_settings_error.is_some() {
+            self.error = Some("请先修复插件设置文件，再刷新状态，原文件不会被覆盖。".into());
+        } else {
+            match plugin_install::start_install(settings::path()) {
+                Ok(events) => {
+                    self.install_events = Some(events);
+                    self.install_status = Some("正在准备下载 RaiShot 与运行依赖…".into());
+                }
+                Err(error) => self.install_status = Some(format!("无法开始安装：{error}")),
+            }
+        }
+        cx.notify();
     }
 
     fn toggle_rule(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -713,6 +2326,7 @@ impl Workspace {
             .collect();
         if self.apply(bindings) {
             self.stats.remove(&id);
+            self.action_status.remove(&id);
             self.confirm_delete = None;
             self.selected = index.and_then(|index| {
                 self.bindings
@@ -730,70 +2344,32 @@ impl Workspace {
 
     fn render_sidebar(&self, header: f32, cx: &mut Context<Self>) -> Div {
         let listener = self.listener();
-        let enabled = self.bindings.iter().filter(|b| b.enabled).count();
-        let (label, sub, color, label_color, card_bg, card_line) = match listener {
+        let enabled = self
+            .bindings
+            .iter()
+            .filter(|b| b.enabled && self.action_available(&b.action))
+            .count();
+        let (label, sub, color) = match listener {
             Listener::Listening => (
                 "正在监听",
-                format!("监听 #{} · {} 条生效", self.listener_generation, enabled),
+                format!("{enabled} 条触发器生效中"),
                 theme::ACCENT,
-                theme::TEXT,
-                theme::ACCENT_BG,
-                0x21362c,
             ),
-            Listener::Recording => (
-                "正在录制",
-                "输入暂被拦截 · Esc 取消".into(),
-                theme::RECORD,
-                theme::RECORD_TEXT,
-                0x1a150f,
-                0x3e3121,
-            ),
-            Listener::Paused => (
-                "已暂停",
-                "触发器不会响应".into(),
-                theme::TEXT_FAINT,
-                theme::TEXT_SOFT,
-                theme::ROW,
-                0x2a303a,
-            ),
-            Listener::Offline => (
-                "未监听",
-                "输入线程已结束".into(),
-                theme::DANGER,
-                theme::DANGER_TEXT,
-                theme::DANGER_BG,
-                0x4a2429,
-            ),
-            Listener::Starting => (
-                "正在连接",
-                "正在安装输入监听".into(),
-                theme::TEXT_FAINT,
-                theme::TEXT_SOFT,
-                theme::ROW,
-                0x2a303a,
-            ),
-            Listener::Rebuilding => (
-                "正在重建",
-                "请松开其他按键".into(),
-                theme::TEXT_FAINT,
-                theme::TEXT_SOFT,
-                theme::ROW,
-                0x2a303a,
-            ),
+            Listener::Recording => ("正在录制", "输入暂被拦截 · Esc 取消".into(), theme::RECORD),
+            Listener::Paused => ("已暂停", "触发器不会响应".into(), theme::TEXT_DIM),
+            Listener::Offline => ("未监听", "输入线程已结束".into(), theme::DANGER),
+            Listener::Starting => ("正在连接", "正在安装输入监听".into(), theme::TEXT_DIM),
+            Listener::Rebuilding => ("正在重建", "请松开其他按键".into(), theme::TEXT_DIM),
         };
         let action = match listener {
-            Listener::Listening => div()
-                .id("listener-action")
-                .h(px(30.))
-                .rounded(px(7.))
-                .border_1()
-                .border_color(rgb(theme::ACCENT_LINE))
-                .text_color(rgb(0xbfebd5))
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(0x16241e)))
-                .child(icon(Icon::Pause, 13., 0xbfebd5))
-                .child("暂停监听")
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_pause(cx))),
+            Listener::Listening => small(icon_button(
+                "listener-action",
+                Icon::Pause,
+                "暂停监听",
+                Tone::Secondary,
+                true,
+            ))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_pause(cx))),
             Listener::Paused => small(icon_button(
                 "listener-action",
                 Icon::Play,
@@ -801,36 +2377,118 @@ impl Workspace {
                 Tone::Primary,
                 true,
             ))
-            .h(px(30.))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_pause(cx))),
-            Listener::Offline => small(button(
+            Listener::Offline => small(icon_button(
                 "listener-action",
+                Icon::Refresh,
                 "重建监听",
                 Tone::DangerSolid,
                 true,
             ))
-            .h(px(30.))
             .on_click(cx.listener(|this, _, _, cx| this.rebuild_backend(cx))),
-            Listener::Recording | Listener::Starting | Listener::Rebuilding => div()
-                .id("listener-action")
-                .h(px(30.))
-                .rounded(px(7.))
-                .border_1()
-                .border_color(rgb(card_line))
-                .text_color(rgb(theme::TEXT_FAINT))
-                .opacity(0.7)
-                .child(match listener {
+            Listener::Recording | Listener::Starting | Listener::Rebuilding => small(button(
+                "listener-action",
+                match listener {
                     Listener::Recording => "录制中",
                     Listener::Rebuilding => "正在重建…",
                     _ => "正在连接…",
-                }),
+                },
+                Tone::Secondary,
+                false,
+            )),
         }
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(6.))
-        .text_size(px(12.))
-        .font_weight(FontWeight::SEMIBOLD);
+        .w_full();
+        let status = div()
+            .rounded(px(14.))
+            .p(px(14.))
+            .bg(theme::tint_fill(color, 0.13, 0.02))
+            .border_1()
+            .border_color(hsla(color, 0.24))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(theme::beacon(color, 7.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(theme::TEXT_DIM))
+                                    .child(sub),
+                            ),
+                    )
+                    .when(listener == Listener::Listening, |el| {
+                        el.child(
+                            div()
+                                .font_family(theme::MONO_FONT)
+                                .text_size(px(11.))
+                                .text_color(rgb(theme::TEXT_FAINT))
+                                .child(format!("#{}", self.listener_generation)),
+                        )
+                    }),
+            )
+            .child(action);
+
+        let panel_combo = self
+            .bindings
+            .iter()
+            .find(|b| matches!(b.action, ActionSpec::ShowPanel) && b.enabled)
+            .map(|b| caps_for(&b.spec));
+        let launcher = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                icon_button(
+                    "open-panel",
+                    Icon::Bolt,
+                    "打开触发面板",
+                    Tone::Primary,
+                    !self.recording,
+                )
+                .h(px(40.))
+                .w_full()
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx))),
+            )
+            .when_some(panel_combo, |el, caps| {
+                el.child(
+                    div()
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(7.))
+                        .child(caption("呼出"))
+                        .child(combo(&caps, CapSize::Small).flex_nowrap()),
+                )
+            })
+            .child(
+                small(icon_button(
+                    "record-panel-shortcut",
+                    Icon::Record,
+                    "录制面板呼出组合",
+                    Tone::Ghost,
+                    listener == Listener::Listening,
+                ))
+                .w_full()
+                .on_click(cx.listener(|this, _, _, cx| this.record_panel_shortcut(cx))),
+            );
 
         let nav = |id: &'static str,
                    page: Page,
@@ -840,12 +2498,13 @@ impl Workspace {
             let active = self.page == page;
             div()
                 .id(id)
-                .h(px(34.))
-                .px(px(10.))
-                .rounded(px(8.))
+                .relative()
+                .h(px(38.))
+                .px(px(12.))
+                .rounded(px(10.))
                 .flex()
                 .items_center()
-                .gap(px(10.))
+                .gap(px(11.))
                 .text_size(px(13.))
                 .cursor_pointer()
                 .text_color(rgb(if active {
@@ -853,171 +2512,213 @@ impl Workspace {
                 } else {
                     theme::TEXT_MUTED
                 }))
-                .when(active, |el| el.bg(rgb(theme::SURFACE_HI)))
-                .when(!active, |el| el.hover(|s| s.bg(rgb(0x14171c))))
+                .when(active, |el| {
+                    el.bg(theme::gradient(
+                        90.,
+                        hsla(theme::ACCENT, 0.14),
+                        hsla(theme::ACCENT, 0.02),
+                    ))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(0.))
+                            .top(px(10.))
+                            .w(px(3.))
+                            .h(px(18.))
+                            .rounded(px(2.))
+                            .bg(theme::accent_fill(180.))
+                            .shadow(theme::glow(theme::ACCENT, 0.8, 8.)),
+                    )
+                })
+                .when(!active, |el| {
+                    el.hover(|s| s.bg(rgb(0x12141c)).text_color(rgb(theme::TEXT_SOFT)))
+                })
                 .child(icon(
                     glyph,
                     16.,
                     if active {
-                        theme::TEXT
+                        theme::ACCENT
                     } else {
-                        theme::TEXT_MUTED
+                        theme::TEXT_DIM
                     },
                 ))
                 .child(div().flex_1().child(label))
                 .when_some(count, |el, count| {
                     el.child(
                         div()
-                            .text_size(px(12.))
+                            .min_w(px(22.))
+                            .h(px(18.))
+                            .px(px(6.))
+                            .rounded(px(9.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
                             .font_family(theme::MONO_FONT)
-                            .text_color(rgb(theme::TEXT_DIM))
+                            .text_size(px(11.))
+                            .bg(if active {
+                                hsla(theme::ACCENT, 0.14)
+                            } else {
+                                hsla(0x161923, 1.)
+                            })
+                            .text_color(rgb(if active {
+                                theme::ACCENT
+                            } else {
+                                theme::TEXT_DIM
+                            }))
                             .child(count.to_string()),
                     )
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if !this.recording {
                         this.page = page;
+                        this.preset_edit_id = None;
                         cx.notify();
                     }
                 }))
         };
 
         div()
-            .w(px(208.))
+            .w(px(224.))
             .flex_none()
             .h_full()
+            .relative()
+            .overflow_hidden()
             .bg(rgb(theme::SIDEBAR))
             .border_r_1()
             .border_color(rgb(theme::DIVIDER))
-            .pb(px(14.))
-            .px(px(12.))
-            .flex()
-            .flex_col()
-            .gap(px(18.))
             .child(
-                // 应用名占据标题栏左侧，可拖动窗口。
-                div()
-                    .h(px(header.max(36.)))
-                    .flex_none()
-                    .px(px(6.))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .window_control_area(WindowControlArea::Drag)
-                    .child(logo(22.))
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("OmniTrigger"),
-                    ),
+                theme::aurora(theme::ACCENT, 0.09, 90.)
+                    .top(px(16.))
+                    .left(px(36.)),
             )
             .child(
                 div()
-                    .rounded(px(10.))
-                    .p(px(12.))
-                    .bg(rgb(card_bg))
-                    .border_1()
-                    .border_color(rgb(card_line))
+                    .size_full()
+                    .px(px(14.))
+                    .pb(px(14.))
                     .flex()
                     .flex_col()
-                    .gap(px(10.))
+                    .gap(px(16.))
+                    .child(
+                        // 应用名占据标题栏左侧，可拖动窗口。
+                        div()
+                            .h(px(header.max(36.) + 12.))
+                            .flex_none()
+                            .px(px(4.))
+                            .flex()
+                            .items_center()
+                            .gap(px(11.))
+                            .window_control_area(WindowControlArea::Drag)
+                            .child(logo(30.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .text_size(px(15.))
+                                            .font_weight(FontWeight::BOLD)
+                                            .child("OmniTrigger"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.5))
+                                            .text_color(rgb(theme::TEXT_FAINT))
+                                            .child("组合输入触发引擎"),
+                                    ),
+                            ),
+                    )
+                    .child(status)
+                    .child(launcher)
                     .child(
                         div()
                             .flex()
-                            .items_center()
-                            .gap(px(8.))
+                            .flex_col()
+                            .gap(px(2.))
                             .child(
                                 div()
-                                    .size(px(14.))
-                                    .rounded(px(7.))
-                                    .bg(hsla(color, 0.18))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(dot(color, 8.)),
+                                    .px(px(12.))
+                                    .pb(px(6.))
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme::TEXT_FAINT))
+                                    .child("工作区"),
+                            )
+                            .child(nav(
+                                "nav-actions",
+                                Page::Actions,
+                                Icon::Grid,
+                                "动作库",
+                                Some(1),
+                            ))
+                            .child(nav(
+                                "nav-wheels",
+                                Page::Wheels,
+                                Icon::Pulse,
+                                "轨道轮盘",
+                                Some(self.wheels.wheels.len()),
+                            ))
+                            .child(nav(
+                                "nav-presets",
+                                Page::Presets,
+                                Icon::Layers,
+                                "触发预设",
+                                Some(PRESETS.len()),
+                            ))
+                            .child(nav(
+                                "nav-triggers",
+                                Page::Triggers,
+                                Icon::Keyboard,
+                                "触发器",
+                                Some(self.bindings.len()),
+                            ))
+                            .child(nav(
+                                "nav-history",
+                                Page::History,
+                                Icon::Clock,
+                                "触发记录",
+                                Some(self.hits.len()),
+                            ))
+                            .child(nav(
+                                "nav-diagnostics",
+                                Page::Diagnostics,
+                                Icon::Pulse,
+                                "输入诊断",
+                                None,
+                            )),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(10.))
+                            .child(
+                                small(icon_button(
+                                    "sidebar-rebuild",
+                                    Icon::Refresh,
+                                    if self.restarting {
+                                        "正在重建…"
+                                    } else {
+                                        "重建监听"
+                                    },
+                                    Tone::Ghost,
+                                    true,
+                                ))
+                                .w_full()
+                                .border_1()
+                                .border_color(rgb(theme::BORDER))
+                                .on_click(cx.listener(|this, _, _, cx| this.rebuild_backend(cx))),
                             )
                             .child(
                                 div()
-                                    .text_size(px(13.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(label_color))
-                                    .child(label),
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap(px(6.))
+                                    .child(dot(theme::TEXT_FAINT, 4.))
+                                    .child(caption("配置自动保存在本机")),
                             ),
-                    )
-                    .child(
-                        div()
-                            .mt(px(-4.))
-                            .text_size(px(12.))
-                            .text_color(rgb(theme::TEXT_DIM))
-                            .child(sub),
-                    )
-                    .child(action),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(nav(
-                        "nav-triggers",
-                        Page::Triggers,
-                        Icon::Keyboard,
-                        "触发器",
-                        Some(self.bindings.len()),
-                    ))
-                    .child(nav(
-                        "nav-history",
-                        Page::History,
-                        Icon::Clock,
-                        "触发记录",
-                        Some(self.hits.len()),
-                    ))
-                    .child(nav(
-                        "nav-diagnostics",
-                        Page::Diagnostics,
-                        Icon::Pulse,
-                        "输入诊断",
-                        None,
-                    )),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .px(px(6.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .id("sidebar-rebuild")
-                            .h(px(30.))
-                            .rounded(px(7.))
-                            .border_1()
-                            .border_color(rgb(0x262c36))
-                            .text_color(rgb(theme::TEXT_MUTED))
-                            .text_size(px(12.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .gap(px(6.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(rgb(0x14171c)))
-                            .child(icon(Icon::Refresh, 13., theme::TEXT_MUTED))
-                            .child(if self.restarting {
-                                "正在重建…"
-                            } else {
-                                "重建监听"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.rebuild_backend(cx))),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(theme::TEXT_FAINT))
-                            .flex()
-                            .justify_center()
-                            .child("配置自动保存在本机"),
                     ),
             )
     }
@@ -1025,25 +2726,32 @@ impl Workspace {
     // ───────────────────────────── 触发器页 ─────────────────────────────
 
     fn render_banner(&self, cx: &mut Context<Self>) -> Option<Div> {
-        if let Some(error) = &self.error {
+        let banner = |color: u32, glyph: Icon| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .px(px(12.))
+                .py(px(10.))
+                .rounded(px(12.))
+                .bg(theme::tint_fill(color, 0.14, 0.04))
+                .border_1()
+                .border_color(hsla(color, 0.32))
+                .child(icon_tile(glyph, color, 30.))
+        };
+        if let Some(error) = self
+            .error
+            .as_ref()
+            .or_else(|| self.action_error.as_ref().map(|(_, error)| error))
+        {
             let offline = self.backend.is_none() && !self.restarting;
             return Some(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .px(px(12.))
-                    .py(px(10.))
-                    .rounded(px(9.))
-                    .bg(rgb(0x2a1619))
-                    .border_1()
-                    .border_color(rgb(theme::DANGER_LINE))
-                    .child(icon(Icon::Alert, 16., theme::DANGER))
+                banner(theme::DANGER, Icon::Alert)
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(12.))
+                            .text_size(px(12.5))
                             .text_color(rgb(theme::DANGER_TEXT))
                             .child(error.clone()),
                     )
@@ -1059,6 +2767,7 @@ impl Workspace {
                         small(button("banner-dismiss", "知道了", Tone::Secondary, true)).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.error = None;
+                                this.action_error = None;
                                 cx.notify();
                             }),
                         )
@@ -1066,27 +2775,24 @@ impl Workspace {
             );
         }
         (self.listener() == Listener::Paused).then(|| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .px(px(12.))
-                .py(px(10.))
-                .rounded(px(9.))
-                .bg(rgb(0x171a20))
-                .border_1()
-                .border_color(rgb(theme::BORDER_HI))
-                .child(icon(Icon::Pause, 16., theme::TEXT_MUTED))
+            banner(theme::TEXT_MUTED, Icon::Pause)
                 .child(
                     div()
                         .flex_1()
-                        .text_size(px(12.))
+                        .min_w_0()
+                        .text_size(px(12.5))
                         .text_color(rgb(theme::TEXT_SOFT))
                         .child("监听已暂停。触发器不会响应，按键和滚轮照常交给应用。"),
                 )
                 .child(
-                    small(button("banner-resume", "恢复监听", Tone::Secondary, true))
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_pause(cx))),
+                    small(icon_button(
+                        "banner-resume",
+                        Icon::Play,
+                        "恢复监听",
+                        Tone::Secondary,
+                        true,
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_pause(cx))),
                 )
         })
     }
@@ -1094,6 +2800,7 @@ impl Workspace {
     fn render_list(&self, cx: &mut Context<Self>) -> Div {
         let listening = self.listener() == Listener::Listening;
         let dim = matches!(self.listener(), Listener::Paused | Listener::Offline);
+        let enabled = self.bindings.iter().filter(|b| b.enabled).count();
         let mut rows = div()
             .id("trigger-rows")
             .flex_1()
@@ -1107,80 +2814,134 @@ impl Workspace {
             let id = binding.spec.id;
             let selected = self.pending.is_none() && !self.recording && self.selected == Some(id);
             let stats = self.stats.get(&id).cloned().unwrap_or_default();
-            let (hits_label, hits_color) = if stats.hits > 0 {
-                (format!("{} 次", stats.hits), theme::TEXT_SOFT)
-            } else {
-                ("未触发".to_string(), theme::TEXT_FAINT)
+            let (glyph, tint) = action_look(&binding.action);
+            let (detail, detail_color) = match self.action_unavailable_reason(&binding.action) {
+                Some(reason) => (reason, theme::RECORD),
+                None => (action_detail(&binding.action), theme::TEXT_DIM),
             };
-            let last = if !binding.enabled {
-                "已停用".to_string()
+            // 标题行右侧：停用标记，或本次运行的命中次数与最近时间。
+            let badge = if !binding.enabled {
+                Some(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(theme::TEXT_FAINT))
+                        .child("已停用"),
+                )
             } else {
-                stats
-                    .last
-                    .map(|last| format!("最近 {}", &last[..5]))
-                    .unwrap_or_default()
+                (stats.hits > 0).then(|| {
+                    div()
+                        .h(px(20.))
+                        .px(px(7.))
+                        .rounded(px(10.))
+                        .bg(hsla(theme::VIOLET, 0.12))
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .font_family(theme::MONO_FONT)
+                        .text_size(px(11.))
+                        .text_color(rgb(theme::VIOLET))
+                        .child(icon(Icon::Bolt, 10., theme::VIOLET))
+                        .child(match &stats.last {
+                            Some(last) => format!("{} · {}", thousands(stats.hits), &last[..5]),
+                            None => thousands(stats.hits),
+                        })
+                })
             };
             rows = rows.child(
                 div()
+                    .id(("row-card", id))
                     .flex_none()
+                    .relative()
                     .flex()
                     .items_center()
                     .gap(px(14.))
-                    .px(px(14.))
+                    .pl(px(14.))
+                    .pr(px(16.))
                     .py(px(12.))
-                    .rounded(px(10.))
-                    .bg(rgb(if selected {
-                        theme::SELECTED
-                    } else {
-                        theme::ROW
-                    }))
+                    .rounded(px(14.))
                     .border_1()
-                    .border_color(rgb(if selected {
-                        theme::KEYCAP_EDGE
-                    } else {
-                        theme::BORDER
-                    }))
+                    .when(selected, |el| {
+                        el.bg(theme::gradient(
+                            90.,
+                            hsla(theme::ACCENT, 0.1),
+                            hsla(theme::SURFACE, 0.95),
+                        ))
+                        .border_color(hsla(theme::ACCENT, 0.5))
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(-1.))
+                                .top(px(18.))
+                                .bottom(px(18.))
+                                .w(px(3.))
+                                .rounded(px(2.))
+                                .bg(theme::accent_fill(180.)),
+                        )
+                    })
+                    .when(!selected, |el| {
+                        el.bg(rgb(theme::ROW))
+                            .border_color(rgb(theme::BORDER))
+                            .hover(|s| s.bg(rgb(0x141722)).border_color(rgb(theme::BORDER_MID)))
+                    })
                     .child(
                         div()
                             .id(("row", id))
                             .flex_1()
                             .min_w_0()
                             .flex()
-                            .flex_col()
-                            .gap(px(8.))
+                            .items_center()
+                            .gap(px(14.))
                             .cursor_pointer()
-                            .when(!binding.enabled, |el| el.opacity(0.5))
-                            .child(combo(&caps_for(&binding.spec), CapSize::Medium))
+                            .when(!binding.enabled, |el| el.opacity(0.45))
+                            .child(icon_tile(glyph, tint, 40.))
                             .child(
                                 div()
-                                    .text_size(px(13.))
-                                    .text_color(rgb(theme::TEXT_MUTED))
-                                    .truncate()
-                                    .child(binding.message.clone()),
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(7.))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(8.))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .text_size(px(14.))
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .child(binding.message.clone()),
+                                            )
+                                            .when_some(badge, |el, badge| {
+                                                el.child(badge.flex_none())
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(10.))
+                                            .child(
+                                                combo(&caps_for(&binding.spec), CapSize::Small)
+                                                    .flex_none()
+                                                    .flex_nowrap(),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .text_size(px(12.))
+                                                    .text_color(rgb(detail_color))
+                                                    .child(detail),
+                                            ),
+                                    ),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| this.select(id, cx))),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .min_w(px(64.))
-                            .flex()
-                            .flex_col()
-                            .items_end()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .font_family(theme::MONO_FONT)
-                                    .text_color(rgb(hits_color))
-                                    .child(hits_label),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(theme::TEXT_FAINT))
-                                    .child(last),
-                            ),
                     )
                     .child(
                         switch(("switch", id), binding.enabled)
@@ -1191,14 +2952,22 @@ impl Workspace {
         if self.bindings.is_empty() {
             rows = rows.child(
                 div()
-                    .py(px(48.))
+                    .py(px(56.))
                     .flex()
                     .flex_col()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(px(12.))
+                    .child(
+                        icon_tile(Icon::Keyboard, theme::ACCENT, 56.).shadow(theme::glow(
+                            theme::ACCENT,
+                            0.2,
+                            24.,
+                        )),
+                    )
                     .child(
                         div()
-                            .text_size(px(14.))
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(rgb(theme::TEXT_SOFT))
                             .child("还没有触发器"),
                     )
@@ -1209,13 +2978,13 @@ impl Workspace {
             .flex_1()
             .min_w_0()
             .h_full()
-            .pt(px(12.))
+            .pt(px(6.))
             .pb(px(16.))
-            .pl(px(24.))
-            .pr(px(20.))
+            .pl(px(28.))
+            .pr(px(18.))
             .flex()
             .flex_col()
-            .gap(px(14.))
+            .gap(px(16.))
             .child(
                 div()
                     .flex()
@@ -1224,12 +2993,31 @@ impl Workspace {
                     .gap(px(12.))
                     .child(heading(
                         "触发器",
-                        "按住前缀，再按目标键或滚动滚轮；在任意应用中生效",
+                        "按住前缀再按目标键或滚轮，全局生效",
                     ))
                     .child(
                         icon_button("record", Icon::Record, "录制组合", Tone::Primary, listening)
                             .on_click(cx.listener(|this, _, _, cx| this.start_recording(cx))),
                     ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.))
+                    .child(chip(
+                        Icon::Keyboard,
+                        theme::ACCENT_2,
+                        self.bindings.len().to_string(),
+                        "触发器",
+                    ))
+                    .child(chip(Icon::Check, theme::ACCENT, enabled.to_string(), "已启用"))
+                    .child(chip(
+                        Icon::Bolt,
+                        theme::VIOLET,
+                        thousands(self.trigger_count),
+                        "本次触发",
+                    )),
             )
             .children(self.render_banner(cx))
             .child(rows)
@@ -1243,9 +3031,10 @@ impl Workspace {
             .flex()
             .items_center()
             .justify_between()
+            .gap(px(8.))
             .child(
                 div()
-                    .text_size(px(14.))
+                    .text_size(px(13.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(theme::TEXT_MUTED))
                     .child(title),
@@ -1253,30 +3042,549 @@ impl Workspace {
             .child(right)
     }
 
+    /// 详情顶部的组合展示区：同色渐变底与描边。
+    fn stage(color: u32) -> Div {
+        div()
+            .rounded(px(16.))
+            .px(px(16.))
+            .pt(px(22.))
+            .pb(px(16.))
+            .bg(theme::tint_fill(color, 0.15, 0.02))
+            .border_1()
+            .border_color(hsla(color, 0.26))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(14.))
+    }
+
+    /// 舞台底部的两项指标。
+    fn stage_metrics(color: u32, metrics: [(&'static str, String); 2]) -> Div {
+        let [left, right] = metrics;
+        let metric = |(label, value): (&'static str, String)| {
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .font_family(theme::MONO_FONT)
+                        .text_size(px(18.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(value),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(theme::TEXT_DIM))
+                        .child(label),
+                )
+        };
+        div()
+            .w_full()
+            .pt(px(14.))
+            .border_t_1()
+            .border_color(hsla(color, 0.16))
+            .flex()
+            .items_center()
+            .child(metric(left))
+            .child(div().w(px(1.)).h(px(28.)).bg(hsla(color, 0.16)))
+            .child(metric(right))
+    }
+
     fn message_field(&self, label: &'static str, hint: Option<&'static str>) -> Div {
+        Self::input_field(label, &self.message, hint)
+    }
+
+    fn input_field(
+        label: &'static str,
+        input: &Entity<MessageInput>,
+        hint: Option<&'static str>,
+    ) -> Div {
         div()
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .gap(px(7.))
             .child(
                 div()
                     .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(theme::TEXT_SOFT))
+                    .text_color(rgb(theme::TEXT_MUTED))
                     .child(label),
             )
-            .child(self.message.clone())
+            .child(input.clone())
             .when_some(hint, |el, hint| el.child(caption(hint)))
     }
 
-    fn render_recording(&self) -> Vec<AnyElement> {
+    /// 舞台下方的触发组合工具：重新录制、预设和插件默认值。
+    fn trigger_tools(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_wrap()
+            .justify_center()
+            .gap(px(6.))
+            .child(
+                small(icon_button(
+                    "customize-trigger",
+                    Icon::Record,
+                    "重新录制",
+                    Tone::Secondary,
+                    self.listener() == Listener::Listening,
+                ))
+                .on_click(cx.listener(|this, _, _, cx| this.record_trigger(cx))),
+            )
+            .child(
+                small(icon_button(
+                    "select-trigger-preset",
+                    Icon::Layers,
+                    "选择预设",
+                    Tone::Secondary,
+                    !self.recording,
+                ))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.preset_edit_id = if this.pending.is_none() {
+                        this.selected
+                    } else {
+                        None
+                    };
+                    this.page = Page::Presets;
+                    cx.notify();
+                })),
+            )
+            .when(matches!(self.draft_action, ActionSpec::Plugin(_)), |el| {
+                el.child(
+                    small(icon_button(
+                        "restore-default-trigger",
+                        Icon::Refresh,
+                        "恢复默认",
+                        Tone::Ghost,
+                        !self.recording,
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.restore_default_trigger(cx))),
+                )
+            })
+    }
+
+    fn trigger_fields(&self, spec: &TriggerSpec, cx: &mut Context<Self>) -> Div {
+        let spec = self
+            .edited_spec
+            .as_ref()
+            .filter(|draft| draft.id == spec.id)
+            .unwrap_or(spec);
+        let fields = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(section_title("触发方式"));
+        if matches!(spec.activation, Activation::Wheel(_)) {
+            return fields.child(caption("滚轮达到一格时触发；组合由同一份触发描述保存。"));
+        }
+        fields
+            .child(
+                theme::segments()
+                    .child(
+                        segment("trigger-press", "按下即触发", !self.hold_mode)
+                            .flex_1()
+                            .on_click(cx.listener(|this, _, _, cx| this.set_hold_mode(false, cx))),
+                    )
+                    .child(
+                        segment("trigger-hold", "长按触发", self.hold_mode)
+                            .flex_1()
+                            .on_click(cx.listener(|this, _, _, cx| this.set_hold_mode(true, cx))),
+                    ),
+            )
+            .when(self.hold_mode, |el| {
+                el.child(Self::input_field(
+                    "长按时间（毫秒）",
+                    &self.hold_duration,
+                    Some("50–10000；达到时间触发一次，提前松开回放原按压。"),
+                ))
+                .child(caption(
+                    "额外按键或滚轮取消等待；鼠标位移超过 8px 也会取消。",
+                ))
+            })
+    }
+
+    fn render_presets(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut content = div()
+            .id("preset-catalog")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(22.));
+        for (group, glyph, tint) in [
+            ("长按", Icon::Clock, theme::VIOLET),
+            ("键盘组合", Icon::Keyboard, theme::ACCENT_2),
+            ("单键与鼠标组合", Icon::Mouse, theme::PINK),
+        ] {
+            let mut cards = div().grid().grid_cols(2).gap(px(12.));
+            let mut count = 0;
+            for (index, preset) in PRESETS
+                .iter()
+                .enumerate()
+                .filter(|(_, preset)| preset.group == group)
+            {
+                count += 1;
+                let hover_group = SharedString::from(format!("preset-{}", preset.key));
+                cards =
+                    cards.child(
+                        div()
+                            .id(preset.key)
+                            .group(hover_group.clone())
+                            .min_w_0()
+                            .p(px(16.))
+                            .rounded(px(14.))
+                            .bg(theme::gradient(
+                                180.,
+                                hsla(theme::SURFACE, 1.),
+                                hsla(theme::ROW, 1.),
+                            ))
+                            .border_1()
+                            .border_color(rgb(theme::BORDER))
+                            .flex()
+                            .flex_col()
+                            .gap(px(12.))
+                            .when(!self.recording, |el| {
+                                el.cursor_pointer()
+                                    .hover(|s| s.border_color(hsla(tint, 0.5)))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.choose_preset(index, cx)
+                                    }))
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(10.))
+                                    .child(icon_tile(glyph, tint, 32.))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(14.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(preset.title),
+                                    )
+                                    .child(
+                                        icon(Icon::ArrowRight, 14., theme::TEXT_FAINT)
+                                            .group_hover(hover_group, |s| s.text_color(rgb(tint))),
+                                    ),
+                            )
+                            .child(combo(&caps_for(&preset.spec(0)), CapSize::Small))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(theme::TEXT_DIM))
+                                    .line_clamp(2)
+                                    .child(preset.description),
+                            ),
+                    );
+            }
+            content = content.child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(section_title(group))
+                            .child(
+                                div()
+                                    .font_family(theme::MONO_FONT)
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme::TEXT_FAINT))
+                                    .child(count.to_string()),
+                            ),
+                    )
+                    .child(cards),
+            );
+        }
+        div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .pl(px(28.))
+            .pr(px(24.))
+            .pt(px(6.))
+            .pb(px(18.))
+            .flex()
+            .flex_col()
+            .gap(px(18.))
+            .child(heading(
+                "触发预设",
+                "选择触发方式并调整参数；保留已选动作，保存后生效。",
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(14.))
+                    .p(px(14.))
+                    .rounded(px(14.))
+                    .bg(theme::tint_fill(theme::ACCENT, 0.13, 0.03))
+                    .border_1()
+                    .border_color(hsla(theme::ACCENT, 0.26))
+                    .child(icon_tile(Icon::Bolt, theme::ACCENT, 36.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("推荐：右键长按 300ms"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(theme::TEXT_MUTED))
+                                    .child("普通短按会延后补发；移动超过 8px 时取消长按候选。"),
+                            ),
+                    ),
+            )
+            .child(content)
+            .child(caption(
+                "预设只填入草稿，保存后才生效。已有组合和前缀冲突会明确报告。",
+            ))
+    }
+
+    /// 动作类型选择格。
+    fn kind_tile(
+        id: &'static str,
+        glyph: Icon,
+        tint: u32,
+        label: &'static str,
+        active: bool,
+    ) -> Stateful<Div> {
+        div()
+            .id(id)
+            .min_w_0()
+            .h(px(64.))
+            .rounded(px(12.))
+            .border_1()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(7.))
+            .text_size(px(12.))
+            .whitespace_nowrap()
+            .cursor_pointer()
+            .when(active, |el| {
+                el.bg(theme::tint_fill(tint, 0.18, 0.04))
+                    .border_color(hsla(tint, 0.6))
+                    .text_color(rgb(theme::TEXT))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .shadow(theme::glow(tint, 0.18, 14.))
+            })
+            .when(!active, |el| {
+                el.bg(rgb(0x0c0e14))
+                    .border_color(rgb(theme::BORDER))
+                    .text_color(rgb(theme::TEXT_MUTED))
+                    .hover(|s| {
+                        s.border_color(rgb(theme::BORDER_HI))
+                            .text_color(rgb(theme::TEXT_SOFT))
+                    })
+            })
+            .child(icon(
+                glyph,
+                18.,
+                if active { tint } else { theme::TEXT_DIM },
+            ))
+            .child(label)
+    }
+
+    fn action_fields(&self, hint: Option<&'static str>, cx: &mut Context<Self>) -> Div {
+        let notification = matches!(self.draft_action, ActionSpec::Notification);
+        let command = matches!(self.draft_action, ActionSpec::Command(_));
+        let panel = matches!(self.draft_action, ActionSpec::ShowPanel);
+        let plugin = matches!(self.draft_action, ActionSpec::Plugin(_));
+        let shortcut = matches!(self.draft_action, ActionSpec::SendShortcut(_));
+        let wheel = matches!(self.draft_action, ActionSpec::ShowWheel(_));
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(section_title("触发后执行"))
+            .child(
+                div()
+                    .grid()
+                    .grid_cols(3)
+                    .gap(px(8.))
+                    .child(
+                        Self::kind_tile(
+                            "notification-only",
+                            Icon::Bell,
+                            theme::VIOLET,
+                            "仅提示",
+                            notification,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.draft_action = ActionSpec::Notification;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        Self::kind_tile(
+                            "send-shortcut-action",
+                            Icon::Keyboard,
+                            theme::ACCENT_2,
+                            "发送快捷键",
+                            shortcut,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.draft_action =
+                                ActionSpec::SendShortcut(ShortcutAction { keys: vec![0x08] });
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        Self::kind_tile(
+                            "command-action",
+                            Icon::Terminal,
+                            theme::RECORD,
+                            "运行程序",
+                            command,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.draft_action = ActionSpec::Command(CommandAction {
+                                program: String::new(),
+                                args: Vec::new(),
+                                working_directory: None,
+                            });
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        Self::kind_tile(
+                            "plugin-action",
+                            Icon::Capture,
+                            theme::PINK,
+                            "插件动作",
+                            plugin,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.draft_action =
+                                ActionSpec::Plugin(PluginActionRef::raishot_capture());
+                            if this.message.read(cx).text().trim().is_empty() {
+                                this.message
+                                    .update(cx, |input, cx| input.set_text("截图", cx));
+                            }
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        Self::kind_tile(
+                            "show-panel-action",
+                            Icon::Panel,
+                            theme::ACCENT,
+                            "触发面板",
+                            panel,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.draft_action = ActionSpec::ShowPanel;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        Self::kind_tile("show-wheel-action", Icon::Pulse, theme::VIOLET, "轨道轮盘", wheel)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(wheel) = this.wheels.wheels.first() {
+                                    this.choose_draft_wheel(wheel.id.clone(), cx);
+                                } else {
+                                    this.page = Page::Wheels;
+                                    cx.notify();
+                                }
+                            })),
+                    ),
+            )
+            .when(wheel, |el| el.child(self.draft_wheel_fields(cx)))
+            .child(self.message_field("动作名称 / 提示消息", hint))
+            .when(panel, |el| {
+                el.child(caption(
+                    "打开或收起触发面板。该组合用于控制面板，不作为面板中的动作卡片；右键长按每次在当前鼠标位置显示。",
+                ))
+            })
+            .when(plugin, |el| el.child(self.plugin_action_fields(cx)))
+            .when(shortcut, |el| {
+                let result = ShortcutAction::parse(&self.shortcut_keys.read(cx).text());
+                let (preview, ok) = match result {
+                    Ok(shortcut) => (format!("将发送：{}", shortcut.display()), true),
+                    Err(error) => (error, false),
+                };
+                el.child(Self::input_field(
+                    "要发送的按键 / 快捷键",
+                    &self.shortcut_keys,
+                    Some("单键如 Backspace、Left；组合如 Ctrl+C、Ctrl+Shift+Left。"),
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_size(px(12.))
+                        .text_color(rgb(if ok { theme::ACCENT } else { theme::DANGER }))
+                        .child(icon(
+                            if ok { Icon::Check } else { Icon::Alert },
+                            13.,
+                            if ok { theme::ACCENT } else { theme::DANGER },
+                        ))
+                        .child(preview),
+                )
+                .child(caption("保存后切换到目标窗口，用触发组合测试。每次触发发送一次完整按下与释放；不会弹出提示。"))
+            })
+            .when(command, |el| {
+                el.child(Self::input_field(
+                    "程序",
+                    &self.program,
+                    Some("路径不加引号；脚本请填写解释器程序。"),
+                ))
+                .child(Self::input_field(
+                    "参数",
+                    &self.arguments,
+                    Some(r#"每项单独传递，例如 ["--capture"]。无参数填 []。"#),
+                ))
+                .child(Self::input_field(
+                    "工作目录（可选）",
+                    &self.working_directory,
+                    None,
+                ))
+                .child(
+                    small(icon_button(
+                        "test-action",
+                        Icon::Play,
+                        "测试动作",
+                        Tone::Secondary,
+                        true,
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.test_action(cx))),
+                )
+                .child(caption(
+                    "测试会立即运行当前草稿。仅报告进程状态，实际结果由程序确认。",
+                ))
+            })
+    }
+
+    fn render_recording(&self) -> (Vec<AnyElement>, Option<AnyElement>) {
         let held = caps_for_buttons(&self.recording_held);
         let mut live = div()
             .flex()
             .flex_wrap()
             .items_center()
             .justify_center()
-            .gap(px(8.));
+            .gap(px(9.));
         for (index, cap) in held.iter().enumerate() {
             if index > 0 {
                 live = live.child(plus(CapSize::Large, theme::RECORD_DIM));
@@ -1297,198 +3605,179 @@ impl Workspace {
         let bullet = |text: &'static str| {
             div()
                 .flex()
-                .gap(px(8.))
+                .gap(px(10.))
                 .text_size(px(12.))
                 .text_color(rgb(theme::TEXT_MUTED))
-                .child(div().mt(px(7.)).child(dot(theme::TEXT_FAINT, 4.)))
+                .child(div().mt(px(6.)).child(dot(theme::RECORD_DIM, 5.)))
                 .child(div().flex_1().child(text))
         };
-        vec![
-            Self::inspector_header(
-                "录制新组合",
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(px(12.))
-                    .text_color(rgb(theme::RECORD))
-                    .child(dot(theme::RECORD, 7.))
-                    .child("录制中"),
-            )
-            .into_any_element(),
+        let body = vec![
+            Self::inspector_header("新增触发器", status_pill("录制中", theme::RECORD))
+                .into_any_element(),
             div()
-                .h(px(236.))
-                .rounded(px(12.))
+                .h(px(250.))
+                .rounded(px(16.))
                 .border_1()
                 .border_dashed()
-                .border_color(rgb(theme::RECORD_LINE))
-                .bg(rgb(theme::RECORD_BG))
+                .border_color(hsla(theme::RECORD, 0.45))
+                .bg(theme::tint_fill(theme::RECORD, 0.13, 0.02))
                 .p(px(16.))
                 .flex()
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(16.))
+                .gap(px(18.))
                 .child(
                     div()
-                        .size(px(44.))
-                        .rounded(px(22.))
+                        .size(px(56.))
+                        .rounded(px(28.))
                         .border_2()
-                        .border_color(rgb(0x3e3121))
+                        .border_color(hsla(theme::RECORD, 0.45))
+                        .bg(hsla(theme::RECORD, 0.08))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon(Icon::Record, 30., theme::RECORD)),
+                        .child(icon(Icon::Record, 30., theme::RECORD))
+                        .with_animation(
+                            "record-pulse",
+                            Animation::new(Duration::from_millis(1600))
+                                .repeat()
+                                .with_easing(pulsating_between(0.15, 1.)),
+                            |el, delta| el.shadow(theme::glow(theme::RECORD, 0.5 * delta, 28.)),
+                        ),
                 )
                 .child(live)
                 .child(
                     div()
                         .text_size(px(13.))
-                        .text_color(rgb(0xe9d6bc))
+                        .text_color(rgb(theme::RECORD_TEXT))
                         .child(hint),
                 )
                 .into_any_element(),
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.))
+                .gap(px(8.))
                 .child(bullet("录制期间输入暂被拦截，不会传给其他应用。"))
                 .child(bullet("其他软件注入的模拟输入不参与录制。"))
                 .child(bullet(
                     "鼠标点击也会被录制；单独的左键、右键不能作为触发器。",
                 ))
                 .into_any_element(),
-            div().flex_1().into_any_element(),
-            div()
-                .h(px(34.))
-                .rounded(px(8.))
-                .border_1()
-                .border_color(rgb(theme::BORDER_MID))
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(px(8.))
-                .text_size(px(13.))
-                .text_color(rgb(theme::TEXT_SOFT))
-                .child("按")
-                .child(keycap(
-                    &Cap {
-                        label: "Esc".into(),
-                        mouse: false,
-                        arrow: None,
-                    },
-                    CapSize::Small,
-                    CapTone::Normal,
-                ))
-                .child("取消录制")
-                .into_any_element(),
-        ]
+        ];
+        let footer = div()
+            .h(px(36.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(8.))
+            .text_size(px(13.))
+            .text_color(rgb(theme::TEXT_SOFT))
+            .child("按")
+            .child(keycap(
+                &Cap {
+                    label: "Esc".into(),
+                    mouse: false,
+                    arrow: None,
+                },
+                CapSize::Small,
+                CapTone::Normal,
+            ))
+            .child("取消录制")
+            .into_any_element();
+        (body, Some(footer))
     }
 
-    fn render_captured(&self, spec: &TriggerSpec, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let conflict = self.conflict.clone();
-        let ok = conflict.is_none();
-        let status = match &conflict {
-            None => div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_size(px(12.))
-                .text_color(rgb(theme::ACCENT))
-                .child(icon(Icon::Check, 14., theme::ACCENT))
-                .child("没有冲突，可以添加"),
-            Some(conflict) => div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_size(px(12.))
-                .text_color(rgb(theme::DANGER))
-                .child(icon(Icon::Alert, 14., theme::DANGER))
-                .child(conflict.title),
+    fn render_captured(
+        &self,
+        spec: &TriggerSpec,
+        cx: &mut Context<Self>,
+    ) -> (Vec<AnyElement>, Option<AnyElement>) {
+        let draft = self.draft_spec(spec, cx);
+        let conflict = match &draft {
+            Ok(spec) => settings::check_candidate(&self.bindings, spec).err(),
+            Err(error) => Some(Conflict {
+                title: "触发参数无效",
+                detail: error.clone(),
+                other: None,
+            }),
         };
-        let mut items = vec![
+        let display_spec = draft.as_ref().unwrap_or(spec);
+        let ok = conflict.is_none();
+        let color = if ok { theme::ACCENT } else { theme::DANGER };
+        let status = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .text_size(px(12.5))
+            .text_color(rgb(color))
+            .child(icon(if ok { Icon::Check } else { Icon::Alert }, 14., color))
+            .child(match &conflict {
+                None => "没有冲突，可以添加",
+                Some(conflict) => conflict.title,
+            });
+        let mut body = vec![
             Self::inspector_header(
-                "录制新组合",
-                small(icon_button(
-                    "rerecord-top",
-                    Icon::Refresh,
-                    "重新录制",
-                    Tone::Ghost,
-                    true,
-                ))
-                .on_click(cx.listener(|this, _, _, cx| this.start_recording(cx))),
+                "新增触发器",
+                status_pill(if ok { "待保存" } else { "存在冲突" }, color),
             )
             .into_any_element(),
-            div()
-                .rounded(px(12.))
-                .border_1()
-                .border_color(rgb(if ok {
-                    theme::ACCENT_LINE
-                } else {
-                    theme::DANGER_LINE
-                }))
-                .bg(rgb(if ok {
-                    theme::ACCENT_BG
-                } else {
-                    theme::DANGER_BG
-                }))
-                .px(px(16.))
-                .py(px(18.))
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(12.))
-                .child(combo(&caps_for(spec), CapSize::Large).justify_center())
+            Self::stage(color)
+                .child(
+                    combo_toned(
+                        &caps_for(display_spec),
+                        CapSize::Large,
+                        if ok { CapTone::Lit } else { CapTone::Normal },
+                    )
+                    .justify_center(),
+                )
                 .child(status)
                 .into_any_element(),
+            self.trigger_tools(cx).into_any_element(),
+            self.trigger_fields(spec, cx).into_any_element(),
         ];
-        match conflict {
+        let footer = match conflict {
             None => {
-                items.push(self.message_field("提示消息", None).into_any_element());
-                items.push(div().flex_1().into_any_element());
-                items.push(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .child(
-                            button("add", "添加触发器", Tone::Primary, true)
-                                .flex_1()
-                                .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-                        )
-                        .child(
-                            button("preview-draft", "预览提示", Tone::Secondary, true)
-                                .px(px(12.))
-                                .on_click(cx.listener(|this, _, _, cx| this.preview_draft(cx))),
-                        )
-                        .child(
-                            button("discard", "放弃", Tone::Ghost, true)
-                                .px(px(12.))
-                                .on_click(cx.listener(|this, _, _, cx| this.discard_pending(cx))),
-                        )
-                        .into_any_element(),
-                );
+                body.push(self.action_fields(None, cx).into_any_element());
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        icon_button("add", Icon::Check, "添加触发器", Tone::Primary, true)
+                            .flex_1()
+                            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+                    )
+                    .child(
+                        button("preview-draft", "预览", Tone::Secondary, true)
+                            .on_click(cx.listener(|this, _, _, cx| this.preview_draft(cx))),
+                    )
+                    .child(
+                        button("discard", "放弃", Tone::Ghost, true)
+                            .on_click(cx.listener(|this, _, _, cx| this.discard_pending(cx))),
+                    )
             }
             Some(conflict) => {
-                let mut detail = div().flex().flex_col().gap(px(8.)).child(
+                let mut detail = div().flex().flex_col().gap(px(10.)).child(
                     div()
-                        .text_size(px(12.))
-                        .text_color(rgb(theme::TEXT_MUTED))
+                        .text_size(px(12.5))
+                        .text_color(rgb(theme::DANGER_TEXT))
                         .child(conflict.detail.clone()),
                 );
                 if let Some(other) = conflict.other.and_then(|id| self.binding(id)) {
                     let other_id = other.spec.id;
+                    let (glyph, tint) = action_look(&other.action);
                     detail =
                         detail.child(
                             div()
                                 .flex()
                                 .items_center()
-                                .gap(px(10.))
-                                .px(px(12.))
-                                .py(px(10.))
-                                .rounded(px(9.))
-                                .bg(rgb(theme::SURFACE))
+                                .gap(px(12.))
+                                .p(px(12.))
+                                .rounded(px(12.))
+                                .bg(rgb(theme::ROW))
                                 .border_1()
-                                .border_color(rgb(0x262c36))
+                                .border_color(rgb(theme::BORDER_MID))
+                                .child(icon_tile(glyph, tint, 34.))
                                 .child(
                                     div()
                                         .flex_1()
@@ -1496,14 +3785,14 @@ impl Workspace {
                                         .flex()
                                         .flex_col()
                                         .gap(px(6.))
-                                        .child(combo(&caps_for(&other.spec), CapSize::Small))
                                         .child(
                                             div()
-                                                .text_size(px(12.))
-                                                .text_color(rgb(theme::TEXT_MUTED))
                                                 .truncate()
+                                                .text_size(px(13.))
+                                                .font_weight(FontWeight::SEMIBOLD)
                                                 .child(other.message.clone()),
-                                        ),
+                                        )
+                                        .child(combo(&caps_for(&other.spec), CapSize::Small)),
                                 )
                                 .child(
                                     small(button("view-conflict", "查看", Tone::Secondary, true))
@@ -1513,222 +3802,308 @@ impl Workspace {
                                 ),
                         );
                 }
-                items.push(detail.into_any_element());
-                items.push(div().flex_1().into_any_element());
-                items.push(
-                    div()
-                        .flex()
-                        .gap(px(8.))
-                        .child(
-                            button("rerecord", "重新录制", Tone::Primary, true)
-                                .flex_1()
-                                .on_click(cx.listener(|this, _, _, cx| this.start_recording(cx))),
-                        )
-                        .child(
-                            button("discard", "取消", Tone::Secondary, true)
-                                .on_click(cx.listener(|this, _, _, cx| this.discard_pending(cx))),
-                        )
-                        .into_any_element(),
-                );
+                body.push(detail.into_any_element());
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        icon_button("rerecord", Icon::Record, "重新录制", Tone::Primary, true)
+                            .flex_1()
+                            .on_click(cx.listener(|this, _, _, cx| this.record_trigger(cx))),
+                    )
+                    .child(
+                        button("discard", "取消", Tone::Secondary, true)
+                            .on_click(cx.listener(|this, _, _, cx| this.discard_pending(cx))),
+                    )
             }
-        }
-        items
+        };
+        (body, Some(footer.into_any_element()))
     }
 
-    fn render_edit(&self, binding: &Binding, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_edit(
+        &self,
+        binding: &Binding,
+        cx: &mut Context<Self>,
+    ) -> (Vec<AnyElement>, Option<AnyElement>) {
         let id = binding.spec.id;
+        let conflict = match self.draft_spec(&binding.spec, cx) {
+            Ok(spec) => self.check_draft_trigger(&spec, Some(id)).err(),
+            Err(detail) => Some(Conflict {
+                title: "触发参数无效",
+                detail,
+                other: None,
+            }),
+        };
+        let available = self.action_available(&binding.action);
+        let draft_available = self
+            .draft_action_spec(cx)
+            .is_ok_and(|action| self.action_available(&action));
         let stats = self.stats.get(&id).cloned().unwrap_or_default();
         let draft = self.message.read(cx).text();
-        let changed = draft != binding.message && !draft.trim().is_empty();
+        let changed = !draft.trim().is_empty()
+            && (draft != binding.message
+                || self
+                    .draft_spec(&binding.spec, cx)
+                    .as_ref()
+                    .map(|spec| spec != &binding.spec)
+                    .unwrap_or(true)
+                || self
+                    .draft_action_spec(cx)
+                    .as_ref()
+                    .map(|action| action != &binding.action)
+                    .unwrap_or(true));
         let confirming = self.confirm_delete == Some(id);
-        let mini = |label: &'static str, value: String| {
-            div()
-                .flex_1()
-                .px(px(12.))
-                .py(px(10.))
-                .rounded(px(9.))
-                .bg(rgb(theme::SURFACE))
-                .border_1()
-                .border_color(rgb(0x22272f))
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgb(theme::TEXT_DIM))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .text_size(px(18.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .font_family(theme::MONO_FONT)
-                        .child(value),
-                )
+        let display = self
+            .draft_spec(&binding.spec, cx)
+            .unwrap_or_else(|_| binding.spec.clone());
+        let (state, state_color) = if binding.enabled && !available {
+            ("动作不可用", theme::RECORD)
+        } else if binding.enabled {
+            ("已启用", theme::ACCENT)
+        } else {
+            ("已停用", theme::TEXT_DIM)
         };
-        vec![
-            Self::inspector_header(
-                "触发器详情",
-                div()
-                    .text_size(px(12.))
-                    .text_color(rgb(if binding.enabled {
-                        theme::ACCENT
-                    } else {
-                        theme::TEXT_DIM
-                    }))
-                    .child(if binding.enabled {
-                        "已启用"
-                    } else {
-                        "已停用"
-                    }),
-            )
-            .into_any_element(),
-            div()
-                .min_h(px(44.))
-                .child(combo(&caps_for(&binding.spec), CapSize::Large))
+        let action_status = self
+            .action_status
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| "本次运行尚未执行动作".into());
+        let body = vec![
+            Self::inspector_header("触发器详情", status_pill(state, state_color))
+                .into_any_element(),
+            Self::stage(theme::ACCENT)
+                .child(
+                    combo_toned(&caps_for(&display), CapSize::Large, CapTone::Lit).justify_center(),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(theme::TEXT_MUTED))
+                        .child(activation_label(&display)),
+                )
+                .child(Self::stage_metrics(
+                    theme::ACCENT,
+                    [
+                        ("真实触发", thousands(stats.hits)),
+                        ("最近一次", stats.last.unwrap_or_else(|| "—".into())),
+                    ],
+                ))
                 .into_any_element(),
             div()
                 .flex()
-                .gap(px(8.))
-                .child(mini("真实触发", stats.hits.to_string()))
-                .child(mini("最近一次", stats.last.unwrap_or_else(|| "—".into())))
+                .flex_col()
+                .gap(px(12.))
+                .child(self.trigger_tools(cx))
+                .when_some(conflict.clone(), |el, conflict| {
+                    el.child(
+                        div()
+                            .flex()
+                            .gap(px(10.))
+                            .p(px(12.))
+                            .rounded(px(12.))
+                            .bg(theme::tint_fill(theme::DANGER, 0.14, 0.04))
+                            .border_1()
+                            .border_color(hsla(theme::DANGER, 0.32))
+                            .child(icon(Icon::Alert, 15., theme::DANGER))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(theme::DANGER_TEXT))
+                                    .child(format!(
+                                        "{}：{}{}",
+                                        conflict.title,
+                                        conflict.detail,
+                                        conflict
+                                            .other
+                                            .and_then(|other| self.binding(other))
+                                            .map(|other| format!(
+                                                "（{}，#{}）",
+                                                other.message, other.spec.id
+                                            ))
+                                            .unwrap_or_default()
+                                    )),
+                            ),
+                    )
+                })
                 .into_any_element(),
-            self.message_field(
-                "提示消息",
-                Some("触发时在屏幕右下角显示 4 秒，不抢占当前窗口焦点。"),
-            )
-            .into_any_element(),
-            div()
-                .flex()
-                .gap(px(8.))
-                .child(
-                    button("save", "保存消息", Tone::Primary, changed)
-                        .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-                )
-                .child(
-                    icon_button("preview", Icon::Play, "测试提示", Tone::Secondary, true)
-                        .px(px(12.))
-                        .on_click(cx.listener(|this, _, _, cx| this.preview_draft(cx))),
-                )
+            self.trigger_fields(&binding.spec, cx).into_any_element(),
+            self.action_fields(Some("作为面板卡片名称；仅提示动作会显示 4 秒浮层。"), cx)
                 .into_any_element(),
-            div().flex_1().into_any_element(),
             div()
-                .pt(px(12.))
-                .border_t_1()
-                .border_color(rgb(theme::DIVIDER))
                 .flex()
                 .items_center()
-                .justify_between()
-                .child(caption("测试提示不计入触发次数"))
+                .gap(px(10.))
+                .px(px(12.))
+                .py(px(10.))
+                .rounded(px(10.))
+                .bg(rgb(0x0c0e14))
+                .border_1()
+                .border_color(rgb(theme::BORDER))
+                .child(icon(Icon::Pulse, 14., theme::TEXT_DIM))
                 .child(
-                    small(if confirming {
-                        button("delete", "再次点击确认删除", Tone::DangerSolid, true)
-                    } else {
-                        icon_button("delete", Icon::Trash, "删除触发器", Tone::Danger, true)
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| this.remove_rule(id, cx))),
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(12.))
+                        .text_color(rgb(theme::TEXT_MUTED))
+                        .child(action_status),
                 )
                 .into_any_element(),
-        ]
+            caption("测试提示不计入触发次数。").into_any_element(),
+        ];
+        let footer = div()
+            .flex()
+            .gap(px(8.))
+            .child(
+                icon_button(
+                    "save",
+                    Icon::Check,
+                    "保存动作",
+                    Tone::Primary,
+                    changed && conflict.is_none() && draft_available,
+                )
+                .flex_1()
+                .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+            )
+            .child(
+                icon_button("preview", Icon::Play, "测试提示", Tone::Secondary, true)
+                    .on_click(cx.listener(|this, _, _, cx| this.preview_draft(cx))),
+            )
+            .child(
+                if confirming {
+                    button("delete", "确认删除", Tone::DangerSolid, true)
+                } else {
+                    glyph_button("delete", Icon::Trash, Tone::Danger, true)
+                        .border_1()
+                        .border_color(hsla(theme::DANGER, 0.3))
+                }
+                .on_click(cx.listener(move |this, _, _, cx| this.remove_rule(id, cx))),
+            )
+            .into_any_element();
+        (body, Some(footer))
     }
 
-    fn render_inspector(&self, cx: &mut Context<Self>) -> Div {
-        let children = if self.recording {
+    fn render_inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (body, footer) = if self.recording {
             self.render_recording()
         } else if let Some(spec) = self.pending.clone() {
             self.render_captured(&spec, cx)
         } else if let Some(binding) = self.selected.and_then(|id| self.binding(id)).cloned() {
             self.render_edit(&binding, cx)
         } else {
-            vec![
-                Self::inspector_header("触发器详情", div()).into_any_element(),
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(12.))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .text_color(rgb(theme::TEXT_MUTED))
-                            .child("选择一个触发器查看详情，或录制新组合。"),
-                    )
-                    .child(
-                        icon_button(
-                            "record-empty",
-                            Icon::Record,
-                            "录制组合",
-                            Tone::Primary,
-                            self.listener() == Listener::Listening,
+            (
+                vec![
+                    Self::inspector_header("触发器详情", div()).into_any_element(),
+                    div()
+                        .pt(px(120.))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(14.))
+                        .child(
+                            icon_tile(Icon::Keyboard, theme::ACCENT, 56.).shadow(theme::glow(
+                                theme::ACCENT,
+                                0.2,
+                                24.,
+                            )),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| this.start_recording(cx))),
-                    )
-                    .into_any_element(),
-            ]
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(rgb(theme::TEXT_MUTED))
+                                .child("选择一个触发器查看详情，或录制新组合。"),
+                        )
+                        .child(
+                            icon_button(
+                                "record-empty",
+                                Icon::Record,
+                                "录制组合",
+                                Tone::Primary,
+                                self.listener() == Listener::Listening,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.start_recording(cx))),
+                        )
+                        .into_any_element(),
+                ],
+                None,
+            )
         };
         div()
-            .w(px(340.))
+            .w(px(360.))
             .flex_none()
-            .h_full()
+            .mt(px(2.))
+            .mr(px(14.))
+            .mb(px(14.))
+            .rounded(px(18.))
             .bg(rgb(theme::INSPECTOR))
-            .border_l_1()
-            .border_color(rgb(theme::DIVIDER))
-            .pt(px(12.))
-            .pb(px(18.))
-            .px(px(20.))
+            .border_1()
+            .border_color(rgb(theme::BORDER))
+            .shadow(theme::lift(0.6))
+            .overflow_hidden()
             .flex()
             .flex_col()
-            .gap(px(16.))
-            .children(children)
+            .child(
+                div()
+                    .id("inspector")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p(px(18.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(18.))
+                    .children(body.into_iter().map(|part| div().flex_none().child(part))),
+            )
+            .when_some(footer, |el, footer| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .px(px(16.))
+                        .py(px(14.))
+                        .rounded_b(px(17.))
+                        .bg(rgb(0x0c0e14))
+                        .border_t_1()
+                        .border_color(rgb(theme::DIVIDER))
+                        .child(footer),
+                )
+            })
     }
 
     // ───────────────────────────── 记录与诊断 ─────────────────────────────
 
     fn render_history(&self, cx: &mut Context<Self>) -> Div {
         let filter = self.history_filter;
-        let segment = |id: &'static str, label: &'static str, value: HistoryFilter| {
-            let active = filter == value;
-            div()
-                .id(id)
-                .h(px(26.))
-                .px(px(12.))
-                .rounded(px(6.))
-                .flex()
-                .items_center()
-                .text_size(px(12.))
-                .cursor_pointer()
-                .text_color(rgb(if active {
-                    theme::TEXT
-                } else {
-                    theme::TEXT_MUTED
-                }))
-                .when(active, |el| el.bg(rgb(0x262c36)))
-                .child(label)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.history_filter = value;
-                    cx.notify();
-                }))
+        let tab = |id: &'static str, label: &'static str, value: HistoryFilter| {
+            segment(id, label, filter == value).on_click(cx.listener(move |this, _, _, cx| {
+                this.history_filter = value;
+                cx.notify();
+            }))
         };
         let mut list = div()
             .id("history-list")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .rounded(px(10.))
+            .rounded(px(14.))
             .border_1()
             .border_color(rgb(theme::BORDER))
-            .bg(rgb(theme::INSPECTOR));
+            .bg(rgb(theme::ROW));
         let mut shown = 0;
         for hit in self.hits.iter().filter(|hit| match filter {
             HistoryFilter::All => true,
-            HistoryFilter::Real => !hit.preview,
-            HistoryFilter::Preview => hit.preview,
+            HistoryFilter::Real => hit.source == HitSource::Input,
+            HistoryFilter::Panel => matches!(hit.source, HitSource::Panel | HitSource::Wheel),
+            HistoryFilter::Preview => hit.source == HitSource::Preview,
         }) {
             shown += 1;
-            let (tag, tag_bg, tag_fg) = if hit.preview {
-                ("测试", theme::SURFACE_HI, theme::TEXT_MUTED)
-            } else {
-                ("触发", theme::ACCENT_DEEP, theme::ACCENT)
+            let (tag, color) = match hit.source {
+                HitSource::Preview => ("测试", theme::TEXT_MUTED),
+                HitSource::Panel => ("面板", theme::RECORD),
+                HitSource::Wheel => ("轮盘", theme::VIOLET),
+                HitSource::Input => ("组合", theme::ACCENT),
             };
             list = list.child(
                 div()
@@ -1738,7 +4113,8 @@ impl Workspace {
                     .px(px(16.))
                     .py(px(11.))
                     .border_b_1()
-                    .border_color(rgb(0x1b1f26))
+                    .border_color(rgb(theme::DIVIDER))
+                    .hover(|s| s.bg(rgb(0x131620)))
                     .child(
                         div()
                             .w(px(64.))
@@ -1748,20 +4124,8 @@ impl Workspace {
                             .text_color(rgb(theme::TEXT_DIM))
                             .child(hit.time.clone()),
                     )
-                    .child(
-                        div()
-                            .w(px(40.))
-                            .flex_none()
-                            .py(px(2.))
-                            .rounded(px(5.))
-                            .bg(rgb(tag_bg))
-                            .text_color(rgb(tag_fg))
-                            .text_size(px(11.))
-                            .flex()
-                            .justify_center()
-                            .child(tag),
-                    )
-                    .child(div().w(px(250.)).flex_none().overflow_hidden().child(
+                    .child(div().w(px(48.)).flex_none().child(pill(tag, color)))
+                    .child(div().w(px(230.)).flex_none().overflow_hidden().child(
                         if hit.caps.is_empty() {
                             caption("界面测试")
                         } else {
@@ -1782,78 +4146,150 @@ impl Workspace {
         if shown == 0 {
             list = list.child(
                 div()
-                    .py(px(48.))
+                    .py(px(56.))
                     .flex()
-                    .justify_center()
-                    .text_size(px(13.))
-                    .text_color(rgb(theme::TEXT_DIM))
-                    .child("按下一个组合，这里会出现触发记录。"),
+                    .flex_col()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(icon_tile(Icon::Clock, theme::VIOLET, 48.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(rgb(theme::TEXT_DIM))
+                            .child("按下一个组合，这里会出现触发记录。"),
+                    ),
             );
         }
         div()
             .flex_1()
             .min_w_0()
             .h_full()
-            .pt(px(12.))
+            .pt(px(6.))
             .pb(px(16.))
-            .px(px(24.))
+            .pl(px(28.))
+            .pr(px(24.))
             .flex()
             .flex_col()
-            .gap(px(14.))
+            .gap(px(16.))
             .child(
                 div()
                     .flex()
                     .items_end()
                     .justify_between()
                     .gap(px(12.))
-                    .child(heading(
-                        "触发记录",
-                        format!(
-                            "本次运行真实触发 {} 次，测试提示单独标记，不计入次数",
-                            self.trigger_count
-                        ),
-                    ))
+                    .child(heading("触发记录", "仅保留本次运行期间的最近 30 条"))
                     .child(
-                        div()
-                            .flex()
-                            .p(px(3.))
-                            .rounded(px(8.))
-                            .bg(rgb(theme::SURFACE))
-                            .border_1()
-                            .border_color(rgb(0x22272f))
-                            .child(segment("filter-all", "全部", HistoryFilter::All))
-                            .child(segment("filter-real", "触发", HistoryFilter::Real))
-                            .child(segment("filter-preview", "测试", HistoryFilter::Preview)),
+                        theme::segments()
+                            .child(tab("filter-all", "全部", HistoryFilter::All))
+                            .child(tab("filter-real", "组合", HistoryFilter::Real))
+                            .child(tab("filter-panel", "面板 / 轮盘", HistoryFilter::Panel))
+                            .child(tab("filter-preview", "测试", HistoryFilter::Preview)),
                     ),
             )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(8.))
+                    .child(chip(
+                        Icon::Keyboard,
+                        theme::ACCENT,
+                        thousands(self.trigger_count),
+                        "组合触发",
+                    ))
+                    .child(chip(
+                        Icon::Panel,
+                        theme::RECORD,
+                        thousands(self.panel_click_count),
+                        "面板点击",
+                    ))
+                    .child(chip(
+                        Icon::Play,
+                        theme::TEXT_MUTED,
+                        self.hits
+                            .iter()
+                            .filter(|hit| hit.source == HitSource::Preview)
+                            .count()
+                            .to_string(),
+                        "测试提示",
+                    )),
+            )
             .child(list)
-            .child(caption("保留最近 30 条，仅在本次运行期间。"))
+            .when(!self.action_log.is_empty(), |el| {
+                el.child(
+                    card()
+                        .p(px(14.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .child(section_title("动作执行记录（含测试动作，最近 30 条）"))
+                        .child(
+                            div()
+                                .id("action-log")
+                                .max_h(px(160.))
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.))
+                                .children(self.action_log.iter().map(|line| {
+                                    div()
+                                        .font_family(theme::MONO_FONT)
+                                        .text_size(px(11.5))
+                                        .text_color(rgb(theme::TEXT_DIM))
+                                        .child(line.clone())
+                                })),
+                        ),
+                )
+            })
     }
 
     fn render_diagnostics(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let d = &self.diagnostics;
+        let hold_outcome = |outcome: HoldOutcome| match outcome {
+            HoldOutcome::Matched => "已命中",
+            HoldOutcome::ShortRelease => "未满阈值松开",
+            HoldOutcome::Movement => "移动取消",
+            HoldOutcome::FocusChanged => "切窗取消",
+            HoldOutcome::OtherButton => "其他按键打断",
+            HoldOutcome::Wheel => "滚轮打断",
+            HoldOutcome::Configuration => "配置变更取消",
+            HoldOutcome::Paused => "暂停取消",
+            HoldOutcome::Recording => "录制取消",
+            HoldOutcome::Recovery => "恢复或错误取消",
+        };
+        let rejected = match d.last_hold_start_rejection {
+            Some(HoldStartRejection::Paused) => "监听暂停",
+            Some(HoldStartRejection::Recording) => "正在录制",
+            Some(HoldStartRejection::ExtraHeld) => "其他按键仍按住，组合未匹配",
+            Some(HoldStartRejection::ExistingPress) => "已有该键按压，尚未收到释放",
+            Some(HoldStartRejection::Unmatched) => "组合未匹配",
+            None => "无",
+        };
         let age = |ms: Option<u64>| {
             ms.map(|ms| format!("最近 {:.1} 秒前", ms as f64 / 1000.))
                 .unwrap_or_else(|| "尚无事件".into())
         };
         let held = caps_for_buttons(&d.held);
-        let info = |title: &'static str| {
-            div()
+        let info = |glyph: Icon, tint: u32, title: &'static str| {
+            card()
                 .flex_1()
                 .min_w_0()
                 .p(px(16.))
-                .rounded(px(10.))
-                .bg(rgb(theme::INSPECTOR))
-                .border_1()
-                .border_color(rgb(theme::BORDER))
                 .flex()
                 .flex_col()
                 .gap(px(10.))
                 .child(
                     div()
-                        .text_size(px(14.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(title),
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(icon_tile(glyph, tint, 28.))
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(title),
+                        ),
                 )
         };
         let para = |text: &'static str| {
@@ -1862,15 +4298,12 @@ impl Workspace {
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child(text)
         };
-        div()
-            .id("diagnostics")
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .overflow_y_scroll()
-            .pt(px(12.))
-            .pb(px(16.))
-            .px(px(24.))
+        let latency = self.last_panel_latency.as_ref();
+        let page = div()
+            .pt(px(6.))
+            .pb(px(18.))
+            .pl(px(28.))
+            .pr(px(24.))
             .flex()
             .flex_col()
             .gap(px(16.))
@@ -1886,6 +4319,8 @@ impl Workspace {
                         "当前监听",
                         format!("#{}", self.listener_generation),
                         Some(("重建后加一".into(), theme::TEXT_FAINT)),
+                        Icon::Refresh,
+                        theme::ACCENT,
                     ))
                     .child(stat(
                         "键盘回调",
@@ -1898,11 +4333,15 @@ impl Workspace {
                                 theme::TEXT_FAINT
                             },
                         )),
+                        Icon::Keyboard,
+                        theme::ACCENT_2,
                     ))
                     .child(stat(
                         "鼠标回调",
                         thousands(d.mouse_events),
                         Some((age(d.last_mouse_ms), theme::TEXT_FAINT)),
+                        Icon::Mouse,
+                        theme::VIOLET,
                     )),
             )
             .child(
@@ -1913,23 +4352,31 @@ impl Workspace {
                         "外部模拟输入",
                         thousands(d.external_injected),
                         Some(("不触发、不参与录制".into(), theme::TEXT_FAINT)),
+                        Icon::Terminal,
+                        theme::RECORD,
                     ))
                     .child(
                         card()
                             .flex_grow()
                             .flex_basis(px(0.))
                             .min_w_0()
-                            .px(px(16.))
-                            .py(px(14.))
+                            .p(px(16.))
                             .flex()
                             .flex_col()
                             .gap(px(8.))
                             .flex_1()
                             .child(
                                 div()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(theme::TEXT_DIM))
-                                    .child("当前按住"),
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(10.))
+                                    .child(icon_tile(Icon::Bolt, theme::PINK, 28.))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(rgb(theme::TEXT_DIM))
+                                            .child("当前按住"),
+                                    ),
                             )
                             .child(if held.is_empty() {
                                 div()
@@ -1950,12 +4397,180 @@ impl Workspace {
                             ))),
                     ),
             )
+            .child(section_title("长按与面板耗时"))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(10.))
+                    .child(stat(
+                        "最近长按判定",
+                        d.last_hold_elapsed_ms
+                            .map(|ms| format!("{ms} ms"))
+                            .unwrap_or_else(|| "—".into()),
+                        Some((
+                            match (d.last_hold_threshold_ms, d.last_hold_lateness_ms) {
+                                (Some(threshold), Some(late)) => format!(
+                                    "阈值 {threshold}ms · 超出 {late}ms · 最多超出 {}ms",
+                                    self.max_hold_lateness_ms
+                                ),
+                                (Some(threshold), None) => {
+                                    format!("阈值 {threshold}ms · 提前松开或取消")
+                                }
+                                _ => "尚无长按记录".into(),
+                            },
+                            theme::TEXT_DIM,
+                        )),
+                        Icon::Clock,
+                        theme::VIOLET,
+                    ))
+                    .child(stat(
+                        "上次长按至面板提交",
+                        latency
+                            .map(|latency| format!("{} ms", latency.total_ms))
+                            .unwrap_or_else(|| "—".into()),
+                        Some((
+                            latency
+                                .map(|latency| {
+                                    format!(
+                                        "判定 {}ms · 阈值 {}ms · 最长 {}ms",
+                                        latency.held_ms,
+                                        latency.threshold_ms,
+                                        self.max_panel_total_ms
+                                    )
+                                })
+                                .unwrap_or_else(|| "尚无长按打开面板".into()),
+                            theme::TEXT_DIM,
+                        )),
+                        Icon::Panel,
+                        theme::ACCENT,
+                    ))
+                    .child(stat(
+                        "判定后的界面耗时",
+                        latency
+                            .map(|latency| {
+                                format!("{} ms", latency.queue_ms.saturating_add(latency.display_ms))
+                            })
+                            .unwrap_or_else(|| "—".into()),
+                        Some((
+                            latency
+                                .map(|latency| {
+                                    format!(
+                                        "通知 {}ms · 显示 {}ms",
+                                        latency.queue_ms, latency.display_ms
+                                    )
+                                })
+                                .unwrap_or_else(|| "不含显示器扫描输出".into()),
+                            theme::TEXT_DIM,
+                        )),
+                        Icon::Pulse,
+                        theme::ACCENT_2,
+                    )),
+            )
+            .child(caption(format!(
+                "计时方式：{}。长按命中 {} · 移动取消 {} · 切窗取消 {} · 短按 / 其他取消 {}；仅记录耗时与次数，不保存原始输入。",
+                if d.hold_timer_backend.is_empty() {
+                    "等待监听就绪"
+                } else {
+                    d.hold_timer_backend
+                },
+                d.hold_triggered,
+                d.hold_cancelled_movement,
+                d.hold_cancelled_focus,
+                d.hold_cancelled_other
+            )))
+            .child(caption(format!(
+                "Hook 墙钟耗时最大值：本体 {:.2}ms（慢 {} 次）· 下游链 {:.2}ms（慢 {} 次）· 后台补发 {:.2}ms（慢 {} 次）；慢指超过 50ms，补发独立执行。",
+                d.max_hook_work_us as f64 / 1000.,
+                d.slow_hook_work_count,
+                d.max_hook_chain_us as f64 / 1000.,
+                d.slow_hook_chain_count,
+                d.max_replay_us as f64 / 1000.,
+                d.slow_replay_count
+            )))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(10.))
+                    .child(
+                        info(Icon::Clock, theme::VIOLET, "最近 8 次长按结果")
+                            .child(caption(format!(
+                                "按下 {} · 释放 {} · 开始计时 {} · 未开始 {} · 重复鼠标按下 {}",
+                                d.hold_terminal_downs,
+                                d.hold_terminal_ups,
+                                d.hold_started,
+                                d.hold_not_started,
+                                d.hold_terminal_duplicate_downs
+                            )))
+                            .child(caption(format!("最近未开始原因：{rejected}")))
+                            .when(d.recent_hold_attempts.is_empty(), |el| {
+                                el.child(caption("尚无长按结果"))
+                            })
+                            .children(d.recent_hold_attempts.iter().rev().map(|attempt| {
+                                let matched = attempt.outcome == HoldOutcome::Matched;
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(8.))
+                                    .px(px(10.))
+                                    .py(px(5.))
+                                    .rounded(px(8.))
+                                    .bg(rgb(0x0c0e14))
+                                    .text_size(px(12.))
+                                    .text_color(rgb(if matched {
+                                        theme::ACCENT
+                                    } else {
+                                        theme::TEXT_MUTED
+                                    }))
+                                    .child(hold_outcome(attempt.outcome))
+                                    .child(
+                                        div()
+                                            .font_family(theme::MONO_FONT)
+                                            .text_size(px(11.5))
+                                            .child(format!(
+                                                "{} / {} ms",
+                                                attempt.elapsed_ms, attempt.threshold_ms
+                                            )),
+                                    )
+                            })),
+                    )
+                    .child(
+                        info(Icon::Panel, theme::ACCENT, "面板显示与收起")
+                            .child(caption(format!(
+                                "呼出请求 {} · 原生提交 {} · 跳过 {} · 失败 {}",
+                                self.panel_show_stats.requested,
+                                self.panel_show_stats.submitted,
+                                self.panel_show_stats.skipped,
+                                self.panel_show_stats.failed
+                            )))
+                            .child(caption(format!(
+                                "呈现请求 {} · 收起 {} · 其中失焦收起 {}",
+                                self.panel_diagnostics.present_count,
+                                self.panel_diagnostics.hide_count,
+                                self.panel_diagnostics.focus_dismiss_count
+                            )))
+                            .child(caption(format!(
+                                "最近显示：{}",
+                                if self.panel_show_stats.last.is_empty() {
+                                    "尚未呼出"
+                                } else {
+                                    self.panel_show_stats.last
+                                }
+                            )))
+                            .child(caption(format!(
+                                "最近面板事件：{}",
+                                self.panel_diagnostics.last_event
+                            )))
+                            .child(caption("原生提交表示显示调用成功返回，不代表屏幕像素已亮起。")),
+                    ),
+            )
             .child(
                 div()
                     .flex()
                     .gap(px(10.))
                     .child(
-                        info("偶发失效时")
+                        info(Icon::Refresh, theme::ACCENT_2, "偶发失效时")
                             .child(para("1. 松开所有按键和鼠标按钮。"))
                             .child(para(
                                 "2. 点击“重建监听”，旧监听会先收尾已消费的按压。",
@@ -1963,21 +4578,21 @@ impl Workspace {
                             .child(para("3. 触发器、暂停状态和未保存的录制结果都会保留。"))
                             .child(
                                 div().flex().child(
-                                    icon_button(
+                                    small(icon_button(
                                         "diag-rebuild",
                                         Icon::Refresh,
                                         "重建监听",
                                         Tone::Secondary,
                                         true,
-                                    )
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.rebuild_backend(cx)),
-                                        ),
+                                    ))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.rebuild_backend(cx)),
+                                    ),
                                 ),
                             ),
                     )
                     .child(
-                        info("与其他输入工具并用")
+                        info(Icon::Layers, theme::RECORD, "与其他输入工具并用")
                             .child(para(
                                 "Windows 按“后安装先处理”的顺序调用低级 Hook。其他软件若在上游拦截 CapsLock、侧键或滚轮，这里可能收不到原输入。",
                             ))
@@ -1985,7 +4600,14 @@ impl Workspace {
                                 "程序不会定时重装 Hook 抢占链首；仅凭漏触发无法判断具体来源。",
                             )),
                     ),
-            )
+            );
+        div()
+            .id("diagnostics")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_y_scroll()
+            .child(page)
     }
 
     /// 标题栏高度与系统按钮宽度（逻辑像素），并同步按钮下方的底色。
@@ -1993,14 +4615,9 @@ impl Workspace {
         let Some(hwnd) = self.title_bar else {
             return (0., 0.);
         };
-        let color = if self.page == Page::Triggers {
-            theme::INSPECTOR
-        } else {
-            theme::BACKGROUND
-        };
-        if self.caption_color != Some(color) {
-            omnitrigger_windows::set_caption_color(hwnd, color);
-            self.caption_color = Some(color);
+        if self.caption_color != Some(theme::BACKGROUND) {
+            omnitrigger_windows::set_caption_color(hwnd, theme::BACKGROUND);
+            self.caption_color = Some(theme::BACKGROUND);
         }
         let scale = window.scale_factor();
         omnitrigger_windows::caption_buttons(hwnd)
@@ -2008,30 +4625,15 @@ impl Workspace {
             .unwrap_or((32., 138.))
     }
 
-    /// 页面各栏的底色延伸进标题栏，右上角留空给系统按钮。
+    /// 主区底色延伸进标题栏，右上角留空给系统按钮。
     fn render_title_bar(&self, height: f32, buttons_width: f32) -> Div {
-        let reserve = div().flex_none().w(px(buttons_width)).h_full();
-        let band = div()
+        div()
             .flex_none()
             .h(px(height))
             .flex()
             .window_control_area(WindowControlArea::Drag)
-            .child(div().flex_1().h_full().bg(rgb(theme::BACKGROUND)));
-        if self.page == Page::Triggers {
-            band.child(
-                div()
-                    .w(px(340.))
-                    .flex_none()
-                    .h_full()
-                    .border_l_1()
-                    .border_color(rgb(theme::DIVIDER))
-                    .flex()
-                    .child(div().flex_1().h_full().bg(rgb(theme::INSPECTOR)))
-                    .child(reserve),
-            )
-        } else {
-            band.child(reserve)
-        }
+            .child(div().flex_1().h_full().bg(rgb(theme::BACKGROUND)))
+            .child(div().flex_none().w(px(buttons_width)).h_full())
     }
 
     fn render_status_bar(&self) -> Div {
@@ -2052,10 +4654,23 @@ impl Workspace {
                 .collect::<Vec<_>>()
                 .join(" + ")
         };
+        let metric = |glyph: Icon, value: String| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .child(icon(glyph, 12., theme::TEXT_FAINT))
+                .child(
+                    div()
+                        .font_family(theme::MONO_FONT)
+                        .text_color(rgb(theme::TEXT_MUTED))
+                        .child(value),
+                )
+        };
         div()
             .h(px(30.))
             .flex_none()
-            .px(px(16.))
+            .px(px(14.))
             .flex()
             .items_center()
             .justify_between()
@@ -2063,7 +4678,7 @@ impl Workspace {
             .bg(rgb(theme::SIDEBAR))
             .border_t_1()
             .border_color(rgb(theme::DIVIDER))
-            .text_size(px(12.))
+            .text_size(px(11.5))
             .text_color(rgb(theme::TEXT_DIM))
             .child(
                 div()
@@ -2071,26 +4686,36 @@ impl Workspace {
                     .items_center()
                     .gap(px(8.))
                     .min_w_0()
-                    .child(dot(color, 6.))
+                    .child(dot(color, 6.).shadow(theme::glow(color, 0.8, 6.)))
                     .child(div().truncate().child(self.status.clone())),
             )
             .child(
                 div()
                     .flex()
                     .flex_none()
+                    .items_center()
                     .gap(px(14.))
-                    .text_size(px(11.))
-                    .text_color(rgb(theme::TEXT_FAINT))
-                    .child(format!(
-                        "键盘 {}",
-                        thousands(self.diagnostics.keyboard_events)
+                    .child(metric(
+                        Icon::Keyboard,
+                        thousands(self.diagnostics.keyboard_events),
                     ))
-                    .child(format!("鼠标 {}", thousands(self.diagnostics.mouse_events)))
-                    .child(format!(
-                        "模拟 {}",
-                        thousands(self.diagnostics.external_injected)
+                    .child(metric(
+                        Icon::Mouse,
+                        thousands(self.diagnostics.mouse_events),
                     ))
-                    .child(format!("按住 {held}")),
+                    .child(metric(
+                        Icon::Terminal,
+                        thousands(self.diagnostics.external_injected),
+                    ))
+                    .child(div().w(px(1.)).h(px(12.)).bg(rgb(theme::BORDER_MID)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .child("按住")
+                            .child(div().text_color(rgb(theme::TEXT_SOFT)).child(held)),
+                    ),
             )
     }
 }
@@ -2098,24 +4723,39 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (title_height, buttons_width) = self.caption_area(window);
-        let main = match self.page {
+        let page = match self.page {
+            Page::Actions => self.render_actions(window, cx).into_any_element(),
+            Page::Wheels => self.render_wheels(cx).into_any_element(),
+            Page::Presets => self.render_presets(cx).into_any_element(),
             Page::Triggers => div()
                 .flex_1()
                 .min_w_0()
                 .flex()
                 .child(self.render_list(cx))
-                .child(self.render_inspector(cx)),
-            Page::History => div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .child(self.render_history(cx)),
-            Page::Diagnostics => div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .child(self.render_diagnostics(cx)),
+                .child(self.render_inspector(cx))
+                .into_any_element(),
+            Page::History => self.render_history(cx).into_any_element(),
+            Page::Diagnostics => self.render_diagnostics(cx).into_any_element(),
         };
+        // 柔光只放在主区下半部，不会伸到右上角的系统按钮区域。
+        let main = div()
+            .flex_1()
+            .min_h_0()
+            .relative()
+            .overflow_hidden()
+            .bg(rgb(theme::BACKGROUND))
+            .flex()
+            .child(
+                theme::aurora(theme::ACCENT_2, 0.06, 220.)
+                    .right(px(170.))
+                    .bottom(px(30.)),
+            )
+            .child(
+                theme::aurora(theme::VIOLET, 0.05, 200.)
+                    .left(px(220.))
+                    .bottom(px(-80.)),
+            )
+            .child(div().flex_1().min_w_0().flex().child(page));
         // 根节点不铺底色：系统标题按钮绘制在界面下方，需透出。
         div()
             .size_full()
@@ -2139,7 +4779,7 @@ impl Render for Workspace {
                             .when(title_height > 0., |el| {
                                 el.child(self.render_title_bar(title_height, buttons_width))
                             })
-                            .child(main.min_h_0().bg(rgb(theme::BACKGROUND))),
+                            .child(main),
                     ),
             )
             .child(self.render_status_bar())
@@ -2149,36 +4789,39 @@ impl Render for Workspace {
 struct Toast {
     caps: Vec<Cap>,
     message: String,
-    preview: bool,
+    source: HitSource,
     shown: Instant,
 }
 
 impl Render for Toast {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let progress = (1. - self.shown.elapsed().as_secs_f32() / TOAST_SECONDS).clamp(0., 1.);
+        let preview = self.source == HitSource::Preview;
         let header = div()
             .flex()
             .items_center()
             .gap(px(8.))
-            .child(logo(16.))
+            .child(logo(18.))
             .child(
                 div()
                     .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(theme::TEXT_MUTED))
                     .child("OmniTrigger"),
             )
-            .when(self.preview, |el| {
-                el.child(
-                    div()
-                        .px(px(6.))
-                        .rounded(px(4.))
-                        .bg(rgb(theme::SURFACE_HI))
-                        .border_1()
-                        .border_color(rgb(theme::BORDER_MID))
-                        .text_size(px(11.))
-                        .text_color(rgb(theme::TEXT_MUTED))
-                        .child("测试"),
-                )
+            .when(self.source != HitSource::Input, |el| {
+                el.child(pill(
+                    match self.source {
+                        HitSource::Panel => "面板",
+                        HitSource::Wheel => "轮盘",
+                        _ => "测试",
+                    },
+                    if self.source == HitSource::Panel {
+                        theme::RECORD
+                    } else {
+                        theme::TEXT_MUTED
+                    },
+                ))
             })
             .child(div().flex_1())
             .when(!self.caps.is_empty(), |el| {
@@ -2189,54 +4832,57 @@ impl Render for Toast {
             .h(px(TOAST_HEIGHT))
             .font_family(theme::UI_FONT)
             .text_color(rgb(theme::TEXT))
-            .rounded(px(12.))
-            .bg(rgb(0x15181e))
+            .rounded(px(14.))
+            .bg(theme::gradient(
+                160.,
+                hsla(0x171b28, 1.),
+                hsla(0x0c0e15, 1.),
+            ))
             .border_1()
-            .border_color(rgb(if self.preview {
-                theme::BORDER_MID
+            .border_color(if preview {
+                hsla(theme::BORDER_MID, 1.)
             } else {
-                0x2f4a3d
-            }))
-            .overflow_hidden()
+                hsla(theme::ACCENT, 0.42)
+            })
+            .px(px(16.))
+            .pt(px(13.))
+            .pb(px(12.))
             .flex()
             .flex_col()
+            .gap(px(8.))
+            .child(header)
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
-                    .px(px(16.))
-                    .pt(px(14.))
-                    .pb(px(12.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.))
-                    .child(header)
-                    .child(
-                        div()
-                            .text_size(px(15.))
-                            .line_height(px(22.))
-                            .line_clamp(2)
-                            .child(self.message.clone()),
-                    ),
+                    .text_size(px(15.))
+                    .line_height(px(22.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .line_clamp(2)
+                    .child(self.message.clone()),
             )
             .child(
                 div()
-                    .h(px(2.))
+                    .h(px(3.))
                     .flex_none()
-                    .bg(rgb(if self.preview {
-                        theme::DIVIDER
-                    } else {
-                        theme::ACCENT_DEEP
-                    }))
+                    .rounded(px(2.))
+                    .bg(hsla(
+                        if preview { theme::PLUS } else { theme::ACCENT },
+                        0.14,
+                    ))
                     .child(
                         div()
                             .h_full()
                             .w(gpui::relative(progress))
-                            .bg(rgb(if self.preview {
-                                theme::PLUS
-                            } else {
-                                theme::ACCENT
-                            })),
+                            .rounded(px(2.))
+                            .when(preview, |el| el.bg(rgb(theme::PLUS)))
+                            .when(!preview, |el| {
+                                el.bg(theme::accent_fill(90.)).shadow(theme::glow(
+                                    theme::ACCENT,
+                                    0.6,
+                                    6.,
+                                ))
+                            }),
                     ),
             )
     }
@@ -2264,6 +4910,51 @@ fn smoke_test() -> Result<(), String> {
 
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
+    if let Some(index) = arguments.iter().position(|argument| argument == "--config") {
+        let result = arguments
+            .get(index + 1)
+            .filter(|path| !path.starts_with("--"))
+            .ok_or_else(|| "--config 后需要配置文件路径。".to_string())
+            .and_then(|path| settings::use_path(path.into()));
+        if let Err(error) = result {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--check-config")
+    {
+        match settings::load().and_then(|bindings| {
+            settings::validate(&bindings)?;
+            let wheels = Wheels::load(&settings::path())?;
+            for binding in &bindings {
+                if let ActionSpec::ShowWheel(reference) = &binding.action {
+                    if !wheels
+                        .wheels
+                        .iter()
+                        .any(|wheel| wheel.id == reference.wheel_id)
+                    {
+                        return Err(format!(
+                            "触发器 #{} 引用的轮盘“{}”不存在。",
+                            binding.spec.id, reference.wheel_id
+                        ));
+                    }
+                }
+            }
+            Ok(bindings.len())
+        }) {
+            Ok(count) => println!(
+                "配置有效，共 {count} 条绑定：{}",
+                settings::path().display()
+            ),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if arguments.iter().any(|argument| argument == "--smoke-test") {
         if let Err(error) = smoke_test() {
             eprintln!("{error}");
@@ -2272,6 +4963,37 @@ fn main() {
         return;
     }
     let ui_smoke = arguments.iter().any(|argument| argument == "--ui-smoke");
+    let open_panel = arguments.iter().any(|argument| argument == "--panel");
+    let initial_wheel = arguments
+        .iter()
+        .position(|argument| argument == "--wheel")
+        .map(|index| {
+            arguments
+                .get(index + 1)
+                .filter(|value| !value.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| "--wheel 后需要轮盘标识。".to_string())
+        })
+        .transpose()
+        .and_then(|id| {
+            if let Some(id) = &id {
+                WheelActionRef {
+                    wheel_id: id.clone(),
+                }
+                .validate()?;
+            }
+            Ok(id)
+        });
+    let initial_wheel = match initial_wheel {
+        Ok(id) => id,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
+    let wheel_editor = arguments
+        .iter()
+        .any(|argument| argument == "--wheel-editor");
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
@@ -2298,7 +5020,18 @@ fn main() {
                         }
                         _ => Err("无法取得主窗口句柄，已改用系统标题栏。".into()),
                     };
-                    let view = cx.new(|cx| Workspace::new(cx, ui_smoke, title_bar));
+                    let main_window = gpui::Window::window_handle(&*window);
+                    let view = cx.new(|cx| {
+                        Workspace::new(
+                            cx,
+                            ui_smoke,
+                            open_panel && initial_wheel.is_none(),
+                            initial_wheel,
+                            wheel_editor,
+                            main_window,
+                            title_bar,
+                        )
+                    });
                     let closing_view = view.downgrade();
                     window.on_window_should_close(cx, move |_, cx| {
                         let _ = closing_view.update(cx, |view, _| {
