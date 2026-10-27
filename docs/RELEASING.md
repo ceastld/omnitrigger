@@ -29,7 +29,7 @@ git diff --check
 .\scripts\package-windows.ps1 -Target x86_64-pc-windows-msvc
 ```
 
-脚本使用锁定依赖和 Release 配置，从本次 Cargo 回执定位 EXE，生成 `dist\OmniTrigger-<版本>-windows-x86_64.zip` 和 `dist\SHA256SUMS.txt`。包内包含项目许可证、运行说明、发布说明及按实际目标收集的第三方许可 / 版权 / NOTICE 和机器可读清单；缺少所需许可时打包失败。许可文件来源与补充规则见 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
+脚本使用锁定依赖和 Release 配置，从本次 Cargo 回执定位 EXE，先以该 EXE 只读验证全部公开 JSON 示例，再生成 `dist\OmniTrigger-<版本>-windows-x86_64.zip` 和 `dist\SHA256SUMS.txt`。包内包含项目许可证、运行说明、发布说明及按实际目标收集的第三方许可 / 版权 / NOTICE / PATENTS 和机器可读清单；缺少所需许可正文、只有相对链接占位文本时打包失败。许可文件来源与补充规则见 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
 
 发布前核对：
 

@@ -26,6 +26,7 @@ try {
     if ($artifacts.Count -ne 1) { throw 'Cargo 未返回唯一的 Release EXE。' }
     $binaryPath = [string]$artifacts[0].executable
     if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) { throw '本次 Release EXE 不存在。' }
+    & (Join-Path $PSScriptRoot 'check-configs.ps1') -BinaryPath $binaryPath
 
     $distRoot = Join-Path $projectRoot 'dist'
     $null = New-Item -ItemType Directory -Path $distRoot -Force

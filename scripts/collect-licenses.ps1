@@ -54,6 +54,17 @@ function Copy-Notice {
     }
 }
 
+function Test-LicenseBody {
+    param([IO.FileInfo]$File)
+    # 某些发布包把符号链接展开成“../LICENSE-MIT”普通文本，不能当作许可全文。
+    if ($File.Length -lt 200) { return $false }
+    if ($File.Length -lt 1024) {
+        $text = [IO.File]::ReadAllText($File.FullName).Trim()
+        if ($text -match '^(?:\.\.?[\\/])+[^\r\n]+$') { return $false }
+    }
+    $true
+}
+
 Push-Location -LiteralPath $projectRoot
 try {
     $metadataText = & cargo metadata --locked --format-version 1 --filter-platform $Target
@@ -99,6 +110,7 @@ try {
         $packageFolder = "$($package.name)-$($package.version)"
         $packageOutput = Join-Path $outputRoot $packageFolder
         $noticeFiles = @(Get-NoticeFiles -Root $packageRoot)
+        $licensePath = $null
         if ($package.license_file) {
             $licensePath = [IO.Path]::GetFullPath((Join-Path $packageRoot $package.license_file))
             if (-not $licensePath.StartsWith($packageRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
@@ -107,13 +119,18 @@ try {
             $noticeFiles += Get-Item -LiteralPath $licensePath
         }
         $copiedFiles = @()
+        $licenseTextFiles = @()
         foreach ($file in @($noticeFiles | Sort-Object FullName -Unique)) {
             $relative = [IO.Path]::GetRelativePath($packageRoot, $file.FullName)
             $copiedFiles += Copy-Notice -Source $file.FullName -Destination (Join-Path $packageOutput $relative) -RelativePath "$packageFolder/$relative"
+            if (($file.Name -match '(?i)^(licen[cs]e|copying|unlicense)([._-].*)?$' -or $file.FullName -eq $licensePath) -and
+                (Test-LicenseBody -File $file)) {
+                $licenseTextFiles += "$packageFolder/$($relative.Replace('\', '/'))"
+            }
         }
 
         $supplement = @($overrides.packages | Where-Object { $_.name -eq $package.name -and $_.version -eq $package.version })
-        if (-not $copiedFiles.Count -and $supplement.Count -ne 1) {
+        if (-not $licenseTextFiles.Count -and $supplement.Count -ne 1) {
             throw "$($package.name) $($package.version) 没有许可全文或已审核的补充文件。"
         }
         $supplementSources = @()
@@ -128,6 +145,9 @@ try {
                 if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne $file.sha256) { throw "补充许可哈希不一致：$($file.path)" }
                 $relative = "supplement/$([IO.Path]::GetFileName($source))"
                 $copiedFiles += Copy-Notice -Source $source -Destination (Join-Path $packageOutput $relative) -RelativePath "$packageFolder/$relative"
+                if (Test-LicenseBody -File (Get-Item -LiteralPath $source)) {
+                    $licenseTextFiles += "$packageFolder/$relative"
+                }
                 $supplementSources += [ordered]@{ file = "$packageFolder/$relative"; url = $file.source_url; note = $file.note }
             }
             # 保留包本身的原始授权声明与作者信息，补充文件不改写上游声明。
@@ -138,10 +158,11 @@ try {
                 }
             }
         }
+        if (-not $licenseTextFiles.Count) { throw "$packageFolder 的文件仅含短声明或相对链接，缺少许可正文。" }
         $entries += [ordered]@{
             name = $package.name; version = $package.version; license_expression = $package.license
             authors = @($package.authors); repository = $package.repository; source = $package.source
-            files = @($copiedFiles); supplements = @($supplementSources)
+            files = @($copiedFiles); license_text_files = @($licenseTextFiles); supplements = @($supplementSources)
         }
     }
 

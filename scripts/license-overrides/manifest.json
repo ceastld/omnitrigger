@@ -270,6 +270,25 @@
       ]
     },
     {
+      "name": "sval_nested",
+      "version": "2.22.0",
+      "license_expression": "Apache-2.0 OR MIT",
+      "files": [
+        {
+          "path": "files/sval-rs-sval-02395d2e20b5/LICENSE-MIT",
+          "sha256": "5d1bf69a3993489f96efc2ec5af6252cc4f5ff524b023ab6a43a08414f23ddb0",
+          "source_url": "https://raw.githubusercontent.com/sval-rs/sval/02395d2e20b5f703ca3ac35ae13efa5ad5248258/LICENSE-MIT",
+          "note": "原发布包仅保存指向仓库根许可的相对链接文本；从对应 VCS 提交的仓库根补充完整许可，原引用与声明另行保留。"
+        },
+        {
+          "path": "files/sval-rs-sval-02395d2e20b5/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "source_url": "https://raw.githubusercontent.com/sval-rs/sval/02395d2e20b5f703ca3ac35ae13efa5ad5248258/LICENSE-APACHE",
+          "note": "原发布包仅保存指向仓库根许可的相对链接文本；从对应 VCS 提交的仓库根补充完整许可，原引用与声明另行保留。"
+        }
+      ]
+    },
+    {
       "name": "svg_fmt",
       "version": "0.4.5",
       "license_expression": "MIT/Apache-2.0",
