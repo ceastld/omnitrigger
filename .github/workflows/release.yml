@@ -148,14 +148,16 @@ jobs:
             throw '远端标签已变化，拒绝发布与标签不符的构建。'
           }
 
-          $exists = $false
-          try {
-            $null = Invoke-RestMethod -Uri "$repositoryApi/releases/tags/$escapedTag" -Headers $headers
-            $exists = $true
-          } catch {
-            if ([int]$_.Exception.Response.StatusCode -ne 404) { throw }
+          # 按标签获取的 REST 端点只返回已发布版本；列表端点也能看到有权访问的草稿。
+          # 请求失败直接中止，不能将网络或权限错误当作“尚无 Release”。
+          for ($page = 1; ; $page++) {
+            $releasePage = Invoke-RestMethod -Uri "$repositoryApi/releases?per_page=100&page=$page" -Headers $headers
+            $releases = @($releasePage)
+            if (@($releases | Where-Object tag_name -CEQ $tag).Count -ne 0) {
+              throw "标签 $tag 已有 Release（可能为草稿），不会覆盖。"
+            }
+            if ($releases.Count -lt 100) { break }
           }
-          if ($exists) { throw "标签 $tag 已有 Release（可能为草稿），不会覆盖。" }
 
           $notes = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $releaseNotes))
           $notes += "`n`n源码提交：$env:RELEASE_COMMIT`n构建记录：$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID`n"
@@ -164,9 +166,12 @@ jobs:
           gh release create $tag $archive $checksums --repo $env:GITHUB_REPOSITORY --verify-tag --draft --prerelease --latest=false --title "OmniTrigger $tag · Windows 预览版" --notes-file $notesPath
           if ($LASTEXITCODE -ne 0) { throw '创建草稿或上传资产失败；保留已有草稿供检查。' }
 
-          $release = Invoke-RestMethod -Uri "$repositoryApi/releases/tags/$escapedTag" -Headers $headers
+          # gh 会通过 GraphQL 定位尚未发布的标签，再读取真实 Release；REST tags 端点不支持草稿。
+          $releaseJson = gh release view $tag --repo $env:GITHUB_REPOSITORY --json id,isDraft,isPrerelease,assets
+          if ($LASTEXITCODE -ne 0) { throw '无法读取刚创建的草稿，停止公开。' }
+          $release = $releaseJson | ConvertFrom-Json
           $assets = @($release.assets)
-          if (-not $release.draft -or -not $release.prerelease -or $assets.Count -ne 2) {
+          if (-not $release.isDraft -or -not $release.isPrerelease -or $assets.Count -ne 2) {
             throw '草稿状态或发行资产数量异常，停止公开。'
           }
           foreach ($path in @($archive, $checksums)) {
