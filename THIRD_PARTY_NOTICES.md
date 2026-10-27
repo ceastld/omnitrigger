@@ -26,7 +26,11 @@ cargo metadata --locked --format-version 1 --filter-platform x86_64-pc-windows-m
 
 初次准备开源时，核对了锁定依赖的许可证声明与包内的许可、版权文件。GPUI 0.2.2 使用 Apache-2.0，其许可文件包含 Zed Industries, Inc. 的版权声明；部分传递依赖另有 COPYRIGHT 文件。全平台依赖中还含 MPL-2.0 的 `cbindgen`（其他平台的构建依赖），扩展平台时需重新检查。
 
-该核对不能替代针对实际发行包的完整审查。分发二进制前，应按实际目标、功能与锁定版本收集许可证全文、版权及适用通知，随包提供；依赖变更后重新生成。Apache-2.0 的发行要求见[官方许可第 4 节](https://www.apache.org/licenses/LICENSE-2.0)。
+Windows 发行流程通过 `scripts/collect-licenses.ps1` 从锁定目标的应用可达依赖图收集许可全文、版权与 NOTICE；为保守起见同时保留构建依赖通知，并收集固定 Rust 工具链提供的标准库版权和许可。ZIP 中的 `licenses/dependencies.json` 记录包版本、原始许可声明、上游来源和随包文件 SHA-256，不包含构建机绝对路径。
+
+部分上游 crate 声明了许可证但发布包未附带全文。受控补充文件的[来源说明](scripts/license-overrides/README.md)和[清单](scripts/license-overrides/manifest.json)按包版本固定来源、哈希和说明，随包保留原 Cargo / README 授权声明。优先使用该版本的上游源码文件；只有后续补充或标准许可正文时明确标注来源，不将其冒充发布包原文件，也不推断缺失的版权年份。这些第三方文件遵循各自许可证，项目 MIT 声明不替代它们。
+
+新增未审核的许可声明或缺失许可文件会使打包失败；依赖变更后需重新审核和生成。该流程不能替代针对实际发行内容的审查。Apache-2.0 的发行要求见[官方许可第 4 节](https://www.apache.org/licenses/LICENSE-2.0)。
 
 ## 图标与字体
 

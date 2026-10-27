@@ -57,6 +57,7 @@ fn pending_replay_consumes_later_discrete_edges_but_never_mouse_move() {
     let target = Button::Key(0x57);
     let other = Button::Key(0x51);
     state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+        conditions: Vec::new(),
         id: 1,
         held: vec![caps],
         activation: Activation::Press(target),
@@ -90,6 +91,7 @@ fn old_ack_cannot_clear_new_press_and_hold_action_waits_for_older_replay() {
     let (mut state, jobs, acks, events) = setup();
     let right = Button::Mouse(MouseButton::Right);
     state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+        conditions: Vec::new(),
         id: 7,
         held: vec![],
         activation: Activation::Hold {
@@ -106,13 +108,13 @@ fn old_ack_cannot_clear_new_press_and_hold_action_waits_for_older_replay() {
     state.advance_time_at(500);
     assert!(!events
         .try_iter()
-        .any(|event| matches!(event, BackendEvent::Triggered(_))));
+        .any(|event| matches!(event, BackendEvent::Triggered { .. })));
     ack(&acks, &old);
     pump(&mut state);
     assert!(state.owned_press.contains(&right));
     assert!(events
         .try_iter()
-        .any(|event| matches!(event, BackendEvent::Triggered(7))));
+        .any(|event| matches!(event, BackendEvent::Triggered { id: 7, .. })));
     assert!(input(&mut state, InputKind::Up(right), 501));
     assert!(!state.owned_press.contains(&right));
 }
@@ -133,13 +135,16 @@ fn stale_foreground_markers_are_cancelled_without_running_actions() {
         .unwrap();
     pump(&mut state);
     let first = job(&jobs);
-    state.notify_action(BackendEvent::Triggered(9));
+    state.notify_action(BackendEvent::Triggered {
+        id: 9,
+        pointer: None,
+    });
     ack(&acks, &first);
     let effects = state.replay.pump(state.foreground.wrapping_add(1));
     state.apply_replay_effects(effects);
     assert!(!events
         .try_iter()
-        .any(|event| matches!(event, BackendEvent::Triggered(_))));
+        .any(|event| matches!(event, BackendEvent::Triggered { .. })));
 }
 
 #[test]
@@ -148,6 +153,7 @@ fn paused_press_stays_owned_after_replay_and_cleanup_ack_until_physical_release(
     let caps = Button::Key(0x14);
     let other = Button::Key(0x51);
     state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+        conditions: Vec::new(),
         id: 1,
         held: vec![caps],
         activation: Activation::Press(Button::Key(0x57)),
@@ -174,4 +180,149 @@ fn paused_press_stays_owned_after_replay_and_cleanup_ack_until_physical_release(
     assert!(input(&mut state, InputKind::Up(other), 3));
     assert!(state.owned_press.is_empty());
     assert!(state.failure_draining.is_empty());
+}
+
+#[test]
+fn drag_started_triggered_and_ended_wait_for_the_previous_replay_in_order() {
+    let (mut state, jobs, acks, events) = setup();
+    let right = Button::Mouse(MouseButton::Right);
+    state.command(BackendCommand::SetBindings(vec![
+        TriggerSpec {
+            conditions: Vec::new(),
+            id: 1,
+            held: vec![],
+            activation: Activation::Hold {
+                button: right,
+                duration_ms: 300,
+            },
+        },
+        TriggerSpec {
+            conditions: Vec::new(),
+            id: 2,
+            held: vec![],
+            activation: Activation::Drag {
+                button: right,
+                min_distance_px: 18,
+                max_start_ms: 180,
+            },
+        },
+    ]));
+    assert!(input(&mut state, InputKind::Down(right), 0));
+    assert!(input(&mut state, InputKind::Up(right), 100));
+    pump(&mut state);
+    let previous = job(&jobs);
+    assert!(input(&mut state, InputKind::Down(right), 200));
+    let movement = state.input_at(None, None, Some((118, 100)), 210);
+    assert!(!state.queue_outcome(movement, None));
+    let release = state.input_at(Some(InputKind::Up(right)), None, Some((118, 100)), 220);
+    assert!(state.queue_outcome(release, Some(InputKind::Up(right))));
+    assert!(!events.try_iter().any(|event| matches!(
+        event,
+        BackendEvent::Triggered { .. } | BackendEvent::Drag { .. }
+    )));
+    ack(&acks, &previous);
+    pump(&mut state);
+    let delivered: Vec<_> = events
+        .try_iter()
+        .filter_map(|event| match event {
+            BackendEvent::Drag { event, .. } => Some(match event.phase {
+                omnitrigger_core::DragPhase::Started => "start",
+                omnitrigger_core::DragPhase::Ended => "end",
+                omnitrigger_core::DragPhase::Cancelled => "cancel",
+            }),
+            BackendEvent::Triggered { id: 2, .. } => Some("trigger"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(delivered, vec!["start", "trigger", "end"]);
+    assert!(state.owned_press.is_empty());
+}
+
+#[test]
+fn deferred_trigger_keeps_the_matching_pointer_instead_of_later_motion() {
+    let (mut state, jobs, acks, events) = setup();
+    let right = Button::Mouse(MouseButton::Right);
+    state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+        conditions: Vec::new(),
+        id: 7,
+        held: vec![],
+        activation: Activation::Hold {
+            button: right,
+            duration_ms: 300,
+        },
+    }]));
+    assert!(input(&mut state, InputKind::Down(right), 0));
+    assert!(input(&mut state, InputKind::Up(right), 100));
+    pump(&mut state);
+    let previous = job(&jobs);
+    assert!(input(&mut state, InputKind::Down(right), 200));
+    state.advance_time_at(500);
+    assert!(!events
+        .try_iter()
+        .any(|event| matches!(event, BackendEvent::Triggered { .. })));
+    state.input_at(None, None, Some((700, -300)), 501);
+    ack(&acks, &previous);
+    pump(&mut state);
+    assert!(events.try_iter().any(|event| matches!(
+        event,
+        BackendEvent::Triggered {
+            id: 7,
+            pointer: Some((100, 100))
+        }
+    )));
+    assert_eq!(state.pointer.load(), Some((700, -300)));
+}
+
+#[test]
+fn topology_change_discards_old_deferred_triggers_before_the_previous_replay_ack() {
+    let (mut state, jobs, acks, events) = setup();
+    let right = Button::Mouse(MouseButton::Right);
+    state
+        .apply_screen_context(
+            vec![omnitrigger_core::ScreenRect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            }],
+            (100, 100),
+            0,
+        )
+        .unwrap();
+    state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+        conditions: Vec::new(),
+        id: 7,
+        held: vec![],
+        activation: Activation::Hold {
+            button: right,
+            duration_ms: 300,
+        },
+    }]));
+    assert!(input(&mut state, InputKind::Down(right), 0));
+    assert!(input(&mut state, InputKind::Up(right), 100));
+    pump(&mut state);
+    let previous = job(&jobs);
+    assert!(input(&mut state, InputKind::Down(right), 200));
+    state.advance_time_at(500);
+    assert!(!events
+        .try_iter()
+        .any(|event| matches!(event, BackendEvent::Triggered { .. })));
+    state
+        .apply_screen_context(
+            vec![omnitrigger_core::ScreenRect {
+                left: -1920,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            }],
+            (-100, 100),
+            501,
+        )
+        .unwrap();
+    ack(&acks, &previous);
+    pump(&mut state);
+    assert!(!events
+        .try_iter()
+        .any(|event| matches!(event, BackendEvent::Triggered { .. })));
+    assert!(input(&mut state, InputKind::Up(right), 502));
 }

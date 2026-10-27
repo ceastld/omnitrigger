@@ -3,15 +3,17 @@ use crate::{
     HoldStartRejection, ListenerDiagnostics, PanelKey, PRIORITY_PROBE_TAG,
 };
 use omnitrigger_core::{
-    Axis, Button, Decision, Engine, InputEvent, InputKind, MouseButton, Recorder, TriggerSpec,
+    Axis, Button, Decision, DragEvent, DragPhase, Engine, InputEvent, InputKind, MouseButton,
+    Recorder, ScreenRect, TriggerSpec,
 };
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     mem::size_of,
     sync::{
-        atomic::{AtomicIsize, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender, SyncSender},
+        Arc,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -58,6 +60,9 @@ const MESSAGE_BATCH: usize = 64;
 mod replay_runtime;
 use replay_runtime::{Effect as ReplayEffect, ReplayRuntime};
 
+#[path = "screen_context.rs"]
+mod screen_context;
+
 thread_local! {
     // Hook 始终在安装它的消息线程运行；不在 UI 线程共享可变引擎。
     static STATE: RefCell<Option<ThreadState>> = const { RefCell::new(None) };
@@ -67,6 +72,32 @@ pub struct Backend {
     commands: Sender<BackendCommand>,
     thread_id: u32,
     worker: Option<JoinHandle<()>>,
+    pointer: Arc<PointerSnapshot>,
+}
+
+/// 同一原子保存两个带符号坐标，读者不会拼接到两次鼠标事件。
+#[derive(Default)]
+struct PointerSnapshot {
+    packed: AtomicU64,
+    known: AtomicBool,
+}
+
+impl PointerSnapshot {
+    fn store(&self, (x, y): (i32, i32)) {
+        self.packed.store(
+            (u64::from(x as u32) << 32) | u64::from(y as u32),
+            Ordering::Release,
+        );
+        self.known.store(true, Ordering::Release);
+    }
+
+    fn load(&self) -> Option<(i32, i32)> {
+        if !self.known.load(Ordering::Acquire) {
+            return None;
+        }
+        let packed = self.packed.load(Ordering::Acquire);
+        Some(((packed >> 32) as u32 as i32, packed as u32 as i32))
+    }
 }
 
 impl Backend {
@@ -74,9 +105,11 @@ impl Backend {
         let (commands_tx, commands_rx) = mpsc::channel();
         let (events_tx, events_rx) = mpsc::sync_channel(EVENT_CAPACITY);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let pointer = Arc::new(PointerSnapshot::default());
+        let worker_pointer = pointer.clone();
         let worker = thread::Builder::new()
             .name("omnitrigger-input".into())
-            .spawn(move || run_input_thread(commands_rx, events_tx, ready_tx))
+            .spawn(move || run_input_thread(commands_rx, events_tx, ready_tx, worker_pointer))
             .map_err(|error| format!("无法创建输入线程：{error}"))?;
         match ready_rx.recv() {
             Ok(Ok(thread_id)) => Ok((
@@ -84,6 +117,7 @@ impl Backend {
                     commands: commands_tx,
                     thread_id,
                     worker: Some(worker),
+                    pointer,
                 },
                 events_rx,
             )),
@@ -106,6 +140,11 @@ impl Backend {
         unsafe { PostThreadMessageW(self.thread_id, COMMAND_MESSAGE, WPARAM(0), LPARAM(0)) }
             .map_err(|error| format!("无法唤醒输入线程：{error}"))
     }
+
+    /// 初始化位置或最近一次物理鼠标事件的屏幕坐标。不会访问 Hook 状态或取得 UI 锁。
+    pub fn pointer_position(&self) -> Option<(i32, i32)> {
+        self.pointer.load()
+    }
 }
 
 impl Drop for Backend {
@@ -121,6 +160,7 @@ fn run_input_thread(
     commands: Receiver<BackendCommand>,
     events: SyncSender<BackendEvent>,
     ready: SyncSender<Result<u32, String>>,
+    pointer: Arc<PointerSnapshot>,
 ) {
     let mut message = MSG::default();
     unsafe {
@@ -133,7 +173,24 @@ fn run_input_thread(
             return;
         }
     };
-    let mut state = ThreadState::new(events.clone());
+    // 广播 WM_DISPLAYCHANGE 不会送到纯线程消息队列或 message-only 窗口。
+    // 专用隐藏顶层窗口仅标记刷新，枚举屏幕始终留在 Hook 之外。
+    let display_events = match screen_context::DisplayEvents::new(HINSTANCE(module.0)) {
+        Ok(window) => window,
+        Err(error) => {
+            let _ = ready.send(Err(error));
+            return;
+        }
+    };
+    let mut state = ThreadState::new_with_pointer(events.clone(), pointer);
+    let initial_context = screen_context::collect_screens()
+        .and_then(|screens| screen_context::cursor_position().map(|pointer| (screens, pointer)));
+    let context_result = initial_context
+        .and_then(|(screens, pointer)| state.apply_screen_context(screens, pointer, 0));
+    if let Err(error) = context_result {
+        let _ = ready.send(Err(format!("无法初始化显示器与指针上下文：{error}")));
+        return;
+    }
     if let Err(error) = state.replay.start(unsafe { GetCurrentThreadId() }) {
         let _ = ready.send(Err(error));
         return;
@@ -172,6 +229,9 @@ fn run_input_thread(
         let _ = events.try_send(BackendEvent::Ready);
         let mut shutdown_deadline = None;
         'message_loop: loop {
+            if screen_context::take_refresh() && shutdown_deadline.is_none() {
+                refresh_screen_context();
+            }
             // 命令队列先于到期匹配处理，暂停/关闭不会被积压的普通消息推迟。
             let mut more_commands = match drain_commands(&commands, &mut shutdown_deadline) {
                 CommandBatch::Stop => break,
@@ -189,6 +249,7 @@ fn run_input_thread(
                 if message.message == WM_QUIT {
                     break 'message_loop;
                 }
+                display_events.dispatch(&message);
                 if message.message == WM_TIMER {
                     STATE.with(|slot| {
                         if let Some(state) = slot.borrow_mut().as_mut() {
@@ -198,6 +259,9 @@ fn run_input_thread(
                         }
                     });
                 }
+            }
+            if screen_context::take_refresh() && shutdown_deadline.is_none() {
+                refresh_screen_context();
             }
             match drain_commands(&commands, &mut shutdown_deadline) {
                 CommandBatch::Stop => break,
@@ -230,7 +294,10 @@ fn run_input_thread(
                         .as_ref()
                         .filter(|timer| timer.usable)
                         .map(|timer| timer.handle),
-                    state.engine.next_deadline_ms().is_some() || state.replay.busy(),
+                    state.engine.next_deadline_ms().is_some()
+                        || state.engine.active_drag().is_some()
+                        || state.replay.busy()
+                        || !state.pending_drag_cancels.is_empty(),
                 )
             });
             let handles = timer_handle.map(|handle| [handle]);
@@ -285,6 +352,15 @@ fn drain_commands(
         let Ok(command) = commands.try_recv() else {
             return CommandBatch::Done;
         };
+        if matches!(command, BackendCommand::SetEnabled(true))
+            && STATE.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .is_some_and(|state| !state.screen_context_ready)
+            })
+        {
+            refresh_screen_context();
+        }
         if matches!(command, BackendCommand::Shutdown) {
             let drained = STATE.with(|slot| {
                 let mut slot = slot.borrow_mut();
@@ -316,12 +392,35 @@ fn advance_pending_hold() {
         let Some(state) = slot.as_mut() else {
             return;
         };
+        state.report_overflow();
+        if state.engine.active_drag().is_some() {
+            // 拖拽认领后已无计时 deadline，仍按有界间隔检查前台变化。
+            state.check_foreground();
+        }
         if state.engine.next_deadline_ms().is_none() {
             return;
         }
         let outcome = state.advance_time_at(state.now_ms());
         state.reschedule_hold_timer();
         state.queue_outcome(outcome, None);
+    });
+}
+
+fn refresh_screen_context() {
+    // 原生查询可能派发消息；不能在可变借用核心状态期间执行。
+    let context = screen_context::collect_screens()
+        .and_then(|screens| screen_context::cursor_position().map(|pointer| (screens, pointer)));
+    STATE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(state) = slot.as_mut() else {
+            return;
+        };
+        let result = context.and_then(|(screens, pointer)| {
+            state.apply_screen_context(screens, pointer, state.now_ms())
+        });
+        if let Err(error) = result {
+            state.screen_context_failed(error);
+        }
     });
 }
 
@@ -460,10 +559,23 @@ struct ThreadState {
     panel_consumed: BTreeSet<Button>,
     /// 方向键选择之后才接管 Enter，未选择时不吞掉前台窗口的回车。
     panel_selecting: bool,
+    pointer: Arc<PointerSnapshot>,
+    /// 通知拥塞时保留终止事件，监听暂停后仍定时重试，避免 UI 留下活动拖拽。
+    pending_drag_cancels: VecDeque<(DragEvent, isize)>,
+    screens: Vec<ScreenRect>,
+    screen_context_ready: bool,
 }
 
 impl ThreadState {
+    #[cfg(test)]
     fn new(events: SyncSender<BackendEvent>) -> Self {
+        let mut state = Self::new_with_pointer(events, Arc::new(PointerSnapshot::default()));
+        // 事件序列测试由夹具提供上下文，保留无区域绑定的既有测试行为。
+        state.screen_context_ready = true;
+        state
+    }
+
+    fn new_with_pointer(events: SyncSender<BackendEvent>, pointer: Arc<PointerSnapshot>) -> Self {
         let waitable_timer = HoldDeadlineTimer::new();
         let counters = ListenerDiagnostics {
             hold_timer_backend: waitable_timer
@@ -496,6 +608,10 @@ impl ThreadState {
             panel_window: 0,
             panel_consumed: BTreeSet::new(),
             panel_selecting: false,
+            pointer,
+            pending_drag_cancels: VecDeque::with_capacity(2),
+            screens: Vec::new(),
+            screen_context_ready: false,
         }
     }
 
@@ -528,6 +644,56 @@ impl ThreadState {
         }
     }
 
+    fn apply_screen_context(
+        &mut self,
+        screens: Vec<ScreenRect>,
+        pointer: (i32, i32),
+        now_ms: u64,
+    ) -> Result<(), String> {
+        let changed = self.screens != screens;
+        let decision = self
+            .engine
+            .set_screens(screens.clone())
+            .map_err(|error| error.to_string())?;
+        if changed {
+            self.cancel_queued_replay();
+        }
+        self.screens = screens;
+        self.screen_context_ready = true;
+        self.observe_hold(now_ms, &decision, HoldOutcome::Configuration);
+        let outcome = self.finish_decision(decision, None);
+        self.queue_outcome(outcome, None);
+        self.pointer.store(pointer);
+        let movement = self.engine.pointer_moved(pointer, now_ms);
+        self.observe_hold(now_ms, &movement, HoldOutcome::Configuration);
+        let outcome = self.finish_decision(movement, None);
+        self.queue_outcome(outcome, None);
+        self.reschedule_hold_timer();
+        Ok(())
+    }
+
+    fn screen_context_failed(&mut self, error: String) {
+        self.screen_context_ready = false;
+        let cancelled = self.engine.set_enabled(false);
+        self.enabled = false;
+        self.cancel_queued_replay();
+        self.forward_cancelled_drags(cancelled);
+        self.cancel_recording();
+        if let Ok(cancelled) = self.engine.set_screens(Vec::new()) {
+            self.forward_cancelled_drags(cancelled);
+        }
+        self.screens.clear();
+        self.observe_hold(
+            self.now_ms(),
+            &Decision::default(),
+            HoldOutcome::Configuration,
+        );
+        self.reschedule_hold_timer();
+        self.notify(BackendEvent::Error(format!(
+            "显示器上下文更新失败，监听已暂停；请重新启用或重建监听：{error}"
+        )));
+    }
+
     fn notify(&mut self, event: BackendEvent) {
         if self.events.try_send(event).is_err() {
             self.overflow_reported = true;
@@ -535,8 +701,20 @@ impl ThreadState {
     }
 
     fn notify_action(&mut self, event: BackendEvent) {
+        if !self.enabled
+            && !matches!(&event, BackendEvent::Drag { event, .. } if event.phase == DragPhase::Cancelled)
+        {
+            return;
+        }
+        // Ended 产生时核心已移除会话，交付屏障拒绝入队时仍需通知界面取消。
+        let ended = match &event {
+            BackendEvent::Drag { event, foreground } if event.phase == DragPhase::Ended => {
+                Some((*event, *foreground))
+            }
+            _ => None,
+        };
         match self.replay.defer_action(event, self.foreground) {
-            Ok(Some(event)) => self.notify(event),
+            Ok(Some(event)) => self.deliver_action(event),
             Ok(None) => {}
             Err(()) => {
                 let affected = self.replay.abandon(&[]);
@@ -544,7 +722,56 @@ impl ThreadState {
                     affected,
                     "输入交付队列已满，待执行动作已取消，监听已暂停。".into(),
                 );
+                if let Some((mut event, foreground)) = ended {
+                    event.phase = DragPhase::Cancelled;
+                    self.deliver_action(BackendEvent::Drag { event, foreground });
+                }
             }
+        }
+    }
+
+    fn retain_drag_cancel(&mut self, mut event: DragEvent, foreground: isize) {
+        event.phase = DragPhase::Cancelled;
+        if let Some(pending) = self
+            .pending_drag_cancels
+            .iter_mut()
+            .find(|(pending, _)| pending.session == event.session)
+        {
+            *pending = (event, foreground);
+        } else {
+            // 首次交付失败即暂停匹配；最多保留失败通知对应会话和当前核心活动会话。
+            self.pending_drag_cancels.push_back((event, foreground));
+        }
+    }
+
+    fn deliver_action(&mut self, event: BackendEvent) {
+        if !self.enabled
+            && !matches!(&event, BackendEvent::Drag { event, .. } if event.phase == DragPhase::Cancelled)
+        {
+            return;
+        }
+        if let Err(error) = self.events.try_send(event) {
+            self.overflow_reported = true;
+            let (mpsc::TrySendError::Full(event) | mpsc::TrySendError::Disconnected(event)) = error;
+            if let BackendEvent::Drag { event, foreground } = event {
+                self.retain_drag_cancel(event, foreground);
+                let cancelled = self.engine.set_enabled(false);
+                self.enabled = false;
+                self.cancel_queued_replay();
+                for event in cancelled.drags {
+                    self.retain_drag_cancel(event, self.foreground as isize);
+                }
+                self.observe_hold(self.now_ms(), &Decision::default(), HoldOutcome::Recovery);
+            }
+        }
+    }
+
+    fn forward_cancelled_drags(&mut self, decision: Decision) {
+        for event in decision.drags {
+            self.deliver_action(BackendEvent::Drag {
+                event,
+                foreground: self.foreground as isize,
+            });
         }
     }
 
@@ -580,6 +807,8 @@ impl ThreadState {
         let mut snapshot = self.counters.clone();
         snapshot.held = self.physical_held.iter().copied().collect();
         snapshot.owned = self.owned_press.iter().copied().collect();
+        snapshot.screen_context_ready = self.screen_context_ready;
+        snapshot.screen_count = self.screens.len();
         let age_ms = |time: Instant| time.elapsed().as_millis().min(u64::MAX as u128) as u64;
         snapshot.last_keyboard_ms = self.last_keyboard.map(age_ms);
         snapshot.last_mouse_ms = self.last_mouse.map(age_ms);
@@ -596,6 +825,7 @@ impl ThreadState {
             BackendCommand::GetDiagnostics | BackendCommand::SetPanelWindow(_) => {
                 HoldOutcome::Recovery
             }
+            BackendCommand::CancelDrag { .. } => HoldOutcome::Recovery,
         };
         match command {
             BackendCommand::SetBindings(bindings) => {
@@ -613,9 +843,10 @@ impl ThreadState {
                         .cloned()
                         .collect();
                     match self.engine.replace_bindings(bindings) {
-                        Ok(()) => {
+                        Ok(cancelled) => {
                             self.hold_specs = hold_specs;
                             self.cancel_queued_replay();
+                            self.forward_cancelled_drags(cancelled);
                         }
                         Err(error) => self.notify(BackendEvent::Error(error.to_string())),
                     }
@@ -626,8 +857,9 @@ impl ThreadState {
                     self.notify(BackendEvent::Error("请先松开上次录制中按住的按键".into()));
                     return;
                 }
-                self.engine.cancel();
+                let cancelled = self.engine.cancel();
                 self.cancel_queued_replay();
+                self.forward_cancelled_drags(cancelled);
                 self.recording = Some(RecordingSession {
                     recorder: Recorder::new(),
                     preexisting: self.physical_held.clone(),
@@ -636,12 +868,19 @@ impl ThreadState {
             }
             BackendCommand::CancelRecording => self.cancel_recording(),
             BackendCommand::SetEnabled(enabled) => {
+                if enabled && !self.screen_context_ready {
+                    self.notify(BackendEvent::Error(
+                        "显示器上下文不可用，无法重新启用监听；请重试或重建监听。".into(),
+                    ));
+                    return;
+                }
                 self.cancel_recording();
-                self.engine.set_enabled(enabled);
+                let cancelled = self.engine.set_enabled(enabled);
                 self.enabled = enabled;
                 if !enabled {
                     self.cancel_queued_replay();
                 }
+                self.forward_cancelled_drags(cancelled);
                 if enabled {
                     self.replay.retry_cleanup();
                 }
@@ -653,6 +892,13 @@ impl ThreadState {
                 self.panel_window = window.map_or(0, |hwnd| hwnd as usize);
                 self.panel_selecting = false;
             }
+            BackendCommand::CancelDrag { session } => {
+                let cancelled = self.engine.cancel_drag(session);
+                if !cancelled.drags.is_empty() {
+                    self.cancel_queued_replay();
+                    self.forward_cancelled_drags(cancelled);
+                }
+            }
             BackendCommand::Shutdown => {}
         }
         self.observe_hold(self.now_ms(), &Decision::default(), cancelled_by);
@@ -660,7 +906,8 @@ impl ThreadState {
 
     fn cancel_recording(&mut self) {
         if self.recording.take().is_some() {
-            self.engine.cancel();
+            let cancelled = self.engine.cancel();
+            self.forward_cancelled_drags(cancelled);
             self.observe_hold(self.now_ms(), &Decision::default(), HoldOutcome::Recording);
             self.notify(BackendEvent::RecordingCancelled);
         }
@@ -679,7 +926,7 @@ impl ThreadState {
     }
 
     fn observe_hold(&mut self, now_ms: u64, decision: &Decision, cancelled_by: HoldOutcome) {
-        let deadline = self.engine.next_deadline_ms();
+        let deadline = self.engine.next_hold_deadline_ms();
         if let Some(active) = self.active_hold {
             if deadline != Some(active.deadline_ms) {
                 self.active_hold = None;
@@ -847,9 +1094,10 @@ impl ThreadState {
     fn hold_timer_failed(&mut self, error: String) {
         self.kill_hold_timer();
         // 计时失效不能让待定按压永远悬挂，按原取消协议吞掉后续释放。
-        self.engine.set_enabled(false);
+        let cancelled = self.engine.set_enabled(false);
         self.enabled = false;
-        self.engine.cancel();
+        self.cancel_queued_replay();
+        self.forward_cancelled_drags(cancelled);
         self.observe_hold(self.now_ms(), &Decision::default(), HoldOutcome::Recovery);
         self.notify(BackendEvent::Error(format!(
             "无法启动长按计时器，监听已暂停；请松开按键后重新启用：{error}"
@@ -866,8 +1114,9 @@ impl ThreadState {
             self.counters.foreground_cancellations =
                 self.counters.foreground_cancellations.saturating_add(1);
             // 不把旧窗口的缓冲输入补发给新窗口。
-            self.engine.cancel();
+            let cancelled = self.engine.cancel();
             self.cancel_queued_replay();
+            self.forward_cancelled_drags(cancelled);
             self.observe_hold(
                 self.now_ms(),
                 &Decision::default(),
@@ -879,11 +1128,26 @@ impl ThreadState {
     }
 
     fn report_overflow(&mut self) {
+        while let Some((event, foreground)) = self.pending_drag_cancels.pop_front() {
+            if self
+                .events
+                .try_send(BackendEvent::Drag { event, foreground })
+                .is_err()
+            {
+                self.pending_drag_cancels.push_front((event, foreground));
+                break;
+            }
+        }
         if self.overflow_reported {
             self.overflow_reported = self
                 .events
                 .try_send(BackendEvent::Error(
-                    "提示队列已满，部分触发通知被丢弃".into(),
+                    if self.enabled {
+                        "提示队列已满，部分触发通知被丢弃"
+                    } else {
+                        "提示队列已满，监听已暂停；拖拽已取消，请松开按键后重新启用。"
+                    }
+                    .into(),
                 ))
                 .is_err();
         }
@@ -914,6 +1178,9 @@ impl ThreadState {
         pointer: Option<(i32, i32)>,
         now_ms: u64,
     ) -> HookOutcome {
+        if let Some(position) = pointer {
+            self.pointer.store(position);
+        }
         self.check_foreground();
         self.report_overflow();
         let mut movement = pointer
@@ -1001,7 +1268,7 @@ impl ThreadState {
         };
         self.observe_hold(now_ms, &decision, cancelled_by);
         if let Some(reason) = start_rejection {
-            if self.engine.next_deadline_ms().is_none() {
+            if self.engine.next_hold_deadline_ms().is_none() {
                 self.counters.hold_not_started = self.counters.hold_not_started.saturating_add(1);
                 self.counters.last_hold_start_rejection = Some(reason);
             }
@@ -1010,6 +1277,8 @@ impl ThreadState {
         decision.replay = movement.replay;
         movement.triggered.append(&mut decision.triggered);
         decision.triggered = movement.triggered;
+        movement.drags.append(&mut decision.drags);
+        decision.drags = movement.drags;
         self.finish_decision(decision, Some(kind))
     }
 
@@ -1018,8 +1287,24 @@ impl ThreadState {
         mut decision: Decision,
         current: Option<InputKind>,
     ) -> HookOutcome {
+        for event in decision.drags.drain(..) {
+            let cancelled = event.phase == DragPhase::Cancelled;
+            let notification = BackendEvent::Drag {
+                event,
+                foreground: self.foreground as isize,
+            };
+            if cancelled {
+                self.cancel_queued_replay();
+                self.deliver_action(notification);
+            } else {
+                self.notify_action(notification);
+            }
+        }
         for id in decision.triggered.drain(..) {
-            self.notify_action(BackendEvent::Triggered(id));
+            self.notify_action(BackendEvent::Triggered {
+                id,
+                pointer: self.pointer.load(),
+            });
         }
         if !decision.consume && !decision.replay.is_empty() {
             // Hook 回调内不能假定补发已先于原事件交付；把当前事件也放进同一批
@@ -1165,8 +1450,9 @@ impl ThreadState {
 
     fn replay_failed(&mut self, kinds: &[InputKind]) {
         self.counters.replay_failures = self.counters.replay_failures.saturating_add(1);
-        self.engine.set_enabled(false);
+        let cancelled = self.engine.set_enabled(false);
         self.enabled = false;
+        self.forward_cancelled_drags(cancelled);
         self.observe_hold(self.now_ms(), &Decision::default(), HoldOutcome::Recovery);
         // Engine 原本预期回放成功，故标为 Passed。实际未发送/已恢复释放的按压
         // 仍需吞掉物理 repeat/up，不能把没有对应 Down 的 Up 传给目标窗口。
@@ -1191,7 +1477,7 @@ impl ThreadState {
     fn apply_replay_effects(&mut self, effects: Vec<ReplayEffect>) {
         for effect in effects {
             match effect {
-                ReplayEffect::Action(event) => self.notify(event),
+                ReplayEffect::Action(event) => self.deliver_action(event),
                 ReplayEffect::Timing(elapsed) => {
                     update_hook_timing(&mut self.counters, HookTiming::Replay, elapsed)
                 }
@@ -1726,7 +2012,8 @@ pub(crate) fn prepare_panel_window(hwnd: isize) -> Result<(), String> {
 }
 
 pub(crate) fn prepare_wheel_window(hwnd: isize) -> Result<(), String> {
-    prepare_floating_window(hwnd, windows::core::w!("OmniTrigger 轨道轮盘"), "轨道轮盘")
+    prepare_floating_window(hwnd, windows::core::w!("OmniTrigger 轨道轮盘"), "轨道轮盘")?;
+    crate::wheel_window::prepare_borderless(hwnd)
 }
 
 fn prepare_floating_window(
@@ -1762,6 +2049,7 @@ pub(crate) fn show_panel_at_cursor(hwnd: isize, content: Option<(f32, f32)>) -> 
         content,
         windows::core::w!("OmniTrigger 触发面板"),
         "触发面板",
+        None,
     )
 }
 
@@ -1775,6 +2063,23 @@ pub(crate) fn show_wheel_at_cursor_with_size(
         Some((width, height)),
         windows::core::w!("OmniTrigger 轨道轮盘"),
         "轨道轮盘",
+        None,
+    )
+}
+
+pub(crate) fn show_wheel_at_point_with_size(
+    hwnd: isize,
+    x: i32,
+    y: i32,
+    width: f32,
+    height: f32,
+) -> Result<(), String> {
+    show_floating_at_cursor(
+        hwnd,
+        Some((width, height)),
+        windows::core::w!("OmniTrigger 轨道轮盘"),
+        "轨道轮盘",
+        Some((x, y)),
     )
 }
 
@@ -1783,6 +2088,7 @@ fn show_floating_at_cursor(
     content: Option<(f32, f32)>,
     title: windows::core::PCWSTR,
     name: &str,
+    anchor: Option<(i32, i32)>,
 ) -> Result<(), String> {
     use windows::Win32::{
         Foundation::{HWND, POINT, RECT},
@@ -1807,8 +2113,14 @@ fn show_floating_at_cursor(
     if foreground != hwnd {
         PANEL_RESTORE_TARGET.store(foreground.0 as isize, Ordering::Relaxed);
     }
-    let mut cursor = POINT::default();
-    unsafe { GetCursorPos(&mut cursor) }.map_err(|error| format!("无法读取鼠标位置：{error}"))?;
+    let cursor = if let Some((x, y)) = anchor {
+        POINT { x, y }
+    } else {
+        let mut cursor = POINT::default();
+        unsafe { GetCursorPos(&mut cursor) }
+            .map_err(|error| format!("无法读取鼠标位置：{error}"))?;
+        cursor
+    };
     let monitor = unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) };
     if monitor.is_invalid() {
         return Err("无法确定鼠标所在的显示器。".into());
@@ -1916,6 +2228,14 @@ pub(crate) fn show_notification_window(
 }
 
 #[cfg(test)]
+#[path = "drag_platform_tests.rs"]
+mod drag_tests;
+
+#[cfg(test)]
+#[path = "region_platform_tests.rs"]
+mod region_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1969,6 +2289,7 @@ mod tests {
         let mut state = ThreadState::new(tx);
         let middle = Button::Mouse(MouseButton::Middle);
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            conditions: Vec::new(),
             id: 1,
             held: vec![],
             activation: omnitrigger_core::Activation::Press(middle),
@@ -1979,7 +2300,10 @@ mod tests {
             rx.try_recv(),
             Ok(BackendEvent::PointerPressed { x: -20, y: 30 })
         ));
-        assert!(matches!(rx.try_recv(), Ok(BackendEvent::Triggered(1))));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(BackendEvent::Triggered { id: 1, .. })
+        ));
         let escape = Button::Key(0x1b);
         assert!(
             !state
@@ -2267,6 +2591,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(EVENT_CAPACITY);
         let mut state = ThreadState::new(tx);
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            conditions: Vec::new(),
             id: 7,
             held: vec![],
             activation: omnitrigger_core::Activation::Hold {
@@ -2401,6 +2726,7 @@ mod tests {
         }
         let (mut state, _) = right_hold_state();
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            conditions: Vec::new(),
             id: 9,
             held: vec![Button::Key(0x14)],
             activation: omnitrigger_core::Activation::Hold {
@@ -2470,7 +2796,10 @@ mod tests {
                 ..
             })
         ));
-        assert!(matches!(rx.try_recv(), Ok(BackendEvent::Triggered(7))));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(BackendEvent::Triggered { id: 7, .. })
+        ));
         let timing = state.diagnostics();
         assert_eq!(timing.last_hold_elapsed_ms, Some(300));
         assert_eq!(timing.last_hold_threshold_ms, Some(300));
@@ -2501,7 +2830,10 @@ mod tests {
             other => panic!("意外长按计时通知：{other:?}"),
         };
         assert!(matched_at >= before_match && matched_at <= Instant::now());
-        assert!(matches!(rx.try_recv(), Ok(BackendEvent::Triggered(7))));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(BackendEvent::Triggered { id: 7, .. })
+        ));
         let timing = state.diagnostics();
         assert_eq!(timing.last_hold_elapsed_ms, Some(350));
         assert_eq!(timing.last_hold_threshold_ms, Some(300));
@@ -2610,7 +2942,7 @@ mod tests {
             assert!(release.replay_kinds.is_empty());
             assert!(!rx
                 .try_iter()
-                .any(|event| matches!(event, BackendEvent::Triggered(_))));
+                .any(|event| matches!(event, BackendEvent::Triggered { .. })));
         }
     }
 
@@ -2803,6 +3135,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                conditions: Vec::new(),
                 id: 1,
                 held: vec![caps],
                 activation: omnitrigger_core::Activation::Press(Button::Key(0x57)),
@@ -2834,6 +3167,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                conditions: Vec::new(),
                 id: 1,
                 held: vec![caps],
                 activation: omnitrigger_core::Activation::Press(Button::Key(0x57)),
@@ -2929,6 +3263,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                conditions: Vec::new(),
                 id: 9,
                 held: vec![caps],
                 activation: omnitrigger_core::Activation::Press(w),

@@ -2,10 +2,36 @@
 
 use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirection};
 
-mod shortcut;
-pub use shortcut::validate_shortcut;
+mod automation_basics;
 #[cfg(windows)]
-pub use shortcut::{capture_shortcut_target, send_shortcut, send_shortcut_to, ShortcutTarget};
+pub use automation_basics::{open_target, read_clipboard_text, send_text_to, write_clipboard_text};
+pub use automation_basics::{validate_automation_text, validate_open_target};
+
+mod system_adjustment;
+#[cfg(windows)]
+pub use system_adjustment::{
+    adjust_system_at, capture_adjustment_point, query_system_adjustment_capabilities_at,
+};
+pub use system_adjustment::{
+    validate_system_adjustment, AdjustmentCapability, AdjustmentKind, AdjustmentResult,
+    BrightnessMethod, SystemAdjustment, SystemAdjustmentCapabilities, SystemAdjustmentError,
+    SystemAdjustmentErrorCode,
+};
+
+mod window_action;
+pub use window_action::WindowOperation;
+#[cfg(windows)]
+pub use window_action::{
+    perform_window_action, pointer_scale_at_point, shortcut_target_context, shortcut_target_process,
+};
+
+mod shortcut;
+#[cfg(windows)]
+pub use shortcut::{
+    capture_shortcut_target, ensure_shortcut_target, restore_shortcut_target, send_key_sequence_to,
+    send_key_tap_to, send_shortcut, send_shortcut_to, ShortcutTarget,
+};
+pub use shortcut::{validate_key_sequence, validate_key_tap, validate_shortcut};
 
 /// 专用于诊断 Hook 链顺序的注入标记；探针只计数，不进入触发器状态机。
 pub const PRIORITY_PROBE_TAG: usize = 0x4f4d_5052;
@@ -91,6 +117,9 @@ pub struct ListenerDiagnostics {
     /// 新按下边沿未能开始计时的次数，重复鼠标 Down 由上一字段单独记录。
     pub hold_not_started: u64,
     pub last_hold_start_rejection: Option<HoldStartRejection>,
+    /// 完整显示器矩形是否已成功缓存；失败时暂停监听，不猜测虚拟桌面边界。
+    pub screen_context_ready: bool,
+    pub screen_count: usize,
 }
 
 #[derive(Debug)]
@@ -99,6 +128,10 @@ pub enum BackendCommand {
     StartRecording,
     CancelRecording,
     SetEnabled(bool),
+    /// 仅取消指定的活动拖拽会话；过期会话不影响新的拖拽。
+    CancelDrag {
+        session: u64,
+    },
     GetDiagnostics,
     /// 登记可见面板的窗口，`None` 表示已收起。面板可见且未获前台时，Hook 接管单独按下的导航键。
     SetPanelWindow(Option<isize>),
@@ -142,7 +175,16 @@ pub enum BackendEvent {
         threshold_ms: u32,
         matched_at: std::time::Instant,
     },
-    Triggered(u64),
+    /// 拖拽生命周期保留原始前台身份；不为每次鼠标移动排队。
+    Drag {
+        event: omnitrigger_core::DragEvent,
+        foreground: isize,
+    },
+    /// 匹配时冻结物理指针上下文；经过回放/界面队列后仍保留当时位置。
+    Triggered {
+        id: u64,
+        pointer: Option<(i32, i32)>,
+    },
     Error(String),
     RecordingCancelled,
     Diagnostics(Box<ListenerDiagnostics>),
@@ -152,6 +194,8 @@ pub enum BackendEvent {
 mod platform;
 #[cfg(windows)]
 mod title_bar;
+#[cfg(windows)]
+mod wheel_window;
 #[cfg(windows)]
 pub use platform::Backend;
 
@@ -196,6 +240,18 @@ pub fn show_panel_at_cursor_with_size(hwnd: isize, width: f32, height: f32) -> R
 #[cfg(windows)]
 pub fn show_wheel_at_cursor_with_size(hwnd: isize, width: f32, height: f32) -> Result<(), String> {
     platform::show_wheel_at_cursor_with_size(hwnd, width, height)
+}
+
+/// 以显式屏幕坐标为中心显示轮盘；不移动鼠标，按目标显示器 DPI 换算并限制在工作区内。
+#[cfg(windows)]
+pub fn show_wheel_at_point_with_size(
+    hwnd: isize,
+    x: i32,
+    y: i32,
+    width: f32,
+    height: f32,
+) -> Result<(), String> {
+    platform::show_wheel_at_point_with_size(hwnd, x, y, width, height)
 }
 
 /// 兼容原有调用，与 `show_panel_at_cursor` 相同。
@@ -323,6 +379,14 @@ pub fn format_trigger(spec: &TriggerSpec) -> String {
             button,
             duration_ms,
         } => format!("{}（长按 {duration_ms}ms）", format_button(button)),
+        Activation::Drag {
+            button,
+            min_distance_px,
+            max_start_ms,
+        } => format!(
+            "{}（快速拖拽 ≥{min_distance_px}px / {max_start_ms}ms 内）",
+            format_button(button)
+        ),
         Activation::Wheel(direction) => match direction {
             WheelDirection::Up => "滚轮上滚".into(),
             WheelDirection::Down => "滚轮下滚".into(),
@@ -340,6 +404,7 @@ mod tests {
     #[test]
     fn hold_description_keeps_the_prefix_button_and_duration() {
         let spec = TriggerSpec {
+            conditions: Vec::new(),
             id: 5,
             held: vec![Button::Key(0xa2)],
             activation: Activation::Hold {

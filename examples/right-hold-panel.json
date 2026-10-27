@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 7,
   "bindings": [
     {
       "id": 1,
@@ -13,7 +13,7 @@
       },
       "message": "打开触发面板",
       "enabled": true,
-      "show_panel": true
+      "action": { "kind": "show_panel" }
     }
   ]
 }

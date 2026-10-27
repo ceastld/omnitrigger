@@ -1,5 +1,7 @@
 //! 外部命令与快捷键的应用层执行边界，不参与 Hook 或核心匹配。
+use crate::external_action::ExternalAction;
 use crate::shortcut::ShortcutAction;
+use crate::window_action::WindowAction;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -69,6 +71,7 @@ pub struct ExecutionEvent {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ExecutionOutcome {
     ShortcutSent,
+    WindowApplied,
     Started {
         pid: u32,
     },
@@ -94,7 +97,9 @@ struct Request {
 
 enum ExecutableAction {
     Command(CommandAction),
+    GuardedCommand(CommandAction, omnitrigger_windows::ShortcutTarget),
     Shortcut(Box<dyn FnOnce() -> Result<(), String> + Send>),
+    Window(Box<dyn FnOnce() -> Result<(), String> + Send>),
 }
 
 struct Running {
@@ -187,14 +192,65 @@ impl CommandExecutor {
     }
 
     pub fn submit_shortcut(&self, id: u64, shortcut: ShortcutAction) -> Result<(), String> {
-        shortcut.validate()?;
         let target = omnitrigger_windows::capture_shortcut_target()?;
+        self.submit_shortcut_to(id, shortcut, target)
+    }
+
+    pub fn submit_shortcut_to(
+        &self,
+        id: u64,
+        shortcut: ShortcutAction,
+        target: omnitrigger_windows::ShortcutTarget,
+    ) -> Result<(), String> {
+        shortcut.validate()?;
         self.submit_request(
             id,
             ExecutableAction::Shortcut(Box::new(move || {
                 omnitrigger_windows::send_shortcut_to(&shortcut.keys, target)
             })),
             None,
+        )
+    }
+
+    pub fn submit_window(&self, id: u64, action: WindowAction) -> Result<(), String> {
+        let target = omnitrigger_windows::capture_shortcut_target()?;
+        self.submit_window_to(id, action, target)
+    }
+
+    pub fn submit_window_to(
+        &self,
+        id: u64,
+        action: WindowAction,
+        target: omnitrigger_windows::ShortcutTarget,
+    ) -> Result<(), String> {
+        self.submit_request(
+            id,
+            ExecutableAction::Window(Box::new(move || {
+                omnitrigger_windows::perform_window_action(target, action.platform_operation())
+            })),
+            None,
+        )
+    }
+
+    pub fn submit_external(&self, id: u64, action: ExternalAction) -> Result<(), String> {
+        let target = omnitrigger_windows::capture_shortcut_target()?;
+        self.submit_external_to(id, action, target)
+    }
+
+    pub fn submit_external_to(
+        &self,
+        id: u64,
+        action: ExternalAction,
+        target: omnitrigger_windows::ShortcutTarget,
+    ) -> Result<(), String> {
+        action.validate()?;
+        if let Some(reason) = action.unavailable_reason() {
+            return Err(reason);
+        }
+        self.submit_request(
+            id,
+            ExecutableAction::GuardedCommand(action.command, target),
+            Some(format!("external:{}", action.provider.to_lowercase())),
         )
     }
 
@@ -220,7 +276,10 @@ impl CommandExecutor {
         {
             return Err("命令执行线程已结束，无法接纳新的调用。".into());
         }
-        let shortcut = matches!(&action, ExecutableAction::Shortcut(_));
+        let shortcut = matches!(
+            &action,
+            ExecutableAction::Shortcut(_) | ExecutableAction::Window(_)
+        );
         let mut reserved = self.reserved.lock().map_err(|_| "命令执行状态不可用。")?;
         if reserved
             .entries
@@ -294,6 +353,7 @@ impl CommandExecutor {
             ExecutionOutcome::Finished { .. }
                 | ExecutionOutcome::Failed { .. }
                 | ExecutionOutcome::ShortcutSent
+                | ExecutionOutcome::WindowApplied
         ) {
             if let Ok(mut reserved) = self.reserved.lock() {
                 if reserved
@@ -320,6 +380,20 @@ impl Drop for CommandExecutor {
             }
         }
     }
+}
+
+fn spawn_request(action: ExecutableAction) -> std::io::Result<Child> {
+    let command = match action {
+        ExecutableAction::Command(command) => command,
+        ExecutableAction::GuardedCommand(command, target) => {
+            if omnitrigger_windows::capture_shortcut_target().ok() != Some(target) {
+                return Err(std::io::Error::other("前台窗口已改变，已取消外部动作。"));
+            }
+            command
+        }
+        _ => return Err(std::io::Error::other("此操作不是外部进程动作。")),
+    };
+    spawn(command)
 }
 
 fn spawn(command: CommandAction) -> std::io::Result<Child> {
@@ -359,7 +433,12 @@ fn run(requests: Receiver<Request>, events: SyncSender<ExecutionEvent>, stopping
                     Ok(()) => ExecutionOutcome::ShortcutSent,
                     Err(message) => ExecutionOutcome::Failed { message },
                 },
-                ExecutableAction::Command(command) => match spawn(command) {
+                ExecutableAction::Window(apply) => match apply() {
+                    Ok(()) => ExecutionOutcome::WindowApplied,
+                    Err(message) => ExecutionOutcome::Failed { message },
+                },
+                command @ (ExecutableAction::Command(_)
+                | ExecutableAction::GuardedCommand(_, _)) => match spawn_request(command) {
                     Ok(child) => {
                         if stopping.load(Ordering::Acquire) {
                             return;
@@ -486,6 +565,7 @@ mod tests {
                         ExecutionOutcome::Finished { .. }
                             | ExecutionOutcome::Failed { .. }
                             | ExecutionOutcome::ShortcutSent
+                            | ExecutionOutcome::WindowApplied
                     ) {
                         assert!(!executor.is_running(id));
                         return event.outcome;
@@ -626,6 +706,35 @@ mod tests {
         command.args.push("含\0空字符".into());
         assert!(executor.submit(1, command).is_err());
         assert!(executor.reserved.lock().unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn window_operations_run_on_worker_and_report_their_own_completion() {
+        let executor = CommandExecutor::shortcuts();
+        executor
+            .submit_request(
+                5,
+                ExecutableAction::Window(Box::new(|| {
+                    assert_eq!(thread::current().name(), Some("omnitrigger-shortcuts"));
+                    Ok(())
+                })),
+                None,
+            )
+            .unwrap();
+        assert_eq!(terminal(&executor, 5), ExecutionOutcome::WindowApplied);
+        executor
+            .submit_request(
+                5,
+                ExecutableAction::Window(Box::new(|| Err("前台已切换".into()))),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            terminal(&executor, 5),
+            ExecutionOutcome::Failed {
+                message: "前台已切换".into()
+            }
+        );
     }
 
     #[test]

@@ -1,0 +1,41 @@
+{
+  "version": 7,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [],
+      "activation": { "kind": "wheel_up" },
+      "conditions": [{ "kind": "pointer_region", "region": { "kind": "screen_edge", "edge": "left", "thickness_px": 8 } }],
+      "message": "左边缘上滚增加音量",
+      "enabled": true,
+      "action": { "kind": "adjust_system", "target": "volume", "delta_percent": 5 }
+    },
+    {
+      "id": 2,
+      "held": [],
+      "activation": { "kind": "wheel_down" },
+      "conditions": [{ "kind": "pointer_region", "region": { "kind": "screen_edge", "edge": "left", "thickness_px": 8 } }],
+      "message": "左边缘下滚减少音量",
+      "enabled": true,
+      "action": { "kind": "adjust_system", "target": "volume", "delta_percent": -5 }
+    },
+    {
+      "id": 3,
+      "held": [],
+      "activation": { "kind": "wheel_up" },
+      "conditions": [{ "kind": "pointer_region", "region": { "kind": "screen_edge", "edge": "right", "thickness_px": 8 } }],
+      "message": "右边缘上滚增加屏幕亮度",
+      "enabled": true,
+      "action": { "kind": "adjust_system", "target": "brightness", "delta_percent": 5 }
+    },
+    {
+      "id": 4,
+      "held": [],
+      "activation": { "kind": "wheel_down" },
+      "conditions": [{ "kind": "pointer_region", "region": { "kind": "screen_edge", "edge": "right", "thickness_px": 8 } }],
+      "message": "右边缘下滚减少屏幕亮度",
+      "enabled": true,
+      "action": { "kind": "adjust_system", "target": "brightness", "delta_percent": -5 }
+    }
+  ]
+}

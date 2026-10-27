@@ -249,6 +249,11 @@ impl Workspace {
             ))
             .children(self.render_banner(cx))
             .child(search)
+            .child(section_title("内置基础能力"))
+            .child(card().p(px(18.)).flex().flex_col().gap(px(10.))
+                .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("本地步骤动作"))
+                .child(caption("快捷键、连续组合键、输入文本、剪贴板、打开网址或文件、等待与变量；在程序内配置并顺序运行。"))
+                .child(button("create-local-action","新建本地动作",Tone::Primary,!self.recording).on_click(cx.listener(|this,_,_,cx|this.new_local_action(cx)))))
             .child(section_title("插件动作"))
             .when(matches, |el| el.child(capture))
             .when(!matches, |el| {

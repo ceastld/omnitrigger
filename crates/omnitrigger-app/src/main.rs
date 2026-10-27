@@ -4,6 +4,10 @@ mod action_library;
 mod assets;
 mod event_bridge;
 mod execution;
+mod external_action;
+mod local_action;
+mod local_editor;
+mod local_executor;
 mod message_input;
 mod plugin_install;
 mod plugins;
@@ -11,11 +15,15 @@ mod presets;
 mod radial_wheel;
 mod settings;
 mod shortcut;
+mod system_action;
+mod system_executor;
 mod theme;
+mod trigger_conditions;
 mod trigger_panel;
 mod wheel_editor;
 mod wheel_workspace;
 mod wheels;
+mod window_action;
 
 use assets::{Assets, Icon};
 use event_bridge::{EventBridge, UiWake};
@@ -33,7 +41,7 @@ use omnitrigger_windows::{
     HoldStartRejection, ListenerDiagnostics,
 };
 use plugins::{PluginActionRef, Plugins};
-use presets::PRESETS;
+use presets::{DEFAULT_DRAG_DISTANCE_PX, DEFAULT_DRAG_START_MS, PRESETS};
 use radial_wheel::{RadialWheel, WheelRequest, WHEEL_SIZE};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use settings::{ActionSpec, Binding, Conflict};
@@ -53,7 +61,25 @@ use trigger_panel::{
     panel_size, PanelContext, PanelDiagnostics, PanelItem, PanelKind, PanelRequest, PanelState,
     TriggerPanel,
 };
+use wheel_workspace::DragWheelSession;
 use wheels::{WheelAccent, WheelActionRef, Wheels};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TriggerMode {
+    Press,
+    Hold,
+    Drag,
+}
+
+impl TriggerMode {
+    fn of(activation: Activation) -> Self {
+        match activation {
+            Activation::Hold { .. } => Self::Hold,
+            Activation::Drag { .. } => Self::Drag,
+            _ => Self::Press,
+        }
+    }
+}
 
 const TOAST_SECONDS: f32 = 4.;
 const TOAST_WIDTH: f32 = 380.;
@@ -325,6 +351,10 @@ fn action_detail(action: &ActionSpec) -> String {
         ActionSpec::ShowPanel => "打开 / 收起触发面板".into(),
         ActionSpec::ShowWheel(reference) => format!("轨道轮盘 · {}", reference.wheel_id),
         ActionSpec::SendShortcut(shortcut) => format!("发送快捷键 · {}", shortcut.display()),
+        ActionSpec::Window(action) => format!("窗口 · {}", action.display()),
+        ActionSpec::AdjustSystem(action) => action.display(),
+        ActionSpec::Local(action) => action.summary(),
+        ActionSpec::External(action) => format!("外部动作 · 依赖 {}", action.provider),
         ActionSpec::Command(command) => {
             let program = Path::new(&command.program)
                 .file_name()
@@ -349,6 +379,10 @@ fn action_look(action: &ActionSpec) -> (Icon, u32) {
         ActionSpec::ShowPanel => (Icon::Panel, theme::ACCENT),
         ActionSpec::ShowWheel(_) => (Icon::Pulse, theme::VIOLET),
         ActionSpec::SendShortcut(_) => (Icon::Keyboard, theme::ACCENT_2),
+        ActionSpec::Window(_) => (Icon::Panel, theme::ACCENT_2),
+        ActionSpec::AdjustSystem(_) => (Icon::Pulse, theme::ACCENT_2),
+        ActionSpec::Local(_) => (Icon::Layers, theme::ACCENT_2),
+        ActionSpec::External(_) => (Icon::Terminal, theme::RECORD),
         ActionSpec::Command(_) => (Icon::Terminal, theme::RECORD),
         ActionSpec::Plugin(_) => (Icon::Capture, theme::PINK),
     }
@@ -358,8 +392,21 @@ fn activation_label(spec: &TriggerSpec) -> String {
     match spec.activation {
         Activation::Press(_) => "按下即触发".into(),
         Activation::Hold { duration_ms, .. } => format!("长按 {duration_ms}ms 触发"),
+        Activation::Drag {
+            min_distance_px,
+            max_start_ms,
+            ..
+        } => format!("快速拖拽 ≥{min_distance_px}px · <{max_start_ms}ms"),
         Activation::Wheel(_) => "滚轮一格即触发".into(),
     }
+}
+
+struct StartupOptions {
+    ui_smoke: bool,
+    panel: bool,
+    wheel: Option<String>,
+    wheel_target: Option<omnitrigger_windows::ShortcutTarget>,
+    wheel_editor: bool,
 }
 
 struct Workspace {
@@ -381,8 +428,13 @@ struct Workspace {
     page: Page,
     history_filter: HistoryFilter,
     message: Entity<MessageInput>,
-    hold_mode: bool,
+    trigger_mode: TriggerMode,
+    condition_editor: trigger_conditions::ConditionEditor,
+    recording_conditions: Vec<omnitrigger_core::TriggerCondition>,
+    adjustment_amount: Entity<MessageInput>,
     hold_duration: Entity<MessageInput>,
+    drag_distance: Entity<MessageInput>,
+    drag_window: Entity<MessageInput>,
     draft_action: ActionSpec,
     recording_for_panel: bool,
     recording_preserve_action: bool,
@@ -407,15 +459,23 @@ struct Workspace {
     wheel_registered: Option<isize>,
     wheel_generation: u64,
     wheel_active: Option<String>,
+    wheel_active_definition: Option<wheels::WheelDefinition>,
     wheel_target: Option<omnitrigger_windows::ShortcutTarget>,
     wheel_runtime_ids: HashMap<(String, usize), u64>,
     wheel_requests: Receiver<WheelRequest>,
     wheel_sender: SyncSender<WheelRequest>,
     open_wheel_on_ready: Option<String>,
+    wheel_launch_target: Option<omnitrigger_windows::ShortcutTarget>,
+    drag_wheel_session: Option<DragWheelSession>,
     install_events: Option<Receiver<plugin_install::InstallEvent>>,
     install_status: Option<String>,
     executor: CommandExecutor,
     shortcut_executor: CommandExecutor,
+    system_executor: system_executor::SystemAdjustmentExecutor,
+    local_executor: local_executor::LocalExecutor,
+    local_invocations: HashMap<u64, u64>,
+    local_editor: local_editor::LocalEditor,
+    wheel_local_editor: local_editor::LocalEditor,
     action_status: HashMap<u64, String>,
     action_log: VecDeque<String>,
     bindings: Vec<Binding>,
@@ -467,13 +527,17 @@ impl Workspace {
 
     fn new(
         cx: &mut Context<Self>,
-        ui_smoke: bool,
-        open_panel: bool,
-        initial_wheel: Option<String>,
-        wheel_editor: bool,
+        startup: StartupOptions,
         main_window: AnyWindowHandle,
         title_bar: Result<isize, String>,
     ) -> Self {
+        let StartupOptions {
+            ui_smoke,
+            panel: open_panel,
+            wheel: initial_wheel,
+            wheel_target: wheel_launch_target,
+            wheel_editor,
+        } = startup;
         let (bindings, load_error) = match settings::load() {
             Ok(bindings) => (bindings, None),
             Err(error) => (Vec::new(), Some(error)),
@@ -516,7 +580,20 @@ impl Workspace {
             Ok(wheels) => (wheels, None),
             Err(error) => (Wheels { wheels: Vec::new() }, Some(error)),
         };
-        let initial_definition = wheels.wheels.first();
+        let initial_definition = bindings
+            .iter()
+            .find_map(|binding| {
+                if binding.enabled && matches!(binding.spec.activation, Activation::Drag { .. }) {
+                    if let ActionSpec::ShowWheel(reference) = &binding.action {
+                        return wheels
+                            .wheels
+                            .iter()
+                            .find(|wheel| wheel.id == reference.wheel_id);
+                    }
+                }
+                None
+            })
+            .or_else(|| wheels.wheels.first());
         let wheel_selected = initial_definition.map(|wheel| wheel.id.clone());
         let wheel_name = cx.new(|cx| {
             let mut input = MessageInput::new(cx).with_character_limit(30);
@@ -576,7 +653,28 @@ impl Workspace {
         });
         cx.observe(&action_search, |_, _, cx| cx.notify()).detach();
         let initial_activation = bindings.first().map(|binding| binding.spec.activation);
-        let hold_mode = matches!(initial_activation, Some(Activation::Hold { .. }));
+        let trigger_mode = initial_activation.map_or(TriggerMode::Press, TriggerMode::of);
+        let mut local_editor = local_editor::LocalEditor::new(cx);
+        if let ActionSpec::Local(action) = &draft_action {
+            local_editor.load(action, cx);
+        }
+        let wheel_local_editor = local_editor::LocalEditor::new(cx);
+        let condition_editor = trigger_conditions::ConditionEditor::new(
+            cx,
+            bindings.first().map(|binding| &binding.spec),
+        );
+        let initial_adjustment_amount = if let ActionSpec::AdjustSystem(action) = draft_action {
+            action.delta_percent.unsigned_abs().to_string()
+        } else {
+            "5".into()
+        };
+        let adjustment_amount = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(3);
+            input.set_text(initial_adjustment_amount, cx);
+            input
+        });
+        cx.observe(&adjustment_amount, |_, _, cx| cx.notify())
+            .detach();
         let hold_duration = cx.new(|cx| {
             let mut input = MessageInput::new(cx).with_character_limit(10);
             input.set_placeholder("50–10000 毫秒");
@@ -589,6 +687,27 @@ impl Workspace {
             );
             input
         });
+        let (distance, window_ms) = match initial_activation {
+            Some(Activation::Drag {
+                min_distance_px,
+                max_start_ms,
+                ..
+            }) => (min_distance_px, max_start_ms),
+            _ => (DEFAULT_DRAG_DISTANCE_PX, DEFAULT_DRAG_START_MS),
+        };
+        let drag_distance = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(10);
+            input.set_text(distance.to_string(), cx);
+            input
+        });
+        let drag_window = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(10);
+            input.set_text(window_ms.to_string(), cx);
+            input
+        });
+        for input in [&hold_duration, &drag_distance, &drag_window] {
+            cx.observe(input, |_, _, cx| cx.notify()).detach();
+        }
         let program = cx.new(|cx| {
             let mut input = MessageInput::new(cx).with_character_limit(512 * 1024);
             input.set_placeholder("可执行文件的完整路径");
@@ -650,8 +769,13 @@ impl Workspace {
             },
             history_filter: HistoryFilter::All,
             message,
-            hold_mode,
+            trigger_mode,
+            condition_editor,
+            recording_conditions: Vec::new(),
+            adjustment_amount,
             hold_duration,
+            drag_distance,
+            drag_window,
             draft_action,
             recording_for_panel: false,
             recording_preserve_action: false,
@@ -676,15 +800,23 @@ impl Workspace {
             wheel_registered: None,
             wheel_generation: 0,
             wheel_active: None,
+            wheel_active_definition: None,
             wheel_target: None,
             wheel_runtime_ids: HashMap::new(),
             wheel_requests,
             wheel_sender,
             open_wheel_on_ready: initial_wheel,
+            wheel_launch_target,
+            drag_wheel_session: None,
             install_events: None,
             install_status: None,
             executor: CommandExecutor::new(),
             shortcut_executor: CommandExecutor::shortcuts(),
+            system_executor: system_executor::SystemAdjustmentExecutor::new(),
+            local_executor: local_executor::LocalExecutor::new(),
+            local_invocations: HashMap::new(),
+            local_editor,
+            wheel_local_editor,
             action_status: HashMap::new(),
             action_log: VecDeque::new(),
             bindings,
@@ -813,6 +945,14 @@ impl Workspace {
     }
 
     fn send(&mut self, command: BackendCommand) -> bool {
+        if matches!(
+            command,
+            BackendCommand::SetEnabled(false)
+                | BackendCommand::StartRecording
+                | BackendCommand::Shutdown
+        ) {
+            self.local_executor.cancel_all();
+        }
         let result = self
             .backend
             .as_ref()
@@ -887,6 +1027,76 @@ impl Workspace {
                 self.install_events = Some(events);
             }
         }
+        for _ in 0..64 {
+            let Ok(event) = self.local_executor.try_recv() else {
+                break;
+            };
+            if event.outcome.is_terminal()
+                && self.local_invocations.get(&event.id) == Some(&event.invocation_id)
+            {
+                self.local_invocations.remove(&event.id);
+            }
+            changed = true;
+            use local_executor::LocalExecutionOutcome;
+            let (message, failed) = match event.outcome {
+                LocalExecutionOutcome::StepProgress {
+                    step_index,
+                    description,
+                } => (
+                    format!(
+                        "运行 {} · 第 {} 步：{}",
+                        event.invocation_id,
+                        step_index + 1,
+                        description
+                    ),
+                    false,
+                ),
+                LocalExecutionOutcome::Finished {
+                    completed_steps,
+                    summary,
+                } => (
+                    format!(
+                        "运行 {} 已完成 {completed_steps} 步 · {summary}",
+                        event.invocation_id
+                    ),
+                    false,
+                ),
+                LocalExecutionOutcome::Failed {
+                    completed_steps,
+                    failed_step,
+                    message,
+                } => (
+                    format!(
+                        "运行 {} 在{}失败，已完成 {completed_steps} 步：{message}",
+                        event.invocation_id,
+                        failed_step.map_or_else(
+                            || "准备阶段".into(),
+                            |index| format!("第 {} 步", index + 1)
+                        )
+                    ),
+                    true,
+                ),
+                LocalExecutionOutcome::Cancelled {
+                    completed_steps, ..
+                } => (
+                    format!(
+                        "运行 {} 已取消，已完成 {completed_steps} 步",
+                        event.invocation_id
+                    ),
+                    false,
+                ),
+            };
+            if failed {
+                self.action_error = Some((event.id, message.clone()));
+            } else if self
+                .action_error
+                .as_ref()
+                .is_some_and(|(id, _)| *id == event.id)
+            {
+                self.action_error = None;
+            }
+            self.record_action_status(event.id, message);
+        }
         for _ in 0..8 {
             match self.panel_requests.try_recv() {
                 Ok(PanelRequest::Run(id)) => {
@@ -924,6 +1134,37 @@ impl Workspace {
         if !panel_visible && self.panel_registered.take().is_some() {
             self.send(BackendCommand::SetPanelWindow(None));
         }
+        for _ in 0..8 {
+            let Ok(event) = self.system_executor.try_recv() else {
+                break;
+            };
+            changed = true;
+            let (text, failed) = match event.result {
+                Ok(result) => (
+                    format!(
+                        "{} 当前 {}% · {}",
+                        match result.kind {
+                            omnitrigger_windows::AdjustmentKind::Volume => "音量",
+                            omnitrigger_windows::AdjustmentKind::Brightness => "亮度",
+                        },
+                        result.current_percent,
+                        result.target_label
+                    ),
+                    false,
+                ),
+                Err(error) => (error, true),
+            };
+            if failed {
+                self.action_error = Some((event.id, text.clone()));
+            } else if self
+                .action_error
+                .as_ref()
+                .is_some_and(|(id, _)| *id == event.id)
+            {
+                self.action_error = None;
+            }
+            self.record_action_status(event.id, text);
+        }
         while let Ok(event) = self
             .executor
             .try_recv()
@@ -932,6 +1173,7 @@ impl Workspace {
             changed = true;
             let (text, failed) = match event.outcome {
                 ExecutionOutcome::ShortcutSent => ("已发送快捷键".into(), false),
+                ExecutionOutcome::WindowApplied => ("已提交窗口操作".into(), false),
                 ExecutionOutcome::Started { pid } => (format!("已启动进程（PID {pid}）"), false),
                 ExecutionOutcome::Finished { code, success } => (
                     format!(
@@ -1001,6 +1243,7 @@ impl Workspace {
                 }
                 BackendEvent::RecordingProgress(held) => self.recording_held = held,
                 BackendEvent::Recorded(mut spec) => {
+                    spec.conditions = self.recording_conditions.clone();
                     self.recording = false;
                     self.recording_held.clear();
                     let editing = self.recording_edit_id.take();
@@ -1064,7 +1307,12 @@ impl Workspace {
                         queue_ms: elapsed_ms(matched_at),
                     });
                 }
-                BackendEvent::Triggered(id) => self.fire(id, HitSource::Input, cx),
+                BackendEvent::Triggered { id, pointer } => {
+                    self.fire_at(id, HitSource::Input, pointer, cx)
+                }
+                BackendEvent::Drag { event, foreground } => {
+                    self.handle_drag_event(event, foreground, cx)
+                }
                 BackendEvent::PointerPressed { x, y } => {
                     if let Some(wheel) = self.wheel_window {
                         let _ = wheel.update(cx, |view, window, _| {
@@ -1108,6 +1356,7 @@ impl Workspace {
                     }
                 }
                 BackendEvent::EscapePressed => {
+                    self.local_executor.cancel_all();
                     if let Some(wheel) = self.wheel_window {
                         let _ = wheel.update(cx, |view, window, _| view.dismiss_escape(window));
                     }
@@ -1188,7 +1437,11 @@ impl Workspace {
         }
         if self.open_wheel_on_ready.is_some() && (self.ready || self.backend.is_none()) {
             if let Some(id) = self.open_wheel_on_ready.take() {
-                self.open_wheel(&id, cx);
+                if let Some(target) = self.wheel_launch_target.take() {
+                    self.open_wheel_after_launch(id, target, cx);
+                } else {
+                    self.open_wheel(&id, cx);
+                }
             }
         }
     }
@@ -1199,7 +1452,9 @@ impl Workspace {
 
     fn action_available(&self, action: &ActionSpec) -> bool {
         match action {
-            ActionSpec::ShowWheel(_) => self.action_unavailable_reason(action).is_none(),
+            ActionSpec::ShowWheel(_) | ActionSpec::External(_) => {
+                self.action_unavailable_reason(action).is_none()
+            }
             ActionSpec::Plugin(reference) => {
                 self.plugin_settings_error.is_none() && self.plugins.availability(reference).is_ok()
             }
@@ -1208,8 +1463,17 @@ impl Workspace {
     }
 
     fn action_busy(&self, id: u64, action: &ActionSpec) -> bool {
+        // 每次按压/拖拽都是独立调用；快捷键可在有界 FIFO 中排队，不因未读结果互斥。
+        if matches!(
+            action,
+            ActionSpec::SendShortcut(_) | ActionSpec::Window(_) | ActionSpec::AdjustSystem(_)
+        ) {
+            return false;
+        }
         self.executor.is_running(id)
             || self.shortcut_executor.is_running(id)
+            || self.system_executor.is_running(id)
+            || self.local_executor.is_running(id)
             || match action {
                 ActionSpec::Plugin(reference) => self
                     .plugins
@@ -1221,6 +1485,7 @@ impl Workspace {
 
     fn action_unavailable_reason(&self, action: &ActionSpec) -> Option<String> {
         match action {
+            ActionSpec::External(action) => action.unavailable_reason(),
             ActionSpec::ShowWheel(reference) => self.wheels_error.clone().or_else(|| {
                 (!self
                     .wheels
@@ -1254,13 +1519,26 @@ impl Workspace {
     }
 
     fn load_trigger_fields(&mut self, spec: &TriggerSpec, cx: &mut Context<Self>) {
-        self.hold_mode = matches!(spec.activation, Activation::Hold { .. });
+        self.condition_editor.load(spec, cx);
+        self.trigger_mode = TriggerMode::of(spec.activation);
         let duration = match spec.activation {
             Activation::Hold { duration_ms, .. } => duration_ms,
             _ => 300,
         };
         self.hold_duration
             .update(cx, |input, cx| input.set_text(duration.to_string(), cx));
+        let (distance, window_ms) = match spec.activation {
+            Activation::Drag {
+                min_distance_px,
+                max_start_ms,
+                ..
+            } => (min_distance_px, max_start_ms),
+            _ => (DEFAULT_DRAG_DISTANCE_PX, DEFAULT_DRAG_START_MS),
+        };
+        self.drag_distance
+            .update(cx, |input, cx| input.set_text(distance.to_string(), cx));
+        self.drag_window
+            .update(cx, |input, cx| input.set_text(window_ms.to_string(), cx));
     }
 
     fn draft_spec(&self, base: &TriggerSpec, cx: &App) -> Result<TriggerSpec, String> {
@@ -1270,10 +1548,17 @@ impl Workspace {
             .filter(|spec| spec.id == base.id)
             .unwrap_or(base);
         let button = match base.activation {
-            Activation::Press(button) | Activation::Hold { button, .. } => button,
-            Activation::Wheel(_) => return Ok(base.clone()),
+            Activation::Press(button)
+            | Activation::Hold { button, .. }
+            | Activation::Drag { button, .. } => button,
+            Activation::Wheel(_) => {
+                return Ok(TriggerSpec {
+                    conditions: self.condition_editor.conditions(cx)?,
+                    ..base.clone()
+                })
+            }
         };
-        let activation = if self.hold_mode {
+        let activation = if self.trigger_mode == TriggerMode::Hold {
             let duration_ms: u32 = self
                 .hold_duration
                 .read(cx)
@@ -1288,17 +1573,44 @@ impl Workspace {
                 button,
                 duration_ms,
             }
+        } else if self.trigger_mode == TriggerMode::Drag {
+            if !matches!(button, Button::Mouse(_)) {
+                return Err("快速拖拽仅适用于鼠标按键，请选择鼠标预设或重新录制。".into());
+            }
+            let min_distance_px = self
+                .drag_distance
+                .read(cx)
+                .text()
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "拖拽距离请输入 4–500 的整数像素。".to_string())?;
+            let max_start_ms = self
+                .drag_window
+                .read(cx)
+                .text()
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "启动时窗请输入 20–2000 的整数毫秒。".to_string())?;
+            if !(4..=500).contains(&min_distance_px) || !(20..=2000).contains(&max_start_ms) {
+                return Err("快速拖拽距离应为 4–500px，启动时窗应为 20–2000ms。".into());
+            }
+            Activation::Drag {
+                button,
+                min_distance_px,
+                max_start_ms,
+            }
         } else {
             Activation::Press(button)
         };
         Ok(TriggerSpec {
             activation,
+            conditions: self.condition_editor.conditions(cx)?,
             ..base.clone()
         })
     }
 
-    fn set_hold_mode(&mut self, hold: bool, cx: &mut Context<Self>) {
-        self.hold_mode = hold;
+    fn set_trigger_mode(&mut self, mode: TriggerMode, cx: &mut Context<Self>) {
+        self.trigger_mode = mode;
         if let Some(base) = self.pending.clone() {
             match self.draft_spec(&base, cx) {
                 Ok(spec) => {
@@ -1646,6 +1958,16 @@ impl Workspace {
     }
 
     fn fire(&mut self, id: u64, source: HitSource, cx: &mut Context<Self>) {
+        self.fire_at(id, source, None, cx);
+    }
+
+    fn fire_at(
+        &mut self,
+        id: u64,
+        source: HitSource,
+        pointer: Option<(i32, i32)>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(binding) = self.binding(id) {
             if !binding.enabled || self.recording {
                 return;
@@ -1661,6 +1983,9 @@ impl Workspace {
             let action = binding.action.clone();
             let panel_behavior = PanelBehavior::for_activation(binding.spec.activation);
             let is_hold = matches!(binding.spec.activation, Activation::Hold { .. });
+            let is_drag_wheel = source == HitSource::Input
+                && matches!(binding.spec.activation, Activation::Drag { .. })
+                && matches!(action, ActionSpec::ShowWheel(_));
             let timing = if source == HitSource::Input && is_hold {
                 self.last_hold_timing.take().filter(|trace| trace.id == id)
             } else {
@@ -1671,13 +1996,16 @@ impl Workspace {
                 stats.hits += 1;
                 stats.last = Some(clock());
             }
-            if matches!(action, ActionSpec::ShowPanel) {
+            if is_drag_wheel {
+                // 同一次匹配的 Started/Ended 生命周期负责轮盘交互；这里仅记录命中。
+                self.record_hit(caps, message, source);
+            } else if matches!(action, ActionSpec::ShowPanel) {
                 self.record_hit(caps, message, source);
                 self.open_panel(panel_behavior, timing, cx);
             } else if !matches!(action, ActionSpec::Notification) {
                 // 截图等动作可能立即采集屏幕，执行前不弹出自己的提示浮层。
                 self.record_hit(caps, message, source);
-                self.dispatch_action(id, action, cx);
+                self.dispatch_action_context(id, action, None, pointer, cx);
             } else {
                 self.show_message(caps, message, source, cx);
             }
@@ -1717,10 +2045,80 @@ impl Workspace {
     }
 
     fn dispatch_action(&mut self, id: u64, action: ActionSpec, cx: &mut Context<Self>) {
+        self.dispatch_action_to(id, action, None, cx);
+    }
+
+    fn dispatch_action_to(
+        &mut self,
+        id: u64,
+        action: ActionSpec,
+        target: Option<omnitrigger_windows::ShortcutTarget>,
+        cx: &mut Context<Self>,
+    ) {
+        self.dispatch_action_context(id, action, target, None, cx);
+    }
+
+    fn dispatch_action_context(
+        &mut self,
+        id: u64,
+        action: ActionSpec,
+        target: Option<omnitrigger_windows::ShortcutTarget>,
+        pointer: Option<(i32, i32)>,
+        cx: &mut Context<Self>,
+    ) {
         match action {
+            ActionSpec::Local(action) => {
+                let target = target
+                    .map(Ok)
+                    .unwrap_or_else(omnitrigger_windows::capture_shortcut_target);
+                let result =
+                    target.and_then(|target| self.local_executor.submit(id, action, target));
+                match result {
+                    Ok(invocation) => {
+                        self.local_invocations.insert(id, invocation);
+                        self.action_error = None;
+                        self.record_action_status(
+                            id,
+                            format!("本地动作已排队 · 运行 {invocation}"),
+                        );
+                    }
+                    Err(error) => {
+                        self.action_error = Some((id, error.clone()));
+                        self.record_action_status(id, error);
+                    }
+                }
+                cx.notify();
+            }
+            ActionSpec::AdjustSystem(action) => {
+                let point = pointer.or_else(|| {
+                    self.backend
+                        .as_ref()
+                        .and_then(|backend| backend.pointer_position())
+                });
+                let result = point
+                    .ok_or_else(|| "尚未获取鼠标位置，请恢复监听后重试。".to_string())
+                    .and_then(|point| self.system_executor.submit(id, action, point));
+                match result {
+                    Ok(()) => {
+                        self.action_error = None;
+                        self.record_action_status(id, format!("等待{}", action.display()));
+                    }
+                    Err(error) => {
+                        self.action_error = Some((id, error.clone()));
+                        self.record_action_status(id, error);
+                    }
+                }
+                cx.notify();
+            }
             ActionSpec::ShowWheel(reference) => self.open_wheel(&reference.wheel_id, cx),
             ActionSpec::SendShortcut(shortcut) => {
-                match self.shortcut_executor.submit_shortcut(id, shortcut) {
+                let result = match target {
+                    Some(target) => self
+                        .shortcut_executor
+                        .submit_shortcut_to(id, shortcut, target),
+                    None => self.shortcut_executor.submit_shortcut(id, shortcut),
+                };
+                match result {
                     Ok(()) => {
                         self.action_error = None;
                         self.record_action_status(id, "等待发送快捷键".into());
@@ -1733,6 +2131,44 @@ impl Workspace {
                 cx.notify();
             }
             ActionSpec::Command(command) => self.submit_action(id, command, cx),
+            ActionSpec::External(action) => {
+                let provider = action.provider.clone();
+                let result = action
+                    .validate()
+                    .and_then(|()| action.unavailable_reason().map_or(Ok(()), Err))
+                    .and_then(|()| match target {
+                        Some(target) => self.executor.submit_external_to(id, action, target),
+                        None => self.executor.submit_external(id, action),
+                    });
+                match result {
+                    Ok(()) => {
+                        self.action_error = None;
+                        self.record_action_status(id, format!("等待调用 {provider} 外部动作"));
+                    }
+                    Err(error) => {
+                        self.action_error = Some((id, error.clone()));
+                        self.record_action_status(id, error);
+                    }
+                }
+                cx.notify();
+            }
+            ActionSpec::Window(action) => {
+                let result = match target {
+                    Some(target) => self.shortcut_executor.submit_window_to(id, action, target),
+                    None => self.shortcut_executor.submit_window(id, action),
+                };
+                match result {
+                    Ok(()) => {
+                        self.action_error = None;
+                        self.record_action_status(id, "等待窗口操作".into());
+                    }
+                    Err(error) => {
+                        self.action_error = Some((id, error.clone()));
+                        self.record_action_status(id, error);
+                    }
+                }
+                cx.notify();
+            }
             ActionSpec::Plugin(reference) => {
                 let result = if let Some(error) = &self.plugin_settings_error {
                     Err(error.clone())
@@ -1794,6 +2230,12 @@ impl Workspace {
     }
 
     fn draft_action_spec(&self, cx: &App) -> Result<ActionSpec, String> {
+        if matches!(self.draft_action, ActionSpec::Local(_)) {
+            return self.local_editor.snapshot(cx).map(ActionSpec::Local);
+        }
+        if matches!(self.draft_action, ActionSpec::AdjustSystem(_)) {
+            return self.draft_adjustment(cx).map(ActionSpec::AdjustSystem);
+        }
         if matches!(self.draft_action, ActionSpec::SendShortcut(_)) {
             return ShortcutAction::parse(&self.shortcut_keys.read(cx).text())
                 .map(ActionSpec::SendShortcut);
@@ -1973,6 +2415,14 @@ impl Workspace {
     }
 
     fn load_action(&mut self, action: ActionSpec, cx: &mut Context<Self>) {
+        if let ActionSpec::Local(local) = &action {
+            self.local_editor.load(local, cx);
+        }
+        if let ActionSpec::AdjustSystem(adjustment) = action {
+            self.adjustment_amount.update(cx, |input, cx| {
+                input.set_text(adjustment.delta_percent.unsigned_abs().to_string(), cx)
+            });
+        }
         let shortcut_text = match &action {
             ActionSpec::SendShortcut(shortcut) => shortcut.display(),
             _ => "Backspace".into(),
@@ -2025,6 +2475,14 @@ impl Workspace {
         if self.listener() != Listener::Listening {
             return;
         }
+        self.recording_conditions = match self.condition_editor.conditions(cx) {
+            Ok(conditions) => conditions,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
         self.hide_wheel(cx);
         self.error = None;
         self.recording_for_panel = false;
@@ -2325,6 +2783,7 @@ impl Workspace {
             .cloned()
             .collect();
         if self.apply(bindings) {
+            self.local_executor.cancel_id(id);
             self.stats.remove(&id);
             self.action_status.remove(&id);
             self.confirm_delete = None;
@@ -2649,7 +3108,7 @@ impl Workspace {
                                 Page::Actions,
                                 Icon::Grid,
                                 "动作库",
-                                Some(1),
+                                Some(2),
                             ))
                             .child(nav(
                                 "nav-wheels",
@@ -3178,23 +3637,98 @@ impl Workspace {
             .gap(px(10.))
             .child(section_title("触发方式"));
         if matches!(spec.activation, Activation::Wheel(_)) {
-            return fields.child(caption("滚轮达到一格时触发；组合由同一份触发描述保存。"));
+            let mut directions = theme::segments();
+            for (key, label, direction) in [
+                ("wheel-up", "上滚", omnitrigger_core::WheelDirection::Up),
+                ("wheel-down", "下滚", omnitrigger_core::WheelDirection::Down),
+                ("wheel-left", "左滚", omnitrigger_core::WheelDirection::Left),
+                (
+                    "wheel-right",
+                    "右滚",
+                    omnitrigger_core::WheelDirection::Right,
+                ),
+            ] {
+                directions = directions.child(
+                    segment(key, label, spec.activation == Activation::Wheel(direction))
+                        .flex_1()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(base) = this
+                                .pending
+                                .as_ref()
+                                .or_else(|| {
+                                    this.selected
+                                        .and_then(|id| this.binding(id))
+                                        .map(|binding| &binding.spec)
+                                })
+                                .cloned()
+                            {
+                                this.edited_spec = Some(TriggerSpec {
+                                    activation: Activation::Wheel(direction),
+                                    ..base
+                                });
+                                cx.notify();
+                            }
+                        })),
+                );
+            }
+            return fields
+                .child(directions)
+                .child(caption("滚轮累计一格时触发；位置条件和按住组合独立配置。"))
+                .child(self.condition_fields(cx));
         }
         fields
             .child(
                 theme::segments()
                     .child(
-                        segment("trigger-press", "按下即触发", !self.hold_mode)
-                            .flex_1()
-                            .on_click(cx.listener(|this, _, _, cx| this.set_hold_mode(false, cx))),
+                        segment(
+                            "trigger-press",
+                            "按下即触发",
+                            self.trigger_mode == TriggerMode::Press,
+                        )
+                        .flex_1()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_trigger_mode(TriggerMode::Press, cx)
+                        })),
                     )
                     .child(
-                        segment("trigger-hold", "长按触发", self.hold_mode)
-                            .flex_1()
-                            .on_click(cx.listener(|this, _, _, cx| this.set_hold_mode(true, cx))),
+                        segment(
+                            "trigger-hold",
+                            "长按触发",
+                            self.trigger_mode == TriggerMode::Hold,
+                        )
+                        .flex_1()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_trigger_mode(TriggerMode::Hold, cx)
+                        })),
+                    )
+                    .child(
+                        segment(
+                            "trigger-drag",
+                            "快速拖拽",
+                            self.trigger_mode == TriggerMode::Drag,
+                        )
+                        .flex_1()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_trigger_mode(TriggerMode::Drag, cx)
+                        })),
                     ),
             )
-            .when(self.hold_mode, |el| {
+            .when(self.trigger_mode == TriggerMode::Drag, |el| {
+                el.child(Self::input_field(
+                    "启动距离（物理像素）",
+                    &self.drag_distance,
+                    Some("4–500；在时窗内达到位移阈值后认领本次按压。"),
+                ))
+                .child(Self::input_field(
+                    "启动时窗（毫秒）",
+                    &self.drag_window,
+                    Some("20–2000；须早于同组合的长按阈值。默认 18px / 180ms。"),
+                ))
+                .child(caption(
+                    "轮盘动作在认领后持续按住选择，松开执行；其他动作在认领时执行。",
+                ))
+            })
+            .when(self.trigger_mode == TriggerMode::Hold, |el| {
                 el.child(Self::input_field(
                     "长按时间（毫秒）",
                     &self.hold_duration,
@@ -3204,6 +3738,7 @@ impl Workspace {
                     "额外按键或滚轮取消等待；鼠标位移超过 8px 也会取消。",
                 ))
             })
+            .child(self.condition_fields(cx))
     }
 
     fn render_presets(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3216,6 +3751,8 @@ impl Workspace {
             .flex_col()
             .gap(px(22.));
         for (group, glyph, tint) in [
+            ("快速拖拽", Icon::Mouse, theme::ACCENT),
+            ("屏幕区域", Icon::Mouse, theme::ACCENT_2),
             ("长按", Icon::Clock, theme::VIOLET),
             ("键盘组合", Icon::Keyboard, theme::ACCENT_2),
             ("单键与鼠标组合", Icon::Mouse, theme::PINK),
@@ -3344,13 +3881,15 @@ impl Workspace {
                                 div()
                                     .text_size(px(13.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child("推荐：右键长按 300ms"),
+                                    .child("右键快拖与静止长按可以共存"),
                             )
                             .child(
                                 div()
                                     .text_size(px(12.))
                                     .text_color(rgb(theme::TEXT_MUTED))
-                                    .child("普通短按会延后补发；移动超过 8px 时取消长按候选。"),
+                                    .child(
+                                        "快拖时窗必须早于长按阈值；命中后由同一次按压互斥认领。",
+                                    ),
                             ),
                     ),
             )
@@ -3413,6 +3952,8 @@ impl Workspace {
         let plugin = matches!(self.draft_action, ActionSpec::Plugin(_));
         let shortcut = matches!(self.draft_action, ActionSpec::SendShortcut(_));
         let wheel = matches!(self.draft_action, ActionSpec::ShowWheel(_));
+        let system = matches!(self.draft_action, ActionSpec::AdjustSystem(_));
+        let local = matches!(self.draft_action, ActionSpec::Local(_));
         div()
             .flex()
             .flex_col()
@@ -3511,6 +4052,18 @@ impl Workspace {
                     ),
             )
             .when(wheel, |el| el.child(self.draft_wheel_fields(cx)))
+            .child(Self::kind_tile("system-adjustment",Icon::Pulse,theme::ACCENT_2,"音量 / 屏幕亮度",system).on_click(cx.listener(|this,_,_,cx| {
+                this.draft_action=ActionSpec::AdjustSystem(system_action::SystemAdjustmentAction {target:system_action::AdjustmentTarget::Volume,delta_percent:5});
+                this.adjustment_amount.update(cx,|input,cx|input.set_text("5",cx));
+                cx.notify();
+            })))
+            .when(system,|el|el.child(self.system_action_fields(cx)))
+            .child(Self::kind_tile("local-action",Icon::Layers,theme::ACCENT_2,"本地步骤动作",local).on_click(cx.listener(|this,_,_,cx|this.choose_local_action(cx))))
+            .when(local,|el|el.child(self.local_action_fields(false,cx))
+                .child(div().flex().flex_wrap().gap(px(6.))
+                    .child(small(button("test-local-action","运行当前草稿",Tone::Secondary,!self.recording)).on_click(cx.listener(|this,_,_,cx|this.test_action(cx))))
+                    .child(small(button("cancel-local-action","停止此动作",Tone::Danger,true)).on_click(cx.listener(|this,_,_,cx|this.stop_local_action(false,cx)))))
+                .child(caption("输入步骤作用于运行时的前台窗口。正式试用请保存并切换到目标软件，再用组合触发。")))
             .child(self.message_field("动作名称 / 提示消息", hint))
             .when(panel, |el| {
                 el.child(caption(
@@ -4201,7 +4754,7 @@ impl Workspace {
                         Icon::Panel,
                         theme::RECORD,
                         thousands(self.panel_click_count),
-                        "面板点击",
+                        "面板 / 轮盘",
                     ))
                     .child(chip(
                         Icon::Play,
@@ -4910,6 +5463,16 @@ fn smoke_test() -> Result<(), String> {
 
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
+    if let Some(result) = system_action::cli(&arguments) {
+        match result {
+            Ok(text) => println!("{text}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if let Some(index) = arguments.iter().position(|argument| argument == "--config") {
         let result = arguments
             .get(index + 1)
@@ -4994,6 +5557,18 @@ fn main() {
     let wheel_editor = arguments
         .iter()
         .any(|argument| argument == "--wheel-editor");
+    let preserve_foreground = initial_wheel.is_some() && !wheel_editor;
+    let wheel_launch_target = if preserve_foreground {
+        match omnitrigger_windows::capture_shortcut_target() {
+            Ok(target) => Some(target),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
@@ -5003,6 +5578,7 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(920.), px(620.))),
+                    focus: !preserve_foreground,
                     titlebar: Some(TitlebarOptions {
                         title: Some("OmniTrigger".into()),
                         ..Default::default()
@@ -5024,10 +5600,13 @@ fn main() {
                     let view = cx.new(|cx| {
                         Workspace::new(
                             cx,
-                            ui_smoke,
-                            open_panel && initial_wheel.is_none(),
-                            initial_wheel,
-                            wheel_editor,
+                            StartupOptions {
+                                ui_smoke,
+                                panel: open_panel && initial_wheel.is_none(),
+                                wheel: initial_wheel,
+                                wheel_target: wheel_launch_target,
+                                wheel_editor,
+                            },
                             main_window,
                             title_bar,
                         )
@@ -5047,7 +5626,9 @@ fn main() {
                 eprintln!("无法启动 OmniTrigger 界面：{error}");
                 cx.quit();
             }
-            cx.activate(true);
+            if !preserve_foreground {
+                cx.activate(true);
+            }
         });
 }
 

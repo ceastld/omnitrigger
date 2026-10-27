@@ -11,9 +11,14 @@ use std::sync::{
 };
 
 use crate::execution::CommandAction;
+use crate::external_action::ExternalAction;
+use crate::local_action::LocalAction;
 use crate::plugins::PluginActionRef;
 use crate::shortcut::ShortcutAction;
+use crate::system_action::SystemAdjustmentAction;
+use crate::trigger_conditions::ConditionDto;
 use crate::wheels::WheelActionRef;
+use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
 
@@ -37,6 +42,10 @@ pub enum ActionSpec {
     ShowWheel(WheelActionRef),
     Command(CommandAction),
     SendShortcut(ShortcutAction),
+    Window(WindowAction),
+    External(ExternalAction),
+    AdjustSystem(SystemAdjustmentAction),
+    Local(LocalAction),
     Plugin(PluginActionRef),
 }
 
@@ -56,6 +65,8 @@ struct BindingDto {
     id: u64,
     #[serde(rename = "held")]
     held: Vec<ButtonDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    conditions: Vec<ConditionDto>,
     #[serde(rename = "activation")]
     activation: ActivationDto,
     #[serde(rename = "message")]
@@ -85,7 +96,15 @@ enum ButtonDto {
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 enum ActivationDto {
     Press(ButtonDto),
-    Hold { button: ButtonDto, duration_ms: u32 },
+    Hold {
+        button: ButtonDto,
+        duration_ms: u32,
+    },
+    Drag {
+        button: ButtonDto,
+        min_distance_px: u32,
+        max_start_ms: u32,
+    },
     WheelUp,
     WheelDown,
     WheelLeft,
@@ -123,6 +142,7 @@ impl From<&Binding> for BindingDto {
         Self {
             id: binding.spec.id,
             held: binding.spec.held.iter().copied().map(Into::into).collect(),
+            conditions: binding.spec.conditions.iter().map(Into::into).collect(),
             activation: match binding.spec.activation {
                 Activation::Press(button) => ActivationDto::Press(button.into()),
                 Activation::Hold {
@@ -131,6 +151,15 @@ impl From<&Binding> for BindingDto {
                 } => ActivationDto::Hold {
                     button: button.into(),
                     duration_ms,
+                },
+                Activation::Drag {
+                    button,
+                    min_distance_px,
+                    max_start_ms,
+                } => ActivationDto::Drag {
+                    button: button.into(),
+                    min_distance_px,
+                    max_start_ms,
                 },
                 Activation::Wheel(WheelDirection::Up) => ActivationDto::WheelUp,
                 Activation::Wheel(WheelDirection::Down) => ActivationDto::WheelDown,
@@ -148,7 +177,10 @@ impl From<&Binding> for BindingDto {
 
 impl BindingDto {
     fn into_binding(self, version: u32) -> Result<Binding, String> {
-        let action = if version == 5 {
+        if version < 6 && !self.conditions.is_empty() {
+            return Err("位置条件需要版本 6 配置。".into());
+        }
+        let action = if version >= 5 {
             if self.command.is_some() || self.show_panel.is_some() {
                 return Err("版本 5 配置不能混用旧版 command / show_panel 字段。".into());
             }
@@ -171,8 +203,15 @@ impl BindingDto {
                 ActionSpec::Notification
             }
         };
+        if version < 6 && matches!(action, ActionSpec::AdjustSystem(_)) {
+            return Err("系统调节动作需要版本 6 配置。".into());
+        }
+        if version < 7 && matches!(action, ActionSpec::Local(_)) {
+            return Err("本地步骤动作需要版本 7 配置。".into());
+        }
         Ok(Binding {
             spec: TriggerSpec {
+                conditions: self.conditions.into_iter().map(Into::into).collect(),
                 id: self.id,
                 held: self.held.into_iter().map(Into::into).collect(),
                 activation: match self.activation {
@@ -183,6 +222,15 @@ impl BindingDto {
                     } => Activation::Hold {
                         button: button.into(),
                         duration_ms,
+                    },
+                    ActivationDto::Drag {
+                        button,
+                        min_distance_px,
+                        max_start_ms,
+                    } => Activation::Drag {
+                        button: button.into(),
+                        min_distance_px,
+                        max_start_ms,
                     },
                     ActivationDto::WheelUp => Activation::Wheel(WheelDirection::Up),
                     ActivationDto::WheelDown => Activation::Wheel(WheelDirection::Down),
@@ -201,6 +249,7 @@ pub fn defaults() -> Vec<Binding> {
     vec![
         Binding {
             spec: TriggerSpec {
+                conditions: Vec::new(),
                 id: 1,
                 held: vec![Button::Key(0x14)],
                 activation: Activation::Press(Button::Key(0x57)),
@@ -211,6 +260,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                conditions: Vec::new(),
                 id: 2,
                 held: vec![Button::Mouse(MouseButton::X1)],
                 activation: Activation::Wheel(WheelDirection::Up),
@@ -221,6 +271,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                conditions: Vec::new(),
                 id: 3,
                 held: vec![Button::Mouse(MouseButton::X1)],
                 activation: Activation::Wheel(WheelDirection::Down),
@@ -231,6 +282,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                conditions: Vec::new(),
                 id: 4,
                 held: vec![Button::Key(0x14)],
                 activation: Activation::Press(Button::Key(0x20)),
@@ -241,6 +293,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                conditions: Vec::new(),
                 id: 5,
                 held: vec![],
                 activation: Activation::Hold {
@@ -269,7 +322,7 @@ pub fn path() -> PathBuf {
 fn decode(text: &str) -> Result<Vec<Binding>, String> {
     let settings: Settings =
         serde_json::from_str(text).map_err(|e| format!("配置格式有误：{e}"))?;
-    if !matches!(settings.version, 1..=5) {
+    if !matches!(settings.version, 1..=7) {
         return Err("配置版本不受支持，原文件已保留。".into());
     }
     let bindings = settings
@@ -300,6 +353,7 @@ pub fn next_id(bindings: &[Binding]) -> u64 {
 
 fn bare_primary_click(spec: &TriggerSpec) -> bool {
     spec.held.is_empty()
+        && spec.conditions.is_empty()
         && matches!(
             spec.activation,
             Activation::Press(Button::Mouse(MouseButton::Left | MouseButton::Right))
@@ -325,9 +379,34 @@ pub fn check_candidate(bindings: &[Binding], spec: &TriggerSpec) -> Result<(), C
     let pick = |a: u64, b: u64| Some(if a == id { b } else { a });
     Err(match error {
         RegistrationError::DuplicateTrigger { first, second } => Conflict {
-            title: "与已有触发器重复",
-            detail: "该组合已注册，不会覆盖原有绑定。".into(),
+            title: "与已有触发范围冲突",
+            detail: "组合和位置范围存在重叠；可调整区域、滚轮方向或按住组合。普通按下不能与重叠范围的同组合长按或快拖并用。".into(),
             other: pick(first, second),
+        },
+        RegistrationError::InvalidDragButton { .. } => Conflict {
+            title: "拖拽目标必须是鼠标按钮",
+            detail: "快速拖拽只支持鼠标按钮，键盘按键可选择按下或长按。".into(),
+            other: None,
+        },
+        RegistrationError::InvalidDragDistance { min_distance_px, .. } => Conflict {
+            title: "拖拽距离无效",
+            detail: format!("拖拽距离应为 4–500 个物理像素，当前为 {min_distance_px}px。"),
+            other: None,
+        },
+        RegistrationError::InvalidDragWindow { max_start_ms, .. } => Conflict {
+            title: "快拖时窗无效",
+            detail: format!("快速拖拽时窗应为 20–2000ms，当前为 {max_start_ms}ms。"),
+            other: None,
+        },
+        RegistrationError::TimingConflict {
+            hold_binding,
+            drag_binding,
+            hold_duration_ms,
+            drag_max_start_ms,
+        } => Conflict {
+            title: "长按与快拖时序冲突",
+            detail: format!("快速拖拽时窗（{drag_max_start_ms}ms）必须严格短于同组合的长按阈值（{hold_duration_ms}ms）。"),
+            other: pick(hold_binding, drag_binding),
         },
         RegistrationError::TerminalIsPrefix {
             terminal_binding,
@@ -365,11 +444,14 @@ pub fn validate(bindings: &[Binding]) -> Result<(), String> {
         let result = match &binding.action {
             ActionSpec::Command(command) => command.validate(),
             ActionSpec::SendShortcut(shortcut) => shortcut.validate(),
+            ActionSpec::External(action) => action.validate(),
+            ActionSpec::AdjustSystem(action) => action.validate(),
+            ActionSpec::Local(action) => action.validate(),
             ActionSpec::ShowWheel(reference) => reference.validate(),
             ActionSpec::Plugin(reference) => {
                 reference.validate().map_err(|error| error.to_string())
             }
-            ActionSpec::Notification | ActionSpec::ShowPanel => Ok(()),
+            ActionSpec::Notification | ActionSpec::ShowPanel | ActionSpec::Window(_) => Ok(()),
         };
         if let Err(error) = result {
             return Err(format!("触发器 #{}：{error}", binding.spec.id));
@@ -393,7 +475,7 @@ pub fn save(bindings: &[Binding]) -> Result<(), String> {
 fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
     validate(bindings)?;
     let text = serde_json::to_vec_pretty(&Settings {
-        version: 5,
+        version: 7,
         bindings: bindings.iter().map(Into::into).collect(),
     })
     .map_err(|e| e.to_string())?;
@@ -403,7 +485,7 @@ fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
             decode(&original)?;
             let settings: Settings =
                 serde_json::from_str(&original).map_err(|error| error.to_string())?;
-            if settings.version < 5 {
+            if settings.version < 7 {
                 backup_legacy(destination, settings.version, original.as_bytes())?;
             }
         }
@@ -413,7 +495,11 @@ fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
     atomic_write(destination, &text)
 }
 
-fn backup_legacy(destination: &Path, version: u32, original: &[u8]) -> Result<(), String> {
+pub(crate) fn backup_legacy(
+    destination: &Path,
+    version: u32,
+    original: &[u8],
+) -> Result<(), String> {
     let file_name = destination.file_name().ok_or("配置路径不可用")?;
     let mut backup_name = file_name.to_os_string();
     backup_name.push(format!(".v{version}.bak"));
@@ -481,11 +567,14 @@ pub(crate) fn atomic_write(destination: &Path, contents: &[u8]) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_action::LocalStep;
+    use crate::system_action::AdjustmentTarget;
+    use omnitrigger_core::{PointerRegion, ScreenCorner, ScreenEdge, ScreenRect, TriggerCondition};
     use serde_json::json;
 
     fn encode(bindings: &[Binding]) -> String {
         serde_json::to_string(&Settings {
-            version: 5,
+            version: 7,
             bindings: bindings.iter().map(Into::into).collect(),
         })
         .unwrap()
@@ -594,7 +683,7 @@ mod tests {
     }
 
     #[test]
-    fn v5_round_trip_preserves_all_action_variants_and_unavailable_plugin_parameters() {
+    fn current_round_trip_preserves_all_action_variants_and_unavailable_plugin_parameters() {
         let mut expected = defaults();
         expected[1].enabled = false;
         expected[1].action = ActionSpec::Command(CommandAction {
@@ -665,6 +754,7 @@ mod tests {
                 let actual = decode(&legacy(version, command, panel)).unwrap();
                 assert_eq!(actual.len(), 1);
                 assert_eq!(actual[0].spec.id, 42);
+                assert!(actual[0].spec.conditions.is_empty());
                 assert_eq!(actual[0].message, "中文 名称");
                 assert!(!actual[0].enabled);
                 match (&actual[0].action, command, panel) {
@@ -682,7 +772,7 @@ mod tests {
 
     #[test]
     fn incompatible_and_ambiguous_configurations_are_rejected() {
-        assert!(decode(r#"{"version":6,"bindings":[]}"#).is_err());
+        assert!(decode(r#"{"version":8,"bindings":[]}"#).is_err());
         assert!(decode(&legacy(4, true, true)).is_err());
         let mut value: serde_json::Value = serde_json::from_str(&legacy(4, false, false)).unwrap();
         value["version"] = 5.into();
@@ -699,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn save_backs_up_legacy_bytes_once_then_saves_version_five() {
+    fn save_backs_up_legacy_bytes_once_then_saves_current_version() {
         let scratch = Scratch::new();
         let destination = scratch.config();
         let original = legacy(4, true, false);
@@ -760,6 +850,82 @@ mod tests {
         );
     }
 
+    fn drag_binding(button: Button, min_distance_px: u32, max_start_ms: u32) -> Binding {
+        Binding {
+            spec: TriggerSpec {
+                conditions: Vec::new(),
+                id: 6,
+                held: vec![],
+                activation: Activation::Drag {
+                    button,
+                    min_distance_px,
+                    max_start_ms,
+                },
+            },
+            message: "快速拖拽已触发".into(),
+            enabled: true,
+            action: ActionSpec::Notification,
+        }
+    }
+
+    #[test]
+    fn drag_dto_round_trip_keeps_current_version_parameters_and_independent_action() {
+        let drag = drag_binding(Button::Mouse(MouseButton::Right), 18, 180);
+        let mut bindings = defaults();
+        bindings.push(drag.clone());
+        validate(&bindings).unwrap();
+        assert_eq!(decode(&encode(&bindings)).unwrap(), bindings);
+        let serialized = serde_json::to_value(BindingDto::from(&drag)).unwrap();
+        assert_eq!(
+            serialized["activation"],
+            json!({
+                "kind": "drag",
+                "value": {
+                    "button": {"kind": "right"},
+                    "min_distance_px": 18,
+                    "max_start_ms": 180
+                }
+            })
+        );
+        assert_eq!(serialized["action"], json!({"kind": "notification"}));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&encode(&bindings)).unwrap()["version"],
+            7
+        );
+        assert_eq!(bindings.last(), Some(&drag));
+    }
+
+    #[test]
+    fn drag_parameters_and_hold_timing_conflicts_are_reported_without_rewriting() {
+        for (button, distance, window, title) in [
+            (Button::Key(0x41), 18, 180, "拖拽目标必须是鼠标按钮"),
+            (Button::Mouse(MouseButton::Right), 3, 180, "拖拽距离无效"),
+            (Button::Mouse(MouseButton::Right), 501, 180, "拖拽距离无效"),
+            (Button::Mouse(MouseButton::Right), 18, 19, "快拖时窗无效"),
+            (Button::Mouse(MouseButton::Right), 18, 2001, "快拖时窗无效"),
+        ] {
+            let drag = drag_binding(button, distance, window);
+            let original = drag.clone();
+            assert!(decode(&encode(std::slice::from_ref(&drag))).is_err());
+            assert_eq!(check_candidate(&[], &drag.spec).unwrap_err().title, title);
+            assert_eq!(drag, original);
+        }
+        let drag = drag_binding(Button::Mouse(MouseButton::Right), 18, 300);
+        let conflict = check_candidate(&defaults(), &drag.spec).unwrap_err();
+        assert_eq!(conflict.title, "长按与快拖时序冲突");
+        assert_eq!(conflict.other, Some(5));
+        assert_eq!(
+            drag.spec.activation,
+            Activation::Drag {
+                button: Button::Mouse(MouseButton::Right),
+                min_distance_px: 18,
+                max_start_ms: 300,
+            }
+        );
+        let left = drag_binding(Button::Mouse(MouseButton::Left), 18, 180);
+        assert!(check_candidate(&defaults(), &left.spec).is_ok());
+    }
+
     #[test]
     fn invalid_hold_duration_and_duplicate_recordings_are_rejected_without_rewriting() {
         let mut bindings = defaults();
@@ -794,8 +960,9 @@ mod tests {
         values[0].action = ActionSpec::Plugin(missing);
         let duplicate = check_candidate(&values, &values[0].spec).unwrap_err();
         assert_eq!(duplicate.other, Some(1));
-        assert_eq!(duplicate.title, "与已有触发器重复");
+        assert_eq!(duplicate.title, "与已有触发范围冲突");
         let prefix = TriggerSpec {
+            conditions: Vec::new(),
             id: 0,
             held: vec![Button::Key(0xa0)],
             activation: Activation::Press(Button::Key(0x14)),
@@ -805,6 +972,7 @@ mod tests {
             Some(1)
         );
         let bare_left = TriggerSpec {
+            conditions: Vec::new(),
             id: 0,
             held: vec![],
             activation: Activation::Press(Button::Mouse(MouseButton::Left)),
@@ -814,11 +982,466 @@ mod tests {
             None
         );
         let fresh = TriggerSpec {
+            conditions: Vec::new(),
             id: 0,
             held: vec![Button::Key(0x14)],
             activation: Activation::Press(Button::Key(0x45)),
         };
         assert!(check_candidate(&values, &fresh).is_ok());
         assert_eq!(values.len(), 5);
+    }
+
+    fn version_five(bindings: &[Binding]) -> String {
+        let mut document: serde_json::Value = serde_json::from_str(&encode(bindings)).unwrap();
+        document["version"] = 5.into();
+        document.to_string()
+    }
+
+    fn regional_binding(
+        id: u64,
+        region: PointerRegion,
+        direction: WheelDirection,
+        target: AdjustmentTarget,
+        delta_percent: i16,
+    ) -> Binding {
+        Binding {
+            spec: TriggerSpec {
+                id,
+                held: vec![],
+                conditions: vec![TriggerCondition::PointerRegion(region)],
+                activation: Activation::Wheel(direction),
+            },
+            message: format!("区域动作 {id}"),
+            enabled: true,
+            action: ActionSpec::AdjustSystem(SystemAdjustmentAction {
+                target,
+                delta_percent,
+            }),
+        }
+    }
+
+    #[test]
+    fn version_five_preserves_every_existing_action_and_identity_with_no_position_condition() {
+        let mut plugin = PluginActionRef::raishot_capture();
+        plugin.plugin_id = "missing-plugin".into();
+        plugin
+            .parameters
+            .insert("原参数".into(), json!({"nested":[42,"中文"]}));
+        let actions = vec![
+            ActionSpec::Notification,
+            ActionSpec::ShowPanel,
+            ActionSpec::ShowWheel(WheelActionRef {
+                wheel_id: "missing-wheel".into(),
+            }),
+            ActionSpec::Command(CommandAction {
+                program: "工具.exe".into(),
+                args: vec!["中文 空格 & 符号".into()],
+                working_directory: Some("C:\\旧目录".into()),
+            }),
+            ActionSpec::SendShortcut(ShortcutAction::parse("RightCtrl+Backspace").unwrap()),
+            ActionSpec::Window(WindowAction {
+                operation: crate::window_action::WindowOperation::Minimize,
+            }),
+            ActionSpec::External(ExternalAction {
+                provider: "旧依赖".into(),
+                command: CommandAction {
+                    program: std::env::current_exe()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    args: vec!["旧动作参数".into()],
+                    working_directory: None,
+                },
+                disabled_reason: Some("原动作不可用".into()),
+            }),
+            ActionSpec::Plugin(plugin),
+        ];
+        let expected: Vec<_> = actions
+            .into_iter()
+            .enumerate()
+            .map(|(index, action)| Binding {
+                spec: TriggerSpec {
+                    id: 100 + index as u64,
+                    held: vec![Button::Key(0x14)],
+                    conditions: vec![],
+                    activation: Activation::Press(Button::Key(0x70 + index as u16)),
+                },
+                message: format!("旧动作 {index}"),
+                enabled: index % 2 == 0,
+                action,
+            })
+            .collect();
+        let original = version_five(&expected);
+        assert!(!original.contains("conditions"));
+        let actual = decode(&original).unwrap();
+        assert_eq!(actual, expected);
+        assert!(actual
+            .iter()
+            .all(|binding| binding.spec.conditions.is_empty()));
+        assert_eq!(decode(&encode(&actual)).unwrap(), expected);
+    }
+
+    #[test]
+    fn version_six_preserves_regions_rectangle_and_signed_system_adjustments_on_round_trip() {
+        let expected = vec![
+            regional_binding(
+                10,
+                PointerRegion::ScreenEdge {
+                    edge: ScreenEdge::Top,
+                    thickness_px: 8,
+                },
+                WheelDirection::Up,
+                AdjustmentTarget::Volume,
+                5,
+            ),
+            regional_binding(
+                11,
+                PointerRegion::ScreenEdge {
+                    edge: ScreenEdge::Bottom,
+                    thickness_px: 12,
+                },
+                WheelDirection::Down,
+                AdjustmentTarget::Volume,
+                -7,
+            ),
+            regional_binding(
+                12,
+                PointerRegion::ScreenCorner {
+                    corner: ScreenCorner::BottomRight,
+                    size_px: 40,
+                },
+                WheelDirection::Left,
+                AdjustmentTarget::Brightness,
+                10,
+            ),
+            regional_binding(
+                13,
+                PointerRegion::Rectangle(ScreenRect {
+                    left: -512,
+                    top: -180,
+                    right: -1,
+                    bottom: 400,
+                }),
+                WheelDirection::Right,
+                AdjustmentTarget::Brightness,
+                -100,
+            ),
+        ];
+        let text = encode(&expected);
+        assert_eq!(decode(&text).unwrap(), expected);
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["version"], 7);
+        assert_eq!(
+            value["bindings"][0]["conditions"],
+            json!([{"kind":"pointer_region","region":{"kind":"screen_edge","edge":"top","thickness_px":8}}])
+        );
+        assert_eq!(
+            value["bindings"][2]["conditions"][0]["region"],
+            json!({"kind":"screen_corner","corner":"bottom_right","size_px":40})
+        );
+        assert_eq!(
+            value["bindings"][3]["conditions"][0]["region"],
+            json!({"kind":"rectangle","left":-512,"top":-180,"right":-1,"bottom":400})
+        );
+        assert_eq!(
+            value["bindings"][1]["action"],
+            json!({"kind":"adjust_system","target":"volume","delta_percent":-7})
+        );
+        assert_eq!(
+            value["bindings"][3]["action"],
+            json!({"kind":"adjust_system","target":"brightness","delta_percent":-100})
+        );
+    }
+
+    #[test]
+    fn opposite_edges_can_share_a_wheel_direction_but_overlapping_edge_and_corner_cannot() {
+        let left = regional_binding(
+            30,
+            PointerRegion::ScreenEdge {
+                edge: ScreenEdge::Left,
+                thickness_px: 8,
+            },
+            WheelDirection::Up,
+            AdjustmentTarget::Volume,
+            5,
+        );
+        let right = regional_binding(
+            31,
+            PointerRegion::ScreenEdge {
+                edge: ScreenEdge::Right,
+                thickness_px: 8,
+            },
+            WheelDirection::Up,
+            AdjustmentTarget::Brightness,
+            5,
+        );
+        let distinct = vec![left.clone(), right.clone()];
+        validate(&distinct).unwrap();
+        check_candidate(std::slice::from_ref(&left), &right.spec).unwrap();
+        assert_eq!(decode(&encode(&distinct)).unwrap(), distinct);
+
+        let corner = regional_binding(
+            32,
+            PointerRegion::ScreenCorner {
+                corner: ScreenCorner::TopLeft,
+                size_px: 32,
+            },
+            WheelDirection::Up,
+            AdjustmentTarget::Brightness,
+            -5,
+        );
+        assert!(decode(&encode(&[left.clone(), corner.clone()])).is_err());
+        let conflict = check_candidate(std::slice::from_ref(&left), &corner.spec).unwrap_err();
+        assert_eq!(conflict.other, Some(left.spec.id));
+        assert_eq!(conflict.title, "与已有触发范围冲突");
+
+        let mut unconditional = right;
+        unconditional.spec.conditions.clear();
+        assert!(check_candidate(&[left], &unconditional.spec).is_err());
+    }
+
+    #[test]
+    fn invalid_adjustment_and_region_candidates_never_replace_a_valid_original() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let valid = regional_binding(
+            40,
+            PointerRegion::ScreenEdge {
+                edge: ScreenEdge::Top,
+                thickness_px: 8,
+            },
+            WheelDirection::Up,
+            AdjustmentTarget::Volume,
+            5,
+        );
+        let original = encode(std::slice::from_ref(&valid));
+        std::fs::write(&destination, &original).unwrap();
+        let mut invalid_candidates = Vec::new();
+        for delta_percent in [0, -101, 101, i16::MIN, i16::MAX] {
+            let mut candidate = valid.clone();
+            candidate.action = ActionSpec::AdjustSystem(SystemAdjustmentAction {
+                target: AdjustmentTarget::Volume,
+                delta_percent,
+            });
+            invalid_candidates.push(candidate);
+        }
+        for region in [
+            PointerRegion::ScreenEdge {
+                edge: ScreenEdge::Top,
+                thickness_px: 0,
+            },
+            PointerRegion::ScreenEdge {
+                edge: ScreenEdge::Right,
+                thickness_px: 257,
+            },
+            PointerRegion::ScreenCorner {
+                corner: ScreenCorner::TopLeft,
+                size_px: 0,
+            },
+            PointerRegion::ScreenCorner {
+                corner: ScreenCorner::BottomRight,
+                size_px: 1025,
+            },
+            PointerRegion::Rectangle(ScreenRect {
+                left: 20,
+                top: 0,
+                right: 20,
+                bottom: 100,
+            }),
+            PointerRegion::Rectangle(ScreenRect {
+                left: 0,
+                top: 20,
+                right: 100,
+                bottom: 19,
+            }),
+        ] {
+            let mut candidate = valid.clone();
+            candidate.spec.conditions = vec![TriggerCondition::PointerRegion(region)];
+            invalid_candidates.push(candidate);
+        }
+        for candidate in invalid_candidates {
+            assert!(decode(&encode(std::slice::from_ref(&candidate))).is_err());
+            assert!(save_to(&destination, &[candidate]).is_err());
+            assert_eq!(std::fs::read_to_string(&destination).unwrap(), original);
+        }
+        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn unknown_condition_fields_and_legacy_new_fields_are_rejected_without_rewriting_source() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let valid = regional_binding(
+            50,
+            PointerRegion::ScreenEdge {
+                edge: ScreenEdge::Top,
+                thickness_px: 8,
+            },
+            WheelDirection::Up,
+            AdjustmentTarget::Volume,
+            5,
+        );
+        let base: serde_json::Value =
+            serde_json::from_str(&encode(std::slice::from_ref(&valid))).unwrap();
+        let mut invalid_documents = Vec::new();
+        let mut unknown_condition = base.clone();
+        unknown_condition["bindings"][0]["conditions"][0]["source"] = "physical".into();
+        invalid_documents.push(unknown_condition);
+        let mut unknown_region = base.clone();
+        unknown_region["bindings"][0]["conditions"][0]["region"]["exclude_connected"] =
+            false.into();
+        invalid_documents.push(unknown_region);
+        let mut unknown_kind = base.clone();
+        unknown_kind["bindings"][0]["conditions"][0]["kind"] = "future-condition".into();
+        invalid_documents.push(unknown_kind);
+        let mut unknown_action = base.clone();
+        unknown_action["bindings"][0]["action"]["absolute_percent"] = 50.into();
+        invalid_documents.push(unknown_action);
+        let mut old_with_condition = base.clone();
+        old_with_condition["version"] = 5.into();
+        old_with_condition["bindings"][0]["action"] = json!({"kind":"notification"});
+        invalid_documents.push(old_with_condition);
+        let mut old_with_adjustment = base;
+        old_with_adjustment["version"] = 5.into();
+        old_with_adjustment["bindings"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("conditions");
+        invalid_documents.push(old_with_adjustment);
+        for document in invalid_documents {
+            let original = document.to_string();
+            assert!(decode(&original).is_err());
+            std::fs::write(&destination, &original).unwrap();
+            assert!(save_to(&destination, std::slice::from_ref(&valid)).is_err());
+            assert_eq!(std::fs::read_to_string(&destination).unwrap(), original);
+        }
+        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn saving_version_five_makes_one_exact_byte_backup_and_upgrades_to_six() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let backup = scratch.0.join("bindings.json.v5.bak");
+        let original = format!(" \r\n{}\r\n ", version_five(&defaults()));
+        std::fs::write(&destination, original.as_bytes()).unwrap();
+        let mut bindings = decode(&original).unwrap();
+        bindings.push(regional_binding(
+            70,
+            PointerRegion::ScreenEdge {
+                edge: ScreenEdge::Top,
+                thickness_px: 8,
+            },
+            WheelDirection::Up,
+            AdjustmentTarget::Volume,
+            5,
+        ));
+        save_to(&destination, &bindings).unwrap();
+        assert_eq!(std::fs::read(&backup).unwrap(), original.as_bytes());
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&destination).unwrap()).unwrap();
+        assert_eq!(saved["version"], 7);
+        assert_eq!(decode(&saved.to_string()).unwrap(), bindings);
+        bindings.last_mut().unwrap().message = "修改后的边缘音量".into();
+        save_to(&destination, &bindings).unwrap();
+        assert_eq!(std::fs::read(&backup).unwrap(), original.as_bytes());
+        assert_eq!(
+            decode(&std::fs::read_to_string(&destination).unwrap()).unwrap(),
+            bindings
+        );
+        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 2);
+    }
+
+    fn local_binding() -> Binding {
+        let mut binding = defaults().remove(0);
+        binding.message = "本地动作 中文与模板".into();
+        binding.enabled = false;
+        binding.action = ActionSpec::Local(LocalAction {
+            version: 1,
+            steps: vec![
+                LocalStep::SetVariable {
+                    name: "prefix".into(),
+                    value: "中文 $$".into(),
+                },
+                LocalStep::ReadClipboard {
+                    variable: "clip".into(),
+                },
+                LocalStep::InputText {
+                    text: "${prefix}\r\n${clip}".into(),
+                },
+                LocalStep::SetClipboard {
+                    text: "$${literal} ${clip}".into(),
+                },
+                LocalStep::SendShortcut {
+                    keys: vec![0xa2, 0x41],
+                },
+                LocalStep::KeyTap { key: 0x12 },
+                LocalStep::KeySequence {
+                    modifiers: vec![0xa2],
+                    keys: vec![0x4b, 0x5a],
+                },
+                LocalStep::Delay { milliseconds: 125 },
+                LocalStep::Open {
+                    target: "https://example.com".into(),
+                },
+            ],
+        });
+        binding
+    }
+
+    #[test]
+    fn local_actions_round_trip_in_v7_and_older_versions_are_preserved_on_rejection() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let expected = vec![local_binding()];
+        save_to(&destination, &expected).unwrap();
+        let saved = std::fs::read_to_string(&destination).unwrap();
+        assert_eq!(decode(&saved).unwrap(), expected);
+        let current: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(current["version"], 7);
+        assert_eq!(current["bindings"][0]["action"]["kind"], "local");
+        assert_eq!(current["bindings"][0]["action"]["version"], 1);
+        for version in 1..=6 {
+            let mut old = current.clone();
+            old["version"] = version.into();
+            let original = old.to_string();
+            let error = decode(&original).unwrap_err();
+            if version >= 5 {
+                assert!(error.contains("版本 7"), "错误的拒绝原因：{error}");
+            }
+            std::fs::write(&destination, original.as_bytes()).unwrap();
+            assert!(save_to(&destination, &expected).is_err());
+            assert_eq!(std::fs::read(&destination).unwrap(), original.as_bytes());
+        }
+        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn adding_local_action_to_v6_keeps_exact_legacy_backup_and_saves_v7() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let backup = scratch.0.join("bindings.json.v6.bak");
+        let mut legacy: serde_json::Value = serde_json::from_str(&encode(&defaults())).unwrap();
+        legacy["version"] = 6.into();
+        let original = format!(" \r\n{}\r\n ", legacy);
+        std::fs::write(&destination, original.as_bytes()).unwrap();
+        let mut expected = decode(&original).unwrap();
+        expected[0] = local_binding();
+        save_to(&destination, &expected).unwrap();
+        assert_eq!(std::fs::read(&backup).unwrap(), original.as_bytes());
+        let saved = std::fs::read_to_string(&destination).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&saved).unwrap()["version"],
+            7
+        );
+        assert_eq!(decode(&saved).unwrap(), expected);
+        expected[0].message = "再次修改本地动作".into();
+        save_to(&destination, &expected).unwrap();
+        assert_eq!(std::fs::read(&backup).unwrap(), original.as_bytes());
+        assert_eq!(
+            decode(&std::fs::read_to_string(&destination).unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 2);
     }
 }

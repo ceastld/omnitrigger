@@ -154,10 +154,19 @@ pub fn caps_for_buttons(buttons: &[Button]) -> Vec<Cap> {
 }
 
 pub fn caps_for(spec: &TriggerSpec) -> Vec<Cap> {
-    let mut caps = caps_for_buttons(&spec.held);
+    let mut caps: Vec<_> = spec
+        .conditions
+        .iter()
+        .map(|condition| Cap {
+            label: crate::trigger_conditions::condition_label(condition).into(),
+            mouse: true,
+            arrow: None,
+        })
+        .collect();
+    caps.extend(caps_for_buttons(&spec.held));
     caps.push(match &spec.activation {
         Activation::Press(button) => button_cap(button),
-        Activation::Hold { button, .. } => button_cap(button),
+        Activation::Hold { button, .. } | Activation::Drag { button, .. } => button_cap(button),
         Activation::Wheel(direction) => Cap {
             label: "滚轮".into(),
             mouse: true,
@@ -172,6 +181,23 @@ pub fn caps_for(spec: &TriggerSpec) -> Vec<Cap> {
     if let Activation::Hold { duration_ms, .. } = spec.activation {
         caps.push(Cap {
             label: format!("长按 {duration_ms}ms").into(),
+            mouse: false,
+            arrow: None,
+        });
+    }
+    if let Activation::Drag {
+        min_distance_px,
+        max_start_ms,
+        ..
+    } = spec.activation
+    {
+        caps.push(Cap {
+            label: "快速拖拽".into(),
+            mouse: false,
+            arrow: None,
+        });
+        caps.push(Cap {
+            label: format!("≥{min_distance_px}px · <{max_start_ms}ms").into(),
             mouse: false,
             arrow: None,
         });
@@ -580,8 +606,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn drag_caps_preserve_mouse_button_distance_and_strict_start_window() {
+        let spec = TriggerSpec {
+            conditions: Vec::new(),
+            id: 6,
+            held: vec![Button::Key(0x14)],
+            activation: Activation::Drag {
+                button: Button::Mouse(MouseButton::Right),
+                min_distance_px: 18,
+                max_start_ms: 180,
+            },
+        };
+        let caps = caps_for(&spec);
+        assert_eq!(caps.len(), 4);
+        assert_eq!(caps[0].label.as_ref(), "CapsLock");
+        assert_eq!(caps[1].label.as_ref(), "右键");
+        assert!(caps[1].mouse);
+        assert_eq!(caps[2].label.as_ref(), "快速拖拽");
+        assert_eq!(caps[3].label.as_ref(), "≥18px · <180ms");
+        assert!(!caps[2].mouse && !caps[3].mouse);
+    }
+
+    #[test]
     fn hold_caps_preserve_the_button_and_configured_duration() {
         let spec = TriggerSpec {
+            conditions: Vec::new(),
             id: 5,
             held: vec![],
             activation: Activation::Hold {
@@ -600,6 +649,7 @@ mod tests {
     #[test]
     fn wheel_and_mouse_caps_share_one_description_with_trigger_spec() {
         let spec = TriggerSpec {
+            conditions: Vec::new(),
             id: 1,
             held: vec![Button::Mouse(MouseButton::X1), Button::Key(0x14)],
             activation: Activation::Wheel(WheelDirection::Down),

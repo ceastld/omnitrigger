@@ -4,7 +4,11 @@ use crate::{
     wheels::{WheelAccent, WheelDefinition},
     ActionSpec, Context, Div, Icon, Page, Tone, Workspace,
 };
-use gpui::{div, prelude::*, px, rgb, FontWeight};
+use gpui::{div, prelude::*, px, rgb, FontWeight, MouseButton, MouseDownEvent, Stateful};
+use std::{cell::Cell, rc::Rc};
+
+/// 管理页轮盘预览的舞台边长（逻辑像素）。
+const PREVIEW_SIZE: f32 = 340.;
 
 fn accent_color(accent: WheelAccent) -> u32 {
     match accent {
@@ -18,6 +22,10 @@ fn action_text(action: &ActionSpec) -> String {
     match action {
         ActionSpec::Notification => "显示提示".into(),
         ActionSpec::SendShortcut(shortcut) => format!("发送 {}", shortcut.display()),
+        ActionSpec::Window(action) => format!("窗口 · {}", action.display()),
+        ActionSpec::AdjustSystem(action) => action.display(),
+        ActionSpec::Local(action) => action.summary(),
+        ActionSpec::External(action) => format!("外部动作 · 依赖 {}", action.provider),
         ActionSpec::Command(_) => "运行程序 / 脚本".into(),
         ActionSpec::Plugin(_) => "插件动作".into(),
         ActionSpec::ShowPanel => "打开触发面板".into(),
@@ -235,7 +243,7 @@ impl Workspace {
                     .justify_between()
                     .gap(px(10.))
                     .child(section_title("轮盘设置"))
-                    .child(status_pill(format!("{} / 8 槽位", wheel.slots.len()), tint)),
+                    .child(status_pill(format!("{} 个槽位", wheel.slots.len()), tint)),
             )
             .child(Self::input_field("轮盘名称", &self.wheel_name, None))
             .child(
@@ -259,6 +267,13 @@ impl Workspace {
                     )
                     .child(caption("名称修改后点击保存；槽位和颜色分别保存。")),
             );
+        if !wheel.app_overrides.is_empty() {
+            appearance = appearance.child(caption(format!(
+                "当前编辑通用布局；另有 {} 个应用专用布局：{}。使用时按前台应用自动选择，专用布局保存在轮盘配置文件中。",
+                wheel.app_overrides.len(),
+                wheel.app_overrides.iter().map(|item| item.process.as_str()).collect::<Vec<_>>().join("、")
+            )));
+        }
         let mut colors = div().flex().flex_wrap().items_center().gap(px(7.));
         for (index, (accent, label)) in [
             (WheelAccent::Mint, "薄荷"),
@@ -418,6 +433,14 @@ impl Workspace {
                                     .child(slot.label.clone()),
                             )
                             .child(caption(action_text(&slot.action)))
+                            .when_some(slot.position, |el, position| {
+                                el.child(caption(format!(
+                                    "{}圈 · 方向 {} / {}",
+                                    ["内", "中", "外"][usize::from(position.ring)],
+                                    position.sector + 1,
+                                    position.sectors
+                                )))
+                            })
                             .when_some(reason, |el, error| {
                                 el.child(
                                     div()
@@ -502,10 +525,12 @@ impl Workspace {
             slots = slots.child(caption("在上方选择一个槽位，修改名称、快捷键或排列顺序。"));
         }
 
-        let has_room = can_edit && wheel.slots.len() < 8;
+        let has_room = can_edit && crate::wheel_workspace::wheel_has_room(wheel);
         let can_save_slot = can_edit && selected.is_some();
         let selected_shortcut = selected
             .is_some_and(|index| matches!(wheel.slots[index].action, ActionSpec::SendShortcut(_)));
+        let selected_local =
+            selected.is_some_and(|index| matches!(wheel.slots[index].action, ActionSpec::Local(_)));
         let mut add = card()
             .p(px(18.))
             .flex()
@@ -518,10 +543,25 @@ impl Workspace {
                 Some("填写简短名称，方便在轮盘上辨认。"),
             ))
             .child(Self::input_field(
-                "快捷键",
+                if selected_local {
+                    "新快捷键槽位的按键"
+                } else {
+                    "快捷键"
+                },
                 &self.wheel_slot_shortcut,
                 Some("单个按键或组合，如 Enter、Ctrl+V。"),
             ))
+            .when(selected_local, |el| {
+                el.child(self.local_action_fields(true, cx)).child(
+                    small(button(
+                        "stop-wheel-local",
+                        "停止此本地动作",
+                        Tone::Danger,
+                        true,
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.stop_local_action(true, cx))),
+                )
+            })
             .when(selected.is_some(), |el| {
                 el.child(
                     button(
@@ -550,13 +590,29 @@ impl Workspace {
                     }
                 })),
             )
-            .when(selected.is_some() && !selected_shortcut, |el| {
-                el.child(caption(
+            .child(
+                button(
+                    "add-wheel-local",
+                    "添加本地步骤槽位",
+                    Tone::Secondary,
+                    has_room,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if has_room {
+                        this.add_wheel_local_action(cx);
+                    }
+                })),
+            )
+            .when(
+                selected.is_some() && !selected_shortcut && !selected_local,
+                |el| {
+                    el.child(caption(
                     "选中槽位使用程序、插件或提示动作，保存时仅更新名称；添加快捷键会创建新槽位。",
                 ))
-            })
-            .when(!has_room && wheel.slots.len() >= 8, |el| {
-                el.child(caption("已达到 8 个槽位上限，可先删除不常用的动作。"))
+                },
+            )
+            .when(!crate::wheel_workspace::wheel_has_room(wheel), |el| {
+                el.child(caption("当前布局没有空余方向，可先删除不常用的动作。"))
             })
             .child(div().h(px(1.)).bg(rgb(theme::BORDER)).my(px(3.)))
             .child(
@@ -689,102 +745,47 @@ impl Workspace {
         )
     }
 
-    /// 圆形舞台只编辑选中项，不在配置页面执行槽位动作。
-    fn wheel_orbit_preview(&self, wheel: &WheelDefinition, cx: &mut Context<Self>) -> Div {
-        let tint = accent_color(wheel.accent);
-        let mut orbit = div()
-            .relative()
-            .size(px(320.))
-            .flex_none()
-            .child(theme::aurora(tint, 0.12, 95.).left(px(160.)).top(px(160.)));
-        for (index, diameter) in [282., 212., 126.].into_iter().enumerate() {
-            orbit = orbit.child(
-                div()
-                    .absolute()
-                    .left(px((320. - diameter) / 2.))
-                    .top(px((320. - diameter) / 2.))
-                    .size(px(diameter))
-                    .rounded(px(diameter / 2.))
-                    .border_1()
-                    .border_color(theme::hsla(tint, if index == 0 { 0.2 } else { 0.1 })),
-            );
-        }
-        orbit = orbit.child(
-            div()
-                .absolute()
-                .left(px(112.))
-                .top(px(112.))
-                .size(px(96.))
-                .rounded(px(48.))
-                .border_1()
-                .border_color(theme::hsla(tint, 0.45))
-                .bg(theme::tint_fill(tint, 0.18, 0.035))
-                .shadow(theme::glow(tint, 0.14, 20.))
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(5.))
-                .child(
-                    div()
-                        .font_family(theme::MONO_FONT)
-                        .text_size(px(25.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(tint))
-                        .child(format!("{:02}", wheel.slots.len())),
-                )
-                .child(caption("动作轨道")),
+    /// 圆形舞台与浮动轮盘共用扇区样式；点击扇区只选中槽位以便编辑，不在配置页面执行动作。
+    fn wheel_orbit_preview(
+        &self,
+        wheel: &WheelDefinition,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let bounds = Rc::new(Cell::new(None));
+        let stage = crate::radial_wheel::preview_stage(
+            wheel,
+            self.wheel_slot_selected,
+            |index| {
+                wheel
+                    .slots
+                    .get(index)
+                    .is_some_and(|slot| self.action_unavailable_reason(&slot.action).is_none())
+            },
+            PREVIEW_SIZE,
+            bounds.clone(),
         );
-        let count = wheel.slots.len().max(1) as f32;
-        for (index, slot) in wheel.slots.iter().enumerate() {
-            let angle = index as f32 * std::f32::consts::TAU / count - std::f32::consts::FRAC_PI_2;
-            let x = 160. + 116. * angle.cos();
-            let y = 160. + 116. * angle.sin();
-            let active = self.wheel_slot_selected == Some(index);
-            orbit = orbit.child(
-                div()
-                    .id(("wheel-orbit-slot", index as u64))
-                    .absolute()
-                    .left(px(x - 37.))
-                    .top(px(y - 28.))
-                    .w(px(74.))
-                    .h(px(56.))
-                    .rounded(px(15.))
-                    .border_1()
-                    .border_color(theme::hsla(tint, if active { 0.9 } else { 0.35 }))
-                    .bg(theme::tint_fill(
-                        tint,
-                        if active { 0.3 } else { 0.15 },
-                        0.06,
-                    ))
-                    .when(active, |el| el.shadow(theme::glow(tint, 0.28, 16.)))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(5.))
-                    .px(px(5.))
-                    .cursor_pointer()
-                    .hover(|style| style.border_color(theme::hsla(tint, 0.9)))
-                    .child(
-                        div()
-                            .font_family(theme::MONO_FONT)
-                            .text_size(px(10.))
-                            .text_color(rgb(tint))
-                            .child(format!("{:02}", index + 1)),
-                    )
-                    .child(
-                        div()
-                            .max_w(px(64.))
-                            .truncate()
-                            .text_size(px(11.))
-                            .text_color(rgb(theme::TEXT))
-                            .child(slot.label.clone()),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_wheel_slot(index, cx))),
-            );
-        }
-        orbit
+        let target = wheel.clone();
+        div()
+            .id("wheel-orbit-preview")
+            .cursor_pointer()
+            .child(stage)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    let Some(stage) = bounds.get() else {
+                        return;
+                    };
+                    let point = (
+                        f32::from(event.position.x - stage.origin.x),
+                        f32::from(event.position.y - stage.origin.y),
+                    );
+                    if let Some(index) =
+                        crate::radial_wheel::preview_hit(&target, PREVIEW_SIZE, point)
+                    {
+                        this.select_wheel_slot(index, cx);
+                    }
+                }),
+            )
     }
 
     /// 触发器动作编辑区中的轮盘选择器，保留缺失引用以便明确修复。

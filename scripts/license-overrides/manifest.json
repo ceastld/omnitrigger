@@ -1,0 +1,318 @@
+{
+  "schema_version": 1,
+  "packages": [
+    {
+      "name": "convert_case",
+      "version": "0.4.0",
+      "license_expression": "MIT",
+      "files": [
+        {
+          "path": "files/rutrum-convert-case-f72ca63c9d57/LICENSE",
+          "sha256": "797087750c4103075e96bb7a60202a040812f8679ae2f7263148a1cc0b298d28",
+          "source_url": "https://raw.githubusercontent.com/rutrum/convert-case/f72ca63c9d579fbab22e361c76e39d31d1e86a2e/LICENSE",
+          "note": "原发布提交后紧接的上游许可补充提交（2020-05-25）；保留原包 MIT 声明及作者信息。"
+        }
+      ]
+    },
+    {
+      "name": "dtor",
+      "version": "0.0.6",
+      "license_expression": "Apache-2.0 OR MIT",
+      "files": [
+        {
+          "path": "files/mmastrac-rust-ctor-e8c8b4a82de7/LICENSE-MIT",
+          "sha256": "bccaa8b6c09f94e81f06696e179dbe058464bbdfbc823b6d49cada1d71e84ac3",
+          "source_url": "https://raw.githubusercontent.com/mmastrac/rust-ctor/e8c8b4a82de72311a5257db0502ced728081e745/LICENSE-MIT",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        },
+        {
+          "path": "files/mmastrac-rust-ctor-e8c8b4a82de7/LICENSE-APACHE",
+          "sha256": "a8ad31b1c3f40dca5a84119351b8fa8ddc868edd77fad8a8ebf6d8f2d16fa4ae",
+          "source_url": "https://raw.githubusercontent.com/mmastrac/rust-ctor/e8c8b4a82de72311a5257db0502ced728081e745/LICENSE-APACHE",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        }
+      ]
+    },
+    {
+      "name": "dtor-proc-macro",
+      "version": "0.0.5",
+      "license_expression": "Apache-2.0 OR MIT",
+      "files": [
+        {
+          "path": "files/mmastrac-rust-ctor-b05136ac9640/LICENSE-MIT",
+          "sha256": "bccaa8b6c09f94e81f06696e179dbe058464bbdfbc823b6d49cada1d71e84ac3",
+          "source_url": "https://raw.githubusercontent.com/mmastrac/rust-ctor/b05136ac964049a1ee29de763d0b119c42258567/LICENSE-MIT",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        },
+        {
+          "path": "files/mmastrac-rust-ctor-b05136ac9640/LICENSE-APACHE",
+          "sha256": "a8ad31b1c3f40dca5a84119351b8fa8ddc868edd77fad8a8ebf6d8f2d16fa4ae",
+          "source_url": "https://raw.githubusercontent.com/mmastrac/rust-ctor/b05136ac964049a1ee29de763d0b119c42258567/LICENSE-APACHE",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        }
+      ]
+    },
+    {
+      "name": "lyon",
+      "version": "1.0.19",
+      "license_expression": "MIT OR Apache-2.0",
+      "files": [
+        {
+          "path": "files/nical-lyon-56219c95c658/LICENSE-MIT",
+          "sha256": "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e",
+          "source_url": "https://raw.githubusercontent.com/nical/lyon/56219c95c658d4f39de7b190d98e57d5773ba241/LICENSE-MIT",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        },
+        {
+          "path": "files/nical-lyon-56219c95c658/LICENSE-APACHE",
+          "sha256": "216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06",
+          "source_url": "https://raw.githubusercontent.com/nical/lyon/56219c95c658d4f39de7b190d98e57d5773ba241/LICENSE-APACHE",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        }
+      ]
+    },
+    {
+      "name": "lyon_algorithms",
+      "version": "1.0.22",
+      "license_expression": "MIT OR Apache-2.0",
+      "files": [
+        {
+          "path": "files/nical-lyon-db98d26a1a90/LICENSE-MIT",
+          "sha256": "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e",
+          "source_url": "https://raw.githubusercontent.com/nical/lyon/db98d26a1a90076a7a894262dcb51117eef643c8/LICENSE-MIT",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        },
+        {
+          "path": "files/nical-lyon-db98d26a1a90/LICENSE-APACHE",
+          "sha256": "216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06",
+          "source_url": "https://raw.githubusercontent.com/nical/lyon/db98d26a1a90076a7a894262dcb51117eef643c8/LICENSE-APACHE",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        }
+      ]
+    },
+    {
+      "name": "lyon_geom",
+      "version": "1.0.20",
+      "license_expression": "MIT OR Apache-2.0",
+      "files": [
+        {
+          "path": "files/nical-lyon-db98d26a1a90/LICENSE-MIT",
+          "sha256": "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e",
+          "source_url": "https://raw.githubusercontent.com/nical/lyon/db98d26a1a90076a7a894262dcb51117eef643c8/LICENSE-MIT",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        },
+        {
+          "path": "files/nical-lyon-db98d26a1a90/LICENSE-APACHE",
+          "sha256": "216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06",
+          "source_url": "https://raw.githubusercontent.com/nical/lyon/db98d26a1a90076a7a894262dcb51117eef643c8/LICENSE-APACHE",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        }
+      ]
+    },
+    {
+      "name": "lyon_path",
+      "version": "1.0.19",
+      "license_expression": "MIT OR Apache-2.0",
+      "files": [
+        {
+          "path": "files/nical-lyon-56219c95c658/LICENSE-MIT",
+          "sha256": "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e",
+          "source_url": "https://raw.githubusercontent.com/nical/lyon/56219c95c658d4f39de7b190d98e57d5773ba241/LICENSE-MIT",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        },
+        {
+          "path": "files/nical-lyon-56219c95c658/LICENSE-APACHE",
+          "sha256": "216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06",
+          "source_url": "https://raw.githubusercontent.com/nical/lyon/56219c95c658d4f39de7b190d98e57d5773ba241/LICENSE-APACHE",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        }
+      ]
+    },
+    {
+      "name": "lyon_tessellation",
+      "version": "1.0.23",
+      "license_expression": "MIT OR Apache-2.0",
+      "files": [
+        {
+          "path": "files/nical-lyon-db98d26a1a90/LICENSE-MIT",
+          "sha256": "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e",
+          "source_url": "https://raw.githubusercontent.com/nical/lyon/db98d26a1a90076a7a894262dcb51117eef643c8/LICENSE-MIT",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        },
+        {
+          "path": "files/nical-lyon-db98d26a1a90/LICENSE-APACHE",
+          "sha256": "216486f29671a4262efe32af6d84a75bef398127f8c5f369b5c8305983887a06",
+          "source_url": "https://raw.githubusercontent.com/nical/lyon/db98d26a1a90076a7a894262dcb51117eef643c8/LICENSE-APACHE",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        }
+      ]
+    },
+    {
+      "name": "mac",
+      "version": "0.1.1",
+      "license_expression": "MIT/Apache-2.0",
+      "files": [
+        {
+          "path": "files/spdx-license-list-data-v3.27.0/Apache-2.0.txt",
+          "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff",
+          "source_url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/Apache-2.0.txt",
+          "note": "原发布包和固定发布 tag 仅声明 MIT/Apache-2.0，未附许可全文。按 Apache-2.0 选项附标准条款；原 Cargo/README 授权声明及作者一并保留，不伪造版权年份。"
+        }
+      ]
+    },
+    {
+      "name": "profiling",
+      "version": "1.0.18",
+      "license_expression": "MIT OR Apache-2.0",
+      "files": [
+        {
+          "path": "files/aclysma-profiling-8271551172eb/LICENSE-MIT",
+          "sha256": "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333",
+          "source_url": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-MIT",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        },
+        {
+          "path": "files/aclysma-profiling-8271551172eb/LICENSE-APACHE",
+          "sha256": "10d30a673cd5e9349bdc02aeb48f14b3386d27d0da32df8f0a555d4aa16aa551",
+          "source_url": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-APACHE",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        }
+      ]
+    },
+    {
+      "name": "profiling-procmacros",
+      "version": "1.0.18",
+      "license_expression": "MIT OR Apache-2.0",
+      "files": [
+        {
+          "path": "files/aclysma-profiling-8271551172eb/LICENSE-MIT",
+          "sha256": "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333",
+          "source_url": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-MIT",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        },
+        {
+          "path": "files/aclysma-profiling-8271551172eb/LICENSE-APACHE",
+          "sha256": "10d30a673cd5e9349bdc02aeb48f14b3386d27d0da32df8f0a555d4aa16aa551",
+          "source_url": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-APACHE",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        }
+      ]
+    },
+    {
+      "name": "pulp-wasm-simd-flag",
+      "version": "0.1.1",
+      "license_expression": "MIT",
+      "files": [
+        {
+          "path": "files/sarah-quinones-pulp-5eb07fd7b68e/LICENSE",
+          "sha256": "d64f878c89bd5f1e5ada7e4aad57690b122727cf5229b7b87ea1980c188da1d9",
+          "source_url": "https://raw.githubusercontent.com/sarah-quinones/pulp/5eb07fd7b68edf0a5e19f71737d315f72a510295/LICENSE",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        }
+      ]
+    },
+    {
+      "name": "seahash",
+      "version": "4.1.0",
+      "license_expression": "MIT",
+      "files": [
+        {
+          "path": "files/spdx-license-list-data-v3.27.0/MIT.txt",
+          "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+          "source_url": "https://raw.githubusercontent.com/spdx/license-list-data/v3.27.0/text/MIT.txt",
+          "note": "原发布包声明 MIT，但未附许可全文。附 SPDX 标准 MIT 条款模板；包内 Cargo 声明及原作者信息另行保留。模板中的占位符不是上游版权声明，不据此补写年份。"
+        },
+        {
+          "path": "files/ticki-tfs-344ce0f56dee/LICENSE",
+          "sha256": "6252f0c8d4a0df9b2dc0c6464cb2489dbe8859b0eb727e19c14e6af1ee432394",
+          "source_url": "https://raw.githubusercontent.com/ticki/tfs/344ce0f56dee996f098d239ccc3515df0f6bb8ad/LICENSE",
+          "note": "原作者官方项目中 seahash 3.0.5 所在历史提交的 MIT 许可及版权通知补充；不是 seahash 4.1.0 原始许可文件。4.1.0 原 Cargo 授权声明与作者信息分别保留。"
+        }
+      ]
+    },
+    {
+      "name": "simd_helpers",
+      "version": "0.1.0",
+      "license_expression": "MIT",
+      "files": [
+        {
+          "path": "files/lu-zero-simd_helpers-82040194cd05/LICENSE",
+          "sha256": "d69f24ad84ec2ade64c0b68bdb31b41170e997b158370342056918329cc9af1e",
+          "source_url": "https://raw.githubusercontent.com/lu-zero/simd_helpers/82040194cd05affb060bf94d6f19f82a771d07fb/LICENSE",
+          "note": "原发布提交后的下一次上游提交仅补充 LICENSE；保留原包 MIT 声明及作者信息。"
+        }
+      ]
+    },
+    {
+      "name": "stacksafe",
+      "version": "0.1.4",
+      "license_expression": "Apache-2.0",
+      "files": [
+        {
+          "path": "files/fast-stacksafe-a5c029b7d3a5/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "source_url": "https://raw.githubusercontent.com/fast/stacksafe/a5c029b7d3a5fe6771ecd79266b6e21313cfa174/LICENSE",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        }
+      ]
+    },
+    {
+      "name": "stacksafe-macro",
+      "version": "0.1.4",
+      "license_expression": "Apache-2.0",
+      "files": [
+        {
+          "path": "files/fast-stacksafe-a5c029b7d3a5/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "source_url": "https://raw.githubusercontent.com/fast/stacksafe/a5c029b7d3a5fe6771ecd79266b6e21313cfa174/LICENSE",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        }
+      ]
+    },
+    {
+      "name": "svg_fmt",
+      "version": "0.4.5",
+      "license_expression": "MIT/Apache-2.0",
+      "files": [
+        {
+          "path": "files/nical-rust_debug-93f414cd572b/LICENSE",
+          "sha256": "7e98bed7f100747aaae7d82ab94fbe6b76fd6b84b09a3aaa413bff8196d0fbb1",
+          "source_url": "https://raw.githubusercontent.com/nical/rust_debug/93f414cd572b5c2781df93dbdc068ed13443d05a/LICENSE",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        }
+      ]
+    },
+    {
+      "name": "taffy",
+      "version": "0.9.0",
+      "license_expression": "MIT",
+      "files": [
+        {
+          "path": "files/DioxusLabs-taffy-599b1b7d7410/LICENSE.md",
+          "sha256": "a7083ef3dd41a65eeb2162c2c091b0082e2724fb4c6ed029b363c7840d244ecd",
+          "source_url": "https://raw.githubusercontent.com/DioxusLabs/taffy/599b1b7d7410d97e13bafc4c01fbe6d7a9cf060a/LICENSE.md",
+          "note": "原发布包缺少许可文件；从该包记录的上游源码提交补充。"
+        }
+      ]
+    },
+    {
+      "name": "zune-inflate",
+      "version": "0.2.54",
+      "license_expression": "MIT OR Apache-2.0 OR Zlib",
+      "files": [
+        {
+          "path": "files/etemesi254-zune-image-69502ce83fdf/LICENSE-ZLIB",
+          "sha256": "7fa429541e55b1509909e058f2d21a37467e4958ec713b357f6e0cf9dc4ee352",
+          "source_url": "https://raw.githubusercontent.com/etemesi254/zune-image/69502ce83fdfecdd0beefd677e2abb3781b29d98/LICENSE-ZLIB",
+          "note": "从该包对应源码提交补充 Zlib 许可全文及原版权/双许可声明。"
+        },
+        {
+          "path": "files/etemesi254-zune-image-69502ce83fdf/LICENSE.md",
+          "sha256": "e870d7fd7819a9f0453c62798cb52ae95d148a8c91dc2de1d983f997143c72de",
+          "source_url": "https://raw.githubusercontent.com/etemesi254/zune-image/69502ce83fdfecdd0beefd677e2abb3781b29d98/LICENSE.md",
+          "note": "从该包对应源码提交补充 Zlib 许可全文及原版权/双许可声明。"
+        }
+      ]
+    }
+  ]
+}

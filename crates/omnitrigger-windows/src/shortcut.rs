@@ -4,7 +4,9 @@ use std::collections::BTreeSet;
 #[cfg(windows)]
 pub(crate) const SHORTCUT_TAG: usize = 0x4f4d_534b;
 #[cfg(any(windows, test))]
-const MODIFIERS: [u16; 8] = [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0x5b, 0x5c];
+pub(crate) const MODIFIERS: [u16; 8] = [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0x5b, 0x5c];
+#[cfg(windows)]
+pub(crate) static SENDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn modifier_family(key: u16) -> Option<u8> {
     match key {
@@ -43,6 +45,32 @@ pub fn validate_shortcut(keys: &[u16]) -> Result<(), String> {
     Ok(())
 }
 
+/// 单键轻点允许独立修饰键；泛型 Shift/Ctrl/Alt VK 保留其原始含义。
+pub fn validate_key_tap(key: u16) -> Result<(), String> {
+    if modifier_family(key).is_some() || matches!(key, 0x10..=0x12) {
+        Ok(())
+    } else {
+        validate_shortcut(&[key])
+    }
+}
+
+/// 一组修饰键跨越 1–16 个依次轻点的普通键，不改变键的顺序或左右侧。
+pub fn validate_key_sequence(modifiers: &[u16], keys: &[u16]) -> Result<(), String> {
+    if modifiers.len() > 4 {
+        return Err("连续按键最多包含四类修饰键。".into());
+    }
+    if keys.is_empty() || keys.len() > 16 {
+        return Err("连续按键需要 1–16 个普通键。".into());
+    }
+    let mut combination = modifiers.to_vec();
+    combination.push(keys[0]);
+    validate_shortcut(&combination)?;
+    for key in &keys[1..] {
+        validate_shortcut(&[*key])?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg(any(windows, test))]
 struct Stroke {
@@ -72,6 +100,47 @@ fn plan(keys: &[u16], held: &BTreeSet<u16>) -> Result<Vec<Stroke>, String> {
     Ok(owned
         .iter()
         .map(|&key| Stroke { key, up: false })
+        .chain(owned.iter().rev().map(|&key| Stroke { key, up: true }))
+        .collect())
+}
+
+#[cfg(any(windows, test))]
+fn tap_plan(key: u16, held: &BTreeSet<u16>) -> Result<Vec<Stroke>, String> {
+    validate_key_tap(key)?;
+    if held.contains(&key) || MODIFIERS.iter().any(|modifier| held.contains(modifier)) {
+        return Err("轻点目标或修饰键仍被按住，已取消；请先松开这些按键。".into());
+    }
+    Ok(vec![Stroke { key, up: false }, Stroke { key, up: true }])
+}
+
+#[cfg(any(windows, test))]
+fn sequence_plan(
+    modifiers: &[u16],
+    keys: &[u16],
+    held: &BTreeSet<u16>,
+) -> Result<Vec<Stroke>, String> {
+    validate_key_sequence(modifiers, keys)?;
+    if keys.iter().any(|key| held.contains(key)) {
+        return Err("连续按键中的目标键仍被按住，已取消发送。".into());
+    }
+    if MODIFIERS
+        .iter()
+        .any(|key| held.contains(key) && !modifiers.contains(key))
+    {
+        return Err("存在连续按键以外的修饰键仍被按住，已取消发送。".into());
+    }
+    let owned: Vec<_> = modifiers
+        .iter()
+        .copied()
+        .filter(|key| !held.contains(key))
+        .collect();
+    Ok(owned
+        .iter()
+        .map(|&key| Stroke { key, up: false })
+        .chain(
+            keys.iter()
+                .flat_map(|&key| [Stroke { key, up: false }, Stroke { key, up: true }]),
+        )
         .chain(owned.iter().rev().map(|&key| Stroke { key, up: true }))
         .collect())
 }
@@ -109,7 +178,7 @@ pub fn send_shortcut(keys: &[u16]) -> Result<(), String> {
 /// 排队时记录的前台窗口标识，只能由适配层捕获，不暴露原始句柄。
 #[cfg(windows)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ShortcutTarget(isize);
+pub struct ShortcutTarget(pub(crate) isize);
 
 #[cfg(windows)]
 pub fn capture_shortcut_target() -> Result<ShortcutTarget, String> {
@@ -121,32 +190,100 @@ pub fn capture_shortcut_target() -> Result<ShortcutTarget, String> {
     }
 }
 
+/// 确认原目标仍有效且仍为前台；只读核验，不改变窗口焦点。
+/// 多步骤动作应在每个需要原窗口的步骤之前重新核验。
+#[cfg(windows)]
+pub fn ensure_shortcut_target(target: ShortcutTarget) -> Result<(), String> {
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{GetForegroundWindow, IsWindow},
+    };
+    let hwnd = HWND(target.0 as *mut std::ffi::c_void);
+    if hwnd.0.is_null() || !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return Err("原目标窗口已关闭或失效，已取消动作。".into());
+    }
+    if unsafe { GetForegroundWindow() } != hwnd {
+        return Err("前台窗口已切换，已取消动作。".into());
+    }
+    Ok(())
+}
+
+/// 尝试交还启动前捕获的前台窗口，不注入按键，也不绕过系统前台权限限制。
+/// 调用方应先确认当前前台仍是自己的窗口，避免覆盖用户已经完成的窗口切换。
+/// 目标已失效时返回错误；系统拒绝前台切换时返回 `Ok(false)`。
+#[cfg(windows)]
+pub fn restore_shortcut_target(target: ShortcutTarget) -> Result<bool, String> {
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{GetForegroundWindow, IsWindow, SetForegroundWindow},
+    };
+    let hwnd = HWND(target.0 as *mut std::ffi::c_void);
+    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return Err("原目标窗口已关闭或失效，无法恢复前台。".into());
+    }
+    if unsafe { GetForegroundWindow() } == hwnd {
+        return Ok(true);
+    }
+    let _ = unsafe { SetForegroundWindow(hwnd) };
+    Ok(unsafe { GetForegroundWindow() } == hwnd)
+}
+
 /// 向排队时的前台窗口发送快捷键；执行时前台已变化则取消，不主动抢焦点。
 /// 必须在 Hook 与界面线程之外调用，其他限制与 `send_shortcut` 相同。
 #[cfg(windows)]
 pub fn send_shortcut_to(keys: &[u16], target: ShortcutTarget) -> Result<(), String> {
-    use std::{mem::size_of, sync::Mutex};
-    use windows::Win32::UI::{
-        Input::KeyboardAndMouse::{
-            GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-            KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-        },
-        WindowsAndMessaging::GetForegroundWindow,
-    };
-
-    static SENDING: Mutex<()> = Mutex::new(());
     let _guard = SENDING.lock().map_err(|_| "快捷键发送状态不可用。")?;
     validate_shortcut(keys)?;
-    if unsafe { GetForegroundWindow() }.0 as isize != target.0 {
-        return Err("前台窗口已切换，已取消发送快捷键。".into());
-    }
-    let held = MODIFIERS
+    ensure_shortcut_target(target)?;
+    let strokes = plan(keys, &held_keys(keys))?;
+    send_strokes(&strokes, target, "快捷键")
+}
+
+/// 轻点一个键，包括独立 Alt/Ctrl/Shift/Win；不能轻点已经按住的键。
+/// 必须由工作线程调用，不更改焦点，不释放用户预先按住的按键。
+#[cfg(windows)]
+pub fn send_key_tap_to(key: u16, target: ShortcutTarget) -> Result<(), String> {
+    let _guard = SENDING.lock().map_err(|_| "按键发送状态不可用。")?;
+    validate_key_tap(key)?;
+    ensure_shortcut_target(target)?;
+    let strokes = tap_plan(key, &held_keys(&[key]))?;
+    send_strokes(&strokes, target, "单键轻点")
+}
+
+/// 保持一组修饰键，依次轻点多个普通键。已按住的目标修饰键只借用，不松开。
+/// 必须由工作线程调用；与普通快捷键和 Unicode 文本发送共用串行门闩。
+#[cfg(windows)]
+pub fn send_key_sequence_to(
+    modifiers: &[u16],
+    keys: &[u16],
+    target: ShortcutTarget,
+) -> Result<(), String> {
+    let _guard = SENDING.lock().map_err(|_| "连续按键发送状态不可用。")?;
+    validate_key_sequence(modifiers, keys)?;
+    ensure_shortcut_target(target)?;
+    let strokes = sequence_plan(modifiers, keys, &held_keys(keys))?;
+    send_strokes(&strokes, target, "连续按键")
+}
+
+#[cfg(windows)]
+fn held_keys(keys: &[u16]) -> BTreeSet<u16> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    MODIFIERS
         .iter()
         .copied()
         .chain(keys.iter().copied())
         .filter(|key| unsafe { GetAsyncKeyState(i32::from(*key)) } < 0)
-        .collect();
-    let strokes = plan(keys, &held)?;
+        .collect()
+}
+
+/// 调用方必须持有 SENDING；清理只涉及当前计划已提交的自有按下。
+#[cfg(windows)]
+fn send_strokes(strokes: &[Stroke], target: ShortcutTarget, label: &str) -> Result<(), String> {
+    use std::mem::size_of;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    };
     fn native(stroke: &Stroke) -> INPUT {
         let mut flags = KEYBD_EVENT_FLAGS(0);
         if stroke.up {
@@ -168,14 +305,12 @@ pub fn send_shortcut_to(keys: &[u16], target: ShortcutTarget) -> Result<(), Stri
         }
     }
     let inputs: Vec<INPUT> = strokes.iter().map(native).collect();
-    if unsafe { GetForegroundWindow() }.0 as isize != target.0 {
-        return Err("前台窗口已切换，已取消发送快捷键。".into());
-    }
+    ensure_shortcut_target(target)?;
     let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) } as usize;
     if sent == inputs.len() {
         return Ok(());
     }
-    let releases = cleanup(&strokes, sent);
+    let releases = cleanup(strokes, sent);
     let release_inputs: Vec<INPUT> = releases.iter().map(native).collect();
     let mut released = 0;
     // 系统可能只接纳批次的一部分；有限次继续处理剩余释放，绝不重新执行动作。
@@ -193,12 +328,12 @@ pub fn send_shortcut_to(keys: &[u16], target: ShortcutTarget) -> Result<(), Stri
             .collect::<Vec<_>>()
             .join("、");
         return Err(format!(
-            "快捷键仅送达 {sent}/{} 个事件，且无法确认 {pending} 已释放；请手动按下并松开这些键。",
+            "{label}仅送达 {sent}/{} 个事件，且无法确认 {pending} 已释放；请手动按下并松开这些键。",
             inputs.len()
         ));
     }
     Err(format!(
-        "快捷键仅送达 {sent}/{} 个事件；已尝试收尾本次按下，目标应用可能受权限隔离或输入拦截影响。",
+        "{label}仅送达 {sent}/{} 个事件；已尝试收尾本次按下，目标应用可能受权限隔离或输入拦截影响。",
         inputs.len()
     ))
 }
@@ -274,6 +409,100 @@ mod tests {
         }
         for key in [0x08, 0x0d, 0xa0, 0xa2, 0xa4, 0x43] {
             assert!(!extended(key));
+        }
+    }
+
+    #[test]
+    fn modifier_tap_requires_every_physical_modifier_released() {
+        for key in MODIFIERS.into_iter().chain([0x10, 0x11, 0x12, 0x43]) {
+            assert!(validate_key_tap(key).is_ok());
+            let strokes = tap_plan(key, &BTreeSet::new()).unwrap();
+            assert_eq!(
+                strokes,
+                [Stroke { key, up: false }, Stroke { key, up: true }]
+            );
+            assert_eq!(cleanup(&strokes, 1), [Stroke { key, up: true }]);
+            assert!(cleanup(&strokes, 2).is_empty());
+            assert!(tap_plan(key, &BTreeSet::from([key])).is_err());
+            for held in MODIFIERS {
+                assert!(tap_plan(key, &BTreeSet::from([held])).is_err());
+            }
+        }
+        assert!(validate_key_tap(0xe7).is_err());
+    }
+
+    #[test]
+    fn sequence_keeps_modifier_owned_once_and_preserves_terminal_order() {
+        let strokes =
+            sequence_plan(&[0xa2, 0xa0], &[0x4b, 0x43, 0x43], &BTreeSet::from([0xa2])).unwrap();
+        assert_eq!(
+            strokes,
+            [
+                Stroke {
+                    key: 0xa0,
+                    up: false
+                },
+                Stroke {
+                    key: 0x4b,
+                    up: false
+                },
+                Stroke {
+                    key: 0x4b,
+                    up: true
+                },
+                Stroke {
+                    key: 0x43,
+                    up: false
+                },
+                Stroke {
+                    key: 0x43,
+                    up: true
+                },
+                Stroke {
+                    key: 0x43,
+                    up: false
+                },
+                Stroke {
+                    key: 0x43,
+                    up: true
+                },
+                Stroke {
+                    key: 0xa0,
+                    up: true
+                },
+            ]
+        );
+        for sent in 0..=strokes.len() {
+            let releases = cleanup(&strokes, sent);
+            assert!(releases
+                .iter()
+                .all(|stroke| stroke.up && stroke.key != 0xa2));
+            let mut held = BTreeSet::new();
+            for stroke in strokes.iter().take(sent).chain(releases.iter()) {
+                if stroke.up {
+                    held.remove(&stroke.key);
+                } else {
+                    held.insert(stroke.key);
+                }
+            }
+            assert!(held.is_empty(), "部分提交 {sent} 未收尾");
+        }
+        assert!(sequence_plan(&[0xa2], &[0x43], &BTreeSet::from([0xa3])).is_err());
+        assert!(sequence_plan(&[0xa2], &[0x43], &BTreeSet::from([0x43])).is_err());
+    }
+
+    #[test]
+    fn sequence_rejects_ambiguous_modifiers_and_bounds_terminal_count() {
+        assert!(validate_key_sequence(&[], &[0x41; 16]).is_ok());
+        for (modifiers, keys) in [
+            (vec![], vec![]),
+            (vec![], vec![0x41; 17]),
+            (vec![0xa2, 0xa3], vec![0x43]),
+            (vec![0x11], vec![0x43]),
+            (vec![0xa2], vec![0x43, 0xa0]),
+            (vec![0x43], vec![0x41]),
+        ] {
+            assert!(validate_key_sequence(&modifiers, &keys).is_err());
         }
     }
 

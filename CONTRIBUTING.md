@@ -4,7 +4,7 @@
 
 ## 开发环境
 
-当前应用面向 Windows，需要 Rust 1.90+ 的 MSVC 工具链及 Visual Studio C++ Build Tools。
+当前应用面向 Windows，需要 Rust 的 MSVC 工具链、Visual Studio C++ Build Tools 及 PowerShell 7。仓库的 `rust-toolchain.toml` 固定 Rust 1.90.0 和所需检查组件。
 
 ```powershell
 cargo build -p omnitrigger-app --locked
@@ -12,6 +12,8 @@ cargo build -p omnitrigger-app --locked
 ```
 
 ## 代码边界
+
+先阅读[项目架构](docs/ARCHITECTURE.md)定位模块，功能说明见[文档目录](docs/README.md)。
 
 - `omnitrigger-core` 是纯 Rust 确定性状态机：输入标准化事件、时间与上下文，输出决策，不读取隐含全局状态。
 - `omnitrigger-windows` 负责 Windows 输入采集、消费、补发和监听生命周期。Hook 同步路径只做有界状态更新与匹配。
@@ -25,16 +27,27 @@ cargo build -p omnitrigger-app --locked
 按改动执行以下检查；纯文档改动检查内容与差异即可。
 
 ```powershell
+.\scripts\check.ps1
+```
+
+该脚本与 Windows CI 共用：依次检查格式、工作区测试、Clippy、应用构建，并用 `--check-config` 验证 `examples/*.json`，不会执行配置中的动作。需要单独运行时：
+
+```powershell
 cargo fmt --all --check
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build -p omnitrigger-app --locked
 ```
+
+Linux / macOS 上可运行 `cargo test -p omnitrigger-core --locked` 和 `cargo clippy -p omnitrigger-core --all-targets --locked -- -D warnings`；Linux CI 以此检查核心独立性。平台与界面改动仍需 Windows 检查。
 
 涉及 Windows Hook 生命周期时，在有交互桌面的 Windows 会话中额外执行：
 
 ```powershell
 cargo build -p omnitrigger-app --locked
 .\target\debug\omnitrigger.exe --smoke-test
+# 或在完整检查后执行 Hook 检查：
+.\scripts\check.ps1 -SmokeTest
 ```
 
 该命令验证真实 Hook 的安装与卸载；自动化测试不能替代桌面中的组合录制、触发、释放和监听重建检查。请在 PR 中说明实际验证环境与结果。

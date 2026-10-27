@@ -482,6 +482,7 @@ impl ButtonDescription {
 impl DefaultTrigger {
     fn spec(&self, id: u64) -> TriggerSpec {
         TriggerSpec {
+            conditions: Vec::new(),
             id,
             held: self.held.iter().map(|button| button.button()).collect(),
             activation: match self.activation {

@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - '**'
   pull_request:
   workflow_dispatch:
 
@@ -30,14 +32,25 @@ jobs:
       - name: 安装 Rust 工具链
         run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
 
-      - name: 检查格式
-        run: cargo fmt --all --check
+      - name: 检查、构建并验证示例配置
+        shell: pwsh
+        run: ./scripts/check.ps1
 
-      - name: 运行工作区测试
-        run: cargo test --workspace --locked
+  core-linux:
+    name: Linux 核心可移植性
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - name: 检查代码
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: 安装 Rust 工具链
+        run: rustup toolchain install 1.90.0 --profile minimal --component clippy
 
-      - name: 构建应用
-        run: cargo build -p omnitrigger-app --locked
+      - name: 运行核心测试
+        run: cargo test -p omnitrigger-core --locked
+
+      - name: 检查核心代码
+        run: cargo clippy -p omnitrigger-core --all-targets --locked -- -D warnings

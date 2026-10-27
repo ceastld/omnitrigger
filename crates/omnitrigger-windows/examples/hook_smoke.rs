@@ -17,11 +17,13 @@ fn main() -> Result<(), String> {
     backend.send(BackendCommand::SetEnabled(false))?;
     backend.send(BackendCommand::SetBindings(vec![
         TriggerSpec {
+            conditions: Vec::new(),
             id: 1,
             held: vec![Button::Key(0x14)],
             activation: Activation::Press(Button::Key(0x57)),
         },
         TriggerSpec {
+            conditions: Vec::new(),
             id: 2,
             held: vec![Button::Mouse(MouseButton::X1)],
             activation: Activation::Wheel(WheelDirection::Up),
