@@ -1,0 +1,8 @@
+node_modules/
+.vitepress/cache/
+.vitepress/dist/
+
+# 由 scripts/sync-docs.mjs 从仓库文档与程序图标生成
+docs/
+public/logo.svg
+public/favicon.svg

@@ -1,0 +1,20 @@
+{
+  "name": "omnitrigger-site",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "OmniTrigger 主页与文档站",
+  "scripts": {
+    "sync": "node scripts/sync-docs.mjs",
+    "dev": "vitepress dev",
+    "build": "vitepress build",
+    "preview": "vitepress preview"
+  },
+  "devDependencies": {
+    "mermaid": "11.14.0",
+    "vitepress": "1.6.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

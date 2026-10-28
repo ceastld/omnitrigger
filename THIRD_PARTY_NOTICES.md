@@ -38,6 +38,14 @@ Windows 发行流程通过 `scripts/collect-licenses.ps1` 从锁定目标的应�
 
 界面请求使用系统安装的 Microsoft YaHei UI、Cascadia Mono 等字体，仓库没有附带字体文件。系统字体不因本项目使用 MIT 而获得再分发许可。
 
+## 主页与文档站
+
+`site/` 使用 VitePress 构建主页与文档站，精确版本以 `site/package-lock.json` 为准。这些 npm 依赖只用于网站，不进入 Windows 发行包。
+
+构建时，VitePress 运行时、Vue、本地搜索以及文档流程图使用的 mermaid 等软件包会被打包进站点的浏览器脚本。[`site/scripts/third-party-licenses.mjs`](site/scripts/third-party-licenses.mjs) 按实际打包的模块收集许可正文与版权声明，生成随站点发布的 `third-party-licenses.txt`。其中多数为 MIT 或 ISC，部分 `d3` 旧版本为 BSD-3-Clause，`dompurify` 为 MPL-2.0 OR Apache-2.0；个别发布包未附带许可正文时，清单注明其 `package.json` 中的许可声明。
+
+站点使用访问者系统中的字体，不分发字体文件，也不加载外部字体、统计或广告脚本。界面截图与社交预览图来自本项目程序和图标，按 MIT 提供；预览图中的文字由系统字体渲染为图像，不包含字体文件。
+
 ## 可选下载的 RaiShot 运行程序
 
 RaiShot 截图适配描述和 OmniTrigger 安装器属于本项目代码；截图能力由用户选择安装后独立下载的 [RaiShot v0.4.15 发布包](https://github.com/ceastld/raishot/releases/tag/v0.4.15) 提供。该外部程序使用 GPL-3.0-or-later，不能将其二进制、运行库或素材视为本项目 MIT 资源。

@@ -38,9 +38,10 @@ crates/
     plugins/                 内置插件动作清单
 docs/                        架构、使用说明与发布检查
 examples/                    可校验的绑定配置与脚本示例
+site/                        主页与文档站（VitePress），文档页从仓库 Markdown 同步
 scripts/check.ps1            Windows 本地与 CI 共用检查入口
 scripts/build-app.ps1        构建应用并返回本次 EXE 的准确路径
-.github/                     CI、Issue 与 PR 模板
+.github/                     CI、站点发布、Issue 与 PR 模板
 rust-toolchain.toml          固定 Rust 工具链与检查组件
 ```
 
