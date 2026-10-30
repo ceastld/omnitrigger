@@ -1,6 +1,6 @@
 //! 轮盘管理与执行协调；浮窗只提交选择，不在输入 Hook 内执行动作。
 use crate::{
-    wheels::{WheelDefinition, WheelSlot},
+    wheels::{WheelDefinition, WheelPosition, WheelSlot},
     ActionSpec, Activation, BackendCommand, Bounds, Context, HitSource, Page, RadialWheel,
     RawWindowHandle, ShortcutAction, WheelAccent, WheelActionRef, WheelRequest, Wheels,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, Workspace,
@@ -55,6 +55,134 @@ pub(super) fn next_slot_position(wheel: &WheelDefinition) -> Option<crate::wheel
     None
 }
 
+pub(super) const RING_NAMES: [&str; 3] = ["内圈", "中圈", "外圈"];
+/// 尚无动作的圈首次放入槽位时使用的方向数。
+const DEFAULT_SECTORS: u8 = 8;
+
+/// 圈的方向数与半格偏移由该圈已有槽位决定；空圈返回 `None`。
+pub(super) fn ring_geometry(wheel: &WheelDefinition, ring: u8) -> Option<(u8, bool)> {
+    wheel
+        .slots
+        .iter()
+        .filter_map(|slot| slot.position)
+        .find(|position| position.ring == ring)
+        .map(|position| (position.sectors, position.half_step))
+}
+
+/// 返回占用该方位的槽位序号。
+pub(super) fn slot_at(wheel: &WheelDefinition, ring: u8, sector: u8) -> Option<usize> {
+    wheel.slots.iter().position(|slot| {
+        slot.position
+            .is_some_and(|position| position.ring == ring && position.sector == sector)
+    })
+}
+
+/// 把槽位移到指定圈与方向；目标方向已有动作时两者互换，空圈按默认 8 个方向启用。
+pub(super) fn place_slot(
+    wheel: &mut WheelDefinition,
+    slot: usize,
+    ring: u8,
+    sector: u8,
+) -> Result<(), String> {
+    let current = wheel
+        .slots
+        .get(slot)
+        .and_then(|entry| entry.position)
+        .ok_or("只有方位布局可以调整方向，请先改用方位布局。")?;
+    let name = RING_NAMES.get(usize::from(ring)).ok_or("圈号应为 0–2。")?;
+    let (sectors, half_step) = ring_geometry(wheel, ring).unwrap_or((DEFAULT_SECTORS, false));
+    if sector >= sectors {
+        return Err(format!("{name}只有 {sectors} 个方向。"));
+    }
+    match slot_at(wheel, ring, sector) {
+        Some(other) if other == slot => return Ok(()),
+        Some(other) => wheel.slots[other].position = Some(current),
+        None => {}
+    }
+    wheel.slots[slot].position = Some(WheelPosition {
+        ring,
+        sector,
+        sectors,
+        half_step,
+    });
+    Ok(())
+}
+
+/// 切换圈时优先保留原方向编号，被占用或超出范围时取该圈第一个空方向。
+pub(super) fn move_slot_to_ring(
+    wheel: &mut WheelDefinition,
+    slot: usize,
+    ring: u8,
+) -> Result<(), String> {
+    let current = wheel
+        .slots
+        .get(slot)
+        .and_then(|entry| entry.position)
+        .ok_or("只有方位布局可以调整方向，请先改用方位布局。")?;
+    if current.ring == ring {
+        return Ok(());
+    }
+    let name = RING_NAMES.get(usize::from(ring)).ok_or("圈号应为 0–2。")?;
+    let sectors = ring_geometry(wheel, ring).map_or(DEFAULT_SECTORS, |(sectors, _)| sectors);
+    let sector = std::iter::once(current.sector)
+        .chain(0..sectors)
+        .find(|sector| *sector < sectors && slot_at(wheel, ring, *sector).is_none())
+        .ok_or(format!(
+            "{name}已没有空方向，可增加方向数或直接点选方向互换。"
+        ))?;
+    place_slot(wheel, slot, ring, sector)
+}
+
+/// 调整整圈的方向数与半格偏移；已有动作会超出新方向数时拒绝，不替用户挪动布局。
+pub(super) fn set_ring_layout(
+    wheel: &mut WheelDefinition,
+    ring: u8,
+    sectors: u8,
+    half_step: bool,
+) -> Result<(), String> {
+    let name = RING_NAMES.get(usize::from(ring)).ok_or("圈号应为 0–2。")?;
+    if !(1..=16).contains(&sectors) {
+        return Err("每圈方向数应为 1–16。".into());
+    }
+    if let Some(position) = wheel
+        .slots
+        .iter()
+        .filter_map(|slot| slot.position)
+        .find(|position| position.ring == ring && position.sector >= sectors)
+    {
+        return Err(format!(
+            "{name}方向 {} 已有动作，先把它移到其他方向再减少方向数。",
+            position.sector + 1
+        ));
+    }
+    for position in wheel
+        .slots
+        .iter_mut()
+        .filter_map(|slot| slot.position.as_mut())
+        .filter(|position| position.ring == ring)
+    {
+        position.sectors = sectors;
+        position.half_step = half_step;
+    }
+    Ok(())
+}
+
+/// 均分布局转为内圈方位布局，方向与原均分位置一致；此后删除槽位不再重排其他动作。
+pub(super) fn convert_to_positions(wheel: &mut WheelDefinition) {
+    if wheel.slots.iter().any(|slot| slot.position.is_some()) {
+        return;
+    }
+    let sectors = wheel.slots.len() as u8;
+    for (index, slot) in wheel.slots.iter_mut().enumerate() {
+        slot.position = Some(WheelPosition {
+            ring: 0,
+            sector: index as u8,
+            sectors,
+            half_step: false,
+        });
+    }
+}
+
 pub(super) fn wheel_has_room(wheel: &WheelDefinition) -> bool {
     if wheel
         .slots
@@ -80,25 +208,19 @@ impl Workspace {
             cx.notify();
             return false;
         }
+        // 文件可能已在外部编辑器中修改；不同于已载入内容时拒绝保存，避免覆盖这些修改。
+        if Wheels::load(&crate::settings::path()).is_ok_and(|disk| disk != self.wheels) {
+            self.error = Some(
+                "wheels.json 已在外部修改，请先点击“重新载入”，再在页面中编辑，以免覆盖文件中的修改。"
+                    .into(),
+            );
+            cx.notify();
+            return false;
+        }
         match proposed.save(&crate::settings::path()) {
             Ok(()) => {
-                self.hide_wheel(cx);
-                self.wheels = proposed;
-                self.error = None;
+                self.apply_wheels(proposed, cx);
                 self.status = "轮盘已保存。".into();
-                let definitions = &self.wheels.wheels;
-                self.wheel_runtime_ids.retain(|(id, index), runtime_id| {
-                    definitions
-                        .iter()
-                        .any(|wheel| &wheel.id == id && *index < wheel.slots.len())
-                        || self.executor.is_running(*runtime_id)
-                        || self.shortcut_executor.is_running(*runtime_id)
-                        || self.system_executor.is_running(*runtime_id)
-                        || self.local_executor.is_running(*runtime_id)
-                        || self.action_service.is_running(*runtime_id)
-                });
-                self.sync_bindings();
-                cx.notify();
                 true
             }
             Err(error) => {
@@ -107,6 +229,132 @@ impl Workspace {
                 false
             }
         }
+    }
+
+    fn apply_wheels(&mut self, wheels: Wheels, cx: &mut Context<Self>) {
+        self.hide_wheel(cx);
+        self.wheels = wheels;
+        self.wheels_error = None;
+        self.error = None;
+        let definitions = &self.wheels.wheels;
+        self.wheel_runtime_ids.retain(|(id, index), runtime_id| {
+            definitions
+                .iter()
+                .any(|wheel| &wheel.id == id && *index < wheel.slots.len())
+                || self.executor.is_running(*runtime_id)
+                || self.shortcut_executor.is_running(*runtime_id)
+                || self.system_executor.is_running(*runtime_id)
+                || self.local_executor.is_running(*runtime_id)
+                || self.action_service.is_running(*runtime_id)
+        });
+        self.sync_bindings();
+        cx.notify();
+    }
+
+    /// 重新读取 wheels.json；读取或校验失败时保留当前内容并显示原因。
+    pub(super) fn reload_wheels(&mut self, cx: &mut Context<Self>) {
+        match Wheels::load(&crate::settings::path()) {
+            Ok(wheels) => {
+                let slot = self.wheel_slot_selected;
+                self.apply_wheels(wheels, cx);
+                let id = self
+                    .wheel_selected
+                    .clone()
+                    .filter(|id| self.wheels.wheels.iter().any(|wheel| &wheel.id == id))
+                    .or_else(|| self.wheels.wheels.first().map(|wheel| wheel.id.clone()));
+                match id {
+                    Some(id) => self.select_wheel(id, cx),
+                    None => self.wheel_selected = None,
+                }
+                if let Some(slot) = slot {
+                    self.select_wheel_slot(slot, cx);
+                }
+                self.status = "已重新载入轮盘配置。".into();
+            }
+            Err(error) => {
+                if self.wheels_error.is_some() {
+                    self.wheels_error = Some(error.clone());
+                }
+                self.error = Some(format!("重新载入失败，仍使用当前轮盘：{error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    /// 用系统中 .json 的默认程序打开轮盘配置，未关联程序时改用记事本；修改后需重新载入。
+    pub(super) fn open_wheels_file(&mut self, cx: &mut Context<Self>) {
+        let path = crate::settings::path().with_file_name("wheels.json");
+        let path = std::path::absolute(&path).unwrap_or(path);
+        if !path.exists() && self.wheels_error.is_none() {
+            if let Err(error) = self.wheels.save(&crate::settings::path()) {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+        }
+        let target = path.to_string_lossy().into_owned();
+        std::thread::spawn(move || {
+            if omnitrigger_windows::open_target(&target).is_err() {
+                let _ = std::process::Command::new("notepad.exe")
+                    .arg(&target)
+                    .spawn();
+            }
+        });
+        self.status = "已打开 wheels.json，保存文件后点击“重新载入”。".into();
+        cx.notify();
+    }
+
+    fn edit_selected_wheel(
+        &mut self,
+        cx: &mut Context<Self>,
+        edit: impl FnOnce(&mut WheelDefinition, Option<usize>) -> Result<(), String>,
+    ) {
+        let Some(index) = self.selected_wheel_index() else {
+            return;
+        };
+        let slot = self.wheel_slot_selected;
+        let mut proposed = self.wheels.clone();
+        if let Err(error) = edit(&mut proposed.wheels[index], slot) {
+            self.error = Some(error);
+            cx.notify();
+            return;
+        }
+        if self.commit_wheels(proposed, cx) {
+            if let Some(slot) = slot {
+                self.select_wheel_slot(slot, cx);
+            }
+        }
+    }
+
+    pub(super) fn place_wheel_slot(&mut self, ring: u8, sector: u8, cx: &mut Context<Self>) {
+        self.edit_selected_wheel(cx, |wheel, slot| {
+            place_slot(wheel, slot.ok_or("请先选择槽位。")?, ring, sector)
+        });
+    }
+
+    pub(super) fn move_wheel_slot_ring(&mut self, ring: u8, cx: &mut Context<Self>) {
+        self.edit_selected_wheel(cx, |wheel, slot| {
+            move_slot_to_ring(wheel, slot.ok_or("请先选择槽位。")?, ring)
+        });
+    }
+
+    pub(super) fn set_wheel_ring_layout(
+        &mut self,
+        ring: u8,
+        sectors: u8,
+        half_step: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_selected_wheel(cx, |wheel, _| {
+            set_ring_layout(wheel, ring, sectors, half_step)
+        });
+    }
+
+    pub(super) fn convert_wheel_to_positions(&mut self, cx: &mut Context<Self>) {
+        self.edit_selected_wheel(cx, |wheel, _| {
+            convert_to_positions(wheel);
+            Ok(())
+        });
     }
 
     pub(super) fn select_wheel(&mut self, id: String, cx: &mut Context<Self>) {
@@ -1044,5 +1292,93 @@ impl Workspace {
             changed = true;
         }
         changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(ring: u8, sector: u8, sectors: u8) -> Option<WheelPosition> {
+        Some(WheelPosition {
+            ring,
+            sector,
+            sectors,
+            half_step: false,
+        })
+    }
+
+    fn wheel(positions: &[Option<WheelPosition>]) -> WheelDefinition {
+        let mut wheel = Wheels::default().wheels.remove(0);
+        let template = wheel.slots[0].clone();
+        wheel.slots = positions
+            .iter()
+            .enumerate()
+            .map(|(index, position)| WheelSlot {
+                label: format!("槽位{index}"),
+                position: *position,
+                ..template.clone()
+            })
+            .collect();
+        wheel
+    }
+
+    #[test]
+    fn placing_on_occupied_direction_swaps() {
+        let mut wheel = wheel(&[at(0, 0, 8), at(0, 3, 8)]);
+        place_slot(&mut wheel, 0, 0, 3).unwrap();
+        assert_eq!(wheel.slots[0].position, at(0, 3, 8));
+        assert_eq!(wheel.slots[1].position, at(0, 0, 8));
+        wheel.validate().unwrap();
+    }
+
+    #[test]
+    fn swapping_across_rings_keeps_each_ring_geometry() {
+        let mut wheel = wheel(&[at(0, 1, 8), at(1, 5, 16)]);
+        place_slot(&mut wheel, 0, 1, 5).unwrap();
+        assert_eq!(wheel.slots[0].position, at(1, 5, 16));
+        assert_eq!(wheel.slots[1].position, at(0, 1, 8));
+        wheel.validate().unwrap();
+    }
+
+    #[test]
+    fn moving_to_empty_ring_uses_default_sectors_and_keeps_direction() {
+        let mut wheel = wheel(&[at(0, 5, 8), at(0, 0, 8)]);
+        move_slot_to_ring(&mut wheel, 0, 2).unwrap();
+        assert_eq!(wheel.slots[0].position, at(2, 5, 8));
+        wheel.validate().unwrap();
+    }
+
+    #[test]
+    fn moving_to_ring_falls_back_to_first_free_direction() {
+        let mut wheel = wheel(&[at(0, 1, 8), at(1, 0, 2), at(1, 1, 2)]);
+        assert!(move_slot_to_ring(&mut wheel, 0, 1).is_err());
+        set_ring_layout(&mut wheel, 1, 4, false).unwrap();
+        move_slot_to_ring(&mut wheel, 0, 1).unwrap();
+        assert_eq!(wheel.slots[0].position, at(1, 2, 4));
+        wheel.validate().unwrap();
+    }
+
+    #[test]
+    fn ring_layout_applies_to_whole_ring_and_refuses_to_drop_slots() {
+        let mut wheel = wheel(&[at(0, 6, 8), at(0, 1, 8), at(1, 0, 16)]);
+        assert!(set_ring_layout(&mut wheel, 0, 6, false).is_err());
+        set_ring_layout(&mut wheel, 0, 12, true).unwrap();
+        for slot in &wheel.slots[..2] {
+            let position = slot.position.unwrap();
+            assert_eq!((position.sectors, position.half_step), (12, true));
+        }
+        assert_eq!(wheel.slots[2].position, at(1, 0, 16));
+        wheel.validate().unwrap();
+    }
+
+    #[test]
+    fn converting_even_layout_keeps_directions() {
+        let mut wheel = wheel(&[None, None, None]);
+        convert_to_positions(&mut wheel);
+        let positions: Vec<_> = wheel.slots.iter().map(|slot| slot.position).collect();
+        assert_eq!(positions, [at(0, 0, 3), at(0, 1, 3), at(0, 2, 3)]);
+        wheel.validate().unwrap();
+        assert!(place_slot(&mut wheel, 0, 0, 3).is_err());
     }
 }

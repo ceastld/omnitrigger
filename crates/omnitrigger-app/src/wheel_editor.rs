@@ -1,5 +1,6 @@
 //! 自定义轮盘的管理页；动作与触发绑定仍由应用层统一保存和验证。
 use crate::theme::rgb;
+use crate::wheel_workspace::{slot_at, RING_NAMES};
 use crate::{
     button, caption, card, heading, icon, icon_button, section_title, small, status_pill, theme,
     wheels::{WheelAccent, WheelDefinition},
@@ -34,6 +35,38 @@ fn action_text(action: &ActionSpec) -> String {
         ActionSpec::ShowPanel => "打开触发面板".into(),
         ActionSpec::ShowWheel(_) => "打开轮盘".into(),
     }
+}
+
+fn chip(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<gpui::SharedString>,
+    active: bool,
+    enabled: bool,
+    tint: u32,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px(px(10.))
+        .py(px(6.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(if active {
+            theme::hsla(tint, 0.7)
+        } else {
+            rgb(theme::BORDER).into()
+        })
+        .bg(if active {
+            theme::tint_fill(tint, 0.22, 0.04)
+        } else {
+            rgb(theme::BACKGROUND).into()
+        })
+        .text_size(px(12.))
+        .when(enabled, |el| {
+            el.cursor_pointer()
+                .hover(|style| style.border_color(theme::hsla(tint, 0.55)))
+        })
+        .when(!enabled, |el| el.opacity(0.45))
+        .child(label.into())
 }
 
 fn alert(text: impl Into<gpui::SharedString>) -> Div {
@@ -154,9 +187,45 @@ impl Workspace {
         if self.wheels.wheels.is_empty() {
             rows = rows.child(caption("还没有轮盘。新建后，为它添加常用动作。"));
         }
+        let can_open_file = !self.recording;
         directory = directory
             .child(self.smooth_scroll.wrap("wheel-directory-scroll", rows))
-            .child(caption("每个轮盘有独立名称、颜色和动作顺序。"));
+            .child(caption("每个轮盘有独立名称、颜色和动作顺序。"))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(6.))
+                    .child(
+                        small(button(
+                            "open-wheels-file",
+                            "编辑 JSON",
+                            Tone::Secondary,
+                            can_open_file,
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if can_open_file {
+                                this.open_wheels_file(cx);
+                            }
+                        })),
+                    )
+                    .child(
+                        small(button(
+                            "reload-wheels",
+                            "重新载入",
+                            Tone::Secondary,
+                            can_open_file,
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if can_open_file {
+                                this.reload_wheels(cx);
+                            }
+                        })),
+                    ),
+            )
+            .child(caption(
+                "应用专用布局等全部字段可在 wheels.json 中修改，保存文件后点击重新载入。",
+            ));
         let content = if let Some(wheel) = wheel {
             self.wheel_editor_content(wheel, cx)
         } else {
@@ -271,11 +340,20 @@ impl Workspace {
                     .child(caption("名称修改后点击保存；槽位和颜色分别保存。")),
             );
         if !wheel.app_overrides.is_empty() {
-            appearance = appearance.child(caption(format!(
-                "当前编辑通用布局；另有 {} 个应用专用布局：{}。使用时按前台应用自动选择，专用布局保存在轮盘配置文件中。",
-                wheel.app_overrides.len(),
-                wheel.app_overrides.iter().map(|item| item.process.as_str()).collect::<Vec<_>>().join("、")
-            )));
+            // 长段自动换行的文字在滚动列中会被量高，留下空白并截断页尾；拆成短行。
+            appearance = appearance
+                .child(caption(format!(
+                    "当前编辑通用布局；另有 {} 个应用专用布局，按前台应用自动选择，在“编辑 JSON”中修改。",
+                    wheel.app_overrides.len()
+                )))
+                .child(
+                    div().flex().flex_wrap().gap(px(6.)).children(
+                        wheel
+                            .app_overrides
+                            .iter()
+                            .map(|item| status_pill(item.process.clone(), tint)),
+                    ),
+                );
         }
         let mut colors = div().flex().flex_wrap().items_center().gap(px(7.));
         for (index, (accent, label)) in [
@@ -377,13 +455,18 @@ impl Workspace {
                 "预览使用已保存的槽位。设置呼出组合后，仍需在触发器页保存绑定。",
             ));
 
+        let explicit = wheel.slots.iter().any(|slot| slot.position.is_some());
         let mut slots = card().p(px(18.)).flex().flex_col().gap(px(12.)).child(
             div()
                 .flex()
                 .items_center()
                 .justify_between()
                 .child(section_title("动作顺序"))
-                .child(caption("从顶部开始，顺时针排列")),
+                .child(caption(if explicit {
+                    "编号即数字键 1–8，方向在选中后调整"
+                } else {
+                    "从顶部开始，顺时针排列"
+                })),
         );
         for (index, slot) in wheel.slots.iter().enumerate() {
             let active = selected == Some(index);
@@ -523,7 +606,9 @@ impl Workspace {
                 )
                 .when(wheel.slots.len() == 1, |el| {
                     el.child(caption("每个轮盘至少保留一个槽位。"))
-                });
+                })
+                .child(div().h(px(1.)).bg(rgb(theme::BORDER)).my(px(3.)))
+                .map(|card| self.wheel_position_editor(card, wheel, index, tint, can_edit, cx));
         } else {
             slots = slots.child(caption("在上方选择一个槽位，修改名称、快捷键或排列顺序。"));
         }
@@ -748,6 +833,146 @@ impl Workspace {
                 .child(footer)
                 .map(|el| self.smooth_scroll.wrap("wheel-editor-content", el)),
         )
+    }
+
+    /// 选中槽位的圈、方向与整圈分区，直接追加到槽位卡片；每次点击立即保存，预览随之更新。
+    fn wheel_position_editor(
+        &self,
+        card: Div,
+        wheel: &WheelDefinition,
+        index: usize,
+        tint: u32,
+        can_edit: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let field = |label: &'static str| {
+            div()
+                .text_size(px(12.))
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child(label)
+        };
+        let editor = card.child(field("方位"));
+        let Some(position) = wheel.slots[index].position else {
+            return editor
+                .child(caption("当前为均分布局，方向随槽位数量自动均分。"))
+                .child(caption(
+                    "改用方位布局后可逐个指定圈和方向，删除槽位不会重排其他动作。",
+                ))
+                .child(
+                    small(button(
+                        "convert-wheel-positions",
+                        "改用方位布局",
+                        Tone::Secondary,
+                        can_edit,
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if can_edit {
+                            this.convert_wheel_to_positions(cx);
+                        }
+                    })),
+                );
+        };
+        let mut rings = div().flex().flex_wrap().gap(px(6.));
+        for (ring, name) in RING_NAMES.iter().enumerate() {
+            let ring = ring as u8;
+            let used = wheel
+                .slots
+                .iter()
+                .filter(|slot| slot.position.is_some_and(|other| other.ring == ring))
+                .count();
+            rings = rings.child(
+                chip(
+                    ("wheel-ring", u64::from(ring)),
+                    format!("{name} · {used}"),
+                    position.ring == ring,
+                    can_edit,
+                    tint,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if can_edit {
+                        this.move_wheel_slot_ring(ring, cx);
+                    }
+                })),
+            );
+        }
+        let mut sectors = div().flex().flex_wrap().gap(px(6.));
+        for sector in 0..position.sectors {
+            let label = match slot_at(wheel, position.ring, sector) {
+                Some(other) if other != index => {
+                    let short: String = wheel.slots[other].label.chars().take(4).collect();
+                    format!("{} {short}", sector + 1)
+                }
+                _ => (sector + 1).to_string(),
+            };
+            sectors = sectors.child(
+                chip(
+                    ("wheel-sector", u64::from(sector)),
+                    label,
+                    position.sector == sector,
+                    can_edit,
+                    tint,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if can_edit {
+                        this.place_wheel_slot(position.ring, sector, cx);
+                    }
+                })),
+            );
+        }
+        let (ring, count, half) = (position.ring, position.sectors, position.half_step);
+        let (can_less, can_more) = (can_edit && count > 1, can_edit && count < 16);
+        let geometry = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.))
+            .child(
+                small(button("wheel-sectors-less", "−", Tone::Secondary, can_less)).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        if can_less {
+                            this.set_wheel_ring_layout(ring, count - 1, half, cx);
+                        }
+                    }),
+                ),
+            )
+            .child(
+                div()
+                    .min_w(px(64.))
+                    .text_size(px(12.))
+                    .flex()
+                    .justify_center()
+                    .child(format!("{count} 个方向")),
+            )
+            .child(
+                small(button("wheel-sectors-more", "+", Tone::Secondary, can_more)).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        if can_more {
+                            this.set_wheel_ring_layout(ring, count + 1, half, cx);
+                        }
+                    }),
+                ),
+            )
+            .child(
+                chip(("wheel-half-step", 0u64), "错开半格", half, can_edit, tint).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        if can_edit {
+                            this.set_wheel_ring_layout(ring, count, !half, cx);
+                        }
+                    }),
+                ),
+            );
+        editor
+            .child(rings)
+            .child(field("方向（1 在正上方，顺时针编号）"))
+            .child(sectors)
+            .child(field("本圈分区"))
+            .child(geometry)
+            .child(caption(
+                "点已有动作的方向会与它互换；方向数和错开半格作用于整圈。",
+            ))
+            .child(caption(
+                "拖拽时离按下点 182 逻辑像素内选内圈，182–302 选中圈，更远选外圈。",
+            ))
     }
 
     /// 圆形舞台与浮动轮盘共用扇区样式；点击扇区只选中槽位以便编辑，不在配置页面执行动作。
