@@ -517,6 +517,32 @@ pub fn read_clipboard_text() -> Result<String, String> {
     clipboard::read(&native::Clipboard::new(false)?)
 }
 
+/// 向原前台窗口发送 Ctrl+C，等待剪贴板序号变化后读取文本；仅工作线程调用。
+/// 复制结果会留在剪贴板，不恢复原内容；未选中文本或目标不响应复制时返回错误。
+#[cfg(windows)]
+pub fn copy_selection_text(target: crate::ShortcutTarget) -> Result<String, String> {
+    use std::time::{Duration, Instant};
+    use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
+    const VK_LCONTROL: u16 = 0xA2;
+    const VK_C: u16 = 0x43;
+    let before = unsafe { GetClipboardSequenceNumber() };
+    crate::send_shortcut_to(&[VK_LCONTROL, VK_C], target)?;
+    let started = Instant::now();
+    while unsafe { GetClipboardSequenceNumber() } == before {
+        if started.elapsed() > Duration::from_millis(600) {
+            return Err("目标窗口没有复制任何内容，请先选中文本。".into());
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    // 复制方可能分多次写入格式；稍候再读，读取本身仍有打开重试。
+    std::thread::sleep(Duration::from_millis(30));
+    let text = read_clipboard_text()?;
+    if text.trim().is_empty() {
+        return Err("选中内容不含文本。".into());
+    }
+    Ok(text)
+}
+
 /// 向原前台窗口分批发送 Unicode 文本，换行规范为一次回车字符。
 /// 仅工作线程调用；拒绝按住的修饰键，不更改焦点，不使用或覆盖剪贴板。
 /// 权限隔离、前台切换或输入拦截可能导致部分提交，收尾不等于撤销文本。

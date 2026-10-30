@@ -4,7 +4,9 @@ use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirect
 
 mod automation_basics;
 #[cfg(windows)]
-pub use automation_basics::{open_target, read_clipboard_text, send_text_to, write_clipboard_text};
+pub use automation_basics::{
+    copy_selection_text, open_target, read_clipboard_text, send_text_to, write_clipboard_text,
+};
 pub use automation_basics::{validate_automation_text, validate_open_target};
 
 mod system_adjustment;
@@ -22,7 +24,8 @@ mod window_action;
 pub use window_action::WindowOperation;
 #[cfg(windows)]
 pub use window_action::{
-    perform_window_action, pointer_scale_at_point, shortcut_target_context, shortcut_target_process,
+    perform_window_action, pointer_scale_at_point, shortcut_target_context,
+    shortcut_target_process, shortcut_target_title,
 };
 
 mod shortcut;

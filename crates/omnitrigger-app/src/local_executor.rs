@@ -1,6 +1,9 @@
 //! 本地动作在单个后台线程顺序执行；提交时冻结动作和原前台身份。
 //! 取消只阻止后续步骤，不撤销已经执行的输入、剪贴板或打开操作。
-use crate::local_action::{expand_template, validate_text, LocalAction, LocalStep};
+use crate::local_action::{
+    expand_template, extract_urls, search_url, strip_app_name, validate_text, LocalAction,
+    LocalStep,
+};
 use omnitrigger_windows::ShortcutTarget;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -117,6 +120,8 @@ trait Host: Send + 'static {
     fn set_clipboard(&mut self, text: &str) -> Result<(), String>;
     fn read_clipboard(&mut self) -> Result<String, String>;
     fn open(&mut self, target: &str) -> Result<(), String>;
+    fn copy_selection(&mut self, target: Self::Target) -> Result<String, String>;
+    fn window_title(&mut self, target: Self::Target) -> Result<String, String>;
 }
 
 struct NativeHost;
@@ -159,6 +164,14 @@ impl Host for NativeHost {
 
     fn open(&mut self, target: &str) -> Result<(), String> {
         omnitrigger_windows::open_target(target)
+    }
+
+    fn copy_selection(&mut self, target: ShortcutTarget) -> Result<String, String> {
+        omnitrigger_windows::copy_selection_text(target)
+    }
+
+    fn window_title(&mut self, target: ShortcutTarget) -> Result<String, String> {
+        omnitrigger_windows::shortcut_target_title(target)
     }
 }
 
@@ -542,6 +555,48 @@ fn execute_step<H: Host>(
             guard(host, request)?;
             host.open(&target)
         }
+        LocalStep::CopySelection { variable } => {
+            host.copy_selection(request.target).and_then(|value| {
+                validate_text(&value)?;
+                variables.insert(variable.clone(), value);
+                Ok(())
+            })
+        }
+        LocalStep::ReadWindowTitle {
+            variable,
+            strip_app_name: strip,
+        } => host.window_title(request.target).and_then(|title| {
+            let title = if *strip {
+                strip_app_name(&title)
+            } else {
+                &title
+            };
+            validate_text(title)?;
+            variables.insert(variable.clone(), title.to_string());
+            Ok(())
+        }),
+        LocalStep::OpenUrls { text } => {
+            let text = expand_template(text, variables).map_err(Stop::Failed)?;
+            let urls = extract_urls(&text);
+            if urls.is_empty() {
+                return Err(Stop::Failed("文本中没有找到网址。".into()));
+            }
+            // 首个网址打开后前台会切换，后续只检查取消，不再要求原窗口在前台。
+            guard(host, request)?;
+            for url in urls {
+                if request.cancelled.load(Ordering::Acquire) {
+                    return Err(Stop::Cancelled);
+                }
+                host.open(&url).map_err(Stop::Failed)?;
+            }
+            Ok(())
+        }
+        LocalStep::WebSearch { url, query } => {
+            let query = expand_template(query, variables).map_err(Stop::Failed)?;
+            let url = search_url(url, &query).map_err(Stop::Failed)?;
+            guard(host, request)?;
+            host.open(&url)
+        }
         LocalStep::Delay { milliseconds } => {
             let started = Instant::now();
             let duration = Duration::from_millis(u64::from(*milliseconds));
@@ -644,6 +699,14 @@ mod tests {
         }
         fn open(&mut self, target: &str) -> Result<(), String> {
             self.call("open", target)
+        }
+        fn copy_selection(&mut self, _: usize) -> Result<String, String> {
+            self.call("copy", "")?;
+            Ok(self.state.lock().unwrap().clipboard.clone())
+        }
+        fn window_title(&mut self, _: usize) -> Result<String, String> {
+            self.call("title", "")?;
+            Ok("页面 - Google Chrome".into())
         }
     }
 
@@ -757,6 +820,84 @@ mod tests {
             ]
         );
         assert!(!executor.is_running(7));
+    }
+
+    #[test]
+    fn selection_and_title_feed_search_link_and_url_steps() {
+        let (host, state) = mock();
+        state.lock().unwrap().clipboard = "看 www.a.com 和 https://b.com/x。".into();
+        let executor = Executor::with_host(host);
+        executor
+            .submit(
+                3,
+                action(vec![
+                    LocalStep::CopySelection {
+                        variable: "text".into(),
+                    },
+                    LocalStep::ReadWindowTitle {
+                        variable: "title".into(),
+                        strip_app_name: true,
+                    },
+                    LocalStep::WebSearch {
+                        url: "https://s.com/?q=%s".into(),
+                        query: "${title}".into(),
+                    },
+                    LocalStep::OpenUrls {
+                        text: "${text}".into(),
+                    },
+                    write("[${title}](${text})"),
+                ]),
+                1,
+            )
+            .unwrap();
+        let LocalExecutionOutcome::Finished {
+            completed_steps, ..
+        } = terminal(&executor).outcome
+        else {
+            panic!("动作应完成");
+        };
+        assert_eq!(completed_steps, 5);
+        assert_eq!(
+            state.lock().unwrap().calls,
+            [
+                "copy:",
+                "title:",
+                "open:https://s.com/?q=%E9%A1%B5%E9%9D%A2",
+                "open:https://www.a.com",
+                "open:https://b.com/x",
+                "write:[页面](看 www.a.com 和 https://b.com/x。)"
+            ]
+        );
+    }
+
+    #[test]
+    fn open_urls_without_any_url_fails_before_opening() {
+        let (host, state) = mock();
+        state.lock().unwrap().clipboard = "没有网址".into();
+        let executor = Executor::with_host(host);
+        executor
+            .submit(
+                4,
+                action(vec![
+                    LocalStep::CopySelection {
+                        variable: "text".into(),
+                    },
+                    LocalStep::OpenUrls {
+                        text: "${text}".into(),
+                    },
+                ]),
+                1,
+            )
+            .unwrap();
+        assert!(matches!(
+            terminal(&executor).outcome,
+            LocalExecutionOutcome::Failed {
+                completed_steps: 1,
+                failed_step: Some(1),
+                ..
+            }
+        ));
+        assert_eq!(state.lock().unwrap().calls, ["copy:"]);
     }
 
     #[test]

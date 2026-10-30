@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum WindowOperation {
     ToggleMaximize,
     Minimize,
+    Close,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +20,7 @@ impl WindowAction {
         match self.operation {
             WindowOperation::ToggleMaximize => "最大化 / 恢复",
             WindowOperation::Minimize => "最小化",
+            WindowOperation::Close => "关闭窗口",
         }
     }
 
@@ -26,6 +28,7 @@ impl WindowAction {
         match self.operation {
             WindowOperation::ToggleMaximize => omnitrigger_windows::WindowOperation::ToggleMaximize,
             WindowOperation::Minimize => omnitrigger_windows::WindowOperation::Minimize,
+            WindowOperation::Close => omnitrigger_windows::WindowOperation::Close,
         }
     }
 }

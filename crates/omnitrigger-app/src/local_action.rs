@@ -17,16 +17,58 @@ pub struct LocalAction {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LocalStep {
-    SendShortcut { keys: Vec<u16> },
-    KeyTap { key: u16 },
-    KeySequence { modifiers: Vec<u16>, keys: Vec<u16> },
-    InputText { text: String },
-    SetClipboard { text: String },
-    ReadClipboard { variable: String },
-    SetVariable { name: String, value: String },
-    Open { target: String },
-    Delay { milliseconds: u32 },
+    SendShortcut {
+        keys: Vec<u16>,
+    },
+    KeyTap {
+        key: u16,
+    },
+    KeySequence {
+        modifiers: Vec<u16>,
+        keys: Vec<u16>,
+    },
+    InputText {
+        text: String,
+    },
+    SetClipboard {
+        text: String,
+    },
+    ReadClipboard {
+        variable: String,
+    },
+    SetVariable {
+        name: String,
+        value: String,
+    },
+    Open {
+        target: String,
+    },
+    Delay {
+        milliseconds: u32,
+    },
+    /// 向原窗口发送 Ctrl+C 并读取复制出的文本；结果保留在剪贴板。
+    CopySelection {
+        variable: String,
+    },
+    /// 读取原窗口标题；`strip_app_name` 去掉末尾的“ - 应用名”。
+    ReadWindowTitle {
+        variable: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        strip_app_name: bool,
+    },
+    /// 打开文本中找到的网址，最多 MAX_OPEN_URLS 个；没有网址时失败。
+    OpenUrls {
+        text: String,
+    },
+    /// 将查询文本编码后替换网址模板中的 %s 并打开。
+    WebSearch {
+        url: String,
+        query: String,
+    },
 }
+
+pub const MAX_OPEN_URLS: usize = 8;
+const MAX_QUERY_CHARS: usize = 128;
 
 impl LocalAction {
     pub fn validate(&self) -> Result<(), String> {
@@ -57,8 +99,21 @@ impl LocalAction {
                     LocalStep::InputText { text } | LocalStep::SetClipboard { text } => {
                         validate_template(text, &variables)?;
                     }
-                    LocalStep::ReadClipboard { variable } => {
+                    LocalStep::ReadClipboard { variable }
+                    | LocalStep::CopySelection { variable }
+                    | LocalStep::ReadWindowTitle { variable, .. } => {
                         define_variable(variable, None, &mut variables)?;
+                    }
+                    LocalStep::OpenUrls { text } => {
+                        if let Some(resolved) = validate_template(text, &variables)? {
+                            if extract_urls(&resolved).is_empty() {
+                                return Err("文本中没有网址。".into());
+                            }
+                        }
+                    }
+                    LocalStep::WebSearch { url, query } => {
+                        search_url(url, "x")?;
+                        validate_template(query, &variables)?;
                     }
                     LocalStep::SetVariable { name, value } => {
                         let resolved = validate_template(value, &variables)?;
@@ -130,8 +185,83 @@ impl LocalStep {
                 format!("打开目标（{} 字符单元）", target.encode_utf16().count())
             }
             Self::Delay { milliseconds } => format!("等待 {milliseconds} 毫秒"),
+            Self::CopySelection { variable } => format!("复制选中文本到变量 {variable}"),
+            Self::ReadWindowTitle { variable, .. } => format!("读取窗口标题到变量 {variable}"),
+            Self::OpenUrls { text } => {
+                format!(
+                    "打开文本中的网址（{} 字符单元）",
+                    text.encode_utf16().count()
+                )
+            }
+            Self::WebSearch { .. } => "网页搜索".into(),
         }
     }
+}
+
+/// 按出现顺序提取去重的 http(s) 与 www. 网址，去掉句末标点，最多 MAX_OPEN_URLS 个。
+pub(crate) fn extract_urls(text: &str) -> Vec<String> {
+    let mut urls: Vec<String> = Vec::new();
+    let separator = |c: char| c.is_whitespace() || "<>\"'`，。；、（）【】「」《》".contains(c);
+    for token in text.split(separator) {
+        let lower = token.to_ascii_lowercase();
+        let Some(start) = ["https://", "http://", "www."]
+            .iter()
+            .filter_map(|prefix| lower.find(prefix))
+            .min()
+        else {
+            continue;
+        };
+        let candidate = token[start..].trim_end_matches(|c: char| ".,;:!?)]}".contains(c));
+        let url = if candidate.len() >= 4 && candidate[..4].eq_ignore_ascii_case("www.") {
+            format!("https://{candidate}")
+        } else {
+            candidate.to_string()
+        };
+        if omnitrigger_windows::validate_open_target(&url).is_ok() && !urls.contains(&url) {
+            urls.push(url);
+            if urls.len() == MAX_OPEN_URLS {
+                break;
+            }
+        }
+    }
+    urls
+}
+
+/// 将查询编码进只含一个 %s 的 http(s) 模板；查询先去首尾空白并截取前 128 个字符。
+pub(crate) fn search_url(template: &str, query: &str) -> Result<String, String> {
+    let lower = template.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://"))
+        || template.matches("%s").count() != 1
+        || template.chars().any(char::is_whitespace)
+    {
+        return Err("搜索网址需要以 http(s):// 开头、不含空白，并只包含一个 %s。".into());
+    }
+    let query: String = query.trim().chars().take(MAX_QUERY_CHARS).collect();
+    if query.is_empty() {
+        return Err("搜索内容为空。".into());
+    }
+    let mut encoded = String::new();
+    for byte in query.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.~".contains(&byte) {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    let url = template.replacen("%s", &encoded, 1);
+    omnitrigger_windows::validate_open_target(&url)?;
+    Ok(url)
+}
+
+/// 去掉标题末尾的“ - 应用名”或“ — 应用名”；没有分隔符时原样返回。
+pub(crate) fn strip_app_name(title: &str) -> &str {
+    [" - ", " — "]
+        .iter()
+        .filter_map(|separator| title.rfind(separator))
+        .max()
+        .map(|index| title[..index].trim_end())
+        .filter(|head| !head.is_empty())
+        .unwrap_or(title)
 }
 
 fn validate_name(name: &str) -> Result<(), String> {
@@ -393,6 +523,93 @@ mod tests {
         ])
         .validate()
         .is_ok());
+    }
+
+    #[test]
+    fn urls_are_extracted_in_order_without_trailing_punctuation() {
+        assert_eq!(
+            extract_urls("见 https://a.com/x?q=1。另有 www.b.org, 和 https://a.com/x?q=1"),
+            vec!["https://a.com/x?q=1", "https://www.b.org"]
+        );
+        assert_eq!(extract_urls("（http://c.net/p）"), vec!["http://c.net/p"]);
+        assert!(extract_urls("没有网址 https:// ftp://x").is_empty());
+        let many = (0..20)
+            .map(|index| format!("https://e{index}.com"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(extract_urls(&many).len(), MAX_OPEN_URLS);
+    }
+
+    #[test]
+    fn search_url_encodes_trimmed_query_into_single_placeholder() {
+        assert_eq!(
+            search_url("https://www.google.com/search?q=%s", "  a b&c/中 ").unwrap(),
+            "https://www.google.com/search?q=a%20b%26c%2F%E4%B8%AD"
+        );
+        assert_eq!(
+            search_url("https://s.com/?q=%s", &"x".repeat(300))
+                .unwrap()
+                .len(),
+            "https://s.com/?q=".len() + 128
+        );
+        for template in ["file:///%s", "https://s.com/?q=", "https://s.com/%s/%s"] {
+            assert!(search_url(template, "a").is_err(), "{template}");
+        }
+        assert!(search_url("https://s.com/?q=%s", "  ").is_err());
+    }
+
+    #[test]
+    fn app_name_suffix_is_removed_only_when_a_title_remains() {
+        assert_eq!(
+            strip_app_name("标题 - 子标题 - Google Chrome"),
+            "标题 - 子标题"
+        );
+        assert_eq!(strip_app_name("main.rs — Code"), "main.rs");
+        assert_eq!(strip_app_name(" - Chrome"), " - Chrome");
+        assert_eq!(strip_app_name("无后缀"), "无后缀");
+    }
+
+    #[test]
+    fn runtime_text_steps_define_variables_and_static_inputs_are_checked() {
+        action(vec![
+            LocalStep::CopySelection {
+                variable: "text".into(),
+            },
+            LocalStep::ReadWindowTitle {
+                variable: "title".into(),
+                strip_app_name: true,
+            },
+            LocalStep::WebSearch {
+                url: "https://www.google.com/search?q=%s".into(),
+                query: "${text}".into(),
+            },
+            LocalStep::OpenUrls {
+                text: "${title} ${text}".into(),
+            },
+        ])
+        .validate()
+        .unwrap();
+        assert!(action(vec![LocalStep::OpenUrls {
+            text: "没有网址".into()
+        }])
+        .validate()
+        .is_err());
+        assert!(action(vec![LocalStep::WebSearch {
+            url: "https://s.com/?q=".into(),
+            query: "a".into()
+        }])
+        .validate()
+        .is_err());
+        let json = r#"{"version":1,"steps":[{"kind":"read_window_title","variable":"t"}]}"#;
+        let parsed: LocalAction = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed.steps[0],
+            LocalStep::ReadWindowTitle {
+                variable: "t".into(),
+                strip_app_name: false
+            }
+        );
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
     }
 
     #[test]

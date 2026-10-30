@@ -4,6 +4,8 @@
 pub enum WindowOperation {
     ToggleMaximize,
     Minimize,
+    /// 请求窗口按系统菜单“关闭”处理，等同 Alt+F4；应用可以询问保存或拒绝。
+    Close,
 }
 
 #[cfg(any(windows, test))]
@@ -25,6 +27,7 @@ enum WindowCommand {
     Maximize,
     Restore,
     Minimize,
+    Close,
 }
 
 #[cfg(any(windows, test))]
@@ -42,6 +45,7 @@ fn plan(state: TargetState, operation: WindowOperation) -> Result<WindowCommand,
         WindowOperation::ToggleMaximize if state.maximized => Ok(WindowCommand::Restore),
         WindowOperation::ToggleMaximize if state.can_maximize => Ok(WindowCommand::Maximize),
         WindowOperation::Minimize if state.can_minimize => Ok(WindowCommand::Minimize),
+        WindowOperation::Close => Ok(WindowCommand::Close),
         WindowOperation::ToggleMaximize => Err("目标窗口不支持最大化。".into()),
         WindowOperation::Minimize => Err("目标窗口不支持最小化。".into()),
     }
@@ -75,8 +79,8 @@ pub fn perform_window_action(
         Foundation::HWND,
         UI::WindowsAndMessaging::{
             GetAncestor, GetForegroundWindow, GetWindowLongPtrW, IsIconic, IsWindow,
-            IsWindowVisible, IsZoomed, ShowWindowAsync, GA_ROOT, GWL_STYLE, SW_MAXIMIZE,
-            SW_MINIMIZE, SW_RESTORE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+            IsWindowVisible, IsZoomed, PostMessageW, ShowWindowAsync, GA_ROOT, GWL_STYLE, SC_CLOSE,
+            SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_SYSCOMMAND, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
         },
     };
     let hwnd = HWND(target.0 as *mut std::ffi::c_void);
@@ -104,6 +108,17 @@ pub fn perform_window_action(
                 return false;
             }
             let command = match command {
+                WindowCommand::Close => {
+                    return unsafe {
+                        PostMessageW(
+                            Some(hwnd),
+                            WM_SYSCOMMAND,
+                            windows::Win32::Foundation::WPARAM(SC_CLOSE as usize),
+                            windows::Win32::Foundation::LPARAM(0),
+                        )
+                    }
+                    .is_ok();
+                }
                 WindowCommand::Maximize => SW_MAXIMIZE,
                 WindowCommand::Restore => SW_RESTORE,
                 WindowCommand::Minimize => SW_MINIMIZE,
@@ -111,6 +126,23 @@ pub fn perform_window_action(
             unsafe { ShowWindowAsync(hwnd, command) }.as_bool()
         },
     )
+}
+
+/// 读取捕获窗口的标题文本，目标不必仍为前台；空标题返回空字符串。
+#[cfg(windows)]
+pub fn shortcut_target_title(target: crate::ShortcutTarget) -> Result<String, String> {
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{GetWindowTextLengthW, GetWindowTextW, IsWindow},
+    };
+    let hwnd = HWND(target.0 as *mut std::ffi::c_void);
+    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return Err("目标窗口已关闭或失效，无法读取标题。".into());
+    }
+    let length = unsafe { GetWindowTextLengthW(hwnd) }.clamp(0, 4096) as usize;
+    let mut buffer = vec![0u16; length + 1];
+    let copied = unsafe { GetWindowTextW(hwnd, &mut buffer) }.max(0) as usize;
+    Ok(String::from_utf16_lossy(&buffer[..copied.min(length)]))
 }
 
 /// 读取捕获窗口所属进程的映像文件名（例如 `Code.exe`），不读取目录或进程配置。
@@ -272,6 +304,32 @@ mod tests {
             "WorkerWChild",
         ] {
             assert_eq!(desktop_context(class), None);
+        }
+    }
+
+    #[test]
+    fn close_needs_only_a_visible_foreground_top_level_target() {
+        let fixed = TargetState {
+            can_maximize: false,
+            can_minimize: false,
+            ..ready()
+        };
+        assert_eq!(
+            plan(fixed, WindowOperation::Close).unwrap(),
+            WindowCommand::Close
+        );
+        for state in [
+            TargetState {
+                foreground: false,
+                ..ready()
+            },
+            TargetState {
+                top_level: false,
+                ..ready()
+            },
+            TargetState::default(),
+        ] {
+            assert!(plan(state, WindowOperation::Close).is_err());
         }
     }
 

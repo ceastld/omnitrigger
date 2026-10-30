@@ -16,6 +16,10 @@ enum StepKind {
     Variable,
     Open,
     Delay,
+    CopySelection,
+    WindowTitle,
+    OpenUrls,
+    WebSearch,
 }
 impl StepKind {
     fn label(self) -> &'static str {
@@ -29,6 +33,10 @@ impl StepKind {
             Self::Variable => "设置变量",
             Self::Open => "打开网址 / 文件",
             Self::Delay => "等待",
+            Self::CopySelection => "复制选中文本",
+            Self::WindowTitle => "读取窗口标题",
+            Self::OpenUrls => "打开文本中的网址",
+            Self::WebSearch => "网页搜索",
         }
     }
     fn default_step(self) -> LocalStep {
@@ -58,6 +66,20 @@ impl StepKind {
                 target: "https://example.com".into(),
             },
             Self::Delay => LocalStep::Delay { milliseconds: 100 },
+            Self::CopySelection => LocalStep::CopySelection {
+                variable: "selection".into(),
+            },
+            Self::WindowTitle => LocalStep::ReadWindowTitle {
+                variable: "title".into(),
+                strip_app_name: true,
+            },
+            Self::OpenUrls => LocalStep::OpenUrls {
+                text: "${selection}".into(),
+            },
+            Self::WebSearch => LocalStep::WebSearch {
+                url: "https://www.google.com/search?q=%s".into(),
+                query: "${selection}".into(),
+            },
         }
     }
 }
@@ -161,7 +183,18 @@ impl LocalEditor {
             LocalStep::InputText { text } | LocalStep::SetClipboard { text } => {
                 (display_text(text), String::new())
             }
-            LocalStep::ReadClipboard { variable } => (variable.clone(), String::new()),
+            LocalStep::ReadClipboard { variable } | LocalStep::CopySelection { variable } => {
+                (variable.clone(), String::new())
+            }
+            LocalStep::ReadWindowTitle {
+                variable,
+                strip_app_name,
+            } => (
+                variable.clone(),
+                if *strip_app_name { "是" } else { "" }.into(),
+            ),
+            LocalStep::OpenUrls { text } => (display_text(text), String::new()),
+            LocalStep::WebSearch { url, query } => (url.clone(), display_text(query)),
             LocalStep::SetVariable { name, value } => (name.clone(), display_text(value)),
             LocalStep::Open { target } => (target.clone(), String::new()),
             LocalStep::Delay { milliseconds } => (milliseconds.to_string(), String::new()),
@@ -212,6 +245,24 @@ impl LocalEditor {
                     value: parse_text(&second)?,
                 },
                 LocalStep::Open { .. } => LocalStep::Open { target: first },
+                LocalStep::CopySelection { .. } => LocalStep::CopySelection {
+                    variable: first.trim().into(),
+                },
+                LocalStep::ReadWindowTitle { .. } => LocalStep::ReadWindowTitle {
+                    variable: first.trim().into(),
+                    strip_app_name: match second.trim() {
+                        "" | "否" => false,
+                        "是" => true,
+                        _ => return Err("去掉应用名请填写“是”，或留空保留完整标题。".into()),
+                    },
+                },
+                LocalStep::OpenUrls { .. } => LocalStep::OpenUrls {
+                    text: parse_text(&first)?,
+                },
+                LocalStep::WebSearch { .. } => LocalStep::WebSearch {
+                    url: first.trim().into(),
+                    query: parse_text(&second)?,
+                },
                 LocalStep::Delay { .. } => LocalStep::Delay {
                     milliseconds: first
                         .trim()
@@ -359,7 +410,10 @@ impl Workspace {
                 LocalStep::KeyTap {..}=>("单独按键",Some("支持单独 Alt、Ctrl、Shift、Win，或 Enter、F5 等。")),
                 LocalStep::KeySequence {..}=>("全程按住的修饰键",Some("如 Ctrl 或 Alt；可留空。下方按键依次按下和释放。")),
                 LocalStep::InputText {..}|LocalStep::SetClipboard {..}=>("文字内容",Some("普通文字直接输入；多行可填 JSON 字符串，如 \"第一行\\n第二行\"。支持 ${变量名}，$$ 表示 $。")),
-                LocalStep::ReadClipboard {..}|LocalStep::SetVariable {..}=>("变量名",Some("字母或下划线开头，最多 32 个 ASCII 标识符字符。")),
+                LocalStep::ReadClipboard {..}|LocalStep::SetVariable {..}|LocalStep::ReadWindowTitle {..}=>("变量名",Some("字母或下划线开头，最多 32 个 ASCII 标识符字符。")),
+                LocalStep::CopySelection {..}=>("变量名",Some("向原窗口发送 Ctrl+C 并保存复制的文字；复制结果会留在剪贴板。")),
+                LocalStep::OpenUrls {..}=>("包含网址的文字",Some("通常填 ${selection}；按出现顺序打开其中的 http(s) 与 www. 网址，最多 8 个。")),
+                LocalStep::WebSearch {..}=>("搜索网址",Some("用 %s 表示搜索词，例如 https://www.bing.com/search?q=%s。")),
                 LocalStep::Open {..}=>("网址 / 绝对路径",Some("支持 http、https、mailto、about 和本地文件或文件夹。")),
                 LocalStep::Delay {..}=>("等待时间（毫秒）",Some("0–5000；整个动作显式等待最多 10000ms。")),
             };
@@ -369,6 +423,20 @@ impl Workspace {
                     "依次发送的按键",
                     &editor.second,
                     Some("逗号分隔，例如 K, Z；修饰键在整组按键之间保持按住。"),
+                ));
+            }
+            if matches!(step, LocalStep::ReadWindowTitle { .. }) {
+                fields = fields.child(Self::input_field(
+                    "去掉应用名",
+                    &editor.second,
+                    Some("填“是”去掉标题末尾的“ - 应用名”；留空保留完整标题。"),
+                ));
+            }
+            if matches!(step, LocalStep::WebSearch { .. }) {
+                fields = fields.child(Self::input_field(
+                    "搜索词",
+                    &editor.second,
+                    Some("可引用 ${变量名}；取前 128 个字符并自动编码。"),
                 ));
             }
             if matches!(step, LocalStep::SetVariable { .. }) {
@@ -433,6 +501,10 @@ impl Workspace {
             StepKind::Variable,
             StepKind::Open,
             StepKind::Delay,
+            StepKind::CopySelection,
+            StepKind::WindowTitle,
+            StepKind::OpenUrls,
+            StepKind::WebSearch,
         ]
         .into_iter()
         .enumerate()
