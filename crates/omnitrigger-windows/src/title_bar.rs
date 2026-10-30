@@ -147,18 +147,6 @@ unsafe fn apply_frame(hwnd: HWND) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::caption_is_dark;
-    #[test]
-    fn caption_buttons_follow_light_and_dark_backgrounds() {
-        assert!(caption_is_dark(0x251e1c));
-        assert!(!caption_is_dark(0xfaf8f7));
-        assert!(caption_is_dark(0));
-        assert!(!caption_is_dark(0xffffff));
-    }
-}
-
 /// 上边缘的缩放感应高度，与系统窗框一致。
 unsafe fn resize_border(hwnd: HWND) -> i32 {
     unsafe {
@@ -224,5 +212,17 @@ unsafe extern "system" fn subclass_proc(
             }
             _ => DefSubclassProc(hwnd, msg, wparam, lparam),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::caption_is_dark;
+    #[test]
+    fn caption_buttons_follow_light_and_dark_backgrounds() {
+        assert!(caption_is_dark(0x251e1c));
+        assert!(!caption_is_dark(0xfaf8f7));
+        assert!(caption_is_dark(0));
+        assert!(!caption_is_dark(0xffffff));
     }
 }
