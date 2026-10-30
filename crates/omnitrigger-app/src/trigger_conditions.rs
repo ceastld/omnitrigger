@@ -1,6 +1,7 @@
 //! 鼠标位置条件的配置与编辑器；实际匹配、区域相交和校验共用核心模型。
+use crate::theme::rgb;
 use crate::{caption, section_title, small, theme, MessageInput, Workspace};
-use gpui::{div, prelude::*, px, rgb, App, Context, Div, Entity};
+use gpui::{div, prelude::*, px, App, Context, Div, Entity};
 use omnitrigger_core::{
     PointerRegion, ScreenCorner, ScreenEdge, ScreenRect, TriggerCondition, TriggerSpec,
 };
@@ -18,6 +19,12 @@ pub enum RegionDto {
     ScreenEdge {
         edge: EdgeDto,
         thickness_px: u32,
+    },
+    ScreenEdgeSegment {
+        edge: EdgeDto,
+        thickness_px: u32,
+        start_inset_px: u32,
+        end_inset_px: u32,
     },
     ScreenCorner {
         corner: CornerDto,
@@ -62,6 +69,22 @@ impl From<&TriggerCondition> for ConditionDto {
                     },
                     thickness_px,
                 },
+                PointerRegion::ScreenEdgeSegment {
+                    edge,
+                    thickness_px,
+                    start_inset_px,
+                    end_inset_px,
+                } => RegionDto::ScreenEdgeSegment {
+                    edge: match edge {
+                        ScreenEdge::Top => EdgeDto::Top,
+                        ScreenEdge::Right => EdgeDto::Right,
+                        ScreenEdge::Bottom => EdgeDto::Bottom,
+                        ScreenEdge::Left => EdgeDto::Left,
+                    },
+                    thickness_px,
+                    start_inset_px,
+                    end_inset_px,
+                },
                 PointerRegion::ScreenCorner { corner, size_px } => RegionDto::ScreenCorner {
                     corner: match corner {
                         ScreenCorner::TopLeft => CornerDto::TopLeft,
@@ -93,6 +116,22 @@ impl From<ConditionDto> for TriggerCondition {
                     EdgeDto::Left => ScreenEdge::Left,
                 },
                 thickness_px,
+            },
+            RegionDto::ScreenEdgeSegment {
+                edge,
+                thickness_px,
+                start_inset_px,
+                end_inset_px,
+            } => PointerRegion::ScreenEdgeSegment {
+                edge: match edge {
+                    EdgeDto::Top => ScreenEdge::Top,
+                    EdgeDto::Right => ScreenEdge::Right,
+                    EdgeDto::Bottom => ScreenEdge::Bottom,
+                    EdgeDto::Left => ScreenEdge::Left,
+                },
+                thickness_px,
+                start_inset_px,
+                end_inset_px,
             },
             RegionDto::ScreenCorner { corner, size_px } => PointerRegion::ScreenCorner {
                 corner: match corner {
@@ -169,6 +208,8 @@ impl RegionChoice {
 pub struct ConditionEditor {
     choice: RegionChoice,
     extent: Entity<MessageInput>,
+    start_inset: Entity<MessageInput>,
+    end_inset: Entity<MessageInput>,
     rectangle: Entity<MessageInput>,
 }
 impl ConditionEditor {
@@ -183,12 +224,29 @@ impl ConditionEditor {
             input.set_text("0, 0, 200, 200", cx);
             input
         });
+        let start_inset = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(10);
+            input.set_text("0", cx);
+            input
+        });
+        let end_inset = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(10);
+            input.set_text("0", cx);
+            input
+        });
         let mut editor = Self {
             choice: RegionChoice::Any,
             extent,
+            start_inset,
+            end_inset,
             rectangle,
         };
-        for input in [&editor.extent, &editor.rectangle] {
+        for input in [
+            &editor.extent,
+            &editor.start_inset,
+            &editor.end_inset,
+            &editor.rectangle,
+        ] {
             cx.observe(input, |_, _, cx| cx.notify()).detach();
         }
         if let Some(spec) = spec {
@@ -198,9 +256,16 @@ impl ConditionEditor {
     }
     pub fn load(&mut self, spec: &TriggerSpec, cx: &mut Context<Workspace>) {
         self.choice = RegionChoice::Any;
+        self.start_inset
+            .update(cx, |input, cx| input.set_text("0", cx));
+        self.end_inset
+            .update(cx, |input, cx| input.set_text("0", cx));
         if let Some(TriggerCondition::PointerRegion(region)) = spec.conditions.first() {
             match *region {
-                PointerRegion::ScreenEdge { edge, thickness_px } => {
+                PointerRegion::ScreenEdge { edge, thickness_px }
+                | PointerRegion::ScreenEdgeSegment {
+                    edge, thickness_px, ..
+                } => {
                     self.choice = match edge {
                         ScreenEdge::Top => RegionChoice::Top,
                         ScreenEdge::Right => RegionChoice::Right,
@@ -209,6 +274,18 @@ impl ConditionEditor {
                     };
                     self.extent
                         .update(cx, |input, cx| input.set_text(thickness_px.to_string(), cx));
+                    if let PointerRegion::ScreenEdgeSegment {
+                        start_inset_px,
+                        end_inset_px,
+                        ..
+                    } = *region
+                    {
+                        self.start_inset.update(cx, |input, cx| {
+                            input.set_text(start_inset_px.to_string(), cx)
+                        });
+                        self.end_inset
+                            .update(cx, |input, cx| input.set_text(end_inset_px.to_string(), cx));
+                    }
                 }
                 PointerRegion::ScreenCorner { corner, size_px } => {
                     self.choice = match corner {
@@ -266,9 +343,32 @@ impl ConditionEditor {
                 .parse::<u32>()
                 .map_err(|_| "区域范围应为正整数物理像素。")?;
             if let Some(edge) = self.choice.edge() {
-                PointerRegion::ScreenEdge {
-                    edge,
-                    thickness_px: value,
+                let start_inset_px = self
+                    .start_inset
+                    .read(cx)
+                    .text()
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|_| "边缘起点缩进应为非负整数物理像素。")?;
+                let end_inset_px = self
+                    .end_inset
+                    .read(cx)
+                    .text()
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|_| "边缘终点缩进应为非负整数物理像素。")?;
+                if start_inset_px == 0 && end_inset_px == 0 {
+                    PointerRegion::ScreenEdge {
+                        edge,
+                        thickness_px: value,
+                    }
+                } else {
+                    PointerRegion::ScreenEdgeSegment {
+                        edge,
+                        thickness_px: value,
+                        start_inset_px,
+                        end_inset_px,
+                    }
                 }
             } else {
                 PointerRegion::ScreenCorner {
@@ -293,6 +393,30 @@ pub fn condition_label(condition: &TriggerCondition) -> String {
                 ScreenEdge::Bottom => "底部边缘",
                 ScreenEdge::Left => "左侧边缘",
             }
+        ),
+        PointerRegion::ScreenEdgeSegment {
+            edge,
+            thickness_px,
+            start_inset_px,
+            end_inset_px,
+        } => format!(
+            "{} {thickness_px}px（{}缩进 {start_inset_px}px，{}缩进 {end_inset_px}px）",
+            match edge {
+                ScreenEdge::Top => "顶部边缘",
+                ScreenEdge::Right => "右侧边缘",
+                ScreenEdge::Bottom => "底部边缘",
+                ScreenEdge::Left => "左侧边缘",
+            },
+            if matches!(edge, ScreenEdge::Top | ScreenEdge::Bottom) {
+                "左端"
+            } else {
+                "上端"
+            },
+            if matches!(edge, ScreenEdge::Top | ScreenEdge::Bottom) {
+                "右端"
+            } else {
+                "下端"
+            },
         ),
         PointerRegion::ScreenCorner { corner, size_px } => format!(
             "{} {size_px}px",
@@ -343,11 +467,19 @@ impl Workspace {
                     if this.recording {
                         return;
                     }
-                    this.condition_editor.choice = choice;
-                    if choice != RegionChoice::Any {
-                        this.condition_editor.extent.update(cx, |input, cx| {
-                            input.set_text(if choice.edge().is_some() { "8" } else { "32" }, cx)
-                        });
+                    if this.condition_editor.choice != choice {
+                        this.condition_editor.choice = choice;
+                        this.condition_editor
+                            .start_inset
+                            .update(cx, |input, cx| input.set_text("0", cx));
+                        this.condition_editor
+                            .end_inset
+                            .update(cx, |input, cx| input.set_text("0", cx));
+                        if choice != RegionChoice::Any {
+                            this.condition_editor.extent.update(cx, |input, cx| {
+                                input.set_text(if choice.edge().is_some() { "8" } else { "32" }, cx)
+                            });
+                        }
                     }
                     cx.notify();
                 })),
@@ -396,6 +528,27 @@ impl Workspace {
                         Some("边缘 1–256px，角落 1–1024px；范围不超过对应半屏。"),
                     ))
                 }
+            })
+            .when_some(self.condition_editor.choice.edge(), |el, edge| {
+                let horizontal = matches!(edge, ScreenEdge::Top | ScreenEdge::Bottom);
+                el.child(Self::input_field(
+                    if horizontal {
+                        "左端缩进（物理像素）"
+                    } else {
+                        "上端缩进（物理像素）"
+                    },
+                    &self.condition_editor.start_inset,
+                    Some("从屏幕边端扣除的长度，0 表示保留角落；例如侧边上端缩进 8px，可避开顶部 8px 边缘。"),
+                ))
+                .child(Self::input_field(
+                    if horizontal {
+                        "右端缩进（物理像素）"
+                    } else {
+                        "下端缩进（物理像素）"
+                    },
+                    &self.condition_editor.end_inset,
+                    Some("缩进按每块显示器分别计算；扣除整条边时该区段不触发。"),
+                ))
             })
             .child(caption(
                 "位置条件可与滚轮、按键、长按和快拖组合；屏幕边角会排除多屏相接的共享边段。",

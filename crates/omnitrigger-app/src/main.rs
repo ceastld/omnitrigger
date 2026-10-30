@@ -1,7 +1,14 @@
 #![windows_subsystem = "windows"]
 
 mod action_library;
+mod action_packages;
+mod appearance;
+mod appearance_ui;
 mod assets;
+mod browser_actions;
+mod browser_actions_ui;
+mod browser_connector;
+mod browser_connector_ui;
 mod event_bridge;
 mod execution;
 mod external_action;
@@ -13,10 +20,13 @@ mod plugin_install;
 mod plugins;
 mod presets;
 mod radial_wheel;
+mod service;
 mod settings;
 mod shortcut;
+mod smooth_scroll;
 mod system_action;
 mod system_executor;
+mod system_hud;
 mod theme;
 mod trigger_conditions;
 mod trigger_panel;
@@ -29,10 +39,10 @@ use assets::{Assets, Icon};
 use event_bridge::{EventBridge, UiWake};
 use execution::{CommandAction, CommandExecutor, ExecutionOutcome};
 use gpui::{
-    div, point, prelude::*, pulsating_between, px, rgb, size, Animation, AnimationExt, AnyElement,
-    AnyWindowHandle, App, Application, Bounds, Context, Div, Entity, FontWeight, SharedString,
-    Stateful, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowHandle, WindowKind, WindowOptions,
+    div, point, prelude::*, px, size, AnyElement, AnyWindowHandle, App, Application, Bounds,
+    Context, Div, Entity, FontWeight, SharedString, Stateful, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowHandle, WindowKind,
+    WindowOptions,
 };
 use message_input::MessageInput;
 use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec};
@@ -44,18 +54,19 @@ use plugins::{PluginActionRef, Plugins};
 use presets::{DEFAULT_DRAG_DISTANCE_PX, DEFAULT_DRAG_START_MS, PRESETS};
 use radial_wheel::{RadialWheel, WheelRequest, WHEEL_SIZE};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use service::TriggerError;
 use settings::{ActionSpec, Binding, Conflict};
 use shortcut::ShortcutAction;
 use std::{
     collections::{HashMap, VecDeque},
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
     time::{Duration, Instant},
 };
 use theme::{
     button, caps_for, caps_for_buttons, combo, combo_toned, dot, ghost_cap, glyph_button, hsla,
-    icon, icon_button, icon_tile, keycap, logo, pill, plus, segment, small, status_pill, switch,
-    Cap, CapSize, CapTone, Tone,
+    icon, icon_button, icon_tile, keycap, logo, pill, plus, rgb, segment, small, status_pill,
+    switch, Cap, CapSize, CapTone, Tone,
 };
 use trigger_panel::{
     panel_size, PanelContext, PanelDiagnostics, PanelItem, PanelKind, PanelRequest, PanelState,
@@ -93,8 +104,27 @@ enum Page {
     Wheels,
     Triggers,
     Presets,
+    Extensions,
     History,
     Diagnostics,
+    Settings,
+}
+
+fn should_refresh_workspace_for_backend_event(event: &BackendEvent, page: Page) -> bool {
+    match event {
+        BackendEvent::Ready
+        | BackendEvent::RecordingProgress(_)
+        | BackendEvent::Recorded(_)
+        | BackendEvent::Triggered { .. }
+        | BackendEvent::Error(_)
+        | BackendEvent::RecordingCancelled => true,
+        BackendEvent::Diagnostics(_) | BackendEvent::HoldTiming { .. } => page == Page::Diagnostics,
+        // 这些事件由各浮窗直接处理，不改变主窗口的可见内容。
+        BackendEvent::PointerPressed { .. }
+        | BackendEvent::EscapePressed
+        | BackendEvent::PanelKey(_)
+        | BackendEvent::Drag { .. } => false,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -149,12 +179,6 @@ struct Hit {
     source: HitSource,
 }
 
-#[derive(Clone, Default)]
-struct Stats {
-    hits: u64,
-    last: Option<String>,
-}
-
 struct HoldTrace {
     id: u64,
     elapsed_ms: u64,
@@ -201,6 +225,31 @@ fn thousands(value: u64) -> String {
     out
 }
 
+/// 已启用 RaiShot 时按本机现状重新定位：原路径失效、或有正在运行 / 更新的兼容安装时
+/// 更新设置。只读清单与文件大小，耗时为毫秒级；未找到时保留原设置。
+fn relocate_raishot(plugins: &mut Plugins) -> Option<String> {
+    if !plugins.raishot_enabled() {
+        return None;
+    }
+    let configured =
+        (!plugins.raishot_path().is_empty()).then(|| PathBuf::from(plugins.raishot_path()));
+    let found = plugin_install::locate(&settings::path(), configured.as_deref())?;
+    if configured.as_deref() == Some(found.cli.as_path()) {
+        return None;
+    }
+    let mut candidate = plugins.clone();
+    candidate
+        .configure_raishot(found.cli.to_string_lossy().into_owned(), true)
+        .ok()?;
+    candidate.save(&settings::path()).ok()?;
+    *plugins = candidate;
+    Some(if configured.is_some() {
+        format!("已改用本机的 RaiShot {}。", found.version)
+    } else {
+        format!("已接入本机的 RaiShot {}，无需下载。", found.version)
+    })
+}
+
 fn heading(title: &'static str, subtitle: impl Into<SharedString>) -> Div {
     div()
         .flex()
@@ -209,9 +258,9 @@ fn heading(title: &'static str, subtitle: impl Into<SharedString>) -> Div {
         .min_w_0()
         .child(
             div()
-                .text_size(px(24.))
-                .line_height(px(32.))
-                .font_weight(FontWeight::BOLD)
+                .text_size(px(20.))
+                .line_height(px(28.))
+                .font_weight(FontWeight::SEMIBOLD)
                 .child(title),
         )
         .child(
@@ -229,36 +278,21 @@ fn caption(text: impl Into<SharedString>) -> Div {
         .child(text.into())
 }
 
-/// 带渐变强调条的小节标题。
+/// 简洁的小节标题。
 fn section_title(title: &'static str) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .child(
-            div()
-                .w(px(3.))
-                .h(px(12.))
-                .rounded(px(2.))
-                .bg(theme::accent_fill(180.)),
-        )
-        .child(
-            div()
-                .text_size(px(12.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(theme::TEXT_SOFT))
-                .child(title),
-        )
+    div().flex().items_center().gap(px(8.)).child(
+        div()
+            .text_size(px(12.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(theme::TEXT_SOFT))
+            .child(title),
+    )
 }
 
 fn card() -> Div {
     div()
-        .rounded(px(14.))
-        .bg(theme::gradient(
-            180.,
-            theme::hsla(theme::SURFACE, 1.),
-            theme::hsla(theme::ROW, 1.),
-        ))
+        .rounded(px(8.))
+        .bg(rgb(theme::ROW))
         .border_1()
         .border_color(rgb(theme::BORDER))
 }
@@ -305,17 +339,12 @@ fn stat(
         })
 }
 
-/// 列表页眉下的统计胶囊。
+/// 列表页眉下的轻量统计。
 fn chip(glyph: Icon, tint: u32, value: impl Into<SharedString>, label: &'static str) -> Div {
     div()
         .flex_none()
-        .h(px(32.))
-        .pl(px(7.))
+        .h(px(26.))
         .pr(px(12.))
-        .rounded(px(10.))
-        .bg(rgb(theme::ROW))
-        .border_1()
-        .border_color(rgb(theme::BORDER))
         .flex()
         .items_center()
         .gap(px(8.))
@@ -323,7 +352,6 @@ fn chip(glyph: Icon, tint: u32, value: impl Into<SharedString>, label: &'static 
             div()
                 .size(px(20.))
                 .rounded(px(6.))
-                .bg(theme::hsla(tint, 0.14))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -354,6 +382,8 @@ fn action_detail(action: &ActionSpec) -> String {
         ActionSpec::Window(action) => format!("窗口 · {}", action.display()),
         ActionSpec::AdjustSystem(action) => action.display(),
         ActionSpec::Local(action) => action.summary(),
+        ActionSpec::Invoke(call) => format!("动作包 · {} / {}", call.package_id, call.action_id),
+        ActionSpec::Browser(action) => format!("浏览器 · {}", action.label()),
         ActionSpec::External(action) => format!("外部动作 · 依赖 {}", action.provider),
         ActionSpec::Command(command) => {
             let program = Path::new(&command.program)
@@ -382,6 +412,8 @@ fn action_look(action: &ActionSpec) -> (Icon, u32) {
         ActionSpec::Window(_) => (Icon::Panel, theme::ACCENT_2),
         ActionSpec::AdjustSystem(_) => (Icon::Pulse, theme::ACCENT_2),
         ActionSpec::Local(_) => (Icon::Layers, theme::ACCENT_2),
+        ActionSpec::Invoke(_) => (Icon::Terminal, theme::ACCENT_2),
+        ActionSpec::Browser(_) => (Icon::Browser, theme::ACCENT_2),
         ActionSpec::External(_) => (Icon::Terminal, theme::RECORD),
         ActionSpec::Command(_) => (Icon::Terminal, theme::RECORD),
         ActionSpec::Plugin(_) => (Icon::Capture, theme::PINK),
@@ -403,6 +435,8 @@ fn activation_label(spec: &TriggerSpec) -> String {
 
 struct StartupOptions {
     ui_smoke: bool,
+    browser_connector_settings: bool,
+    appearance_settings: bool,
     panel: bool,
     wheel: Option<String>,
     wheel_target: Option<omnitrigger_windows::ShortcutTarget>,
@@ -421,12 +455,14 @@ struct Workspace {
     pending: Option<TriggerSpec>,
     edited_spec: Option<TriggerSpec>,
     preset_edit_id: Option<u64>,
-    next_binding_id: Option<u64>,
     conflict: Option<Conflict>,
     selected: Option<u64>,
     confirm_delete: Option<u64>,
     page: Page,
+    theme_mode: appearance::Mode,
+    theme_error: Option<String>,
     history_filter: HistoryFilter,
+    smooth_scroll: smooth_scroll::ScrollRegions,
     message: Entity<MessageInput>,
     trigger_mode: TriggerMode,
     condition_editor: trigger_conditions::ConditionEditor,
@@ -443,10 +479,15 @@ struct Workspace {
     arguments: Entity<MessageInput>,
     working_directory: Entity<MessageInput>,
     shortcut_keys: Entity<MessageInput>,
-    plugin_path: Entity<MessageInput>,
     action_search: Entity<MessageInput>,
+    package_input: Entity<MessageInput>,
+    package_picker_for_draft: bool,
+    action_service: omnitrigger_actions::ActionService,
     plugins: Plugins,
     plugin_settings_error: Option<String>,
+    browser_connector_ui: browser_connector_ui::BrowserConnectorUi,
+    browser_executor: browser_actions::BrowserExecutor,
+    browser_editor: browser_actions_ui::BrowserEditor,
     wheels: Wheels,
     wheels_error: Option<String>,
     wheel_selected: Option<String>,
@@ -472,14 +513,15 @@ struct Workspace {
     executor: CommandExecutor,
     shortcut_executor: CommandExecutor,
     system_executor: system_executor::SystemAdjustmentExecutor,
+    system_hud: system_hud::SystemHud,
+    brightness_hud_prepared: bool,
     local_executor: local_executor::LocalExecutor,
     local_invocations: HashMap<u64, u64>,
     local_editor: local_editor::LocalEditor,
     wheel_local_editor: local_editor::LocalEditor,
     action_status: HashMap<u64, String>,
     action_log: VecDeque<String>,
-    bindings: Vec<Binding>,
-    stats: HashMap<u64, Stats>,
+    triggers: service::TriggerService,
     error: Option<String>,
     action_error: Option<(u64, String)>,
     status: String,
@@ -533,11 +575,18 @@ impl Workspace {
     ) -> Self {
         let StartupOptions {
             ui_smoke,
+            browser_connector_settings,
+            appearance_settings,
             panel: open_panel,
             wheel: initial_wheel,
             wheel_target: wheel_launch_target,
             wheel_editor,
         } = startup;
+        let (theme_mode, theme_error) = match appearance::load(&settings::path()) {
+            Ok(mode) => (mode, None),
+            Err(error) => (appearance::Mode::default(), Some(error)),
+        };
+        theme::apply(theme_mode, cx.window_appearance());
         let (bindings, load_error) = match settings::load() {
             Ok(bindings) => (bindings, None),
             Err(error) => (Vec::new(), Some(error)),
@@ -557,12 +606,6 @@ impl Workspace {
         let ui_wake = events.as_ref().map(EventBridge::wake).unwrap_or_default();
         Self::watch_ui(ui_wake.clone(), cx);
         let selected = bindings.first().map(|binding| binding.spec.id);
-        let next_binding_id = bindings
-            .iter()
-            .map(|b| b.spec.id)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1);
         let initial = bindings
             .first()
             .map(|binding| binding.message.clone())
@@ -636,22 +679,40 @@ impl Workspace {
             input
         });
         cx.observe(&shortcut_keys, |_, _, cx| cx.notify()).detach();
-        let (plugins, plugin_settings_error) = match Plugins::load(&settings::path()) {
+        let (mut plugins, plugin_settings_error) = match Plugins::load(&settings::path()) {
             Ok(plugins) => (plugins, None),
             Err(error) => (Plugins::default(), Some(error.to_string())),
         };
-        let plugin_path = cx.new(|cx| {
-            let mut input = MessageInput::new(cx).with_character_limit(32768);
-            input.set_placeholder("已有安装可填写 raishot-cli.exe 的完整路径");
-            input.set_text(plugins.raishot_path().to_string(), cx);
-            input
-        });
+        let relocated = plugin_settings_error
+            .is_none()
+            .then(|| relocate_raishot(&mut plugins))
+            .flatten();
         let action_search = cx.new(|cx| {
             let mut input = MessageInput::new(cx).embedded();
             input.set_placeholder("搜索动作，例如：截图");
             input
         });
+        let browser_connector_ui = browser_connector_ui::BrowserConnectorUi::new(cx);
+        let mut browser_editor = browser_actions_ui::BrowserEditor::new(cx);
+        if let ActionSpec::Browser(action) = &draft_action {
+            browser_editor.load(action, cx);
+        }
         cx.observe(&action_search, |_, _, cx| cx.notify()).detach();
+        let package_input = cx.new(|cx| {
+            let mut input = MessageInput::new(cx)
+                .with_json_text()
+                .with_character_limit(128 * 1024);
+            input.set_placeholder(r#"例如：{"name":"示例"}"#);
+            input.set_text(
+                match &draft_action {
+                    ActionSpec::Invoke(call) => call.input.to_string(),
+                    _ => "{}".into(),
+                },
+                cx,
+            );
+            input
+        });
+        cx.observe(&package_input, |_, _, cx| cx.notify()).detach();
         let initial_activation = bindings.first().map(|binding| binding.spec.activation);
         let trigger_mode = initial_activation.map_or(TriggerMode::Press, TriggerMode::of);
         let mut local_editor = local_editor::LocalEditor::new(cx);
@@ -746,6 +807,7 @@ impl Workspace {
         .detach();
         let (panel_sender, panel_requests) = mpsc::sync_channel(8);
         let (wheel_sender, wheel_requests) = mpsc::sync_channel(8);
+        let system_executor = system_executor::SystemAdjustmentExecutor::with_wake(ui_wake.clone());
         Self {
             backend,
             events,
@@ -758,16 +820,22 @@ impl Workspace {
             pending: None,
             edited_spec: None,
             preset_edit_id: None,
-            next_binding_id,
             conflict: None,
             selected,
             confirm_delete: None,
-            page: if wheel_editor {
+            theme_mode,
+            theme_error,
+            page: if appearance_settings {
+                Page::Settings
+            } else if browser_connector_settings {
+                Page::Extensions
+            } else if wheel_editor {
                 Page::Wheels
             } else {
                 Page::Triggers
             },
             history_filter: HistoryFilter::All,
+            smooth_scroll: smooth_scroll::ScrollRegions::default(),
             message,
             trigger_mode,
             condition_editor,
@@ -784,10 +852,12 @@ impl Workspace {
             arguments,
             working_directory,
             shortcut_keys,
-            plugin_path,
             action_search,
             plugins,
             plugin_settings_error,
+            browser_connector_ui,
+            browser_executor: browser_actions::BrowserExecutor::new(settings::path()),
+            browser_editor,
             wheels,
             wheels_error,
             wheel_selected,
@@ -809,18 +879,22 @@ impl Workspace {
             wheel_launch_target,
             drag_wheel_session: None,
             install_events: None,
-            install_status: None,
+            install_status: relocated,
             executor: CommandExecutor::new(),
+            package_input,
+            package_picker_for_draft: false,
+            action_service: action_packages::service(&settings::path()),
             shortcut_executor: CommandExecutor::shortcuts(),
-            system_executor: system_executor::SystemAdjustmentExecutor::new(),
+            system_executor,
+            system_hud: system_hud::SystemHud::default(),
+            brightness_hud_prepared: false,
             local_executor: local_executor::LocalExecutor::new(),
             local_invocations: HashMap::new(),
             local_editor,
             wheel_local_editor,
             action_status: HashMap::new(),
             action_log: VecDeque::new(),
-            bindings,
-            stats: HashMap::new(),
+            triggers: service::TriggerService::new(bindings, service::SettingsFile),
             error: startup_error.or(load_error).or(title_bar.clone().err()),
             action_error: None,
             status: "正在连接键盘和鼠标…".into(),
@@ -868,6 +942,18 @@ impl Workspace {
         } else {
             Listener::Listening
         }
+    }
+
+    /// 切换主页面；录制期间保持当前页，避免打断输入拦截。
+    fn open_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.recording {
+            return;
+        }
+        self.smooth_scroll.cancel_all();
+        self.page = page;
+        self.package_picker_for_draft = false;
+        self.preset_edit_id = None;
+        cx.notify();
     }
 
     fn rebuild_backend(&mut self, cx: &mut Context<Self>) {
@@ -952,6 +1038,7 @@ impl Workspace {
                 | BackendCommand::Shutdown
         ) {
             self.local_executor.cancel_all();
+            self.action_service.cancel_all();
         }
         let result = self
             .backend
@@ -972,13 +1059,10 @@ impl Workspace {
             return;
         }
         self.bindings_need_sync = false;
-        self.send(BackendCommand::SetBindings(
-            self.bindings
-                .iter()
-                .filter(|b| b.enabled && self.action_available(&b.action))
-                .map(|b| b.spec.clone())
-                .collect(),
-        ));
+        let specs = self
+            .triggers
+            .active_specs(|action| self.action_available(action));
+        self.send(BackendCommand::SetBindings(specs));
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) {
@@ -989,6 +1073,24 @@ impl Workspace {
             }
         }
         let mut changed = self.poll_wheel(cx);
+        if !self.brightness_hud_prepared
+            && self.ready
+            && self.triggers.bindings().iter().any(|binding| {
+                binding.enabled
+                    && matches!(&binding.action, ActionSpec::AdjustSystem(action)
+                        if action.target == system_action::AdjustmentTarget::Brightness)
+            })
+        {
+            self.brightness_hud_prepared = true;
+            if let Err(error) = self.system_hud.prewarm() {
+                self.error = Some(error);
+                changed = true;
+            }
+        }
+        if let Some(error) = self.system_hud.take_error() {
+            self.error = Some(error);
+            changed = true;
+        }
         if let Some(events) = self.install_events.take() {
             let mut finished = false;
             loop {
@@ -996,15 +1098,24 @@ impl Workspace {
                     Ok(plugin_install::InstallEvent::Progress(message)) => {
                         self.install_status = Some(message)
                     }
-                    Ok(plugin_install::InstallEvent::Finished { cli_path, version }) => {
-                        self.plugin_path.update(cx, |input, cx| {
-                            input.set_text(cli_path.to_string_lossy().into_owned(), cx)
-                        });
-                        let saved = self.save_plugin_settings(true, cx);
-                        self.install_status = Some(if saved {
-                            format!("RaiShot {version} 已安装。可选择截图动作并设置触发。")
+                    Ok(plugin_install::InstallEvent::Finished {
+                        cli_path,
+                        version,
+                        downloaded,
+                    }) => {
+                        let saved = self.save_plugin_configuration(
+                            cli_path.to_string_lossy().into_owned(),
+                            true,
+                            cx,
+                        );
+                        self.install_status = Some(if !saved {
+                            "运行文件已就绪，插件设置保存失败；处理错误后重试启用。".into()
+                        } else if downloaded {
+                            format!(
+                                "RaiShot {version} 已安装。首次截图时 Windows 会检查新程序，可能需要约 1 分钟，之后会快很多。"
+                            )
                         } else {
-                            "依赖已安装，插件设置保存失败；请处理错误后保存路径。".into()
+                            format!("已接入本机的 RaiShot {version}，无需下载。")
                         });
                         finished = true;
                     }
@@ -1027,6 +1138,9 @@ impl Workspace {
                 self.install_events = Some(events);
             }
         }
+        changed |= self.poll_browser_connector(cx);
+        changed |= self.poll_packages();
+        changed |= self.poll_browser_actions();
         for _ in 0..64 {
             let Ok(event) = self.local_executor.try_recv() else {
                 break;
@@ -1139,6 +1253,14 @@ impl Workspace {
                 break;
             };
             changed = true;
+            match &event.result {
+                Ok(result) => {
+                    if let Err(error) = self.system_hud.complete(event.token, result, event.point) {
+                        self.error = Some(error);
+                    }
+                }
+                Err(_) => self.system_hud.fail(event.token),
+            }
             let (text, failed) = match event.result {
                 Ok(result) => (
                     format!(
@@ -1226,7 +1348,7 @@ impl Workspace {
                 }
             };
             processed_backend += 1;
-            changed = true;
+            changed |= should_refresh_workspace_for_backend_event(&event, self.page);
             match event {
                 BackendEvent::Ready => {
                     self.ready = true;
@@ -1254,14 +1376,10 @@ impl Workspace {
                             None
                         }
                     });
-                    let Some(id) = reusable.or(self.next_binding_id) else {
-                        self.error = Some("触发器编号已用尽，无法添加新绑定。".into());
+                    let Some(id) = self.draft_id(reusable) else {
                         continue;
                     };
                     spec.id = id;
-                    if reusable.is_none() {
-                        self.next_binding_id = id.checked_add(1);
-                    }
                     self.conflict = self.check_draft_trigger(&spec, editing).err();
                     self.load_trigger_fields(&spec, cx);
                     if editing.is_some() {
@@ -1357,6 +1475,7 @@ impl Workspace {
                 }
                 BackendEvent::EscapePressed => {
                     self.local_executor.cancel_all();
+                    self.action_service.cancel_all();
                     if let Some(wheel) = self.wheel_window {
                         let _ = wheel.update(cx, |view, window, _| view.dismiss_escape(window));
                     }
@@ -1446,15 +1565,30 @@ impl Workspace {
         }
     }
 
+    /// 优先复用草稿或正在编辑的编号，否则分配新编号；失败时写入错误提示。
+    fn draft_id(&mut self, reuse: Option<u64>) -> Option<u64> {
+        if reuse.is_some() {
+            return reuse;
+        }
+        match self.triggers.allocate_id() {
+            Ok(id) => Some(id),
+            Err(error) => {
+                self.error = Some(error.message());
+                None
+            }
+        }
+    }
+
     fn binding(&self, id: u64) -> Option<&Binding> {
-        self.bindings.iter().find(|binding| binding.spec.id == id)
+        self.triggers.get(id)
     }
 
     fn action_available(&self, action: &ActionSpec) -> bool {
         match action {
-            ActionSpec::ShowWheel(_) | ActionSpec::External(_) => {
-                self.action_unavailable_reason(action).is_none()
-            }
+            ActionSpec::ShowWheel(_)
+            | ActionSpec::External(_)
+            | ActionSpec::Invoke(_)
+            | ActionSpec::Browser(_) => self.action_unavailable_reason(action).is_none(),
             ActionSpec::Plugin(reference) => {
                 self.plugin_settings_error.is_none() && self.plugins.availability(reference).is_ok()
             }
@@ -1474,6 +1608,8 @@ impl Workspace {
             || self.shortcut_executor.is_running(id)
             || self.system_executor.is_running(id)
             || self.local_executor.is_running(id)
+            || self.action_service.is_running(id)
+            || self.browser_executor.is_running(id)
             || match action {
                 ActionSpec::Plugin(reference) => self
                     .plugins
@@ -1485,6 +1621,15 @@ impl Workspace {
 
     fn action_unavailable_reason(&self, action: &ActionSpec) -> Option<String> {
         match action {
+            ActionSpec::Browser(action) => action.validate().err().or_else(|| {
+                (!self.browser_connector_ui.installed())
+                    .then(|| "请先在扩展页安装浏览器连接器。".into())
+            }),
+            ActionSpec::Invoke(call) => self
+                .action_service
+                .validate(call)
+                .err()
+                .map(|error| error.to_string()),
             ActionSpec::External(action) => action.unavailable_reason(),
             ActionSpec::ShowWheel(reference) => self.wheels_error.clone().or_else(|| {
                 (!self
@@ -1509,13 +1654,7 @@ impl Workspace {
         spec: &TriggerSpec,
         editing: Option<u64>,
     ) -> Result<(), Conflict> {
-        let others: Vec<_> = self
-            .bindings
-            .iter()
-            .filter(|b| Some(b.spec.id) != editing)
-            .cloned()
-            .collect();
-        settings::check_candidate(&others, spec)
+        self.triggers.check_candidate(spec, editing)
     }
 
     fn load_trigger_fields(&mut self, spec: &TriggerSpec, cx: &mut Context<Self>) {
@@ -1614,7 +1753,7 @@ impl Workspace {
         if let Some(base) = self.pending.clone() {
             match self.draft_spec(&base, cx) {
                 Ok(spec) => {
-                    self.conflict = settings::check_candidate(&self.bindings, &spec).err();
+                    self.conflict = self.triggers.check_candidate(&spec, None).err();
                     self.pending = Some(spec);
                 }
                 Err(error) => self.error = Some(error),
@@ -1634,20 +1773,10 @@ impl Workspace {
             .preset_edit_id
             .take()
             .filter(|id| self.binding(*id).is_some());
-        let Some(id) = self
-            .pending
-            .as_ref()
-            .map(|spec| spec.id)
-            .or(editing)
-            .or(self.next_binding_id)
-        else {
-            self.error = Some("触发器编号已用尽，无法添加新绑定。".into());
+        let Some(id) = self.draft_id(self.pending.as_ref().map(|spec| spec.id).or(editing)) else {
             cx.notify();
             return;
         };
-        if self.pending.is_none() && editing.is_none() {
-            self.next_binding_id = id.checked_add(1);
-        }
         self.clear_pending();
         self.edited_spec = None;
         let spec = preset.spec(id);
@@ -1670,7 +1799,8 @@ impl Workspace {
     }
 
     fn panel_items(&self) -> Vec<PanelItem> {
-        self.bindings
+        self.triggers
+            .bindings()
             .iter()
             .filter(|b| !matches!(b.action, ActionSpec::ShowPanel))
             .map(|binding| {
@@ -1709,7 +1839,8 @@ impl Workspace {
         PanelContext {
             paused: self.paused,
             shortcuts: self
-                .bindings
+                .triggers
+                .bindings()
                 .iter()
                 .filter(|b| matches!(b.action, ActionSpec::ShowPanel) && b.enabled)
                 .map(|b| caps_for(&b.spec))
@@ -1719,6 +1850,15 @@ impl Workspace {
 
     fn refresh_panel(&mut self, cx: &mut Context<Self>) {
         if let Some(panel) = self.panel {
+            match panel.update(cx, |view, _, _| view.is_visible()) {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(_) => {
+                    self.panel = None;
+                    return;
+                }
+            }
+            // 隐藏期间不重建卡片；open_panel 在 present 前总会提供最新快照。
             let items = self.panel_items();
             let context = self.panel_context();
             let error = self
@@ -1992,9 +2132,7 @@ impl Workspace {
                 None
             };
             if source == HitSource::Input {
-                let stats = self.stats.entry(id).or_default();
-                stats.hits += 1;
-                stats.last = Some(clock());
+                self.triggers.record_hit(id, clock());
             }
             if is_drag_wheel {
                 // 同一次匹配的 Started/Ended 生命周期负责轮盘交互；这里仅记录命中。
@@ -2067,6 +2205,33 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match action {
+            ActionSpec::Browser(action) => {
+                match self.browser_executor.submit(id, action) {
+                    Ok(()) => {
+                        self.action_error = None;
+                        self.record_action_status(id, "等待执行浏览器动作".into());
+                    }
+                    Err(error) => {
+                        self.action_error = Some((id, error.clone()));
+                        self.record_action_status(id, error);
+                    }
+                }
+                cx.notify();
+            }
+            ActionSpec::Invoke(call) => {
+                match self.action_service.submit(id, call) {
+                    Ok(invocation) => {
+                        self.action_error = None;
+                        self.record_action_status(id, format!("动作包已接纳 · 运行 {invocation}"));
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        self.action_error = Some((id, message.clone()));
+                        self.record_action_status(id, message);
+                    }
+                }
+                cx.notify();
+            }
             ActionSpec::Local(action) => {
                 let target = target
                     .map(Ok)
@@ -2097,10 +2262,21 @@ impl Workspace {
                 });
                 let result = point
                     .ok_or_else(|| "尚未获取鼠标位置，请恢复监听后重试。".to_string())
-                    .and_then(|point| self.system_executor.submit(id, action, point));
+                    .and_then(|point| {
+                        self.system_executor
+                            .submit(id, action, point)
+                            .map(|token| (token, point))
+                    });
                 match result {
-                    Ok(()) => {
+                    Ok((token, point)) => {
                         self.action_error = None;
+                        if action.target == system_action::AdjustmentTarget::Brightness {
+                            if let Err(error) =
+                                self.system_hud.begin(token, point, action.delta_percent)
+                            {
+                                self.error = Some(error);
+                            }
+                        }
                         self.record_action_status(id, format!("等待{}", action.display()));
                     }
                     Err(error) => {
@@ -2197,7 +2373,7 @@ impl Workspace {
                     Err(error) => {
                         self.action_error = Some((id, error.clone()));
                         self.record_action_status(id, error);
-                        self.plugins.refresh();
+                        self.plugins.refresh_availability();
                         self.sync_bindings();
                     }
                 }
@@ -2230,6 +2406,19 @@ impl Workspace {
     }
 
     fn draft_action_spec(&self, cx: &App) -> Result<ActionSpec, String> {
+        if let ActionSpec::Browser(action) = &self.draft_action {
+            return self
+                .browser_editor
+                .snapshot(action, cx)
+                .map(ActionSpec::Browser);
+        }
+        if let ActionSpec::Invoke(call) = &self.draft_action {
+            let mut call = call.clone();
+            call.input = serde_json::from_str(&self.package_input.read(cx).text())
+                .map_err(|error| format!("动作参数需要 JSON 对象：{error}"))?;
+            call.validate().map_err(|error| error.to_string())?;
+            return Ok(ActionSpec::Invoke(call));
+        }
         if matches!(self.draft_action, ActionSpec::Local(_)) {
             return self.local_editor.snapshot(cx).map(ActionSpec::Local);
         }
@@ -2415,6 +2604,14 @@ impl Workspace {
     }
 
     fn load_action(&mut self, action: ActionSpec, cx: &mut Context<Self>) {
+        if let ActionSpec::Browser(action) = &action {
+            self.browser_editor.load(action, cx);
+            self.refresh_browser_profiles();
+        }
+        if let ActionSpec::Invoke(call) = &action {
+            self.package_input
+                .update(cx, |input, cx| input.set_text(call.input.to_string(), cx));
+        }
         if let ActionSpec::Local(local) = &action {
             self.local_editor.load(local, cx);
         }
@@ -2489,6 +2686,7 @@ impl Workspace {
         self.recording_preserve_action = preserve_action;
         self.recording_edit_id = editing;
         if self.send(BackendCommand::StartRecording) {
+            self.smooth_scroll.cancel_all();
             self.recording = true;
             self.recording_held.clear();
             self.conflict = None;
@@ -2511,6 +2709,7 @@ impl Workspace {
         if self.recording {
             return;
         }
+        self.smooth_scroll.cancel("inspector");
         self.selected = Some(id);
         self.clear_pending();
         self.conflict = None;
@@ -2551,69 +2750,57 @@ impl Workspace {
         };
         if let Some(error) = self.action_unavailable_reason(&action) {
             self.error = Some(format!(
-                "动作尚不可用：{error}。请先在动作库中配置或安装插件。"
+                "动作尚不可用：{error}。请先在“扩展”页安装或启用插件。"
             ));
             cx.notify();
             return;
         }
-        let mut next = self.bindings.clone();
-        if self.pending.is_none() {
-            if let Err(conflict) = self.check_draft_trigger(&spec, self.selected) {
-                self.conflict = Some(conflict.clone());
-                self.error = Some(format!("{}：{}", conflict.title, conflict.detail));
-                cx.notify();
-                return;
-            }
-        }
-        let mut added = None;
-        if self.pending.is_some() {
-            if let Err(conflict) = settings::check_candidate(&next, &spec) {
-                self.conflict = Some(conflict);
-                cx.notify();
-                return;
-            }
-            let id = spec.id;
-            next.push(Binding {
-                spec: TriggerSpec { id, ..spec },
-                message: text,
-                enabled: true,
-                action,
-            });
-            added = Some(id);
+        let adding = self.pending.is_some();
+        let result = if adding {
+            self.triggers
+                .add(Binding {
+                    spec,
+                    message: text,
+                    enabled: true,
+                    action,
+                })
+                .map(Some)
         } else if let Some(id) = self.selected {
-            if let Some(binding) = next.iter_mut().find(|binding| binding.spec.id == id) {
-                binding.message = text;
-                binding.spec = spec;
-                binding.action = action;
-            }
+            self.triggers.update(id, spec, text, action).map(|_| None)
         } else {
             self.error = Some("请先录制一个组合。".into());
             cx.notify();
             return;
-        }
-        if self.apply(next) {
-            if let Some(id) = added {
-                self.pending = None;
-                self.selected = Some(id);
-                self.status = "触发器已添加，试着在任意窗口触发它。".into();
-            } else {
-                self.status = "触发器动作已保存。".into();
+        };
+        match result {
+            Ok(added) => {
+                self.applied();
+                if let Some(id) = added {
+                    self.pending = None;
+                    self.selected = Some(id);
+                    self.status = "触发器已添加，试着在任意窗口触发它。".into();
+                } else {
+                    self.status = "触发器动作已保存。".into();
+                }
+                self.edited_spec = None;
+                self.load_selected_message(cx);
             }
-            self.edited_spec = None;
-            self.load_selected_message(cx);
+            // 新录制的冲突在录制区原位提示；修改已有绑定时同时给出错误横幅。
+            Err(TriggerError::Conflict(conflict)) if adding => self.conflict = Some(conflict),
+            Err(error) => {
+                if let TriggerError::Conflict(conflict) = &error {
+                    self.conflict = Some(conflict.clone());
+                }
+                self.error = Some(error.message());
+            }
         }
         cx.notify();
     }
 
-    fn apply(&mut self, bindings: Vec<Binding>) -> bool {
-        if let Err(error) = settings::validate(&bindings).and_then(|_| settings::save(&bindings)) {
-            self.error = Some(error);
-            return false;
-        }
-        self.bindings = bindings;
+    /// 服务层已提交绑定变更后，清除旧错误并同步输入后端。
+    fn applied(&mut self) {
         self.error = None;
         self.sync_bindings();
-        true
     }
 
     fn clear_pending(&mut self) {
@@ -2622,37 +2809,37 @@ impl Workspace {
         }
     }
 
-    fn choose_capture(&mut self, cx: &mut Context<Self>) {
+    fn choose_plugin_action(
+        &mut self,
+        reference: PluginActionRef,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
         if self.recording {
             return;
         }
-        if self.pending.is_some()
-            && self.draft_action == ActionSpec::Plugin(PluginActionRef::raishot_capture())
-        {
+        if self.pending.is_some() && self.draft_action == ActionSpec::Plugin(reference.clone()) {
             self.page = Page::Triggers;
             cx.notify();
             return;
         }
-        let Some(id) = self.next_binding_id else {
-            self.error = Some("触发器编号已用尽。".into());
+        let Some(id) = self.draft_id(None) else {
             cx.notify();
             return;
         };
-        let reference = PluginActionRef::raishot_capture();
         match self.plugins.default_trigger(&reference, id) {
             Ok(spec) => {
-                self.next_binding_id = id.checked_add(1);
                 self.clear_pending();
                 self.edited_spec = None;
                 self.load_trigger_fields(&spec, cx);
-                self.conflict = settings::check_candidate(&self.bindings, &spec).err();
+                self.conflict = self.triggers.check_candidate(&spec, None).err();
                 self.pending = Some(spec);
                 self.load_action(ActionSpec::Plugin(reference), cx);
                 self.message
-                    .update(cx, |input, cx| input.set_text("截图", cx));
+                    .update(cx, |input, cx| input.set_text(title.clone(), cx));
                 self.page = Page::Triggers;
                 self.error = None;
-                self.status = "已选择 RaiShot 截图，默认快捷键已填入草稿，可修改后保存。".into();
+                self.status = format!("已选择{title}，默认快捷键已填入草稿，可修改后保存。");
             }
             Err(error) => self.error = Some(error.to_string()),
         }
@@ -2689,12 +2876,26 @@ impl Workspace {
     }
 
     fn save_plugin_settings(&mut self, enabled: bool, cx: &mut Context<Self>) -> bool {
+        self.save_plugin_configuration(self.plugins.raishot_path().to_string(), enabled, cx)
+    }
+
+    fn save_plugin_configuration(
+        &mut self,
+        path: String,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.executor.is_plugin_running("raishot") {
+            self.error = Some("请等待 RaiShot 动作结束后再更改插件设置。".into());
+            cx.notify();
+            return false;
+        }
         let result = if let Some(error) = &self.plugin_settings_error {
             Err(error.clone())
         } else {
             let mut candidate = self.plugins.clone();
             candidate
-                .configure_raishot(self.plugin_path.read(cx).text().trim().to_string(), enabled)
+                .configure_raishot(path, enabled)
                 .and_then(|()| candidate.save(&settings::path()))
                 .map(|()| candidate)
                 .map_err(|error| error.to_string())
@@ -2711,7 +2912,7 @@ impl Workspace {
         self.sync_bindings();
         self.refresh_panel(cx);
         self.status = if enabled {
-            "RaiShot 插件设置已保存，所有绑定共用该程序路径。"
+            "RaiShot 插件已启用，所有插件动作已就绪。"
         } else {
             "RaiShot 插件已停用，绑定配置已保留。"
         }
@@ -2721,6 +2922,11 @@ impl Workspace {
     }
 
     fn refresh_plugins(&mut self, cx: &mut Context<Self>) {
+        if self.install_events.is_some() || self.executor.is_plugin_running("raishot") {
+            self.error = Some("请等待 RaiShot 当前任务结束后再刷新插件。".into());
+            cx.notify();
+            return;
+        }
         match Plugins::load(&settings::path()) {
             Ok(plugins) => {
                 self.plugins = plugins;
@@ -2729,6 +2935,9 @@ impl Workspace {
             Err(error) => self.plugin_settings_error = Some(error.to_string()),
         }
         self.plugins.refresh();
+        if let Some(message) = relocate_raishot(&mut self.plugins) {
+            self.install_status = Some(message);
+        }
         self.sync_bindings();
         self.refresh_panel(cx);
         self.status = "已刷新插件状态。".into();
@@ -2736,16 +2945,18 @@ impl Workspace {
     }
 
     fn install_raishot(&mut self, cx: &mut Context<Self>) {
-        if self.install_events.is_some() {
+        if self.install_events.is_some() || self.executor.is_plugin_running("raishot") {
             return;
         }
         if self.plugin_settings_error.is_some() {
             self.error = Some("请先修复插件设置文件，再刷新状态，原文件不会被覆盖。".into());
         } else {
-            match plugin_install::start_install(settings::path()) {
+            let configured = (!self.plugins.raishot_path().is_empty())
+                .then(|| PathBuf::from(self.plugins.raishot_path()));
+            match plugin_install::start_prepare(settings::path(), configured) {
                 Ok(events) => {
                     self.install_events = Some(events);
-                    self.install_status = Some("正在准备下载 RaiShot 与运行依赖…".into());
+                    self.install_status = Some("正在查找本机已有的 RaiShot…".into());
                 }
                 Err(error) => self.install_status = Some(format!("无法开始安装：{error}")),
             }
@@ -2757,11 +2968,10 @@ impl Workspace {
         if self.recording {
             return;
         }
-        let mut bindings = self.bindings.clone();
-        if let Some(binding) = bindings.iter_mut().find(|binding| binding.spec.id == id) {
-            binding.enabled = !binding.enabled;
+        match self.triggers.toggle(id) {
+            Ok(_) => self.applied(),
+            Err(error) => self.error = Some(error.message()),
         }
-        self.apply(bindings);
         cx.notify();
     }
 
@@ -2775,26 +2985,18 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let index = self.bindings.iter().position(|b| b.spec.id == id);
-        let bindings = self
-            .bindings
-            .iter()
-            .filter(|binding| binding.spec.id != id)
-            .cloned()
-            .collect();
-        if self.apply(bindings) {
-            self.local_executor.cancel_id(id);
-            self.stats.remove(&id);
-            self.action_status.remove(&id);
-            self.confirm_delete = None;
-            self.selected = index.and_then(|index| {
-                self.bindings
-                    .get(index)
-                    .or_else(|| self.bindings.last())
-                    .map(|binding| binding.spec.id)
-            });
-            self.status = "触发器已删除。".into();
-            self.load_selected_message(cx);
+        match self.triggers.remove(id) {
+            Ok(next) => {
+                self.applied();
+                self.local_executor.cancel_id(id);
+                self.action_service.cancel_id(id);
+                self.action_status.remove(&id);
+                self.confirm_delete = None;
+                self.selected = next;
+                self.status = "触发器已删除。".into();
+                self.load_selected_message(cx);
+            }
+            Err(error) => self.error = Some(error.message()),
         }
         cx.notify();
     }
@@ -2804,7 +3006,8 @@ impl Workspace {
     fn render_sidebar(&self, header: f32, cx: &mut Context<Self>) -> Div {
         let listener = self.listener();
         let enabled = self
-            .bindings
+            .triggers
+            .bindings()
             .iter()
             .filter(|b| b.enabled && self.action_available(&b.action))
             .count();
@@ -2858,11 +3061,11 @@ impl Workspace {
         }
         .w_full();
         let status = div()
-            .rounded(px(14.))
-            .p(px(14.))
-            .bg(theme::tint_fill(color, 0.13, 0.02))
+            .rounded(px(8.))
+            .p(px(12.))
+            .bg(rgb(theme::ROW))
             .border_1()
-            .border_color(hsla(color, 0.24))
+            .border_color(rgb(theme::BORDER))
             .flex()
             .flex_col()
             .gap(px(12.))
@@ -2891,21 +3094,13 @@ impl Workspace {
                                     .text_color(rgb(theme::TEXT_DIM))
                                     .child(sub),
                             ),
-                    )
-                    .when(listener == Listener::Listening, |el| {
-                        el.child(
-                            div()
-                                .font_family(theme::MONO_FONT)
-                                .text_size(px(11.))
-                                .text_color(rgb(theme::TEXT_FAINT))
-                                .child(format!("#{}", self.listener_generation)),
-                        )
-                    }),
+                    ),
             )
             .child(action);
 
         let panel_combo = self
-            .bindings
+            .triggers
+            .bindings()
             .iter()
             .find(|b| matches!(b.action, ActionSpec::ShowPanel) && b.enabled)
             .map(|b| caps_for(&b.spec));
@@ -2918,35 +3113,42 @@ impl Workspace {
                     "open-panel",
                     Icon::Bolt,
                     "打开触发面板",
-                    Tone::Primary,
+                    Tone::Secondary,
                     !self.recording,
                 )
                 .h(px(40.))
                 .w_full()
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_panel(cx))),
             )
-            .when_some(panel_combo, |el, caps| {
-                el.child(
-                    div()
-                        .overflow_hidden()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(7.))
-                        .child(caption("呼出"))
-                        .child(combo(&caps, CapSize::Small).flex_nowrap()),
-                )
-            })
             .child(
-                small(icon_button(
-                    "record-panel-shortcut",
-                    Icon::Record,
-                    "录制面板呼出组合",
-                    Tone::Ghost,
-                    listener == Listener::Listening,
-                ))
-                .w_full()
-                .on_click(cx.listener(|this, _, _, cx| this.record_panel_shortcut(cx))),
+                div()
+                    .id("record-panel-shortcut")
+                    .px(px(10.))
+                    .py(px(8.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgb(theme::BORDER))
+                    .overflow_hidden()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .when(listener == Listener::Listening, |el| {
+                        el.cursor_pointer()
+                            .hover(|s| s.bg(rgb(theme::ROW)))
+                            .on_click(cx.listener(|this, _, _, cx| this.record_panel_shortcut(cx)))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(div().flex_1().child(caption("呼出组合")))
+                            .child(icon(Icon::Record, 12., theme::TEXT_DIM))
+                            .child(div().ml(px(4.)).child(caption("录制"))),
+                    )
+                    .child(match panel_combo {
+                        Some(caps) => combo(&caps, CapSize::Small).into_any_element(),
+                        None => caption("未设置").into_any_element(),
+                    }),
             );
 
         let nav = |id: &'static str,
@@ -2958,9 +3160,9 @@ impl Workspace {
             div()
                 .id(id)
                 .relative()
-                .h(px(38.))
-                .px(px(12.))
-                .rounded(px(10.))
+                .h(px(34.))
+                .px(px(10.))
+                .rounded(px(6.))
                 .flex()
                 .items_center()
                 .gap(px(11.))
@@ -2972,26 +3174,21 @@ impl Workspace {
                     theme::TEXT_MUTED
                 }))
                 .when(active, |el| {
-                    el.bg(theme::gradient(
-                        90.,
-                        hsla(theme::ACCENT, 0.14),
-                        hsla(theme::ACCENT, 0.02),
-                    ))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(0.))
-                            .top(px(10.))
-                            .w(px(3.))
-                            .h(px(18.))
-                            .rounded(px(2.))
-                            .bg(theme::accent_fill(180.))
-                            .shadow(theme::glow(theme::ACCENT, 0.8, 8.)),
-                    )
+                    el.bg(rgb(theme::SELECTED))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(0.))
+                                .top(px(9.))
+                                .w(px(2.))
+                                .h(px(16.))
+                                .rounded(px(2.))
+                                .bg(rgb(theme::ACCENT)),
+                        )
                 })
                 .when(!active, |el| {
-                    el.hover(|s| s.bg(rgb(0x12141c)).text_color(rgb(theme::TEXT_SOFT)))
+                    el.hover(|s| s.bg(rgb(theme::ROW)).text_color(rgb(theme::TEXT_SOFT)))
                 })
                 .child(icon(
                     glyph,
@@ -3028,17 +3225,20 @@ impl Workspace {
                             .child(count.to_string()),
                     )
                 })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.recording {
-                        this.page = page;
-                        this.preset_edit_id = None;
-                        cx.notify();
-                    }
-                }))
+                .on_click(cx.listener(move |this, _, _, cx| this.open_page(page, cx)))
+        };
+        let group = |label: &'static str| {
+            div()
+                .px(px(12.))
+                .pt(px(6.))
+                .pb(px(4.))
+                .text_size(px(11.))
+                .text_color(rgb(theme::TEXT_FAINT))
+                .child(label)
         };
 
         div()
-            .w(px(224.))
+            .w(px(192.))
             .flex_none()
             .h_full()
             .relative()
@@ -3046,11 +3246,6 @@ impl Workspace {
             .bg(rgb(theme::SIDEBAR))
             .border_r_1()
             .border_color(rgb(theme::DIVIDER))
-            .child(
-                theme::aurora(theme::ACCENT, 0.09, 90.)
-                    .top(px(16.))
-                    .left(px(36.)),
-            )
             .child(
                 div()
                     .size_full()
@@ -3095,25 +3290,25 @@ impl Workspace {
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .child(
-                                div()
-                                    .px(px(12.))
-                                    .pb(px(6.))
-                                    .text_size(px(11.))
-                                    .text_color(rgb(theme::TEXT_FAINT))
-                                    .child("工作区"),
-                            )
+                            .child(group("工作区"))
+                            .child(nav(
+                                "nav-triggers",
+                                Page::Triggers,
+                                Icon::Keyboard,
+                                "触发器",
+                                Some(self.triggers.bindings().len()),
+                            ))
                             .child(nav(
                                 "nav-actions",
                                 Page::Actions,
                                 Icon::Grid,
                                 "动作库",
-                                Some(2),
+                                None,
                             ))
                             .child(nav(
                                 "nav-wheels",
                                 Page::Wheels,
-                                Icon::Pulse,
+                                Icon::Wheel,
                                 "轨道轮盘",
                                 Some(self.wheels.wheels.len()),
                             ))
@@ -3122,21 +3317,23 @@ impl Workspace {
                                 Page::Presets,
                                 Icon::Layers,
                                 "触发预设",
-                                Some(PRESETS.len()),
+                                None,
                             ))
                             .child(nav(
-                                "nav-triggers",
-                                Page::Triggers,
-                                Icon::Keyboard,
-                                "触发器",
-                                Some(self.bindings.len()),
+                                "nav-extensions",
+                                Page::Extensions,
+                                Icon::Plug,
+                                "扩展",
+                                None,
                             ))
+                            .child(div().h(px(10.)))
+                            .child(group("监控"))
                             .child(nav(
                                 "nav-history",
                                 Page::History,
                                 Icon::Clock,
                                 "触发记录",
-                                Some(self.hits.len()),
+                                (!self.hits.is_empty()).then_some(self.hits.len()),
                             ))
                             .child(nav(
                                 "nav-diagnostics",
@@ -3147,38 +3344,13 @@ impl Workspace {
                             )),
                     )
                     .child(div().flex_1())
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(10.))
-                            .child(
-                                small(icon_button(
-                                    "sidebar-rebuild",
-                                    Icon::Refresh,
-                                    if self.restarting {
-                                        "正在重建…"
-                                    } else {
-                                        "重建监听"
-                                    },
-                                    Tone::Ghost,
-                                    true,
-                                ))
-                                .w_full()
-                                .border_1()
-                                .border_color(rgb(theme::BORDER))
-                                .on_click(cx.listener(|this, _, _, cx| this.rebuild_backend(cx))),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .gap(px(6.))
-                                    .child(dot(theme::TEXT_FAINT, 4.))
-                                    .child(caption("配置自动保存在本机")),
-                            ),
-                    ),
+                    .child(nav(
+                        "nav-settings",
+                        Page::Settings,
+                        Icon::Sliders,
+                        "设置",
+                        None,
+                    )),
             )
     }
 
@@ -3259,7 +3431,12 @@ impl Workspace {
     fn render_list(&self, cx: &mut Context<Self>) -> Div {
         let listening = self.listener() == Listener::Listening;
         let dim = matches!(self.listener(), Listener::Paused | Listener::Offline);
-        let enabled = self.bindings.iter().filter(|b| b.enabled).count();
+        let enabled = self
+            .triggers
+            .bindings()
+            .iter()
+            .filter(|b| b.enabled)
+            .count();
         let mut rows = div()
             .id("trigger-rows")
             .flex_1()
@@ -3267,12 +3444,12 @@ impl Workspace {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .gap(px(8.))
+            .gap(px(2.))
             .when(dim, |el| el.opacity(0.6));
-        for binding in &self.bindings {
+        for binding in self.triggers.bindings() {
             let id = binding.spec.id;
             let selected = self.pending.is_none() && !self.recording && self.selected == Some(id);
-            let stats = self.stats.get(&id).cloned().unwrap_or_default();
+            let stats = self.triggers.stats(id);
             let (glyph, tint) = action_look(&binding.action);
             let (detail, detail_color) = match self.action_unavailable_reason(&binding.action) {
                 Some(reason) => (reason, theme::RECORD),
@@ -3313,35 +3490,26 @@ impl Workspace {
                     .relative()
                     .flex()
                     .items_center()
-                    .gap(px(14.))
-                    .pl(px(14.))
-                    .pr(px(16.))
-                    .py(px(12.))
-                    .rounded(px(14.))
+                    .gap(px(10.))
+                    .pl(px(12.))
+                    .pr(px(12.))
+                    .py(px(10.))
+                    .rounded(px(6.))
                     .border_1()
+                    .border_color(hsla(theme::BORDER, 0.))
                     .when(selected, |el| {
-                        el.bg(theme::gradient(
-                            90.,
-                            hsla(theme::ACCENT, 0.1),
-                            hsla(theme::SURFACE, 0.95),
-                        ))
-                        .border_color(hsla(theme::ACCENT, 0.5))
-                        .child(
+                        el.bg(rgb(theme::SELECTED)).child(
                             div()
                                 .absolute()
                                 .left(px(-1.))
                                 .top(px(18.))
                                 .bottom(px(18.))
-                                .w(px(3.))
+                                .w(px(2.))
                                 .rounded(px(2.))
-                                .bg(theme::accent_fill(180.)),
+                                .bg(rgb(theme::ACCENT)),
                         )
                     })
-                    .when(!selected, |el| {
-                        el.bg(rgb(theme::ROW))
-                            .border_color(rgb(theme::BORDER))
-                            .hover(|s| s.bg(rgb(0x141722)).border_color(rgb(theme::BORDER_MID)))
-                    })
+                    .when(!selected, |el| el.hover(|s| s.bg(rgb(theme::ROW))))
                     .child(
                         div()
                             .id(("row", id))
@@ -3349,17 +3517,17 @@ impl Workspace {
                             .min_w_0()
                             .flex()
                             .items_center()
-                            .gap(px(14.))
+                            .gap(px(10.))
                             .cursor_pointer()
                             .when(!binding.enabled, |el| el.opacity(0.45))
-                            .child(icon_tile(glyph, tint, 40.))
+                            .child(icon_tile(glyph, tint, 28.))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .flex()
                                     .flex_col()
-                                    .gap(px(7.))
+                                    .gap(px(5.))
                                     .child(
                                         div()
                                             .flex()
@@ -3370,7 +3538,7 @@ impl Workspace {
                                                     .flex_1()
                                                     .min_w_0()
                                                     .truncate()
-                                                    .text_size(px(14.))
+                                                    .text_size(px(13.))
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .child(binding.message.clone()),
                                             )
@@ -3408,7 +3576,7 @@ impl Workspace {
                     ),
             );
         }
-        if self.bindings.is_empty() {
+        if self.triggers.bindings().is_empty() {
             rows = rows.child(
                 div()
                     .py(px(56.))
@@ -3416,13 +3584,7 @@ impl Workspace {
                     .flex_col()
                     .items_center()
                     .gap(px(12.))
-                    .child(
-                        icon_tile(Icon::Keyboard, theme::ACCENT, 56.).shadow(theme::glow(
-                            theme::ACCENT,
-                            0.2,
-                            24.,
-                        )),
-                    )
+                    .child(icon_tile(Icon::Keyboard, theme::ACCENT, 48.))
                     .child(
                         div()
                             .text_size(px(15.))
@@ -3439,7 +3601,7 @@ impl Workspace {
             .h_full()
             .pt(px(6.))
             .pb(px(16.))
-            .pl(px(28.))
+            .pl(px(20.))
             .pr(px(18.))
             .flex()
             .flex_col()
@@ -3467,7 +3629,7 @@ impl Workspace {
                     .child(chip(
                         Icon::Keyboard,
                         theme::ACCENT_2,
-                        self.bindings.len().to_string(),
+                        self.triggers.bindings().len().to_string(),
                         "触发器",
                     ))
                     .child(chip(Icon::Check, theme::ACCENT, enabled.to_string(), "已启用"))
@@ -3479,7 +3641,7 @@ impl Workspace {
                     )),
             )
             .children(self.render_banner(cx))
-            .child(rows)
+            .child(self.smooth_scroll.wrap("trigger-rows", rows))
             .child(caption(
                 "最多 64 条触发器，每条最多 8 个前缀。单独按下未用于组合的前缀时，原输入会补发给应用。",
             ))
@@ -3501,20 +3663,17 @@ impl Workspace {
             .child(right)
     }
 
-    /// 详情顶部的组合展示区：同色渐变底与描边。
+    /// 详情顶部的组合与状态摘要。
     fn stage(color: u32) -> Div {
         div()
-            .rounded(px(16.))
-            .px(px(16.))
-            .pt(px(22.))
-            .pb(px(16.))
-            .bg(theme::tint_fill(color, 0.15, 0.02))
-            .border_1()
-            .border_color(hsla(color, 0.26))
+            .rounded(px(6.))
+            .px(px(12.))
+            .py(px(14.))
+            .bg(hsla(color, 0.035))
             .flex()
             .flex_col()
             .items_center()
-            .gap(px(14.))
+            .gap(px(10.))
     }
 
     /// 舞台底部的两项指标。
@@ -3530,7 +3689,7 @@ impl Workspace {
                 .child(
                     div()
                         .font_family(theme::MONO_FONT)
-                        .text_size(px(18.))
+                        .text_size(px(16.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(value),
                 )
@@ -3543,7 +3702,7 @@ impl Workspace {
         };
         div()
             .w_full()
-            .pt(px(14.))
+            .pt(px(10.))
             .border_t_1()
             .border_color(hsla(color, 0.16))
             .flex()
@@ -3848,7 +4007,7 @@ impl Workspace {
             .flex_1()
             .min_w_0()
             .h_full()
-            .pl(px(28.))
+            .pl(px(20.))
             .pr(px(24.))
             .pt(px(6.))
             .pb(px(18.))
@@ -3893,7 +4052,7 @@ impl Workspace {
                             ),
                     ),
             )
-            .child(content)
+            .child(self.smooth_scroll.wrap("preset-catalog", content))
             .child(caption(
                 "预设只填入草稿，保存后才生效。已有组合和前缀冲突会明确报告。",
             ))
@@ -3926,10 +4085,9 @@ impl Workspace {
                     .border_color(hsla(tint, 0.6))
                     .text_color(rgb(theme::TEXT))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .shadow(theme::glow(tint, 0.18, 14.))
             })
             .when(!active, |el| {
-                el.bg(rgb(0x0c0e14))
+                el.bg(rgb(theme::BACKGROUND))
                     .border_color(rgb(theme::BORDER))
                     .text_color(rgb(theme::TEXT_MUTED))
                     .hover(|s| {
@@ -3946,6 +4104,45 @@ impl Workspace {
     }
 
     fn action_fields(&self, hint: Option<&'static str>, cx: &mut Context<Self>) -> Div {
+        if matches!(self.draft_action, ActionSpec::Browser(_)) {
+            return div()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(section_title("浏览器操作"))
+                        .child(
+                            small(button(
+                                "change-browser-action-kind",
+                                "更换动作",
+                                Tone::Ghost,
+                                !self.recording,
+                            ))
+                            .on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.draft_action = ActionSpec::Notification;
+                                    cx.notify();
+                                },
+                            )),
+                        ),
+                )
+                .child(self.browser_action_fields(cx))
+                .child(self.message_field("动作名称", None))
+                .child(
+                    small(icon_button(
+                        "test-browser-action",
+                        Icon::Play,
+                        "测试动作",
+                        Tone::Secondary,
+                        !self.recording,
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| this.test_action(cx))),
+                );
+        }
         let notification = matches!(self.draft_action, ActionSpec::Notification);
         let command = matches!(self.draft_action, ActionSpec::Command(_));
         let panel = matches!(self.draft_action, ActionSpec::ShowPanel);
@@ -3954,6 +4151,8 @@ impl Workspace {
         let wheel = matches!(self.draft_action, ActionSpec::ShowWheel(_));
         let system = matches!(self.draft_action, ActionSpec::AdjustSystem(_));
         let local = matches!(self.draft_action, ActionSpec::Local(_));
+        let package = matches!(self.draft_action, ActionSpec::Invoke(_));
+        let browser = matches!(self.draft_action, ActionSpec::Browser(_));
         div()
             .flex()
             .flex_col()
@@ -4017,11 +4216,17 @@ impl Workspace {
                             plugin,
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.draft_action =
-                                ActionSpec::Plugin(PluginActionRef::raishot_capture());
-                            if this.message.read(cx).text().trim().is_empty() {
-                                this.message
-                                    .update(cx, |input, cx| input.set_text("截图", cx));
+                            if matches!(this.draft_action, ActionSpec::Plugin(_)) {
+                                return;
+                            }
+                            match this.plugins.catalogue() {
+                                Ok(actions) => if let Some(action) = actions.into_iter().next() {
+                                    this.load_action(ActionSpec::Plugin(action.reference), cx);
+                                    if this.message.read(cx).text().trim().is_empty() {
+                                        this.message.update(cx, |input, cx| input.set_text(action.title, cx));
+                                    }
+                                },
+                                Err(error) => this.error = Some(error.to_string()),
                             }
                             cx.notify();
                         })),
@@ -4052,6 +4257,22 @@ impl Workspace {
                     ),
             )
             .when(wheel, |el| el.child(self.draft_wheel_fields(cx)))
+            .child(Self::kind_tile("browser-action", Icon::Browser, theme::ACCENT_2, "浏览器操作", browser)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.load_action(ActionSpec::Browser(browser_actions::BrowserAction {
+                        command: browser_actions::BrowserCommand::ReloadTab, profile: None,
+                    }), cx);
+                    this.refresh_browser_profiles();
+                    cx.notify();
+                })))
+            .when(browser, |el| el.child(self.browser_action_fields(cx)))
+            .child(Self::kind_tile("package-action", Icon::Terminal, theme::ACCENT_2, "动作包 / JavaScript", package)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.package_picker_for_draft = true;
+                    this.page = Page::Actions;
+                    cx.notify();
+                })))
+            .when(package, |el| el.child(self.package_action_fields(cx)))
             .child(Self::kind_tile("system-adjustment",Icon::Pulse,theme::ACCENT_2,"音量 / 屏幕亮度",system).on_click(cx.listener(|this,_,_,cx| {
                 this.draft_action=ActionSpec::AdjustSystem(system_action::SystemAdjustmentAction {target:system_action::AdjustmentTarget::Volume,delta_percent:5});
                 this.adjustment_amount.update(cx,|input,cx|input.set_text("5",cx));
@@ -4096,7 +4317,7 @@ impl Workspace {
                         ))
                         .child(preview),
                 )
-                .child(caption("保存后切换到目标窗口，用触发组合测试。每次触发发送一次完整按下与释放；不会弹出提示。"))
+                .child(caption("保存后用触发组合测试。普通按键发送完整按下与释放；独立音量键使用 Windows 原生调节与浮层，不叠加本软件提示。"))
             })
             .when(command, |el| {
                 el.child(Self::input_field(
@@ -4190,14 +4411,7 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon(Icon::Record, 30., theme::RECORD))
-                        .with_animation(
-                            "record-pulse",
-                            Animation::new(Duration::from_millis(1600))
-                                .repeat()
-                                .with_easing(pulsating_between(0.15, 1.)),
-                            |el, delta| el.shadow(theme::glow(theme::RECORD, 0.5 * delta, 28.)),
-                        ),
+                        .child(icon(Icon::Record, 26., theme::RECORD)),
                 )
                 .child(live)
                 .child(
@@ -4248,7 +4462,7 @@ impl Workspace {
     ) -> (Vec<AnyElement>, Option<AnyElement>) {
         let draft = self.draft_spec(spec, cx);
         let conflict = match &draft {
-            Ok(spec) => settings::check_candidate(&self.bindings, spec).err(),
+            Ok(spec) => self.triggers.check_candidate(spec, None).err(),
             Err(error) => Some(Conflict {
                 title: "触发参数无效",
                 detail: error.clone(),
@@ -4292,6 +4506,9 @@ impl Workspace {
         let footer = match conflict {
             None => {
                 body.push(self.action_fields(None, cx).into_any_element());
+                if matches!(self.draft_action, ActionSpec::Browser(_)) {
+                    body.swap(3, 4);
+                }
                 div()
                     .flex()
                     .gap(px(8.))
@@ -4391,7 +4608,7 @@ impl Workspace {
         let draft_available = self
             .draft_action_spec(cx)
             .is_ok_and(|action| self.action_available(&action));
-        let stats = self.stats.get(&id).cloned().unwrap_or_default();
+        let stats = self.triggers.stats(id);
         let draft = self.message.read(cx).text();
         let changed = !draft.trim().is_empty()
             && (draft != binding.message
@@ -4421,7 +4638,7 @@ impl Workspace {
             .get(&id)
             .cloned()
             .unwrap_or_else(|| "本次运行尚未执行动作".into());
-        let body = vec![
+        let mut body = vec![
             Self::inspector_header("触发器详情", status_pill(state, state_color))
                 .into_any_element(),
             Self::stage(theme::ACCENT)
@@ -4491,7 +4708,7 @@ impl Workspace {
                 .px(px(12.))
                 .py(px(10.))
                 .rounded(px(10.))
-                .bg(rgb(0x0c0e14))
+                .bg(rgb(theme::BACKGROUND))
                 .border_1()
                 .border_color(rgb(theme::BORDER))
                 .child(icon(Icon::Pulse, 14., theme::TEXT_DIM))
@@ -4506,6 +4723,9 @@ impl Workspace {
                 .into_any_element(),
             caption("测试提示不计入触发次数。").into_any_element(),
         ];
+        if matches!(self.draft_action, ActionSpec::Browser(_)) {
+            body.swap(3, 4);
+        }
         let footer = div()
             .flex()
             .gap(px(8.))
@@ -4556,13 +4776,7 @@ impl Workspace {
                         .items_center()
                         .justify_center()
                         .gap(px(14.))
-                        .child(
-                            icon_tile(Icon::Keyboard, theme::ACCENT, 56.).shadow(theme::glow(
-                                theme::ACCENT,
-                                0.2,
-                                24.,
-                            )),
-                        )
+                        .child(icon_tile(Icon::Keyboard, theme::ACCENT, 48.))
                         .child(
                             div()
                                 .text_size(px(13.))
@@ -4585,16 +4799,15 @@ impl Workspace {
             )
         };
         div()
-            .w(px(360.))
+            .w(px(320.))
             .flex_none()
             .mt(px(2.))
             .mr(px(14.))
             .mb(px(14.))
-            .rounded(px(18.))
+            .rounded(px(8.))
             .bg(rgb(theme::INSPECTOR))
             .border_1()
             .border_color(rgb(theme::BORDER))
-            .shadow(theme::lift(0.6))
             .overflow_hidden()
             .flex()
             .flex_col()
@@ -4604,11 +4817,12 @@ impl Workspace {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .p(px(18.))
+                    .p(px(16.))
                     .flex()
                     .flex_col()
-                    .gap(px(18.))
-                    .children(body.into_iter().map(|part| div().flex_none().child(part))),
+                    .gap(px(14.))
+                    .children(body.into_iter().map(|part| div().flex_none().child(part)))
+                    .map(|el| self.smooth_scroll.wrap("inspector", el)),
             )
             .when_some(footer, |el, footer| {
                 el.child(
@@ -4616,8 +4830,8 @@ impl Workspace {
                         .flex_none()
                         .px(px(16.))
                         .py(px(14.))
-                        .rounded_b(px(17.))
-                        .bg(rgb(0x0c0e14))
+                        .rounded_b(px(7.))
+                        .bg(rgb(theme::INSPECTOR))
                         .border_t_1()
                         .border_color(rgb(theme::DIVIDER))
                         .child(footer),
@@ -4719,7 +4933,7 @@ impl Workspace {
             .h_full()
             .pt(px(6.))
             .pb(px(16.))
-            .pl(px(28.))
+            .pl(px(20.))
             .pr(px(24.))
             .flex()
             .flex_col()
@@ -4767,7 +4981,7 @@ impl Workspace {
                         "测试提示",
                     )),
             )
-            .child(list)
+            .child(self.smooth_scroll.wrap("history-list", list))
             .when(!self.action_log.is_empty(), |el| {
                 el.child(
                     card()
@@ -4790,7 +5004,8 @@ impl Workspace {
                                         .text_size(px(11.5))
                                         .text_color(rgb(theme::TEXT_DIM))
                                         .child(line.clone())
-                                })),
+                                }))
+                                .map(|el| self.smooth_scroll.wrap("action-log", el)),
                         ),
                 )
             })
@@ -4855,7 +5070,7 @@ impl Workspace {
         let page = div()
             .pt(px(6.))
             .pb(px(18.))
-            .pl(px(28.))
+            .pl(px(20.))
             .pr(px(24.))
             .flex()
             .flex_col()
@@ -5069,7 +5284,7 @@ impl Workspace {
                                     .px(px(10.))
                                     .py(px(5.))
                                     .rounded(px(8.))
-                                    .bg(rgb(0x0c0e14))
+                                    .bg(rgb(theme::BACKGROUND))
                                     .text_size(px(12.))
                                     .text_color(rgb(if matched {
                                         theme::ACCENT
@@ -5161,6 +5376,7 @@ impl Workspace {
             .h_full()
             .overflow_y_scroll()
             .child(page)
+            .map(|el| self.smooth_scroll.wrap("diagnostics", el))
     }
 
     /// 标题栏高度与系统按钮宽度（逻辑像素），并同步按钮下方的底色。
@@ -5168,9 +5384,10 @@ impl Workspace {
         let Some(hwnd) = self.title_bar else {
             return (0., 0.);
         };
-        if self.caption_color != Some(theme::BACKGROUND) {
-            omnitrigger_windows::set_caption_color(hwnd, theme::BACKGROUND);
-            self.caption_color = Some(theme::BACKGROUND);
+        let background = theme::resolve_color(theme::BACKGROUND);
+        if self.caption_color != Some(background) {
+            omnitrigger_windows::set_caption_color(hwnd, background);
+            self.caption_color = Some(background);
         }
         let scale = window.scale_factor();
         omnitrigger_windows::caption_buttons(hwnd)
@@ -5221,7 +5438,7 @@ impl Workspace {
                 )
         };
         div()
-            .h(px(30.))
+            .h(px(26.))
             .flex_none()
             .px(px(14.))
             .flex()
@@ -5239,47 +5456,51 @@ impl Workspace {
                     .items_center()
                     .gap(px(8.))
                     .min_w_0()
-                    .child(dot(color, 6.).shadow(theme::glow(color, 0.8, 6.)))
+                    .child(dot(color, 6.))
                     .child(div().truncate().child(self.status.clone())),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(14.))
-                    .child(metric(
-                        Icon::Keyboard,
-                        thousands(self.diagnostics.keyboard_events),
-                    ))
-                    .child(metric(
-                        Icon::Mouse,
-                        thousands(self.diagnostics.mouse_events),
-                    ))
-                    .child(metric(
-                        Icon::Terminal,
-                        thousands(self.diagnostics.external_injected),
-                    ))
-                    .child(div().w(px(1.)).h(px(12.)).bg(rgb(theme::BORDER_MID)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(5.))
-                            .child("按住")
-                            .child(div().text_color(rgb(theme::TEXT_SOFT)).child(held)),
-                    ),
-            )
+            .when(self.page == Page::Diagnostics, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(14.))
+                        .child(metric(
+                            Icon::Keyboard,
+                            thousands(self.diagnostics.keyboard_events),
+                        ))
+                        .child(metric(
+                            Icon::Mouse,
+                            thousands(self.diagnostics.mouse_events),
+                        ))
+                        .child(metric(
+                            Icon::Terminal,
+                            thousands(self.diagnostics.external_injected),
+                        ))
+                        .child(div().w(px(1.)).h(px(12.)).bg(rgb(theme::BORDER_MID)))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(5.))
+                                .child("按住")
+                                .child(div().text_color(rgb(theme::TEXT_SOFT)).child(held)),
+                        ),
+                )
+            })
     }
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        theme::apply(self.theme_mode, window.appearance());
         let (title_height, buttons_width) = self.caption_area(window);
         let page = match self.page {
             Page::Actions => self.render_actions(window, cx).into_any_element(),
             Page::Wheels => self.render_wheels(cx).into_any_element(),
             Page::Presets => self.render_presets(cx).into_any_element(),
+            Page::Extensions => self.render_extensions(cx).into_any_element(),
             Page::Triggers => div()
                 .flex_1()
                 .min_w_0()
@@ -5289,8 +5510,9 @@ impl Render for Workspace {
                 .into_any_element(),
             Page::History => self.render_history(cx).into_any_element(),
             Page::Diagnostics => self.render_diagnostics(cx).into_any_element(),
+            Page::Settings => self.render_appearance(window, cx).into_any_element(),
         };
-        // 柔光只放在主区下半部，不会伸到右上角的系统按钮区域。
+        // 纯色工作区避免大半径模糊随交互反复绘制。
         let main = div()
             .flex_1()
             .min_h_0()
@@ -5298,16 +5520,6 @@ impl Render for Workspace {
             .overflow_hidden()
             .bg(rgb(theme::BACKGROUND))
             .flex()
-            .child(
-                theme::aurora(theme::ACCENT_2, 0.06, 220.)
-                    .right(px(170.))
-                    .bottom(px(30.)),
-            )
-            .child(
-                theme::aurora(theme::VIOLET, 0.05, 200.)
-                    .left(px(220.))
-                    .bottom(px(-80.)),
-            )
             .child(div().flex_1().min_w_0().flex().child(page));
         // 根节点不铺底色：系统标题按钮绘制在界面下方，需透出。
         div()
@@ -5463,6 +5675,16 @@ fn smoke_test() -> Result<(), String> {
 
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
+    if let Some(preview) = system_hud::Preview::parse(&arguments) {
+        match preview {
+            Ok(preview) => preview.run(),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if let Some(result) = system_action::cli(&arguments) {
         match result {
             Ok(text) => println!("{text}"),
@@ -5483,6 +5705,36 @@ fn main() {
             eprintln!("{error}");
             std::process::exit(1);
         }
+    }
+    if let Some(result) = browser_actions_ui::cli(&arguments) {
+        match result {
+            Ok(text) => println!("{text}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Some(result) = browser_connector_ui::cli(&arguments) {
+        match result {
+            Ok(text) => println!("{text}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Some(result) = action_packages::cli(&arguments) {
+        match result {
+            Ok(text) => println!("{text}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
     }
     if arguments
         .iter()
@@ -5526,6 +5778,10 @@ fn main() {
         return;
     }
     let ui_smoke = arguments.iter().any(|argument| argument == "--ui-smoke");
+    let appearance_settings = arguments.iter().any(|argument| argument == "--settings");
+    let browser_connector_settings = arguments
+        .iter()
+        .any(|argument| argument == "--browser-connector-settings");
     let open_panel = arguments.iter().any(|argument| argument == "--panel");
     let initial_wheel = arguments
         .iter()
@@ -5602,6 +5858,8 @@ fn main() {
                             cx,
                             StartupOptions {
                                 ui_smoke,
+                                browser_connector_settings,
+                                appearance_settings,
                                 panel: open_panel && initial_wheel.is_none(),
                                 wheel: initial_wheel,
                                 wheel_target: wheel_launch_target,
@@ -5612,6 +5870,17 @@ fn main() {
                         )
                     });
                     let closing_view = view.downgrade();
+                    let appearance_view = view.downgrade();
+                    window
+                        .observe_window_appearance(move |window, cx| {
+                            let _ = appearance_view.update(cx, |view, cx| {
+                                if theme::apply(view.theme_mode, window.appearance()) {
+                                    cx.refresh_windows();
+                                    cx.notify();
+                                }
+                            });
+                        })
+                        .detach();
                     window.on_window_should_close(cx, move |_, cx| {
                         let _ = closing_view.update(cx, |view, _| {
                             view.backend.take();
@@ -5634,7 +5903,70 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::thousands;
+    use super::{should_refresh_workspace_for_backend_event, thousands, Page};
+    use omnitrigger_windows::{BackendEvent, PanelKey};
+
+    #[test]
+    fn background_input_and_diagnostics_do_not_redraw_unrelated_pages() {
+        let events = [
+            BackendEvent::PointerPressed { x: 100, y: 200 },
+            BackendEvent::EscapePressed,
+            BackendEvent::PanelKey(PanelKey::Down),
+            BackendEvent::Diagnostics(Box::default()),
+            BackendEvent::HoldTiming {
+                id: 1,
+                elapsed_ms: 300,
+                threshold_ms: 300,
+                matched_at: std::time::Instant::now(),
+            },
+        ];
+        for page in [
+            Page::Triggers,
+            Page::Actions,
+            Page::Wheels,
+            Page::Presets,
+            Page::History,
+        ] {
+            assert!(events
+                .iter()
+                .all(|event| !should_refresh_workspace_for_backend_event(event, page)));
+        }
+        assert!(should_refresh_workspace_for_backend_event(
+            &BackendEvent::Diagnostics(Box::default()),
+            Page::Diagnostics,
+        ));
+        assert!(!should_refresh_workspace_for_backend_event(
+            &events[0],
+            Page::Diagnostics,
+        ));
+    }
+
+    #[test]
+    fn recording_and_action_changes_still_refresh_every_page() {
+        let events = [
+            BackendEvent::Ready,
+            BackendEvent::RecordingProgress(Vec::new()),
+            BackendEvent::Recorded(super::PRESETS[0].spec(1)),
+            BackendEvent::RecordingCancelled,
+            BackendEvent::Triggered {
+                id: 1,
+                pointer: None,
+            },
+            BackendEvent::Error("监听已断开".into()),
+        ];
+        for page in [
+            Page::Triggers,
+            Page::Actions,
+            Page::Wheels,
+            Page::Presets,
+            Page::History,
+            Page::Diagnostics,
+        ] {
+            assert!(events
+                .iter()
+                .all(|event| should_refresh_workspace_for_backend_event(event, page)));
+        }
+    }
 
     #[test]
     fn thousands_groups_digits_from_the_right() {

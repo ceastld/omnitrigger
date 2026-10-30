@@ -27,6 +27,8 @@ pub struct AdjustmentResult {
     /// 原生接口读回的值，不将“成功提交”当成已达到请求值。
     pub current_percent: u8,
     pub target_label: String,
+    /// 亮度动作实际选择的逻辑显示器设备名；音量不关联显示器。
+    pub monitor_device: Option<String>,
     pub brightness_method: Option<BrightnessMethod>,
 }
 
@@ -198,7 +200,7 @@ mod native {
         time::{Duration, Instant},
     };
     use windows::{
-        core::{BSTR, PCWSTR},
+        core::{Interface, BSTR, PCWSTR},
         Win32::{
             Devices::Display::*,
             Foundation::{ERROR_INSUFFICIENT_BUFFER, POINT, RPC_E_CHANGED_MODE},
@@ -304,6 +306,7 @@ mod native {
             current_percent: value,
             requested_percent: value,
             target_label: "系统默认多媒体输出".into(),
+            monitor_device: None,
             brightness_method: None,
         })
     }
@@ -334,6 +337,7 @@ mod native {
             requested_percent: (requested * 100.).round() as u8,
             current_percent: (current * 100.).round() as u8,
             target_label: "系统默认多媒体输出".into(),
+            monitor_device: None,
             brightness_method: None,
         })
     }
@@ -396,6 +400,7 @@ mod native {
         current: u32,
         maximum: u32,
         label: String,
+        monitor_device: String,
     }
     fn ddc_monitor(logical: &LogicalMonitor) -> Result<DdcMonitor, SystemAdjustmentError> {
         let mut count = 0;
@@ -429,15 +434,7 @@ mod native {
             },
         )?;
         let handle = monitors.0[0].hPhysicalMonitor;
-        let (mut capabilities, mut temperatures) = (0, 0);
-        if unsafe { GetMonitorCapabilities(handle, &mut capabilities, &mut temperatures) } == 0
-            || capabilities & MC_CAPS_BRIGHTNESS == 0
-        {
-            return Err(failure(
-                SystemAdjustmentErrorCode::UnsupportedBrightness,
-                "目标显示器未提供 DDC/CI 背光调节能力。",
-            ));
-        }
+        // 有些显示器的 MCCS 能力声明读取失败，但亮度接口本身可用；以实际读取和范围校验为准。
         let (mut minimum, mut current, mut maximum) = (0, 0, 0);
         if unsafe { GetMonitorBrightness(handle, &mut minimum, &mut current, &mut maximum) } == 0 {
             return Err(native_error(
@@ -460,6 +457,7 @@ mod native {
             current,
             maximum,
             label,
+            monitor_device: logical.name.clone(),
         })
     }
 
@@ -475,6 +473,7 @@ mod native {
                 requested_percent: requested,
                 current_percent: percent_from_raw(self.minimum, self.current, self.maximum)?,
                 target_label: self.label.clone(),
+                monitor_device: Some(self.monitor_device.clone()),
                 brightness_method: Some(BrightnessMethod::DdcCi),
             })
         }
@@ -826,6 +825,75 @@ mod native {
         Ok(methods.remove(0))
     }
 
+    fn wait_wmi_call_result(
+        call: &IWbemCallResult,
+    ) -> Result<Option<IWbemClassObject>, SystemAdjustmentError> {
+        // 保留原始 HRESULT：正值 WBEM_S_TIMEDOUT 也表示尚未完成，不能按一般 SUCCEEDED 处理。
+        let mut method_status = 0;
+        let status =
+            unsafe { (call.vtable().GetCallStatus)(call.as_raw(), 2000, &mut method_status) };
+        if status.0 != 0 {
+            return Err(failure(
+                SystemAdjustmentErrorCode::ConfirmationUnknown,
+                format!(
+                    "亮度请求已提交，但无法及时确认调用完成（HRESULT 0x{:08X}）。",
+                    status.0 as u32
+                ),
+            ));
+        }
+        if method_status != 0 {
+            return Err(failure(
+                SystemAdjustmentErrorCode::NativeFailure,
+                format!(
+                    "内屏亮度方法执行失败（HRESULT 0x{:08X}）。",
+                    method_status as u32
+                ),
+            ));
+        }
+        let mut raw = ptr::null_mut();
+        // 完成等待已限定为两秒；此处不再等待，也允许成功调用没有输出对象。
+        let status = unsafe { (call.vtable().GetResultObject)(call.as_raw(), 0, &mut raw) };
+        let response = if raw.is_null() {
+            None
+        } else {
+            Some(unsafe { IWbemClassObject::from_raw(raw) })
+        };
+        if status.0 != 0 {
+            return Err(failure(
+                SystemAdjustmentErrorCode::ConfirmationUnknown,
+                format!(
+                    "亮度请求已提交，但无法取得方法输出（HRESULT 0x{:08X}）。",
+                    status.0 as u32
+                ),
+            ));
+        }
+        Ok(response)
+    }
+
+    fn read_wmi_confirmation(
+        requested: u8,
+        has_response: bool,
+        mut read_current: impl FnMut() -> Result<u8, SystemAdjustmentError>,
+        mut wait_before_retry: impl FnMut(),
+    ) -> Result<u8, SystemAdjustmentError> {
+        let mut current = 0;
+        for attempt in 0..3 {
+            current = confirm_brightness_result(read_current())?;
+            if current == requested || (has_response && attempt == 2) {
+                return Ok(current);
+            }
+            if attempt < 2 {
+                wait_before_retry();
+            }
+        }
+        Err(failure(
+            SystemAdjustmentErrorCode::ConfirmationUnknown,
+            format!(
+                "亮度请求已提交且调用完成，但没有方法输出，读回 {current}% 尚未达到请求的 {requested}%。"
+            ),
+        ))
+    }
+
     impl WmiMonitor {
         fn read_current(&self) -> Result<u8, SystemAdjustmentError> {
             let mut matches = Vec::new();
@@ -861,6 +929,7 @@ mod native {
                 requested_percent: requested,
                 current_percent: self.current,
                 target_label: self.label.clone(),
+                monitor_device: Some(self.label.clone()),
                 brightness_method: Some(BrightnessMethod::Wmi),
             }
         }
@@ -967,43 +1036,32 @@ mod native {
                     error,
                 )
             })?;
-            let response = unsafe {
-                call.ok_or_else(|| {
-                    failure(
-                        SystemAdjustmentErrorCode::ConfirmationUnknown,
-                        "亮度请求已提交，但没有返回确认句柄。",
-                    )
-                })?
-                .GetResultObject(2000)
-            }
-            .map_err(|error| {
-                native_error(
+            let call = call.ok_or_else(|| {
+                failure(
                     SystemAdjustmentErrorCode::ConfirmationUnknown,
-                    "亮度请求已提交，但无法及时确认结果",
-                    error,
+                    "亮度请求已提交，但没有返回确认句柄。",
                 )
             })?;
-            let status = confirm_brightness_result(integer_property(
-                &response,
-                windows::core::w!("ReturnValue"),
-            ))?;
-            if status != 0 {
-                return Err(failure(
-                    SystemAdjustmentErrorCode::NativeFailure,
-                    format!("内屏拒绝亮度请求，错误码 {status}。"),
-                ));
-            }
-            for attempt in 0..3 {
-                self.current = confirm_brightness_result(self.read_current())?;
-                if self.current == requested || attempt == 2 {
-                    return Ok(self.result(previous, requested));
+            let response = wait_wmi_call_result(&call)?;
+            if let Some(response) = &response {
+                let status = confirm_brightness_result(integer_property(
+                    response,
+                    windows::core::w!("ReturnValue"),
+                ))?;
+                if status != 0 {
+                    return Err(failure(
+                        SystemAdjustmentErrorCode::NativeFailure,
+                        format!("内屏拒绝亮度请求，错误码 {status}。"),
+                    ));
                 }
-                std::thread::sleep(Duration::from_millis(25));
             }
-            Err(failure(
-                SystemAdjustmentErrorCode::ConfirmationUnknown,
-                "亮度请求已提交，但目标实例已不可读。",
-            ))
+            self.current = read_wmi_confirmation(
+                requested,
+                response.is_some(),
+                || self.read_current(),
+                || std::thread::sleep(Duration::from_millis(25)),
+            )?;
+            Ok(self.result(previous, requested))
         }
     }
 
@@ -1058,6 +1116,158 @@ mod native {
         match brightness_target(point)? {
             BrightnessTarget::Ddc(target) => target.adjust(delta),
             BrightnessTarget::Wmi(target) => target.adjust(delta),
+        }
+    }
+    #[cfg(test)]
+    mod wmi_confirmation_tests {
+        use super::*;
+        use std::{cell::Cell, ffi::c_void};
+        use windows::core::{IUnknown_Vtbl, GUID, HRESULT};
+
+        #[repr(C)]
+        struct FakeCall {
+            vtable: *const IWbemCallResult_Vtbl,
+            call_status: HRESULT,
+            method_status: i32,
+            object_status: HRESULT,
+            call_timeout: Cell<i32>,
+            object_timeout: Cell<i32>,
+            object_calls: Cell<u32>,
+        }
+
+        unsafe extern "system" fn query(
+            _: *mut c_void,
+            _: *const GUID,
+            output: *mut *mut c_void,
+        ) -> HRESULT {
+            unsafe { *output = ptr::null_mut() };
+            HRESULT(0x80004002u32 as i32)
+        }
+        unsafe extern "system" fn reference(_: *mut c_void) -> u32 {
+            1
+        }
+        unsafe extern "system" fn get_status(
+            this: *mut c_void,
+            timeout: i32,
+            status: *mut i32,
+        ) -> HRESULT {
+            let fake = unsafe { &*(this as *const FakeCall) };
+            fake.call_timeout.set(timeout);
+            unsafe { *status = fake.method_status };
+            fake.call_status
+        }
+        unsafe extern "system" fn get_object(
+            this: *mut c_void,
+            timeout: i32,
+            output: *mut *mut c_void,
+        ) -> HRESULT {
+            let fake = unsafe { &*(this as *const FakeCall) };
+            fake.object_timeout.set(timeout);
+            fake.object_calls.set(fake.object_calls.get() + 1);
+            unsafe { *output = ptr::null_mut() };
+            fake.object_status
+        }
+        static VTABLE: IWbemCallResult_Vtbl = IWbemCallResult_Vtbl {
+            base__: IUnknown_Vtbl {
+                QueryInterface: query,
+                AddRef: reference,
+                Release: reference,
+            },
+            GetResultObject: get_object,
+            GetResultString: get_object,
+            GetResultServices: get_object,
+            GetCallStatus: get_status,
+        };
+        impl FakeCall {
+            fn new(call_status: i32, method_status: i32, object_status: i32) -> Self {
+                Self {
+                    vtable: &VTABLE,
+                    call_status: HRESULT(call_status),
+                    method_status,
+                    object_status: HRESULT(object_status),
+                    call_timeout: Cell::new(-1),
+                    object_timeout: Cell::new(-1),
+                    object_calls: Cell::new(0),
+                }
+            }
+            fn run(&self) -> Result<Option<IWbemClassObject>, SystemAdjustmentError> {
+                let raw = self as *const Self as *mut c_void;
+                let call = unsafe { IWbemCallResult::from_raw_borrowed(&raw) }.unwrap();
+                wait_wmi_call_result(call)
+            }
+        }
+
+        #[test]
+        fn completed_wmi_call_accepts_null_output_without_losing_the_hresult_or_wait_budget() {
+            let call = FakeCall::new(0, 0, 0);
+            assert!(call.run().unwrap().is_none());
+            assert_eq!(call.call_timeout.get(), 2000);
+            assert_eq!(call.object_timeout.get(), 0);
+            assert_eq!(call.object_calls.get(), 1);
+        }
+
+        #[test]
+        fn wmi_positive_timeout_and_real_method_failures_never_count_as_completion() {
+            for call_status in [WBEM_S_TIMEDOUT.0, 1, 0x80070005u32 as i32] {
+                let call = FakeCall::new(call_status, 0, 0);
+                assert_eq!(
+                    call.run().unwrap_err().code,
+                    SystemAdjustmentErrorCode::ConfirmationUnknown
+                );
+                assert_eq!(call.object_calls.get(), 0);
+            }
+            let failed_method = FakeCall::new(0, 0x80041001u32 as i32, 0);
+            assert_eq!(
+                failed_method.run().unwrap_err().code,
+                SystemAdjustmentErrorCode::NativeFailure
+            );
+            assert_eq!(failed_method.object_calls.get(), 0);
+            for object_status in [WBEM_S_TIMEDOUT.0, 0x80041001u32 as i32] {
+                let call = FakeCall::new(0, 0, object_status);
+                assert_eq!(
+                    call.run().unwrap_err().code,
+                    SystemAdjustmentErrorCode::ConfirmationUnknown
+                );
+            }
+        }
+
+        #[test]
+        fn missing_method_output_requires_matching_brightness_readback() {
+            let mut values = [41, 45, 46].into_iter();
+            let waits = Cell::new(0);
+            let current = read_wmi_confirmation(
+                46,
+                false,
+                || Ok(values.next().unwrap()),
+                || waits.set(waits.get() + 1),
+            )
+            .unwrap();
+            assert_eq!(current, 46);
+            assert_eq!(waits.get(), 2);
+            assert_eq!(
+                read_wmi_confirmation(46, false, || Ok(41), || {})
+                    .unwrap_err()
+                    .code,
+                SystemAdjustmentErrorCode::ConfirmationUnknown
+            );
+            assert_eq!(
+                read_wmi_confirmation(46, true, || Ok(41), || {}).unwrap(),
+                41
+            );
+            let error = read_wmi_confirmation(
+                46,
+                false,
+                || {
+                    Err(failure(
+                        SystemAdjustmentErrorCode::MonitorUnavailable,
+                        "目标实例已变化",
+                    ))
+                },
+                || {},
+            )
+            .unwrap_err();
+            assert_eq!(error.code, SystemAdjustmentErrorCode::ConfirmationUnknown);
+            assert!(error.message.contains("目标实例已变化"));
         }
     }
 }

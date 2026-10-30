@@ -1,10 +1,11 @@
 //! 自定义轮盘的管理页；动作与触发绑定仍由应用层统一保存和验证。
+use crate::theme::rgb;
 use crate::{
     button, caption, card, heading, icon, icon_button, section_title, small, status_pill, theme,
     wheels::{WheelAccent, WheelDefinition},
     ActionSpec, Context, Div, Icon, Page, Tone, Workspace,
 };
-use gpui::{div, prelude::*, px, rgb, FontWeight, MouseButton, MouseDownEvent, Stateful};
+use gpui::{div, prelude::*, px, FontWeight, MouseButton, MouseDownEvent, Stateful};
 use std::{cell::Cell, rc::Rc};
 
 /// 管理页轮盘预览的舞台边长（逻辑像素）。
@@ -25,6 +26,8 @@ fn action_text(action: &ActionSpec) -> String {
         ActionSpec::Window(action) => format!("窗口 · {}", action.display()),
         ActionSpec::AdjustSystem(action) => action.display(),
         ActionSpec::Local(action) => action.summary(),
+        ActionSpec::Invoke(call) => format!("动作包 · {} / {}", call.package_id, call.action_id),
+        ActionSpec::Browser(action) => format!("浏览器 · {}", action.label()),
         ActionSpec::External(action) => format!("外部动作 · 依赖 {}", action.provider),
         ActionSpec::Command(_) => "运行程序 / 脚本".into(),
         ActionSpec::Plugin(_) => "插件动作".into(),
@@ -100,7 +103,7 @@ impl Workspace {
             let selected = self.wheel_selected.as_deref() == Some(item.id.as_str());
             let tint = accent_color(item.accent);
             let id = item.id.clone();
-            let references = self.bindings.iter().filter(|binding|
+            let references = self.triggers.bindings().iter().filter(|binding|
                 matches!(&binding.action, ActionSpec::ShowWheel(reference) if reference.wheel_id == item.id)
             ).count();
             rows = rows.child(
@@ -152,7 +155,7 @@ impl Workspace {
             rows = rows.child(caption("还没有轮盘。新建后，为它添加常用动作。"));
         }
         directory = directory
-            .child(rows)
+            .child(self.smooth_scroll.wrap("wheel-directory-scroll", rows))
             .child(caption("每个轮盘有独立名称、颜色和动作顺序。"));
         let content = if let Some(wheel) = wheel {
             self.wheel_editor_content(wheel, cx)
@@ -193,7 +196,7 @@ impl Workspace {
             .min_w_0()
             .h_full()
             .min_h_0()
-            .pl(px(28.))
+            .pl(px(20.))
             .pr(px(24.))
             .pt(px(6.))
             .pb(px(18.))
@@ -226,7 +229,7 @@ impl Workspace {
         let selected = self
             .wheel_slot_selected
             .filter(|index| *index < wheel.slots.len());
-        let references = self.bindings.iter().filter(|binding|
+        let references = self.triggers.bindings().iter().filter(|binding|
             matches!(&binding.action, ActionSpec::ShowWheel(reference) if reference.wheel_id == wheel.id)
         ).count();
         let can_preview = can_edit && !wheel.slots.is_empty();
@@ -622,7 +625,8 @@ impl Workspace {
                     .child("从现有触发器复制动作"),
             );
         let candidates: Vec<_> = self
-            .bindings
+            .triggers
+            .bindings()
             .iter()
             .filter(|binding| {
                 !matches!(
@@ -693,7 +697,7 @@ impl Workspace {
         }
         let can_add_binding = has_room && source_exists;
         add = add
-            .child(source_rows)
+            .child(self.smooth_scroll.wrap("wheel-source-list", source_rows))
             .when(
                 self.wheel_source_binding.is_some() && !source_exists,
                 |el| el.child(alert("原触发器已不存在，请重新选择要复制的动作。")),
@@ -741,7 +745,8 @@ impl Workspace {
                 .child(preview)
                 .child(slots)
                 .child(add)
-                .child(footer),
+                .child(footer)
+                .map(|el| self.smooth_scroll.wrap("wheel-editor-content", el)),
         )
     }
 

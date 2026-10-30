@@ -48,6 +48,9 @@ pub use regions::{
 pub use registration::RegistrationError;
 
 #[cfg(test)]
+mod prefix_tests;
+
+#[cfg(test)]
 mod region_tests;
 
 #[cfg(test)]

@@ -44,8 +44,21 @@ pub enum ScreenCorner {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PointerRegion {
-    ScreenEdge { edge: ScreenEdge, thickness_px: u32 },
-    ScreenCorner { corner: ScreenCorner, size_px: u32 },
+    ScreenEdge {
+        edge: ScreenEdge,
+        thickness_px: u32,
+    },
+    /// 横边从左、右缩进，竖边从上、下缩进；缩进按物理像素计，空区段不匹配。
+    ScreenEdgeSegment {
+        edge: ScreenEdge,
+        thickness_px: u32,
+        start_inset_px: u32,
+        end_inset_px: u32,
+    },
+    ScreenCorner {
+        corner: ScreenCorner,
+        size_px: u32,
+    },
     Rectangle(ScreenRect),
 }
 
@@ -90,7 +103,10 @@ impl std::error::Error for ContextError {}
 impl PointerRegion {
     pub fn validate(self) -> Result<(), RegionError> {
         match self {
-            Self::ScreenEdge { thickness_px, .. } if !(1..=256).contains(&thickness_px) => {
+            Self::ScreenEdge { thickness_px, .. }
+            | Self::ScreenEdgeSegment { thickness_px, .. }
+                if !(1..=256).contains(&thickness_px) =>
+            {
                 Err(RegionError::InvalidThickness { thickness_px })
             }
             Self::ScreenCorner { size_px, .. } if !(1..=1024).contains(&size_px) => {
@@ -110,17 +126,21 @@ impl PointerRegion {
         if let Self::Rectangle(rect) = self {
             return rect.contains(point);
         }
+        let band = self.edge_band();
         screens
             .iter()
             .copied()
             .filter(|screen| screen.is_valid() && screen.contains(point))
-            .any(|screen| match self {
-                Self::ScreenEdge { edge, thickness_px } => {
-                    edge_distance(screen, point, edge) < i64::from(thickness_px)
-                        && owns_half(screen, point, edge)
-                        && exposed(screen, point, edge, screens)
+            .any(|screen| {
+                if let Some(band) = band {
+                    let (start, end) = band.along_edges();
+                    return edge_distance(screen, point, band.edge) < i64::from(band.thickness_px)
+                        && edge_distance(screen, point, start) >= i64::from(band.start_inset_px)
+                        && edge_distance(screen, point, end) >= i64::from(band.end_inset_px)
+                        && owns_half(screen, point, band.edge)
+                        && exposed(screen, point, band.edge, screens);
                 }
-                Self::ScreenCorner { corner, size_px } => {
+                if let Self::ScreenCorner { corner, size_px } = self {
                     let (horizontal, vertical) = corner_edges(corner);
                     let anchor = corner_anchor(screen, corner);
                     corner_diagonal_exposed(screen, corner, screens)
@@ -130,9 +150,83 @@ impl PointerRegion {
                                 && exposed(screen, anchor, edge, screens)
                                 && exposed(screen, point, edge, screens)
                         })
+                } else {
+                    false
                 }
-                Self::Rectangle(_) => false,
             })
+    }
+
+    fn edge_band(self) -> Option<EdgeBand> {
+        match self {
+            Self::ScreenEdge { edge, thickness_px } => Some(EdgeBand {
+                edge,
+                thickness_px,
+                start_inset_px: 0,
+                end_inset_px: 0,
+            }),
+            Self::ScreenEdgeSegment {
+                edge,
+                thickness_px,
+                start_inset_px,
+                end_inset_px,
+            } => Some(EdgeBand {
+                edge,
+                thickness_px,
+                start_inset_px,
+                end_inset_px,
+            }),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct EdgeBand {
+    edge: ScreenEdge,
+    thickness_px: u32,
+    start_inset_px: u32,
+    end_inset_px: u32,
+}
+
+impl EdgeBand {
+    fn along_edges(self) -> (ScreenEdge, ScreenEdge) {
+        match self.edge {
+            ScreenEdge::Top | ScreenEdge::Bottom => (ScreenEdge::Left, ScreenEdge::Right),
+            ScreenEdge::Left | ScreenEdge::Right => (ScreenEdge::Top, ScreenEdge::Bottom),
+        }
+    }
+
+    fn inset_at(self, edge: ScreenEdge) -> Option<u32> {
+        let (start, end) = self.along_edges();
+        if edge == start {
+            Some(self.start_inset_px)
+        } else if edge == end {
+            Some(self.end_inset_px)
+        } else {
+            None
+        }
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        if self.edge == other.edge {
+            return true;
+        }
+        // 相反边由 owns_half 分开；相邻边只有在交角至少缩进对方厚度时才可证明互斥。
+        let Some(inset) = self.inset_at(other.edge) else {
+            return false;
+        };
+        inset < other.thickness_px && other.inset_at(self.edge).unwrap_or(0) < self.thickness_px
+    }
+
+    fn overlaps_corner(self, corner: ScreenCorner, size_px: u32) -> bool {
+        let (horizontal, vertical) = corner_edges(corner);
+        if self.edge == horizontal {
+            self.inset_at(vertical).unwrap_or(0) < size_px
+        } else if self.edge == vertical {
+            self.inset_at(horizontal).unwrap_or(0) < size_px
+        } else {
+            false
+        }
     }
 }
 
@@ -233,6 +327,20 @@ pub(crate) fn conditions_overlap(left: &[TriggerCondition], right: &[TriggerCond
     else {
         return true;
     };
+    match (left.edge_band(), right.edge_band()) {
+        (Some(left), Some(right)) => return left.overlaps(right),
+        (Some(edge), None) => {
+            if let PointerRegion::ScreenCorner { corner, size_px } = *right {
+                return edge.overlaps_corner(corner, size_px);
+            }
+        }
+        (None, Some(edge)) => {
+            if let PointerRegion::ScreenCorner { corner, size_px } = *left {
+                return edge.overlaps_corner(corner, size_px);
+            }
+        }
+        (None, None) => {}
+    }
     match (*left, *right) {
         (PointerRegion::Rectangle(left), PointerRegion::Rectangle(right)) => {
             left.left < right.right
@@ -242,24 +350,11 @@ pub(crate) fn conditions_overlap(left: &[TriggerCondition], right: &[TriggerCond
         }
         (PointerRegion::Rectangle(_), _) | (_, PointerRegion::Rectangle(_)) => true,
         (
-            PointerRegion::ScreenEdge { edge: left, .. },
-            PointerRegion::ScreenEdge { edge: right, .. },
-        ) => !matches!(
-            (left, right),
-            (ScreenEdge::Left, ScreenEdge::Right)
-                | (ScreenEdge::Right, ScreenEdge::Left)
-                | (ScreenEdge::Top, ScreenEdge::Bottom)
-                | (ScreenEdge::Bottom, ScreenEdge::Top)
-        ),
-        (
             PointerRegion::ScreenCorner { corner: left, .. },
             PointerRegion::ScreenCorner { corner: right, .. },
         ) => left == right,
-        (PointerRegion::ScreenEdge { edge, .. }, PointerRegion::ScreenCorner { corner, .. })
-        | (PointerRegion::ScreenCorner { corner, .. }, PointerRegion::ScreenEdge { edge, .. }) => {
-            let (horizontal, vertical) = corner_edges(corner);
-            edge == horizontal || edge == vertical
-        }
+        // 所有边缘组合已在上面处理；其余未知组合保持保守冲突。
+        _ => true,
     }
 }
 

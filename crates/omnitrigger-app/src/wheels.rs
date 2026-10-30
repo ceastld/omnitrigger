@@ -148,6 +148,8 @@ fn validate_slots(slots: &[WheelSlot]) -> Result<(), String> {
                 ActionSpec::External(action) => action.validate(),
                 ActionSpec::AdjustSystem(action) => action.validate(),
                 ActionSpec::Local(action) => action.validate(),
+                ActionSpec::Invoke(call) => call.validate().map_err(|error| error.to_string()),
+                ActionSpec::Browser(action) => action.validate(),
                 ActionSpec::SendShortcut(shortcut) => shortcut.validate(),
                 ActionSpec::Plugin(reference) => {
                     reference.validate().map_err(|error| error.to_string())
@@ -260,7 +262,7 @@ impl Wheels {
                 Self::decode(&original)?;
                 let original_version: WheelsFile =
                     serde_json::from_str(&original).map_err(|error| error.to_string())?;
-                if original_version.version < 2 {
+                if original_version.version < 4 {
                     crate::settings::backup_legacy(
                         &destination,
                         original_version.version,
@@ -274,7 +276,7 @@ impl Wheels {
             }
         }
         let contents = serde_json::to_vec_pretty(&WheelsFile {
-            version: 2,
+            version: 4,
             wheels: self.wheels.clone(),
         })
         .map_err(|error| format!("编码轮盘配置失败：{error}"))?;
@@ -284,7 +286,7 @@ impl Wheels {
     fn decode(text: &str) -> Result<Self, String> {
         let file: WheelsFile =
             serde_json::from_str(text).map_err(|error| format!("轮盘配置格式有误：{error}"))?;
-        if !(1..=2).contains(&file.version) {
+        if !(1..=4).contains(&file.version) {
             return Err("轮盘配置版本不受支持，原文件已保留。".into());
         }
         if file.version < 2
@@ -302,6 +304,28 @@ impl Wheels {
             })
         {
             return Err("本地步骤动作需要版本 2 轮盘配置。".into());
+        }
+        if file.version < 3
+            && file.wheels.iter().any(|wheel| {
+                wheel
+                    .slots
+                    .iter()
+                    .chain(wheel.app_overrides.iter().flat_map(|app| app.slots.iter()))
+                    .any(|slot| matches!(slot.action, ActionSpec::Invoke(_)))
+            })
+        {
+            return Err("动作包调用需要版本 3 轮盘配置。".into());
+        }
+        if file.version < 4
+            && file.wheels.iter().any(|wheel| {
+                wheel
+                    .slots
+                    .iter()
+                    .chain(wheel.app_overrides.iter().flat_map(|app| app.slots.iter()))
+                    .any(|slot| matches!(slot.action, ActionSpec::Browser(_)))
+            })
+        {
+            return Err("浏览器动作需要版本 4 轮盘配置。".into());
         }
         let wheels = Self {
             wheels: file.wheels,
@@ -375,10 +399,72 @@ mod tests {
 
     fn encode(wheels: &Wheels) -> String {
         serde_json::to_string(&WheelsFile {
-            version: 2,
+            version: 4,
             wheels: wheels.wheels.clone(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn browser_slots_preserve_profile_and_require_v4_even_in_application_override() {
+        let mut wheels = Wheels::default();
+        let slot = WheelSlot {
+            label: "浏览器静音".into(),
+            action: ActionSpec::Browser(crate::browser_actions::BrowserAction {
+                command: crate::browser_actions::BrowserCommand::ToggleMute,
+                profile: Some("work-browser".into()),
+            }),
+            position: None,
+        };
+        wheels.wheels[0]
+            .app_overrides
+            .push(WheelApplicationOverride {
+                process: "chrome.exe".into(),
+                slots: vec![slot],
+            });
+        let text = encode(&wheels);
+        assert_eq!(Wheels::decode(&text).unwrap(), wheels);
+        let mut old: serde_json::Value = serde_json::from_str(&text).unwrap();
+        old["version"] = 3.into();
+        assert_eq!(
+            Wheels::decode(&old.to_string()).unwrap_err(),
+            "浏览器动作需要版本 4 轮盘配置。"
+        );
+    }
+
+    #[test]
+    fn package_calls_round_trip_in_global_and_override_slots_and_upgrade_v2() {
+        let scratch = Scratch::new();
+        let mut expected = Wheels::default();
+        let mut slot = expected.wheels[0].slots[0].clone();
+        slot.action = ActionSpec::Invoke(omnitrigger_actions::ActionCall {
+            package_id: "not.installed".into(),
+            action_id: "run".into(),
+            action_version: 2,
+            input: serde_json::json!({"steps":["first","second"]}),
+        });
+        expected.wheels[0].slots[0] = slot.clone();
+        expected.wheels[0].app_overrides = vec![WheelApplicationOverride {
+            process: "Code.exe".into(),
+            slots: vec![slot],
+        }];
+        assert_eq!(Wheels::decode(&encode(&expected)).unwrap(), expected);
+        let mut old: serde_json::Value = serde_json::from_str(&encode(&expected)).unwrap();
+        old["version"] = 2.into();
+        assert!(Wheels::decode(&old.to_string())
+            .unwrap_err()
+            .contains("版本 3"));
+        let mut original: serde_json::Value =
+            serde_json::from_str(&encode(&Wheels::default())).unwrap();
+        original["version"] = 2.into();
+        let bytes = format!(" \r\n{original}\r\n");
+        std::fs::write(scratch.wheels(), &bytes).unwrap();
+        expected.save(&scratch.bindings()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.0.join("wheels.json.v2.bak")).unwrap(),
+            bytes
+        );
+        assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
     }
 
     #[test]
@@ -445,7 +531,7 @@ mod tests {
             "绑定原样保留"
         );
         let value: serde_json::Value = serde_json::from_str(&encode(&expected)).unwrap();
-        assert_eq!(value["version"], 2);
+        assert_eq!(value["version"], 4);
         assert_eq!(value["wheels"][1]["accent"], "amber");
     }
 
@@ -517,7 +603,7 @@ mod tests {
         let base: serde_json::Value = serde_json::from_str(&encode(&wheels)).unwrap();
         let mut bad_values = vec!["not-json".to_string()];
         let mut future = base.clone();
-        future["version"] = 3.into();
+        future["version"] = 5.into();
         bad_values.push(future.to_string());
         for pointer in [
             "",
@@ -799,7 +885,7 @@ mod tests {
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.wheels()).unwrap()).unwrap();
-        assert_eq!(saved["version"], 2);
+        assert_eq!(saved["version"], 4);
         assert_eq!(saved["wheels"][0]["slots"][1]["action"]["kind"], "local");
         assert_eq!(
             saved["wheels"][0]["app_overrides"][0]["slots"][0]["action"]["version"],
@@ -855,7 +941,7 @@ mod tests {
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.wheels()).unwrap()).unwrap();
-        assert_eq!(saved["version"], 2);
+        assert_eq!(saved["version"], 4);
         expected.wheels[0].slots[0].label = "再次修改".into();
         expected.save(&scratch.bindings()).unwrap();
         assert_eq!(std::fs::read(&backup).unwrap(), original.as_bytes());

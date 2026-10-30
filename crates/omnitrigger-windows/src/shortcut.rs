@@ -164,11 +164,22 @@ fn cleanup(plan: &[Stroke], sent: usize) -> Vec<Stroke> {
 
 #[cfg(any(windows, test))]
 fn extended(key: u16) -> bool {
-    matches!(key, 0x21..=0x28 | 0x2c..=0x2e | 0x5b..=0x5d | 0x6f | 0x90 | 0xa3 | 0xa5)
+    matches!(key, 0x21..=0x28 | 0x2c..=0x2e | 0x5b..=0x5d | 0x6f | 0x90 | 0xa3 | 0xa5 | 0xad..=0xaf)
+}
+
+#[cfg(any(windows, test))]
+fn bare_volume_command(keys: &[u16]) -> Option<u16> {
+    match keys {
+        [0xad] => Some(8),  // APPCOMMAND_VOLUME_MUTE
+        [0xae] => Some(9),  // APPCOMMAND_VOLUME_DOWN
+        [0xaf] => Some(10), // APPCOMMAND_VOLUME_UP
+        _ => None,
+    }
 }
 
 /// 向当前前台应用发送一次快捷键；必须在 Hook 与界面线程之外调用。
 /// 调用方负责排队并显示错误。本函数不改变焦点，也不松开预先按住的修饰键。
+/// 裸音量键改为向 Windows Shell 提交系统媒体命令，避免被前台应用吞掉；不注入替代按键。
 /// Windows 权限隔离或其他 Hook 仍可能拒绝输入；失败收尾不等于无损恢复。
 #[cfg(windows)]
 pub fn send_shortcut(keys: &[u16]) -> Result<(), String> {
@@ -236,6 +247,9 @@ pub fn send_shortcut_to(keys: &[u16], target: ShortcutTarget) -> Result<(), Stri
     validate_shortcut(keys)?;
     ensure_shortcut_target(target)?;
     let strokes = plan(keys, &held_keys(keys))?;
+    if let Some(command) = bare_volume_command(keys) {
+        return send_volume_command(command, target);
+    }
     send_strokes(&strokes, target, "快捷键")
 }
 
@@ -247,7 +261,84 @@ pub fn send_key_tap_to(key: u16, target: ShortcutTarget) -> Result<(), String> {
     validate_key_tap(key)?;
     ensure_shortcut_target(target)?;
     let strokes = tap_plan(key, &held_keys(&[key]))?;
+    if let Some(command) = bare_volume_command(&[key]) {
+        return send_volume_command(command, target);
+    }
     send_strokes(&strokes, target, "单键轻点")
+}
+
+/// 调用方持有 SENDING，且已完成原前台和物理按键状态校验。只选择一次路由，不进行注入回退。
+#[cfg(windows)]
+fn send_volume_command(command: u16, target: ShortcutTarget) -> Result<(), String> {
+    use windows::Win32::{
+        Foundation::{GetLastError, SetLastError, WIN32_ERROR},
+        UI::WindowsAndMessaging::{GetShellWindow, SendMessageTimeoutW},
+    };
+    ensure_shortcut_target(target)?;
+    let shell = unsafe { GetShellWindow() };
+    send_volume_message_with(
+        command,
+        target,
+        shell,
+        |shell, message, source, packed, flags, timeout| {
+            let mut response = 0;
+            unsafe { SetLastError(WIN32_ERROR(0)) };
+            let delivered = unsafe {
+                SendMessageTimeoutW(
+                    shell,
+                    message,
+                    source,
+                    packed,
+                    flags,
+                    timeout,
+                    Some(&mut response),
+                )
+            };
+            if delivered.0 == 0 {
+                let error = unsafe { GetLastError() };
+                return Err(format!(
+                    "无法确认 Windows Shell 音量命令已送达或完成（错误 {}）；结果未知，不自动重试。",
+                    error.0
+                ));
+            }
+            Ok(response)
+        },
+    )
+}
+
+#[cfg(windows)]
+fn send_volume_message_with(
+    command: u16,
+    source: ShortcutTarget,
+    shell: windows::Win32::Foundation::HWND,
+    send: impl FnOnce(
+        windows::Win32::Foundation::HWND,
+        u32,
+        windows::Win32::Foundation::WPARAM,
+        windows::Win32::Foundation::LPARAM,
+        windows::Win32::UI::WindowsAndMessaging::SEND_MESSAGE_TIMEOUT_FLAGS,
+        u32,
+    ) -> Result<usize, String>,
+) -> Result<(), String> {
+    use windows::Win32::{
+        Foundation::{LPARAM, WPARAM},
+        UI::WindowsAndMessaging::{SMTO_ABORTIFHUNG, SMTO_ERRORONEXIT, WM_APPCOMMAND},
+    };
+    if shell.is_invalid() {
+        return Err("Windows Shell 不可用，无法发送系统音量命令；未注入替代按键。".into());
+    }
+    // 高字为命令，输入来源 FAPPCOMMAND_KEY 和修饰键状态均为零；wParam 保留触发前台身份。
+    // 这里只确认消息调用已完成。Explorer 可在执行媒体命令后返回零，不能据此判定失败；
+    // 接收方返回值也不能作为硬件音量读回或系统浮层显示成功的证明。
+    let _response = send(
+        shell,
+        WM_APPCOMMAND,
+        WPARAM(source.0 as usize),
+        LPARAM((command as isize) << 16),
+        SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+        1000,
+    )?;
+    Ok(())
 }
 
 /// 保持一组修饰键，依次轻点多个普通键。已按住的目标修饰键只借用，不松开。
@@ -276,42 +367,45 @@ fn held_keys(keys: &[u16]) -> BTreeSet<u16> {
         .collect()
 }
 
+#[cfg(windows)]
+fn native_input(stroke: &Stroke) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY,
+        KEYEVENTF_KEYUP, VIRTUAL_KEY,
+    };
+    let mut flags = KEYBD_EVENT_FLAGS(0);
+    if stroke.up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    if extended(stroke.key) {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(stroke.key),
+                dwFlags: flags,
+                dwExtraInfo: SHORTCUT_TAG,
+                ..Default::default()
+            },
+        },
+    }
+}
+
 /// 调用方必须持有 SENDING；清理只涉及当前计划已提交的自有按下。
 #[cfg(windows)]
 fn send_strokes(strokes: &[Stroke], target: ShortcutTarget, label: &str) -> Result<(), String> {
     use std::mem::size_of;
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, VIRTUAL_KEY,
-    };
-    fn native(stroke: &Stroke) -> INPUT {
-        let mut flags = KEYBD_EVENT_FLAGS(0);
-        if stroke.up {
-            flags |= KEYEVENTF_KEYUP;
-        }
-        if extended(stroke.key) {
-            flags |= KEYEVENTF_EXTENDEDKEY;
-        }
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(stroke.key),
-                    dwFlags: flags,
-                    dwExtraInfo: SHORTCUT_TAG,
-                    ..Default::default()
-                },
-            },
-        }
-    }
-    let inputs: Vec<INPUT> = strokes.iter().map(native).collect();
+    use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT};
+    let inputs: Vec<INPUT> = strokes.iter().map(native_input).collect();
     ensure_shortcut_target(target)?;
     let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) } as usize;
     if sent == inputs.len() {
         return Ok(());
     }
     let releases = cleanup(strokes, sent);
-    let release_inputs: Vec<INPUT> = releases.iter().map(native).collect();
+    let release_inputs: Vec<INPUT> = releases.iter().map(native_input).collect();
     let mut released = 0;
     // 系统可能只接纳批次的一部分；有限次继续处理剩余释放，绝不重新执行动作。
     for _ in 0..5 {
@@ -408,6 +502,119 @@ mod tests {
             assert!(extended(key));
         }
         for key in [0x08, 0x0d, 0xa0, 0xa2, 0xa4, 0x43] {
+            assert!(!extended(key));
+        }
+    }
+
+    #[test]
+    fn only_bare_volume_keys_select_system_media_commands() {
+        for (key, command) in [(0xad, 8), (0xae, 9), (0xaf, 10)] {
+            assert_eq!(bare_volume_command(&[key]), Some(command));
+            for modifier in MODIFIERS {
+                assert_eq!(bare_volume_command(&[modifier, key]), None);
+                assert!(plan(&[modifier, key], &BTreeSet::new()).is_ok());
+            }
+            assert!(plan(&[key], &BTreeSet::from([key])).is_err());
+            assert!(tap_plan(key, &BTreeSet::from([key])).is_err());
+            for modifier in MODIFIERS {
+                assert!(plan(&[key], &BTreeSet::from([modifier])).is_err());
+                assert!(tap_plan(key, &BTreeSet::from([modifier])).is_err());
+            }
+        }
+        for keys in [vec![], vec![0x41], vec![0xb0], vec![0xae, 0xaf]] {
+            assert_eq!(bare_volume_command(&keys), None);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_media_message_preserves_source_and_key_origin_and_uses_one_bounded_submission() {
+        use std::cell::Cell;
+        use windows::Win32::{
+            Foundation::HWND,
+            UI::WindowsAndMessaging::{SMTO_ABORTIFHUNG, SMTO_ERRORONEXIT, WM_APPCOMMAND},
+        };
+        let shell = HWND(0x5678usize as *mut std::ffi::c_void);
+        let source = ShortcutTarget(0x1234);
+        for command in [8, 9, 10] {
+            let calls = Cell::new(0);
+            send_volume_message_with(
+                command,
+                source,
+                shell,
+                |target, message, origin, packed, flags, timeout| {
+                    calls.set(calls.get() + 1);
+                    assert_eq!(target, shell);
+                    assert_eq!(message, WM_APPCOMMAND);
+                    assert_eq!(origin.0, 0x1234);
+                    assert_eq!(packed.0, (command as isize) << 16);
+                    assert_eq!(flags, SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT);
+                    assert_eq!(timeout, 1000);
+                    Ok(1)
+                },
+            )
+            .unwrap();
+            assert_eq!(calls.get(), 1);
+        }
+        assert!(
+            send_volume_message_with(10, source, HWND::default(), |_, _, _, _, _, _| {
+                panic!("缺少 Shell 时不能提交消息")
+            })
+            .unwrap_err()
+            .contains("Shell 不可用")
+        );
+        let calls = Cell::new(0);
+        send_volume_message_with(10, source, shell, |_, _, _, _, _, _| {
+            calls.set(calls.get() + 1);
+            Ok(0)
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            send_volume_message_with(10, source, shell, |_, _, _, _, _, _| {
+                calls.set(calls.get() + 1);
+                Err("发送超时".into())
+            })
+            .unwrap_err(),
+            "发送超时"
+        );
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn volume_key_inputs_and_partial_cleanup_keep_extended_flags_and_own_injection_tag() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            INPUT_KEYBOARD, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+        };
+        for key in [0xad, 0xae, 0xaf] {
+            let strokes = plan(&[key], &BTreeSet::new()).unwrap();
+            assert_eq!(
+                strokes,
+                [Stroke { key, up: false }, Stroke { key, up: true }]
+            );
+            for (stroke, expected_flags) in strokes.iter().zip([
+                KEYEVENTF_EXTENDEDKEY,
+                KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP,
+            ]) {
+                let input = native_input(stroke);
+                assert_eq!(input.r#type, INPUT_KEYBOARD);
+                let keyboard = unsafe { input.Anonymous.ki };
+                assert_eq!(keyboard.wVk.0, key);
+                assert_eq!(keyboard.dwFlags, expected_flags);
+                assert_eq!(keyboard.dwExtraInfo, SHORTCUT_TAG);
+            }
+            assert!(cleanup(&strokes, 0).is_empty());
+            let releases = cleanup(&strokes, 1);
+            assert_eq!(releases, [Stroke { key, up: true }]);
+            let keyboard = unsafe { native_input(&releases[0]).Anonymous.ki };
+            assert_eq!(keyboard.wVk.0, key);
+            assert_eq!(keyboard.dwFlags, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP);
+            assert_eq!(keyboard.dwExtraInfo, SHORTCUT_TAG);
+            assert!(cleanup(&strokes, 2).is_empty());
+        }
+        // 不扩大其他浏览器或媒体键的既有扩展语义。
+        for key in [0xa6, 0xac, 0xb0, 0xb7] {
             assert!(!extended(key));
         }
     }

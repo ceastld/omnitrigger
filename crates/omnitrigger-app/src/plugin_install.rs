@@ -1,4 +1,7 @@
-//! 插件依赖的后台安装边界。只下载、校验和解包，不运行能力程序。
+//! 插件依赖的后台发现和安装边界。只校验、下载和解包，不运行能力程序。
+#[path = "plugin_discovery.rs"]
+mod discovery;
+
 use serde::Deserialize;
 use std::{
     fs,
@@ -24,33 +27,79 @@ const INSTALL_SCRIPT: &str = include_str!("plugin_install.ps1");
 #[derive(Debug)]
 pub enum InstallEvent {
     Progress(String),
-    Finished { cli_path: PathBuf, version: String },
+    Finished {
+        cli_path: PathBuf,
+        version: String,
+        /// 本次是否新下载；新程序首次启动时系统会检查，需要提示用户。
+        downloaded: bool,
+    },
     Failed(String),
 }
 
-/// 返回后由 UI 读取事件；所有网络、磁盘及子进程等待都在后台线程。
-pub fn start_install(config_path: PathBuf) -> Result<Receiver<InstallEvent>, String> {
-    start(config_path, None)
+/// OmniTrigger 下载 RaiShot 时使用的共享位置，与 RaiShot 自己的安装约定一致，
+/// 其他程序也能找到并复用，避免每个宿主各存一份副本。
+pub fn shared_root() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(|base| PathBuf::from(base).join("Programs").join("RaiShot"))
 }
 
-/// 离线包也必须匹配适配中固定的官方版本、大小和 SHA-256。
-#[cfg(test)]
-pub fn start_install_from_archive(
-    config_path: PathBuf,
-    archive_path: PathBuf,
-) -> Result<Receiver<InstallEvent>, String> {
-    start(config_path, Some(archive_path))
+/// 早期版本安装在配置目录下的副本，仍作为已有安装复用。
+fn legacy_root(config_path: &Path) -> Option<PathBuf> {
+    Some(
+        absolute(config_path)
+            .ok()?
+            .parent()?
+            .join("plugins")
+            .join("raishot")
+            .join("runtime"),
+    )
 }
 
-fn start(
+/// 同步查找本机已有的兼容 RaiShot；只读清单与文件大小，可在界面线程调用。
+pub fn locate(config_path: &Path, configured: Option<&Path>) -> Option<discovery::Installed> {
+    let legacy = legacy_root(config_path)?;
+    discovery::find(configured, shared_root().as_deref(), &legacy)
+}
+
+/// 优先接入本机已有安装，找不到时才下载到共享位置。下载与校验在后台线程。
+pub fn start_prepare(
     config_path: PathBuf,
-    archive_path: Option<PathBuf>,
+    configured_cli: Option<PathBuf>,
 ) -> Result<Receiver<InstallEvent>, String> {
     let (events, receiver) = mpsc::sync_channel(16);
     thread::Builder::new()
         .name("omnitrigger-plugin-install".into())
         .spawn(move || {
-            if let Err(message) = install(&config_path, archive_path.as_deref(), &events) {
+            if let Some(found) = locate(&config_path, configured_cli.as_deref()) {
+                let _ = events.send(InstallEvent::Finished {
+                    cli_path: found.cli,
+                    version: found.version,
+                    downloaded: false,
+                });
+                return;
+            }
+            let result = shared_root()
+                .ok_or_else(|| "无法确定 RaiShot 安装位置。".to_string())
+                .and_then(|root| install(&root, None, &events));
+            if let Err(message) = result {
+                let _ = events.send(InstallEvent::Failed(message));
+            }
+        })
+        .map_err(|error| format!("无法启动插件安装线程：{error}"))?;
+    Ok(receiver)
+}
+
+/// 离线包也必须匹配适配中固定的官方版本、大小和 SHA-256。
+#[cfg(test)]
+pub fn start_install_from_archive(
+    root: PathBuf,
+    archive_path: PathBuf,
+) -> Result<Receiver<InstallEvent>, String> {
+    let (events, receiver) = mpsc::sync_channel(16);
+    thread::Builder::new()
+        .name("omnitrigger-plugin-install".into())
+        .spawn(move || {
+            if let Err(message) = install(&root, Some(&archive_path), &events) {
                 let _ = events.send(InstallEvent::Failed(message));
             }
         })
@@ -69,19 +118,23 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn ensure_plain_ancestors(path: &Path) -> Result<(), String> {
-    for ancestor in path.ancestors() {
+    if discovery::is_cloud_path(path) {
+        return Err("插件目录不能位于云盘同步目录。".into());
+    }
+    // 从根向下检查，避免先访问链接或云端目录内部的子路径。
+    for ancestor in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
         match fs::symlink_metadata(ancestor) {
             Ok(metadata) => {
                 #[cfg(windows)]
                 let reparse = {
                     use std::os::windows::fs::MetadataExt;
-                    metadata.file_attributes() & 0x400 != 0
+                    metadata.file_attributes() & (0x400 | 0x1000 | 0x40000 | 0x400000) != 0
                 };
                 #[cfg(not(windows))]
                 let reparse = metadata.file_type().is_symlink();
                 if reparse {
                     return Err(format!(
-                        "插件安装目录不能包含链接或联接点：{}",
+                        "插件目录不能包含链接、联接点或云端占位文件：{}",
                         ancestor.display()
                     ));
                 }
@@ -94,17 +147,11 @@ fn ensure_plain_ancestors(path: &Path) -> Result<(), String> {
 }
 
 fn install(
-    config_path: &Path,
+    root: &Path,
     archive_path: Option<&Path>,
     events: &SyncSender<InstallEvent>,
 ) -> Result<(), String> {
-    let config_path = absolute(config_path)?;
-    let root = config_path
-        .parent()
-        .ok_or("插件配置目录不可用。")?
-        .join("plugins")
-        .join("raishot")
-        .join("runtime");
+    let root = absolute(root)?;
     ensure_plain_ancestors(&root)?;
     fs::create_dir_all(&root).map_err(|error| format!("无法创建插件安装目录：{error}"))?;
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -207,10 +254,18 @@ fn run_script(
     }
     let (cli_path, version) = finished.ok_or("插件安装未返回完成结果。")?;
     let expected = root.join(RAISHOT_VERSION).join("raishot-cli.exe");
-    if cli_path != expected || version != RAISHOT_VERSION || !cli_path.is_file() {
+    if cli_path != expected
+        || version != RAISHOT_VERSION
+        || ensure_plain_ancestors(&cli_path).is_err()
+        || !cli_path.is_file()
+    {
         return Err("插件安装结果无效，未更新程序路径。".into());
     }
-    let _ = events.send(InstallEvent::Finished { cli_path, version });
+    let _ = events.send(InstallEvent::Finished {
+        cli_path,
+        version,
+        downloaded: true,
+    });
     Ok(())
 }
 
@@ -413,8 +468,7 @@ exit $LASTEXITCODE
                 .expect("请设置已下载的 RaiShot.0.4.15.0.zip 路径"),
         );
         let fixture = Fixture::new();
-        let events =
-            start_install_from_archive(fixture.base.join("bindings.json"), archive).unwrap();
+        let events = start_install_from_archive(fixture.root.clone(), archive).unwrap();
         loop {
             match events
                 .recv_timeout(std::time::Duration::from_secs(60))
@@ -422,7 +476,9 @@ exit $LASTEXITCODE
             {
                 InstallEvent::Progress(_) => {}
                 InstallEvent::Failed(message) => panic!("{message}"),
-                InstallEvent::Finished { cli_path, version } => {
+                InstallEvent::Finished {
+                    cli_path, version, ..
+                } => {
                     assert_eq!(version, RAISHOT_VERSION);
                     let directory = cli_path.parent().unwrap();
                     assert!(directory.join("raishot.exe").is_file());

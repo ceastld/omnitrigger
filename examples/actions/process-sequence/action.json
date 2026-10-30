@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "examples.process-sequence",
+  "name": "顺序运行程序",
+  "version": "1.0.0",
+  "actions": [
+    {
+      "id": "run",
+      "title": "顺序运行两个程序",
+      "version": 1,
+      "runtime": "node",
+      "entry": "main.mjs"
+    }
+  ]
+}

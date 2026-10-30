@@ -14,6 +14,12 @@
 | unicode-segmentation | 文本编辑的字素边界 | MIT OR Apache-2.0 |
 | raw-window-handle | 原生窗口句柄 | MIT OR Apache-2.0 OR Zlib |
 | embed-resource | 构建时嵌入 Windows 图标资源 | MIT |
+| omnitrigger-browser | 固定 Git 修订的浏览器 RPC 客户端 | MIT |
+| tokio | 浏览器连接的后台异步运行时 | MIT |
+
+原生亮度提示通过现有 `windows` 绑定调用系统自带的 USER32、GDI 与 GDI+，没有增加第三方 Rust 包或捆绑系统 DLL。文字使用本机系统字体渲染，不分发字体文件。
+
+浏览器动作通过 `omnitrigger-browser` 的 Rust 客户端直接复用本机持久连接，依赖固定于公开仓库修订 `fd2b205a48f2fecc414dc6fb63b3687d586e5ef3`，不随应用分发独立浏览器程序。该客户端与其传递依赖的许可由同一发行收集脚本保留；浏览器扩展和可选连接器的独立发行包另行保留其许可通知。
 
 `OR` 表示可按上游条款选择其中一种许可。完整依赖图还包含传递依赖，不能仅凭此表打包可执行文件。
 
@@ -31,6 +37,12 @@ Windows 发行流程通过 `scripts/collect-licenses.ps1` 从锁定目标的应�
 部分上游 crate 声明了许可证但发布包未附带全文。受控补充文件的[来源说明](scripts/license-overrides/README.md)和[清单](scripts/license-overrides/manifest.json)按包版本固定来源、哈希和说明，随包保留原 Cargo / README 授权声明。优先使用该版本的上游源码文件；只有后续补充或标准许可正文时明确标注来源，不将其冒充发布包原文件，也不推断缺失的版权年份。这些第三方文件遵循各自许可证，项目 MIT 声明不替代它们。
 
 新增未审核的许可声明或缺失许可文件会使打包失败；依赖变更后需重新审核和生成。该流程不能替代针对实际发行内容的审查。Apache-2.0 的发行要求见[官方许可第 4 节](https://www.apache.org/licenses/LICENSE-2.0)。
+
+## 可选的 Node.js 运行环境
+
+本地 JavaScript 动作包使用用户安装的 Node.js。当前应用不下载或分发 Node 二进制，不引入 npm 运行依赖；内嵌的 JS 宿主与仓库示例由本项目实现，按项目 MIT 许可证提供。`omnitrigger-actions` 复用工作区已锁定的 `serde` 和 `serde_json`，没有新增第三方 Rust 包。
+
+动作包作者自行引入的代码、模块、程序或素材遵循各自许可证，不能因包由 OmniTrigger 加载而视为 MIT。将来如将 Node 或其他运行时并入发行包，应按实际分发内容重新核对并保留完整许可和版权通知。
 
 ## 图标与字体
 

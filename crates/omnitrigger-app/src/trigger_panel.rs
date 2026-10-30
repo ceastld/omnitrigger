@@ -3,7 +3,7 @@
 use std::sync::mpsc::{SyncSender, TrySendError};
 
 use gpui::{
-    div, point, prelude::*, px, rgb, AnyElement, BoxShadow, Context, Div, Entity, FocusHandle,
+    div, point, prelude::*, px, AnyElement, BoxShadow, Context, Div, Entity, FocusHandle,
     Focusable, FontWeight, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, ScrollHandle,
     SharedString, Stateful, Subscription, Window,
 };
@@ -12,7 +12,7 @@ use crate::{
     assets::Icon,
     event_bridge::UiWake,
     message_input::MessageInput,
-    theme::{self, button, hsla, icon, keycap, plus, small, Cap, CapSize, CapTone, Tone},
+    theme::{self, button, hsla, icon, keycap, plus, rgb, small, Cap, CapSize, CapTone, Tone},
 };
 
 /// 面板固定宽度；高度随动作行数变化，见 [`panel_size`]。
@@ -260,6 +260,7 @@ pub struct TriggerPanel {
     selected: Option<usize>,
     hovered: Option<u64>,
     scroll: ScrollHandle,
+    smooth_scroll: crate::smooth_scroll::ScrollRegions,
     visible: bool,
     was_active: bool,
     closing: bool,
@@ -327,6 +328,7 @@ impl TriggerPanel {
             selected: None,
             hovered: None,
             scroll: ScrollHandle::new(),
+            smooth_scroll: crate::smooth_scroll::ScrollRegions::default(),
             visible: false,
             was_active: false,
             closing: true,
@@ -356,6 +358,7 @@ impl TriggerPanel {
         self.set_query(String::new());
         self.selected = None;
         self.hovered = None;
+        self.smooth_scroll.cancel("panel-items");
         self.scroll.set_offset(point(px(0.), px(0.)));
         // 未取得前台时不聚焦筛选框，避免显示光标却收不到输入；点击筛选框时再聚焦。
         if self.was_active {
@@ -400,6 +403,7 @@ impl TriggerPanel {
             self.diagnostics.last_event = cause.label();
         }
         self.visible = false;
+        self.smooth_scroll.cancel("panel-items");
         self.closing = true;
         self.was_active = false;
         // 同步隐藏原生窗口，避免随后启动的截图拍到面板；保留窗口供下次复用。
@@ -463,6 +467,14 @@ impl TriggerPanel {
         error: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if !self
+            .items
+            .iter()
+            .map(|item| item.id)
+            .eq(items.iter().map(|item| item.id))
+        {
+            self.smooth_scroll.cancel("panel-items");
+        }
         self.items = items;
         self.context = context;
         self.error = error;
@@ -491,6 +503,7 @@ impl TriggerPanel {
         } else {
             first_ready(&self.items, &self.visible_items)
         };
+        self.smooth_scroll.cancel("panel-items");
         self.scroll.set_offset(point(px(0.), px(0.)));
         true
     }
@@ -548,6 +561,7 @@ impl TriggerPanel {
             PanelKey::Move(direction) => {
                 self.selected = step(self.selected, self.visible_items.len(), direction);
                 if let Some(slot) = self.selected {
+                    self.smooth_scroll.cancel("panel-items");
                     self.scroll.scroll_to_item(slot);
                 }
                 cx.notify();
@@ -738,6 +752,10 @@ impl TriggerPanel {
                     .enumerate()
                     .map(|(slot, &index)| self.tile(slot, &self.items[index], cx)),
             )
+            .map(|el| {
+                self.smooth_scroll
+                    .wrap_with_handle("panel-items", el, &self.scroll)
+            })
             .into_any_element()
     }
 

@@ -1,0 +1,11 @@
+{
+  "package_id": "examples.process-sequence",
+  "action_id": "run",
+  "action_version": 1,
+  "input": {
+    "steps": [
+      { "program": "node", "args": ["--version"] },
+      { "program": "node", "args": ["-p", "'第二步完成'"] }
+    ]
+  }
+}

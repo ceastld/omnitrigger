@@ -15,7 +15,13 @@ enum PressState {
     Consumed,
     Passed,
     Draining,
+    /// 已立即交给应用、但仍算作组合前缀的按下；释放同样交给应用，不消费也不回放。
+    Observed,
 }
+
+/// 左键是所有界面操作的主键（点击、拖动标题栏、框选、拖放），作为前缀时不扣留，
+/// 否则在组合未完成前所有程序都收不到按下，拖动会全部失效。
+const PRIMARY: Button = Button::Mouse(crate::MouseButton::Left);
 
 #[derive(Clone, Copy)]
 struct PendingHold {
@@ -48,6 +54,8 @@ pub struct Engine {
     active_drag: Option<ActiveDrag>,
     next_drag_session: Option<u64>,
     pointer_position: Option<(i32, i32)>,
+    /// 首个等待中的鼠标前缀按下时的指针位置；移出容差后放弃组合并回放，交还拖拽。
+    prefix_origin: Option<(i32, i32)>,
     screens: Vec<ScreenRect>,
 }
 
@@ -66,6 +74,7 @@ impl Engine {
             active_drag: None,
             next_drag_session: Some(1),
             pointer_position: None,
+            prefix_origin: None,
             screens: Vec::new(),
         })
     }
@@ -102,6 +111,7 @@ impl Engine {
     pub fn cancel(&mut self) -> Decision {
         let drag = self.finish_drag(DragPhase::Cancelled);
         self.pending.clear();
+        self.prefix_origin = None;
         self.hold = None;
         self.drag = None;
         self.wheel = [0; 4];
@@ -222,10 +232,7 @@ impl Engine {
         let moved = match self.hold.as_mut() {
             Some(hold) if matches!(hold.button, Button::Mouse(_)) => {
                 if let Some(origin) = hold.pointer_origin {
-                    let dx = i64::from(position.0) - i64::from(origin.0);
-                    let dy = i64::from(position.1) - i64::from(origin.1);
-                    // 先限制各轴，平方运算只处理 -8..=8，极端坐标也不会溢出。
-                    dx.abs() > 8 || dy.abs() > 8 || dx * dx + dy * dy > 64
+                    beyond_tolerance(origin, position)
                 } else {
                     hold.pointer_origin = Some(position);
                     false
@@ -236,6 +243,20 @@ impl Engine {
         if moved {
             self.hold = None;
             if self.drag.is_none() {
+                decision.replay.extend(self.flush_pending());
+            }
+        }
+        // 鼠标键作为普通前缀等待时，移动说明用户在拖拽（如拖动标题栏、框选）：
+        // 放弃组合并立即回放按下，让应用收到真实的按下与后续移动，而不是松开时的一次点击。
+        if self.hold.is_none()
+            && self.drag.is_none()
+            && self.active_drag.is_none()
+            && self.pressed.iter().any(|(button, state)| {
+                matches!(button, Button::Mouse(_)) && *state == PressState::Pending
+            })
+        {
+            let origin = *self.prefix_origin.get_or_insert(position);
+            if beyond_tolerance(origin, position) {
                 decision.replay.extend(self.flush_pending());
             }
         }
@@ -277,7 +298,7 @@ impl Engine {
         if let Some(state) = self.pressed.get(&button) {
             // 自动重复不是第二次按压；已消费的按压也不能通过重复事件泄漏。
             return Decision {
-                consume: *state != PressState::Passed,
+                consume: !matches!(*state, PressState::Passed | PressState::Observed),
                 ..Decision::default()
             };
         }
@@ -357,10 +378,12 @@ impl Engine {
                 ..Decision::default()
             };
         }
-        let eligible = self
-            .pressed
-            .values()
-            .all(|state| matches!(state, PressState::Pending | PressState::Consumed));
+        let eligible = self.pressed.values().all(|state| {
+            matches!(
+                state,
+                PressState::Pending | PressState::Consumed | PressState::Observed
+            )
+        });
         let extends_prefix = eligible
             && self.bindings.iter().any(|binding| {
                 binding.held.contains(&button)
@@ -370,9 +393,19 @@ impl Engine {
                         .keys()
                         .all(|pressed| binding.held.contains(pressed))
             });
+        if extends_prefix && button == PRIMARY {
+            // 只记录为前缀，按下照常交给应用；其他等待中的前缀保持不变。
+            self.wheel = [0; 4];
+            self.wheel_owner = [None; 4];
+            self.pressed.insert(button, PressState::Observed);
+            return Decision::default();
+        }
         if extends_prefix {
             self.wheel = [0; 4];
             self.wheel_owner = [None; 4];
+            if matches!(button, Button::Mouse(_)) && self.prefix_origin.is_none() {
+                self.prefix_origin = self.pointer_position;
+            }
             self.pressed.insert(button, PressState::Pending);
             self.pending.push(InputKind::Down(button));
             return Decision {
@@ -428,7 +461,7 @@ impl Engine {
                 consume: true,
                 ..Decision::default()
             },
-            PressState::Passed => Decision::default(),
+            PressState::Passed | PressState::Observed => Decision::default(),
         };
         decision.drags.extend(drag);
         decision
@@ -485,7 +518,10 @@ impl Engine {
     fn held_matches(&self, held: &[Button]) -> bool {
         self.pressed.len() == held.len()
             && self.pressed.iter().all(|(button, state)| {
-                matches!(state, PressState::Pending | PressState::Consumed) && held.contains(button)
+                matches!(
+                    state,
+                    PressState::Pending | PressState::Consumed | PressState::Observed
+                ) && held.contains(button)
             })
     }
 
@@ -574,6 +610,7 @@ impl Engine {
     }
 
     fn commit_pending(&mut self) {
+        self.prefix_origin = None;
         self.pending.clear();
         self.hold = None;
         self.drag = None;
@@ -585,6 +622,7 @@ impl Engine {
     }
 
     fn flush_pending(&mut self) -> Vec<InputKind> {
+        self.prefix_origin = None;
         self.hold = None;
         self.drag = None;
         self.wheel = [0; 4];
@@ -614,6 +652,14 @@ impl Engine {
             position: drag.position,
         })
     }
+}
+
+/// 鼠标长按与鼠标前缀共用的静止容差：相对按下点 8 个物理像素的半径。
+fn beyond_tolerance(origin: (i32, i32), position: (i32, i32)) -> bool {
+    let dx = i64::from(position.0) - i64::from(origin.0);
+    let dy = i64::from(position.1) - i64::from(origin.1);
+    // 先限制各轴，平方运算只处理 -8..=8，极端坐标也不会溢出。
+    dx.abs() > 8 || dy.abs() > 8 || dx * dx + dy * dy > 64
 }
 
 fn distance_at_least(origin: (i32, i32), position: (i32, i32), distance: u32) -> bool {

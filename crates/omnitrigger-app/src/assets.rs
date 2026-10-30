@@ -42,9 +42,35 @@ pub enum Icon {
     Grid,
     Layers,
     Panel,
+    Sun,
+    Speaker,
+    Wheel,
+    Plug,
+    Browser,
 }
 
 const ICONS: &[(Icon, &str, &str)] = &[
+    (
+        Icon::Browser,
+        "icons/browser.svg",
+        icon!(
+            r##"<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01M13 6.5h.01" stroke-width="1.7"/>"##
+        ),
+    ),
+    (
+        Icon::Sun,
+        "icons/sun.svg",
+        icon!(
+            r##"<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke-width="1.7"/>"##
+        ),
+    ),
+    (
+        Icon::Speaker,
+        "icons/speaker.svg",
+        icon!(
+            r##"<path d="M3 9h4l5-4v14l-5-4H3z" stroke-width="1.7"/><path d="M16 8a6 6 0 0 1 0 8M19 5a10 10 0 0 1 0 14" stroke-width="1.7"/>"##
+        ),
+    ),
     (
         Icon::Logo,
         "icons/logo.svg",
@@ -208,6 +234,20 @@ const ICONS: &[(Icon, &str, &str)] = &[
         "icons/panel.svg",
         icon!(
             r##"<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M3.5 9.5h17"/><rect x="7" y="12.5" width="4" height="3.5" rx="1" fill="#000" stroke="none"/><rect x="13" y="12.5" width="4" height="3.5" rx="1" fill="#000" stroke="none"/>"##
+        ),
+    ),
+    (
+        Icon::Wheel,
+        "icons/wheel.svg",
+        icon!(
+            r##"<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3"/><path d="M12 3.5V9M12 15v5.5M3.5 12H9M15 12h5.5"/>"##
+        ),
+    ),
+    (
+        Icon::Plug,
+        "icons/plug.svg",
+        icon!(
+            r##"<path d="M9 3v5M15 3v5"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><path d="M12 17v4"/>"##
         ),
     ),
 ];

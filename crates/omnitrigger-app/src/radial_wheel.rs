@@ -1,4 +1,5 @@
 //! 自定义轮盘只负责方向选择与请求；动作执行、前台上下文和生命周期由管理界面协调。
+use crate::theme::rgb;
 use std::{
     cell::Cell,
     f32::consts::{PI, TAU},
@@ -7,9 +8,9 @@ use std::{
 };
 
 use gpui::{
-    canvas, div, point, prelude::*, px, rgb, Background, Bounds, BoxShadow, Context, Div,
-    FocusHandle, FontWeight, Hsla, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
-    MouseMoveEvent, PathBuilder, Pixels, Point, Stateful, Window,
+    canvas, div, point, prelude::*, px, Background, Bounds, BoxShadow, Context, Div, FocusHandle,
+    FontWeight, Hsla, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent,
+    PathBuilder, Pixels, Point, Stateful, Window,
 };
 
 use crate::{

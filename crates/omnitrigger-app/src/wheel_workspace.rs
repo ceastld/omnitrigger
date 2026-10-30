@@ -95,6 +95,7 @@ impl Workspace {
                         || self.shortcut_executor.is_running(*runtime_id)
                         || self.system_executor.is_running(*runtime_id)
                         || self.local_executor.is_running(*runtime_id)
+                        || self.action_service.is_running(*runtime_id)
                 });
                 self.sync_bindings();
                 cx.notify();
@@ -113,6 +114,8 @@ impl Workspace {
             return;
         };
         let name = wheel.name.clone();
+        self.smooth_scroll.cancel("wheel-editor-content");
+        self.smooth_scroll.cancel("wheel-source-list");
         self.wheel_selected = Some(id);
         self.wheel_slot_selected = None;
         self.wheel_source_binding = None;
@@ -176,6 +179,7 @@ impl Workspace {
         let Some(slot) = self.wheels.wheels[wheel_index].slots.get(index).cloned() else {
             return;
         };
+        self.smooth_scroll.cancel("wheel-editor-content");
         self.wheel_slot_selected = Some(index);
         self.wheel_slot_label
             .update(cx, |input, cx| input.set_text(slot.label, cx));
@@ -338,7 +342,7 @@ impl Workspace {
             return;
         };
         let id = self.wheels.wheels[index].id.clone();
-        if self.bindings.iter().any(|binding| matches!(&binding.action, ActionSpec::ShowWheel(reference) if reference.wheel_id == id)) {
+        if self.triggers.bindings().iter().any(|binding| matches!(&binding.action, ActionSpec::ShowWheel(reference) if reference.wheel_id == id)) {
             self.error = Some("此轮盘仍被触发器引用，请先删除或更改对应呼出绑定。".into());
             cx.notify(); return;
         }
@@ -395,7 +399,7 @@ impl Workspace {
             return;
         };
         let wheel = self.wheels.wheels[index].clone();
-        if let Some(existing) = self.bindings.iter().find(|binding|
+        if let Some(existing) = self.triggers.bindings().iter().find(|binding|
             matches!(&binding.action, ActionSpec::ShowWheel(reference) if reference.wheel_id == wheel.id)
                 && matches!(binding.spec.activation, Activation::Drag { .. })).map(|binding| binding.spec.id) {
             self.clear_pending();
@@ -405,19 +409,10 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(id) = self
-            .pending
-            .as_ref()
-            .map(|spec| spec.id)
-            .or(self.next_binding_id)
-        else {
-            self.error = Some("触发器编号已用尽。".into());
+        let Some(id) = self.draft_id(self.pending.as_ref().map(|spec| spec.id)) else {
             cx.notify();
             return;
         };
-        if self.pending.is_none() {
-            self.next_binding_id = id.checked_add(1);
-        }
         self.clear_pending();
         self.edited_spec = None;
         let spec = crate::presets::PRESETS
@@ -612,12 +607,10 @@ impl Workspace {
                 .wheel_runtime_ids
                 .contains_key(&(id.to_string(), index))
             {
-                let Some(runtime_id) = self.next_binding_id else {
-                    self.error = Some("动作编号已用尽。".into());
+                let Some(runtime_id) = self.draft_id(None) else {
                     cx.notify();
                     return;
                 };
-                self.next_binding_id = runtime_id.checked_add(1);
                 self.wheel_runtime_ids
                     .insert((id.to_string(), index), runtime_id);
             }
@@ -724,6 +717,12 @@ impl Workspace {
 
     pub(super) fn refresh_wheel(&self, cx: &mut Context<Self>) {
         if let Some(window) = self.wheel_window {
+            if !window
+                .update(cx, |view, _, _| view.is_visible())
+                .unwrap_or(false)
+            {
+                return;
+            }
             if let Some(definition) = &self.wheel_active_definition {
                 let states = self.wheel_slot_states(definition);
                 let _ = window.update(cx, |view, _, cx| view.update_states(states, cx));

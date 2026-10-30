@@ -3,15 +3,15 @@
 use std::ops::Range;
 
 use gpui::{
-    actions, div, fill, point, prelude::*, px, relative, rgb, rgba, size, App, Bounds,
-    ClipboardItem, ContentMask, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ShapedLine, SharedString, Style,
-    TextRun, UTF16Selection, UnderlineStyle, Window,
+    actions, div, fill, point, prelude::*, px, relative, rgba, size, App, Bounds, ClipboardItem,
+    ContentMask, Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler,
+    FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, ShapedLine, SharedString, Style, TextRun,
+    UTF16Selection, UnderlineStyle, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::theme;
+use crate::theme::{self, rgb};
 
 const MAX_CHARACTERS: usize = 2000;
 const KEY_CONTEXT: &str = "OmniTriggerMessageInput";
@@ -57,6 +57,7 @@ pub fn init(cx: &mut App) {
 
 pub struct MessageInput {
     character_limit: usize,
+    json_text: bool,
     focus: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
@@ -76,6 +77,7 @@ impl MessageInput {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             character_limit: MAX_CHARACTERS,
+            json_text: false,
             focus: cx.focus_handle(),
             content: SharedString::default(),
             placeholder: "触发时显示的文字".into(),
@@ -117,8 +119,20 @@ impl MessageInput {
         self
     }
 
+    /// JSON 字符串中的 Unicode 行分隔符必须转义，不能像提示文字一样改成空格。
+    pub fn with_json_text(mut self) -> Self {
+        self.json_text = true;
+        self
+    }
+
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        self.content = single_line(&text.into(), self.character_limit).into();
+        let text = text.into();
+        let text = if self.json_text {
+            json_line_separators(&text)
+        } else {
+            text.to_string()
+        };
+        self.content = single_line(&text, self.character_limit).into();
         // 载入已有消息时从开头显示，避免长消息只露出结尾。
         self.anchor = 0;
         self.head = 0;
@@ -282,6 +296,22 @@ impl MessageInput {
             .map(|range| from_utf16(&self.content, range))
             .or_else(|| self.marked.clone())
             .unwrap_or_else(|| self.selection());
+        let escaped;
+        let (text, selected) = if self.json_text {
+            let selected = selected.map(|selection| {
+                let range = from_utf16(text, selection);
+                json_line_separators(&text[..range.start])
+                    .encode_utf16()
+                    .count()
+                    ..json_line_separators(&text[..range.end])
+                        .encode_utf16()
+                        .count()
+            });
+            escaped = json_line_separators(text);
+            (escaped.as_str(), selected)
+        } else {
+            (text, selected)
+        };
         let replacement =
             replace_content(&self.content, range, text, selected, self.character_limit);
         self.content = replacement.text.into();
@@ -415,16 +445,13 @@ impl Render for MessageInput {
             .when(!self.embedded, |el| {
                 let focused = self.focus.is_focused(window);
                 el.border_1()
-                    .rounded(px(10.))
+                    .rounded(px(6.))
                     .border_color(if focused {
                         theme::hsla(theme::ACCENT, 0.7)
                     } else {
                         rgb(theme::BORDER_MID).into()
                     })
-                    .when(focused, |el| {
-                        el.shadow(theme::glow(theme::ACCENT, 0.18, 10.))
-                    })
-                    .bg(rgb(0x0a0b11))
+                    .bg(rgb(theme::BACKGROUND))
                     .px(px(12.))
                     .py(px(8.))
             })
@@ -650,6 +677,11 @@ impl Element for MessageLine {
     }
 }
 
+fn json_line_separators(text: &str) -> String {
+    text.replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
 fn single_line(text: &str, limit: usize) -> String {
     let normalized = text
         .replace("\r\n", " ")
@@ -730,6 +762,34 @@ fn to_utf16(text: &str, range: Range<usize>) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_parameters_preserve_unicode_separators_when_loaded_or_pasted() {
+        let value = serde_json::json!({"text":"中\u{2028}文\u{2029}🦀\n\t", "literal":"\\u2028"});
+        let serialized = value.to_string();
+        let line = single_line(&json_line_separators(&serialized), 128 * 1024);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+            value
+        );
+        let pasted = replace_content(
+            "{}",
+            0..2,
+            &json_line_separators(&serialized),
+            None,
+            128 * 1024,
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&pasted.text).unwrap(),
+            value
+        );
+        let large = serde_json::json!({"text":"\u{2028}".repeat(21_000)});
+        let line = single_line(&json_line_separators(&large.to_string()), 128 * 1024);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+            large
+        );
+    }
 
     #[test]
     fn utf16_ranges_keep_chinese_and_astral_characters_whole() {

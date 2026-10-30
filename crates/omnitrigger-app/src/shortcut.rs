@@ -84,6 +84,9 @@ fn parse_key(name: &str) -> Option<u16> {
         "numpaddivide" | "divide" => 0x6f,
         "numlock" => 0x90,
         "scrolllock" => 0x91,
+        "volumeup" | "音量加" | "音量增加" | "增大音量" => 0xaf,
+        "volumedown" | "音量减" | "音量减少" | "减小音量" => 0xae,
+        "volumemute" | "mute" | "静音" => 0xad,
         "semicolon" | ";" => 0xba,
         "plus" | "equals" | "=" => 0xbb,
         "comma" | "," => 0xbc,
@@ -160,6 +163,9 @@ fn key_name(key: u16) -> String {
         0x6f => "NumpadDivide",
         0x90 => "NumLock",
         0x91 => "ScrollLock",
+        0xad => "VolumeMute",
+        0xae => "VolumeDown",
+        0xaf => "VolumeUp",
         0xba => "Semicolon",
         0xbb => "Plus",
         0xbc => "Comma",
@@ -192,6 +198,9 @@ mod tests {
             ("右 Alt + F24", vec![0xa5, 0x87]),
             ("Win+Numpad0", vec![0x5b, 0x60]),
             ("Ctrl+Plus", vec![0xa2, 0xbb]),
+            ("VolumeUp", vec![0xaf]),
+            ("音量减少", vec![0xae]),
+            ("静音", vec![0xad]),
         ] {
             let action = ShortcutAction::parse(text).unwrap();
             assert_eq!(action.keys, keys);

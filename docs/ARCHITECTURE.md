@@ -1,6 +1,8 @@
 # 工程架构
 
-OmniTrigger 是一个 Rust workspace，按输入匹配、Windows 能力和桌面应用划分为三个 crate。当前应用面向 Windows；纯 Rust 核心不依赖 Windows API 或 GPUI，可以独立测试。功能入口见 [README](../README.md)，专题说明见[文档索引](README.md)。
+界面遵循最少必要操作：安装类能力只提供一个安装入口，后台完成所需步骤；成功显示“已安装”，失败在原处提供重试。版本、路径、发布清单和注册过程由程序管理。
+
+OmniTrigger 是一个 Rust workspace，按输入匹配、Windows 能力、通用动作运行和桌面应用划分为四个 crate。当前应用面向 Windows；纯 Rust 核心不依赖 Windows API 或 GPUI，可以独立测试。功能入口见 [README](../README.md)，专题说明见[文档索引](README.md)。
 
 ## 依赖与数据流
 
@@ -8,6 +10,7 @@ OmniTrigger 是一个 Rust workspace，按输入匹配、Windows 能力和桌面
 flowchart TB
     A[omnitrigger-app：GPUI、配置与动作分发] --> W[omnitrigger-windows：输入与系统适配]
     A --> C[omnitrigger-core：模型、校验与状态机]
+    A --> X[omnitrigger-actions：动作契约、目录与运行时]
     W --> C
 ```
 
@@ -32,6 +35,7 @@ Windows Hook / 计时到期 / 上下文变化
 crates/
   omnitrigger-core/src/       输入模型、注册验证、状态机与录制器
   omnitrigger-windows/src/    Windows Hook、输入补发、窗口与系统能力
+  omnitrigger-actions/       通用动作契约、包目录、执行服务与 JS 宿主
   omnitrigger-app/
     src/                     配置、GPUI 页面与动作执行器
     assets/                  图标源稿与构建时嵌入的 ICO
@@ -71,6 +75,7 @@ rust-toolchain.toml          固定 Rust 工具链与检查组件
 | `screen_context.rs` | 显示器上下文采集和更新，供核心区域条件使用。 |
 | `shortcut.rs`、`automation_basics.rs` | 目标身份检查、快捷键 / 文字注入、剪贴板与打开目标。 |
 | `system_adjustment.rs` | 系统音量、显示器亮度及能力检测。 |
+| `native_system_hud.rs`、`system_hud_paint.rs`、`system_hud_window.rs` | 独立 Win32 提示线程、GDI+ 位图和目标显示器定位；不依赖 GPUI 绘制。 |
 | `window_action.rs`、`title_bar.rs`、`wheel_window.rs` | 窗口操作、标题栏和轮盘原生窗口适配。 |
 | `*_tests.rs` 与 `examples/hook_*.rs` | 输入交付和平台边界测试、需要桌面会话的 Hook 检查程序。 |
 
@@ -84,15 +89,24 @@ Hook 回调只做有界状态更新、匹配与排队。动作、磁盘、网络
 | `settings.rs`、`trigger_conditions.rs`、`presets.rs` | 绑定配置、版本迁移、候选校验、条件编辑与预设。 |
 | `event_bridge.rs` | 有界后端事件转发与 GPUI 唤醒。 |
 | `execution.rs`、`local_executor.rs`、`system_executor.rs` | 命令 / 快捷键、本地步骤与系统调节后台执行。 |
+| `system_hud.rs`、`system_hud_values.rs` | 将本软件请求与回执映射为按屏幕独立的亮度目标值，向原生提示线程提交显示命令。 |
 | `local_action.rs`、`local_editor.rs`、`shortcut.rs`、`system_action.rs`、`window_action.rs`、`external_action.rs` | 各动作参数、校验和编辑支持。 |
-| `plugins.rs`、`plugin_install.rs`、`action_library.rs` | 内置插件动作解析、共享依赖设置、下载安装与动作库页面。 |
+| `plugins.rs`、`plugin_discovery.rs`、`plugin_install.rs`、`action_library.rs` | 内置或本地 RaiShot 清单解析、共享依赖设置、已有安装发现、下载安装、动作库与扩展页面。 |
 | `trigger_panel.rs`、`radial_wheel.rs` | 浮动面板与轮盘的呈现、选择和交互。 |
 | `wheels.rs`、`wheel_editor.rs`、`wheel_workspace.rs` | 轮盘配置、编辑、应用覆盖和拖拽呼出会话。 |
 | `theme.rs`、`assets.rs`、`message_input.rs` | 共用界面组件、内置资源与文本输入。 |
 
 动作执行的容量、目标校验、取消与回执见[动作执行架构](EXECUTION_ARCHITECTURE.md)。配置保存保留损坏或不支持版本的原文件；兼容升级和备份行为需要与示例、文档及测试同步维护。
 
-`main.rs` 目前仍集中较多界面与协调逻辑，其他页面模块也会扩展 `Workspace`。当前采用三 crate 边界，没有将每个页面或执行器拆成独立 crate。后续可按启动、监听协调、动作协调和页面逐步拆分；这属于维护方向，不代表已有独立模块或稳定扩展 API。
+`main.rs` 目前仍集中较多界面与协调逻辑，其他页面模块也会扩展 `Workspace`。通用动作的模型与运行已经独立到 `omnitrigger-actions`，现有快捷键、本地步骤及系统调节执行器保留原有平台语义。后续可按启动、监听协调和页面逐步拆分，不需要为每个页面建立 crate。
+
+## 通用动作：`omnitrigger-actions`
+
+本节描述当前已实现的执行层。独立用户动作、SQLite 持久化及自建账号的个人多设备同步属于下一阶段，目标边界见[账号工作区与同步设计](ACCOUNT_WORKSPACE.md)。当前目录加载和绑定内嵌动作仍需按该数据模型迁移。
+
+`ActionSpec::Invoke(ActionCall)` 是应用的通用扩展入口，保存包 ID、动作 ID、契约版本和 JSON 输入。`PackageCatalog` 读取本地包描述，`ActionService` 管理配额与调用生命周期，`RuntimeRegistry` 根据动作声明的运行时选择 `ActionRuntime`。当前 `NodeRuntime` 调用包内的 JS 默认导出，并接收版本化的结构化结果。
+
+此 crate 不依赖输入核心、Windows 适配层或 GPUI。新增 JS 业务只增加动作包；新增执行语言或图解释器则增加运行时适配器，绑定仍沿用同一调用结构。编辑器和执行器各有职责，流程图编辑器不作为统一动作接口的前置条件。清单、脚本 API、版本及边界见[动作包与 JavaScript 入口](ACTION_PACKAGES.md)。
 
 ## 修改从哪里开始
 
@@ -100,7 +114,7 @@ Hook 回调只做有界状态更新、匹配与排队。动作、磁盘、网络
 | --- | --- | --- |
 | 输入匹配或冲突 | 核心模型、注册与状态机；应用配置转换 | `cargo test -p omnitrigger-core --locked`，然后检查配置相关测试。 |
 | Hook、补发或释放 | `platform.rs`、`replay_runtime.rs`、平台测试 | Windows crate 测试与真实桌面 Hook 检查。 |
-| 新动作或执行行为 | `settings.rs`、动作模型、应用分发与对应执行器 | 应用定向测试；涉及原生能力时补充桌面验证。 |
+| 新动作或执行行为 | JS 业务先增加动作包；新运行时检查 `omnitrigger-actions`；原生动作检查应用分发与对应执行器 | 动作 crate 与应用定向测试；涉及原生能力时补充桌面验证。 |
 | 配置格式 | `settings.rs`、`wheels.rs`、`plugins.rs` 与示例 | 兼容读写、失败不覆盖、旧版备份及 `--check-config`。 |
 | 页面与视觉交互 | 对应页面、`theme.rs`、窗口适配 | 应用构建、启动及实际窗口交互检查。 |
 | 开源或分发内容 | 许可证、第三方通知、CI 和发布文档 | [发布检查](RELEASING.md)。 |

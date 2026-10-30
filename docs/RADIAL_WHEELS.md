@@ -115,11 +115,11 @@
 
 ## 配置文件
 
-轮盘内容保存在绑定文件同目录的 `wheels.json`，读取版本 1–2，保存版本 2。默认位置为 `%LOCALAPPDATA%\OmniTrigger\wheels.json`；使用 `--config` 时，轮盘文件也位于所选绑定文件的目录。版本 2 支持本地步骤动作，其动作内部版本为 1；首次保存版本 1 轮盘前保留 `wheels.json.v1.bak` 备份。
+轮盘内容保存在绑定文件同目录的 `wheels.json`，读取版本 1–3，保存版本 3。默认位置为 `%LOCALAPPDATA%\OmniTrigger\wheels.json`；使用 `--config` 时，轮盘文件也位于所选绑定文件的目录。版本 2 增加本地步骤动作，版本 3 增加通用 `invoke` 动作；首次保存旧版轮盘前保留 `wheels.json.v<旧版本>.bak` 备份。动作包使用同一调用结构，见[动作包说明](ACTION_PACKAGES.md)。
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "wheels": [
     {
       "id": "orbit-edit",
@@ -190,7 +190,7 @@
 }
 ```
 
-呼出绑定保存在当前版本 7 的 `bindings.json`（读取兼容版本 1–7），动作字段只保存轮盘引用：
+呼出绑定保存在当前版本 8 的 `bindings.json`（读取兼容版本 1–8），动作字段只保存轮盘引用：
 
 ```json
 "action": { "kind": "show_wheel", "wheel_id": "orbit-edit" }

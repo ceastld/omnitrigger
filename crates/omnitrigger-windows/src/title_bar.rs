@@ -9,7 +9,7 @@ use windows::Win32::{
         Dwm::{
             DwmDefWindowProc, DwmExtendFrameIntoClientArea, DwmGetWindowAttribute,
             DwmSetWindowAttribute, DWMWA_CAPTION_BUTTON_BOUNDS, DWMWA_CAPTION_COLOR,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
         },
         Gdi::{ClientToScreen, ScreenToClient},
     },
@@ -90,6 +90,20 @@ pub(crate) fn set_caption_color(hwnd: isize, rgb: u32) {
     let hwnd = HWND(hwnd as *mut std::ffi::c_void);
     let color = COLORREF((rgb & 0xff) << 16 | (rgb & 0xff00) | (rgb >> 16 & 0xff));
     unsafe {
+        let dark = caption_is_dark(color.0) as i32;
+        let text = COLORREF(if dark != 0 { 0xf0eae8 } else { 0x322620 });
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark as *const i32 as *const _,
+            size_of::<i32>() as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TEXT_COLOR,
+            &text as *const COLORREF as *const _,
+            size_of::<COLORREF>() as u32,
+        );
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_CAPTION_COLOR,
@@ -99,7 +113,14 @@ pub(crate) fn set_caption_color(hwnd: isize, rgb: u32) {
     }
 }
 
-/// 整个窗口作为 DWM 框架；界面为深色，按钮固定用深色样式。
+fn caption_is_dark(colorref: u32) -> bool {
+    let red = colorref & 0xff;
+    let green = (colorref >> 8) & 0xff;
+    let blue = (colorref >> 16) & 0xff;
+    299 * red + 587 * green + 114 * blue < 128_000
+}
+
+/// 整个窗口作为 DWM 框架；重建边框时保留当前主题的系统按钮样式。
 unsafe fn apply_frame(hwnd: HWND) {
     let margins = MARGINS {
         cxLeftWidth: -1,
@@ -107,8 +128,15 @@ unsafe fn apply_frame(hwnd: HWND) {
         cyTopHeight: -1,
         cyBottomHeight: -1,
     };
-    let dark = 1i32;
     unsafe {
+        let mut caption = COLORREF(u32::MAX);
+        let _ = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CAPTION_COLOR,
+            &mut caption as *mut COLORREF as *mut _,
+            size_of::<COLORREF>() as u32,
+        );
+        let dark = (caption.0 == u32::MAX || caption_is_dark(caption.0)) as i32;
         let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -116,6 +144,18 @@ unsafe fn apply_frame(hwnd: HWND) {
             &dark as *const i32 as *const _,
             size_of::<i32>() as u32,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::caption_is_dark;
+    #[test]
+    fn caption_buttons_follow_light_and_dark_backgrounds() {
+        assert!(caption_is_dark(0x251e1c));
+        assert!(!caption_is_dark(0xfaf8f7));
+        assert!(caption_is_dark(0));
+        assert!(!caption_is_dark(0xffffff));
     }
 }
 

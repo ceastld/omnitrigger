@@ -1,4 +1,5 @@
 //! 系统调节动作的持久化参数；设备访问只在后台执行器中发生。
+use crate::theme::rgb;
 use crate::{caption, section_title, small, theme, ActionSpec, Workspace};
 use gpui::{div, prelude::*, App, Context, Div};
 use serde::{Deserialize, Serialize};
@@ -187,9 +188,9 @@ impl Workspace {
         }
         div().flex().flex_col().gap(gpui::px(9.)).child(section_title("系统调节")).child(options)
             .child(Self::input_field("每次触发调节（%）",&self.adjustment_amount,Some("1–100；滚轮每累计一格执行一次，自动限制在设备支持的范围内。")))
-            .child(caption(match action.target {AdjustmentTarget::Volume=>"调节系统默认多媒体输出设备音量。滚轮上、下可分别绑定增加和减少。",AdjustmentTarget::Brightness=>"调节触发时鼠标所在的屏幕；使用硬件 DDC/CI 或已匹配的内屏亮度接口。不支持的屏幕会报告原因。"}))
+            .child(caption(match action.target {AdjustmentTarget::Volume=>"按百分点精确调节音量，不显示音量浮层。需要 Windows 自带提示时，选择“发送按键”并填写 VolumeUp 或 VolumeDown；步长由系统决定。",AdjustmentTarget::Brightness=>"调节触发时鼠标所在的屏幕；使用硬件 DDC/CI 或已匹配的内屏亮度接口。不支持的屏幕会报告原因。"}))
             .child(caption("“测试动作”会真实改变音量或亮度；仅检查支持情况可使用 --check-system-controls。"))
-            .when_some(self.draft_adjustment(cx).err(),|el,error|el.child(div().text_color(gpui::rgb(theme::DANGER)).text_size(gpui::px(11.)).child(error)))
+            .when_some(self.draft_adjustment(cx).err(),|el,error|el.child(div().text_color(rgb(theme::DANGER)).text_size(gpui::px(11.)).child(error)))
     }
 }
 

@@ -342,6 +342,19 @@ impl CommandExecutor {
         })
     }
 
+    /// 清单或共享路径只能在整个插件的调用都结束后切换。
+    pub fn is_plugin_running(&self, plugin_id: &str) -> bool {
+        self.reserved.lock().map_or(true, |reserved| {
+            reserved.entries.values().any(|entry| {
+                entry
+                    .group
+                    .as_deref()
+                    .and_then(|group| group.split_once('/'))
+                    .is_some_and(|(id, _)| id == plugin_id)
+            })
+        })
+    }
+
     pub fn try_recv(&self) -> Result<ExecutionEvent, TryRecvError> {
         let event = self.events.try_recv().inspect_err(|error| {
             if *error == TryRecvError::Disconnected {
@@ -828,6 +841,8 @@ mod tests {
             .submit_group(1, command.clone(), Some("raishot/capture".into()))
             .unwrap();
         assert!(executor.is_group_running("raishot/capture"));
+        assert!(executor.is_plugin_running("raishot"));
+        assert!(!executor.is_plugin_running("rai"));
         assert!(executor
             .submit_group(2, command.clone(), Some("raishot/capture".into()))
             .is_err());

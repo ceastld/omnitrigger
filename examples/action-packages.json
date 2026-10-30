@@ -1,0 +1,24 @@
+{
+  "version": 8,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [{ "kind": "key", "value": 20 }],
+      "activation": { "kind": "press", "value": { "kind": "key", "value": 82 } },
+      "message": "顺序运行两个 Node 示例步骤",
+      "enabled": true,
+      "action": {
+        "kind": "invoke",
+        "package_id": "examples.process-sequence",
+        "action_id": "run",
+        "action_version": 1,
+        "input": {
+          "steps": [
+            { "program": "node", "args": ["--version"] },
+            { "program": "node", "args": ["-p", "'第二步完成'"] }
+          ]
+        }
+      }
+    }
+  ]
+}

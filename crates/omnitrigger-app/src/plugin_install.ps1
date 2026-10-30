@@ -17,16 +17,24 @@ function Send-InstallProgress([string]$Message) {
 
 function Assert-PlainPath([string]$Path) {
     $installCurrent = [IO.Path]::GetFullPath($Path)
+    if ($installCurrent -match '(?i)(^|[\\/])(OneDrive[^\\/]*|Dropbox|iCloud[^\\/]*)([\\/]|$)') {
+        throw '插件目录不能位于云盘同步目录。'
+    }
+    $installAncestors = New-Object 'Collections.Generic.Stack[string]'
     while ($installCurrent) {
-        if (Test-Path -LiteralPath $installCurrent) {
-            $installItem = Get-Item -LiteralPath $installCurrent -Force
-            if (($installItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw '安装目录包含链接或联接点，请更换配置目录。'
-            }
-        }
+        $installAncestors.Push($installCurrent)
         $installParent = [IO.Directory]::GetParent($installCurrent)
         if ($null -eq $installParent) { break }
         $installCurrent = $installParent.FullName
+    }
+    # Stack 按根到叶的顺序枚举，先拒绝父级链接/云端目录，再访问子路径。
+    foreach ($installCurrent in $installAncestors) {
+        if (Test-Path -LiteralPath $installCurrent) {
+            $installItem = Get-Item -LiteralPath $installCurrent -Force
+            if (([long]$installItem.Attributes -band (0x400 -bor 0x1000 -bor 0x40000 -bor 0x400000)) -ne 0) {
+                throw '插件目录包含链接、联接点或云端占位文件。'
+            }
+        }
     }
 }
 
@@ -132,7 +140,9 @@ function Assert-InstalledFiles([string]$Directory, [string]$Version, [string]$Ma
     Assert-PlainPath $Directory
     $installManifestPath = Join-Path $Directory 'manifest.json'
     Assert-PlainPath $installManifestPath
-    if (-not (Test-Path -LiteralPath $installManifestPath -PathType Leaf) -or (Get-Sha256 $installManifestPath) -cne $ManifestHash) {
+    if (-not (Test-Path -LiteralPath $installManifestPath -PathType Leaf) -or
+        (Get-Item -LiteralPath $installManifestPath).Length -gt 65536 -or
+        (Get-Sha256 $installManifestPath) -cne $ManifestHash) {
         throw '安装包的文件清单校验失败。'
     }
     $installManifest = [IO.File]::ReadAllText($installManifestPath) | ConvertFrom-Json

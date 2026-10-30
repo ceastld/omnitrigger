@@ -19,6 +19,7 @@ export const groups = [
       ['docs/README.md', 'index', '文档首页'],
       ['docs/GETTING_STARTED.md', 'getting-started', '快速开始'],
       ['docs/FEATURES.md', 'features', '当前功能与交互'],
+      ['docs/PRODUCT.md', 'product', '产品理念'],
     ],
   },
   {
@@ -42,6 +43,7 @@ export const groups = [
       ['docs/KEYBOARD_ACTIONS.md', 'keyboard-actions', '发送按键与快捷键'],
       ['docs/LOCAL_ACTIONS.md', 'local-actions', '本地步骤动作'],
       ['docs/COMMAND_ACTIONS.md', 'command-actions', '程序与脚本'],
+      ['docs/ACTION_PACKAGES.md', 'action-packages', '动作包与 JavaScript 入口'],
       ['docs/PLUGIN_SYSTEM.md', 'plugin-system', '插件动作与快速绑定'],
     ],
   },
@@ -57,6 +59,9 @@ export const groups = [
     items: [
       ['docs/BUILDING.md', 'building', '从源码构建'],
       ['docs/ARCHITECTURE.md', 'architecture', '工程架构'],
+      ['docs/PROFILES.md', 'profiles', '配置档与数据目录设计'],
+      ['docs/ACCOUNT_WORKSPACE.md', 'account-workspace', '账号工作区与同步设计'],
+      ['docs/BROWSER_EXTENSION.md', 'browser-extension', 'Chrome API 桥接扩展设计'],
       ['docs/EXECUTION_ARCHITECTURE.md', 'execution-architecture', '动作执行架构'],
       ['CONTRIBUTING.md', 'contributing', '贡献指南'],
       ['SECURITY.md', 'security', '安全说明'],

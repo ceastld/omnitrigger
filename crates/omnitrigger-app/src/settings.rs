@@ -47,6 +47,8 @@ pub enum ActionSpec {
     AdjustSystem(SystemAdjustmentAction),
     Local(LocalAction),
     Plugin(PluginActionRef),
+    Invoke(omnitrigger_actions::ActionCall),
+    Browser(crate::browser_actions::BrowserAction),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -180,6 +182,18 @@ impl BindingDto {
         if version < 6 && !self.conditions.is_empty() {
             return Err("位置条件需要版本 6 配置。".into());
         }
+        if version < 8
+            && self.conditions.iter().any(|condition| {
+                matches!(
+                    condition,
+                    ConditionDto::PointerRegion {
+                        region: crate::trigger_conditions::RegionDto::ScreenEdgeSegment { .. }
+                    }
+                )
+            })
+        {
+            return Err("边缘区段需要版本 8 配置。".into());
+        }
         let action = if version >= 5 {
             if self.command.is_some() || self.show_panel.is_some() {
                 return Err("版本 5 配置不能混用旧版 command / show_panel 字段。".into());
@@ -208,6 +222,12 @@ impl BindingDto {
         }
         if version < 7 && matches!(action, ActionSpec::Local(_)) {
             return Err("本地步骤动作需要版本 7 配置。".into());
+        }
+        if version < 8 && matches!(action, ActionSpec::Invoke(_)) {
+            return Err("动作包调用需要版本 8 配置。".into());
+        }
+        if version < 9 && matches!(action, ActionSpec::Browser(_)) {
+            return Err("浏览器动作需要版本 9 配置。".into());
         }
         Ok(Binding {
             spec: TriggerSpec {
@@ -322,7 +342,7 @@ pub fn path() -> PathBuf {
 fn decode(text: &str) -> Result<Vec<Binding>, String> {
     let settings: Settings =
         serde_json::from_str(text).map_err(|e| format!("配置格式有误：{e}"))?;
-    if !matches!(settings.version, 1..=7) {
+    if !matches!(settings.version, 1..=9) {
         return Err("配置版本不受支持，原文件已保留。".into());
     }
     let bindings = settings
@@ -447,6 +467,8 @@ pub fn validate(bindings: &[Binding]) -> Result<(), String> {
             ActionSpec::External(action) => action.validate(),
             ActionSpec::AdjustSystem(action) => action.validate(),
             ActionSpec::Local(action) => action.validate(),
+            ActionSpec::Invoke(call) => call.validate().map_err(|error| error.to_string()),
+            ActionSpec::Browser(action) => action.validate(),
             ActionSpec::ShowWheel(reference) => reference.validate(),
             ActionSpec::Plugin(reference) => {
                 reference.validate().map_err(|error| error.to_string())
@@ -475,7 +497,7 @@ pub fn save(bindings: &[Binding]) -> Result<(), String> {
 fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
     validate(bindings)?;
     let text = serde_json::to_vec_pretty(&Settings {
-        version: 7,
+        version: 9,
         bindings: bindings.iter().map(Into::into).collect(),
     })
     .map_err(|e| e.to_string())?;
@@ -485,7 +507,7 @@ fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
             decode(&original)?;
             let settings: Settings =
                 serde_json::from_str(&original).map_err(|error| error.to_string())?;
-            if settings.version < 7 {
+            if settings.version < 9 {
                 backup_legacy(destination, settings.version, original.as_bytes())?;
             }
         }
@@ -574,10 +596,81 @@ mod tests {
 
     fn encode(bindings: &[Binding]) -> String {
         serde_json::to_string(&Settings {
-            version: 7,
+            version: 9,
             bindings: bindings.iter().map(Into::into).collect(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn browser_actions_upgrade_v8_with_exact_backup_and_reject_mislabeled_schema() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let mut previous: serde_json::Value = serde_json::from_str(&encode(&defaults())).unwrap();
+        previous["version"] = 8.into();
+        let original = format!(" \r\n{previous}\r\n");
+        std::fs::write(&destination, &original).unwrap();
+        let mut bindings = defaults();
+        bindings[0].action = ActionSpec::Browser(crate::browser_actions::BrowserAction {
+            command: crate::browser_actions::BrowserCommand::Call {
+                method: "bookmarks.search".into(),
+                args: vec![json!({"query":"中文书签"})],
+            },
+            profile: Some("work-browser".into()),
+        });
+        save_to(&destination, &bindings).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.0.join("bindings.json.v8.bak")).unwrap(),
+            original
+        );
+        assert_eq!(
+            decode(&std::fs::read_to_string(&destination).unwrap()).unwrap(),
+            bindings
+        );
+        let mut old: serde_json::Value = serde_json::from_str(&encode(&bindings)).unwrap();
+        old["version"] = 8.into();
+        assert_eq!(
+            decode(&old.to_string()).unwrap_err(),
+            "浏览器动作需要版本 9 配置。"
+        );
+    }
+
+    #[test]
+    fn package_calls_preserve_uninstalled_identity_and_input_and_require_v8() {
+        let mut expected = defaults();
+        expected[0].action = ActionSpec::Invoke(omnitrigger_actions::ActionCall {
+            package_id: "missing.package".into(),
+            action_id: "run".into(),
+            action_version: 12,
+            input: json!({"program":"C:\\Program Files\\工具.exe", "args":["有 空格", "${literal}"], "nested":{"enabled":true}}),
+        });
+        let encoded = encode(&expected);
+        assert_eq!(decode(&encoded).unwrap(), expected);
+        let mut legacy: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        legacy["version"] = 7.into();
+        assert!(decode(&legacy.to_string()).unwrap_err().contains("版本 8"));
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let mut old: serde_json::Value = serde_json::from_str(&encode(&defaults())).unwrap();
+        old["version"] = 7.into();
+        let original = format!(" \r\n{old}\r\n");
+        std::fs::write(&destination, &original).unwrap();
+        save_to(&destination, &expected).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.0.join("bindings.json.v7.bak")).unwrap(),
+            original
+        );
+        assert_eq!(
+            decode(&std::fs::read_to_string(&destination).unwrap()).unwrap(),
+            expected
+        );
+        expected[0].action = ActionSpec::Invoke(omnitrigger_actions::ActionCall {
+            package_id: "missing.package".into(),
+            action_id: "run".into(),
+            action_version: 12,
+            input: json!([]),
+        });
+        assert!(validate(&expected).is_err());
     }
 
     fn legacy(version: u32, command: bool, panel: bool) -> String {
@@ -772,7 +865,7 @@ mod tests {
 
     #[test]
     fn incompatible_and_ambiguous_configurations_are_rejected() {
-        assert!(decode(r#"{"version":8,"bindings":[]}"#).is_err());
+        assert!(decode(r#"{"version":10,"bindings":[]}"#).is_err());
         assert!(decode(&legacy(4, true, true)).is_err());
         let mut value: serde_json::Value = serde_json::from_str(&legacy(4, false, false)).unwrap();
         value["version"] = 5.into();
@@ -890,7 +983,7 @@ mod tests {
         assert_eq!(serialized["action"], json!({"kind": "notification"}));
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&encode(&bindings)).unwrap()["version"],
-            7
+            9
         );
         assert_eq!(bindings.last(), Some(&drag));
     }
@@ -1130,7 +1223,7 @@ mod tests {
         let text = encode(&expected);
         assert_eq!(decode(&text).unwrap(), expected);
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["version"], 7);
+        assert_eq!(value["version"], 9);
         assert_eq!(
             value["bindings"][0]["conditions"],
             json!([{"kind":"pointer_region","region":{"kind":"screen_edge","edge":"top","thickness_px":8}}])
@@ -1151,6 +1244,94 @@ mod tests {
             value["bindings"][3]["action"],
             json!({"kind":"adjust_system","target":"brightness","delta_percent":-100})
         );
+    }
+
+    #[test]
+    fn screen_edge_segments_round_trip_and_require_version_eight() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let expected: Vec<_> = [
+            (ScreenEdge::Top, WheelDirection::Up),
+            (ScreenEdge::Right, WheelDirection::Down),
+            (ScreenEdge::Bottom, WheelDirection::Left),
+            (ScreenEdge::Left, WheelDirection::Right),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (edge, direction))| {
+            regional_binding(
+                80 + index as u64,
+                PointerRegion::ScreenEdgeSegment {
+                    edge,
+                    thickness_px: 8,
+                    start_inset_px: 8,
+                    end_inset_px: 13,
+                },
+                direction,
+                AdjustmentTarget::Brightness,
+                -5,
+            )
+        })
+        .collect();
+        let encoded = encode(&expected);
+        assert_eq!(decode(&encoded).unwrap(), expected);
+        let document: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(document["version"], 9);
+        assert_eq!(
+            document["bindings"][3]["conditions"][0]["region"],
+            json!({
+                "kind":"screen_edge_segment", "edge":"left", "thickness_px":8,
+                "start_inset_px":8, "end_inset_px":13
+            })
+        );
+        for version in 6..=7 {
+            let mut old = document.clone();
+            old["version"] = version.into();
+            let original = old.to_string();
+            assert_eq!(decode(&original).unwrap_err(), "边缘区段需要版本 8 配置。");
+            std::fs::write(&destination, &original).unwrap();
+            assert!(save_to(&destination, &expected).is_err());
+            assert_eq!(std::fs::read_to_string(&destination).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn trimmed_sides_and_top_can_share_both_wheel_directions_and_preserve_existing_bindings() {
+        let mut expected = defaults();
+        for (edge, target) in [
+            (ScreenEdge::Left, AdjustmentTarget::Brightness),
+            (ScreenEdge::Right, AdjustmentTarget::Brightness),
+            (ScreenEdge::Top, AdjustmentTarget::Volume),
+        ] {
+            let region = if edge == ScreenEdge::Top {
+                PointerRegion::ScreenEdge {
+                    edge,
+                    thickness_px: 8,
+                }
+            } else {
+                PointerRegion::ScreenEdgeSegment {
+                    edge,
+                    thickness_px: 8,
+                    start_inset_px: 8,
+                    end_inset_px: 0,
+                }
+            };
+            for (direction, delta_percent) in [(WheelDirection::Up, 5), (WheelDirection::Down, -5)]
+            {
+                let binding = regional_binding(
+                    90 + expected.len() as u64,
+                    region,
+                    direction,
+                    target,
+                    delta_percent,
+                );
+                check_candidate(&expected, &binding.spec).unwrap();
+                expected.push(binding);
+            }
+        }
+        validate(&expected).unwrap();
+        assert_eq!(decode(&encode(&expected)).unwrap(), expected);
+        assert_eq!(&expected[..defaults().len()], defaults());
     }
 
     #[test]
@@ -1340,7 +1521,7 @@ mod tests {
         assert_eq!(std::fs::read(&backup).unwrap(), original.as_bytes());
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&destination).unwrap()).unwrap();
-        assert_eq!(saved["version"], 7);
+        assert_eq!(saved["version"], 9);
         assert_eq!(decode(&saved.to_string()).unwrap(), bindings);
         bindings.last_mut().unwrap().message = "修改后的边缘音量".into();
         save_to(&destination, &bindings).unwrap();
@@ -1398,7 +1579,7 @@ mod tests {
         let saved = std::fs::read_to_string(&destination).unwrap();
         assert_eq!(decode(&saved).unwrap(), expected);
         let current: serde_json::Value = serde_json::from_str(&saved).unwrap();
-        assert_eq!(current["version"], 7);
+        assert_eq!(current["version"], 9);
         assert_eq!(current["bindings"][0]["action"]["kind"], "local");
         assert_eq!(current["bindings"][0]["action"]["version"], 1);
         for version in 1..=6 {
@@ -1432,7 +1613,7 @@ mod tests {
         let saved = std::fs::read_to_string(&destination).unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&saved).unwrap()["version"],
-            7
+            9
         );
         assert_eq!(decode(&saved).unwrap(), expected);
         expected[0].message = "再次修改本地动作".into();

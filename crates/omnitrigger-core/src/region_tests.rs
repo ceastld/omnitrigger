@@ -18,6 +18,14 @@ fn edge(edge: ScreenEdge) -> PointerRegion {
         thickness_px: 8,
     }
 }
+fn segment(edge: ScreenEdge, start_inset_px: u32, end_inset_px: u32) -> PointerRegion {
+    PointerRegion::ScreenEdgeSegment {
+        edge,
+        thickness_px: 8,
+        start_inset_px,
+        end_inset_px,
+    }
+}
 fn corner(corner: ScreenCorner) -> PointerRegion {
     PointerRegion::ScreenCorner {
         corner,
@@ -70,6 +78,18 @@ fn statically_disjoint_regions_never_overlap_in_sampled_multi_screen_topologies(
         corner(ScreenCorner::TopRight),
         corner(ScreenCorner::BottomRight),
         corner(ScreenCorner::BottomLeft),
+        segment(ScreenEdge::Top, 8, 0),
+        segment(ScreenEdge::Top, 0, 8),
+        segment(ScreenEdge::Top, 8, 8),
+        segment(ScreenEdge::Right, 8, 0),
+        segment(ScreenEdge::Right, 0, 8),
+        segment(ScreenEdge::Right, 8, 8),
+        segment(ScreenEdge::Bottom, 8, 0),
+        segment(ScreenEdge::Bottom, 0, 8),
+        segment(ScreenEdge::Bottom, 8, 8),
+        segment(ScreenEdge::Left, 8, 0),
+        segment(ScreenEdge::Left, 0, 8),
+        segment(ScreenEdge::Left, 8, 8),
     ];
     let topologies = [
         vec![rect(0, 0, 10, 10), rect(10, 5, 20, 15)],
@@ -115,6 +135,287 @@ fn screen_regions_exclude_only_the_connected_segment_and_both_sides_of_it() {
     assert!(edge(ScreenEdge::Bottom).matches((10, -1), &vertical));
     assert!(!edge(ScreenEdge::Bottom).matches((50, -1), &vertical));
     assert!(!edge(ScreenEdge::Top).matches((50, 0), &vertical));
+}
+
+#[test]
+fn explicit_edge_segments_register_three_wheels_and_reserve_top_corners() {
+    let bindings = [
+        segment(ScreenEdge::Left, 8, 0),
+        segment(ScreenEdge::Right, 8, 0),
+        edge(ScreenEdge::Top),
+    ]
+    .into_iter()
+    .enumerate()
+    .flat_map(|(index, region)| {
+        [WheelDirection::Up, WheelDirection::Down]
+            .into_iter()
+            .enumerate()
+            .map(move |(direction_index, direction)| {
+                binding(
+                    (index * 2 + direction_index + 1) as u64,
+                    &[],
+                    Activation::Wheel(direction),
+                    region,
+                )
+            })
+    })
+    .collect();
+    let mut engine = engine(bindings, (0, 0));
+    for (time, point, up_id) in [
+        (1, (0, 0), Some(5)),
+        (2, (999, 0), Some(5)),
+        (3, (0, 7), Some(5)),
+        (4, (999, 7), Some(5)),
+        (5, (0, 8), Some(1)),
+        (6, (999, 8), Some(3)),
+        (7, (500, 7), Some(5)),
+        (8, (500, 8), None),
+        (9, (7, 100), Some(1)),
+        (10, (8, 100), None),
+    ] {
+        engine.pointer_moved(point, time);
+        for (delta, id) in [(120, up_id), (-120, up_id.map(|id| id + 1))] {
+            let decision = engine.process(scroll(delta));
+            assert_eq!(decision.consume, id.is_some(), "{point:?}");
+            assert_eq!(decision.triggered, id.into_iter().collect::<Vec<_>>());
+        }
+    }
+}
+
+#[test]
+fn explicit_edge_segments_exclude_connected_parts_in_event_sequences() {
+    let mut engine = Engine::new(vec![
+        binding(
+            1,
+            &[],
+            Activation::Wheel(WheelDirection::Up),
+            segment(ScreenEdge::Left, 8, 0),
+        ),
+        binding(
+            2,
+            &[],
+            Activation::Wheel(WheelDirection::Up),
+            segment(ScreenEdge::Right, 8, 0),
+        ),
+        binding(
+            3,
+            &[],
+            Activation::Wheel(WheelDirection::Up),
+            edge(ScreenEdge::Top),
+        ),
+    ])
+    .unwrap();
+    engine
+        .set_screens(vec![rect(-100, -100, 0, 100), rect(0, 0, 100, 100)])
+        .unwrap();
+    for (time, point, id) in [
+        (1, (-1, 50), None),
+        (2, (0, 50), None),
+        (3, (-1, -50), Some(2)),
+        (4, (-100, 50), Some(1)),
+        (5, (99, 50), Some(2)),
+        (6, (50, 0), Some(3)),
+    ] {
+        engine.pointer_moved(point, time);
+        let decision = engine.process(scroll(120));
+        assert_eq!(decision.consume, id.is_some(), "{point:?}");
+        assert_eq!(decision.triggered, id.into_iter().collect::<Vec<_>>());
+    }
+    // 上下相接的屏幕也不能把相接区段作为上边缘。
+    engine
+        .set_screens(vec![rect(0, -100, 100, 0), rect(25, 0, 100, 100)])
+        .unwrap();
+    engine.pointer_moved((50, 0), 7);
+    assert!(!engine.process(scroll(120)).consume);
+}
+
+#[test]
+fn changing_between_segment_and_top_flushes_partial_wheels_without_borrowing_them() {
+    let mut engine = engine(
+        vec![
+            binding(
+                1,
+                &[],
+                Activation::Wheel(WheelDirection::Up),
+                segment(ScreenEdge::Left, 8, 0),
+            ),
+            binding(
+                2,
+                &[],
+                Activation::Wheel(WheelDirection::Up),
+                edge(ScreenEdge::Top),
+            ),
+        ],
+        (0, 8),
+    );
+    assert!(engine.process(scroll(60)).consume);
+    assert_eq!(engine.pointer_moved((0, 7), 1).replay, [scroll(60).kind]);
+    assert!(engine.process(scroll(60)).triggered.is_empty());
+    assert_eq!(engine.process(scroll(60)).triggered, [2]);
+    assert!(engine.process(scroll(60)).consume);
+    assert_eq!(engine.pointer_moved((0, 8), 2).replay, [scroll(60).kind]);
+    assert!(engine.process(scroll(60)).triggered.is_empty());
+    assert_eq!(engine.process(scroll(60)).triggered, [1]);
+    engine.process(scroll(60));
+    assert_eq!(engine.pointer_moved((8, 8), 3).replay, [scroll(60).kind]);
+    assert!(!engine.process(scroll(120)).consume);
+}
+
+#[test]
+fn edge_segment_insets_use_physical_axes_negative_coordinates_and_safe_wide_distances() {
+    let screens = [rect(-100, -200, 0, -100)];
+    for side in [ScreenEdge::Top, ScreenEdge::Bottom] {
+        let y = if side == ScreenEdge::Top { -200 } else { -101 };
+        let region = segment(side, 10, 20);
+        assert!(!region.matches((-91, y), &screens));
+        assert!(region.matches((-90, y), &screens));
+        assert!(region.matches((-21, y), &screens));
+        assert!(!region.matches((-20, y), &screens));
+    }
+    for side in [ScreenEdge::Left, ScreenEdge::Right] {
+        let x = if side == ScreenEdge::Left { -100 } else { -1 };
+        let region = segment(side, 10, 20);
+        assert!(!region.matches((x, -191), &screens));
+        assert!(region.matches((x, -190), &screens));
+        assert!(region.matches((x, -121), &screens));
+        assert!(!region.matches((x, -120), &screens));
+    }
+    let narrow = [rect(0, 0, 5, 5)];
+    assert!(segment(ScreenEdge::Left, 1, 1).matches((2, 2), &narrow));
+    assert!(!segment(ScreenEdge::Right, 1, 1).matches((2, 2), &narrow));
+    for side in [
+        ScreenEdge::Top,
+        ScreenEdge::Right,
+        ScreenEdge::Bottom,
+        ScreenEdge::Left,
+    ] {
+        for y in 0..5 {
+            for x in 0..5 {
+                assert!(!segment(side, 3, 2).matches((x, y), &narrow));
+                assert!(!segment(side, u32::MAX, u32::MAX).matches((x, y), &narrow));
+            }
+        }
+    }
+    let extreme = [rect(i32::MIN, i32::MIN, i32::MAX, i32::MAX)];
+    assert!(segment(ScreenEdge::Top, 2_147_483_648, 0).matches((0, i32::MIN), &extreme));
+    assert!(!segment(ScreenEdge::Top, u32::MAX, 0).matches((i32::MAX - 1, i32::MIN), &extreme));
+    assert!(!segment(ScreenEdge::Left, u32::MAX, u32::MAX).matches((i32::MIN, 0), &extreme));
+    for thickness_px in [0, 257] {
+        let invalid = PointerRegion::ScreenEdgeSegment {
+            edge: ScreenEdge::Left,
+            thickness_px,
+            start_inset_px: 0,
+            end_inset_px: 0,
+        };
+        assert_eq!(
+            invalid.validate(),
+            Err(RegionError::InvalidThickness { thickness_px })
+        );
+        assert!(!invalid.matches((0, 0), &narrow));
+    }
+}
+
+#[test]
+fn segment_conflicts_require_proven_separation_and_preserve_original_edge_semantics() {
+    let overlap = |left, right| {
+        super::regions::conditions_overlap(
+            &[TriggerCondition::PointerRegion(left)],
+            &[TriggerCondition::PointerRegion(right)],
+        )
+    };
+    for (left, right, expected) in [
+        (edge(ScreenEdge::Left), edge(ScreenEdge::Top), true),
+        (segment(ScreenEdge::Left, 7, 0), edge(ScreenEdge::Top), true),
+        (
+            segment(ScreenEdge::Left, 8, 0),
+            edge(ScreenEdge::Top),
+            false,
+        ),
+        (segment(ScreenEdge::Left, 0, 8), edge(ScreenEdge::Top), true),
+        (
+            segment(ScreenEdge::Top, 8, 0),
+            edge(ScreenEdge::Left),
+            false,
+        ),
+        (
+            segment(ScreenEdge::Top, 0, 8),
+            edge(ScreenEdge::Right),
+            false,
+        ),
+        (
+            segment(ScreenEdge::Right, 8, 0),
+            segment(ScreenEdge::Top, 0, 0),
+            false,
+        ),
+        (
+            segment(ScreenEdge::Right, 0, 8),
+            edge(ScreenEdge::Bottom),
+            false,
+        ),
+        (
+            segment(ScreenEdge::Bottom, 8, 0),
+            edge(ScreenEdge::Left),
+            false,
+        ),
+        (
+            segment(ScreenEdge::Left, 8, 8),
+            segment(ScreenEdge::Left, 8, 8),
+            true,
+        ),
+        (
+            segment(ScreenEdge::Left, 8, 8),
+            segment(ScreenEdge::Right, 8, 8),
+            false,
+        ),
+        (
+            segment(ScreenEdge::Top, 8, 8),
+            segment(ScreenEdge::Bottom, 8, 8),
+            false,
+        ),
+        (
+            segment(ScreenEdge::Left, 31, 0),
+            corner(ScreenCorner::TopLeft),
+            true,
+        ),
+        (
+            segment(ScreenEdge::Left, 32, 0),
+            corner(ScreenCorner::TopLeft),
+            false,
+        ),
+        (
+            segment(ScreenEdge::Right, 0, 32),
+            corner(ScreenCorner::BottomRight),
+            false,
+        ),
+        (
+            segment(ScreenEdge::Top, 32, 0),
+            corner(ScreenCorner::TopLeft),
+            false,
+        ),
+        (
+            segment(ScreenEdge::Bottom, 0, 32),
+            corner(ScreenCorner::BottomRight),
+            false,
+        ),
+        (
+            segment(ScreenEdge::Left, 0, 0),
+            corner(ScreenCorner::TopRight),
+            false,
+        ),
+        (
+            segment(ScreenEdge::Left, 8, 8),
+            PointerRegion::Rectangle(rect(100, 100, 200, 200)),
+            true,
+        ),
+    ] {
+        assert_eq!(overlap(left, right), expected, "{left:?}, {right:?}");
+        assert_eq!(overlap(right, left), expected, "{right:?}, {left:?}");
+        let registered = Engine::new(vec![
+            binding(1, &[], Activation::Wheel(WheelDirection::Up), left),
+            binding(2, &[], Activation::Wheel(WheelDirection::Up), right),
+        ]);
+        assert_eq!(registered.is_ok(), !expected, "{left:?}, {right:?}");
+    }
 }
 
 #[test]

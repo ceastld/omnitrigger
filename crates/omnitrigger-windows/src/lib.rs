@@ -9,7 +9,15 @@ pub use automation_basics::{
 };
 pub use automation_basics::{validate_automation_text, validate_open_target};
 
+#[cfg(windows)]
+mod native_system_hud;
 mod system_adjustment;
+#[cfg(windows)]
+mod system_hud_paint;
+#[cfg(windows)]
+mod system_hud_window;
+#[cfg(windows)]
+pub use native_system_hud::{NativeSystemHud, NativeSystemHudSnapshot};
 #[cfg(windows)]
 pub use system_adjustment::{
     adjust_system_at, capture_adjustment_point, query_system_adjustment_capabilities_at,
@@ -19,6 +27,16 @@ pub use system_adjustment::{
     BrightnessMethod, SystemAdjustment, SystemAdjustmentCapabilities, SystemAdjustmentError,
     SystemAdjustmentErrorCode,
 };
+#[cfg(windows)]
+pub use system_hud_window::{
+    hide_system_hud_window, prewarm_system_hud_window, show_system_hud_window,
+    system_hud_placement, SystemHudPlacement,
+};
+
+#[cfg(windows)]
+mod process_paths;
+#[cfg(windows)]
+pub use process_paths::{documents_dir, running_process_paths};
 
 mod window_action;
 pub use window_action::WindowOperation;
@@ -364,6 +382,9 @@ fn format_key(key: u16) -> String {
         0xa3 => "右 Ctrl".into(),
         0xa4 => "左 Alt".into(),
         0xa5 => "右 Alt".into(),
+        0xad => "音量静音".into(),
+        0xae => "音量减".into(),
+        0xaf => "音量加".into(),
         _ => {
             #[cfg(windows)]
             if let Some(name) = platform::key_name(key) {

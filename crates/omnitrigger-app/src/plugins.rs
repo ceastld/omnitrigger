@@ -2,9 +2,15 @@
 use crate::execution::CommandAction;
 use omnitrigger_core::{Activation, Button, Engine, MouseButton, TriggerSpec, WheelDirection};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 const RAISHOT_MANIFEST: &str = include_str!("../plugins/raishot.json");
+const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -17,6 +23,7 @@ pub struct PluginActionRef {
 }
 
 impl PluginActionRef {
+    #[cfg(test)]
     pub fn raishot_capture() -> Self {
         Self {
             plugin_id: "raishot".into(),
@@ -94,13 +101,14 @@ impl fmt::Display for PluginError {
         match self {
             Self::InvalidReference => formatter.write_str("插件动作引用格式有误。"),
             Self::PluginMissing(id) => write!(formatter, "插件 {id} 不可用，请安装对应适配。"),
-            Self::Disabled => formatter.write_str("RaiShot 插件已停用，请在动作库中启用。"),
-            Self::PathNotConfigured => {
-                formatter.write_str("尚未配置 RaiShot CLI，请在动作库中安装或选择程序。")
-            }
+            Self::Disabled => formatter.write_str("RaiShot 插件已停用，请在“扩展”页启用。"),
+            Self::PathNotConfigured => formatter.write_str("RaiShot 尚未就绪，请在“扩展”页启用。"),
             Self::InvalidPath(reason) => write!(formatter, "RaiShot CLI 路径无效：{reason}"),
             Self::ProgramMissing(path) => {
-                write!(formatter, "找不到 RaiShot CLI：{path}，请重新定位程序。")
+                write!(
+                    formatter,
+                    "找不到 RaiShot CLI：{path}，请在“扩展”页重新启用 RaiShot。"
+                )
             }
             Self::ActionMissing(id) => {
                 write!(formatter, "RaiShot 不提供动作 {id}，请检查适配版本。")
@@ -122,9 +130,19 @@ pub struct ResolvedPluginAction {
     pub plugin_version: String,
 }
 
+/// 从同一份已验证清单生成动作库，显示名不参与动作身份匹配。
+#[derive(Clone, Debug)]
+pub struct PluginCatalogAction {
+    pub reference: PluginActionRef,
+    pub plugin_name: String,
+    pub title: String,
+    pub description: String,
+}
+
 #[derive(Clone)]
 pub struct Plugins {
     settings: PluginSettings,
+    manifest_path: Option<PathBuf>,
     manifest: Result<PluginManifest, PluginError>,
     available: Result<(), PluginError>,
 }
@@ -153,6 +171,7 @@ impl Default for Plugins {
                     cli_path: String::new(),
                 },
             },
+            manifest_path: None,
             manifest: PluginManifest::decode(RAISHOT_MANIFEST),
             available: Err(PluginError::PathNotConfigured),
         };
@@ -164,16 +183,19 @@ impl Default for Plugins {
 impl Plugins {
     pub fn load(config_path: &Path) -> Result<Self, PluginError> {
         let destination = settings_directory(config_path).join("plugins.json");
-        let text = match std::fs::read_to_string(&destination) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default())
-            }
+        let settings = match std::fs::read_to_string(&destination) {
+            Ok(text) => decode_settings(&text)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default().settings,
             Err(error) => return Err(PluginError::Settings(format!("读取失败：{error}"))),
         };
-        let settings = decode_settings(&text)?;
         let mut plugins = Self {
             settings,
+            manifest_path: Some(
+                settings_directory(config_path)
+                    .join("plugins")
+                    .join("raishot")
+                    .join("manifest.json"),
+            ),
             ..Self::default()
         };
         plugins.refresh();
@@ -214,7 +236,7 @@ impl Plugins {
             enabled,
             cli_path: path,
         };
-        candidate.refresh();
+        candidate.refresh_availability();
         candidate.manifest.as_ref().map_err(Clone::clone)?;
         *self = candidate;
         Ok(())
@@ -222,12 +244,45 @@ impl Plugins {
 
     /// 在设置刷新等应用层时机更新缓存，渲染和实际注册仅查询缓存。
     pub fn refresh(&mut self) {
+        if let Some(path) = &self.manifest_path {
+            self.manifest = load_manifest(path);
+        }
+        self.refresh_availability();
+    }
+
+    /// 程序启动失败时仅重查当前适配快照，避免运行中的其他动作切换清单。
+    pub fn refresh_availability(&mut self) {
         self.available = self.manifest.as_ref().map_err(Clone::clone).and_then(|_| {
             if !self.settings.raishot.enabled {
                 return Err(PluginError::Disabled);
             }
             validate_program(&self.settings.raishot.cli_path)
         });
+    }
+
+    pub fn catalogue(&self) -> Result<Vec<PluginCatalogAction>, PluginError> {
+        let manifest = self.manifest.as_ref().map_err(Clone::clone)?;
+        Ok(manifest
+            .actions
+            .iter()
+            .map(|action| PluginCatalogAction {
+                reference: PluginActionRef {
+                    plugin_id: manifest.id.clone(),
+                    action_id: action.id.clone(),
+                    action_version: action.version,
+                    parameters: BTreeMap::new(),
+                },
+                plugin_name: manifest.name.clone(),
+                title: action.title.clone(),
+                description: action.description.clone(),
+            })
+            .collect())
+    }
+
+    pub fn action_title(&self, reference: &PluginActionRef) -> Option<String> {
+        let action = self.definition(reference).ok()?;
+        let manifest = self.manifest.as_ref().ok()?;
+        Some(format!("{} / {}", manifest.name, action.title))
     }
 
     pub fn availability(&self, reference: &PluginActionRef) -> Result<(), PluginError> {
@@ -301,10 +356,80 @@ impl Plugins {
         }
         if !reference.parameters.is_empty() {
             return Err(PluginError::InvalidParameters(
-                "截图动作不接受参数。".into(),
+                "当前插件清单只支持无参数动作。".into(),
             ));
         }
         Ok(action)
+    }
+}
+
+fn load_manifest(path: &Path) -> Result<PluginManifest, PluginError> {
+    let path = std::path::absolute(path)
+        .map_err(|error| PluginError::InvalidManifest(format!("解析清单路径失败：{error}")))?;
+    // 仅访问一个明确路径；逐层检查，防止通过目录联接点进入云盘或读取占位文件。
+    for ancestor in path
+        .ancestors()
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        if ancestor.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy().to_ascii_lowercase();
+            name.starts_with("onedrive") || name == "dropbox" || name.starts_with("icloud")
+        }) {
+            return Err(PluginError::InvalidManifest(
+                "清单位于云盘同步目录，请使用本机配置目录。".into(),
+            ));
+        }
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || unavailable_manifest_attributes(&metadata) {
+                    return Err(PluginError::InvalidManifest(
+                        "清单路径含链接或云端占位文件，请使用普通本机文件。".into(),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return PluginManifest::decode(RAISHOT_MANIFEST)
+            }
+            Err(error) => {
+                return Err(PluginError::InvalidManifest(format!(
+                    "检查清单路径失败：{error}"
+                )))
+            }
+        }
+    }
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|error| PluginError::InvalidManifest(format!("检查清单失败：{error}")))?;
+    if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES as u64 {
+        return Err(PluginError::InvalidManifest(
+            "清单必须是最大 64 KiB 的本机文件。".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(&path)
+        .and_then(|file| {
+            file.take(MAX_MANIFEST_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|error| PluginError::InvalidManifest(format!("读取清单失败：{error}")))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|error| PluginError::InvalidManifest(format!("清单必须是 UTF-8：{error}")))?;
+    PluginManifest::decode(text)
+}
+
+fn unavailable_manifest_attributes(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // ReparsePoint、Offline、RecallOnOpen、RecallOnDataAccess。
+        metadata.file_attributes() & (0x400 | 0x1000 | 0x40000 | 0x400000) != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = metadata;
+        false
     }
 }
 
@@ -505,7 +630,7 @@ impl DefaultTrigger {
 
 impl PluginManifest {
     fn decode(text: &str) -> Result<Self, PluginError> {
-        if text.len() > 64 * 1024 {
+        if text.len() > MAX_MANIFEST_BYTES {
             return Err(PluginError::InvalidManifest("清单超过 64 KiB。".into()));
         }
         let manifest: Self = serde_json::from_str(text)
@@ -518,10 +643,11 @@ impl PluginManifest {
             || manifest.name.trim().is_empty()
             || manifest.description.trim().is_empty()
             || manifest.settings.len() != 1
-            || manifest.actions.len() != 1
+            || manifest.actions.is_empty()
+            || manifest.actions.len() > 128
         {
             return Err(PluginError::InvalidManifest(
-                "首版只支持内置 RaiShot 适配。".into(),
+                "当前只支持 RaiShot 适配，清单需要 1 到 128 个动作。".into(),
             ));
         }
         let setting = &manifest.settings[0];
@@ -532,29 +658,38 @@ impl PluginManifest {
         {
             return Err(PluginError::InvalidManifest("缺少 CLI 路径设置。".into()));
         }
-        let action = &manifest.actions[0];
-        if action.id != "capture"
-            || action.version != 1
-            || action.title.trim().is_empty()
-            || action.description.trim().is_empty()
-            || !action.parameters.is_empty()
-            || action.effects != ["screen_capture"]
-            || action.runner.kind != "process"
-            || action.runner.program.setting != "cliPath"
-            || action.runner.working_directory.parent_of_setting != "cliPath"
-            || action.runner.completion != "process_exit"
-            || action.runner.args.len() != 1
-            || action.runner.args[0].literal != "--capture"
-            || action.concurrency.group != "capture"
-            || action.concurrency.max_running != 1
-            || action.concurrency.on_busy != "reject"
-        {
-            return Err(PluginError::InvalidManifest(
-                "截图调用或并发契约不受支持。".into(),
-            ));
+        let mut action_ids = BTreeSet::new();
+        for action in &manifest.actions {
+            if !valid_name(&action.id)
+                || !action_ids.insert(&action.id)
+                || action.version == 0
+                || action.title.trim().is_empty()
+                || action.description.trim().is_empty()
+                || !action.parameters.is_empty()
+                || action.effects.is_empty()
+                || action.effects.len() > 16
+                || action.effects.iter().any(|effect| !valid_name(effect))
+                || action.runner.kind != "process"
+                || action.runner.program.setting != "cliPath"
+                || action.runner.working_directory.parent_of_setting != "cliPath"
+                || action.runner.completion != "process_exit"
+                || action.runner.args.len() > 128
+                || action
+                    .runner
+                    .args
+                    .iter()
+                    .any(|argument| argument.literal.contains('\0'))
+                || !valid_name(&action.concurrency.group)
+                || action.concurrency.max_running != 1
+                || action.concurrency.on_busy != "reject"
+            {
+                return Err(PluginError::InvalidManifest(
+                    "动作身份重复、定义有误，或调用与并发契约不受支持。".into(),
+                ));
+            }
+            Engine::new(vec![action.default_trigger.spec(1)])
+                .map_err(|error| PluginError::InvalidManifest(error.to_string()))?;
         }
-        Engine::new(vec![action.default_trigger.spec(1)])
-            .map_err(|error| PluginError::InvalidManifest(error.to_string()))?;
         Ok(manifest)
     }
 }
@@ -574,6 +709,212 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    fn external_manifest(directory: &Path, text: &str) -> PathBuf {
+        let path = directory.join("plugins/raishot/manifest.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn two_action_manifest() -> serde_json::Value {
+        let mut manifest: serde_json::Value = serde_json::from_str(RAISHOT_MANIFEST).unwrap();
+        let mut action = manifest["actions"][0].clone();
+        action["id"] = "custom-capture".into();
+        action["title"] = "自定义截图".into();
+        action["runner"]["args"] = serde_json::json!([
+            {"literal": "--capture"},
+            {"literal": "literal $(not-a-shell) & 中文 参数"}
+        ]);
+        manifest["actions"].as_array_mut().unwrap().push(action);
+        manifest
+    }
+
+    #[test]
+    fn local_catalogue_loads_without_settings_and_resolves_each_action_from_manifest() {
+        let directory = scratch();
+        let manifest = two_action_manifest();
+        let path = external_manifest(&directory, &manifest.to_string());
+        let config_path = directory.join("bindings.json");
+        let mut plugins = Plugins::load(&config_path).unwrap();
+        let catalogue = plugins.catalogue().unwrap();
+        assert_eq!(catalogue.len(), 2);
+        assert_eq!(catalogue[0].reference, PluginActionRef::raishot_capture());
+        assert_eq!(catalogue[0].plugin_name, "RaiShot");
+        assert_eq!(catalogue[1].title, "自定义截图");
+        assert!(!catalogue[1].description.is_empty());
+        assert_eq!(
+            plugins.action_title(&catalogue[1].reference).as_deref(),
+            Some("RaiShot / 自定义截图")
+        );
+        assert!(matches!(
+            plugins.availability(&catalogue[1].reference),
+            Err(PluginError::PathNotConfigured)
+        ));
+        assert!(!directory.join("plugins.json").exists());
+        let executable = directory.join("raishot-cli.exe");
+        std::fs::write(&executable, "不执行").unwrap();
+        plugins
+            .configure_raishot(executable.to_string_lossy().into_owned(), true)
+            .unwrap();
+        assert_eq!(
+            plugins
+                .resolve(&catalogue[1].reference)
+                .unwrap()
+                .command
+                .args,
+            ["--capture", "literal $(not-a-shell) & 中文 参数"]
+        );
+        assert_eq!(
+            plugins
+                .default_trigger(&catalogue[1].reference, 73)
+                .unwrap()
+                .id,
+            73
+        );
+
+        // 后台错误重查和路径设置沿用当前快照，只有显式刷新才切换清单。
+        std::fs::write(&path, "{broken").unwrap();
+        plugins.refresh_availability();
+        plugins
+            .configure_raishot(executable.to_string_lossy().into_owned(), true)
+            .unwrap();
+        assert_eq!(plugins.catalogue().unwrap().len(), 2);
+        plugins.refresh();
+        assert!(plugins.catalogue().is_err());
+
+        // 删除自定义清单恢复内置目录，原引用仍保留且明确报告缺失动作。
+        std::fs::remove_file(path).unwrap();
+        plugins.refresh();
+        assert_eq!(plugins.catalogue().unwrap().len(), 1);
+        assert!(matches!(
+            plugins.availability(&catalogue[1].reference),
+            Err(PluginError::ActionMissing(_))
+        ));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn invalid_local_manifest_does_not_fall_back_or_rewrite_existing_settings() {
+        let directory = scratch();
+        std::fs::create_dir_all(&directory).unwrap();
+        let config_path = directory.join("bindings.json");
+        let executable = directory.join("raishot-cli.exe");
+        std::fs::write(&executable, "不执行").unwrap();
+        let mut plugins = Plugins::default();
+        plugins
+            .configure_raishot(executable.to_string_lossy().into_owned(), true)
+            .unwrap();
+        plugins.save(&config_path).unwrap();
+        let original_settings = std::fs::read(directory.join("plugins.json")).unwrap();
+        let path = external_manifest(&directory, "{broken");
+        let mut loaded = Plugins::load(&config_path).unwrap();
+        assert!(matches!(
+            loaded.catalogue(),
+            Err(PluginError::InvalidManifest(_))
+        ));
+        assert!(matches!(
+            loaded.availability(&PluginActionRef::raishot_capture()),
+            Err(PluginError::InvalidManifest(_))
+        ));
+        assert_eq!(loaded.raishot_path(), executable.to_str().unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{broken");
+        assert_eq!(
+            std::fs::read(directory.join("plugins.json")).unwrap(),
+            original_settings
+        );
+
+        std::fs::write(
+            &path,
+            RAISHOT_MANIFEST.replace("\"hostApiVersion\": 1", "\"hostApiVersion\": 2"),
+        )
+        .unwrap();
+        loaded.refresh();
+        assert!(matches!(
+            loaded.catalogue(),
+            Err(PluginError::IncompatibleVersion)
+        ));
+        std::fs::write(&path, RAISHOT_MANIFEST).unwrap();
+        loaded.refresh();
+        assert!(loaded
+            .availability(&PluginActionRef::raishot_capture())
+            .is_ok());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_duplicate_actions_unknown_contracts_and_unbounded_or_invalid_arguments() {
+        let mut duplicate = two_action_manifest();
+        duplicate["actions"][1]["id"] = "capture".into();
+        duplicate["actions"][1]["version"] = 2.into();
+        assert!(matches!(
+            PluginManifest::decode(&duplicate.to_string()),
+            Err(PluginError::InvalidManifest(_))
+        ));
+        for (pointer, invalid) in [
+            ("/actions/0/id", serde_json::json!("../outside")),
+            ("/actions/0/version", serde_json::json!(0)),
+            (
+                "/actions/0/parameters",
+                serde_json::json!([{"name": "unknown"}]),
+            ),
+            (
+                "/actions/0/runner/program/setting",
+                serde_json::json!("arbitraryPath"),
+            ),
+            (
+                "/actions/0/runner/workingDirectory/parentOfSetting",
+                serde_json::json!("arbitraryPath"),
+            ),
+            ("/actions/0/runner/kind", serde_json::json!("shell")),
+            (
+                "/actions/0/runner/completion",
+                serde_json::json!("detached"),
+            ),
+            (
+                "/actions/0/runner/args",
+                serde_json::json!([{"literal": "bad\0argument"}]),
+            ),
+            (
+                "/actions/0/runner/args",
+                serde_json::json!(vec![serde_json::json!({"literal": "x"}); 129]),
+            ),
+            (
+                "/actions/0/concurrency/group",
+                serde_json::json!("../capture"),
+            ),
+            ("/actions/0/concurrency/onBusy", serde_json::json!("queue")),
+            (
+                "/actions/0/defaultTrigger/held",
+                serde_json::json!([{"kind": "key", "value": 162}, {"kind": "key", "value": 162}]),
+            ),
+        ] {
+            let mut manifest = two_action_manifest();
+            *manifest.pointer_mut(pointer).unwrap() = invalid;
+            assert!(
+                PluginManifest::decode(&manifest.to_string()).is_err(),
+                "accepted {pointer}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_manifest_rejects_oversized_files_and_cloud_directory_paths() {
+        let directory = scratch();
+        let path = external_manifest(&directory, &" ".repeat(MAX_MANIFEST_BYTES + 1));
+        assert!(matches!(
+            load_manifest(&path),
+            Err(PluginError::InvalidManifest(_))
+        ));
+        for name in ["OneDrive", "OneDrive - Work", "Dropbox", "iCloudDrive"] {
+            let cloud_path = directory.join(name).join("plugins/raishot/manifest.json");
+            assert!(matches!(
+                load_manifest(&cloud_path),
+                Err(PluginError::InvalidManifest(_))
+            ));
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -1,9 +1,10 @@
 //! 本地步骤的小表单编辑器；保存只生成动作快照，不执行任何能力。
 use crate::local_action::{LocalAction, LocalStep};
+use crate::theme::rgb;
 use crate::{
     caption, section_title, small, theme, ActionSpec, MessageInput, Page, Tone, Workspace,
 };
-use gpui::{div, prelude::*, px, rgb, App, Context, Div, Entity};
+use gpui::{div, prelude::*, px, App, Context, Div, Entity};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StepKind {
@@ -341,11 +342,9 @@ impl Workspace {
         if self.recording {
             return;
         }
-        let Some(id) = self.next_binding_id else {
-            self.error = Some("触发器编号已耗尽。".into());
+        let Some(id) = self.draft_id(None) else {
             return;
         };
-        self.next_binding_id = id.checked_add(1);
         self.clear_pending();
         let spec = omnitrigger_core::TriggerSpec {
             id,
