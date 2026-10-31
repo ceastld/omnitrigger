@@ -1366,50 +1366,166 @@ fn disc(center: f32, radius: f32, color: u32, blur: f32) -> Div {
         ])
 }
 
-fn preview_scale(definition: &WheelDefinition, size: f32) -> f32 {
-    let disc = if explicit_layout(definition) {
-        EXPLICIT_DISC
-    } else {
-        LEGACY_DISC
-    };
-    (size / 2. - 4.) / disc
+/// 编辑舞台三圈各自的方向数与半格偏移；空圈也给出几何，以便显示可放置的空格。
+pub type RingGeometry = [(u8, bool); 3];
+
+fn editor_scale(size: f32) -> f32 {
+    (size / 2. - 4.) / EXPLICIT_DISC
 }
 
-/// 管理页预览的槽位命中；`point` 为相对舞台左上角的逻辑像素，与扇区一致按方向和圈号判断。
-pub fn preview_hit(definition: &WheelDefinition, size: f32, point: (f32, f32)) -> Option<usize> {
-    let scale = preview_scale(definition, size);
-    let center = wheel_size(definition) / 2.;
-    hit_slot_for_definition(
-        (
-            center + (point.0 - size / 2.) / scale,
-            center + (point.1 - size / 2.) / scale,
-        ),
-        definition,
-    )
+fn editor_angle(sector: u8, (sectors, half_step): (u8, bool)) -> f32 {
+    position_angle(&WheelPosition {
+        ring: 0,
+        sector,
+        sectors,
+        half_step,
+    })
 }
 
-/// 管理页的缩略预览，与浮动轮盘共用扇区绘制；选中项是正在编辑的槽位，`ready` 标出无法执行的槽位。
-/// `bounds` 记下舞台在窗口中的位置，供点击时换算为舞台坐标。
-pub fn preview_stage(
+/// 编辑舞台的格子命中：圈按相邻圈带的中线划分，方向与运行时分槽一致；中心和盘外不命中。
+pub fn editor_hit(geometry: &RingGeometry, size: f32, point: (f32, f32)) -> Option<(u8, u8)> {
+    let scale = editor_scale(size);
+    let (dx, dy) = ((point.0 - size / 2.) / scale, (point.1 - size / 2.) / scale);
+    let radius = dx.hypot(dy);
+    if !radius.is_finite() || radius <= POINTER_RADIUS || radius > EXPLICIT_BEZEL.0 {
+        return None;
+    }
+    let ring = EXPLICIT_BANDS
+        .windows(2)
+        .position(|pair| radius < (pair[0].1 + pair[1].0) / 2.)
+        .unwrap_or(EXPLICIT_BANDS.len() - 1);
+    let (sectors, half_step) = geometry[ring];
+    let angle = dx.atan2(-dy).rem_euclid(TAU);
+    let offset = if half_step { 0.5 } else { 0. };
+    let sector = ((angle / TAU * f32::from(sectors) - offset + 0.5).floor() as i32)
+        .rem_euclid(i32::from(sectors));
+    Some((ring as u8, sector as u8))
+}
+
+/// 管理页的编辑舞台：三圈全部方向都画成格子，空格显示“+”，动作格显示名称。
+/// `definition` 须为方位布局；`moving` 时其余格子提亮，提示点选目标。
+pub fn editor_stage(
     definition: &WheelDefinition,
-    selected: Option<usize>,
+    geometry: &RingGeometry,
+    selected: Option<(u8, u8)>,
+    moving: bool,
     ready: impl Fn(usize) -> bool,
     size: f32,
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
 ) -> Div {
     let color = accent_color(definition.accent);
-    let explicit = explicit_layout(definition);
-    let valid = layout_valid(definition);
-    let scale = preview_scale(definition, size);
+    let scale = editor_scale(size);
     let center = size / 2.;
-    let source_center = wheel_size(definition) / 2.;
-    let count = if valid { definition.slots.len() } else { 0 };
-    let selected = selected.filter(|&slot| slot < count);
-    let states: Vec<bool> = (0..definition.slots.len()).map(ready).collect();
-    let ready = |slot: usize| states.get(slot).copied().unwrap_or(false);
-    let art = wheel_art(Some(definition), color, selected, ready);
+    let mut art = WheelArt {
+        color,
+        wedges: Vec::new(),
+        bezel: EXPLICIT_BEZEL,
+        ticks: 120,
+        chevrons: Vec::new(),
+        focus: None,
+    };
+    let mut labels = Vec::new();
+    for (ring, band) in EXPLICIT_BANDS.into_iter().enumerate() {
+        let ring_geometry = geometry[ring];
+        let half = PI / f32::from(ring_geometry.0);
+        for sector in 0..ring_geometry.0 {
+            let slot = definition.slots.iter().position(|slot| {
+                slot.position.is_some_and(|position| {
+                    usize::from(position.ring) == ring && position.sector == sector
+                })
+            });
+            let middle = editor_angle(sector, ring_geometry);
+            let span = (middle - half, middle + half);
+            let is_selected = selected == Some((ring as u8, sector));
+            let ready = slot.is_none_or(&ready);
+            let tone = if ready { color } else { UNAVAILABLE };
+            let (fill, edge) = match (is_selected, slot) {
+                (true, _) => (
+                    theme::gradient(
+                        middle.to_degrees(),
+                        theme::hsla(tone, 0.1),
+                        theme::hsla(tone, 0.4),
+                    ),
+                    theme::hsla(tone, 0.8),
+                ),
+                (false, Some(_)) => (
+                    theme::gradient(
+                        middle.to_degrees(),
+                        theme::hsla(0x151c2a, 0.98),
+                        theme::hsla(0x212b3e, 0.98),
+                    ),
+                    if !ready {
+                        theme::hsla(theme::RECORD, 0.3)
+                    } else if moving {
+                        theme::hsla(color, 0.45)
+                    } else {
+                        theme::hsla(0x9fb2d6, 0.14)
+                    },
+                ),
+                (false, None) => (
+                    theme::hsla(0x8fa3c4, 0.035).into(),
+                    theme::hsla(
+                        if moving { color } else { 0x8fa3c4 },
+                        if moving { 0.4 } else { 0.08 },
+                    ),
+                ),
+            };
+            art.wedges.push(Wedge {
+                band,
+                span,
+                fill,
+                edge,
+            });
+            if is_selected {
+                art.focus = Some(Focus {
+                    band,
+                    span,
+                    color: tone,
+                });
+            }
+            let radius = (band.0 + band.1) / 2.;
+            let width = (TAU * radius / f32::from(ring_geometry.0) * 0.86)
+                .min(band.1 - band.0 + 24.)
+                * scale;
+            let (x, y) = (
+                center + middle.sin() * radius * scale,
+                center - middle.cos() * radius * scale,
+            );
+            let text = match slot {
+                Some(slot) => div()
+                    .max_w(px(width))
+                    .truncate()
+                    .text_size(px(if ring_geometry.0 > 12 { 11. } else { 12.5 }))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(match (ready, is_selected) {
+                        (false, _) => theme::TEXT_DIM,
+                        (true, true) => theme::TEXT,
+                        (true, false) => theme::TEXT_SOFT,
+                    }))
+                    .child(definition.slots[slot].label.clone()),
+                None => div()
+                    .text_size(px(15.))
+                    .text_color(theme::hsla(
+                        if is_selected { color } else { 0x8fa3c4 },
+                        if is_selected { 1. } else { 0.3 },
+                    ))
+                    .child("+"),
+            };
+            labels.push(
+                div()
+                    .absolute()
+                    .left(px(x - width / 2.))
+                    .top(px(y - 10.))
+                    .w(px(width))
+                    .h(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(text),
+            );
+        }
+    }
     let hub_radius = HUB_RADIUS * scale;
-    let tone = selected.map_or(color, |slot| if ready(slot) { color } else { UNAVAILABLE });
     let hub = div()
         .absolute()
         .left(px(center - hub_radius))
@@ -1422,123 +1538,25 @@ pub fn preview_stage(
             theme::hsla(0x080b12, 1.),
         ))
         .border_1()
-        .border_color(theme::hsla(
-            tone,
-            if selected.is_some() { 0.62 } else { 0.24 },
-        ))
-        .shadow(theme::glow(
-            tone,
-            if selected.is_some() { 0.22 } else { 0.08 },
-            16.,
-        ))
+        .border_color(theme::hsla(color, 0.4))
         .flex()
-        .flex_col()
         .items_center()
         .justify_center()
-        .gap(px(2.))
         .child(
             div()
-                .font_family(theme::MONO_FONT)
-                .font_weight(FontWeight::BOLD)
-                .text_size(px(match (explicit, selected.is_some()) {
-                    (false, true) => 17.,
-                    (true, _) => 11.,
-                    (false, false) => 9.,
-                }))
-                .text_color(theme::hsla(tone, if selected.is_some() { 1. } else { 0.8 }))
-                .child(match selected {
-                    Some(slot) => format!("{:02}", slot + 1),
-                    None if explicit => format!("{count}"),
-                    None => "ORBIT".into(),
-                }),
-        )
-        .when(!explicit, |hub| {
-            hub.child(
-                div()
-                    .w(px(hub_radius * 2. - 14.))
-                    .truncate()
-                    .text_center()
-                    .text_size(px(10.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(theme::TEXT))
-                    .child(match selected {
-                        Some(slot) => definition.slots[slot].label.clone(),
-                        None => format!("{count} 个动作"),
-                    }),
-            )
-        });
-    let labels = (0..count).filter_map(|slot| {
-        let (x, y) = label_center(definition, slot)?;
-        let (x, y) = (
-            center + (x - source_center) * scale,
-            center + (y - source_center) * scale,
+                .w(px(hub_radius * 2. - 10.))
+                .truncate()
+                .text_center()
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme::TEXT_SOFT))
+                .child(definition.name.clone()),
         );
-        let (width, height) = if explicit {
-            (24., 14.)
-        } else {
-            (NODE_WIDTH * scale, NODE_HEIGHT * scale)
-        };
-        let selected = selected == Some(slot);
-        let ready = ready(slot);
-        Some(
-            div()
-                .absolute()
-                .left(px(x - width / 2.))
-                .top(px(y - height / 2.))
-                .w(px(width))
-                .h(px(height))
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(2.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(3.))
-                        .child(
-                            div()
-                                .font_family(theme::MONO_FONT)
-                                .text_size(px(if explicit { 8.5 } else { 9. }))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(theme::hsla(
-                                    if ready { color } else { theme::TEXT_DIM },
-                                    if selected { 1. } else { 0.72 },
-                                ))
-                                .child(format!("{:02}", slot + 1)),
-                        )
-                        .when(!explicit && !ready, |header| {
-                            header.child(theme::icon(Icon::Alert, 9., theme::RECORD))
-                        }),
-                )
-                .when(!explicit, |label| {
-                    label.child(
-                        div()
-                            .max_w(px(width - 4.))
-                            .truncate()
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(match (ready, selected) {
-                                (false, _) => theme::TEXT_DIM,
-                                (true, true) => theme::TEXT,
-                                (true, false) => theme::TEXT_SOFT,
-                            }))
-                            .child(definition.slots[slot].label.clone()),
-                    )
-                }),
-        )
-    });
     div()
         .relative()
         .flex_none()
         .size(px(size))
-        .child(disc(
-            center,
-            if explicit { EXPLICIT_DISC } else { LEGACY_DISC } * scale,
-            color,
-            14.,
-        ))
+        .child(disc(center, EXPLICIT_DISC * scale, color, 18.))
         .child(
             canvas(
                 move |stage, _, _| bounds.set(Some(stage)),
@@ -1811,48 +1829,43 @@ mod tests {
                 }
             }
         }
-        // 管理页预览按缩放后的同一扇区命中，文字中心落在自己的扇区上。
-        let size = 340.;
-        for definition in &layouts {
-            let scale = preview_scale(definition, size);
-            let center = wheel_size(definition) / 2.;
-            let disc = if explicit_layout(definition) {
-                EXPLICIT_DISC
-            } else {
-                LEGACY_DISC
-            };
-            assert!(disc * scale <= size / 2.);
-            let stage = |(x, y): (f32, f32)| {
-                (
-                    size / 2. + (x - center) * scale,
-                    size / 2. + (y - center) * scale,
-                )
-            };
-            for slot in 0..definition.slots.len() {
-                let (inner, outer) = slot_band(definition, slot).unwrap();
-                let (start, end) = slot_span(definition, slot).unwrap();
-                let middle = (start + end) / 2.;
-                for radius in [inner + 1., (inner + outer) / 2., outer - 1.] {
-                    let point = stage((
-                        center + middle.sin() * radius,
-                        center - middle.cos() * radius,
-                    ));
-                    assert_eq!(preview_hit(definition, size, point), Some(slot));
-                }
-                let label = stage(label_center(definition, slot).unwrap());
-                assert_eq!(preview_hit(definition, size, label), Some(slot));
-            }
-            assert_eq!(preview_hit(definition, size, (size / 2., size / 2.)), None);
-        }
-        // 稀疏布局中间圈正上方是空方位，预览点击不选中任何槽位。
-        let sparse = &layouts[1];
-        let empty = (size / 2., size / 2. - 242. * preview_scale(sparse, size));
-        assert_eq!(preview_hit(sparse, size, empty), None);
 
         assert!(angle_within(0.05, (-0.2, 0.2)));
         assert!(angle_within(TAU - 0.05, (-0.2, 0.2)));
         assert!(!angle_within(PI, (-0.2, 0.2)));
         assert!(angle_within(PI, (0., TAU)));
+    }
+
+    #[test]
+    fn editor_hit_maps_every_cell_and_ignores_hub_and_outside() {
+        let geometry: RingGeometry = [(8, false), (16, true), (5, false)];
+        let size = 520.;
+        let scale = editor_scale(size);
+        let at = |angle: f32, radius: f32| {
+            (
+                size / 2. + angle.sin() * radius * scale,
+                size / 2. - angle.cos() * radius * scale,
+            )
+        };
+        for (ring, &(inner, outer)) in EXPLICIT_BANDS.iter().enumerate() {
+            let layout = geometry[ring];
+            for sector in 0..layout.0 {
+                let middle = editor_angle(sector, layout);
+                let half = TAU / f32::from(layout.0) / 2. - 0.01;
+                for radius in [inner + 1., (inner + outer) / 2., outer - 1.] {
+                    for angle in [middle - half, middle, middle + half] {
+                        assert_eq!(
+                            editor_hit(&geometry, size, at(angle, radius)),
+                            Some((ring as u8, sector)),
+                            "ring {ring} sector {sector} radius {radius}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(editor_hit(&geometry, size, (size / 2., size / 2.)), None);
+        assert_eq!(editor_hit(&geometry, size, at(0., HUB_RADIUS)), None);
+        assert_eq!(editor_hit(&geometry, size, at(0., EXPLICIT_DISC)), None);
     }
 
     #[test]

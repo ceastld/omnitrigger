@@ -1,6 +1,8 @@
 //! 轮盘管理与执行协调；浮窗只提交选择，不在输入 Hook 内执行动作。
 use crate::{
+    radial_wheel::RingGeometry,
     wheels::{WheelDefinition, WheelPosition, WheelSlot},
+    window_action::{WindowAction, WindowOperation},
     ActionSpec, Activation, BackendCommand, Bounds, Context, HitSource, Page, RadialWheel,
     RawWindowHandle, ShortcutAction, WheelAccent, WheelActionRef, WheelRequest, Wheels,
     WindowBackgroundAppearance, WindowBounds, WindowHandle, WindowKind, WindowOptions, Workspace,
@@ -29,35 +31,44 @@ struct DragPlacement {
     scale: f32,
 }
 
-/// 显式布局保留空方向；新增动作填入已有圈中的首个空位。
-pub(super) fn next_slot_position(wheel: &WheelDefinition) -> Option<crate::wheels::WheelPosition> {
-    let _ = wheel.slots.first()?.position?;
-    for ring in 0..=2 {
-        let Some(template) = wheel
-            .slots
-            .iter()
-            .filter_map(|slot| slot.position)
-            .find(|position| position.ring == ring)
-        else {
-            continue;
-        };
-        for sector in 0..template.sectors {
-            if !wheel
-                .slots
-                .iter()
-                .filter_map(|slot| slot.position)
-                .any(|position| position.ring == ring && position.sector == sector)
-            {
-                return Some(crate::wheels::WheelPosition { sector, ..template });
-            }
-        }
-    }
-    None
-}
-
 pub(super) const RING_NAMES: [&str; 3] = ["内圈", "中圈", "外圈"];
 /// 尚无动作的圈首次放入槽位时使用的方向数。
 const DEFAULT_SECTORS: u8 = 8;
+
+/// 格子面板中的常用动作，点一下即放入。
+pub(super) enum Preset {
+    Keys(&'static str),
+    Window(WindowOperation),
+}
+
+pub(super) const WHEEL_PRESETS: [(&str, Preset); 12] = [
+    ("复制", Preset::Keys("Ctrl+C")),
+    ("粘贴", Preset::Keys("Ctrl+V")),
+    ("撤销", Preset::Keys("Ctrl+Z")),
+    ("全选", Preset::Keys("Ctrl+A")),
+    ("关闭标签", Preset::Keys("Ctrl+W")),
+    ("新标签", Preset::Keys("Ctrl+T")),
+    ("后退", Preset::Keys("Alt+Left")),
+    ("前进", Preset::Keys("Alt+Right")),
+    ("截图", Preset::Keys("Win+Shift+S")),
+    ("最小化", Preset::Window(WindowOperation::Minimize)),
+    (
+        "最大化 / 恢复",
+        Preset::Window(WindowOperation::ToggleMaximize),
+    ),
+    ("关闭窗口", Preset::Window(WindowOperation::Close)),
+];
+
+pub(super) fn preset_action(preset: &Preset) -> ActionSpec {
+    match preset {
+        Preset::Keys(keys) => {
+            ActionSpec::SendShortcut(ShortcutAction::parse(keys).expect("常用快捷键可以解析"))
+        }
+        Preset::Window(operation) => ActionSpec::Window(WindowAction {
+            operation: *operation,
+        }),
+    }
+}
 
 /// 圈的方向数与半格偏移由该圈已有槽位决定；空圈返回 `None`。
 pub(super) fn ring_geometry(wheel: &WheelDefinition, ring: u8) -> Option<(u8, bool)> {
@@ -69,12 +80,91 @@ pub(super) fn ring_geometry(wheel: &WheelDefinition, ring: u8) -> Option<(u8, bo
         .map(|position| (position.sectors, position.half_step))
 }
 
+/// 三圈的显示几何；空圈按默认方向数显示可放置的空格。
+pub(super) fn view_geometry(view: &WheelDefinition) -> RingGeometry {
+    std::array::from_fn(|ring| ring_geometry(view, ring as u8).unwrap_or((DEFAULT_SECTORS, false)))
+}
+
 /// 返回占用该方位的槽位序号。
 pub(super) fn slot_at(wheel: &WheelDefinition, ring: u8, sector: u8) -> Option<usize> {
     wheel.slots.iter().position(|slot| {
         slot.position
             .is_some_and(|position| position.ring == ring && position.sector == sector)
     })
+}
+
+/// 编辑时取出一组槽位：通用布局或某个应用的专用布局；均分布局转为方位布局。
+pub(super) fn scope_view(wheel: &WheelDefinition, scope: Option<&str>) -> WheelDefinition {
+    let mut view = wheel.clone();
+    if let Some(application) = scope.and_then(|process| {
+        wheel
+            .app_overrides
+            .iter()
+            .find(|application| application.process == process)
+    }) {
+        view.slots = application.slots.clone();
+    }
+    view.app_overrides.clear();
+    convert_to_positions(&mut view);
+    view
+}
+
+/// 把编辑后的槽位写回对应的布局。
+pub(super) fn store_view(wheel: &mut WheelDefinition, scope: Option<&str>, view: WheelDefinition) {
+    match scope.and_then(|process| {
+        wheel
+            .app_overrides
+            .iter_mut()
+            .find(|application| application.process == process)
+    }) {
+        Some(application) => application.slots = view.slots,
+        None => wheel.slots = view.slots,
+    }
+}
+
+/// 在格子上放入动作：已有动作时替换名称与动作，空格新增槽位并沿用该圈几何。
+pub(super) fn put_action(
+    view: &mut WheelDefinition,
+    (ring, sector): (u8, u8),
+    label: String,
+    action: ActionSpec,
+) -> Result<(), String> {
+    if let Some(slot) = slot_at(view, ring, sector) {
+        view.slots[slot].label = label;
+        view.slots[slot].action = action;
+        return Ok(());
+    }
+    if view.slots.len() >= 48 {
+        return Err("每组轮盘最多放 48 个动作。".into());
+    }
+    let (sectors, half_step) = ring_geometry(view, ring).unwrap_or((DEFAULT_SECTORS, false));
+    if sector >= sectors {
+        return Err("这个格子已不存在，请重新选择。".into());
+    }
+    view.slots.push(WheelSlot {
+        label,
+        action,
+        position: Some(WheelPosition {
+            ring,
+            sector,
+            sectors,
+            half_step,
+        }),
+    });
+    Ok(())
+}
+
+/// 移除格子上的动作；每组至少保留一个动作。
+pub(super) fn remove_at(
+    view: &mut WheelDefinition,
+    (ring, sector): (u8, u8),
+) -> Result<(), String> {
+    let slot = slot_at(view, ring, sector).ok_or("这个格子是空的。")?;
+    if view.slots.len() <= 1 {
+        return Err("轮盘至少保留一个动作。".into());
+    }
+    view.slots.remove(slot);
+    Ok(())
 }
 
 /// 把槽位移到指定圈与方向；目标方向已有动作时两者互换，空圈按默认 8 个方向启用。
@@ -88,11 +178,10 @@ pub(super) fn place_slot(
         .slots
         .get(slot)
         .and_then(|entry| entry.position)
-        .ok_or("只有方位布局可以调整方向，请先改用方位布局。")?;
-    let name = RING_NAMES.get(usize::from(ring)).ok_or("圈号应为 0–2。")?;
+        .ok_or("要移动的动作已不存在。")?;
     let (sectors, half_step) = ring_geometry(wheel, ring).unwrap_or((DEFAULT_SECTORS, false));
     if sector >= sectors {
-        return Err(format!("{name}只有 {sectors} 个方向。"));
+        return Err("这个格子已不存在，请重新选择。".into());
     }
     match slot_at(wheel, ring, sector) {
         Some(other) if other == slot => return Ok(()),
@@ -108,31 +197,6 @@ pub(super) fn place_slot(
     Ok(())
 }
 
-/// 切换圈时优先保留原方向编号，被占用或超出范围时取该圈第一个空方向。
-pub(super) fn move_slot_to_ring(
-    wheel: &mut WheelDefinition,
-    slot: usize,
-    ring: u8,
-) -> Result<(), String> {
-    let current = wheel
-        .slots
-        .get(slot)
-        .and_then(|entry| entry.position)
-        .ok_or("只有方位布局可以调整方向，请先改用方位布局。")?;
-    if current.ring == ring {
-        return Ok(());
-    }
-    let name = RING_NAMES.get(usize::from(ring)).ok_or("圈号应为 0–2。")?;
-    let sectors = ring_geometry(wheel, ring).map_or(DEFAULT_SECTORS, |(sectors, _)| sectors);
-    let sector = std::iter::once(current.sector)
-        .chain(0..sectors)
-        .find(|sector| *sector < sectors && slot_at(wheel, ring, *sector).is_none())
-        .ok_or(format!(
-            "{name}已没有空方向，可增加方向数或直接点选方向互换。"
-        ))?;
-    place_slot(wheel, slot, ring, sector)
-}
-
 /// 调整整圈的方向数与半格偏移；已有动作会超出新方向数时拒绝，不替用户挪动布局。
 pub(super) fn set_ring_layout(
     wheel: &mut WheelDefinition,
@@ -142,18 +206,15 @@ pub(super) fn set_ring_layout(
 ) -> Result<(), String> {
     let name = RING_NAMES.get(usize::from(ring)).ok_or("圈号应为 0–2。")?;
     if !(1..=16).contains(&sectors) {
-        return Err("每圈方向数应为 1–16。".into());
+        return Err("每圈格数应为 1–16。".into());
     }
-    if let Some(position) = wheel
+    if wheel
         .slots
         .iter()
         .filter_map(|slot| slot.position)
-        .find(|position| position.ring == ring && position.sector >= sectors)
+        .any(|position| position.ring == ring && position.sector >= sectors)
     {
-        return Err(format!(
-            "{name}方向 {} 已有动作，先把它移到其他方向再减少方向数。",
-            position.sector + 1
-        ));
+        return Err(format!("{name}最后几格还有动作，先把它们移走再减少格数。"));
     }
     for position in wheel
         .slots
@@ -180,18 +241,6 @@ pub(super) fn convert_to_positions(wheel: &mut WheelDefinition) {
             sectors,
             half_step: false,
         });
-    }
-}
-
-pub(super) fn wheel_has_room(wheel: &WheelDefinition) -> bool {
-    if wheel
-        .slots
-        .first()
-        .is_some_and(|slot| slot.position.is_some())
-    {
-        next_slot_position(wheel).is_some()
-    } else {
-        wheel.slots.len() < 8
     }
 }
 
@@ -255,7 +304,7 @@ impl Workspace {
     pub(super) fn reload_wheels(&mut self, cx: &mut Context<Self>) {
         match Wheels::load(&crate::settings::path()) {
             Ok(wheels) => {
-                let slot = self.wheel_slot_selected;
+                let (cell, scope) = (self.wheel_cell, self.wheel_scope.clone());
                 self.apply_wheels(wheels, cx);
                 let id = self
                     .wheel_selected
@@ -266,9 +315,9 @@ impl Workspace {
                     Some(id) => self.select_wheel(id, cx),
                     None => self.wheel_selected = None,
                 }
-                if let Some(slot) = slot {
-                    self.select_wheel_slot(slot, cx);
-                }
+                self.wheel_scope = scope;
+                self.wheel_cell = cell;
+                self.load_wheel_cell(cx);
                 self.status = "已重新载入轮盘配置。".into();
             }
             Err(error) => {
@@ -304,57 +353,255 @@ impl Workspace {
         cx.notify();
     }
 
-    fn edit_selected_wheel(
+    /// 当前编辑的应用范围；所选应用已不在专用布局中时回到通用布局。
+    fn wheel_scope_for(&self, wheel: &WheelDefinition) -> Option<String> {
+        self.wheel_scope.clone().filter(|process| {
+            wheel
+                .app_overrides
+                .iter()
+                .any(|application| &application.process == process)
+        })
+    }
+
+    /// 选中轮盘在当前应用范围下的槽位，均分布局已转为方位布局。
+    pub(super) fn wheel_view(&self) -> Option<WheelDefinition> {
+        let wheel = self.wheels.wheels.get(self.selected_wheel_index()?)?;
+        Some(scope_view(wheel, self.wheel_scope_for(wheel).as_deref()))
+    }
+
+    /// 修改当前范围的槽位并立即保存；成功后按选中格子刷新面板。
+    fn edit_wheel_view(
         &mut self,
+        status: impl Into<String>,
         cx: &mut Context<Self>,
-        edit: impl FnOnce(&mut WheelDefinition, Option<usize>) -> Result<(), String>,
-    ) {
+        edit: impl FnOnce(&mut WheelDefinition) -> Result<(), String>,
+    ) -> bool {
         let Some(index) = self.selected_wheel_index() else {
+            return false;
+        };
+        let mut proposed = self.wheels.clone();
+        let wheel = &mut proposed.wheels[index];
+        let scope = self.wheel_scope_for(wheel);
+        let mut view = scope_view(wheel, scope.as_deref());
+        if let Err(error) = edit(&mut view) {
+            self.error = Some(error);
+            cx.notify();
+            return false;
+        }
+        store_view(wheel, scope.as_deref(), view);
+        if !self.commit_wheels(proposed, cx) {
+            return false;
+        }
+        self.status = status.into();
+        self.load_wheel_cell(cx);
+        true
+    }
+
+    /// 按选中格子同步槽位序号与面板输入。
+    fn load_wheel_cell(&mut self, cx: &mut Context<Self>) {
+        let slot = self
+            .wheel_view()
+            .zip(self.wheel_cell)
+            .and_then(|(view, (ring, sector))| {
+                slot_at(&view, ring, sector).map(|index| (index, view.slots[index].clone()))
+            });
+        self.wheel_slot_selected = slot.as_ref().map(|(index, _)| *index);
+        let label = slot
+            .as_ref()
+            .map(|(_, slot)| slot.label.clone())
+            .unwrap_or_default();
+        self.wheel_slot_label
+            .update(cx, |input, cx| input.set_text(label, cx));
+        if let Some((_, slot)) = &slot {
+            if let ActionSpec::Local(action) = &slot.action {
+                self.wheel_local_editor.load(action, cx);
+            }
+        }
+        self.wheel_slot_shortcut
+            .update(cx, |input, cx| input.set_text("", cx));
+    }
+
+    /// 名称在离开格子前自动保存；内容未变或为空时不写文件。
+    fn flush_wheel_label(&mut self, cx: &mut Context<Self>) {
+        let Some((view, (ring, sector))) = self.wheel_view().zip(self.wheel_cell) else {
             return;
         };
-        let slot = self.wheel_slot_selected;
-        let mut proposed = self.wheels.clone();
-        if let Err(error) = edit(&mut proposed.wheels[index], slot) {
-            self.error = Some(error);
+        let Some(slot) = slot_at(&view, ring, sector) else {
+            return;
+        };
+        let label = self.wheel_slot_label.read(cx).text().trim().to_string();
+        if label.is_empty() || label == view.slots[slot].label {
+            return;
+        }
+        self.edit_wheel_view("名称已保存。", cx, |view| {
+            view.slots[slot].label = label;
+            Ok(())
+        });
+    }
+
+    /// 点格子：移动中则把动作移到这里（有动作就互换），否则选中或取消选中。
+    pub(super) fn select_wheel_cell(&mut self, cell: (u8, u8), cx: &mut Context<Self>) {
+        if self.wheel_moving {
+            self.wheel_moving = false;
+            if let Some(from) = self.wheel_cell.filter(|from| *from != cell) {
+                if self.edit_wheel_view("已移动。", cx, |view| {
+                    let slot = slot_at(view, from.0, from.1).ok_or("要移动的动作已不存在。")?;
+                    place_slot(view, slot, cell.0, cell.1)
+                }) {
+                    self.wheel_cell = Some(cell);
+                    self.load_wheel_cell(cx);
+                }
+            }
             cx.notify();
             return;
         }
-        if self.commit_wheels(proposed, cx) {
-            if let Some(slot) = slot {
-                self.select_wheel_slot(slot, cx);
+        self.flush_wheel_label(cx);
+        self.wheel_cell = (self.wheel_cell != Some(cell)).then_some(cell);
+        self.wheel_replacing = false;
+        self.wheel_source_binding = None;
+        self.load_wheel_cell(cx);
+        cx.notify();
+    }
+
+    pub(super) fn deselect_wheel_cell(&mut self, cx: &mut Context<Self>) {
+        self.flush_wheel_label(cx);
+        self.wheel_cell = None;
+        self.wheel_moving = false;
+        self.wheel_replacing = false;
+        self.load_wheel_cell(cx);
+        cx.notify();
+    }
+
+    pub(super) fn set_wheel_moving(&mut self, moving: bool, cx: &mut Context<Self>) {
+        self.flush_wheel_label(cx);
+        self.wheel_moving = moving;
+        cx.notify();
+    }
+
+    pub(super) fn set_wheel_replacing(&mut self, replacing: bool, cx: &mut Context<Self>) {
+        self.flush_wheel_label(cx);
+        self.wheel_replacing = replacing;
+        self.wheel_source_binding = None;
+        cx.notify();
+    }
+
+    pub(super) fn set_wheel_scope(&mut self, scope: Option<String>, cx: &mut Context<Self>) {
+        self.flush_wheel_label(cx);
+        self.wheel_scope = scope;
+        self.wheel_cell = None;
+        self.wheel_moving = false;
+        self.wheel_replacing = false;
+        self.load_wheel_cell(cx);
+        cx.notify();
+    }
+
+    fn put_wheel_action(&mut self, label: String, action: ActionSpec, cx: &mut Context<Self>) {
+        let Some(cell) = self.wheel_cell else {
+            return;
+        };
+        let status = format!("已放入“{label}”。");
+        if self.edit_wheel_view(status, cx, |view| put_action(view, cell, label, action)) {
+            self.wheel_replacing = false;
+        }
+    }
+
+    pub(super) fn put_wheel_preset(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some((label, preset)) = WHEEL_PRESETS.get(index) {
+            self.put_wheel_action((*label).into(), preset_action(preset), cx);
+        }
+    }
+
+    /// 自定义快捷键以按键写法作为初始名称，放入后可在面板里改名。
+    pub(super) fn put_wheel_shortcut(&mut self, cx: &mut Context<Self>) {
+        match ShortcutAction::parse(&self.wheel_slot_shortcut.read(cx).text()) {
+            Ok(shortcut) => {
+                let label = shortcut.display().chars().take(30).collect();
+                self.put_wheel_action(label, ActionSpec::SendShortcut(shortcut), cx);
+            }
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
             }
         }
     }
 
-    pub(super) fn place_wheel_slot(&mut self, ring: u8, sector: u8, cx: &mut Context<Self>) {
-        self.edit_selected_wheel(cx, |wheel, slot| {
-            place_slot(wheel, slot.ok_or("请先选择槽位。")?, ring, sector)
-        });
+    pub(super) fn put_wheel_local_action(&mut self, cx: &mut Context<Self>) {
+        self.put_wheel_action(
+            "本地动作".into(),
+            ActionSpec::Local(crate::local_editor::initial_action()),
+            cx,
+        );
     }
 
-    pub(super) fn move_wheel_slot_ring(&mut self, ring: u8, cx: &mut Context<Self>) {
-        self.edit_selected_wheel(cx, |wheel, slot| {
-            move_slot_to_ring(wheel, slot.ok_or("请先选择槽位。")?, ring)
-        });
+    /// 复制已有触发器的动作；之后与原触发器互不影响。
+    pub(super) fn put_wheel_binding(&mut self, binding_id: u64, cx: &mut Context<Self>) {
+        let Some(binding) = self.binding(binding_id).cloned() else {
+            return;
+        };
+        if matches!(
+            binding.action,
+            ActionSpec::ShowPanel | ActionSpec::ShowWheel(_)
+        ) {
+            return;
+        }
+        let label: String = binding.message.trim().chars().take(30).collect();
+        let label = if label.is_empty() {
+            "动作".into()
+        } else {
+            label
+        };
+        self.put_wheel_action(label, binding.action, cx);
     }
 
-    pub(super) fn set_wheel_ring_layout(
-        &mut self,
-        ring: u8,
-        sectors: u8,
-        half_step: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.edit_selected_wheel(cx, |wheel, _| {
-            set_ring_layout(wheel, ring, sectors, half_step)
-        });
-    }
-
-    pub(super) fn convert_wheel_to_positions(&mut self, cx: &mut Context<Self>) {
-        self.edit_selected_wheel(cx, |wheel, _| {
-            convert_to_positions(wheel);
+    pub(super) fn save_wheel_local(&mut self, cx: &mut Context<Self>) {
+        let Some((ring, sector)) = self.wheel_cell else {
+            return;
+        };
+        let action = match self.wheel_local_editor.snapshot(cx) {
+            Ok(action) => action,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
+        self.flush_wheel_label(cx);
+        self.edit_wheel_view("本地动作已保存。", cx, |view| {
+            let slot = slot_at(view, ring, sector).ok_or("这个格子是空的。")?;
+            view.slots[slot].action = ActionSpec::Local(action);
             Ok(())
         });
+    }
+
+    pub(super) fn remove_wheel_cell(&mut self, cx: &mut Context<Self>) {
+        if let Some(cell) = self.wheel_cell {
+            self.edit_wheel_view("已移除。", cx, |view| remove_at(view, cell));
+        }
+    }
+
+    pub(super) fn resize_wheel_ring(&mut self, ring: u8, delta: i8, cx: &mut Context<Self>) {
+        let Some((sectors, half_step)) = self
+            .wheel_view()
+            .and_then(|view| ring_geometry(&view, ring))
+        else {
+            return;
+        };
+        let Some(next) = sectors
+            .checked_add_signed(delta)
+            .filter(|next| (2..=16).contains(next))
+        else {
+            return;
+        };
+        let status = format!("{}改为 {next} 格。", RING_NAMES[usize::from(ring)]);
+        self.edit_wheel_view(status, cx, |view| {
+            set_ring_layout(view, ring, next, half_step)
+        });
+    }
+
+    /// 切换轮盘前先保存正在编辑的名称。
+    pub(super) fn switch_wheel(&mut self, id: String, cx: &mut Context<Self>) {
+        self.flush_wheel_label(cx);
+        self.select_wheel(id, cx);
     }
 
     pub(super) fn select_wheel(&mut self, id: String, cx: &mut Context<Self>) {
@@ -365,14 +612,14 @@ impl Workspace {
         self.smooth_scroll.cancel("wheel-editor-content");
         self.smooth_scroll.cancel("wheel-source-list");
         self.wheel_selected = Some(id);
-        self.wheel_slot_selected = None;
+        self.wheel_cell = None;
+        self.wheel_moving = false;
+        self.wheel_replacing = false;
+        self.wheel_scope = None;
         self.wheel_source_binding = None;
         self.wheel_name
             .update(cx, |input, cx| input.set_text(name, cx));
-        self.wheel_slot_label
-            .update(cx, |input, cx| input.set_text("", cx));
-        self.wheel_slot_shortcut
-            .update(cx, |input, cx| input.set_text("Ctrl+C", cx));
+        self.load_wheel_cell(cx);
         cx.notify();
     }
 
@@ -420,171 +667,6 @@ impl Workspace {
         self.commit_wheels(proposed, cx);
     }
 
-    pub(super) fn select_wheel_slot(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(wheel_index) = self.selected_wheel_index() else {
-            return;
-        };
-        let Some(slot) = self.wheels.wheels[wheel_index].slots.get(index).cloned() else {
-            return;
-        };
-        self.smooth_scroll.cancel("wheel-editor-content");
-        self.wheel_slot_selected = Some(index);
-        self.wheel_slot_label
-            .update(cx, |input, cx| input.set_text(slot.label, cx));
-        if let ActionSpec::Local(action) = &slot.action {
-            self.wheel_local_editor.load(action, cx);
-        }
-        let shortcut = match slot.action {
-            ActionSpec::SendShortcut(shortcut) => shortcut.display(),
-            _ => String::new(),
-        };
-        self.wheel_slot_shortcut
-            .update(cx, |input, cx| input.set_text(shortcut, cx));
-        cx.notify();
-    }
-
-    pub(super) fn add_wheel_shortcut(&mut self, cx: &mut Context<Self>) {
-        let Some(index) = self.selected_wheel_index() else {
-            return;
-        };
-        let shortcut = match ShortcutAction::parse(&self.wheel_slot_shortcut.read(cx).text()) {
-            Ok(shortcut) => shortcut,
-            Err(error) => {
-                self.error = Some(error);
-                cx.notify();
-                return;
-            }
-        };
-        let label = self.wheel_slot_label.read(cx).text().trim().to_string();
-        let label = if label.is_empty() {
-            "新快捷键".into()
-        } else {
-            label
-        };
-        let mut proposed = self.wheels.clone();
-        let slot_index = proposed.wheels[index].slots.len();
-        if !wheel_has_room(&proposed.wheels[index]) {
-            self.error = Some("当前布局没有空余方向。".into());
-            cx.notify();
-            return;
-        }
-        let position = next_slot_position(&proposed.wheels[index]);
-        proposed.wheels[index].slots.push(WheelSlot {
-            label,
-            action: ActionSpec::SendShortcut(shortcut),
-            position,
-        });
-        if self.commit_wheels(proposed, cx) {
-            self.select_wheel_slot(slot_index, cx);
-        }
-    }
-
-    pub(super) fn add_wheel_local_action(&mut self, cx: &mut Context<Self>) {
-        let Some(index) = self.selected_wheel_index() else {
-            return;
-        };
-        if !wheel_has_room(&self.wheels.wheels[index]) {
-            self.error = Some("当前布局没有空余方向。".into());
-            cx.notify();
-            return;
-        }
-        let mut proposed = self.wheels.clone();
-        let position = next_slot_position(&proposed.wheels[index]);
-        let slot_index = proposed.wheels[index].slots.len();
-        proposed.wheels[index].slots.push(WheelSlot {
-            label: "本地动作".into(),
-            position,
-            action: ActionSpec::Local(crate::local_editor::initial_action()),
-        });
-        if self.commit_wheels(proposed, cx) {
-            self.select_wheel_slot(slot_index, cx);
-        }
-    }
-
-    pub(super) fn save_wheel_slot(&mut self, cx: &mut Context<Self>) {
-        let Some(index) = self.selected_wheel_index() else {
-            return;
-        };
-        let Some(slot_index) = self.wheel_slot_selected else {
-            return;
-        };
-        let mut proposed = self.wheels.clone();
-        let Some(slot) = proposed.wheels[index].slots.get_mut(slot_index) else {
-            return;
-        };
-        slot.label = self.wheel_slot_label.read(cx).text().trim().into();
-        if matches!(slot.action, ActionSpec::Local(_)) {
-            match self.wheel_local_editor.snapshot(cx) {
-                Ok(action) => slot.action = ActionSpec::Local(action),
-                Err(error) => {
-                    self.error = Some(error);
-                    cx.notify();
-                    return;
-                }
-            }
-        }
-        if matches!(slot.action, ActionSpec::SendShortcut(_)) {
-            match ShortcutAction::parse(&self.wheel_slot_shortcut.read(cx).text()) {
-                Ok(shortcut) => slot.action = ActionSpec::SendShortcut(shortcut),
-                Err(error) => {
-                    self.error = Some(error);
-                    cx.notify();
-                    return;
-                }
-            }
-        }
-        self.commit_wheels(proposed, cx);
-    }
-
-    pub(super) fn move_wheel_slot(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let Some(index) = self.selected_wheel_index() else {
-            return;
-        };
-        let Some(slot_index) = self.wheel_slot_selected else {
-            return;
-        };
-        let Some(target) = slot_index.checked_add_signed(delta) else {
-            return;
-        };
-        if target >= self.wheels.wheels[index].slots.len() {
-            return;
-        }
-        let mut proposed = self.wheels.clone();
-        let previous_position = proposed.wheels[index].slots[slot_index].position;
-        proposed.wheels[index].slots[slot_index].position =
-            proposed.wheels[index].slots[target].position;
-        proposed.wheels[index].slots[target].position = previous_position;
-        proposed.wheels[index].slots.swap(slot_index, target);
-        if self.commit_wheels(proposed, cx) {
-            self.select_wheel_slot(target, cx);
-        }
-    }
-
-    pub(super) fn remove_wheel_slot(&mut self, cx: &mut Context<Self>) {
-        let Some(index) = self.selected_wheel_index() else {
-            return;
-        };
-        let Some(slot_index) = self.wheel_slot_selected else {
-            return;
-        };
-        if self.wheels.wheels[index].slots.len() <= 1 {
-            self.error = Some("轮盘至少保留一个动作。".into());
-            cx.notify();
-            return;
-        }
-        if slot_index >= self.wheels.wheels[index].slots.len() {
-            return;
-        }
-        let mut proposed = self.wheels.clone();
-        proposed.wheels[index].slots.remove(slot_index);
-        if self.commit_wheels(proposed, cx) {
-            self.select_wheel_slot(
-                slot_index.min(self.wheels.wheels[index].slots.len() - 1),
-                cx,
-            );
-        }
-    }
-
     pub(super) fn remove_wheel(&mut self, cx: &mut Context<Self>) {
         let Some(index) = self.selected_wheel_index() else {
             return;
@@ -598,42 +680,10 @@ impl Workspace {
         proposed.wheels.remove(index);
         if self.commit_wheels(proposed, cx) {
             self.wheel_selected = None;
-            self.wheel_slot_selected = None;
+            self.wheel_cell = None;
             if let Some(wheel) = self.wheels.wheels.first() {
                 self.select_wheel(wheel.id.clone(), cx);
             }
-        }
-    }
-
-    pub(super) fn add_wheel_binding(&mut self, binding_id: u64, cx: &mut Context<Self>) {
-        let Some(index) = self.selected_wheel_index() else {
-            return;
-        };
-        let Some(binding) = self.binding(binding_id).cloned() else {
-            return;
-        };
-        if matches!(
-            binding.action,
-            ActionSpec::ShowPanel | ActionSpec::ShowWheel(_)
-        ) {
-            return;
-        }
-        let mut proposed = self.wheels.clone();
-        let slot_index = proposed.wheels[index].slots.len();
-        if !wheel_has_room(&proposed.wheels[index]) {
-            self.error = Some("当前布局没有空余方向。".into());
-            cx.notify();
-            return;
-        }
-        let position = next_slot_position(&proposed.wheels[index]);
-        proposed.wheels[index].slots.push(WheelSlot {
-            label: binding.message.chars().take(30).collect(),
-            action: binding.action,
-            position,
-        });
-        if self.commit_wheels(proposed, cx) {
-            self.wheel_source_binding = Some(binding_id);
-            self.select_wheel_slot(slot_index, cx);
         }
     }
 
@@ -1342,21 +1392,58 @@ mod tests {
     }
 
     #[test]
-    fn moving_to_empty_ring_uses_default_sectors_and_keeps_direction() {
-        let mut wheel = wheel(&[at(0, 5, 8), at(0, 0, 8)]);
-        move_slot_to_ring(&mut wheel, 0, 2).unwrap();
-        assert_eq!(wheel.slots[0].position, at(2, 5, 8));
-        wheel.validate().unwrap();
+    fn putting_on_empty_cell_uses_ring_geometry() {
+        let mut view = wheel(&[at(0, 0, 6), at(1, 2, 12)]);
+        let action = view.slots[0].action.clone();
+        put_action(&mut view, (1, 7), "新".into(), action.clone()).unwrap();
+        assert_eq!(view.slots[2].position, at(1, 7, 12));
+        put_action(&mut view, (2, 3), "外".into(), action.clone()).unwrap();
+        assert_eq!(view.slots[3].position, at(2, 3, 8));
+        assert!(put_action(&mut view, (0, 6), "越界".into(), action.clone()).is_err());
+        put_action(&mut view, (0, 0), "替换".into(), action).unwrap();
+        assert_eq!(
+            (view.slots.len(), view.slots[0].label.as_str()),
+            (4, "替换")
+        );
+        view.validate().unwrap();
     }
 
     #[test]
-    fn moving_to_ring_falls_back_to_first_free_direction() {
-        let mut wheel = wheel(&[at(0, 1, 8), at(1, 0, 2), at(1, 1, 2)]);
-        assert!(move_slot_to_ring(&mut wheel, 0, 1).is_err());
-        set_ring_layout(&mut wheel, 1, 4, false).unwrap();
-        move_slot_to_ring(&mut wheel, 0, 1).unwrap();
-        assert_eq!(wheel.slots[0].position, at(1, 2, 4));
-        wheel.validate().unwrap();
+    fn removing_keeps_other_positions_and_last_slot() {
+        let mut view = wheel(&[at(0, 0, 8), at(0, 4, 8)]);
+        remove_at(&mut view, (0, 0)).unwrap();
+        assert_eq!(view.slots[0].position, at(0, 4, 8));
+        assert!(remove_at(&mut view, (0, 4)).is_err());
+        assert!(remove_at(&mut view, (0, 1)).is_err());
+    }
+
+    #[test]
+    fn scope_view_edits_app_layout_and_converts_even_layout() {
+        let mut definition = wheel(&[None, None]);
+        definition
+            .app_overrides
+            .push(crate::wheels::WheelApplicationOverride {
+                process: "code.exe".into(),
+                slots: wheel(&[at(1, 3, 4)]).slots,
+            });
+        let mut view = scope_view(&definition, Some("code.exe"));
+        assert!(view.app_overrides.is_empty());
+        let action = view.slots[0].action.clone();
+        put_action(&mut view, (1, 0), "应用".into(), action).unwrap();
+        store_view(&mut definition, Some("code.exe"), view);
+        assert_eq!(definition.app_overrides[0].slots.len(), 2);
+        assert_eq!(definition.slots[0].position, None);
+        let general = scope_view(&definition, None);
+        assert_eq!(general.slots[1].position, at(0, 1, 2));
+        store_view(&mut definition, None, general);
+        definition.validate().unwrap();
+    }
+
+    #[test]
+    fn presets_parse() {
+        for (_, preset) in &WHEEL_PRESETS {
+            preset_action(preset);
+        }
     }
 
     #[test]

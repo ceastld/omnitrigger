@@ -495,6 +495,12 @@ struct Workspace {
     wheel_slot_label: Entity<MessageInput>,
     wheel_slot_shortcut: Entity<MessageInput>,
     wheel_slot_selected: Option<usize>,
+    /// 轮盘编辑器中选中的格子（圈, 方向）。
+    wheel_cell: Option<(u8, u8)>,
+    wheel_moving: bool,
+    wheel_replacing: bool,
+    /// 正在编辑的应用专用布局（进程名）；`None` 为通用布局。
+    wheel_scope: Option<String>,
     wheel_source_binding: Option<u64>,
     wheel_window: Option<WindowHandle<RadialWheel>>,
     wheel_registered: Option<isize>,
@@ -865,6 +871,10 @@ impl Workspace {
             wheel_slot_label,
             wheel_slot_shortcut,
             wheel_slot_selected: None,
+            wheel_cell: None,
+            wheel_moving: false,
+            wheel_replacing: false,
+            wheel_scope: None,
             wheel_source_binding: None,
             wheel_window: None,
             wheel_registered: None,
@@ -5498,7 +5508,15 @@ impl Render for Workspace {
         let (title_height, buttons_width) = self.caption_area(window);
         let page = match self.page {
             Page::Actions => self.render_actions(window, cx).into_any_element(),
-            Page::Wheels => self.render_wheels(cx).into_any_element(),
+            Page::Wheels => self
+                .render_wheels(
+                    (
+                        f32::from(window.viewport_size().width),
+                        f32::from(window.viewport_size().height),
+                    ),
+                    cx,
+                )
+                .into_any_element(),
             Page::Presets => self.render_presets(cx).into_any_element(),
             Page::Extensions => self.render_extensions(cx).into_any_element(),
             Page::Triggers => div()
