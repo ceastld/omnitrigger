@@ -1,0 +1,149 @@
+{
+  "measured_at_utc": "2026-11-02T15:49:08.4438748Z",
+  "target": "x86_64-pc-windows-msvc",
+  "rustc": [
+    "rustc 1.90.0 (1159e78c4 2025-09-14)",
+    "binary: rustc",
+    "commit-hash: 1159e78c4747b02ef996e55082b704c09b970588",
+    "commit-date: 2025-09-14",
+    "host: x86_64-pc-windows-msvc",
+    "release: 1.90.0",
+    "LLVM version: 20.1.8"
+  ],
+  "lock_sha256": "bc7e7051ab5cbfce36126530ad1684b254fe1a147eb57fd31605357434d8b53d",
+  "samples": 11,
+  "measurements": [
+    {
+      "engine": "boa",
+      "profile": "release",
+      "crt": "dynamic",
+      "imported_dlls": [
+        "bcryptprimitives.dll",
+        "kernel32.dll",
+        "api-ms-win-core-synch-l1-2-0.dll",
+        "KERNEL32.dll",
+        "ntdll.dll",
+        "VCRUNTIME140.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-locale-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll"
+      ],
+      "exe_bytes": 11809280,
+      "exe_only_zip_bytes": 3894647,
+      "sha256": "20db34502798448eba314945733c19e2602f40b78e944e0ec7c1c6e8b0a0cbf3",
+      "first_round_trip_ms": 170.602,
+      "median_round_trip_ms": 195.203,
+      "round_trips_ms": [
+        116.808,
+        125.35,
+        143.968,
+        157.168,
+        193.342,
+        195.203,
+        211.306,
+        285.669,
+        289.176,
+        296.412,
+        306.993
+      ]
+    },
+    {
+      "engine": "boa",
+      "profile": "small",
+      "crt": "static",
+      "imported_dlls": [
+        "bcryptprimitives.dll",
+        "kernel32.dll",
+        "api-ms-win-core-synch-l1-2-0.dll",
+        "KERNEL32.dll",
+        "ntdll.dll"
+      ],
+      "exe_bytes": 3456512,
+      "exe_only_zip_bytes": 1480233,
+      "sha256": "0cb472d0cffb4dd7bcb97c1cdac737c29eb430451d8dbbf0f509efd5507be6b6",
+      "first_round_trip_ms": 182.542,
+      "median_round_trip_ms": 199.398,
+      "round_trips_ms": [
+        141.076,
+        151.895,
+        156.518,
+        159.557,
+        186.544,
+        199.398,
+        209.132,
+        211.843,
+        231.29,
+        345.728,
+        406.105
+      ]
+    },
+    {
+      "engine": "quickjs",
+      "profile": "release",
+      "crt": "dynamic",
+      "imported_dlls": [
+        "api-ms-win-core-synch-l1-2-0.dll",
+        "bcryptprimitives.dll",
+        "KERNEL32.dll",
+        "ntdll.dll",
+        "VCRUNTIME140.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "api-ms-win-crt-runtime-l1-1-0.dll",
+        "api-ms-win-crt-convert-l1-1-0.dll",
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "api-ms-win-crt-math-l1-1-0.dll",
+        "api-ms-win-crt-locale-l1-1-0.dll"
+      ],
+      "exe_bytes": 1389056,
+      "exe_only_zip_bytes": 708994,
+      "sha256": "ae9a2d88e69b9b9fdf0664684df23d231d21d7540945ae8ace9b4736079141fd",
+      "first_round_trip_ms": 322.221,
+      "median_round_trip_ms": 161.557,
+      "round_trips_ms": [
+        129.907,
+        130.699,
+        146.879,
+        149.422,
+        154.146,
+        161.557,
+        201.015,
+        242.101,
+        323.733,
+        325.944,
+        821.259
+      ]
+    },
+    {
+      "engine": "quickjs",
+      "profile": "small",
+      "crt": "static",
+      "imported_dlls": [
+        "api-ms-win-core-synch-l1-2-0.dll",
+        "bcryptprimitives.dll",
+        "KERNEL32.dll",
+        "ntdll.dll"
+      ],
+      "exe_bytes": 1206272,
+      "exe_only_zip_bytes": 662527,
+      "sha256": "01a1fc3d7384ad0110126ffe1dbd7fa0b9f98291579ed738605f8dc476963f8e",
+      "first_round_trip_ms": 170.562,
+      "median_round_trip_ms": 158.301,
+      "round_trips_ms": [
+        134.186,
+        134.899,
+        141.064,
+        145.635,
+        153.645,
+        158.301,
+        165.637,
+        171.231,
+        176.514,
+        200.756,
+        374.742
+      ]
+    }
+  ]
+}

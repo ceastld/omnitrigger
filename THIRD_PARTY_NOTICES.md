@@ -45,6 +45,14 @@ Windows 发行流程通过 `scripts/collect-licenses.ps1` 从锁定目标的应�
 
 动作包作者自行引入的代码、模块、程序或素材遵循各自许可证，不能因包由 OmniTrigger 加载而视为 MIT。将来如将 Node 或其他运行时并入发行包，应按实际分发内容重新核对并保留完整许可和版权通知。
 
+## 独立的 JS 引擎体积实验
+
+`tools/js-engine-probe` 是独立 Cargo workspace，使用单独的锁文件，不进入桌面应用依赖图或正式发行包。实验使用 Boa 0.21.1（`Unlicense OR MIT`，选择 MIT）及 rquickjs 0.14.0（MIT）；后者静态编译随 crate 提供的 QuickJS-NG C 引擎（MIT）。宿主与测试由本项目编写。
+
+已核对锁文件对应 Cargo 元数据和 rquickjs / QuickJS-NG 随包许可。Boa 系列发布 crate 未附带许可全文，上游授权见 [Boa 0.21.1 MIT 许可](https://github.com/boa-dev/boa/blob/v0.21.1/LICENSE-MIT)。实验传递依赖含 MIT、Apache-2.0、Unicode-3.0、Unlicense 和 Zlib 等声明；双重授权可选择相应分支，Unicode 数据仍须保留其自身许可。完整版本与依赖关系以实验的 `Cargo.lock` 和 `cargo metadata --locked` 为准。
+
+测量脚本生成的 ZIP 只含 EXE，用于比较压缩体积，不是可发布安装包。CI 仅上传测量 JSON，不分发实验二进制。若正式分发宿主，须为其独立依赖图、标准库和 QuickJS-NG 收集完整许可及版权通知，补齐 Boa 发布 crate 缺失的上游许可文件，并记录来源和哈希；`small` 还链接 MSVC 静态 CRT，须一并核对其再分发要求。现有桌面应用的许可收集范围不能代替这一流程。
+
 ## 图标与字体
 
 程序图标的 SVG 源文件与 ICO 位于 `crates/omnitrigger-app/assets/`，界面小图标以内联 SVG 保存在 `src/assets.rs`。这些文件随项目源码提供。引入外部素材时，应同时记录来源并保留其许可声明。

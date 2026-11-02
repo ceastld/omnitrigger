@@ -44,6 +44,52 @@ jobs:
       - name: 验证更新服务发布通知
         run: python -m unittest discover -s scripts -p 'test_update_*.py' -v
 
+  js-engines:
+    name: Windows JS 引擎实验
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: tools/js-engine-probe
+        shell: pwsh
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: 安装 Rust 工具链
+        run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+
+      - name: 缓存实验构建
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: tools/js-engine-probe -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: 格式、真实宿主测试与 Clippy
+        run: |
+          cargo fmt --all --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($engine in @('boa', 'quickjs')) {
+            $engineArguments = @('--release', '--locked', '--no-default-features', '--features', $engine)
+            if ($engine -eq 'quickjs') { $engineArguments += @('--target-dir', 'target/quickjs') }
+            cargo test @engineArguments
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cargo clippy --all-targets @engineArguments -- -D warnings
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: 构建两种引擎并测量体积
+        run: ./measure.ps1
+
+      - name: 保存测量数据
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: js-engine-measurements
+          path: tools/js-engine-probe/results/measurements.json
+          if-no-files-found: error
+
   core-linux:
     name: Linux 核心可移植性
     runs-on: ubuntu-latest
