@@ -8,7 +8,8 @@ function Start-UpdatedApplication([bool]$HealthCheck) {
     else { Remove-Item Env:OMNITRIGGER_UPDATE_HEALTH -ErrorAction SilentlyContinue }
     try {
         # Windows 文件名不能包含双引号；配置路径作为完整独立参数引用。
-        return Start-Process -FilePath $updatePlan.executable -ArgumentList @('--config', ('"' + $updatePlan.config + '"'), '--settings') -WorkingDirectory $updateRoot -WindowStyle Hidden -PassThru
+        # 这是用户需要看到的交互界面；下载器和替换器自身保持隐藏。
+        return Start-Process -FilePath $updatePlan.executable -ArgumentList @('--config', ('"' + $updatePlan.config + '"'), '--settings') -WorkingDirectory $updateRoot -WindowStyle Normal -PassThru
     } finally { Remove-Item Env:OMNITRIGGER_UPDATE_HEALTH -ErrorAction SilentlyContinue }
 }
 try {

@@ -83,7 +83,7 @@ class Fixture {
     }
 }
 '@
-    Add-Type -TypeDefinition $updateSource -OutputAssembly $updateFixtureExe -OutputType ConsoleApplication
+    Add-Type -TypeDefinition $updateSource -OutputAssembly $updateFixtureExe -OutputType WindowsApplication
     foreach ($updateCase in @('success', 'rollback', 'tampered')) {
         $updateRoot = Join-Path $updateTestRoot "安装 空格-$updateCase"
         $updateStage = Join-Path $updateRoot '.omnitrigger-update-fixture'
