@@ -88,6 +88,7 @@ try {
         }
     }
     $report = [ordered]@{
+        api_version = 1
         measured_at_utc = [DateTime]::UtcNow.ToString('o')
         target = 'x86_64-pc-windows-msvc'
         rustc = @(& rustc -Vv)

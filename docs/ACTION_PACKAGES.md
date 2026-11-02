@@ -233,4 +233,4 @@ profiles\<配置档 ID>\packages\<包 ID>\
 
 流程图扩展、跨动作调用、包市场、热重载和自动更新均未实现。这套接口把新增业务与输入绑定解耦，但新增运行时或宿主能力仍需要对应实现和测试；契约发生不兼容变化时仍需版本迁移。
 
-独立的 [Rust JS 宿主体积实验](../tools/js-engine-probe/README.md)对比纯 Rust Boa 与 Rust 嵌入 QuickJS-NG 的 Windows EXE，提供构建、测试和测量脚本。它只验证同步脚本及 JSON 输入输出，尚未接入这里的动作包、SDK 或插件安装，不改变当前 Node 运行时。
+独立的 [Rust JS 宿主原型](../tools/js-engine-probe/README.md)提供共享的文件、进程、剪贴板和打开目标 API，含真实文件转换示例，并对比 Boa 与 QuickJS-NG 的 Windows EXE 体积。它尚未接入这里的动作包与插件安装，不改变当前 Node 运行时。

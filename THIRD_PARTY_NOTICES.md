@@ -53,6 +53,8 @@ Windows 发行流程通过 `scripts/collect-licenses.ps1` 从锁定目标的应�
 
 测量脚本生成的 ZIP 只含 EXE，用于比较压缩体积，不是可发布安装包。CI 仅上传测量 JSON，不分发实验二进制。若正式分发宿主，须为其独立依赖图、标准库和 QuickJS-NG 收集完整许可及版权通知，补齐 Boa 发布 crate 缺失的上游许可文件，并记录来源和哈希；`small` 还链接 MSVC 静态 CRT，须一并核对其再分发要求。现有桌面应用的许可收集范围不能代替这一流程。
 
+脚本原型的桌面 API 复用本项目 MIT 的 `omnitrigger-windows`，引入的 Windows 绑定及其辅助 crate 为已在主 workspace 使用的 `windows` 0.61.3 依赖系列（MIT OR Apache-2.0）。精确版本记录在原型独立锁文件中；宿主桥接、JS SDK、类型声明和示例由本项目编写，按 MIT 提供。原型的 `small` 版仍按上文独立分发规则核对许可。
+
 ## 图标与字体
 
 程序图标的 SVG 源文件与 ICO 位于 `crates/omnitrigger-app/assets/`，界面小图标以内联 SVG 保存在 `src/assets.rs`。这些文件随项目源码提供。引入外部素材时，应同时记录来源并保留其许可声明。

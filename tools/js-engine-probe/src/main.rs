@@ -2,6 +2,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{self, Read};
 
+mod api;
+const SDK: &str = include_str!("sdk.js");
+
 #[cfg(any(
     all(feature = "boa", feature = "quickjs"),
     not(any(feature = "boa", feature = "quickjs"))
@@ -46,7 +49,7 @@ fn run() -> Result<Value, String> {
     let input = serde_json::to_string(&request.input).map_err(|error| error.to_string())?;
     let literal = serde_json::to_string(&input).map_err(|error| error.to_string())?;
     let source = format!(
-        "(() => {{ const ctx = {{ input: JSON.parse({literal}) }};\n\
+        "(() => {{ const ctx = {{ input: JSON.parse({literal}) }};\n{SDK}\n\
          const result = (function(ctx) {{\n{}\n}})(ctx);\n\
          if (result && typeof result.then === 'function') throw new Error('原型仅支持同步入口');\n\
          const output = JSON.stringify(result);\n\
@@ -65,6 +68,21 @@ fn run() -> Result<Value, String> {
 fn evaluate(source: &str) -> Result<String, String> {
     use boa_engine::{Context, Source};
     let mut context = Context::default();
+    use boa_engine::{js_string, JsValue, NativeFunction};
+    context
+        .register_global_builtin_callable(
+            js_string!("__hostCall"),
+            1,
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let request = args
+                    .first()
+                    .unwrap_or(&JsValue::undefined())
+                    .to_string(context)?
+                    .to_std_string_escaped();
+                Ok(js_string!(api::dispatch(request)).into())
+            }),
+        )
+        .map_err(|error| error.to_string())?;
     context
         .runtime_limits_mut()
         .set_loop_iteration_limit(1_000_000);
@@ -89,6 +107,13 @@ fn evaluate(source: &str) -> Result<String, String> {
     runtime.set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
     let context = Context::full(&runtime).map_err(|error| error.to_string())?;
     context.with(|ctx| {
+        ctx.globals()
+            .set(
+                "__hostCall",
+                rquickjs::Function::new(ctx.clone(), api::dispatch)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
         ctx.eval::<String, _>(source).map_err(|error| {
             if error.is_exception() {
                 let exception = ctx.catch();

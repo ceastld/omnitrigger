@@ -91,3 +91,105 @@ fn invalid_requests_are_rejected_before_execution() {
         assert!(!ok, "{response}");
     }
 }
+
+#[test]
+fn native_file_api_completes_a_real_transformation_and_preserves_existing_files() {
+    let directory = std::env::temp_dir().join(format!(
+        "omnitrigger-api-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let source = directory.join("输入 中文.txt");
+    let target = directory.join("输出 中文.txt");
+    std::fs::write(&source, "第一行  \r\n第二行\t\n").unwrap();
+    let (ok, response) = invoke(json!({
+        "script": include_str!("../examples/clean-file.js"),
+        "input": {"source":source,"destination":target}
+    }));
+    assert!(ok, "{response}");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "第一行\n第二行\n"
+    );
+    let (ok, response) = invoke(
+        json!({"script":"try { ctx.fs.writeText(ctx.input.path, '覆盖'); } catch(e) { return {code:e.code}; }", "input":{"path":target}}),
+    );
+    assert!(ok, "{response}");
+    assert_eq!(response["result"]["code"], "file_write_failed");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "第一行\n第二行\n"
+    );
+    let (ok, response) = invoke(
+        json!({"script":"ctx.fs.writeText(ctx.input.path, '已替换', {overwrite:true}); return ctx.fs.readText(ctx.input.path);", "input":{"path":target}}),
+    );
+    assert!(ok, "{response}");
+    assert_eq!(response["result"], "已替换");
+    std::fs::remove_file(source).unwrap();
+    std::fs::remove_file(target).unwrap();
+    std::fs::remove_dir(directory).unwrap();
+}
+
+#[test]
+fn native_api_rejects_invalid_arguments_with_stable_error_codes() {
+    for (script, code) in [
+        ("ctx.fs.readText('relative.txt')", "invalid_path"),
+        ("ctx.fs.writeText(42, 'x')", "invalid_arguments"),
+        (
+            "ctx.fs.writeText('C:/unused.txt', 'x'.repeat(65537))",
+            "text_too_large",
+        ),
+        ("ctx.process.run('', [])", "invalid_arguments"),
+        (
+            "ctx.process.run('not-used', [], {timeoutMs:0})",
+            "invalid_arguments",
+        ),
+        (
+            "ctx.process.start('omnitrigger-nonexistent-program-api-test')",
+            "process_start_failed",
+        ),
+        ("ctx.open('javascript:alert(1)')", "open_failed"),
+    ] {
+        let (ok, response) = invoke(
+            json!({"script":format!("try {{ {script}; }} catch (e) {{ return {{code:e.code}}; }} throw new Error('应当拒绝');"),"input":{}}),
+        );
+        assert!(ok, "{script}: {response}");
+        assert_eq!(response["result"]["code"], code, "{script}: {response}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn native_process_api_reports_real_exit_status_and_timeout_without_shell_guessing() {
+    let program = std::env::var("COMSPEC").unwrap();
+    let (ok, response) = invoke(
+        json!({"script":"return ctx.process.run(ctx.input.program, ['/d','/c','exit','7']);", "input":{"program":program}}),
+    );
+    assert!(ok, "{response}");
+    assert_eq!(response["result"]["exitCode"], 7);
+    assert_eq!(response["result"]["success"], false);
+    // 被测程序仍是宿主自己；不给 stdin 会立即报告解析失败，证明参数不被拼成 Shell 命令。
+    let (ok, response) = invoke(
+        json!({"script":"return ctx.process.run(ctx.input.program, ['a b & exit 0']);", "input":{"program":env!("CARGO_BIN_EXE_omnitrigger-js-probe")}}),
+    );
+    assert!(ok, "{response}");
+    assert_eq!(response["result"]["exitCode"], 1);
+    let (ok, response) = invoke(
+        json!({"script":"return ctx.process.start(ctx.input.program, ['/d','/c','exit','0']);", "input":{"program":program}}),
+    );
+    assert!(ok, "{response}");
+    assert!(response["result"]["pid"]
+        .as_u64()
+        .is_some_and(|pid| pid > 0));
+    let sleeper = std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let (ok, response) = invoke(
+        json!({"script":"try { ctx.process.run(ctx.input.program, ['-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 5'], {timeoutMs:50}); } catch(e) { return {code:e.code}; } throw new Error('应当超时');", "input":{"program":sleeper}}),
+    );
+    assert!(ok, "{response}");
+    assert_eq!(response["result"]["code"], "process_timeout");
+}
