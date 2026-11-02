@@ -30,6 +30,8 @@ mod system_hud;
 mod theme;
 mod trigger_conditions;
 mod trigger_panel;
+mod update_ui;
+mod updater;
 mod wheel_editor;
 mod wheel_workspace;
 mod wheels;
@@ -461,6 +463,7 @@ struct Workspace {
     page: Page,
     theme_mode: appearance::Mode,
     theme_error: Option<String>,
+    update_ui: update_ui::UpdateUi,
     history_filter: HistoryFilter,
     smooth_scroll: smooth_scroll::ScrollRegions,
     message: Entity<MessageInput>,
@@ -831,6 +834,7 @@ impl Workspace {
             confirm_delete: None,
             theme_mode,
             theme_error,
+            update_ui: update_ui::UpdateUi::new(),
             page: if appearance_settings {
                 Page::Settings
             } else if browser_connector_settings {
@@ -1149,6 +1153,7 @@ impl Workspace {
             }
         }
         changed |= self.poll_browser_connector(cx);
+        changed |= self.poll_update(cx);
         changed |= self.poll_packages();
         changed |= self.poll_browser_actions();
         for _ in 0..64 {

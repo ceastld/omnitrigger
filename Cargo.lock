@@ -2938,6 +2938,7 @@ dependencies = [
  "omnitrigger-core",
  "omnitrigger-windows",
  "raw-window-handle",
+ "semver",
  "serde",
  "serde_json",
  "tokio",

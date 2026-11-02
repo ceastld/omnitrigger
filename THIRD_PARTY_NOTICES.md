@@ -16,6 +16,7 @@
 | embed-resource | 构建时嵌入 Windows 图标资源 | MIT |
 | omnitrigger-browser | 固定 Git 修订的浏览器 RPC 客户端 | MIT |
 | tokio | 浏览器连接的后台异步运行时 | MIT |
+| semver | 应用更新版本排序，复用锁定的 1.0.28 | MIT OR Apache-2.0 |
 
 原生亮度提示通过现有 `windows` 绑定调用系统自带的 USER32、GDI 与 GDI+，没有增加第三方 Rust 包或捆绑系统 DLL。文字使用本机系统字体渲染，不分发字体文件。
 

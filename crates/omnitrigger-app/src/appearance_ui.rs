@@ -1,4 +1,4 @@
-//! 设置页仅提供常用外观选择，修改后立即生效并自动保存。
+//! 设置页提供外观选择和应用更新。
 use crate::{appearance::Mode, caption, card, heading, icon, theme, Workspace};
 use gpui::{div, prelude::*, px, Context, Div, FontWeight, Window};
 
@@ -93,7 +93,8 @@ impl Workspace {
                     .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("颜色主题"))
                     .child(caption("选择后立即生效，自动保存。跟随系统会与 Windows 的浅色或深色模式保持一致。"))
                     .child(div().flex().flex_wrap().gap(px(12.)).children(choices)))
-                .when_some(self.theme_error.clone(), |el, error| el.child(caption(error).text_color(theme::rgb(theme::DANGER)))))
+                .when_some(self.theme_error.clone(), |el, error| el.child(caption(error).text_color(theme::rgb(theme::DANGER))))
+                .child(self.render_update(cx)))
             .map(|el| self.smooth_scroll.wrap("appearance-settings", el))
     }
 }
