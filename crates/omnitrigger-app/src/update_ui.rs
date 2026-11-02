@@ -8,15 +8,21 @@ pub(super) struct UpdateUi {
     release: Option<updater::Release>,
     status: String,
     failed: bool,
+    schedule: updater::CheckSchedule,
 }
 
 impl UpdateUi {
     pub fn new() -> Self {
         let error = std::env::var("OMNITRIGGER_UPDATE_ERROR").ok();
         std::env::remove_var("OMNITRIGGER_UPDATE_ERROR");
+        let mut schedule = updater::CheckSchedule::default();
+        if error.is_some() {
+            schedule.checked_at(std::time::Instant::now());
+        }
         Self {
             failed: error.is_some(),
             status: error.unwrap_or_default(),
+            schedule,
             ..Self::default()
         }
     }
@@ -32,14 +38,24 @@ impl Workspace {
             .release
             .clone()
             .map_or(updater::Operation::Check, updater::Operation::Install);
+        self.begin_update(operation, cx);
+    }
+
+    fn begin_update(&mut self, operation: updater::Operation, cx: &mut Context<Self>) {
+        let checking = matches!(operation, updater::Operation::Check);
+        if checking {
+            self.update_ui
+                .schedule
+                .checked_at(std::time::Instant::now());
+        }
         match updater::start(operation, crate::settings::path()) {
             Ok(events) => {
                 self.update_ui.events = Some(events);
                 self.update_ui.failed = false;
-                self.update_ui.status = if self.update_ui.release.is_some() {
-                    "正在准备下载…"
-                } else {
+                self.update_ui.status = if checking {
                     "正在检查更新…"
+                } else {
+                    "正在准备下载…"
                 }
                 .into();
             }
@@ -55,6 +71,14 @@ impl Workspace {
         // 首个成功打开窗口且输入后端就绪的版本才允许更新器删除备份。
         if self.ready {
             updater::mark_healthy();
+        }
+        if self.update_ui.events.is_none()
+            && self
+                .update_ui
+                .schedule
+                .claim_due(std::time::Instant::now(), self.ready)
+        {
+            self.begin_update(updater::Operation::Check, cx);
         }
         let Some(events) = self.update_ui.events.take() else {
             return false;
@@ -77,12 +101,19 @@ impl Workspace {
                     self.update_ui.failed = true;
                     terminal = true;
                 }
-                Ok(updater::Event::Restart) => {
-                    self.update_ui.status = "更新已准备好，正在重启…".into();
-                    self.backend.take();
-                    cx.quit();
-                    return true;
-                }
+                Ok(updater::Event::Restart(permit)) => match permit.authorize() {
+                    Ok(()) => {
+                        self.update_ui.status = "更新已准备好，正在重启…".into();
+                        self.backend.take();
+                        cx.quit();
+                        return true;
+                    }
+                    Err(error) => {
+                        self.update_ui.status = error;
+                        self.update_ui.failed = true;
+                        terminal = true;
+                    }
+                },
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     if !terminal {
@@ -145,7 +176,7 @@ impl Workspace {
                     ),
             )
             .child(caption(
-                "下载在后台完成，校验通过后自动重启。你的触发器与设置会保留。",
+                "启动后及每 5 小时检查版本。点击更新后后台下载，校验通过后自动重启，保留触发器与设置。",
             ))
             .when(!self.update_ui.status.is_empty(), |el| {
                 el.child(

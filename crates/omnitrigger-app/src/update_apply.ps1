@@ -3,6 +3,19 @@
 $updateChanged = New-Object 'Collections.Generic.List[object]'
 $updateChild = $null
 $updateParentExited = $false
+function Invoke-UpdateFileOperation([scriptblock]$Action) {
+    # 进程退出后，映像或防病毒扫描的共享锁可能短暂保留；有界重试，不结束其他进程。
+    $updateRetryDeadline = [DateTime]::UtcNow.AddSeconds(5)
+    while ($true) {
+        try { & $Action; return } catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $updateRetryDeadline) { throw }
+            Start-Sleep -Milliseconds 100
+        } catch [UnauthorizedAccessException] {
+            if ([DateTime]::UtcNow -ge $updateRetryDeadline) { throw }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+}
 function Start-UpdatedApplication([bool]$HealthCheck) {
     if ($HealthCheck) { $env:OMNITRIGGER_UPDATE_HEALTH = Join-Path $updateStage 'healthy' }
     else { Remove-Item Env:OMNITRIGGER_UPDATE_HEALTH -ErrorAction SilentlyContinue }
@@ -30,8 +43,18 @@ try {
     }
     $updateParent = Get-Process -Id $updatePlan.parent_pid -ErrorAction SilentlyContinue
     if ($null -eq $updateParent -or $updateParent.Path -ine $updatePlan.executable) { throw '原应用已退出，已取消更新。' }
+    if (-not $updatePlan.token) { throw '缺少本次更新的退出授权身份。' }
     [IO.File]::WriteAllText((Join-Path $updateStage 'helper-ready'), 'ready')
+    $updateAuthorization = Join-Path $updateStage 'authorize'
+    $updateAuthorizationDeadline = [DateTime]::UtcNow.AddSeconds(30)
+    while (-not (Test-Path -LiteralPath $updateAuthorization)) {
+        if ($updateParent.HasExited -or [DateTime]::UtcNow -gt $updateAuthorizationDeadline) { throw '未收到本次更新的退出授权，已取消更新。' }
+        Start-Sleep -Milliseconds 100
+    }
+    Assert-UpdatePath $updateAuthorization
+    if ([IO.File]::ReadAllText($updateAuthorization) -cne $updatePlan.token) { throw '本次更新的退出授权身份不匹配。' }
     if (-not $updateParent.WaitForExit(30000)) { throw '应用未能退出，已取消更新。' }
+    $updateParent.Dispose()
     $updateParentExited = $true
     foreach ($updateFile in $updateFiles) {
         $updateSource = Join-Path (Join-Path $updateStage 'payload') $updateFile.name
@@ -45,7 +68,7 @@ try {
         }
         $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($updateTarget))
         # 同卷移动，运行中的其他实例锁定 EXE 时会失败并回滚，不强杀其他实例。
-        if ($updateExisted) { Remove-Item -LiteralPath $updateTarget -Force }
+        if ($updateExisted) { Invoke-UpdateFileOperation { Remove-Item -LiteralPath $updateTarget -Force } }
         $updateChanged.Add(@{ target = $updateTarget; backup = $updateBackup; existed = $updateExisted })
         Move-Item -LiteralPath $updateSource -Destination $updateTarget
     }
@@ -67,12 +90,16 @@ try {
     }
 } catch {
     $updateFailure = $_.Exception.Message
-    if ($null -ne $updateChild -and -not $updateChild.HasExited) { $updateChild.Kill(); $updateChild.WaitForExit() }
+    if ($null -ne $updateChild) {
+        if (-not $updateChild.HasExited) { $updateChild.Kill() }
+        $updateChild.WaitForExit()
+        $updateChild.Dispose()
+    }
     try {
         for ($updateIndex = $updateChanged.Count - 1; $updateIndex -ge 0; $updateIndex--) {
             $updateFile = $updateChanged[$updateIndex]
             Assert-UpdatePath $updateFile.target
-            if ($updateFile.existed) { Copy-Item -LiteralPath $updateFile.backup -Destination $updateFile.target -Force }
+            if ($updateFile.existed) { Invoke-UpdateFileOperation { Copy-Item -LiteralPath $updateFile.backup -Destination $updateFile.target -Force } }
             elseif (Test-Path -LiteralPath $updateFile.target) { Remove-Item -LiteralPath $updateFile.target -Force }
         }
         if ($updateParentExited) {

@@ -34,6 +34,10 @@ function Get-UpdateHash([string]$Path) {
     finally { $updateHasher.Dispose(); $updateHashStream.Dispose() }
 }
 
+function Confirm-UpdateDigest([string]$Archive, [string]$Expected) {
+    if ($Expected -cnotmatch '^[0-9a-fA-F]{64}$' -or (Get-UpdateHash $Archive) -ine $Expected) { throw '更新包与版本 API 的 SHA-256 不符。' }
+}
+
 function Get-UpdateFile([string]$Url, [string]$Destination, [long]$Limit, [long]$Expected = 0) {
     $updateHandler = New-Object Net.Http.HttpClientHandler
     $updateHandler.AllowAutoRedirect = $false
@@ -45,7 +49,7 @@ function Get-UpdateFile([string]$Url, [string]$Destination, [long]$Limit, [long]
         $updateUri = [uri]$Url
         for ($updateRedirect = 0; $updateRedirect -lt 6; $updateRedirect++) {
             if ($updateUri.Scheme -cne 'https' -or -not $updateUri.IsDefaultPort -or $updateUri.UserInfo -or
-                $updateUri.DnsSafeHost -notin @('api.github.com', 'github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com')) { throw '更新源返回了不受信任的下载地址。' }
+                $updateUri.DnsSafeHost -notin @('update.alinko.cc', 'api.github.com', 'github.com', 'release-assets.githubusercontent.com', 'objects.githubusercontent.com')) { throw '更新源返回了不受信任的下载地址。' }
             $updateResponse = $updateClient.GetAsync($updateUri, [Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
             if ([int]$updateResponse.StatusCode -in @(301, 302, 303, 307, 308)) {
                 if ($null -eq $updateResponse.Headers.Location) { throw '更新源返回了无效重定向。' }

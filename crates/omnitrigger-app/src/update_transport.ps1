@@ -4,13 +4,18 @@ try {
     Assert-UpdatePath $updateStage
     if ($env:OMNITRIGGER_UPDATE_MODE -ceq 'check') {
         Write-UpdateProgress '正在检查更新…'
+        $updateResponsePath = Join-Path $updateStage 'version.json'
+        Get-UpdateFile $env:OMNITRIGGER_UPDATE_API $updateResponsePath 64KB
+        $updateManifest = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($updateResponsePath))
+        Write-UpdateEvent @{ kind = 'manifest'; manifest = $updateManifest }
+    } elseif ($env:OMNITRIGGER_UPDATE_MODE -ceq 'fallback') {
         $updateResponsePath = Join-Path $updateStage 'releases.json'
         Get-UpdateFile 'https://api.github.com/repos/ceastld/omnitrigger/releases?per_page=100' $updateResponsePath 4MB
         $updateReleases = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($updateResponsePath))
         # 不把不需要的作者/下载统计等 API 字段传回界面线程。
         $updateResults = @($updateReleases | ForEach-Object {
             @{ tag_name = $_.tag_name; body = $_.body; draft = $_.draft; assets = @($_.assets | ForEach-Object {
-                @{ name = $_.name; size = $_.size; browser_download_url = $_.browser_download_url }
+                @{ name = $_.name; size = $_.size; browser_download_url = $_.browser_download_url; digest = $_.digest }
             }) }
         })
         Write-UpdateEvent @{ kind = 'releases'; releases = $updateResults }
@@ -28,6 +33,7 @@ try {
         }
         Write-UpdateProgress '正在校验并准备更新…'
         Confirm-UpdateHash (Join-Path $updateStage 'SHA256SUMS.txt') $updateArchiveName $updateArchive
+        Confirm-UpdateDigest $updateArchive $updatePlan.release.sha256
         $updateFiles = Expand-UpdateArchive $updateArchive (Join-Path $updateStage 'payload')
         [IO.File]::WriteAllText((Join-Path $updateStage 'files.json'), (ConvertTo-Json -InputObject @($updateFiles) -Compress), (New-Object Text.UTF8Encoding($false)))
         Write-UpdateEvent @{ kind = 'prepared' }

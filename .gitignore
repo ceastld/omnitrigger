@@ -6,6 +6,7 @@
 /.local/
 /.tmp/
 /tmp/
+__pycache__/
 
 # 本地凭据
 .env

@@ -1,0 +1,38 @@
+name: 通知统一更新服务
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '已公开的 OmniTrigger 发行标签'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+    secrets:
+      APP_UPDATES_DISPATCH_TOKEN:
+        required: true
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    if: github.event_name != 'release' || (!github.event.release.draft && startsWith(github.event.release.tag_name, 'v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: 检出通知脚本
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: 校验公开发行并通知 app-updates
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+          APP_UPDATES_DISPATCH_TOKEN: ${{ secrets.APP_UPDATES_DISPATCH_TOKEN }}
+        run: python3 scripts/notify-update-api.py

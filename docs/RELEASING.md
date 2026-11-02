@@ -56,14 +56,20 @@ git tag -a v0.1.0 -m "release: 发布 Windows 预览版 0.1.0"
 git push origin v0.1.0
 ```
 
-后续版本先更新 `Cargo.toml` 的工作区版本、同步 `Cargo.lock` 中本项目包版本及对应发布说明，再创建匹配标签。发布后核对 Actions 两个作业、公开 Release、资产文件名、大小和 SHA-256。
+后续版本先更新 `Cargo.toml` 的工作区版本、同步 `Cargo.lock` 中本项目包版本及对应发布说明，再创建匹配标签。发布后核对构建、发布、更新服务通知作业，以及公开 Release、资产文件名、大小和 SHA-256。
 
 ## 应用内更新契约
 
-设置页更新器读取官方仓库最近 100 条公开 Release（包含预发布版），按 SemVer 选择高于当前版本的最高版本。当前版本来自 Cargo 构建版本；不得仅更改发布标签而不更新工作区版本。
+设置页更新器优先读取 `https://update.alinko.cc/omnitrigger/version.json`；网络或清单校验失败时回退官方 GitHub 最近 100 条公开 Release（包含预发布版），按 SemVer 选择高于当前版本的最高版本。启动就绪后检查一次，此后每 5 小时检查；下载和安装始终需用户操作。当前版本来自 Cargo 构建版本；不得仅更改发布标签而不更新工作区版本。
 
-发行资产继续使用 `OmniTrigger-<版本>-windows-x86_64.zip` 和 `SHA256SUMS.txt`，清单行格式为 `<64 位 SHA-256>  <ZIP 文件名>`，无需额外更新服务器或更新清单。ZIP 根目录保留 `omnitrigger.exe`、`LICENSE`、`THIRD_PARTY_NOTICES.md`、`README.txt`、`RELEASE_NOTES.md` 和 `licenses/`。更新器拒绝其他顶层文件、路径穿越、重复文件、链接及超限解压内容；以后改变发行布局时需同步更新器。
+发行资产继续使用 `OmniTrigger-<版本>-windows-x86_64.zip` 和 `SHA256SUMS.txt`，清单行格式为 `<64 位 SHA-256>  <ZIP 文件名>`；ZIP 必须具有 GitHub 资产 SHA-256 摘要。ZIP 根目录保留 `omnitrigger.exe`、`LICENSE`、`THIRD_PARTY_NOTICES.md`、`README.txt`、`RELEASE_NOTES.md` 和 `licenses/`。更新器拒绝其他顶层文件、路径穿越、重复文件、链接及超限解压内容；以后改变发行布局时需同步更新器。
 
-网络与解包在后台线程启动的隐藏 PowerShell 下载器完成，不经过 Hook 同步路径。退出前由独立替换器完成预检和就绪交接；旧进程退出后备份并覆盖发行文件，以原配置路径启动新版。新版窗口打开且输入后端就绪后回报构建版本，替换器才删除备份；启动失败则尝试回滚，并把原因传给重新启动的旧版。此为进程内检测到的失败恢复，不提供断电或操作系统崩溃后的事务恢复。
+版本清单由 [ceastld/app-updates](https://github.com/ceastld/app-updates) 的 `public/omnitrigger/version.json` 维护，通过同一 Workers 和 `update.alinko.cc` 域名分发。字段为 `product=omnitrigger`、`release`（Cargo SemVer）、`version`、`publishedAt`、`downloadUrl`、`sha256SumsUrl`、`sha256`、`size`、`notes`。三段数字的展示版本追加 `.0`，带预发布后缀时保持原 SemVer；客户端始终按 `release` 比较。
 
-新增版本的发布前人工验证应包含：旧版检查新版、后台下载进度、真实发行包完整校验、自动重启、配置保留、文件被占用、不可写目录及启动失败后的恢复。无网络集成测试覆盖包校验、ZIP 边界、退出交接、中文带空格路径、成功替换和失败回滚。SHA-256 与下载包来自同一 GitHub 发布源，只校验完整性，不替代独立发行签名。
+Windows Release 在成功公开并校验发行资产后，显式调用[通知工作流](../.github/workflows/notify-update-api.yml)，向 `app-updates` 发送 `release-published` 事件。手动公开 Release 也由 `release: published` 事件通知；可手动运行通知工作流并传入已有标签补发。接收端校验产品和仓库，拒绝版本倒退和同版本 ZIP 摘要变化，随后同步、部署并读回 JSON 正文及 JSON/CORS 响应头。不创建测试 Release，不使用服务端轮询。
+
+跨仓库通知需在本仓库 Actions Secrets 配置 `APP_UPDATES_DISPATCH_TOKEN`，仅授予 `ceastld/app-updates` 的 Contents: write 权限。此密钥不进入源码；普通分支推送和应用内检查均不需要它。首次接入可用既有公开版本同步、部署和验证服务，无需创建新标签。
+
+网络与解包在后台线程启动的隐藏 PowerShell 下载器完成，不经过 Hook 同步路径。退出前由独立替换器完成预检和就绪交接；主界面必须为本次更新写入退出授权，替换器同时收到授权和旧进程退出后才备份并覆盖发行文件。下载期间普通关闭窗口不会授权安装。替换器以原配置路径启动新版；新版窗口打开且输入后端就绪后回报构建版本，才删除备份。启动失败则尝试回滚，并把原因传给重新启动的旧版；短暂映像共享锁会有界重试，不结束其他实例。此为进程内检测到的失败恢复，不提供断电或操作系统崩溃后的事务恢复。
+
+新增版本的发布前人工验证应包含：统一 API 读回、备用源回退、后台下载进度、真实发行包完整校验、自动重启、配置保留、文件被占用、不可写目录及启动失败后的恢复。无网络测试覆盖清单身份、摘要、定时检查、回退、ZIP 边界、退出授权、中文带空格路径、成功替换和失败回滚。SHA-256 由 GitHub 资产摘要同步到 Cloudflare，同时核对原始 SHA256SUMS；这不替代独立发行签名。

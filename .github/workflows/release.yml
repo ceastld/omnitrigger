@@ -186,3 +186,13 @@ jobs:
           }
           gh release edit $tag --repo $env:GITHUB_REPOSITORY --draft=false --prerelease --latest=false
           if ($LASTEXITCODE -ne 0) { throw '公开预览版失败；草稿资产保留供检查。' }
+
+  notify-update-api:
+    name: 同步统一更新服务
+    needs: publish
+    if: needs.publish.result == 'success'
+    uses: ./.github/workflows/notify-update-api.yml
+    with:
+      release_tag: ${{ github.ref_name }}
+    secrets:
+      APP_UPDATES_DISPATCH_TOKEN: ${{ secrets.APP_UPDATES_DISPATCH_TOKEN }}

@@ -58,6 +58,8 @@ try {
     Expect-Failure { Confirm-UpdateHash $updateHashPath 'valid.zip' $updateZipPath }
     [IO.File]::WriteAllText($updateHashPath, ((Get-UpdateHash $updateZipPath) + '  valid.zip'))
     Confirm-UpdateHash $updateHashPath 'valid.zip' $updateZipPath
+    Confirm-UpdateDigest $updateZipPath (Get-UpdateHash $updateZipPath)
+    Expect-Failure { Confirm-UpdateDigest $updateZipPath ('f' * 64) }
 
     # 用极小的真实 EXE 模拟旧版、健康新版及启动失败，经过生产替换器而非测试替身。
     $updateFixtureExe = Join-Path $updateTestRoot 'fixture.exe'
@@ -84,7 +86,7 @@ class Fixture {
 }
 '@
     Add-Type -TypeDefinition $updateSource -OutputAssembly $updateFixtureExe -OutputType WindowsApplication
-    foreach ($updateCase in @('success', 'rollback', 'tampered')) {
+    foreach ($updateCase in @('success', 'rollback', 'tampered', 'cancelled')) {
         $updateRoot = Join-Path $updateTestRoot "安装 空格-$updateCase"
         $updateStage = Join-Path $updateRoot '.omnitrigger-update-fixture'
         $updatePayload = Join-Path $updateStage 'payload'
@@ -100,7 +102,7 @@ class Fixture {
             @{ name = $_; sha256 = (Get-UpdateHash (Join-Path $updatePayload $_)) }
         }
         if ($updateCase -eq 'tampered') { [IO.File]::WriteAllText((Join-Path $updatePayload 'README.txt'), 'changed') }
-        $updatePlan = @{ executable = $updateExe; config = $updateConfig; parent_pid = $updateParent.Id; release = @{ tag_name = 'v0.2.0' } }
+        $updatePlan = @{ executable = $updateExe; config = $updateConfig; parent_pid = $updateParent.Id; release = @{ tag_name = 'v0.2.0' }; token = 'fixture-session' }
         [IO.File]::WriteAllText((Join-Path $updateStage 'plan.json'), ($updatePlan | ConvertTo-Json -Depth 5))
         [IO.File]::WriteAllText((Join-Path $updateStage 'files.json'), (ConvertTo-Json -InputObject @($updateManifest)))
         foreach ($updateScript in @('update_apply.ps1', 'update_common.ps1')) {
@@ -120,8 +122,14 @@ class Fixture {
         }
         Assert-Test (Test-Path -LiteralPath (Join-Path $updateStage 'helper-ready')) '替换器未就绪。'
         Assert-Test ([IO.File]::ReadAllText((Join-Path $updateRoot 'README.txt')) -ceq 'old') '旧版退出前不能替换文件。'
+        if ($updateCase -ne 'cancelled') { [IO.File]::WriteAllText((Join-Path $updateStage 'authorize'), $updatePlan.token) }
         [IO.File]::WriteAllText((Join-Path $updateRoot 'exit-parent'), 'exit')
         Assert-Test ($updateHelper.WaitForExit(45000)) '替换器未能及时结束。'
+        if ($updateCase -eq 'cancelled') {
+            Assert-Test ($updateHelper.ExitCode -ne 0) '未授权的普通退出不能安装更新。'
+            Assert-Test ([IO.File]::ReadAllText((Join-Path $updateRoot 'README.txt')) -ceq 'old') '未授权时不能替换原文件。'
+            continue
+        }
         $updateDeadline = [DateTime]::UtcNow.AddSeconds(5)
         while (-not (Test-Path -LiteralPath $updateConfig) -and [DateTime]::UtcNow -lt $updateDeadline) { Start-Sleep -Milliseconds 50 }
         $updateResult = [IO.File]::ReadAllText($updateConfig).Split('|')
