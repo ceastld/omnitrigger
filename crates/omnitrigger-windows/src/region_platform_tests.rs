@@ -22,6 +22,7 @@ fn setup(screens: Vec<ScreenRect>, pointer: (i32, i32)) -> (ThreadState, Receive
 
 fn regional(activation: Activation, region: PointerRegion) -> TriggerSpec {
     TriggerSpec {
+        wheel: Default::default(),
         keyboard: Default::default(),
         process_scope: Default::default(),
         id: 8,
@@ -113,6 +114,53 @@ fn wheel_uses_its_own_physical_point_and_full_monitor_bottom_instead_of_work_are
 }
 
 #[test]
+fn packet_wheel_delivers_one_backend_hit_per_event_at_its_own_point() {
+    let (mut state, events) = setup(vec![screen(0, 0, 1920, 1080)], (100, 500));
+    let mut row = regional(
+        Activation::Wheel(WheelDirection::Up),
+        PointerRegion::ScreenEdge {
+            edge: ScreenEdge::Bottom,
+            thickness_px: 1,
+        },
+    );
+    row.wheel = omnitrigger_core::WheelPolicy::Packet;
+    state.command(BackendCommand::SetBindings(vec![row]));
+    for (time, delta) in [1, 15, 240, i32::MAX].into_iter().enumerate() {
+        let outcome = state.input_at(
+            Some(InputKind::Wheel {
+                axis: Axis::Vertical,
+                delta,
+            }),
+            None,
+            Some((100, 1079)),
+            time as u64 + 1,
+        );
+        assert!(outcome.consume);
+        let hits: Vec<_> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                BackendEvent::Triggered { id, pointer } => Some((id, pointer)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hits, [(8, Some((100, 1079)))]);
+    }
+    let outside = state.input_at(
+        Some(InputKind::Wheel {
+            axis: Axis::Vertical,
+            delta: 240,
+        }),
+        None,
+        Some((100, 1078)),
+        10,
+    );
+    assert!(!outside.consume);
+    assert!(!events
+        .try_iter()
+        .any(|event| matches!(event, BackendEvent::Triggered { .. })));
+}
+
+#[test]
 fn shared_monitor_edge_is_not_exposed_but_outer_edge_still_matches() {
     let (mut state, events) = setup(
         vec![screen(-100, 0, 0, 100), screen(0, 0, 100, 100)],
@@ -186,6 +234,7 @@ fn topology_change_cancels_active_drag_and_pending_hold_and_drains_releases() {
             }
         };
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
             id: 8,

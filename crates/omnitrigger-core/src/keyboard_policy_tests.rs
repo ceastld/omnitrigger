@@ -9,6 +9,7 @@ const SIDE: Button = Button::Mouse(MouseButton::X1);
 
 fn binding(id: u64, held: &[Button], activation: Activation) -> TriggerSpec {
     TriggerSpec {
+        wheel: Default::default(),
         id,
         held: held.to_vec(),
         activation,

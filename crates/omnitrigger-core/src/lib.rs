@@ -13,6 +13,7 @@
 //! let caps = Button::Key(0x14);
 //! let w = Button::Key(0x57);
 //! let mut engine = Engine::new(vec![TriggerSpec {
+//!     wheel: Default::default(),
 //!     keyboard: Default::default(),
 //!     process_scope: Default::default(),
 //!     id: 1,
@@ -42,6 +43,7 @@ pub use engine::Engine;
 pub use model::{
     Activation, ActiveDrag, Axis, Button, Decision, DragEvent, DragPhase, InputEvent, InputKind,
     KeyboardMatching, KeyboardPolicy, MouseButton, RetainedPrefix, TriggerSpec, WheelDirection,
+    WheelPolicy,
 };
 pub use process_scope::{ProcessIdentity, ProcessScope, ProcessScopeError, WindowRole};
 pub use recorder::Recorder;
@@ -74,3 +76,6 @@ mod region_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod wheel_policy_tests;

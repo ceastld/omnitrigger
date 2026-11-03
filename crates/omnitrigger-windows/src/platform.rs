@@ -2367,6 +2367,7 @@ mod tests {
         let adorn = Button::Key(71);
         let key = Button::Key(75);
         let make = |id, held, terminal| TriggerSpec {
+            wheel: Default::default(),
             id,
             held,
             activation: omnitrigger_core::Activation::Press(terminal),
@@ -2437,6 +2438,7 @@ mod tests {
         let key = Button::Key(75);
         let unknown = Button::Key(88);
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            wheel: Default::default(),
             id: 1,
             held: vec![caps],
             activation: omnitrigger_core::Activation::Press(key),
@@ -2495,6 +2497,7 @@ mod tests {
         let terminal = Button::Key(80);
         let unknown = Button::Key(88);
         let make = |id, held, priority| TriggerSpec {
+            wheel: Default::default(),
             id,
             held,
             activation: omnitrigger_core::Activation::Press(terminal),
@@ -2544,6 +2547,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                wheel: Default::default(),
                 id: 1,
                 held: vec![],
                 activation: omnitrigger_core::Activation::Press(Button::Key(75)),
@@ -2605,6 +2609,7 @@ mod tests {
         let (events, _) = mpsc::sync_channel(EVENT_CAPACITY);
         let mut state = ThreadState::new(events);
         let global = TriggerSpec {
+            wheel: Default::default(),
             keyboard: Default::default(),
             id: 1,
             held: vec![],
@@ -2725,6 +2730,7 @@ mod tests {
         let mut state = ThreadState::new(tx);
         let middle = Button::Mouse(MouseButton::Middle);
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
@@ -3029,6 +3035,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(EVENT_CAPACITY);
         let mut state = ThreadState::new(tx);
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
@@ -3166,6 +3173,7 @@ mod tests {
         }
         let (mut state, _) = right_hold_state();
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
@@ -3577,6 +3585,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
@@ -3611,6 +3620,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
@@ -3709,6 +3719,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),

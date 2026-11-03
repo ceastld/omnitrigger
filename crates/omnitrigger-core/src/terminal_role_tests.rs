@@ -9,6 +9,7 @@ const RIGHT: Button = Button::Mouse(MouseButton::Right);
 
 fn spec(id: u64, held: &[Button], activation: Activation, dedicated: bool) -> TriggerSpec {
     TriggerSpec {
+        wheel: Default::default(),
         id,
         held: held.to_vec(),
         activation,

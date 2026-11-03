@@ -10,6 +10,7 @@ const X: Button = Button::Key(88);
 
 fn rule(id: u64, adorn: Option<Button>, terminal: Button, priority: u16) -> TriggerSpec {
     TriggerSpec {
+        wheel: Default::default(),
         id,
         held: [Some(CAPS), adorn].into_iter().flatten().collect(),
         activation: Activation::Press(terminal),

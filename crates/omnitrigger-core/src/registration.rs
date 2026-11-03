@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use crate::{
-    Activation, Button, ProcessScopeError, RegionError, TriggerCondition, TriggerSpec, regions,
+    Activation, Button, ProcessScopeError, RegionError, TriggerCondition, TriggerSpec, WheelPolicy,
+    regions,
 };
 
 /// Hook 匹配仍受固定上限约束；完整检查发生在注册时。
@@ -12,6 +13,9 @@ pub const MAX_BINDINGS: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistrationError {
+    InvalidWheelPolicy {
+        id: u64,
+    },
     InvalidRetainedPrefix {
         id: u64,
     },
@@ -104,6 +108,7 @@ pub enum RegistrationError {
 impl fmt::Display for RegistrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::InvalidWheelPolicy { .. } => "逐事件滚轮策略仅支持滚轮触发。",
             Self::InvalidRetainedPrefix { .. } => "保留原功能前缀须为 held 中的明确键盘键，启用捕获匹配和单按恢复，与专用层互斥；时间须不超过 60000 毫秒。",
             Self::InvalidCapturedMatching { .. } => {
                 "捕获集合需要显式键盘层（专用层或保留原功能层），最多一个附加键，顺序编号须小于 512；鼠标触发仅支持保留原功能层。"
@@ -164,6 +169,11 @@ pub(super) fn validate(
     }
     let mut ids = BTreeSet::new();
     for binding in &mut bindings {
+        if binding.wheel != WheelPolicy::Notch
+            && !matches!(binding.activation, Activation::Wheel(_))
+        {
+            return Err(RegistrationError::InvalidWheelPolicy { id: binding.id });
+        }
         if let Some(policy) = binding.keyboard.retained_prefix.as_ref()
             && (binding.keyboard.dedicated_prefix.is_some()
                 || !binding.keyboard.matching.is_captured()

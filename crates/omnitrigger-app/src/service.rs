@@ -221,6 +221,7 @@ mod tests {
     fn binding(id: u64, key: u16) -> Binding {
         Binding {
             spec: TriggerSpec {
+                wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
                 id,

@@ -10,7 +10,7 @@ use crate::model::direction;
 use crate::registration::validate;
 use crate::{
     Activation, ActiveDrag, Axis, Button, ContextError, Decision, DragEvent, DragPhase, InputEvent,
-    InputKind, RegistrationError, ScreenRect, TriggerSpec, WheelDirection, regions,
+    InputKind, RegistrationError, ScreenRect, TriggerSpec, WheelDirection, WheelPolicy, regions,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -806,14 +806,14 @@ impl Engine {
             return Decision::default();
         }
         let direction = direction(axis, delta);
-        let Some(id) = self
+        let Some((id, policy)) = self
             .candidates()
             .find(|binding| {
                 binding.activation == Activation::Wheel(direction)
                     && self.binding_held_matches(binding)
                     && self.conditions_match(binding)
             })
-            .map(|binding| binding.id)
+            .map(|binding| (binding.id, binding.wheel))
         else {
             return Decision {
                 replay: self.flush_pending(),
@@ -826,10 +826,19 @@ impl Engine {
             self.wheel[index] = 0;
         }
         self.wheel_owner[index] = Some(id);
-        self.wheel[index] = self.wheel[index].saturating_add(i64::from(delta).abs());
-        // 一条异常大的公共API输入不能让hook同步路径产生无界工作；剩余步数保留。
-        let count = (self.wheel[index] / 120).min(64) as usize;
-        self.wheel[index] -= count as i64 * 120;
+        let count = match policy {
+            WheelPolicy::Packet => {
+                self.wheel[index] = 0;
+                1
+            }
+            WheelPolicy::Notch => {
+                self.wheel[index] = self.wheel[index].saturating_add(i64::from(delta).abs());
+                // 一条异常大的公共API输入不能让hook同步路径产生无界工作；剩余步数保留。
+                let count = (self.wheel[index] / 120).min(64) as usize;
+                self.wheel[index] -= count as i64 * 120;
+                count
+            }
+        };
         if count > 0 {
             self.commit_pending();
             self.append_regional_tails();

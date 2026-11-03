@@ -87,12 +87,23 @@ pub struct ActiveDrag {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TriggerSpec {
+    pub wheel: WheelPolicy,
     pub keyboard: KeyboardPolicy,
     pub process_scope: ProcessScope,
     pub id: u64,
     pub held: Vec<Button>,
     pub activation: Activation,
     pub conditions: Vec<TriggerCondition>,
+}
+
+/// 滚轮动作的计数单位；不改变按住集合、位置或应用条件。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WheelPolicy {
+    /// 累积 120 单位执行一次，每次事件最多执行 64 次，余量保留。
+    #[default]
+    Notch,
+    /// 每个非零标准化滚轮事件执行一次，不累积余量。
+    Packet,
 }
 
 /// 只影响物理键盘输入；缺省保留既有回退和单次触发行为。

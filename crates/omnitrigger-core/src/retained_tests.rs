@@ -7,6 +7,7 @@ const X: Button = Button::Key(88);
 
 fn spec(id: u64, terminal: Button, adorn: Option<Button>) -> TriggerSpec {
     TriggerSpec {
+        wheel: Default::default(),
         id,
         held: std::iter::once(PREFIX).chain(adorn).collect(),
         activation: Activation::Press(terminal),
@@ -367,6 +368,7 @@ fn retained_modifiers_bypass_capture_and_do_not_steal_existing_shortcuts() {
     }
     let ctrl = Button::Key(162);
     let normal = TriggerSpec {
+        wheel: Default::default(),
         id: 2,
         held: vec![ctrl],
         activation: Activation::Press(PREFIX),

@@ -13,6 +13,7 @@ fn scope(allow: &[&str], deny: &[&str]) -> ProcessScope {
 }
 fn press(id: u64, process_scope: ProcessScope) -> TriggerSpec {
     TriggerSpec {
+        wheel: Default::default(),
         keyboard: Default::default(),
         id,
         held: vec![CAPS],
@@ -381,6 +382,7 @@ fn scope_and_region_both_apply_to_an_override() {
 #[test]
 fn terminal_prefix_conflicts_respect_disjoint_processes() {
     let terminal = TriggerSpec {
+        wheel: Default::default(),
         keyboard: Default::default(),
         id: 1,
         held: vec![],
@@ -399,6 +401,7 @@ fn terminal_prefix_conflicts_respect_disjoint_processes() {
 fn process_change_cancels_a_claimed_drag_and_replacement_rebuilds_scopes() {
     let right = Button::Mouse(MouseButton::Right);
     let drag = TriggerSpec {
+        wheel: Default::default(),
         keyboard: Default::default(),
         id: 3,
         held: vec![],

@@ -1,0 +1,14 @@
+{
+  "version": 16,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [{"kind": "x1"}],
+      "activation": {"kind": "wheel_up"},
+      "wheel": "packet",
+      "message": "侧键加上滚：每个非零事件执行一次",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    }
+  ]
+}

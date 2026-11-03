@@ -438,7 +438,10 @@ fn activation_label(spec: &TriggerSpec) -> String {
             max_start_ms,
             ..
         } => format!("快速拖拽 ≥{min_distance_px}px · <{max_start_ms}ms"),
-        Activation::Wheel(_) => "滚轮一格即触发".into(),
+        Activation::Wheel(_) => match spec.wheel {
+            omnitrigger_core::WheelPolicy::Notch => "滚轮一格即触发".into(),
+            omnitrigger_core::WheelPolicy::Packet => "每个滚轮事件触发一次".into(),
+        },
     }
 }
 
@@ -1401,6 +1404,9 @@ impl Workspace {
                     {
                         spec.process_scope = base.process_scope.clone();
                         spec.keyboard = base.keyboard.clone();
+                        if matches!(spec.activation, Activation::Wheel(_)) {
+                            spec.wheel = base.wheel;
+                        }
                     }
                     let reusable = editing.or_else(|| {
                         if self.recording_preserve_action {
@@ -3939,7 +3945,14 @@ impl Workspace {
             }
             return fields
                 .child(directions)
-                .child(caption("滚轮累计一格时触发；位置条件和按住组合独立配置。"))
+                .child(caption(match spec.wheel {
+                    omnitrigger_core::WheelPolicy::Notch => {
+                        "滚轮累计一格时触发；位置条件和按住组合独立配置。"
+                    }
+                    omnitrigger_core::WheelPolicy::Packet => {
+                        "每个非零滚轮事件触发一次；位置条件和按住组合独立配置。"
+                    }
+                }))
                 .child(self.condition_fields(cx));
         }
         fields
@@ -5774,6 +5787,12 @@ impl Render for Toast {
 
 fn smoke_test() -> Result<(), String> {
     let mut bindings = settings::defaults();
+    let mut packet = bindings[0].clone();
+    packet.spec.id = settings::next_id(&bindings);
+    packet.spec.held = vec![Button::Mouse(omnitrigger_core::MouseButton::X2)];
+    packet.spec.activation = Activation::Wheel(omnitrigger_core::WheelDirection::Left);
+    packet.spec.wheel = omnitrigger_core::WheelPolicy::Packet;
+    bindings.push(packet);
     let mut scoped = bindings[0].clone();
     scoped.spec.id = settings::next_id(&bindings);
     scoped.spec.process_scope.allow = vec!["omnitrigger-smoke".into()];

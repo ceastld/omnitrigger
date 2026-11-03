@@ -57,6 +57,7 @@ fn pending_replay_consumes_later_discrete_edges_but_never_mouse_move() {
     let target = Button::Key(0x57);
     let other = Button::Key(0x51);
     state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+        wheel: Default::default(),
         keyboard: Default::default(),
         process_scope: Default::default(),
         conditions: Vec::new(),
@@ -93,6 +94,7 @@ fn old_ack_cannot_clear_new_press_and_hold_action_waits_for_older_replay() {
     let (mut state, jobs, acks, events) = setup();
     let right = Button::Mouse(MouseButton::Right);
     state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+        wheel: Default::default(),
         keyboard: Default::default(),
         process_scope: Default::default(),
         conditions: Vec::new(),
@@ -157,6 +159,7 @@ fn paused_press_stays_owned_after_replay_and_cleanup_ack_until_physical_release(
     let caps = Button::Key(0x14);
     let other = Button::Key(0x51);
     state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+        wheel: Default::default(),
         keyboard: Default::default(),
         process_scope: Default::default(),
         conditions: Vec::new(),
@@ -194,6 +197,7 @@ fn drag_started_triggered_and_ended_wait_for_the_previous_replay_in_order() {
     let right = Button::Mouse(MouseButton::Right);
     state.command(BackendCommand::SetBindings(vec![
         TriggerSpec {
+            wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
@@ -205,6 +209,7 @@ fn drag_started_triggered_and_ended_wait_for_the_previous_replay_in_order() {
             },
         },
         TriggerSpec {
+            wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
@@ -253,6 +258,7 @@ fn deferred_trigger_keeps_the_matching_pointer_instead_of_later_motion() {
     let (mut state, jobs, acks, events) = setup();
     let right = Button::Mouse(MouseButton::Right);
     state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+        wheel: Default::default(),
         keyboard: Default::default(),
         process_scope: Default::default(),
         conditions: Vec::new(),
@@ -302,6 +308,7 @@ fn topology_change_discards_old_deferred_triggers_before_the_previous_replay_ack
         )
         .unwrap();
     state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+        wheel: Default::default(),
         keyboard: Default::default(),
         process_scope: Default::default(),
         conditions: Vec::new(),

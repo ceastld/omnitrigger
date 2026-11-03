@@ -1,7 +1,7 @@
 //! 应用持久化边界。纯核心无需了解文件格式或用户目录。
 use omnitrigger_core::{
     Activation, Button, Engine, KeyboardMatching, KeyboardPolicy, MouseButton, ProcessScope,
-    RegistrationError, TriggerSpec, WheelDirection,
+    RegistrationError, TriggerSpec, WheelDirection, WheelPolicy,
 };
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -22,7 +22,7 @@ use crate::wheels::WheelActionRef;
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
-const CONFIG_VERSION: u32 = 15;
+const CONFIG_VERSION: u32 = 16;
 
 pub fn use_path(path: PathBuf) -> Result<(), String> {
     CUSTOM_PATH.set(path).map_err(|_| "配置路径已设置。".into())
@@ -65,6 +65,8 @@ struct Settings {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BindingDto {
+    #[serde(default, skip_serializing_if = "WheelPolicyDto::is_default")]
+    wheel: WheelPolicyDto,
     #[serde(default, skip_serializing_if = "KeyboardPolicyDto::is_default")]
     keyboard: KeyboardPolicyDto,
     #[serde(default, skip_serializing_if = "ProcessScopeDto::is_global")]
@@ -87,6 +89,38 @@ struct BindingDto {
     command: Option<CommandAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     show_panel: Option<bool>,
+}
+
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WheelPolicyDto {
+    #[default]
+    Notch,
+    Packet,
+}
+
+impl WheelPolicyDto {
+    fn is_default(&self) -> bool {
+        matches!(self, Self::Notch)
+    }
+}
+
+impl From<WheelPolicyDto> for WheelPolicy {
+    fn from(policy: WheelPolicyDto) -> Self {
+        match policy {
+            WheelPolicyDto::Notch => Self::Notch,
+            WheelPolicyDto::Packet => Self::Packet,
+        }
+    }
+}
+
+impl From<WheelPolicy> for WheelPolicyDto {
+    fn from(policy: WheelPolicy) -> Self {
+        match policy {
+            WheelPolicy::Notch => Self::Notch,
+            WheelPolicy::Packet => Self::Packet,
+        }
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -284,6 +318,7 @@ impl From<ButtonDto> for Button {
 impl From<&Binding> for BindingDto {
     fn from(binding: &Binding) -> Self {
         Self {
+            wheel: binding.spec.wheel.into(),
             keyboard: KeyboardPolicyDto {
                 matching: binding.spec.keyboard.matching.into(),
                 dedicated_prefix: binding.spec.keyboard.dedicated_prefix.map(Into::into),
@@ -354,6 +389,9 @@ impl From<&Binding> for BindingDto {
 
 impl BindingDto {
     fn into_binding(self, version: u32) -> Result<Binding, String> {
+        if version < 16 && !self.wheel.is_default() {
+            return Err("逐事件滚轮策略需要版本 16 配置。".into());
+        }
         if version < 15
             && (!self.process_scope.identity.is_default()
                 || !self.keyboard.tap_scope.identity.is_default()
@@ -434,6 +472,7 @@ impl BindingDto {
         }
         Ok(Binding {
             spec: TriggerSpec {
+                wheel: self.wheel.into(),
                 keyboard: KeyboardPolicy {
                     matching: self.keyboard.matching.into(),
                     dedicated_prefix: self.keyboard.dedicated_prefix.map(Into::into),
@@ -502,6 +541,7 @@ pub fn defaults() -> Vec<Binding> {
     vec![
         Binding {
             spec: TriggerSpec {
+                wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
@@ -515,6 +555,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
@@ -528,6 +569,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
@@ -541,6 +583,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
@@ -554,6 +597,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
@@ -641,6 +685,11 @@ pub fn check_candidate(bindings: &[Binding], spec: &TriggerSpec) -> Result<(), C
     };
     let pick = |a: u64, b: u64| Some(if a == id { b } else { a });
     Err(match error {
+        RegistrationError::InvalidWheelPolicy { .. } => Conflict {
+            title: "滚轮策略不适用于当前触发方式",
+            detail: "逐事件策略仅用于滚轮，请改为滚轮触发或恢复缺省策略。".into(),
+            other: None,
+        },
         RegistrationError::CapturedPriorityConflict { first, second } => Conflict {
             title: "捕获规则顺序冲突",
             detail: "同一捕获层的重叠规则使用了相同顺序编号，请在配置中明确 matching.priority。".into(),
@@ -892,6 +941,45 @@ mod tests {
             .unwrap_err()
             .contains("专用层"));
         assert_eq!(std::fs::read_to_string(&destination).unwrap(), saved);
+    }
+
+    #[test]
+    fn packet_wheel_round_trip_requires_v16_and_keeps_exact_v15_backup() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let mut document: serde_json::Value = serde_json::from_str(&encode(&defaults())).unwrap();
+        document["version"] = 15.into();
+        let original = format!(" \r\n{document}\r\n");
+        std::fs::write(&destination, &original).unwrap();
+        let mut bindings = decode(&original).unwrap();
+        assert!(bindings
+            .iter()
+            .all(|binding| binding.spec.wheel == WheelPolicy::Notch));
+        bindings[0].spec.activation = Activation::Wheel(WheelDirection::Up);
+        bindings[0].spec.wheel = WheelPolicy::Packet;
+        save_to(&destination, &bindings).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.0.join("bindings.json.v15.bak")).unwrap(),
+            original
+        );
+        let saved = std::fs::read_to_string(&destination).unwrap();
+        assert_eq!(decode(&saved).unwrap(), bindings);
+        let mut document: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(document["version"], 16);
+        assert_eq!(document["bindings"][0]["wheel"], "packet");
+        assert!(document["bindings"][1].get("wheel").is_none());
+        document["version"] = 15.into();
+        assert!(decode(&document.to_string())
+            .unwrap_err()
+            .contains("版本 16"));
+        document["version"] = 16.into();
+        document["bindings"][0]["wheel"] = "unknown".into();
+        assert!(decode(&document.to_string()).is_err());
+        bindings[0].spec.activation = Activation::Press(Button::Key(87));
+        assert!(save_to(&destination, &bindings)
+            .unwrap_err()
+            .contains("仅支持滚轮"));
+        assert_eq!(std::fs::read_to_string(destination).unwrap(), saved);
     }
 
     #[test]
@@ -1612,6 +1700,7 @@ mod tests {
     fn drag_binding(button: Button, min_distance_px: u32, max_start_ms: u32) -> Binding {
         Binding {
             spec: TriggerSpec {
+                wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
@@ -1723,6 +1812,7 @@ mod tests {
         assert_eq!(duplicate.other, Some(1));
         assert_eq!(duplicate.title, "与已有触发范围冲突");
         let prefix = TriggerSpec {
+            wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
@@ -1742,6 +1832,7 @@ mod tests {
             Some(1)
         );
         let bare_left = TriggerSpec {
+            wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
@@ -1754,6 +1845,7 @@ mod tests {
             None
         );
         let fresh = TriggerSpec {
+            wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
@@ -1780,6 +1872,7 @@ mod tests {
     ) -> Binding {
         Binding {
             spec: TriggerSpec {
+                wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
                 id,
@@ -1837,6 +1930,7 @@ mod tests {
             .enumerate()
             .map(|(index, action)| Binding {
                 spec: TriggerSpec {
+                    wheel: Default::default(),
                     keyboard: Default::default(),
                     process_scope: Default::default(),
                     id: 100 + index as u64,

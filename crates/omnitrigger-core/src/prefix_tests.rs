@@ -10,6 +10,7 @@ const W: Button = Button::Key(0x57);
 
 fn press(id: u64, held: &[Button], terminal: Button) -> TriggerSpec {
     TriggerSpec {
+        wheel: Default::default(),
         keyboard: Default::default(),
         process_scope: Default::default(),
         conditions: vec![],
@@ -85,6 +86,7 @@ fn dragging_with_a_left_prefix_binding_never_holds_input() {
 #[test]
 fn left_prefix_with_wheel_consumes_only_the_wheel() {
     let mut engine = Engine::new(vec![TriggerSpec {
+        wheel: Default::default(),
         keyboard: Default::default(),
         process_scope: Default::default(),
         conditions: vec![],
@@ -124,6 +126,7 @@ fn cancelling_does_not_swallow_a_passed_left_release() {
 fn moving_a_held_mouse_prefix_hands_the_press_back() {
     for prefix in [RIGHT, MIDDLE, SIDE] {
         let mut engine = Engine::new(vec![TriggerSpec {
+            wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: vec![],
@@ -151,6 +154,7 @@ fn moving_a_held_mouse_prefix_hands_the_press_back() {
 #[test]
 fn small_jitter_keeps_a_mouse_prefix_waiting_for_its_combo() {
     let mut engine = Engine::new(vec![TriggerSpec {
+        wheel: Default::default(),
         keyboard: Default::default(),
         process_scope: Default::default(),
         conditions: vec![],
@@ -170,6 +174,7 @@ fn small_jitter_keeps_a_mouse_prefix_waiting_for_its_combo() {
 #[test]
 fn prefix_origin_resets_between_presses() {
     let mut engine = Engine::new(vec![TriggerSpec {
+        wheel: Default::default(),
         keyboard: Default::default(),
         process_scope: Default::default(),
         conditions: vec![],
