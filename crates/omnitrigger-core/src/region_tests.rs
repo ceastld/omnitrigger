@@ -34,6 +34,7 @@ fn corner(corner: ScreenCorner) -> PointerRegion {
 }
 fn binding(id: u64, held: &[Button], activation: Activation, region: PointerRegion) -> TriggerSpec {
     TriggerSpec {
+        pointer_scope: Default::default(),
         wheel: Default::default(),
         keyboard: Default::default(),
         process_scope: Default::default(),

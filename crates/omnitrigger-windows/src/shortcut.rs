@@ -212,6 +212,17 @@ pub fn capture_shortcut_target() -> Result<ShortcutTarget, String> {
     }
 }
 
+/// 只读捕获当前前台，并核对其仍是触发通知中的原窗口；失败不另选目标。
+#[cfg(windows)]
+pub fn capture_matching_shortcut_target(expected: isize) -> Result<ShortcutTarget, String> {
+    let target = capture_shortcut_target()?;
+    if expected == 0 || target.0 != expected {
+        return Err("触发后前台窗口已切换或原目标未知，已取消动作。".into());
+    }
+    ensure_shortcut_target(target)?;
+    Ok(target)
+}
+
 /// 确认原目标仍有效且仍为前台；只读核验，不改变窗口焦点。
 /// 多步骤动作应在每个需要原窗口的步骤之前重新核验。
 #[cfg(windows)]

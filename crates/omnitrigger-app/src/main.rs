@@ -1389,7 +1389,8 @@ impl Workspace {
                     self.send(BackendCommand::SetEnabled(!self.paused));
                 }
                 BackendEvent::RecordingProgress(held) => self.recording_held = held,
-                BackendEvent::Recorded(mut spec) => {
+                BackendEvent::Recorded(spec) => {
+                    let mut spec = *spec;
                     spec.conditions = self.recording_conditions.clone();
                     self.recording = false;
                     self.recording_held.clear();
@@ -1403,6 +1404,7 @@ impl Workspace {
                         })
                     {
                         spec.process_scope = base.process_scope.clone();
+                        spec.pointer_scope = base.pointer_scope.clone();
                         spec.keyboard = base.keyboard.clone();
                         if matches!(spec.activation, Activation::Wheel(_)) {
                             spec.wheel = base.wheel;
@@ -1464,9 +1466,25 @@ impl Workspace {
                         queue_ms: elapsed_ms(matched_at),
                     });
                 }
-                BackendEvent::Triggered { id, pointer } => {
-                    self.fire_at(id, HitSource::Input, pointer, cx)
-                }
+                BackendEvent::Triggered {
+                    id,
+                    pointer,
+                    foreground,
+                } => match omnitrigger_windows::capture_matching_shortcut_target(foreground) {
+                    Ok(target) => self.fire_at(id, HitSource::Input, pointer, Some(target), cx),
+                    Err(error) => {
+                        if let Some((caps, message)) = self
+                            .binding(id)
+                            .filter(|binding| binding.enabled && !self.recording)
+                            .map(|binding| (caps_for(&binding.spec), binding.message.clone()))
+                        {
+                            self.triggers.record_hit(id, clock());
+                            self.record_hit(caps, message, HitSource::Input);
+                            self.action_error = Some((id, error.clone()));
+                            self.record_action_status(id, error);
+                        }
+                    }
+                },
                 BackendEvent::Drag { event, foreground } => {
                     self.handle_drag_event(event, foreground, cx)
                 }
@@ -2137,7 +2155,7 @@ impl Workspace {
     }
 
     fn fire(&mut self, id: u64, source: HitSource, cx: &mut Context<Self>) {
-        self.fire_at(id, source, None, cx);
+        self.fire_at(id, source, None, None, cx);
     }
 
     fn fire_at(
@@ -2145,6 +2163,7 @@ impl Workspace {
         id: u64,
         source: HitSource,
         pointer: Option<(i32, i32)>,
+        target: Option<omnitrigger_windows::ShortcutTarget>,
         cx: &mut Context<Self>,
     ) {
         if let Some(binding) = self.binding(id) {
@@ -2182,7 +2201,7 @@ impl Workspace {
             } else if !matches!(action, ActionSpec::Notification) {
                 // 截图等动作可能立即采集屏幕，执行前不弹出自己的提示浮层。
                 self.record_hit(caps, message, source);
-                self.dispatch_action_context(id, action, None, pointer, cx);
+                self.dispatch_action_context(id, action, target, pointer, cx);
             } else {
                 self.show_message(caps, message, source, cx);
             }
@@ -3504,6 +3523,15 @@ impl Workspace {
                     detail
                 )
             };
+            let detail = if binding.spec.pointer_scope.is_global() {
+                detail
+            } else {
+                format!(
+                    "指针窗口：{} · {}",
+                    settings::process_scope_label(&binding.spec.pointer_scope),
+                    detail
+                )
+            };
             let detail = if binding.spec.keyboard == Default::default() {
                 detail
             } else {
@@ -3865,6 +3893,12 @@ impl Workspace {
             .flex_col()
             .gap(px(10.))
             .child(section_title("触发方式"))
+            .when(!spec.pointer_scope.is_global(), |element| {
+                element.child(caption(format!(
+                    "指针窗口范围：{}（配置文件中设置）",
+                    settings::process_scope_label(&spec.pointer_scope)
+                )))
+            })
             .when(!spec.process_scope.is_global(), |element| {
                 element.child(caption(format!(
                     "应用范围：{}（配置文件中设置）",
@@ -5792,6 +5826,7 @@ fn smoke_test() -> Result<(), String> {
     packet.spec.held = vec![Button::Mouse(omnitrigger_core::MouseButton::X2)];
     packet.spec.activation = Activation::Wheel(omnitrigger_core::WheelDirection::Left);
     packet.spec.wheel = omnitrigger_core::WheelPolicy::Packet;
+    packet.spec.pointer_scope.allow = vec!["omnitrigger-smoke".into()];
     bindings.push(packet);
     let mut scoped = bindings[0].clone();
     scoped.spec.id = settings::next_id(&bindings);
@@ -5888,6 +5923,9 @@ fn smoke_test() -> Result<(), String> {
         match events.recv_timeout(Duration::from_millis(100)) {
             Ok(BackendEvent::Diagnostics(snapshot))
                 if snapshot.process_context_required
+                    && snapshot.pointer_context_required
+                    && snapshot.pointer_process.is_some()
+                    && snapshot.pointer_window_role != omnitrigger_core::WindowRole::Unknown
                     && snapshot.foreground_process.is_some()
                     && snapshot.foreground_window_role != omnitrigger_core::WindowRole::Unknown =>
             {
@@ -5897,15 +5935,13 @@ fn smoke_test() -> Result<(), String> {
             _ => {}
         }
         if std::time::Instant::now() >= deadline {
-            return Err(
-                "前台进程或窗口角色快照未就绪；带窗口上下文范围的真实 Hook 验证未完成。".into(),
-            );
+            return Err("前台或指针窗口上下文未就绪；带窗口范围的真实 Hook 验证未完成。".into());
         }
         std::thread::sleep(Duration::from_millis(10));
     }
     backend.send(BackendCommand::SetEnabled(false))?;
     drop(backend);
-    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; scoped/shell-context/dedicated/retained/repeat/contextual-terminal/captured registrations valid; foreground process and window role resolved outside hooks.");
+    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; scoped/pointer-scope/shell-context/dedicated/retained/repeat/contextual-terminal/captured registrations valid; foreground and pointer process/window role resolved outside hooks.");
     Ok(())
 }
 
@@ -6182,11 +6218,12 @@ mod tests {
         let events = [
             BackendEvent::Ready,
             BackendEvent::RecordingProgress(Vec::new()),
-            BackendEvent::Recorded(super::PRESETS[0].spec(1)),
+            BackendEvent::Recorded(Box::new(super::PRESETS[0].spec(1))),
             BackendEvent::RecordingCancelled,
             BackendEvent::Triggered {
                 id: 1,
                 pointer: None,
+                foreground: 0,
             },
             BackendEvent::Error("监听已断开".into()),
         ];

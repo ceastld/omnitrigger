@@ -13,6 +13,10 @@ pub const MAX_BINDINGS: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistrationError {
+    InvalidPointerProcessScope {
+        id: u64,
+        reason: ProcessScopeError,
+    },
     InvalidWheelPolicy {
         id: u64,
     },
@@ -108,6 +112,7 @@ pub enum RegistrationError {
 impl fmt::Display for RegistrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::InvalidPointerProcessScope { reason, .. } => return write!(f, "指针窗口范围无效：{reason}"),
             Self::InvalidWheelPolicy { .. } => "逐事件滚轮策略仅支持滚轮触发。",
             Self::InvalidRetainedPrefix { .. } => "保留原功能前缀须为 held 中的明确键盘键，启用捕获匹配和单按恢复，与专用层互斥；时间须不超过 60000 毫秒。",
             Self::InvalidCapturedMatching { .. } => {
@@ -243,6 +248,12 @@ pub(super) fn validate(
                 reason,
             }
         })?;
+        binding.pointer_scope.normalize().map_err(|reason| {
+            RegistrationError::InvalidPointerProcessScope {
+                id: binding.id,
+                reason,
+            }
+        })?;
         binding.process_scope.normalize().map_err(|reason| {
             RegistrationError::InvalidProcessScope {
                 id: binding.id,
@@ -355,7 +366,7 @@ pub(super) fn validate(
                     button: a.key,
                 });
             }
-            if left.process_scope.overlaps(&right.process_scope)
+            if left.scopes_overlap(right)
                 && regions::conditions_overlap(&left.conditions, &right.conditions)
             {
                 for (layer, other) in [(left, right), (right, left)] {
@@ -382,8 +393,8 @@ pub(super) fn validate(
             if captured_pair
                 && same_button
                 && left.keyboard.matching.priority() == right.keyboard.matching.priority()
-                && left.process_scope.priority() == right.process_scope.priority()
-                && left.process_scope.overlaps(&right.process_scope)
+                && left.scope_priority() == right.scope_priority()
+                && left.scopes_overlap(right)
                 && regions::conditions_overlap(&left.conditions, &right.conditions)
             {
                 return Err(RegistrationError::CapturedPriorityConflict {
@@ -394,8 +405,8 @@ pub(super) fn validate(
             if left.held == right.held
                 && (left.activation == right.activation || same_button)
                 && regions::conditions_overlap(&left.conditions, &right.conditions)
-                && left.process_scope.overlaps(&right.process_scope)
-                && left.process_scope.priority() == right.process_scope.priority()
+                && left.scopes_overlap(right)
+                && left.scope_priority() == right.scope_priority()
                 && !(captured_pair
                     && left.keyboard.matching.priority() != right.keyboard.matching.priority())
                 && !(left.keyboard.matching.is_captured()
@@ -440,7 +451,7 @@ pub(super) fn validate(
                         && other.keyboard.matching.is_captured())
                     && left.held.iter().all(|held| other.held.contains(held))
                     && regions::conditions_overlap(&left.conditions, &other.conditions)
-                    && left.process_scope.overlaps(&other.process_scope)
+                    && left.scopes_overlap(other)
             })
         {
             return Err(RegistrationError::TerminalIsPrefix {

@@ -66,6 +66,13 @@ mod screen_context;
 #[path = "foreground_context.rs"]
 mod foreground_context;
 
+#[path = "pointer_context.rs"]
+mod pointer_context;
+
+#[cfg(test)]
+#[path = "pointer_platform_tests.rs"]
+mod pointer_tests;
+
 thread_local! {
     // Hook 始终在安装它的消息线程运行；不在 UI 线程共享可变引擎。
     static STATE: RefCell<Option<ThreadState>> = const { RefCell::new(None) };
@@ -244,6 +251,7 @@ fn run_input_thread(
             };
             pump_replay();
             refresh_process_context();
+            refresh_pointer_context();
             let mut message_count = 0;
             for _ in 0..MESSAGE_BATCH {
                 // PeekMessage 同时派发低级 Hook 的同步回调；不在任何 RefCell 借用内泵消息。
@@ -275,6 +283,7 @@ fn run_input_thread(
             }
             pump_replay();
             refresh_process_context();
+            refresh_pointer_context();
             if let Some(deadline) = shutdown_deadline {
                 let drained = STATE.with(|slot| {
                     slot.borrow()
@@ -305,13 +314,13 @@ fn run_input_thread(
                         || state.replay.busy()
                         || !state.pending_drag_cancels.is_empty()
                         || (foreground_events.is_none() && state.engine.needs_process_context()),
-                    state.needs_shell_poll(),
+                    state.needs_shell_poll() || state.engine.needs_pointer_context(),
                 )
             });
             let handles = timer_handle.map(|handle| [handle]);
             let timeout = input_wait_timeout_ms(hold_active, shutdown_deadline);
             let timeout = if shell_poll {
-                timeout.min(250)
+                timeout.min(125)
             } else {
                 timeout
             };
@@ -476,6 +485,36 @@ fn refresh_process_context() {
     });
 }
 
+fn refresh_pointer_context() {
+    let probe = STATE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let state = slot.as_mut()?;
+        state.check_foreground();
+        (state.engine.needs_pointer_context()
+            && state.pointer_context.as_ref().is_none_or(|snapshot| {
+                snapshot.needs_refresh(state.pointer.load(), Instant::now())
+            }))
+        .then(|| {
+            state
+                .pointer
+                .load()
+                .map(|point| (point, state.foreground_epoch))
+        })
+        .flatten()
+    });
+    let Some((point, epoch)) = probe else {
+        return;
+    };
+    let snapshot = pointer_context::sample_at(point);
+    STATE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some(state) = slot.as_mut() {
+            state.check_foreground();
+            state.apply_pointer_context(snapshot, epoch);
+        }
+    });
+}
+
 fn pump_replay() {
     STATE.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -597,6 +636,7 @@ struct ThreadState {
     foreground_epoch: u64,
     process_resolved: bool,
     last_context_probe: Option<Instant>,
+    pointer_context: Option<pointer_context::Snapshot>,
     overflow_reported: bool,
     counters: ListenerDiagnostics,
     last_keyboard: Option<Instant>,
@@ -654,6 +694,7 @@ impl ThreadState {
             foreground_epoch: 0,
             process_resolved: false,
             last_context_probe: None,
+            pointer_context: None,
             overflow_reported: false,
             counters,
             last_keyboard: None,
@@ -873,6 +914,17 @@ impl ThreadState {
         snapshot.foreground_process = self.engine.foreground_process().map(str::to_owned);
         snapshot.process_context_required = self.engine.needs_process_context();
         snapshot.foreground_window_role = self.engine.foreground_window_role();
+        let pointer = self
+            .pointer_context
+            .as_ref()
+            .filter(|sample| sample.valid_at(self.pointer.load(), Instant::now()));
+        snapshot.pointer_process = pointer.and_then(|sample| sample.name.clone());
+        snapshot.pointer_window_role =
+            pointer.map_or(omnitrigger_core::WindowRole::Unknown, |sample| sample.role);
+        snapshot.pointer_window = pointer
+            .filter(|sample| sample.name.is_some())
+            .map(|sample| sample.identity.hwnd as isize);
+        snapshot.pointer_context_required = self.engine.needs_pointer_context();
         let age_ms = |time: Instant| time.elapsed().as_millis().min(u64::MAX as u128) as u64;
         snapshot.last_keyboard_ms = self.last_keyboard.map(age_ms);
         snapshot.last_mouse_ms = self.last_mouse.map(age_ms);
@@ -1208,6 +1260,10 @@ impl ThreadState {
             self.foreground_epoch = self.foreground_epoch.wrapping_add(1);
             self.process_resolved = false;
             self.last_context_probe = None;
+            self.pointer_context = None;
+            let _ = self
+                .engine
+                .set_pointer_context(None, omnitrigger_core::WindowRole::Unknown);
         }
     }
 
@@ -1247,6 +1303,38 @@ impl ThreadState {
         }
     }
 
+    fn validate_pointer_context(&mut self) -> Decision {
+        if self.engine.needs_pointer_context()
+            && !self
+                .pointer_context
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.valid_at(self.pointer.load(), Instant::now()))
+        {
+            self.pointer_context = None;
+            self.engine
+                .set_pointer_context(None, omnitrigger_core::WindowRole::Unknown)
+                .unwrap_or_default()
+        } else {
+            Decision::default()
+        }
+    }
+
+    fn apply_pointer_context(&mut self, snapshot: pointer_context::Snapshot, epoch: u64) {
+        if epoch != self.foreground_epoch || !snapshot.valid_at(self.pointer.load(), Instant::now())
+        {
+            return;
+        }
+        if let Ok(decision) = self
+            .engine
+            .set_pointer_context(snapshot.name.as_deref(), snapshot.role)
+        {
+            self.pointer_context = Some(snapshot);
+            let outcome = self.finish_decision(decision, None);
+            self.queue_outcome(outcome, None);
+            self.reschedule_hold_timer();
+        }
+    }
+
     fn report_overflow(&mut self) {
         while let Some((event, foreground)) = self.pending_drag_cancels.pop_front() {
             if self
@@ -1277,11 +1365,14 @@ impl ThreadState {
         // 没有后续输入时也先确认前台，再作到期决策，不能向新窗口触发旧按压。
         self.check_foreground();
         self.report_overflow();
-        let decision = if self.recording.is_none() {
-            self.engine.advance_time(now_ms)
-        } else {
-            Decision::default()
-        };
+        let mut decision = self.validate_pointer_context();
+        if self.recording.is_none() {
+            let elapsed = self.engine.advance_time(now_ms);
+            decision.consume |= elapsed.consume;
+            decision.replay.extend(elapsed.replay);
+            decision.triggered.extend(elapsed.triggered);
+            decision.drags.extend(elapsed.drags);
+        }
         self.observe_hold(now_ms, &decision, HoldOutcome::Recovery);
         self.finish_decision(decision, None)
     }
@@ -1303,9 +1394,14 @@ impl ThreadState {
         }
         self.check_foreground();
         self.report_overflow();
-        let mut movement = pointer
+        let mut movement = self.validate_pointer_context();
+        let positional = pointer
             .map(|position| self.engine.pointer_moved(position, now_ms))
             .unwrap_or_default();
+        movement.consume |= positional.consume;
+        movement.triggered.extend(positional.triggered);
+        movement.replay.extend(positional.replay);
+        movement.drags.extend(positional.drags);
         self.observe_hold(now_ms, &movement, HoldOutcome::Movement);
         let Some(kind) = kind else {
             return self.finish_decision(movement, None);
@@ -1424,6 +1520,7 @@ impl ThreadState {
             self.notify_action(BackendEvent::Triggered {
                 id,
                 pointer: self.pointer.load(),
+                foreground: self.foreground as isize,
             });
         }
         if !decision.consume && !decision.replay.is_empty() {
@@ -1554,7 +1651,7 @@ impl ThreadState {
         if self.recording_consumed.is_empty() {
             if let Some(spec) = session.candidate.take() {
                 self.recording = None;
-                self.notify(BackendEvent::Recorded(spec));
+                self.notify(BackendEvent::Recorded(Box::new(spec)));
             }
         }
         // 只在按下集合变化时通知界面，键盘 repeat 不产生事件。
@@ -2367,6 +2464,7 @@ mod tests {
         let adorn = Button::Key(71);
         let key = Button::Key(75);
         let make = |id, held, terminal| TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             id,
             held,
@@ -2438,6 +2536,7 @@ mod tests {
         let key = Button::Key(75);
         let unknown = Button::Key(88);
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             id: 1,
             held: vec![caps],
@@ -2497,6 +2596,7 @@ mod tests {
         let terminal = Button::Key(80);
         let unknown = Button::Key(88);
         let make = |id, held, priority| TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             id,
             held,
@@ -2547,6 +2647,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                pointer_scope: Default::default(),
                 wheel: Default::default(),
                 id: 1,
                 held: vec![],
@@ -2609,6 +2710,7 @@ mod tests {
         let (events, _) = mpsc::sync_channel(EVENT_CAPACITY);
         let mut state = ThreadState::new(events);
         let global = TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             id: 1,
@@ -2730,6 +2832,7 @@ mod tests {
         let mut state = ThreadState::new(tx);
         let middle = Button::Mouse(MouseButton::Middle);
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
@@ -3035,6 +3138,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(EVENT_CAPACITY);
         let mut state = ThreadState::new(tx);
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
@@ -3173,6 +3277,7 @@ mod tests {
         }
         let (mut state, _) = right_hold_state();
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
@@ -3585,6 +3690,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                pointer_scope: Default::default(),
                 wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
@@ -3620,6 +3726,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                pointer_scope: Default::default(),
                 wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
@@ -3719,6 +3826,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                pointer_scope: Default::default(),
                 wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),

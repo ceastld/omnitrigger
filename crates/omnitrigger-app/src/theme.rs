@@ -722,6 +722,7 @@ mod tests {
     #[test]
     fn drag_caps_preserve_mouse_button_distance_and_strict_start_window() {
         let spec = TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
@@ -747,6 +748,7 @@ mod tests {
     #[test]
     fn hold_caps_preserve_the_button_and_configured_duration() {
         let spec = TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
@@ -769,6 +771,7 @@ mod tests {
     #[test]
     fn wheel_and_mouse_caps_share_one_description_with_trigger_spec() {
         let spec = TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),

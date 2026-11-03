@@ -17,6 +17,7 @@ pub struct TriggerPreset {
 impl TriggerPreset {
     pub fn spec(&self, id: u64) -> TriggerSpec {
         TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
@@ -264,6 +265,7 @@ mod tests {
             .find(|preset| preset.key == "right-300")
             .unwrap();
         let expected = TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),

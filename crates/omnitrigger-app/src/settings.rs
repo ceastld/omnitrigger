@@ -22,7 +22,7 @@ use crate::wheels::WheelActionRef;
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
-const CONFIG_VERSION: u32 = 16;
+const CONFIG_VERSION: u32 = 17;
 
 pub fn use_path(path: PathBuf) -> Result<(), String> {
     CUSTOM_PATH.set(path).map_err(|_| "配置路径已设置。".into())
@@ -65,6 +65,8 @@ struct Settings {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BindingDto {
+    #[serde(default, skip_serializing_if = "ProcessScopeDto::is_global")]
+    pointer_scope: ProcessScopeDto,
     #[serde(default, skip_serializing_if = "WheelPolicyDto::is_default")]
     wheel: WheelPolicyDto,
     #[serde(default, skip_serializing_if = "KeyboardPolicyDto::is_default")]
@@ -319,6 +321,11 @@ impl From<&Binding> for BindingDto {
     fn from(binding: &Binding) -> Self {
         Self {
             wheel: binding.spec.wheel.into(),
+            pointer_scope: ProcessScopeDto {
+                identity: binding.spec.pointer_scope.identity.into(),
+                allow: binding.spec.pointer_scope.allow.clone(),
+                deny: binding.spec.pointer_scope.deny.clone(),
+            },
             keyboard: KeyboardPolicyDto {
                 matching: binding.spec.keyboard.matching.into(),
                 dedicated_prefix: binding.spec.keyboard.dedicated_prefix.map(Into::into),
@@ -389,6 +396,9 @@ impl From<&Binding> for BindingDto {
 
 impl BindingDto {
     fn into_binding(self, version: u32) -> Result<Binding, String> {
+        if version < 17 && !self.pointer_scope.is_global() {
+            return Err("指针窗口范围需要版本 17 配置。".into());
+        }
         if version < 16 && !self.wheel.is_default() {
             return Err("逐事件滚轮策略需要版本 16 配置。".into());
         }
@@ -472,6 +482,11 @@ impl BindingDto {
         }
         Ok(Binding {
             spec: TriggerSpec {
+                pointer_scope: ProcessScope {
+                    identity: self.pointer_scope.identity.into(),
+                    allow: self.pointer_scope.allow,
+                    deny: self.pointer_scope.deny,
+                },
                 wheel: self.wheel.into(),
                 keyboard: KeyboardPolicy {
                     matching: self.keyboard.matching.into(),
@@ -541,6 +556,7 @@ pub fn defaults() -> Vec<Binding> {
     vec![
         Binding {
             spec: TriggerSpec {
+                pointer_scope: Default::default(),
                 wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
@@ -555,6 +571,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                pointer_scope: Default::default(),
                 wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
@@ -569,6 +586,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                pointer_scope: Default::default(),
                 wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
@@ -583,6 +601,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                pointer_scope: Default::default(),
                 wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
@@ -597,6 +616,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                pointer_scope: Default::default(),
                 wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
@@ -965,7 +985,7 @@ mod tests {
         let saved = std::fs::read_to_string(&destination).unwrap();
         assert_eq!(decode(&saved).unwrap(), bindings);
         let mut document: serde_json::Value = serde_json::from_str(&saved).unwrap();
-        assert_eq!(document["version"], 16);
+        assert_eq!(document["version"], CONFIG_VERSION);
         assert_eq!(document["bindings"][0]["wheel"], "packet");
         assert!(document["bindings"][1].get("wheel").is_none());
         document["version"] = 15.into();
@@ -979,6 +999,46 @@ mod tests {
         assert!(save_to(&destination, &bindings)
             .unwrap_err()
             .contains("仅支持滚轮"));
+        assert_eq!(std::fs::read_to_string(destination).unwrap(), saved);
+    }
+
+    #[test]
+    fn pointer_scope_round_trip_requires_v17_and_preserves_exact_v16_backup() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let mut doc: serde_json::Value = serde_json::from_str(&encode(&defaults())).unwrap();
+        doc["version"] = 16.into();
+        let original = format!(" \r\n{doc}\r\n");
+        std::fs::write(&destination, &original).unwrap();
+        let mut bindings = decode(&original).unwrap();
+        bindings[0].spec.pointer_scope = ProcessScope {
+            identity: omnitrigger_core::ProcessIdentity::ShellContext,
+            allow: vec!["desktop".into()],
+            deny: vec![],
+        };
+        save_to(&destination, &bindings).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.0.join("bindings.json.v16.bak")).unwrap(),
+            original
+        );
+        let saved = std::fs::read_to_string(&destination).unwrap();
+        assert_eq!(decode(&saved).unwrap(), bindings);
+        let mut doc: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(doc["version"], 17);
+        assert_eq!(
+            doc["bindings"][0]["pointer_scope"],
+            json!({"identity":"shell_context","allow":["desktop"]})
+        );
+        assert!(doc["bindings"][1].get("pointer_scope").is_none());
+        doc["version"] = 16.into();
+        assert!(decode(&doc.to_string()).unwrap_err().contains("版本 17"));
+        doc["version"] = 17.into();
+        doc["bindings"][0]["pointer_scope"]["subject"] = "unknown".into();
+        assert!(decode(&doc.to_string()).is_err());
+        bindings[0].spec.pointer_scope.allow = vec!["bad/path".into()];
+        assert!(save_to(&destination, &bindings)
+            .unwrap_err()
+            .contains("指针窗口范围"));
         assert_eq!(std::fs::read_to_string(destination).unwrap(), saved);
     }
 
@@ -1700,6 +1760,7 @@ mod tests {
     fn drag_binding(button: Button, min_distance_px: u32, max_start_ms: u32) -> Binding {
         Binding {
             spec: TriggerSpec {
+                pointer_scope: Default::default(),
                 wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
@@ -1812,6 +1873,7 @@ mod tests {
         assert_eq!(duplicate.other, Some(1));
         assert_eq!(duplicate.title, "与已有触发范围冲突");
         let prefix = TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
@@ -1832,6 +1894,7 @@ mod tests {
             Some(1)
         );
         let bare_left = TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
@@ -1845,6 +1908,7 @@ mod tests {
             None
         );
         let fresh = TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
@@ -1872,6 +1936,7 @@ mod tests {
     ) -> Binding {
         Binding {
             spec: TriggerSpec {
+                pointer_scope: Default::default(),
                 wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),
@@ -1930,6 +1995,7 @@ mod tests {
             .enumerate()
             .map(|(index, action)| Binding {
                 spec: TriggerSpec {
+                    pointer_scope: Default::default(),
                     wheel: Default::default(),
                     keyboard: Default::default(),
                     process_scope: Default::default(),

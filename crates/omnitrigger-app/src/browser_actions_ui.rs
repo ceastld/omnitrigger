@@ -178,6 +178,7 @@ impl Workspace {
                 return;
             };
             let spec = omnitrigger_core::TriggerSpec {
+                pointer_scope: Default::default(),
                 wheel: Default::default(),
                 keyboard: Default::default(),
                 process_scope: Default::default(),

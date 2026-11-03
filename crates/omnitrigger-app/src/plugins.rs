@@ -607,6 +607,7 @@ impl ButtonDescription {
 impl DefaultTrigger {
     fn spec(&self, id: u64) -> TriggerSpec {
         TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),

@@ -56,8 +56,9 @@ mod window_context;
 pub use script_target::{ScriptTarget, ScriptTargetInfo};
 #[cfg(windows)]
 pub use shortcut::{
-    capture_shortcut_target, ensure_shortcut_target, restore_shortcut_target, send_key_sequence_to,
-    send_key_tap_to, send_shortcut, send_shortcut_to, ShortcutTarget,
+    capture_matching_shortcut_target, capture_shortcut_target, ensure_shortcut_target,
+    restore_shortcut_target, send_key_sequence_to, send_key_tap_to, send_shortcut,
+    send_shortcut_to, ShortcutTarget,
 };
 pub use shortcut::{
     validate_key_sequence, validate_key_tap, validate_key_timing, validate_shortcut,
@@ -103,6 +104,11 @@ pub struct ListenerDiagnostics {
     pub foreground_process: Option<String>,
     /// 当前窗口角色，由 Hook 外采集；未知状态不会借用上一窗口的结果。
     pub foreground_window_role: omnitrigger_core::WindowRole,
+    /// 当前有效的指针窗口采样；不改变动作执行目标，不保留历史。
+    pub pointer_process: Option<String>,
+    pub pointer_window_role: omnitrigger_core::WindowRole,
+    pub pointer_window: Option<isize>,
+    pub pointer_context_required: bool,
     pub process_context_required: bool,
     pub keyboard_events: u64,
     pub mouse_events: u64,
@@ -192,7 +198,8 @@ pub enum BackendEvent {
     Ready,
     /// 录制期间当前按住的按键（不含录制前已按住的键），按下集合变化时发送。
     RecordingProgress(Vec<Button>),
-    Recorded(TriggerSpec),
+    /// 完整配置只在录制完成时分配，避免放大每条输入通知。
+    Recorded(Box<TriggerSpec>),
     /// 物理鼠标按下的位置，仅用于当前界面的窗外点击判断，不改变输入决策。
     PointerPressed {
         x: i32,
@@ -219,6 +226,8 @@ pub enum BackendEvent {
     Triggered {
         id: u64,
         pointer: Option<(i32, i32)>,
+        /// 匹配时的前台窗口；界面排队不能把动作重新定向到后来激活的窗口。
+        foreground: isize,
     },
     Error(String),
     RecordingCancelled,
@@ -442,6 +451,7 @@ mod tests {
     #[test]
     fn hold_description_keeps_the_prefix_button_and_duration() {
         let spec = TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),

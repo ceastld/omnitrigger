@@ -17,6 +17,7 @@ fn main() -> Result<(), String> {
     backend.send(BackendCommand::SetEnabled(false))?;
     backend.send(BackendCommand::SetBindings(vec![
         TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),
@@ -26,6 +27,7 @@ fn main() -> Result<(), String> {
             activation: Activation::Press(Button::Key(0x57)),
         },
         TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),

@@ -1,0 +1,15 @@
+{
+  "version": 17,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [{"kind":"x1"}],
+      "activation": {"kind":"wheel_up"},
+      "wheel": "packet",
+      "pointer_scope": {"allow":["notepad"]},
+      "message": "指针在记事本内：侧键加上滚",
+      "enabled": false,
+      "action": {"kind":"notification"}
+    }
+  ]
+}

@@ -27,6 +27,7 @@ impl Recorder {
             InputKind::Down(button) => {
                 if self.pressed.insert(button) {
                     self.candidate = Some(TriggerSpec {
+                        pointer_scope: Default::default(),
                         wheel: Default::default(),
                         keyboard: Default::default(),
                         process_scope: Default::default(),
@@ -54,6 +55,7 @@ impl Recorder {
             InputKind::Wheel { axis, delta } if delta != 0 => {
                 self.completed = true;
                 Some(TriggerSpec {
+                    pointer_scope: Default::default(),
                     wheel: Default::default(),
                     keyboard: Default::default(),
                     process_scope: Default::default(),

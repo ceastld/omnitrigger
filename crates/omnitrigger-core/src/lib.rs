@@ -13,6 +13,7 @@
 //! let caps = Button::Key(0x14);
 //! let w = Button::Key(0x57);
 //! let mut engine = Engine::new(vec![TriggerSpec {
+//!     pointer_scope: Default::default(),
 //!     wheel: Default::default(),
 //!     keyboard: Default::default(),
 //!     process_scope: Default::default(),
@@ -79,3 +80,6 @@ mod tests;
 
 #[cfg(test)]
 mod wheel_policy_tests;
+
+#[cfg(test)]
+mod pointer_scope_tests;

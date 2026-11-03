@@ -87,6 +87,8 @@ pub struct ActiveDrag {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TriggerSpec {
+    /// 指针窗口范围与前台 process_scope 同时生效，不改变动作执行目标。
+    pub pointer_scope: ProcessScope,
     pub wheel: WheelPolicy,
     pub keyboard: KeyboardPolicy,
     pub process_scope: ProcessScope,
@@ -94,6 +96,17 @@ pub struct TriggerSpec {
     pub held: Vec<Button>,
     pub activation: Activation,
     pub conditions: Vec<TriggerCondition>,
+}
+
+impl TriggerSpec {
+    pub(crate) fn scope_priority(&self) -> u8 {
+        self.process_scope.priority() + self.pointer_scope.priority()
+    }
+
+    pub(crate) fn scopes_overlap(&self, other: &Self) -> bool {
+        self.process_scope.overlaps(&other.process_scope)
+            && self.pointer_scope.overlaps(&other.pointer_scope)
+    }
 }
 
 /// 滚轮动作的计数单位；不改变按住集合、位置或应用条件。

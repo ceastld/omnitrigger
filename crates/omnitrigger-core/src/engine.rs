@@ -74,9 +74,13 @@ pub struct Engine {
     screens: Vec<ScreenRect>,
     process_name: Option<String>,
     window_role: crate::WindowRole,
+    pointer_process: Option<String>,
+    pointer_role: crate::WindowRole,
     active_bindings: Vec<usize>,
     requires_process: Vec<bool>,
     requires_role: Vec<bool>,
+    requires_pointer_process: Vec<bool>,
+    requires_pointer_role: Vec<bool>,
     dedicated_leader: Option<Button>,
     repeat_owner: BTreeMap<Button, u64>,
     tap_restore: Option<PendingTapRestore>,
@@ -108,9 +112,13 @@ impl Engine {
             screens: Vec::new(),
             process_name: None,
             window_role: crate::WindowRole::Unknown,
+            pointer_process: None,
+            pointer_role: crate::WindowRole::Unknown,
             active_bindings: Vec::new(),
             requires_process: Vec::new(),
             requires_role: Vec::new(),
+            requires_pointer_process: Vec::new(),
+            requires_pointer_role: Vec::new(),
             dedicated_leader: None,
             repeat_owner: BTreeMap::new(),
             tap_restore: None,
@@ -167,6 +175,44 @@ impl Engine {
         Ok(decision)
     }
 
+    /// 指针身份来自外层快照；与前台身份分别保存，变化仅撤销失去条件的输入。
+    pub fn set_pointer_context(
+        &mut self,
+        name: Option<&str>,
+        role: crate::WindowRole,
+    ) -> Result<Decision, crate::ProcessScopeError> {
+        let normalized = name
+            .map(|name| {
+                crate::process_scope::normalize_name(name).ok_or_else(|| {
+                    crate::ProcessScopeError::InvalidName {
+                        name: name.to_owned(),
+                    }
+                })
+            })
+            .transpose()?;
+        if self.pointer_process == normalized && self.pointer_role == role {
+            return Ok(Decision::default());
+        }
+        self.pointer_process = normalized;
+        self.pointer_role = role;
+        self.refresh_active_bindings();
+        Ok(self.reconcile_conditions())
+    }
+
+    pub fn pointer_process(&self) -> Option<&str> {
+        self.pointer_process.as_deref()
+    }
+
+    pub fn pointer_window_role(&self) -> crate::WindowRole {
+        self.pointer_role
+    }
+
+    pub fn needs_pointer_context(&self) -> bool {
+        self.bindings
+            .iter()
+            .any(|binding| !binding.pointer_scope.is_global())
+    }
+
     pub fn needs_process_context(&self) -> bool {
         self.bindings.iter().any(|binding| {
             !binding.process_scope.is_global()
@@ -200,6 +246,34 @@ impl Engine {
     }
 
     fn compile_process_scopes(&mut self) {
+        let related = |binding: &TriggerSpec, other: &TriggerSpec| {
+            if binding.keyboard.matching.is_captured() {
+                other.keyboard.matching.is_captured()
+                    && binding.keyboard.prefix() == other.keyboard.prefix()
+            } else {
+                other.held == binding.held
+                    && same_activation_family(other.activation, binding.activation)
+            }
+        };
+        self.requires_pointer_process =
+            self.bindings
+                .iter()
+                .map(|binding| {
+                    binding.pointer_scope.is_global()
+                        && self.bindings.iter().any(|other| {
+                            other.pointer_scope.priority() > 0 && related(binding, other)
+                        })
+                })
+                .collect();
+        self.requires_pointer_role = self
+            .bindings
+            .iter()
+            .map(|binding| {
+                self.bindings
+                    .iter()
+                    .any(|other| other.pointer_scope.needs_role() && related(binding, other))
+            })
+            .collect();
         self.requires_role = self
             .bindings
             .iter()
@@ -274,14 +348,20 @@ impl Engine {
                     .matches_context(self.process_name.as_deref(), self.window_role)
                     && (self.process_name.is_some() || !self.requires_process[index])
                     && (self.window_role != crate::WindowRole::Unknown
-                        || !self.requires_role[index]))
+                        || !self.requires_role[index])
+                    && binding
+                        .pointer_scope
+                        .matches_context(self.pointer_process.as_deref(), self.pointer_role)
+                    && (self.pointer_process.is_some() || !self.requires_pointer_process[index])
+                    && (self.pointer_role != crate::WindowRole::Unknown
+                        || !self.requires_pointer_role[index]))
                     .then_some(index)
             })
             .collect();
         self.active_bindings.sort_by_key(|&index| {
             let binding = &self.bindings[index];
             (
-                std::cmp::Reverse(binding.process_scope.priority()),
+                std::cmp::Reverse(binding.scope_priority()),
                 binding.keyboard.matching.priority(),
             )
         });
@@ -549,12 +629,12 @@ impl Engine {
                     && self.binding_held_matches(binding)
                     && self.conditions_match(binding)
             })
-            .map(|binding| binding.process_scope.priority());
+            .map(|binding| binding.scope_priority());
         let press = self
             .candidates()
             .find(|binding| {
                 binding.activation == Activation::Press(button)
-                    && Some(binding.process_scope.priority()) == priority
+                    && Some(binding.scope_priority()) == priority
                     && self.binding_held_matches(binding)
                     && self.conditions_match(binding)
             })
@@ -579,7 +659,7 @@ impl Engine {
                     button: terminal,
                     duration_ms,
                 } if terminal == button
-                    && Some(binding.process_scope.priority()) == priority
+                    && Some(binding.scope_priority()) == priority
                     && self.binding_held_matches(binding)
                     && self.conditions_match(binding) =>
                 {
@@ -595,7 +675,7 @@ impl Engine {
                     min_distance_px,
                     max_start_ms,
                 } if terminal == button
-                    && Some(binding.process_scope.priority()) == priority
+                    && Some(binding.scope_priority()) == priority
                     && self.binding_held_matches(binding)
                     && self.conditions_match(binding) =>
                 {
@@ -981,7 +1061,9 @@ impl Engine {
     fn binding_keeps_wheel_remainder(&self, id: u64) -> bool {
         self.candidates().any(|binding| {
             binding.id == id
-                && (!binding.conditions.is_empty() || binding.keyboard.prefix().is_some())
+                && (!binding.conditions.is_empty()
+                    || !binding.pointer_scope.is_global()
+                    || binding.keyboard.prefix().is_some())
         })
     }
 
@@ -996,7 +1078,9 @@ impl Engine {
             .captured_presses
             .iter()
             .filter_map(|(&key, &index)| {
-                (!self.conditions_match(&self.bindings[index])).then_some(key)
+                (!self.active_bindings.contains(&index)
+                    || !self.conditions_match(&self.bindings[index]))
+                .then_some(key)
             })
             .collect::<Vec<_>>();
         for key in lost_captures {

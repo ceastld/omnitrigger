@@ -22,6 +22,7 @@ fn setup(screens: Vec<ScreenRect>, pointer: (i32, i32)) -> (ThreadState, Receive
 
 fn regional(activation: Activation, region: PointerRegion) -> TriggerSpec {
     TriggerSpec {
+        pointer_scope: Default::default(),
         wheel: Default::default(),
         keyboard: Default::default(),
         process_scope: Default::default(),
@@ -50,7 +51,8 @@ fn keyboard_region_uses_explicit_initial_pointer_and_freezes_it_when_matching() 
         events.try_recv().unwrap(),
         BackendEvent::Triggered {
             id: 8,
-            pointer: Some((-1919, -1079))
+            pointer: Some((-1919, -1079)),
+            ..
         }
     ));
     assert!(
@@ -94,7 +96,8 @@ fn wheel_uses_its_own_physical_point_and_full_monitor_bottom_instead_of_work_are
         events.try_recv().unwrap(),
         BackendEvent::Triggered {
             id: 8,
-            pointer: Some((100, 1079))
+            pointer: Some((100, 1079)),
+            ..
         }
     ));
     assert_eq!(state.pointer.load(), Some((100, 1079)));
@@ -139,7 +142,7 @@ fn packet_wheel_delivers_one_backend_hit_per_event_at_its_own_point() {
         let hits: Vec<_> = events
             .try_iter()
             .filter_map(|event| match event {
-                BackendEvent::Triggered { id, pointer } => Some((id, pointer)),
+                BackendEvent::Triggered { id, pointer, .. } => Some((id, pointer)),
                 _ => None,
             })
             .collect();
@@ -184,7 +187,8 @@ fn shared_monitor_edge_is_not_exposed_but_outer_edge_still_matches() {
         events.try_recv().unwrap(),
         BackendEvent::Triggered {
             id: 8,
-            pointer: Some((99, 50))
+            pointer: Some((99, 50)),
+            ..
         }
     ));
 }
@@ -234,6 +238,7 @@ fn topology_change_cancels_active_drag_and_pending_hold_and_drains_releases() {
             }
         };
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),

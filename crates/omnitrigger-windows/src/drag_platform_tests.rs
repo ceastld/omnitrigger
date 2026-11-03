@@ -6,6 +6,7 @@ const RIGHT: Button = Button::Mouse(MouseButton::Right);
 
 fn bindings(with_hold: bool) -> Vec<TriggerSpec> {
     let mut bindings = vec![TriggerSpec {
+        pointer_scope: Default::default(),
         wheel: Default::default(),
         keyboard: Default::default(),
         process_scope: Default::default(),
@@ -20,6 +21,7 @@ fn bindings(with_hold: bool) -> Vec<TriggerSpec> {
     }];
     if with_hold {
         bindings.push(TriggerSpec {
+            pointer_scope: Default::default(),
             wheel: Default::default(),
             keyboard: Default::default(),
             process_scope: Default::default(),

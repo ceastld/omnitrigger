@@ -4,6 +4,7 @@ const SIDE: Button = Button::Mouse(MouseButton::X1);
 
 fn binding(id: u64, direction: WheelDirection, wheel: WheelPolicy) -> TriggerSpec {
     TriggerSpec {
+        pointer_scope: Default::default(),
         id,
         held: vec![SIDE],
         activation: Activation::Wheel(direction),
