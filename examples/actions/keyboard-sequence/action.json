@@ -5,6 +5,7 @@
   "version": "1.0.0",
   "actions": [
     {"id":"sequence","title":"保持修饰键发送连续按键","version":1,"runtime":"node","entry":"sequence.mjs"},
-    {"id":"shortcuts","title":"按顺序发送独立快捷键","version":1,"runtime":"node","entry":"shortcuts.mjs"}
+    {"id":"shortcuts","title":"按顺序发送独立快捷键","version":1,"runtime":"node","entry":"shortcuts.mjs"},
+    {"id":"recipe","title":"执行有序键盘与文本步骤","version":1,"runtime":"node","entry":"recipe.mjs"}
   ]
 }

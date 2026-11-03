@@ -14,15 +14,20 @@ use std::{
     time::{Duration, Instant},
 };
 use windows::{
-    core::w,
+    core::{w, PCWSTR},
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
-        UI::WindowsAndMessaging::{
-            CallNextHookEx, CreateWindowExW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
-            PeekMessageW, SetForegroundWindow, SetWindowsHookExW, ShowWindow, TranslateMessage,
-            UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, PM_REMOVE, SW_SHOWNOACTIVATE,
-            WH_KEYBOARD_LL, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+        UI::{
+            Input::KeyboardAndMouse::SetFocus,
+            WindowsAndMessaging::{
+                CallNextHookEx, CreateWindowExW, DestroyWindow, DispatchMessageW,
+                GetForegroundWindow, GetWindowTextW, PeekMessageW, SendMessageW,
+                SetForegroundWindow, SetWindowTextW, SetWindowsHookExW, ShowWindow,
+                TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, PM_REMOVE,
+                SW_SHOWNOACTIVATE, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WS_BORDER,
+                WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+            },
         },
     },
 };
@@ -359,9 +364,165 @@ fn interactive_desktop_key_sequence_smoke() {
         ];
         reports.push(json!({"case":name,"evidence":verify(&expected,&[(3,4,gap-2)])}));
     }
-    let report = json!({"cases":reports,"clipboard_accessed":false,"physical_keys_recorded":false,"scope":"low_level_tagged_input_observation_not_target_application_business_effect"});
+    if let Some(path) = std::env::var_os("OMNITRIGGER_KEY_RECIPE_FIXTURE") {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Case {
+            name: String,
+            call: ActionCall,
+            expected: Vec<(u32, bool)>,
+            gaps: Vec<(usize, usize, u32)>,
+        }
+        let file = std::fs::File::open(path).unwrap();
+        assert!(file.metadata().unwrap().len() <= 1024 * 1024);
+        let cases: Vec<Case> = serde_json::from_reader(file).unwrap();
+        assert!(!cases.is_empty() && cases.len() <= 32);
+        for case in cases {
+            assert_eq!(case.call.package_id, "examples.keyboard-sequence");
+            assert_eq!(case.call.action_id, "recipe");
+            assert!(!case.expected.is_empty() && case.expected.len() <= 64);
+            focus(windows.main);
+            reset();
+            service
+                .submit_with_host(
+                    1,
+                    case.call,
+                    Some(Arc::new(DesktopHost::capture(Some(
+                        omnitrigger_windows::capture_shortcut_target().unwrap(),
+                    )))),
+                )
+                .unwrap();
+            let start = Instant::now();
+            loop {
+                pump();
+                assert_eq!(
+                    unsafe { GetForegroundWindow() },
+                    windows.main,
+                    "外部配方实测失焦"
+                );
+                if let Ok(event) = service.try_recv() {
+                    if event.outcome.is_terminal() {
+                        assert!(
+                            matches!(event.outcome, ActionOutcome::Succeeded { .. }),
+                            "{event:?}"
+                        );
+                        break;
+                    }
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(10),
+                    "外部配方实测超时"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            reports.push(json!({"case":case.name,"evidence":verify(&case.expected,&case.gaps)}));
+        }
+    }
+    // 验证同一输入配方在自建多行输入框中的实际选区与行边界行为。
+    let edit = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("EDIT"),
+            w!(""),
+            WS_CHILD | WS_VISIBLE | WS_BORDER | WINDOW_STYLE(0x0004),
+            10,
+            30,
+            460,
+            100,
+            Some(windows.main),
+            None,
+            None,
+            None,
+        )
+    }
+    .unwrap();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/actions");
+    let call: ActionCall = serde_json::from_slice(
+        &std::fs::read(root.join("keyboard-sequence/delete-line-start.json")).unwrap(),
+    )
+    .unwrap();
+    for delay in [0, 10] {
+        for (position, expected) in [
+            (9, "head\r\nDEF\r\ntail"),
+            (12, "head\r\n\r\ntail"),
+            (6, "headabcDEF\r\ntail"),
+        ] {
+            focus(windows.main);
+            let _ = unsafe { SetFocus(Some(edit)) };
+            let before = "head\r\nabcDEF\r\ntail"
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            unsafe {
+                SetWindowTextW(edit, PCWSTR(before.as_ptr())).unwrap();
+                SendMessageW(
+                    edit,
+                    0x00b1,
+                    Some(WPARAM(position)),
+                    Some(LPARAM(position as isize)),
+                );
+            }
+            reset();
+            let mut call = call.clone();
+            call.input["keyDownDelayMs"] = delay.into();
+            service
+                .submit_with_host(
+                    1,
+                    call,
+                    Some(Arc::new(DesktopHost::capture(Some(
+                        omnitrigger_windows::capture_shortcut_target().unwrap(),
+                    )))),
+                )
+                .unwrap();
+            let start = Instant::now();
+            loop {
+                pump();
+                assert_eq!(
+                    unsafe { GetForegroundWindow() },
+                    windows.main,
+                    "行编辑实测失焦"
+                );
+                if let Ok(event) = service.try_recv() {
+                    if event.outcome.is_terminal() {
+                        assert!(
+                            matches!(event.outcome, ActionOutcome::Succeeded { .. }),
+                            "{event:?}"
+                        );
+                        break;
+                    }
+                }
+                assert!(start.elapsed() < Duration::from_secs(10), "行编辑实测超时");
+                thread::sleep(Duration::from_millis(1));
+            }
+            let gaps = if delay == 0 {
+                vec![(3, 4, 78)]
+            } else {
+                vec![(0, 1, 8), (1, 2, 8), (3, 4, 88), (4, 5, 8)]
+            };
+            let key_evidence = verify(
+                &[
+                    (160, false),
+                    (36, false),
+                    (36, true),
+                    (160, true),
+                    (8, false),
+                    (8, true),
+                ],
+                &gaps,
+            );
+            let mut buffer = [0u16; 128];
+            let count = unsafe { GetWindowTextW(edit, &mut buffer) }.max(0) as usize;
+            let observed = String::from_utf16(&buffer[..count]).unwrap();
+            assert_eq!(observed, expected);
+            reports.push(json!({"case":"delete-line-start","key_down_delay_ms":delay,"cursor":position,"expected":expected,"observed":observed,"evidence":key_evidence}));
+        }
+    }
+    let report = json!({"cases":reports,"clipboard_accessed":false,"physical_keys_recorded":false,"scope":"tagged_input_and_owned_edit_not_physical_trigger_or_original_target_application_evidence"});
     if let Some(path) = std::env::var_os("OMNITRIGGER_KEY_SMOKE_REPORT") {
         std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
-    println!("原生与Node连续按键共10项实测通过；未访问剪贴板或记录物理键盘输入。");
+    println!(
+        "原生、Node按键和自建输入框行编辑共{}项实测通过；未访问剪贴板或记录物理键盘输入。",
+        reports.len()
+    );
 }

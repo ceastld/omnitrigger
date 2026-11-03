@@ -24,6 +24,10 @@ python scripts/plan_action_migration.py `
 - `counters`：已确认的功能计数标识数组，形如 `[{ "Method": "功能名", "Ids": ["计数ID"] }]`。这些 ID 不作为动作排名。工具不猜测未知 ID 的用途。
 - `current`：当前 OmniTrigger 的绑定配置，含 `bindings` 数组。
 
+可选 `--bodies .tmp/migration/bodies.json` 提供动作正文记录数组，或 `{ "Items": [...] }`；也接受成功导出响应的 `resultJson` 包装。每项使用 `Id`、`ActionType`、`UseTemplate`、`Resolution`、`StoredData`、`EffectiveData`。身份必须唯一；引用缺失仍保留原行。当前只投影 `ActionType:"SendKeys"`、`UseTemplate:false`、`Resolution:"local"` 且两个正文值完全相同的记录；模板及来源未核验的正文继续标记缺口，不用旧正文代替模板，也不将空正文当作已迁移。
+
+这种基本键盘动作的逐行格式与快速操作类型 2 的 WinForms SendKeys 不同。支持 `@修饰键+普通键`（或 `|` 分隔，逗号表示多键）、普通键的 `!键名`、`;毫秒` 和字面文本行／`%文字`。一行中的普通键共享修饰键；泛型 Ctrl/Shift/Alt 按源规则使用右侧，显式左右键保持不变。非等待行之后、下一行之前自动加入 30ms，即使下一行本身也是等待：Shift+Home、`;50`、Backspace 的配置等待合计 80ms。负数／零等待不执行睡眠，但仍取消下一行的自动等待。未知键、独立修饰键轻点、预算超限或特殊 Unicode 标记不会被跳过为无操作。输出调用[键盘配方示例](../examples/actions/keyboard-sequence/recipe.mjs)，运行时只依赖 OmniTrigger 的桌面 API。
+
 ## 筛选及结果含义
 
 筛选所有启用的扩展热键和鼠标规则，再加入近 30 天与历史统计各前 20 项；动作引用按 ID 去重。排名先排除已确认的功能计数，然后取前 20 项。未在本机目录中找到的 ID 仍占据排名，并标记为待解析，不自动替换成下一项。

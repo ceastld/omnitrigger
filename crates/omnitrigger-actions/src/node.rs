@@ -639,6 +639,120 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_recipe_keeps_literal_text_and_single_key_independent_of_profile_delay() {
+        if !node_available() {
+            return;
+        }
+        #[derive(Default)]
+        struct Host(std::sync::Mutex<Vec<Value>>);
+        impl NativeHost for Host {
+            fn call(
+                &self,
+                method: &str,
+                params: Value,
+                _: &CancellationToken,
+            ) -> Result<Value, ActionError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(json!({"method":method,"params":params}));
+                if !matches!(method, "keyboard.text" | "keyboard.sequence") {
+                    return Err(ActionError::new("unexpected_method", method));
+                }
+                Ok(json!({"submitted":true}))
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/actions");
+        let action = crate::PackageCatalog::load(&root).resolve(&ActionCall {
+            package_id:"examples.keyboard-sequence".into(), action_id:"recipe".into(), action_version:1,
+            input:json!({"keyDownDelayMs":10,"steps":[{"kind":"text","text":"${literal} $$"},{"kind":"tap","key":35}]}),
+        }).unwrap();
+        let host = Host::default();
+        NodeRuntime::default()
+            .execute_with_host(&action, &context(), &CancellationToken::new(), Some(&host))
+            .unwrap();
+        assert_eq!(
+            *host.0.lock().unwrap(),
+            vec![
+                json!({"method":"keyboard.text","params":{"text":"${literal} $$"}}),
+                json!({"method":"keyboard.sequence","params":{"modifiers":[],"keys":[35],"key_down_delay_ms":0}}),
+            ]
+        );
+    }
+
+    #[test]
+    fn keyboard_recipe_example_preserves_profile_timing_and_stops_after_cancellation() {
+        if !node_available() {
+            return;
+        }
+        struct Host {
+            calls: std::sync::Mutex<Vec<(String, Value, Instant)>>,
+            cancel_after_first_input: bool,
+        }
+        impl NativeHost for Host {
+            fn call(
+                &self,
+                method: &str,
+                params: Value,
+                cancellation: &CancellationToken,
+            ) -> Result<Value, ActionError> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((method.into(), params.clone(), Instant::now()));
+                match method {
+                    "target.info" => Ok(json!({"processName":"WPS.EXE"})),
+                    "keyboard.sequence" => {
+                        if self.cancel_after_first_input {
+                            cancellation.cancel();
+                        }
+                        Ok(json!({"submitted":true}))
+                    }
+                    _ => Err(ActionError::new("unexpected_method", method)),
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/actions");
+        let call: ActionCall = serde_json::from_slice(
+            &fs::read(root.join("keyboard-sequence/delete-line-start.json")).unwrap(),
+        )
+        .unwrap();
+        let action = crate::PackageCatalog::load(&root).resolve(&call).unwrap();
+        for cancel_after_first_input in [false, true] {
+            let host = Host {
+                calls: Default::default(),
+                cancel_after_first_input,
+            };
+            let result = NodeRuntime::default().execute_with_host(
+                &action,
+                &context(),
+                &CancellationToken::new(),
+                Some(&host),
+            );
+            let calls = host.calls.lock().unwrap();
+            assert_eq!(calls[0].0, "target.info");
+            assert_eq!(calls[1].0, "keyboard.sequence");
+            assert_eq!(
+                calls[1].1,
+                json!({"modifiers":[160],"keys":[36],"key_down_delay_ms":10})
+            );
+            if cancel_after_first_input {
+                assert_eq!(result.unwrap_err().code, "cancelled");
+                assert_eq!(calls.len(), 2, "取消后不能继续发送 Backspace");
+            } else {
+                assert!(result.is_ok(), "{result:?}");
+                assert_eq!(calls.len(), 3);
+                assert_eq!(calls[2].0, "keyboard.sequence");
+                assert_eq!(
+                    calls[2].1,
+                    json!({"modifiers":[],"keys":[8],"key_down_delay_ms":10})
+                );
+                assert!(calls[2].2.duration_since(calls[1].2) >= Duration::from_millis(80));
+            }
+        }
+    }
+
+    #[test]
     fn timed_keyboard_api_preserves_order_and_rejects_invalid_options_before_dispatch() {
         if !node_available() {
             return;

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 from plan_action_migration import build_plan, main, ranked_actions, shortcut_action, same_process_scope, process_scopes_overlap
+from action_body_projection import keyboard_body
 
 
 def fixture():
@@ -24,6 +25,46 @@ def fixture():
 
 
 class MigrationTests(unittest.TestCase):
+    def test_keyboard_body_preserves_automatic_wait_before_explicit_wait(self):
+        record = {"ActionType":"SendKeys", "UseTemplate":False, "Resolution":"local",
+                  "StoredData":"@LSHIFT+HOME\r\n;50\r\n@+BACK", "EffectiveData":"@LSHIFT+HOME\r\n;50\r\n@+BACK"}
+        result = keyboard_body(record, {"DefaultModifiedKeyDownDelay":0})
+        self.assertEqual(result["native_action"]["input"], {"steps":[
+            {"kind":"sequence","modifiers":[160],"keys":[36]},
+            {"kind":"delay","milliseconds":30}, {"kind":"delay","milliseconds":50},
+            {"kind":"sequence","modifiers":[],"keys":[8]}]})
+
+    def test_keyboard_body_keeps_shared_modifiers_literal_text_and_nonpositive_waits(self):
+        text = "@CONTROL+VK_M,VK_M\n;-3\n%${cliptext}\n!END"
+        record = {"ActionType":"SendKeys","UseTemplate":False,"Resolution":"local","StoredData":text,"EffectiveData":text}
+        result = keyboard_body(record, {"DefaultModifiedKeyDownDelay":10})
+        self.assertEqual(result["native_action"]["input"], {"keyDownDelayMs":10,"steps":[
+            {"kind":"sequence","modifiers":[163],"keys":[77,77]},
+            {"kind":"delay","milliseconds":30}, {"kind":"delay","milliseconds":0},
+            {"kind":"text","text":"${cliptext}"}, {"kind":"delay","milliseconds":30},
+            {"kind":"tap","key":35}]})
+
+    def test_keyboard_body_unverified_templates_and_unsupported_values_cannot_become_noops(self):
+        base = {"ActionType":"SendKeys","UseTemplate":False,"Resolution":"local","StoredData":"@+HOME","EffectiveData":"@+HOME"}
+        for change in ({"UseTemplate":True},{"UseTemplate":None},{"Resolution":"template_cache_miss"},
+                       {"EffectiveData":None},{"StoredData":"different"},{"ActionType":"XAction"}):
+            self.assertIsNone(keyboard_body(dict(base, **change), {"DefaultModifiedKeyDownDelay":0})["native_action"])
+        for text in ("@LSHIFT+HOME+BACK", "@+unknown", "@+1", "!LSHIFT", "@LSHIFT+", ";10001", "\ue000", "\0", "%"+'字'*22000):
+            row = dict(base, StoredData=text, EffectiveData=text)
+            self.assertIsNone(keyboard_body(row, {"DefaultModifiedKeyDownDelay":0})["native_action"],repr(text[:30]))
+        self.assertIsNone(keyboard_body(base,{})["native_action"])
+
+    def test_body_snapshot_requires_unique_identity_and_retains_unresolved_references(self):
+        data = fixture()
+        data["source"]["PowerKeys"]["20"]["KeyActions"][0].update(ActionType=12, Data="action-a")
+        record = {"Id":"action-a","ActionType":"SendKeys","UseTemplate":False,"Resolution":"local","StoredData":"@+HOME","EffectiveData":"@+HOME"}
+        result = build_plan(**data, body_records={"Items":[record]})
+        self.assertEqual(result["bindings"][0]["operation"]["native_action"]["action_id"], "recipe")
+        self.assertFalse(result["complete"])
+        self.assertEqual(build_plan(**data,body_records=[])["bindings"][0]["operation"]["action_gaps"],["source_body_not_in_snapshot"])
+        for snapshot in ([record,dict(record,Id="ACTION-A")],[dict(record,Id="")],{"Items":None}):
+            with self.assertRaises(ValueError):build_plan(**data,body_records=snapshot)
+
     def test_literal_text_preserves_dollars_unicode_and_source_rule_without_usage_heuristics(self):
         for text in ("\\", "`", "字😀", "${missing}", "$$", " $= ", "\t", "\r"):
             data = fixture()
@@ -299,16 +340,23 @@ class MigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             data = fixture()
+            data["source"]["PowerKeys"]["20"]["KeyActions"][0].update(ActionType=12, Data="action-a")
             args = []
             for name, value in data.items():
                 name = "catalog" if name == "catalog_payload" else name
                 path = root / (name + ".json")
                 path.write_text(json.dumps(value), encoding="utf-8")
                 args += ["--" + name, str(path)]
+            bodies = root / "bodies.json"
+            bodies.write_text(json.dumps([{"Id":"action-a","ActionType":"SendKeys","UseTemplate":False,
+                                         "Resolution":"local","StoredData":"@+HOME","EffectiveData":"@+HOME"}]),encoding="utf-8")
+            args += ["--bodies",str(bodies)]
             before = {path.name: path.read_bytes() for path in root.iterdir()}
             output = root / "plan.json"
             main(args + ["--out", str(output)])
             self.assertIn("sha256", json.loads(output.read_text(encoding="utf-8"))["evidence"]["source"])
+            self.assertIn("sha256", json.loads(output.read_text(encoding="utf-8"))["evidence"]["bodies"])
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["bindings"][0]["operation"]["native_action"]["action_id"],"recipe")
             with self.assertRaises(FileExistsError):
                 main(args + ["--out", str(output)])
             for name, content in before.items():

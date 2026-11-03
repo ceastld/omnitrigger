@@ -5,6 +5,7 @@ import collections
 import hashlib
 import json
 from pathlib import Path
+from action_body_projection import keyboard_body
 
 
 def load(path):
@@ -51,7 +52,21 @@ def shortcut_action(data):
     return {"kind": "send_shortcut", "keys": keys + [terminal]}
 
 
-def operation(row, settings=None):
+def operation(row, settings=None, body_records=None):
+    if row.get("ActionType") == 12 and body_records is not None:
+        identity = normalized_id(row.get("Data"))
+        record = body_records.get(identity)
+        result = (keyboard_body(record, settings or {}) if record is not None else
+                  {"status":"needs_source_review", "native_action":None, "action_gaps":["source_body_not_in_snapshot"]})
+        if row.get("Message"):
+            result["action_gaps"].append("notification_side_effect")
+            result["status"] = "needs_implementation"
+        result.update(source_type=12, action_ref=row.get("Data"))
+        if record is not None:
+            result["body_source"] = {"action_type":record.get("ActionType"), "resolution":record.get("Resolution"),
+                                     "uses_template":record.get("UseTemplate"),
+                                     "record_sha256":hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()}
+        return result
     if row.get("ActionType") == 6:
         text = row.get("Data")
         gaps = ["notification_side_effect"] if row.get("Message") else []
@@ -364,7 +379,20 @@ def project_source_precedence(bindings, current):
                          if row["operation"]["status"] != "native_action_available" else "needs_runtime_verification")
 
 
-def build_plan(source, catalog_payload, usage, counters, current, limit=20):
+def build_plan(source, catalog_payload, usage, counters, current, limit=20, body_records=None):
+    if body_records is not None:
+        if isinstance(body_records, dict) and "resultJson" in body_records:
+            if body_records.get("success") is not True:
+                raise ValueError("动作正文快照未成功导出")
+            body_records = json.loads(body_records["resultJson"])
+        if isinstance(body_records, dict):
+            body_records = body_records.get("Items")
+        if not isinstance(body_records, list) or any(not isinstance(record, dict) for record in body_records):
+            raise ValueError("动作正文快照需要 Items 数组或记录数组")
+        identities = [normalized_id(record.get("Id")) for record in body_records]
+        if any(not identity for identity in identities) or len(set(identities)) != len(identities):
+            raise ValueError("动作正文快照包含空身份或重复身份")
+        body_records = dict(zip(identities, body_records))
     payload = catalog_payload.get("payload", catalog_payload)
     items = payload["items"]
     if payload.get("hasMore") or payload.get("totalCount", len(items)) != len(items):
@@ -398,7 +426,7 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20):
             if folded:
                 gaps = [gap for gap in gaps if gap != "unsupported_trigger_key"]
                 notes.append({"kind": "standalone_key_folded_into_prefix", "leader": leader["Key"], "policy": tap_policy})
-            native = operation(rule, source.get("InputSettings"))
+            native = operation(rule, source.get("InputSettings"), body_records)
             overlap = [row for row in current["bindings"] if trigger and same_trigger(trigger, row)]
             action_matches = [row["id"] for row in overlap
                               if row.get("action") == native.get("native_action")
@@ -434,7 +462,7 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20):
             identity = f"mouse:{scope}:{index}"
             bindings.append({"key": identity, "kind": "mouse", "title": rule.get("Description"),
                              "source": {"scope": scope, "rule": rule},
-                             "operation": operation(rule, source.get("InputSettings")), "status": "needs_trigger_semantics_review",
+                             "operation": operation(rule, source.get("InputSettings"), body_records), "status": "needs_trigger_semantics_review",
                              "trigger_gaps": ["mouse_rule_semantics"],
                              "equivalent_configuration_ids": []})
             if rule.get("ActionType") == 12:
@@ -477,9 +505,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("source", "catalog", "usage", "counters", "current", "out"):
         parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--bodies", type=Path, help="可选的已导出正文/模板来源快照，只读")
     args = parser.parse_args(argv)
     paths = {name: getattr(args, name) for name in ("source", "catalog", "usage", "counters", "current")}
-    plan = build_plan(**{name if name != "catalog" else "catalog_payload": load(path)
+    if args.bodies:
+        paths["bodies"] = args.bodies
+    plan = build_plan(**{{"catalog":"catalog_payload", "bodies":"body_records"}.get(name, name): load(path)
                          for name, path in paths.items()})
     plan["evidence"] = {name: {"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
                         for name, path in paths.items()}
