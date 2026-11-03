@@ -45,7 +45,7 @@ pub use regions::{
     ContextError, PointerRegion, RegionError, ScreenCorner, ScreenEdge, ScreenRect,
     TriggerCondition,
 };
-pub use registration::RegistrationError;
+pub use registration::{MAX_BINDINGS, RegistrationError};
 
 #[cfg(test)]
 mod prefix_tests;

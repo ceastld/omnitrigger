@@ -44,6 +44,9 @@ jobs:
       - name: 验证更新服务发布通知
         run: python -m unittest discover -s scripts -p 'test_update_*.py' -v
 
+      - name: 验证离线动作迁移评估
+        run: python -m unittest discover -s scripts -p 'test_action_migration.py' -v
+
   js-engines:
     name: Windows JS 引擎实验
     runs-on: windows-latest

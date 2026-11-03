@@ -3657,9 +3657,10 @@ impl Workspace {
             )
             .children(self.render_banner(cx))
             .child(self.smooth_scroll.wrap("trigger-rows", rows))
-            .child(caption(
-                "最多 64 条触发器，每条最多 8 个前缀。单独按下未用于组合的前缀时，原输入会补发给应用。",
-            ))
+            .child(caption(format!(
+                "最多 {} 条触发器，每条最多 8 个前缀。单独按下未用于组合的前缀时，原输入会补发给应用。",
+                omnitrigger_core::MAX_BINDINGS,
+            )))
     }
 
     fn inspector_header(title: &'static str, right: impl IntoElement) -> Div {

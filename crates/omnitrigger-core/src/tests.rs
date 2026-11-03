@@ -309,7 +309,7 @@ fn registration_rejects_ambiguous_invalid_and_excessive_inputs() {
         Err(RegistrationError::InvalidButton { .. })
     ));
     assert!(matches!(
-        Engine::new(vec![press(1, &[], W); 65]),
+        Engine::new(vec![press(1, &[], W); MAX_BINDINGS + 1]),
         Err(RegistrationError::TooManyBindings)
     ));
     let many_held = (1..=9).map(Button::Key).collect::<Vec<_>>();
@@ -317,6 +317,49 @@ fn registration_rejects_ambiguous_invalid_and_excessive_inputs() {
         Engine::new(vec![press(1, &many_held, W)]),
         Err(RegistrationError::TooManyHeld { .. })
     ));
+}
+
+#[test]
+fn full_capacity_matches_every_binding_and_cleans_each_press() {
+    let bindings = (0..MAX_BINDINGS)
+        .map(|index| {
+            press(
+                index as u64 + 1,
+                &[Button::Key(0x20 + (index / 32) as u16)],
+                Button::Key(0x40 + (index % 32) as u16),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut engine = Engine::new(bindings.clone()).unwrap();
+    for binding in &bindings {
+        let prefix = binding.held[0];
+        let Activation::Press(terminal) = binding.activation else {
+            unreachable!()
+        };
+        assert!(engine.process(event(InputKind::Down(prefix))).consume);
+        let hit = engine.process(event(InputKind::Down(terminal)));
+        assert_eq!(hit.triggered, vec![binding.id]);
+        assert!(hit.consume && hit.replay.is_empty());
+        assert!(engine.process(event(InputKind::Up(terminal))).consume);
+        assert!(engine.process(event(InputKind::Up(prefix))).consume);
+        assert_eq!(
+            engine.process(event(InputKind::Up(prefix))),
+            Decision::default()
+        );
+    }
+    let prefix = bindings[0].held[0];
+    engine.process(event(InputKind::Down(prefix)));
+    let mut excessive = bindings.clone();
+    excessive.push(bindings[0].clone());
+    assert_eq!(
+        engine.replace_bindings(excessive),
+        Err(RegistrationError::TooManyBindings)
+    );
+    // 失败替换不能取消原来等待的前缀；松开时仍正确补发。
+    assert_eq!(
+        engine.process(event(InputKind::Up(prefix))).replay,
+        vec![InputKind::Down(prefix), InputKind::Up(prefix)]
+    );
 }
 
 #[test]

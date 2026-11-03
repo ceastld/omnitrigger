@@ -51,6 +51,7 @@ export const groups = [
     text: '配置与排查',
     items: [
       ['docs/CONFIGURATION.md', 'configuration', '配置文件与隐私'],
+      ['docs/ACTION_MIGRATION.md', 'action-migration', '离线动作迁移评估'],
       ['docs/TROUBLESHOOTING.md', 'troubleshooting', '并用其他工具与诊断'],
     ],
   },

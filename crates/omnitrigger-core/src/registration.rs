@@ -5,6 +5,9 @@ use std::fmt;
 
 use crate::{Activation, Button, RegionError, TriggerCondition, TriggerSpec, regions};
 
+/// Hook 匹配仍受固定上限约束；完整检查发生在注册时。
+pub const MAX_BINDINGS: usize = 512;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistrationError {
     TooManyBindings,
@@ -66,7 +69,12 @@ pub enum RegistrationError {
 impl fmt::Display for RegistrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::TooManyBindings => "最多可添加 64 个触发器，请删除不再使用的触发器后重试。",
+            Self::TooManyBindings => {
+                return write!(
+                    f,
+                    "最多可添加 {MAX_BINDINGS} 个触发器，请删除不再使用的触发器后重试。"
+                );
+            }
             Self::TooManyConditions { .. } => "每个触发器目前最多配置一个鼠标区域条件。",
             Self::InvalidPointerRegion { reason, .. } => {
                 return write!(f, "鼠标区域条件无效：{reason}");
@@ -93,7 +101,7 @@ impl std::error::Error for RegistrationError {}
 pub(super) fn validate(
     mut bindings: Vec<TriggerSpec>,
 ) -> Result<Vec<TriggerSpec>, RegistrationError> {
-    if bindings.len() > 64 {
+    if bindings.len() > MAX_BINDINGS {
         return Err(RegistrationError::TooManyBindings);
     }
     let mut ids = BTreeSet::new();
