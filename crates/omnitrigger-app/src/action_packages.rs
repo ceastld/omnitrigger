@@ -48,6 +48,19 @@ pub fn service(config: &Path) -> ActionService {
     ActionService::new(catalog, runtimes)
 }
 
+pub fn submit(
+    service: &ActionService,
+    id: u64,
+    call: ActionCall,
+    target: Option<omnitrigger_windows::ShortcutTarget>,
+) -> Result<u64, omnitrigger_actions::ActionError> {
+    service.submit_with_host(
+        id,
+        call,
+        Some(Arc::new(crate::desktop_host::DesktopHost::capture(target))),
+    )
+}
+
 /// 校验与运行共用服务；读清单不会导入 JS，也不安装 Hook。
 pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
     let check = arguments.iter().position(|arg| arg == "--check-action");
@@ -77,7 +90,7 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
         if check.is_some() {
             return Ok(serde_json::json!({"valid":true,"call":call}).to_string());
         }
-        let invocation_id = service.submit(0, call).map_err(|error| error.to_string())?;
+        let invocation_id = submit(&service, 0, call, None).map_err(|error| error.to_string())?;
         loop {
             match service.try_recv() {
                 Ok(event) => match event.outcome {

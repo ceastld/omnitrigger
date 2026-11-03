@@ -243,8 +243,18 @@ pub fn restore_shortcut_target(target: ShortcutTarget) -> Result<bool, String> {
 /// 必须在 Hook 与界面线程之外调用，其他限制与 `send_shortcut` 相同。
 #[cfg(windows)]
 pub fn send_shortcut_to(keys: &[u16], target: ShortcutTarget) -> Result<(), String> {
+    send_shortcut_checked(keys, target, || Ok(()))
+}
+
+#[cfg(windows)]
+pub(super) fn send_shortcut_checked(
+    keys: &[u16],
+    target: ShortcutTarget,
+    check: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     let _guard = SENDING.lock().map_err(|_| "快捷键发送状态不可用。")?;
     validate_shortcut(keys)?;
+    check()?;
     ensure_shortcut_target(target)?;
     let strokes = plan(keys, &held_keys(keys))?;
     if let Some(command) = bare_volume_command(keys) {
@@ -711,6 +721,30 @@ mod tests {
         ] {
             assert!(validate_key_sequence(&modifiers, &keys).is_err());
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn queued_shortcut_checks_cancellation_after_acquiring_the_input_lock() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        };
+        let lock = SENDING.lock().unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let observed = cancelled.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            send_shortcut_checked(&[65], ShortcutTarget(0), || {
+                assert!(observed.load(Ordering::Acquire));
+                Err("已取消，不发送输入".into())
+            })
+        });
+        started_rx.recv().unwrap();
+        cancelled.store(true, Ordering::Release);
+        drop(lock);
+        assert_eq!(worker.join().unwrap().unwrap_err(), "已取消，不发送输入");
     }
 
     /// 显式运行：cargo test -p omnitrigger-windows interactive_shortcut_smoke -- --ignored --nocapture

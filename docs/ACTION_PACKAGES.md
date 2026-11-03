@@ -116,6 +116,37 @@ export default async function (ctx) {
 | `ctx.browser.profiles({ timeoutMs })` | 列出已连接浏览器及其 `browser_instance_id`；连接可用不代表业务动作已完成。 |
 | `ctx.browser.call(method, args, { profile, timeoutMs })` | 复用已安装连接器的 SDK，通过持久 IPC 调用 Chrome API，返回原始结果。 |
 | `ctx.browser.chrome.*` | 动态 Proxy，例如 `await ctx.browser.chrome.bookmarks.getTree()`；指定 profile 或超时时使用 `call`。 |
+| `ctx.desktop.target()` | 读取本次提交时捕获的目标，返回 `processName`、`title`、`processId`、`isForeground`。不重新选择前台。 |
+| `ctx.desktop.sendShortcut(keys)` | 向原目标发送一次快捷键，明确 VK、修饰键在前。返回 `{ submitted: true }` 仅表示系统接纳输入。 |
+
+### 桌面脚本
+
+桌面上下文由应用在接纳动作前捕获；轮盘调用沿用打开轮盘前的目标。窗口句柄留在 Rust 侧，每次操作重新核对窗口、线程、进程及进程创建时间；发送前还要求原窗口仍为前台，不自动抢焦点。读取目标失败只影响桌面 API，纯代码及浏览器动作仍可运行。这些检查不能原子锁住 Windows 的窗口生命周期。
+
+```javascript
+export default async ctx => {
+  const target = await ctx.desktop.target();
+  const keys = target.processName.toLowerCase() === 'acrobat.exe'
+    ? [162, 87]   // 左 Ctrl + W
+    : [164, 115]; // 左 Alt + F4
+  await ctx.desktop.sendShortcut(keys);
+  return { inputSubmitted: true };
+};
+```
+
+快捷键复用原生发送器的键位校验、已按住修饰键处理和输入标记。API 不确认应用是否已经关闭文档或完成其他业务操作。多步动作在每步发送前重新核验目标；发送时前台不再是原目标、目标失效、非法按键或取消会拒绝后续输入。核验不记录前台历史，不能检测两次调用之间切走又切回的情况。没有已开始副作用时错误的 `effectState` 为 `not_started`，输入发送失败或回执未确认时可能为 `unknown`；均不会自动重试。取消不撤销已提交的输入。
+
+`effectState` 描述失败的这一次 API 调用，最终错误会保留该字段；它不表示脚本此前没有执行其他步骤。判断整段动作是否可以重试仍需结合业务结果。
+
+桌面调用须逐个 `await`，并发调用报 `desktop_busy`，每次动作最多 128 次桌面调用。单次回执等待最多 5 秒，仍受动作总运行时限限制；返回时尚有调用会报 `pending_desktop_calls`。桥接仅在本次调用期间监听回环地址，使用系统随机令牌，不占用脚本 stdout，也不新增常驻服务或桥接线程。它与脚本代码一样使用当前用户权限，不构成沙盒。
+
+[删除到行首示例](../examples/actions/desktop-line-edit/)依次发送 Shift+Home、等待 80ms、发送 Backspace。它会实际编辑目标输入框，检查清单不会执行它。专用输入框的真实验证在本机显式运行：
+
+```powershell
+cargo test -p omnitrigger-app interactive_desktop_api_smoke --locked -- --ignored --nocapture
+```
+
+测试短暂激活自建窗口，验证编辑结果、步骤间切窗和取消；不使用个人配置。独立的 `tools/js-engine-probe` 仍是另一套同步实验宿主，这里描述的是应用内 Node 动作 API。
 
 ### 浏览器脚本
 

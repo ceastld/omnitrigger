@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { writeFileSync, renameSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
+import { createConnection } from 'node:net';
 
 const LIMIT = 64 * 1024;
 const controller = new AbortController();
@@ -14,12 +15,16 @@ let browserClient;
 let browserConnection;
 let browserDeadline;
 const browserPending = new Set();
+const nativeSockets = new Set();
+let nativePending;
+let nativeId = 0;
 const fault = (code, message) => Object.assign(new Error(message), { code,
   ...(['cancelled', 'timeout'].includes(code) ? {effectState:'unknown'} : {}),
 });
 const stop = (reason) => {
   if (!controller.signal.aborted) controller.abort(reason);
   for (const child of children) child.kill();
+  for (const socket of nativeSockets) socket.destroy();
 };
 const initial = new Promise((resolve, reject) => {
   lines.on('line', (line) => {
@@ -102,6 +107,70 @@ const browser = Object.freeze({
   profiles: (options = {}) => browserRequest(undefined, undefined, options, true),
   call: (method, args = [], options = {}) => browserRequest(method, args, options),
   chrome: chromeProxy(),
+});
+
+function nativeCall(method, params) {
+  checkCancelled();
+  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, message), {effectState, method});
+  if (!request.native) return Promise.reject(fail('desktop_unavailable', '此宿主没有提供本次调用的桌面上下文。'));
+  if (nativePending) return Promise.reject(fail('desktop_busy', '请 await 上一个桌面调用，避免输入并发。'));
+  if (nativeId >= 128) return Promise.reject(fail('desktop_call_limit', '单次动作最多调用 128 次桌面 API。'));
+  const id = ++nativeId;
+  const operation = new Promise((resolve, reject) => {
+    let settled = false;
+    let sent = false;
+    let chunks = '';
+    const socket = createConnection({host:'127.0.0.1', port:request.native.port});
+    nativeSockets.add(socket);
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      controller.signal.removeEventListener('abort', aborted);
+      nativeSockets.delete(socket);
+      socket.destroy();
+      if (error) reject(error); else resolve(value);
+    };
+    const aborted = () => finish(controller.signal.reason);
+    controller.signal.addEventListener('abort', aborted, {once:true});
+    socket.setEncoding('utf8');
+    socket.setTimeout(5000, () => finish(fail('desktop_timeout', '桌面调用未在 5 秒内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
+    socket.once('connect', () => {
+      if (controller.signal.aborted) return aborted();
+      sent = true;
+      socket.write(JSON.stringify({token:request.native.token, id, method, params}) + '\n');
+    });
+    socket.on('data', chunk => {
+      chunks += chunk;
+      if (Buffer.byteLength(chunks) > 64 * 1024 + 1) return finish(fail('desktop_protocol', '桌面回执超过上限。', 'unknown'));
+      if (!chunks.endsWith('\n')) return;
+      try {
+        const response = JSON.parse(chunks);
+        if (response.id !== id || typeof response.ok !== 'boolean') throw new Error('回执身份不匹配');
+        if (response.ok) finish(undefined, response.value);
+        else {
+          const error = response.error;
+          if (!error || typeof error.code !== 'string' || typeof error.message !== 'string') throw new Error('缺少错误');
+          finish(fail(error.code, error.message, error.effect_state ?? 'unknown'));
+        }
+      } catch { finish(fail('desktop_protocol', '桌面回执格式无效；业务结果未确认。', 'unknown')); }
+    });
+    socket.once('error', error => finish(fail('desktop_connection', error.message, sent ? 'unknown' : 'not_started')));
+    socket.once('close', () => finish(fail('desktop_connection', '桌面连接已关闭；不会重试。', sent ? 'unknown' : 'not_started')));
+  });
+  nativePending = operation;
+  operation.then(() => { nativePending = undefined; }, () => { nativePending = undefined; });
+  return operation;
+}
+
+const desktop = Object.freeze({
+  target: () => nativeCall('target.info', {}),
+  sendShortcut: (keys) => {
+    if (!Array.isArray(keys) || keys.length < 1 || keys.length > 9
+        || keys.some(key => !Number.isInteger(key) || key < 1 || key > 254)) {
+      return Promise.reject(Object.assign(fault('invalid_input', '快捷键需要 1–9 个明确的 VK 整数；修饰键在前。'), {effectState:'not_started'}));
+    }
+    return nativeCall('keyboard.shortcut', {keys});
+  },
 });
 
 function delay(milliseconds) {
@@ -225,6 +294,7 @@ try {
     packageRoot: request.package_root,
     process: Object.freeze({ run, start }),
     browser,
+    desktop,
     delay,
     signal: controller.signal,
   });
@@ -236,6 +306,7 @@ try {
   checkCancelled();
   if (children.size) throw fault('pending_processes', '动作返回时仍有未等待的 ctx.process.run 调用；请使用 await。');
   if (browserPending.size) throw fault('pending_browser_calls', '动作返回时仍有未等待的浏览器调用；请使用 await。');
+  if (nativePending) throw Object.assign(fault('pending_desktop_calls', '动作返回时仍有未等待的桌面调用；请使用 await。'), {effectState:'unknown'});
   respond({ status: 'ok', output: output ?? null });
 } catch (error) {
   if (request?.response_path && request?.invocation) {

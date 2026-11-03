@@ -1,4 +1,4 @@
-use crate::{model::valid_id, ActionCall, ActionError, PackageCatalog, ResolvedAction};
+use crate::{model::valid_id, ActionCall, ActionError, NativeHost, PackageCatalog, ResolvedAction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -43,6 +43,16 @@ pub trait ActionRuntime: Send + Sync {
         context: &InvocationContext,
         cancellation: &CancellationToken,
     ) -> Result<Value, ActionError>;
+
+    fn execute_with_host(
+        &self,
+        action: &ResolvedAction,
+        context: &InvocationContext,
+        cancellation: &CancellationToken,
+        _host: Option<&dyn NativeHost>,
+    ) -> Result<Value, ActionError> {
+        self.execute(action, context, cancellation)
+    }
 }
 
 #[derive(Default)]
@@ -151,6 +161,15 @@ impl ActionService {
     }
 
     pub fn submit(&self, id: u64, call: ActionCall) -> Result<u64, ActionError> {
+        self.submit_with_host(id, call, None)
+    }
+
+    pub fn submit_with_host(
+        &self,
+        id: u64,
+        call: ActionCall,
+        host: Option<Arc<dyn NativeHost>>,
+    ) -> Result<u64, ActionError> {
         let action = self.catalog.resolve(&call)?;
         let runtime = self.runtimes.get(&action.definition.runtime)?;
         let cancellation = CancellationToken::new();
@@ -210,7 +229,7 @@ impl ActionService {
                     ActionOutcome::Cancelled
                 } else {
                     let result = catch_unwind(AssertUnwindSafe(|| {
-                        runtime.execute(&action, &context, &cancellation)
+                        runtime.execute_with_host(&action, &context, &cancellation, host.as_deref())
                     }));
                     if cancellation.is_cancelled() {
                         // 取消不撤销已经发生的副作用；实现必须先结束自己的资源再返回。

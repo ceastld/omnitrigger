@@ -12,6 +12,12 @@ export interface BrowserFault extends Error {
   effectState?: 'not_started' | 'unknown';
   requiredPermissions?: string[];
 }
+export interface DesktopFault extends Error {
+  code: string;
+  method?: 'target.info' | 'keyboard.shortcut';
+  /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
+  effectState: 'not_started' | 'unknown';
+}
 export interface BrowserApi {
   profiles(options?: Pick<BrowserOptions, 'timeoutMs'>): Promise<Array<{
     browser_instance_id: string;
@@ -36,4 +42,10 @@ export interface ActionContext {
     start(program: string, args?: string[], options?: {cwd?: string}): Promise<{pid: number}>;
   };
   browser: BrowserApi;
+  desktop: {
+    /** 本次提交时捕获的目标，不在调用时重新选择前台。进程名含 .exe。 */
+    target(): Promise<{processName: string; title: string; processId: number; isForeground: boolean}>;
+    /** 明确 VK，修饰键在前；仅确认系统接纳输入，不确认业务动作完成。 */
+    sendShortcut(keys: number[]): Promise<{submitted: true}>;
+  };
 }

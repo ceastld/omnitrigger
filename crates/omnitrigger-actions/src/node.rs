@@ -1,6 +1,9 @@
 //! 每次调用一个 Node 进程；运行代码的权限与当前用户相同，不构成沙盒。
 //! 协议结果走独立临时文件，普通 stdout/stderr 不进入协议或应用历史。
-use crate::{ActionError, ActionRuntime, CancellationToken, InvocationContext, ResolvedAction};
+use crate::{
+    native::NativeBridge, ActionError, ActionRuntime, CancellationToken, InvocationContext,
+    NativeHost, ResolvedAction,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -57,12 +60,23 @@ impl ActionRuntime for NodeRuntime {
         context: &InvocationContext,
         cancellation: &CancellationToken,
     ) -> Result<Value, ActionError> {
+        self.execute_with_host(action, context, cancellation, None)
+    }
+
+    fn execute_with_host(
+        &self,
+        action: &ResolvedAction,
+        context: &InvocationContext,
+        cancellation: &CancellationToken,
+        host: Option<&dyn NativeHost>,
+    ) -> Result<Value, ActionError> {
         if cancellation.is_cancelled() {
             return Err(cancelled());
         }
         // 目录是加载时快照，执行前再次核验入口，避免文件被替换为链接后越界。
         let (root, entry) = checked_entry(action)?;
         let scratch = ResponseDirectory::new()?;
+        let mut native = host.map(|_| NativeBridge::new()).transpose()?;
         let request = json!({
             "api_version": 1,
             "invocation": {
@@ -75,6 +89,7 @@ impl ActionRuntime for NodeRuntime {
             "response_path": scratch.response(),
             "timeout_ms": self.timeout.as_millis(),
             "browser": self.browser_connector.as_deref().and_then(browser_configuration),
+            "native": native.as_ref().map(NativeBridge::configuration).transpose()?,
         });
         let mut bytes = serde_json::to_vec(&request)
             .map_err(|error| ActionError::new("invalid_request", error.to_string()))?;
@@ -179,6 +194,9 @@ impl ActionRuntime for NodeRuntime {
                     ))
                 }
                 Ok(None) => {}
+            }
+            if let (true, Some(bridge), Some(host)) = (stopping.is_none(), &mut native, host) {
+                bridge.poll(host, cancellation);
             }
             if let Some((since, reason)) = &stopping {
                 if since.elapsed() >= CANCEL_GRACE {
@@ -434,6 +452,166 @@ fn terminate_host(child: &mut Child) {
 mod tests {
     use super::*;
     use crate::{ActionCall, ActionDefinition};
+
+    #[derive(Default)]
+    struct DesktopHost(std::sync::Mutex<Vec<Value>>);
+    impl NativeHost for DesktopHost {
+        fn call(
+            &self,
+            method: &str,
+            params: Value,
+            _: &CancellationToken,
+        ) -> Result<Value, ActionError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(json!({"method":method,"params":params}));
+            match method {
+                "target.info" => Ok(
+                    json!({"processName":"Acrobat.exe","title":"测试文档","processId":12,"isForeground":true}),
+                ),
+                "keyboard.shortcut" if params["keys"] == json!([162, 87]) => {
+                    Ok(json!({"submitted":true}))
+                }
+                _ => {
+                    let mut error = ActionError::new("target_changed", "目标已切换。");
+                    error.effect_state = Some("not_started".into());
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_host_routes_captured_target_shortcuts_and_structured_errors_without_stdout_protocol()
+    {
+        if !node_available() {
+            return;
+        }
+        let fixture = Fixture::new(
+            r#"export default async ctx => {
+            console.log('ordinary output is not a native request');
+            const target = await ctx.desktop.target();
+            const keys = target.processName.toLowerCase() === 'acrobat.exe' ? [162,87] : [164,115];
+            const sent = await ctx.desktop.sendShortcut(keys);
+            let failure;
+            try { await ctx.desktop.sendShortcut([65]); } catch(e) { failure = {code:e.code,effect:e.effectState}; }
+            return {target,sent,failure};
+        }"#,
+            json!({}),
+        );
+        let host = DesktopHost::default();
+        let result = NodeRuntime::default()
+            .execute_with_host(
+                &fixture.action,
+                &context(),
+                &CancellationToken::new(),
+                Some(&host),
+            )
+            .unwrap();
+        assert_eq!(result["target"]["title"], "测试文档");
+        assert_eq!(result["sent"], json!({"submitted":true}));
+        assert_eq!(
+            result["failure"],
+            json!({"code":"target_changed","effect":"not_started"})
+        );
+        let calls = host.0.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[1]["params"]["keys"], json!([162, 87]));
+    }
+
+    #[test]
+    fn desktop_host_requires_await_and_reports_unavailable_before_operation() {
+        if !node_available() {
+            return;
+        }
+        let fixture = Fixture::new(
+            "export default async ctx => await ctx.desktop.target();",
+            json!({}),
+        );
+        let error = fixture.run().unwrap_err();
+        assert_eq!(error.code, "desktop_unavailable");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        let fixture = Fixture::new(
+            r#"export default async ctx => {
+            const first = ctx.desktop.target();
+            let busy;
+            try { await ctx.desktop.sendShortcut([162,87]); } catch(e) { busy=e.code; }
+            await first;
+            return busy;
+        }"#,
+            json!({}),
+        );
+        let host = DesktopHost::default();
+        assert_eq!(
+            NodeRuntime::default()
+                .execute_with_host(
+                    &fixture.action,
+                    &context(),
+                    &CancellationToken::new(),
+                    Some(&host)
+                )
+                .unwrap(),
+            "desktop_busy"
+        );
+        let fixture = Fixture::new(
+            "export default ctx => { void ctx.desktop.target(); return {}; };",
+            json!({}),
+        );
+        assert_eq!(
+            NodeRuntime::default()
+                .execute_with_host(
+                    &fixture.action,
+                    &context(),
+                    &CancellationToken::new(),
+                    Some(&host)
+                )
+                .unwrap_err()
+                .code,
+            "pending_desktop_calls"
+        );
+    }
+
+    #[test]
+    fn desktop_host_cancellation_prevents_a_later_input_step() {
+        if !node_available() {
+            return;
+        }
+        let fixture = Fixture::new(
+            r#"export default async ctx => {
+            await ctx.desktop.target();
+            await ctx.delay(2000);
+            await ctx.desktop.sendShortcut([162,87]);
+        }"#,
+            json!({}),
+        );
+        let host = std::sync::Arc::new(DesktopHost::default());
+        let cancellation = CancellationToken::new();
+        let cancel = cancellation.clone();
+        let observed = host.clone();
+        let canceller = thread::spawn(move || {
+            let began = Instant::now();
+            while observed.0.lock().unwrap().is_empty() {
+                assert!(began.elapsed() < Duration::from_secs(5));
+                thread::sleep(Duration::from_millis(10));
+            }
+            cancel.cancel();
+        });
+        assert_eq!(
+            NodeRuntime::default()
+                .execute_with_host(
+                    &fixture.action,
+                    &context(),
+                    &cancellation,
+                    Some(host.as_ref())
+                )
+                .unwrap_err()
+                .code,
+            "cancelled"
+        );
+        canceller.join().unwrap();
+        assert_eq!(host.0.lock().unwrap().len(), 1);
+    }
 
     struct Fixture {
         directory: ResponseDirectory,

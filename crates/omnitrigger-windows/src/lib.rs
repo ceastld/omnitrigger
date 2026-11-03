@@ -46,7 +46,11 @@ pub use window_action::{
     shortcut_target_process, shortcut_target_title,
 };
 
+#[cfg(windows)]
+mod script_target;
 mod shortcut;
+#[cfg(windows)]
+pub use script_target::{ScriptTarget, ScriptTargetInfo};
 #[cfg(windows)]
 pub use shortcut::{
     capture_shortcut_target, ensure_shortcut_target, restore_shortcut_target, send_key_sequence_to,

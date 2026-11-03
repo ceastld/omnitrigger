@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "id": "example.desktop-line-edit",
+  "name": "桌面文本编辑示例",
+  "version": "1.0.0",
+  "actions": [{"id": "delete-line-start", "title": "删除到行首", "version": 1, "runtime": "node", "entry": "main.mjs"}]
+}

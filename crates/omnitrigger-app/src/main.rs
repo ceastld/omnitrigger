@@ -9,6 +9,7 @@ mod browser_actions;
 mod browser_actions_ui;
 mod browser_connector;
 mod browser_connector_ui;
+mod desktop_host;
 mod event_bridge;
 mod execution;
 mod external_action;
@@ -2245,7 +2246,7 @@ impl Workspace {
                 cx.notify();
             }
             ActionSpec::Invoke(call) => {
-                match self.action_service.submit(id, call) {
+                match action_packages::submit(&self.action_service, id, call, target) {
                     Ok(invocation) => {
                         self.action_error = None;
                         self.record_action_status(id, format!("动作包已接纳 · 运行 {invocation}"));
