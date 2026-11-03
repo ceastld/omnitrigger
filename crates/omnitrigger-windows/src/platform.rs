@@ -2321,6 +2321,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retained_keyboard_layer_forwards_release_trigger_and_orders_restore_before_successor() {
+        let (events, received) = mpsc::sync_channel(EVENT_CAPACITY);
+        let mut state = ThreadState::new(events);
+        let prefix = Button::Key(32);
+        let adorn = Button::Key(71);
+        let key = Button::Key(75);
+        let make = |id, held, terminal| TriggerSpec {
+            id,
+            held,
+            activation: omnitrigger_core::Activation::Press(terminal),
+            conditions: vec![],
+            process_scope: Default::default(),
+            keyboard: omnitrigger_core::KeyboardPolicy {
+                retained_prefix: Some(omnitrigger_core::RetainedPrefix {
+                    key: prefix,
+                    capture_scope: Default::default(),
+                    quiet_ms: 50,
+                    fast_ms: 50,
+                    block_with_primary_mouse: false,
+                }),
+                matching: omnitrigger_core::KeyboardMatching::Captured {
+                    priority: id as u16,
+                },
+                repeat: true,
+                restore_on_tap: true,
+                tap_timeout_ms: Some(1500),
+                ..Default::default()
+            },
+        };
+        state.command(BackendCommand::SetBindings(vec![
+            make(1, vec![prefix, adorn], key),
+            make(2, vec![prefix], adorn),
+        ]));
+        let event =
+            |state: &mut ThreadState, kind, time| state.input_at(Some(kind), None, None, time);
+        assert!(event(&mut state, InputKind::Down(prefix), 100).consume);
+        assert!(event(&mut state, InputKind::Down(adorn), 110).consume);
+        assert!(event(&mut state, InputKind::Up(adorn), 120).consume);
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            BackendEvent::Triggered { id: 2, .. }
+        ));
+        assert!(event(&mut state, InputKind::Up(prefix), 130).consume);
+        event(&mut state, InputKind::Down(prefix), 300);
+        let fallback = event(&mut state, InputKind::Down(key), 310);
+        assert!(fallback.consume);
+        assert_eq!(
+            fallback.replay_kinds,
+            vec![InputKind::Down(prefix), InputKind::Down(key)]
+        );
+        assert!(!event(&mut state, InputKind::Up(key), 320).consume);
+        assert!(!event(&mut state, InputKind::Up(prefix), 330).consume);
+        assert!(state.owned_press.is_empty());
+        event(&mut state, InputKind::Down(prefix), 500);
+        event(&mut state, InputKind::Down(adorn), 510);
+        let tap = event(&mut state, InputKind::Up(prefix), 520);
+        assert_eq!(
+            tap.replay_kinds,
+            vec![
+                InputKind::Down(prefix),
+                InputKind::Up(prefix),
+                InputKind::Down(adorn),
+                InputKind::Up(adorn)
+            ]
+        );
+        assert!(event(&mut state, InputKind::Up(adorn), 530).consume);
+        assert!(state.owned_press.is_empty() && received.try_recv().is_err());
+    }
+
+    #[test]
     fn dedicated_keyboard_layer_keeps_native_ownership_and_repeats_notifications() {
         let (events, received) = mpsc::sync_channel(EVENT_CAPACITY);
         let mut state = ThreadState::new(events);
@@ -2335,6 +2405,7 @@ mod tests {
             process_scope: Default::default(),
             keyboard: omnitrigger_core::KeyboardPolicy {
                 matching: Default::default(),
+                retained_prefix: None,
                 dedicated_prefix: Some(caps),
                 repeat: true,
                 restore_on_tap: true,

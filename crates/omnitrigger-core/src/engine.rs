@@ -2,6 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "retained.rs"]
+mod retained;
+use retained::RetainedSession;
+
 use crate::model::direction;
 use crate::registration::validate;
 use crate::{
@@ -76,6 +80,9 @@ pub struct Engine {
     tap_restore: Option<PendingTapRestore>,
     layer_owner: Option<usize>,
     tap_allowed: Vec<bool>,
+    retained: Option<RetainedSession>,
+    last_keyboard_down: Option<u64>,
+    retained_starters: Vec<usize>,
 }
 
 impl Engine {
@@ -105,6 +112,9 @@ impl Engine {
             tap_restore: None,
             layer_owner: None,
             tap_allowed: Vec::new(),
+            retained: None,
+            last_keyboard_down: None,
+            retained_starters: Vec::new(),
         };
         engine.compile_process_scopes();
         Ok(engine)
@@ -146,7 +156,13 @@ impl Engine {
 
     pub fn needs_process_context(&self) -> bool {
         self.bindings.iter().any(|binding| {
-            !binding.process_scope.is_global() || !binding.keyboard.tap_scope.is_global()
+            !binding.process_scope.is_global()
+                || !binding.keyboard.tap_scope.is_global()
+                || binding
+                    .keyboard
+                    .retained_prefix
+                    .as_ref()
+                    .is_some_and(|policy| !policy.capture_scope.is_global())
         })
     }
 
@@ -164,8 +180,7 @@ impl Engine {
                         other.process_scope.priority() > 0
                             && (if binding.keyboard.matching.is_captured() {
                                 other.keyboard.matching.is_captured()
-                                    && binding.keyboard.dedicated_prefix
-                                        == other.keyboard.dedicated_prefix
+                                    && binding.keyboard.prefix() == other.keyboard.prefix()
                             } else {
                                 other.held == binding.held
                                     && same_activation_family(other.activation, binding.activation)
@@ -177,6 +192,19 @@ impl Engine {
     }
 
     fn refresh_active_bindings(&mut self) {
+        self.retained_starters = self
+            .bindings
+            .iter()
+            .enumerate()
+            .filter_map(|(index, binding)| {
+                binding
+                    .keyboard
+                    .retained_prefix
+                    .as_ref()
+                    .filter(|policy| policy.capture_scope.matches(self.process_name.as_deref()))
+                    .map(|_| index)
+            })
+            .collect();
         self.tap_allowed = self
             .bindings
             .iter()
@@ -240,6 +268,7 @@ impl Engine {
         self.terminal_presses.clear();
         self.captured_presses.clear();
         self.tap_restore = None;
+        self.retained = None;
         self.pending.clear();
         self.prefix_origin = None;
         self.hold = None;
@@ -299,10 +328,14 @@ impl Engine {
                 .drags
                 .extend(self.finish_drag(DragPhase::Cancelled));
         }
-        let current = match event.kind {
-            InputKind::Down(button) => self.down(button),
-            InputKind::Up(button) => self.up(button),
-            InputKind::Wheel { axis, delta } => self.scroll(axis, delta),
+        let current = if let Some(decision) = self.retained_event(event.kind) {
+            decision
+        } else {
+            match event.kind {
+                InputKind::Down(button) => self.down(button),
+                InputKind::Up(button) => self.up(button),
+                InputKind::Wheel { axis, delta } => self.scroll(axis, delta),
+            }
         };
         decision.consume = current.consume;
         decision.replay.extend(current.replay);
@@ -767,10 +800,19 @@ impl Engine {
     }
 
     fn dedicated_index(&self, button: Button) -> Option<usize> {
-        self.active_bindings.iter().copied().find(|&index| {
-            let binding = &self.bindings[index];
-            binding.keyboard.dedicated_prefix == Some(button) && self.conditions_match(binding)
-        })
+        self.retained_starters
+            .iter()
+            .copied()
+            .chain(
+                self.active_bindings
+                    .iter()
+                    .copied()
+                    .filter(|&index| self.bindings[index].keyboard.retained_prefix.is_none()),
+            )
+            .find(|&index| {
+                let binding = &self.bindings[index];
+                binding.keyboard.prefix() == Some(button) && self.conditions_match(binding)
+            })
     }
 
     fn repeated_action(&self, button: Button) -> Option<u64> {
@@ -841,7 +883,7 @@ impl Engine {
         self.active_bindings.iter().copied().find(|&index| {
             let binding = &self.bindings[index];
             binding.keyboard.matching.is_captured()
-                && binding.keyboard.dedicated_prefix == Some(leader)
+                && binding.keyboard.prefix() == Some(leader)
                 && binding.held.contains(&button)
                 && self.conditions_match(binding)
         })
@@ -854,8 +896,10 @@ impl Engine {
         let Some(leader) = self.captured_layer() else {
             return false;
         };
-        binding.keyboard.dedicated_prefix == Some(leader)
-            && self.pressed.get(&leader) == Some(&PressState::Consumed)
+        binding.keyboard.prefix() == Some(leader)
+            && (self.pressed.get(&leader) == Some(&PressState::Consumed)
+                || (self.retained.is_some()
+                    && self.pressed.get(&leader) == Some(&PressState::Observed)))
             && binding
                 .held
                 .iter()
@@ -872,7 +916,7 @@ impl Engine {
     fn binding_keeps_wheel_remainder(&self, id: u64) -> bool {
         self.candidates().any(|binding| {
             binding.id == id
-                && (!binding.conditions.is_empty() || binding.keyboard.dedicated_prefix.is_some())
+                && (!binding.conditions.is_empty() || binding.keyboard.prefix().is_some())
         })
     }
 

@@ -22,7 +22,7 @@ use crate::wheels::WheelActionRef;
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
-const CONFIG_VERSION: u32 = 13;
+const CONFIG_VERSION: u32 = 14;
 
 pub fn use_path(path: PathBuf) -> Result<(), String> {
     CUSTOM_PATH.set(path).map_err(|_| "配置路径已设置。".into())
@@ -96,6 +96,8 @@ struct KeyboardPolicyDto {
     matching: KeyboardMatchingDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dedicated_prefix: Option<ButtonDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retained_prefix: Option<RetainedPrefixDto>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     repeat: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -110,11 +112,24 @@ impl KeyboardPolicyDto {
     fn is_default(&self) -> bool {
         self.matching.is_default()
             && self.dedicated_prefix.is_none()
+            && self.retained_prefix.is_none()
             && !self.repeat
             && !self.restore_on_tap
             && self.tap_timeout_ms.is_none()
             && self.tap_scope.is_global()
     }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedPrefixDto {
+    key: ButtonDto,
+    #[serde(default, skip_serializing_if = "ProcessScopeDto::is_global")]
+    capture_scope: ProcessScopeDto,
+    quiet_ms: u32,
+    fast_ms: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    block_with_primary_mouse: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -237,6 +252,21 @@ impl From<&Binding> for BindingDto {
             keyboard: KeyboardPolicyDto {
                 matching: binding.spec.keyboard.matching.into(),
                 dedicated_prefix: binding.spec.keyboard.dedicated_prefix.map(Into::into),
+                retained_prefix: binding
+                    .spec
+                    .keyboard
+                    .retained_prefix
+                    .as_ref()
+                    .map(|policy| RetainedPrefixDto {
+                        key: policy.key.into(),
+                        capture_scope: ProcessScopeDto {
+                            allow: policy.capture_scope.allow.clone(),
+                            deny: policy.capture_scope.deny.clone(),
+                        },
+                        quiet_ms: policy.quiet_ms,
+                        fast_ms: policy.fast_ms,
+                        block_with_primary_mouse: policy.block_with_primary_mouse,
+                    }),
                 repeat: binding.spec.keyboard.repeat,
                 restore_on_tap: binding.spec.keyboard.restore_on_tap,
                 tap_timeout_ms: binding.spec.keyboard.tap_timeout_ms,
@@ -286,6 +316,9 @@ impl From<&Binding> for BindingDto {
 
 impl BindingDto {
     fn into_binding(self, version: u32) -> Result<Binding, String> {
+        if version < 14 && self.keyboard.retained_prefix.is_some() {
+            return Err("保留原功能前缀需要版本 14 配置。".into());
+        }
         if version < 12 && !self.keyboard.matching.is_default() {
             return Err("捕获集合匹配需要版本 12 配置。".into());
         }
@@ -355,6 +388,18 @@ impl BindingDto {
                 keyboard: KeyboardPolicy {
                     matching: self.keyboard.matching.into(),
                     dedicated_prefix: self.keyboard.dedicated_prefix.map(Into::into),
+                    retained_prefix: self.keyboard.retained_prefix.map(|policy| {
+                        omnitrigger_core::RetainedPrefix {
+                            key: policy.key.into(),
+                            capture_scope: ProcessScope {
+                                allow: policy.capture_scope.allow,
+                                deny: policy.capture_scope.deny,
+                            },
+                            quiet_ms: policy.quiet_ms,
+                            fast_ms: policy.fast_ms,
+                            block_with_primary_mouse: policy.block_with_primary_mouse,
+                        }
+                    }),
                     repeat: self.keyboard.repeat,
                     restore_on_tap: self.keyboard.restore_on_tap,
                     tap_timeout_ms: self.keyboard.tap_timeout_ms,
@@ -817,6 +862,7 @@ mod tests {
         bindings[0].spec.keyboard = KeyboardPolicy {
             matching: Default::default(),
             dedicated_prefix: Some(Button::Key(20)),
+            retained_prefix: None,
             restore_on_tap: true,
             tap_timeout_ms: Some(20_000),
             repeat: true,
@@ -884,6 +930,48 @@ mod tests {
     }
 
     #[test]
+    fn retained_prefix_requires_v14_preserves_v13_backup_and_round_trips() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let mut bindings = vec![defaults()[0].clone()];
+        let key = bindings[0].spec.held[0];
+        let mut original: serde_json::Value = serde_json::from_str(&encode(&bindings)).unwrap();
+        original["version"] = 13.into();
+        let original = format!(" \r\n{original}\r\n");
+        std::fs::write(&destination, &original).unwrap();
+        bindings[0].spec.keyboard = KeyboardPolicy {
+            matching: KeyboardMatching::Captured { priority: 3 },
+            retained_prefix: Some(omnitrigger_core::RetainedPrefix {
+                key,
+                capture_scope: Default::default(),
+                quiet_ms: 50,
+                fast_ms: 50,
+                block_with_primary_mouse: true,
+            }),
+            repeat: true,
+            restore_on_tap: true,
+            tap_timeout_ms: Some(1500),
+            ..Default::default()
+        };
+        assert_eq!(decode(&encode(&bindings)).unwrap(), bindings);
+        save_to(&destination, &bindings).unwrap();
+        assert_eq!(
+            std::fs::read(scratch.0.join("bindings.json.v13.bak")).unwrap(),
+            original.as_bytes()
+        );
+        let mut value: serde_json::Value = serde_json::from_str(&encode(&bindings)).unwrap();
+        value["version"] = 13.into();
+        assert!(decode(&value.to_string()).unwrap_err().contains("版本 14"));
+        value["version"] = 14.into();
+        value["bindings"][0]["keyboard"]["retained_prefix"]["unknown"] = true.into();
+        assert!(decode(&value.to_string()).is_err());
+        assert_eq!(
+            std::fs::read(scratch.0.join("bindings.json.v13.bak")).unwrap(),
+            original.as_bytes()
+        );
+    }
+
+    #[test]
     fn shortcut_timing_requires_v13_and_keeps_exact_v12_backup() {
         let scratch = Scratch::new();
         let destination = scratch.config();
@@ -942,19 +1030,47 @@ mod tests {
                 } else {
                     omnitrigger_core::InputKind::Up(key)
                 };
-                let decision = engine.process(omnitrigger_core::InputEvent {
+                let event = omnitrigger_core::InputEvent {
                     kind,
                     injected: false,
-                });
+                };
+                let decision = if let Some(time) = step["time_ms"].as_u64() {
+                    engine.process_at(event, time)
+                } else {
+                    engine.process(event)
+                };
                 let expected: Vec<u64> = serde_json::from_value(step["triggered"].clone()).unwrap();
                 assert_eq!(
                     decision.triggered, expected,
                     "case={case_index} step={step_index}"
                 );
-                assert!(
-                    decision.replay.is_empty(),
+                let expected_replay = step["replay"]
+                    .as_array()
+                    .map(|rows| {
+                        rows.iter()
+                            .map(|row| {
+                                let key = Button::Key(
+                                    u16::try_from(row["key"].as_u64().unwrap()).unwrap(),
+                                );
+                                if row["down"].as_bool().unwrap() {
+                                    omnitrigger_core::InputKind::Down(key)
+                                } else {
+                                    omnitrigger_core::InputKind::Up(key)
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                assert_eq!(
+                    decision.replay, expected_replay,
                     "case={case_index} step={step_index}"
                 );
+                if let Some(consume) = step["consume"].as_bool() {
+                    assert_eq!(
+                        decision.consume, consume,
+                        "case={case_index} step={step_index}"
+                    );
+                }
             }
         }
         println!(

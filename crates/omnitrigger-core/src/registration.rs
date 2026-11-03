@@ -12,6 +12,9 @@ pub const MAX_BINDINGS: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistrationError {
+    InvalidRetainedPrefix {
+        id: u64,
+    },
     InvalidCapturedMatching {
         id: u64,
     },
@@ -101,8 +104,9 @@ pub enum RegistrationError {
 impl fmt::Display for RegistrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::InvalidRetainedPrefix { .. } => "保留原功能前缀须为 held 中的明确键盘键，启用捕获匹配和单按恢复，与专用层互斥；时间须不超过 60000 毫秒。",
             Self::InvalidCapturedMatching { .. } => {
-                "捕获集合仅支持专用键盘层的按键触发，最多一个附加键，顺序编号须小于 512。"
+                "捕获集合需要显式键盘层（专用层或保留原功能层），最多一个附加键，顺序编号须小于 512；鼠标触发仅支持保留原功能层。"
             }
             Self::CapturedPriorityConflict { .. } => {
                 "同一捕获层的重叠规则使用了相同顺序编号，请明确选择顺序。"
@@ -114,13 +118,13 @@ impl fmt::Display for RegistrationError {
                 "键盘重复仅支持键盘按下触发，不支持鼠标、长按、拖拽或滚轮。"
             }
             Self::InvalidTapRestore { .. } => {
-                "单按恢复需要专用前缀；超时仅在启用恢复时可设置，应为 1 至 60000 毫秒。"
+                "单按恢复需要显式键盘层；超时仅在启用恢复时可设置，应为 1 至 60000 毫秒。"
             }
             Self::InvalidTapProcessScope { reason, .. } => {
                 return write!(f, "单按恢复的应用范围无效：{reason}");
             }
             Self::ConflictingPrefixPolicy { .. } => {
-                "重叠应用和位置范围内，同一前缀的专用层、单按恢复与超时策略必须一致。"
+                "重叠应用和位置范围内，同一前缀的层模式（专用层或保留原功能层）、捕获范围、快速输入与单按恢复策略必须一致。"
             }
             Self::InvalidProcessScope { reason, .. } => return write!(f, "进程范围无效：{reason}"),
             Self::TooManyBindings => {
@@ -160,14 +164,38 @@ pub(super) fn validate(
     }
     let mut ids = BTreeSet::new();
     for binding in &mut bindings {
+        if let Some(policy) = binding.keyboard.retained_prefix.as_ref()
+            && (binding.keyboard.dedicated_prefix.is_some()
+                || !binding.keyboard.matching.is_captured()
+                || !binding.keyboard.restore_on_tap
+                || !matches!(policy.key, Button::Key(key) if (1..=254).contains(&key) && !matches!(key, 0x10..=0x12))
+                || !binding.held.contains(&policy.key)
+                || policy.quiet_ms > 60_000
+                || policy.fast_ms > 60_000)
+        {
+            return Err(RegistrationError::InvalidRetainedPrefix { id: binding.id });
+        }
+        if let Some(policy) = binding.keyboard.retained_prefix.as_mut() {
+            policy.capture_scope.normalize().map_err(|reason| {
+                RegistrationError::InvalidProcessScope {
+                    id: binding.id,
+                    reason,
+                }
+            })?;
+        }
         if binding.keyboard.matching.is_captured()
-            && (binding.keyboard.dedicated_prefix.is_none()
+            && (binding.keyboard.prefix().is_none()
                 || binding.held.len() > 2
                 || binding
                     .held
                     .iter()
                     .any(|button| !matches!(button, Button::Key(_)))
-                || !matches!(binding.activation, Activation::Press(Button::Key(_)))
+                || !(matches!(binding.activation, Activation::Press(Button::Key(_)))
+                    || (binding.keyboard.retained_prefix.is_some()
+                        && matches!(
+                            binding.activation,
+                            Activation::Press(Button::Mouse(_)) | Activation::Wheel(_)
+                        )))
                 || usize::from(binding.keyboard.matching.priority()) >= MAX_BINDINGS)
         {
             return Err(RegistrationError::InvalidCapturedMatching { id: binding.id });
@@ -187,7 +215,7 @@ pub(super) fn validate(
             return Err(RegistrationError::InvalidKeyboardRepeat { id: binding.id });
         }
         if ((binding.keyboard.restore_on_tap || binding.keyboard.tap_timeout_ms.is_some())
-            && binding.keyboard.dedicated_prefix.is_none())
+            && binding.keyboard.prefix().is_none())
             || (binding.keyboard.tap_timeout_ms.is_some() && !binding.keyboard.restore_on_tap)
             || binding
                 .keyboard
@@ -287,13 +315,46 @@ pub(super) fn validate(
     }
     for (index, left) in bindings.iter().enumerate() {
         for right in bindings.iter().skip(index + 1) {
+            for (retained, other) in [(left, right), (right, left)] {
+                if let Some(policy) = retained.keyboard.retained_prefix.as_ref()
+                    && other.keyboard.retained_prefix.is_none()
+                    && other.held.contains(&policy.key)
+                    && policy.capture_scope.overlaps(&other.process_scope)
+                    && regions::conditions_overlap(&retained.conditions, &other.conditions)
+                    && !(other.keyboard.matching.is_captured()
+                        && other.keyboard.prefix() != Some(policy.key))
+                {
+                    return Err(RegistrationError::ConflictingPrefixPolicy {
+                        first: left.id,
+                        second: right.id,
+                        button: policy.key,
+                    });
+                }
+            }
+            if let (Some(a), Some(b)) = (
+                &left.keyboard.retained_prefix,
+                &right.keyboard.retained_prefix,
+            ) && a.key == b.key
+                && a.capture_scope.overlaps(&b.capture_scope)
+                && regions::conditions_overlap(&left.conditions, &right.conditions)
+                && !left.keyboard.same_layer(&right.keyboard)
+            {
+                return Err(RegistrationError::ConflictingPrefixPolicy {
+                    first: left.id,
+                    second: right.id,
+                    button: a.key,
+                });
+            }
             if left.process_scope.overlaps(&right.process_scope)
                 && regions::conditions_overlap(&left.conditions, &right.conditions)
             {
                 for (layer, other) in [(left, right), (right, left)] {
-                    if let Some(button) = layer.keyboard.dedicated_prefix
+                    if let Some(button) = layer.keyboard.prefix()
                         && other.held.contains(&button)
                         && !other.keyboard.same_layer(&layer.keyboard)
+                        && !(layer.keyboard.matching.is_captured()
+                            && other.keyboard.matching.is_captured()
+                            && other.keyboard.prefix() != Some(button))
                     {
                         return Err(RegistrationError::ConflictingPrefixPolicy {
                             first: left.id,
@@ -307,7 +368,7 @@ pub(super) fn validate(
                 .is_some_and(|button| Some(button) == activation_button(right.activation));
             let captured_pair = left.keyboard.matching.is_captured()
                 && right.keyboard.matching.is_captured()
-                && left.keyboard.dedicated_prefix == right.keyboard.dedicated_prefix;
+                && left.keyboard.prefix() == right.keyboard.prefix();
             if captured_pair
                 && same_button
                 && left.keyboard.matching.priority() == right.keyboard.matching.priority()
@@ -327,6 +388,9 @@ pub(super) fn validate(
                 && left.process_scope.priority() == right.process_scope.priority()
                 && !(captured_pair
                     && left.keyboard.matching.priority() != right.keyboard.matching.priority())
+                && !(left.keyboard.matching.is_captured()
+                    && right.keyboard.matching.is_captured()
+                    && left.keyboard.prefix() != right.keyboard.prefix())
             {
                 let timed = match (left.activation, right.activation) {
                     (
@@ -361,9 +425,9 @@ pub(super) fn validate(
         if let Some(button) = activation_button(left.activation)
             && let Some(prefix) = bindings.iter().find(|other| {
                 other.held.contains(&button)
+                    // 两个显式捕获层由先按下的引导键决定归属，后一个键可以先作为末键或附加键。
                     && !(left.keyboard.matching.is_captured()
-                        && other.keyboard.matching.is_captured()
-                        && left.keyboard.dedicated_prefix == other.keyboard.dedicated_prefix)
+                        && other.keyboard.matching.is_captured())
                     && left.held.iter().all(|held| other.held.contains(held))
                     && regions::conditions_overlap(&left.conditions, &other.conditions)
                     && left.process_scope.overlaps(&other.process_scope)

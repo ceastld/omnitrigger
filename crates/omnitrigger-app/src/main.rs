@@ -3503,6 +3503,8 @@ impl Workspace {
                     "{}{} · {}",
                     if binding.spec.keyboard.dedicated_prefix.is_some() {
                         "专用层"
+                    } else if binding.spec.keyboard.retained_prefix.is_some() {
+                        "保留原功能层"
                     } else {
                         ""
                     },
@@ -3865,10 +3867,28 @@ impl Workspace {
                 let name = theme::caps_for_buttons(&[button])[0].label.clone();
                 element.child(caption(format!("{name} 专用层：未绑定的键盘输入不回放。")))
             })
+            .when_some(spec.keyboard.retained_prefix.as_ref(), |element, policy| {
+                let name = theme::caps_for_buttons(&[policy.key])[0].label.clone();
+                element
+                    .child(caption(format!(
+                        "{name} 保留原功能层：前键间隔 {}ms，快速输入时窗 {}ms。",
+                        policy.quiet_ms, policy.fast_ms
+                    )))
+                    .child(caption(format!(
+                        "前缀捕获范围：{}。",
+                        settings::process_scope_label(&policy.capture_scope)
+                    )))
+            })
             .when(spec.keyboard.restore_on_tap, |element| {
                 element.child(caption(spec.keyboard.tap_timeout_ms.map_or_else(
                     || "独立单按恢复原键（不限时）。".to_string(),
-                    |ms| format!("独立单按恢复原键（严格小于 {ms}ms）。"),
+                    |ms| {
+                        if spec.keyboard.retained_prefix.is_some() {
+                            format!("独立单按恢复原键（不超过 {ms}ms）。")
+                        } else {
+                            format!("独立单按恢复原键（严格小于 {ms}ms）。")
+                        }
+                    },
                 )))
             })
             .when(!spec.keyboard.tap_scope.is_global(), |element| {
@@ -5785,11 +5805,31 @@ fn smoke_test() -> Result<(), String> {
         };
         bindings.push(captured);
     }
+    let mut retained = bindings[0].clone();
+    retained.spec.id = settings::next_id(&bindings);
+    retained.spec.held = vec![Button::Key(134)];
+    retained.spec.activation = Activation::Press(Button::Key(75));
+    retained.spec.keyboard = omnitrigger_core::KeyboardPolicy {
+        retained_prefix: Some(omnitrigger_core::RetainedPrefix {
+            key: Button::Key(134),
+            capture_scope: Default::default(),
+            quiet_ms: 50,
+            fast_ms: 50,
+            block_with_primary_mouse: false,
+        }),
+        matching: omnitrigger_core::KeyboardMatching::Captured { priority: 0 },
+        repeat: true,
+        restore_on_tap: true,
+        tap_timeout_ms: Some(1500),
+        ..Default::default()
+    };
+    bindings.push(retained);
     for binding in &mut bindings {
         if binding.spec.held.contains(&Button::Key(20)) {
             binding.spec.keyboard = omnitrigger_core::KeyboardPolicy {
                 matching: Default::default(),
                 dedicated_prefix: Some(Button::Key(20)),
+                retained_prefix: None,
                 repeat: true,
                 restore_on_tap: true,
                 tap_timeout_ms: Some(20_000),
@@ -5828,7 +5868,7 @@ fn smoke_test() -> Result<(), String> {
     }
     backend.send(BackendCommand::SetEnabled(false))?;
     drop(backend);
-    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; scoped/dedicated/repeat/contextual-terminal/captured registrations valid; foreground process resolved outside hooks.");
+    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; scoped/dedicated/retained/repeat/contextual-terminal/captured registrations valid; foreground process resolved outside hooks.");
     Ok(())
 }
 

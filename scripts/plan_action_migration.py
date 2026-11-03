@@ -127,6 +127,7 @@ def same_process_scope(left, right):
 
 def same_keyboard_policy(left, right):
     return (left.get("dedicated_prefix") == right.get("dedicated_prefix")
+            and left.get("retained_prefix") == right.get("retained_prefix")
             and left.get("repeat", False) == right.get("repeat", False)
             and left.get("matching", {"kind": "exact"}) == right.get("matching", {"kind": "exact"})
             and left.get("restore_on_tap", False) == right.get("restore_on_tap", False)
@@ -155,13 +156,31 @@ def leader_tap_policy(leader, settings):
     return policy, gaps, index
 
 
-def power_trigger(leader, rule, tap_policy=None, tap_gaps=(), priority=0):
+def power_trigger(leader, rule, tap_policy=None, tap_gaps=(), priority=0, settings=None):
     scope, gaps, notes = process_scope(leader, rule)
     gaps.extend(tap_gaps)
     dedicated = leader.get("KeepOriginKeyFunc") is False
+    settings = settings or {}
+    retained = None
     if not dedicated:
-        # V1 的保留原功能模式包含快速输入保护、松开顺序和超时，不能按普通回退宣称等价。
-        gaps.append("legacy_retained_prefix_timing")
+        quiet = settings.get("PowerKeys_DelayBeforeCtrlKey")
+        fast = settings.get("PowerKeys_ContinuousInputCheckTime")
+        cancel = settings.get("PowerKeys_CancelLongPressKeyDelayMs")
+        hint = settings.get("PowerKeys_HintWindowDelay")
+        if (leader.get("KeepOriginKeyFunc") is True
+                and all(type(value) is int and 0 <= value <= 60_000 for value in (quiet, fast))
+                and type(cancel) is int and 0 < cancel <= 60_000
+                and type(hint) is int and (hint <= 0 or hint > cancel)
+                and settings.get("PowerKeys_IgnoreUnknownKey") is False):
+            retained = {"key": button(leader.get("Key")), "quiet_ms": quiet, "fast_ms": fast}
+            capture_scope, capture_gaps, _ = process_scope(leader, {})
+            gaps.extend(capture_gaps)
+            if capture_scope:
+                retained["capture_scope"] = capture_scope
+            if leader.get("Key") in (160, 161, 162, 163):
+                retained["block_with_primary_mouse"] = True
+        else:
+            gaps.append("legacy_retained_prefix_timing")
     if any(rule.get(key) for key in ("Shift", "Control", "Alt")):
         gaps.append("either_side_modifier_matching")
     if rule.get("LongPressActionType", 0) != 0:
@@ -179,6 +198,12 @@ def power_trigger(leader, rule, tap_policy=None, tap_gaps=(), priority=0):
     if "either_side_modifier_matching" in gaps:
         return None, sorted(set(gaps)), notes
     keyboard = {"repeat": terminal["kind"] == "key"}
+    if retained is not None:
+        if retained["key"] and retained["key"]["kind"] == "key" and terminal["kind"] == "key" and priority < 512:
+            keyboard.update(retained_prefix=retained, matching={"kind":"captured", "priority":priority},
+                            restore_on_tap=True, tap_timeout_ms=cancel)
+        else:
+            gaps.append("unsupported_retained_prefix")
     if dedicated:
         prefix = button(leader.get("Key"))
         if prefix["kind"] == "key":
@@ -335,7 +360,7 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20):
             if rule.get("IsDisabled"):
                 continue
             identity = f"power:{leader_key}:{index}"
-            trigger, gaps, notes = power_trigger(leader, rule, tap_policy, tap_gaps, priorities[index])
+            trigger, gaps, notes = power_trigger(leader, rule, tap_policy, tap_gaps, priorities[index], source.get("InputSettings"))
             folded = index == folded_index
             if folded:
                 gaps = [gap for gap in gaps if gap != "unsupported_trigger_key"]

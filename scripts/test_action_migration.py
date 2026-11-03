@@ -24,6 +24,21 @@ def fixture():
 
 
 class MigrationTests(unittest.TestCase):
+    def test_retained_projection_requires_explicit_source_timing_and_keeps_hint_semantics_gaps(self):
+        data=fixture();leader=data["source"]["PowerKeys"]["20"];leader["KeepOriginKeyFunc"]=True
+        settings=data["source"]["InputSettings"]
+        settings.update(PowerKeys_DelayBeforeCtrlKey=50,PowerKeys_ContinuousInputCheckTime=50,
+                        PowerKeys_CancelLongPressKeyDelayMs=1500,PowerKeys_HintWindowDelay=20000,PowerKeys_IgnoreUnknownKey=False)
+        row=build_plan(**data)["bindings"][0]
+        self.assertEqual(row["trigger_gaps"],[])
+        self.assertEqual(row["trigger"]["keyboard"]["retained_prefix"],{"key":{"kind":"key","value":20},"quiet_ms":50,"fast_ms":50})
+        self.assertEqual(row["trigger"]["keyboard"]["tap_timeout_ms"],1500)
+        for key,value in [("PowerKeys_DelayBeforeCtrlKey",True),("PowerKeys_ContinuousInputCheckTime",60001),
+                          ("PowerKeys_CancelLongPressKeyDelayMs",0),("PowerKeys_HintWindowDelay",1000),("PowerKeys_IgnoreUnknownKey",True)]:
+            previous=settings[key];settings[key]=value
+            self.assertIn("legacy_retained_prefix_timing",build_plan(**data)["bindings"][0]["trigger_gaps"])
+            settings[key]=previous
+
     def test_source_input_timing_requires_evidence_and_preserves_global_and_process_delays(self):
         data=fixture()
         row=build_plan(**data)["bindings"][0]

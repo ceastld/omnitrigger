@@ -21,7 +21,7 @@ OmniTrigger 的绑定、插件与轮盘配置都保存在本机 JSON 文件中�
 
 浏览器连接器的本机状态独立保存在配置同级 `browser-connector.json`，版本程序位于 `plugins/browser-connector/runtime/0.1.0`。用户点击安装后，本机注册与启动自动完成，这些内部文件无需手工编辑。实现细节见[浏览器连接器](BROWSER_EXTENSION.md)。
 
-`bindings.json` 读取兼容版本 1–13，保存使用版本 13；首次保存旧配置前创建 `bindings.json.v<旧版本>.bak` 备份，备份失败不会覆盖原配置。版本 8 增加 `invoke` 动作引用，版本 9 增加 `browser` 浏览器动作，版本 10 增加 `process_scope`，版本 11 增加 `keyboard` 专用层与重复策略，版本 12 增加显式捕获集合匹配，版本 13 增加快捷键按下时序。回退旧程序时需恢复对应备份。
+`bindings.json` 读取兼容版本 1–14，保存使用版本 14；首次保存旧配置前创建 `bindings.json.v<旧版本>.bak` 备份，备份失败不会覆盖原配置。版本 8 增加 `invoke` 动作引用，版本 9 增加 `browser` 浏览器动作，版本 10 增加 `process_scope`，版本 11 增加 `keyboard` 专用层与重复策略，版本 12 增加显式捕获集合匹配，版本 13 增加快捷键按下时序，版本 14 增加保留原功能的键盘层。回退旧程序时需恢复对应备份。
 
 版本 13 的 `send_shortcut` 动作可添加 `"timing": {"key_down_delay_ms": 5, "process_overrides": {"wps": 10}}`。省略时延迟为零；覆盖值按原目标进程文件名匹配，忽略大小写及可选的 `.exe`，最多 16 项，不接受路径、通配符或重复别名。每个延迟是 0–1000ms 整数；设置了进程覆盖但无法读取目标身份时拒绝执行。界面修改快捷键会保留原时序，详细发送顺序见[按键动作](KEYBOARD_ACTIONS.md)。
 
@@ -67,7 +67,39 @@ OmniTrigger 的绑定、插件与轮盘配置都保存在本机 JSON 文件中�
 
 ### 捕获集合匹配
 
-版本 12 可在 `keyboard` 中添加 `"matching": {"kind": "captured", "priority": 0}`。缺省或 `{"kind":"exact"}` 仍精确匹配物理按下集合。捕获模式要求专用键盘层、键盘 `press`，每条至多一个附加键（`held` 中除引导键外的键）。完整例子见 [`captured-keyboard-layer.json`](../examples/captured-keyboard-layer.json)，初始均停用。
+版本 12 可在 `keyboard` 中添加 `"matching": {"kind": "captured", "priority": 0}`。缺省或 `{"kind":"exact"}` 仍精确匹配物理按下集合。捕获模式要求显式键盘层，每条至多一个附加键（`held` 中除引导键外的键）；专用层仅支持键盘 `press`，版本 14 的保留原功能层还支持鼠标 `press` 和滚轮。完整例子见 [`captured-keyboard-layer.json`](../examples/captured-keyboard-layer.json)，初始均停用。
+
+两个捕获层可以互相把对方引导键用作附加键；先按下哪个引导键决定本次所属的层。同一物理按下集合在不同层中可有不同动作。精确模式继续执行原有前缀冲突检查。
+
+## 保留原功能的键盘层
+
+版本 14 可用以下策略替代 `dedicated_prefix`，两者不能同时设置：
+
+```json
+"keyboard": {
+  "matching": {"kind":"captured", "priority":0},
+  "retained_prefix": {
+    "key":{"kind":"key", "value":32},
+    "quiet_ms":50,
+    "fast_ms":50,
+    "capture_scope":{"deny":["game.exe"]},
+    "block_with_primary_mouse":false
+  },
+  "repeat":true,
+  "restore_on_tap":true,
+  "tap_timeout_ms":1500
+}
+```
+
+引导键必须在 `held` 中，`quiet_ms` 和 `fast_ms` 为 0–60000ms 的整数。捕获前距离最近普通按下不足 `quiet_ms` 时直接放行引导键；普通按下的系统重复也会更新时间。独立单按的释放时间不超过 `tap_timeout_ms` 时补发一次轻点，超时不补发；缺省超时不限时。恢复后释放的时间也参与下一次前键间隔判断。该模式必须显式启用 `restore_on_tap`。
+
+捕获后不足 `fast_ms` 的第二键若属于附加键，先暂存；其他键使引导键补发按下，再按顺序交付当前键。暂存期间先释放引导键，会补发引导键和暂存键的两次轻点；先释放暂存键，尝试其无附加键动作。第三键到来会把暂存键提升为捕获键，再选择动作。第三键未命中时仍保留暂存状态；此时释放暂存键后，其捕获资格保持到引导键结束或取消。超过快速输入时窗时，按动作、附加键、未知键回退的顺序处理。
+
+`capture_scope` 使用与 `process_scope` 相同的进程名单格式，省略表示全局。它决定是否捕获前缀，单条绑定的 `process_scope` 决定动作是否可用；即使当前应用没有可用动作，仍可捕获并执行单按或回退。同一引导键的捕获范围有重叠时，层策略必须一致，即使动作应用范围互不重叠也会检查。
+
+鼠标主键按下时补发引导键按下，供拖动和绘图使用，同时保留本次层。若此前已经交付按下，释放会交付给应用；符合单按条件时仍可能补发轻点。`block_with_primary_mouse` 为真时，鼠标主键已按住则不启动该层。层内鼠标动作触发后不再进行单按恢复。取消和应用切换不会补发待定轻点；已交付按下的释放仍交付，其他已消费按压的释放由系统收尾。补发失败可能留下部分效果，不能视为无损恢复。
+
+目前通过配置设置；界面显示层和时间，编辑或重新录制保留策略。见初始停用的 [`retained-keyboard-layer.json`](../examples/retained-keyboard-layer.json)。
 
 捕获层先按已有捕获集合选择动作；没有命中时，只有当前适用规则所声明的附加键才会被捕获。未识别键和首次按下就命中动作的末键会被抑制，但不进入捕获集合，也不阻止无附加键的默认规则。多个附加键可同时保留，各自释放时移除；捕获来源的位置条件失效后，旧按压不能重新成为前缀。
 

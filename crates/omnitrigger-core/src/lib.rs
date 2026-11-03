@@ -41,7 +41,7 @@ mod registration;
 pub use engine::Engine;
 pub use model::{
     Activation, ActiveDrag, Axis, Button, Decision, DragEvent, DragPhase, InputEvent, InputKind,
-    KeyboardMatching, KeyboardPolicy, MouseButton, TriggerSpec, WheelDirection,
+    KeyboardMatching, KeyboardPolicy, MouseButton, RetainedPrefix, TriggerSpec, WheelDirection,
 };
 pub use process_scope::{ProcessScope, ProcessScopeError};
 pub use recorder::Recorder;
@@ -53,6 +53,9 @@ pub use registration::{MAX_BINDINGS, RegistrationError};
 
 #[cfg(test)]
 mod prefix_tests;
+
+#[cfg(test)]
+mod retained_tests;
 
 #[cfg(test)]
 mod terminal_role_tests;

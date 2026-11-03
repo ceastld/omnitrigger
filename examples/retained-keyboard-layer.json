@@ -1,0 +1,38 @@
+{
+  "version": 14,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [{"kind":"key","value":32}],
+      "activation": {"kind":"press","value":{"kind":"key","value":75}},
+      "keyboard": {
+        "matching": {"kind":"captured","priority":1},
+        "retained_prefix": {"key":{"kind":"key","value":32},"quiet_ms":50,"fast_ms":50},
+        "repeat": true, "restore_on_tap": true, "tap_timeout_ms":1500
+      },
+      "enabled":false, "message":"空格保留原功能层的 K", "action":{"kind":"notification"}
+    },
+    {
+      "id": 2,
+      "held": [{"kind":"key","value":32},{"kind":"key","value":71}],
+      "activation": {"kind":"press","value":{"kind":"key","value":75}},
+      "keyboard": {
+        "matching": {"kind":"captured","priority":0},
+        "retained_prefix": {"key":{"kind":"key","value":32},"quiet_ms":50,"fast_ms":50},
+        "repeat": true, "restore_on_tap": true, "tap_timeout_ms":1500
+      },
+      "enabled":false, "message":"空格与 G 捕获后按 K", "action":{"kind":"notification"}
+    },
+    {
+      "id": 3,
+      "held": [{"kind":"key","value":32}],
+      "activation": {"kind":"press","value":{"kind":"x2"}},
+      "keyboard": {
+        "matching": {"kind":"captured","priority":2},
+        "retained_prefix": {"key":{"kind":"key","value":32},"quiet_ms":50,"fast_ms":50},
+        "restore_on_tap": true, "tap_timeout_ms":1500
+      },
+      "enabled":false, "message":"空格与鼠标侧键", "action":{"kind":"notification"}
+    }
+  ]
+}

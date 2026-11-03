@@ -98,10 +98,12 @@ pub struct TriggerSpec {
 /// 只影响物理键盘输入；缺省保留既有回退和单次触发行为。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct KeyboardPolicy {
-    /// 默认精确按下集合；捕获模式仅供显式专用键盘层使用。
+    /// 默认精确按下集合；捕获模式要求显式键盘层。
     pub matching: KeyboardMatching,
     /// 专用层的键必须在 held 中。层内未匹配的键盘按压不回放，鼠标输入仍按各自规则处理。
     pub dedicated_prefix: Option<Button>,
+    /// 保留原功能的捕获层；与专用层互斥，时间由事件调用方显式提供。
+    pub retained_prefix: Option<RetainedPrefix>,
     /// 仅普通键盘 Press 可用；精确模式重复原动作，捕获模式按当前捕获集合重新选择。
     pub repeat: bool,
     /// 独立按下且没有其他键盘输入或匹配动作时，松开后补发自身的一次点击。
@@ -113,13 +115,32 @@ pub struct KeyboardPolicy {
 }
 
 impl KeyboardPolicy {
+    pub(crate) fn prefix(&self) -> Option<Button> {
+        self.dedicated_prefix
+            .or(self.retained_prefix.as_ref().map(|policy| policy.key))
+    }
+
     pub(crate) fn same_layer(&self, other: &Self) -> bool {
         self.dedicated_prefix == other.dedicated_prefix
+            && self.retained_prefix == other.retained_prefix
             && self.matching.is_captured() == other.matching.is_captured()
             && self.restore_on_tap == other.restore_on_tap
             && self.tap_timeout_ms == other.tap_timeout_ms
             && self.tap_scope == other.tap_scope
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetainedPrefix {
+    pub key: Button,
+    /// 与动作应用范围独立：没有可用动作时仍可捕获前缀并执行回退。
+    pub capture_scope: ProcessScope,
+    /// 距最近普通按下不足此时长时，引导键直接交给应用。
+    pub quiet_ms: u32,
+    /// 捕获后此时窗内，附加键暂存，其他键使引导键交还应用。
+    pub fast_ms: u32,
+    /// 鼠标主键已按住时不捕获此引导键。
+    pub block_with_primary_mouse: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
