@@ -599,7 +599,8 @@ impl Engine {
         } else {
             eligible
                 && self.candidates().any(|binding| {
-                    binding.held.contains(&button)
+                    binding.keyboard.retained_prefix.is_none()
+                        && binding.held.contains(&button)
                         && self.conditions_match(binding)
                         && self
                             .pressed
@@ -796,7 +797,9 @@ impl Engine {
     }
 
     fn is_dedicated_prefix(&self, button: Button) -> bool {
-        self.dedicated_index(button).is_some()
+        self.candidates().any(|binding| {
+            binding.keyboard.dedicated_prefix == Some(button) && self.conditions_match(binding)
+        })
     }
 
     fn dedicated_index(&self, button: Button) -> Option<usize> {

@@ -21,6 +21,14 @@ impl Engine {
             if self.dedicated_leader.is_some() {
                 return None;
             }
+            if self
+                .pressed
+                .keys()
+                .any(|key| matches!(key, Button::Key(0x10..=0x12 | 0xa0..=0xa5 | 0x5b | 0x5c)))
+            {
+                // 交给普通组合匹配；不把修饰组合中的按键计入普通输入间隔。
+                return None;
+            }
             let previous = self.last_keyboard_down;
             if self.enabled
                 && !self.pressed.contains_key(&button)

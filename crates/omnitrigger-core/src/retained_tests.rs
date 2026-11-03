@@ -354,6 +354,34 @@ fn retained_wheel_preserves_partial_delta_and_completed_action_suppresses_tap() 
 }
 
 #[test]
+fn retained_modifiers_bypass_capture_and_do_not_steal_existing_shortcuts() {
+    for code in [16, 17, 18, 91, 92, 160, 161, 162, 163, 164, 165] {
+        let modifier = Button::Key(code);
+        let mut e = Engine::new(vec![spec(1, K, None)]).unwrap();
+        input(&mut e, modifier, true, 0);
+        assert!(!input(&mut e, PREFIX, true, 100).consume);
+        input(&mut e, modifier, false, 110);
+        input(&mut e, PREFIX, false, 120);
+        // 被放行的修饰组合不会延长前键间隔。
+        assert!(input(&mut e, PREFIX, true, 130).consume);
+    }
+    let ctrl = Button::Key(162);
+    let normal = TriggerSpec {
+        id: 2,
+        held: vec![ctrl],
+        activation: Activation::Press(PREFIX),
+        keyboard: Default::default(),
+        process_scope: Default::default(),
+        conditions: vec![],
+    };
+    let mut e = Engine::new(vec![spec(1, K, None), normal]).unwrap();
+    input(&mut e, ctrl, true, 0);
+    assert_eq!(input(&mut e, PREFIX, true, 100).triggered, vec![2]);
+    assert!(input(&mut e, PREFIX, false, 110).consume);
+    assert!(input(&mut e, ctrl, false, 120).consume);
+}
+
+#[test]
 fn retained_registration_rejects_implicit_or_conflicting_policy() {
     for kind in 0..6 {
         let mut row = spec(1, K, None);

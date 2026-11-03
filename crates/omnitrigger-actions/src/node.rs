@@ -759,32 +759,30 @@ mod tests {
         }"#,
             json!({}),
         );
-        let host = std::sync::Arc::new(DesktopHost::default());
-        let cancellation = CancellationToken::new();
-        let cancel = cancellation.clone();
-        let observed = host.clone();
-        let canceller = thread::spawn(move || {
-            let began = Instant::now();
-            while observed.0.lock().unwrap().is_empty() {
-                assert!(began.elapsed() < Duration::from_secs(5));
-                thread::sleep(Duration::from_millis(10));
+        #[derive(Default)]
+        struct CancelAfterFirst(std::sync::Mutex<Vec<String>>);
+        impl NativeHost for CancelAfterFirst {
+            fn call(
+                &self,
+                method: &str,
+                _: Value,
+                cancellation: &CancellationToken,
+            ) -> Result<Value, ActionError> {
+                self.0.lock().unwrap().push(method.into());
+                cancellation.cancel();
+                Ok(json!({}))
             }
-            cancel.cancel();
-        });
+        }
+        let host = CancelAfterFirst::default();
+        let cancellation = CancellationToken::new();
         assert_eq!(
             NodeRuntime::default()
-                .execute_with_host(
-                    &fixture.action,
-                    &context(),
-                    &cancellation,
-                    Some(host.as_ref())
-                )
+                .execute_with_host(&fixture.action, &context(), &cancellation, Some(&host))
                 .unwrap_err()
                 .code,
             "cancelled"
         );
-        canceller.join().unwrap();
-        assert_eq!(host.0.lock().unwrap().len(), 1);
+        assert_eq!(*host.0.lock().unwrap(), vec!["target.info"]);
     }
 
     struct Fixture {
