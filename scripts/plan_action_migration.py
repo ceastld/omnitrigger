@@ -52,6 +52,32 @@ def shortcut_action(data):
 
 
 def operation(row, settings=None):
+    if row.get("ActionType") == 6:
+        text = row.get("Data")
+        gaps = ["notification_side_effect"] if row.get("Message") else []
+        native = None
+        if not isinstance(text, str) or not text or "\0" in text or any(0xD800 <= ord(c) <= 0xDFFF for c in text):
+            gaps.append("invalid_literal_text")
+        elif any(marker in text for marker in ("{cliptext}", "{selection}", "{0")) or text.upper().startswith("FILE:"):
+            gaps.append("source_text_expansion_required")
+        elif "\n" in text:
+            # 源 LF/CRLF 使用物理 Return；现有文本 API 使用 Unicode CR，不能声称输入契约相同。
+            gaps.append("source_text_newline_key_semantics")
+        elif any(0xE000 <= ord(c) <= 0xE0FF for c in text):
+            gaps.append("source_text_extended_flag_semantics")
+        else:
+            escaped = text.replace("$", "$$")
+            if len(escaped.encode("utf-16-le")) // 2 > 65536:
+                gaps.append("unsupported_literal_text_size")
+            else:
+                native = {"kind": "local", "version": 1,
+                          "steps": [{"kind": "input_text", "text": escaped}]}
+                payload = {key: value for key, value in native.items() if key != "kind"}
+                if len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > 256 * 1024:
+                    gaps.append("unsupported_literal_text_size")
+                    native = None
+        return {"status": "native_action_available" if native and not gaps else "needs_implementation",
+                "native_action": native, "source_type": 6, "action_gaps": gaps}
     if row.get("ActionType") == 1:
         native = shortcut_action(row.get("Data"))
         gaps = ["notification_side_effect"] if row.get("Message") else []

@@ -1,0 +1,17 @@
+{
+  "version": 15,
+  "bindings": [
+    {
+      "id": 9401,
+      "held": [{"kind":"key","value":162},{"kind":"key","value":164}],
+      "activation": {"kind":"press","value":{"kind":"key","value":124}},
+      "message": "输入字面文本",
+      "enabled": false,
+      "action": {
+        "kind": "local",
+        "version": 1,
+        "steps": [{"kind":"input_text","text":"$${literal} $$$$ 文😀 \\"}]
+      }
+    }
+  ]
+}

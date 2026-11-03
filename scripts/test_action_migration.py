@@ -24,6 +24,54 @@ def fixture():
 
 
 class MigrationTests(unittest.TestCase):
+    def test_literal_text_preserves_dollars_unicode_and_source_rule_without_usage_heuristics(self):
+        for text in ("\\", "`", "字😀", "${missing}", "$$", " $= ", "\t", "\r"):
+            data = fixture()
+            rule = data["source"]["PowerKeys"]["20"]["KeyActions"][0]
+            rule.update(ActionType=6, Data=text)
+            original = dict(rule)
+            row = build_plan(**data)["bindings"][0]
+            self.assertEqual(rule, original)
+            self.assertEqual(row["operation"]["native_action"], {
+                "kind": "local", "version": 1,
+                "steps": [{"kind": "input_text", "text": text.replace("$", "$$")}]})
+            self.assertEqual(row["status"], "needs_runtime_verification")
+            self.assertEqual(row["operation"]["action_gaps"], [])
+
+    def test_literal_text_does_not_replace_dynamic_expansion_or_physical_newline_semantics(self):
+        for text, gap in [("{cliptext}", "source_text_expansion_required"),
+                          ("{selection}", "source_text_expansion_required"),
+                          ("{0:yyyy}", "source_text_expansion_required"),
+                          ("fIlE:C:/example.txt", "source_text_expansion_required"),
+                          ("a\r\nb", "source_text_newline_key_semantics"),
+                          ("\n", "source_text_newline_key_semantics"),
+                          ("\ue000", "source_text_extended_flag_semantics"),
+                          (None, "invalid_literal_text"), ("", "invalid_literal_text"),
+                          ("a\0b", "invalid_literal_text"), ("\ud800", "invalid_literal_text"),
+                          ("😀" * 32769, "unsupported_literal_text_size"),
+                          ("\x01" * 65536, "unsupported_literal_text_size"),
+                          ("$" * 32769, "unsupported_literal_text_size")]:
+            data = fixture()
+            data["source"]["PowerKeys"]["20"]["KeyActions"][0].update(ActionType=6, Data=text)
+            row = build_plan(**data)["bindings"][0]
+            self.assertIsNone(row["operation"]["native_action"])
+            self.assertIn(gap, row["operation"]["action_gaps"])
+            self.assertEqual(row["status"], "needs_action_support")
+        data = fixture()
+        data["source"]["PowerKeys"]["20"]["KeyActions"][0].update(ActionType=6, Data="x", Message="通知")
+        self.assertEqual(build_plan(**data)["bindings"][0]["operation"]["action_gaps"], ["notification_side_effect"])
+
+    def test_literal_text_scope_and_existing_configuration_must_also_match(self):
+        data = fixture()
+        rule = data["source"]["PowerKeys"]["20"]["KeyActions"][0]
+        rule.update(ActionType=6, Data="${literal}")
+        projected = build_plan(**data)["bindings"][0]
+        data["current"]["bindings"] = [dict(id=7, **projected["trigger"], enabled=True,
+                                             action=projected["operation"]["native_action"])]
+        self.assertEqual(build_plan(**data)["bindings"][0]["equivalent_configuration_ids"], [7])
+        data["current"]["bindings"][0]["action"]["steps"][0]["text"] = "${literal}"
+        self.assertEqual(build_plan(**data)["bindings"][0]["equivalent_configuration_ids"], [])
+
     def test_retained_projection_requires_explicit_source_timing_and_keeps_hint_semantics_gaps(self):
         data=fixture();leader=data["source"]["PowerKeys"]["20"];leader["KeepOriginKeyFunc"]=True
         settings=data["source"]["InputSettings"]

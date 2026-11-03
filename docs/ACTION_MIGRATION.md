@@ -30,7 +30,13 @@ python scripts/plan_action_migration.py `
 
 只有历史计数、没有近期调用且没有启用绑定引用的动作标记为暂缓。直接发送快捷键的规则不依赖动作 ID 的使用计数，不能因缺少计数被判为闲置。所有暂缓项保留原数据，不自动删除。
 
-`operation.native_action` 目前仅转换 V1 `Keystroke` 的 `modifier|VK` 数据，产生独立的 OmniTrigger `send_shortcut` 动作描述。按已核对的 V1 输入实现，修饰键顺序为 Ctrl、Alt、Shift、Win，其中前三种使用右侧，Win 使用左侧；不会按名称猜测或统一改成左侧。显式 SendKeys 左右键不由该解析器转换。未知位、鼠标 VK、修饰键作为终键、SendKeys 语法和脚本都不会被当作普通快捷键解析。
+`operation.native_action` 可转换 V1 `Keystroke` 的 `modifier|VK` 数据，产生独立的 OmniTrigger `send_shortcut` 动作描述。按已核对的 V1 输入实现，修饰键顺序为 Ctrl、Alt、Shift、Win，其中前三种使用右侧，Win 使用左侧；不会按名称猜测或统一改成左侧。显式 SendKeys 左右键不由该解析器转换。未知位、鼠标 VK、修饰键作为终键、SendKeys 语法和脚本都不会被当作普通快捷键解析。
+
+V1 `InputText` 的非空字面文本转换成现有 `local` 动作的一步 `input_text`，通过原目标窗口直接发送 Unicode，不使用剪贴板或附加回车。保存时将 `$` 转为 `$$`，以保留 `${…}` 等字面内容；原规则数据保持不变，停用示例见 [`literal-text.json`](../examples/literal-text.json)。动态剪贴板／选区／日期占位符及 `FILE:` 内容读取标记 `source_text_expansion_required`，不静默替换。源 LF／CRLF 使用物理 Return，与当前文本 API 的 Unicode CR 不同，继续标记 `source_text_newline_key_semantics`。NUL、无效代理项、超出 UTF-16 或本地动作配置上限的文本不会产生可执行描述；附加通知仍保留行为缺口。生成结果须在实际目标窗口验证，源类型不会仅因已有文本 API 就被标记为完成。
+
+Windows 可运行 `cargo test -p omnitrigger-app interactive_local_literal_text_smoke --locked -- --ignored --nocapture`，在自建输入框中经真实本地执行器验证字面文本和选区替换。测试暂时取得该窗口焦点，核对实际文字及剪贴板序号，不读取剪贴板内容；这项观察不代替原目标软件和触发器验收。
+
+源对 U+E000–U+E0FF 另加扩展键标记，与当前 Unicode 输入标记不同，这类字符保留 `source_text_extended_flag_semantics` 缺口。
 
 源 `DefaultModifiedKeyDownDelay` 为正时保留该延迟；非正值时对 `wps`、`et`、`wpp`、`wpspdf`、`mstsc` 使用 10ms，其他进程为零。转换结果使用版本 13 的 `timing`。缺失或非法设置标记 `source_key_down_delay_unknown`，超过支持上限标记 `unsupported_key_down_delay`，不产生可执行原生动作。按键提交及延迟观测只能证明输入契约，还须在实际目标软件验证业务结果。
 

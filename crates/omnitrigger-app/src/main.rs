@@ -20,6 +20,8 @@ mod external_action;
 mod local_action;
 mod local_editor;
 mod local_executor;
+#[cfg(test)]
+mod local_text_smoke;
 mod message_input;
 mod plugin_install;
 mod plugins;
