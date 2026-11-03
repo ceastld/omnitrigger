@@ -307,11 +307,11 @@ mod tests {
                     }
                     altered = true;
                 }
-                if mode != "focus_changed" || !altered {
-                    if unsafe { GetForegroundWindow() } != parent {
-                        service.cancel_all();
-                        panic!("测试失焦，已请求取消");
-                    }
+                if (mode != "focus_changed" || !altered)
+                    && unsafe { GetForegroundWindow() } != parent
+                {
+                    service.cancel_all();
+                    panic!("测试失焦，已请求取消");
                 }
                 if let Ok(event) = service.try_recv() {
                     if event.outcome.is_terminal() {
