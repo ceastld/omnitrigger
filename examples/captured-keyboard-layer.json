@@ -1,0 +1,32 @@
+{
+  "version": 12,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [{"kind": "key", "value": 20}, {"kind": "key", "value": 69}],
+      "activation": {"kind": "press", "value": {"kind": "key", "value": 80}},
+      "keyboard": {"dedicated_prefix": {"kind": "key", "value": 20}, "repeat": true, "matching": {"kind": "captured", "priority": 0}},
+      "message": "捕获 E 后按 P",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    },
+    {
+      "id": 2,
+      "held": [{"kind": "key", "value": 20}, {"kind": "key", "value": 32}],
+      "activation": {"kind": "press", "value": {"kind": "key", "value": 74}},
+      "keyboard": {"dedicated_prefix": {"kind": "key", "value": 20}, "repeat": true, "matching": {"kind": "captured", "priority": 1}},
+      "message": "捕获 Space 后按 J",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    },
+    {
+      "id": 3,
+      "held": [{"kind": "key", "value": 20}],
+      "activation": {"kind": "press", "value": {"kind": "key", "value": 80}},
+      "keyboard": {"dedicated_prefix": {"kind": "key", "value": 20}, "repeat": true, "matching": {"kind": "captured", "priority": 10}},
+      "message": "P 的默认规则；额外捕获 Space 不阻止匹配",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    }
+  ]
+}

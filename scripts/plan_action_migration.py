@@ -118,6 +118,7 @@ def same_process_scope(left, right):
 def same_keyboard_policy(left, right):
     return (left.get("dedicated_prefix") == right.get("dedicated_prefix")
             and left.get("repeat", False) == right.get("repeat", False)
+            and left.get("matching", {"kind": "exact"}) == right.get("matching", {"kind": "exact"})
             and left.get("restore_on_tap", False) == right.get("restore_on_tap", False)
             and left.get("tap_timeout_ms") == right.get("tap_timeout_ms")
             and same_process_scope(left.get("tap_scope", {}), right.get("tap_scope", {})))
@@ -144,7 +145,7 @@ def leader_tap_policy(leader, settings):
     return policy, gaps, index
 
 
-def power_trigger(leader, rule, tap_policy=None, tap_gaps=()):
+def power_trigger(leader, rule, tap_policy=None, tap_gaps=(), priority=0):
     scope, gaps, notes = process_scope(leader, rule)
     gaps.extend(tap_gaps)
     dedicated = leader.get("KeepOriginKeyFunc") is False
@@ -172,6 +173,10 @@ def power_trigger(leader, rule, tap_policy=None, tap_gaps=()):
         prefix = button(leader.get("Key"))
         if prefix["kind"] == "key":
             keyboard["dedicated_prefix"] = prefix
+            if terminal["kind"] == "key" and priority < 512:
+                keyboard["matching"] = {"kind": "captured", "priority": priority}
+            else:
+                gaps.append("unsupported_captured_matching")
         else:
             gaps.append("dedicated_mouse_prefix")
         keyboard.update(tap_policy or {})
@@ -264,6 +269,12 @@ def project_source_precedence(bindings, current):
                     or not process_scopes_overlap(terminal["trigger"].get("process_scope", {}),
                                                   prefix["trigger"].get("process_scope", {}))):
                 continue
+            if (terminal["trigger"]["keyboard"].get("matching", {}).get("kind") == "captured"
+                    and prefix["trigger"]["keyboard"].get("matching", {}).get("kind") == "captured"
+                    and terminal["trigger"]["keyboard"].get("dedicated_prefix") == prefix["trigger"]["keyboard"].get("dedicated_prefix")):
+                for row, other in ((terminal, prefix), (prefix, terminal)):
+                    row["source_normalizations"].append({"kind": "source_terminal_preempts_capture", "other": other["key"]})
+                continue
             for row, other in ((terminal, prefix), (prefix, terminal)):
                 row["trigger_gaps"] = sorted(set(row["trigger_gaps"] + ["terminal_prefix_overlap"]))
                 row["source_normalizations"].append({"kind": "terminal_prefix_review", "other": other["key"]})
@@ -307,11 +318,14 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20):
         if not leader.get("IsEnabled"):
             continue
         tap_policy, tap_gaps, folded_index = leader_tap_policy(leader, source.get("InputSettings") or {})
+        ordered = sorted((index for index, row in enumerate(leader.get("KeyActions") or []) if not row.get("IsDisabled")),
+                         key=lambda index: -(leader["KeyActions"][index].get("AdornKey") or 0))
+        priorities = {index: priority for priority, index in enumerate(ordered)}
         for index, rule in enumerate(leader.get("KeyActions") or []):
             if rule.get("IsDisabled"):
                 continue
             identity = f"power:{leader_key}:{index}"
-            trigger, gaps, notes = power_trigger(leader, rule, tap_policy, tap_gaps)
+            trigger, gaps, notes = power_trigger(leader, rule, tap_policy, tap_gaps, priorities[index])
             folded = index == folded_index
             if folded:
                 gaps = [gap for gap in gaps if gap != "unsupported_trigger_key"]

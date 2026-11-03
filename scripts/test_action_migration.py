@@ -67,13 +67,15 @@ class MigrationTests(unittest.TestCase):
         data = fixture()
         existing = {"id": 5, "held": [{"kind": "key", "value": 20}],
                     "activation": {"kind": "press", "value": {"kind": "key", "value": 74}},
-                    "keyboard": {"dedicated_prefix": {"kind": "key", "value": 20}, "repeat": True},
+                    "keyboard": {"dedicated_prefix": {"kind": "key", "value": 20}, "repeat": True,
+                                 "matching": {"kind": "captured", "priority": 0}},
                     "action": {"kind": "send_shortcut", "keys": [162, 65]}, "enabled": True}
         data["current"]["bindings"] = [existing]
         self.assertEqual(build_plan(**data)["bindings"][0]["equivalent_configuration_ids"], [5])
         for change in ({"enabled": False}, {"conditions": [{"kind": "example"}]},
                        {"action": {"kind": "notification"}}, {"keyboard": {"repeat": False}},
-                       {"process_scope": {"deny": ["editor"]}}):
+                       {"process_scope": {"deny": ["editor"]}},
+                       {"keyboard": {"dedicated_prefix": {"kind": "key", "value": 20}, "repeat": True}}):
             data["current"]["bindings"] = [dict(existing, **change)]
             self.assertEqual(build_plan(**data)["bindings"][0]["equivalent_configuration_ids"], [])
             self.assertEqual(build_plan(**data)["bindings"][0]["existing_trigger_ids"], [5])
@@ -86,7 +88,8 @@ class MigrationTests(unittest.TestCase):
         row = build_plan(**data)["bindings"][0]
         self.assertEqual(row["trigger_gaps"], [])
         self.assertEqual(row["trigger"]["process_scope"], {"allow": ["Code", "cursor.exe"], "deny": ["game.exe", "preview"]})
-        self.assertEqual(row["trigger"]["keyboard"], {"dedicated_prefix": {"kind": "key", "value": 20}, "repeat": True})
+        self.assertEqual(row["trigger"]["keyboard"], {"dedicated_prefix": {"kind": "key", "value": 20}, "repeat": True,
+                                                    "matching": {"kind": "captured", "priority": 0}})
         leader["KeepOriginKeyFunc"] = True
         leader["BlackList"] = "explorer"
         self.assertEqual(set(build_plan(**data)["bindings"][0]["trigger_gaps"]), {"legacy_retained_prefix_timing", "legacy_shell_window_role"})
@@ -150,7 +153,7 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(len({row["key"] for row in rows}), 3)
         self.assertEqual(len(next(row for row in result["actions"] if row["id"] == "action-a")["binding_keys"]), 3)
 
-    def test_terminal_also_used_as_adornment_requires_review_only_in_overlapping_processes(self):
+    def test_captured_terminal_preemption_is_preserved_as_a_note_instead_of_a_registration_gap(self):
         data = fixture()
         leader = data["source"]["PowerKeys"]["20"]
         leader["KeyActions"] = [
@@ -158,8 +161,10 @@ class MigrationTests(unittest.TestCase):
             {"SecondaryKey": 75, "AdornKey": 74, "BindingProcessName": "Code", "ActionType": 1, "Data": "2|66"},
         ]
         rows = build_plan(**data)["bindings"]
-        self.assertTrue(all("terminal_prefix_overlap" in row["trigger_gaps"] for row in rows))
-        self.assertTrue(all(row["status"] == "needs_trigger_support" for row in rows))
+        self.assertTrue(all(not row["trigger_gaps"] for row in rows))
+        self.assertTrue(all(any(note["kind"] == "source_terminal_preempts_capture" for note in row["source_normalizations"]) for row in rows))
+        self.assertTrue(all(row["status"] == "needs_runtime_verification" for row in rows))
+        self.assertEqual([row["trigger"]["keyboard"]["matching"]["priority"] for row in rows], [1, 0])
         leader["KeyActions"][1]["BindingProcessName"] = "viewer"
         self.assertTrue(all(row["status"] == "needs_runtime_verification" for row in build_plan(**data)["bindings"]))
 

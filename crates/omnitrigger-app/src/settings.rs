@@ -1,7 +1,7 @@
 //! 应用持久化边界。纯核心无需了解文件格式或用户目录。
 use omnitrigger_core::{
-    Activation, Button, Engine, KeyboardPolicy, MouseButton, ProcessScope, RegistrationError,
-    TriggerSpec, WheelDirection,
+    Activation, Button, Engine, KeyboardMatching, KeyboardPolicy, MouseButton, ProcessScope,
+    RegistrationError, TriggerSpec, WheelDirection,
 };
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -22,7 +22,7 @@ use crate::wheels::WheelActionRef;
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
-const CONFIG_VERSION: u32 = 11;
+const CONFIG_VERSION: u32 = 12;
 
 pub fn use_path(path: PathBuf) -> Result<(), String> {
     CUSTOM_PATH.set(path).map_err(|_| "配置路径已设置。".into())
@@ -92,6 +92,8 @@ struct BindingDto {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KeyboardPolicyDto {
+    #[serde(default, skip_serializing_if = "KeyboardMatchingDto::is_default")]
+    matching: KeyboardMatchingDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dedicated_prefix: Option<ButtonDto>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -106,11 +108,43 @@ struct KeyboardPolicyDto {
 
 impl KeyboardPolicyDto {
     fn is_default(&self) -> bool {
-        self.dedicated_prefix.is_none()
+        self.matching.is_default()
+            && self.dedicated_prefix.is_none()
             && !self.repeat
             && !self.restore_on_tap
             && self.tap_timeout_ms.is_none()
             && self.tap_scope.is_global()
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum KeyboardMatchingDto {
+    #[default]
+    Exact,
+    Captured {
+        priority: u16,
+    },
+}
+impl KeyboardMatchingDto {
+    fn is_default(&self) -> bool {
+        matches!(self, Self::Exact)
+    }
+}
+impl From<KeyboardMatching> for KeyboardMatchingDto {
+    fn from(value: KeyboardMatching) -> Self {
+        match value {
+            KeyboardMatching::Exact => Self::Exact,
+            KeyboardMatching::Captured { priority } => Self::Captured { priority },
+        }
+    }
+}
+impl From<KeyboardMatchingDto> for KeyboardMatching {
+    fn from(value: KeyboardMatchingDto) -> Self {
+        match value {
+            KeyboardMatchingDto::Exact => Self::Exact,
+            KeyboardMatchingDto::Captured { priority } => Self::Captured { priority },
+        }
     }
 }
 
@@ -201,6 +235,7 @@ impl From<&Binding> for BindingDto {
     fn from(binding: &Binding) -> Self {
         Self {
             keyboard: KeyboardPolicyDto {
+                matching: binding.spec.keyboard.matching.into(),
                 dedicated_prefix: binding.spec.keyboard.dedicated_prefix.map(Into::into),
                 repeat: binding.spec.keyboard.repeat,
                 restore_on_tap: binding.spec.keyboard.restore_on_tap,
@@ -251,6 +286,9 @@ impl From<&Binding> for BindingDto {
 
 impl BindingDto {
     fn into_binding(self, version: u32) -> Result<Binding, String> {
+        if version < 12 && !self.keyboard.matching.is_default() {
+            return Err("捕获集合匹配需要版本 12 配置。".into());
+        }
         if version < 11 && !self.keyboard.is_default() {
             return Err("专用前缀与键盘重复需要版本 11 配置。".into());
         }
@@ -310,6 +348,7 @@ impl BindingDto {
         Ok(Binding {
             spec: TriggerSpec {
                 keyboard: KeyboardPolicy {
+                    matching: self.keyboard.matching.into(),
                     dedicated_prefix: self.keyboard.dedicated_prefix.map(Into::into),
                     repeat: self.keyboard.repeat,
                     restore_on_tap: self.keyboard.restore_on_tap,
@@ -500,6 +539,11 @@ pub fn check_candidate(bindings: &[Binding], spec: &TriggerSpec) -> Result<(), C
     };
     let pick = |a: u64, b: u64| Some(if a == id { b } else { a });
     Err(match error {
+        RegistrationError::CapturedPriorityConflict { first, second } => Conflict {
+            title: "捕获规则顺序冲突",
+            detail: "同一捕获层的重叠规则使用了相同顺序编号，请在配置中明确 matching.priority。".into(),
+            other: pick(first, second),
+        },
         RegistrationError::DuplicateTrigger { first, second } => Conflict {
             title: "与已有触发范围冲突",
             detail: "组合和位置范围存在重叠；可调整区域、滚轮方向或按住组合。普通按下不能与重叠范围的同组合长按或快拖并用。".into(),
@@ -766,6 +810,7 @@ mod tests {
     fn tap_restore_policy_keeps_timeout_and_rejects_impossible_combinations() {
         let mut bindings = vec![defaults()[0].clone()];
         bindings[0].spec.keyboard = KeyboardPolicy {
+            matching: Default::default(),
             dedicated_prefix: Some(Button::Key(20)),
             restore_on_tap: true,
             tap_timeout_ms: Some(20_000),
@@ -786,6 +831,99 @@ mod tests {
         bindings[0].spec.keyboard.restore_on_tap = true;
         bindings[0].spec.keyboard.dedicated_prefix = None;
         assert!(decode(&encode(&bindings)).unwrap_err().contains("单按恢复"));
+    }
+
+    #[test]
+    fn captured_matching_round_trip_requires_v12_and_keeps_the_exact_v11_backup() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let mut document: serde_json::Value = serde_json::from_str(&encode(&defaults())).unwrap();
+        document["version"] = 11.into();
+        let original = format!(" \r\n{document}\r\n");
+        std::fs::write(&destination, &original).unwrap();
+        let mut bindings = vec![defaults()[0].clone()];
+        bindings[0].spec.keyboard = KeyboardPolicy {
+            dedicated_prefix: Some(Button::Key(20)),
+            matching: KeyboardMatching::Captured { priority: 7 },
+            repeat: true,
+            ..Default::default()
+        };
+        save_to(&destination, &bindings).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.0.join("bindings.json.v11.bak")).unwrap(),
+            original
+        );
+        let conflict = check_candidate(&bindings, &bindings[0].spec).unwrap_err();
+        assert_eq!(conflict.other, Some(bindings[0].spec.id));
+        assert_eq!(conflict.title, "捕获规则顺序冲突");
+        assert_eq!(
+            decode(&std::fs::read_to_string(&destination).unwrap()).unwrap(),
+            bindings
+        );
+        let mut saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&destination).unwrap()).unwrap();
+        assert_eq!(saved["version"], 12);
+        assert_eq!(
+            saved["bindings"][0]["keyboard"]["matching"],
+            json!({"kind":"captured","priority":7})
+        );
+        saved["version"] = 11.into();
+        assert!(decode(&saved.to_string()).unwrap_err().contains("版本 12"));
+        saved["version"] = 12.into();
+        saved["bindings"][0]["keyboard"]["matching"]["priority"] = 512.into();
+        assert!(decode(&saved.to_string()).unwrap_err().contains("捕获集合"));
+        assert_eq!(
+            decode(&std::fs::read_to_string(&destination).unwrap()).unwrap(),
+            bindings
+        );
+    }
+
+    #[test]
+    #[ignore = "读取显式指定的本机回放样本，仅执行纯核心，不安装 Hook 或运行动作"]
+    fn captured_matching_replays_external_source_witnesses() {
+        let path = std::env::var_os("OMNITRIGGER_CAPTURE_REPLAY").expect("需要指定回放样本");
+        let file = std::fs::File::open(path).unwrap();
+        assert!(file.metadata().unwrap().len() <= 32 * 1024 * 1024);
+        let document: serde_json::Value = serde_json::from_reader(file).unwrap();
+        let bindings = decode(&document["config"].to_string()).unwrap();
+        assert!(bindings.iter().all(|binding| !binding.enabled));
+        let mut engine =
+            Engine::new(bindings.into_iter().map(|binding| binding.spec).collect()).unwrap();
+        let cases = document["cases"].as_array().unwrap();
+        assert!(!cases.is_empty() && cases.len() <= 100_000);
+        for (case_index, case) in cases.iter().enumerate() {
+            engine
+                .set_foreground_process(case["process"].as_str())
+                .unwrap();
+            let steps = case["steps"].as_array().unwrap();
+            assert!(!steps.is_empty() && steps.len() <= 32);
+            for (step_index, step) in steps.iter().enumerate() {
+                let key = Button::Key(u16::try_from(step["key"].as_u64().unwrap()).unwrap());
+                let kind = if step["down"].as_bool().unwrap() {
+                    omnitrigger_core::InputKind::Down(key)
+                } else {
+                    omnitrigger_core::InputKind::Up(key)
+                };
+                let decision = engine.process(omnitrigger_core::InputEvent {
+                    kind,
+                    injected: false,
+                });
+                let expected: Vec<u64> = serde_json::from_value(step["triggered"].clone()).unwrap();
+                assert_eq!(
+                    decision.triggered, expected,
+                    "case={case_index} step={step_index}"
+                );
+                assert!(
+                    decision.replay.is_empty(),
+                    "case={case_index} step={step_index}"
+                );
+            }
+        }
+        println!(
+            "捕获集合回放通过：{} 规则、{} 组序列；没有安装 Hook 或执行动作。",
+            document["config"]["bindings"].as_array().unwrap().len(),
+            cases.len()
+        );
     }
 
     #[test]

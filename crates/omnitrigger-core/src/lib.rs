@@ -41,7 +41,7 @@ mod registration;
 pub use engine::Engine;
 pub use model::{
     Activation, ActiveDrag, Axis, Button, Decision, DragEvent, DragPhase, InputEvent, InputKind,
-    KeyboardPolicy, MouseButton, TriggerSpec, WheelDirection,
+    KeyboardMatching, KeyboardPolicy, MouseButton, TriggerSpec, WheelDirection,
 };
 pub use process_scope::{ProcessScope, ProcessScopeError};
 pub use recorder::Recorder;
@@ -56,6 +56,9 @@ mod prefix_tests;
 
 #[cfg(test)]
 mod terminal_role_tests;
+
+#[cfg(test)]
+mod captured_matching_tests;
 
 #[cfg(test)]
 mod keyboard_policy_tests;

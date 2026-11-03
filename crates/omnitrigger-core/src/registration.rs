@@ -12,6 +12,13 @@ pub const MAX_BINDINGS: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistrationError {
+    InvalidCapturedMatching {
+        id: u64,
+    },
+    CapturedPriorityConflict {
+        first: u64,
+        second: u64,
+    },
     InvalidDedicatedPrefix {
         id: u64,
         button: Button,
@@ -94,6 +101,12 @@ pub enum RegistrationError {
 impl fmt::Display for RegistrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::InvalidCapturedMatching { .. } => {
+                "捕获集合仅支持专用键盘层的按键触发，最多一个附加键，顺序编号须小于 512。"
+            }
+            Self::CapturedPriorityConflict { .. } => {
+                "同一捕获层的重叠规则使用了相同顺序编号，请明确选择顺序。"
+            }
             Self::InvalidDedicatedPrefix { .. } => {
                 "专用前缀必须是当前组合中按住的明确键盘键，不能使用鼠标键或泛型修饰键。"
             }
@@ -147,6 +160,18 @@ pub(super) fn validate(
     }
     let mut ids = BTreeSet::new();
     for binding in &mut bindings {
+        if binding.keyboard.matching.is_captured()
+            && (binding.keyboard.dedicated_prefix.is_none()
+                || binding.held.len() > 2
+                || binding
+                    .held
+                    .iter()
+                    .any(|button| !matches!(button, Button::Key(_)))
+                || !matches!(binding.activation, Activation::Press(Button::Key(_)))
+                || usize::from(binding.keyboard.matching.priority()) >= MAX_BINDINGS)
+        {
+            return Err(RegistrationError::InvalidCapturedMatching { id: binding.id });
+        }
         if let Some(button) = binding.keyboard.dedicated_prefix
             && (!matches!(button, Button::Key(key) if (1..=254).contains(&key) && !matches!(key, 0x10..=0x12))
                 || !binding.held.contains(&button))
@@ -280,11 +305,28 @@ pub(super) fn validate(
             }
             let same_button = activation_button(left.activation)
                 .is_some_and(|button| Some(button) == activation_button(right.activation));
+            let captured_pair = left.keyboard.matching.is_captured()
+                && right.keyboard.matching.is_captured()
+                && left.keyboard.dedicated_prefix == right.keyboard.dedicated_prefix;
+            if captured_pair
+                && same_button
+                && left.keyboard.matching.priority() == right.keyboard.matching.priority()
+                && left.process_scope.priority() == right.process_scope.priority()
+                && left.process_scope.overlaps(&right.process_scope)
+                && regions::conditions_overlap(&left.conditions, &right.conditions)
+            {
+                return Err(RegistrationError::CapturedPriorityConflict {
+                    first: left.id,
+                    second: right.id,
+                });
+            }
             if left.held == right.held
                 && (left.activation == right.activation || same_button)
                 && regions::conditions_overlap(&left.conditions, &right.conditions)
                 && left.process_scope.overlaps(&right.process_scope)
                 && left.process_scope.priority() == right.process_scope.priority()
+                && !(captured_pair
+                    && left.keyboard.matching.priority() != right.keyboard.matching.priority())
             {
                 let timed = match (left.activation, right.activation) {
                     (
@@ -319,6 +361,9 @@ pub(super) fn validate(
         if let Some(button) = activation_button(left.activation)
             && let Some(prefix) = bindings.iter().find(|other| {
                 other.held.contains(&button)
+                    && !(left.keyboard.matching.is_captured()
+                        && other.keyboard.matching.is_captured()
+                        && left.keyboard.dedicated_prefix == other.keyboard.dedicated_prefix)
                     && left.held.iter().all(|held| other.held.contains(held))
                     && regions::conditions_overlap(&left.conditions, &other.conditions)
                     && left.process_scope.overlaps(&other.process_scope)

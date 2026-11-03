@@ -98,9 +98,11 @@ pub struct TriggerSpec {
 /// 只影响物理键盘输入；缺省保留既有回退和单次触发行为。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct KeyboardPolicy {
+    /// 默认精确按下集合；捕获模式仅供显式专用键盘层使用。
+    pub matching: KeyboardMatching,
     /// 专用层的键必须在 held 中。层内未匹配的键盘按压不回放，鼠标输入仍按各自规则处理。
     pub dedicated_prefix: Option<Button>,
-    /// 仅普通键盘 Press 可用；重复事件只重复本次按压最初匹配的动作。
+    /// 仅普通键盘 Press 可用；精确模式重复原动作，捕获模式按当前捕获集合重新选择。
     pub repeat: bool,
     /// 独立按下且没有其他键盘输入或匹配动作时，松开后补发自身的一次点击。
     pub restore_on_tap: bool,
@@ -113,9 +115,31 @@ pub struct KeyboardPolicy {
 impl KeyboardPolicy {
     pub(crate) fn same_layer(&self, other: &Self) -> bool {
         self.dedicated_prefix == other.dedicated_prefix
+            && self.matching.is_captured() == other.matching.is_captured()
             && self.restore_on_tap == other.restore_on_tap
             && self.tap_timeout_ms == other.tap_timeout_ms
             && self.tap_scope == other.tap_scope
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum KeyboardMatching {
+    #[default]
+    Exact,
+    /// 按已捕获附加键匹配；同应用优先级内，数值越小越先选。
+    Captured { priority: u16 },
+}
+
+impl KeyboardMatching {
+    pub fn is_captured(self) -> bool {
+        matches!(self, Self::Captured { .. })
+    }
+
+    pub(crate) fn priority(self) -> u16 {
+        match self {
+            Self::Exact => 0,
+            Self::Captured { priority } => priority,
+        }
     }
 }
 

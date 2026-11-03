@@ -5757,9 +5757,31 @@ fn smoke_test() -> Result<(), String> {
         contextual.spec.activation = Activation::Press(Button::Key(terminal));
         bindings.push(contextual);
     }
+    for (priority, held) in [
+        vec![Button::Key(135), Button::Key(69)],
+        vec![Button::Key(135)],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut captured = bindings[0].clone();
+        captured.spec.id = settings::next_id(&bindings);
+        captured.spec.held = held;
+        captured.spec.activation = Activation::Press(Button::Key(80));
+        captured.spec.keyboard = omnitrigger_core::KeyboardPolicy {
+            dedicated_prefix: Some(Button::Key(135)),
+            matching: omnitrigger_core::KeyboardMatching::Captured {
+                priority: priority as u16,
+            },
+            repeat: true,
+            ..Default::default()
+        };
+        bindings.push(captured);
+    }
     for binding in &mut bindings {
         if binding.spec.held.contains(&Button::Key(20)) {
             binding.spec.keyboard = omnitrigger_core::KeyboardPolicy {
+                matching: Default::default(),
                 dedicated_prefix: Some(Button::Key(20)),
                 repeat: true,
                 restore_on_tap: true,
@@ -5799,7 +5821,7 @@ fn smoke_test() -> Result<(), String> {
     }
     backend.send(BackendCommand::SetEnabled(false))?;
     drop(backend);
-    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; scoped/dedicated/repeat/contextual-terminal registrations valid; foreground process resolved outside hooks.");
+    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; scoped/dedicated/repeat/contextual-terminal/captured registrations valid; foreground process resolved outside hooks.");
     Ok(())
 }
 

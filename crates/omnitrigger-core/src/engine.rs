@@ -48,12 +48,13 @@ struct PendingTapRestore {
     deadline_ms: Option<u64>,
 }
 
-/// 每个组合要求当前按下集合与 held 完全一致；多余按键不会被静默忽略。
+/// 默认组合要求当前按下集合与 held 完全一致；捕获集合模式须显式启用。
 pub struct Engine {
     bindings: Vec<TriggerSpec>,
     pressed: BTreeMap<Button, PressState>,
     /// 一次物理按压在认领为末键后，直到释放都不能借给其他组合作前缀。
     terminal_presses: BTreeSet<Button>,
+    captured_presses: BTreeMap<Button, usize>,
     pending: Vec<InputKind>,
     wheel: [i64; 4],
     wheel_owner: [Option<u64>; 4],
@@ -83,6 +84,7 @@ impl Engine {
             bindings: validate(bindings)?,
             pressed: BTreeMap::new(),
             terminal_presses: BTreeSet::new(),
+            captured_presses: BTreeMap::new(),
             pending: Vec::new(),
             wheel: [0; 4],
             wheel_owner: [None; 4],
@@ -160,8 +162,14 @@ impl Engine {
                 binding.process_scope.is_global()
                     && self.bindings.iter().any(|other| {
                         other.process_scope.priority() > 0
-                            && other.held == binding.held
-                            && same_activation_family(other.activation, binding.activation)
+                            && (if binding.keyboard.matching.is_captured() {
+                                other.keyboard.matching.is_captured()
+                                    && binding.keyboard.dedicated_prefix
+                                        == other.keyboard.dedicated_prefix
+                            } else {
+                                other.held == binding.held
+                                    && same_activation_family(other.activation, binding.activation)
+                            })
                     })
             })
             .collect();
@@ -189,8 +197,13 @@ impl Engine {
                     .then_some(index)
             })
             .collect();
-        self.active_bindings
-            .sort_by_key(|&index| std::cmp::Reverse(self.bindings[index].process_scope.priority()));
+        self.active_bindings.sort_by_key(|&index| {
+            let binding = &self.bindings[index];
+            (
+                std::cmp::Reverse(binding.process_scope.priority()),
+                binding.keyboard.matching.priority(),
+            )
+        });
     }
 
     fn candidates(&self) -> impl Iterator<Item = &TriggerSpec> {
@@ -225,6 +238,7 @@ impl Engine {
         self.layer_owner = None;
         self.repeat_owner.clear();
         self.terminal_presses.clear();
+        self.captured_presses.clear();
         self.tap_restore = None;
         self.pending.clear();
         self.prefix_origin = None;
@@ -446,7 +460,7 @@ impl Engine {
             .candidates()
             .find(|binding| {
                 same_activation_family(binding.activation, Activation::Press(button))
-                    && self.held_matches(&binding.held)
+                    && self.binding_held_matches(binding)
                     && self.conditions_match(binding)
             })
             .map(|binding| binding.process_scope.priority());
@@ -455,7 +469,7 @@ impl Engine {
             .find(|binding| {
                 binding.activation == Activation::Press(button)
                     && Some(binding.process_scope.priority()) == priority
-                    && self.held_matches(&binding.held)
+                    && self.binding_held_matches(binding)
                     && self.conditions_match(binding)
             })
             .map(|binding| (binding.id, binding.keyboard.repeat));
@@ -480,7 +494,7 @@ impl Engine {
                     duration_ms,
                 } if terminal == button
                     && Some(binding.process_scope.priority()) == priority
-                    && self.held_matches(&binding.held)
+                    && self.binding_held_matches(binding)
                     && self.conditions_match(binding) =>
                 {
                     Some((binding.id, duration_ms))
@@ -496,7 +510,7 @@ impl Engine {
                     max_start_ms,
                 } if terminal == button
                     && Some(binding.process_scope.priority()) == priority
-                    && self.held_matches(&binding.held)
+                    && self.binding_held_matches(binding)
                     && self.conditions_match(binding) =>
                 {
                     Some((binding.id, min_distance_px, max_start_ms))
@@ -547,15 +561,19 @@ impl Engine {
                         | PressState::Observed
                 )
             });
-        let extends_prefix = eligible
-            && self.candidates().any(|binding| {
-                binding.held.contains(&button)
-                    && self.conditions_match(binding)
-                    && self
-                        .pressed
-                        .keys()
-                        .all(|pressed| binding.held.contains(pressed))
-            });
+        let extends_prefix = if self.captured_layer().is_some() {
+            self.captured_extension(button).is_some()
+        } else {
+            eligible
+                && self.candidates().any(|binding| {
+                    binding.held.contains(&button)
+                        && self.conditions_match(binding)
+                        && self
+                            .pressed
+                            .keys()
+                            .all(|pressed| binding.held.contains(pressed))
+                })
+        };
         if extends_prefix && button == PRIMARY {
             // 只记录为前缀，按下照常交给应用；其他等待中的前缀保持不变。
             self.wheel = [0; 4];
@@ -588,6 +606,9 @@ impl Engine {
                 }
             }
             if self.dedicated_leader.is_some() && matches!(button, Button::Key(_)) {
+                if let Some(index) = self.captured_extension(button) {
+                    self.captured_presses.insert(button, index);
+                }
                 self.pressed.insert(button, PressState::Consumed);
             } else {
                 self.pressed.insert(button, PressState::Pending);
@@ -626,12 +647,14 @@ impl Engine {
     fn up(&mut self, button: Button) -> Decision {
         self.repeat_owner.remove(&button);
         self.terminal_presses.remove(&button);
+        self.captured_presses.remove(&button);
         let leaving_layer = self.dedicated_leader == Some(button);
         let restore_tap = leaving_layer && self.tap_restore.is_some_and(|tap| tap.button == button);
         if leaving_layer {
             self.dedicated_leader = None;
             self.layer_owner = None;
             self.repeat_owner.clear();
+            self.captured_presses.clear();
             self.tap_restore = None;
         }
         let drag = if self.pressed.contains_key(&button) {
@@ -700,7 +723,7 @@ impl Engine {
             .candidates()
             .find(|binding| {
                 binding.activation == Activation::Wheel(direction)
-                    && self.held_matches(&binding.held)
+                    && self.binding_held_matches(binding)
                     && self.conditions_match(binding)
             })
             .map(|binding| binding.id)
@@ -751,23 +774,39 @@ impl Engine {
     }
 
     fn repeated_action(&self, button: Button) -> Option<u64> {
+        if self.captured_layer().is_some_and(|leader| leader != button) {
+            // 捕获模式每次重复都按当前捕获集合重新选择，已捕获附加键不会因重复丢失角色。
+            return self
+                .candidates()
+                .find(|binding| {
+                    binding.activation == Activation::Press(button)
+                        && self.binding_held_matches(binding)
+                        && self.conditions_match(binding)
+                })
+                .filter(|binding| binding.keyboard.repeat)
+                .map(|binding| binding.id);
+        }
         let id = *self.repeat_owner.get(&button)?;
         self.candidates()
             .find(|binding| {
                 binding.id == id
                     && self.conditions_match(binding)
-                    && self.pressed.len() == binding.held.len() + 1
-                    && self.pressed.iter().all(|(&pressed, &state)| {
-                        pressed == button
-                            || (binding.held.contains(&pressed)
-                                && !self.terminal_presses.contains(&pressed)
-                                && matches!(
-                                    state,
-                                    PressState::Pending
-                                        | PressState::PendingSuppressed
-                                        | PressState::Consumed
-                                        | PressState::Observed
-                                ))
+                    && (if binding.keyboard.matching.is_captured() {
+                        self.binding_held_matches(binding)
+                    } else {
+                        self.pressed.len() == binding.held.len() + 1
+                            && self.pressed.iter().all(|(&pressed, &state)| {
+                                pressed == button
+                                    || (binding.held.contains(&pressed)
+                                        && !self.terminal_presses.contains(&pressed)
+                                        && matches!(
+                                            state,
+                                            PressState::Pending
+                                                | PressState::PendingSuppressed
+                                                | PressState::Consumed
+                                                | PressState::Observed
+                                        ))
+                            })
                     })
             })
             .map(|binding| binding.id)
@@ -785,6 +824,42 @@ impl Engine {
                 ) && held.contains(button)
                     && !self.terminal_presses.contains(button)
             })
+    }
+
+    fn captured_layer(&self) -> Option<Button> {
+        self.dedicated_leader.filter(|_| {
+            self.layer_owner
+                .is_some_and(|index| self.bindings[index].keyboard.matching.is_captured())
+        })
+    }
+
+    fn captured_extension(&self, button: Button) -> Option<usize> {
+        let leader = self.captured_layer()?;
+        if button == leader {
+            return None;
+        }
+        self.active_bindings.iter().copied().find(|&index| {
+            let binding = &self.bindings[index];
+            binding.keyboard.matching.is_captured()
+                && binding.keyboard.dedicated_prefix == Some(leader)
+                && binding.held.contains(&button)
+                && self.conditions_match(binding)
+        })
+    }
+
+    fn binding_held_matches(&self, binding: &TriggerSpec) -> bool {
+        if !binding.keyboard.matching.is_captured() {
+            return self.held_matches(&binding.held);
+        }
+        let Some(leader) = self.captured_layer() else {
+            return false;
+        };
+        binding.keyboard.dedicated_prefix == Some(leader)
+            && self.pressed.get(&leader) == Some(&PressState::Consumed)
+            && binding
+                .held
+                .iter()
+                .all(|key| *key == leader || self.captured_presses.contains_key(key))
     }
 
     fn conditions_match(&self, binding: &TriggerSpec) -> bool {
@@ -808,6 +883,19 @@ impl Engine {
     }
 
     fn reconcile_conditions(&mut self) -> Decision {
+        let lost_captures = self
+            .captured_presses
+            .iter()
+            .filter_map(|(&key, &index)| {
+                (!self.conditions_match(&self.bindings[index])).then_some(key)
+            })
+            .collect::<Vec<_>>();
+        for key in lost_captures {
+            self.captured_presses.remove(&key);
+            if let Some(state) = self.pressed.get_mut(&key) {
+                *state = PressState::Draining;
+            }
+        }
         if self.dedicated_leader.is_some_and(|button| {
             self.layer_owner
                 .zip(self.dedicated_index(button))
