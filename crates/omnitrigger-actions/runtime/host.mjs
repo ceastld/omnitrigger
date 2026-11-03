@@ -10,7 +10,13 @@ const children = new Set();
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 let request;
 let replied = false;
-const fault = (code, message) => Object.assign(new Error(message), { code });
+let browserClient;
+let browserConnection;
+let browserDeadline;
+const browserPending = new Set();
+const fault = (code, message) => Object.assign(new Error(message), { code,
+  ...(['cancelled', 'timeout'].includes(code) ? {effectState:'unknown'} : {}),
+});
 const stop = (reason) => {
   if (!controller.signal.aborted) controller.abort(reason);
   for (const child of children) child.kill();
@@ -39,6 +45,64 @@ const initial = new Promise((resolve, reject) => {
 function checkCancelled() {
   if (controller.signal.aborted) throw controller.signal.reason;
 }
+
+function browserOptions(options) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)
+      || Object.keys(options).some(key => !['profile', 'timeoutMs'].includes(key))
+      || (options.profile !== undefined && (typeof options.profile !== 'string' || !options.profile || options.profile.length > 128))
+      || (options.timeoutMs !== undefined && (!Number.isInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 60_000))) {
+    throw fault('invalid_input', '浏览器选项仅支持 profile 和 1–60000 毫秒的 timeoutMs。');
+  }
+  return { ...options, timeoutMs: Math.max(1, Math.min(options.timeoutMs ?? 10_000, browserDeadline - Date.now())), signal: controller.signal };
+}
+
+async function connectedBrowser() {
+  checkCancelled();
+  if (!request.browser) throw Object.assign(fault('browser_unavailable', '请先安装并启动浏览器连接器。'), { effectState: 'not_started' });
+  if (!browserConnection) {
+    browserConnection = (async () => {
+      const { connect } = await import(pathToFileURL(request.browser.sdk_path).href);
+      checkCancelled();
+      const client = await connect({ configPath: request.browser.config_path,
+        connectTimeoutMs: Math.max(1, Math.min(5000, browserDeadline - Date.now())) });
+      browserClient = client;
+      if (controller.signal.aborted) { client.close(); checkCancelled(); }
+      return client;
+    })();
+  }
+  return browserConnection;
+}
+
+function browserRequest(method, args, options = {}, profiles = false) {
+  if (browserPending.size >= 8) return Promise.reject(Object.assign(fault('busy', '单次动作最多同时等待 8 个浏览器调用。'), {effectState:'not_started'}));
+  const operation = (async () => {
+    checkCancelled();
+    browserOptions(options);
+    const client = await connectedBrowser();
+    checkCancelled();
+    return profiles ? client.profiles(browserOptions(options)) : client.call(method, args, browserOptions(options));
+  })();
+  browserPending.add(operation);
+  // 不替脚本吞掉错误；同时收尾未 await 的 Promise，避免进程外泄漏。
+  operation.then(() => browserPending.delete(operation), () => browserPending.delete(operation));
+  return operation;
+}
+
+function chromeProxy(parts = []) {
+  return new Proxy(function () {}, {
+    get(_target, name) {
+      if (name === 'then' || name === 'toJSON' || typeof name !== 'string') return undefined;
+      return chromeProxy([...parts, name]);
+    },
+    apply(_target, _this, args) { return browserRequest(parts.join('.'), args); },
+  });
+}
+
+const browser = Object.freeze({
+  profiles: (options = {}) => browserRequest(undefined, undefined, options, true),
+  call: (method, args = [], options = {}) => browserRequest(method, args, options),
+  chrome: chromeProxy(),
+});
 
 function delay(milliseconds) {
   checkCancelled();
@@ -150,6 +214,7 @@ try {
     throw fault('invalid_request', '不支持的动作宿主请求。');
   }
   timer = setTimeout(() => stop(fault('timeout', '动作超过运行时限；不会自动重试。')), request.timeout_ms);
+  browserDeadline = Date.now() + request.timeout_ms;
   checkCancelled();
   const module = await import(pathToFileURL(request.entry_path).href);
   if (typeof module.default !== 'function') throw fault('invalid_entry', '动作入口必须 default 导出一个函数。');
@@ -159,6 +224,7 @@ try {
     invocation: Object.freeze(request.invocation),
     packageRoot: request.package_root,
     process: Object.freeze({ run, start }),
+    browser,
     delay,
     signal: controller.signal,
   });
@@ -169,17 +235,22 @@ try {
   const output = await Promise.race([module.default(ctx), cancelled]);
   checkCancelled();
   if (children.size) throw fault('pending_processes', '动作返回时仍有未等待的 ctx.process.run 调用；请使用 await。');
+  if (browserPending.size) throw fault('pending_browser_calls', '动作返回时仍有未等待的浏览器调用；请使用 await。');
   respond({ status: 'ok', output: output ?? null });
 } catch (error) {
   if (request?.response_path && request?.invocation) {
     respond({ status: 'error', error: {
       code: typeof error?.code === 'string' && /^[a-zA-Z0-9_]{1,64}$/.test(error.code) ? error.code : 'script_failed',
       message: String(error?.message ?? error).slice(0, 4096),
+      ...(typeof error?.effectState === 'string' ? { effect_state: error.effectState } : {}),
+      ...(typeof error?.method === 'string' ? { method: error.method } : {}),
+      ...(Array.isArray(error?.requiredPermissions) ? { required_permissions: error.requiredPermissions } : {}),
     } });
   } else process.exitCode = 1;
 } finally {
   clearTimeout(timer);
   stop(fault('cancelled', '动作宿主已结束。'));
+  browserClient?.close();
   lines.close();
   // An action cannot keep this per-invocation host alive with stray timers/handles.
   process.exit(process.exitCode ?? 0);

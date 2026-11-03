@@ -1,0 +1,6 @@
+{
+  "package_id": "examples.browser-summary",
+  "action_id": "summarize",
+  "action_version": 1,
+  "input": {}
+}

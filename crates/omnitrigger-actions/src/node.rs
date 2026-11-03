@@ -25,6 +25,7 @@ static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 pub struct NodeRuntime {
     program: PathBuf,
     timeout: Duration,
+    browser_connector: Option<PathBuf>,
 }
 
 impl NodeRuntime {
@@ -32,7 +33,14 @@ impl NodeRuntime {
         Self {
             program: program.into(),
             timeout: Duration::from_secs(60),
+            browser_connector: None,
         }
+    }
+
+    /// 由应用提供固定版本连接器目录；仅执行时核验，非浏览器动作无需安装连接器。
+    pub fn with_browser_connector(mut self, directory: PathBuf) -> Self {
+        self.browser_connector = Some(directory);
+        self
     }
 }
 
@@ -66,6 +74,7 @@ impl ActionRuntime for NodeRuntime {
             "entry_path": entry,
             "response_path": scratch.response(),
             "timeout_ms": self.timeout.as_millis(),
+            "browser": self.browser_connector.as_deref().and_then(browser_configuration),
         });
         let mut bytes = serde_json::to_vec(&request)
             .map_err(|error| ActionError::new("invalid_request", error.to_string()))?;
@@ -78,6 +87,7 @@ impl ActionRuntime for NodeRuntime {
             .args(["--input-type=module", "--eval", HOST])
             .current_dir(&root)
             .env_remove("NODE_OPTIONS")
+            .env_remove("OMNITRIGGER_BROWSER_PIPE")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -129,10 +139,10 @@ impl ActionRuntime for NodeRuntime {
                 let reason = if cancellation.is_cancelled() {
                     Some(cancelled())
                 } else if began.elapsed() >= self.timeout {
-                    Some(ActionError::new(
-                        "timeout",
-                        "动作超过 60 秒运行时限；不会自动重试。",
-                    ))
+                    let mut error =
+                        ActionError::new("timeout", "动作超过 60 秒运行时限；不会自动重试。");
+                    error.effect_state = Some("unknown".into());
+                    Some(error)
                 } else {
                     None
                 };
@@ -190,7 +200,30 @@ impl ActionRuntime for NodeRuntime {
 }
 
 fn cancelled() -> ActionError {
-    ActionError::new("cancelled", "动作已取消；已经完成的操作不会撤销。")
+    let mut error = ActionError::new("cancelled", "动作已取消；已经完成的操作不会撤销。");
+    error.effect_state = Some("unknown".into());
+    error
+}
+
+fn browser_configuration(directory: &Path) -> Option<Value> {
+    let directory = std::path::absolute(directory).ok()?;
+    let sdk = directory.join("sdk-js").join("index.mjs");
+    let config = directory.join("connection.json");
+    for file in [
+        &sdk,
+        &config,
+        &directory.join("sdk-js").join("protocol.mjs"),
+    ] {
+        for ancestor in file.ancestors() {
+            if restricted(&fs::symlink_metadata(ancestor).ok()?) {
+                return None;
+            }
+        }
+        if !file.is_file() {
+            return None;
+        }
+    }
+    Some(json!({"sdk_path": sdk, "config_path": config}))
 }
 
 fn checked_entry(action: &ResolvedAction) -> Result<(PathBuf, PathBuf), ActionError> {
@@ -440,7 +473,191 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_file(self.directory.0.join("main.mjs"));
+            for file in ["sdk-js/index.mjs", "sdk-js/protocol.mjs", "connection.json"] {
+                let _ = fs::remove_file(self.directory.0.join(file));
+            }
+            let _ = fs::remove_dir(self.directory.0.join("sdk-js"));
         }
+    }
+
+    fn browser_runtime(fixture: &Fixture, sdk: &str) -> NodeRuntime {
+        let root = &fixture.action.package_root;
+        fs::create_dir(root.join("sdk-js")).unwrap();
+        fs::write(root.join("sdk-js/index.mjs"), sdk).unwrap();
+        fs::write(root.join("sdk-js/protocol.mjs"), "").unwrap();
+        fs::write(root.join("connection.json"), "{}").unwrap();
+        NodeRuntime::default().with_browser_connector(root.clone())
+    }
+
+    #[test]
+    fn browser_host_reuses_client_preserves_values_and_structured_errors() {
+        if !node_available() {
+            return;
+        }
+        let fixture = Fixture::new(
+            r#"export default async ctx => {
+            const profiles = await ctx.browser.profiles();
+            const value = await ctx.browser.chrome.bookmarks.getTree();
+            const nothing = await ctx.browser.call('tabs.remove', [1], {profile:'test', timeoutMs:100});
+            return { profiles, value, undefinedResult: nothing === undefined };
+        }"#,
+            json!({}),
+        );
+        let runtime = browser_runtime(
+            &fixture,
+            r#"
+            let connections = 0;
+            export async function connect() {
+                if (++connections !== 1) throw Error('must reuse connection');
+                return { profiles: async () => [{browser_instance_id:'test'}], close() {},
+                    async call(method, args, options) {
+                        if (!options.signal || options.timeoutMs > 10000) throw Error('missing bounds');
+                        if (method === 'bookmarks.getTree') return [{id:'0', title:'中文'}];
+                        if (args[0] !== 1 || options.profile !== 'test') throw Error('argument mismatch');
+                    } };
+            }
+        "#,
+        );
+        let result = runtime
+            .execute(&fixture.action, &context(), &CancellationToken::new())
+            .unwrap();
+        assert_eq!(result["value"][0]["title"], "中文");
+        assert_eq!(result["undefinedResult"], true);
+
+        fs::write(
+            &fixture.action.entry_path,
+            "export default async ctx => ctx.browser.call('sessions.restore')",
+        )
+        .unwrap();
+        fs::write(
+            fixture.action.package_root.join("sdk-js/index.mjs"),
+            r#"
+            export async function connect() { return { close() {}, async call(method) {
+                throw Object.assign(Error('需要会话权限'), {code:'permission_required', method,
+                    effectState:'not_started', requiredPermissions:['sessions']});
+            } }; }
+        "#,
+        )
+        .unwrap();
+        let error = runtime
+            .execute(&fixture.action, &context(), &CancellationToken::new())
+            .unwrap_err();
+        assert_eq!(error.code, "permission_required");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        assert_eq!(error.method.as_deref(), Some("sessions.restore"));
+        assert_eq!(error.required_permissions, ["sessions"]);
+    }
+
+    #[test]
+    fn browser_host_reports_missing_connector_and_rejects_unawaited_calls() {
+        if !node_available() {
+            return;
+        }
+        let fixture = Fixture::new(
+            "export default async ctx => ctx.browser.profiles()",
+            json!({}),
+        );
+        let error = fixture.run().unwrap_err();
+        assert_eq!(error.code, "browser_unavailable");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        let runtime = browser_runtime(&fixture, "export async function connect() { return { close() {}, call: async () => new Promise(() => {}) }; }");
+        fs::write(
+            &fixture.action.entry_path,
+            "export default ctx => { ctx.browser.call('tabs.create', [{}]); return {}; }",
+        )
+        .unwrap();
+        assert_eq!(
+            runtime
+                .execute(&fixture.action, &context(), &CancellationToken::new())
+                .unwrap_err()
+                .code,
+            "pending_browser_calls"
+        );
+        fs::write(
+            &fixture.action.entry_path,
+            "export default async ctx => ctx.browser.call('tabs.query', [], {timeoutMs:0})",
+        )
+        .unwrap();
+        assert_eq!(
+            runtime
+                .execute(&fixture.action, &context(), &CancellationToken::new())
+                .unwrap_err()
+                .code,
+            "invalid_input"
+        );
+    }
+
+    #[test]
+    fn browser_host_bounds_calls_before_connection_is_ready() {
+        if !node_available() {
+            return;
+        }
+        let fixture = Fixture::new(
+            r#"export default async ctx => {
+                const results = await Promise.allSettled(Array.from({length:9}, () => ctx.browser.call('tabs.query', [])));
+                return results.map(result => result.status === 'fulfilled' ? result.value : {code:result.reason.code, effectState:result.reason.effectState});
+            }"#,
+            json!({}),
+        );
+        let runtime = browser_runtime(
+            &fixture,
+            r#"
+            export async function connect() {
+                await new Promise(resolve => setTimeout(resolve, 30));
+                let calls = 0;
+                return {close() {}, async call() {return ++calls;}};
+            }
+        "#,
+        );
+        let output = runtime
+            .execute(&fixture.action, &context(), &CancellationToken::new())
+            .unwrap();
+        assert_eq!(output[7], 8);
+        assert_eq!(
+            output[8],
+            json!({"code":"busy","effectState":"not_started"})
+        );
+    }
+
+    #[test]
+    fn browser_host_timeout_and_cancellation_bound_connection_and_calls() {
+        if !node_available() {
+            return;
+        }
+        let fixture = Fixture::new(
+            "export default async ctx => ctx.browser.call('tabs.query', [])",
+            json!({}),
+        );
+        let mut runtime = browser_runtime(&fixture, "export async function connect() { return {close() {}, call: async () => new Promise(() => {})}; }");
+        runtime.timeout = Duration::from_millis(250);
+        let began = Instant::now();
+        assert_eq!(
+            runtime
+                .execute(&fixture.action, &context(), &CancellationToken::new())
+                .unwrap_err()
+                .code,
+            "timeout"
+        );
+        assert!(began.elapsed() < Duration::from_secs(5));
+        fs::write(
+            fixture.action.package_root.join("sdk-js/index.mjs"),
+            "export async function connect() { return new Promise(() => {}); }",
+        )
+        .unwrap();
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        let cancelling = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            cancel.cancel();
+        });
+        assert_eq!(
+            runtime
+                .execute(&fixture.action, &context(), &token)
+                .unwrap_err()
+                .code,
+            "cancelled"
+        );
+        cancelling.join().unwrap();
     }
     fn context() -> InvocationContext {
         InvocationContext {
@@ -522,6 +739,7 @@ mod tests {
         let runtime = NodeRuntime {
             program: "node".into(),
             timeout: Duration::from_millis(100),
+            browser_connector: None,
         };
         assert_eq!(
             runtime

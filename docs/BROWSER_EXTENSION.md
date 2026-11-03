@@ -1,6 +1,6 @@
 # Chrome API 桥接扩展设计
 
-状态：独立 Windows 开发原型与 OmniTrigger 可选插件安装入口已实现，工程名为 `omnitrigger-browser`。已有 MV3 扩展、Rust Native Host 与桥接服务、CLI、Rust 客户端及 JS Proxy，主程序动作库已接入常用浏览器动作和通用 API 调用。已在隔离 Chrome 155 中验证真实书签读取、并发、错误及约 760 KiB 的 Unicode 结果传输；本轮新增动作、SDK 组合操作和可选权限有模拟回归测试，尚未逐项完成真实 Chrome 验证。尚未提供事件订阅、callback-only 适配、书签增量索引或 `ctx.browser` 宿主接口。
+状态：独立 Windows 开发原型与 OmniTrigger 可选插件安装入口已实现，工程名为 `omnitrigger-browser`。已有 MV3 扩展、Rust Native Host 与桥接服务、CLI、Rust 客户端及 JS Proxy，主程序动作库已接入常用浏览器动作和通用 API 调用，Node 动作宿主提供 `ctx.browser`。已在隔离 Chrome 156 和已安装 v0.1.0 SDK 中验证书签读取、标签页和窗口操作、错误、派发前取消及约 1 MiB Unicode 结果在脚本内处理。新版可选权限和 SDK 组合操作仍仅有模拟回归测试。尚未提供事件订阅、callback-only 适配或书签增量索引。
 
 下文同时描述后续目标设计，已实现范围以上述原型为准。首要交付是本地与 Chrome 扩展之间的持久连接及通用 `chrome.*` API 调用转发；完整书签读取是首个端到端验收场景。
 
@@ -211,15 +211,35 @@ dispatcher、编解码器与适配元数据随扩展打包；本地只发送结�
 
 | 接入位置 | 设计 |
 | --- | --- |
-| Rust 应用层 | 使用共享 `BrowserClient` 发起 API 调用和订阅；不把浏览器 API 加入输入核心。 |
+| Rust 应用层 | 使用共享 `BrowserClient` 发起 API 调用；不把浏览器 API 加入输入核心。 |
 | 独立 CLI | 先提供通用 `call <method> <args-json>` 与 profile 选择，直接输出完整 JSON，用于端到端诊断。 |
-| JS SDK | 提供 `call`、`subscribe` 和 `chrome.*` Proxy，通过独立 IPC 复用 bridge。 |
-| JS 动作宿主 | 后续增加 `ctx.browser`，由初始请求提供 broker 地址和调用凭据，使用独立 IPC。 |
+| JS SDK | 提供 `call`、`profiles` 和 `chrome.*` Proxy，通过独立 IPC 复用 bridge；订阅待实现。 |
+| JS 动作宿主 | 已提供 `ctx.browser.call`、`profiles` 和 `chrome.*` Proxy，复用固定版本连接器的 JS SDK，自动绑定动作取消与期限。 |
 | 动作包适配 | 按需提供一个通用 `chrome.call` 动作，输入为 method、args 和逻辑 profile；不按 API 数量扩充动作清单。 |
 
 当前 Node 宿主的结果通过临时文件返回，stdout/stderr 被丢弃，stdin 用于初始请求和取消；并不存在可直接复用的双向 stdout RPC。独立 IPC 客户端可避免为浏览器访问先重做这套协议。
 
-Node 的动作最终结果目前限制 64 KiB。SDK 可以在脚本内处理大树并返回摘要，CLI 或直接客户端则接收完整结果；不要先把大书签树塞进最终动作结果文件，或为了浏览器查询普遍放宽所有动作输出。上述 SDK 已实现，主程序的通用浏览器动作也已接入；`ctx.browser` 宿主接口属于后续接入。现有能力见[动作包](ACTION_PACKAGES.md)及[动作执行架构](EXECUTION_ARCHITECTURE.md)。
+Node 的动作最终结果目前限制 64 KiB。SDK 可以在脚本内处理大树并返回摘要，CLI 或直接客户端则接收完整结果；不要先把大书签树塞进最终动作结果文件，或为了浏览器查询普遍放宽所有动作输出。上述 SDK、主程序通用浏览器动作和 `ctx.browser` 宿主接口均已接入。用法及限制见[动作包](ACTION_PACKAGES.md#浏览器脚本)及[动作执行架构](EXECUTION_ARCHITECTURE.md)。
+
+### 真实浏览器回归
+
+`scripts/test-browser-actions.mjs` 使用已注册的 Native Host、已安装 SDK 和独立 Chrome profile，不读取用户 profile 的书签、不提交表单、不操作账号设置。测试创建本地页面和标签页、窗口，并在结束时关闭本次隔离浏览器。需提供本机已有 Playwright 模块、Chrome 程序、已解压发布扩展和连接器目录，不自动下载或改注册项：
+
+```powershell
+node scripts/test-browser-actions.mjs --connector C:/Tools/connector/0.1.0 --extension C:/Tools/browser-extension --playwright-module C:/Tools/node_modules/playwright --chrome 'C:/Program Files/Google/Chrome/Application/chrome.exe' --app ./target/debug/omnitrigger.exe
+```
+
+结果保存在 `output/playwright/browser-actions-*/report.json`。2026-11-03 在 Chrome 156.0.8078.48、发布扩展 v0.1.0 和已安装同版本 SDK 上通过：
+
+- `bookmarks.getTree/getChildren/search`；只读隔离 profile。
+- `tabs.create/query/get/update/goBack/goForward/reload/duplicate/remove`；核验页面导航、固定、静音和关闭后的状态。
+- `windows.create/remove`；仅操作测试窗口。
+- 未知方法 `api_unavailable/not_started`、无效标签页 `chrome_error`、派发前取消不新建标签页。
+- 真实 Node 宿主 `ctx.browser` 处理约 1 MiB 合成 Unicode 分块结果，最终仅返回摘要。
+
+可选 `--app` 进一步验证本次构建应用的 `--run-action` 入口，包括 Rust 侧 SDK 路径核验；动作包与连接配置均在本次测试目录中生成。
+
+Chrome 在没有交互的合成历史页面中可能拒绝后退，本次测试在本地页面产生实际交互后核验前后退；RPC 保留原始错误，不将失败转换为成功。页面导航和关闭等操作需要检查后置状态，连接或 API 接纳请求本身不代表页面已完成加载。取消后的副作用、真实运行中的超时和可选权限提示不能靠这组测试宣称可撤销；宿主的超时、取消、结构化错误和未等待调用另有替身回归测试。
 
 ## 独立仓库与实施顺序
 

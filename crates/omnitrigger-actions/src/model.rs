@@ -72,6 +72,12 @@ pub struct ActionDefinition {
 pub struct ActionError {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_permissions: Vec<String>,
 }
 
 impl ActionError {
@@ -79,6 +85,9 @@ impl ActionError {
         Self {
             code: code.into(),
             message: message.into(),
+            effect_state: None,
+            method: None,
+            required_permissions: Vec::new(),
         }
     }
 }

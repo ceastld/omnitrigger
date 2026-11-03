@@ -113,6 +113,31 @@ export default async function (ctx) {
 | `ctx.process.start(program, args, { cwd })` | 独立启动程序，返回 `{ pid }`，不等待退出、不采集输出；省略 `cwd` 时使用包目录。成功启动后，取消动作不会关闭该程序。 |
 | `ctx.delay(milliseconds)` | 等待指定毫秒数。 |
 | `ctx.signal` | 当前调用的取消信号；自定义异步步骤可监听此信号停止后续工作。 |
+| `ctx.browser.profiles({ timeoutMs })` | 列出已连接浏览器及其 `browser_instance_id`；连接可用不代表业务动作已完成。 |
+| `ctx.browser.call(method, args, { profile, timeoutMs })` | 复用已安装连接器的 SDK，通过持久 IPC 调用 Chrome API，返回原始结果。 |
+| `ctx.browser.chrome.*` | 动态 Proxy，例如 `await ctx.browser.chrome.bookmarks.getTree()`；指定 profile 或超时时使用 `call`。 |
+
+### 浏览器脚本
+
+先在“扩展”安装浏览器连接器，并让 Chrome 扩展连接本机。宿主从当前配置同级的固定版本连接器目录加载 SDK，无需在动作参数中保存 SDK 路径、端点或扩展 ID。未安装时只有浏览器调用报 `browser_unavailable`，其他脚本仍可运行。完整宿主类型见 [api.d.ts](../crates/omnitrigger-actions/runtime/api.d.ts)。
+
+```javascript
+export default async ctx => {
+  const tree = await ctx.browser.call('bookmarks.getTree', [], {
+    ...(ctx.input.profile ? { profile: ctx.input.profile } : {}),
+    timeoutMs: 10000,
+  });
+  return { roots: tree.length };
+};
+```
+
+`profile` 为 `profiles()` 返回的 `browser_instance_id`。省略时由桥接服务要求恰好一个连接，多个连接会明确失败。每个动作复用一条客户端连接，最多同时等待 8 个浏览器调用；不启动 CLI 或额外 Node 子进程。所有调用都需要 `await`；动作返回时仍有未完成调用会报 `pending_browser_calls`，随后停止等待、关闭连接。
+
+`timeoutMs` 默认为 10000，允许 1–60000 毫秒，同时受动作总计 60 秒期限约束。动作取消自动传入 SDK，取消或超时只停止等待或尚未派发的调用，不能保证中断 Chrome 内部操作，不能撤销副作用，也不自动重试。捕获异常可读 `code`、`method`、`effectState`，支持的新版连接器还会提供 `requiredPermissions`；未捕获时最终 `ActionError` 使用 `effect_state` 和 `required_permissions` 字段保留这些信息。`unknown` 表示结果未确认。
+
+脚本内可处理 SDK 最大 32 MiB 的结果；最终动作结果仍限 64 KiB，建议只返回摘要。`undefined` 和 `null` 在脚本内保持区别。通用转发仍受扩展权限、调用模式和 Chrome 自身条件限制，不支持事件订阅或任意页面脚本注入。v0.1.0 发布扩展没有新增可选权限界面，不能把源码里的新增能力当作已安装能力。
+
+可直接复制的[书签统计示例](../examples/actions/browser-summary/)只返回数量，不保存书签内容。将它放到当前配置同级 `actions` 目录后，用其 `call.json` 执行 `--run-action`；可在 `input.profile` 中明确指定目标。独立的 `tools/js-engine-probe` 仍是同步系统 API 实验，没有此浏览器接口。
 
 当前参数编辑器保存 JSON 对象，没有通用参数表单或完整 JSON Schema 校验。包清单加载和“检查动作”只验证调用结构、动作身份、版本和运行时解析，不执行脚本，所以不能验证所有业务输入。需要修改必填输入、输出含义或行为约定时，提高动作的契约版本，并显式更新绑定；包的发布版本不能代替动作契约版本。
 

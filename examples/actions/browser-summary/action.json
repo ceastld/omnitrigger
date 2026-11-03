@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "examples.browser-summary",
+  "name": "浏览器书签摘要",
+  "version": "1.0.0",
+  "actions": [
+    {
+      "id": "summarize",
+      "title": "统计浏览器书签",
+      "version": 1,
+      "runtime": "node",
+      "entry": "main.mjs"
+    }
+  ]
+}

@@ -35,7 +35,11 @@ pub fn service(config: &Path) -> ActionService {
     let mut catalog = PackageCatalog::load(&root(config));
     let mut runtimes = RuntimeRegistry::new();
     if let Some(program) = node_program() {
-        if let Err(error) = runtimes.register("node", Arc::new(NodeRuntime::new(program))) {
+        let runtime = NodeRuntime::new(program).with_browser_connector(
+            crate::browser_connector::runtime_root(config)
+                .join(crate::browser_connector::CONNECTOR_VERSION),
+        );
+        if let Err(error) = runtimes.register("node", Arc::new(runtime)) {
             catalog.diagnostics.push(error.to_string());
         }
     } else {
@@ -79,7 +83,7 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
                 Ok(event) => match event.outcome {
                     ActionOutcome::Started => {},
                     ActionOutcome::Succeeded { output } => return Ok(serde_json::json!({"invocation_id":invocation_id,"status":"succeeded","output":output}).to_string()),
-                    ActionOutcome::Failed { error } => return Err(serde_json::json!({"invocation_id":invocation_id,"status":"failed","error":{"code":error.code,"message":error.message}}).to_string()),
+                    ActionOutcome::Failed { error } => return Err(serde_json::json!({"invocation_id":invocation_id,"status":"failed","error":error}).to_string()),
                     ActionOutcome::Cancelled => return Err(serde_json::json!({"invocation_id":invocation_id,"status":"cancelled"}).to_string()),
                 },
                 Err(std::sync::mpsc::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(20)),
