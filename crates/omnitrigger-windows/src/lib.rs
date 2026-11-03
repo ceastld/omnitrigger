@@ -431,6 +431,7 @@ mod tests {
     #[test]
     fn hold_description_keeps_the_prefix_button_and_duration() {
         let spec = TriggerSpec {
+            keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
             id: 5,

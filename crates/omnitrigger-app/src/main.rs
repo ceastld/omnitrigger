@@ -1393,6 +1393,7 @@ impl Workspace {
                         })
                     {
                         spec.process_scope = base.process_scope.clone();
+                        spec.keyboard = base.keyboard.clone();
                     }
                     let reusable = editing.or_else(|| {
                         if self.recording_preserve_action {
@@ -3489,6 +3490,24 @@ impl Workspace {
                     detail
                 )
             };
+            let detail = if binding.spec.keyboard == Default::default() {
+                detail
+            } else {
+                format!(
+                    "{}{} · {}",
+                    if binding.spec.keyboard.dedicated_prefix.is_some() {
+                        "专用层"
+                    } else {
+                        ""
+                    },
+                    if binding.spec.keyboard.repeat {
+                        " 按住重复"
+                    } else {
+                        ""
+                    },
+                    detail
+                )
+            };
             // 标题行右侧：停用标记，或本次运行的命中次数与最近时间。
             let badge = if !binding.enabled {
                 Some(
@@ -3835,6 +3854,25 @@ impl Workspace {
                     "应用范围：{}（配置文件中设置）",
                     settings::process_scope_label(&spec.process_scope)
                 )))
+            })
+            .when_some(spec.keyboard.dedicated_prefix, |element, button| {
+                let name = theme::caps_for_buttons(&[button])[0].label.clone();
+                element.child(caption(format!("{name} 专用层：未绑定的键盘输入不回放。")))
+            })
+            .when(spec.keyboard.restore_on_tap, |element| {
+                element.child(caption(spec.keyboard.tap_timeout_ms.map_or_else(
+                    || "独立单按恢复原键（不限时）。".to_string(),
+                    |ms| format!("独立单按恢复原键（严格小于 {ms}ms）。"),
+                )))
+            })
+            .when(!spec.keyboard.tap_scope.is_global(), |element| {
+                element.child(caption(format!(
+                    "单按恢复范围：{}。",
+                    settings::process_scope_label(&spec.keyboard.tap_scope)
+                )))
+            })
+            .when(spec.keyboard.repeat, |element| {
+                element.child(caption("按住重复执行（仅支持按下触发，配置文件中设置）。"))
             });
         if matches!(spec.activation, Activation::Wheel(_)) {
             let mut directions = theme::segments();
@@ -5708,6 +5746,17 @@ fn smoke_test() -> Result<(), String> {
     scoped.spec.id = settings::next_id(&bindings);
     scoped.spec.process_scope.allow = vec!["omnitrigger-smoke".into()];
     bindings.push(scoped);
+    for binding in &mut bindings {
+        if binding.spec.held.contains(&Button::Key(20)) {
+            binding.spec.keyboard = omnitrigger_core::KeyboardPolicy {
+                dedicated_prefix: Some(Button::Key(20)),
+                repeat: true,
+                restore_on_tap: true,
+                tap_timeout_ms: Some(20_000),
+                tap_scope: Default::default(),
+            };
+        }
+    }
     settings::validate(&bindings)?;
     let (backend, events) = Backend::start()?;
     match events
@@ -5739,7 +5788,7 @@ fn smoke_test() -> Result<(), String> {
     }
     backend.send(BackendCommand::SetEnabled(false))?;
     drop(backend);
-    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; default/scoped registrations valid; foreground process resolved outside hooks.");
+    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; scoped/dedicated/repeat registrations valid; foreground process resolved outside hooks.");
     Ok(())
 }
 

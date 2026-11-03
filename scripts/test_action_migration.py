@@ -12,7 +12,7 @@ def fixture():
     rule = {"SecondaryKey": 74, "ActionType": 1, "Data": "2|65"}
     return dict(
         source={"PowerKeys": {"20": {"Key": 20, "IsEnabled": True,
-                                      "KeepOriginKeyFunc": True, "KeyActions": [rule]}},
+                                      "KeepOriginKeyFunc": False, "KeyActions": [rule]}},
                 "MouseActions": [], "ExeSettings": {}},
         catalog_payload={"payload": {"items": [{"id": "action-a", "title": "示例动作", "actionType": "XAction"}],
                                      "totalCount": 1, "hasMore": False}},
@@ -59,8 +59,7 @@ class MigrationTests(unittest.TestCase):
         leader["KeyActions"][0].update(Control=True, BindingProcessName="editor;browser")
         result = build_plan(**data)
         self.assertEqual(set(result["bindings"][0]["trigger_gaps"]), {
-            "foreground_process_scope", "leader_process_exclusions",
-            "suppress_unused_prefix", "either_side_modifier_matching"})
+            "either_side_modifier_matching"})
         self.assertEqual(result["summary"]["native_action_available"], 1)
         self.assertFalse(result["complete"])
 
@@ -68,14 +67,77 @@ class MigrationTests(unittest.TestCase):
         data = fixture()
         existing = {"id": 5, "held": [{"kind": "key", "value": 20}],
                     "activation": {"kind": "press", "value": {"kind": "key", "value": 74}},
+                    "keyboard": {"dedicated_prefix": {"kind": "key", "value": 20}, "repeat": True},
                     "action": {"kind": "send_shortcut", "keys": [162, 65]}, "enabled": True}
         data["current"]["bindings"] = [existing]
         self.assertEqual(build_plan(**data)["bindings"][0]["equivalent_configuration_ids"], [5])
         for change in ({"enabled": False}, {"conditions": [{"kind": "example"}]},
-                       {"action": {"kind": "notification"}}):
+                       {"action": {"kind": "notification"}}, {"keyboard": {"repeat": False}},
+                       {"process_scope": {"deny": ["editor"]}}):
             data["current"]["bindings"] = [dict(existing, **change)]
             self.assertEqual(build_plan(**data)["bindings"][0]["equivalent_configuration_ids"], [])
             self.assertEqual(build_plan(**data)["bindings"][0]["existing_trigger_ids"], [5])
+
+    def test_native_layer_and_process_projection_keep_unimplemented_shell_and_timing_gaps(self):
+        data = fixture()
+        leader = data["source"]["PowerKeys"]["20"]
+        leader["BlackList"] = "game.exe;preview"
+        leader["KeyActions"][0]["BindingProcessName"] = "Code;cursor.exe"
+        row = build_plan(**data)["bindings"][0]
+        self.assertEqual(row["trigger_gaps"], [])
+        self.assertEqual(row["trigger"]["process_scope"], {"allow": ["Code", "cursor.exe"], "deny": ["game.exe", "preview"]})
+        self.assertEqual(row["trigger"]["keyboard"], {"dedicated_prefix": {"kind": "key", "value": 20}, "repeat": True})
+        leader["KeepOriginKeyFunc"] = True
+        leader["BlackList"] = "explorer"
+        self.assertEqual(set(build_plan(**data)["bindings"][0]["trigger_gaps"]), {"legacy_retained_prefix_timing", "legacy_shell_window_role"})
+
+    def test_standalone_restore_and_duplicate_process_entries_are_explicit_projections(self):
+        data = fixture()
+        leader = data["source"]["PowerKeys"]["20"]
+        leader["KeyActions"][0]["BindingProcessName"] = "Code;Code"
+        leader["KeyActions"].append({"SecondaryKey": None, "ActionType": 1, "Data": "0|20"})
+        result = build_plan(**data)
+        self.assertIn("legacy_standalone_timing_unknown", result["bindings"][0]["trigger_gaps"])
+        data["source"]["InputSettings"] = {"PowerKeys_HintWindowDelay": 20000}
+        rows = build_plan(**data)["bindings"]
+        self.assertEqual(rows[0]["trigger_gaps"], [])
+        self.assertEqual(rows[0]["trigger"]["process_scope"]["allow"], ["Code"])
+        self.assertEqual(rows[0]["source_normalizations"][0]["kind"], "duplicate_process_entry")
+        self.assertTrue(rows[0]["trigger"]["keyboard"]["restore_on_tap"])
+        self.assertEqual(rows[0]["trigger"]["keyboard"]["tap_timeout_ms"], 20000)
+        self.assertEqual(rows[1]["status"], "prefix_policy_projected_unverified")
+        self.assertEqual(rows[1]["folded_into_prefix"], 20)
+        leader["KeyActions"][1]["BindingProcessName"] = "Wormhole"
+        rows = build_plan(**data)["bindings"]
+        self.assertEqual(rows[0]["trigger"]["keyboard"]["tap_scope"], {"allow": ["Wormhole"]})
+        self.assertEqual(rows[1]["status"], "prefix_policy_projected_unverified")
+
+    def test_ordered_application_rules_become_disjoint_and_shadowed_rows_are_retained(self):
+        data = fixture()
+        leader = data["source"]["PowerKeys"]["20"]
+        leader["KeyActions"] = [
+            {"SecondaryKey": 74, "ActionType": 1, "Data": "2|65"},
+            {"SecondaryKey": 74, "BindingProcessName": "Code;editor", "ActionType": 1, "Data": "2|66"},
+            {"SecondaryKey": 74, "BindingProcessName": "code;viewer", "ActionType": 1, "Data": "2|67"},
+            {"SecondaryKey": 74, "BindingProcessName": "CODE", "ActionType": 1, "Data": "2|68"},
+            {"SecondaryKey": 74, "ActionType": 1, "Data": "2|69"},
+        ]
+        rows = build_plan(**data)["bindings"]
+        self.assertEqual(rows[0]["trigger"]["process_scope"]["deny"], ["Code", "editor", "viewer"])
+        self.assertEqual(rows[1]["trigger"]["process_scope"]["allow"], ["Code", "editor"])
+        self.assertEqual(rows[2]["trigger"]["process_scope"]["allow"], ["viewer"])
+        self.assertEqual(rows[3]["status"], "shadowed_source_rule")
+        self.assertEqual(rows[4]["status"], "shadowed_source_rule")
+        self.assertEqual(rows[3]["source"]["rule"]["BindingProcessName"], "CODE")
+        self.assertEqual(len(rows), 5)
+
+    def test_unimplemented_specific_actions_still_exclude_the_global_fallback_range(self):
+        data = fixture()
+        leader = data["source"]["PowerKeys"]["20"]
+        leader["KeyActions"].append({"SecondaryKey": 74, "ActionType": 12, "Data": "action-a", "BindingProcessName": "Code"})
+        rows = build_plan(**data)["bindings"]
+        self.assertEqual(rows[0]["trigger"]["process_scope"], {"deny": ["Code"]})
+        self.assertEqual(rows[1]["status"], "needs_action_support")
 
     def test_duplicate_mouse_ids_and_per_app_rules_are_preserved(self):
         data = fixture()
@@ -87,6 +149,19 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         self.assertEqual(len({row["key"] for row in rows}), 3)
         self.assertEqual(len(next(row for row in result["actions"] if row["id"] == "action-a")["binding_keys"]), 3)
+
+    def test_terminal_also_used_as_adornment_requires_review_only_in_overlapping_processes(self):
+        data = fixture()
+        leader = data["source"]["PowerKeys"]["20"]
+        leader["KeyActions"] = [
+            {"SecondaryKey": 74, "BindingProcessName": "Code", "ActionType": 1, "Data": "2|65"},
+            {"SecondaryKey": 75, "AdornKey": 74, "BindingProcessName": "Code", "ActionType": 1, "Data": "2|66"},
+        ]
+        rows = build_plan(**data)["bindings"]
+        self.assertTrue(all("terminal_prefix_overlap" in row["trigger_gaps"] for row in rows))
+        self.assertTrue(all(row["status"] == "needs_trigger_support" for row in rows))
+        leader["KeyActions"][1]["BindingProcessName"] = "viewer"
+        self.assertTrue(all(row["status"] == "needs_runtime_verification" for row in build_plan(**data)["bindings"]))
 
     def test_partial_catalog_or_failed_statistics_fail_without_output(self):
         for patch in ({"hasMore": True}, {"totalCount": 2}):

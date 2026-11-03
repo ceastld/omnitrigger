@@ -607,6 +607,7 @@ impl ButtonDescription {
 impl DefaultTrigger {
     fn spec(&self, id: u64) -> TriggerSpec {
         TriggerSpec {
+            keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
             id,

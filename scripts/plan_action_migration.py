@@ -69,14 +69,88 @@ def button(code):
     return {"kind": mouse[code]} if code in mouse else {"kind": "key", "value": code}
 
 
-def power_trigger(leader, rule):
+def normalized_process_name(name):
+    return name.lower().removesuffix(".exe")
+
+
+def process_scope(leader, rule):
+    result = {}
     gaps = []
-    if rule.get("BindingProcessName"):
-        gaps.append("foreground_process_scope")
-    if leader.get("BlackList"):
-        gaps.append("leader_process_exclusions")
-    if leader.get("KeepOriginKeyFunc") is not True:
-        gaps.append("suppress_unused_prefix")
+    notes = []
+    for name, value in (("allow", rule.get("BindingProcessName")), ("deny", leader.get("BlackList"))):
+        if not value:
+            continue
+        if not isinstance(value, str):
+            raise ValueError("进程名单必须为字符串")
+        names = []
+        for item in (item.strip() for item in value.split(";")):
+            if not item:
+                continue
+            if item in names:
+                notes.append({"kind": "duplicate_process_entry", "list": name, "name": item})
+            else:
+                names.append(item)
+        result[name] = names
+        canonical = [normalized_process_name(item) for item in names]
+        if (any(not item or len(item.encode("utf-8")) > 260
+                or any(c in '/\\:*?;\"<>|,；，' or ord(c) < 32 or 127 <= ord(c) <= 159 for c in item) for item in names)
+                or any(not item or item in (".", "..") for item in canonical)
+                or len(set(canonical)) != len(canonical)):
+            gaps.append("unsupported_process_list")
+        if set(canonical) & {"explorer", "desktop", "taskbar"}:
+            gaps.append("legacy_shell_window_role")
+    if sum(len(names) for names in result.values()) > 64:
+        gaps.append("unsupported_process_list")
+    allowed = {normalized_process_name(item) for item in result.get("allow", [])}
+    denied = {normalized_process_name(item) for item in result.get("deny", [])}
+    if allowed and allowed <= denied:
+        gaps.append("empty_process_scope")
+    return result, gaps, notes
+
+
+def same_process_scope(left, right):
+    def signature(value):
+        return tuple(tuple(sorted(normalized_process_name(item) for item in value.get(key, [])))
+                     for key in ("allow", "deny"))
+    return signature(left) == signature(right)
+
+
+def same_keyboard_policy(left, right):
+    return (left.get("dedicated_prefix") == right.get("dedicated_prefix")
+            and left.get("repeat", False) == right.get("repeat", False)
+            and left.get("restore_on_tap", False) == right.get("restore_on_tap", False)
+            and left.get("tap_timeout_ms") == right.get("tap_timeout_ms")
+            and same_process_scope(left.get("tap_scope", {}), right.get("tap_scope", {})))
+
+
+def leader_tap_policy(leader, settings):
+    rows = [(index, row) for index, row in enumerate(leader.get("KeyActions") or [])
+            if not row.get("IsDisabled") and row.get("SecondaryKey") is None]
+    if leader.get("KeepOriginKeyFunc") is not False or len(rows) != 1:
+        return {}, [], None
+    index, row = rows[0]
+    if (row.get("ActionType") != 1 or shortcut_action(row.get("Data")) != {"kind": "send_shortcut", "keys": [leader.get("Key")]}
+            or any(row.get(key) for key in ("AdornKey", "Shift", "Control", "Alt", "Message", "LongPressActionType"))):
+        return {}, [], None
+    policy = {"restore_on_tap": True}
+    tap_scope, gaps, _ = process_scope({}, row)
+    if tap_scope:
+        policy["tap_scope"] = tap_scope
+    timeout = settings.get("PowerKeys_HintWindowDelay")
+    if type(timeout) is not int or timeout > 60_000:
+        return policy, gaps + ["legacy_standalone_timing_unknown"], index
+    if timeout > 0:
+        policy["tap_timeout_ms"] = timeout
+    return policy, gaps, index
+
+
+def power_trigger(leader, rule, tap_policy=None, tap_gaps=()):
+    scope, gaps, notes = process_scope(leader, rule)
+    gaps.extend(tap_gaps)
+    dedicated = leader.get("KeepOriginKeyFunc") is False
+    if not dedicated:
+        # V1 的保留原功能模式包含快速输入保护、松开顺序和超时，不能按普通回退宣称等价。
+        gaps.append("legacy_retained_prefix_timing")
     if any(rule.get(key) for key in ("Shift", "Control", "Alt")):
         gaps.append("either_side_modifier_matching")
     if rule.get("LongPressActionType", 0) != 0:
@@ -90,16 +164,124 @@ def power_trigger(leader, rule):
     terminal = button(rule.get("SecondaryKey"))
     if any(key is None for key in held) or terminal is None:
         gaps.append("unsupported_trigger_key")
-        return None, sorted(set(gaps))
+        return None, sorted(set(gaps)), notes
     if "either_side_modifier_matching" in gaps:
-        return None, sorted(set(gaps))
-    return {"held": held, "activation": {"kind": "press", "value": terminal}}, sorted(set(gaps))
+        return None, sorted(set(gaps)), notes
+    keyboard = {"repeat": terminal["kind"] == "key"}
+    if dedicated:
+        prefix = button(leader.get("Key"))
+        if prefix["kind"] == "key":
+            keyboard["dedicated_prefix"] = prefix
+        else:
+            gaps.append("dedicated_mouse_prefix")
+        keyboard.update(tap_policy or {})
+    trigger = {"held": held, "activation": {"kind": "press", "value": terminal}, "keyboard": keyboard}
+    if scope:
+        trigger["process_scope"] = scope
+    return trigger, sorted(set(gaps)), notes
 
 
 def same_trigger(left, right):
     sort_key = lambda item: json.dumps(item, sort_keys=True)
     return (sorted(left.get("held", []), key=sort_key) == sorted(right.get("held", []), key=sort_key)
             and left.get("activation") == right.get("activation"))
+
+
+def process_scopes_overlap(left, right):
+    def names(scope, field):
+        return {normalized_process_name(name) for name in scope.get(field, [])}
+    left_allow, right_allow = names(left, "allow"), names(right, "allow")
+    denied = names(left, "deny") | names(right, "deny")
+    if left_allow and right_allow:
+        return bool((left_allow & right_allow) - denied)
+    if left_allow or right_allow:
+        return bool((left_allow or right_allow) - denied)
+    return True
+
+
+def project_source_precedence(bindings, current):
+    """源按列表先后选应用规则；投影成互斥范围，保留被遮蔽的原规则。"""
+    groups = collections.defaultdict(list)
+    for row in bindings:
+        if row["kind"] != "power_key" or row["source"]["rule"].get("SecondaryKey") is None:
+            continue
+        rule = row["source"]["rule"]
+        signature = (row["source"]["leader"]["Key"], rule.get("AdornKey"), rule["SecondaryKey"],
+                     rule.get("Shift", False), rule.get("Control", False), rule.get("Alt", False))
+        groups[signature].append(row)
+    for rows in groups.values():
+        if any(row["trigger"] is None or set(row["trigger_gaps"]) & {
+                "unsupported_process_list", "empty_process_scope", "legacy_shell_window_role"} for row in rows):
+            if len(rows) > 1:
+                for row in rows:
+                    row["trigger_gaps"] = sorted(set(row["trigger_gaps"] + ["source_process_precedence_review"]))
+            continue
+        specific = {}
+        for row in rows:
+            for name in row["trigger"].get("process_scope", {}).get("allow", []):
+                specific.setdefault(normalized_process_name(name), name)
+        seen = {}
+        default_owner = None
+        for row in rows:
+            scope = row["trigger"].setdefault("process_scope", {})
+            allowed = scope.get("allow", [])
+            if allowed:
+                excluded = {normalized_process_name(name): seen[normalized_process_name(name)]
+                            for name in allowed if normalized_process_name(name) in seen}
+                effective = [name for name in allowed if normalized_process_name(name) not in seen]
+                for name in allowed:
+                    seen.setdefault(normalized_process_name(name), row["key"])
+                if excluded:
+                    row["source_normalizations"].append({"kind": "ordered_process_scope", "excluded": excluded})
+                if not effective:
+                    row["trigger"] = None
+                    row["status"] = "shadowed_source_rule"
+                    continue
+                scope["allow"] = effective
+            elif default_owner is not None:
+                row["source_normalizations"].append({"kind": "shadowed_default_rule", "owner": default_owner})
+                row["trigger"] = None
+                row["status"] = "shadowed_source_rule"
+                continue
+            else:
+                default_owner = row["key"]
+                denied = scope.get("deny", [])
+                existing = {normalized_process_name(name) for name in denied}
+                added = [name for canonical, name in specific.items() if canonical not in existing]
+                if added:
+                    scope["deny"] = denied + added
+                    row["source_normalizations"].append({"kind": "default_excludes_specific_rules", "names": added})
+            if sum(len(names) for names in scope.values()) > 64:
+                row["trigger_gaps"] = sorted(set(row["trigger_gaps"] + ["unsupported_process_list"]))
+    candidates = [row for row in bindings if row.get("trigger")]
+    for terminal in candidates:
+        activation = terminal["trigger"]["activation"]
+        if activation["kind"] != "press":
+            continue
+        for prefix in candidates:
+            if (activation["value"] not in prefix["trigger"]["held"]
+                    or not process_scopes_overlap(terminal["trigger"].get("process_scope", {}),
+                                                  prefix["trigger"].get("process_scope", {}))):
+                continue
+            for row, other in ((terminal, prefix), (prefix, terminal)):
+                row["trigger_gaps"] = sorted(set(row["trigger_gaps"] + ["terminal_prefix_overlap"]))
+                row["source_normalizations"].append({"kind": "terminal_prefix_review", "other": other["key"]})
+    current_by_id = {row["id"]: row for row in current["bindings"]}
+    for row in bindings:
+        if row["kind"] != "power_key" or row["trigger"] is None:
+            continue
+        equivalents = []
+        if not row["trigger_gaps"]:
+            for identity in row["matching_action_configuration_ids"]:
+                existing = current_by_id[identity]
+                if (existing.get("enabled") and not existing.get("conditions")
+                        and same_process_scope(existing.get("process_scope", {}), row["trigger"].get("process_scope", {}))
+                        and same_keyboard_policy(existing.get("keyboard", {}), row["trigger"]["keyboard"])):
+                    equivalents.append(identity)
+        row["equivalent_configuration_ids"] = equivalents
+        row["status"] = ("configuration_equivalent_unverified" if equivalents else "needs_trigger_support"
+                         if row["trigger_gaps"] else "needs_action_support"
+                         if row["operation"]["status"] != "native_action_available" else "needs_runtime_verification")
 
 
 def build_plan(source, catalog_payload, usage, counters, current, limit=20):
@@ -123,26 +305,36 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20):
     for leader_key, leader in source["PowerKeys"].items():
         if not leader.get("IsEnabled"):
             continue
+        tap_policy, tap_gaps, folded_index = leader_tap_policy(leader, source.get("InputSettings") or {})
         for index, rule in enumerate(leader.get("KeyActions") or []):
             if rule.get("IsDisabled"):
                 continue
             identity = f"power:{leader_key}:{index}"
-            trigger, gaps = power_trigger(leader, rule)
+            trigger, gaps, notes = power_trigger(leader, rule, tap_policy, tap_gaps)
+            folded = index == folded_index
+            if folded:
+                gaps = [gap for gap in gaps if gap != "unsupported_trigger_key"]
+                notes.append({"kind": "standalone_key_folded_into_prefix", "leader": leader["Key"], "policy": tap_policy})
             native = operation(rule)
             overlap = [row for row in current["bindings"] if trigger and same_trigger(trigger, row)]
             action_matches = [row["id"] for row in overlap
                               if row.get("action") == native.get("native_action")
                               and native["status"] == "native_action_available"]
             equivalents = [row["id"] for row in overlap if not gaps and row.get("enabled")
-                           and not row.get("conditions") and row["id"] in action_matches]
+                           and not row.get("conditions") and row["id"] in action_matches
+                           and same_process_scope(row.get("process_scope", {}), trigger.get("process_scope", {}))
+                           and same_keyboard_policy(row.get("keyboard", {}), trigger["keyboard"])]
             bindings.append({"key": identity, "kind": "power_key", "title": rule.get("Title"),
                              "source": {"leader": {key: value for key, value in leader.items() if key != "KeyActions"},
                                         "rule_index": index, "rule": rule},
                              "trigger": trigger, "trigger_gaps": gaps, "operation": native,
+                             "source_normalizations": notes,
+                             "folded_into_prefix": leader["Key"] if folded else None,
                              "existing_trigger_ids": [row["id"] for row in overlap],
                              "matching_action_configuration_ids": action_matches,
                              "equivalent_configuration_ids": equivalents,
-                             "status": "configuration_equivalent_unverified" if equivalents
+                             "status": "prefix_policy_projected_unverified" if folded and not gaps
+                             else "configuration_equivalent_unverified" if equivalents
                              else "needs_trigger_support" if gaps
                              else "needs_action_support" if native["status"] != "native_action_available"
                              else "needs_runtime_verification"})
@@ -164,6 +356,7 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20):
                              "equivalent_configuration_ids": []})
             if rule.get("ActionType") == 12:
                 references[normalized_id(rule.get("Data"))].append(identity)
+    project_source_precedence(bindings, current)
     selected = set(references) | {row["id"] for row in recent + historical}
     actions = []
     recent_ids = {row["id"] for row in recent}
@@ -191,6 +384,7 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20):
                         "selected_actions": len(actions),
                         "binding_status": dict(collections.Counter(row["status"] for row in bindings)),
                         "trigger_gaps": dict(collections.Counter(gap for row in bindings for gap in row["trigger_gaps"])),
+                        "normalizations": dict(collections.Counter(note["kind"] for row in bindings for note in row.get("source_normalizations", []))),
                         "native_action_available": sum(row["operation"]["status"] == "native_action_available" for row in bindings)},
             "recent30_top": recent, "historical_top": historical,
             "bindings": bindings, "actions": actions}

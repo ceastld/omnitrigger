@@ -1,7 +1,7 @@
 //! 应用持久化边界。纯核心无需了解文件格式或用户目录。
 use omnitrigger_core::{
-    Activation, Button, Engine, MouseButton, ProcessScope, RegistrationError, TriggerSpec,
-    WheelDirection,
+    Activation, Button, Engine, KeyboardPolicy, MouseButton, ProcessScope, RegistrationError,
+    TriggerSpec, WheelDirection,
 };
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -22,6 +22,7 @@ use crate::wheels::WheelActionRef;
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
+const CONFIG_VERSION: u32 = 11;
 
 pub fn use_path(path: PathBuf) -> Result<(), String> {
     CUSTOM_PATH.set(path).map_err(|_| "配置路径已设置。".into())
@@ -64,6 +65,8 @@ struct Settings {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BindingDto {
+    #[serde(default, skip_serializing_if = "KeyboardPolicyDto::is_default")]
+    keyboard: KeyboardPolicyDto,
     #[serde(default, skip_serializing_if = "ProcessScopeDto::is_global")]
     process_scope: ProcessScopeDto,
     #[serde(rename = "id")]
@@ -84,6 +87,31 @@ struct BindingDto {
     command: Option<CommandAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     show_panel: Option<bool>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeyboardPolicyDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dedicated_prefix: Option<ButtonDto>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    repeat: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    restore_on_tap: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tap_timeout_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "ProcessScopeDto::is_global")]
+    tap_scope: ProcessScopeDto,
+}
+
+impl KeyboardPolicyDto {
+    fn is_default(&self) -> bool {
+        self.dedicated_prefix.is_none()
+            && !self.repeat
+            && !self.restore_on_tap
+            && self.tap_timeout_ms.is_none()
+            && self.tap_scope.is_global()
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -172,6 +200,16 @@ impl From<ButtonDto> for Button {
 impl From<&Binding> for BindingDto {
     fn from(binding: &Binding) -> Self {
         Self {
+            keyboard: KeyboardPolicyDto {
+                dedicated_prefix: binding.spec.keyboard.dedicated_prefix.map(Into::into),
+                repeat: binding.spec.keyboard.repeat,
+                restore_on_tap: binding.spec.keyboard.restore_on_tap,
+                tap_timeout_ms: binding.spec.keyboard.tap_timeout_ms,
+                tap_scope: ProcessScopeDto {
+                    allow: binding.spec.keyboard.tap_scope.allow.clone(),
+                    deny: binding.spec.keyboard.tap_scope.deny.clone(),
+                },
+            },
             process_scope: ProcessScopeDto {
                 allow: binding.spec.process_scope.allow.clone(),
                 deny: binding.spec.process_scope.deny.clone(),
@@ -213,6 +251,9 @@ impl From<&Binding> for BindingDto {
 
 impl BindingDto {
     fn into_binding(self, version: u32) -> Result<Binding, String> {
+        if version < 11 && !self.keyboard.is_default() {
+            return Err("专用前缀与键盘重复需要版本 11 配置。".into());
+        }
         if version < 10 && !self.process_scope.is_global() {
             return Err("应用范围需要版本 10 配置。".into());
         }
@@ -268,6 +309,16 @@ impl BindingDto {
         }
         Ok(Binding {
             spec: TriggerSpec {
+                keyboard: KeyboardPolicy {
+                    dedicated_prefix: self.keyboard.dedicated_prefix.map(Into::into),
+                    repeat: self.keyboard.repeat,
+                    restore_on_tap: self.keyboard.restore_on_tap,
+                    tap_timeout_ms: self.keyboard.tap_timeout_ms,
+                    tap_scope: ProcessScope {
+                        allow: self.keyboard.tap_scope.allow,
+                        deny: self.keyboard.tap_scope.deny,
+                    },
+                },
                 process_scope: ProcessScope {
                     allow: self.process_scope.allow,
                     deny: self.process_scope.deny,
@@ -310,6 +361,7 @@ pub fn defaults() -> Vec<Binding> {
     vec![
         Binding {
             spec: TriggerSpec {
+                keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 1,
@@ -322,6 +374,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 2,
@@ -334,6 +387,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 3,
@@ -346,6 +400,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 4,
@@ -358,6 +413,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 5,
@@ -388,7 +444,7 @@ pub fn path() -> PathBuf {
 fn decode(text: &str) -> Result<Vec<Binding>, String> {
     let settings: Settings =
         serde_json::from_str(text).map_err(|e| format!("配置格式有误：{e}"))?;
-    if !matches!(settings.version, 1..=10) {
+    if !matches!(settings.version, 1..=CONFIG_VERSION) {
         return Err("配置版本不受支持，原文件已保留。".into());
     }
     let bindings = settings
@@ -543,7 +599,7 @@ pub fn save(bindings: &[Binding]) -> Result<(), String> {
 fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
     validate(bindings)?;
     let text = serde_json::to_vec_pretty(&Settings {
-        version: 10,
+        version: CONFIG_VERSION,
         bindings: bindings.iter().map(Into::into).collect(),
     })
     .map_err(|e| e.to_string())?;
@@ -553,7 +609,7 @@ fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
             decode(&original)?;
             let settings: Settings =
                 serde_json::from_str(&original).map_err(|error| error.to_string())?;
-            if settings.version < 10 {
+            if settings.version < CONFIG_VERSION {
                 backup_legacy(destination, settings.version, original.as_bytes())?;
             }
         }
@@ -642,10 +698,94 @@ mod tests {
 
     fn encode(bindings: &[Binding]) -> String {
         serde_json::to_string(&Settings {
-            version: 10,
+            version: CONFIG_VERSION,
             bindings: bindings.iter().map(Into::into).collect(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn keyboard_policy_round_trip_upgrade_and_mislabeled_schema_preserve_original_files() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let mut document: serde_json::Value = serde_json::from_str(&encode(&defaults())).unwrap();
+        document["version"] = 10.into();
+        let original = format!(" \r\n{document}\r\n");
+        std::fs::write(&destination, &original).unwrap();
+        let mut bindings = defaults();
+        for binding in &mut bindings {
+            if binding.spec.held.contains(&Button::Key(20)) {
+                binding.spec.keyboard = KeyboardPolicy {
+                    dedicated_prefix: Some(Button::Key(20)),
+                    repeat: true,
+                    ..Default::default()
+                };
+            }
+        }
+        save_to(&destination, &bindings).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.0.join("bindings.json.v10.bak")).unwrap(),
+            original
+        );
+        let saved = std::fs::read_to_string(&destination).unwrap();
+        assert_eq!(decode(&saved).unwrap(), bindings);
+        let mut document: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            document["bindings"][0]["keyboard"],
+            json!({"dedicated_prefix":{"kind":"key","value":20},"repeat":true})
+        );
+        document["version"] = 10.into();
+        assert!(decode(&document.to_string())
+            .unwrap_err()
+            .contains("版本 11"));
+        document["version"] = CONFIG_VERSION.into();
+        document["bindings"][0]["keyboard"]["unexpected"] = true.into();
+        assert!(decode(&document.to_string()).is_err());
+        bindings[0].spec.keyboard = Default::default();
+        assert!(save_to(&destination, &bindings)
+            .unwrap_err()
+            .contains("专用层"));
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), saved);
+    }
+
+    #[test]
+    fn repeat_on_hold_is_rejected_without_dropping_the_recorded_keys() {
+        let mut bindings = vec![defaults()[0].clone()];
+        bindings[0].spec.keyboard.repeat = true;
+        bindings[0].spec.activation = Activation::Hold {
+            button: Button::Key(87),
+            duration_ms: 300,
+        };
+        assert!(decode(&encode(&bindings))
+            .unwrap_err()
+            .contains("重复仅支持"));
+        assert_eq!(bindings[0].spec.held, vec![Button::Key(20)]);
+    }
+
+    #[test]
+    fn tap_restore_policy_keeps_timeout_and_rejects_impossible_combinations() {
+        let mut bindings = vec![defaults()[0].clone()];
+        bindings[0].spec.keyboard = KeyboardPolicy {
+            dedicated_prefix: Some(Button::Key(20)),
+            restore_on_tap: true,
+            tap_timeout_ms: Some(20_000),
+            repeat: true,
+            tap_scope: ProcessScope {
+                allow: vec!["Wormhole.exe".into()],
+                deny: vec![],
+            },
+        };
+        assert_eq!(decode(&encode(&bindings)).unwrap(), bindings);
+        let document: serde_json::Value = serde_json::from_str(&encode(&bindings)).unwrap();
+        assert_eq!(
+            document["bindings"][0]["keyboard"]["tap_timeout_ms"],
+            20_000
+        );
+        bindings[0].spec.keyboard.restore_on_tap = false;
+        assert!(decode(&encode(&bindings)).unwrap_err().contains("单按恢复"));
+        bindings[0].spec.keyboard.restore_on_tap = true;
+        bindings[0].spec.keyboard.dedicated_prefix = None;
+        assert!(decode(&encode(&bindings)).unwrap_err().contains("单按恢复"));
     }
 
     #[test]
@@ -964,7 +1104,11 @@ mod tests {
 
     #[test]
     fn incompatible_and_ambiguous_configurations_are_rejected() {
-        assert!(decode(r#"{"version":11,"bindings":[]}"#).is_err());
+        assert!(decode(&format!(
+            r#"{{"version":{},"bindings":[]}}"#,
+            CONFIG_VERSION + 1
+        ))
+        .is_err());
         assert!(decode(&legacy(4, true, true)).is_err());
         let mut value: serde_json::Value = serde_json::from_str(&legacy(4, false, false)).unwrap();
         value["version"] = 5.into();
@@ -1045,6 +1189,7 @@ mod tests {
     fn drag_binding(button: Button, min_distance_px: u32, max_start_ms: u32) -> Binding {
         Binding {
             spec: TriggerSpec {
+                keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 6,
@@ -1083,7 +1228,7 @@ mod tests {
         assert_eq!(serialized["action"], json!({"kind": "notification"}));
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&encode(&bindings)).unwrap()["version"],
-            10
+            CONFIG_VERSION
         );
         assert_eq!(bindings.last(), Some(&drag));
     }
@@ -1155,6 +1300,7 @@ mod tests {
         assert_eq!(duplicate.other, Some(1));
         assert_eq!(duplicate.title, "与已有触发范围冲突");
         let prefix = TriggerSpec {
+            keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
             id: 0,
@@ -1166,6 +1312,7 @@ mod tests {
             Some(1)
         );
         let bare_left = TriggerSpec {
+            keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
             id: 0,
@@ -1177,6 +1324,7 @@ mod tests {
             None
         );
         let fresh = TriggerSpec {
+            keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
             id: 0,
@@ -1202,6 +1350,7 @@ mod tests {
     ) -> Binding {
         Binding {
             spec: TriggerSpec {
+                keyboard: Default::default(),
                 process_scope: Default::default(),
                 id,
                 held: vec![],
@@ -1258,6 +1407,7 @@ mod tests {
             .enumerate()
             .map(|(index, action)| Binding {
                 spec: TriggerSpec {
+                    keyboard: Default::default(),
                     process_scope: Default::default(),
                     id: 100 + index as u64,
                     held: vec![Button::Key(0x14)],
@@ -1328,7 +1478,7 @@ mod tests {
         let text = encode(&expected);
         assert_eq!(decode(&text).unwrap(), expected);
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["version"], 10);
+        assert_eq!(value["version"], CONFIG_VERSION);
         assert_eq!(
             value["bindings"][0]["conditions"],
             json!([{"kind":"pointer_region","region":{"kind":"screen_edge","edge":"top","thickness_px":8}}])
@@ -1381,7 +1531,7 @@ mod tests {
         let encoded = encode(&expected);
         assert_eq!(decode(&encoded).unwrap(), expected);
         let document: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(document["version"], 10);
+        assert_eq!(document["version"], CONFIG_VERSION);
         assert_eq!(
             document["bindings"][3]["conditions"][0]["region"],
             json!({
@@ -1626,7 +1776,7 @@ mod tests {
         assert_eq!(std::fs::read(&backup).unwrap(), original.as_bytes());
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&destination).unwrap()).unwrap();
-        assert_eq!(saved["version"], 10);
+        assert_eq!(saved["version"], CONFIG_VERSION);
         assert_eq!(decode(&saved.to_string()).unwrap(), bindings);
         bindings.last_mut().unwrap().message = "修改后的边缘音量".into();
         save_to(&destination, &bindings).unwrap();
@@ -1684,7 +1834,7 @@ mod tests {
         let saved = std::fs::read_to_string(&destination).unwrap();
         assert_eq!(decode(&saved).unwrap(), expected);
         let current: serde_json::Value = serde_json::from_str(&saved).unwrap();
-        assert_eq!(current["version"], 10);
+        assert_eq!(current["version"], CONFIG_VERSION);
         assert_eq!(current["bindings"][0]["action"]["kind"], "local");
         assert_eq!(current["bindings"][0]["action"]["version"], 1);
         for version in 1..=6 {
@@ -1718,7 +1868,7 @@ mod tests {
         let saved = std::fs::read_to_string(&destination).unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&saved).unwrap()["version"],
-            10
+            CONFIG_VERSION
         );
         assert_eq!(decode(&saved).unwrap(), expected);
         expected[0].message = "再次修改本地动作".into();

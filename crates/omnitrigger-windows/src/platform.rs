@@ -2321,10 +2321,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dedicated_keyboard_layer_keeps_native_ownership_and_repeats_notifications() {
+        let (events, received) = mpsc::sync_channel(EVENT_CAPACITY);
+        let mut state = ThreadState::new(events);
+        let caps = Button::Key(20);
+        let key = Button::Key(75);
+        let unknown = Button::Key(88);
+        state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            id: 1,
+            held: vec![caps],
+            activation: omnitrigger_core::Activation::Press(key),
+            conditions: vec![],
+            process_scope: Default::default(),
+            keyboard: omnitrigger_core::KeyboardPolicy {
+                dedicated_prefix: Some(caps),
+                repeat: true,
+                restore_on_tap: true,
+                tap_timeout_ms: Some(20_000),
+                tap_scope: Default::default(),
+            },
+        }]));
+        assert!(state.input(InputKind::Down(caps), None).consume);
+        let tap = state.input(InputKind::Up(caps), None);
+        assert!(tap.consume);
+        assert_eq!(
+            tap.replay_kinds,
+            vec![InputKind::Down(caps), InputKind::Up(caps)]
+        );
+        for kind in [
+            InputKind::Down(caps),
+            InputKind::Down(unknown),
+            InputKind::Up(unknown),
+        ] {
+            let result = state.input(kind, None);
+            assert!(result.consume && result.replay_kinds.is_empty());
+        }
+        for _ in 0..3 {
+            let result = state.input(InputKind::Down(key), None);
+            assert!(result.consume && result.replay_kinds.is_empty());
+            assert!(matches!(
+                received.try_recv().unwrap(),
+                BackendEvent::Triggered { id: 1, .. }
+            ));
+        }
+        assert!(state.owned_press.contains(&caps) && state.owned_press.contains(&key));
+        for kind in [InputKind::Up(caps), InputKind::Up(key)] {
+            let result = state.input(kind, None);
+            assert!(result.consume && result.replay_kinds.is_empty());
+        }
+        assert!(state.owned_press.is_empty());
+        state.command(BackendCommand::SetEnabled(false));
+        assert!(!state.input(InputKind::Down(unknown), None).consume);
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
     fn process_scope_snapshot_rejects_stale_window_pid_and_generation() {
         let (events, _) = mpsc::sync_channel(EVENT_CAPACITY);
         let mut state = ThreadState::new(events);
         let global = TriggerSpec {
+            keyboard: Default::default(),
             id: 1,
             held: vec![],
             activation: omnitrigger_core::Activation::Press(Button::Key(75)),
@@ -2428,6 +2484,7 @@ mod tests {
         let mut state = ThreadState::new(tx);
         let middle = Button::Mouse(MouseButton::Middle);
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
             id: 1,
@@ -2731,6 +2788,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(EVENT_CAPACITY);
         let mut state = ThreadState::new(tx);
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
             id: 7,
@@ -2867,6 +2925,7 @@ mod tests {
         }
         let (mut state, _) = right_hold_state();
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            keyboard: Default::default(),
             process_scope: Default::default(),
             conditions: Vec::new(),
             id: 9,
@@ -3277,6 +3336,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 1,
@@ -3310,6 +3370,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 1,
@@ -3407,6 +3468,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                keyboard: Default::default(),
                 process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 9,

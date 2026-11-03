@@ -12,6 +12,25 @@ pub const MAX_BINDINGS: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistrationError {
+    InvalidDedicatedPrefix {
+        id: u64,
+        button: Button,
+    },
+    InvalidKeyboardRepeat {
+        id: u64,
+    },
+    InvalidTapRestore {
+        id: u64,
+    },
+    InvalidTapProcessScope {
+        id: u64,
+        reason: ProcessScopeError,
+    },
+    ConflictingPrefixPolicy {
+        first: u64,
+        second: u64,
+        button: Button,
+    },
     InvalidProcessScope {
         id: u64,
         reason: ProcessScopeError,
@@ -75,6 +94,21 @@ pub enum RegistrationError {
 impl fmt::Display for RegistrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::InvalidDedicatedPrefix { .. } => {
+                "专用前缀必须是当前组合中按住的明确键盘键，不能使用鼠标键或泛型修饰键。"
+            }
+            Self::InvalidKeyboardRepeat { .. } => {
+                "键盘重复仅支持键盘按下触发，不支持鼠标、长按、拖拽或滚轮。"
+            }
+            Self::InvalidTapRestore { .. } => {
+                "单按恢复需要专用前缀；超时仅在启用恢复时可设置，应为 1 至 60000 毫秒。"
+            }
+            Self::InvalidTapProcessScope { reason, .. } => {
+                return write!(f, "单按恢复的应用范围无效：{reason}");
+            }
+            Self::ConflictingPrefixPolicy { .. } => {
+                "重叠应用和位置范围内，同一前缀的专用层、单按恢复与超时策略必须一致。"
+            }
             Self::InvalidProcessScope { reason, .. } => return write!(f, "进程范围无效：{reason}"),
             Self::TooManyBindings => {
                 return write!(
@@ -113,6 +147,40 @@ pub(super) fn validate(
     }
     let mut ids = BTreeSet::new();
     for binding in &mut bindings {
+        if let Some(button) = binding.keyboard.dedicated_prefix {
+            if !matches!(button, Button::Key(key) if (1..=254).contains(&key) && !matches!(key, 0x10..=0x12))
+                || !binding.held.contains(&button)
+            {
+                return Err(RegistrationError::InvalidDedicatedPrefix {
+                    id: binding.id,
+                    button,
+                });
+            }
+        }
+        if binding.keyboard.repeat
+            && !matches!(binding.activation, Activation::Press(Button::Key(_)))
+        {
+            return Err(RegistrationError::InvalidKeyboardRepeat { id: binding.id });
+        }
+        if ((binding.keyboard.restore_on_tap || binding.keyboard.tap_timeout_ms.is_some())
+            && binding.keyboard.dedicated_prefix.is_none())
+            || (binding.keyboard.tap_timeout_ms.is_some() && !binding.keyboard.restore_on_tap)
+            || binding
+                .keyboard
+                .tap_timeout_ms
+                .is_some_and(|ms| !(1..=60_000).contains(&ms))
+        {
+            return Err(RegistrationError::InvalidTapRestore { id: binding.id });
+        }
+        if !binding.keyboard.restore_on_tap && !binding.keyboard.tap_scope.is_global() {
+            return Err(RegistrationError::InvalidTapRestore { id: binding.id });
+        }
+        binding.keyboard.tap_scope.normalize().map_err(|reason| {
+            RegistrationError::InvalidTapProcessScope {
+                id: binding.id,
+                reason,
+            }
+        })?;
         binding.process_scope.normalize().map_err(|reason| {
             RegistrationError::InvalidProcessScope {
                 id: binding.id,
@@ -195,6 +263,22 @@ pub(super) fn validate(
     }
     for (index, left) in bindings.iter().enumerate() {
         for right in bindings.iter().skip(index + 1) {
+            if left.process_scope.overlaps(&right.process_scope)
+                && regions::conditions_overlap(&left.conditions, &right.conditions)
+            {
+                for (layer, other) in [(left, right), (right, left)] {
+                    if let Some(button) = layer.keyboard.dedicated_prefix
+                        && other.held.contains(&button)
+                        && !other.keyboard.same_layer(&layer.keyboard)
+                    {
+                        return Err(RegistrationError::ConflictingPrefixPolicy {
+                            first: left.id,
+                            second: right.id,
+                            button,
+                        });
+                    }
+                }
+            }
             let same_button = activation_button(left.activation)
                 .is_some_and(|button| Some(button) == activation_button(right.activation));
             if left.held == right.held

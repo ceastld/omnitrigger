@@ -1,0 +1,23 @@
+{
+  "version": 11,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [{"kind": "key", "value": 20}],
+      "activation": {"kind": "press", "value": {"kind": "key", "value": 73}},
+      "keyboard": {"dedicated_prefix": {"kind": "key", "value": 20}, "repeat": true, "restore_on_tap": true, "tap_timeout_ms": 20000},
+      "message": "向上移动",
+      "enabled": true,
+      "action": {"kind": "send_shortcut", "keys": [38]}
+    },
+    {
+      "id": 2,
+      "held": [{"kind": "key", "value": 20}],
+      "activation": {"kind": "press", "value": {"kind": "key", "value": 75}},
+      "keyboard": {"dedicated_prefix": {"kind": "key", "value": 20}, "repeat": true, "restore_on_tap": true, "tap_timeout_ms": 20000},
+      "message": "向下移动",
+      "enabled": true,
+      "action": {"kind": "send_shortcut", "keys": [40]}
+    }
+  ]
+}

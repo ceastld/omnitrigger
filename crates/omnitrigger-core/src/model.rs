@@ -87,11 +87,36 @@ pub struct ActiveDrag {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TriggerSpec {
+    pub keyboard: KeyboardPolicy,
     pub process_scope: ProcessScope,
     pub id: u64,
     pub held: Vec<Button>,
     pub activation: Activation,
     pub conditions: Vec<TriggerCondition>,
+}
+
+/// 只影响物理键盘输入；缺省保留既有回退和单次触发行为。
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct KeyboardPolicy {
+    /// 专用层的键必须在 held 中。层内未匹配的键盘按压不回放，鼠标输入仍按各自规则处理。
+    pub dedicated_prefix: Option<Button>,
+    /// 仅普通键盘 Press 可用；重复事件只重复本次按压最初匹配的动作。
+    pub repeat: bool,
+    /// 独立按下且没有其他键盘输入或匹配动作时，松开后补发自身的一次点击。
+    pub restore_on_tap: bool,
+    /// 单按恢复的等待上限；None 不限时，不安装额外计时器。
+    pub tap_timeout_ms: Option<u32>,
+    /// 单按恢复的额外应用范围，不改变整个层的适用范围。
+    pub tap_scope: ProcessScope,
+}
+
+impl KeyboardPolicy {
+    pub(crate) fn same_layer(&self, other: &Self) -> bool {
+        self.dedicated_prefix == other.dedicated_prefix
+            && self.restore_on_tap == other.restore_on_tap
+            && self.tap_timeout_ms == other.tap_timeout_ms
+            && self.tap_scope == other.tap_scope
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

@@ -22,6 +22,7 @@ fn setup(screens: Vec<ScreenRect>, pointer: (i32, i32)) -> (ThreadState, Receive
 
 fn regional(activation: Activation, region: PointerRegion) -> TriggerSpec {
     TriggerSpec {
+        keyboard: Default::default(),
         process_scope: Default::default(),
         id: 8,
         held: vec![],
@@ -185,6 +186,7 @@ fn topology_change_cancels_active_drag_and_pending_hold_and_drains_releases() {
             }
         };
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            keyboard: Default::default(),
             process_scope: Default::default(),
             id: 8,
             held: vec![],

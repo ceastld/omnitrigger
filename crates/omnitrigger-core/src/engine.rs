@@ -12,6 +12,8 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PressState {
     Pending,
+    /// 层内等待中的按压，没有交给应用，也不会在短按或取消时回放。
+    PendingSuppressed,
     Consumed,
     Passed,
     Draining,
@@ -40,6 +42,12 @@ struct PendingDrag {
     pointer_origin: Option<(i32, i32)>,
 }
 
+#[derive(Clone, Copy)]
+struct PendingTapRestore {
+    button: Button,
+    deadline_ms: Option<u64>,
+}
+
 /// 每个组合要求当前按下集合与 held 完全一致；多余按键不会被静默忽略。
 pub struct Engine {
     bindings: Vec<TriggerSpec>,
@@ -60,6 +68,11 @@ pub struct Engine {
     process_name: Option<String>,
     active_bindings: Vec<usize>,
     requires_process: Vec<bool>,
+    dedicated_leader: Option<Button>,
+    repeat_owner: BTreeMap<Button, u64>,
+    tap_restore: Option<PendingTapRestore>,
+    layer_owner: Option<usize>,
+    tap_allowed: Vec<bool>,
 }
 
 impl Engine {
@@ -82,6 +95,11 @@ impl Engine {
             process_name: None,
             active_bindings: Vec::new(),
             requires_process: Vec::new(),
+            dedicated_leader: None,
+            repeat_owner: BTreeMap::new(),
+            tap_restore: None,
+            layer_owner: None,
+            tap_allowed: Vec::new(),
         };
         engine.compile_process_scopes();
         Ok(engine)
@@ -122,9 +140,9 @@ impl Engine {
     }
 
     pub fn needs_process_context(&self) -> bool {
-        self.bindings
-            .iter()
-            .any(|binding| !binding.process_scope.is_global())
+        self.bindings.iter().any(|binding| {
+            !binding.process_scope.is_global() || !binding.keyboard.tap_scope.is_global()
+        })
     }
 
     pub fn foreground_process(&self) -> Option<&str> {
@@ -148,6 +166,16 @@ impl Engine {
     }
 
     fn refresh_active_bindings(&mut self) {
+        self.tap_allowed = self
+            .bindings
+            .iter()
+            .map(|binding| {
+                binding
+                    .keyboard
+                    .tap_scope
+                    .matches(self.process_name.as_deref())
+            })
+            .collect();
         self.active_bindings = self
             .bindings
             .iter()
@@ -190,6 +218,10 @@ impl Engine {
     /// 取消上下文并消费旧按压的后续释放；活动拖拽的终止事件与收尾决策同步返回。
     pub fn cancel(&mut self) -> Decision {
         let drag = self.finish_drag(DragPhase::Cancelled);
+        self.dedicated_leader = None;
+        self.layer_owner = None;
+        self.repeat_owner.clear();
+        self.tap_restore = None;
         self.pending.clear();
         self.prefix_origin = None;
         self.hold = None;
@@ -197,7 +229,10 @@ impl Engine {
         self.wheel = [0; 4];
         self.wheel_owner = [None; 4];
         for state in self.pressed.values_mut() {
-            if matches!(*state, PressState::Pending | PressState::Consumed) {
+            if matches!(
+                *state,
+                PressState::Pending | PressState::PendingSuppressed | PressState::Consumed
+            ) {
                 *state = PressState::Draining;
             }
         }
@@ -226,6 +261,12 @@ impl Engine {
             return Decision::default();
         }
         let mut decision = self.advance_time(now_ms);
+        if self.tap_restore.is_some_and(|tap| matches!(event.kind,
+            InputKind::Down(Button::Key(_)) | InputKind::Up(Button::Key(_)))
+            && !matches!(event.kind, InputKind::Down(button) | InputKind::Up(button) if button == tap.button))
+        {
+            self.tap_restore = None;
+        }
         let interrupts_press = match event.kind {
             InputKind::Down(button) => !self.pressed.contains_key(&button),
             // 释放由 up 按原 Pending/Consumed 语义回放并收尾，避免先转 Passed。
@@ -256,6 +297,12 @@ impl Engine {
     pub fn advance_time(&mut self, now_ms: u64) -> Decision {
         let mut decision = self.reconcile_conditions();
         self.now_ms = self.now_ms.max(now_ms);
+        if self.tap_restore.is_some_and(|tap| {
+            tap.deadline_ms
+                .is_some_and(|deadline| self.now_ms >= deadline)
+        }) {
+            self.tap_restore = None;
+        }
         if self
             .drag
             .is_some_and(|drag| self.now_ms >= drag.deadline_ms)
@@ -375,10 +422,15 @@ impl Engine {
     }
 
     fn down(&mut self, button: Button) -> Decision {
-        if let Some(state) = self.pressed.get(&button) {
+        if let Some(state) = self.pressed.get(&button).copied() {
             // 自动重复不是第二次按压；已消费的按压也不能通过重复事件泄漏。
             return Decision {
-                consume: !matches!(*state, PressState::Passed | PressState::Observed),
+                consume: !matches!(state, PressState::Passed | PressState::Observed),
+                triggered: if state == PressState::Consumed {
+                    self.repeated_action(button).into_iter().collect()
+                } else {
+                    Vec::new()
+                },
                 ..Decision::default()
             };
         }
@@ -402,10 +454,13 @@ impl Engine {
                     && self.held_matches(&binding.held)
                     && self.conditions_match(binding)
             })
-            .map(|binding| binding.id);
-        if let Some(id) = press {
+            .map(|binding| (binding.id, binding.keyboard.repeat));
+        if let Some((id, repeat)) = press {
             self.commit_pending();
             self.pressed.insert(button, PressState::Consumed);
+            if repeat {
+                self.repeat_owner.insert(button, id);
+            }
             return Decision {
                 consume: true,
                 triggered: vec![id],
@@ -446,8 +501,18 @@ impl Engine {
         if hold.is_some() || drag.is_some() {
             self.wheel = [0; 4];
             self.wheel_owner = [None; 4];
-            self.pressed.insert(button, PressState::Pending);
-            self.pending.push(InputKind::Down(button));
+            let suppressed = self.dedicated_leader.is_some() && matches!(button, Button::Key(_));
+            self.pressed.insert(
+                button,
+                if suppressed {
+                    PressState::PendingSuppressed
+                } else {
+                    PressState::Pending
+                },
+            );
+            if !suppressed {
+                self.pending.push(InputKind::Down(button));
+            }
             self.hold = hold.map(|(id, duration_ms)| PendingHold {
                 id,
                 button,
@@ -469,7 +534,10 @@ impl Engine {
         let eligible = self.pressed.values().all(|state| {
             matches!(
                 state,
-                PressState::Pending | PressState::Consumed | PressState::Observed
+                PressState::Pending
+                    | PressState::PendingSuppressed
+                    | PressState::Consumed
+                    | PressState::Observed
             )
         });
         let extends_prefix = eligible
@@ -494,14 +562,53 @@ impl Engine {
             if matches!(button, Button::Mouse(_)) && self.prefix_origin.is_none() {
                 self.prefix_origin = self.pointer_position;
             }
-            self.pressed.insert(button, PressState::Pending);
-            self.pending.push(InputKind::Down(button));
+            if let Some(index) = self
+                .dedicated_index(button)
+                .filter(|_| self.dedicated_leader.is_none())
+            {
+                let isolated = self.pressed.is_empty();
+                let restore =
+                    self.bindings[index].keyboard.restore_on_tap && self.tap_allowed[index];
+                let timeout = self.bindings[index].keyboard.tap_timeout_ms;
+                self.commit_pending();
+                self.dedicated_leader = Some(button);
+                self.layer_owner = Some(index);
+                if isolated && restore {
+                    self.tap_restore = Some(PendingTapRestore {
+                        button,
+                        deadline_ms: timeout.map(|ms| self.now_ms.saturating_add(u64::from(ms))),
+                    });
+                }
+            }
+            if self.dedicated_leader.is_some() && matches!(button, Button::Key(_)) {
+                self.pressed.insert(button, PressState::Consumed);
+            } else {
+                self.pressed.insert(button, PressState::Pending);
+                self.pending.push(InputKind::Down(button));
+            }
             return Decision {
                 consume: true,
                 ..Decision::default()
             };
         }
         let replay = self.flush_pending();
+        if matches!(button, Button::Key(_)) && self.dedicated_leader.is_some() {
+            self.pressed.insert(button, PressState::Consumed);
+            return Decision {
+                consume: true,
+                replay,
+                ..Decision::default()
+            };
+        }
+        if self.is_dedicated_prefix(button) {
+            // 不能借用此前已交付给应用的按压来启动层；仍抑制专用键自身。
+            self.pressed.insert(button, PressState::Draining);
+            return Decision {
+                consume: true,
+                replay,
+                ..Decision::default()
+            };
+        }
         self.pressed.insert(button, PressState::Passed);
         Decision {
             replay,
@@ -510,6 +617,15 @@ impl Engine {
     }
 
     fn up(&mut self, button: Button) -> Decision {
+        self.repeat_owner.remove(&button);
+        let leaving_layer = self.dedicated_leader == Some(button);
+        let restore_tap = leaving_layer && self.tap_restore.is_some_and(|tap| tap.button == button);
+        if leaving_layer {
+            self.dedicated_leader = None;
+            self.layer_owner = None;
+            self.repeat_owner.clear();
+            self.tap_restore = None;
+        }
         let drag = if self.pressed.contains_key(&button) {
             self.active_drag.and_then(|drag| {
                 self.finish_drag(if drag.button == button {
@@ -524,6 +640,13 @@ impl Engine {
         let Some(state) = self.pressed.remove(&button) else {
             return Decision::default();
         };
+        if leaving_layer {
+            for state in self.pressed.values_mut() {
+                if matches!(*state, PressState::Consumed | PressState::PendingSuppressed) {
+                    *state = PressState::Draining;
+                }
+            }
+        }
         self.wheel = [0; 4];
         self.wheel_owner = [None; 4];
         let mut decision = match state {
@@ -536,7 +659,7 @@ impl Engine {
                     ..Decision::default()
                 }
             }
-            PressState::Consumed => {
+            PressState::Consumed | PressState::PendingSuppressed => {
                 // 已完成组合的前缀释放后，不让另一个尚未完成的组合继续等待。
                 let replay = self.flush_pending();
                 Decision {
@@ -551,6 +674,11 @@ impl Engine {
             },
             PressState::Passed | PressState::Observed => Decision::default(),
         };
+        if restore_tap {
+            decision
+                .replay
+                .extend([InputKind::Down(button), InputKind::Up(button)]);
+        }
         decision.drags.extend(drag);
         decision
     }
@@ -575,6 +703,7 @@ impl Engine {
             };
         };
         let index = wheel_index(direction);
+        self.tap_restore = None;
         if self.wheel_owner[index] != Some(id) {
             self.wheel[index] = 0;
         }
@@ -586,7 +715,7 @@ impl Engine {
         if count > 0 {
             self.commit_pending();
             self.append_regional_tails();
-        } else if self.binding_has_conditions(id)
+        } else if self.binding_keeps_wheel_remainder(id)
             || self
                 .pressed
                 .values()
@@ -602,12 +731,48 @@ impl Engine {
         }
     }
 
+    fn is_dedicated_prefix(&self, button: Button) -> bool {
+        self.dedicated_index(button).is_some()
+    }
+
+    fn dedicated_index(&self, button: Button) -> Option<usize> {
+        self.active_bindings.iter().copied().find(|&index| {
+            let binding = &self.bindings[index];
+            binding.keyboard.dedicated_prefix == Some(button) && self.conditions_match(binding)
+        })
+    }
+
+    fn repeated_action(&self, button: Button) -> Option<u64> {
+        let id = *self.repeat_owner.get(&button)?;
+        self.candidates()
+            .find(|binding| {
+                binding.id == id
+                    && self.conditions_match(binding)
+                    && self.pressed.len() == binding.held.len() + 1
+                    && self.pressed.iter().all(|(&pressed, &state)| {
+                        pressed == button
+                            || (binding.held.contains(&pressed)
+                                && matches!(
+                                    state,
+                                    PressState::Pending
+                                        | PressState::PendingSuppressed
+                                        | PressState::Consumed
+                                        | PressState::Observed
+                                ))
+                    })
+            })
+            .map(|binding| binding.id)
+    }
+
     fn held_matches(&self, held: &[Button]) -> bool {
         self.pressed.len() == held.len()
             && self.pressed.iter().all(|(button, state)| {
                 matches!(
                     state,
-                    PressState::Pending | PressState::Consumed | PressState::Observed
+                    PressState::Pending
+                        | PressState::PendingSuppressed
+                        | PressState::Consumed
+                        | PressState::Observed
                 ) && held.contains(button)
             })
     }
@@ -619,9 +784,11 @@ impl Engine {
             .all(|condition| condition.matches(self.pointer_position, &self.screens))
     }
 
-    fn binding_has_conditions(&self, id: u64) -> bool {
-        self.candidates()
-            .any(|binding| binding.id == id && !binding.conditions.is_empty())
+    fn binding_keeps_wheel_remainder(&self, id: u64) -> bool {
+        self.candidates().any(|binding| {
+            binding.id == id
+                && (!binding.conditions.is_empty() || binding.keyboard.dedicated_prefix.is_some())
+        })
     }
 
     fn binding_conditions_match(&self, id: u64) -> bool {
@@ -631,6 +798,28 @@ impl Engine {
     }
 
     fn reconcile_conditions(&mut self) -> Decision {
+        if self.dedicated_leader.is_some_and(|button| {
+            self.layer_owner
+                .zip(self.dedicated_index(button))
+                .is_none_or(|(owner, current)| {
+                    !self.bindings[owner]
+                        .keyboard
+                        .same_layer(&self.bindings[current].keyboard)
+                })
+        }) {
+            let replay = self.flush_pending();
+            let mut decision = self.cancel();
+            decision.replay = replay;
+            return decision;
+        }
+        let revoked = self
+            .repeat_owner
+            .iter()
+            .filter_map(|(&button, &id)| (!self.binding_conditions_match(id)).then_some(button))
+            .collect::<Vec<_>>();
+        for button in revoked {
+            self.repeat_owner.remove(&button);
+        }
         let mut decision = Decision::default();
         let had_timed = self.hold.is_some() || self.drag.is_some();
         if self
@@ -678,7 +867,7 @@ impl Engine {
     fn append_regional_tails(&mut self) {
         for index in 0..4 {
             if self.wheel[index] == 0
-                || !self.wheel_owner[index].is_some_and(|id| self.binding_has_conditions(id))
+                || !self.wheel_owner[index].is_some_and(|id| self.binding_keeps_wheel_remainder(id))
             {
                 continue;
             }
@@ -695,12 +884,13 @@ impl Engine {
     }
 
     fn commit_pending(&mut self) {
+        self.tap_restore = None;
         self.prefix_origin = None;
         self.pending.clear();
         self.hold = None;
         self.drag = None;
         for state in self.pressed.values_mut() {
-            if *state == PressState::Pending {
+            if matches!(*state, PressState::Pending | PressState::PendingSuppressed) {
                 *state = PressState::Consumed;
             }
         }
@@ -715,6 +905,8 @@ impl Engine {
         for state in self.pressed.values_mut() {
             if *state == PressState::Pending {
                 *state = PressState::Passed;
+            } else if *state == PressState::PendingSuppressed {
+                *state = PressState::Consumed;
             }
         }
         std::mem::take(&mut self.pending)
