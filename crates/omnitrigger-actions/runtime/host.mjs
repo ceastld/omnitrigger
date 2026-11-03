@@ -169,6 +169,19 @@ const desktop = Object.freeze({
         || keys.some(key => !Number.isInteger(key) || key < 1 || key > 254)) {
       throw Object.assign(fault('invalid_input', '快捷键需要 1–5 个明确的 VK 整数；修饰键在前。'), {effectState:'not_started'});
     }
+    if (options?.timing !== undefined) {
+      const timing = options.timing;
+      const overrides = timing?.process_overrides ?? {};
+      if (typeof options !== 'object' || Array.isArray(options) || Object.keys(options).length !== 1 || !timing || typeof timing !== 'object' || Array.isArray(timing)
+          || Object.keys(timing).some(key => !['key_down_delay_ms','process_overrides'].includes(key))
+          || (timing.key_down_delay_ms !== undefined && (!Number.isInteger(timing.key_down_delay_ms) || timing.key_down_delay_ms < 0 || timing.key_down_delay_ms > 1000))
+          || !overrides || typeof overrides !== 'object' || Array.isArray(overrides) || Object.keys(overrides).length > 16
+          || Object.values(overrides).some(value => !Number.isInteger(value) || value < 0 || value > 1000)
+          || timing.process_overrides === null) {
+        throw Object.assign(fault('invalid_input', 'timing 需要原生快捷键时序对象，与 keyDownDelayMs 互斥。'), {effectState:'not_started'});
+      }
+      return nativeCall('keyboard.shortcut', {keys,timing});
+    }
     const delay = keyTiming(options, 1);
     return nativeCall('keyboard.shortcut', delay ? {keys, key_down_delay_ms:delay} : {keys});
   },

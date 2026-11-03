@@ -117,7 +117,7 @@ export default async function (ctx) {
 | `ctx.browser.call(method, args, { profile, timeoutMs })` | 复用已安装连接器的 SDK，通过持久 IPC 调用 Chrome API，返回原始结果。 |
 | `ctx.browser.chrome.*` | 动态 Proxy，例如 `await ctx.browser.chrome.bookmarks.getTree()`；指定 profile 或超时时使用 `call`。 |
 | `ctx.desktop.target()` | 读取本次提交时捕获的目标，返回真实 `processName`、`windowRole`（`unknown`／`application`／`desktop`／`taskbar`）、`title`、`processId`、`isForeground`。角色在调用时采集，不重新选择目标。 |
-| `ctx.desktop.sendShortcut(keys, options?)` | 向原目标发送一次快捷键，明确 VK、修饰键在前，最多四类修饰键加一个普通键。可设置 `keyDownDelayMs`，默认零。返回 `{ submitted: true }` 仅表示系统接纳输入。 |
+| `ctx.desktop.sendShortcut(keys, options?)` | 向原目标发送一次快捷键，明确 VK、修饰键在前，最多四类修饰键加一个普通键。可设置 `keyDownDelayMs`，或用 `timing` 复用原生进程时序配置；两者互斥，默认零。返回 `{ submitted: true }` 仅表示系统接纳输入。 |
 | `ctx.desktop.sendKeySequence(modifiers, keys, options?)` | 最多四类修饰键在整组 1–16 个普通键期间保持按下。保留顺序和左右侧；可设置 `keyDownDelayMs`。 |
 | `ctx.desktop.sendText(text)` | 分批发送 Unicode 文本，不借用剪贴板；每批核验原目标及取消状态。 |
 | `ctx.desktop.copySelectionText()` | 向原目标发送 Ctrl+C，等待剪贴板序号变化后读取文本；复制结果保留在剪贴板。 |
@@ -145,7 +145,9 @@ export default async ctx => {
 
 桌面调用须逐个 `await`，并发调用报 `desktop_busy`，每次动作最多 128 次桌面调用。单次回执等待最多 5 秒，仍受动作总运行时限限制；返回时尚有调用会报 `pending_desktop_calls`。桥接仅在本次调用期间监听回环地址，使用系统随机令牌，不占用脚本 stdout，也不新增常驻服务或桥接线程。它与脚本代码一样使用当前用户权限，不构成沙盒。
 
-键盘 `options` 只接受 `keyDownDelayMs`，须为 0–1000 的整数。正延迟在修饰键就绪后等待一次，再在每个普通键按下后等待一次；总等待预算 `(普通键数量 + 1) × keyDownDelayMs` 不得超过 3000ms。等待及逐次提交期间检查取消和原目标；失败只尝试释放本次已提交的按键，不重试动作，也不释放借用的修饰键。零延迟的单次 `sendShortcut` 保留原媒体键 Shell 路径；`sendKeySequence` 始终使用按键输入。错误保留 `method`、`code` 和 `effectState`，部分提交或释放收尾失败仍可能有副作用。
+键盘 `options.keyDownDelayMs` 须为 0–1000 的整数。正延迟在修饰键就绪后等待一次，再在每个普通键按下后等待一次；总等待预算 `(普通键数量 + 1) × keyDownDelayMs` 不得超过 3000ms。等待及逐次提交期间检查取消和原目标；失败只尝试释放本次已提交的按键，不重试动作，也不释放借用的修饰键。零延迟的单次 `sendShortcut` 保留原媒体键 Shell 路径；`sendKeySequence` 始终使用按键输入。错误保留 `method`、`code` 和 `effectState`，部分提交或释放收尾失败仍可能有副作用。
+
+`sendShortcut` 另接受 `{timing:{key_down_delay_ms:0,process_overrides:{wps:10}}}`，字段与原生快捷键配置一致，由 Rust 共用同一校验和解析。覆盖最多 16 个明确进程文件名，忽略大小写和可选 `.exe`，按本次捕获的原目标进程选择；身份读取失败则报错，不退到当前窗口或忽略覆盖。它与 `keyDownDelayMs` 互斥，`sendKeySequence` 仍只接受后者。[发送快捷键示例](../examples/actions/shortcut/)展示动作包调用与隔离浏览器验收。
 
 [键盘序列示例](../examples/actions/keyboard-sequence/)提供保持修饰键的序列与可设置步骤间隔的多个独立快捷键。例如 `await ctx.desktop.sendKeySequence([163], [77, 77], {keyDownDelayMs:10})` 在右 Ctrl 按住期间依次轻点两次 M。示例按原目标进程选择默认时序，调用方可显式覆盖；这不是通用 SendKeys 解释器。
 

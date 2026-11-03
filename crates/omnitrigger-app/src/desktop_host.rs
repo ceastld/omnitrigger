@@ -144,21 +144,43 @@ impl NativeHost for DesktopHost {
                 )
             }
             "keyboard.shortcut" => {
-                let args: ShortcutArgs = serde_json::from_value(params)
-                    .map_err(|message| error("invalid_input", message, "not_started"))?;
-                omnitrigger_windows::validate_shortcut(&args.keys)
-                    .map_err(|message| error("invalid_input", message, "not_started"))?;
-                omnitrigger_windows::validate_key_timing(1, args.key_down_delay_ms)
+                let action: crate::shortcut::ShortcutAction = if params.get("timing").is_some() {
+                    serde_json::from_value(params)
+                        .map_err(|message| error("invalid_input", message, "not_started"))?
+                } else {
+                    let args: ShortcutArgs = serde_json::from_value(params)
+                        .map_err(|message| error("invalid_input", message, "not_started"))?;
+                    crate::shortcut::ShortcutAction {
+                        keys: args.keys,
+                        timing: crate::shortcut::KeyboardTiming {
+                            key_down_delay_ms: args.key_down_delay_ms,
+                            ..Default::default()
+                        },
+                    }
+                };
+                action
+                    .validate()
                     .map_err(|message| error("invalid_input", message, "not_started"))?;
                 let target = self.target.as_ref().map_err(Clone::clone)?;
                 target
                     .ensure_foreground()
                     .map_err(|message| error("target_changed", message, "not_started"))?;
+                let delay = if action.timing.process_overrides.is_empty() {
+                    action.timing.key_down_delay_ms
+                } else {
+                    let info = target
+                        .info()
+                        .map_err(|message| error("target_changed", message, "not_started"))?;
+                    action
+                        .timing
+                        .resolve(&info.process_name)
+                        .map_err(|message| error("invalid_input", message, "not_started"))?
+                };
                 if cancellation.is_cancelled() {
                     return Err(error("cancelled", "动作已取消。", "not_started"));
                 }
                 target
-                    .send_shortcut_timed_if(&args.keys, args.key_down_delay_ms, || {
+                    .send_shortcut_timed_if(&action.keys, delay, || {
                         if cancellation.is_cancelled() {
                             Err("动作已取消，未提交输入。".into())
                         } else {
@@ -234,6 +256,19 @@ mod tests {
             ("clipboard.read", json!({"unexpected":true})),
             ("clipboard.write", json!({"text":"a\0b"})),
             ("keyboard.text", json!({"text":5})),
+            ("keyboard.shortcut", json!({"keys":[163,9],"timing":null})),
+            (
+                "keyboard.shortcut",
+                json!({"keys":[163,9],"timing":{},"key_down_delay_ms":0}),
+            ),
+            (
+                "keyboard.shortcut",
+                json!({"keys":[163,9],"timing":{"process_overrides":{"bad/path":10}}}),
+            ),
+            (
+                "keyboard.shortcut",
+                json!({"keys":[163,9],"timing":{"process_overrides":{"wps":10,"WPS.exe":20}}}),
+            ),
             ("selection.copy", json!([])),
         ] {
             assert_eq!(
@@ -251,6 +286,16 @@ mod tests {
             host.call("target.info", json!({}), &token)
                 .unwrap_err()
                 .code,
+            "target_unavailable"
+        );
+        assert_eq!(
+            host.call(
+                "keyboard.shortcut",
+                json!({"keys":[163,9],"timing":{"process_overrides":{"wps":10}}}),
+                &token
+            )
+            .unwrap_err()
+            .code,
             "target_unavailable"
         );
         assert_eq!(

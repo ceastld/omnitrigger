@@ -1,0 +1,5 @@
+[
+  {"name":"previous","action":{"keys":[163,161,9],"timing":{"process_overrides":{"wps":10}}}},
+  {"name":"next","action":{"keys":[163,9],"timing":{"process_overrides":{"wps":10}}}},
+  {"name":"close","action":{"keys":[163,87],"timing":{"process_overrides":{"wps":10}}}}
+]

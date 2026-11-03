@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "id": "examples.shortcut",
+  "name": "发送快捷键",
+  "version": "1.0.0",
+  "actions": [{"id":"send","title":"发送快捷键","version":1,"runtime":"node","entry":"main.mjs"}]
+}

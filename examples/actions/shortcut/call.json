@@ -1,0 +1,6 @@
+{
+  "package_id": "examples.shortcut",
+  "action_id": "send",
+  "action_version": 1,
+  "input": {"keys":[163,9],"timing":{"process_overrides":{"wps":10}}}
+}

@@ -1043,6 +1043,69 @@ mod tests {
     }
 
     #[test]
+    fn side_tab_example_matches_packets_clicks_and_keeps_release_and_tap_fallback() {
+        use omnitrigger_core::{Axis, InputEvent, InputKind, MouseButton};
+        let bindings = decode(include_str!("../../../examples/mouse-tab-navigation.json")).unwrap();
+        assert_eq!(bindings.len(), 3);
+        assert!(bindings.iter().all(|binding| !binding.enabled));
+        let mut engine =
+            Engine::new(bindings.into_iter().map(|binding| binding.spec).collect()).unwrap();
+        engine.set_foreground_process(Some("chrome")).unwrap();
+        engine
+            .set_pointer_context(Some("chrome"), omnitrigger_core::WindowRole::Application)
+            .unwrap();
+        let input = |engine: &mut Engine, kind| {
+            engine.process(InputEvent {
+                kind,
+                injected: false,
+            })
+        };
+        let side = Button::Mouse(MouseButton::X1);
+        let right = Button::Mouse(MouseButton::Right);
+        assert!(input(&mut engine, InputKind::Down(side)).consume);
+        for (delta, id) in [(15, 1), (-240, 2)] {
+            let result = input(
+                &mut engine,
+                InputKind::Wheel {
+                    axis: Axis::Vertical,
+                    delta,
+                },
+            );
+            assert!(result.consume);
+            assert_eq!(result.triggered, [id]);
+        }
+        assert_eq!(input(&mut engine, InputKind::Down(right)).triggered, [3]);
+        for key in [right, side] {
+            let result = input(&mut engine, InputKind::Up(key));
+            assert!(result.consume && result.replay.is_empty());
+        }
+        input(&mut engine, InputKind::Down(side));
+        assert_eq!(
+            input(&mut engine, InputKind::Up(side)).replay,
+            [InputKind::Down(side), InputKind::Up(side)]
+        );
+        let ctrl = Button::Key(162);
+        input(&mut engine, InputKind::Down(ctrl));
+        assert!(!input(&mut engine, InputKind::Down(side)).consume);
+        assert!(
+            !input(
+                &mut engine,
+                InputKind::Wheel {
+                    axis: Axis::Vertical,
+                    delta: 120
+                }
+            )
+            .consume
+        );
+        input(&mut engine, InputKind::Up(side));
+        input(&mut engine, InputKind::Up(ctrl));
+        engine
+            .set_pointer_context(None, omnitrigger_core::WindowRole::Unknown)
+            .unwrap();
+        assert!(!input(&mut engine, InputKind::Down(side)).consume);
+    }
+
+    #[test]
     fn repeat_on_hold_is_rejected_without_dropping_the_recorded_keys() {
         let mut bindings = vec![defaults()[0].clone()];
         bindings[0].spec.keyboard.repeat = true;

@@ -777,8 +777,10 @@ mod tests {
             r#"export default async ctx => {
             await ctx.desktop.sendKeySequence([163,165,161],[75,67],{keyDownDelayMs:10});
             await ctx.desktop.sendShortcut([163,65],{keyDownDelayMs:20});
+            await ctx.desktop.sendShortcut([163,9],{timing:{process_overrides:{'WPS.exe':10}}});
             const invalid=[];
-            for (const options of [{keyDownDelayMs:null},{keyDownDelayMs:-1},{keyDownDelayMs:1.5},{keyDownDelayMs:1001},{delay:10},null]) {
+            for (const options of [{keyDownDelayMs:null},{keyDownDelayMs:-1},{keyDownDelayMs:1.5},{keyDownDelayMs:1001},{delay:10},null,
+                {timing:null},{timing:{},keyDownDelayMs:0},{timing:{process_overrides:{wps:null}}},{timing:{key_down_delay_ms:1001}}]) {
                 try { await ctx.desktop.sendShortcut([65],options); } catch(e) { invalid.push([e.code,e.effectState]); }
             }
             try { await ctx.desktop.sendKeySequence([163],Array(16).fill(65),{keyDownDelayMs:200}); } catch(e) { invalid.push([e.code,e.effectState]); }
@@ -795,9 +797,12 @@ mod tests {
                 Some(&host),
             )
             .unwrap();
-        assert_eq!(result, json!(vec![vec!["invalid_input", "not_started"]; 7]));
+        assert_eq!(
+            result,
+            json!(vec![vec!["invalid_input", "not_started"]; 11])
+        );
         let calls = host.0.lock().unwrap();
-        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len(), 3);
         assert_eq!(
             calls[0],
             json!({"method":"keyboard.sequence","params":{"modifiers":[163,165,161],"keys":[75,67],"key_down_delay_ms":10}})
@@ -805,6 +810,10 @@ mod tests {
         assert_eq!(
             calls[1],
             json!({"method":"keyboard.shortcut","params":{"keys":[163,65],"key_down_delay_ms":20}})
+        );
+        assert_eq!(
+            calls[2],
+            json!({"method":"keyboard.shortcut","params":{"keys":[163,9],"timing":{"process_overrides":{"WPS.exe":10}}}})
         );
     }
 

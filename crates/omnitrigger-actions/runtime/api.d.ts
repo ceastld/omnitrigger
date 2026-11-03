@@ -5,6 +5,11 @@ export interface BrowserOptions {
   /** 默认 10000，范围 1–60000；同时受动作总运行时限约束。 */
   timeoutMs?: number;
 }
+/** 与原生 send_shortcut 配置共用字段、进程规范化和校验。 */
+export interface ShortcutTiming {
+  key_down_delay_ms?: number;
+  process_overrides?: Record<string, number>;
+}
 export interface BrowserFault extends Error {
   code: string;
   method?: string;
@@ -46,7 +51,7 @@ export interface ActionContext {
     /** 本次提交时捕获的目标，不在调用时重新选择前台。进程名含 .exe。 */
     target(): Promise<{processName: string; windowRole: "unknown" | "application" | "desktop" | "taskbar"; title: string; processId: number; isForeground: boolean}>;
     /** 明确 VK，修饰键在前；仅确认系统接纳输入，不确认业务动作完成。 */
-    sendShortcut(keys: number[], options?: {keyDownDelayMs?: number}): Promise<{submitted: true}>;
+    sendShortcut(keys: number[], options?: {keyDownDelayMs?: number; timing?: never} | {timing: ShortcutTiming; keyDownDelayMs?: never}): Promise<{submitted: true}>;
     /** 修饰键跨越整组普通键；延迟在修饰键就绪后、每个普通键按下后等待。 */
     sendKeySequence(modifiers: number[], keys: number[], options?: {keyDownDelayMs?: number}): Promise<{submitted: true}>;
     /** Unicode 直接输入，不使用剪贴板。最多 65,536 个 UTF-16 单元，无 NUL。 */

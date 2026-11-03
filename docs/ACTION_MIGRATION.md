@@ -16,6 +16,10 @@ python scripts/plan_action_migration.py `
 
 输出文件必须尚不存在。控制台仅输出条目数量；详细规则和文件路径保留在本机输出中。每份输入的 SHA-256 记录在 `evidence`，便于后续核对快照是否改变。
 
+可选的 `--mouse-settings <文件>` 提供全局鼠标设置，也可放在 `source.MouseSettings` 中。支持直接对象、成功的 `resultJson` 导出响应及含 `Values:[{Name,Value}]` 的快照；重复名称或失败响应会被拒绝。需包含 `SpecialExeList`、`DisableOnFullscreenApp`、`EnableReverseVScroll`，缺失时保留源鼠标行并标记缺口。
+
+目前可为无位置、无去抖、无需激活窗口的侧键 1／2 加滚轮或鼠标按下规则生成触发描述：滚轮使用逐事件策略，进程条件放入 `pointer_scope`。白名单非空时保留其优先于黑名单的语义，其他情况合并全局和本条排除；不能表达的路径名单不会被丢弃后继续转换。列表记录当前配置中同组合的编号，只有通知或不同动作时不会标成已迁移。前缀生命周期、额外鼠标按住状态、队列调度和窗口身份差异继续作为显式缺口；生成触发描述不代表可以直接启用。
+
 ## 输入格式
 
 - `source`：含 `PowerKeys` 字典、`MouseActions` 数组及可选 `ExeSettings` 字典的 V1 配置快照。每个前缀包含 `Key`、`IsEnabled`、`KeepOriginKeyFunc`、`BlackList`、`KeyActions`；规则保留原字段。应用配置中的 `MouseActions` 同样纳入。只读导出的 `InputSettings` 用于确认单按恢复超时及 `DefaultModifiedKeyDownDelay`；缺少后者时不能确认快捷键的输入时序。

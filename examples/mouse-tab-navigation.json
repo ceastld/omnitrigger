@@ -1,0 +1,26 @@
+{
+  "version": 17,
+  "bindings": [
+    {
+      "id":1,"held":[{"kind":"x1"}],"activation":{"kind":"wheel_up"},"wheel":"packet",
+      "process_scope":{"allow":["chrome","msedge","firefox"]},
+      "pointer_scope":{"allow":["chrome","msedge","firefox"]},
+      "message":"侧键加上滚：上一标签","enabled":false,
+      "action":{"kind":"send_shortcut","keys":[163,161,9]}
+    },
+    {
+      "id":2,"held":[{"kind":"x1"}],"activation":{"kind":"wheel_down"},"wheel":"packet",
+      "process_scope":{"allow":["chrome","msedge","firefox"]},
+      "pointer_scope":{"allow":["chrome","msedge","firefox"]},
+      "message":"侧键加下滚：下一标签","enabled":false,
+      "action":{"kind":"send_shortcut","keys":[163,9]}
+    },
+    {
+      "id":3,"held":[{"kind":"x1"}],"activation":{"kind":"press","value":{"kind":"right"}},
+      "process_scope":{"allow":["chrome","msedge","firefox"]},
+      "pointer_scope":{"allow":["chrome","msedge","firefox"]},
+      "message":"侧键加右键：关闭标签","enabled":false,
+      "action":{"kind":"send_shortcut","keys":[163,87]}
+    }
+  ]
+}

@@ -7,6 +7,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
+import { verifyDesktopShortcuts } from './browser-shortcut-smoke.mjs';
 
 const args = process.argv.slice(2);
 const option = name => { const index = args.indexOf(name); if (index < 0 || !args[index + 1]) throw Error(`需要 ${name}`); return resolve(args[index + 1]); };
@@ -27,7 +28,7 @@ try {
   const existing = await client.profiles();
   report.existingProfiles = existing.length;
   context = await playwright.chromium.launchPersistentContext(join(scratch, 'profile'), {
-    executablePath: chrome, headless: true, ignoreDefaultArgs: ['--disable-extensions'],
+    executablePath: chrome, headless: !args.includes('--desktop-shortcuts'), ignoreDefaultArgs: ['--disable-extensions'],
     args: ['--enable-unsafe-extension-debugging', '--no-first-run', '--no-default-browser-check'],
   });
   const cdp = await context.browser().newBrowserCDPSession();
@@ -108,6 +109,10 @@ try {
   assert(Number.isInteger(window.id));
   await call('windows.remove', [window.id]);
   report.checks.push('windows.create/remove（仅测试窗口）');
+  if (args.includes('--desktop-shortcuts')) {
+    report.desktopShortcuts = await verifyDesktopShortcuts({context,cdp,call,base,scratch,app:option('--app'),root,fixture:option('--desktop-shortcuts')});
+    report.checks.push('隔离 Chrome：真实桌面脚本 API 完成上一标签、下一标签及关闭当前标签');
+  }
   await assert.rejects(call('omnitriggerMissing.noSuchMethod'), error => { report.apiError = {code:error.code, effectState:error.effectState}; return !!error.code; });
   await assert.rejects(call('tabs.get', [2147483647]), error => error.code === 'chrome_error');
   const cancellation = new AbortController(); cancellation.abort();

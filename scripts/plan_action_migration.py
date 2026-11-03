@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 from action_body_projection import keyboard_body
+from mouse_action_projection import mouse_trigger, settings_snapshot
 
 
 def load(path):
@@ -341,7 +342,7 @@ def project_source_precedence(bindings, current):
                     row["source_normalizations"].append({"kind": "default_excludes_specific_rules", "names": added})
             if sum(len(scope.get(key, [])) for key in ("allow", "deny")) > 64:
                 row["trigger_gaps"] = sorted(set(row["trigger_gaps"] + ["unsupported_process_list"]))
-    candidates = [row for row in bindings if row.get("trigger")]
+    candidates = [row for row in bindings if row["kind"] == "power_key" and row.get("trigger")]
     for terminal in candidates:
         activation = terminal["trigger"]["activation"]
         if activation["kind"] != "press":
@@ -379,7 +380,8 @@ def project_source_precedence(bindings, current):
                          if row["operation"]["status"] != "native_action_available" else "needs_runtime_verification")
 
 
-def build_plan(source, catalog_payload, usage, counters, current, limit=20, body_records=None):
+def build_plan(source, catalog_payload, usage, counters, current, limit=20, body_records=None, mouse_settings=None):
+    mouse_settings = settings_snapshot(mouse_settings if mouse_settings is not None else source.get("MouseSettings"))
     if body_records is not None:
         if isinstance(body_records, dict) and "resultJson" in body_records:
             if body_records.get("success") is not True:
@@ -460,10 +462,15 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20, body
             if not rule.get("IsEnabled"):
                 continue
             identity = f"mouse:{scope}:{index}"
+            projection = mouse_trigger(rule, mouse_settings) if scope == "global" else {"trigger":None,"trigger_gaps":["mouse_application_profile_selection"]}
+            matching = [item for item in current["bindings"] if projection["trigger"] is not None
+                        and item.get("held")==projection["trigger"]["held"]
+                        and item.get("activation")==projection["trigger"]["activation"]]
             bindings.append({"key": identity, "kind": "mouse", "title": rule.get("Description"),
                              "source": {"scope": scope, "rule": rule},
                              "operation": operation(rule, source.get("InputSettings"), body_records), "status": "needs_trigger_semantics_review",
-                             "trigger_gaps": ["mouse_rule_semantics"],
+                             **projection,
+                             "matching_trigger_configuration_ids": [item["id"] for item in matching],
                              "equivalent_configuration_ids": []})
             if rule.get("ActionType") == 12:
                 references[normalized_id(rule.get("Data"))].append(identity)
@@ -506,10 +513,13 @@ def main(argv=None):
     for name in ("source", "catalog", "usage", "counters", "current", "out"):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--bodies", type=Path, help="可选的已导出正文/模板来源快照，只读")
+    parser.add_argument("--mouse-settings", type=Path, help="可选的已导出鼠标全局设置，只读")
     args = parser.parse_args(argv)
     paths = {name: getattr(args, name) for name in ("source", "catalog", "usage", "counters", "current")}
     if args.bodies:
         paths["bodies"] = args.bodies
+    if args.mouse_settings:
+        paths["mouse_settings"] = args.mouse_settings
     plan = build_plan(**{{"catalog":"catalog_payload", "bodies":"body_records"}.get(name, name): load(path)
                          for name, path in paths.items()})
     plan["evidence"] = {name: {"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}

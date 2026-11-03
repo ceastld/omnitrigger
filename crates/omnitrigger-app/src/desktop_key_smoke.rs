@@ -418,6 +418,94 @@ fn interactive_desktop_key_sequence_smoke() {
             reports.push(json!({"case":case.name,"evidence":verify(&case.expected,&case.gaps)}));
         }
     }
+    if let Some(path) = std::env::var_os("OMNITRIGGER_SHORTCUT_FIXTURE") {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Case {
+            name: String,
+            action: ShortcutAction,
+            expected: Vec<(u32, bool)>,
+            gaps: Vec<(usize, usize, u32)>,
+        }
+        let file = std::fs::File::open(path).unwrap();
+        assert!(file.metadata().unwrap().len() <= 1024 * 1024);
+        let cases: Vec<Case> = serde_json::from_reader(file).unwrap();
+        assert!(!cases.is_empty() && cases.len() <= 32);
+        for case in cases {
+            assert!(!case.expected.is_empty() && case.expected.len() <= 64);
+            case.action.validate().unwrap();
+            for runtime in ["native", "node"] {
+                assert!([windows.main, windows.other].contains(&unsafe { GetForegroundWindow() }));
+                focus(windows.main);
+                reset();
+                let raw = omnitrigger_windows::capture_shortcut_target().unwrap();
+                let process = omnitrigger_windows::ScriptTarget::capture(raw)
+                    .unwrap()
+                    .info()
+                    .unwrap()
+                    .process_name;
+                let delay = case.action.timing.resolve(&process).unwrap();
+                if runtime == "native" {
+                    executor
+                        .submit_shortcut_to(1, case.action.clone(), raw)
+                        .unwrap();
+                } else {
+                    service
+                        .submit_with_host(
+                            1,
+                            ActionCall {
+                                package_id: "examples.shortcut".into(),
+                                action_id: "send".into(),
+                                action_version: 1,
+                                input: serde_json::to_value(&case.action).unwrap(),
+                            },
+                            Some(Arc::new(DesktopHost::capture(Some(raw)))),
+                        )
+                        .unwrap();
+                }
+                let began = Instant::now();
+                loop {
+                    pump();
+                    assert_eq!(
+                        unsafe { GetForegroundWindow() },
+                        windows.main,
+                        "快捷键实测失焦"
+                    );
+                    let done = if runtime == "native" {
+                        executor
+                            .try_recv()
+                            .ok()
+                            .map(|event| {
+                                assert!(
+                                    matches!(event.outcome, ExecutionOutcome::ShortcutSent),
+                                    "{event:?}"
+                                );
+                                true
+                            })
+                            .unwrap_or(false)
+                    } else if let Ok(event) = service.try_recv() {
+                        if event.outcome.is_terminal() {
+                            assert!(
+                                matches!(event.outcome, ActionOutcome::Succeeded { .. }),
+                                "{event:?}"
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if done {
+                        break;
+                    }
+                    assert!(began.elapsed() < Duration::from_secs(10), "快捷键实测超时");
+                    thread::sleep(Duration::from_millis(1));
+                }
+                reports.push(json!({"case":case.name,"runtime":runtime,"resolved_delay_ms":delay,"evidence":verify(&case.expected,&case.gaps)}));
+            }
+        }
+    }
     // 验证同一输入配方在自建多行输入框中的实际选区与行边界行为。
     let edit = unsafe {
         CreateWindowExW(
