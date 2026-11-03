@@ -2334,6 +2334,7 @@ mod tests {
             conditions: vec![],
             process_scope: Default::default(),
             keyboard: omnitrigger_core::KeyboardPolicy {
+                matching: Default::default(),
                 dedicated_prefix: Some(caps),
                 repeat: true,
                 restore_on_tap: true,
@@ -2373,6 +2374,54 @@ mod tests {
         state.command(BackendCommand::SetEnabled(false));
         assert!(!state.input(InputKind::Down(unknown), None).consume);
         assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn captured_keyboard_layer_forwards_reselection_and_finishes_each_owned_release() {
+        let (events, received) = mpsc::sync_channel(EVENT_CAPACITY);
+        let mut state = ThreadState::new(events);
+        let caps = Button::Key(20);
+        let adorn = Button::Key(69);
+        let terminal = Button::Key(80);
+        let unknown = Button::Key(88);
+        let make = |id, held, priority| TriggerSpec {
+            id,
+            held,
+            activation: omnitrigger_core::Activation::Press(terminal),
+            conditions: vec![],
+            process_scope: Default::default(),
+            keyboard: omnitrigger_core::KeyboardPolicy {
+                dedicated_prefix: Some(caps),
+                repeat: true,
+                matching: omnitrigger_core::KeyboardMatching::Captured { priority },
+                ..Default::default()
+            },
+        };
+        state.command(BackendCommand::SetBindings(vec![
+            make(1, vec![caps, adorn], 0),
+            make(2, vec![caps], 1),
+        ]));
+        for key in [caps, adorn, unknown] {
+            let result = state.input(InputKind::Down(key), None);
+            assert!(result.consume && result.replay_kinds.is_empty());
+        }
+        assert!(state.input(InputKind::Down(terminal), None).consume);
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            BackendEvent::Triggered { id: 1, .. }
+        ));
+        assert!(state.input(InputKind::Up(adorn), None).consume);
+        let repeated = state.input(InputKind::Down(terminal), None);
+        assert!(repeated.consume && repeated.replay_kinds.is_empty());
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            BackendEvent::Triggered { id: 2, .. }
+        ));
+        for key in [caps, terminal, unknown] {
+            let result = state.input(InputKind::Up(key), None);
+            assert!(result.consume && result.replay_kinds.is_empty());
+        }
+        assert!(state.owned_press.is_empty() && received.try_recv().is_err());
     }
 
     #[test]
