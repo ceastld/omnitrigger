@@ -1307,6 +1307,13 @@ mod tests {
             held: vec![Button::Key(0xa0)],
             activation: Activation::Press(Button::Key(0x14)),
         };
+        // Shift+CapsLock 与 CapsLock+W 的 held 可区分，即使已有项禁用也不误报。
+        check_candidate(&values, &prefix).unwrap();
+        // 裸 CapsLock 会抢先作为动作末键，仍与已有 CapsLock 前缀冲突。
+        let prefix = TriggerSpec {
+            held: vec![],
+            ..prefix
+        };
         assert_eq!(
             check_candidate(&values, &prefix).unwrap_err().other,
             Some(1)
