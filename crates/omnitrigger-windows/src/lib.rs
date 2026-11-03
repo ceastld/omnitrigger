@@ -6,6 +6,7 @@ mod automation_basics;
 #[cfg(windows)]
 pub use automation_basics::{
     copy_selection_text, open_target, read_clipboard_text, send_text_to, write_clipboard_text,
+    write_clipboard_text_if,
 };
 pub use automation_basics::{validate_automation_text, validate_open_target};
 

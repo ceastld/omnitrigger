@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "examples.desktop-text",
+  "name": "桌面文本示例",
+  "version": "1.0.0",
+  "actions": [
+    {"id":"type","title":"输入文本","version":1,"runtime":"node","entry":"type.mjs"},
+    {"id":"paste","title":"粘贴文本","version":1,"runtime":"node","entry":"paste.mjs"},
+    {"id":"wrap-selection","title":"用括号包裹选区","version":1,"runtime":"node","entry":"wrap.mjs"},
+    {"id":"end-newline","title":"到行尾并换行","version":1,"runtime":"node","entry":"newline.mjs"}
+  ]
+}

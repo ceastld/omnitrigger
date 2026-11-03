@@ -119,6 +119,27 @@ impl ScriptTarget {
             check()
         })
     }
+
+    pub fn send_text_if(
+        &self,
+        text: &str,
+        mut check: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        crate::automation_basics::send_text_checked(text, self.target, || {
+            self.ensure_foreground()?;
+            check()
+        })
+    }
+
+    pub fn copy_selection_text_if(
+        &self,
+        mut check: impl FnMut() -> Result<(), String>,
+    ) -> Result<String, String> {
+        crate::automation_basics::copy_selection_text_checked(self.target, || {
+            self.ensure_foreground()?;
+            check()
+        })
+    }
 }
 
 #[cfg(test)]

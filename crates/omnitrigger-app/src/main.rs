@@ -10,6 +10,8 @@ mod browser_actions_ui;
 mod browser_connector;
 mod browser_connector_ui;
 mod desktop_host;
+#[cfg(test)]
+mod desktop_text_smoke;
 mod event_bridge;
 mod execution;
 mod external_action;

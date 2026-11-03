@@ -243,6 +243,14 @@ mod clipboard {
     }
 
     pub(super) fn write(text: &str, backend: &impl Backend) -> Result<(), String> {
+        write_checked(text, backend, || Ok(()))
+    }
+
+    pub(super) fn write_checked(
+        text: &str,
+        backend: &impl Backend,
+        check: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         validate_automation_text(text)?;
         let units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         let handle = backend.allocate(&units)?;
@@ -251,6 +259,7 @@ mod clipboard {
             handle: Some(handle),
         };
         let lease = Lease::open(backend)?;
+        check()?;
         backend
             .empty()
             .map_err(|error| format!("无法清空剪贴板：{error}"))?;
@@ -511,6 +520,16 @@ pub fn write_clipboard_text(text: &str) -> Result<(), String> {
     clipboard::write(text, &native::Clipboard::new(true)?)
 }
 
+/// 打开重试结束后、清空之前核验调用方条件；失败时释放尚未转交的内存。
+#[cfg(windows)]
+pub fn write_clipboard_text_if(
+    text: &str,
+    check: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    validate_automation_text(text)?;
+    clipboard::write_checked(text, &native::Clipboard::new(true)?, check)
+}
+
 /// 只读取 CF_UNICODETEXT，拒绝无效/超限 UTF-16；仅工作线程调用。
 #[cfg(windows)]
 pub fn read_clipboard_text() -> Result<String, String> {
@@ -521,14 +540,31 @@ pub fn read_clipboard_text() -> Result<String, String> {
 /// 复制结果会留在剪贴板，不恢复原内容；未选中文本或目标不响应复制时返回错误。
 #[cfg(windows)]
 pub fn copy_selection_text(target: crate::ShortcutTarget) -> Result<String, String> {
+    let text = copy_selection_text_checked(target, || Ok(()))?;
+    if text.trim().is_empty() {
+        return Err("选中内容不含文本。".into());
+    }
+    Ok(text)
+}
+
+#[cfg(windows)]
+pub(super) fn copy_selection_text_checked(
+    target: crate::ShortcutTarget,
+    mut check: impl FnMut() -> Result<(), String>,
+) -> Result<String, String> {
     use std::time::{Duration, Instant};
     use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
     const VK_LCONTROL: u16 = 0xA2;
     const VK_C: u16 = 0x43;
-    let before = unsafe { GetClipboardSequenceNumber() };
-    crate::send_shortcut_to(&[VK_LCONTROL, VK_C], target)?;
+    let mut before = 0;
+    crate::shortcut::send_shortcut_checked(&[VK_LCONTROL, VK_C], target, || {
+        check()?;
+        before = unsafe { GetClipboardSequenceNumber() };
+        Ok(())
+    })?;
     let started = Instant::now();
     while unsafe { GetClipboardSequenceNumber() } == before {
+        check()?;
         if started.elapsed() > Duration::from_millis(600) {
             return Err("目标窗口没有复制任何内容，请先选中文本。".into());
         }
@@ -536,8 +572,10 @@ pub fn copy_selection_text(target: crate::ShortcutTarget) -> Result<String, Stri
     }
     // 复制方可能分多次写入格式；稍候再读，读取本身仍有打开重试。
     std::thread::sleep(Duration::from_millis(30));
+    check()?;
     let text = read_clipboard_text()?;
-    if text.trim().is_empty() {
+    check()?;
+    if text.is_empty() {
         return Err("选中内容不含文本。".into());
     }
     Ok(text)
@@ -548,10 +586,30 @@ pub fn copy_selection_text(target: crate::ShortcutTarget) -> Result<String, Stri
 /// 权限隔离、前台切换或输入拦截可能导致部分提交，收尾不等于撤销文本。
 #[cfg(windows)]
 pub fn send_text_to(text: &str, target: crate::ShortcutTarget) -> Result<(), String> {
+    send_text_checked(text, target, || Ok(()))
+}
+
+#[cfg(windows)]
+pub(super) fn send_text_checked(
+    text: &str,
+    target: crate::ShortcutTarget,
+    mut check: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
     let _guard = crate::shortcut::SENDING
         .lock()
         .map_err(|_| "文本发送状态不可用。")?;
-    text_input::send(text, &mut native::TextInput(target))
+    struct Checked<'a, F>(&'a mut native::TextInput, F);
+    impl<F: FnMut() -> Result<(), String>> text_input::Input for Checked<'_, F> {
+        fn guard(&mut self) -> Result<(), String> {
+            (self.1)()?;
+            text_input::Input::guard(self.0)
+        }
+        fn send(&mut self, strokes: &[text_input::UnicodeStroke]) -> usize {
+            text_input::Input::send(self.0, strokes)
+        }
+    }
+    check()?;
+    text_input::send(text, &mut Checked(&mut native::TextInput(target), check))
 }
 
 #[cfg(test)]
@@ -788,6 +846,20 @@ mod tests {
             .unwrap_err()
             .contains("文本已写入"));
         assert!(!backend.log.borrow().contains(&"free"));
+    }
+
+    #[test]
+    fn clipboard_cancel_after_open_keeps_old_content_and_frees_the_new_allocation() {
+        let backend = MockClipboard {
+            busy: Cell::new(2),
+            ..Default::default()
+        };
+        assert!(clipboard::write_checked("new", &backend, || Err("cancelled".into())).is_err());
+        let log = backend.log.borrow();
+        assert!(log.contains(&"open") && log.contains(&"wait"));
+        assert!(!log.contains(&"empty") && !log.contains(&"set"));
+        assert_eq!(log.iter().filter(|event| **event == "close").count(), 1);
+        assert_eq!(log.iter().filter(|event| **event == "free").count(), 1);
     }
 
     #[test]

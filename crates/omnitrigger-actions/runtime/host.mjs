@@ -112,7 +112,7 @@ const browser = Object.freeze({
 function nativeCall(method, params) {
   checkCancelled();
   const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, message), {effectState, method});
-  if (!request.native) return Promise.reject(fail('desktop_unavailable', '此宿主没有提供本次调用的桌面上下文。'));
+  if (!request.native) return Promise.reject(fail(request.native_error?.code ?? 'desktop_unavailable', request.native_error?.message ?? '此宿主没有提供本次调用的桌面上下文。'));
   if (nativePending) return Promise.reject(fail('desktop_busy', '请 await 上一个桌面调用，避免输入并发。'));
   if (nativeId >= 128) return Promise.reject(fail('desktop_call_limit', '单次动作最多调用 128 次桌面 API。'));
   const id = ++nativeId;
@@ -141,7 +141,7 @@ function nativeCall(method, params) {
     });
     socket.on('data', chunk => {
       chunks += chunk;
-      if (Buffer.byteLength(chunks) > 64 * 1024 + 1) return finish(fail('desktop_protocol', '桌面回执超过上限。', 'unknown'));
+      if (Buffer.byteLength(chunks) > 512 * 1024 + 1) return finish(fail('desktop_protocol', '桌面回执超过上限。', 'unknown'));
       if (!chunks.endsWith('\n')) return;
       try {
         const response = JSON.parse(chunks);
@@ -171,6 +171,21 @@ const desktop = Object.freeze({
     }
     return nativeCall('keyboard.shortcut', {keys});
   },
+  sendText: text => textCall('keyboard.text', text),
+  copySelectionText: () => nativeCall('selection.copy', {}),
+});
+
+function textCall(method, text) {
+  if (typeof text !== 'string' || text.length > 65536 || text.includes('\0')
+      || Buffer.from(text, 'utf8').toString('utf8') !== text) {
+    return Promise.reject(Object.assign(fault('invalid_input', '文本需要有效 Unicode，不含 NUL，最多 65,536 个 UTF-16 单元。'), {effectState:'not_started', method}));
+  }
+  return nativeCall(method, {text});
+}
+
+const clipboard = Object.freeze({
+  readText: () => nativeCall('clipboard.read', {}),
+  writeText: text => textCall('clipboard.write', text),
 });
 
 function delay(milliseconds) {
@@ -295,6 +310,7 @@ try {
     process: Object.freeze({ run, start }),
     browser,
     desktop,
+    clipboard,
     delay,
     signal: controller.signal,
   });

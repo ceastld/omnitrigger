@@ -8,8 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const LIMIT: usize = 16 * 1024;
-const RESPONSE_LIMIT: usize = 64 * 1024;
+// 65,536 个 UTF-16 单元即使全部需要 JSON 转义也能完整传输。
+const LIMIT: usize = 512 * 1024;
+const RESPONSE_LIMIT: usize = 512 * 1024;
 const CLIENTS: usize = 4;
 
 /// 由应用为本次调用捕获的本机上下文。不是沙盒或权限隔离。
@@ -99,11 +100,19 @@ impl NativeBridge {
             }
             if client.output.is_none() {
                 let mut bytes = [0u8; 4096];
-                match client.stream.read(&mut bytes) {
-                    Ok(0) => return false,
-                    Ok(count) => client.input.extend_from_slice(&bytes[..count]),
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return true,
-                    Err(_) => return false,
+                for _ in 0..16 {
+                    match client.stream.read(&mut bytes) {
+                        Ok(0) => return false,
+                        Ok(count) => client.input.extend_from_slice(&bytes[..count]),
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(_) => return false,
+                    }
+                    if client.input.len() > LIMIT {
+                        return false;
+                    }
+                    if client.input.contains(&b'\n') {
+                        break;
+                    }
                 }
                 if client.input.len() > LIMIT {
                     return false;
@@ -213,8 +222,11 @@ mod tests {
         drain(&mut bridge, &host, &cancel);
         assert_eq!(host.0.load(Ordering::SeqCst), 1);
         let mut huge = TcpStream::connect(bridge.listener.local_addr().unwrap()).unwrap();
-        huge.write_all(&vec![b'x'; LIMIT + 1]).unwrap();
+        let writer = std::thread::spawn(move || {
+            let _ = huge.write_all(&vec![b'x'; LIMIT + 1]);
+        });
         drain(&mut bridge, &host, &cancel);
+        writer.join().unwrap();
         assert!(bridge.clients.is_empty());
         let _cancelled = request(&bridge, 2, &bridge.token);
         cancel.cancel();

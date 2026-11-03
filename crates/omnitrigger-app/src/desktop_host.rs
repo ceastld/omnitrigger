@@ -32,6 +32,20 @@ struct ShortcutArgs {
     keys: Vec<u16>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextArgs {
+    text: String,
+}
+
+fn not_cancelled(cancellation: &CancellationToken) -> Result<(), String> {
+    if cancellation.is_cancelled() {
+        Err("动作已取消，未继续本机调用。".into())
+    } else {
+        Ok(())
+    }
+}
+
 impl NativeHost for DesktopHost {
     fn call(
         &self,
@@ -47,6 +61,59 @@ impl NativeHost for DesktopHost {
             ));
         }
         match method {
+            "clipboard.read" => {
+                if params != json!({}) {
+                    return Err(error(
+                        "invalid_input",
+                        "剪贴板读取不接受参数。",
+                        "not_started",
+                    ));
+                }
+                let text = omnitrigger_windows::read_clipboard_text()
+                    .map_err(|message| error("clipboard_failed", message, "not_started"))?;
+                not_cancelled(cancellation)
+                    .map_err(|message| error("cancelled", message, "not_started"))?;
+                Ok(json!(text))
+            }
+            "clipboard.write" | "keyboard.text" => {
+                let args: TextArgs = serde_json::from_value(params)
+                    .map_err(|message| error("invalid_input", message, "not_started"))?;
+                omnitrigger_windows::validate_automation_text(&args.text)
+                    .map_err(|message| error("invalid_input", message, "not_started"))?;
+                if method == "clipboard.write" {
+                    omnitrigger_windows::write_clipboard_text_if(&args.text, || {
+                        not_cancelled(cancellation)
+                    })
+                    .map_err(|message| error("clipboard_failed", message, "unknown"))?;
+                    Ok(json!({"written":true}))
+                } else {
+                    let target = self.target.as_ref().map_err(Clone::clone)?;
+                    target
+                        .ensure_foreground()
+                        .map_err(|message| error("target_changed", message, "not_started"))?;
+                    target
+                        .send_text_if(&args.text, || not_cancelled(cancellation))
+                        .map_err(|message| error("input_failed", message, "unknown"))?;
+                    Ok(json!({"submitted":true}))
+                }
+            }
+            "selection.copy" => {
+                if params != json!({}) {
+                    return Err(error(
+                        "invalid_input",
+                        "复制选区不接受参数。",
+                        "not_started",
+                    ));
+                }
+                let target = self.target.as_ref().map_err(Clone::clone)?;
+                target
+                    .ensure_foreground()
+                    .map_err(|message| error("target_changed", message, "not_started"))?;
+                let text = target
+                    .copy_selection_text_if(|| not_cancelled(cancellation))
+                    .map_err(|message| error("selection_failed", message, "unknown"))?;
+                Ok(json!(text))
+            }
             "target.info" => {
                 if params != json!({}) {
                     return Err(error(
@@ -111,6 +178,17 @@ mod tests {
             )),
         };
         let token = CancellationToken::new();
+        for (method, params) in [
+            ("clipboard.read", json!({"unexpected":true})),
+            ("clipboard.write", json!({"text":"a\0b"})),
+            ("keyboard.text", json!({"text":5})),
+            ("selection.copy", json!([])),
+        ] {
+            assert_eq!(
+                host.call(method, params, &token).unwrap_err().code,
+                "invalid_input"
+            );
+        }
         assert_eq!(
             host.call("keyboard.shortcut", json!({"keys":[65,162]}), &token)
                 .unwrap_err()

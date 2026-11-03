@@ -73,10 +73,38 @@ impl ActionRuntime for NodeRuntime {
         if cancellation.is_cancelled() {
             return Err(cancelled());
         }
+        self.execute_with_native(
+            action,
+            context,
+            cancellation,
+            host,
+            host.map(|_| NativeBridge::new()),
+        )
+    }
+}
+
+impl NodeRuntime {
+    fn execute_with_native(
+        &self,
+        action: &ResolvedAction,
+        context: &InvocationContext,
+        cancellation: &CancellationToken,
+        host: Option<&dyn NativeHost>,
+        native: Option<Result<NativeBridge, ActionError>>,
+    ) -> Result<Value, ActionError> {
+        if cancellation.is_cancelled() {
+            return Err(cancelled());
+        }
         // 目录是加载时快照，执行前再次核验入口，避免文件被替换为链接后越界。
         let (root, entry) = checked_entry(action)?;
         let scratch = ResponseDirectory::new()?;
-        let mut native = host.map(|_| NativeBridge::new()).transpose()?;
+        let native =
+            native.map(|result| result.and_then(|bridge| Ok((bridge.configuration()?, bridge))));
+        let (mut native, native_configuration, native_error) = match native {
+            Some(Ok((configuration, bridge))) => (Some(bridge), Some(configuration), None),
+            Some(Err(error)) => (None, None, Some(error)),
+            None => (None, None, None),
+        };
         let request = json!({
             "api_version": 1,
             "invocation": {
@@ -89,7 +117,8 @@ impl ActionRuntime for NodeRuntime {
             "response_path": scratch.response(),
             "timeout_ms": self.timeout.as_millis(),
             "browser": self.browser_connector.as_deref().and_then(browser_configuration),
-            "native": native.as_ref().map(NativeBridge::configuration).transpose()?,
+            "native": native_configuration,
+            "native_error": native_error,
         });
         let mut bytes = serde_json::to_vec(&request)
             .map_err(|error| ActionError::new("invalid_request", error.to_string()))?;
@@ -452,6 +481,95 @@ fn terminate_host(child: &mut Child) {
 mod tests {
     use super::*;
     use crate::{ActionCall, ActionDefinition};
+
+    #[test]
+    fn unavailable_native_bridge_only_fails_the_requested_capability() {
+        if !node_available() {
+            return;
+        }
+        let fixture = Fixture::new(
+            r#"export default async ctx => {
+            const arithmetic = 6 * 7;
+            let failure;
+            try { await ctx.desktop.target(); } catch(e) { failure={code:e.code,effect:e.effectState}; }
+            return {arithmetic,failure};
+        }"#,
+            json!({}),
+        );
+        let mut error = ActionError::new("native_bridge_unavailable", "本机桥接被禁用。");
+        error.effect_state = Some("not_started".into());
+        let output = NodeRuntime::default()
+            .execute_with_native(
+                &fixture.action,
+                &context(),
+                &CancellationToken::new(),
+                Some(&DesktopHost::default()),
+                Some(Err(error)),
+            )
+            .unwrap();
+        assert_eq!(
+            output,
+            json!({"arithmetic":42,"failure":{"code":"native_bridge_unavailable","effect":"not_started"}})
+        );
+    }
+
+    #[test]
+    fn text_api_preserves_maximum_json_escaped_text_and_rejects_invalid_unicode() {
+        if !node_available() {
+            return;
+        }
+        #[derive(Default)]
+        struct TextHost(std::sync::Mutex<String>);
+        impl NativeHost for TextHost {
+            fn call(
+                &self,
+                method: &str,
+                params: Value,
+                _: &CancellationToken,
+            ) -> Result<Value, ActionError> {
+                match method {
+                    "clipboard.write" => {
+                        *self.0.lock().unwrap() = params["text"].as_str().unwrap().into();
+                        Ok(json!({"written":true}))
+                    }
+                    "clipboard.read" => Ok(json!(*self.0.lock().unwrap())),
+                    "keyboard.text" => {
+                        assert_eq!(params["text"], "文😀\r\n");
+                        Ok(json!({"submitted":true}))
+                    }
+                    "selection.copy" => Ok(json!(" \t ")),
+                    _ => panic!("未知方法"),
+                }
+            }
+        }
+        let fixture = Fixture::new(
+            r#"export default async ctx => {
+            const text='\u0001'.repeat(65536);
+            await ctx.clipboard.writeText(text);
+            const read=await ctx.clipboard.readText();
+            const submitted=await ctx.desktop.sendText('文😀\r\n');
+            const selection=await ctx.desktop.copySelectionText();
+            let invalid=0;
+            for (const text of ['\ud800','x'.repeat(65537),'a\0b']) {
+                try { await ctx.desktop.sendText(text); } catch(e) { if(e.code==='invalid_input' && e.effectState==='not_started') invalid++; }
+            }
+            return {length:read.length,equal:read===text,submitted,selection,invalid};
+        }"#,
+            json!({}),
+        );
+        let output = NodeRuntime::default()
+            .execute_with_host(
+                &fixture.action,
+                &context(),
+                &CancellationToken::new(),
+                Some(&TextHost::default()),
+            )
+            .unwrap();
+        assert_eq!(
+            output,
+            json!({"length":65536,"equal":true,"submitted":{"submitted":true},"selection":" \t ","invalid":3})
+        );
+    }
 
     #[derive(Default)]
     struct DesktopHost(std::sync::Mutex<Vec<Value>>);

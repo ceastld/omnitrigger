@@ -14,7 +14,7 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'keyboard.shortcut';
+  method?: 'target.info' | 'keyboard.shortcut' | 'keyboard.text' | 'selection.copy' | 'clipboard.read' | 'clipboard.write';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
 }
@@ -47,5 +47,15 @@ export interface ActionContext {
     target(): Promise<{processName: string; title: string; processId: number; isForeground: boolean}>;
     /** 明确 VK，修饰键在前；仅确认系统接纳输入，不确认业务动作完成。 */
     sendShortcut(keys: number[]): Promise<{submitted: true}>;
+    /** Unicode 直接输入，不使用剪贴板。最多 65,536 个 UTF-16 单元，无 NUL。 */
+    sendText(text: string): Promise<{submitted: true}>;
+    /** 向原目标发送 Ctrl+C 并读取新文本。复制结果保留在剪贴板。 */
+    copySelectionText(): Promise<string>;
+  };
+  clipboard: {
+    /** 只读 Unicode 文本；没有文本格式时抛错。 */
+    readText(): Promise<string>;
+    /** 替换全部剪贴板格式为 Unicode 文本，不自动恢复。 */
+    writeText(text: string): Promise<{written: true}>;
   };
 }
