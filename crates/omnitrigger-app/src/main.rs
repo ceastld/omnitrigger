@@ -5776,6 +5776,18 @@ fn smoke_test() -> Result<(), String> {
     scoped.spec.id = settings::next_id(&bindings);
     scoped.spec.process_scope.allow = vec!["omnitrigger-smoke".into()];
     bindings.push(scoped);
+    for name in ["explorer", "desktop", "taskbar"] {
+        let mut shell = bindings[0].clone();
+        shell.spec.id = settings::next_id(&bindings);
+        shell.spec.held = vec![Button::Key(162)];
+        shell.spec.activation = Activation::Press(Button::Key(131));
+        shell.spec.process_scope = omnitrigger_core::ProcessScope {
+            identity: omnitrigger_core::ProcessIdentity::ShellContext,
+            allow: vec![name.into()],
+            deny: vec![],
+        };
+        bindings.push(shell);
+    }
     // 使用 S，避开默认 CapsLock+Space 呼出面板的真实前缀冲突。
     for (held, terminal) in [([20, 83], 69), ([20, 69], 80)] {
         let mut contextual = bindings[0].clone();
@@ -5854,7 +5866,9 @@ fn smoke_test() -> Result<(), String> {
         backend.send(BackendCommand::GetDiagnostics)?;
         match events.recv_timeout(Duration::from_millis(100)) {
             Ok(BackendEvent::Diagnostics(snapshot))
-                if snapshot.process_context_required && snapshot.foreground_process.is_some() =>
+                if snapshot.process_context_required
+                    && snapshot.foreground_process.is_some()
+                    && snapshot.foreground_window_role != omnitrigger_core::WindowRole::Unknown =>
             {
                 break
             }
@@ -5862,13 +5876,15 @@ fn smoke_test() -> Result<(), String> {
             _ => {}
         }
         if std::time::Instant::now() >= deadline {
-            return Err("前台进程快照未就绪；带应用范围的真实 Hook 验证未完成。".into());
+            return Err(
+                "前台进程或窗口角色快照未就绪；带窗口上下文范围的真实 Hook 验证未完成。".into(),
+            );
         }
         std::thread::sleep(Duration::from_millis(10));
     }
     backend.send(BackendCommand::SetEnabled(false))?;
     drop(backend);
-    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; scoped/dedicated/retained/repeat/contextual-terminal/captured registrations valid; foreground process resolved outside hooks.");
+    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; scoped/shell-context/dedicated/retained/repeat/contextual-terminal/captured registrations valid; foreground process and window role resolved outside hooks.");
     Ok(())
 }
 

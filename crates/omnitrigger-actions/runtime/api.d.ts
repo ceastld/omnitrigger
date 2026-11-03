@@ -44,7 +44,7 @@ export interface ActionContext {
   browser: BrowserApi;
   desktop: {
     /** 本次提交时捕获的目标，不在调用时重新选择前台。进程名含 .exe。 */
-    target(): Promise<{processName: string; title: string; processId: number; isForeground: boolean}>;
+    target(): Promise<{processName: string; windowRole: "unknown" | "application" | "desktop" | "taskbar"; title: string; processId: number; isForeground: boolean}>;
     /** 明确 VK，修饰键在前；仅确认系统接纳输入，不确认业务动作完成。 */
     sendShortcut(keys: number[], options?: {keyDownDelayMs?: number}): Promise<{submitted: true}>;
     /** 修饰键跨越整组普通键；延迟在修饰键就绪后、每个普通键按下后等待。 */

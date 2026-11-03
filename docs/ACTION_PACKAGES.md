@@ -116,7 +116,7 @@ export default async function (ctx) {
 | `ctx.browser.profiles({ timeoutMs })` | 列出已连接浏览器及其 `browser_instance_id`；连接可用不代表业务动作已完成。 |
 | `ctx.browser.call(method, args, { profile, timeoutMs })` | 复用已安装连接器的 SDK，通过持久 IPC 调用 Chrome API，返回原始结果。 |
 | `ctx.browser.chrome.*` | 动态 Proxy，例如 `await ctx.browser.chrome.bookmarks.getTree()`；指定 profile 或超时时使用 `call`。 |
-| `ctx.desktop.target()` | 读取本次提交时捕获的目标，返回 `processName`、`title`、`processId`、`isForeground`。不重新选择前台。 |
+| `ctx.desktop.target()` | 读取本次提交时捕获的目标，返回真实 `processName`、`windowRole`（`unknown`／`application`／`desktop`／`taskbar`）、`title`、`processId`、`isForeground`。角色在调用时采集，不重新选择目标。 |
 | `ctx.desktop.sendShortcut(keys, options?)` | 向原目标发送一次快捷键，明确 VK、修饰键在前，最多四类修饰键加一个普通键。可设置 `keyDownDelayMs`，默认零。返回 `{ submitted: true }` 仅表示系统接纳输入。 |
 | `ctx.desktop.sendKeySequence(modifiers, keys, options?)` | 最多四类修饰键在整组 1–16 个普通键期间保持按下。保留顺序和左右侧；可设置 `keyDownDelayMs`。 |
 | `ctx.desktop.sendText(text)` | 分批发送 Unicode 文本，不借用剪贴板；每批核验原目标及取消状态。 |

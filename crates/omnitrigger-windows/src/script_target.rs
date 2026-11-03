@@ -26,6 +26,7 @@ pub struct ScriptTarget {
 #[derive(Debug)]
 pub struct ScriptTargetInfo {
     pub process_name: String,
+    pub window_role: omnitrigger_core::WindowRole,
     pub title: String,
     pub process_id: u32,
     pub is_foreground: bool,
@@ -89,8 +90,15 @@ impl ScriptTarget {
 
     pub fn info(&self) -> Result<ScriptTargetInfo, String> {
         self.ensure_identity()?;
+        let process_name = shortcut_target_process(self.target)?;
+        let window_role = crate::window_context::role(
+            HWND(self.target.0 as *mut _),
+            self.identity.pid,
+            &process_name,
+        );
         let info = ScriptTargetInfo {
-            process_name: shortcut_target_process(self.target)?,
+            process_name,
+            window_role,
             title: shortcut_target_title(self.target)?,
             process_id: self.identity.pid,
             is_foreground: ensure_shortcut_target(self.target).is_ok(),
@@ -209,6 +217,7 @@ mod tests {
         assert_eq!(info.title, "独立目标验证");
         assert!(!info.is_foreground);
         assert!(info.process_name.ends_with(".exe"));
+        assert_eq!(info.window_role, omnitrigger_core::WindowRole::Application);
         assert!(target.ensure_foreground().is_err());
         let mut stale = target;
         stale.identity.process_created ^= 1;

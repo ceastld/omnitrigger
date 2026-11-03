@@ -20,7 +20,7 @@ use std::{
 };
 use windows::Win32::{
     Foundation::{
-        CloseHandle, HANDLE, HINSTANCE, LPARAM, LRESULT, WAIT_FAILED, WAIT_OBJECT_0, WPARAM,
+        CloseHandle, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WAIT_FAILED, WAIT_OBJECT_0, WPARAM,
     },
     System::{
         LibraryLoader::GetModuleHandleW,
@@ -291,7 +291,7 @@ fn run_input_thread(
             if more_commands || message_count == MESSAGE_BATCH {
                 continue;
             }
-            let (timer_handle, hold_active) = STATE.with(|slot| {
+            let (timer_handle, hold_active, shell_poll) = STATE.with(|slot| {
                 let slot = slot.borrow();
                 let state = slot.as_ref().expect("输入状态存在");
                 (
@@ -305,10 +305,16 @@ fn run_input_thread(
                         || state.replay.busy()
                         || !state.pending_drag_cancels.is_empty()
                         || (foreground_events.is_none() && state.engine.needs_process_context()),
+                    state.needs_shell_poll(),
                 )
             });
             let handles = timer_handle.map(|handle| [handle]);
             let timeout = input_wait_timeout_ms(hold_active, shutdown_deadline);
+            let timeout = if shell_poll {
+                timeout.min(250)
+            } else {
+                timeout
+            };
             let result = unsafe {
                 MsgWaitForMultipleObjectsEx(
                     handles.as_ref().map(|handles| handles.as_slice()),
@@ -436,24 +442,36 @@ fn refresh_process_context() {
         let mut slot = slot.borrow_mut();
         let state = slot.as_mut()?;
         state.check_foreground();
-        (state.engine.needs_process_context() && !state.process_resolved).then_some((
+        (state.engine.needs_process_context()
+            && (!state.process_resolved
+                || (state.needs_shell_poll()
+                    && state
+                        .last_context_probe
+                        .is_none_or(|time| time.elapsed() >= Duration::from_millis(250)))))
+        .then_some((
             foreground_context::Identity {
                 hwnd: state.foreground,
                 pid: state.foreground_pid,
             },
             state.foreground_epoch,
+            state.engine.foreground_process().map(str::to_owned),
         ))
     });
-    let Some((identity, epoch)) = probe else {
+    let Some((identity, epoch, cached_name)) = probe else {
         return;
     };
     // QueryFullProcessImageNameW 可能派发消息，必须处于 RefCell 借用和 Hook 回调之外。
-    let name = foreground_context::process_name(identity);
+    let name = cached_name.or_else(|| foreground_context::process_name(identity));
+    let role = name
+        .as_ref()
+        .map_or(omnitrigger_core::WindowRole::Unknown, |name| {
+            crate::window_context::role(HWND(identity.hwnd as *mut _), identity.pid, name)
+        });
     STATE.with(|slot| {
         let mut slot = slot.borrow_mut();
         if let Some(state) = slot.as_mut() {
             state.check_foreground();
-            state.apply_process_context(identity, epoch, name.as_deref());
+            state.apply_process_context(identity, epoch, name.as_deref(), role);
         }
     });
 }
@@ -578,6 +596,7 @@ struct ThreadState {
     foreground_pid: u32,
     foreground_epoch: u64,
     process_resolved: bool,
+    last_context_probe: Option<Instant>,
     overflow_reported: bool,
     counters: ListenerDiagnostics,
     last_keyboard: Option<Instant>,
@@ -634,6 +653,7 @@ impl ThreadState {
             foreground_pid: foreground.pid,
             foreground_epoch: 0,
             process_resolved: false,
+            last_context_probe: None,
             overflow_reported: false,
             counters,
             last_keyboard: None,
@@ -852,6 +872,7 @@ impl ThreadState {
         snapshot.screen_count = self.screens.len();
         snapshot.foreground_process = self.engine.foreground_process().map(str::to_owned);
         snapshot.process_context_required = self.engine.needs_process_context();
+        snapshot.foreground_window_role = self.engine.foreground_window_role();
         let age_ms = |time: Instant| time.elapsed().as_millis().min(u64::MAX as u128) as u64;
         snapshot.last_keyboard_ms = self.last_keyboard.map(age_ms);
         snapshot.last_mouse_ms = self.last_mouse.map(age_ms);
@@ -1152,6 +1173,12 @@ impl ThreadState {
         self.update_foreground_identity(foreground_context::snapshot());
     }
 
+    fn needs_shell_poll(&self) -> bool {
+        self.engine.needs_shell_context()
+            && (self.engine.foreground_window_role() == omnitrigger_core::WindowRole::Unknown
+                || self.engine.foreground_process() == Some("explorer"))
+    }
+
     #[cfg(test)]
     fn update_foreground(&mut self, foreground: usize) {
         self.update_foreground_identity(foreground_context::Identity {
@@ -1180,6 +1207,7 @@ impl ThreadState {
             self.foreground_pid = identity.pid;
             self.foreground_epoch = self.foreground_epoch.wrapping_add(1);
             self.process_resolved = false;
+            self.last_context_probe = None;
         }
     }
 
@@ -1188,6 +1216,7 @@ impl ThreadState {
         identity: foreground_context::Identity,
         epoch: u64,
         name: Option<&str>,
+        role: omnitrigger_core::WindowRole,
     ) {
         if identity.hwnd != self.foreground
             || identity.pid != self.foreground_pid
@@ -1196,7 +1225,17 @@ impl ThreadState {
             return;
         }
         self.process_resolved = true;
-        if let Ok(cancelled) = self.engine.set_foreground_process(name) {
+        self.last_context_probe = Some(Instant::now());
+        let previous = (
+            self.engine.foreground_process().map(str::to_owned),
+            self.engine.foreground_window_role(),
+        );
+        if let Ok(cancelled) = self.engine.set_foreground_context(name, role) {
+            if previous.0.as_deref() == self.engine.foreground_process()
+                && previous.1 == self.engine.foreground_window_role()
+            {
+                return;
+            }
             self.cancel_queued_replay();
             self.forward_cancelled_drags(cancelled);
             self.observe_hold(
@@ -2496,6 +2535,72 @@ mod tests {
     }
 
     #[test]
+    fn shell_context_poll_preserves_equal_context_queue_and_cancels_changed_role() {
+        use omnitrigger_core::{ProcessIdentity, ProcessScope, WindowRole};
+        let (events, _) = mpsc::sync_channel(EVENT_CAPACITY);
+        let mut state = ThreadState::new(events);
+        let identity = foreground_context::Identity { hwnd: 100, pid: 10 };
+        state.update_foreground_identity(identity);
+        state
+            .engine
+            .replace_bindings(vec![TriggerSpec {
+                id: 1,
+                held: vec![],
+                activation: omnitrigger_core::Activation::Press(Button::Key(75)),
+                keyboard: Default::default(),
+                conditions: vec![],
+                process_scope: ProcessScope {
+                    identity: ProcessIdentity::ShellContext,
+                    allow: vec!["explorer".into()],
+                    deny: vec![],
+                },
+            }])
+            .unwrap();
+        state.apply_process_context(
+            identity,
+            state.foreground_epoch,
+            Some("explorer.exe"),
+            WindowRole::Application,
+        );
+        assert!(state.needs_shell_poll());
+        let key = Button::Key(75);
+        let kind = InputKind::Down(key);
+        state.physical_held.insert(key);
+        state
+            .replay
+            .enqueue(
+                vec![replay_input(kind, &state.key_metadata)],
+                vec![kind],
+                identity.hwnd,
+                &state.key_metadata,
+            )
+            .unwrap();
+        state.apply_process_context(
+            identity,
+            state.foreground_epoch,
+            Some("EXPLORER.exe"),
+            WindowRole::Application,
+        );
+        assert!(state.replay.busy());
+        assert!(!state.failure_draining.contains(&key));
+        state.apply_process_context(
+            identity,
+            state.foreground_epoch,
+            Some("explorer"),
+            WindowRole::Taskbar,
+        );
+        assert!(state.failure_draining.contains(&key));
+        assert_eq!(state.engine.foreground_window_role(), WindowRole::Taskbar);
+        state.apply_process_context(
+            identity,
+            state.foreground_epoch,
+            Some("editor"),
+            WindowRole::Application,
+        );
+        assert!(!state.needs_shell_poll());
+    }
+
+    #[test]
     fn process_scope_snapshot_rejects_stale_window_pid_and_generation() {
         let (events, _) = mpsc::sync_channel(EVENT_CAPACITY);
         let mut state = ThreadState::new(events);
@@ -2510,6 +2615,7 @@ mod tests {
         let scoped = TriggerSpec {
             id: 2,
             process_scope: omnitrigger_core::ProcessScope {
+                identity: Default::default(),
                 allow: vec!["editor".into()],
                 deny: vec![],
             },
@@ -2521,12 +2627,27 @@ mod tests {
         state.update_foreground_identity(first);
         let old_epoch = state.foreground_epoch;
         state.update_foreground_identity(second);
-        state.apply_process_context(first, old_epoch, Some("editor"));
+        state.apply_process_context(
+            first,
+            old_epoch,
+            Some("editor"),
+            omnitrigger_core::WindowRole::Application,
+        );
         assert!(!state.process_resolved);
         state.update_foreground_identity(first);
-        state.apply_process_context(first, old_epoch, Some("editor"));
+        state.apply_process_context(
+            first,
+            old_epoch,
+            Some("editor"),
+            omnitrigger_core::WindowRole::Application,
+        );
         assert!(!state.process_resolved);
-        state.apply_process_context(first, state.foreground_epoch, Some("editor.exe"));
+        state.apply_process_context(
+            first,
+            state.foreground_epoch,
+            Some("editor.exe"),
+            omnitrigger_core::WindowRole::Application,
+        );
         assert!(state.process_resolved);
         let hit = state.engine.process(InputEvent {
             kind: InputKind::Down(Button::Key(75)),

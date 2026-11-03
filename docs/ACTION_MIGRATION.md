@@ -34,7 +34,7 @@ python scripts/plan_action_migration.py `
 
 源 `DefaultModifiedKeyDownDelay` 为正时保留该延迟；非正值时对 `wps`、`et`、`wpp`、`wpspdf`、`mstsc` 使用 10ms，其他进程为零。转换结果使用版本 13 的 `timing`。缺失或非法设置标记 `source_key_down_delay_unknown`，超过支持上限标记 `unsupported_key_down_delay`，不产生可执行原生动作。按键提交及延迟观测只能证明输入契约，还须在实际目标软件验证业务结果。
 
-触发部分会产生原生应用范围、进程排除名单、专用或保留原功能前缀和键盘重复描述。专用键盘前缀使用版本 12 的捕获集合策略，并按源附加键降序、原始列表顺序产生显式 `priority`；保留源规则，不自动扩展配置档别名。保留原功能前缀使用版本 14 的 `retained_prefix`，其中 `capture_scope` 保留引导键黑名单，与动作应用范围独立；Shift/Ctrl 引导键启用主鼠标键阻止捕获。Explorer 桌面／任务栏逻辑名称、泛型修饰键、长短按分流及鼠标规则仍单独记录缺口。名单有非法格式或有效范围为空时保留待核验状态。
+触发部分会产生原生应用范围、进程排除名单、专用或保留原功能前缀和键盘重复描述。源应用名单使用版本 15 的显式 `identity:"shell_context"`，区分 Explorer 应用窗口、桌面和任务栏；与旧配置比较时包含匹配域，避免将真实进程范围误认为已迁移。专用键盘前缀使用版本 12 的捕获集合策略，并按源附加键降序、原始列表顺序产生显式 `priority`；保留源规则，不自动扩展配置档别名。保留原功能前缀使用版本 14 的 `retained_prefix`，其中 `capture_scope` 保留引导键黑名单，与动作应用范围独立；Shift/Ctrl 引导键启用主鼠标键阻止捕获。泛型修饰键、长短按分流及鼠标规则仍单独记录缺口；窗口角色投影不证明 UWP/WPS 子进程适配、真实 Hook 交付或动作业务效果。名单有非法格式或有效范围为空时保留待核验状态。
 
 保留原功能策略需要明确的 `PowerKeys_DelayBeforeCtrlKey`、`PowerKeys_ContinuousInputCheckTime`、正值 `PowerKeys_CancelLongPressKeyDelayMs`，并确认 `PowerKeys_IgnoreUnknownKey=false`。提示窗超时须关闭或大于单按取消时限；缺失、非法设置或其他提示窗组合继续标记 `legacy_retained_prefix_timing`，不能用普通前缀超时替代。离线回放只验证显式事件、时间、动作选择和补发序列；实际 Hook 的交付、窗口角色、注入来源与动作效果需要独立验收。
 

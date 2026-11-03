@@ -107,21 +107,22 @@ def process_scope(leader, rule):
                 or any(not item or item in (".", "..") for item in canonical)
                 or len(set(canonical)) != len(canonical)):
             gaps.append("unsupported_process_list")
-        if set(canonical) & {"explorer", "desktop", "taskbar"}:
-            gaps.append("legacy_shell_window_role")
     if sum(len(names) for names in result.values()) > 64:
         gaps.append("unsupported_process_list")
     allowed = {normalized_process_name(item) for item in result.get("allow", [])}
     denied = {normalized_process_name(item) for item in result.get("deny", [])}
     if allowed and allowed <= denied:
         gaps.append("empty_process_scope")
+    if result:
+        result["identity"] = "shell_context"
     return result, gaps, notes
 
 
 def same_process_scope(left, right):
     def signature(value):
-        return tuple(tuple(sorted(normalized_process_name(item) for item in value.get(key, [])))
-                     for key in ("allow", "deny"))
+        lists = tuple(tuple(sorted(normalized_process_name(item) for item in value.get(key, [])))
+                      for key in ("allow", "deny"))
+        return (value.get("identity", "executable") if any(lists) else "global", lists)
     return signature(left) == signature(right)
 
 
@@ -228,15 +229,20 @@ def same_trigger(left, right):
 
 
 def process_scopes_overlap(left, right):
-    def names(scope, field):
-        return {normalized_process_name(name) for name in scope.get(field, [])}
-    left_allow, right_allow = names(left, "allow"), names(right, "allow")
-    denied = names(left, "deny") | names(right, "deny")
-    if left_allow and right_allow:
-        return bool((left_allow & right_allow) - denied)
-    if left_allow or right_allow:
-        return bool((left_allow or right_allow) - denied)
-    return True
+    def matches(scope, process, role):
+        allow = {normalized_process_name(name) for name in scope.get("allow", [])}
+        deny = {normalized_process_name(name) for name in scope.get("deny", [])}
+        logical = role if scope.get("identity") == "shell_context" and role != "application" else process
+        return (not allow or logical in allow) and logical not in deny
+    names = {normalized_process_name(name) for scope in (left, right)
+             for key in ("allow", "deny") for name in scope.get(key, [])}
+    names.update(("desktop", "taskbar", "explorer"))
+    outside = "__other_process__"
+    while outside in names:
+        outside += "_"
+    names.add(outside)
+    return any(matches(left, name, role) and matches(right, name, role)
+               for name in names for role in ("application", "desktop", "taskbar"))
 
 
 def project_source_precedence(bindings, current):
@@ -251,7 +257,7 @@ def project_source_precedence(bindings, current):
         groups[signature].append(row)
     for rows in groups.values():
         if any(row["trigger"] is None or set(row["trigger_gaps"]) & {
-                "unsupported_process_list", "empty_process_scope", "legacy_shell_window_role"} for row in rows):
+                "unsupported_process_list", "empty_process_scope"} for row in rows):
             if len(rows) > 1:
                 for row in rows:
                     row["trigger_gaps"] = sorted(set(row["trigger_gaps"] + ["source_process_precedence_review"]))
@@ -290,8 +296,9 @@ def project_source_precedence(bindings, current):
                 added = [name for canonical, name in specific.items() if canonical not in existing]
                 if added:
                     scope["deny"] = denied + added
+                    scope["identity"] = "shell_context"
                     row["source_normalizations"].append({"kind": "default_excludes_specific_rules", "names": added})
-            if sum(len(names) for names in scope.values()) > 64:
+            if sum(len(scope.get(key, [])) for key in ("allow", "deny")) > 64:
                 row["trigger_gaps"] = sorted(set(row["trigger_gaps"] + ["unsupported_process_list"]))
     candidates = [row for row in bindings if row.get("trigger")]
     for terminal in candidates:

@@ -73,8 +73,10 @@ pub struct Engine {
     prefix_origin: Option<(i32, i32)>,
     screens: Vec<ScreenRect>,
     process_name: Option<String>,
+    window_role: crate::WindowRole,
     active_bindings: Vec<usize>,
     requires_process: Vec<bool>,
+    requires_role: Vec<bool>,
     dedicated_leader: Option<Button>,
     repeat_owner: BTreeMap<Button, u64>,
     tap_restore: Option<PendingTapRestore>,
@@ -105,8 +107,10 @@ impl Engine {
             prefix_origin: None,
             screens: Vec::new(),
             process_name: None,
+            window_role: crate::WindowRole::Unknown,
             active_bindings: Vec::new(),
             requires_process: Vec::new(),
+            requires_role: Vec::new(),
             dedicated_leader: None,
             repeat_owner: BTreeMap::new(),
             tap_restore: None,
@@ -136,6 +140,14 @@ impl Engine {
         &mut self,
         name: Option<&str>,
     ) -> Result<Decision, crate::ProcessScopeError> {
+        self.set_foreground_context(name, crate::WindowRole::Unknown)
+    }
+
+    pub fn set_foreground_context(
+        &mut self,
+        name: Option<&str>,
+        role: crate::WindowRole,
+    ) -> Result<Decision, crate::ProcessScopeError> {
         let normalized = name
             .map(|name| {
                 crate::process_scope::normalize_name(name).ok_or_else(|| {
@@ -145,11 +157,12 @@ impl Engine {
                 })
             })
             .transpose()?;
-        if self.process_name == normalized {
+        if self.process_name == normalized && self.window_role == role {
             return Ok(Decision::default());
         }
         let decision = self.cancel();
         self.process_name = normalized;
+        self.window_role = role;
         self.refresh_active_bindings();
         Ok(decision)
     }
@@ -170,7 +183,39 @@ impl Engine {
         self.process_name.as_deref()
     }
 
+    pub fn foreground_window_role(&self) -> crate::WindowRole {
+        self.window_role
+    }
+
+    pub fn needs_shell_context(&self) -> bool {
+        self.bindings.iter().any(|binding| {
+            binding.process_scope.needs_role()
+                || binding.keyboard.tap_scope.needs_role()
+                || binding
+                    .keyboard
+                    .retained_prefix
+                    .as_ref()
+                    .is_some_and(|policy| policy.capture_scope.needs_role())
+        })
+    }
+
     fn compile_process_scopes(&mut self) {
+        self.requires_role = self
+            .bindings
+            .iter()
+            .map(|binding| {
+                self.bindings.iter().any(|other| {
+                    other.process_scope.needs_role()
+                        && (if binding.keyboard.matching.is_captured() {
+                            other.keyboard.matching.is_captured()
+                                && binding.keyboard.prefix() == other.keyboard.prefix()
+                        } else {
+                            other.held == binding.held
+                                && same_activation_family(other.activation, binding.activation)
+                        })
+                })
+            })
+            .collect();
         self.requires_process = self
             .bindings
             .iter()
@@ -201,7 +246,11 @@ impl Engine {
                     .keyboard
                     .retained_prefix
                     .as_ref()
-                    .filter(|policy| policy.capture_scope.matches(self.process_name.as_deref()))
+                    .filter(|policy| {
+                        policy
+                            .capture_scope
+                            .matches_context(self.process_name.as_deref(), self.window_role)
+                    })
                     .map(|_| index)
             })
             .collect();
@@ -212,7 +261,7 @@ impl Engine {
                 binding
                     .keyboard
                     .tap_scope
-                    .matches(self.process_name.as_deref())
+                    .matches_context(self.process_name.as_deref(), self.window_role)
             })
             .collect();
         self.active_bindings = self
@@ -220,8 +269,12 @@ impl Engine {
             .iter()
             .enumerate()
             .filter_map(|(index, binding)| {
-                (binding.process_scope.matches(self.process_name.as_deref())
-                    && (self.process_name.is_some() || !self.requires_process[index]))
+                (binding
+                    .process_scope
+                    .matches_context(self.process_name.as_deref(), self.window_role)
+                    && (self.process_name.is_some() || !self.requires_process[index])
+                    && (self.window_role != crate::WindowRole::Unknown
+                        || !self.requires_role[index]))
                     .then_some(index)
             })
             .collect();

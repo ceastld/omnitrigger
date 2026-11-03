@@ -6,6 +6,7 @@ const J: Button = Button::Key(74);
 
 fn scope(allow: &[&str], deny: &[&str]) -> ProcessScope {
     ProcessScope {
+        identity: Default::default(),
         allow: allow.iter().map(|s| s.to_string()).collect(),
         deny: deny.iter().map(|s| s.to_string()).collect(),
     }
@@ -32,6 +33,169 @@ fn chord(engine: &mut Engine) -> Vec<u64> {
     input(engine, InputKind::Up(K));
     input(engine, InputKind::Up(CAPS));
     hit.triggered
+}
+
+fn shell(allow: &[&str], deny: &[&str]) -> ProcessScope {
+    ProcessScope {
+        identity: ProcessIdentity::ShellContext,
+        ..scope(allow, deny)
+    }
+}
+
+#[test]
+fn shell_context_roles_choose_disjoint_rules_without_replacing_the_real_process() {
+    let mut engine = Engine::new(vec![
+        press(1, shell(&["explorer"], &[])),
+        press(2, shell(&["desktop"], &[])),
+        press(3, shell(&["taskbar"], &[])),
+        press(4, scope(&[], &[])),
+    ])
+    .unwrap();
+    assert!(engine.needs_shell_context());
+    for (role, expected) in [
+        (WindowRole::Application, 1),
+        (WindowRole::Desktop, 2),
+        (WindowRole::Taskbar, 3),
+    ] {
+        engine
+            .set_foreground_context(Some("Explorer.EXE"), role)
+            .unwrap();
+        assert_eq!(chord(&mut engine), vec![expected]);
+        assert_eq!(engine.foreground_process(), Some("explorer"));
+    }
+    engine
+        .set_foreground_context(Some("editor"), WindowRole::Application)
+        .unwrap();
+    assert_eq!(chord(&mut engine), vec![4]);
+    engine
+        .set_foreground_context(Some("explorer"), WindowRole::Unknown)
+        .unwrap();
+    assert!(chord(&mut engine).is_empty());
+    engine
+        .set_foreground_context(None, WindowRole::Desktop)
+        .unwrap();
+    assert!(chord(&mut engine).is_empty());
+}
+
+#[test]
+fn shell_context_executable_domain_preserves_legacy_explorer_and_literal_aliases() {
+    let mut engine = Engine::new(vec![press(1, scope(&["explorer"], &[]))]).unwrap();
+    assert!(!engine.needs_shell_context());
+    for role in [
+        WindowRole::Unknown,
+        WindowRole::Application,
+        WindowRole::Desktop,
+        WindowRole::Taskbar,
+    ] {
+        engine
+            .set_foreground_context(Some("explorer.exe"), role)
+            .unwrap();
+        assert_eq!(chord(&mut engine), vec![1]);
+    }
+    assert!(!scope(&["desktop"], &[]).matches_context(Some("explorer"), WindowRole::Desktop));
+    assert!(scope(&["desktop"], &[]).matches_context(Some("desktop"), WindowRole::Application));
+}
+
+#[test]
+fn shell_context_overlap_checks_both_domains_instead_of_alias_spelling() {
+    assert!(scope(&["explorer"], &[]).overlaps(&shell(&["desktop"], &[])));
+    assert!(!shell(&["explorer"], &[]).overlaps(&shell(&["desktop"], &[])));
+    assert!(!shell(&["taskbar"], &[]).overlaps(&shell(&[], &["taskbar"])));
+    assert!(matches!(
+        Engine::new(vec![
+            press(1, scope(&["explorer"], &[])),
+            press(2, shell(&["desktop"], &[]))
+        ]),
+        Err(RegistrationError::DuplicateTrigger { .. })
+    ));
+}
+
+#[test]
+fn shell_context_role_change_cancels_hold_even_when_process_name_is_unchanged() {
+    let mut binding = press(1, shell(&["explorer"], &[]));
+    binding.activation = Activation::Hold {
+        button: K,
+        duration_ms: 100,
+    };
+    let mut engine = Engine::new(vec![binding]).unwrap();
+    engine
+        .set_foreground_context(Some("explorer"), WindowRole::Application)
+        .unwrap();
+    input(&mut engine, InputKind::Down(CAPS));
+    input(&mut engine, InputKind::Down(K));
+    assert_eq!(
+        engine
+            .set_foreground_context(Some("Explorer.exe"), WindowRole::Application)
+            .unwrap(),
+        Decision::default()
+    );
+    assert_eq!(engine.next_deadline_ms(), Some(100));
+    engine
+        .set_foreground_context(Some("explorer"), WindowRole::Taskbar)
+        .unwrap();
+    assert!(engine.advance_time(100).triggered.is_empty());
+    assert!(input(&mut engine, InputKind::Up(K)).consume);
+    assert!(input(&mut engine, InputKind::Up(CAPS)).consume);
+    assert!(chord(&mut engine).is_empty());
+}
+
+#[test]
+fn shell_context_unknown_role_blocks_captured_fallback_but_not_unrelated_triggers() {
+    let mut scoped = press(1, shell(&["desktop"], &[]));
+    let mut global = press(2, scope(&[], &[]));
+    global.activation = Activation::Press(J);
+    for binding in [&mut scoped, &mut global] {
+        binding.keyboard.matching = KeyboardMatching::Captured {
+            priority: binding.id as u16,
+        };
+        binding.keyboard.dedicated_prefix = Some(CAPS);
+    }
+    let mut unrelated = press(3, scope(&[], &[]));
+    unrelated.held = vec![];
+    unrelated.activation = Activation::Press(Button::Key(80));
+    let mut engine = Engine::new(vec![scoped, global, unrelated]).unwrap();
+    engine.set_foreground_process(Some("explorer")).unwrap();
+    assert!(!input(&mut engine, InputKind::Down(CAPS)).consume);
+    assert!(input(&mut engine, InputKind::Down(J)).triggered.is_empty());
+    input(&mut engine, InputKind::Up(J));
+    input(&mut engine, InputKind::Up(CAPS));
+    assert_eq!(
+        input(&mut engine, InputKind::Down(Button::Key(80))).triggered,
+        vec![3]
+    );
+}
+
+#[test]
+fn shell_context_retained_capture_and_tap_scopes_are_independent_from_action_scope() {
+    let mut binding = press(1, shell(&["editor"], &[]));
+    binding.keyboard = KeyboardPolicy {
+        matching: KeyboardMatching::Captured { priority: 0 },
+        retained_prefix: Some(Box::new(RetainedPrefix {
+            key: CAPS,
+            capture_scope: shell(&[], &["taskbar"]),
+            quiet_ms: 0,
+            fast_ms: 0,
+            block_with_primary_mouse: false,
+        })),
+        restore_on_tap: true,
+        tap_timeout_ms: Some(1500),
+        tap_scope: shell(&["desktop"], &[]),
+        ..Default::default()
+    };
+    let mut engine = Engine::new(vec![binding]).unwrap();
+    for (role, captured, restored) in [
+        (WindowRole::Unknown, false, false),
+        (WindowRole::Taskbar, false, false),
+        (WindowRole::Application, true, false),
+        (WindowRole::Desktop, true, true),
+    ] {
+        engine
+            .set_foreground_context(Some("explorer"), role)
+            .unwrap();
+        assert_eq!(input(&mut engine, InputKind::Down(CAPS)).consume, captured);
+        let up = input(&mut engine, InputKind::Up(CAPS));
+        assert_eq!(!up.replay.is_empty(), restored);
+    }
 }
 
 #[test]
@@ -112,6 +276,7 @@ fn malformed_scope_or_context_cannot_cancel_an_existing_pending_press() {
         scope(&[".exe"], &[]),
         scope(&[" editor"], &[]),
         ProcessScope {
+            identity: Default::default(),
             allow: vec!["a".into(); 65],
             deny: vec![],
         },

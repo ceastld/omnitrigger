@@ -43,7 +43,7 @@ pub use model::{
     Activation, ActiveDrag, Axis, Button, Decision, DragEvent, DragPhase, InputEvent, InputKind,
     KeyboardMatching, KeyboardPolicy, MouseButton, RetainedPrefix, TriggerSpec, WheelDirection,
 };
-pub use process_scope::{ProcessScope, ProcessScopeError};
+pub use process_scope::{ProcessIdentity, ProcessScope, ProcessScopeError, WindowRole};
 pub use recorder::Recorder;
 pub use regions::{
     ContextError, PointerRegion, RegionError, ScreenCorner, ScreenEdge, ScreenRect,

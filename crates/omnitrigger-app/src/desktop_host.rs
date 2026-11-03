@@ -140,7 +140,7 @@ impl NativeHost for DesktopHost {
                     .info()
                     .map_err(|message| error("target_changed", message, "not_started"))?;
                 Ok(
-                    json!({"processName":info.process_name,"title":info.title,"processId":info.process_id,"isForeground":info.is_foreground}),
+                    json!({"processName":info.process_name,"windowRole":info.window_role.as_str(),"title":info.title,"processId":info.process_id,"isForeground":info.is_foreground}),
                 )
             }
             "keyboard.shortcut" => {

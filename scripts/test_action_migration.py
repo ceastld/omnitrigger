@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from plan_action_migration import build_plan, main, ranked_actions, shortcut_action
+from plan_action_migration import build_plan, main, ranked_actions, shortcut_action, same_process_scope, process_scopes_overlap
 
 
 def fixture():
@@ -112,19 +112,35 @@ class MigrationTests(unittest.TestCase):
             self.assertEqual(build_plan(**data)["bindings"][0]["equivalent_configuration_ids"], [])
             self.assertEqual(build_plan(**data)["bindings"][0]["existing_trigger_ids"], [5])
 
-    def test_native_layer_and_process_projection_keep_unimplemented_shell_and_timing_gaps(self):
+    def test_native_layer_projects_shell_context_and_keeps_unknown_timing_gap(self):
         data = fixture()
         leader = data["source"]["PowerKeys"]["20"]
         leader["BlackList"] = "game.exe;preview"
         leader["KeyActions"][0]["BindingProcessName"] = "Code;cursor.exe"
         row = build_plan(**data)["bindings"][0]
         self.assertEqual(row["trigger_gaps"], [])
-        self.assertEqual(row["trigger"]["process_scope"], {"allow": ["Code", "cursor.exe"], "deny": ["game.exe", "preview"]})
+        self.assertEqual(row["trigger"]["process_scope"], {"identity": "shell_context", "allow": ["Code", "cursor.exe"], "deny": ["game.exe", "preview"]})
         self.assertEqual(row["trigger"]["keyboard"], {"dedicated_prefix": {"kind": "key", "value": 20}, "repeat": True,
                                                     "matching": {"kind": "captured", "priority": 0}})
         leader["KeepOriginKeyFunc"] = True
         leader["BlackList"] = "explorer"
-        self.assertEqual(set(build_plan(**data)["bindings"][0]["trigger_gaps"]), {"legacy_retained_prefix_timing", "legacy_shell_window_role"})
+        self.assertEqual(set(build_plan(**data)["bindings"][0]["trigger_gaps"]), {"legacy_retained_prefix_timing"})
+
+    def test_shell_context_scope_identity_prevents_false_existing_equivalence(self):
+        executable = {"allow": ["explorer.exe"]}
+        explorer = dict(executable, identity="shell_context")
+        desktop = {"allow": ["desktop"], "identity": "shell_context"}
+        self.assertFalse(same_process_scope(executable, explorer))
+        self.assertTrue(same_process_scope({}, {"identity": "shell_context"}))
+        self.assertFalse(process_scopes_overlap(explorer, desktop))
+        self.assertTrue(process_scopes_overlap(executable, desktop))
+        data = fixture()
+        leader = data["source"]["PowerKeys"]["20"]
+        leader["KeyActions"][0]["BindingProcessName"] = "explorer"
+        leader["KeyActions"].append(dict(leader["KeyActions"][0], BindingProcessName="desktop"))
+        rows = build_plan(**data)["bindings"]
+        self.assertTrue(all(not row["trigger_gaps"] for row in rows))
+        self.assertTrue(all(row["trigger"]["process_scope"]["identity"] == "shell_context" for row in rows))
 
     def test_standalone_restore_and_duplicate_process_entries_are_explicit_projections(self):
         data = fixture()
@@ -144,7 +160,7 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(rows[1]["folded_into_prefix"], 20)
         leader["KeyActions"][1]["BindingProcessName"] = "Wormhole"
         rows = build_plan(**data)["bindings"]
-        self.assertEqual(rows[0]["trigger"]["keyboard"]["tap_scope"], {"allow": ["Wormhole"]})
+        self.assertEqual(rows[0]["trigger"]["keyboard"]["tap_scope"], {"identity": "shell_context", "allow": ["Wormhole"]})
         self.assertEqual(rows[1]["status"], "prefix_policy_projected_unverified")
 
     def test_ordered_application_rules_become_disjoint_and_shadowed_rows_are_retained(self):
@@ -171,7 +187,7 @@ class MigrationTests(unittest.TestCase):
         leader = data["source"]["PowerKeys"]["20"]
         leader["KeyActions"].append({"SecondaryKey": 74, "ActionType": 12, "Data": "action-a", "BindingProcessName": "Code"})
         rows = build_plan(**data)["bindings"]
-        self.assertEqual(rows[0]["trigger"]["process_scope"], {"deny": ["Code"]})
+        self.assertEqual(rows[0]["trigger"]["process_scope"], {"identity": "shell_context", "deny": ["Code"]})
         self.assertEqual(rows[1]["status"], "needs_action_support")
 
     def test_duplicate_mouse_ids_and_per_app_rules_are_preserved(self):

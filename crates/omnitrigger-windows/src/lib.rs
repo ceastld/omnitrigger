@@ -51,6 +51,8 @@ pub use window_action::{
 mod script_target;
 mod shortcut;
 #[cfg(windows)]
+mod window_context;
+#[cfg(windows)]
 pub use script_target::{ScriptTarget, ScriptTargetInfo};
 #[cfg(windows)]
 pub use shortcut::{
@@ -99,6 +101,8 @@ pub enum HoldStartRejection {
 pub struct ListenerDiagnostics {
     /// 仅当前前台映像名；None 表示尚未采集或无法读取，不记录历史。
     pub foreground_process: Option<String>,
+    /// 当前窗口角色，由 Hook 外采集；未知状态不会借用上一窗口的结果。
+    pub foreground_window_role: omnitrigger_core::WindowRole,
     pub process_context_required: bool,
     pub keyboard_events: u64,
     pub mouse_events: u64,

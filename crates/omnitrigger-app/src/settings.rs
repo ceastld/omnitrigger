@@ -22,7 +22,7 @@ use crate::wheels::WheelActionRef;
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
-const CONFIG_VERSION: u32 = 14;
+const CONFIG_VERSION: u32 = 15;
 
 pub fn use_path(path: PathBuf) -> Result<(), String> {
     CUSTOM_PATH.set(path).map_err(|_| "配置路径已设置。".into())
@@ -166,6 +166,8 @@ impl From<KeyboardMatchingDto> for KeyboardMatching {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProcessScopeDto {
+    #[serde(default, skip_serializing_if = "ProcessIdentityDto::is_default")]
+    identity: ProcessIdentityDto,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     allow: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -174,7 +176,36 @@ struct ProcessScopeDto {
 
 impl ProcessScopeDto {
     fn is_global(&self) -> bool {
-        self.allow.is_empty() && self.deny.is_empty()
+        self.allow.is_empty() && self.deny.is_empty() && self.identity.is_default()
+    }
+}
+
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ProcessIdentityDto {
+    #[default]
+    Executable,
+    ShellContext,
+}
+impl ProcessIdentityDto {
+    fn is_default(&self) -> bool {
+        matches!(self, Self::Executable)
+    }
+}
+impl From<omnitrigger_core::ProcessIdentity> for ProcessIdentityDto {
+    fn from(value: omnitrigger_core::ProcessIdentity) -> Self {
+        match value {
+            omnitrigger_core::ProcessIdentity::Executable => Self::Executable,
+            omnitrigger_core::ProcessIdentity::ShellContext => Self::ShellContext,
+        }
+    }
+}
+impl From<ProcessIdentityDto> for omnitrigger_core::ProcessIdentity {
+    fn from(value: ProcessIdentityDto) -> Self {
+        match value {
+            ProcessIdentityDto::Executable => Self::Executable,
+            ProcessIdentityDto::ShellContext => Self::ShellContext,
+        }
     }
 }
 
@@ -187,7 +218,11 @@ pub fn process_scope_label(scope: &ProcessScope) -> String {
     if !scope.deny.is_empty() {
         text += &format!("，排除 {}", scope.deny.join("、"));
     }
-    text
+    if scope.identity == omnitrigger_core::ProcessIdentity::ShellContext {
+        format!("窗口上下文：{text}")
+    } else {
+        text
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -260,6 +295,7 @@ impl From<&Binding> for BindingDto {
                     .map(|policy| RetainedPrefixDto {
                         key: policy.key.into(),
                         capture_scope: ProcessScopeDto {
+                            identity: policy.capture_scope.identity.into(),
                             allow: policy.capture_scope.allow.clone(),
                             deny: policy.capture_scope.deny.clone(),
                         },
@@ -271,11 +307,13 @@ impl From<&Binding> for BindingDto {
                 restore_on_tap: binding.spec.keyboard.restore_on_tap,
                 tap_timeout_ms: binding.spec.keyboard.tap_timeout_ms,
                 tap_scope: ProcessScopeDto {
+                    identity: binding.spec.keyboard.tap_scope.identity.into(),
                     allow: binding.spec.keyboard.tap_scope.allow.clone(),
                     deny: binding.spec.keyboard.tap_scope.deny.clone(),
                 },
             },
             process_scope: ProcessScopeDto {
+                identity: binding.spec.process_scope.identity.into(),
                 allow: binding.spec.process_scope.allow.clone(),
                 deny: binding.spec.process_scope.deny.clone(),
             },
@@ -316,6 +354,17 @@ impl From<&Binding> for BindingDto {
 
 impl BindingDto {
     fn into_binding(self, version: u32) -> Result<Binding, String> {
+        if version < 15
+            && (!self.process_scope.identity.is_default()
+                || !self.keyboard.tap_scope.identity.is_default()
+                || self
+                    .keyboard
+                    .retained_prefix
+                    .as_ref()
+                    .is_some_and(|policy| !policy.capture_scope.identity.is_default()))
+        {
+            return Err("窗口上下文匹配需要版本 15 配置。".into());
+        }
         if version < 14 && self.keyboard.retained_prefix.is_some() {
             return Err("保留原功能前缀需要版本 14 配置。".into());
         }
@@ -392,6 +441,7 @@ impl BindingDto {
                         Box::new(omnitrigger_core::RetainedPrefix {
                             key: policy.key.into(),
                             capture_scope: ProcessScope {
+                                identity: policy.capture_scope.identity.into(),
                                 allow: policy.capture_scope.allow,
                                 deny: policy.capture_scope.deny,
                             },
@@ -404,11 +454,13 @@ impl BindingDto {
                     restore_on_tap: self.keyboard.restore_on_tap,
                     tap_timeout_ms: self.keyboard.tap_timeout_ms,
                     tap_scope: ProcessScope {
+                        identity: self.keyboard.tap_scope.identity.into(),
                         allow: self.keyboard.tap_scope.allow,
                         deny: self.keyboard.tap_scope.deny,
                     },
                 },
                 process_scope: ProcessScope {
+                    identity: self.process_scope.identity.into(),
                     allow: self.process_scope.allow,
                     deny: self.process_scope.deny,
                 },
@@ -867,6 +919,7 @@ mod tests {
             tap_timeout_ms: Some(20_000),
             repeat: true,
             tap_scope: ProcessScope {
+                identity: Default::default(),
                 allow: vec!["Wormhole.exe".into()],
                 deny: vec![],
             },
@@ -972,6 +1025,75 @@ mod tests {
     }
 
     #[test]
+    fn shell_context_requires_v15_preserves_v14_and_all_three_scope_domains() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let mut old: serde_json::Value = serde_json::from_str(&encode(&defaults())).unwrap();
+        old["version"] = 14.into();
+        let original = format!(" \r\n{old}\r\n");
+        std::fs::write(&destination, original.as_bytes()).unwrap();
+        let mut binding = defaults()[0].clone();
+        binding.spec.held = vec![Button::Key(32)];
+        binding.spec.activation = Activation::Press(Button::Key(75));
+        binding.spec.process_scope = ProcessScope {
+            identity: omnitrigger_core::ProcessIdentity::ShellContext,
+            allow: vec!["desktop".into()],
+            deny: vec![],
+        };
+        binding.spec.keyboard = KeyboardPolicy {
+            matching: KeyboardMatching::Captured { priority: 0 },
+            retained_prefix: Some(Box::new(omnitrigger_core::RetainedPrefix {
+                key: Button::Key(32),
+                capture_scope: binding.spec.process_scope.clone(),
+                quiet_ms: 50,
+                fast_ms: 50,
+                block_with_primary_mouse: false,
+            })),
+            restore_on_tap: true,
+            tap_timeout_ms: Some(1500),
+            tap_scope: binding.spec.process_scope.clone(),
+            ..Default::default()
+        };
+        let bindings = vec![binding];
+        assert_eq!(decode(&encode(&bindings)).unwrap(), bindings);
+        save_to(&destination, &bindings).unwrap();
+        assert_eq!(
+            std::fs::read(scratch.0.join("bindings.json.v14.bak")).unwrap(),
+            original.as_bytes()
+        );
+        let base: serde_json::Value = serde_json::from_str(&encode(&bindings)).unwrap();
+        for path in [
+            "/bindings/0/process_scope",
+            "/bindings/0/keyboard/tap_scope",
+            "/bindings/0/keyboard/retained_prefix/capture_scope",
+        ] {
+            let mut document = base.clone();
+            for other in [
+                "/bindings/0/process_scope",
+                "/bindings/0/keyboard/tap_scope",
+                "/bindings/0/keyboard/retained_prefix/capture_scope",
+            ] {
+                if other != path {
+                    document
+                        .pointer_mut(other)
+                        .unwrap()
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("identity");
+                }
+            }
+            document["version"] = 14.into();
+            assert!(decode(&document.to_string())
+                .unwrap_err()
+                .contains("版本 15"));
+            document["version"] = 15.into();
+            document.pointer_mut(path).unwrap()["identity"] = "future".into();
+            assert!(decode(&document.to_string()).is_err());
+        }
+        assert!(process_scope_label(&bindings[0].spec.process_scope).starts_with("窗口上下文："));
+    }
+
+    #[test]
     fn shortcut_timing_requires_v13_and_keeps_exact_v12_backup() {
         let scratch = Scratch::new();
         let destination = scratch.config();
@@ -1018,8 +1140,15 @@ mod tests {
         let cases = document["cases"].as_array().unwrap();
         assert!(!cases.is_empty() && cases.len() <= 100_000);
         for (case_index, case) in cases.iter().enumerate() {
+            let role = match case["role"].as_str() {
+                None | Some("unknown") => omnitrigger_core::WindowRole::Unknown,
+                Some("application") => omnitrigger_core::WindowRole::Application,
+                Some("desktop") => omnitrigger_core::WindowRole::Desktop,
+                Some("taskbar") => omnitrigger_core::WindowRole::Taskbar,
+                Some(other) => panic!("未知窗口角色：{other}"),
+            };
             engine
-                .set_foreground_process(case["process"].as_str())
+                .set_foreground_context(case["process"].as_str(), role)
                 .unwrap();
             let steps = case["steps"].as_array().unwrap();
             assert!(!steps.is_empty() && steps.len() <= 32);
@@ -1086,6 +1215,7 @@ mod tests {
         let mut scoped = bindings[0].clone();
         scoped.spec.id = 88;
         scoped.spec.process_scope = ProcessScope {
+            identity: Default::default(),
             allow: vec!["Code.EXE".into(), "cursor".into()],
             deny: vec!["cursor.exe".into()],
         };
@@ -1115,6 +1245,7 @@ mod tests {
         std::fs::write(&destination, &original).unwrap();
         let mut bindings = defaults();
         bindings[0].spec.process_scope = ProcessScope {
+            identity: Default::default(),
             allow: vec![],
             deny: vec!["game.exe".into()],
         };

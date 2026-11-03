@@ -1,0 +1,32 @@
+{
+  "version": 15,
+  "bindings": [
+    {
+      "id": 9101,
+      "held": [{"kind":"key","value":162}],
+      "activation": {"kind":"press","value":{"kind":"key","value":120}},
+      "process_scope": {"identity":"shell_context","allow":["explorer"]},
+      "message": "文件窗口中的 Ctrl+F9",
+      "enabled": false,
+      "action": {"kind":"notification"}
+    },
+    {
+      "id": 9102,
+      "held": [{"kind":"key","value":162}],
+      "activation": {"kind":"press","value":{"kind":"key","value":120}},
+      "process_scope": {"identity":"shell_context","allow":["desktop"]},
+      "message": "桌面中的 Ctrl+F9",
+      "enabled": false,
+      "action": {"kind":"notification"}
+    },
+    {
+      "id": 9103,
+      "held": [{"kind":"key","value":162}],
+      "activation": {"kind":"press","value":{"kind":"key","value":120}},
+      "process_scope": {"identity":"shell_context","allow":["taskbar"]},
+      "message": "任务栏中的 Ctrl+F9",
+      "enabled": false,
+      "action": {"kind":"notification"}
+    }
+  ]
+}
