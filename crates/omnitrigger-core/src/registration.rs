@@ -147,15 +147,14 @@ pub(super) fn validate(
     }
     let mut ids = BTreeSet::new();
     for binding in &mut bindings {
-        if let Some(button) = binding.keyboard.dedicated_prefix {
-            if !matches!(button, Button::Key(key) if (1..=254).contains(&key) && !matches!(key, 0x10..=0x12))
-                || !binding.held.contains(&button)
-            {
-                return Err(RegistrationError::InvalidDedicatedPrefix {
-                    id: binding.id,
-                    button,
-                });
-            }
+        if let Some(button) = binding.keyboard.dedicated_prefix
+            && (!matches!(button, Button::Key(key) if (1..=254).contains(&key) && !matches!(key, 0x10..=0x12))
+                || !binding.held.contains(&button))
+        {
+            return Err(RegistrationError::InvalidDedicatedPrefix {
+                id: binding.id,
+                button,
+            });
         }
         if binding.keyboard.repeat
             && !matches!(binding.activation, Activation::Press(Button::Key(_)))
