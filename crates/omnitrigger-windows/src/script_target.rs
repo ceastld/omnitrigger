@@ -120,12 +120,44 @@ impl ScriptTarget {
         })
     }
 
+    pub fn send_shortcut_timed_if(
+        &self,
+        keys: &[u16],
+        delay_ms: u32,
+        mut check: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        crate::validate_shortcut(keys)?;
+        crate::validate_key_timing(1, delay_ms)?;
+        if delay_ms == 0 {
+            return self.send_shortcut_if(keys, check);
+        }
+        self.send_key_sequence_if(
+            &keys[..keys.len() - 1],
+            &keys[keys.len() - 1..],
+            delay_ms,
+            &mut check,
+        )
+    }
+
     pub fn send_text_if(
         &self,
         text: &str,
         mut check: impl FnMut() -> Result<(), String>,
     ) -> Result<(), String> {
         crate::automation_basics::send_text_checked(text, self.target, || {
+            self.ensure_foreground()?;
+            check()
+        })
+    }
+
+    pub fn send_key_sequence_if(
+        &self,
+        modifiers: &[u16],
+        keys: &[u16],
+        delay_ms: u32,
+        mut check: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        crate::shortcut::send_key_sequence_checked(modifiers, keys, delay_ms, self.target, || {
             self.ensure_foreground()?;
             check()
         })

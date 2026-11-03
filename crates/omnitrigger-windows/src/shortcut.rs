@@ -71,6 +71,17 @@ pub fn validate_key_sequence(modifiers: &[u16], keys: &[u16]) -> Result<(), Stri
     Ok(())
 }
 
+/// 一次桌面调用的等待预算有界，给桥接回执与释放收尾留出时间。
+pub fn validate_key_timing(key_count: usize, delay_ms: u32) -> Result<(), String> {
+    if !(1..=16).contains(&key_count) {
+        return Err("连续按键需要 1–16 个普通键。".into());
+    }
+    if delay_ms > 1000 || (key_count as u64 + 1) * u64::from(delay_ms) > 3000 {
+        return Err("按下延迟应为 0–1000ms，单次连续按键的等待合计不能超过 3000ms。".into());
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg(any(windows, test))]
 struct Stroke {
@@ -359,11 +370,123 @@ pub fn send_key_sequence_to(
     keys: &[u16],
     target: ShortcutTarget,
 ) -> Result<(), String> {
+    send_key_sequence_checked(modifiers, keys, 0, target, || Ok(()))
+}
+
+#[cfg(windows)]
+pub(super) fn send_key_sequence_checked(
+    modifiers: &[u16],
+    keys: &[u16],
+    delay_ms: u32,
+    target: ShortcutTarget,
+    mut check: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
     let _guard = SENDING.lock().map_err(|_| "连续按键发送状态不可用。")?;
     validate_key_sequence(modifiers, keys)?;
+    validate_key_timing(keys.len(), delay_ms)?;
+    check()?;
     ensure_shortcut_target(target)?;
     let strokes = sequence_plan(modifiers, keys, &held_keys(keys))?;
-    send_strokes(&strokes, target, "连续按键")
+    if delay_ms == 0 {
+        return send_strokes(&strokes, target, "连续按键");
+    }
+    let stages = timed_stages(&strokes, keys.len(), delay_ms);
+    run_timed(
+        &stages,
+        || {
+            check()?;
+            ensure_shortcut_target(target)
+        },
+        |batch| {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT};
+            let inputs: Vec<INPUT> = batch.iter().map(native_input).collect();
+            unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) as usize }
+        },
+        |milliseconds, guard| {
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_millis(u64::from(milliseconds));
+            loop {
+                guard()?;
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Ok(());
+                }
+                std::thread::sleep(remaining.min(std::time::Duration::from_millis(5)));
+            }
+        },
+    )
+}
+
+#[cfg(any(windows, test))]
+fn timed_stages(strokes: &[Stroke], key_count: usize, delay_ms: u32) -> Vec<TimedStage> {
+    let modifiers_end = strokes
+        .iter()
+        .take_while(|stroke| modifier_family(stroke.key).is_some())
+        .count();
+    let mut stages = vec![
+        TimedStage::Send(strokes[..modifiers_end].to_vec()),
+        TimedStage::Wait(delay_ms),
+    ];
+    let mut cursor = modifiers_end;
+    for _ in 0..key_count {
+        stages.push(TimedStage::Send(vec![strokes[cursor]]));
+        stages.push(TimedStage::Wait(delay_ms));
+        stages.push(TimedStage::Send(vec![strokes[cursor + 1]]));
+        cursor += 2;
+    }
+    stages.push(TimedStage::Send(strokes[cursor..].to_vec()));
+    stages
+}
+
+#[cfg(any(windows, test))]
+enum TimedStage {
+    Send(Vec<Stroke>),
+    Wait(u32),
+}
+
+/// 发送失败、取消或目标改变时，仅释放本次已送达且仍未释放的自有按下。
+#[cfg(any(windows, test))]
+fn run_timed(
+    stages: &[TimedStage],
+    mut check: impl FnMut() -> Result<(), String>,
+    mut send: impl FnMut(&[Stroke]) -> usize,
+    mut wait: impl FnMut(u32, &mut dyn FnMut() -> Result<(), String>) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut delivered = Vec::new();
+    let operation = (|| {
+        for stage in stages {
+            check()?;
+            match stage {
+                TimedStage::Send(batch) if !batch.is_empty() => {
+                    let count = send(batch).min(batch.len());
+                    delivered.extend_from_slice(&batch[..count]);
+                    if count != batch.len() {
+                        return Err("连续按键仅部分送达，已停止后续输入。".into());
+                    }
+                }
+                TimedStage::Wait(milliseconds) => wait(*milliseconds, &mut check)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    })();
+    if operation.is_err() {
+        let releases = cleanup(&delivered, delivered.len());
+        let mut released = 0;
+        for _ in 0..5 {
+            if released == releases.len() {
+                break;
+            }
+            released += send(&releases[released..]).min(releases.len() - released);
+        }
+        if released != releases.len() {
+            return Err(format!(
+                "{} 部分自有按键未确认释放，请手动松开修饰键后再继续。",
+                operation.unwrap_err()
+            ));
+        }
+    }
+    operation
 }
 
 #[cfg(windows)]
@@ -380,8 +503,8 @@ fn held_keys(keys: &[u16]) -> BTreeSet<u16> {
 #[cfg(windows)]
 fn native_input(stroke: &Stroke) -> windows::Win32::UI::Input::KeyboardAndMouse::INPUT {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY,
-        KEYEVENTF_KEYUP, VIRTUAL_KEY,
+        MapVirtualKeyW, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, VIRTUAL_KEY,
     };
     let mut flags = KEYBD_EVENT_FLAGS(0);
     if stroke.up {
@@ -395,6 +518,8 @@ fn native_input(stroke: &Stroke) -> windows::Win32::UI::Input::KeyboardAndMouse:
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
                 wVk: VIRTUAL_KEY(stroke.key),
+                wScan: (unsafe { MapVirtualKeyW(u32::from(stroke.key), MAPVK_VK_TO_VSC) } & 0xff)
+                    as u16,
                 dwFlags: flags,
                 dwExtraInfo: SHORTCUT_TAG,
                 ..Default::default()
@@ -445,6 +570,139 @@ fn send_strokes(strokes: &[Stroke], target: ShortcutTarget, label: &str) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timed_sequence_keeps_modifier_order_and_waits_before_each_release() {
+        use std::cell::RefCell;
+        let plan = sequence_plan(&[163, 165, 161], &[75, 67], &BTreeSet::new()).unwrap();
+        let stages = timed_stages(&plan, 2, 10);
+        let trace = RefCell::new(Vec::new());
+        run_timed(
+            &stages,
+            || Ok(()),
+            |batch| {
+                trace.borrow_mut().push(format!("send:{batch:?}"));
+                batch.len()
+            },
+            |ms, guard| {
+                guard()?;
+                trace.borrow_mut().push(format!("wait:{ms}"));
+                Ok(())
+            },
+        )
+        .unwrap();
+        let trace = trace.into_inner();
+        assert_eq!(trace.len(), 9);
+        assert_eq!(trace[0], format!("send:{:?}", &plan[..3]));
+        assert_eq!(trace[1], "wait:10");
+        assert_eq!(trace[3], "wait:10");
+        assert_eq!(trace[6], "wait:10");
+        assert_eq!(trace[7], format!("send:{:?}", &plan[6..7]));
+        assert_eq!(trace[8], format!("send:{:?}", &plan[7..]));
+    }
+
+    #[test]
+    fn timed_sequence_cancellation_releases_only_owned_unfinished_presses() {
+        use std::cell::{Cell, RefCell};
+        let plan = sequence_plan(&[163, 161], &[75, 67], &BTreeSet::from([163])).unwrap();
+        let cancelled = Cell::new(false);
+        let waits = Cell::new(0);
+        let delivered = RefCell::new(Vec::new());
+        let error = run_timed(
+            &timed_stages(&plan, 2, 10),
+            || {
+                if cancelled.get() {
+                    Err("已取消".into())
+                } else {
+                    Ok(())
+                }
+            },
+            |batch| {
+                delivered.borrow_mut().extend_from_slice(batch);
+                batch.len()
+            },
+            |_, guard| {
+                waits.set(waits.get() + 1);
+                if waits.get() == 2 {
+                    cancelled.set(true);
+                }
+                guard()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, "已取消");
+        assert_eq!(
+            delivered.into_inner(),
+            vec![
+                Stroke {
+                    key: 161,
+                    up: false
+                },
+                Stroke { key: 75, up: false },
+                Stroke { key: 75, up: true },
+                Stroke { key: 161, up: true }
+            ]
+        );
+    }
+
+    #[test]
+    fn timed_sequence_partial_submission_never_retries_the_action() {
+        use std::cell::{Cell, RefCell};
+        let plan = sequence_plan(&[163, 165, 161], &[75], &BTreeSet::new()).unwrap();
+        let calls = Cell::new(0);
+        let batches = RefCell::new(Vec::new());
+        let error = run_timed(
+            &timed_stages(&plan, 1, 10),
+            || Ok(()),
+            |batch| {
+                calls.set(calls.get() + 1);
+                batches.borrow_mut().push(batch.to_vec());
+                if calls.get() == 1 {
+                    2
+                } else {
+                    batch.len()
+                }
+            },
+            |_, _| panic!("部分失败后不能继续等待或发普通键"),
+        )
+        .unwrap_err();
+        assert!(error.contains("部分送达"));
+        assert_eq!(calls.get(), 2);
+        assert_eq!(
+            batches.borrow()[1],
+            vec![Stroke { key: 165, up: true }, Stroke { key: 163, up: true }]
+        );
+    }
+
+    #[test]
+    fn timed_sequence_cleanup_failure_is_bounded_and_timing_limits_are_explicit() {
+        use std::cell::Cell;
+        let plan = sequence_plan(&[163], &[75], &BTreeSet::new()).unwrap();
+        let calls = Cell::new(0);
+        let error = run_timed(
+            &timed_stages(&plan, 1, 10),
+            || Ok(()),
+            |batch| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    batch.len()
+                } else {
+                    assert!(batch.iter().all(|stroke| stroke.up));
+                    0
+                }
+            },
+            |_, _| Err("目标已切换".into()),
+        )
+        .unwrap_err();
+        assert!(error.contains("未确认释放"));
+        assert_eq!(calls.get(), 6);
+        for (count, delay) in [(0, 0), (usize::MAX, 0), (1, 1001), (16, 200)] {
+            assert!(validate_key_timing(count, delay).is_err());
+        }
+        for (count, delay) in [(1, 1000), (16, 176), (16, 0)] {
+            assert!(validate_key_timing(count, delay).is_ok());
+        }
+    }
 
     #[test]
     fn accepts_single_editing_keys_and_rejects_ambiguous_combinations() {
@@ -513,6 +771,27 @@ mod tests {
         }
         for key in [0x08, 0x0d, 0xa0, 0xa2, 0xa4, 0x43] {
             assert!(!extended(key));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_virtual_keys_keep_scan_codes_without_marking_right_shift_as_extended() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            MapVirtualKeyW, KEYEVENTF_EXTENDEDKEY, MAPVK_VK_TO_VSC,
+        };
+        for key in [161, 163, 165, 65, 135] {
+            let input = native_input(&Stroke { key, up: false });
+            let keyboard = unsafe { input.Anonymous.ki };
+            assert_eq!(keyboard.wVk.0, key);
+            assert_eq!(
+                keyboard.wScan,
+                (unsafe { MapVirtualKeyW(u32::from(key), MAPVK_VK_TO_VSC) } & 0xff) as u16
+            );
+            assert_eq!(
+                keyboard.dwFlags.contains(KEYEVENTF_EXTENDEDKEY),
+                matches!(key, 163 | 165)
+            );
         }
     }
 

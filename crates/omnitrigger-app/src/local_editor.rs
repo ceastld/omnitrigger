@@ -163,21 +163,21 @@ impl LocalEditor {
         };
         let (first, second) = match step {
             LocalStep::SendShortcut { keys } => (
-                crate::shortcut::ShortcutAction { keys: keys.clone() }.display(),
+                crate::shortcut::ShortcutAction::new(keys.clone()).display(),
                 String::new(),
             ),
             LocalStep::KeyTap { key } => (
-                crate::shortcut::ShortcutAction { keys: vec![*key] }.display(),
+                crate::shortcut::ShortcutAction::new(vec![*key]).display(),
                 String::new(),
             ),
             LocalStep::KeySequence { modifiers, keys } => (
                 modifiers
                     .iter()
-                    .map(|key| crate::shortcut::ShortcutAction { keys: vec![*key] }.display())
+                    .map(|key| crate::shortcut::ShortcutAction::new(vec![*key]).display())
                     .collect::<Vec<_>>()
                     .join("+"),
                 keys.iter()
-                    .map(|key| crate::shortcut::ShortcutAction { keys: vec![*key] }.display())
+                    .map(|key| crate::shortcut::ShortcutAction::new(vec![*key]).display())
                     .collect::<Vec<_>>()
                     .join(", "),
             ),
@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn saved_generic_modifier_taps_remain_editable_without_rewriting_the_key() {
         for key in [0x10, 0x11, 0x12] {
-            let label = crate::shortcut::ShortcutAction { keys: vec![key] }.display();
+            let label = crate::shortcut::ShortcutAction::new(vec![key]).display();
             assert_eq!(parse_key(&label).unwrap(), key);
             assert_eq!(parse_key(&label.to_ascii_lowercase()).unwrap(), key);
         }

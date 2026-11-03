@@ -57,7 +57,9 @@ pub use shortcut::{
     capture_shortcut_target, ensure_shortcut_target, restore_shortcut_target, send_key_sequence_to,
     send_key_tap_to, send_shortcut, send_shortcut_to, ShortcutTarget,
 };
-pub use shortcut::{validate_key_sequence, validate_key_tap, validate_shortcut};
+pub use shortcut::{
+    validate_key_sequence, validate_key_tap, validate_key_timing, validate_shortcut,
+};
 
 /// 专用于诊断 Hook 链顺序的注入标记；探针只计数，不进入触发器状态机。
 pub const PRIORITY_PROBE_TAG: usize = 0x4f4d_5052;

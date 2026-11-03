@@ -639,6 +639,62 @@ mod tests {
     }
 
     #[test]
+    fn timed_keyboard_api_preserves_order_and_rejects_invalid_options_before_dispatch() {
+        if !node_available() {
+            return;
+        }
+        #[derive(Default)]
+        struct Host(std::sync::Mutex<Vec<Value>>);
+        impl NativeHost for Host {
+            fn call(
+                &self,
+                method: &str,
+                params: Value,
+                _: &CancellationToken,
+            ) -> Result<Value, ActionError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(json!({"method":method,"params":params}));
+                Ok(json!({"submitted":true}))
+            }
+        }
+        let fixture = Fixture::new(
+            r#"export default async ctx => {
+            await ctx.desktop.sendKeySequence([163,165,161],[75,67],{keyDownDelayMs:10});
+            await ctx.desktop.sendShortcut([163,65],{keyDownDelayMs:20});
+            const invalid=[];
+            for (const options of [{keyDownDelayMs:null},{keyDownDelayMs:-1},{keyDownDelayMs:1.5},{keyDownDelayMs:1001},{delay:10},null]) {
+                try { await ctx.desktop.sendShortcut([65],options); } catch(e) { invalid.push([e.code,e.effectState]); }
+            }
+            try { await ctx.desktop.sendKeySequence([163],Array(16).fill(65),{keyDownDelayMs:200}); } catch(e) { invalid.push([e.code,e.effectState]); }
+            return invalid;
+        }"#,
+            json!({}),
+        );
+        let host = Host::default();
+        let result = NodeRuntime::default()
+            .execute_with_host(
+                &fixture.action,
+                &context(),
+                &CancellationToken::new(),
+                Some(&host),
+            )
+            .unwrap();
+        assert_eq!(result, json!(vec![vec!["invalid_input", "not_started"]; 7]));
+        let calls = host.0.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0],
+            json!({"method":"keyboard.sequence","params":{"modifiers":[163,165,161],"keys":[75,67],"key_down_delay_ms":10}})
+        );
+        assert_eq!(
+            calls[1],
+            json!({"method":"keyboard.shortcut","params":{"keys":[163,65],"key_down_delay_ms":20}})
+        );
+    }
+
+    #[test]
     fn desktop_host_requires_await_and_reports_unavailable_before_operation() {
         if !node_available() {
             return;

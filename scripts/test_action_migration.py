@@ -13,6 +13,7 @@ def fixture():
     return dict(
         source={"PowerKeys": {"20": {"Key": 20, "IsEnabled": True,
                                       "KeepOriginKeyFunc": False, "KeyActions": [rule]}},
+                "InputSettings": {"DefaultModifiedKeyDownDelay": 0},
                 "MouseActions": [], "ExeSettings": {}},
         catalog_payload={"payload": {"items": [{"id": "action-a", "title": "示例动作", "actionType": "XAction"}],
                                      "totalCount": 1, "hasMore": False}},
@@ -23,6 +24,21 @@ def fixture():
 
 
 class MigrationTests(unittest.TestCase):
+    def test_source_input_timing_requires_evidence_and_preserves_global_and_process_delays(self):
+        data=fixture()
+        row=build_plan(**data)["bindings"][0]
+        self.assertEqual(row["operation"]["native_action"]["keys"],[163,65])
+        self.assertEqual(row["operation"]["native_action"]["timing"],{"process_overrides":{"wps":10,"et":10,"wpp":10,"wpspdf":10,"mstsc":10}})
+        for delay in [10,1000]:
+            data["source"]["InputSettings"]["DefaultModifiedKeyDownDelay"]=delay
+            self.assertEqual(build_plan(**data)["bindings"][0]["operation"]["native_action"]["timing"],{"key_down_delay_ms":delay})
+        for value,gap in [(None,"source_key_down_delay_unknown"),(True,"source_key_down_delay_unknown"),(1001,"unsupported_key_down_delay")]:
+            data["source"]["InputSettings"]["DefaultModifiedKeyDownDelay"]=value
+            row=build_plan(**data)["bindings"][0]
+            self.assertEqual(row["operation"]["status"],"needs_implementation")
+            self.assertIn(gap,row["operation"]["action_gaps"])
+            self.assertIsNone(row["operation"]["native_action"])
+
     def test_ranking_excludes_features_before_top_and_keeps_missing_actions(self):
         ranked = ranked_actions({"feature-a": 500, "missing": 100, "local": 99},
                                 {"local": {"title": "当前动作"}}, {"feature-a"}, 1)
@@ -69,7 +85,8 @@ class MigrationTests(unittest.TestCase):
                     "activation": {"kind": "press", "value": {"kind": "key", "value": 74}},
                     "keyboard": {"dedicated_prefix": {"kind": "key", "value": 20}, "repeat": True,
                                  "matching": {"kind": "captured", "priority": 0}},
-                    "action": {"kind": "send_shortcut", "keys": [162, 65]}, "enabled": True}
+                    "action": {"kind": "send_shortcut", "keys": [163, 65], "timing": {"process_overrides": {
+                        "wps":10,"et":10,"wpp":10,"wpspdf":10,"mstsc":10}}}, "enabled": True}
         data["current"]["bindings"] = [existing]
         self.assertEqual(build_plan(**data)["bindings"][0]["equivalent_configuration_ids"], [5])
         for change in ({"enabled": False}, {"conditions": [{"kind": "example"}]},
@@ -195,7 +212,7 @@ class MigrationTests(unittest.TestCase):
             build_plan(**data)
 
     def test_shortcuts_reject_sendkeys_unknown_bits_and_mouse(self):
-        self.assertEqual(shortcut_action("15|65"), {"kind": "send_shortcut", "keys": [162, 160, 164, 91, 65]})
+        self.assertEqual(shortcut_action("15|65"), {"kind": "send_shortcut", "keys": [163, 165, 161, 91, 65]})
         for invalid in (None, "^a", "2|65|x", "16|65", "2|1", "2|17", "2|162", "２|65"):
             self.assertIsNone(shortcut_action(invalid), invalid)
 

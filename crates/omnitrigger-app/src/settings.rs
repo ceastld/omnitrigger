@@ -22,7 +22,7 @@ use crate::wheels::WheelActionRef;
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
-const CONFIG_VERSION: u32 = 12;
+const CONFIG_VERSION: u32 = 13;
 
 pub fn use_path(path: PathBuf) -> Result<(), String> {
     CUSTOM_PATH.set(path).map_err(|_| "配置路径已设置。".into())
@@ -344,6 +344,11 @@ impl BindingDto {
         }
         if version < 9 && matches!(action, ActionSpec::Browser(_)) {
             return Err("浏览器动作需要版本 9 配置。".into());
+        }
+        if version < 13
+            && matches!(&action, ActionSpec::SendShortcut(shortcut) if !shortcut.timing.is_default())
+        {
+            return Err("按键时序需要版本 13 配置。".into());
         }
         Ok(Binding {
             spec: TriggerSpec {
@@ -862,7 +867,7 @@ mod tests {
         );
         let mut saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&destination).unwrap()).unwrap();
-        assert_eq!(saved["version"], 12);
+        assert_eq!(saved["version"], CONFIG_VERSION);
         assert_eq!(
             saved["bindings"][0]["keyboard"]["matching"],
             json!({"kind":"captured","priority":7})
@@ -875,6 +880,39 @@ mod tests {
         assert_eq!(
             decode(&std::fs::read_to_string(&destination).unwrap()).unwrap(),
             bindings
+        );
+    }
+
+    #[test]
+    fn shortcut_timing_requires_v13_and_keeps_exact_v12_backup() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let mut document: serde_json::Value = serde_json::from_str(&encode(&defaults())).unwrap();
+        document["version"] = 12.into();
+        let original = format!(" \r\n{document}\r\n");
+        std::fs::write(&destination, &original).unwrap();
+        let mut bindings = vec![defaults()[0].clone()];
+        let mut shortcut = ShortcutAction::new(vec![163, 165, 161, 65]);
+        shortcut
+            .timing
+            .process_overrides
+            .insert("WPS.exe".into(), 10);
+        bindings[0].action = ActionSpec::SendShortcut(shortcut);
+        save_to(&destination, &bindings).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.0.join("bindings.json.v12.bak")).unwrap(),
+            original
+        );
+        assert_eq!(
+            decode(&std::fs::read_to_string(&destination).unwrap()).unwrap(),
+            bindings
+        );
+        let mut saved: serde_json::Value = serde_json::from_str(&encode(&bindings)).unwrap();
+        saved["version"] = 12.into();
+        assert!(decode(&saved.to_string()).unwrap_err().contains("版本 13"));
+        assert_eq!(
+            std::fs::read_to_string(scratch.0.join("bindings.json.v12.bak")).unwrap(),
+            original
         );
     }
 
@@ -1113,7 +1151,7 @@ mod tests {
         for (binding, (input, output)) in bindings.iter().zip(expected) {
             assert_eq!(
                 binding.action,
-                ActionSpec::SendShortcut(ShortcutAction { keys: vec![output] })
+                ActionSpec::SendShortcut(ShortcutAction::new(vec![output]))
             );
             let caps = InputKind::Down(Button::Key(0x14));
             assert!(engine.process(event(caps)).consume);
@@ -1193,7 +1231,7 @@ mod tests {
         let actual = decode(&value.to_string()).unwrap();
         assert_eq!(
             actual[0].action,
-            ActionSpec::SendShortcut(ShortcutAction { keys: vec![8] })
+            ActionSpec::SendShortcut(ShortcutAction::new(vec![8]))
         );
     }
 

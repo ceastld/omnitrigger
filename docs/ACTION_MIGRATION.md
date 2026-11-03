@@ -18,7 +18,7 @@ python scripts/plan_action_migration.py `
 
 ## 输入格式
 
-- `source`：含 `PowerKeys` 字典、`MouseActions` 数组及可选 `ExeSettings` 字典的 V1 配置快照。每个前缀包含 `Key`、`IsEnabled`、`KeepOriginKeyFunc`、`BlackList`、`KeyActions`；规则保留原字段。应用配置中的 `MouseActions` 同样纳入。可附加只读导出的 `InputSettings`，用于确认单按恢复相关的超时。
+- `source`：含 `PowerKeys` 字典、`MouseActions` 数组及可选 `ExeSettings` 字典的 V1 配置快照。每个前缀包含 `Key`、`IsEnabled`、`KeepOriginKeyFunc`、`BlackList`、`KeyActions`；规则保留原字段。应用配置中的 `MouseActions` 同样纳入。只读导出的 `InputSettings` 用于确认单按恢复超时及 `DefaultModifiedKeyDownDelay`；缺少后者时不能确认快捷键的输入时序。
 - `catalog`：完整的 `payload.items`，或直接包含 `items` 的对象。每项含 `id`、`title`、`actionType`。目录的 `hasMore` 必须为假，`totalCount` 必须与条目数一致；分页结果应来自同一个 `snapshotId`。
 - `usage`：`Days30` 和 `Days0` 各含 `IsSuccess: true` 与 `Data: { "动作ID": 次数 }`。`Days0` 保留为历史接口原值；工具不推断具体统计起始日期。
 - `counters`：已确认的功能计数标识数组，形如 `[{ "Method": "功能名", "Ids": ["计数ID"] }]`。这些 ID 不作为动作排名。工具不猜测未知 ID 的用途。
@@ -30,7 +30,9 @@ python scripts/plan_action_migration.py `
 
 只有历史计数、没有近期调用且没有启用绑定引用的动作标记为暂缓。直接发送快捷键的规则不依赖动作 ID 的使用计数，不能因缺少计数被判为闲置。所有暂缓项保留原数据，不自动删除。
 
-`operation.native_action` 目前仅转换 V1 `Keystroke` 的 `modifier|VK` 数据，产生独立的 OmniTrigger `send_shortcut` 动作描述。发送时明确使用左侧修饰键。未知位、鼠标 VK、修饰键作为终键、SendKeys 语法和脚本都不会被当作普通快捷键解析。
+`operation.native_action` 目前仅转换 V1 `Keystroke` 的 `modifier|VK` 数据，产生独立的 OmniTrigger `send_shortcut` 动作描述。按已核对的 V1 输入实现，修饰键顺序为 Ctrl、Alt、Shift、Win，其中前三种使用右侧，Win 使用左侧；不会按名称猜测或统一改成左侧。显式 SendKeys 左右键不由该解析器转换。未知位、鼠标 VK、修饰键作为终键、SendKeys 语法和脚本都不会被当作普通快捷键解析。
+
+源 `DefaultModifiedKeyDownDelay` 为正时保留该延迟；非正值时对 `wps`、`et`、`wpp`、`wpspdf`、`mstsc` 使用 10ms，其他进程为零。转换结果使用版本 13 的 `timing`。缺失或非法设置标记 `source_key_down_delay_unknown`，超过支持上限标记 `unsupported_key_down_delay`，不产生可执行原生动作。按键提交及延迟观测只能证明输入契约，还须在实际目标软件验证业务结果。
 
 触发部分会产生原生应用范围、进程排除名单、专用前缀和键盘重复描述。专用键盘前缀使用版本 12 的捕获集合策略，并按源附加键降序、原始列表顺序产生显式 `priority`；保留源规则，不自动扩展配置档别名。保留原功能的旧版前缀含快速输入保护与超时，仍标记 `legacy_retained_prefix_timing`；Explorer 桌面／任务栏逻辑名称、泛型修饰键、长短按分流及鼠标规则也单独记录缺口。名单有非法格式或有效范围为空时保留待核验状态。
 

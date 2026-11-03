@@ -32,7 +32,7 @@ def ranked_actions(counts, catalog, excluded, limit):
 
 
 def shortcut_action(data):
-    """V1 modifier|VK；输出按键使用明确左侧修饰键，不解析 SendKeys 文本。"""
+    """V1 modifier|VK；按源顺序显式映射泛型修饰键，不解析 SendKeys 文本。"""
     if not isinstance(data, str):
         return None
     parts = data.split("|")
@@ -46,15 +46,25 @@ def shortcut_action(data):
                  or 246 <= terminal <= 254)
     if modifiers & ~15 or not supported:
         return None
-    keys = [key for bit, key in ((2, 162), (4, 160), (1, 164), (8, 91))
+    keys = [key for bit, key in ((2, 163), (1, 165), (4, 161), (8, 91))
             if modifiers & bit]
     return {"kind": "send_shortcut", "keys": keys + [terminal]}
 
 
-def operation(row):
+def operation(row, settings=None):
     if row.get("ActionType") == 1:
         native = shortcut_action(row.get("Data"))
         gaps = ["notification_side_effect"] if row.get("Message") else []
+        delay = (settings or {}).get("DefaultModifiedKeyDownDelay")
+        if type(delay) is not int:
+            gaps.append("source_key_down_delay_unknown")
+            native = None
+        elif delay > 1000:
+            gaps.append("unsupported_key_down_delay")
+            native = None
+        elif native:
+            native["timing"] = ({"key_down_delay_ms": delay} if delay > 0 else
+                                {"process_overrides": {name: 10 for name in ("wps", "et", "wpp", "wpspdf", "mstsc")}})
         return {"status": "native_action_available" if native and not gaps else "needs_implementation",
                 "native_action": native, "source_type": 1, "action_gaps": gaps}
     return {"status": "needs_source_review" if row.get("ActionType") == 12
@@ -330,7 +340,7 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20):
             if folded:
                 gaps = [gap for gap in gaps if gap != "unsupported_trigger_key"]
                 notes.append({"kind": "standalone_key_folded_into_prefix", "leader": leader["Key"], "policy": tap_policy})
-            native = operation(rule)
+            native = operation(rule, source.get("InputSettings"))
             overlap = [row for row in current["bindings"] if trigger and same_trigger(trigger, row)]
             action_matches = [row["id"] for row in overlap
                               if row.get("action") == native.get("native_action")
@@ -366,7 +376,7 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20):
             identity = f"mouse:{scope}:{index}"
             bindings.append({"key": identity, "kind": "mouse", "title": rule.get("Description"),
                              "source": {"scope": scope, "rule": rule},
-                             "operation": operation(rule), "status": "needs_trigger_semantics_review",
+                             "operation": operation(rule, source.get("InputSettings")), "status": "needs_trigger_semantics_review",
                              "trigger_gaps": ["mouse_rule_semantics"],
                              "equivalent_configuration_ids": []})
             if rule.get("ActionType") == 12:

@@ -11,6 +11,8 @@ mod browser_connector;
 mod browser_connector_ui;
 mod desktop_host;
 #[cfg(test)]
+mod desktop_key_smoke;
+#[cfg(test)]
 mod desktop_text_smoke;
 mod event_bridge;
 mod execution;
@@ -2454,8 +2456,9 @@ impl Workspace {
         if matches!(self.draft_action, ActionSpec::AdjustSystem(_)) {
             return self.draft_adjustment(cx).map(ActionSpec::AdjustSystem);
         }
-        if matches!(self.draft_action, ActionSpec::SendShortcut(_)) {
-            return ShortcutAction::parse(&self.shortcut_keys.read(cx).text())
+        if let ActionSpec::SendShortcut(existing) = &self.draft_action {
+            return existing
+                .edit_keys(&self.shortcut_keys.read(cx).text())
                 .map(ActionSpec::SendShortcut);
         }
         if let Some(command) = self.draft_command(cx)? {
@@ -4268,7 +4271,7 @@ impl Workspace {
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.draft_action =
-                                ActionSpec::SendShortcut(ShortcutAction { keys: vec![0x08] });
+                                ActionSpec::SendShortcut(ShortcutAction::new(vec![0x08]));
                             cx.notify();
                         })),
                     )
@@ -4375,7 +4378,11 @@ impl Workspace {
             })
             .when(plugin, |el| el.child(self.plugin_action_fields(cx)))
             .when(shortcut, |el| {
-                let result = ShortcutAction::parse(&self.shortcut_keys.read(cx).text());
+                let result = if let ActionSpec::SendShortcut(existing) = &self.draft_action {
+                    existing.edit_keys(&self.shortcut_keys.read(cx).text())
+                } else {
+                    ShortcutAction::parse(&self.shortcut_keys.read(cx).text())
+                };
                 let (preview, ok) = match result {
                     Ok(shortcut) => (format!("将发送：{}", shortcut.display()), true),
                     Err(error) => (error, false),

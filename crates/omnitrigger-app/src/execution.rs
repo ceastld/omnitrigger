@@ -203,10 +203,23 @@ impl CommandExecutor {
         target: omnitrigger_windows::ShortcutTarget,
     ) -> Result<(), String> {
         shortcut.validate()?;
+        let target = omnitrigger_windows::ScriptTarget::capture(target)?;
+        let stopping = self.stopping.clone();
         self.submit_request(
             id,
             ExecutableAction::Shortcut(Box::new(move || {
-                omnitrigger_windows::send_shortcut_to(&shortcut.keys, target)
+                let delay = if shortcut.timing.process_overrides.is_empty() {
+                    shortcut.timing.key_down_delay_ms
+                } else {
+                    shortcut.timing.resolve(&target.info()?.process_name)?
+                };
+                target.send_shortcut_timed_if(&shortcut.keys, delay, || {
+                    if stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                        Err("程序正在退出，已停止后续输入。".into())
+                    } else {
+                        Ok(())
+                    }
+                })
             })),
             None,
         )
@@ -775,7 +788,7 @@ mod tests {
             }
         );
         assert!(executor
-            .submit_shortcut(2, ShortcutAction { keys: vec![] })
+            .submit_shortcut(2, ShortcutAction::new(vec![]))
             .is_err());
         assert!(executor.reserved.lock().unwrap().entries.is_empty());
         executor.submit_request(1, success(), None).unwrap();

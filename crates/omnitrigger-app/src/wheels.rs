@@ -208,9 +208,7 @@ impl Default for Wheels {
         .into_iter()
         .map(|(label, terminal)| WheelSlot {
             label: label.into(),
-            action: ActionSpec::SendShortcut(ShortcutAction {
-                keys: vec![0xa2, terminal],
-            }),
+            action: ActionSpec::SendShortcut(ShortcutAction::new(vec![0xa2, terminal])),
             position: None,
         })
         .collect();
@@ -262,7 +260,7 @@ impl Wheels {
                 Self::decode(&original)?;
                 let original_version: WheelsFile =
                     serde_json::from_str(&original).map_err(|error| error.to_string())?;
-                if original_version.version < 4 {
+                if original_version.version < 5 {
                     crate::settings::backup_legacy(
                         &destination,
                         original_version.version,
@@ -276,7 +274,7 @@ impl Wheels {
             }
         }
         let contents = serde_json::to_vec_pretty(&WheelsFile {
-            version: 4,
+            version: 5,
             wheels: self.wheels.clone(),
         })
         .map_err(|error| format!("编码轮盘配置失败：{error}"))?;
@@ -286,7 +284,7 @@ impl Wheels {
     fn decode(text: &str) -> Result<Self, String> {
         let file: WheelsFile =
             serde_json::from_str(text).map_err(|error| format!("轮盘配置格式有误：{error}"))?;
-        if !(1..=4).contains(&file.version) {
+        if !(1..=5).contains(&file.version) {
             return Err("轮盘配置版本不受支持，原文件已保留。".into());
         }
         if file.version < 2
@@ -326,6 +324,15 @@ impl Wheels {
             })
         {
             return Err("浏览器动作需要版本 4 轮盘配置。".into());
+        }
+        if file.version < 5
+            && file.wheels.iter().any(|wheel| {
+                wheel.slots.iter()
+                    .chain(wheel.app_overrides.iter().flat_map(|app| app.slots.iter()))
+                    .any(|slot| matches!(&slot.action, ActionSpec::SendShortcut(shortcut) if !shortcut.timing.is_default()))
+            })
+        {
+            return Err("按键时序需要版本 5 轮盘配置。".into());
         }
         let wheels = Self {
             wheels: file.wheels,
@@ -399,10 +406,52 @@ mod tests {
 
     fn encode(wheels: &Wheels) -> String {
         serde_json::to_string(&WheelsFile {
-            version: 4,
+            version: 5,
             wheels: wheels.wheels.clone(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn timed_shortcuts_require_v5_for_global_and_override_slots_and_backup_v4() {
+        let scratch = Scratch::new();
+        let mut wheels = Wheels::default();
+        let mut original: serde_json::Value = serde_json::from_str(&encode(&wheels)).unwrap();
+        original["version"] = 4.into();
+        let original = format!(" \r\n{original}\r\n");
+        std::fs::write(scratch.wheels(), &original).unwrap();
+        let mut slot = wheels.wheels[0].slots[0].clone();
+        if let ActionSpec::SendShortcut(action) = &mut slot.action {
+            action.timing.key_down_delay_ms = 10;
+        } else {
+            unreachable!();
+        }
+        for in_override in [false, true] {
+            wheels = Wheels::default();
+            if in_override {
+                wheels.wheels[0]
+                    .app_overrides
+                    .push(WheelApplicationOverride {
+                        process: "editor.exe".into(),
+                        slots: vec![slot.clone()],
+                    });
+            } else {
+                wheels.wheels[0].slots[0] = slot.clone();
+            }
+            assert_eq!(Wheels::decode(&encode(&wheels)).unwrap(), wheels);
+            let mut old: serde_json::Value = serde_json::from_str(&encode(&wheels)).unwrap();
+            old["version"] = 4.into();
+            assert_eq!(
+                Wheels::decode(&old.to_string()).unwrap_err(),
+                "按键时序需要版本 5 轮盘配置。"
+            );
+        }
+        wheels.save(&scratch.bindings()).unwrap();
+        assert_eq!(
+            std::fs::read(scratch.0.join("wheels.json.v4.bak")).unwrap(),
+            original.as_bytes()
+        );
+        assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), wheels);
     }
 
     #[test]
@@ -480,9 +529,7 @@ mod tests {
         for (slot, terminal) in editing.slots.iter().zip([0x43, 0x56, 0x41, 0x5a]) {
             assert_eq!(
                 slot.action,
-                ActionSpec::SendShortcut(ShortcutAction {
-                    keys: vec![0xa2, terminal]
-                })
+                ActionSpec::SendShortcut(ShortcutAction::new(vec![0xa2, terminal]))
             );
         }
         assert!(!scratch.bindings().exists());
@@ -531,7 +578,7 @@ mod tests {
             "绑定原样保留"
         );
         let value: serde_json::Value = serde_json::from_str(&encode(&expected)).unwrap();
-        assert_eq!(value["version"], 4);
+        assert_eq!(value["version"], 5);
         assert_eq!(value["wheels"][1]["accent"], "amber");
     }
 
@@ -582,7 +629,7 @@ mod tests {
             ActionSpec::ShowWheel(WheelActionRef {
                 wheel_id: "orbit-edit".into(),
             }),
-            ActionSpec::SendShortcut(ShortcutAction { keys: vec![] }),
+            ActionSpec::SendShortcut(ShortcutAction::new(vec![])),
             ActionSpec::Command(CommandAction {
                 program: String::new(),
                 args: vec![],
@@ -603,7 +650,7 @@ mod tests {
         let base: serde_json::Value = serde_json::from_str(&encode(&wheels)).unwrap();
         let mut bad_values = vec!["not-json".to_string()];
         let mut future = base.clone();
-        future["version"] = 5.into();
+        future["version"] = 6.into();
         bad_values.push(future.to_string());
         for pointer in [
             "",
@@ -662,7 +709,7 @@ mod tests {
     fn positioned(ring: u8, sector: u8, sectors: u8, half_step: bool) -> WheelSlot {
         WheelSlot {
             label: format!("圈{ring}槽{sector}"),
-            action: ActionSpec::SendShortcut(ShortcutAction { keys: vec![0x08] }),
+            action: ActionSpec::SendShortcut(ShortcutAction::new(vec![0x08])),
             position: Some(WheelPosition {
                 ring,
                 sector,
@@ -885,7 +932,7 @@ mod tests {
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.wheels()).unwrap()).unwrap();
-        assert_eq!(saved["version"], 4);
+        assert_eq!(saved["version"], 5);
         assert_eq!(saved["wheels"][0]["slots"][1]["action"]["kind"], "local");
         assert_eq!(
             saved["wheels"][0]["app_overrides"][0]["slots"][0]["action"]["version"],
@@ -941,7 +988,7 @@ mod tests {
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.wheels()).unwrap()).unwrap();
-        assert_eq!(saved["version"], 4);
+        assert_eq!(saved["version"], 5);
         expected.wheels[0].slots[0].label = "再次修改".into();
         expected.save(&scratch.bindings()).unwrap();
         assert_eq!(std::fs::read(&backup).unwrap(), original.as_bytes());

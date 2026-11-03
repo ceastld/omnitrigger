@@ -1,14 +1,91 @@
 //! 发送快捷键的配置与文本输入；实际注入由平台适配层执行。
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShortcutAction {
     /// 按顺序保存修饰键，最后一项为目标键；不改写左右键或输入顺序。
     pub keys: Vec<u16>,
+    #[serde(default, skip_serializing_if = "KeyboardTiming::is_default")]
+    pub timing: KeyboardTiming,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyboardTiming {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub key_down_delay_ms: u32,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub process_overrides: BTreeMap<String, u32>,
+}
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+fn process_key(name: &str) -> Result<String, String> {
+    if name.is_empty()
+        || name.len() > 260
+        || name.trim() != name
+        || name
+            .chars()
+            .any(|c| c.is_control() || "/\\:*?;\"<>|".contains(c))
+    {
+        return Err("时序覆盖需要明确进程文件名，不能使用路径或通配符。".into());
+    }
+    let canonical = name.to_lowercase();
+    let canonical = canonical
+        .strip_suffix(".exe")
+        .unwrap_or(&canonical)
+        .to_owned();
+    if canonical.is_empty() || canonical == "." || canonical == ".." {
+        return Err("时序覆盖的进程名无效。".into());
+    }
+    Ok(canonical)
+}
+impl KeyboardTiming {
+    pub fn is_default(&self) -> bool {
+        self.key_down_delay_ms == 0 && self.process_overrides.is_empty()
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        omnitrigger_windows::validate_key_timing(1, self.key_down_delay_ms)?;
+        if self.process_overrides.len() > 16 {
+            return Err("按键时序最多设置16个进程覆盖。".into());
+        }
+        let mut seen = BTreeSet::new();
+        for (name, delay) in &self.process_overrides {
+            if !seen.insert(process_key(name)?) {
+                return Err("按键时序包含重复进程名。".into());
+            }
+            omnitrigger_windows::validate_key_timing(1, *delay)?;
+        }
+        Ok(())
+    }
+    pub fn resolve(&self, process: &str) -> Result<u32, String> {
+        self.validate()?;
+        let key = process_key(process)?;
+        Ok(self
+            .process_overrides
+            .iter()
+            .find_map(|(name, delay)| {
+                (process_key(name).ok().as_ref() == Some(&key)).then_some(*delay)
+            })
+            .unwrap_or(self.key_down_delay_ms))
+    }
 }
 
 impl ShortcutAction {
+    pub fn new(keys: Vec<u16>) -> Self {
+        Self {
+            keys,
+            ..Default::default()
+        }
+    }
+    pub fn edit_keys(&self, text: &str) -> Result<Self, String> {
+        let mut action = self.clone();
+        action.keys = Self::parse(text)?.keys;
+        action.validate()?;
+        Ok(action)
+    }
     pub fn parse(text: &str) -> Result<Self, String> {
         if text.len() > 256 {
             return Err("快捷键不能超过 256 字节。".into());
@@ -22,13 +99,14 @@ impl ShortcutAction {
             let key = parse_key(name).ok_or_else(|| format!("无法识别按键“{name}”。"))?;
             keys.push(key);
         }
-        let shortcut = Self { keys };
+        let shortcut = Self::new(keys);
         shortcut.validate()?;
         Ok(shortcut)
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        omnitrigger_windows::validate_shortcut(&self.keys)
+        omnitrigger_windows::validate_shortcut(&self.keys)?;
+        self.timing.validate()
     }
 
     pub fn display(&self) -> String {
@@ -190,6 +268,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn timing_preserves_explicit_keys_and_editor_changes_keep_process_overrides() {
+        let mut action = ShortcutAction::parse("RightCtrl+RightAlt+RightShift+A").unwrap();
+        action.timing = KeyboardTiming {
+            key_down_delay_ms: 5,
+            process_overrides: BTreeMap::from([("WPS.exe".into(), 10), ("工具".into(), 20)]),
+        };
+        assert_eq!(action.keys, vec![163, 165, 161, 65]);
+        assert_eq!(action.timing.resolve("wps.EXE").unwrap(), 10);
+        assert_eq!(action.timing.resolve("工具.exe").unwrap(), 20);
+        assert_eq!(action.timing.resolve("editor.exe").unwrap(), 5);
+        let edited = action.edit_keys("RightCtrl+B").unwrap();
+        assert_eq!(edited.keys, vec![163, 66]);
+        assert_eq!(edited.timing, action.timing);
+        assert!(action.edit_keys("Ctrl+Ctrl+B").is_err());
+        assert_eq!(action.keys, vec![163, 165, 161, 65]);
+        let encoded = serde_json::to_string(&action).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ShortcutAction>(&encoded).unwrap(),
+            action
+        );
+    }
+
+    #[test]
+    fn timing_rejects_alias_duplicates_unknown_fields_and_unbounded_delays() {
+        for timing in [
+            KeyboardTiming {
+                key_down_delay_ms: 1001,
+                ..Default::default()
+            },
+            KeyboardTiming {
+                process_overrides: BTreeMap::from([("Code".into(), 10), ("code.exe".into(), 20)]),
+                ..Default::default()
+            },
+            KeyboardTiming {
+                process_overrides: BTreeMap::from([("C:/code.exe".into(), 10)]),
+                ..Default::default()
+            },
+            KeyboardTiming {
+                process_overrides: BTreeMap::from([(".exe".into(), 10)]),
+                ..Default::default()
+            },
+        ] {
+            assert!(timing.validate().is_err());
+        }
+        assert!(
+            serde_json::from_str::<ShortcutAction>(r#"{"keys":[65],"timing":{"delay":10}}"#)
+                .is_err()
+        );
+        let default = ShortcutAction::new(vec![65]);
+        assert_eq!(
+            serde_json::to_value(default).unwrap(),
+            serde_json::json!({"keys":[65]})
+        );
+    }
+
+    #[test]
     fn accepts_single_edit_keys_and_shortcuts_without_changing_order_or_side() {
         for (text, keys) in [
             ("Backspace", vec![0x08]),
@@ -244,7 +378,7 @@ mod tests {
     #[test]
     fn every_supported_virtual_key_can_be_displayed_and_parsed_without_losing_identity() {
         for key in 0..=0xff {
-            let action = ShortcutAction { keys: vec![key] };
+            let action = ShortcutAction::new(vec![key]);
             if action.validate().is_ok() {
                 assert_eq!(ShortcutAction::parse(&action.display()).unwrap(), action);
             }

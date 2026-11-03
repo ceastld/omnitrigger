@@ -14,7 +14,7 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'keyboard.shortcut' | 'keyboard.text' | 'selection.copy' | 'clipboard.read' | 'clipboard.write';
+  method?: 'target.info' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'clipboard.read' | 'clipboard.write';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
 }
@@ -46,7 +46,9 @@ export interface ActionContext {
     /** 本次提交时捕获的目标，不在调用时重新选择前台。进程名含 .exe。 */
     target(): Promise<{processName: string; title: string; processId: number; isForeground: boolean}>;
     /** 明确 VK，修饰键在前；仅确认系统接纳输入，不确认业务动作完成。 */
-    sendShortcut(keys: number[]): Promise<{submitted: true}>;
+    sendShortcut(keys: number[], options?: {keyDownDelayMs?: number}): Promise<{submitted: true}>;
+    /** 修饰键跨越整组普通键；延迟在修饰键就绪后、每个普通键按下后等待。 */
+    sendKeySequence(modifiers: number[], keys: number[], options?: {keyDownDelayMs?: number}): Promise<{submitted: true}>;
     /** Unicode 直接输入，不使用剪贴板。最多 65,536 个 UTF-16 单元，无 NUL。 */
     sendText(text: string): Promise<{submitted: true}>;
     /** 向原目标发送 Ctrl+C 并读取新文本。复制结果保留在剪贴板。 */

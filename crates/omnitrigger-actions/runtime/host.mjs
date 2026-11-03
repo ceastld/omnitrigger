@@ -164,12 +164,21 @@ function nativeCall(method, params) {
 
 const desktop = Object.freeze({
   target: () => nativeCall('target.info', {}),
-  sendShortcut: (keys) => {
-    if (!Array.isArray(keys) || keys.length < 1 || keys.length > 9
+  sendShortcut: async (keys, options = {}) => {
+    if (!Array.isArray(keys) || keys.length < 1 || keys.length > 5
         || keys.some(key => !Number.isInteger(key) || key < 1 || key > 254)) {
-      return Promise.reject(Object.assign(fault('invalid_input', '快捷键需要 1–9 个明确的 VK 整数；修饰键在前。'), {effectState:'not_started'}));
+      throw Object.assign(fault('invalid_input', '快捷键需要 1–5 个明确的 VK 整数；修饰键在前。'), {effectState:'not_started'});
     }
-    return nativeCall('keyboard.shortcut', {keys});
+    const delay = keyTiming(options, 1);
+    return nativeCall('keyboard.shortcut', delay ? {keys, key_down_delay_ms:delay} : {keys});
+  },
+  sendKeySequence: async (modifiers, keys, options = {}) => {
+    if (!Array.isArray(modifiers) || modifiers.length > 4 || !Array.isArray(keys) || keys.length < 1 || keys.length > 16
+        || [...modifiers,...keys].some(key => !Number.isInteger(key) || key < 1 || key > 254)) {
+      throw Object.assign(fault('invalid_input', '连续按键需要 0–4 个修饰键和 1–16 个普通键，使用明确 VK 整数。'), {effectState:'not_started'});
+    }
+    const delay = keyTiming(options, keys.length);
+    return nativeCall('keyboard.sequence', {modifiers,keys,key_down_delay_ms:delay});
   },
   sendText: text => textCall('keyboard.text', text),
   copySelectionText: () => nativeCall('selection.copy', {}),
@@ -199,6 +208,15 @@ function delay(milliseconds) {
     const aborted = () => { clearTimeout(timer); reject(controller.signal.reason); };
     controller.signal.addEventListener('abort', aborted, { once: true });
   });
+}
+
+function keyTiming(options, count) {
+  const value = options?.keyDownDelayMs === undefined ? 0 : options.keyDownDelayMs;
+  if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some(key => key !== 'keyDownDelayMs')
+      || !Number.isInteger(value) || value < 0 || value > 1000 || (count + 1) * value > 3000) {
+    throw Object.assign(fault('invalid_input', '按下延迟需要 0–1000ms 整数，单次等待合计不能超过 3000ms。'), {effectState:'not_started'});
+  }
+  return value;
 }
 
 function validateProcess(program, args, options, allowedOptions) {

@@ -30,6 +30,17 @@ impl DesktopHost {
 #[serde(deny_unknown_fields)]
 struct ShortcutArgs {
     keys: Vec<u16>,
+    #[serde(default)]
+    key_down_delay_ms: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SequenceArgs {
+    modifiers: Vec<u16>,
+    keys: Vec<u16>,
+    #[serde(default)]
+    key_down_delay_ms: u32,
 }
 
 #[derive(Deserialize)]
@@ -137,6 +148,8 @@ impl NativeHost for DesktopHost {
                     .map_err(|message| error("invalid_input", message, "not_started"))?;
                 omnitrigger_windows::validate_shortcut(&args.keys)
                     .map_err(|message| error("invalid_input", message, "not_started"))?;
+                omnitrigger_windows::validate_key_timing(1, args.key_down_delay_ms)
+                    .map_err(|message| error("invalid_input", message, "not_started"))?;
                 let target = self.target.as_ref().map_err(Clone::clone)?;
                 target
                     .ensure_foreground()
@@ -145,13 +158,38 @@ impl NativeHost for DesktopHost {
                     return Err(error("cancelled", "动作已取消。", "not_started"));
                 }
                 target
-                    .send_shortcut_if(&args.keys, || {
+                    .send_shortcut_timed_if(&args.keys, args.key_down_delay_ms, || {
                         if cancellation.is_cancelled() {
                             Err("动作已取消，未提交输入。".into())
                         } else {
                             Ok(())
                         }
                     })
+                    .map_err(|message| error("input_failed", message, "unknown"))?;
+                Ok(json!({"submitted":true}))
+            }
+            "keyboard.sequence" => {
+                let args: SequenceArgs = serde_json::from_value(params)
+                    .map_err(|message| error("invalid_input", message, "not_started"))?;
+                omnitrigger_windows::validate_key_sequence(&args.modifiers, &args.keys)
+                    .and_then(|_| {
+                        omnitrigger_windows::validate_key_timing(
+                            args.keys.len(),
+                            args.key_down_delay_ms,
+                        )
+                    })
+                    .map_err(|message| error("invalid_input", message, "not_started"))?;
+                let target = self.target.as_ref().map_err(Clone::clone)?;
+                target
+                    .ensure_foreground()
+                    .map_err(|message| error("target_changed", message, "not_started"))?;
+                target
+                    .send_key_sequence_if(
+                        &args.modifiers,
+                        &args.keys,
+                        args.key_down_delay_ms,
+                        || not_cancelled(cancellation),
+                    )
                     .map_err(|message| error("input_failed", message, "unknown"))?;
                 Ok(json!({"submitted":true}))
             }
@@ -179,6 +217,20 @@ mod tests {
         };
         let token = CancellationToken::new();
         for (method, params) in [
+            (
+                "keyboard.shortcut",
+                json!({"keys":[65],"key_down_delay_ms":1001}),
+            ),
+            ("keyboard.sequence", json!({"modifiers":[17],"keys":[65]})),
+            ("keyboard.sequence", json!({"modifiers":[162],"keys":[]})),
+            (
+                "keyboard.sequence",
+                json!({"modifiers":[162],"keys":vec![65;16],"key_down_delay_ms":200}),
+            ),
+            (
+                "keyboard.sequence",
+                json!({"modifiers":[],"keys":[65],"extra":1}),
+            ),
             ("clipboard.read", json!({"unexpected":true})),
             ("clipboard.write", json!({"text":"a\0b"})),
             ("keyboard.text", json!({"text":5})),
