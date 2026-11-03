@@ -1384,6 +1384,16 @@ impl Workspace {
                     self.recording = false;
                     self.recording_held.clear();
                     let editing = self.recording_edit_id.take();
+                    if let Some(base) = editing
+                        .and_then(|id| self.binding(id).map(|binding| &binding.spec))
+                        .or_else(|| {
+                            self.recording_preserve_action
+                                .then_some(self.pending.as_ref())
+                                .flatten()
+                        })
+                    {
+                        spec.process_scope = base.process_scope.clone();
+                    }
                     let reusable = editing.or_else(|| {
                         if self.recording_preserve_action {
                             self.pending.as_ref().map(|s| s.id)
@@ -3470,6 +3480,15 @@ impl Workspace {
                 Some(reason) => (reason, theme::RECORD),
                 None => (action_detail(&binding.action), theme::TEXT_DIM),
             };
+            let detail = if binding.spec.process_scope.is_global() {
+                detail
+            } else {
+                format!(
+                    "{} · {}",
+                    settings::process_scope_label(&binding.spec.process_scope),
+                    detail
+                )
+            };
             // 标题行右侧：停用标记，或本次运行的命中次数与最近时间。
             let badge = if !binding.enabled {
                 Some(
@@ -3629,7 +3648,7 @@ impl Workspace {
                     .gap(px(12.))
                     .child(heading(
                         "触发器",
-                        "按住前缀再按目标键或滚轮，全局生效",
+                        "按住前缀再按目标键或滚轮，支持应用范围",
                     ))
                     .child(
                         icon_button("record", Icon::Record, "录制组合", Tone::Primary, listening)
@@ -3810,7 +3829,13 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(section_title("触发方式"));
+            .child(section_title("触发方式"))
+            .when(!spec.process_scope.is_global(), |element| {
+                element.child(caption(format!(
+                    "应用范围：{}（配置文件中设置）",
+                    settings::process_scope_label(&spec.process_scope)
+                )))
+            });
         if matches!(spec.activation, Activation::Wheel(_)) {
             let mut directions = theme::segments();
             for (key, label, direction) in [
@@ -5678,7 +5703,11 @@ impl Render for Toast {
 }
 
 fn smoke_test() -> Result<(), String> {
-    let bindings = settings::defaults();
+    let mut bindings = settings::defaults();
+    let mut scoped = bindings[0].clone();
+    scoped.spec.id = settings::next_id(&bindings);
+    scoped.spec.process_scope.allow = vec!["omnitrigger-smoke".into()];
+    bindings.push(scoped);
     settings::validate(&bindings)?;
     let (backend, events) = Backend::start()?;
     match events
@@ -5691,9 +5720,26 @@ fn smoke_test() -> Result<(), String> {
     backend.send(BackendCommand::SetBindings(
         bindings.into_iter().map(|b| b.spec).collect(),
     ))?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        backend.send(BackendCommand::GetDiagnostics)?;
+        match events.recv_timeout(Duration::from_millis(100)) {
+            Ok(BackendEvent::Diagnostics(snapshot))
+                if snapshot.process_context_required && snapshot.foreground_process.is_some() =>
+            {
+                break
+            }
+            Ok(BackendEvent::Error(error)) => return Err(error),
+            _ => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("前台进程快照未就绪；带应用范围的真实 Hook 验证未完成。".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     backend.send(BackendCommand::SetEnabled(false))?;
     drop(backend);
-    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; default registrations valid.");
+    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; default/scoped registrations valid; foreground process resolved outside hooks.");
     Ok(())
 }
 

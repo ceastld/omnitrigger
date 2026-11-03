@@ -3,13 +3,19 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
-use crate::{Activation, Button, RegionError, TriggerCondition, TriggerSpec, regions};
+use crate::{
+    Activation, Button, ProcessScopeError, RegionError, TriggerCondition, TriggerSpec, regions,
+};
 
 /// Hook 匹配仍受固定上限约束；完整检查发生在注册时。
 pub const MAX_BINDINGS: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistrationError {
+    InvalidProcessScope {
+        id: u64,
+        reason: ProcessScopeError,
+    },
     TooManyBindings,
     TooManyConditions {
         id: u64,
@@ -69,6 +75,7 @@ pub enum RegistrationError {
 impl fmt::Display for RegistrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::InvalidProcessScope { reason, .. } => return write!(f, "进程范围无效：{reason}"),
             Self::TooManyBindings => {
                 return write!(
                     f,
@@ -106,6 +113,12 @@ pub(super) fn validate(
     }
     let mut ids = BTreeSet::new();
     for binding in &mut bindings {
+        binding.process_scope.normalize().map_err(|reason| {
+            RegistrationError::InvalidProcessScope {
+                id: binding.id,
+                reason,
+            }
+        })?;
         if !ids.insert(binding.id) {
             return Err(RegistrationError::DuplicateId { id: binding.id });
         }
@@ -187,6 +200,8 @@ pub(super) fn validate(
             if left.held == right.held
                 && (left.activation == right.activation || same_button)
                 && regions::conditions_overlap(&left.conditions, &right.conditions)
+                && left.process_scope.overlaps(&right.process_scope)
+                && left.process_scope.priority() == right.process_scope.priority()
             {
                 let timed = match (left.activation, right.activation) {
                     (
@@ -222,6 +237,7 @@ pub(super) fn validate(
             && let Some(prefix) = bindings.iter().find(|other| {
                 other.held.contains(&button)
                     && regions::conditions_overlap(&left.conditions, &other.conditions)
+                    && left.process_scope.overlaps(&other.process_scope)
             })
         {
             return Err(RegistrationError::TerminalIsPrefix {

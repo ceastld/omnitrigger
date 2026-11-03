@@ -6,6 +6,7 @@ const Q: Button = Button::Key(0x51);
 
 fn drag(id: u64, held: &[Button], button: Button, distance: u32, window: u32) -> TriggerSpec {
     TriggerSpec {
+        process_scope: Default::default(),
         conditions: vec![],
         id,
         held: held.to_vec(),
@@ -19,6 +20,7 @@ fn drag(id: u64, held: &[Button], button: Button, distance: u32, window: u32) ->
 
 fn hold(id: u64, held: &[Button], duration: u32) -> TriggerSpec {
     TriggerSpec {
+        process_scope: Default::default(),
         conditions: vec![],
         id,
         held: held.to_vec(),
@@ -404,6 +406,7 @@ fn registration_validates_drag_parameters_timing_and_terminal_prefix_ambiguity()
     for other in [
         drag(2, &[], RIGHT, 30, 200),
         TriggerSpec {
+            process_scope: Default::default(),
             conditions: vec![],
             id: 2,
             held: vec![],
@@ -422,6 +425,7 @@ fn registration_validates_drag_parameters_timing_and_terminal_prefix_ambiguity()
         Engine::new(vec![
             drag(1, &[], RIGHT, 18, 180),
             TriggerSpec {
+                process_scope: Default::default(),
                 conditions: vec![],
                 id: 2,
                 held: vec![RIGHT],

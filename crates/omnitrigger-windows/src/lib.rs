@@ -90,6 +90,9 @@ pub enum HoldStartRejection {
 /// 监听线程的观测快照。计数表示收到的回调，不代表系统全部输入。
 #[derive(Debug, Clone, Default)]
 pub struct ListenerDiagnostics {
+    /// 仅当前前台映像名；None 表示尚未采集或无法读取，不记录历史。
+    pub foreground_process: Option<String>,
+    pub process_context_required: bool,
     pub keyboard_events: u64,
     pub mouse_events: u64,
     pub external_injected: u64,
@@ -428,6 +431,7 @@ mod tests {
     #[test]
     fn hold_description_keeps_the_prefix_button_and_duration() {
         let spec = TriggerSpec {
+            process_scope: Default::default(),
             conditions: Vec::new(),
             id: 5,
             held: vec![Button::Key(0xa2)],

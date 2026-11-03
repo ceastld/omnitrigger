@@ -57,11 +57,14 @@ pub struct Engine {
     /// 首个等待中的鼠标前缀按下时的指针位置；移出容差后放弃组合并回放，交还拖拽。
     prefix_origin: Option<(i32, i32)>,
     screens: Vec<ScreenRect>,
+    process_name: Option<String>,
+    active_bindings: Vec<usize>,
+    requires_process: Vec<bool>,
 }
 
 impl Engine {
     pub fn new(bindings: Vec<TriggerSpec>) -> Result<Self, RegistrationError> {
-        Ok(Self {
+        let mut engine = Self {
             bindings: validate(bindings)?,
             pressed: BTreeMap::new(),
             pending: Vec::new(),
@@ -76,7 +79,12 @@ impl Engine {
             pointer_position: None,
             prefix_origin: None,
             screens: Vec::new(),
-        })
+            process_name: None,
+            active_bindings: Vec::new(),
+            requires_process: Vec::new(),
+        };
+        engine.compile_process_scopes();
+        Ok(engine)
     }
     pub fn replace_bindings(
         &mut self,
@@ -85,7 +93,79 @@ impl Engine {
         let bindings = validate(bindings)?;
         let decision = self.cancel();
         self.bindings = bindings;
+        self.compile_process_scopes();
         Ok(decision)
+    }
+
+    /// 映像文件名由平台显式提供。未知时不匹配有范围的规则，也不猜测其全局回退。
+    /// 无效名称保留旧上下文；实际变化取消待定输入、计时和拖拽，并消费旧按压的释放。
+    pub fn set_foreground_process(
+        &mut self,
+        name: Option<&str>,
+    ) -> Result<Decision, crate::ProcessScopeError> {
+        let normalized = name
+            .map(|name| {
+                crate::process_scope::normalize_name(name).ok_or_else(|| {
+                    crate::ProcessScopeError::InvalidName {
+                        name: name.to_owned(),
+                    }
+                })
+            })
+            .transpose()?;
+        if self.process_name == normalized {
+            return Ok(Decision::default());
+        }
+        let decision = self.cancel();
+        self.process_name = normalized;
+        self.refresh_active_bindings();
+        Ok(decision)
+    }
+
+    pub fn needs_process_context(&self) -> bool {
+        self.bindings
+            .iter()
+            .any(|binding| !binding.process_scope.is_global())
+    }
+
+    pub fn foreground_process(&self) -> Option<&str> {
+        self.process_name.as_deref()
+    }
+
+    fn compile_process_scopes(&mut self) {
+        self.requires_process = self
+            .bindings
+            .iter()
+            .map(|binding| {
+                binding.process_scope.is_global()
+                    && self.bindings.iter().any(|other| {
+                        other.process_scope.priority() > 0
+                            && other.held == binding.held
+                            && same_activation_family(other.activation, binding.activation)
+                    })
+            })
+            .collect();
+        self.refresh_active_bindings();
+    }
+
+    fn refresh_active_bindings(&mut self) {
+        self.active_bindings = self
+            .bindings
+            .iter()
+            .enumerate()
+            .filter_map(|(index, binding)| {
+                (binding.process_scope.matches(self.process_name.as_deref())
+                    && (self.process_name.is_some() || !self.requires_process[index]))
+                    .then_some(index)
+            })
+            .collect();
+        self.active_bindings
+            .sort_by_key(|&index| std::cmp::Reverse(self.bindings[index].process_scope.priority()));
+    }
+
+    fn candidates(&self) -> impl Iterator<Item = &TriggerSpec> {
+        self.active_bindings
+            .iter()
+            .map(|&index| &self.bindings[index])
     }
 
     /// 屏幕拓扑来自平台显式快照。无效替换不改变状态；实际变更取消旧上下文。
@@ -306,16 +386,24 @@ impl Engine {
             self.pressed.insert(button, PressState::Passed);
             return Decision::default();
         }
-        if let Some(id) = self
-            .bindings
-            .iter()
+        let priority = self
+            .candidates()
             .find(|binding| {
-                binding.activation == Activation::Press(button)
+                same_activation_family(binding.activation, Activation::Press(button))
                     && self.held_matches(&binding.held)
                     && self.conditions_match(binding)
             })
-            .map(|binding| binding.id)
-        {
+            .map(|binding| binding.process_scope.priority());
+        let press = self
+            .candidates()
+            .find(|binding| {
+                binding.activation == Activation::Press(button)
+                    && Some(binding.process_scope.priority()) == priority
+                    && self.held_matches(&binding.held)
+                    && self.conditions_match(binding)
+            })
+            .map(|binding| binding.id);
+        if let Some(id) = press {
             self.commit_pending();
             self.pressed.insert(button, PressState::Consumed);
             return Decision {
@@ -325,13 +413,13 @@ impl Engine {
             };
         }
         let hold = self
-            .bindings
-            .iter()
+            .candidates()
             .find_map(|binding| match binding.activation {
                 Activation::Hold {
                     button: terminal,
                     duration_ms,
                 } if terminal == button
+                    && Some(binding.process_scope.priority()) == priority
                     && self.held_matches(&binding.held)
                     && self.conditions_match(binding) =>
                 {
@@ -340,14 +428,14 @@ impl Engine {
                 _ => None,
             });
         let drag = self
-            .bindings
-            .iter()
+            .candidates()
             .find_map(|binding| match binding.activation {
                 Activation::Drag {
                     button: terminal,
                     min_distance_px,
                     max_start_ms,
                 } if terminal == button
+                    && Some(binding.process_scope.priority()) == priority
                     && self.held_matches(&binding.held)
                     && self.conditions_match(binding) =>
                 {
@@ -385,7 +473,7 @@ impl Engine {
             )
         });
         let extends_prefix = eligible
-            && self.bindings.iter().any(|binding| {
+            && self.candidates().any(|binding| {
                 binding.held.contains(&button)
                     && self.conditions_match(binding)
                     && self
@@ -473,8 +561,7 @@ impl Engine {
         }
         let direction = direction(axis, delta);
         let Some(id) = self
-            .bindings
-            .iter()
+            .candidates()
             .find(|binding| {
                 binding.activation == Activation::Wheel(direction)
                     && self.held_matches(&binding.held)
@@ -533,14 +620,12 @@ impl Engine {
     }
 
     fn binding_has_conditions(&self, id: u64) -> bool {
-        self.bindings
-            .iter()
+        self.candidates()
             .any(|binding| binding.id == id && !binding.conditions.is_empty())
     }
 
     fn binding_conditions_match(&self, id: u64) -> bool {
-        self.bindings
-            .iter()
+        self.candidates()
             .find(|binding| binding.id == id)
             .is_some_and(|binding| self.conditions_match(binding))
     }
@@ -577,7 +662,7 @@ impl Engine {
                 .pressed
                 .values()
                 .any(|state| *state == PressState::Pending)
-            && !self.bindings.iter().any(|binding| {
+            && !self.candidates().any(|binding| {
                 self.conditions_match(binding)
                     && self
                         .pressed
@@ -651,6 +736,20 @@ impl Engine {
             origin: drag.origin,
             position: drag.position,
         })
+    }
+}
+
+fn same_activation_family(left: Activation, right: Activation) -> bool {
+    let button = |activation| match activation {
+        Activation::Press(button)
+        | Activation::Hold { button, .. }
+        | Activation::Drag { button, .. } => Some(button),
+        Activation::Wheel(_) => None,
+    };
+    match (button(left), button(right)) {
+        (Some(left), Some(right)) => left == right,
+        (None, None) => left == right,
+        _ => false,
     }
 }
 

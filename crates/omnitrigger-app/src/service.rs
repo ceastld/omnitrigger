@@ -221,6 +221,7 @@ mod tests {
     fn binding(id: u64, key: u16) -> Binding {
         Binding {
             spec: TriggerSpec {
+                process_scope: Default::default(),
                 id,
                 held: vec![Button::Key(0x14)],
                 conditions: Vec::new(),

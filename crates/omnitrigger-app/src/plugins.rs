@@ -607,6 +607,7 @@ impl ButtonDescription {
 impl DefaultTrigger {
     fn spec(&self, id: u64) -> TriggerSpec {
         TriggerSpec {
+            process_scope: Default::default(),
             conditions: Vec::new(),
             id,
             held: self.held.iter().map(|button| button.button()).collect(),

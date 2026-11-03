@@ -1,0 +1,22 @@
+{
+  "version": 10,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [{"kind": "key", "value": 20}],
+      "activation": {"kind": "press", "value": {"kind": "key", "value": 75}},
+      "message": "全局回退示例",
+      "enabled": true,
+      "action": {"kind": "notification"}
+    },
+    {
+      "id": 2,
+      "held": [{"kind": "key", "value": 20}],
+      "activation": {"kind": "press", "value": {"kind": "key", "value": 75}},
+      "process_scope": {"allow": ["Code", "cursor.exe"]},
+      "message": "编辑器内优先示例",
+      "enabled": true,
+      "action": {"kind": "notification"}
+    }
+  ]
+}

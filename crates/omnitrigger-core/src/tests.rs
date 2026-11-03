@@ -15,6 +15,7 @@ fn event(kind: InputKind) -> InputEvent {
 }
 fn press(id: u64, held: &[Button], terminal: Button) -> TriggerSpec {
     TriggerSpec {
+        process_scope: Default::default(),
         conditions: vec![],
         id,
         held: held.to_vec(),
@@ -23,6 +24,7 @@ fn press(id: u64, held: &[Button], terminal: Button) -> TriggerSpec {
 }
 fn wheel(id: u64, held: &[Button], direction: WheelDirection) -> TriggerSpec {
     TriggerSpec {
+        process_scope: Default::default(),
         conditions: vec![],
         id,
         held: held.to_vec(),
@@ -31,6 +33,7 @@ fn wheel(id: u64, held: &[Button], direction: WheelDirection) -> TriggerSpec {
 }
 fn hold(id: u64, held: &[Button], button: Button, duration_ms: u32) -> TriggerSpec {
     TriggerSpec {
+        process_scope: Default::default(),
         conditions: vec![],
         id,
         held: held.to_vec(),

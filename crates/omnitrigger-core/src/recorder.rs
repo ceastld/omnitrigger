@@ -27,6 +27,7 @@ impl Recorder {
             InputKind::Down(button) => {
                 if self.pressed.insert(button) {
                     self.candidate = Some(TriggerSpec {
+                        process_scope: Default::default(),
                         conditions: vec![],
                         id: 0,
                         held: self
@@ -51,6 +52,7 @@ impl Recorder {
             InputKind::Wheel { axis, delta } if delta != 0 => {
                 self.completed = true;
                 Some(TriggerSpec {
+                    process_scope: Default::default(),
                     conditions: vec![],
                     id: 0,
                     held: self.pressed.iter().copied().collect(),

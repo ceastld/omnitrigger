@@ -178,6 +178,7 @@ impl Workspace {
                 return;
             };
             let spec = omnitrigger_core::TriggerSpec {
+                process_scope: Default::default(),
                 id,
                 held: vec![],
                 conditions: vec![],

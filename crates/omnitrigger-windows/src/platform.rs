@@ -63,6 +63,9 @@ use replay_runtime::{Effect as ReplayEffect, ReplayRuntime};
 #[path = "screen_context.rs"]
 mod screen_context;
 
+#[path = "foreground_context.rs"]
+mod foreground_context;
+
 thread_local! {
     // Hook 始终在安装它的消息线程运行；不在 UI 线程共享可变引擎。
     static STATE: RefCell<Option<ThreadState>> = const { RefCell::new(None) };
@@ -183,6 +186,7 @@ fn run_input_thread(
         }
     };
     let mut state = ThreadState::new_with_pointer(events.clone(), pointer);
+    let foreground_events = foreground_context::ForegroundEvents::new();
     let initial_context = screen_context::collect_screens()
         .and_then(|screens| screen_context::cursor_position().map(|pointer| (screens, pointer)));
     let context_result = initial_context
@@ -239,6 +243,7 @@ fn run_input_thread(
                 CommandBatch::Done => false,
             };
             pump_replay();
+            refresh_process_context();
             let mut message_count = 0;
             for _ in 0..MESSAGE_BATCH {
                 // PeekMessage 同时派发低级 Hook 的同步回调；不在任何 RefCell 借用内泵消息。
@@ -269,6 +274,7 @@ fn run_input_thread(
                 CommandBatch::Done => {}
             }
             pump_replay();
+            refresh_process_context();
             if let Some(deadline) = shutdown_deadline {
                 let drained = STATE.with(|slot| {
                     slot.borrow()
@@ -297,7 +303,8 @@ fn run_input_thread(
                     state.engine.next_deadline_ms().is_some()
                         || state.engine.active_drag().is_some()
                         || state.replay.busy()
-                        || !state.pending_drag_cancels.is_empty(),
+                        || !state.pending_drag_cancels.is_empty()
+                        || (foreground_events.is_none() && state.engine.needs_process_context()),
                 )
             });
             let handles = timer_handle.map(|handle| [handle]);
@@ -424,6 +431,33 @@ fn refresh_screen_context() {
     });
 }
 
+fn refresh_process_context() {
+    let probe = STATE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let state = slot.as_mut()?;
+        state.check_foreground();
+        (state.engine.needs_process_context() && !state.process_resolved).then_some((
+            foreground_context::Identity {
+                hwnd: state.foreground,
+                pid: state.foreground_pid,
+            },
+            state.foreground_epoch,
+        ))
+    });
+    let Some((identity, epoch)) = probe else {
+        return;
+    };
+    // QueryFullProcessImageNameW 可能派发消息，必须处于 RefCell 借用和 Hook 回调之外。
+    let name = foreground_context::process_name(identity);
+    STATE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some(state) = slot.as_mut() {
+            state.check_foreground();
+            state.apply_process_context(identity, epoch, name.as_deref());
+        }
+    });
+}
+
 fn pump_replay() {
     STATE.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -541,6 +575,9 @@ struct ThreadState {
     physical_held: BTreeSet<Button>,
     key_metadata: BTreeMap<Button, KeyMetadata>,
     foreground: usize,
+    foreground_pid: u32,
+    foreground_epoch: u64,
+    process_resolved: bool,
     overflow_reported: bool,
     counters: ListenerDiagnostics,
     last_keyboard: Option<Instant>,
@@ -576,6 +613,7 @@ impl ThreadState {
     }
 
     fn new_with_pointer(events: SyncSender<BackendEvent>, pointer: Arc<PointerSnapshot>) -> Self {
+        let foreground = foreground_context::snapshot();
         let waitable_timer = HoldDeadlineTimer::new();
         let counters = ListenerDiagnostics {
             hold_timer_backend: waitable_timer
@@ -592,7 +630,10 @@ impl ThreadState {
             owned_press: BTreeSet::new(),
             physical_held: BTreeSet::new(),
             key_metadata: BTreeMap::new(),
-            foreground: unsafe { GetForegroundWindow() }.0 as usize,
+            foreground: foreground.hwnd,
+            foreground_pid: foreground.pid,
+            foreground_epoch: 0,
+            process_resolved: false,
             overflow_reported: false,
             counters,
             last_keyboard: None,
@@ -809,6 +850,8 @@ impl ThreadState {
         snapshot.owned = self.owned_press.iter().copied().collect();
         snapshot.screen_context_ready = self.screen_context_ready;
         snapshot.screen_count = self.screens.len();
+        snapshot.foreground_process = self.engine.foreground_process().map(str::to_owned);
+        snapshot.process_context_required = self.engine.needs_process_context();
         let age_ms = |time: Instant| time.elapsed().as_millis().min(u64::MAX as u128) as u64;
         snapshot.last_keyboard_ms = self.last_keyboard.map(age_ms);
         snapshot.last_mouse_ms = self.last_mouse.map(age_ms);
@@ -844,6 +887,7 @@ impl ThreadState {
                         .collect();
                     match self.engine.replace_bindings(bindings) {
                         Ok(cancelled) => {
+                            self.process_resolved = false;
                             self.hold_specs = hold_specs;
                             self.cancel_queued_replay();
                             self.forward_cancelled_drags(cancelled);
@@ -1105,16 +1149,25 @@ impl ThreadState {
     }
 
     fn check_foreground(&mut self) {
-        let foreground = unsafe { GetForegroundWindow() }.0 as usize;
-        self.update_foreground(foreground);
+        self.update_foreground_identity(foreground_context::snapshot());
     }
 
+    #[cfg(test)]
     fn update_foreground(&mut self, foreground: usize) {
-        if foreground != self.foreground {
+        self.update_foreground_identity(foreground_context::Identity {
+            hwnd: foreground,
+            pid: self.foreground_pid,
+        });
+    }
+
+    fn update_foreground_identity(&mut self, identity: foreground_context::Identity) {
+        let notified = foreground_context::take_changed();
+        if notified || identity.hwnd != self.foreground || identity.pid != self.foreground_pid {
             self.counters.foreground_cancellations =
                 self.counters.foreground_cancellations.saturating_add(1);
             // 不把旧窗口的缓冲输入补发给新窗口。
             let cancelled = self.engine.cancel();
+            let _ = self.engine.set_foreground_process(None);
             self.cancel_queued_replay();
             self.forward_cancelled_drags(cancelled);
             self.observe_hold(
@@ -1123,7 +1176,35 @@ impl ThreadState {
                 HoldOutcome::FocusChanged,
             );
             self.cancel_recording();
-            self.foreground = foreground;
+            self.foreground = identity.hwnd;
+            self.foreground_pid = identity.pid;
+            self.foreground_epoch = self.foreground_epoch.wrapping_add(1);
+            self.process_resolved = false;
+        }
+    }
+
+    fn apply_process_context(
+        &mut self,
+        identity: foreground_context::Identity,
+        epoch: u64,
+        name: Option<&str>,
+    ) {
+        if identity.hwnd != self.foreground
+            || identity.pid != self.foreground_pid
+            || epoch != self.foreground_epoch
+        {
+            return;
+        }
+        self.process_resolved = true;
+        if let Ok(cancelled) = self.engine.set_foreground_process(name) {
+            self.cancel_queued_replay();
+            self.forward_cancelled_drags(cancelled);
+            self.observe_hold(
+                self.now_ms(),
+                &Decision::default(),
+                HoldOutcome::FocusChanged,
+            );
+            self.reschedule_hold_timer();
         }
     }
 
@@ -2240,6 +2321,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn process_scope_snapshot_rejects_stale_window_pid_and_generation() {
+        let (events, _) = mpsc::sync_channel(EVENT_CAPACITY);
+        let mut state = ThreadState::new(events);
+        let global = TriggerSpec {
+            id: 1,
+            held: vec![],
+            activation: omnitrigger_core::Activation::Press(Button::Key(75)),
+            conditions: vec![],
+            process_scope: Default::default(),
+        };
+        let scoped = TriggerSpec {
+            id: 2,
+            process_scope: omnitrigger_core::ProcessScope {
+                allow: vec!["editor".into()],
+                deny: vec![],
+            },
+            ..global.clone()
+        };
+        state.engine.replace_bindings(vec![global, scoped]).unwrap();
+        let first = foreground_context::Identity { hwnd: 100, pid: 10 };
+        let second = foreground_context::Identity { hwnd: 100, pid: 20 };
+        state.update_foreground_identity(first);
+        let old_epoch = state.foreground_epoch;
+        state.update_foreground_identity(second);
+        state.apply_process_context(first, old_epoch, Some("editor"));
+        assert!(!state.process_resolved);
+        state.update_foreground_identity(first);
+        state.apply_process_context(first, old_epoch, Some("editor"));
+        assert!(!state.process_resolved);
+        state.apply_process_context(first, state.foreground_epoch, Some("editor.exe"));
+        assert!(state.process_resolved);
+        let hit = state.engine.process(InputEvent {
+            kind: InputKind::Down(Button::Key(75)),
+            injected: false,
+        });
+        assert_eq!(hit.triggered, vec![2]);
+        // 即使切走后已返回同一窗口，前台通知也必须取消旧按压。
+        foreground_context::mark_changed();
+        state.update_foreground_identity(first);
+        assert!(!state.process_resolved);
+        state.update_foreground_identity(second);
+        assert!(
+            state
+                .engine
+                .process(InputEvent {
+                    kind: InputKind::Up(Button::Key(75)),
+                    injected: false
+                })
+                .consume
+        );
+        let hit = state.engine.process(InputEvent {
+            kind: InputKind::Down(Button::Key(75)),
+            injected: false,
+        });
+        assert!(hit.triggered.is_empty());
+    }
+
+    #[test]
     fn hook_timing_metrics_keep_separate_maxima_and_count_only_over_fifty_ms() {
         let mut counters = ListenerDiagnostics::default();
         update_hook_timing(&mut counters, HookTiming::Work, Duration::from_millis(50));
@@ -2289,6 +2428,7 @@ mod tests {
         let mut state = ThreadState::new(tx);
         let middle = Button::Mouse(MouseButton::Middle);
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            process_scope: Default::default(),
             conditions: Vec::new(),
             id: 1,
             held: vec![],
@@ -2591,6 +2731,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(EVENT_CAPACITY);
         let mut state = ThreadState::new(tx);
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            process_scope: Default::default(),
             conditions: Vec::new(),
             id: 7,
             held: vec![],
@@ -2726,6 +2867,7 @@ mod tests {
         }
         let (mut state, _) = right_hold_state();
         state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            process_scope: Default::default(),
             conditions: Vec::new(),
             id: 9,
             held: vec![Button::Key(0x14)],
@@ -3135,6 +3277,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 1,
                 held: vec![caps],
@@ -3167,6 +3310,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 1,
                 held: vec![caps],
@@ -3263,6 +3407,7 @@ mod tests {
         state
             .engine
             .replace_bindings(vec![TriggerSpec {
+                process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 9,
                 held: vec![caps],

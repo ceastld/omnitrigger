@@ -1,6 +1,7 @@
 //! 应用持久化边界。纯核心无需了解文件格式或用户目录。
 use omnitrigger_core::{
-    Activation, Button, Engine, MouseButton, RegistrationError, TriggerSpec, WheelDirection,
+    Activation, Button, Engine, MouseButton, ProcessScope, RegistrationError, TriggerSpec,
+    WheelDirection,
 };
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -63,6 +64,8 @@ struct Settings {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BindingDto {
+    #[serde(default, skip_serializing_if = "ProcessScopeDto::is_global")]
+    process_scope: ProcessScopeDto,
     #[serde(rename = "id")]
     id: u64,
     #[serde(rename = "held")]
@@ -81,6 +84,33 @@ struct BindingDto {
     command: Option<CommandAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     show_panel: Option<bool>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessScopeDto {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allow: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deny: Vec<String>,
+}
+
+impl ProcessScopeDto {
+    fn is_global(&self) -> bool {
+        self.allow.is_empty() && self.deny.is_empty()
+    }
+}
+
+pub fn process_scope_label(scope: &ProcessScope) -> String {
+    let mut text = if scope.allow.is_empty() {
+        "所有应用".into()
+    } else {
+        format!("仅 {}", scope.allow.join("、"))
+    };
+    if !scope.deny.is_empty() {
+        text += &format!("，排除 {}", scope.deny.join("、"));
+    }
+    text
 }
 
 #[derive(Serialize, Deserialize)]
@@ -142,6 +172,10 @@ impl From<ButtonDto> for Button {
 impl From<&Binding> for BindingDto {
     fn from(binding: &Binding) -> Self {
         Self {
+            process_scope: ProcessScopeDto {
+                allow: binding.spec.process_scope.allow.clone(),
+                deny: binding.spec.process_scope.deny.clone(),
+            },
             id: binding.spec.id,
             held: binding.spec.held.iter().copied().map(Into::into).collect(),
             conditions: binding.spec.conditions.iter().map(Into::into).collect(),
@@ -179,6 +213,9 @@ impl From<&Binding> for BindingDto {
 
 impl BindingDto {
     fn into_binding(self, version: u32) -> Result<Binding, String> {
+        if version < 10 && !self.process_scope.is_global() {
+            return Err("应用范围需要版本 10 配置。".into());
+        }
         if version < 6 && !self.conditions.is_empty() {
             return Err("位置条件需要版本 6 配置。".into());
         }
@@ -231,6 +268,10 @@ impl BindingDto {
         }
         Ok(Binding {
             spec: TriggerSpec {
+                process_scope: ProcessScope {
+                    allow: self.process_scope.allow,
+                    deny: self.process_scope.deny,
+                },
                 conditions: self.conditions.into_iter().map(Into::into).collect(),
                 id: self.id,
                 held: self.held.into_iter().map(Into::into).collect(),
@@ -269,6 +310,7 @@ pub fn defaults() -> Vec<Binding> {
     vec![
         Binding {
             spec: TriggerSpec {
+                process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 1,
                 held: vec![Button::Key(0x14)],
@@ -280,6 +322,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 2,
                 held: vec![Button::Mouse(MouseButton::X1)],
@@ -291,6 +334,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 3,
                 held: vec![Button::Mouse(MouseButton::X1)],
@@ -302,6 +346,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 4,
                 held: vec![Button::Key(0x14)],
@@ -313,6 +358,7 @@ pub fn defaults() -> Vec<Binding> {
         },
         Binding {
             spec: TriggerSpec {
+                process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 5,
                 held: vec![],
@@ -342,7 +388,7 @@ pub fn path() -> PathBuf {
 fn decode(text: &str) -> Result<Vec<Binding>, String> {
     let settings: Settings =
         serde_json::from_str(text).map_err(|e| format!("配置格式有误：{e}"))?;
-    if !matches!(settings.version, 1..=9) {
+    if !matches!(settings.version, 1..=10) {
         return Err("配置版本不受支持，原文件已保留。".into());
     }
     let bindings = settings
@@ -497,7 +543,7 @@ pub fn save(bindings: &[Binding]) -> Result<(), String> {
 fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
     validate(bindings)?;
     let text = serde_json::to_vec_pretty(&Settings {
-        version: 9,
+        version: 10,
         bindings: bindings.iter().map(Into::into).collect(),
     })
     .map_err(|e| e.to_string())?;
@@ -507,7 +553,7 @@ fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
             decode(&original)?;
             let settings: Settings =
                 serde_json::from_str(&original).map_err(|error| error.to_string())?;
-            if settings.version < 9 {
+            if settings.version < 10 {
                 backup_legacy(destination, settings.version, original.as_bytes())?;
             }
         }
@@ -596,10 +642,63 @@ mod tests {
 
     fn encode(bindings: &[Binding]) -> String {
         serde_json::to_string(&Settings {
-            version: 9,
+            version: 10,
             bindings: bindings.iter().map(Into::into).collect(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn process_scope_round_trip_keeps_user_names_and_rejects_legacy_schema() {
+        let mut bindings = vec![defaults()[0].clone()];
+        let mut scoped = bindings[0].clone();
+        scoped.spec.id = 88;
+        scoped.spec.process_scope = ProcessScope {
+            allow: vec!["Code.EXE".into(), "cursor".into()],
+            deny: vec!["cursor.exe".into()],
+        };
+        bindings.push(scoped);
+        let text = encode(&bindings);
+        assert_eq!(decode(&text).unwrap(), bindings);
+        let mut document: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(document["bindings"][0].get("process_scope").is_none());
+        document["version"] = 9.into();
+        assert!(decode(&document.to_string())
+            .unwrap_err()
+            .contains("版本 10"));
+        document["version"] = 10.into();
+        document["bindings"][1]["process_scope"]["allow"] = json!(["Code", "code.exe"]);
+        assert!(decode(&document.to_string())
+            .unwrap_err()
+            .contains("重复名称"));
+    }
+
+    #[test]
+    fn process_scope_upgrade_backs_up_exact_v9_content_before_saving() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let mut document: serde_json::Value = serde_json::from_str(&encode(&defaults())).unwrap();
+        document["version"] = 9.into();
+        let original = format!(" \r\n{document}\r\n");
+        std::fs::write(&destination, &original).unwrap();
+        let mut bindings = defaults();
+        bindings[0].spec.process_scope = ProcessScope {
+            allow: vec![],
+            deny: vec!["game.exe".into()],
+        };
+        save_to(&destination, &bindings).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.0.join("bindings.json.v9.bak")).unwrap(),
+            original
+        );
+        assert_eq!(
+            decode(&std::fs::read_to_string(&destination).unwrap()).unwrap(),
+            bindings
+        );
+        let saved = std::fs::read(&destination).unwrap();
+        bindings[0].spec.process_scope.allow = vec!["bad/path".into()];
+        assert!(save_to(&destination, &bindings).is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), saved);
     }
 
     #[test]
@@ -865,7 +964,7 @@ mod tests {
 
     #[test]
     fn incompatible_and_ambiguous_configurations_are_rejected() {
-        assert!(decode(r#"{"version":10,"bindings":[]}"#).is_err());
+        assert!(decode(r#"{"version":11,"bindings":[]}"#).is_err());
         assert!(decode(&legacy(4, true, true)).is_err());
         let mut value: serde_json::Value = serde_json::from_str(&legacy(4, false, false)).unwrap();
         value["version"] = 5.into();
@@ -946,6 +1045,7 @@ mod tests {
     fn drag_binding(button: Button, min_distance_px: u32, max_start_ms: u32) -> Binding {
         Binding {
             spec: TriggerSpec {
+                process_scope: Default::default(),
                 conditions: Vec::new(),
                 id: 6,
                 held: vec![],
@@ -983,7 +1083,7 @@ mod tests {
         assert_eq!(serialized["action"], json!({"kind": "notification"}));
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&encode(&bindings)).unwrap()["version"],
-            9
+            10
         );
         assert_eq!(bindings.last(), Some(&drag));
     }
@@ -1055,6 +1155,7 @@ mod tests {
         assert_eq!(duplicate.other, Some(1));
         assert_eq!(duplicate.title, "与已有触发范围冲突");
         let prefix = TriggerSpec {
+            process_scope: Default::default(),
             conditions: Vec::new(),
             id: 0,
             held: vec![Button::Key(0xa0)],
@@ -1065,6 +1166,7 @@ mod tests {
             Some(1)
         );
         let bare_left = TriggerSpec {
+            process_scope: Default::default(),
             conditions: Vec::new(),
             id: 0,
             held: vec![],
@@ -1075,6 +1177,7 @@ mod tests {
             None
         );
         let fresh = TriggerSpec {
+            process_scope: Default::default(),
             conditions: Vec::new(),
             id: 0,
             held: vec![Button::Key(0x14)],
@@ -1099,6 +1202,7 @@ mod tests {
     ) -> Binding {
         Binding {
             spec: TriggerSpec {
+                process_scope: Default::default(),
                 id,
                 held: vec![],
                 conditions: vec![TriggerCondition::PointerRegion(region)],
@@ -1154,6 +1258,7 @@ mod tests {
             .enumerate()
             .map(|(index, action)| Binding {
                 spec: TriggerSpec {
+                    process_scope: Default::default(),
                     id: 100 + index as u64,
                     held: vec![Button::Key(0x14)],
                     conditions: vec![],
@@ -1223,7 +1328,7 @@ mod tests {
         let text = encode(&expected);
         assert_eq!(decode(&text).unwrap(), expected);
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["version"], 9);
+        assert_eq!(value["version"], 10);
         assert_eq!(
             value["bindings"][0]["conditions"],
             json!([{"kind":"pointer_region","region":{"kind":"screen_edge","edge":"top","thickness_px":8}}])
@@ -1276,7 +1381,7 @@ mod tests {
         let encoded = encode(&expected);
         assert_eq!(decode(&encoded).unwrap(), expected);
         let document: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(document["version"], 9);
+        assert_eq!(document["version"], 10);
         assert_eq!(
             document["bindings"][3]["conditions"][0]["region"],
             json!({
@@ -1521,7 +1626,7 @@ mod tests {
         assert_eq!(std::fs::read(&backup).unwrap(), original.as_bytes());
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&destination).unwrap()).unwrap();
-        assert_eq!(saved["version"], 9);
+        assert_eq!(saved["version"], 10);
         assert_eq!(decode(&saved.to_string()).unwrap(), bindings);
         bindings.last_mut().unwrap().message = "修改后的边缘音量".into();
         save_to(&destination, &bindings).unwrap();
@@ -1579,7 +1684,7 @@ mod tests {
         let saved = std::fs::read_to_string(&destination).unwrap();
         assert_eq!(decode(&saved).unwrap(), expected);
         let current: serde_json::Value = serde_json::from_str(&saved).unwrap();
-        assert_eq!(current["version"], 9);
+        assert_eq!(current["version"], 10);
         assert_eq!(current["bindings"][0]["action"]["kind"], "local");
         assert_eq!(current["bindings"][0]["action"]["version"], 1);
         for version in 1..=6 {
@@ -1613,7 +1718,7 @@ mod tests {
         let saved = std::fs::read_to_string(&destination).unwrap();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&saved).unwrap()["version"],
-            9
+            10
         );
         assert_eq!(decode(&saved).unwrap(), expected);
         expected[0].message = "再次修改本地动作".into();

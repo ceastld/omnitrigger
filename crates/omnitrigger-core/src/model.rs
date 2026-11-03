@@ -1,6 +1,6 @@
 //! 标准化输入、统一触发描述与确定性决策。
 
-use crate::TriggerCondition;
+use crate::{ProcessScope, TriggerCondition};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum MouseButton {
@@ -87,6 +87,7 @@ pub struct ActiveDrag {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TriggerSpec {
+    pub process_scope: ProcessScope,
     pub id: u64,
     pub held: Vec<Button>,
     pub activation: Activation,

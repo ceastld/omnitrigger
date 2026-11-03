@@ -17,6 +17,7 @@ pub struct TriggerPreset {
 impl TriggerPreset {
     pub fn spec(&self, id: u64) -> TriggerSpec {
         TriggerSpec {
+            process_scope: Default::default(),
             conditions: self
                 .region
                 .map(omnitrigger_core::TriggerCondition::PointerRegion)
@@ -261,6 +262,7 @@ mod tests {
             .find(|preset| preset.key == "right-300")
             .unwrap();
         let expected = TriggerSpec {
+            process_scope: Default::default(),
             conditions: Vec::new(),
             id: 42,
             held: vec![],
