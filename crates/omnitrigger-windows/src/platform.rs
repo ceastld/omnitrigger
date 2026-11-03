@@ -2334,13 +2334,13 @@ mod tests {
             conditions: vec![],
             process_scope: Default::default(),
             keyboard: omnitrigger_core::KeyboardPolicy {
-                retained_prefix: Some(omnitrigger_core::RetainedPrefix {
+                retained_prefix: Some(Box::new(omnitrigger_core::RetainedPrefix {
                     key: prefix,
                     capture_scope: Default::default(),
                     quiet_ms: 50,
                     fast_ms: 50,
                     block_with_primary_mouse: false,
-                }),
+                })),
                 matching: omnitrigger_core::KeyboardMatching::Captured {
                     priority: id as u16,
                 },

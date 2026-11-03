@@ -13,13 +13,13 @@ fn spec(id: u64, terminal: Button, adorn: Option<Button>) -> TriggerSpec {
         conditions: vec![],
         process_scope: Default::default(),
         keyboard: KeyboardPolicy {
-            retained_prefix: Some(RetainedPrefix {
+            retained_prefix: Some(Box::new(RetainedPrefix {
                 key: PREFIX,
                 capture_scope: Default::default(),
                 quiet_ms: 50,
                 fast_ms: 50,
                 block_with_primary_mouse: false,
-            }),
+            })),
             matching: KeyboardMatching::Captured {
                 priority: id as u16,
             },

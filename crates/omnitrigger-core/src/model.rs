@@ -103,7 +103,7 @@ pub struct KeyboardPolicy {
     /// 专用层的键必须在 held 中。层内未匹配的键盘按压不回放，鼠标输入仍按各自规则处理。
     pub dedicated_prefix: Option<Button>,
     /// 保留原功能的捕获层；与专用层互斥，时间由事件调用方显式提供。
-    pub retained_prefix: Option<RetainedPrefix>,
+    pub retained_prefix: Option<Box<RetainedPrefix>>,
     /// 仅普通键盘 Press 可用；精确模式重复原动作，捕获模式按当前捕获集合重新选择。
     pub repeat: bool,
     /// 独立按下且没有其他键盘输入或匹配动作时，松开后补发自身的一次点击。

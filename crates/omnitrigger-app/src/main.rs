@@ -5810,13 +5810,13 @@ fn smoke_test() -> Result<(), String> {
     retained.spec.held = vec![Button::Key(134)];
     retained.spec.activation = Activation::Press(Button::Key(75));
     retained.spec.keyboard = omnitrigger_core::KeyboardPolicy {
-        retained_prefix: Some(omnitrigger_core::RetainedPrefix {
+        retained_prefix: Some(Box::new(omnitrigger_core::RetainedPrefix {
             key: Button::Key(134),
             capture_scope: Default::default(),
             quiet_ms: 50,
             fast_ms: 50,
             block_with_primary_mouse: false,
-        }),
+        })),
         matching: omnitrigger_core::KeyboardMatching::Captured { priority: 0 },
         repeat: true,
         restore_on_tap: true,

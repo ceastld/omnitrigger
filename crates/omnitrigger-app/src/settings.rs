@@ -389,7 +389,7 @@ impl BindingDto {
                     matching: self.keyboard.matching.into(),
                     dedicated_prefix: self.keyboard.dedicated_prefix.map(Into::into),
                     retained_prefix: self.keyboard.retained_prefix.map(|policy| {
-                        omnitrigger_core::RetainedPrefix {
+                        Box::new(omnitrigger_core::RetainedPrefix {
                             key: policy.key.into(),
                             capture_scope: ProcessScope {
                                 allow: policy.capture_scope.allow,
@@ -398,7 +398,7 @@ impl BindingDto {
                             quiet_ms: policy.quiet_ms,
                             fast_ms: policy.fast_ms,
                             block_with_primary_mouse: policy.block_with_primary_mouse,
-                        }
+                        })
                     }),
                     repeat: self.keyboard.repeat,
                     restore_on_tap: self.keyboard.restore_on_tap,
@@ -941,13 +941,13 @@ mod tests {
         std::fs::write(&destination, &original).unwrap();
         bindings[0].spec.keyboard = KeyboardPolicy {
             matching: KeyboardMatching::Captured { priority: 3 },
-            retained_prefix: Some(omnitrigger_core::RetainedPrefix {
+            retained_prefix: Some(Box::new(omnitrigger_core::RetainedPrefix {
                 key,
                 capture_scope: Default::default(),
                 quiet_ms: 50,
                 fast_ms: 50,
                 block_with_primary_mouse: true,
-            }),
+            })),
             repeat: true,
             restore_on_tap: true,
             tap_timeout_ms: Some(1500),
