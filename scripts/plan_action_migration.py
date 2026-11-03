@@ -260,6 +260,7 @@ def project_source_precedence(bindings, current):
             continue
         for prefix in candidates:
             if (activation["value"] not in prefix["trigger"]["held"]
+                    or not all(held in prefix["trigger"]["held"] for held in terminal["trigger"]["held"])
                     or not process_scopes_overlap(terminal["trigger"].get("process_scope", {}),
                                                   prefix["trigger"].get("process_scope", {}))):
                 continue

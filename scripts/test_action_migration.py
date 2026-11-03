@@ -163,6 +163,21 @@ class MigrationTests(unittest.TestCase):
         leader["KeyActions"][1]["BindingProcessName"] = "viewer"
         self.assertTrue(all(row["status"] == "needs_runtime_verification" for row in build_plan(**data)["bindings"]))
 
+    def test_terminal_and_adornment_with_distinct_held_contexts_are_supported(self):
+        data = fixture()
+        leader = data["source"]["PowerKeys"]["20"]
+        leader["KeyActions"] = [
+            {"SecondaryKey": 69, "AdornKey": 32, "ActionType": 1, "Data": "2|65"},
+            {"SecondaryKey": 80, "AdornKey": 69, "ActionType": 1, "Data": "2|66"},
+        ]
+        rows = build_plan(**data)["bindings"]
+        self.assertTrue(all(not row["trigger_gaps"] for row in rows))
+        self.assertTrue(all(row["status"] == "needs_runtime_verification" for row in rows))
+        self.assertEqual(rows[0]["trigger"]["held"], [
+            {"kind": "key", "value": 20}, {"kind": "key", "value": 32}])
+        self.assertEqual(rows[1]["trigger"]["held"], [
+            {"kind": "key", "value": 20}, {"kind": "key", "value": 69}])
+
     def test_partial_catalog_or_failed_statistics_fail_without_output(self):
         for patch in ({"hasMore": True}, {"totalCount": 2}):
             data = fixture()

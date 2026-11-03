@@ -55,6 +55,9 @@ pub use registration::{MAX_BINDINGS, RegistrationError};
 mod prefix_tests;
 
 #[cfg(test)]
+mod terminal_role_tests;
+
+#[cfg(test)]
 mod keyboard_policy_tests;
 
 #[cfg(test)]

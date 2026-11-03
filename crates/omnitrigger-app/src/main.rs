@@ -5749,6 +5749,14 @@ fn smoke_test() -> Result<(), String> {
     scoped.spec.id = settings::next_id(&bindings);
     scoped.spec.process_scope.allow = vec!["omnitrigger-smoke".into()];
     bindings.push(scoped);
+    // 使用 S，避开默认 CapsLock+Space 呼出面板的真实前缀冲突。
+    for (held, terminal) in [([20, 83], 69), ([20, 69], 80)] {
+        let mut contextual = bindings[0].clone();
+        contextual.spec.id = settings::next_id(&bindings);
+        contextual.spec.held = held.into_iter().map(Button::Key).collect();
+        contextual.spec.activation = Activation::Press(Button::Key(terminal));
+        bindings.push(contextual);
+    }
     for binding in &mut bindings {
         if binding.spec.held.contains(&Button::Key(20)) {
             binding.spec.keyboard = omnitrigger_core::KeyboardPolicy {
@@ -5791,7 +5799,7 @@ fn smoke_test() -> Result<(), String> {
     }
     backend.send(BackendCommand::SetEnabled(false))?;
     drop(backend);
-    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; scoped/dedicated/repeat registrations valid; foreground process resolved outside hooks.");
+    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; scoped/dedicated/repeat/contextual-terminal registrations valid; foreground process resolved outside hooks.");
     Ok(())
 }
 

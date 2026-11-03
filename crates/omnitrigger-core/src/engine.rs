@@ -1,6 +1,6 @@
 //! 事件匹配、长按与拖拽计时、消费及回退状态。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::direction;
 use crate::registration::validate;
@@ -52,6 +52,8 @@ struct PendingTapRestore {
 pub struct Engine {
     bindings: Vec<TriggerSpec>,
     pressed: BTreeMap<Button, PressState>,
+    /// 一次物理按压在认领为末键后，直到释放都不能借给其他组合作前缀。
+    terminal_presses: BTreeSet<Button>,
     pending: Vec<InputKind>,
     wheel: [i64; 4],
     wheel_owner: [Option<u64>; 4],
@@ -80,6 +82,7 @@ impl Engine {
         let mut engine = Self {
             bindings: validate(bindings)?,
             pressed: BTreeMap::new(),
+            terminal_presses: BTreeSet::new(),
             pending: Vec::new(),
             wheel: [0; 4],
             wheel_owner: [None; 4],
@@ -221,6 +224,7 @@ impl Engine {
         self.dedicated_leader = None;
         self.layer_owner = None;
         self.repeat_owner.clear();
+        self.terminal_presses.clear();
         self.tap_restore = None;
         self.pending.clear();
         self.prefix_origin = None;
@@ -458,6 +462,7 @@ impl Engine {
         if let Some((id, repeat)) = press {
             self.commit_pending();
             self.pressed.insert(button, PressState::Consumed);
+            self.terminal_presses.insert(button);
             if repeat {
                 self.repeat_owner.insert(button, id);
             }
@@ -499,6 +504,7 @@ impl Engine {
                 _ => None,
             });
         if hold.is_some() || drag.is_some() {
+            self.terminal_presses.insert(button);
             self.wheel = [0; 4];
             self.wheel_owner = [None; 4];
             let suppressed = self.dedicated_leader.is_some() && matches!(button, Button::Key(_));
@@ -531,15 +537,16 @@ impl Engine {
                 ..Decision::default()
             };
         }
-        let eligible = self.pressed.values().all(|state| {
-            matches!(
-                state,
-                PressState::Pending
-                    | PressState::PendingSuppressed
-                    | PressState::Consumed
-                    | PressState::Observed
-            )
-        });
+        let eligible = self.terminal_presses.is_empty()
+            && self.pressed.values().all(|state| {
+                matches!(
+                    state,
+                    PressState::Pending
+                        | PressState::PendingSuppressed
+                        | PressState::Consumed
+                        | PressState::Observed
+                )
+            });
         let extends_prefix = eligible
             && self.candidates().any(|binding| {
                 binding.held.contains(&button)
@@ -618,6 +625,7 @@ impl Engine {
 
     fn up(&mut self, button: Button) -> Decision {
         self.repeat_owner.remove(&button);
+        self.terminal_presses.remove(&button);
         let leaving_layer = self.dedicated_leader == Some(button);
         let restore_tap = leaving_layer && self.tap_restore.is_some_and(|tap| tap.button == button);
         if leaving_layer {
@@ -752,6 +760,7 @@ impl Engine {
                     && self.pressed.iter().all(|(&pressed, &state)| {
                         pressed == button
                             || (binding.held.contains(&pressed)
+                                && !self.terminal_presses.contains(&pressed)
                                 && matches!(
                                     state,
                                     PressState::Pending
@@ -774,6 +783,7 @@ impl Engine {
                         | PressState::Consumed
                         | PressState::Observed
                 ) && held.contains(button)
+                    && !self.terminal_presses.contains(button)
             })
     }
 

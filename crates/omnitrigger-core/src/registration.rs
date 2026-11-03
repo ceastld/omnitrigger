@@ -132,7 +132,7 @@ impl fmt::Display for RegistrationError {
             Self::TerminalInHeld { .. } => "目标键不能同时作为当前组合的前缀，请调整组合后重试。",
             Self::DuplicateTrigger { .. } => "已存在相同组合，请编辑已有触发器。",
             Self::TerminalIsPrefix { .. } => {
-                "目标键已作为另一组合的前缀，请调整组合或删除冲突触发器。"
+                "目标键会先触发动作，无法继续作为另一组合的前缀，请调整组合或范围。"
             }
         })
     }
@@ -319,6 +319,7 @@ pub(super) fn validate(
         if let Some(button) = activation_button(left.activation)
             && let Some(prefix) = bindings.iter().find(|other| {
                 other.held.contains(&button)
+                    && left.held.iter().all(|held| other.held.contains(held))
                     && regions::conditions_overlap(&left.conditions, &other.conditions)
                     && left.process_scope.overlaps(&other.process_scope)
             })
