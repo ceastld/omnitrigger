@@ -371,11 +371,24 @@ impl Workspace {
             .map(|spec| spec.id)
             .or(self.selected)
             .unwrap_or(0);
+        let title = if let ActionSpec::Invoke(call) = &self.draft_action {
+            self.action_service
+                .catalog()
+                .actions
+                .iter()
+                .find(|entry| {
+                    entry.package_id == call.package_id && entry.definition.id == call.action_id
+                })
+                .map(|entry| format!("{} / {}", entry.package_name, entry.definition.title))
+                .unwrap_or_else(|| "动作包尚未加载".into())
+        } else {
+            crate::action_detail(&self.draft_action)
+        };
         div()
             .flex()
             .flex_col()
             .gap(px(8.))
-            .child(caption(crate::action_detail(&self.draft_action)))
+            .child(caption(title))
             .child(Self::input_field(
                 "动作参数（JSON 对象）",
                 &self.package_input,
@@ -415,6 +428,88 @@ impl Workspace {
             ))
     }
 
+    pub(super) fn package_result(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.recording {
+            return None;
+        }
+        let id = self
+            .pending
+            .as_ref()
+            .map(|spec| spec.id)
+            .or(self.selected)?;
+        let ActionSpec::Invoke(call) = self.draft_action_spec(cx).ok()? else {
+            return None;
+        };
+        let feedback = self.package_feedback.for_call(id, &call)?;
+        Some(match feedback {
+            crate::package_feedback::Feedback::Running(invocation) => {
+                div().child(caption(format!("运行 #{invocation} · 正在处理")))
+            }
+            crate::package_feedback::Feedback::Completed(preview) => {
+                let invocation = preview.invocation;
+                let expanded = self.package_feedback.details_visible(invocation);
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(div().flex_1().child(caption(format!(
+                                "上次运行 #{} · {}",
+                                invocation, preview.label
+                            ))))
+                            .child(
+                                crate::small(button(
+                                    "toggle-package-result",
+                                    if expanded {
+                                        "收起结果"
+                                    } else {
+                                        "查看结果"
+                                    },
+                                    Tone::Ghost,
+                                    true,
+                                ))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.package_feedback.toggle_details(invocation);
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
+                    )
+                    .when(expanded, |element| {
+                        element.child(
+                            div()
+                                .id("package-result")
+                                .max_h(px(160.))
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .p(px(10.))
+                                .bg(crate::rgb(theme::ROW))
+                                .rounded(px(6.))
+                                .font_family(theme::MONO_FONT)
+                                .text_size(px(12.))
+                                .children(
+                                    preview
+                                        .text
+                                        .lines()
+                                        .map(|line| div().flex_none().child(line.to_string())),
+                                )
+                                .map(|element| self.smooth_scroll.wrap("package-result", element)),
+                        )
+                    })
+                    .when(expanded && preview.truncated, |element| {
+                        element.child(caption("结果过长，预览已截断。"))
+                    })
+            }
+        })
+    }
+
     pub(super) fn poll_packages(&mut self) -> bool {
         let mut changed = false;
         for _ in 0..8 {
@@ -422,6 +517,7 @@ impl Workspace {
                 break;
             };
             changed = true;
+            self.package_feedback.apply(&event);
             let (message, failed) = match event.outcome {
                 ActionOutcome::Started => ("已开始".to_string(), false),
                 ActionOutcome::Succeeded { output: _ } => ("已完成，动作已返回结果".into(), false),

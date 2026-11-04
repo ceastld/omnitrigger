@@ -28,6 +28,7 @@ mod local_executor;
 #[cfg(test)]
 mod local_text_smoke;
 mod message_input;
+mod package_feedback;
 mod plugin_install;
 mod plugins;
 mod presets;
@@ -504,6 +505,7 @@ struct Workspace {
     package_input: Entity<MessageInput>,
     package_picker_for_draft: bool,
     action_service: omnitrigger_actions::ActionService,
+    package_feedback: package_feedback::PackageFeedback,
     script_projects: script_projects::ScriptProjects,
     plugins: Plugins,
     plugin_settings_error: Option<String>,
@@ -918,6 +920,7 @@ impl Workspace {
             package_input,
             package_picker_for_draft: false,
             action_service: action_packages::service(&settings::path()),
+            package_feedback: Default::default(),
             script_projects,
             shortcut_executor: CommandExecutor::shortcuts(),
             system_executor,
@@ -2289,8 +2292,9 @@ impl Workspace {
                 cx.notify();
             }
             ActionSpec::Invoke(call) => {
-                match action_packages::submit(&self.action_service, id, call, target) {
+                match action_packages::submit(&self.action_service, id, call.clone(), target) {
                     Ok(invocation) => {
+                        self.package_feedback.accepted(id, invocation, call);
                         self.action_error = None;
                         self.record_action_status(id, format!("动作包已接纳 · 运行 {invocation}"));
                     }
@@ -4309,6 +4313,56 @@ impl Workspace {
                     .on_click(cx.listener(|this, _, _, cx| this.test_action(cx))),
                 );
         }
+        if let ActionSpec::Invoke(call) = &self.draft_action {
+            let call = call.clone();
+            let is_script = self
+                .action_service
+                .catalog()
+                .resolve(&call)
+                .is_ok_and(|entry| entry.definition.runtime == "script");
+            return div()
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(div().flex_1().child(section_title("动作包")))
+                        .when(is_script, |element| {
+                            element.child(
+                                small(button(
+                                    "edit-current-script",
+                                    "编辑代码",
+                                    Tone::Secondary,
+                                    !self.recording,
+                                ))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.edit_script_project(call.clone(), cx)
+                                    },
+                                )),
+                            )
+                        })
+                        .child(
+                            small(button(
+                                "change-package-action-kind",
+                                "更换动作",
+                                Tone::Ghost,
+                                !self.recording,
+                            ))
+                            .on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.draft_action = ActionSpec::Notification;
+                                    cx.notify();
+                                },
+                            )),
+                        ),
+                )
+                .child(self.package_action_fields(cx))
+                .child(self.message_field("动作名称", hint));
+        }
         let notification = matches!(self.draft_action, ActionSpec::Notification);
         let command = matches!(self.draft_action, ActionSpec::Command(_));
         let panel = matches!(self.draft_action, ActionSpec::ShowPanel);
@@ -4676,7 +4730,10 @@ impl Workspace {
         let footer = match conflict {
             None => {
                 body.push(self.action_fields(None, cx).into_any_element());
-                if matches!(self.draft_action, ActionSpec::Browser(_)) {
+                if matches!(
+                    self.draft_action,
+                    ActionSpec::Browser(_) | ActionSpec::Invoke(_)
+                ) {
                     body.swap(3, 4);
                 }
                 div()
@@ -4687,10 +4744,18 @@ impl Workspace {
                             .flex_1()
                             .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                     )
-                    .child(
+                    .child(if matches!(self.draft_action, ActionSpec::Invoke(_)) {
+                        button(
+                            "run-package-draft-footer",
+                            "运行草稿",
+                            Tone::Secondary,
+                            !self.action_service.is_running(spec.id),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.test_action(cx)))
+                    } else {
                         button("preview-draft", "预览", Tone::Secondary, true)
-                            .on_click(cx.listener(|this, _, _, cx| this.preview_draft(cx))),
-                    )
+                            .on_click(cx.listener(|this, _, _, cx| this.preview_draft(cx)))
+                    })
                     .child(
                         button("discard", "放弃", Tone::Ghost, true)
                             .on_click(cx.listener(|this, _, _, cx| this.discard_pending(cx))),
@@ -4893,7 +4958,10 @@ impl Workspace {
                 .into_any_element(),
             caption("测试提示不计入触发次数。").into_any_element(),
         ];
-        if matches!(self.draft_action, ActionSpec::Browser(_)) {
+        if matches!(
+            self.draft_action,
+            ActionSpec::Browser(_) | ActionSpec::Invoke(_)
+        ) {
             body.swap(3, 4);
         }
         let footer = div()
@@ -4929,6 +4997,7 @@ impl Workspace {
     }
 
     fn render_inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let package_result = self.package_result(cx);
         let (body, footer) = if self.recording {
             self.render_recording()
         } else if let Some(spec) = self.pending.clone() {
@@ -5004,6 +5073,10 @@ impl Workspace {
                         .bg(rgb(theme::INSPECTOR))
                         .border_t_1()
                         .border_color(rgb(theme::DIVIDER))
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .when_some(package_result, |element, result| element.child(result))
                         .child(footer),
                 )
             })
