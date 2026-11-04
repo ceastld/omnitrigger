@@ -124,14 +124,23 @@ fn installed_image_digest_is_checked_before_any_process_starts() {
 fn script_diagnostics_associate_entry_paths_without_changing_fault_fields() {
     let fixture =
         Fixture::new("function fail() {\n throw new Error('entry-diagnostic');\n}\nreturn fail();");
-    let entry_path = fixture.root.join("main.js").display().to_string();
+    let entry_path = fixture.root.join("main.js").canonicalize().unwrap();
+    let assert_entry = |message: &str| {
+        let reported = message
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("脚本入口："))
+            .unwrap_or_else(|| panic!("{message}"));
+        // Windows 的 TEMP 可能含短路径，回执显示规范路径；核验实际文件身份。
+        assert_eq!(PathBuf::from(reported).canonicalize().unwrap(), entry_path);
+    };
     let action = fixture.action(json!({}));
     let error = runtime()
         .execute(&action, &context(), &CancellationToken::new())
         .unwrap_err();
     assert_eq!(error.code, "script_failed");
     assert_eq!(error.effect_state.as_deref(), Some("unknown"));
-    assert!(error.message.contains(&entry_path));
+    assert_entry(&error.message);
     assert!(error.message.contains("action.js:3"), "{}", error.message);
     std::fs::write(
         fixture.root.join("main.js"),
@@ -155,7 +164,7 @@ fn script_diagnostics_associate_entry_paths_without_changing_fault_fields() {
         .unwrap_err();
     assert_eq!(error.code, "script_failed");
     assert!(error.message.len() <= 16 * 1024);
-    assert!(error.message.contains(&entry_path));
+    assert_entry(&error.message);
     assert!(error.message.contains("action.js"));
 }
 
