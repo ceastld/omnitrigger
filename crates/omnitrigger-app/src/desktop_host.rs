@@ -241,6 +241,20 @@ impl NativeHost for DesktopHost {
                     .map_err(|message| error("input_failed", message, "unknown"))?;
                 Ok(json!({"submitted":true}))
             }
+            "window.action" => {
+                let action: crate::window_action::WindowAction = serde_json::from_value(params)
+                    .map_err(|message| error("invalid_input", message, "not_started"))?;
+                let target = self.target.as_ref().map_err(Clone::clone)?;
+                target
+                    .ensure_foreground()
+                    .map_err(|message| error("target_changed", message, "not_started"))?;
+                not_cancelled(cancellation)
+                    .map_err(|message| error("cancelled", message, "not_started"))?;
+                target
+                    .window_action_if(action.platform_operation(), || not_cancelled(cancellation))
+                    .map_err(|message| error("window_action_failed", message, "unknown"))?;
+                Ok(json!({"submitted":true}))
+            }
             "keyboard.sequence" => {
                 let args: SequenceArgs = serde_json::from_value(params)
                     .map_err(|message| error("invalid_input", message, "not_started"))?;
@@ -337,6 +351,13 @@ mod tests {
         };
         let host = DesktopHost::from_snapshot(snapshot).unwrap();
         let token = CancellationToken::new();
+        for operation in ["toggle_maximize", "minimize", "close"] {
+            let error = host
+                .call("window.action", json!({"operation":operation}), &token)
+                .unwrap_err();
+            assert_eq!(error.code, "target_changed");
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        }
         let value = host.call("target.context", json!({}), &token).unwrap();
         assert_eq!(value["window_handle"], snapshot.window_handle.to_string());
         assert_eq!(
@@ -384,6 +405,12 @@ mod tests {
                 json!({"modifiers":[],"keys":[65],"extra":1}),
             ),
             ("clipboard.read", json!({"unexpected":true})),
+            ("window.action", json!({"operation":"maximize"})),
+            (
+                "window.action",
+                json!({"operation":"close","window_handle":"1"}),
+            ),
+            ("window.action", json!({"operation":null})),
             ("clipboard.write", json!({"text":"a\0b"})),
             (
                 "clipboard.write",
@@ -435,6 +462,12 @@ mod tests {
             "target_unavailable"
         );
         assert_eq!(
+            host.call("window.action", json!({"operation":"close"}), &token)
+                .unwrap_err()
+                .code,
+            "target_unavailable"
+        );
+        assert_eq!(
             host.call(
                 "keyboard.shortcut",
                 json!({"keys":[163,9],"timing":{"process_overrides":{"wps":10}}}),
@@ -455,6 +488,12 @@ mod tests {
             "unknown_method"
         );
         token.cancel();
+        assert_eq!(
+            host.call("window.action", json!({"operation":"close"}), &token)
+                .unwrap_err()
+                .code,
+            "cancelled"
+        );
         assert_eq!(
             host.call("keyboard.shortcut", json!({"keys":[65]}), &token)
                 .unwrap_err()

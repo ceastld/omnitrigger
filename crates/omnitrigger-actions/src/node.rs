@@ -733,6 +733,70 @@ mod tests {
     }
 
     #[test]
+    fn desktop_window_api_validates_and_preserves_original_target_faults() {
+        if !node_available() {
+            return;
+        }
+        #[derive(Default)]
+        struct Host(std::sync::Mutex<Vec<Value>>);
+        impl NativeHost for Host {
+            fn call(
+                &self,
+                method: &str,
+                params: Value,
+                _: &CancellationToken,
+            ) -> Result<Value, ActionError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(json!({"method":method,"params":params}));
+                if params["operation"] == "close" {
+                    let mut error = ActionError::new("target_changed", "原目标已改变。");
+                    error.effect_state = Some("not_started".into());
+                    return Err(error);
+                }
+                Ok(json!({"submitted":true}))
+            }
+        }
+        let fixture = Fixture::new(
+            r#"export default async ctx => {
+            let invalid = 0;
+            for (const op of [null, undefined, false, 0, {}, 'Close', 'maximize', 'resize']) {
+                try { await ctx.desktop.windowAction(op); } catch(e) {
+                    if(e.code==='invalid_input' && e.effectState==='not_started' && e.method==='window.action') invalid++;
+                }
+            }
+            const first = await ctx.desktop.windowAction('toggle_maximize');
+            const second = await ctx.desktop.windowAction('minimize');
+            let error;
+            try { await ctx.desktop.windowAction('close'); } catch(e) {error={code:e.code,effect:e.effectState,method:e.method};}
+            return {invalid,first,second,error};
+        }"#,
+            json!({}),
+        );
+        let host = Host::default();
+        let output = NodeRuntime::default()
+            .execute_with_host(
+                &fixture.action,
+                &context(),
+                &CancellationToken::new(),
+                Some(&host),
+            )
+            .unwrap();
+        assert_eq!(
+            output,
+            json!({"invalid":8,"first":{"submitted":true},"second":{"submitted":true},"error":{"code":"target_changed","effect":"not_started","method":"window.action"}})
+        );
+        assert_eq!(
+            *host.0.lock().unwrap(),
+            ["toggle_maximize", "minimize", "close"]
+                .into_iter()
+                .map(|op| json!({"method":"window.action","params":{"operation":op}}))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn transient_clipboard_options_are_explicit_and_reject_typos_before_native_call() {
         if !node_available() {
             return;

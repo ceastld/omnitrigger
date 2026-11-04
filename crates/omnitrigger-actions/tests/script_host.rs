@@ -491,6 +491,73 @@ fn script_line_edit_example_uses_original_target_and_preflights_parameters() {
 
 #[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn script_window_api_routes_operations_validates_and_preserves_faults() {
+    let fixture = Fixture::new(
+        r#"
+        const rejected = [];
+        for (const operation of [null, undefined, false, 0, {}, 'Close', 'maximize', 'resize']) {
+            try { ctx.desktop.windowAction(operation); } catch(e) { rejected.push([e.code,e.effectState,e.method]); }
+        }
+        const receipts = ['toggle_maximize','minimize','close'].map(op => ctx.desktop.windowAction(op));
+        return {rejected,receipts};
+    "#,
+    );
+    let host = RecordingHost::default();
+    let output = runtime()
+        .execute_with_host(
+            &fixture.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap();
+    assert_eq!(
+        output["rejected"],
+        json!(vec![
+            vec!["invalid_input", "not_started", "window.action"];
+            8
+        ])
+    );
+    assert_eq!(
+        output["receipts"],
+        json!([{ "submitted":true },{ "submitted":true },{ "submitted":true }])
+    );
+    assert_eq!(
+        *host.calls.lock().unwrap(),
+        ["toggle_maximize", "minimize", "close"]
+            .into_iter()
+            .map(|op| ("window.action".into(), json!({"operation":op})))
+            .collect::<Vec<_>>()
+    );
+    let fixture = Fixture::new("return ctx.desktop.windowAction('close');");
+    let missing = runtime()
+        .execute(
+            &fixture.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+    assert_eq!(missing.code, "desktop_unavailable");
+    assert_eq!(missing.method.as_deref(), Some("window.action"));
+    let host = RecordingHost {
+        fail: true,
+        ..Default::default()
+    };
+    let error = runtime()
+        .execute_with_host(
+            &fixture.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "target_changed");
+    assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+    assert_eq!(error.method.as_deref(), Some("window.action"));
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
 fn script_host_routes_all_desktop_apis_and_validates_before_native_dispatch() {
     let fixture = Fixture::new(
         r#"

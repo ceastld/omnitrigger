@@ -81,7 +81,7 @@ actions/my-script/
 
 `runtime: "script"` 可通过现有动作服务运行独立的 Rust JS 宿主，无需安装 Node。宿主不链接进输入核心；脚本执行、取消与终态仍由 `ActionService` 管理。已有 Boa 和 QuickJS 两种构建使用同一份宿主 API。入口文件声明标准 JS 函数 `function main(ctx)`，返回 JSON 值；不需要自定义文件语法或 npm 包。
 
-目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start`、`ctx.delay`、`ctx.clipboard.readText/writeText`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时暂不提供 Node 模块、ESM 导入、Promise 入口；需要这些能力的动作继续选择 `node` 运行时。
+目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start`、`ctx.delay`、`ctx.clipboard.readText/writeText`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText/windowAction` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时暂不提供 Node 模块、ESM 导入、Promise 入口；需要这些能力的动作继续选择 `node` 运行时。
 
 Windows x64 开发环境可先构建本机 QuickJS 包，再通过开发命令安装。包中包含独立宿主、SDK、许可通知和文件清单；构建命令不会发布或上传二进制：
 
@@ -268,6 +268,12 @@ cargo test -p omnitrigger-app interactive_script_line_edit_smoke --locked -- --i
 测试短暂激活自建窗口，验证编辑结果、步骤间切窗和取消；不使用个人配置。行编辑验收覆盖行中、行尾、行首的真实文本结果；行首可能合并上一行，具体编辑器的 Home 行为仍需分别验收。轻量脚本验收使用显式指定的真实宿主，不访问剪贴板；上面的其他命令分别覆盖 Node API 与原生输入适配。
 
 文本烟测在支持完整备份当前格式时才执行剪贴板用例，结束后恢复并逐格式读回核对；遇到不支持的格式会保留原剪贴板并明确失败，不把跳过算作通过。其他来源在测试期间更新剪贴板时，测试保留新内容。
+
+### 窗口脚本
+
+同步脚本可直接调用 `ctx.desktop.windowAction('toggle_maximize')`；Node 脚本使用 `await`。操作还包括 `minimize` 和 `close`，始终针对本次提交时捕获且仍为前台的窗口，复用原生窗口能力。目标身份与取消条件在状态检查和提交前重新核验；句柄生命周期的检查不是原子锁定。
+
+返回 `{submitted:true}` 仅表示系统接纳请求；关闭可能提示保存或被目标程序拒绝。原目标变化时停止，已提交的窗口请求不会因取消而撤销。此接口不接收外部窗口句柄或隐式选择新前台；参数、目标与请求失败保留结构化错误。完整参数见[窗口动作 API](../tools/js-engine-probe/API.md#窗口动作)。
 
 ### 浏览器脚本
 

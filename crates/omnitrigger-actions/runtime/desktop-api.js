@@ -58,6 +58,12 @@ function createDesktopApi(invoke) {
     },
     sendText: text => textCall('keyboard.text', text),
     copySelectionText: () => invoke('selection.copy', {}),
+    windowAction: operation => {
+      if (!['toggle_maximize', 'minimize', 'close'].includes(operation)) {
+        invalid('window.action', '窗口操作需要 toggle_maximize、minimize 或 close。');
+      }
+      return invoke('window.action', {operation});
+    },
   });
   const clipboard = Object.freeze({
     readText: () => invoke('clipboard.read', {}),

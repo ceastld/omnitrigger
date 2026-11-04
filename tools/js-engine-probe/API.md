@@ -16,6 +16,7 @@
 | `ctx.desktop.sendKeySequence(modifiers, keys, options)` | 0–4 个修饰键和 1–16 个普通键；修饰键跨越整组，`keyDownDelayMs` 为 0–1000 毫秒，单次等待合计最多 3000 毫秒。 |
 | `ctx.desktop.sendText(text)` | 向原目标直接发送 Unicode，不经过剪贴板；最多 65,536 个 UTF-16 单元，不含 NUL 或孤立代理项。 |
 | `ctx.desktop.copySelectionText()` | 向原目标发送 Ctrl+C，读取新文本；复制结果保留在剪贴板。 |
+| `ctx.desktop.windowAction(operation)` | 对仍为前台的原目标执行 `toggle_maximize`、`minimize` 或 `close`，返回 `{submitted:true}`，不重新选择窗口。 |
 | `ctx.clipboard.readText()` / `writeText(text, options)` | Windows Unicode 文本剪贴板；写入替换全部格式。应用接入支持 `{excludeFromHistory:true}`，返回写入回执；独立 CLI 不支持选项，写入返回 `undefined`，文本最多 64 KiB UTF-8。 |
 | `ctx.browser.profiles({timeoutMs})` | 查询连接的浏览器 profile。 |
 | `ctx.browser.call(method, args, {profile, timeoutMs})` / `ctx.browser.chrome.*` | 同步调用扩展支持的 Chrome API，保留 `undefined` 与 `null`；无 profile 时只接受恰好一个已连接 profile。 |
@@ -39,6 +40,19 @@ function main(ctx) {
 `target()` 只查询原目标；发送前由应用再次核验进程身份、前台和取消状态，并复用现有按键释放收尾逻辑。`submitted` 只表示系统接纳输入，不表示业务动作完成。独立 CLI 没有目标上下文时返回 `desktop_unavailable`，不会自行选择前台。
 
 桌面异常的 `code`、`method`、`effectState` 可在 JS 中捕获，未捕获时保留在动作终态。`not_started` 仅描述该次 API，不能证明此前脚本没有副作用；网络中断或无法确认是否执行时为 `unknown`。桥接失败不自动重试，也不退回宿主直接访问剪贴板。客户端每次连接只发送一帧，最多等待 5 秒；外层动作仍受总时限约束。
+
+## 窗口动作
+
+```js
+/** @param {ScriptContext} ctx */
+function main(ctx) {
+    return ctx.desktop.windowAction('toggle_maximize');
+}
+```
+
+此接口复用原生窗口适配，不模拟按键；Node 入口使用 `await ctx.desktop.windowAction(...)`。状态检查与提交前重复核验原窗口、线程及进程创建身份、前台和取消条件；这些检查不构成对 Windows 窗口生命周期的原子锁定。非法操作在调用前返回 `invalid_input`。原目标已变时停止，系统请求未确认时返回 `window_action_failed` 并标记 `unknown`，不会自动重试。
+
+`submitted` 只表示系统接纳异步请求，不保证界面已经变化；关闭窗口可能弹出保存提示或被应用拒绝。取消不能撤销已提交请求。独立 CLI 没有桌面上下文时返回 `desktop_unavailable`；使用新增 API 需要更新宿主开发包。
 
 ## 顺序等待
 

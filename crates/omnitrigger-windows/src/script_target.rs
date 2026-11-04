@@ -152,6 +152,18 @@ impl ScriptTarget {
         ensure_shortcut_target(self.target)
     }
 
+    /// 每次状态检查及提交前核验原窗口身份和取消条件，不选择新的前台。
+    pub fn window_action_if(
+        &self,
+        operation: crate::WindowOperation,
+        mut check: impl FnMut() -> Result<(), String>,
+    ) -> Result<(), String> {
+        crate::window_action::perform_window_action_checked(self.target, operation, || {
+            self.ensure_foreground()?;
+            check()
+        })
+    }
+
     pub fn send_shortcut(&self, keys: &[u16]) -> Result<(), String> {
         self.send_shortcut_if(keys, || Ok(()))
     }
@@ -259,6 +271,14 @@ mod tests {
         assert!(info.process_name.ends_with(".exe"));
         assert_eq!(info.window_role, omnitrigger_core::WindowRole::Application);
         assert!(target.ensure_foreground().is_err());
+        let checked = std::cell::Cell::new(false);
+        assert!(target
+            .window_action_if(crate::WindowOperation::Close, || {
+                checked.set(true);
+                Ok(())
+            })
+            .is_err());
+        assert!(!checked.get());
         let mut stale = target;
         stale.identity.process_created ^= 1;
         assert!(stale.info().is_err());
@@ -268,6 +288,9 @@ mod tests {
         unsafe { DestroyWindow(hwnd) }.unwrap();
         assert!(target.info().is_err());
         assert!(target.send_shortcut(&[65]).is_err());
+        assert!(target
+            .window_action_if(crate::WindowOperation::Minimize, || Ok(()))
+            .is_err());
     }
     #[test]
     fn explicit_snapshot_restores_only_the_supplied_identity_and_rejects_closed_target() {

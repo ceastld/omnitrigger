@@ -19,7 +19,7 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'clipboard.read' | 'clipboard.write';
+  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'clipboard.read' | 'clipboard.write' | 'window.action';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
 }
@@ -60,6 +60,8 @@ export interface ActionContext {
     sendText(text: string): Promise<{submitted: true}>;
     /** 向原目标发送 Ctrl+C 并读取新文本。复制结果保留在剪贴板。 */
     copySelectionText(): Promise<string>;
+    /** 操作本次捕获且仍为前台的窗口；仅表示系统接纳请求，关闭可能弹出保存提示。 */
+    windowAction(operation: 'toggle_maximize' | 'minimize' | 'close'): Promise<{submitted: true}>;
   };
   clipboard: {
     /** 只读 Unicode 文本；没有文本格式时抛错。 */

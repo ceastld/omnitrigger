@@ -56,10 +56,14 @@ fn perform_with(
     operation: WindowOperation,
     mut inspect: impl FnMut() -> TargetState,
     submit: impl FnOnce(WindowCommand) -> bool,
+    mut check: impl FnMut() -> Result<(), String>,
 ) -> Result<(), String> {
+    check()?;
     plan(inspect(), operation)?;
     // 提交前重新核验；切换前台或窗口在检查期间关闭时不向旧目标发送请求。
+    check()?;
     let command = plan(inspect(), operation)?;
+    check()?;
     if submit(command) {
         Ok(())
     } else {
@@ -74,6 +78,15 @@ fn perform_with(
 pub fn perform_window_action(
     target: crate::ShortcutTarget,
     operation: WindowOperation,
+) -> Result<(), String> {
+    perform_window_action_checked(target, operation, || Ok(()))
+}
+
+#[cfg(windows)]
+pub(crate) fn perform_window_action_checked(
+    target: crate::ShortcutTarget,
+    operation: WindowOperation,
+    check: impl FnMut() -> Result<(), String>,
 ) -> Result<(), String> {
     use windows::Win32::{
         Foundation::HWND,
@@ -125,6 +138,7 @@ pub fn perform_window_action(
             };
             unsafe { ShowWindowAsync(hwnd, command) }.as_bool()
         },
+        check,
     )
 }
 
@@ -400,7 +414,8 @@ mod tests {
                 |_| {
                     submitted.set(true);
                     true
-                }
+                },
+                || Ok(()),
             )
             .is_err());
             assert!(!submitted.get());
@@ -424,16 +439,47 @@ mod tests {
             |_| {
                 submitted.set(true);
                 true
-            }
+            },
+            || Ok(()),
         )
         .is_err());
         assert_eq!(checks.get(), 2);
         assert!(!submitted.get());
-        assert!(perform_with(WindowOperation::Minimize, ready, |_| false).is_err());
-        assert!(
-            perform_with(WindowOperation::Minimize, ready, |command| command
-                == WindowCommand::Minimize)
-            .is_ok()
-        );
+        assert!(perform_with(WindowOperation::Minimize, ready, |_| false, || Ok(())).is_err());
+        assert!(perform_with(
+            WindowOperation::Minimize,
+            ready,
+            |command| command == WindowCommand::Minimize,
+            || Ok(())
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn identity_and_cancellation_checks_prevent_submission_at_each_boundary() {
+        for rejected_check in 1..=3 {
+            let checks = Cell::new(0);
+            let submitted = Cell::new(false);
+            let error = perform_with(
+                WindowOperation::Close,
+                ready,
+                |_| {
+                    submitted.set(true);
+                    true
+                },
+                || {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == rejected_check {
+                        Err("原目标或取消状态已改变".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error, "原目标或取消状态已改变");
+            assert_eq!(checks.get(), rejected_check);
+            assert!(!submitted.get());
+        }
     }
 }

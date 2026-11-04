@@ -9,7 +9,7 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 10] = [
+pub const METHODS: [&str; 11] = [
     "browser.profiles",
     "browser.call",
     "target.info",
@@ -20,6 +20,7 @@ pub const METHODS: [&str; 10] = [
     "selection.copy",
     "clipboard.read",
     "clipboard.write",
+    "window.action",
 ];
 
 #[derive(Deserialize)]
