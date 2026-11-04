@@ -17,6 +17,48 @@ const BROWSER_API: &str =
 compile_error!("请选择且只选择 boa 或 quickjs 引擎。");
 
 const MAX_REQUEST: u64 = 256 * 1024;
+const FAULT_FIELDS: &str = "(function(error) { try {\n\
+    if (typeof error?.code !== 'string' || !['not_started','unknown'].includes(error.effectState)) return null;\n\
+    return JSON.stringify({code:error.code,message:String(error.message),effect_state:error.effectState,method:error.method,required_permissions:error.requiredPermissions});\n\
+    } catch (_) { return null; } })";
+
+fn bounded_diagnostic(mut text: String) -> String {
+    const TAIL: &str = "\n…（诊断已截断）";
+    let mut limit = 16 * 1024;
+    loop {
+        if text.len() > limit {
+            let separator = "\n…\n";
+            let mut end = (limit - TAIL.len() - separator.len()) / 2;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let mut start = text.len() - (limit - TAIL.len() - separator.len() - end);
+            while !text.is_char_boundary(start) {
+                start += 1;
+            }
+            // 长消息保留首尾，避免把位于消息后面的源代码调用栈一并裁掉。
+            text = format!("{}{separator}{}{TAIL}", &text[..end], &text[start..]);
+        }
+        // 控制字符在 JSON 中最多膨胀六倍，给响应信封与原生错误字段留出空间。
+        if serde_json::to_string(&text).is_ok_and(|value| value.len() <= 32 * 1024) {
+            return text;
+        }
+        limit /= 2;
+    }
+}
+
+fn diagnostic_error(fields: Option<String>, rendered: String) -> Value {
+    if let Some(mut fault) = fields
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(Value::is_object)
+    {
+        let message = fault["message"].as_str().unwrap_or("JavaScript 异常");
+        fault["message"] = bounded_diagnostic(format!("{message}\nJavaScript：{rendered}")).into();
+        fault
+    } else {
+        bounded_diagnostic(rendered).into()
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,18 +145,16 @@ fn run() -> Result<Value, Value> {
     let literal = serde_json::to_string(&input).map_err(|error| error.to_string())?;
     let source = format!(
         "(() => {{ const ctx = {{ input: JSON.parse({literal}), ...JSON.parse({metadata}) }};\n{DESKTOP_API}\n{BROWSER_API}\n{SDK}\n\
-         try {{ const result = (function(ctx) {{\n{}\n}})(ctx);\n\
-         if (result && typeof result.then === 'function') throw new Error('原型仅支持同步入口');\n\
+         return function(entry) {{ const result = entry(ctx);\n\
+         if (result && typeof result.then === 'function') throw new Error('脚本入口必须同步返回 JSON 数据');\n\
          const output = JSON.stringify(result);\n\
          if (typeof output !== 'string') throw new Error('入口必须返回 JSON 结果');\n\
          return JSON.stringify({{kind:'value', value:JSON.parse(output)}});\n\
-         }} catch(error) {{\n\
-           if (typeof error?.code !== 'string' || !['not_started','unknown'].includes(error.effectState)) throw error;\n\
-           return JSON.stringify({{kind:'fault',error:{{code:error.code,message:String(error.message),effect_state:error.effectState,method:error.method,required_permissions:error.requiredPermissions}}}});\n\
          }} }})()",
-        request.script
     );
-    let output = evaluate(&source)?;
+    // 首行不插入换行，避免把用户文件行号平移到 SDK 后面；首行列号含函数前缀。
+    let entry = format!("(function(ctx) {{{}\n}})", request.script);
+    let output = evaluate(&source, &entry)?;
     if output.len() > 80 * 1024 {
         return Err("结果超过 64 KiB。".into());
     }
@@ -133,7 +173,7 @@ fn run() -> Result<Value, Value> {
 }
 
 #[cfg(feature = "boa")]
-fn evaluate(source: &str) -> Result<String, String> {
+fn evaluate(source: &str, entry: &str) -> Result<String, Value> {
     use boa_engine::{Context, Source};
     let mut context = Context::default();
     use boa_engine::{js_string, JsValue, NativeFunction};
@@ -155,17 +195,57 @@ fn evaluate(source: &str) -> Result<String, String> {
         .runtime_limits_mut()
         .set_loop_iteration_limit(1_000_000);
     context.runtime_limits_mut().set_recursion_limit(128);
-    let value = context
-        .eval(Source::from_bytes(source))
+    let fields = context
+        .eval(Source::from_bytes(FAULT_FIELDS))
         .map_err(|error| error.to_string())?;
+    let runner = context
+        .eval(Source::from_bytes(source).with_path(std::path::Path::new("omnitrigger-sdk.js")))
+        .map_err(|error| error.to_string())?;
+    let entry = context
+        .eval(Source::from_bytes(entry).with_path(std::path::Path::new("action.js")))
+        .map_err(|error| {
+            let rendered = format!("action.js\n{error}");
+            diagnostic_error(None, rendered)
+        })?;
+    let value = runner
+        .as_callable()
+        .ok_or("SDK 未返回入口执行函数。")?
+        .call(&JsValue::undefined(), &[entry], &mut context)
+        .map_err(|error| boa_error(error, &fields, &mut context))?;
     value
         .as_string()
         .map(|value| value.to_std_string_escaped())
         .ok_or_else(|| "引擎未返回 JSON 字符串。".into())
 }
 
+#[cfg(feature = "boa")]
+fn boa_error(
+    error: boa_engine::JsError,
+    fields: &boa_engine::JsValue,
+    context: &mut boa_engine::Context,
+) -> Value {
+    let rendered = error.to_string();
+    // Boa 的不可捕获限额异常不能转换为 JS 对象，也不再执行错误字段读取代码。
+    if error
+        .as_native()
+        .is_some_and(|error| error.is_runtime_limit())
+    {
+        return diagnostic_error(None, rendered);
+    }
+    let opaque = error.to_opaque(context);
+    let fields = fields
+        .as_callable()
+        .and_then(|reader| {
+            reader
+                .call(&boa_engine::JsValue::undefined(), &[opaque], context)
+                .ok()
+        })
+        .and_then(|value| value.as_string().map(|value| value.to_std_string_escaped()));
+    diagnostic_error(fields, rendered)
+}
+
 #[cfg(feature = "quickjs")]
-fn evaluate(source: &str) -> Result<String, String> {
+fn evaluate(source: &str, entry: &str) -> Result<String, Value> {
     use rquickjs::{Context, Runtime};
     use std::{
         sync::{
@@ -198,15 +278,47 @@ fn evaluate(source: &str) -> Result<String, String> {
                 .map_err(|error| error.to_string())?,
             )
             .map_err(|error| error.to_string())?;
-        ctx.eval::<String, _>(source).map_err(|error| {
-            if error.is_exception() {
-                let exception = ctx.catch();
-                if let Some(exception) = exception.as_exception() {
-                    return exception.to_string();
-                }
-                return format!("JavaScript 异常：{exception:?}");
-            }
-            error.to_string()
-        })
+        let mut options = rquickjs::context::EvalOptions::default();
+        options.filename = Some("omnitrigger-sdk.js".into());
+        let fields: rquickjs::Function =
+            ctx.eval(FAULT_FIELDS).map_err(|error| error.to_string())?;
+        let runner: rquickjs::Function = ctx
+            .eval_with_options(source, options)
+            .map_err(|error| error.to_string())?;
+        let mut options = rquickjs::context::EvalOptions::default();
+        options.filename = Some("action.js".into());
+        let entry: rquickjs::Function = ctx
+            .eval_with_options(entry, options)
+            .map_err(|error| quickjs_error(&ctx, &fields, error))?;
+        runner
+            .call((entry,))
+            .map_err(|error| quickjs_error(&ctx, &fields, error))
     })
+}
+
+#[cfg(feature = "quickjs")]
+fn quickjs_error<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    fields: &rquickjs::Function<'js>,
+    error: rquickjs::Error,
+) -> Value {
+    if !error.is_exception() {
+        return error.to_string().into();
+    }
+    let exception = ctx.catch();
+    let rendered = if let Some(error) = exception.as_exception() {
+        error.to_string()
+    } else if let Some(text) = exception.as_string() {
+        format!("JavaScript 异常：{}", text.to_string().unwrap_or_default())
+    } else {
+        format!("JavaScript 异常：{exception:?}")
+    };
+    let fields = match fields.call::<_, Option<String>>((exception,)) {
+        Ok(fields) => fields,
+        Err(_) => {
+            let _ = ctx.catch();
+            None
+        }
+    };
+    diagnostic_error(fields, rendered)
 }

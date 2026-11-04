@@ -131,7 +131,7 @@ impl ScriptHostRuntime {
         let _image = self.checked_program()?;
         let (root, entry) = crate::node::checked_entry(action)?;
         let mut source = String::new();
-        File::open(entry)
+        File::open(&entry)
             .and_then(|file| file.take(SOURCE_LIMIT + 1).read_to_string(&mut source))
             .map_err(|cause| error("entry_unavailable", cause.to_string(), "not_started"))?;
         if source.len() as u64 > SOURCE_LIMIT {
@@ -252,7 +252,25 @@ impl ScriptHostRuntime {
         if bytes.len() as u64 > RESPONSE_LIMIT {
             return Err(error("invalid_response", "脚本结果过大。", "unknown"));
         }
-        parse_response(&bytes, status.success())
+        parse_response(&bytes, status.success()).map_err(|mut fault| {
+            if fault.code != "invalid_response" {
+                fault.message = format!(
+                    "脚本入口：{}\n{}",
+                    crate::node::script_path(&entry).display(),
+                    fault.message
+                );
+                const TAIL: &str = "\n…（诊断已截断）";
+                if fault.message.len() > 16 * 1024 {
+                    let mut end = 16 * 1024 - TAIL.len();
+                    while !fault.message.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    fault.message.truncate(end);
+                    fault.message.push_str(TAIL);
+                }
+            }
+            fault
+        })
     }
 }
 

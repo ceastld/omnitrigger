@@ -114,13 +114,6 @@ fn delay_waits_without_coercion_and_preserves_validation_faults() {
     assert_eq!(response["error"]["code"], "invalid_input");
     assert_eq!(response["error"]["effect_state"], "not_started");
     assert_eq!(response["error"]["method"], "delay");
-    // Rust 桥接自身也要拒绝超限和错误类型，不能只依赖 JS 校验。
-    for argument in [json!(60001), json!(-1), json!(1.5), json!("1"), json!(null)] {
-        let script = format!("try {{ call('delay', {{milliseconds:{argument}}}); }} catch(e) {{ return e.code; }} return 'unexpected';");
-        let (ok, response) = invoke(json!({"script":script,"input":{}}));
-        assert!(ok, "{response}");
-        assert_eq!(response["result"], "invalid_arguments");
-    }
 }
 
 #[test]
@@ -180,6 +173,87 @@ fn prototype_keys_remain_plain_input_data() {
     );
     assert!(ok, "{response}");
     assert_eq!(response["result"], json!({"own":true,"polluted":false}));
+}
+
+#[test]
+fn diagnostics_keep_user_lines_native_fields_and_utf8_bounds() {
+    let (ok, response) = invoke(
+        json!({"script":"function outer() {\n return inner();\n}\nfunction inner() {\n throw new Error('source-location');\n}\nreturn outer();", "input":{}}),
+    );
+    assert!(!ok);
+    let message = response["error"].as_str().unwrap();
+    assert!(
+        message.contains("source-location") && message.contains("action.js:5"),
+        "{message}"
+    );
+    let (ok, response) =
+        invoke(json!({"script":"\nctx.desktop.sendText(123); return null;", "input":{}}));
+    assert!(!ok);
+    assert_eq!(response["error"]["code"], "invalid_input");
+    assert_eq!(response["error"]["effect_state"], "not_started");
+    assert_eq!(response["error"]["method"], "keyboard.text");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("action.js:2"),
+        "{response}"
+    );
+    let (ok, response) =
+        invoke(json!({"script":"throw new Error('字'.repeat(20000));", "input":{}}));
+    assert!(!ok);
+    let message = response["error"].as_str().unwrap();
+    assert!(
+        message.len() <= 16 * 1024
+            && message.ends_with("（诊断已截断）")
+            && message.contains("action.js")
+    );
+    let (ok, response) =
+        invoke(json!({"script":"throw new Error('\\0'.repeat(20000));", "input":{}}));
+    assert!(!ok);
+    assert!(response["error"]
+        .as_str()
+        .is_some_and(|message| message.len() <= 16 * 1024 && message.contains("action.js")));
+    assert!(response.to_string().len() < 96 * 1024);
+    let (ok, response) = invoke(
+        json!({"script":"const e = new Error('original-fault'); Object.defineProperty(e, 'code', {get() { throw new Error('renderer-fault'); }}); throw e;", "input":{}}),
+    );
+    assert!(!ok);
+    assert!(
+        response["error"]
+            .as_str()
+            .unwrap()
+            .contains("original-fault"),
+        "{response}"
+    );
+    let (ok, response) = invoke(
+        json!({"script":"throw Object.assign(new Error('permission-sample'), {code:'permission_required',effectState:'not_started',method:'bookmarks.getTree',requiredPermissions:['bookmarks']});", "input":{}}),
+    );
+    assert!(!ok);
+    assert_eq!(response["error"]["code"], "permission_required");
+    assert_eq!(response["error"]["method"], "bookmarks.getTree");
+    assert_eq!(response["error"]["effect_state"], "not_started");
+    assert_eq!(
+        response["error"]["required_permissions"],
+        json!(["bookmarks"])
+    );
+    let (ok, response) = invoke(json!({"script":"function main( {", "input":{}}));
+    assert!(!ok);
+    assert!(
+        response["error"].as_str().unwrap().contains("action.js"),
+        "{response}"
+    );
+    let (ok, response) = invoke(
+        json!({"script":"Object.prototype.toJSON = () => 1; throw Object.assign(new Error('serialization-sample'), {code:'x',effectState:'unknown'});", "input":{}}),
+    );
+    assert!(!ok);
+    assert!(
+        response["error"]
+            .as_str()
+            .unwrap()
+            .contains("serialization-sample"),
+        "{response}"
+    );
 }
 
 #[test]

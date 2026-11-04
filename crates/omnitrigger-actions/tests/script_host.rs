@@ -121,6 +121,46 @@ fn installed_image_digest_is_checked_before_any_process_starts() {
 
 #[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn script_diagnostics_associate_entry_paths_without_changing_fault_fields() {
+    let fixture =
+        Fixture::new("function fail() {\n throw new Error('entry-diagnostic');\n}\nreturn fail();");
+    let entry_path = fixture.root.join("main.js").display().to_string();
+    let action = fixture.action(json!({}));
+    let error = runtime()
+        .execute(&action, &context(), &CancellationToken::new())
+        .unwrap_err();
+    assert_eq!(error.code, "script_failed");
+    assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+    assert!(error.message.contains(&entry_path));
+    assert!(error.message.contains("action.js:3"), "{}", error.message);
+    std::fs::write(
+        fixture.root.join("main.js"),
+        "function main(ctx) {\n ctx.desktop.sendText(123);\n return null;\n}",
+    )
+    .unwrap();
+    let error = runtime()
+        .execute(&action, &context(), &CancellationToken::new())
+        .unwrap_err();
+    assert_eq!(error.code, "invalid_input");
+    assert_eq!(error.method.as_deref(), Some("keyboard.text"));
+    assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+    assert!(error.message.contains("action.js:2"), "{}", error.message);
+    std::fs::write(
+        fixture.root.join("main.js"),
+        "function main() { throw new Error('字'.repeat(20000)); }",
+    )
+    .unwrap();
+    let error = runtime()
+        .execute(&action, &context(), &CancellationToken::new())
+        .unwrap_err();
+    assert_eq!(error.code, "script_failed");
+    assert!(error.message.len() <= 16 * 1024);
+    assert!(error.message.contains(&entry_path));
+    assert!(error.message.contains("action.js"));
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
 fn package_root_supports_normal_javascript_path_concatenation() {
     let fixture = Fixture::new("const file = ctx.packageRoot + '/output.txt'; ctx.fs.writeText(file, '路径拼接验证'); return ctx.fs.readText(file);");
     let output = runtime()

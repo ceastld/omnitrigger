@@ -285,3 +285,30 @@ mod desktop {
         read_clipboard().map(|_| ())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delay_wire_rejects_invalid_values_without_relying_on_sdk_validation() {
+        for value in [
+            json!(60001),
+            json!(-1),
+            json!(1.5),
+            json!("1"),
+            json!(null),
+            json!(true),
+        ] {
+            let request = json!({"kind":"delay","milliseconds":value});
+            let response: Value = serde_json::from_str(&dispatch(request.to_string())).unwrap();
+            assert_eq!(response["ok"], false);
+            assert_eq!(response["error"]["code"], "invalid_arguments");
+        }
+        let response: Value = serde_json::from_str(&dispatch(
+            json!({"kind":"delay","milliseconds":0}).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(response, json!({"ok":true,"value":null}));
+    }
+}
