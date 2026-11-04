@@ -817,10 +817,17 @@ fn legacy_host_click_smoke(scenario: &str) {
     let root = PathBuf::from(
         std::env::var_os("OMNITRIGGER_MENU_HOST_ROOT").expect("需要隔离的保存配置目录"),
     );
-    native_clipboard_smoke_preflight(Some(&root)).unwrap();
     let status_path = PathBuf::from(std::env::var_os("OMNITRIGGER_MENU_SMOKE_STATUS").unwrap());
     let host_exe = std::env::var("OMNITRIGGER_MENU_HOST_EXE").unwrap();
     let omni_exe = std::env::var("OMNITRIGGER_CLI_SMOKE_EXE").unwrap();
+    // 通用 hold 保留；只有固定的已保护 Legacy 夹具可凭短时核验记录运行。
+    crate::clipboard_smoke_protection::preflight(
+        &root,
+        scenario,
+        std::path::Path::new(&omni_exe),
+        std::path::Path::new(&host_exe),
+    )
+    .unwrap();
     struct Owned {
         windows: Vec<HWND>,
         previous: HWND,

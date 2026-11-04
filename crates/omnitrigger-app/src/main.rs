@@ -12,6 +12,8 @@ mod browser_connector;
 mod browser_connector_ui;
 #[cfg(all(windows, test))]
 mod clipboard_restore;
+#[cfg(all(windows, test))]
+mod clipboard_smoke_protection;
 mod desktop_host;
 #[cfg(test)]
 mod desktop_key_smoke;
