@@ -1337,47 +1337,150 @@ mod tests {
         );
     }
 
-    #[test]
-    #[ignore = "读取显式指定的本机回放样本，仅执行纯核心，不安装 Hook 或运行动作"]
-    fn captured_matching_replays_external_source_witnesses() {
-        let path = std::env::var_os("OMNITRIGGER_CAPTURE_REPLAY").expect("需要指定回放样本");
-        let file = std::fs::File::open(path).unwrap();
-        assert!(file.metadata().unwrap().len() <= 32 * 1024 * 1024);
-        let document: serde_json::Value = serde_json::from_reader(file).unwrap();
+    #[derive(Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+    enum ReplayEvent {
+        Down {
+            button: ButtonDto,
+        },
+        Up {
+            button: ButtonDto,
+        },
+        Wheel {
+            axis: ReplayAxis,
+            delta: i32,
+        },
+        Advance {},
+        Foreground {
+            process: Option<String>,
+            role: Option<String>,
+        },
+        Pointer {
+            process: Option<String>,
+            role: Option<String>,
+        },
+        Cancel {},
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum ReplayAxis {
+        Vertical,
+        Horizontal,
+    }
+
+    impl ReplayEvent {
+        fn input(self) -> Option<omnitrigger_core::InputKind> {
+            use omnitrigger_core::{Axis, InputKind};
+            Some(match self {
+                Self::Down { button } => InputKind::Down(button.into()),
+                Self::Up { button } => InputKind::Up(button.into()),
+                Self::Wheel { axis, delta } => InputKind::Wheel {
+                    axis: match axis {
+                        ReplayAxis::Vertical => Axis::Vertical,
+                        ReplayAxis::Horizontal => Axis::Horizontal,
+                    },
+                    delta,
+                },
+                _ => return None,
+            })
+        }
+    }
+
+    fn replay_event(value: &serde_json::Value) -> ReplayEvent {
+        if value.get("kind").is_some() {
+            serde_json::from_value(value.clone()).unwrap()
+        } else {
+            let button = ButtonDto::Key(u16::try_from(value["key"].as_u64().unwrap()).unwrap());
+            if value["down"].as_bool().unwrap() {
+                ReplayEvent::Down { button }
+            } else {
+                ReplayEvent::Up { button }
+            }
+        }
+    }
+
+    fn replay_role(role: Option<&str>) -> omnitrigger_core::WindowRole {
+        use omnitrigger_core::WindowRole;
+        match role {
+            None | Some("unknown") => WindowRole::Unknown,
+            Some("application") => WindowRole::Application,
+            Some("desktop") => WindowRole::Desktop,
+            Some("taskbar") => WindowRole::Taskbar,
+            Some(other) => panic!("未知窗口角色：{other}"),
+        }
+    }
+
+    fn replay_document(document: &serde_json::Value) -> (usize, usize) {
         let bindings = decode(&document["config"].to_string()).unwrap();
         assert!(bindings.iter().all(|binding| !binding.enabled));
-        let mut engine =
-            Engine::new(bindings.into_iter().map(|binding| binding.spec).collect()).unwrap();
+        let specs: Vec<_> = bindings.into_iter().map(|binding| binding.spec).collect();
+        let mut engine = Engine::new(specs.clone()).unwrap();
         let cases = document["cases"].as_array().unwrap();
         assert!(!cases.is_empty() && cases.len() <= 100_000);
         for (case_index, case) in cases.iter().enumerate() {
-            let role = match case["role"].as_str() {
-                None | Some("unknown") => omnitrigger_core::WindowRole::Unknown,
-                Some("application") => omnitrigger_core::WindowRole::Application,
-                Some("desktop") => omnitrigger_core::WindowRole::Desktop,
-                Some("taskbar") => omnitrigger_core::WindowRole::Taskbar,
-                Some(other) => panic!("未知窗口角色：{other}"),
-            };
+            // 带绝对时间的独立见证需重建引擎，避免上一组的单调时钟污染边界。
+            if case
+                .get("reset")
+                .is_some_and(|value| value.as_bool().unwrap())
+            {
+                engine = Engine::new(specs.clone()).unwrap();
+            }
             engine
-                .set_foreground_context(case["process"].as_str(), role)
+                .set_foreground_context(
+                    case["process"].as_str(),
+                    replay_role(case["role"].as_str()),
+                )
                 .unwrap();
+            if case.get("pointer_process").is_some() {
+                engine
+                    .set_pointer_context(
+                        case["pointer_process"].as_str(),
+                        replay_role(case["pointer_role"].as_str()),
+                    )
+                    .unwrap();
+            }
             let steps = case["steps"].as_array().unwrap();
             assert!(!steps.is_empty() && steps.len() <= 32);
             for (step_index, step) in steps.iter().enumerate() {
-                let key = Button::Key(u16::try_from(step["key"].as_u64().unwrap()).unwrap());
-                let kind = if step["down"].as_bool().unwrap() {
-                    omnitrigger_core::InputKind::Down(key)
-                } else {
-                    omnitrigger_core::InputKind::Up(key)
-                };
-                let event = omnitrigger_core::InputEvent {
-                    kind,
-                    injected: false,
-                };
-                let decision = if let Some(time) = step["time_ms"].as_u64() {
-                    engine.process_at(event, time)
-                } else {
-                    engine.process(event)
+                let event = replay_event(step.get("event").unwrap_or(step));
+                let time = step.get("time_ms").map(|value| value.as_u64().unwrap());
+                let decision = match event {
+                    ReplayEvent::Advance {} => {
+                        engine.advance_time(time.expect("推进时间需要 time_ms"))
+                    }
+                    ReplayEvent::Foreground { process, role } => {
+                        assert!(time.is_none(), "上下文变更前请单独推进时间");
+                        engine
+                            .set_foreground_context(
+                                process.as_deref(),
+                                replay_role(role.as_deref()),
+                            )
+                            .unwrap()
+                    }
+                    ReplayEvent::Pointer { process, role } => {
+                        assert!(time.is_none(), "上下文变更前请单独推进时间");
+                        engine
+                            .set_pointer_context(process.as_deref(), replay_role(role.as_deref()))
+                            .unwrap()
+                    }
+                    ReplayEvent::Cancel {} => {
+                        assert!(time.is_none(), "取消前请单独推进时间");
+                        engine.cancel()
+                    }
+                    event => {
+                        let event = omnitrigger_core::InputEvent {
+                            kind: event.input().unwrap(),
+                            injected: step
+                                .get("injected")
+                                .is_some_and(|value| value.as_bool().unwrap()),
+                        };
+                        if let Some(time) = time {
+                            engine.process_at(event, time)
+                        } else {
+                            engine.process(event)
+                        }
+                    }
                 };
                 let expected: Vec<u64> = serde_json::from_value(step["triggered"].clone()).unwrap();
                 assert_eq!(
@@ -1388,16 +1491,7 @@ mod tests {
                     .as_array()
                     .map(|rows| {
                         rows.iter()
-                            .map(|row| {
-                                let key = Button::Key(
-                                    u16::try_from(row["key"].as_u64().unwrap()).unwrap(),
-                                );
-                                if row["down"].as_bool().unwrap() {
-                                    omnitrigger_core::InputKind::Down(key)
-                                } else {
-                                    omnitrigger_core::InputKind::Up(key)
-                                }
-                            })
+                            .map(|row| replay_event(row).input().expect("补发只能包含输入事件"))
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
@@ -1413,11 +1507,76 @@ mod tests {
                 }
             }
         }
-        println!(
-            "捕获集合回放通过：{} 规则、{} 组序列；没有安装 Hook 或执行动作。",
-            document["config"]["bindings"].as_array().unwrap().len(),
-            cases.len()
+        (specs.len(), cases.len())
+    }
+
+    #[test]
+    fn external_replay_isolates_clocks_and_checks_mouse_context_and_injection() {
+        let document = json!({
+            "config":{"version":17,"bindings":[
+                {"id":1,"held":[{"kind":"key","value":32}],"activation":{"kind":"press","value":{"kind":"key","value":75}},
+                 "keyboard":{"repeat":true,"retained_prefix":{"key":{"kind":"key","value":32},"quiet_ms":50,"fast_ms":50},"matching":{"kind":"captured","priority":0},"restore_on_tap":true,"tap_timeout_ms":1500},
+                 "message":"回放协议测试","enabled":false,"action":{"kind":"notification"}},
+                {"id":2,"held":[{"kind":"x1"}],"activation":{"kind":"wheel_up"},"wheel":"packet",
+                 "pointer_scope":{"allow":["reader"]},"message":"指针回放协议测试","enabled":false,"action":{"kind":"notification"}}
+            ]},
+            "cases":[
+                {"reset":true,"process":"editor","steps":[
+                    {"key":32,"down":true,"time_ms":100,"triggered":[],"consume":true},
+                    {"key":32,"down":false,"time_ms":20000,"injected":true,"triggered":[],"consume":false},
+                    {"key":75,"down":true,"time_ms":150,"triggered":[1],"consume":true},
+                    {"event":{"kind":"foreground","process":"other","role":"application"},"triggered":[],"consume":false},
+                    {"key":75,"down":false,"time_ms":160,"triggered":[],"consume":true},
+                    {"key":32,"down":false,"time_ms":170,"triggered":[],"consume":true}
+                ]},
+                {"reset":true,"process":"editor","steps":[
+                    {"key":32,"down":true,"time_ms":100,"triggered":[],"consume":true},
+                    {"key":75,"down":true,"time_ms":149,"triggered":[],"consume":false,"replay":[{"key":32,"down":true}]},
+                    {"key":32,"down":false,"time_ms":200,"triggered":[],"consume":false},
+                    {"key":75,"down":false,"time_ms":201,"triggered":[],"consume":false}
+                ]},
+                {"reset":true,"process":"editor","pointer_process":"reader","pointer_role":"application","steps":[
+                    {"event":{"kind":"down","button":{"kind":"x1"}},"time_ms":0,"triggered":[],"consume":true},
+                    {"event":{"kind":"wheel","axis":"vertical","delta":1},"time_ms":1,"triggered":[2],"consume":true},
+                    {"event":{"kind":"pointer","process":null,"role":"unknown"},"triggered":[],"consume":false},
+                    {"event":{"kind":"wheel","axis":"vertical","delta":1},"time_ms":2,"triggered":[],"consume":false},
+                    {"event":{"kind":"up","button":{"kind":"x1"}},"time_ms":3,"triggered":[],"consume":true}
+                ]},
+                {"reset":true,"process":"editor","pointer_process":"reader","pointer_role":"application","steps":[
+                    {"event":{"kind":"down","button":{"kind":"x1"}},"triggered":[],"consume":true},
+                    {"event":{"kind":"pointer","process":null,"role":"unknown"},"triggered":[],"consume":false,
+                     "replay":[{"kind":"down","button":{"kind":"x1"}}]},
+                    {"event":{"kind":"up","button":{"kind":"x1"}},"triggered":[],"consume":false}
+                ]},
+                {"reset":true,"process":"editor","steps":[
+                    {"key":32,"down":true,"time_ms":100,"triggered":[],"consume":true},
+                    {"event":{"kind":"advance"},"time_ms":1601,"triggered":[],"consume":false},
+                    {"key":32,"down":false,"triggered":[],"consume":true},
+                    {"key":32,"down":true,"time_ms":1700,"triggered":[],"consume":true},
+                    {"event":{"kind":"cancel"},"triggered":[],"consume":false},
+                    {"key":32,"down":false,"time_ms":1701,"triggered":[],"consume":true}
+                ]}
+            ]
+        });
+        assert_eq!(replay_document(&document), (2, 5));
+        assert!(serde_json::from_value::<ReplayEvent>(
+            json!({"kind":"wheel","axis":"diagonal","delta":1})
+        )
+        .is_err());
+        assert!(
+            serde_json::from_value::<ReplayEvent>(json!({"kind":"cancel","extra":true})).is_err()
         );
+    }
+
+    #[test]
+    #[ignore = "读取显式指定的本机回放样本，仅执行纯核心，不安装 Hook 或运行动作"]
+    fn captured_matching_replays_external_source_witnesses() {
+        let path = std::env::var_os("OMNITRIGGER_CAPTURE_REPLAY").expect("需要指定回放样本");
+        let file = std::fs::File::open(path).unwrap();
+        assert!(file.metadata().unwrap().len() <= 32 * 1024 * 1024);
+        let document: serde_json::Value = serde_json::from_reader(file).unwrap();
+        let (rules, cases) = replay_document(&document);
+        println!("捕获集合回放通过：{rules} 规则、{cases} 组序列；没有安装 Hook 或执行动作。");
     }
 
     #[test]
