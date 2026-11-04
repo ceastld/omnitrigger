@@ -164,6 +164,7 @@ function nativeCall(method, params) {
 
 const desktop = Object.freeze({
   target: () => nativeCall('target.info', {}),
+  targetContext: () => nativeCall('target.context', {}),
   sendShortcut: async (keys, options = {}) => {
     if (!Array.isArray(keys) || keys.length < 1 || keys.length > 5
         || keys.some(key => !Number.isInteger(key) || key < 1 || key > 254)) {

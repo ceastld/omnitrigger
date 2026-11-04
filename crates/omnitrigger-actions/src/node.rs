@@ -639,6 +639,47 @@ mod tests {
     }
 
     #[test]
+    fn target_context_export_keeps_portable_precision_and_clipboard_receipt() {
+        if !node_available() {
+            return;
+        }
+        struct Host;
+        impl NativeHost for Host {
+            fn call(
+                &self,
+                method: &str,
+                params: Value,
+                _: &CancellationToken,
+            ) -> Result<Value, ActionError> {
+                match method {
+                    "target.context" if params == json!({}) => {
+                        Ok(json!({"window_handle":"123", "process_id":7,
+                        "thread_id":8,"process_created_file_time":"134386985330123456","expires_at_unix_ms":1793760000000u64}))
+                    }
+                    "clipboard.write" if params == json!({"text":"literal"}) => {
+                        Ok(json!({"written":true,"sequenceNumber":42}))
+                    }
+                    _ => Err(ActionError::new("unexpected_method", method)),
+                }
+            }
+        }
+        let fixture = Fixture::new("export default async ctx => ({target:await ctx.desktop.targetContext(), receipt:await ctx.clipboard.writeText('literal')});", json!({}));
+        let output = NodeRuntime::default()
+            .execute_with_host(
+                &fixture.action,
+                &context(),
+                &CancellationToken::new(),
+                Some(&Host),
+            )
+            .unwrap();
+        assert_eq!(
+            output["target"]["process_created_file_time"],
+            "134386985330123456"
+        );
+        assert_eq!(output["receipt"]["sequenceNumber"], 42);
+    }
+
+    #[test]
     fn keyboard_recipe_keeps_literal_text_and_single_key_independent_of_profile_delay() {
         if !node_available() {
             return;

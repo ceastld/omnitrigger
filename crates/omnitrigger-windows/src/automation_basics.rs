@@ -536,6 +536,12 @@ pub fn read_clipboard_text() -> Result<String, String> {
     clipboard::read(&native::Clipboard::new(false)?)
 }
 
+/// 当前窗口站的剪贴板序号；仅为读回观察值，不构成独占权或事务。
+#[cfg(windows)]
+pub fn clipboard_sequence_number() -> u32 {
+    unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() }
+}
+
 /// 向原前台窗口发送 Ctrl+C，等待剪贴板序号变化后读取文本；仅工作线程调用。
 /// 复制结果会留在剪贴板，不恢复原内容；未选中文本或目标不响应复制时返回错误。
 #[cfg(windows)]

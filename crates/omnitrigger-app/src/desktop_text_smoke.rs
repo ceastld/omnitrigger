@@ -584,3 +584,298 @@ fn interactive_desktop_text_smoke() {
         "剪贴板格式无法安全备份；文本输入已验证，未执行剪贴板用例"
     );
 }
+
+/// 由 Cua 在两个 ready 阶段点击真实菜单；仅操作本测试创建的输入框。
+#[test]
+#[ignore = "需要精确激活自有窗口并点击独立宿主的原菜单，核验成功及目标关闭错误"]
+fn interactive_legacy_menu_click_smoke() {
+    use std::path::PathBuf;
+    let root = PathBuf::from(
+        std::env::var_os("OMNITRIGGER_MENU_HOST_ROOT").expect("需要隔离的保存配置目录"),
+    );
+    let status_path = PathBuf::from(std::env::var_os("OMNITRIGGER_MENU_SMOKE_STATUS").unwrap());
+    let host_exe = std::env::var("OMNITRIGGER_MENU_HOST_EXE").unwrap();
+    let omni_exe = std::env::var("OMNITRIGGER_CLI_SMOKE_EXE").unwrap();
+    let expected: Value =
+        serde_json::from_slice(&std::fs::read(root.join("expected-text.json")).unwrap()).unwrap();
+    let expected = expected["text"].as_str().unwrap();
+    struct Owned {
+        windows: Vec<HWND>,
+        previous: HWND,
+        root: PathBuf,
+    }
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.root.join("cancel-requested"), "cancel");
+            let restore = self.windows.contains(&unsafe { GetForegroundWindow() });
+            for hwnd in self.windows.iter().rev() {
+                let _ = unsafe { DestroyWindow(*hwnd) };
+            }
+            if restore {
+                let _ = unsafe { SetForegroundWindow(self.previous) };
+            }
+        }
+    }
+    fn create(title: &str, initial: &str) -> (HWND, HWND) {
+        // 普通编辑器会在重新激活时恢复子控件焦点；STATIC 默认过程没有这项行为。
+        unsafe extern "system" fn fixture_proc(
+            hwnd: HWND,
+            message: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> windows::Win32::Foundation::LRESULT {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                DefWindowProcW, GetWindowLongPtrW, GWLP_USERDATA, WM_SETFOCUS,
+            };
+            if message == WM_SETFOCUS {
+                let edit = HWND(unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut _);
+                if !edit.is_invalid() {
+                    let _ = unsafe { SetFocus(Some(edit)) };
+                    return windows::Win32::Foundation::LRESULT(0);
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+        }
+        let wide = title.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                PCWSTR(wide.as_ptr()),
+                WS_OVERLAPPEDWINDOW,
+                120,
+                120,
+                540,
+                240,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let wide = initial.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let edit = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("EDIT"),
+                PCWSTR(wide.as_ptr()),
+                WS_CHILD | WS_VISIBLE | WS_BORDER | WINDOW_STYLE(0x0004 | 0x0040 | 0x0080 | 0x1000),
+                20,
+                35,
+                480,
+                120,
+                Some(hwnd),
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                SetWindowLongPtrW, GWLP_USERDATA, GWLP_WNDPROC,
+            };
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, edit.0 as isize);
+            assert_ne!(
+                SetWindowLongPtrW(hwnd, GWLP_WNDPROC, fixture_proc as *const () as isize),
+                0
+            );
+        }
+        (hwnd, edit)
+    }
+    let mut owned = Owned {
+        windows: vec![],
+        previous: unsafe { GetForegroundWindow() },
+        root: root.clone(),
+    };
+    let (window, edit) = create("OmniTrigger 文本 API 实测", "");
+    owned.windows.push(window);
+    let (decoy, decoy_edit) = create("OmniTrigger 失效目标验证", "unchanged");
+    owned.windows.push(decoy);
+    let _ = unsafe { ShowWindow(window, SW_SHOWNOACTIVATE) };
+    let write_status = |stage: &str, extra: Value| {
+        std::fs::write(
+            &status_path,
+            serde_json::to_vec(&json!({"stage":stage,"pid":std::process::id(),
+        "window":window.0 as usize,"decoy":decoy.0 as usize,"root":root,"extra":extra}))
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    write_status("waiting_focus", json!({}));
+    let began = Instant::now();
+    while unsafe { GetForegroundWindow() } != window {
+        pump();
+        assert!(
+            began.elapsed() < Duration::from_secs(60),
+            "没有激活自有目标，未开始执行"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let _ = unsafe { SetFocus(Some(edit)) };
+    // 原目标将在失效用例中关闭；剪贴板租约使用一直存活到恢复之后的自有窗口。
+    let mut backup = ClipboardBackup::new(decoy).expect("无法完整备份当前格式；未开始写入");
+    let package = root.join("native-gateway/actions/legacy-menu");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        root.join("native-gateway/bindings.json"),
+        r#"{"version":1,"bindings":[]}"#,
+    )
+    .unwrap();
+    std::fs::write(package.join("action.json"),serde_json::to_vec(&json!({"schema_version":1,"id":"legacy.menu-text","name":"Owned menu gateway","version":"1.0.0","actions":[
+        {"id":"launch","title":"launch","version":1,"runtime":"node","entry":"launch.mjs"},
+        {"id":"paste","title":"paste","version":1,"runtime":"node","entry":"paste.mjs"}]})).unwrap()).unwrap();
+    std::fs::write(package.join("launch.mjs"),r#"import fs from 'node:fs/promises';
+export default async ctx => {
+  const target = await ctx.desktop.targetContext();
+  await fs.writeFile(ctx.input.target_path, JSON.stringify(target), {mode:0o600});
+  const child = await ctx.process.start(ctx.input.host_exe, ['--data-root',ctx.input.root,'--command','clip none','--scenario','saved-text-execute','--exit-after-ms','60000']);
+  return {pid:child.pid,target};
+};"#).unwrap();
+    std::fs::write(package.join("paste.mjs"),r#"import fs from 'node:fs/promises';
+export default async ctx => {
+  const receipt = await ctx.clipboard.writeText(ctx.input.text);
+  if (!Number.isInteger(receipt.sequenceNumber) || receipt.sequenceNumber===0) throw new Error('clipboard receipt missing');
+  await fs.writeFile(ctx.input.phase_path, JSON.stringify(receipt), {mode:0o600});
+  await ctx.delay(ctx.input.delay_ms);
+  await ctx.desktop.sendShortcut([162,86]);
+  return {inputSubmitted:true,clipboardSequenceNumber:receipt.sequenceNumber};
+};"#).unwrap();
+    std::fs::write(root.join("gateway-config.json"),serde_json::to_vec(&json!({"omnitrigger_exe":omni_exe,
+        "config_path":root.join("native-gateway/bindings.json"),"expected_owner_pid":std::process::id()})).unwrap()).unwrap();
+    let target = omnitrigger_windows::ScriptTarget::capture(
+        omnitrigger_windows::capture_shortcut_target().unwrap(),
+    )
+    .unwrap()
+    .snapshot()
+    .unwrap();
+    let mut registry = RuntimeRegistry::new();
+    registry
+        .register("node", Arc::new(NodeRuntime::default()))
+        .unwrap();
+    let service = ActionService::new(
+        PackageCatalog::load(&root.join("native-gateway/actions")),
+        registry,
+    );
+    let _running = Running(&service);
+    service.submit_with_host(1,ActionCall{package_id:"legacy.menu-text".into(),action_id:"launch".into(),action_version:1,
+        input:json!({"target_path":root.join("launch-target.json"),"host_exe":host_exe,"root":root})},
+        Some(Arc::new(DesktopHost::from_snapshot(target).unwrap()))).unwrap();
+    let began = Instant::now();
+    let launch = loop {
+        pump();
+        if let Ok(event) = service.try_recv() {
+            if let ActionOutcome::Succeeded { output } = event.outcome {
+                break output;
+            } else if event.outcome.is_terminal() {
+                panic!("{event:?}");
+            }
+        }
+        assert!(began.elapsed() < Duration::from_secs(15));
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(
+        launch["target"]["window_handle"],
+        target.window_handle.to_string()
+    );
+    let mut destroyed = false;
+    let began = Instant::now();
+    let result = loop {
+        pump();
+        if let Ok(bytes) = std::fs::read(root.join("native-clipboard-phase.json")) {
+            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                if let Some(sequence) = value["sequenceNumber"].as_u64() {
+                    backup
+                        .last_owned
+                        .store(u32::try_from(sequence).unwrap(), Ordering::Release);
+                }
+            }
+        }
+        if root.join("startup-error.log").exists() {
+            panic!(
+                "{}",
+                std::fs::read_to_string(root.join("startup-error.log")).unwrap()
+            );
+        }
+        if root.join("menu-click-ready-1.json").exists()
+            && !root.join("first-click-complete.json").exists()
+        {
+            let ready: Value = serde_json::from_slice(
+                &std::fs::read(root.join("menu-click-ready-1.json")).unwrap(),
+            )
+            .unwrap();
+            write_status("menu_1", ready);
+        }
+        if root.join("first-click-complete.json").exists()
+            && !root.join("first-effect-verified").exists()
+        {
+            let effect_limit = Instant::now();
+            while text(edit) != expected && effect_limit.elapsed() < Duration::from_secs(3) {
+                pump();
+                thread::sleep(Duration::from_millis(10));
+            }
+            let mut info = windows::Win32::UI::WindowsAndMessaging::GUITHREADINFO {
+                cbSize: std::mem::size_of::<windows::Win32::UI::WindowsAndMessaging::GUITHREADINFO>(
+                ) as u32,
+                ..Default::default()
+            };
+            let _ = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::GetGUIThreadInfo(
+                    target.thread_id,
+                    &mut info,
+                )
+            };
+            std::fs::write(root.join("first-effect-diagnostic.json"),serde_json::to_vec(&json!({"foreground":unsafe{GetForegroundWindow()}.0 as usize,"focus":info.hwndFocus.0 as usize,"expected_edit":edit.0 as usize,"observed_length":text(edit).len()})).unwrap()).unwrap();
+            assert_eq!(text(edit), expected, "真实菜单执行后的文本不一致");
+            std::fs::write(root.join("first-effect-verified"), "verified").unwrap();
+        }
+        if root.join("menu-click-ready-2.json").exists() && !destroyed {
+            unsafe { DestroyWindow(window) }.unwrap();
+            destroyed = true;
+            let _ = unsafe { ShowWindow(decoy, SW_SHOWNOACTIVATE) };
+            let _ = unsafe { SetForegroundWindow(decoy) };
+        }
+        if destroyed {
+            let ready: Value = serde_json::from_slice(
+                &std::fs::read(root.join("menu-click-ready-2.json")).unwrap(),
+            )
+            .unwrap();
+            write_status("menu_2_target_closed", ready);
+        }
+        if root.join("scenario.json").exists() {
+            break serde_json::from_slice::<Value>(
+                &std::fs::read(root.join("scenario.json")).unwrap(),
+            )
+            .unwrap();
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(65),
+            "原菜单验证未完成，不重复执行"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(result["passed"].as_u64().unwrap() >= 9);
+    assert!(destroyed);
+    assert_eq!(text(decoy_edit), "unchanged");
+    write_status("error_visible", result.clone());
+    let until = Instant::now();
+    while !root.join("operator-finish").exists() && until.elapsed() < Duration::from_secs(12) {
+        pump();
+        thread::sleep(Duration::from_millis(20));
+    }
+    let formats = backup.data.len();
+    backup.restore().unwrap();
+    std::fs::write(root.join("finish-test"), "finish").unwrap();
+    let until = Instant::now();
+    while !root.join("exit.json").exists() && until.elapsed() < Duration::from_secs(5) {
+        pump();
+        thread::sleep(Duration::from_millis(20));
+    }
+    let exit: Value =
+        serde_json::from_slice(&std::fs::read(root.join("exit.json")).unwrap()).unwrap();
+    assert_eq!(exit["exitCode"], 0);
+    std::fs::write(root.join("outer-native-result.json"),serde_json::to_vec_pretty(&json!({"passed":true,"launch":launch,
+        "menu_result":result,"decoy_unchanged":true,"restored_clipboard_formats":formats,"host_exit":exit})).unwrap()).unwrap();
+    write_status("complete", json!({"restored_clipboard_formats":formats}));
+}

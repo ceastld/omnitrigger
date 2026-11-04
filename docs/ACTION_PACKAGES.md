@@ -117,12 +117,13 @@ export default async function (ctx) {
 | `ctx.browser.call(method, args, { profile, timeoutMs })` | 复用已安装连接器的 SDK，通过持久 IPC 调用 Chrome API，返回原始结果。 |
 | `ctx.browser.chrome.*` | 动态 Proxy，例如 `await ctx.browser.chrome.bookmarks.getTree()`；指定 profile 或超时时使用 `call`。 |
 | `ctx.desktop.target()` | 读取本次提交时捕获的目标，返回真实 `processName`、`windowRole`（`unknown`／`application`／`desktop`／`taskbar`）、`title`、`processId`、`isForeground`。角色在调用时采集，不重新选择目标。 |
+| `ctx.desktop.targetContext()` | 导出原目标的完整值快照，字段可直接保存为 `--target-context` 文件；调用时重新核验原身份，生成 30 秒的提交期限。 |
 | `ctx.desktop.sendShortcut(keys, options?)` | 向原目标发送一次快捷键，明确 VK、修饰键在前，最多四类修饰键加一个普通键。可设置 `keyDownDelayMs`，或用 `timing` 复用原生进程时序配置；两者互斥，默认零。返回 `{ submitted: true }` 仅表示系统接纳输入。 |
 | `ctx.desktop.sendKeySequence(modifiers, keys, options?)` | 最多四类修饰键在整组 1–16 个普通键期间保持按下。保留顺序和左右侧；可设置 `keyDownDelayMs`。 |
 | `ctx.desktop.sendText(text)` | 分批发送 Unicode 文本，不借用剪贴板；每批核验原目标及取消状态。 |
 | `ctx.desktop.copySelectionText()` | 向原目标发送 Ctrl+C，等待剪贴板序号变化后读取文本；复制结果保留在剪贴板。 |
 | `ctx.clipboard.readText()` | 读取 Unicode 文本，保留空白；没有文本格式或 UTF-16 无效时抛错。 |
-| `ctx.clipboard.writeText(text)` | 替换全部剪贴板内容为 Unicode 文本，返回 `{ written: true }`，不自动恢复。 |
+| `ctx.clipboard.writeText(text)` | 替换全部剪贴板内容为 Unicode 文本，返回 `{ written: true, sequenceNumber }`，不自动恢复。序号是写入后观察值，不代表独占剪贴板。 |
 
 ### 桌面脚本
 
@@ -144,7 +145,9 @@ omnitrigger.exe --config C:\Actions\bindings.json --run-action C:\Actions\call.j
 
 Windows 适配层提供 `ScriptTarget::snapshot()` 和 `ScriptTarget::from_snapshot(...)`，后者核验传入值后恢复上下文。传递值快照不代表能原子锁住窗口生命周期。目标文件及动作参数可能含个人信息，宿主应使用自己的本机临时目录，避免放入仓库或日志正文。
 
-桌面上下文由应用在接纳动作前捕获；轮盘调用沿用打开轮盘前的目标。窗口句柄留在 Rust 侧，每次操作重新核对窗口、线程、进程及进程创建时间；发送前还要求原窗口仍为前台，不自动抢焦点。读取目标失败只影响桌面 API，纯代码及浏览器动作仍可运行。这些检查不能原子锁住 Windows 的窗口生命周期。
+脚本可用 `await ctx.desktop.targetContext()` 取得同样的文件内容，再通过 `ctx.process.start(...)` 启动桌面宿主。脚本返回后按次桥接会关闭；持久界面应保存原身份，在用户操作时核验它并发起新调用，不能继续使用已结束的桥接，也不能在子进程启动后改抓当前前台。剪贴板序号会变化和回绕，检查与后续写入也不是原子操作，不能把匹配的序号当作安全恢复旧内容的充分条件。
+
+桌面上下文由应用在接纳动作前捕获；轮盘调用沿用打开轮盘前的目标。运行时每次操作重新核对窗口、线程、进程及进程创建时间；发送前还要求原窗口仍为前台，不自动抢焦点。读取目标失败只影响桌面 API，纯代码及浏览器动作仍可运行。这些检查不能原子锁住 Windows 的窗口生命周期。
 
 ```javascript
 export default async ctx => {

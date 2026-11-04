@@ -105,7 +105,8 @@ impl NativeHost for DesktopHost {
                         not_cancelled(cancellation)
                     })
                     .map_err(|message| error("clipboard_failed", message, "unknown"))?;
-                    Ok(json!({"written":true}))
+                    let sequence = omnitrigger_windows::clipboard_sequence_number();
+                    Ok(json!({"written":true,"sequenceNumber":sequence}))
                 } else {
                     let target = self.target.as_ref().map_err(Clone::clone)?;
                     target
@@ -133,6 +134,23 @@ impl NativeHost for DesktopHost {
                     .copy_selection_text_if(|| not_cancelled(cancellation))
                     .map_err(|message| error("selection_failed", message, "unknown"))?;
                 Ok(json!(text))
+            }
+            "target.context" => {
+                if params != json!({}) {
+                    return Err(error(
+                        "invalid_input",
+                        "目标上下文导出不接受参数。",
+                        "not_started",
+                    ));
+                }
+                let snapshot = self
+                    .target
+                    .as_ref()
+                    .map_err(Clone::clone)?
+                    .snapshot()
+                    .map_err(|message| error("target_changed", message, "not_started"))?;
+                crate::action_target_context::export(snapshot)
+                    .map_err(|message| error("target_unavailable", message, "not_started"))
             }
             "target.info" => {
                 if params != json!({}) {
@@ -236,6 +254,85 @@ impl NativeHost for DesktopHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn target_context_export_keeps_original_hidden_window_identity() {
+        use windows::{
+            core::w,
+            Win32::UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
+            },
+        };
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("Owned context export"),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        struct Owned(windows::Win32::Foundation::HWND);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        let owned = Owned(hwnd);
+        // 使用本进程真实窗口构造快照，不读取当前前台。
+        let mut pid = 0;
+        let tid = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(hwnd, Some(&mut pid))
+        };
+        use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+        let (mut created, mut exited, mut kernel, mut user) = Default::default();
+        unsafe {
+            GetProcessTimes(
+                GetCurrentProcess(),
+                &mut created,
+                &mut exited,
+                &mut kernel,
+                &mut user,
+            )
+        }
+        .unwrap();
+        let snapshot = ScriptTargetSnapshot {
+            window_handle: hwnd.0 as usize,
+            process_id: pid,
+            thread_id: tid,
+            process_created_file_time: (u64::from(created.dwHighDateTime) << 32)
+                | u64::from(created.dwLowDateTime),
+        };
+        let host = DesktopHost::from_snapshot(snapshot).unwrap();
+        let token = CancellationToken::new();
+        let value = host.call("target.context", json!({}), &token).unwrap();
+        assert_eq!(value["window_handle"], snapshot.window_handle.to_string());
+        assert_eq!(
+            value["process_created_file_time"],
+            snapshot.process_created_file_time.to_string()
+        );
+        assert_eq!(
+            host.call("target.context", json!({"other":true}), &token)
+                .unwrap_err()
+                .code,
+            "invalid_input"
+        );
+        drop(owned);
+        assert_eq!(
+            host.call("target.context", json!({}), &token)
+                .unwrap_err()
+                .code,
+            "target_changed"
+        );
+    }
 
     #[test]
     fn desktop_validation_and_cancellation_do_not_fall_back_to_another_target() {

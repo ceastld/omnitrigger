@@ -19,7 +19,7 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'clipboard.read' | 'clipboard.write';
+  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'clipboard.read' | 'clipboard.write';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
 }
@@ -50,6 +50,8 @@ export interface ActionContext {
   desktop: {
     /** 本次提交时捕获的目标，不在调用时重新选择前台。进程名含 .exe。 */
     target(): Promise<{processName: string; windowRole: "unknown" | "application" | "desktop" | "taskbar"; title: string; processId: number; isForeground: boolean}>;
+    /** CLI 可直接使用的原目标值快照；30 秒内提交，不重新选择前台。 */
+    targetContext(): Promise<{window_handle: string; process_id: number; thread_id: number; process_created_file_time: string; expires_at_unix_ms: number}>;
     /** 明确 VK，修饰键在前；仅确认系统接纳输入，不确认业务动作完成。 */
     sendShortcut(keys: number[], options?: {keyDownDelayMs?: number; timing?: never} | {timing: ShortcutTiming; keyDownDelayMs?: never}): Promise<{submitted: true}>;
     /** 修饰键跨越整组普通键；延迟在修饰键就绪后、每个普通键按下后等待。 */
@@ -63,6 +65,6 @@ export interface ActionContext {
     /** 只读 Unicode 文本；没有文本格式时抛错。 */
     readText(): Promise<string>;
     /** 替换全部剪贴板格式为 Unicode 文本，不自动恢复。 */
-    writeText(text: string): Promise<{written: true}>;
+    writeText(text: string): Promise<{written: true; sequenceNumber: number}>;
   };
 }

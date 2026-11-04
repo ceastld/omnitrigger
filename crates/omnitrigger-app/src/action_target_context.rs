@@ -1,6 +1,6 @@
 //! 外部桌面宿主提交动作时的短时目标快照；不捕获当前前台。
 use omnitrigger_windows::ScriptTargetSnapshot;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{io::Read, path::Path, time::SystemTime};
 
 pub fn validate_cli(arguments: &[String]) -> Result<(), String> {
@@ -57,7 +57,7 @@ pub fn path(arguments: &[String]) -> Result<Option<&Path>, String> {
         .ok_or_else(|| "--target-context 后需要目标快照文件路径。".into())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TargetContext {
     window_handle: String,
@@ -65,6 +65,25 @@ struct TargetContext {
     thread_id: u32,
     process_created_file_time: String,
     expires_at_unix_ms: u64,
+}
+
+pub fn export(snapshot: ScriptTargetSnapshot) -> Result<serde_json::Value, String> {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_millis();
+    let expires_at_unix_ms = u64::try_from(now)
+        .map_err(|_| "系统时间超出范围。")?
+        .checked_add(30_000)
+        .ok_or("系统时间超出范围。")?;
+    serde_json::to_value(TargetContext {
+        window_handle: snapshot.window_handle.to_string(),
+        process_id: snapshot.process_id,
+        thread_id: snapshot.thread_id,
+        process_created_file_time: snapshot.process_created_file_time.to_string(),
+        expires_at_unix_ms,
+    })
+    .map_err(|error| error.to_string())
 }
 
 fn decimal<T: std::str::FromStr>(value: &str) -> Result<T, String> {
