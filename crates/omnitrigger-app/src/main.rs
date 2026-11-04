@@ -5952,6 +5952,19 @@ fn smoke_test() -> Result<(), String> {
 
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
+    // 新建工程不与系统操作、预览或其他命令混用；在任何 CLI 副作用前拒绝组合。
+    if arguments
+        .iter()
+        .any(|argument| argument == "--create-script-action")
+    {
+        if let Err(message) = action_target_context::validate_cli(&arguments) {
+            eprintln!(
+                "{}",
+                serde_json::json!({"status":"rejected","error":{"code":"invalid_cli_arguments","message":message,"effect_state":"not_started"}})
+            );
+            std::process::exit(1);
+        }
+    }
     if let Some(preview) = system_hud::Preview::parse(&arguments) {
         match preview {
             Ok(preview) => preview.run(),

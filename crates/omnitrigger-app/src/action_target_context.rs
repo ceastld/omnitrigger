@@ -15,6 +15,7 @@ pub fn validate_cli(arguments: &[String]) -> Result<(), String> {
                 | "--run-action"
                 | "--target-context"
                 | "--list-package-actions"
+                | "--create-script-action"
                 | "--stream-action-events"
         ) || !seen.insert(flag)
         {
@@ -28,17 +29,26 @@ pub fn validate_cli(arguments: &[String]) -> Result<(), String> {
             .get(index + 1)
             .is_none_or(|value| value.starts_with("--"))
         {
-            return Err(format!("参数 {flag} 后需要文件路径。"));
+            return Err(if flag == "--create-script-action" {
+                "--create-script-action 后需要工程标识。".into()
+            } else {
+                format!("参数 {flag} 后需要文件路径。")
+            });
         }
         index += 2;
     }
-    let commands = ["--check-action", "--run-action", "--list-package-actions"]
-        .iter()
-        .filter(|flag| seen.contains(**flag))
-        .count();
+    let commands = [
+        "--check-action",
+        "--run-action",
+        "--list-package-actions",
+        "--create-script-action",
+    ]
+    .iter()
+    .filter(|flag| seen.contains(**flag))
+    .count();
     if commands != 1 {
         return Err(
-            "需要且只能指定一次 --check-action、--run-action 或 --list-package-actions。".into(),
+            "需要且只能指定一次 --check-action、--run-action、--list-package-actions 或 --create-script-action。".into(),
         );
     }
     if (seen.contains("--target-context") || seen.contains("--stream-action-events"))
@@ -251,6 +261,7 @@ mod tests {
     fn package_catalog_and_event_stream_have_unambiguous_cli_modes() {
         for args in [
             vec!["app.exe", "--list-package-actions"],
+            vec!["app.exe", "--create-script-action", "my-script"],
             vec!["--config", "owned.json", "--list-package-actions"],
             vec![
                 "--run-action",
@@ -265,6 +276,24 @@ mod tests {
         for args in [
             vec!["--stream-action-events"],
             vec!["--list-package-actions", "extra"],
+            vec!["--create-script-action"],
+            vec![
+                "--create-script-action",
+                "my-script",
+                "--run-action",
+                "a.json",
+            ],
+            vec![
+                "--create-script-action",
+                "my-script",
+                "--stream-action-events",
+            ],
+            vec![
+                "--create-script-action",
+                "my-script",
+                "--target-context",
+                "target.json",
+            ],
             vec!["--list-package-actions", "--list-package-actions"],
             vec!["--list-package-actions", "--run-action", "call.json"],
             vec!["--list-package-actions", "--target-context", "target.json"],

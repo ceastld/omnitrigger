@@ -93,16 +93,24 @@ pub fn submit(
 pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
     let check = arguments.iter().position(|arg| arg == "--check-action");
     let run = arguments.iter().position(|arg| arg == "--run-action");
+    let create = arguments
+        .iter()
+        .position(|arg| arg == "--create-script-action");
     let list = arguments
         .iter()
         .position(|arg| arg == "--list-package-actions");
     let stream = arguments.iter().any(|arg| arg == "--stream-action-events");
     let explicit_target = arguments.iter().position(|arg| arg == "--target-context");
-    let index = check.or(run).or(list).or(explicit_target).or_else(|| {
-        arguments
-            .iter()
-            .position(|arg| arg == "--stream-action-events")
-    })?;
+    let index = check
+        .or(run)
+        .or(create)
+        .or(list)
+        .or(explicit_target)
+        .or_else(|| {
+            arguments
+                .iter()
+                .position(|arg| arg == "--stream-action-events")
+        })?;
     Some((|| {
         crate::action_target_context::validate_cli(arguments).map_err(|message| {
             serde_json::json!({
@@ -110,6 +118,22 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
                 "effect_state":"not_started"}})
             .to_string()
         })?;
+        if let Some(index) = create {
+            let project = omnitrigger_actions::project::create_script_project(
+                &root(&settings::path()),
+                &arguments[index + 1],
+            )
+            .map_err(|mut error| {
+                error
+                    .effect_state
+                    .get_or_insert_with(|| "not_started".into());
+                serde_json::json!({"status":"failed","error":error}).to_string()
+            })?;
+            return Ok(
+                serde_json::json!({"schema_version":1,"status":"created","project":project})
+                    .to_string(),
+            );
+        }
         let rejected = |mut error: omnitrigger_actions::ActionError| {
             error.effect_state = Some("not_started".into());
             serde_json::json!({"status":"rejected","error":error}).to_string()

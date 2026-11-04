@@ -49,6 +49,23 @@ jobs:
           cargo test --locked -p omnitrigger-app isolated_clipboard_restore_smoke -- --ignored --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: 安装 SDK 检查使用的 Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/script-sdk-check/package-lock.json
+
+      - name: 验证脚本工程与真实类型检查
+        shell: pwsh
+        run: |
+          Push-Location tools/script-sdk-check
+          npm ci --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          node tools/script-sdk-check/check.mjs target/debug/omnitrigger.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: 验证更新服务发布通知
         run: python -m unittest discover -s scripts -p 'test_update_*.py' -v
 

@@ -97,6 +97,38 @@ fn unavailable_host_and_pre_cancel_are_rejected_before_execution() {
 
 #[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn script_host_runs_generated_standard_js_project_without_repository_paths() {
+    let fixture = Fixture::new("return null;");
+    let root = fixture.root.join("actions");
+    let project = omnitrigger_actions::project::create_script_project(&root, "generated").unwrap();
+    let action = omnitrigger_actions::PackageCatalog::load(&root)
+        .resolve(&project.call)
+        .unwrap();
+    let output = runtime()
+        .execute(&action, &context(), &CancellationToken::new())
+        .unwrap();
+    assert_eq!(
+        output,
+        json!({"text":"OmniTrigger","invocation":{"invocation_id":u64::MAX.to_string(),"binding_id":"9007199254740993"}})
+    );
+    // 只清理本测试明确创建的路径；有额外文件时保留目录。
+    for name in [
+        "action.json",
+        "main.js",
+        "call.json",
+        "jsconfig.json",
+        "README.md",
+        "sdk/api.d.ts",
+    ] {
+        std::fs::remove_file(project.package_root.join(name)).unwrap();
+    }
+    std::fs::remove_dir(project.package_root.join("sdk")).unwrap();
+    std::fs::remove_dir(project.package_root).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
 fn script_host_round_trip_has_real_context_without_node() {
     let fixture = Fixture::new("return {input:ctx.input, invocation:ctx.invocation, root:ctx.packageRoot, version:ctx.apiVersion};");
     let input = json!({"text":"中文 ' \" $(not-a-command)\n第二行","__proto__":{"polluted":true}});

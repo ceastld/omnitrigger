@@ -45,13 +45,13 @@ pub struct PackageCatalog {
 impl PackageCatalog {
     pub fn load(root: &Path) -> Self {
         let mut catalog = Self::default();
-        if let Err(error) = catalog.load_inner(root) {
+        if let Err(error) = catalog.load_inner(root, 0) {
             catalog.diagnostics.push(error.to_string());
         }
         catalog
     }
 
-    fn load_inner(&mut self, root: &Path) -> Result<(), ActionError> {
+    fn load_inner(&mut self, root: &Path, reserved: usize) -> Result<(), ActionError> {
         let metadata = match fs::symlink_metadata(root) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -71,7 +71,7 @@ impl PackageCatalog {
             fs::read_dir(&canonical_root).map_err(|error| io_error("枚举动作目录失败", error))?;
         let mut folders = Vec::new();
         for (index, entry) in directory.enumerate() {
-            if index == MAX_DIRECTORY_ENTRIES {
+            if index == MAX_DIRECTORY_ENTRIES - reserved {
                 return Err(ActionError::new(
                     "catalog_limit",
                     "动作目录超过 512 个项目，请减少目录内容后重新加载。",
@@ -88,7 +88,7 @@ impl PackageCatalog {
             }
             if metadata.is_dir() {
                 folders.push(path);
-                if folders.len() > MAX_PACKAGES {
+                if folders.len() > MAX_PACKAGES - reserved {
                     return Err(ActionError::new(
                         "catalog_limit",
                         "动作目录最多加载 128 个动作包。",
@@ -188,6 +188,30 @@ impl PackageCatalog {
             entry_path: entry.entry_path.clone(),
         })
     }
+}
+
+/// 新建工程前预留一个目录名额，拒绝已有诊断或重复身份，避免生成不可加载的包。
+pub(crate) fn validate_new_package(root: &Path, id: &str) -> Result<(), ActionError> {
+    let mut catalog = PackageCatalog::default();
+    catalog.load_inner(root, 1).map_err(|mut error| {
+        if error.code == "catalog_limit" {
+            error.message = format!("创建工程需为新动作包预留一个目录名额：{}", error.message);
+        }
+        error
+    })?;
+    if let Some(diagnostic) = catalog.diagnostics.first() {
+        return Err(ActionError::new(
+            "invalid_catalog",
+            format!("请先修复动作目录诊断：{diagnostic}"),
+        ));
+    }
+    if catalog.package_ids.contains(id) {
+        return Err(ActionError::new(
+            "project_exists",
+            format!("动作包标识 {id} 已存在，不会创建重复工程。"),
+        ));
+    }
+    Ok(())
 }
 
 fn read_manifest(folder: &Path) -> Result<PackageManifest, ActionError> {
@@ -301,12 +325,20 @@ fn checked_entry(root: &Path, entry: &str) -> Result<PathBuf, ActionError> {
     Ok(canonical)
 }
 
-fn check_local(path: &Path, metadata: &Metadata) -> Result<(), ActionError> {
+pub(crate) fn check_local_name(path: &Path) -> Result<(), ActionError> {
     let cloud = path.components().any(|component| {
         let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
         name.starts_with("onedrive") || name == "dropbox" || name.starts_with("icloud")
     });
-    if cloud || metadata.file_type().is_symlink() || unavailable_attributes(metadata) {
+    if cloud {
+        return Err(ActionError::new("nonlocal_path", "跳过云盘目录。"));
+    }
+    Ok(())
+}
+
+pub(crate) fn check_local(path: &Path, metadata: &Metadata) -> Result<(), ActionError> {
+    check_local_name(path)?;
+    if metadata.file_type().is_symlink() || unavailable_attributes(metadata) {
         return Err(ActionError::new(
             "nonlocal_path",
             "跳过链接、云盘目录或云端占位文件。",
@@ -316,7 +348,7 @@ fn check_local(path: &Path, metadata: &Metadata) -> Result<(), ActionError> {
 }
 
 /// 只读取明确路径的祖先属性，避免调用者把目录放在链接或联接点下。
-fn check_ancestors(path: &Path) -> Result<(), ActionError> {
+pub(crate) fn check_ancestors(path: &Path) -> Result<(), ActionError> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {

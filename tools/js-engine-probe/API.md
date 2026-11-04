@@ -1,6 +1,6 @@
 # 首批脚本 API
 
-状态：可运行的同步原型，不是正式插件。两种引擎加载同一份 `src/sdk.js`，通过 JSON 桥接到 Rust。桌面 API 与 Node 共用参数校验定义，应用接入时经每次调用独立的回环连接交给现有 `NativeHost`；独立 CLI 的剪贴板和打开目标复用 `omnitrigger-windows`。不安装 Hook，不访问 GPUI。`ctx.apiVersion` 为 `1`。[类型声明](api.d.ts)用于编辑器补全，不提供 TS 转译。
+状态：可运行的同步原型，不是正式插件。两种引擎加载同一份 `src/sdk.js`，通过 JSON 桥接到 Rust。桌面 API 与 Node 共用参数校验定义，应用接入时经每次调用独立的回环连接交给现有 `NativeHost`；独立 CLI 的剪贴板和打开目标复用 `omnitrigger-windows`。不安装 Hook，不访问 GPUI。`ctx.apiVersion` 为 `1`。[类型声明](../../crates/omnitrigger-actions/runtime/script-api.d.ts)用于编辑器补全，不提供 TS 转译。
 
 通过 OmniTrigger 的 `script` 动作运行时接入时，文件声明 `function main(ctx)`；适配层将它转为本工具的函数体请求，文件本身保持标准 JavaScript。`ctx.packageRoot` 为动作包目录，`ctx.invocation` 包含十进制字符串调用身份。独立 CLI 可以省略这些元数据，此时两项为 `null`。成功与失败响应均带有 `schema_version: 1`。
 

@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod model;
 mod native;
 pub mod node;
+pub mod project;
 pub mod script_host;
 pub mod service;
 

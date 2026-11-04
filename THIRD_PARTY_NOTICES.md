@@ -42,6 +42,8 @@ Windows 发行流程通过 `scripts/collect-licenses.ps1` 从锁定目标的应�
 
 ## 可选的 Node.js 运行环境
 
+`tools/script-sdk-check` 仅用于开发与 CI 的工程生成和类型校验，锁定 TypeScript 5.9.3（Apache-2.0）。已核对 npm 包声明及随包 `LICENSE.txt`；上游见 [TypeScript 许可](https://github.com/microsoft/TypeScript/blob/v5.9.3/LICENSE.txt)。该编译器不进入应用、脚本宿主或生成的动作工程，动作运行不要求安装它。版本、下载来源及完整性记录在该目录的 `package-lock.json`。
+
 本地 JavaScript 动作包使用用户安装的 Node.js。当前应用不下载或分发 Node 二进制，不引入 npm 运行依赖；内嵌的 JS 宿主与仓库示例由本项目实现，按项目 MIT 许可证提供。`omnitrigger-actions` 复用工作区已锁定的 `serde` 和 `serde_json`，没有新增第三方 Rust 包。
 
 动作包作者自行引入的代码、模块、程序或素材遵循各自许可证，不能因包由 OmniTrigger 加载而视为 MIT。将来如将 Node 或其他运行时并入发行包，应按实际分发内容重新核对并保留完整许可和版权通知。

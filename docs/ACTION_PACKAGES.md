@@ -32,11 +32,44 @@ flowchart LR
 
 ## 创建动作包
 
+### 新建可编辑的脚本工程
+
+开发命令在当前配置同级的 `actions` 目录创建工程；配置所在目录需已存在：
+
+```powershell
+.\target\debug\omnitrigger.exe --config D:\Demo\bindings.json --create-script-action my-script
+```
+
+返回 JSON 包含工程、入口、调用文件和 SDK 的完整路径。创建不要求安装脚本引擎，不启动脚本、不新增绑定。工程包含：
+
+```text
+actions/my-script/
+  action.json
+  main.js
+  call.json
+  jsconfig.json
+  README.md
+  sdk/api.d.ts
+```
+
+使用支持 JavaScript / TypeScript 的编辑器打开该目录，直接编辑 `main.js`。工程附带本地 SDK 类型快照，启用标准 JS 类型检查，不依赖仓库路径或 npm 包，也无需转译；运行只需要独立宿主。SDK 的[源声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)随应用维护，更新应用不会覆盖既有工程。
+
+安装宿主后，可使用同一配置校验和运行：
+
+```powershell
+.\target\debug\omnitrigger.exe --config D:\Demo\bindings.json --check-action D:\Demo\actions\my-script\call.json
+.\target\debug\omnitrigger.exe --config D:\Demo\bindings.json --run-action D:\Demo\actions\my-script\call.json
+```
+
+`--check-action` 只校验引用与运行时是否可用，不执行脚本，也不代替编辑器类型检查。生成入口只清理输入中的文本并返回 JSON，不操作窗口或剪贴板。应用已打开时，重新启动后动作库才会加载新包。
+
+工程标识为 1–64 个英文字母、数字、`-` 或 `_`，以字母或数字开头，不能是 Windows 设备名。命令拒绝重复身份、已有目录、目录容量不足，以及含诊断的动作目录；不会覆盖作者文件。链接、云盘目录和占位路径沿用动作目录校验；写入失败可能保留部分工程，错误会给出路径。该命令不能与运行、事件流、系统调节或其他操作混用。
+
 ### 轻量脚本宿主
 
 `runtime: "script"` 可通过现有动作服务运行独立的 Rust JS 宿主，无需安装 Node。宿主不链接进输入核心；脚本执行、取消与终态仍由 `ActionService` 管理。已有 Boa 和 QuickJS 两种构建使用同一份宿主 API。入口文件声明标准 JS 函数 `function main(ctx)`，返回 JSON 值；不需要自定义文件语法或 npm 包。
 
-目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start`、`ctx.clipboard.readText/writeText`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../tools/js-engine-probe/api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；此处调用同步返回，不使用 `await`。该运行时暂不提供 Node 模块、ESM 导入、Promise 入口或浏览器 API；需要这些能力的动作继续选择 `node` 运行时。
+目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start`、`ctx.clipboard.readText/writeText`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；此处调用同步返回，不使用 `await`。该运行时暂不提供 Node 模块、ESM 导入、Promise 入口或浏览器 API；需要这些能力的动作继续选择 `node` 运行时。
 
 开发时先构建 `tools/js-engine-probe`，把宿主放到配置同级的 `runtimes/script/host.exe`（非 Windows 为 `host`），或使用环境变量 `OMNITRIGGER_SCRIPT_HOST` 指定完整本地路径。尚无自动安装入口。没有宿主时，相关动作报告运行时不可用，不回退其他解释器。清单与 `ActionCall` 格式保持一致；`--check-action` 检查引用，`--run-action` 实际执行。
 
