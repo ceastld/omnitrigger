@@ -66,7 +66,11 @@ pub fn service(config: &Path) -> ActionService {
         if let Err(error) = runtimes.register("node", Arc::new(runtime)) {
             catalog.diagnostics.push(error.to_string());
         }
-    } else {
+    } else if catalog
+        .actions
+        .iter()
+        .any(|action| action.definition.runtime == "node")
+    {
         catalog.diagnostics.push("未找到 Node.js；请安装 Node.js，或用 OMNITRIGGER_NODE 指定 node.exe 的完整路径后重启。".into());
     }
     ActionService::new(catalog, runtimes)
