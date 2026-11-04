@@ -9,7 +9,9 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 8] = [
+pub const METHODS: [&str; 10] = [
+    "browser.profiles",
+    "browser.call",
     "target.info",
     "target.context",
     "keyboard.shortcut",
@@ -33,6 +35,7 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
         message: message.to_string(),
         effect_state: Some(effect.into()),
         method: Some(method.into()),
+        required_permissions: Vec::new(),
     }
 }
 
@@ -72,14 +75,20 @@ pub fn call(
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, connection.port));
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))
         .map_err(|cause| fault("native_bridge_unavailable", cause, &method, "not_started"))?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let browser = method.starts_with("browser.");
+    let deadline = Instant::now() + Duration::from_secs(if browser { 66 } else { 5 });
+    let response_limit = if browser {
+        32 * 1024 * 1024 + 1024
+    } else {
+        LIMIT
+    };
     let network = |cause| fault("native_bridge_failed", cause, &method, "unknown");
     // 一旦开始写入就不能证明服务端是否已执行；所有后续故障都不自动重试。
     let remaining = || {
         deadline
             .checked_duration_since(Instant::now())
             .filter(|d| !d.is_zero())
-            .ok_or_else(|| network("本机调用超过 5 秒。".to_string()))
+            .ok_or_else(|| network("本机调用等待超时。".to_string()))
     };
     let mut written = 0;
     while written < request.len() {
@@ -107,8 +116,8 @@ pub fn call(
             break;
         }
         bytes.extend_from_slice(&chunk[..count]);
-        if bytes.len() > LIMIT + 1 {
-            return Err(network("本机回执超过 512 KiB。".into()));
+        if bytes.len() > response_limit + 1 {
+            return Err(network("本机回执超过方法的结果大小限制。".into()));
         }
         // 服务端每连接一帧并关闭；读到 EOF 才能排除多帧或尾随内容。
     }
@@ -155,7 +164,32 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                 Some("unknown") | None => "unknown",
                 _ => return Err(invalid()),
             };
-            Err(fault(code, message, method, effect))
+            let reported_method = match error.get("method") {
+                Some(value) => value
+                    .as_str()
+                    .filter(|method| !method.is_empty() && method.len() <= 256)
+                    .ok_or_else(invalid)?,
+                None => method,
+            };
+            let permissions = match error.get("required_permissions") {
+                Some(value) => value
+                    .as_array()
+                    .filter(|values| values.len() <= 32)
+                    .ok_or_else(invalid)?
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .filter(|s| !s.is_empty() && s.len() <= 128)
+                            .map(str::to_owned)
+                            .ok_or_else(invalid)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                None => Vec::new(),
+            };
+            let mut error = fault(code, message, reported_method, effect);
+            error.required_permissions = permissions;
+            Err(error)
         }
         None => Err(invalid()),
     }

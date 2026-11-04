@@ -9,14 +9,16 @@ const nativeContext = ctx.__nativeContext;
 delete ctx.__nativeContext;
 ctx.apiVersion = 1;
 if (ctx.invocation) Object.freeze(ctx.invocation);
-function call(kind, args = {}) {
+function call(kind, args = {}, serialized) {
     if (++calls > 32) throw new Error('单次脚本最多调用 32 次宿主 API');
-    const response = decode(nativeCall(encode({ kind, ...args })));
+    const response = decode(nativeCall(serialized ?? encode({ kind, ...args })));
     if (!response.ok) {
         const error = new Error(response.error.message);
         error.code = response.error.code;
         if (response.error.effect_state) error.effectState = response.error.effect_state;
+        else if (kind === 'native') error.effectState = 'not_started';
         if (response.error.method) error.method = response.error.method;
+        if (response.error.required_permissions) error.requiredPermissions = response.error.required_permissions;
         throw error;
     }
     return response.value;
@@ -32,14 +34,36 @@ ctx.process = Object.freeze({
 function desktopCall(method, params) {
     if (!nativeContext || nativeContext.error) {
         const cause = nativeContext?.error;
-        throw Object.assign(new Error(cause?.message ?? '桌面 API 需要 OmniTrigger 本次动作的目标上下文。'), {
-            code:cause?.code ?? 'desktop_unavailable', effectState:cause?.effect_state ?? 'not_started', method,
+        throw Object.assign(new Error(cause?.message ?? (method.startsWith('browser.') ? '浏览器 API 需要 OmniTrigger 应用宿主。' : '桌面 API 需要 OmniTrigger 本次动作的目标上下文。')), {
+            code:cause?.code ?? (method.startsWith('browser.') ? 'browser_unavailable' : 'desktop_unavailable'), effectState:cause?.effect_state ?? 'not_started', method,
         });
     }
-    return call('native', {connection:nativeContext.connection, id:++nativeId, method, params});
+    const request = {connection:nativeContext.connection, id:nativeId+1, method, params};
+    const serialized = encode({kind:'native',...request});
+    const tooLarge = () => {throw Object.assign(new Error('本机调用请求超过 512 KiB。'), {code:'invalid_input',effectState:'not_started',method});};
+    if (serialized.length > 512*1024) tooLarge();
+    if (/[^\x00-\x7f]/.test(serialized)) {
+        let bytes = 0;
+        for (const character of serialized) {
+            const point = character.codePointAt(0);
+            bytes += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+            if (bytes > 512*1024) tooLarge();
+        }
+    }
+    nativeId++;
+    return call('native', request, serialized);
 }
 const desktopApis = createDesktopApi(desktopCall);
 ctx.desktop = desktopApis.desktop;
+ctx.browser = createBrowserApi((method, args, options, profiles) => {
+    let value;
+    try { value = desktopCall(profiles ? 'browser.profiles' : 'browser.call', profiles ? {options} : {method,args,options}); }
+    catch (error) { if (!profiles && error?.method === 'browser.call') error.method = method; throw error; }
+    if (profiles) return value;
+    if (value?.has_value === true && Object.hasOwn(value,'value')) return value.value;
+    if (value?.has_value === false) return undefined;
+    throw Object.assign(new Error('浏览器调用回执格式无效。'), {code:'invalid_response',effectState:'unknown',method});
+});
 ctx.clipboard = nativeContext ? desktopApis.clipboard : Object.freeze({
     readText: () => call('read_clipboard'),
     writeText: (text, options = {}) => {

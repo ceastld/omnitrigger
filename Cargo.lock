@@ -2950,7 +2950,7 @@ dependencies = [
 [[package]]
 name = "omnitrigger-browser"
 version = "0.1.0"
-source = "git+https://github.com/ceastld/omnitrigger-browser?rev=fd2b205a48f2fecc414dc6fb63b3687d586e5ef3#fd2b205a48f2fecc414dc6fb63b3687d586e5ef3"
+source = "git+https://github.com/ceastld/omnitrigger-browser?rev=a5adc50022120cc4e6b0596bb56e14ed0ec2d02e#a5adc50022120cc4e6b0596bb56e14ed0ec2d02e"
 dependencies = [
  "base64",
  "serde",

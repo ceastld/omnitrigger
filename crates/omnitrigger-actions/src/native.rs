@@ -11,6 +11,7 @@ use std::{
 // 65,536 个 UTF-16 单元即使全部需要 JSON 转义也能完整传输。
 const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
+const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
 
 /// 由应用为本次调用捕获的本机上下文。不是沙盒或权限隔离。
@@ -22,6 +23,17 @@ pub trait NativeHost: Send + Sync {
         params: Value,
         cancellation: &CancellationToken,
     ) -> Result<Value, ActionError>;
+
+    /// 长时间原生调用可据此遵守外层动作时限；默认沿用原有有界回调。
+    fn call_with_deadline(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: &CancellationToken,
+        _deadline: Instant,
+    ) -> Result<Value, ActionError> {
+        self.call(method, params, cancellation)
+    }
 }
 
 pub(crate) struct NativeBridge {
@@ -79,7 +91,17 @@ impl NativeBridge {
     }
 
     /// 每次只接纳一个连接，每客户端最多读取一帧；全部缓冲和在途连接有上限。
+    #[cfg(test)]
     pub(crate) fn poll(&mut self, host: &dyn NativeHost, cancellation: &CancellationToken) {
+        self.poll_until(host, cancellation, None);
+    }
+
+    pub(crate) fn poll_until(
+        &mut self,
+        host: &dyn NativeHost,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) {
         if let Ok((stream, _)) = self.listener.accept() {
             if self.clients.len() < CLIENTS && stream.set_nonblocking(true).is_ok() {
                 let _ = stream.set_nodelay(true);
@@ -95,7 +117,12 @@ impl NativeBridge {
         let token = &self.token;
         let next_id = &mut self.next_id;
         self.clients.retain_mut(|client| {
-            if cancellation.is_cancelled() || client.began.elapsed() > Duration::from_secs(2) {
+            let lifetime = if client.output.is_some() {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_secs(2)
+            };
+            if cancellation.is_cancelled() || client.began.elapsed() > lifetime {
                 return false;
             }
             if client.output.is_none() {
@@ -135,7 +162,15 @@ impl NativeBridge {
                             "动作已取消，未开始本机调用。",
                         ))
                     } else {
-                        host.call(&request.method, request.params, cancellation)
+                        match deadline {
+                            Some(deadline) => host.call_with_deadline(
+                                &request.method,
+                                request.params,
+                                cancellation,
+                                deadline,
+                            ),
+                            None => host.call(&request.method, request.params, cancellation),
+                        }
                     };
                     let response = match result {
                         Ok(value) => json!({"id":request.id, "ok":true, "value":value}),
@@ -144,11 +179,17 @@ impl NativeBridge {
                     let Ok(mut bytes) = serde_json::to_vec(&response) else {
                         return false;
                     };
-                    if bytes.len() > RESPONSE_LIMIT {
+                    let limit = if request.method.starts_with("browser.") {
+                        BROWSER_RESPONSE_LIMIT
+                    } else {
+                        RESPONSE_LIMIT
+                    };
+                    if bytes.len() > limit {
                         return false;
                     }
                     bytes.push(b'\n');
                     client.output = Some(bytes);
+                    client.began = Instant::now();
                 }
             }
             if let Some(bytes) = &client.output {

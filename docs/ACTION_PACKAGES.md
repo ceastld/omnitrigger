@@ -69,7 +69,7 @@ actions/my-script/
 
 `runtime: "script"` 可通过现有动作服务运行独立的 Rust JS 宿主，无需安装 Node。宿主不链接进输入核心；脚本执行、取消与终态仍由 `ActionService` 管理。已有 Boa 和 QuickJS 两种构建使用同一份宿主 API。入口文件声明标准 JS 函数 `function main(ctx)`，返回 JSON 值；不需要自定义文件语法或 npm 包。
 
-目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start`、`ctx.clipboard.readText/writeText`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；此处调用同步返回，不使用 `await`。该运行时暂不提供 Node 模块、ESM 导入、Promise 入口或浏览器 API；需要这些能力的动作继续选择 `node` 运行时。
+目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start`、`ctx.clipboard.readText/writeText`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时暂不提供 Node 模块、ESM 导入、Promise 入口；需要这些能力的动作继续选择 `node` 运行时。
 
 开发时先构建 `tools/js-engine-probe`，把宿主放到配置同级的 `runtimes/script/host.exe`（非 Windows 为 `host`），或使用环境变量 `OMNITRIGGER_SCRIPT_HOST` 指定完整本地路径。尚无自动安装入口。没有宿主时，相关动作报告运行时不可用，不回退其他解释器。清单与 `ActionCall` 格式保持一致；`--check-action` 检查引用，`--run-action` 实际执行。
 
@@ -263,7 +263,7 @@ export default async ctx => {
 
 脚本内可处理 SDK 最大 32 MiB 的结果；最终动作结果仍限 64 KiB，建议只返回摘要。`undefined` 和 `null` 在脚本内保持区别。通用转发仍受扩展权限、调用模式和 Chrome 自身条件限制，不支持事件订阅或任意页面脚本注入。v0.1.0 发布扩展没有新增可选权限界面，不能把源码里的新增能力当作已安装能力。
 
-可直接复制的[书签统计示例](../examples/actions/browser-summary/)只返回数量，不保存书签内容。将它放到当前配置同级 `actions` 目录后，用其 `call.json` 执行 `--run-action`；可在 `input.profile` 中明确指定目标。独立的 `tools/js-engine-probe` 仍是同步系统 API 实验，没有此浏览器接口。
+可直接复制的[书签统计示例](../examples/actions/browser-summary/)只返回数量，不保存书签内容。将它放到当前配置同级 `actions` 目录后，用其 `call.json` 执行 `--run-action`；可在 `input.profile` 中明确指定目标。轻量宿主也提供同步浏览器接口，见[脚本书签统计](../examples/actions/script-browser-summary/)；该示例使用相同 Chrome API，不使用 `await`，可在没有 Node 的环境中运行。在仓库外编辑时，先创建脚本工程，再移入示例逻辑并保留工程的本地 SDK 引用；已有工程的 SDK 快照需由作者显式更新，应用不会覆盖。
 
 当前参数编辑器保存 JSON 对象，没有通用参数表单或完整 JSON Schema 校验。包清单加载和“检查动作”只验证调用结构、动作身份、版本和运行时解析，不执行脚本，所以不能验证所有业务输入。需要修改必填输入、输出含义或行为约定时，提高动作的契约版本，并显式更新绑定；包的发布版本不能代替动作契约版本。
 
@@ -344,7 +344,7 @@ omnitrigger.exe --config D:\Demo\bindings.json --run-action D:\Demo\call.json --
 
 JS 宿主必须返回匹配协议版本和调用 ID 的有效结果；仅有进程退出码 0 不算动作成功。成功结果表示脚本完成其声明的逻辑，外部程序的业务是否真正完成仍由动作自行验证。单次调用上限为 60 秒；每个子程序的标准输出和标准错误合计最多 64 KiB，最终 JSON 回执最多 64 KiB。宿主不保留 `console` 日志；需要带回的信息应通过 `return` 返回，界面只显示终态，命令行可读取 JSON 结果。协议使用独立临时响应文件，与日志输出分开，运行后清理临时目录。
 
-Node 进程以当前用户权限运行，能导入 Node 自带模块并访问用户权限范围内的文件、网络和进程。清单、独立进程及路径检查均不是安全沙盒；只加载自己信任的包。当前没有浏览器扩展 API、权限声明与授权隔离，也没有供脚本直接调用的原生键盘、剪贴板或窗口 SDK。
+Node 进程以当前用户权限运行，能导入 Node 自带模块并访问用户权限范围内的文件、网络和进程。清单、独立进程及路径检查均不是安全沙盒；只加载自己信任的包。已有浏览器调用和有限的原目标键盘、文本与剪贴板 API；尚无动作包级别的权限声明与授权隔离、鼠标操作或任意窗口控制。
 
 ## 动作内容来源与托管（规划）
 

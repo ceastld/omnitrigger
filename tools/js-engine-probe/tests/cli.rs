@@ -72,6 +72,12 @@ fn action_context_metadata_preserves_full_integer_identity() {
 
 #[test]
 fn desktop_requires_explicit_context_and_keeps_bridge_failure_structured() {
+    let (ok, response) =
+        invoke(json!({"script":"return ctx.browser.call('tabs.query');","input":{}}));
+    assert!(!ok);
+    assert_eq!(response["error"]["code"], "browser_unavailable");
+    assert_eq!(response["error"]["effect_state"], "not_started");
+    assert_eq!(response["error"]["method"], "tabs.query");
     let script = "ctx.desktop.sendText('x'); return {};";
     let (ok, response) = invoke(json!({"script":script,"input":{}}));
     assert!(!ok);

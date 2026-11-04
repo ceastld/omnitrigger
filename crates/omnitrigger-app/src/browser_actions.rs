@@ -421,6 +421,25 @@ fn connector_endpoint(config: &Path) -> Result<String, Fault> {
     Ok(pipe.into())
 }
 
+pub(super) fn script_endpoint(config: &Path) -> Result<String, omnitrigger_actions::ActionError> {
+    #[cfg(windows)]
+    {
+        connector_endpoint(config).map_err(|fault| {
+            let mut error = omnitrigger_actions::ActionError::new(fault.code, fault.message);
+            error.effect_state = fault.effect_state;
+            error
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = config;
+        Err(omnitrigger_actions::ActionError::new(
+            "unsupported_platform",
+            "浏览器连接器目前仅支持 Windows。",
+        ))
+    }
+}
+
 trait Transport {
     async fn profiles(&mut self) -> Result<Value, Fault>;
     async fn call(&mut self, profile: &str, method: &str, args: Value) -> Result<Value, Fault>;

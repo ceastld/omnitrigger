@@ -32,6 +32,7 @@ mod plugin_install;
 mod plugins;
 mod presets;
 mod radial_wheel;
+mod script_browser;
 mod service;
 mod settings;
 mod shortcut;

@@ -9,6 +9,15 @@ interface ScriptShortcutTiming {
     key_down_delay_ms?: number;
     process_overrides?: Record<string, number>;
 }
+interface ScriptBrowserOptions {
+    /** browser_instance_id，省略时只接受恰好一个已连接 profile。 */
+    profile?: string;
+    /** 单次 RPC 的等待时限，默认 10000，范围 1–60000 毫秒；另受动作总时限约束。 */
+    timeoutMs?: number;
+}
+interface ScriptBrowserFault extends ScriptDesktopFault {
+    requiredPermissions?: string[];
+}
 type ScriptContext = Readonly<{
     apiVersion: 1;
     input: Record<string, any>;
@@ -41,6 +50,13 @@ type ScriptContext = Readonly<{
         sendText(text: string): {submitted: true};
         /** 向原目标发送 Ctrl+C 并读取新文本，复制结果保留在剪贴板。 */
         copySelectionText(): string;
+    };
+    browser: {
+        profiles(options?: Pick<ScriptBrowserOptions, 'timeoutMs'>): Array<{browser_instance_id: string; session_id: string; name: string; [key: string]: unknown}>;
+        /** 方法不带 chrome. 前缀；同步返回，undefined 与 null 保持区别。 */
+        call<T = unknown>(method: string, args?: unknown[], options?: ScriptBrowserOptions): T;
+        /** 同步远程 Proxy，例如 ctx.browser.chrome.bookmarks.getTree()。选项使用 call。 */
+        chrome: any;
     };
     clipboard: {
         readText(): string;

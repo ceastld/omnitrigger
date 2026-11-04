@@ -85,7 +85,10 @@ pub fn submit(
     service.submit_with_host(
         id,
         call,
-        Some(Arc::new(crate::desktop_host::DesktopHost::capture(target))),
+        Some(Arc::new(crate::script_browser::ActionHost::new(
+            settings::path(),
+            crate::desktop_host::DesktopHost::capture(target),
+        ))),
     )
 }
 
@@ -192,7 +195,14 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
             return Ok(serde_json::json!({"valid":true,"call":call}).to_string());
         }
         let invocation_id = match explicit_host {
-            Some(host) => service.submit_with_host(0, call, Some(Arc::new(host))),
+            Some(host) => service.submit_with_host(
+                0,
+                call,
+                Some(Arc::new(crate::script_browser::ActionHost::new(
+                    settings::path(),
+                    host,
+                ))),
+            ),
             None => submit(&service, 0, call, None),
         }
         .map_err(rejected)?;

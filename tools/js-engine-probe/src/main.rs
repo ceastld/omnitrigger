@@ -7,6 +7,8 @@ mod native;
 const DESKTOP_API: &str =
     include_str!("../../../crates/omnitrigger-actions/runtime/desktop-api.js");
 const SDK: &str = include_str!("sdk.js");
+const BROWSER_API: &str =
+    include_str!("../../../crates/omnitrigger-actions/runtime/browser-api.js");
 
 #[cfg(any(
     all(feature = "boa", feature = "quickjs"),
@@ -85,7 +87,7 @@ fn run() -> Result<Value, Value> {
     let input = serde_json::to_string(&request.input).map_err(|error| error.to_string())?;
     let literal = serde_json::to_string(&input).map_err(|error| error.to_string())?;
     let source = format!(
-        "(() => {{ const ctx = {{ input: JSON.parse({literal}), ...JSON.parse({metadata}) }};\n{DESKTOP_API}\n{SDK}\n\
+        "(() => {{ const ctx = {{ input: JSON.parse({literal}), ...JSON.parse({metadata}) }};\n{DESKTOP_API}\n{BROWSER_API}\n{SDK}\n\
          try {{ const result = (function(ctx) {{\n{}\n}})(ctx);\n\
          if (result && typeof result.then === 'function') throw new Error('原型仅支持同步入口');\n\
          const output = JSON.stringify(result);\n\
@@ -93,7 +95,7 @@ fn run() -> Result<Value, Value> {
          return JSON.stringify({{kind:'value', value:JSON.parse(output)}});\n\
          }} catch(error) {{\n\
            if (typeof error?.code !== 'string' || !['not_started','unknown'].includes(error.effectState)) throw error;\n\
-           return JSON.stringify({{kind:'fault',error:{{code:error.code,message:String(error.message),effect_state:error.effectState,method:error.method}}}});\n\
+           return JSON.stringify({{kind:'fault',error:{{code:error.code,message:String(error.message),effect_state:error.effectState,method:error.method,required_permissions:error.requiredPermissions}}}});\n\
          }} }})()",
         request.script
     );

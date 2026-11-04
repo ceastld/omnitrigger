@@ -426,3 +426,96 @@ fn script_host_waits_for_native_io_and_cancellation_ends_pending_calls() {
     assert_eq!(error.effect_state.as_deref(), Some("unknown"));
     assert!(began.elapsed() < Duration::from_secs(3));
 }
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn script_host_browser_api_keeps_large_values_undefined_and_permission_metadata() {
+    struct BrowserMock(Mutex<Vec<(String, Value)>>);
+    impl NativeHost for BrowserMock {
+        fn call(
+            &self,
+            method: &str,
+            params: Value,
+            _: &CancellationToken,
+        ) -> Result<Value, ActionError> {
+            self.0.lock().unwrap().push((method.into(), params.clone()));
+            if method == "browser.profiles" {
+                return Ok(
+                    json!([{"browser_instance_id":"work","session_id":"s","name":"fixture"}]),
+                );
+            }
+            assert_eq!(method, "browser.call");
+            Ok(match params["method"].as_str().unwrap() {
+                "bookmarks.getTree" => {
+                    json!({"has_value":true,"value":[{"title":"中文😀".repeat(110000)}]})
+                }
+                "test.undefined" => json!({"has_value":false}),
+                "test.null" => json!({"has_value":true,"value":null}),
+                "test.permission" => {
+                    let mut error = ActionError::new("permission_required", "需要书签权限。");
+                    error.method = Some("test.permission".into());
+                    error.effect_state = Some("not_started".into());
+                    error.required_permissions = vec!["bookmarks".into()];
+                    return Err(error);
+                }
+                _ => panic!("unexpected method"),
+            })
+        }
+    }
+    let host = BrowserMock(Mutex::new(Vec::new()));
+    let fixture = Fixture::new(
+        r#"
+        let rejected=0;
+        for(const invalid of [
+            ()=>ctx.browser.call('constructor.x'),
+            ()=>ctx.browser.call('chrome.tabs.query'),
+            ()=>ctx.browser.call('tabs.query',[undefined]),
+            ()=>ctx.browser.call('tabs.query',[NaN]),
+            ()=>ctx.browser.call('tabs.query',[{text:'\ud800'}]),
+            ()=>ctx.browser.call('tabs.query',[],{timeoutMs:0}),
+            ()=>ctx.browser.call('tabs.query',{},{}),
+            ()=>ctx.browser.call('tabs.query',[],{profile:'work',unknown:true}),
+            ()=>ctx.browser.call('tabs.query',['x'.repeat(530000)]),
+        ]) {try{invalid()}catch(error){if(error.effectState==='not_started') rejected++;}}
+        const profiles=ctx.browser.profiles();
+        const tree=ctx.browser.chrome.bookmarks.getTree();
+        const missing=ctx.browser.call('test.undefined',[],{profile:'work',timeoutMs:5000})===undefined;
+        const isNull=ctx.browser.call('test.null')===null;
+        let fault;
+        try{ctx.browser.call('test.permission')}catch(error){fault={code:error.code,effect:error.effectState,method:error.method,permissions:error.requiredPermissions};}
+        return {rejected,profile:profiles[0].browser_instance_id,characters:tree[0].title.length,missing,isNull,fault};
+    "#,
+    );
+    let result = runtime()
+        .execute_with_host(
+            &fixture.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap();
+    assert_eq!(
+        result,
+        json!({"rejected":9,"profile":"work","characters":440000,"missing":true,"isNull":true,"fault":{"code":"permission_required","effect":"not_started","method":"test.permission","permissions":["bookmarks"]}})
+    );
+    let calls = host.0.lock().unwrap();
+    assert_eq!(calls.len(), 5);
+    assert_eq!(
+        calls[2].1,
+        json!({"method":"test.undefined","args":[],"options":{"profile":"work","timeoutMs":5000}})
+    );
+    drop(calls);
+    let fixture = Fixture::new("ctx.browser.call('test.permission'); return {};");
+    let error = runtime()
+        .execute_with_host(
+            &fixture.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "permission_required");
+    assert_eq!(error.method.as_deref(), Some("test.permission"));
+    assert_eq!(error.required_permissions, vec!["bookmarks"]);
+    assert_eq!(host.0.lock().unwrap().len(), 6);
+}

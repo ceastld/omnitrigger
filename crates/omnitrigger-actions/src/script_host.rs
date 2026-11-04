@@ -151,7 +151,7 @@ impl ScriptHostRuntime {
                 return Err(error(code, message, "unknown"));
             }
             if let (Some(bridge), Some(host)) = (&mut bridge, host) {
-                bridge.poll(host, cancellation);
+                bridge.poll_until(host, cancellation, began.checked_add(self.timeout));
             }
             match child.0.try_wait() {
                 Ok(Some(status)) => break status,
@@ -235,8 +235,12 @@ fn parse_response(bytes: &[u8], exited_successfully: bool) -> Result<Value, Acti
             || fault
                 .method
                 .as_ref()
-                .is_some_and(|method| method.len() > 64)
-            || !fault.required_permissions.is_empty()
+                .is_some_and(|method| method.len() > 256)
+            || fault.required_permissions.len() > 32
+            || fault
+                .required_permissions
+                .iter()
+                .any(|permission| permission.is_empty() || permission.len() > 128)
         {
             return Err(invalid());
         }

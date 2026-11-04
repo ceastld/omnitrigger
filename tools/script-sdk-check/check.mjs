@@ -41,7 +41,7 @@ assert.equal(checked.length, 0, report(checked));
 assert.equal(readFileSync(project.sdk_path,'utf8'), readFileSync(join(repo,'crates/omnitrigger-actions/runtime/script-api.d.ts'),'utf8'));
 const original = readFileSync(project.entry_path,'utf8');
 // 编译器必须实际拒绝错误参数和未提供的环境能力，而不只是成功解析声明。
-writeFileSync(project.entry_path, `${original}\nctx.desktop.sendText(123);\nctx.browser.call('tabs.query');\nprocess.exit(0);\ndocument.title;\n`);
+writeFileSync(project.entry_path, `${original}\nctx.desktop.sendText(123);\nctx.browser.missing();\nprocess.exit(0);\ndocument.title;\n`);
 const negative = diagnostics(project.package_root);
 assert(negative.some(item=>item.code === 2345), report(negative));
 assert(negative.some(item=>item.code === 2339), report(negative));

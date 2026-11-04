@@ -237,7 +237,7 @@ node scripts/test-browser-actions.mjs --connector C:/Tools/connector/0.1.0 --ext
 - 未知方法 `api_unavailable/not_started`、无效标签页 `chrome_error`、派发前取消不新建标签页。
 - 真实 Node 宿主 `ctx.browser` 处理约 1 MiB 合成 Unicode 分块结果，最终仅返回摘要。
 
-可选 `--app` 进一步验证本次构建应用的 `--run-action` 入口，包括 Rust 侧 SDK 路径核验；动作包与连接配置均在本次测试目录中生成。
+可选 `--app` 进一步验证本次构建应用的 `--run-action` 入口，包括 Rust 侧 SDK 路径核验；动作包与连接配置均在本次测试目录中生成。另加 `--script-host <宿主完整路径>` 可验证轻量运行时，经应用 Rust 客户端读取书签、处理约 1 MiB 合成结果、保留 `undefined` 和结构化错误，并核验仅本次新建的测试标签页已关闭。此模式禁用 Node 运行时；验收工具本身仍使用 Node / Playwright。连接阶段最多等待 30 秒并记录状态变化，连接未就绪则不开始业务调用。
 
 Chrome 在没有交互的合成历史页面中可能拒绝后退，本次测试在本地页面产生实际交互后核验前后退；RPC 保留原始错误，不将失败转换为成功。页面导航和关闭等操作需要检查后置状态，连接或 API 接纳请求本身不代表页面已完成加载。取消后的副作用、真实运行中的超时和可选权限提示不能靠这组测试宣称可撤销；宿主的超时、取消、结构化错误和未等待调用另有替身回归测试。
 

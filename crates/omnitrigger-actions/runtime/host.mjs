@@ -93,21 +93,7 @@ function browserRequest(method, args, options = {}, profiles = false) {
   return operation;
 }
 
-function chromeProxy(parts = []) {
-  return new Proxy(function () {}, {
-    get(_target, name) {
-      if (name === 'then' || name === 'toJSON' || typeof name !== 'string') return undefined;
-      return chromeProxy([...parts, name]);
-    },
-    apply(_target, _this, args) { return browserRequest(parts.join('.'), args); },
-  });
-}
-
-const browser = Object.freeze({
-  profiles: (options = {}) => browserRequest(undefined, undefined, options, true),
-  call: (method, args = [], options = {}) => browserRequest(method, args, options),
-  chrome: chromeProxy(),
-});
+const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...args));
 
 function nativeCall(method, params) {
   checkCancelled();

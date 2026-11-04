@@ -34,6 +34,7 @@ try {
   const cdp = await context.browser().newBrowserCDPSession();
   const loaded = await cdp.send('Extensions.loadUnpacked', { path: extension });
   report.chromeVersion = context.browser().version();
+  report.extensionId = loaded.id;
   let worker = context.serviceWorkers().find(item => item.url().startsWith(`chrome-extension://${loaded.id}/`));
   worker ??= await context.waitForEvent('serviceworker', { timeout: 15000 });
   // 首次 CDP 加载有时尚未派发安装事件；从扩展自己的状态入口确认并恢复连接。
@@ -42,7 +43,13 @@ try {
   await popup.evaluate(() => chrome.runtime.sendMessage({type:'bridge.enable', enabled:true}));
   await popup.close();
   let profile;
-  for (let attempt = 0; attempt < 100; attempt++) {
+  report.connectionHistory = [];
+  for (let attempt = 0; attempt < 300; attempt++) {
+    if (attempt % 10 === 0) {
+      const status = await worker.evaluate(() => chrome.storage.session.get('bridgeStatus'));
+      const previous = report.connectionHistory.at(-1);
+      if (!previous || previous.bridgeStatus?.state !== status.bridgeStatus?.state || previous.bridgeStatus?.message !== status.bridgeStatus?.message) report.connectionHistory.push(status);
+    }
     const identity = await worker.evaluate(() => chrome.storage.local.get('browserInstanceId'));
     profile = identity.browserInstanceId;
     if (profile && (await client.profiles()).some(item => item.browser_instance_id === profile)) break;
@@ -122,7 +129,7 @@ try {
   report.checks.push('未知 API、无效标签页、派发前取消且没有新建标签页');
   // 在隔离 profile 中放置合成大结果，验证 SDK 分块及脚本内处理，最终只返回摘要。
   await worker.evaluate(() => chrome.storage.local.set({omnitriggerActionFixture: '中文🦀'.repeat(100000)}));
-  const host = await readFile(join(root, 'crates/omnitrigger-actions/runtime/host.mjs'), 'utf8');
+  const host = (await Promise.all(['desktop-api.js','browser-api.js','host.mjs'].map(name => readFile(join(root,'crates/omnitrigger-actions/runtime',name),'utf8')))).join('\n');
   const entry = join(scratch, 'main.mjs');
   await writeFile(entry, `export default async ctx => {
     const profiles = await ctx.browser.profiles();
@@ -165,6 +172,40 @@ try {
     assert.equal(output.status,'succeeded');
     assert.deepEqual(output.output,{connected:true,characters:400000});
     report.checks.push('真实 OmniTrigger --run-action → Rust 配置核验 → Node ctx.browser → Chrome → 摘要结果');
+
+    if (args.includes('--script-host')) {
+      for (const name of ['omnitrigger-browser.exe','omnitrigger-browser-host.exe']) {
+        await writeFile(join(runtime,name),await readFile(join(connector,name)));
+      }
+      await writeFile(join(scratch,'browser-connector.json'),JSON.stringify({enabled:true,registered:true,installed:true,extension_id:loaded.id,version:'0.1.0',cli_path:join(runtime,'omnitrigger-browser.exe')}));
+      const light = join(scratch,'actions/light-browser-test');
+      await mkdir(light,{recursive:true});
+      await writeFile(join(light,'action.json'),JSON.stringify({schema_version:1,id:'light-browser-test',name:'轻量浏览器验收',version:'1.0.0',actions:[{id:'run',title:'轻量浏览器验收',version:1,runtime:'script',entry:'main.js'}]}));
+      await writeFile(join(light,'main.js'),`function main(ctx) {
+        const options={profile:ctx.input.profile};
+        const profiles=ctx.browser.profiles();
+        const tree=ctx.browser.call('bookmarks.getTree',[],options);
+        const value=ctx.browser.call('storage.local.get',['omnitriggerActionFixture'],options);
+        const tab=ctx.browser.call('tabs.create',[{url:ctx.input.url,active:false}],options);
+        const absent=ctx.browser.call('tabs.remove',[tab.id],options)===undefined;
+        let apiError;
+        try {ctx.browser.call('omnitriggerMissing.noSuchMethod',[],options)}
+        catch(e) {apiError={code:e.code,effectState:e.effectState,method:e.method};}
+        return {connected:profiles.some(p=>p.browser_instance_id===ctx.input.profile),characters:value.omnitriggerActionFixture.length,rootId:tree[0].id,undefinedPreserved:absent,apiError};
+      }`);
+      const lightCall=join(light,'call.json');
+      await writeFile(lightCall,JSON.stringify({package_id:'light-browser-test',action_id:'run',action_version:1,input:{profile,url:base+'/light-script'}}));
+      const command=spawn(app,['--config',relative(process.cwd(),join(scratch,'bindings.json')),'--run-action',lightCall],{windowsHide:true,stdio:['ignore','pipe','pipe'],env:{...process.env,OMNITRIGGER_SCRIPT_HOST:option('--script-host'),OMNITRIGGER_NODE:join(scratch,'node-not-installed.exe')}});
+      let output='';let errors='';command.stdout.on('data',chunk=>{output+=chunk});command.stderr.on('data',chunk=>{errors+=chunk});
+      const timeout=setTimeout(()=>command.kill(),30000);
+      try {await new Promise((resolve,reject)=>{command.once('error',reject);command.once('exit',code=>code===0?resolve():reject(Error(`轻量应用调用失败 ${code}: ${errors}`)))});}
+      finally {clearTimeout(timeout);}
+      const result=JSON.parse(output);assert.equal(result.status,'succeeded');
+      assert.deepEqual(result.output,{connected:true,characters:400000,rootId:tree[0].id,undefinedPreserved:true,apiError:{code:'api_unavailable',effectState:'not_started',method:'omnitriggerMissing.noSuchMethod'}});
+      assert(!(await call('tabs.query',[{}])).some(tab=>tab.url===base+'/light-script'));
+      report.lightweight={host:option('--script-host'),nodeRequired:false,output:result.output};
+      report.checks.push('真实轻量宿主 → 应用 Rust 客户端 → Chrome：书签、1 MiB Unicode、原生 undefined、结构化错误及测试标签页关闭后核验');
+    }
   }
   report.ok = true;
 } catch (error) {

@@ -6,6 +6,6 @@
 
 执行需要独立脚本宿主；开发时将宿主放在配置同级 `runtimes/script/host.exe`，或使用 `OMNITRIGGER_SCRIPT_HOST` 指定完整路径。创建工程本身不下载宿主。
 
-`ctx.fs`、`ctx.process`、`ctx.clipboard`、`ctx.open` 和 `ctx.desktop` 为同步 API，不使用 `await`。桌面 API 使用提交动作时的原目标。当前没有 Node / npm 模块、ESM 导入、Promise 入口或浏览器 API。示例只处理输入并返回结果，不操作窗口或剪贴板。
+`ctx.fs`、`ctx.process`、`ctx.clipboard`、`ctx.open`、`ctx.desktop` 和 `ctx.browser` 为同步 API，不使用 `await`。桌面 API 使用提交动作时的原目标。浏览器调用复用已安装并启用的浏览器连接器，支持 `call`、`profiles` 与 `chrome.*`；当前没有 Node / npm 模块、ESM 导入或 Promise 入口。示例只处理输入并返回结果，不操作窗口或剪贴板。
 
 SDK 是创建时附带的类型快照，更新应用不会覆盖本工程。它提供补全和静态参数检查，不代替实际运行时校验；文件或系统操作可能产生副作用，失败后不会自动撤销或重试。

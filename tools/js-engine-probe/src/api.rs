@@ -20,6 +20,8 @@ pub struct ApiError {
     pub(crate) effect_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) method: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) required_permissions: Vec<String>,
 }
 
 fn error(code: &'static str, message: impl ToString) -> ApiError {
@@ -28,6 +30,7 @@ fn error(code: &'static str, message: impl ToString) -> ApiError {
         message: message.to_string(),
         effect_state: None,
         method: None,
+        required_permissions: Vec::new(),
     }
 }
 

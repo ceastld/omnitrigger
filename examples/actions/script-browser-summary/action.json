@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "id": "script-browser-summary",
+  "name": "脚本书签统计",
+  "version": "1.0.0",
+  "actions": [{"id":"count","title":"统计浏览器书签","version":1,"runtime":"script","entry":"main.js"}]
+}
