@@ -2,8 +2,8 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync} from 'node:fs';
-import {dirname, join, resolve} from 'node:path';
+import {cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
+import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -102,7 +102,7 @@ for (const [archive,reason] of [[damaged,/文件校验失败/],[wrongEngine,/自
   assert.equal(readFileSync(pointer,'utf8'),firstPointer);
   assert.equal(hash(readFileSync(firstHost)),hash(originalHost));
 }
-assert(!existsSync(join(root,'runtimes/script/outside.txt')));
+assert(!readdirSync(join(root,'runtimes/script'),{recursive:true}).some(name=>basename(name)==='outside.txt'));
 checks.push('hash_layout_duplicate_identity_and_startup_failures_preserve_active_host');
 
 const changed = Buffer.from(originalHost);
@@ -115,11 +115,13 @@ try {
 } finally { writeFileSync(firstHost,originalHost); }
 checks.push('same_size_installed_image_tampering_rejected_before_execution');
 
+const legacyHost=join(root,'runtimes/script/host.exe');
+cpSync(firstHost,legacyHost,{errorOnExist:true});
 try {
   writeFileSync(pointer,JSON.stringify({...first,manifest_sha256:'0'.repeat(64)}));
   const failure=cli(['--run-action',project.call_path],1);
   assert.equal(failure.error.code,'runtime_unavailable');
-} finally { writeFileSync(pointer,firstPointer); }
+} finally { writeFileSync(pointer,firstPointer); unlinkSync(legacyHost); }
 checks.push('invalid_managed_pointer_does_not_fall_back');
 
 const next = variant('next',folder=>{
