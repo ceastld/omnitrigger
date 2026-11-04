@@ -690,6 +690,51 @@ fn script_keyboard_recipe_preserves_steps_timing_and_stops_after_faults() {
 
 #[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn script_tab_calls_keep_left_control_and_use_only_the_original_target() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/actions");
+    let catalog = omnitrigger_actions::PackageCatalog::load(&root);
+    for (source, key) in [
+        (
+            include_str!("../../../examples/actions/keyboard-sequence/close-tab-script.json"),
+            87,
+        ),
+        (
+            include_str!("../../../examples/actions/keyboard-sequence/new-tab-script.json"),
+            84,
+        ),
+    ] {
+        let call: ActionCall = serde_json::from_str(source).unwrap();
+        let action = catalog.resolve(&call).unwrap();
+        let host = RecordingHost::default();
+        let output = runtime()
+            .execute_with_host(&action, &context(), &CancellationToken::new(), Some(&host))
+            .unwrap();
+        assert_eq!(output, json!({"inputSubmitted":true,"steps":1}));
+        assert_eq!(
+            *host.calls.lock().unwrap(),
+            vec![
+                ("target.info".into(), json!({})),
+                (
+                    "keyboard.sequence".into(),
+                    json!({"modifiers":[162],"keys":[key],"key_down_delay_ms":0})
+                ),
+            ]
+        );
+        let host = RecordingHost {
+            fail: true,
+            ..Default::default()
+        };
+        let fault = runtime()
+            .execute_with_host(&action, &context(), &CancellationToken::new(), Some(&host))
+            .unwrap_err();
+        assert_eq!(fault.code, "target_changed");
+        assert_eq!(fault.effect_state.as_deref(), Some("not_started"));
+        assert_eq!(host.calls.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
 fn script_keyboard_recipe_checks_late_parameters_and_host_call_budget() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/actions");
     let catalog = omnitrigger_actions::PackageCatalog::load(&root);

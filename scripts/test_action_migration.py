@@ -6,7 +6,18 @@ import tempfile
 import unittest
 
 from plan_action_migration import build_plan, main, ranked_actions, shortcut_action, same_process_scope, process_scopes_overlap
-from action_body_projection import keyboard_body
+from action_body_projection import action_body, keyboard_body
+
+
+def key_step_record(key=87, params=None, **changes):
+    inputs = {"keys": {"VarKey": None, "Value": json.dumps({"CtrlKeys": [162], "Keys": [key]})}}
+    inputs.update(params or {})
+    body = {"LimitSingleInstance": False, "SummaryExpression": "$$", "SubPrograms": [], "Variables": [],
+            "Steps": [{"StepRunnerKey": "sys:keyInput", "InputParams": inputs, "Disabled": False}]}
+    body.update(changes)
+    text = json.dumps(body)
+    return {"Id": "action-a", "ActionType": "XAction", "UseTemplate": False, "Resolution": "local",
+            "StoredData": text, "EffectiveData": text}
 
 
 def fixture():
@@ -25,6 +36,61 @@ def fixture():
 
 
 class MigrationTests(unittest.TestCase):
+    def test_literal_key_step_uses_independent_script_and_ignores_only_disabled_steps(self):
+        for key in (87, 84):
+            record = key_step_record(key)
+            body = json.loads(record['EffectiveData'])
+            body['Steps'].insert(0, {'StepRunnerKey':'sys:unknown', 'Disabled':True})
+            record.update(StoredData=json.dumps(body), EffectiveData=json.dumps(body))
+            original = json.dumps(record, sort_keys=True)
+            native = action_body(record, {'DefaultModifiedKeyDownDelay':0})['native_action']
+            self.assertEqual(native, {'kind':'invoke','package_id':'examples.keyboard-sequence',
+                'action_id':'recipe-script','action_version':1,
+                'input':{'steps':[{'kind':'sequence','modifiers':[162],'keys':[key]}]}})
+            self.assertEqual(json.dumps(record, sort_keys=True), original)
+        for hold, setting, expected in [('-1',10,10),('0',10,0),('25',0,25)]:
+            record = key_step_record(params={'holdMs':{'VarKey':None,'Value':hold}})
+            self.assertEqual(action_body(record, {'DefaultModifiedKeyDownDelay':setting})['native_action']['input']['keyDownDelayMs'],expected)
+
+    def test_key_step_does_not_flatten_dynamic_branch_repeat_or_extra_behavior(self):
+        records = [key_step_record(LimitSingleInstance=True), key_step_record(SummaryExpression='$=dynamic'),
+            key_step_record(Variables=[{'Type':0,'DefaultValue':'$=dynamic','SaveState':False,'IsInput':False,'IsOutput':False}]),
+            key_step_record(Variables=[{'Type':0,'DefaultValue':'','SaveState':True,'IsInput':False,'IsOutput':False}]),
+            key_step_record(params={'repeat':{'VarKey':None,'Value':'2'}}),
+            key_step_record(params={'holdMs':{'VarKey':None,'Value':'1001'}}),
+            key_step_record(params={'keys':{'VarKey':'dynamic','Value':None}})]
+        for field,value in [('IfSteps',[{'StepRunnerKey':'sys:unknown'}]), ('DelayMs',10),
+                            ('OutputParams',{'result':'saved'}), ('Disabled','false'), ('Unknown',True)]:
+            record=key_step_record(); body=json.loads(record['EffectiveData']); body['Steps'][0][field]=value
+            record.update(StoredData=json.dumps(body),EffectiveData=json.dumps(body)); records.append(record)
+        for keys in ({'CtrlKeys':[17],'Keys':[87]}, {'CtrlKeys':[162,163],'Keys':[87]},
+                     {'CtrlKeys':[True],'Keys':[87]}, {'CtrlKeys':[162],'Keys':[87,84]},
+                     {'CtrlKeys':[162],'Keys':[None]}, {'CtrlKeys':[162],'Keys':[87],'Other':1}):
+            records.append(key_step_record(params={'keys':{'VarKey':None,'Value':json.dumps(keys)}}))
+        for record in records:
+            self.assertIsNone(action_body(record, {'DefaultModifiedKeyDownDelay':0})['native_action'])
+        record=key_step_record()
+        for change in ({'UseTemplate':True},{'Resolution':'template_cache_miss'},{'StoredData':'old'}):
+            self.assertIsNone(action_body(dict(record,**change), {'DefaultModifiedKeyDownDelay':0})['native_action'])
+        self.assertIsNone(action_body(record,{})['native_action'])
+        duplicate=record['EffectiveData'].replace('"LimitSingleInstance": false','"LimitSingleInstance": true, "LimitSingleInstance": false')
+        self.assertIsNone(action_body(dict(record,StoredData=duplicate,EffectiveData=duplicate),{'DefaultModifiedKeyDownDelay':0})['native_action'])
+
+    def test_selected_statistics_only_actions_get_calls_without_inventing_bindings(self):
+        data=fixture(); data['source']['PowerKeys']={}
+        result=build_plan(**data,body_records=[key_step_record()])
+        row=result['actions'][0]
+        self.assertEqual(row['binding_keys'],[])
+        self.assertEqual(row['status'],'needs_runtime_verification')
+        self.assertEqual(row['implementation']['native_action']['action_id'],'recipe-script')
+        self.assertEqual(result['bindings'],[])
+        self.assertEqual(result['summary']['selected_action_available'],1)
+        self.assertFalse(result['complete'])
+        data['usage']['Days30']['Data']['action-a']=0
+        deferred=build_plan(**data,body_records=[key_step_record()])['actions'][0]
+        self.assertEqual(deferred['status'],'deferred_unused')
+        self.assertNotIn('implementation',deferred)
+
     def test_builtin_brightness_reuses_native_action_and_keeps_source_policy_reviews(self):
         for name, delta in (('monitor_brightness_increase',5),('monitor_brightness_decrease',-5)):
             data = fixture()

@@ -4,6 +4,8 @@
 
 [call-script.json](call-script.json) 演示左 Shift+Home、等待 30ms 和 50ms、Backspace。它删除光标到行首的内容；光标已在行首时可能合并上一行，Home 的含义也可能因编辑器而异。示例调用会真实发送输入，运行前应使用测试文档。
 
+[close-tab-script.json](close-tab-script.json) 与 [new-tab-script.json](new-tab-script.json) 分别向原目标发送左 Ctrl+W、左 Ctrl+T，复用同一入口。它们不查询浏览器连接器；实际效果取决于原目标软件如何处理快捷键，不保证一定关闭或新建标签页。
+
 输入沿用同包已有 `recipe` 动作的格式：
 
 | 步骤 | 参数与行为 |

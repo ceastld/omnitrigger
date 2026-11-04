@@ -5,7 +5,7 @@ import collections
 import hashlib
 import json
 from pathlib import Path
-from action_body_projection import keyboard_body
+from action_body_projection import action_body
 from mouse_action_projection import mouse_trigger, settings_snapshot
 
 
@@ -67,7 +67,7 @@ def operation(row, settings=None, body_records=None):
     if row.get("ActionType") == 12 and body_records is not None:
         identity = normalized_id(row.get("Data"))
         record = body_records.get(identity)
-        result = (keyboard_body(record, settings or {}) if record is not None else
+        result = (action_body(record, settings or {}) if record is not None else
                   {"status":"needs_source_review", "native_action":None, "action_gaps":["source_body_not_in_snapshot"]})
         if row.get("Message"):
             result["action_gaps"].append("notification_side_effect")
@@ -505,6 +505,11 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20, body
                         "historical_count": usage["Days0"]["Data"].get(identity, 0),
                         "status": "unresolved_identity" if entry is None else "deferred_unused"
                         if defer else "needs_source_review"})
+        if entry is not None and not defer and body_records is not None:
+            implementation = operation({"ActionType": 12, "Data": identity}, source.get("InputSettings"), body_records)
+            actions[-1]["implementation"] = implementation
+            if implementation["status"] == "native_action_available" and not implementation.get("action_gaps"):
+                actions[-1]["status"] = "needs_runtime_verification"
     return {"version": 1, "complete": False,
             "criteria": {"top_limit": limit, "rank_before_catalog_filter": True,
                          "excluded_feature_counters": sorted(excluded),
@@ -512,6 +517,7 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20, body
                          "historical_source": "days=0", "automatic_deletion": False},
             "summary": {"loaded_actions": len(items), "enabled_bindings": len(bindings),
                         "selected_actions": len(actions),
+                        "selected_action_available": sum(row.get("implementation", {}).get("status") == "native_action_available" for row in actions),
                         "binding_status": dict(collections.Counter(row["status"] for row in bindings)),
                         "trigger_gaps": dict(collections.Counter(gap for row in bindings for gap in row["trigger_gaps"])),
                         "normalizations": dict(collections.Counter(note["kind"] for row in bindings for note in row.get("source_normalizations", []))),

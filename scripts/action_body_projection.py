@@ -40,6 +40,100 @@ def _ordinary(key):
                                    or 186 <= key <= 192 or 219 <= key <= 223 or 246 <= key <= 254))
 
 
+def action_body(record, settings):
+    if record.get("ActionType") == "XAction":
+        return key_step_body(record, settings)
+    return keyboard_body(record, settings)
+
+
+def key_step_body(record, settings):
+    """将单个字面按键步骤交给现有脚本 API；不解释条件、变量或子程序。"""
+    def fail(code):
+        return {"status": "needs_source_review", "action_gaps": [code], "native_action": None}
+    if record.get("UseTemplate") is not False or record.get("Resolution") != "local":
+        return fail("source_body_resolution_required")
+    data = record.get("EffectiveData")
+    if not isinstance(data, str) or data != record.get("StoredData"):
+        return fail("source_body_data_unverified")
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("正文含重复字段")
+            result[key] = value
+        return result
+    try:
+        body = json.loads(data, object_pairs_hook=unique_object)
+        if (not isinstance(body, dict) or set(body) - {"LimitSingleInstance", "SummaryExpression", "SubPrograms", "Variables", "Steps"}
+                or body.get("LimitSingleInstance") is not False or body.get("SubPrograms") != []
+                or body.get("SummaryExpression", "") not in ("", "$$")):
+            return fail("source_step_action_metadata_review")
+        variables = body.get("Variables")
+        if not isinstance(variables, list) or any(not isinstance(var, dict)
+                or any(var.get(key) is not False for key in ("SaveState", "IsInput", "IsOutput"))
+                or var.get("DefaultValue") not in ("", None) or type(var.get("Type")) is not int or var.get("Type") != 0
+                or var.get("CustomType") is not None or var.get("TableDef") is not None for var in variables):
+            return fail("source_step_variables_review")
+        steps = body.get("Steps")
+        if not isinstance(steps, list) or not 1 <= len(steps) <= 32:
+            return fail("source_body_step_limit")
+        if any(not isinstance(step, dict) or type(step.get("Disabled", False)) is not bool for step in steps):
+            return fail("source_step_disabled_invalid")
+        active = [step for step in steps if not step.get("Disabled", False)]
+        if len(active) != 1:
+            return fail("source_step_sequence_review")
+        step = active[0]
+        if (step.get("StepRunnerKey") != "sys:keyInput" or set(step) - {
+                "StepRunnerKey", "InputParams", "OutputParams", "IfSteps", "ElseSteps", "Note", "Disabled", "Collapsed", "DelayMs"}
+                or step.get("IfSteps") not in (None, []) or step.get("ElseSteps") not in (None, [])
+                or step.get("OutputParams", {}) != {} or type(step.get("DelayMs", 0)) is not int or step.get("DelayMs", 0) != 0):
+            return fail("source_step_behavior_review")
+        params = step["InputParams"]
+        if not isinstance(params, dict) or set(params) - {"keys", "repeat", "interval", "holdMs"}:
+            return fail("source_step_parameters_review")
+        def literal(name, default=None):
+            if name not in params:
+                return default
+            param = params[name]
+            if not isinstance(param, dict) or set(param) != {"VarKey", "Value"} or param["VarKey"] is not None:
+                raise ValueError("仅支持字面参数")
+            return param["Value"]
+        def integer(name, default):
+            value = literal(name, default)
+            if isinstance(value, str) and re.fullmatch(r"[+-]?[0-9]+", value):
+                value = int(value)
+            if type(value) is not int or not -(2**31) <= value < 2**31:
+                raise ValueError("需要整数参数")
+            return value
+        if integer("repeat", 1) != 1:
+            return fail("source_step_repeat_review")
+        integer("interval", 1)  # 单次输入不使用重复间隔，但动态参数仍不能被忽略。
+        hold = integer("holdMs", -1)
+        keys = json.loads(literal("keys"), object_pairs_hook=unique_object)
+        if not isinstance(keys, dict) or set(keys) != {"CtrlKeys", "Keys"}:
+            return fail("source_step_keys_invalid")
+        modifiers, terminals = keys["CtrlKeys"], keys["Keys"]
+        if (not isinstance(modifiers, list) or len(modifiers) > 4
+                or any(type(key) is not int or key not in (91, 92, 160, 161, 162, 163, 164, 165) for key in modifiers)
+                or len(set(modifiers)) != len(modifiers) or not isinstance(terminals, list) or len(terminals) != 1
+                or type(terminals[0]) is not int or not _ordinary(terminals[0])):
+            return fail("source_step_keys_invalid")
+        families = [{91: 3, 92: 3, 160: 0, 161: 0, 162: 1, 163: 1, 164: 2, 165: 2}[key] for key in modifiers]
+        if len(set(families)) != len(families):
+            return fail("source_step_keys_invalid")
+        delay = settings.get("DefaultModifiedKeyDownDelay") if hold < 0 else hold
+        if type(delay) is not int or delay > 1000:
+            return fail("source_key_down_delay_unknown")
+        inputs = {"steps": [{"kind": "sequence", "modifiers": modifiers, "keys": terminals}]}
+        if hold >= 0 or delay > 0:
+            inputs["keyDownDelayMs"] = max(0, delay)
+        return {"status": "native_action_available", "action_gaps": [],
+                "native_action": {"kind": "invoke", "package_id": "examples.keyboard-sequence",
+                                  "action_id": "recipe-script", "action_version": 1, "input": inputs}}
+    except (ValueError, TypeError, KeyError, RecursionError):
+        return fail("source_step_literal_data_required")
+
+
 def keyboard_body(record, settings):
     """只使用明确的本机正文；模板与未知来源不会回退到旧 StoredData。"""
     def fail(code):

@@ -1,0 +1,6 @@
+{
+  "package_id": "examples.keyboard-sequence",
+  "action_id": "recipe-script",
+  "action_version": 1,
+  "input": {"steps": [{"kind": "sequence", "modifiers": [162], "keys": [84]}]}
+}
