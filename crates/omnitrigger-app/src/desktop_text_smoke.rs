@@ -247,6 +247,43 @@ fn text(edit: HWND) -> String {
 }
 
 struct Running<'a>(&'a ActionService);
+fn reject_held_clipboard_smoke(path: &std::path::Path) -> Result<(), String> {
+    if path.try_exists().map_err(|error| error.to_string())? {
+        return Err("采集归属尚未隔离：禁止重放会改写系统剪贴板的手工实测。".into());
+    }
+    Ok(())
+}
+
+fn native_clipboard_smoke_preflight(profile: Option<&std::path::Path>) -> Result<(), String> {
+    reject_held_clipboard_smoke(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.tmp/native-clipboard-test-hold.marker"),
+    )?;
+    if let Some(profile) = profile {
+        reject_held_clipboard_smoke(&profile.join("native-clipboard-tests-disabled.marker"))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn held_clipboard_fixture_is_rejected_without_native_effects() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../.tmp/clipboard-hold-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let marker = root.join("hold");
+    assert!(reject_held_clipboard_smoke(&marker).is_ok());
+    std::fs::write(&marker, "source collector not isolated").unwrap();
+    assert!(reject_held_clipboard_smoke(&marker).is_err());
+    std::fs::remove_file(marker).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
 impl Drop for Running<'_> {
     fn drop(&mut self) {
         self.0.cancel_all();
@@ -306,6 +343,7 @@ fn cli_run(
 #[test]
 #[ignore = "激活专用输入框；支持完整备份时验证真实剪贴板并恢复"]
 fn interactive_desktop_text_smoke() {
+    native_clipboard_smoke_preflight(None).unwrap();
     struct Window(HWND, HWND);
     impl Drop for Window {
         fn drop(&mut self) {
@@ -603,6 +641,7 @@ fn legacy_host_click_smoke(scenario: &str) {
     let root = PathBuf::from(
         std::env::var_os("OMNITRIGGER_MENU_HOST_ROOT").expect("需要隔离的保存配置目录"),
     );
+    native_clipboard_smoke_preflight(Some(&root)).unwrap();
     let status_path = PathBuf::from(std::env::var_os("OMNITRIGGER_MENU_SMOKE_STATUS").unwrap());
     let host_exe = std::env::var("OMNITRIGGER_MENU_HOST_EXE").unwrap();
     let omni_exe = std::env::var("OMNITRIGGER_CLI_SMOKE_EXE").unwrap();
