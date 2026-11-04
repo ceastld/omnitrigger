@@ -20,8 +20,11 @@ struct Fixture {
 }
 impl Fixture {
     fn new(source: &str) -> Self {
+        Self::named(source, "")
+    }
+    fn named(source: &str, name: &str) -> Self {
         let root = std::env::temp_dir().join(format!(
-            "omnitrigger-script-test-{}-{}",
+            "omnitrigger-script-test-{name}{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -122,8 +125,11 @@ fn installed_image_digest_is_checked_before_any_process_starts() {
 #[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
 fn script_diagnostics_associate_entry_paths_without_changing_fault_fields() {
-    let fixture =
-        Fixture::new("function fail() {\n throw new Error('entry-diagnostic');\n}\nreturn fail();");
+    // 较长入口路径也不能在应用二次裁剪时挤掉用户调用栈。
+    let fixture = Fixture::named(
+        "function fail() {\n throw new Error('entry-diagnostic');\n}\nreturn fail();",
+        &"diagnostic-".repeat(9),
+    );
     let entry_path = fixture.root.join("main.js").canonicalize().unwrap();
     let assert_entry = |message: &str| {
         let reported = message

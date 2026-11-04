@@ -261,12 +261,21 @@ impl ScriptHostRuntime {
                 );
                 const TAIL: &str = "\n…（诊断已截断）";
                 if fault.message.len() > 16 * 1024 {
-                    let mut end = 16 * 1024 - TAIL.len();
+                    const SEPARATOR: &str = "\n…\n";
+                    let budget = 16 * 1024 - TAIL.len() - SEPARATOR.len();
+                    let mut end = budget / 2;
                     while !fault.message.is_char_boundary(end) {
                         end -= 1;
                     }
-                    fault.message.truncate(end);
-                    fault.message.push_str(TAIL);
+                    let mut start = fault.message.len() - (budget - end);
+                    while !fault.message.is_char_boundary(start) {
+                        start += 1;
+                    }
+                    fault.message = format!(
+                        "{}{SEPARATOR}{}{TAIL}",
+                        &fault.message[..end],
+                        &fault.message[start..]
+                    );
                 }
             }
             fault
