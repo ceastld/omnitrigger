@@ -1,4 +1,4 @@
-"""侧键动作的离线投影；保留身份采样、捕获生命周期和队列差异，不启用绑定。"""
+"""鼠标需求的离线核对；保留身份采样、捕获生命周期和队列差异，不启用绑定。"""
 import json
 
 
@@ -35,12 +35,58 @@ def names(values):
     return result
 
 
-def mouse_trigger(rule, settings):
+def mouse_requirements(rule):
+    """已核对的 V1 控制键与区域含义；识别枚举不等于已经实现其完整匹配策略。"""
+    key, location = rule.get("ControlKey"), rule.get("Location")
     gaps = []
-    if rule.get("ControlKey") not in (5, 6):
-        return {"trigger": None, "trigger_gaps": ["mouse_control_key_semantics"]}
+    if "ControlKey" not in rule:
+        control = {"kind":"unknown"}
+        gaps.append("mouse_control_key_missing")
+    elif key is None or type(key) is int and key == 0:
+        control = {"kind":"unmodified"}
+        gaps.append("mouse_unmodified_control_exclusions")
+    elif type(key) is int and key in (5, 6):
+        control = {"kind":"mouse_button", "button":"x1" if key == 5 else "x2"}
+    elif type(key) is int and key in (1, 2, 4):
+        control = {"kind":"mouse_button", "button":{1:"left",2:"right",4:"middle"}[key]}
+        gaps.append("mouse_primary_button_capture")
+    elif type(key) is int and key in (16, 17, 18):
+        control = {"kind":"modifier_family", "family":{16:"shift",17:"control",18:"alt"}[key]}
+        gaps.extend(("mouse_either_side_modifier_matching", "mouse_modifier_state_sampling"))
+    elif type(key) is int and key in (160,161,162,163,164,165,91,92):
+        family, side = {160:("shift","left"),161:("shift","right"),162:("control","left"),
+                        163:("control","right"),164:("alt","left"),165:("alt","right"),
+                        91:("windows","left"),92:("windows","right")}[key]
+        control = {"kind":"modifier_key", "key":key, "side":side, "family":family}
+        if key != 164:
+            gaps.append("mouse_explicit_modifier_mapping_review")
+    elif type(key) is int and 7 <= key <= 254:
+        control = {"kind":"captured_keyboard_key", "key":key}
+        gaps.append("mouse_keyboard_capture_ownership")
+    else:
+        control = {"kind":"unknown", "value":key}
+        gaps.append("mouse_control_key_semantics")
+    edges = {48:"top",192:"bottom",196608:"left",786432:"right"}
+    if type(location) is int and location == 0:
+        region = {"kind":"unrestricted"}
+    elif type(location) is int and location in edges:
+        region = {"kind":"screen_edge", "edge":edges[location], "thickness_px":1}
+        gaps.extend(("mouse_screen_edge_intersection_priority", "mouse_screen_edge_seam_policy"))
+    else:
+        region = {"kind":"unsupported", "value":location}
+        gaps.append("unsupported_mouse_Location")
+    return {"control":control, "region":region, "unresolved":sorted(set(gaps))}
+
+
+def mouse_trigger(rule, settings):
+    requirements = mouse_requirements(rule)
+    def unavailable(gaps):
+        return {"trigger":None, "trigger_gaps":sorted(set(gaps)), "source_requirements":requirements}
+    if requirements["unresolved"]:
+        return unavailable(requirements["unresolved"])
+    gaps = []
     if not isinstance(settings, dict) or any(key not in settings for key in ("SpecialExeList", "DisableOnFullscreenApp", "EnableReverseVScroll")):
-        return {"trigger": None, "trigger_gaps": ["mouse_global_settings_missing"]}
+        return unavailable(["mouse_global_settings_missing"])
     flags = {"IsEnabled":True,"Operation":4,"AdornKey":None,"Location":0,"TriggerDistance":0,"DebounceMs":0,
              "TriggerActionWhenMouseUp":False,"DisableInFullScreen":False,
              "LimitOnPrimaryScreen":False,"ActivatePointingWindow":False}
@@ -54,9 +100,12 @@ def mouse_trigger(rule, settings):
         gaps.append("mouse_event_type")
     if kind in (11,12) and settings["EnableReverseVScroll"] is not False:
         gaps.append("mouse_reverse_scroll_policy")
-    control = "x1" if rule["ControlKey"] == 5 else "x2"
+    keyboard_control = requirements["control"]["kind"] == "modifier_key"
+    control = None if keyboard_control else requirements["control"]["button"]
     if kind == 4:
-        button = {1048576:"left",2097152:"right",4194304:"middle",8388608:"x1",16777216:"x2"}.get(rule.get("MouseButton"))
+        mouse_button = rule.get("MouseButton")
+        button = ({1048576:"left",2097152:"right",4194304:"middle",8388608:"x1",16777216:"x2"}.get(mouse_button)
+                  if type(mouse_button) is int else None)
         if button is None or button == control:
             gaps.append("mouse_terminal_button")
         activation = {"kind":"press", "value":{"kind":button}}
@@ -76,12 +125,16 @@ def mouse_trigger(rule, settings):
         gaps.append("unsupported_mouse_process_list")
         allow, deny = [], []
     if gaps:
-        return {"trigger":None,"trigger_gaps":sorted(set(gaps))}
+        return unavailable(gaps)
     scope = {"identity":"shell_context"}
     if allow: scope["allow"]=allow
     if deny: scope["deny"]=deny
-    trigger = {"held":[{"kind":control}],"activation":activation,"pointer_scope":scope}
+    held = {"kind":"key", "value":rule["ControlKey"]} if keyboard_control else {"kind":control}
+    trigger = {"held":[held],"activation":activation,"pointer_scope":scope}
     if kind in (11,12): trigger["wheel"]="packet"
-    return {"trigger":trigger,"trigger_gaps":["mouse_prefix_lifecycle_review", "mouse_other_held_buttons_review",
+    reviews = (["mouse_modifier_capture_delivery_review", "mouse_modifier_state_sampling", "mouse_other_held_keys_review"]
+               if keyboard_control else ["mouse_prefix_lifecycle_review"])
+    return {"trigger":trigger,"trigger_gaps":reviews + ["mouse_other_held_buttons_review",
         "mouse_queue_drop_delay_review", "pointer_host_identity_mapping", "pointer_context_sampling"],
+        "source_requirements":requirements,
         "source_normalizations":[{"kind":"mouse_whitelist_precedence","bypasses_blacklists":bool(allow)}]}

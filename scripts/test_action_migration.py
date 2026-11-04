@@ -25,6 +25,34 @@ def fixture():
 
 
 class MigrationTests(unittest.TestCase):
+    def test_builtin_brightness_reuses_native_action_and_keeps_source_policy_reviews(self):
+        for name, delta in (('monitor_brightness_increase',5),('monitor_brightness_decrease',-5)):
+            data = fixture()
+            source = data['source']['PowerKeys']['20']['KeyActions'][0]
+            source.update(ActionType=11, Data=name)
+            result = build_plan(**data)
+            row = result['bindings'][0]
+            native = row['operation']['native_action']
+            self.assertEqual(native, {'kind':'adjust_system','target':'brightness','delta_percent':delta})
+            self.assertEqual(row['status'], 'needs_action_semantics_review')
+            self.assertEqual(result['summary']['native_action_requires_semantics_review'], 1)
+            self.assertEqual(row['operation']['action_gaps'], ['brightness_target_sampling_review','brightness_quantization_review'])
+            data['current']['bindings'] = [dict(row['trigger'], id=99, enabled=True, action=native)]
+            checked = build_plan(**data)['bindings'][0]
+            self.assertEqual(checked['existing_trigger_ids'], [99])
+            self.assertEqual(checked['matching_action_configuration_ids'], [99])
+            self.assertEqual(checked['equivalent_configuration_ids'], [])
+            source['Message'] = '另有通知'
+            self.assertIn('notification_side_effect', build_plan(**data)['bindings'][0]['operation']['action_gaps'])
+        for value in ('windows_volume_up','windows_volume_down','monitor_brightness_increase ',None,[]):
+            data = fixture()
+            data['source']['PowerKeys']['20']['KeyActions'][0].update(ActionType=11, Data=value)
+            self.assertNotIn('native_action', build_plan(**data)['bindings'][0]['operation'])
+        for operation in (2, 4.0, '4', None):
+            data = fixture()
+            data['source']['PowerKeys']['20']['KeyActions'][0].update(ActionType=11, Data='monitor_brightness_increase', Operation=operation)
+            self.assertNotIn('native_action', build_plan(**data)['bindings'][0]['operation'])
+
     def test_keyboard_body_preserves_automatic_wait_before_explicit_wait(self):
         record = {"ActionType":"SendKeys", "UseTemplate":False, "Resolution":"local",
                   "StoredData":"@LSHIFT+HOME\r\n;50\r\n@+BACK", "EffectiveData":"@LSHIFT+HOME\r\n;50\r\n@+BACK"}

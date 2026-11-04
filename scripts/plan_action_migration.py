@@ -54,6 +54,16 @@ def shortcut_action(data):
 
 
 def operation(row, settings=None, body_records=None):
+    if (type(row.get("ActionType")) is int and row["ActionType"] == 11
+            and type(row.get("Operation", 4)) is int and row.get("Operation", 4) == 4):
+        brightness = {"monitor_brightness_increase":5, "monitor_brightness_decrease":-5}
+        if isinstance(row.get("Data"), str) and row["Data"] in brightness:
+            gaps = ["brightness_target_sampling_review", "brightness_quantization_review"]
+            if row.get("Message"):
+                gaps.append("notification_side_effect")
+            return {"status":"native_action_available", "source_type":11,
+                    "native_action":{"kind":"adjust_system", "target":"brightness",
+                                     "delta_percent":brightness[row["Data"]]}, "action_gaps":gaps}
     if row.get("ActionType") == 12 and body_records is not None:
         identity = normalized_id(row.get("Data"))
         record = body_records.get(identity)
@@ -367,7 +377,7 @@ def project_source_precedence(bindings, current):
         if row["kind"] != "power_key" or row["trigger"] is None:
             continue
         equivalents = []
-        if not row["trigger_gaps"]:
+        if not row["trigger_gaps"] and not row["operation"].get("action_gaps"):
             for identity in row["matching_action_configuration_ids"]:
                 existing = current_by_id[identity]
                 if (existing.get("enabled") and not existing.get("conditions")
@@ -377,7 +387,8 @@ def project_source_precedence(bindings, current):
         row["equivalent_configuration_ids"] = equivalents
         row["status"] = ("configuration_equivalent_unverified" if equivalents else "needs_trigger_support"
                          if row["trigger_gaps"] else "needs_action_support"
-                         if row["operation"]["status"] != "native_action_available" else "needs_runtime_verification")
+                         if row["operation"]["status"] != "native_action_available" else "needs_action_semantics_review"
+                         if row["operation"].get("action_gaps") else "needs_runtime_verification")
 
 
 def build_plan(source, catalog_payload, usage, counters, current, limit=20, body_records=None, mouse_settings=None):
@@ -433,7 +444,7 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20, body
             action_matches = [row["id"] for row in overlap
                               if row.get("action") == native.get("native_action")
                               and native["status"] == "native_action_available"]
-            equivalents = [row["id"] for row in overlap if not gaps and row.get("enabled")
+            equivalents = [row["id"] for row in overlap if not gaps and not native.get("action_gaps") and row.get("enabled")
                            and not row.get("conditions") and row["id"] in action_matches
                            and same_process_scope(row.get("process_scope", {}), trigger.get("process_scope", {}))
                            and same_keyboard_policy(row.get("keyboard", {}), trigger["keyboard"])]
@@ -450,6 +461,7 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20, body
                              else "configuration_equivalent_unverified" if equivalents
                              else "needs_trigger_support" if gaps
                              else "needs_action_support" if native["status"] != "native_action_available"
+                             else "needs_action_semantics_review" if native.get("action_gaps")
                              else "needs_runtime_verification"})
             if rule.get("ActionType") == 12:
                 references[normalized_id(rule.get("Data"))].append(identity)
@@ -503,7 +515,9 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20, body
                         "binding_status": dict(collections.Counter(row["status"] for row in bindings)),
                         "trigger_gaps": dict(collections.Counter(gap for row in bindings for gap in row["trigger_gaps"])),
                         "normalizations": dict(collections.Counter(note["kind"] for row in bindings for note in row.get("source_normalizations", []))),
-                        "native_action_available": sum(row["operation"]["status"] == "native_action_available" for row in bindings)},
+                        "native_action_available": sum(row["operation"]["status"] == "native_action_available" for row in bindings),
+                        "native_action_requires_semantics_review": sum(row["operation"]["status"] == "native_action_available"
+                            and bool(row["operation"].get("action_gaps")) for row in bindings)},
             "recent30_top": recent, "historical_top": historical,
             "bindings": bindings, "actions": actions}
 

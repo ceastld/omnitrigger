@@ -20,6 +20,10 @@ python scripts/plan_action_migration.py `
 
 目前可为无位置、无去抖、无需激活窗口的侧键 1／2 加滚轮或鼠标按下规则生成触发描述：滚轮使用逐事件策略，进程条件放入 `pointer_scope`。白名单非空时保留其优先于黑名单的语义，其他情况合并全局和本条排除；不能表达的路径名单不会被丢弃后继续转换。列表记录当前配置中同组合的编号，只有通知或不同动作时不会标成已迁移。前缀生命周期、额外鼠标按住状态、队列调度和窗口身份差异继续作为显式缺口；生成触发描述不代表可以直接启用。
 
+全局鼠标行的 `source_requirements` 分别记录控制键与区域含义。无控制键、通用 Ctrl／Shift／Alt、需要捕获所有权的普通键、明确左右侧的修饰键不再混为同一种缺口。明确的左 Alt（VK 164）加鼠标规则可生成候选描述，保留修饰键按下交付、异步状态采样、额外按住键和队列差异；不会将通用 Ctrl 擅自改成左 Ctrl。
+
+完整上、下、左、右边框会记录为 1px 的源区域需求，但暂不自动转换边缘规则。无控制键时的排除条件、相邻边角的列表优先顺序，以及多屏接缝策略仍待核实。识别出了区域枚举不代表触发语义已经等价，也不以本项目默认的 8px 边缘替换源范围。
+
 ## 输入格式
 
 - `source`：含 `PowerKeys` 字典、`MouseActions` 数组及可选 `ExeSettings` 字典的 V1 配置快照。每个前缀包含 `Key`、`IsEnabled`、`KeepOriginKeyFunc`、`BlackList`、`KeyActions`；规则保留原字段。应用配置中的 `MouseActions` 同样纳入。只读导出的 `InputSettings` 用于确认单按恢复超时及 `DefaultModifiedKeyDownDelay`；缺少后者时不能确认快捷键的输入时序。
@@ -39,6 +43,8 @@ python scripts/plan_action_migration.py `
 只有历史计数、没有近期调用且没有启用绑定引用的动作标记为暂缓。直接发送快捷键的规则不依赖动作 ID 的使用计数，不能因缺少计数被判为闲置。所有暂缓项保留原数据，不自动删除。
 
 `operation.native_action` 可转换 V1 `Keystroke` 的 `modifier|VK` 数据，产生独立的 OmniTrigger `send_shortcut` 动作描述。按已核对的 V1 输入实现，修饰键顺序为 Ctrl、Alt、Shift、Win，其中前三种使用右侧，Win 使用左侧；不会按名称猜测或统一改成左侧。显式 SendKeys 左右键不由该解析器转换。未知位、鼠标 VK、修饰键作为终键、SendKeys 语法和脚本都不会被当作普通快捷键解析。
+
+内置亮度加减可复用现有 `adjust_system`，候选步长分别为 `5`、`-5` 个百分点。目标屏幕采样时刻和硬件量化仍保留在 `operation.action_gaps`，不因动作描述相同就标为配置等价。汇总的 `native_action_requires_semantics_review` 单独计数这些已有候选但仍需核对的动作；它们也包含在 `native_action_available` 中。音量 Shell 命令不直接替换成媒体键或固定百分点，避免悄悄改变分发路径和步长。
 
 V1 `InputText` 的非空字面文本转换成现有 `local` 动作的一步 `input_text`，通过原目标窗口直接发送 Unicode，不使用剪贴板或附加回车。保存时将 `$` 转为 `$$`，以保留 `${…}` 等字面内容；原规则数据保持不变，停用示例见 [`literal-text.json`](../examples/literal-text.json)。动态剪贴板／选区／日期占位符及 `FILE:` 内容读取标记 `source_text_expansion_required`，不静默替换。源 LF／CRLF 使用物理 Return，与当前文本 API 的 Unicode CR 不同，继续标记 `source_text_newline_key_semantics`。NUL、无效代理项、超出 UTF-16 或本地动作配置上限的文本不会产生可执行描述；附加通知仍保留行为缺口。生成结果须在实际目标窗口验证，源类型不会仅因已有文本 API 就被标记为完成。
 
