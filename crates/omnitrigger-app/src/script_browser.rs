@@ -411,6 +411,9 @@ mod tests {
                             let id=message["id"].clone();
                             let method=message["method"].as_str().unwrap();
                             if method=="tabs.query" && message["args"]==json!(["slow"]) {slow_tx.send(()).unwrap();continue;}
+                            if method=="tabs.query" && message["args"]==json!(["reported-unknown"]) {
+                                framing::write(&mut extension,&json!({"v":1,"type":"result","id":id,"session_id":"s-work","ok":false,"error":{"code":"result_unknown","message":"上游未确认已派发操作的结果","effect_state":"unknown"}})).await.unwrap();continue;
+                            }
                             if method=="bookmarks.getTree" {
                                 let bytes=serde_json::to_vec(&json!([{"title":"中文😀".repeat(110000)}])).unwrap();
                                 framing::write(&mut extension,&json!({"v":1,"type":"result.begin","id":id,"session_id":"s-work","total_bytes":bytes.len(),"chunk_count":bytes.len().div_ceil(CHUNK_BYTES)})).await.unwrap();
@@ -575,12 +578,21 @@ mod tests {
             .unwrap_err();
         assert_eq!(expired.effect_state.as_deref(), Some("not_started"));
         assert_eq!(fixture.calls.load(Ordering::SeqCst), count);
-        let timed = fixture
-            .call("tabs.query", json!(["slow"]), 500, deadline(), &token)
+        // 上游错误必须原样保留。不要让本地与代理的同期限计时器竞争，
+        // 再把谁先唤醒当作错误码契约；本地截止由下方 outer 场景单独验证。
+        let reported = fixture
+            .call(
+                "tabs.query",
+                json!(["reported-unknown"]),
+                10000,
+                deadline(),
+                &token,
+            )
             .unwrap_err();
-        assert_eq!(timed.code, "timeout");
-        assert_eq!(timed.effect_state.as_deref(), Some("unknown"));
-        fixture.slow.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(reported.code, "result_unknown");
+        assert_eq!(reported.effect_state.as_deref(), Some("unknown"));
+        assert_eq!(reported.method.as_deref(), Some("tabs.query"));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), count + 1);
         let host = Arc::clone(&fixture.host);
         let cancel = CancellationToken::new();
         let signal = cancel.clone();
@@ -604,6 +616,8 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(outer.code, "timeout");
+        assert_eq!(outer.effect_state.as_deref(), Some("unknown"));
+        assert_eq!(outer.method.as_deref(), Some("tabs.query"));
         fixture.slow.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(
             fixture
