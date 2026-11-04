@@ -255,15 +255,17 @@ export default async ctx => {
 
 [文本动作示例](../examples/actions/desktop-text/)包含直接输入、粘贴、括号包裹选区、行尾换行。粘贴示例先写剪贴板、等待 50ms、发送 Ctrl+V；包裹选区先复制，保留空格和制表符，然后执行同样的粘贴过程。这些示例都实际改变目标文本，粘贴后的文本留在剪贴板。
 
-[删除到行首示例](../examples/actions/desktop-line-edit/)依次发送 Shift+Home、等待 80ms、发送 Backspace。它会实际编辑目标输入框，检查清单不会执行它。专用输入框的真实验证在本机显式运行：
+[删除到行首示例](../examples/actions/desktop-line-edit/)依次发送 Shift+Home、等待 80ms、发送 Backspace。`delete-line-start-script` 使用标准 JS 和独立轻量宿主，通过 `call-script.json` 调用，不需要 Node；`waitMs` 与 `keyDownDelayMs` 可显式设置，并在发送输入前校验。默认按原目标进程选择按下时序。它会实际编辑目标输入框，检查清单不会执行它。专用输入框的真实验证在本机显式运行：
 
 ```powershell
 cargo test -p omnitrigger-app interactive_desktop_api_smoke --locked -- --ignored --nocapture
 cargo test -p omnitrigger-app interactive_desktop_text_smoke --locked -- --ignored --nocapture
 cargo test -p omnitrigger-app interactive_desktop_key_sequence_smoke --locked -- --ignored --nocapture
+$env:OMNITRIGGER_TEST_SCRIPT_HOST = 'D:/Local/script-host.exe'
+cargo test -p omnitrigger-app interactive_script_line_edit_smoke --locked -- --ignored --nocapture --test-threads=1
 ```
 
-测试短暂激活自建窗口，验证编辑结果、步骤间切窗和取消；不使用个人配置。独立的 `tools/js-engine-probe` 仍是另一套同步实验宿主，这里描述的是应用内 Node 动作 API。
+测试短暂激活自建窗口，验证编辑结果、步骤间切窗和取消；不使用个人配置。行编辑验收覆盖行中、行尾、行首的真实文本结果；行首可能合并上一行，具体编辑器的 Home 行为仍需分别验收。轻量脚本验收使用显式指定的真实宿主，不访问剪贴板；上面的其他命令分别覆盖 Node API 与原生输入适配。
 
 文本烟测在支持完整备份当前格式时才执行剪贴板用例，结束后恢复并逐格式读回核对；遇到不支持的格式会保留原剪贴板并明确失败，不把跳过算作通过。其他来源在测试期间更新剪贴板时，测试保留新内容。
 

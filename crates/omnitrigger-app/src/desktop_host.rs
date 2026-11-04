@@ -467,16 +467,40 @@ mod tests {
     #[test]
     #[ignore = "短暂激活专用输入框，验证 Node 桌面 API 的真实效果"]
     fn interactive_desktop_api_smoke() {
+        desktop_line_smoke(
+            "node",
+            std::sync::Arc::new(omnitrigger_actions::NodeRuntime::default()),
+            include_str!("../../../examples/actions/desktop-line-edit/call.json"),
+        );
+    }
+
+    #[test]
+    #[ignore = "短暂激活专用输入框，须显式指定真实轻量宿主，验证脚本行编辑效果"]
+    fn interactive_script_line_edit_smoke() {
+        let program =
+            std::env::var_os("OMNITRIGGER_TEST_SCRIPT_HOST").expect("设置真实脚本宿主路径");
+        assert!(std::path::Path::new(&program).is_file());
+        desktop_line_smoke(
+            "script",
+            std::sync::Arc::new(omnitrigger_actions::ScriptHostRuntime::new(program)),
+            include_str!("../../../examples/actions/desktop-line-edit/call-script.json"),
+        );
+    }
+
+    fn desktop_line_smoke(
+        runtime_name: &str,
+        runtime: std::sync::Arc<dyn omnitrigger_actions::ActionRuntime>,
+        call_source: &str,
+    ) {
         use omnitrigger_actions::{
-            ActionCall, ActionOutcome, ActionService, NodeRuntime, PackageCatalog, RuntimeRegistry,
+            ActionCall, ActionOutcome, ActionService, PackageCatalog, RuntimeRegistry,
         };
         use std::{
-            sync::Arc,
             thread,
             time::{Duration, Instant},
         };
         use windows::{
-            core::w,
+            core::{w, PCWSTR},
             Win32::{
                 Foundation::{HWND, LPARAM, WPARAM},
                 UI::{
@@ -559,11 +583,11 @@ mod tests {
                 WINDOW_EX_STYLE(0),
                 w!("EDIT"),
                 w!("abcd"),
-                WS_CHILD | WS_VISIBLE | WS_BORDER | WINDOW_STYLE(0x0080),
+                WS_CHILD | WS_VISIBLE | WS_BORDER | WINDOW_STYLE(0x0044),
                 20,
                 35,
                 440,
-                30,
+                80,
                 Some(parent),
                 None,
                 None,
@@ -592,33 +616,77 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/actions");
         let catalog = PackageCatalog::load(&root);
         let mut registry = RuntimeRegistry::new();
-        registry
-            .register("node", Arc::new(NodeRuntime::default()))
-            .unwrap();
+        registry.register(runtime_name, runtime).unwrap();
         let service = ActionService::new(catalog, registry);
-        let call: ActionCall = serde_json::from_str(include_str!(
-            "../../../examples/actions/desktop-line-edit/call.json"
-        ))
-        .unwrap();
+        let call: ActionCall = serde_json::from_str(call_source).unwrap();
         let mut evidence = Vec::new();
-        for mode in ["success", "focus_changed", "cancelled"] {
-            unsafe { SetWindowTextW(edit, w!("abcd")) }.unwrap();
+        for (mode, before, cursor, expected) in [
+            ("success", "abcd", 4, ""),
+            (
+                "middle_of_line",
+                "head\r\nabcDEF\r\ntail",
+                9,
+                "head\r\nDEF\r\ntail",
+            ),
+            (
+                "end_of_line",
+                "head\r\nabcDEF\r\ntail",
+                12,
+                "head\r\n\r\ntail",
+            ),
+            (
+                "start_of_line",
+                "head\r\nabcDEF\r\ntail",
+                6,
+                "headabcDEF\r\ntail",
+            ),
+            ("focus_changed", "abcd", 4, "abcd"),
+            ("cancelled", "abcd", 4, "abcd"),
+        ] {
+            let encoded = before
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            unsafe { SetWindowTextW(edit, PCWSTR(encoded.as_ptr())) }.unwrap();
             let _ = unsafe { ShowWindow(parent, SW_SHOWNOACTIVATE) };
             let _ = unsafe { SetForegroundWindow(parent) };
+            // Windows 前台锁可能拒绝进程自行激活；允许操作者激活专用窗口，
+            // 等待期间只泵消息，不发送任何输入，也不反复抢占前台。
+            if unsafe { GetForegroundWindow() } != parent {
+                println!(
+                    "等待专用测试窗口前台：pid={} hwnd={}",
+                    std::process::id(),
+                    parent.0 as usize
+                );
+                let wait = Instant::now();
+                while unsafe { GetForegroundWindow() } != parent
+                    && wait.elapsed() < Duration::from_secs(45)
+                {
+                    pump();
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
             assert_eq!(
                 unsafe { GetForegroundWindow() },
                 parent,
                 "未获取测试窗口前台，未提交动作"
             );
             let _ = unsafe { SetFocus(Some(edit)) };
-            unsafe { SendMessageW(edit, 0x00b1, Some(WPARAM(4)), Some(LPARAM(4))) };
+            unsafe {
+                SendMessageW(
+                    edit,
+                    0x00b1,
+                    Some(WPARAM(cursor)),
+                    Some(LPARAM(cursor as isize)),
+                )
+            };
             let target = capture_shortcut_target().unwrap();
             crate::action_packages::submit(&service, 1, call.clone(), Some(target)).unwrap();
             let began = Instant::now();
             let mut altered = false;
             let outcome = loop {
                 pump();
-                if !altered && mode != "success" && selected(edit) {
+                if !altered && matches!(mode, "focus_changed" | "cancelled") && selected(edit) {
                     if mode == "focus_changed" {
                         let _ = unsafe { ShowWindow(decoy, SW_SHOWNOACTIVATE) };
                         let _ = unsafe { SetForegroundWindow(decoy) };
@@ -628,11 +696,14 @@ mod tests {
                     }
                     altered = true;
                 }
-                if (mode != "focus_changed" || !altered)
-                    && unsafe { GetForegroundWindow() } != parent
-                {
+                let expected_foreground = if mode == "focus_changed" && altered {
+                    decoy
+                } else {
+                    parent
+                };
+                if unsafe { GetForegroundWindow() } != expected_foreground {
                     service.cancel_all();
-                    panic!("测试失焦，已请求取消");
+                    panic!("行编辑实测 {mode} 失焦，已请求取消");
                 }
                 if let Ok(event) = service.try_recv() {
                     if event.outcome.is_terminal() {
@@ -647,12 +718,12 @@ mod tests {
             };
             pump();
             match mode {
-                "success" => {
+                "success" | "middle_of_line" | "end_of_line" | "start_of_line" => {
                     assert!(
                         matches!(outcome, ActionOutcome::Succeeded { .. }),
                         "{outcome:?}"
                     );
-                    assert_eq!(text(edit), "");
+                    assert_eq!(text(edit), expected);
                 }
                 "focus_changed" => {
                     assert!(
@@ -666,12 +737,12 @@ mod tests {
                     assert_eq!(text(edit), "abcd");
                 }
             }
-            evidence.push(json!({"case":mode,"text":text(edit),"outcome":format!("{outcome:?}")}));
+            evidence.push(json!({"case":mode,"cursor":cursor,"expected":expected,"text":text(edit),"outcome":format!("{outcome:?}")}));
         }
         if let Some(path) = std::env::var_os("OMNITRIGGER_DESKTOP_SMOKE_REPORT") {
             std::fs::write(
                 path,
-                serde_json::to_vec_pretty(&json!({"cases":evidence})).unwrap(),
+                serde_json::to_vec_pretty(&json!({"runtime":runtime_name,"cases":evidence,"clipboard_accessed":false,"scope":"owned_edit_not_physical_trigger_or_original_target_application"})).unwrap(),
             )
             .unwrap();
         }

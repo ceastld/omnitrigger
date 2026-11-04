@@ -348,6 +348,149 @@ impl NativeHost for RecordingHost {
 
 #[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn script_line_edit_example_uses_original_target_and_preflights_parameters() {
+    struct Host {
+        process: &'static str,
+        fail_second: bool,
+        cancel_after_first: bool,
+        calls: Mutex<Vec<(String, Value)>>,
+    }
+    impl NativeHost for Host {
+        fn call(
+            &self,
+            method: &str,
+            params: Value,
+            cancellation: &CancellationToken,
+        ) -> Result<Value, ActionError> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push((method.into(), params));
+            if self.cancel_after_first && method == "keyboard.sequence" && calls.len() == 2 {
+                cancellation.cancel();
+            }
+            if self.fail_second && method == "keyboard.sequence" && calls.len() == 3 {
+                let mut error = ActionError::new("target_changed", "原目标已不在前台。");
+                error.effect_state = Some("not_started".into());
+                return Err(error);
+            }
+            Ok(if method == "target.info" {
+                json!({"processName":self.process})
+            } else {
+                json!({"submitted":true})
+            })
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/actions");
+    let catalog = omnitrigger_actions::PackageCatalog::load(&root);
+    let call: ActionCall = serde_json::from_str(include_str!(
+        "../../../examples/actions/desktop-line-edit/call-script.json"
+    ))
+    .unwrap();
+    for (process, input, delay) in [
+        ("Code.exe", json!({}), 0),
+        ("WPS.EXE", json!({"waitMs":0}), 10),
+        ("mstsc.exe", json!({"waitMs":0}), 10),
+        ("Code.exe", json!({"waitMs":0,"keyDownDelayMs":7}), 7),
+        ("WPS.EXE", json!({"waitMs":0,"keyDownDelayMs":0}), 0),
+    ] {
+        let host = Host {
+            process,
+            fail_second: false,
+            cancel_after_first: false,
+            calls: Mutex::default(),
+        };
+        let mut call = call.clone();
+        call.input = input;
+        let output = runtime()
+            .execute_with_host(
+                &catalog.resolve(&call).unwrap(),
+                &context(),
+                &CancellationToken::new(),
+                Some(&host),
+            )
+            .unwrap();
+        assert_eq!(output, json!({"processName":process,"inputSubmitted":true}));
+        assert_eq!(
+            *host.calls.lock().unwrap(),
+            vec![
+                ("target.info".into(), json!({})),
+                (
+                    "keyboard.sequence".into(),
+                    json!({"modifiers":[160],"keys":[36],"key_down_delay_ms":delay})
+                ),
+                (
+                    "keyboard.sequence".into(),
+                    json!({"modifiers":[],"keys":[8],"key_down_delay_ms":delay})
+                ),
+            ]
+        );
+    }
+    for input in [
+        json!({"waitMs":"80"}),
+        json!({"waitMs":-1}),
+        json!({"waitMs":60001}),
+        json!({"waitMs":null}),
+        json!({"keyDownDelayMs":"0"}),
+        json!({"keyDownDelayMs":1001}),
+    ] {
+        let host = Host {
+            process: "Code.exe",
+            fail_second: false,
+            cancel_after_first: false,
+            calls: Mutex::default(),
+        };
+        let mut call = call.clone();
+        call.input = input;
+        let error = runtime()
+            .execute_with_host(
+                &catalog.resolve(&call).unwrap(),
+                &context(),
+                &CancellationToken::new(),
+                Some(&host),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_input");
+        assert_eq!(error.method.as_deref(), Some("script.parameters"));
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        assert!(host.calls.lock().unwrap().is_empty());
+    }
+    let host = Host {
+        process: "Code.exe",
+        fail_second: true,
+        cancel_after_first: false,
+        calls: Mutex::default(),
+    };
+    let error = runtime()
+        .execute_with_host(
+            &catalog.resolve(&call).unwrap(),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "target_changed");
+    assert_eq!(error.method.as_deref(), Some("keyboard.sequence"));
+    assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+    assert_eq!(host.calls.lock().unwrap().len(), 3);
+    let host = Host {
+        process: "Code.exe",
+        fail_second: false,
+        cancel_after_first: true,
+        calls: Mutex::default(),
+    };
+    let error = runtime()
+        .execute_with_host(
+            &catalog.resolve(&call).unwrap(),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "cancelled");
+    assert_eq!(host.calls.lock().unwrap().len(), 2);
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
 fn script_host_routes_all_desktop_apis_and_validates_before_native_dispatch() {
     let fixture = Fixture::new(
         r#"
