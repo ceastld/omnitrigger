@@ -1,3 +1,10 @@
+/** 入口返回的 JSON 数据；不包含 Promise、undefined、函数或平台对象。数值须为有限数。 */
+type ScriptJsonValue = null | boolean | number | string | readonly ScriptJsonValue[] | {
+    readonly [key: string]: ScriptJsonValue;
+};
+/** 标准同步入口。用 @type {ScriptMain} 标注 main，可同时检查上下文与返回值。 */
+type ScriptMain = (ctx: ScriptContext) => ScriptJsonValue;
+
 /** 同步宿主 API。原生异常可在脚本中 catch，并通过 error.code 区分。 */
 interface ScriptDesktopFault extends Error {
     code: string;

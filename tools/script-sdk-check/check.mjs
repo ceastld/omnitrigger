@@ -42,6 +42,34 @@ const checked = diagnostics(project.package_root);
 assert.equal(checked.length, 0, report(checked));
 assert.equal(readFileSync(project.sdk_path,'utf8'), readFileSync(join(repo,'crates/omnitrigger-actions/runtime/script-api.d.ts'),'utf8'));
 const original = readFileSync(project.entry_path,'utf8');
+// 使用新建工程实际附带的声明，验证入口签名，而不在测试中另抄一份类型。
+const entryHeader = '/// <reference path="./sdk/api.d.ts" />\n/** @type {ScriptMain} */\n';
+function checkEntry(source) {
+  writeFileSync(project.entry_path, entryHeader + source);
+  return diagnostics(project.package_root);
+}
+for (const source of [
+  'function main(ctx) { return {text: String(ctx.input.text), nested: [null, true, {count: 3}], invocation: ctx.invocation}; }',
+  'function main(ctx) { if (ctx.input.fail) throw new Error("failure"); return null; }',
+]) {
+  const items = checkEntry(source);
+  assert.equal(items.length, 0, report(items));
+}
+const invalidEntries = {
+  async: 'async function main(ctx) { return {text: String(ctx.input.text)}; }',
+  promise: 'function main() { return Promise.resolve("later"); }',
+  missingReturn: 'function main(ctx) { String(ctx.input.text); }',
+  partialReturn: 'function main(ctx) { if (ctx.input.text) return "text"; }',
+  undefined: 'function main() { return undefined; }',
+  nestedFunction: 'function main() { return {handler: () => true}; }',
+  nestedPromise: 'function main() { return [Promise.resolve(1)]; }',
+  platformObject: 'function main() { return new Map([["key", "value"]]); }',
+};
+for (const [name, source] of Object.entries(invalidEntries)) {
+  const items = checkEntry(source);
+  assert(items.some(item => [1065, 2322, 2355, 2366].includes(item.code)
+    && item.file && resolve(item.file.fileName) === resolve(project.entry_path)), `${name}: ${report(items)}`);
+}
 writeFileSync(project.entry_path, `${original}\nctx.delay(0);\nctx.desktop.windowAction('minimize');\n`);
 const withDelay = diagnostics(project.package_root);
 assert.equal(withDelay.length, 0, report(withDelay));
@@ -67,6 +95,6 @@ const listed = cli(['--list-package-actions']);
 assert.equal(listed.actions.length, 1);
 assert.equal(listed.actions[0].runtime, 'script');
 assert.equal(readFileSync(config,'utf8'),'[]');
-const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,negativeTypeChecks:negative.length,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
+const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,entryContractChecks:Object.keys(invalidEntries),negativeTypeChecks:negative.length,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
 writeFileSync(join(root,'result.json'), JSON.stringify(result,null,2));
 console.log(JSON.stringify(result));

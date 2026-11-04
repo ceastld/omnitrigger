@@ -64,7 +64,7 @@ actions/my-script/
   sdk/api.d.ts
 ```
 
-使用支持 JavaScript / TypeScript 的编辑器打开该目录，直接编辑 `main.js`。工程附带本地 SDK 类型快照，启用标准 JS 类型检查，不依赖仓库路径或 npm 包，也无需转译；运行只需要独立宿主。SDK 的[源声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)随应用维护，更新应用不会覆盖既有工程。
+使用支持 JavaScript / TypeScript 的编辑器打开该目录，直接编辑 `main.js`。工程附带本地 SDK 类型快照，启用标准 JS 类型检查，不依赖仓库路径或 npm 包，也无需转译；运行只需要独立宿主。入口的 `@type {ScriptMain}` 注释同时提供 `ctx` 补全和 JSON 返回值检查，能在编辑时发现异步入口、遗漏返回及 Promise、函数、`undefined` 等非 JSON 返回值；无结果时返回 `null`。静态类型无法排除 `any`、循环引用和非有限数，实际运行仍有独立校验。SDK 的[源声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)随应用维护，更新应用不会覆盖既有工程。
 
 安装宿主后，可使用同一配置校验和运行：
 
