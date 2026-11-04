@@ -60,10 +60,10 @@ impl PackageFeedback {
 
     pub fn apply(&mut self, event: &ActionEvent) {
         if !event.outcome.is_terminal()
-            || !self
+            || self
                 .active
                 .get(&event.invocation_id)
-                .is_some_and(|run| run.binding == event.id)
+                .is_none_or(|run| run.binding != event.id)
         {
             return;
         }
