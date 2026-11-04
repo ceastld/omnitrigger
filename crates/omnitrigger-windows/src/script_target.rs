@@ -15,6 +15,15 @@ struct Identity {
     process_created: u64,
 }
 
+/// 跨进程传递的值快照；恢复时核验原身份，不重新选取窗口。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScriptTargetSnapshot {
+    pub window_handle: usize,
+    pub process_id: u32,
+    pub thread_id: u32,
+    pub process_created_file_time: u64,
+}
+
 /// 句柄仅留在平台层；进程创建时间用于拒绝 PID 被复用后的目标。
 /// 这些核验不是对 Windows 窗口生命周期的原子锁定。
 #[derive(Clone, Copy, Debug)]
@@ -79,6 +88,37 @@ impl ScriptTarget {
             target,
             identity: identity(target)?,
         })
+    }
+
+    pub fn snapshot(&self) -> Result<ScriptTargetSnapshot, String> {
+        self.ensure_identity()?;
+        Ok(ScriptTargetSnapshot {
+            window_handle: self.target.0 as usize,
+            process_id: self.identity.pid,
+            thread_id: self.identity.thread_id,
+            process_created_file_time: self.identity.process_created,
+        })
+    }
+
+    pub fn from_snapshot(snapshot: ScriptTargetSnapshot) -> Result<Self, String> {
+        if snapshot.window_handle == 0
+            || snapshot.window_handle > isize::MAX as usize
+            || snapshot.process_id == 0
+            || snapshot.thread_id == 0
+            || snapshot.process_created_file_time == 0
+        {
+            return Err("目标快照必须包含有效窗口、进程、线程和进程创建时间。".into());
+        }
+        let target = Self {
+            target: ShortcutTarget(snapshot.window_handle as isize),
+            identity: Identity {
+                pid: snapshot.process_id,
+                thread_id: snapshot.thread_id,
+                process_created: snapshot.process_created_file_time,
+            },
+        };
+        target.ensure_identity()?;
+        Ok(target)
     }
 
     fn ensure_identity(&self) -> Result<(), String> {
@@ -228,5 +268,63 @@ mod tests {
         unsafe { DestroyWindow(hwnd) }.unwrap();
         assert!(target.info().is_err());
         assert!(target.send_shortcut(&[65]).is_err());
+    }
+    #[test]
+    fn explicit_snapshot_restores_only_the_supplied_identity_and_rejects_closed_target() {
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("Owned snapshot target"),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        struct Owned(HWND);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        let owned = Owned(hwnd);
+        let target = ScriptTarget::capture(ShortcutTarget(hwnd.0 as isize)).unwrap();
+        let original = target.snapshot().unwrap();
+        assert_eq!(
+            ScriptTarget::from_snapshot(original)
+                .unwrap()
+                .snapshot()
+                .unwrap(),
+            original
+        );
+        for changed in [
+            ScriptTargetSnapshot {
+                process_id: original.process_id + 1,
+                ..original
+            },
+            ScriptTargetSnapshot {
+                thread_id: original.thread_id + 1,
+                ..original
+            },
+            ScriptTargetSnapshot {
+                process_created_file_time: original.process_created_file_time + 1,
+                ..original
+            },
+            ScriptTargetSnapshot {
+                window_handle: 0,
+                ..original
+            },
+        ] {
+            assert!(ScriptTarget::from_snapshot(changed).is_err());
+        }
+        drop(owned);
+        assert!(ScriptTarget::from_snapshot(original).is_err());
     }
 }

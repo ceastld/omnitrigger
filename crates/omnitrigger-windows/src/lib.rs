@@ -53,7 +53,7 @@ mod shortcut;
 #[cfg(windows)]
 mod window_context;
 #[cfg(windows)]
-pub use script_target::{ScriptTarget, ScriptTargetInfo};
+pub use script_target::{ScriptTarget, ScriptTargetInfo, ScriptTargetSnapshot};
 #[cfg(windows)]
 pub use shortcut::{
     capture_matching_shortcut_target, capture_shortcut_target, ensure_shortcut_target,

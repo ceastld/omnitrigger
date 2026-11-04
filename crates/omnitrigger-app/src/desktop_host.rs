@@ -1,6 +1,8 @@
 //! 应用向脚本提供的按次桌面上下文；不在 Hook 中读取进程或发送输入。
 use omnitrigger_actions::{ActionError, CancellationToken, NativeHost};
-use omnitrigger_windows::{capture_shortcut_target, ScriptTarget, ShortcutTarget};
+use omnitrigger_windows::{
+    capture_shortcut_target, ScriptTarget, ScriptTargetSnapshot, ShortcutTarget,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -15,6 +17,13 @@ fn error(code: &str, message: impl ToString, effect: &str) -> ActionError {
 }
 
 impl DesktopHost {
+    pub fn from_snapshot(snapshot: ScriptTargetSnapshot) -> Result<Self, ActionError> {
+        Ok(Self {
+            target: Ok(ScriptTarget::from_snapshot(snapshot)
+                .map_err(|message| error("target_unavailable", message, "not_started"))?),
+        })
+    }
+
     pub fn capture(target: Option<ShortcutTarget>) -> Self {
         // 捕获失败只影响桌面调用，浏览器或纯代码动作仍可运行。
         let target = target

@@ -65,11 +65,22 @@ pub fn submit(
 pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
     let check = arguments.iter().position(|arg| arg == "--check-action");
     let run = arguments.iter().position(|arg| arg == "--run-action");
-    let index = check.or(run)?;
+    let explicit_target = arguments.iter().position(|arg| arg == "--target-context");
+    let index = check.or(run).or(explicit_target)?;
     Some((|| {
-        if check.is_some() && run.is_some() {
-            return Err("--check-action 与 --run-action 不能同时指定。".into());
-        }
+        crate::action_target_context::validate_cli(arguments).map_err(|message| {
+            serde_json::json!({
+            "status":"rejected","error":{"code":"invalid_cli_arguments", "message":message,
+                "effect_state":"not_started"}})
+            .to_string()
+        })?;
+        let target_error = |message: String| {
+            serde_json::json!({"status":"rejected","error":{
+                "code":"invalid_target_context","message":message,"effect_state":"not_started"
+            }})
+            .to_string()
+        };
+        let target_path = crate::action_target_context::path(arguments).map_err(target_error)?;
         let path = arguments
             .get(index + 1)
             .filter(|path| !path.starts_with("--"))
@@ -85,12 +96,24 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
         }
         let call: ActionCall =
             serde_json::from_slice(&bytes).map_err(|error| format!("动作调用格式有误：{error}"))?;
+        let explicit_host = target_path
+            .map(|path| {
+                let snapshot = crate::action_target_context::read(path)?;
+                crate::desktop_host::DesktopHost::from_snapshot(snapshot)
+                    .map_err(|error| error.to_string())
+            })
+            .transpose()
+            .map_err(target_error)?;
         let service = service(&settings::path());
         service.validate(&call).map_err(|error| error.to_string())?;
         if check.is_some() {
             return Ok(serde_json::json!({"valid":true,"call":call}).to_string());
         }
-        let invocation_id = submit(&service, 0, call, None).map_err(|error| error.to_string())?;
+        let invocation_id = match explicit_host {
+            Some(host) => service.submit_with_host(0, call, Some(Arc::new(host))),
+            None => submit(&service, 0, call, None),
+        }
+        .map_err(|error| error.to_string())?;
         loop {
             match service.try_recv() {
                 Ok(event) => match event.outcome {

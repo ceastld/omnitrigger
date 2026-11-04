@@ -126,6 +126,24 @@ export default async function (ctx) {
 
 ### 桌面脚本
 
+外部桌面宿主可在 `--run-action` 后附加 `--target-context <target.json>`，把打开菜单前已捕获的目标交给现有动作运行器。这个入口不安装 Hook、不启动界面或常驻服务。目标文件最多 4 KiB，字段如下：
+
+| 字段 | JSON 类型 | 含义 |
+| --- | --- | --- |
+| `window_handle` | 十进制字符串 | 明确目标的正数 HWND |
+| `process_id` | 正整数 | 该窗口所属进程 |
+| `thread_id` | 正整数 | 该窗口所属线程 |
+| `process_created_file_time` | 十进制字符串 | 进程创建 FILETIME 的原始 64 位值，避免 JS Number 精度损失 |
+| `expires_at_unix_ms` | 整数 | 本次提交的到期时间，调用时生成，最多为当前 Unix 毫秒加 30,000 |
+
+```powershell
+omnitrigger.exe --config C:\Actions\bindings.json --run-action C:\Actions\call.json --target-context C:\Actions\target.json
+```
+
+文件必须包含完整身份，拒绝未知字段、重复参数、过期或超长有效期；不能与 `--check-action` 合用。提交前按原身份重新核验，失败返回 `status: rejected`、`invalid_target_context` 和 `effect_state: not_started`，不会改选当前前台或执行脚本。接纳后仍逐次核验目标，输入还要求它是前台；CLI 不恢复焦点。到期时间只限制提交，不延长动作运行时限，也不是身份凭证或权限隔离。
+
+Windows 适配层提供 `ScriptTarget::snapshot()` 和 `ScriptTarget::from_snapshot(...)`，后者核验传入值后恢复上下文。传递值快照不代表能原子锁住窗口生命周期。目标文件及动作参数可能含个人信息，宿主应使用自己的本机临时目录，避免放入仓库或日志正文。
+
 桌面上下文由应用在接纳动作前捕获；轮盘调用沿用打开轮盘前的目标。窗口句柄留在 Rust 侧，每次操作重新核对窗口、线程、进程及进程创建时间；发送前还要求原窗口仍为前台，不自动抢焦点。读取目标失败只影响桌面 API，纯代码及浏览器动作仍可运行。这些检查不能原子锁住 Windows 的窗口生命周期。
 
 ```javascript
