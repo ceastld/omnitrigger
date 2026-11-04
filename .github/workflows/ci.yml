@@ -94,6 +94,14 @@ jobs:
       - name: 构建两种引擎并测量体积
         run: ./measure.ps1
 
+      - name: 验证轻量引擎接入动作服务
+        run: |
+          foreach ($engine in @('boa', 'quickjs')) {
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = Join-Path $PWD "results/$engine-small.exe"
+            cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --test script_host -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
       - name: 保存测量数据
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

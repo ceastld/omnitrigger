@@ -1,0 +1,6 @@
+{
+  "package_id":"script-clean-file",
+  "action_id":"clean",
+  "action_version":1,
+  "input":{"source":"D:/Temp/input.txt","destination":"D:/Temp/cleaned.txt"}
+}

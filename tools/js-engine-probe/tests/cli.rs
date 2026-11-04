@@ -51,6 +51,26 @@ fn parameters_and_modern_javascript_round_trip() {
 }
 
 #[test]
+fn action_context_metadata_preserves_full_integer_identity() {
+    let root = std::env::current_dir().unwrap();
+    let invocation =
+        json!({"invocation_id":"18446744073709551615","binding_id":"9007199254740993"});
+    let (ok, response) = invoke(
+        json!({"script":"return { invocation:ctx.invocation, root:ctx.packageRoot };", "input":{}, "invocation":invocation,"package_root":root}),
+    );
+    assert!(ok, "{response}");
+    assert_eq!(response["schema_version"], 1);
+    assert_eq!(
+        response["result"],
+        json!({"invocation":invocation,"root":root})
+    );
+    let (ok, _) = invoke(
+        json!({"script":"return 1;","input":{},"invocation":{"invocation_id":"not-an-id","binding_id":"0"}}),
+    );
+    assert!(!ok);
+}
+
+#[test]
 fn prototype_keys_remain_plain_input_data() {
     let (ok, response) = invoke(
         json!({"script": "return {own: Object.hasOwn(ctx.input, '__proto__'), polluted: ({}).polluted ?? false};", "input": {"__proto__": {"polluted":true}}}),

@@ -6,6 +6,7 @@ use crate::{
 use gpui::{div, prelude::*, px, FontWeight};
 use omnitrigger_actions::{
     ActionCall, ActionOutcome, ActionService, NodeRuntime, PackageCatalog, RuntimeRegistry,
+    ScriptHostRuntime,
 };
 use std::{
     io::{Read, Write},
@@ -34,6 +35,29 @@ fn node_program() -> Option<PathBuf> {
 pub fn service(config: &Path) -> ActionService {
     let mut catalog = PackageCatalog::load(&root(config));
     let mut runtimes = RuntimeRegistry::new();
+    let host = std::env::var_os("OMNITRIGGER_SCRIPT_HOST")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::absolute(config)
+                .unwrap_or_else(|_| config.to_path_buf())
+                .with_file_name("runtimes")
+                .join("script")
+                .join(if cfg!(windows) { "host.exe" } else { "host" })
+        });
+    if host.is_absolute() && host.is_file() {
+        if let Err(error) = runtimes.register("script", Arc::new(ScriptHostRuntime::new(host))) {
+            catalog.diagnostics.push(error.to_string());
+        }
+    } else if catalog
+        .actions
+        .iter()
+        .any(|action| action.definition.runtime == "script")
+    {
+        catalog.diagnostics.push(
+            "轻量脚本宿主未安装；开发时可用 OMNITRIGGER_SCRIPT_HOST 指定本机构建的完整路径。"
+                .into(),
+        );
+    }
     if let Some(program) = node_program() {
         let runtime = NodeRuntime::new(program).with_browser_connector(
             crate::browser_connector::runtime_root(config)

@@ -1,7 +1,10 @@
 /** 同步实验 API。原生异常可在脚本中 catch，并通过 error.code 区分。 */
-declare const ctx: Readonly<{
+type ScriptContext = Readonly<{
     apiVersion: 1;
     input: Record<string, any>;
+    /** 动作包提供；直接使用 CLI 且未传元数据时为 null。 */
+    invocation: Readonly<{invocation_id: string; binding_id: string}> | null;
+    packageRoot: string | null;
     fs: {
         /** UTF-8 文件，绝对路径，最多 64 KiB。 */
         readText(path: string): string;
@@ -20,3 +23,4 @@ declare const ctx: Readonly<{
     /** 系统接纳请求，不等于网页或文件已经打开完成。 */
     open(target: string): void;
 }>;
+declare const ctx: ScriptContext;

@@ -1,6 +1,6 @@
 # 动作包与 JavaScript 入口
 
-动作包把动作身份、参数和执行实现分开。一个绑定保存“调用哪个动作、传什么输入”，动作包提供清单和入口文件，运行时负责执行。当前提供 Node.js 运行时，适合带参数的程序启动、多个步骤、条件判断和结果处理；不内置流程图编辑器。
+动作包把动作身份、参数和执行实现分开。一个绑定保存“调用哪个动作、传什么输入”，动作包提供清单和入口文件，运行时负责执行。当前提供 Node.js 与独立 Rust JS 宿主两种运行方式，适合带参数的程序启动、多个步骤、条件判断和结果处理；不内置流程图编辑器。
 
 现有的运行程序、快捷键、本地步骤、系统调节和内置截图插件继续使用原有配置。新增脚本业务通过 `invoke` 入口接入，不需要为每个业务增加 `ActionSpec` 枚举成员或修改输入核心。
 
@@ -31,6 +31,22 @@ flowchart LR
 这些类型位于 `omnitrigger-actions`，不依赖 GPUI 或 Windows 输入核心。应用层负责目录位置、界面编辑和状态展示。原有执行器保留各自的输入目标核验、队列和系统调节合并语义，当前没有覆盖所有执行器的统一全局配额。
 
 ## 创建动作包
+
+### 轻量脚本宿主
+
+`runtime: "script"` 可通过现有动作服务运行独立的 Rust JS 宿主，无需安装 Node。宿主不链接进输入核心；脚本执行、取消与终态仍由 `ActionService` 管理。已有 Boa 和 QuickJS 两种构建使用同一份宿主 API。入口文件声明标准 JS 函数 `function main(ctx)`，返回 JSON 值；不需要自定义文件语法或 npm 包。
+
+目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start`、`ctx.clipboard.readText/writeText` 和 `ctx.open`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../tools/js-engine-probe/api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)。该运行时暂不提供 Node 模块、ESM 导入、Promise 入口、浏览器或目标键盘 API；需要这些能力的动作继续选择 `node` 运行时。
+
+开发时先构建 `tools/js-engine-probe`，把宿主放到配置同级的 `runtimes/script/host.exe`（非 Windows 为 `host`），或使用环境变量 `OMNITRIGGER_SCRIPT_HOST` 指定完整本地路径。尚无自动安装入口。没有宿主时，相关动作报告运行时不可用，不回退其他解释器。清单与 `ActionCall` 格式保持一致；`--check-action` 检查引用，`--run-action` 实际执行。
+
+外层最多运行 60 秒，取消或超时终止并等待本次宿主退出，不重试或回滚。已启动的独立程序不会随调用结束关闭；宿主强停时也不保证正在执行的原生调用及其后代全部收尾。脚本错误与协议错误分别返回 `script_failed`、`invalid_response`，已开始执行后的副作用状态为 `unknown`。
+
+运行时限从操作系统的进程创建返回后开始计算，不能中断阻塞在操作系统内的进程创建。
+
+引擎自身还有 CPU、循环或内存限制，与外层时限独立，先达到的限制生效。
+
+### Node 动作包
 
 将文件放在绑定配置同级的 `actions` 目录下：
 

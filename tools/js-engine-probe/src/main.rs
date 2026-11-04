@@ -19,12 +19,23 @@ struct Request {
     /// 同步函数体；通过 ctx.input 读取参数，通过 return 返回 JSON 结果。
     script: String,
     input: Value,
+    #[serde(default)]
+    invocation: Option<Invocation>,
+    #[serde(default)]
+    package_root: Option<String>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct Invocation {
+    invocation_id: String,
+    binding_id: String,
 }
 
 fn main() {
     let response = match run() {
-        Ok(value) => json!({"ok": true, "result": value}),
-        Err(error) => json!({"ok": false, "error": error}),
+        Ok(value) => json!({"schema_version":1,"ok": true, "result": value}),
+        Err(error) => json!({"schema_version":1,"ok": false, "error": error}),
     };
     println!("{response}");
     if response["ok"] != true {
@@ -45,11 +56,31 @@ fn run() -> Result<Value, String> {
     if !request.input.is_object() {
         return Err("input 必须是 JSON 对象。".into());
     }
+    if let Some(invocation) = &request.invocation {
+        for id in [&invocation.invocation_id, &invocation.binding_id] {
+            if id.is_empty()
+                || !id.bytes().all(|b| b.is_ascii_digit())
+                || id.parse::<u64>().is_err()
+            {
+                return Err("调用身份必须为 u64 十进制字符串。".into());
+            }
+        }
+    }
+    if request
+        .package_root
+        .as_ref()
+        .is_some_and(|root| !std::path::Path::new(root).is_absolute())
+    {
+        return Err("package_root 必须为绝对路径。".into());
+    }
+    let metadata = json!({"invocation":request.invocation,"packageRoot":request.package_root});
+    let metadata =
+        serde_json::to_string(&metadata.to_string()).map_err(|error| error.to_string())?;
     // 将 JSON 编码为 JS 字符串再解析，避免 __proto__ 对象字面量语义及参数插值。
     let input = serde_json::to_string(&request.input).map_err(|error| error.to_string())?;
     let literal = serde_json::to_string(&input).map_err(|error| error.to_string())?;
     let source = format!(
-        "(() => {{ const ctx = {{ input: JSON.parse({literal}) }};\n{SDK}\n\
+        "(() => {{ const ctx = {{ input: JSON.parse({literal}), ...JSON.parse({metadata}) }};\n{SDK}\n\
          const result = (function(ctx) {{\n{}\n}})(ctx);\n\
          if (result && typeof result.then === 'function') throw new Error('原型仅支持同步入口');\n\
          const output = JSON.stringify(result);\n\

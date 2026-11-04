@@ -102,6 +102,8 @@ cargo run -p omnitrigger-app --locked             # 在终端运行
 
 自定义复杂动作可使用[动作包](docs/ACTION_PACKAGES.md)：在配置同级的 `actions/<包目录>` 放入 `action.json` 和 JS 入口，在动作库选择动作并填写 JSON 参数。JS 使用 `export default async function(ctx)`；`await ctx.process.run(...)` 等待程序退出并取得输出，`await ctx.process.start(...)` 独立启动桌面程序后继续后续步骤。`--check-action <call.json>` 只读检查调用，`--run-action <call.json>` 真实执行，`--list-package-actions` 只读列出动作包目录；均可结合 `--config` 指定目录。外部宿主可为运行命令增加 `--stream-action-events`，分别取得开始事件与终态结果。
 
+轻量脚本可选择 `script` 运行时：独立 Rust JS 宿主提供文件、进程、剪贴板与打开目标 API，不要求 Node。脚本声明 `function main(ctx)`，使用普通 JavaScript 和类型提示；安装与现有能力见[轻量脚本宿主](docs/ACTION_PACKAGES.md#轻量脚本宿主)。
+
 ## 工程结构
 
 | 目录 | 职责 |

@@ -3,12 +3,14 @@ pub mod catalog;
 pub mod model;
 mod native;
 pub mod node;
+pub mod script_host;
 pub mod service;
 
 pub use catalog::{CatalogAction, PackageCatalog, ResolvedAction};
 pub use model::{ActionCall, ActionDefinition, ActionError, PackageManifest};
 pub use native::NativeHost;
 pub use node::NodeRuntime;
+pub use script_host::ScriptHostRuntime;
 pub use service::{
     ActionCatalogDescription, ActionCatalogSnapshot, ActionEvent, ActionOutcome, ActionRuntime,
     ActionService, CancellationToken, InvocationContext, RuntimeRegistry,

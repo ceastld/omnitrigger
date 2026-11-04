@@ -273,7 +273,7 @@ fn browser_configuration(directory: &Path) -> Option<Value> {
     Some(json!({"sdk_path": sdk, "config_path": config}))
 }
 
-fn checked_entry(action: &ResolvedAction) -> Result<(PathBuf, PathBuf), ActionError> {
+pub(crate) fn checked_entry(action: &ResolvedAction) -> Result<(PathBuf, PathBuf), ActionError> {
     let fail = |error| ActionError::new("entry_unavailable", format!("动作入口不可用：{error}"));
     if !action.package_root.is_absolute() || !action.entry_path.is_absolute() {
         return Err(ActionError::new(
@@ -402,10 +402,10 @@ fn read_response(path: &Path, invocation_id: u64) -> Result<Value, ActionError> 
     }
 }
 
-struct ResponseDirectory(PathBuf);
+pub(crate) struct ResponseDirectory(PathBuf);
 
 impl ResponseDirectory {
-    fn new() -> Result<Self, ActionError> {
+    pub(crate) fn new() -> Result<Self, ActionError> {
         for _ in 0..32 {
             let path = std::env::temp_dir().join(format!(
                 "omnitrigger-action-{}-{}",
@@ -434,7 +434,7 @@ impl ResponseDirectory {
         Err(ActionError::new("runtime_io", "无法分配动作临时目录。"))
     }
 
-    fn response(&self) -> PathBuf {
+    pub(crate) fn response(&self) -> PathBuf {
         self.0.join("response.json")
     }
 }
@@ -459,7 +459,7 @@ impl Drop for ChildGuard {
     }
 }
 
-fn hide_window(command: &mut Command) {
+pub(crate) fn hide_window(command: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

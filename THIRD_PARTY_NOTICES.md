@@ -48,7 +48,7 @@ Windows 发行流程通过 `scripts/collect-licenses.ps1` 从锁定目标的应�
 
 ## 独立的 JS 引擎体积实验
 
-`tools/js-engine-probe` 是独立 Cargo workspace，使用单独的锁文件，不进入桌面应用依赖图或正式发行包。实验使用 Boa 0.21.1（`Unlicense OR MIT`，选择 MIT）及 rquickjs 0.14.0（MIT）；后者静态编译随 crate 提供的 QuickJS-NG C 引擎（MIT）。宿主与测试由本项目编写。
+`tools/js-engine-probe` 是独立 Cargo workspace，使用单独的锁文件，不进入桌面应用依赖图或正式发行包。动作服务的 `script` 运行时可启动本机构建的独立宿主，适配层本身不链接或打包引擎。宿主使用 Boa 0.21.1（`Unlicense OR MIT`，选择 MIT）及 rquickjs 0.14.0（MIT）；后者静态编译随 crate 提供的 QuickJS-NG C 引擎（MIT）。宿主、适配层与测试由本项目编写。
 
 已核对锁文件对应 Cargo 元数据和 rquickjs / QuickJS-NG 随包许可。Boa 系列发布 crate 未附带许可全文，上游授权见 [Boa 0.21.1 MIT 许可](https://github.com/boa-dev/boa/blob/v0.21.1/LICENSE-MIT)。实验传递依赖含 MIT、Apache-2.0、Unicode-3.0、Unlicense 和 Zlib 等声明；双重授权可选择相应分支，Unicode 数据仍须保留其自身许可。完整版本与依赖关系以实验的 `Cargo.lock` 和 `cargo metadata --locked` 为准。
 

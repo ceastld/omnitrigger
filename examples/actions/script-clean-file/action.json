@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "id": "script-clean-file",
+  "name": "脚本文本清理",
+  "version": "1.0.0",
+  "actions": [{"id":"clean","title":"清理文本文件行尾空白","version":1,"runtime":"script","entry":"clean.js"}]
+}

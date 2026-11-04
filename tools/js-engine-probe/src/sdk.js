@@ -5,6 +5,7 @@ const encode = JSON.stringify.bind(JSON);
 const decode = JSON.parse.bind(JSON);
 let calls = 0;
 ctx.apiVersion = 1;
+if (ctx.invocation) Object.freeze(ctx.invocation);
 function call(kind, args = {}) {
     if (++calls > 32) throw new Error('单次脚本最多调用 32 次宿主 API');
     const response = decode(nativeCall(encode({ kind, ...args })));
