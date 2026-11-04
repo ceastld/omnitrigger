@@ -491,6 +491,249 @@ fn script_line_edit_example_uses_original_target_and_preflights_parameters() {
 
 #[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn script_keyboard_recipe_preserves_steps_timing_and_stops_after_faults() {
+    struct Host {
+        process: &'static str,
+        fail_at: usize,
+        cancel_at: usize,
+        calls: Mutex<Vec<(String, Value)>>,
+    }
+    impl NativeHost for Host {
+        fn call(
+            &self,
+            method: &str,
+            params: Value,
+            cancellation: &CancellationToken,
+        ) -> Result<Value, ActionError> {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push((method.into(), params));
+            if calls.len() == self.cancel_at {
+                cancellation.cancel();
+            }
+            if calls.len() == self.fail_at {
+                let mut error = ActionError::new("target_changed", "原目标已改变。");
+                error.effect_state = Some("not_started".into());
+                return Err(error);
+            }
+            Ok(if method == "target.info" {
+                json!({"processName":self.process})
+            } else {
+                json!({"submitted":true})
+            })
+        }
+    }
+    let make_host = |process| Host {
+        process,
+        fail_at: usize::MAX,
+        cancel_at: usize::MAX,
+        calls: Mutex::default(),
+    };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/actions");
+    let catalog = omnitrigger_actions::PackageCatalog::load(&root);
+    let call: ActionCall = serde_json::from_str(include_str!(
+        "../../../examples/actions/keyboard-sequence/call-script.json"
+    ))
+    .unwrap();
+    for (process, delay_override, expected_delay) in [
+        ("Code.exe", None, 0),
+        ("WPS.EXE", None, 10),
+        ("mstsc.exe", None, 10),
+        ("WPS.EXE", Some(0), 0),
+        ("Code.exe", Some(7), 7),
+    ] {
+        let mut call = call.clone();
+        if let Some(delay) = delay_override {
+            call.input["keyDownDelayMs"] = json!(delay);
+        }
+        let host = make_host(process);
+        let began = Instant::now();
+        let output = runtime()
+            .execute_with_host(
+                &catalog.resolve(&call).unwrap(),
+                &context(),
+                &CancellationToken::new(),
+                Some(&host),
+            )
+            .unwrap();
+        assert_eq!(output, json!({"inputSubmitted":true,"steps":4}));
+        assert!(began.elapsed() >= Duration::from_millis(80));
+        let mut expected = vec![];
+        if delay_override.is_none() {
+            expected.push(("target.info".into(), json!({})));
+        }
+        expected.extend([
+            (
+                "keyboard.sequence".into(),
+                json!({"modifiers":[160],"keys":[36],"key_down_delay_ms":expected_delay}),
+            ),
+            (
+                "keyboard.sequence".into(),
+                json!({"modifiers":[],"keys":[8],"key_down_delay_ms":expected_delay}),
+            ),
+        ]);
+        assert_eq!(*host.calls.lock().unwrap(), expected);
+    }
+    let mut mixed = call.clone();
+    mixed.input = json!({"steps":[
+        {"kind":"sequence","modifiers":[163],"keys":[77,77]},
+        {"kind":"delay","milliseconds":0},
+        {"kind":"tap","key":65},
+        {"kind":"text","text":"中文😀${literal}"}
+    ]});
+    let host = make_host("WPS.EXE");
+    runtime()
+        .execute_with_host(
+            &catalog.resolve(&mixed).unwrap(),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap();
+    assert_eq!(
+        *host.calls.lock().unwrap(),
+        vec![
+            ("target.info".into(), json!({})),
+            (
+                "keyboard.sequence".into(),
+                json!({"modifiers":[163],"keys":[77,77],"key_down_delay_ms":10})
+            ),
+            (
+                "keyboard.sequence".into(),
+                json!({"modifiers":[],"keys":[65],"key_down_delay_ms":0})
+            ),
+            ("keyboard.text".into(), json!({"text":"中文😀${literal}"})),
+        ]
+    );
+    // 原目标在第二次输入前变化，后续文本不能提交；此前输入不能被当作已撤销。
+    let mut host = make_host("Code.exe");
+    host.fail_at = 3;
+    let error = runtime()
+        .execute_with_host(
+            &catalog.resolve(&mixed).unwrap(),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "target_changed");
+    assert_eq!(error.method.as_deref(), Some("keyboard.sequence"));
+    assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+    assert_eq!(host.calls.lock().unwrap().len(), 3);
+    let mut host = make_host("Code.exe");
+    host.cancel_at = 2;
+    let error = runtime()
+        .execute_with_host(
+            &catalog.resolve(&mixed).unwrap(),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "cancelled");
+    assert_eq!(host.calls.lock().unwrap().len(), 2);
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn script_keyboard_recipe_checks_late_parameters_and_host_call_budget() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/actions");
+    let catalog = omnitrigger_actions::PackageCatalog::load(&root);
+    let mut call: ActionCall = serde_json::from_str(include_str!(
+        "../../../examples/actions/keyboard-sequence/call-script.json"
+    ))
+    .unwrap();
+    for last in [
+        json!(null),
+        json!({"kind":"unknown"}),
+        json!({"kind":"delay","milliseconds":"30"}),
+        json!({"kind":"delay","milliseconds":-1}),
+        json!({"kind":"delay","milliseconds":60001}),
+        json!({"kind":"tap","key":0}),
+        json!({"kind":"sequence","modifiers":[],"keys":[]}),
+        json!({"kind":"text","text":null}),
+        json!({"kind":"text","text":"bad\0text"}),
+    ] {
+        call.input = json!({"steps":[{"kind":"tap","key":65},last]});
+        let host = RecordingHost::default();
+        let error = runtime()
+            .execute_with_host(
+                &catalog.resolve(&call).unwrap(),
+                &context(),
+                &CancellationToken::new(),
+                Some(&host),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_input");
+        assert_eq!(error.method.as_deref(), Some("script.parameters"));
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        assert!(host.calls.lock().unwrap().is_empty());
+    }
+    for (steps, delay) in [
+        (json!([{"kind":"tap","key":65}]), json!("10")),
+        (json!([{"kind":"tap","key":65}]), json!(1001)),
+        (
+            json!([{"kind":"tap","key":65},{"kind":"sequence","modifiers":[],"keys":[65,66,67]}]),
+            json!(1000),
+        ),
+    ] {
+        call.input = json!({"steps":steps,"keyDownDelayMs":delay});
+        let host = RecordingHost::default();
+        let error = runtime()
+            .execute_with_host(
+                &catalog.resolve(&call).unwrap(),
+                &context(),
+                &CancellationToken::new(),
+                Some(&host),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_input");
+        assert_eq!(error.method.as_deref(), Some("script.parameters"));
+        assert!(host.calls.lock().unwrap().is_empty());
+    }
+    call.input = json!({"steps":[{"kind":"delay","milliseconds":0}]});
+    let host = RecordingHost::default();
+    let output = runtime()
+        .execute_with_host(
+            &catalog.resolve(&call).unwrap(),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap();
+    assert_eq!(output, json!({"inputSubmitted":false,"steps":1}));
+    assert!(host.calls.lock().unwrap().is_empty());
+    // 32 步加一次默认目标查询会超预算；显式时序恰好允许 32 次调用。
+    call.input = json!({"steps":vec![json!({"kind":"sequence","modifiers":[],"keys":[65]});32]});
+    let host = RecordingHost::default();
+    let error = runtime()
+        .execute_with_host(
+            &catalog.resolve(&call).unwrap(),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "invalid_input");
+    assert!(host.calls.lock().unwrap().is_empty());
+    call.input["keyDownDelayMs"] = json!(0);
+    let output = runtime()
+        .execute_with_host(
+            &catalog.resolve(&call).unwrap(),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap();
+    assert_eq!(output, json!({"inputSubmitted":true,"steps":32}));
+    let calls = host.calls.lock().unwrap();
+    assert_eq!(calls.len(), 32);
+    assert!(calls
+        .iter()
+        .all(|(method, _)| method == "keyboard.sequence"));
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
 fn script_window_api_routes_operations_validates_and_preserves_faults() {
     let fixture = Fixture::new(
         r#"

@@ -249,6 +249,8 @@ export default async ctx => {
 
 同一包的 `recipe` 动作组合 `sequence`、`tap`、`text`、`delay`，最多 32 步。`sequence` 使用上述进程时序，`tap` 只轻点一个普通键且不增加按下延迟；`text` 保留字面内容。每一步等待及输入均遵守动作取消和原目标身份边界。[删除到行首调用](../examples/actions/keyboard-sequence/delete-line-start.json)先发左 Shift+Home，再等待 30ms 和 50ms，最后发 Backspace；行首执行时可能合并上一行，应按实际编辑器行为验收。
 
+同包新增 `recipe-script`，以标准同步 JS 和现有 API 在轻量宿主中执行相同步骤输入，无需 Node；[调用示例](../examples/actions/keyboard-sequence/call-script.json)与[完整说明](../examples/actions/keyboard-sequence/README.md)包含编辑器配置、时序和边界。该入口在执行前检查步骤形状、等待、时序、文本和 32 次宿主调用预算；默认目标查询也占一次，含连续按键的 32 步输入须显式指定 `keyDownDelayMs`。按键语义和当前桌面状态仍由每次 API 调用核验，不能视为整组输入的事务。
+
 桥接创建失败只在调用桌面或剪贴板 API 时抛出 `native_bridge_unavailable`，不阻止纯代码或浏览器脚本运行。桌面桥接的单请求、单回执上限为 512 KiB；文本 API 接受最多 65,536 个 UTF-16 单元，拒绝 NUL 和不完整代理对。最终动作结果仍限 64 KiB，处理长文本后应返回摘要。
 
 `sendText` 将 CRLF 和 LF 分别规范为一次回车，不解析 SendKeys、模板或按键脚本语法。它拒绝仍被按住的 Ctrl、Shift、Alt、Win；已发送的文字无法回滚。`copySelectionText` 最多等待约 600ms 的序号变化，期间持续核验目标和取消；超时会报错，不使用旧剪贴板文本冒充选区。它不使用 UI Automation，也不能保证任意应用都响应 Ctrl+C；剪贴板不是隔离事务，其他程序的同时写入仍可能影响结果。

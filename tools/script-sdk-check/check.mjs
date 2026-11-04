@@ -33,6 +33,8 @@ function report(items) {
 }
 const lineEdit = diagnostics(join(repo, 'examples/actions/desktop-line-edit'));
 assert.equal(lineEdit.length, 0, report(lineEdit));
+const keyboard = diagnostics(join(repo, 'examples/actions/keyboard-sequence'));
+assert.equal(keyboard.length, 0, report(keyboard));
 const created = cli(['--create-script-action', 'sdk-test']);
 assert.equal(created.status, 'created');
 assert.equal(created.schema_version, 1);

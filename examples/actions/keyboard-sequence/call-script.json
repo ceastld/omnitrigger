@@ -1,0 +1,13 @@
+{
+  "package_id": "examples.keyboard-sequence",
+  "action_id": "recipe-script",
+  "action_version": 1,
+  "input": {
+    "steps": [
+      {"kind":"sequence","modifiers":[160],"keys":[36]},
+      {"kind":"delay","milliseconds":30},
+      {"kind":"delay","milliseconds":50},
+      {"kind":"sequence","modifiers":[],"keys":[8]}
+    ]
+  }
+}
