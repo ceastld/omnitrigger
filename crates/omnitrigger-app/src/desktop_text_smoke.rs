@@ -589,6 +589,16 @@ fn interactive_desktop_text_smoke() {
 #[test]
 #[ignore = "需要精确激活自有窗口并点击独立宿主的原菜单，核验成功及目标关闭错误"]
 fn interactive_legacy_menu_click_smoke() {
+    legacy_host_click_smoke("saved-text-execute");
+}
+
+#[test]
+#[ignore = "需要精确激活自有窗口并点击独立宿主的真实剪贴板条目"]
+fn interactive_legacy_clipboard_click_smoke() {
+    legacy_host_click_smoke("clipboard-text-execute");
+}
+
+fn legacy_host_click_smoke(scenario: &str) {
     use std::path::PathBuf;
     let root = PathBuf::from(
         std::env::var_os("OMNITRIGGER_MENU_HOST_ROOT").expect("需要隔离的保存配置目录"),
@@ -596,9 +606,6 @@ fn interactive_legacy_menu_click_smoke() {
     let status_path = PathBuf::from(std::env::var_os("OMNITRIGGER_MENU_SMOKE_STATUS").unwrap());
     let host_exe = std::env::var("OMNITRIGGER_MENU_HOST_EXE").unwrap();
     let omni_exe = std::env::var("OMNITRIGGER_CLI_SMOKE_EXE").unwrap();
-    let expected: Value =
-        serde_json::from_slice(&std::fs::read(root.join("expected-text.json")).unwrap()).unwrap();
-    let expected = expected["text"].as_str().unwrap();
     struct Owned {
         windows: Vec<HWND>,
         previous: HWND,
@@ -730,7 +737,7 @@ fn interactive_legacy_menu_click_smoke() {
 export default async ctx => {
   const target = await ctx.desktop.targetContext();
   await fs.writeFile(ctx.input.target_path, JSON.stringify(target), {mode:0o600});
-  const child = await ctx.process.start(ctx.input.host_exe, ['--data-root',ctx.input.root,'--command','clip none','--scenario','saved-text-execute','--exit-after-ms','60000']);
+  const child = await ctx.process.start(ctx.input.host_exe, ['--data-root',ctx.input.root,'--command','clip none','--scenario',ctx.input.scenario,'--exit-after-ms','60000']);
   return {pid:child.pid,target};
 };"#).unwrap();
     std::fs::write(package.join("paste.mjs"),r#"import fs from 'node:fs/promises';
@@ -760,7 +767,7 @@ export default async ctx => {
     );
     let _running = Running(&service);
     service.submit_with_host(1,ActionCall{package_id:"legacy.menu-text".into(),action_id:"launch".into(),action_version:1,
-        input:json!({"target_path":root.join("launch-target.json"),"host_exe":host_exe,"root":root})},
+        input:json!({"target_path":root.join("launch-target.json"),"host_exe":host_exe,"root":root,"scenario":scenario})},
         Some(Arc::new(DesktopHost::from_snapshot(target).unwrap()))).unwrap();
     let began = Instant::now();
     let launch = loop {
@@ -810,6 +817,10 @@ export default async ctx => {
         if root.join("first-click-complete.json").exists()
             && !root.join("first-effect-verified").exists()
         {
+            let expected: Value =
+                serde_json::from_slice(&std::fs::read(root.join("expected-text.json")).unwrap())
+                    .unwrap();
+            let expected = expected["text"].as_str().unwrap();
             let effect_limit = Instant::now();
             while text(edit) != expected && effect_limit.elapsed() < Duration::from_secs(3) {
                 pump();
