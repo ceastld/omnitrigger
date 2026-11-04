@@ -363,13 +363,11 @@ impl Chooser {
     fn close(&self, window: &mut Window) {
         // 用户已切到其他应用时不抢回焦点。恢复前重新核验原窗口和进程创建时间。
         let handle = HasWindowHandle::window_handle(&*window).map(|handle| handle.as_raw());
-        match (handle, self.request.target) {
-            (Ok(RawWindowHandle::Win32(handle)), Some(snapshot)) => {
-                if let Ok(target) = omnitrigger_windows::ScriptTarget::from_snapshot(snapshot) {
-                    let _ = target.restore_foreground_if(handle.hwnd.get());
-                }
+        if let (Ok(RawWindowHandle::Win32(handle)), Some(snapshot)) = (handle, self.request.target)
+        {
+            if let Ok(target) = omnitrigger_windows::ScriptTarget::from_snapshot(snapshot) {
+                let _ = target.restore_foreground_if(handle.hwnd.get());
             }
-            _ => {}
         }
         window.remove_window();
     }
