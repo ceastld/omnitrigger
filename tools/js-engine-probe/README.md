@@ -9,9 +9,11 @@
 | 引擎 | 实现 | 版本与选择 |
 | --- | --- | --- |
 | [Boa](https://github.com/boa-dev/boa) | 纯 Rust JS 引擎 | 固定 0.21.1，兼容项目 Rust 1.90；0.22.0 要求 Rust 1.91。关闭默认可选功能，不启用 Intl / Temporal。 |
-| [rquickjs](https://github.com/DelSkayn/rquickjs) / QuickJS-NG | Rust 宿主，静态编译 C 引擎 | 固定 rquickjs 0.14.0，只启用 `std`，不启用模块加载器、宏或异步 Rust 适配。 |
+| [rquickjs](https://github.com/DelSkayn/rquickjs) / QuickJS-NG | Rust 宿主，静态编译 C 引擎 | 固定 rquickjs 0.14.0，启用 `std` 与包内 ESM 所需的 `loader`，不启用动态原生库、宏或异步 Rust 适配。 |
 
 两者使用同一份宿主代码和 JSON 接口，不需要安装 Node 或 Electron。引擎依赖通过独立 `Cargo.lock` 固定，不进入主程序 workspace。许可和未来分发要求见[第三方通知](../../THIRD_PARTY_NOTICES.md)。
+
+新建工程使用标准 ESM 多文件布局，入口为具名导出 `main(ctx)` 的 `main.mjs`；已有 `.js` 的 `function main(ctx)` 与独立函数体请求继续有效。模块路径、循环、缓存、限额、错误及编辑器约定见[包内模块](MODULES.md)。
 
 ## 2026-11-02 API 版实测
 
@@ -80,7 +82,7 @@ node tools/js-engine-probe/check-install.mjs target/debug/omnitrigger.exe .tmp/s
 
 ## 边界与后续
 
-- 已有文件、进程、剪贴板和打开目标 API；应用接入提供有限的目标、键盘与浏览器 API，以及本机开发包安装命令；尚无 TS 转译、ESM / npm 加载、Node 兼容层、HTTP、鼠标操作、任意窗口控制、内置编辑器或自动下载安装界面。体积结论只覆盖这里实现的同步宿主。
+- 已有文件、进程、剪贴板和打开目标 API；应用接入提供有限的目标、键盘与浏览器 API，以及本机开发包安装命令；尚无 TS 转译、npm 加载、Node 兼容层、HTTP、鼠标操作、任意窗口控制、内置编辑器或自动下载安装界面。体积结论只覆盖这里实现的同步宿主。
 - 请求最多 256 KiB，最终结果最多 64 KiB。结果限制在引擎序列化之后检查，不是统一的峰值内存限制。
 - Boa 配置循环迭代和递归限制，没有宿主墙钟超时和堆内存上限；QuickJS 配置 32 MiB 引擎内存、512 KiB 栈和约 2 秒 JS 时间配额（不计宿主 API 的同步等待）。内存限制不包含 Rust 宿主，均不宣称安全沙盒。
 - 正式插件应通过外层进程监测实现统一超时和取消，并沿用 `ActionCall` / `ActionRuntime`，再按业务需要增加能力。无需先替换现有 Node 动作。

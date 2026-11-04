@@ -2,7 +2,7 @@
 
 状态：可运行的同步原型，不是正式插件。两种引擎加载同一份 `src/sdk.js`，通过 JSON 桥接到 Rust。桌面 API 与 Node 共用参数校验定义，应用接入时经每次调用独立的回环连接交给现有 `NativeHost`；独立 CLI 的剪贴板和打开目标复用 `omnitrigger-windows`。不安装 Hook，不访问 GPUI。`ctx.apiVersion` 为 `1`。[类型声明](../../crates/omnitrigger-actions/runtime/script-api.d.ts)用于编辑器补全，不提供 TS 转译。
 
-通过 OmniTrigger 的 `script` 动作运行时接入时，文件声明 `function main(ctx)`；适配层将它转为本工具的函数体请求，文件本身保持标准 JavaScript。`ctx.packageRoot` 为动作包目录，`ctx.invocation` 包含十进制字符串调用身份。独立 CLI 可以省略这些元数据，此时两项为 `null`。成功与失败响应均带有 `schema_version: 1`。
+通过 OmniTrigger 的 `script` 动作运行时接入时，`.mjs` 文件具名导出同步 `main(ctx)` 并可导入包内相对模块；已有 `.js` 文件声明 `function main(ctx)`，适配层继续将它转为函数体请求，文件本身保持标准 JavaScript。模块契约见[包内模块](MODULES.md)。`ctx.packageRoot` 为动作包目录，`ctx.invocation` 包含十进制字符串调用身份。独立 CLI 可以省略这些元数据，此时两项为 `null`。成功与失败响应均带有 `schema_version: 1`。
 
 | API | 行为 |
 | --- | --- |
@@ -11,6 +11,7 @@
 | `ctx.process.run(program, args, {timeoutMs})` | 程序和参数数组分别传递，不隐式经过 Shell。返回 `{pid, exitCode, success}`；默认等待 1000 毫秒，允许 1–1000 毫秒。非零退出由脚本判断，stdout / stderr 不采集。 |
 | `ctx.process.start(program, args)` | 创建独立程序后返回 `{pid}`，程序不随脚本结束关闭。 |
 | `ctx.delay(milliseconds)` | 同步等待 0–60000 毫秒的整数，返回 `undefined`；字符串、小数、非有限数等返回 `invalid_input`，不做隐式转换。 |
+| `ctx.ui.choose({items, title?, placeholder?, timeoutMs?})` | 应用 GPUI 界面中的可搜索选择菜单，返回稳定 ID 或明确取消；Node 入口使用 `await`。独立 CLI 返回 `ui_unavailable`。参数与示例见[脚本选择菜单](../../examples/actions/script-choice/)。 |
 | `ctx.desktop.target()` / `targetContext()` | 查询提交时捕获的原目标或导出 30 秒有效的目标快照；不重新选择前台。仅应用接入可用。 |
 | `ctx.desktop.sendShortcut(keys, options)` | 1–5 个 VK 整数，修饰键在前；支持 `keyDownDelayMs` 或原生 `timing` 配置，二者互斥。 |
 | `ctx.desktop.sendKeySequence(modifiers, keys, options)` | 0–4 个修饰键和 1–16 个普通键；修饰键跨越整组，`keyDownDelayMs` 为 0–1000 毫秒，单次等待合计最多 3000 毫秒。 |

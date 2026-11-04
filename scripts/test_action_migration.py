@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 from plan_action_migration import build_plan, main, ranked_actions, shortcut_action, same_process_scope, process_scopes_overlap
-from action_body_projection import action_body, keyboard_body
+from action_body_projection import action_body, keyboard_body, subprogram_dependencies
 
 
 def key_step_record(key=87, params=None, **changes):
@@ -36,6 +36,70 @@ def fixture():
 
 
 class MigrationTests(unittest.TestCase):
+    def test_subprogram_calls_remain_dependencies_instead_of_guessing_from_action_title(self):
+        record = key_step_record()
+        body = json.loads(record['EffectiveData'])
+        call = {'StepRunnerKey': 'sys:subprogram', 'InputParams': {
+            'subProgram': {'VarKey': None, 'Value': '%%synthetic-close'},
+            'var:Ctrl_W': {'VarKey': None, 'Value': 'Reader'},
+            'var:Alt_F4': {'VarKey': None, 'Value': 'Browser'}}}
+        body['Steps'] = [dict(call, Disabled=True), call]
+        record.update(Title='关闭', StoredData=json.dumps(body), EffectiveData=json.dumps(body))
+        before = json.dumps(record, sort_keys=True)
+        result = action_body(record, {'DefaultModifiedKeyDownDelay': 0})
+        self.assertIsNone(result['native_action'])
+        self.assertEqual(result['status'], 'needs_source_review')
+        self.assertIn('source_subprogram_dependency_required', result['action_gaps'])
+        self.assertEqual(result['dependency_review'], {
+            'scope': 'active_step_tree', 'inventory_complete': True, 'calls': [{
+                'path': 'Steps[1]', 'reference': '%%synthetic-close', 'resolution': 'body_not_provided',
+                'input_names': ['var:Alt_F4', 'var:Ctrl_W']}]})
+        self.assertEqual(json.dumps(record, sort_keys=True), before)
+        data = fixture()
+        data['body_records'] = [record]
+        plan = build_plan(**data)
+        self.assertEqual(plan['summary']['selected_action_subprogram_calls'], 1)
+        self.assertEqual(plan['summary']['selected_action_available'], 0)
+        self.assertEqual(plan['actions'][0]['status'], 'needs_source_review')
+
+    def test_dependency_inventory_keeps_conditional_and_dynamic_calls_without_evaluation(self):
+        record = key_step_record()
+        def call(reference):
+            return {'StepRunnerKey': 'sys:subprogram', 'InputParams': {'subProgram': reference}}
+        literal = call({'VarKey': None, 'Value': '%%synthetic-search'})
+        variable = call({'VarKey': 'dynamic', 'Value': None})
+        expression = call({'VarKey': None, 'Value': '$=lookup()'})
+        interpolated = call({'VarKey': None, 'Value': '%%{dynamic}'})
+        body = json.loads(record['EffectiveData'])
+        body['Steps'] = [{'StepRunnerKey': 'sys:simpleIf', 'IfSteps': [literal],
+                          'ElseSteps': [variable, expression, interpolated]},
+                         {'Disabled': True, 'IfSteps': [literal]}]
+        record.update(StoredData=json.dumps(body), EffectiveData=json.dumps(body))
+        review = subprogram_dependencies(record)
+        self.assertTrue(review['inventory_complete'])
+        self.assertEqual([row['path'] for row in review['calls']], [
+            'Steps[0].IfSteps[0]', 'Steps[0].ElseSteps[0]', 'Steps[0].ElseSteps[1]', 'Steps[0].ElseSteps[2]'])
+        self.assertEqual([row['resolution'] for row in review['calls']],
+                         ['body_not_provided', 'dynamic_reference', 'dynamic_reference', 'dynamic_reference'])
+        self.assertEqual([row['reference'] for row in review['calls']], ['%%synthetic-search', None, None, None])
+
+    def test_dependency_inventory_does_not_read_stale_template_data_or_claim_partial_walk_complete(self):
+        record = key_step_record()
+        for changes in ({'UseTemplate': True}, {'Resolution': 'template_cache_miss'}, {'StoredData': 'old'}):
+            self.assertIsNone(subprogram_dependencies(dict(record, **changes)))
+        for steps in ([{}] * 257, [{'Disabled': 'false'}], [{'IfSteps': {}}]):
+            body = json.loads(record['EffectiveData'])
+            body['Steps'] = steps
+            record.update(StoredData=json.dumps(body), EffectiveData=json.dumps(body))
+            self.assertFalse(subprogram_dependencies(record)['inventory_complete'])
+        body = json.loads(key_step_record()['EffectiveData'])
+        text = json.dumps(body).replace('"Steps":', '"Steps": [], "Steps":')
+        record.update(StoredData=text, EffectiveData=text)
+        self.assertFalse(subprogram_dependencies(record)['inventory_complete'])
+        data = fixture()
+        data['body_records'] = [record]
+        self.assertEqual(build_plan(**data)['summary']['selected_action_dependency_inventory_incomplete'], 1)
+
     def test_literal_key_step_uses_independent_script_and_ignores_only_disabled_steps(self):
         for key in (87, 84):
             record = key_step_record(key)

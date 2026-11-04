@@ -1,0 +1,6 @@
+{
+  "package_id": "script-modules",
+  "action_id": "run",
+  "action_version": 1,
+  "input": { "text": "  OmniTrigger  " }
+}

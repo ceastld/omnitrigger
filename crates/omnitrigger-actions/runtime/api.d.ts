@@ -19,10 +19,30 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'clipboard.read' | 'clipboard.write' | 'window.action';
+  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'clipboard.read' | 'clipboard.write' | 'window.action' | 'ui.choose';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
 }
+export interface ChoiceItem {
+  /** 必填且唯一的稳定 ID，最多 128 个 UTF-16 单元；不返回显示序号。 */
+  id: string;
+  /** 单行非空文本，最多 256 个 UTF-16 单元。 */
+  label: string;
+  /** 单行说明，最多 512 个 UTF-16 单元。 */
+  description?: string;
+}
+export interface ChooseOptions {
+  /** 1–200 项；参数总量最多 32 KiB UTF-8 JSON，不接受额外字段。 */
+  items: readonly ChoiceItem[];
+  /** 默认“选择一项”，最多 128 个 UTF-16 单元。 */
+  title?: string;
+  /** 默认“搜索”，最多 128 个 UTF-16 单元。搜索匹配 ID、标签和说明。 */
+  placeholder?: string;
+  /** 默认 30000，范围 1–60000 毫秒；另受动作总运行时限约束。 */
+  timeoutMs?: number;
+}
+export type ChooseResult = {status: 'selected'; id: string}
+  | {status: 'cancelled'; reason: 'dismissed' | 'timeout'};
 export interface BrowserApi {
   profiles(options?: Pick<BrowserOptions, 'timeoutMs'>): Promise<Array<{
     browser_instance_id: string;
@@ -47,6 +67,13 @@ export interface ActionContext {
     start(program: string, args?: string[], options?: {cwd?: string}): Promise<{pid: number}>;
   };
   browser: BrowserApi;
+  ui: {
+    /** 需要应用界面。↑↓/Enter 或点击选择，Esc/关闭取消；动作取消和宿主退出抛错。
+     * 后续输入仍核验本次提交的原目标；系统拒绝恢复前台时输入返回 target_changed。
+     * 已有窗口返回 ui_busy，不排队。务必 await，不可遗留选择 Promise。
+     */
+    choose(options: ChooseOptions): Promise<ChooseResult>;
+  };
   desktop: {
     /** 本次提交时捕获的目标，不在调用时重新选择前台。进程名含 .exe。 */
     target(): Promise<{processName: string; windowRole: "unknown" | "application" | "desktop" | "taskbar"; title: string; processId: number; isForeground: boolean}>;

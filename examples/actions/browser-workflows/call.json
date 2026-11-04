@@ -1,0 +1,11 @@
+{
+  "package_id": "examples.browser-workflows",
+  "action_id": "open-url",
+  "action_version": 1,
+  "input": {
+    "profile": "请替换为已连接的 browser_instance_id",
+    "windowId": 123,
+    "url": "https://example.com/",
+    "activate": false
+  }
+}

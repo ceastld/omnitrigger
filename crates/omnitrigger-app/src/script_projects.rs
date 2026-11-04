@@ -243,8 +243,9 @@ fn editor_plan(
             return Err("OMNITRIGGER_EDITOR 需要存在的完整本地编辑器 EXE 路径。".into());
         }
         return Ok(EditorPlan {
+            arguments: project_editor_arguments(&program, root, entry)
+                .unwrap_or_else(|| vec![entry.as_os_str().into()]),
             program,
-            arguments: vec![entry.as_os_str().into()],
             label: "代码编辑器",
         });
     }
@@ -268,6 +269,22 @@ fn editor_plan(
         program: notepad,
         arguments: vec![entry.as_os_str().into()],
         label: "记事本",
+    })
+}
+
+fn project_editor_arguments(program: &Path, root: &Path, entry: &Path) -> Option<Vec<OsString>> {
+    let name = program.file_stem()?.to_str()?.to_ascii_lowercase();
+    // 仅为具有已知文件夹参数协议的编辑器传递工程目录，不把目录误当成普通编辑器的文件。
+    matches!(
+        name.as_str(),
+        "code" | "code - insiders" | "cursor" | "codium" | "windsurf"
+    )
+    .then(|| {
+        vec![
+            "--new-window".into(),
+            root.as_os_str().into(),
+            entry.as_os_str().into(),
+        ]
     })
 }
 
@@ -340,9 +357,14 @@ mod tests {
             root.join("missing.exe"),
         )
         .unwrap();
-        assert_eq!(explicit.arguments, vec![entry.as_os_str().to_os_string()]);
+        assert_eq!(explicit.arguments, plan.arguments);
         let plain = editor_plan(&folder, &entry, None, vec![], program.clone()).unwrap();
-        assert_eq!(plain.arguments, explicit.arguments);
+        assert_eq!(plain.arguments, vec![entry.as_os_str().to_os_string()]);
+        assert_eq!(
+            project_editor_arguments(&root.join("Cursor.exe"), &folder, &entry),
+            Some(plan.arguments.clone())
+        );
+        assert!(project_editor_arguments(&root.join("Other.exe"), &folder, &entry).is_none());
         let skipped = editor_plan(
             &folder,
             &entry,

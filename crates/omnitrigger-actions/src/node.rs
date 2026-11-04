@@ -537,6 +537,81 @@ fn terminate_host(child: &mut Child) {
 mod tests {
     use super::*;
     use crate::{ActionCall, ActionDefinition};
+
+    #[test]
+    fn ui_choice_returns_stable_id_and_continues_on_the_same_native_host() {
+        if !node_available() {
+            return;
+        }
+        struct ChoiceHost {
+            choice: Value,
+            methods: std::sync::Mutex<Vec<String>>,
+        }
+        impl NativeHost for ChoiceHost {
+            fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+                panic!("UI 调用必须保留外层时限")
+            }
+            fn call_with_deadline(
+                &self,
+                method: &str,
+                params: Value,
+                cancellation: &CancellationToken,
+                deadline: Instant,
+            ) -> Result<Value, ActionError> {
+                assert!(!cancellation.is_cancelled());
+                assert!(deadline > Instant::now());
+                self.methods.lock().unwrap().push(method.into());
+                match method {
+                    "ui.choose" => {
+                        assert_eq!(
+                            params,
+                            json!({"items":[{"id":"stable-id","label":"显示名称"}],"timeoutMs":1000})
+                        );
+                        Ok(self.choice.clone())
+                    }
+                    "keyboard.text" => {
+                        assert_eq!(params, json!({"text":"stable-id"}));
+                        Ok(json!({"submitted":true}))
+                    }
+                    _ => panic!("意外调用：{method}"),
+                }
+            }
+        }
+        let fixture = Fixture::new(
+            r#"export default async ctx => {
+            const choice = await ctx.ui.choose({items:[{id:'stable-id',label:'显示名称'}],timeoutMs:1000});
+            if (choice.status === 'selected') await ctx.desktop.sendText(choice.id);
+            return choice;
+        }"#,
+            json!({}),
+        );
+        for choice in [
+            json!({"status":"selected","id":"stable-id"}),
+            json!({"status":"cancelled","reason":"dismissed"}),
+            json!({"status":"cancelled","reason":"timeout"}),
+        ] {
+            let host = ChoiceHost {
+                choice: choice.clone(),
+                methods: Default::default(),
+            };
+            let output = NodeRuntime::default()
+                .execute_with_host(
+                    &fixture.action,
+                    &context(),
+                    &CancellationToken::new(),
+                    Some(&host),
+                )
+                .unwrap();
+            assert_eq!(output, choice);
+            let expected = if choice["status"] == "selected" {
+                vec!["ui.choose", "keyboard.text"]
+            } else {
+                vec!["ui.choose"]
+            };
+            assert_eq!(*host.methods.lock().unwrap(), expected);
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn script_paths_remove_only_supported_verbatim_prefixes() {

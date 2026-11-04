@@ -76,5 +76,47 @@ function createDesktopApi(invoke) {
       return textCall('clipboard.write', text, options.excludeFromHistory ? {exclude_from_history:true} : {});
     },
   });
-  return {desktop, clipboard};
+  const ui = Object.freeze({
+    choose: options => {
+      const method = 'ui.choose';
+      const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+      const text = (value, max) => {
+        if (typeof value !== 'string' || !value.trim() || value.length > max || /[\x00-\x1f\x7f-\x9f\u2028\u2029]/.test(value)) return false;
+        for (let i = 0; i < value.length; i++) {
+          const unit = value.charCodeAt(i);
+          if (unit >= 0xd800 && unit <= 0xdbff) {
+            const next = value.charCodeAt(++i);
+            if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+          } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+        }
+        return true;
+      };
+      const ids = new Set();
+      if (!object(options) || Object.keys(options).some(key => !['items','title','placeholder','timeoutMs'].includes(key))
+          || !Array.isArray(options.items) || options.items.length < 1 || options.items.length > 200
+          || (options.title !== undefined && !text(options.title, 128))
+          || (options.placeholder !== undefined && !text(options.placeholder, 128))
+          || (options.timeoutMs !== undefined && (!Number.isInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 60000))
+          || options.items.some(item => {
+            if (!object(item) || Object.keys(item).some(key => !['id','label','description'].includes(key))
+                || !text(item.id, 128) || !text(item.label, 256)
+                || (item.description !== undefined && item.description !== '' && !text(item.description, 512)) || ids.has(item.id)) return true;
+            ids.add(item.id);
+            return false;
+          })) invalid(method, '选择需要 1–200 个唯一 ID 的候选项和有效单行文本，时限 1–60000 毫秒。');
+      // 复制白名单字段；两种引擎传递同一份参数，不传递业务对象或回调。
+      const params = {items:options.items.map(item => ({id:item.id,label:item.label,...(item.description === undefined ? {} : {description:item.description})})),
+        ...(options.title === undefined ? {} : {title:options.title}),
+        ...(options.placeholder === undefined ? {} : {placeholder:options.placeholder}),
+        ...(options.timeoutMs === undefined ? {} : {timeoutMs:options.timeoutMs})};
+      let bytes = 0;
+      for (const character of JSON.stringify(params)) {
+        const point = character.codePointAt(0);
+        bytes += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+      }
+      if (bytes > 32*1024) invalid(method, '选择参数总量最多 32 KiB。');
+      return invoke(method, params);
+    },
+  });
+  return {desktop, clipboard, ui};
 }

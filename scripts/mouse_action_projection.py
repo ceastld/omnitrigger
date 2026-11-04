@@ -44,7 +44,6 @@ def mouse_requirements(rule):
         gaps.append("mouse_control_key_missing")
     elif key is None or type(key) is int and key == 0:
         control = {"kind":"unmodified"}
-        gaps.append("mouse_unmodified_control_exclusions")
     elif type(key) is int and key in (5, 6):
         control = {"kind":"mouse_button", "button":"x1" if key == 5 else "x2"}
     elif type(key) is int and key in (1, 2, 4):
@@ -52,14 +51,11 @@ def mouse_requirements(rule):
         gaps.append("mouse_primary_button_capture")
     elif type(key) is int and key in (16, 17, 18):
         control = {"kind":"modifier_family", "family":{16:"shift",17:"control",18:"alt"}[key]}
-        gaps.extend(("mouse_either_side_modifier_matching", "mouse_modifier_state_sampling"))
     elif type(key) is int and key in (160,161,162,163,164,165,91,92):
         family, side = {160:("shift","left"),161:("shift","right"),162:("control","left"),
                         163:("control","right"),164:("alt","left"),165:("alt","right"),
                         91:("windows","left"),92:("windows","right")}[key]
         control = {"kind":"modifier_key", "key":key, "side":side, "family":family}
-        if key != 164:
-            gaps.append("mouse_explicit_modifier_mapping_review")
     elif type(key) is int and 7 <= key <= 254:
         control = {"kind":"captured_keyboard_key", "key":key}
         gaps.append("mouse_keyboard_capture_ownership")
@@ -75,7 +71,18 @@ def mouse_requirements(rule):
     else:
         region = {"kind":"unsupported", "value":location}
         gaps.append("unsupported_mouse_Location")
-    return {"control":control, "region":region, "unresolved":sorted(set(gaps))}
+    result = {"control":control, "region":region, "unresolved":sorted(set(gaps))}
+    if control["kind"] in ("unmodified", "modifier_family", "modifier_key"):
+        result["projection_policy"] = {"kind":"mouse_exact", "modifier_delivery":"observed",
+                                       "extra_held_inputs":"exclude", "source_equivalence":False}
+        result["semantic_differences"] = (["source_checks_captured_keys_not_all_ordinary_keys",
+                                            "source_unmodified_does_not_exclude_windows_keys",
+                                            "source_virtual_control_state_unavailable"]
+                                           if control["kind"] == "unmodified" else
+                                           ["source_async_modifier_sampling_unavailable",
+                                            "source_async_modifier_path_can_allow_extra_keyboard_keys"])
+        result["semantic_differences"].append("source_checks_captured_mouse_buttons_not_all_physical_buttons")
+    return result
 
 
 def mouse_trigger(rule, settings):
@@ -100,8 +107,10 @@ def mouse_trigger(rule, settings):
         gaps.append("mouse_event_type")
     if kind in (11,12) and settings["EnableReverseVScroll"] is not False:
         gaps.append("mouse_reverse_scroll_policy")
-    keyboard_control = requirements["control"]["kind"] == "modifier_key"
-    control = None if keyboard_control else requirements["control"]["button"]
+    control_kind = requirements["control"]["kind"]
+    keyboard_control = control_kind in ("modifier_key", "modifier_family")
+    observed_control = keyboard_control or control_kind == "unmodified"
+    control = None if observed_control else requirements["control"]["button"]
     if kind == 4:
         mouse_button = rule.get("MouseButton")
         button = ({1048576:"left",2097152:"right",4194304:"middle",8388608:"x1",16777216:"x2"}.get(mouse_button)
@@ -129,11 +138,15 @@ def mouse_trigger(rule, settings):
     scope = {"identity":"shell_context"}
     if allow: scope["allow"]=allow
     if deny: scope["deny"]=deny
-    held = {"kind":"key", "value":rule["ControlKey"]} if keyboard_control else {"kind":control}
-    trigger = {"held":[held],"activation":activation,"pointer_scope":scope}
+    held = ([{"kind":"key", "value":rule["ControlKey"]}] if keyboard_control
+            else [] if observed_control else [{"kind":control}])
+    trigger = {"held":held,"activation":activation,"pointer_scope":scope}
+    if observed_control: trigger["keyboard"]={"matching":{"kind":"mouse_exact"}}
     if kind in (11,12): trigger["wheel"]="packet"
     reviews = (["mouse_modifier_capture_delivery_review", "mouse_modifier_state_sampling", "mouse_other_held_keys_review"]
-               if keyboard_control else ["mouse_prefix_lifecycle_review"])
+               if keyboard_control else ["mouse_unmodified_source_ownership_review", "mouse_virtual_control_state_review",
+                                         "mouse_other_held_keys_review"] if observed_control
+               else ["mouse_prefix_lifecycle_review"])
     return {"trigger":trigger,"trigger_gaps":reviews + ["mouse_other_held_buttons_review",
         "mouse_queue_drop_delay_review", "pointer_host_identity_mapping", "pointer_context_sampling"],
         "source_requirements":requirements,

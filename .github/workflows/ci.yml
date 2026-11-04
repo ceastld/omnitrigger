@@ -66,6 +66,12 @@ jobs:
           node tools/script-sdk-check/check.mjs target/debug/omnitrigger.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: 验证常用动作和浏览器工作流
+        shell: pwsh
+        run: |
+          node --test tests/browser_workflows.test.mjs examples/actions/common-desktop/recipes.test.mjs examples/actions/common-search/recipes.test.mjs examples/actions/script-choice/contract.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: 验证轻量脚本开发包的真实安装与切换
         shell: pwsh
         run: |
@@ -124,7 +130,7 @@ jobs:
         run: |
           foreach ($engine in @('boa', 'quickjs')) {
             $env:OMNITRIGGER_TEST_SCRIPT_HOST = Join-Path $PWD "results/$engine-small.exe"
-            cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --test script_host -- --ignored --test-threads=1
+            cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --tests -- --ignored --test-threads=1
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 

@@ -9,8 +9,9 @@ use std::{
 };
 
 pub const SCRIPT_API: &str = include_str!("../runtime/script-api.d.ts");
-const ENTRY: &str = include_str!("../runtime/script-template.js");
-const README: &str = include_str!("../runtime/script-project.md");
+const ENTRY: &str = include_str!("../../../examples/actions/script-modules/main.mjs");
+const MODULE: &str = include_str!("../../../examples/actions/script-modules/lib/text.js");
+const README: &str = include_str!("../../../examples/actions/script-modules/README.md");
 
 #[derive(Debug, Serialize)]
 pub struct ScriptProject {
@@ -138,8 +139,8 @@ fn create_project(root: &Path, id: &str, name: &str) -> Result<ScriptProject, Ac
         action_version: 1,
         input: json!({"text":"  OmniTrigger  "}),
     };
-    let manifest = json!({"schema_version":1,"id":id,"name":name,"version":"1.0.0","actions":[{"id":"run","title":"运行脚本","version":1,"runtime":"script","entry":"main.js"}]});
-    let config = json!({"compilerOptions":{"allowJs":true,"checkJs":true,"strict":true,"noEmit":true,"target":"ES2020","lib":["ES2020"],"types":[]},"files":["main.js","sdk/api.d.ts"]});
+    let manifest = json!({"schema_version":1,"id":id,"name":name,"version":"1.0.0","actions":[{"id":"run","title":"运行脚本","version":1,"runtime":"script","entry":"main.mjs"}]});
+    let config = json!({"compilerOptions":{"allowJs":true,"checkJs":true,"strict":true,"noEmit":true,"target":"ES2020","module":"ESNext","moduleResolution":"Bundler","lib":["ES2020"],"types":[]},"include":["**/*.js","**/*.mjs","sdk/**/*.d.ts"]});
     let write = |name: &str, contents: &str| -> std::io::Result<()> {
         let mut file = fs::OpenOptions::new()
             .create_new(true)
@@ -149,8 +150,10 @@ fn create_project(root: &Path, id: &str, name: &str) -> Result<ScriptProject, Ac
     };
     let result = (|| -> std::io::Result<()> {
         fs::create_dir(package_root.join("sdk"))?;
+        fs::create_dir(package_root.join("lib"))?;
         write("sdk/api.d.ts", SCRIPT_API)?;
-        write("main.js", ENTRY)?;
+        write("main.mjs", ENTRY)?;
+        write("lib/text.js", MODULE)?;
         write("call.json", &serde_json::to_string_pretty(&call)?)?;
         write("jsconfig.json", &config.to_string())?;
         write("README.md", README)?;
@@ -168,7 +171,7 @@ fn create_project(root: &Path, id: &str, name: &str) -> Result<ScriptProject, Ac
         )
     })?;
     Ok(ScriptProject {
-        entry_path: package_root.join("main.js"),
+        entry_path: package_root.join("main.mjs"),
         call_path: package_root.join("call.json"),
         sdk_path: package_root.join("sdk/api.d.ts"),
         package_root,
@@ -228,9 +231,16 @@ mod tests {
         let config: serde_json::Value =
             serde_json::from_slice(&fs::read(project.package_root.join("jsconfig.json")).unwrap())
                 .unwrap();
-        for name in config["files"].as_array().unwrap() {
-            assert!(project.package_root.join(name.as_str().unwrap()).is_file());
-        }
+        assert_eq!(config["compilerOptions"]["module"], "ESNext");
+        assert_eq!(
+            config["include"],
+            json!(["**/*.js", "**/*.mjs", "sdk/**/*.d.ts"])
+        );
+        assert_eq!(
+            fs::read_to_string(project.package_root.join("lib/text.js")).unwrap(),
+            MODULE
+        );
+        assert_eq!(action.definition.entry, "main.mjs");
         fs::write(
             &project.entry_path,
             "throw new Error('这是作者自己的内容');",

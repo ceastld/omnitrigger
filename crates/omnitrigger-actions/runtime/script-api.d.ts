@@ -16,6 +16,26 @@ interface ScriptShortcutTiming {
     key_down_delay_ms?: number;
     process_overrides?: Record<string, number>;
 }
+interface ScriptChoiceItem {
+    /** 唯一稳定 ID，最多 128 个 UTF-16 单元。 */
+    id: string;
+    /** 单行非空文本，最多 256 个 UTF-16 单元。 */
+    label: string;
+    /** 单行说明，最多 512 个 UTF-16 单元。 */
+    description?: string;
+}
+interface ScriptChooseOptions {
+    /** 1–200 项；UTF-8 JSON 参数总量最多 32 KiB，不接受额外字段。 */
+    items: readonly ScriptChoiceItem[];
+    /** 默认“选择一项”，最多 128 个 UTF-16 单元。 */
+    title?: string;
+    /** 默认“搜索”，匹配 ID、标签和说明，最多 128 个 UTF-16 单元。 */
+    placeholder?: string;
+    /** 默认 30000，范围 1–60000 毫秒；另受动作总时限约束。 */
+    timeoutMs?: number;
+}
+type ScriptChooseResult = {status: 'selected'; id: string}
+    | {status: 'cancelled'; reason: 'dismissed' | 'timeout'};
 interface ScriptBrowserOptions {
     /** browser_instance_id，省略时只接受恰好一个已连接 profile。 */
     profile?: string;
@@ -46,6 +66,13 @@ type ScriptContext = Readonly<{
         };
         /** 创建独立程序后返回，不随脚本结束关闭。 */
         start(program: string, args?: string[]): { pid: number };
+    };
+    ui: {
+        /** 需要应用 GPUI 界面。同步等待发生在动作线程，Hook 不等待。
+         * ↑↓/Enter 或点击选择；Esc/关闭取消，动作取消与宿主退出抛错。
+         * 已有窗口返回 ui_busy。后续输入保持原目标身份；失焦返回 target_changed。
+         */
+        choose(options: ScriptChooseOptions): ScriptChooseResult;
     };
     desktop: {
         /** 本次提交时捕获的目标，不在调用时重新选择前台；独立 CLI 不提供目标。 */

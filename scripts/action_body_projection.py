@@ -42,8 +42,73 @@ def _ordinary(key):
 
 def action_body(record, settings):
     if record.get("ActionType") == "XAction":
-        return key_step_body(record, settings)
+        result = key_step_body(record, settings)
+        if result["native_action"] is None:
+            review = subprogram_dependencies(record)
+            if review is not None:
+                result["dependency_review"] = review
+                if review["calls"]:
+                    result["action_gaps"].append("source_subprogram_dependency_required")
+        return result
     return keyboard_body(record, settings)
+
+
+def subprogram_dependencies(record):
+    """只列出已核实本机正文中的调用位置；不执行表达式或按名称猜测子程序行为。"""
+    if record.get("UseTemplate") is not False or record.get("Resolution") != "local":
+        return None
+    data = record.get("EffectiveData")
+    if not isinstance(data, str) or data != record.get("StoredData"):
+        return None
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("正文含重复字段")
+            result[key] = value
+        return result
+
+    calls = []
+    remaining = 256
+
+    def walk(steps, path, depth):
+        nonlocal remaining
+        if steps is None:
+            return
+        if not isinstance(steps, list) or depth > 16:
+            raise ValueError("步骤结构或深度需要人工检查")
+        for index, step in enumerate(steps):
+            remaining -= 1
+            if remaining < 0 or not isinstance(step, dict) or type(step.get("Disabled", False)) is not bool:
+                raise ValueError("步骤数量或禁用标记需要人工检查")
+            if step.get("Disabled", False):
+                continue
+            location = f"{path}[{index}]"
+            if step.get("StepRunnerKey") == "sys:subprogram":
+                params = step.get("InputParams")
+                if not isinstance(params, dict):
+                    raise ValueError("调用参数需要人工检查")
+                reference = params.get("subProgram")
+                literal = (isinstance(reference, dict) and set(reference) == {"VarKey", "Value"}
+                           and reference["VarKey"] is None and isinstance(reference["Value"], str)
+                           and bool(reference["Value"])
+                           and not any(marker in reference["Value"] for marker in ("$", "{", "}")))
+                calls.append({"path": location, "reference": reference["Value"] if literal else None,
+                              "resolution": "body_not_provided" if literal else "dynamic_reference",
+                              "input_names": sorted(key for key in params if key.startswith("var:"))})
+            for branch in ("IfSteps", "ElseSteps"):
+                walk(step.get(branch), location + "." + branch, depth + 1)
+
+    try:
+        body = json.loads(data, object_pairs_hook=unique_object)
+        if not isinstance(body, dict) or not isinstance(body.get("Steps"), list):
+            return None
+        walk(body["Steps"], "Steps", 0)
+        return {"scope": "active_step_tree", "inventory_complete": True, "calls": calls}
+    except (ValueError, TypeError, KeyError, RecursionError):
+        # 部分清单仍有定位价值，但绝不标成完整或可投影动作。
+        return {"scope": "active_step_tree", "inventory_complete": False, "calls": calls}
 
 
 def key_step_body(record, settings):

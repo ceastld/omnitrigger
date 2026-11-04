@@ -518,6 +518,8 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20, body
             "summary": {"loaded_actions": len(items), "enabled_bindings": len(bindings),
                         "selected_actions": len(actions),
                         "selected_action_available": sum(row.get("implementation", {}).get("status") == "native_action_available" for row in actions),
+                        "selected_action_subprogram_calls": sum(len(row.get("implementation", {}).get("dependency_review", {}).get("calls", [])) for row in actions),
+                        "selected_action_dependency_inventory_incomplete": sum(row.get("implementation", {}).get("dependency_review", {}).get("inventory_complete") is False for row in actions),
                         "binding_status": dict(collections.Counter(row["status"] for row in bindings)),
                         "trigger_gaps": dict(collections.Counter(gap for row in bindings for gap in row["trigger_gaps"])),
                         "normalizations": dict(collections.Counter(note["kind"] for row in bindings for note in row.get("source_normalizations", []))),

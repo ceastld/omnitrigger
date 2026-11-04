@@ -4,7 +4,7 @@ import unittest
 import tempfile
 from pathlib import Path
 from mouse_action_projection import mouse_trigger, mouse_requirements, settings_snapshot
-from plan_action_migration import build_plan, main
+from plan_action_migration import build_plan, main, same_keyboard_policy
 from test_action_migration import fixture
 
 
@@ -28,7 +28,8 @@ class MouseMigrationTests(unittest.TestCase):
             self.assertIsNone(result['trigger'])
             self.assertEqual(result['source_requirements']['control'], {'kind':'unmodified'})
             self.assertEqual(result['source_requirements']['region'], {'kind':'screen_edge','edge':edge,'thickness_px':1})
-            self.assertIn('mouse_unmodified_control_exclusions', result['trigger_gaps'])
+            self.assertNotIn('mouse_unmodified_control_exclusions', result['trigger_gaps'])
+            self.assertFalse(result['source_requirements']['projection_policy']['source_equivalence'])
             self.assertIn('mouse_screen_edge_intersection_priority', result['trigger_gaps'])
             self.assertIn('mouse_screen_edge_seam_policy', result['trigger_gaps'])
             self.assertNotIn('mouse_control_key_semantics', result['trigger_gaps'])
@@ -36,9 +37,12 @@ class MouseMigrationTests(unittest.TestCase):
     def test_generic_modifiers_and_captured_keys_keep_distinct_requirements(self):
         for key, family in ((16,'shift'),(17,'control'),(18,'alt')):
             result = mouse_trigger(dict(rule(), ControlKey=key), settings())
-            self.assertIsNone(result['trigger'])
+            self.assertEqual(result['trigger']['held'], [{'kind':'key','value':key}])
+            self.assertEqual(result['trigger']['keyboard'], {'matching':{'kind':'mouse_exact'}})
             self.assertEqual(result['source_requirements']['control'], {'kind':'modifier_family','family':family})
-            self.assertIn('mouse_either_side_modifier_matching', result['trigger_gaps'])
+            self.assertNotIn('mouse_either_side_modifier_matching', result['trigger_gaps'])
+            self.assertIn('mouse_modifier_state_sampling', result['trigger_gaps'])
+            self.assertIn('mouse_other_held_keys_review', result['trigger_gaps'])
         for key in (20, 32):
             result = mouse_trigger(dict(rule(), ControlKey=key), settings())
             self.assertIsNone(result['trigger'])
@@ -64,7 +68,35 @@ class MouseMigrationTests(unittest.TestCase):
         self.assertEqual(row['operation']['native_action']['keys'], [163,165,71])
         self.assertEqual(row['equivalent_configuration_ids'], [])
         self.assertIsNone(mouse_trigger(dict(source, MouseButton=16777216.0), settings())['trigger'])
-        self.assertIsNone(mouse_trigger(dict(source, ControlKey=165), settings())['trigger'])
+        self.assertEqual(mouse_trigger(dict(source, ControlKey=165), settings())['trigger']['held'],
+                         [{'kind':'key','value':165}])
+
+    def test_unmodified_projection_excludes_all_held_inputs_and_keeps_source_ownership_gap(self):
+        for value in (None, 0):
+            result = mouse_trigger(dict(rule(), ControlKey=value), settings())
+            self.assertEqual(result['trigger']['held'], [])
+            self.assertEqual(result['trigger']['keyboard'], {'matching':{'kind':'mouse_exact'}})
+            self.assertIn('mouse_unmodified_source_ownership_review', result['trigger_gaps'])
+            self.assertIn('mouse_virtual_control_state_review', result['trigger_gaps'])
+            self.assertEqual(result['source_requirements']['projection_policy']['extra_held_inputs'], 'exclude')
+            self.assertFalse(result['source_requirements']['projection_policy']['source_equivalence'])
+
+    def test_supported_modifier_projection_never_claims_source_or_existing_binding_equivalence(self):
+        data = fixture()
+        data['source']['MouseActions'] = [dict(rule(), ControlKey=17)]
+        data['current']['bindings'].append({'id':99,'held':[{'kind':'key','value':17}],
+            'activation':{'kind':'wheel_up'},'wheel':'packet','enabled':True,
+            'action':{'kind':'notification'}})
+        result = build_plan(**data, mouse_settings=settings())
+        row = [row for row in result['bindings'] if row['kind']=='mouse'][0]
+        self.assertIsNotNone(row['trigger'])
+        self.assertEqual(row['status'], 'needs_trigger_semantics_review')
+        # 旧清单该字段只表示按键形状相同；完整等价仍为空，策略须单独比较。
+        self.assertEqual(row['matching_trigger_configuration_ids'], [99])
+        self.assertFalse(same_keyboard_policy(data['current']['bindings'][-1].get('keyboard', {}),
+                                             row['trigger']['keyboard']))
+        self.assertEqual(row['equivalent_configuration_ids'], [])
+        self.assertFalse(result['complete'])
 
     def test_three_actual_shapes_keep_side_order_scope_and_source_timing(self):
         data=fixture()
@@ -92,7 +124,7 @@ class MouseMigrationTests(unittest.TestCase):
 
     def test_missing_settings_or_unsupported_flags_never_become_enabled_shortcuts(self):
         self.assertIsNone(mouse_trigger(rule(),None)['trigger'])
-        for change in ({'ControlKey':17},{'Location':48},{'ActivatePointingWindow':True},
+        for change in ({'Location':48},{'ActivatePointingWindow':True},
                        {'DebounceMs':50},{'TriggerActionWhenMouseUp':True},{'IsEnabled':False}):
             self.assertIsNone(mouse_trigger(dict(rule(),**change),settings())['trigger'])
         self.assertIsNone(mouse_trigger(rule(),dict(settings(),EnableReverseVScroll=True))['trigger'])

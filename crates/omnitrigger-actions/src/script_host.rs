@@ -130,19 +130,7 @@ impl ScriptHostRuntime {
         }
         let _image = self.checked_program()?;
         let (root, entry) = crate::node::checked_entry(action)?;
-        let mut source = String::new();
-        File::open(&entry)
-            .and_then(|file| file.take(SOURCE_LIMIT + 1).read_to_string(&mut source))
-            .map_err(|cause| error("entry_unavailable", cause.to_string(), "not_started"))?;
-        if source.len() as u64 > SOURCE_LIMIT {
-            return Err(error(
-                "source_too_large",
-                "脚本入口超过 128 KiB。",
-                "not_started",
-            ));
-        }
-        // 动作文件保持标准 JS 语法，供编辑器与类型提示使用；CLI 原型的函数体协议留在适配层。
-        let source = format!("{source}\nif (typeof main !== 'function') throw new Error('脚本入口须声明 function main(ctx)');\nreturn main(ctx);");
+        let entry_request = entry_request(&root, &entry)?;
         let native = host
             .map(|_| NativeBridge::new().and_then(|bridge| Ok((bridge.configuration()?, bridge))));
         let (mut bridge, native_context) = match native {
@@ -152,10 +140,16 @@ impl ScriptHostRuntime {
             Some(Err(error)) => (None, json!({"error":error})),
             None => (None, Value::Null),
         };
-        let request = serde_json::to_vec(&json!({
-            "script":source,"input":action.call.input,"package_root":crate::node::script_path(&root),"native_context":native_context,
+        let mut request = json!({
+            "input":action.call.input,"package_root":crate::node::script_path(&root),"native_context":native_context,
             "invocation":{"invocation_id":context.invocation_id.to_string(),"binding_id":context.binding_id.to_string()}
-        })).map_err(|cause| error("invalid_request", cause.to_string(), "not_started"))?;
+        });
+        request
+            .as_object_mut()
+            .expect("request object")
+            .extend(entry_request);
+        let request = serde_json::to_vec(&request)
+            .map_err(|cause| error("invalid_request", cause.to_string(), "not_started"))?;
         if request.len() > 256 * 1024 {
             return Err(error(
                 "invalid_request",
@@ -283,6 +277,53 @@ impl ScriptHostRuntime {
     }
 }
 
+fn entry_request(
+    root: &std::path::Path,
+    entry: &std::path::Path,
+) -> Result<serde_json::Map<String, Value>, ActionError> {
+    if entry.extension().is_some_and(|ext| ext == "mjs") {
+        let relative = entry.strip_prefix(root).map_err(|_| {
+            error(
+                "entry_unavailable",
+                "模块入口必须位于动作包内。",
+                "not_started",
+            )
+        })?;
+        let relative = relative
+            .to_str()
+            .ok_or_else(|| {
+                error(
+                    "entry_unavailable",
+                    "模块入口路径需要 UTF-8。",
+                    "not_started",
+                )
+            })?
+            .replace('\\', "/");
+        // 由宿主在自己的包内加载器中再次验证入口及每个依赖；不拼接或转译模块源码。
+        return Ok(serde_json::Map::from_iter([(
+            "module_entry".into(),
+            relative.into(),
+        )]));
+    }
+    let mut source = String::new();
+    File::open(entry)
+        .and_then(|file| file.take(SOURCE_LIMIT + 1).read_to_string(&mut source))
+        .map_err(|cause| error("entry_unavailable", cause.to_string(), "not_started"))?;
+    if source.len() as u64 > SOURCE_LIMIT {
+        return Err(error(
+            "source_too_large",
+            "脚本入口超过 128 KiB。",
+            "not_started",
+        ));
+    }
+    // 兼容原有 function main(ctx) 工程；函数体宿主协议不变。
+    let source = format!("{source}\nif (typeof main !== 'function') throw new Error('脚本入口须声明 function main(ctx)');\nreturn main(ctx);");
+    Ok(serde_json::Map::from_iter([(
+        "script".into(),
+        source.into(),
+    )]))
+}
+
 fn error(code: &str, message: impl Into<String>, effect: &str) -> ActionError {
     let mut value = ActionError::new(code, message);
     value.effect_state = Some(effect.into());
@@ -356,6 +397,68 @@ impl Drop for OwnedHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn module_entry_uses_a_path_and_legacy_entry_keeps_function_body_protocol() {
+        let fixture = crate::catalog::tests::Fixture::new();
+        let entry = fixture.0.join("main.mjs");
+        let request = entry_request(&fixture.0, &entry).unwrap();
+        assert_eq!(request["module_entry"], "main.mjs");
+        assert!(!request.contains_key("script"));
+        let entry = fixture.0.join("main.js");
+        std::fs::write(&entry, "function main(ctx) { return ctx.input; }").unwrap();
+        let request = entry_request(&fixture.0, &entry).unwrap();
+        assert!(request["script"]
+            .as_str()
+            .unwrap()
+            .ends_with("return main(ctx);"));
+        assert!(!request.contains_key("module_entry"));
+    }
+
+    #[test]
+    #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+    fn generated_module_project_runs_and_reports_dependency_errors() {
+        let fixture = crate::catalog::tests::Fixture::new();
+        let root = fixture.0.join("actions");
+        let project = crate::project::create_script_project(&root, "modules").unwrap();
+        let action = crate::PackageCatalog::load(&root)
+            .resolve(&project.call)
+            .unwrap();
+        let runtime = ScriptHostRuntime::new(PathBuf::from(
+            std::env::var_os("OMNITRIGGER_TEST_SCRIPT_HOST").expect("设置真实宿主路径"),
+        ));
+        let context = InvocationContext {
+            invocation_id: u64::MAX,
+            binding_id: 9_007_199_254_740_993,
+        };
+        let result = runtime
+            .execute(&action, &context, &CancellationToken::new())
+            .unwrap();
+        assert_eq!(
+            result,
+            json!({"text":"OmniTrigger","invocation":{"invocation_id":u64::MAX.to_string(),"binding_id":"9007199254740993"}})
+        );
+        std::fs::write(
+            project.package_root.join("lib/text.js"),
+            "export function cleanText(){throw new Error('helper failed');}",
+        )
+        .unwrap();
+        let error = runtime
+            .execute(&action, &context, &CancellationToken::new())
+            .unwrap_err();
+        assert_eq!(error.code, "script_failed");
+        assert!(error.message.contains("text.js"), "{error}");
+        std::fs::write(
+            project.package_root.join("lib/text.js"),
+            "export const cleanText = ;",
+        )
+        .unwrap();
+        let error = runtime
+            .execute(&action, &context, &CancellationToken::new())
+            .unwrap_err();
+        assert_eq!(error.code, "module_parse");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        assert!(error.message.contains("text.js"), "{error}");
+    }
     #[test]
     fn result_requires_version_and_matching_os_exit() {
         assert_eq!(

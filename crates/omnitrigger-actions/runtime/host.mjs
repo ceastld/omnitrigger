@@ -98,7 +98,7 @@ const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...
 function nativeCall(method, params) {
   checkCancelled();
   const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, message), {effectState, method});
-  if (!request.native) return Promise.reject(fail(request.native_error?.code ?? 'desktop_unavailable', request.native_error?.message ?? '此宿主没有提供本次调用的桌面上下文。'));
+  if (!request.native) return Promise.reject(fail(request.native_error?.code ?? (method === 'ui.choose' ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (method === 'ui.choose' ? '选择窗口需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
   if (nativePending) return Promise.reject(fail('desktop_busy', '请 await 上一个桌面调用，避免输入并发。'));
   if (nativeId >= 128) return Promise.reject(fail('desktop_call_limit', '单次动作最多调用 128 次桌面 API。'));
   const id = ++nativeId;
@@ -119,7 +119,8 @@ function nativeCall(method, params) {
     const aborted = () => finish(controller.signal.reason);
     controller.signal.addEventListener('abort', aborted, {once:true});
     socket.setEncoding('utf8');
-    socket.setTimeout(5000, () => finish(fail('desktop_timeout', '桌面调用未在 5 秒内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
+    const timeout = method === 'ui.choose' ? 61000 : 5000;
+    socket.setTimeout(timeout, () => finish(fail('desktop_timeout', '桌面调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
     socket.once('connect', () => {
       if (controller.signal.aborted) return aborted();
       sent = true;
@@ -153,6 +154,7 @@ const desktopApis = createDesktopApi(nativeCall);
 const asyncApi = api => Object.freeze(Object.fromEntries(Object.entries(api).map(([name, fn]) => [name, async (...args) => fn(...args)])));
 const desktop = asyncApi(desktopApis.desktop);
 const clipboard = asyncApi(desktopApis.clipboard);
+const ui = asyncApi(desktopApis.ui);
 
 function delay(milliseconds) {
   checkCancelled();
@@ -277,6 +279,7 @@ try {
     browser,
     desktop,
     clipboard,
+    ui,
     delay,
     signal: controller.signal,
   });

@@ -1,0 +1,4 @@
+{
+  "compilerOptions": {"checkJs":true,"noEmit":true,"strict":true,"target":"ES2022"},
+  "files": ["main.js", "../../../crates/omnitrigger-actions/runtime/script-api.d.ts"]
+}

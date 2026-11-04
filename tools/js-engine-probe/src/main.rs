@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::io::{self, Read};
 
 mod api;
+mod modules;
 mod native;
 const DESKTOP_API: &str =
     include_str!("../../../crates/omnitrigger-actions/runtime/desktop-api.js");
@@ -64,7 +65,11 @@ fn diagnostic_error(fields: Option<String>, rendered: String) -> Value {
 #[serde(deny_unknown_fields)]
 struct Request {
     /// 同步函数体；通过 ctx.input 读取参数，通过 return 返回 JSON 结果。
-    script: String,
+    #[serde(default)]
+    script: Option<String>,
+    /// 标准 ESM 入口；与 script 互斥，路径相对于 package_root。
+    #[serde(default)]
+    module_entry: Option<String>,
     input: Value,
     #[serde(default)]
     invocation: Option<Invocation>,
@@ -137,6 +142,30 @@ fn run() -> Result<Value, Value> {
     {
         return Err("package_root 必须为绝对路径。".into());
     }
+    let modules = if let Some(entry) = &request.module_entry {
+        if request.script.is_some() {
+            return Err(modules::fault(
+                "module_entry",
+                "module_entry 与 script 不能同时提供。",
+                "not_started",
+            ));
+        }
+        Some(modules::PackageModules::new(
+            request.package_root.as_deref().ok_or_else(|| {
+                modules::fault("module_entry", "模块入口需要 package_root。", "not_started")
+            })?,
+            entry,
+        )?)
+    } else {
+        if request.script.is_none() {
+            return Err(modules::fault(
+                "invalid_request",
+                "请求需要 script 或 module_entry。",
+                "not_started",
+            ));
+        }
+        None
+    };
     let metadata = json!({"invocation":request.invocation,"packageRoot":request.package_root,"__nativeContext":request.native_context});
     let metadata =
         serde_json::to_string(&metadata.to_string()).map_err(|error| error.to_string())?;
@@ -153,8 +182,11 @@ fn run() -> Result<Value, Value> {
          }} }})()",
     );
     // 首行不插入换行，避免把用户文件行号平移到 SDK 后面；首行列号含函数前缀。
-    let entry = format!("(function(ctx) {{{}\n}})", request.script);
-    let output = evaluate(&source, &entry)?;
+    let entry = format!(
+        "(function(ctx) {{{}\n}})",
+        request.script.as_deref().unwrap_or_default()
+    );
+    let output = evaluate(&source, &entry, modules.as_ref())?;
     if output.len() > 80 * 1024 {
         return Err("结果超过 64 KiB。".into());
     }
@@ -173,9 +205,21 @@ fn run() -> Result<Value, Value> {
 }
 
 #[cfg(feature = "boa")]
-fn evaluate(source: &str, entry: &str) -> Result<String, Value> {
+fn evaluate(
+    source: &str,
+    entry: &str,
+    modules: Option<&std::rc::Rc<modules::PackageModules>>,
+) -> Result<String, Value> {
     use boa_engine::{Context, Source};
-    let mut context = Context::default();
+    let loader = modules.map(|package| modules::boa::Loader::new(std::rc::Rc::clone(package)));
+    let mut context = if let Some(loader) = &loader {
+        Context::builder()
+            .module_loader(std::rc::Rc::clone(loader))
+            .build()
+            .map_err(|e| e.to_string())?
+    } else {
+        Context::default()
+    };
     use boa_engine::{js_string, JsValue, NativeFunction};
     context
         .register_global_builtin_callable(
@@ -201,12 +245,16 @@ fn evaluate(source: &str, entry: &str) -> Result<String, Value> {
     let runner = context
         .eval(Source::from_bytes(source).with_path(std::path::Path::new("omnitrigger-sdk.js")))
         .map_err(|error| error.to_string())?;
-    let entry = context
-        .eval(Source::from_bytes(entry).with_path(std::path::Path::new("action.js")))
-        .map_err(|error| {
-            let rendered = format!("action.js\n{error}");
-            diagnostic_error(None, rendered)
-        })?;
+    let entry = if let Some(loader) = &loader {
+        modules::boa::entry(loader, &mut context, &fields)?
+    } else {
+        context
+            .eval(Source::from_bytes(entry).with_path(std::path::Path::new("action.js")))
+            .map_err(|error| {
+                let rendered = format!("action.js\n{error}");
+                diagnostic_error(None, rendered)
+            })?
+    };
     let value = runner
         .as_callable()
         .ok_or("SDK 未返回入口执行函数。")?
@@ -245,7 +293,11 @@ fn boa_error(
 }
 
 #[cfg(feature = "quickjs")]
-fn evaluate(source: &str, entry: &str) -> Result<String, Value> {
+fn evaluate(
+    source: &str,
+    entry: &str,
+    modules: Option<&std::rc::Rc<modules::PackageModules>>,
+) -> Result<String, Value> {
     use rquickjs::{Context, Runtime};
     use std::{
         sync::{
@@ -255,6 +307,12 @@ fn evaluate(source: &str, entry: &str) -> Result<String, Value> {
         time::{Duration, Instant},
     };
     let runtime = Runtime::new().map_err(|error| error.to_string())?;
+    if let Some(package) = modules {
+        runtime.set_loader(
+            modules::quickjs::Loader(std::rc::Rc::clone(package)),
+            modules::quickjs::Loader(std::rc::Rc::clone(package)),
+        );
+    }
     runtime.set_memory_limit(32 * 1024 * 1024);
     runtime.set_max_stack_size(512 * 1024);
     let began = Instant::now();
@@ -287,13 +345,29 @@ fn evaluate(source: &str, entry: &str) -> Result<String, Value> {
             .map_err(|error| error.to_string())?;
         let mut options = rquickjs::context::EvalOptions::default();
         options.filename = Some("action.js".into());
-        let entry: rquickjs::Function = ctx
-            .eval_with_options(entry, options)
-            .map_err(|error| quickjs_error(&ctx, &fields, error))?;
+        let entry: rquickjs::Function = if let Some(package) = modules {
+            modules::quickjs::entry(package, &ctx, &fields)?
+        } else {
+            ctx.eval_with_options(entry, options)
+                .map_err(|error| quickjs_error(&ctx, &fields, error))?
+        };
         runner
             .call((entry,))
             .map_err(|error| quickjs_error(&ctx, &fields, error))
     })
+}
+
+#[cfg(feature = "quickjs")]
+fn quickjs_exception(ctx: &rquickjs::Ctx<'_>, error: rquickjs::Error) -> String {
+    if !error.is_exception() {
+        return error.to_string();
+    }
+    let exception = ctx.catch();
+    if let Some(error) = exception.as_exception() {
+        error.to_string()
+    } else {
+        format!("JavaScript 异常：{exception:?}")
+    }
 }
 
 #[cfg(feature = "quickjs")]

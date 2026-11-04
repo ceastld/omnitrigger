@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 use std::{
     io::{Read, Write},
     net::{Ipv4Addr, TcpListener, TcpStream},
+    sync::atomic::{AtomicBool, Ordering},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -67,6 +69,47 @@ fn io_error(error: impl ToString) -> ActionError {
     );
     error.effect_state = Some("not_started".into());
     error
+}
+
+/// 交互 UI 可等待数十秒；父运行时此时正在本次 poll 栈中，不能依赖它
+/// 继续轮询子进程才能发现宿主退出。旁路只检测连接和取消，不读走协议数据。
+fn interactive_call(
+    stream: &TcpStream,
+    parent: &CancellationToken,
+    call: impl FnOnce(&CancellationToken) -> Result<Value, ActionError>,
+) -> Result<Value, ActionError> {
+    let stream = stream.try_clone().map_err(io_error)?;
+    let cancellation = CancellationToken::new();
+    let done = AtomicBool::new(false);
+    struct Finish<'a>(&'a AtomicBool);
+    impl Drop for Finish<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    thread::scope(|scope| {
+        let token = &cancellation;
+        let stopped = &done;
+        scope.spawn(move || {
+            while !stopped.load(Ordering::Acquire) {
+                let mut byte = [0];
+                let disconnected = match stream.peek(&mut byte) {
+                    Ok(_) => true, // EOF，或违反一连接一帧约定的尾随数据。
+                    Err(error) => error.kind() != std::io::ErrorKind::WouldBlock,
+                };
+                if parent.is_cancelled() || disconnected {
+                    token.cancel();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let _finish = Finish(&done);
+        if parent.is_cancelled() {
+            cancellation.cancel();
+        }
+        call(&cancellation)
+    })
 }
 
 impl NativeBridge {
@@ -162,7 +205,7 @@ impl NativeBridge {
                             "动作已取消，未开始本机调用。",
                         ))
                     } else {
-                        match deadline {
+                        let call = |cancellation: &CancellationToken| match deadline {
                             Some(deadline) => host.call_with_deadline(
                                 &request.method,
                                 request.params,
@@ -170,6 +213,11 @@ impl NativeBridge {
                                 deadline,
                             ),
                             None => host.call(&request.method, request.params, cancellation),
+                        };
+                        if request.method == "ui.choose" {
+                            interactive_call(&client.stream, cancellation, call)
+                        } else {
+                            call(cancellation)
                         }
                     };
                     let response = match result {
@@ -210,6 +258,55 @@ impl NativeBridge {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn interactive_wait_observes_parent_cancel_and_host_disconnect_without_polling_runtime() {
+        for disconnect in [false, true] {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            stream.set_nonblocking(true).unwrap();
+            let parent = CancellationToken::new();
+            let token = parent.clone();
+            let (started, ready) = std::sync::mpsc::sync_channel(1);
+            let worker = thread::spawn(move || {
+                interactive_call(&stream, &token, |cancellation| {
+                    started.send(()).unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    while !cancellation.is_cancelled() && Instant::now() < deadline {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    assert!(
+                        cancellation.is_cancelled(),
+                        "交互窗口未观察到宿主断连或动作取消"
+                    );
+                    Ok(Value::Null)
+                })
+            });
+            ready.recv().unwrap();
+            if disconnect {
+                drop(peer);
+            } else {
+                parent.cancel();
+            }
+            assert_eq!(worker.join().unwrap().unwrap(), Value::Null);
+            // 断连仅取消本次交互调用，不污染可供动作服务查询的外层令牌。
+            assert_eq!(parent.is_cancelled(), !disconnect);
+        }
+    }
+
+    #[test]
+    fn interactive_monitor_stops_after_a_normal_response() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let _peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let value = interactive_call(&stream, &CancellationToken::new(), |_| {
+            Ok(json!({"status":"selected","id":"stable"}))
+        })
+        .unwrap();
+        assert_eq!(value["id"], "stable");
+    }
 
     struct Host(AtomicUsize);
     impl NativeHost for Host {

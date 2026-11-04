@@ -1,0 +1,6 @@
+{
+  "package_id": "examples.common-search",
+  "action_id": "web-search",
+  "action_version": 1,
+  "input": {"source": "text", "text": "Rust input state machine", "maxCodePoints": 128}
+}

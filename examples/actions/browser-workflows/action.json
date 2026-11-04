@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "id": "examples.browser-workflows",
+  "name": "常用浏览器工作流",
+  "version": "1.0.0",
+  "actions": [
+    { "id": "open-url", "title": "按网址复用或新建标签", "version": 1, "runtime": "node", "entry": "open-url.mjs" },
+    { "id": "duplicate-tab", "title": "复制指定标签", "version": 1, "runtime": "node", "entry": "duplicate-tab.mjs" },
+    { "id": "restore-session", "title": "恢复指定关闭会话", "version": 1, "runtime": "node", "entry": "restore-session.mjs" },
+    { "id": "open-bookmark", "title": "搜索书签并打开", "version": 1, "runtime": "node", "entry": "open-bookmark.mjs" }
+  ]
+}

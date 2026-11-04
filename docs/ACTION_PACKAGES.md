@@ -57,14 +57,15 @@ flowchart LR
 ```text
 actions/my-script/
   action.json
-  main.js
+  main.mjs
+  lib/text.js
   call.json
   jsconfig.json
   README.md
   sdk/api.d.ts
 ```
 
-使用支持 JavaScript / TypeScript 的编辑器打开该目录，直接编辑 `main.js`。工程附带本地 SDK 类型快照，启用标准 JS 类型检查，不依赖仓库路径或 npm 包，也无需转译；运行只需要独立宿主。入口的 `@type {ScriptMain}` 注释同时提供 `ctx` 补全和 JSON 返回值检查，能在编辑时发现异步入口、遗漏返回及 Promise、函数、`undefined` 等非 JSON 返回值；无结果时返回 `null`。静态类型无法排除 `any`、循环引用和非有限数，实际运行仍有独立校验。SDK 的[源声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)随应用维护，更新应用不会覆盖既有工程。
+使用支持 JavaScript / TypeScript 的编辑器打开整个目录，编辑 `main.mjs` 和 `lib` 中的模块。入口具名导出同步 `main(ctx)`，通过标准相对 `import` / `export` 拆分代码。工程附带本地 SDK 类型快照，启用标准 JS 类型检查，不依赖仓库路径或 npm 包，也无需转译；运行需要支持包内模块的新宿主；已有 `.js` 工程继续使用 `function main(ctx)`，更新应用不会改写作者文件。路径、缓存、循环和限额见[包内模块](../tools/js-engine-probe/MODULES.md)。入口的 `@type {ScriptMain}` 注释同时提供 `ctx` 补全和 JSON 返回值检查，能在编辑时发现异步入口、遗漏返回及 Promise、函数、`undefined` 等非 JSON 返回值；无结果时返回 `null`。静态类型无法排除 `any`、循环引用和非有限数，实际运行仍有独立校验。SDK 的[源声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)随应用维护，更新应用不会覆盖既有工程。
 
 安装宿主后，可使用同一配置校验和运行：
 
@@ -79,9 +80,9 @@ actions/my-script/
 
 ### 轻量脚本宿主
 
-`runtime: "script"` 可通过现有动作服务运行独立的 Rust JS 宿主，无需安装 Node。宿主不链接进输入核心；脚本执行、取消与终态仍由 `ActionService` 管理。已有 Boa 和 QuickJS 两种构建使用同一份宿主 API。入口文件声明标准 JS 函数 `function main(ctx)`，返回 JSON 值；不需要自定义文件语法或 npm 包。
+`runtime: "script"` 可通过现有动作服务运行独立的 Rust JS 宿主，无需安装 Node。宿主不链接进输入核心；脚本执行、取消与终态仍由 `ActionService` 管理。已有 Boa 和 QuickJS 两种构建使用同一份宿主 API。`.mjs` 入口具名导出同步 `main(ctx)`，`.js` 入口声明标准 JS 函数 `function main(ctx)`，均返回 JSON 值；不需要自定义文件语法或 npm 包。
 
-目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start`、`ctx.delay`、`ctx.clipboard.readText/writeText`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText/windowAction` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时暂不提供 Node 模块、ESM 导入、Promise 入口；需要这些能力的动作继续选择 `node` 运行时。
+目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start`、`ctx.delay`、`ctx.clipboard.readText/writeText`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText/windowAction` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时提供包内相对 ESM 导入，暂不提供 Node/npm 模块或 Promise 入口；需要 Node 环境或异步入口的动作继续选择 `node` 运行时。
 
 Windows x64 开发环境可先构建本机 QuickJS 包，再通过开发命令安装。包中包含独立宿主、SDK、许可通知和文件清单；构建命令不会发布或上传二进制：
 
@@ -272,6 +273,12 @@ cargo test -p omnitrigger-app interactive_script_line_edit_smoke --locked -- --i
 测试短暂激活自建窗口，验证编辑结果、步骤间切窗和取消；不使用个人配置。行编辑验收覆盖行中、行尾、行首的真实文本结果；行首可能合并上一行，具体编辑器的 Home 行为仍需分别验收。轻量脚本验收使用显式指定的真实宿主，不访问剪贴板；上面的其他命令分别覆盖 Node API 与原生输入适配。
 
 文本烟测在支持完整备份当前格式时才执行剪贴板用例，结束后恢复并逐格式读回核对；遇到不支持的格式会保留原剪贴板并明确失败，不把跳过算作通过。其他来源在测试期间更新剪贴板时，测试保留新内容。
+
+### 脚本选择菜单
+
+应用界面中的动作可调用 `ctx.ui.choose({items, title?, placeholder?, timeoutMs?})`，显示可搜索、支持键盘和鼠标选择的菜单。每项包含唯一稳定的 `id`、显示 `label` 和可选 `description`；接受 1–200 项，总参数最多 32 KiB。返回 `{status:'selected', id}`，或 `{status:'cancelled', reason:'dismissed'|'timeout'}`。默认时限 30 秒，另受动作总时限限制。Node 调用需 `await`，轻量脚本同步等待发生在动作线程，Hook 不等待。
+
+动作取消或宿主断连会关闭未完成的选择窗口。当前只能打开一个选择窗口；已有选择时报告 `ui_busy`，独立 CLI 没有 GPUI 界面时报告 `ui_unavailable`。选择完成后仅在窗口仍为前台且原目标身份有效时尝试交还焦点；系统可能拒绝，后续输入继续核验原目标，不能把选择回执当作目标已恢复的证明。示例见[脚本选择菜单](../examples/actions/script-choice/)。
 
 ### 窗口脚本
 

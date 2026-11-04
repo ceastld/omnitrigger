@@ -36,6 +36,7 @@ mod radial_wheel;
 mod script_browser;
 mod script_projects;
 mod script_runtime;
+mod script_ui;
 mod service;
 mod settings;
 mod shortcut;
@@ -3557,6 +3558,10 @@ impl Workspace {
                         "专用层"
                     } else if binding.spec.keyboard.retained_prefix.is_some() {
                         "保留原功能层"
+                    } else if binding.spec.keyboard.matching
+                        == omnitrigger_core::KeyboardMatching::MouseExact
+                    {
+                        "鼠标修饰键观察"
                     } else {
                         ""
                     },
@@ -3920,6 +3925,13 @@ impl Workspace {
                     "应用范围：{}（配置文件中设置）",
                     settings::process_scope_label(&spec.process_scope)
                 )))
+            })
+            .when(spec.keyboard.matching == omnitrigger_core::KeyboardMatching::MouseExact, |element| {
+                element.child(caption(if spec.held.is_empty() {
+                    "鼠标精确观察：有任意按键或鼠标键按住时不触发。"
+                } else {
+                    "鼠标精确观察：修饰键照常交给应用；泛型 Ctrl/Shift/Alt 接受左右任一侧或双侧，其他按住键会排除匹配。"
+                }))
             })
             .when_some(spec.keyboard.dedicated_prefix, |element, button| {
                 let name = theme::caps_for_buttons(&[button])[0].label.clone();
@@ -6201,6 +6213,7 @@ fn main() {
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             message_input::init(cx);
+            script_ui::init(cx);
             let bounds = Bounds::centered(None, size(px(1060.), px(780.)), cx);
             let result = cx.open_window(
                 WindowOptions {

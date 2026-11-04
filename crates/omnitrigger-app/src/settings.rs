@@ -22,7 +22,7 @@ use crate::wheels::WheelActionRef;
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
-const CONFIG_VERSION: u32 = 17;
+const CONFIG_VERSION: u32 = 18;
 
 pub fn use_path(path: PathBuf) -> Result<(), String> {
     CUSTOM_PATH.set(path).map_err(|_| "配置路径已设置。".into())
@@ -173,6 +173,7 @@ struct RetainedPrefixDto {
 enum KeyboardMatchingDto {
     #[default]
     Exact,
+    MouseExact,
     Captured {
         priority: u16,
     },
@@ -186,6 +187,7 @@ impl From<KeyboardMatching> for KeyboardMatchingDto {
     fn from(value: KeyboardMatching) -> Self {
         match value {
             KeyboardMatching::Exact => Self::Exact,
+            KeyboardMatching::MouseExact => Self::MouseExact,
             KeyboardMatching::Captured { priority } => Self::Captured { priority },
         }
     }
@@ -194,6 +196,7 @@ impl From<KeyboardMatchingDto> for KeyboardMatching {
     fn from(value: KeyboardMatchingDto) -> Self {
         match value {
             KeyboardMatchingDto::Exact => Self::Exact,
+            KeyboardMatchingDto::MouseExact => Self::MouseExact,
             KeyboardMatchingDto::Captured { priority } => Self::Captured { priority },
         }
     }
@@ -396,6 +399,9 @@ impl From<&Binding> for BindingDto {
 
 impl BindingDto {
     fn into_binding(self, version: u32) -> Result<Binding, String> {
+        if version < 18 && matches!(self.keyboard.matching, KeyboardMatchingDto::MouseExact) {
+            return Err("鼠标修饰键观察匹配需要版本 18 配置。".into());
+        }
         if version < 17 && !self.pointer_scope.is_global() {
             return Err("指针窗口范围需要版本 17 配置。".into());
         }
@@ -705,6 +711,11 @@ pub fn check_candidate(bindings: &[Binding], spec: &TriggerSpec) -> Result<(), C
     };
     let pick = |a: u64, b: u64| Some(if a == id { b } else { a });
     Err(match error {
+        RegistrationError::ConflictingModifierDelivery { first, second } => Conflict {
+            title: "修饰键交付策略冲突",
+            detail: "同一修饰键在重叠范围内同时用于鼠标观察和输入捕获，请调整范围或统一交付策略。".into(),
+            other: pick(first, second),
+        },
         RegistrationError::InvalidWheelPolicy { .. } => Conflict {
             title: "滚轮策略不适用于当前触发方式",
             detail: "逐事件策略仅用于滚轮，请改为滚轮触发或恢复缺省策略。".into(),
@@ -1024,7 +1035,7 @@ mod tests {
         let saved = std::fs::read_to_string(&destination).unwrap();
         assert_eq!(decode(&saved).unwrap(), bindings);
         let mut doc: serde_json::Value = serde_json::from_str(&saved).unwrap();
-        assert_eq!(doc["version"], 17);
+        assert_eq!(doc["version"], CONFIG_VERSION);
         assert_eq!(
             doc["bindings"][0]["pointer_scope"],
             json!({"identity":"shell_context","allow":["desktop"]})
@@ -1040,6 +1051,37 @@ mod tests {
             .unwrap_err()
             .contains("指针窗口范围"));
         assert_eq!(std::fs::read_to_string(destination).unwrap(), saved);
+    }
+
+    #[test]
+    fn mouse_exact_round_trip_requires_v18_and_keeps_generic_modifier() {
+        let mut doc = json!({"version":18,"bindings":[{
+            "id":1,"held":[{"kind":"key","value":17}],
+            "activation":{"kind":"wheel_up"},"wheel":"packet",
+            "keyboard":{"matching":{"kind":"mouse_exact"}},
+            "message":"测试","enabled":true,"action":{"kind":"notification"}
+        }]});
+        let bindings = decode(&doc.to_string()).unwrap();
+        assert_eq!(
+            bindings[0].spec.keyboard.matching,
+            KeyboardMatching::MouseExact
+        );
+        assert_eq!(bindings[0].spec.held, vec![Button::Key(17)]);
+        let saved = encode(&bindings);
+        assert_eq!(decode(&saved).unwrap(), bindings);
+        let saved_doc: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(
+            saved_doc["bindings"][0]["keyboard"]["matching"]["kind"],
+            "mouse_exact"
+        );
+        assert_eq!(saved_doc["bindings"][0]["held"][0]["value"], 17);
+        doc["version"] = 17.into();
+        assert!(decode(&doc.to_string()).unwrap_err().contains("版本 18"));
+        doc["version"] = 18.into();
+        doc["bindings"][0]["held"][0]["value"] = 32.into();
+        assert!(decode(&doc.to_string())
+            .unwrap_err()
+            .contains("鼠标精确观察模式"));
     }
 
     #[test]

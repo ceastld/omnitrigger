@@ -9,7 +9,8 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 11] = [
+pub const METHODS: [&str; 12] = [
+    "ui.choose",
     "browser.profiles",
     "browser.call",
     "target.info",
@@ -77,7 +78,12 @@ pub fn call(
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))
         .map_err(|cause| fault("native_bridge_unavailable", cause, &method, "not_started"))?;
     let browser = method.starts_with("browser.");
-    let deadline = Instant::now() + Duration::from_secs(if browser { 66 } else { 5 });
+    let deadline = Instant::now()
+        + Duration::from_secs(if browser || method == "ui.choose" {
+            66
+        } else {
+            5
+        });
     let response_limit = if browser {
         32 * 1024 * 1024 + 1024
     } else {

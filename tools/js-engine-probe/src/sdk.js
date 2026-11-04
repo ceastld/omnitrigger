@@ -42,8 +42,8 @@ ctx.delay = milliseconds => {
 function desktopCall(method, params) {
     if (!nativeContext || nativeContext.error) {
         const cause = nativeContext?.error;
-        throw Object.assign(new Error(cause?.message ?? (method.startsWith('browser.') ? '浏览器 API 需要 OmniTrigger 应用宿主。' : '桌面 API 需要 OmniTrigger 本次动作的目标上下文。')), {
-            code:cause?.code ?? (method.startsWith('browser.') ? 'browser_unavailable' : 'desktop_unavailable'), effectState:cause?.effect_state ?? 'not_started', method,
+        throw Object.assign(new Error(cause?.message ?? (method.startsWith('browser.') ? '浏览器 API 需要 OmniTrigger 应用宿主。' : method === 'ui.choose' ? '选择窗口需要 OmniTrigger 应用界面。' : '桌面 API 需要 OmniTrigger 本次动作的目标上下文。')), {
+            code:cause?.code ?? (method.startsWith('browser.') ? 'browser_unavailable' : method === 'ui.choose' ? 'ui_unavailable' : 'desktop_unavailable'), effectState:cause?.effect_state ?? 'not_started', method,
         });
     }
     const request = {connection:nativeContext.connection, id:nativeId+1, method, params};
@@ -63,6 +63,7 @@ function desktopCall(method, params) {
 }
 const desktopApis = createDesktopApi(desktopCall);
 ctx.desktop = desktopApis.desktop;
+ctx.ui = desktopApis.ui;
 ctx.browser = createBrowserApi((method, args, options, profiles) => {
     let value;
     try { value = desktopCall(profiles ? 'browser.profiles' : 'browser.call', profiles ? {options} : {method,args,options}); }

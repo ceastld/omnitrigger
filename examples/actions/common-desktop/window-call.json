@@ -1,0 +1,6 @@
+{
+  "package_id": "examples.common-desktop",
+  "action_id": "window-action",
+  "action_version": 1,
+  "input": {"operation": "toggle_maximize"}
+}

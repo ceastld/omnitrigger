@@ -99,6 +99,33 @@ pub struct TriggerSpec {
 }
 
 impl TriggerSpec {
+    /// MouseExact 中泛型 Shift/Ctrl/Alt 代表任一物理侧；其他模式仍按原键码比较。
+    pub(crate) fn accepts_held_button(&self, button: Button) -> bool {
+        self.held.iter().any(|&held| {
+            held == button
+                || (self.keyboard.matching == KeyboardMatching::MouseExact
+                    && modifier_matches(held, button))
+        })
+    }
+
+    pub(crate) fn held_sets_overlap(&self, other: &Self) -> bool {
+        self.held == other.held
+            || (self.keyboard.matching == KeyboardMatching::MouseExact
+                && self.held.len() == 1
+                && !other.held.is_empty()
+                && other
+                    .held
+                    .iter()
+                    .all(|&button| self.accepts_held_button(button)))
+            || (other.keyboard.matching == KeyboardMatching::MouseExact
+                && other.held.len() == 1
+                && !self.held.is_empty()
+                && self
+                    .held
+                    .iter()
+                    .all(|&button| other.accepts_held_button(button)))
+    }
+
     pub(crate) fn scope_priority(&self) -> u8 {
         self.process_scope.priority() + self.pointer_scope.priority()
     }
@@ -173,6 +200,10 @@ pub enum KeyboardMatching {
     Exact,
     /// 按已捕获附加键匹配；同应用优先级内，数值越小越先选。
     Captured { priority: u16 },
+    /// 鼠标 Press/Wheel 专用：held 为空或一个修饰键。只观察已交付的修饰键，
+    /// 不捕获其按下、重复或释放；泛型 Shift/Ctrl/Alt 接受左右任一侧或两侧。
+    /// 其他任何按住键（含鼠标、普通键和 Win）都排除匹配，不借用已消费的按压。
+    MouseExact,
 }
 
 impl KeyboardMatching {
@@ -182,10 +213,23 @@ impl KeyboardMatching {
 
     pub(crate) fn priority(self) -> u16 {
         match self {
-            Self::Exact => 0,
+            Self::Exact | Self::MouseExact => 0,
             Self::Captured { priority } => priority,
         }
     }
+}
+
+pub(crate) fn is_modifier(button: Button) -> bool {
+    matches!(button, Button::Key(0x10..=0x12 | 0x5b..=0x5c | 0xa0..=0xa5))
+}
+
+fn modifier_matches(required: Button, physical: Button) -> bool {
+    matches!(
+        (required, physical),
+        (Button::Key(0x10), Button::Key(0xa0 | 0xa1))
+            | (Button::Key(0x11), Button::Key(0xa2 | 0xa3))
+            | (Button::Key(0x12), Button::Key(0xa4 | 0xa5))
+    )
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

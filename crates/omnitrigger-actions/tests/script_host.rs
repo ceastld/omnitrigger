@@ -265,7 +265,8 @@ fn script_host_runs_generated_standard_js_project_without_repository_paths() {
     // 只清理本测试明确创建的路径；有额外文件时保留目录。
     for name in [
         "action.json",
-        "main.js",
+        "main.mjs",
+        "lib/text.js",
         "call.json",
         "jsconfig.json",
         "README.md",
@@ -274,6 +275,7 @@ fn script_host_runs_generated_standard_js_project_without_repository_paths() {
         std::fs::remove_file(project.package_root.join(name)).unwrap();
     }
     std::fs::remove_dir(project.package_root.join("sdk")).unwrap();
+    std::fs::remove_dir(project.package_root.join("lib")).unwrap();
     std::fs::remove_dir(project.package_root).unwrap();
     std::fs::remove_dir(root).unwrap();
 }
@@ -396,9 +398,51 @@ impl NativeHost for RecordingHost {
             }
             "clipboard.read" | "selection.copy" => json!("选区 中文😀"),
             "clipboard.write" => json!({"written":true,"sequenceNumber":42}),
+            "ui.choose" => json!({"status":"selected","id":"copy"}),
             _ => json!({"submitted":true}),
         })
     }
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn script_choice_preserves_stable_ids_and_the_following_native_target() {
+    let fixture = Fixture::new("const selected = ctx.ui.choose({items:[{id:'copy',label:'复制'}]}); const target = ctx.desktop.target(); return {selected,process:target.processName};");
+    let host = RecordingHost::default();
+    let output = runtime()
+        .execute_with_host(
+            &fixture.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap();
+    assert_eq!(
+        output,
+        json!({"selected":{"status":"selected","id":"copy"},"process":"fixture.exe"})
+    );
+    let calls = host.calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].0, "ui.choose");
+    assert_eq!(calls[0].1["items"][0]["id"], "copy");
+    assert_eq!(calls[1].0, "target.info");
+    drop(calls);
+    let host = RecordingHost {
+        fail: true,
+        ..Default::default()
+    };
+    let error = runtime()
+        .execute_with_host(
+            &fixture.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "target_changed");
+    assert_eq!(error.method.as_deref(), Some("ui.choose"));
+    assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+    assert_eq!(host.calls.lock().unwrap().len(), 1);
 }
 
 #[test]

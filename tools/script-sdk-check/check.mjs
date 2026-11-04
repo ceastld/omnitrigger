@@ -2,8 +2,8 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync} from 'node:fs';
-import {dirname, join, resolve} from 'node:path';
+import {existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
+import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import ts from 'typescript';
 
@@ -31,10 +31,16 @@ function diagnostics(path) {
 function report(items) {
   return ts.formatDiagnosticsWithColorAndContext(items, {getCanonicalFileName:x=>x,getCurrentDirectory:()=>root,getNewLine:()=> '\n'});
 }
-const lineEdit = diagnostics(join(repo, 'examples/actions/desktop-line-edit'));
-assert.equal(lineEdit.length, 0, report(lineEdit));
-const keyboard = diagnostics(join(repo, 'examples/actions/keyboard-sequence'));
-assert.equal(keyboard.length, 0, report(keyboard));
+const examplesRoot = join(repo, 'examples/actions');
+const checkedExamples = [];
+for (const entry of readdirSync(examplesRoot, {withFileTypes:true})) {
+  if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+  const directory = join(examplesRoot, entry.name);
+  if (!existsSync(join(directory, 'jsconfig.json'))) continue;
+  const items = diagnostics(directory);
+  assert.equal(items.length, 0, report(items));
+  checkedExamples.push(entry.name);
+}
 const created = cli(['--create-script-action', 'sdk-test']);
 assert.equal(created.status, 'created');
 assert.equal(created.schema_version, 1);
@@ -47,7 +53,7 @@ const original = readFileSync(project.entry_path,'utf8');
 // 使用新建工程实际附带的声明，验证入口签名，而不在测试中另抄一份类型。
 const entryHeader = '/// <reference path="./sdk/api.d.ts" />\n/** @type {ScriptMain} */\n';
 function checkEntry(source) {
-  writeFileSync(project.entry_path, entryHeader + source);
+  writeFileSync(project.entry_path, entryHeader + (project.entry_path.endsWith('.mjs') ? 'export ' : '') + source);
   return diagnostics(project.package_root);
 }
 for (const source of [
@@ -85,7 +91,8 @@ assert(negative.some(item=>item.code === 2339), report(negative));
 const messages = negative.map(item=>ts.flattenDiagnosticMessageText(item.messageText,'\n')).join('\n');
 assert(messages.includes('process') && messages.includes('document'), messages);
 writeFileSync(project.entry_path, `${original}\n// 保留作者修改\n`);
-const files = ['main.js','action.json','call.json','jsconfig.json','README.md','sdk/api.d.ts'];
+const files = [basename(project.entry_path),'action.json','call.json','jsconfig.json','README.md','sdk/api.d.ts'];
+if (existsSync(join(project.package_root,'lib/text.js'))) files.push('lib/text.js');
 const hashes = () => files.map(name=>createHash('sha256').update(readFileSync(join(project.package_root,name))).digest('hex'));
 const before = hashes();
 assert.equal(cli(['--create-script-action','sdk-test'],1).error.code, 'project_exists');
@@ -97,6 +104,6 @@ const listed = cli(['--list-package-actions']);
 assert.equal(listed.actions.length, 1);
 assert.equal(listed.actions[0].runtime, 'script');
 assert.equal(readFileSync(config,'utf8'),'[]');
-const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,entryContractChecks:Object.keys(invalidEntries),negativeTypeChecks:negative.length,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
+const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,checkedExamples,entryContractChecks:Object.keys(invalidEntries),negativeTypeChecks:negative.length,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
 writeFileSync(join(root,'result.json'), JSON.stringify(result,null,2));
 console.log(JSON.stringify(result));

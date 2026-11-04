@@ -80,12 +80,14 @@ pub fn submit(
     call: ActionCall,
     target: Option<omnitrigger_windows::ShortcutTarget>,
 ) -> Result<u64, omnitrigger_actions::ActionError> {
+    let desktop = crate::desktop_host::DesktopHost::capture(target);
+    let target = desktop.choice_target();
     service.submit_with_host(
         id,
         call,
-        Some(Arc::new(crate::script_browser::ActionHost::new(
-            settings::path(),
-            crate::desktop_host::DesktopHost::capture(target),
+        Some(Arc::new(crate::script_ui::Host::new(
+            crate::script_browser::ActionHost::new(settings::path(), desktop),
+            target,
         ))),
     )
 }
@@ -208,14 +210,17 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
             return Ok(serde_json::json!({"valid":true,"call":call}).to_string());
         }
         let invocation_id = match explicit_host {
-            Some(host) => service.submit_with_host(
-                0,
-                call,
-                Some(Arc::new(crate::script_browser::ActionHost::new(
-                    settings::path(),
-                    host,
-                ))),
-            ),
+            Some(host) => {
+                let target = host.choice_target();
+                service.submit_with_host(
+                    0,
+                    call,
+                    Some(Arc::new(crate::script_ui::Host::new(
+                        crate::script_browser::ActionHost::new(settings::path(), host),
+                        target,
+                    ))),
+                )
+            }
             None => submit(&service, 0, call, None),
         }
         .map_err(rejected)?;

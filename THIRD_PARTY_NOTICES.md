@@ -55,6 +55,8 @@ Windows 发行流程通过 `scripts/collect-licenses.ps1` 从锁定目标的应�
 
 已核对锁文件对应 Cargo 元数据和 rquickjs / QuickJS-NG 随包许可。Boa 系列发布 crate 未附带许可全文，上游授权见 [Boa 0.21.1 MIT 许可](https://github.com/boa-dev/boa/blob/v0.21.1/LICENSE-MIT)。实验传递依赖含 MIT、Apache-2.0、Unicode-3.0、Unlicense 和 Zlib 等声明；双重授权可选择相应分支，Unicode 数据仍须保留其自身许可。完整版本与依赖关系以实验的 `Cargo.lock` 和 `cargo metadata --locked` 为准。
 
+包内 ESM 加载启用 rquickjs 0.14.0 的 `loader` 特性，不启用 `dyn-load`。其 relative-path 2.0.3 依赖已在独立锁文件中；已核对发布 crate 的元数据与随包 LICENSE-MIT / LICENSE-APACHE（`MIT OR Apache-2.0`，选择 MIT）。开发包的完整依赖通知须继续包含这项可达依赖及其原始版权与许可。
+
 测量脚本生成的 ZIP 只含 EXE，用于比较压缩体积，不是可发布安装包。CI 仅上传测量 JSON，不分发实验二进制。若正式分发宿主，须为其独立依赖图、标准库和 QuickJS-NG 收集完整许可及版权通知，补齐 Boa 发布 crate 缺失的上游许可文件，并记录来源和哈希；`small` 还链接 MSVC 静态 CRT，须一并核对其再分发要求。现有桌面应用的许可收集范围不能代替这一流程。
 
 `tools/js-engine-probe/package-runtime.ps1` 另行生成仅供本机验证的 QuickJS 开发包；它按独立工程、入口包和 feature 调用许可收集器，保留可达正常及构建依赖、Rust 标准库、QuickJS-NG 和包装层通知，并记录文件摘要。rquickjs-core / rquickjs-sys 0.14.0 的包装层 MIT 全文按发布包 VCS 修订补充，来源与摘要见受控清单；sys 包原有的 QuickJS 通知同时保留。开发包记录 MSVC 静态 CRT 构建环境，公开二进制分发的再分发复核仍未完成；该流程不发布二进制或创建 Release。

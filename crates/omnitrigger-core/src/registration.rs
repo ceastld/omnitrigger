@@ -13,6 +13,13 @@ pub const MAX_BINDINGS: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistrationError {
+    InvalidMouseMatching {
+        id: u64,
+    },
+    ConflictingModifierDelivery {
+        first: u64,
+        second: u64,
+    },
     InvalidPointerProcessScope {
         id: u64,
         reason: ProcessScopeError,
@@ -112,6 +119,8 @@ pub enum RegistrationError {
 impl fmt::Display for RegistrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::InvalidMouseMatching { .. } => "鼠标精确观察模式仅支持鼠标按下或滚轮，held 为空或一个修饰键，不能同时配置键盘捕获层、重复或单按恢复。",
+            Self::ConflictingModifierDelivery { .. } => "同一修饰键在重叠范围内同时用于鼠标观察和输入捕获，请分开其范围或统一交付策略。",
             Self::InvalidPointerProcessScope { reason, .. } => return write!(f, "指针窗口范围无效：{reason}"),
             Self::InvalidWheelPolicy { .. } => "逐事件滚轮策略仅支持滚轮触发。",
             Self::InvalidRetainedPrefix { .. } => "保留原功能前缀须为 held 中的明确键盘键，启用捕获匹配和单按恢复，与专用层互斥；时间须不超过 60000 毫秒。",
@@ -174,6 +183,24 @@ pub(super) fn validate(
     }
     let mut ids = BTreeSet::new();
     for binding in &mut bindings {
+        if binding.keyboard.matching == crate::KeyboardMatching::MouseExact
+            && (binding.held.len() > 1
+                || binding
+                    .held
+                    .iter()
+                    .any(|&button| !crate::model::is_modifier(button))
+                || !matches!(
+                    binding.activation,
+                    Activation::Press(Button::Mouse(_)) | Activation::Wheel(_)
+                )
+                || binding.keyboard.prefix().is_some()
+                || binding.keyboard.repeat
+                || binding.keyboard.restore_on_tap
+                || binding.keyboard.tap_timeout_ms.is_some()
+                || !binding.keyboard.tap_scope.is_global())
+        {
+            return Err(RegistrationError::InvalidMouseMatching { id: binding.id });
+        }
         if binding.wheel != WheelPolicy::Notch
             && !matches!(binding.activation, Activation::Wheel(_))
         {
@@ -336,6 +363,26 @@ pub(super) fn validate(
     }
     for (index, left) in bindings.iter().enumerate() {
         for right in bindings.iter().skip(index + 1) {
+            if left.scopes_overlap(right)
+                && regions::conditions_overlap(&left.conditions, &right.conditions)
+            {
+                for (observed, captured) in [(left, right), (right, left)] {
+                    if observed.keyboard.matching == crate::KeyboardMatching::MouseExact
+                        && captured.keyboard.matching != crate::KeyboardMatching::MouseExact
+                        && captured
+                            .held
+                            .iter()
+                            .copied()
+                            .chain(activation_button(captured.activation))
+                            .any(|button| observed.accepts_held_button(button))
+                    {
+                        return Err(RegistrationError::ConflictingModifierDelivery {
+                            first: left.id,
+                            second: right.id,
+                        });
+                    }
+                }
+            }
             for (retained, other) in [(left, right), (right, left)] {
                 if let Some(policy) = retained.keyboard.retained_prefix.as_ref()
                     && other.keyboard.retained_prefix.is_none()
@@ -402,7 +449,7 @@ pub(super) fn validate(
                     second: right.id,
                 });
             }
-            if left.held == right.held
+            if left.held_sets_overlap(right)
                 && (left.activation == right.activation || same_button)
                 && regions::conditions_overlap(&left.conditions, &right.conditions)
                 && left.scopes_overlap(right)

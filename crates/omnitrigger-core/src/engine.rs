@@ -251,7 +251,7 @@ impl Engine {
                 other.keyboard.matching.is_captured()
                     && binding.keyboard.prefix() == other.keyboard.prefix()
             } else {
-                other.held == binding.held
+                other.held_sets_overlap(binding)
                     && same_activation_family(other.activation, binding.activation)
             }
         };
@@ -284,7 +284,7 @@ impl Engine {
                             other.keyboard.matching.is_captured()
                                 && binding.keyboard.prefix() == other.keyboard.prefix()
                         } else {
-                            other.held == binding.held
+                            other.held_sets_overlap(binding)
                                 && same_activation_family(other.activation, binding.activation)
                         })
                 })
@@ -301,7 +301,7 @@ impl Engine {
                                 other.keyboard.matching.is_captured()
                                     && binding.keyboard.prefix() == other.keyboard.prefix()
                             } else {
-                                other.held == binding.held
+                                other.held_sets_overlap(binding)
                                     && same_activation_family(other.activation, binding.activation)
                             })
                     })
@@ -453,6 +453,13 @@ impl Engine {
             InputKind::Up(_) => false,
             InputKind::Wheel { delta, .. } => delta != 0,
         };
+        if interrupts_press
+            && matches!(event.kind, InputKind::Down(_))
+            && self.has_observed_wheel_tail()
+        {
+            // 先归还上一条观察规则的不足一格输入，再让新按压选择动作或捕获层。
+            decision.replay.extend(self.flush_pending());
+        }
         if interrupts_press && (self.hold.is_some() || self.drag.is_some()) {
             decision.replay.extend(self.flush_pending());
         }
@@ -733,6 +740,7 @@ impl Engine {
             eligible
                 && self.candidates().any(|binding| {
                     binding.keyboard.retained_prefix.is_none()
+                        && binding.keyboard.matching != crate::KeyboardMatching::MouseExact
                         && binding.held.contains(&button)
                         && self.conditions_match(binding)
                         && self
@@ -845,6 +853,7 @@ impl Engine {
                 }
             }
         }
+        let observed_wheel = self.has_observed_wheel_tail();
         self.wheel = [0; 4];
         self.wheel_owner = [None; 4];
         let mut decision = match state {
@@ -870,7 +879,14 @@ impl Engine {
                 consume: true,
                 ..Decision::default()
             },
-            PressState::Passed | PressState::Observed => Decision::default(),
+            PressState::Passed | PressState::Observed => Decision {
+                replay: if observed_wheel {
+                    self.flush_pending()
+                } else {
+                    Vec::new()
+                },
+                ..Decision::default()
+            },
         };
         if restore_tap {
             decision
@@ -1035,6 +1051,17 @@ impl Engine {
     }
 
     fn binding_held_matches(&self, binding: &TriggerSpec) -> bool {
+        if binding.keyboard.matching == crate::KeyboardMatching::MouseExact {
+            return binding.held.iter().all(|&required| {
+                self.pressed
+                    .keys()
+                    .any(|&physical| required == physical || binding.accepts_held_button(physical))
+            }) && self.pressed.iter().all(|(&button, &state)| {
+                state == PressState::Passed
+                    && !self.terminal_presses.contains(&button)
+                    && binding.accepts_held_button(button)
+            });
+        }
         if !binding.keyboard.matching.is_captured() {
             return self.held_matches(&binding.held);
         }
@@ -1063,7 +1090,20 @@ impl Engine {
             binding.id == id
                 && (!binding.conditions.is_empty()
                     || !binding.pointer_scope.is_global()
+                    || binding.keyboard.matching == crate::KeyboardMatching::MouseExact
                     || binding.keyboard.prefix().is_some())
+        })
+    }
+
+    fn has_observed_wheel_tail(&self) -> bool {
+        self.wheel_owner.iter().enumerate().any(|(index, owner)| {
+            self.wheel[index] != 0
+                && owner.is_some_and(|id| {
+                    self.bindings.iter().any(|binding| {
+                        binding.id == id
+                            && binding.keyboard.matching == crate::KeyboardMatching::MouseExact
+                    })
+                })
         })
     }
 

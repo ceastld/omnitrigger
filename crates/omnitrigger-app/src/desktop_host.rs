@@ -17,6 +17,11 @@ fn error(code: &str, message: impl ToString, effect: &str) -> ActionError {
 }
 
 impl DesktopHost {
+    /// 选择窗口只可恢复本次捕获且身份仍有效的目标，绝不重新抓取前台。
+    pub fn choice_target(&self) -> Option<ScriptTargetSnapshot> {
+        self.target.as_ref().ok()?.snapshot().ok()
+    }
+
     pub fn from_snapshot(snapshot: ScriptTargetSnapshot) -> Result<Self, ActionError> {
         Ok(Self {
             target: Ok(ScriptTarget::from_snapshot(snapshot)

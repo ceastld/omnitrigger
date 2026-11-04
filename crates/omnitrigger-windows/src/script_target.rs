@@ -152,6 +152,19 @@ impl ScriptTarget {
         ensure_shortcut_target(self.target)
     }
 
+    /// 仅当前台仍是调用方提供的界面窗口时，尝试交还原目标。
+    /// 保留原进程身份核验；窗口检查与系统激活不是原子事务。
+    pub fn restore_foreground_if(&self, current_window: isize) -> Result<bool, String> {
+        self.ensure_identity()?;
+        if current_window == 0 || !crate::is_foreground_window(current_window) {
+            return Ok(false);
+        }
+        self.ensure_identity()?;
+        let restored = crate::restore_shortcut_target(self.target)?;
+        self.ensure_identity()?;
+        Ok(restored)
+    }
+
     /// 每次状态检查及提交前核验原窗口身份和取消条件，不选择新的前台。
     pub fn window_action_if(
         &self,
@@ -271,6 +284,8 @@ mod tests {
         assert!(info.process_name.ends_with(".exe"));
         assert_eq!(info.window_role, omnitrigger_core::WindowRole::Application);
         assert!(target.ensure_foreground().is_err());
+        assert!(!target.restore_foreground_if(0).unwrap());
+        assert!(!target.restore_foreground_if(hwnd.0 as isize).unwrap());
         let checked = std::cell::Cell::new(false);
         assert!(target
             .window_action_if(crate::WindowOperation::Close, || {
@@ -282,6 +297,7 @@ mod tests {
         let mut stale = target;
         stale.identity.process_created ^= 1;
         assert!(stale.info().is_err());
+        assert!(stale.restore_foreground_if(0).is_err());
         stale = target;
         stale.identity.thread_id ^= 1;
         assert!(stale.info().is_err());
