@@ -1,0 +1,18 @@
+{
+  "version": 19,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [],
+      "activation": {"kind": "wheel_up"},
+      "wheel": "packet",
+      "keyboard": {"matching": {"kind": "mouse_exact"}},
+      "conditions": [
+        {"kind": "pointer_region", "region": {"kind": "screen_boundary", "edge": "top"}}
+      ],
+      "message": "显示器顶部单像素边界：包含角点和接缝",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    }
+  ]
+}

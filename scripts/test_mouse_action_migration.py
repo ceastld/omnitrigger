@@ -25,13 +25,14 @@ class MouseMigrationTests(unittest.TestCase):
         for location, edge in ((48,'top'),(192,'bottom'),(196608,'left'),(786432,'right')):
             source = dict(rule(), ControlKey=None, Location=location)
             result = mouse_trigger(source, settings())
-            self.assertIsNone(result['trigger'])
+            self.assertEqual(result['trigger']['conditions'], [{'kind':'pointer_region',
+                'region':{'kind':'screen_boundary','edge':edge}}])
             self.assertEqual(result['source_requirements']['control'], {'kind':'unmodified'})
             self.assertEqual(result['source_requirements']['region'], {'kind':'screen_edge','edge':edge,'thickness_px':1})
             self.assertNotIn('mouse_unmodified_control_exclusions', result['trigger_gaps'])
             self.assertFalse(result['source_requirements']['projection_policy']['source_equivalence'])
-            self.assertIn('mouse_screen_edge_intersection_priority', result['trigger_gaps'])
-            self.assertIn('mouse_screen_edge_seam_policy', result['trigger_gaps'])
+            self.assertIn('mouse_region_rule_priority_review', result['trigger_gaps'])
+            self.assertNotIn('mouse_screen_edge_seam_policy', result['trigger_gaps'])
             self.assertNotIn('mouse_control_key_semantics', result['trigger_gaps'])
 
     def test_generic_modifiers_and_captured_keys_keep_distinct_requirements(self):
@@ -124,7 +125,7 @@ class MouseMigrationTests(unittest.TestCase):
 
     def test_missing_settings_or_unsupported_flags_never_become_enabled_shortcuts(self):
         self.assertIsNone(mouse_trigger(rule(),None)['trigger'])
-        for change in ({'Location':48},{'ActivatePointingWindow':True},
+        for change in ({'Location':16},{'Location':48.0},{'Location':False},{'ActivatePointingWindow':True},
                        {'DebounceMs':50},{'TriggerActionWhenMouseUp':True},{'IsEnabled':False}):
             self.assertIsNone(mouse_trigger(dict(rule(),**change),settings())['trigger'])
         self.assertIsNone(mouse_trigger(rule(),dict(settings(),EnableReverseVScroll=True))['trigger'])

@@ -44,6 +44,10 @@ pub enum ScreenCorner {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PointerRegion {
+    /// 显示器自身的单像素边界；包含角点及显示器接缝。
+    ScreenBoundary {
+        edge: ScreenEdge,
+    },
     ScreenEdge {
         edge: ScreenEdge,
         thickness_px: u32,
@@ -125,6 +129,13 @@ impl PointerRegion {
         }
         if let Self::Rectangle(rect) = self {
             return rect.contains(point);
+        }
+        if let Self::ScreenBoundary { edge } = self {
+            return screens.iter().copied().any(|screen| {
+                screen.is_valid()
+                    && screen.contains(point)
+                    && edge_distance(screen, point, edge) == 0
+            });
         }
         let band = self.edge_band();
         screens

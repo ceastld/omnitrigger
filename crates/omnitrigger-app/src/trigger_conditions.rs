@@ -16,6 +16,9 @@ pub enum ConditionDto {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RegionDto {
+    ScreenBoundary {
+        edge: EdgeDto,
+    },
     ScreenEdge {
         edge: EdgeDto,
         thickness_px: u32,
@@ -60,6 +63,14 @@ impl From<&TriggerCondition> for ConditionDto {
         let TriggerCondition::PointerRegion(region) = condition;
         Self::PointerRegion {
             region: match *region {
+                PointerRegion::ScreenBoundary { edge } => RegionDto::ScreenBoundary {
+                    edge: match edge {
+                        ScreenEdge::Top => EdgeDto::Top,
+                        ScreenEdge::Right => EdgeDto::Right,
+                        ScreenEdge::Bottom => EdgeDto::Bottom,
+                        ScreenEdge::Left => EdgeDto::Left,
+                    },
+                },
                 PointerRegion::ScreenEdge { edge, thickness_px } => RegionDto::ScreenEdge {
                     edge: match edge {
                         ScreenEdge::Top => EdgeDto::Top,
@@ -108,6 +119,14 @@ impl From<ConditionDto> for TriggerCondition {
     fn from(condition: ConditionDto) -> Self {
         let ConditionDto::PointerRegion { region } = condition;
         Self::PointerRegion(match region {
+            RegionDto::ScreenBoundary { edge } => PointerRegion::ScreenBoundary {
+                edge: match edge {
+                    EdgeDto::Top => ScreenEdge::Top,
+                    EdgeDto::Right => ScreenEdge::Right,
+                    EdgeDto::Bottom => ScreenEdge::Bottom,
+                    EdgeDto::Left => ScreenEdge::Left,
+                },
+            },
             RegionDto::ScreenEdge { edge, thickness_px } => PointerRegion::ScreenEdge {
                 edge: match edge {
                     EdgeDto::Top => ScreenEdge::Top,
@@ -159,6 +178,7 @@ impl From<ConditionDto> for TriggerCondition {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RegionChoice {
+    Boundary(ScreenEdge),
     Any,
     TopLeft,
     Top,
@@ -173,6 +193,7 @@ enum RegionChoice {
 impl RegionChoice {
     fn label(self) -> &'static str {
         match self {
+            Self::Boundary(_) => "显示器单像素边界",
             Self::Any => "不限位置",
             Self::TopLeft => "左上角",
             Self::Top => "顶部边缘",
@@ -200,6 +221,12 @@ impl RegionChoice {
             Self::TopRight => Some(ScreenCorner::TopRight),
             Self::BottomRight => Some(ScreenCorner::BottomRight),
             Self::BottomLeft => Some(ScreenCorner::BottomLeft),
+            _ => None,
+        }
+    }
+    fn boundary(self) -> Option<ScreenEdge> {
+        match self {
+            Self::Boundary(edge) => Some(edge),
             _ => None,
         }
     }
@@ -262,6 +289,9 @@ impl ConditionEditor {
             .update(cx, |input, cx| input.set_text("0", cx));
         if let Some(TriggerCondition::PointerRegion(region)) = spec.conditions.first() {
             match *region {
+                PointerRegion::ScreenBoundary { edge } => {
+                    self.choice = RegionChoice::Boundary(edge);
+                }
                 PointerRegion::ScreenEdge { edge, thickness_px }
                 | PointerRegion::ScreenEdgeSegment {
                     edge, thickness_px, ..
@@ -315,6 +345,11 @@ impl ConditionEditor {
     pub fn conditions(&self, cx: &App) -> Result<Vec<TriggerCondition>, String> {
         if self.choice == RegionChoice::Any {
             return Ok(Vec::new());
+        }
+        if let Some(edge) = self.choice.boundary() {
+            return Ok(vec![TriggerCondition::PointerRegion(
+                PointerRegion::ScreenBoundary { edge },
+            )]);
         }
         let region = if self.choice == RegionChoice::Rectangle {
             let values = self
@@ -385,6 +420,15 @@ impl ConditionEditor {
 pub fn condition_label(condition: &TriggerCondition) -> String {
     let TriggerCondition::PointerRegion(region) = condition;
     match *region {
+        PointerRegion::ScreenBoundary { edge } => format!(
+            "{}单像素边界（包含角点和接缝）",
+            match edge {
+                ScreenEdge::Top => "顶部",
+                ScreenEdge::Right => "右侧",
+                ScreenEdge::Bottom => "底部",
+                ScreenEdge::Left => "左侧",
+            }
+        ),
         PointerRegion::ScreenEdge { edge, thickness_px } => format!(
             "{} {thickness_px}px",
             match edge {
@@ -451,7 +495,10 @@ impl Workspace {
         .into_iter()
         .enumerate()
         {
-            let active = self.condition_editor.choice == choice;
+            let active = self.condition_editor.choice == choice
+                || choice
+                    .edge()
+                    .is_some_and(|edge| self.condition_editor.choice.boundary() == Some(edge));
             grid = grid.child(
                 small(crate::button(
                     ("pointer-region", index as u64),
@@ -491,6 +538,20 @@ impl Workspace {
             .gap(px(9.))
             .child(section_title("鼠标位置条件"))
             .child(grid)
+            .when_some(self.condition_editor.choice.edge().or(self.condition_editor.choice.boundary()), |el, edge| {
+                let active = self.condition_editor.choice.boundary().is_some();
+                el.child(small(crate::button(
+                    "screen-boundary-mode",
+                    "显示器单像素边界（包含角点和接缝）",
+                    if active { crate::Tone::Primary } else { crate::Tone::Secondary },
+                    !self.recording,
+                )).on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.recording {
+                        this.condition_editor.choice = RegionChoice::Boundary(edge);
+                        cx.notify();
+                    }
+                })))
+            })
             .child(
                 small(crate::button(
                     "custom-pointer-region",
@@ -510,7 +571,7 @@ impl Workspace {
                     cx.notify();
                 })),
             )
-            .when(self.condition_editor.choice != RegionChoice::Any, |el| {
+            .when(self.condition_editor.choice != RegionChoice::Any && self.condition_editor.choice.boundary().is_none(), |el| {
                 if self.condition_editor.choice == RegionChoice::Rectangle {
                     el.child(Self::input_field(
                         "物理坐标：左, 上, 右, 下",
@@ -551,7 +612,7 @@ impl Workspace {
                 ))
             })
             .child(caption(
-                "位置条件可与滚轮、按键、长按和快拖组合；屏幕边角会排除多屏相接的共享边段。",
+                "位置条件可与滚轮、按键、长按和快拖组合；普通边缘排除多屏共享边段，单像素边界包含角点和接缝。",
             ))
             .when_some(self.condition_editor.conditions(cx).err(), |el, error| {
                 el.child(

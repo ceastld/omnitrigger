@@ -67,7 +67,6 @@ def mouse_requirements(rule):
         region = {"kind":"unrestricted"}
     elif type(location) is int and location in edges:
         region = {"kind":"screen_edge", "edge":edges[location], "thickness_px":1}
-        gaps.extend(("mouse_screen_edge_intersection_priority", "mouse_screen_edge_seam_policy"))
     else:
         region = {"kind":"unsupported", "value":location}
         gaps.append("unsupported_mouse_Location")
@@ -94,7 +93,7 @@ def mouse_trigger(rule, settings):
     gaps = []
     if not isinstance(settings, dict) or any(key not in settings for key in ("SpecialExeList", "DisableOnFullscreenApp", "EnableReverseVScroll")):
         return unavailable(["mouse_global_settings_missing"])
-    flags = {"IsEnabled":True,"Operation":4,"AdornKey":None,"Location":0,"TriggerDistance":0,"DebounceMs":0,
+    flags = {"IsEnabled":True,"Operation":4,"AdornKey":None,"TriggerDistance":0,"DebounceMs":0,
              "TriggerActionWhenMouseUp":False,"DisableInFullScreen":False,
              "LimitOnPrimaryScreen":False,"ActivatePointingWindow":False}
     for key, expected in flags.items():
@@ -141,12 +140,17 @@ def mouse_trigger(rule, settings):
     held = ([{"kind":"key", "value":rule["ControlKey"]}] if keyboard_control
             else [] if observed_control else [{"kind":control}])
     trigger = {"held":held,"activation":activation,"pointer_scope":scope}
+    if requirements["region"]["kind"] == "screen_edge":
+        trigger["conditions"] = [{"kind":"pointer_region", "region":{
+            "kind":"screen_boundary", "edge":requirements["region"]["edge"]}}]
     if observed_control: trigger["keyboard"]={"matching":{"kind":"mouse_exact"}}
     if kind in (11,12): trigger["wheel"]="packet"
     reviews = (["mouse_modifier_capture_delivery_review", "mouse_modifier_state_sampling", "mouse_other_held_keys_review"]
                if keyboard_control else ["mouse_unmodified_source_ownership_review", "mouse_virtual_control_state_review",
                                          "mouse_other_held_keys_review"] if observed_control
                else ["mouse_prefix_lifecycle_review"])
+    if requirements["region"]["kind"] == "screen_edge":
+        reviews.append("mouse_region_rule_priority_review")
     return {"trigger":trigger,"trigger_gaps":reviews + ["mouse_other_held_buttons_review",
         "mouse_queue_drop_delay_review", "pointer_host_identity_mapping", "pointer_context_sampling"],
         "source_requirements":requirements,

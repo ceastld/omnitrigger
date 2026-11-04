@@ -484,6 +484,98 @@ fn opposite_region_ownership_is_unique_on_narrow_screens() {
 }
 
 #[test]
+fn screen_boundary_includes_corners_and_each_monitor_seam_but_no_inner_pixels() {
+    let screens = [rect(-100, 0, 0, 100), rect(0, 20, 100, 120)];
+    let boundary = |edge| PointerRegion::ScreenBoundary { edge };
+    assert!(boundary(ScreenEdge::Right).matches((-1, 50), &screens));
+    assert!(boundary(ScreenEdge::Left).matches((0, 50), &screens));
+    assert!(!edge(ScreenEdge::Right).matches((-1, 50), &screens));
+    assert!(!edge(ScreenEdge::Left).matches((0, 50), &screens));
+    assert!(boundary(ScreenEdge::Top).matches((-100, 0), &screens));
+    assert!(boundary(ScreenEdge::Left).matches((-100, 0), &screens));
+    assert!(boundary(ScreenEdge::Bottom).matches((99, 119), &screens));
+    assert!(boundary(ScreenEdge::Right).matches((99, 119), &screens));
+    for side in [
+        ScreenEdge::Top,
+        ScreenEdge::Right,
+        ScreenEdge::Bottom,
+        ScreenEdge::Left,
+    ] {
+        assert!(!boundary(side).matches((50, 50), &screens));
+        assert!(!boundary(side).matches((-101, 0), &screens));
+        assert!(!boundary(side).matches((0, 0), &[]));
+    }
+}
+
+#[test]
+fn screen_boundary_handles_tiny_mirrored_invalid_and_extreme_screens() {
+    let tiny = [rect(0, 0, 1, 1)];
+    for side in [
+        ScreenEdge::Top,
+        ScreenEdge::Right,
+        ScreenEdge::Bottom,
+        ScreenEdge::Left,
+    ] {
+        let region = PointerRegion::ScreenBoundary { edge: side };
+        assert!(region.matches((0, 0), &tiny));
+        assert!(!region.matches((0, 0), &[rect(0, 0, 0, 1)]));
+    }
+    let region = PointerRegion::ScreenBoundary {
+        edge: ScreenEdge::Right,
+    };
+    let extreme = rect(i32::MIN, i32::MIN, i32::MAX, i32::MAX);
+    assert!(region.matches((i32::MAX - 1, i32::MIN), &[extreme, extreme]));
+    assert!(!region.matches((i32::MAX, 0), &[extreme]));
+}
+
+#[test]
+fn screen_boundary_registration_rejects_ambiguous_corners_and_tiny_opposites() {
+    for other in [ScreenEdge::Top, ScreenEdge::Right, ScreenEdge::Bottom] {
+        let specs = [ScreenEdge::Left, other]
+            .into_iter()
+            .enumerate()
+            .map(|(i, edge)| {
+                binding(
+                    i as u64 + 1,
+                    &[],
+                    Activation::Wheel(WheelDirection::Up),
+                    PointerRegion::ScreenBoundary { edge },
+                )
+            })
+            .collect();
+        assert!(Engine::new(specs).is_err());
+    }
+}
+
+#[test]
+fn screen_boundary_wheel_tail_flushes_on_exit_and_press_release_remains_owned() {
+    let region = PointerRegion::ScreenBoundary {
+        edge: ScreenEdge::Top,
+    };
+    let mut wheel = engine(
+        vec![binding(
+            1,
+            &[],
+            Activation::Wheel(WheelDirection::Up),
+            region,
+        )],
+        (0, 0),
+    );
+    assert!(wheel.process(scroll(60)).consume);
+    assert_eq!(wheel.pointer_moved((0, 1), 1).replay, [scroll(60).kind]);
+    assert!(!wheel.process(scroll(120)).consume);
+    wheel.pointer_moved((999, 0), 2);
+    assert_eq!(wheel.process(scroll(120)).triggered, [1]);
+    let mut press = engine(
+        vec![binding(2, &[], Activation::Press(RIGHT), region)],
+        (0, 0),
+    );
+    assert_eq!(press.process(event(InputKind::Down(RIGHT))).triggered, [2]);
+    press.pointer_moved((500, 100), 1);
+    assert!(press.process(event(InputKind::Up(RIGHT))).consume);
+}
+
+#[test]
 fn wheel_conditions_keep_raw_partial_recovery_and_do_not_borrow_across_edges() {
     let right = binding(
         2,

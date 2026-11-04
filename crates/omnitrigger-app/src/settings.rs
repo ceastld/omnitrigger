@@ -22,7 +22,7 @@ use crate::wheels::WheelActionRef;
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
-const CONFIG_VERSION: u32 = 18;
+const CONFIG_VERSION: u32 = 19;
 
 pub fn use_path(path: PathBuf) -> Result<(), String> {
     CUSTOM_PATH.set(path).map_err(|_| "配置路径已设置。".into())
@@ -399,6 +399,18 @@ impl From<&Binding> for BindingDto {
 
 impl BindingDto {
     fn into_binding(self, version: u32) -> Result<Binding, String> {
+        if version < 19
+            && self.conditions.iter().any(|condition| {
+                matches!(
+                    condition,
+                    ConditionDto::PointerRegion {
+                        region: crate::trigger_conditions::RegionDto::ScreenBoundary { .. }
+                    }
+                )
+            })
+        {
+            return Err("显示器单像素边界需要版本 19 配置。".into());
+        }
         if version < 18 && matches!(self.keyboard.matching, KeyboardMatchingDto::MouseExact) {
             return Err("鼠标修饰键观察匹配需要版本 18 配置。".into());
         }
@@ -2353,6 +2365,39 @@ mod tests {
             value["bindings"][3]["action"],
             json!({"kind":"adjust_system","target":"brightness","delta_percent":-100})
         );
+    }
+
+    #[test]
+    fn screen_boundaries_round_trip_and_require_version_nineteen() {
+        for edge in [
+            ScreenEdge::Top,
+            ScreenEdge::Right,
+            ScreenEdge::Bottom,
+            ScreenEdge::Left,
+        ] {
+            let expected = vec![regional_binding(
+                90,
+                PointerRegion::ScreenBoundary { edge },
+                WheelDirection::Up,
+                AdjustmentTarget::Volume,
+                5,
+            )];
+            let encoded = encode(&expected);
+            assert_eq!(decode(&encoded).unwrap(), expected);
+            let mut document: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(document["version"], 19);
+            assert_eq!(
+                document["bindings"][0]["conditions"][0]["region"]["kind"],
+                "screen_boundary"
+            );
+            for version in 6..19 {
+                document["version"] = version.into();
+                assert_eq!(
+                    decode(&document.to_string()).unwrap_err(),
+                    "显示器单像素边界需要版本 19 配置。"
+                );
+            }
+        }
     }
 
     #[test]
