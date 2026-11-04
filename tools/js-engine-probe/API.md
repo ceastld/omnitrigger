@@ -10,6 +10,7 @@
 | `ctx.fs.writeText(path, text, {overwrite})` | 默认创建新文件，目标存在则报错；只有显式 `overwrite:true` 才覆盖，不自动创建目录。 |
 | `ctx.process.run(program, args, {timeoutMs})` | 程序和参数数组分别传递，不隐式经过 Shell。返回 `{pid, exitCode, success}`；默认等待 1000 毫秒，允许 1–1000 毫秒。非零退出由脚本判断，stdout / stderr 不采集。 |
 | `ctx.process.start(program, args)` | 创建独立程序后返回 `{pid}`，程序不随脚本结束关闭。 |
+| `ctx.delay(milliseconds)` | 同步等待 0–60000 毫秒的整数，返回 `undefined`；字符串、小数、非有限数等返回 `invalid_input`，不做隐式转换。 |
 | `ctx.desktop.target()` / `targetContext()` | 查询提交时捕获的原目标或导出 30 秒有效的目标快照；不重新选择前台。仅应用接入可用。 |
 | `ctx.desktop.sendShortcut(keys, options)` | 1–5 个 VK 整数，修饰键在前；支持 `keyDownDelayMs` 或原生 `timing` 配置，二者互斥。 |
 | `ctx.desktop.sendKeySequence(modifiers, keys, options)` | 0–4 个修饰键和 1–16 个普通键；修饰键跨越整组，`keyDownDelayMs` 为 0–1000 毫秒，单次等待合计最多 3000 毫秒。 |
@@ -38,6 +39,18 @@ function main(ctx) {
 `target()` 只查询原目标；发送前由应用再次核验进程身份、前台和取消状态，并复用现有按键释放收尾逻辑。`submitted` 只表示系统接纳输入，不表示业务动作完成。独立 CLI 没有目标上下文时返回 `desktop_unavailable`，不会自行选择前台。
 
 桌面异常的 `code`、`method`、`effectState` 可在 JS 中捕获，未捕获时保留在动作终态。`not_started` 仅描述该次 API，不能证明此前脚本没有副作用；网络中断或无法确认是否执行时为 `unknown`。桥接失败不自动重试，也不退回宿主直接访问剪贴板。客户端每次连接只发送一帧，最多等待 5 秒；外层动作仍受总时限约束。
+
+## 顺序等待
+
+```js
+/** @param {ScriptContext} ctx */
+function main(ctx) {
+    ctx.delay(80);
+    return {ready: true};
+}
+```
+
+等待在独立宿主中休眠，计入每次脚本最多 32 次 API 调用，不使用 CPU 忙等。它只保证经过等待时间，不表示外部窗口或网页已就绪。通过 OmniTrigger 运行时，等待计入动作总时限；取消和超时会终止并回收直接宿主，后续脚本步骤不再继续，此前已发生的副作用保留。独立 CLI 没有外层动作服务的取消机制。新增 API 需要使用包含此能力的宿主开发包；修改 SDK 声明不会升级已安装宿主。
 
 ## 文件清理动作
 

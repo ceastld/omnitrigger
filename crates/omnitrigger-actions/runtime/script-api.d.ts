@@ -24,6 +24,8 @@ type ScriptContext = Readonly<{
     /** 动作包提供；直接使用 CLI 且未传元数据时为 null。 */
     invocation: Readonly<{invocation_id: string; binding_id: string}> | null;
     packageRoot: string | null;
+    /** 同步等待 0–60000 毫秒的整数；受动作总时限约束。取消会终止独立宿主。 */
+    delay(milliseconds: number): void;
     fs: {
         /** UTF-8 文件，绝对路径，最多 64 KiB。 */
         readText(path: string): string;

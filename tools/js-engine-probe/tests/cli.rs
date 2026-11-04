@@ -86,6 +86,44 @@ fn parameters_and_modern_javascript_round_trip() {
 }
 
 #[test]
+fn delay_waits_without_coercion_and_preserves_validation_faults() {
+    let (ok, response) = invoke(json!({
+        "script": r#"
+            const rejected = [];
+            for (const value of [-1, 60001, 1.5, '1', null, undefined, NaN, Infinity, true]) {
+                try { ctx.delay(value); } catch (e) {
+                    rejected.push([e.code, e.effectState, e.method]);
+                }
+            }
+            const before = Date.now();
+            const result = ctx.delay(30);
+            ctx.delay(0);
+            return {elapsed:Date.now()-before, empty:result === undefined, rejected};
+        "#,
+        "input":{}
+    }));
+    assert!(ok, "{response}");
+    assert!(response["result"]["elapsed"].as_u64().unwrap() >= 30);
+    assert_eq!(response["result"]["empty"], true);
+    assert_eq!(
+        response["result"]["rejected"],
+        json!(vec![json!(["invalid_input", "not_started", "delay"]); 9])
+    );
+    let (ok, response) = invoke(json!({"script":"ctx.delay(-1); return true;", "input":{}}));
+    assert!(!ok);
+    assert_eq!(response["error"]["code"], "invalid_input");
+    assert_eq!(response["error"]["effect_state"], "not_started");
+    assert_eq!(response["error"]["method"], "delay");
+    // Rust 桥接自身也要拒绝超限和错误类型，不能只依赖 JS 校验。
+    for argument in [json!(60001), json!(-1), json!(1.5), json!("1"), json!(null)] {
+        let script = format!("try {{ call('delay', {{milliseconds:{argument}}}); }} catch(e) {{ return e.code; }} return 'unexpected';");
+        let (ok, response) = invoke(json!({"script":script,"input":{}}));
+        assert!(ok, "{response}");
+        assert_eq!(response["result"], "invalid_arguments");
+    }
+}
+
+#[test]
 fn action_context_metadata_preserves_full_integer_identity() {
     let root = std::env::current_dir().unwrap();
     let invocation =

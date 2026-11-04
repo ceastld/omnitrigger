@@ -37,6 +37,9 @@ fn error(code: &'static str, message: impl ToString) -> ApiError {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Call {
+    Delay {
+        milliseconds: u64,
+    },
     Native {
         connection: crate::native::Configuration,
         id: u32,
@@ -152,6 +155,16 @@ impl Drop for ManagedChild {
 
 fn execute(call: Call) -> Result<Value, ApiError> {
     match call {
+        Call::Delay { milliseconds } => {
+            if milliseconds > 60_000 {
+                return Err(error(
+                    "invalid_arguments",
+                    "等待时间必须为 0–60000 毫秒的整数。",
+                ));
+            }
+            thread::sleep(Duration::from_millis(milliseconds));
+            Ok(Value::Null)
+        }
         Call::Native {
             connection,
             id,

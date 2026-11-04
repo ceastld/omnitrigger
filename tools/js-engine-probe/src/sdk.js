@@ -31,6 +31,14 @@ ctx.process = Object.freeze({
     run: (program, args = [], options = {}) => call('run', { program, args, timeout_ms: options.timeoutMs ?? 1000 }),
     start: (program, args = []) => call('start', { program, args }),
 });
+ctx.delay = milliseconds => {
+    if (!Number.isInteger(milliseconds) || milliseconds < 0 || milliseconds > 60_000) {
+        throw Object.assign(new Error('等待时间必须为 0–60000 毫秒的整数。'), {
+            code:'invalid_input', effectState:'not_started', method:'delay',
+        });
+    }
+    call('delay', {milliseconds});
+};
 function desktopCall(method, params) {
     if (!nativeContext || nativeContext.error) {
         const cause = nativeContext?.error;

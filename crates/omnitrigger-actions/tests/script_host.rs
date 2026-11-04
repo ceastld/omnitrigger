@@ -139,6 +139,60 @@ fn package_root_supports_normal_javascript_path_concatenation() {
 
 #[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn script_delay_keeps_order_and_allows_cancellation_and_timeout() {
+    let fixture = Fixture::new(
+        "ctx.delay(30); ctx.fs.writeText(ctx.input.output,'after delay'); return {done:true};",
+    );
+    let output = fixture.root.join("output.txt");
+    let began = Instant::now();
+    assert_eq!(
+        runtime()
+            .execute(
+                &fixture.action(json!({"output":output})),
+                &context(),
+                &CancellationToken::new()
+            )
+            .unwrap(),
+        json!({"done":true})
+    );
+    assert!(began.elapsed() >= Duration::from_millis(30));
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), "after delay");
+    std::fs::remove_file(&output).unwrap();
+
+    std::fs::write(fixture.root.join("main.js"), "function main(ctx) {ctx.fs.writeText(ctx.input.ready,'before delay'); ctx.delay(60000); ctx.fs.writeText(ctx.input.output,'must not run'); return true;}").unwrap();
+    let ready = fixture.root.join("ready.txt");
+    let action = fixture.action(json!({"ready":ready,"output":output}));
+    let cancellation = CancellationToken::new();
+    let signal = cancellation.clone();
+    let worker_action = action.clone();
+    let worker = thread::spawn(move || runtime().execute(&worker_action, &context(), &signal));
+    let began = Instant::now();
+    while !ready.exists() {
+        assert!(began.elapsed() < Duration::from_secs(30));
+        thread::sleep(Duration::from_millis(10));
+    }
+    let began = Instant::now();
+    cancellation.cancel();
+    let error = worker.join().unwrap().unwrap_err();
+    assert_eq!(error.code, "cancelled");
+    assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+    assert!(began.elapsed() < Duration::from_secs(5));
+    assert!(!output.exists());
+    assert_eq!(std::fs::read_to_string(&ready).unwrap(), "before delay");
+    std::fs::remove_file(&ready).unwrap();
+
+    let error = runtime()
+        .with_timeout(Duration::from_secs(2))
+        .execute(&action, &context(), &CancellationToken::new())
+        .unwrap_err();
+    assert_eq!(error.code, "timeout");
+    assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+    assert_eq!(std::fs::read_to_string(&ready).unwrap(), "before delay");
+    assert!(!output.exists());
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
 fn script_host_runs_generated_standard_js_project_without_repository_paths() {
     let fixture = Fixture::new("return null;");
     let root = fixture.root.join("actions");
