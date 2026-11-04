@@ -174,16 +174,25 @@ fn script_host_runs_generated_standard_js_project_without_repository_paths() {
 fn script_host_round_trip_has_real_context_without_node() {
     let fixture = Fixture::new("return {input:ctx.input, invocation:ctx.invocation, root:ctx.packageRoot, version:ctx.apiVersion};");
     let input = json!({"text":"中文 ' \" $(not-a-command)\n第二行","__proto__":{"polluted":true}});
-    let output = runtime()
+    let mut output = runtime()
         .execute(
             &fixture.action(input.clone()),
             &context(),
             &CancellationToken::new(),
         )
         .unwrap();
+    let root = output.as_object_mut().unwrap().remove("root").unwrap();
+    let root = PathBuf::from(root.as_str().unwrap());
+    assert!(root.is_absolute());
+    assert_eq!(
+        std::fs::canonicalize(&root).unwrap(),
+        std::fs::canonicalize(&fixture.root).unwrap()
+    );
+    #[cfg(windows)]
+    assert!(!root.to_string_lossy().starts_with(r"\\?\"));
     assert_eq!(
         output,
-        json!({"input":input,"invocation":{"invocation_id":u64::MAX.to_string(),"binding_id":"9007199254740993"},"root":std::fs::canonicalize(&fixture.root).unwrap(),"version":1})
+        json!({"input":input,"invocation":{"invocation_id":u64::MAX.to_string(),"binding_id":"9007199254740993"},"version":1})
     );
 }
 
