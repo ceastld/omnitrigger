@@ -33,6 +33,7 @@ mod plugins;
 mod presets;
 mod radial_wheel;
 mod script_browser;
+mod script_projects;
 mod script_runtime;
 mod service;
 mod settings;
@@ -503,6 +504,7 @@ struct Workspace {
     package_input: Entity<MessageInput>,
     package_picker_for_draft: bool,
     action_service: omnitrigger_actions::ActionService,
+    script_projects: script_projects::ScriptProjects,
     plugins: Plugins,
     plugin_settings_error: Option<String>,
     browser_connector_ui: browser_connector_ui::BrowserConnectorUi,
@@ -724,6 +726,7 @@ impl Workspace {
             browser_editor.load(action, cx);
         }
         cx.observe(&action_search, |_, _, cx| cx.notify()).detach();
+        let script_projects = script_projects::ScriptProjects::new(cx);
         let package_input = cx.new(|cx| {
             let mut input = MessageInput::new(cx)
                 .with_json_text()
@@ -915,6 +918,7 @@ impl Workspace {
             package_input,
             package_picker_for_draft: false,
             action_service: action_packages::service(&settings::path()),
+            script_projects,
             shortcut_executor: CommandExecutor::shortcuts(),
             system_executor,
             system_hud: system_hud::SystemHud::default(),
@@ -1172,6 +1176,7 @@ impl Workspace {
         changed |= self.poll_browser_connector(cx);
         changed |= self.poll_update(cx);
         changed |= self.poll_packages();
+        changed |= self.poll_script_editor();
         changed |= self.poll_browser_actions();
         for _ in 0..64 {
             let Ok(event) = self.local_executor.try_recv() else {

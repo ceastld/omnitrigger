@@ -11,7 +11,7 @@
 | GPUI | Windows 桌面界面 | Apache-2.0 |
 | windows | Windows API 绑定 | MIT OR Apache-2.0 |
 | serde / serde_json | 本地配置序列化 | MIT OR Apache-2.0 |
-| getrandom | 按次动作桌面桥接的系统随机令牌，复用锁定的 0.3.4 | MIT OR Apache-2.0 |
+| getrandom | 桌面桥接随机令牌与脚本工程稳定标识，复用锁定的 0.3.4 | MIT OR Apache-2.0 |
 | unicode-segmentation | 文本编辑的字素边界 | MIT OR Apache-2.0 |
 | raw-window-handle | 原生窗口句柄 | MIT OR Apache-2.0 OR Zlib |
 | embed-resource | 构建时嵌入 Windows 图标资源 | MIT |

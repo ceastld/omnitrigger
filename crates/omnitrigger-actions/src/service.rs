@@ -171,6 +171,12 @@ impl ActionService {
         &self.catalog
     }
 
+    /// 只替换后续调用使用的快照；已接纳的调用持有自己的运行时，不清空配额或事件。
+    pub fn reload(&mut self, catalog: PackageCatalog, runtimes: RuntimeRegistry) {
+        self.catalog = catalog;
+        self.runtimes = runtimes;
+    }
+
     pub fn describe_catalog(&self) -> ActionCatalogSnapshot {
         ActionCatalogSnapshot {
             schema_version: 1,
@@ -455,6 +461,34 @@ mod tests {
         for _ in 0..CAPACITY {
             terminal(&service);
         }
+    }
+
+    #[test]
+    fn reload_preserves_old_workers_results_reservations_and_invocation_ids() {
+        let (fixture, mut service) = service(Arc::new(Wait));
+        let old = service.submit(1, Fixture::call()).unwrap();
+        service.reload(PackageCatalog::default(), RuntimeRegistry::new());
+        assert!(service.is_running(1));
+        assert_eq!(
+            service.validate(&Fixture::call()).unwrap_err().code,
+            "package_missing"
+        );
+        let mut registry = RuntimeRegistry::new();
+        registry.register("test", Arc::new(Echo)).unwrap();
+        service.reload(PackageCatalog::load(&fixture.0), registry);
+        let next = service.submit(2, Fixture::call()).unwrap();
+        assert!(next > old);
+        let event = terminal(&service);
+        assert_eq!(event.id, 2);
+        assert_eq!(event.invocation_id, next);
+        assert!(matches!(event.outcome, ActionOutcome::Succeeded { .. }));
+        assert!(service.is_running(1));
+        assert_eq!(service.cancel_id(1), 1);
+        let event = terminal(&service);
+        assert_eq!(event.id, 1);
+        assert_eq!(event.invocation_id, old);
+        assert_eq!(event.outcome, ActionOutcome::Cancelled);
+        assert!(!service.is_running(1));
     }
 
     #[test]

@@ -121,6 +121,24 @@ fn installed_image_digest_is_checked_before_any_process_starts() {
 
 #[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn package_root_supports_normal_javascript_path_concatenation() {
+    let fixture = Fixture::new("const file = ctx.packageRoot + '/output.txt'; ctx.fs.writeText(file, '路径拼接验证'); return ctx.fs.readText(file);");
+    let output = runtime()
+        .execute(
+            &fixture.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert_eq!(output, json!("路径拼接验证"));
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("output.txt")).unwrap(),
+        "路径拼接验证"
+    );
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
 fn script_host_runs_generated_standard_js_project_without_repository_paths() {
     let fixture = Fixture::new("return null;");
     let root = fixture.root.join("actions");

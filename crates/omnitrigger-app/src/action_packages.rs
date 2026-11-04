@@ -32,6 +32,11 @@ fn node_program() -> Option<PathBuf> {
 }
 
 pub fn service(config: &Path) -> ActionService {
+    let (catalog, runtimes) = components(config);
+    ActionService::new(catalog, runtimes)
+}
+
+pub(super) fn components(config: &Path) -> (PackageCatalog, RuntimeRegistry) {
     let mut catalog = PackageCatalog::load(&root(config));
     let mut runtimes = RuntimeRegistry::new();
     let needs_script = catalog
@@ -66,7 +71,7 @@ pub fn service(config: &Path) -> ActionService {
     {
         catalog.diagnostics.push("未找到 Node.js；请安装 Node.js，或用 OMNITRIGGER_NODE 指定 node.exe 的完整路径后重启。".into());
     }
-    ActionService::new(catalog, runtimes)
+    (catalog, runtimes)
 }
 
 pub fn submit(
@@ -261,6 +266,8 @@ impl Workspace {
                 .err()
                 .map(|error| error.to_string());
             let name = title.clone();
+            let edit_call = call.clone();
+            let is_script = entry.definition.runtime == "script";
             list = list.child(
                 card()
                     .p(px(16.))
@@ -287,6 +294,22 @@ impl Workspace {
                             )))
                             .when_some(reason, |element, reason| element.child(caption(reason))),
                     )
+                    .when(is_script, |element| {
+                        element.child(
+                            icon_button(
+                                ("edit-script", index as u64),
+                                Icon::Terminal,
+                                "编辑代码",
+                                Tone::Secondary,
+                                !self.recording,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.edit_script_project(edit_call.clone(), cx)
+                                },
+                            )),
+                        )
+                    })
                     .child(
                         icon_button(
                             ("bind-package", index as u64),

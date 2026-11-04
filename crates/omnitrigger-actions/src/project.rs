@@ -44,6 +44,44 @@ fn valid_project_id(id: &str) -> bool {
 /// 在已有本地父目录下创建 actions 根目录与全新的包目录。
 /// 不覆盖已有目录；写入失败可能保留部分工程，调用者应报告路径，不能盲目重试。
 pub fn create_script_project(root: &Path, id: &str) -> Result<ScriptProject, ActionError> {
+    create_project(root, id, id)
+}
+
+/// 用户界面只需名称；稳定标识由系统生成，不将显示名称当作目录或调用身份。
+pub fn create_named_script_project(root: &Path, name: &str) -> Result<ScriptProject, ActionError> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        return Err(fault(
+            "invalid_project_name",
+            "脚本名称需要 1–80 个可见字符。",
+            "not_started",
+        ));
+    }
+    let mut identity = [0u8; 8];
+    getrandom::fill(&mut identity)
+        .map_err(|error| fault("project_identity", error.to_string(), "not_started"))?;
+    let id = format!("script-{}", u64::from_le_bytes(identity));
+    create_project(root, &id, name)
+}
+
+/// 编辑入口重新验证磁盘目录，不依赖界面中的旧快照，不启动任何动作运行时。
+pub fn editable_script(root: &Path, call: &ActionCall) -> Result<(PathBuf, PathBuf), ActionError> {
+    let action = crate::PackageCatalog::load(root).resolve(call)?;
+    if action.definition.runtime != "script" {
+        return Err(fault(
+            "not_script_project",
+            "此动作不是轻量脚本。",
+            "not_started",
+        ));
+    }
+    let (root, entry) = crate::node::checked_entry(&action)?;
+    Ok((
+        crate::node::script_path(&root),
+        crate::node::script_path(&entry),
+    ))
+}
+
+fn create_project(root: &Path, id: &str, name: &str) -> Result<ScriptProject, ActionError> {
     if !valid_project_id(id) {
         return Err(fault("invalid_project_id", "工程标识需为 1–64 个英文字母、数字、- 或 _，以字母或数字开头，不能使用 Windows 设备名。", "not_started"));
     }
@@ -100,7 +138,7 @@ pub fn create_script_project(root: &Path, id: &str) -> Result<ScriptProject, Act
         action_version: 1,
         input: json!({"text":"  OmniTrigger  "}),
     };
-    let manifest = json!({"schema_version":1,"id":id,"name":id,"version":"1.0.0","actions":[{"id":"run","title":"运行脚本","version":1,"runtime":"script","entry":"main.js"}]});
+    let manifest = json!({"schema_version":1,"id":id,"name":name,"version":"1.0.0","actions":[{"id":"run","title":"运行脚本","version":1,"runtime":"script","entry":"main.js"}]});
     let config = json!({"compilerOptions":{"allowJs":true,"checkJs":true,"strict":true,"noEmit":true,"target":"ES2020","lib":["ES2020"],"types":[]},"files":["main.js","sdk/api.d.ts"]});
     let write = |name: &str, contents: &str| -> std::io::Result<()> {
         let mut file = fs::OpenOptions::new()
@@ -142,6 +180,40 @@ pub fn create_script_project(root: &Path, id: &str) -> Result<ScriptProject, Act
 mod tests {
     use super::*;
     use crate::{catalog::tests::Fixture, PackageCatalog};
+
+    #[test]
+    fn named_projects_preserve_display_names_and_edit_without_a_runtime() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("actions");
+        for name in ["", "   ", "bad\nname"] {
+            assert_eq!(
+                create_named_script_project(&root, name).unwrap_err().code,
+                "invalid_project_name"
+            );
+        }
+        assert!(!root.exists());
+        let first = create_named_script_project(&root, "  整理选中文字  ").unwrap();
+        let second = create_named_script_project(&root, "整理选中文字").unwrap();
+        assert_ne!(first.call.package_id, second.call.package_id);
+        assert_ne!(first.package_root, second.package_root);
+        let catalog = PackageCatalog::load(&root);
+        assert_eq!(catalog.actions.len(), 2);
+        assert!(catalog
+            .actions
+            .iter()
+            .all(|a| a.package_name == "整理选中文字"));
+        let (folder, entry) = editable_script(&root, &first.call).unwrap();
+        assert_eq!(
+            fs::canonicalize(folder).unwrap(),
+            fs::canonicalize(&first.package_root).unwrap()
+        );
+        assert_eq!(
+            fs::canonicalize(entry).unwrap(),
+            fs::canonicalize(&first.entry_path).unwrap()
+        );
+        fs::remove_file(&first.entry_path).unwrap();
+        assert!(editable_script(&root, &first.call).is_err());
+    }
 
     #[test]
     fn generated_project_resolves_and_existing_author_edits_survive() {

@@ -258,6 +258,7 @@ impl Workspace {
             ))
             .children(self.render_banner(cx))
             .child(search)
+            .child(self.script_tools(cx))
             .when(local_matches, |el| {
                 el.child(section_title("内置")).child(local)
             })

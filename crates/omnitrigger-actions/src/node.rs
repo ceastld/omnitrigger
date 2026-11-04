@@ -114,7 +114,7 @@ impl NodeRuntime {
                 "binding_id": context.binding_id.to_string(),
             },
             "input": action.call.input,
-            "package_root": root,
+            "package_root": script_path(&root),
             "entry_path": entry,
             "response_path": scratch.response(),
             "timeout_ms": self.timeout.as_millis(),
@@ -274,6 +274,59 @@ fn browser_configuration(directory: &Path) -> Option<Value> {
         }
     }
     Some(json!({"sdk_path": sdk, "config_path": config}))
+}
+
+/// 向 JS 提供常规路径；Windows verbatim 路径不支持脚本常用的 `/` 拼接。
+/// 仅转换已核验路径的表示，入口和包边界核验仍使用原规范路径。
+pub(crate) fn script_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use std::path::{Component, Prefix};
+        let ordinary = |name: &std::ffi::OsStr| {
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            let stem = name
+                .split('.')
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_uppercase();
+            !name.ends_with(['.', ' '])
+                && !name
+                    .chars()
+                    .any(|c| c.is_control() || "<>:\"|?*".contains(c))
+                && !matches!(
+                    stem.as_str(),
+                    "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+                )
+                && !((stem.starts_with("COM") || stem.starts_with("LPT"))
+                    && matches!(
+                        stem.get(3..),
+                        Some("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³")
+                    ))
+        };
+        // 字面保留名称不能去掉前缀，否则普通 Win32 路径可能指向另一个文件或设备。
+        if path
+            .components()
+            .any(|part| matches!(part,Component::Normal(name) if !ordinary(name)))
+        {
+            return path.to_path_buf();
+        }
+        if let Some(Component::Prefix(prefix)) = path.components().next() {
+            let (skip, mut wide) = match prefix.kind() {
+                Prefix::VerbatimDisk(_) => (4, Vec::new()),
+                Prefix::VerbatimUNC(server, share) if ordinary(server) && ordinary(share) => {
+                    (8, vec![u16::from(b'\\'); 2])
+                }
+                _ => return path.to_path_buf(),
+            };
+            wide.extend(path.as_os_str().encode_wide().skip(skip));
+            return PathBuf::from(std::ffi::OsString::from_wide(&wide));
+        }
+    }
+    path.to_path_buf()
 }
 
 pub(crate) fn checked_entry(action: &ResolvedAction) -> Result<(PathBuf, PathBuf), ActionError> {
@@ -483,6 +536,44 @@ fn terminate_host(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn script_paths_remove_only_supported_verbatim_prefixes() {
+        assert_eq!(
+            script_path(Path::new(r"\\?\D:\中文 目录\actions")),
+            PathBuf::from(r"D:\中文 目录\actions")
+        );
+        assert_eq!(
+            script_path(Path::new(r"\\?\UNC\server\share\actions")),
+            PathBuf::from(r"\\server\share\actions")
+        );
+        assert_eq!(
+            script_path(Path::new(r"D:\普通目录")),
+            PathBuf::from(r"D:\普通目录")
+        );
+        for literal in [
+            r"\\?\D:\literal.\actions",
+            r"\\?\D:\AUX.txt",
+            r"\\?\Volume{unknown}\actions",
+        ] {
+            assert_eq!(script_path(Path::new(literal)), PathBuf::from(literal));
+        }
+    }
+
+    #[test]
+    fn node_package_root_supports_javascript_path_concatenation() {
+        if !node_available() {
+            return;
+        }
+        let fixture = Fixture::new("import {writeFile,readFile} from 'node:fs/promises'; export default async ctx => { const file = ctx.packageRoot + '/joined.txt'; await writeFile(file, '普通路径', 'utf8'); return await readFile(file,'utf8'); };",json!({}));
+        let output = fixture.run().unwrap();
+        assert_eq!(output, json!("普通路径"));
+        assert_eq!(
+            fs::read_to_string(fixture.directory.0.join("joined.txt")).unwrap(),
+            "普通路径"
+        );
+        fs::remove_file(fixture.directory.0.join("joined.txt")).unwrap();
+    }
     use crate::{ActionCall, ActionDefinition};
 
     #[test]

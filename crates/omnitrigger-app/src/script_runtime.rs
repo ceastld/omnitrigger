@@ -74,7 +74,7 @@ pub fn root(config: &Path) -> Result<PathBuf, String> {
         .with_file_name("runtimes")
         .join("script"))
 }
-fn plain(path: &Path) -> Result<(), String> {
+pub(super) fn check_local_path(path: &Path) -> Result<(), String> {
     let absolute = std::path::absolute(path).map_err(|e| e.to_string())?;
     #[cfg(windows)]
     if let Some(std::path::Component::Prefix(prefix)) = absolute.components().next() {
@@ -82,7 +82,7 @@ fn plain(path: &Path) -> Result<(), String> {
             prefix.kind(),
             std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
         ) {
-            return Err("宿主安装仅支持普通本地路径。".into());
+            return Err("仅支持普通本地磁盘路径。".into());
         }
     }
     let mut ancestors = absolute.ancestors().collect::<Vec<_>>();
@@ -92,7 +92,7 @@ fn plain(path: &Path) -> Result<(), String> {
             let s = s.to_string_lossy().to_ascii_lowercase();
             s.starts_with("onedrive") || s == "dropbox" || s.starts_with("icloud")
         }) {
-            return Err("宿主路径不能位于云盘目录。".into());
+            return Err("脚本路径不能位于云盘目录。".into());
         }
         match fs::symlink_metadata(ancestor) {
             Ok(metadata) => {
@@ -104,7 +104,7 @@ fn plain(path: &Path) -> Result<(), String> {
                 #[cfg(not(windows))]
                 let unavailable = metadata.file_type().is_symlink();
                 if unavailable {
-                    return Err("宿主路径包含链接、联接点或占位文件。".into());
+                    return Err("脚本路径包含链接、联接点或占位文件。".into());
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -114,7 +114,7 @@ fn plain(path: &Path) -> Result<(), String> {
     Ok(())
 }
 fn read(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
-    plain(path)?;
+    check_local_path(path)?;
     let file = File::open(path).map_err(|e| e.to_string())?;
     if !file.metadata().map_err(|e| e.to_string())?.is_file() {
         return Err("需要普通文件。".into());
@@ -207,7 +207,7 @@ fn manifest(path: &Path) -> Result<(Manifest, String), String> {
     Ok((parsed, sha(&bytes)))
 }
 fn verify_package(directory: &Path, expected_manifest: &str) -> Result<Manifest, String> {
-    plain(directory)?;
+    check_local_path(directory)?;
     let (parsed, hash) = manifest(&directory.join("manifest.json"))?;
     if hash != expected_manifest {
         return Err("已安装宿主的清单摘要不符。".into());
@@ -229,7 +229,7 @@ fn verify_package(directory: &Path, expected_manifest: &str) -> Result<Manifest,
                 return Err("宿主目录项目数量超限。".into());
             }
             let path = item.path();
-            plain(&path)?;
+            check_local_path(&path)?;
             let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
             if metadata.is_dir() {
                 pending.push(path);
@@ -260,7 +260,7 @@ fn verify_package(directory: &Path, expected_manifest: &str) -> Result<Manifest,
 pub fn locate(config: &Path) -> Result<Option<Installed>, String> {
     if let Some(path) = std::env::var_os("OMNITRIGGER_SCRIPT_HOST") {
         let program = PathBuf::from(path);
-        plain(&program)?;
+        check_local_path(&program)?;
         return if program.is_absolute() && program.is_file() {
             Ok(Some(Installed {
                 program,
@@ -272,10 +272,10 @@ pub fn locate(config: &Path) -> Result<Option<Installed>, String> {
     }
     let root = root(config)?;
     let current = root.join("current.json");
-    plain(&current)?;
+    check_local_path(&current)?;
     if !current.exists() {
         let program = root.join(if cfg!(windows) { "host.exe" } else { "host" });
-        plain(&program)?;
+        check_local_path(&program)?;
         return Ok(program.is_file().then_some(Installed {
             program,
             integrity: None,
@@ -290,7 +290,7 @@ pub fn locate(config: &Path) -> Result<Option<Installed>, String> {
         return Err("宿主激活指针无效，未回退到旧解释器。".into());
     }
     let package = root.join("packages").join(&pointer.archive_sha256);
-    plain(&package)?;
+    check_local_path(&package)?;
     let (parsed, digest) = manifest(&package.join("manifest.json"))?;
     if digest != pointer.manifest_sha256 {
         return Err("宿主激活清单摘要不符，未回退到旧解释器。".into());
@@ -301,7 +301,7 @@ pub fn locate(config: &Path) -> Result<Option<Installed>, String> {
         .find(|file| file.path == "host.exe")
         .ok_or("缺少宿主映像。")?;
     let program = package.join("host.exe");
-    plain(&program)?;
+    check_local_path(&program)?;
     if !program.is_file() {
         return Err("已安装宿主映像缺失。".into());
     }
@@ -378,7 +378,7 @@ pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<
     if !valid_hash(expected) {
         return Err("本机开发安装需要完整 SHA-256。".into());
     }
-    plain(archive)?;
+    check_local_path(archive)?;
     let metadata = fs::metadata(archive).map_err(|e| e.to_string())?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > FILE_LIMIT {
         return Err("开发包不是普通 ZIP 或大小超限。".into());
@@ -402,7 +402,7 @@ pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<
     }
     drop(bytes);
     let root = root(config)?;
-    plain(&root)?;
+    check_local_path(&root)?;
     fs::create_dir_all(&root).map_err(|e| e.to_string())?;
     let nonce = format!(
         "{}-{}",
@@ -512,10 +512,10 @@ pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<
         }
         verify_package(&payload, &digest)?;
         let packages = root.join("packages");
-        plain(&packages)?;
+        check_local_path(&packages)?;
         fs::create_dir_all(&packages).map_err(|e| e.to_string())?;
         let destination = packages.join(&archive_hash);
-        plain(&destination)?;
+        check_local_path(&destination)?;
         if destination.exists() {
             verify_package(&destination, &digest)?;
         } else {
@@ -537,7 +537,7 @@ pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<
             manifest_sha256: digest,
         };
         let current = root.join("current.json");
-        plain(&current)?;
+        check_local_path(&current)?;
         let next = root.join(format!(".current-{nonce}.json"));
         let mut file = File::options()
             .create_new(true)

@@ -153,7 +153,7 @@ impl ScriptHostRuntime {
             None => (None, Value::Null),
         };
         let request = serde_json::to_vec(&json!({
-            "script":source,"input":action.call.input,"package_root":root,"native_context":native_context,
+            "script":source,"input":action.call.input,"package_root":crate::node::script_path(&root),"native_context":native_context,
             "invocation":{"invocation_id":context.invocation_id.to_string(),"binding_id":context.binding_id.to_string()}
         })).map_err(|cause| error("invalid_request", cause.to_string(), "not_started"))?;
         if request.len() > 256 * 1024 {
