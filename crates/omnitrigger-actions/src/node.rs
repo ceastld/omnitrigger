@@ -536,6 +536,7 @@ fn terminate_host(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ActionCall, ActionDefinition};
     #[cfg(windows)]
     #[test]
     fn script_paths_remove_only_supported_verbatim_prefixes() {
@@ -574,7 +575,6 @@ mod tests {
         );
         fs::remove_file(fixture.directory.0.join("joined.txt")).unwrap();
     }
-    use crate::{ActionCall, ActionDefinition};
 
     #[test]
     fn unavailable_native_bridge_only_fails_the_requested_capability() {

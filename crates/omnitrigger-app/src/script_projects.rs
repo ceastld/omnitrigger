@@ -271,6 +271,39 @@ fn editor_plan(
     })
 }
 
+fn open_editor(root: &Path, call: &ActionCall) -> Result<String, String> {
+    let (root, entry) =
+        omnitrigger_actions::project::editable_script(root, call).map_err(|e| e.to_string())?;
+    let mut candidates = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local).join("Programs/Microsoft VS Code/Code.exe"));
+    }
+    for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(folder) = std::env::var_os(variable) {
+            candidates.push(PathBuf::from(folder).join("Microsoft VS Code/Code.exe"));
+        }
+    }
+    let windows = std::env::var_os("SystemRoot").ok_or("无法定位系统编辑器。")?;
+    let plan = editor_plan(
+        &root,
+        &entry,
+        std::env::var_os("OMNITRIGGER_EDITOR").map(PathBuf::from),
+        candidates,
+        PathBuf::from(windows).join("System32/notepad.exe"),
+    )?;
+    let mut command = Command::new(&plan.program);
+    command.args(&plan.arguments).current_dir(&root);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
+        .spawn()
+        .map_err(|e| format!("无法启动{}：{e}", plan.label))?;
+    Ok(plan.label.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,37 +371,4 @@ mod tests {
         std::fs::remove_file(program).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
-}
-
-fn open_editor(root: &Path, call: &ActionCall) -> Result<String, String> {
-    let (root, entry) =
-        omnitrigger_actions::project::editable_script(root, call).map_err(|e| e.to_string())?;
-    let mut candidates = Vec::new();
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        candidates.push(PathBuf::from(local).join("Programs/Microsoft VS Code/Code.exe"));
-    }
-    for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
-        if let Some(folder) = std::env::var_os(variable) {
-            candidates.push(PathBuf::from(folder).join("Microsoft VS Code/Code.exe"));
-        }
-    }
-    let windows = std::env::var_os("SystemRoot").ok_or("无法定位系统编辑器。")?;
-    let plan = editor_plan(
-        &root,
-        &entry,
-        std::env::var_os("OMNITRIGGER_EDITOR").map(PathBuf::from),
-        candidates,
-        PathBuf::from(windows).join("System32/notepad.exe"),
-    )?;
-    let mut command = Command::new(&plan.program);
-    command.args(&plan.arguments).current_dir(&root);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
-    command
-        .spawn()
-        .map_err(|e| format!("无法启动{}：{e}", plan.label))?;
-    Ok(plan.label.into())
 }
