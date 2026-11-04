@@ -17,8 +17,8 @@ use windows::{
     core::{w, PCWSTR},
     Win32::{
         Foundation::{
-            GetLastError, GlobalFree, SetLastError, HANDLE, HGLOBAL, HWND, LPARAM, WIN32_ERROR,
-            WPARAM,
+            CloseHandle, GetLastError, GlobalFree, SetLastError, HANDLE, HGLOBAL, HWND, LPARAM,
+            WAIT_OBJECT_0, WIN32_ERROR, WPARAM,
         },
         System::{
             DataExchange::{
@@ -27,6 +27,10 @@ use windows::{
                 RegisterClipboardFormatW, SetClipboardData,
             },
             Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
+            Threading::{
+                GetExitCodeProcess, OpenProcess, WaitForSingleObject, PROCESS_ACCESS_RIGHTS,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+            },
         },
         UI::{
             Input::KeyboardAndMouse::SetFocus,
@@ -40,6 +44,14 @@ use windows::{
         },
     },
 };
+
+// 启动后保留内核句柄，避免退出报告先于实际退出或 PID 重用导致误判。
+struct HostProcess(HANDLE);
+impl Drop for HostProcess {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
 
 struct Lease;
 impl Lease {
@@ -150,6 +162,7 @@ struct ClipboardBackup {
     last_owned: Arc<AtomicU32>,
     last_write_id: Arc<Mutex<Option<String>>>,
     active: bool,
+    report_path: Option<std::path::PathBuf>,
 }
 
 #[path = "../../omnitrigger-windows/tests/support/private_clipboard.rs"]
@@ -199,6 +212,11 @@ fn isolated_clipboard_restore_smoke() {
         html.0 = None;
     }
     let mut backup = ClipboardBackup::new(owner).unwrap();
+    let restore_report = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../.tmp/clipboard-restore-native-{}.json",
+        std::process::id()
+    ));
+    backup.report_path = Some(restore_report.clone());
     let expected = backup.data.clone();
     // 确认普通快照原本没有排除元数据。
     let backend = RestoreNative(owner);
@@ -226,6 +244,10 @@ fn isolated_clipboard_restore_smoke() {
         Ordering::Release,
     );
     backup.restore().unwrap();
+    let report: Value = serde_json::from_slice(&std::fs::read(&restore_report).unwrap()).unwrap();
+    assert_eq!(report["status"], "restored_and_verified");
+    assert_eq!(report["exclusion_formats"], 2);
+    std::fs::remove_file(restore_report).unwrap();
     station.verify();
     let restored = snapshot(owner).unwrap();
     assert_eq!(
@@ -270,9 +292,36 @@ impl ClipboardBackup {
             last_owned: Arc::new(AtomicU32::new(sequence)),
             last_write_id: Arc::new(Mutex::new(None)),
             active: true,
+            report_path: None,
         })
     }
     fn restore(&mut self) -> Result<(), String> {
+        if !self.active {
+            return Ok(());
+        }
+        let no_write = unsafe { GetClipboardSequenceNumber() } == self.initial_sequence
+            && self.last_owned.load(Ordering::Acquire) == self.initial_sequence;
+        let result = self.restore_once();
+        if let Some(path) = &self.report_path {
+            let status = if result.is_err() {
+                "failed_or_refused"
+            } else if no_write {
+                "unchanged_no_write"
+            } else {
+                "restored_and_verified"
+            };
+            let report = json!({"status":status,"payload_formats":self.data.len(),
+                "exclusion_formats":if result.is_ok() && !no_write {2}else{0},
+                "exact_format_set_verified":false,"error":result.as_ref().err()});
+            std::fs::write(
+                path,
+                serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("恢复已结束，但收据写入失败：{error}"))?;
+        }
+        result
+    }
+    fn restore_once(&mut self) -> Result<(), String> {
         if !self.active {
             return Ok(());
         }
@@ -945,6 +994,7 @@ fn legacy_host_click_smoke(scenario: &str) {
     let _ = unsafe { SetFocus(Some(edit)) };
     // 原目标将在失效用例中关闭；剪贴板租约使用一直存活到恢复之后的自有窗口。
     let mut backup = ClipboardBackup::new(decoy).expect("无法完整备份当前格式；未开始写入");
+    backup.report_path = Some(root.join("clipboard-restore-result.json"));
     let package = root.join("native-gateway/actions/legacy-menu");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(
@@ -959,7 +1009,9 @@ fn legacy_host_click_smoke(scenario: &str) {
 export default async ctx => {
   const target = await ctx.desktop.targetContext();
   await fs.writeFile(ctx.input.target_path, JSON.stringify(target), {mode:0o600});
-  const child = await ctx.process.start(ctx.input.host_exe, ['--data-root',ctx.input.root,'--command','clip none','--scenario',ctx.input.scenario,'--exit-after-ms','60000']);
+  await fs.writeFile(ctx.input.root+'/host-launch-request.json',JSON.stringify({nodePid:process.pid,startedAt:Date.now()}));
+  const child = await ctx.process.start(ctx.input.host_exe, ['--data-root',ctx.input.root,'--command','clip none','--scenario',ctx.input.scenario,'--exit-after-ms',String(ctx.input.host_lifetime_ms)]);
+  await fs.writeFile(ctx.input.root+'/host-spawned.json',JSON.stringify({pid:child.pid,startedAt:Date.now()}));
   return {pid:child.pid,target};
 };"#).unwrap();
     std::fs::write(package.join("paste.mjs"),r#"import fs from 'node:fs/promises';
@@ -990,7 +1042,8 @@ export default async ctx => {
     );
     let _running = Running(&service);
     service.submit_with_host(1,ActionCall{package_id:"legacy.menu-text".into(),action_id:"launch".into(),action_version:1,
-        input:json!({"target_path":root.join("launch-target.json"),"host_exe":host_exe,"root":root,"scenario":scenario})},
+        input:json!({"target_path":root.join("launch-target.json"),"host_exe":host_exe,"root":root,"scenario":scenario,
+            "host_lifetime_ms":if scenario=="clipboard-text-execute" {300000}else{60000}})},
         Some(Arc::new(DesktopHost::from_snapshot(target).unwrap()))).unwrap();
     let began = Instant::now();
     let launch = loop {
@@ -1009,6 +1062,20 @@ export default async ctx => {
         launch["target"]["window_handle"],
         target.window_handle.to_string()
     );
+    std::fs::write(
+        root.join("host-launch-result.json"),
+        serde_json::to_vec_pretty(&launch).unwrap(),
+    )
+    .unwrap();
+    let host_pid = u32::try_from(launch["pid"].as_u64().expect("宿主 PID 缺失")).unwrap();
+    let host_process = HostProcess(unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_ACCESS_RIGHTS(0x0010_0000),
+            false,
+            host_pid,
+        )
+        .expect("无法保留本轮宿主进程句柄")
+    });
     let mut destroyed = false;
     let began = Instant::now();
     let result = loop {
@@ -1090,7 +1157,12 @@ export default async ctx => {
             .unwrap();
         }
         assert!(
-            began.elapsed() < Duration::from_secs(65),
+            began.elapsed()
+                < Duration::from_secs(if scenario == "clipboard-text-execute" {
+                    240
+                } else {
+                    65
+                }),
             "原菜单验证未完成，不重复执行"
         );
         thread::sleep(Duration::from_millis(20));
@@ -1100,7 +1172,14 @@ export default async ctx => {
     assert_eq!(text(decoy_edit), "unchanged");
     write_status("error_visible", result.clone());
     let until = Instant::now();
-    while !root.join("operator-finish").exists() && until.elapsed() < Duration::from_secs(12) {
+    while !root.join("operator-finish").exists()
+        && until.elapsed()
+            < Duration::from_secs(if scenario == "clipboard-text-execute" {
+                30
+            } else {
+                12
+            })
+    {
         pump();
         thread::sleep(Duration::from_millis(20));
     }
@@ -1115,8 +1194,20 @@ export default async ctx => {
     let exit: Value =
         serde_json::from_slice(&std::fs::read(root.join("exit.json")).unwrap()).unwrap();
     assert_eq!(exit["exitCode"], 0);
+    let until = Instant::now();
+    while unsafe { WaitForSingleObject(host_process.0, 0) } != WAIT_OBJECT_0 {
+        assert!(
+            until.elapsed() < Duration::from_secs(10),
+            "宿主写出退出报告但进程仍未结束"
+        );
+        pump();
+        thread::sleep(Duration::from_millis(20));
+    }
+    let mut host_exit_code = u32::MAX;
+    unsafe { GetExitCodeProcess(host_process.0, &mut host_exit_code) }.unwrap();
+    assert_eq!(host_exit_code, 0);
     std::fs::write(root.join("outer-native-result.json"),serde_json::to_vec_pretty(&json!({"passed":true,"launch":launch,
         "menu_result":result,"decoy_unchanged":true,"restored_clipboard_formats":formats,
-        "restored_payload_formats":formats,"restore_exclusion_formats":2,"format_set_identical_to_initial":false,"host_exit":exit})).unwrap()).unwrap();
+        "restored_payload_formats":formats,"restore_exclusion_formats":2,"exact_format_set_verified":false,"host_exit":exit,"host_process_exit_verified":true})).unwrap()).unwrap();
     write_status("complete", json!({"restored_clipboard_formats":formats}));
 }
