@@ -20,6 +20,7 @@ use std::{
 };
 
 const HOST: &str = include_str!("../runtime/host.mjs");
+const DESKTOP_API: &str = include_str!("../runtime/desktop-api.js");
 const OUTPUT_LIMIT: u64 = 64 * 1024;
 const POLL: Duration = Duration::from_millis(20);
 const CANCEL_GRACE: Duration = Duration::from_millis(250);
@@ -127,8 +128,9 @@ impl NodeRuntime {
         }
         bytes.push(b'\n');
         let mut command = Command::new(&self.program);
+        let host_source = format!("{DESKTOP_API}\n{HOST}");
         command
-            .args(["--input-type=module", "--eval", HOST])
+            .args(["--input-type=module", "--eval", &host_source])
             .current_dir(&root)
             .env_remove("NODE_OPTIONS")
             .env_remove("OMNITRIGGER_BROWSER_PIPE")

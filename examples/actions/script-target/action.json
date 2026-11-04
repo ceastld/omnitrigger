@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "id": "script-target",
+  "name": "脚本目标查询",
+  "version": "1.0.0",
+  "actions": [{"id":"inspect","title":"查询动作原目标","version":1,"runtime":"script","entry":"target.js"}]
+}

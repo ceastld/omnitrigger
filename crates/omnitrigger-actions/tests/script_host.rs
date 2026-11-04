@@ -1,12 +1,15 @@
 //! 真正的轻量 JS 进程接入测试；CI 在两种引擎构建后显式运行 ignored 用例。
 use omnitrigger_actions::{
-    ActionCall, ActionDefinition, ActionRuntime, CancellationToken, InvocationContext,
-    ResolvedAction, ScriptHostRuntime,
+    ActionCall, ActionDefinition, ActionError, ActionRuntime, CancellationToken, InvocationContext,
+    NativeHost, ResolvedAction, ScriptHostRuntime,
 };
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -174,4 +177,220 @@ fn script_host_cancel_and_timeout_do_not_claim_rollback() {
         .unwrap_err();
     assert_eq!(timed.code, "timeout");
     assert_eq!(timed.effect_state.as_deref(), Some("unknown"));
+}
+
+#[derive(Default)]
+struct RecordingHost {
+    calls: Mutex<Vec<(String, Value)>>,
+    fail: bool,
+}
+impl NativeHost for RecordingHost {
+    fn call(
+        &self,
+        method: &str,
+        params: Value,
+        _: &CancellationToken,
+    ) -> Result<Value, ActionError> {
+        self.calls.lock().unwrap().push((method.into(), params));
+        if self.fail {
+            let mut fault = ActionError::new("target_changed", "原目标已改变。");
+            fault.effect_state = Some("not_started".into());
+            return Err(fault);
+        }
+        Ok(match method {
+            "target.info" => json!({"processName":"fixture.exe","isForeground":true}),
+            "target.context" => {
+                json!({"window_handle":"18446744073709551615","process_created_file_time":"9007199254740993"})
+            }
+            "clipboard.read" | "selection.copy" => json!("选区 中文😀"),
+            "clipboard.write" => json!({"written":true,"sequenceNumber":42}),
+            _ => json!({"submitted":true}),
+        })
+    }
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn script_host_routes_all_desktop_apis_and_validates_before_native_dispatch() {
+    let fixture = Fixture::new(
+        r#"
+        const rejected = [];
+        for (const invalid of [
+            () => ctx.desktop.sendShortcut([]),
+            () => ctx.desktop.sendShortcut([65], {keyDownDelayMs:-1}),
+            () => ctx.desktop.sendShortcut([65], {timing:{process_overrides:null}}),
+            () => ctx.desktop.sendKeySequence([], Array(17).fill(65)),
+            () => ctx.desktop.sendKeySequence([], [65,66,67], {keyDownDelayMs:1000}),
+            () => ctx.desktop.sendText('\ud800'),
+            () => ctx.desktop.sendText('\udfff'),
+            () => ctx.desktop.sendText('x\0'),
+            () => ctx.clipboard.writeText('x', {excludeFromHistory:1}),
+        ]) {
+            try { invalid(); } catch(e) { rejected.push([e.code,e.effectState]); }
+        }
+        const target=ctx.desktop.target();
+        const snapshot=ctx.desktop.targetContext();
+        ctx.desktop.sendShortcut([162,67], {timing:{key_down_delay_ms:20,process_overrides:{'fixture.exe':30}}});
+        ctx.desktop.sendKeySequence([162], [65,67], {keyDownDelayMs:10});
+        ctx.desktop.sendText('中文😀');
+        ctx.desktop.sendText('\u0001'.repeat(65536));
+        const selection=ctx.desktop.copySelectionText();
+        const text=ctx.clipboard.readText();
+        const receipt=ctx.clipboard.writeText('临时😀', {excludeFromHistory:true});
+        return {rejected,target,snapshot,selection,text,receipt};
+    "#,
+    );
+    let host = RecordingHost::default();
+    let result = runtime()
+        .execute_with_host(
+            &fixture.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap();
+    assert_eq!(
+        result["rejected"],
+        json!(vec![vec!["invalid_input", "not_started"]; 9])
+    );
+    assert_eq!(result["target"]["processName"], "fixture.exe");
+    assert_eq!(result["snapshot"]["window_handle"], u64::MAX.to_string());
+    assert_eq!(result["selection"], "选区 中文😀");
+    assert_eq!(result["text"], "选区 中文😀");
+    assert_eq!(result["receipt"]["sequenceNumber"], 42);
+    let calls = host.calls.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "target.info",
+            "target.context",
+            "keyboard.shortcut",
+            "keyboard.sequence",
+            "keyboard.text",
+            "keyboard.text",
+            "selection.copy",
+            "clipboard.read",
+            "clipboard.write"
+        ]
+    );
+    assert_eq!(
+        calls[2].1,
+        json!({"keys":[162,67],"timing":{"key_down_delay_ms":20,"process_overrides":{"fixture.exe":30}}})
+    );
+    assert_eq!(
+        calls[3].1,
+        json!({"modifiers":[162],"keys":[65,67],"key_down_delay_ms":10})
+    );
+    assert_eq!(calls[4].1, json!({"text":"中文😀"}));
+    assert_eq!(calls[5].1["text"].as_str().unwrap().len(), 65536);
+    assert_eq!(
+        calls[8].1,
+        json!({"text":"临时😀","exclude_from_history":true})
+    );
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn script_host_preserves_native_faults_and_never_substitutes_an_ambient_target() {
+    let fixture = Fixture::new("ctx.desktop.sendText('x'); return {};");
+    let missing = runtime()
+        .execute(
+            &fixture.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+    assert_eq!(missing.code, "desktop_unavailable");
+    assert_eq!(missing.effect_state.as_deref(), Some("not_started"));
+    let host = RecordingHost {
+        fail: true,
+        ..Default::default()
+    };
+    let fault = runtime()
+        .execute_with_host(
+            &fixture.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap_err();
+    assert_eq!(fault.code, "target_changed");
+    assert_eq!(fault.effect_state.as_deref(), Some("not_started"));
+    assert_eq!(fault.method.as_deref(), Some("keyboard.text"));
+    assert_eq!(host.calls.lock().unwrap().len(), 1);
+    let caught = Fixture::new("try {ctx.desktop.sendText('x')} catch(e) {return {code:e.code,method:e.method,effect:e.effectState}};");
+    let result = runtime()
+        .execute_with_host(
+            &caught.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap();
+    assert_eq!(
+        result,
+        json!({"code":"target_changed","method":"keyboard.text","effect":"not_started"})
+    );
+    assert_eq!(host.calls.lock().unwrap().len(), 2);
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn script_host_waits_for_native_io_and_cancellation_ends_pending_calls() {
+    struct WaitingHost(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl NativeHost for WaitingHost {
+        fn call(
+            &self,
+            _: &str,
+            params: Value,
+            cancellation: &CancellationToken,
+        ) -> Result<Value, ActionError> {
+            if params["text"] == "wait-for-cancel" {
+                self.0.store(true, Ordering::SeqCst);
+                let began = Instant::now();
+                while !cancellation.is_cancelled() && began.elapsed() < Duration::from_secs(4) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                return Err(ActionError::new("cancelled", "已取消。"));
+            }
+            thread::sleep(Duration::from_millis(2100));
+            Ok(json!({"submitted":true}))
+        }
+    }
+    // 原生等待不占 JS 的 CPU 时间配额；返回后仍能完成 JSON 结果。
+    let fixture = Fixture::new("return ctx.desktop.sendText('slow');");
+    assert_eq!(
+        runtime()
+            .execute_with_host(
+                &fixture.action(json!({})),
+                &context(),
+                &CancellationToken::new(),
+                Some(&WaitingHost(std::sync::Arc::default()))
+            )
+            .unwrap(),
+        json!({"submitted":true})
+    );
+    let fixture = Fixture::new("return ctx.desktop.sendText('wait-for-cancel');");
+    let cancellation = CancellationToken::new();
+    let signal = cancellation.clone();
+    let action = fixture.action(json!({}));
+    let ready = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let host = WaitingHost(std::sync::Arc::clone(&ready));
+    let worker = thread::spawn(move || {
+        runtime().execute_with_host(&action, &context(), &signal, Some(&host))
+    });
+    let began = Instant::now();
+    while !ready.load(Ordering::SeqCst) {
+        assert!(began.elapsed() < Duration::from_secs(30));
+        thread::sleep(Duration::from_millis(5));
+    }
+    cancellation.cancel();
+    let began = Instant::now();
+    let error = worker.join().unwrap().unwrap_err();
+    assert_eq!(error.code, "cancelled");
+    assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+    assert!(began.elapsed() < Duration::from_secs(3));
 }

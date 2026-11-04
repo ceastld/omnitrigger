@@ -1,5 +1,8 @@
 //! 轻量脚本宿主的进程适配；引擎作为独立可执行文件，不链接进输入引擎或桌面程序。
-use crate::{ActionError, ActionRuntime, CancellationToken, InvocationContext, ResolvedAction};
+use crate::native::NativeBridge;
+use crate::{
+    ActionError, ActionRuntime, CancellationToken, InvocationContext, NativeHost, ResolvedAction,
+};
 use serde_json::{json, Value};
 use std::{
     fs::File,
@@ -39,6 +42,27 @@ impl ActionRuntime for ScriptHostRuntime {
         context: &InvocationContext,
         cancellation: &CancellationToken,
     ) -> Result<Value, ActionError> {
+        self.execute_in_context(action, context, cancellation, None)
+    }
+    fn execute_with_host(
+        &self,
+        action: &ResolvedAction,
+        context: &InvocationContext,
+        cancellation: &CancellationToken,
+        host: Option<&dyn NativeHost>,
+    ) -> Result<Value, ActionError> {
+        self.execute_in_context(action, context, cancellation, host)
+    }
+}
+
+impl ScriptHostRuntime {
+    fn execute_in_context(
+        &self,
+        action: &ResolvedAction,
+        context: &InvocationContext,
+        cancellation: &CancellationToken,
+        host: Option<&dyn NativeHost>,
+    ) -> Result<Value, ActionError> {
         if cancellation.is_cancelled() {
             return Err(error("cancelled", "动作提交前已取消。", "not_started"));
         }
@@ -56,8 +80,17 @@ impl ActionRuntime for ScriptHostRuntime {
         }
         // 动作文件保持标准 JS 语法，供编辑器与类型提示使用；CLI 原型的函数体协议留在适配层。
         let source = format!("{source}\nif (typeof main !== 'function') throw new Error('脚本入口须声明 function main(ctx)');\nreturn main(ctx);");
+        let native = host
+            .map(|_| NativeBridge::new().and_then(|bridge| Ok((bridge.configuration()?, bridge))));
+        let (mut bridge, native_context) = match native {
+            Some(Ok((configuration, bridge))) => {
+                (Some(bridge), json!({"connection":configuration}))
+            }
+            Some(Err(error)) => (None, json!({"error":error})),
+            None => (None, Value::Null),
+        };
         let request = serde_json::to_vec(&json!({
-            "script":source,"input":action.call.input,"package_root":root,
+            "script":source,"input":action.call.input,"package_root":root,"native_context":native_context,
             "invocation":{"invocation_id":context.invocation_id.to_string(),"binding_id":context.binding_id.to_string()}
         })).map_err(|cause| error("invalid_request", cause.to_string(), "not_started"))?;
         if request.len() > 256 * 1024 {
@@ -116,6 +149,9 @@ impl ActionRuntime for ScriptHostRuntime {
                 drop(child);
                 let _ = writer.join();
                 return Err(error(code, message, "unknown"));
+            }
+            if let (Some(bridge), Some(host)) = (&mut bridge, host) {
+                bridge.poll(host, cancellation);
             }
             match child.0.try_wait() {
                 Ok(Some(status)) => break status,
@@ -185,6 +221,27 @@ fn parse_response(bytes: &[u8], exited_successfully: bool) -> Result<Value, Acti
     if exited_successfully {
         return value.get("result").cloned().ok_or_else(invalid);
     }
+    if value["error"].is_object() {
+        let fault: ActionError =
+            serde_json::from_value(value["error"].clone()).map_err(|_| invalid())?;
+        if fault.code.is_empty()
+            || fault.code.len() > 64
+            || fault.message.is_empty()
+            || fault.message.len() > 16 * 1024
+            || !matches!(
+                fault.effect_state.as_deref(),
+                Some("not_started" | "unknown")
+            )
+            || fault
+                .method
+                .as_ref()
+                .is_some_and(|method| method.len() > 64)
+            || !fault.required_permissions.is_empty()
+        {
+            return Err(invalid());
+        }
+        return Err(fault);
+    }
     let message = value["error"]
         .as_str()
         .filter(|text| !text.is_empty() && text.len() <= 16 * 1024)
@@ -229,5 +286,21 @@ mod tests {
         .unwrap_err();
         assert_eq!(failed.code, "script_failed");
         assert_eq!(failed.effect_state.as_deref(), Some("unknown"));
+        let native = parse_response(br#"{"schema_version":1,"ok":false,"error":{"code":"target_changed","message":"changed","effect_state":"not_started","method":"keyboard.text"}}"#, false).unwrap_err();
+        assert_eq!(native.code, "target_changed");
+        assert_eq!(native.effect_state.as_deref(), Some("not_started"));
+        for error in [
+            json!({"code":"x","message":"x","effect_state":"rolled_back"}),
+            json!({"code":"","message":"x","effect_state":"not_started"}),
+            json!({"code":"x","message":"x","effect_state":"unknown","extra":true}),
+        ] {
+            let frame = json!({"schema_version":1,"ok":false,"error":error});
+            assert_eq!(
+                parse_response(frame.to_string().as_bytes(), false)
+                    .unwrap_err()
+                    .code,
+                "invalid_response"
+            );
+        }
     }
 }

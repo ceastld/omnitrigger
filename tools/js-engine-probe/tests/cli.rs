@@ -71,6 +71,30 @@ fn action_context_metadata_preserves_full_integer_identity() {
 }
 
 #[test]
+fn desktop_requires_explicit_context_and_keeps_bridge_failure_structured() {
+    let script = "ctx.desktop.sendText('x'); return {};";
+    let (ok, response) = invoke(json!({"script":script,"input":{}}));
+    assert!(!ok);
+    assert_eq!(response["error"]["code"], "desktop_unavailable");
+    assert_eq!(response["error"]["effect_state"], "not_started");
+    // 桥接初始化失败时剪贴板也不能退回宿主自己的系统 API。
+    let (ok, response) = invoke(
+        json!({"script":"ctx.clipboard.writeText('must not write'); return {};","input":{},"native_context":{"error":{"code":"native_bridge_unavailable","message":"fixture unavailable","effect_state":"not_started"}}}),
+    );
+    assert!(!ok);
+    assert_eq!(response["error"]["code"], "native_bridge_unavailable");
+    assert_eq!(response["error"]["method"], "clipboard.write");
+    let (ok, response) = invoke(
+        json!({"script":"try {ctx.desktop.target()} catch(e) {return {code:e.code,effect:e.effectState,method:e.method}}","input":{}}),
+    );
+    assert!(ok);
+    assert_eq!(
+        response["result"],
+        json!({"code":"desktop_unavailable","effect":"not_started","method":"target.info"})
+    );
+}
+
+#[test]
 fn prototype_keys_remain_plain_input_data() {
     let (ok, response) = invoke(
         json!({"script": "return {own: Object.hasOwn(ctx.input, '__proto__'), polluted: ({}).polluted ?? false};", "input": {"__proto__": {"polluted":true}}}),

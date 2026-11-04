@@ -162,63 +162,11 @@ function nativeCall(method, params) {
   return operation;
 }
 
-const desktop = Object.freeze({
-  target: () => nativeCall('target.info', {}),
-  targetContext: () => nativeCall('target.context', {}),
-  sendShortcut: async (keys, options = {}) => {
-    if (!Array.isArray(keys) || keys.length < 1 || keys.length > 5
-        || keys.some(key => !Number.isInteger(key) || key < 1 || key > 254)) {
-      throw Object.assign(fault('invalid_input', '快捷键需要 1–5 个明确的 VK 整数；修饰键在前。'), {effectState:'not_started'});
-    }
-    if (options?.timing !== undefined) {
-      const timing = options.timing;
-      const overrides = timing?.process_overrides ?? {};
-      if (typeof options !== 'object' || Array.isArray(options) || Object.keys(options).length !== 1 || !timing || typeof timing !== 'object' || Array.isArray(timing)
-          || Object.keys(timing).some(key => !['key_down_delay_ms','process_overrides'].includes(key))
-          || (timing.key_down_delay_ms !== undefined && (!Number.isInteger(timing.key_down_delay_ms) || timing.key_down_delay_ms < 0 || timing.key_down_delay_ms > 1000))
-          || !overrides || typeof overrides !== 'object' || Array.isArray(overrides) || Object.keys(overrides).length > 16
-          || Object.values(overrides).some(value => !Number.isInteger(value) || value < 0 || value > 1000)
-          || timing.process_overrides === null) {
-        throw Object.assign(fault('invalid_input', 'timing 需要原生快捷键时序对象，与 keyDownDelayMs 互斥。'), {effectState:'not_started'});
-      }
-      return nativeCall('keyboard.shortcut', {keys,timing});
-    }
-    const delay = keyTiming(options, 1);
-    return nativeCall('keyboard.shortcut', delay ? {keys, key_down_delay_ms:delay} : {keys});
-  },
-  sendKeySequence: async (modifiers, keys, options = {}) => {
-    if (!Array.isArray(modifiers) || modifiers.length > 4 || !Array.isArray(keys) || keys.length < 1 || keys.length > 16
-        || [...modifiers,...keys].some(key => !Number.isInteger(key) || key < 1 || key > 254)) {
-      throw Object.assign(fault('invalid_input', '连续按键需要 0–4 个修饰键和 1–16 个普通键，使用明确 VK 整数。'), {effectState:'not_started'});
-    }
-    const delay = keyTiming(options, keys.length);
-    return nativeCall('keyboard.sequence', {modifiers,keys,key_down_delay_ms:delay});
-  },
-  sendText: text => textCall('keyboard.text', text),
-  copySelectionText: () => nativeCall('selection.copy', {}),
-});
-
-function textCall(method, text, extra = {}) {
-  if (typeof text !== 'string' || text.length > 65536 || text.includes('\0')
-      || Buffer.from(text, 'utf8').toString('utf8') !== text) {
-    return Promise.reject(Object.assign(fault('invalid_input', '文本需要有效 Unicode，不含 NUL，最多 65,536 个 UTF-16 单元。'), {effectState:'not_started', method}));
-  }
-  return nativeCall(method, {text, ...extra});
-}
-
-function writeClipboardText(text, options = {}) {
-  if (options === null || typeof options !== 'object' || Array.isArray(options)
-      || Object.keys(options).some(key => key !== 'excludeFromHistory')
-      || ('excludeFromHistory' in options && typeof options.excludeFromHistory !== 'boolean')) {
-    return Promise.reject(Object.assign(fault('invalid_input', '剪贴板选项只接受布尔值 excludeFromHistory。'), {effectState:'not_started', method:'clipboard.write'}));
-  }
-  return textCall('clipboard.write', text, options.excludeFromHistory ? {exclude_from_history:true} : {});
-}
-
-const clipboard = Object.freeze({
-  readText: () => nativeCall('clipboard.read', {}),
-  writeText: writeClipboardText,
-});
+const desktopApis = createDesktopApi(nativeCall);
+// Node 保持 Promise 契约；共享定义中的同步校验异常也转为拒绝。
+const asyncApi = api => Object.freeze(Object.fromEntries(Object.entries(api).map(([name, fn]) => [name, async (...args) => fn(...args)])));
+const desktop = asyncApi(desktopApis.desktop);
+const clipboard = asyncApi(desktopApis.clipboard);
 
 function delay(milliseconds) {
   checkCancelled();
@@ -231,15 +179,6 @@ function delay(milliseconds) {
     const aborted = () => { clearTimeout(timer); reject(controller.signal.reason); };
     controller.signal.addEventListener('abort', aborted, { once: true });
   });
-}
-
-function keyTiming(options, count) {
-  const value = options?.keyDownDelayMs === undefined ? 0 : options.keyDownDelayMs;
-  if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some(key => key !== 'keyDownDelayMs')
-      || !Number.isInteger(value) || value < 0 || value > 1000 || (count + 1) * value > 3000) {
-    throw Object.assign(fault('invalid_input', '按下延迟需要 0–1000ms 整数，单次等待合计不能超过 3000ms。'), {effectState:'not_started'});
-  }
-  return value;
 }
 
 function validateProcess(program, args, options, allowedOptions) {

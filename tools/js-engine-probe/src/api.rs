@@ -14,20 +14,32 @@ const MAX_TEXT: usize = 64 * 1024;
 
 #[derive(Serialize, Debug)]
 pub struct ApiError {
-    code: &'static str,
-    message: String,
+    pub(crate) code: String,
+    pub(crate) message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) effect_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) method: Option<String>,
 }
 
 fn error(code: &'static str, message: impl ToString) -> ApiError {
     ApiError {
-        code,
+        code: code.into(),
         message: message.to_string(),
+        effect_state: None,
+        method: None,
     }
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Call {
+    Native {
+        connection: crate::native::Configuration,
+        id: u32,
+        method: String,
+        params: Value,
+    },
     ReadText {
         path: String,
     },
@@ -55,12 +67,17 @@ enum Call {
 }
 
 pub fn dispatch(request: String) -> String {
-    let result = if request.len() > 256 * 1024 {
-        Err(error("request_too_large", "API 请求超过 256 KiB。"))
+    let result = if request.len() > 512 * 1024 {
+        Err(error("request_too_large", "API 请求超过 512 KiB。"))
     } else {
         serde_json::from_str::<Call>(&request)
             .map_err(|cause| error("invalid_arguments", cause))
-            .and_then(execute)
+            .and_then(|call| {
+                if request.len() > 256 * 1024 && !matches!(call, Call::Native { .. }) {
+                    return Err(error("request_too_large", "API 请求超过 256 KiB。"));
+                }
+                execute(call)
+            })
     };
     match result {
         Ok(value) => json!({"ok":true,"value":value}).to_string(),
@@ -132,6 +149,12 @@ impl Drop for ManagedChild {
 
 fn execute(call: Call) -> Result<Value, ApiError> {
     match call {
+        Call::Native {
+            connection,
+            id,
+            method,
+            params,
+        } => crate::native::call(connection, id, method, params),
         Call::ReadText { path } => Ok(json!(read_text(&path)?)),
         Call::WriteText {
             path,
