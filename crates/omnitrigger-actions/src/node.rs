@@ -639,6 +639,62 @@ mod tests {
     }
 
     #[test]
+    fn transient_clipboard_options_are_explicit_and_reject_typos_before_native_call() {
+        if !node_available() {
+            return;
+        }
+        #[derive(Default)]
+        struct Host(std::sync::Mutex<Vec<Value>>);
+        impl NativeHost for Host {
+            fn call(
+                &self,
+                method: &str,
+                params: Value,
+                _: &CancellationToken,
+            ) -> Result<Value, ActionError> {
+                assert_eq!(method, "clipboard.write");
+                self.0.lock().unwrap().push(params);
+                Ok(json!({"written":true,"sequenceNumber":9}))
+            }
+        }
+        let fixture = Fixture::new(
+            r#"export default async ctx => {
+            await ctx.clipboard.writeText('literal');
+            await ctx.clipboard.writeText('literal', {excludeFromHistory:false});
+            const receipt=await ctx.clipboard.writeText('literal', {excludeFromHistory:true});
+            let rejected=0;
+            for(const option of [null, true, [], {excludeFromHistory:1}, {excludeFromHistory:null}, {excludeFromHistory:undefined}, {exclude_from_history:true}]) {
+                try { await ctx.clipboard.writeText('literal',option); }
+                catch(e) { if(e.code==='invalid_input' && e.effectState==='not_started') rejected++; }
+            }
+            return {rejected,receipt};
+        }"#,
+            json!({}),
+        );
+        let host = Host::default();
+        let output = NodeRuntime::default()
+            .execute_with_host(
+                &fixture.action,
+                &context(),
+                &CancellationToken::new(),
+                Some(&host),
+            )
+            .unwrap();
+        assert_eq!(
+            output,
+            json!({"rejected":7,"receipt":{"written":true,"sequenceNumber":9}})
+        );
+        assert_eq!(
+            *host.0.lock().unwrap(),
+            [
+                json!({"text":"literal"}),
+                json!({"text":"literal"}),
+                json!({"text":"literal","exclude_from_history":true})
+            ]
+        );
+    }
+
+    #[test]
     fn target_context_export_keeps_portable_precision_and_clipboard_receipt() {
         if !node_available() {
             return;

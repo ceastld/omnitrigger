@@ -41,6 +41,12 @@ jobs:
         shell: pwsh
         run: ./scripts/check.ps1
 
+      - name: 验证独立窗口站中的剪贴板排除格式
+        shell: pwsh
+        run: |
+          cargo test --locked -p omnitrigger-windows --test clipboard_exclusion -- --ignored --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: 验证更新服务发布通知
         run: python -m unittest discover -s scripts -p 'test_update_*.py' -v
 

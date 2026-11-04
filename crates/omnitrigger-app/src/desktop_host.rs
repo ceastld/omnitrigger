@@ -58,6 +58,14 @@ struct TextArgs {
     text: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClipboardWriteArgs {
+    text: String,
+    #[serde(default)]
+    exclude_from_history: bool,
+}
+
 fn not_cancelled(cancellation: &CancellationToken) -> Result<(), String> {
     if cancellation.is_cancelled() {
         Err("动作已取消，未继续本机调用。".into())
@@ -95,28 +103,36 @@ impl NativeHost for DesktopHost {
                     .map_err(|message| error("cancelled", message, "not_started"))?;
                 Ok(json!(text))
             }
-            "clipboard.write" | "keyboard.text" => {
+            "clipboard.write" => {
+                let args: ClipboardWriteArgs = serde_json::from_value(params)
+                    .map_err(|message| error("invalid_input", message, "not_started"))?;
+                omnitrigger_windows::validate_automation_text(&args.text)
+                    .map_err(|message| error("invalid_input", message, "not_started"))?;
+                let check = || not_cancelled(cancellation);
+                if args.exclude_from_history {
+                    omnitrigger_windows::write_clipboard_text_excluding_history_if(
+                        &args.text, check,
+                    )
+                } else {
+                    omnitrigger_windows::write_clipboard_text_if(&args.text, check)
+                }
+                .map_err(|message| error("clipboard_failed", message, "unknown"))?;
+                let sequence = omnitrigger_windows::clipboard_sequence_number();
+                Ok(json!({"written":true,"sequenceNumber":sequence}))
+            }
+            "keyboard.text" => {
                 let args: TextArgs = serde_json::from_value(params)
                     .map_err(|message| error("invalid_input", message, "not_started"))?;
                 omnitrigger_windows::validate_automation_text(&args.text)
                     .map_err(|message| error("invalid_input", message, "not_started"))?;
-                if method == "clipboard.write" {
-                    omnitrigger_windows::write_clipboard_text_if(&args.text, || {
-                        not_cancelled(cancellation)
-                    })
-                    .map_err(|message| error("clipboard_failed", message, "unknown"))?;
-                    let sequence = omnitrigger_windows::clipboard_sequence_number();
-                    Ok(json!({"written":true,"sequenceNumber":sequence}))
-                } else {
-                    let target = self.target.as_ref().map_err(Clone::clone)?;
-                    target
-                        .ensure_foreground()
-                        .map_err(|message| error("target_changed", message, "not_started"))?;
-                    target
-                        .send_text_if(&args.text, || not_cancelled(cancellation))
-                        .map_err(|message| error("input_failed", message, "unknown"))?;
-                    Ok(json!({"submitted":true}))
-                }
+                let target = self.target.as_ref().map_err(Clone::clone)?;
+                target
+                    .ensure_foreground()
+                    .map_err(|message| error("target_changed", message, "not_started"))?;
+                target
+                    .send_text_if(&args.text, || not_cancelled(cancellation))
+                    .map_err(|message| error("input_failed", message, "unknown"))?;
+                Ok(json!({"submitted":true}))
             }
             "selection.copy" => {
                 if params != json!({}) {
@@ -361,6 +377,22 @@ mod tests {
             ),
             ("clipboard.read", json!({"unexpected":true})),
             ("clipboard.write", json!({"text":"a\0b"})),
+            (
+                "clipboard.write",
+                json!({"text":"literal", "exclude_from_history":"true"}),
+            ),
+            (
+                "clipboard.write",
+                json!({"text":"literal", "exclude_from_history":null}),
+            ),
+            (
+                "clipboard.write",
+                json!({"text":"literal", "excludeFromHistory":true}),
+            ),
+            (
+                "keyboard.text",
+                json!({"text":"literal", "exclude_from_history":true}),
+            ),
             ("keyboard.text", json!({"text":5})),
             ("keyboard.shortcut", json!({"keys":[163,9],"timing":null})),
             (

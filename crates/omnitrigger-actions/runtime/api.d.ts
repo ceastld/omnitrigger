@@ -64,7 +64,7 @@ export interface ActionContext {
   clipboard: {
     /** 只读 Unicode 文本；没有文本格式时抛错。 */
     readText(): Promise<string>;
-    /** 替换全部剪贴板格式为 Unicode 文本，不自动恢复。 */
-    writeText(text: string): Promise<{written: true; sequenceNumber: number}>;
+    /** 替换全部格式，不自动恢复。excludeFromHistory 为临时回贴请求排除历史采集；仅遵守标记的采集器有效。 */
+    writeText(text: string, options?: {excludeFromHistory?: boolean}): Promise<{written: true; sequenceNumber: number}>;
   };
 }

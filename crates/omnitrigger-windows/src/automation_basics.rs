@@ -186,6 +186,8 @@ mod clipboard {
         fn close(&self) -> Result<(), String>;
         fn empty(&self) -> Result<(), String>;
         fn set_unicode(&self, handle: Self::Handle) -> Result<(), String>;
+        fn register_format(&self, name: &str) -> Result<u32, String>;
+        fn set_format(&self, format: u32, handle: Self::Handle) -> Result<(), String>;
         fn read_unicode(&self) -> Result<Vec<u16>, String>;
         fn wait_retry(&self) {
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -251,18 +253,55 @@ mod clipboard {
         backend: &impl Backend,
         check: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
+        write_with_exclusion_checked(text, false, backend, check)
+    }
+
+    pub(super) fn write_with_exclusion_checked(
+        text: &str,
+        exclude_from_history: bool,
+        backend: &impl Backend,
+        check: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         validate_automation_text(text)?;
+        // 注册和分配都在清空前完成；任一标记失败时不交付未标记的正文。
+        let formats = if exclude_from_history {
+            vec![
+                backend.register_format("OmniTrigger.TransientClipboard.v1")?,
+                backend.register_format("ExcludeClipboardContentFromMonitorProcessing")?,
+            ]
+        } else {
+            Vec::new()
+        };
         let units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         let handle = backend.allocate(&units)?;
         let mut memory = OwnedMemory {
             backend,
             handle: Some(handle),
         };
+        let mut markers = Vec::new();
+        for format in formats {
+            markers.push((
+                format,
+                OwnedMemory {
+                    backend,
+                    // 固定四字节；消费者只检查格式存在，不读取或解析载荷。
+                    handle: Some(backend.allocate(&[1, 0])?),
+                },
+            ));
+        }
         let lease = Lease::open(backend)?;
         check()?;
         backend
             .empty()
             .map_err(|error| format!("无法清空剪贴板：{error}"))?;
+        for (format, marker) in &mut markers {
+            backend
+                .set_format(*format, marker.handle.unwrap())
+                .map_err(|error| {
+                    format!("剪贴板已清空，但排除采集标记写入失败；未写入文本：{error}")
+                })?;
+            marker.handle = None;
+        }
         backend.set_unicode(handle).map_err(|error| {
             format!("剪贴板已清空，但文本写入失败；无法保证恢复原内容：{error}")
         })?;
@@ -306,7 +345,7 @@ mod native {
             System::{
                 DataExchange::{
                     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
-                    OpenClipboard, SetClipboardData,
+                    OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
                 },
                 Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
                 Ole::CF_UNICODETEXT,
@@ -439,6 +478,23 @@ mod native {
                 .map(|_| ())
                 .map_err(|error| error.to_string())
         }
+        fn register_format(&self, name: &str) -> Result<u32, String> {
+            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            let format = unsafe { RegisterClipboardFormatW(PCWSTR(wide.as_ptr())) };
+            if format == 0 {
+                Err(format!(
+                    "无法注册剪贴板排除格式：{}",
+                    windows::core::Error::from_win32()
+                ))
+            } else {
+                Ok(format)
+            }
+        }
+        fn set_format(&self, format: u32, handle: HGLOBAL) -> Result<(), String> {
+            unsafe { SetClipboardData(format, Some(HANDLE(handle.0))) }
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        }
         fn read_unicode(&self) -> Result<Vec<u16>, String> {
             unsafe { IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT.0)) }
                 .map_err(|_| "剪贴板没有可读取的 Unicode 文本。".to_string())?;
@@ -528,6 +584,17 @@ pub fn write_clipboard_text_if(
 ) -> Result<(), String> {
     validate_automation_text(text)?;
     clipboard::write_checked(text, &native::Clipboard::new(true)?, check)
+}
+
+/// 同一次打开中先写入临时内容与 Windows 历史排除标记，再交付 Unicode 正文。
+/// 标记是遵守协议的采集器的排除提示，不是剪贴板独占权或保密边界。
+#[cfg(windows)]
+pub fn write_clipboard_text_excluding_history_if(
+    text: &str,
+    check: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    validate_automation_text(text)?;
+    clipboard::write_with_exclusion_checked(text, true, &native::Clipboard::new(true)?, check)
 }
 
 /// 只读取 CF_UNICODETEXT，拒绝无效/超限 UTF-16；仅工作线程调用。
@@ -784,6 +851,9 @@ mod tests {
         fail: Option<&'static str>,
         busy: Cell<usize>,
         data: RefCell<Vec<u16>>,
+        allocations: RefCell<Vec<Vec<u16>>>,
+        freed: RefCell<Vec<usize>>,
+        formats: RefCell<Vec<u32>>,
     }
     impl MockClipboard {
         fn step(&self, name: &'static str) -> Result<(), String> {
@@ -800,10 +870,12 @@ mod tests {
         fn allocate(&self, units: &[u16]) -> Result<usize, String> {
             self.step("allocate")?;
             *self.data.borrow_mut() = units.to_vec();
-            Ok(7)
+            let handle = 7 + self.allocations.borrow().len();
+            self.allocations.borrow_mut().push(units.to_vec());
+            Ok(handle)
         }
         fn free(&self, handle: usize) {
-            assert_eq!(handle, 7);
+            self.freed.borrow_mut().push(handle);
             self.log.borrow_mut().push("free");
         }
         fn open(&self) -> Result<(), String> {
@@ -825,6 +897,29 @@ mod tests {
         fn set_unicode(&self, handle: usize) -> Result<(), String> {
             assert_eq!(handle, 7);
             self.step("set")
+        }
+        fn register_format(&self, name: &str) -> Result<u32, String> {
+            match name {
+                "OmniTrigger.TransientClipboard.v1" => {
+                    self.step("register_transient")?;
+                    Ok(49152)
+                }
+                "ExcludeClipboardContentFromMonitorProcessing" => {
+                    self.step("register_history")?;
+                    Ok(49153)
+                }
+                _ => panic!("unexpected format"),
+            }
+        }
+        fn set_format(&self, format: u32, handle: usize) -> Result<(), String> {
+            assert_eq!(handle, 8 + (format - 49152) as usize);
+            self.step(if format == 49152 {
+                "transient"
+            } else {
+                "history"
+            })?;
+            self.formats.borrow_mut().push(format);
+            Ok(())
         }
         fn read_unicode(&self) -> Result<Vec<u16>, String> {
             self.step("read_unicode")?;
@@ -852,6 +947,73 @@ mod tests {
             .unwrap_err()
             .contains("文本已写入"));
         assert!(!backend.log.borrow().contains(&"free"));
+    }
+
+    #[test]
+    fn clipboard_exclusion_precedes_text_in_the_same_lease() {
+        let backend = MockClipboard::default();
+        clipboard::write_with_exclusion_checked("literal", true, &backend, || Ok(())).unwrap();
+        assert_eq!(
+            *backend.log.borrow(),
+            [
+                "register_transient",
+                "register_history",
+                "allocate",
+                "allocate",
+                "allocate",
+                "open",
+                "empty",
+                "transient",
+                "history",
+                "set",
+                "close"
+            ]
+        );
+        assert_eq!(*backend.formats.borrow(), [49152, 49153]);
+        assert_eq!(
+            &backend.allocations.borrow()[1..],
+            &[vec![1, 0], vec![1, 0]]
+        );
+        assert!(backend.freed.borrow().is_empty());
+    }
+
+    #[test]
+    fn clipboard_exclusion_failure_never_publishes_unmarked_text() {
+        for (failed, freed) in [
+            ("register_transient", 0),
+            ("register_history", 0),
+            ("transient", 3),
+            ("history", 2),
+            ("set", 1),
+            ("close", 0),
+        ] {
+            let backend = MockClipboard {
+                fail: Some(failed),
+                ..Default::default()
+            };
+            assert!(
+                clipboard::write_with_exclusion_checked("literal", true, &backend, || Ok(()))
+                    .is_err()
+            );
+            let log = backend.log.borrow();
+            if failed != "set" && failed != "close" {
+                assert!(!log.contains(&"set"));
+            }
+            assert_eq!(backend.freed.borrow().len(), freed, "{failed}");
+            assert_eq!(
+                log.iter().filter(|step| **step == "close").count(),
+                usize::from(!failed.starts_with("register"))
+            );
+        }
+        let backend = MockClipboard::default();
+        assert!(
+            clipboard::write_with_exclusion_checked("literal", true, &backend, || Err(
+                "cancelled".into()
+            ))
+            .is_err()
+        );
+        assert!(!backend.log.borrow().contains(&"empty"));
+        assert_eq!(backend.freed.borrow().len(), 3);
     }
 
     #[test]

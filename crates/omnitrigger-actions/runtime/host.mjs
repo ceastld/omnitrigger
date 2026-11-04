@@ -198,17 +198,26 @@ const desktop = Object.freeze({
   copySelectionText: () => nativeCall('selection.copy', {}),
 });
 
-function textCall(method, text) {
+function textCall(method, text, extra = {}) {
   if (typeof text !== 'string' || text.length > 65536 || text.includes('\0')
       || Buffer.from(text, 'utf8').toString('utf8') !== text) {
     return Promise.reject(Object.assign(fault('invalid_input', '文本需要有效 Unicode，不含 NUL，最多 65,536 个 UTF-16 单元。'), {effectState:'not_started', method}));
   }
-  return nativeCall(method, {text});
+  return nativeCall(method, {text, ...extra});
+}
+
+function writeClipboardText(text, options = {}) {
+  if (options === null || typeof options !== 'object' || Array.isArray(options)
+      || Object.keys(options).some(key => key !== 'excludeFromHistory')
+      || ('excludeFromHistory' in options && typeof options.excludeFromHistory !== 'boolean')) {
+    return Promise.reject(Object.assign(fault('invalid_input', '剪贴板选项只接受布尔值 excludeFromHistory。'), {effectState:'not_started', method:'clipboard.write'}));
+  }
+  return textCall('clipboard.write', text, options.excludeFromHistory ? {exclude_from_history:true} : {});
 }
 
 const clipboard = Object.freeze({
   readText: () => nativeCall('clipboard.read', {}),
-  writeText: text => textCall('clipboard.write', text),
+  writeText: writeClipboardText,
 });
 
 function delay(milliseconds) {
