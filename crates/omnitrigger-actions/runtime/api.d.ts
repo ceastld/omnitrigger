@@ -65,6 +65,6 @@ export interface ActionContext {
     /** 只读 Unicode 文本；没有文本格式时抛错。 */
     readText(): Promise<string>;
     /** 替换全部格式，不自动恢复。excludeFromHistory 为临时回贴请求排除历史采集；仅遵守标记的采集器有效。 */
-    writeText(text: string, options?: {excludeFromHistory?: boolean}): Promise<{written: true; sequenceNumber: number}>;
+    writeText(text: string, options?: {excludeFromHistory?: boolean}): Promise<{written: true; sequenceNumber: number; writeId?: string}>;
   };
 }

@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::{
     sync::{
         atomic::{AtomicU32, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -24,7 +24,7 @@ use windows::{
             DataExchange::{
                 CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
                 GetClipboardFormatNameW, GetClipboardSequenceNumber, OpenClipboard,
-                SetClipboardData,
+                RegisterClipboardFormatW, SetClipboardData,
             },
             Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
         },
@@ -33,8 +33,9 @@ use windows::{
             WindowsAndMessaging::{
                 CreateWindowExW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
                 GetWindowTextW, PeekMessageW, SendMessageW, SetForegroundWindow, SetWindowTextW,
-                ShowWindow, TranslateMessage, MSG, PM_REMOVE, SW_SHOWNOACTIVATE, WINDOW_EX_STYLE,
-                WINDOW_STYLE, WS_BORDER, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+                ShowWindow, TranslateMessage, HWND_MESSAGE, MSG, PM_REMOVE, SW_SHOWNOACTIVATE,
+                WINDOW_EX_STYLE, WINDOW_STYLE, WS_BORDER, WS_CHILD, WS_OVERLAPPEDWINDOW,
+                WS_VISIBLE,
             },
         },
     },
@@ -104,6 +105,10 @@ fn snapshot(owner: HWND) -> Result<Vec<(u32, Vec<u8>)>, String> {
         let mut name = [0u16; 256];
         let count = unsafe { GetClipboardFormatNameW(format, &mut name) }.max(0) as usize;
         let name = String::from_utf16_lossy(&name[..count]);
+        // 排除元数据只保留其语义；恢复时规范化为版本1，不读取旧标记载荷。
+        if crate::clipboard_restore::EXCLUSION_FORMATS.contains(&name.as_str()) {
+            continue;
+        }
         let allowed = matches!(format, 1 | 7 | 8 | 13 | 15 | 16 | 17)
             || matches!(
                 name.as_str(),
@@ -143,7 +148,112 @@ struct ClipboardBackup {
     owner: HWND,
     data: Vec<(u32, Vec<u8>)>,
     last_owned: Arc<AtomicU32>,
+    last_write_id: Arc<Mutex<Option<String>>>,
     active: bool,
+}
+
+#[path = "../../omnitrigger-windows/tests/support/private_clipboard.rs"]
+mod private_clipboard;
+
+#[test]
+#[ignore = "需要可创建命名窗口站的 Windows 管理员令牌；CI 单独串行运行，绝不使用交互剪贴板"]
+fn isolated_clipboard_restore_smoke() {
+    let station = private_clipboard::PrivateClipboard::create();
+    station.verify();
+    let owner = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("STATIC"),
+            w!("OmniTrigger Clipboard Restore Test"),
+            WINDOW_STYLE(0),
+            0,
+            0,
+            0,
+            0,
+            Some(HWND_MESSAGE),
+            None,
+            None,
+            None,
+        )
+    }
+    .unwrap();
+    struct Window(HWND);
+    impl Drop for Window {
+        fn drop(&mut self) {
+            let _ = unsafe { DestroyWindow(self.0) };
+        }
+    }
+    let _window = Window(owner);
+    // 合成富文本与 Unicode；恢复路径必须保留原始字节并规范化排除元数据。
+    let mut plain = Allocation::new(&[65, 0, 66, 0, 0, 0]).unwrap();
+    let html_format = unsafe { RegisterClipboardFormatW(w!("HTML Format")) };
+    assert_ne!(html_format, 0);
+    let html_bytes = b"Version:1.0\r\n<html><b>owned</b></html>\0";
+    let mut html = Allocation::new(html_bytes).unwrap();
+    {
+        let _lease = Lease::open(owner).unwrap();
+        unsafe { EmptyClipboard() }.unwrap();
+        unsafe { SetClipboardData(13, Some(HANDLE(plain.0.unwrap().0))) }.unwrap();
+        plain.0 = None;
+        unsafe { SetClipboardData(html_format, Some(HANDLE(html.0.unwrap().0))) }.unwrap();
+        html.0 = None;
+    }
+    let mut backup = ClipboardBackup::new(owner).unwrap();
+    let expected = backup.data.clone();
+    // 确认普通快照原本没有排除元数据。
+    let backend = RestoreNative(owner);
+    let marker_ids: Vec<u32> = crate::clipboard_restore::EXCLUSION_FORMATS
+        .iter()
+        .map(|name| crate::clipboard_restore::Backend::register(&backend, name).unwrap())
+        .collect();
+    assert!(marker_ids.iter().all(|format| unsafe {
+        windows::Win32::System::DataExchange::IsClipboardFormatAvailable(*format)
+    }
+    .is_err()));
+    station.verify();
+    let receipt = DesktopHost::capture(None)
+        .call(
+            "clipboard.write",
+            json!({"text":"temporary","exclude_from_history":true}),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    let write_id = receipt["writeId"].as_str().unwrap().to_owned();
+    assert_eq!(write_id.len(), 32);
+    *backup.last_write_id.lock().unwrap() = Some(write_id.clone());
+    backup.last_owned.store(
+        receipt["sequenceNumber"].as_u64().unwrap() as u32,
+        Ordering::Release,
+    );
+    backup.restore().unwrap();
+    station.verify();
+    let restored = snapshot(owner).unwrap();
+    assert_eq!(
+        restored, expected,
+        "原载荷格式及字节必须相同，排除元数据另算"
+    );
+    {
+        let _lease = Lease::open(owner).unwrap();
+        for format in marker_ids {
+            crate::clipboard_restore::Backend::verify(&backend, format, &1u32.to_le_bytes())
+                .unwrap();
+        }
+    }
+    assert_eq!(omnitrigger_windows::read_clipboard_text().unwrap(), "AB");
+    // 后续来源更新必须被保留，不能在 Drop 中再次覆盖。
+    let mut stale = ClipboardBackup::new(owner).unwrap();
+    let newer_id =
+        omnitrigger_windows::write_clipboard_text_excluding_history_if("newer", || Ok(())).unwrap();
+    assert_ne!(newer_id, write_id);
+    // 模拟外层观察到其它写入方的新序号，标识仍必须阻止覆盖。
+    stale
+        .last_owned
+        .store(unsafe { GetClipboardSequenceNumber() }, Ordering::Release);
+    *stale.last_write_id.lock().unwrap() = Some(write_id);
+    assert!(stale.restore().is_err());
+    assert!(!stale.active);
+    drop(stale);
+    assert_eq!(omnitrigger_windows::read_clipboard_text().unwrap(), "newer");
 }
 impl ClipboardBackup {
     fn new(owner: HWND) -> Result<Self, String> {
@@ -158,6 +268,7 @@ impl ClipboardBackup {
             owner,
             data,
             last_owned: Arc::new(AtomicU32::new(sequence)),
+            last_write_id: Arc::new(Mutex::new(None)),
             active: true,
         })
     }
@@ -176,32 +287,88 @@ impl ClipboardBackup {
             self.active = false;
             return Err("测试期间剪贴板已被其他来源更新；保留当前内容，未恢复旧快照".into());
         }
-        let mut allocations = self
-            .data
-            .iter()
-            .map(|(_, bytes)| Allocation::new(bytes))
-            .collect::<Result<Vec<_>, _>>()?;
-        let lease = Lease::open(self.owner)?;
-        if unsafe { GetClipboardSequenceNumber() } != self.last_owned.load(Ordering::Acquire) {
-            self.active = false;
-            return Err("打开剪贴板期间内容已变化；未覆盖当前内容".into());
-        }
-        unsafe { EmptyClipboard() }.map_err(|error| error.to_string())?;
-        for ((format, _), allocation) in self.data.iter().zip(&mut allocations) {
-            let handle = allocation.0.unwrap();
-            unsafe { SetClipboardData(*format, Some(HANDLE(handle.0))) }
-                .map_err(|error| error.to_string())?;
-            allocation.0 = None;
-        }
-        drop(lease);
+        // 本次恢复只有一次尝试。失败后 Drop 不得再盲重试破坏性写入。
         self.active = false;
-        let restored = snapshot(self.owner)?;
-        for entry in &self.data {
-            if !restored.contains(entry) {
-                return Err("剪贴板备份读回不一致".into());
-            }
+        let write_id = self
+            .last_write_id
+            .lock()
+            .map_err(|_| "写入标识锁已失效；未恢复")?
+            .clone()
+            .ok_or("没有本次临时写入标识；未恢复")?;
+        crate::clipboard_restore::restore(
+            &self.data,
+            self.last_owned.load(Ordering::Acquire),
+            &write_id,
+            &RestoreNative(self.owner),
+        )
+    }
+}
+
+struct RestoreNative(HWND);
+impl crate::clipboard_restore::Backend for RestoreNative {
+    type Memory = Allocation;
+    fn register(&self, name: &str) -> Result<u32, String> {
+        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+        let format = unsafe { RegisterClipboardFormatW(PCWSTR(wide.as_ptr())) };
+        if format == 0 {
+            Err("无法注册恢复所需的排除格式；未开始写入".into())
+        } else {
+            Ok(format)
         }
+    }
+    fn allocate(&self, bytes: &[u8]) -> Result<Allocation, String> {
+        Allocation::new(bytes)
+    }
+    fn open(&self) -> Result<(), String> {
+        let lease = Lease::open(self.0)?;
+        // 由恢复算法的 Lease 负责关闭；不让临时打开句柄提前关闭。
+        std::mem::forget(lease);
         Ok(())
+    }
+    fn close(&self) -> Result<(), String> {
+        unsafe { CloseClipboard() }.map_err(|error| error.to_string())
+    }
+    fn sequence(&self) -> u32 {
+        unsafe { GetClipboardSequenceNumber() }
+    }
+    fn matches_write(&self, token: &str) -> Result<bool, String> {
+        let format = <Self as crate::clipboard_restore::Backend>::register(
+            self,
+            crate::clipboard_restore::EXCLUSION_FORMATS[0],
+        )?;
+        let mut expected = 1u32.to_le_bytes().to_vec();
+        expected.extend(token.encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
+        Ok(<Self as crate::clipboard_restore::Backend>::verify(self, format, &expected).is_ok())
+    }
+    fn empty(&self) -> Result<(), String> {
+        unsafe { EmptyClipboard() }.map_err(|error| error.to_string())
+    }
+    fn set(&self, format: u32, allocation: &mut Allocation) -> Result<(), String> {
+        let handle = allocation.0.unwrap();
+        unsafe { SetClipboardData(format, Some(HANDLE(handle.0))) }
+            .map_err(|error| error.to_string())?;
+        allocation.0 = None;
+        Ok(())
+    }
+    fn verify(&self, format: u32, expected: &[u8]) -> Result<(), String> {
+        let handle = unsafe { GetClipboardData(format) }.map_err(|error| error.to_string())?;
+        let global = HGLOBAL(handle.0);
+        let size = unsafe { GlobalSize(global) };
+        if size < expected.len() {
+            return Err("剪贴板恢复读回长度不符".into());
+        }
+        let pointer = unsafe { GlobalLock(global) };
+        if pointer.is_null() {
+            return Err("剪贴板恢复读回锁定失败".into());
+        }
+        let matches =
+            unsafe { std::slice::from_raw_parts(pointer.cast::<u8>(), expected.len()) } == expected;
+        let _ = unsafe { GlobalUnlock(global) };
+        if matches {
+            Ok(())
+        } else {
+            Err("剪贴板恢复载荷读回不符".into())
+        }
     }
 }
 impl Drop for ClipboardBackup {
@@ -215,6 +382,7 @@ impl Drop for ClipboardBackup {
 struct TrackedHost {
     inner: DesktopHost,
     sequence: Option<Arc<AtomicU32>>,
+    write_id: Option<Arc<Mutex<Option<String>>>>,
 }
 impl NativeHost for TrackedHost {
     fn call(
@@ -225,6 +393,13 @@ impl NativeHost for TrackedHost {
     ) -> Result<Value, omnitrigger_actions::ActionError> {
         let result = self.inner.call(method, params, cancel);
         if matches!(method, "clipboard.write" | "selection.copy") {
+            if let Some(write_id) = &self.write_id {
+                *write_id.lock().unwrap() = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|receipt| receipt["writeId"].as_str())
+                    .map(str::to_owned);
+            }
             if let Some(sequence) = &self.sequence {
                 sequence.store(unsafe { GetClipboardSequenceNumber() }, Ordering::Release);
             }
@@ -526,6 +701,7 @@ fn interactive_desktop_text_smoke() {
         let host = TrackedHost {
             inner: DesktopHost::from_snapshot(snapshot).unwrap(),
             sequence: backup.as_ref().map(|backup| backup.last_owned.clone()),
+            write_id: backup.as_ref().map(|backup| backup.last_write_id.clone()),
         };
         let call = ActionCall {
             package_id: "examples.desktop-text".into(),
@@ -781,8 +957,9 @@ export default async ctx => {
 };"#).unwrap();
     std::fs::write(package.join("paste.mjs"),r#"import fs from 'node:fs/promises';
 export default async ctx => {
-  const receipt = await ctx.clipboard.writeText(ctx.input.text);
+  const receipt = await ctx.clipboard.writeText(ctx.input.text, {excludeFromHistory:true});
   if (!Number.isInteger(receipt.sequenceNumber) || receipt.sequenceNumber===0) throw new Error('clipboard receipt missing');
+  if (typeof receipt.writeId !== 'string' || !/^[0-9a-f]{32}$/.test(receipt.writeId)) throw new Error('clipboard ownership receipt missing');
   await fs.writeFile(ctx.input.phase_path, JSON.stringify(receipt), {mode:0o600});
   await ctx.delay(ctx.input.delay_ms);
   await ctx.desktop.sendShortcut([162,86]);
@@ -832,6 +1009,12 @@ export default async ctx => {
         if let Ok(bytes) = std::fs::read(root.join("native-clipboard-phase.json")) {
             if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
                 if let Some(sequence) = value["sequenceNumber"].as_u64() {
+                    let write_id = value["writeId"].as_str().expect("临时写入必须带有标识");
+                    assert!(
+                        write_id.len() == 32
+                            && write_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    );
+                    *backup.last_write_id.lock().unwrap() = Some(write_id.to_owned());
                     backup
                         .last_owned
                         .store(u32::try_from(sequence).unwrap(), Ordering::Release);
@@ -926,6 +1109,7 @@ export default async ctx => {
         serde_json::from_slice(&std::fs::read(root.join("exit.json")).unwrap()).unwrap();
     assert_eq!(exit["exitCode"], 0);
     std::fs::write(root.join("outer-native-result.json"),serde_json::to_vec_pretty(&json!({"passed":true,"launch":launch,
-        "menu_result":result,"decoy_unchanged":true,"restored_clipboard_formats":formats,"host_exit":exit})).unwrap()).unwrap();
+        "menu_result":result,"decoy_unchanged":true,"restored_clipboard_formats":formats,
+        "restored_payload_formats":formats,"restore_exclusion_formats":2,"format_set_identical_to_initial":false,"host_exit":exit})).unwrap()).unwrap();
     write_status("complete", json!({"restored_clipboard_formats":formats}));
 }

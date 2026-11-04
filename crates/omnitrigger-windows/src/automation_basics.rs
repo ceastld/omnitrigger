@@ -262,6 +262,16 @@ mod clipboard {
         backend: &impl Backend,
         check: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
+        write_with_token_checked(text, exclude_from_history, None, backend, check)
+    }
+
+    pub(super) fn write_with_token_checked(
+        text: &str,
+        exclude_from_history: bool,
+        token: Option<&str>,
+        backend: &impl Backend,
+        check: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
         validate_automation_text(text)?;
         // 注册和分配都在清空前完成；任一标记失败时不交付未标记的正文。
         let formats = if exclude_from_history {
@@ -279,13 +289,19 @@ mod clipboard {
             handle: Some(handle),
         };
         let mut markers = Vec::new();
-        for format in formats {
+        for (index, format) in formats.into_iter().enumerate() {
+            let mut marker = vec![1, 0];
+            if index == 0 {
+                if let Some(token) = token {
+                    marker.extend(token.encode_utf16().chain([0]));
+                }
+            }
             markers.push((
                 format,
                 OwnedMemory {
                     backend,
-                    // 固定四字节；消费者只检查格式存在，不读取或解析载荷。
-                    handle: Some(backend.allocate(&[1, 0])?),
+                    // 版本 DWORD，临时格式另带本次标识；历史消费者只检查存在。
+                    handle: Some(backend.allocate(&marker)?),
                 },
             ));
         }
@@ -588,13 +604,33 @@ pub fn write_clipboard_text_if(
 
 /// 同一次打开中先写入临时内容与 Windows 历史排除标记，再交付 Unicode 正文。
 /// 标记是遵守协议的采集器的排除提示，不是剪贴板独占权或保密边界。
+/// 成功返回本次随机写入标识；需要恢复快照的调用方还须在打开期间核验它。
 #[cfg(windows)]
 pub fn write_clipboard_text_excluding_history_if(
     text: &str,
     check: impl FnOnce() -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     validate_automation_text(text)?;
-    clipboard::write_with_exclusion_checked(text, true, &native::Clipboard::new(true)?, check)
+    let guid = unsafe { windows::Win32::System::Com::CoCreateGuid() }
+        .map_err(|error| format!("无法创建剪贴板写入标识：{error}"))?;
+    let token = format!(
+        "{:08x}{:04x}{:04x}{}",
+        guid.data1,
+        guid.data2,
+        guid.data3,
+        guid.data4
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    clipboard::write_with_token_checked(
+        text,
+        true,
+        Some(&token),
+        &native::Clipboard::new(true)?,
+        check,
+    )?;
+    Ok(token)
 }
 
 /// 只读取 CF_UNICODETEXT，拒绝无效/超限 UTF-16；仅工作线程调用。

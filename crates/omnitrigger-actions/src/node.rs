@@ -653,8 +653,13 @@ mod tests {
                 _: &CancellationToken,
             ) -> Result<Value, ActionError> {
                 assert_eq!(method, "clipboard.write");
+                let excluded = params["exclude_from_history"] == true;
                 self.0.lock().unwrap().push(params);
-                Ok(json!({"written":true,"sequenceNumber":9}))
+                let mut receipt = json!({"written":true,"sequenceNumber":9});
+                if excluded {
+                    receipt["writeId"] = json!("0123456789abcdef0123456789abcdef");
+                }
+                Ok(receipt)
             }
         }
         let fixture = Fixture::new(
@@ -682,7 +687,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             output,
-            json!({"rejected":7,"receipt":{"written":true,"sequenceNumber":9}})
+            json!({"rejected":7,"receipt":{"written":true,"sequenceNumber":9,"writeId":"0123456789abcdef0123456789abcdef"}})
         );
         assert_eq!(
             *host.0.lock().unwrap(),

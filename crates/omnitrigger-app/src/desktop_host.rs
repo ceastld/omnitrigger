@@ -109,16 +109,24 @@ impl NativeHost for DesktopHost {
                 omnitrigger_windows::validate_automation_text(&args.text)
                     .map_err(|message| error("invalid_input", message, "not_started"))?;
                 let check = || not_cancelled(cancellation);
-                if args.exclude_from_history {
-                    omnitrigger_windows::write_clipboard_text_excluding_history_if(
-                        &args.text, check,
+                let write_id = if args.exclude_from_history {
+                    Some(
+                        omnitrigger_windows::write_clipboard_text_excluding_history_if(
+                            &args.text, check,
+                        )
+                        .map_err(|message| error("clipboard_failed", message, "unknown"))?,
                     )
                 } else {
                     omnitrigger_windows::write_clipboard_text_if(&args.text, check)
-                }
-                .map_err(|message| error("clipboard_failed", message, "unknown"))?;
+                        .map_err(|message| error("clipboard_failed", message, "unknown"))?;
+                    None
+                };
                 let sequence = omnitrigger_windows::clipboard_sequence_number();
-                Ok(json!({"written":true,"sequenceNumber":sequence}))
+                let mut receipt = json!({"written":true,"sequenceNumber":sequence});
+                if let Some(write_id) = write_id {
+                    receipt["writeId"] = json!(write_id);
+                }
+                Ok(receipt)
             }
             "keyboard.text" => {
                 let args: TextArgs = serde_json::from_value(params)

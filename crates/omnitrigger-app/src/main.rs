@@ -10,6 +10,8 @@ mod browser_actions;
 mod browser_actions_ui;
 mod browser_connector;
 mod browser_connector_ui;
+#[cfg(all(windows, test))]
+mod clipboard_restore;
 mod desktop_host;
 #[cfg(test)]
 mod desktop_key_smoke;

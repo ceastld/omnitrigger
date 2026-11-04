@@ -46,6 +46,8 @@ jobs:
         run: |
           cargo test --locked -p omnitrigger-windows --test clipboard_exclusion -- --ignored --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p omnitrigger-app isolated_clipboard_restore_smoke -- --ignored --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 验证更新服务发布通知
         run: python -m unittest discover -s scripts -p 'test_update_*.py' -v
