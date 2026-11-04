@@ -96,6 +96,30 @@ fn unavailable_host_and_pre_cancel_are_rejected_before_execution() {
 }
 
 #[test]
+fn installed_image_digest_is_checked_before_any_process_starts() {
+    let fixture = Fixture::new("return {};");
+    let program = fixture.root.join("host.exe");
+    std::fs::write(&program, b"not an executable").unwrap();
+    for (digest, size) in [
+        ("0".repeat(64), 17),
+        ("invalid".into(), 17),
+        ("0".repeat(64), 1),
+    ] {
+        let error = ScriptHostRuntime::new(&program)
+            .with_integrity(digest, size)
+            .execute(
+                &fixture.action(json!({})),
+                &context(),
+                &CancellationToken::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "runtime_integrity");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+    }
+    std::fs::remove_file(program).unwrap();
+}
+
+#[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
 fn script_host_runs_generated_standard_js_project_without_repository_paths() {
     let fixture = Fixture::new("return null;");

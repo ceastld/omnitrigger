@@ -33,6 +33,7 @@ mod plugins;
 mod presets;
 mod radial_wheel;
 mod script_browser;
+mod script_runtime;
 mod service;
 mod settings;
 mod shortcut;
@@ -5953,11 +5954,13 @@ fn smoke_test() -> Result<(), String> {
 
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
-    // 新建工程不与系统操作、预览或其他命令混用；在任何 CLI 副作用前拒绝组合。
-    if arguments
-        .iter()
-        .any(|argument| argument == "--create-script-action")
-    {
+    // 新建工程、安装宿主不与系统操作或其他命令混用；在任何 CLI 副作用前拒绝组合。
+    if arguments.iter().any(|argument| {
+        matches!(
+            argument.as_str(),
+            "--create-script-action" | "--install-script-runtime"
+        )
+    }) {
         if let Err(message) = action_target_context::validate_cli(&arguments) {
             eprintln!(
                 "{}",

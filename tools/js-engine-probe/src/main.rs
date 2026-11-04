@@ -40,6 +40,21 @@ struct Invocation {
 }
 
 fn main() {
+    let arguments: Vec<_> = std::env::args_os().skip(1).collect();
+    if arguments.len() == 1 && arguments[0] == "--describe-runtime" {
+        println!(
+            "{}",
+            json!({"schema_version":1,"product":"omnitrigger-script-host","version":env!("CARGO_PKG_VERSION"),"engine":if cfg!(feature="quickjs"){"quickjs"}else{"boa"},"api_version":1,"protocol_schema":1})
+        );
+        return;
+    }
+    if !arguments.is_empty() {
+        println!(
+            "{}",
+            json!({"schema_version":1,"ok":false,"error":"未知宿主参数。"})
+        );
+        std::process::exit(1);
+    }
     let response = match run() {
         Ok(value) => json!({"schema_version":1,"ok": true, "result": value}),
         Err(error) => json!({"schema_version":1,"ok": false, "error": error}),

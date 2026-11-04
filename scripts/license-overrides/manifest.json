@@ -332,6 +332,32 @@
           "note": "从该包对应源码提交补充 Zlib 许可全文及原版权/双许可声明。"
         }
       ]
+    },
+    {
+      "name": "rquickjs-core",
+      "version": "0.14.0",
+      "license_expression": "MIT",
+      "files": [
+        {
+          "path": "files/rquickjs-d7ef5eeae702fea24/LICENSE",
+          "sha256": "976ad3d07927343ab99b31510625acba89eac8e0e517c712925620ddeda91b70",
+          "source_url": "https://raw.githubusercontent.com/DelSkayn/rquickjs/d7ef5eeae702fea24c03643064de454f1c1dd4b0/LICENSE",
+          "note": "同一发布源码提交的仓库根 MIT 许可；子 crate 未附 Rust 包装层许可全文，另保留各自原始声明及 QuickJS-NG 自带通知。"
+        }
+      ]
+    },
+    {
+      "name": "rquickjs-sys",
+      "version": "0.14.0",
+      "license_expression": "MIT",
+      "files": [
+        {
+          "path": "files/rquickjs-d7ef5eeae702fea24/LICENSE",
+          "sha256": "976ad3d07927343ab99b31510625acba89eac8e0e517c712925620ddeda91b70",
+          "source_url": "https://raw.githubusercontent.com/DelSkayn/rquickjs/d7ef5eeae702fea24c03643064de454f1c1dd4b0/LICENSE",
+          "note": "同一发布源码提交的仓库根 MIT 许可；子 crate 未附 Rust 包装层许可全文，另保留各自原始声明及 QuickJS-NG 自带通知。"
+        }
+      ]
     }
   ]
 }

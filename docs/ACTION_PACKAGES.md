@@ -71,7 +71,19 @@ actions/my-script/
 
 目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start`、`ctx.clipboard.readText/writeText`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时暂不提供 Node 模块、ESM 导入、Promise 入口；需要这些能力的动作继续选择 `node` 运行时。
 
-开发时先构建 `tools/js-engine-probe`，把宿主放到配置同级的 `runtimes/script/host.exe`（非 Windows 为 `host`），或使用环境变量 `OMNITRIGGER_SCRIPT_HOST` 指定完整本地路径。尚无自动安装入口。没有宿主时，相关动作报告运行时不可用，不回退其他解释器。清单与 `ActionCall` 格式保持一致；`--check-action` 检查引用，`--run-action` 实际执行。
+Windows x64 开发环境可先构建本机 QuickJS 包，再通过开发命令安装。包中包含独立宿主、SDK、许可通知和文件清单；构建命令不会发布或上传二进制：
+
+```powershell
+./tools/js-engine-probe/package-runtime.ps1 -OutputDirectory D:\Demo\script-development
+$package = Get-Content D:\Demo\script-development\result.json -Raw | ConvertFrom-Json
+.\target\debug\omnitrigger.exe --config D:\Demo\bindings.json --install-script-runtime $package.archive --sha256 $package.sha256
+```
+
+输出目录必须不存在；构建需要 Rust 1.90 MSVC、对应 `rust-docs`、Visual Studio C++ 工具和 PowerShell 7。安装端使用系统 Windows PowerShell 5.1，不需要 Node。摘要应来自已信任的本机构建记录；SHA-256 是完整性检查，不是作者签名。安装拒绝越界、重复路径、链接、超限或清单不符的文件，核对宿主能力描述并实际运行一段纯 JS 后才切换当前版本。失败不替换当前指针，可能保留暂存目录供排障。旧包保留，已运行的调用不因切换而结束；没有自动清理或断电恢复保证。
+
+应用读取配置同级 `runtimes/script/current.json` 指向的包，每次动作执行前验证宿主映像的大小和 SHA-256；Windows 上在宿主退出前保留只读句柄，禁止写入或替换该映像。指针或托管包无效时报告错误，不静默回退。该开发入口只接受 `development` 包，不创建绑定或常驻进程；尚无界面自动下载和安装入口。
+
+也可把自行构建的宿主放到配置同级 `runtimes/script/host.exe`（非 Windows 为 `host`），或用 `OMNITRIGGER_SCRIPT_HOST` 指定完整本地路径。环境变量优先于托管包；手动路径不附带托管包完整性保证，不能使用云盘、占位或链接路径。没有宿主时，相关动作报告运行时不可用。清单与 `ActionCall` 格式保持一致；`--check-action` 检查引用，`--run-action` 实际执行。
 
 外层最多运行 60 秒，取消或超时终止并等待本次宿主退出，不重试或回滚。已启动的独立程序不会随调用结束关闭；宿主强停时也不保证正在执行的原生调用及其后代全部收尾。普通脚本错误与协议错误分别返回 `script_failed`、`invalid_response`；桌面结构化错误保留原 `code`、`method`、`effect_state`。API 的 `not_started` 仅表示本次调用未开始，不代表此前脚本步骤无副作用；宿主强停时为 `unknown`。
 
@@ -397,4 +409,4 @@ profiles\<配置档 ID>\packages\<包 ID>\
 
 流程图扩展、跨动作调用、包市场、热重载和自动更新均未实现。这套接口把新增业务与输入绑定解耦，但新增运行时或宿主能力仍需要对应实现和测试；契约发生不兼容变化时仍需版本迁移。
 
-独立的 [Rust JS 宿主原型](../tools/js-engine-probe/README.md)提供共享的文件、进程、剪贴板和打开目标 API，含真实文件转换示例，并对比 Boa 与 QuickJS-NG 的 Windows EXE 体积。它尚未接入这里的动作包与插件安装，不改变当前 Node 运行时。
+独立的 [Rust JS 宿主](../tools/js-engine-probe/README.md)已接入动作包的 `script` 运行时，提供共享 API、SDK 和本机开发包安装验证；同目录保留 Boa 与 QuickJS-NG 的体积测量。现有 Node 动作继续使用各自的运行时。

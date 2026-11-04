@@ -4,6 +4,7 @@ use crate::{
     ActionError, ActionRuntime, CancellationToken, InvocationContext, NativeHost, ResolvedAction,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{Read, Seek, Write},
@@ -19,6 +20,7 @@ const RESPONSE_LIMIT: u64 = 96 * 1024;
 pub struct ScriptHostRuntime {
     program: PathBuf,
     timeout: Duration,
+    integrity: Option<(String, u64)>,
 }
 
 impl ScriptHostRuntime {
@@ -26,12 +28,72 @@ impl ScriptHostRuntime {
         Self {
             program: program.into(),
             timeout: Duration::from_secs(60),
+            integrity: None,
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    /// 托管安装包的宿主映像校验。手动指定解释器时不自动声称受包清单保护。
+    pub fn with_integrity(mut self, sha256: String, size: u64) -> Self {
+        self.integrity = Some((sha256, size));
+        self
+    }
+
+    fn checked_program(&self) -> Result<Option<File>, ActionError> {
+        let Some((expected, size)) = &self.integrity else {
+            return Ok(None);
+        };
+        let invalid = || {
+            error(
+                "runtime_integrity",
+                "脚本宿主与已安装清单不符，未启动进程。",
+                "not_started",
+            )
+        };
+        if expected.len() != 64
+            || !expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || *size == 0
+            || *size > 16 * 1024 * 1024
+        {
+            return Err(invalid());
+        }
+        crate::catalog::check_ancestors(&self.program).map_err(|_| invalid())?;
+        let metadata = std::fs::symlink_metadata(&self.program).map_err(|_| invalid())?;
+        crate::catalog::check_local(&self.program, &metadata).map_err(|_| invalid())?;
+        if !metadata.is_file() || metadata.len() != *size {
+            return Err(invalid());
+        }
+        let mut options = File::options();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(1);
+        }
+        let mut file = options.open(&self.program).map_err(|_| invalid())?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0u8; 32768];
+        let mut total = 0u64;
+        loop {
+            let count = file.read(&mut buffer).map_err(|_| invalid())?;
+            if count == 0 {
+                break;
+            }
+            total += count as u64;
+            if total > *size {
+                return Err(invalid());
+            }
+            hash.update(&buffer[..count]);
+        }
+        if total != *size || !format!("{:x}", hash.finalize()).eq_ignore_ascii_case(expected) {
+            return Err(invalid());
+        }
+        // Windows 上此句柄在宿主退出前禁止替换或写入映像。
+        Ok(Some(file))
     }
 }
 
@@ -66,6 +128,7 @@ impl ScriptHostRuntime {
         if cancellation.is_cancelled() {
             return Err(error("cancelled", "动作提交前已取消。", "not_started"));
         }
+        let _image = self.checked_program()?;
         let (root, entry) = crate::node::checked_entry(action)?;
         let mut source = String::new();
         File::open(entry)

@@ -18,6 +18,7 @@
 | omnitrigger-browser | 固定 Git 修订的浏览器 RPC 客户端 | MIT |
 | tokio | 浏览器连接的后台异步运行时 | MIT |
 | semver | 应用更新版本排序，复用锁定的 1.0.28 | MIT OR Apache-2.0 |
+| sha2 | 脚本开发包及托管宿主映像完整性检查，复用锁定的 0.10.9 | MIT OR Apache-2.0 |
 
 原生亮度提示通过现有 `windows` 绑定调用系统自带的 USER32、GDI 与 GDI+，没有增加第三方 Rust 包或捆绑系统 DLL。文字使用本机系统字体渲染，不分发字体文件。
 
@@ -55,6 +56,8 @@ Windows 发行流程通过 `scripts/collect-licenses.ps1` 从锁定目标的应�
 已核对锁文件对应 Cargo 元数据和 rquickjs / QuickJS-NG 随包许可。Boa 系列发布 crate 未附带许可全文，上游授权见 [Boa 0.21.1 MIT 许可](https://github.com/boa-dev/boa/blob/v0.21.1/LICENSE-MIT)。实验传递依赖含 MIT、Apache-2.0、Unicode-3.0、Unlicense 和 Zlib 等声明；双重授权可选择相应分支，Unicode 数据仍须保留其自身许可。完整版本与依赖关系以实验的 `Cargo.lock` 和 `cargo metadata --locked` 为准。
 
 测量脚本生成的 ZIP 只含 EXE，用于比较压缩体积，不是可发布安装包。CI 仅上传测量 JSON，不分发实验二进制。若正式分发宿主，须为其独立依赖图、标准库和 QuickJS-NG 收集完整许可及版权通知，补齐 Boa 发布 crate 缺失的上游许可文件，并记录来源和哈希；`small` 还链接 MSVC 静态 CRT，须一并核对其再分发要求。现有桌面应用的许可收集范围不能代替这一流程。
+
+`tools/js-engine-probe/package-runtime.ps1` 另行生成仅供本机验证的 QuickJS 开发包；它按独立工程、入口包和 feature 调用许可收集器，保留可达正常及构建依赖、Rust 标准库、QuickJS-NG 和包装层通知，并记录文件摘要。rquickjs-core / rquickjs-sys 0.14.0 的包装层 MIT 全文按发布包 VCS 修订补充，来源与摘要见受控清单；sys 包原有的 QuickJS 通知同时保留。开发包记录 MSVC 静态 CRT 构建环境，公开二进制分发的再分发复核仍未完成；该流程不发布二进制或创建 Release。
 
 脚本原型的桌面 API 复用本项目 MIT 的 `omnitrigger-windows`，引入的 Windows 绑定及其辅助 crate 为已在主 workspace 使用的 `windows` 0.61.3 依赖系列（MIT OR Apache-2.0）。精确版本记录在原型独立锁文件中；宿主桥接、JS SDK、类型声明和示例由本项目编写，按 MIT 提供。原型的 `small` 版仍按上文独立分发规则核对许可。
 

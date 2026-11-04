@@ -6,7 +6,11 @@
 [CmdletBinding()]
 param(
     [string]$Target = 'x86_64-pc-windows-msvc',
-    [Parameter(Mandatory = $true)][string]$OutputDirectory
+    [Parameter(Mandatory = $true)][string]$OutputDirectory,
+    [string]$ManifestPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'Cargo.toml'),
+    [string]$PackageName = 'omnitrigger-app',
+    [string[]]$Features = @(),
+    [switch]$NoDefaultFeatures
 )
 
 $ErrorActionPreference = 'Stop'
@@ -67,14 +71,17 @@ function Test-LicenseBody {
 
 Push-Location -LiteralPath $projectRoot
 try {
-    $metadataText = & cargo metadata --locked --format-version 1 --filter-platform $Target
+    $metadataArguments = @('metadata', '--locked', '--format-version', '1', '--filter-platform', $Target, '--manifest-path', [IO.Path]::GetFullPath($ManifestPath))
+    if ($NoDefaultFeatures) { $metadataArguments += '--no-default-features' }
+    if ($Features.Count) { $metadataArguments += @('--features', ($Features -join ',')) }
+    $metadataText = & cargo @metadataArguments
     if ($LASTEXITCODE -ne 0) { throw '无法读取锁定目标的 Cargo 依赖图。' }
     $metadata = $metadataText | ConvertFrom-Json
     $packages = @{}; $nodes = @{}
     foreach ($package in $metadata.packages) { $packages[$package.id] = $package }
     foreach ($node in $metadata.resolve.nodes) { $nodes[$node.id] = $node }
-    $app = @($metadata.packages | Where-Object name -eq 'omnitrigger-app')
-    if ($app.Count -ne 1) { throw '无法确定应用包。' }
+    $app = @($metadata.packages | Where-Object name -eq $PackageName)
+    if ($app.Count -ne 1) { throw "无法确定许可收集入口包：$PackageName" }
 
     $pending = [Collections.Generic.Queue[string]]::new()
     $pending.Enqueue($app[0].id)
@@ -190,7 +197,9 @@ try {
     }
     $rustVersion = & rustc --version
     [ordered]@{
-        schema_version = 1; target = $Target; dependency_scope = 'application reachable normal and build dependencies; excludes dev-only edges'
+        schema_version = 1; target = $Target; root_package = $PackageName
+        features = @($Features); no_default_features = [bool]$NoDefaultFeatures
+        dependency_scope = 'selected root reachable normal and build dependencies; excludes dev-only edges'
         packages = @($entries); rust_standard_library = [ordered]@{ toolchain = $rustVersion; files = @($rustFiles) }
     } | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $outputRoot 'dependencies.json') -Encoding utf8NoBOM
     Write-Host "已收集 $($entries.Count) 个目标依赖及 Rust 标准库的许可与通知。"

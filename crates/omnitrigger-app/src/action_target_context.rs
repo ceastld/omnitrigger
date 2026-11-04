@@ -16,6 +16,8 @@ pub fn validate_cli(arguments: &[String]) -> Result<(), String> {
                 | "--target-context"
                 | "--list-package-actions"
                 | "--create-script-action"
+                | "--install-script-runtime"
+                | "--sha256"
                 | "--stream-action-events"
         ) || !seen.insert(flag)
         {
@@ -42,14 +44,18 @@ pub fn validate_cli(arguments: &[String]) -> Result<(), String> {
         "--run-action",
         "--list-package-actions",
         "--create-script-action",
+        "--install-script-runtime",
     ]
     .iter()
     .filter(|flag| seen.contains(**flag))
     .count();
     if commands != 1 {
         return Err(
-            "需要且只能指定一次 --check-action、--run-action、--list-package-actions 或 --create-script-action。".into(),
+            "需要且只能指定一次 --check-action、--run-action、--list-package-actions、--create-script-action 或 --install-script-runtime。".into(),
         );
+    }
+    if seen.contains("--install-script-runtime") != seen.contains("--sha256") {
+        return Err("--install-script-runtime 需要且只能搭配 --sha256 使用。".into());
     }
     if (seen.contains("--target-context") || seen.contains("--stream-action-events"))
         && !seen.contains("--run-action")
@@ -262,6 +268,7 @@ mod tests {
         for args in [
             vec!["app.exe", "--list-package-actions"],
             vec!["app.exe", "--create-script-action", "my-script"],
+            vec!["--install-script-runtime", "host.zip", "--sha256", "digest"],
             vec!["--config", "owned.json", "--list-package-actions"],
             vec![
                 "--run-action",
@@ -277,6 +284,16 @@ mod tests {
             vec!["--stream-action-events"],
             vec!["--list-package-actions", "extra"],
             vec!["--create-script-action"],
+            vec!["--install-script-runtime", "host.zip"],
+            vec!["--create-script-action", "script", "--sha256", "digest"],
+            vec![
+                "--install-script-runtime",
+                "host.zip",
+                "--sha256",
+                "digest",
+                "--run-action",
+                "call.json",
+            ],
             vec![
                 "--create-script-action",
                 "my-script",

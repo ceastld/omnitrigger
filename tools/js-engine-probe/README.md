@@ -1,6 +1,6 @@
 # Rust 脚本宿主体积实验
 
-状态：独立可运行的脚本宿主，提供首批 Rust API；可作为 OmniTrigger 的 `script` 运行时接入动作包，尚无自动安装入口。接入方式见[动作包](../../docs/ACTION_PACKAGES.md#轻量脚本宿主)。本目录同时保留单独运行与体积测量入口。应用的 `--create-script-action` 可生成附带本地 SDK 与编辑器配置的标准 JS 工程，运行前仍需配置宿主。
+状态：独立可运行的脚本宿主，提供首批 Rust API；已作为 OmniTrigger 的 `script` 运行时接入动作包，并有 QuickJS 本机开发包的构建、校验和安装命令。接入方式见[动作包](../../docs/ACTION_PACKAGES.md#轻量脚本宿主)。本目录同时保留单独运行与体积测量入口。应用的 `--create-script-action` 可生成附带本地 SDK 与编辑器配置的标准 JS 工程。
 
 已有文件读写、程序启动与等待、剪贴板读写和打开目标；应用接入还提供原目标查询、快捷键、连续按键、文本输入、选区复制及浏览器调用。两个引擎加载同一份 SDK 并调用同一份 Rust 实现，详见 [API 与运行示例](API.md)、[编辑器类型声明](../../crates/omnitrigger-actions/runtime/script-api.d.ts)。
 
@@ -35,6 +35,17 @@
 
 ## 运行与复测
 
+本机开发包从仓库根目录生成，输出目录需不存在：
+
+```powershell
+./tools/js-engine-probe/package-runtime.ps1 -OutputDirectory "$PWD/.tmp/script-runtime-dev"
+node tools/js-engine-probe/check-install.mjs target/debug/omnitrigger.exe .tmp/script-runtime-dev/result.json
+```
+
+第二条命令仅用于开发验收，需要 Node；它在新的临时配置中安装真实包、运行生成工程，并验证损坏包、路径越界、宿主身份不符、启动失败、安装后篡改及版本切换，不改个人绑定。动作运行和安装本身无需 Node。包保留 SDK、独立依赖图和 Rust 标准库通知，记录 PE 导入及静态 CRT 构建情况；不上传、不创建 Release。公开二进制分发前仍需完成实际工具链的再分发复核。
+
+`host.exe --describe-runtime` 不等待 stdin，返回宿主身份、版本、引擎和协议版本，用于安装验证；无参数时继续使用下文的动作协议。
+
 需要 Windows x64、Rust 1.90 MSVC、Visual Studio C++ 构建工具和 PowerShell 7。从本目录执行：
 
 ```powershell
@@ -67,7 +78,7 @@
 
 ## 边界与后续
 
-- 已有文件、进程、剪贴板和打开目标 API；应用接入提供有限的目标、键盘与浏览器 API；尚无 TS 转译、ESM / npm 加载、Node 兼容层、HTTP、鼠标操作、任意窗口控制、编辑器或插件安装器。体积结论只覆盖这里实现的同步宿主。
+- 已有文件、进程、剪贴板和打开目标 API；应用接入提供有限的目标、键盘与浏览器 API，以及本机开发包安装命令；尚无 TS 转译、ESM / npm 加载、Node 兼容层、HTTP、鼠标操作、任意窗口控制、内置编辑器或自动下载安装界面。体积结论只覆盖这里实现的同步宿主。
 - 请求最多 256 KiB，最终结果最多 64 KiB。结果限制在引擎序列化之后检查，不是统一的峰值内存限制。
 - Boa 配置循环迭代和递归限制，没有宿主墙钟超时和堆内存上限；QuickJS 配置 32 MiB 引擎内存、512 KiB 栈和约 2 秒 JS 时间配额（不计宿主 API 的同步等待）。内存限制不包含 Rust 宿主，均不宣称安全沙盒。
 - 正式插件应通过外层进程监测实现统一超时和取消，并沿用 `ActionCall` / `ActionRuntime`，再按业务需要增加能力。无需先替换现有 Node 动作。

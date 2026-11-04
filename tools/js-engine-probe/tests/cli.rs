@@ -38,6 +38,41 @@ fn invoke(request: Value) -> (bool, Value) {
 }
 
 #[test]
+fn installation_metadata_is_bounded_and_does_not_wait_for_action_input() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_omnitrigger-js-probe"))
+        .arg("--describe-runtime")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // 保持 stdin 打开：能力描述必须在没有动作输入、也没有 EOF 时直接结束。
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("宿主能力描述等待了动作输入");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.len() < 4096);
+    let metadata: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(metadata["product"], "omnitrigger-script-host");
+    assert_eq!(metadata["protocol_schema"], 1);
+    assert_eq!(metadata["api_version"], 1);
+    assert_eq!(
+        metadata["engine"],
+        if cfg!(feature = "quickjs") {
+            "quickjs"
+        } else {
+            "boa"
+        }
+    );
+}
+
+#[test]
 fn parameters_and_modern_javascript_round_trip() {
     let (ok, response) = invoke(json!({
         "script": "const {items, text} = ctx.input; return {sum: items.map(x => x * 2).reduce((a,b) => a+b, 0), text, big: String(42n), optional: ctx.input.absent?.x ?? '默认'};",

@@ -6,7 +6,6 @@ use crate::{
 use gpui::{div, prelude::*, px, FontWeight};
 use omnitrigger_actions::{
     ActionCall, ActionOutcome, ActionService, NodeRuntime, PackageCatalog, RuntimeRegistry,
-    ScriptHostRuntime,
 };
 use std::{
     io::{Read, Write},
@@ -35,28 +34,22 @@ fn node_program() -> Option<PathBuf> {
 pub fn service(config: &Path) -> ActionService {
     let mut catalog = PackageCatalog::load(&root(config));
     let mut runtimes = RuntimeRegistry::new();
-    let host = std::env::var_os("OMNITRIGGER_SCRIPT_HOST")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::absolute(config)
-                .unwrap_or_else(|_| config.to_path_buf())
-                .with_file_name("runtimes")
-                .join("script")
-                .join(if cfg!(windows) { "host.exe" } else { "host" })
-        });
-    if host.is_absolute() && host.is_file() {
-        if let Err(error) = runtimes.register("script", Arc::new(ScriptHostRuntime::new(host))) {
-            catalog.diagnostics.push(error.to_string());
-        }
-    } else if catalog
+    let needs_script = catalog
         .actions
         .iter()
-        .any(|action| action.definition.runtime == "script")
-    {
-        catalog.diagnostics.push(
-            "轻量脚本宿主未安装；开发时可用 OMNITRIGGER_SCRIPT_HOST 指定本机构建的完整路径。"
+        .any(|action| action.definition.runtime == "script");
+    match crate::script_runtime::locate(config) {
+        Ok(Some(host)) => {
+            if let Err(error) = runtimes.register("script", Arc::new(host.runtime())) {
+                catalog.diagnostics.push(error.to_string());
+            }
+        }
+        Ok(None) if needs_script => catalog.diagnostics.push(
+            "轻量脚本宿主未安装；开发时可用本机包安装接口或 OMNITRIGGER_SCRIPT_HOST 指定完整路径。"
                 .into(),
-        );
+        ),
+        Err(error) if needs_script => catalog.diagnostics.push(error),
+        _ => {}
     }
     if let Some(program) = node_program() {
         let runtime = NodeRuntime::new(program).with_browser_connector(
@@ -94,6 +87,9 @@ pub fn submit(
 
 /// 校验与运行共用服务；读清单不会导入 JS，也不安装 Hook。
 pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
+    let install = arguments
+        .iter()
+        .position(|arg| arg == "--install-script-runtime");
     let check = arguments.iter().position(|arg| arg == "--check-action");
     let run = arguments.iter().position(|arg| arg == "--run-action");
     let create = arguments
@@ -107,6 +103,7 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
     let index = check
         .or(run)
         .or(create)
+        .or(install)
         .or(list)
         .or(explicit_target)
         .or_else(|| {
@@ -121,6 +118,17 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
                 "effect_state":"not_started"}})
             .to_string()
         })?;
+        if let Some(index) = install {
+            let hash = arguments
+                .iter()
+                .position(|arg| arg == "--sha256")
+                .expect("validated");
+            return crate::script_runtime::install_archive(
+                &settings::path(), Path::new(&arguments[index + 1]), &arguments[hash + 1],
+            ).map(|value| value.to_string()).map_err(|message| {
+                serde_json::json!({"status":"failed","error":{"code":"runtime_install_failed","message":message}}).to_string()
+            });
+        }
         if let Some(index) = create {
             let project = omnitrigger_actions::project::create_script_project(
                 &root(&settings::path()),
