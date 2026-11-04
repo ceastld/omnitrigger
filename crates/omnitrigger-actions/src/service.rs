@@ -14,6 +14,23 @@ use std::{
 
 pub const CAPACITY: usize = 4;
 
+/// 只读的动作包目录；引用检查不执行脚本，也不证明业务参数或本机能力可用。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActionCatalogSnapshot {
+    pub schema_version: u32,
+    pub actions: Vec<ActionCatalogDescription>,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ActionCatalogDescription {
+    pub call: ActionCall,
+    pub package_name: String,
+    pub title: String,
+    pub runtime: String,
+    pub reference_error: Option<ActionError>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvocationContext {
     pub invocation_id: u64,
@@ -152,6 +169,34 @@ impl ActionService {
 
     pub fn catalog(&self) -> &PackageCatalog {
         &self.catalog
+    }
+
+    pub fn describe_catalog(&self) -> ActionCatalogSnapshot {
+        ActionCatalogSnapshot {
+            schema_version: 1,
+            actions: self
+                .catalog
+                .actions
+                .iter()
+                .map(|entry| {
+                    let call = ActionCall {
+                        package_id: entry.package_id.clone(),
+                        action_id: entry.definition.id.clone(),
+                        action_version: entry.definition.version,
+                        input: serde_json::json!({}),
+                    };
+                    let reference_error = self.validate(&call).err();
+                    ActionCatalogDescription {
+                        call,
+                        package_name: entry.package_name.clone(),
+                        title: entry.definition.title.clone(),
+                        runtime: entry.definition.runtime.clone(),
+                        reference_error,
+                    }
+                })
+                .collect(),
+            diagnostics: self.catalog.diagnostics.clone(),
+        }
     }
 
     pub fn validate(&self, call: &ActionCall) -> Result<(), ActionError> {
@@ -473,6 +518,56 @@ mod tests {
             "runtime_unavailable"
         );
         assert!(!service.is_running(1));
+    }
+
+    #[test]
+    fn catalog_description_is_a_serializable_snapshot_without_execution() {
+        struct NeverExecute;
+        impl ActionRuntime for NeverExecute {
+            fn execute(
+                &self,
+                _: &ResolvedAction,
+                _: &InvocationContext,
+                _: &CancellationToken,
+            ) -> Result<Value, ActionError> {
+                panic!("目录描述不能执行动作")
+            }
+        }
+        let fixture = Fixture::new();
+        fixture.package("installed", "example", "test");
+        fixture.package("future", "future", "missing-runtime");
+        let mut registry = RuntimeRegistry::new();
+        registry.register("test", Arc::new(NeverExecute)).unwrap();
+        let mut catalog = PackageCatalog::load(&fixture.0);
+        catalog.diagnostics.push("诊断原样保留".into());
+        let service = ActionService::new(catalog, registry);
+        drop(fixture); // 描述使用已加载快照，不重新读目录、脚本或用户配置。
+        let snapshot = service.describe_catalog();
+        assert_eq!(snapshot.schema_version, 1);
+        assert_eq!(snapshot.actions.len(), 2);
+        let installed = snapshot
+            .actions
+            .iter()
+            .find(|x| x.call.package_id == "example")
+            .unwrap();
+        assert_eq!(installed.call, Fixture::call());
+        assert!(installed.reference_error.is_none());
+        let future = snapshot
+            .actions
+            .iter()
+            .find(|x| x.call.package_id == "future")
+            .unwrap();
+        assert_eq!(
+            future.reference_error.as_ref().unwrap().code,
+            "runtime_unavailable"
+        );
+        assert_eq!(snapshot.diagnostics.last().unwrap(), "诊断原样保留");
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ActionCatalogSnapshot>(&json).unwrap(),
+            snapshot
+        );
+        assert!(matches!(service.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[test]

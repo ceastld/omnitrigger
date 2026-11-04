@@ -10,10 +10,19 @@ pub fn validate_cli(arguments: &[String]) -> Result<(), String> {
         let flag = arguments[index].as_str();
         if !matches!(
             flag,
-            "--config" | "--check-action" | "--run-action" | "--target-context"
+            "--config"
+                | "--check-action"
+                | "--run-action"
+                | "--target-context"
+                | "--list-package-actions"
+                | "--stream-action-events"
         ) || !seen.insert(flag)
         {
             return Err(format!("动作命令含未知或重复参数：{flag}"));
+        }
+        if matches!(flag, "--list-package-actions" | "--stream-action-events") {
+            index += 1;
+            continue;
         }
         if arguments
             .get(index + 1)
@@ -23,8 +32,19 @@ pub fn validate_cli(arguments: &[String]) -> Result<(), String> {
         }
         index += 2;
     }
-    if seen.contains("--check-action") == seen.contains("--run-action") {
-        return Err("需要且只能指定一次 --check-action 或 --run-action。".into());
+    let commands = ["--check-action", "--run-action", "--list-package-actions"]
+        .iter()
+        .filter(|flag| seen.contains(**flag))
+        .count();
+    if commands != 1 {
+        return Err(
+            "需要且只能指定一次 --check-action、--run-action 或 --list-package-actions。".into(),
+        );
+    }
+    if (seen.contains("--target-context") || seen.contains("--stream-action-events"))
+        && !seen.contains("--run-action")
+    {
+        return Err("目标上下文和事件流只能用于 --run-action。".into());
     }
     Ok(())
 }
@@ -225,6 +245,39 @@ mod tests {
             "t.json".into()
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn package_catalog_and_event_stream_have_unambiguous_cli_modes() {
+        for args in [
+            vec!["app.exe", "--list-package-actions"],
+            vec!["--config", "owned.json", "--list-package-actions"],
+            vec![
+                "--run-action",
+                "call.json",
+                "--stream-action-events",
+                "--target-context",
+                "target.json",
+            ],
+        ] {
+            assert!(validate_cli(&args.iter().map(|x| x.to_string()).collect::<Vec<_>>()).is_ok());
+        }
+        for args in [
+            vec!["--stream-action-events"],
+            vec!["--list-package-actions", "extra"],
+            vec!["--list-package-actions", "--list-package-actions"],
+            vec!["--list-package-actions", "--run-action", "call.json"],
+            vec!["--list-package-actions", "--target-context", "target.json"],
+            vec!["--check-action", "call.json", "--stream-action-events"],
+            vec![
+                "--run-action",
+                "call.json",
+                "--stream-action-events",
+                "--stream-action-events",
+            ],
+        ] {
+            assert!(validate_cli(&args.iter().map(|x| x.to_string()).collect::<Vec<_>>()).is_err());
+        }
     }
 
     #[test]

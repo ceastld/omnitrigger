@@ -10,6 +10,6 @@ pub use model::{ActionCall, ActionDefinition, ActionError, PackageManifest};
 pub use native::NativeHost;
 pub use node::NodeRuntime;
 pub use service::{
-    ActionEvent, ActionOutcome, ActionRuntime, ActionService, CancellationToken, InvocationContext,
-    RuntimeRegistry,
+    ActionCatalogDescription, ActionCatalogSnapshot, ActionEvent, ActionOutcome, ActionRuntime,
+    ActionService, CancellationToken, InvocationContext, RuntimeRegistry,
 };

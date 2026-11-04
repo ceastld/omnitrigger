@@ -8,7 +8,7 @@ use omnitrigger_actions::{
     ActionCall, ActionOutcome, ActionService, NodeRuntime, PackageCatalog, RuntimeRegistry,
 };
 use std::{
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -65,8 +65,16 @@ pub fn submit(
 pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
     let check = arguments.iter().position(|arg| arg == "--check-action");
     let run = arguments.iter().position(|arg| arg == "--run-action");
+    let list = arguments
+        .iter()
+        .position(|arg| arg == "--list-package-actions");
+    let stream = arguments.iter().any(|arg| arg == "--stream-action-events");
     let explicit_target = arguments.iter().position(|arg| arg == "--target-context");
-    let index = check.or(run).or(explicit_target)?;
+    let index = check.or(run).or(list).or(explicit_target).or_else(|| {
+        arguments
+            .iter()
+            .position(|arg| arg == "--stream-action-events")
+    })?;
     Some((|| {
         crate::action_target_context::validate_cli(arguments).map_err(|message| {
             serde_json::json!({
@@ -74,6 +82,28 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
                 "effect_state":"not_started"}})
             .to_string()
         })?;
+        let rejected = |mut error: omnitrigger_actions::ActionError| {
+            error.effect_state = Some("not_started".into());
+            serde_json::json!({"status":"rejected","error":error}).to_string()
+        };
+        let request_error = |message| {
+            rejected(omnitrigger_actions::ActionError::new(
+                "invalid_action_request",
+                message,
+            ))
+        };
+        if list.is_some() {
+            let snapshot = service(&settings::path()).describe_catalog();
+            let output = serde_json::to_string(&snapshot)
+                .map_err(|error| request_error(error.to_string()))?;
+            if output.len() > 4 * 1024 * 1024 {
+                return Err(rejected(omnitrigger_actions::ActionError::new(
+                    "catalog_too_large",
+                    "动作包目录输出超过 4 MiB，未返回部分目录。",
+                )));
+            }
+            return Ok(output);
+        }
         let target_error = |message: String| {
             serde_json::json!({"status":"rejected","error":{
                 "code":"invalid_target_context","message":message,"effect_state":"not_started"
@@ -84,18 +114,18 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
         let path = arguments
             .get(index + 1)
             .filter(|path| !path.starts_with("--"))
-            .ok_or("动作命令后需要 ActionCall JSON 文件路径。")?;
+            .ok_or_else(|| request_error("动作命令后需要 ActionCall JSON 文件路径。".into()))?;
         let mut bytes = Vec::new();
         std::fs::File::open(path)
-            .map_err(|error| format!("读取动作调用失败：{error}"))?
+            .map_err(|error| request_error(format!("读取动作调用失败：{error}")))?
             .take(128 * 1024 + 1)
             .read_to_end(&mut bytes)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| request_error(error.to_string()))?;
         if bytes.len() > 128 * 1024 {
-            return Err("动作调用文件不能超过 128 KiB。".into());
+            return Err(request_error("动作调用文件不能超过 128 KiB。".into()));
         }
-        let call: ActionCall =
-            serde_json::from_slice(&bytes).map_err(|error| format!("动作调用格式有误：{error}"))?;
+        let call: ActionCall = serde_json::from_slice(&bytes)
+            .map_err(|error| request_error(format!("动作调用格式有误：{error}")))?;
         let explicit_host = target_path
             .map(|path| {
                 let snapshot = crate::action_target_context::read(path)?;
@@ -105,7 +135,7 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
             .transpose()
             .map_err(target_error)?;
         let service = service(&settings::path());
-        service.validate(&call).map_err(|error| error.to_string())?;
+        service.validate(&call).map_err(rejected)?;
         if check.is_some() {
             return Ok(serde_json::json!({"valid":true,"call":call}).to_string());
         }
@@ -113,17 +143,22 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
             Some(host) => service.submit_with_host(0, call, Some(Arc::new(host))),
             None => submit(&service, 0, call, None),
         }
-        .map_err(|error| error.to_string())?;
+        .map_err(rejected)?;
         loop {
             match service.try_recv() {
                 Ok(event) => match event.outcome {
-                    ActionOutcome::Started => {},
+                    ActionOutcome::Started => {
+                        if stream {
+                            println!("{}", serde_json::json!({"schema_version":1,"invocation_id":invocation_id,"status":"started"}));
+                            std::io::stdout().flush().map_err(|error| serde_json::json!({"status":"failed","error":{"code":"event_stream_closed","message":error.to_string(),"effect_state":"unknown"}}).to_string())?;
+                        }
+                    },
                     ActionOutcome::Succeeded { output } => return Ok(serde_json::json!({"invocation_id":invocation_id,"status":"succeeded","output":output}).to_string()),
                     ActionOutcome::Failed { error } => return Err(serde_json::json!({"invocation_id":invocation_id,"status":"failed","error":error}).to_string()),
-                    ActionOutcome::Cancelled => return Err(serde_json::json!({"invocation_id":invocation_id,"status":"cancelled"}).to_string()),
+                    ActionOutcome::Cancelled => return Err(serde_json::json!({"invocation_id":invocation_id,"status":"cancelled","error":{"code":"cancelled","message":"动作已取消。","effect_state":"unknown"}}).to_string()),
                 },
                 Err(std::sync::mpsc::TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(20)),
-                Err(error) => return Err(format!("动作服务连接中断：{error}")),
+                Err(error) => return Err(serde_json::json!({"invocation_id":invocation_id,"status":"failed","error":{"code":"action_channel_closed","message":format!("动作服务连接中断：{error}"),"effect_state":"unknown"}}).to_string()),
             }
         }
     })())

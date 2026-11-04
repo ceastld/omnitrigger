@@ -252,6 +252,19 @@ export default async ctx => {
 
 `--check-action` 只读检查，不执行 JS，不安装 Hook。`--run-action` 真实执行并返回结构化结果，也不安装 Hook。运行时或包不可用、版本不兼容、调用忙碌、进程启动失败和脚本运行失败均报告错误，不自动重试。
 
+### 外部宿主的目录与事件
+
+`--list-package-actions` 输出一个 JSON 对象：`schema_version: 1`、`actions` 和 `diagnostics`。每项包含完整 `call`（默认 `input: {}`）、`package_name`、`title`、`runtime`、可空的 `reference_error`。目录只包含已安装动作包；不枚举原生动作或个人绑定，不导入 JS。引用检查通过只说明包和运行时可解析，不保证业务成功或输入满足脚本要求。输出超过 4 MiB 时整体拒绝，不返回部分目录。
+
+```powershell
+omnitrigger.exe --config D:\Demo\bindings.json --list-package-actions
+omnitrigger.exe --config D:\Demo\bindings.json --run-action D:\Demo\call.json --stream-action-events
+```
+
+事件模式在 stdout 先输出一行 `{"schema_version":1,"invocation_id":1,"status":"started"}`，随后输出成功终态 JSON。`started` 表示服务开始处理这次调用；它不证明 JS 已执行或业务成功。调用 ID 仅在本次进程内有效。失败终态写入 stderr，退出码为 1；执行前拒绝不会输出 started。宿主必须同时读取两个流、核对开始与终态的调用 ID，并等待进程实际退出；成功终态与退出码 0 才组成成功结果。未指定事件参数时保留单终态输出。
+
+`--stream-action-events` 只能与 `--run-action` 合用，可同时传递明确的 `--target-context`。检查、运行和列目录三种命令互斥。外部宿主取消时应收尾自己启动的调用进程；进程退出不能撤销脚本已产生的副作用，失败或缺失回执不能自动重试。
+
 仓库提供可直接复制的[顺序运行程序示例包](../examples/actions/process-sequence/)，其包 ID 为 `examples.process-sequence`，动作 ID 为 `run`，同时提供[完整绑定配置](../examples/action-packages.json)和[独立调用文件](../examples/actions/process-sequence/call.json)。从仓库根目录可以直接检查并运行两个无文件写入的 Node 步骤；需要 `node` 位于 `PATH`：
 
 ```powershell
