@@ -69,6 +69,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check-wheel-input-cli.mjs target/debug/omnitrigger.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-single-instance.mjs target/debug/omnitrigger.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustfmt --edition=2024 --check tools/script-sdk-check/file-open-probe.rs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustc --edition=2024 --crate-name omnitrigger_file_open_probe tools/script-sdk-check/file-open-probe.rs -o .tmp/file-open-probe.exe
@@ -118,6 +120,11 @@ jobs:
       - name: 安装 Rust 工具链
         run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
 
+      - name: 安装真实脚本验收使用的 Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
       - name: 缓存实验构建
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -142,6 +149,7 @@ jobs:
 
       - name: 验证轻量引擎接入动作服务
         run: |
+          $env:OMNITRIGGER_TEST_NODE = (Get-Command node).Source
           foreach ($engine in @('boa', 'quickjs')) {
             $env:OMNITRIGGER_TEST_SCRIPT_HOST = Join-Path $PWD "results/$engine-small.exe"
             cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --tests -- --ignored --test-threads=1

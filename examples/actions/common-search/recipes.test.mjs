@@ -5,6 +5,29 @@ import {runInNewContext} from 'node:vm';
 import test from 'node:test';
 
 const script = readFileSync(new URL('search.js', import.meta.url), 'utf8');
+
+test('两个脚本动作通过清单启用单实例，既有调用信封仍引用原动作契约', () => {
+    const manifest = JSON.parse(readFileSync(new URL('action.json', import.meta.url), 'utf8'));
+    assert.equal(manifest.schema_version, 1);
+    assert.equal(manifest.id, 'examples.common-search');
+    for (const [id, entry] of [['web-search', 'search.js'], ['open-or-search', 'open-or-search.js']]) {
+        const action = manifest.actions.find(item => item.id === id);
+        assert.ok(action, `清单缺少 ${id}`);
+        assert.equal(action.single_instance, true, `${id} 必须由 ActionService 执行单实例策略`);
+        assert.equal(action.runtime, 'script');
+        assert.equal(action.entry, entry);
+        assert.equal(action.version, 1);
+    }
+    for (const name of ['call.json', 'text-call.json', 'open-or-search-call.json', 'open-file-call.json']) {
+        const call = JSON.parse(readFileSync(new URL(name, import.meta.url), 'utf8'));
+        const action = manifest.actions.find(item => item.id === call.action_id);
+        assert.ok(action, `${name} 必须指向清单中的动作`);
+        assert.equal(call.package_id, manifest.id);
+        assert.equal(call.action_version, action.version);
+        assert.equal(Object.hasOwn(call.input, 'single_instance'), false, '单实例属于清单，不属于调用输入');
+    }
+});
+
 function run(input, selected = 'a & 中\n文', failureAt = '') {
     const calls = [];
     const fault = Object.assign(new Error('宿主失败'), {code: 'target_changed', effectState: 'not_started'});

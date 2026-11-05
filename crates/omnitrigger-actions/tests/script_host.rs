@@ -52,6 +52,7 @@ impl Fixture {
                 version: 1,
                 runtime: "script".into(),
                 entry: "main.js".into(),
+                single_instance: false,
             },
         }
     }

@@ -1268,6 +1268,7 @@ mod tests {
                         version: 1,
                         runtime: "node".into(),
                         entry: "main.mjs".into(),
+                        single_instance: false,
                     },
                     package_root: root,
                     entry_path,

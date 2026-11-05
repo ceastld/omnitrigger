@@ -135,7 +135,8 @@ OmniTrigger/
       "title": "运行两个步骤",
       "version": 1,
       "runtime": "node",
-      "entry": "main.mjs"
+      "entry": "main.mjs",
+      "single_instance": true
     }
   ]
 }
@@ -175,6 +176,16 @@ export default async function (ctx) {
 `run` 等待进程退出并取得输出；`start` 只确认进程已创建，返回 `{ pid }`，不确认窗口已显示或文档已打开。通过 `start` 成功启动的独立程序不会随本次动作结束或取消而关闭。
 
 程序路径和参数数组分开传递，不按空格拆分，不隐式调用 Shell。需要运行 PowerShell 等解释器时，显式将解释器路径作为程序，把脚本路径和其他参数分别放入数组。
+
+### 动作级单实例
+
+动作定义可设置 `single_instance: true`，同一 `ActionService` 中相同 `package_id` 与 `action_id` 的调用不能重叠执行，即使它们来自不同绑定、传入不同参数、使用不同契约版本或运行时。不同包或动作分别判断；该策略同时适用于 `node` 和 `script`。省略或设置 `false` 保留原行为；新建脚本工程也默认关闭，由作者编辑 `action.json` 后重新加载。值只能是 JSON 布尔值，`null`、字符串、数值或其他类型会使清单无效。动作包 `schema_version` 仍为 1，绑定及 `ActionCall` 不增加字段。
+
+同一动作已有活跃调用时，只要已有调用或新调用中任一个启用单实例，新调用就返回 `action_busy`、`effect_state: "not_started"`。因此重载清单开启或关闭策略，不会绕过已经运行的调用；两边都关闭时仍遵守原有绑定与总配额限制。重复同一绑定时优先保留原来的 `binding_busy`。拒绝不会执行入口，也不排队、替换、取消旧调用或自动重试。
+
+单实例占用在运行时返回、工作线程持有的运行时与宿主引用清理完成后释放，不必等界面读取终态；请求取消本身不会提前释放。原绑定占用和最多 4 次未完成或终态未读取调用的配额仍沿用原协议，所以单实例已经释放，也可能因绑定或总配额尚未释放而被拒绝。
+
+单实例只覆盖同一个动作服务，不是跨服务或跨进程的全局锁。分别启动的命令行进程拥有各自服务，不能靠此字段防止它们重叠；通过 `ctx.process.start` 启动的独立程序也不属于运行时结束后的动作占用。
 
 ## 输入与 JS API
 
@@ -395,7 +406,7 @@ export default async ctx => {
 
 ### 外部宿主的目录与事件
 
-`--list-package-actions` 输出一个 JSON 对象：`schema_version: 1`、`actions` 和 `diagnostics`。每项包含完整 `call`（默认 `input: {}`）、`package_name`、`title`、`runtime`、可空的 `reference_error`。目录只包含已安装动作包；不枚举原生动作或个人绑定，不导入 JS。引用检查通过只说明包和运行时可解析，不保证业务成功或输入满足脚本要求。输出超过 4 MiB 时整体拒绝，不返回部分目录。
+`--list-package-actions` 输出一个 JSON 对象：`schema_version: 1`、`actions` 和 `diagnostics`。每项包含完整 `call`（默认 `input: {}`）、`package_name`、`title`、`runtime`、可空的 `reference_error`，以及可选的 `single_instance`；启用时为 `true`，默认 `false` 省略以保留旧目录格式。该策略属于动作定义，不写入 `call`。目录只包含已安装动作包；不枚举原生动作或个人绑定，不导入 JS。引用检查通过只说明包和运行时可解析，不保证业务成功或输入满足脚本要求；目录也不是动作当前是否忙碌的快照。输出超过 4 MiB 时整体拒绝，不返回部分目录。
 
 ```powershell
 omnitrigger.exe --config D:\Demo\bindings.json --list-package-actions
@@ -432,7 +443,7 @@ omnitrigger.exe --config D:\Demo\bindings.json --run-action D:\Demo\call.json --
 
 ## 执行与权限边界
 
-通用动作服务最多接纳 4 次未完成或终态未读取的调用；同一绑定不重叠执行。每次调用获得独立 ID，终态区分成功、失败和取消。工作线程异常转为失败，不把异常当作成功继续执行。动作编辑区的“停止此动作”请求取消；Node 先通知 `ctx.signal`，协作取消会请求终止 `ctx.process.run` 启动的直接子进程，宽限后强制停止仅作用于 Node 宿主。脚本占满 CPU、阻塞事件循环或自行通过原生 API 创建进程时，不能保证子进程全部结束；不提供完整进程树收尾保证。`ctx.process.start` 已成功启动的独立程序始终不随动作取消关闭。取消和超时不能撤销已经发生的文件修改或其他副作用。
+通用动作服务最多接纳 4 次未完成或终态未读取的调用；同一绑定不重叠执行。启用 `single_instance` 的动作还会按上文的动作身份拒绝跨绑定重叠。每次调用获得独立 ID，终态区分成功、失败和取消。工作线程异常转为失败，不把异常当作成功继续执行。动作编辑区的“停止此动作”请求取消；Node 先通知 `ctx.signal`，协作取消会请求终止 `ctx.process.run` 启动的直接子进程，宽限后强制停止仅作用于 Node 宿主。脚本占满 CPU、阻塞事件循环或自行通过原生 API 创建进程时，不能保证子进程全部结束；不提供完整进程树收尾保证。`ctx.process.start` 已成功启动的独立程序始终不随动作取消关闭。取消和超时不能撤销已经发生的文件修改或其他副作用。
 
 JS 宿主必须返回匹配协议版本和调用 ID 的有效结果；仅有进程退出码 0 不算动作成功。成功结果表示脚本完成其声明的逻辑，外部程序的业务是否真正完成仍由动作自行验证。单次调用上限为 60 秒；每个子程序的标准输出和标准错误合计最多 64 KiB，最终 JSON 回执最多 64 KiB。宿主不保留 `console` 日志；需要带回的信息应通过 `return` 返回，界面提供有界结果预览，完整 JSON 结果可从命令行读取。协议使用独立临时响应文件，与日志输出分开，运行后清理临时目录。
 

@@ -204,11 +204,13 @@ test('通用调用清单及旧动作契约保持明确，新增轻量入口参�
     const manifest = JSON.parse(readFileSync(new URL('action.json', import.meta.url), 'utf8'));
     assert.deepEqual(manifest.actions.find(action => action.id === 'web-search'), {
         id: 'web-search', title: '搜索选中文本或明确文本', version: 1, runtime: 'script', entry: 'search.js',
+        single_instance: true,
     });
     const action = manifest.actions.find(action => action.id === 'open-or-search');
     assert.equal(action.runtime, 'script');
     assert.equal(action.version, 1);
     assert.equal(action.entry, 'open-or-search.js');
+    assert.equal(action.single_instance, true);
     for (const filename of ['open-or-search-call.json', 'open-file-call.json']) {
         const call = JSON.parse(readFileSync(new URL(filename, import.meta.url), 'utf8'));
         assert.equal(call.package_id, manifest.id);

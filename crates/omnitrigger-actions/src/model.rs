@@ -65,6 +65,9 @@ pub struct ActionDefinition {
     pub version: u32,
     pub runtime: String,
     pub entry: String,
+    /// 同一ActionService中按包和动作标识禁止重叠执行；不影响终态读取配额。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub single_instance: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -114,6 +117,31 @@ pub(crate) fn valid_id(value: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn optional_single_instance_preserves_schema_one_and_rejects_non_boolean_values() {
+        let original = json!({
+            "schema_version":1,"id":"example","name":"示例","version":"1.0.0",
+            "actions":[{"id":"run","title":"运行","version":1,"runtime":"test","entry":"main.js"}]
+        });
+        let manifest: PackageManifest = serde_json::from_value(original.clone()).unwrap();
+        assert!(!manifest.actions[0].single_instance);
+        assert_eq!(serde_json::to_value(&manifest).unwrap(), original);
+        let mut enabled = original.clone();
+        enabled["actions"][0]["single_instance"] = true.into();
+        let manifest: PackageManifest = serde_json::from_value(enabled.clone()).unwrap();
+        assert!(manifest.actions[0].single_instance);
+        assert_eq!(serde_json::to_value(&manifest).unwrap(), enabled);
+        for invalid in [json!(null), json!(0), json!("true"), json!([]), json!({})] {
+            let mut value = original.clone();
+            value["actions"][0]["single_instance"] = invalid;
+            assert!(serde_json::from_value::<PackageManifest>(value).is_err());
+        }
+        let mut disabled = original.clone();
+        disabled["actions"][0]["single_instance"] = false.into();
+        let manifest: PackageManifest = serde_json::from_value(disabled).unwrap();
+        assert_eq!(serde_json::to_value(manifest).unwrap(), original);
+    }
 
     #[test]
     fn references_remain_valid_without_an_installed_provider() {

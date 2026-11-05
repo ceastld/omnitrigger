@@ -92,6 +92,20 @@ pub fn submit(
     )
 }
 
+/// 外部目录原样保留共享模型的可选策略字段，不读取绑定或执行动作入口。
+fn catalog_json(service: &ActionService) -> Result<String, omnitrigger_actions::ActionError> {
+    let output = serde_json::to_string(&service.describe_catalog()).map_err(|error| {
+        omnitrigger_actions::ActionError::new("invalid_action_request", error.to_string())
+    })?;
+    if output.len() > 4 * 1024 * 1024 {
+        return Err(omnitrigger_actions::ActionError::new(
+            "catalog_too_large",
+            "动作包目录输出超过 4 MiB，未返回部分目录。",
+        ));
+    }
+    Ok(output)
+}
+
 /// 校验与运行共用服务；读清单不会导入 JS，也不安装 Hook。
 pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
     let install = arguments
@@ -163,16 +177,7 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
             ))
         };
         if list.is_some() {
-            let snapshot = service(&settings::path()).describe_catalog();
-            let output = serde_json::to_string(&snapshot)
-                .map_err(|error| request_error(error.to_string()))?;
-            if output.len() > 4 * 1024 * 1024 {
-                return Err(rejected(omnitrigger_actions::ActionError::new(
-                    "catalog_too_large",
-                    "动作包目录输出超过 4 MiB，未返回部分目录。",
-                )));
-            }
-            return Ok(output);
+            return catalog_json(&service(&settings::path())).map_err(rejected);
         }
         let target_error = |message: String| {
             serde_json::json!({"status":"rejected","error":{
@@ -542,5 +547,222 @@ impl Workspace {
             self.record_action_status(event.id, message);
         }
         changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omnitrigger_actions::{
+        ActionError, ActionRuntime, CancellationToken, InvocationContext, ResolvedAction,
+    };
+    use serde_json::{json, Value};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct NeverExecute;
+    impl ActionRuntime for NeverExecute {
+        fn execute(
+            &self,
+            _: &ResolvedAction,
+            _: &InvocationContext,
+            _: &CancellationToken,
+        ) -> Result<Value, ActionError> {
+            panic!("动作目录和引用校验不能执行入口")
+        }
+    }
+
+    struct Fixture {
+        directory: PathBuf,
+        config: PathBuf,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(1);
+            let directory = loop {
+                let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+                    ".single-instance-app-test-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                match std::fs::create_dir(&directory) {
+                    Ok(()) => break directory,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("无法创建本测试临时目录：{error}"),
+                }
+            };
+            let fixture = Self {
+                config: directory.join("bindings.json"),
+                directory,
+            };
+            std::fs::create_dir(root(&fixture.config)).unwrap();
+            fixture
+        }
+
+        fn package(&self, policy: Option<Value>) -> ActionCall {
+            let directory = root(&self.config).join("app-policy-test");
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(
+                directory.join("main.js"),
+                b"throw new Error('must not execute');",
+            )
+            .unwrap();
+            let mut manifest = json!({"schema_version":1,"id":"app-policy-test","name":"目录策略测试","version":"1.0.0","actions":[{"id":"run","title":"只读校验","version":1,"runtime":"app-test","entry":"main.js"}]});
+            if let Some(policy) = policy {
+                manifest["actions"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("single_instance".into(), policy);
+            }
+            std::fs::write(
+                directory.join("action.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            ActionCall {
+                package_id: "app-policy-test".into(),
+                action_id: "run".into(),
+                action_version: 1,
+                input: json!({}),
+            }
+        }
+
+        fn service(&self, runtime: &str) -> ActionService {
+            let catalog = PackageCatalog::load(&root(&self.config));
+            let mut runtimes = RuntimeRegistry::new();
+            runtimes.register(runtime, Arc::new(NeverExecute)).unwrap();
+            ActionService::new(catalog, runtimes)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            // 仅清理本测试已知文件与空目录，不递归清理或跟随链接。
+            let actions = root(&self.config);
+            for file in [
+                "app-policy-test/main.js",
+                "app-policy-test/action.json",
+                "generated-script/action.json",
+                "generated-script/main.mjs",
+                "generated-script/lib/text.js",
+                "generated-script/call.json",
+                "generated-script/jsconfig.json",
+                "generated-script/README.md",
+                "generated-script/sdk/api.d.ts",
+            ] {
+                let _ = std::fs::remove_file(actions.join(file));
+            }
+            for directory in [
+                "app-policy-test",
+                "generated-script/lib",
+                "generated-script/sdk",
+                "generated-script",
+            ] {
+                let _ = std::fs::remove_dir(actions.join(directory));
+            }
+            let _ = std::fs::remove_dir(actions);
+            let _ = std::fs::remove_dir(&self.directory);
+        }
+    }
+
+    #[test]
+    fn action_catalog_and_validation_preserve_optional_single_instance_without_execution() {
+        for policy in [None, Some(json!(false)), Some(json!(true))] {
+            let expected = policy == Some(json!(true));
+            let fixture = Fixture::new();
+            let call = fixture.package(policy);
+            let service = fixture.service("app-test");
+            assert!(service.catalog().diagnostics.is_empty());
+            assert_eq!(
+                service
+                    .catalog()
+                    .resolve(&call)
+                    .unwrap()
+                    .definition
+                    .single_instance,
+                expected
+            );
+            service.validate(&call).unwrap();
+            let output: Value = serde_json::from_str(&catalog_json(&service).unwrap()).unwrap();
+            assert_eq!(output["schema_version"], 1);
+            assert_eq!(output["actions"].as_array().unwrap().len(), 1);
+            let action = &output["actions"][0];
+            assert_eq!(action["runtime"], "app-test");
+            assert!(action["reference_error"].is_null());
+            if expected {
+                assert_eq!(action["single_instance"], true);
+            } else {
+                assert!(action.get("single_instance").is_none());
+            }
+            let serialized_call = serde_json::to_value(&call).unwrap();
+            assert_eq!(action["call"], serialized_call);
+            assert_eq!(serialized_call.as_object().unwrap().len(), 4);
+            assert!(serialized_call.get("single_instance").is_none());
+        }
+    }
+
+    #[test]
+    fn invalid_single_instance_types_do_not_enter_the_app_catalog_or_validate() {
+        for policy in [
+            json!(null),
+            json!("true"),
+            json!("false"),
+            json!(0),
+            json!(1),
+            json!([]),
+            json!({}),
+        ] {
+            let fixture = Fixture::new();
+            let call = fixture.package(Some(policy));
+            let service = fixture.service("app-test");
+            assert!(service.catalog().actions.is_empty());
+            assert!(!service.catalog().diagnostics.is_empty());
+            assert!(service.validate(&call).is_err());
+            let output: Value = serde_json::from_str(&catalog_json(&service).unwrap()).unwrap();
+            assert!(output["actions"].as_array().unwrap().is_empty());
+            assert!(!output["diagnostics"].as_array().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn generated_script_keeps_legacy_default_and_accepts_author_enabled_single_instance() {
+        let fixture = Fixture::new();
+        fixture.package(Some(json!(true)));
+        let actions = root(&fixture.config);
+        let project =
+            omnitrigger_actions::project::create_script_project(&actions, "generated-script")
+                .unwrap();
+        let manifest_path = project.package_root.join("action.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["schema_version"], 1);
+        assert!(manifest["actions"][0].get("single_instance").is_none());
+        let service = fixture.service("script");
+        assert!(
+            !service
+                .catalog()
+                .resolve(&project.call)
+                .unwrap()
+                .definition
+                .single_instance
+        );
+        service.validate(&project.call).unwrap();
+        manifest["actions"][0]["single_instance"] = json!(true);
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let service = fixture.service("script");
+        assert!(
+            service
+                .catalog()
+                .resolve(&project.call)
+                .unwrap()
+                .definition
+                .single_instance
+        );
+        service.validate(&project.call).unwrap();
+        let (_, entry) =
+            omnitrigger_actions::project::editable_script(&actions, &project.call).unwrap();
+        assert_eq!(entry.file_name().unwrap(), "main.mjs");
+        assert!(serde_json::to_value(project.call)
+            .unwrap()
+            .get("single_instance")
+            .is_none());
     }
 }

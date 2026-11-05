@@ -16,6 +16,16 @@
 node --test examples/actions/common-search/recipes.test.mjs
 ```
 
+## 单实例与调用契约
+
+包版本 `1.2.0` 在 `action.json` 中为 `web-search` 和 `open-or-search` 分别显式设置 `single_instance: true`。需要支持此清单字段的动作服务；单实例由服务调度实现，不在 JS 全局变量中加锁，也不依赖两个独立脚本宿主共享内存。
+
+同一个 `ActionService` 内，单实例身份是 `package_id + action_id`：不同绑定、输入、动作版本或运行时都不另分锁。同一动作运行期间，经其他绑定再次提交会返回 `action_busy`，`effect_state: "not_started"`，不会排队、替换、执行或自动重试；重复同一绑定时，既有 `binding_busy` 错误优先。两个不同动作分别占用自己的身份，`web-search` 和 `open-or-search` 不互锁。
+
+取消请求本身不会立即解锁；要等运行时实际结束并完成清理。正常、失败或取消结束后即可再次提交，不必先由界面读取终态；绑定占用与总配额仍按动作服务既有终态读取协议处理。清单重载也不能提前解除正在运行的单实例占用。范围限于同一个动作服务，不保证跨服务或跨进程互斥。
+
+此策略不增加调用参数：两个动作的契约版本仍为 `1`，既有 `source`、`text`、`urlTemplate`、`maxCodePoints` 和返回值保持不变。四份调用示例无需修改；若要调整策略，应编辑动作清单中的布尔字段，不能在 `input` 中加入同名字段来启用或关闭策略。动作服务不支持该字段时，不能依靠脚本自行获得单实例保证。
+
 ## 打开本地文件或搜索文本
 
 新增动作 `open-or-search`（契约版本 1，入口 `open-or-search.js`）为标准同步 JS，使用轻量宿主的 `ctx.fs.stat(path)`。需要提供该 API 的应用、SDK 和轻量宿主，旧版宿主没有此接口时返回 `fs_unavailable`，不会改为搜索文件路径。
@@ -60,7 +70,7 @@ omnitrigger.exe --run-action <open-or-search-call.json 的绝对路径>
 
 `stat` 是只读元数据快照，与后续打开不是原子事务；本动作不会声称检查后文件无法被替换。文件打开仍受 `ctx.open` 的平台校验约束。若前面已经复制选区，即使随后 `fs.stat` 返回 `effectState: "not_started"`，复制结果仍可能留在剪贴板；该字段只描述失败的那次 API，不代表整个动作没有前序效果。
 
-搜索默认最多保留 128 个 Unicode 码点，可通过 `maxCodePoints` 设置；完整文本先经过 Unicode 校验，截断不会拆开代理对。每次调用独立执行，没有跨调用的单实例约束；复制超时和重试由宿主 API 决定。动作不读取文件内容、不枚举目录、不监控剪贴板、不创建调度任务。
+搜索默认最多保留 128 个 Unicode 码点，可通过 `maxCodePoints` 设置；完整文本先经过 Unicode 校验，截断不会拆开代理对。并发调用受清单中的动作级单实例约束，复制超时和重试仍由宿主 API 决定。动作不读取文件内容、不枚举目录、不监控剪贴板、不创建调度任务。
 
 定向测试只使用内存元数据与合成选区：
 
