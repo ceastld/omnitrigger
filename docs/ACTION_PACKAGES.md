@@ -378,6 +378,12 @@ Node返回严格的 `{submitted:true}`，仅表示系统接纳打开请求，不
 
 错误包含 `method:'system.open'` 和 `effectState`。校验或提交前取消/过期为 `not_started`；进入系统调用后的失败、迟到、取消或丢失回执为 `unknown`。等待受动作总时限限制，但单次系统打开不能被强制抢占，取消不会撤销已接纳请求，`unknown`不能作为安全重试依据。
 
+### 打开独立文本历史
+
+`ctx.ui.openHistory()` 在运行中的应用内打开独立历史窗口。Node 需要 `await`，轻量脚本同步返回 `{opened:true}`。目标沿用本次动作提交时的窗口快照，不接受目标、程序路径或配置路径参数；没有可用原目标时返回 `target_unavailable`。打开示例见[文本历史动作包](../examples/actions/clipboard-history/README.md)。
+
+回执只确认窗口创建，动作结束后窗口仍然存在。窗口默认关闭采集；关闭它只停止自身采集，确认停止后才移除，不停止主窗采集或退出应用。采集停止失败时窗口保留，可再次关闭以重试。已有选择窗或历史窗时返回 `ui_busy`；无应用界面的 CLI 返回 `ui_unavailable`。提交前取消或过期为 `not_started`，创建已经开始但结果无法确认时为 `unknown`，不会自动重试。
+
 ### 本地文件元数据
 
 `ctx.fs.stat(path)` 只查询本地路径的类型，返回 `{kind:'file'|'directory'|'missing'|'other'}`，不打开文件内容或枚举目录。Node 使用 `await`；轻量脚本同步返回。它通过本机宿主工作，无需应用界面或前台窗口，可用于“存在普通文件时打开，否则搜索文本”等分支。

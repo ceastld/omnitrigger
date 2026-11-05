@@ -4,7 +4,9 @@
 
 Node 异步入口为 `manage`，轻量同步模块入口为 `manage-script`。两者共用 `workflow.mjs`，动作契约版本均为 1，各自声明 `single_instance: true`。两个不同动作 ID 不互锁；历史存储仍须负责并发与取消保护。
 
-输入必须明确选择一种模式，不接受其它参数：
+动作 `open`（Node）或 `open-script`（轻量同步）无需输入参数，通过 `ctx.ui.openHistory()` 在已有主进程打开完整独立历史页。调用文件为 [open-call.json](open-call.json) 和 [open-script-call.json](open-script-call.json)，不需要填写程序或配置路径。目标在本次动作提交时捕获，窗口打开后不会改抓前台；默认关闭采集，也不启动第二套 Hook。创建回执返回后窗口继续存活。关闭时只停止该窗自己的采集，确认停止后才移除窗口；停止失败保留窗口供重试，不退出主程序或停止主窗采集。已有选择窗或 API 历史窗时返回 `ui_busy`；无应用界面的 CLI 返回 `ui_unavailable`。回执仅确认窗口创建，取消或结果不确定时不自动重试。应用、宿主和 SDK 需支持该 API。
+
+管理入口的输入必须明确选择一种模式，不接受其它参数：
 
 - `{"mode":"append","text":"原样保存的文本"}`：显式保存输入，不读取剪贴板。允许空文本与空白，最多 65536 UTF-16 单元，无 NUL 或坏代理项。连续重复由存储返回 `inserted:false`。
 - `{"mode":"list","limit":100}`：仅查询摘要并显示选择框；选中后只返回摘要，不读取全文、不发送输入。

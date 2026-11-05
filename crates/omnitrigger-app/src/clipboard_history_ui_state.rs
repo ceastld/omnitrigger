@@ -40,6 +40,7 @@ pub(super) struct HistoryUiState {
     pending_send_selection: Option<PendingSendSelection>,
     refresh_required: bool,
     initial_query_requested: bool,
+    popup_close_requested: bool,
 }
 
 impl HistoryUiState {
@@ -58,6 +59,7 @@ impl HistoryUiState {
             pending_send_selection: None,
             refresh_required: false,
             initial_query_requested: false,
+            popup_close_requested: false,
         }
     }
 
@@ -86,6 +88,7 @@ impl HistoryUiState {
 
     pub fn primary_enabled(&self) -> bool {
         self.available
+            && !(self.popup_close_requested && self.phase == Phase::Off)
             && match self.phase {
                 Phase::Starting => true,
                 Phase::Closing => false,
@@ -158,7 +161,7 @@ impl HistoryUiState {
     }
 
     pub fn can_query(&self) -> bool {
-        self.available && self.pending_io.is_none()
+        self.available && !self.popup_close_requested && self.pending_io.is_none()
     }
 
     pub fn query(&mut self) -> Option<u64> {
@@ -296,6 +299,66 @@ impl HistoryUiState {
 impl HistoryUiState {
     pub fn initial_list_loading(&self) -> bool {
         self.revision.is_none() && self.pending_io.is_some()
+    }
+}
+
+impl HistoryUiState {
+    pub fn request_popup_close(&mut self) -> Option<(u64, Control)> {
+        self.popup_close_requested = true;
+        match self.phase {
+            Phase::Off | Phase::Closing => None,
+            Phase::Starting | Phase::On | Phase::CloseFailed => self.primary(),
+        }
+    }
+
+    pub fn popup_close_ready(&self) -> bool {
+        self.popup_close_requested && self.phase == Phase::Off
+    }
+}
+
+#[cfg(test)]
+mod popup_close_tests {
+    use super::*;
+
+    #[test]
+    fn popup_waits_for_own_stop_ack_and_retry_without_affecting_main_collector() {
+        let mut main = HistoryUiState::new(true);
+        let (main_start, command) = main.primary().unwrap();
+        assert_eq!(command, Control::Enable);
+        main.acknowledge(
+            main_start,
+            Status::Running {
+                key: crate::clipboard_history_controller::SessionKey {
+                    generation: 1,
+                    listener_session: 2,
+                },
+            },
+            None,
+        );
+        let mut popup = HistoryUiState::new(true);
+        let (start, _) = popup.primary().unwrap();
+        let (stop, command) = popup.request_popup_close().unwrap();
+        assert_eq!(command, Control::Disable);
+        assert!(!popup.popup_close_ready());
+        popup.acknowledge(start, Status::Stopped, None);
+        assert!(!popup.popup_close_ready());
+        popup.acknowledge(
+            stop,
+            Status::CleanupFailed {
+                key: crate::clipboard_history_controller::SessionKey {
+                    generation: 1,
+                    listener_session: 1,
+                },
+            },
+            None,
+        );
+        assert!(!popup.popup_close_ready());
+        let (retry, command) = popup.request_popup_close().unwrap();
+        assert_eq!(command, Control::RetryCleanup);
+        popup.acknowledge(retry, Status::Stopped, None);
+        assert!(popup.popup_close_ready());
+        assert!(popup.primary().is_none());
+        assert_eq!(main.phase, Phase::On);
     }
 }
 

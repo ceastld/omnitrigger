@@ -122,6 +122,25 @@ impl HistoryLaunchTarget {
         Ok(result)
     }
 
+    /// 来自本次Host私有快照；复验完整身份，不捕获当前前台。
+    pub fn from_host_snapshot(
+        snapshot: ScriptTargetSnapshot,
+        accepted: Instant,
+    ) -> Result<Self, SendFailure> {
+        let target = ScriptTarget::from_snapshot(snapshot)
+            .map_err(|_| SendFailure::before("target_changed"))?;
+        let info = target
+            .info()
+            .map_err(|_| SendFailure::before("target_changed"))?;
+        let own_process = std::process::id();
+        if snapshot.process_id == own_process
+            || info.process_name.eq_ignore_ascii_case("omnitrigger.exe")
+        {
+            return Err(SendFailure::before("target_is_own_window"));
+        }
+        Self::from_verified_snapshot(snapshot, own_process, accepted, SendTime::now()?)
+    }
+
     /// 捕获时用原DTO规则验证来源，然后只保留不可从脚本反序列化的私有快照。
     fn from_captured(
         snapshot: ScriptTargetSnapshot,
@@ -135,6 +154,15 @@ impl HistoryLaunchTarget {
         if validated != snapshot {
             return Err(SendFailure::before("target_changed"));
         }
+        Self::from_verified_snapshot(snapshot, own_process, captured, now)
+    }
+
+    fn from_verified_snapshot(
+        snapshot: ScriptTargetSnapshot,
+        own_process: u32,
+        captured: Instant,
+        now: SendTime,
+    ) -> Result<Self, SendFailure> {
         let expires = captured
             .checked_add(TARGET_LIFETIME)
             .ok_or_else(|| SendFailure::before("target_expired"))?;

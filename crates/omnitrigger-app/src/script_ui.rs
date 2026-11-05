@@ -24,7 +24,7 @@ static BROKER: OnceLock<Mutex<Option<Broker>>> = OnceLock::new();
 
 #[derive(Clone)]
 struct Broker {
-    sender: SyncSender<Request>,
+    sender: SyncSender<UiRequest>,
     busy: Arc<AtomicBool>,
 }
 
@@ -154,6 +154,8 @@ impl<H: NativeHost> NativeHost for Host<H> {
             crate::script_fs::stat(params, cancellation, deadline)
         } else if method == "ui.notify" {
             crate::script_notify::notify(params, cancellation, deadline)
+        } else if method == "ui.open_history" {
+            open_history(params, cancellation, deadline, self.target)
         } else if method == "ui.choose" {
             choose(params, cancellation, deadline, self.target)
         } else {
@@ -200,12 +202,12 @@ fn choose(
     let (response, receiver) = mpsc::sync_channel(1);
     broker
         .sender
-        .try_send(Request {
+        .try_send(UiRequest::Choose(Request {
             options,
             response,
             abandoned: waiting.abandoned.clone(),
             target,
-        })
+        }))
         .map_err(|_| fault("ui_unavailable", "选择窗口连接已关闭。"))?;
     wait_for_choice(receiver, cancellation, deadline, choice_deadline)
 }
@@ -263,10 +265,20 @@ pub fn init(cx: &mut App) {
         .expect("script UI broker") = Some(broker);
     cx.spawn(async move |cx| {
         let mut active: Option<(WindowHandle<Chooser>, Arc<AtomicBool>)> = None;
+        let mut history_active: Option<(WindowHandle<crate::Workspace>, HistorySlot)> = None;
         loop {
             cx.background_executor().timer(POLL).await;
             if cx
                 .update(|cx| {
+                    if let Some((handle, _)) = &history_active {
+                        let alive = handle.update(cx, |view, window, _| {
+                            if view.text_history.popup_close_ready() {
+                                window.remove_window();
+                                false
+                            } else { true }
+                        }).unwrap_or(false);
+                        if !alive { history_active.take(); }
+                    }
                     if active
                         .as_ref()
                         .is_some_and(|(_, abandoned)| abandoned.load(Ordering::Acquire))
@@ -280,6 +292,39 @@ pub fn init(cx: &mut App) {
                     }
                     let Ok(request) = receiver.try_recv() else {
                         return;
+                    };
+                    let request = match request {
+                        UiRequest::Choose(request) => request,
+                        UiRequest::History(request) => {
+                            let target = match crate::clipboard_history_send::HistoryLaunchTarget::from_host_snapshot(request.target, request.accepted) {
+                                Ok(target) => target,
+                                Err(_) => {
+                                    let mut phase = request.phase.lock().unwrap_or_else(|error| error.into_inner());
+                                    if matches!(*phase, HistoryOpenPhase::Pending) {
+                                        *phase = HistoryOpenPhase::Failed(history_fault("target_changed", "not_started"));
+                                    }
+                                    let _ = request.changed.try_send(());
+                                    return;
+                                }
+                            };
+                            if !history_begin(&request.phase, &request.cancellation, request.deadline) {
+                                let _ = request.changed.try_send(());
+                                return;
+                            }
+                            let result = crate::open_script_history_window(target, cx)
+                                .map_err(|_| history_fault("ui_unavailable", "unknown"));
+                            let mut phase = request.phase.lock().unwrap_or_else(|error| error.into_inner());
+                            match result {
+                                Ok(handle) => {
+                                    history_active = Some((handle, request.slot));
+                                    *phase = HistoryOpenPhase::Opened;
+                                }
+                                Err(error) => *phase = HistoryOpenPhase::Failed(error),
+                            }
+                            drop(phase);
+                            let _ = request.changed.try_send(());
+                            return;
+                        }
                     };
                     if request.abandoned.load(Ordering::Acquire) {
                         return;
@@ -487,6 +532,267 @@ impl Render for Chooser {
                     .text_color(theme::rgb(theme::TEXT_MUTED))
                     .child("↑↓ 选择 · Enter 确定 · Esc 取消"),
             )
+    }
+}
+
+enum UiRequest {
+    Choose(Request),
+    History(HistoryRequest),
+}
+
+struct HistorySlot(Arc<AtomicBool>);
+impl Drop for HistorySlot {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+enum HistoryOpenPhase {
+    Pending,
+    Creating,
+    Opened,
+    Failed(ActionError),
+}
+
+struct HistoryRequest {
+    target: ScriptTargetSnapshot,
+    accepted: Instant,
+    cancellation: CancellationToken,
+    deadline: Instant,
+    phase: Arc<Mutex<HistoryOpenPhase>>,
+    changed: SyncSender<()>,
+    slot: HistorySlot,
+}
+
+fn history_fault(code: &str, effect: &str) -> ActionError {
+    let mut error = ActionError::new(
+        code,
+        match code {
+            "invalid_input" => "打开历史窗口不接受参数。",
+            "ui_busy" => "历史窗口或选择窗口尚未关闭，请先完成当前操作。",
+            "target_unavailable" | "target_changed" => "本次原目标不可用，未改选当前前台。",
+            "cancelled" => "打开历史窗口已取消。",
+            "timeout" => "历史窗口创建未在等待时限内确认，不会自动重试。",
+            _ => "历史窗口需要正在运行的OmniTrigger界面。",
+        },
+    );
+    error.method = Some("ui.open_history".into());
+    error.effect_state = Some(effect.into());
+    error
+}
+
+fn history_begin(
+    phase: &Mutex<HistoryOpenPhase>,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+) -> bool {
+    let mut phase = phase.lock().unwrap_or_else(|error| error.into_inner());
+    if !matches!(*phase, HistoryOpenPhase::Pending) {
+        return false;
+    }
+    let error = if cancellation.is_cancelled() {
+        Some(history_fault("cancelled", "not_started"))
+    } else if Instant::now() >= deadline {
+        Some(history_fault("timeout", "not_started"))
+    } else {
+        None
+    };
+    if let Some(error) = error {
+        *phase = HistoryOpenPhase::Failed(error);
+        false
+    } else {
+        *phase = HistoryOpenPhase::Creating;
+        true
+    }
+}
+
+fn open_history(
+    params: Value,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+    target: Option<ScriptTargetSnapshot>,
+) -> Result<Value, ActionError> {
+    if params != json!({}) {
+        return Err(history_fault("invalid_input", "not_started"));
+    }
+    let accepted = Instant::now();
+    let deadline = deadline.min(accepted + Duration::from_secs(5));
+    if cancellation.is_cancelled() {
+        return Err(history_fault("cancelled", "not_started"));
+    }
+    if accepted >= deadline {
+        return Err(history_fault("timeout", "not_started"));
+    }
+    // 无UI优先明确拒绝；CLI不能据此捕获一个新目标或启动主程序。
+    let broker = BROKER
+        .get()
+        .and_then(|value| value.lock().ok()?.clone())
+        .ok_or_else(|| history_fault("ui_unavailable", "not_started"))?;
+    let target = target.ok_or_else(|| history_fault("target_unavailable", "not_started"))?;
+    if broker
+        .busy
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(history_fault("ui_busy", "not_started"));
+    }
+    let phase = Arc::new(Mutex::new(HistoryOpenPhase::Pending));
+    let (changed, receiver) = mpsc::sync_channel(1);
+    let request = HistoryRequest {
+        target,
+        accepted,
+        cancellation: cancellation.clone(),
+        deadline,
+        phase: phase.clone(),
+        changed,
+        slot: HistorySlot(broker.busy),
+    };
+    broker
+        .sender
+        .try_send(UiRequest::History(request))
+        .map_err(|error| {
+            history_fault(
+                if matches!(error, mpsc::TrySendError::Full(_)) {
+                    "ui_busy"
+                } else {
+                    "ui_unavailable"
+                },
+                "not_started",
+            )
+        })?;
+    wait_history_open(&phase, receiver, cancellation, deadline)
+}
+
+fn wait_history_open(
+    phase: &Mutex<HistoryOpenPhase>,
+    receiver: Receiver<()>,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+) -> Result<Value, ActionError> {
+    loop {
+        {
+            let mut phase = phase.lock().unwrap_or_else(|error| error.into_inner());
+            if let HistoryOpenPhase::Failed(error) = &*phase {
+                return Err(error.clone());
+            }
+            let interrupt = if cancellation.is_cancelled() {
+                Some("cancelled")
+            } else if Instant::now() >= deadline {
+                Some("timeout")
+            } else {
+                None
+            };
+            if let Some(code) = interrupt {
+                let effect = if matches!(*phase, HistoryOpenPhase::Pending) {
+                    "not_started"
+                } else {
+                    "unknown"
+                };
+                let error = history_fault(code, effect);
+                if matches!(*phase, HistoryOpenPhase::Pending) {
+                    *phase = HistoryOpenPhase::Failed(error.clone());
+                }
+                return Err(error);
+            }
+            if matches!(*phase, HistoryOpenPhase::Opened) {
+                return Ok(json!({"opened":true}));
+            }
+        }
+        match receiver.recv_timeout(POLL.min(deadline.saturating_duration_since(Instant::now()))) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let phase = phase.lock().unwrap_or_else(|error| error.into_inner());
+                if matches!(
+                    *phase,
+                    HistoryOpenPhase::Opened | HistoryOpenPhase::Failed(_)
+                ) {
+                    continue;
+                }
+                return Err(history_fault(
+                    "ui_unavailable",
+                    if matches!(
+                        *phase,
+                        HistoryOpenPhase::Pending | HistoryOpenPhase::Failed(_)
+                    ) {
+                        "not_started"
+                    } else {
+                        "unknown"
+                    },
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod history_open_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn headless_ui_host_rejects_without_forwarding_or_capturing_a_target() {
+        struct Inner;
+        impl NativeHost for Inner {
+            fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+                panic!("历史打开不得回退到其他宿主能力");
+            }
+        }
+        let error = Host::new(Inner, None)
+            .call("ui.open_history", json!({}), &CancellationToken::new())
+            .unwrap_err();
+        assert_eq!(error.code, "ui_unavailable");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+    }
+
+    #[test]
+    fn cancellation_before_creation_prevents_creation_but_after_begin_is_unknown() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let pending = Mutex::new(HistoryOpenPhase::Pending);
+        assert!(!history_begin(&pending, &cancellation, deadline));
+        let (signal, receiver) = mpsc::sync_channel(1);
+        let failure = wait_history_open(&pending, receiver, &cancellation, deadline).unwrap_err();
+        assert_eq!(failure.effect_state.as_deref(), Some("not_started"));
+        drop(signal);
+        let active = Mutex::new(HistoryOpenPhase::Pending);
+        let token = CancellationToken::new();
+        assert!(history_begin(&active, &token, deadline));
+        token.cancel();
+        let (_signal, receiver) = mpsc::sync_channel(1);
+        let failure = wait_history_open(&active, receiver, &token, deadline).unwrap_err();
+        assert_eq!(failure.effect_state.as_deref(), Some("unknown"));
+        assert!(matches!(
+            *active.lock().unwrap(),
+            HistoryOpenPhase::Creating
+        ));
+    }
+
+    #[test]
+    fn acknowledged_window_slot_outlives_action_and_is_released_only_by_ui_owner() {
+        let busy = Arc::new(AtomicBool::new(true));
+        let ui_slot = HistorySlot(busy.clone());
+        let phase = Arc::new(Mutex::new(HistoryOpenPhase::Opened));
+        let (_signal, receiver) = mpsc::sync_channel(1);
+        assert_eq!(
+            wait_history_open(
+                &phase,
+                receiver,
+                &CancellationToken::new(),
+                Instant::now() + Duration::from_secs(1)
+            )
+            .unwrap(),
+            json!({"opened":true})
+        );
+        drop(phase);
+        assert!(busy.load(Ordering::Acquire));
+        // choose和下一次openHistory都使用这个原有CAS，动作结束不能让它们进入。
+        assert!(busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err());
+        drop(ui_slot);
+        assert!(busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok());
     }
 }
 

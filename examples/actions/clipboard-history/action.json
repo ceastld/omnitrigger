@@ -4,6 +4,8 @@
   "name": "显式文本历史",
   "version": "1.0.0",
   "actions": [
+    {"id":"open","title":"打开独立文本历史","version":1,"runtime":"node","entry":"open.mjs","single_instance":true},
+    {"id":"open-script","title":"打开独立文本历史（脚本）","version":1,"runtime":"script","entry":"open-script.mjs","single_instance":true},
     {"id":"manage","title":"保存、选择或发送历史文本","version":1,"runtime":"node","entry":"main.mjs","single_instance":true},
     {"id":"manage-script","title":"保存、选择或发送历史文本（脚本）","version":1,"runtime":"script","entry":"main-script.mjs","single_instance":true}
   ]

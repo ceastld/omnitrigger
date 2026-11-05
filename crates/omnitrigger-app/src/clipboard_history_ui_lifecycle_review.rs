@@ -400,3 +400,41 @@ fn manual_refresh_after_real_store_busy_is_required_before_selection_actions_res
     assert_eq!(selected.revision, "3");
     assert_eq!(ui.phase, Phase::Off);
 }
+
+#[test]
+fn closing_popup_stops_only_its_listener_and_main_keeps_recording_into_real_store() {
+    let fixture = Fixture::new();
+    let main_token = Cancellation::default();
+    let popup_token = Cancellation::default();
+    let (mut main, main_listeners, _) = driver(
+        &fixture,
+        vec![feed(vec![text(11, "主窗合成一"), text(12, "主窗合成二")])],
+    );
+    let (mut popup, popup_listeners, _) = driver(&fixture, vec![feed(vec![])]);
+    let mut main_ui = HistoryUiState::new(true);
+    let mut popup_ui = HistoryUiState::new(true);
+    enabled(&mut main_ui, &mut main, main_token.clone());
+    enabled(&mut popup_ui, &mut popup, popup_token.clone());
+    main.poll_once().unwrap();
+    let (close, command) = popup_ui.request_popup_close().unwrap();
+    assert_eq!(command, Control::Disable);
+    assert!(!popup_ui.popup_close_ready());
+    popup_token.cancel();
+    popup_ui.acknowledge(close, popup.disable().unwrap().status, None);
+    assert!(popup_ui.popup_close_ready());
+    main.poll_once().unwrap();
+    assert_eq!(main_ui.phase, Phase::On);
+    assert!(!main_token.is_cancelled());
+    assert_eq!(main_listeners.lock().unwrap().stops, 0);
+    assert_eq!(popup_listeners.lock().unwrap().stops, 1);
+    assert_eq!(
+        fixture
+            .store
+            .as_ref()
+            .list(200, || Ok(()))
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+}

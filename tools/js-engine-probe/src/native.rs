@@ -9,7 +9,7 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 20] = [
+pub const METHODS: [&str; 21] = [
     "history.list",
     "history.get",
     "history.append",
@@ -17,6 +17,7 @@ pub const METHODS: [&str; 20] = [
     "fs.stat",
     "ui.choose",
     "ui.notify",
+    "ui.open_history",
     "browser.profiles",
     "browser.call",
     "target.info",

@@ -6358,6 +6358,79 @@ fn smoke_test(wheel_input_policy: WheelInputPolicy) -> Result<(), String> {
     Ok(())
 }
 
+/// 仅由既有UI broker在GPUI线程调用；该窗关闭不退出主应用。
+fn open_script_history_window(
+    target: clipboard_history_send::HistoryLaunchTarget,
+    cx: &mut App,
+) -> Result<WindowHandle<Workspace>, String> {
+    let bounds = Bounds::centered(None, size(px(1060.), px(780.)), cx);
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(920.), px(620.))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("OmniTrigger · 文本历史".into()),
+                ..Default::default()
+            }),
+            focus: true,
+            app_id: Some("OmniTrigger.TextHistory".into()),
+            ..Default::default()
+        },
+        |window, cx| {
+            let hwnd =
+                HasWindowHandle::window_handle(&*window)
+                    .ok()
+                    .and_then(|handle| match handle.as_raw() {
+                        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+                        _ => None,
+                    });
+            let title_bar = hwnd
+                .ok_or_else(|| "无法取得历史窗口句柄。".to_string())
+                .and_then(|hwnd| {
+                    omnitrigger_windows::extend_into_title_bar(hwnd)
+                        .map(|()| hwnd)
+                        .map_err(|_| "无法扩展历史标题栏。".to_string())
+                });
+            let own_window = gpui::Window::window_handle(&*window);
+            let view = cx.new(|cx| {
+                Workspace::new(
+                    cx,
+                    StartupOptions {
+                        wheel_input_policy: WheelInputPolicy::Unfiltered,
+                        ui_smoke: false,
+                        browser_connector_settings: false,
+                        appearance_settings: false,
+                        text_history_page: true,
+                        text_history_target: Some(target),
+                        text_history_ui_window: hwnd,
+                        panel: false,
+                        wheel: None,
+                        wheel_target: None,
+                        wheel_editor: false,
+                    },
+                    own_window,
+                    title_bar,
+                )
+            });
+            view.update(cx, |view, cx| {
+                view.text_history.activate();
+                cx.notify();
+            });
+            let closing = view.downgrade();
+            window.on_window_should_close(cx, move |_, cx| {
+                let _ = closing.update(cx, |view, cx| {
+                    view.text_history.request_popup_close();
+                    cx.notify();
+                });
+                // 既有broker轮询只在本窗采集明确Off后移除此窗。
+                false
+            });
+            view
+        },
+    )
+    .map_err(|_| "无法创建历史窗口。".to_string())
+}
+
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
     #[cfg(windows)]

@@ -166,6 +166,20 @@ function createDesktopApi(invoke) {
     },
   });
   const ui = Object.freeze({
+    openHistory: (...args) => {
+      const method = 'ui.open_history';
+      if (args.length !== 0) invalid(method, '打开历史窗口不接受参数。');
+      const receipt = value => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)
+            || Reflect.ownKeys(value).length !== 1 || value.opened !== true) {
+          throw Object.assign(new Error('历史窗口创建回执未确认，不会自动重试。'),
+            {code:'invalid_response', method, effectState:'unknown'});
+        }
+        return {opened:true};
+      };
+      const result = invoke(method, {});
+      return result && typeof result.then === 'function' ? result.then(receipt) : receipt(result);
+    },
     notify: options => {
       const method = 'ui.notify';
       const text = (value, max, multiline) => {

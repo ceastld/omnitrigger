@@ -156,6 +156,8 @@ type ScriptContext = Readonly<{
         start(program: string, args?: string[]): { pid: number };
     };
     ui: {
+        /** 只确认创建独立历史窗；动作结束后仍存活，关闭仅停止该窗自己的采集。无UI为ui_unavailable。 */
+        openHistory(): {opened: true};
         /** 需要应用界面；同步等待创建回执，不等待显示时长，不激活窗口。
          * 返回仅证明接纳并创建通知请求，不证明用户已读；已有通知返回 ui_busy。
          * 脚本正常完成后按时长存活，应用退出收尾。仅纯文本，不执行 HTML 或链接。

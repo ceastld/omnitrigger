@@ -205,17 +205,32 @@ test('缺少历史服务明确失败，不回退系统剪贴板', async () => {
   }
 });
 
-test('清单双入口与调用信封独立，默认仅展示摘要', () => {
+test('清单中的管理和打开入口与调用信封一致，管理默认仅展示摘要', () => {
   const manifest = JSON.parse(readFileSync(new URL('action.json', import.meta.url), 'utf8'));
-  assert.equal(manifest.actions.length, 2);
-  assert.deepEqual(manifest.actions.map(action => action.runtime), ['node','script']);
-  for (const name of ['call.json','call-script.json','append-call.json','send-call.json']) {
+  const expected = {open:'node','open-script':'script',manage:'node','manage-script':'script'};
+  assert.equal(manifest.actions.length, Object.keys(expected).length);
+  for (const action of manifest.actions) assert.equal(action.runtime, expected[action.id]);
+  for (const name of ['call.json','call-script.json','append-call.json','send-call.json','open-call.json','open-script-call.json']) {
     const value = JSON.parse(readFileSync(new URL(name, import.meta.url), 'utf8'));
     assert.equal(value.package_id, manifest.id);
     const action = manifest.actions.find(action => action.id === value.action_id);
     assert.equal(action.version, value.action_version);
     assert.equal(action.single_instance, true);
     if (name === 'call.json' || name === 'call-script.json') assert.equal(value.input.mode, 'list');
+  }
+});
+
+test('两个打开入口只提交原生历史窗请求，保留未知结果且不重试', async () => {
+  for (const name of ['open.mjs','open-script.mjs']) {
+    const module = await import(new URL(name, import.meta.url));
+    const main = module.default ?? module.main;
+    let calls = 0;
+    assert.deepEqual(await main({ui:{openHistory(){calls++;return {opened:true};}}}), {opened:true});
+    assert.equal(calls,1);
+    const failure = Object.assign(new Error('合成未知结果'),{code:'timeout',effectState:'unknown'});
+    try { await main({ui:{openHistory(){calls++;throw failure;}}}); assert.fail('未知结果应传回调用者'); }
+    catch (error) { assert.equal(error,failure); }
+    assert.equal(calls,2);
   }
 });
 

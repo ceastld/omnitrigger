@@ -19,7 +19,7 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'ui.choose' | 'ui.notify';
+  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'ui.choose' | 'ui.notify' | 'ui.open_history';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
 }
@@ -131,6 +131,8 @@ export interface ActionContext {
   };
   browser: BrowserApi;
   ui: {
+    /** 只确认创建独立历史窗；动作结束后仍存活，关闭仅停止该窗自己的采集。无UI为ui_unavailable。 */
+    openHistory(): Promise<{opened: true}>;
     /** 需要应用界面；仅确认已接纳并创建通知请求，不证明用户已读。
      * 不激活窗口，纯文本显示；已有通知返回 ui_busy，不排队或覆盖。
      * await 只等创建回执；脚本正常结束后通知按时长存活，应用退出收尾。

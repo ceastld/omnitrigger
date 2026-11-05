@@ -274,6 +274,22 @@ impl ClipboardHistoryUi {
     }
 
     /// 复用Workspace既有唤醒与兜底poll；一次最多收32项，不做磁盘或原生输入工作。
+    pub fn request_popup_close(&mut self) {
+        self.cancel_send();
+        self.collection.cancel();
+        if let Some((id, command)) = self.state.request_popup_close() {
+            self.submit(Request::Control {
+                id,
+                command,
+                cancellation: self.collection.clone(),
+            });
+        }
+    }
+
+    pub fn popup_close_ready(&self) -> bool {
+        self.state.popup_close_ready()
+    }
+
     pub fn poll(&mut self) -> bool {
         let mut changed = self.sending.poll();
         for _ in 0..32 {
