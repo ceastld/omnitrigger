@@ -13,3 +13,7 @@ const plan = prepareRecipe(ctx.input);
 void close; void keys; void restore;
 // @ts-expect-error 纯准备结果不可改写，派发时复制成实际 SDK 接受的数组。
 plan.steps.push({kind:'tap',key:65});
+
+import sequence from '../examples/actions/keyboard-sequence/sequence.mjs';
+import shortcuts from '../examples/actions/keyboard-sequence/shortcuts.mjs';
+void sequence(ctx); void shortcuts(ctx);

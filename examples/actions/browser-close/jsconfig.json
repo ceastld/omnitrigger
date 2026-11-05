@@ -1,8 +1,22 @@
 {
   "compilerOptions": {
-    "allowJs": true, "checkJs": true, "strict": true, "noEmit": true,
-    "target": "ESNext", "lib": ["ESNext", "DOM"],
-    "module": "ESNext", "moduleResolution": "Bundler", "types": []
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noEmit": true,
+    "target": "ESNext",
+    "lib": [
+      "ESNext",
+      "DOM"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": []
   },
-  "files": ["close-tab.mjs"]
+  "files": [
+    "close-tab.mjs",
+    "close-tab-script.mjs",
+    "close-common.mjs",
+    "sdk/script-types.d.ts"
+  ]
 }

@@ -1,3 +1,35 @@
+export interface BrightnessStepOptions {
+  direction:'up'|'down';
+  strategy:'physical'|'wmi_first'|'physical_then_wmi';
+}
+export type BrightnessStepCode='initialization_failed'|'monitor_unavailable'|'ambiguous_monitor'
+  |'brightness_unavailable'|'brightness_failed'|'brightness_unknown';
+export type BrightnessStepNoWriteCode=Exclude<BrightnessStepCode,'brightness_unknown'>;
+/** index是本次集合序号，数值范围仍由运行时校验。 */
+export type BrightnessStepReadRejected={index:number;status:'read_rejected';previousRaw:null;requestedRaw:null;currentRaw:null;errorCode:BrightnessStepCode};
+export type BrightnessStepUnchanged={index:number;status:'unchanged';previousRaw:number;requestedRaw:number;currentRaw:number;errorCode:null};
+export type BrightnessStepNoWriteMember=BrightnessStepReadRejected|BrightnessStepUnchanged;
+export type BrightnessStepMember=BrightnessStepNoWriteMember
+  |{index:number;status:'set_unconfirmed'|'readback_unknown';previousRaw:number;requestedRaw:number;currentRaw:null;errorCode:BrightnessStepCode}
+  |{index:number;status:'readback_different'|'confirmed';previousRaw:number;requestedRaw:number;currentRaw:number;errorCode:null};
+export type BrightnessStepPhysical={members:BrightnessStepMember[];errorCode:null}
+  |{members:[];errorCode:BrightnessStepCode};
+export type BrightnessStepNoWritePhysical={members:BrightnessStepNoWriteMember[];errorCode:null}
+  |{members:[];errorCode:BrightnessStepNoWriteCode};
+export type BrightnessStepWmiFailure={status:'failed';previousPercent:null;requestedPercent:null;currentPercent:null;errorCode:BrightnessStepCode};
+export type BrightnessStepWmiNoWrite={status:'zero_skipped'|'no_eligible_level';previousPercent:number;requestedPercent:null;currentPercent:number;errorCode:null}
+  |(Omit<BrightnessStepWmiFailure,'errorCode'>&{errorCode:BrightnessStepNoWriteCode});
+export type BrightnessStepWmi=BrightnessStepWmiNoWrite|BrightnessStepWmiFailure
+  |{status:'set';previousPercent:number;requestedPercent:number;currentPercent:number;errorCode:null};
+type BrightnessStepStrategies<P,W>=
+  |{strategy:'physical';physical:P;wmi:null}
+  |{strategy:'wmi_first';physical:null;wmi:W}
+  |{strategy:'physical_then_wmi';physical:P;wmi:W|null};
+/** unknown为保守副作用状态；正常写入仍须检查逐项读回，取消不撤销设备变化。 */
+export type BrightnessStepResult=
+  |({effectState:'unknown'}&BrightnessStepStrategies<BrightnessStepPhysical,BrightnessStepWmi>)
+  |({effectState:'not_started'}&BrightnessStepStrategies<BrightnessStepNoWritePhysical,BrightnessStepWmiNoWrite>);
+
 /** Node 动作宿主 API v1。受信任的本地代码，与当前用户具有相同权限。 */
 export interface BrowserOptions {
   /** browser_instance_id；省略时只接受恰好一个已连接 profile。 */
@@ -19,7 +51,7 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'ui.choose' | 'ui.notify' | 'ui.open_history' | 'ui.toggle_history';
+  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'display.brightness_step' | 'ui.choose' | 'ui.notify' | 'ui.open_history' | 'ui.toggle_history';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
 }
@@ -151,6 +183,8 @@ export interface ActionContext {
     choose(options: ChooseOptions): Promise<ChooseResult>;
   };
   desktop: {
+    /** 必填显式策略；逐项检查回执，无自动重试或补偿。 */
+    stepBrightness(options: BrightnessStepOptions): Promise<BrightnessStepResult>;
     /** 本次提交时捕获的目标，不在调用时重新选择前台。进程名含 .exe。 */
     target(): Promise<{processName: string; windowRole: "unknown" | "application" | "desktop" | "taskbar"; title: string; processId: number; isForeground: boolean}>;
     /** CLI 可直接使用的原目标值快照；30 秒内提交，不重新选择前台。 */

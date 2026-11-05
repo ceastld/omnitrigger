@@ -15,6 +15,9 @@
     "../../../tools/js-engine-probe/api.d.ts",
     "recipe.mjs",
     "prepare-recipe.mjs",
-    "timing.mjs"
+    "timing.mjs",
+    "sequence.mjs",
+    "shortcuts.mjs",
+    "prepare-keys.mjs"
   ]
 }

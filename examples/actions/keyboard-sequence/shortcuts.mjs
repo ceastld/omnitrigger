@@ -1,11 +1,12 @@
 import {timing} from './timing.mjs';
+import {prepareShortcuts} from './prepare-keys.mjs';
+/** @param {{input:unknown,desktop:{target():Promise<{processName:string}>,sendShortcut(keys:number[],options?:{keyDownDelayMs?:number}):Promise<unknown>},delay(milliseconds:number):Promise<unknown>}} ctx */
 export default async ctx => {
-  const steps = ctx.input.steps;
-  if (!Array.isArray(steps) || steps.length < 1 || steps.length > 16) throw new Error('需要 1–16 个快捷键步骤');
-  const options = await timing(ctx);
-  for (const step of steps) {
-    await ctx.desktop.sendShortcut(step.keys, options);
+  const plan = prepareShortcuts(ctx.input);
+  const {keyDownDelayMs} = await timing({ input:plan, desktop:ctx.desktop });
+  for (const step of plan.steps) {
+    await ctx.desktop.sendShortcut(step.keys.slice(), {keyDownDelayMs});
     if (step.delayAfterMs !== undefined) await ctx.delay(step.delayAfterMs);
   }
-  return {inputSubmitted:true, steps:steps.length};
+  return {inputSubmitted:true, steps:plan.steps.length};
 };

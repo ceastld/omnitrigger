@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noEmit": true,
+    "target": "ESNext",
+    "lib": [
+      "ESNext",
+      "DOM"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": []
+  },
+  "files": [
+    "browser_close_sync_types.ts",
+    "../examples/actions/browser-close/sdk/script-types.d.ts"
+  ]
+}

@@ -2,8 +2,23 @@
   "schema_version": 1,
   "id": "examples.browser-close",
   "name": "指定浏览器标签关闭",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "actions": [
-    { "id": "close-tab", "title": "关闭指定浏览器标签", "version": 1, "runtime": "node", "entry": "close-tab.mjs", "single_instance": true }
+    {
+      "id": "close-tab",
+      "title": "关闭指定浏览器标签",
+      "version": 1,
+      "runtime": "node",
+      "entry": "close-tab.mjs",
+      "single_instance": true
+    },
+    {
+      "id": "close-tab-script",
+      "title": "关闭指定浏览器标签（同步轻量）",
+      "version": 1,
+      "runtime": "script",
+      "entry": "close-tab-script.mjs",
+      "single_instance": true
+    }
   ]
 }

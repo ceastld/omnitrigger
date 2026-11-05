@@ -1,0 +1,11 @@
+{
+  "package_id": "examples.browser-close",
+  "action_id": "close-tab-script",
+  "action_version": 1,
+  "input": {
+    "profile": "替换为选定的 browser_instance_id",
+    "windowId": 123,
+    "tabId": 456,
+    "timeoutMs": 5000
+  }
+}

@@ -27,3 +27,5 @@
 Node `recipe` 也会在首次桌面调用前检查整组参数、时序和 32 次调用预算，并快照步骤与嵌套按键数组。后续等待期间改写调用方输入不会改变已选步骤。只包含等待时，返回 `inputSubmitted:false`；参数预检不替代每次桌面 API 对原目标、物理按住状态、平台 VK 支持及取消的检查，也不会撤销已提交输入。
 
 Node `recipe.mjs` 与纯准备 helper 也纳入本包 `jsconfig.json` 的 strict 检查；没有新增运行时依赖，安装时须保留同目录的 `.mjs` 文件。
+
+`sequence` 与 `shortcuts` 两个 Node 入口也在首次异步查询前固定输入；`shortcuts` 会先检查全部 1–16 步的 keys 与 delayAfterMs，再开始派发。键值范围、数量和单次按下等待沿用公开桌面 API；只支持原有的 keyDownDelayMs，不新增嵌套 timing 输入。任一步运行时目标变化或取消仍会立即停止，已发生输入不回滚、不重试。
