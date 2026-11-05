@@ -50,7 +50,7 @@ function desktopCall(method, params) {
             throw Object.assign(new Error('数据选区 API 需要应用本机能力桥接。'), {code:'native_bridge_unavailable',effectState:'not_started',method});
         }
         const cause = nativeContext?.error;
-        const ui = method === 'ui.choose' || method === 'ui.notify' || method === 'ui.open_history';
+        const ui = method === 'ui.choose' || method === 'ui.notify' || method === 'ui.open_history' || method === 'ui.toggle_history';
         if (method === 'fs.stat') throw Object.assign(new Error('文件状态 API 需要本机宿主。'), {code:'fs_unavailable',effectState:'not_started',method});
         const code = ui && cause?.code === 'desktop_unavailable' ? 'ui_unavailable' : cause?.code;
         throw Object.assign(new Error(cause?.message ?? (method.startsWith('browser.') ? '浏览器 API 需要 OmniTrigger 应用宿主。' : ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '桌面 API 需要 OmniTrigger 本次动作的目标上下文。')), {

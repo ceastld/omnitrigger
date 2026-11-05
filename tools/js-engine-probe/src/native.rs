@@ -9,7 +9,7 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 21] = [
+pub const METHODS: [&str; 22] = [
     "history.list",
     "history.get",
     "history.append",
@@ -18,6 +18,7 @@ pub const METHODS: [&str; 21] = [
     "ui.choose",
     "ui.notify",
     "ui.open_history",
+    "ui.toggle_history",
     "browser.profiles",
     "browser.call",
     "target.info",
@@ -137,6 +138,7 @@ pub fn call(
         if matches!(
             method.as_str(),
             "fs.stat"
+                | "ui.toggle_history"
                 | "clipboard.read_data"
                 | "selection.copy_data"
                 | "history.list"
@@ -153,7 +155,10 @@ pub fn call(
                 &method,
                 if matches!(
                     method.as_str(),
-                    "selection.copy_data" | "history.append" | "history.remove"
+                    "selection.copy_data"
+                        | "history.append"
+                        | "history.remove"
+                        | "ui.toggle_history"
                 ) {
                     "unknown"
                 } else {
@@ -173,6 +178,7 @@ pub fn call(
                 if matches!(
                     method.as_str(),
                     "fs.stat"
+                        | "ui.toggle_history"
                         | "clipboard.read_data"
                         | "selection.copy_data"
                         | "history.list"
@@ -186,7 +192,10 @@ pub fn call(
                         &method,
                         if matches!(
                             method.as_str(),
-                            "selection.copy_data" | "history.append" | "history.remove"
+                            "selection.copy_data"
+                                | "history.append"
+                                | "history.remove"
+                                | "ui.toggle_history"
                         ) {
                             "unknown"
                         } else {

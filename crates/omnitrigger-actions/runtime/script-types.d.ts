@@ -158,6 +158,10 @@ type ScriptContext = Readonly<{
     ui: {
         /** 只确认创建独立历史窗；动作结束后仍存活，关闭仅停止该窗自己的采集。无UI为ui_unavailable。 */
         openHistory(): {opened: true};
+        /** 与Node入口共用本次Host的原生切换：无窗创建，已有窗等自身采集停止并移除后返回closed。
+         * chooser/未完成关闭为ui_busy；关闭不需新目标；无UI为ui_unavailable。
+         * 开始后取消/超时为unknown，不自动重试，不停止主窗采集。 */
+        toggleHistory(): {opened: true} | {closed: true};
         /** 需要应用界面；同步等待创建回执，不等待显示时长，不激活窗口。
          * 返回仅证明接纳并创建通知请求，不证明用户已读；已有通知返回 ui_busy。
          * 脚本正常完成后按时长存活，应用退出收尾。仅纯文本，不执行 HTML 或链接。

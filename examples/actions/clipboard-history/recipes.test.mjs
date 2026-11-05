@@ -207,10 +207,10 @@ test('缺少历史服务明确失败，不回退系统剪贴板', async () => {
 
 test('清单中的管理和打开入口与调用信封一致，管理默认仅展示摘要', () => {
   const manifest = JSON.parse(readFileSync(new URL('action.json', import.meta.url), 'utf8'));
-  const expected = {open:'node','open-script':'script',manage:'node','manage-script':'script'};
+  const expected = {open:'node','open-script':'script',toggle:'node','toggle-script':'script',manage:'node','manage-script':'script'};
   assert.equal(manifest.actions.length, Object.keys(expected).length);
   for (const action of manifest.actions) assert.equal(action.runtime, expected[action.id]);
-  for (const name of ['call.json','call-script.json','append-call.json','send-call.json','open-call.json','open-script-call.json']) {
+  for (const name of ['call.json','call-script.json','append-call.json','send-call.json','open-call.json','open-script-call.json','toggle-call.json','toggle-script-call.json']) {
     const value = JSON.parse(readFileSync(new URL(name, import.meta.url), 'utf8'));
     assert.equal(value.package_id, manifest.id);
     const action = manifest.actions.find(action => action.id === value.action_id);
@@ -231,6 +231,22 @@ test('两个打开入口只提交原生历史窗请求，保留未知结果且�
     try { await main({ui:{openHistory(){calls++;throw failure;}}}); assert.fail('未知结果应传回调用者'); }
     catch (error) { assert.equal(error,failure); }
     assert.equal(calls,2);
+  }
+});
+
+test('两个切换入口保留打开或关闭回执，未知结果只调用一次', async () => {
+  for (const name of ['toggle.mjs','toggle-script.mjs']) {
+    const module = await import(new URL(name, import.meta.url));
+    const main = module.default ?? module.main;
+    for (const receipt of [{opened:true},{closed:true}]) {
+      let calls = 0;
+      assert.deepEqual(await main({ui:{toggleHistory(){calls++;return receipt;}}}), receipt);
+      assert.equal(calls,1);
+    }
+    let calls = 0;
+    const failure = Object.assign(new Error('合成未知结果'),{code:'timeout',effectState:'unknown'});
+    await assert.rejects(async () => main({ui:{toggleHistory(){calls++;throw failure;}}}), error => error === failure);
+    assert.equal(calls,1);
   }
 });
 

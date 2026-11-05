@@ -16,7 +16,7 @@ let browserConnection;
 let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
-const nativeMethods = new Set(['system.open','process.capture','history.list','history.get','history.append','history.remove','fs.stat','ui.choose','ui.notify','ui.open_history','browser.profiles','browser.call','target.info','target.context',
+const nativeMethods = new Set(['system.open','process.capture','history.list','history.get','history.append','history.remove','fs.stat','ui.choose','ui.notify','ui.open_history','ui.toggle_history','browser.profiles','browser.call','target.info','target.context',
   'keyboard.shortcut','keyboard.sequence','keyboard.text','selection.copy','selection.copy_data','clipboard.read','clipboard.read_data','clipboard.write','window.action']);
 let nativePending;
 let nativePendingMethod;
@@ -99,6 +99,7 @@ function browserRequest(method, args, options = {}, profiles = false) {
 const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...args));
 
 function nativeCall(method, params) {
+  const historyUi = method === 'ui.open_history' || method === 'ui.toggle_history';
   const opening = method === 'system.open';
   const capture = method === 'process.capture';
   const stat = method === 'fs.stat';
@@ -110,12 +111,12 @@ function nativeCall(method, params) {
   const history = historyRead || historyWrite;
   const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, capture ? '程序输出采集未完成，请检查错误代码。' : stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : history ? '剪贴板历史调用失败；请检查错误代码。' : message), {effectState:stat || dataRead || historyRead ? 'not_started' : effectState, method});
   if (!nativeMethods.has(method)) return Promise.reject(fail('invalid_input', '未提供此本机调用方法。'));
-  if ((method === 'ui.open_history' || stat || data || history || capture) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
+  if ((historyUi || stat || data || history || capture) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
   checkCancelled();
-  const ui = method === 'ui.choose' || method === 'ui.notify' || method === 'ui.open_history';
+  const ui = method === 'ui.choose' || method === 'ui.notify' || historyUi;
   const unavailable = ui && request.native_error?.code === 'desktop_unavailable' ? 'ui_unavailable' : request.native_error?.code;
   if (!request.native) return Promise.reject(fail(capture ? 'native_bridge_unavailable' : history ? 'history_unavailable' : data ? 'native_bridge_unavailable' : stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
-  if (nativePending) return Promise.reject(fail(stat ? 'fs_busy' : (method === 'ui.notify' || method === 'ui.open_history') && nativePendingMethod === method ? 'ui_busy' : 'desktop_busy', '请 await 上一个本机调用，避免并发。'));
+  if (nativePending) return Promise.reject(fail(stat ? 'fs_busy' : method === 'ui.toggle_history' && ['ui.choose','ui.open_history','ui.toggle_history'].includes(nativePendingMethod) ? 'ui_busy' : (method === 'ui.notify' || historyUi) && nativePendingMethod === method ? 'ui_busy' : 'desktop_busy', '请 await 上一个本机调用，避免并发。'));
   if (nativeId >= 128) return Promise.reject(fail('desktop_call_limit', '单次动作最多调用 128 次桌面 API。'));
   const id = ++nativeId;
   const operation = new Promise((resolve, reject) => {
@@ -139,7 +140,7 @@ function nativeCall(method, params) {
     const aborted = () => {
       const reason = controller.signal.reason;
       if (opening || capture) return finish(fail(reason?.code === 'timeout' ? 'timeout' : 'cancelled', undefined, sent ? 'unknown' : 'not_started'));
-      if (method === 'ui.notify' || method === 'ui.open_history' || stat || data || history || capture) {
+      if (method === 'ui.notify' || historyUi || stat || data || history || capture) {
         if (typeof reason?.method !== 'string') reason.method = method;
         reason.effectState = stat || dataRead || historyRead ? 'not_started' : sent ? 'unknown' : 'not_started';
       }
@@ -148,9 +149,9 @@ function nativeCall(method, params) {
     controller.signal.addEventListener('abort', aborted, {once:true});
     if (!capture) socket.setEncoding('utf8');
     const timeout = capture ? Math.min(params.timeout_ms + 1500, 61500) : opening || method === 'ui.choose' ? 61000 : dataCopy ? 8000 : 5000;
-    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || method === 'ui.open_history' || stat || data || history || capture ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
+    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || historyUi || stat || data || history || capture ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
     // 这些方法的总传输时限不被零碎数据延长，外层取消/时限仍优先生效。
-    if (method === 'ui.open_history' || opening || stat || data || history || capture) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
+    if (historyUi || opening || stat || data || history || capture) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
     socket.once('connect', () => {
       if (controller.signal.aborted) return aborted();
       sent = true;

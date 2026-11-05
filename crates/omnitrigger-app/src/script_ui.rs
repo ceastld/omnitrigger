@@ -156,6 +156,8 @@ impl<H: NativeHost> NativeHost for Host<H> {
             crate::script_notify::notify(params, cancellation, deadline)
         } else if method == "ui.open_history" {
             open_history(params, cancellation, deadline, self.target)
+        } else if method == "ui.toggle_history" {
+            toggle_history(params, cancellation, deadline, self.target)
         } else if method == "ui.choose" {
             choose(params, cancellation, deadline, self.target)
         } else {
@@ -266,18 +268,37 @@ pub fn init(cx: &mut App) {
     cx.spawn(async move |cx| {
         let mut active: Option<(WindowHandle<Chooser>, Arc<AtomicBool>)> = None;
         let mut history_active: Option<(WindowHandle<crate::Workspace>, HistorySlot)> = None;
+        let mut history_toggle: Option<HistoryToggleRequest> = None;
+        let mut deferred: Option<UiRequest> = None;
         loop {
             cx.background_executor().timer(POLL).await;
             if cx
                 .update(|cx| {
                     if let Some((handle, _)) = &history_active {
-                        let alive = handle.update(cx, |view, window, _| {
+                        let closed = handle.update(cx, |view, window, _| {
                             if view.text_history.popup_close_ready() {
                                 window.remove_window();
-                                false
-                            } else { true }
-                        }).unwrap_or(false);
-                        if !alive { history_active.take(); }
+                                true
+                            } else { false }
+                        });
+                        match closed {
+                            Ok(true) => {
+                                // 先移除本窗并释放其原有槽，之后才确认关闭。
+                                history_active.take();
+                                if let Some(request) = history_toggle.take() {
+                                    finish_history_toggle(&request, HistoryTogglePhase::Closed);
+                                }
+                            }
+                            Ok(false) => {}
+                            Err(_) => {
+                                history_active.take();
+                                if let Some(request) = history_toggle.take() {
+                                    finish_history_toggle(&request, HistoryTogglePhase::Failed(
+                                        history_toggle_fault("ui_unavailable", "unknown"),
+                                    ));
+                                }
+                            }
+                        }
                     }
                     if active
                         .as_ref()
@@ -288,13 +309,30 @@ pub fn init(cx: &mut App) {
                         }
                     }
                     if active.is_some() {
+                        // 切换必须能在chooser占用期间明确拒绝，不能等它关闭后再开历史窗。
+                        // 既有打开/选择请求仍延迟到原chooser收尾，不改变其契约。
+                        if deferred.is_none() {
+                            if let Ok(request) = receiver.try_recv() {
+                                match request {
+                                    UiRequest::ToggleHistory(request) => finish_history_toggle(
+                                        &request,
+                                        HistoryTogglePhase::Failed(history_toggle_fault("ui_busy", "not_started")),
+                                    ),
+                                    request => deferred = Some(request),
+                                }
+                            }
+                        }
                         return;
                     }
-                    let Ok(request) = receiver.try_recv() else {
+                    let Some(request) = deferred.take().or_else(|| receiver.try_recv().ok()) else {
                         return;
                     };
                     let request = match request {
                         UiRequest::Choose(request) => request,
+                        UiRequest::ToggleHistory(request) => {
+                            dispatch_history_toggle(request, &mut history_active, &mut history_toggle, cx);
+                            return;
+                        }
                         UiRequest::History(request) => {
                             let target = match crate::clipboard_history_send::HistoryLaunchTarget::from_host_snapshot(request.target, request.accepted) {
                                 Ok(target) => target,
@@ -538,6 +576,7 @@ impl Render for Chooser {
 enum UiRequest {
     Choose(Request),
     History(HistoryRequest),
+    ToggleHistory(HistoryToggleRequest),
 }
 
 struct HistorySlot(Arc<AtomicBool>);
@@ -724,6 +763,496 @@ fn wait_history_open(
     }
 }
 
+// toggle只追加显式切换，不改变openHistory的创建契约。
+enum HistoryTogglePhase {
+    Pending,
+    Creating,
+    Closing,
+    Opened,
+    Closed,
+    Failed(ActionError),
+}
+
+struct HistoryToggleRequest {
+    target: Option<ScriptTargetSnapshot>,
+    accepted: Instant,
+    cancellation: CancellationToken,
+    deadline: Instant,
+    phase: Arc<Mutex<HistoryTogglePhase>>,
+    changed: SyncSender<()>,
+    busy: Arc<AtomicBool>,
+}
+
+fn history_toggle_fault(code: &str, effect: &str) -> ActionError {
+    let mut error = history_fault(code, effect);
+    if let Some(message) = match code {
+        "invalid_input" => Some("切换历史窗口不接受参数。"),
+        "cancelled" => Some("切换历史窗口已取消。"),
+        "timeout" => Some("历史窗口创建或关闭尚未确认，不会自动重试。"),
+        _ => None,
+    } {
+        error.message = message.into();
+    }
+    error.method = Some("ui.toggle_history".into());
+    error
+}
+
+fn finish_history_toggle(request: &HistoryToggleRequest, result: HistoryTogglePhase) {
+    *request
+        .phase
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = result;
+    let _ = request.changed.try_send(());
+}
+
+fn begin_history_toggle(request: &HistoryToggleRequest, closing: bool) -> bool {
+    let mut phase = request
+        .phase
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if !matches!(*phase, HistoryTogglePhase::Pending) {
+        return false;
+    }
+    let failure = if request.cancellation.is_cancelled() {
+        Some("cancelled")
+    } else if Instant::now() >= request.deadline {
+        Some("timeout")
+    } else {
+        None
+    };
+    if let Some(code) = failure {
+        *phase = HistoryTogglePhase::Failed(history_toggle_fault(code, "not_started"));
+        let _ = request.changed.try_send(());
+        false
+    } else {
+        *phase = if closing {
+            HistoryTogglePhase::Closing
+        } else {
+            HistoryTogglePhase::Creating
+        };
+        true
+    }
+}
+
+fn begin_history_toggle_close(request: &HistoryToggleRequest, already_requested: bool) -> bool {
+    if already_requested {
+        // 不能把第二次toggle变成RetryCleanup；由原窗口显式重试按钮负责。
+        finish_history_toggle(
+            request,
+            HistoryTogglePhase::Failed(history_toggle_fault("ui_busy", "not_started")),
+        );
+        return false;
+    }
+    // 关闭只操作本窗，不读取或验证本次外部目标。
+    begin_history_toggle(request, true)
+}
+
+fn prepare_history_toggle_open(
+    request: &HistoryToggleRequest,
+) -> Option<(
+    crate::clipboard_history_send::HistoryLaunchTarget,
+    HistorySlot,
+)> {
+    // 与openHistory/choose共用原有CAS，窗口继续持有同一个槽。
+    if request
+        .busy
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        finish_history_toggle(
+            request,
+            HistoryTogglePhase::Failed(history_toggle_fault("ui_busy", "not_started")),
+        );
+        return None;
+    }
+    let slot = HistorySlot(request.busy.clone());
+    let Some(snapshot) = request.target else {
+        finish_history_toggle(
+            request,
+            HistoryTogglePhase::Failed(history_toggle_fault("target_unavailable", "not_started")),
+        );
+        return None;
+    };
+    let target = match crate::clipboard_history_send::HistoryLaunchTarget::from_host_snapshot(
+        snapshot,
+        request.accepted,
+    ) {
+        Ok(target) => target,
+        Err(_) => {
+            finish_history_toggle(
+                request,
+                HistoryTogglePhase::Failed(history_toggle_fault("target_changed", "not_started")),
+            );
+            return None;
+        }
+    };
+    begin_history_toggle(request, false).then_some((target, slot))
+}
+
+fn dispatch_history_toggle(
+    request: HistoryToggleRequest,
+    history: &mut Option<(WindowHandle<crate::Workspace>, HistorySlot)>,
+    closing: &mut Option<HistoryToggleRequest>,
+    cx: &mut App,
+) {
+    if closing.is_some() {
+        finish_history_toggle(
+            &request,
+            HistoryTogglePhase::Failed(history_toggle_fault("ui_busy", "not_started")),
+        );
+        return;
+    }
+    if let Some((handle, _)) = history.as_ref() {
+        let started = handle.update(cx, |view, _, cx| {
+            if !begin_history_toggle_close(&request, view.text_history.popup_close_requested()) {
+                return false;
+            }
+            view.text_history.request_popup_close();
+            cx.notify();
+            true
+        });
+        match started {
+            Ok(true) => *closing = Some(request),
+            Ok(false) => {}
+            Err(_) => finish_history_toggle(
+                &request,
+                HistoryTogglePhase::Failed(history_toggle_fault("ui_unavailable", "unknown")),
+            ),
+        }
+        return;
+    }
+    if let Some((target, slot)) = prepare_history_toggle_open(&request) {
+        match crate::open_script_history_window(target, cx) {
+            Ok(handle) => {
+                *history = Some((handle, slot));
+                finish_history_toggle(&request, HistoryTogglePhase::Opened);
+            }
+            Err(_) => finish_history_toggle(
+                &request,
+                HistoryTogglePhase::Failed(history_toggle_fault("ui_unavailable", "unknown")),
+            ),
+        }
+    }
+}
+
+fn toggle_history(
+    params: Value,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+    target: Option<ScriptTargetSnapshot>,
+) -> Result<Value, ActionError> {
+    if params != json!({}) {
+        return Err(history_toggle_fault("invalid_input", "not_started"));
+    }
+    let accepted = Instant::now();
+    let deadline = deadline.min(accepted + Duration::from_secs(5));
+    if cancellation.is_cancelled() {
+        return Err(history_toggle_fault("cancelled", "not_started"));
+    }
+    if accepted >= deadline {
+        return Err(history_toggle_fault("timeout", "not_started"));
+    }
+    let broker = BROKER
+        .get()
+        .and_then(|value| value.lock().ok()?.clone())
+        .ok_or_else(|| history_toggle_fault("ui_unavailable", "not_started"))?;
+    let phase = Arc::new(Mutex::new(HistoryTogglePhase::Pending));
+    let (changed, receiver) = mpsc::sync_channel(1);
+    let request = HistoryToggleRequest {
+        target,
+        accepted,
+        cancellation: cancellation.clone(),
+        deadline,
+        phase: phase.clone(),
+        changed,
+        busy: broker.busy,
+    };
+    // GPUI线程决定打开还是关闭；调用线程不能用过期的窗口存在性快照决定。
+    broker
+        .sender
+        .try_send(UiRequest::ToggleHistory(request))
+        .map_err(|error| {
+            history_toggle_fault(
+                if matches!(error, mpsc::TrySendError::Full(_)) {
+                    "ui_busy"
+                } else {
+                    "ui_unavailable"
+                },
+                "not_started",
+            )
+        })?;
+    wait_history_toggle(&phase, receiver, cancellation, deadline)
+}
+
+fn wait_history_toggle(
+    phase: &Mutex<HistoryTogglePhase>,
+    receiver: Receiver<()>,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+) -> Result<Value, ActionError> {
+    loop {
+        {
+            let mut phase = phase.lock().unwrap_or_else(|error| error.into_inner());
+            if let HistoryTogglePhase::Failed(error) = &*phase {
+                return Err(error.clone());
+            }
+            let interrupt = if cancellation.is_cancelled() {
+                Some("cancelled")
+            } else if Instant::now() >= deadline {
+                Some("timeout")
+            } else {
+                None
+            };
+            if let Some(code) = interrupt {
+                let pending = matches!(*phase, HistoryTogglePhase::Pending);
+                let error =
+                    history_toggle_fault(code, if pending { "not_started" } else { "unknown" });
+                if pending {
+                    *phase = HistoryTogglePhase::Failed(error.clone());
+                }
+                // 已经开始的创建/关闭仍由UI拥有；不撤销、不重放、不释放窗口槽。
+                return Err(error);
+            }
+            match *phase {
+                HistoryTogglePhase::Opened => return Ok(json!({"opened":true})),
+                HistoryTogglePhase::Closed => return Ok(json!({"closed":true})),
+                _ => {}
+            }
+        }
+        match receiver.recv_timeout(POLL.min(deadline.saturating_duration_since(Instant::now()))) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let phase = phase.lock().unwrap_or_else(|error| error.into_inner());
+                if matches!(
+                    *phase,
+                    HistoryTogglePhase::Opened
+                        | HistoryTogglePhase::Closed
+                        | HistoryTogglePhase::Failed(_)
+                ) {
+                    continue;
+                }
+                return Err(history_toggle_fault(
+                    "ui_unavailable",
+                    if matches!(*phase, HistoryTogglePhase::Pending) {
+                        "not_started"
+                    } else {
+                        "unknown"
+                    },
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod history_toggle_lifecycle_tests {
+    use super::*;
+
+    fn request() -> (HistoryToggleRequest, Receiver<()>) {
+        let (changed, receiver) = mpsc::sync_channel(1);
+        (
+            HistoryToggleRequest {
+                target: None,
+                accepted: Instant::now(),
+                cancellation: CancellationToken::new(),
+                deadline: Instant::now() + Duration::from_secs(5),
+                phase: Arc::new(Mutex::new(HistoryTogglePhase::Pending)),
+                changed,
+                busy: Arc::new(AtomicBool::new(false)),
+            },
+            receiver,
+        )
+    }
+
+    #[test]
+    fn headless_toggle_rejects_without_forwarding_or_launching() {
+        struct Inner;
+        impl NativeHost for Inner {
+            fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+                panic!("切换历史窗不得回退到其他能力");
+            }
+        }
+        let error = Host::new(Inner, None)
+            .call("ui.toggle_history", json!({}), &CancellationToken::new())
+            .unwrap_err();
+        assert_eq!(error.code, "ui_unavailable");
+        assert_eq!(error.method.as_deref(), Some("ui.toggle_history"));
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+    }
+
+    #[test]
+    fn chooser_slot_is_busy_before_missing_target_and_is_not_released() {
+        let (request, receiver) = request();
+        request.busy.store(true, Ordering::Release);
+        assert!(prepare_history_toggle_open(&request).is_none());
+        let error = wait_history_toggle(
+            &request.phase,
+            receiver,
+            &request.cancellation,
+            request.deadline,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "ui_busy");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        assert!(request.busy.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn opening_without_host_target_releases_only_its_new_reservation() {
+        let (request, receiver) = request();
+        assert!(prepare_history_toggle_open(&request).is_none());
+        let error = wait_history_toggle(
+            &request.phase,
+            receiver,
+            &request.cancellation,
+            request.deadline,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "target_unavailable");
+        assert!(!request.busy.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn close_needs_no_external_target_and_duplicate_close_does_not_retry_cleanup() {
+        let (request, _) = request();
+        assert!(begin_history_toggle_close(&request, false));
+        assert!(matches!(
+            *request.phase.lock().unwrap(),
+            HistoryTogglePhase::Closing
+        ));
+        let (duplicate, receiver) = self::request();
+        assert!(!begin_history_toggle_close(&duplicate, true));
+        let error = wait_history_toggle(
+            &duplicate.phase,
+            receiver,
+            &duplicate.cancellation,
+            duplicate.deadline,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "ui_busy");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        assert!(matches!(
+            *request.phase.lock().unwrap(),
+            HistoryTogglePhase::Closing
+        ));
+    }
+
+    #[test]
+    fn cancellation_before_start_prevents_both_branches_after_start_stays_unknown() {
+        for closing in [false, true] {
+            let (request, receiver) = request();
+            request.cancellation.cancel();
+            assert!(!begin_history_toggle(&request, closing));
+            let error = wait_history_toggle(
+                &request.phase,
+                receiver,
+                &request.cancellation,
+                request.deadline,
+            )
+            .unwrap_err();
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+            let (started, receiver) = self::request();
+            assert!(begin_history_toggle(&started, closing));
+            started.cancellation.cancel();
+            let error = wait_history_toggle(
+                &started.phase,
+                receiver,
+                &started.cancellation,
+                started.deadline,
+            )
+            .unwrap_err();
+            assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+            assert!(matches!(
+                *started.phase.lock().unwrap(),
+                HistoryTogglePhase::Creating | HistoryTogglePhase::Closing
+            ));
+        }
+    }
+
+    #[test]
+    fn timed_out_close_keeps_ui_slot_until_owner_removes_window_then_closed_receipt_is_distinct() {
+        let (mut request, receiver) = request();
+        request.busy.store(true, Ordering::Release);
+        let slot = HistorySlot(request.busy.clone());
+        let mut main = crate::clipboard_history_ui_state::HistoryUiState::new(true);
+        let (main_start, _) = main.primary().unwrap();
+        main.acknowledge(
+            main_start,
+            crate::clipboard_history_controller::Status::Running {
+                key: crate::clipboard_history_controller::SessionKey {
+                    generation: 1,
+                    listener_session: 2,
+                },
+            },
+            None,
+        );
+        let mut popup = crate::clipboard_history_ui_state::HistoryUiState::new(true);
+        let (start, _) = popup.primary().unwrap();
+        popup.acknowledge(
+            start,
+            crate::clipboard_history_controller::Status::Running {
+                key: crate::clipboard_history_controller::SessionKey {
+                    generation: 1,
+                    listener_session: 1,
+                },
+            },
+            None,
+        );
+        assert!(begin_history_toggle_close(
+            &request,
+            popup.popup_close_requested()
+        ));
+        let (stop, command) = popup.request_popup_close().unwrap();
+        assert_eq!(command, crate::clipboard_history_ui_state::Control::Disable);
+        assert!(!popup.popup_close_ready());
+        request.deadline = Instant::now();
+        let error = wait_history_toggle(
+            &request.phase,
+            receiver,
+            &request.cancellation,
+            request.deadline,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "timeout");
+        assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+        assert!(request.busy.load(Ordering::Acquire));
+        assert!(matches!(
+            *request.phase.lock().unwrap(),
+            HistoryTogglePhase::Closing
+        ));
+        // 旧确认不能使本窗Off；主窗也继续保持自己的On。
+        popup.acknowledge(
+            start,
+            crate::clipboard_history_controller::Status::Stopped,
+            None,
+        );
+        assert!(!popup.popup_close_ready());
+        assert!(request.busy.load(Ordering::Acquire));
+        assert_eq!(main.phase, crate::clipboard_history_ui_state::Phase::On);
+        popup.acknowledge(
+            stop,
+            crate::clipboard_history_controller::Status::Stopped,
+            None,
+        );
+        assert!(popup.popup_close_ready());
+        assert_eq!(main.phase, crate::clipboard_history_ui_state::Phase::On);
+        // 与UI相同：本窗确认Off后移除窗口/释放所有者槽，之后才发布Closed。
+        drop(slot);
+        finish_history_toggle(&request, HistoryTogglePhase::Closed);
+        assert!(!request.busy.load(Ordering::Acquire));
+        let (_signal, receiver) = mpsc::sync_channel(1);
+        assert_eq!(
+            wait_history_toggle(
+                &request.phase,
+                receiver,
+                &CancellationToken::new(),
+                Instant::now() + Duration::from_secs(1)
+            )
+            .unwrap(),
+            json!({"closed":true})
+        );
+    }
+}
 #[cfg(test)]
 mod history_open_lifecycle_tests {
     use super::*;

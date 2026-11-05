@@ -166,6 +166,19 @@ function createDesktopApi(invoke) {
     },
   });
   const ui = Object.freeze({
+    toggleHistory: (...args) => {
+      const method = 'ui.toggle_history';
+      if (args.length !== 0) invalid(method, '切换历史窗口不接受参数。');
+      const receipt = value => {
+        const keys = value && typeof value === 'object' && !Array.isArray(value) ? Reflect.ownKeys(value) : [];
+        if (keys.length === 1 && keys[0] === 'opened' && value.opened === true) return {opened:true};
+        if (keys.length === 1 && keys[0] === 'closed' && value.closed === true) return {closed:true};
+        throw Object.assign(new Error('历史窗口切换回执未确认，不会自动重试。'),
+          {code:'invalid_response', method, effectState:'unknown'});
+      };
+      const result = invoke(method, {});
+      return result && typeof result.then === 'function' ? result.then(receipt) : receipt(result);
+    },
     openHistory: (...args) => {
       const method = 'ui.open_history';
       if (args.length !== 0) invalid(method, '打开历史窗口不接受参数。');

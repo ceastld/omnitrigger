@@ -6,6 +6,8 @@ Node 异步入口为 `manage`，轻量同步模块入口为 `manage-script`。�
 
 动作 `open`（Node）或 `open-script`（轻量同步）无需输入参数，通过 `ctx.ui.openHistory()` 在已有主进程打开完整独立历史页。调用文件为 [open-call.json](open-call.json) 和 [open-script-call.json](open-script-call.json)，不需要填写程序或配置路径。目标在本次动作提交时捕获，窗口打开后不会改抓前台；默认关闭采集，也不启动第二套 Hook。创建回执返回后窗口继续存活。关闭时只停止该窗自己的采集，确认停止后才移除窗口；停止失败保留窗口供重试，不退出主程序或停止主窗采集。已有选择窗或 API 历史窗时返回 `ui_busy`；无应用界面的 CLI 返回 `ui_unavailable`。回执仅确认窗口创建，取消或结果不确定时不自动重试。应用、宿主和 SDK 需支持该 API。
 
+动作 `toggle`（Node）或 `toggle-script`（轻量同步）通过无参 `ctx.ui.toggleHistory()` 切换同一个 API 历史窗口，调用文件为 [toggle-call.json](toggle-call.json) 和 [toggle-script-call.json](toggle-script-call.json)。无窗时使用本次动作的原目标打开并返回 `{opened:true}`；已有窗时只请求关闭该窗，确认自身采集停止并移除后返回 `{closed:true}`，关闭不需要新的外部目标。选择窗占用或历史窗正在关闭时返回 `ui_busy`，不会借重复切换自动重试清理。创建或关闭已开始后的取消、超时可能为 `unknown`，不应据此自动切换第二次。`open` / `open-script` 继续保持只打开的契约。
+
 管理入口的输入必须明确选择一种模式，不接受其它参数：
 
 - `{"mode":"append","text":"原样保存的文本"}`：显式保存输入，不读取剪贴板。允许空文本与空白，最多 65536 UTF-16 单元，无 NUL 或坏代理项。连续重复由存储返回 `inserted:false`。

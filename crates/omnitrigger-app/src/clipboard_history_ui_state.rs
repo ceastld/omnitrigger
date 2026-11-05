@@ -311,6 +311,10 @@ impl HistoryUiState {
         }
     }
 
+    pub fn popup_close_requested(&self) -> bool {
+        self.popup_close_requested
+    }
+
     pub fn popup_close_ready(&self) -> bool {
         self.popup_close_requested && self.phase == Phase::Off
     }

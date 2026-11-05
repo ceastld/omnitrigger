@@ -52,6 +52,11 @@ export function checkClipboardHistoryTypes({
       + `const saved: ${prefix}ClipboardHistoryAppend = ${awaitCall("ctx.clipboard.history.append({text:'  synthetic 😀  '})")};\n`
       + `const empty: ${prefix}ClipboardHistoryAppend = ${awaitCall("ctx.clipboard.history.append({text:''})")};\n`
       + `const removed: ${prefix}ClipboardHistoryRemove = ${awaitCall("ctx.clipboard.history.remove({id:'9007199254740993'})")};\n`
+      + `const oldOpen: {opened:true} = ${awaitCall('ctx.ui.openHistory()')};\n`
+      + `const toggled: {opened:true} | {closed:true} = ${awaitCall('ctx.ui.toggleHistory()')};\n`
+      + (asynchronous ? 'const pendingToggle:Promise<{opened:true}|{closed:true}> = ctx.ui.toggleHistory();\n'
+        : 'const immediateToggle:{opened:true}|{closed:true} = ctx.ui.toggleHistory();\n')
+      + 'if ("opened" in toggled) { const opened:true = toggled.opened; } else { const closed:true = toggled.closed; }\n'
       + 'const revision: string = listing.revision; const id: string = saved.id; const stamp: string = item.createdAt;\n'
       + 'const units: number = listing.items[0].utf16Units; const preview: string = listing.items[0].preview;\n'
       + 'const body: string = item.text; const inserted: boolean = empty.inserted; const didRemove: boolean = removed.removed;\n'
@@ -61,6 +66,7 @@ export function checkClipboardHistoryTypes({
       + (asynchronous ? '' : 'const savedMain: ScriptMain = value => value.clipboard.history.append({text:"synthetic"});\n'
         + 'const removedMain: ScriptMain = value => value.clipboard.history.remove({id:"1"});\n'
         + 'const listedMain: ScriptMain = value => value.clipboard.history.list({limit:1});\n'
+        + 'const toggledMain: ScriptMain = value => value.ui.toggleHistory();\n'
         + 'const readMain: ScriptMain = value => value.clipboard.history.get({id:"1"});\n'
         + 'function itemAsJson(value:ScriptClipboardHistoryItem):ScriptJsonValue{return value;}\n')
       + 'return {revision,id,stamp,units,preview,inserted,didRemove,count:limited.items.length};\n}\n';
@@ -74,6 +80,16 @@ export function checkClipboardHistoryTypes({
         jsonPromise:'const main: ScriptMain = () => Promise.resolve(true);',
         jsonFunction:'const main: ScriptMain = () => ({handler:() => true});',
       }),
+      toggleArity:'ctx.ui.toggleHistory({});',
+      toggleMustNarrow:`const opened = (${awaitCall('ctx.ui.toggleHistory()')}).opened;`,
+      toggleReceiptAccess: asynchronous ? 'ctx.ui.toggleHistory().opened;' : 'ctx.ui.toggleHistory().then(() => true);',
+      openArity:'ctx.ui.openHistory({});',
+      openHasNoClosed:`const closed = (${awaitCall('ctx.ui.openHistory()')}).closed;`,
+      openTiming: asynchronous ? 'const immediate:{opened:true} = ctx.ui.openHistory();' : 'const pending:Promise<{opened:true}> = ctx.ui.openHistory();',
+      toggleHasNoBody:`const text = (${awaitCall('ctx.ui.toggleHistory()')}).text;`,
+      toggleTiming: asynchronous
+        ? 'const immediate:{opened:true}|{closed:true} = ctx.ui.toggleHistory();'
+        : 'const pending:Promise<{opened:true}|{closed:true}> = ctx.ui.toggleHistory();',
       listLimitType:'ctx.clipboard.history.list({limit:"100"});',
       listExtra:'ctx.clipboard.history.list({page:1});',
       listArity:'ctx.clipboard.history.list({}, {});',

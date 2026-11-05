@@ -15,7 +15,7 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 23] = [
+const METHODS: [&str; 24] = [
     "system.open",
     "process.capture",
     "history.list",
@@ -26,6 +26,7 @@ const METHODS: [&str; 23] = [
     "ui.choose",
     "ui.notify",
     "ui.open_history",
+    "ui.toggle_history",
     "browser.profiles",
     "browser.call",
     "target.info",
@@ -269,6 +270,7 @@ impl NativeBridge {
                         if opening
                             || request.method == "ui.choose"
                             || request.method == "ui.open_history"
+                            || request.method == "ui.toggle_history"
                             || data_copy
                             || history
                             || capture

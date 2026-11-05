@@ -19,7 +19,7 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'ui.choose' | 'ui.notify' | 'ui.open_history';
+  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'ui.choose' | 'ui.notify' | 'ui.open_history' | 'ui.toggle_history';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
 }
@@ -133,6 +133,10 @@ export interface ActionContext {
   ui: {
     /** 只确认创建独立历史窗；动作结束后仍存活，关闭仅停止该窗自己的采集。无UI为ui_unavailable。 */
     openHistory(): Promise<{opened: true}>;
+    /** 无窗用本次Host原目标创建；已有窗仅关闭本窗，确认自身采集停止并移除后才返回closed。
+     * chooser或未完成关闭为ui_busy；关闭不需要新目标；无UI为ui_unavailable。
+     * 创建/关闭开始后取消或超时为unknown，不自动重试，也不停止主窗采集。 */
+    toggleHistory(): Promise<{opened: true} | {closed: true}>;
     /** 需要应用界面；仅确认已接纳并创建通知请求，不证明用户已读。
      * 不激活窗口，纯文本显示；已有通知返回 ui_busy，不排队或覆盖。
      * await 只等创建回执；脚本正常结束后通知按时长存活，应用退出收尾。

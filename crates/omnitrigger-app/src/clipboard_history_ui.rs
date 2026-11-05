@@ -286,6 +286,10 @@ impl ClipboardHistoryUi {
         }
     }
 
+    pub fn popup_close_requested(&self) -> bool {
+        self.state.popup_close_requested()
+    }
+
     pub fn popup_close_ready(&self) -> bool {
         self.state.popup_close_ready()
     }
