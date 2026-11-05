@@ -50,3 +50,33 @@ test('坏语法、大小和不支持的入口类型返回结构化拒绝',()=>{
   assert.equal(analyzeScriptEntry().passed,false);
   for(const invalid of [null,[],4])assert.equal(analyzeScriptEntry(invalid).passed,false);
 });
+
+test('轻量async入口即使没有ScriptMain注解也不能报告声明检查通过',()=>{
+  for(const text of ['export async function main(){return null;}',
+    'async function run(){return null;}export {run as main};',
+    'export const main=async()=>null;',
+    'const run=async function(){return null};export {run as main};']) {
+    const result=inspect(text);
+    assert.equal(result.passed,false);assert.equal(result.mainExport,'local_async_declaration');
+    assert.equal(result.diagnostics[0].code,'entry_main_async');
+    assert.equal(result.runtimeExecuted,false);assert.equal(result.filesRead,false);
+  }
+});
+test('轻量生成器入口不能把未执行的迭代器当成JSON入口',()=>{
+  for(const text of ['export function* main(){yield 1;}',
+    'function* run(){yield 1;}export {run as main};',
+    'export const main=function*(){return null;};',
+    'export async function* main(){yield 1;}']) {
+    const result=inspect(text);
+    assert.equal(result.passed,false);assert.equal(result.mainExport,'local_generator_declaration');
+    assert.equal(result.diagnostics[0].code,'entry_main_generator');
+    assert.equal(result.diagnostics[0].severity,'error');
+  }
+});
+test('未作为main导出的async或生成器辅助函数不被一概拒绝',()=>{
+  for(const text of ['async function helper(){return null;}export function main(){return null;}',
+    'function* helper(){yield 1;}export const main=()=>({ok:true});']) {
+    const result=inspect(text);assert.equal(result.passed,true);
+    assert.equal(result.mainExport,'local_callable_declaration');
+  }
+});

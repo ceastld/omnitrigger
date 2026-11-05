@@ -1,4 +1,4 @@
-// 只检查 ESM 文本中的 main 具名导出声明；不解析依赖、不执行初始化器。
+// 只检查轻量 ESM 的 main 具名导出声明；不解析依赖、不执行初始化器。
 import ts from 'typescript';
 import {Buffer} from 'node:buffer';
 
@@ -25,7 +25,8 @@ export function analyzeScriptEntry(input={}) {
   }
   const locals=new Map(),exported=[],stars=[];
   const has=(node,kind)=>node.modifiers?.some(m=>m.kind===kind);
-  const callable=value=>value&&(ts.isArrowFunction(value)||ts.isFunctionExpression(value))?'callable':
+  const functionKind=node=>node.asteriskToken?'generator_callable':has(node,ts.SyntaxKind.AsyncKeyword)?'async_callable':'callable';
+  const callable=value=>value&&(ts.isArrowFunction(value)||ts.isFunctionExpression(value))?functionKind(value):
     value&&(ts.isStringLiteralLike(value)||ts.isNumericLiteral(value)||ts.isClassExpression(value)
       ||ts.isObjectLiteralExpression(value)||ts.isArrayLiteralExpression(value)
       ||[ts.SyntaxKind.TrueKeyword,ts.SyntaxKind.FalseKeyword,ts.SyntaxKind.NullKeyword].includes(value.kind))?'noncallable':'unresolved';
@@ -36,7 +37,7 @@ export function analyzeScriptEntry(input={}) {
   for(const node of source.statements) {
     const direct=has(node,ts.SyntaxKind.ExportKeyword)&&!has(node,ts.SyntaxKind.DefaultKeyword);
     if(ts.isFunctionDeclaration(node)&&node.name) {
-      locals.set(node.name.text,'callable');
+      locals.set(node.name.text,functionKind(node));
       if(direct&&node.name.text==='main')exported.push({local:'main',node});
     } else if(ts.isClassDeclaration(node)&&node.name) {
       locals.set(node.name.text,'noncallable');
@@ -68,6 +69,13 @@ export function analyzeScriptEntry(input={}) {
     return result('missing_named_export');
   }
   const entry=exported[0],kind=entry.kind??locals.get(entry.local)??'unresolved';
+  if(kind==='async_callable'||kind==='generator_callable') {
+    const asyncMain=kind==='async_callable';
+    add(asyncMain?'entry_main_async':'entry_main_generator','error',asyncMain
+      ?'轻量 main 入口不能声明为 async；该宿主要求同步返回 JSON。'
+      :'轻量 main 入口不能声明为生成器；迭代器不是该入口需要的 JSON 结果。',entry.node,source);
+    return result(asyncMain?'local_async_declaration':'local_generator_declaration');
+  }
   if(kind==='noncallable') {
     add('entry_main_noncallable','error','main 的静态声明是不可直接调用的值或 class。',entry.node,source);
     return result('local_noncallable_declaration');
