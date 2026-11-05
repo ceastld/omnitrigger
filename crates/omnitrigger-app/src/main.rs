@@ -1072,6 +1072,9 @@ impl Workspace {
         }
         self.smooth_scroll.cancel_all();
         self.page = page;
+        if page == Page::TextHistory {
+            self.text_history.activate();
+        }
         self.package_picker_for_draft = false;
         self.preset_edit_id = None;
         cx.notify();
@@ -6596,6 +6599,12 @@ fn main() {
                             title_bar,
                         )
                     });
+                    if text_history_page {
+                        view.update(cx, |view, cx| {
+                            view.text_history.activate();
+                            cx.notify();
+                        });
+                    }
                     let closing_view = view.downgrade();
                     let appearance_view = view.downgrade();
                     window

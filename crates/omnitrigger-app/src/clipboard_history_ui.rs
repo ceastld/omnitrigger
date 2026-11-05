@@ -4,7 +4,9 @@ use crate::clipboard_history_background::{Cancellation, HistoryBackground};
 use crate::clipboard_history_controller::{
     CommitDisposition, DropReason, Failure, Status, StoreFailure,
 };
-use crate::clipboard_history_filter::{summary_label, SummaryQuery, MAX_QUERY_CHARACTERS};
+use crate::clipboard_history_filter::{
+    summary_label, SummaryDirection, SummaryQuery, MAX_QUERY_CHARACTERS,
+};
 use crate::clipboard_history_send::{
     HistoryLaunchTarget, HistorySendRequest, HistorySendSession, SendFailure, SendReceipt,
 };
@@ -13,7 +15,7 @@ use crate::clipboard_history_ui_state::{Control, HistoryUiState, Phase};
 use crate::event_bridge::{EventBridge, UiWake};
 use crate::message_input::MessageInput;
 use crate::theme::{self, button, rgb, Tone};
-use gpui::{div, prelude::*, px, Context, Div, Entity, Subscription};
+use gpui::{div, prelude::*, px, Context, Div, Entity, ScrollHandle, Subscription};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -72,6 +74,7 @@ pub(super) struct ClipboardHistoryUi {
     sending: HistorySendSession,
     query: SummaryQuery,
     search: Entity<MessageInput>,
+    scroll: ScrollHandle,
     _search_changed: Subscription,
     store: Option<Arc<ClipboardHistoryStore>>,
     wake: UiWake,
@@ -98,6 +101,7 @@ impl ClipboardHistoryUi {
                 Ok(query) if query != this.text_history.query => {
                     this.text_history.cancel_send();
                     this.text_history.query = query;
+                    this.text_history.scroll.scroll_to_item(0);
                     this.text_history.state.selected = None;
                 }
                 Ok(_) => {}
@@ -112,6 +116,7 @@ impl ClipboardHistoryUi {
             sending: HistorySendSession::new(launch_target, ui_window),
             query: SummaryQuery::default(),
             search,
+            scroll: ScrollHandle::new(),
             _search_changed: search_changed,
             store,
             wake,
@@ -191,6 +196,13 @@ impl ClipboardHistoryUi {
         });
     }
 
+    /// 页面已明确打开后请求一次摘要；不在构造、render或poll中推断进入。
+    pub fn activate(&mut self) {
+        if let Some(id) = self.state.initial_query() {
+            self.submit(Request::List { id });
+        }
+    }
+
     fn refresh(&mut self) {
         if let Some(id) = self.state.query() {
             self.submit(Request::List { id });
@@ -223,6 +235,30 @@ impl ClipboardHistoryUi {
             }),
             Err(error) => self.state.sent(id, Err(error)),
         }
+    }
+
+    fn select_adjacent(&mut self, direction: SummaryDirection) {
+        if !self.state.can_query() {
+            return;
+        }
+        let Some(id) = self
+            .query
+            .adjacent_id(&self.state.items, self.state.selected.as_deref(), direction)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let Some(visible_index) = self
+            .query
+            .matching_indices(&self.state.items)
+            .iter()
+            .position(|&index| self.state.items[index].id == id)
+        else {
+            return;
+        };
+        self.sending.selection_changing(&id);
+        self.state.select(&id);
+        self.scroll.scroll_to_item(visible_index);
     }
 
     fn remove_selected(&mut self) {
@@ -267,7 +303,7 @@ impl ClipboardHistoryUi {
                     changed = true;
                 }
                 Ok(Reply::Sent { id, result }) => {
-                    self.sending.finish(id);
+                    self.sending.complete(id, &result);
                     self.state.sent(id, result);
                     changed = true;
                 }
@@ -509,6 +545,7 @@ impl super::Workspace {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.text_history.scroll)
             .rounded(px(14.))
             .border_1()
             .border_color(rgb(theme::BORDER))
@@ -536,15 +573,17 @@ impl super::Workspace {
             );
         }
         if visible.is_empty() {
-            list = list.child(
-                div()
-                    .p(px(32.))
-                    .child(super::caption(if state.items.is_empty() {
-                        "暂无摘要，点击刷新查询已有历史。"
-                    } else {
-                        "没有匹配的摘要，试试其他筛选词。"
-                    })),
-            );
+            list = list.child(div().p(px(32.)).child(super::caption(
+                if state.initial_list_loading() {
+                    "正在加载历史摘要…"
+                } else if state.items.is_empty() && state.revision.is_some() {
+                    "暂无历史摘要。"
+                } else if state.items.is_empty() {
+                    "暂无摘要，点击刷新查询已有历史。"
+                } else {
+                    "没有匹配的摘要，试试其他筛选词。"
+                },
+            )));
         }
         div()
             .flex_1()
@@ -578,6 +617,55 @@ impl super::Workspace {
                     ),
             )
             .child(div().flex_none().child(self.text_history.search.clone()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        button(
+                            "text-history-previous",
+                            "上一条",
+                            Tone::Secondary,
+                            state.can_query()
+                                && self
+                                    .text_history
+                                    .query
+                                    .adjacent_id(
+                                        &state.items,
+                                        state.selected.as_deref(),
+                                        SummaryDirection::Previous,
+                                    )
+                                    .is_some(),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.text_history
+                                .select_adjacent(SummaryDirection::Previous);
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        button(
+                            "text-history-next",
+                            "下一条",
+                            Tone::Secondary,
+                            state.can_query()
+                                && self
+                                    .text_history
+                                    .query
+                                    .adjacent_id(
+                                        &state.items,
+                                        state.selected.as_deref(),
+                                        SummaryDirection::Next,
+                                    )
+                                    .is_some(),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.text_history.select_adjacent(SummaryDirection::Next);
+                            cx.notify();
+                        })),
+                    ),
+            )
             .child(
                 div()
                     .flex()

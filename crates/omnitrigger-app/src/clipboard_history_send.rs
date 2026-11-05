@@ -40,12 +40,22 @@ impl SendFailure {
         match self.code {
             "target_expired" => "原窗口信息已过期，请从原窗口重新打开文本历史。",
             "target_is_own_window" => "不能向 OmniTrigger 自身窗口发送。",
+            "target_identity_changed" => "原窗口身份已变化或无法核验，请从原窗口重新打开文本历史。",
+            "target_changed" => "原窗口或前台核验未完成，未提交文本。请回到历史窗口后明确重试。",
             "history_selection_changed" => "选中项已变化，请刷新后重新选择。",
             "history_text_empty" => "空文本无需发送。",
             "cancelled" => "发送已取消。",
             "send_busy" => "已有发送尚未结束。",
             _ => "原窗口不可用或前台已变化，未提交文本。",
         }
+    }
+
+    fn invalidates_target(self) -> bool {
+        self.effect == InputEffect::NotStarted
+            && matches!(
+                self.code,
+                "target_identity_changed" | "target_is_own_window"
+            )
     }
 
     pub fn needs_refresh(self) -> bool {
@@ -160,6 +170,7 @@ pub(super) struct HistorySendSession {
     ui_window: Option<isize>,
     pending: Option<(u64, String, CancellationToken)>,
     expired: bool,
+    invalidated: bool,
 }
 
 impl HistorySendSession {
@@ -172,6 +183,7 @@ impl HistorySendSession {
             ui_window,
             pending: None,
             expired: false,
+            invalidated: false,
         }
     }
 
@@ -208,7 +220,8 @@ impl HistorySendSession {
     }
 
     fn ready_at(&self, now: SendTime) -> bool {
-        !self.expired
+        !self.invalidated
+            && !self.expired
             && self.pending.is_none()
             && self.ui_window.is_some()
             && self
@@ -240,6 +253,8 @@ impl HistorySendSession {
             } else {
                 "正在向原窗口提交选中的文本…"
             }
+        } else if self.invalidated {
+            "本次原窗口身份已不可用，请从原窗口重新打开文本历史。"
         } else if self.expired {
             "原窗口信息已过期，请从原窗口重新打开文本历史。"
         } else if self.target.is_none() || self.ui_window.is_none() {
@@ -256,6 +271,9 @@ impl HistorySendSession {
     ) -> Result<HistorySendRequest, SendFailure> {
         if self.pending.is_some() {
             return Err(SendFailure::before("send_busy"));
+        }
+        if self.invalidated {
+            return Err(SendFailure::before("target_identity_changed"));
         }
         if self.expired {
             return Err(SendFailure::before("target_expired"));
@@ -291,6 +309,25 @@ impl HistorySendSession {
     pub fn cancel(&self) {
         if let Some((_, _, cancellation)) = &self.pending {
             cancellation.cancel();
+        }
+    }
+
+    pub fn complete(&mut self, id: u64, result: &Result<SendReceipt, SendFailure>) {
+        if !self
+            .pending
+            .as_ref()
+            .is_some_and(|(pending, _, _)| *pending == id)
+        {
+            return;
+        }
+        self.finish(id);
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.invalidates_target())
+        {
+            self.target = None;
+            self.invalidated = true;
         }
     }
 
@@ -432,9 +469,9 @@ impl HistorySendRequest {
     pub fn run(self, store: Arc<ClipboardHistoryStore>) -> Result<SendReceipt, SendFailure> {
         self.check(SendTime::now()?)?;
         let target = ScriptTarget::from_snapshot(self.target.snapshot)
-            .map_err(|_| SendFailure::before("target_changed"))?;
+            .map_err(|_| SendFailure::before("target_identity_changed"))?;
         let desktop = DesktopHost::from_snapshot(self.target.snapshot)
-            .map_err(|_| SendFailure::before("target_changed"))?;
+            .map_err(|_| SendFailure::before("target_identity_changed"))?;
         let port = DesktopSendPort {
             target,
             host: WithClipboardHistory::new(desktop, Some(store)),
@@ -466,8 +503,11 @@ impl HistorySendRequest {
                 &self.cancellation,
                 self.target.expires,
             )
-            .map_err(|_| {
-                SendFailure::before(if self.cancellation.is_cancelled() {
+            .map_err(|error| {
+                SendFailure::before(if error.code == "target_changed" {
+                    // 既有DesktopHost的target.context用此代码报告snapshot身份核验失败。
+                    "target_identity_changed"
+                } else if self.cancellation.is_cancelled() {
                     "cancelled"
                 } else {
                     "target_changed"
@@ -482,7 +522,7 @@ impl HistorySendRequest {
             return Err(SendFailure::before("target_is_own_window"));
         }
         if snapshot != self.target.snapshot {
-            return Err(SendFailure::before("target_changed"));
+            return Err(SendFailure::before("target_identity_changed"));
         }
         Ok(())
     }
@@ -837,7 +877,7 @@ mod tests {
         *host.contexts.lock().unwrap() = vec![context(31_000), context(31_000), changed];
         assert_eq!(
             request(now).execute(&host, || Ok(now)).unwrap_err().code,
-            "target_changed"
+            "target_identity_changed"
         );
         assert!(host.sent.lock().unwrap().is_empty());
     }
@@ -1134,7 +1174,7 @@ mod tests {
                 .execute(&host, || Ok(now))
                 .unwrap_err()
                 .code,
-            "target_changed"
+            "target_identity_changed"
         );
         assert!(host.sent.lock().unwrap().is_empty());
         let mut host = port();
@@ -1239,6 +1279,138 @@ mod tests {
             }),
         );
         assert!(session.action_enabled(state.can_send()));
+    }
+
+    #[test]
+    fn confirmed_identity_failure_disarms_send_but_keeps_history_data_actions() {
+        use crate::clipboard_history_store::HistoryList;
+        use crate::clipboard_history_ui_state::HistoryUiState;
+        for code in ["target_identity_changed", "target_is_own_window"] {
+            let now = SendTime::now().unwrap();
+            let mut session = HistorySendSession::new(Some(launch(now)), Some(456));
+            let mut state = HistoryUiState::new(true);
+            state.listed(
+                None,
+                Ok(HistoryList {
+                    items: vec![selected().summary],
+                    revision: "2".into(),
+                }),
+            );
+            state.select("1");
+            let (id, selected) = state.begin_send_selection().unwrap();
+            let _request = session.begin(id, selected).unwrap();
+            let result = Err(SendFailure::before(code));
+            session.complete(id, &result);
+            state.sent(id, result);
+            assert!(!session.pending());
+            assert!(session.target.is_none());
+            assert!(!session.action_enabled(state.can_send()));
+            assert_eq!(
+                session.begin(id + 1, self::selected()).err().unwrap().code,
+                "target_identity_changed"
+            );
+            assert!(state.can_query());
+            assert!(state.can_remove());
+            assert!(session.status().contains("重新打开"));
+            let refresh = state.query().unwrap();
+            state.listed(
+                Some(refresh),
+                Ok(HistoryList {
+                    items: vec![self::selected().summary],
+                    revision: "2".into(),
+                }),
+            );
+            assert!(state.can_remove());
+            assert!(!session.action_enabled(state.can_send()));
+            assert!(session.status().contains("重新打开"));
+        }
+    }
+
+    #[test]
+    fn transient_foreground_failure_keeps_capability_for_an_explicit_new_attempt() {
+        let now = SendTime::now().unwrap();
+        let mut session = HistorySendSession::new(Some(launch(now)), Some(456));
+        let original = session.target.as_ref().unwrap().snapshot;
+        let _request = session.begin(1, selected()).unwrap();
+        session.complete(1, &Err(SendFailure::before("target_changed")));
+        assert!(!session.pending());
+        assert_eq!(session.target.as_ref().unwrap().snapshot, original);
+        assert!(session.action_enabled(true));
+        // 只有新的明确begin产生请求；完成回执本身不提交或重试。
+        assert!(session.begin(2, selected()).is_ok());
+    }
+
+    #[test]
+    fn stale_identity_error_cannot_disarm_another_pending_request() {
+        let now = SendTime::now().unwrap();
+        let mut session = HistorySendSession::new(Some(launch(now)), Some(456));
+        let _first = session.begin(1, selected()).unwrap();
+        session.complete(1, &Ok(SendReceipt { utf16_units: 5 }));
+        let _second = session.begin(2, selected()).unwrap();
+        session.complete(1, &Err(SendFailure::before("target_identity_changed")));
+        assert!(session.pending());
+        assert!(session.target.is_some());
+        assert!(!session.invalidated);
+        assert_eq!(session.action_label(), "取消发送");
+        session.complete(2, &Err(SendFailure::before("target_changed")));
+        assert!(session.ready());
+    }
+
+    #[test]
+    fn confirmed_snapshot_mismatch_is_distinct_from_unknown_input_and_stale_dto() {
+        let now = time();
+        let host = port();
+        let mut changed = context(31_000);
+        changed["process_id"] = json!(8);
+        *host.contexts.lock().unwrap() = vec![changed];
+        let failure = request(now).execute(&host, || Ok(now)).unwrap_err();
+        assert_eq!(failure.code, "target_identity_changed");
+        assert!(failure.invalidates_target());
+        assert_eq!(*host.calls.lock().unwrap(), ["target.context"]);
+        assert!(host.sent.lock().unwrap().is_empty());
+        assert!(!(SendFailure {
+            code: "input_result_unknown",
+            effect: InputEffect::Unknown
+        })
+        .invalidates_target());
+        let host = port();
+        *host.contexts.lock().unwrap() = vec![context(now.unix_ms)];
+        let failure = request(now).execute(&host, || Ok(now)).unwrap_err();
+        assert_eq!(failure.code, "target_changed");
+        assert!(!failure.invalidates_target());
+        struct ProbeFailure {
+            code: &'static str,
+        }
+        impl NativeHost for ProbeFailure {
+            fn call(
+                &self,
+                method: &str,
+                _: Value,
+                _: &CancellationToken,
+            ) -> Result<Value, ActionError> {
+                assert_eq!(method, "target.context");
+                let mut error = ActionError::new(self.code, "合成元数据错误，不应进入界面");
+                error.effect_state = Some("not_started".into());
+                Err(error)
+            }
+        }
+        impl SendPort for ProbeFailure {
+            fn restore_original(
+                &self,
+                _: isize,
+                _: &CancellationToken,
+                _: Instant,
+            ) -> Result<(), SendFailure> {
+                panic!("身份查询失败后不应交还前台")
+            }
+        }
+        for (code, invalidates) in [("target_changed", true), ("target_unavailable", false)] {
+            let failure = request(now)
+                .execute(&ProbeFailure { code }, || Ok(now))
+                .unwrap_err();
+            assert_eq!(failure.invalidates_target(), invalidates);
+            assert!(!format!("{failure:?}").contains("合成元数据错误"));
+        }
     }
 }
 

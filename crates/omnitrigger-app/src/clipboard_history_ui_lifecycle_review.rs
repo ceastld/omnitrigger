@@ -343,3 +343,60 @@ fn disconnected_state_must_not_be_revived_by_old_async_control_or_list_results()
     assert!(!ui.primary_enabled());
     assert!(!ui.can_query());
 }
+
+#[test]
+fn manual_refresh_after_real_store_busy_is_required_before_selection_actions_resume() {
+    let fixture = Fixture::new();
+    seed(&fixture);
+    let mut ui = HistoryUiState::new(true);
+    let first = ui.initial_query().unwrap();
+    ui.listed(
+        Some(first),
+        Ok(fixture.store.as_ref().list(200, || Ok(())).unwrap()),
+    );
+    ui.select("1");
+    assert!(ui.can_send());
+    let original = history_bytes(&fixture.path);
+
+    let held = held_sidecar(&fixture);
+    let refresh = ui.query().unwrap();
+    let error = fixture.store.as_ref().list(200, || Ok(())).unwrap_err();
+    assert_eq!(
+        (error.code, error.effect_state),
+        ("history_busy", "not_started")
+    );
+    ui.listed(Some(refresh), Err("无法读取文本历史，请稍后明确刷新。"));
+    assert_eq!(history_bytes(&fixture.path), original);
+    assert!(ui.can_query());
+    ui.select("2");
+    assert!(
+        ui.begin_send_selection().is_none(),
+        "读取失败后须先明确刷新，不能从旧摘要开始发送"
+    );
+    assert!(ui.remove().is_none(), "更换选中项不能跳过刷新要求");
+    assert_eq!(ui.phase, Phase::Off);
+
+    drop(held);
+    fixture
+        .store
+        .as_ref()
+        .append_at("合成锁释放后的新项", 3, || Ok(()))
+        .unwrap();
+    ui.listed(
+        None,
+        Ok(fixture.store.as_ref().list(200, || Ok(())).unwrap()),
+    );
+    assert_eq!(ui.items.len(), 2, "后台列表不替代用户要求的明确刷新");
+    assert!(ui.begin_send_selection().is_none());
+
+    let retry = ui.query().unwrap();
+    ui.listed(
+        Some(retry),
+        Ok(fixture.store.as_ref().list(200, || Ok(())).unwrap()),
+    );
+    assert_eq!(ui.items.len(), 3);
+    let (_, selected) = ui.begin_send_selection().unwrap();
+    assert_eq!(selected.summary.id, "2");
+    assert_eq!(selected.revision, "3");
+    assert_eq!(ui.phase, Phase::Off);
+}

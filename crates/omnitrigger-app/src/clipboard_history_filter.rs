@@ -53,6 +53,259 @@ impl SummaryQuery {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SummaryDirection {
+    Previous,
+    Next,
+}
+
+impl SummaryQuery {
+    /// 沿已加载的可见摘要移动；不排序、不读取正文，抵达边界时不循环。
+    pub fn adjacent_id<'a>(
+        &self,
+        items: &'a [HistorySummary],
+        selected: Option<&str>,
+        direction: SummaryDirection,
+    ) -> Option<&'a str> {
+        let visible = self.matching_indices(items);
+        let current =
+            selected.and_then(|id| visible.iter().position(|&index| items[index].id == id));
+        let target = match current {
+            None => 0,
+            Some(position) => match direction {
+                SummaryDirection::Previous => position.checked_sub(1)?,
+                SummaryDirection::Next => position.checked_add(1)?,
+            },
+        };
+        visible.get(target).map(|&index| items[index].id.as_str())
+    }
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+    use crate::clipboard_history_send::{InputEffect, SendFailure};
+    use crate::clipboard_history_store::HistoryList;
+    use crate::clipboard_history_ui_state::HistoryUiState;
+
+    fn summaries() -> Vec<HistorySummary> {
+        [
+            ("100", "Rust 最近", "5"),
+            ("20", "其他摘要", "99"),
+            ("3", "Rust 更早", "10"),
+        ]
+        .into_iter()
+        .map(|(id, preview, created_at)| HistorySummary {
+            id: id.into(),
+            preview: preview.into(),
+            utf16_units: 20,
+            created_at: created_at.into(),
+        })
+        .collect()
+    }
+
+    #[test]
+    fn either_direction_without_selection_starts_at_first_visible_summary() {
+        let items = summaries();
+        for direction in [SummaryDirection::Previous, SummaryDirection::Next] {
+            assert_eq!(
+                SummaryQuery::default().adjacent_id(&items, None, direction),
+                Some("100")
+            );
+        }
+    }
+
+    #[test]
+    fn movement_uses_loaded_order_instead_of_sorting_ids_or_timestamps() {
+        let items = summaries();
+        let query = SummaryQuery::default();
+        assert_eq!(
+            query.adjacent_id(&items, Some("100"), SummaryDirection::Next),
+            Some("20")
+        );
+        assert_eq!(
+            query.adjacent_id(&items, Some("20"), SummaryDirection::Previous),
+            Some("100")
+        );
+        assert_eq!(
+            query.adjacent_id(&items, Some("20"), SummaryDirection::Next),
+            Some("3")
+        );
+    }
+
+    #[test]
+    fn first_and_last_boundaries_do_not_wrap_or_keep_a_false_next_target() {
+        let items = summaries();
+        let query = SummaryQuery::default();
+        assert_eq!(
+            query.adjacent_id(&items, Some("100"), SummaryDirection::Previous),
+            None
+        );
+        assert_eq!(
+            query.adjacent_id(&items, Some("3"), SummaryDirection::Next),
+            None
+        );
+    }
+
+    #[test]
+    fn filtering_skips_hidden_rows_in_both_directions() {
+        let items = summaries();
+        let query = SummaryQuery::new("rust").unwrap();
+        assert_eq!(
+            query.adjacent_id(&items, Some("100"), SummaryDirection::Next),
+            Some("3")
+        );
+        assert_eq!(
+            query.adjacent_id(&items, Some("3"), SummaryDirection::Previous),
+            Some("100")
+        );
+    }
+
+    #[test]
+    fn missing_or_filtered_out_selection_restarts_at_first_visible_id() {
+        let items = summaries();
+        let query = SummaryQuery::new("rust").unwrap();
+        for selected in [Some("20"), Some("deleted"), None] {
+            for direction in [SummaryDirection::Previous, SummaryDirection::Next] {
+                assert_eq!(query.adjacent_id(&items, selected, direction), Some("100"));
+            }
+        }
+    }
+
+    #[test]
+    fn empty_list_and_no_matches_have_no_navigation_target() {
+        let items = summaries();
+        for direction in [SummaryDirection::Previous, SummaryDirection::Next] {
+            assert_eq!(
+                SummaryQuery::default().adjacent_id(&[], None, direction),
+                None
+            );
+            assert_eq!(
+                SummaryQuery::new("不匹配")
+                    .unwrap()
+                    .adjacent_id(&items, Some("100"), direction),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn one_visible_row_is_selectable_once_and_has_no_adjacent_target() {
+        let items = summaries();
+        let query = SummaryQuery::new("其他").unwrap();
+        assert_eq!(
+            query.adjacent_id(&items, None, SummaryDirection::Next),
+            Some("20")
+        );
+        assert_eq!(
+            query.adjacent_id(&items, Some("20"), SummaryDirection::Previous),
+            None
+        );
+        assert_eq!(
+            query.adjacent_id(&items, Some("20"), SummaryDirection::Next),
+            None
+        );
+    }
+
+    #[test]
+    fn refresh_resolves_current_id_again_and_navigation_does_not_mutate_summaries() {
+        let mut items = summaries();
+        let query = SummaryQuery::default();
+        items.remove(1);
+        let before = items.clone();
+        assert_eq!(
+            query.adjacent_id(&items, Some("3"), SummaryDirection::Previous),
+            Some("100")
+        );
+        assert_eq!(
+            query.adjacent_id(&items, Some("20"), SummaryDirection::Next),
+            Some("100")
+        );
+        assert_eq!(items, before);
+    }
+
+    #[test]
+    fn empty_text_can_be_navigated_but_does_not_become_sendable() {
+        let mut items = summaries();
+        items[0].preview.clear();
+        items[0].utf16_units = 0;
+        let mut state = HistoryUiState::new(true);
+        state.listed(
+            None,
+            Ok(HistoryList {
+                items,
+                revision: "100".into(),
+            }),
+        );
+        let id = SummaryQuery::default()
+            .adjacent_id(&state.items, None, SummaryDirection::Next)
+            .unwrap()
+            .to_owned();
+        state.select(&id);
+        assert!(!state.can_send());
+        assert!(state.begin_send_selection().is_none());
+    }
+
+    #[test]
+    fn moved_selection_reuses_real_ui_selection_and_displayed_revision() {
+        let mut state = HistoryUiState::new(true);
+        state.listed(
+            None,
+            Ok(HistoryList {
+                items: summaries(),
+                revision: "9007199254740993".into(),
+            }),
+        );
+        state.select("100");
+        let id = SummaryQuery::new("rust")
+            .unwrap()
+            .adjacent_id(
+                &state.items,
+                state.selected.as_deref(),
+                SummaryDirection::Next,
+            )
+            .unwrap()
+            .to_owned();
+        state.select(&id);
+        let (_, selection) = state.begin_send_selection().unwrap();
+        assert_eq!(selection.summary.id, "3");
+        assert_eq!(selection.revision, "9007199254740993");
+        assert!(!state.can_query());
+    }
+
+    #[test]
+    fn moving_after_unknown_send_never_clears_real_ui_refresh_barrier() {
+        let mut state = HistoryUiState::new(true);
+        state.listed(
+            None,
+            Ok(HistoryList {
+                items: summaries(),
+                revision: "100".into(),
+            }),
+        );
+        state.select("100");
+        let (request, _) = state.begin_send_selection().unwrap();
+        state.sent(
+            request,
+            Err(SendFailure {
+                code: "input_result_unknown",
+                effect: InputEffect::Unknown,
+            }),
+        );
+        let id = SummaryQuery::default()
+            .adjacent_id(
+                &state.items,
+                state.selected.as_deref(),
+                SummaryDirection::Next,
+            )
+            .unwrap()
+            .to_owned();
+        state.select(&id);
+        assert!(!state.can_send());
+        assert!(state.begin_send_selection().is_none());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

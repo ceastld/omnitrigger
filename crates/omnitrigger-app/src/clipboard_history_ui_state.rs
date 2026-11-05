@@ -39,6 +39,7 @@ pub(super) struct HistoryUiState {
     pending_io: Option<u64>,
     pending_send_selection: Option<PendingSendSelection>,
     refresh_required: bool,
+    initial_query_requested: bool,
 }
 
 impl HistoryUiState {
@@ -56,6 +57,7 @@ impl HistoryUiState {
             pending_io: None,
             pending_send_selection: None,
             refresh_required: false,
+            initial_query_requested: false,
         }
     }
 
@@ -164,6 +166,7 @@ impl HistoryUiState {
             return None;
         }
         let id = self.allocate()?;
+        self.initial_query_requested = true;
         self.pending_io = Some(id);
         self.message = None;
         Some(id)
@@ -271,8 +274,159 @@ impl HistoryUiState {
                 }
                 self.refresh_required = false;
             }
-            Err(message) => self.message = Some(message),
+            Err(message) => {
+                // 旧摘要保留供参考；读取失败后须先明确刷新再操作。
+                self.refresh_required = true;
+                self.message = Some(message);
+            }
         }
+    }
+}
+
+impl HistoryUiState {
+    /// 只由显式页面进入调用；手动查询也算已请求，不因失败或重新进入自动重试。
+    pub fn initial_query(&mut self) -> Option<u64> {
+        if self.initial_query_requested {
+            return None;
+        }
+        self.query()
+    }
+}
+
+impl HistoryUiState {
+    pub fn initial_list_loading(&self) -> bool {
+        self.revision.is_none() && self.pending_io.is_some()
+    }
+}
+
+#[cfg(test)]
+mod initial_loading_label_tests {
+    use super::*;
+
+    #[test]
+    fn pending_first_load_is_not_reported_as_empty_and_stale_reply_cannot_hide_loading() {
+        let mut state = HistoryUiState::new(true);
+        assert!(!state.initial_list_loading());
+        let id = state.initial_query().unwrap();
+        assert!(state.initial_list_loading());
+        state.listed(
+            Some(id + 1),
+            Ok(HistoryList {
+                items: vec![],
+                revision: "0".into(),
+            }),
+        );
+        assert!(state.initial_list_loading());
+        state.listed(
+            Some(id),
+            Ok(HistoryList {
+                items: vec![],
+                revision: "0".into(),
+            }),
+        );
+        assert!(!state.initial_list_loading());
+    }
+
+    #[test]
+    fn failure_restores_manual_retry_caption_and_manual_retry_shows_loading_again() {
+        let mut state = HistoryUiState::new(true);
+        let id = state.initial_query().unwrap();
+        state.listed(Some(id), Err("合成读取失败"));
+        assert!(!state.initial_list_loading());
+        assert!(state.can_query());
+        assert!(state.initial_query().is_none());
+        assert!(state.query().is_some());
+        assert!(state.initial_list_loading());
+    }
+}
+
+#[cfg(test)]
+mod initial_load_tests {
+    use super::*;
+
+    fn listing() -> HistoryList {
+        HistoryList {
+            items: vec![HistorySummary {
+                id: "10".into(),
+                preview: "合成摘要".into(),
+                utf16_units: 20,
+                created_at: "1".into(),
+            }],
+            revision: "9007199254740993".into(),
+        }
+    }
+
+    #[test]
+    fn first_activation_requests_one_list_and_repeated_activation_cannot_duplicate_it() {
+        let mut state = HistoryUiState::new(true);
+        let id = state.initial_query().unwrap();
+        assert_eq!(id, 1);
+        assert_eq!(state.phase, Phase::Off);
+        assert_eq!(state.pending_control, None);
+        assert_eq!(state.pending_io, Some(id));
+        for _ in 0..20 {
+            assert!(state.initial_query().is_none());
+        }
+        assert_eq!(state.next_id, 1);
+        assert!(!state.can_query());
+    }
+
+    #[test]
+    fn initial_read_failure_stays_manual_and_refresh_can_succeed_with_new_request_id() {
+        let mut state = HistoryUiState::new(true);
+        let id = state.initial_query().unwrap();
+        state.listed(Some(id), Err("无法读取文本历史，请稍后明确刷新。"));
+        assert!(state.can_query());
+        assert!(state.message.is_some());
+        assert_eq!(state.phase, Phase::Off);
+        for _ in 0..20 {
+            assert!(state.initial_query().is_none());
+        }
+        let manual = state.query().unwrap();
+        assert_eq!(manual, id + 1);
+        state.listed(Some(manual), Ok(listing()));
+        assert_eq!(state.items[0].id, "10");
+        assert!(state.initial_query().is_none());
+    }
+
+    #[test]
+    fn stale_and_unsolicited_replies_cannot_complete_pending_initial_list() {
+        let mut state = HistoryUiState::new(true);
+        let id = state.initial_query().unwrap();
+        state.listed(Some(id + 1), Ok(listing()));
+        state.listed(None, Ok(listing()));
+        assert!(state.items.is_empty());
+        assert_eq!(state.pending_io, Some(id));
+        assert!(state.initial_query().is_none());
+        state.listed(Some(id), Ok(listing()));
+        assert_eq!(state.items.len(), 1);
+    }
+
+    #[test]
+    fn capture_control_before_activation_does_not_consume_the_initial_query_gate() {
+        let mut state = HistoryUiState::new(true);
+        let (control, command) = state.primary().unwrap();
+        assert_eq!(command, Control::Enable);
+        let id = state.initial_query().unwrap();
+        assert_ne!(control, id);
+        assert_eq!(state.phase, Phase::Starting);
+        assert_eq!(state.pending_control, Some(control));
+        assert_eq!(state.pending_io, Some(id));
+    }
+
+    #[test]
+    fn unavailable_or_disconnected_state_does_not_start_or_revive_initial_work() {
+        let mut unavailable = HistoryUiState::new(false);
+        assert!(unavailable.initial_query().is_none());
+        assert_eq!(unavailable.next_id, 0);
+        let mut state = HistoryUiState::new(true);
+        let id = state.initial_query().unwrap();
+        state.disconnected();
+        state.listed(Some(id), Ok(listing()));
+        assert!(state.initial_query().is_none());
+        assert!(!state.available);
+        assert!(state.items.is_empty());
+        assert_eq!(state.phase, Phase::Off);
     }
 }
 
