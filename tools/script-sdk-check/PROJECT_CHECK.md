@@ -13,7 +13,7 @@ node tools/script-sdk-check/check-project-types.mjs "D:\Actions\my-script"
 
 `moduleChecks/entryChecks` 按入口返回完整静态结果。轻量导入图需要显式 `.js`／`.mjs`，不补全扩展名，也不支持 Node 包导入；静态加载图最多64模块、合计1MiB。TypeScript 的类型解析仍受明确工程范围限制。若 TypeScript 将 `./value.js` 重定向到 `value.ts`，工具仍按宿主需要的明确 `.js` 路径补读包内静态依赖，沿用相同的元数据、UTF-8和容量防护，不枚举目录。
 
-动态导入目标和再导出值无法静态确定时，返回警告并将 `staticAnalysisComplete` 设为 `false`。旧 `.js` 函数体入口继续接受类型检查，记录在 `skippedEntries`，不强加ESM导出要求；该字段也使静态分析完整性为 `false`。`main` 的函数声明不证明初始化之后仍可调用或返回合法结果。`runtimeCapabilitiesChecked/runtimeVerified` 始终为 `false`，不会探测实际宿主。更详细的静态边界见 [模块快照检查](MODULE_SNAPSHOT_CHECK.md)。
+动态导入目标和再导出值无法静态确定时，返回警告并将 `staticAnalysisComplete` 设为 `false`。旧 `.js` 函数体入口继续接受类型检查，记录在 `skippedEntries`，不强加ESM导出要求；该字段也使静态分析完整性为 `false`。清单中的旧 `.js` 入口若出现静态 `import/export`，会另报可定位的 `legacy_entry_module_syntax`：该入口实际被宿主包装为函数体，不能按 ESM 执行；模块入口使用 `.mjs` 并具名导出 `main`。此限制只针对旧入口，不限制被 `.mjs` 导入的 `.js` 辅助模块。`main` 的函数声明不证明初始化之后仍可调用或返回合法结果。`runtimeCapabilitiesChecked/runtimeVerified` 始终为 `false`，不会探测实际宿主。更详细的静态边界见 [模块快照检查](MODULE_SNAPSHOT_CHECK.md)。
 
 这适合使用记事本或需要命令行反馈的开发流程。保留入口的 `@type {ScriptMain}` 标注及工程SDK；检查使用工程自己的声明快照，不自动升级到仓库最新版。Node动作不在此工具范围内。
 
@@ -28,7 +28,7 @@ node tools/script-sdk-check/check-project-types.mjs "D:\Actions\my-script"
 
 `jsconfig.json` 的编译选项会参与检查，始终启用 `allowJs/checkJs/noEmit` 并排除隐式环境类型。检查时固定 `moduleDetection:"force"`，使多个旧 `.js` 入口的 `main` 和局部变量分别属于各自文件，符合每次调用独立函数体的运行方式；这只影响类型作用域，不改写源码、不要求旧入口导出，也不改变运行协议。编辑器需要同样的隔离时，可在工程自己的 `jsconfig.json` 中设置该选项。当前不展开 `extends`；只检查清单入口和按需依赖，不遍历 `include` 下未使用的其他文件。缺少SDK或配置分别报告 `project_sdk_missing/project_config_missing`，配置不支持或损坏为 `project_config_unsupported/project_config_invalid`。`jsconfig.json` 的 JSON 语法错误另附 `error.location`，包含工程内文件名 `file` 和从 1 开始的 `line/column`；函数接口抛出的错误也保留相同 `location`，便于命令行定位，使用既有 `project_config_invalid` 错误码。
 
-内容读取限于该工程和已定位的TypeScript标准库。云盘命名目录、符号链接、硬链接及Windows云端占位属性会拒绝；不会扫描用户目录寻找SDK。单个源码最多128KiB、声明最多512KiB，工程读取合计最多8MiB、256个文件；超限为 `project_file_limit/project_total_limit`。文本要求UTF-8，错误为 `project_utf8_invalid`，不替换坏字节后继续检查。标准库只读取已安装TypeScript中的明确文件。
+内容读取限于该工程和已定位的TypeScript标准库。云盘命名目录、符号链接、硬链接及Windows云端占位属性会拒绝；不会扫描用户目录寻找SDK。单个源码最多128KiB、声明最多512KiB，工程读取合计最多8MiB、256个文件；超限为 `project_file_limit/project_total_limit`。文本要求UTF-8，错误为 `project_utf8_invalid`，不替换坏字节后继续检查。若错误发生在工程内文件，`error.location.file` 标明入口或依赖的相对路径；无法解码时不提供或猜测 `line/column`。标准库只读取已安装TypeScript中的明确文件。
 
 该命令通过只表示当前声明和已覆盖的静态加载约束没有错误；应同时查看 `staticAnalysisComplete` 和警告。它不替代动作清单引用检查、实际模块加载、宿主能力或目标软件验收。查看实际调用行为仍使用项目现有的显式运行入口。测试全部使用合成目录，其中模块故意抛出初始化异常以证明检查没有执行代码：
 

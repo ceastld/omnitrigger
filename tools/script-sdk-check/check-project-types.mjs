@@ -82,7 +82,7 @@ export function checkProjectTypes(projectDirectory) {
       }
       let text;
       try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes.subarray(0,count));}
-      catch {fail('project_utf8_invalid');}
+      catch {fail('project_utf8_invalid',within(root,path)?{file:relative(root,path).replaceAll('\\','/')}:undefined);}
       if(within(root,path)&&['.js','.mjs'].includes(extname(path)))sourceSnapshots.set(path,text);
       return text;
     } finally {closeSync(handle);}
@@ -163,12 +163,21 @@ export function checkProjectTypes(projectDirectory) {
   });
   if(fatal)throw fatal;
   const localName=path=>relative(root,path).replaceAll('\\','/');
-  const moduleChecks=[],entryChecks=[],skippedEntries=[];
+  const moduleChecks=[],entryChecks=[],skippedEntries=[],legacyEntryDiagnostics=[];
   for(const entry of new Set(entries)) {
     const name=localName(entry);
     // 旧 .js 走函数体协议，不能假装它需要 ESM 具名导出。
     if(extname(entry)!=='.mjs') {
       skippedEntries.push({entry:name,reason:'legacy_function_body_protocol'});
+      const source=program.getSourceFile(entry);
+      const moduleNode=source?.statements.find(node=>ts.isImportDeclaration(node)||ts.isExportDeclaration(node)
+        ||ts.isExportAssignment(node)||node.modifiers?.some(modifier=>modifier.kind===ts.SyntaxKind.ExportKeyword));
+      if(moduleNode) {
+        const point=source.getLineAndCharacterOfPosition(moduleNode.getStart(source));
+        legacyEntryDiagnostics.push({entry:name,category:'entry',code:'legacy_entry_module_syntax',severity:'error',
+          message:'旧 .js 入口按函数体执行，不能使用静态 import/export；需要模块时改用 .mjs 入口并具名导出 main。',
+          file:name,line:point.line+1,column:point.character+1});
+      }
       continue;
     }
     let moduleResult;
@@ -192,10 +201,11 @@ export function checkProjectTypes(projectDirectory) {
     entryChecks.push({entry:name,...analyzeScriptEntry({file:name,text:sourceSnapshots.get(entry)})});
   }
   const environmentDiagnostics=[
+    ...legacyEntryDiagnostics,
     ...moduleChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'modules',...item}))),
     ...entryChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'entry',...item}))),
   ];
-  const staticEnvironmentPassed=moduleChecks.every(check=>check.passed)&&entryChecks.every(check=>check.passed);
+  const staticEnvironmentPassed=legacyEntryDiagnostics.length===0&&moduleChecks.every(check=>check.passed)&&entryChecks.every(check=>check.passed);
   return {passed:diagnostics.length===0&&staticEnvironmentPassed,compilerVersion:ts.version,project:root,
     entries:entries.map(path=>relative(root,path).replaceAll('\\','/')),diagnostics,
     checkedFiles:[...loaded.keys()].map(path=>relative(root,path).replaceAll('\\','/')),

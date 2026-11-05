@@ -98,10 +98,24 @@ test('源文件上限先于解析拒绝，清单中的越界入口也拒绝',()=
 
 test('无效UTF8与硬链接在内容检查前明确拒绝，不静默替换字节',()=>{
   const root=fixture();writeFileSync(join(root,'main.mjs'),Buffer.from([0xff,0xfe,0x61]));
-  assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_utf8_invalid');
+  assert.throws(()=>checkProjectTypes(root),error=>{
+    assert.equal(error.code,'project_utf8_invalid');assert.deepEqual(error.location,{file:'main.mjs'});return true;
+  });
   writeFileSync(join(root,'main.mjs'),'export function main() { return null; }');
   linkSync(join(root,'main.mjs'),join(root,'same-file.mjs'));
   assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_link_path');
+});
+
+test('CLI非法UTF8依赖定位到具体包内模块，不回显字节或猜测行列',()=>{
+  const root=fixture();writeFileSync(join(root,'lib/text.mjs'),Buffer.from([0xff,0xfe,0x61]));
+  const result=spawnSync(process.execPath,[join(repo,'tools/script-sdk-check/check-project-types.mjs'),root],
+    {encoding:'utf8',windowsHide:true,timeout:30000,maxBuffer:1024*1024});
+  assert.ifError(result.error);assert.equal(result.status,1);assert.equal(result.stdout,'');
+  const output=JSON.parse(result.stderr);
+  assert.equal(output.error.code,'project_utf8_invalid');
+  assert.deepEqual(output.error.location,{file:'lib/text.mjs'});
+  assert.equal(output.runtimeExecuted,false);assert.equal(output.filesModified,false);
+  assert.deepEqual(readFileSync(join(root,'lib/text.mjs')),Buffer.from([0xff,0xfe,0x61]));
 });
 
 test('CLI缺参数返回结构化失败和退出码，不尝试寻找工程',()=>{
@@ -188,6 +202,40 @@ test('另一个旧js入口的局部变量不能替当前入口掩盖未定义名
   assert.equal(result.passed,false);
   assert(result.diagnostics.some(item=>item.code===2304&&item.file==='consumer.js'));
   assert.equal(result.runtimeExecuted,false);assert.deepEqual(result.entryChecks,[]);
+});
+
+test('旧js入口的静态import或export不能因类型通过而误放行',()=>{
+  for(const source of [
+    'import {clean} from "./lib/text.mjs";\n/** @type {ScriptMain} */\nfunction main(ctx){return clean("text");}',
+    '/** @type {ScriptMain} */\nexport function main(ctx){return {ok:true};}',
+  ]) {
+    const root=fixture();
+    writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[{runtime:'script',entry:'legacy.js'}]}));
+    writeFileSync(join(root,'legacy.js'),source);
+    const result=checkProjectTypes(root);assert.deepEqual(result.diagnostics,[]);
+    assert.equal(result.passed,false);assert.equal(result.staticEnvironmentPassed,false);
+    const diagnostic=result.environmentDiagnostics.find(item=>item.code==='legacy_entry_module_syntax');
+    assert.equal(diagnostic.file,'legacy.js');assert.equal(diagnostic.column,1);
+    assert.equal(diagnostic.line,source.startsWith('import')?1:2);
+    assert.equal(result.staticAnalysisComplete,false);assert.equal(result.runtimeExecuted,false);
+    assert.deepEqual(result.entryChecks,[]);
+  }
+});
+
+test('CLI旧js模块语法错误可定位且mjs导入js辅助模块保持可用',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[{runtime:'script',entry:'legacy.js'}]}));
+  writeFileSync(join(root,'legacy.js'),'/** @type {ScriptMain} */\nexport function main(ctx){return null;}');
+  const result=spawnSync(process.execPath,[join(repo,'tools/script-sdk-check/check-project-types.mjs'),root],
+    {encoding:'utf8',windowsHide:true,timeout:30000,maxBuffer:1024*1024});
+  assert.ifError(result.error);assert.equal(result.status,1);assert.equal(result.stderr,'');
+  const output=JSON.parse(result.stdout);assert.equal(output.passed,false);
+  assert(output.environmentDiagnostics.some(item=>item.code==='legacy_entry_module_syntax'&&item.file==='legacy.js'&&item.line===2));
+  assert.equal(output.runtimeExecuted,false);assert.equal(output.filesModified,false);
+  writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[{runtime:'script',entry:'main.mjs'}]}));
+  writeFileSync(join(root,'lib/value.js'),'export const value=1;');
+  writeFileSync(join(root,'main.mjs'),'import {value} from "./lib/value.js";export function main(){return value;}');
+  const module=checkProjectTypes(root);assert.equal(module.passed,true,JSON.stringify(module));
 });
 
 test('旧js函数体入口继续做类型检查，不强加ESM导出要求',()=>{
