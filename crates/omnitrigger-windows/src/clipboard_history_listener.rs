@@ -1016,6 +1016,100 @@ mod native {
         Ok(scope)
     }
 
+    /// 仅用于应用内部辅助进程入口。接线方须在任何 UI、插件和脚本初始化之前调用。
+    /// 参数是父进程明确采样的窗口站/桌面名；不能以失败为由回退当前交互窗口站。
+    pub fn run_clipboard_history_capture_helper(
+        station: &str,
+        desktop: &str,
+        previous: u32,
+    ) -> i32 {
+        let result = enter_scope(station, desktop).and_then(|_scope| capture_text(previous));
+        let bytes = encode_reply(result);
+        let mut output = std::io::stdout().lock();
+        match output.write_all(&bytes).and_then(|()| output.flush()) {
+            Ok(()) => 0,
+            Err(_) => 2,
+        }
+    }
+
+    fn capture_text(previous: u32) -> Result<Observation, HistoryListenerError> {
+        let formats = [
+            w!("OmniTrigger.TransientClipboard.v1"),
+            w!("ExcludeClipboardContentFromMonitorProcessing"),
+            w!("PNG"),
+            w!("image/png"),
+        ]
+        .map(|name| unsafe { RegisterClipboardFormatW(name) });
+        if formats.contains(&0) {
+            return Err(HistoryListenerError::CaptureFailed);
+        }
+        capture_with(&mut NativeText { formats }, previous)
+    }
+
+    struct NativeText {
+        formats: [u32; 4],
+    }
+    impl TextBackend for NativeText {
+        fn open(&mut self) -> Result<(), HistoryListenerError> {
+            for attempt in 0..3 {
+                if unsafe { OpenClipboard(None) }.is_ok() {
+                    return Ok(());
+                }
+                if attempt < 2 {
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+            Err(HistoryListenerError::ClipboardBusy)
+        }
+        fn close(&mut self) -> Result<(), HistoryListenerError> {
+            unsafe { CloseClipboard() }.map_err(|_| HistoryListenerError::CaptureFailed)
+        }
+        fn sequence(&mut self) -> u32 {
+            unsafe { GetClipboardSequenceNumber() }
+        }
+        fn formats(&mut self) -> Formats {
+            let available = |format| unsafe { IsClipboardFormatAvailable(format) }.is_ok();
+            Formats {
+                transient: available(self.formats[0]),
+                excluded: available(self.formats[1]),
+                files: available(15),
+                image: [2, 3, 8, 14, 17, self.formats[2], self.formats[3]]
+                    .into_iter()
+                    .any(available),
+                unicode: available(13),
+            }
+        }
+        fn text(&mut self) -> Result<String, HistoryListenerError> {
+            let memory = HGLOBAL(
+                unsafe { GetClipboardData(13) }
+                    .map_err(|_| HistoryListenerError::CaptureFailed)?
+                    .0,
+            );
+            let size = unsafe { GlobalSize(memory) };
+            if size < 2 || size % 2 != 0 {
+                return Err(HistoryListenerError::InvalidText);
+            }
+            let pointer = unsafe { GlobalLock(memory) };
+            if pointer.is_null() {
+                return Err(HistoryListenerError::CaptureFailed);
+            }
+            struct Unlock(HGLOBAL);
+            impl Drop for Unlock {
+                fn drop(&mut self) {
+                    let _ = unsafe { GlobalUnlock(self.0) };
+                }
+            }
+            let _unlock = Unlock(memory);
+            let units = unsafe {
+                std::slice::from_raw_parts(pointer.cast::<u16>(), (size / 2).min(MAX_UNITS + 1))
+            };
+            let count = units
+                .iter()
+                .position(|&unit| unit == 0)
+                .ok_or(HistoryListenerError::TextTooLarge)?;
+            String::from_utf16(&units[..count]).map_err(|_| HistoryListenerError::InvalidText)
+        }
+    }
     #[cfg(test)]
     mod scope_tests {
         use super::*;
@@ -1122,101 +1216,6 @@ mod native {
                 Err(HistoryListenerError::ScopeMismatch)
             );
             assert!(backend.sets.is_empty());
-        }
-    }
-
-    /// 仅用于应用内部辅助进程入口。接线方须在任何 UI、插件和脚本初始化之前调用。
-    /// 参数是父进程明确采样的窗口站/桌面名；不能以失败为由回退当前交互窗口站。
-    pub fn run_clipboard_history_capture_helper(
-        station: &str,
-        desktop: &str,
-        previous: u32,
-    ) -> i32 {
-        let result = enter_scope(station, desktop).and_then(|_scope| capture_text(previous));
-        let bytes = encode_reply(result);
-        let mut output = std::io::stdout().lock();
-        match output.write_all(&bytes).and_then(|()| output.flush()) {
-            Ok(()) => 0,
-            Err(_) => 2,
-        }
-    }
-
-    fn capture_text(previous: u32) -> Result<Observation, HistoryListenerError> {
-        let formats = [
-            w!("OmniTrigger.TransientClipboard.v1"),
-            w!("ExcludeClipboardContentFromMonitorProcessing"),
-            w!("PNG"),
-            w!("image/png"),
-        ]
-        .map(|name| unsafe { RegisterClipboardFormatW(name) });
-        if formats.contains(&0) {
-            return Err(HistoryListenerError::CaptureFailed);
-        }
-        capture_with(&mut NativeText { formats }, previous)
-    }
-
-    struct NativeText {
-        formats: [u32; 4],
-    }
-    impl TextBackend for NativeText {
-        fn open(&mut self) -> Result<(), HistoryListenerError> {
-            for attempt in 0..3 {
-                if unsafe { OpenClipboard(None) }.is_ok() {
-                    return Ok(());
-                }
-                if attempt < 2 {
-                    thread::sleep(Duration::from_millis(5));
-                }
-            }
-            Err(HistoryListenerError::ClipboardBusy)
-        }
-        fn close(&mut self) -> Result<(), HistoryListenerError> {
-            unsafe { CloseClipboard() }.map_err(|_| HistoryListenerError::CaptureFailed)
-        }
-        fn sequence(&mut self) -> u32 {
-            unsafe { GetClipboardSequenceNumber() }
-        }
-        fn formats(&mut self) -> Formats {
-            let available = |format| unsafe { IsClipboardFormatAvailable(format) }.is_ok();
-            Formats {
-                transient: available(self.formats[0]),
-                excluded: available(self.formats[1]),
-                files: available(15),
-                image: [2, 3, 8, 14, 17, self.formats[2], self.formats[3]]
-                    .into_iter()
-                    .any(available),
-                unicode: available(13),
-            }
-        }
-        fn text(&mut self) -> Result<String, HistoryListenerError> {
-            let memory = HGLOBAL(
-                unsafe { GetClipboardData(13) }
-                    .map_err(|_| HistoryListenerError::CaptureFailed)?
-                    .0,
-            );
-            let size = unsafe { GlobalSize(memory) };
-            if size < 2 || size % 2 != 0 {
-                return Err(HistoryListenerError::InvalidText);
-            }
-            let pointer = unsafe { GlobalLock(memory) };
-            if pointer.is_null() {
-                return Err(HistoryListenerError::CaptureFailed);
-            }
-            struct Unlock(HGLOBAL);
-            impl Drop for Unlock {
-                fn drop(&mut self) {
-                    let _ = unsafe { GlobalUnlock(self.0) };
-                }
-            }
-            let _unlock = Unlock(memory);
-            let units = unsafe {
-                std::slice::from_raw_parts(pointer.cast::<u16>(), (size / 2).min(MAX_UNITS + 1))
-            };
-            let count = units
-                .iter()
-                .position(|&unit| unit == 0)
-                .ok_or(HistoryListenerError::TextTooLarge)?;
-            String::from_utf16(&units[..count]).map_err(|_| HistoryListenerError::InvalidText)
         }
     }
 }
