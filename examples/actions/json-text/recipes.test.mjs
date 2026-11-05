@@ -134,7 +134,7 @@ for(const asynchronous of [false,true]){
 
 test('动作清单和四个调用示例引用同一共享模块契约',()=>{
   const manifest=JSON.parse(readFileSync(new URL('action.json',import.meta.url),'utf8'));
-  assert.deepEqual(manifest.actions.map(action=>action.runtime),['node','script']);
+  assert.deepEqual(manifest.actions.filter(action=>['inspect-or-send','inspect-or-send-script'].includes(action.id)).map(action=>action.runtime),['node','script']);
   for(const name of ['call.json','call-script.json','send-call.json','choose-call.json']){
     const call=JSON.parse(readFileSync(new URL(name,import.meta.url),'utf8'));
     const action=manifest.actions.find(action=>action.id===call.action_id);

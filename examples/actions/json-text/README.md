@@ -1,21 +1,64 @@
-# 显式 JSON 文本
+# JSON 文本排版与子值选择
 
-只处理调用方明确提供的 `text`，不读取剪贴板、选区或文件，不使用宿主脚本或表达式求值。Node 异步与轻量同步模块入口共用独立编写的语法/排版模块。
+处理调用参数明确提供的 JSON 文本，提供 Node 和同步轻量模块入口。
 
-- `mode:"inspect"`：校验并返回类型、节点/键/字符串/数字数量、容器深度和输入长度；没有宿主调用。
-- `mode:"send", format:"pretty"|"compact"`：完整校验与排版后，向提交时捕获的原目标发送一次文本。
-- `mode:"choose-send"`：先验证两种排版结果，再显示选择框；取消不发送，选择后仍使用原目标，不重抓前台。界面焦点恢复与目标检查交给宿主。
+| 动作 ID | 运行时 | 用途 |
+| --- | --- | --- |
+| `inspect-or-send` | Node | 校验、排版或选择排版后输入 |
+| `inspect-or-send-script` | script | 同步校验、排版或选择排版后输入 |
+| `select-or-send` | Node | 按明确路径选取 JSON 子值 |
+| `select-or-send-script` | script | 同步选取 JSON 子值 |
 
-输入仅接受上述模式规定的 `mode`、`text`、`format` 字段。最多 65536 UTF-16 输入单元、32 层容器、10000 个值节点；原始输入须为有效 Unicode，无 NUL。不接受注释、BOM、尾逗号或多份文档。重复对象键（包括转义后同名）明确拒绝，不静默选择最后一项。
+四个动作的契约版本均为 1，分别启用单实例；不同动作 ID 不互锁。
 
-数字不转成 JS number，字符串字面量不重新转义：大整数、负零、指数写法、属性顺序和字符串转义保持原 token，仅整理字符串之外的 JSON 空白。紧凑排版移除外部空白；缩进使用两格和 LF。JSON 转义中的 `\u0000` 等作为文本保留，不转成实际 NUL。排版后的文本也不能超过 65536 UTF-16 单元；较大的缩进结果可明确选择紧凑模式，inspect 不受缩进膨胀影响。
+## 校验与排版参数
 
-终态只含摘要，不含原文或排版结果；错误消息固定，不包含片段、键名或目标标题。发送失败/取消/失焦不重试，不用剪贴板或快捷键回退。`inputSubmitted:true` 只表示系统接纳文本输入，不证明业务完成，也不会恢复已被部分输入替换的内容。
+- `{mode:"inspect",text}`：校验并返回根类型、节点/键/字符串/数字数量、容器深度及输入长度，无宿主调用。
+- `{mode:"send",text,format:"pretty"|"compact"}`：完整校验、排版后，向提交时捕获的原目标输入一次。
+- `{mode:"choose-send",text}`：先验证两种排版结果，再选择缩进或紧凑格式；取消不发送。
 
-本包提供 JSON 文本语法、排版和输入的独立子集，没有树形编辑表单、专用剪贴板格式或其它宿主实现。两个动作 ID 分别启用单实例，不互锁。
+仅接受对应模式列出的字段。缩进使用两格和 LF；紧凑格式移除字符串外的 JSON 空白。大整数、负零、指数写法、属性顺序和字符串转义保持原 token，数字不转换为 JS number。
+
+## 子值选择参数
+
+两个选择动作均只接受 `mode`、`text`、`path`、`format`：
+
+| 参数 | 规则 |
+| --- | --- |
+| `mode` | `inspect` 返回摘要；`send` 向原目标输入所选 JSON 文本一次 |
+| `text` | 完整 JSON 文本 |
+| `path` | 最多 32 段的稠密数组；字符串为精确对象键，整数为数组索引；空数组选择根 |
+| `format` | `compact` 或 `pretty` |
+
+例如 `text` 为 `{"items":[{"count":9007199254740993}]}`，`path` 为 `["items",0,"count"]`，选中 JSON 文本保持为 `9007199254740993`。字符串子值保留 JSON 引号和转义。
+
+键名按解码后精确匹配，可使用空键；每个键最多 1024 个 UTF-16 单元，须有效 Unicode、无 NUL。数组索引为 0–9999 的整数，不把字符串数字当索引。路径不支持通配、递归搜索或表达式，也不采用 JSON Pointer 字符串语法。缺键/索引报 `json_path_missing`，节点或路径段类型不匹配报 `json_path_type`。
+
+## 限额与结果
+
+输入最多 65,536 个 UTF-16 单元、32 层容器和 10,000 个值节点；要求有效 Unicode、无实际 NUL。不接受注释、BOM、尾逗号或多份文档，重复对象键（含转义后同名）明确拒绝。整份文档均须有效，选择路径不能绕过其它分支的校验。JSON 转义中的 `\u0000` 等保留为文本。
+
+输出最多 65,536 个 UTF-16 单元；缩进膨胀超限时报错，不截断或自动换格式。选择动作摘要包含子值类型、子树节点数、路径段数及长度；终态和错误不包含正文、键名或路径。`inputSubmitted:true` 表示系统接纳输入请求，失败/取消/失焦后不自动重试，不改抓其它目标。
+
+默认调用文件均为无宿主调用的 `inspect`。`send-call.json` 和选择动作的 `mode:"send"` 会真实输入文本。包不自动读取剪贴板、选区或文件。
+
+## 编辑与静态检查
+
+用支持 JavaScript/TypeScript 的编辑器打开整个包目录。`jsconfig.json` 为所有七个业务模块启用 strict `checkJs`，测试文件不属于作者检查入口。
+
+- `sdk/api.d.ts` 是本地 Node API 声明。
+- `sdk/script-types.d.ts` 是本地同步模块 API 声明，没有全局 `ctx`。
+- `json-types.d.ts` 描述输入、路径、任务、摘要和结构化错误；入口的外部输入保留为 `unknown`，由现有校验器检查。
+
+共享模块显式接收上下文，JSDoc 和声明引用均为包内路径。更新 SDK 时先保留作者原快照，再选择与 App/宿主匹配的声明；替换声明不会升级实际运行时。
+
+使用项目已有检查工具，路径按本机实际位置填写：
 
 ```powershell
-node --test examples/actions/json-text/recipes.test.mjs
+$checkTools = 'D:\OmniTrigger\tools\script-sdk-check'
+$package = 'D:\Actions\json-text'
+node "$checkTools\node_modules\typescript\lib\tsc.js" --project "$package\jsconfig.json" --noEmit
+node "$checkTools\check-project-types.mjs" $package
 ```
 
-测试仅用合成数据与 RecordingHost。默认调用示例为无副作用的 inspect；send 示例实际运行时会提交输入，需另行验证原目标场景。
+第一条检查所有 Node/同步业务模块；第二条额外检查清单中的同步入口、静态模块图和 `main` 导出。静态通过不代表目标窗口或运行时能力已经验收。

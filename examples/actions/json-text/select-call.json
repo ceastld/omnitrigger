@@ -1,0 +1,15 @@
+{
+  "package_id": "examples.json-text",
+  "action_id": "select-or-send",
+  "action_version": 1,
+  "input": {
+    "mode": "inspect",
+    "text": "{\"items\":[{\"count\":9007199254740993}]}",
+    "path": [
+      "items",
+      0,
+      "count"
+    ],
+    "format": "compact"
+  }
+}

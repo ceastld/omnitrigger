@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
+    "types": []
+  },
+  "files": [
+    "main.mjs",
+    "main-script.mjs",
+    "select.mjs",
+    "select-script.mjs",
+    "json.mjs",
+    "workflow.mjs",
+    "select-core.mjs",
+    "json-types.d.ts",
+    "sdk/api.d.ts",
+    "sdk/script-types.d.ts",
+    "sdk/clipboard-history-api.d.ts"
+  ]
+}

@@ -196,6 +196,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/process_capture_bridge_api.test.mjs tests/process_capture_bridge_transport.test.mjs tests/app_node_capture_check.test.mjs tests/process_capture_api.test.mjs tests/process_capture_contract.test.mjs tests/process_capture_sdk.test.mjs tests/clipboard_history_inspector.test.mjs tests/clipboard_history_inspector_scan_limit.test.mjs examples/actions/json-text/recipes.test.mjs examples/actions/selection-history/recipes.test.mjs examples/actions/process-output/recipes.test.mjs examples/actions/process-output/encoding-boundaries.test.mjs examples/actions/process-output/cross-entry-contract.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test examples/actions/json-text/select.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p examples/actions/json-text/jsconfig.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/json-text
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/common-search/open-or-search.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/path-text/recipes.test.mjs examples/actions/line-text/recipes.test.mjs

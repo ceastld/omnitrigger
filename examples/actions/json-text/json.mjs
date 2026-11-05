@@ -1,7 +1,11 @@
 // 独立编写的有界 JSON 语法/排版器；数值与字符串字面量保持原 token，不转成 JS number。
+/** @typedef {import('./json-types').JsonErrorCode} JsonErrorCode */
+/** @param {JsonErrorCode} code @returns {never} */
 function fault(code) { throw Object.assign(new Error('JSON 文本不符合本配方契约。'), {code}); }
+/** @param {string} character */
 const digit = character => character >= '0' && character <= '9';
 
+/** @param {string} source @returns {import('./json-types').JsonAnalysis} */
 export function analyze(source) {
   if (typeof source !== 'string' || source.length > 65536 || source.includes('\0')) fault('invalid_input');
   for (let index = 0; index < source.length; index++) {
@@ -12,10 +16,16 @@ export function analyze(source) {
     } else if (unit >= 0xdc00 && unit <= 0xdfff) fault('invalid_input');
   }
   let position = 0;
+  /** @type {string[]} */
   const tokens = [];
+  /** @type {Omit<import('./json-types').JsonSummary,'rootKind'|'inputUtf16Units'>&{rootKind:import('./json-types').JsonKind|''}} */
   const summary = {rootKind:'',nodeCount:0,keyCount:0,stringCount:0,numberCount:0,maxDepth:0};
   const space = () => { while ([' ', '\r', '\n', '\t'].includes(source[position])) position++; };
+  /** @param {string} value */
   const punctuation = value => { tokens.push(value); position++; };
+  /** @overload @param {true} key @returns {string} */
+  /** @overload @param {false} [key] @returns {null} */
+  /** @param {boolean} [key] @returns {string|null} */
   function stringToken(key = false) {
     const start = position++;
     while (position < source.length) {
@@ -23,7 +33,7 @@ export function analyze(source) {
       if (character === '"') {
         const raw = source.slice(start, position);
         tokens.push(raw);
-        return key ? JSON.parse(raw) : null;
+        return key ? /** @type {string} */ (JSON.parse(raw)) : null;
       }
       if (character.charCodeAt(0) < 32) fault('invalid_json');
       if (character === '\\') {
@@ -57,6 +67,7 @@ export function analyze(source) {
     }
     tokens.push(source.slice(start, position));
   }
+  /** @param {number} depth @returns {void} */
   function value(depth) {
     space();
     if (++summary.nodeCount > 10000) fault('json_limit');
@@ -69,6 +80,7 @@ export function analyze(source) {
       summary.maxDepth = Math.max(summary.maxDepth, depth + 1);
       const object = kind === 'object';
       const close = object ? '}' : ']';
+      /** @type {Set<string>} */
       const names = new Set();
       punctuation(character);
       space();
@@ -106,15 +118,18 @@ export function analyze(source) {
   value(0);
   space();
   if (position !== source.length) fault('invalid_json');
-  return {tokens,summary:{...summary,inputUtf16Units:source.length}};
+  return {tokens,summary:/** @type {import('./json-types').JsonSummary} */ ({...summary,inputUtf16Units:source.length})};
 }
 
+/** @param {readonly string[]} tokens @param {unknown} style @returns {string} */
 export function format(tokens, style) {
-  if (!['compact','pretty'].includes(style)) fault('invalid_input');
+  if (!['compact','pretty'].includes(/** @type {string} */ (style))) fault('invalid_input');
   if (style === 'compact') return tokens.join('');
+  /** @type {string[]} */
   const parts = [];
   let units = 0;
   let depth = 0;
+  /** @param {string} value */
   const append = value => {
     units += value.length;
     if (units > 65536) fault('json_output_too_large');
