@@ -30,6 +30,10 @@ impl MousePrefixOwners {
     fn insert(&mut self, index: usize) {
         self.bindings[index / 64] |= 1 << (index % 64);
     }
+
+    fn contains(&self, index: usize) -> bool {
+        self.bindings[index / 64] & (1 << (index % 64)) != 0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -405,7 +409,29 @@ impl Engine {
     fn candidates(&self) -> impl Iterator<Item = &TriggerSpec> {
         self.active_bindings
             .iter()
-            .map(|&index| &self.bindings[index])
+            .copied()
+            .filter(move |&index| self.mouse_prefix_allows_binding(index))
+            .map(|index| &self.bindings[index])
+    }
+
+    fn mouse_prefix_allows_binding(&self, index: usize) -> bool {
+        let binding = &self.bindings[index];
+        // 与establish_mouse_prefix_session的拥有域一致，不重解释观察/保留层。
+        if binding.keyboard.retained_prefix.is_some() || binding.keyboard.matching.is_mouse_rule() {
+            return true;
+        }
+        binding.held.iter().all(|&button| {
+            let Button::Mouse(mouse) = button else {
+                return true;
+            };
+            let owners = &self.mouse_prefix_sessions[mouse_slot(mouse)];
+            !owners.is_active()
+                || !matches!(
+                    self.pressed.get(&button),
+                    Some(PressState::Pending | PressState::Consumed)
+                )
+                || owners.contains(index)
+        })
     }
 
     /// 屏幕拓扑来自平台显式快照。无效替换不改变状态；实际变更取消旧上下文。

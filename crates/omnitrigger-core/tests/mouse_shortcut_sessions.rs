@@ -325,3 +325,48 @@ fn losing_one_scope_keeps_another_original_owner_and_passed_key_alive() {
     assert_eq!(wheel(&mut engine, -1, 6), hit(202));
     assert_eq!(physical(&mut engine, InputKind::Up(X1), 7), owned());
 }
+
+#[test]
+fn surviving_owner_stays_usable_but_revoked_or_new_owner_waits_for_fresh_physical_prefix() {
+    for initially_allowed in [false, true] {
+        let mut rules = original_rules(0);
+        rules[0].pointer_scope = ProcessScope {
+            allow: vec!["scope-a".into()],
+            ..Default::default()
+        };
+        rules[1].pointer_scope = Default::default();
+        rules[2].pointer_scope = Default::default();
+        let mut engine = Engine::new(rules).unwrap();
+        engine
+            .set_pointer_context(
+                Some(if initially_allowed {
+                    "scope-a"
+                } else {
+                    "scope-b"
+                }),
+                WindowRole::Application,
+            )
+            .unwrap();
+        assert_eq!(physical(&mut engine, InputKind::Down(X1), 1), owned());
+        assert_eq!(
+            wheel(&mut engine, if initially_allowed { 1 } else { -1 }, 2),
+            hit(if initially_allowed { 201 } else { 202 })
+        );
+        engine
+            .set_pointer_context(Some("scope-b"), WindowRole::Application)
+            .unwrap();
+        // 202/203始终有效，不能全局取消仍存活的X1前缀。
+        assert_eq!(wheel(&mut engine, -1, 3), hit(202));
+        engine
+            .set_pointer_context(Some("scope-a"), WindowRole::Application)
+            .unwrap();
+        // 201若曾拥有则已被撤销；若从未拥有也不能凭新范围加入旧按压。
+        assert_eq!(wheel(&mut engine, 1, 4), Decision::default());
+        assert_eq!(physical(&mut engine, InputKind::Down(RIGHT), 5), hit(203));
+        assert_eq!(physical(&mut engine, InputKind::Up(RIGHT), 6), owned());
+        assert_eq!(physical(&mut engine, InputKind::Up(X1), 7), owned());
+        assert_eq!(physical(&mut engine, InputKind::Down(X1), 8), owned());
+        assert_eq!(wheel(&mut engine, 1, 9), hit(201));
+        assert_eq!(physical(&mut engine, InputKind::Up(X1), 10), owned());
+    }
+}
