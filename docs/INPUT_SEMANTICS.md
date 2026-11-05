@@ -39,6 +39,25 @@ omnitrigger.exe --smoke-test --wheel-input-policy small-vertical-150ms
 
 该参数只用于启动监听及 Hook 烟测；与配置检查、动作执行等无监听操作混用会在操作前结构化拒绝。它不会自动启用个人迁移配置。核心被借用时的回调仍保留原有透传行为，不递归执行匹配；独立门禁会观察滚轮历史并记录诊断计数，但不保证这类物理重入仍能完成录制或按压收尾。输入序列测试与 Hook 安装清理不代表真实物理滚轮、其他软件或所有设备均已验收。
 
+## 鼠标快捷键的忙时投递
+
+开发入口 `--mouse-shortcut-queue <计划文件>` 可为一组已有的鼠标快捷键绑定选择共享投递策略。只支持鼠标按下或滚轮触发的 `SendShortcut`；绑定仍须启用并满足原触发范围。未传此参数时保持原投递方式，不读取计划文件。
+
+计划中的 ID 必须来自本次 `--config` 所选配置。例如：
+
+```json
+{"bindings":[71,72],"policy":{"kind":"delay","capacity":2,"max_submit_wait_ms":100}}
+```
+
+`delay` 按 FIFO 保存至多 1–64 个等待项，投递等待预算为 1–60000 毫秒；预算截至提交给快捷键执行器，不限制执行器内部等待或系统输入耗时。每项保留本次触发捕获的原目标、按键与时序，不重新抓取前台。也可显式采用 `{"bindings":[71],"policy":{"kind":"drop"}}`，在前一项仍等待、运行或终态尚未消费时拒绝新项。队列满或等待过期均不重试。
+
+```powershell
+omnitrigger.exe --config .\bindings.json --mouse-shortcut-queue .\mouse-queue.json --check-config
+omnitrigger.exe --config .\bindings.json --mouse-shortcut-queue .\mouse-queue.json
+```
+
+计划最多 16 KiB，未知字段、重复字段、重复或不存在的绑定 ID、非法范围均明确拒绝。普通启动可附加 `--panel`；不能与历史窗口、动作运行、烟测或其他操作模式混用，暂不与 `--wheel-input-policy` 组合。暂停、录制、替换配置或取消会撤销相应等待项；已经提交的调用只请求取消，收到对应调用的明确终态后才释放占用。未知结果保留占用，不推断成功或重复发送。此策略只调度动作，不改变 Hook 的消费、释放或补发语义。
+
 ## 鼠标修饰键观察
 
 版本 18 的 `keyboard.matching.kind=mouse_exact` 用于鼠标按下或滚轮，`held` 可为空或一个修饰键。泛型 Shift、Ctrl、Alt（VK 16、17、18）接受左侧、右侧或双侧同时按住；明确侧别的键仍只匹配该侧。修饰键的按下、重复和释放照常交给应用，不作为暂存前缀；其他按住键或鼠标键会排除匹配。空 `held` 要求没有其他物理按住输入，不能将它理解为仅排除修饰键。

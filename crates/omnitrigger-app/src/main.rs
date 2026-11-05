@@ -40,6 +40,7 @@ mod local_executor;
 #[cfg(test)]
 mod local_text_smoke;
 mod message_input;
+mod mouse_shortcut_dispatch;
 mod package_feedback;
 mod plugin_install;
 mod plugins;
@@ -478,6 +479,7 @@ fn activation_label(spec: &TriggerSpec) -> String {
 }
 
 struct StartupOptions {
+    mouse_shortcuts: Option<mouse_shortcut_dispatch::Plan>,
     wheel_input_policy: WheelInputPolicy,
     ui_smoke: bool,
     browser_connector_settings: bool,
@@ -573,6 +575,8 @@ struct Workspace {
     executor: CommandExecutor,
     shortcut_executor: CommandExecutor,
     mouse_shortcut_invocations: HashMap<u64, u64>,
+    mouse_shortcut_dispatch: Option<mouse_shortcut_dispatch::MouseShortcutDispatch>,
+    mouse_shortcut_dispatch_error: Option<mouse_shortcut_dispatch::Error>,
     system_executor: system_executor::SystemAdjustmentExecutor,
     system_hud: system_hud::SystemHud,
     brightness_hud_prepared: bool,
@@ -635,6 +639,7 @@ impl Workspace {
         title_bar: Result<isize, String>,
     ) -> Self {
         let StartupOptions {
+            mouse_shortcuts: mouse_shortcuts_plan,
             wheel_input_policy,
             ui_smoke,
             browser_connector_settings,
@@ -906,6 +911,22 @@ impl Workspace {
             text_history_ui_window,
             cx,
         );
+        let configured = mouse_shortcuts_plan
+            .map(|plan| {
+                if plan.bindings.iter().any(|id| {
+                    !bindings.iter().any(|binding| {
+                        binding.spec.id == *id && mouse_shortcut_dispatch::supports_binding(binding)
+                    })
+                }) {
+                    return Err(mouse_shortcut_dispatch::Error::InvalidBindings);
+                }
+                mouse_shortcut_dispatch::MouseShortcutDispatch::new(plan)
+            })
+            .transpose();
+        let (mouse_shortcut_dispatch, mouse_shortcut_dispatch_error) = match configured {
+            Ok(queue) => (queue, None),
+            Err(error) => (None, Some(error)),
+        };
         Self {
             mode,
             backend,
@@ -1003,6 +1024,8 @@ impl Workspace {
             script_projects,
             shortcut_executor: CommandExecutor::shortcuts(),
             mouse_shortcut_invocations: HashMap::new(),
+            mouse_shortcut_dispatch,
+            mouse_shortcut_dispatch_error,
             system_executor,
             system_hud: system_hud::SystemHud::default(),
             brightness_hud_prepared: false,
@@ -1013,7 +1036,10 @@ impl Workspace {
             action_status: HashMap::new(),
             action_log: VecDeque::new(),
             triggers: service::TriggerService::new(bindings, service::SettingsFile),
-            error: startup_error.or(load_error).or(title_bar.clone().err()),
+            error: startup_error
+                .or(load_error)
+                .or(title_bar.clone().err())
+                .or(mouse_shortcut_dispatch_error.map(|error| error.message().to_owned())),
             action_error: None,
             status: mode.initial_status().into(),
             hits: VecDeque::new(),
@@ -1457,6 +1483,7 @@ impl Workspace {
             .or_else(|_| self.shortcut_executor.try_recv().map(|event| (true, event)))
         {
             changed = true;
+            self.observe_mouse_shortcut_queue(from_shortcut_executor, &event);
             consume_owned_shortcut_receipt(
                 &mut self.mouse_shortcut_invocations,
                 from_shortcut_executor,
@@ -1716,6 +1743,7 @@ impl Workspace {
                 BackendEvent::Diagnostics(snapshot) => self.diagnostics = *snapshot,
             }
         }
+        changed |= self.pump_mouse_shortcuts();
         // 一次只处理有界批次；仍有积压时立即再调度，避免等维护轮询。
         if processed_backend == 64 {
             self.ui_wake.notify();
@@ -2338,7 +2366,10 @@ impl Workspace {
             if source == HitSource::Input {
                 self.triggers.record_hit(id, clock());
             }
-            if is_drag_wheel {
+            if source == HitSource::Input && self.queue_owns_mouse_rule(id) {
+                self.record_hit(caps, message, source);
+                self.enqueue_mouse_shortcut(id, action, target, cx);
+            } else if is_drag_wheel {
                 // 同一次匹配的 Started/Ended 生命周期负责轮盘交互；这里仅记录命中。
                 self.record_hit(caps, message, source);
             } else if matches!(action, ActionSpec::ShowPanel) {
@@ -2386,9 +2417,209 @@ impl Workspace {
         cx.notify();
     }
 
+    fn mouse_shortcut_frame(&self) -> (u64, omnitrigger_core::DispatchEnablement) {
+        let now = self
+            .started
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let state = if !self.ready {
+            omnitrigger_core::DispatchEnablement::Unknown
+        } else if self.paused || self.recording {
+            omnitrigger_core::DispatchEnablement::Disabled
+        } else {
+            omnitrigger_core::DispatchEnablement::Enabled
+        };
+        (now, state)
+    }
+    fn queue_owns_mouse_rule(&self, id: u64) -> bool {
+        match &self.mouse_shortcut_dispatch {
+            Some(queue) => queue.owns_binding(id),
+            None => {
+                self.mouse_shortcut_dispatch_error.is_some() && self.is_mouse_shortcut_binding(id)
+            }
+        }
+    }
+    fn mouse_queue_result(
+        &mut self,
+        result: Result<mouse_shortcut_dispatch::Report, mouse_shortcut_dispatch::Error>,
+        admission_binding: Option<u64>,
+    ) -> bool {
+        let report = match result {
+            Ok(report) => report,
+            Err(error) => {
+                self.mouse_shortcut_dispatch_error = Some(error);
+                self.error = Some(error.message().into());
+                return true;
+            }
+        };
+        let changed = report.changed();
+        if let (Some(id), Some(admission)) = (admission_binding, report.admission) {
+            match admission {
+                omnitrigger_core::MouseDispatchAdmission::Started(_) => {
+                    self.record_action_status(id, "等待发送快捷键".into())
+                }
+                omnitrigger_core::MouseDispatchAdmission::Delayed { .. } => {
+                    self.record_action_status(id, "等待前一项快捷键结束".into())
+                }
+                omnitrigger_core::MouseDispatchAdmission::Dropped(reason) => {
+                    self.mouse_queue_drop(id, reason)
+                }
+            }
+        }
+        for dropped in report.dropped {
+            self.mouse_queue_drop(dropped.request.binding_id, dropped.reason);
+        }
+        if let Some(lease) = report.submitted {
+            self.mouse_shortcut_invocations
+                .insert(lease.invocation, lease.binding);
+            if self
+                .action_error
+                .as_ref()
+                .is_some_and(|(id, _)| *id == lease.binding)
+            {
+                self.action_error = None;
+            }
+            self.record_action_status(lease.binding, "等待发送快捷键".into());
+        }
+        if let Some((lease, result)) = report.cancellation {
+            match result {
+                Ok(
+                    execution::ShortcutCancelState::Requested
+                    | execution::ShortcutCancelState::AlreadyRequested,
+                ) => {
+                    self.record_action_status(
+                        lease.binding,
+                        "已请求停止，等待快捷键发送收尾".into(),
+                    );
+                }
+                Ok(_) => {
+                    self.action_error =
+                        Some((lease.binding, "取消尚未确认，仍等待原调用终态。".into()))
+                }
+                Err(message) => self.action_error = Some((lease.binding, message)),
+            }
+        }
+        if let Some((id, message)) = report.rejected_before_start {
+            self.action_error = Some((id, message.clone()));
+            self.record_action_status(id, message);
+        }
+        changed
+    }
+    fn mouse_queue_drop(&mut self, id: u64, reason: omnitrigger_core::MouseDispatchDropReason) {
+        use omnitrigger_core::MouseDispatchDropReason as R;
+        let message = match reason {
+            R::QueueFull => "鼠标快捷键队列已满，本次未提交。",
+            R::Busy => "前一次鼠标快捷键尚未结束，本次未提交。",
+            R::Expired => "鼠标快捷键等待已过期，本次未提交。",
+            R::Disabled | R::EnablementUnknown => "鼠标快捷键当前未启用或状态未知，本次未提交。",
+            R::Cancelled | R::ContextInvalidated => "本次鼠标快捷键等待项已取消，未提交。",
+        }
+        .to_owned();
+        self.action_error = Some((id, message.clone()));
+        self.record_action_status(id, message);
+    }
+    fn enqueue_mouse_shortcut(
+        &mut self,
+        id: u64,
+        action: ActionSpec,
+        target: Option<omnitrigger_windows::ShortcutTarget>,
+        cx: &mut Context<Self>,
+    ) {
+        let prepared = (|| {
+            if let Some(error) = self.mouse_shortcut_dispatch_error {
+                return Err(error.message().to_owned());
+            }
+            if !self
+                .binding(id)
+                .is_some_and(mouse_shortcut_dispatch::supports_binding)
+            {
+                return Err("该规则已不属于已配置的鼠标快捷键范围，未改用其他投递路径。".into());
+            }
+            let ActionSpec::SendShortcut(shortcut) = action else {
+                return Err("此调度只接收快捷键。".into());
+            };
+            let target =
+                target.ok_or_else(|| "缺少本次输入的原目标，未改选当前前台。".to_owned())?;
+            execution::PreparedShortcut::capture(shortcut, target)
+        })();
+        match prepared {
+            Ok(prepared) => {
+                let (now, state) = self.mouse_shortcut_frame();
+                let executor = &self.shortcut_executor;
+                let result = self
+                    .mouse_shortcut_dispatch
+                    .as_mut()
+                    .ok_or(mouse_shortcut_dispatch::Error::InvalidBindings)
+                    .and_then(|queue| queue.offer(id, prepared, executor, now, state));
+                self.mouse_queue_result(result, Some(id));
+                self.pump_mouse_shortcuts();
+            }
+            Err(message) => {
+                self.action_error = Some((id, message.clone()));
+                self.record_action_status(id, message);
+            }
+        }
+        cx.notify();
+    }
+    fn pump_mouse_shortcuts(&mut self) -> bool {
+        if self.mouse_shortcut_dispatch_error.is_some() {
+            return false;
+        }
+        let (now, state) = self.mouse_shortcut_frame();
+        let Some(queue) = &mut self.mouse_shortcut_dispatch else {
+            return false;
+        };
+        let result = queue.pump_one(&self.shortcut_executor, now, state);
+        self.mouse_queue_result(result, None)
+    }
+    fn observe_mouse_shortcut_queue(
+        &mut self,
+        from_shortcut: bool,
+        event: &execution::ExecutionEvent,
+    ) {
+        let (now, state) = self.mouse_shortcut_frame();
+        if let Some(queue) = &mut self.mouse_shortcut_dispatch {
+            let result = queue.observe(from_shortcut, event, &self.shortcut_executor, now, state);
+            self.mouse_queue_result(result, None);
+        }
+    }
+    fn cancel_mouse_shortcut_rule(&mut self, id: u64) {
+        let (now, state) = self.mouse_shortcut_frame();
+        if let Some(queue) = &mut self.mouse_shortcut_dispatch {
+            let result = queue.cancel_rule(id, &self.shortcut_executor, now, state);
+            self.mouse_queue_result(result, None);
+        }
+        for (&invocation, &binding) in &self.mouse_shortcut_invocations {
+            if binding == id
+                && !self
+                    .mouse_shortcut_dispatch
+                    .as_ref()
+                    .is_some_and(|queue| queue.owns_invocation(invocation))
+            {
+                if let Err(error) = self.shortcut_executor.cancel_shortcut(invocation) {
+                    self.error = Some(error);
+                }
+            }
+        }
+    }
+
     fn cancel_owned_mouse_shortcuts(&mut self) {
+        let (now, state) = self.mouse_shortcut_frame();
+        if let Some(queue) = &mut self.mouse_shortcut_dispatch {
+            let result = queue.cancel_all(&self.shortcut_executor, now, state);
+            self.mouse_queue_result(result, None);
+        }
         // 每个配额对应一个准确回执；同绑定允许多次调用，不能用binding作为取消键。
         for &invocation in self.mouse_shortcut_invocations.keys() {
+            if self
+                .mouse_shortcut_dispatch
+                .as_ref()
+                .is_some_and(|queue| queue.owns_invocation(invocation))
+            {
+                continue;
+            }
             if let Err(error) = self.shortcut_executor.cancel_shortcut(invocation) {
                 self.error = Some(error);
             }
@@ -3241,6 +3472,7 @@ impl Workspace {
         }
         match self.triggers.remove(id) {
             Ok(next) => {
+                self.cancel_mouse_shortcut_rule(id);
                 self.applied();
                 self.local_executor.cancel_id(id);
                 self.action_service.cancel_id(id);
@@ -6396,6 +6628,7 @@ fn open_script_history_window(
                 Workspace::new(
                     cx,
                     StartupOptions {
+                        mouse_shortcuts: None,
                         wheel_input_policy: WheelInputPolicy::Unfiltered,
                         ui_smoke: false,
                         browser_connector_settings: false,
@@ -6433,6 +6666,9 @@ fn open_script_history_window(
 
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
+    // 先拒绝混用模式，尚未读配置、启动 worker、安装 Hook 或执行动作。
+    let mouse_shortcuts_path = mouse_shortcut_dispatch::parse_plan_path(&arguments)
+        .unwrap_or_else(|error| mouse_shortcut_dispatch::reject_cli(error));
     #[cfg(windows)]
     if arguments.get(1).map(String::as_str) == Some("--omni-clipboard-history-worker") {
         let code = if arguments.len() == 4 {
@@ -6546,6 +6782,25 @@ fn main() {
             std::process::exit(1);
         }
     }
+    let mouse_shortcuts_plan = mouse_shortcuts_path.map(|path| {
+        let plan = mouse_shortcut_dispatch::read_plan(&path)
+            .unwrap_or_else(|error| mouse_shortcut_dispatch::reject_cli(error));
+        let bindings = settings::load().unwrap_or_else(|message| {
+            mouse_shortcut_dispatch::reject_cli(mouse_shortcut_dispatch::CliError {
+                code: "mouse_queue_config_read_failed",
+                message,
+            })
+        });
+        settings::validate(&bindings).unwrap_or_else(|message| {
+            mouse_shortcut_dispatch::reject_cli(mouse_shortcut_dispatch::CliError {
+                code: "mouse_queue_config_invalid",
+                message,
+            })
+        });
+        mouse_shortcut_dispatch::validate_plan_bindings(&plan, &bindings)
+            .unwrap_or_else(|error| mouse_shortcut_dispatch::reject_cli(error));
+        plan
+    });
     if let Some(result) = browser_actions_ui::cli(&arguments) {
         match result {
             Ok(text) => println!("{text}"),
@@ -6716,6 +6971,7 @@ fn main() {
                         Workspace::new(
                             cx,
                             StartupOptions {
+                                mouse_shortcuts: mouse_shortcuts_plan,
                                 wheel_input_policy,
                                 ui_smoke,
                                 browser_connector_settings,

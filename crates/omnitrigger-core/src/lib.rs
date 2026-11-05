@@ -35,6 +35,7 @@
 
 mod engine;
 mod model;
+mod mouse_dispatch_queue;
 mod mouse_modifier_snapshot;
 mod process_scope;
 mod recorder;
@@ -47,6 +48,13 @@ pub use model::{
     Activation, ActiveDrag, Axis, Button, Decision, DragEvent, DragPhase, InputEvent, InputKind,
     KeyboardMatching, KeyboardPolicy, MouseButton, RetainedPrefix, TriggerSpec, WheelDirection,
     WheelPolicy,
+};
+pub use mouse_dispatch_queue::{
+    ActiveMouseDispatch, BuiltinMouseSwitch, BusyMousePolicy, DispatchEnablement,
+    DroppedMouseDispatch, MAX_BUILTIN_MOUSE_SWITCHES, MAX_DELAYED_DISPATCHES,
+    MouseDispatchAdmission, MouseDispatchCancellation, MouseDispatchClass, MouseDispatchControls,
+    MouseDispatchDropReason, MouseDispatchError, MouseDispatchQueue, MouseDispatchRequest,
+    MouseDispatchUpdate,
 };
 pub use mouse_modifier_snapshot::{
     ModifierRequirement, ModifierSides, MouseCaptureOwnership, MouseContextEvent,
