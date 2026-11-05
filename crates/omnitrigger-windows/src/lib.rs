@@ -13,6 +13,17 @@ pub use automation_basics::{
 };
 pub use automation_basics::{validate_automation_text, validate_open_target};
 
+#[cfg(any(windows, test))]
+mod clipboard_history_worker;
+#[cfg(any(windows, test))]
+mod clipboard_history_worker_protocol;
+#[cfg(windows)]
+pub use clipboard_history_worker::{
+    run_clipboard_history_worker_helper, ClipboardHistoryWorker, ClipboardScope,
+    HistoryCaptureFailure, HistoryWorkerBudgets, HistoryWorkerError, HistoryWorkerOptions,
+    HistoryWorkerProtocolError, HistoryWorkerReply, HistoryWorkerSkip, HistoryWorkerStats,
+};
+
 mod clipboard_history_listener;
 #[cfg(windows)]
 pub use clipboard_history_listener::{

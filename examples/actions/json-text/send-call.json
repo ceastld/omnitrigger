@@ -1,0 +1,1 @@
+{"package_id":"examples.json-text","action_id":"inspect-or-send-script","action_version":1,"input":{"mode":"send","format":"pretty","text":"{\"count\":9007199254740993,\"name\":\"示例\"}"}}

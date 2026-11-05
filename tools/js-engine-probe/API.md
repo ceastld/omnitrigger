@@ -9,6 +9,7 @@
 | `ctx.fs.readText(path)` | 读取绝对路径的 UTF-8 文本，最多 64 KiB。 |
 | `ctx.fs.writeText(path, text, {overwrite})` | 默认创建新文件，目标存在则报错；只有显式 `overwrite:true` 才覆盖，不自动创建目录。 |
 | `ctx.process.run(program, args, {timeoutMs})` | 程序和参数数组分别传递，不隐式经过 Shell。返回 `{pid, exitCode, success}`；默认等待 1000 毫秒，允许 1–1000 毫秒。非零退出由脚本判断，stdout / stderr 不采集。 |
+| `ctx.process.capture(program, args?, options?)` | 同步采集 Windows 程序输出，返回 `{code, stdout, stderr}`；默认预算 10 秒、默认拒绝非零退出，双流合计最多 64 KiB，严格 UTF-8。详见[程序输出采集](#程序输出采集)。 |
 | `ctx.process.start(program, args)` | 创建独立程序后返回 `{pid}`，程序不随脚本结束关闭。 |
 | `ctx.delay(milliseconds)` | 同步等待 0–60000 毫秒的整数，返回 `undefined`；字符串、小数、非有限数等返回 `invalid_input`，不做隐式转换。 |
 | `ctx.ui.choose({items, title?, placeholder?, timeoutMs?})` | 应用 GPUI 界面中的可搜索选择菜单，返回稳定 ID 或明确取消；Node 入口使用 `await`。独立 CLI 返回 `ui_unavailable`。参数与示例见[脚本选择菜单](../../examples/actions/script-choice/)。 |
@@ -27,6 +28,46 @@
 | `ctx.open(target)` | 系统默认程序打开 http、https、mailto、about 或本地绝对路径；成功只表示系统接纳请求。 |
 
 原生错误转换为 JS 异常，可在 `catch (error)` 中读取 `error.code`，例如 `invalid_arguments`、`file_read_failed`、`file_write_failed`、`process_start_failed` 和 `process_timeout`。通过 SDK 每个脚本最多调用 32 次 API，文件和进程桥接请求最多 256 KiB，桌面桥接最多 512 KiB；桌面与应用接入的剪贴板文本最多 65,536 个 UTF-16 单元，文件文本最多 64 KiB UTF-8。SDK 计数是防误用措施，不是安全隔离。
+
+## 程序输出采集
+
+`ctx.process.capture` 由包含此实现的新 Windows 轻量宿主提供，Boa 与 QuickJS 共用实现，同步调用，无需 `await`。已安装旧宿主不会因更新类型声明或示例而增加能力，实际可用性取决于运行的宿主构建。Node 目前没有 `ctx.process.capture`；两种入口的示例见[程序输出通知动作](../../examples/actions/process-output/)。
+
+```js
+const result = ctx.process.capture('C:\\OwnedFixture\\program.exe', ['--format', 'json'], {
+  cwd: 'C:\\OwnedFixture',
+  timeoutMs: 10000,
+  allowNonZero: false,
+});
+return { code: result.code, stdoutLength: result.stdout.length };
+```
+
+上述路径为占位示例，需要替换为明确的自有程序和目录。
+
+| 参数或结果 | 契约 |
+| --- | --- |
+| `program` | 本地盘符绝对 `.exe` 路径，不查找 `PATH`，不隐式调用 Shell；拒绝 UNC、设备路径和 `.` / `..` 路径段。脚本须显式指定解释器 EXE 与参数，不能直接传入 `.cmd` / `.bat`。 |
+| `args` | 默认 `[]`，最多 128 个字符串；保留参数边界，按 Windows 命令行规则编码。程序和参数须为有效 Unicode，不含 NUL；完整命令行连同结束 NUL 最多 32,767 个 UTF-16 单元。 |
+| `options.cwd` | 可选的本地盘符绝对目录路径，拒绝 `.` / `..`、NUL 和非字符串；省略时继承宿主工作目录，不自动使用动作包目录。需要稳定目录时显式设置。 |
+| `options.timeoutMs` | 1–60,000 的整数，默认 10,000 毫秒。未知选项、错误类型或非法值在启动前拒绝，不隐式转换。 |
+| `options.allowNonZero` | 布尔值，默认 `false`；非零退出抛出 `process_exit_nonzero`。设为 `true` 才返回该退出码与完整输出。 |
+| 返回值 | 恰含 `{code, stdout, stderr}`，`code` 为有符号 32 位退出码。两个流的原始字节合计最多 65,536，包含 stderr；等待直接进程退出和双流 EOF 后分别严格解码 UTF-8，不补替换字符。NUL 是合法输出字符，后续显示接口可有更严格限制。 |
+
+超出字节上限返回 `process_output_too_large`，无效 UTF-8 返回 `process_invalid_utf8`；错误不返回部分输出。双流交替采集，后代持有管道导致 EOF 未到也受预算约束。`timeoutMs` 是在创建、采集和等待阶段观察的预算，不能中断阻塞中的操作系统调用，不是硬实时超时；收尾可能额外等待约一秒。通过动作服务调用时，外层动作总时限可能更短，并会终止直接脚本宿主；独立 CLI 没有这层动作期限。
+
+采集使用 Windows 10+ 私有 Job，在进程创建时关联，收尾时终止 Job 内进程并检查直接进程退出及 Job 内活动进程归零，再交付结果。宿主被强制终止时，私有 Job 最后一个句柄关闭会终止仍在其中的进程。Job 建立或关联失败即报错，不回退到无 Job 启动；不支持的平台返回 `unsupported_platform`。该范围仅覆盖 Job 内进程，不能保证外部服务或未包含的进程结束，也不能撤销程序已经产生的副作用；现有 `start` 独立程序的生命周期保持不变。
+
+SDK 异常固定 `method: 'process.capture'`，消息为“程序输出采集未完成，请检查错误代码。”，不回显路径、参数或输出。JS 使用 `effectState`，原生协议使用 `effect_state`：确认尚未启动为 `not_started`，已启动后失败或效果不确定为 `unknown`。常见错误如下；脚本应按代码处理，不自动重试。
+
+| 错误代码 | 含义与效果状态 |
+| --- | --- |
+| `invalid_input` / `invalid_arguments` / `request_too_large` | SDK 参数、原生参数或请求超限，`not_started`。 |
+| `unsupported_platform` / `process_setup_failed` / `process_start_failed` | 平台不支持、Job/管道设置或进程创建失败，`not_started`。 |
+| `process_timeout` / `process_output_too_large` / `process_invalid_utf8` / `process_exit_nonzero` | 启动后超时、超限、解码或非零策略失败，`unknown`。 |
+| `process_read_failed` / `process_wait_failed` / `process_clock_error` / `process_cleanup_failed` | 采集、等待、计时或收尾失败，`unknown`，不能据此断言副作用未发生。 |
+| `invalid_response` / `process_capture_failed` | 回执无效或未识别的采集失败；派发后的效果不确定时为 `unknown`。 |
+
+与 Node 现有 `await ctx.process.run(program, args, {cwd, allowNonZero})` 相比，返回字段相同，但契约不同：Node 没有单次 `timeoutMs`，省略 `cwd` 使用包目录，输出按 UTF-8 替换无效字节；取消处理直接子进程，没有上述私有 Job 收尾保证。Node 的双流同样合计最多 64 KiB。这些区别不能通过改名调用消除；轻量旧 `run` 仍返回 `{pid, exitCode, success}`，不采集输出。
 
 ## 原目标快捷键
 

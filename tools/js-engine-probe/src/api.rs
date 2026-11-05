@@ -12,6 +12,29 @@ use std::{
 
 const MAX_TEXT: usize = 64 * 1024;
 
+#[path = "process_capture.rs"]
+mod process_capture;
+
+fn capture_timeout() -> u64 {
+    process_capture::Options::default().timeout_ms
+}
+
+fn capture_cwd<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
+
+fn capture_api_error(failure: process_capture::Failure) -> ApiError {
+    ApiError {
+        code: failure.code.into(),
+        message: failure.message.into(),
+        effect_state: Some(failure.effect_state.into()),
+        method: Some("process.capture".into()),
+        required_permissions: Vec::new(),
+    }
+}
+
 #[derive(Serialize, Debug)]
 pub struct ApiError {
     pub(crate) code: String,
@@ -59,6 +82,17 @@ enum Call {
         args: Vec<String>,
         timeout_ms: u64,
     },
+    Capture {
+        program: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default = "capture_timeout")]
+        timeout_ms: u64,
+        #[serde(default)]
+        allow_non_zero: bool,
+        #[serde(default, deserialize_with = "capture_cwd")]
+        cwd: Option<String>,
+    },
     Start {
         program: String,
         args: Vec<String>,
@@ -73,11 +107,20 @@ enum Call {
 }
 
 pub fn dispatch(request: String) -> String {
+    let capture_request = request.len() <= 512 * 1024
+        && request.contains("\"capture\"")
+        && serde_json::from_str::<Value>(&request).is_ok_and(|value| value["kind"] == "capture");
     let result = if request.len() > 512 * 1024 {
         Err(error("request_too_large", "API 请求超过 512 KiB。"))
     } else {
         serde_json::from_str::<Call>(&request)
-            .map_err(|cause| error("invalid_arguments", cause))
+            .map_err(|cause| {
+                if capture_request {
+                    capture_api_error(process_capture::fault("invalid_arguments", false))
+                } else {
+                    error("invalid_arguments", cause)
+                }
+            })
             .and_then(|call| {
                 if request.len() > 256 * 1024 && !matches!(call, Call::Native { .. }) {
                     return Err(error("request_too_large", "API 请求超过 256 KiB。"));
@@ -229,6 +272,24 @@ fn execute(call: Call) -> Result<Value, ApiError> {
                 thread::sleep(Duration::from_millis(5));
             }
         }
+        Call::Capture {
+            program,
+            args,
+            timeout_ms,
+            allow_non_zero,
+            cwd,
+        } => {
+            let result = process_capture::capture(
+                &program,
+                &args,
+                &process_capture::Options {
+                    timeout_ms,
+                    allow_non_zero,
+                    cwd,
+                },
+            );
+            result.map(|value| json!(value)).map_err(capture_api_error)
+        }
         Call::Start { program, args } => {
             let child = command(&program, &args)?
                 .spawn()
@@ -310,5 +371,28 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(response, json!({"ok":true,"value":null}));
+    }
+
+    #[test]
+    fn capture_wire_rejects_invalid_arguments_before_any_program_start() {
+        for extra in [
+            json!({"timeout_ms":0}),
+            json!({"timeout_ms":60001}),
+            json!({"timeout_ms":"1"}),
+            json!({"allow_non_zero":1}),
+            json!({"unknown":true}),
+            json!({"cwd":null}),
+            json!({"args":"secret-output"}),
+        ] {
+            let mut request = json!({"kind":"capture","program":"C:\\fixture.exe","args":[]});
+            for (key, value) in extra.as_object().unwrap() {
+                request[key] = value.clone();
+            }
+            let response: Value = serde_json::from_str(&dispatch(request.to_string())).unwrap();
+            assert_eq!(response["ok"], false);
+            assert_eq!(response["error"]["code"], "invalid_arguments");
+            assert_eq!(response["error"]["effect_state"], "not_started");
+            assert!(!response.to_string().contains("secret-output"));
+        }
     }
 }

@@ -78,6 +78,35 @@ fn context() -> InvocationContext {
 }
 
 #[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn explicit_capability_requirements_allow_supported_pure_entry() {
+    let fixture = Fixture::new("return {ran:true};");
+    let output = runtime()
+        .with_required_capabilities(vec!["clipboard.history.v1".into()])
+        .execute(
+            &fixture.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert_eq!(output, json!({"ran":true}));
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn missing_capability_is_rejected_before_entry_is_even_read() {
+    let fixture = Fixture::new("throw new Error('entry must not run');");
+    let action = fixture.action(json!({}));
+    std::fs::remove_file(&action.entry_path).unwrap();
+    let fault = runtime()
+        .with_required_capabilities(vec!["synthetic.missing.v1".into()])
+        .execute(&action, &context(), &CancellationToken::new())
+        .unwrap_err();
+    assert_eq!(fault.code, "runtime_capability_missing");
+    assert_eq!(fault.effect_state.as_deref(), Some("not_started"));
+}
+
+#[test]
 fn unavailable_host_and_pre_cancel_are_rejected_before_execution() {
     let fixture = Fixture::new("return {};");
     let runtime = ScriptHostRuntime::new(fixture.root.join("does-not-exist.exe"));

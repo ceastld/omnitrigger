@@ -67,6 +67,22 @@ jobs:
             $env:OMNITRIGGER_HISTORY_HELPER_EXE = $historyPreviousHelper
           }
 
+      - name: 验证独立窗口站中的持续历史辅助进程
+        shell: pwsh
+        run: |
+          $historyWorkerExecutable = Join-Path $env:GITHUB_WORKSPACE 'target\debug\omnitrigger.exe'
+          if (-not (Test-Path -LiteralPath $historyWorkerExecutable -PathType Leaf)) {
+            throw '缺少已构建并接入持续历史入口的自有程序。'
+          }
+          $historyWorkerPrevious = $env:OMNITRIGGER_HISTORY_HELPER_EXE
+          try {
+            $env:OMNITRIGGER_HISTORY_HELPER_EXE = (Resolve-Path -LiteralPath $historyWorkerExecutable).Path
+            cargo test --locked -p omnitrigger-windows --test clipboard_history_worker -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            $env:OMNITRIGGER_HISTORY_HELPER_EXE = $historyWorkerPrevious
+          }
+
       - name: 安装 SDK 检查使用的 Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -89,9 +105,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check-single-instance.mjs target/debug/omnitrigger.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # 默认仅Node模式，不附加--light-host。
+          node tools/script-sdk-check/check-clipboard-history.mjs target/debug/omnitrigger.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustfmt --edition=2024 --check tools/script-sdk-check/file-open-probe.rs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustc --edition=2024 --crate-name omnitrigger_file_open_probe tools/script-sdk-check/file-open-probe.rs -o .tmp/file-open-probe.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 验证已有轻量工程的独立类型检查
+        shell: pwsh
+        run: |
+          node --test tools/script-sdk-check/check-project-types.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 验证常用动作和浏览器工作流
@@ -107,7 +132,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/clipboard_history_api.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/clipboard_history_cli_metadata.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/clipboard-history/recipes.test.mjs examples/actions/target-window-menu/recipes.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/process_capture_api.test.mjs tests/process_capture_contract.test.mjs tests/process_capture_sdk.test.mjs tests/clipboard_history_inspector.test.mjs tests/clipboard_history_inspector_scan_limit.test.mjs examples/actions/json-text/recipes.test.mjs examples/actions/selection-history/recipes.test.mjs examples/actions/process-output/recipes.test.mjs examples/actions/process-output/encoding-boundaries.test.mjs examples/actions/process-output/cross-entry-contract.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/common-search/open-or-search.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -129,6 +158,9 @@ jobs:
 
       - name: 验证动作正文快照工具
         run: python -m unittest discover -s scripts -p 'test_snapshot_action_candidates.py' -v
+
+      - name: 验证鼠标快照配置投影
+        run: python -m unittest discover -s scripts -p 'test_mouse_snapshot_projection.py' -v
 
   js-engines:
     name: Windows JS 引擎实验
@@ -173,6 +205,52 @@ jobs:
 
       - name: 构建两种引擎并测量体积
         run: ./measure.ps1
+
+      - name: 验证输出采集的自有夹具与宿主退出收尾
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { throw '缺少明确的CI临时目录。' }
+          if ([string]::IsNullOrWhiteSpace($env:GITHUB_WORKSPACE)) { throw '缺少明确的工作区路径。' }
+          $captureCaseRoot = Join-Path $env:RUNNER_TEMP ("process-capture-ci-" + [guid]::NewGuid().ToString('N'))
+          if (Test-Path -LiteralPath $captureCaseRoot) { throw '受控目录必须全新创建。' }
+          New-Item -ItemType Directory -Path $captureCaseRoot -ErrorAction Stop | Out-Null
+          $captureFixtureSource = Join-Path $env:GITHUB_WORKSPACE 'tools\script-sdk-check\process-capture-fixture.rs'
+          $captureFixture = Join-Path $captureCaseRoot 'process-capture-fixture.exe'
+          rustfmt --edition=2024 --check $captureFixtureSource
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --edition=2024 --crate-name process_capture_fixture $captureFixtureSource -o $captureFixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path -LiteralPath $captureFixture -PathType Leaf)) { throw '自有夹具未构建。' }
+          $capturePreviousFixture = $env:OMNITRIGGER_CAPTURE_FIXTURE
+          $capturePreviousHost = $env:OMNITRIGGER_CAPTURE_HOST
+          $capturePreviousRoot = $env:OMNITRIGGER_CAPTURE_CASE_ROOT
+          $capturePreviousEngine = $env:OMNITRIGGER_CAPTURE_ENGINE
+          try {
+            $env:OMNITRIGGER_CAPTURE_FIXTURE = (Resolve-Path -LiteralPath $captureFixture).Path
+            $env:OMNITRIGGER_CAPTURE_CASE_ROOT = (Resolve-Path -LiteralPath $captureCaseRoot).Path
+            foreach ($engine in @('boa', 'quickjs')) {
+              $captureHost = Join-Path $PWD "results/$engine-small.exe"
+              if (-not (Test-Path -LiteralPath $captureHost -PathType Leaf)) { throw '缺少测量步骤构建的明确宿主。' }
+              $env:OMNITRIGGER_CAPTURE_HOST = (Resolve-Path -LiteralPath $captureHost).Path
+              $env:OMNITRIGGER_CAPTURE_ENGINE = $engine
+              node ../script-sdk-check/process-capture-test-support.mjs --warmup
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              $captureEngineArguments = @('--release', '--locked', '--no-default-features', '--features', $engine)
+              if ($engine -eq 'quickjs') { $captureEngineArguments += @('--target-dir', 'target/quickjs') }
+              $captureTestName = 'api::process_capture::tests::controlled_fixture_capture_cases'
+              $captureTests = & cargo test @captureEngineArguments -- --list
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              if (@($captureTests | Where-Object { $_ -eq "$($captureTestName): test" }).Count -ne 1) { throw '未找到唯一受控采集用例。' }
+              cargo test @captureEngineArguments $captureTestName -- --ignored --exact --test-threads=1
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              node --test --test-concurrency=1 ../../tests/process_capture_parent_kill.test.mjs ../../tests/process_capture_host.test.mjs
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          } finally {
+            $env:OMNITRIGGER_CAPTURE_FIXTURE = $capturePreviousFixture
+            $env:OMNITRIGGER_CAPTURE_HOST = $capturePreviousHost
+            $env:OMNITRIGGER_CAPTURE_CASE_ROOT = $capturePreviousRoot
+            $env:OMNITRIGGER_CAPTURE_ENGINE = $capturePreviousEngine
+          }
 
       - name: 验证轻量引擎接入动作服务
         run: |

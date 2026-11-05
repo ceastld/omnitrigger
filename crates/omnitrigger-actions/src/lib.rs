@@ -4,6 +4,7 @@ pub mod model;
 mod native;
 pub mod node;
 pub mod project;
+pub mod runtime_capabilities;
 pub mod script_host;
 pub mod service;
 

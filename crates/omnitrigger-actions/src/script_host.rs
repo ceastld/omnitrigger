@@ -14,6 +14,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "script_host_capability_probe.rs"]
+mod capability_probe;
+
 const SOURCE_LIMIT: u64 = 128 * 1024;
 const RESPONSE_LIMIT: u64 = 96 * 1024;
 
@@ -21,6 +24,7 @@ pub struct ScriptHostRuntime {
     program: PathBuf,
     timeout: Duration,
     integrity: Option<(String, u64)>,
+    required_capabilities: Vec<String>,
 }
 
 impl ScriptHostRuntime {
@@ -29,6 +33,7 @@ impl ScriptHostRuntime {
             program: program.into(),
             timeout: Duration::from_secs(60),
             integrity: None,
+            required_capabilities: Vec::new(),
         }
     }
 
@@ -40,6 +45,13 @@ impl ScriptHostRuntime {
     /// 托管安装包的宿主映像校验。手动指定解释器时不自动声称受包清单保护。
     pub fn with_integrity(mut self, sha256: String, size: u64) -> Self {
         self.integrity = Some((sha256, size));
+        self
+    }
+
+    /// 仅调用方明确提出能力要求时探测宿主；不从源码或 SDK 推断要求。
+    /// 未声明要求的已有动作保持原执行路径，静态引用检查不调用本方法。
+    pub fn with_required_capabilities(mut self, required: Vec<String>) -> Self {
+        self.required_capabilities = required;
         self
     }
 
@@ -129,6 +141,12 @@ impl ScriptHostRuntime {
             return Err(error("cancelled", "动作提交前已取消。", "not_started"));
         }
         let _image = self.checked_program()?;
+        capability_probe::check(
+            &self.program,
+            &self.required_capabilities,
+            self.timeout,
+            cancellation,
+        )?;
         let (root, entry) = crate::node::checked_entry(action)?;
         let entry_request = entry_request(&root, &entry)?;
         let native = host

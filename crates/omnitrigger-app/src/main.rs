@@ -10,8 +10,14 @@ mod browser_actions;
 mod browser_actions_ui;
 mod browser_connector;
 mod browser_connector_ui;
+mod clipboard_history_background;
+mod clipboard_history_controller;
 mod clipboard_history_host;
+#[cfg(test)]
+mod clipboard_history_review;
 mod clipboard_history_store;
+mod clipboard_history_ui;
+mod clipboard_history_ui_state;
 #[cfg(all(windows, test))]
 mod clipboard_restore;
 #[cfg(all(windows, test))]
@@ -132,6 +138,7 @@ enum Page {
     Presets,
     Extensions,
     History,
+    TextHistory,
     Diagnostics,
     Settings,
 }
@@ -467,6 +474,7 @@ struct StartupOptions {
     ui_smoke: bool,
     browser_connector_settings: bool,
     appearance_settings: bool,
+    text_history_page: bool,
     panel: bool,
     wheel: Option<String>,
     wheel_target: Option<omnitrigger_windows::ShortcutTarget>,
@@ -478,6 +486,7 @@ struct Workspace {
     wheel_input_policy: WheelInputPolicy,
     events: Option<EventBridge<BackendEvent>>,
     ui_wake: UiWake,
+    text_history: clipboard_history_ui::ClipboardHistoryUi,
     ready: bool,
     bindings_need_sync: bool,
     paused: bool,
@@ -618,6 +627,7 @@ impl Workspace {
             ui_smoke,
             browser_connector_settings,
             appearance_settings,
+            text_history_page,
             panel: open_panel,
             wheel: initial_wheel,
             wheel_target: wheel_launch_target,
@@ -851,11 +861,23 @@ impl Workspace {
         let (panel_sender, panel_requests) = mpsc::sync_channel(8);
         let (wheel_sender, wheel_requests) = mpsc::sync_channel(8);
         let system_executor = system_executor::SystemAdjustmentExecutor::with_wake(ui_wake.clone());
+        let history_store = std::path::absolute(settings::path())
+            .ok()
+            .and_then(|path| {
+                clipboard_history_store::ClipboardHistoryStore::new(
+                    path.with_file_name("clipboard-history.json"),
+                )
+                .ok()
+            })
+            .map(std::sync::Arc::new);
+        let text_history =
+            clipboard_history_ui::ClipboardHistoryUi::new(history_store, ui_wake.clone());
         Self {
             backend,
             wheel_input_policy,
             events,
             ui_wake,
+            text_history,
             ready: false,
             bindings_need_sync: false,
             paused: false,
@@ -870,7 +892,9 @@ impl Workspace {
             theme_mode,
             theme_error,
             update_ui: update_ui::UpdateUi::new(),
-            page: if appearance_settings {
+            page: if text_history_page {
+                Page::TextHistory
+            } else if appearance_settings {
                 Page::Settings
             } else if browser_connector_settings {
                 Page::Extensions
@@ -1126,6 +1150,7 @@ impl Workspace {
             }
         }
         let mut changed = self.poll_wheel(cx);
+        changed |= self.text_history.poll();
         if !self.brightness_hud_prepared
             && self.ready
             && self.triggers.bindings().iter().any(|binding| {
@@ -3414,6 +3439,13 @@ impl Workspace {
                                 Page::Extensions,
                                 Icon::Plug,
                                 "扩展",
+                                None,
+                            ))
+                            .child(nav(
+                                "nav-text-history",
+                                Page::TextHistory,
+                                Icon::Clock,
+                                "文本历史",
                                 None,
                             ))
                             .child(div().h(px(10.)))
@@ -5812,6 +5844,7 @@ impl Render for Workspace {
                 .child(self.render_inspector(cx))
                 .into_any_element(),
             Page::History => self.render_history(cx).into_any_element(),
+            Page::TextHistory => self.render_text_history(cx).into_any_element(),
             Page::Diagnostics => self.render_diagnostics(cx).into_any_element(),
             Page::Settings => self.render_appearance(window, cx).into_any_element(),
         };
@@ -6153,6 +6186,15 @@ fn smoke_test(wheel_input_policy: WheelInputPolicy) -> Result<(), String> {
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
     #[cfg(windows)]
+    if arguments.get(1).map(String::as_str) == Some("--omni-clipboard-history-worker") {
+        let code = if arguments.len() == 4 {
+            omnitrigger_windows::run_clipboard_history_worker_helper(&arguments[2], &arguments[3])
+        } else {
+            2
+        };
+        std::process::exit(code);
+    }
+    #[cfg(windows)]
     if arguments.get(1).map(String::as_str) == Some("--omni-clipboard-history-capture") {
         let previous = if arguments.len() == 5 {
             arguments[4].parse::<u32>().ok()
@@ -6299,6 +6341,9 @@ fn main() {
     }
     let ui_smoke = arguments.iter().any(|argument| argument == "--ui-smoke");
     let appearance_settings = arguments.iter().any(|argument| argument == "--settings");
+    let text_history_page = arguments
+        .iter()
+        .any(|argument| argument == "--text-history");
     let browser_connector_settings = arguments
         .iter()
         .any(|argument| argument == "--browser-connector-settings");
@@ -6382,6 +6427,7 @@ fn main() {
                                 ui_smoke,
                                 browser_connector_settings,
                                 appearance_settings,
+                                text_history_page,
                                 panel: open_panel && initial_wheel.is_none(),
                                 wheel: initial_wheel,
                                 wheel_target: wheel_launch_target,
@@ -6448,6 +6494,7 @@ mod tests {
             Page::Wheels,
             Page::Presets,
             Page::History,
+            Page::TextHistory,
         ] {
             assert!(events
                 .iter()
@@ -6483,6 +6530,7 @@ mod tests {
             Page::Wheels,
             Page::Presets,
             Page::History,
+            Page::TextHistory,
             Page::Diagnostics,
         ] {
             assert!(events

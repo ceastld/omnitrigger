@@ -139,6 +139,19 @@ type ScriptContext = Readonly<{
         run(program: string, args?: string[], options?: { timeoutMs?: number }): {
             pid: number; exitCode: number | null; success: boolean;
         };
+        /** Windows 10+ 有界 UTF-8 输出采集；保留 run 原语义。
+         * program 为明确本地绝对 .exe 路径，脚本显式传解释器；不搜索 PATH、不隐式 shell。
+         * args 最多128项，无NUL，MSVCRT命令行最多32767 UTF-16（含终止）。
+         * timeoutMs 为1..60000，默认10000；cwd 可选本地绝对目录。不同于所有OS调用的硬期限。
+         * stdout/stderr 合计最多65536字节、严格UTF-8；溢出/坏编码/超时无部分回执。
+         * 默认非零退出抛 process_exit_nonzero；allowNonZero=true 才返回非零code及完整输出。
+         * 私有Job在创建时关联，成功/失败/宿主关闭时收尾Job内后代；不是任意外部服务进程树沙盒。
+         * 取消由外层结束宿主；不保证阻塞OS调用中即时协作取消，不自动重试。
+         * 输出供脚本内部处理，默认终态/错误不应回显正文。
+         */
+        capture(program: string, args?: string[], options?: { timeoutMs?: number; allowNonZero?: boolean; cwd?: string }): {
+            code: number; stdout: string; stderr: string;
+        };
         /** 创建独立程序后返回，不随脚本结束关闭。 */
         start(program: string, args?: string[]): { pid: number };
     };

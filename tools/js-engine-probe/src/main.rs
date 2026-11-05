@@ -5,6 +5,7 @@ use std::io::{self, Read};
 mod api;
 mod modules;
 mod native;
+mod runtime_description;
 const DESKTOP_API: &str =
     include_str!("../../../crates/omnitrigger-actions/runtime/desktop-api.js");
 const SDK: &str = include_str!("sdk.js");
@@ -91,10 +92,7 @@ struct Invocation {
 fn main() {
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     if arguments.len() == 1 && arguments[0] == "--describe-runtime" {
-        println!(
-            "{}",
-            json!({"schema_version":1,"product":"omnitrigger-script-host","version":env!("CARGO_PKG_VERSION"),"engine":if cfg!(feature="quickjs"){"quickjs"}else{"boa"},"api_version":1,"protocol_schema":1})
-        );
+        println!("{}", runtime_description::describe());
         return;
     }
     if !arguments.is_empty() {
