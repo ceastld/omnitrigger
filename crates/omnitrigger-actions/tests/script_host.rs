@@ -153,6 +153,21 @@ fn installed_image_digest_is_checked_before_any_process_starts() {
 }
 
 #[test]
+fn zero_budget_rejects_before_entry_validation_or_host_start() {
+    let fixture = Fixture::new("ctx.fs.writeText(ctx.input.output, 'must not run');");
+    let action = fixture.action(json!({"output":fixture.root.join("output.txt")}));
+    // 入口和宿主均不存在：若先读取入口或尝试创建宿主，错误代码会不同。
+    std::fs::remove_file(&action.entry_path).unwrap();
+    let fault = ScriptHostRuntime::new(fixture.root.join("does-not-exist.exe"))
+        .with_timeout(Duration::ZERO)
+        .execute(&action, &context(), &CancellationToken::new())
+        .unwrap_err();
+    assert_eq!(fault.code, "timeout");
+    assert_eq!(fault.effect_state.as_deref(), Some("not_started"));
+    assert!(!fixture.root.join("output.txt").exists());
+}
+
+#[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
 fn script_diagnostics_associate_entry_paths_without_changing_fault_fields() {
     // 较长入口路径也不能在应用二次裁剪时挤掉用户调用栈。
@@ -365,7 +380,7 @@ fn script_host_executes_file_api_and_rejects_accidental_overwrite() {
 
 #[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
-fn script_host_cancel_and_timeout_do_not_claim_rollback() {
+fn script_host_cancel_does_not_claim_rollback() {
     let fixture = Fixture::new(&format!(
         "ctx.fs.writeText(ctx.input.ready,'effect remains'); while(true) {{ let x=1; {} }}",
         "x=Math.sin(x)+Math.cos(x);".repeat(32)
@@ -389,18 +404,6 @@ fn script_host_cancel_and_timeout_do_not_claim_rollback() {
         std::fs::read_to_string(fixture.root.join("ready.txt")).unwrap(),
         "effect remains"
     );
-    // 用纯循环单独验证宿主时限，避免将 API 参数错误误认作超时。
-    std::fs::write(fixture.root.join("main.js"), "while(true) {};").unwrap();
-    let timed = runtime()
-        .with_timeout(Duration::ZERO)
-        .execute(
-            &fixture.action(json!({})),
-            &context(),
-            &CancellationToken::new(),
-        )
-        .unwrap_err();
-    assert_eq!(timed.code, "timeout");
-    assert_eq!(timed.effect_state.as_deref(), Some("unknown"));
 }
 
 #[derive(Default)]

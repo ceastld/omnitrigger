@@ -16,7 +16,7 @@ use std::{
 pub(super) fn check(
     program: &Path,
     required: &[String],
-    timeout: Duration,
+    deadline: Instant,
     cancellation: &CancellationToken,
 ) -> Result<(), ActionError> {
     let convert = |fault: crate::runtime_capabilities::CapabilityError| {
@@ -42,7 +42,8 @@ pub(super) fn check(
             "not_started",
         ));
     }
-    if timeout.is_zero() {
+    let deadline = deadline.min(Instant::now() + Duration::from_secs(10));
+    if Instant::now() >= deadline {
         return Err(error(
             "runtime_description_timeout",
             "宿主能力探测超时，未运行动作。",
@@ -81,6 +82,20 @@ pub(super) fn check(
             )
         })?);
     crate::node::hide_window(&mut command);
+    if cancellation.is_cancelled() {
+        return Err(error(
+            "cancelled",
+            "能力探测前已取消，未运行动作。",
+            "not_started",
+        ));
+    }
+    if Instant::now() >= deadline {
+        return Err(error(
+            "runtime_description_timeout",
+            "宿主能力探测超时，未运行动作。",
+            "not_started",
+        ));
+    }
     let mut child = OwnedHost(command.spawn().map_err(|_| {
         error(
             "runtime_description_start",
@@ -88,7 +103,6 @@ pub(super) fn check(
             "not_started",
         )
     })?);
-    let began = Instant::now();
     loop {
         if cancellation.is_cancelled() {
             return Err(error(
@@ -97,7 +111,7 @@ pub(super) fn check(
                 "not_started",
             ));
         }
-        if began.elapsed() >= timeout.min(Duration::from_secs(10)) {
+        if Instant::now() >= deadline {
             return Err(error(
                 "runtime_description_timeout",
                 "宿主能力探测超时，未运行动作。",
@@ -172,7 +186,7 @@ mod tests {
         check(
             Path::new("missing-synthetic-host"),
             &[],
-            Duration::ZERO,
+            Instant::now(),
             &CancellationToken::new(),
         )
         .unwrap();
@@ -182,7 +196,7 @@ mod tests {
         let fault = check(
             Path::new("missing-synthetic-host"),
             &["bad/token".into()],
-            Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(1),
             &CancellationToken::new(),
         )
         .unwrap_err();
@@ -197,7 +211,7 @@ mod tests {
         let fault = check(
             Path::new("missing-synthetic-host"),
             &required,
-            Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(1),
             &token,
         )
         .unwrap_err();
@@ -205,7 +219,7 @@ mod tests {
         let fault = check(
             Path::new("missing-synthetic-host"),
             &required,
-            Duration::ZERO,
+            Instant::now(),
             &CancellationToken::new(),
         )
         .unwrap_err();
