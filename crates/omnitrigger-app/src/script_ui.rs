@@ -148,7 +148,9 @@ impl<H: NativeHost> NativeHost for Host<H> {
         cancellation: &CancellationToken,
         deadline: Instant,
     ) -> Result<Value, ActionError> {
-        if method == "fs.stat" {
+        if method == "system.open" {
+            crate::script_open::open(params, cancellation, deadline)
+        } else if method == "fs.stat" {
             crate::script_fs::stat(params, cancellation, deadline)
         } else if method == "ui.notify" {
             crate::script_notify::notify(params, cancellation, deadline)

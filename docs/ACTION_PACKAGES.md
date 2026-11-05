@@ -364,6 +364,20 @@ cargo test -p omnitrigger-app interactive_script_line_edit_smoke --locked -- --i
 
 文本烟测在支持完整备份当前格式时才执行剪贴板用例，结束后恢复并逐格式读回核对；遇到不支持的格式会保留原剪贴板并明确失败，不把跳过算作通过。其他来源在测试期间更新剪贴板时，测试保留新内容。
 
+### Node 打开网址或本地目标
+
+`await ctx.open(target)` 请求系统默认程序打开网址或本地路径，无需前台窗口。只接受一个目标字符串：`http`、`https`、`mailto`、`about` 或盘符开头的本地绝对路径，最多32,766个UTF-16单元；首尾空白、控制字符及非法目标会被拒绝。目标原样传递，不拆成命令行，不接收参数、verb或其他选项。
+
+```javascript
+await ctx.open('https://example.com/');
+const receipt = await ctx.open('D:/Work/report.txt');
+return {submitted: receipt.submitted};
+```
+
+Node返回严格的 `{submitted:true}`，仅表示系统接纳打开请求，不证明文件、网页或外部应用完成加载。轻量 `ctx.open` 保持既有同步行为。没有应用原生桥返回 `native_bridge_unavailable`；不回退 `run/start`，不调用命令解释器，也不自动重试。原生调用并发返回 `open_busy`，Node须await；遗留打开Promise会使动作失败。
+
+错误包含 `method:'system.open'` 和 `effectState`。校验或提交前取消/过期为 `not_started`；进入系统调用后的失败、迟到、取消或丢失回执为 `unknown`。单次系统打开不能被强制抢占，取消不会撤销已接纳请求，`unknown`不能作为安全重试依据。五秒客户端等待预算不代表系统调用的硬期限。
+
 ### 本地文件元数据
 
 `ctx.fs.stat(path)` 只查询本地路径的类型，返回 `{kind:'file'|'directory'|'missing'|'other'}`，不打开文件内容或枚举目录。Node 使用 `await`；轻量脚本同步返回。它通过本机宿主工作，无需应用界面或前台窗口，可用于“存在普通文件时打开，否则搜索文本”等分支。

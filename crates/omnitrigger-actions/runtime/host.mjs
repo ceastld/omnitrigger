@@ -16,7 +16,7 @@ let browserConnection;
 let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
-const nativeMethods = new Set(['process.capture','history.list','history.get','history.append','history.remove','fs.stat','ui.choose','ui.notify','browser.profiles','browser.call','target.info','target.context',
+const nativeMethods = new Set(['system.open','process.capture','history.list','history.get','history.append','history.remove','fs.stat','ui.choose','ui.notify','browser.profiles','browser.call','target.info','target.context',
   'keyboard.shortcut','keyboard.sequence','keyboard.text','selection.copy','selection.copy_data','clipboard.read','clipboard.read_data','clipboard.write','window.action']);
 let nativePending;
 let nativePendingMethod;
@@ -99,6 +99,7 @@ function browserRequest(method, args, options = {}, profiles = false) {
 const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...args));
 
 function nativeCall(method, params) {
+  const opening = method === 'system.open';
   const capture = method === 'process.capture';
   const stat = method === 'fs.stat';
   const dataRead = method === 'clipboard.read_data';
@@ -137,7 +138,7 @@ function nativeCall(method, params) {
     };
     const aborted = () => {
       const reason = controller.signal.reason;
-      if (capture) return finish(fail(reason?.code === 'timeout' ? 'timeout' : 'cancelled', undefined, sent ? 'unknown' : 'not_started'));
+      if (opening || capture) return finish(fail(reason?.code === 'timeout' ? 'timeout' : 'cancelled', undefined, sent ? 'unknown' : 'not_started'));
       if (method === 'ui.notify' || stat || data || history || capture) {
         if (typeof reason?.method !== 'string') reason.method = method;
         reason.effectState = stat || dataRead || historyRead ? 'not_started' : sent ? 'unknown' : 'not_started';
@@ -148,8 +149,8 @@ function nativeCall(method, params) {
     if (!capture) socket.setEncoding('utf8');
     const timeout = capture ? Math.min(params.timeout_ms + 1500, 61500) : method === 'ui.choose' ? 61000 : dataCopy ? 8000 : 5000;
     socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || stat || data || history || capture ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
-    // 历史/数据方法及 stat 的总传输时限不被零碎数据延长，外层取消/时限仍优先生效。
-    if (stat || data || history || capture) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
+    // 这些方法的总传输时限不被零碎数据延长，外层取消/时限仍优先生效。
+    if (opening || stat || data || history || capture) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
     socket.once('connect', () => {
       if (controller.signal.aborted) return aborted();
       sent = true;
@@ -172,12 +173,12 @@ function nativeCall(method, params) {
       try {
         const response = JSON.parse(chunks);
         if (response.id !== id || typeof response.ok !== 'boolean') throw new Error('回执身份不匹配');
-        if ((history || capture) && (Reflect.ownKeys(response).length !== 3 || !Object.hasOwn(response, response.ok ? 'value' : 'error'))) throw new Error();
+        if ((opening || history || capture) && (Reflect.ownKeys(response).length !== 3 || !Object.hasOwn(response, response.ok ? 'value' : 'error'))) throw new Error();
         if (response.ok) finish(undefined, response.value);
         else {
           const error = response.error;
           if (!error || typeof error.code !== 'string' || typeof error.message !== 'string') throw new Error('缺少错误');
-          if ((history || capture) && ((error.method !== undefined && error.method !== method)
+          if ((opening || history || capture) && ((error.method !== undefined && error.method !== method)
               || (error.effect_state !== undefined && !['not_started','unknown'].includes(error.effect_state)))) throw new Error();
           const failure = fail(error.code, error.message, error.effect_state ?? 'unknown');
           if (!history && !capture && Array.isArray(error.required_permissions)) failure.requiredPermissions = error.required_permissions;
@@ -193,6 +194,48 @@ function nativeCall(method, params) {
   const completed = () => {nativePending = undefined; nativePendingMethod = undefined;};
   operation.then(completed, completed);
   return operation;
+}
+
+// 只经应用桥接打开目标；不调用Node spawn/run/start，不解释命令行。
+async function openTarget(...args) {
+  const fail = (code, effectState) => Object.assign(new Error('打开请求未确认，请检查错误代码。'),
+    {code, effectState, method:'system.open'});
+  const target = args[0];
+  if (args.length !== 1 || typeof target !== 'string' || !target.length || target.length > 32766
+      || target.trim() !== target || /[\u0000-\u001f\u007f-\u009f]/.test(target)) {
+    throw fail('invalid_input', 'not_started');
+  }
+  for (let index = 0; index < target.length; index++) {
+    const unit = target.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = target.charCodeAt(++index);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) throw fail('invalid_input', 'not_started');
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) throw fail('invalid_input', 'not_started');
+  }
+  // 协议/绝对路径白名单由与轻量open相同的Rust校验独立执行，不从用户文本猜程序或参数。
+  if (controller.signal.aborted) throw fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled', 'not_started');
+  if (!request.native) throw fail('native_bridge_unavailable', 'not_started');
+  let result;
+  try { result = await nativeCall('system.open', {target}); }
+  catch (error) {
+    let code = 'native_bridge_failed', effect = 'unknown';
+    try {
+      const aliases = {desktop_busy:'open_busy',desktop_call_limit:'native_call_limit',
+        desktop_timeout:'timeout',desktop_protocol:'invalid_response',desktop_connection:'native_bridge_failed'};
+      const known = ['invalid_input','open_failed','open_unavailable','open_busy','cancelled','timeout',
+        'invalid_response','native_bridge_unavailable','native_bridge_failed','native_call_limit'];
+      const reported = aliases[error?.code] ?? error?.code;
+      if (known.includes(reported)) code = reported;
+      if (error?.effectState === 'not_started') effect = 'not_started';
+    } catch (_) { /* 不读取或回显异常getter正文。 */ }
+    throw fail(code, effect);
+  }
+  try {
+    if (result === null || typeof result !== 'object' || Array.isArray(result)
+        || Reflect.ownKeys(result).length !== 1 || !Object.hasOwn(result, 'submitted')
+        || result.submitted !== true) throw new Error();
+  } catch (_) { throw fail('invalid_response', 'unknown'); }
+  return {submitted:true};
 }
 
 const desktopApis = createDesktopApi(nativeCall);
@@ -322,6 +365,7 @@ try {
     input: request.input,
     invocation: Object.freeze(request.invocation),
     packageRoot: request.package_root,
+    open: openTarget,
     process: Object.freeze({ run, start, capture:createProcessCaptureApi(params => nativeCall('process.capture', params.cwd === undefined ? {...params,cwd:request.package_root} : params), true).capture }),
     browser,
     desktop,
@@ -340,6 +384,7 @@ try {
   if (children.size) throw fault('pending_processes', '动作返回时仍有未等待的 ctx.process.run 调用；请使用 await。');
   if (browserPending.size) throw fault('pending_browser_calls', '动作返回时仍有未等待的浏览器调用；请使用 await。');
   if (nativePending) {
+    if (nativePendingMethod === 'system.open') throw Object.assign(fault('pending_open', '动作返回时仍有未等待的打开请求；请使用 await。'), {effectState:'unknown',method:'system.open'});
     if (nativePendingMethod === 'process.capture') throw Object.assign(fault('pending_process_capture', '动作返回时仍有未等待的程序采集；请使用 await。'), {effectState:'unknown',method:'process.capture'});
     if (nativePendingMethod === 'fs.stat') throw Object.assign(fault('fs_error', '动作返回时仍有未等待的文件状态查询；请使用 await。'), {effectState:'not_started',method:'fs.stat'});
     throw Object.assign(fault('pending_desktop_calls', '动作返回时仍有未等待的桌面调用；请使用 await。'), {effectState:'unknown'});

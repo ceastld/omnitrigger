@@ -51,6 +51,7 @@ mod script_fs;
 mod script_notify;
 #[cfg(debug_assertions)]
 mod script_notify_smoke;
+mod script_open;
 mod script_projects;
 mod script_runtime;
 mod script_ui;

@@ -92,11 +92,26 @@ export interface BrowserApi {
   /** 动态远程 Proxy，例如 await ctx.browser.chrome.bookmarks.getTree()。选项请使用 call。 */
   chrome: any;
 }
+
+/** 打开成功只表示系统接纳，不证明外部程序或网页加载完成。 */
+export type OpenResult = {submitted: true};
+export interface OpenFault extends Error {
+  code: 'invalid_input' | 'open_failed' | 'open_unavailable' | 'open_busy' | 'cancelled' | 'timeout'
+    | 'invalid_response' | 'native_bridge_unavailable' | 'native_bridge_failed' | 'native_call_limit' | 'pending_open';
+  method: 'system.open';
+  /** unknown不可当作未打开或允许重试；只描述该次API。 */
+  effectState: 'not_started' | 'unknown';
+}
 export interface ActionContext {
   apiVersion: 1;
   input: Record<string, any>;
   invocation: Readonly<{invocation_id: string; binding_id: string}>;
   packageRoot: string;
+  /** 通过应用已有Rust适配请求系统默认程序打开目标；须await。
+   * 只接受一个字符串，http/https/mailto/about或本地盘符绝对路径，最多32766 UTF-16。
+   * 不接收程序、参数、verb或选项，不搜索PATH、不回退run/start、不自动重试。
+   * 单次系统调用不可强制抢占，迟到或无法确认的结果为unknown。 */
+  open(target: string): Promise<OpenResult>;
   signal: AbortSignal;
   delay(milliseconds: number): Promise<void>;
   fs: {
