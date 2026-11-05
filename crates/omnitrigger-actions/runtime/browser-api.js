@@ -10,6 +10,7 @@ function createBrowserApi(invoke, wrap = fn => fn) {
         || (options.timeoutMs !== undefined && (!Number.isInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 60000))) {
       invalid('invalid_input','浏览器选项仅支持 profile 和 1–60000 毫秒的 timeoutMs。',method);
     }
+    return {...options};
   }
   function jsonArgument(value, method, seen = new Set(), depth = 0) {
     if (depth > 64) invalid('invalid_request','浏览器参数嵌套超过 64 层。',method);
@@ -21,17 +22,26 @@ function createBrowserApi(invoke, wrap = fn => fn) {
           if (!(next>=0xdc00 && next<=0xdfff)) invalid('invalid_request','浏览器参数需要有效 Unicode。',method);
         } else if (unit>=0xdc00 && unit<=0xdfff) invalid('invalid_request','浏览器参数需要有效 Unicode。',method);
       }
-      return;
+      return value;
     }
-    if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return;
+    if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return value;
     if (!value || typeof value !== 'object' || seen.has(value)
         || (!Array.isArray(value) && ![Object.prototype,null].includes(Object.getPrototypeOf(value)))
         || Object.getOwnPropertySymbols(value).length) {
       invalid('invalid_request','浏览器参数需要 JSON，不支持 undefined、函数、循环引用或非 JSON 对象。',method);
     }
     seen.add(value);
-    for (const item of Array.isArray(value) ? value : Object.values(value)) jsonArgument(item,method,seen,depth+1);
+    // 校验时取得独立JSON值；连接等待及适配器写入都不能改变调用方的参数。
+    const copy = Array.isArray(value) ? [] : {};
+    if (Array.isArray(value)) {
+      for (const item of value) copy.push(jsonArgument(item,method,seen,depth+1));
+    } else {
+      for (const [key,item] of Object.entries(value)) {
+        Object.defineProperty(copy,key,{value:jsonArgument(item,method,seen,depth+1),enumerable:true,writable:true,configurable:true});
+      }
+    }
     seen.delete(value);
+    return copy;
   }
   const call = wrap((method, args = [], options = {}) => {
     if (typeof method !== 'string' || method.length > 256 || method.startsWith('chrome.')
@@ -40,9 +50,9 @@ function createBrowserApi(invoke, wrap = fn => fn) {
       invalid('invalid_request','方法需使用 bookmarks.getTree 等 Chrome API 路径。',method);
     }
     if (!Array.isArray(args)) invalid('invalid_request','浏览器 args 必须为 JSON 数组。',method);
-    jsonArgument(args,method);
-    optionsFor(options,method);
-    return invoke(method,args,options,false);
+    const snapshotOptions = optionsFor(options,method);
+    const snapshotArgs = jsonArgument(args,method);
+    return invoke(method,snapshotArgs,snapshotOptions,false);
   });
   function chrome(parts = []) {
     return new Proxy(function () {}, {
@@ -54,7 +64,6 @@ function createBrowserApi(invoke, wrap = fn => fn) {
     });
   }
   return Object.freeze({call,profiles:wrap((options = {}) => {
-    optionsFor(options,'browser.profiles');
-    return invoke(undefined,undefined,options,true);
+    return invoke(undefined,undefined,optionsFor(options,'browser.profiles'),true);
   }),chrome:chrome()});
 }
