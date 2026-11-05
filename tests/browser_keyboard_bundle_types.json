@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "allowJs": true, "checkJs": true, "strict": true, "noEmit": true,
+    "target": "ESNext", "lib": ["ESNext", "DOM"],
+    "module": "ESNext", "moduleResolution": "Bundler", "types": []
+  },
+  "files": ["browser_keyboard_bundle_types.ts", "../examples/actions/browser-workflows/sdk/script-types.d.ts"]
+}

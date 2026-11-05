@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "examples.browser-workflows",
   "name": "常用浏览器工作流",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "actions": [
     { "id": "create-default-tab", "title": "新建指定窗口的默认标签页", "version": 1, "runtime": "node", "entry": "default-new-tab.mjs", "single_instance": true },
     { "id": "create-default-tab-script", "title": "新建指定窗口的默认标签页（同步轻量）", "version": 1, "runtime": "script", "entry": "default-new-tab-script.mjs", "single_instance": true },

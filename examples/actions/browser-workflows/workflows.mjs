@@ -197,7 +197,7 @@ export function runDefaultTabSync(ctx) {
 /** @param {import('./sdk/api').ActionContext} ctx @param {string} operation */
 export async function runWorkflow(ctx, operation) {
   if (operation === 'create-default-tab') return runDefaultTabAsync(ctx);
-  const input = /** @type {any} */ (ctx.input);
+  const input = /** @type {any} */ (Object.freeze({ ...ctx.input }));
   validate(input, operation);
   const profile = await selectProfile(ctx.browser, input);
   /** @type {any[]} */
