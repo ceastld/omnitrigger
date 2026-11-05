@@ -1,5 +1,28 @@
 //! 音量与硬件背光操作，只能由动作工作线程调用，不参与输入 Hook。
 use std::fmt;
+mod physical_brightness_set;
+pub use physical_brightness_set::{
+    BrightnessStepDirection, PhysicalBrightnessMemberResult, PhysicalBrightnessReading,
+    PhysicalBrightnessSetResult, PhysicalBrightnessStatus, MAX_PHYSICAL_BRIGHTNESS_TARGETS,
+};
+mod brightness_step_fallback;
+pub use brightness_step_fallback::BrightnessStepOutcome;
+mod wmi_brightness_levels;
+mod wmi_first_instance;
+pub use wmi_brightness_levels::{
+    plan_wmi_brightness_step, WmiBrightnessStepDirection, WmiBrightnessStepSelection,
+    MAX_WMI_BRIGHTNESS_LEVELS,
+};
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirstWmiBrightnessResult {
+    pub instance: String,
+    pub step: WmiSupportedBrightnessResult,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WmiSupportedBrightnessResult {
+    pub selection: WmiBrightnessStepSelection,
+    pub adjustment: AdjustmentResult,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SystemAdjustment {
@@ -27,7 +50,7 @@ pub struct AdjustmentResult {
     /// 原生接口读回的值，不将“成功提交”当成已达到请求值。
     pub current_percent: u8,
     pub target_label: String,
-    /// 亮度动作实际选择的逻辑显示器设备名；音量不关联显示器。
+    /// 亮度操作实际选择的设备标识：逻辑显示器名或显式首枚举 WMI 实例名；音量不关联显示器。
     pub monitor_device: Option<String>,
     pub brightness_method: Option<BrightnessMethod>,
 }
@@ -158,6 +181,69 @@ pub fn adjust_system_at(
     }
 }
 
+/// 显式使用 WMI 枚举的第一实例，不按当前指针匹配；首项失败不转投下一项。
+/// 必须在工作线程调用，独立于默认精确选屏接口，不自动用作失败回退。
+#[cfg(windows)]
+pub fn step_first_enumerated_wmi_brightness(
+    direction: WmiBrightnessStepDirection,
+) -> Result<FirstWmiBrightnessResult, SystemAdjustmentError> {
+    let _apartment = native::ComApartment::new()?;
+    native::step_first_enumerated_wmi_brightness(direction)
+}
+
+/// 显式选定逻辑屏幕的 WMI 设备支持档位步进；无 DDC 或其他设备回退。
+/// 工作线程调用；沿用精确设备实例关联和原写入/确认路径。
+#[cfg(windows)]
+pub fn step_wmi_supported_brightness_at(
+    point: (i32, i32),
+    direction: WmiBrightnessStepDirection,
+) -> Result<WmiSupportedBrightnessResult, SystemAdjustmentError> {
+    let _apartment = native::ComApartment::new()?;
+    native::step_wmi_supported_brightness(point, direction)
+}
+
+/// 在本次执行时读取一次物理鼠标位置，后续只操作已关联的 WMI 实例。
+#[cfg(windows)]
+pub fn step_wmi_supported_brightness_under_cursor(
+    direction: WmiBrightnessStepDirection,
+) -> Result<WmiSupportedBrightnessResult, SystemAdjustmentError> {
+    step_wmi_supported_brightness_at(capture_adjustment_point()?, direction)
+}
+
+/// 最近逻辑屏幕下全部物理显示器的 DDC ±5% 步进；不回退 WMI。
+#[cfg(windows)]
+pub fn step_physical_brightness_set_at(
+    point: (i32, i32),
+    direction: BrightnessStepDirection,
+) -> Result<PhysicalBrightnessSetResult, SystemAdjustmentError> {
+    native::step_physical_brightness_set(point, direction)
+}
+
+/// 执行时读取一次物理鼠标位置并固定物理显示器集合；只在工作线程调用。
+#[cfg(windows)]
+pub fn step_physical_brightness_set_under_cursor(
+    direction: BrightnessStepDirection,
+) -> Result<PhysicalBrightnessSetResult, SystemAdjustmentError> {
+    step_physical_brightness_set_at(capture_adjustment_point()?, direction)
+}
+
+/// 显式组合入口：先 DDC；只在确认未写入且无有效成员时尝试首枚举 WMI。
+/// 保留两个阶段的逐项回执；不重试，不因部分/未知效果再修改另一实例。
+#[cfg(windows)]
+pub fn step_brightness_with_first_wmi_fallback_under_cursor(
+    direction: BrightnessStepDirection,
+) -> Result<BrightnessStepOutcome, SystemAdjustmentError> {
+    let wmi_direction = match direction {
+        BrightnessStepDirection::Increase => WmiBrightnessStepDirection::Increase,
+        BrightnessStepDirection::Decrease => WmiBrightnessStepDirection::Decrease,
+    };
+    brightness_step_fallback::run_brightness_step(
+        capture_adjustment_point,
+        |point| step_physical_brightness_set_at(point, direction),
+        || step_first_enumerated_wmi_brightness(wmi_direction),
+    )
+}
+
 /// 只查询能力和当前值，不改变音量、亮度或其他显示参数。需要在工作线程运行。
 #[cfg(windows)]
 pub fn query_system_adjustment_capabilities_at(point: (i32, i32)) -> SystemAdjustmentCapabilities {
@@ -191,6 +277,44 @@ pub fn query_system_adjustment_capabilities_at(point: (i32, i32)) -> SystemAdjus
     }
 }
 
+/// 脚本宿主守卫：false为读取/设备边界，true紧邻原生写调用；不能抢占已经进入的Win32调用。
+#[cfg(windows)]
+pub fn step_physical_brightness_set_at_if(
+    point: (i32, i32),
+    direction: BrightnessStepDirection,
+    check: &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
+) -> Result<PhysicalBrightnessSetResult, SystemAdjustmentError> {
+    native::step_physical_brightness_set_if(point, direction, check)
+}
+#[cfg(windows)]
+pub fn step_first_enumerated_wmi_brightness_if(
+    direction: WmiBrightnessStepDirection,
+    check: &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
+) -> Result<FirstWmiBrightnessResult, SystemAdjustmentError> {
+    check(false)?;
+    let _apartment = native::ComApartment::new()?;
+    check(false)?;
+    native::step_first_enumerated_wmi_brightness_if(direction, check)
+}
+#[cfg(windows)]
+pub fn step_brightness_with_first_wmi_fallback_at_if(
+    point: (i32, i32),
+    direction: BrightnessStepDirection,
+    check: &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
+) -> Result<BrightnessStepOutcome, SystemAdjustmentError> {
+    let physical = step_physical_brightness_set_at_if(point, direction, check);
+    check(false)?;
+    let wmi_direction = match direction {
+        BrightnessStepDirection::Increase => WmiBrightnessStepDirection::Increase,
+        BrightnessStepDirection::Decrease => WmiBrightnessStepDirection::Decrease,
+    };
+    brightness_step_fallback::run_brightness_step(
+        || Ok(point),
+        |_| physical,
+        || step_first_enumerated_wmi_brightness_if(wmi_direction, check),
+    )
+}
+
 #[cfg(windows)]
 mod native {
     use super::*;
@@ -205,7 +329,8 @@ mod native {
             Devices::Display::*,
             Foundation::{ERROR_INSUFFICIENT_BUFFER, POINT, RPC_E_CHANGED_MODE},
             Graphics::Gdi::{
-                GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFOEXW, MONITOR_DEFAULTTONULL,
+                GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFOEXW,
+                MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
             },
             Media::Audio::{
                 eMultimedia, eRender, Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator,
@@ -352,13 +477,23 @@ mod native {
         )
     }
     fn logical_monitor(point: (i32, i32)) -> Result<LogicalMonitor, SystemAdjustmentError> {
+        logical_monitor_with_nearest(point, false)
+    }
+    fn logical_monitor_with_nearest(
+        point: (i32, i32),
+        nearest: bool,
+    ) -> Result<LogicalMonitor, SystemAdjustmentError> {
         let handle = unsafe {
             MonitorFromPoint(
                 POINT {
                     x: point.0,
                     y: point.1,
                 },
-                MONITOR_DEFAULTTONULL,
+                if nearest {
+                    MONITOR_DEFAULTTONEAREST
+                } else {
+                    MONITOR_DEFAULTTONULL
+                },
             )
         };
         if handle.is_invalid() {
@@ -392,6 +527,105 @@ mod native {
                 }
             }
         }
+    }
+
+    struct DdcSetPort<'a>(&'a PhysicalMonitors);
+    impl physical_brightness_set::PhysicalBrightnessPort for DdcSetPort<'_> {
+        fn count(&self) -> usize {
+            self.0 .0.len()
+        }
+        fn label(&self, index: usize) -> String {
+            let description = self.0 .0[index].szPhysicalMonitorDescription;
+            utf16_text(&description)
+        }
+        fn read(
+            &mut self,
+            index: usize,
+        ) -> Result<PhysicalBrightnessReading, SystemAdjustmentError> {
+            let (mut minimum, mut current, mut maximum) = (0, 0, 0);
+            if unsafe {
+                GetMonitorBrightness(
+                    self.0 .0[index].hPhysicalMonitor,
+                    &mut minimum,
+                    &mut current,
+                    &mut maximum,
+                )
+            } == 0
+            {
+                return Err(native_error(
+                    SystemAdjustmentErrorCode::NativeFailure,
+                    "读取物理显示器亮度失败",
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            Ok(PhysicalBrightnessReading {
+                minimum,
+                current,
+                maximum,
+            })
+        }
+        fn set(&mut self, index: usize, value: u32) -> Result<(), SystemAdjustmentError> {
+            if unsafe { SetMonitorBrightness(self.0 .0[index].hPhysicalMonitor, value) } == 0 {
+                return Err(native_error(
+                    SystemAdjustmentErrorCode::ConfirmationUnknown,
+                    "物理显示器亮度请求未获确认",
+                    std::io::Error::last_os_error(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    pub(super) fn step_physical_brightness_set(
+        point: (i32, i32),
+        direction: BrightnessStepDirection,
+    ) -> Result<PhysicalBrightnessSetResult, SystemAdjustmentError> {
+        step_physical_brightness_set_if(point, direction, &mut |_| Ok(()))
+    }
+    pub(super) fn step_physical_brightness_set_if(
+        point: (i32, i32),
+        direction: BrightnessStepDirection,
+        check: &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
+    ) -> Result<PhysicalBrightnessSetResult, SystemAdjustmentError> {
+        check(false)?;
+        let logical = logical_monitor_with_nearest(point, true)?;
+        check(false)?;
+        let mut count = 0;
+        unsafe { GetNumberOfPhysicalMonitorsFromHMONITOR(logical.handle, &mut count) }.map_err(
+            |error| {
+                native_error(
+                    SystemAdjustmentErrorCode::UnsupportedBrightness,
+                    "无法枚举逻辑屏幕的物理显示器",
+                    error,
+                )
+            },
+        )?;
+        if !(1..=MAX_PHYSICAL_BRIGHTNESS_TARGETS as u32).contains(&count) {
+            return Err(failure(
+                SystemAdjustmentErrorCode::UnsupportedBrightness,
+                "逻辑屏幕的物理显示器数量不在 1–64 内，未提交亮度请求。",
+            ));
+        }
+        // 沿用现有 RAII，成功、部分失败和提前返回均尝试销毁已取得的全部有效句柄。
+        check(false)?;
+        let mut monitors = PhysicalMonitors(vec![PHYSICAL_MONITOR::default(); count as usize]);
+        unsafe { GetPhysicalMonitorsFromHMONITOR(logical.handle, &mut monitors.0) }.map_err(
+            |error| {
+                native_error(
+                    SystemAdjustmentErrorCode::UnsupportedBrightness,
+                    "获取物理显示器句柄失败",
+                    error,
+                )
+            },
+        )?;
+        check(false)?;
+        let members =
+            physical_brightness_set::step_members_if(&mut DdcSetPort(&monitors), direction, check)?;
+        Ok(PhysicalBrightnessSetResult {
+            point,
+            logical_device: logical.name,
+            members,
+        })
     }
 
     struct DdcMonitor {
@@ -660,6 +894,14 @@ mod native {
         services: &IWbemServices,
         query: &str,
     ) -> Result<Vec<IWbemClassObject>, SystemAdjustmentError> {
+        wmi_rows_if(services, query, &mut |_| Ok(()))
+    }
+    fn wmi_rows_if(
+        services: &IWbemServices,
+        query: &str,
+        check: &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
+    ) -> Result<Vec<IWbemClassObject>, SystemAdjustmentError> {
+        check(false)?;
         let enumerator = unsafe {
             services.ExecQuery(
                 &BSTR::from("WQL"),
@@ -678,9 +920,11 @@ mod native {
         let mut result = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
+            check(false)?;
             let mut values = [None];
             let mut returned = 0;
             let status = unsafe { enumerator.Next(500, &mut values, &mut returned) };
+            check(false)?;
             status.ok().map_err(|error| {
                 native_error(
                     SystemAdjustmentErrorCode::UnsupportedBrightness,
@@ -750,12 +994,209 @@ mod native {
         })
     }
 
+    pub(super) fn step_first_enumerated_wmi_brightness(
+        direction: WmiBrightnessStepDirection,
+    ) -> Result<FirstWmiBrightnessResult, SystemAdjustmentError> {
+        step_first_enumerated_wmi_brightness_if(direction, &mut |_| Ok(()))
+    }
+    pub(super) fn step_first_enumerated_wmi_brightness_if(
+        direction: WmiBrightnessStepDirection,
+        check: &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
+    ) -> Result<FirstWmiBrightnessResult, SystemAdjustmentError> {
+        check(false)?;
+        let services = wmi_connect()?;
+        check(false)?;
+        let rows = wmi_rows_if(
+            &services,
+            "SELECT InstanceName, CurrentBrightness, Level FROM WmiMonitorBrightness",
+            check,
+        )?;
+        check(false)?;
+        wmi_first_instance::with_first_wmi_row(rows, |object| {
+            check(false)?;
+            let instance = string_property(&object, windows::core::w!("InstanceName"))?;
+            if instance.is_empty() {
+                return Err(failure(
+                    SystemAdjustmentErrorCode::NativeFailure,
+                    "首个 WMI 实例身份为空。",
+                ));
+            }
+            let current = integer_property(&object, windows::core::w!("CurrentBrightness"))?;
+            if current > 100 {
+                return Err(failure(
+                    SystemAdjustmentErrorCode::NativeFailure,
+                    "首个 WMI 实例亮度无效。",
+                ));
+            }
+            let levels = wmi_level_property(&object)?;
+            check(false)?;
+            let selection = plan_wmi_brightness_step(current as u8, &levels, direction)?;
+            // 零档/无档可以只读返回，不为没有写入的操作要求方法类存在。
+            if !matches!(selection, WmiBrightnessStepSelection::Set { .. }) {
+                return Ok(FirstWmiBrightnessResult {
+                    instance: instance.clone(),
+                    step: WmiSupportedBrightnessResult {
+                        selection,
+                        adjustment: AdjustmentResult {
+                            kind: AdjustmentKind::Brightness,
+                            previous_percent: current as u8,
+                            requested_percent: current as u8,
+                            current_percent: current as u8,
+                            target_label: instance.clone(),
+                            monitor_device: Some(instance),
+                            brightness_method: Some(BrightnessMethod::Wmi),
+                        },
+                    },
+                });
+            }
+            let method_path = wmi_method_path_in_if(&services, &instance, false, check)?;
+            check(false)?;
+            let target = WmiMonitor {
+                services,
+                instance: instance.clone(),
+                method_path,
+                current: current as u8,
+                label: instance.clone(),
+                active_only: false,
+            };
+            // 使用刚从首对象读到的同一 current/Level，写入只沿已固定的实例方法路径。
+            let unchanged = target.result(current as u8, current as u8);
+            let adjusted =
+                wmi_brightness_levels::submit_selected_wmi_step(selection, |requested| {
+                    target.set_requested_if(requested, check)
+                })?;
+            Ok(FirstWmiBrightnessResult {
+                instance,
+                step: WmiSupportedBrightnessResult {
+                    selection,
+                    adjustment: adjusted.unwrap_or(unchanged),
+                },
+            })
+        })
+    }
+
+    fn wmi_level_property(object: &IWbemClassObject) -> Result<Vec<u8>, SystemAdjustmentError> {
+        use windows::Win32::System::{
+            Ole::{
+                SafeArrayGetDim, SafeArrayGetElement, SafeArrayGetElemsize, SafeArrayGetLBound,
+                SafeArrayGetUBound, SafeArrayGetVartype,
+            },
+            Variant::{VT_ARRAY, VT_UI1},
+        };
+        let value = property(object, windows::core::w!("Level"))?;
+        if value.vt().0 != (VT_ARRAY.0 | VT_UI1.0) {
+            return Err(failure(
+                SystemAdjustmentErrorCode::NativeFailure,
+                "WMI Level 必须是直接的 uint8 数组。",
+            ));
+        }
+        // value 在全部元素复制完前保持存活；只读借用数组，不接管/销毁数组所有权。
+        let array = unsafe { value.Anonymous.Anonymous.Anonymous.parray };
+        if array.is_null() || unsafe { SafeArrayGetDim(array) } != 1 {
+            return Err(failure(
+                SystemAdjustmentErrorCode::NativeFailure,
+                "WMI Level 数组为空或维度无效。",
+            ));
+        }
+        let convert = |error| {
+            native_error(
+                SystemAdjustmentErrorCode::NativeFailure,
+                "读取 WMI Level 数组失败",
+                error,
+            )
+        };
+        if unsafe { SafeArrayGetVartype(array) }.map_err(convert)? != VT_UI1
+            || unsafe { SafeArrayGetElemsize(array) } != 1
+        {
+            return Err(failure(
+                SystemAdjustmentErrorCode::NativeFailure,
+                "WMI Level 数组元素类型或宽度无效。",
+            ));
+        }
+        let lower = unsafe { SafeArrayGetLBound(array, 1) }.map_err(convert)?;
+        let upper = unsafe { SafeArrayGetUBound(array, 1) }.map_err(convert)?;
+        let count = wmi_brightness_levels::wmi_level_array_count(1, lower, upper)?;
+        let mut levels = Vec::with_capacity(count);
+        for offset in 0..count {
+            let index = lower.checked_add(offset as i32).ok_or_else(|| {
+                failure(
+                    SystemAdjustmentErrorCode::NativeFailure,
+                    "WMI Level 下标溢出。",
+                )
+            })?;
+            let mut element = 0u8;
+            unsafe { SafeArrayGetElement(array, &index, (&mut element as *mut u8).cast()) }
+                .map_err(convert)?;
+            levels.push(element);
+        }
+        Ok(levels)
+    }
+
+    impl WmiMonitor {
+        fn supported_step_snapshot(&self) -> Result<(u8, Vec<u8>), SystemAdjustmentError> {
+            let mut matched = Vec::new();
+            let query = if self.active_only {
+                "SELECT InstanceName, CurrentBrightness, Level FROM WmiMonitorBrightness WHERE Active = TRUE"
+            } else {
+                "SELECT InstanceName, CurrentBrightness, Level FROM WmiMonitorBrightness"
+            };
+            for object in wmi_rows(&self.services, query)? {
+                if string_property(&object, windows::core::w!("InstanceName"))?
+                    .eq_ignore_ascii_case(&self.instance)
+                {
+                    let current =
+                        integer_property(&object, windows::core::w!("CurrentBrightness"))?;
+                    if current > 100 {
+                        return Err(failure(
+                            SystemAdjustmentErrorCode::NativeFailure,
+                            "WMI 当前亮度无效。",
+                        ));
+                    }
+                    matched.push((current as u8, wmi_level_property(&object)?));
+                }
+            }
+            if matched.len() != 1 {
+                return Err(failure(
+                    SystemAdjustmentErrorCode::MonitorUnavailable,
+                    "目标 WMI 亮度实例已变化或不唯一，未选择其他实例。",
+                ));
+            }
+            Ok(matched.remove(0))
+        }
+
+        fn step_supported(
+            mut self,
+            direction: WmiBrightnessStepDirection,
+        ) -> Result<WmiSupportedBrightnessResult, SystemAdjustmentError> {
+            let (current, levels) = self.supported_step_snapshot()?;
+            self.current = current;
+            let selection = plan_wmi_brightness_step(current, &levels, direction)?;
+            let unchanged = self.result(current, current);
+            let adjusted =
+                wmi_brightness_levels::submit_selected_wmi_step(selection, |requested| {
+                    self.set_requested(requested)
+                })?;
+            Ok(WmiSupportedBrightnessResult {
+                selection,
+                adjustment: adjusted.unwrap_or(unchanged),
+            })
+        }
+    }
+
+    pub(super) fn step_wmi_supported_brightness(
+        point: (i32, i32),
+        direction: WmiBrightnessStepDirection,
+    ) -> Result<WmiSupportedBrightnessResult, SystemAdjustmentError> {
+        wmi_monitor(&logical_monitor(point)?)?.step_supported(direction)
+    }
+
     struct WmiMonitor {
         services: IWbemServices,
         instance: String,
         method_path: String,
         current: u8,
         label: String,
+        active_only: bool,
     }
     fn wmi_monitor(logical: &LogicalMonitor) -> Result<WmiMonitor, SystemAdjustmentError> {
         let device =
@@ -797,6 +1238,7 @@ mod native {
             method_path,
             current,
             label: logical.name.clone(),
+            active_only: true,
         })
     }
 
@@ -804,10 +1246,27 @@ mod native {
         services: &IWbemServices,
         instance: &str,
     ) -> Result<String, SystemAdjustmentError> {
-        let objects = wmi_rows(
-            services,
-            "SELECT InstanceName, __PATH FROM WmiMonitorBrightnessMethods WHERE Active = TRUE",
-        )?;
+        wmi_method_path_in(services, instance, true)
+    }
+    fn wmi_method_path_in(
+        services: &IWbemServices,
+        instance: &str,
+        active_only: bool,
+    ) -> Result<String, SystemAdjustmentError> {
+        wmi_method_path_in_if(services, instance, active_only, &mut |_| Ok(()))
+    }
+    fn wmi_method_path_in_if(
+        services: &IWbemServices,
+        instance: &str,
+        active_only: bool,
+        check: &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
+    ) -> Result<String, SystemAdjustmentError> {
+        let query = if active_only {
+            "SELECT InstanceName, __PATH FROM WmiMonitorBrightnessMethods WHERE Active = TRUE"
+        } else {
+            "SELECT InstanceName, __PATH FROM WmiMonitorBrightnessMethods"
+        };
+        let objects = wmi_rows_if(services, query, check)?;
         let mut methods = Vec::new();
         for object in objects {
             if string_property(&object, windows::core::w!("InstanceName"))?
@@ -895,12 +1354,17 @@ mod native {
     }
 
     impl WmiMonitor {
-        fn read_current(&self) -> Result<u8, SystemAdjustmentError> {
+        fn read_current_if(
+            &self,
+            check: &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
+        ) -> Result<u8, SystemAdjustmentError> {
             let mut matches = Vec::new();
-            for object in wmi_rows(
-                &self.services,
-                "SELECT InstanceName, CurrentBrightness FROM WmiMonitorBrightness WHERE Active = TRUE",
-            )? {
+            let query = if self.active_only {
+                "SELECT InstanceName, CurrentBrightness FROM WmiMonitorBrightness WHERE Active = TRUE"
+            } else {
+                "SELECT InstanceName, CurrentBrightness FROM WmiMonitorBrightness"
+            };
+            for object in wmi_rows_if(&self.services, query, check)? {
                 if string_property(&object, windows::core::w!("InstanceName"))?
                     .eq_ignore_ascii_case(&self.instance)
                 {
@@ -933,9 +1397,20 @@ mod native {
                 brightness_method: Some(BrightnessMethod::Wmi),
             }
         }
-        fn adjust(mut self, delta: i16) -> Result<AdjustmentResult, SystemAdjustmentError> {
+        fn adjust(self, delta: i16) -> Result<AdjustmentResult, SystemAdjustmentError> {
+            let requested = (i16::from(self.current) + delta).clamp(0, 100) as u8;
+            self.set_requested(requested)
+        }
+        fn set_requested(self, requested: u8) -> Result<AdjustmentResult, SystemAdjustmentError> {
+            self.set_requested_if(requested, &mut |_| Ok(()))
+        }
+        fn set_requested_if(
+            mut self,
+            requested: u8,
+            check: &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
+        ) -> Result<AdjustmentResult, SystemAdjustmentError> {
+            check(false)?;
             let previous = self.current;
-            let requested = (i16::from(previous) + delta).clamp(0, 100) as u8;
             if requested == previous {
                 return Ok(self.result(previous, requested));
             }
@@ -1018,6 +1493,7 @@ mod native {
                 )
             })?;
             let mut call = None;
+            check(true)?;
             unsafe {
                 self.services.ExecMethod(
                     &BSTR::from(self.method_path.as_str()),
@@ -1043,6 +1519,7 @@ mod native {
                 )
             })?;
             let response = wait_wmi_call_result(&call)?;
+            check(false)?;
             if let Some(response) = &response {
                 let status = confirm_brightness_result(integer_property(
                     response,
@@ -1058,7 +1535,12 @@ mod native {
             self.current = read_wmi_confirmation(
                 requested,
                 response.is_some(),
-                || self.read_current(),
+                || {
+                    check(false)?;
+                    let value = self.read_current_if(check)?;
+                    check(false)?;
+                    Ok(value)
+                },
                 || std::thread::sleep(Duration::from_millis(25)),
             )?;
             Ok(self.result(previous, requested))

@@ -6,6 +6,7 @@ mod action_target_context;
 mod appearance;
 mod appearance_ui;
 mod assets;
+mod brightness_step_host;
 mod browser_actions;
 mod browser_actions_ui;
 mod browser_connector;

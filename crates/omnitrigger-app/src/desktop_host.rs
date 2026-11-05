@@ -292,6 +292,9 @@ impl NativeHost for DesktopHost {
                     omnitrigger_windows::read_clipboard_data,
                 )
             }
+            "display.brightness_step" => {
+                return crate::brightness_step_host::execute(params, cancellation, None)
+            }
             "selection.copy_data" => return self.copy_data(params, cancellation, None),
             _ => {}
         }
@@ -516,6 +519,9 @@ impl NativeHost for DesktopHost {
                 Some(deadline),
                 omnitrigger_windows::read_clipboard_data,
             ),
+            "display.brightness_step" => {
+                crate::brightness_step_host::execute(params, cancellation, Some(deadline))
+            }
             "selection.copy_data" => self.copy_data(params, cancellation, Some(deadline)),
             _ => self.call(method, params, cancellation),
         }
@@ -1444,5 +1450,33 @@ mod tests {
             )
             .unwrap();
         }
+    }
+    #[test]
+    fn brightness_dispatch_rejects_before_hardware_on_both_host_entries_without_valid_target() {
+        let host = DesktopHost {
+            target: Err(error(
+                "synthetic_no_target",
+                "合成不可用目标",
+                "not_started",
+            )),
+        };
+        let token = CancellationToken::new();
+        token.cancel();
+        let params = json!({"direction":"up","strategy":"physical"});
+        let first = host
+            .call("display.brightness_step", params.clone(), &token)
+            .unwrap_err();
+        assert_eq!(first.code, "cancelled");
+        assert_eq!(first.method.as_deref(), Some("display.brightness_step"));
+        let second = host
+            .call_with_deadline(
+                "display.brightness_step",
+                params,
+                &CancellationToken::new(),
+                Instant::now(),
+            )
+            .unwrap_err();
+        assert_eq!(second.code, "timeout");
+        assert_eq!(second.effect_state.as_deref(), Some("not_started"));
     }
 }

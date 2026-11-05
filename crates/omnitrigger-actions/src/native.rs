@@ -15,7 +15,7 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 24] = [
+const METHODS: [&str; 25] = [
     "system.open",
     "process.capture",
     "history.list",
@@ -40,6 +40,7 @@ const METHODS: [&str; 24] = [
     "clipboard.read_data",
     "clipboard.write",
     "window.action",
+    "display.brightness_step",
 ];
 
 /// 由应用为本次调用捕获的本机上下文。不是沙盒或权限隔离。
@@ -228,6 +229,7 @@ impl NativeBridge {
                     *next_id += 1;
                     let opening = request.method == "system.open";
                     let capture = request.method == "process.capture";
+                    let brightness = request.method == "display.brightness_step";
                     let data_read = request.method == "clipboard.read_data";
                     let data_copy = request.method == "selection.copy_data";
                     let history_read =
@@ -253,7 +255,7 @@ impl NativeBridge {
                     } else if cancellation.is_cancelled() {
                         let mut error =
                             ActionError::new("cancelled", "动作已取消，未开始本机调用。");
-                        if opening || data_read || data_copy || history || capture {
+                        if opening || data_read || data_copy || history || capture || brightness {
                             error.effect_state = Some("not_started".into());
                         }
                         Err(error)
@@ -274,6 +276,7 @@ impl NativeBridge {
                             || data_copy
                             || history
                             || capture
+                            || brightness
                         {
                             interactive_call(&client.stream, cancellation, call)
                         } else {
@@ -281,6 +284,17 @@ impl NativeBridge {
                         }
                     }
                     .map_err(|mut error| {
+                        if brightness {
+                            error.message = "亮度步进未获完整确认；请检查结构化回执。".into();
+                            error.method = Some("display.brightness_step".into());
+                            error.required_permissions.clear();
+                            if !matches!(
+                                error.effect_state.as_deref(),
+                                Some("not_started" | "unknown")
+                            ) {
+                                error.effect_state = Some("unknown".into());
+                            }
+                        }
                         if opening {
                             error.message = "打开请求未确认，请检查错误代码。".into();
                             error.method = Some("system.open".into());

@@ -611,3 +611,15 @@ profiles\<配置档 ID>\packages\<包 ID>\
 流程图扩展、跨动作调用、包市场、热重载和自动更新均未实现。这套接口把新增业务与输入绑定解耦，但新增运行时或宿主能力仍需要对应实现和测试；契约发生不兼容变化时仍需版本迁移。
 
 独立的 [Rust JS 宿主](../tools/js-engine-probe/README.md)已接入动作包的 `script` 运行时，提供共享 API、SDK 和本机开发包安装验证；同目录保留 Boa 与 QuickJS-NG 的体积测量。现有 Node 动作继续使用各自的运行时。
+
+## 脚本亮度步进
+
+Node 使用 `await ctx.desktop.stepBrightness({direction:'up',strategy:'physical'})`；同步脚本使用同名方法直接取得结果。`direction`只接受`up/down`，`strategy`必须显式选择`physical/wmi_first/physical_then_wmi`，不接受额外字段或默认策略。wire为`display.brightness_step`，走现有NativeBridge和App宿主，不启动另一服务或执行器。
+
+physical和physical_then_wmi在实际执行时捕获一次物理指针。physical对最近逻辑屏幕下1–64台物理显示器按各自量程±5%步进；wmi_first不读取或依赖指针，直接固定首枚举WMI对象，按支持档位严格跨过当前值±1，零档或无档不写；physical_then_wmi仅在确认DDC未写入且无有效成员时尝试首WMI。调用需要NativeBridge，不要求原前台窗口或界面。部分/未知写入后不跨设备补偿，不重试。
+
+结果包含strategy、effectState、physical和wmi。effectState为not_started或unknown：后者保守记录已进入写调用，不代替逐项读回状态。physical成员按本次序号返回read_rejected、unchanged、set_unconfirmed、readback_unknown、readback_different或confirmed，以及可用的原始数值和固定错误代码；wmi返回set、zero_skipped、no_eligible_level或failed及可用百分点。无设备名、实例ID、坐标或原异常正文。外层返回不代表所有设备成功，WMI的set也不证明读回已达到请求值。
+
+参数错误及写前取消/期限为not_started；进入首个写调用后无法确认的取消/超时为unknown。设备之间、读写前后检查原动作取消和总期限；无法抢占已进入的Win32调用，返回后停止后续设备。传输已发送后失联也不能据此推断未执行。中断时逐项回执可能未送达，不撤销已写入，不应自动重试。SDK拒绝额外字段、标识、非法数值和不符合策略的回退回执。
+
+该API不改变既有百分点动作、原22规则或个人绑定；不据API可用宣称来源等价或设备验收通过。

@@ -72,11 +72,20 @@ pub use native_system_hud::{NativeSystemHud, NativeSystemHudSnapshot};
 #[cfg(windows)]
 pub use system_adjustment::{
     adjust_system_at, capture_adjustment_point, query_system_adjustment_capabilities_at,
+    step_brightness_with_first_wmi_fallback_at_if,
+    step_brightness_with_first_wmi_fallback_under_cursor, step_first_enumerated_wmi_brightness,
+    step_first_enumerated_wmi_brightness_if, step_physical_brightness_set_at,
+    step_physical_brightness_set_at_if, step_physical_brightness_set_under_cursor,
+    step_wmi_supported_brightness_at, step_wmi_supported_brightness_under_cursor,
 };
 pub use system_adjustment::{
-    validate_system_adjustment, AdjustmentCapability, AdjustmentKind, AdjustmentResult,
-    BrightnessMethod, SystemAdjustment, SystemAdjustmentCapabilities, SystemAdjustmentError,
-    SystemAdjustmentErrorCode,
+    plan_wmi_brightness_step, validate_system_adjustment, AdjustmentCapability, AdjustmentKind,
+    AdjustmentResult, BrightnessMethod, BrightnessStepDirection, BrightnessStepOutcome,
+    FirstWmiBrightnessResult, PhysicalBrightnessMemberResult, PhysicalBrightnessReading,
+    PhysicalBrightnessSetResult, PhysicalBrightnessStatus, SystemAdjustment,
+    SystemAdjustmentCapabilities, SystemAdjustmentError, SystemAdjustmentErrorCode,
+    WmiBrightnessStepDirection, WmiBrightnessStepSelection, WmiSupportedBrightnessResult,
+    MAX_PHYSICAL_BRIGHTNESS_TARGETS, MAX_WMI_BRIGHTNESS_LEVELS,
 };
 #[cfg(windows)]
 pub use system_hud_window::{

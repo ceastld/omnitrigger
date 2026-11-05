@@ -1,3 +1,35 @@
+interface ScriptBrightnessStepOptions {
+  direction:'up'|'down';
+  strategy:'physical'|'wmi_first'|'physical_then_wmi';
+}
+type ScriptBrightnessStepCode='initialization_failed'|'monitor_unavailable'|'ambiguous_monitor'
+  |'brightness_unavailable'|'brightness_failed'|'brightness_unknown';
+type ScriptBrightnessStepNoWriteCode=Exclude<ScriptBrightnessStepCode,'brightness_unknown'>;
+/** index是本次集合序号，数值范围仍由运行时校验。 */
+type ScriptBrightnessStepReadRejected={index:number;status:'read_rejected';previousRaw:null;requestedRaw:null;currentRaw:null;errorCode:ScriptBrightnessStepCode};
+type ScriptBrightnessStepUnchanged={index:number;status:'unchanged';previousRaw:number;requestedRaw:number;currentRaw:number;errorCode:null};
+type ScriptBrightnessStepNoWriteMember=ScriptBrightnessStepReadRejected|ScriptBrightnessStepUnchanged;
+type ScriptBrightnessStepMember=ScriptBrightnessStepNoWriteMember
+  |{index:number;status:'set_unconfirmed'|'readback_unknown';previousRaw:number;requestedRaw:number;currentRaw:null;errorCode:ScriptBrightnessStepCode}
+  |{index:number;status:'readback_different'|'confirmed';previousRaw:number;requestedRaw:number;currentRaw:number;errorCode:null};
+type ScriptBrightnessStepPhysical={members:ScriptBrightnessStepMember[];errorCode:null}
+  |{members:[];errorCode:ScriptBrightnessStepCode};
+type ScriptBrightnessStepNoWritePhysical={members:ScriptBrightnessStepNoWriteMember[];errorCode:null}
+  |{members:[];errorCode:ScriptBrightnessStepNoWriteCode};
+type ScriptBrightnessStepWmiFailure={status:'failed';previousPercent:null;requestedPercent:null;currentPercent:null;errorCode:ScriptBrightnessStepCode};
+type ScriptBrightnessStepWmiNoWrite={status:'zero_skipped'|'no_eligible_level';previousPercent:number;requestedPercent:null;currentPercent:number;errorCode:null}
+  |(Omit<ScriptBrightnessStepWmiFailure,'errorCode'>&{errorCode:ScriptBrightnessStepNoWriteCode});
+type ScriptBrightnessStepWmi=ScriptBrightnessStepWmiNoWrite|ScriptBrightnessStepWmiFailure
+  |{status:'set';previousPercent:number;requestedPercent:number;currentPercent:number;errorCode:null};
+type ScriptBrightnessStepStrategies<P,W>=
+  |{strategy:'physical';physical:P;wmi:null}
+  |{strategy:'wmi_first';physical:null;wmi:W}
+  |{strategy:'physical_then_wmi';physical:P;wmi:W|null};
+/** unknown为保守副作用状态；正常写入仍须检查逐项读回，取消不撤销设备变化。 */
+type ScriptBrightnessStepResult=
+  |({effectState:'unknown'}&ScriptBrightnessStepStrategies<ScriptBrightnessStepPhysical,ScriptBrightnessStepWmi>)
+  |({effectState:'not_started'}&ScriptBrightnessStepStrategies<ScriptBrightnessStepNoWritePhysical,ScriptBrightnessStepWmiNoWrite>);
+
 /** 入口返回的 JSON 数据；不包含 Promise、undefined、函数或平台对象。数值须为有限数。 */
 type ScriptJsonValue = null | boolean | number | string | readonly ScriptJsonValue[] | {
     readonly [key: string]: ScriptJsonValue;
@@ -176,6 +208,8 @@ type ScriptContext = Readonly<{
         choose(options: ScriptChooseOptions): ScriptChooseResult;
     };
     desktop: {
+        /** 同步，参数与Node入口共用严格工厂；逐项检查回执。 */
+        stepBrightness(options: ScriptBrightnessStepOptions): ScriptBrightnessStepResult;
         /** 本次提交时捕获的目标，不在调用时重新选择前台；独立 CLI 不提供目标。 */
         target(): {processName: string; windowRole: 'unknown' | 'application' | 'desktop' | 'taskbar'; title: string; processId: number; isForeground: boolean};
         /** 30 秒内可提交的原目标快照，句柄和 FILETIME 保持字符串精度。 */

@@ -3,13 +3,14 @@ use crate::api::ApiError;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
+    cell::Cell,
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpStream},
     time::{Duration, Instant},
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 22] = [
+pub const METHODS: [&str; 23] = [
     "history.list",
     "history.get",
     "history.append",
@@ -32,6 +33,7 @@ pub const METHODS: [&str; 22] = [
     "clipboard.read_data",
     "clipboard.write",
     "window.action",
+    "display.brightness_step",
 ];
 
 #[derive(Deserialize)]
@@ -61,7 +63,9 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
             code
         })
         .into(),
-        message: if stat {
+        message: if method == "display.brightness_step" {
+            "亮度步进未获完整确认；请检查结构化回执。".into()
+        } else if stat {
             "本地路径状态查询失败；请检查错误代码。".into()
         } else if history {
             "剪贴板历史调用失败；请检查错误代码。".into()
@@ -81,6 +85,11 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
         method: Some(method.into()),
         required_permissions: Vec::new(),
     }
+}
+
+// 请求写入尝试前可证明未提交；开始写入后仅保守返回unknown。
+fn brightness_transport_effect(method:&str,write_began:bool,fallback:&'static str)->&'static str {
+    if method=="display.brightness_step" && !write_began {"not_started"} else {fallback}
 }
 
 pub fn call(
@@ -121,7 +130,7 @@ pub fn call(
         .map_err(|cause| fault("native_bridge_unavailable", cause, &method, "not_started"))?;
     let browser = method.starts_with("browser.");
     let deadline = Instant::now()
-        + Duration::from_secs(if browser || method == "ui.choose" {
+        + Duration::from_secs(if browser || method == "ui.choose" || method == "display.brightness_step" {
             66
         } else if method == "selection.copy_data" {
             8
@@ -133,7 +142,8 @@ pub fn call(
     } else {
         LIMIT
     };
-    let network = |cause| fault("native_bridge_failed", cause, &method, "unknown");
+    let write_began=Cell::new(false);
+    let network = |cause| fault("native_bridge_failed", cause, &method, brightness_transport_effect(&method,write_began.get(),"unknown"));
     let transport = |cause: std::io::Error| {
         if matches!(
             method.as_str(),
@@ -141,6 +151,7 @@ pub fn call(
                 | "ui.toggle_history"
                 | "clipboard.read_data"
                 | "selection.copy_data"
+                | "display.brightness_step"
                 | "history.list"
                 | "history.get"
                 | "history.append"
@@ -156,11 +167,12 @@ pub fn call(
                 if matches!(
                     method.as_str(),
                     "selection.copy_data"
+                    | "display.brightness_step"
                         | "history.append"
                         | "history.remove"
                         | "ui.toggle_history"
                 ) {
-                    "unknown"
+                    brightness_transport_effect(&method,write_began.get(),"unknown")
                 } else {
                     "not_started"
                 },
@@ -181,6 +193,7 @@ pub fn call(
                         | "ui.toggle_history"
                         | "clipboard.read_data"
                         | "selection.copy_data"
+                        | "display.brightness_step"
                         | "history.list"
                         | "history.get"
                         | "history.append"
@@ -193,11 +206,12 @@ pub fn call(
                         if matches!(
                             method.as_str(),
                             "selection.copy_data"
+                            | "display.brightness_step"
                                 | "history.append"
                                 | "history.remove"
                                 | "ui.toggle_history"
                         ) {
-                            "unknown"
+                            brightness_transport_effect(&method,write_began.get(),"unknown")
                         } else {
                             "not_started"
                         },
@@ -212,6 +226,7 @@ pub fn call(
         stream
             .set_write_timeout(Some(remaining()?))
             .map_err(transport)?;
+        write_began.set(true);
         let count = stream.write(&request[written..]).map_err(transport)?;
         if count == 0 {
             return Err(network("本机调用写入中断。".into()));
@@ -289,6 +304,7 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                 "fs.stat"
                     | "clipboard.read_data"
                     | "selection.copy_data"
+                    | "display.brightness_step"
                     | "history.list"
                     | "history.get"
                     | "history.append"
@@ -429,4 +445,12 @@ mod tests {
             server.join().unwrap();
         }
     }
+    #[test]
+    fn brightness_timeout_before_request_write_is_not_started_and_after_attempt_is_unknown(){
+        assert_eq!(brightness_transport_effect("display.brightness_step",false,"unknown"),"not_started");
+        assert_eq!(brightness_transport_effect("display.brightness_step",true,"unknown"),"unknown");
+        assert_eq!(brightness_transport_effect("keyboard.text",false,"unknown"),"unknown");
+        assert_eq!(brightness_transport_effect("fs.stat",true,"not_started"),"not_started");
+    }
+
 }

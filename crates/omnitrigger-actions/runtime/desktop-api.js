@@ -94,7 +94,125 @@ function createDesktopApi(invoke) {
       return value && typeof value.then === 'function' ? value.then(result, failure) : result(value);
     } catch (error) { return failure(error); }
   }
+  function brightnessFault(code, effectState) {
+    return Object.assign(new Error('亮度步进未获完整确认；请检查结构化回执。'),
+      {code, effectState, method:'display.brightness_step'});
+  }
+  function brightnessRecord(value, fields) {
+    if (!exactDataFields(value, fields)) throw new Error();
+    const result = {};
+    for (const key of fields) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new Error();
+      result[key] = descriptor.value;
+    }
+    return result;
+  }
+  function brightnessResponse(value, strategy) {
+    const codes = ['initialization_failed','monitor_unavailable','ambiguous_monitor',
+      'brightness_unavailable','brightness_failed','brightness_unknown'];
+    const uint = (value,max) => Number.isInteger(value) && value >= 0 && value <= max;
+    const errorCode = code => code === null || codes.includes(code);
+    const physical = value => {
+      const report = brightnessRecord(value, ['members','errorCode']);
+      const items = report.members;
+      if (!errorCode(report.errorCode) || !Array.isArray(items) || items.length > 64
+          || Reflect.ownKeys(items).length !== items.length + 1
+          || (report.errorCode === null ? items.length === 0 : items.length !== 0)) throw new Error();
+      const members = [];
+      for (let index = 0; index < items.length; index++) {
+        const descriptor = Object.getOwnPropertyDescriptor(items, String(index));
+        if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new Error();
+        const row = brightnessRecord(descriptor.value,
+          ['index','status','previousRaw','requestedRaw','currentRaw','errorCode']);
+        if (row.index !== index || !errorCode(row.errorCode)) throw new Error();
+        const previous = uint(row.previousRaw,0xffffffff), requested = uint(row.requestedRaw,0xffffffff);
+        const current = uint(row.currentRaw,0xffffffff);
+        switch (row.status) {
+          case 'read_rejected':
+            if (row.previousRaw !== null || row.requestedRaw !== null || row.currentRaw !== null || row.errorCode === null) throw new Error(); break;
+          case 'unchanged':
+            if (!previous || !requested || !current || row.previousRaw !== row.requestedRaw || row.currentRaw !== row.requestedRaw || row.errorCode !== null) throw new Error(); break;
+          case 'set_unconfirmed': case 'readback_unknown':
+            if (!previous || !requested || row.currentRaw !== null || row.errorCode === null) throw new Error(); break;
+          case 'readback_different': case 'confirmed':
+            if (!previous || !requested || !current || row.errorCode !== null
+                || (row.status === 'confirmed' && row.currentRaw !== row.requestedRaw)) throw new Error(); break;
+          default: throw new Error();
+        }
+        members.push(row);
+      }
+      return {members,errorCode:report.errorCode};
+    };
+    const wmi = value => {
+      const row = brightnessRecord(value,['status','previousPercent','requestedPercent','currentPercent','errorCode']);
+      if (!errorCode(row.errorCode)) throw new Error();
+      if (row.status === 'failed') {
+        if (row.errorCode === null || row.previousPercent !== null || row.requestedPercent !== null || row.currentPercent !== null) throw new Error();
+      } else {
+        if (row.errorCode !== null || !uint(row.previousPercent,100) || !uint(row.currentPercent,100)) throw new Error();
+        if (row.status === 'set') {
+          if (!uint(row.requestedPercent,100) || row.requestedPercent === 0) throw new Error();
+        } else if (!['zero_skipped','no_eligible_level'].includes(row.status) || row.requestedPercent !== null
+            || row.previousPercent !== row.currentPercent) throw new Error();
+      }
+      return row;
+    };
+    const report = brightnessRecord(value,['strategy','effectState','physical','wmi']);
+    if (report.strategy !== strategy || !['not_started','unknown'].includes(report.effectState)) throw new Error();
+    if ((strategy === 'physical' && (report.physical === null || report.wmi !== null))
+        || (strategy === 'wmi_first' && (report.physical !== null || report.wmi === null))
+        || (strategy === 'physical_then_wmi' && report.physical === null)) throw new Error();
+    const result = {strategy,effectState:report.effectState,physical:report.physical === null ? null : physical(report.physical),
+      wmi:report.wmi === null ? null : wmi(report.wmi)};
+    if (result.effectState === 'not_started' && (result.physical?.members.some(row => !['read_rejected','unchanged'].includes(row.status))
+        || result.wmi?.status === 'set' || result.physical?.errorCode === 'brightness_unknown'
+        || result.wmi?.errorCode === 'brightness_unknown')) throw new Error();
+    if (strategy === 'physical_then_wmi' && result.wmi !== null) {
+      const ddc = result.physical;
+      if (ddc.errorCode !== null
+          ? !['monitor_unavailable','brightness_unavailable'].includes(ddc.errorCode)
+          : !ddc.members.every(row => row.status === 'read_rejected')) throw new Error();
+    }
+    return result;
+  }
+  function brightnessStep(args) {
+    const method = 'display.brightness_step';
+    let params;
+    try {
+      if (args.length !== 1) throw new Error();
+      params = brightnessRecord(args[0],['direction','strategy']);
+      if (!['up','down'].includes(params.direction)
+          || !['physical','wmi_first','physical_then_wmi'].includes(params.strategy)) throw new Error();
+    } catch (_) { throw brightnessFault('invalid_input','not_started'); }
+    const requestedStrategy = params.strategy;
+    const failure = cause => {
+      const allowed = ['invalid_input','cancelled','timeout','native_bridge_unavailable','native_bridge_failed',
+        'desktop_unavailable','desktop_busy','desktop_call_limit','desktop_connection','desktop_protocol','desktop_timeout',
+        'invalid_response','initialization_failed','monitor_unavailable','ambiguous_monitor','brightness_unavailable',
+        'brightness_failed','brightness_unknown'];
+      let code = 'native_bridge_failed', effect = 'unknown';
+      try {
+        // 只读各自一次的自有数据属性；不执行异常getter或继承属性。
+        const reported = cause != null ? Object.getOwnPropertyDescriptor(cause,'code')?.value : undefined;
+        const reportedEffect = cause != null ? Object.getOwnPropertyDescriptor(cause,'effectState')?.value : undefined;
+        if (allowed.includes(reported)) code = reported;
+        if (reportedEffect === 'not_started') effect = 'not_started';
+      } catch (_) { /* 不读取或回显异常正文。 */ }
+      throw brightnessFault(code,effect);
+    };
+    const result = value => {
+      try { return brightnessResponse(value,requestedStrategy); }
+      catch (_) { throw brightnessFault('invalid_response','unknown'); }
+    };
+    try {
+      const value = invoke(method,params);
+      return value && typeof value.then === 'function' ? value.then(result,failure) : result(value);
+    } catch (cause) { return failure(cause); }
+  }
+
   const desktop = Object.freeze({
+    stepBrightness: (...args) => brightnessStep(args),
     target: () => invoke('target.info', {}),
     targetContext: () => invoke('target.context', {}),
     sendShortcut: (keys, options = {}) => {

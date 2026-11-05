@@ -1,0 +1,1 @@
+{"package_id":"examples.brightness-step","action_id":"step-script","action_version":1,"input":{"direction":"down","strategy":"wmi_first"}}
