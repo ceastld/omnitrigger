@@ -567,3 +567,197 @@ fn action_service_cancel_cleans_capture_job_while_parent_test_process_lives() {
     )
     .unwrap();
 }
+
+const OUTER_DEADLINE: &str = r#"
+import {existsSync,readFileSync,writeFileSync,renameSync} from 'node:fs';
+import {join} from 'node:path';
+const pause=ms=>new Promise(done=>setTimeout(done,ms));
+function publish(root,name,text) {
+  writeFileSync(join(root,name+'.writing'),text,{flag:'wx'});
+  renameSync(join(root,name+'.writing'),join(root,name));
+}
+export default async ctx => {
+  if(process.ppid!==ctx.input.parent)throw Error('owned_parent_mismatch');
+  await ctx.delay(58000); // 沿用默认60秒；不修改运行时限或注入取消帧。
+  const pending=ctx.process.capture(ctx.input.program,['descendant',ctx.input.root,ctx.input.token],{timeoutMs:10000});
+  pending.catch(()=>{});
+  const until=performance.now()+8000;
+  const ready=join(ctx.input.root,'fixture-ready');
+  while(!existsSync(ready)||readFileSync(ready,'utf8')!==ctx.input.token) {
+    if(performance.now()>=until)throw Error('fixture_ready_timeout');
+    await pause(2);
+  }
+  publish(ctx.input.root,'node-owner.json',JSON.stringify({schemaVersion:1,token:ctx.input.token,node:process.pid,app:process.ppid}));
+  publish(ctx.input.root,'node-armed',ctx.input.token);
+  const release=join(ctx.input.root,'release-control');
+  while(!existsSync(release)||readFileSync(release,'utf8')!==ctx.input.token) {
+    if(performance.now()>=until)throw Error('control_release_timeout');
+    await pause(2);
+  }
+  publish(ctx.input.root,'node-control-request',ctx.input.token);
+  return await pending;
+};
+"#;
+
+// 仅测试观察：原参数、实际外层deadline、令牌与结果照常转交，不缩短期限。
+struct DeadlineCaptureHost {
+    inner: WithProcessCapture<NoOtherMethods>,
+    observed: std::sync::Mutex<Vec<Value>>,
+}
+impl NativeHost for DeadlineCaptureHost {
+    fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+        Err(ActionError::new(
+            "missing_outer_deadline",
+            "本验收必须收到运行时传入的真实外层deadline。",
+        ))
+    }
+    fn call_with_deadline(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Value, ActionError> {
+        let began = Instant::now();
+        let remaining = deadline.saturating_duration_since(began);
+        let request_matches = method == "process.capture"
+            && params["timeout_ms"] == 10000
+            && params["args"][0] == "descendant";
+        let uncancelled_at_entry = !cancellation.is_cancelled();
+        let result = self
+            .inner
+            .call_with_deadline(method, params, cancellation, deadline);
+        let valid_error = result.as_ref().is_err_and(|error| {
+            error.code == "timeout"
+                && error.effect_state.as_deref() == Some("unknown")
+                && error.method.as_deref() == Some("process.capture")
+                && error.required_permissions.is_empty()
+        });
+        let observation = json!({
+            "requestMatches":request_matches,
+            "remainingMs":remaining.as_millis(),
+            "positiveOuterBudget":remaining >= Duration::from_millis(250),
+            "outerBudgetBelowThreeSeconds":remaining <= Duration::from_secs(3),
+            "deadlineReached":Instant::now() >= deadline,
+            "apiTenSecondsNotElapsed":began.elapsed() < Duration::from_secs(10),
+            "uncancelledAtEntry":uncancelled_at_entry,
+            "uncancelledAtReturn":!cancellation.is_cancelled(),
+            "captureReturnedTimeoutUnknown":valid_error,
+            "bodyRecorded":false,
+        });
+        self.observed.lock().unwrap().push(observation);
+        result
+    }
+}
+
+fn observe_after_slow_node_ready(
+    root: &Path,
+    token: &str,
+    parent: u32,
+) -> Result<Value, &'static str> {
+    let began = Instant::now();
+    // 只延长测试观察器等作者开始采集的时间，不更改任何生产期限。
+    while !root.join("node-armed").is_file() {
+        if began.elapsed() >= Duration::from_secs(62) {
+            return Err("outer_deadline_node_ready_unproven");
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    observe(root, token, parent)
+}
+
+#[test]
+#[ignore = "慢速约60–63秒；显式自有Node和夹具；默认60秒真实外层deadline"]
+fn node_outer_deadline_cleans_capture_job_while_parent_test_process_lives() {
+    let node = explicit("OMNITRIGGER_APP_CAPTURE_NODE", true);
+    let fixture = explicit("OMNITRIGGER_CAPTURE_FIXTURE", true);
+    let parent_root = explicit("OMNITRIGGER_APP_CAPTURE_CASE_ROOT", false);
+    let parent = std::process::id();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        ^ (u128::from(parent) << 64)
+        ^ u128::from(NEXT.fetch_add(1, Ordering::Relaxed));
+    let token = format!("{nonce:032x}");
+    let root = parent_root.join(format!("capture-case-app-node-deadline-{token}"));
+    fs::create_dir(&root).expect("只创建全新本轮目录，不覆盖或删除旧目录");
+    ordinary(&root, false).unwrap();
+    let context = InvocationContext {
+        invocation_id: 1,
+        binding_id: 1,
+    };
+    let warm = action(
+        &root,
+        WARM,
+        json!({"program":fixture,"signature":SIGNATURE}),
+    );
+    let warm_result = NodeRuntime::new(&node).execute_with_host(
+        &warm,
+        &context,
+        &CancellationToken::new(),
+        Some(&WithProcessCapture::new(NoOtherMethods)),
+    );
+    assert!(
+        warm_result.is_ok_and(|value| value["ready"] == true),
+        "冷启动预热或夹具签名失败；不回显正文"
+    );
+    let host = DeadlineCaptureHost {
+        inner: WithProcessCapture::new(NoOtherMethods),
+        observed: std::sync::Mutex::new(Vec::new()),
+    };
+    let target = action(
+        &root,
+        OUTER_DEADLINE,
+        json!({"program":fixture,"root":root,"token":token,"parent":parent}),
+    );
+    let cancellation = CancellationToken::new();
+    let began = Instant::now();
+    let (outcome, observation) = thread::scope(|scope| {
+        let observer = scope.spawn(|| observe_after_slow_node_ready(&root, &token, parent));
+        let outcome = NodeRuntime::new(&node).execute_with_host(
+            &target,
+            &context,
+            &cancellation,
+            Some(&host),
+        );
+        (outcome, observer.join().expect("只读观察线程必须正常返回"))
+    });
+    assert!(
+        outcome.as_ref().is_err_and(|error| {
+            error.code == "timeout" && error.effect_state.as_deref() == Some("unknown")
+        }),
+        "必须收到默认外层timeout/unknown，不能以取消或单次采集成功替代"
+    );
+    assert!(!cancellation.is_cancelled(), "测试不得取消父令牌");
+    assert!(began.elapsed() >= Duration::from_secs(60));
+    assert!(began.elapsed() < Duration::from_secs(65));
+    let records = host.observed.lock().unwrap();
+    assert_eq!(records.len(), 1, "必须只有一次真实采集");
+    let deadline_observation = records[0].clone();
+    for key in [
+        "requestMatches",
+        "positiveOuterBudget",
+        "outerBudgetBelowThreeSeconds",
+        "deadlineReached",
+        "apiTenSecondsNotElapsed",
+        "uncancelledAtEntry",
+        "uncancelledAtReturn",
+        "captureReturnedTimeoutUnknown",
+    ] {
+        assert_eq!(deadline_observation[key], true, "外层deadline证据不足");
+    }
+    let observation = observation.expect("未在自然期限前证明协作清理；不重试");
+    assert_eq!(std::process::id(), parent);
+    let receipt = json!({"passed":true,"runtime":"node","terminalCode":"timeout",
+        "outerRuntimeDefaultSeconds":60,"captureTimeoutMs":10000,
+        "deadlineObservation":deadline_observation,"observation":observation,
+        "elapsedMs":began.elapsed().as_millis(),"parentKind":"retained_app_test_process",
+        "parentTokenCancelled":false,"authorInjectsCancelFrame":false,
+        "nodeSelfExitRequested":false,"attempts":1});
+    write_new(
+        &root.join("native-node-deadline-capture-receipt.json"),
+        &serde_json::to_vec_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
+}

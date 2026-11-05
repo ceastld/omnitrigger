@@ -38,6 +38,8 @@ cargo test -p omnitrigger-app --bin omnitrigger process_capture_host::node_nativ
 
 相同环境下，测试 `process_capture_host::node_native::action_service_cancel_cleans_capture_job_while_parent_test_process_lives` 验证 `ActionService.cancel_id`：通过真实动作包提交后再取消，分别核对采集实际返回的取消错误、服务的 Started/Cancelled 终态、占用释放及三个进程退出。作者不注入取消帧、不自行退出；该用例不操作物理界面，也不证明外层期限。
 
+测试 `process_capture_host::node_native::node_outer_deadline_cleans_capture_job_while_parent_test_process_lives` 则保留 Node 默认60秒外层期限：作者等待58秒后请求10秒采集，验证较早的真实外层期限终止采集，并在父进程仍存活时收尾Node、夹具和后代。它不修改生产超时、不主动取消，单次约60–63秒；繁忙机器若未赶上就绪窗口，应保留失败，不能自动重试或改记通过。
+
 纯 Fake 验证命令：
 
 ```powershell
