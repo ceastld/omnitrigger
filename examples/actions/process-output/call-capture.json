@@ -1,0 +1,14 @@
+{
+  "package_id": "examples.process-output",
+  "action_id": "notify-capture",
+  "action_version": 1,
+  "input": {
+    "program": "C:\\OwnedFixture\\capture-fixture.exe",
+    "args": [
+      "exit",
+      "0"
+    ],
+    "cwd": "C:\\OwnedFixture",
+    "timeoutMs": 10000
+  }
+}

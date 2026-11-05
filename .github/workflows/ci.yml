@@ -180,6 +180,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/path-text/recipes.test.mjs examples/actions/line-text/recipes.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test examples/actions/process-output/node-capture.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 验证轻量脚本开发包的真实安装与切换
         shell: pwsh
