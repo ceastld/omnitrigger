@@ -121,7 +121,8 @@ export function checkProjectTypes(projectDirectory) {
   if(converted.errors.length)fail('project_config_invalid');
   const options={strict:true,target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.ESNext,
     moduleResolution:ts.ModuleResolutionKind.Bundler,lib:['lib.es2020.d.ts'],...converted.options,
-    noEmit:true,allowJs:true,checkJs:true,types:[]};
+    // 旧 .js 入口实际各自在函数体内执行；noEmit 检查也按文件隔离，不合并作者局部声明。
+    noEmit:true,allowJs:true,checkJs:true,types:[],moduleDetection:ts.ModuleDetectionKind.Force};
   const host=ts.createCompilerHost(options);
   let fatal;
   const originalExists=host.fileExists;

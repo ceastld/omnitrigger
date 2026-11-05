@@ -49,9 +49,19 @@ const project = created.project;
 assert.equal(project.package_root, join(root,'actions','sdk-test'));
 const checked = diagnostics(project.package_root);
 assert.equal(checked.length, 0, report(checked));
-assert.equal(readFileSync(project.sdk_path,'utf8'), readFileSync(join(repo,'crates/omnitrigger-actions/runtime/script-api.d.ts'),'utf8'));
+assert.equal(readFileSync(project.sdk_path,'utf8'), readFileSync(join(repo,'crates/omnitrigger-actions/runtime/script-types.d.ts'),'utf8'));
 const historyTypeChecks = checkClipboardHistoryTypes({syncDeclarationPath:project.sdk_path, temporaryRoot:root});
 const original = readFileSync(project.entry_path,'utf8');
+// ESM 模块没有隐式上下文；只允许入口参数或显式传参，防止编辑器补全误导作者。
+for (const source of [
+  'ctx.delay(0); export function main() { return null; }',
+  'export function helper() { return ctx.input.text; }',
+]) {
+  writeFileSync(project.entry_path, source);
+  const items = diagnostics(project.package_root);
+  assert(items.some(item => item.code === 2304 && item.file?.text.slice(item.start,item.start+item.length) === 'ctx'),report(items));
+}
+writeFileSync(project.entry_path, original);
 // 使用新建工程实际附带的声明，验证入口签名，而不在测试中另抄一份类型。
 const entryHeader = '/// <reference path="./sdk/api.d.ts" />\n/** @type {ScriptMain} */\n';
 function checkEntry(source) {
@@ -82,11 +92,11 @@ for (const [name, source] of Object.entries(invalidEntries)) {
   assert(items.some(item => [1065, 2322, 2355, 2366].includes(item.code)
     && item.file && resolve(item.file.fileName) === resolve(project.entry_path)), `${name}: ${report(items)}`);
 }
-writeFileSync(project.entry_path, `${original}\nctx.delay(0);\nctx.desktop.windowAction('minimize');\n`);
+writeFileSync(project.entry_path, `${original}\n/** @param {ScriptContext} ctx */\nfunction verifyHost(ctx) { ctx.delay(0); ctx.desktop.windowAction('minimize'); }\n`);
 const withDelay = diagnostics(project.package_root);
 assert.equal(withDelay.length, 0, report(withDelay));
 // 编译器必须实际拒绝错误参数和未提供的环境能力，而不只是成功解析声明。
-writeFileSync(project.entry_path, `${original}\nctx.desktop.sendText(123);\nctx.delay('10');\nctx.desktop.windowAction('resize');\nctx.browser.missing();\nprocess.exit(0);\ndocument.title;\n`);
+writeFileSync(project.entry_path, `${original}\n/** @param {ScriptContext} ctx */\nfunction rejectHost(ctx) {\nctx.desktop.sendText(123);\nctx.delay('10');\nctx.desktop.windowAction('resize');\nctx.browser.missing();\nprocess.exit(0);\ndocument.title;\n}\n`);
 const negative = diagnostics(project.package_root);
 assert(negative.some(item=>item.code === 2345), report(negative));
 assert(negative.some(item=>item.code === 2345 && item.file?.text.slice(item.start, item.start + item.length) === "'10'"), report(negative));

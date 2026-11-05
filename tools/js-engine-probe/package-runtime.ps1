@@ -76,7 +76,8 @@ try {
     if ($description.product -cne 'omnitrigger-script-host' -or $description.engine -cne $Engine -or $description.schema_version -ne 1 -or $description.protocol_schema -ne 1 -or $description.api_version -ne 1) { throw '宿主能力描述不兼容。' }
     $response = Invoke-Host $hostPath @() '{"script":"return {version:ctx.apiVersion,value:ctx.input.value};","input":{"value":"安装验证"}}'
     if ($response.schema_version -ne 1 -or $response.ok -ne $true -or $response.result.version -ne 1 -or $response.result.value -cne '安装验证') { throw '宿主实际 JS 调用验证失败。' }
-    Copy-Local (Join-Path $repo 'crates/omnitrigger-actions/runtime/script-api.d.ts') (Join-Path $payload 'sdk/api.d.ts')
+    Copy-Local (Join-Path $repo 'crates/omnitrigger-actions/runtime/script-types.d.ts') (Join-Path $payload 'sdk/api.d.ts')
+    Add-Content -LiteralPath (Join-Path $payload 'sdk/api.d.ts') -Value 'declare const ctx: ScriptContext;' -Encoding utf8NoBOM
     Copy-Local (Join-Path $repo 'LICENSE') (Join-Path $payload 'LICENSE')
     & (Join-Path $repo 'scripts/collect-licenses.ps1') -OutputDirectory (Join-Path $payload 'licenses') -ManifestPath (Join-Path $PSScriptRoot 'Cargo.toml') -PackageName 'omnitrigger-js-probe' -NoDefaultFeatures -Features $Engine
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'

@@ -65,7 +65,7 @@ actions/my-script/
   sdk/api.d.ts
 ```
 
-使用支持 JavaScript / TypeScript 的编辑器打开整个目录，编辑 `main.mjs` 和 `lib` 中的模块。入口具名导出同步 `main(ctx)`，通过标准相对 `import` / `export` 拆分代码。工程附带本地 SDK 类型快照，启用标准 JS 类型检查，不依赖仓库路径或 npm 包，也无需转译；运行需要支持包内模块的新宿主；已有 `.js` 工程继续使用 `function main(ctx)`，更新应用不会改写作者文件。路径、缓存、循环和限额见[包内模块](../tools/js-engine-probe/MODULES.md)。入口的 `@type {ScriptMain}` 注释同时提供 `ctx` 补全和 JSON 返回值检查，能在编辑时发现异步入口、遗漏返回及 Promise、函数、`undefined` 等非 JSON 返回值；无结果时返回 `null`。静态类型无法排除 `any`、循环引用和非有限数，实际运行仍有独立校验。SDK 的[源声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)随应用维护，更新应用不会覆盖既有工程。
+使用支持 JavaScript / TypeScript 的编辑器打开整个目录，编辑 `main.mjs` 和 `lib` 中的模块。入口具名导出同步 `main(ctx)`，通过标准相对 `import` / `export` 拆分代码。工程附带本地 SDK 类型快照，启用标准 JS 类型检查，不依赖仓库路径或 npm 包，也无需转译；运行需要支持包内模块的新宿主；已有 `.js` 工程继续使用 `function main(ctx)`，更新应用不会改写作者文件。路径、缓存、循环和限额见[包内模块](../tools/js-engine-probe/MODULES.md)。入口的 `@type {ScriptMain}` 注释同时提供 `ctx` 补全和 JSON 返回值检查，能在编辑时发现异步入口、遗漏返回及 Promise、函数、`undefined` 等非 JSON 返回值；无结果时返回 `null`。静态类型无法排除 `any`、循环引用和非有限数，实际运行仍有独立校验。模块没有全局 `ctx`，辅助函数需要显式传参。SDK 的[源声明](../crates/omnitrigger-actions/runtime/script-types.d.ts)随应用维护，更新应用不会覆盖既有工程。
 
 安装宿主后，可使用同一配置校验和运行：
 

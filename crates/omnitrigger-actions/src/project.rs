@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const SCRIPT_API: &str = include_str!("../runtime/script-api.d.ts");
+pub const SCRIPT_API: &str = include_str!("../runtime/script-types.d.ts");
 const ENTRY: &str = include_str!("../../../examples/actions/script-modules/main.mjs");
 const MODULE: &str = include_str!("../../../examples/actions/script-modules/lib/text.js");
 const README: &str = include_str!("../../../examples/actions/script-modules/README.md");

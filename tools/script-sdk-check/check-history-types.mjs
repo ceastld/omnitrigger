@@ -45,7 +45,7 @@ export function checkClipboardHistoryTypes({
       : `/// <reference path=${JSON.stringify(normalized(relative(folder, syncDeclarationPath)))} />\n`;
     const awaitCall = expression => asynchronous ? `await ${expression}` : expression;
     const prefix = asynchronous ? '' : 'Script';
-    const positive = `${header}${asynchronous ? 'async ' : ''}function verifyHistory() {\n`
+    const positive = `${header}${asynchronous ? 'async ' : ''}function verifyHistory(ctx: ${asynchronous ? 'ActionContext' : 'ScriptContext'}) {\n`
       + `const listing: ${prefix}ClipboardHistoryList = ${awaitCall('ctx.clipboard.history.list()')};\n`
       + `const limited: ${prefix}ClipboardHistoryList = ${awaitCall('ctx.clipboard.history.list({limit:200})')};\n`
       + `const item: ${prefix}ClipboardHistoryText = ${awaitCall("ctx.clipboard.history.get({id:'18446744073709551615'})")};\n`
@@ -57,6 +57,12 @@ export function checkClipboardHistoryTypes({
       + 'const body: string = item.text; const inserted: boolean = empty.inserted; const didRemove: boolean = removed.removed;\n'
       + (asynchronous ? 'const pending: Promise<ClipboardHistoryList> = ctx.clipboard.history.list({limit:1});\nconst api: AsyncClipboardHistoryApi = ctx.clipboard.history;\n'
         : 'const api: ScriptClipboardHistoryApi = ctx.clipboard.history;\n')
+      // 标准同步入口能直接返回真实JSON回执；这里只检查类型，不执行历史操作。
+      + (asynchronous ? '' : 'const savedMain: ScriptMain = value => value.clipboard.history.append({text:"synthetic"});\n'
+        + 'const removedMain: ScriptMain = value => value.clipboard.history.remove({id:"1"});\n'
+        + 'const listedMain: ScriptMain = value => value.clipboard.history.list({limit:1});\n'
+        + 'const readMain: ScriptMain = value => value.clipboard.history.get({id:"1"});\n'
+        + 'function itemAsJson(value:ScriptClipboardHistoryItem):ScriptJsonValue{return value;}\n')
       + 'return {revision,id,stamp,units,preview,inserted,didRemove,count:limited.items.length};\n}\n';
     const positivePath = join(folder, 'positive.ts');
     writeFileSync(positivePath, positive);
@@ -64,6 +70,10 @@ export function checkClipboardHistoryTypes({
     assert.equal(positiveDiagnostics.length, 0, report(positiveDiagnostics, root));
 
     const cases = {
+      ...(asynchronous ? {} : {
+        jsonPromise:'const main: ScriptMain = () => Promise.resolve(true);',
+        jsonFunction:'const main: ScriptMain = () => ({handler:() => true});',
+      }),
       listLimitType:'ctx.clipboard.history.list({limit:"100"});',
       listExtra:'ctx.clipboard.history.list({page:1});',
       listArity:'ctx.clipboard.history.list({}, {});',
@@ -91,7 +101,7 @@ export function checkClipboardHistoryTypes({
         : 'const pending: Promise<ScriptClipboardHistoryList> = ctx.clipboard.history.list();',
       resultAccess: asynchronous ? 'ctx.clipboard.history.get({id:"1"}).text;' : 'ctx.clipboard.history.get({id:"1"}).then(() => true);',
     };
-    let negative = `${header}${asynchronous ? 'async ' : ''}function rejectHistory() {\n`;
+    let negative = `${header}${asynchronous ? 'async ' : ''}function rejectHistory(ctx: ${asynchronous ? 'ActionContext' : 'ScriptContext'}) {\n`;
     const expectedLines = new Map();
     for (const [name, statement] of Object.entries(cases)) {
       negative += `// ${name}\n`;

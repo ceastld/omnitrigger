@@ -9,7 +9,7 @@ import {checkProjectTypes} from './check-project-types.mjs';
 
 const repo=resolve(dirname(fileURLToPath(import.meta.url)),'../..');
 const parent=join(repo,'.tmp/continuous-actions/sdk');mkdirSync(parent,{recursive:true});
-const sdk=readFileSync(join(repo,'crates/omnitrigger-actions/runtime/script-api.d.ts'),'utf8');
+const sdk=readFileSync(join(repo,'crates/omnitrigger-actions/runtime/script-types.d.ts'),'utf8');
 function fixture() {
   const root=mkdtempSync(join(parent,'project-check-'));
   mkdirSync(join(root,'sdk'));mkdirSync(join(root,'lib'));
@@ -139,6 +139,35 @@ test('动态目标和再导出保留不确定性，不把警告改成运行成�
   assert.equal(reexport.runtimeVerified,false);
 });
 
+test('同包多个旧js入口的main和局部变量按文件隔离',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[
+    {runtime:'script',entry:'first.js'},{runtime:'script',entry:'second.js'},
+    {runtime:'script',entry:'main.mjs'},
+  ]}));
+  for(const file of ['first.js','second.js'])writeFileSync(join(root,file),
+    '/** @type {ScriptMain} */\nfunction main(ctx){return ctx.input.text;}\nconst localValue=1;');
+  const result=checkProjectTypes(root);
+  assert.equal(result.passed,true,JSON.stringify(result.diagnostics));
+  assert.deepEqual(result.diagnostics,[]);
+  assert.deepEqual(result.skippedEntries.map(item=>item.entry),['first.js','second.js']);
+  assert.equal(result.moduleChecks.length,1);assert.equal(result.entryChecks.length,1);
+  assert.equal(result.runtimeExecuted,false);assert.equal(result.staticAnalysisComplete,false);
+});
+
+test('另一个旧js入口的局部变量不能替当前入口掩盖未定义名称',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[
+    {runtime:'script',entry:'provider.js'},{runtime:'script',entry:'consumer.js'},
+  ]}));
+  writeFileSync(join(root,'provider.js'),'const otherEntryValue=1;\n/** @type {ScriptMain} */\nvar main=function(ctx){return ctx.input.text;};');
+  writeFileSync(join(root,'consumer.js'),'/** @type {ScriptMain} */\nvar main=function(ctx){return otherEntryValue;};');
+  const result=checkProjectTypes(root);
+  assert.equal(result.passed,false);
+  assert(result.diagnostics.some(item=>item.code===2304&&item.file==='consumer.js'));
+  assert.equal(result.runtimeExecuted,false);assert.deepEqual(result.entryChecks,[]);
+});
+
 test('旧js函数体入口继续做类型检查，不强加ESM导出要求',()=>{
   const root=fixture();
   writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[{runtime:'script',entry:'legacy.js'}]}));
@@ -183,4 +212,18 @@ test('统一CLI对环境失败输出JSON和退出码1，不执行作者初始化
   assert.deepEqual(output.diagnostics,[]);
   assert(output.environmentDiagnostics.some(d=>d.code==='entry_main_not_exported'));
   assert.equal(output.runtimeExecuted,false);assert.equal(output.filesModified,false);
+});
+
+
+test('模块入口和辅助模块都必须显式接收上下文',()=>{
+  for(const [file,source] of [
+    ['main.mjs','ctx.delay(0);export function main(){return null;}'],
+    ['lib/text.mjs','/** @param {string} text */\nexport function clean(text){return ctx.input.text;}'],
+  ]) {
+    const root=fixture();writeFileSync(join(root,file),source);
+    const result=checkProjectTypes(root);
+    assert.equal(result.passed,false);
+    assert(result.diagnostics.some(d=>d.code===2304),JSON.stringify(result.diagnostics));
+    assert.equal(result.runtimeExecuted,false);assert.equal(result.filesModified,false);
+  }
 });
