@@ -625,9 +625,7 @@ mod tests {
         wait_inactive(&service, first);
         service.submit(2, call).unwrap();
         let outcomes: Vec<_> = (0..2).map(|_| terminal(&service).outcome).collect();
-        assert!(outcomes
-            .iter()
-            .any(|outcome| *outcome == ActionOutcome::Cancelled));
+        assert!(outcomes.contains(&ActionOutcome::Cancelled));
         assert!(outcomes
             .iter()
             .any(|outcome| matches!(outcome, ActionOutcome::Succeeded { .. })));
