@@ -1551,7 +1551,7 @@ mod tests {
                 assert!(saved["bindings"][0].get("keyboard").is_none());
             }
             let mut source = document();
-            source["version"] = 23.into();
+            source["version"] = (CONFIG_VERSION + 1).into();
             assert!(decode(&source.to_string())
                 .unwrap_err()
                 .contains("配置版本不受支持"));
