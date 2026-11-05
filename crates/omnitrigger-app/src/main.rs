@@ -10,6 +10,8 @@ mod browser_actions;
 mod browser_actions_ui;
 mod browser_connector;
 mod browser_connector_ui;
+mod clipboard_history_host;
+mod clipboard_history_store;
 #[cfg(all(windows, test))]
 mod clipboard_restore;
 #[cfg(all(windows, test))]
@@ -6121,6 +6123,23 @@ fn smoke_test(wheel_input_policy: WheelInputPolicy) -> Result<(), String> {
 
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
+    #[cfg(windows)]
+    if arguments.get(1).map(String::as_str) == Some("--omni-clipboard-history-capture") {
+        let previous = if arguments.len() == 5 {
+            arguments[4].parse::<u32>().ok()
+        } else {
+            None
+        };
+        let code = match previous {
+            Some(previous) => omnitrigger_windows::run_clipboard_history_capture_helper(
+                &arguments[2],
+                &arguments[3],
+                previous,
+            ),
+            None => 2,
+        };
+        std::process::exit(code);
+    }
     let wheel_input_policy = match wheel_input_cli::parse(&arguments) {
         Ok(policy) => policy,
         Err(error) => {

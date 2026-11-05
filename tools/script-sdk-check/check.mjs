@@ -6,6 +6,7 @@ import {existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFile
 import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import ts from 'typescript';
+import {checkClipboardHistoryTypes} from './check-history-types.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const binary = resolve(process.argv[2] ?? 'target/debug/omnitrigger.exe');
@@ -49,6 +50,7 @@ assert.equal(project.package_root, join(root,'actions','sdk-test'));
 const checked = diagnostics(project.package_root);
 assert.equal(checked.length, 0, report(checked));
 assert.equal(readFileSync(project.sdk_path,'utf8'), readFileSync(join(repo,'crates/omnitrigger-actions/runtime/script-api.d.ts'),'utf8'));
+const historyTypeChecks = checkClipboardHistoryTypes({syncDeclarationPath:project.sdk_path, temporaryRoot:root});
 const original = readFileSync(project.entry_path,'utf8');
 // 使用新建工程实际附带的声明，验证入口签名，而不在测试中另抄一份类型。
 const entryHeader = '/// <reference path="./sdk/api.d.ts" />\n/** @type {ScriptMain} */\n';
@@ -116,6 +118,6 @@ const listed = cli(['--list-package-actions']);
 assert.equal(listed.actions.length, 1);
 assert.equal(listed.actions[0].runtime, 'script');
 assert.equal(readFileSync(config,'utf8'),'[]');
-const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,checkedExamples,entryContractChecks:Object.keys(invalidEntries),negativeTypeChecks:negative.length,structuredClipboardTypeChecks:true,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
+const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,checkedExamples,entryContractChecks:Object.keys(invalidEntries),negativeTypeChecks:negative.length,structuredClipboardTypeChecks:true,historyTypeChecks,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
 writeFileSync(join(root,'result.json'), JSON.stringify(result,null,2));
 console.log(JSON.stringify(result));

@@ -16,7 +16,7 @@ let browserConnection;
 let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
-const nativeMethods = new Set(['fs.stat','ui.choose','ui.notify','browser.profiles','browser.call','target.info','target.context',
+const nativeMethods = new Set(['history.list','history.get','history.append','history.remove','fs.stat','ui.choose','ui.notify','browser.profiles','browser.call','target.info','target.context',
   'keyboard.shortcut','keyboard.sequence','keyboard.text','selection.copy','selection.copy_data','clipboard.read','clipboard.read_data','clipboard.write','window.action']);
 let nativePending;
 let nativePendingMethod;
@@ -103,13 +103,16 @@ function nativeCall(method, params) {
   const dataRead = method === 'clipboard.read_data';
   const dataCopy = method === 'selection.copy_data';
   const data = dataRead || dataCopy;
-  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : message), {effectState:stat || dataRead ? 'not_started' : effectState, method});
+  const historyRead = method === 'history.list' || method === 'history.get';
+  const historyWrite = method === 'history.append' || method === 'history.remove';
+  const history = historyRead || historyWrite;
+  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : history ? '剪贴板历史调用失败；请检查错误代码。' : message), {effectState:stat || dataRead || historyRead ? 'not_started' : effectState, method});
   if (!nativeMethods.has(method)) return Promise.reject(fail('invalid_input', '未提供此本机调用方法。'));
-  if ((stat || data) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
+  if ((stat || data || history) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
   checkCancelled();
   const ui = method === 'ui.choose' || method === 'ui.notify';
   const unavailable = ui && request.native_error?.code === 'desktop_unavailable' ? 'ui_unavailable' : request.native_error?.code;
-  if (!request.native) return Promise.reject(fail(data ? 'native_bridge_unavailable' : stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
+  if (!request.native) return Promise.reject(fail(history ? 'history_unavailable' : data ? 'native_bridge_unavailable' : stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
   if (nativePending) return Promise.reject(fail(stat ? 'fs_busy' : method === 'ui.notify' && nativePendingMethod === method ? 'ui_busy' : 'desktop_busy', '请 await 上一个本机调用，避免并发。'));
   if (nativeId >= 128) return Promise.reject(fail('desktop_call_limit', '单次动作最多调用 128 次桌面 API。'));
   const id = ++nativeId;
@@ -131,18 +134,18 @@ function nativeCall(method, params) {
     };
     const aborted = () => {
       const reason = controller.signal.reason;
-      if (method === 'ui.notify' || stat || data) {
+      if (method === 'ui.notify' || stat || data || history) {
         if (typeof reason?.method !== 'string') reason.method = method;
-        reason.effectState = stat || dataRead ? 'not_started' : sent ? 'unknown' : 'not_started';
+        reason.effectState = stat || dataRead || historyRead ? 'not_started' : sent ? 'unknown' : 'not_started';
       }
       finish(reason);
     };
     controller.signal.addEventListener('abort', aborted, {once:true});
     socket.setEncoding('utf8');
     const timeout = method === 'ui.choose' ? 61000 : dataCopy ? 8000 : 5000;
-    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || stat || data ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
-    // 新数据方法及 stat 的总传输时限不被零碎数据延长，外层取消/时限仍优先生效。
-    if (stat || data) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
+    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || stat || data || history ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
+    // 历史/数据方法及 stat 的总传输时限不被零碎数据延长，外层取消/时限仍优先生效。
+    if (stat || data || history) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
     socket.once('connect', () => {
       if (controller.signal.aborted) return aborted();
       sent = true;
@@ -155,12 +158,15 @@ function nativeCall(method, params) {
       try {
         const response = JSON.parse(chunks);
         if (response.id !== id || typeof response.ok !== 'boolean') throw new Error('回执身份不匹配');
+        if (history && (Reflect.ownKeys(response).length !== 3 || !Object.hasOwn(response, response.ok ? 'value' : 'error'))) throw new Error();
         if (response.ok) finish(undefined, response.value);
         else {
           const error = response.error;
           if (!error || typeof error.code !== 'string' || typeof error.message !== 'string') throw new Error('缺少错误');
+          if (history && ((error.method !== undefined && error.method !== method)
+              || (error.effect_state !== undefined && !['not_started','unknown'].includes(error.effect_state)))) throw new Error();
           const failure = fail(error.code, error.message, error.effect_state ?? 'unknown');
-          if (Array.isArray(error.required_permissions)) failure.requiredPermissions = error.required_permissions;
+          if (!history && Array.isArray(error.required_permissions)) failure.requiredPermissions = error.required_permissions;
           finish(failure);
         }
       } catch { finish(fail('desktop_protocol', '桌面回执格式无效；业务结果未确认。', 'unknown')); }
@@ -179,7 +185,7 @@ const desktopApis = createDesktopApi(nativeCall);
 // Node 保持 Promise 契约；共享定义中的同步校验异常也转为拒绝。
 const asyncApi = api => Object.freeze(Object.fromEntries(Object.entries(api).map(([name, fn]) => [name, async (...args) => fn(...args)])));
 const desktop = asyncApi(desktopApis.desktop);
-const clipboard = asyncApi(desktopApis.clipboard);
+const clipboard = Object.freeze({...asyncApi(desktopApis.clipboard), history:asyncApi(createClipboardHistoryApi(nativeCall))});
 const ui = asyncApi(desktopApis.ui);
 const fs = asyncApi(desktopApis.fs);
 

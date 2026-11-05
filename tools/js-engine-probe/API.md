@@ -21,6 +21,7 @@
 | `ctx.desktop.windowAction(operation)` | 对仍为前台的原目标执行 `toggle_maximize`、`minimize` 或 `close`，返回 `{submitted:true}`，不重新选择窗口。 |
 | `ctx.clipboard.readText()` / `writeText(text, options)` | Windows Unicode 文本剪贴板；写入替换全部格式。应用接入支持 `{excludeFromHistory:true}`，返回写入回执；独立 CLI 不支持选项，写入返回 `undefined`，文本最多 64 KiB UTF-8。 |
 | `ctx.clipboard.readData()` | 应用接入返回 `{kind:'text',text,sequenceNumber}` 或 `{kind:'files',paths,sequenceNumber}`；无桥接明确报错。 |
+| `ctx.clipboard.history.list/get/append/remove` | 应用接入的显式纯文本历史；此处同步返回，默认不监听。独立CLI返回 `history_unavailable`。 |
 | `ctx.browser.profiles({timeoutMs})` | 查询连接的浏览器 profile。 |
 | `ctx.browser.call(method, args, {profile, timeoutMs})` / `ctx.browser.chrome.*` | 同步调用扩展支持的 Chrome API，保留 `undefined` 与 `null`；无 profile 时只接受恰好一个已连接 profile。 |
 | `ctx.open(target)` | 系统默认程序打开 http、https、mailto、about 或本地绝对路径；成功只表示系统接纳请求。 |
@@ -49,6 +50,25 @@ function main(ctx) {
 `copySelectionData({timeoutMs:400,pollIntervalMs:10,settleMs:0,allowUnchanged:false})` 可显式设置等待序号变化、轮询和读前等待。默认分别为 600/15/30ms，未变化时报 `selection_unchanged`；只有显式 `allowUnchanged:true` 才可返回未变化的数据。复制只发一次，结果留在剪贴板，不抢焦点、不重选目标、不恢复原内容。等待预算不保证阻塞 Win32 调用的硬期限，`changed` 只表示序号不同，不证明数据由目标生成。
 
 读取文本优先，允许空文本；文件列表支持 `[]`，每项必须非空。文本和路径总长各最多 65,536 个 UTF-16 单元，路径最多 64 项，不含 NUL 或孤立代理项。路径仅作为数据，不检查或打开文件；无支持格式、畸形格式或超限均明确报错。完整参数和示例见[动作包文档](../../docs/ACTION_PACKAGES.md#文本与文件列表)。
+
+## 显式文本历史
+
+应用接入提供以下同步接口；Node入口使用相同对象参数并逐次 `await`：
+
+| 方法 | 结果 |
+| --- | --- |
+| `ctx.clipboard.history.list({limit?})` | 默认100项、范围1–200；返回 `{items:[{id,preview,utf16Units,createdAt}],revision}`，不含全文。也可省略整个参数。 |
+| `ctx.clipboard.history.get({id})` | 返回 `{id,text,createdAt,revision}`；不存在抛 `history_item_missing`。 |
+| `ctx.clipboard.history.append({text})` | 显式保存文本，返回 `{id,revision,inserted}`；空文本和空白保留，与最新条目完全相同可去重。 |
+| `ctx.clipboard.history.remove({id})` | 返回 `{removed,revision}`；不存在为false，未变不增加revision。 |
+
+ID必须是非零、无前导零的十进制u64字符串；revision也是十进制字符串，可为 `"0"`，不转JS数字。createdAt为Unix毫秒字符串。单条原文最多65536个UTF-16单元，有效Unicode、无NUL；最多200项、总长1048576个UTF-16单元，超出时按最旧项逐条淘汰，不截断原文。列表摘要单行、最多64个UTF-16单元且不切断代理对；utf16Units始终表示原文长度。
+
+存储是应用配置同级 `clipboard-history.json` 中的明文JSON，读取上限8MiB；损坏或未知版本明确拒绝并保留原文件。默认不启动监听，不读取当前剪贴板或导入其他历史；构造宿主不读写文件，只有显式调用才访问存储。历史方法不需要目标窗口，独立CLI无应用桥接时四方法仍存在并抛 `history_unavailable`。
+
+错误提供固定正文与 `code/method/effectState`，不附带历史正文、路径或权限字段。参数/结果错误为 `invalid_input/invalid_response`，不存在为 `history_item_missing`；锁竞争、损坏和外部变化分别为 `history_busy/history_corrupt/history_conflict`，计数溢出为 `history_id_exhausted/history_revision_exhausted`，取消/期限为 `cancelled/timeout`。读失败为not_started，写入提交前明确拒绝为not_started，提交后无法确认时为unknown；不自动重试或回滚。5秒客户端传输期限不保证抢占已进入的文件系统调用，外层动作取消和期限仍优先生效。
+
+`get`正文仅供脚本内部处理；应返回状态、数量和长度等摘要。SDK不会自动删改可信脚本主动返回的全文。参数、完整边界及双入口示例见[动作包文档](../../docs/ACTION_PACKAGES.md#显式文本历史)和[显式历史配方](../../examples/actions/clipboard-history/)。已安装旧宿主与已有工程的SDK快照需要更新后才能使用。
 
 ## 窗口动作
 

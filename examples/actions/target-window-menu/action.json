@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "id": "examples.target-window-menu",
+  "name": "原目标窗口操作菜单",
+  "version": "1.0.0",
+  "actions": [
+    {"id":"choose","title":"选择原目标窗口操作","version":1,"runtime":"node","entry":"main.mjs","single_instance":true},
+    {"id":"choose-script","title":"选择原目标窗口操作（脚本）","version":1,"runtime":"script","entry":"main-script.mjs","single_instance":true}
+  ]
+}

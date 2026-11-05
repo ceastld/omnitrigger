@@ -1,0 +1,6 @@
+{
+  "package_id": "examples.clipboard-history",
+  "action_id": "manage-script",
+  "action_version": 1,
+  "input": {"mode":"append", "text":"明确保存的示例文本"}
+}

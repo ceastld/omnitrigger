@@ -13,6 +13,13 @@ pub use automation_basics::{
 };
 pub use automation_basics::{validate_automation_text, validate_open_target};
 
+mod clipboard_history_listener;
+#[cfg(windows)]
+pub use clipboard_history_listener::{
+    run_clipboard_history_capture_helper, ClipboardHistoryListener, HistoryListenerError,
+    HistoryListenerStats, HistoryText,
+};
+
 mod clipboard_data;
 #[cfg(windows)]
 pub use clipboard_data::read_clipboard_data;

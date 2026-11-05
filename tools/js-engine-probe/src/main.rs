@@ -8,6 +8,8 @@ mod native;
 const DESKTOP_API: &str =
     include_str!("../../../crates/omnitrigger-actions/runtime/desktop-api.js");
 const SDK: &str = include_str!("sdk.js");
+const HISTORY_API: &str =
+    include_str!("../../../crates/omnitrigger-actions/runtime/clipboard-history-api.js");
 const BROWSER_API: &str =
     include_str!("../../../crates/omnitrigger-actions/runtime/browser-api.js");
 
@@ -173,7 +175,7 @@ fn run() -> Result<Value, Value> {
     let input = serde_json::to_string(&request.input).map_err(|error| error.to_string())?;
     let literal = serde_json::to_string(&input).map_err(|error| error.to_string())?;
     let source = format!(
-        "(() => {{ const ctx = {{ input: JSON.parse({literal}), ...JSON.parse({metadata}) }};\n{DESKTOP_API}\n{BROWSER_API}\n{SDK}\n\
+        "(() => {{ const ctx = {{ input: JSON.parse({literal}), ...JSON.parse({metadata}) }};\n{DESKTOP_API}\n{BROWSER_API}\n{HISTORY_API}\n{SDK}\n\
          return function(entry) {{ const result = entry(ctx);\n\
          if (result && typeof result.then === 'function') throw new Error('脚本入口必须同步返回 JSON 数据');\n\
          const output = JSON.stringify(result);\n\

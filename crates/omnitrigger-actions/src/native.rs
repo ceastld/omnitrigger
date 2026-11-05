@@ -15,7 +15,11 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 16] = [
+const METHODS: [&str; 20] = [
+    "history.list",
+    "history.get",
+    "history.append",
+    "history.remove",
     "fs.stat",
     "ui.choose",
     "ui.notify",
@@ -220,6 +224,12 @@ impl NativeBridge {
                     *next_id += 1;
                     let data_read = request.method == "clipboard.read_data";
                     let data_copy = request.method == "selection.copy_data";
+                    let history_read =
+                        matches!(request.method.as_str(), "history.list" | "history.get");
+                    let history = matches!(
+                        request.method.as_str(),
+                        "history.list" | "history.get" | "history.append" | "history.remove"
+                    );
                     let result = if !METHODS.contains(&request.method.as_str()) {
                         let mut error = ActionError::new("invalid_input", "未提供此本机调用方法。");
                         error.effect_state = Some("not_started".into());
@@ -237,7 +247,7 @@ impl NativeBridge {
                     } else if cancellation.is_cancelled() {
                         let mut error =
                             ActionError::new("cancelled", "动作已取消，未开始本机调用。");
-                        if data_read || data_copy {
+                        if data_read || data_copy || history {
                             error.effect_state = Some("not_started".into());
                         }
                         Err(error)
@@ -251,18 +261,23 @@ impl NativeBridge {
                             ),
                             None => host.call(&request.method, request.params, cancellation),
                         };
-                        if request.method == "ui.choose" || data_copy {
+                        if request.method == "ui.choose" || data_copy || history {
                             interactive_call(&client.stream, cancellation, call)
                         } else {
                             call(cancellation)
                         }
                     }
                     .map_err(|mut error| {
-                        if data_read || data_copy {
-                            error.message = "剪贴板或选区数据调用失败；请检查错误代码。".into();
+                        if data_read || data_copy || history {
+                            error.message = if history {
+                                "剪贴板历史调用失败；请检查错误代码。"
+                            } else {
+                                "剪贴板或选区数据调用失败；请检查错误代码。"
+                            }
+                            .into();
                             error.method = Some(request.method.clone());
                             error.required_permissions.clear();
-                            if data_read {
+                            if data_read || history_read {
                                 error.effect_state = Some("not_started".into());
                             } else if error.effect_state.as_deref() != Some("not_started") {
                                 error.effect_state = Some("unknown".into());

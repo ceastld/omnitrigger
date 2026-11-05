@@ -4,5 +4,9 @@
   "license": "MIT",
   "type": "module",
   "engines": {"node": ">=22"},
+  "scripts": {
+    "test:history-types": "node check-history-types.mjs",
+    "test:history-api": "node --test ../../tests/clipboard_history_api.test.mjs"
+  },
   "devDependencies": {"typescript": "5.9.3"}
 }

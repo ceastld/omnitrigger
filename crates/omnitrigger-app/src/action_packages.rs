@@ -85,11 +85,32 @@ pub fn submit(
     service.submit_with_host(
         id,
         call,
-        Some(Arc::new(crate::script_ui::Host::new(
-            crate::script_browser::ActionHost::new(settings::path(), desktop),
-            target,
+        Some(Arc::new(with_clipboard_history(
+            crate::script_ui::Host::new(
+                crate::script_browser::ActionHost::new(settings::path(), desktop),
+                target,
+            ),
         ))),
     )
+}
+
+/// 只确定应用私有文件位置；构造不读写磁盘，首次显式历史调用才访问存储。
+fn with_clipboard_history<H: omnitrigger_actions::NativeHost>(
+    inner: H,
+) -> crate::clipboard_history_host::WithClipboardHistory<
+    H,
+    Arc<crate::clipboard_history_store::ClipboardHistoryStore>,
+> {
+    let store = std::path::absolute(settings::path())
+        .ok()
+        .and_then(|path| {
+            crate::clipboard_history_store::ClipboardHistoryStore::new(
+                path.with_file_name("clipboard-history.json"),
+            )
+            .ok()
+        })
+        .map(Arc::new);
+    crate::clipboard_history_host::WithClipboardHistory::new(inner, store)
 }
 
 /// 外部目录原样保留共享模型的可选策略字段，不读取绑定或执行动作入口。
@@ -220,9 +241,11 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
                 service.submit_with_host(
                     0,
                     call,
-                    Some(Arc::new(crate::script_ui::Host::new(
-                        crate::script_browser::ActionHost::new(settings::path(), host),
-                        target,
+                    Some(Arc::new(with_clipboard_history(
+                        crate::script_ui::Host::new(
+                            crate::script_browser::ActionHost::new(settings::path(), host),
+                            target,
+                        ),
                     ))),
                 )
             }

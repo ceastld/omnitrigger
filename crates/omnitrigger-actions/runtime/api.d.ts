@@ -147,6 +147,7 @@ export interface ActionContext {
     windowAction(operation: 'toggle_maximize' | 'minimize' | 'close'): Promise<{submitted: true}>;
   };
   clipboard: {
+    history: import('./clipboard-history-api').AsyncClipboardHistoryApi;
     /** 只读 Unicode 文本；没有文本格式时抛错。 */
     readText(): Promise<string>;
     /** 需要应用 native bridge；文本最多 65536 UTF-16 单元（可为空），无 NUL 或孤立代理项。

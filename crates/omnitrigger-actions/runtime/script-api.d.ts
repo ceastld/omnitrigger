@@ -80,6 +80,40 @@ interface ScriptBrowserOptions {
 interface ScriptBrowserFault extends ScriptDesktopFault {
     requiredPermissions?: string[];
 }
+/** u64 的规范十进制字符串；ID 非零，revision 可以为 "0"，不转换为 JS number。 */
+type ScriptHistoryDecimal = string;
+/** createdAt 为应用持久化的时间字符串；SDK 不重新解释时区或重写格式。 */
+interface ScriptClipboardHistoryItem {
+  id: ScriptHistoryDecimal;
+  /** 单行摘要，最多 64 UTF-16 单元，不切断代理对；不是全文。 */
+  preview: string;
+  utf16Units: number;
+  createdAt: string;
+}
+interface ScriptClipboardHistoryList {items: ScriptClipboardHistoryItem[]; revision: ScriptHistoryDecimal}
+interface ScriptClipboardHistoryText {id: ScriptHistoryDecimal; text: string; createdAt: string; revision: ScriptHistoryDecimal}
+interface ScriptClipboardHistoryAppend {id: ScriptHistoryDecimal; revision: ScriptHistoryDecimal; inserted: boolean}
+interface ScriptClipboardHistoryRemove {removed: boolean; revision: ScriptHistoryDecimal}
+type ScriptClipboardHistoryMethod = 'history.list' | 'history.get' | 'history.append' | 'history.remove';
+interface ScriptClipboardHistoryFault extends Error {
+  code: string;
+  method: ScriptClipboardHistoryMethod;
+  /** list/get 总为 not_started；写入发出后无法确认的失败为 unknown。 */
+  effectState: 'not_started' | 'unknown';
+}
+interface ScriptClipboardHistoryApi {
+  /** 默认 limit=100，整数 1..200；只返回摘要，不返回正文。 */
+  list(options?: {limit?: number}): ScriptClipboardHistoryList;
+  /** 不存在抛 history_item_missing；正文只供脚本内部使用，不应放进动作终态。 */
+  get(options: {id: ScriptHistoryDecimal}): ScriptClipboardHistoryText;
+  /** 显式保存文本：可为空、保留空白、有效 Unicode、无 NUL，最多 65536 UTF-16。
+   * 连续相同文本可去重并 inserted=false；不自动重试，不建立监听或读系统剪贴板。
+   */
+  append(options: {text: string}): ScriptClipboardHistoryAppend;
+  /** 不存在返回 removed=false；无变化不递增 revision。 */
+  remove(options: {id: ScriptHistoryDecimal}): ScriptClipboardHistoryRemove;
+}
+
 type ScriptContext = Readonly<{
     apiVersion: 1;
     input: Record<string, any>;
@@ -148,6 +182,7 @@ type ScriptContext = Readonly<{
         chrome: any;
     };
     clipboard: {
+        history: ScriptClipboardHistoryApi;
         readText(): string;
         /** 同步读应用 native bridge；无 bridge 抛 native_bridge_unavailable，不退回旧 readText。
          * 文本可为空、最多 65536 UTF-16 单元，无 NUL 或孤立代理项。文件最多 64 项，

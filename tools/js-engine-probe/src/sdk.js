@@ -41,6 +41,9 @@ ctx.delay = milliseconds => {
 };
 function desktopCall(method, params) {
     if (!nativeContext || nativeContext.error) {
+        if (['history.list','history.get','history.append','history.remove'].includes(method)) {
+            throw Object.assign(new Error('剪贴板历史调用失败；请检查错误代码。'), {code:'history_unavailable',effectState:'not_started',method});
+        }
         if (method === 'clipboard.read_data' || method === 'selection.copy_data') {
             throw Object.assign(new Error('数据选区 API 需要应用本机能力桥接。'), {code:'native_bridge_unavailable',effectState:'not_started',method});
         }
@@ -90,5 +93,7 @@ ctx.clipboard = nativeContext ? desktopApis.clipboard : Object.freeze({
         return call('write_clipboard', {text});
     },
 });
+// 独立 CLI 仍暴露历史 API，但没有应用桥接时明确不可用，不回退系统剪贴板。
+ctx.clipboard = Object.freeze({...ctx.clipboard, history:createClipboardHistoryApi(desktopCall)});
 ctx.open = target => call('open', { target });
 Object.freeze(ctx);

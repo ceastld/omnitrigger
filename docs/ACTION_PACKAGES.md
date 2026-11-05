@@ -82,7 +82,7 @@ actions/my-script/
 
 `runtime: "script"` 可通过现有动作服务运行独立的 Rust JS 宿主，无需安装 Node。宿主不链接进输入核心；脚本执行、取消与终态仍由 `ActionService` 管理。已有 Boa 和 QuickJS 两种构建使用同一份宿主 API。`.mjs` 入口具名导出同步 `main(ctx)`，`.js` 入口声明标准 JS 函数 `function main(ctx)`，均返回 JSON 值；不需要自定义文件语法或 npm 包。
 
-目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start`、`ctx.delay`、`ctx.clipboard.readText/writeText`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText/windowAction` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时提供包内相对 ESM 导入，暂不提供 Node/npm 模块或 Promise 入口；需要 Node 环境或异步入口的动作继续选择 `node` 运行时。
+目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start`、`ctx.delay`、`ctx.clipboard.readText/readData/writeText/history.*`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText/copySelectionData/windowAction` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时提供包内相对 ESM 导入，暂不提供 Node/npm 模块或 Promise 入口；需要 Node 环境或异步入口的动作继续选择 `node` 运行时。
 
 Windows x64 开发环境可先构建本机 QuickJS 包，再通过开发命令安装。包中包含独立宿主、SDK、许可通知和文件清单；构建命令不会发布或上传二进制：
 
@@ -212,6 +212,7 @@ export default async function (ctx) {
 | `ctx.desktop.copySelectionData(options?)` | 向原目标发送一次 Ctrl+C，按明确等待参数读取文本或文件列表，另返回 `changed`。 |
 | `ctx.clipboard.readText()` | 读取 Unicode 文本，保留空白；没有文本格式或 UTF-16 无效时抛错。 |
 | `ctx.clipboard.readData()` | 读取文本或文件列表及观察到的剪贴板序号，不需要前台目标，不读取文件内容。 |
+| `ctx.clipboard.history.list/get/append/remove` | 显式访问应用的有界纯文本历史；默认不监听或读取系统剪贴板。 |
 | `ctx.clipboard.writeText(text, options?)` | 替换全部剪贴板内容为 Unicode 文本，返回 `{ written: true, sequenceNumber }`，不自动恢复。临时回贴可传 `{ excludeFromHistory: true }`，同时写入 Windows 历史排除格式与 `OmniTrigger.TransientClipboard.v1`，回执另含本次随机 `writeId`；识别标记的采集器应跳过该内容。默认不排除；标记不限制其它程序读取。序号是写入后观察值，不代表独占剪贴板。 |
 
 临时格式以版本 DWORD `1` 开头，后接以 NUL 终止的 UTF-16 写入标识。采集器只需查询格式存在；需要恢复旧快照的宿主必须在同一次打开剪贴板期间核验本次标识与预期序号，发现其它来源更新时保留当前内容。标识属于合作协议，不能阻止其它软件修改或复制标记。测试恢复原载荷时也加入排除元数据，因此恢复后的完整格式集合可能与最初不同。
@@ -245,6 +246,41 @@ function main(ctx) {
 ```
 
 两个新方法都要求应用的本机桥接；无桥接时返回 `native_bridge_unavailable`。需要同时更新应用与脚本宿主开发包。格式和合成宿主测试分别覆盖读取与协议，不代表任意软件响应复制或个人绑定已经验收。
+
+### 显式文本历史
+
+`ctx.clipboard.history` 通过应用本机桥接访问配置文件同级的 `clipboard-history.json`，内容以明文 JSON 持久化。服务构造不读写历史文件；只有显式历史调用才访问存储。默认不监听系统剪贴板、不导入其他历史，也不自动采集图片或文件列表。四个方法不需要前台目标；后续发送文本仍使用本次动作原目标的 `sendText`。
+
+Node 逐次 `await`；轻量脚本同步返回。参数只接受表中的对象字段，错误类型和未知字段在存储访问前拒绝：
+
+| 方法 | 参数 | 返回 |
+| --- | --- | --- |
+| `list(options?)` | `{limit?}`，默认100，整数1–200。 | `{items:[{id,preview,utf16Units,createdAt}],revision}`；只有单行摘要，没有全文字段。 |
+| `get({id})` | 非零、无前导零的十进制u64字符串。 | `{id,text,createdAt,revision}`；不存在抛 `history_item_missing`。 |
+| `append({text})` | 有效Unicode、无NUL，最多65536个UTF-16单元；可为空，保留原始空白。 | `{id,revision,inserted}`；与当前最新条目完全相同时可去重，返回 `inserted:false`。 |
+| `remove({id})` | 与 `get` 相同的ID字符串。 | `{removed,revision}`；不存在返回 `removed:false`。 |
+
+ID和修订号都用十进制字符串传递，避免JS整数精度损失；修订号可为 `"0"`，不要转成 `number`。`createdAt` 是Unix毫秒的十进制字符串，排序与淘汰按稳定ID顺序，不按墙钟重新排列。列表最新在前；摘要最多64个UTF-16单元，不切断代理对，换行和控制字符替换为单行显示内容。`utf16Units` 是原文长度，摘要不是原文。
+
+默认最多200项、原文总计1048576个UTF-16单元。达到容量时逐条淘汰最旧项，不截断条目正文。读取的存储文件最多8MiB；未知版本或损坏内容明确报错并保留原文件。去重或删除不存在的ID不增加修订号，删除后不复用旧ID；ID或修订号溢出会明确失败。
+
+轻量入口可以只返回数量和长度；Node入口为相同调用增加 `await`：
+
+```js
+/** @param {ScriptContext} ctx */
+function main(ctx) {
+    const listing = ctx.clipboard.history.list({limit: 10});
+    if (!listing.items.length) return {itemCount: 0};
+    const item = ctx.clipboard.history.get({id: listing.items[0].id});
+    return {itemCount: listing.items.length, selectedUtf16Units: item.text.length};
+}
+```
+
+`get` 的正文供脚本内部使用；默认配方的终态只输出状态、数量和长度，不回显正文。可信脚本仍能主动返回或记录已取得的文本，SDK不提供正文追踪或自动删改。完整的保存、摘要选择与向原目标发送示例见[显式文本历史动作](../examples/actions/clipboard-history/)，包含Node和同步轻量入口；发送入口会实际向原目标输入文本。
+
+错误包含 `code`、`method:'history.*'` 和 `effectState`，正文固定，不附带历史文本或底层路径。常用代码为 `invalid_input`、`invalid_response`、`history_unavailable`、`history_item_missing`、`history_busy`、`history_corrupt`、`history_conflict`、`history_id_exhausted`、`history_revision_exhausted`、`cancelled`、`timeout`；其他无法分类的失败为 `history_failed`。无应用桥接或存储不可用时明确 `history_unavailable`，不退回读取系统剪贴板。
+
+`list/get` 失败的 `effectState` 为 `not_started`；写入在提交前明确拒绝为 `not_started`，提交后不能确认结果时为 `unknown`。不同调用不是一个事务，列表后条目可能被另一调用移除。锁竞争会报 `history_busy`，外部变化可能报 `history_conflict`；不会自动覆盖冲突、回滚或重试。客户端历史请求的传输期限为5秒，仍受更短的动作取消/总时限限制，不能保证立即中断已进入的文件系统调用。使用新增接口需要更新应用、宿主及已有工程的SDK快照。
 
 ### 桌面脚本
 

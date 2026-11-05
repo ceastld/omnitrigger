@@ -51,6 +51,22 @@ jobs:
           cargo test --locked -p omnitrigger-app isolated_clipboard_restore_smoke -- --ignored --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: 验证独立窗口站中的历史监听与退出
+        shell: pwsh
+        run: |
+          $historyHelperCandidate = Join-Path $env:GITHUB_WORKSPACE 'target\debug\omnitrigger.exe'
+          if (-not (Test-Path -LiteralPath $historyHelperCandidate -PathType Leaf)) {
+            throw '缺少已构建并接入内部历史读取入口的自有辅助程序。'
+          }
+          $historyPreviousHelper = $env:OMNITRIGGER_HISTORY_HELPER_EXE
+          try {
+            $env:OMNITRIGGER_HISTORY_HELPER_EXE = (Resolve-Path -LiteralPath $historyHelperCandidate).Path
+            cargo test --locked -p omnitrigger-windows --test clipboard_history_listener -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            $env:OMNITRIGGER_HISTORY_HELPER_EXE = $historyPreviousHelper
+          }
+
       - name: 安装 SDK 检查使用的 Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -89,6 +105,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/clipboard_data_api.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/clipboard_history_api.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test examples/actions/clipboard-history/recipes.test.mjs examples/actions/target-window-menu/recipes.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/common-search/open-or-search.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -106,6 +126,9 @@ jobs:
 
       - name: 验证离线动作迁移评估
         run: python -m unittest discover -s scripts -p 'test_*migration.py' -v
+
+      - name: 验证动作正文快照工具
+        run: python -m unittest discover -s scripts -p 'test_snapshot_action_candidates.py' -v
 
   js-engines:
     name: Windows JS 引擎实验
@@ -156,7 +179,19 @@ jobs:
           $env:OMNITRIGGER_TEST_NODE = (Get-Command node).Source
           foreach ($engine in @('boa', 'quickjs')) {
             $env:OMNITRIGGER_TEST_SCRIPT_HOST = Join-Path $PWD "results/$engine-small.exe"
-            cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --tests -- --ignored --test-threads=1
+            cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --tests -- --ignored --skip _history_ --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: 验证显式文本历史的真实 Node 和两种轻量引擎
+        run: |
+          # NativeHost只提供合成JSON，不读系统剪贴板，不启动监听、界面或发送输入。
+          $env:OMNITRIGGER_TEST_NODE = (Get-Command node).Source
+          cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --test clipboard_history node_history_ -- --ignored --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($engine in @('boa', 'quickjs')) {
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = Join-Path $PWD "results/$engine-small.exe"
+            cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --test clipboard_history light_history_ -- --ignored --test-threads=1
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
