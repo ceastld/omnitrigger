@@ -9,8 +9,9 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 12] = [
+pub const METHODS: [&str; 13] = [
     "ui.choose",
+    "ui.notify",
     "browser.profiles",
     "browser.call",
     "target.info",

@@ -148,7 +148,9 @@ impl<H: NativeHost> NativeHost for Host<H> {
         cancellation: &CancellationToken,
         deadline: Instant,
     ) -> Result<Value, ActionError> {
-        if method == "ui.choose" {
+        if method == "ui.notify" {
+            crate::script_notify::notify(params, cancellation, deadline)
+        } else if method == "ui.choose" {
             choose(params, cancellation, deadline, self.target)
         } else {
             self.inner
@@ -245,6 +247,7 @@ fn wait_for_choice(
 
 /// 仅在 GPUI 线程初始化。接收器随 App 任务销毁，等待中的动作会立即得知宿主退出。
 pub fn init(cx: &mut App) {
+    crate::script_notify::init(cx);
     let (sender, receiver) = mpsc::sync_channel(1);
     let broker = Broker {
         sender,

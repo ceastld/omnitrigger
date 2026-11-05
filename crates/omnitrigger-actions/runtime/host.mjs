@@ -17,6 +17,7 @@ let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
 let nativePending;
+let nativePendingMethod;
 let nativeId = 0;
 const fault = (code, message) => Object.assign(new Error(message), { code,
   ...(['cancelled', 'timeout'].includes(code) ? {effectState:'unknown'} : {}),
@@ -98,8 +99,10 @@ const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...
 function nativeCall(method, params) {
   checkCancelled();
   const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, message), {effectState, method});
-  if (!request.native) return Promise.reject(fail(request.native_error?.code ?? (method === 'ui.choose' ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (method === 'ui.choose' ? '选择窗口需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
-  if (nativePending) return Promise.reject(fail('desktop_busy', '请 await 上一个桌面调用，避免输入并发。'));
+  const ui = method === 'ui.choose' || method === 'ui.notify';
+  const unavailable = ui && request.native_error?.code === 'desktop_unavailable' ? 'ui_unavailable' : request.native_error?.code;
+  if (!request.native) return Promise.reject(fail(unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
+  if (nativePending) return Promise.reject(fail(method === 'ui.notify' && nativePendingMethod === method ? 'ui_busy' : 'desktop_busy', '请 await 上一个本机调用，避免并发。'));
   if (nativeId >= 128) return Promise.reject(fail('desktop_call_limit', '单次动作最多调用 128 次桌面 API。'));
   const id = ++nativeId;
   const operation = new Promise((resolve, reject) => {
@@ -116,11 +119,18 @@ function nativeCall(method, params) {
       socket.destroy();
       if (error) reject(error); else resolve(value);
     };
-    const aborted = () => finish(controller.signal.reason);
+    const aborted = () => {
+      const reason = controller.signal.reason;
+      if (method === 'ui.notify') {
+        if (typeof reason?.method !== 'string') reason.method = method;
+        reason.effectState = sent ? 'unknown' : 'not_started';
+      }
+      finish(reason);
+    };
     controller.signal.addEventListener('abort', aborted, {once:true});
     socket.setEncoding('utf8');
     const timeout = method === 'ui.choose' ? 61000 : 5000;
-    socket.setTimeout(timeout, () => finish(fail('desktop_timeout', '桌面调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
+    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
     socket.once('connect', () => {
       if (controller.signal.aborted) return aborted();
       sent = true;
@@ -137,7 +147,9 @@ function nativeCall(method, params) {
         else {
           const error = response.error;
           if (!error || typeof error.code !== 'string' || typeof error.message !== 'string') throw new Error('缺少错误');
-          finish(fail(error.code, error.message, error.effect_state ?? 'unknown'));
+          const failure = fail(error.code, error.message, error.effect_state ?? 'unknown');
+          if (Array.isArray(error.required_permissions)) failure.requiredPermissions = error.required_permissions;
+          finish(failure);
         }
       } catch { finish(fail('desktop_protocol', '桌面回执格式无效；业务结果未确认。', 'unknown')); }
     });
@@ -145,7 +157,9 @@ function nativeCall(method, params) {
     socket.once('close', () => finish(fail('desktop_connection', '桌面连接已关闭；不会重试。', sent ? 'unknown' : 'not_started')));
   });
   nativePending = operation;
-  operation.then(() => { nativePending = undefined; }, () => { nativePending = undefined; });
+  nativePendingMethod = method;
+  const completed = () => {nativePending = undefined; nativePendingMethod = undefined;};
+  operation.then(completed, completed);
   return operation;
 }
 

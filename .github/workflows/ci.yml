@@ -71,6 +71,8 @@ jobs:
         run: |
           node --test tests/browser_workflows.test.mjs examples/actions/common-desktop/recipes.test.mjs examples/actions/common-search/recipes.test.mjs examples/actions/script-choice/contract.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/ui_notify_api.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 验证轻量脚本开发包的真实安装与切换
         shell: pwsh

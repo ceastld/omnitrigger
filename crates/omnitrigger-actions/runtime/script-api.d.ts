@@ -36,6 +36,19 @@ interface ScriptChooseOptions {
 }
 type ScriptChooseResult = {status: 'selected'; id: string}
     | {status: 'cancelled'; reason: 'dismissed' | 'timeout'};
+interface ScriptNotifyOptions {
+    /** 必填纯文本，非空白有效 Unicode，最多 1024 个 UTF-16 单元；允许 CR/LF/Tab，其余控制字符拒绝。 */
+    message: string;
+    /** 默认 OmniTrigger；非空白单行有效 Unicode，最多 128 个 UTF-16 单元。 */
+    title?: string;
+    /** 默认 info。 */
+    level?: 'info' | 'success' | 'warning' | 'error';
+    /** 默认 topRight；相对于主显示器工作区。 */
+    placement?: 'topRight' | 'bottomRight' | 'center';
+    /** 默认 3000，整数 1000–30000 毫秒；不等待显示结束。 */
+    durationMs?: number;
+}
+type ScriptNotifyResult = {submitted: true};
 interface ScriptBrowserOptions {
     /** browser_instance_id，省略时只接受恰好一个已连接 profile。 */
     profile?: string;
@@ -68,6 +81,11 @@ type ScriptContext = Readonly<{
         start(program: string, args?: string[]): { pid: number };
     };
     ui: {
+        /** 需要应用界面；同步等待创建回执，不等待显示时长，不激活窗口。
+         * 返回仅证明接纳并创建通知请求，不证明用户已读；已有通知返回 ui_busy。
+         * 脚本正常完成后按时长存活，应用退出收尾。仅纯文本，不执行 HTML 或链接。
+         */
+        notify(options: ScriptNotifyOptions): ScriptNotifyResult;
         /** 需要应用 GPUI 界面。同步等待发生在动作线程，Hook 不等待。
          * ↑↓/Enter 或点击选择；Esc/关闭取消，动作取消与宿主退出抛错。
          * 已有窗口返回 ui_busy。后续输入保持原目标身份；失焦返回 target_changed。

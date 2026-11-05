@@ -12,6 +12,12 @@ pub use automation_basics::{validate_automation_text, validate_open_target};
 
 #[cfg(windows)]
 mod native_system_hud;
+#[cfg(windows)]
+mod notification_window;
+#[cfg(windows)]
+pub use notification_window::{
+    prepare_notification_window, primary_notification_placement, NotificationPlacement,
+};
 mod system_adjustment;
 #[cfg(windows)]
 mod system_hud_paint;

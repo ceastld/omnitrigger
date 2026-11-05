@@ -34,6 +34,9 @@ mod plugins;
 mod presets;
 mod radial_wheel;
 mod script_browser;
+mod script_notify;
+#[cfg(debug_assertions)]
+mod script_notify_smoke;
 mod script_projects;
 mod script_runtime;
 mod script_ui;
@@ -6073,6 +6076,10 @@ fn smoke_test() -> Result<(), String> {
 
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
+    #[cfg(debug_assertions)]
+    if script_notify_smoke::maybe_run(&arguments) {
+        return;
+    }
     // 新建工程、安装宿主不与系统操作或其他命令混用；在任何 CLI 副作用前拒绝组合。
     if arguments.iter().any(|argument| {
         matches!(

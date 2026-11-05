@@ -26,3 +26,5 @@ cargo test -p omnitrigger-app --bin omnitrigger --locked desktop_key_smoke::inte
 `interactive_close_recipe_smoke` 使用真实轻量宿主执行 `common-desktop/call.json`，同时要求动作成功回执及本轮窗口实际销毁。将上述命令的测试名替换为该名称即可运行。此用例验证默认 Alt+F4 分支，不验证其他软件的 Ctrl+W 分支、保存提示或标签页行为。
 
 这些结果只证明自建控件与窗口中的效果，不代表物理触发、原软件快捷键处理、输入法组合态或个人绑定已验收。仅有 `submitted` 回执不能替代窗口或文本状态检查。
+
+调试版还有 `--notification-smoke <空的本地输出目录>`：在独立 GPUI 实例中，经真实 Node 与轻量宿主显示合成通知，检查重叠请求拒绝、到期收尾、活动通知随应用退出清理和前台采样。须先设置 `OMNITRIGGER_TEST_SCRIPT_HOST`；此模式不打开主窗口、不安装 Hook，也不读取个人绑定或剪贴板。第一条通知保留 30 秒，期间将本轮 PID 与通知诊断写入 `ready.json`，供外部窗口工具核对实际可见界面；最终结果写入 `report.json`。前台检查是有界采样，仍需结合非激活窗口属性和实际窗口观察。

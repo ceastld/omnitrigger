@@ -77,6 +77,35 @@ function createDesktopApi(invoke) {
     },
   });
   const ui = Object.freeze({
+    notify: options => {
+      const method = 'ui.notify';
+      const text = (value, max, multiline) => {
+        // 与原生 Rust 校验共用 Unicode White_Space 定义；FEFF 是格式字符，不是空白。
+        if (typeof value !== 'string' || !/[^\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/.test(value) || value.length > max
+            || (multiline ? /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/ : /[\x00-\x1f\x7f-\x9f\u2028\u2029]/).test(value)) return false;
+        for (let i = 0; i < value.length; i++) {
+          const unit = value.charCodeAt(i);
+          if (unit >= 0xd800 && unit <= 0xdbff) {
+            const next = value.charCodeAt(++i);
+            if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+          } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+        }
+        return true;
+      };
+      if (!options || typeof options !== 'object' || Array.isArray(options)
+          || Reflect.ownKeys(options).some(key => !['message','title','level','placement','durationMs'].includes(key))) {
+        invalid(method, '通知参数只接受 message、title、level、placement 和 durationMs。');
+      }
+      const {message, title = 'OmniTrigger', level = 'info', placement = 'topRight', durationMs = 3000} = options;
+      if (!text(message, 1024, true) || !text(title, 128, false)
+          || !['info','success','warning','error'].includes(level)
+          || !['topRight','bottomRight','center'].includes(placement)
+          || !Number.isInteger(durationMs) || durationMs < 1000 || durationMs > 30000) {
+        invalid(method, '通知需要 1–1024 个 UTF-16 单元的有效正文、最多 128 单元的单行标题、有效级别和位置，以及 1000–30000 毫秒的整数时长。');
+      }
+      // 两类宿主共享同一份纯文本参数；不裁剪、不转义或更改作者正文。
+      return invoke(method, {message, title, level, placement, durationMs});
+    },
     choose: options => {
       const method = 'ui.choose';
       const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);

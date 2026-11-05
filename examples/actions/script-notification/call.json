@@ -1,0 +1,6 @@
+{
+  "package_id": "example.script-notification",
+  "action_id": "notify",
+  "action_version": 1,
+  "input": {"message":"任务已提交，可继续工作。","title":"示例通知","level":"success","placement":"topRight","durationMs":3000}
+}

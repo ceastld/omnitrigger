@@ -19,7 +19,7 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'clipboard.read' | 'clipboard.write' | 'window.action' | 'ui.choose';
+  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'clipboard.read' | 'clipboard.write' | 'window.action' | 'ui.choose' | 'ui.notify';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
 }
@@ -43,6 +43,19 @@ export interface ChooseOptions {
 }
 export type ChooseResult = {status: 'selected'; id: string}
   | {status: 'cancelled'; reason: 'dismissed' | 'timeout'};
+export interface NotifyOptions {
+  /** 必填纯文本，非空白、有效 Unicode，最多 1024 个 UTF-16 单元；允许 CR/LF/Tab，其余控制字符拒绝。 */
+  message: string;
+  /** 默认 OmniTrigger；非空白单行有效 Unicode，最多 128 个 UTF-16 单元。 */
+  title?: string;
+  /** 默认 info。 */
+  level?: 'info' | 'success' | 'warning' | 'error';
+  /** 默认 topRight；相对于主显示器工作区。 */
+  placement?: 'topRight' | 'bottomRight' | 'center';
+  /** 默认 3000，整数 1000–30000 毫秒；返回不等待显示时长。 */
+  durationMs?: number;
+}
+export type NotifyResult = {submitted: true};
 export interface BrowserApi {
   profiles(options?: Pick<BrowserOptions, 'timeoutMs'>): Promise<Array<{
     browser_instance_id: string;
@@ -68,6 +81,11 @@ export interface ActionContext {
   };
   browser: BrowserApi;
   ui: {
+    /** 需要应用界面；仅确认已接纳并创建通知请求，不证明用户已读。
+     * 不激活窗口，纯文本显示；已有通知返回 ui_busy，不排队或覆盖。
+     * await 只等创建回执；脚本正常结束后通知按时长存活，应用退出收尾。
+     */
+    notify(options: NotifyOptions): Promise<NotifyResult>;
     /** 需要应用界面。↑↓/Enter 或点击选择，Esc/关闭取消；动作取消和宿主退出抛错。
      * 后续输入仍核验本次提交的原目标；系统拒绝恢复前台时输入返回 target_changed。
      * 已有窗口返回 ui_busy，不排队。务必 await，不可遗留选择 Promise。

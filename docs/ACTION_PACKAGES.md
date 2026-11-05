@@ -274,6 +274,30 @@ cargo test -p omnitrigger-app interactive_script_line_edit_smoke --locked -- --i
 
 文本烟测在支持完整备份当前格式时才执行剪贴板用例，结束后恢复并逐格式读回核对；遇到不支持的格式会保留原剪贴板并明确失败，不把跳过算作通过。其他来源在测试期间更新剪贴板时，测试保留新内容。
 
+### 原生通知
+
+应用界面中的脚本可调用 `ctx.ui.notify({message, title?, level?, placement?, durationMs?})`，提交一个不抢焦点、鼠标透传的纯文本通知。Node 使用 `await`；轻量脚本同步返回。它不创建定时或事件触发器。
+
+```javascript
+export default async ctx => {
+  return await ctx.ui.notify({
+    message: '处理完成',
+    title: '工作流',
+    level: 'success',
+    placement: 'topRight',
+    durationMs: 3000,
+  });
+};
+```
+
+`message` 必填，非空白，最多 1024 个 UTF-16 单元，可含换行与制表符；`title` 默认 `OmniTrigger`，为最多 128 个 UTF-16 单元的非空白单行文本。文本须为有效 Unicode，不接受 NUL、孤立代理项及其它控制字符。`level` 为 `info`、`success`、`warning` 或 `error`，默认 `info`；`placement` 为主显示器工作区的 `topRight`、`bottomRight` 或 `center`，默认 `topRight`。`durationMs` 默认 3000，接受 1000–30000 的整数。参数不接受额外字段，也不会执行 HTML 或链接。
+
+返回 `{submitted:true}` 表示应用接纳并创建了通知界面请求，不证明用户看见或读到内容。调用不等待通知到期，脚本正常结束后通知继续显示到期；应用退出时清理。同一时间只接纳一个通知，重叠请求明确报告 `ui_busy`，不自动覆盖或排队。没有运行中的应用界面时报告 `ui_unavailable`。创建前取消或超过时限为 `not_started`；界面已创建后的未确认结果可能为 `unknown`，不能据此自动重试。
+
+窗口大小受主显示器工作区限制，过长内容可能被裁切，适合简短提示。通用示例见[脚本通知](../examples/actions/script-notification/)，真实界面检查见[桌面脚本验收](DESKTOP_SCRIPT_SMOKE.md)。
+
+轻量脚本需要包含该接口的宿主版本；更新应用源码或类型声明不会替换已经安装的旧宿主。独立脚本 CLI 没有应用界面，不会自动启动通知服务。
+
 ### 脚本选择菜单
 
 应用界面中的动作可调用 `ctx.ui.choose({items, title?, placeholder?, timeoutMs?})`，显示可搜索、支持键盘和鼠标选择的菜单。每项包含唯一稳定的 `id`、显示 `label` 和可选 `description`；接受 1–200 项，总参数最多 32 KiB。返回 `{status:'selected', id}`，或 `{status:'cancelled', reason:'dismissed'|'timeout'}`。默认时限 30 秒，另受动作总时限限制。Node 调用需 `await`，轻量脚本同步等待发生在动作线程，Hook 不等待。
