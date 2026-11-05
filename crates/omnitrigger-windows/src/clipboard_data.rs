@@ -142,7 +142,7 @@ mod reader {
     }
 
     fn wide_units(bytes: &[u8]) -> Result<Vec<u16>, ClipboardDataError> {
-        if bytes.len() % 2 != 0 {
+        if !bytes.len().is_multiple_of(2) {
             return Err(malformed());
         }
         Ok(bytes
@@ -177,7 +177,7 @@ mod reader {
         if offset < DROP_HEADER_BYTES
             || offset > size
             || offset > isize::MAX as usize
-            || (wide && offset % 2 != 0)
+            || (wide && !offset.is_multiple_of(2))
         {
             return Err(malformed());
         }
