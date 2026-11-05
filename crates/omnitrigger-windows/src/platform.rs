@@ -2520,11 +2520,30 @@ mod tests {
             vec![
                 InputKind::Down(prefix),
                 InputKind::Up(prefix),
-                InputKind::Down(adorn),
-                InputKind::Up(adorn)
+                InputKind::Down(adorn)
             ]
         );
-        assert!(event(&mut state, InputKind::Up(adorn), 530).consume);
+        let physical_up = event(&mut state, InputKind::Up(adorn), 530);
+        assert!(!physical_up.consume && physical_up.replay_kinds.is_empty());
+        assert!(state.owned_press.is_empty() && received.try_recv().is_err());
+        state.command(BackendCommand::SetBindings(vec![make(
+            1,
+            vec![prefix, adorn],
+            key,
+        )]));
+        event(&mut state, InputKind::Down(prefix), 700);
+        event(&mut state, InputKind::Down(adorn), 710);
+        let ordinary = event(&mut state, InputKind::Up(adorn), 720);
+        assert!(ordinary.consume);
+        assert_eq!(
+            ordinary.replay_kinds,
+            vec![
+                InputKind::Down(prefix),
+                InputKind::Down(adorn),
+                InputKind::Up(adorn),
+            ]
+        );
+        assert!(!event(&mut state, InputKind::Up(prefix), 730).consume);
         assert!(state.owned_press.is_empty() && received.try_recv().is_err());
     }
 
