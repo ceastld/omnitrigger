@@ -6199,10 +6199,17 @@ fn main() {
     }
     #[cfg(windows)]
     if arguments.get(1).map(String::as_str) == Some("--omni-clipboard-history-capture-gated") {
-        let previous = if arguments.len() == 5 { arguments[4].parse::<u32>().ok() } else { None };
+        let previous = if arguments.len() == 5 {
+            arguments[4].parse::<u32>().ok()
+        } else {
+            None
+        };
         let code = match previous {
             Some(previous) => omnitrigger_windows::run_clipboard_history_gated_capture_helper(
-                &arguments[2], &arguments[3], previous),
+                &arguments[2],
+                &arguments[3],
+                previous,
+            ),
             None => 2,
         };
         std::process::exit(code);
