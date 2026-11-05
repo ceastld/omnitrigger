@@ -374,9 +374,9 @@ const receipt = await ctx.open('D:/Work/report.txt');
 return {submitted: receipt.submitted};
 ```
 
-Node返回严格的 `{submitted:true}`，仅表示系统接纳打开请求，不证明文件、网页或外部应用完成加载。轻量 `ctx.open` 保持既有同步行为。没有应用原生桥返回 `native_bridge_unavailable`；不回退 `run/start`，不调用命令解释器，也不自动重试。原生调用并发返回 `open_busy`，Node须await；遗留打开Promise会使动作失败。
+Node返回严格的 `{submitted:true}`，仅表示系统接纳打开请求，不证明文件、网页或外部应用完成加载。轻量 `ctx.open` 保持既有同步行为。目标按系统默认方式处理，本地可执行文件和快捷方式也可能启动程序；只运行可信动作。没有应用原生桥返回 `native_bridge_unavailable`，不会自动重试。原生调用并发返回 `open_busy`，Node须await；遗留打开Promise会使动作失败。
 
-错误包含 `method:'system.open'` 和 `effectState`。校验或提交前取消/过期为 `not_started`；进入系统调用后的失败、迟到、取消或丢失回执为 `unknown`。单次系统打开不能被强制抢占，取消不会撤销已接纳请求，`unknown`不能作为安全重试依据。五秒客户端等待预算不代表系统调用的硬期限。
+错误包含 `method:'system.open'` 和 `effectState`。校验或提交前取消/过期为 `not_started`；进入系统调用后的失败、迟到、取消或丢失回执为 `unknown`。等待受动作总时限限制，但单次系统打开不能被强制抢占，取消不会撤销已接纳请求，`unknown`不能作为安全重试依据。
 
 ### 本地文件元数据
 

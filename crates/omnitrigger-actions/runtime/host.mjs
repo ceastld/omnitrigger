@@ -147,7 +147,7 @@ function nativeCall(method, params) {
     };
     controller.signal.addEventListener('abort', aborted, {once:true});
     if (!capture) socket.setEncoding('utf8');
-    const timeout = capture ? Math.min(params.timeout_ms + 1500, 61500) : method === 'ui.choose' ? 61000 : dataCopy ? 8000 : 5000;
+    const timeout = capture ? Math.min(params.timeout_ms + 1500, 61500) : opening || method === 'ui.choose' ? 61000 : dataCopy ? 8000 : 5000;
     socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || stat || data || history || capture ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
     // 这些方法的总传输时限不被零碎数据延长，外层取消/时限仍优先生效。
     if (opening || stat || data || history || capture) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);

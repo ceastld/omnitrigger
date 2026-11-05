@@ -118,6 +118,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustc --edition=2024 --crate-name omnitrigger_file_open_probe tools/script-sdk-check/file-open-probe.rs -o .tmp/file-open-probe.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-node-open.mjs target/debug/omnitrigger.exe .tmp/file-open-probe.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 验证 Node 输出采集与断连后的进程收尾
         shell: pwsh

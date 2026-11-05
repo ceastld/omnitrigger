@@ -89,7 +89,7 @@ test('连接前后取消区分效果；固定总等待不因零碎数据延长',
     assert.equal(own.socket.destroyed,true);
   }
   const h=harness(),own=h.start();own.socket.emit('data','{');
-  assert.equal(h.timers[0].ms,5000);h.timers[0].fn();
+  assert.equal(h.timers[0].ms,61000);h.timers[0].fn();
   await assert.rejects(own.result,fault('timeout','unknown'));
   assert.equal(h.sockets.length,1);
 });
