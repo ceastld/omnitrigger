@@ -1530,9 +1530,26 @@ impl Engine {
                 available.insert(index);
             }
         }
-        for owners in &mut self.mouse_prefix_sessions {
+        for mouse in [
+            crate::MouseButton::Left,
+            crate::MouseButton::Right,
+            crate::MouseButton::Middle,
+            crate::MouseButton::X1,
+            crate::MouseButton::X2,
+        ] {
+            let owners = &mut self.mouse_prefix_sessions[mouse_slot(mouse)];
+            let was_active = owners.is_active();
             for (word, valid) in owners.bindings.iter_mut().zip(&available.bindings) {
                 *word &= *valid;
+            }
+            // 最后一个原会话所有者失效后，只收尾这次已消费的按压。
+            // Pending 仍由原回退路径处理；范围恢复不能重新借用旧 Consumed。
+            if was_active
+                && !owners.is_active()
+                && let Some(state) = self.pressed.get_mut(&Button::Mouse(mouse))
+                && *state == PressState::Consumed
+            {
+                *state = PressState::Draining;
             }
         }
     }
