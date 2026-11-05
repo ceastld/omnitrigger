@@ -42,8 +42,10 @@ const server = createServer((request, response) => { response.setHeader('Content
 try {
   const existing = await client.profiles();
   report.existingProfiles = existing.length;
+  const browserEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !['OMNITRIGGER_BROWSER_CONFIG','OMNITRIGGER_BROWSER_PIPE'].includes(key.toUpperCase())));
   context = await playwright.chromium.launchPersistentContext(join(scratch, 'profile'), {
-    executablePath: chrome, headless: !args.includes('--desktop-shortcuts'), ignoreDefaultArgs: ['--disable-extensions'],
+    executablePath: chrome, headless: !args.includes('--desktop-shortcuts'), env: browserEnv, ignoreDefaultArgs: ['--disable-extensions'],
     args: ['--enable-unsafe-extension-debugging', '--no-first-run', '--no-default-browser-check'],
   });
   const cdp = await context.browser().newBrowserCDPSession();
@@ -51,28 +53,41 @@ try {
   report.chromeVersion = context.browser().version();
   report.extensionId = loaded.id;
   let worker = context.serviceWorkers().find(item => item.url().startsWith(`chrome-extension://${loaded.id}/`));
-  worker ??= await context.waitForEvent('serviceworker', { timeout: 15000 });
-  // 首次 CDP 加载有时尚未派发安装事件；从扩展自己的状态入口确认并恢复连接。
-  const popup = await context.newPage();
-  await popup.goto(`chrome-extension://${loaded.id}/popup.html`);
-  await popup.evaluate(() => chrome.runtime.sendMessage({type:'bridge.enable', enabled:false}));
-  await popup.evaluate(() => chrome.runtime.sendMessage({type:'bridge.enable', enabled:true}));
-  await popup.close();
+  worker ??= await context.waitForEvent('serviceworker', {
+    predicate: item => item.url().startsWith(`chrome-extension://${loaded.id}/`), timeout: 15000,
+  });
+  assert(worker.url().startsWith(`chrome-extension://${loaded.id}/`), '只能读取本次加载的扩展 worker');
+  // 新隔离 profile 默认启用，由 background 初始化连接；普通标签中的 popup 消息会被 sender.tab 拒绝。
+  report.connectionBootstrap = 'fresh-profile-default-enabled; own-worker-only; no popup messages';
   report.connectionHistory = [];
+  let connected = false;
   for (let attempt = 0; attempt < 300; attempt++) {
-    if (attempt % 10 === 0) {
-      const status = await worker.evaluate(() => chrome.storage.session.get('bridgeStatus'));
-      const previous = report.connectionHistory.at(-1);
-      if (!previous || previous.bridgeStatus?.state !== status.bridgeStatus?.state || previous.bridgeStatus?.message !== status.bridgeStatus?.message) report.connectionHistory.push(status);
+    const identity = await worker.evaluate(() => chrome.storage.local.get({browserInstanceId:'',bridgeEnabled:true}));
+    const identityId = identity.browserInstanceId;
+    assert(!existing.some(item => item.browser_instance_id === identityId), '隔离 worker 身份在启动前已经存在，停止路由');
+    profile = typeof identityId === 'string' && identityId ? identityId : undefined;
+    const status = await worker.evaluate(() => chrome.storage.session.get('bridgeStatus'));
+    const matching = profile ? (await client.profiles()).filter(item => item.browser_instance_id === profile) : [];
+    const sample = { ...status, profile, bridgeEnabled:identity.bridgeEnabled,
+      matchingProfiles:matching.map(item => ({browser_instance_id:item.browser_instance_id,session_id:item.session_id})) };
+    report.connectionStatus = sample;
+    const previous = report.connectionHistory.at(-1);
+    if (!previous || JSON.stringify(previous) !== JSON.stringify(sample)) {
+      report.connectionHistory.push(sample);
+      if (report.connectionHistory.length > 40) report.connectionHistory.splice(1,1);
     }
-    const identity = await worker.evaluate(() => chrome.storage.local.get('browserInstanceId'));
-    profile = identity.browserInstanceId;
-    if (profile && (await client.profiles()).some(item => item.browser_instance_id === profile)) break;
+    const bridge = status.bridgeStatus;
+    if (profile && bridge?.state === 'connected' && bridge.browser_instance_id === profile
+        && typeof bridge.session_id === 'string' && bridge.session_id
+        && matching.length === 1 && matching[0].session_id === bridge.session_id) {
+      connected = true;
+      report.connectedSessionId = bridge.session_id;
+      break;
+    }
     await delay(100);
   }
   assert(profile && !existing.some(item => item.browser_instance_id === profile), '必须唯一定位新建的隔离 profile');
-  report.connectionStatus = await worker.evaluate(() => chrome.storage.session.get('bridgeStatus'));
-  assert((await client.profiles()).some(item => item.browser_instance_id === profile), '扩展尚未连接');
+  assert(connected, '自建扩展尚未连接；查看 connectionStatus/connectionHistory，不更改注册或模拟 popup');
   report.checks.push('Native Host 连接及明确 profile 路由');
   const call = (method, args = [], options = {}) => client.call(method, args, { profile, ...options });
   const tree = await call('bookmarks.getTree');
@@ -169,9 +184,8 @@ try {
     const runtime = join(scratch, 'plugins/browser-connector/runtime/0.1.0');
     await mkdir(packageRoot, {recursive:true});
     await mkdir(join(runtime, 'sdk-js'), {recursive:true});
-    for (const file of ['sdk-js/index.mjs','sdk-js/protocol.mjs','connection.json']) {
-      await writeFile(join(runtime,file),await readFile(join(connector,file)));
-    }
+    await cp(join(connector,'sdk-js'),join(runtime,'sdk-js'),{recursive:true,errorOnExist:true,force:false});
+    await writeFile(join(runtime,'connection.json'),await readFile(join(connector,'connection.json')));
     await writeFile(join(packageRoot,'main.mjs'),await readFile(entry));
     await writeFile(join(packageRoot,'action.json'),JSON.stringify({schema_version:1,id:'browser-test',name:'浏览器验收',version:'1.0.0',
       actions:[{id:'run',title:'浏览器验收',version:1,runtime:'node',entry:'main.mjs'}]}));
