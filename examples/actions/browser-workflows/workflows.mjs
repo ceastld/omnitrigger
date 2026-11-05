@@ -2,6 +2,7 @@
 const COMMON = ['profile', 'timeoutMs'];
 const OPEN = ['windowId', 'tabId', 'activate', 'focusWindow'];
 const FIELDS = {
+  'create-default-tab': [...COMMON, 'windowId', 'activate', 'focusWindow'],
   'open-url': [...COMMON, ...OPEN, 'url'],
   'open-bookmark': [...COMMON, ...OPEN, 'query', 'bookmarkId'],
   'duplicate-tab': [...COMMON, 'windowId', 'tabId', 'focusWindow'],
@@ -48,6 +49,9 @@ function validate(input, operation) {
   }
   if (operation === 'duplicate-tab' && !id(input.tabId)) fail('invalid_input', '复制需要明确 tabId。');
   if (operation === 'open-url') canonicalUrl(input.url);
+  if (operation === 'create-default-tab' && !text(input.profile)) {
+    fail('invalid_input', '默认新标签页需要明确 profile。');
+  }
   if (operation === 'open-bookmark' && (!text(input.query, 512)
       || (input.bookmarkId !== undefined && !text(input.bookmarkId)))) {
     fail('invalid_input', '书签搜索需要 query；可用 bookmarkId 消除多个匹配。');
@@ -88,13 +92,14 @@ function tabUrl(tab) {
 
 /** @param {import('../../../crates/omnitrigger-actions/runtime/api').ActionContext} ctx */
 export async function runWorkflow(ctx, operation) {
-  const input = ctx.input;
+  const input = operation === 'create-default-tab' ? Object.freeze({ ...ctx.input }) : ctx.input;
   validate(input, operation);
   const profile = await selectProfile(ctx.browser, input);
   const steps = [];
   let attemptedMutation = false;
   let currentMethod = 'browser.workflow';
   const receipt = { status: 'completed', profile, operation, steps };
+  if (operation === 'create-default-tab') receipt.addressBarRequested = false;
   const call = async (method, args) => {
     currentMethod = method;
     return ctx.browser.call(method, args, { profile, timeoutMs: input.timeoutMs ?? 10000 });
@@ -148,7 +153,19 @@ export async function runWorkflow(ctx, operation) {
     await focus(input.windowId);
   };
   try {
-    if (operation === 'open-url') {
+    if (operation === 'create-default-tab') {
+      const window = await call('windows.get', [input.windowId]);
+      if (!window || window.id !== input.windowId || window.type !== 'normal') {
+        fail('target_changed', '指定普通浏览器窗口不可用。', 'windows.get');
+      }
+      // url刻意省略：由浏览器选择默认新标签页，不开放内部URL白名单。
+      const created = await mutate('tabs.create', [{ windowId: input.windowId, active: input.activate !== false }], { windowId: input.windowId });
+      const identity = tabIdentity(created);
+      Object.assign(steps[steps.length - 1], identity);
+      tabIdentity(created, input.windowId);
+      Object.assign(receipt, { disposition: 'created', target: identity });
+      await focus(input.windowId);
+    } else if (operation === 'open-url') {
       await open(canonicalUrl(input.url));
     } else if (operation === 'open-bookmark') {
       const results = await call('bookmarks.search', [{ query: input.query }]);

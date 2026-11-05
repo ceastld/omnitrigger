@@ -21,6 +21,7 @@ use std::{
 
 const HOST: &str = include_str!("../runtime/host.mjs");
 const DESKTOP_API: &str = include_str!("../runtime/desktop-api.js");
+const PROCESS_CAPTURE_API: &str = include_str!("../runtime/process-capture-api.js");
 const HISTORY_API: &str = include_str!("../runtime/clipboard-history-api.js");
 const BROWSER_API: &str = include_str!("../runtime/browser-api.js");
 const OUTPUT_LIMIT: u64 = 64 * 1024;
@@ -130,7 +131,8 @@ impl NodeRuntime {
         }
         bytes.push(b'\n');
         let mut command = Command::new(&self.program);
-        let host_source = format!("{DESKTOP_API}\n{BROWSER_API}\n{HISTORY_API}\n{HOST}");
+        let host_source =
+            format!("{DESKTOP_API}\n{BROWSER_API}\n{HISTORY_API}\n{PROCESS_CAPTURE_API}\n{HOST}");
         // 内置宿主也不能放进 --eval：Windows 的命令行长度上限会限制 SDK 扩展。
         let host_file = TemporaryHostFile::write(&scratch, &host_source)?;
         command

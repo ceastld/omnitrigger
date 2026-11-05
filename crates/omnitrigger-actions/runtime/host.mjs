@@ -16,7 +16,7 @@ let browserConnection;
 let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
-const nativeMethods = new Set(['history.list','history.get','history.append','history.remove','fs.stat','ui.choose','ui.notify','browser.profiles','browser.call','target.info','target.context',
+const nativeMethods = new Set(['process.capture','history.list','history.get','history.append','history.remove','fs.stat','ui.choose','ui.notify','browser.profiles','browser.call','target.info','target.context',
   'keyboard.shortcut','keyboard.sequence','keyboard.text','selection.copy','selection.copy_data','clipboard.read','clipboard.read_data','clipboard.write','window.action']);
 let nativePending;
 let nativePendingMethod;
@@ -99,6 +99,7 @@ function browserRequest(method, args, options = {}, profiles = false) {
 const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...args));
 
 function nativeCall(method, params) {
+  const capture = method === 'process.capture';
   const stat = method === 'fs.stat';
   const dataRead = method === 'clipboard.read_data';
   const dataCopy = method === 'selection.copy_data';
@@ -106,13 +107,13 @@ function nativeCall(method, params) {
   const historyRead = method === 'history.list' || method === 'history.get';
   const historyWrite = method === 'history.append' || method === 'history.remove';
   const history = historyRead || historyWrite;
-  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : history ? '剪贴板历史调用失败；请检查错误代码。' : message), {effectState:stat || dataRead || historyRead ? 'not_started' : effectState, method});
+  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, capture ? '程序输出采集未完成，请检查错误代码。' : stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : history ? '剪贴板历史调用失败；请检查错误代码。' : message), {effectState:stat || dataRead || historyRead ? 'not_started' : effectState, method});
   if (!nativeMethods.has(method)) return Promise.reject(fail('invalid_input', '未提供此本机调用方法。'));
-  if ((stat || data || history) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
+  if ((stat || data || history || capture) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
   checkCancelled();
   const ui = method === 'ui.choose' || method === 'ui.notify';
   const unavailable = ui && request.native_error?.code === 'desktop_unavailable' ? 'ui_unavailable' : request.native_error?.code;
-  if (!request.native) return Promise.reject(fail(history ? 'history_unavailable' : data ? 'native_bridge_unavailable' : stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
+  if (!request.native) return Promise.reject(fail(capture ? 'native_bridge_unavailable' : history ? 'history_unavailable' : data ? 'native_bridge_unavailable' : stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
   if (nativePending) return Promise.reject(fail(stat ? 'fs_busy' : method === 'ui.notify' && nativePendingMethod === method ? 'ui_busy' : 'desktop_busy', '请 await 上一个本机调用，避免并发。'));
   if (nativeId >= 128) return Promise.reject(fail('desktop_call_limit', '单次动作最多调用 128 次桌面 API。'));
   const id = ++nativeId;
@@ -120,6 +121,8 @@ function nativeCall(method, params) {
     let settled = false;
     let sent = false;
     let chunks = '';
+    let captureBytes = 0;
+    const captureDecoder = capture ? new TextDecoder('utf-8', {fatal:true}) : undefined;
     let methodTimer;
     const socket = createConnection({host:'127.0.0.1', port:request.native.port});
     nativeSockets.add(socket);
@@ -134,39 +137,50 @@ function nativeCall(method, params) {
     };
     const aborted = () => {
       const reason = controller.signal.reason;
-      if (method === 'ui.notify' || stat || data || history) {
+      if (capture) return finish(fail(reason?.code === 'timeout' ? 'timeout' : 'cancelled', undefined, sent ? 'unknown' : 'not_started'));
+      if (method === 'ui.notify' || stat || data || history || capture) {
         if (typeof reason?.method !== 'string') reason.method = method;
         reason.effectState = stat || dataRead || historyRead ? 'not_started' : sent ? 'unknown' : 'not_started';
       }
       finish(reason);
     };
     controller.signal.addEventListener('abort', aborted, {once:true});
-    socket.setEncoding('utf8');
-    const timeout = method === 'ui.choose' ? 61000 : dataCopy ? 8000 : 5000;
-    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || stat || data || history ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
+    if (!capture) socket.setEncoding('utf8');
+    const timeout = capture ? Math.min(params.timeout_ms + 1500, 61500) : method === 'ui.choose' ? 61000 : dataCopy ? 8000 : 5000;
+    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || stat || data || history || capture ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
     // 历史/数据方法及 stat 的总传输时限不被零碎数据延长，外层取消/时限仍优先生效。
-    if (stat || data || history) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
+    if (stat || data || history || capture) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
     socket.once('connect', () => {
       if (controller.signal.aborted) return aborted();
       sent = true;
       socket.write(JSON.stringify({token:request.native.token, id, method, params}) + '\n');
     });
     socket.on('data', chunk => {
+      if (capture) {
+        captureBytes += chunk.length;
+        if (captureBytes > 512 * 1024 + 1) return finish(fail('invalid_response', undefined, 'unknown'));
+        try { chunk = captureDecoder.decode(chunk, {stream:true}); }
+        catch { return finish(fail('invalid_response', undefined, 'unknown')); }
+      }
       chunks += chunk;
       if (Buffer.byteLength(chunks) > 512 * 1024 + 1) return finish(fail('desktop_protocol', '桌面回执超过上限。', 'unknown'));
       if (!chunks.endsWith('\n')) return;
+      if (capture) {
+        try { chunks += captureDecoder.decode(); }
+        catch { return finish(fail('invalid_response', undefined, 'unknown')); }
+      }
       try {
         const response = JSON.parse(chunks);
         if (response.id !== id || typeof response.ok !== 'boolean') throw new Error('回执身份不匹配');
-        if (history && (Reflect.ownKeys(response).length !== 3 || !Object.hasOwn(response, response.ok ? 'value' : 'error'))) throw new Error();
+        if ((history || capture) && (Reflect.ownKeys(response).length !== 3 || !Object.hasOwn(response, response.ok ? 'value' : 'error'))) throw new Error();
         if (response.ok) finish(undefined, response.value);
         else {
           const error = response.error;
           if (!error || typeof error.code !== 'string' || typeof error.message !== 'string') throw new Error('缺少错误');
-          if (history && ((error.method !== undefined && error.method !== method)
+          if ((history || capture) && ((error.method !== undefined && error.method !== method)
               || (error.effect_state !== undefined && !['not_started','unknown'].includes(error.effect_state)))) throw new Error();
           const failure = fail(error.code, error.message, error.effect_state ?? 'unknown');
-          if (!history && Array.isArray(error.required_permissions)) failure.requiredPermissions = error.required_permissions;
+          if (!history && !capture && Array.isArray(error.required_permissions)) failure.requiredPermissions = error.required_permissions;
           finish(failure);
         }
       } catch { finish(fail('desktop_protocol', '桌面回执格式无效；业务结果未确认。', 'unknown')); }
@@ -308,7 +322,7 @@ try {
     input: request.input,
     invocation: Object.freeze(request.invocation),
     packageRoot: request.package_root,
-    process: Object.freeze({ run, start }),
+    process: Object.freeze({ run, start, capture:createProcessCaptureApi(params => nativeCall('process.capture', params.cwd === undefined ? {...params,cwd:request.package_root} : params), true).capture }),
     browser,
     desktop,
     clipboard,
@@ -326,6 +340,7 @@ try {
   if (children.size) throw fault('pending_processes', '动作返回时仍有未等待的 ctx.process.run 调用；请使用 await。');
   if (browserPending.size) throw fault('pending_browser_calls', '动作返回时仍有未等待的浏览器调用；请使用 await。');
   if (nativePending) {
+    if (nativePendingMethod === 'process.capture') throw Object.assign(fault('pending_process_capture', '动作返回时仍有未等待的程序采集；请使用 await。'), {effectState:'unknown',method:'process.capture'});
     if (nativePendingMethod === 'fs.stat') throw Object.assign(fault('fs_error', '动作返回时仍有未等待的文件状态查询；请使用 await。'), {effectState:'not_started',method:'fs.stat'});
     throw Object.assign(fault('pending_desktop_calls', '动作返回时仍有未等待的桌面调用；请使用 await。'), {effectState:'unknown'});
   }

@@ -5,6 +5,9 @@ use crate::clipboard_history_controller::{
     CommitDisposition, DropReason, Failure, Status, StoreFailure,
 };
 use crate::clipboard_history_filter::{summary_label, SummaryQuery, MAX_QUERY_CHARACTERS};
+use crate::clipboard_history_send::{
+    HistoryLaunchTarget, HistorySendRequest, HistorySendSession, SendFailure, SendReceipt,
+};
 use crate::clipboard_history_store::{ClipboardHistoryStore, HistoryError, HistoryList, MAX_ITEMS};
 use crate::clipboard_history_ui_state::{Control, HistoryUiState, Phase};
 use crate::event_bridge::{EventBridge, UiWake};
@@ -28,6 +31,10 @@ enum Request {
         id: u64,
         item: String,
     },
+    Send {
+        id: u64,
+        request: Box<HistorySendRequest>,
+    },
 }
 
 enum Reply {
@@ -41,6 +48,10 @@ enum Reply {
         result: Result<HistoryList, &'static str>,
     },
     Notice(&'static str),
+    Sent {
+        id: u64,
+        result: Result<SendReceipt, SendFailure>,
+    },
 }
 
 struct Worker {
@@ -58,6 +69,7 @@ impl Drop for Worker {
 
 pub(super) struct ClipboardHistoryUi {
     state: HistoryUiState,
+    sending: HistorySendSession,
     query: SummaryQuery,
     search: Entity<MessageInput>,
     _search_changed: Subscription,
@@ -72,6 +84,8 @@ impl ClipboardHistoryUi {
     pub fn new(
         store: Option<Arc<ClipboardHistoryStore>>,
         wake: UiWake,
+        launch_target: Option<HistoryLaunchTarget>,
+        ui_window: Option<isize>,
         cx: &mut Context<super::Workspace>,
     ) -> Self {
         let search = cx.new(|cx| {
@@ -82,6 +96,7 @@ impl ClipboardHistoryUi {
         let search_changed = cx.observe(&search, |this, search, cx| {
             match SummaryQuery::new(&search.read(cx).text()) {
                 Ok(query) if query != this.text_history.query => {
+                    this.text_history.cancel_send();
                     this.text_history.query = query;
                     this.text_history.state.selected = None;
                 }
@@ -94,6 +109,7 @@ impl ClipboardHistoryUi {
         collection.cancel();
         Self {
             state: HistoryUiState::new(store.is_some()),
+            sending: HistorySendSession::new(launch_target, ui_window),
             query: SummaryQuery::default(),
             search,
             _search_changed: search_changed,
@@ -138,6 +154,7 @@ impl ClipboardHistoryUi {
 
     fn submit(&mut self, request: Request) {
         if !self.ensure_worker() {
+            self.cancel_send();
             self.collection.cancel();
             return;
         }
@@ -146,6 +163,7 @@ impl ClipboardHistoryUi {
             .as_ref()
             .is_some_and(|worker| worker.requests.try_send(request).is_err())
         {
+            self.cancel_send();
             self.collection.cancel();
             self.worker.take();
             self.state.disconnected();
@@ -179,6 +197,34 @@ impl ClipboardHistoryUi {
         }
     }
 
+    pub fn cancel_send(&self) {
+        self.sending.cancel();
+    }
+
+    fn send_selected(&mut self) {
+        if self.sending.pending() {
+            self.cancel_send();
+            return;
+        }
+        if !self.sending.ready()
+            || !self
+                .query
+                .selected_visible(&self.state.items, self.state.selected.as_deref())
+        {
+            return;
+        }
+        let Some((id, selected)) = self.state.begin_send_selection() else {
+            return;
+        };
+        match self.sending.begin(id, selected) {
+            Ok(request) => self.submit(Request::Send {
+                id,
+                request: Box::new(request),
+            }),
+            Err(error) => self.state.sent(id, Err(error)),
+        }
+    }
+
     fn remove_selected(&mut self) {
         if !self
             .query
@@ -193,7 +239,7 @@ impl ClipboardHistoryUi {
 
     /// 复用Workspace既有唤醒与兜底poll；一次最多收32项，不做磁盘或原生输入工作。
     pub fn poll(&mut self) -> bool {
-        let mut changed = false;
+        let mut changed = self.sending.poll();
         for _ in 0..32 {
             let Some(worker) = self.worker.as_ref() else {
                 break;
@@ -220,12 +266,18 @@ impl ClipboardHistoryUi {
                     self.state.listed(id, result);
                     changed = true;
                 }
+                Ok(Reply::Sent { id, result }) => {
+                    self.sending.finish(id);
+                    self.state.sent(id, result);
+                    changed = true;
+                }
                 Ok(Reply::Notice(message)) => {
                     self.state.message = Some(message);
                     changed = true;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    self.cancel_send();
                     self.collection.cancel();
                     self.worker.take();
                     self.state.disconnected();
@@ -240,6 +292,7 @@ impl ClipboardHistoryUi {
 
 impl Drop for ClipboardHistoryUi {
     fn drop(&mut self) {
+        self.cancel_send();
         self.collection.cancel();
         if let Some(worker) = &self.worker {
             worker.shutdown.cancel();
@@ -359,6 +412,15 @@ fn run_worker(
                     break;
                 }
             }
+            Ok(Request::Send { id, request }) => {
+                if shutdown.is_cancelled() {
+                    break;
+                }
+                let result = (*request).run(store.clone());
+                if replies.send(Reply::Sent { id, result }).is_err() {
+                    break;
+                }
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -466,6 +528,7 @@ impl super::Workspace {
                     .bg(rgb(if selected { theme::SURFACE } else { theme::ROW }))
                     .hover(|style| style.bg(rgb(theme::SURFACE)))
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.text_history.sending.selection_changing(&id);
                         this.text_history.state.select(&id);
                         cx.notify();
                     }))
@@ -548,6 +611,24 @@ impl super::Workspace {
                             cx.notify();
                         })),
                     )
+                    .child(
+                        button(
+                            "text-history-send",
+                            self.text_history.sending.action_label(),
+                            Tone::Secondary,
+                            self.text_history.sending.action_enabled(
+                                state.can_send()
+                                    && self
+                                        .text_history
+                                        .query
+                                        .selected_visible(&state.items, state.selected.as_deref()),
+                            ),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.text_history.send_selected();
+                            cx.notify();
+                        })),
+                    )
                     .child(super::caption(format!(
                         "{} / {} 条摘要",
                         visible.len(),
@@ -557,6 +638,7 @@ impl super::Workspace {
             .when_some(state.message, |element, message| {
                 element.child(super::caption(message))
             })
+            .child(super::caption(self.text_history.sending.status()))
             .child(list)
     }
 }

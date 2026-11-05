@@ -713,3 +713,6 @@ fn foreign_controller_ticket_cannot_write_or_consume_recreated_owner_pending() {
 
 #[path = "clipboard_history_ui_lifecycle_review.rs"]
 mod ui_lifecycle_review;
+
+#[path = "clipboard_history_host_stage_review.rs"]
+mod host_stage_review;

@@ -79,7 +79,7 @@ struct Accounting {
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn CreateJobObjectW(security: *const Security, name: *const u16) -> Handle;
+    fn CreateJobObjectW(security: *const c_void, name: *const u16) -> Handle;
     fn SetInformationJobObject(
         job: Handle,
         class: i32,

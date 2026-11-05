@@ -152,6 +152,13 @@ impl TargetContext {
     }
 }
 
+/// 应用内目标交接复用相同DTO与有效期规则，不读取快照文件。
+pub fn validate_value(value: serde_json::Value, now: u64) -> Result<ScriptTargetSnapshot, String> {
+    let context: TargetContext =
+        serde_json::from_value(value).map_err(|_| "目标快照格式无效。".to_string())?;
+    context.validate(now)
+}
+
 pub fn read(path: &Path) -> Result<ScriptTargetSnapshot, String> {
     let mut bytes = Vec::new();
     std::fs::File::open(path)

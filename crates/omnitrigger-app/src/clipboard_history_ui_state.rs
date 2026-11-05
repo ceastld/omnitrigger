@@ -1,6 +1,7 @@
 //! 文本历史页的纯界面状态。关闭确认来自后台，不由按钮点击或超时推断。
 
 use crate::clipboard_history_controller::Status;
+use crate::clipboard_history_send::{HistorySendSelection, SendFailure, SendReceipt};
 use crate::clipboard_history_store::{HistoryList, HistorySummary};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,9 +20,16 @@ pub(super) enum Control {
     RetryCleanup,
 }
 
+struct PendingSendSelection {
+    request: u64,
+    id: String,
+    changed: bool,
+}
+
 pub(super) struct HistoryUiState {
     pub phase: Phase,
     pub items: Vec<HistorySummary>,
+    pub revision: Option<String>,
     pub selected: Option<String>,
     pub message: Option<&'static str>,
     pub available: bool,
@@ -29,6 +37,7 @@ pub(super) struct HistoryUiState {
     control_floor: u64,
     pending_control: Option<u64>,
     pending_io: Option<u64>,
+    pending_send_selection: Option<PendingSendSelection>,
     refresh_required: bool,
 }
 
@@ -37,6 +46,7 @@ impl HistoryUiState {
         Self {
             phase: Phase::Off,
             items: Vec::new(),
+            revision: None,
             selected: None,
             message: (!available).then_some("文本历史暂时不可用。"),
             available,
@@ -44,6 +54,7 @@ impl HistoryUiState {
             control_floor: 0,
             pending_control: None,
             pending_io: None,
+            pending_send_selection: None,
             refresh_required: false,
         }
     }
@@ -133,6 +144,7 @@ impl HistoryUiState {
         self.available = false;
         self.pending_control = None;
         self.pending_io = None;
+        self.pending_send_selection = None;
         if self.phase != Phase::Off {
             self.phase = Phase::CloseFailed;
         }
@@ -158,7 +170,10 @@ impl HistoryUiState {
     }
 
     pub fn select(&mut self, id: &str) {
-        if self.items.iter().any(|item| item.id == id) {
+        if self.items.iter().any(|item| item.id == id) && self.selected.as_deref() != Some(id) {
+            if let Some(pending) = self.pending_send_selection.as_mut() {
+                pending.changed = true;
+            }
             self.selected = Some(id.to_owned());
         }
     }
@@ -170,6 +185,56 @@ impl HistoryUiState {
                 .selected
                 .as_ref()
                 .is_some_and(|id| self.items.iter().any(|item| &item.id == id))
+    }
+
+    pub fn can_send(&self) -> bool {
+        self.can_remove()
+            && self.revision.is_some()
+            && self.selected.as_ref().is_some_and(|selected| {
+                self.items
+                    .iter()
+                    .any(|item| &item.id == selected && item.utf16_units > 0)
+            })
+    }
+
+    pub fn begin_send_selection(&mut self) -> Option<(u64, HistorySendSelection)> {
+        if !self.can_send() {
+            return None;
+        }
+        let selected = self.selected.as_ref()?;
+        let summary = self.items.iter().find(|item| &item.id == selected)?.clone();
+        let revision = self.revision.clone()?;
+        let id = self.query()?;
+        self.pending_send_selection = Some(PendingSendSelection {
+            request: id,
+            id: summary.id.clone(),
+            changed: false,
+        });
+        Some((id, HistorySendSelection { summary, revision }))
+    }
+
+    pub fn sent(&mut self, id: u64, result: Result<SendReceipt, SendFailure>) {
+        if self.pending_io != Some(id) {
+            return;
+        }
+        self.pending_io = None;
+        let sent_selection = self.pending_send_selection.take();
+        self.message = Some(match result {
+            Ok(receipt) => {
+                if sent_selection.is_some_and(|pending| {
+                    pending.request == id
+                        && !pending.changed
+                        && self.selected.as_ref() == Some(&pending.id)
+                }) {
+                    self.selected = None;
+                }
+                receipt.message()
+            }
+            Err(error) => {
+                self.refresh_required |= error.needs_refresh();
+                error.message()
+            }
+        });
     }
 
     pub fn remove(&mut self) -> Option<(u64, String)> {
@@ -195,6 +260,7 @@ impl HistoryUiState {
         }
         match result {
             Ok(list) => {
+                self.revision = Some(list.revision);
                 self.items = list.items;
                 if !self
                     .selected
@@ -355,5 +421,72 @@ mod tests {
         state.listed(Some(id), Ok(list(&["2"])));
         assert_eq!(state.items.len(), 1);
         assert!(state.selected.is_none());
+    }
+
+    #[test]
+    fn send_selection_keeps_stable_id_and_displayed_revision() {
+        let mut state = HistoryUiState::new(true);
+        let mut listing = list(&["1", "2"]);
+        listing.revision = "9007199254740993".into();
+        state.listed(None, Ok(listing));
+        state.select("2");
+        let (id, selection) = state.begin_send_selection().unwrap();
+        assert_eq!(selection.summary.id, "2");
+        assert_eq!(selection.revision, "9007199254740993");
+        assert!(!state.can_query());
+        state.sent(id + 1, Ok(SendReceipt { utf16_units: 4 }));
+        assert!(!state.can_query());
+        state.sent(id, Ok(SendReceipt { utf16_units: 4 }));
+        assert!(state.can_query());
+        assert!(state.selected.is_none());
+    }
+
+    #[test]
+    fn unknown_input_requires_explicit_refresh_and_keeps_no_success_claim() {
+        use crate::clipboard_history_send::InputEffect;
+        let mut state = HistoryUiState::new(true);
+        state.listed(None, Ok(list(&["1"])));
+        state.select("1");
+        let (id, _) = state.begin_send_selection().unwrap();
+        state.sent(
+            id,
+            Err(SendFailure {
+                code: "input_result_unknown",
+                effect: InputEffect::Unknown,
+            }),
+        );
+        assert!(!state.can_remove());
+        assert!(state.begin_send_selection().is_none());
+        assert!(state.message.unwrap().contains("尚不确定"));
+        state.listed(None, Ok(list(&["1"])));
+        assert!(!state.can_remove());
+        let id = state.query().unwrap();
+        state.listed(Some(id), Ok(list(&["1"])));
+        assert!(state.can_remove());
+    }
+
+    #[test]
+    fn changing_selection_during_pending_send_does_not_change_request_identity() {
+        let mut state = HistoryUiState::new(true);
+        state.listed(None, Ok(list(&["1", "2"])));
+        state.select("1");
+        let (_, selection) = state.begin_send_selection().unwrap();
+        state.select("2");
+        assert_eq!(selection.summary.id, "1");
+        assert_eq!(state.selected.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn empty_text_can_be_deleted_but_cannot_start_a_send() {
+        let mut state = HistoryUiState::new(true);
+        let mut listing = list(&["1"]);
+        listing.items[0].utf16_units = 0;
+        listing.items[0].preview.clear();
+        state.listed(None, Ok(listing));
+        state.select("1");
+        assert!(state.can_remove());
+        assert!(!state.can_send());
+        assert!(state.begin_send_selection().is_none());
+        assert!(state.can_query());
     }
 }

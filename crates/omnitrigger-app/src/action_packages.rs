@@ -97,9 +97,11 @@ pub fn submit(
 /// 只确定应用私有文件位置；构造不读写磁盘，首次显式历史调用才访问存储。
 fn with_clipboard_history<H: omnitrigger_actions::NativeHost>(
     inner: H,
-) -> crate::clipboard_history_host::WithClipboardHistory<
-    H,
-    Arc<crate::clipboard_history_store::ClipboardHistoryStore>,
+) -> crate::process_capture_host::WithProcessCapture<
+    crate::clipboard_history_host::WithClipboardHistory<
+        H,
+        Arc<crate::clipboard_history_store::ClipboardHistoryStore>,
+    >,
 > {
     let store = std::path::absolute(settings::path())
         .ok()
@@ -110,7 +112,9 @@ fn with_clipboard_history<H: omnitrigger_actions::NativeHost>(
             .ok()
         })
         .map(Arc::new);
-    crate::clipboard_history_host::WithClipboardHistory::new(inner, store)
+    crate::process_capture_host::WithProcessCapture::new(
+        crate::clipboard_history_host::WithClipboardHistory::new(inner, store),
+    )
 }
 
 /// 外部目录原样保留共享模型的可选策略字段，不读取绑定或执行动作入口。

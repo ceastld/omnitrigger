@@ -20,8 +20,6 @@ boa_engine = { version = "=0.21.1", default-features = false, optional = true }
 rquickjs = { version = "=0.14.0", default-features = false, features = ["std", "loader"], optional = true }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
-
-[target.'cfg(windows)'.dependencies]
 omnitrigger-windows = { path = "../../crates/omnitrigger-windows" }
 
 [profile.small]

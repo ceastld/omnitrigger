@@ -15,7 +15,8 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 20] = [
+const METHODS: [&str; 21] = [
+    "process.capture",
     "history.list",
     "history.get",
     "history.append",
@@ -222,6 +223,7 @@ impl NativeBridge {
                         return false;
                     }
                     *next_id += 1;
+                    let capture = request.method == "process.capture";
                     let data_read = request.method == "clipboard.read_data";
                     let data_copy = request.method == "selection.copy_data";
                     let history_read =
@@ -247,7 +249,7 @@ impl NativeBridge {
                     } else if cancellation.is_cancelled() {
                         let mut error =
                             ActionError::new("cancelled", "动作已取消，未开始本机调用。");
-                        if data_read || data_copy || history {
+                        if data_read || data_copy || history || capture {
                             error.effect_state = Some("not_started".into());
                         }
                         Err(error)
@@ -261,14 +263,21 @@ impl NativeBridge {
                             ),
                             None => host.call(&request.method, request.params, cancellation),
                         };
-                        if request.method == "ui.choose" || data_copy || history {
+                        if request.method == "ui.choose" || data_copy || history || capture {
                             interactive_call(&client.stream, cancellation, call)
                         } else {
                             call(cancellation)
                         }
                     }
                     .map_err(|mut error| {
-                        if data_read || data_copy || history {
+                        if capture {
+                            error.message = "程序输出采集未完成，请检查错误代码。".into();
+                            error.method = Some(request.method.clone());
+                            error.required_permissions.clear();
+                            if error.effect_state.as_deref() != Some("not_started") {
+                                error.effect_state = Some("unknown".into());
+                            }
+                        } else if data_read || data_copy || history {
                             error.message = if history {
                                 "剪贴板历史调用失败；请检查错误代码。"
                             } else {

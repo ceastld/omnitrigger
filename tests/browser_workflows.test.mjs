@@ -276,7 +276,7 @@ test('Node 动作宿主实际加载入口，保留部分成功回执与抛出的
     // 与 node.rs 相同拼接顺序，宿主源码本身不是独立可执行入口。
     const host = join(root, 'host.mjs');
     const runtime = new URL('../crates/omnitrigger-actions/runtime/', import.meta.url);
-    const sources = await Promise.all(['desktop-api.js', 'browser-api.js', 'clipboard-history-api.js', 'host.mjs']
+    const sources = await Promise.all(['desktop-api.js', 'browser-api.js', 'clipboard-history-api.js', 'process-capture-api.js', 'host.mjs']
       .map(name => readFile(new URL(name, runtime), 'utf8')));
     await writeFile(host, sources.join('\n'));
     for (const [entry, input, expected] of [

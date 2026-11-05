@@ -1,0 +1,341 @@
+//! 仅显式ignored原生验收。父测试进程自然存活，不修改CLI或生产生命周期。
+use super::WithProcessCapture;
+use omnitrigger_actions::{
+    ActionCall, ActionDefinition, ActionError, ActionRuntime, CancellationToken, InvocationContext,
+    NativeHost, NodeRuntime, ResolvedAction,
+};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+use windows::Win32::{
+    Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT},
+    System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_ACCESS_RIGHTS, PROCESS_QUERY_LIMITED_INFORMATION,
+    },
+};
+static NEXT: AtomicU64 = AtomicU64::new(1);
+const SIGNATURE: &str = "omnitrigger-process-capture-fixture-v1";
+const WARM: &str = r#"
+export default async ctx => {
+  const value = await ctx.process.capture(ctx.input.program, ['warmup'], {timeoutMs:10000});
+  return {ready:value.code===0&&value.stdout===ctx.input.signature&&value.stderr===''};
+};
+"#;
+const SELF_EXIT: &str = r#"
+import {existsSync,readFileSync,writeFileSync,renameSync} from 'node:fs';
+import {join} from 'node:path';
+const pause=ms=>new Promise(done=>setTimeout(done,ms));
+function publish(root,name,text) {
+  writeFileSync(join(root,name+'.writing'),text,{flag:'wx'});
+  renameSync(join(root,name+'.writing'),join(root,name));
+}
+export default async ctx => {
+  if(process.ppid!==ctx.input.parent)throw Error('owned_parent_mismatch');
+  const pending=ctx.process.capture(ctx.input.program,['descendant',ctx.input.root,ctx.input.token],{timeoutMs:10000});
+  pending.catch(()=>{});
+  const until=performance.now()+8000;
+  const ready=join(ctx.input.root,'fixture-ready');
+  while(!existsSync(ready)||readFileSync(ready,'utf8')!==ctx.input.token) {
+    if(performance.now()>=until)throw Error('fixture_ready_timeout');
+    await pause(2);
+  }
+  publish(ctx.input.root,'node-owner.json',JSON.stringify({schemaVersion:1,token:ctx.input.token,node:process.pid,app:process.ppid}));
+  publish(ctx.input.root,'node-armed',ctx.input.token);
+  const release=join(ctx.input.root,'release-control');
+  while(!existsSync(release)||readFileSync(release,'utf8')!==ctx.input.token) {
+    if(performance.now()>=until)throw Error('control_release_timeout');
+    await pause(2);
+  }
+  publish(ctx.input.root,'node-control-request',ctx.input.token);
+  process.kill(process.pid,'SIGKILL'); // 唯一终止目标是作者自己，不按记录PID终止。
+  throw Error('self_exit_returned');
+};
+"#;
+
+fn ordinary(path: &Path, file: bool) -> Result<(), &'static str> {
+    crate::script_runtime::check_local_path(path).map_err(|_| "metadata_rejected")?;
+    let info = fs::symlink_metadata(path).map_err(|_| "metadata_unavailable")?;
+    if info.file_type().is_symlink() || (file && !info.is_file()) || (!file && !info.is_dir()) {
+        return Err("metadata_kind");
+    }
+    Ok(())
+}
+fn explicit(name: &str, file: bool) -> PathBuf {
+    let path = PathBuf::from(std::env::var_os(name).expect("必须显式提供本机自有路径"));
+    assert!(path.is_absolute(), "需要明确绝对路径");
+    ordinary(&path, file).expect("路径必须是非云盘普通本地文件或目录");
+    if file {
+        assert!(
+            path.extension()
+                .and_then(|v| v.to_str())
+                .is_some_and(|v| v.eq_ignore_ascii_case("exe")),
+            "需要自有EXE"
+        );
+    }
+    path
+}
+fn write_new(path: &Path, bytes: &[u8]) -> Result<(), &'static str> {
+    crate::script_runtime::check_local_path(path).map_err(|_| "metadata_rejected")?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| "create_owned_file")?;
+    file.write_all(bytes).map_err(|_| "write_owned_file")?;
+    file.sync_all().map_err(|_| "sync_owned_file")
+}
+fn read_owned(path: &Path, limit: u64) -> Result<String, &'static str> {
+    ordinary(path, true)?;
+    let file = File::open(path).map_err(|_| "read_owned_file")?;
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "read_owned_file")?;
+    if bytes.len() as u64 > limit {
+        return Err("owned_file_limit");
+    }
+    String::from_utf8(bytes).map_err(|_| "owned_file_utf8")
+}
+fn action(root: &Path, source: &str, input: Value) -> ResolvedAction {
+    let entry = root.join(format!(
+        "action-{}.mjs",
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    write_new(&entry, source.as_bytes()).expect("仅创建本轮动作源码");
+    ResolvedAction {
+        call: ActionCall {
+            package_id: "validation.node-native-capture".into(),
+            action_id: "run".into(),
+            action_version: 1,
+            input,
+        },
+        definition: ActionDefinition {
+            id: "run".into(),
+            title: "Node原生采集验收".into(),
+            version: 1,
+            runtime: "node".into(),
+            entry: entry.file_name().unwrap().to_string_lossy().into_owned(),
+            single_instance: false,
+        },
+        package_root: root.to_path_buf(),
+        entry_path: entry,
+    }
+}
+struct NoOtherMethods;
+impl NativeHost for NoOtherMethods {
+    fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+        Err(ActionError::new(
+            "unexpected_native_method",
+            "该原生验收只接受process.capture。",
+        ))
+    }
+}
+struct ReadOnlyProcess(HANDLE);
+impl ReadOnlyProcess {
+    fn open(pid: u32) -> Result<Self, &'static str> {
+        // 只有查询与同步权限；不申请PROCESS_TERMINATE，也不按PID终止进程。
+        unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_ACCESS_RIGHTS(0x0010_0000),
+                false,
+                pid,
+            )
+        }
+        .map(Self)
+        .map_err(|_| "readonly_process_open")
+    }
+    fn exited(&self) -> Result<bool, &'static str> {
+        let state = unsafe { WaitForSingleObject(self.0, 0) };
+        if state == WAIT_OBJECT_0 {
+            Ok(true)
+        } else if state == WAIT_TIMEOUT {
+            Ok(false)
+        } else {
+            Err("readonly_wait_unknown")
+        }
+    }
+}
+impl Drop for ReadOnlyProcess {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Pids {
+    schema_version: u32,
+    token: String,
+    fixture: u32,
+    descendant: u32,
+    started_at_unix_ms: u64,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NodeOwner {
+    schema_version: u32,
+    token: String,
+    node: u32,
+    app: u32,
+}
+fn observe(root: &Path, token: &str, parent: u32) -> Result<Value, &'static str> {
+    let began = Instant::now();
+    while !root.join("node-armed").is_file() {
+        if began.elapsed() >= Duration::from_secs(8) {
+            return Err("node_ready_timeout");
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    if read_owned(&root.join("node-armed"), 128)? != token
+        || read_owned(&root.join("fixture-ready"), 128)? != token
+    {
+        return Err("owned_ready_token");
+    }
+    let pids: Pids = serde_json::from_str(&read_owned(&root.join("owned-pids.json"), 2048)?)
+        .map_err(|_| "owned_pid_record")?;
+    let node: NodeOwner = serde_json::from_str(&read_owned(&root.join("node-owner.json"), 2048)?)
+        .map_err(|_| "owned_node_record")?;
+    if pids.schema_version != 1
+        || node.schema_version != 1
+        || pids.token != token
+        || node.token != token
+        || node.app != parent
+    {
+        return Err("owned_record_identity");
+    }
+    let ids = [parent, node.node, pids.fixture, pids.descendant];
+    if ids.contains(&0)
+        || ids
+            .iter()
+            .enumerate()
+            .any(|(index, id)| ids[..index].contains(id))
+    {
+        return Err("owned_pid_collision");
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "wall_clock")?
+        .as_millis();
+    if now < u128::from(pids.started_at_unix_ms)
+        || now - u128::from(pids.started_at_unix_ms) >= 5000
+    {
+        return Err("fixture_age_unproven");
+    }
+    // 全部句柄在Node强杀之前获取，观察中不再重新按PID打开，避免PID复用混淆。
+    let handles = [
+        ReadOnlyProcess::open(node.node)?,
+        ReadOnlyProcess::open(pids.fixture)?,
+        ReadOnlyProcess::open(pids.descendant)?,
+    ];
+    for handle in &handles {
+        if handle.exited()? {
+            return Err("owned_process_not_alive");
+        }
+    }
+    let temporary = root.join("release-control.writing");
+    write_new(&temporary, token.as_bytes())?;
+    if root.join("release-control").exists() {
+        return Err("release_exists");
+    }
+    fs::rename(temporary, root.join("release-control")).map_err(|_| "publish_release")?;
+    let released = Instant::now();
+    loop {
+        let states = handles
+            .iter()
+            .map(ReadOnlyProcess::exited)
+            .collect::<Result<Vec<_>, _>>()?;
+        if states.iter().all(|value| *value) {
+            if std::process::id() != parent {
+                return Err("parent_identity_changed");
+            }
+            if read_owned(&root.join("node-control-request"), 128)? != token {
+                return Err("self_exit_request_unproven");
+            }
+            return Ok(
+                json!({"nodeExited":true,"fixtureExited":true,"descendantExited":true,
+                "parentTestProcessStillAlive":true,"handlesOpenedBeforeRelease":true,
+                "observedMs":released.elapsed().as_millis(),"naturalExpiryUsed":false,"bodyRecorded":false}),
+            );
+        }
+        if released.elapsed() >= Duration::from_secs(3) {
+            return Err("cooperative_cleanup_not_observed");
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+#[ignore = "需要显式自有Node、夹具和父目录；真实原生验收须显式运行"]
+fn node_self_exit_cleans_capture_job_while_parent_test_process_lives() {
+    let node = explicit("OMNITRIGGER_APP_CAPTURE_NODE", true);
+    let fixture = explicit("OMNITRIGGER_CAPTURE_FIXTURE", true);
+    let parent_root = explicit("OMNITRIGGER_APP_CAPTURE_CASE_ROOT", false);
+    let parent = std::process::id();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        ^ (u128::from(parent) << 64)
+        ^ u128::from(NEXT.fetch_add(1, Ordering::Relaxed));
+    let token = format!("{nonce:032x}");
+    let root = parent_root.join(format!("capture-case-app-node-native-{token}"));
+    fs::create_dir(&root).expect("只创建全新本轮目录，不覆盖或删除旧目录");
+    ordinary(&root, false).unwrap();
+    let host = WithProcessCapture::new(NoOtherMethods);
+    let context = InvocationContext {
+        invocation_id: 1,
+        binding_id: 1,
+    };
+    let warm = action(
+        &root,
+        WARM,
+        json!({"program":fixture,"signature":SIGNATURE}),
+    );
+    let warm_result = NodeRuntime::new(&node).execute_with_host(
+        &warm,
+        &context,
+        &CancellationToken::new(),
+        Some(&host),
+    );
+    assert!(
+        warm_result.is_ok_and(|value| value["ready"] == true),
+        "冷启动预热或夹具签名失败；不回显正文"
+    );
+    let target = action(
+        &root,
+        SELF_EXIT,
+        json!({"program":fixture,"root":root,"token":token,"parent":parent}),
+    );
+    let (outcome, observation) = thread::scope(|scope| {
+        let observer = scope.spawn(|| observe(&root, &token, parent));
+        let outcome = NodeRuntime::new(&node).execute_with_host(
+            &target,
+            &context,
+            &CancellationToken::new(),
+            Some(&host),
+        );
+        (outcome, observer.join().expect("只读观察线程必须正常返回"))
+    });
+    assert!(
+        outcome
+            .as_ref()
+            .is_err_and(|error| error.code == "runtime_exit"),
+        "Node必须异常退出，不能以别的错误或成功替代"
+    );
+    let observation = observation.expect("未在自然期限前证明协作清理；不重试");
+    assert_eq!(std::process::id(), parent);
+    let receipt = json!({"passed":true,"runtime":"node","terminalCode":"runtime_exit",
+        "parentKind":"retained_app_test_process","observation":observation,
+        "nodeExitUsesCooperativeCancellation":true,"equivalentToLightweightOsJobClose":false,"attempts":1});
+    write_new(
+        &root.join("native-node-capture-receipt.json"),
+        &serde_json::to_vec_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
+}

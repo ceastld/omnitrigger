@@ -2,6 +2,14 @@
 
 use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirection};
 
+mod process_capture;
+pub use process_capture::{
+    capture as capture_process, capture_if as capture_process_if,
+    validate as validate_process_capture, Captured as ProcessCaptureResult,
+    Control as ProcessCaptureControl, Failure as ProcessCaptureFailure,
+    Options as ProcessCaptureOptions,
+};
+
 mod local_path_stat;
 pub use local_path_stat::{stat_local_path, LocalPathKind, LocalStatError};
 

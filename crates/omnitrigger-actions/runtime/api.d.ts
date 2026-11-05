@@ -109,6 +109,9 @@ export interface ActionContext {
   };
   process: {
     run(program: string, args?: string[], options?: {cwd?: string; allowNonZero?: boolean}): Promise<{code: number; stdout: string; stderr: string}>;
+    /** 通过应用原生桥严格采集；Windows私有Job、有效UTF8、stdout/stderr合计64KiB。
+     * 不回退run；无桥接/非Windows明确拒绝，取消/超时不返回部分输出。 */
+    capture(program: string, args?: string[], options?: {timeoutMs?: number; allowNonZero?: boolean; cwd?: string}): Promise<{code: number; stdout: string; stderr: string}>;
     start(program: string, args?: string[], options?: {cwd?: string}): Promise<{pid: number}>;
   };
   browser: BrowserApi;

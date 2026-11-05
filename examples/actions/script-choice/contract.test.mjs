@@ -12,6 +12,7 @@ const runtime = new URL('../../../crates/omnitrigger-actions/runtime/', import.m
 const desktopSource = readFileSync(new URL('desktop-api.js', runtime), 'utf8');
 const browserSource = readFileSync(new URL('browser-api.js', runtime), 'utf8');
 const historySource = readFileSync(new URL('clipboard-history-api.js', runtime), 'utf8');
+const captureSource = readFileSync(new URL('process-capture-api.js', runtime), 'utf8');
 const hostSource = readFileSync(new URL('host.mjs', runtime), 'utf8');
 const sdkSource = readFileSync(new URL('../../../tools/js-engine-probe/src/sdk.js', import.meta.url), 'utf8');
 const api = runInNewContext(desktopSource + ';createDesktopApi');
@@ -48,13 +49,13 @@ test('轻量 SDK 使用相同参数与结果；独立 CLI 明确拒绝 UI', () =
       request = JSON.parse(source);
       return JSON.stringify({ok:true,value:{status:'cancelled',reason:'dismissed'}});
     }};
-  runInNewContext(desktopSource + browserSource + historySource + sdkSource, context);
+  runInNewContext(desktopSource + browserSource + historySource + captureSource + sdkSource, context);
   assert.equal(context.ctx.ui.choose(valid()).reason, 'dismissed');
   assert.equal(request.kind, 'native');
   assert.equal(request.method, 'ui.choose');
   assert.deepEqual(request.params, valid());
   const cli = {ctx:{},__hostCall: () => {throw Error('不应调用独立 CLI 的本机桥接');}};
-  runInNewContext(desktopSource + browserSource + historySource + sdkSource, cli);
+  runInNewContext(desktopSource + browserSource + historySource + captureSource + sdkSource, cli);
   assert.throws(() => cli.ctx.ui.choose(valid()), error => error.code === 'ui_unavailable' && error.method === 'ui.choose');
 });
 
@@ -81,7 +82,7 @@ async function nodeInvocation(source, handle, {cancel = false} = {}) {
     const host = join(directory, 'host.mjs');
     const response = join(directory, 'response.json');
     writeFileSync(entry, source);
-    writeFileSync(host, desktopSource + browserSource + historySource + hostSource);
+    writeFileSync(host, desktopSource + browserSource + historySource + captureSource + hostSource);
     child = spawn(process.execPath, [host], {stdio:['pipe','pipe','pipe'],windowsHide:true});
     let stderr = '';
     child.stderr.on('data', chunk => { stderr += chunk; });

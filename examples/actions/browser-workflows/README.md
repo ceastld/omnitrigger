@@ -1,6 +1,6 @@
 # 常用浏览器工作流
 
-本动作包用已有 `ctx.browser.profiles()` 和 `ctx.browser.call()` 组合四个 Node 动作。需要 Node、已安装并连接的浏览器连接器，以及 Chrome 对应权限。将整个目录放入所选配置同级 `actions/browser-workflows`，重新加载应用后可在动作库设置触发。开发入口执行 `omnitrigger.exe --run-action <调用 JSON 路径>`。先修改 `call.json` 内的示例配置标识和窗口 ID；其中占位值不能直接使用。
+本动作包用已有 `ctx.browser.profiles()` 和 `ctx.browser.call()` 组合五个 Node 动作。需要 Node、已安装并连接的浏览器连接器，以及 Chrome 对应权限。将整个目录放入所选配置同级 `actions/browser-workflows`，重新加载应用后可在动作库设置触发。开发入口执行 `omnitrigger.exe --run-action <调用 JSON 路径>`。先修改 `call.json` 内的示例配置标识和窗口 ID；其中占位值不能直接使用。
 
 本包没有新增依赖。离线检查在仓库根运行：
 
@@ -14,6 +14,7 @@ node --test tests/browser_workflows.test.mjs
 
 | 动作 ID | 必填输入 | 可选输入 | 行为 |
 | --- | --- | --- | --- |
+| `create-default-tab` | `profile`、`windowId` | `activate`、`focusWindow` | 在指定普通窗口中新建浏览器默认标签页，不传入 URL |
 | `open-url` | `windowId`、`url` | `tabId`、`activate`、`focusWindow` | 在指定普通窗口中按网址复用；无匹配才新建 |
 | `duplicate-tab` | `windowId`、`tabId` | `focusWindow` | 复查源标签仍在指定窗口，再按明确 ID 复制 |
 | `restore-session` | `sessionId`、`sessionKind` | 无 | 从最近关闭列表核对 ID 和类型，再恢复该会话 |
@@ -34,11 +35,17 @@ const closed = await ctx.browser.call('sessions.getRecentlyClosed', [{ maxResult
 
 这些结果只应在脚本中筛选或提供给自己的选择界面；不要直接把整棵书签树或所有标签内容写入动作历史。本包输出只保留 ID、步骤和错误码，不包含网页 URL、标题和搜索词。动作输入本身仍遵循应用现有保存规则，应避免在绑定 URL 中放置秘密。
 
+## 新建默认标签页
+
+`create-default-tab` 要求明确的 `profile` 和普通窗口 `windowId`，不接受 `url` 或 `tabId`。它核验窗口后只调用一次 `tabs.create`，省略 URL，由浏览器决定默认页。默认激活新标签，只有显式 `focusWindow:true` 才请求窗口聚焦；回执中的 `addressBarRequested:false` 表示没有发送地址栏快捷键。
+
+新建、窗口聚焦和地址栏获得输入焦点是不同结果。此动作不复用已有标签，不选择当前前台，也不保证地址栏焦点。失败沿用下文的部分成功回执，不重试创建。
+
 ## 打开网址和书签
 
 URL 仅支持不含用户名、密码的完整 HTTP/HTTPS 地址，用标准 `URL.href` 规范化后精确比较，包含路径、查询和 fragment；不按域名、前缀或通配符匹配。`pendingUrl` 优先于已提交 URL，避免复用正在离开目标页面的标签。多个匹配报 `ambiguous_tab`，可显式传入匹配的 `tabId`；显式标签不匹配时停止，不新建替代标签。浏览器不能提供完整标签网址时报告 `permission_required` 和 `requiredPermissions: ['tabs']`，需要扩展有 `tabs` 或足以覆盖相关 URL 的站点授权。
 
-默认 `activate: true` 会激活目标窗口内的标签。`focusWindow` 默认 false，不主动把浏览器窗口带到前台；确实希望定位到该窗口时设 true。`activate: false` 时复用没有副作用，新建使用后台标签，且不能同时要求 `focusWindow: true`。这些选项仅适用于 `open-url` 和 `open-bookmark`；复制、恢复的激活行为由 Chrome API 决定。
+默认 `activate: true` 会激活目标窗口内的标签。`focusWindow` 默认 false，不主动把浏览器窗口带到前台；确实希望定位到该窗口时设 true。`activate: false` 时复用没有副作用，新建使用后台标签，且不能同时要求 `focusWindow: true`。这些选项仅适用于 `open-url`、`open-bookmark` 和 `create-default-tab`；复制、恢复的激活行为由 Chrome API 决定。
 
 书签搜索先排除文件夹。多个网页书签匹配报 `ambiguous_bookmark`，使用先前搜索得到的 `bookmarkId` 消歧；指定 ID 必须仍出现在本次搜索中。非网页 URL（如 bookmarklet）报 `unsupported_url`。
 

@@ -119,6 +119,32 @@ jobs:
           rustc --edition=2024 --crate-name omnitrigger_file_open_probe tools/script-sdk-check/file-open-probe.rs -o .tmp/file-open-probe.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: 验证 Node 输出采集与断连后的进程收尾
+        shell: pwsh
+        run: |
+          $captureNode = (Get-Command node).Source
+          $captureRoot = Join-Path $env:RUNNER_TEMP ("app-node-capture-" + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $captureRoot -ErrorAction Stop | Out-Null
+          $captureFixture = Join-Path $captureRoot 'process-capture-fixture.exe'
+          rustc --edition=2024 --crate-name process_capture_fixture tools/script-sdk-check/process-capture-fixture.rs -o $captureFixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-app-node-capture.mjs --suite normal --app "$PWD/target/debug/omnitrigger.exe" --node $captureNode --fixture $captureFixture --case-root "$captureRoot/cli" --cold-timeout-ms 60000 --case-timeout-ms 20000
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $capturePreviousNode = $env:OMNITRIGGER_APP_CAPTURE_NODE
+          $capturePreviousFixture = $env:OMNITRIGGER_CAPTURE_FIXTURE
+          $capturePreviousRoot = $env:OMNITRIGGER_APP_CAPTURE_CASE_ROOT
+          try {
+            $env:OMNITRIGGER_APP_CAPTURE_NODE = $captureNode
+            $env:OMNITRIGGER_CAPTURE_FIXTURE = $captureFixture
+            $env:OMNITRIGGER_APP_CAPTURE_CASE_ROOT = $captureRoot
+            cargo test --locked -p omnitrigger-app --bin omnitrigger process_capture_host::node_native::node_self_exit_cleans_capture_job_while_parent_test_process_lives -- --ignored --exact --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            $env:OMNITRIGGER_APP_CAPTURE_NODE = $capturePreviousNode
+            $env:OMNITRIGGER_CAPTURE_FIXTURE = $capturePreviousFixture
+            $env:OMNITRIGGER_APP_CAPTURE_CASE_ROOT = $capturePreviousRoot
+          }
+
       - name: 验证已有轻量工程的独立类型检查
         shell: pwsh
         run: |
@@ -130,7 +156,7 @@ jobs:
       - name: 验证常用动作和浏览器工作流
         shell: pwsh
         run: |
-          node --test tests/browser_workflows.test.mjs examples/actions/common-desktop/recipes.test.mjs examples/actions/common-search/recipes.test.mjs examples/actions/script-choice/contract.test.mjs
+          node --test tests/browser_workflows.test.mjs tests/browser_default_tab.test.mjs tests/notification_action_contract.test.mjs examples/actions/common-desktop/recipes.test.mjs examples/actions/common-search/recipes.test.mjs examples/actions/script-choice/contract.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/ui_notify_api.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -144,7 +170,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/clipboard-history/recipes.test.mjs examples/actions/target-window-menu/recipes.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test tests/process_capture_api.test.mjs tests/process_capture_contract.test.mjs tests/process_capture_sdk.test.mjs tests/clipboard_history_inspector.test.mjs tests/clipboard_history_inspector_scan_limit.test.mjs examples/actions/json-text/recipes.test.mjs examples/actions/selection-history/recipes.test.mjs examples/actions/process-output/recipes.test.mjs examples/actions/process-output/encoding-boundaries.test.mjs examples/actions/process-output/cross-entry-contract.test.mjs
+          node --test tests/process_capture_bridge_api.test.mjs tests/process_capture_bridge_transport.test.mjs tests/app_node_capture_check.test.mjs tests/process_capture_api.test.mjs tests/process_capture_contract.test.mjs tests/process_capture_sdk.test.mjs tests/clipboard_history_inspector.test.mjs tests/clipboard_history_inspector_scan_limit.test.mjs examples/actions/json-text/recipes.test.mjs examples/actions/selection-history/recipes.test.mjs examples/actions/process-output/recipes.test.mjs examples/actions/process-output/encoding-boundaries.test.mjs examples/actions/process-output/cross-entry-contract.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/common-search/open-or-search.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -244,14 +270,14 @@ jobs:
               $env:OMNITRIGGER_CAPTURE_ENGINE = $engine
               node ../script-sdk-check/process-capture-test-support.mjs --warmup
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-              $captureEngineArguments = @('--release', '--locked', '--no-default-features', '--features', $engine)
-              if ($engine -eq 'quickjs') { $captureEngineArguments += @('--target-dir', 'target/quickjs') }
-              $captureTestName = 'api::process_capture::tests::controlled_fixture_capture_cases'
-              $captureTests = & cargo test @captureEngineArguments -- --list
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-              if (@($captureTests | Where-Object { $_ -eq "$($captureTestName): test" }).Count -ne 1) { throw '未找到唯一受控采集用例。' }
-              cargo test @captureEngineArguments $captureTestName -- --ignored --exact --test-threads=1
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              if ($engine -eq 'boa') {
+                $captureTestName = 'process_capture::tests::controlled_fixture_capture_cases'
+                $captureTests = & cargo test --manifest-path ../../Cargo.toml -p omnitrigger-windows --release --locked --lib -- --list
+                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                if (@($captureTests | Where-Object { $_ -eq "$($captureTestName): test" }).Count -ne 1) { throw '未找到唯一受控采集用例。' }
+                cargo test --manifest-path ../../Cargo.toml -p omnitrigger-windows --release --locked --lib $captureTestName -- --ignored --exact --test-threads=1
+                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              }
               node --test --test-concurrency=1 ../../tests/process_capture_parent_kill.test.mjs ../../tests/process_capture_host.test.mjs
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }

@@ -84,7 +84,7 @@ actions/my-script/
 
 目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start/capture`、`ctx.delay`、`ctx.clipboard.readText/readData/writeText/history.*`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText/copySelectionData/windowAction` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时提供包内相对 ESM 导入，暂不提供 Node/npm 模块或 Promise 入口；需要 Node 环境或异步入口的动作继续选择 `node` 运行时。
 
-Windows 轻量 `process.capture` 需要包含该实现的新宿主构建，使用本地绝对 EXE 路径，可显式设置绝对 `cwd`；默认 10 秒预算、双流合计 64 KiB、严格 UTF-8，默认拒绝非零退出。预算不是中断操作系统调用的硬超时，外层动作期限可能更短；私有 Job 仅收尾其中的进程，失败不自动重试。Node 现有 `process.run` 的解码、目录和收尾契约不同，Node 尚无 `capture`；详见[程序输出采集契约](../tools/js-engine-probe/API.md#程序输出采集)及[双入口通知示例](../examples/actions/process-output/)。
+Windows `process.capture` 在 Node、Boa、QuickJS 间共用 Rust 后端；Node 通过应用原生桥接逐次 `await`，轻量宿主同步返回。使用本地绝对 EXE 路径，可设置绝对 `cwd`；默认10秒预算、双流合计64KiB、严格UTF-8，默认拒绝非零退出。Node 默认工作目录为动作包目录，轻量默认继承宿主目录。预算不是硬实时超时，失败不返回部分输出、不自动重试。轻量宿主强停由操作系统关闭它的私有Job；Node断连由应用检测后协作取消，其Job仍由应用持有。旧 `process.run/start` 契约保持原样，详见[程序输出采集契约](../tools/js-engine-probe/API.md#程序输出采集)。
 
 Windows x64 开发环境可先构建本机 QuickJS 包，再通过开发命令安装。包中包含独立宿主、SDK、许可通知和文件清单；构建命令不会发布或上传二进制：
 
@@ -199,6 +199,7 @@ export default async function (ctx) {
 | `ctx.invocation` | 当前 `invocation_id` 和 `binding_id`，以十进制字符串保留 Rust `u64` 的完整精度，用于关联本次调用。 |
 | `ctx.packageRoot` | 当前动作包的绝对目录，可用于定位包内资源。 |
 | `ctx.process.run(program, args, { cwd, allowNonZero })` | 启动进程并等待退出，返回 `code`、`stdout` 和 `stderr`；启动失败或非零退出抛错。省略 `cwd` 时使用包目录；显式设置 `allowNonZero: true` 时由脚本处理非零退出。 |
+| `ctx.process.capture(program, args?, { cwd?, timeoutMs?, allowNonZero? }?)` | Windows 严格采集，须 `await`；返回 `{code, stdout, stderr}`。默认10秒、双流合计64KiB、严格UTF-8，失败不交付部分输出；默认工作目录为包目录。 |
 | `ctx.process.start(program, args, { cwd })` | 独立启动程序，返回 `{ pid }`，不等待退出、不采集输出；省略 `cwd` 时使用包目录。成功启动后，取消动作不会关闭该程序。 |
 | `ctx.delay(milliseconds)` | 等待指定毫秒数。 |
 | `ctx.signal` | 当前调用的取消信号；自定义异步步骤可监听此信号停止后续工作。 |
@@ -251,6 +252,10 @@ function main(ctx) {
 
 ### 显式文本历史
 
+`omnitrigger.exe --text-history` 打开独立历史窗口；可附加 `--config <路径>` 选择配置。此模式不启动触发引擎，不能混用动作运行、设置或 Hook 检查参数。窗口默认不采集，点击“开启采集”后仅接收之后的剪贴板变更；摘要筛选不读取全部正文。
+
+窗口在打开前保留原目标身份，最多在本进程内有效 5 分钟。选中项的“发送到原窗口”复用既有文本输入接口；从历史窗口交还焦点时若前台已换成第三个窗口，会拒绝发送。目标关闭、身份变化或过期时须从原窗口重新打开。普通主窗口中的历史页没有这一启动目标，仍可查询、删除和控制采集。发送回执只表示系统接纳输入，结果不确定时要求核对与刷新，不自动重试；CLI 目标上下文的 30 秒限制保持不变。
+
 `ctx.clipboard.history` 通过应用本机桥接访问配置文件同级的 `clipboard-history.json`，内容以明文 JSON 持久化。服务构造不读写历史文件；只有显式历史调用才访问存储。默认不监听系统剪贴板、不导入其他历史，也不自动采集图片或文件列表。四个方法不需要前台目标；后续发送文本仍使用本次动作原目标的 `sendText`。
 
 Node 逐次 `await`；轻量脚本同步返回。参数只接受表中的对象字段，错误类型和未知字段在存储访问前拒绝：
@@ -281,6 +286,8 @@ function main(ctx) {
 `get` 的正文供脚本内部使用；默认配方的终态只输出状态、数量和长度，不回显正文。可信脚本仍能主动返回或记录已取得的文本，SDK不提供正文追踪或自动删改。完整的保存、摘要选择与向原目标发送示例见[显式文本历史动作](../examples/actions/clipboard-history/)，包含Node和同步轻量入口；发送入口会实际向原目标输入文本。
 
 错误包含 `code`、`method:'history.*'` 和 `effectState`，正文固定，不附带历史文本或底层路径。常用代码为 `invalid_input`、`invalid_response`、`history_unavailable`、`history_item_missing`、`history_busy`、`history_corrupt`、`history_conflict`、`history_id_exhausted`、`history_revision_exhausted`、`cancelled`、`timeout`；其他无法分类的失败为 `history_failed`。无应用桥接或存储不可用时明确 `history_unavailable`，不退回读取系统剪贴板。
+
+`get` 返回独立的文本快照，删除不会撤回其他调用方已经取得的正文。删除成功确认该项已从持久历史移除，不保证已取得的文本不会随后被发送。读取历史与向原目标输入是分别完成的操作，不组成原子事务；输入回执也不表示目标应用已经完成业务操作。
 
 `list/get` 失败的 `effectState` 为 `not_started`；写入在提交前明确拒绝为 `not_started`，提交后不能确认结果时为 `unknown`。不同调用不是一个事务，列表后条目可能被另一调用移除。锁竞争会报 `history_busy`，外部变化可能报 `history_conflict`；不会自动覆盖冲突、回滚或重试。客户端历史请求的传输期限为5秒，仍受更短的动作取消/总时限限制，不能保证立即中断已进入的文件系统调用。使用新增接口需要更新应用、宿主及已有工程的SDK快照。
 

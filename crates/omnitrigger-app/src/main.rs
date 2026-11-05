@@ -16,6 +16,7 @@ mod clipboard_history_filter;
 mod clipboard_history_host;
 #[cfg(test)]
 mod clipboard_history_review;
+mod clipboard_history_send;
 #[cfg(test)]
 mod clipboard_history_send_candidate;
 mod clipboard_history_store;
@@ -43,6 +44,7 @@ mod package_feedback;
 mod plugin_install;
 mod plugins;
 mod presets;
+mod process_capture_host;
 mod radial_wheel;
 mod script_browser;
 mod script_fs;
@@ -69,6 +71,7 @@ mod wheel_input_cli;
 mod wheel_workspace;
 mod wheels;
 mod window_action;
+mod workspace_mode;
 
 use assets::{Assets, Icon};
 use event_bridge::{EventBridge, UiWake};
@@ -109,6 +112,7 @@ use trigger_panel::{
 };
 use wheel_workspace::DragWheelSession;
 use wheels::{WheelAccent, WheelActionRef, Wheels};
+use workspace_mode::WorkspaceMode;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TriggerMode {
@@ -478,6 +482,8 @@ struct StartupOptions {
     browser_connector_settings: bool,
     appearance_settings: bool,
     text_history_page: bool,
+    text_history_target: Option<clipboard_history_send::HistoryLaunchTarget>,
+    text_history_ui_window: Option<isize>,
     panel: bool,
     wheel: Option<String>,
     wheel_target: Option<omnitrigger_windows::ShortcutTarget>,
@@ -485,6 +491,7 @@ struct StartupOptions {
 }
 
 struct Workspace {
+    mode: WorkspaceMode,
     backend: Option<Backend>,
     wheel_input_policy: WheelInputPolicy,
     events: Option<EventBridge<BackendEvent>>,
@@ -631,33 +638,43 @@ impl Workspace {
             browser_connector_settings,
             appearance_settings,
             text_history_page,
+            text_history_target,
+            text_history_ui_window,
             panel: open_panel,
             wheel: initial_wheel,
             wheel_target: wheel_launch_target,
             wheel_editor,
         } = startup;
+        let mode = WorkspaceMode::from_text_history_flag(text_history_page);
         let (theme_mode, theme_error) = match appearance::load(&settings::path()) {
             Ok(mode) => (mode, None),
             Err(error) => (appearance::Mode::default(), Some(error)),
         };
         theme::apply(theme_mode, cx.window_appearance());
-        let (bindings, load_error) = match settings::load() {
-            Ok(bindings) => (bindings, None),
-            Err(error) => (Vec::new(), Some(error)),
+        let (bindings, load_error) = if mode.owns_input_engine() {
+            match settings::load() {
+                Ok(bindings) => (bindings, None),
+                Err(error) => (Vec::new(), Some(error)),
+            }
+        } else {
+            (Vec::new(), None)
         };
-        let (mut backend, events, mut startup_error) =
+        let (mut backend, events, mut startup_error) = if mode.owns_input_engine() {
             match Backend::start_with_wheel_input_policy(wheel_input_policy) {
-                Ok((backend, events)) => (Some(backend), events, None),
-                Err(error) => (None, std::sync::mpsc::channel().1, Some(error)),
-            };
-        let events = match EventBridge::new(events) {
+                Ok((backend, events)) => (Some(backend), Some(events), None),
+                Err(error) => (None, Some(std::sync::mpsc::channel().1), Some(error)),
+            }
+        } else {
+            (None, None, None)
+        };
+        let events = events.and_then(|events| match EventBridge::new(events) {
             Ok(events) => Some(events),
             Err(error) => {
                 backend.take();
                 startup_error = Some(error);
                 None
             }
-        };
+        });
         let ui_wake = events.as_ref().map(EventBridge::wake).unwrap_or_default();
         Self::watch_ui(ui_wake.clone(), cx);
         let selected = bindings.first().map(|binding| binding.spec.id);
@@ -674,9 +691,13 @@ impl Workspace {
             .first()
             .map(|b| b.action.clone())
             .unwrap_or(ActionSpec::Notification);
-        let (wheels, wheels_error) = match Wheels::load(&settings::path()) {
-            Ok(wheels) => (wheels, None),
-            Err(error) => (Wheels { wheels: Vec::new() }, Some(error)),
+        let (wheels, wheels_error) = if mode.owns_input_engine() {
+            match Wheels::load(&settings::path()) {
+                Ok(wheels) => (wheels, None),
+                Err(error) => (Wheels { wheels: Vec::new() }, Some(error)),
+            }
+        } else {
+            (Wheels { wheels: Vec::new() }, None)
         };
         let initial_definition = bindings
             .iter()
@@ -734,12 +755,15 @@ impl Workspace {
             input
         });
         cx.observe(&shortcut_keys, |_, _, cx| cx.notify()).detach();
-        let (mut plugins, plugin_settings_error) = match Plugins::load(&settings::path()) {
-            Ok(plugins) => (plugins, None),
-            Err(error) => (Plugins::default(), Some(error.to_string())),
+        let (mut plugins, plugin_settings_error) = if mode.owns_input_engine() {
+            match Plugins::load(&settings::path()) {
+                Ok(plugins) => (plugins, None),
+                Err(error) => (Plugins::default(), Some(error.to_string())),
+            }
+        } else {
+            (Plugins::default(), None)
         };
-        let relocated = plugin_settings_error
-            .is_none()
+        let relocated = (mode.owns_input_engine() && plugin_settings_error.is_none())
             .then(|| relocate_raishot(&mut plugins))
             .flatten();
         let action_search = cx.new(|cx| {
@@ -873,9 +897,15 @@ impl Workspace {
                 .ok()
             })
             .map(std::sync::Arc::new);
-        let text_history =
-            clipboard_history_ui::ClipboardHistoryUi::new(history_store, ui_wake.clone(), cx);
+        let text_history = clipboard_history_ui::ClipboardHistoryUi::new(
+            history_store,
+            ui_wake.clone(),
+            text_history_target,
+            text_history_ui_window,
+            cx,
+        );
         Self {
+            mode,
             backend,
             wheel_input_policy,
             events,
@@ -959,7 +989,14 @@ impl Workspace {
             executor: CommandExecutor::new(),
             package_input,
             package_picker_for_draft: false,
-            action_service: action_packages::service(&settings::path()),
+            action_service: if mode.owns_input_engine() {
+                action_packages::service(&settings::path())
+            } else {
+                omnitrigger_actions::ActionService::new(
+                    omnitrigger_actions::PackageCatalog::default(),
+                    omnitrigger_actions::RuntimeRegistry::new(),
+                )
+            },
             package_feedback: Default::default(),
             script_projects,
             shortcut_executor: CommandExecutor::shortcuts(),
@@ -975,7 +1012,7 @@ impl Workspace {
             triggers: service::TriggerService::new(bindings, service::SettingsFile),
             error: startup_error.or(load_error).or(title_bar.clone().err()),
             action_error: None,
-            status: "正在连接键盘和鼠标…".into(),
+            status: mode.initial_status().into(),
             hits: VecDeque::new(),
             trigger_count: 0,
             toast: None,
@@ -1024,8 +1061,14 @@ impl Workspace {
 
     /// 切换主页面；录制期间保持当前页，避免打断输入拦截。
     fn open_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.mode.history_only() {
+            return;
+        }
         if self.recording {
             return;
+        }
+        if page != Page::TextHistory {
+            self.text_history.cancel_send();
         }
         self.smooth_scroll.cancel_all();
         self.page = page;
@@ -1035,6 +1078,11 @@ impl Workspace {
     }
 
     fn rebuild_backend(&mut self, cx: &mut Context<Self>) {
+        if !self.mode.owns_input_engine() {
+            self.status = self.mode.initial_status().into();
+            cx.notify();
+            return;
+        }
         if self.restarting {
             return;
         }
@@ -1091,6 +1139,9 @@ impl Workspace {
     }
 
     fn toggle_pause(&mut self, cx: &mut Context<Self>) {
+        if !self.mode.owns_input_engine() {
+            return;
+        }
         if self.recording || !self.ready {
             return;
         }
@@ -1111,6 +1162,9 @@ impl Workspace {
     }
 
     fn send(&mut self, command: BackendCommand) -> bool {
+        if !self.mode.owns_input_engine() {
+            return false;
+        }
         if matches!(
             command,
             BackendCommand::SetEnabled(false)
@@ -1134,6 +1188,10 @@ impl Workspace {
     }
 
     fn sync_bindings(&mut self) {
+        if !self.mode.owns_input_engine() {
+            self.bindings_need_sync = false;
+            return;
+        }
         if self.recording {
             self.bindings_need_sync = true;
             return;
@@ -1146,6 +1204,12 @@ impl Workspace {
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) {
+        if self.mode.history_only() {
+            if self.text_history.poll() {
+                cx.notify();
+            }
+            return;
+        }
         if !self.panel_prepared {
             self.panel_prepared = true;
             if let Err(error) = self.prepare_panel(cx) {
@@ -1305,6 +1369,7 @@ impl Workspace {
                     changed = true;
                 }
                 Ok(PanelRequest::Configure) => {
+                    self.text_history.cancel_send();
                     self.page = Page::Triggers;
                     let _ = self
                         .main_window
@@ -1906,6 +1971,7 @@ impl Workspace {
             self.message
                 .update(cx, |input, cx| input.set_text("新动作", cx));
         }
+        self.text_history.cancel_send();
         self.page = Page::Triggers;
         self.confirm_delete = None;
         self.error = None;
@@ -2787,6 +2853,9 @@ impl Workspace {
         editing: Option<u64>,
         cx: &mut Context<Self>,
     ) {
+        if !self.mode.owns_input_engine() {
+            return;
+        }
         if self.listener() != Listener::Listening {
             return;
         }
@@ -2809,6 +2878,7 @@ impl Workspace {
             self.recording_held.clear();
             self.conflict = None;
             self.confirm_delete = None;
+            self.text_history.cancel_send();
             self.page = Page::Triggers;
             self.status = "请按下组合并全部松开；按 Esc 取消。".into();
         }
@@ -2832,6 +2902,7 @@ impl Workspace {
         self.clear_pending();
         self.conflict = None;
         self.confirm_delete = None;
+        self.text_history.cancel_send();
         self.page = Page::Triggers;
         self.load_selected_message(cx);
         cx.notify();
@@ -2937,6 +3008,7 @@ impl Workspace {
             return;
         }
         if self.pending.is_some() && self.draft_action == ActionSpec::Plugin(reference.clone()) {
+            self.text_history.cancel_send();
             self.page = Page::Triggers;
             cx.notify();
             return;
@@ -2955,6 +3027,7 @@ impl Workspace {
                 self.load_action(ActionSpec::Plugin(reference), cx);
                 self.message
                     .update(cx, |input, cx| input.set_text(title.clone(), cx));
+                self.text_history.cancel_send();
                 self.page = Page::Triggers;
                 self.error = None;
                 self.status = format!("已选择{title}，默认快捷键已填入草稿，可修改后保存。");
@@ -3936,6 +4009,7 @@ impl Workspace {
                     } else {
                         None
                     };
+                    this.text_history.cancel_send();
                     this.page = Page::Presets;
                     cx.notify();
                 })),
@@ -4557,6 +4631,7 @@ impl Workspace {
                                 if let Some(wheel) = this.wheels.wheels.first() {
                                     this.choose_draft_wheel(wheel.id.clone(), cx);
                                 } else {
+                                    this.text_history.cancel_send();
                                     this.page = Page::Wheels;
                                     cx.notify();
                                 }
@@ -4576,6 +4651,7 @@ impl Workspace {
             .child(Self::kind_tile("package-action", Icon::Terminal, theme::ACCENT_2, "动作包 / JavaScript", package)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.package_picker_for_draft = true;
+                    this.text_history.cancel_send();
                     this.page = Page::Actions;
                     cx.notify();
                 })))
@@ -5737,6 +5813,22 @@ impl Workspace {
     }
 
     fn render_status_bar(&self) -> Div {
+        if self.mode.history_only() {
+            return div()
+                .h(px(26.))
+                .flex_none()
+                .px(px(14.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .bg(rgb(theme::SIDEBAR))
+                .border_t_1()
+                .border_color(rgb(theme::DIVIDER))
+                .text_size(px(11.5))
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child(dot(theme::TEXT_MUTED, 6.))
+                .child(self.mode.initial_status());
+        }
         let color = match self.listener() {
             Listener::Listening => theme::ACCENT,
             Listener::Recording => theme::RECORD,
@@ -5826,7 +5918,13 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         theme::apply(self.theme_mode, window.appearance());
         let (title_height, buttons_width) = self.caption_area(window);
-        let page = match self.page {
+        let history_window = self.mode.history_only();
+        let visible_page = if history_window {
+            Page::TextHistory
+        } else {
+            self.page
+        };
+        let page = match visible_page {
             Page::Actions => self.render_actions(window, cx).into_any_element(),
             Page::Wheels => self
                 .render_wheels(
@@ -5873,7 +5971,9 @@ impl Render for Workspace {
                     .flex_1()
                     .min_h_0()
                     .flex()
-                    .child(self.render_sidebar(title_height, cx))
+                    .when(!history_window, |element| {
+                        element.child(self.render_sidebar(title_height, cx))
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -5882,6 +5982,15 @@ impl Render for Workspace {
                             .flex_col()
                             .when(title_height > 0., |el| {
                                 el.child(self.render_title_bar(title_height, buttons_width))
+                            })
+                            .when(history_window, |element| {
+                                element.child(
+                                    div()
+                                        .px(px(20.))
+                                        .py(px(8.))
+                                        .window_control_area(WindowControlArea::Drag)
+                                        .child(pill("独立历史窗口", theme::TEXT_MUTED)),
+                                )
                             })
                             .child(main),
                     ),
@@ -6231,6 +6340,19 @@ fn main() {
         };
         std::process::exit(code);
     }
+    let startup_mode = match WorkspaceMode::from_arguments(&arguments) {
+        Ok(mode) => mode,
+        Err(message) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({"status":"rejected","error":{
+                    "code":"invalid_cli_arguments","message":message,"effect_state":"not_started"
+                }})
+            );
+            std::process::exit(1);
+        }
+    };
+    let text_history_page = startup_mode.history_only();
     let wheel_input_policy = match wheel_input_cli::parse(&arguments) {
         Ok(policy) => policy,
         Err(error) => {
@@ -6361,9 +6483,6 @@ fn main() {
     }
     let ui_smoke = arguments.iter().any(|argument| argument == "--ui-smoke");
     let appearance_settings = arguments.iter().any(|argument| argument == "--settings");
-    let text_history_page = arguments
-        .iter()
-        .any(|argument| argument == "--text-history");
     let browser_connector_settings = arguments
         .iter()
         .any(|argument| argument == "--browser-connector-settings");
@@ -6399,14 +6518,26 @@ fn main() {
         .iter()
         .any(|argument| argument == "--wheel-editor");
     let preserve_foreground = initial_wheel.is_some() && !wheel_editor;
-    let wheel_launch_target = if preserve_foreground {
+    let launch_target = if preserve_foreground || text_history_page {
         match omnitrigger_windows::capture_shortcut_target() {
             Ok(target) => Some(target),
-            Err(error) => {
+            Err(error) if preserve_foreground => {
                 eprintln!("{error}");
                 std::process::exit(1);
             }
+            Err(_) => None,
         }
+    } else {
+        None
+    };
+    let wheel_launch_target = if preserve_foreground {
+        launch_target
+    } else {
+        None
+    };
+    let text_history_target = if text_history_page {
+        launch_target
+            .and_then(|target| clipboard_history_send::HistoryLaunchTarget::capture(target).ok())
     } else {
         None
     };
@@ -6422,7 +6553,7 @@ fn main() {
                     window_min_size: Some(size(px(920.), px(620.))),
                     focus: !preserve_foreground,
                     titlebar: Some(TitlebarOptions {
-                        title: Some("OmniTrigger".into()),
+                        title: Some(startup_mode.window_title().into()),
                         ..Default::default()
                     }),
                     app_id: Some("OmniTrigger".into()),
@@ -6438,6 +6569,12 @@ fn main() {
                         }
                         _ => Err("无法取得主窗口句柄，已改用系统标题栏。".into()),
                     };
+                    let text_history_ui_window = HasWindowHandle::window_handle(&*window)
+                        .ok()
+                        .and_then(|handle| match handle.as_raw() {
+                            RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+                            _ => None,
+                        });
                     let main_window = gpui::Window::window_handle(&*window);
                     let view = cx.new(|cx| {
                         Workspace::new(
@@ -6448,6 +6585,8 @@ fn main() {
                                 browser_connector_settings,
                                 appearance_settings,
                                 text_history_page,
+                                text_history_target,
+                                text_history_ui_window,
                                 panel: open_panel && initial_wheel.is_none(),
                                 wheel: initial_wheel,
                                 wheel_target: wheel_launch_target,
@@ -6471,6 +6610,7 @@ fn main() {
                         .detach();
                     window.on_window_should_close(cx, move |_, cx| {
                         let _ = closing_view.update(cx, |view, _| {
+                            view.text_history.cancel_send();
                             view.backend.take();
                         });
                         cx.quit();
