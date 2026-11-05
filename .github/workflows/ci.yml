@@ -180,9 +180,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/desktop_api_toggle_history.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test tests/brightness_step_api.test.mjs tests/brightness_step_contract_review.test.mjs tests/brightness_step_types.test.mjs examples/actions/brightness-step/recipes.test.mjs
+          node --test tests/brightness_step_api.test.mjs tests/brightness_step_contract_review.test.mjs tests/brightness_step_types.test.mjs examples/actions/brightness-step/recipes.test.mjs tests/volume_adjust_api.test.mjs examples/actions/volume-adjust/recipes.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p examples/actions/brightness-step/jsconfig.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p examples/actions/volume-adjust/jsconfig.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/fs_stat_api.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

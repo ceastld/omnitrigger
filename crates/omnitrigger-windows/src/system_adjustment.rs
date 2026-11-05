@@ -315,6 +315,19 @@ pub fn step_brightness_with_first_wmi_fallback_at_if(
     )
 }
 
+/// 默认多媒体输出端点的百分点增减；无指针/窗口要求，守卫true紧邻写调用。
+#[cfg(windows)]
+pub fn adjust_volume_if(
+    delta_percent: i16,
+    check: &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
+) -> Result<AdjustmentResult, SystemAdjustmentError> {
+    validate_system_adjustment(SystemAdjustment::Volume { delta_percent })?;
+    check(false)?;
+    let _apartment = native::ComApartment::new()?;
+    check(false)?;
+    native::adjust_volume_if(delta_percent, check)
+}
+
 #[cfg(windows)]
 mod native {
     use super::*;
@@ -437,9 +450,19 @@ mod native {
     }
 
     pub(super) fn adjust_volume(delta: i16) -> Result<AdjustmentResult, SystemAdjustmentError> {
+        adjust_volume_if(delta, &mut |_| Ok(()))
+    }
+    pub(super) fn adjust_volume_if(
+        delta: i16,
+        check: &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
+    ) -> Result<AdjustmentResult, SystemAdjustmentError> {
+        check(false)?;
         let endpoint = audio_endpoint()?;
+        check(false)?;
         let previous = audio_read(&endpoint)?;
+        check(false)?;
         let requested = volume_next(previous, delta)?;
+        check(true)?;
         unsafe { endpoint.SetMasterVolumeLevelScalar(requested, ptr::null()) }.map_err(
             |error| {
                 native_error(
@@ -449,6 +472,7 @@ mod native {
                 )
             },
         )?;
+        check(false)?;
         let current = audio_read(&endpoint).map_err(|error| {
             native_error(
                 SystemAdjustmentErrorCode::ConfirmationUnknown,
@@ -456,6 +480,7 @@ mod native {
                 error,
             )
         })?;
+        check(false)?;
         Ok(AdjustmentResult {
             kind: AdjustmentKind::Volume,
             previous_percent: (previous * 100.).round() as u8,

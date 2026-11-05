@@ -622,4 +622,10 @@ physical和physical_then_wmi在实际执行时捕获一次物理指针。physica
 
 参数错误及写前取消/期限为not_started；进入首个写调用后无法确认的取消/超时为unknown。设备之间、读写前后检查原动作取消和总期限；无法抢占已进入的Win32调用，返回后停止后续设备。传输已发送后失联也不能据此推断未执行。中断时逐项回执可能未送达，不撤销已写入，不应自动重试。SDK拒绝额外字段、标识、非法数值和不符合策略的回退回执。
 
-该API不改变既有百分点动作、原22规则或个人绑定；不据API可用宣称来源等价或设备验收通过。
+## 显式音量百分点调节
+
+Node使用`await ctx.desktop.adjustVolume({deltaPercent:5})`，同步脚本用同名方法直接取回结果。参数必须为仅含deltaPercent的对象，非零整数，范围-100至100。复用当前默认多媒体输出端点的CoreAudio百分比算法，结果夹紧到0–100；不注入媒体键或请求系统音量提示，不接受设备ID，不要求前台目标、指针或界面，需要应用NativeBridge。
+
+wire为audio.volume_adjust，deltaPercent映射为delta_percent。返回匿名previousPercent、requestedPercent、currentPercent及保守effectState:'unknown'。即使在边界夹紧后请求值不变，现有原生路径仍调用设置接口；不把它称为未写入。读回可能受到设备量化或其他客户端影响，不保证等于请求，不以SDK重新计算或伪造读回。
+
+参数错误和写前取消/期限为not_started；进入设置调用后无法确认的取消、期限或原生错误为unknown。与亮度共用守卫和既有NativeBridge断连处理，在原生读写前后检查总期限，不能抢占已进入的阻塞调用。没有重试、补偿、外部工具或另一执行器。错误只含固定消息、代码、方法及效果状态，不返回设备标识或原异常正文。

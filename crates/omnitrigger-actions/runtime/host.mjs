@@ -17,7 +17,7 @@ let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
 const nativeMethods = new Set(['system.open','process.capture','history.list','history.get','history.append','history.remove','fs.stat','ui.choose','ui.notify','ui.open_history','ui.toggle_history','browser.profiles','browser.call','target.info','target.context',
-  'keyboard.shortcut','keyboard.sequence','keyboard.text','selection.copy','selection.copy_data','clipboard.read','clipboard.read_data','clipboard.write','window.action','display.brightness_step']);
+  'keyboard.shortcut','keyboard.sequence','keyboard.text','selection.copy','selection.copy_data','clipboard.read','clipboard.read_data','clipboard.write','window.action','display.brightness_step','audio.volume_adjust']);
 let nativePending;
 let nativePendingMethod;
 let nativeId = 0;
@@ -102,7 +102,8 @@ function nativeCall(method, params) {
   const historyUi = method === 'ui.open_history' || method === 'ui.toggle_history';
   const opening = method === 'system.open';
   const capture = method === 'process.capture';
-  const brightness = method === 'display.brightness_step';
+  const volume = method === 'audio.volume_adjust';
+  const brightness = method === 'display.brightness_step' || volume;
   const stat = method === 'fs.stat';
   const dataRead = method === 'clipboard.read_data';
   const dataCopy = method === 'selection.copy_data';
@@ -110,7 +111,7 @@ function nativeCall(method, params) {
   const historyRead = method === 'history.list' || method === 'history.get';
   const historyWrite = method === 'history.append' || method === 'history.remove';
   const history = historyRead || historyWrite;
-  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, brightness ? '亮度步进未获完整确认；请检查结构化回执。' : capture ? '程序输出采集未完成，请检查错误代码。' : stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : history ? '剪贴板历史调用失败；请检查错误代码。' : message), {effectState:stat || dataRead || historyRead ? 'not_started' : effectState, method});
+  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, volume ? '音量调节未获完整确认；请检查错误代码和效果状态。' : brightness ? '亮度步进未获完整确认；请检查结构化回执。' : capture ? '程序输出采集未完成，请检查错误代码。' : stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : history ? '剪贴板历史调用失败；请检查错误代码。' : message), {effectState:stat || dataRead || historyRead ? 'not_started' : effectState, method});
   if (!nativeMethods.has(method)) return Promise.reject(fail('invalid_input', '未提供此本机调用方法。'));
   if ((historyUi || stat || data || history || capture || brightness) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
   checkCancelled();
@@ -154,7 +155,7 @@ function nativeCall(method, params) {
     controller.signal.addEventListener('abort', aborted, {once:true});
     if (!capture) socket.setEncoding('utf8');
     const timeout = capture ? Math.min(params.timeout_ms + 1500, 61500) : opening || method === 'ui.choose' || brightness ? 61000 : dataCopy ? 8000 : 5000;
-    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || historyUi || stat || data || history || capture ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
+    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || historyUi || stat || data || history || capture || brightness ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
     // 这些方法的总传输时限不被零碎数据延长，外层取消/时限仍优先生效。
     if (historyUi || opening || stat || data || history || capture || brightness) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
     socket.once('connect', () => {

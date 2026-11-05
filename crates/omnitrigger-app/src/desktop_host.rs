@@ -292,6 +292,9 @@ impl NativeHost for DesktopHost {
                     omnitrigger_windows::read_clipboard_data,
                 )
             }
+            "audio.volume_adjust" => {
+                return crate::volume_adjust_host::execute(params, cancellation, None)
+            }
             "display.brightness_step" => {
                 return crate::brightness_step_host::execute(params, cancellation, None)
             }
@@ -519,6 +522,9 @@ impl NativeHost for DesktopHost {
                 Some(deadline),
                 omnitrigger_windows::read_clipboard_data,
             ),
+            "audio.volume_adjust" => {
+                crate::volume_adjust_host::execute(params, cancellation, Some(deadline))
+            }
             "display.brightness_step" => {
                 crate::brightness_step_host::execute(params, cancellation, Some(deadline))
             }
@@ -1472,6 +1478,33 @@ mod tests {
             .call_with_deadline(
                 "display.brightness_step",
                 params,
+                &CancellationToken::new(),
+                Instant::now(),
+            )
+            .unwrap_err();
+        assert_eq!(second.code, "timeout");
+        assert_eq!(second.effect_state.as_deref(), Some("not_started"));
+    }
+    #[test]
+    fn volume_dispatch_both_entries_do_not_require_a_foreground_target() {
+        let host = DesktopHost {
+            target: Err(error(
+                "synthetic_no_target",
+                "合成不可用目标",
+                "not_started",
+            )),
+        };
+        let token = CancellationToken::new();
+        token.cancel();
+        let first = host
+            .call("audio.volume_adjust", json!({"delta_percent":5}), &token)
+            .unwrap_err();
+        assert_eq!(first.code, "cancelled");
+        assert_eq!(first.method.as_deref(), Some("audio.volume_adjust"));
+        let second = host
+            .call_with_deadline(
+                "audio.volume_adjust",
+                json!({"delta_percent":-5}),
                 &CancellationToken::new(),
                 Instant::now(),
             )

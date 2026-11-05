@@ -15,7 +15,7 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 25] = [
+const METHODS: [&str; 26] = [
     "system.open",
     "process.capture",
     "history.list",
@@ -41,6 +41,7 @@ const METHODS: [&str; 25] = [
     "clipboard.write",
     "window.action",
     "display.brightness_step",
+    "audio.volume_adjust",
 ];
 
 /// 由应用为本次调用捕获的本机上下文。不是沙盒或权限隔离。
@@ -229,7 +230,10 @@ impl NativeBridge {
                     *next_id += 1;
                     let opening = request.method == "system.open";
                     let capture = request.method == "process.capture";
-                    let brightness = request.method == "display.brightness_step";
+                    let brightness = matches!(
+                        request.method.as_str(),
+                        "display.brightness_step" | "audio.volume_adjust"
+                    );
                     let data_read = request.method == "clipboard.read_data";
                     let data_copy = request.method == "selection.copy_data";
                     let history_read =
@@ -285,8 +289,13 @@ impl NativeBridge {
                     }
                     .map_err(|mut error| {
                         if brightness {
-                            error.message = "亮度步进未获完整确认；请检查结构化回执。".into();
-                            error.method = Some("display.brightness_step".into());
+                            error.message = if request.method == "audio.volume_adjust" {
+                                "音量调节未获完整确认；请检查错误代码和效果状态。"
+                            } else {
+                                "亮度步进未获完整确认；请检查结构化回执。"
+                            }
+                            .into();
+                            error.method = Some(request.method.clone());
                             error.required_permissions.clear();
                             if !matches!(
                                 error.effect_state.as_deref(),

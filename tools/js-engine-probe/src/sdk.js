@@ -43,6 +43,7 @@ ctx.delay = milliseconds => {
 };
 function desktopCall(method, params) {
     if (!nativeContext || nativeContext.error) {
+        if (method === 'audio.volume_adjust') throw Object.assign(new Error('音量调节需要应用本机能力桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
         if (method === 'display.brightness_step') throw Object.assign(new Error('亮度步进需要应用本机能力桥接。'), {code:'native_bridge_unavailable',effectState:'not_started',method});
         if (['history.list','history.get','history.append','history.remove'].includes(method)) {
             throw Object.assign(new Error('剪贴板历史调用失败；请检查错误代码。'), {code:'history_unavailable',effectState:'not_started',method});

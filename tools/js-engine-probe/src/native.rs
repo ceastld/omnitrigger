@@ -10,7 +10,7 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 23] = [
+pub const METHODS: [&str; 24] = [
     "history.list",
     "history.get",
     "history.append",
@@ -34,6 +34,7 @@ pub const METHODS: [&str; 23] = [
     "clipboard.write",
     "window.action",
     "display.brightness_step",
+    "audio.volume_adjust",
 ];
 
 #[derive(Deserialize)]
@@ -63,7 +64,9 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
             code
         })
         .into(),
-        message: if method == "display.brightness_step" {
+        message: if method == "audio.volume_adjust" {
+            "音量调节未获完整确认；请检查错误代码和效果状态。".into()
+        } else if method == "display.brightness_step" {
             "亮度步进未获完整确认；请检查结构化回执。".into()
         } else if stat {
             "本地路径状态查询失败；请检查错误代码。".into()
@@ -93,7 +96,7 @@ fn brightness_transport_effect(
     write_began: bool,
     fallback: &'static str,
 ) -> &'static str {
-    if method == "display.brightness_step" && !write_began {
+    if matches!(method, "display.brightness_step" | "audio.volume_adjust") && !write_began {
         "not_started"
     } else {
         fallback
@@ -139,7 +142,13 @@ pub fn call(
     let browser = method.starts_with("browser.");
     let deadline = Instant::now()
         + Duration::from_secs(
-            if browser || method == "ui.choose" || method == "display.brightness_step" {
+            if browser
+                || method == "ui.choose"
+                || matches!(
+                    method.as_str(),
+                    "display.brightness_step" | "audio.volume_adjust"
+                )
+            {
                 66
             } else if method == "selection.copy_data" {
                 8
@@ -169,6 +178,7 @@ pub fn call(
                 | "clipboard.read_data"
                 | "selection.copy_data"
                 | "display.brightness_step"
+                | "audio.volume_adjust"
                 | "history.list"
                 | "history.get"
                 | "history.append"
@@ -185,6 +195,7 @@ pub fn call(
                     method.as_str(),
                     "selection.copy_data"
                         | "display.brightness_step"
+                        | "audio.volume_adjust"
                         | "history.append"
                         | "history.remove"
                         | "ui.toggle_history"
@@ -211,6 +222,7 @@ pub fn call(
                         | "clipboard.read_data"
                         | "selection.copy_data"
                         | "display.brightness_step"
+                        | "audio.volume_adjust"
                         | "history.list"
                         | "history.get"
                         | "history.append"
@@ -224,6 +236,7 @@ pub fn call(
                             method.as_str(),
                             "selection.copy_data"
                                 | "display.brightness_step"
+                                | "audio.volume_adjust"
                                 | "history.append"
                                 | "history.remove"
                                 | "ui.toggle_history"
@@ -322,6 +335,7 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "clipboard.read_data"
                     | "selection.copy_data"
                     | "display.brightness_step"
+                    | "audio.volume_adjust"
                     | "history.list"
                     | "history.get"
                     | "history.append"
@@ -464,6 +478,15 @@ mod tests {
     }
     #[test]
     fn brightness_timeout_before_request_write_is_not_started_and_after_attempt_is_unknown() {
+        assert_eq!(
+            brightness_transport_effect("audio.volume_adjust", false, "unknown"),
+            "not_started"
+        );
+        assert_eq!(
+            brightness_transport_effect("audio.volume_adjust", true, "unknown"),
+            "unknown"
+        );
+
         assert_eq!(
             brightness_transport_effect("display.brightness_step", false, "unknown"),
             "not_started"

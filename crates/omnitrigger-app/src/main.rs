@@ -3,6 +3,7 @@
 mod action_library;
 mod action_packages;
 mod action_target_context;
+mod adjustment_guard;
 mod appearance;
 mod appearance_ui;
 mod assets;
@@ -69,6 +70,7 @@ mod trigger_conditions;
 mod trigger_panel;
 mod update_ui;
 mod updater;
+mod volume_adjust_host;
 mod wheel_editor;
 mod wheel_input_cli;
 mod wheel_workspace;

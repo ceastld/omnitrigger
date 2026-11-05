@@ -71,8 +71,8 @@ mod system_hud_window;
 pub use native_system_hud::{NativeSystemHud, NativeSystemHudSnapshot};
 #[cfg(windows)]
 pub use system_adjustment::{
-    adjust_system_at, capture_adjustment_point, query_system_adjustment_capabilities_at,
-    step_brightness_with_first_wmi_fallback_at_if,
+    adjust_system_at, adjust_volume_if, capture_adjustment_point,
+    query_system_adjustment_capabilities_at, step_brightness_with_first_wmi_fallback_at_if,
     step_brightness_with_first_wmi_fallback_under_cursor, step_first_enumerated_wmi_brightness,
     step_first_enumerated_wmi_brightness_if, step_physical_brightness_set_at,
     step_physical_brightness_set_at_if, step_physical_brightness_set_under_cursor,

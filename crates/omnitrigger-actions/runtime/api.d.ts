@@ -1,3 +1,15 @@
+export interface VolumeAdjustOptions {
+  /** 非零整数，-100至100个百分点；运行时校验范围。 */
+  deltaPercent:number;
+}
+/** 默认多媒体输出端点；独立读回不保证与请求相同，不返回设备标识。 */
+export type VolumeAdjustResult = {
+  effectState:'unknown';
+  previousPercent:number;
+  requestedPercent:number;
+  currentPercent:number;
+};
+
 export interface BrightnessStepOptions {
   direction:'up'|'down';
   strategy:'physical'|'wmi_first'|'physical_then_wmi';
@@ -51,7 +63,7 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'display.brightness_step' | 'ui.choose' | 'ui.notify' | 'ui.open_history' | 'ui.toggle_history';
+  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'display.brightness_step' | 'audio.volume_adjust' | 'ui.choose' | 'ui.notify' | 'ui.open_history' | 'ui.toggle_history';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
 }
@@ -183,6 +195,7 @@ export interface ActionContext {
     choose(options: ChooseOptions): Promise<ChooseResult>;
   };
   desktop: {
+    adjustVolume(options: VolumeAdjustOptions): Promise<VolumeAdjustResult>;
     /** 必填显式策略；逐项检查回执，无自动重试或补偿。 */
     stepBrightness(options: BrightnessStepOptions): Promise<BrightnessStepResult>;
     /** 本次提交时捕获的目标，不在调用时重新选择前台。进程名含 .exe。 */

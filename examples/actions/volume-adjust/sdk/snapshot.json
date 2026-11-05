@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "required_api": "ctx.desktop.adjustVolume",
+  "wire": "audio.volume_adjust",
+  "files": {
+    "api.d.ts": {
+      "canonical_source": "crates/omnitrigger-actions/runtime/api.d.ts",
+      "sha256": "7ae85df4d6bba81754d694e4df97ac27edc9c8bab1ddb646c9f4c396c401b72d"
+    },
+    "script-types.d.ts": {
+      "canonical_source": "crates/omnitrigger-actions/runtime/script-types.d.ts",
+      "sha256": "b01bb12f8f79e07f1bd51f771a150f0a23b2e4417d180eb2d100a24715827369"
+    },
+    "clipboard-history-api.d.ts": {
+      "canonical_source": "crates/omnitrigger-actions/runtime/clipboard-history-api.d.ts",
+      "sha256": "c40fd66fd6318909c1bab62775d097dcfb5a8a7a84a411883a4852bdbd04cf2e"
+    }
+  }
+}

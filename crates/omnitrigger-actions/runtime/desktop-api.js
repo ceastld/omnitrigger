@@ -191,15 +191,7 @@ function createDesktopApi(invoke) {
         'desktop_unavailable','desktop_busy','desktop_call_limit','desktop_connection','desktop_protocol','desktop_timeout',
         'invalid_response','initialization_failed','monitor_unavailable','ambiguous_monitor','brightness_unavailable',
         'brightness_failed','brightness_unknown'];
-      let code = 'native_bridge_failed', effect = 'unknown';
-      try {
-        // 只读各自一次的自有数据属性；不执行异常getter或继承属性。
-        const reported = cause != null ? Object.getOwnPropertyDescriptor(cause,'code')?.value : undefined;
-        const reportedEffect = cause != null ? Object.getOwnPropertyDescriptor(cause,'effectState')?.value : undefined;
-        if (allowed.includes(reported)) code = reported;
-        if (reportedEffect === 'not_started') effect = 'not_started';
-      } catch (_) { /* 不读取或回显异常正文。 */ }
-      throw brightnessFault(code,effect);
+      return desktopMutationFailure(cause,allowed,brightnessFault);
     };
     const result = value => {
       try { return brightnessResponse(value,requestedStrategy); }
@@ -211,7 +203,48 @@ function createDesktopApi(invoke) {
     } catch (cause) { return failure(cause); }
   }
 
+  function desktopMutationFailure(cause, allowed, makeFault) {
+    let code='native_bridge_failed',effect='unknown';
+    try {
+      const reported=cause != null ? Object.getOwnPropertyDescriptor(cause,'code')?.value : undefined;
+      const reportedEffect=cause != null ? Object.getOwnPropertyDescriptor(cause,'effectState')?.value : undefined;
+      if(allowed.includes(reported))code=reported;
+      if(reportedEffect==='not_started')effect='not_started';
+    } catch (_) { /* 不读取或回显异常正文。 */ }
+    throw makeFault(code,effect);
+  }
+  function volumeFault(code,effectState){
+    return Object.assign(new Error('音量调节未获完整确认；请检查错误代码和效果状态。'),
+      {code,effectState:code==='audio_unknown'?'unknown':effectState,method:'audio.volume_adjust'});
+  }
+  function adjustVolume(args){
+    let delta;
+    try{
+      if(args.length!==1)throw new Error();
+      const params=brightnessRecord(args[0],['deltaPercent']);
+      delta=params.deltaPercent;
+      if(!Number.isInteger(delta)||delta===0||delta < -100||delta > 100)throw new Error();
+    }catch(_){throw volumeFault('invalid_input','not_started');}
+    const failure=cause=>desktopMutationFailure(cause,
+      ['invalid_input','cancelled','timeout','native_bridge_unavailable','native_bridge_failed','desktop_unavailable',
+        'desktop_busy','desktop_call_limit','desktop_connection','desktop_protocol','desktop_timeout','invalid_response',
+        'initialization_failed','audio_unavailable','audio_failed','audio_unknown'],volumeFault);
+    const result=value=>{
+      try{
+        const row=brightnessRecord(value,['effectState','previousPercent','requestedPercent','currentPercent']);
+        if(row.effectState!=='unknown'||![row.previousPercent,row.requestedPercent,row.currentPercent].every(value=>Number.isInteger(value)&&value>=0&&value<=100)
+          ||(delta>0&&row.requestedPercent<row.previousPercent)||(delta<0&&row.requestedPercent>row.previousPercent))throw new Error();
+        return row;
+      }catch(_){throw volumeFault('invalid_response','unknown');}
+    };
+    try{
+      const value=invoke('audio.volume_adjust',{delta_percent:delta});
+      return value&&typeof value.then==='function'?value.then(result,failure):result(value);
+    }catch(cause){return failure(cause);}
+  }
+
   const desktop = Object.freeze({
+    adjustVolume: (...args) => adjustVolume(args),
     stepBrightness: (...args) => brightnessStep(args),
     target: () => invoke('target.info', {}),
     targetContext: () => invoke('target.context', {}),

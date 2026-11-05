@@ -1,4 +1,5 @@
 //! 亮度 wire 的唯一 App 参数解析与匿名回执映射；复用现有平台实现。
+use crate::adjustment_guard::AdjustmentControl;
 use omnitrigger_actions::{ActionError, CancellationToken};
 use omnitrigger_windows::{
     BrightnessStepDirection, FirstWmiBrightnessResult, PhysicalBrightnessSetResult,
@@ -7,7 +8,9 @@ use omnitrigger_windows::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{cell::Cell, time::Instant};
+#[cfg(test)]
+use std::cell::Cell;
+use std::time::Instant;
 const METHOD: &str = "display.brightness_step";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,46 +117,20 @@ fn execute_with_clock(
     if !["physical", "wmi_first", "physical_then_wmi"].contains(&args.strategy.as_str()) {
         return Err(fault("invalid_input", "not_started"));
     }
-    let written = Cell::new(false);
-    let stopped = Cell::new(None);
-    let mut check = |write: bool| {
-        let reason = if cancellation.is_cancelled() {
-            Some("cancelled")
-        } else if deadline.is_some_and(|limit| now() >= limit) {
-            Some("timeout")
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
-            stopped.set(Some(reason));
-            return Err(SystemAdjustmentError {
-                code: SystemAdjustmentErrorCode::ConfirmationUnknown,
-                message: "亮度步进已停止。".into(),
-            });
-        }
-        if write {
-            written.set(true);
-        }
-        Ok(())
-    };
-    let effect = || {
-        if written.get() {
-            "unknown"
-        } else {
-            "not_started"
-        }
-    };
-    check(false).map_err(|_| fault(stopped.get().unwrap_or("brightness_failed"), effect()))?;
+    let control = AdjustmentControl::new(cancellation, deadline, &now);
+    let mut check = |write| control.check(write);
+    let effect = || control.effect();
+    check(false).map_err(|_| fault(control.reason().unwrap_or("brightness_failed"), effect()))?;
     let captured = if args.strategy == "wmi_first" {
         Ok(None)
     } else {
         capture().map(Some)
     };
-    check(false).map_err(|_| fault(stopped.get().unwrap_or("brightness_failed"), effect()))?;
+    check(false).map_err(|_| fault(control.reason().unwrap_or("brightness_failed"), effect()))?;
     let point = captured.map_err(|error| fault(code(&error), effect()))?;
     let (physical_result, wmi_result) = invoke(direction, &args.strategy, point, &mut check);
     let _ = check(false);
-    if let Some(reason) = stopped.get() {
+    if let Some(reason) = control.reason() {
         return Err(fault(reason, effect()));
     }
     Ok(

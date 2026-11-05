@@ -1,3 +1,15 @@
+interface ScriptVolumeAdjustOptions {
+  /** 非零整数，-100至100个百分点；运行时校验范围。 */
+  deltaPercent:number;
+}
+/** 默认多媒体输出端点；独立读回不保证与请求相同，不返回设备标识。 */
+type ScriptVolumeAdjustResult = {
+  effectState:'unknown';
+  previousPercent:number;
+  requestedPercent:number;
+  currentPercent:number;
+};
+
 interface ScriptBrightnessStepOptions {
   direction:'up'|'down';
   strategy:'physical'|'wmi_first'|'physical_then_wmi';
@@ -208,6 +220,7 @@ type ScriptContext = Readonly<{
         choose(options: ScriptChooseOptions): ScriptChooseResult;
     };
     desktop: {
+        adjustVolume(options: ScriptVolumeAdjustOptions): ScriptVolumeAdjustResult;
         /** 同步，参数与Node入口共用严格工厂；逐项检查回执。 */
         stepBrightness(options: ScriptBrightnessStepOptions): ScriptBrightnessStepResult;
         /** 本次提交时捕获的目标，不在调用时重新选择前台；独立 CLI 不提供目标。 */
