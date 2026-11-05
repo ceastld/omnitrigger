@@ -59,6 +59,8 @@ pub struct Engine {
     /// 一次物理按压在认领为末键后，直到释放都不能借给其他组合作前缀。
     terminal_presses: BTreeSet<Button>,
     captured_presses: BTreeMap<Button, usize>,
+    /// 保留层仍物理按住的可恢复附加键，保留按下次序。
+    retained_adorn_order: Vec<Button>,
     pending: Vec<InputKind>,
     wheel: [i64; 4],
     wheel_owner: [Option<u64>; 4],
@@ -98,6 +100,7 @@ impl Engine {
             pressed: BTreeMap::new(),
             terminal_presses: BTreeSet::new(),
             captured_presses: BTreeMap::new(),
+            retained_adorn_order: Vec::with_capacity(254),
             pending: Vec::new(),
             wheel: [0; 4],
             wheel_owner: [None; 4],
@@ -394,6 +397,7 @@ impl Engine {
     }
     /// 取消上下文并消费旧按压的后续释放；活动拖拽的终止事件与收尾决策同步返回。
     pub fn cancel(&mut self) -> Decision {
+        self.retained_adorn_order.clear();
         let drag = self.finish_drag(DragPhase::Cancelled);
         self.dedicated_leader = None;
         self.layer_owner = None;

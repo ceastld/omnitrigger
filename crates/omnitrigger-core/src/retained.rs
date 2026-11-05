@@ -87,7 +87,11 @@ impl Engine {
                 if event == InputKind::Down(PRIMARY) && !session.restored_down {
                     replay.push(InputKind::Down(session.key));
                     self.pressed.insert(session.key, PressState::Observed);
-                    self.retained.as_mut().unwrap().restored_down = true;
+                    self.restore_retained_adorns(&mut replay, session.temporary);
+                    let active = self.retained.as_mut().unwrap();
+                    active.temporary = None;
+                    active.used = true;
+                    active.restored_down = true;
                 }
                 let mut decision = match event {
                     InputKind::Down(button) => self.down(button),
@@ -119,7 +123,38 @@ impl Engine {
             .map(|binding| (binding.id, binding.keyboard.repeat))
     }
 
+    fn record_retained_adorn(&mut self, button: Button, owner: usize) {
+        if self.bindings[owner].held.contains(&button)
+            && self.bindings[owner].keyboard.prefix() != Some(button)
+            && !self.retained_adorn_order.contains(&button)
+        {
+            // 注册键码限于1..=254且不重复，预留容量足够，无Hook路径扩容。
+            self.retained_adorn_order.push(button);
+        }
+    }
+
+    fn restore_retained_adorns(&mut self, replay: &mut Vec<InputKind>, temporary: Option<Button>) {
+        if let Some(temporary) = temporary {
+            replay.push(InputKind::Down(temporary));
+            self.pressed.insert(temporary, PressState::Observed);
+            self.captured_presses.remove(&temporary);
+        }
+        for &key in &self.retained_adorn_order {
+            if Some(key) != temporary
+                && self.pressed.get(&key) == Some(&PressState::Consumed)
+                && !self.terminal_presses.contains(&key)
+            {
+                replay.push(InputKind::Down(key));
+                self.pressed.insert(key, PressState::Observed);
+            }
+        }
+        self.retained_adorn_order.clear();
+        self.captured_presses
+            .retain(|key, _| self.pressed.get(key) != Some(&PressState::Observed));
+    }
+
     fn retained_capture(&mut self, button: Button, owner: usize) {
+        self.record_retained_adorn(button, owner);
         // 此前已经交付给应用的按下仍须交付释放，不能因为重复事件被捕获而丢掉释放。
         self.pressed.entry(button).or_insert(PressState::Consumed);
         self.captured_presses.insert(button, owner);
@@ -140,6 +175,14 @@ impl Engine {
     }
 
     fn retained_down(&mut self, session: RetainedSession, button: Button) -> Decision {
+        if session.restored_down {
+            // 鼠标恢复只保留引导身份；后续键盘输入不再参与层内匹配。
+            let state = self.pressed.entry(button).or_insert(PressState::Passed);
+            return Decision {
+                consume: !matches!(*state, PressState::Passed | PressState::Observed),
+                ..Decision::default()
+            };
+        }
         if button == session.key {
             return Decision {
                 consume: true,
@@ -148,6 +191,36 @@ impl Engine {
         }
         let repeating = self.pressed.contains_key(&button);
         self.retained.as_mut().unwrap().used = true;
+        if repeating
+            && matches!(
+                self.pressed.get(&button),
+                Some(PressState::Passed | PressState::Observed)
+            )
+        {
+            // 会话之前已经交付的按下不能借重复变成捕获键或恢复键。
+            return Decision::default();
+        }
+        if repeating
+            && session.temporary != Some(button)
+            && self.retained_adorn_order.contains(&button)
+        {
+            // 已提升的附加键仍由原按压拥有，重复不能重新进入快速暂存。
+            return Decision {
+                consume: true,
+                ..Decision::default()
+            };
+        }
+        if repeating && session.temporary == Some(button) {
+            // 纯附加键重复继续等待；兼有普通末键含义时按来源快速输入路径回退。
+            return if self.retained_action(button).is_some() {
+                self.retained_fallback(session, button)
+            } else {
+                Decision {
+                    consume: true,
+                    ..Decision::default()
+                }
+            };
+        }
         if let Some(temporary) = session.temporary {
             let owner = self.captured_extension(temporary).unwrap_or(session.owner);
             self.retained_capture(temporary, owner);
@@ -157,8 +230,8 @@ impl Engine {
                     return self.retained_hit(button, id, repeat);
                 }
             } else {
-                // 暂存键后的未命中第三键同样计入会话捕获集合。
-                self.retained_capture(button, session.owner);
+                // 来源第三键未命中时恢复引导及附加键；当前第三键透传。
+                return self.retained_fallback(session, button);
             }
             return Decision {
                 consume: true,
@@ -173,7 +246,8 @@ impl Engine {
         if !session.restored_down
             && self.now_ms.saturating_sub(session.started_ms) < u64::from(policy.fast_ms)
         {
-            if self.captured_extension(button).is_some() {
+            if let Some(owner) = self.captured_extension(button) {
+                self.record_retained_adorn(button, owner);
                 self.pressed.entry(button).or_insert(PressState::Consumed);
                 self.retained.as_mut().unwrap().temporary = Some(button);
                 return Decision {
@@ -203,6 +277,7 @@ impl Engine {
     }
 
     fn finish_retained(&mut self) {
+        self.retained_adorn_order.clear();
         self.retained = None;
         self.dedicated_leader = None;
         self.layer_owner = None;
@@ -221,6 +296,7 @@ impl Engine {
     fn retained_fallback(&mut self, session: RetainedSession, button: Button) -> Decision {
         let mut replay = self.flush_pending();
         replay.push(InputKind::Down(session.key));
+        self.restore_retained_adorns(&mut replay, None);
         self.finish_retained();
         self.pressed.insert(session.key, PressState::Observed);
         self.pressed.entry(button).or_insert(PressState::Passed);
@@ -231,8 +307,31 @@ impl Engine {
     }
 
     fn retained_up(&mut self, session: RetainedSession, button: Button) -> Option<Decision> {
+        self.retained_adorn_order.retain(|key| *key != button);
+        if session.restored_down {
+            if button != session.key {
+                return None;
+            }
+            let replay = self.flush_pending();
+            self.finish_retained();
+            self.pressed.remove(&button);
+            return Some(Decision {
+                replay,
+                ..Decision::default()
+            });
+        }
         if session.temporary == Some(button) {
             let action = self.retained_action(button);
+            if action.is_none() {
+                // 快速暂存键没有独立动作时恢复普通输入，避免吞掉一次快速键入。
+                let mut decision = self.retained_fallback(session, button);
+                self.pressed.remove(&button);
+                decision.consume = true;
+                decision
+                    .replay
+                    .extend([InputKind::Down(button), InputKind::Up(button)]);
+                return Some(decision);
+            }
             if action.is_some() {
                 self.commit_pending();
             }
@@ -266,12 +365,11 @@ impl Engine {
                         self.now_ms.saturating_sub(session.started_ms) <= u64::from(ms)
                     }));
         if let Some(temporary) = session.temporary {
-            replay.extend([
-                InputKind::Down(button),
-                InputKind::Up(button),
-                InputKind::Down(temporary),
-                InputKind::Up(temporary),
-            ]);
+            replay.extend([InputKind::Down(button), InputKind::Up(button)]);
+            self.retained_adorn_order.retain(|key| *key != temporary);
+            self.restore_retained_adorns(&mut replay, None);
+            replay.push(InputKind::Down(temporary));
+            self.pressed.insert(temporary, PressState::Observed);
         } else if !session.used {
             self.last_keyboard_down = Some(self.now_ms);
             let policy = &self.bindings[session.owner].keyboard;

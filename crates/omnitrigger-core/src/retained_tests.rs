@@ -74,7 +74,7 @@ fn retained_quiet_boundary_preserves_prior_passed_keys_and_repeats() {
     let mut e = Engine::new(vec![spec(1, X, None)]).unwrap();
     input(&mut e, X, true, 0);
     input(&mut e, PREFIX, true, 100);
-    assert_eq!(input(&mut e, X, true, 160).triggered, vec![1]);
+    assert_eq!(input(&mut e, X, true, 160), Decision::default());
     assert!(!input(&mut e, X, false, 170).consume);
     assert!(input(&mut e, PREFIX, false, 180).replay.is_empty());
 }
@@ -101,15 +101,15 @@ fn retained_fast_terminal_falls_back_but_boundary_triggers() {
 }
 
 #[test]
-fn retained_temporary_key_restores_two_taps_if_prefix_releases_first() {
+fn retained_temporary_key_stays_down_until_physical_release_if_prefix_releases_first() {
     let mut e = Engine::new(vec![spec(1, K, Some(G))]).unwrap();
     input(&mut e, PREFIX, true, 100);
     input(&mut e, G, true, 110);
     let up = input(&mut e, PREFIX, false, 120);
-    assert_eq!(up.replay, [tap(PREFIX), tap(G)].concat());
+    assert_eq!(up.replay, [tap(PREFIX), vec![InputKind::Down(G)]].concat());
     assert!(up.consume);
     let tail = input(&mut e, G, false, 130);
-    assert!(tail.consume);
+    assert!(!tail.consume);
     assert!(tail.replay.is_empty());
 }
 
@@ -135,18 +135,20 @@ fn retained_third_key_promotes_temporary_then_repeat_reselects_after_release() {
 }
 
 #[test]
-fn retained_unmatched_third_key_keeps_temporary_capture_until_prefix_ends() {
+fn retained_unmatched_third_key_restores_adorn_and_passes_the_current_key() {
     let mut e = Engine::new(vec![spec(1, K, Some(G))]).unwrap();
     input(&mut e, PREFIX, true, 100);
     input(&mut e, G, true, 110);
-    assert!(input(&mut e, X, true, 120).consume);
-    assert!(input(&mut e, G, false, 130).triggered.is_empty());
-    assert_eq!(input(&mut e, K, true, 160).triggered, vec![1]);
-    e.cancel();
+    let third = input(&mut e, X, true, 120);
+    assert!(!third.consume);
+    assert_eq!(
+        third.replay,
+        vec![InputKind::Down(PREFIX), InputKind::Down(G)]
+    );
+    assert_eq!(input(&mut e, G, false, 130), Decision::default());
+    assert_eq!(input(&mut e, K, true, 160), Decision::default());
     for key in [PREFIX, X, K] {
-        let up = input(&mut e, key, false, 180);
-        assert!(up.consume);
-        assert!(up.replay.is_empty());
+        assert_eq!(input(&mut e, key, false, 180), Decision::default());
     }
     input(&mut e, PREFIX, true, 300);
     assert!(input(&mut e, K, true, 360).triggered.is_empty());
@@ -174,18 +176,11 @@ fn retained_primary_mouse_restores_down_and_keeps_release_balanced() {
         assert_eq!(mouse.replay, vec![InputKind::Down(PREFIX)]);
         assert!(!mouse.consume);
         if used {
-            assert_eq!(input(&mut e, K, true, 170).triggered, vec![1]);
+            assert_eq!(input(&mut e, K, true, 170), Decision::default());
+            assert_eq!(input(&mut e, K, false, 171), Decision::default());
         }
         let up = input(&mut e, PREFIX, false, 100 + elapsed);
-        assert_eq!(
-            up.replay,
-            if elapsed <= 1500 && !used {
-                tap(PREFIX)
-            } else {
-                vec![]
-            }
-        );
-        assert_eq!(up.consume, elapsed <= 1500 && !used);
+        assert_eq!(up, Decision::default());
         assert!(!input(&mut e, Button::Mouse(MouseButton::Left), false, 2000).consume);
     }
     let mut e = Engine::new(vec![spec(1, K, None)]).unwrap();

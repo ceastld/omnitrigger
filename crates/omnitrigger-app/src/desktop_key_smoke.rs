@@ -6,6 +6,7 @@ use crate::{
 };
 use omnitrigger_actions::{
     ActionCall, ActionOutcome, ActionService, NodeRuntime, PackageCatalog, RuntimeRegistry,
+    ScriptHostRuntime,
 };
 use serde_json::{json, Value};
 use std::{
@@ -22,7 +23,7 @@ use windows::{
             Input::KeyboardAndMouse::SetFocus,
             WindowsAndMessaging::{
                 CallNextHookEx, CreateWindowExW, DestroyWindow, DispatchMessageW,
-                GetForegroundWindow, GetWindowTextW, PeekMessageW, SendMessageW,
+                GetForegroundWindow, GetWindowTextW, IsWindow, PeekMessageW, SendMessageW,
                 SetForegroundWindow, SetWindowTextW, SetWindowsHookExW, ShowWindow,
                 TranslateMessage, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, PM_REMOVE,
                 SW_SHOWNOACTIVATE, WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WS_BORDER,
@@ -120,6 +121,32 @@ fn focus(window: HWND) {
         "测试没有取得焦点，未发送输入"
     );
 }
+fn initial_focus(window: HWND) {
+    if let Some(path) = std::env::var_os("OMNITRIGGER_KEY_SMOKE_READY") {
+        // 显式交互验收可由外部控制器激活这一自建窗口；不绕过系统前台锁，
+        // 等待期间只泵消息，不采集或注入任何输入。
+        let _ = unsafe { ShowWindow(window, SW_SHOWNOACTIVATE) };
+        std::fs::write(
+            path,
+            serde_json::to_vec(&json!({
+                "pid": std::process::id(),
+                "window_id": window.0 as usize,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let start = Instant::now();
+        while unsafe { GetForegroundWindow() } != window {
+            pump();
+            assert!(
+                start.elapsed() < Duration::from_secs(30),
+                "等待专用窗口激活超时，未发送输入"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    focus(window);
+}
 fn keys() -> Vec<Key> {
     KEYS.lock().unwrap().clone()
 }
@@ -179,7 +206,7 @@ fn interactive_desktop_key_sequence_smoke() {
         unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(observe), Some(HINSTANCE(module.0)), 0) }
             .unwrap(),
     );
-    focus(windows.main);
+    initial_focus(windows.main);
     let executor = CommandExecutor::new();
     reset();
     let raw = omnitrigger_windows::capture_shortcut_target().unwrap();
@@ -221,6 +248,13 @@ fn interactive_desktop_key_sequence_smoke() {
     registry
         .register("node", Arc::new(NodeRuntime::default()))
         .unwrap();
+    let mut line_recipes = vec!["recipe"];
+    if let Some(program) = std::env::var_os("OMNITRIGGER_TEST_SCRIPT_HOST") {
+        registry
+            .register("script", Arc::new(ScriptHostRuntime::new(program)))
+            .unwrap();
+        line_recipes.push("recipe-script");
+    }
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/actions");
     let service = ActionService::new(PackageCatalog::load(&root), registry);
     let _running = Running(&service);
@@ -529,80 +563,83 @@ fn interactive_desktop_key_sequence_smoke() {
         &std::fs::read(root.join("keyboard-sequence/delete-line-start.json")).unwrap(),
     )
     .unwrap();
-    for delay in [0, 10] {
-        for (position, expected) in [
-            (9, "head\r\nDEF\r\ntail"),
-            (12, "head\r\n\r\ntail"),
-            (6, "headabcDEF\r\ntail"),
-        ] {
-            focus(windows.main);
-            let _ = unsafe { SetFocus(Some(edit)) };
-            let before = "head\r\nabcDEF\r\ntail"
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect::<Vec<_>>();
-            unsafe {
-                SetWindowTextW(edit, PCWSTR(before.as_ptr())).unwrap();
-                SendMessageW(
-                    edit,
-                    0x00b1,
-                    Some(WPARAM(position)),
-                    Some(LPARAM(position as isize)),
-                );
-            }
-            reset();
-            let mut call = call.clone();
-            call.input["keyDownDelayMs"] = delay.into();
-            service
-                .submit_with_host(
-                    1,
-                    call,
-                    Some(Arc::new(DesktopHost::capture(Some(
-                        omnitrigger_windows::capture_shortcut_target().unwrap(),
-                    )))),
-                )
-                .unwrap();
-            let start = Instant::now();
-            loop {
-                pump();
-                assert_eq!(
-                    unsafe { GetForegroundWindow() },
-                    windows.main,
-                    "行编辑实测失焦"
-                );
-                if let Ok(event) = service.try_recv() {
-                    if event.outcome.is_terminal() {
-                        assert!(
-                            matches!(event.outcome, ActionOutcome::Succeeded { .. }),
-                            "{event:?}"
-                        );
-                        break;
-                    }
+    for action_id in line_recipes {
+        for delay in [0, 10] {
+            for (position, expected) in [
+                (9, "head\r\nDEF\r\ntail"),
+                (12, "head\r\n\r\ntail"),
+                (6, "headabcDEF\r\ntail"),
+            ] {
+                focus(windows.main);
+                let _ = unsafe { SetFocus(Some(edit)) };
+                let before = "head\r\nabcDEF\r\ntail"
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect::<Vec<_>>();
+                unsafe {
+                    SetWindowTextW(edit, PCWSTR(before.as_ptr())).unwrap();
+                    SendMessageW(
+                        edit,
+                        0x00b1,
+                        Some(WPARAM(position)),
+                        Some(LPARAM(position as isize)),
+                    );
                 }
-                assert!(start.elapsed() < Duration::from_secs(10), "行编辑实测超时");
-                thread::sleep(Duration::from_millis(1));
+                reset();
+                let mut call = call.clone();
+                call.action_id = action_id.into();
+                call.input["keyDownDelayMs"] = delay.into();
+                service
+                    .submit_with_host(
+                        1,
+                        call,
+                        Some(Arc::new(DesktopHost::capture(Some(
+                            omnitrigger_windows::capture_shortcut_target().unwrap(),
+                        )))),
+                    )
+                    .unwrap();
+                let start = Instant::now();
+                loop {
+                    pump();
+                    assert_eq!(
+                        unsafe { GetForegroundWindow() },
+                        windows.main,
+                        "行编辑实测失焦"
+                    );
+                    if let Ok(event) = service.try_recv() {
+                        if event.outcome.is_terminal() {
+                            assert!(
+                                matches!(event.outcome, ActionOutcome::Succeeded { .. }),
+                                "{event:?}"
+                            );
+                            break;
+                        }
+                    }
+                    assert!(start.elapsed() < Duration::from_secs(10), "行编辑实测超时");
+                    thread::sleep(Duration::from_millis(1));
+                }
+                let gaps = if delay == 0 {
+                    vec![(3, 4, 78)]
+                } else {
+                    vec![(0, 1, 8), (1, 2, 8), (3, 4, 88), (4, 5, 8)]
+                };
+                let key_evidence = verify(
+                    &[
+                        (160, false),
+                        (36, false),
+                        (36, true),
+                        (160, true),
+                        (8, false),
+                        (8, true),
+                    ],
+                    &gaps,
+                );
+                let mut buffer = [0u16; 128];
+                let count = unsafe { GetWindowTextW(edit, &mut buffer) }.max(0) as usize;
+                let observed = String::from_utf16(&buffer[..count]).unwrap();
+                assert_eq!(observed, expected);
+                reports.push(json!({"case":"delete-line-start","action_id":action_id,"key_down_delay_ms":delay,"cursor":position,"expected":expected,"observed":observed,"evidence":key_evidence}));
             }
-            let gaps = if delay == 0 {
-                vec![(3, 4, 78)]
-            } else {
-                vec![(0, 1, 8), (1, 2, 8), (3, 4, 88), (4, 5, 8)]
-            };
-            let key_evidence = verify(
-                &[
-                    (160, false),
-                    (36, false),
-                    (36, true),
-                    (160, true),
-                    (8, false),
-                    (8, true),
-                ],
-                &gaps,
-            );
-            let mut buffer = [0u16; 128];
-            let count = unsafe { GetWindowTextW(edit, &mut buffer) }.max(0) as usize;
-            let observed = String::from_utf16(&buffer[..count]).unwrap();
-            assert_eq!(observed, expected);
-            reports.push(json!({"case":"delete-line-start","key_down_delay_ms":delay,"cursor":position,"expected":expected,"observed":observed,"evidence":key_evidence}));
         }
     }
     let report = json!({"cases":reports,"clipboard_accessed":false,"physical_keys_recorded":false,"scope":"tagged_input_and_owned_edit_not_physical_trigger_or_original_target_application_evidence"});
@@ -610,7 +647,83 @@ fn interactive_desktop_key_sequence_smoke() {
         std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
     println!(
-        "原生、Node按键和自建输入框行编辑共{}项实测通过；未访问剪贴板或记录物理键盘输入。",
+        "原生、脚本按键和自建输入框行编辑共{}项实测通过；未访问剪贴板或记录物理键盘输入。",
         reports.len()
     );
+}
+
+#[test]
+#[ignore = "激活自建窗口，经真实轻量脚本验证关闭效果；需要 OMNITRIGGER_TEST_SCRIPT_HOST"]
+fn interactive_close_recipe_smoke() {
+    let program = std::env::var_os("OMNITRIGGER_TEST_SCRIPT_HOST").expect("需要真实轻量宿主路径");
+    let windows = Windows {
+        main: window(w!("OmniTrigger 关闭动作效果实测")),
+        other: window(w!("OmniTrigger 关闭动作备用窗口")),
+        previous: unsafe { GetForegroundWindow() },
+    };
+    initial_focus(windows.main);
+    let raw = omnitrigger_windows::capture_shortcut_target().unwrap();
+    let process = omnitrigger_windows::ScriptTarget::capture(raw)
+        .unwrap()
+        .info()
+        .unwrap()
+        .process_name;
+    assert_ne!(process, "Acrobat.exe", "本例验证默认关闭窗口分支");
+    let mut registry = RuntimeRegistry::new();
+    registry
+        .register(
+            "script",
+            Arc::new(ScriptHostRuntime::new(program).with_timeout(Duration::from_secs(5))),
+        )
+        .unwrap();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/actions");
+    let call: ActionCall =
+        serde_json::from_slice(&std::fs::read(root.join("common-desktop/call.json")).unwrap())
+            .unwrap();
+    assert_eq!(call.input["ctrlWProcesses"], json!(["Acrobat"]));
+    let service = ActionService::new(PackageCatalog::load(&root), registry);
+    let _running = Running(&service);
+    service
+        .submit_with_host(1, call, Some(Arc::new(DesktopHost::capture(Some(raw)))))
+        .unwrap();
+    let start = Instant::now();
+    let mut outcome = None;
+    loop {
+        pump();
+        let closed = !unsafe { IsWindow(Some(windows.main)) }.as_bool();
+        if !closed && unsafe { GetForegroundWindow() } != windows.main {
+            service.cancel_all();
+            panic!("关闭效果验收失焦，已取消输入");
+        }
+        if let Ok(event) = service.try_recv() {
+            if event.outcome.is_terminal() {
+                assert!(
+                    matches!(event.outcome, ActionOutcome::Succeeded { .. }),
+                    "{:?}",
+                    event.outcome
+                );
+                if let ActionOutcome::Succeeded { output } = event.outcome {
+                    assert_eq!(output["operation"], "alt_f4");
+                    assert_eq!(output["submitted"], true);
+                    outcome = Some(output);
+                }
+            }
+        }
+        if closed && outcome.is_some() {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(8), "自建窗口未关闭");
+        thread::sleep(Duration::from_millis(1));
+    }
+    let report = json!({
+        "case": "close-by-process-alt-f4",
+        "window_closed": true,
+        "outcome": outcome,
+        "clipboard_accessed": false,
+        "scope": "owned_window_not_original_application_or_ctrl_w_branch",
+    });
+    if let Some(path) = std::env::var_os("OMNITRIGGER_KEY_SMOKE_REPORT") {
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+    println!("真实轻量脚本已关闭本轮自建窗口，未访问剪贴板。");
 }
