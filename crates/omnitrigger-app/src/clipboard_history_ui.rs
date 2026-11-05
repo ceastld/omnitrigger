@@ -5,17 +5,23 @@ use crate::clipboard_history_controller::{
     CommitDisposition, DropReason, Failure, Status, StoreFailure,
 };
 use crate::clipboard_history_filter::{
-    summary_label, SummaryDirection, SummaryQuery, MAX_QUERY_CHARACTERS,
+    summary_keyboard_action, summary_label, HistoryQueryView, SummaryDirection, SummaryEnterLatch,
+    SummaryKeyboardAction, SummaryQuery, MAX_QUERY_CHARACTERS,
 };
 use crate::clipboard_history_send::{
     HistoryLaunchTarget, HistorySendRequest, HistorySendSession, SendFailure, SendReceipt,
 };
-use crate::clipboard_history_store::{ClipboardHistoryStore, HistoryError, HistoryList, MAX_ITEMS};
+use crate::clipboard_history_store::{
+    ClipboardHistoryStore, HistoryError, HistoryList, HistorySearch, MAX_ITEMS,
+};
 use crate::clipboard_history_ui_state::{Control, HistoryUiState, Phase};
 use crate::event_bridge::{EventBridge, UiWake};
 use crate::message_input::MessageInput;
 use crate::theme::{self, button, rgb, Tone};
-use gpui::{div, prelude::*, px, Context, Div, Entity, ScrollHandle, Subscription};
+use gpui::{
+    div, prelude::*, px, Context, Div, Entity, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton,
+    ScrollHandle, Subscription, Window,
+};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -28,6 +34,10 @@ enum Request {
     },
     List {
         id: u64,
+    },
+    Search {
+        id: u64,
+        query: SummaryQuery,
     },
     Remove {
         id: u64,
@@ -48,6 +58,10 @@ enum Reply {
     List {
         id: Option<u64>,
         result: Result<HistoryList, &'static str>,
+    },
+    Search {
+        id: u64,
+        result: Result<HistorySearch, &'static str>,
     },
     Notice(&'static str),
     Sent {
@@ -72,8 +86,11 @@ impl Drop for Worker {
 pub(super) struct ClipboardHistoryUi {
     state: HistoryUiState,
     sending: HistorySendSession,
-    query: SummaryQuery,
+    query: HistoryQueryView,
     search: Entity<MessageInput>,
+    list_focus: FocusHandle,
+    list_blur: Option<Subscription>,
+    enter_send: SummaryEnterLatch,
     scroll: ScrollHandle,
     _search_changed: Subscription,
     store: Option<Arc<ClipboardHistoryStore>>,
@@ -93,14 +110,15 @@ impl ClipboardHistoryUi {
     ) -> Self {
         let search = cx.new(|cx| {
             let mut input = MessageInput::new(cx).with_character_limit(MAX_QUERY_CHARACTERS);
-            input.set_placeholder("筛选摘要（不搜索正文）");
+            input.set_placeholder("筛选摘要；点击“查找正文”搜索完整文本");
             input
         });
         let search_changed = cx.observe(&search, |this, search, cx| {
             match SummaryQuery::new(&search.read(cx).text()) {
-                Ok(query) if query != this.text_history.query => {
+                Ok(query) if &query != this.text_history.query.draft() => {
                     this.text_history.cancel_send();
-                    this.text_history.query = query;
+                    this.text_history.enter_send.cancel();
+                    this.text_history.query.set_draft(query);
                     this.text_history.scroll.scroll_to_item(0);
                     this.text_history.state.selected = None;
                 }
@@ -114,8 +132,11 @@ impl ClipboardHistoryUi {
         Self {
             state: HistoryUiState::new(store.is_some()),
             sending: HistorySendSession::new(launch_target, ui_window),
-            query: SummaryQuery::default(),
+            query: HistoryQueryView::default(),
             search,
+            list_focus: cx.focus_handle(),
+            list_blur: None,
+            enter_send: SummaryEnterLatch::default(),
             scroll: ScrollHandle::new(),
             _search_changed: search_changed,
             store,
@@ -176,6 +197,7 @@ impl ClipboardHistoryUi {
     }
 
     fn primary(&mut self) {
+        self.enter_send.cancel();
         if matches!(
             self.state.phase,
             Phase::Starting | Phase::On | Phase::CloseFailed
@@ -198,14 +220,46 @@ impl ClipboardHistoryUi {
 
     /// 页面已明确打开后请求一次摘要；不在构造、render或poll中推断进入。
     pub fn activate(&mut self) {
+        self.enter_send.cancel();
         if let Some(id) = self.state.initial_query() {
             self.submit(Request::List { id });
         }
     }
 
     fn refresh(&mut self) {
+        self.enter_send.cancel();
         if let Some(id) = self.state.query() {
             self.submit(Request::List { id });
+        }
+    }
+
+    fn search_full_text(&mut self, cx: &mut Context<super::Workspace>) {
+        self.enter_send.cancel();
+        // 直接读本次控件值，不依赖observe是否已经交付，也不读取系统剪贴板。
+        let query = match SummaryQuery::new(&self.search.read(cx).text()) {
+            Ok(query) => query,
+            Err(_) => {
+                self.cancel_send();
+                self.state.selected = None;
+                self.state.message = Some("查找词过长，未查询正文，请缩短后重试。");
+                return;
+            }
+        };
+        if &query != self.query.draft() {
+            self.cancel_send();
+            self.state.selected = None;
+            self.scroll.scroll_to_item(0);
+            self.query.set_draft(query);
+        }
+        let Some(id) = self.state.query() else {
+            return;
+        };
+        self.cancel_send();
+        self.state.selected = None;
+        let query = self.query.begin(id);
+        self.submit(Request::Search { id, query });
+        if self.worker.is_none() {
+            self.query.disconnected();
         }
     }
 
@@ -214,6 +268,7 @@ impl ClipboardHistoryUi {
     }
 
     fn send_selected(&mut self) {
+        self.enter_send.cancel();
         if self.sending.pending() {
             self.cancel_send();
             return;
@@ -261,7 +316,90 @@ impl ClipboardHistoryUi {
         self.scroll.scroll_to_item(visible_index);
     }
 
+    fn focus_list(&mut self, window: &mut Window, cx: &mut Context<super::Workspace>) {
+        self.enter_send.cancel();
+        if self.list_blur.is_none() {
+            self.list_blur = Some(cx.on_blur(&self.list_focus.clone(), window, |this, _, _| {
+                this.text_history.enter_send.cancel();
+            }));
+        }
+        self.list_focus.focus(window);
+    }
+
+    /// 只由拥有焦点的列表处理；筛选输入是兄弟元素，其编辑/IME事件不进入这里。
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window) -> bool {
+        if !self.list_focus.is_focused(window) {
+            self.enter_send.cancel();
+            return false;
+        }
+        let modifiers = &event.keystroke.modifiers;
+        let modified = modifiers.shift
+            || modifiers.control
+            || modifiers.alt
+            || modifiers.platform
+            || modifiers.function;
+        if modified || event.keystroke.key != "enter" || !event.is_held {
+            self.enter_send.cancel();
+        }
+        let can_send = self.state.can_send()
+            && self.sending.ready()
+            && !self.sending.pending()
+            && self
+                .query
+                .selected_visible(&self.state.items, self.state.selected.as_deref());
+        let Some(action) = summary_keyboard_action(
+            &event.keystroke.key,
+            event.is_held,
+            modified,
+            self.state.can_query(),
+            can_send,
+        ) else {
+            return event.keystroke.key == "enter" && !modified && self.enter_send.is_armed();
+        };
+        match action {
+            SummaryKeyboardAction::Navigate(direction) => self.select_adjacent(direction),
+            SummaryKeyboardAction::ArmSend => {
+                if let (Some(id), Some(revision)) = (&self.state.selected, &self.state.revision) {
+                    self.enter_send.arm(id, revision);
+                }
+            }
+        }
+        true
+    }
+
+    fn key_up(&mut self, event: &KeyUpEvent, window: &mut Window) -> bool {
+        if event.keystroke.key != "enter" {
+            self.enter_send.cancel();
+            return false;
+        }
+        let owned_press = self.enter_send.is_armed();
+        let modifiers = &event.keystroke.modifiers;
+        let modified = modifiers.shift
+            || modifiers.control
+            || modifiers.alt
+            || modifiers.platform
+            || modifiers.function;
+        let allowed = self.list_focus.is_focused(window)
+            && !modified
+            && self.state.can_send()
+            && self.sending.ready()
+            && !self.sending.pending()
+            && self
+                .query
+                .selected_visible(&self.state.items, self.state.selected.as_deref());
+        if self.enter_send.release(
+            self.state.selected.as_deref(),
+            self.state.revision.as_deref(),
+            allowed,
+        ) {
+            // 收到Enter释放事件后，仍复用原目标/读取/版本/取消校验。
+            self.send_selected();
+        }
+        owned_press
+    }
+
     fn remove_selected(&mut self) {
+        self.enter_send.cancel();
         if !self
             .query
             .selected_visible(&self.state.items, self.state.selected.as_deref())
@@ -275,6 +413,7 @@ impl ClipboardHistoryUi {
 
     /// 复用Workspace既有唤醒与兜底poll；一次最多收32项，不做磁盘或原生输入工作。
     pub fn request_popup_close(&mut self) {
+        self.enter_send.cancel();
         self.cancel_send();
         self.collection.cancel();
         if let Some((id, command)) = self.state.request_popup_close() {
@@ -320,6 +459,51 @@ impl ClipboardHistoryUi {
                 }
                 Ok(Reply::List { id, result }) => {
                     self.state.listed(id, result);
+                    if self.query.invalidate(self.state.revision.as_deref()) {
+                        if !self
+                            .query
+                            .selected_visible(&self.state.items, self.state.selected.as_deref())
+                        {
+                            self.state.selected = None;
+                        }
+                        if self.state.message.is_none() {
+                            self.state.message =
+                                Some("历史已变化，已返回摘要筛选；可重新查找正文。");
+                        }
+                    }
+                    changed = true;
+                }
+                Ok(Reply::Search { id, result }) => {
+                    if !self.query.is_pending(id) {
+                        continue;
+                    }
+                    match result {
+                        Ok(found) => {
+                            let revision = found.list.revision.clone();
+                            self.state.listed(Some(id), Ok(found.list));
+                            let applied = self.query.complete(
+                                id,
+                                &revision,
+                                self.state.revision.as_deref(),
+                                self.state.can_query(),
+                                found.matching_ids,
+                            );
+                            if applied {
+                                if !self.query.selected_visible(
+                                    &self.state.items,
+                                    self.state.selected.as_deref(),
+                                ) {
+                                    self.state.selected = None;
+                                }
+                            } else if self.state.can_query() && self.state.message.is_none() {
+                                self.state.message = Some("查找词已变化，请重新查找正文。");
+                            }
+                        }
+                        Err(message) => {
+                            self.state.listed(Some(id), Err(message));
+                            self.query.failed(id);
+                        }
+                    }
                     changed = true;
                 }
                 Ok(Reply::Sent { id, result }) => {
@@ -337,6 +521,7 @@ impl ClipboardHistoryUi {
                     self.collection.cancel();
                     self.worker.take();
                     self.state.disconnected();
+                    self.query.disconnected();
                     changed = true;
                     break;
                 }
@@ -445,6 +630,15 @@ fn run_worker(
                     })
                     .is_err()
                 {
+                    break;
+                }
+            }
+            Ok(Request::Search { id, query }) => {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                let result = store
+                    .search_full_text(query.terms(), || operation_check(&shutdown, deadline))
+                    .map_err(|_| "无法查找完整文本，请明确重试；旧摘要仅供参考。");
+                if replies.send(Reply::Search { id, result }).is_err() {
                     break;
                 }
             }
@@ -566,6 +760,25 @@ impl super::Workspace {
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.text_history.scroll)
+            .track_focus(&self.text_history.list_focus)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.text_history.focus_list(window, cx);
+                }),
+            )
+            .on_key_down(cx.listener(|this, event, window, cx| {
+                if this.text_history.key_down(event, window) {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .on_key_up(cx.listener(|this, event, window, cx| {
+                if this.text_history.key_up(event, window) {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .rounded(px(14.))
             .border_1()
             .border_color(rgb(theme::BORDER))
@@ -584,7 +797,8 @@ impl super::Workspace {
                     .border_color(rgb(theme::DIVIDER))
                     .bg(rgb(if selected { theme::SURFACE } else { theme::ROW }))
                     .hover(|style| style.bg(rgb(theme::SURFACE)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.text_history.focus_list(window, cx);
                         this.text_history.sending.selection_changing(&id);
                         this.text_history.state.select(&id);
                         cx.notify();
@@ -594,8 +808,12 @@ impl super::Workspace {
         }
         if visible.is_empty() {
             list = list.child(div().p(px(32.)).child(super::caption(
-                if state.initial_list_loading() {
+                if self.text_history.query.loading() {
+                    "正在查找完整文本…"
+                } else if state.initial_list_loading() {
                     "正在加载历史摘要…"
+                } else if self.text_history.query.full_text_active() {
+                    "完整文本中没有匹配项。"
                 } else if state.items.is_empty() && state.revision.is_some() {
                     "暂无历史摘要。"
                 } else if state.items.is_empty() {
@@ -658,7 +876,8 @@ impl super::Workspace {
                                     )
                                     .is_some(),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.text_history.focus_list(window, cx);
                             this.text_history
                                 .select_adjacent(SummaryDirection::Previous);
                             cx.notify();
@@ -680,7 +899,8 @@ impl super::Workspace {
                                     )
                                     .is_some(),
                         )
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.text_history.focus_list(window, cx);
                             this.text_history.select_adjacent(SummaryDirection::Next);
                             cx.notify();
                         })),
@@ -691,6 +911,22 @@ impl super::Workspace {
                     .flex()
                     .items_center()
                     .gap(px(8.))
+                    .child(
+                        button(
+                            "text-history-search-body",
+                            if self.text_history.query.loading() {
+                                "正在查找…"
+                            } else {
+                                "查找正文"
+                            },
+                            Tone::Secondary,
+                            state.can_query(),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.text_history.search_full_text(cx);
+                            cx.notify();
+                        })),
+                    )
                     .child(
                         button(
                             "text-history-refresh",
@@ -738,7 +974,12 @@ impl super::Workspace {
                         })),
                     )
                     .child(super::caption(format!(
-                        "{} / {} 条摘要",
+                        "{} {} / {} 条",
+                        if self.text_history.query.full_text_active() {
+                            "正文命中"
+                        } else {
+                            "摘要筛选"
+                        },
                         visible.len(),
                         state.items.len()
                     ))),
@@ -747,6 +988,9 @@ impl super::Workspace {
                 element.child(super::caption(message))
             })
             .child(super::caption(self.text_history.sending.status()))
+            .child(super::caption(
+                "点击列表后：↑↓ / Home / End 选择，Enter 发送选中项。",
+            ))
             .child(list)
     }
 }

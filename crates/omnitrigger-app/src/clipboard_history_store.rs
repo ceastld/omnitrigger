@@ -126,6 +126,22 @@ pub struct HistoryList {
     pub items: Vec<HistorySummary>,
     pub revision: String,
 }
+/// 仅供本应用历史页：全部规范摘要与同一版本下的正文匹配ID，不携带正文。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct HistorySearch {
+    pub list: HistoryList,
+    pub matching_ids: Vec<String>,
+}
+
+/// 词项由有界查询归一化；与摘要筛选共用Unicode小写后的字面AND匹配。
+pub(super) fn text_matches_terms(text: &str, terms: &[String]) -> bool {
+    if terms.is_empty() {
+        return true;
+    }
+    let lower = text.to_lowercase();
+    terms.iter().all(|term| lower.contains(term))
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryItem {
@@ -623,6 +639,42 @@ impl ClipboardHistoryStore {
         }
         self.read(check, |document| document.list(limit))
     }
+    /// 显式正文检索；一次私有只读事务返回同一revision的摘要与ID，扫描最多MAX_ITEMS项。
+    pub(super) fn search_full_text(
+        &self,
+        terms: &[String],
+        mut check: impl FnMut() -> Result<()>,
+    ) -> Result<HistorySearch> {
+        // UI查询最多256字符；归一化允许Unicode小写扩展，但仍给内部参数设硬上限。
+        if terms.len() > 256
+            || terms
+                .iter()
+                .any(|term| term.is_empty() || term.len() > 4_096)
+            || terms.iter().map(String::len).sum::<usize>() > 4_096
+        {
+            return Err(HistoryError::new("invalid_input"));
+        }
+        let (list, texts) = self.read(&mut check, |document| {
+            let list = document.list(MAX_ITEMS)?;
+            let texts = document
+                .items
+                .iter()
+                .rev()
+                .map(|item| (item.id.clone(), item.text.clone()))
+                .collect::<Vec<_>>();
+            Ok((list, texts))
+        })?;
+        // 快照已取得且lease已释放；CPU匹配不继续占着采集写入的存储槽。
+        check()?;
+        let matching_ids = texts
+            .into_iter()
+            .filter(|(_, text)| text_matches_terms(text, terms))
+            .map(|(id, _)| id)
+            .collect();
+        check()?;
+        Ok(HistorySearch { list, matching_ids })
+    }
+
     pub fn get(&self, id: &str, check: impl FnMut() -> Result<()>) -> Result<HistoryItem> {
         decimal(id, false).ok_or_else(|| HistoryError::new("invalid_input"))?;
         self.read(check, |document| document.get(id))
@@ -718,6 +770,147 @@ mod persistence_tests {
             }
             let _ = fs::remove_dir(&self.directory);
         }
+    }
+
+    #[test]
+    fn full_text_search_finds_tail_beyond_preview_without_body_output_or_writes() {
+        let fixture = Fixture::new();
+        let text = format!("{} Needle 中文\r\n保留空白  ", "前".repeat(80));
+        let saved = fixture.store.append_at(&text, 1, || Ok(())).unwrap();
+        fixture.store.append_at("其他摘要", 2, || Ok(())).unwrap();
+        let bytes = fixture.bytes();
+        let query = crate::clipboard_history_filter::SummaryQuery::new("NEEDLE 中文").unwrap();
+        let result = fixture
+            .store
+            .search_full_text(query.terms(), || Ok(()))
+            .unwrap();
+        assert_eq!(result.matching_ids, vec![saved.id.clone()]);
+        assert_eq!(result.list.items.len(), 2);
+        assert!(!result.list.items[1].preview.contains("Needle"));
+        assert!(!format!("{result:?}").contains("Needle"));
+        assert_eq!(fixture.bytes(), bytes);
+        assert_eq!(fixture.store.get(&saved.id, || Ok(())).unwrap().text, text);
+        assert_eq!(
+            fixture.store.list(MAX_ITEMS, || Ok(())).unwrap().revision,
+            result.list.revision
+        );
+    }
+    #[test]
+    fn full_text_search_uses_all_terms_and_empty_query_keeps_stored_order() {
+        let fixture = Fixture::new();
+        let first = fixture
+            .store
+            .append_at("Alpha 中文\nBeta", 9, || Ok(()))
+            .unwrap();
+        let last = fixture.store.append_at("只含 ALPHA", 1, || Ok(())).unwrap();
+        let query = crate::clipboard_history_filter::SummaryQuery::new("alpha BETA 中文").unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .search_full_text(query.terms(), || Ok(()))
+                .unwrap()
+                .matching_ids,
+            vec![first.id.clone()]
+        );
+        let result = fixture.store.search_full_text(&[], || Ok(())).unwrap();
+        assert_eq!(result.matching_ids, vec![last.id, first.id]);
+        assert_eq!(
+            result.matching_ids,
+            result
+                .list
+                .items
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+    #[test]
+    fn full_text_search_rejects_unbounded_terms_and_cancel_before_disk() {
+        let fixture = Fixture::new();
+        let error = fixture
+            .store
+            .search_full_text(&vec!["x".into(); 257], || Ok(()))
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_input");
+        assert!(!fixture.store.path.exists());
+        let error = fixture
+            .store
+            .search_full_text(&["x".repeat(4_097)], || Ok(()))
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_input");
+        assert!(!fixture.store.path.exists());
+        let error = fixture
+            .store
+            .search_full_text(&[], || Err(HistoryError::new("cancelled")))
+            .unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        assert!(!fixture.store.path.exists());
+    }
+    #[test]
+    fn full_text_search_cancel_after_scan_returns_no_partial_receipt_or_mutation() {
+        let fixture = Fixture::new();
+        fixture
+            .store
+            .append_at("合成 needle", 1, || Ok(()))
+            .unwrap();
+        let before = fixture.bytes();
+        let mut checks = 0;
+        let result = fixture.store.search_full_text(&["needle".into()], || {
+            checks += 1;
+            if checks == 6 {
+                Err(HistoryError::new("cancelled"))
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(result.unwrap_err().code, "cancelled");
+        assert_eq!(fixture.bytes(), before);
+    }
+
+    #[test]
+    fn full_text_search_accepts_unicode_lowercase_expansion_of_a_valid_query() {
+        let fixture = Fixture::new();
+        let text = "İ".repeat(256);
+        let saved = fixture.store.append_at(&text, 1, || Ok(())).unwrap();
+        let query = crate::clipboard_history_filter::SummaryQuery::new(&text).unwrap();
+        assert_eq!(
+            fixture
+                .store
+                .search_full_text(query.terms(), || Ok(()))
+                .unwrap()
+                .matching_ids,
+            vec![saved.id]
+        );
+    }
+
+    #[test]
+    fn full_text_search_releases_lease_before_matching_and_keeps_snapshot_identity() {
+        let fixture = Fixture::new();
+        let first = fixture
+            .store
+            .append_at("合成 needle", 1, || Ok(()))
+            .unwrap();
+        let mut checks = 0;
+        let mut wrote = false;
+        let result = fixture
+            .store
+            .search_full_text(&["needle".into()], || {
+                checks += 1;
+                if checks == 5 {
+                    fixture
+                        .store
+                        .append_at("另一条 needle 采集", 2, || Ok(()))?;
+                    wrote = true;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(wrote);
+        assert_eq!(result.matching_ids, vec![first.id]);
+        assert_eq!(result.list.items.len(), 1);
+        let latest = fixture.store.list(MAX_ITEMS, || Ok(())).unwrap();
+        assert_eq!(latest.items.len(), 2);
+        assert_ne!(result.list.revision, latest.revision);
     }
 
     #[test]
