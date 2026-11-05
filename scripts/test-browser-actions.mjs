@@ -1,13 +1,14 @@
 // 真实 Chrome 验收：复用已注册的 Native Host，仅操作本次创建的隔离 profile。
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { resolve, join, relative } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import { verifyDesktopShortcuts } from './browser-shortcut-smoke.mjs';
+import { verifyBrowserWorkflows } from './browser-workflows-smoke.mjs';
 
 const args = process.argv.slice(2);
 const option = name => { const index = args.indexOf(name); if (index < 0 || !args[index + 1]) throw Error(`需要 ${name}`); return resolve(args[index + 1]); };
@@ -19,10 +20,24 @@ const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 await mkdir(join(root, 'output/playwright'), { recursive: true });
 const scratch = await mkdtemp(join(root, 'output/playwright/browser-actions-'));
 const report = { ok: false, checks: [], scope: '隔离 Chrome、本地页面、已安装 SDK' };
+let extensionPath = extension;
+if (args.includes('--workflow-recipes')) {
+  option('--app');
+  // 只在本轮临时副本声明测试所需权限，不操作已安装扩展及用户浏览器设置。
+  extensionPath = join(scratch, 'workflow-extension');
+  await cp(extension, extensionPath, { recursive: true, errorOnExist: true, force: false });
+  const manifest = JSON.parse(await readFile(join(extensionPath, 'manifest.json'), 'utf8'));
+  const extra = ['tabs', 'sessions'].filter(name => !manifest.permissions.includes(name));
+  report.permissionFixture = { original: manifest.permissions, added: extra };
+  manifest.permissions = [...manifest.permissions, ...extra];
+  manifest.optional_permissions = (manifest.optional_permissions ?? []).filter(name => !extra.includes(name));
+  await writeFile(join(extensionPath, 'manifest.json'), JSON.stringify(manifest, null, 2));
+}
 const { connect } = await import(pathToFileURL(join(connector, 'sdk-js/index.mjs')));
 const config = JSON.parse(await readFile(join(connector, 'connection.json'), 'utf8'));
 const client = await connect({ pipe: config.pipe, timeoutMs: 3000 });
 let context;
+let profile;
 const server = createServer((request, response) => { response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end(`<title>OmniTrigger ${request.url}</title><h1>浏览器动作测试</h1><button type="button">测试交互</button>`); });
 try {
   const existing = await client.profiles();
@@ -32,7 +47,7 @@ try {
     args: ['--enable-unsafe-extension-debugging', '--no-first-run', '--no-default-browser-check'],
   });
   const cdp = await context.browser().newBrowserCDPSession();
-  const loaded = await cdp.send('Extensions.loadUnpacked', { path: extension });
+  const loaded = await cdp.send('Extensions.loadUnpacked', { path: extensionPath });
   report.chromeVersion = context.browser().version();
   report.extensionId = loaded.id;
   let worker = context.serviceWorkers().find(item => item.url().startsWith(`chrome-extension://${loaded.id}/`));
@@ -40,9 +55,9 @@ try {
   // 首次 CDP 加载有时尚未派发安装事件；从扩展自己的状态入口确认并恢复连接。
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${loaded.id}/popup.html`);
+  await popup.evaluate(() => chrome.runtime.sendMessage({type:'bridge.enable', enabled:false}));
   await popup.evaluate(() => chrome.runtime.sendMessage({type:'bridge.enable', enabled:true}));
   await popup.close();
-  let profile;
   report.connectionHistory = [];
   for (let attempt = 0; attempt < 300; attempt++) {
     if (attempt % 10 === 0) {
@@ -173,6 +188,11 @@ try {
     assert.deepEqual(output.output,{connected:true,characters:400000});
     report.checks.push('真实 OmniTrigger --run-action → Rust 配置核验 → Node ctx.browser → Chrome → 摘要结果');
 
+    if (args.includes('--workflow-recipes')) {
+      report.workflows = await verifyBrowserWorkflows({ call, base, scratch, app, root, profile });
+      report.checks.push('真实浏览器脚本：网址新建/复用、明确标签复制、书签定位、指定会话恢复及歧义拒绝');
+    }
+
     if (args.includes('--script-host')) {
       for (const name of ['omnitrigger-browser.exe','omnitrigger-browser-host.exe']) {
         await writeFile(join(runtime,name),await readFile(join(connector,name)));
@@ -212,8 +232,23 @@ try {
   report.error = { code:error.code, message:error.message, stack:error.stack };
   process.exitCode = 1;
 } finally {
-  client.close();
-  await context?.close();
+  try {
+    await context?.close();
+    if (profile) {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        if (!(await client.profiles()).some(item => item.browser_instance_id === profile)) {
+          report.isolatedProfileDisconnected = true;
+          break;
+        }
+        await delay(100);
+      }
+      assert(report.isolatedProfileDisconnected, '隔离 profile 尚未断开');
+    }
+  } catch (error) {
+    report.cleanupError = { message: error.message };
+    report.ok = false;
+    process.exitCode = 1;
+  } finally { client.close(); }
   server.close();
   await writeFile(join(scratch,'report.json'),JSON.stringify(report,null,2));
   console.log(JSON.stringify({...report, evidence:join(scratch,'report.json')}));
