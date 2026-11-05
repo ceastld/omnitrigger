@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "examples.common-search",
   "name": "文本搜索与本地文件",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "actions": [
     {"id": "web-search", "title": "搜索选中文本或明确文本", "version": 1, "runtime": "script", "entry": "search.js", "single_instance": true},
     {"id": "open-or-search", "title": "打开本地文件或搜索文本", "version": 1, "runtime": "script", "entry": "open-or-search.js", "single_instance": true}

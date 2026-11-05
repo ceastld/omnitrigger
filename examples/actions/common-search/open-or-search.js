@@ -3,7 +3,10 @@
 function main(ctx) {
     const source = ctx.input.source;
     const template = ctx.input.urlTemplate === undefined ? 'https://www.google.com/search?q=%s' : ctx.input.urlTemplate;
-    const limit = ctx.input.maxCodePoints === undefined ? 128 : ctx.input.maxCodePoints;
+    const lengthUnit = ctx.input.queryLengthUnit === undefined ? 'codepoints' : ctx.input.queryLengthUnit;
+    const limit = lengthUnit === 'utf16'
+        ? (ctx.input.maxUtf16Units === undefined ? 128 : ctx.input.maxUtf16Units)
+        : (ctx.input.maxCodePoints === undefined ? 128 : ctx.input.maxCodePoints);
     /** @param {string} message */
     function invalid(message) {
         throw Object.assign(new Error(message), {
@@ -28,8 +31,13 @@ function main(ctx) {
     } catch (_) {
         invalid('urlTemplate 含无效 Unicode。');
     }
+    if (lengthUnit !== 'codepoints' && lengthUnit !== 'utf16') invalid('queryLengthUnit 需要 codepoints 或 utf16。');
+    if ((lengthUnit === 'utf16' && Object.prototype.hasOwnProperty.call(ctx.input, 'maxCodePoints')) ||
+        (lengthUnit === 'codepoints' && Object.prototype.hasOwnProperty.call(ctx.input, 'maxUtf16Units'))) {
+        invalid('查询长度单位与上限字段不能混用。');
+    }
     if (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > 2048) {
-        invalid('maxCodePoints 需要 1–2048 的整数。');
+        invalid(lengthUnit === 'utf16' ? 'maxUtf16Units 需要 1–2048 的整数。' : 'maxCodePoints 需要 1–2048 的整数。');
     }
     if (source === 'text' && (typeof ctx.input.text !== 'string' || !ctx.input.text.trim() ||
         ctx.input.text.length > 65536 || ctx.input.text.includes('\0'))) invalid('text 需要非空文本，最多 65,536 个 UTF-16 单元。');
@@ -71,6 +79,20 @@ function main(ctx) {
         // 已核对的 File.Exists 分支：目录/缺失不是文件，继续原来的搜索。
         // 只有明确元数据结果走这里，任何 stat 异常都不会变成搜索。
         pathKind = metadata.kind;
+    }
+    if (lengthUnit === 'utf16') {
+        const end = Math.min(text.length, limit);
+        const last = text.charCodeAt(end - 1);
+        if (text.length > limit && last >= 0xd800 && last <= 0xdbff) {
+            throw Object.assign(new Error('UTF-16 查询边界会拆开代理对；请调整上限。'), {
+                code: 'query_utf16_boundary', method: 'script.query',
+                effectState: source === 'selection' ? 'unknown' : 'not_started',
+            });
+        }
+        ctx.open(template.replace('%s', encodeURIComponent(text.slice(0, end))));
+        return {submitted: true, source, operation: 'search', queryLengthUnit: 'utf16',
+            queryUtf16Units: end, truncated: text.length > limit,
+            ...(pathKind === undefined ? {} : {pathKind})};
     }
     const points = Array.from(text);
     const encoded = encodeURIComponent(points.slice(0, limit).join(''));

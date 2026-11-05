@@ -72,6 +72,10 @@ omnitrigger.exe --run-action <open-or-search-call.json 的绝对路径>
 
 搜索默认最多保留 128 个 Unicode 码点，可通过 `maxCodePoints` 设置；完整文本先经过 Unicode 校验，截断不会拆开代理对。并发调用受清单中的动作级单实例约束，复制超时和重试仍由宿主 API 决定。动作不读取文件内容、不枚举目录、不监控剪贴板、不创建调度任务。
 
+`open-or-search` 可显式传 `queryLengthUnit:"utf16"` 和 `maxUtf16Units`（默认128，整数1–2048），按UTF-16单元限制搜索词。该模式不接受`maxCodePoints`；默认/codepoints模式不接受`maxUtf16Units`，避免混用。未传新参数时仍使用原128码点预算和原回执字段；`web-search` 不增加此选项。
+
+UTF-16预算可能落在代理对中间，此时返回`query_utf16_boundary`，不向下调整上限或打开目标。显式文本为`not_started`，已复制选区后为`unknown`。有效查询仍使用`encodeURIComponent`，空格编码为`%20`；该选项只改变长度单位。成功摘要为`queryLengthUnit:"utf16"/queryUtf16Units/truncated`，不返回搜索词或URL。文件分支先于查询截断，仍原样打开完整文件路径；文件列表或数据对象不隐式转换、拼接成查询。
+
 定向测试只使用内存元数据与合成选区：
 
 ```powershell

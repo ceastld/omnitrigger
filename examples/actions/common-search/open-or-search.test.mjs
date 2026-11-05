@@ -221,3 +221,65 @@ test('通用调用清单及旧动作契约保持明确，新增轻量入口参�
     const config = JSON.parse(readFileSync(new URL('jsconfig.json', import.meta.url), 'utf8'));
     assert.ok(config.files.includes('open-or-search.js'));
 });
+
+const utf16Template='https://example.invalid/search?q=%s';
+const utf16Input=text=>({source:'text',text,queryLengthUnit:'utf16',maxUtf16Units:128,urlTemplate:utf16Template});
+test('显式UTF16预算与默认码点预算分开，默认回执字段保持原样',()=>{
+  const text='😀'.repeat(65),utf16=run(utf16Input(text));
+  assert.deepEqual(utf16.result,{submitted:true,source:'text',operation:'search',queryLengthUnit:'utf16',queryUtf16Units:128,truncated:true});
+  assert.deepEqual(utf16.calls,[['open',utf16Template.replace('%s',encodeURIComponent('😀'.repeat(64)))]]);
+  const current=run({source:'text',text,urlTemplate:utf16Template});
+  assert.equal(current.result.queryCodePoints,65);assert.equal(current.result.truncated,false);
+  assert.equal('queryLengthUnit' in current.result,false);
+  const chinese=run(utf16Input('中'.repeat(129)));
+  assert.equal(chinese.result.queryUtf16Units,128);assert.equal(chinese.result.truncated,true);
+});
+test('拒绝半代理边界与非法后缀；已复制选区的效果状态不能写成未开始',()=>{
+  const text='a'.repeat(127)+'😀';
+  for(const selection of [false,true]){
+    const out=run(selection?{source:'selection',queryLengthUnit:'utf16',maxUtf16Units:128}:utf16Input(text),{selection:text});
+    assert.equal(out.error.code,'query_utf16_boundary');assert.equal(out.error.method,'script.query');
+    assert.equal(out.error.effectState,selection?'unknown':'not_started');
+    assert.deepEqual(out.calls,selection?[['copy']]:[]);
+  }
+  const bad=run(utf16Input('a'.repeat(200)+'\ud800'));
+  assert.equal(bad.error.code,'invalid_input');assert.deepEqual(bad.calls,[]);
+});
+test('策略混用、非法单位或上限在复制与元数据前拒绝',()=>{
+  for(const policy of [
+    {queryLengthUnit:'unknown'},{queryLengthUnit:null},{queryLengthUnit:'utf16',maxCodePoints:128},
+    {maxUtf16Units:128},{queryLengthUnit:'codepoints',maxUtf16Units:128},
+    {queryLengthUnit:'utf16',maxUtf16Units:0},{queryLengthUnit:'utf16',maxUtf16Units:2049},
+    {queryLengthUnit:'utf16',maxUtf16Units:'128'},
+  ]){
+    const out=run({source:'selection',...policy});
+    assert.equal(out.error.code,'invalid_input');assert.equal(out.error.effectState,'not_started');assert.deepEqual(out.calls,[]);
+  }
+});
+test('长度选项保留URI组件编码，空格与加号没有改成表单编码',()=>{
+  const text="A +&!*'()~ 中",out=run(utf16Input(text));
+  assert.deepEqual(out.calls,[['open',utf16Template.replace('%s',encodeURIComponent(text))]]);
+  assert.ok(out.calls[0][1].includes('A%20%2B%26'));
+  assert.equal(out.result.truncated,false);
+});
+test('完整普通文件优先打开；目录和缺失项才按显式预算搜索',()=>{
+  const path='C:/Synthetic/😀 文件.txt';
+  const input={...utf16Input(path),maxUtf16Units:1};
+  const file=run(input);
+  assert.deepEqual(file.calls,[['stat',path],['open',path]]);
+  assert.deepEqual(file.result,{submitted:true,source:'text',operation:'open-file'});
+  for(const kind of ['directory','missing']){
+    const out=run(input,{metadata:{kind}});
+    assert.deepEqual(out.calls,[['stat',path],['open',utf16Template.replace('%s','C')]]);
+    assert.equal(out.result.pathKind,kind);assert.equal(out.result.queryUtf16Units,1);
+  }
+});
+test('非文本文件列表与数据对象不隐式转换为路径或查询',()=>{
+  for(const selection of [['C:/Synthetic/a.txt'],{kind:'files',paths:['C:/Synthetic/a.txt'],sequenceNumber:1}]){
+    const out=run({source:'selection',queryLengthUnit:'utf16'},{selection});
+    assert.equal(out.error.code,'invalid_selection');assert.deepEqual(out.calls,[['copy']]);
+  }
+  const copyError=Object.assign(Error('合成格式不支持'),{code:'unsupported_clipboard_format',method:'selection.copy',effectState:'unknown'});
+  const out=run({source:'selection',queryLengthUnit:'utf16'},{copyError});
+  assert.equal(out.error,copyError);assert.deepEqual(out.calls,[['copy']]);
+});
