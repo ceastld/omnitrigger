@@ -313,10 +313,10 @@ impl HistorySendSession {
     }
 
     pub fn complete(&mut self, id: u64, result: &Result<SendReceipt, SendFailure>) {
-        if !self
+        if self
             .pending
             .as_ref()
-            .is_some_and(|(pending, _, _)| *pending == id)
+            .is_none_or(|(pending, _, _)| *pending != id)
         {
             return;
         }
