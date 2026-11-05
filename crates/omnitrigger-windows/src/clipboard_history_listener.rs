@@ -492,12 +492,28 @@ mod native {
         signal: Arc<Signal>,
         window: Option<JoinHandle<Result<(), HistoryListenerError>>>,
         worker: Option<JoinHandle<()>>,
+        persistent: Option<Arc<std::sync::Mutex<PersistentState>>>,
     }
 
     impl ClipboardHistoryListener {
         /// helper_executable 必须由应用提供自己的可执行文件，不能来自脚本参数。
         pub fn start(
             helper_executable: &Path,
+        ) -> Result<(Self, mpsc::Receiver<HistoryText>), HistoryListenerError> {
+            Self::start_with_reader(helper_executable, None)
+        }
+        /// 显式选择持续helper；仍只由后续通知触发采集，不在启动时读取旧正文。
+        pub fn start_persistent(
+            helper_executable: &Path,
+            budgets: crate::clipboard_history_worker::HistoryWorkerBudgets,
+        ) -> Result<(Self, mpsc::Receiver<HistoryText>), HistoryListenerError> {
+            crate::clipboard_history_worker_protocol::WorkerMachine::new(budgets)
+                .map_err(|_| HistoryListenerError::InvalidOptions)?;
+            Self::start_with_reader(helper_executable, Some(budgets))
+        }
+        fn start_with_reader(
+            helper_executable: &Path,
+            budgets: Option<crate::clipboard_history_worker::HistoryWorkerBudgets>,
         ) -> Result<(Self, mpsc::Receiver<HistoryText>), HistoryListenerError> {
             if !helper_executable.is_absolute() || !helper_executable.is_file() {
                 return Err(HistoryListenerError::InvalidOptions);
@@ -528,16 +544,32 @@ mod native {
                 signal,
                 window: Some(window),
                 worker: None,
+                persistent: None,
             };
             let baseline = initial
                 .recv_timeout(Duration::from_secs(2))
                 .map_err(|_| HistoryListenerError::StartFailed)??;
             let worker_signal = listener.signal.clone();
-            let reader = ProcessReader {
-                executable: helper_executable.to_owned(),
-                station,
-                desktop,
-                signal: listener.signal.clone(),
+            let reader = match budgets {
+                None => SelectedReader::OneShot(ProcessReader {
+                    executable: helper_executable.to_owned(),
+                    station,
+                    desktop,
+                    signal: listener.signal.clone(),
+                }),
+                Some(budgets) => {
+                    let state = Arc::new(std::sync::Mutex::new(PersistentState::new(
+                        helper_executable.to_owned(),
+                        station,
+                        desktop,
+                        budgets,
+                    )?));
+                    listener.persistent = Some(state.clone());
+                    SelectedReader::Persistent(Box::new(PersistentReader {
+                        state,
+                        signal: listener.signal.clone(),
+                    }))
+                }
             };
             listener.worker = Some(
                 thread::Builder::new()
@@ -573,6 +605,9 @@ mod native {
                 .is_some_and(|handle| handle.join().is_err())
             {
                 error = Some(HistoryListenerError::WorkerFailed);
+            }
+            if let Err(cause) = self.cleanup_persistent() {
+                error = Some(cause);
             }
             match error {
                 Some(cause) => Err(cause),
@@ -725,6 +760,232 @@ mod native {
             thread::sleep(Duration::from_millis(10));
         }
         Ok(())
+    }
+
+    // 仅插入现有listener的native模块；不改默认模式，不依赖共享读取重构。
+    enum SelectedReader {
+        OneShot(ProcessReader),
+        Persistent(Box<PersistentReader>),
+    }
+    impl CaptureReader for SelectedReader {
+        fn capture(
+            &mut self,
+            previous: u32,
+            stop: &AtomicBool,
+        ) -> Result<Observation, HistoryListenerError> {
+            match self {
+                Self::OneShot(reader) => reader.capture(previous, stop),
+                Self::Persistent(reader) => reader.capture(previous, stop),
+            }
+        }
+    }
+    // 仅此历史适配的测试接缝，不调度任务，也不定义另一个进程协议。
+    trait PersistentClient: Send {
+        fn start(
+            &mut self,
+            stop: &AtomicBool,
+        ) -> Result<(), crate::clipboard_history_worker::HistoryWorkerError>;
+        fn capture(
+            &mut self,
+            previous: u32,
+            stop: &AtomicBool,
+        ) -> Result<
+            crate::clipboard_history_worker::HistoryWorkerReply,
+            crate::clipboard_history_worker::HistoryWorkerError,
+        >;
+        fn stop(
+            &mut self,
+        ) -> Result<
+            crate::clipboard_history_worker::HistoryWorkerStats,
+            crate::clipboard_history_worker::HistoryWorkerError,
+        >;
+        fn stats(&self) -> crate::clipboard_history_worker::HistoryWorkerStats;
+    }
+    impl PersistentClient for crate::clipboard_history_worker::ClipboardHistoryWorker {
+        fn start(
+            &mut self,
+            stop: &AtomicBool,
+        ) -> Result<(), crate::clipboard_history_worker::HistoryWorkerError> {
+            crate::clipboard_history_worker::ClipboardHistoryWorker::start(self, stop)
+        }
+        fn capture(
+            &mut self,
+            previous: u32,
+            stop: &AtomicBool,
+        ) -> Result<
+            crate::clipboard_history_worker::HistoryWorkerReply,
+            crate::clipboard_history_worker::HistoryWorkerError,
+        > {
+            crate::clipboard_history_worker::ClipboardHistoryWorker::capture(self, previous, stop)
+        }
+        fn stop(
+            &mut self,
+        ) -> Result<
+            crate::clipboard_history_worker::HistoryWorkerStats,
+            crate::clipboard_history_worker::HistoryWorkerError,
+        > {
+            crate::clipboard_history_worker::ClipboardHistoryWorker::stop(self)
+        }
+        fn stats(&self) -> crate::clipboard_history_worker::HistoryWorkerStats {
+            crate::clipboard_history_worker::ClipboardHistoryWorker::stats(self)
+        }
+    }
+    fn persistent_error(
+        error: crate::clipboard_history_worker::HistoryWorkerError,
+    ) -> HistoryListenerError {
+        use crate::clipboard_history_worker::{
+            HistoryCaptureFailure as F, HistoryWorkerError as E, HistoryWorkerProtocolError as P,
+        };
+        match error {
+            E::Cancelled => HistoryListenerError::CaptureCancelled,
+            E::CleanupFailed => HistoryListenerError::WorkerFailed,
+            E::InvalidOptions | E::Protocol(P::InvalidBudget) => {
+                HistoryListenerError::InvalidOptions
+            }
+            E::Protocol(P::StartupTimeout | P::ReadTimeout | P::StopTimeout) => {
+                HistoryListenerError::CaptureTimedOut
+            }
+            E::Protocol(P::PeerRefused(F::ScopeMismatch)) => HistoryListenerError::ScopeMismatch,
+            _ => HistoryListenerError::CaptureFailed,
+        }
+    }
+    struct PersistentReader<
+        C: PersistentClient = crate::clipboard_history_worker::ClipboardHistoryWorker,
+    > {
+        state: Arc<std::sync::Mutex<PersistentState<C>>>,
+        signal: Arc<Signal>,
+    }
+    struct PersistentState<
+        C: PersistentClient = crate::clipboard_history_worker::ClipboardHistoryWorker,
+    > {
+        client: C,
+        reported: crate::clipboard_history_worker::HistoryWorkerStats,
+    }
+    impl PersistentState {
+        fn new(
+            executable: PathBuf,
+            station: String,
+            desktop: String,
+            budgets: crate::clipboard_history_worker::HistoryWorkerBudgets,
+        ) -> Result<Self, HistoryListenerError> {
+            use crate::clipboard_history_worker::{
+                ClipboardHistoryWorker, ClipboardScope, HistoryWorkerOptions,
+            };
+            let client = ClipboardHistoryWorker::new(HistoryWorkerOptions {
+                helper_executable: executable,
+                scope: ClipboardScope { station, desktop },
+                budgets,
+            })
+            .map_err(persistent_error)?;
+            Ok(Self {
+                client,
+                reported: Default::default(),
+            })
+        }
+    }
+    impl<C: PersistentClient> PersistentState<C> {
+        fn report(&mut self, signal: &Signal) {
+            let stats = self.client.stats();
+            signal.counters.helpers_started.fetch_add(
+                stats.spawned.saturating_sub(self.reported.spawned),
+                Ordering::Relaxed,
+            );
+            signal.counters.helpers_finished.fetch_add(
+                stats.reaped.saturating_sub(self.reported.reaped),
+                Ordering::Relaxed,
+            );
+            self.reported = stats;
+        }
+        fn shutdown(&mut self, signal: &Signal) -> Result<(), HistoryListenerError> {
+            let before = self.client.stats();
+            let result = self.client.stop();
+            let after = self.client.stats();
+            self.report(signal);
+            signal.counters.failed.fetch_add(
+                after.failures.saturating_sub(before.failures),
+                Ordering::Relaxed,
+            );
+            signal.counters.timeouts.fetch_add(
+                after.timeouts.saturating_sub(before.timeouts),
+                Ordering::Relaxed,
+            );
+            result.map_err(persistent_error).map(|_| ())
+        }
+    }
+    impl<C: PersistentClient> CaptureReader for PersistentReader<C> {
+        fn capture(
+            &mut self,
+            previous: u32,
+            stop: &AtomicBool,
+        ) -> Result<Observation, HistoryListenerError> {
+            use crate::clipboard_history_worker::{
+                HistoryCaptureFailure as F, HistoryWorkerReply as R, HistoryWorkerSkip as S,
+            };
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| HistoryListenerError::WorkerFailed)?;
+            let result = state
+                .client
+                .start(stop)
+                .and_then(|()| state.client.capture(previous, stop));
+            state.report(&self.signal);
+            match result.map_err(persistent_error)? {
+                R::Text { sequence, text, .. } => Ok(Observation {
+                    sequence,
+                    content: Content::Text(text),
+                }),
+                R::Skipped {
+                    sequence, reason, ..
+                } => Ok(Observation {
+                    sequence,
+                    content: Content::Skip(match reason {
+                        S::Duplicate => Skip::Duplicate,
+                        S::Transient => Skip::Transient,
+                        S::Excluded => Skip::Excluded,
+                        S::Files => Skip::Files,
+                        S::Image => Skip::Image,
+                        S::Unsupported => Skip::Unsupported,
+                    }),
+                }),
+                R::Failed { reason, .. } => Err(match reason {
+                    F::ScopeMismatch => HistoryListenerError::ScopeMismatch,
+                    F::Busy => HistoryListenerError::ClipboardBusy,
+                    F::Changed => HistoryListenerError::ClipboardChanged,
+                    F::InvalidText => HistoryListenerError::InvalidText,
+                    F::TooLarge => HistoryListenerError::TextTooLarge,
+                    F::Backend => HistoryListenerError::CaptureFailed,
+                }),
+                _ => Err(HistoryListenerError::InvalidReply),
+            }
+        }
+    }
+    fn stop_persistent_state<C: PersistentClient>(
+        owner: &mut Option<Arc<std::sync::Mutex<PersistentState<C>>>>,
+        signal: &Signal,
+    ) -> Result<(), HistoryListenerError> {
+        let shared = match owner.as_ref() {
+            Some(shared) => Arc::clone(shared),
+            None => return Ok(()),
+        };
+        let stopped = {
+            // join之后仅为退出接回毒化状态；数据路径仍拒绝毒化锁。
+            let mut state = match shared.lock() {
+                Ok(state) => state,
+                Err(poison) => poison.into_inner(),
+            };
+            state.shutdown(signal)
+        };
+        if stopped.is_ok() {
+            owner.take();
+        }
+        // 失败时父对象保留同一client，下一次明确stop重试，不新建替代。
+        stopped
+    }
+    impl ClipboardHistoryListener {
+        fn cleanup_persistent(&mut self) -> Result<(), HistoryListenerError> {
+            stop_persistent_state(&mut self.persistent, &self.signal)
+        }
     }
 
     struct ProcessReader {
@@ -1216,6 +1477,483 @@ mod native {
                 Err(HistoryListenerError::ScopeMismatch)
             );
             assert!(backend.sets.is_empty());
+        }
+        // 全部为内存假客户端：不启动线程/进程，不访问剪贴板或窗口站。
+        use crate::clipboard_history_worker::{
+            HistoryCaptureFailure as ClientFailure, HistoryWorkerError as ClientError,
+            HistoryWorkerProtocolError as ClientProtocolError, HistoryWorkerReply as ClientReply,
+            HistoryWorkerSkip as ClientSkip, HistoryWorkerStats as ClientStats,
+        };
+        use std::collections::VecDeque;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct ClientAudit {
+            starts: usize,
+            previous: Vec<u32>,
+            stops: usize,
+            alive: bool,
+            stats: ClientStats,
+        }
+        struct ClientStep {
+            result: Result<ClientReply, ClientError>,
+            cancel_after: bool,
+            wake_next: bool,
+        }
+        impl ClientStep {
+            fn reply(reply: ClientReply) -> Self {
+                Self {
+                    result: Ok(reply),
+                    cancel_after: false,
+                    wake_next: false,
+                }
+            }
+            fn error(error: ClientError) -> Self {
+                Self {
+                    result: Err(error),
+                    cancel_after: false,
+                    wake_next: false,
+                }
+            }
+        }
+        struct MemoryClient {
+            audit: Arc<Mutex<ClientAudit>>,
+            steps: VecDeque<ClientStep>,
+            signal: std::sync::Weak<Signal>,
+            stop_failures: usize,
+            startup_error: Option<ClientError>,
+        }
+        impl PersistentClient for MemoryClient {
+            fn start(&mut self, cancel: &AtomicBool) -> Result<(), ClientError> {
+                let mut audit = self.audit.lock().unwrap();
+                audit.starts += 1;
+                if cancel.load(Ordering::Acquire) {
+                    return Err(ClientError::Cancelled);
+                }
+                if let Some(error) = self.startup_error {
+                    return Err(error);
+                }
+                if !audit.alive {
+                    audit.alive = true;
+                    audit.stats.spawned += 1;
+                }
+                Ok(())
+            }
+            fn capture(
+                &mut self,
+                previous: u32,
+                cancel: &AtomicBool,
+            ) -> Result<ClientReply, ClientError> {
+                let step = self.steps.pop_front().expect("一次通知只消费一步");
+                let mut audit = self.audit.lock().unwrap();
+                audit.previous.push(previous);
+                audit.stats.captures += 1;
+                if step.result.is_err() {
+                    // 假客户端报告已回收；真实kill/reap由worker自身测试和native验收证明。
+                    audit.stats.failures += 1;
+                    if matches!(
+                        step.result,
+                        Err(ClientError::Protocol(ClientProtocolError::ReadTimeout))
+                    ) {
+                        audit.stats.timeouts += 1;
+                    }
+                    if audit.alive {
+                        audit.stats.reaped += 1;
+                        audit.alive = false;
+                    }
+                }
+                drop(audit);
+                if step.cancel_after {
+                    cancel.store(true, Ordering::Release);
+                }
+                if step.wake_next {
+                    self.signal.upgrade().unwrap().wake.try_send(()).unwrap();
+                }
+                step.result
+            }
+            fn stop(&mut self) -> Result<ClientStats, ClientError> {
+                let mut audit = self.audit.lock().unwrap();
+                audit.stops += 1;
+                if self.stop_failures > 0 {
+                    self.stop_failures -= 1;
+                    audit.stats.failures += 1;
+                    return Err(ClientError::CleanupFailed);
+                }
+                if audit.alive {
+                    audit.stats.reaped += 1;
+                    audit.alive = false;
+                }
+                Ok(audit.stats)
+            }
+            fn stats(&self) -> ClientStats {
+                self.audit.lock().unwrap().stats
+            }
+        }
+        struct ReaderHarness {
+            reader: PersistentReader<MemoryClient>,
+            owner: Option<Arc<Mutex<PersistentState<MemoryClient>>>>,
+            signal: Arc<Signal>,
+            wakes: mpsc::Receiver<()>,
+            audit: Arc<Mutex<ClientAudit>>,
+        }
+        fn memory_reader(steps: Vec<ClientStep>) -> ReaderHarness {
+            let (wake, wakes) = mpsc::sync_channel(1);
+            let signal = Arc::new(Signal {
+                stop: AtomicBool::new(false),
+                wake,
+                counters: Counters::default(),
+            });
+            let audit = Arc::new(Mutex::new(ClientAudit::default()));
+            let state = Arc::new(Mutex::new(PersistentState {
+                client: MemoryClient {
+                    audit: audit.clone(),
+                    steps: steps.into(),
+                    signal: Arc::downgrade(&signal),
+                    stop_failures: 0,
+                    startup_error: None,
+                },
+                reported: ClientStats::default(),
+            }));
+            ReaderHarness {
+                reader: PersistentReader {
+                    state: state.clone(),
+                    signal: signal.clone(),
+                },
+                owner: Some(state),
+                signal,
+                wakes,
+                audit,
+            }
+        }
+        fn synthetic_text(sequence: u32) -> ClientReply {
+            ClientReply::Text {
+                request_id: u64::from(sequence) + 1,
+                sequence,
+                text: "synthetic".into(),
+            }
+        }
+
+        #[test]
+        fn persistent_adapter_is_inert_until_explicit_capture_and_reuses_client() {
+            let mut h = memory_reader(vec![
+                ClientStep::reply(synthetic_text(5)),
+                ClientStep::reply(synthetic_text(6)),
+            ]);
+            assert_eq!(h.audit.lock().unwrap().starts, 0);
+            assert_eq!(h.signal.counters.snapshot().captures, 0);
+            assert_eq!(h.reader.capture(4, &h.signal.stop).unwrap().sequence, 5);
+            assert_eq!(h.reader.capture(5, &h.signal.stop).unwrap().sequence, 6);
+            {
+                let a = h.audit.lock().unwrap();
+                assert_eq!(a.stats.spawned, 1);
+                assert_eq!(a.previous, [4, 5]);
+            }
+            assert_eq!(h.signal.counters.snapshot().helpers_started, 1);
+            stop_persistent_state(&mut h.owner, &h.signal).unwrap();
+            assert!(h.owner.is_none());
+            assert_eq!(h.signal.counters.snapshot().helpers_finished, 1);
+        }
+        #[test]
+        fn persistent_adapter_maps_all_skip_reasons_without_creating_new_client() {
+            let pairs = [
+                (ClientSkip::Duplicate, Skip::Duplicate),
+                (ClientSkip::Transient, Skip::Transient),
+                (ClientSkip::Excluded, Skip::Excluded),
+                (ClientSkip::Files, Skip::Files),
+                (ClientSkip::Image, Skip::Image),
+                (ClientSkip::Unsupported, Skip::Unsupported),
+            ];
+            let mut h = memory_reader(
+                pairs
+                    .iter()
+                    .map(|(reason, _)| {
+                        ClientStep::reply(ClientReply::Skipped {
+                            request_id: 1,
+                            sequence: 8,
+                            reason: *reason,
+                        })
+                    })
+                    .collect(),
+            );
+            for (_, expected) in pairs {
+                let result = h.reader.capture(7, &h.signal.stop).unwrap();
+                assert_eq!(result.sequence, 8);
+                assert!(matches!(result.content, Content::Skip(actual) if actual == expected));
+            }
+            assert_eq!(h.audit.lock().unwrap().stats.spawned, 1);
+        }
+        #[test]
+        fn persistent_adapter_maps_capture_failures_without_adapter_retry() {
+            let pairs = [
+                (
+                    ClientFailure::ScopeMismatch,
+                    HistoryListenerError::ScopeMismatch,
+                ),
+                (ClientFailure::Busy, HistoryListenerError::ClipboardBusy),
+                (
+                    ClientFailure::Changed,
+                    HistoryListenerError::ClipboardChanged,
+                ),
+                (
+                    ClientFailure::InvalidText,
+                    HistoryListenerError::InvalidText,
+                ),
+                (ClientFailure::TooLarge, HistoryListenerError::TextTooLarge),
+                (ClientFailure::Backend, HistoryListenerError::CaptureFailed),
+            ];
+            let mut h = memory_reader(
+                pairs
+                    .iter()
+                    .map(|(reason, _)| {
+                        ClientStep::reply(ClientReply::Failed {
+                            request_id: 1,
+                            reason: *reason,
+                        })
+                    })
+                    .collect(),
+            );
+            for (_, expected) in pairs {
+                assert_eq!(h.reader.capture(7, &h.signal.stop).err(), Some(expected));
+            }
+            assert_eq!(h.audit.lock().unwrap().stats.spawned, 1);
+        }
+        #[test]
+        fn persistent_adapter_protocol_failure_is_not_retried_inside_capture() {
+            let mut h = memory_reader(vec![
+                ClientStep::error(ClientError::Protocol(ClientProtocolError::InvalidFrame)),
+                ClientStep::reply(synthetic_text(9)),
+            ]);
+            assert_eq!(
+                h.reader.capture(7, &h.signal.stop).err(),
+                Some(HistoryListenerError::CaptureFailed)
+            );
+            {
+                let a = h.audit.lock().unwrap();
+                assert_eq!(a.previous, [7]);
+                assert_eq!(a.stats.reaped, 1);
+            }
+            assert_eq!(h.signal.counters.snapshot().helpers_finished, 1);
+            // 下一次明确采集才可调用客户端重建；失败请求本身没有补发。
+            assert_eq!(h.reader.capture(8, &h.signal.stop).unwrap().sequence, 9);
+            assert_eq!(h.audit.lock().unwrap().stats.spawned, 2);
+        }
+        #[test]
+        fn persistent_adapter_start_failure_does_not_issue_capture() {
+            let mut h = memory_reader(vec![]);
+            h.reader.state.lock().unwrap().client.startup_error = Some(ClientError::Protocol(
+                ClientProtocolError::PeerRefused(ClientFailure::ScopeMismatch),
+            ));
+            assert_eq!(
+                h.reader.capture(7, &h.signal.stop).err(),
+                Some(HistoryListenerError::ScopeMismatch)
+            );
+            let a = h.audit.lock().unwrap();
+            assert_eq!(a.starts, 1);
+            assert!(a.previous.is_empty());
+        }
+        #[test]
+        fn persistent_adapter_cancelled_before_start_does_not_capture_or_spawn() {
+            let mut h = memory_reader(vec![]);
+            h.signal.stop.store(true, Ordering::Release);
+            assert_eq!(
+                h.reader.capture(7, &h.signal.stop).err(),
+                Some(HistoryListenerError::CaptureCancelled)
+            );
+            let a = h.audit.lock().unwrap();
+            assert_eq!(a.stats.spawned, 0);
+            assert!(a.previous.is_empty());
+        }
+        #[test]
+        fn persistent_adapter_cleanup_failure_retains_same_client_for_explicit_retry() {
+            let mut h = memory_reader(vec![ClientStep::reply(synthetic_text(8))]);
+            h.reader.capture(7, &h.signal.stop).unwrap();
+            h.reader.state.lock().unwrap().client.stop_failures = 1;
+            let identity = Arc::as_ptr(h.owner.as_ref().unwrap());
+            drop(h.reader);
+            assert_eq!(
+                stop_persistent_state(&mut h.owner, &h.signal),
+                Err(HistoryListenerError::WorkerFailed)
+            );
+            assert_eq!(Arc::as_ptr(h.owner.as_ref().unwrap()), identity);
+            assert_eq!(h.signal.counters.snapshot().helpers_finished, 0);
+            stop_persistent_state(&mut h.owner, &h.signal).unwrap();
+            stop_persistent_state(&mut h.owner, &h.signal).unwrap();
+            let a = h.audit.lock().unwrap();
+            assert_eq!(a.stops, 2);
+            assert_eq!(a.stats.spawned, 1);
+            assert_eq!(a.stats.reaped, 1);
+            assert_eq!(h.signal.counters.snapshot().failed, 1);
+            assert_eq!(h.signal.counters.snapshot().helpers_finished, 1);
+        }
+        #[test]
+        fn persistent_adapter_poison_rejects_capture_but_cleanup_recovers_owned_client() {
+            let mut h = memory_reader(vec![ClientStep::reply(synthetic_text(8))]);
+            h.reader.capture(7, &h.signal.stop).unwrap();
+            let shared = h.owner.as_ref().unwrap().clone();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = shared.lock().unwrap();
+                panic!("synthetic poisoning");
+            }));
+            assert_eq!(
+                h.reader.capture(8, &h.signal.stop).err(),
+                Some(HistoryListenerError::WorkerFailed)
+            );
+            stop_persistent_state(&mut h.owner, &h.signal).unwrap();
+            let a = h.audit.lock().unwrap();
+            assert_eq!(a.previous, [7]);
+            assert_eq!(a.stats.reaped, 1);
+        }
+        #[test]
+        fn persistent_adapter_late_text_after_cancel_is_discarded_by_existing_worker() {
+            let mut step = ClientStep::reply(synthetic_text(8));
+            step.cancel_after = true;
+            let mut h = memory_reader(vec![step]);
+            let (output, results) = mpsc::sync_channel(1);
+            h.signal.wake.try_send(()).unwrap();
+            worker(h.reader, &h.signal, h.wakes, output, 42, 7);
+            assert!(results.try_recv().is_err());
+            assert_eq!(h.signal.counters.snapshot().delivered, 0);
+            assert_eq!(h.audit.lock().unwrap().previous, [7]);
+            stop_persistent_state(&mut h.owner, &h.signal).unwrap();
+        }
+        #[test]
+        fn persistent_adapter_uses_bounded_output_and_drops_new_result_when_full() {
+            let mut first = ClientStep::reply(synthetic_text(8));
+            first.wake_next = true;
+            let mut second = ClientStep::reply(synthetic_text(9));
+            second.wake_next = true;
+            let mut last = ClientStep::reply(synthetic_text(10));
+            last.cancel_after = true;
+            let mut h = memory_reader(vec![first, second, last]);
+            let (output, results) = mpsc::sync_channel(1);
+            h.signal.wake.try_send(()).unwrap();
+            worker(h.reader, &h.signal, h.wakes, output, 42, 7);
+            assert_eq!(results.try_recv().unwrap().sequence_number, 8);
+            assert!(results.try_recv().is_err());
+            let stats = h.signal.counters.snapshot();
+            assert_eq!(stats.delivered, 1);
+            assert_eq!(stats.dropped, 1);
+            assert_eq!(h.audit.lock().unwrap().stats.spawned, 1);
+            stop_persistent_state(&mut h.owner, &h.signal).unwrap();
+        }
+        #[test]
+        fn persistent_adapter_timeout_counts_once_in_existing_worker() {
+            let mut first =
+                ClientStep::error(ClientError::Protocol(ClientProtocolError::ReadTimeout));
+            first.wake_next = true;
+            let mut last = ClientStep::reply(synthetic_text(9));
+            last.cancel_after = true;
+            let mut h = memory_reader(vec![first, last]);
+            let (output, results) = mpsc::sync_channel(1);
+            h.signal.wake.try_send(()).unwrap();
+            worker(h.reader, &h.signal, h.wakes, output, 42, 7);
+            assert!(results.try_recv().is_err());
+            let stats = h.signal.counters.snapshot();
+            assert_eq!(stats.failed, 1);
+            assert_eq!(stats.timeouts, 1);
+            assert_eq!(stats.helpers_started, 2);
+            assert_eq!(stats.helpers_finished, 1);
+            stop_persistent_state(&mut h.owner, &h.signal).unwrap();
+            assert_eq!(h.signal.counters.snapshot().helpers_finished, 2);
+        }
+        #[test]
+        fn persistent_adapter_rejects_control_reply_on_capture_path() {
+            let mut h = memory_reader(vec![ClientStep::reply(ClientReply::Ready)]);
+            assert_eq!(
+                h.reader.capture(7, &h.signal.stop).err(),
+                Some(HistoryListenerError::InvalidReply)
+            );
+            assert_eq!(h.audit.lock().unwrap().previous, [7]);
+        }
+        #[test]
+        fn persistent_adapter_accepts_text_decoded_across_every_wire_split() {
+            use crate::clipboard_history_worker_protocol::{encode_reply, Decoder};
+            let frame = encode_reply(&synthetic_text(8)).unwrap();
+            for split in 1..frame.len() {
+                let mut decoder = Decoder::default();
+                assert_eq!(decoder.push(&frame[..split]).unwrap(), None);
+                let decoded = decoder.push(&frame[split..]).unwrap().unwrap();
+                let mut h = memory_reader(vec![ClientStep::reply(decoded)]);
+                let observation = h.reader.capture(7, &h.signal.stop).unwrap();
+                assert_eq!(observation.sequence, 8);
+                assert!(
+                    matches!(observation.content, Content::Text(ref text) if text == "synthetic")
+                );
+                assert_eq!(h.audit.lock().unwrap().previous, [7]);
+            }
+        }
+        #[test]
+        fn persistent_adapter_propagates_decoder_rejection_once_without_fallback() {
+            use crate::clipboard_history_worker_protocol::{encode_reply, Decoder, MAX_UNITS};
+            let frame = encode_reply(&synthetic_text(8)).unwrap();
+            let mut bad_magic = frame.clone();
+            bad_magic[0] ^= 1;
+            let mut trailing = frame.clone();
+            trailing.push(0);
+            let mut too_large = frame[..25].to_vec();
+            too_large[21..25].copy_from_slice(&((MAX_UNITS + 1) as u32).to_le_bytes());
+            for (bytes, expected) in [
+                (bad_magic, ClientProtocolError::InvalidFrame),
+                (trailing, ClientProtocolError::TrailingData),
+                (too_large, ClientProtocolError::TooLarge),
+            ] {
+                let mut decoder = Decoder::default();
+                let error = decoder.push(&bytes).unwrap_err();
+                assert_eq!(error, expected);
+                assert_eq!(decoder.push(&frame), Err(ClientProtocolError::InvalidState));
+                let mut h = memory_reader(vec![ClientStep::error(ClientError::Protocol(error))]);
+                assert_eq!(
+                    h.reader.capture(7, &h.signal.stop).err(),
+                    Some(HistoryListenerError::CaptureFailed)
+                );
+                let a = h.audit.lock().unwrap();
+                assert_eq!(a.previous, [7]);
+                assert_eq!(a.stats.reaped, 1);
+            }
+        }
+        #[test]
+        fn persistent_adapter_propagates_truncated_eof_without_body_delivery() {
+            use crate::clipboard_history_worker_protocol::{encode_reply, Decoder};
+            let frame = encode_reply(&synthetic_text(8)).unwrap();
+            let mut decoder = Decoder::default();
+            assert_eq!(decoder.push(&frame[..frame.len() - 1]), Ok(None));
+            let error = decoder.end_of_stream().unwrap_err();
+            assert_eq!(error, ClientProtocolError::Truncated);
+            let mut h = memory_reader(vec![ClientStep::error(ClientError::Protocol(error))]);
+            assert_eq!(
+                h.reader.capture(7, &h.signal.stop).err(),
+                Some(HistoryListenerError::CaptureFailed)
+            );
+            assert_eq!(h.signal.counters.snapshot().helpers_finished, 1);
+        }
+        #[test]
+        fn persistent_adapter_sequence_wrap_uses_equality_and_delivers_new_zero() {
+            let mut first = ClientStep::reply(synthetic_text(0));
+            first.wake_next = true;
+            let mut last = ClientStep::reply(synthetic_text(1));
+            last.cancel_after = true;
+            let mut h = memory_reader(vec![first, last]);
+            let (output, results) = mpsc::sync_channel(1);
+            h.signal.wake.try_send(()).unwrap();
+            worker(h.reader, &h.signal, h.wakes, output, 42, u32::MAX);
+            let record = results.try_recv().unwrap();
+            assert_eq!((record.session, record.sequence_number), (42, 0));
+            assert!(results.try_recv().is_err());
+            assert_eq!(h.audit.lock().unwrap().previous, [u32::MAX, 0]);
+            stop_persistent_state(&mut h.owner, &h.signal).unwrap();
+        }
+        #[test]
+        fn persistent_adapter_stop_before_worker_rejects_even_queued_notification() {
+            let mut h = memory_reader(vec![]);
+            let (output, results) = mpsc::sync_channel(1);
+            h.signal.wake.try_send(()).unwrap();
+            h.signal.stop.store(true, Ordering::Release);
+            worker(h.reader, &h.signal, h.wakes, output, 42, 7);
+            assert!(results.try_recv().is_err());
+            assert_eq!(h.audit.lock().unwrap().starts, 0);
+            assert_eq!(h.signal.counters.snapshot().captures, 0);
+            stop_persistent_state(&mut h.owner, &h.signal).unwrap();
+            assert_eq!(h.signal.counters.snapshot().helpers_started, 0);
         }
     }
 }

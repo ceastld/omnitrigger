@@ -710,3 +710,6 @@ fn foreign_controller_ticket_cannot_write_or_consume_recreated_owner_pending() {
     );
     assert_eq!(fixture.revision(), "1");
 }
+
+#[path = "clipboard_history_ui_lifecycle_review.rs"]
+mod ui_lifecycle_review;

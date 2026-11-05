@@ -89,6 +89,7 @@ fn store_failure(error: HistoryError) -> StoreFailure {
         "history_conflict" => StoreFailure::Conflict,
         "cancelled" | "timeout" => StoreFailure::Cancelled,
         "history_busy" | "history_unavailable" => StoreFailure::Unavailable,
+        _ if error.effect_state == "not_started" => StoreFailure::Unavailable,
         _ => StoreFailure::Unknown,
     }
 }
@@ -115,7 +116,9 @@ mod native {
 
     /// 只使用当前应用自己的helper入口，不接受脚本/历史正文提供的路径。
     #[derive(Default)]
-    pub struct NativeHistoryFactory;
+    pub struct NativeHistoryFactory {
+        worker_budgets: Option<omnitrigger_windows::HistoryWorkerBudgets>,
+    }
     struct Listener {
         listener: ClipboardHistoryListener,
         results: Receiver<HistoryText>,
@@ -133,8 +136,11 @@ mod native {
             }
             let executable =
                 std::env::current_exe().map_err(|_| BackgroundError::ListenerFailed)?;
-            let (listener, results) = ClipboardHistoryListener::start(&executable)
-                .map_err(|_| BackgroundError::ListenerFailed)?;
+            let (listener, results) = match self.worker_budgets {
+                None => ClipboardHistoryListener::start(&executable),
+                Some(budgets) => ClipboardHistoryListener::start_persistent(&executable, budgets),
+            }
+            .map_err(|_| BackgroundError::ListenerFailed)?;
             // 更保守的启用交接基线：只读序号元数据；交接期间的变更可能被跳过，不补读旧正文。
             let baseline = omnitrigger_windows::clipboard_sequence_number();
             Ok(Box::new(Listener {
@@ -172,9 +178,22 @@ mod native {
         }
     }
     impl HistoryBackground<NativeHistoryFactory, ClipboardHistoryWriter> {
+        /// 构造仍默认关闭；预算只影响明确启用后的持续helper。
+        pub fn for_store_with_worker(
+            store: Arc<ClipboardHistoryStore>,
+            budgets: omnitrigger_windows::HistoryWorkerBudgets,
+        ) -> Self {
+            let mut background = Self::for_store(store);
+            background.factory.worker_budgets = Some(budgets);
+            background
+        }
+
         /// 仅保存既有私有store引用；默认关闭，真正启用必须在后台显式调用enable。
         pub fn for_store(store: Arc<ClipboardHistoryStore>) -> Self {
-            Self::new(NativeHistoryFactory, ClipboardHistoryWriter::new(store))
+            Self::new(
+                NativeHistoryFactory::default(),
+                ClipboardHistoryWriter::new(store),
+            )
         }
     }
 }

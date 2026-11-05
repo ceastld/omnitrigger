@@ -4,11 +4,13 @@ use crate::clipboard_history_background::{Cancellation, HistoryBackground};
 use crate::clipboard_history_controller::{
     CommitDisposition, DropReason, Failure, Status, StoreFailure,
 };
+use crate::clipboard_history_filter::{summary_label, SummaryQuery, MAX_QUERY_CHARACTERS};
 use crate::clipboard_history_store::{ClipboardHistoryStore, HistoryError, HistoryList, MAX_ITEMS};
 use crate::clipboard_history_ui_state::{Control, HistoryUiState, Phase};
 use crate::event_bridge::{EventBridge, UiWake};
+use crate::message_input::MessageInput;
 use crate::theme::{self, button, rgb, Tone};
-use gpui::{div, prelude::*, px, Context, Div};
+use gpui::{div, prelude::*, px, Context, Div, Entity, Subscription};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -56,6 +58,9 @@ impl Drop for Worker {
 
 pub(super) struct ClipboardHistoryUi {
     state: HistoryUiState,
+    query: SummaryQuery,
+    search: Entity<MessageInput>,
+    _search_changed: Subscription,
     store: Option<Arc<ClipboardHistoryStore>>,
     wake: UiWake,
     worker: Option<Worker>,
@@ -64,11 +69,34 @@ pub(super) struct ClipboardHistoryUi {
 
 impl ClipboardHistoryUi {
     /// 这里只保存组合根提供的store；不创建线程、不读磁盘、不启用监听。
-    pub fn new(store: Option<Arc<ClipboardHistoryStore>>, wake: UiWake) -> Self {
+    pub fn new(
+        store: Option<Arc<ClipboardHistoryStore>>,
+        wake: UiWake,
+        cx: &mut Context<super::Workspace>,
+    ) -> Self {
+        let search = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).with_character_limit(MAX_QUERY_CHARACTERS);
+            input.set_placeholder("筛选摘要（不搜索正文）");
+            input
+        });
+        let search_changed = cx.observe(&search, |this, search, cx| {
+            match SummaryQuery::new(&search.read(cx).text()) {
+                Ok(query) if query != this.text_history.query => {
+                    this.text_history.query = query;
+                    this.text_history.state.selected = None;
+                }
+                Ok(_) => {}
+                Err(_) => this.text_history.state.message = Some("筛选词过长，请缩短后重试。"),
+            }
+            cx.notify();
+        });
         let collection = Cancellation::default();
         collection.cancel();
         Self {
             state: HistoryUiState::new(store.is_some()),
+            query: SummaryQuery::default(),
+            search,
+            _search_changed: search_changed,
             store,
             wake,
             worker: None,
@@ -152,6 +180,12 @@ impl ClipboardHistoryUi {
     }
 
     fn remove_selected(&mut self) {
+        if !self
+            .query
+            .selected_visible(&self.state.items, self.state.selected.as_deref())
+        {
+            return;
+        }
         if let Some((id, item)) = self.state.remove() {
             self.submit(Request::Remove { id, item });
         }
@@ -253,7 +287,14 @@ fn run_worker(
     replies: mpsc::SyncSender<Reply>,
     shutdown: Cancellation,
 ) {
-    let mut background = HistoryBackground::for_store(store.clone());
+    let mut background = HistoryBackground::for_store_with_worker(
+        store.clone(),
+        omnitrigger_windows::HistoryWorkerBudgets {
+            startup_ms: 60_000,
+            read_ms: 1_000,
+            stop_grace_ms: 500,
+        },
+    );
     let mut control_id = 0;
     let mut reported_status = Status::Stopped;
     'work: while !shutdown.is_cancelled() {
@@ -410,7 +451,9 @@ impl super::Workspace {
             .border_1()
             .border_color(rgb(theme::BORDER))
             .bg(rgb(theme::ROW));
-        for (index, item) in state.items.iter().enumerate() {
+        let visible = self.text_history.query.matching_indices(&state.items);
+        for &index in &visible {
+            let item = &state.items[index];
             let selected = state.selected.as_deref() == Some(item.id.as_str());
             let id = item.id.clone();
             list = list.child(
@@ -426,14 +469,18 @@ impl super::Workspace {
                         this.text_history.state.select(&id);
                         cx.notify();
                     }))
-                    .child(div().truncate().child(item.preview.clone())),
+                    .child(div().truncate().child(summary_label(item))),
             );
         }
-        if state.items.is_empty() {
+        if visible.is_empty() {
             list = list.child(
                 div()
                     .p(px(32.))
-                    .child(super::caption("暂无摘要，点击刷新查询已有历史。")),
+                    .child(super::caption(if state.items.is_empty() {
+                        "暂无摘要，点击刷新查询已有历史。"
+                    } else {
+                        "没有匹配的摘要，试试其他筛选词。"
+                    })),
             );
         }
         div()
@@ -467,6 +514,7 @@ impl super::Workspace {
                         })),
                     ),
             )
+            .child(div().flex_none().child(self.text_history.search.clone()))
             .child(
                 div()
                     .flex()
@@ -489,14 +537,22 @@ impl super::Workspace {
                             "text-history-remove",
                             "删除选中项",
                             Tone::Danger,
-                            state.can_remove(),
+                            state.can_remove()
+                                && self
+                                    .text_history
+                                    .query
+                                    .selected_visible(&state.items, state.selected.as_deref()),
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.text_history.remove_selected();
                             cx.notify();
                         })),
                     )
-                    .child(super::caption(format!("{} 条摘要", state.items.len()))),
+                    .child(super::caption(format!(
+                        "{} / {} 条摘要",
+                        visible.len(),
+                        state.items.len()
+                    ))),
             )
             .when_some(state.message, |element, message| {
                 element.child(super::caption(message))

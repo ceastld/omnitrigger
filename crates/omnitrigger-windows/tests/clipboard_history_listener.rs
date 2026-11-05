@@ -386,3 +386,184 @@ fn isolated_history_delayed_render_timeout_is_bounded_and_next_update_recovers()
     assert_eq!(stopped.helpers_started, stopped.helpers_finished);
     scope.verify();
 }
+
+// 仅用于CI独立进程中的CREATE_ONLY非交互窗口站；沿用原有严格scope夹具。
+fn persistent_listener() -> (ClipboardHistoryListener, Receiver<HistoryText>) {
+    ClipboardHistoryListener::start_persistent(
+        &executable(),
+        omnitrigger_windows::HistoryWorkerBudgets {
+            startup_ms: 60_000,
+            read_ms: 1_000,
+            stop_grace_ms: 500,
+        },
+    )
+    .unwrap()
+}
+
+fn receive_persistent(scope: &PrivateClipboard, receiver: &Receiver<HistoryText>) -> HistoryText {
+    scope.verify();
+    // 首次通知可能包含冷启动等待；不是采集延时性能承诺。
+    let record = receiver
+        .recv_timeout(Duration::from_secs(65))
+        .expect("持续listener未收到合成历史项");
+    scope.verify();
+    record
+}
+
+fn wait_persistent(listener: &ClipboardHistoryListener, check: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(65);
+    while !check() {
+        assert!(
+            Instant::now() < deadline,
+            "持续listener验收超时，状态={:?}",
+            listener.stats()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+#[ignore = "仅CI独立非交互窗口站验收；持续reader同scope、排除格式和Unicode parity"]
+fn isolated_persistent_listener_preserves_unicode_and_exclusion_in_same_scope() {
+    let scope = PrivateClipboard::create();
+    let owner = Owner::new(&scope);
+    publish(
+        &scope,
+        &owner,
+        &[(13, wide("synthetic old text must not import"))],
+    );
+    let (mut listener, results) = persistent_listener();
+    scope.verify();
+    assert_eq!(
+        results.recv_timeout(Duration::from_millis(150)),
+        Err(RecvTimeoutError::Timeout)
+    );
+    assert_eq!(listener.stats().helpers_started, 0);
+    let expected = " \r\n合成😀 e\u{301} ";
+    publish(&scope, &owner, &[(13, wide(expected))]);
+    let record = receive_persistent(&scope, &results);
+    assert_eq!(record.text, expected);
+    assert_eq!(record.session, listener.session());
+    assert_eq!(listener.stats().helpers_started, 1);
+
+    let transient = unsafe { RegisterClipboardFormatW(w!("OmniTrigger.TransientClipboard.v1")) };
+    let excluded =
+        unsafe { RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")) };
+    let png = unsafe { RegisterClipboardFormatW(w!("PNG")) };
+    assert_ne!(transient, 0);
+    assert_ne!(excluded, 0);
+    assert_ne!(png, 0);
+    // 文件路径和图片字节均为合成载荷，测试从不打开文件或解码图片。
+    let mut drop_files = vec![0; 20];
+    drop_files[..4].copy_from_slice(&20_u32.to_le_bytes());
+    drop_files[16..20].copy_from_slice(&1_u32.to_le_bytes());
+    drop_files.extend(wide("Z:\\synthetic-never-open.txt"));
+    drop_files.extend([0, 0]);
+    for (format, bytes) in [
+        (transient, 1_u32.to_le_bytes().to_vec()),
+        (excluded, 1_u32.to_le_bytes().to_vec()),
+        (15, drop_files),
+        (png, b"synthetic-not-a-real-image".to_vec()),
+    ] {
+        let before = listener.stats().skipped;
+        publish(
+            &scope,
+            &owner,
+            &[(format, bytes), (13, wide("synthetic excluded body"))],
+        );
+        wait_persistent(&listener, || listener.stats().skipped > before);
+        assert_eq!(
+            results.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        );
+        assert_eq!(listener.stats().helpers_started, 1);
+        assert_eq!(listener.stats().helpers_finished, 0);
+        scope.verify();
+    }
+    publish(&scope, &owner, &[(13, wide(""))]);
+    assert_eq!(receive_persistent(&scope, &results).text, "");
+    let began = Instant::now();
+    let stopped = listener.stop().unwrap();
+    assert!(began.elapsed() < Duration::from_secs(2));
+    assert_eq!((stopped.helpers_started, stopped.helpers_finished), (1, 1));
+    assert_eq!(stopped.failed, 0);
+    assert_eq!(stopped.timeouts, 0);
+    assert_eq!(listener.stop().unwrap(), stopped);
+    publish(
+        &scope,
+        &owner,
+        &[(13, wide("synthetic after persistent stop"))],
+    );
+    assert_eq!(
+        results.recv_timeout(Duration::from_millis(150)),
+        Err(RecvTimeoutError::Disconnected)
+    );
+    scope.verify();
+}
+
+#[test]
+#[ignore = "仅CI独立非交互窗口站验收；多次copy复用一个helper、严格Unicode边界与明确stop/reap"]
+fn isolated_persistent_listener_many_copies_reuse_one_helper_and_reap_on_stop() {
+    let scope = PrivateClipboard::create();
+    let owner = Owner::new(&scope);
+    publish(&scope, &owner, &[(13, wide("synthetic baseline"))]);
+    let (mut listener, results) = persistent_listener();
+    for index in 0..4 {
+        let text = format!("synthetic continuous copy {index} 😀");
+        publish(&scope, &owner, &[(13, wide(&text))]);
+        let record = receive_persistent(&scope, &results);
+        assert_eq!(record.text, text);
+        assert_eq!(record.session, listener.session());
+        let stats = listener.stats();
+        assert_eq!((stats.helpers_started, stats.helpers_finished), (1, 0));
+        scope.verify();
+    }
+    // 无效代理项和超长文本应拒绝，不把健康进程重建，也不输出截断后的内容。
+    let invalid = [0xd800_u16, 0]
+        .into_iter()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let before_invalid = listener.stats().failed;
+    publish(&scope, &owner, &[(13, invalid)]);
+    wait_persistent(&listener, || listener.stats().failed > before_invalid);
+    assert_eq!(
+        results.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    );
+    let maximum = "😀".repeat(32_768);
+    publish(&scope, &owner, &[(13, wide(&maximum))]);
+    assert_eq!(receive_persistent(&scope, &results).text, maximum);
+    let before_large = listener.stats().failed;
+    publish(&scope, &owner, &[(13, wide(&"x".repeat(65_537)))]);
+    wait_persistent(&listener, || listener.stats().failed > before_large);
+    assert_eq!(
+        results.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    );
+    publish(
+        &scope,
+        &owner,
+        &[(13, wide("synthetic recovered after rejection"))],
+    );
+    assert_eq!(
+        receive_persistent(&scope, &results).text,
+        "synthetic recovered after rejection"
+    );
+    let before_stop = listener.stats();
+    assert_eq!(
+        (before_stop.helpers_started, before_stop.helpers_finished),
+        (1, 0)
+    );
+    assert!(before_stop.failed >= 2);
+    assert_eq!(before_stop.timeouts, 0);
+    let began = Instant::now();
+    let stopped = listener.stop().unwrap();
+    assert!(began.elapsed() < Duration::from_secs(2));
+    assert_eq!((stopped.helpers_started, stopped.helpers_finished), (1, 1));
+    assert_eq!(listener.stop().unwrap(), stopped);
+    assert_eq!(
+        results.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Disconnected)
+    );
+    scope.verify();
+}

@@ -12,9 +12,12 @@ mod browser_connector;
 mod browser_connector_ui;
 mod clipboard_history_background;
 mod clipboard_history_controller;
+mod clipboard_history_filter;
 mod clipboard_history_host;
 #[cfg(test)]
 mod clipboard_history_review;
+#[cfg(test)]
+mod clipboard_history_send_candidate;
 mod clipboard_history_store;
 mod clipboard_history_ui;
 mod clipboard_history_ui_state;
@@ -871,7 +874,7 @@ impl Workspace {
             })
             .map(std::sync::Arc::new);
         let text_history =
-            clipboard_history_ui::ClipboardHistoryUi::new(history_store, ui_wake.clone());
+            clipboard_history_ui::ClipboardHistoryUi::new(history_store, ui_wake.clone(), cx);
         Self {
             backend,
             wheel_input_policy,

@@ -102,7 +102,7 @@ impl HistoryUiState {
     }
 
     pub fn acknowledge(&mut self, id: u64, status: Status, problem: Option<&'static str>) {
-        if id < self.control_floor {
+        if !self.available || id < self.control_floor {
             return;
         }
         if self.pending_control == Some(id) {
@@ -121,7 +121,7 @@ impl HistoryUiState {
     }
 
     pub fn control_failed(&mut self, id: u64) {
-        if id < self.control_floor {
+        if !self.available || id < self.control_floor {
             return;
         }
         self.pending_control = None;
@@ -184,6 +184,9 @@ impl HistoryUiState {
     }
 
     pub fn listed(&mut self, id: Option<u64>, result: Result<HistoryList, &'static str>) {
+        if !self.available {
+            return;
+        }
         match id {
             Some(id) if self.pending_io == Some(id) => self.pending_io = None,
             Some(_) => return,
