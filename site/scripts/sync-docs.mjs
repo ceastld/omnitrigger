@@ -59,6 +59,7 @@ export const groups = [
     text: '开发与发布',
     items: [
       ['docs/BUILDING.md', 'building', '从源码构建'],
+      ['docs/DESKTOP_SCRIPT_SMOKE.md', 'desktop-script-smoke', '桌面脚本效果验收'],
       ['docs/ARCHITECTURE.md', 'architecture', '工程架构'],
       ['docs/PROFILES.md', 'profiles', '配置档与数据目录设计'],
       ['docs/ACCOUNT_WORKSPACE.md', 'account-workspace', '账号工作区与同步设计'],
