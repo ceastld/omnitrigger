@@ -297,3 +297,95 @@ test('模块入口和辅助模块都必须显式接收上下文',()=>{
     assert.equal(result.runtimeExecuted,false);assert.equal(result.filesModified,false);
   }
 });
+
+
+function dualSdkFixture() {
+  const root=fixture();
+  writeFileSync(join(root,'sdk/api.d.ts'),'export interface NodeActionContext { input: Record<string,unknown>; }\n');
+  writeFileSync(join(root,'sdk/script-types.d.ts'),sdk);
+  writeFileSync(join(root,'main.mjs'),'throw Error("DECLARATION CHECK MUST NOT EXECUTE");\n/** @type {ScriptMain} */\nexport function main(ctx) { return {text:String(ctx.input.text ?? "")}; }\n');
+  writeFileSync(join(root,'unused-node.mjs'),'THIS FILE IS NOT A SCRIPT ENTRY AND MUST NOT BE READ');
+  writeFileSync(join(root,'jsconfig.json'),JSON.stringify({compilerOptions:{strict:true,target:'ES2020',module:'ESNext',moduleResolution:'Bundler',lib:['ES2020']},files:['main.mjs','unused-node.mjs','sdk/script-types.d.ts']}));
+  return root;
+}
+
+test('files列明的同步声明进入混合SDK检查，但不扩大到未使用Node源码',()=>{
+  const root=dualSdkFixture();const entry=readFileSync(join(root,'main.mjs'));
+  const result=checkProjectTypes(root);
+  assert.equal(result.passed,true,JSON.stringify(result.diagnostics));
+  assert(result.checkedFiles.includes('sdk/script-types.d.ts'));
+  assert(!result.checkedFiles.includes('unused-node.mjs'));
+  assert.equal(result.runtimeExecuted,false);assert.equal(result.filesModified,false);
+  assert.deepEqual(readFileSync(join(root,'main.mjs')),entry);
+});
+
+test('显式声明中的类型错误保留实际文件和行列',()=>{
+  const root=dualSdkFixture();
+  writeFileSync(join(root,'sdk/broken.d.ts'),'declare const impossible: MissingConfiguredType;\n');
+  const path=join(root,'jsconfig.json');const config=JSON.parse(readFileSync(path,'utf8'));
+  config.files.push('sdk/broken.d.ts');writeFileSync(path,JSON.stringify(config));
+  const result=checkProjectTypes(root);
+  assert.equal(result.passed,false);
+  assert(result.diagnostics.some(d=>d.code===2304&&d.file==='sdk/broken.d.ts'&&d.line===1&&d.column===27));
+  assert.equal(result.runtimeExecuted,false);
+});
+
+test('files不允许隐藏清单中的同步入口约束',()=>{
+  const root=dualSdkFixture();const path=join(root,'jsconfig.json');
+  const config=JSON.parse(readFileSync(path,'utf8'));config.files=['sdk/script-types.d.ts'];
+  writeFileSync(path,JSON.stringify(config));
+  writeFileSync(join(root,'main.mjs'),'/** @type {ScriptMain} */\nexport async function main(ctx){return {text:String(ctx.input.text)};}');
+  const result=checkProjectTypes(root);
+  assert.equal(result.passed,false);
+  assert(result.environmentDiagnostics.some(d=>d.code==='entry_main_async'));
+  assert.deepEqual(result.entries,['main.mjs']);
+});
+
+test('缺失的显式声明是类型诊断，不静默略过',()=>{
+  const root=dualSdkFixture();const path=join(root,'jsconfig.json');
+  const config=JSON.parse(readFileSync(path,'utf8'));config.files.push('sdk/missing.d.ts');
+  writeFileSync(path,JSON.stringify(config));
+  const result=checkProjectTypes(root);
+  assert.equal(result.passed,false);assert(result.diagnostics.some(d=>d.code===6053));
+  assert(!result.checkedFiles.includes('sdk/missing.d.ts'));
+});
+
+test('显式声明拒绝越界和通配符，错误定位到工程配置',()=>{
+  for(const name of ['../outside.d.ts','/outside.d.ts','C:/outside.d.ts','sdk/*.d.ts']) {
+    const root=dualSdkFixture();const path=join(root,'jsconfig.json');
+    const config=JSON.parse(readFileSync(path,'utf8'));config.files.push(name);
+    writeFileSync(path,JSON.stringify(config));
+    assert.throws(()=>checkProjectTypes(root),error=>{
+      assert.equal(error.code,'project_config_unsupported');
+      assert.deepEqual(error.location,{file:'jsconfig.json'});return true;
+    });
+  }
+});
+
+test('files数组类型与数量有界，不让无效路径进入读取',()=>{
+  for(const files of [null,'sdk/api.d.ts',[null],Array(257).fill('sdk/api.d.ts')]) {
+    const root=fixture();writeFileSync(join(root,'jsconfig.json'),JSON.stringify({files}));
+    assert.throws(()=>checkProjectTypes(root),error=>{
+      assert.equal(error.code,'project_config_invalid');
+      assert.deepEqual(error.location,{file:'jsconfig.json'});return true;
+    });
+  }
+});
+
+test('配置声明继续遵守硬链接和容量防护',()=>{
+  const root=dualSdkFixture();const declaration=join(root,'sdk/script-types.d.ts');
+  linkSync(declaration,join(root,'sdk/linked.d.ts'));
+  assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_link_path');
+  unlinkSync(join(root,'sdk/linked.d.ts'));
+  writeFileSync(declaration,'//'+ 'x'.repeat(512*1024));
+  assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_file_limit');
+});
+
+test('同一显式声明去重，SDK快照不会因重复配置产生伪冲突',()=>{
+  const root=dualSdkFixture();const path=join(root,'jsconfig.json');
+  const config=JSON.parse(readFileSync(path,'utf8'));config.files.push('sdk/script-types.d.ts','sdk/api.d.ts');
+  writeFileSync(path,JSON.stringify(config));
+  const result=checkProjectTypes(root);
+  assert.equal(result.passed,true,JSON.stringify(result.diagnostics));
+  assert.equal(result.checkedFiles.filter(name=>name==='sdk/script-types.d.ts').length,1);
+});

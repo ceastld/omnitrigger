@@ -122,6 +122,21 @@ export function checkProjectTypes(projectDirectory) {
   if(!config||typeof config!=='object'||Array.isArray(config)||Object.hasOwn(config,'extends'))fail('project_config_unsupported');
   const compilerOptions=Object.hasOwn(config,'compilerOptions')?config.compilerOptions:{};
   if(!compilerOptions||typeof compilerOptions!=='object'||Array.isArray(compilerOptions))fail('project_config_invalid');
+  // 仅加入作者逐个列明的包内声明；不按 files/include 扫描目录或扩展 Node 入口。
+  const configuredFiles=Object.hasOwn(config,'files')?config.files:[];
+  if(!Array.isArray(configuredFiles)||configuredFiles.length>256
+    ||configuredFiles.some(name=>typeof name!=='string'||!name||name.length>2048||name.includes('\0'))) {
+    fail('project_config_invalid',{file:'jsconfig.json'});
+  }
+  const configuredDeclarations=[];
+  for(const name of configuredFiles) {
+    if(!name.endsWith('.d.ts'))continue;
+    const declaration=resolve(root,name);
+    if(isAbsolute(name)||/[\0*?:]/.test(name)||!within(root,declaration)) {
+      fail('project_config_unsupported',{file:'jsconfig.json'});
+    }
+    configuredDeclarations.push(declaration);
+  }
   const converted=ts.convertCompilerOptionsFromJson(compilerOptions,root);
   if(converted.errors.length)fail('project_config_invalid');
   const options={strict:true,target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.ESNext,
@@ -153,7 +168,7 @@ export function checkProjectTypes(projectDirectory) {
     }
   };
   host.writeFile=()=>fail('project_emit_forbidden');
-  const program=ts.createProgram([...new Set([...entries,sdk])],options,host);
+  const program=ts.createProgram([...new Set([...entries,sdk,...configuredDeclarations])],options,host);
   if(fatal)throw fatal;
   const diagnostics=ts.getPreEmitDiagnostics(program).map(item=>{
     const location=item.file&&typeof item.start==='number'?item.file.getLineAndCharacterOfPosition(item.start):undefined;
