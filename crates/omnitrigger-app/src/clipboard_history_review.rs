@@ -1,5 +1,4 @@
 //! 仅合成目录的后台历史组合回归；由应用测试组合根显式声明，不启动原生监听器。
-#![cfg(test)]
 
 use crate::clipboard_history_background::{
     BackgroundError, BackgroundListener, BackgroundStore, Cancellation, ClipboardHistoryWriter,
