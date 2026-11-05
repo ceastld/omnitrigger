@@ -65,12 +65,13 @@ SDK 异常固定 `method: 'process.capture'`，消息为“程序输出采集未
 | `unsupported_platform` / `process_setup_failed` / `process_start_failed` | 平台不支持、Job/管道设置或进程创建失败，`not_started`。 |
 | `cancelled` / `timeout` | 外层动作取消或期限到达；启动前为 `not_started`，启动后为 `unknown`。 |
 | `process_timeout` / `process_output_too_large` / `process_invalid_utf8` / `process_exit_nonzero` | 启动后超时、超限、解码或非零策略失败，`unknown`。 |
-| `process_read_failed` / `process_wait_failed` / `process_clock_error` / `process_cleanup_failed` | 采集、等待、计时或收尾失败，`unknown`，不能据此断言副作用未发生。 |
+| `process_read_failed` / `process_wait_failed` / `process_cleanup_failed` | 采集、等待或收尾失败，`unknown`，不能据此断言副作用未发生。 |
+| `process_clock_error` | 启动前预算计算失败为 `not_started`，采集中计时异常为 `unknown`。 |
 | `invalid_response` / `process_capture_failed` | 回执无效或未识别的采集失败；派发后的效果不确定时为 `unknown`。 |
 
 Node 的 `capture` 须等待完成；未 `await` 的在途采集会令动作报 `pending_process_capture`，并关闭连接以请求收尾。所有本机调用共用在途限制与每动作128次计数，采集的传输预算为 `timeoutMs + 1500ms`、最多61500ms，仍受更短的外层期限约束。
 
-与 Node 现有 `await ctx.process.run(program, args, {cwd, allowNonZero})` 相比，返回字段相同，但契约不同：Node 没有单次 `timeoutMs`，省略 `cwd` 使用包目录，输出按 UTF-8 替换无效字节；取消处理直接子进程，没有上述私有 Job 收尾保证。Node 的双流同样合计最多 64 KiB。这些区别不能通过改名调用消除；轻量旧 `run` 仍返回 `{pid, exitCode, success}`，不采集输出。
+与 Node 现有 `await ctx.process.run(program, args, {cwd, allowNonZero})` 相比，返回字段相同，但契约不同：Node 旧 `run` 没有单次 `timeoutMs`，省略 `cwd` 使用包目录，输出按 UTF-8 替换无效字节；取消处理直接子进程，没有上述私有 Job 收尾保证。Node 旧 `run` 的双流同样合计最多 64 KiB。这些区别不能通过改名调用消除；轻量旧 `run` 仍返回 `{pid, exitCode, success}`，不采集输出。
 
 ## 原目标快捷键
 

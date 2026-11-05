@@ -139,6 +139,8 @@ jobs:
             $env:OMNITRIGGER_APP_CAPTURE_CASE_ROOT = $captureRoot
             cargo test --locked -p omnitrigger-app --bin omnitrigger process_capture_host::node_native::node_self_exit_cleans_capture_job_while_parent_test_process_lives -- --ignored --exact --test-threads=1
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cargo test --locked -p omnitrigger-app --bin omnitrigger process_capture_host::node_native::action_service_cancel_cleans_capture_job_while_parent_test_process_lives -- --ignored --exact --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally {
             $env:OMNITRIGGER_APP_CAPTURE_NODE = $capturePreviousNode
             $env:OMNITRIGGER_CAPTURE_FIXTURE = $capturePreviousFixture

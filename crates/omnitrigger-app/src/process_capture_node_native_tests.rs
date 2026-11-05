@@ -339,3 +339,231 @@ fn node_self_exit_cleans_capture_job_while_parent_test_process_lives() {
     )
     .unwrap();
 }
+
+const USER_CANCEL: &str = r#"
+import {existsSync,readFileSync,writeFileSync,renameSync} from 'node:fs';
+import {join} from 'node:path';
+const pause=ms=>new Promise(done=>setTimeout(done,ms));
+function publish(root,name,text) {
+  writeFileSync(join(root,name+'.writing'),text,{flag:'wx'});
+  renameSync(join(root,name+'.writing'),join(root,name));
+}
+export default async ctx => {
+  if(process.ppid!==ctx.input.parent)throw Error('owned_parent_mismatch');
+  const pending=ctx.process.capture(ctx.input.program,['descendant',ctx.input.root,ctx.input.token],{timeoutMs:10000});
+  pending.catch(()=>{});
+  const until=performance.now()+8000;
+  const ready=join(ctx.input.root,'fixture-ready');
+  while(!existsSync(ready)||readFileSync(ready,'utf8')!==ctx.input.token) {
+    if(performance.now()>=until)throw Error('fixture_ready_timeout');
+    await pause(2);
+  }
+  publish(ctx.input.root,'node-owner.json',JSON.stringify({schemaVersion:1,token:ctx.input.token,node:process.pid,app:process.ppid}));
+  publish(ctx.input.root,'node-armed',ctx.input.token);
+  const release=join(ctx.input.root,'release-control');
+  while(!existsSync(release)||readFileSync(release,'utf8')!==ctx.input.token) {
+    if(performance.now()>=until)throw Error('control_release_timeout');
+    await pause(2);
+  }
+  publish(ctx.input.root,'node-control-request',ctx.input.token);
+  return await pending;
+};
+"#;
+
+// ActionService在令牌被取消后会覆盖终态；另证实实际capture返回取消，避免仅凭终态通过。
+struct CancelledCaptureHost {
+    inner: WithProcessCapture<NoOtherMethods>,
+    observed: std::sync::Mutex<(usize, bool)>,
+}
+impl CancelledCaptureHost {
+    fn remember(
+        &self,
+        result: Result<Value, ActionError>,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, ActionError> {
+        let valid = cancellation.is_cancelled()
+            && result.as_ref().is_err_and(|error| {
+                error.code == "cancelled"
+                    && error.effect_state.as_deref() == Some("unknown")
+                    && error.method.as_deref() == Some("process.capture")
+                    && error.required_permissions.is_empty()
+            });
+        let mut observed = self.observed.lock().unwrap();
+        observed.0 += 1;
+        observed.1 &= valid;
+        result
+    }
+}
+impl NativeHost for CancelledCaptureHost {
+    fn call(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, ActionError> {
+        self.remember(self.inner.call(method, params, cancellation), cancellation)
+    }
+    fn call_with_deadline(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Value, ActionError> {
+        self.remember(
+            self.inner
+                .call_with_deadline(method, params, cancellation, deadline),
+            cancellation,
+        )
+    }
+}
+
+fn wait_user_cancel_request(root: &Path, token: &str) -> Result<(), &'static str> {
+    let began = Instant::now();
+    let path = root.join("node-control-request");
+    while !path.exists() {
+        if began.elapsed() >= Duration::from_secs(8) {
+            return Err("user_cancel_ready_timeout");
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    if read_owned(&path, 128)? != token {
+        return Err("user_cancel_ready_token");
+    }
+    Ok(())
+}
+
+fn cancelled_terminal(
+    service: &omnitrigger_actions::ActionService,
+    invocation: u64,
+) -> Result<(), &'static str> {
+    use omnitrigger_actions::ActionOutcome;
+    let began = Instant::now();
+    let mut started = false;
+    loop {
+        match service.try_recv() {
+            Ok(event) => {
+                if event.id != 1 || event.invocation_id != invocation {
+                    return Err("service_event_identity");
+                }
+                match event.outcome {
+                    ActionOutcome::Started if !started => started = true,
+                    ActionOutcome::Cancelled if started => return Ok(()),
+                    _ => return Err("service_event_not_cancelled"),
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                return Err("service_events_disconnected");
+            }
+        }
+        if began.elapsed() >= Duration::from_secs(4) {
+            return Err("service_cancel_terminal_timeout");
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+#[ignore = "需要显式自有Node、夹具和父目录；真实ActionService取消验收须显式运行"]
+fn action_service_cancel_cleans_capture_job_while_parent_test_process_lives() {
+    use omnitrigger_actions::{ActionService, PackageCatalog, RuntimeRegistry};
+    use std::sync::Arc;
+    let node = explicit("OMNITRIGGER_APP_CAPTURE_NODE", true);
+    let fixture = explicit("OMNITRIGGER_CAPTURE_FIXTURE", true);
+    let parent_root = explicit("OMNITRIGGER_APP_CAPTURE_CASE_ROOT", false);
+    let parent = std::process::id();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        ^ (u128::from(parent) << 64)
+        ^ u128::from(NEXT.fetch_add(1, Ordering::Relaxed));
+    let token = format!("{nonce:032x}");
+    let root = parent_root.join(format!("capture-case-app-service-cancel-{token}"));
+    fs::create_dir(&root).expect("只创建全新本轮目录，不覆盖或删除旧目录");
+    ordinary(&root, false).unwrap();
+    let warm = action(
+        &root,
+        WARM,
+        json!({"program":fixture,"signature":SIGNATURE}),
+    );
+    let warm_result = NodeRuntime::new(&node).execute_with_host(
+        &warm,
+        &InvocationContext {
+            invocation_id: 1,
+            binding_id: 1,
+        },
+        &CancellationToken::new(),
+        Some(&WithProcessCapture::new(NoOtherMethods)),
+    );
+    assert!(
+        warm_result.is_ok_and(|value| value["ready"] == true),
+        "冷启动预热或夹具签名失败；不回显正文"
+    );
+    let catalog_root = root.join("catalog");
+    fs::create_dir(&catalog_root).unwrap();
+    let package = catalog_root.join("owned");
+    fs::create_dir(&package).unwrap();
+    write_new(&package.join("main.mjs"), USER_CANCEL.as_bytes()).unwrap();
+    let manifest = json!({"schema_version":1,"id":"validation.node-service-cancel",
+        "name":"Node动作服务取消验收","version":"1.0.0","actions":[{
+        "id":"run","title":"取消采集","version":1,"runtime":"node","entry":"main.mjs"}]});
+    write_new(
+        &package.join("action.json"),
+        &serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let catalog = PackageCatalog::load(&catalog_root);
+    assert!(catalog.diagnostics.is_empty(), "合成目录加载失败");
+    assert_eq!(catalog.actions.len(), 1);
+    let mut runtimes = RuntimeRegistry::new();
+    runtimes
+        .register("node", Arc::new(NodeRuntime::new(&node)))
+        .unwrap();
+    let service = ActionService::new(catalog, runtimes);
+    let host = Arc::new(CancelledCaptureHost {
+        inner: WithProcessCapture::new(NoOtherMethods),
+        observed: std::sync::Mutex::new((0, true)),
+    });
+    let call = ActionCall {
+        package_id: "validation.node-service-cancel".into(),
+        action_id: "run".into(),
+        action_version: 1,
+        input: json!({"program":fixture,"root":root,"token":token,"parent":parent}),
+    };
+    let (ready, count, terminal, observation) = thread::scope(|scope| {
+        let observer = scope.spawn(|| observe(&root, &token, parent));
+        let invocation = service
+            .submit_with_host(1, call, Some(host.clone()))
+            .expect("合成动作必须提交成功");
+        let ready = wait_user_cancel_request(&root, &token);
+        // 就绪失败也取消本次提交；所有断言留在观察线程有界返回之后。
+        let count = service.cancel_id(1);
+        let terminal = cancelled_terminal(&service, invocation);
+        (
+            ready,
+            count,
+            terminal,
+            observer.join().expect("只读观察线程必须正常返回"),
+        )
+    });
+    ready.expect("必须在fixture存活且句柄就绪后发出用户取消");
+    assert_eq!(count, 1, "必须命中本轮唯一动作");
+    terminal.expect("必须收到本轮Started后Cancelled终态");
+    assert_eq!(*host.observed.lock().unwrap(), (1, true));
+    assert!(!service.is_running(1), "读取终态后应释放本轮占用");
+    let observation = observation.expect("未在自然期限前证明协作清理；不重试");
+    assert_eq!(std::process::id(), parent);
+    let receipt = json!({"passed":true,"runtime":"node","terminalStatus":"cancelled",
+        "cancelSource":"ActionService.cancel_id","cancelledInvocations":count,
+        "captureReturnedCancelledUnknown":true,"captureCalls":1,
+        "parentKind":"retained_app_test_process","observation":observation,
+        "physicalUiClickExercised":false,"authorInjectsCancelFrame":false,
+        "nodeSelfExitRequested":false,"attempts":1});
+    write_new(
+        &root.join("native-service-cancel-capture-receipt.json"),
+        &serde_json::to_vec_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
+}
