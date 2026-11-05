@@ -97,23 +97,27 @@ function browserRequest(method, args, options = {}, profiles = false) {
 const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...args));
 
 function nativeCall(method, params) {
+  const stat = method === 'fs.stat';
+  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, stat ? '本地路径状态查询失败；请检查错误代码。' : message), {effectState:stat ? 'not_started' : effectState, method});
+  if (stat && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
   checkCancelled();
-  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, message), {effectState, method});
   const ui = method === 'ui.choose' || method === 'ui.notify';
   const unavailable = ui && request.native_error?.code === 'desktop_unavailable' ? 'ui_unavailable' : request.native_error?.code;
-  if (!request.native) return Promise.reject(fail(unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
-  if (nativePending) return Promise.reject(fail(method === 'ui.notify' && nativePendingMethod === method ? 'ui_busy' : 'desktop_busy', '请 await 上一个本机调用，避免并发。'));
+  if (!request.native) return Promise.reject(fail(stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
+  if (nativePending) return Promise.reject(fail(stat ? 'fs_busy' : method === 'ui.notify' && nativePendingMethod === method ? 'ui_busy' : 'desktop_busy', '请 await 上一个本机调用，避免并发。'));
   if (nativeId >= 128) return Promise.reject(fail('desktop_call_limit', '单次动作最多调用 128 次桌面 API。'));
   const id = ++nativeId;
   const operation = new Promise((resolve, reject) => {
     let settled = false;
     let sent = false;
     let chunks = '';
+    let statTimer;
     const socket = createConnection({host:'127.0.0.1', port:request.native.port});
     nativeSockets.add(socket);
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
+      clearTimeout(statTimer);
       controller.signal.removeEventListener('abort', aborted);
       nativeSockets.delete(socket);
       socket.destroy();
@@ -121,16 +125,18 @@ function nativeCall(method, params) {
     };
     const aborted = () => {
       const reason = controller.signal.reason;
-      if (method === 'ui.notify') {
+      if (method === 'ui.notify' || stat) {
         if (typeof reason?.method !== 'string') reason.method = method;
-        reason.effectState = sent ? 'unknown' : 'not_started';
+        reason.effectState = stat ? 'not_started' : sent ? 'unknown' : 'not_started';
       }
       finish(reason);
     };
     controller.signal.addEventListener('abort', aborted, {once:true});
     socket.setEncoding('utf8');
     const timeout = method === 'ui.choose' ? 61000 : 5000;
-    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
+    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || stat ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
+    // stat 的总传输时限不被零碎数据延长，外层动作取消/时限仍优先生效。
+    if (stat) statTimer = setTimeout(() => finish(fail('timeout')), 5000);
     socket.once('connect', () => {
       if (controller.signal.aborted) return aborted();
       sent = true;
@@ -153,8 +159,8 @@ function nativeCall(method, params) {
         }
       } catch { finish(fail('desktop_protocol', '桌面回执格式无效；业务结果未确认。', 'unknown')); }
     });
-    socket.once('error', error => finish(fail('desktop_connection', error.message, sent ? 'unknown' : 'not_started')));
-    socket.once('close', () => finish(fail('desktop_connection', '桌面连接已关闭；不会重试。', sent ? 'unknown' : 'not_started')));
+    socket.once('error', error => finish(fail(stat ? (sent ? 'fs_error' : 'fs_unavailable') : 'desktop_connection', error.message, sent ? 'unknown' : 'not_started')));
+    socket.once('close', () => finish(fail(stat ? 'fs_error' : 'desktop_connection', '桌面连接已关闭；不会重试。', sent ? 'unknown' : 'not_started')));
   });
   nativePending = operation;
   nativePendingMethod = method;
@@ -169,6 +175,7 @@ const asyncApi = api => Object.freeze(Object.fromEntries(Object.entries(api).map
 const desktop = asyncApi(desktopApis.desktop);
 const clipboard = asyncApi(desktopApis.clipboard);
 const ui = asyncApi(desktopApis.ui);
+const fs = asyncApi(desktopApis.fs);
 
 function delay(milliseconds) {
   checkCancelled();
@@ -294,6 +301,7 @@ try {
     desktop,
     clipboard,
     ui,
+    fs,
     delay,
     signal: controller.signal,
   });
@@ -305,7 +313,10 @@ try {
   checkCancelled();
   if (children.size) throw fault('pending_processes', '动作返回时仍有未等待的 ctx.process.run 调用；请使用 await。');
   if (browserPending.size) throw fault('pending_browser_calls', '动作返回时仍有未等待的浏览器调用；请使用 await。');
-  if (nativePending) throw Object.assign(fault('pending_desktop_calls', '动作返回时仍有未等待的桌面调用；请使用 await。'), {effectState:'unknown'});
+  if (nativePending) {
+    if (nativePendingMethod === 'fs.stat') throw Object.assign(fault('fs_error', '动作返回时仍有未等待的文件状态查询；请使用 await。'), {effectState:'not_started',method:'fs.stat'});
+    throw Object.assign(fault('pending_desktop_calls', '动作返回时仍有未等待的桌面调用；请使用 await。'), {effectState:'unknown'});
+  }
   respond({ status: 'ok', output: output ?? null });
 } catch (error) {
   if (request?.response_path && request?.invocation) {

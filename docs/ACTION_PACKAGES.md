@@ -274,6 +274,31 @@ cargo test -p omnitrigger-app interactive_script_line_edit_smoke --locked -- --i
 
 文本烟测在支持完整备份当前格式时才执行剪贴板用例，结束后恢复并逐格式读回核对；遇到不支持的格式会保留原剪贴板并明确失败，不把跳过算作通过。其他来源在测试期间更新剪贴板时，测试保留新内容。
 
+### 本地文件元数据
+
+`ctx.fs.stat(path)` 只查询本地路径的类型，返回 `{kind:'file'|'directory'|'missing'|'other'}`，不打开文件内容或枚举目录。Node 使用 `await`；轻量脚本同步返回。它通过本机宿主工作，无需应用界面或前台窗口，可用于“存在普通文件时打开，否则搜索文本”等分支。
+
+```javascript
+const info = await ctx.fs.stat('D:/Work/report.txt');
+if (info.kind === 'file') {
+  await ctx.open('D:/Work/report.txt');
+}
+```
+
+接受有效 Unicode 的普通盘符绝对路径，最多 32767 个 UTF-16 单元。只支持本地固定磁盘的物理卷；相对路径、UNC、设备路径、SUBST、网络映射及可移动磁盘不支持。路径不能含 `.`、`..`、中间空组件、备用数据流、设备名、非法字符或以空格、点结尾的组件；设备名依据 [Windows 命名规则](https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file)校验。可使用正斜杠或反斜杠，盘符根和末尾单个分隔符有效。
+
+逐级检查祖先属性，遇到链接、联接点、其他重解析点、离线或召回占位属性时报告 `path_unavailable`；OneDrive、Dropbox、iCloud 目录名也会被拒绝。目标或祖先不存在时返回 `missing`，访问拒绝和其他错误不会被当作不存在，也不会自动回退搜索。调用不改文件或个人配置；它不是脚本沙盒。
+
+错误包含 `method:'fs.stat'` 和 `effectState:'not_started'`。格式错误为 `invalid_input`，不支持的磁盘为 `path_not_local`，访问拒绝为 `access_denied`，其他元数据错误为 `fs_error`；没有本机宿主为 `fs_unavailable`。Node 中须 `await`，已有本机调用未结束时报告 `fs_busy`。调用检查动作取消与截止时限，但不能抢占已经进入的单次系统元数据调用，也不自动重试。
+
+返回值是查询时的观察，不能保证后续打开时路径仍指向同一个对象。通用调用见[搜索与打开文件示例](../examples/actions/common-search/)。开发检查使用新建的隔离配置、文件和目录联接，不启动界面或 Hook：
+
+```powershell
+node tools/script-sdk-check/check-fs-stat.mjs target/debug/omnitrigger.exe
+```
+
+可在命令末尾追加已构建的轻量宿主 EXE 路径，逐个验证真实脚本到原生元数据的调用。已安装旧宿主和已有工程的 SDK 快照需要更新后才能使用新接口。
+
 ### 原生通知
 
 应用界面中的脚本可调用 `ctx.ui.notify({message, title?, level?, placement?, durationMs?})`，提交一个不抢焦点、鼠标透传的纯文本通知。Node 使用 `await`；轻量脚本同步返回。它不创建定时或事件触发器。

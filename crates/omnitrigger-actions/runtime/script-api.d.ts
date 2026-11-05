@@ -49,6 +49,14 @@ interface ScriptNotifyOptions {
     durationMs?: number;
 }
 type ScriptNotifyResult = {submitted: true};
+/** 非原子元数据快照；后续打开必须重新检查。 */
+type ScriptLocalPathStat = {kind: 'file' | 'directory' | 'missing' | 'other'};
+interface ScriptFileStatFault extends Error {
+    code: 'invalid_input' | 'path_not_local' | 'path_unavailable' | 'access_denied' | 'fs_error' | 'fs_unavailable' | 'fs_busy' | 'cancelled' | 'timeout';
+    method: 'fs.stat';
+    /** 仅此只读调用无副作用，不涵盖此前脚本步骤。 */
+    effectState: 'not_started';
+}
 interface ScriptBrowserOptions {
     /** browser_instance_id，省略时只接受恰好一个已连接 profile。 */
     profile?: string;
@@ -67,6 +75,12 @@ type ScriptContext = Readonly<{
     /** 同步等待 0–60000 毫秒的整数；受动作总时限约束。取消会终止独立宿主。 */
     delay(milliseconds: number): void;
     fs: {
+        /** 同步只查普通盘符绝对路径的本地固定物理盘元数据，最多 32767 UTF-16 单元。
+         * 不打开内容或枚举目录；平台独立拒绝链接、占位和云盘，词法预检不代替复验。
+         * 缺失目标/祖先为 missing，访问拒绝及其他错误抛错；无本机宿主为 fs_unavailable。
+         * 5 秒短时 RPC，不重试；元数据非原子，后续打开须重新检查。
+         */
+        stat(path: string): ScriptLocalPathStat;
         /** UTF-8 文件，绝对路径，最多 64 KiB。 */
         readText(path: string): string;
         /** 默认不覆盖；不自动创建目录。失败可能留下部分文件。 */

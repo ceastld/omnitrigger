@@ -2,6 +2,9 @@
 
 use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirection};
 
+mod local_path_stat;
+pub use local_path_stat::{stat_local_path, LocalPathKind, LocalStatError};
+
 mod automation_basics;
 #[cfg(windows)]
 pub use automation_basics::{

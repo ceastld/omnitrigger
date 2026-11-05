@@ -43,6 +43,7 @@ function desktopCall(method, params) {
     if (!nativeContext || nativeContext.error) {
         const cause = nativeContext?.error;
         const ui = method === 'ui.choose' || method === 'ui.notify';
+        if (method === 'fs.stat') throw Object.assign(new Error('文件状态 API 需要本机宿主。'), {code:'fs_unavailable',effectState:'not_started',method});
         const code = ui && cause?.code === 'desktop_unavailable' ? 'ui_unavailable' : cause?.code;
         throw Object.assign(new Error(cause?.message ?? (method.startsWith('browser.') ? '浏览器 API 需要 OmniTrigger 应用宿主。' : ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '桌面 API 需要 OmniTrigger 本次动作的目标上下文。')), {
             code:code ?? (method.startsWith('browser.') ? 'browser_unavailable' : ui ? 'ui_unavailable' : 'desktop_unavailable'), effectState:cause?.effect_state ?? 'not_started', method,
@@ -64,6 +65,7 @@ function desktopCall(method, params) {
     return call('native', request, serialized);
 }
 const desktopApis = createDesktopApi(desktopCall);
+ctx.fs = Object.freeze({...ctx.fs, ...desktopApis.fs});
 ctx.desktop = desktopApis.desktop;
 ctx.ui = desktopApis.ui;
 ctx.browser = createBrowserApi((method, args, options, profiles) => {

@@ -56,6 +56,14 @@ export interface NotifyOptions {
   durationMs?: number;
 }
 export type NotifyResult = {submitted: true};
+/** 非原子元数据快照；后续打开必须重新检查。 */
+export type LocalPathStat = {kind: 'file' | 'directory' | 'missing' | 'other'};
+export interface FileStatFault extends Error {
+  code: 'invalid_input' | 'path_not_local' | 'path_unavailable' | 'access_denied' | 'fs_error' | 'fs_unavailable' | 'fs_busy' | 'cancelled' | 'timeout';
+  method: 'fs.stat';
+  /** 仅此只读调用无副作用，不代表脚本之前的步骤没有副作用。 */
+  effectState: 'not_started';
+}
 export interface BrowserApi {
   profiles(options?: Pick<BrowserOptions, 'timeoutMs'>): Promise<Array<{
     browser_instance_id: string;
@@ -75,6 +83,14 @@ export interface ActionContext {
   packageRoot: string;
   signal: AbortSignal;
   delay(milliseconds: number): Promise<void>;
+  fs: {
+    /** 普通盘符绝对路径，1–32767 UTF-16 单元；只查固定本地物理盘元数据。
+     * 不打开内容或枚举目录；拒绝链接、占位及云盘路径，无本机宿主为 fs_unavailable。
+     * 缺失目标/祖先返回 missing；访问拒绝和其他错误抛错，不能当作 missing。
+     * 词法预检不替代平台复验。单调用内并发返回 fs_busy，传输限时 5 秒且不重试。
+     */
+    stat(path: string): Promise<LocalPathStat>;
+  };
   process: {
     run(program: string, args?: string[], options?: {cwd?: string; allowNonZero?: boolean}): Promise<{code: number; stdout: string; stderr: string}>;
     start(program: string, args?: string[], options?: {cwd?: string}): Promise<{pid: number}>;

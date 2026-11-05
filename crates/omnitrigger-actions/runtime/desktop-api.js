@@ -147,5 +147,49 @@ function createDesktopApi(invoke) {
       return invoke(method, params);
     },
   });
-  return {desktop, clipboard, ui};
+  const fs = Object.freeze({
+    stat: (...args) => {
+      const method = 'fs.stat';
+      const fail = (code = 'invalid_input') => {
+        throw Object.assign(new Error(code === 'path_not_local' ? '路径不属于支持的普通本地磁盘路径。' : '本地路径状态查询失败；请检查错误代码。'), {code, effectState:'not_started', method});
+      };
+      const path = args[0];
+      if (args.length !== 1 || typeof path !== 'string' || path.length < 3 || path.length > 32767
+          || !/^[A-Za-z]:[\\/]/.test(path) || /[\x00-\x1f\x7f-\x9f]/.test(path)) fail();
+      for (let i = 0; i < path.length; i++) {
+        const unit = path.charCodeAt(i);
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+          const next = path.charCodeAt(++i);
+          if (!(next >= 0xdc00 && next <= 0xdfff)) fail();
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) fail();
+      }
+      // 仅对组件检查副本统一分隔符，查询仍传原文。字符串 split 避免
+      // Boa 的正则 split 在最大长度路径上逐位置尝试匹配。
+      const components = path.length === 3 ? [] : path.slice(3).replaceAll(String.fromCharCode(92), '/').split('/');
+      if (components.at(-1) === '') components.pop();
+      for (const component of components) {
+        if (!component || component === '.' || component === '..' || /[<>:"|?*]/.test(component) || /[ .]$/.test(component)
+            || /^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?: *\.| *$)/i.test(component)) fail();
+      }
+      if (components.some(component => {
+        const name = component.toLowerCase();
+        return name.startsWith('onedrive') || name.startsWith('icloud') || name === 'dropbox';
+      })) fail('path_unavailable');
+      const failure = error => {
+        const codes = ['invalid_input','path_not_local','path_unavailable','access_denied','fs_error','fs_unavailable','fs_busy','cancelled','timeout'];
+        fail(codes.includes(error?.code) ? error.code : 'fs_error');
+      };
+      const result = value => {
+        if (!value || typeof value !== 'object' || Array.isArray(value) || Reflect.ownKeys(value).length !== 1
+            || !Object.hasOwn(value, 'kind') || !['file','directory','missing','other'].includes(value.kind)) fail('fs_error');
+        return value;
+      };
+      // 词法检查不访问磁盘；盘类型、物理卷、祖先属性和占位文件仍由平台独立复验。
+      try {
+        const value = invoke(method, {path});
+        return value && typeof value.then === 'function' ? value.then(result, failure) : result(value);
+      } catch (error) { return failure(error); }
+    },
+  });
+  return {desktop, clipboard, ui, fs};
 }

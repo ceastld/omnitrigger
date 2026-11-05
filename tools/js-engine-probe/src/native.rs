@@ -9,7 +9,8 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 13] = [
+pub const METHODS: [&str; 14] = [
+    "fs.stat",
     "ui.choose",
     "ui.notify",
     "browser.profiles",
@@ -33,10 +34,22 @@ pub struct Configuration {
 }
 
 fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiError {
+    let stat = method == "fs.stat";
     ApiError {
-        code: code.into(),
-        message: message.to_string(),
-        effect_state: Some(effect.into()),
+        code: (if stat && code == "native_bridge_unavailable" {
+            "fs_unavailable"
+        } else if stat && code == "native_bridge_failed" {
+            "fs_error"
+        } else {
+            code
+        })
+        .into(),
+        message: if stat {
+            "本地路径状态查询失败；请检查错误代码。".into()
+        } else {
+            message.to_string()
+        },
+        effect_state: Some(if stat { "not_started" } else { effect }.into()),
         method: Some(method.into()),
         required_permissions: Vec::new(),
     }
@@ -91,21 +104,47 @@ pub fn call(
         LIMIT
     };
     let network = |cause| fault("native_bridge_failed", cause, &method, "unknown");
-    // 一旦开始写入就不能证明服务端是否已执行；所有后续故障都不自动重试。
+    let transport = |cause: std::io::Error| {
+        if method == "fs.stat"
+            && matches!(
+                cause.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            )
+        {
+            fault(
+                "timeout",
+                "本地路径状态查询等待超时。",
+                &method,
+                "not_started",
+            )
+        } else {
+            network(cause.to_string())
+        }
+    };
+    // 写入后不能证明服务端是否已执行；只读 stat 仍无副作用，其他方法为 unknown，均不重试。
     let remaining = || {
         deadline
             .checked_duration_since(Instant::now())
             .filter(|d| !d.is_zero())
-            .ok_or_else(|| network("本机调用等待超时。".to_string()))
+            .ok_or_else(|| {
+                if method == "fs.stat" {
+                    fault(
+                        "timeout",
+                        "本地路径状态查询等待超时。",
+                        &method,
+                        "not_started",
+                    )
+                } else {
+                    network("本机调用等待超时。".to_string())
+                }
+            })
     };
     let mut written = 0;
     while written < request.len() {
         stream
             .set_write_timeout(Some(remaining()?))
-            .map_err(|cause| network(cause.to_string()))?;
-        let count = stream
-            .write(&request[written..])
-            .map_err(|cause| network(cause.to_string()))?;
+            .map_err(transport)?;
+        let count = stream.write(&request[written..]).map_err(transport)?;
         if count == 0 {
             return Err(network("本机调用写入中断。".into()));
         }
@@ -115,11 +154,9 @@ pub fn call(
     loop {
         stream
             .set_read_timeout(Some(remaining()?))
-            .map_err(|cause| network(cause.to_string()))?;
+            .map_err(transport)?;
         let mut chunk = [0u8; 4096];
-        let count = stream
-            .read(&mut chunk)
-            .map_err(|cause| network(cause.to_string()))?;
+        let count = stream.read(&mut chunk).map_err(transport)?;
         if count == 0 {
             break;
         }
@@ -179,6 +216,9 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     .ok_or_else(invalid)?,
                 None => method,
             };
+            if method == "fs.stat" && reported_method != method {
+                return Err(invalid());
+            }
             let permissions = match error.get("required_permissions") {
                 Some(value) => value
                     .as_array()

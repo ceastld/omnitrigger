@@ -1,0 +1,6 @@
+{
+  "package_id": "examples.common-search",
+  "action_id": "open-or-search",
+  "action_version": 1,
+  "input": {"source": "text", "text": "合成示例搜索词"}
+}

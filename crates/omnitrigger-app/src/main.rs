@@ -34,6 +34,7 @@ mod plugins;
 mod presets;
 mod radial_wheel;
 mod script_browser;
+mod script_fs;
 mod script_notify;
 #[cfg(debug_assertions)]
 mod script_notify_smoke;

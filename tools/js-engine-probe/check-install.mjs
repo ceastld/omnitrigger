@@ -5,6 +5,7 @@ import {createHash} from 'node:crypto';
 import {cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {verifyFsStat} from '../script-sdk-check/check-fs-stat.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const sourceApp = resolve(process.argv[2] ?? 'target/debug/omnitrigger.exe');
@@ -73,6 +74,8 @@ const outcome = cli(['--run-action',project.call_path]);
 assert.equal(outcome.status,'succeeded');
 assert.equal(outcome.output.text,'OmniTrigger');
 checks.push('generated_project_runs_without_Node_or_manual_host');
+verifyFsStat({root,entryPath:project.entry_path,call:project.call,invoke:callPath=>cli(['--run-action',callPath])});
+checks.push('installed_host_fs_stat_uses_real_native_metadata_without_UI');
 assert.equal(install(development.archive).status,'installed');
 assert.equal(readFileSync(pointer,'utf8'),firstPointer);
 checks.push('same_package_reinstall');
