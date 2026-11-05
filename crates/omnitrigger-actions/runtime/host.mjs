@@ -119,6 +119,10 @@ function nativeCall(method, params) {
   if (nativePending) return Promise.reject(fail(stat ? 'fs_busy' : method === 'ui.toggle_history' && ['ui.choose','ui.open_history','ui.toggle_history'].includes(nativePendingMethod) ? 'ui_busy' : (method === 'ui.notify' || historyUi) && nativePendingMethod === method ? 'ui_busy' : 'desktop_busy', '请 await 上一个本机调用，避免并发。'));
   if (nativeId >= 128) return Promise.reject(fail('desktop_call_limit', '单次动作最多调用 128 次桌面 API。'));
   const id = ++nativeId;
+  let frame;
+  // 在本次调用中固定请求；连接建立后的发送不再读取调用方的可变数组或时序对象。
+  try { frame = JSON.stringify({token:request.native.token, id, method, params}) + '\n'; }
+  catch { return Promise.reject(fail('invalid_input', '本机调用参数无法编码。')); }
   const operation = new Promise((resolve, reject) => {
     let settled = false;
     let sent = false;
@@ -155,7 +159,7 @@ function nativeCall(method, params) {
     socket.once('connect', () => {
       if (controller.signal.aborted) return aborted();
       sent = true;
-      socket.write(JSON.stringify({token:request.native.token, id, method, params}) + '\n');
+      socket.write(frame);
     });
     socket.on('data', chunk => {
       if (capture) {
