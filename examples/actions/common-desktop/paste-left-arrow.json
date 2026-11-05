@@ -1,0 +1,6 @@
+{
+  "package_id": "examples.common-desktop",
+  "action_id": "paste-arrow-text",
+  "action_version": 1,
+  "input": {"text": "\\Leftarrow ", "pasteKey": "ctrl-v", "keyDownDelayMs": 0}
+}

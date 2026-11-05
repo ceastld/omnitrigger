@@ -5,6 +5,7 @@
   "version": "1.0.0",
   "actions": [
     {"id": "close-by-process", "title": "按进程选择关闭快捷键", "version": 1, "runtime": "script", "entry": "close.js"},
-    {"id": "window-action", "title": "操作原目标窗口", "version": 1, "runtime": "script", "entry": "window.js"}
+    {"id": "window-action", "title": "操作原目标窗口", "version": 1, "runtime": "script", "entry": "window.js"},
+    {"id": "paste-arrow-text", "title": "经剪贴板粘贴字面箭头文本", "version": 1, "runtime": "script", "entry": "paste-arrow.js"}
   ]
 }
