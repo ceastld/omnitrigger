@@ -1,0 +1,191 @@
+// 仅调用共享公开 factory 与内存 invoke；不启动脚本宿主、不读取系统剪贴板、不注入输入。
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import {runInNewContext} from 'node:vm';
+import test from 'node:test';
+
+const source = readFileSync(new URL('../crates/omnitrigger-actions/runtime/desktop-api.js', import.meta.url), 'utf8');
+const createApi = runInNewContext(source + '\ncreateDesktopApi');
+const plain = value => JSON.parse(JSON.stringify(value));
+const privateText = 'synthetic_clipboard_payload_只限内存_😀';
+const sequence = 0xffffffff;
+const defaults = {timeout_ms:600, poll_interval_ms:15, settle_ms:30, allow_unchanged:false};
+const copyMethod = 'selection.copy_data';
+const readMethod = 'clipboard.read_data';
+const snapshot = (kind, copy = false) => kind === 'text'
+  ? {kind, text:privateText, sequenceNumber:sequence, ...(copy ? {changed:true} : {})}
+  : {kind, paths:['X:\\SyntheticOnly\\one.txt', '\\\\synthetic.invalid\\share\\中文😀.txt'], sequenceNumber:0, ...(copy ? {changed:false} : {})};
+
+function api(reply, asynchronous = false) {
+  const calls = [];
+  const result = createApi((method, params) => {
+    calls.push([method, plain(params)]);
+    assert([readMethod, copyMethod].includes(method), '只能调用新格式API，不能降级到旧文本/磁盘/输入API');
+    if (reply instanceof Error) {
+      if (asynchronous) return Promise.reject(reply);
+      throw reply;
+    }
+    return asynchronous ? Promise.resolve(reply) : reply;
+  });
+  return {result, calls};
+}
+function structured(method, effect, code) {
+  return error => typeof error?.code === 'string' && /^[a-z][a-z0-9_]*$/.test(error.code)
+    && (code === undefined || error.code === code) && error.method === method && error.effectState === effect
+    && !String(error.message).includes(privateText) && !String(error.message).includes('SyntheticOnly')
+    && !String(error.message).includes('synthetic.invalid');
+}
+const methodCall = (result, copy, options) => copy ? result.desktop.copySelectionData(options) : result.clipboard.readData();
+
+test('公开 factory 提供两个新API，并保留已有文本API', () => {
+  const {result} = api(snapshot('text'));
+  assert.equal(typeof result.clipboard.readData, 'function');
+  assert.equal(typeof result.desktop.copySelectionData, 'function');
+  assert.equal(typeof result.clipboard.readText, 'function');
+  assert.equal(typeof result.clipboard.writeText, 'function');
+  assert.equal(typeof result.desktop.copySelectionText, 'function');
+});
+
+test('同步与Promise适配都保持文本/文件联合、空文本/空列表、u32边界和原始字符', async () => {
+  for (const asynchronous of [false, true]) for (const copy of [false, true]) {
+    for (const value of [snapshot('text', copy), snapshot('files', copy),
+      {kind:'text',text:'',sequenceNumber:0,...(copy ? {changed:false} : {})},
+      {kind:'text',text:' \r\n合成😀 ',sequenceNumber:1,...(copy ? {changed:true} : {})},
+      {kind:'files',paths:[],sequenceNumber:sequence,...(copy ? {changed:false} : {})}]) {
+      const {result,calls} = api(value, asynchronous);
+      const returned = methodCall(result, copy, copy ? {allowUnchanged:true} : undefined);
+      assert.equal(typeof returned?.then === 'function', asynchronous);
+      assert.deepEqual(plain(await returned), value);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0][0], copy ? copyMethod : readMethod);
+      if (!copy) assert.deepEqual(calls[0][1], {});
+    }
+  }
+});
+
+test('文件路径仅作为数据保留，不执行本地路径校验、stat、枚举或打开', async () => {
+  const value = {kind:'files',paths:['relative synthetic.txt','C:\\OneDrive-synthetic\\file.txt',
+    '\\\\synthetic.invalid\\share\\file.txt','X:\\a & literal.txt','  literal whitespace  ',' '],sequenceNumber:27};
+  for (const asynchronous of [false,true]) {
+    const {result,calls}=api(value,asynchronous);
+    assert.deepEqual(plain(await result.clipboard.readData()),value);
+    assert.deepEqual(calls,[[readMethod,{}]]);
+  }
+});
+
+test('copy选项仅camelCase输入，明确映射snake_case；默认不夹紧或改写预算', () => {
+  for (const options of [undefined, {}]) {
+    const {result,calls}=api(snapshot('text',true));
+    result.desktop.copySelectionData(options);
+    assert.equal(calls[0][0],copyMethod);
+    const params=calls[0][1];
+    assert(Object.keys(params).every(key => Object.hasOwn(defaults,key)));
+    assert.deepEqual({...defaults,...params},defaults);
+  }
+  for (const [options,expected] of [
+    [{timeoutMs:400,pollIntervalMs:10,settleMs:0,allowUnchanged:true},{timeout_ms:400,poll_interval_ms:10,settle_ms:0,allow_unchanged:true}],
+    [{timeoutMs:1,pollIntervalMs:1,settleMs:1000,allowUnchanged:false},{timeout_ms:1,poll_interval_ms:1,settle_ms:1000,allow_unchanged:false}],
+    [{timeoutMs:5000,pollIntervalMs:1000,settleMs:1000,allowUnchanged:true},{timeout_ms:5000,poll_interval_ms:1000,settle_ms:1000,allow_unchanged:true}],
+  ]) {
+    const {result,calls}=api(snapshot('text',true));
+    result.desktop.copySelectionData(options);
+    assert.deepEqual(calls,[[copyMethod,expected]]);
+  }
+});
+
+test('非法选项在任何invoke前拒绝，错误不回显正文', () => {
+  const values=[null,true,1,'options',[],new String('options'),
+    {extra:privateText},{timeout_ms:400},{poll_interval_ms:10},{settle_ms:0},{allow_unchanged:true},
+    {timeoutMs:1}, {timeoutMs:10,pollIntervalMs:11}, {[Symbol('unknown')]:privateText}];
+  for (const [name,bad] of [
+    ['timeoutMs',[null,false,'400',0,-1,5001,0.5,NaN,Infinity]],
+    ['pollIntervalMs',[null,false,'10',0,-1,1001,1.5,NaN,Infinity]],
+    ['settleMs',[null,false,'0',-1,1001,1.5,NaN,Infinity]],
+    ['allowUnchanged',[null,0,1,'true',{},[]]],
+  ]) for (const value of bad) values.push({[name]:value});
+  for (const options of values) {
+    const {result,calls}=api(snapshot('text',true));
+    assert.throws(()=>result.desktop.copySelectionData(options),structured(copyMethod,'not_started','invalid_input'));
+    assert.deepEqual(calls,[]);
+  }
+  for (const args of [[{}],[undefined],[null],[privateText]]) {
+    const {result,calls}=api(snapshot('text'));
+    assert.throws(()=>result.clipboard.readData(...args),structured(readMethod,'not_started','invalid_input'));
+    assert.deepEqual(calls,[]);
+  }
+  const {result,calls}=api(snapshot('text',true));
+  assert.throws(()=>result.desktop.copySelectionData({},{}),structured(copyMethod,'not_started','invalid_input'));
+  assert.deepEqual(calls,[]);
+});
+
+test('结果UTF16上限精确计算：65536单元、64项及总路径长度边界', async () => {
+  for (const copy of [false,true]) for (const asynchronous of [false,true]) {
+    for (const value of [
+      {kind:'text',text:'x'.repeat(65536),sequenceNumber:1},
+      {kind:'text',text:'😀'.repeat(32768),sequenceNumber:2},
+      {kind:'files',paths:Array(64).fill('x'.repeat(1024)),sequenceNumber:3},
+      {kind:'files',paths:['😀'.repeat(32768)],sequenceNumber:4},
+    ]) {
+      if (copy) value.changed=true;
+      const {result}=api(value,asynchronous);
+      assert.deepEqual(plain(await methodCall(result,copy)),value);
+    }
+  }
+});
+
+function invalidResults(copy) {
+  const text={kind:'text',text:privateText,sequenceNumber:1,...(copy ? {changed:true} : {})};
+  const files={kind:'files',paths:['X:\\SyntheticOnly\\file.txt'],sequenceNumber:1,...(copy ? {changed:true} : {})};
+  const values=[undefined,null,true,[],{},privateText,
+    {...text,kind:'image'}, {...text,extra:privateText}, {...text,paths:[]}, {...files,text:privateText},
+    {...text,text:1}, {...text,text:null}, {...text,text:'\ud800'}, {...text,text:'x\udc00'}, {...text,text:'x\0y'},
+    {...text,text:'x'.repeat(65537)}, {...text,text:'😀'.repeat(32769)},
+    {...files,paths:null}, {...files,paths:privateText}, {...files,paths:[1]}, {...files,paths:[null]},
+    {...files,paths:['']}, {...files,paths:['x\0y']}, {...files,paths:['\ud800']}, {...files,paths:Array(65).fill('x')},
+    {...files,paths:Array(64).fill('x'.repeat(1024)).concat('x')},
+    {...files,paths:['x'.repeat(32768),'x'.repeat(32769)]},
+    {...files,paths:['😀'.repeat(32769)]}, {...text,[Symbol('extra')]:privateText}];
+  for (const sequenceNumber of [-1,4294967296,0.5,'1',null,true,NaN,Infinity]) values.push({...text,sequenceNumber});
+  const missingSequence={...text}; delete missingSequence.sequenceNumber; values.push(missingSequence);
+  if (copy) {
+    const missing={...text};delete missing.changed;values.push(missing);
+    for (const changed of [null,0,1,'true',{},[]]) values.push({...text,changed});
+  } else values.push({...text,changed:true});
+  return values;
+}
+
+test('畸形联合、额外字段、坏Unicode、数量和序号不转成空文本或文件列表', async () => {
+  for (const copy of [false,true]) for (const asynchronous of [false,true]) for (const value of invalidResults(copy)) {
+    const {result,calls}=api(value,asynchronous);
+    await assert.rejects(async()=>await methodCall(result,copy),structured(copy ? copyMethod : readMethod,copy ? 'unknown' : 'not_started','invalid_response'));
+    assert.equal(calls.length,1,'坏回执不得重试、降级或重新读取');
+  }
+});
+
+test('结构化平台错误保留方法/阶段，去除payload；不降级读取旧文本', async () => {
+  for (const copy of [false,true]) for (const asynchronous of [false,true]) {
+    for (const [code,effect] of [['native_bridge_unavailable','not_started'],['unsupported_clipboard_format',copy?'unknown':'not_started'],
+      ['cancelled',copy?'unknown':'not_started'],['timeout',copy?'unknown':'not_started'],
+      ...(copy ? [['selection_unchanged','unknown'],['target_changed','not_started']] : [])]) {
+      const error=Object.assign(new Error(privateText+' X:\\SyntheticOnly\\file.txt'),{code,method:'wrong.method',effectState:effect});
+      const {result,calls}=api(error,asynchronous);
+      await assert.rejects(async()=>await methodCall(result,copy),structured(copy?copyMethod:readMethod,effect,code));
+      assert.equal(calls.length,1);
+    }
+  }
+});
+
+test('新的轻量示例显式单实例、read/copy调用与默认摘要契约', () => {
+  const root=new URL('../examples/actions/selection-data/',import.meta.url);
+  const manifest=JSON.parse(readFileSync(new URL('action.json',root),'utf8'));
+  assert.equal(manifest.id,'examples.selection-data');
+  assert.deepEqual(manifest.actions,[{id:'summarize',title:'查看选区或剪贴板数据摘要',version:1,runtime:'script',entry:'main.js',single_instance:true}]);
+  for (const [file,mode] of [['call.json','read'],['copy-call.json','copy']]) {
+    const call=JSON.parse(readFileSync(new URL(file,root),'utf8'));
+    assert.equal(call.package_id,manifest.id);assert.equal(call.action_id,'summarize');assert.equal(call.action_version,1);
+    assert.equal(call.input.mode,mode);
+  }
+  const entry=readFileSync(new URL('main.js',root),'utf8');
+  assert(entry.includes('ctx.clipboard.readData()') && entry.includes('ctx.desktop.copySelectionData('));
+  assert(!entry.includes('console.') && !entry.includes('ctx.open(') && !entry.includes('ctx.fs.'));
+});

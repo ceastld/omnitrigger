@@ -1,10 +1,13 @@
 //! 应用向脚本提供的按次桌面上下文；不在 Hook 中读取进程或发送输入。
 use omnitrigger_actions::{ActionError, CancellationToken, NativeHost};
 use omnitrigger_windows::{
-    capture_shortcut_target, ScriptTarget, ScriptTargetSnapshot, ShortcutTarget,
+    capture_shortcut_target, ClipboardData, ClipboardDataError, ClipboardDataSnapshot,
+    ScriptTarget, ScriptTargetSnapshot, SelectionCopyOptions, SelectionDataError,
+    SelectionDataSnapshot, ShortcutTarget,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::time::Instant;
 
 pub struct DesktopHost {
     target: Result<ScriptTarget, ActionError>,
@@ -17,6 +20,29 @@ fn error(code: &str, message: impl ToString, effect: &str) -> ActionError {
 }
 
 impl DesktopHost {
+    fn copy_data(
+        &self,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Value, ActionError> {
+        let method = "selection.copy_data";
+        let options = copy_data_options(params)?;
+        data_check(method, cancellation, deadline, "not_started")?;
+        let target = self
+            .target
+            .as_ref()
+            .map_err(|error| data_error(method, &error.code, "not_started"))?;
+        target
+            .ensure_foreground()
+            .map_err(|_| data_error(method, "target_changed", "not_started"))?;
+        data_check(method, cancellation, deadline, "not_started")?;
+        let result = target.copy_selection_data_if(options, || {
+            data_check(method, cancellation, deadline, "not_started").map_err(|error| error.message)
+        });
+        copy_data_result(result, cancellation, deadline)
+    }
+
     /// 选择窗口只可恢复本次捕获且身份仍有效的目标，绝不重新抓取前台。
     pub fn choice_target(&self) -> Option<ScriptTargetSnapshot> {
         self.target.as_ref().ok()?.snapshot().ok()
@@ -71,6 +97,168 @@ struct ClipboardWriteArgs {
     exclude_from_history: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct CopyDataArgs {
+    timeout_ms: u32,
+    poll_interval_ms: u32,
+    settle_ms: u32,
+    allow_unchanged: bool,
+}
+impl Default for CopyDataArgs {
+    fn default() -> Self {
+        let options = SelectionCopyOptions::default();
+        Self {
+            timeout_ms: options.timeout_ms,
+            poll_interval_ms: options.poll_interval_ms,
+            settle_ms: options.settle_ms,
+            allow_unchanged: options.allow_unchanged,
+        }
+    }
+}
+
+fn copy_data_options(params: Value) -> Result<SelectionCopyOptions, ActionError> {
+    let invalid = || data_error("selection.copy_data", "invalid_input", "not_started");
+    // serde 的结构体也可从数组反序列化；wire 契约只接受对象。
+    if !params.is_object() {
+        return Err(invalid());
+    }
+    let args: CopyDataArgs = serde_json::from_value(params).map_err(|_| invalid())?;
+    if !(1..=5000).contains(&args.timeout_ms)
+        || !(1..=1000).contains(&args.poll_interval_ms)
+        || args.poll_interval_ms > args.timeout_ms
+        || args.settle_ms > 1000
+    {
+        return Err(invalid());
+    }
+    let options = SelectionCopyOptions {
+        timeout_ms: args.timeout_ms,
+        poll_interval_ms: args.poll_interval_ms,
+        settle_ms: args.settle_ms,
+        allow_unchanged: args.allow_unchanged,
+    };
+    options.validate().map_err(|_| invalid())?;
+    Ok(options)
+}
+
+fn data_error(method: &str, code: &str, effect: &str) -> ActionError {
+    let code = if !code.is_empty()
+        && code.len() <= 64
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        code
+    } else if method == "clipboard.read_data" {
+        "clipboard_failed"
+    } else {
+        "selection_failed"
+    };
+    let message = match code {
+        "invalid_input" if method == "clipboard.read_data" => "读取剪贴板数据只接受空对象参数。",
+        "invalid_input" => "选区复制参数无效，需要有效等待时限、轮询间隔、稳定等待和布尔选项。",
+        "cancelled" => "动作已取消。",
+        "timeout" => "动作超过运行时限。",
+        "target_unavailable" => "原目标不可用。",
+        "target_changed" => "原目标已变化或不再位于前台。",
+        "unsupported_clipboard_format" => "剪贴板没有支持的文本或文件列表格式。",
+        "selection_unchanged" => "等待结束时剪贴板序号未改变。",
+        "selection_busy" => "另一次输入提交尚未结束。",
+        "invalid_clipboard_data" => "剪贴板数据不符合文本或文件列表的边界要求。",
+        _ if method == "clipboard.read_data" => "无法读取剪贴板数据。",
+        _ => "无法复制并读取选区数据。",
+    };
+    let effect = if method == "clipboard.read_data" || effect == "not_started" {
+        "not_started"
+    } else {
+        "unknown"
+    };
+    let mut error = error(code, message, effect);
+    error.method = Some(method.into());
+    error
+}
+
+fn data_check(
+    method: &str,
+    cancellation: &CancellationToken,
+    deadline: Option<Instant>,
+    effect: &str,
+) -> Result<(), ActionError> {
+    if cancellation.is_cancelled() {
+        return Err(data_error(method, "cancelled", effect));
+    }
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(data_error(method, "timeout", effect));
+    }
+    Ok(())
+}
+
+fn clipboard_data_json(
+    snapshot: ClipboardDataSnapshot,
+    method: &str,
+    effect: &str,
+) -> Result<Value, ActionError> {
+    let invalid = || data_error(method, "invalid_clipboard_data", effect);
+    match snapshot.data {
+        ClipboardData::Text(text) => {
+            if text.encode_utf16().take(65537).count() > 65536 || text.contains('\0') {
+                return Err(invalid());
+            }
+            Ok(json!({"kind":"text","text":text,"sequenceNumber":snapshot.sequence_number}))
+        }
+        ClipboardData::Files(paths) => {
+            if paths.len() > 64 {
+                return Err(invalid());
+            }
+            let mut total = 0usize;
+            for path in &paths {
+                let length = path.encode_utf16().take(65537).count();
+                if path.is_empty() || length > 65536 - total || path.contains('\0') {
+                    return Err(invalid());
+                }
+                total += length;
+            }
+            Ok(json!({"kind":"files","paths":paths,"sequenceNumber":snapshot.sequence_number}))
+        }
+    }
+}
+
+/// 本接缝也用于测试；有效参数用假 reader，绝不依赖交互剪贴板或前台窗口。
+fn read_data_with(
+    params: Value,
+    cancellation: &CancellationToken,
+    deadline: Option<Instant>,
+    reader: impl FnOnce() -> Result<ClipboardDataSnapshot, ClipboardDataError>,
+) -> Result<Value, ActionError> {
+    let method = "clipboard.read_data";
+    if params != json!({}) {
+        return Err(data_error(method, "invalid_input", "not_started"));
+    }
+    data_check(method, cancellation, deadline, "not_started")?;
+    let result = reader();
+    data_check(method, cancellation, deadline, "not_started")?;
+    result
+        .map_err(|error| data_error(method, error.code, "not_started"))
+        .and_then(|snapshot| clipboard_data_json(snapshot, method, "not_started"))
+}
+
+fn copy_data_result(
+    result: Result<SelectionDataSnapshot, SelectionDataError>,
+    cancellation: &CancellationToken,
+    deadline: Option<Instant>,
+) -> Result<Value, ActionError> {
+    let method = "selection.copy_data";
+    let effect = match &result {
+        Ok(_) => "unknown",
+        Err(error) => error.effect_state,
+    };
+    data_check(method, cancellation, deadline, effect)?;
+    let snapshot = result.map_err(|error| data_error(method, error.code, error.effect_state))?;
+    let mut value = clipboard_data_json(snapshot.clipboard, method, "unknown")?;
+    value["changed"] = json!(snapshot.changed);
+    Ok(value)
+}
+
 fn not_cancelled(cancellation: &CancellationToken) -> Result<(), String> {
     if cancellation.is_cancelled() {
         Err("动作已取消，未继续本机调用。".into())
@@ -86,6 +274,18 @@ impl NativeHost for DesktopHost {
         params: Value,
         cancellation: &CancellationToken,
     ) -> Result<Value, ActionError> {
+        match method {
+            "clipboard.read_data" => {
+                return read_data_with(
+                    params,
+                    cancellation,
+                    None,
+                    omnitrigger_windows::read_clipboard_data,
+                )
+            }
+            "selection.copy_data" => return self.copy_data(params, cancellation, None),
+            _ => {}
+        }
         if cancellation.is_cancelled() {
             return Err(error(
                 "cancelled",
@@ -292,11 +492,440 @@ impl NativeHost for DesktopHost {
             )),
         }
     }
+
+    fn call_with_deadline(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Value, ActionError> {
+        match method {
+            "clipboard.read_data" => read_data_with(
+                params,
+                cancellation,
+                Some(deadline),
+                omnitrigger_windows::read_clipboard_data,
+            ),
+            "selection.copy_data" => self.copy_data(params, cancellation, Some(deadline)),
+            _ => self.call(method, params, cancellation),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 这一组仅使用合成快照/注入 reader，或不可用目标；禁止访问交互剪贴板。
+    mod data_adapter {
+        use super::*;
+        use std::cell::Cell;
+
+        fn host_without_target() -> DesktopHost {
+            DesktopHost {
+                target: Err(error(
+                    "target_unavailable",
+                    "synthetic_payload_do_not_echo",
+                    "not_started",
+                )),
+            }
+        }
+
+        fn snapshot(data: ClipboardData, sequence_number: u32) -> ClipboardDataSnapshot {
+            ClipboardDataSnapshot {
+                data,
+                sequence_number,
+            }
+        }
+
+        fn assert_fault(error: ActionError, method: &str, code: &str, effect: &str) {
+            assert_eq!(error.method.as_deref(), Some(method));
+            assert_eq!(error.code, code);
+            assert_eq!(error.effect_state.as_deref(), Some(effect));
+            assert!(!error.message.contains("synthetic_payload_do_not_echo"));
+        }
+
+        #[test]
+        fn copy_data_defaults_and_boundaries_are_pure_and_do_not_touch_a_target() {
+            let defaults = copy_data_options(json!({})).unwrap();
+            assert_eq!(
+                (
+                    defaults.timeout_ms,
+                    defaults.poll_interval_ms,
+                    defaults.settle_ms,
+                    defaults.allow_unchanged
+                ),
+                (600, 15, 30, false)
+            );
+            let minimum = copy_data_options(
+                json!({"timeout_ms":1,"poll_interval_ms":1,"settle_ms":0,"allow_unchanged":false}),
+            )
+            .unwrap();
+            assert_eq!(
+                (
+                    minimum.timeout_ms,
+                    minimum.poll_interval_ms,
+                    minimum.settle_ms
+                ),
+                (1, 1, 0)
+            );
+            let maximum = copy_data_options(json!({"timeout_ms":5000,"poll_interval_ms":1000,"settle_ms":1000,"allow_unchanged":true})).unwrap();
+            assert_eq!(
+                (
+                    maximum.timeout_ms,
+                    maximum.poll_interval_ms,
+                    maximum.settle_ms,
+                    maximum.allow_unchanged
+                ),
+                (5000, 1000, 1000, true)
+            );
+            // settle 是独立预算，不擅自约束到序号等待 timeout。
+            assert!(copy_data_options(
+                json!({"timeout_ms":1,"poll_interval_ms":1,"settle_ms":1000})
+            )
+            .is_ok());
+        }
+
+        #[test]
+        fn copy_data_invalid_wire_fields_are_rejected_before_unavailable_target() {
+            let host = host_without_target();
+            let token = CancellationToken::new();
+            for params in [
+                json!(null),
+                json!([]),
+                json!(true),
+                json!({"extra":true}),
+                json!({"timeout_ms":0}),
+                json!({"timeout_ms":5001}),
+                json!({"timeout_ms":u64::MAX}),
+                json!({"timeout_ms":null}),
+                json!({"timeout_ms":"600"}),
+                json!({"timeout_ms":1.5}),
+                json!({"timeout_ms":-1}),
+                json!({"poll_interval_ms":0}),
+                json!({"poll_interval_ms":1001}),
+                json!({"poll_interval_ms":null}),
+                json!({"timeout_ms":1}),
+                json!({"timeout_ms":10,"poll_interval_ms":11}),
+                json!({"settle_ms":1001}),
+                json!({"settle_ms":-1}),
+                json!({"settle_ms":false}),
+                json!({"settle_ms":null}),
+                json!({"allow_unchanged":null}),
+                json!({"allow_unchanged":1}),
+                json!({"allow_unchanged":"false"}),
+                json!({"timeoutMs":600}),
+                json!({"pollIntervalMs":15}),
+                json!({"settleMs":30}),
+                json!({"allowUnchanged":true}),
+            ] {
+                assert_fault(
+                    host.call("selection.copy_data", params, &token)
+                        .unwrap_err(),
+                    "selection.copy_data",
+                    "invalid_input",
+                    "not_started",
+                );
+            }
+            token.cancel();
+            assert_fault(
+                host.call(
+                    "selection.copy_data",
+                    json!({"allow_unchanged":null}),
+                    &token,
+                )
+                .unwrap_err(),
+                "selection.copy_data",
+                "invalid_input",
+                "not_started",
+            );
+        }
+
+        #[test]
+        fn copy_data_valid_options_cancel_and_deadline_do_not_fall_back_to_foreground() {
+            let host = host_without_target();
+            let token = CancellationToken::new();
+            for params in [
+                json!({}),
+                json!({"allow_unchanged":true}),
+                json!({"timeout_ms":400,"poll_interval_ms":10,"settle_ms":0}),
+            ] {
+                assert_fault(
+                    host.call("selection.copy_data", params, &token)
+                        .unwrap_err(),
+                    "selection.copy_data",
+                    "target_unavailable",
+                    "not_started",
+                );
+            }
+            assert_fault(
+                host.call_with_deadline("selection.copy_data", json!({}), &token, Instant::now())
+                    .unwrap_err(),
+                "selection.copy_data",
+                "timeout",
+                "not_started",
+            );
+            token.cancel();
+            assert_fault(
+                host.call("selection.copy_data", json!({}), &token)
+                    .unwrap_err(),
+                "selection.copy_data",
+                "cancelled",
+                "not_started",
+            );
+        }
+
+        #[test]
+        fn read_data_strict_params_do_not_call_the_injected_reader() {
+            for params in [
+                json!(null),
+                json!([]),
+                json!(true),
+                json!({"text":"synthetic_payload_do_not_echo"}),
+                json!({"sequenceNumber":0}),
+            ] {
+                let result = read_data_with(params, &CancellationToken::new(), None, || {
+                    panic!("非法参数不得调用 reader")
+                });
+                assert_fault(
+                    result.unwrap_err(),
+                    "clipboard.read_data",
+                    "invalid_input",
+                    "not_started",
+                );
+            }
+        }
+
+        #[test]
+        fn read_data_injected_snapshots_keep_empty_text_files_and_arbitrary_path_data() {
+            let token = CancellationToken::new();
+            let called = Cell::new(0);
+            let empty = read_data_with(json!({}), &token, None, || {
+                called.set(called.get() + 1);
+                Ok(snapshot(ClipboardData::Text(String::new()), 0))
+            })
+            .unwrap();
+            assert_eq!(empty, json!({"kind":"text","text":"","sequenceNumber":0}));
+            let text = "  中文😀\r\n\t";
+            let output = read_data_with(json!({}), &token, None, || {
+                Ok(snapshot(ClipboardData::Text(text.into()), u32::MAX))
+            })
+            .unwrap();
+            assert_eq!(
+                output,
+                json!({"kind":"text","text":text,"sequenceNumber":u32::MAX})
+            );
+            let paths = vec![
+                "relative/只是数据".to_string(),
+                "C:/OneDrive/not-opened.txt".into(),
+                "\\\\server\\share\\not-opened.txt".into(),
+                "  literal path  ".into(),
+            ];
+            let expected = json!({"kind":"files","paths":paths,"sequenceNumber":7});
+            let files = read_data_with(json!({}), &token, None, || {
+                Ok(snapshot(ClipboardData::Files(paths), 7))
+            })
+            .unwrap();
+            assert_eq!(files, expected);
+            let empty_files = read_data_with(json!({}), &token, None, || {
+                Ok(snapshot(ClipboardData::Files(vec![]), 0))
+            })
+            .unwrap();
+            assert_eq!(
+                empty_files,
+                json!({"kind":"files","paths":[],"sequenceNumber":0})
+            );
+            assert_eq!(called.get(), 1);
+        }
+
+        #[test]
+        fn data_conversion_accepts_exact_utf16_limits_without_trimming_or_deduplicating() {
+            let text = clipboard_data_json(
+                snapshot(ClipboardData::Text("😀".repeat(32768)), u32::MAX),
+                "clipboard.read_data",
+                "not_started",
+            )
+            .unwrap();
+            assert_eq!(text["text"].as_str().unwrap().encode_utf16().count(), 65536);
+            let files = clipboard_data_json(
+                snapshot(ClipboardData::Files(vec!["😀".repeat(512); 64]), 0),
+                "clipboard.read_data",
+                "not_started",
+            )
+            .unwrap();
+            assert_eq!(files["paths"].as_array().unwrap().len(), 64);
+            let whitespace = clipboard_data_json(
+                snapshot(ClipboardData::Files(vec![" ".into()]), 0),
+                "clipboard.read_data",
+                "not_started",
+            )
+            .unwrap();
+            assert_eq!(whitespace["paths"][0], " ");
+        }
+
+        #[test]
+        fn data_conversion_refuses_invalid_shape_and_keeps_copy_effect_unknown() {
+            for (method, effect) in [
+                ("clipboard.read_data", "not_started"),
+                ("selection.copy_data", "unknown"),
+            ] {
+                for data in [
+                    ClipboardData::Text("x".repeat(65537)),
+                    ClipboardData::Text("a\0b".into()),
+                    ClipboardData::Files(vec![String::new()]),
+                    ClipboardData::Files(vec!["a\0b".into()]),
+                    ClipboardData::Files(vec!["p".into(); 65]),
+                    ClipboardData::Files(vec!["a".repeat(32768), "b".repeat(32769)]),
+                ] {
+                    assert_fault(
+                        clipboard_data_json(snapshot(data, 0), method, effect).unwrap_err(),
+                        method,
+                        "invalid_clipboard_data",
+                        effect,
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn read_data_cancel_deadline_and_native_errors_never_expose_payload() {
+            let token = CancellationToken::new();
+            token.cancel();
+            assert_fault(
+                read_data_with(json!({}), &token, None, || panic!("取消后不得读剪贴板"))
+                    .unwrap_err(),
+                "clipboard.read_data",
+                "cancelled",
+                "not_started",
+            );
+            assert_fault(
+                read_data_with(
+                    json!({}),
+                    &CancellationToken::new(),
+                    Some(Instant::now()),
+                    || panic!("超时后不得读剪贴板"),
+                )
+                .unwrap_err(),
+                "clipboard.read_data",
+                "timeout",
+                "not_started",
+            );
+            let token = CancellationToken::new();
+            assert_fault(
+                read_data_with(json!({}), &token, None, || {
+                    token.cancel();
+                    Ok(snapshot(
+                        ClipboardData::Text("synthetic_payload_do_not_echo".into()),
+                        1,
+                    ))
+                })
+                .unwrap_err(),
+                "clipboard.read_data",
+                "cancelled",
+                "not_started",
+            );
+            for code in [
+                "unsupported_clipboard_format",
+                "clipboard_busy",
+                "invalid_clipboard_data",
+            ] {
+                assert_fault(
+                    read_data_with(json!({}), &CancellationToken::new(), None, || {
+                        Err(ClipboardDataError {
+                            code,
+                            message: "synthetic_payload_do_not_echo".into(),
+                        })
+                    })
+                    .unwrap_err(),
+                    "clipboard.read_data",
+                    code,
+                    "not_started",
+                );
+            }
+        }
+
+        #[test]
+        fn copy_data_result_keeps_changed_and_native_stage_without_text_error_matching() {
+            for (data, changed, sequence) in [
+                (ClipboardData::Text(String::new()), false, 0),
+                (ClipboardData::Files(vec![]), true, u32::MAX),
+            ] {
+                let value = copy_data_result(
+                    Ok(SelectionDataSnapshot {
+                        clipboard: snapshot(data, sequence),
+                        changed,
+                    }),
+                    &CancellationToken::new(),
+                    None,
+                )
+                .unwrap();
+                assert_eq!(value["changed"], changed);
+                assert_eq!(value["sequenceNumber"], sequence);
+                assert_eq!(value.as_object().unwrap().len(), 4);
+            }
+            for (code, effect) in [
+                ("selection_unchanged", "unknown"),
+                ("selection_busy", "not_started"),
+                ("target_changed", "unknown"),
+                ("operation_guard_failed", "unknown"),
+            ] {
+                let result = Err(SelectionDataError {
+                    code,
+                    message: "动作已取消 synthetic_payload_do_not_echo".into(),
+                    effect_state: effect,
+                });
+                assert_fault(
+                    copy_data_result(result, &CancellationToken::new(), None).unwrap_err(),
+                    "selection.copy_data",
+                    code,
+                    effect,
+                );
+            }
+            for effect in ["not_started", "unknown"] {
+                let token = CancellationToken::new();
+                token.cancel();
+                let result = Err(SelectionDataError {
+                    code: "operation_guard_failed",
+                    message: "synthetic_payload_do_not_echo".into(),
+                    effect_state: effect,
+                });
+                assert_fault(
+                    copy_data_result(result, &token, None).unwrap_err(),
+                    "selection.copy_data",
+                    "cancelled",
+                    effect,
+                );
+                let result = Err(SelectionDataError {
+                    code: "operation_guard_failed",
+                    message: "synthetic_payload_do_not_echo".into(),
+                    effect_state: effect,
+                });
+                assert_fault(
+                    copy_data_result(result, &CancellationToken::new(), Some(Instant::now()))
+                        .unwrap_err(),
+                    "selection.copy_data",
+                    "timeout",
+                    effect,
+                );
+            }
+            let token = CancellationToken::new();
+            token.cancel();
+            let result = Ok(SelectionDataSnapshot {
+                clipboard: snapshot(
+                    ClipboardData::Text("synthetic_payload_do_not_echo".into()),
+                    1,
+                ),
+                changed: true,
+            });
+            assert_fault(
+                copy_data_result(result, &token, None).unwrap_err(),
+                "selection.copy_data",
+                "cancelled",
+                "unknown",
+            );
+        }
+    }
 
     #[test]
     fn target_context_export_keeps_original_hidden_window_identity() {

@@ -49,7 +49,8 @@ impl NativeHost for ActionHost {
         if method.starts_with("browser.") {
             self.browser.call(method, params, cancellation, deadline)
         } else {
-            self.desktop.call(method, params, cancellation)
+            self.desktop
+                .call_with_deadline(method, params, cancellation, deadline)
         }
     }
 }

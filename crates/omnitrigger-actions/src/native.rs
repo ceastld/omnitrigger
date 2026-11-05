@@ -15,6 +15,24 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
+const METHODS: [&str; 16] = [
+    "fs.stat",
+    "ui.choose",
+    "ui.notify",
+    "browser.profiles",
+    "browser.call",
+    "target.info",
+    "target.context",
+    "keyboard.shortcut",
+    "keyboard.sequence",
+    "keyboard.text",
+    "selection.copy",
+    "selection.copy_data",
+    "clipboard.read",
+    "clipboard.read_data",
+    "clipboard.write",
+    "window.action",
+];
 
 /// 由应用为本次调用捕获的本机上下文。不是沙盒或权限隔离。
 /// 回调在动作工作线程执行，须有界返回，并在副作用前核验取消和目标身份。
@@ -71,8 +89,9 @@ fn io_error(error: impl ToString) -> ActionError {
     error
 }
 
-/// 交互 UI 可等待数十秒；父运行时此时正在本次 poll 栈中，不能依赖它
+/// 交互 UI 和复制等待可能暂时停留在本次 poll 栈中，不能依赖父运行时
 /// 继续轮询子进程才能发现宿主退出。旁路只检测连接和取消，不读走协议数据。
+/// 无法强制抢占已经进入的阻塞系统调用；实现仍须在调用前后复验取消。
 fn interactive_call(
     stream: &TcpStream,
     parent: &CancellationToken,
@@ -199,11 +218,29 @@ impl NativeBridge {
                         return false;
                     }
                     *next_id += 1;
-                    let result = if cancellation.is_cancelled() {
-                        Err(ActionError::new(
-                            "cancelled",
-                            "动作已取消，未开始本机调用。",
-                        ))
+                    let data_read = request.method == "clipboard.read_data";
+                    let data_copy = request.method == "selection.copy_data";
+                    let result = if !METHODS.contains(&request.method.as_str()) {
+                        let mut error = ActionError::new("invalid_input", "未提供此本机调用方法。");
+                        error.effect_state = Some("not_started".into());
+                        Err(error)
+                    } else if !request.params.is_object()
+                        || (data_read
+                            && request
+                                .params
+                                .as_object()
+                                .is_some_and(|params| !params.is_empty()))
+                    {
+                        let mut error = ActionError::new("invalid_input", "本机调用参数无效。");
+                        error.effect_state = Some("not_started".into());
+                        Err(error)
+                    } else if cancellation.is_cancelled() {
+                        let mut error =
+                            ActionError::new("cancelled", "动作已取消，未开始本机调用。");
+                        if data_read || data_copy {
+                            error.effect_state = Some("not_started".into());
+                        }
+                        Err(error)
                     } else {
                         let call = |cancellation: &CancellationToken| match deadline {
                             Some(deadline) => host.call_with_deadline(
@@ -214,12 +251,25 @@ impl NativeBridge {
                             ),
                             None => host.call(&request.method, request.params, cancellation),
                         };
-                        if request.method == "ui.choose" {
+                        if request.method == "ui.choose" || data_copy {
                             interactive_call(&client.stream, cancellation, call)
                         } else {
                             call(cancellation)
                         }
-                    };
+                    }
+                    .map_err(|mut error| {
+                        if data_read || data_copy {
+                            error.message = "剪贴板或选区数据调用失败；请检查错误代码。".into();
+                            error.method = Some(request.method.clone());
+                            error.required_permissions.clear();
+                            if data_read {
+                                error.effect_state = Some("not_started".into());
+                            } else if error.effect_state.as_deref() != Some("not_started") {
+                                error.effect_state = Some("unknown".into());
+                            }
+                        }
+                        error
+                    });
                     let response = match result {
                         Ok(value) => json!({"id":request.id, "ok":true, "value":value}),
                         Err(error) => json!({"id":request.id, "ok":false, "error":error}),

@@ -9,7 +9,7 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 14] = [
+pub const METHODS: [&str; 16] = [
     "fs.stat",
     "ui.choose",
     "ui.notify",
@@ -21,7 +21,9 @@ pub const METHODS: [&str; 14] = [
     "keyboard.sequence",
     "keyboard.text",
     "selection.copy",
+    "selection.copy_data",
     "clipboard.read",
+    "clipboard.read_data",
     "clipboard.write",
     "window.action",
 ];
@@ -35,6 +37,8 @@ pub struct Configuration {
 
 fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiError {
     let stat = method == "fs.stat";
+    let data_read = method == "clipboard.read_data";
+    let data_copy = method == "selection.copy_data";
     ApiError {
         code: (if stat && code == "native_bridge_unavailable" {
             "fs_unavailable"
@@ -46,10 +50,19 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
         .into(),
         message: if stat {
             "本地路径状态查询失败；请检查错误代码。".into()
+        } else if data_read || data_copy {
+            "剪贴板或选区数据调用失败；请检查错误代码。".into()
         } else {
             message.to_string()
         },
-        effect_state: Some(if stat { "not_started" } else { effect }.into()),
+        effect_state: Some(
+            if stat || data_read {
+                "not_started"
+            } else {
+                effect
+            }
+            .into(),
+        ),
         method: Some(method.into()),
         required_permissions: Vec::new(),
     }
@@ -95,6 +108,8 @@ pub fn call(
     let deadline = Instant::now()
         + Duration::from_secs(if browser || method == "ui.choose" {
             66
+        } else if method == "selection.copy_data" {
+            8
         } else {
             5
         });
@@ -105,17 +120,22 @@ pub fn call(
     };
     let network = |cause| fault("native_bridge_failed", cause, &method, "unknown");
     let transport = |cause: std::io::Error| {
-        if method == "fs.stat"
-            && matches!(
-                cause.kind(),
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-            )
-        {
+        if matches!(
+            method.as_str(),
+            "fs.stat" | "clipboard.read_data" | "selection.copy_data"
+        ) && matches!(
+            cause.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ) {
             fault(
                 "timeout",
-                "本地路径状态查询等待超时。",
+                "本机调用等待超时。",
                 &method,
-                "not_started",
+                if method == "selection.copy_data" {
+                    "unknown"
+                } else {
+                    "not_started"
+                },
             )
         } else {
             network(cause.to_string())
@@ -127,12 +147,19 @@ pub fn call(
             .checked_duration_since(Instant::now())
             .filter(|d| !d.is_zero())
             .ok_or_else(|| {
-                if method == "fs.stat" {
+                if matches!(
+                    method.as_str(),
+                    "fs.stat" | "clipboard.read_data" | "selection.copy_data"
+                ) {
                     fault(
                         "timeout",
-                        "本地路径状态查询等待超时。",
+                        "本机调用等待超时。",
                         &method,
-                        "not_started",
+                        if method == "selection.copy_data" {
+                            "unknown"
+                        } else {
+                            "not_started"
+                        },
                     )
                 } else {
                     network("本机调用等待超时。".to_string())
@@ -216,7 +243,11 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     .ok_or_else(invalid)?,
                 None => method,
             };
-            if method == "fs.stat" && reported_method != method {
+            if matches!(
+                method,
+                "fs.stat" | "clipboard.read_data" | "selection.copy_data"
+            ) && reported_method != method
+            {
                 return Err(invalid());
             }
             let permissions = match error.get("required_permissions") {

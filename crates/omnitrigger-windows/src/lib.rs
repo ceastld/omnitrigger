@@ -13,6 +13,13 @@ pub use automation_basics::{
 };
 pub use automation_basics::{validate_automation_text, validate_open_target};
 
+mod clipboard_data;
+#[cfg(windows)]
+pub use clipboard_data::read_clipboard_data;
+pub use clipboard_data::{ClipboardData, ClipboardDataError, ClipboardDataSnapshot};
+mod selection_data;
+pub use selection_data::{SelectionCopyOptions, SelectionDataError, SelectionDataSnapshot};
+
 #[cfg(windows)]
 mod native_system_hud;
 #[cfg(windows)]

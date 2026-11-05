@@ -245,6 +245,36 @@ impl ScriptTarget {
             check()
         })
     }
+
+    /// 向原目标复制一次并读取文本或文件列表；不重新捕获前台，不恢复剪贴板。
+    /// check的字符串错误统一映射operation_guard_failed，不根据消息猜测取消原因。
+    pub fn copy_selection_data_if(
+        &self,
+        options: crate::selection_data::SelectionCopyOptions,
+        mut check: impl FnMut() -> Result<(), String>,
+    ) -> Result<
+        crate::selection_data::SelectionDataSnapshot,
+        crate::selection_data::SelectionDataError,
+    > {
+        use crate::selection_data::{copy_selection_data_checked, SelectionDataError};
+        options.validate()?;
+        copy_selection_data_checked(self.target, options, || {
+            check().map_err(|_| {
+                SelectionDataError::new(
+                    "operation_guard_failed",
+                    "复制选区的调用检查未通过。",
+                    "not_started",
+                )
+            })?;
+            self.ensure_foreground().map_err(|_| {
+                SelectionDataError::new(
+                    "target_changed",
+                    "原目标窗口已失效或不再位于前台。",
+                    "not_started",
+                )
+            })
+        })
+    }
 }
 
 #[cfg(test)]

@@ -19,7 +19,7 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'clipboard.read' | 'clipboard.write' | 'window.action' | 'ui.choose' | 'ui.notify';
+  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'ui.choose' | 'ui.notify';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
 }
@@ -56,6 +56,22 @@ export interface NotifyOptions {
   durationMs?: number;
 }
 export type NotifyResult = {submitted: true};
+/** 文本优先，包括空文本。sequenceNumber 为 u32，不证明数据生产者身份。
+ * 文件路径仅是数据；不查询状态、不枚举或打开它们。
+ */
+export type ClipboardDataSnapshot = {kind: 'text'; text: string; sequenceNumber: number}
+  | {kind: 'files'; paths: string[]; sequenceNumber: number};
+export type SelectionDataSnapshot = ClipboardDataSnapshot & {changed: boolean};
+export interface SelectionCopyOptions {
+  /** 序号等待预算，默认 600，整数 1–5000；不是所有 Win32 调用的硬期限。 */
+  timeoutMs?: number;
+  /** 默认 15，整数 1–1000，且不得超过 timeoutMs；不自动调整默认值。 */
+  pollIntervalMs?: number;
+  /** 序号等待后可选稳定等待，默认 30，整数 0–1000 毫秒。 */
+  settleMs?: number;
+  /** 默认 false；true 允许读取序号未变化的当前数据，并返回 changed=false。 */
+  allowUnchanged?: boolean;
+}
 /** 非原子元数据快照；后续打开必须重新检查。 */
 export type LocalPathStat = {kind: 'file' | 'directory' | 'missing' | 'other'};
 export interface FileStatFault extends Error {
@@ -121,12 +137,24 @@ export interface ActionContext {
     sendText(text: string): Promise<{submitted: true}>;
     /** 向原目标发送 Ctrl+C 并读取新文本。复制结果保留在剪贴板。 */
     copySelectionText(): Promise<string>;
+    /** 向本次捕获且仍为前台的原目标发送一次左 Ctrl+C，不重抓目标或抢焦点。
+     * 返回最终文本/文件列表快照；changed 只比较最终序号与复制前序号，不证明生产者。
+     * 默认未变化抛 selection_unchanged；不恢复剪贴板，取消不撤销已发送输入。
+     * 客户端最多等待 8 秒；不能保证取消立即抢占阻塞 Win32 调用。
+     */
+    copySelectionData(options?: SelectionCopyOptions): Promise<SelectionDataSnapshot>;
     /** 操作本次捕获且仍为前台的窗口；仅表示系统接纳请求，关闭可能弹出保存提示。 */
     windowAction(operation: 'toggle_maximize' | 'minimize' | 'close'): Promise<{submitted: true}>;
   };
   clipboard: {
     /** 只读 Unicode 文本；没有文本格式时抛错。 */
     readText(): Promise<string>;
+    /** 需要应用 native bridge；文本最多 65536 UTF-16 单元（可为空），无 NUL 或孤立代理项。
+     * 文件最多 64 项，每项非空有效 Unicode、无 NUL，总计最多 65536 UTF-16 单元；[] 合法。
+     * 路径不 trim、不验证绝对性/云盘/实际文件，也不查询或打开。
+     * 无支持格式抛 unsupported_clipboard_format，不将图片/自定义格式当空文本。
+     */
+    readData(): Promise<ClipboardDataSnapshot>;
     /** 替换全部格式，不自动恢复。excludeFromHistory 为临时回贴请求排除历史采集；仅遵守标记的采集器有效。 */
     writeText(text: string, options?: {excludeFromHistory?: boolean}): Promise<{written: true; sequenceNumber: number; writeId?: string}>;
   };

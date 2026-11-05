@@ -17,8 +17,10 @@
 | `ctx.desktop.sendKeySequence(modifiers, keys, options)` | 0–4 个修饰键和 1–16 个普通键；修饰键跨越整组，`keyDownDelayMs` 为 0–1000 毫秒，单次等待合计最多 3000 毫秒。 |
 | `ctx.desktop.sendText(text)` | 向原目标直接发送 Unicode，不经过剪贴板；最多 65,536 个 UTF-16 单元，不含 NUL 或孤立代理项。 |
 | `ctx.desktop.copySelectionText()` | 向原目标发送 Ctrl+C，读取新文本；复制结果保留在剪贴板。 |
+| `ctx.desktop.copySelectionData(options)` | 向原目标发送一次 Ctrl+C，按可选等待参数返回文本或文件列表与 `changed`；需要应用本机桥接。 |
 | `ctx.desktop.windowAction(operation)` | 对仍为前台的原目标执行 `toggle_maximize`、`minimize` 或 `close`，返回 `{submitted:true}`，不重新选择窗口。 |
 | `ctx.clipboard.readText()` / `writeText(text, options)` | Windows Unicode 文本剪贴板；写入替换全部格式。应用接入支持 `{excludeFromHistory:true}`，返回写入回执；独立 CLI 不支持选项，写入返回 `undefined`，文本最多 64 KiB UTF-8。 |
+| `ctx.clipboard.readData()` | 应用接入返回 `{kind:'text',text,sequenceNumber}` 或 `{kind:'files',paths,sequenceNumber}`；无桥接明确报错。 |
 | `ctx.browser.profiles({timeoutMs})` | 查询连接的浏览器 profile。 |
 | `ctx.browser.call(method, args, {profile, timeoutMs})` / `ctx.browser.chrome.*` | 同步调用扩展支持的 Chrome API，保留 `undefined` 与 `null`；无 profile 时只接受恰好一个已连接 profile。 |
 | `ctx.open(target)` | 系统默认程序打开 http、https、mailto、about 或本地绝对路径；成功只表示系统接纳请求。 |
@@ -40,7 +42,13 @@ function main(ctx) {
 
 `target()` 只查询原目标；发送前由应用再次核验进程身份、前台和取消状态，并复用现有按键释放收尾逻辑。`submitted` 只表示系统接纳输入，不表示业务动作完成。独立 CLI 没有目标上下文时返回 `desktop_unavailable`，不会自行选择前台。
 
-桌面异常的 `code`、`method`、`effectState` 可在 JS 中捕获，未捕获时保留在动作终态。`not_started` 仅描述该次 API，不能证明此前脚本没有副作用；网络中断或无法确认是否执行时为 `unknown`。桥接失败不自动重试，也不退回宿主直接访问剪贴板。客户端每次连接只发送一帧，最多等待 5 秒；外层动作仍受总时限约束。
+桌面异常的 `code`、`method`、`effectState` 可在 JS 中捕获，未捕获时保留在动作终态。`not_started` 仅描述该次 API，不能证明此前脚本没有副作用；网络中断或无法确认是否执行时为 `unknown`。桥接失败不自动重试，也不退回宿主直接访问剪贴板。客户端每次连接只发送一帧，普通桌面请求最多等待 5 秒，`copySelectionData` 为 8 秒；交互选择和浏览器请求另有等待期限，外层动作仍受总时限约束。
+
+## 选区数据
+
+`copySelectionData({timeoutMs:400,pollIntervalMs:10,settleMs:0,allowUnchanged:false})` 可显式设置等待序号变化、轮询和读前等待。默认分别为 600/15/30ms，未变化时报 `selection_unchanged`；只有显式 `allowUnchanged:true` 才可返回未变化的数据。复制只发一次，结果留在剪贴板，不抢焦点、不重选目标、不恢复原内容。等待预算不保证阻塞 Win32 调用的硬期限，`changed` 只表示序号不同，不证明数据由目标生成。
+
+读取文本优先，允许空文本；文件列表支持 `[]`，每项必须非空。文本和路径总长各最多 65,536 个 UTF-16 单元，路径最多 64 项，不含 NUL 或孤立代理项。路径仅作为数据，不检查或打开文件；无支持格式、畸形格式或超限均明确报错。完整参数和示例见[动作包文档](../../docs/ACTION_PACKAGES.md#文本与文件列表)。
 
 ## 窗口动作
 

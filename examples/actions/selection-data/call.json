@@ -1,0 +1,6 @@
+{
+  "package_id": "examples.selection-data",
+  "action_id": "summarize",
+  "action_version": 1,
+  "input": {"mode":"read"}
+}

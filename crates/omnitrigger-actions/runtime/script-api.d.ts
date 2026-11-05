@@ -49,6 +49,20 @@ interface ScriptNotifyOptions {
     durationMs?: number;
 }
 type ScriptNotifyResult = {submitted: true};
+/** 文本优先（含空文本）；文件路径仅为数据，不查询或打开。序号为 u32。 */
+type ScriptClipboardDataSnapshot = {kind: 'text'; text: string; sequenceNumber: number}
+    | {kind: 'files'; paths: string[]; sequenceNumber: number};
+type ScriptSelectionDataSnapshot = ScriptClipboardDataSnapshot & {changed: boolean};
+interface ScriptSelectionCopyOptions {
+    /** 默认 600，整数 1–5000；仅为序号等待预算，不是全部 Win32 调用的硬期限。 */
+    timeoutMs?: number;
+    /** 默认 15，整数 1–1000 且 <= timeoutMs；不自动调整。 */
+    pollIntervalMs?: number;
+    /** 默认 30，整数 0–1000 毫秒。 */
+    settleMs?: number;
+    /** 默认 false；true 允许当前未变化数据，返回 changed=false。 */
+    allowUnchanged?: boolean;
+}
 /** 非原子元数据快照；后续打开必须重新检查。 */
 type ScriptLocalPathStat = {kind: 'file' | 'directory' | 'missing' | 'other'};
 interface ScriptFileStatFault extends Error {
@@ -118,6 +132,11 @@ type ScriptContext = Readonly<{
         sendText(text: string): {submitted: true};
         /** 向原目标发送 Ctrl+C 并读取新文本，复制结果保留在剪贴板。 */
         copySelectionText(): string;
+        /** 同步向捕获且仍为前台的原目标发送一次左 Ctrl+C，不重抓或抢焦点。
+         * changed 比较最终序号与复制前序号，不证明生产者。默认未变抛 selection_unchanged。
+         * 不恢复剪贴板，取消不撤销输入；客户端最多等待 8 秒，不保证抢占阻塞 Win32 调用。
+         */
+        copySelectionData(options?: ScriptSelectionCopyOptions): ScriptSelectionDataSnapshot;
         /** 操作本次捕获且仍为前台的窗口；仅表示系统接纳请求，关闭可能弹出保存提示。 */
         windowAction(operation: 'toggle_maximize' | 'minimize' | 'close'): {submitted: true};
     };
@@ -130,6 +149,12 @@ type ScriptContext = Readonly<{
     };
     clipboard: {
         readText(): string;
+        /** 同步读应用 native bridge；无 bridge 抛 native_bridge_unavailable，不退回旧 readText。
+         * 文本可为空、最多 65536 UTF-16 单元，无 NUL 或孤立代理项。文件最多 64 项，
+         * 每项非空有效 Unicode 且无 NUL，总 UTF-16 最多 65536；[] 合法，不 trim 或验证路径。
+         * 不支持格式抛 unsupported_clipboard_format，不查询或打开路径。
+         */
+        readData(): ScriptClipboardDataSnapshot;
         /** 替换全部格式。独立 CLI 不支持选项并返回 void；应用接入返回写入回执。 */
         writeText(text: string, options?: {excludeFromHistory?: boolean}): void | {written: true; sequenceNumber: number; writeId?: string};
     };

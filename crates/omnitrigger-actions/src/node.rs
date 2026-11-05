@@ -130,8 +130,10 @@ impl NodeRuntime {
         bytes.push(b'\n');
         let mut command = Command::new(&self.program);
         let host_source = format!("{DESKTOP_API}\n{BROWSER_API}\n{HOST}");
+        // 内置宿主也不能放进 --eval：Windows 的命令行长度上限会限制 SDK 扩展。
+        let host_file = TemporaryHostFile::write(&scratch, &host_source)?;
         command
-            .args(["--input-type=module", "--eval", &host_source])
+            .arg(&host_file.0)
             .current_dir(&root)
             .env_remove("NODE_OPTIONS")
             .env_remove("OMNITRIGGER_BROWSER_PIPE")
@@ -455,6 +457,37 @@ fn read_response(path: &Path, invocation_id: u64) -> Result<Value, ActionError> 
             Err(error)
         }
         _ => Err(invalid("Node 结果缺少终态或包含相互冲突的字段。".into())),
+    }
+}
+
+struct TemporaryHostFile(PathBuf);
+
+impl TemporaryHostFile {
+    fn write(directory: &ResponseDirectory, source: &str) -> Result<Self, ActionError> {
+        let path = directory.0.join("host.mjs");
+        let failure = |error: std::io::Error| {
+            let mut failure =
+                ActionError::new("runtime_io", format!("无法准备 Node 临时宿主：{error}"));
+            failure.effect_state = Some("not_started".into());
+            failure
+        };
+        let mut output = File::options()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(failure)?;
+        let owned = Self(path);
+        let written = output.write_all(source.as_bytes());
+        drop(output);
+        written.map_err(failure)?;
+        Ok(owned)
+    }
+}
+
+impl Drop for TemporaryHostFile {
+    fn drop(&mut self) {
+        // 仅删除本调用create_new创建的宿主文件；ChildGuard先结束直接子进程。
+        let _ = fs::remove_file(&self.0);
     }
 }
 
@@ -1504,6 +1537,25 @@ mod tests {
         assert_eq!(output["args"], fixture.action.call.input["args"]);
         assert_eq!(output["id"], u64::MAX.to_string());
         assert_eq!(output["code"], 0);
+    }
+
+    #[test]
+    fn node_host_file_preserves_package_directory_and_is_removed_after_execution() {
+        if !node_available() {
+            eprintln!("跳过 Node 集成测试：未安装 Node。");
+            return;
+        }
+        let fixture = Fixture::new(
+            "export default async ctx => ({cwd:process.cwd(),packageRoot:ctx.packageRoot,host:process.argv[1],eval:process.execArgv.includes('--eval')})",
+            json!({}),
+        );
+        let output = fixture.run().unwrap();
+        assert_eq!(output["cwd"], output["packageRoot"]);
+        assert_eq!(output["eval"], false);
+        let host = PathBuf::from(output["host"].as_str().unwrap());
+        assert_eq!(host.file_name().unwrap(), "host.mjs");
+        assert!(!host.exists());
+        assert!(!host.parent().unwrap().exists());
     }
 
     #[test]

@@ -3,6 +3,28 @@ import json
 import re
 
 
+def _field(obj, name, default=None):
+    """只接受已知 DTO 字段的 Pascal/camel 两种拼写；同时出现时拒绝歧义。"""
+    alternate = name[0].lower() + name[1:]
+    if name in obj and alternate in obj:
+        raise ValueError("正文含歧义字段")
+    key = name if name in obj else alternate
+    return obj.get(key, default), key
+
+
+def _fields(obj, names):
+    if not isinstance(obj, dict):
+        return obj
+    aliases = {name[0].lower() + name[1:]: name for name in names}
+    result = {}
+    for name, value in obj.items():
+        key = aliases.get(name, name)
+        if key in result:
+            raise ValueError("正文含歧义字段")
+        result[key] = value
+    return result
+
+
 def _key(name):
     # 明确键码，不通过字符布局猜测组合键。
     aliases = {"BACK": 8, "BACKSPACE": 8, "TAB": 9, "RETURN": 13, "ENTER": 13,
@@ -80,16 +102,22 @@ def subprogram_dependencies(record):
             raise ValueError("步骤结构或深度需要人工检查")
         for index, step in enumerate(steps):
             remaining -= 1
-            if remaining < 0 or not isinstance(step, dict) or type(step.get("Disabled", False)) is not bool:
+            if remaining < 0 or not isinstance(step, dict):
                 raise ValueError("步骤数量或禁用标记需要人工检查")
-            if step.get("Disabled", False):
+            disabled, _ = _field(step, "Disabled", False)
+            if type(disabled) is not bool:
+                raise ValueError("禁用标记需要人工检查")
+            if disabled:
                 continue
             location = f"{path}[{index}]"
-            if step.get("StepRunnerKey") == "sys:subprogram":
-                params = step.get("InputParams")
+            runner, _ = _field(step, "StepRunnerKey")
+            if not isinstance(runner, str) or not runner:
+                raise ValueError("步骤字段格式需要人工检查")
+            if runner == "sys:subprogram":
+                params, _ = _field(step, "InputParams")
                 if not isinstance(params, dict):
                     raise ValueError("调用参数需要人工检查")
-                reference = params.get("subProgram")
+                reference = _fields(params.get("subProgram"), ("VarKey", "Value"))
                 literal = (isinstance(reference, dict) and set(reference) == {"VarKey", "Value"}
                            and reference["VarKey"] is None and isinstance(reference["Value"], str)
                            and bool(reference["Value"])
@@ -98,13 +126,17 @@ def subprogram_dependencies(record):
                               "resolution": "body_not_provided" if literal else "dynamic_reference",
                               "input_names": sorted(key for key in params if key.startswith("var:"))})
             for branch in ("IfSteps", "ElseSteps"):
-                walk(step.get(branch), location + "." + branch, depth + 1)
+                children, branch_key = _field(step, branch)
+                walk(children, location + "." + branch_key, depth + 1)
 
     try:
         body = json.loads(data, object_pairs_hook=unique_object)
-        if not isinstance(body, dict) or not isinstance(body.get("Steps"), list):
+        if not isinstance(body, dict):
             return None
-        walk(body["Steps"], "Steps", 0)
+        steps, steps_key = _field(body, "Steps")
+        if not isinstance(steps, list):
+            return None
+        walk(steps, steps_key, 0)
         return {"scope": "active_step_tree", "inventory_complete": True, "calls": calls}
     except (ValueError, TypeError, KeyError, RecursionError):
         # 部分清单仍有定位价值，但绝不标成完整或可投影动作。
@@ -128,12 +160,16 @@ def key_step_body(record, settings):
             result[key] = value
         return result
     try:
-        body = json.loads(data, object_pairs_hook=unique_object)
+        body = _fields(json.loads(data, object_pairs_hook=unique_object),
+                       ("LimitSingleInstance", "SummaryExpression", "SubPrograms", "Variables", "Steps"))
         if (not isinstance(body, dict) or set(body) - {"LimitSingleInstance", "SummaryExpression", "SubPrograms", "Variables", "Steps"}
                 or body.get("LimitSingleInstance") is not False or body.get("SubPrograms") != []
                 or body.get("SummaryExpression", "") not in ("", "$$")):
             return fail("source_step_action_metadata_review")
         variables = body.get("Variables")
+        if isinstance(variables, list):
+            variables = [_fields(var, ("SaveState", "IsInput", "IsOutput", "DefaultValue", "Type", "CustomType", "TableDef"))
+                         for var in variables]
         if not isinstance(variables, list) or any(not isinstance(var, dict)
                 or any(var.get(key) is not False for key in ("SaveState", "IsInput", "IsOutput"))
                 or var.get("DefaultValue") not in ("", None) or type(var.get("Type")) is not int or var.get("Type") != 0
@@ -142,6 +178,8 @@ def key_step_body(record, settings):
         steps = body.get("Steps")
         if not isinstance(steps, list) or not 1 <= len(steps) <= 32:
             return fail("source_body_step_limit")
+        steps = [_fields(step, ("StepRunnerKey", "InputParams", "OutputParams", "IfSteps", "ElseSteps", "Note", "Disabled", "Collapsed", "DelayMs"))
+                 for step in steps]
         if any(not isinstance(step, dict) or type(step.get("Disabled", False)) is not bool for step in steps):
             return fail("source_step_disabled_invalid")
         active = [step for step in steps if not step.get("Disabled", False)]
@@ -159,7 +197,7 @@ def key_step_body(record, settings):
         def literal(name, default=None):
             if name not in params:
                 return default
-            param = params[name]
+            param = _fields(params[name], ("VarKey", "Value"))
             if not isinstance(param, dict) or set(param) != {"VarKey", "Value"} or param["VarKey"] is not None:
                 raise ValueError("仅支持字面参数")
             return param["Value"]
@@ -174,7 +212,7 @@ def key_step_body(record, settings):
             return fail("source_step_repeat_review")
         integer("interval", 1)  # 单次输入不使用重复间隔，但动态参数仍不能被忽略。
         hold = integer("holdMs", -1)
-        keys = json.loads(literal("keys"), object_pairs_hook=unique_object)
+        keys = _fields(json.loads(literal("keys"), object_pairs_hook=unique_object), ("CtrlKeys", "Keys"))
         if not isinstance(keys, dict) or set(keys) != {"CtrlKeys", "Keys"}:
             return fail("source_step_keys_invalid")
         modifiers, terminals = keys["CtrlKeys"], keys["Keys"]

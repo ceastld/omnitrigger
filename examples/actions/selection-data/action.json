@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "id": "examples.selection-data",
+  "name": "选区与剪贴板数据摘要",
+  "version": "1.0.0",
+  "actions": [
+    {"id":"summarize","title":"查看选区或剪贴板数据摘要","version":1,"runtime":"script","entry":"main.js","single_instance":true}
+  ]
+}

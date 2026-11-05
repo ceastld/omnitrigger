@@ -59,6 +59,8 @@ function checkEntry(source) {
 for (const source of [
   'function main(ctx) { return {text: String(ctx.input.text), nested: [null, true, {count: 3}], invocation: ctx.invocation}; }',
   'function main(ctx) { if (ctx.input.fail) throw new Error("failure"); return null; }',
+  'function main(ctx) { const value = ctx.clipboard.readData(); return value.kind === "files" ? {count:value.paths.length, sequence:value.sequenceNumber} : {units:value.text.length, sequence:value.sequenceNumber}; }',
+  'function main(ctx) { const value = ctx.desktop.copySelectionData({timeoutMs:400,pollIntervalMs:10,settleMs:0,allowUnchanged:false}); return {kind:value.kind,changed:value.changed}; }',
 ]) {
   const items = checkEntry(source);
   assert.equal(items.length, 0, report(items));
@@ -90,6 +92,16 @@ assert(negative.some(item=>item.code === 2345 && item.file?.text.slice(item.star
 assert(negative.some(item=>item.code === 2339), report(negative));
 const messages = negative.map(item=>ts.flattenDiagnosticMessageText(item.messageText,'\n')).join('\n');
 assert(messages.includes('process') && messages.includes('document'), messages);
+for (const source of [
+  'function main(ctx) { return ctx.clipboard.readData().paths.length; }',
+  'function main(ctx) { return ctx.desktop.copySelectionData({timeoutMs:"400"}); }',
+  'function main(ctx) { return ctx.desktop.copySelectionData({allowUnchanged:"yes"}); }',
+  'function main(ctx) { return ctx.desktop.copySelectionData({unknown:true}); }',
+]) {
+  const items = checkEntry(source);
+  assert(items.some(item => [2322,2339,2345,2353].includes(item.code)
+    && item.file && resolve(item.file.fileName) === resolve(project.entry_path)), report(items));
+}
 writeFileSync(project.entry_path, `${original}\n// 保留作者修改\n`);
 const files = [basename(project.entry_path),'action.json','call.json','jsconfig.json','README.md','sdk/api.d.ts'];
 if (existsSync(join(project.package_root,'lib/text.js'))) files.push('lib/text.js');
@@ -104,6 +116,6 @@ const listed = cli(['--list-package-actions']);
 assert.equal(listed.actions.length, 1);
 assert.equal(listed.actions[0].runtime, 'script');
 assert.equal(readFileSync(config,'utf8'),'[]');
-const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,checkedExamples,entryContractChecks:Object.keys(invalidEntries),negativeTypeChecks:negative.length,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
+const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,checkedExamples,entryContractChecks:Object.keys(invalidEntries),negativeTypeChecks:negative.length,structuredClipboardTypeChecks:true,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
 writeFileSync(join(root,'result.json'), JSON.stringify(result,null,2));
 console.log(JSON.stringify(result));

@@ -275,10 +275,45 @@ pub(super) fn send_shortcut_checked(
     check: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     let _guard = SENDING.lock().map_err(|_| "快捷键发送状态不可用。")?;
+    send_shortcut_prepared(keys, target, check, || {})
+}
+
+#[cfg(windows)]
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum TryShortcutError {
+    Busy,
+    Unavailable,
+    Failed,
+}
+
+/// 新复制接口不排队等待输入门闩；复用既有计划和失败释放，不重新解释按键。
+/// before_send在门闩内、前置检查及计划完成后调用，之后可能已经提交输入。
+#[cfg(windows)]
+pub(super) fn try_send_shortcut_checked_before_send(
+    keys: &[u16],
+    target: ShortcutTarget,
+    check: impl FnOnce() -> Result<(), String>,
+    before_send: impl FnOnce(),
+) -> Result<(), TryShortcutError> {
+    let _guard = SENDING.try_lock().map_err(|error| match error {
+        std::sync::TryLockError::WouldBlock => TryShortcutError::Busy,
+        std::sync::TryLockError::Poisoned(_) => TryShortcutError::Unavailable,
+    })?;
+    send_shortcut_prepared(keys, target, check, before_send).map_err(|_| TryShortcutError::Failed)
+}
+
+#[cfg(windows)]
+fn send_shortcut_prepared(
+    keys: &[u16],
+    target: ShortcutTarget,
+    check: impl FnOnce() -> Result<(), String>,
+    before_send: impl FnOnce(),
+) -> Result<(), String> {
     validate_shortcut(keys)?;
     check()?;
     ensure_shortcut_target(target)?;
     let strokes = plan(keys, &held_keys(keys))?;
+    before_send();
     if let Some(command) = bare_volume_command(keys) {
         return send_volume_command(command, target);
     }
@@ -1011,6 +1046,39 @@ mod tests {
         ] {
             assert!(validate_key_sequence(&modifiers, &keys).is_err());
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_shortcut_busy_rejects_without_waiting_or_running_callbacks() {
+        let _lock = SENDING.lock().unwrap();
+        let result = try_send_shortcut_checked_before_send(
+            &[0xa2, 0x43],
+            ShortcutTarget(0),
+            || panic!("忙拒绝不得访问目标或输入检查"),
+            || panic!("忙拒绝不得采样或提交"),
+        );
+        assert_eq!(result, Err(TryShortcutError::Busy));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_shortcut_preparation_failures_never_reach_before_send_callback() {
+        // 在读取前台/物理键状态前通过参数或guard拒绝，不访问交互桌面。
+        let invalid = send_shortcut_prepared(
+            &[],
+            ShortcutTarget(0),
+            || panic!("无效参数不得运行guard"),
+            || panic!("无效参数不得到达提交边界"),
+        );
+        assert!(invalid.is_err());
+        let rejected = send_shortcut_prepared(
+            &[0xa2, 0x43],
+            ShortcutTarget(0),
+            || Err("受控取消".into()),
+            || panic!("guard拒绝不得到达提交边界"),
+        );
+        assert_eq!(rejected.unwrap_err(), "受控取消");
     }
 
     #[cfg(windows)]

@@ -46,6 +46,8 @@ jobs:
         run: |
           cargo test --locked -p omnitrigger-windows --test clipboard_exclusion -- --ignored --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked -p omnitrigger-windows --test clipboard_data -- --ignored --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked -p omnitrigger-app isolated_clipboard_restore_smoke -- --ignored --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -84,6 +86,8 @@ jobs:
           node --test tests/ui_notify_api.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/fs_stat_api.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/clipboard_data_api.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/common-search/open-or-search.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

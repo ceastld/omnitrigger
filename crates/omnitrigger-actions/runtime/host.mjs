@@ -16,6 +16,8 @@ let browserConnection;
 let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
+const nativeMethods = new Set(['fs.stat','ui.choose','ui.notify','browser.profiles','browser.call','target.info','target.context',
+  'keyboard.shortcut','keyboard.sequence','keyboard.text','selection.copy','selection.copy_data','clipboard.read','clipboard.read_data','clipboard.write','window.action']);
 let nativePending;
 let nativePendingMethod;
 let nativeId = 0;
@@ -98,12 +100,16 @@ const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...
 
 function nativeCall(method, params) {
   const stat = method === 'fs.stat';
-  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, stat ? '本地路径状态查询失败；请检查错误代码。' : message), {effectState:stat ? 'not_started' : effectState, method});
-  if (stat && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
+  const dataRead = method === 'clipboard.read_data';
+  const dataCopy = method === 'selection.copy_data';
+  const data = dataRead || dataCopy;
+  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : message), {effectState:stat || dataRead ? 'not_started' : effectState, method});
+  if (!nativeMethods.has(method)) return Promise.reject(fail('invalid_input', '未提供此本机调用方法。'));
+  if ((stat || data) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
   checkCancelled();
   const ui = method === 'ui.choose' || method === 'ui.notify';
   const unavailable = ui && request.native_error?.code === 'desktop_unavailable' ? 'ui_unavailable' : request.native_error?.code;
-  if (!request.native) return Promise.reject(fail(stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
+  if (!request.native) return Promise.reject(fail(data ? 'native_bridge_unavailable' : stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
   if (nativePending) return Promise.reject(fail(stat ? 'fs_busy' : method === 'ui.notify' && nativePendingMethod === method ? 'ui_busy' : 'desktop_busy', '请 await 上一个本机调用，避免并发。'));
   if (nativeId >= 128) return Promise.reject(fail('desktop_call_limit', '单次动作最多调用 128 次桌面 API。'));
   const id = ++nativeId;
@@ -111,13 +117,13 @@ function nativeCall(method, params) {
     let settled = false;
     let sent = false;
     let chunks = '';
-    let statTimer;
+    let methodTimer;
     const socket = createConnection({host:'127.0.0.1', port:request.native.port});
     nativeSockets.add(socket);
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
-      clearTimeout(statTimer);
+      clearTimeout(methodTimer);
       controller.signal.removeEventListener('abort', aborted);
       nativeSockets.delete(socket);
       socket.destroy();
@@ -125,18 +131,18 @@ function nativeCall(method, params) {
     };
     const aborted = () => {
       const reason = controller.signal.reason;
-      if (method === 'ui.notify' || stat) {
+      if (method === 'ui.notify' || stat || data) {
         if (typeof reason?.method !== 'string') reason.method = method;
-        reason.effectState = stat ? 'not_started' : sent ? 'unknown' : 'not_started';
+        reason.effectState = stat || dataRead ? 'not_started' : sent ? 'unknown' : 'not_started';
       }
       finish(reason);
     };
     controller.signal.addEventListener('abort', aborted, {once:true});
     socket.setEncoding('utf8');
-    const timeout = method === 'ui.choose' ? 61000 : 5000;
-    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || stat ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
-    // stat 的总传输时限不被零碎数据延长，外层动作取消/时限仍优先生效。
-    if (stat) statTimer = setTimeout(() => finish(fail('timeout')), 5000);
+    const timeout = method === 'ui.choose' ? 61000 : dataCopy ? 8000 : 5000;
+    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || stat || data ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
+    // 新数据方法及 stat 的总传输时限不被零碎数据延长，外层取消/时限仍优先生效。
+    if (stat || data) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
     socket.once('connect', () => {
       if (controller.signal.aborted) return aborted();
       sent = true;

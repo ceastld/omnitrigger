@@ -41,6 +41,9 @@ ctx.delay = milliseconds => {
 };
 function desktopCall(method, params) {
     if (!nativeContext || nativeContext.error) {
+        if (method === 'clipboard.read_data' || method === 'selection.copy_data') {
+            throw Object.assign(new Error('数据选区 API 需要应用本机能力桥接。'), {code:'native_bridge_unavailable',effectState:'not_started',method});
+        }
         const cause = nativeContext?.error;
         const ui = method === 'ui.choose' || method === 'ui.notify';
         if (method === 'fs.stat') throw Object.assign(new Error('文件状态 API 需要本机宿主。'), {code:'fs_unavailable',effectState:'not_started',method});
@@ -78,6 +81,7 @@ ctx.browser = createBrowserApi((method, args, options, profiles) => {
     throw Object.assign(new Error('浏览器调用回执格式无效。'), {code:'invalid_response',effectState:'unknown',method});
 });
 ctx.clipboard = nativeContext ? desktopApis.clipboard : Object.freeze({
+    readData: desktopApis.clipboard.readData,
     readText: () => call('read_clipboard'),
     writeText: (text, options = {}) => {
         if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).length) {

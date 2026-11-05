@@ -209,10 +209,42 @@ export default async function (ctx) {
 | `ctx.desktop.sendKeySequence(modifiers, keys, options?)` | 最多四类修饰键在整组 1–16 个普通键期间保持按下。保留顺序和左右侧；可设置 `keyDownDelayMs`。 |
 | `ctx.desktop.sendText(text)` | 分批发送 Unicode 文本，不借用剪贴板；每批核验原目标及取消状态。 |
 | `ctx.desktop.copySelectionText()` | 向原目标发送 Ctrl+C，等待剪贴板序号变化后读取文本；复制结果保留在剪贴板。 |
+| `ctx.desktop.copySelectionData(options?)` | 向原目标发送一次 Ctrl+C，按明确等待参数读取文本或文件列表，另返回 `changed`。 |
 | `ctx.clipboard.readText()` | 读取 Unicode 文本，保留空白；没有文本格式或 UTF-16 无效时抛错。 |
+| `ctx.clipboard.readData()` | 读取文本或文件列表及观察到的剪贴板序号，不需要前台目标，不读取文件内容。 |
 | `ctx.clipboard.writeText(text, options?)` | 替换全部剪贴板内容为 Unicode 文本，返回 `{ written: true, sequenceNumber }`，不自动恢复。临时回贴可传 `{ excludeFromHistory: true }`，同时写入 Windows 历史排除格式与 `OmniTrigger.TransientClipboard.v1`，回执另含本次随机 `writeId`；识别标记的采集器应跳过该内容。默认不排除；标记不限制其它程序读取。序号是写入后观察值，不代表独占剪贴板。 |
 
 临时格式以版本 DWORD `1` 开头，后接以 NUL 终止的 UTF-16 写入标识。采集器只需查询格式存在；需要恢复旧快照的宿主必须在同一次打开剪贴板期间核验本次标识与预期序号，发现其它来源更新时保留当前内容。标识属于合作协议，不能阻止其它软件修改或复制标记。测试恢复原载荷时也加入排除元数据，因此恢复后的完整格式集合可能与最初不同。
+
+### 文本与文件列表
+
+`readData()` 返回 `{kind: "text", text, sequenceNumber}` 或 `{kind: "files", paths, sequenceNumber}`。文本格式优先，空文本也保留；没有支持的格式会返回 `unsupported_clipboard_format`，格式损坏或超出上限时抛错。文件列表中的路径只作为字符串返回，不检查路径合法性、存在性或云端属性，也不打开它们。
+
+文本最多 65,536 个 UTF-16 单元；文件列表最多 64 项，路径总长最多 65,536 个 UTF-16 单元。文件路径不能为空，文本和路径都不能含 NUL 或不完整代理对；合法空列表保留为 `[]`。序号是读取期间的观察值，可能回绕，不能用来证明数据来自某个窗口或保证后续访问仍是同一份内容。
+
+`copySelectionData` 接受以下可选字段，全部先于输入操作校验：
+
+| 字段 | 默认值 | 范围与含义 |
+| --- | --- | --- |
+| `timeoutMs` | 600 | 1–5000ms，等待序号变化的预算。 |
+| `pollIntervalMs` | 15 | 1–1000ms，且不超过 `timeoutMs`。 |
+| `settleMs` | 30 | 0–1000ms，读格式前的额外等待。 |
+| `allowUnchanged` | false | 为 `true` 时，等待结束仍可读取未变化的数据，并返回 `changed: false`。 |
+
+复制结果保留在剪贴板；此方法不恢复原内容、不重新抓取前台、不重发复制。它持续核验原目标和取消状态，读到的序号与复制前不同才标记 `changed: true`；这仍不能证明数据由目标窗口产生。默认未变化时返回 `selection_unchanged`。等待预算不包含延迟渲染等阻塞系统调用的硬期限；取消也不能撤销已发送的复制。
+
+轻量入口同步使用；Node 入口在调用前加 `await`。示例只返回摘要，完整内容仍可在脚本内处理：
+
+```js
+function main(ctx) {
+    const data = ctx.desktop.copySelectionData({timeoutMs: 400, pollIntervalMs: 10, settleMs: 0});
+    return data.kind === 'files'
+        ? {kind: data.kind, count: data.paths.length, changed: data.changed}
+        : {kind: data.kind, units: data.text.length, changed: data.changed};
+}
+```
+
+两个新方法都要求应用的本机桥接；无桥接时返回 `native_bridge_unavailable`。需要同时更新应用与脚本宿主开发包。格式和合成宿主测试分别覆盖读取与协议，不代表任意软件响应复制或个人绑定已经验收。
 
 ### 桌面脚本
 

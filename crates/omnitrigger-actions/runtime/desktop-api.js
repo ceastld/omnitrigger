@@ -23,6 +23,76 @@ function createDesktopApi(invoke) {
     if (!valid) invalid(method, '文本需要有效 Unicode，不含 NUL，最多 65,536 个 UTF-16 单元。');
     return invoke(method, {text, ...extra});
   }
+  function dataFault(method, code, effectState) {
+    return Object.assign(new Error('剪贴板或选区数据调用失败；请检查错误代码。'), {code, effectState, method});
+  }
+  function dataText(value, max, allowEmpty) {
+    if (typeof value !== 'string' || value.length > max || (!allowEmpty && value.length === 0) || value.includes('\0')) return false;
+    for (let i = 0; i < value.length; i++) {
+      const unit = value.charCodeAt(i);
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        const next = value.charCodeAt(++i);
+        if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+    }
+    return true;
+  }
+  function exactDataFields(value, fields) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+      && Reflect.ownKeys(value).length === fields.length && fields.every(key => Object.hasOwn(value, key));
+  }
+  function dataCall(method, params) {
+    const copy = method === 'selection.copy_data';
+    const effect = copy ? 'unknown' : 'not_started';
+    const failure = error => {
+      let code = 'native_bridge_failed';
+      let notStarted = !copy;
+      try {
+        const reported = error?.code;
+        if (typeof reported === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(reported)) code = reported;
+        if (copy) notStarted = error?.effectState === 'not_started';
+      } catch (_) { /* 不读取或回显异常 getter 的正文。 */ }
+      throw dataFault(method, code, notStarted ? 'not_started' : 'unknown');
+    };
+    const result = value => {
+      try {
+        const kind = value?.kind;
+        const files = kind === 'files';
+        const fields = ['kind', files ? 'paths' : 'text', 'sequenceNumber', ...(copy ? ['changed'] : [])];
+        if (!exactDataFields(value, fields) || !['text','files'].includes(kind)) throw new Error();
+        const sequenceNumber = value.sequenceNumber;
+        const changed = copy ? value.changed : undefined;
+        if (!Number.isInteger(sequenceNumber) || sequenceNumber < 0 || sequenceNumber > 0xffffffff
+            || (copy && typeof changed !== 'boolean')) throw new Error();
+        let data;
+        if (files) {
+          const source = value.paths;
+          if (!Array.isArray(source) || source.length > 64
+              || Reflect.ownKeys(source).length !== source.length + 1) throw new Error();
+          const paths = [];
+          let units = 0;
+          for (let i = 0; i < source.length; i++) {
+            if (!Object.hasOwn(source, i)) throw new Error();
+            const path = source[i];
+            if (!dataText(path, 65536 - units, false)) throw new Error();
+            units += path.length;
+            paths.push(path);
+          }
+          // 路径仅复制数据，不套用 stat、云盘、绝对路径或存在性规则，不 trim。
+          data = {kind:'files', paths, sequenceNumber};
+        } else {
+          const text = value.text;
+          if (!dataText(text, 65536, true)) throw new Error();
+          data = {kind:'text', text, sequenceNumber};
+        }
+        return copy ? {...data, changed} : data;
+      } catch (_) { throw dataFault(method, 'invalid_response', effect); }
+    };
+    try {
+      const value = invoke(method, params);
+      return value && typeof value.then === 'function' ? value.then(result, failure) : result(value);
+    } catch (error) { return failure(error); }
+  }
   const desktop = Object.freeze({
     target: () => invoke('target.info', {}),
     targetContext: () => invoke('target.context', {}),
@@ -58,6 +128,21 @@ function createDesktopApi(invoke) {
     },
     sendText: text => textCall('keyboard.text', text),
     copySelectionText: () => invoke('selection.copy', {}),
+    copySelectionData: (...args) => {
+      const method = 'selection.copy_data';
+      let params;
+      try {
+        const options = args[0] === undefined ? {} : args[0];
+        if (args.length > 1 || options === null || typeof options !== 'object' || Array.isArray(options)
+            || Reflect.ownKeys(options).some(key => !['timeoutMs','pollIntervalMs','settleMs','allowUnchanged'].includes(key))) throw new Error();
+        const {timeoutMs = 600, pollIntervalMs = 15, settleMs = 30, allowUnchanged = false} = options;
+        if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5000
+            || !Number.isInteger(pollIntervalMs) || pollIntervalMs < 1 || pollIntervalMs > 1000 || pollIntervalMs > timeoutMs
+            || !Number.isInteger(settleMs) || settleMs < 0 || settleMs > 1000 || typeof allowUnchanged !== 'boolean') throw new Error();
+        params = {timeout_ms:timeoutMs,poll_interval_ms:pollIntervalMs,settle_ms:settleMs,allow_unchanged:allowUnchanged};
+      } catch (_) { invalid(method, '复制选区数据只接受有效的 timeoutMs、pollIntervalMs、settleMs 和 allowUnchanged。'); }
+      return dataCall(method, params);
+    },
     windowAction: operation => {
       if (!['toggle_maximize', 'minimize', 'close'].includes(operation)) {
         invalid('window.action', '窗口操作需要 toggle_maximize、minimize 或 close。');
@@ -67,6 +152,10 @@ function createDesktopApi(invoke) {
   });
   const clipboard = Object.freeze({
     readText: () => invoke('clipboard.read', {}),
+    readData: (...args) => {
+      if (args.length !== 0) invalid('clipboard.read_data', 'readData 不接收参数。');
+      return dataCall('clipboard.read_data', {});
+    },
     writeText: (text, options = {}) => {
       if (options === null || typeof options !== 'object' || Array.isArray(options)
           || Object.keys(options).some(key => key !== 'excludeFromHistory')
