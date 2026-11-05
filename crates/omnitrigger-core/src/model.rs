@@ -108,6 +108,12 @@ impl TriggerSpec {
     }
 
     pub(crate) fn held_sets_overlap(&self, other: &Self) -> bool {
+        if let KeyboardMatching::MouseSampled { policy, .. } = self.keyboard.matching {
+            return policy.overlaps_existing_held(other);
+        }
+        if let KeyboardMatching::MouseSampled { policy, .. } = other.keyboard.matching {
+            return policy.overlaps_existing_held(self);
+        }
         // 除键集合外也比较不可同时成立的所有权要求：Passed观察不能借用Owned按压
         // 或捕获会话。空Exact及只观察Passed Win的MouseExact仍存在真正重叠。
         if self.keyboard.matching.is_mouse_unmodified() {
@@ -146,6 +152,7 @@ impl TriggerSpec {
                 .iter()
                 .all(|&button| !blocks_unmodified_mouse(button)),
             KeyboardMatching::MouseUnmodified { .. } => true,
+            KeyboardMatching::MouseSampled { .. } => true,
         }
     }
 
@@ -157,6 +164,9 @@ impl TriggerSpec {
                     pointer_scope_priority: false,
                     ..
                 } | KeyboardMatching::MouseUnmodified {
+                    pointer_scope_priority: false,
+                    ..
+                } | KeyboardMatching::MouseSampled {
                     pointer_scope_priority: false,
                     ..
                 } | KeyboardMatching::MouseCapturedLeader {
@@ -255,6 +265,12 @@ pub enum KeyboardMatching {
         priority: u16,
         pointer_scope_priority: bool,
     },
+    /// 显式逐事件修饰快照；held为空，仅观察Passed按压，不读取全局键状态。
+    MouseSampled {
+        policy: crate::MouseModifierPolicy,
+        priority: u16,
+        pointer_scope_priority: bool,
+    },
     /// 只引用已经由键盘层建立的引导会话；held 为一个明确的非修饰键。
     /// 不发起捕获、不借用透传或收尾中的旧按压，额外键盘输入由原层策略处理。
     MouseCapturedLeader {
@@ -269,11 +285,18 @@ impl KeyboardMatching {
     }
 
     pub fn is_mouse_rule(self) -> bool {
-        self.is_mouse_exact() || self.is_mouse_unmodified() || self.is_mouse_captured_leader()
+        self.is_mouse_exact()
+            || self.is_mouse_unmodified()
+            || self.is_mouse_sampled()
+            || self.is_mouse_captured_leader()
     }
 
     pub fn is_mouse_unmodified(self) -> bool {
         matches!(self, Self::MouseUnmodified { .. })
+    }
+
+    pub fn is_mouse_sampled(self) -> bool {
+        matches!(self, Self::MouseSampled { .. })
     }
 
     pub fn is_mouse_exact(self) -> bool {
@@ -290,6 +313,7 @@ impl KeyboardMatching {
             Self::Captured { priority }
             | Self::MouseExact { priority, .. }
             | Self::MouseUnmodified { priority, .. }
+            | Self::MouseSampled { priority, .. }
             | Self::MouseCapturedLeader { priority, .. } => priority,
         }
     }

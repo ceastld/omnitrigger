@@ -21,7 +21,15 @@ OmniTrigger 的绑定、插件与轮盘配置都保存在本机 JSON 文件中�
 
 浏览器连接器的本机状态独立保存在配置同级 `browser-connector.json`，版本程序位于 `plugins/browser-connector/runtime/0.1.0`。用户点击安装后，本机注册与启动自动完成，这些内部文件无需手工编辑。实现细节见[浏览器连接器](BROWSER_EXTENSION.md)。
 
-`bindings.json` 读取兼容版本 1–22，保存使用版本 22；首次保存旧配置前创建 `bindings.json.v<旧版本>.bak` 备份，备份失败不会覆盖原配置。版本 8 增加 `invoke` 动作引用，版本 9 增加 `browser` 浏览器动作，版本 10 增加 `process_scope`，版本 11 增加 `keyboard` 专用层与重复策略，版本 12 增加显式捕获集合匹配，版本 13 增加快捷键按下时序，版本 14 增加保留原功能的键盘层，版本 15 增加显式窗口上下文范围，版本 16 增加逐事件滚轮策略，版本 17 增加独立指针窗口范围，版本 18 增加鼠标修饰键观察匹配，版本 19 增加显示器单像素边界，版本 20 增加鼠标匹配顺序，版本 21 增加鼠标捕获会话引用，版本 22 增加无 Ctrl/Shift/Alt 的鼠标透传观察。回退旧程序时需恢复对应备份。
+`bindings.json` 读取兼容版本 1–23，保存使用版本 23；首次保存旧配置前创建 `bindings.json.v<旧版本>.bak` 备份，备份失败不会覆盖原配置。版本 8 增加 `invoke` 动作引用，版本 9 增加 `browser` 浏览器动作，版本 10 增加 `process_scope`，版本 11 增加 `keyboard` 专用层与重复策略，版本 12 增加显式捕获集合匹配，版本 13 增加快捷键按下时序，版本 14 增加保留原功能的键盘层，版本 15 增加显式窗口上下文范围，版本 16 增加逐事件滚轮策略，版本 17 增加独立指针窗口范围，版本 18 增加鼠标修饰键观察匹配，版本 19 增加显示器单像素边界，版本 20 增加鼠标匹配顺序，版本 21 增加鼠标捕获会话引用，版本 22 增加无 Ctrl/Shift/Alt 的鼠标透传观察，版本 23 增加逐事件修饰快照。回退旧程序时需恢复对应备份。
+
+版本 23 的 `keyboard.matching.kind=mouse_sampled` 只支持空 `held` 的鼠标按下或滚轮。`policy` 必须明确填写 `required`、`allow_other_modifiers`、`allow_extra_passed_keys` 和 `allow_extra_passed_mouse`，不推断放行策略。`required` 可为 `no_control_shift_alt`、`shift`、`control`、`alt` 或明确左右侧的 `left_shift/right_shift/left_control/right_control/left_alt/right_alt/left_windows/right_windows`。泛型要求接受任一侧或双侧；`no_control_shift_alt` 排除全部 Ctrl/Shift/Alt，是否允许 Win 由 `allow_other_modifiers` 决定。
+
+`allow_other_modifiers` 控制要求之外的修饰键；另外两个开关分别控制仍在透传的普通键和额外鼠标键。暂存、被捕获、已消费或等待收尾的按压始终排除匹配，不借用其所有权。顺序和指针范围优先级沿用鼠标规则；不支持捕获层、重复或单按恢复。相交的修饰状态域仍参与冲突检查，不会自动改优先级。完整停用示例见 [`mouse-sampled.json`](../examples/mouse-sampled.json)。
+
+正向修饰快照的单鼠标按下可与无捕获层、单鼠标前缀的精确组合共存：修饰要求命中时先执行鼠标动作并拥有本次按压；全释放的有效样本仍保留精确前缀入口。已消费的按压不会借给前缀，无控制键、无条件末键、多前缀或键盘目标继续保留原冲突保护。
+
+Windows 仅在需要此模式的物理鼠标候选上逐次采样八个左右侧修饰键，在同次匹配中共用一份样本；样本须对应同一事件流、序号、取消代次且在 16ms 评估预算内。缺失、过期或身份不符时不触发。采样不具备原子性，不能证明修饰按压来自物理设备。核心旧 `process_at` 入口没有样本，不借用上次事件；旧匹配模式继续原语义。旧版本配置拒绝新增模式。
 
 版本 22 可使用 `"keyboard":{"matching":{"kind":"mouse_unmodified","priority":0}}`，`held` 必须为空，只支持鼠标按下或滚轮。它允许仍在透传的普通键、Win 键和其他鼠标键同时按住；泛型或左右侧 Ctrl、Shift、Alt 都会排除匹配。被捕获、暂存或等待释放收尾的按压也会排除匹配，此规则不会改动这些输入的归属。顺序范围仍为 0–511，`pointer_scope_priority` 默认 `true`。它不能同时设置捕获层、重复或单按恢复。完整停用示例见 [`mouse-unmodified.json`](../examples/mouse-unmodified.json)。
 

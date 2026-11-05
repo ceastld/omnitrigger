@@ -1,0 +1,35 @@
+{
+  "version": 23,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [],
+      "activation": {"kind": "wheel_up"},
+      "wheel": "packet",
+      "keyboard": {"matching": {"kind": "mouse_sampled", "policy": {
+        "required": "control",
+        "allow_other_modifiers": false,
+        "allow_extra_passed_keys": true,
+        "allow_extra_passed_mouse": false
+      }}},
+      "message": "当前事件快照含 Ctrl 时触发",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    },
+    {
+      "id": 2,
+      "held": [],
+      "activation": {"kind": "wheel_up"},
+      "wheel": "packet",
+      "keyboard": {"matching": {"kind": "mouse_sampled", "policy": {
+        "required": "no_control_shift_alt",
+        "allow_other_modifiers": true,
+        "allow_extra_passed_keys": true,
+        "allow_extra_passed_mouse": false
+      }}},
+      "message": "当前事件快照不含 Ctrl、Shift 或 Alt 时触发",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    }
+  ]
+}

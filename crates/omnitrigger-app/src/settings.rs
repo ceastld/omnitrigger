@@ -1,7 +1,7 @@
 //! 应用持久化边界。纯核心无需了解文件格式或用户目录。
 use omnitrigger_core::{
-    Activation, Button, Engine, KeyboardMatching, KeyboardPolicy, MouseButton, ProcessScope,
-    RegistrationError, TriggerSpec, WheelDirection, WheelPolicy,
+    Activation, Button, Engine, KeyboardMatching, KeyboardPolicy, ModifierRequirement, MouseButton,
+    MouseModifierPolicy, ProcessScope, RegistrationError, TriggerSpec, WheelDirection, WheelPolicy,
 };
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -22,7 +22,7 @@ use crate::wheels::WheelActionRef;
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
-const CONFIG_VERSION: u32 = 22;
+const CONFIG_VERSION: u32 = 23;
 
 pub fn use_path(path: PathBuf) -> Result<(), String> {
     CUSTOM_PATH.set(path).map_err(|_| "配置路径已设置。".into())
@@ -200,9 +200,117 @@ enum KeyboardMatchingDto {
         )]
         pointer_scope_priority: bool,
     },
+    MouseSampled {
+        policy: MouseModifierPolicyDto,
+        #[serde(default, skip_serializing_if = "is_zero_priority")]
+        priority: u16,
+        #[serde(
+            default = "default_pointer_priority",
+            skip_serializing_if = "has_pointer_priority"
+        )]
+        pointer_scope_priority: bool,
+    },
     Captured {
         priority: u16,
     },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MouseModifierPolicyDto {
+    #[serde(deserialize_with = "deserialize_modifier_requirement")]
+    required: ModifierRequirementDto,
+    allow_other_modifiers: bool,
+    allow_extra_passed_keys: bool,
+    allow_extra_passed_mouse: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ModifierRequirementDto {
+    NoControlShiftAlt,
+    Shift,
+    Control,
+    Alt,
+    LeftShift,
+    RightShift,
+    LeftControl,
+    RightControl,
+    LeftAlt,
+    RightAlt,
+    LeftWindows,
+    RightWindows,
+}
+
+fn deserialize_modifier_requirement<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ModifierRequirementDto, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    match value.as_str() {
+        "no_control_shift_alt" => Ok(ModifierRequirementDto::NoControlShiftAlt),
+        "shift" => Ok(ModifierRequirementDto::Shift),
+        "control" => Ok(ModifierRequirementDto::Control),
+        "alt" => Ok(ModifierRequirementDto::Alt),
+        "left_shift" => Ok(ModifierRequirementDto::LeftShift),
+        "right_shift" => Ok(ModifierRequirementDto::RightShift),
+        "left_control" => Ok(ModifierRequirementDto::LeftControl),
+        "right_control" => Ok(ModifierRequirementDto::RightControl),
+        "left_alt" => Ok(ModifierRequirementDto::LeftAlt),
+        "right_alt" => Ok(ModifierRequirementDto::RightAlt),
+        "left_windows" => Ok(ModifierRequirementDto::LeftWindows),
+        "right_windows" => Ok(ModifierRequirementDto::RightWindows),
+        _ => Err(serde::de::Error::custom("不支持的鼠标快照修饰要求。")),
+    }
+}
+
+impl From<MouseModifierPolicy> for MouseModifierPolicyDto {
+    fn from(policy: MouseModifierPolicy) -> Self {
+        let required = match policy.required {
+            ModifierRequirement::NoControlShiftAlt => ModifierRequirementDto::NoControlShiftAlt,
+            ModifierRequirement::Shift => ModifierRequirementDto::Shift,
+            ModifierRequirement::Control => ModifierRequirementDto::Control,
+            ModifierRequirement::Alt => ModifierRequirementDto::Alt,
+            ModifierRequirement::LeftShift => ModifierRequirementDto::LeftShift,
+            ModifierRequirement::RightShift => ModifierRequirementDto::RightShift,
+            ModifierRequirement::LeftControl => ModifierRequirementDto::LeftControl,
+            ModifierRequirement::RightControl => ModifierRequirementDto::RightControl,
+            ModifierRequirement::LeftAlt => ModifierRequirementDto::LeftAlt,
+            ModifierRequirement::RightAlt => ModifierRequirementDto::RightAlt,
+            ModifierRequirement::LeftWindows => ModifierRequirementDto::LeftWindows,
+            ModifierRequirement::RightWindows => ModifierRequirementDto::RightWindows,
+        };
+        Self {
+            required,
+            allow_other_modifiers: policy.allow_other_modifiers,
+            allow_extra_passed_keys: policy.allow_extra_passed_keys,
+            allow_extra_passed_mouse: policy.allow_extra_passed_mouse,
+        }
+    }
+}
+
+impl From<MouseModifierPolicyDto> for MouseModifierPolicy {
+    fn from(policy: MouseModifierPolicyDto) -> Self {
+        let required = match policy.required {
+            ModifierRequirementDto::NoControlShiftAlt => ModifierRequirement::NoControlShiftAlt,
+            ModifierRequirementDto::Shift => ModifierRequirement::Shift,
+            ModifierRequirementDto::Control => ModifierRequirement::Control,
+            ModifierRequirementDto::Alt => ModifierRequirement::Alt,
+            ModifierRequirementDto::LeftShift => ModifierRequirement::LeftShift,
+            ModifierRequirementDto::RightShift => ModifierRequirement::RightShift,
+            ModifierRequirementDto::LeftControl => ModifierRequirement::LeftControl,
+            ModifierRequirementDto::RightControl => ModifierRequirement::RightControl,
+            ModifierRequirementDto::LeftAlt => ModifierRequirement::LeftAlt,
+            ModifierRequirementDto::RightAlt => ModifierRequirement::RightAlt,
+            ModifierRequirementDto::LeftWindows => ModifierRequirement::LeftWindows,
+            ModifierRequirementDto::RightWindows => ModifierRequirement::RightWindows,
+        };
+        Self {
+            required,
+            allow_other_modifiers: policy.allow_other_modifiers,
+            allow_extra_passed_keys: policy.allow_extra_passed_keys,
+            allow_extra_passed_mouse: policy.allow_extra_passed_mouse,
+        }
+    }
 }
 impl KeyboardMatchingDto {
     fn is_default(&self) -> bool {
@@ -222,6 +330,15 @@ impl From<KeyboardMatching> for KeyboardMatchingDto {
     fn from(value: KeyboardMatching) -> Self {
         match value {
             KeyboardMatching::Exact => Self::Exact,
+            KeyboardMatching::MouseSampled {
+                policy,
+                priority,
+                pointer_scope_priority,
+            } => Self::MouseSampled {
+                policy: policy.into(),
+                priority,
+                pointer_scope_priority,
+            },
             KeyboardMatching::MouseCapturedLeader {
                 priority,
                 pointer_scope_priority,
@@ -251,6 +368,15 @@ impl From<KeyboardMatchingDto> for KeyboardMatching {
     fn from(value: KeyboardMatchingDto) -> Self {
         match value {
             KeyboardMatchingDto::Exact => Self::Exact,
+            KeyboardMatchingDto::MouseSampled {
+                policy,
+                priority,
+                pointer_scope_priority,
+            } => Self::MouseSampled {
+                policy: policy.into(),
+                priority,
+                pointer_scope_priority,
+            },
             KeyboardMatchingDto::MouseCapturedLeader {
                 priority,
                 pointer_scope_priority,
@@ -474,6 +600,14 @@ impl From<&Binding> for BindingDto {
 
 impl BindingDto {
     fn into_binding(self, version: u32) -> Result<Binding, String> {
+        if version < 23
+            && matches!(
+                self.keyboard.matching,
+                KeyboardMatchingDto::MouseSampled { .. }
+            )
+        {
+            return Err("逐事件鼠标修饰快照匹配需要版本 23 配置。".into());
+        }
         if version < 22
             && matches!(
                 self.keyboard.matching,
@@ -1063,6 +1197,118 @@ mod tests {
         .unwrap()
     }
 
+    mod mouse_sampled_settings {
+        use super::*;
+
+        fn document(required: &str) -> serde_json::Value {
+            json!({"version":23,"bindings":[{
+                "id":7,"held":[],"activation":{"kind":"wheel_up"},"wheel":"packet",
+                "keyboard":{"matching":{"kind":"mouse_sampled","policy":{
+                    "required":required,"allow_other_modifiers":false,"allow_extra_passed_keys":true,"allow_extra_passed_mouse":false
+                }}},"enabled":false,"message":"合成快照策略","action":{"kind":"notification"}
+            }]})
+        }
+
+        #[test]
+        fn v23_snapshot_policy_round_trips_all_explicit_flags_and_keeps_defaults_separate() {
+            for required in [
+                "no_control_shift_alt",
+                "control",
+                "left_alt",
+                "shift",
+                "alt",
+                "left_control",
+                "right_control",
+                "left_shift",
+                "right_shift",
+                "right_alt",
+                "left_windows",
+                "right_windows",
+            ] {
+                let source = document(required);
+                let bindings = decode(&source.to_string()).unwrap();
+                assert!(bindings[0].spec.keyboard.matching.is_mouse_sampled());
+                assert!(!bindings[0].spec.keyboard.matching.is_mouse_exact());
+                assert!(!bindings[0].spec.keyboard.matching.is_mouse_unmodified());
+                let saved: serde_json::Value = serde_json::from_str(&encode(&bindings)).unwrap();
+                assert_eq!(saved["version"], CONFIG_VERSION);
+                assert_eq!(
+                    saved["bindings"][0]["keyboard"],
+                    source["bindings"][0]["keyboard"]
+                );
+                assert_eq!(decode(&saved.to_string()).unwrap(), bindings);
+            }
+        }
+
+        #[test]
+        fn old_versions_and_missing_unknown_or_mistyped_policy_fields_are_rejected() {
+            for version in 1..23 {
+                let mut source = document("control");
+                source["version"] = version.into();
+                assert!(decode(&source.to_string()).unwrap_err().contains("23"));
+            }
+            for field in [
+                "required",
+                "allow_other_modifiers",
+                "allow_extra_passed_keys",
+                "allow_extra_passed_mouse",
+            ] {
+                let mut source = document("control");
+                source["bindings"][0]["keyboard"]["matching"]["policy"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(field);
+                assert!(decode(&source.to_string()).is_err());
+            }
+            for policy in [
+                json!({}),
+                json!({"required":"Control","allow_other_modifiers":false,"allow_extra_passed_keys":true,"allow_extra_passed_mouse":false}),
+                json!({"required":"control","allow_other_modifiers":0,"allow_extra_passed_keys":true,"allow_extra_passed_mouse":false}),
+                json!({"required":"control","allow_other_modifiers":false,"allow_extra_passed_keys":true,"allow_extra_passed_mouse":false,"extra":true}),
+            ] {
+                let mut source = document("control");
+                source["bindings"][0]["keyboard"]["matching"]["policy"] = policy;
+                assert!(decode(&source.to_string()).is_err());
+            }
+        }
+
+        #[test]
+        fn sampled_shape_and_same_rank_conflicts_remain_structured_core_checks() {
+            let mut held = document("control");
+            held["bindings"][0]["held"] = json!([{"kind":"key","value":17}]);
+            assert!(decode(&held.to_string()).is_err());
+            let mut source = document("control");
+            let mut other = source["bindings"][0].clone();
+            other["id"] = 8.into();
+            source["bindings"]
+                .as_array_mut()
+                .unwrap()
+                .push(other.clone());
+            assert!(decode(&source.to_string()).is_err());
+            source["bindings"][1]["keyboard"]["matching"]["policy"]["required"] =
+                "no_control_shift_alt".into();
+            assert!(decode(&source.to_string()).is_ok());
+            other["keyboard"]["matching"] = json!({"kind":"mouse_unmodified"});
+            source["bindings"][1] = other;
+            assert!(decode(&source.to_string()).is_err());
+        }
+
+        #[test]
+        fn priority_and_pointer_priority_round_trip_without_adjusting_user_order() {
+            let mut source = document("left_alt");
+            source["bindings"][0]["keyboard"]["matching"]["priority"] = 511.into();
+            source["bindings"][0]["keyboard"]["matching"]["pointer_scope_priority"] = false.into();
+            let bindings = decode(&source.to_string()).unwrap();
+            let saved: serde_json::Value = serde_json::from_str(&encode(&bindings)).unwrap();
+            assert_eq!(
+                saved["bindings"][0]["keyboard"],
+                source["bindings"][0]["keyboard"]
+            );
+            source["bindings"][0]["keyboard"]["matching"]["priority"] = 512.into();
+            assert!(decode(&source.to_string()).is_err());
+        }
+    }
+
     mod mouse_unmodified_settings {
         use super::*;
 
@@ -1107,7 +1353,7 @@ mod tests {
                 );
                 assert!(!dto.keyboard.matching.is_default());
                 let saved: serde_json::Value = serde_json::from_str(&encode(&bindings)).unwrap();
-                assert_eq!(saved["version"], 22);
+                assert_eq!(saved["version"], CONFIG_VERSION);
                 assert_eq!(
                     saved["bindings"][0]["keyboard"],
                     json!({"matching":{"kind":"mouse_unmodified"}})
@@ -1301,7 +1547,7 @@ mod tests {
                 let legacy = decode(&source.to_string()).unwrap();
                 assert_eq!(legacy[0].spec.keyboard, KeyboardPolicy::default());
                 let saved: serde_json::Value = serde_json::from_str(&encode(&legacy)).unwrap();
-                assert_eq!(saved["version"], 22);
+                assert_eq!(saved["version"], CONFIG_VERSION);
                 assert!(saved["bindings"][0].get("keyboard").is_none());
             }
             let mut source = document();

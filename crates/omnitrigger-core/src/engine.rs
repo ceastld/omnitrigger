@@ -112,6 +112,9 @@ pub struct Engine {
     retained: Option<RetainedSession>,
     last_keyboard_down: Option<u64>,
     retained_starters: Vec<usize>,
+    mouse_modifier_gate: Option<crate::MouseModifierGate>,
+    mouse_modifier_context: Option<crate::MouseModifierContext>,
+    uses_mouse_modifier_snapshot: bool,
 }
 
 impl Engine {
@@ -152,6 +155,9 @@ impl Engine {
             retained: None,
             last_keyboard_down: None,
             retained_starters: Vec::new(),
+            mouse_modifier_gate: None,
+            mouse_modifier_context: None,
+            uses_mouse_modifier_snapshot: false,
         };
         engine.compile_process_scopes();
         Ok(engine)
@@ -271,6 +277,10 @@ impl Engine {
     }
 
     fn compile_process_scopes(&mut self) {
+        self.uses_mouse_modifier_snapshot = self
+            .bindings
+            .iter()
+            .any(|binding| binding.keyboard.matching.is_mouse_sampled());
         let related = |binding: &TriggerSpec, other: &TriggerSpec| {
             if binding.keyboard.matching.is_captured() {
                 other.keyboard.matching.is_captured()
@@ -419,6 +429,10 @@ impl Engine {
     }
     /// 取消上下文并消费旧按压的后续释放；活动拖拽的终止事件与收尾决策同步返回。
     pub fn cancel(&mut self) -> Decision {
+        self.mouse_modifier_context = None;
+        if let Some(gate) = &mut self.mouse_modifier_gate {
+            let _ = gate.cancel();
+        }
         self.clear_mouse_prefix_sessions();
         self.retained_adorn_order.clear();
         let drag = self.finish_drag(DragPhase::Cancelled);
@@ -464,8 +478,73 @@ impl Engine {
 
     /// 先推进计时，再处理当前物理事件。注入事件完全忽略，不推进时间。
     pub fn process_at(&mut self, event: InputEvent, now_ms: u64) -> Decision {
+        self.process_at_inner(event, now_ms, None)
+    }
+
+    pub fn needs_mouse_modifier_snapshot(&self) -> bool {
+        self.uses_mouse_modifier_snapshot
+    }
+
+    /// 调用方明确分配事件流及样本年龄；重新配置时须使用新的stream_id。
+    pub fn configure_mouse_modifier_snapshot(
+        &mut self,
+        stream_id: u64,
+        max_age_ms: u32,
+    ) -> Result<Decision, crate::MouseSnapshotError> {
+        let gate = crate::MouseModifierGate::new(stream_id, max_age_ms)?;
+        if self
+            .mouse_modifier_gate
+            .as_ref()
+            .is_some_and(|old| stream_id <= old.stream_id())
+        {
+            return Err(crate::MouseSnapshotError::StaleStream);
+        }
+        let decision = self.cancel();
+        self.mouse_modifier_gate = Some(gate);
+        Ok(decision)
+    }
+
+    pub fn mouse_modifier_snapshot_epoch(&self) -> Option<u64> {
+        self.mouse_modifier_gate
+            .as_ref()
+            .map(crate::MouseModifierGate::epoch)
+    }
+
+    pub fn process_with_mouse_snapshot_at(
+        &mut self,
+        event: InputEvent,
+        now_ms: u64,
+        context: crate::MouseModifierInput,
+    ) -> Decision {
+        self.process_at_inner(event, now_ms, Some(context))
+    }
+
+    fn process_at_inner(
+        &mut self,
+        event: InputEvent,
+        now_ms: u64,
+        context: Option<crate::MouseModifierInput>,
+    ) -> Decision {
+        self.mouse_modifier_context = None;
         if event.injected {
             return Decision::default();
+        }
+        if let Some(input) = context
+            && let Some(gate) = &mut self.mouse_modifier_gate
+        {
+            self.mouse_modifier_context = gate
+                .observe_sample(
+                    crate::MouseContextEvent {
+                        stream_id: input.stream_id,
+                        serial: input.serial,
+                        epoch: input.epoch,
+                        observed_at_ms: now_ms,
+                        kind: event.kind,
+                        injected: event.injected,
+                    },
+                    input.snapshot,
+                )
+                .ok();
         }
         let mut decision = self.advance_time(now_ms);
         if self.tap_restore.is_some_and(|tap| matches!(event.kind,
@@ -508,6 +587,7 @@ impl Engine {
         decision.replay.extend(current.replay);
         decision.triggered.extend(current.triggered);
         decision.drags.extend(current.drags);
+        self.mouse_modifier_context = None;
         decision
     }
 
@@ -1113,6 +1193,29 @@ impl Engine {
     }
 
     fn binding_held_matches(&self, binding: &TriggerSpec) -> bool {
+        if let crate::KeyboardMatching::MouseSampled { policy, .. } = binding.keyboard.matching {
+            return self.dedicated_leader.is_none()
+                && self.layer_owner.is_none()
+                && self.retained.is_none()
+                && self.terminal_presses.is_empty()
+                && self.captured_presses.is_empty()
+                && !self
+                    .mouse_prefix_sessions
+                    .iter()
+                    .any(|owners| owners.is_active())
+                && self.pressed.iter().all(|(&button, &state)| {
+                    state == PressState::Passed
+                        && match button {
+                            Button::Key(key) => policy.accepts_passed_key(key),
+                            Button::Mouse(_) => policy.allow_extra_passed_mouse,
+                        }
+                })
+                && self
+                    .mouse_modifier_gate
+                    .as_ref()
+                    .zip(self.mouse_modifier_context.as_ref())
+                    .is_some_and(|(gate, context)| gate.matches(context, policy).unwrap_or(false));
+        }
         if binding.keyboard.matching.is_mouse_unmodified() {
             return self.dedicated_leader.is_none()
                 && self.layer_owner.is_none()
@@ -1761,5 +1864,376 @@ mod mouse_unmodified_tests {
                 Decision::default()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod mouse_sampled_tests {
+    use super::*;
+    use crate::{
+        KeyboardMatching, KeyboardPolicy, ModifierRequirement, ModifierSides, MouseModifierInput,
+        MouseModifierPolicy, MouseModifierSnapshot,
+    };
+
+    fn policy(required: ModifierRequirement) -> MouseModifierPolicy {
+        MouseModifierPolicy {
+            required,
+            allow_other_modifiers: required == ModifierRequirement::NoControlShiftAlt,
+            allow_extra_passed_keys: true,
+            allow_extra_passed_mouse: false,
+        }
+    }
+    fn rule(id: u64, required: ModifierRequirement, priority: u16) -> TriggerSpec {
+        TriggerSpec {
+            id,
+            held: vec![],
+            activation: Activation::Wheel(WheelDirection::Up),
+            conditions: vec![],
+            keyboard: KeyboardPolicy {
+                matching: KeyboardMatching::MouseSampled {
+                    policy: policy(required),
+                    priority,
+                    pointer_scope_priority: true,
+                },
+                ..Default::default()
+            },
+            pointer_scope: Default::default(),
+            process_scope: Default::default(),
+            wheel: WheelPolicy::Packet,
+        }
+    }
+    fn wheel() -> InputEvent {
+        InputEvent {
+            kind: InputKind::Wheel {
+                axis: Axis::Vertical,
+                delta: 120,
+            },
+            injected: false,
+        }
+    }
+    fn context(engine: &Engine, serial: u64, time: u64, control: bool) -> MouseModifierInput {
+        let epoch = engine.mouse_modifier_snapshot_epoch().unwrap();
+        MouseModifierInput {
+            stream_id: 7,
+            serial,
+            epoch,
+            snapshot: Some(MouseModifierSnapshot {
+                stream_id: 7,
+                event_serial: serial,
+                epoch,
+                sampled_at_ms: time,
+                modifiers: ModifierSides {
+                    left_control: control,
+                    ..Default::default()
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn legacy_entry_never_borrows_previous_sample_and_explicit_context_is_per_event() {
+        let mut engine = Engine::new(vec![rule(1, ModifierRequirement::Control, 0)]).unwrap();
+        assert!(engine.needs_mouse_modifier_snapshot());
+        assert!(engine.process_at(wheel(), 0).triggered.is_empty());
+        engine.configure_mouse_modifier_snapshot(7, 0).unwrap();
+        let input = context(&engine, 1, 10, true);
+        assert_eq!(
+            engine
+                .process_with_mouse_snapshot_at(wheel(), 10, input)
+                .triggered,
+            [1]
+        );
+        assert!(engine.process_at(wheel(), 11).triggered.is_empty());
+        assert!(engine.mouse_modifier_context.is_none());
+        assert!(
+            engine
+                .process_with_mouse_snapshot_at(wheel(), 11, input)
+                .triggered
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn missing_expired_wrong_stream_and_injected_samples_fail_closed_without_clock_leakage() {
+        let mut engine = Engine::new(vec![rule(1, ModifierRequirement::Control, 0)]).unwrap();
+        engine.configure_mouse_modifier_snapshot(7, 5).unwrap();
+        let mut missing = context(&engine, 1, 10, true);
+        missing.snapshot = None;
+        assert!(
+            engine
+                .process_with_mouse_snapshot_at(wheel(), 10, missing)
+                .triggered
+                .is_empty()
+        );
+        let stale = context(&engine, 2, 4, true);
+        assert!(
+            engine
+                .process_with_mouse_snapshot_at(wheel(), 10, stale)
+                .triggered
+                .is_empty()
+        );
+        let mut wrong = context(&engine, 3, 10, true);
+        wrong.stream_id = 8;
+        assert!(
+            engine
+                .process_with_mouse_snapshot_at(wheel(), 10, wrong)
+                .triggered
+                .is_empty()
+        );
+        let valid = context(&engine, 4, 10, true);
+        assert_eq!(
+            engine.process_with_mouse_snapshot_at(
+                InputEvent {
+                    injected: true,
+                    ..wheel()
+                },
+                100,
+                valid
+            ),
+            Decision::default()
+        );
+        assert_eq!(
+            engine
+                .process_with_mouse_snapshot_at(wheel(), 10, valid)
+                .triggered,
+            [1]
+        );
+        let reversed = context(&engine, 5, 9, true);
+        assert!(
+            engine
+                .process_with_mouse_snapshot_at(wheel(), 9, reversed)
+                .triggered
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn same_snapshot_keeps_original_order_without_unmodified_stealing_sampled_control() {
+        let mut engine = Engine::new(vec![
+            rule(1, ModifierRequirement::NoControlShiftAlt, 0),
+            rule(2, ModifierRequirement::Control, 2),
+        ])
+        .unwrap();
+        engine.configure_mouse_modifier_snapshot(7, 0).unwrap();
+        let ctrl = context(&engine, 1, 10, true);
+        assert_eq!(
+            engine
+                .process_with_mouse_snapshot_at(wheel(), 10, ctrl)
+                .triggered,
+            [2]
+        );
+        let none = context(&engine, 2, 11, false);
+        assert_eq!(
+            engine
+                .process_with_mouse_snapshot_at(wheel(), 11, none)
+                .triggered,
+            [1]
+        );
+        assert_eq!(
+            engine.process_at(
+                InputEvent {
+                    kind: InputKind::Down(Button::Key(65)),
+                    injected: false
+                },
+                12
+            ),
+            Decision::default()
+        );
+        let extra = context(&engine, 3, 13, true);
+        assert_eq!(
+            engine
+                .process_with_mouse_snapshot_at(wheel(), 13, extra)
+                .triggered,
+            [2]
+        );
+        assert_eq!(
+            engine.process_at(
+                InputEvent {
+                    kind: InputKind::Up(Button::Key(65)),
+                    injected: false
+                },
+                14
+            ),
+            Decision::default()
+        );
+    }
+
+    #[test]
+    fn owned_prefix_and_capture_sessions_reject_sampled_mouse_without_borrowing_keys() {
+        let key = Button::Key(65);
+        let mut owner = rule(2, ModifierRequirement::Control, 0);
+        owner.held = vec![key];
+        owner.activation = Activation::Press(Button::Key(66));
+        owner.wheel = WheelPolicy::Notch;
+        owner.keyboard = KeyboardPolicy {
+            matching: KeyboardMatching::Captured { priority: 0 },
+            dedicated_prefix: Some(key),
+            ..Default::default()
+        };
+        let mut engine =
+            Engine::new(vec![rule(1, ModifierRequirement::Control, 0), owner]).unwrap();
+        engine.configure_mouse_modifier_snapshot(7, 0).unwrap();
+        assert!(
+            engine
+                .process_at(
+                    InputEvent {
+                        kind: InputKind::Down(key),
+                        injected: false
+                    },
+                    10
+                )
+                .consume
+        );
+        let blocked = context(&engine, 1, 11, true);
+        assert!(
+            engine
+                .process_with_mouse_snapshot_at(wheel(), 11, blocked)
+                .triggered
+                .is_empty()
+        );
+        assert!(
+            engine
+                .process_at(
+                    InputEvent {
+                        kind: InputKind::Up(key),
+                        injected: false
+                    },
+                    12
+                )
+                .consume
+        );
+        let next = context(&engine, 2, 13, true);
+        assert_eq!(
+            engine
+                .process_with_mouse_snapshot_at(wheel(), 13, next)
+                .triggered,
+            [1]
+        );
+    }
+
+    #[test]
+    fn cancellation_revokes_sample_epoch_but_consumed_mouse_release_still_finishes() {
+        let button = Button::Mouse(crate::MouseButton::X1);
+        let mut press = rule(1, ModifierRequirement::Control, 0);
+        press.activation = Activation::Press(button);
+        press.wheel = WheelPolicy::Notch;
+        let mut engine = Engine::new(vec![press]).unwrap();
+        engine.configure_mouse_modifier_snapshot(7, 0).unwrap();
+        let input = context(&engine, 1, 10, true);
+        let down = InputEvent {
+            kind: InputKind::Down(button),
+            injected: false,
+        };
+        assert_eq!(
+            engine
+                .process_with_mouse_snapshot_at(down, 10, input)
+                .triggered,
+            [1]
+        );
+        engine.cancel();
+        assert!(
+            engine
+                .process_at(
+                    InputEvent {
+                        kind: InputKind::Up(button),
+                        injected: false
+                    },
+                    11
+                )
+                .consume
+        );
+        assert!(
+            engine
+                .process_with_mouse_snapshot_at(down, 12, MouseModifierInput { serial: 2, ..input })
+                .triggered
+                .is_empty()
+        );
+        assert!(
+            !engine
+                .process_at(
+                    InputEvent {
+                        kind: InputKind::Up(button),
+                        injected: false
+                    },
+                    13
+                )
+                .consume
+        );
+        let fresh = context(&engine, 3, 14, true);
+        assert_eq!(
+            engine
+                .process_with_mouse_snapshot_at(down, 14, fresh)
+                .triggered,
+            [1]
+        );
+    }
+
+    #[test]
+    fn notch_remainder_uses_fresh_snapshot_and_returns_tail_when_context_is_missing() {
+        let mut binding = rule(1, ModifierRequirement::Control, 0);
+        binding.wheel = WheelPolicy::Notch;
+        let mut engine = Engine::new(vec![binding]).unwrap();
+        engine.configure_mouse_modifier_snapshot(7, 0).unwrap();
+        let half = InputEvent {
+            kind: InputKind::Wheel {
+                axis: Axis::Vertical,
+                delta: 60,
+            },
+            injected: false,
+        };
+        let first = context(&engine, 1, 10, true);
+        assert!(
+            engine
+                .process_with_mouse_snapshot_at(half, 10, first)
+                .triggered
+                .is_empty()
+        );
+        assert_eq!(engine.advance_time(11).replay, [half.kind]);
+        let next = context(&engine, 2, 12, true);
+        assert!(
+            engine
+                .process_with_mouse_snapshot_at(half, 12, next)
+                .triggered
+                .is_empty()
+        );
+        let last = context(&engine, 3, 13, true);
+        assert_eq!(
+            engine
+                .process_with_mouse_snapshot_at(half, 13, last)
+                .triggered,
+            [1]
+        );
+    }
+
+    #[test]
+    fn reconfiguration_requires_increasing_stream_identity_and_rejects_old_payloads() {
+        let mut engine = Engine::new(vec![rule(1, ModifierRequirement::Control, 0)]).unwrap();
+        engine.configure_mouse_modifier_snapshot(7, 0).unwrap();
+        let old = context(&engine, 1, 10, true);
+        assert_eq!(
+            engine.configure_mouse_modifier_snapshot(7, 0).unwrap_err(),
+            crate::MouseSnapshotError::StaleStream
+        );
+        assert_eq!(
+            engine.configure_mouse_modifier_snapshot(6, 0).unwrap_err(),
+            crate::MouseSnapshotError::StaleStream
+        );
+        assert_eq!(engine.mouse_modifier_snapshot_epoch(), Some(1));
+        engine.configure_mouse_modifier_snapshot(8, 0).unwrap();
+        assert!(
+            engine
+                .process_with_mouse_snapshot_at(wheel(), 10, old)
+                .triggered
+                .is_empty()
+        );
+        let mut next = old;
+        next.stream_id = 8;
+        next.snapshot.as_mut().unwrap().stream_id = 8;
+        assert_eq!(
+            engine
+                .process_with_mouse_snapshot_at(wheel(), 10, next)
+                .triggered,
+            [1]
+        );
     }
 }

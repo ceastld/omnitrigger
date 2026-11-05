@@ -133,7 +133,7 @@ impl fmt::Display for RegistrationError {
             Self::InvalidMouseCapturedLeader { .. } => "鼠标会话引用仅支持鼠标按下或滚轮，held 须为一个明确的非修饰键，不能同时建立捕获层、重复或单按恢复。",
             Self::MissingCapturedLeader { .. } => "鼠标规则缺少对应的键盘引导层，请先配置同一引导键的专用层或保留原功能层。",
             Self::InvalidMousePriority { .. } => "鼠标匹配顺序须为 0 至 511，数值越小越先匹配。",
-            Self::InvalidMouseMatching { .. } => "鼠标观察模式仅支持鼠标按下或滚轮：精确模式 held 为空或一个修饰键，无控制键模式 held 必须为空；不能同时配置键盘捕获层、重复、单按恢复、恢复超时或非全局单按范围。",
+            Self::InvalidMouseMatching { .. } => "鼠标观察模式仅支持鼠标按下或滚轮：精确模式 held 为空或一个修饰键，无控制键及快照模式 held 必须为空；不能同时配置键盘捕获层、重复、单按恢复、恢复超时或非全局单按范围。",
             Self::ConflictingModifierDelivery { .. } => "同一修饰键在重叠范围内同时用于鼠标观察和输入捕获，请分开其范围或统一交付策略。",
             Self::InvalidPointerProcessScope { reason, .. } => return write!(f, "指针窗口范围无效：{reason}"),
             Self::InvalidWheelPolicy { .. } => "逐事件滚轮策略仅支持滚轮触发。",
@@ -240,7 +240,8 @@ pub(super) fn validate(
         {
             return Err(RegistrationError::InvalidMouseMatching { id: binding.id });
         }
-        if binding.keyboard.matching.is_mouse_unmodified()
+        if (binding.keyboard.matching.is_mouse_unmodified()
+            || binding.keyboard.matching.is_mouse_sampled())
             && (!binding.held.is_empty()
                 || !matches!(
                     binding.activation,
@@ -507,7 +508,9 @@ pub(super) fn validate(
             let ordered_mouse_pair = (left.keyboard.matching.is_mouse_rule()
                 && right.keyboard.matching.is_mouse_rule())
                 || left.keyboard.matching.is_mouse_unmodified()
-                || right.keyboard.matching.is_mouse_unmodified();
+                || right.keyboard.matching.is_mouse_unmodified()
+                || left.keyboard.matching.is_mouse_sampled()
+                || right.keyboard.matching.is_mouse_sampled();
             if captured_pair
                 && same_button
                 && left.keyboard.matching.priority() == right.keyboard.matching.priority()
@@ -564,6 +567,7 @@ pub(super) fn validate(
         if let Some(button) = activation_button(left.activation)
             && let Some(prefix) = bindings.iter().find(|other| {
                 other.held.contains(&button)
+                    && !sampled_terminal_preserves_plain_mouse_prefix(left, other, button)
                     // 两个显式捕获层由先按下的引导键决定归属，后一个键可以先作为末键或附加键。
                     && !(left.keyboard.matching.is_captured()
                         && other.keyboard.matching.is_captured())
@@ -588,6 +592,27 @@ fn activation_button(activation: Activation) -> Option<Button> {
         | Activation::Drag { button, .. } => Some(button),
         Activation::Wheel(_) => None,
     }
+}
+
+/// 正向修饰条件可先触发，但全释放样本仍保留普通鼠标前缀入口。
+/// 这不是Owned/Passed互斥：在台账为空而样本修饰键按住时，终键确实会抢先。
+/// 仅放行正向修饰要求与无层的单鼠标前缀；无CSA及其他终键沿原保护拒绝。
+fn sampled_terminal_preserves_plain_mouse_prefix(
+    terminal: &TriggerSpec,
+    prefix: &TriggerSpec,
+    button: Button,
+) -> bool {
+    matches!(terminal.activation, Activation::Press(Button::Mouse(_)))
+        && matches!(button, Button::Mouse(_))
+        && matches!(terminal.keyboard.matching, crate::KeyboardMatching::MouseSampled { policy, .. }
+            if policy.required != crate::ModifierRequirement::NoControlShiftAlt)
+        && prefix.keyboard.matching == crate::KeyboardMatching::Exact
+        && prefix.keyboard.prefix().is_none()
+        && prefix.held.as_slice() == [button]
+        && matches!(
+            prefix.activation,
+            Activation::Press(Button::Mouse(_)) | Activation::Wheel(_)
+        )
 }
 
 #[cfg(test)]
@@ -816,5 +841,138 @@ mod mouse_unmodified_tests {
         retained.keyboard.restore_on_tap = true;
         assert!(validate(vec![unmodified(1, 0), retained.clone()]).is_ok());
         assert!(validate(vec![retained, unmodified(1, 0)]).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod mouse_sampled_tests {
+    use super::*;
+    use crate::{
+        KeyboardMatching, KeyboardPolicy, ModifierRequirement, MouseModifierPolicy, WheelDirection,
+    };
+
+    fn rule(id: u64, required: ModifierRequirement) -> TriggerSpec {
+        TriggerSpec {
+            id,
+            held: vec![],
+            activation: Activation::Wheel(WheelDirection::Up),
+            conditions: vec![],
+            keyboard: KeyboardPolicy {
+                matching: KeyboardMatching::MouseSampled {
+                    policy: MouseModifierPolicy {
+                        required,
+                        allow_other_modifiers: required == ModifierRequirement::NoControlShiftAlt,
+                        allow_extra_passed_keys: true,
+                        allow_extra_passed_mouse: false,
+                    },
+                    priority: 0,
+                    pointer_scope_priority: true,
+                },
+                ..Default::default()
+            },
+            process_scope: Default::default(),
+            pointer_scope: Default::default(),
+            wheel: WheelPolicy::Packet,
+        }
+    }
+
+    #[test]
+    fn sampled_modifier_domains_keep_true_conflicts_and_owned_exact_disjointness() {
+        let control = rule(1, ModifierRequirement::Control);
+        assert!(
+            validate(vec![
+                control.clone(),
+                rule(2, ModifierRequirement::NoControlShiftAlt)
+            ])
+            .is_ok()
+        );
+        assert!(validate(vec![control.clone(), rule(2, ModifierRequirement::LeftAlt)]).is_ok());
+        assert_eq!(
+            validate(vec![
+                control.clone(),
+                rule(2, ModifierRequirement::LeftControl)
+            ])
+            .unwrap_err(),
+            RegistrationError::DuplicateTrigger {
+                first: 1,
+                second: 2
+            }
+        );
+        for matching in [
+            KeyboardMatching::Exact,
+            KeyboardMatching::MouseExact {
+                priority: 0,
+                pointer_scope_priority: true,
+            },
+            KeyboardMatching::MouseUnmodified {
+                priority: 0,
+                pointer_scope_priority: true,
+            },
+        ] {
+            let mut other = control.clone();
+            other.id = 2;
+            other.keyboard.matching = matching;
+            assert_eq!(
+                validate(vec![control.clone(), other]).unwrap_err(),
+                RegistrationError::DuplicateTrigger {
+                    first: 1,
+                    second: 2
+                }
+            );
+        }
+        let mut owned = control.clone();
+        owned.id = 2;
+        owned.keyboard.matching = KeyboardMatching::Exact;
+        owned.held = vec![Button::Mouse(crate::MouseButton::X1)];
+        assert!(validate(vec![control, owned]).is_ok());
+    }
+
+    #[test]
+    fn sampled_shape_and_priority_reject_invalid_fields_without_normalizing_held() {
+        let mut held = rule(1, ModifierRequirement::Control);
+        held.held.push(Button::Key(0x11));
+        assert_eq!(
+            validate(vec![held]).unwrap_err(),
+            RegistrationError::InvalidMouseMatching { id: 1 }
+        );
+        let mut repeated = rule(1, ModifierRequirement::Control);
+        repeated.keyboard.repeat = true;
+        assert_eq!(
+            validate(vec![repeated]).unwrap_err(),
+            RegistrationError::InvalidMouseMatching { id: 1 }
+        );
+        let mut high = rule(1, ModifierRequirement::Control);
+        if let KeyboardMatching::MouseSampled { priority, .. } = &mut high.keyboard.matching {
+            *priority = 512;
+        }
+        assert_eq!(
+            validate(vec![high]).unwrap_err(),
+            RegistrationError::InvalidMousePriority {
+                id: 1,
+                priority: 512
+            }
+        );
+    }
+
+    #[test]
+    fn allowing_other_snapshot_modifiers_creates_a_real_control_alt_conflict() {
+        let mut control = rule(1, ModifierRequirement::Control);
+        let mut alt = rule(2, ModifierRequirement::LeftAlt);
+        for binding in [&mut control, &mut alt] {
+            if let KeyboardMatching::MouseSampled { policy, .. } = &mut binding.keyboard.matching {
+                policy.allow_other_modifiers = true;
+            }
+        }
+        assert_eq!(
+            validate(vec![control.clone(), alt.clone()]).unwrap_err(),
+            RegistrationError::DuplicateTrigger {
+                first: 1,
+                second: 2
+            }
+        );
+        if let KeyboardMatching::MouseSampled { priority, .. } = &mut alt.keyboard.matching {
+            *priority = 1;
+        }
+        assert!(validate(vec![control, alt]).is_ok());
     }
 }

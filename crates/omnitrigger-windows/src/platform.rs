@@ -58,10 +58,17 @@ const REPLAY_TAG: usize = 0x4f4d_4e49;
 const EVENT_CAPACITY: usize = 256;
 const HOLD_POLL_MS: u64 = 25;
 const MESSAGE_BATCH: usize = 64;
+// 单次事件采样的评估预算；事件、流与取消代次仍须完全一致，不复用旧事件样本。
+const MOUSE_SNAPSHOT_MAX_AGE_MS: u32 = 16;
+static NEXT_MOUSE_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
 #[path = "replay_runtime.rs"]
 mod replay_runtime;
 use replay_runtime::{Effect as ReplayEffect, ReplayRuntime};
+
+#[cfg(test)]
+#[path = "mouse_modifier_platform_tests.rs"]
+mod mouse_modifier_platform_tests;
 
 #[path = "screen_context.rs"]
 mod screen_context;
@@ -694,6 +701,10 @@ fn relative_due_100ns(deadline_ms: u64, elapsed: Duration) -> i64 {
 struct ThreadState {
     // 所有生产变更必须经过 with_engine，不能让后续原生调用读到过期的重入快照。
     engine: Engine,
+    mouse_stream_id: Option<u64>,
+    mouse_event_serial: u64,
+    #[cfg(test)]
+    mouse_modifier_test_samples: VecDeque<Option<omnitrigger_core::MouseModifierSnapshot>>,
     /// 由 Engine 生产，绝不从 physical_held/owned_press 推断鼠标会话。
     wheel_session: Rc<Cell<WheelSessionSnapshot>>,
     events: SyncSender<BackendEvent>,
@@ -762,10 +773,24 @@ impl ThreadState {
                 .map_or("SetTimer 回退", |timer| timer.backend),
             ..ListenerDiagnostics::default()
         };
-        let engine = Engine::new(Vec::new()).expect("空绑定列表始终有效");
+        let mut engine = Engine::new(Vec::new()).expect("空绑定列表始终有效");
+        let mouse_stream_id = NEXT_MOUSE_STREAM_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .ok()
+            .filter(|&stream| {
+                engine
+                    .configure_mouse_modifier_snapshot(stream, MOUSE_SNAPSHOT_MAX_AGE_MS)
+                    .is_ok()
+            });
         let wheel_session = Rc::new(Cell::new(engine.wheel_session_snapshot()));
         Self {
             engine,
+            mouse_stream_id,
+            mouse_event_serial: 0,
+            #[cfg(test)]
+            mouse_modifier_test_samples: VecDeque::new(),
             wheel_session,
             events,
             recording: None,
@@ -1490,12 +1515,79 @@ impl ThreadState {
         self.input_at(Some(kind), metadata, None, self.now_ms())
     }
 
+    /// 系统采样在with_engine之外；只在已过面板/录制/释放收尾门禁后执行。
+    fn process_engine_input(&mut self, event: InputEvent, now_ms: u64) -> (Decision, u64) {
+        let candidate = match event.kind {
+            InputKind::Down(Button::Mouse(_)) => true,
+            InputKind::Wheel { delta, .. } => delta != 0,
+            _ => false,
+        };
+        if event.injected || !candidate || !self.engine.needs_mouse_modifier_snapshot() {
+            return (
+                self.with_engine(|engine| engine.process_at(event, now_ms)),
+                now_ms,
+            );
+        }
+        let Some(stream_id) = self.mouse_stream_id else {
+            return (
+                self.with_engine(|engine| engine.process_at(event, now_ms)),
+                now_ms,
+            );
+        };
+        let Some(serial) = self.mouse_event_serial.checked_add(1) else {
+            return (
+                self.with_engine(|engine| engine.process_at(event, now_ms)),
+                now_ms,
+            );
+        };
+        let Some(epoch) = self.engine.mouse_modifier_snapshot_epoch() else {
+            return (
+                self.with_engine(|engine| engine.process_at(event, now_ms)),
+                now_ms,
+            );
+        };
+        self.mouse_event_serial = serial;
+        #[cfg(not(test))]
+        let snapshot = crate::mouse_modifier_sampler::sample_mouse_modifiers_if(
+            stream_id,
+            serial,
+            epoch,
+            event.injected,
+            || {
+                if self.enabled && self.recording.is_none() {
+                    Ok(())
+                } else {
+                    Err("采样资格失效。".into())
+                }
+            },
+            || self.now_ms(),
+        )
+        .ok();
+        // 普通cargo test绝不读取交互按键状态；测试必须显式提供合成样本。
+        #[cfg(test)]
+        let snapshot = self.mouse_modifier_test_samples.pop_front().flatten();
+        #[cfg(not(test))]
+        let evaluated_at = self.now_ms().max(now_ms);
+        #[cfg(test)]
+        let evaluated_at = now_ms;
+        let context = omnitrigger_core::MouseModifierInput {
+            stream_id,
+            serial,
+            epoch,
+            snapshot,
+        };
+        let decision = self.with_engine(|engine| {
+            engine.process_with_mouse_snapshot_at(event, evaluated_at, context)
+        });
+        (decision, evaluated_at)
+    }
+
     fn input_at(
         &mut self,
         kind: Option<InputKind>,
         metadata: Option<KeyMetadata>,
         pointer: Option<(i32, i32)>,
-        now_ms: u64,
+        mut now_ms: u64,
     ) -> HookOutcome {
         if let Some(position) = pointer {
             self.pointer.store(position);
@@ -1580,10 +1672,14 @@ impl ThreadState {
                     ..Decision::default()
                 }
             } else {
-                self.with_engine(|engine| engine.process_at(event, now_ms))
+                let (decision, evaluated_at) = self.process_engine_input(event, now_ms);
+                now_ms = evaluated_at;
+                decision
             }
         } else {
-            self.with_engine(|engine| engine.process_at(event, now_ms))
+            let (decision, evaluated_at) = self.process_engine_input(event, now_ms);
+            now_ms = evaluated_at;
+            decision
         };
         let cancelled_by = match kind {
             InputKind::Down(_) => HoldOutcome::OtherButton,

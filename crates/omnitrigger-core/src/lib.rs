@@ -35,6 +35,7 @@
 
 mod engine;
 mod model;
+mod mouse_modifier_snapshot;
 mod process_scope;
 mod recorder;
 mod regions;
@@ -46,6 +47,11 @@ pub use model::{
     Activation, ActiveDrag, Axis, Button, Decision, DragEvent, DragPhase, InputEvent, InputKind,
     KeyboardMatching, KeyboardPolicy, MouseButton, RetainedPrefix, TriggerSpec, WheelDirection,
     WheelPolicy,
+};
+pub use mouse_modifier_snapshot::{
+    ModifierRequirement, ModifierSides, MouseCaptureOwnership, MouseContextEvent,
+    MouseModifierContext, MouseModifierGate, MouseModifierInput, MouseModifierPolicy,
+    MouseModifierSnapshot, MouseSnapshotError, ObservationOwnership, ObservedPress,
 };
 pub use process_scope::{ProcessIdentity, ProcessScope, ProcessScopeError, WindowRole};
 pub use recorder::Recorder;

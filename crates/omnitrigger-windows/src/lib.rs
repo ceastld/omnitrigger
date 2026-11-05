@@ -24,7 +24,11 @@ mod clipboard_data;
 #[cfg(windows)]
 pub use clipboard_data::read_clipboard_data;
 pub use clipboard_data::{ClipboardData, ClipboardDataError, ClipboardDataSnapshot};
+mod mouse_modifier_sampler;
 mod selection_data;
+#[cfg(windows)]
+pub use mouse_modifier_sampler::sample_mouse_modifiers_if;
+pub use mouse_modifier_sampler::MouseModifierSamplingError;
 pub use selection_data::{SelectionCopyOptions, SelectionDataError, SelectionDataSnapshot};
 
 #[cfg(windows)]
