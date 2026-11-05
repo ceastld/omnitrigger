@@ -13,6 +13,10 @@ pub const MAX_BINDINGS: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistrationError {
+    InvalidMousePriority {
+        id: u64,
+        priority: u16,
+    },
     InvalidMouseMatching {
         id: u64,
     },
@@ -119,6 +123,7 @@ pub enum RegistrationError {
 impl fmt::Display for RegistrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::InvalidMousePriority { .. } => "鼠标匹配顺序须为 0 至 511，数值越小越先匹配。",
             Self::InvalidMouseMatching { .. } => "鼠标精确观察模式仅支持鼠标按下或滚轮，held 为空或一个修饰键，不能同时配置键盘捕获层、重复或单按恢复。",
             Self::ConflictingModifierDelivery { .. } => "同一修饰键在重叠范围内同时用于鼠标观察和输入捕获，请分开其范围或统一交付策略。",
             Self::InvalidPointerProcessScope { reason, .. } => return write!(f, "指针窗口范围无效：{reason}"),
@@ -183,7 +188,15 @@ pub(super) fn validate(
     }
     let mut ids = BTreeSet::new();
     for binding in &mut bindings {
-        if binding.keyboard.matching == crate::KeyboardMatching::MouseExact
+        if let crate::KeyboardMatching::MouseExact { priority, .. } = binding.keyboard.matching
+            && usize::from(priority) >= MAX_BINDINGS
+        {
+            return Err(RegistrationError::InvalidMousePriority {
+                id: binding.id,
+                priority,
+            });
+        }
+        if binding.keyboard.matching.is_mouse_exact()
             && (binding.held.len() > 1
                 || binding
                     .held
@@ -367,8 +380,8 @@ pub(super) fn validate(
                 && regions::conditions_overlap(&left.conditions, &right.conditions)
             {
                 for (observed, captured) in [(left, right), (right, left)] {
-                    if observed.keyboard.matching == crate::KeyboardMatching::MouseExact
-                        && captured.keyboard.matching != crate::KeyboardMatching::MouseExact
+                    if observed.keyboard.matching.is_mouse_exact()
+                        && !captured.keyboard.matching.is_mouse_exact()
                         && captured
                             .held
                             .iter()
@@ -437,6 +450,8 @@ pub(super) fn validate(
             let captured_pair = left.keyboard.matching.is_captured()
                 && right.keyboard.matching.is_captured()
                 && left.keyboard.prefix() == right.keyboard.prefix();
+            let ordered_mouse_pair =
+                left.keyboard.matching.is_mouse_exact() && right.keyboard.matching.is_mouse_exact();
             if captured_pair
                 && same_button
                 && left.keyboard.matching.priority() == right.keyboard.matching.priority()
@@ -454,7 +469,7 @@ pub(super) fn validate(
                 && regions::conditions_overlap(&left.conditions, &right.conditions)
                 && left.scopes_overlap(right)
                 && left.scope_priority() == right.scope_priority()
-                && !(captured_pair
+                && !((captured_pair || ordered_mouse_pair)
                     && left.keyboard.matching.priority() != right.keyboard.matching.priority())
                 && !(left.keyboard.matching.is_captured()
                     && right.keyboard.matching.is_captured()

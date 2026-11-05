@@ -84,7 +84,31 @@ def mouse_requirements(rule):
     return result
 
 
-def mouse_trigger(rule, settings):
+def mouse_rule_priorities(rules):
+    """同一全局规则层：较高源 Priority、较具体位置、快照中的稳定顺序。
+
+    未导出 Priority 的用户规则使用声明默认值0；不包含运行时生成的内置规则。
+    """
+    enabled = [(index, rule) for index, rule in enumerate(rules) if rule.get("IsEnabled")]
+    if len(enabled) > 512:
+        raise ValueError("鼠标规则顺序超过512条上限")
+    locations = {1:1, 2:1, 4:1, 8:1,
+                 16:2, 32:2, 64:2, 128:2, 65536:2, 131072:2, 262144:2, 524288:2,
+                 48:3, 192:3, 196608:3, 786432:3, 256:4,
+                 4096:5, 8192:5, 16384:5, 32768:5,
+                 12288:6, 49152:6, 20480:6, 40960:6, 61440:7}
+    def key(item):
+        index, rule = item
+        priority = rule.get("Priority", 0)
+        if type(priority) is not int or not -(2**31) <= priority < 2**31:
+            raise ValueError("鼠标源 Priority 必须是32位整数")
+        location = rule.get("Location")
+        order = locations.get(location, 1000) if type(location) is int else 1000
+        return -priority, order, index
+    return {index: priority for priority, (index, _) in enumerate(sorted(enabled, key=key))}
+
+
+def mouse_trigger(rule, settings, *, priority=None):
     requirements = mouse_requirements(rule)
     def unavailable(gaps):
         return {"trigger":None, "trigger_gaps":sorted(set(gaps)), "source_requirements":requirements}
@@ -143,14 +167,21 @@ def mouse_trigger(rule, settings):
     if requirements["region"]["kind"] == "screen_edge":
         trigger["conditions"] = [{"kind":"pointer_region", "region":{
             "kind":"screen_boundary", "edge":requirements["region"]["edge"]}}]
-    if observed_control: trigger["keyboard"]={"matching":{"kind":"mouse_exact"}}
+    if observed_control:
+        matching = {"kind":"mouse_exact"}
+        if priority is not None:
+            if type(priority) is not int or not 0 <= priority < 512:
+                return unavailable(["mouse_rule_order_invalid"])
+            matching["priority"] = priority
+            matching["pointer_scope_priority"] = False
+        trigger["keyboard"]={"matching":matching}
     if kind in (11,12): trigger["wheel"]="packet"
     reviews = (["mouse_modifier_capture_delivery_review", "mouse_modifier_state_sampling", "mouse_other_held_keys_review"]
                if keyboard_control else ["mouse_unmodified_source_ownership_review", "mouse_virtual_control_state_review",
                                          "mouse_other_held_keys_review"] if observed_control
                else ["mouse_prefix_lifecycle_review"])
     if requirements["region"]["kind"] == "screen_edge":
-        reviews.append("mouse_region_rule_priority_review")
+        reviews.append("mouse_region_rule_priority_review" if priority is None else "mouse_builtin_rule_precedence_review")
     return {"trigger":trigger,"trigger_gaps":reviews + ["mouse_other_held_buttons_review",
         "mouse_queue_drop_delay_review", "pointer_host_identity_mapping", "pointer_context_sampling"],
         "source_requirements":requirements,

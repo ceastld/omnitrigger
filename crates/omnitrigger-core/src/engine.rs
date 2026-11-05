@@ -740,7 +740,7 @@ impl Engine {
             eligible
                 && self.candidates().any(|binding| {
                     binding.keyboard.retained_prefix.is_none()
-                        && binding.keyboard.matching != crate::KeyboardMatching::MouseExact
+                        && !binding.keyboard.matching.is_mouse_exact()
                         && binding.held.contains(&button)
                         && self.conditions_match(binding)
                         && self
@@ -903,12 +903,7 @@ impl Engine {
         }
         let direction = direction(axis, delta);
         let Some((id, policy)) = self
-            .candidates()
-            .find(|binding| {
-                binding.activation == Activation::Wheel(direction)
-                    && self.binding_held_matches(binding)
-                    && self.conditions_match(binding)
-            })
+            .selected_wheel(direction)
             .map(|binding| (binding.id, binding.wheel))
         else {
             return Decision {
@@ -1051,7 +1046,7 @@ impl Engine {
     }
 
     fn binding_held_matches(&self, binding: &TriggerSpec) -> bool {
-        if binding.keyboard.matching == crate::KeyboardMatching::MouseExact {
+        if binding.keyboard.matching.is_mouse_exact() {
             return binding.held.iter().all(|&required| {
                 self.pressed
                     .keys()
@@ -1090,7 +1085,7 @@ impl Engine {
             binding.id == id
                 && (!binding.conditions.is_empty()
                     || !binding.pointer_scope.is_global()
-                    || binding.keyboard.matching == crate::KeyboardMatching::MouseExact
+                    || binding.keyboard.matching.is_mouse_exact()
                     || binding.keyboard.prefix().is_some())
         })
     }
@@ -1100,8 +1095,7 @@ impl Engine {
             self.wheel[index] != 0
                 && owner.is_some_and(|id| {
                     self.bindings.iter().any(|binding| {
-                        binding.id == id
-                            && binding.keyboard.matching == crate::KeyboardMatching::MouseExact
+                        binding.id == id && binding.keyboard.matching.is_mouse_exact()
                     })
                 })
         })
@@ -1111,6 +1105,25 @@ impl Engine {
         self.candidates()
             .find(|binding| binding.id == id)
             .is_some_and(|binding| self.conditions_match(binding))
+    }
+
+    fn selected_wheel(&self, direction: WheelDirection) -> Option<&TriggerSpec> {
+        self.candidates().find(|binding| {
+            binding.activation == Activation::Wheel(direction)
+                && self.binding_held_matches(binding)
+                && self.conditions_match(binding)
+        })
+    }
+
+    fn observed_wheel_owner_changed(&self, id: u64) -> bool {
+        let Some(binding) = self.candidates().find(|binding| binding.id == id) else {
+            return false;
+        };
+        let Activation::Wheel(direction) = binding.activation else {
+            return false;
+        };
+        binding.keyboard.matching.is_mouse_exact()
+            && self.selected_wheel(direction).map(|candidate| candidate.id) != Some(id)
     }
 
     fn reconcile_conditions(&mut self) -> Decision {
@@ -1174,7 +1187,10 @@ impl Engine {
                 .extend(self.finish_drag(DragPhase::Cancelled));
         }
         let lost_wheel = self.wheel_owner.iter().enumerate().any(|(index, owner)| {
-            self.wheel[index] != 0 && owner.is_some_and(|id| !self.binding_conditions_match(id))
+            self.wheel[index] != 0
+                && owner.is_some_and(|id| {
+                    !self.binding_conditions_match(id) || self.observed_wheel_owner_changed(id)
+                })
         });
         let lost_prefix = self.hold.is_none()
             && self.drag.is_none()

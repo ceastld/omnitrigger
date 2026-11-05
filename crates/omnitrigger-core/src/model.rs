@@ -103,21 +103,20 @@ impl TriggerSpec {
     pub(crate) fn accepts_held_button(&self, button: Button) -> bool {
         self.held.iter().any(|&held| {
             held == button
-                || (self.keyboard.matching == KeyboardMatching::MouseExact
-                    && modifier_matches(held, button))
+                || (self.keyboard.matching.is_mouse_exact() && modifier_matches(held, button))
         })
     }
 
     pub(crate) fn held_sets_overlap(&self, other: &Self) -> bool {
         self.held == other.held
-            || (self.keyboard.matching == KeyboardMatching::MouseExact
+            || (self.keyboard.matching.is_mouse_exact()
                 && self.held.len() == 1
                 && !other.held.is_empty()
                 && other
                     .held
                     .iter()
                     .all(|&button| self.accepts_held_button(button)))
-            || (other.keyboard.matching == KeyboardMatching::MouseExact
+            || (other.keyboard.matching.is_mouse_exact()
                 && other.held.len() == 1
                 && !self.held.is_empty()
                 && self
@@ -127,7 +126,18 @@ impl TriggerSpec {
     }
 
     pub(crate) fn scope_priority(&self) -> u8 {
-        self.process_scope.priority() + self.pointer_scope.priority()
+        self.process_scope.priority()
+            + if matches!(
+                self.keyboard.matching,
+                KeyboardMatching::MouseExact {
+                    pointer_scope_priority: false,
+                    ..
+                }
+            ) {
+                0
+            } else {
+                self.pointer_scope.priority()
+            }
     }
 
     pub(crate) fn scopes_overlap(&self, other: &Self) -> bool {
@@ -203,18 +213,26 @@ pub enum KeyboardMatching {
     /// 鼠标 Press/Wheel 专用：held 为空或一个修饰键。只观察已交付的修饰键，
     /// 不捕获其按下、重复或释放；泛型 Shift/Ctrl/Alt 接受左右任一侧或两侧。
     /// 其他任何按住键（含鼠标、普通键和 Win）都排除匹配，不借用已消费的按压。
-    MouseExact,
+    /// 同应用优先级内，priority 越小越先选；重叠规则同序时仍返回注册冲突。
+    MouseExact {
+        priority: u16,
+        pointer_scope_priority: bool,
+    },
 }
 
 impl KeyboardMatching {
+    pub fn is_mouse_exact(self) -> bool {
+        matches!(self, Self::MouseExact { .. })
+    }
+
     pub fn is_captured(self) -> bool {
         matches!(self, Self::Captured { .. })
     }
 
     pub(crate) fn priority(self) -> u16 {
         match self {
-            Self::Exact | Self::MouseExact => 0,
-            Self::Captured { priority } => priority,
+            Self::Exact => 0,
+            Self::Captured { priority } | Self::MouseExact { priority, .. } => priority,
         }
     }
 }

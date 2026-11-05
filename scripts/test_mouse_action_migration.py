@@ -3,7 +3,7 @@ import json
 import unittest
 import tempfile
 from pathlib import Path
-from mouse_action_projection import mouse_trigger, mouse_requirements, settings_snapshot
+from mouse_action_projection import mouse_trigger, mouse_rule_priorities, mouse_requirements, settings_snapshot
 from plan_action_migration import build_plan, main, same_keyboard_policy
 from test_action_migration import fixture
 
@@ -21,6 +21,36 @@ def rule(kind=11, data="6|9"):
 
 
 class MouseMigrationTests(unittest.TestCase):
+    def test_mouse_order_uses_source_priority_location_and_stable_enabled_order(self):
+        rows = [dict(rule(), Location=0), dict(rule(), Location=192),
+                dict(rule(), Location=48), dict(rule(), Location=0, Priority=2),
+                dict(rule(), Location=1), dict(rule(), Location=48, IsEnabled=False)]
+        self.assertEqual(mouse_rule_priorities(rows), {3:0, 4:1, 1:2, 2:3, 0:4})
+        data=fixture();data['source']['MouseActions']=rows
+        projected = [row for row in build_plan(**data, mouse_settings=settings())['bindings'] if row['kind']=='mouse']
+        # 侧键前缀仍保持其捕获交付策略；不会为了消除冲突改为修饰键观察。
+        self.assertTrue(all('keyboard' not in row['trigger'] for row in projected if row['trigger']))
+        observed=[dict(row, ControlKey=None) for row in rows]
+        data['source']['MouseActions']=observed
+        projected=[row for row in build_plan(**data,mouse_settings=settings())['bindings'] if row['kind']=='mouse']
+        self.assertEqual([row['trigger']['keyboard']['matching']['priority'] for row in projected if row['trigger']], [4,2,3,0])
+        self.assertTrue(all(row['trigger']['keyboard']['matching']['pointer_scope_priority'] is False
+                            for row in projected if row['trigger']))
+        self.assertTrue(all(not row['equivalent_configuration_ids'] for row in projected))
+
+    def test_mouse_order_invalid_values_are_rejected_and_missing_context_stays_reviewable(self):
+        for value in (True, 1.5, '1', None, 2**31, -(2**31)-1):
+            with self.assertRaises(ValueError):mouse_rule_priorities([dict(rule(),Priority=value)])
+        with self.assertRaises(ValueError):mouse_rule_priorities([rule() for _ in range(513)])
+        for value in (True, -1, 512, '1'):
+            result=mouse_trigger(dict(rule(),ControlKey=None),settings(),priority=value)
+            self.assertIsNone(result['trigger'])
+            self.assertIn('mouse_rule_order_invalid',result['trigger_gaps'])
+        result=mouse_trigger(dict(rule(),ControlKey=None,Location=48),settings(),priority=1)
+        self.assertIn('mouse_builtin_rule_precedence_review',result['trigger_gaps'])
+        self.assertNotIn('mouse_region_rule_priority_review',result['trigger_gaps'])
+        self.assertFalse(result['source_requirements']['projection_policy']['source_equivalence'])
+
     def test_edge_requirements_are_known_without_claiming_matching_equivalence(self):
         for location, edge in ((48,'top'),(192,'bottom'),(196608,'left'),(786432,'right')):
             source = dict(rule(), ControlKey=None, Location=location)

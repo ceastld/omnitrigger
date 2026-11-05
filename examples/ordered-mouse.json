@@ -1,0 +1,28 @@
+{
+  "version": 20,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [],
+      "activation": {"kind": "wheel_up"},
+      "wheel": "packet",
+      "keyboard": {"matching": {"kind": "mouse_exact", "priority": 10}},
+      "message": "普通位置的滚轮回退",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    },
+    {
+      "id": 2,
+      "held": [],
+      "activation": {"kind": "wheel_up"},
+      "wheel": "packet",
+      "keyboard": {"matching": {"kind": "mouse_exact", "priority": 0}},
+      "conditions": [
+        {"kind": "pointer_region", "region": {"kind": "screen_boundary", "edge": "top"}}
+      ],
+      "message": "顶部单像素边界优先",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    }
+  ]
+}

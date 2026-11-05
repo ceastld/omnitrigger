@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 from action_body_projection import action_body
-from mouse_action_projection import mouse_trigger, settings_snapshot
+from mouse_action_projection import mouse_trigger, mouse_rule_priorities, settings_snapshot
 
 
 def load(path):
@@ -470,11 +470,17 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20, body
     mouse_scopes += [(scope, value.get("MouseActions") or [])
                      for scope, value in source.get("ExeSettings", {}).items()]
     for scope, rows in mouse_scopes:
+        priorities = mouse_rule_priorities(rows) if scope == "global" else {}
         for index, rule in enumerate(rows):
             if not rule.get("IsEnabled"):
                 continue
             identity = f"mouse:{scope}:{index}"
-            projection = mouse_trigger(rule, mouse_settings) if scope == "global" else {"trigger":None,"trigger_gaps":["mouse_application_profile_selection"]}
+            projection = mouse_trigger(rule, mouse_settings, priority=priorities[index]) if scope == "global" else {"trigger":None,"trigger_gaps":["mouse_application_profile_selection"]}
+            if projection["trigger"] and projection["trigger"].get("keyboard", {}).get("matching", {}).get("kind") == "mouse_exact":
+                projection["source_normalizations"].append({"kind":"mouse_rule_order", "scope":scope,
+                    "source_index":index, "priority":priorities[index], "missing_source_priority_default":0,
+                    "pointer_whitelist_is_filter_only":True,
+                    "runtime_builtin_rules_included":False})
             matching = [item for item in current["bindings"] if projection["trigger"] is not None
                         and item.get("held")==projection["trigger"]["held"]
                         and item.get("activation")==projection["trigger"]["activation"]]

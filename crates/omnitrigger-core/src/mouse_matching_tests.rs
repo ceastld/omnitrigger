@@ -25,7 +25,10 @@ fn spec(id: u64, modifier: Option<Button>, activation: Activation) -> TriggerSpe
         held: modifier.into_iter().collect(),
         activation,
         keyboard: KeyboardPolicy {
-            matching: KeyboardMatching::MouseExact,
+            matching: KeyboardMatching::MouseExact {
+                priority: 0,
+                pointer_scope_priority: true,
+            },
             ..Default::default()
         },
         wheel: WheelPolicy::Packet,
@@ -45,6 +48,209 @@ fn hit(id: u64) -> Decision {
         triggered: vec![id],
         ..Default::default()
     }
+}
+
+fn ordered(mut spec: TriggerSpec, priority: u16) -> TriggerSpec {
+    spec.keyboard.matching = KeyboardMatching::MouseExact {
+        priority,
+        pointer_scope_priority: true,
+    };
+    spec
+}
+
+fn top_boundary(mut spec: TriggerSpec) -> TriggerSpec {
+    spec.conditions = vec![TriggerCondition::PointerRegion(
+        PointerRegion::ScreenBoundary {
+            edge: ScreenEdge::Top,
+        },
+    )];
+    spec
+}
+
+#[test]
+fn ordered_mouse_rules_choose_matching_priority_independent_of_registration_order() {
+    let fallback = ordered(spec(1, None, Activation::Wheel(WheelDirection::Up)), 20);
+    let top = top_boundary(ordered(
+        spec(2, None, Activation::Wheel(WheelDirection::Up)),
+        3,
+    ));
+    for rows in [
+        vec![fallback.clone(), top.clone()],
+        vec![top.clone(), fallback.clone()],
+    ] {
+        let mut engine = Engine::new(rows).unwrap();
+        engine
+            .set_screens(vec![ScreenRect {
+                left: 0,
+                top: 0,
+                right: 100,
+                bottom: 100,
+            }])
+            .unwrap();
+        engine.pointer_moved((0, 0), 0);
+        assert_eq!(engine.process(event(wheel(1))), hit(2));
+        engine.pointer_moved((50, 50), 1);
+        assert_eq!(engine.process(event(wheel(240))), hit(1));
+        engine.pointer_moved((99, 0), 2);
+        assert_eq!(engine.process(event(wheel(120))), hit(2));
+    }
+}
+
+#[test]
+fn pointer_scope_can_filter_without_reordering_mouse_rules_and_legacy_precedence_remains() {
+    for pointer_scope_priority in [true, false] {
+        let mut top = top_boundary(ordered(scroll_spec(None), 1));
+        let mut right = ordered(spec(2, None, Activation::Wheel(WheelDirection::Up)), 2);
+        right.pointer_scope.allow = vec!["editor".into()];
+        right.conditions = vec![TriggerCondition::PointerRegion(
+            PointerRegion::ScreenBoundary {
+                edge: ScreenEdge::Right,
+            },
+        )];
+        for row in [&mut top, &mut right] {
+            let KeyboardMatching::MouseExact { priority, .. } = row.keyboard.matching else {
+                unreachable!()
+            };
+            row.keyboard.matching = KeyboardMatching::MouseExact {
+                priority,
+                pointer_scope_priority,
+            };
+        }
+        let mut engine = Engine::new(vec![right, top]).unwrap();
+        engine
+            .set_pointer_context(Some("editor.exe"), WindowRole::Application)
+            .unwrap();
+        engine
+            .set_screens(vec![ScreenRect {
+                left: 0,
+                top: 0,
+                right: 100,
+                bottom: 100,
+            }])
+            .unwrap();
+        engine.pointer_moved((99, 0), 0);
+        assert_eq!(
+            engine.process(event(wheel(120))),
+            hit(if pointer_scope_priority { 2 } else { 1 })
+        );
+        engine.pointer_moved((99, 50), 1);
+        assert_eq!(engine.process(event(wheel(120))), hit(2));
+        engine
+            .set_pointer_context(Some("reader.exe"), WindowRole::Application)
+            .unwrap();
+        assert_eq!(engine.process(event(wheel(120))), Decision::default());
+        engine.pointer_moved((99, 0), 2);
+        assert_eq!(engine.process(event(wheel(120))), hit(1));
+    }
+}
+
+#[test]
+fn mouse_order_requires_distinct_numbers_and_valid_boundaries_without_changing_state() {
+    let mut row = ordered(scroll_spec(None), 511);
+    assert!(Engine::new(vec![row.clone()]).is_ok());
+    for priority in [512, u16::MAX] {
+        row.keyboard.matching = KeyboardMatching::MouseExact {
+            priority,
+            pointer_scope_priority: true,
+        };
+        assert_eq!(
+            Engine::new(vec![row.clone()]).err().unwrap(),
+            RegistrationError::InvalidMousePriority { id: 1, priority }
+        );
+    }
+    let first = scroll_spec(None);
+    let mut second = first.clone();
+    second.id = 2;
+    assert_eq!(
+        Engine::new(vec![first.clone(), second.clone()])
+            .err()
+            .unwrap(),
+        RegistrationError::DuplicateTrigger {
+            first: 1,
+            second: 2
+        }
+    );
+    let mut engine = Engine::new(vec![first.clone()]).unwrap();
+    engine.process(event(InputKind::Down(RIGHT)));
+    assert!(engine.replace_bindings(vec![first, second]).is_err());
+    assert_eq!(
+        engine.process(event(InputKind::Up(RIGHT))),
+        Decision::default()
+    );
+    assert_eq!(engine.process(event(wheel(120))), hit(1));
+}
+
+#[test]
+fn mouse_order_does_not_override_application_priority_or_extra_held_exclusions() {
+    let global = ordered(scroll_spec(Some(CTRL)), 0);
+    let mut scoped = ordered(
+        spec(2, Some(CTRL), Activation::Wheel(WheelDirection::Up)),
+        511,
+    );
+    scoped.process_scope.allow = vec!["editor".into()];
+    let mut engine = Engine::new(vec![global, scoped]).unwrap();
+    engine.process(event(InputKind::Down(LEFT_CTRL)));
+    assert_eq!(engine.process(event(wheel(120))), Decision::default());
+    engine.set_foreground_process(Some("editor.exe")).unwrap();
+    assert_eq!(engine.process(event(wheel(120))), hit(2));
+    engine.process(event(InputKind::Down(Button::Key(0x41))));
+    assert_eq!(engine.process(event(wheel(120))), Decision::default());
+    engine.process(event(InputKind::Up(Button::Key(0x41))));
+    engine.set_foreground_process(Some("reader.exe")).unwrap();
+    assert_eq!(engine.process(event(wheel(120))), hit(1));
+}
+
+#[test]
+fn ordered_mouse_press_keeps_its_release_and_never_retriggers_after_region_change() {
+    let mut fallback = ordered(spec(1, None, Activation::Press(RIGHT)), 7);
+    fallback.wheel = WheelPolicy::Notch;
+    let mut top = top_boundary(ordered(spec(2, None, Activation::Press(RIGHT)), 1));
+    top.wheel = WheelPolicy::Notch;
+    let mut engine = Engine::new(vec![fallback, top]).unwrap();
+    engine
+        .set_screens(vec![ScreenRect {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        }])
+        .unwrap();
+    engine.pointer_moved((0, 0), 0);
+    assert_eq!(engine.process(event(InputKind::Down(RIGHT))), hit(2));
+    engine.pointer_moved((50, 50), 1);
+    assert_eq!(engine.process(event(InputKind::Down(RIGHT))), consumed());
+    assert_eq!(engine.process(event(InputKind::Up(RIGHT))), consumed());
+    assert_eq!(engine.process(event(InputKind::Down(RIGHT))), hit(1));
+    assert_eq!(engine.cancel(), Decision::default());
+    assert_eq!(engine.process(event(InputKind::Up(RIGHT))), consumed());
+}
+
+#[test]
+fn ordered_mouse_wheel_replays_old_tail_before_a_higher_priority_region_takes_over() {
+    let mut fallback = ordered(scroll_spec(None), 7);
+    fallback.wheel = WheelPolicy::Notch;
+    let mut top = top_boundary(ordered(
+        spec(2, None, Activation::Wheel(WheelDirection::Up)),
+        1,
+    ));
+    top.wheel = WheelPolicy::Notch;
+    let mut engine = Engine::new(vec![fallback, top]).unwrap();
+    engine
+        .set_screens(vec![ScreenRect {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        }])
+        .unwrap();
+    engine.pointer_moved((50, 50), 0);
+    assert_eq!(engine.process(event(wheel(60))), consumed());
+    assert_eq!(engine.pointer_moved((0, 0), 1).replay, [wheel(60)]);
+    assert_eq!(engine.process(event(wheel(60))), consumed());
+    assert_eq!(engine.process(event(wheel(60))), hit(2));
+    assert_eq!(engine.process(event(wheel(40))), consumed());
+    assert_eq!(engine.pointer_moved((50, 50), 2).replay, [wheel(40)]);
+    assert_eq!(engine.process(event(wheel(120))), hit(1));
 }
 
 fn consumed() -> Decision {

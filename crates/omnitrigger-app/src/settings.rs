@@ -22,7 +22,7 @@ use crate::wheels::WheelActionRef;
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
-const CONFIG_VERSION: u32 = 19;
+const CONFIG_VERSION: u32 = 20;
 
 pub fn use_path(path: PathBuf) -> Result<(), String> {
     CUSTOM_PATH.set(path).map_err(|_| "配置路径已设置。".into())
@@ -173,7 +173,15 @@ struct RetainedPrefixDto {
 enum KeyboardMatchingDto {
     #[default]
     Exact,
-    MouseExact,
+    MouseExact {
+        #[serde(default, skip_serializing_if = "is_zero_priority")]
+        priority: u16,
+        #[serde(
+            default = "default_pointer_priority",
+            skip_serializing_if = "has_pointer_priority"
+        )]
+        pointer_scope_priority: bool,
+    },
     Captured {
         priority: u16,
     },
@@ -183,11 +191,26 @@ impl KeyboardMatchingDto {
         matches!(self, Self::Exact)
     }
 }
+fn is_zero_priority(priority: &u16) -> bool {
+    *priority == 0
+}
+fn default_pointer_priority() -> bool {
+    true
+}
+fn has_pointer_priority(value: &bool) -> bool {
+    *value
+}
 impl From<KeyboardMatching> for KeyboardMatchingDto {
     fn from(value: KeyboardMatching) -> Self {
         match value {
             KeyboardMatching::Exact => Self::Exact,
-            KeyboardMatching::MouseExact => Self::MouseExact,
+            KeyboardMatching::MouseExact {
+                priority,
+                pointer_scope_priority,
+            } => Self::MouseExact {
+                priority,
+                pointer_scope_priority,
+            },
             KeyboardMatching::Captured { priority } => Self::Captured { priority },
         }
     }
@@ -196,7 +219,13 @@ impl From<KeyboardMatchingDto> for KeyboardMatching {
     fn from(value: KeyboardMatchingDto) -> Self {
         match value {
             KeyboardMatchingDto::Exact => Self::Exact,
-            KeyboardMatchingDto::MouseExact => Self::MouseExact,
+            KeyboardMatchingDto::MouseExact {
+                priority,
+                pointer_scope_priority,
+            } => Self::MouseExact {
+                priority,
+                pointer_scope_priority,
+            },
             KeyboardMatchingDto::Captured { priority } => Self::Captured { priority },
         }
     }
@@ -411,7 +440,24 @@ impl BindingDto {
         {
             return Err("显示器单像素边界需要版本 19 配置。".into());
         }
-        if version < 18 && matches!(self.keyboard.matching, KeyboardMatchingDto::MouseExact) {
+        if version < 20
+            && matches!(
+                self.keyboard.matching,
+                KeyboardMatchingDto::MouseExact { priority: 1.., .. }
+                    | KeyboardMatchingDto::MouseExact {
+                        pointer_scope_priority: false,
+                        ..
+                    }
+            )
+        {
+            return Err("鼠标匹配顺序需要版本 20 配置。".into());
+        }
+        if version < 18
+            && matches!(
+                self.keyboard.matching,
+                KeyboardMatchingDto::MouseExact { .. }
+            )
+        {
             return Err("鼠标修饰键观察匹配需要版本 18 配置。".into());
         }
         if version < 17 && !self.pointer_scope.is_global() {
@@ -1076,7 +1122,10 @@ mod tests {
         let bindings = decode(&doc.to_string()).unwrap();
         assert_eq!(
             bindings[0].spec.keyboard.matching,
-            KeyboardMatching::MouseExact
+            KeyboardMatching::MouseExact {
+                priority: 0,
+                pointer_scope_priority: true
+            }
         );
         assert_eq!(bindings[0].spec.held, vec![Button::Key(17)]);
         let saved = encode(&bindings);
@@ -1494,6 +1543,26 @@ mod tests {
                     )
                     .unwrap();
             }
+            if let Some(screens) = case.get("screens") {
+                let rectangles: Vec<[i32; 4]> = serde_json::from_value(screens.clone()).unwrap();
+                engine
+                    .set_screens(
+                        rectangles
+                            .into_iter()
+                            .map(|[left, top, right, bottom]| ScreenRect {
+                                left,
+                                top,
+                                right,
+                                bottom,
+                            })
+                            .collect(),
+                    )
+                    .unwrap();
+            }
+            if let Some(point) = case.get("point") {
+                let point: (i32, i32) = serde_json::from_value(point.clone()).unwrap();
+                engine.pointer_moved(point, 0);
+            }
             let steps = case["steps"].as_array().unwrap();
             assert!(!steps.is_empty() && steps.len() <= 32);
             for (step_index, step) in steps.iter().enumerate() {
@@ -1631,6 +1700,34 @@ mod tests {
         let document: serde_json::Value = serde_json::from_reader(file).unwrap();
         let (rules, cases) = replay_document(&document);
         println!("捕获集合回放通过：{rules} 规则、{cases} 组序列；没有安装 Hook 或执行动作。");
+    }
+
+    #[test]
+    fn ordered_mouse_example_replays_boundary_and_fallback() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../../../examples/ordered-mouse.json")).unwrap();
+        let cases: Vec<_> = [((0, 0), 2), ((99, 0), 2), ((50, 50), 1)].into_iter().map(|(point,id)| {
+            json!({"reset":true,"process":"editor.exe","role":"application",
+                "screens":[[0,0,100,100]],"point":point,
+                "steps":[{"event":{"kind":"wheel","axis":"vertical","delta":120},"triggered":[id],"consume":true}]})
+        }).collect();
+        assert_eq!(
+            replay_document(&json!({"config":config,"cases":cases})),
+            (2, 3)
+        );
+    }
+
+    #[test]
+    #[ignore = "读取显式指定的本机鼠标几何见证，仅执行纯核心，不安装 Hook 或运行动作"]
+    fn mouse_matching_replays_external_geometry_witnesses() {
+        let path = std::env::var_os("OMNITRIGGER_MOUSE_REPLAY").expect("需要指定鼠标回放样本");
+        let file = std::fs::File::open(path).unwrap();
+        assert!(file.metadata().unwrap().len() <= 32 * 1024 * 1024);
+        let document: serde_json::Value = serde_json::from_reader(file).unwrap();
+        let (rules, cases) = replay_document(&document);
+        println!(
+            "鼠标几何与顺序回放通过：{rules} 规则、{cases} 组序列；没有安装 Hook 或执行动作。"
+        );
     }
 
     #[test]
@@ -2368,6 +2465,67 @@ mod tests {
     }
 
     #[test]
+    fn ordered_mouse_matching_round_trip_requires_v20_and_preserves_legacy_zero() {
+        let mut document = json!({"version":20,"bindings":[{
+            "id":1,"held":[],"activation":{"kind":"wheel_up"},"enabled":false,"message":"顺序测试",
+            "keyboard":{"matching":{"kind":"mouse_exact","priority":511}},
+            "action":{"kind":"notification"}
+        }]});
+        let decoded = decode(&document.to_string()).unwrap();
+        assert_eq!(
+            decoded[0].spec.keyboard.matching,
+            KeyboardMatching::MouseExact {
+                priority: 511,
+                pointer_scope_priority: true
+            }
+        );
+        assert_eq!(decode(&encode(&decoded)).unwrap(), decoded);
+        for version in 18..20 {
+            document["version"] = version.into();
+            assert_eq!(
+                decode(&document.to_string()).unwrap_err(),
+                "鼠标匹配顺序需要版本 20 配置。"
+            );
+        }
+        document["version"] = 20.into();
+        for invalid in [json!(512), json!(-1), json!(65536), json!(true), json!(1.5)] {
+            document["bindings"][0]["keyboard"]["matching"]["priority"] = invalid;
+            assert!(decode(&document.to_string()).is_err());
+        }
+        document["version"] = 18.into();
+        document["bindings"][0]["keyboard"]["matching"] = json!({"kind":"mouse_exact"});
+        let legacy = decode(&document.to_string()).unwrap();
+        assert_eq!(
+            legacy[0].spec.keyboard.matching,
+            KeyboardMatching::MouseExact {
+                priority: 0,
+                pointer_scope_priority: true
+            }
+        );
+        let saved: serde_json::Value = serde_json::from_str(&encode(&legacy)).unwrap();
+        assert_eq!(
+            saved["bindings"][0]["keyboard"]["matching"],
+            json!({"kind":"mouse_exact"})
+        );
+        document["version"] = 20.into();
+        document["bindings"][0]["keyboard"]["matching"]["pointer_scope_priority"] = false.into();
+        let filtered = decode(&document.to_string()).unwrap();
+        assert_eq!(
+            filtered[0].spec.keyboard.matching,
+            KeyboardMatching::MouseExact {
+                priority: 0,
+                pointer_scope_priority: false
+            }
+        );
+        assert_eq!(decode(&encode(&filtered)).unwrap(), filtered);
+        document["version"] = 19.into();
+        assert_eq!(
+            decode(&document.to_string()).unwrap_err(),
+            "鼠标匹配顺序需要版本 20 配置。"
+        );
+    }
+
+    #[test]
     fn screen_boundaries_round_trip_and_require_version_nineteen() {
         for edge in [
             ScreenEdge::Top,
@@ -2385,7 +2543,7 @@ mod tests {
             let encoded = encode(&expected);
             assert_eq!(decode(&encoded).unwrap(), expected);
             let mut document: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-            assert_eq!(document["version"], 19);
+            assert_eq!(document["version"], CONFIG_VERSION);
             assert_eq!(
                 document["bindings"][0]["conditions"][0]["region"]["kind"],
                 "screen_boundary"

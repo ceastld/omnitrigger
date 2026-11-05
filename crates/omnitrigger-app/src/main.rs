@@ -3558,9 +3558,7 @@ impl Workspace {
                         "专用层"
                     } else if binding.spec.keyboard.retained_prefix.is_some() {
                         "保留原功能层"
-                    } else if binding.spec.keyboard.matching
-                        == omnitrigger_core::KeyboardMatching::MouseExact
-                    {
+                    } else if binding.spec.keyboard.matching.is_mouse_exact() {
                         "鼠标修饰键观察"
                     } else {
                         ""
@@ -3926,12 +3924,21 @@ impl Workspace {
                     settings::process_scope_label(&spec.process_scope)
                 )))
             })
-            .when(spec.keyboard.matching == omnitrigger_core::KeyboardMatching::MouseExact, |element| {
+            .when(spec.keyboard.matching.is_mouse_exact(), |element| {
                 element.child(caption(if spec.held.is_empty() {
                     "鼠标精确观察：有任意按键或鼠标键按住时不触发。"
                 } else {
                     "鼠标精确观察：修饰键照常交给应用；泛型 Ctrl/Shift/Alt 接受左右任一侧或双侧，其他按住键会排除匹配。"
                 }))
+            })
+            .when_some(match spec.keyboard.matching {
+                omnitrigger_core::KeyboardMatching::MouseExact { priority, .. } => Some(priority),
+                _ => None,
+            }, |element, priority| {
+                element.child(caption(format!("鼠标匹配顺序：{priority}（同应用优先级内，数值越小越先；配置文件中设置）。")))
+            })
+            .when(matches!(spec.keyboard.matching, omnitrigger_core::KeyboardMatching::MouseExact { pointer_scope_priority: false, .. }), |element| {
+                element.child(caption("指针窗口范围仅作过滤，不提升其匹配优先级。"))
             })
             .when_some(spec.keyboard.dedicated_prefix, |element, button| {
                 let name = theme::caps_for_buttons(&[button])[0].label.clone();
