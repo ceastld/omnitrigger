@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noEmit": true,
+    "target": "ESNext",
+    "lib": [
+      "ESNext",
+      "DOM"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": []
+  },
+  "files": [
+    "default-new-tab.mjs",
+    "default-new-tab-script.mjs",
+    "workflows.mjs",
+    "sdk/script-types.d.ts"
+  ]
+}

@@ -1,6 +1,6 @@
 # 常用浏览器工作流
 
-本动作包用已有 `ctx.browser.profiles()` 和 `ctx.browser.call()` 组合五个 Node 动作。需要 Node、已安装并连接的浏览器连接器，以及 Chrome 对应权限。将整个目录放入所选配置同级 `actions/browser-workflows`，重新加载应用后可在动作库设置触发。开发入口执行 `omnitrigger.exe --run-action <调用 JSON 路径>`。先修改 `call.json` 内的示例配置标识和窗口 ID；其中占位值不能直接使用。
+本动作包用已有 `ctx.browser.profiles()` 和 `ctx.browser.call()` 组合五个 Node 动作和一个同步轻量入口。Node 入口需要 Node，同步入口需要已安装的 Boa 或 QuickJS 宿主；两者都需要已安装并连接的浏览器连接器，以及 Chrome 对应权限。将整个目录放入所选配置同级 `actions/browser-workflows`，重新加载应用后可在动作库设置触发。开发入口执行 `omnitrigger.exe --run-action <调用 JSON 路径>`。先修改 `call.json` 内的示例配置标识和窗口 ID；其中占位值不能直接使用。
 
 本包没有新增依赖。离线检查在仓库根运行：
 
@@ -15,6 +15,7 @@ node --test tests/browser_workflows.test.mjs
 | 动作 ID | 必填输入 | 可选输入 | 行为 |
 | --- | --- | --- | --- |
 | `create-default-tab` | `profile`、`windowId` | `activate`、`focusWindow` | 在指定普通窗口中新建浏览器默认标签页，不传入 URL |
+| `create-default-tab-script` | `profile`、`windowId` | `activate`、`focusWindow` | 同一完整业务的同步轻量入口，无需 Node |
 | `open-url` | `windowId`、`url` | `tabId`、`activate`、`focusWindow` | 在指定普通窗口中按网址复用；无匹配才新建 |
 | `duplicate-tab` | `windowId`、`tabId` | `focusWindow` | 复查源标签仍在指定窗口，再按明确 ID 复制 |
 | `restore-session` | `sessionId`、`sessionKind` | 无 | 从最近关闭列表核对 ID 和类型，再恢复该会话 |
@@ -105,3 +106,12 @@ URL 仅支持不含用户名、密码的完整 HTTP/HTTPS 地址，用标准 `UR
 查询、核对和修改不是 Chrome 原子事务：复查可发现期间已发生的变化，但不能消除紧接着的移动、导航或会话变化。源标签或窗口发生变化后停止，不用最活跃标签代替。
 
 API 语义依据：[Chrome Tabs API](https://developer.chrome.com/docs/extensions/reference/api/tabs)、[Windows API](https://developer.chrome.com/docs/extensions/reference/api/windows)、[Sessions API](https://developer.chrome.com/docs/extensions/reference/api/sessions)。
+
+
+## 同步轻量默认新标签
+
+安装既有 Boa 或 QuickJS 轻量宿主后，可使用新增 `create-default-tab-script`（runtime 为 `script`、具名同步 `main(ctx)`），不需要 Node。原 `create-default-tab` 的 Node 入口与动作版本1保持原身份，两种入口共用同一组默认新标签业务步骤。
+
+`default-new-tab-script-call.json` 提供调用模板，需要明确替换 profile/windowId；默认后台示例使用 `activate:false`、`focusWindow:false`。参数校验、首次API调用前的输入快照、profile/普通窗口检查、默认页省略url、创建回执及partial/unknown语义与Node入口一致。创建或聚焦的派发前取消按宿主effectState处理；已经确认创建后再取消或聚焦失败会保留partial及明确目标，不自动重试或补偿关闭标签。
+
+同步入口返回JSON，不返回Promise；宿主进程被外层取消或强停时，仍由既有ActionService管理终态，不能保证脚本有机会返回回执。脚本内部不查询前台、剪贴板、URL或活动标签。

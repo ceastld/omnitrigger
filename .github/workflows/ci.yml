@@ -162,7 +162,9 @@ jobs:
       - name: 验证常用动作和浏览器工作流
         shell: pwsh
         run: |
-          node --test tests/browser_workflows.test.mjs tests/browser_default_tab.test.mjs tests/notification_action_contract.test.mjs examples/actions/common-desktop/recipes.test.mjs examples/actions/common-search/recipes.test.mjs examples/actions/script-choice/contract.test.mjs
+          node --test tests/browser_workflows.test.mjs tests/browser_default_tab.test.mjs tests/browser_default_tab_sync.test.mjs tests/notification_action_contract.test.mjs examples/actions/common-desktop/recipes.test.mjs examples/actions/common-search/recipes.test.mjs examples/actions/script-choice/contract.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p examples/actions/browser-workflows/jsconfig.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/ui_notify_api.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

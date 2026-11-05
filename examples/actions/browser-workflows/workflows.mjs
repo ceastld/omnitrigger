@@ -1,6 +1,7 @@
 // 此模块只组合既有 ctx.browser API；不读前台窗口、剪贴板或隐含的活动标签。
 const COMMON = ['profile', 'timeoutMs'];
 const OPEN = ['windowId', 'tabId', 'activate', 'focusWindow'];
+/** @type {Record<string,string[]>} */
 const FIELDS = {
   'create-default-tab': [...COMMON, 'windowId', 'activate', 'focusWindow'],
   'open-url': [...COMMON, ...OPEN, 'url'],
@@ -9,14 +10,18 @@ const FIELDS = {
   'restore-session': [...COMMON, 'sessionId', 'sessionKind'],
 };
 
+/** @param {string} code @param {string} message @param {string} [method] @param {string[]} [requiredPermissions] @returns {never} */
 function fail(code, message, method = 'browser.workflow', requiredPermissions) {
   throw Object.assign(new Error(message), { code, method, effectState: 'not_started',
     ...(requiredPermissions ? { requiredPermissions } : {}) });
 }
+/** @param {any} value @returns {value is number} */
 function id(value) { return Number.isSafeInteger(value) && value >= 0; }
+/** @param {unknown} value @returns {value is string} */
 function text(value, max = 128) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
 }
+/** @param {unknown} value */
 function canonicalUrl(value, response = false) {
   try {
     if (!text(value, 16384)) throw new Error();
@@ -27,6 +32,7 @@ function canonicalUrl(value, response = false) {
     fail(response ? 'unsupported_url' : 'invalid_input', '网址需要不含凭据的完整 HTTP 或 HTTPS URL。');
   }
 }
+/** @param {any} input @param {string} operation */
 function validate(input, operation) {
   if (!FIELDS[operation] || !input || typeof input !== 'object' || Array.isArray(input)
       || Object.keys(input).some(key => !FIELDS[operation].includes(key))) {
@@ -58,8 +64,8 @@ function validate(input, operation) {
   }
 }
 
-async function selectProfile(browser, input) {
-  const profiles = await browser.profiles({ timeoutMs: input.timeoutMs ?? 10000 });
+/** @param {unknown} profiles @param {any} input @returns {string} */
+function selectedProfile(profiles, input) {
   if (!Array.isArray(profiles) || profiles.some(p => !p || !text(p.browser_instance_id))
       || new Set(profiles.map(p => p.browser_instance_id)).size !== profiles.length) {
     fail('invalid_response', '浏览器配置列表缺少唯一有效标识。', 'browser.profiles');
@@ -73,6 +79,13 @@ async function selectProfile(browser, input) {
   return profiles[0].browser_instance_id;
 }
 
+/** @param {import('./sdk/api').BrowserApi} browser @param {any} input */
+async function selectProfile(browser, input) {
+  const profiles = await browser.profiles({ timeoutMs: input.timeoutMs ?? 10000 });
+  return selectedProfile(profiles, input);
+}
+
+/** @param {any} tab @param {number} [expectedWindow] @param {number} [expectedTab] */
 function tabIdentity(tab, expectedWindow, expectedTab) {
   if (!tab || !id(tab.id) || !id(tab.windowId)) fail('invalid_response', '标签回执缺少明确 ID。');
   if ((expectedWindow !== undefined && tab.windowId !== expectedWindow)
@@ -81,6 +94,7 @@ function tabIdentity(tab, expectedWindow, expectedTab) {
   }
   return { tabId: tab.id, windowId: tab.windowId };
 }
+/** @param {any} tab */
 function tabUrl(tab) {
   // 导航中的 pendingUrl 优先，避免复用正在离开目标网页的标签。
   const url = tab.pendingUrl ?? tab.url;
@@ -90,20 +104,114 @@ function tabUrl(tab) {
   try { return new URL(url).href; } catch { fail('invalid_response', '标签网址格式无效。', 'tabs.query'); }
 }
 
-/** @param {import('../../../crates/omnitrigger-actions/runtime/api').ActionContext} ctx */
+
+/** @param {any} receipt @param {boolean} attemptedMutation @param {string} currentMethod @param {any} error @returns {DefaultTabReceipt} */
+function workflowFailure(receipt, attemptedMutation, currentMethod, error) {
+  if (!attemptedMutation) throw error;
+  const steps = receipt.steps;
+  // 宿主异常仅保留固定字段；用输出回执保存已经确认的步骤与目标身份。
+  // 未确认副作用绝不重试；不以补偿关闭标签掩盖部分成功。
+  const effect = error?.effectState ?? 'unknown';
+  receipt.status = steps.length ? 'partial' : (effect === 'not_started' ? 'failed' : 'unknown');
+  receipt.error = {
+    code: typeof error?.code === 'string' ? error.code : 'browser_workflow_failed',
+    method: currentMethod,
+    effect_state: steps.length && effect === 'not_started' ? 'partial' : effect,
+    ...(Array.isArray(error?.requiredPermissions) ? { required_permissions: error.requiredPermissions } : {}),
+  };
+  return receipt;
+}
+
+/** @typedef {{method:string,args?:unknown[],options:{profile?:string,timeoutMs:number}}} DefaultTabRequest */
+/** @typedef {{method:string,windowId?:number,tabId?:number}} DefaultTabStep */
+/** @typedef {{status:string,profile:string,operation:string,steps:DefaultTabStep[],addressBarRequested?:boolean,
+ * disposition?:string,target?:{tabId:number,windowId:number},error?:{code:string,method:string,effect_state:string,required_permissions?:string[]}}} DefaultTabReceipt */
+// 只为默认新标签动作共享有序业务步骤；两种驱动不解释第二套参数/回执规则。
+/** @param {any} rawInput @returns {Generator<DefaultTabRequest,DefaultTabReceipt,any>} */
+function* defaultTabSteps(rawInput) {
+  const input = Object.freeze({ ...rawInput });
+  validate(input, 'create-default-tab');
+  const profile = selectedProfile(yield { method:'browser.profiles', options:{timeoutMs:input.timeoutMs ?? 10000} }, input);
+  /** @type {DefaultTabStep[]} */
+  const steps = [];
+  /** @type {DefaultTabReceipt} */
+  const receipt = { status:'completed', profile, operation:'create-default-tab', steps, addressBarRequested:false };
+  let attemptedMutation = false;
+  let currentMethod = 'browser.workflow';
+  try {
+    currentMethod = 'windows.get';
+    const window = yield { method:currentMethod, args:[input.windowId], options:{profile,timeoutMs:input.timeoutMs ?? 10000} };
+    if (!window || window.id !== input.windowId || window.type !== 'normal') {
+      fail('target_changed', '指定普通浏览器窗口不可用。', 'windows.get');
+    }
+    currentMethod = 'tabs.create';
+    attemptedMutation = true;
+    // url始终省略，由浏览器选择默认页；失败/未知均不自动重派。
+    const created = yield { method:currentMethod, args:[{windowId:input.windowId,active:input.activate !== false}], options:{profile,timeoutMs:input.timeoutMs ?? 10000} };
+    steps.push({method:currentMethod,windowId:input.windowId});
+    const identity = tabIdentity(created);
+    Object.assign(steps[steps.length - 1], identity);
+    tabIdentity(created, input.windowId);
+    Object.assign(receipt, {disposition:'created',target:identity});
+    if (input.focusWindow === true) {
+      currentMethod = 'windows.update';
+      attemptedMutation = true;
+      yield { method:currentMethod, args:[input.windowId,{focused:true}], options:{profile,timeoutMs:input.timeoutMs ?? 10000} };
+      steps.push({method:currentMethod,windowId:input.windowId});
+    }
+    return receipt;
+  } catch (error) {
+    return workflowFailure(receipt, attemptedMutation, currentMethod, error);
+  }
+}
+/** @param {ScriptContext['browser']|import('./sdk/api').BrowserApi} browser @param {DefaultTabRequest} request */
+function invokeDefaultTab(browser, request) {
+  return request.method === 'browser.profiles' ? browser.profiles(request.options)
+    : browser.call(request.method, request.args, request.options);
+}
+/** @param {Pick<import('./sdk/api').ActionContext,'input'|'browser'>} ctx @returns {Promise<DefaultTabReceipt>} */
+async function runDefaultTabAsync(ctx) {
+  const flow = defaultTabSteps(ctx.input);
+  let step = flow.next();
+  while (!step.done) {
+    let value;
+    try { value = await invokeDefaultTab(ctx.browser, step.value); }
+    catch (error) { step = flow.throw(error); continue; }
+    step = flow.next(value);
+  }
+  return step.value;
+}
+/** @param {Pick<ScriptContext,'input'|'browser'>} ctx @returns {DefaultTabReceipt} */
+export function runDefaultTabSync(ctx) {
+  const flow = defaultTabSteps(ctx.input);
+  let step = flow.next();
+  while (!step.done) {
+    let value;
+    try { value = invokeDefaultTab(ctx.browser, step.value); }
+    catch (error) { step = flow.throw(error); continue; }
+    step = flow.next(value);
+  }
+  return step.value;
+}
+
+/** @param {import('./sdk/api').ActionContext} ctx @param {string} operation */
 export async function runWorkflow(ctx, operation) {
-  const input = operation === 'create-default-tab' ? Object.freeze({ ...ctx.input }) : ctx.input;
+  if (operation === 'create-default-tab') return runDefaultTabAsync(ctx);
+  const input = /** @type {any} */ (ctx.input);
   validate(input, operation);
   const profile = await selectProfile(ctx.browser, input);
+  /** @type {any[]} */
   const steps = [];
   let attemptedMutation = false;
   let currentMethod = 'browser.workflow';
+  /** @type {Record<string,any>} */
   const receipt = { status: 'completed', profile, operation, steps };
-  if (operation === 'create-default-tab') receipt.addressBarRequested = false;
+  /** @param {string} method @param {unknown[]} args @returns {Promise<any>} */
   const call = async (method, args) => {
     currentMethod = method;
     return ctx.browser.call(method, args, { profile, timeoutMs: input.timeoutMs ?? 10000 });
   };
+  /** @param {string} method @param {unknown[]} args @param {Record<string,unknown>} describe */
   const mutate = async (method, args, describe) => {
     attemptedMutation = true;
     const result = await call(method, args);
@@ -111,9 +219,11 @@ export async function runWorkflow(ctx, operation) {
     steps.push({ method, ...describe });
     return result;
   };
+  /** @param {number} windowId */
   const focus = async windowId => {
     if (input.focusWindow === true) await mutate('windows.update', [windowId, { focused: true }], { windowId });
   };
+  /** @param {string} url */
   const open = async url => {
     const window = await call('windows.get', [input.windowId]);
     if (!window || window.id !== input.windowId || window.type !== 'normal') {
@@ -153,19 +263,7 @@ export async function runWorkflow(ctx, operation) {
     await focus(input.windowId);
   };
   try {
-    if (operation === 'create-default-tab') {
-      const window = await call('windows.get', [input.windowId]);
-      if (!window || window.id !== input.windowId || window.type !== 'normal') {
-        fail('target_changed', '指定普通浏览器窗口不可用。', 'windows.get');
-      }
-      // url刻意省略：由浏览器选择默认新标签页，不开放内部URL白名单。
-      const created = await mutate('tabs.create', [{ windowId: input.windowId, active: input.activate !== false }], { windowId: input.windowId });
-      const identity = tabIdentity(created);
-      Object.assign(steps[steps.length - 1], identity);
-      tabIdentity(created, input.windowId);
-      Object.assign(receipt, { disposition: 'created', target: identity });
-      await focus(input.windowId);
-    } else if (operation === 'open-url') {
+    if (operation === 'open-url') {
       await open(canonicalUrl(input.url));
     } else if (operation === 'open-bookmark') {
       const results = await call('bookmarks.search', [{ query: input.query }]);
@@ -201,17 +299,6 @@ export async function runWorkflow(ctx, operation) {
     }
     return receipt;
   } catch (error) {
-    if (!attemptedMutation) throw error;
-    // 宿主异常仅保留固定字段；用输出回执保存已经确认的步骤与目标身份。
-    // 未确认副作用绝不重试；不以补偿关闭标签掩盖部分成功。
-    const effect = error?.effectState ?? 'unknown';
-    receipt.status = steps.length ? 'partial' : (effect === 'not_started' ? 'failed' : 'unknown');
-    receipt.error = {
-      code: typeof error?.code === 'string' ? error.code : 'browser_workflow_failed',
-      method: currentMethod,
-      effect_state: steps.length && effect === 'not_started' ? 'partial' : effect,
-      ...(Array.isArray(error?.requiredPermissions) ? { required_permissions: error.requiredPermissions } : {}),
-    };
-    return receipt;
+    return workflowFailure(receipt, attemptedMutation, currentMethod, error);
   }
 }
