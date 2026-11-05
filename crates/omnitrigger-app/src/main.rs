@@ -3570,6 +3570,8 @@ impl Workspace {
                         "专用层"
                     } else if binding.spec.keyboard.retained_prefix.is_some() {
                         "保留原功能层"
+                    } else if binding.spec.keyboard.matching.is_mouse_unmodified() {
+                        "鼠标无 Ctrl/Shift/Alt 观察"
                     } else if binding.spec.keyboard.matching.is_mouse_exact() {
                         "鼠标修饰键观察"
                     } else if binding.spec.keyboard.matching.is_mouse_captured_leader() {
@@ -3945,16 +3947,22 @@ impl Workspace {
                     "鼠标精确观察：修饰键照常交给应用；泛型 Ctrl/Shift/Alt 接受左右任一侧或双侧，其他按住键会排除匹配。"
                 }))
             })
-            .when_some(match spec.keyboard.matching {
-                omnitrigger_core::KeyboardMatching::MouseExact { priority, .. }
-                | omnitrigger_core::KeyboardMatching::MouseCapturedLeader { priority, .. } => Some(priority),
-                _ => None,
-            }, |element, priority| {
-                element.child(caption(format!("鼠标匹配顺序：{priority}（同应用优先级内，数值越小越先；配置文件中设置）。")))
+            .when(spec.keyboard.matching.is_mouse_unmodified(), |element| {
+                element.child(caption("鼠标无控制键观察：已透传的普通键、Win 键或额外鼠标键可以继续按住；任一侧 Ctrl/Shift/Alt 或任何仍被规则持有的按压都会排除匹配。此规则不捕获额外键，不改变其按下、重复或释放。"))
             })
-            .when(matches!(spec.keyboard.matching, omnitrigger_core::KeyboardMatching::MouseExact { pointer_scope_priority: false, .. }
-                | omnitrigger_core::KeyboardMatching::MouseCapturedLeader { pointer_scope_priority: false, .. }), |element| {
-                element.child(caption("指针窗口范围仅作过滤，不提升其匹配优先级。"))
+            .when_some(match spec.keyboard.matching {
+                omnitrigger_core::KeyboardMatching::MouseExact { priority, pointer_scope_priority }
+                | omnitrigger_core::KeyboardMatching::MouseUnmodified { priority, pointer_scope_priority }
+                | omnitrigger_core::KeyboardMatching::MouseCapturedLeader { priority, pointer_scope_priority } => Some((priority, pointer_scope_priority)),
+                _ => None,
+            }, |element, (priority, pointer_scope_priority)| {
+                element
+                    .child(caption(format!("鼠标匹配顺序：{priority}（同应用优先级内，数值越小越先；配置文件中设置）。")))
+                    .child(caption(if pointer_scope_priority {
+                        "指针窗口范围参与匹配优先级。"
+                    } else {
+                        "指针窗口范围仅作过滤，不提升其匹配优先级。"
+                    }))
             })
             .when(spec.keyboard.matching.is_mouse_captured_leader(), |element| {
                 element.child(caption("仅引用已由键盘层捕获的引导会话；此鼠标规则不会自行捕获按键，透传或已取消的旧按压不能触发。"))
@@ -6030,6 +6038,29 @@ fn smoke_test(wheel_input_policy: WheelInputPolicy) -> Result<(), String> {
         };
         bindings.push(observer);
     }
+    // 只校验注册与监听启动，不注入输入；同时覆盖鼠标按下和滚轮两种合法入口。
+    for (activation, pointer_scope_priority) in [
+        (Activation::Press(Button::Mouse(MouseButton::Middle)), true),
+        (
+            Activation::Wheel(omnitrigger_core::WheelDirection::Left),
+            false,
+        ),
+    ] {
+        let mut unmodified = bindings[0].clone();
+        unmodified.spec.id = settings::next_id(&bindings);
+        unmodified.spec.held.clear();
+        unmodified.spec.activation = activation;
+        unmodified.spec.process_scope.allow = vec!["omnitrigger-smoke".into()];
+        unmodified.spec.pointer_scope.allow = vec!["omnitrigger-smoke".into()];
+        unmodified.spec.keyboard = omnitrigger_core::KeyboardPolicy {
+            matching: omnitrigger_core::KeyboardMatching::MouseUnmodified {
+                priority: 1,
+                pointer_scope_priority,
+            },
+            ..Default::default()
+        };
+        bindings.push(unmodified);
+    }
     for binding in &mut bindings {
         if binding.spec.held.contains(&Button::Key(20)) {
             binding.spec.keyboard = omnitrigger_core::KeyboardPolicy {
@@ -6084,7 +6115,7 @@ fn smoke_test(wheel_input_policy: WheelInputPolicy) -> Result<(), String> {
     }
     backend.send(BackendCommand::SetEnabled(false))?;
     drop(backend);
-    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; scoped/pointer-scope/shell-context/dedicated/retained/repeat/contextual-terminal/captured/mouse-leader registrations valid; foreground and pointer process/window role resolved outside hooks.");
+    println!("OmniTrigger 开发检查：键盘/鼠标 Hook 已安装并正常卸载；应用/指针窗口范围、Shell 上下文、专用/保留层、重复、上下文终止键、捕获匹配、鼠标引导引用及无控制键鼠标注册有效；前台与指针进程/窗口角色已在 Hook 外解析。本检查不注入输入，未验证物理触发效果。");
     Ok(())
 }
 

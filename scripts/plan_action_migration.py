@@ -6,7 +6,8 @@ import hashlib
 import json
 from pathlib import Path
 from action_body_projection import action_body
-from mouse_action_projection import mouse_trigger, mouse_rule_priorities, settings_snapshot
+from mouse_action_projection import (mouse_trigger, mouse_rule_priorities, settings_snapshot,
+                                     validate_unmodified_mouse_policy)
 
 
 def load(path):
@@ -391,7 +392,9 @@ def project_source_precedence(bindings, current):
                          if row["operation"].get("action_gaps") else "needs_runtime_verification")
 
 
-def build_plan(source, catalog_payload, usage, counters, current, limit=20, body_records=None, mouse_settings=None):
+def build_plan(source, catalog_payload, usage, counters, current, limit=20, body_records=None, mouse_settings=None,
+               *, unmodified_mouse_policy="strict"):
+    validate_unmodified_mouse_policy(unmodified_mouse_policy)
     mouse_settings = settings_snapshot(mouse_settings if mouse_settings is not None else source.get("MouseSettings"))
     if body_records is not None:
         if isinstance(body_records, dict) and "resultJson" in body_records:
@@ -475,8 +478,8 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20, body
             if not rule.get("IsEnabled"):
                 continue
             identity = f"mouse:{scope}:{index}"
-            projection = mouse_trigger(rule, mouse_settings, priority=priorities[index]) if scope == "global" else {"trigger":None,"trigger_gaps":["mouse_application_profile_selection"]}
-            if projection["trigger"] and projection["trigger"].get("keyboard", {}).get("matching", {}).get("kind") in ("mouse_exact", "mouse_captured_leader"):
+            projection = mouse_trigger(rule, mouse_settings, priority=priorities[index], unmodified_mouse_policy=unmodified_mouse_policy) if scope == "global" else {"trigger":None,"trigger_gaps":["mouse_application_profile_selection"]}
+            if projection["trigger"] and projection["trigger"].get("keyboard", {}).get("matching", {}).get("kind") in ("mouse_exact", "mouse_captured_leader", "mouse_unmodified"):
                 projection["source_normalizations"].append({"kind":"mouse_rule_order", "scope":scope,
                     "source_index":index, "priority":priorities[index], "missing_source_priority_default":0,
                     "pointer_whitelist_is_filter_only":True,
@@ -516,7 +519,7 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20, body
             actions[-1]["implementation"] = implementation
             if implementation["status"] == "native_action_available" and not implementation.get("action_gaps"):
                 actions[-1]["status"] = "needs_runtime_verification"
-    return {"version": 1, "complete": False,
+    plan = {"version": 1, "complete": False,
             "criteria": {"top_limit": limit, "rank_before_catalog_filter": True,
                          "excluded_feature_counters": sorted(excluded),
                          "zero_recent_does_not_defer_enabled_bindings": True,
@@ -534,6 +537,13 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20, body
                             and bool(row["operation"].get("action_gaps")) for row in bindings)},
             "recent30_top": recent, "historical_top": historical,
             "bindings": bindings, "actions": actions}
+    if unmodified_mouse_policy == "passed":
+        plan["criteria"]["unmodified_mouse_policy"] = "passed"
+        plan["criteria"]["minimum_configuration_version"] = 22
+        plan["summary"]["mouse_unmodified_projected"] = sum(
+            row.get("trigger", {}).get("keyboard", {}).get("matching", {}).get("kind") == "mouse_unmodified"
+            for row in bindings if row.get("trigger") is not None)
+    return plan
 
 
 def main(argv=None):
@@ -542,6 +552,8 @@ def main(argv=None):
         parser.add_argument("--" + name, type=Path, required=True)
     parser.add_argument("--bodies", type=Path, help="可选的已导出正文/模板来源快照，只读")
     parser.add_argument("--mouse-settings", type=Path, help="可选的已导出鼠标全局设置，只读")
+    parser.add_argument("--unmodified-mouse-policy", choices=("strict", "passed"), default="strict",
+                        help="无控制键鼠标投影：strict 保持原严格策略（默认）；passed 使用配置版本22的已透传输入策略，不启用绑定")
     args = parser.parse_args(argv)
     paths = {name: getattr(args, name) for name in ("source", "catalog", "usage", "counters", "current")}
     if args.bodies:
@@ -549,7 +561,7 @@ def main(argv=None):
     if args.mouse_settings:
         paths["mouse_settings"] = args.mouse_settings
     plan = build_plan(**{{"catalog":"catalog_payload", "bodies":"body_records"}.get(name, name): load(path)
-                         for name, path in paths.items()})
+                         for name, path in paths.items()}, unmodified_mouse_policy=args.unmodified_mouse_policy)
     plan["evidence"] = {name: {"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
                         for name, path in paths.items()}
     # 独占新建，防止误覆盖输入文件或上次人工审阅结果。

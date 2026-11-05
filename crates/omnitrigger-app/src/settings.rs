@@ -22,7 +22,7 @@ use crate::wheels::WheelActionRef;
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
-const CONFIG_VERSION: u32 = 21;
+const CONFIG_VERSION: u32 = 22;
 
 pub fn use_path(path: PathBuf) -> Result<(), String> {
     CUSTOM_PATH.set(path).map_err(|_| "配置路径已设置。".into())
@@ -191,6 +191,15 @@ enum KeyboardMatchingDto {
         )]
         pointer_scope_priority: bool,
     },
+    MouseUnmodified {
+        #[serde(default, skip_serializing_if = "is_zero_priority")]
+        priority: u16,
+        #[serde(
+            default = "default_pointer_priority",
+            skip_serializing_if = "has_pointer_priority"
+        )]
+        pointer_scope_priority: bool,
+    },
     Captured {
         priority: u16,
     },
@@ -227,6 +236,13 @@ impl From<KeyboardMatching> for KeyboardMatchingDto {
                 priority,
                 pointer_scope_priority,
             },
+            KeyboardMatching::MouseUnmodified {
+                priority,
+                pointer_scope_priority,
+            } => Self::MouseUnmodified {
+                priority,
+                pointer_scope_priority,
+            },
             KeyboardMatching::Captured { priority } => Self::Captured { priority },
         }
     }
@@ -246,6 +262,13 @@ impl From<KeyboardMatchingDto> for KeyboardMatching {
                 priority,
                 pointer_scope_priority,
             } => Self::MouseExact {
+                priority,
+                pointer_scope_priority,
+            },
+            KeyboardMatchingDto::MouseUnmodified {
+                priority,
+                pointer_scope_priority,
+            } => Self::MouseUnmodified {
                 priority,
                 pointer_scope_priority,
             },
@@ -451,6 +474,14 @@ impl From<&Binding> for BindingDto {
 
 impl BindingDto {
     fn into_binding(self, version: u32) -> Result<Binding, String> {
+        if version < 22
+            && matches!(
+                self.keyboard.matching,
+                KeyboardMatchingDto::MouseUnmodified { .. }
+            )
+        {
+            return Err("无 Ctrl/Shift/Alt 鼠标观察匹配需要版本 22 配置。".into());
+        }
         if version < 19
             && self.conditions.iter().any(|condition| {
                 matches!(
@@ -1032,6 +1063,339 @@ mod tests {
         .unwrap()
     }
 
+    mod mouse_unmodified_settings {
+        use super::*;
+
+        fn document() -> serde_json::Value {
+            json!({"version":22,"bindings":[{
+                "id":7,"held":[],"activation":{"kind":"wheel_up"},
+                "keyboard":{"matching":{"kind":"mouse_unmodified"}},
+                "enabled":false,"message":"合成鼠标策略","action":{"kind":"notification"}
+            }]})
+        }
+
+        fn binding(document: serde_json::Value) -> Binding {
+            let parsed: Settings = serde_json::from_value(document).unwrap();
+            parsed
+                .bindings
+                .into_iter()
+                .next()
+                .unwrap()
+                .into_binding(parsed.version)
+                .unwrap()
+        }
+
+        #[test]
+        fn defaults_are_advanced_even_when_optional_fields_are_omitted() {
+            for enabled in [false, true] {
+                let mut source = document();
+                source["bindings"][0]["enabled"] = enabled.into();
+                let bindings = decode(&source.to_string()).unwrap();
+                assert_eq!(
+                    bindings[0].spec.keyboard.matching,
+                    KeyboardMatching::MouseUnmodified {
+                        priority: 0,
+                        pointer_scope_priority: true
+                    }
+                );
+                assert!(bindings[0].spec.keyboard.matching.is_mouse_unmodified());
+                assert!(!bindings[0].spec.keyboard.matching.is_mouse_exact());
+                let dto = BindingDto::from(&bindings[0]);
+                assert!(
+                    !dto.keyboard.is_default(),
+                    "不能将高级鼠标策略当作默认键盘策略省略"
+                );
+                assert!(!dto.keyboard.matching.is_default());
+                let saved: serde_json::Value = serde_json::from_str(&encode(&bindings)).unwrap();
+                assert_eq!(saved["version"], 22);
+                assert_eq!(
+                    saved["bindings"][0]["keyboard"],
+                    json!({"matching":{"kind":"mouse_unmodified"}})
+                );
+                assert_eq!(saved["bindings"][0]["enabled"], enabled);
+                assert_eq!(decode(&saved.to_string()).unwrap(), bindings);
+            }
+            let mut explicit_defaults = document();
+            explicit_defaults["bindings"][0]["keyboard"] = json!({
+                "matching":{"kind":"mouse_unmodified","priority":0,"pointer_scope_priority":true},
+                "dedicated_prefix":null,"retained_prefix":null,"repeat":false,"restore_on_tap":false,
+                "tap_timeout_ms":null,"tap_scope":{}
+            });
+            let decoded = decode(&explicit_defaults.to_string()).unwrap();
+            let saved: serde_json::Value = serde_json::from_str(&encode(&decoded)).unwrap();
+            assert_eq!(
+                saved["bindings"][0]["keyboard"],
+                json!({"matching":{"kind":"mouse_unmodified"}})
+            );
+        }
+
+        #[test]
+        fn priority_and_pointer_scope_priority_round_trip_without_adjustment() {
+            for priority in [0u16, 1, 511] {
+                for pointer_scope_priority in [false, true] {
+                    let mut source = document();
+                    source["bindings"][0]["keyboard"]["matching"] = json!({"kind":"mouse_unmodified","priority":priority,"pointer_scope_priority":pointer_scope_priority});
+                    let bindings = decode(&source.to_string()).unwrap();
+                    assert_eq!(
+                        bindings[0].spec.keyboard.matching,
+                        KeyboardMatching::MouseUnmodified {
+                            priority,
+                            pointer_scope_priority
+                        }
+                    );
+                    let saved: serde_json::Value =
+                        serde_json::from_str(&encode(&bindings)).unwrap();
+                    let matching = &saved["bindings"][0]["keyboard"]["matching"];
+                    assert_eq!(matching["kind"], "mouse_unmodified");
+                    if priority == 0 {
+                        assert!(matching.get("priority").is_none());
+                    } else {
+                        assert_eq!(matching["priority"], priority);
+                    }
+                    if pointer_scope_priority {
+                        assert!(matching.get("pointer_scope_priority").is_none());
+                    } else {
+                        assert_eq!(matching["pointer_scope_priority"], false);
+                    }
+                    assert_eq!(decode(&saved.to_string()).unwrap(), bindings);
+                }
+            }
+        }
+
+        #[test]
+        fn malformed_or_out_of_range_fields_are_rejected_including_disabled_rules() {
+            let mut invalid_matching = vec![
+                json!(null),
+                json!([]),
+                json!({}),
+                json!({"kind":"MouseUnmodified"}),
+                json!({"kind":"mouse_unmodified","unknown":true}),
+                json!({"kind":"mouse_unmodified","pointerScopePriority":false}),
+                json!({"kind":"mouse_unmodified","held":[]}),
+            ];
+            for value in [
+                json!(null),
+                json!(true),
+                json!("0"),
+                json!(-1),
+                json!(1.5),
+                json!(512),
+                json!(65535),
+                json!(65536),
+            ] {
+                invalid_matching.push(json!({"kind":"mouse_unmodified","priority":value}));
+            }
+            for value in [
+                json!(null),
+                json!(0),
+                json!(1),
+                json!("true"),
+                json!([]),
+                json!({}),
+            ] {
+                invalid_matching
+                    .push(json!({"kind":"mouse_unmodified","pointer_scope_priority":value}));
+            }
+            for matching in invalid_matching {
+                for enabled in [false, true] {
+                    let mut source = document();
+                    source["bindings"][0]["enabled"] = enabled.into();
+                    source["bindings"][0]["keyboard"]["matching"] = matching.clone();
+                    let original = source.to_string();
+                    assert!(decode(&original).is_err());
+                    assert_eq!(source.to_string(), original);
+                }
+            }
+            let mut source = document();
+            source["bindings"][0]["keyboard"]["allow_passed"] = true.into();
+            assert!(decode(&source.to_string()).is_err());
+            let mut source = document();
+            source["bindings"][0]["keyboard"]["matching"]["priority"] = 512.into();
+            let spec = binding(source).spec;
+            assert!(matches!(
+                Engine::new(vec![spec]),
+                Err(RegistrationError::InvalidMousePriority {
+                    id: 7,
+                    priority: 512
+                })
+            ));
+        }
+
+        #[test]
+        fn forbidden_held_activation_and_keyboard_policies_are_not_silently_cleared() {
+            let mut invalid_documents = Vec::new();
+            for held in [
+                json!([{"kind":"key","value":17}]),
+                json!([{"kind":"key","value":65}]),
+                json!([{"kind":"key","value":91}]),
+                json!([{"kind":"x1"}]),
+            ] {
+                let mut source = document();
+                source["bindings"][0]["held"] = held;
+                invalid_documents.push(source);
+            }
+            for activation in [
+                json!({"kind":"press","value":{"kind":"key","value":65}}),
+                json!({"kind":"hold","value":{"button":{"kind":"middle"},"duration_ms":50}}),
+                json!({"kind":"drag","value":{"button":{"kind":"middle"},"min_distance_px":4,"max_start_ms":20}}),
+            ] {
+                let mut source = document();
+                source["bindings"][0]["activation"] = activation;
+                invalid_documents.push(source);
+            }
+            for (key, value) in [
+                ("dedicated_prefix", json!({"kind":"key","value":65})),
+                (
+                    "retained_prefix",
+                    json!({"key":{"kind":"key","value":65},"quiet_ms":0,"fast_ms":0}),
+                ),
+                ("repeat", json!(true)),
+                ("restore_on_tap", json!(true)),
+                ("tap_timeout_ms", json!(1)),
+                ("tap_scope", json!({"allow":["synthetic-editor"]})),
+            ] {
+                let mut source = document();
+                source["bindings"][0]["keyboard"][key] = value;
+                invalid_documents.push(source);
+            }
+            for source in invalid_documents {
+                for enabled in [false, true] {
+                    let mut source = source.clone();
+                    source["bindings"][0]["enabled"] = enabled.into();
+                    let original = source.to_string();
+                    let converted = binding(source.clone());
+                    assert!(converted.spec.keyboard.matching.is_mouse_unmodified());
+                    assert!(matches!(
+                        Engine::new(vec![converted.spec]),
+                        Err(RegistrationError::InvalidMouseMatching { id: 7 })
+                    ));
+                    assert!(decode(&original).is_err());
+                    assert_eq!(source.to_string(), original);
+                }
+            }
+        }
+
+        #[test]
+        fn version_twenty_two_is_required_without_changing_legacy_acceptance() {
+            for version in 1..22 {
+                let mut source = document();
+                source["version"] = version.into();
+                assert_eq!(
+                    decode(&source.to_string()).unwrap_err(),
+                    "无 Ctrl/Shift/Alt 鼠标观察匹配需要版本 22 配置。"
+                );
+            }
+            for version in 1..=22 {
+                let mut source = document();
+                source["version"] = version.into();
+                source["bindings"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("keyboard");
+                if version < 5 {
+                    source["bindings"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("action");
+                }
+                let legacy = decode(&source.to_string()).unwrap();
+                assert_eq!(legacy[0].spec.keyboard, KeyboardPolicy::default());
+                let saved: serde_json::Value = serde_json::from_str(&encode(&legacy)).unwrap();
+                assert_eq!(saved["version"], 22);
+                assert!(saved["bindings"][0].get("keyboard").is_none());
+            }
+            let mut source = document();
+            source["version"] = 23.into();
+            assert!(decode(&source.to_string())
+                .unwrap_err()
+                .contains("配置版本不受支持"));
+            let mut source = document();
+            source["version"] = 21.into();
+            source["bindings"][0]["keyboard"]["matching"] = json!({"kind":"mouse_exact"});
+            let old_mouse = decode(&source.to_string()).unwrap();
+            assert!(old_mouse[0].spec.keyboard.matching.is_mouse_exact());
+            assert!(!old_mouse[0].spec.keyboard.matching.is_mouse_unmodified());
+        }
+
+        #[test]
+        fn supported_mouse_activations_and_existing_primary_click_guard_are_preserved() {
+            for activation in [
+                json!({"kind":"press","value":{"kind":"left"}}),
+                json!({"kind":"press","value":{"kind":"right"}}),
+                json!({"kind":"press","value":{"kind":"middle"}}),
+                json!({"kind":"press","value":{"kind":"x1"}}),
+                json!({"kind":"press","value":{"kind":"x2"}}),
+                json!({"kind":"wheel_up"}),
+                json!({"kind":"wheel_down"}),
+                json!({"kind":"wheel_left"}),
+                json!({"kind":"wheel_right"}),
+            ] {
+                let mut source = document();
+                source["bindings"][0]["activation"] = activation;
+                source["bindings"][0]["conditions"] = json!([{"kind":"pointer_region","region":{"kind":"screen_edge","edge":"top","thickness_px":8}}]);
+                let bindings = decode(&source.to_string()).unwrap();
+                assert_eq!(decode(&encode(&bindings)).unwrap(), bindings);
+            }
+            for button in ["left", "right"] {
+                let mut source = document();
+                source["bindings"][0]["activation"] =
+                    json!({"kind":"press","value":{"kind":button}});
+                assert!(decode(&source.to_string())
+                    .unwrap_err()
+                    .contains("请与其他键组合使用"));
+            }
+        }
+
+        #[test]
+        fn basic_binding_edits_keep_advanced_matching_packet_and_scope_fields() {
+            let mut source = document();
+            source["bindings"][0]["keyboard"]["matching"] =
+                json!({"kind":"mouse_unmodified","priority":511,"pointer_scope_priority":false});
+            source["bindings"][0]["wheel"] = "packet".into();
+            source["bindings"][0]["process_scope"] = json!({"allow":["synthetic-editor"]});
+            source["bindings"][0]["pointer_scope"] = json!({"allow":["synthetic-pointer"]});
+            let mut bindings = decode(&source.to_string()).unwrap();
+            let advanced = bindings[0].spec.clone();
+            bindings[0].message = "合成编辑后的消息".into();
+            bindings[0].enabled = true;
+            bindings[0].action = ActionSpec::ShowPanel;
+            validate(&bindings).unwrap();
+            let saved = encode(&bindings);
+            let decoded = decode(&saved).unwrap();
+            assert_eq!(decoded, bindings);
+            assert_eq!(decoded[0].spec, advanced);
+            assert!(decoded[0].spec.held.is_empty());
+            assert!(!BindingDto::from(&decoded[0]).keyboard.is_default());
+        }
+
+        #[test]
+        fn disabled_conflicts_are_checked_and_explicit_priority_can_order_them() {
+            let existing = binding(document());
+            assert!(!existing.enabled);
+            let mut strict = existing.spec.clone();
+            strict.id = 99;
+            strict.keyboard.matching = KeyboardMatching::MouseExact {
+                priority: 0,
+                pointer_scope_priority: true,
+            };
+            let conflict = check_candidate(std::slice::from_ref(&existing), &strict).unwrap_err();
+            assert_eq!(conflict.other, Some(7));
+            let mut second = existing.clone();
+            second.spec = strict.clone();
+            assert!(validate(&[existing.clone(), second]).is_err());
+            strict.keyboard.matching = KeyboardMatching::MouseExact {
+                priority: 1,
+                pointer_scope_priority: true,
+            };
+            check_candidate(std::slice::from_ref(&existing), &strict).unwrap();
+            let second = Binding {
+                spec: strict,
+                ..existing.clone()
+            };
+            validate(&[existing, second]).unwrap();
+        }
+    }
+
     #[test]
     fn keyboard_policy_round_trip_upgrade_and_mislabeled_schema_preserve_original_files() {
         let scratch = Scratch::new();
@@ -1184,9 +1548,19 @@ mod tests {
         assert!(decode(&doc.to_string()).unwrap_err().contains("版本 18"));
         doc["version"] = 18.into();
         doc["bindings"][0]["held"][0]["value"] = 32.into();
-        assert!(decode(&doc.to_string())
-            .unwrap_err()
-            .contains("鼠标精确观察模式"));
+        assert!(decode(&doc.to_string()).is_err());
+        let settings: Settings = serde_json::from_value(doc).unwrap();
+        let binding = settings
+            .bindings
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_binding(settings.version)
+            .unwrap();
+        assert!(matches!(
+            Engine::new(vec![binding.spec]),
+            Err(RegistrationError::InvalidMouseMatching { id: 1 })
+        ));
     }
 
     #[test]

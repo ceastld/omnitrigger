@@ -108,6 +108,14 @@ impl TriggerSpec {
     }
 
     pub(crate) fn held_sets_overlap(&self, other: &Self) -> bool {
+        // 除键集合外也比较不可同时成立的所有权要求：Passed观察不能借用Owned按压
+        // 或捕获会话。空Exact及只观察Passed Win的MouseExact仍存在真正重叠。
+        if self.keyboard.matching.is_mouse_unmodified() {
+            return other.overlaps_unmodified_mouse();
+        }
+        if other.keyboard.matching.is_mouse_unmodified() {
+            return self.overlaps_unmodified_mouse();
+        }
         self.held == other.held
             || (self.keyboard.matching.is_mouse_exact()
                 && self.held.len() == 1
@@ -125,11 +133,30 @@ impl TriggerSpec {
                     .all(|&button| other.accepts_held_button(button)))
     }
 
+    fn overlaps_unmodified_mouse(&self) -> bool {
+        match self.keyboard.matching {
+            // 非空Exact的每个held都必须Owned；新模式的每个额外按压都必须Passed。
+            KeyboardMatching::Exact => self.held.is_empty(),
+            // 两种捕获匹配都要求dedicated_leader及其会话；新模式明确要求它们为空。
+            KeyboardMatching::Captured { .. } | KeyboardMatching::MouseCapturedLeader { .. } => {
+                false
+            }
+            KeyboardMatching::MouseExact { .. } => self
+                .held
+                .iter()
+                .all(|&button| !blocks_unmodified_mouse(button)),
+            KeyboardMatching::MouseUnmodified { .. } => true,
+        }
+    }
+
     pub(crate) fn scope_priority(&self) -> u8 {
         self.process_scope.priority()
             + if matches!(
                 self.keyboard.matching,
                 KeyboardMatching::MouseExact {
+                    pointer_scope_priority: false,
+                    ..
+                } | KeyboardMatching::MouseUnmodified {
                     pointer_scope_priority: false,
                     ..
                 } | KeyboardMatching::MouseCapturedLeader {
@@ -221,6 +248,13 @@ pub enum KeyboardMatching {
         priority: u16,
         pointer_scope_priority: bool,
     },
+    /// held必须为空，仅用于鼠标Press/Wheel。Ctrl/Shift/Alt任一侧或泛型键按住时拒绝。
+    /// 额外普通键、Win键和鼠标键只可观察Passed按压，不建立或借用任何捕获所有权。
+    /// 同范围内priority越小越先选，指针范围是否参与优先级由显式开关决定。
+    MouseUnmodified {
+        priority: u16,
+        pointer_scope_priority: bool,
+    },
     /// 只引用已经由键盘层建立的引导会话；held 为一个明确的非修饰键。
     /// 不发起捕获、不借用透传或收尾中的旧按压，额外键盘输入由原层策略处理。
     MouseCapturedLeader {
@@ -235,7 +269,11 @@ impl KeyboardMatching {
     }
 
     pub fn is_mouse_rule(self) -> bool {
-        self.is_mouse_exact() || self.is_mouse_captured_leader()
+        self.is_mouse_exact() || self.is_mouse_unmodified() || self.is_mouse_captured_leader()
+    }
+
+    pub fn is_mouse_unmodified(self) -> bool {
+        matches!(self, Self::MouseUnmodified { .. })
     }
 
     pub fn is_mouse_exact(self) -> bool {
@@ -251,6 +289,7 @@ impl KeyboardMatching {
             Self::Exact => 0,
             Self::Captured { priority }
             | Self::MouseExact { priority, .. }
+            | Self::MouseUnmodified { priority, .. }
             | Self::MouseCapturedLeader { priority, .. } => priority,
         }
     }
@@ -258,6 +297,11 @@ impl KeyboardMatching {
 
 pub(crate) fn is_modifier(button: Button) -> bool {
     matches!(button, Button::Key(0x10..=0x12 | 0x5b..=0x5c | 0xa0..=0xa5))
+}
+
+/// 新鼠标观察模式仅排除Ctrl/Shift/Alt，Win仍需通过运行时的Passed及所有权检查。
+pub(crate) fn blocks_unmodified_mouse(button: Button) -> bool {
+    matches!(button, Button::Key(0x10..=0x12 | 0xa0..=0xa5))
 }
 
 fn modifier_matches(required: Button, physical: Button) -> bool {

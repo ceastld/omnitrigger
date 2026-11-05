@@ -35,8 +35,14 @@ def names(values):
     return result
 
 
-def mouse_requirements(rule):
+def validate_unmodified_mouse_policy(value):
+    if not isinstance(value, str) or value not in ("strict", "passed"):
+        raise ValueError("无控制键鼠标策略必须为 strict 或 passed")
+
+
+def mouse_requirements(rule, *, unmodified_mouse_policy="strict"):
     """已核对的 V1 控制键与区域含义；识别枚举不等于已经实现其完整匹配策略。"""
+    validate_unmodified_mouse_policy(unmodified_mouse_policy)
     key, location = rule.get("ControlKey"), rule.get("Location")
     gaps = []
     if "ControlKey" not in rule:
@@ -80,6 +86,22 @@ def mouse_requirements(rule):
                                            ["source_async_modifier_sampling_unavailable",
                                             "source_async_modifier_path_can_allow_extra_keyboard_keys"])
         result["semantic_differences"].append("source_checks_captured_mouse_buttons_not_all_physical_buttons")
+        if control["kind"] == "unmodified" and unmodified_mouse_policy == "passed":
+            result["projection_policy"] = {
+                "kind":"mouse_unmodified", "modifier_delivery":"exclude_ctrl_shift_alt",
+                "extra_held_inputs":"passed_only", "creates_capture":False,
+                "minimum_configuration_version":22, "source_equivalence":False}
+            result["semantic_differences"] = [
+                "source_checks_captured_keys_not_core_ownership",
+                "source_checks_mouse_session_captures_not_core_ownership",
+                "source_virtual_control_state_unavailable",
+                "source_async_modifier_sampling_unavailable",
+                "source_v1_binary_parity_unverified",
+                "source_builtin_enablement_unverified",
+                "source_queue_drop_delay_unverified",
+                "source_recovery_equivalence_unverified"]
+            if type(rule.get("MouseActionType")) is int and rule["MouseActionType"] in (11, 12):
+                result["semantic_differences"].append("source_small_vertical_delta_gate_unverified")
     if control["kind"] == "captured_keyboard_key":
         result["projection_policy"] = {"kind":"mouse_captured_leader", "creates_capture":False,
             "requires_active_leader":control["key"], "source_equivalence":False}
@@ -112,8 +134,8 @@ def mouse_rule_priorities(rules):
     return {index: priority for priority, (index, _) in enumerate(sorted(enabled, key=key))}
 
 
-def mouse_trigger(rule, settings, *, priority=None):
-    requirements = mouse_requirements(rule)
+def mouse_trigger(rule, settings, *, priority=None, unmodified_mouse_policy="strict"):
+    requirements = mouse_requirements(rule, unmodified_mouse_policy=unmodified_mouse_policy)
     def unavailable(gaps):
         return {"trigger":None, "trigger_gaps":sorted(set(gaps)), "source_requirements":requirements}
     if requirements["unresolved"]:
@@ -173,7 +195,9 @@ def mouse_trigger(rule, settings, *, priority=None):
         trigger["conditions"] = [{"kind":"pointer_region", "region":{
             "kind":"screen_boundary", "edge":requirements["region"]["edge"]}}]
     if observed_control or captured_leader:
-        matching = {"kind":"mouse_captured_leader" if captured_leader else "mouse_exact"}
+        matching = {"kind":"mouse_captured_leader" if captured_leader else
+                    "mouse_unmodified" if control_kind == "unmodified" and unmodified_mouse_policy == "passed"
+                    else "mouse_exact"}
         if priority is not None:
             if type(priority) is not int or not 0 <= priority < 512:
                 return unavailable(["mouse_rule_order_invalid"])
@@ -195,4 +219,15 @@ def mouse_trigger(rule, settings, *, priority=None):
     if captured_leader:
         result["trigger_dependencies"] = [{"kind":"existing_keyboard_leader","key":rule["ControlKey"],
             "creates_capture":False}]
+    if control_kind == "unmodified" and unmodified_mouse_policy == "passed":
+        result["trigger_gaps"].extend([
+            "mouse_async_system_state_review", "mouse_source_v1_binary_parity_review",
+            "mouse_builtin_enablement_review", "mouse_recovery_semantics_review",
+            "mouse_physical_application_effects_unverified"])
+        result["source_normalizations"].append({
+            "kind":"mouse_unmodified_passed_policy", "minimum_configuration_version":22,
+            "extra_held_inputs":"passed_only", "creates_capture":False,
+            "source_equivalence":False})
+        if kind in (11, 12):
+            result["trigger_gaps"].append("mouse_small_vertical_delta_review")
     return result

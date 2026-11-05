@@ -133,7 +133,7 @@ impl fmt::Display for RegistrationError {
             Self::InvalidMouseCapturedLeader { .. } => "鼠标会话引用仅支持鼠标按下或滚轮，held 须为一个明确的非修饰键，不能同时建立捕获层、重复或单按恢复。",
             Self::MissingCapturedLeader { .. } => "鼠标规则缺少对应的键盘引导层，请先配置同一引导键的专用层或保留原功能层。",
             Self::InvalidMousePriority { .. } => "鼠标匹配顺序须为 0 至 511，数值越小越先匹配。",
-            Self::InvalidMouseMatching { .. } => "鼠标精确观察模式仅支持鼠标按下或滚轮，held 为空或一个修饰键，不能同时配置键盘捕获层、重复或单按恢复。",
+            Self::InvalidMouseMatching { .. } => "鼠标观察模式仅支持鼠标按下或滚轮：精确模式 held 为空或一个修饰键，无控制键模式 held 必须为空；不能同时配置键盘捕获层、重复、单按恢复、恢复超时或非全局单按范围。",
             Self::ConflictingModifierDelivery { .. } => "同一修饰键在重叠范围内同时用于鼠标观察和输入捕获，请分开其范围或统一交付策略。",
             Self::InvalidPointerProcessScope { reason, .. } => return write!(f, "指针窗口范围无效：{reason}"),
             Self::InvalidWheelPolicy { .. } => "逐事件滚轮策略仅支持滚轮触发。",
@@ -228,6 +228,20 @@ pub(super) fn validate(
                     .held
                     .iter()
                     .any(|&button| !crate::model::is_modifier(button))
+                || !matches!(
+                    binding.activation,
+                    Activation::Press(Button::Mouse(_)) | Activation::Wheel(_)
+                )
+                || binding.keyboard.prefix().is_some()
+                || binding.keyboard.repeat
+                || binding.keyboard.restore_on_tap
+                || binding.keyboard.tap_timeout_ms.is_some()
+                || !binding.keyboard.tap_scope.is_global())
+        {
+            return Err(RegistrationError::InvalidMouseMatching { id: binding.id });
+        }
+        if binding.keyboard.matching.is_mouse_unmodified()
+            && (!binding.held.is_empty()
                 || !matches!(
                     binding.activation,
                     Activation::Press(Button::Mouse(_)) | Activation::Wheel(_)
@@ -490,8 +504,10 @@ pub(super) fn validate(
             let captured_pair = left.keyboard.matching.is_captured()
                 && right.keyboard.matching.is_captured()
                 && left.keyboard.prefix() == right.keyboard.prefix();
-            let ordered_mouse_pair =
-                left.keyboard.matching.is_mouse_rule() && right.keyboard.matching.is_mouse_rule();
+            let ordered_mouse_pair = (left.keyboard.matching.is_mouse_rule()
+                && right.keyboard.matching.is_mouse_rule())
+                || left.keyboard.matching.is_mouse_unmodified()
+                || right.keyboard.matching.is_mouse_unmodified();
             if captured_pair
                 && same_button
                 && left.keyboard.matching.priority() == right.keyboard.matching.priority()
@@ -571,5 +587,234 @@ fn activation_button(activation: Activation) -> Option<Button> {
         | Activation::Hold { button, .. }
         | Activation::Drag { button, .. } => Some(button),
         Activation::Wheel(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod mouse_unmodified_tests {
+    use super::*;
+    use crate::{
+        KeyboardMatching, KeyboardPolicy, MouseButton, ProcessScope, RetainedPrefix, WheelDirection,
+    };
+
+    fn rule(id: u64, matching: KeyboardMatching, held: Vec<Button>) -> TriggerSpec {
+        TriggerSpec {
+            id,
+            held,
+            activation: Activation::Wheel(WheelDirection::Up),
+            conditions: vec![],
+            keyboard: KeyboardPolicy {
+                matching,
+                ..Default::default()
+            },
+            pointer_scope: Default::default(),
+            process_scope: Default::default(),
+            wheel: WheelPolicy::Packet,
+        }
+    }
+
+    fn unmodified(id: u64, priority: u16) -> TriggerSpec {
+        rule(
+            id,
+            KeyboardMatching::MouseUnmodified {
+                priority,
+                pointer_scope_priority: true,
+            },
+            vec![],
+        )
+    }
+
+    #[test]
+    fn unmodified_registration_rejects_every_capture_timing_and_held_option() {
+        let base = unmodified(1, 0);
+        let key = Button::Key(0x51);
+        let mut invalid = Vec::new();
+        let mut binding = base.clone();
+        binding.held = vec![key];
+        invalid.push(binding);
+        let mut binding = base.clone();
+        binding.activation = Activation::Press(key);
+        invalid.push(binding);
+        let mut binding = base.clone();
+        binding.activation = Activation::Hold {
+            button: Button::Mouse(MouseButton::Right),
+            duration_ms: 100,
+        };
+        binding.wheel = WheelPolicy::Notch;
+        invalid.push(binding);
+        let mut binding = base.clone();
+        binding.activation = Activation::Drag {
+            button: Button::Mouse(MouseButton::Right),
+            min_distance_px: 10,
+            max_start_ms: 100,
+        };
+        binding.wheel = WheelPolicy::Notch;
+        invalid.push(binding);
+        let mut binding = base.clone();
+        binding.keyboard.dedicated_prefix = Some(key);
+        invalid.push(binding);
+        let mut binding = base.clone();
+        binding.keyboard.retained_prefix = Some(Box::new(RetainedPrefix {
+            key,
+            capture_scope: Default::default(),
+            quiet_ms: 0,
+            fast_ms: 0,
+            block_with_primary_mouse: false,
+        }));
+        invalid.push(binding);
+        let mut binding = base.clone();
+        binding.keyboard.repeat = true;
+        invalid.push(binding);
+        let mut binding = base.clone();
+        binding.keyboard.restore_on_tap = true;
+        invalid.push(binding);
+        let mut binding = base.clone();
+        binding.keyboard.tap_timeout_ms = Some(10);
+        invalid.push(binding);
+        let mut binding = base;
+        binding.keyboard.tap_scope.allow = vec!["sample".into()];
+        invalid.push(binding);
+        for binding in invalid {
+            assert_eq!(
+                validate(vec![binding]).unwrap_err(),
+                RegistrationError::InvalidMouseMatching { id: 1 }
+            );
+        }
+        assert!(validate(vec![unmodified(1, 511)]).is_ok());
+        assert_eq!(
+            validate(vec![unmodified(1, 512)]).unwrap_err(),
+            RegistrationError::InvalidMousePriority {
+                id: 1,
+                priority: 512
+            }
+        );
+    }
+
+    #[test]
+    fn unmodified_overlap_distinguishes_owned_exact_from_passed_observation_at_equal_rank() {
+        for matching in [
+            KeyboardMatching::Exact,
+            KeyboardMatching::MouseExact {
+                priority: 0,
+                pointer_scope_priority: true,
+            },
+            KeyboardMatching::MouseUnmodified {
+                priority: 0,
+                pointer_scope_priority: true,
+            },
+        ] {
+            let empty = rule(2, matching, vec![]);
+            assert_eq!(
+                validate(vec![unmodified(1, 0), empty.clone()]).unwrap_err(),
+                RegistrationError::DuplicateTrigger {
+                    first: 1,
+                    second: 2
+                }
+            );
+            assert_eq!(
+                validate(vec![empty.clone(), unmodified(1, 0)]).unwrap_err(),
+                RegistrationError::DuplicateTrigger {
+                    first: 2,
+                    second: 1
+                }
+            );
+            assert!(validate(vec![unmodified(1, 1), empty]).is_ok());
+        }
+        for held in [
+            vec![Button::Key(0x51)],
+            vec![Button::Key(0x5b)],
+            vec![Button::Mouse(MouseButton::Left)],
+            vec![Button::Mouse(MouseButton::X1)],
+            vec![Button::Key(0x51), Button::Key(0x5c)],
+        ] {
+            let exact = rule(2, KeyboardMatching::Exact, held);
+            assert!(validate(vec![unmodified(1, 0), exact.clone()]).is_ok());
+            assert!(validate(vec![exact.clone(), unmodified(1, 0)]).is_ok());
+            assert!(validate(vec![unmodified(1, 1), exact]).is_ok());
+        }
+        let strict_win = rule(
+            2,
+            KeyboardMatching::MouseExact {
+                priority: 2,
+                pointer_scope_priority: true,
+            },
+            vec![Button::Key(0x5b)],
+        );
+        assert_eq!(
+            validate(vec![unmodified(1, 2), strict_win.clone()]).unwrap_err(),
+            RegistrationError::DuplicateTrigger {
+                first: 1,
+                second: 2
+            }
+        );
+        assert!(validate(vec![unmodified(1, 1), strict_win]).is_ok());
+    }
+
+    #[test]
+    fn control_shift_alt_requirements_are_disjoint_but_scope_priority_still_orders_real_overlap() {
+        for key in [0x10, 0x11, 0x12, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5] {
+            let other = rule(
+                2,
+                KeyboardMatching::MouseExact {
+                    priority: 0,
+                    pointer_scope_priority: true,
+                },
+                vec![Button::Key(key)],
+            );
+            assert!(validate(vec![unmodified(1, 0), other]).is_ok());
+            let exact = rule(
+                2,
+                KeyboardMatching::Exact,
+                vec![Button::Key(0x51), Button::Key(key)],
+            );
+            assert!(validate(vec![unmodified(1, 0), exact]).is_ok());
+        }
+        let mut scoped = unmodified(2, 0);
+        scoped.pointer_scope = ProcessScope {
+            allow: vec!["sample".into()],
+            ..Default::default()
+        };
+        assert!(validate(vec![unmodified(1, 0), scoped.clone()]).is_ok());
+        scoped.keyboard.matching = KeyboardMatching::MouseUnmodified {
+            priority: 0,
+            pointer_scope_priority: false,
+        };
+        assert_eq!(
+            validate(vec![unmodified(1, 0), scoped]).unwrap_err(),
+            RegistrationError::DuplicateTrigger {
+                first: 1,
+                second: 2
+            }
+        );
+    }
+
+    #[test]
+    fn captured_mouse_leader_and_retained_capture_are_ownership_disjoint_at_equal_rank() {
+        let key = Button::Key(0x51);
+        let captured = rule(
+            2,
+            KeyboardMatching::MouseCapturedLeader {
+                priority: 0,
+                pointer_scope_priority: true,
+            },
+            vec![key],
+        );
+        let mut owner = rule(3, KeyboardMatching::Captured { priority: 0 }, vec![key]);
+        owner.activation = Activation::Press(Button::Key(0x4a));
+        owner.wheel = WheelPolicy::Notch;
+        owner.keyboard.dedicated_prefix = Some(key);
+        assert!(validate(vec![unmodified(1, 0), captured.clone(), owner.clone()]).is_ok());
+        assert!(validate(vec![captured.clone(), unmodified(1, 0), owner]).is_ok());
+        let mut retained = rule(3, KeyboardMatching::Captured { priority: 0 }, vec![key]);
+        retained.keyboard.retained_prefix = Some(Box::new(RetainedPrefix {
+            key,
+            capture_scope: Default::default(),
+            quiet_ms: 0,
+            fast_ms: 0,
+            block_with_primary_mouse: false,
+        }));
+        retained.keyboard.restore_on_tap = true;
+        assert!(validate(vec![unmodified(1, 0), retained.clone()]).is_ok());
+        assert!(validate(vec![retained, unmodified(1, 0)]).is_ok());
     }
 }

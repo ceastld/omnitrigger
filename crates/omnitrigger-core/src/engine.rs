@@ -681,12 +681,20 @@ impl Engine {
                     && self.binding_held_matches(binding)
                     && self.conditions_match(binding)
             })
-            .map(|binding| binding.scope_priority());
+            .map(|binding| {
+                (
+                    binding.scope_priority(),
+                    binding.keyboard.matching.priority(),
+                )
+            });
         let press = self
             .candidates()
             .find(|binding| {
                 binding.activation == Activation::Press(button)
-                    && Some(binding.scope_priority()) == priority
+                    && Some((
+                        binding.scope_priority(),
+                        binding.keyboard.matching.priority(),
+                    )) == priority
                     && self.binding_held_matches(binding)
                     && self.conditions_match(binding)
             })
@@ -711,7 +719,10 @@ impl Engine {
                     button: terminal,
                     duration_ms,
                 } if terminal == button
-                    && Some(binding.scope_priority()) == priority
+                    && Some((
+                        binding.scope_priority(),
+                        binding.keyboard.matching.priority(),
+                    )) == priority
                     && self.binding_held_matches(binding)
                     && self.conditions_match(binding) =>
                 {
@@ -727,7 +738,10 @@ impl Engine {
                     min_distance_px,
                     max_start_ms,
                 } if terminal == button
-                    && Some(binding.scope_priority()) == priority
+                    && Some((
+                        binding.scope_priority(),
+                        binding.keyboard.matching.priority(),
+                    )) == priority
                     && self.binding_held_matches(binding)
                     && self.conditions_match(binding) =>
                 {
@@ -1099,6 +1113,20 @@ impl Engine {
     }
 
     fn binding_held_matches(&self, binding: &TriggerSpec) -> bool {
+        if binding.keyboard.matching.is_mouse_unmodified() {
+            return self.dedicated_leader.is_none()
+                && self.layer_owner.is_none()
+                && self.retained.is_none()
+                && self.terminal_presses.is_empty()
+                && self.captured_presses.is_empty()
+                && !self
+                    .mouse_prefix_sessions
+                    .iter()
+                    .any(|owners| owners.is_active())
+                && self.pressed.iter().all(|(&button, &state)| {
+                    state == PressState::Passed && !crate::model::blocks_unmodified_mouse(button)
+                });
+        }
         if binding.keyboard.matching.is_mouse_captured_leader() {
             let Some(&leader) = binding.held.first() else {
                 return false;
@@ -1459,3 +1487,279 @@ fn wheel_index(direction: WheelDirection) -> usize {
 #[cfg(test)]
 #[path = "drag_tests.rs"]
 mod drag_tests;
+
+#[cfg(test)]
+mod mouse_unmodified_tests {
+    use super::*;
+    use crate::{KeyboardMatching, KeyboardPolicy, MouseButton};
+
+    const Q: Button = Button::Key(0x51);
+    const WIN: Button = Button::Key(0x5b);
+    const RIGHT: Button = Button::Mouse(MouseButton::Right);
+
+    fn rule(id: u64, priority: u16, activation: Activation) -> TriggerSpec {
+        TriggerSpec {
+            id,
+            held: vec![],
+            activation,
+            conditions: vec![],
+            keyboard: KeyboardPolicy {
+                matching: KeyboardMatching::MouseUnmodified {
+                    priority,
+                    pointer_scope_priority: true,
+                },
+                ..Default::default()
+            },
+            pointer_scope: Default::default(),
+            process_scope: Default::default(),
+            wheel: if matches!(activation, Activation::Wheel(_)) {
+                WheelPolicy::Packet
+            } else {
+                WheelPolicy::Notch
+            },
+        }
+    }
+
+    fn wheel(id: u64, priority: u16) -> TriggerSpec {
+        rule(id, priority, Activation::Wheel(WheelDirection::Up))
+    }
+
+    fn input(engine: &mut Engine, kind: InputKind) -> Decision {
+        engine.process(InputEvent {
+            kind,
+            injected: false,
+        })
+    }
+
+    #[test]
+    fn unmodified_matching_requires_passed_state_for_every_keyboard_and_mouse_press() {
+        let binding = wheel(1, 0);
+        let mut engine = Engine::new(vec![binding.clone()]).unwrap();
+        for button in [Q, WIN, Button::Mouse(MouseButton::X1)] {
+            for state in [
+                PressState::Pending,
+                PressState::PendingSuppressed,
+                PressState::Consumed,
+                PressState::Passed,
+                PressState::Draining,
+                PressState::Observed,
+            ] {
+                engine.pressed.clear();
+                engine.pressed.insert(button, state);
+                assert_eq!(
+                    engine.binding_held_matches(&binding),
+                    state == PressState::Passed
+                );
+            }
+        }
+        for key in [0x10, 0x11, 0x12, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5] {
+            engine.pressed.clear();
+            engine.pressed.insert(Button::Key(key), PressState::Passed);
+            assert!(!engine.binding_held_matches(&binding));
+        }
+    }
+
+    #[test]
+    fn unmodified_matching_rejects_terminal_and_session_ledgers_even_with_passed_keys() {
+        let binding = wheel(1, 0);
+        let mut engine = Engine::new(vec![binding.clone()]).unwrap();
+        engine.pressed.insert(Q, PressState::Passed);
+        assert!(engine.binding_held_matches(&binding));
+        engine.terminal_presses.insert(Q);
+        assert!(!engine.binding_held_matches(&binding));
+        engine.terminal_presses.clear();
+        engine.captured_presses.insert(Q, 0);
+        assert!(!engine.binding_held_matches(&binding));
+        engine.captured_presses.clear();
+        engine.dedicated_leader = Some(Q);
+        assert!(!engine.binding_held_matches(&binding));
+        engine.dedicated_leader = None;
+        engine.layer_owner = Some(0);
+        assert!(!engine.binding_held_matches(&binding));
+        engine.layer_owner = None;
+        engine.mouse_prefix_sessions[0].insert(0);
+        assert!(!engine.binding_held_matches(&binding));
+        engine.clear_mouse_prefix_sessions();
+        assert!(engine.binding_held_matches(&binding));
+    }
+
+    #[test]
+    fn unmodified_mouse_trigger_never_claims_extra_passed_presses_or_their_repeats_and_releases() {
+        let mut engine = Engine::new(vec![rule(1, 0, Activation::Press(RIGHT))]).unwrap();
+        for button in [Q, WIN, Button::Mouse(MouseButton::X1)] {
+            assert_eq!(
+                input(&mut engine, InputKind::Down(button)),
+                Decision::default()
+            );
+        }
+        let triggered = input(&mut engine, InputKind::Down(RIGHT));
+        assert!(triggered.consume);
+        assert_eq!(triggered.triggered, [1]);
+        assert!(
+            input(&mut engine, InputKind::Down(RIGHT))
+                .triggered
+                .is_empty()
+        );
+        for button in [Q, WIN, Button::Mouse(MouseButton::X1)] {
+            assert_eq!(engine.pressed[&button], PressState::Passed);
+            assert_eq!(
+                input(&mut engine, InputKind::Down(button)),
+                Decision::default()
+            );
+        }
+        engine.cancel();
+        for button in [Q, WIN, Button::Mouse(MouseButton::X1)] {
+            assert_eq!(
+                input(&mut engine, InputKind::Up(button)),
+                Decision::default()
+            );
+        }
+        assert!(input(&mut engine, InputKind::Up(RIGHT)).consume);
+    }
+
+    #[test]
+    fn unmodified_rule_does_not_borrow_exact_prefix_ownership_at_equal_rank() {
+        let mut exact = wheel(2, 0);
+        exact.keyboard.matching = KeyboardMatching::Exact;
+        exact.held = vec![Q];
+        let mut engine = Engine::new(vec![wheel(1, 0), exact]).unwrap();
+        assert!(input(&mut engine, InputKind::Down(Q)).consume);
+        let wheel_event = InputKind::Wheel {
+            axis: Axis::Vertical,
+            delta: 120,
+        };
+        assert_eq!(input(&mut engine, wheel_event).triggered, [2]);
+        assert!(input(&mut engine, InputKind::Up(Q)).consume);
+        assert_eq!(input(&mut engine, wheel_event).triggered, [1]);
+    }
+
+    #[test]
+    fn strict_mouse_win_and_unmodified_rules_use_the_same_explicit_rank() {
+        for (priority, expected) in [(1, 1), (3, 2)] {
+            let mut strict = wheel(2, 2);
+            strict.keyboard.matching = KeyboardMatching::MouseExact {
+                priority: 2,
+                pointer_scope_priority: true,
+            };
+            strict.held = vec![WIN];
+            let mut engine = Engine::new(vec![wheel(1, priority), strict]).unwrap();
+            assert_eq!(
+                input(&mut engine, InputKind::Down(WIN)),
+                Decision::default()
+            );
+            assert_eq!(
+                input(
+                    &mut engine,
+                    InputKind::Wheel {
+                        axis: Axis::Vertical,
+                        delta: 120
+                    }
+                )
+                .triggered,
+                [expected]
+            );
+            assert_eq!(input(&mut engine, InputKind::Up(WIN)), Decision::default());
+        }
+    }
+
+    #[test]
+    fn captured_layer_keeps_mouse_priority_even_when_unmodified_is_sorted_first() {
+        for priority in [0, 5] {
+            let mut owner = rule(3, 0, Activation::Press(Button::Key(0x4a)));
+            owner.held = vec![Q];
+            owner.keyboard = KeyboardPolicy {
+                matching: KeyboardMatching::Captured { priority: 0 },
+                dedicated_prefix: Some(Q),
+                ..Default::default()
+            };
+            let mut captured = wheel(2, priority);
+            captured.held = vec![Q];
+            captured.keyboard.matching = KeyboardMatching::MouseCapturedLeader {
+                priority,
+                pointer_scope_priority: true,
+            };
+            let mut engine = Engine::new(vec![wheel(1, 0), captured, owner]).unwrap();
+            assert!(input(&mut engine, InputKind::Down(Q)).consume);
+            let wheel_event = InputKind::Wheel {
+                axis: Axis::Vertical,
+                delta: 120,
+            };
+            assert_eq!(input(&mut engine, wheel_event).triggered, [2]);
+            assert!(input(&mut engine, InputKind::Up(Q)).consume);
+            assert_eq!(input(&mut engine, wheel_event).triggered, [1]);
+        }
+    }
+
+    #[test]
+    fn retained_capture_and_unmodified_same_rank_keep_their_separate_ownership_domains() {
+        let mut captured = wheel(2, 0);
+        captured.held = vec![Q];
+        captured.keyboard = KeyboardPolicy {
+            matching: KeyboardMatching::Captured { priority: 0 },
+            retained_prefix: Some(Box::new(crate::RetainedPrefix {
+                key: Q,
+                capture_scope: Default::default(),
+                quiet_ms: 0,
+                fast_ms: 0,
+                block_with_primary_mouse: false,
+            })),
+            restore_on_tap: true,
+            ..Default::default()
+        };
+        let mut engine = Engine::new(vec![wheel(1, 0), captured]).unwrap();
+        assert!(input(&mut engine, InputKind::Down(Q)).consume);
+        let wheel_event = InputKind::Wheel {
+            axis: Axis::Vertical,
+            delta: 120,
+        };
+        assert_eq!(input(&mut engine, wheel_event).triggered, [2]);
+        assert!(input(&mut engine, InputKind::Up(Q)).consume);
+        assert_eq!(input(&mut engine, wheel_event).triggered, [1]);
+    }
+
+    #[test]
+    fn explicit_rank_applies_to_press_vs_timed_candidates_for_the_same_mouse_button() {
+        let mut hold = rule(
+            2,
+            0,
+            Activation::Hold {
+                button: RIGHT,
+                duration_ms: 50,
+            },
+        );
+        hold.keyboard = KeyboardPolicy::default();
+        hold.wheel = WheelPolicy::Notch;
+        let mut engine = Engine::new(vec![rule(1, 1, Activation::Press(RIGHT)), hold]).unwrap();
+        let pending = input(&mut engine, InputKind::Down(RIGHT));
+        assert!(pending.consume);
+        assert!(pending.triggered.is_empty());
+        assert_eq!(engine.advance_time(50).triggered, [2]);
+        assert!(input(&mut engine, InputKind::Up(RIGHT)).consume);
+    }
+
+    #[test]
+    fn strict_mouse_matching_remains_closed_to_extra_ordinary_and_win_keys() {
+        let mut strict = wheel(1, 0);
+        strict.keyboard.matching = KeyboardMatching::MouseExact {
+            priority: 0,
+            pointer_scope_priority: true,
+        };
+        for button in [Q, WIN, Button::Mouse(MouseButton::X1)] {
+            let mut engine = Engine::new(vec![strict.clone()]).unwrap();
+            assert_eq!(
+                input(&mut engine, InputKind::Down(button)),
+                Decision::default()
+            );
+            assert_eq!(
+                input(
+                    &mut engine,
+                    InputKind::Wheel {
+                        axis: Axis::Vertical,
+                        delta: 120
+                    }
+                ),
+                Decision::default()
+            );
+        }
+    }
+}
