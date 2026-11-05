@@ -29,6 +29,80 @@ const POLL: Duration = Duration::from_millis(20);
 const CANCEL_GRACE: Duration = Duration::from_millis(250);
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
+fn request_fault(code: &str, message: impl Into<String>, effect: &str) -> ActionError {
+    let mut fault = ActionError::new(code, message);
+    fault.effect_state = Some(effect.into());
+    fault
+}
+
+fn remaining_before_request(
+    deadline: Instant,
+    cancellation: &CancellationToken,
+    now: Instant,
+) -> Result<Duration, ActionError> {
+    if cancellation.is_cancelled() {
+        return Err(request_fault(
+            "cancelled",
+            "动作提交前已取消，未发送 Node 动作请求。",
+            "not_started",
+        ));
+    }
+    deadline
+        .checked_duration_since(now)
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| {
+            request_fault(
+                "timeout",
+                "动作提交前已超过运行时限，未发送 Node 动作请求。",
+                "not_started",
+            )
+        })
+}
+
+fn start_before_request<T>(
+    deadline: Instant,
+    cancellation: &CancellationToken,
+    now: impl Fn() -> Instant,
+    start: impl FnOnce() -> Result<T, ActionError>,
+) -> Result<T, ActionError> {
+    remaining_before_request(deadline, cancellation, now())?;
+    let child = start()?;
+    remaining_before_request(deadline, cancellation, now())?;
+    Ok(child)
+}
+
+fn write_request<W: Write>(
+    mut input: W,
+    mut request: Value,
+    deadline: Instant,
+    cancellation: &CancellationToken,
+    now: impl Fn() -> Instant,
+) -> Result<W, ActionError> {
+    let remaining = remaining_before_request(deadline, cancellation, now())?;
+    // 复用原有协议字段；Rust 的绝对期限始终优先，毫秒取整不扩大外层预算。
+    request["timeout_ms"] = json!(remaining.as_millis().max(1));
+    let mut bytes = serde_json::to_vec(&request)
+        .map_err(|cause| request_fault("invalid_request", cause.to_string(), "not_started"))?;
+    if bytes.len() > 96 * 1024 {
+        return Err(request_fault(
+            "invalid_request",
+            "动作请求超过 96 KiB。",
+            "not_started",
+        ));
+    }
+    bytes.push(b'\n');
+    // 编码和线程调度也会消耗预算，真正写入前再复核一次。
+    remaining_before_request(deadline, cancellation, now())?;
+    input.write_all(&bytes).map_err(|cause| {
+        request_fault(
+            "runtime_io",
+            format!("动作请求写入失败：{cause}"),
+            "unknown",
+        )
+    })?;
+    Ok(input)
+}
+
 pub struct NodeRuntime {
     program: PathBuf,
     timeout: Duration,
@@ -74,16 +148,9 @@ impl ActionRuntime for NodeRuntime {
         cancellation: &CancellationToken,
         host: Option<&dyn NativeHost>,
     ) -> Result<Value, ActionError> {
-        if cancellation.is_cancelled() {
-            return Err(cancelled());
-        }
-        self.execute_with_native(
-            action,
-            context,
-            cancellation,
-            host,
-            host.map(|_| NativeBridge::new()),
-        )
+        self.execute_with_native(action, context, cancellation, host, || {
+            host.map(|_| NativeBridge::new())
+        })
     }
 }
 
@@ -94,11 +161,18 @@ impl NodeRuntime {
         context: &InvocationContext,
         cancellation: &CancellationToken,
         host: Option<&dyn NativeHost>,
-        native: Option<Result<NativeBridge, ActionError>>,
+        native: impl FnOnce() -> Option<Result<NativeBridge, ActionError>>,
     ) -> Result<Value, ActionError> {
-        if cancellation.is_cancelled() {
-            return Err(cancelled());
-        }
+        let began = Instant::now();
+        let deadline = began.checked_add(self.timeout).ok_or_else(|| {
+            request_fault(
+                "invalid_request",
+                "Node 运行时限超出支持范围。",
+                "not_started",
+            )
+        })?;
+        remaining_before_request(deadline, cancellation, began)?;
+        let native = native();
         // 目录是加载时快照，执行前再次核验入口，避免文件被替换为链接后越界。
         let (root, entry) = checked_entry(action)?;
         let scratch = ResponseDirectory::new()?;
@@ -124,12 +198,12 @@ impl NodeRuntime {
             "native": native_configuration,
             "native_error": native_error,
         });
-        let mut bytes = serde_json::to_vec(&request)
-            .map_err(|error| ActionError::new("invalid_request", error.to_string()))?;
-        if bytes.len() > 96 * 1024 {
+        let request_length = serde_json::to_vec(&request)
+            .map_err(|error| ActionError::new("invalid_request", error.to_string()))?
+            .len();
+        if request_length > 96 * 1024 {
             return Err(ActionError::new("invalid_request", "动作请求超过 96 KiB。"));
         }
-        bytes.push(b'\n');
         let mut command = Command::new(&self.program);
         let host_source =
             format!("{DESKTOP_API}\n{BROWSER_API}\n{HISTORY_API}\n{PROCESS_CAPTURE_API}\n{HOST}");
@@ -144,26 +218,33 @@ impl NodeRuntime {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         hide_window(&mut command);
-        let mut child = ChildGuard(command.spawn().map_err(|error| {
-            ActionError::new(
-                "runtime_start_failed",
-                format!("无法启动 Node 运行时：{error}"),
-            )
-        })?);
+        let mut child = start_before_request(deadline, cancellation, Instant::now, || {
+            command.spawn().map(ChildGuard).map_err(|error| {
+                request_fault(
+                    "runtime_start_failed",
+                    format!("无法启动 Node 运行时：{error}"),
+                    "not_started",
+                )
+            })
+        })?;
         let stdin = child.0.stdin.take().expect("piped stdin");
         // 即使配置的可执行文件不读取 stdin，后台运行时仍能按时取消/超时。
         let (written_tx, written_rx) = mpsc::sync_channel(1);
+        let writer_cancellation = cancellation.clone();
         let writer = thread::Builder::new()
             .name("omnitrigger-node-input".into())
             .spawn(move || {
-                let mut stdin = stdin;
-                let result = stdin.write_all(&bytes).map(|_| stdin);
+                let result =
+                    write_request(stdin, request, deadline, &writer_cancellation, Instant::now);
                 let _ = written_tx.send(result);
             })
             .map_err(|error| {
-                ActionError::new("runtime_io", format!("无法写入动作请求：{error}"))
+                request_fault(
+                    "runtime_io",
+                    format!("无法写入动作请求：{error}"),
+                    "not_started",
+                )
             })?;
-        let began = Instant::now();
         let mut input: Option<ChildStdin> = None;
         let mut cancel_writer = None;
         let mut stopping: Option<(Instant, ActionError)> = None;
@@ -175,12 +256,7 @@ impl NodeRuntime {
                         input = Some(stdin);
                         input_pending = false;
                     }
-                    Ok(Err(error)) => {
-                        break Err(ActionError::new(
-                            "runtime_io",
-                            format!("动作请求写入失败：{error}"),
-                        ))
-                    }
+                    Ok(Err(error)) => break Err(error),
                     Err(mpsc::TryRecvError::Disconnected) => {
                         break Err(ActionError::new("runtime_io", "动作请求写入线程退出。"))
                     }
@@ -190,9 +266,8 @@ impl NodeRuntime {
             if stopping.is_none() {
                 let reason = if cancellation.is_cancelled() {
                     Some(cancelled())
-                } else if began.elapsed() >= self.timeout {
-                    let mut error =
-                        ActionError::new("timeout", "动作超过 60 秒运行时限；不会自动重试。");
+                } else if Instant::now() >= deadline {
+                    let mut error = ActionError::new("timeout", "动作超过运行时限；不会自动重试。");
                     error.effect_state = Some("unknown".into());
                     Some(error)
                 } else {
@@ -233,7 +308,7 @@ impl NodeRuntime {
                 Ok(None) => {}
             }
             if let (true, Some(bridge), Some(host)) = (stopping.is_none(), &mut native, host) {
-                bridge.poll_until(host, cancellation, began.checked_add(self.timeout));
+                bridge.poll_until(host, cancellation, Some(deadline));
             }
             if let Some((since, reason)) = &stopping {
                 if since.elapsed() >= CANCEL_GRACE {
@@ -249,6 +324,27 @@ impl NodeRuntime {
         let _ = writer.join();
         if let Some(writer) = cancel_writer {
             let _ = writer.join();
+        }
+        // 写入线程在宽限期后才获得调度时，仍保留其明确未提交的拒绝回执。
+        if result.is_err() && input_pending {
+            match written_rx.try_recv() {
+                Ok(Err(fault)) if fault.effect_state.as_deref() == Some("not_started") => {
+                    return Err(fault);
+                }
+                _ => {}
+            }
+        }
+        if result.is_ok() {
+            if cancellation.is_cancelled() {
+                return Err(cancelled());
+            }
+            if Instant::now() >= deadline {
+                return Err(request_fault(
+                    "timeout",
+                    "动作超过运行时限；不会自动重试。",
+                    "unknown",
+                ));
+            }
         }
         result
     }
@@ -570,9 +666,41 @@ fn terminate_host(child: &mut Child) {
 }
 
 #[cfg(test)]
+#[path = "node_budget_tests.rs"]
+mod budget_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{ActionCall, ActionDefinition};
+
+    #[test]
+    fn zero_budget_and_pre_cancel_reject_before_bridge_or_entry_initialization() {
+        let fixture = Fixture::new("export default () => 'must not run'", json!({}));
+        fs::remove_file(&fixture.action.entry_path).unwrap();
+        for pre_cancel in [false, true] {
+            let runtime = NodeRuntime {
+                program: fixture.action.package_root.join("does-not-exist.exe"),
+                timeout: if pre_cancel {
+                    Duration::from_secs(60)
+                } else {
+                    Duration::ZERO
+                },
+                browser_connector: None,
+            };
+            let cancellation = CancellationToken::new();
+            if pre_cancel {
+                cancellation.cancel();
+            }
+            let fault = runtime
+                .execute_with_native(&fixture.action, &context(), &cancellation, None, || {
+                    panic!("拒绝前不应初始化本机桥接")
+                })
+                .unwrap_err();
+            assert_eq!(fault.code, if pre_cancel { "cancelled" } else { "timeout" });
+            assert_eq!(fault.effect_state.as_deref(), Some("not_started"));
+        }
+    }
 
     #[test]
     fn ui_choice_returns_stable_id_and_continues_on_the_same_native_host() {
@@ -709,7 +837,7 @@ mod tests {
                 &context(),
                 &CancellationToken::new(),
                 Some(&DesktopHost::default()),
-                Some(Err(error)),
+                || Some(Err(error)),
             )
             .unwrap();
         assert_eq!(
