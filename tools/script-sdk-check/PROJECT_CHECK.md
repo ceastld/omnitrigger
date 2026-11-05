@@ -26,7 +26,7 @@ node tools/script-sdk-check/check-project-types.mjs "D:\Actions\my-script"
 
 源声明若含 `reference path`，不能只复制包装文件而遗漏它引用的类型文件；工程本地 SDK 应保持自包含。安装或升级宿主不会修改作者的 SDK；替换声明也不会升级已经安装的宿主。更新后先运行本工具，再通过原有显式运行入口验证实际行为。
 
-`jsconfig.json` 的编译选项会参与检查，始终启用 `allowJs/checkJs/noEmit` 并排除隐式环境类型。检查时固定 `moduleDetection:"force"`，使多个旧 `.js` 入口的 `main` 和局部变量分别属于各自文件，符合每次调用独立函数体的运行方式；这只影响类型作用域，不改写源码、不要求旧入口导出，也不改变运行协议。编辑器需要同样的隔离时，可在工程自己的 `jsconfig.json` 中设置该选项。当前不展开 `extends`；只检查清单入口和按需依赖，不遍历 `include` 下未使用的其他文件。缺少SDK或配置分别报告 `project_sdk_missing/project_config_missing`，配置不支持或损坏为 `project_config_unsupported/project_config_invalid`。
+`jsconfig.json` 的编译选项会参与检查，始终启用 `allowJs/checkJs/noEmit` 并排除隐式环境类型。检查时固定 `moduleDetection:"force"`，使多个旧 `.js` 入口的 `main` 和局部变量分别属于各自文件，符合每次调用独立函数体的运行方式；这只影响类型作用域，不改写源码、不要求旧入口导出，也不改变运行协议。编辑器需要同样的隔离时，可在工程自己的 `jsconfig.json` 中设置该选项。当前不展开 `extends`；只检查清单入口和按需依赖，不遍历 `include` 下未使用的其他文件。缺少SDK或配置分别报告 `project_sdk_missing/project_config_missing`，配置不支持或损坏为 `project_config_unsupported/project_config_invalid`。`jsconfig.json` 的 JSON 语法错误另附 `error.location`，包含工程内文件名 `file` 和从 1 开始的 `line/column`；函数接口抛出的错误也保留相同 `location`，便于命令行定位，使用既有 `project_config_invalid` 错误码。
 
 内容读取限于该工程和已定位的TypeScript标准库。云盘命名目录、符号链接、硬链接及Windows云端占位属性会拒绝；不会扫描用户目录寻找SDK。单个源码最多128KiB、声明最多512KiB，工程读取合计最多8MiB、256个文件；超限为 `project_file_limit/project_total_limit`。文本要求UTF-8，错误为 `project_utf8_invalid`，不替换坏字节后继续检查。标准库只读取已安装TypeScript中的明确文件。
 

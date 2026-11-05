@@ -8,9 +8,9 @@ import {analyzeScriptModules} from './analyze-script-modules.mjs';
 import {analyzeScriptEntry} from './analyze-script-entry.mjs';
 
 class ProjectCheckError extends Error {
-  constructor(code) { super('脚本工程检查未完成；请检查错误代码。'); this.code=code; }
+  constructor(code,location) { super('脚本工程检查未完成；请检查错误代码。'); this.code=code; this.location=location; }
 }
-const fail=code=>{throw new ProjectCheckError(code);};
+const fail=(code,location)=>{throw new ProjectCheckError(code,location);};
 function within(root,path) {
   const name=relative(root,path);
   return name==='' || !isAbsolute(name)&&name!=='..'&&!name.startsWith('..\\')&&!name.startsWith('../');
@@ -110,8 +110,13 @@ export function checkProjectTypes(projectDirectory) {
   const configPath=join(root,'jsconfig.json');
   let config;
   try {
-    const parsed=ts.parseConfigFileTextToJson(configPath,read(configPath,128*1024));
-    if(parsed.error)fail('project_config_invalid');
+    const parsed=ts.parseConfigFileTextToJson(configPath.replaceAll('\\','/'),read(configPath,128*1024));
+    if(parsed.error) {
+      const diagnostic=parsed.error;
+      const position=diagnostic.file&&typeof diagnostic.start==='number'
+        ?diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start):undefined;
+      fail('project_config_invalid',position?{file:'jsconfig.json',line:position.line+1,column:position.character+1}:undefined);
+    }
     config=parsed.config;
   } catch(error) {if(error?.code==='ENOENT')fail('project_config_missing');throw error;}
   if(!config||typeof config!=='object'||Array.isArray(config)||Object.hasOwn(config,'extends'))fail('project_config_unsupported');
@@ -208,7 +213,8 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
     if(!result.passed)process.exitCode=1;
   } catch(error) {
     console.error(JSON.stringify({passed:false,error:{code:error instanceof ProjectCheckError?error.code:'project_check_failed',
-      message:'脚本工程检查未完成；请检查工程路径、SDK、配置和错误代码。'},runtimeExecuted:false,filesModified:false}));
+      message:'脚本工程检查未完成；请检查工程路径、SDK、配置和错误代码。',
+      ...(error instanceof ProjectCheckError&&error.location?{location:error.location}:{})},runtimeExecuted:false,filesModified:false}));
     process.exitCode=1;
   }
 }

@@ -55,6 +55,28 @@ test('外部导入仅报告无法解析，工程外文件不列入读取集合',
   assert(result.checkedFiles.every(file=>!file.startsWith('../')));
 });
 
+test('配置JSON语法错误保留工程内文件和一基行列',()=>{
+  const root=fixture();const path=join(root,'jsconfig.json');
+  const text='{\n  "compilerOptions": {\n    "checkJs": }\n}\n';
+  writeFileSync(path,text);
+  assert.throws(()=>checkProjectTypes(root),error=>{
+    assert.equal(error.code,'project_config_invalid');
+    assert.deepEqual(error.location,{file:'jsconfig.json',line:3,column:16});return true;
+  });
+  assert.equal(readFileSync(path,'utf8'),text);
+});
+
+test('CLI配置语法错误输出可定位JSON而不执行入口',()=>{
+  const root=fixture();writeFileSync(join(root,'jsconfig.json'),'{\n  "compilerOptions": {\n    "checkJs": }\n}\n');
+  const result=spawnSync(process.execPath,[join(repo,'tools/script-sdk-check/check-project-types.mjs'),root],
+    {encoding:'utf8',windowsHide:true,timeout:30000,maxBuffer:1024*1024});
+  assert.ifError(result.error);assert.equal(result.status,1);assert.equal(result.stdout,'');
+  const output=JSON.parse(result.stderr);
+  assert.equal(output.passed,false);assert.equal(output.error.code,'project_config_invalid');
+  assert.deepEqual(output.error.location,{file:'jsconfig.json',line:3,column:16});
+  assert.equal(output.runtimeExecuted,false);assert.equal(output.filesModified,false);
+});
+
 test('缺SDK、extends和云盘命名路径都明确拒绝，不擅自补写',()=>{
   const root=fixture();unlinkSync(join(root,'sdk/api.d.ts'));
   assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_sdk_missing');
