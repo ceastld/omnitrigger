@@ -549,6 +549,7 @@ mod native {
     }
 
     struct Process {
+        job: crate::clipboard_history_child_job::HistoryChildJob,
         child: Child,
         input: Option<ChildStdin>,
         output: Option<ChildStdout>,
@@ -570,6 +571,8 @@ mod native {
             if self.process.is_some() {
                 return Err(HistoryWorkerError::TransportFailed);
             }
+            let job = crate::clipboard_history_child_job::HistoryChildJob::new()
+                .map_err(|_| HistoryWorkerError::SpawnFailed)?;
             let child = Command::new(&self.options.helper_executable)
                 .arg("--omni-clipboard-history-worker")
                 .arg(&self.options.scope.station)
@@ -581,11 +584,17 @@ mod native {
                 .spawn()
                 .map_err(|_| HistoryWorkerError::SpawnFailed)?;
             self.process = Some(Process {
+                job,
                 child,
                 input: None,
                 output: None,
             });
             let process = self.process.as_mut().unwrap();
+            // 先认领partial-spawn资源，再绑定。失败由Session实际kill/wait；不发送Capture。
+            process
+                .job
+                .assign(&process.child)
+                .map_err(|_| HistoryWorkerError::TransportFailed)?;
             process.input = process.child.stdin.take();
             process.output = process.child.stdout.take();
             if process.input.is_none() || process.output.is_none() {

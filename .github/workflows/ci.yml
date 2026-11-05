@@ -83,6 +83,12 @@ jobs:
             $env:OMNITRIGGER_HISTORY_HELPER_EXE = $historyWorkerPrevious
           }
 
+      - name: 验证历史助手在父进程退出后收尾
+        shell: pwsh
+        run: |
+          cargo test --locked -p omnitrigger-windows --test clipboard_history_child_job_os parent_ -- --ignored --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: 安装 SDK 检查使用的 Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:

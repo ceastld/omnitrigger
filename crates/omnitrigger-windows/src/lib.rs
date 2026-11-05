@@ -13,6 +13,8 @@ pub use automation_basics::{
 };
 pub use automation_basics::{validate_automation_text, validate_open_target};
 
+#[cfg(windows)]
+mod clipboard_history_child_job;
 #[cfg(any(windows, test))]
 mod clipboard_history_worker;
 #[cfg(any(windows, test))]
@@ -27,8 +29,8 @@ pub use clipboard_history_worker::{
 mod clipboard_history_listener;
 #[cfg(windows)]
 pub use clipboard_history_listener::{
-    run_clipboard_history_capture_helper, ClipboardHistoryListener, HistoryListenerError,
-    HistoryListenerStats, HistoryText,
+    run_clipboard_history_capture_helper, run_clipboard_history_gated_capture_helper,
+    ClipboardHistoryListener, HistoryListenerError, HistoryListenerStats, HistoryText,
 };
 
 mod clipboard_data;

@@ -417,7 +417,10 @@ fn decode_reply(bytes: &[u8]) -> Result<Observation, HistoryListenerError> {
 }
 
 #[cfg(windows)]
-pub use native::{run_clipboard_history_capture_helper, ClipboardHistoryListener};
+pub use native::{
+    run_clipboard_history_capture_helper, run_clipboard_history_gated_capture_helper,
+    ClipboardHistoryListener,
+};
 
 #[cfg(windows)]
 mod native {
@@ -994,19 +997,40 @@ mod native {
         desktop: String,
         signal: Arc<Signal>,
     }
-    struct Process(Child, Arc<Signal>);
-    impl Drop for Process {
-        fn drop(&mut self) {
-            if !matches!(self.0.try_wait(), Ok(Some(_))) {
-                let _ = self.0.kill();
+    struct Process(
+        Child,
+        Arc<Signal>,
+        crate::clipboard_history_child_job::HistoryChildJob,
+        bool,
+    );
+    impl Process {
+        fn finish(&mut self) -> Result<(), HistoryListenerError> {
+            if self.3 {
+                return Ok(());
+            }
+            if !matches!(self.0.try_wait(), Ok(Some(_)))
+                && self.0.kill().is_err()
+                && !matches!(self.0.try_wait(), Ok(Some(_)))
+            {
+                self.1.counters.failed.fetch_add(1, Ordering::Relaxed);
+                return Err(HistoryListenerError::WorkerFailed);
             }
             if self.0.wait().is_err() {
                 self.1.counters.failed.fetch_add(1, Ordering::Relaxed);
+                return Err(HistoryListenerError::WorkerFailed);
             }
+            self.3 = true;
             self.1
                 .counters
                 .helpers_finished
                 .fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+    impl Drop for Process {
+        fn drop(&mut self) {
+            // 正常路径明确finish并传播错误；Drop只兜底。Job关闭也不冒充wait已成功。
+            let _ = self.finish();
         }
     }
 
@@ -1020,12 +1044,14 @@ mod native {
                 return Err(HistoryListenerError::CaptureCancelled);
             }
             let deadline = Instant::now() + CAPTURE_BUDGET;
+            let job = crate::clipboard_history_child_job::HistoryChildJob::new()
+                .map_err(|_| HistoryListenerError::CaptureFailed)?;
             let child = Command::new(&self.executable)
-                .arg("--omni-clipboard-history-capture")
+                .arg("--omni-clipboard-history-capture-gated")
                 .arg(&self.station)
                 .arg(&self.desktop)
                 .arg(previous.to_string())
-                .stdin(Stdio::null())
+                .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .creation_flags(0x0800_0000)
@@ -1035,60 +1061,85 @@ mod native {
                 .counters
                 .helpers_started
                 .fetch_add(1, Ordering::Relaxed);
-            let mut process = Process(child, self.signal.clone());
-            let mut stdout = process
-                .0
-                .stdout
-                .take()
-                .ok_or(HistoryListenerError::CaptureFailed)?;
-            let mut bytes = Vec::with_capacity(4096);
-            loop {
+            let mut process = Process(child, self.signal.clone(), job, false);
+            let result = (|| {
+                process
+                    .2
+                    .assign(&process.0)
+                    .map_err(|_| HistoryListenerError::CaptureFailed)?;
                 if stop.load(Ordering::Acquire) {
                     return Err(HistoryListenerError::CaptureCancelled);
                 }
                 if Instant::now() >= deadline {
                     return Err(HistoryListenerError::CaptureTimedOut);
                 }
-                let mut available = 0;
-                let peek = unsafe {
-                    PeekNamedPipe(
-                        stdout.as_raw_handle(),
-                        std::ptr::null_mut(),
-                        0,
-                        std::ptr::null_mut(),
-                        &mut available,
-                        std::ptr::null_mut(),
-                    )
-                };
-                if peek != 0 && available > 0 {
-                    if bytes.len() == MAX_FRAME {
-                        return Err(HistoryListenerError::InvalidReply);
-                    }
-                    let mut buffer = [0; 4096];
-                    let count = (available as usize)
-                        .min(buffer.len())
-                        .min(MAX_FRAME - bytes.len());
-                    let read = stdout
-                        .read(&mut buffer[..count])
-                        .map_err(|_| HistoryListenerError::CaptureFailed)?;
-                    if read == 0 {
-                        return Err(HistoryListenerError::InvalidReply);
-                    }
-                    bytes.extend_from_slice(&buffer[..read]);
-                    continue;
-                }
-                if let Some(status) = process
+                let mut input = process
                     .0
-                    .try_wait()
-                    .map_err(|_| HistoryListenerError::CaptureFailed)?
-                {
-                    if !status.success() {
-                        return Err(HistoryListenerError::CaptureFailed);
+                    .stdin
+                    .take()
+                    .ok_or(HistoryListenerError::CaptureFailed)?;
+                // helper在此之前只读授权管道；Job绑定失败或父退出均不允许触碰剪贴板。
+                input
+                    .write_all(crate::clipboard_history_child_job::CAPTURE_GATE)
+                    .and_then(|()| input.flush())
+                    .map_err(|_| HistoryListenerError::CaptureFailed)?;
+                drop(input);
+                let mut stdout = process
+                    .0
+                    .stdout
+                    .take()
+                    .ok_or(HistoryListenerError::CaptureFailed)?;
+                let mut bytes = Vec::with_capacity(4096);
+                loop {
+                    if stop.load(Ordering::Acquire) {
+                        return Err(HistoryListenerError::CaptureCancelled);
                     }
-                    return decode_reply(&bytes);
+                    if Instant::now() >= deadline {
+                        return Err(HistoryListenerError::CaptureTimedOut);
+                    }
+                    let mut available = 0;
+                    let peek = unsafe {
+                        PeekNamedPipe(
+                            stdout.as_raw_handle(),
+                            std::ptr::null_mut(),
+                            0,
+                            std::ptr::null_mut(),
+                            &mut available,
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    if peek != 0 && available > 0 {
+                        if bytes.len() == MAX_FRAME {
+                            return Err(HistoryListenerError::InvalidReply);
+                        }
+                        let mut buffer = [0; 4096];
+                        let count = (available as usize)
+                            .min(buffer.len())
+                            .min(MAX_FRAME - bytes.len());
+                        let read = stdout
+                            .read(&mut buffer[..count])
+                            .map_err(|_| HistoryListenerError::CaptureFailed)?;
+                        if read == 0 {
+                            return Err(HistoryListenerError::InvalidReply);
+                        }
+                        bytes.extend_from_slice(&buffer[..read]);
+                        continue;
+                    }
+                    if let Some(status) = process
+                        .0
+                        .try_wait()
+                        .map_err(|_| HistoryListenerError::CaptureFailed)?
+                    {
+                        if !status.success() {
+                            return Err(HistoryListenerError::CaptureFailed);
+                        }
+                        return decode_reply(&bytes);
+                    }
+                    thread::sleep(Duration::from_millis(5));
                 }
-                thread::sleep(Duration::from_millis(5));
-            }
+            })();
+            // 清理失败优先返回；helpers_finished只在实际wait成功后增加。
+            process.finish().and(result)
         }
     }
 
@@ -1275,6 +1326,21 @@ mod native {
             return Err(HistoryListenerError::ScopeMismatch);
         }
         Ok(scope)
+    }
+
+    /// 内部受管一次性入口；未收到固定授权帧时不进入scope或读取剪贴板。
+    /// 原run_clipboard_history_capture_helper保持直接读取含义，显式调用方自行拥有生命周期。
+    pub fn run_clipboard_history_gated_capture_helper(
+        station: &str,
+        desktop: &str,
+        previous: u32,
+    ) -> i32 {
+        if crate::clipboard_history_child_job::await_capture_gate(&mut std::io::stdin().lock())
+            .is_err()
+        {
+            return 2;
+        }
+        run_clipboard_history_capture_helper(station, desktop, previous)
     }
 
     /// 仅用于应用内部辅助进程入口。接线方须在任何 UI、插件和脚本初始化之前调用。

@@ -4,7 +4,7 @@
 
 use omnitrigger_windows::{ClipboardHistoryListener, HistoryText};
 use std::ffi::c_void;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -31,6 +31,8 @@ use windows::{
 #[path = "support/private_clipboard.rs"]
 mod private_clipboard;
 use private_clipboard::PrivateClipboard;
+#[path = "../src/clipboard_history_child_job.rs"]
+mod job_support;
 
 #[link(name = "user32")]
 unsafe extern "system" {
@@ -285,18 +287,24 @@ impl Drop for OwnedHelper {
 }
 
 fn helper_frame(station: &str, desktop: &str, previous: u32) -> Vec<u8> {
+    let job = job_support::HistoryChildJob::new().unwrap();
     let process = Command::new(executable())
-        .arg("--omni-clipboard-history-capture")
+        .arg("--omni-clipboard-history-capture-gated")
         .arg(station)
         .arg(desktop)
         .arg(previous.to_string())
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .creation_flags(0x0800_0000)
         .spawn()
         .unwrap();
     let mut process = OwnedHelper(Some(process));
+    job.assign(process.0.as_ref().unwrap()).unwrap();
+    let mut input = process.0.as_mut().unwrap().stdin.take().unwrap();
+    input.write_all(job_support::CAPTURE_GATE).unwrap();
+    input.flush().unwrap();
+    drop(input);
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         if let Some(status) = process.0.as_mut().unwrap().try_wait().unwrap() {
