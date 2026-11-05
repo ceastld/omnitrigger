@@ -58,7 +58,6 @@ def mouse_requirements(rule):
         control = {"kind":"modifier_key", "key":key, "side":side, "family":family}
     elif type(key) is int and 7 <= key <= 254:
         control = {"kind":"captured_keyboard_key", "key":key}
-        gaps.append("mouse_keyboard_capture_ownership")
     else:
         control = {"kind":"unknown", "value":key}
         gaps.append("mouse_control_key_semantics")
@@ -81,6 +80,11 @@ def mouse_requirements(rule):
                                            ["source_async_modifier_sampling_unavailable",
                                             "source_async_modifier_path_can_allow_extra_keyboard_keys"])
         result["semantic_differences"].append("source_checks_captured_mouse_buttons_not_all_physical_buttons")
+    if control["kind"] == "captured_keyboard_key":
+        result["projection_policy"] = {"kind":"mouse_captured_leader", "creates_capture":False,
+            "requires_active_leader":control["key"], "source_equivalence":False}
+        result["semantic_differences"] = ["source_keyboard_session_contract_review",
+            "source_checks_mouse_session_captures_not_all_owned_releases"]
     return result
 
 
@@ -133,7 +137,8 @@ def mouse_trigger(rule, settings, *, priority=None):
     control_kind = requirements["control"]["kind"]
     keyboard_control = control_kind in ("modifier_key", "modifier_family")
     observed_control = keyboard_control or control_kind == "unmodified"
-    control = None if observed_control else requirements["control"]["button"]
+    captured_leader = control_kind == "captured_keyboard_key"
+    control = None if observed_control or captured_leader else requirements["control"]["button"]
     if kind == 4:
         mouse_button = rule.get("MouseButton")
         button = ({1048576:"left",2097152:"right",4194304:"middle",8388608:"x1",16777216:"x2"}.get(mouse_button)
@@ -161,14 +166,14 @@ def mouse_trigger(rule, settings, *, priority=None):
     scope = {"identity":"shell_context"}
     if allow: scope["allow"]=allow
     if deny: scope["deny"]=deny
-    held = ([{"kind":"key", "value":rule["ControlKey"]}] if keyboard_control
+    held = ([{"kind":"key", "value":rule["ControlKey"]}] if keyboard_control or captured_leader
             else [] if observed_control else [{"kind":control}])
     trigger = {"held":held,"activation":activation,"pointer_scope":scope}
     if requirements["region"]["kind"] == "screen_edge":
         trigger["conditions"] = [{"kind":"pointer_region", "region":{
             "kind":"screen_boundary", "edge":requirements["region"]["edge"]}}]
-    if observed_control:
-        matching = {"kind":"mouse_exact"}
+    if observed_control or captured_leader:
+        matching = {"kind":"mouse_captured_leader" if captured_leader else "mouse_exact"}
         if priority is not None:
             if type(priority) is not int or not 0 <= priority < 512:
                 return unavailable(["mouse_rule_order_invalid"])
@@ -176,13 +181,18 @@ def mouse_trigger(rule, settings, *, priority=None):
             matching["pointer_scope_priority"] = False
         trigger["keyboard"]={"matching":matching}
     if kind in (11,12): trigger["wheel"]="packet"
-    reviews = (["mouse_modifier_capture_delivery_review", "mouse_modifier_state_sampling", "mouse_other_held_keys_review"]
+    reviews = (["mouse_existing_captured_leader_dependency", "mouse_owner_lifecycle_review"] if captured_leader else
+               ["mouse_modifier_capture_delivery_review", "mouse_modifier_state_sampling", "mouse_other_held_keys_review"]
                if keyboard_control else ["mouse_unmodified_source_ownership_review", "mouse_virtual_control_state_review",
                                          "mouse_other_held_keys_review"] if observed_control
                else ["mouse_prefix_lifecycle_review"])
     if requirements["region"]["kind"] == "screen_edge":
         reviews.append("mouse_region_rule_priority_review" if priority is None else "mouse_builtin_rule_precedence_review")
-    return {"trigger":trigger,"trigger_gaps":reviews + ["mouse_other_held_buttons_review",
+    result = {"trigger":trigger,"trigger_gaps":reviews + ["mouse_other_held_buttons_review",
         "mouse_queue_drop_delay_review", "pointer_host_identity_mapping", "pointer_context_sampling"],
         "source_requirements":requirements,
         "source_normalizations":[{"kind":"mouse_whitelist_precedence","bypasses_blacklists":bool(allow)}]}
+    if captured_leader:
+        result["trigger_dependencies"] = [{"kind":"existing_keyboard_leader","key":rule["ControlKey"],
+            "creates_capture":False}]
+    return result

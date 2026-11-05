@@ -3560,6 +3560,8 @@ impl Workspace {
                         "保留原功能层"
                     } else if binding.spec.keyboard.matching.is_mouse_exact() {
                         "鼠标修饰键观察"
+                    } else if binding.spec.keyboard.matching.is_mouse_captured_leader() {
+                        "鼠标捕获会话引用"
                     } else {
                         ""
                     },
@@ -3932,13 +3934,18 @@ impl Workspace {
                 }))
             })
             .when_some(match spec.keyboard.matching {
-                omnitrigger_core::KeyboardMatching::MouseExact { priority, .. } => Some(priority),
+                omnitrigger_core::KeyboardMatching::MouseExact { priority, .. }
+                | omnitrigger_core::KeyboardMatching::MouseCapturedLeader { priority, .. } => Some(priority),
                 _ => None,
             }, |element, priority| {
                 element.child(caption(format!("鼠标匹配顺序：{priority}（同应用优先级内，数值越小越先；配置文件中设置）。")))
             })
-            .when(matches!(spec.keyboard.matching, omnitrigger_core::KeyboardMatching::MouseExact { pointer_scope_priority: false, .. }), |element| {
+            .when(matches!(spec.keyboard.matching, omnitrigger_core::KeyboardMatching::MouseExact { pointer_scope_priority: false, .. }
+                | omnitrigger_core::KeyboardMatching::MouseCapturedLeader { pointer_scope_priority: false, .. }), |element| {
                 element.child(caption("指针窗口范围仅作过滤，不提升其匹配优先级。"))
+            })
+            .when(spec.keyboard.matching.is_mouse_captured_leader(), |element| {
+                element.child(caption("仅引用已由键盘层捕获的引导会话；此鼠标规则不会自行捕获按键，透传或已取消的旧按压不能触发。"))
             })
             .when_some(spec.keyboard.dedicated_prefix, |element, button| {
                 let name = theme::caps_for_buttons(&[button])[0].label.clone();
@@ -5996,6 +6003,21 @@ fn smoke_test() -> Result<(), String> {
         ..Default::default()
     };
     bindings.push(retained);
+    for leader in [134, 135] {
+        let mut observer = bindings[0].clone();
+        observer.spec.id = settings::next_id(&bindings);
+        observer.spec.held = vec![Button::Key(leader)];
+        observer.spec.activation = Activation::Wheel(omnitrigger_core::WheelDirection::Right);
+        observer.spec.wheel = omnitrigger_core::WheelPolicy::Packet;
+        observer.spec.keyboard = omnitrigger_core::KeyboardPolicy {
+            matching: omnitrigger_core::KeyboardMatching::MouseCapturedLeader {
+                priority: 0,
+                pointer_scope_priority: false,
+            },
+            ..Default::default()
+        };
+        bindings.push(observer);
+    }
     for binding in &mut bindings {
         if binding.spec.held.contains(&Button::Key(20)) {
             binding.spec.keyboard = omnitrigger_core::KeyboardPolicy {
@@ -6045,7 +6067,7 @@ fn smoke_test() -> Result<(), String> {
     }
     backend.send(BackendCommand::SetEnabled(false))?;
     drop(backend);
-    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; scoped/pointer-scope/shell-context/dedicated/retained/repeat/contextual-terminal/captured registrations valid; foreground and pointer process/window role resolved outside hooks.");
+    println!("OmniTrigger smoke test: keyboard/mouse hooks installed and cleanly removed; scoped/pointer-scope/shell-context/dedicated/retained/repeat/contextual-terminal/captured/mouse-leader registrations valid; foreground and pointer process/window role resolved outside hooks.");
     Ok(())
 }
 

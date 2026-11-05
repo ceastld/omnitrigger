@@ -73,6 +73,9 @@ mod keyboard_policy_tests;
 mod mouse_matching_tests;
 
 #[cfg(test)]
+mod mouse_leader_tests;
+
+#[cfg(test)]
 mod process_scope_tests;
 
 #[cfg(test)]

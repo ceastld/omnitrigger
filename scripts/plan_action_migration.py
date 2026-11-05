@@ -476,7 +476,7 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20, body
                 continue
             identity = f"mouse:{scope}:{index}"
             projection = mouse_trigger(rule, mouse_settings, priority=priorities[index]) if scope == "global" else {"trigger":None,"trigger_gaps":["mouse_application_profile_selection"]}
-            if projection["trigger"] and projection["trigger"].get("keyboard", {}).get("matching", {}).get("kind") == "mouse_exact":
+            if projection["trigger"] and projection["trigger"].get("keyboard", {}).get("matching", {}).get("kind") in ("mouse_exact", "mouse_captured_leader"):
                 projection["source_normalizations"].append({"kind":"mouse_rule_order", "scope":scope,
                     "source_index":index, "priority":priorities[index], "missing_source_priority_default":0,
                     "pointer_whitelist_is_filter_only":True,

@@ -22,7 +22,7 @@ use crate::wheels::WheelActionRef;
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
-const CONFIG_VERSION: u32 = 20;
+const CONFIG_VERSION: u32 = 21;
 
 pub fn use_path(path: PathBuf) -> Result<(), String> {
     CUSTOM_PATH.set(path).map_err(|_| "配置路径已设置。".into())
@@ -173,6 +173,15 @@ struct RetainedPrefixDto {
 enum KeyboardMatchingDto {
     #[default]
     Exact,
+    MouseCapturedLeader {
+        #[serde(default, skip_serializing_if = "is_zero_priority")]
+        priority: u16,
+        #[serde(
+            default = "default_pointer_priority",
+            skip_serializing_if = "has_pointer_priority"
+        )]
+        pointer_scope_priority: bool,
+    },
     MouseExact {
         #[serde(default, skip_serializing_if = "is_zero_priority")]
         priority: u16,
@@ -204,6 +213,13 @@ impl From<KeyboardMatching> for KeyboardMatchingDto {
     fn from(value: KeyboardMatching) -> Self {
         match value {
             KeyboardMatching::Exact => Self::Exact,
+            KeyboardMatching::MouseCapturedLeader {
+                priority,
+                pointer_scope_priority,
+            } => Self::MouseCapturedLeader {
+                priority,
+                pointer_scope_priority,
+            },
             KeyboardMatching::MouseExact {
                 priority,
                 pointer_scope_priority,
@@ -219,6 +235,13 @@ impl From<KeyboardMatchingDto> for KeyboardMatching {
     fn from(value: KeyboardMatchingDto) -> Self {
         match value {
             KeyboardMatchingDto::Exact => Self::Exact,
+            KeyboardMatchingDto::MouseCapturedLeader {
+                priority,
+                pointer_scope_priority,
+            } => Self::MouseCapturedLeader {
+                priority,
+                pointer_scope_priority,
+            },
             KeyboardMatchingDto::MouseExact {
                 priority,
                 pointer_scope_priority,
@@ -439,6 +462,14 @@ impl BindingDto {
             })
         {
             return Err("显示器单像素边界需要版本 19 配置。".into());
+        }
+        if version < 21
+            && matches!(
+                self.keyboard.matching,
+                KeyboardMatchingDto::MouseCapturedLeader { .. }
+            )
+        {
+            return Err("鼠标捕获会话引用需要版本 21 配置。".into());
         }
         if version < 20
             && matches!(
@@ -837,6 +868,19 @@ pub fn check_candidate(bindings: &[Binding], spec: &TriggerSpec) -> Result<(), C
 pub fn validate(bindings: &[Binding]) -> Result<(), String> {
     // 禁用项也需要有效、唯一，以免启用时才发现存储中存在冲突。
     Engine::new(bindings.iter().map(|b| b.spec.clone()).collect()).map_err(|e| e.to_string())?;
+    if bindings
+        .iter()
+        .any(|binding| binding.enabled && binding.spec.keyboard.matching.is_mouse_captured_leader())
+    {
+        Engine::new(
+            bindings
+                .iter()
+                .filter(|binding| binding.enabled)
+                .map(|b| b.spec.clone())
+                .collect(),
+        )
+        .map_err(|e| e.to_string())?;
+    }
     if bindings.iter().any(|b| bare_primary_click(&b.spec)) {
         return Err("鼠标左键或右键请与其他键组合使用，以便仍可操作界面。".into());
     }
@@ -2462,6 +2506,37 @@ mod tests {
             value["bindings"][3]["action"],
             json!({"kind":"adjust_system","target":"brightness","delta_percent":-100})
         );
+    }
+
+    #[test]
+    fn mouse_captured_leader_round_trip_requires_v21_and_an_enabled_owner() {
+        let mut document: serde_json::Value =
+            serde_json::from_str(include_str!("../../../examples/mouse-captured-leader.json"))
+                .unwrap();
+        let decoded = decode(&document.to_string()).unwrap();
+        assert_eq!(decoded.len(), 6);
+        assert!(decoded[2].spec.keyboard.matching.is_mouse_captured_leader());
+        assert_eq!(decode(&encode(&decoded)).unwrap(), decoded);
+        for version in 18..21 {
+            document["version"] = version.into();
+            assert_eq!(
+                decode(&document.to_string()).unwrap_err(),
+                "鼠标捕获会话引用需要版本 21 配置。"
+            );
+        }
+        document["version"] = 21.into();
+        document["bindings"][2]["enabled"] = true.into();
+        assert!(decode(&document.to_string())
+            .unwrap_err()
+            .contains("缺少对应的键盘引导层"));
+        document["bindings"][0]["enabled"] = true.into();
+        assert!(decode(&document.to_string()).is_ok());
+        document["bindings"][4]["enabled"] = true.into();
+        assert!(decode(&document.to_string()).is_err());
+        document["bindings"][1]["enabled"] = true.into();
+        assert!(decode(&document.to_string()).is_ok());
+        document["bindings"][2]["keyboard"]["matching"]["priority"] = 512.into();
+        assert!(decode(&document.to_string()).is_err());
     }
 
     #[test]

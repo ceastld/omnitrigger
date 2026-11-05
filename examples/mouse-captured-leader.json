@@ -1,0 +1,74 @@
+{
+  "version": 21,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [{"kind": "key", "value": 20}],
+      "activation": {"kind": "press", "value": {"kind": "key", "value": 71}},
+      "keyboard": {
+        "dedicated_prefix": {"kind": "key", "value": 20},
+        "matching": {"kind": "captured", "priority": 0}
+      },
+      "message": "CapsLock 键盘引导层示例",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    },
+    {
+      "id": 2,
+      "held": [{"kind": "key", "value": 32}],
+      "activation": {"kind": "press", "value": {"kind": "key", "value": 71}},
+      "keyboard": {
+        "retained_prefix": {
+          "key": {"kind": "key", "value": 32},
+          "quiet_ms": 50,
+          "fast_ms": 50,
+          "capture_scope": {}
+        },
+        "matching": {"kind": "captured", "priority": 0},
+        "restore_on_tap": true,
+        "tap_timeout_ms": 1500
+      },
+      "message": "保留空格原功能的键盘引导层示例",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    },
+    {
+      "id": 3,
+      "held": [{"kind": "key", "value": 20}],
+      "activation": {"kind": "wheel_up"},
+      "wheel": "packet",
+      "keyboard": {"matching": {"kind": "mouse_captured_leader", "priority": 0}},
+      "message": "CapsLock 会话内上滚",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    },
+    {
+      "id": 4,
+      "held": [{"kind": "key", "value": 20}],
+      "activation": {"kind": "wheel_down"},
+      "wheel": "packet",
+      "keyboard": {"matching": {"kind": "mouse_captured_leader", "priority": 1}},
+      "message": "CapsLock 会话内下滚",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    },
+    {
+      "id": 5,
+      "held": [{"kind": "key", "value": 32}],
+      "activation": {"kind": "press", "value": {"kind": "x2"}},
+      "keyboard": {"matching": {"kind": "mouse_captured_leader", "priority": 2}},
+      "message": "空格会话内侧键 2",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    },
+    {
+      "id": 6,
+      "held": [{"kind": "key", "value": 20}],
+      "activation": {"kind": "press", "value": {"kind": "x2"}},
+      "keyboard": {"matching": {"kind": "mouse_captured_leader", "priority": 3}},
+      "message": "CapsLock 会话内侧键 2",
+      "enabled": false,
+      "action": {"kind": "notification"}
+    }
+  ]
+}

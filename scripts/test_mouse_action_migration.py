@@ -76,9 +76,12 @@ class MouseMigrationTests(unittest.TestCase):
             self.assertIn('mouse_other_held_keys_review', result['trigger_gaps'])
         for key in (20, 32):
             result = mouse_trigger(dict(rule(), ControlKey=key), settings())
-            self.assertIsNone(result['trigger'])
+            self.assertEqual(result['trigger']['held'], [{'kind':'key','value':key}])
+            self.assertEqual(result['trigger']['keyboard']['matching'], {'kind':'mouse_captured_leader'})
             self.assertEqual(result['source_requirements']['control'], {'kind':'captured_keyboard_key','key':key})
-            self.assertIn('mouse_keyboard_capture_ownership', result['trigger_gaps'])
+            self.assertIn('mouse_existing_captured_leader_dependency', result['trigger_gaps'])
+            self.assertEqual(result['trigger_dependencies'], [{'kind':'existing_keyboard_leader','key':key,'creates_capture':False}])
+            self.assertFalse(result['source_requirements']['projection_policy']['source_equivalence'])
         for value in (True, 164.0, '164', {}, -1):
             result = mouse_trigger(dict(rule(), ControlKey=value), settings())
             self.assertIsNone(result['trigger'])
@@ -111,6 +114,22 @@ class MouseMigrationTests(unittest.TestCase):
             self.assertIn('mouse_virtual_control_state_review', result['trigger_gaps'])
             self.assertEqual(result['source_requirements']['projection_policy']['extra_held_inputs'], 'exclude')
             self.assertFalse(result['source_requirements']['projection_policy']['source_equivalence'])
+
+    def test_four_captured_leader_shapes_keep_dependencies_in_the_plan(self):
+        rows=[dict(rule(11),ControlKey=20),dict(rule(12),ControlKey=20),
+              dict(rule(4),ControlKey=32,MouseButton=16777216),
+              dict(rule(4),ControlKey=20,MouseButton=16777216)]
+        data=fixture();data['source']['MouseActions']=rows
+        projected=[r for r in build_plan(**data,mouse_settings=settings())['bindings'] if r['kind']=='mouse']
+        self.assertEqual([r['trigger']['held'][0]['value'] for r in projected],[20,20,32,20])
+        self.assertEqual([r['trigger']['activation'] for r in projected],
+                         [{'kind':'wheel_up'},{'kind':'wheel_down'},
+                          {'kind':'press','value':{'kind':'x2'}},{'kind':'press','value':{'kind':'x2'}}])
+        for row in projected:
+            self.assertEqual(row['trigger']['keyboard']['matching']['kind'],'mouse_captured_leader')
+            self.assertEqual(row['trigger_dependencies'][0]['creates_capture'],False)
+            self.assertIn('mouse_existing_captured_leader_dependency',row['trigger_gaps'])
+            self.assertEqual(row['equivalent_configuration_ids'],[])
 
     def test_supported_modifier_projection_never_claims_source_or_existing_binding_equivalence(self):
         data = fixture()

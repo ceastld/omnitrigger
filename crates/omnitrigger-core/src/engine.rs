@@ -740,7 +740,7 @@ impl Engine {
             eligible
                 && self.candidates().any(|binding| {
                     binding.keyboard.retained_prefix.is_none()
-                        && !binding.keyboard.matching.is_mouse_exact()
+                        && !binding.keyboard.matching.is_mouse_rule()
                         && binding.held.contains(&button)
                         && self.conditions_match(binding)
                         && self
@@ -1046,6 +1046,27 @@ impl Engine {
     }
 
     fn binding_held_matches(&self, binding: &TriggerSpec) -> bool {
+        if binding.keyboard.matching.is_mouse_captured_leader() {
+            let Some(&leader) = binding.held.first() else {
+                return false;
+            };
+            return self.dedicated_leader == Some(leader)
+                && matches!(
+                    self.pressed.get(&leader),
+                    Some(PressState::Consumed | PressState::Observed)
+                )
+                && self
+                    .layer_owner
+                    .zip(self.dedicated_index(leader))
+                    .is_some_and(|(owner, current)| {
+                        self.bindings[owner]
+                            .keyboard
+                            .same_layer(&self.bindings[current].keyboard)
+                    })
+                && self.pressed.iter().all(|(&button, &state)| {
+                    !matches!(button, Button::Mouse(_)) || state == PressState::Passed
+                });
+        }
         if binding.keyboard.matching.is_mouse_exact() {
             return binding.held.iter().all(|&required| {
                 self.pressed
@@ -1085,7 +1106,7 @@ impl Engine {
             binding.id == id
                 && (!binding.conditions.is_empty()
                     || !binding.pointer_scope.is_global()
-                    || binding.keyboard.matching.is_mouse_exact()
+                    || binding.keyboard.matching.is_mouse_rule()
                     || binding.keyboard.prefix().is_some())
         })
     }
@@ -1095,7 +1116,7 @@ impl Engine {
             self.wheel[index] != 0
                 && owner.is_some_and(|id| {
                     self.bindings.iter().any(|binding| {
-                        binding.id == id && binding.keyboard.matching.is_mouse_exact()
+                        binding.id == id && binding.keyboard.matching.is_mouse_rule()
                     })
                 })
         })
@@ -1122,7 +1143,7 @@ impl Engine {
         let Activation::Wheel(direction) = binding.activation else {
             return false;
         };
-        binding.keyboard.matching.is_mouse_exact()
+        binding.keyboard.matching.is_mouse_rule()
             && self.selected_wheel(direction).map(|candidate| candidate.id) != Some(id)
     }
 
@@ -1199,7 +1220,8 @@ impl Engine {
                 .values()
                 .any(|state| *state == PressState::Pending)
             && !self.candidates().any(|binding| {
-                self.conditions_match(binding)
+                !binding.keyboard.matching.is_mouse_rule()
+                    && self.conditions_match(binding)
                     && self
                         .pressed
                         .keys()

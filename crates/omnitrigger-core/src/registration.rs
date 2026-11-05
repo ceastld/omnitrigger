@@ -13,6 +13,13 @@ pub const MAX_BINDINGS: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistrationError {
+    InvalidMouseCapturedLeader {
+        id: u64,
+    },
+    MissingCapturedLeader {
+        id: u64,
+        button: Button,
+    },
     InvalidMousePriority {
         id: u64,
         priority: u16,
@@ -123,6 +130,8 @@ pub enum RegistrationError {
 impl fmt::Display for RegistrationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::InvalidMouseCapturedLeader { .. } => "鼠标会话引用仅支持鼠标按下或滚轮，held 须为一个明确的非修饰键，不能同时建立捕获层、重复或单按恢复。",
+            Self::MissingCapturedLeader { .. } => "鼠标规则缺少对应的键盘引导层，请先配置同一引导键的专用层或保留原功能层。",
             Self::InvalidMousePriority { .. } => "鼠标匹配顺序须为 0 至 511，数值越小越先匹配。",
             Self::InvalidMouseMatching { .. } => "鼠标精确观察模式仅支持鼠标按下或滚轮，held 为空或一个修饰键，不能同时配置键盘捕获层、重复或单按恢复。",
             Self::ConflictingModifierDelivery { .. } => "同一修饰键在重叠范围内同时用于鼠标观察和输入捕获，请分开其范围或统一交付策略。",
@@ -188,13 +197,30 @@ pub(super) fn validate(
     }
     let mut ids = BTreeSet::new();
     for binding in &mut bindings {
-        if let crate::KeyboardMatching::MouseExact { priority, .. } = binding.keyboard.matching
-            && usize::from(priority) >= MAX_BINDINGS
+        if binding.keyboard.matching.is_mouse_rule()
+            && usize::from(binding.keyboard.matching.priority()) >= MAX_BINDINGS
         {
             return Err(RegistrationError::InvalidMousePriority {
                 id: binding.id,
-                priority,
+                priority: binding.keyboard.matching.priority(),
             });
+        }
+        if binding.keyboard.matching.is_mouse_captured_leader()
+            && (binding.held.len() != 1
+                || !binding.held.iter().all(|&button| {
+                    matches!(button, Button::Key(1..=254)) && !crate::model::is_modifier(button)
+                })
+                || !matches!(
+                    binding.activation,
+                    Activation::Press(Button::Mouse(_)) | Activation::Wheel(_)
+                )
+                || binding.keyboard.prefix().is_some()
+                || binding.keyboard.repeat
+                || binding.keyboard.restore_on_tap
+                || binding.keyboard.tap_timeout_ms.is_some()
+                || !binding.keyboard.tap_scope.is_global())
+        {
+            return Err(RegistrationError::InvalidMouseCapturedLeader { id: binding.id });
         }
         if binding.keyboard.matching.is_mouse_exact()
             && (binding.held.len() > 1
@@ -374,6 +400,18 @@ pub(super) fn validate(
             return Err(RegistrationError::TerminalInHeld { id: binding.id });
         }
     }
+    for binding in &bindings {
+        if binding.keyboard.matching.is_mouse_captured_leader()
+            && !bindings
+                .iter()
+                .any(|owner| owner.keyboard.prefix() == Some(binding.held[0]))
+        {
+            return Err(RegistrationError::MissingCapturedLeader {
+                id: binding.id,
+                button: binding.held[0],
+            });
+        }
+    }
     for (index, left) in bindings.iter().enumerate() {
         for right in bindings.iter().skip(index + 1) {
             if left.scopes_overlap(right)
@@ -399,6 +437,7 @@ pub(super) fn validate(
             for (retained, other) in [(left, right), (right, left)] {
                 if let Some(policy) = retained.keyboard.retained_prefix.as_ref()
                     && other.keyboard.retained_prefix.is_none()
+                    && !other.keyboard.matching.is_mouse_captured_leader()
                     && other.held.contains(&policy.key)
                     && policy.capture_scope.overlaps(&other.process_scope)
                     && regions::conditions_overlap(&retained.conditions, &other.conditions)
@@ -432,6 +471,7 @@ pub(super) fn validate(
                 for (layer, other) in [(left, right), (right, left)] {
                     if let Some(button) = layer.keyboard.prefix()
                         && other.held.contains(&button)
+                        && !other.keyboard.matching.is_mouse_captured_leader()
                         && !other.keyboard.same_layer(&layer.keyboard)
                         && !(layer.keyboard.matching.is_captured()
                             && other.keyboard.matching.is_captured()
@@ -451,7 +491,7 @@ pub(super) fn validate(
                 && right.keyboard.matching.is_captured()
                 && left.keyboard.prefix() == right.keyboard.prefix();
             let ordered_mouse_pair =
-                left.keyboard.matching.is_mouse_exact() && right.keyboard.matching.is_mouse_exact();
+                left.keyboard.matching.is_mouse_rule() && right.keyboard.matching.is_mouse_rule();
             if captured_pair
                 && same_button
                 && left.keyboard.matching.priority() == right.keyboard.matching.priority()

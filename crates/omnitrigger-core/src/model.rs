@@ -132,6 +132,9 @@ impl TriggerSpec {
                 KeyboardMatching::MouseExact {
                     pointer_scope_priority: false,
                     ..
+                } | KeyboardMatching::MouseCapturedLeader {
+                    pointer_scope_priority: false,
+                    ..
                 }
             ) {
                 0
@@ -218,9 +221,23 @@ pub enum KeyboardMatching {
         priority: u16,
         pointer_scope_priority: bool,
     },
+    /// 只引用已经由键盘层建立的引导会话；held 为一个明确的非修饰键。
+    /// 不发起捕获、不借用透传或收尾中的旧按压，额外键盘输入由原层策略处理。
+    MouseCapturedLeader {
+        priority: u16,
+        pointer_scope_priority: bool,
+    },
 }
 
 impl KeyboardMatching {
+    pub fn is_mouse_captured_leader(self) -> bool {
+        matches!(self, Self::MouseCapturedLeader { .. })
+    }
+
+    pub fn is_mouse_rule(self) -> bool {
+        self.is_mouse_exact() || self.is_mouse_captured_leader()
+    }
+
     pub fn is_mouse_exact(self) -> bool {
         matches!(self, Self::MouseExact { .. })
     }
@@ -232,7 +249,9 @@ impl KeyboardMatching {
     pub(crate) fn priority(self) -> u16 {
         match self {
             Self::Exact => 0,
-            Self::Captured { priority } | Self::MouseExact { priority, .. } => priority,
+            Self::Captured { priority }
+            | Self::MouseExact { priority, .. }
+            | Self::MouseCapturedLeader { priority, .. } => priority,
         }
     }
 }
