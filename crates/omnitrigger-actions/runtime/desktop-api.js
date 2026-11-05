@@ -59,7 +59,8 @@ function createDesktopApi(invoke) {
         const kind = value?.kind;
         const files = kind === 'files';
         const fields = ['kind', files ? 'paths' : 'text', 'sequenceNumber', ...(copy ? ['changed'] : [])];
-        if (!exactDataFields(value, fields) || !['text','files'].includes(kind)) throw new Error();
+        if (!exactDataFields(value, fields) || !['text','files'].includes(kind)
+            || (copy && params.format !== undefined && params.format !== kind)) throw new Error();
         const sequenceNumber = value.sequenceNumber;
         const changed = copy ? value.changed : undefined;
         if (!Number.isInteger(sequenceNumber) || sequenceNumber < 0 || sequenceNumber > 0xffffffff
@@ -134,13 +135,15 @@ function createDesktopApi(invoke) {
       try {
         const options = args[0] === undefined ? {} : args[0];
         if (args.length > 1 || options === null || typeof options !== 'object' || Array.isArray(options)
-            || Reflect.ownKeys(options).some(key => !['timeoutMs','pollIntervalMs','settleMs','allowUnchanged'].includes(key))) throw new Error();
-        const {timeoutMs = 600, pollIntervalMs = 15, settleMs = 30, allowUnchanged = false} = options;
+            || Reflect.ownKeys(options).some(key => !['timeoutMs','pollIntervalMs','settleMs','allowUnchanged','format'].includes(key))) throw new Error();
+        const {timeoutMs = 600, pollIntervalMs = 15, settleMs = 30, allowUnchanged = false, format = 'auto'} = options;
         if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5000
             || !Number.isInteger(pollIntervalMs) || pollIntervalMs < 1 || pollIntervalMs > 1000 || pollIntervalMs > timeoutMs
-            || !Number.isInteger(settleMs) || settleMs < 0 || settleMs > 1000 || typeof allowUnchanged !== 'boolean') throw new Error();
-        params = {timeout_ms:timeoutMs,poll_interval_ms:pollIntervalMs,settle_ms:settleMs,allow_unchanged:allowUnchanged};
-      } catch (_) { invalid(method, '复制选区数据只接受有效的 timeoutMs、pollIntervalMs、settleMs 和 allowUnchanged。'); }
+            || !Number.isInteger(settleMs) || settleMs < 0 || settleMs > 1000 || typeof allowUnchanged !== 'boolean'
+            || !['auto','text','files'].includes(format)) throw new Error();
+        params = {timeout_ms:timeoutMs,poll_interval_ms:pollIntervalMs,settle_ms:settleMs,allow_unchanged:allowUnchanged,
+          ...(format === 'auto' ? {} : {format})};
+      } catch (_) { invalid(method, '复制选区数据只接受有效的 timeoutMs、pollIntervalMs、settleMs、allowUnchanged 和 format。'); }
       return dataCall(method, params);
     },
     windowAction: operation => {

@@ -56,13 +56,15 @@ export interface NotifyOptions {
   durationMs?: number;
 }
 export type NotifyResult = {submitted: true};
-/** 文本优先，包括空文本。sequenceNumber 为 u32，不证明数据生产者身份。
+/** readData()/auto 文本优先，包括空文本。sequenceNumber 为 u32，不证明数据生产者身份。
  * 文件路径仅是数据；不查询状态、不枚举或打开它们。
  */
 export type ClipboardDataSnapshot = {kind: 'text'; text: string; sequenceNumber: number}
   | {kind: 'files'; paths: string[]; sequenceNumber: number};
 export type SelectionDataSnapshot = ClipboardDataSnapshot & {changed: boolean};
 export interface SelectionCopyOptions {
+  /** 默认 auto 文本优先（含空文本）；text/files 只读取指定格式，缺失或无效均不回退。 */
+  format?: 'auto' | 'text' | 'files';
   /** 序号等待预算，默认 600，整数 1–5000；不是所有 Win32 调用的硬期限。 */
   timeoutMs?: number;
   /** 默认 15，整数 1–1000，且不得超过 timeoutMs；不自动调整默认值。 */

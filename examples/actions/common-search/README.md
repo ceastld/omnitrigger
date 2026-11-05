@@ -76,6 +76,12 @@ omnitrigger.exe --run-action <open-or-search-call.json 的绝对路径>
 
 UTF-16预算可能落在代理对中间，此时返回`query_utf16_boundary`，不向下调整上限或打开目标。显式文本为`not_started`，已复制选区后为`unknown`。有效查询仍使用`encodeURIComponent`，空格编码为`%20`；该选项只改变长度单位。成功摘要为`queryLengthUnit:"utf16"/queryUtf16Units/truncated`，不返回搜索词或URL。文件分支先于查询截断，仍原样打开完整文件路径；文件列表或数据对象不隐式转换、拼接成查询。
 
+显式 source:"files" 使用 copySelectionData({format:"files"}) 复制一次新文件列表；文本与文件格式共存时直接读取文件格式，文件格式缺失或无效时明确失败，不回退文本、读旧剪贴板或尝试字符串转换。单文件保留完整原路径并沿上述 stat/open 分支处理，不需要分隔符。
+
+多个文件必须明确传 fileListSeparator（1–32 个 UTF-16 单元的有效 Unicode、无 NUL），例如 "\n"；不提供则复制后报 file_list_separator_required，效果状态为 unknown。全部条目按原顺序连接为一条搜索文本，保留重复；不取首项、trim、排序或分别打开文件，也不把连接文本交给 stat。最多64项，原列表及含分隔符的连接文本分别最多65,536个UTF-16单元，完整数据先校验再按查询预算截断。成功摘要另含 fileCount，不含路径或搜索词。
+
+分隔符、模板和查询预算错误在复制前拒绝；文件格式/数据错误在复制后报告 unknown。目标、复制、stat 或打开接口的结构化错误原样传播，不回退；接口自身的 not_started 不代表之前没有复制效果。source:"text"/"selection" 默认行为不变；新文件列表连接是明确的调用契约。
+
 定向测试只使用内存元数据与合成选区：
 
 ```powershell

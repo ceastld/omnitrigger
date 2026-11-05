@@ -44,7 +44,9 @@ pub use clipboard_history_listener::{
 mod clipboard_data;
 #[cfg(windows)]
 pub use clipboard_data::read_clipboard_data;
-pub use clipboard_data::{ClipboardData, ClipboardDataError, ClipboardDataSnapshot};
+pub use clipboard_data::{
+    ClipboardData, ClipboardDataError, ClipboardDataFormat, ClipboardDataSnapshot,
+};
 mod mouse_modifier_sampler;
 mod selection_data;
 #[cfg(windows)]

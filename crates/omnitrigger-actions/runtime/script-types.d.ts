@@ -49,11 +49,13 @@ interface ScriptNotifyOptions {
     durationMs?: number;
 }
 type ScriptNotifyResult = {submitted: true};
-/** 文本优先（含空文本）；文件路径仅为数据，不查询或打开。序号为 u32。 */
+/** readData()/auto 文本优先（含空文本）；文件路径仅为数据，不查询或打开。序号为 u32。 */
 type ScriptClipboardDataSnapshot = {kind: 'text'; text: string; sequenceNumber: number}
     | {kind: 'files'; paths: string[]; sequenceNumber: number};
 type ScriptSelectionDataSnapshot = ScriptClipboardDataSnapshot & {changed: boolean};
 interface ScriptSelectionCopyOptions {
+    /** 默认 auto 文本优先（含空文本）；text/files 只读取指定格式，缺失或无效均不回退。 */
+    format?: 'auto' | 'text' | 'files';
     /** 默认 600，整数 1–5000；仅为序号等待预算，不是全部 Win32 调用的硬期限。 */
     timeoutMs?: number;
     /** 默认 15，整数 1–1000 且 <= timeoutMs；不自动调整。 */

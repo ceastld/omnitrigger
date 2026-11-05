@@ -13,6 +13,12 @@ function run(input, options = {}) {
             calls.push(['copy']);
             if (options.copyError) throw options.copyError;
             return options.selection ?? '合成选中文本';
+        }, copySelectionData(copyOptions) {
+            assert.deepEqual(JSON.parse(JSON.stringify(copyOptions)), {format: 'files'});
+            calls.push(['copy-data']);
+            if (options.copyDataError) throw options.copyDataError;
+            return Object.prototype.hasOwnProperty.call(options, 'fileData') ? options.fileData
+                : {kind: 'files', paths: ['C:/Synthetic/file.txt'], sequenceNumber: 7, changed: true};
         }},
         fs: options.noStat ? {} : {stat(path) {
             calls.push(['stat', path]);
@@ -282,4 +288,88 @@ test('非文本文件列表与数据对象不隐式转换为路径或查询',()=
   const copyError=Object.assign(Error('合成格式不支持'),{code:'unsupported_clipboard_format',method:'selection.copy',effectState:'unknown'});
   const out=run({source:'selection',queryLengthUnit:'utf16'},{copyError});
   assert.equal(out.error,copyError);assert.deepEqual(out.calls,[['copy']]);
+});
+
+const fileInput = extra => ({source: 'files', urlTemplate: 'https://example.invalid/search?q=%s', ...extra});
+const fileData = paths => ({kind: 'files', paths, sequenceNumber: 7, changed: true});
+test('文件列表：单文件先查完整路径，不套查询预算或要求分隔符', () => {
+    const path = 'C:/Synthetic/中😀 file.txt';
+    const out = run(fileInput({queryLengthUnit: 'utf16', maxUtf16Units: 1}), {fileData: fileData([path])});
+    assert.deepEqual(out.calls, [['copy-data'], ['stat', path], ['open', path]]);
+    assert.deepEqual(out.result, {submitted: true, source: 'files', operation: 'open-file', fileCount: 1});
+    assert.ok(!JSON.stringify(out.result).includes(path));
+});
+test('文件列表：目录缺失才查询，元数据错误原样传播且不回退', () => {
+    const path = 'C:/Synthetic/item';
+    for (const kind of ['directory', 'missing']) {
+        const out = run(fileInput({maxCodePoints: 1}), {fileData: fileData([path]), metadata: {kind}});
+        assert.deepEqual(out.calls, [['copy-data'], ['stat', path], ['open', 'https://example.invalid/search?q=C']]);
+        assert.equal(out.result.pathKind, kind); assert.equal(out.result.fileCount, 1);
+    }
+    const error = fault('access_denied');
+    const out = run(fileInput({}), {fileData: fileData([path]), statError: error});
+    assert.equal(out.error, error); assert.deepEqual(out.calls, [['copy-data'], ['stat', path]]);
+    const invalid = run(fileInput({}), {fileData: fileData(['relative.txt'])});
+    assert.equal(invalid.error.code, 'invalid_input'); assert.equal(invalid.error.effectState, 'unknown');
+    assert.deepEqual(invalid.calls, [['copy-data']]);
+});
+test('文件列表：多文件显式连接全部条目，保留顺序重复且不 stat', () => {
+    const paths = ['C:/Synthetic/b.txt', 'C:/Synthetic/a.txt', 'C:/Synthetic/b.txt'];
+    for (const separator of ['\n', '\r\n', ' | ']) {
+        const out = run(fileInput({fileListSeparator: separator, maxCodePoints: 2048}), {fileData: fileData(paths)});
+        assert.deepEqual(out.calls, [['copy-data'], ['open', 'https://example.invalid/search?q=' + encodeURIComponent(paths.join(separator))]]);
+        assert.equal(out.result.fileCount, 3); assert.equal(out.result.operation, 'search');
+        assert.ok(!JSON.stringify(out.result).includes('Synthetic'));
+    }
+});
+test('文件列表：多个文件缺少分隔符在复制后明确失败', () => {
+    const out = run(fileInput({}), {fileData: fileData(['C:/Synthetic/a', 'C:/Synthetic/b'])});
+    assert.equal(out.error.code, 'file_list_separator_required');
+    assert.equal(out.error.method, 'script.selection'); assert.equal(out.error.effectState, 'unknown');
+    assert.deepEqual(out.calls, [['copy-data']]);
+});
+test('文件列表：非法参数在复制前拒绝', () => {
+    for (const fileListSeparator of [undefined, null, false, 1, '', '\0', '\ud800', 'x'.repeat(33)]) {
+        const out = run(fileInput({fileListSeparator}));
+        assert.equal(out.error.code, 'invalid_input'); assert.equal(out.error.effectState, 'not_started');
+        assert.deepEqual(out.calls, []);
+    }
+    const out = run(fileInput({queryLengthUnit: 'utf16', maxCodePoints: 1}));
+    assert.equal(out.error.code, 'invalid_input'); assert.deepEqual(out.calls, []);
+});
+test('文件列表：空列表格式错误与无效路径数据不改读文本', () => {
+    const values = [null, {}, {kind: 'text', text: 'text priority', sequenceNumber: 7, changed: true},
+        {...fileData(['C:/Synthetic/a']), changed: false}, {...fileData(['C:/Synthetic/a']), sequenceNumber: -1},
+        fileData([1]), fileData(['']), fileData([' ']), fileData(['C:/bad\0name']), fileData(['C:/bad\ud800']),
+        fileData(Array(65).fill('C:/Synthetic/a'))];
+    for (const data of values) {
+        const out = run(fileInput({fileListSeparator: '\n'}), {fileData: data});
+        assert.equal(out.error.code, 'invalid_file_selection'); assert.equal(out.error.effectState, 'unknown');
+        assert.deepEqual(out.calls, [['copy-data']]);
+    }
+    const empty = run(fileInput({}), {fileData: fileData([])});
+    assert.equal(empty.error.code, 'empty_file_list'); assert.deepEqual(empty.calls, [['copy-data']]);
+});
+test('文件列表：复制失败原样传播，不重试不读旧剪贴板', () => {
+    for (const code of ['target_changed', 'selection_unchanged', 'unsupported_clipboard_format', 'cancelled']) {
+        const error = Object.assign(Error('合成复制错误'), {code, method: 'selection.copy_data', effectState: code === 'target_changed' ? 'not_started' : 'unknown'});
+        const out = run(fileInput({fileListSeparator: '\n'}), {copyDataError: error});
+        assert.equal(out.error, error); assert.deepEqual(out.calls, [['copy-data']]);
+    }
+});
+test('文件列表：完整数据和连接长度先于查询截断校验', () => {
+    for (const paths of [['x'.repeat(65537)], ['x'.repeat(32768), 'y'.repeat(32768)]]) {
+        const out = run(fileInput({fileListSeparator: '\n', maxCodePoints: 1}), {fileData: fileData(paths)});
+        assert.equal(out.error.code, 'file_list_too_large'); assert.equal(out.error.effectState, 'unknown');
+        assert.deepEqual(out.calls, [['copy-data']]);
+    }
+    const out = run(fileInput({fileListSeparator: '\n', maxCodePoints: 1}), {fileData: fileData(['valid', '\ud800'])});
+    assert.equal(out.error.code, 'invalid_file_selection'); assert.deepEqual(out.calls, [['copy-data']]);
+});
+test('文件列表：UTF16查询边界按已复制状态报错，无默认行为迁移', () => {
+    const out = run(fileInput({fileListSeparator: '\n', queryLengthUnit: 'utf16', maxUtf16Units: 2}), {fileData: fileData(['a😀', 'b'])});
+    assert.equal(out.error.code, 'query_utf16_boundary'); assert.equal(out.error.effectState, 'unknown');
+    assert.deepEqual(out.calls, [['copy-data']]);
+    const defaultOut = run(fileInput({fileListSeparator: '\n'}), {fileData: fileData(['😀'.repeat(65), 'b'])});
+    assert.equal(defaultOut.result.queryCodePoints, 67); assert.equal(defaultOut.result.truncated, false);
 });

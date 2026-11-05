@@ -1,5 +1,14 @@
 //! 有界剪贴板格式读取，只在动作工作线程调用；文件路径始终作为数据处理。
 
+/// auto保留文本优先；显式格式不向另一格式回退。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClipboardDataFormat {
+    #[default]
+    Auto,
+    Text,
+    Files,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardData {
     Text(String),
@@ -33,9 +42,16 @@ pub fn read_clipboard_data() -> Result<ClipboardDataSnapshot, ClipboardDataError
     reader::read_with(&mut native::Clipboard)
 }
 
+#[cfg(windows)]
+pub(crate) fn read_clipboard_data_format(
+    format: ClipboardDataFormat,
+) -> Result<ClipboardDataSnapshot, ClipboardDataError> {
+    reader::read_with_format(&mut native::Clipboard, format)
+}
+
 #[cfg(any(windows, test))]
 mod reader {
-    use super::{ClipboardData, ClipboardDataError, ClipboardDataSnapshot};
+    use super::{ClipboardData, ClipboardDataError, ClipboardDataFormat, ClipboardDataSnapshot};
 
     pub(super) const UNICODE_TEXT: u32 = 13;
     pub(super) const FILE_DROP: u32 = 15;
@@ -120,10 +136,18 @@ mod reader {
     pub(super) fn read_with(
         backend: &mut impl Backend,
     ) -> Result<ClipboardDataSnapshot, ClipboardDataError> {
+        read_with_format(backend, ClipboardDataFormat::Auto)
+    }
+
+    pub(super) fn read_with_format(
+        backend: &mut impl Backend,
+        format: ClipboardDataFormat,
+    ) -> Result<ClipboardDataSnapshot, ClipboardDataError> {
         let lease = Lease::open(backend)?;
-        let data = if lease.backend.available(UNICODE_TEXT) {
+        let data = if format != ClipboardDataFormat::Files && lease.backend.available(UNICODE_TEXT)
+        {
             ClipboardData::Text(parse_text(&lease.backend.bytes(UNICODE_TEXT)?)?)
-        } else if lease.backend.available(FILE_DROP) {
+        } else if format != ClipboardDataFormat::Text && lease.backend.available(FILE_DROP) {
             let bytes = lease.backend.bytes(FILE_DROP)?;
             ClipboardData::Files(parse_files(&bytes, |part| lease.backend.decode_ansi(part))?)
         } else {
@@ -502,6 +526,70 @@ mod reader {
                 read_with(&mut mock).unwrap().data,
                 ClipboardData::Files(vec!["x".into()])
             );
+        }
+
+        #[test]
+        fn explicit_formats_select_only_requested_data_from_mixed_formats() {
+            // 损坏的未选中格式也不能被读取。
+            let mut files = Mock {
+                text: Some(vec![1]),
+                files: Some(drop_data(true, &wide("x\0x\0\0"))),
+                ..Default::default()
+            };
+            let snapshot = read_with_format(&mut files, ClipboardDataFormat::Files).unwrap();
+            assert_eq!(
+                snapshot.data,
+                ClipboardData::Files(vec!["x".into(), "x".into()])
+            );
+            assert_eq!(snapshot.sequence_number, u32::MAX);
+            assert_eq!(files.events, ["bytes", "sequence", "close"]);
+            let mut text = Mock {
+                text: Some(wide("\0")),
+                files: Some(vec![1]),
+                ..Default::default()
+            };
+            assert_eq!(
+                read_with_format(&mut text, ClipboardDataFormat::Text)
+                    .unwrap()
+                    .data,
+                ClipboardData::Text(String::new())
+            );
+            assert_eq!(text.events, ["bytes", "sequence", "close"]);
+        }
+
+        #[test]
+        fn explicit_formats_never_fall_back_when_missing_or_malformed() {
+            for format in [ClipboardDataFormat::Text, ClipboardDataFormat::Files] {
+                let mut missing = Mock {
+                    text: (format == ClipboardDataFormat::Files).then(|| wide("other\0")),
+                    files: (format == ClipboardDataFormat::Text)
+                        .then(|| drop_data(true, &wide("other\0\0"))),
+                    ..Default::default()
+                };
+                assert_eq!(
+                    read_with_format(&mut missing, format).unwrap_err().code,
+                    "unsupported_clipboard_format"
+                );
+                assert_eq!(missing.events, ["close"]);
+                let mut malformed = Mock {
+                    text: Some(if format == ClipboardDataFormat::Text {
+                        vec![1]
+                    } else {
+                        wide("other\0")
+                    }),
+                    files: Some(if format == ClipboardDataFormat::Files {
+                        vec![1]
+                    } else {
+                        drop_data(true, &wide("other\0\0"))
+                    }),
+                    ..Default::default()
+                };
+                assert_eq!(
+                    read_with_format(&mut malformed, format).unwrap_err().code,
+                    "invalid_clipboard_data"
+                );
+                assert_eq!(malformed.events, ["bytes", "close"]);
+            }
         }
 
         #[test]

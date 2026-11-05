@@ -189,3 +189,45 @@ test('新的轻量示例显式单实例、read/copy调用与默认摘要契约',
   assert(entry.includes('ctx.clipboard.readData()') && entry.includes('ctx.desktop.copySelectionData('));
   assert(!entry.includes('console.') && !entry.includes('ctx.open(') && !entry.includes('ctx.fs.'));
 });
+
+test('复制格式：同步和Promise显式选择格式，auto保留默认wire', async () => {
+  for (const asynchronous of [false,true]) {
+    for (const format of ['auto','text','files']) {
+      const value=format==='files'?{...snapshot('files',true),changed:true}:{kind:'text',text:'',sequenceNumber:0,changed:true};
+      const {result,calls}=api(value,asynchronous);
+      assert.deepEqual(plain(await result.desktop.copySelectionData({format})),value);
+      assert.deepEqual(calls,[[copyMethod,{...defaults,...(format==='auto'?{}:{format})}]]);
+    }
+    const {result,calls}=api(snapshot('files',true),asynchronous);
+    await result.desktop.copySelectionData({format:'files',timeoutMs:400,pollIntervalMs:10,settleMs:0,allowUnchanged:true});
+    assert.deepEqual(calls,[[copyMethod,{format:'files',timeout_ms:400,poll_interval_ms:10,settle_ms:0,allow_unchanged:true}]]);
+  }
+});
+
+test('复制格式：坏参数和readData格式参数在invoke前拒绝', async () => {
+  for (const asynchronous of [false,true]) {
+    const trap=Object.defineProperty({},'format',{enumerable:true,get(){throw Error(privateText);}});
+    for (const options of [{format:null},{format:1},{format:''},{format:'AUTO'},{format:{}},trap]) {
+      const {result,calls}=api(snapshot('text',true),asynchronous);
+      await assert.rejects(async()=>result.desktop.copySelectionData(options),structured(copyMethod,'not_started','invalid_input'));
+      assert.deepEqual(calls,[]);
+    }
+    const {result,calls}=api(snapshot('files'),asynchronous);
+    await assert.rejects(async()=>result.clipboard.readData({format:'files'}),structured(readMethod,'not_started','invalid_input'));
+    assert.deepEqual(calls,[]);
+  }
+});
+
+test('复制格式：回执种类不符明确失败且不重试或降级', async () => {
+  for (const asynchronous of [false,true]) {
+    for (const [format,kind] of [['files','text'],['text','files']]) {
+      const {result,calls}=api(snapshot(kind,true),asynchronous);
+      await assert.rejects(async()=>result.desktop.copySelectionData({format}),structured(copyMethod,'unknown','invalid_response'));
+      assert.equal(calls.length,1);
+      assert.equal(calls[0][1].format,format);
+    }
+    const {result,calls}=api(Object.assign(Error(privateText),{code:'unsupported_clipboard_format',effectState:'unknown'}),asynchronous);
+    await assert.rejects(async()=>result.desktop.copySelectionData({format:'files'}),structured(copyMethod,'unknown','unsupported_clipboard_format'));
+    assert.equal(calls.length,1);
+  }
+});

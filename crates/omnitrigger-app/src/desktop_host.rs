@@ -1,9 +1,9 @@
 //! 应用向脚本提供的按次桌面上下文；不在 Hook 中读取进程或发送输入。
 use omnitrigger_actions::{ActionError, CancellationToken, NativeHost};
 use omnitrigger_windows::{
-    capture_shortcut_target, ClipboardData, ClipboardDataError, ClipboardDataSnapshot,
-    ScriptTarget, ScriptTargetSnapshot, SelectionCopyOptions, SelectionDataError,
-    SelectionDataSnapshot, ShortcutTarget,
+    capture_shortcut_target, ClipboardData, ClipboardDataError, ClipboardDataFormat,
+    ClipboardDataSnapshot, ScriptTarget, ScriptTargetSnapshot, SelectionCopyOptions,
+    SelectionDataError, SelectionDataSnapshot, ShortcutTarget,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -100,6 +100,7 @@ struct ClipboardWriteArgs {
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct CopyDataArgs {
+    format: String,
     timeout_ms: u32,
     poll_interval_ms: u32,
     settle_ms: u32,
@@ -109,6 +110,7 @@ impl Default for CopyDataArgs {
     fn default() -> Self {
         let options = SelectionCopyOptions::default();
         Self {
+            format: "auto".into(),
             timeout_ms: options.timeout_ms,
             poll_interval_ms: options.poll_interval_ms,
             settle_ms: options.settle_ms,
@@ -131,7 +133,14 @@ fn copy_data_options(params: Value) -> Result<SelectionCopyOptions, ActionError>
     {
         return Err(invalid());
     }
+    let format = match args.format.as_str() {
+        "auto" => ClipboardDataFormat::Auto,
+        "text" => ClipboardDataFormat::Text,
+        "files" => ClipboardDataFormat::Files,
+        _ => return Err(invalid()),
+    };
     let options = SelectionCopyOptions {
+        format,
         timeout_ms: args.timeout_ms,
         poll_interval_ms: args.poll_interval_ms,
         settle_ms: args.settle_ms,
@@ -549,6 +558,17 @@ mod tests {
         #[test]
         fn copy_data_defaults_and_boundaries_are_pure_and_do_not_touch_a_target() {
             let defaults = copy_data_options(json!({})).unwrap();
+            assert_eq!(defaults.format, ClipboardDataFormat::Auto);
+            for (format, expected) in [
+                ("auto", ClipboardDataFormat::Auto),
+                ("text", ClipboardDataFormat::Text),
+                ("files", ClipboardDataFormat::Files),
+            ] {
+                assert_eq!(
+                    copy_data_options(json!({"format":format})).unwrap().format,
+                    expected
+                );
+            }
             assert_eq!(
                 (
                     defaults.timeout_ms,
@@ -596,6 +616,11 @@ mod tests {
                 json!([]),
                 json!(true),
                 json!({"extra":true}),
+                json!({"format":null}),
+                json!({"format":1}),
+                json!({"format":""}),
+                json!({"format":"AUTO"}),
+                json!({"format":{}}),
                 json!({"timeout_ms":0}),
                 json!({"timeout_ms":5001}),
                 json!({"timeout_ms":u64::MAX}),

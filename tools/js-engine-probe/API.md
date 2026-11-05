@@ -92,7 +92,7 @@ function main(ctx) {
 
 ## 选区数据
 
-`copySelectionData({timeoutMs:400,pollIntervalMs:10,settleMs:0,allowUnchanged:false})` 可显式设置等待序号变化、轮询和读前等待。默认分别为 600/15/30ms，未变化时报 `selection_unchanged`；只有显式 `allowUnchanged:true` 才可返回未变化的数据。复制只发一次，结果留在剪贴板，不抢焦点、不重选目标、不恢复原内容。等待预算不保证阻塞 Win32 调用的硬期限，`changed` 只表示序号不同，不证明数据由目标生成。
+`copySelectionData({timeoutMs:400,pollIntervalMs:10,settleMs:0,allowUnchanged:false})` 可显式设置等待序号变化、轮询和读前等待。默认分别为 600/15/30ms，未变化时报 `selection_unchanged`；只有显式 `allowUnchanged:true` 才可返回未变化的数据。复制只发一次，结果留在剪贴板，不抢焦点、不重选目标、不恢复原内容。 format 可显式设为 auto/text/files，默认 auto 保持文本优先（含空文本）；text/files 仅读取指定格式，缺失或无效时明确失败，不回退另一格式。format 在发送 Ctrl+C 前校验；readData() 保持无参且文本优先。等待预算不保证阻塞 Win32 调用的硬期限，`changed` 只表示序号不同，不证明数据由目标生成。
 
 读取文本优先，允许空文本；文件列表支持 `[]`，每项必须非空。文本和路径总长各最多 65,536 个 UTF-16 单元，路径最多 64 项，不含 NUL 或孤立代理项。路径仅作为数据，不检查或打开文件；无支持格式、畸形格式或超限均明确报错。完整参数和示例见[动作包文档](../../docs/ACTION_PACKAGES.md#文本与文件列表)。
 

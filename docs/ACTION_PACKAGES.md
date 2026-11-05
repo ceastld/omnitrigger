@@ -230,6 +230,7 @@ export default async function (ctx) {
 
 | 字段 | 默认值 | 范围与含义 |
 | --- | --- | --- |
+| `format` | `"auto"` | `"auto"` 优先读取文本；`"text"`／`"files"` 只读取指定格式，缺失或无效时失败，不回退。 |
 | `timeoutMs` | 600 | 1–5000ms，等待序号变化的预算。 |
 | `pollIntervalMs` | 15 | 1–1000ms，且不超过 `timeoutMs`。 |
 | `settleMs` | 30 | 0–1000ms，读格式前的额外等待。 |

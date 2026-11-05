@@ -1,10 +1,11 @@
 //! 选区复制的有界观察流程。只在动作工作线程调用；不恢复剪贴板、不重发复制。
 #[cfg(any(windows, test))]
 use crate::clipboard_data::ClipboardDataError;
-use crate::clipboard_data::ClipboardDataSnapshot;
+use crate::clipboard_data::{ClipboardDataFormat, ClipboardDataSnapshot};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SelectionCopyOptions {
+    pub format: ClipboardDataFormat,
     pub timeout_ms: u32,
     pub poll_interval_ms: u32,
     pub settle_ms: u32,
@@ -14,6 +15,7 @@ pub struct SelectionCopyOptions {
 impl Default for SelectionCopyOptions {
     fn default() -> Self {
         Self {
+            format: ClipboardDataFormat::Auto,
             timeout_ms: 600,
             poll_interval_ms: 15,
             settle_ms: 30,
@@ -91,7 +93,10 @@ trait Backend {
     fn copy_once(&mut self) -> Result<u32, SelectionDataError>;
     fn sequence_number(&mut self) -> u32;
     fn wait_ms(&mut self, ms: u32);
-    fn read_data(&mut self) -> Result<ClipboardDataSnapshot, ClipboardDataError>;
+    fn read_data(
+        &mut self,
+        format: ClipboardDataFormat,
+    ) -> Result<ClipboardDataSnapshot, ClipboardDataError>;
 }
 
 #[cfg(any(windows, test))]
@@ -199,7 +204,7 @@ fn copy_with_backend(
         }
     }
     backend.check().map_err(|error| error.at("unknown"))?;
-    let result = backend.read_data();
+    let result = backend.read_data(options.format);
     backend.check().map_err(|error| error.at("unknown"))?;
     let clipboard =
         result.map_err(|error| SelectionDataError::new(error.code, error.message, "unknown"))?;
@@ -302,8 +307,11 @@ mod native {
         fn wait_ms(&mut self, ms: u32) {
             std::thread::sleep(Duration::from_millis(u64::from(ms)));
         }
-        fn read_data(&mut self) -> Result<ClipboardDataSnapshot, ClipboardDataError> {
-            crate::clipboard_data::read_clipboard_data()
+        fn read_data(
+            &mut self,
+            format: ClipboardDataFormat,
+        ) -> Result<ClipboardDataSnapshot, ClipboardDataError> {
+            crate::clipboard_data::read_clipboard_data_format(format)
         }
     }
 }
@@ -329,6 +337,7 @@ mod tests {
         data: ClipboardData,
         calls: Vec<&'static str>,
         waits: Vec<u32>,
+        read_formats: Vec<ClipboardDataFormat>,
         last: Option<Operation>,
         fail_after: Option<Operation>,
         guard_code: &'static str,
@@ -349,6 +358,7 @@ mod tests {
                 data: ClipboardData::Text("".into()),
                 calls: Vec::new(),
                 waits: Vec::new(),
+                read_formats: Vec::new(),
                 last: None,
                 fail_after: None,
                 guard_code: "operation_guard_failed",
@@ -420,7 +430,11 @@ mod tests {
                 .checked_add_signed(i64::from(ms) + self.wait_shift)
                 .unwrap();
         }
-        fn read_data(&mut self) -> Result<ClipboardDataSnapshot, ClipboardDataError> {
+        fn read_data(
+            &mut self,
+            format: ClipboardDataFormat,
+        ) -> Result<ClipboardDataSnapshot, ClipboardDataError> {
+            self.read_formats.push(format);
             self.calls.push("read");
             self.last = Some(Operation::Read);
             if let Some(error) = self.read_error.take() {
@@ -437,6 +451,7 @@ mod tests {
 
     fn options() -> SelectionCopyOptions {
         SelectionCopyOptions {
+            format: ClipboardDataFormat::Auto,
             timeout_ms: 10,
             poll_interval_ms: 4,
             settle_ms: 0,
@@ -455,15 +470,39 @@ mod tests {
     }
 
     #[test]
+    fn requested_format_reaches_final_read_without_extra_copy_or_sequence_change() {
+        for format in [
+            ClipboardDataFormat::Auto,
+            ClipboardDataFormat::Text,
+            ClipboardDataFormat::Files,
+        ] {
+            let mut fake = Fake::changed_immediately();
+            let snapshot = copy_with_backend(
+                SelectionCopyOptions {
+                    format,
+                    ..options()
+                },
+                &mut fake,
+            )
+            .unwrap();
+            assert!(snapshot.changed);
+            assert_eq!(snapshot.clipboard.sequence_number, 10);
+            assert_eq!(fake.read_formats, [format]);
+            assert_eq!(fake.calls.iter().filter(|call| **call == "copy").count(), 1);
+        }
+    }
+
+    #[test]
     fn options_defaults_and_every_invalid_boundary_are_checked_before_backend_access() {
         let defaults = SelectionCopyOptions::default();
         assert_eq!(
             defaults,
             SelectionCopyOptions {
+                format: ClipboardDataFormat::Auto,
                 timeout_ms: 600,
                 poll_interval_ms: 15,
                 settle_ms: 30,
-                allow_unchanged: false
+                allow_unchanged: false,
             }
         );
         assert!(defaults.validate().is_ok());
@@ -508,12 +547,14 @@ mod tests {
                 poll_interval_ms: 1,
                 settle_ms: 0,
                 allow_unchanged: true,
+                format: ClipboardDataFormat::Auto,
             },
             SelectionCopyOptions {
                 timeout_ms: 5000,
                 poll_interval_ms: 1000,
                 settle_ms: 1000,
                 allow_unchanged: false,
+                format: ClipboardDataFormat::Auto,
             },
         ] {
             assert!(valid.validate().is_ok());
