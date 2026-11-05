@@ -40,6 +40,16 @@ test('两个ActionCall均明确指定输入且与清单入口和版本一致',()
 });
 for(const asynchronous of [false,true]){
   const mode=asynchronous?'Node':'同步';
+  test(`${mode}旧宿主缺少方法时在读取输入前给出结构化错误`,async()=>{
+    let reads=0;
+    for(const desktop of [undefined,{}, {stepBrightness:null}, {stepBrightness:'unavailable'}]){
+      const ctx={desktop,get input(){reads++;throw Error('输入不应被读取');}};
+      const fault=error=>error.code==='runtime_unavailable'&&error.effectState==='not_started'&&error.method===method;
+      if(asynchronous)await assert.rejects(main(ctx),fault);
+      else assert.throws(()=>scriptMain(ctx),fault);
+    }
+    assert.equal(reads,0);
+  });
   test(`${mode}每种显式策略只发出一次原请求并保留匿名逐项回执`,async()=>{
     for(const strategy of ['physical','wmi_first','physical_then_wmi'])for(const direction of ['up','down']){
       const value=receipt(strategy);const result=await run(asynchronous,{direction,strategy},value);

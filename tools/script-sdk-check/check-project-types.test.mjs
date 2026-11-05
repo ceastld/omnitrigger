@@ -1,10 +1,11 @@
 // 全部使用本次临时合成工程，作者模块含抛错初始化器，检查过程不得执行它们。
 import assert from 'node:assert/strict';
 import {mkdtempSync,mkdirSync,readFileSync,writeFileSync,unlinkSync,linkSync} from 'node:fs';
-import {basename,dirname,join,resolve} from 'node:path';
+import {basename,dirname,join,resolve,relative,isAbsolute} from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import test from 'node:test';
+import ts from 'typescript';
 import {checkProjectTypes} from './check-project-types.mjs';
 
 const repo=resolve(dirname(fileURLToPath(import.meta.url)),'../..');
@@ -432,4 +433,39 @@ test('编译选项定位：有效生成工程的检查结果和作者代码保�
   const result=checkProjectTypes(root);
   assert.equal(result.passed,true);assert.equal(result.runtimeExecuted,false);assert.equal(result.filesModified,false);
   assert.deepEqual(readFileSync(join(root,'main.mjs')),before);
+});
+
+
+test('JSON作者环境契约：本地SDK和全部入口覆盖，六类错误仍被拒绝',()=>{
+  const packageDirectory=join(repo,'examples/actions/json-text');
+  const configPath=join(packageDirectory,'jsconfig.json');
+  const loaded=ts.readConfigFile(configPath,ts.sys.readFile);assert.equal(loaded.error,undefined);
+  const parsed=ts.parseJsonConfigFileContent(loaded.config,ts.sys,packageDirectory);assert.deepEqual(parsed.errors,[]);
+  const root=fixture(),options={...parsed.options,noEmit:true};
+  const prefix=relative(root,packageDirectory).replaceAll('\\','/');
+  function typeFixture(name) {
+    const path=join(root,name);
+    const source=readFileSync(join(repo,'tools/script-sdk-check/fixtures',name),'utf8');
+    writeFileSync(path,source.replaceAll('./package/',prefix+'/'));return path;
+  }
+  const positive=typeFixture('json-author-positive.mjs');
+  const program=ts.createProgram([...parsed.fileNames,positive],options);
+  assert.deepEqual(ts.getPreEmitDiagnostics(program),[]);
+  const files=new Set(program.getSourceFiles().map(file=>resolve(file.fileName)));
+  const inside=(parent,path)=>{const name=relative(parent,path);return name===''||!isAbsolute(name)&&name!=='..'&&!name.startsWith('../')&&!name.startsWith('..\\');};
+  const library=dirname(ts.getDefaultLibFilePath(options));
+  for(const path of files)assert(path===positive||inside(packageDirectory,path)||inside(library,path),'JSON作者声明不得回退到包外仓库源码');
+  const manifest=JSON.parse(readFileSync(join(packageDirectory,'action.json'),'utf8'));
+  for(const action of manifest.actions) {
+    const entry=resolve(packageDirectory,action.entry);assert(inside(packageDirectory,entry));assert(files.has(entry),'动作入口必须参与实际strict检查');
+  }
+  for(const name of ['json-types.d.ts','sdk/api.d.ts','sdk/script-types.d.ts','sdk/clipboard-history-api.d.ts'])assert(files.has(join(packageDirectory,name)),'本地SDK声明必须参与实际检查');
+  const negative=typeFixture('json-author-negative.mjs');
+  const diagnostics=ts.getPreEmitDiagnostics(ts.createProgram([...parsed.fileNames,negative],options));
+  const expected=[[3,2322],[5,2322],[7,2322],[9,2322],[11,18046],[13,18046]];
+  assert.equal(diagnostics.length,expected.length);
+  diagnostics.forEach((item,index)=>{
+    assert(item.file&&typeof item.start==='number');assert.equal(resolve(item.file.fileName),negative);
+    const position=item.file.getLineAndCharacterOfPosition(item.start);assert.deepEqual([position.line+1,item.code],expected[index]);
+  });
 });

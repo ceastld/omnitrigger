@@ -1,6 +1,8 @@
 import {prepare,history,sample,extract,complete,sanitized} from './workflow.mjs';
 
+/** @param {import('./selection-types').SyncContext} ctx @returns {import('./selection-types').ActionResult} */
 export function main(ctx) {
+  /** @type {import('./selection-types').Method} */
   let method = 'script.parameters';
   let copied = false;
   try {

@@ -27,3 +27,11 @@ node --test examples/actions/clipboard-history/recipes.test.mjs
 ```
 
 测试不会读取系统剪贴板、启动监听器、访问文件路径或发送真实输入。示例调用文件供开发检查；实际运行 `append` 会写入应用配置的历史存储，运行 `list` 会展示摘要，运行 `send` 会向原目标提交输入。
+
+## 编辑与静态检查
+
+用支持 JavaScript/TypeScript 的编辑器打开整个包目录。包内 jsconfig.json 为六个 Node/同步入口与共享 workflow.mjs 启用 strict checkJs。sdk/api.d.ts、sdk/script-types.d.ts 和 sdk/clipboard-history-api.d.ts 是随包提供的 API 声明快照；history-types.d.ts 描述本配方流程。所有类型引用都在包内，没有隐式全局 ctx；入口输入保持 unknown 并由原校验器检查。
+
+使用普通 TypeScript 编译器运行 tsc --project <包目录>/jsconfig.json --noEmit 即可检查全部业务模块；也可使用项目 tools/script-sdk-check/node_modules/typescript/lib/tsc.js。项目 check-project-types.mjs 另外检查清单中的同步入口和静态模块图。测试文件不属于作者 jsconfig 的入口。
+
+更新 SDK 前保留作者原快照，再选择与 App/宿主匹配的声明。替换声明不会升级运行时；静态检查也不证明历史服务或目标窗口可用。

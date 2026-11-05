@@ -1,0 +1,15 @@
+import type {ActionContext,ClipboardDataSnapshot,SelectionDataSnapshot} from './sdk/api';
+import type {ClipboardHistoryApi,AsyncClipboardHistoryApi} from './sdk/clipboard-history-api';
+export type NodeContext = Omit<ActionContext,'input'> & {readonly input:unknown};
+export type SyncContext = Omit<ScriptContext,'input'> & {readonly input:unknown};
+export type SharedContext = NodeContext|SyncContext;
+export type CopyOptions = NonNullable<Parameters<ActionContext['desktop']['copySelectionData']>[0]>;
+export type Task = {mode:'read';options:undefined;allowUnchanged:false}|{mode:'copy';options:CopyOptions|undefined;allowUnchanged:boolean};
+export type Snapshot = ClipboardDataSnapshot|SelectionDataSnapshot;
+export type SampledText = {text:string;changed?:boolean};
+export type ActionResult = {operation:'read-to-history'|'copy-to-history';saved:true;inserted:boolean;utf16Units:number;changed?:boolean};
+export type Method = 'script.parameters'|'history.append'|'selection.copy_data'|'clipboard.read_data';
+export type EffectState = 'not_started'|'unknown';
+export type FaultInfo = {code?:unknown;effectState?:unknown};
+export type ActionFault = Error & {code:string;method:Method;effectState:EffectState};
+export type {ClipboardHistoryApi,AsyncClipboardHistoryApi};

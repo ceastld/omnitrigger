@@ -18,3 +18,9 @@ node --test examples/actions/selection-history/recipes.test.mjs
 ```
 
 测试只用合成 RecordingHost。实际运行调用会访问当时剪贴板或发送复制，并写入应用指定的历史；示例不会自动安装绑定或启动监听。真实原目标、取消与存储验收需另行完成。
+
+## 编辑与静态检查
+
+用支持 JavaScript/TypeScript 的编辑器打开整个包目录。标准 jsconfig.json 为 Node/同步入口和 workflow.mjs 启用 strict checkJs；三个 sdk/*.d.ts 是包内 SDK 快照，selection-types.d.ts 描述配方输入检查后的任务与摘要。外部 input 和采样结果保持 unknown，没有隐式全局 ctx。
+
+运行 tsc --project <包目录>/jsconfig.json --noEmit，或使用项目 tools/script-sdk-check/node_modules/typescript/lib/tsc.js 检查全部业务模块。项目 check-project-types.mjs 另外检查清单中的同步入口和静态模块图。静态检查不执行采样，不证明运行时能力可用；测试文件不属于作者 jsconfig。更新 SDK 前保留原快照，并选择与实际 App/宿主匹配的声明。

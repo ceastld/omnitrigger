@@ -206,6 +206,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check-project-types.mjs examples/actions/json-text
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/clipboard-history
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/selection-history
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/common-search/open-or-search.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/path-text/recipes.test.mjs examples/actions/line-text/recipes.test.mjs
