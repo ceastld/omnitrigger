@@ -12,6 +12,7 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const runtime = resolve(repo, 'crates/omnitrigger-actions/runtime');
 const desktopSource = readFileSync(join(runtime, 'desktop-api.js'), 'utf8');
 const browserSource = readFileSync(join(runtime, 'browser-api.js'), 'utf8');
+const historySource = readFileSync(join(runtime, 'clipboard-history-api.js'), 'utf8');
 const hostSource = readFileSync(join(runtime, 'host.mjs'), 'utf8');
 const sdkSource = readFileSync(join(repo, 'tools/js-engine-probe/src/sdk.js'), 'utf8');
 const createApi = runInNewContext(desktopSource + ';createDesktopApi');
@@ -66,7 +67,7 @@ function light(native, reply = {ok:true,value:{submitted:true}}) {
     calls.push(JSON.parse(serialized));
     return JSON.stringify(reply);
   }};
-  runInNewContext(desktopSource + browserSource + sdkSource, context);
+  runInNewContext(desktopSource + browserSource + historySource + sdkSource, context);
   return {ctx:context.ctx,calls};
 }
 
@@ -130,7 +131,7 @@ async function nodeInvocation(source, {handle, native = true, cancel = false, na
     const host = join(directory, 'host.mjs');
     const response = join(directory, 'response.json');
     writeFileSync(entry, source);
-    writeFileSync(host, desktopSource + browserSource + hostSource);
+    writeFileSync(host, desktopSource + browserSource + historySource + hostSource);
     child = spawn(process.execPath, [host], {stdio:['pipe','pipe','pipe'],windowsHide:true});
     let stderr = '';
     child.stderr.on('data', chunk => {stderr += chunk;});

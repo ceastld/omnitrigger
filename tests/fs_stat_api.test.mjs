@@ -12,6 +12,7 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const runtime = resolve(repo, 'crates/omnitrigger-actions/runtime');
 const desktop = readFileSync(join(runtime,'desktop-api.js'),'utf8');
 const browser = readFileSync(join(runtime,'browser-api.js'),'utf8');
+const history = readFileSync(join(runtime,'clipboard-history-api.js'),'utf8');
 const host = readFileSync(join(runtime,'host.mjs'),'utf8');
 const sdk = readFileSync(join(repo,'tools/js-engine-probe/src/sdk.js'),'utf8');
 const createApi = runInNewContext(desktop+';createDesktopApi');
@@ -80,7 +81,7 @@ function light(native, reply={ok:true,value:{kind:'directory'}}) {
   const context={ctx:native===undefined?{}:{__nativeContext:native},__hostCall:serialized=>{
     calls.push(JSON.parse(serialized));return JSON.stringify(reply);
   }};
-  runInNewContext(desktop+browser+sdk,context);
+  runInNewContext(desktop+browser+history+sdk,context);
   return {ctx:context.ctx,calls};
 }
 
@@ -115,7 +116,7 @@ test('预备 Rust 宿主测试中的原始 JS 片段可执行，路径转义和�
   const raw=source.match(/let script = r#"([\s\S]*?)"#;/)?.[1];
   assert(raw);
   const context={ctx:{},__hostCall:()=>{throw Error('词法测试不应发出宿主调用');}};
-  const result=runInNewContext(desktop+browser+sdk+`; (function(ctx){${raw}})(ctx)`,context);
+  const result=runInNewContext(desktop+browser+history+sdk+`; (function(ctx){${raw}})(ctx)`,context);
   assert.equal(result.rejected,result.total);
   assert.deepEqual(plain(result.codes),Array(3).fill('path_unavailable'));
   assert.deepEqual(plain(result.boundaries),Array(5).fill('fs_unavailable'));
@@ -156,7 +157,7 @@ async function nodeInvocation(source,{handle,native=true,nativeError,cancel=fals
   try {
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
     const entry=join(directory,'entry.mjs'),response=join(directory,'response.json'),hostPath=join(directory,'host.mjs');
-    writeFileSync(entry,source);writeFileSync(hostPath,desktop+browser+host);
+    writeFileSync(entry,source);writeFileSync(hostPath,desktop+browser+history+host);
     child=spawn(process.execPath,[hostPath],{stdio:['pipe','pipe','pipe'],windowsHide:true});
     let stderr='';child.stderr.on('data',chunk=>{stderr+=chunk;});
     const exited=once(child,'exit');timer=setTimeout(()=>child.kill(),timeout+3000);
