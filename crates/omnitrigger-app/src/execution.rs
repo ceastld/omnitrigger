@@ -89,7 +89,43 @@ pub enum ExecutionOutcome {
     },
 }
 
+/// 值快照只在Hook外构造，保留原目标身份与完整按键/进程时序；无Clone重发接口。
+pub struct PreparedShortcut {
+    shortcut: ShortcutAction,
+    target: omnitrigger_windows::ScriptTarget,
+}
+impl PreparedShortcut {
+    pub fn capture(
+        shortcut: ShortcutAction,
+        target: omnitrigger_windows::ShortcutTarget,
+    ) -> Result<Self, String> {
+        shortcut.validate()?;
+        Ok(Self {
+            shortcut,
+            target: omnitrigger_windows::ScriptTarget::capture(target)?,
+        })
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShortcutCancelState {
+    Requested,
+    AlreadyRequested,
+    NotFound,
+    Unsupported,
+}
+
+fn shortcut_guard(stopping: &AtomicBool, cancellation: &AtomicBool) -> Result<(), String> {
+    if stopping.load(Ordering::Acquire) {
+        Err("程序正在退出，已停止后续输入。".into())
+    } else if cancellation.load(Ordering::Acquire) {
+        Err("该次快捷键已请求取消；已发送输入不会撤销。".into())
+    } else {
+        Ok(())
+    }
+}
+
 struct Request {
+    shortcut_cancellation: Option<Arc<AtomicBool>>,
     id: u64,
     invocation_id: u64,
     action: ExecutableAction,
@@ -110,6 +146,7 @@ struct Running {
 }
 
 struct Reservation {
+    shortcut_cancellation: Option<Arc<AtomicBool>>,
     binding_id: u64,
     group: Option<String>,
     shortcut: bool,
@@ -191,21 +228,46 @@ impl CommandExecutor {
         self.submit_request(id, ExecutableAction::Command(command), group)
     }
 
+    /// 旧API保留；调用方不需要跟踪时丢弃准确回执，不改变发送路径。
     pub fn submit_shortcut(&self, id: u64, shortcut: ShortcutAction) -> Result<(), String> {
-        let target = omnitrigger_windows::capture_shortcut_target()?;
-        self.submit_shortcut_to(id, shortcut, target)
+        self.submit_shortcut_tracked(id, shortcut).map(|_| ())
     }
-
+    pub fn submit_shortcut_tracked(
+        &self,
+        id: u64,
+        shortcut: ShortcutAction,
+    ) -> Result<u64, String> {
+        let target = omnitrigger_windows::capture_shortcut_target()?;
+        self.submit_shortcut_to_tracked(id, shortcut, target)
+    }
     pub fn submit_shortcut_to(
         &self,
         id: u64,
         shortcut: ShortcutAction,
         target: omnitrigger_windows::ShortcutTarget,
     ) -> Result<(), String> {
-        shortcut.validate()?;
-        let target = omnitrigger_windows::ScriptTarget::capture(target)?;
+        self.submit_shortcut_to_tracked(id, shortcut, target)
+            .map(|_| ())
+    }
+    pub fn submit_shortcut_to_tracked(
+        &self,
+        id: u64,
+        shortcut: ShortcutAction,
+        target: omnitrigger_windows::ShortcutTarget,
+    ) -> Result<u64, String> {
+        self.submit_prepared_shortcut_tracked(id, PreparedShortcut::capture(shortcut, target)?)
+    }
+    /// Prepared在匹配交接点冻结；未来外层显式等待也不能改抓前台或丢失timing。
+    pub fn submit_prepared_shortcut_tracked(
+        &self,
+        id: u64,
+        prepared: PreparedShortcut,
+    ) -> Result<u64, String> {
+        let PreparedShortcut { shortcut, target } = prepared;
         let stopping = self.stopping.clone();
-        self.submit_request(
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let observed = cancellation.clone();
+        self.submit_request_tracked(
             id,
             ExecutableAction::Shortcut(Box::new(move || {
                 let delay = if shortcut.timing.process_overrides.is_empty() {
@@ -213,16 +275,32 @@ impl CommandExecutor {
                 } else {
                     shortcut.timing.resolve(&target.info()?.process_name)?
                 };
+                // 继续使用原平台有序发送与拥有按键释放；取消不是输入撤销。
                 target.send_shortcut_timed_if(&shortcut.keys, delay, || {
-                    if stopping.load(std::sync::atomic::Ordering::Relaxed) {
-                        Err("程序正在退出，已停止后续输入。".into())
-                    } else {
-                        Ok(())
-                    }
+                    shortcut_guard(&stopping, &observed)
                 })
             })),
             None,
+            Some(cancellation),
         )
+    }
+    /// 只设置该调用的取消标记；不删除reservation，不杀PID，不按binding扩大取消。
+    pub fn cancel_shortcut(&self, invocation_id: u64) -> Result<ShortcutCancelState, String> {
+        let reserved = self
+            .reserved
+            .lock()
+            .map_err(|_| "快捷键取消状态未知，仍保留调用占用。")?;
+        let Some(entry) = reserved.entries.get(&invocation_id) else {
+            return Ok(ShortcutCancelState::NotFound);
+        };
+        let Some(flag) = &entry.shortcut_cancellation else {
+            return Ok(ShortcutCancelState::Unsupported);
+        };
+        Ok(if flag.swap(true, Ordering::AcqRel) {
+            ShortcutCancelState::AlreadyRequested
+        } else {
+            ShortcutCancelState::Requested
+        })
     }
 
     pub fn submit_window(&self, id: u64, action: WindowAction) -> Result<(), String> {
@@ -273,6 +351,20 @@ impl CommandExecutor {
         action: ExecutableAction,
         group: Option<String>,
     ) -> Result<(), String> {
+        self.submit_request_tracked(id, action, group, None)
+            .map(|_| ())
+    }
+
+    fn submit_request_tracked(
+        &self,
+        id: u64,
+        action: ExecutableAction,
+        group: Option<String>,
+        shortcut_cancellation: Option<Arc<AtomicBool>>,
+    ) -> Result<u64, String> {
+        if shortcut_cancellation.is_some() && !matches!(&action, ExecutableAction::Shortcut(_)) {
+            return Err("按调用取消仅支持快捷键发送。".into());
+        }
         if group.as_ref().is_some_and(|group| {
             group.trim().is_empty() || group.len() > 256 || group.contains('\0')
         }) {
@@ -317,12 +409,14 @@ impl CommandExecutor {
         reserved.entries.insert(
             invocation_id,
             Reservation {
+                shortcut_cancellation: shortcut_cancellation.clone(),
                 binding_id: id,
                 group,
                 shortcut,
             },
         );
         if let Err(error) = self.requests.try_send(Request {
+            shortcut_cancellation,
             id,
             invocation_id,
             action,
@@ -333,7 +427,7 @@ impl CommandExecutor {
                 mpsc::TrySendError::Disconnected(_) => "命令执行线程已结束。".into(),
             });
         }
-        Ok(())
+        Ok(invocation_id)
     }
 
     /// 待启动、运行中或终态尚未读取时均返回 true，供界面禁用重复执行入口。
@@ -454,34 +548,44 @@ fn run(requests: Receiver<Request>, events: SyncSender<ExecutionEvent>, stopping
             }
             let id = request.id;
             let invocation_id = request.invocation_id;
-            let outcome = match request.action {
-                ExecutableAction::Shortcut(send_shortcut) => match send_shortcut() {
-                    Ok(()) => ExecutionOutcome::ShortcutSent,
-                    Err(message) => ExecutionOutcome::Failed { message },
-                },
-                ExecutableAction::Window(apply) => match apply() {
-                    Ok(()) => ExecutionOutcome::WindowApplied,
-                    Err(message) => ExecutionOutcome::Failed { message },
-                },
-                command @ (ExecutableAction::Command(_)
-                | ExecutableAction::GuardedCommand(_, _)) => match spawn_request(command) {
-                    Ok(child) => {
-                        if stopping.load(Ordering::Acquire) {
-                            return;
-                        }
-                        let pid = child.id();
-                        running.push(Running {
-                            id,
-                            invocation_id,
-                            child,
-                            unknown_notified: false,
-                        });
-                        ExecutionOutcome::Started { pid }
-                    }
-                    Err(error) => ExecutionOutcome::Failed {
-                        message: format!("启动程序失败：{error}"),
+            let outcome = if request
+                .shortcut_cancellation
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+            {
+                ExecutionOutcome::Failed {
+                    message: "该次快捷键在执行前已取消。".into(),
+                }
+            } else {
+                match request.action {
+                    ExecutableAction::Shortcut(send_shortcut) => match send_shortcut() {
+                        Ok(()) => ExecutionOutcome::ShortcutSent,
+                        Err(message) => ExecutionOutcome::Failed { message },
                     },
-                },
+                    ExecutableAction::Window(apply) => match apply() {
+                        Ok(()) => ExecutionOutcome::WindowApplied,
+                        Err(message) => ExecutionOutcome::Failed { message },
+                    },
+                    command @ (ExecutableAction::Command(_)
+                    | ExecutableAction::GuardedCommand(_, _)) => match spawn_request(command) {
+                        Ok(child) => {
+                            if stopping.load(Ordering::Acquire) {
+                                return;
+                            }
+                            let pid = child.id();
+                            running.push(Running {
+                                id,
+                                invocation_id,
+                                child,
+                                unknown_notified: false,
+                            });
+                            ExecutionOutcome::Started { pid }
+                        }
+                        Err(error) => ExecutionOutcome::Failed {
+                            message: format!("启动程序失败：{error}"),
+                        },
+                    },
+                }
             };
             if events
                 .send(ExecutionEvent {
@@ -951,6 +1055,7 @@ mod tests {
                         binding_id: 1,
                         group: Some("raishot/capture".into()),
                         shortcut: false,
+                        shortcut_cancellation: None,
                     },
                 )]),
             }),
@@ -1028,5 +1133,223 @@ mod tests {
         );
         std::fs::remove_file(release).unwrap();
         std::fs::remove_file(output).unwrap();
+    }
+    // 直接驱动原run与原reservation/事件消费；无新线程、进程、窗口或真实输入。
+    fn tracked_fixture(
+        capacity: usize,
+    ) -> (
+        CommandExecutor,
+        Receiver<Request>,
+        SyncSender<ExecutionEvent>,
+    ) {
+        let (requests, receive) = mpsc::sync_channel(capacity);
+        let (send, events) = mpsc::sync_channel(CAPACITY * 3);
+        (
+            CommandExecutor {
+                requests,
+                events,
+                reserved: Mutex::new(Reservations {
+                    next_id: 1,
+                    entries: HashMap::new(),
+                }),
+                stopping: Arc::new(AtomicBool::new(false)),
+                worker: None,
+                startup_error: None,
+            },
+            receive,
+            send,
+        )
+    }
+    #[test]
+    fn tracked_receipts_and_cancel_are_per_invocation_even_for_same_binding() {
+        let (executor, receive, events) = tracked_fixture(CAPACITY);
+        let first_flag = Arc::new(AtomicBool::new(false));
+        let second_flag = Arc::new(AtomicBool::new(false));
+        let first = executor
+            .submit_request_tracked(
+                7,
+                ExecutableAction::Shortcut(Box::new(|| panic!("执行前取消不得调用sender"))),
+                None,
+                Some(first_flag.clone()),
+            )
+            .unwrap();
+        let stop = executor.stopping.clone();
+        let ran = Arc::new(AtomicU64::new(0));
+        let observed = ran.clone();
+        let second = executor
+            .submit_request_tracked(
+                7,
+                ExecutableAction::Shortcut(Box::new(move || {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                    stop.store(true, Ordering::Release);
+                    Ok(())
+                })),
+                None,
+                Some(second_flag.clone()),
+            )
+            .unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            executor.cancel_shortcut(first).unwrap(),
+            ShortcutCancelState::Requested
+        );
+        assert_eq!(
+            executor.cancel_shortcut(first).unwrap(),
+            ShortcutCancelState::AlreadyRequested
+        );
+        assert!(first_flag.load(Ordering::Acquire));
+        assert!(!second_flag.load(Ordering::Acquire));
+        run(receive, events, executor.stopping.clone());
+        assert_eq!(ran.load(Ordering::Relaxed), 1);
+        assert_eq!(executor.reserved.lock().unwrap().entries.len(), 2);
+        let first_event = executor.try_recv().unwrap();
+        assert_eq!((first_event.id, first_event.invocation_id), (7, first));
+        assert!(matches!(
+            first_event.outcome,
+            ExecutionOutcome::Failed { .. }
+        ));
+        assert!(executor.is_running(7));
+        let second_event = executor.try_recv().unwrap();
+        assert_eq!((second_event.id, second_event.invocation_id), (7, second));
+        assert_eq!(second_event.outcome, ExecutionOutcome::ShortcutSent);
+        assert!(!executor.is_running(7));
+    }
+    #[test]
+    fn tracked_cancel_after_send_does_not_relabel_success_or_release_before_event_consumption() {
+        let (executor, receive, events) = tracked_fixture(CAPACITY);
+        let stop = executor.stopping.clone();
+        let receipt = executor
+            .submit_request_tracked(
+                9,
+                ExecutableAction::Shortcut(Box::new(move || {
+                    stop.store(true, Ordering::Release);
+                    Ok(())
+                })),
+                None,
+                Some(Arc::new(AtomicBool::new(false))),
+            )
+            .unwrap();
+        run(receive, events, executor.stopping.clone());
+        assert!(executor.is_running(9));
+        assert_eq!(
+            executor.cancel_shortcut(receipt).unwrap(),
+            ShortcutCancelState::Requested
+        );
+        assert!(executor.is_running(9));
+        let event = executor.try_recv().unwrap();
+        assert_eq!(event.invocation_id, receipt);
+        assert_eq!(event.outcome, ExecutionOutcome::ShortcutSent);
+        assert_eq!(
+            executor.cancel_shortcut(receipt).unwrap(),
+            ShortcutCancelState::NotFound
+        );
+    }
+    #[test]
+    fn tracked_backpressure_rolls_back_only_failed_receipt_and_does_not_cancel_unsupported_work() {
+        let (executor, receive, _events) = tracked_fixture(1);
+        let first = executor
+            .submit_request_tracked(
+                7,
+                ExecutableAction::Shortcut(Box::new(|| Ok(()))),
+                None,
+                Some(Arc::new(AtomicBool::new(false))),
+            )
+            .unwrap();
+        assert!(executor
+            .submit_request_tracked(
+                7,
+                ExecutableAction::Shortcut(Box::new(|| Ok(()))),
+                None,
+                Some(Arc::new(AtomicBool::new(false)))
+            )
+            .is_err());
+        assert_eq!(executor.reserved.lock().unwrap().entries.len(), 1);
+        assert_eq!(
+            executor.cancel_shortcut(first + 1).unwrap(),
+            ShortcutCancelState::NotFound
+        );
+        let request = receive.try_recv().unwrap();
+        assert_eq!(request.invocation_id, first);
+        drop(request);
+        executor
+            .submit_request(8, ExecutableAction::Window(Box::new(|| Ok(()))), None)
+            .unwrap();
+        let unsupported = receive.try_recv().unwrap().invocation_id;
+        assert_eq!(
+            executor.cancel_shortcut(unsupported).unwrap(),
+            ShortcutCancelState::Unsupported
+        );
+        assert!(executor.is_running(7));
+        assert!(executor.is_running(8));
+    }
+    #[test]
+    fn tracked_stale_or_wrong_binding_terminal_cannot_release_a_different_reservation() {
+        let (executor, _receive, events) = tracked_fixture(CAPACITY);
+        let first = executor
+            .submit_request_tracked(
+                7,
+                ExecutableAction::Shortcut(Box::new(|| Ok(()))),
+                None,
+                Some(Arc::new(AtomicBool::new(false))),
+            )
+            .unwrap();
+        events
+            .send(ExecutionEvent {
+                id: 8,
+                invocation_id: first,
+                outcome: ExecutionOutcome::ShortcutSent,
+            })
+            .unwrap();
+        executor.try_recv().unwrap();
+        assert!(executor.is_running(7));
+        events
+            .send(ExecutionEvent {
+                id: 7,
+                invocation_id: first,
+                outcome: ExecutionOutcome::ShortcutSent,
+            })
+            .unwrap();
+        executor.try_recv().unwrap();
+        let second = executor
+            .submit_request_tracked(
+                7,
+                ExecutableAction::Shortcut(Box::new(|| Ok(()))),
+                None,
+                Some(Arc::new(AtomicBool::new(false))),
+            )
+            .unwrap();
+        events
+            .send(ExecutionEvent {
+                id: 7,
+                invocation_id: first,
+                outcome: ExecutionOutcome::ShortcutSent,
+            })
+            .unwrap();
+        executor.try_recv().unwrap();
+        assert!(executor.is_running(7));
+        assert_ne!(first, second);
+        assert!(executor
+            .reserved
+            .lock()
+            .unwrap()
+            .entries
+            .contains_key(&second));
+    }
+    #[test]
+    fn tracked_guard_combines_global_and_call_cancel_without_changing_prepared_api_types() {
+        let stopping = AtomicBool::new(false);
+        let cancel = AtomicBool::new(false);
+        shortcut_guard(&stopping, &cancel).unwrap();
+        cancel.store(true, Ordering::Release);
+        assert!(shortcut_guard(&stopping, &cancel).is_err());
+        cancel.store(false, Ordering::Release);
+        stopping.store(true, Ordering::Release);
+        assert!(shortcut_guard(&stopping, &cancel).is_err());
+        let _capture: fn(
+            ShortcutAction,
+            omnitrigger_windows::ShortcutTarget,
+        ) -> Result<PreparedShortcut, String> = PreparedShortcut::capture;
+        let _submit: fn(&CommandExecutor, u64, PreparedShortcut) -> Result<u64, String> =
+            CommandExecutor::submit_prepared_shortcut_tracked;
     }
 }

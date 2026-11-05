@@ -571,6 +571,7 @@ struct Workspace {
     install_status: Option<String>,
     executor: CommandExecutor,
     shortcut_executor: CommandExecutor,
+    mouse_shortcut_invocations: HashMap<u64, u64>,
     system_executor: system_executor::SystemAdjustmentExecutor,
     system_hud: system_hud::SystemHud,
     brightness_hud_prepared: bool,
@@ -1000,6 +1001,7 @@ impl Workspace {
             package_feedback: Default::default(),
             script_projects,
             shortcut_executor: CommandExecutor::shortcuts(),
+            mouse_shortcut_invocations: HashMap::new(),
             system_executor,
             system_hud: system_hud::SystemHud::default(),
             brightness_hud_prepared: false,
@@ -1165,6 +1167,15 @@ impl Workspace {
     }
 
     fn send(&mut self, command: BackendCommand) -> bool {
+        if matches!(
+            command,
+            BackendCommand::SetBindings(_)
+                | BackendCommand::SetEnabled(false)
+                | BackendCommand::StartRecording
+                | BackendCommand::Shutdown
+        ) {
+            self.cancel_owned_mouse_shortcuts();
+        }
         if !self.mode.owns_input_engine() {
             return false;
         }
@@ -1438,12 +1449,18 @@ impl Workspace {
             }
             self.record_action_status(event.id, text);
         }
-        while let Ok(event) = self
+        while let Ok((from_shortcut_executor, event)) = self
             .executor
             .try_recv()
-            .or_else(|_| self.shortcut_executor.try_recv())
+            .map(|event| (false, event))
+            .or_else(|_| self.shortcut_executor.try_recv().map(|event| (true, event)))
         {
             changed = true;
+            consume_owned_shortcut_receipt(
+                &mut self.mouse_shortcut_invocations,
+                from_shortcut_executor,
+                &event,
+            );
             let (text, failed) = match event.outcome {
                 ExecutionOutcome::ShortcutSent => ("已发送快捷键".into(), false),
                 ExecutionOutcome::WindowApplied => ("已提交窗口操作".into(), false),
@@ -1657,6 +1674,7 @@ impl Workspace {
                     }
                 }
                 BackendEvent::EscapePressed => {
+                    self.cancel_owned_mouse_shortcuts();
                     self.local_executor.cancel_all();
                     self.action_service.cancel_all();
                     if let Some(wheel) = self.wheel_window {
@@ -2367,6 +2385,33 @@ impl Workspace {
         cx.notify();
     }
 
+    fn cancel_owned_mouse_shortcuts(&mut self) {
+        // 每个配额对应一个准确回执；同绑定允许多次调用，不能用binding作为取消键。
+        for &invocation in self.mouse_shortcut_invocations.keys() {
+            if let Err(error) = self.shortcut_executor.cancel_shortcut(invocation) {
+                self.error = Some(error);
+            }
+        }
+        // 取消不是终态；只在同一executor的准确终态被消费后移除回执。
+    }
+    fn is_mouse_shortcut_binding(&self, id: u64) -> bool {
+        self.binding(id).is_some_and(|binding| {
+            matches!(
+                binding.spec.activation,
+                Activation::Wheel(_)
+                    | Activation::Press(omnitrigger_core::Button::Mouse(_))
+                    | Activation::Hold {
+                        button: omnitrigger_core::Button::Mouse(_),
+                        ..
+                    }
+                    | Activation::Drag {
+                        button: omnitrigger_core::Button::Mouse(_),
+                        ..
+                    }
+            )
+        })
+    }
+
     fn dispatch_action(&mut self, id: u64, action: ActionSpec, cx: &mut Context<Self>) {
         self.dispatch_action_to(id, action, None, cx);
     }
@@ -2474,14 +2519,28 @@ impl Workspace {
             }
             ActionSpec::ShowWheel(reference) => self.open_wheel(&reference.wheel_id, cx),
             ActionSpec::SendShortcut(shortcut) => {
-                let result = match target {
-                    Some(target) => self
-                        .shortcut_executor
-                        .submit_shortcut_to(id, shortcut, target),
-                    None => self.shortcut_executor.submit_shortcut(id, shortcut),
+                let result = if self.is_mouse_shortcut_binding(id) {
+                    match target {
+                        Some(target) => self
+                            .shortcut_executor
+                            .submit_shortcut_to_tracked(id, shortcut, target),
+                        None => self.shortcut_executor.submit_shortcut_tracked(id, shortcut),
+                    }
+                    .map(Some)
+                } else {
+                    match target {
+                        Some(target) => self
+                            .shortcut_executor
+                            .submit_shortcut_to(id, shortcut, target),
+                        None => self.shortcut_executor.submit_shortcut(id, shortcut),
+                    }
+                    .map(|()| None)
                 };
                 match result {
-                    Ok(()) => {
+                    Ok(invocation) => {
+                        if let Some(invocation) = invocation {
+                            self.mouse_shortcut_invocations.insert(invocation, id);
+                        }
                         self.action_error = None;
                         self.record_action_status(id, "等待发送快捷键".into());
                     }
@@ -6638,6 +6697,25 @@ fn main() {
         });
 }
 
+// 编号只在所属executor内唯一；仅消费本路径实际可能产生的终态。
+fn consume_owned_shortcut_receipt(
+    owners: &mut HashMap<u64, u64>,
+    from_shortcut_executor: bool,
+    event: &execution::ExecutionEvent,
+) -> bool {
+    if !from_shortcut_executor
+        || !matches!(
+            &event.outcome,
+            ExecutionOutcome::ShortcutSent | ExecutionOutcome::Failed { .. }
+        )
+        || owners.get(&event.invocation_id) != Some(&event.id)
+    {
+        return false;
+    }
+    owners.remove(&event.invocation_id);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::{should_refresh_workspace_for_backend_event, thousands, Page};
@@ -6714,5 +6792,54 @@ mod tests {
         assert_eq!(thousands(999), "999");
         assert_eq!(thousands(1284), "1,284");
         assert_eq!(thousands(1234567), "1,234,567");
+    }
+    #[test]
+    fn tracked_shortcut_owner_ignores_other_executor_nonterminal_and_stale_receipts() {
+        use super::consume_owned_shortcut_receipt;
+        use super::execution::{ExecutionEvent, ExecutionOutcome};
+        use std::collections::HashMap;
+
+        let mut owners = HashMap::from([(1, 7)]);
+        let mut event = ExecutionEvent {
+            id: 7,
+            invocation_id: 1,
+            outcome: ExecutionOutcome::ShortcutSent,
+        };
+        // command executor也可能编号1、binding7，来源不匹配时不能回收。
+        assert!(!consume_owned_shortcut_receipt(&mut owners, false, &event));
+        assert_eq!(owners.get(&1), Some(&7));
+        for outcome in [
+            ExecutionOutcome::Started { pid: 123 },
+            ExecutionOutcome::Unknown {
+                message: "未知".into(),
+            },
+            ExecutionOutcome::WindowApplied,
+            ExecutionOutcome::Finished {
+                code: Some(0),
+                success: true,
+            },
+        ] {
+            event.outcome = outcome;
+            assert!(!consume_owned_shortcut_receipt(&mut owners, true, &event));
+            assert_eq!(owners.get(&1), Some(&7));
+        }
+        event.outcome = ExecutionOutcome::ShortcutSent;
+        event.id = 8;
+        assert!(!consume_owned_shortcut_receipt(&mut owners, true, &event));
+        assert_eq!(owners.get(&1), Some(&7));
+        event.id = 7;
+        assert!(consume_owned_shortcut_receipt(&mut owners, true, &event));
+        assert!(owners.is_empty());
+
+        owners.insert(2, 7);
+        assert!(!consume_owned_shortcut_receipt(&mut owners, true, &event));
+        assert_eq!(owners.get(&2), Some(&7));
+        event.invocation_id = 2;
+        event.outcome = ExecutionOutcome::Failed {
+            message: "取消后返回".into(),
+        };
+        assert!(consume_owned_shortcut_receipt(&mut owners, true, &event));
+        assert!(owners.is_empty());
+        assert!(!consume_owned_shortcut_receipt(&mut owners, true, &event));
     }
 }
