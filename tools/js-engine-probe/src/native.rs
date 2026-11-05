@@ -10,7 +10,10 @@ use std::{
 
 const LIMIT: usize = 512 * 1024;
 pub const METHODS: [&str; 20] = [
-    "history.list", "history.get", "history.append", "history.remove",
+    "history.list",
+    "history.get",
+    "history.append",
+    "history.remove",
     "fs.stat",
     "ui.choose",
     "ui.notify",
@@ -41,7 +44,10 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
     let data_read = method == "clipboard.read_data";
     let data_copy = method == "selection.copy_data";
     let history_read = matches!(method, "history.list" | "history.get");
-    let history = matches!(method, "history.list" | "history.get" | "history.append" | "history.remove");
+    let history = matches!(
+        method,
+        "history.list" | "history.get" | "history.append" | "history.remove"
+    );
     ApiError {
         code: (if history && code == "native_bridge_unavailable" {
             "history_unavailable"
@@ -129,7 +135,13 @@ pub fn call(
     let transport = |cause: std::io::Error| {
         if matches!(
             method.as_str(),
-            "fs.stat" | "clipboard.read_data" | "selection.copy_data" | "history.list" | "history.get" | "history.append" | "history.remove"
+            "fs.stat"
+                | "clipboard.read_data"
+                | "selection.copy_data"
+                | "history.list"
+                | "history.get"
+                | "history.append"
+                | "history.remove"
         ) && matches!(
             cause.kind(),
             std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
@@ -138,7 +150,10 @@ pub fn call(
                 "timeout",
                 "本机调用等待超时。",
                 &method,
-                if matches!(method.as_str(), "selection.copy_data" | "history.append" | "history.remove") {
+                if matches!(
+                    method.as_str(),
+                    "selection.copy_data" | "history.append" | "history.remove"
+                ) {
                     "unknown"
                 } else {
                     "not_started"
@@ -156,13 +171,22 @@ pub fn call(
             .ok_or_else(|| {
                 if matches!(
                     method.as_str(),
-                    "fs.stat" | "clipboard.read_data" | "selection.copy_data" | "history.list" | "history.get" | "history.append" | "history.remove"
+                    "fs.stat"
+                        | "clipboard.read_data"
+                        | "selection.copy_data"
+                        | "history.list"
+                        | "history.get"
+                        | "history.append"
+                        | "history.remove"
                 ) {
                     fault(
                         "timeout",
                         "本机调用等待超时。",
                         &method,
-                        if matches!(method.as_str(), "selection.copy_data" | "history.append" | "history.remove") {
+                        if matches!(
+                            method.as_str(),
+                            "selection.copy_data" | "history.append" | "history.remove"
+                        ) {
                             "unknown"
                         } else {
                             "not_started"
@@ -252,7 +276,13 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
             };
             if matches!(
                 method,
-                "fs.stat" | "clipboard.read_data" | "selection.copy_data" | "history.list" | "history.get" | "history.append" | "history.remove"
+                "fs.stat"
+                    | "clipboard.read_data"
+                    | "selection.copy_data"
+                    | "history.list"
+                    | "history.get"
+                    | "history.append"
+                    | "history.remove"
             ) && reported_method != method
             {
                 return Err(invalid());
@@ -274,7 +304,10 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                 None => Vec::new(),
             };
             let mut error = fault(code, message, reported_method, effect);
-            if !matches!(method, "history.list" | "history.get" | "history.append" | "history.remove") {
+            if !matches!(
+                method,
+                "history.list" | "history.get" | "history.append" | "history.remove"
+            ) {
                 error.required_permissions = permissions;
             }
             Err(error)
