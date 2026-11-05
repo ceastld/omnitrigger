@@ -389,3 +389,47 @@ test('同一显式声明去重，SDK快照不会因重复配置产生伪冲突',
   assert.equal(result.passed,true,JSON.stringify(result.diagnostics));
   assert.equal(result.checkedFiles.filter(name=>name==='sdk/script-types.d.ts').length,1);
 });
+
+
+test('编译选项定位：合法JSON中的错误值指出原始行列',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'jsconfig.json'),'{\n  "compilerOptions": {\n    "strict": "yes"\n  },\n  "files": ["main.mjs"]\n}\n');
+  assert.throws(()=>checkProjectTypes(root),error=>{
+    assert.equal(error.code,'project_config_invalid');
+    assert.deepEqual(error.location,{file:'jsconfig.json',line:3,column:15});return true;
+  });
+});
+test('编译选项定位：拼错选项定位键名，不回显配置正文',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'jsconfig.json'),'{\n  "compilerOptions": {\n    "strcit": true\n  }\n}\n');
+  assert.throws(()=>checkProjectTypes(root),error=>{
+    assert.equal(error.code,'project_config_invalid');
+    assert.deepEqual(error.location,{file:'jsconfig.json',line:3,column:5});
+    assert(!error.message.includes('strcit'));return true;
+  });
+});
+test('编译选项定位：CLI保留结构化位置，作者初始化器不执行',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'jsconfig.json'),'{\n  "compilerOptions": {\n    "strict": "synthetic-private-value"\n  }\n}\n');
+  const result=spawnSync(process.execPath,[join(repo,'tools/script-sdk-check/check-project-types.mjs'),root],{encoding:'utf8',windowsHide:true,timeout:30000});
+  assert.ifError(result.error);assert.equal(result.status,1);
+  const output=JSON.parse(result.stderr);
+  assert.equal(output.error.code,'project_config_invalid');
+  assert.deepEqual(output.error.location,{file:'jsconfig.json',line:3,column:15});
+  assert(!result.stderr.includes('synthetic-private-value'));
+  assert.equal(output.runtimeExecuted,false);assert.equal(output.filesModified,false);
+});
+test('编译选项定位：没有文件发现回调读取，include不扩大范围',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'jsconfig.json'),'{\n  "include": ["../never-read/**"],\n  "compilerOptions": {\n    "strict": "yes"\n  }\n}\n');
+  assert.throws(()=>checkProjectTypes(root),error=>{
+    assert.equal(error.code,'project_config_invalid');
+    assert.deepEqual(error.location,{file:'jsconfig.json',line:4,column:15});return true;
+  });
+});
+test('编译选项定位：有效生成工程的检查结果和作者代码保持不变',()=>{
+  const root=fixture();const before=readFileSync(join(root,'main.mjs'));
+  const result=checkProjectTypes(root);
+  assert.equal(result.passed,true);assert.equal(result.runtimeExecuted,false);assert.equal(result.filesModified,false);
+  assert.deepEqual(readFileSync(join(root,'main.mjs')),before);
+});

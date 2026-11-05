@@ -109,8 +109,10 @@ export function checkProjectTypes(projectDirectory) {
   catch(error){if(error?.code==='ENOENT')fail('project_sdk_missing');throw error;}
   const configPath=join(root,'jsconfig.json');
   let config;
+  let configText;
   try {
-    const parsed=ts.parseConfigFileTextToJson(configPath.replaceAll('\\','/'),read(configPath,128*1024));
+    configText=read(configPath,128*1024);
+    const parsed=ts.parseConfigFileTextToJson(configPath.replaceAll('\\','/'),configText);
     if(parsed.error) {
       const diagnostic=parsed.error;
       const position=diagnostic.file&&typeof diagnostic.start==='number'
@@ -138,7 +140,23 @@ export function checkProjectTypes(projectDirectory) {
     configuredDeclarations.push(declaration);
   }
   const converted=ts.convertCompilerOptionsFromJson(compilerOptions,root);
-  if(converted.errors.length)fail('project_config_invalid');
+  if(converted.errors.length) {
+    // 转换API不带源位置；用同一配置文本取得TS已有的位置，不读取extends/include或文件。
+    const configSource=ts.parseJsonText('jsconfig.json',configText);
+    const expression=configSource.statements[0]?.expression;
+    const property=expression&&ts.isObjectLiteralExpression(expression)
+      ? [...expression.properties].reverse().find(node=>ts.isPropertyAssignment(node)&&node.name.text==='compilerOptions')
+      : undefined;
+    const block=property?.initializer;
+    const located=ts.parseJsonSourceFileConfigFileContent(configSource,{
+      useCaseSensitiveFileNames:true,readDirectory:()=>[],fileExists:()=>false,readFile:()=>undefined,
+    },root).errors.find(error=>error.file===configSource&&typeof error.start==='number'
+      &&block&&error.start>=block.getStart(configSource)&&error.start<block.end
+      &&converted.errors.some(original=>original.code===error.code));
+    const position=located?configSource.getLineAndCharacterOfPosition(located.start):undefined;
+    fail('project_config_invalid',{file:'jsconfig.json',
+      ...(position?{line:position.line+1,column:position.character+1}:{})});
+  }
   const options={strict:true,target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.ESNext,
     moduleResolution:ts.ModuleResolutionKind.Bundler,lib:['lib.es2020.d.ts'],...converted.options,
     // 旧 .js 入口实际各自在函数体内执行；noEmit 检查也按文件隔离，不合并作者局部声明。
