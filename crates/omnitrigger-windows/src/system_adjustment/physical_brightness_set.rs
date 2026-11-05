@@ -172,12 +172,6 @@ fn step_one(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    include!("physical_brightness_set_tests.rs");
-}
-
 #[cfg(any(windows, test))]
 pub(super) fn step_members_if(
     port: &mut impl PhysicalBrightnessPort,
@@ -215,4 +209,10 @@ pub(super) fn step_members_if(
     let result = step_members(&mut Guarded { port, check }, direction);
     check(false)?;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    include!("physical_brightness_set_tests.rs");
 }

@@ -88,8 +88,16 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
 }
 
 // 请求写入尝试前可证明未提交；开始写入后仅保守返回unknown。
-fn brightness_transport_effect(method:&str,write_began:bool,fallback:&'static str)->&'static str {
-    if method=="display.brightness_step" && !write_began {"not_started"} else {fallback}
+fn brightness_transport_effect(
+    method: &str,
+    write_began: bool,
+    fallback: &'static str,
+) -> &'static str {
+    if method == "display.brightness_step" && !write_began {
+        "not_started"
+    } else {
+        fallback
+    }
 }
 
 pub fn call(
@@ -130,20 +138,29 @@ pub fn call(
         .map_err(|cause| fault("native_bridge_unavailable", cause, &method, "not_started"))?;
     let browser = method.starts_with("browser.");
     let deadline = Instant::now()
-        + Duration::from_secs(if browser || method == "ui.choose" || method == "display.brightness_step" {
-            66
-        } else if method == "selection.copy_data" {
-            8
-        } else {
-            5
-        });
+        + Duration::from_secs(
+            if browser || method == "ui.choose" || method == "display.brightness_step" {
+                66
+            } else if method == "selection.copy_data" {
+                8
+            } else {
+                5
+            },
+        );
     let response_limit = if browser {
         32 * 1024 * 1024 + 1024
     } else {
         LIMIT
     };
-    let write_began=Cell::new(false);
-    let network = |cause| fault("native_bridge_failed", cause, &method, brightness_transport_effect(&method,write_began.get(),"unknown"));
+    let write_began = Cell::new(false);
+    let network = |cause| {
+        fault(
+            "native_bridge_failed",
+            cause,
+            &method,
+            brightness_transport_effect(&method, write_began.get(), "unknown"),
+        )
+    };
     let transport = |cause: std::io::Error| {
         if matches!(
             method.as_str(),
@@ -167,12 +184,12 @@ pub fn call(
                 if matches!(
                     method.as_str(),
                     "selection.copy_data"
-                    | "display.brightness_step"
+                        | "display.brightness_step"
                         | "history.append"
                         | "history.remove"
                         | "ui.toggle_history"
                 ) {
-                    brightness_transport_effect(&method,write_began.get(),"unknown")
+                    brightness_transport_effect(&method, write_began.get(), "unknown")
                 } else {
                     "not_started"
                 },
@@ -206,12 +223,12 @@ pub fn call(
                         if matches!(
                             method.as_str(),
                             "selection.copy_data"
-                            | "display.brightness_step"
+                                | "display.brightness_step"
                                 | "history.append"
                                 | "history.remove"
                                 | "ui.toggle_history"
                         ) {
-                            brightness_transport_effect(&method,write_began.get(),"unknown")
+                            brightness_transport_effect(&method, write_began.get(), "unknown")
                         } else {
                             "not_started"
                         },
@@ -446,11 +463,22 @@ mod tests {
         }
     }
     #[test]
-    fn brightness_timeout_before_request_write_is_not_started_and_after_attempt_is_unknown(){
-        assert_eq!(brightness_transport_effect("display.brightness_step",false,"unknown"),"not_started");
-        assert_eq!(brightness_transport_effect("display.brightness_step",true,"unknown"),"unknown");
-        assert_eq!(brightness_transport_effect("keyboard.text",false,"unknown"),"unknown");
-        assert_eq!(brightness_transport_effect("fs.stat",true,"not_started"),"not_started");
+    fn brightness_timeout_before_request_write_is_not_started_and_after_attempt_is_unknown() {
+        assert_eq!(
+            brightness_transport_effect("display.brightness_step", false, "unknown"),
+            "not_started"
+        );
+        assert_eq!(
+            brightness_transport_effect("display.brightness_step", true, "unknown"),
+            "unknown"
+        );
+        assert_eq!(
+            brightness_transport_effect("keyboard.text", false, "unknown"),
+            "unknown"
+        );
+        assert_eq!(
+            brightness_transport_effect("fs.stat", true, "not_started"),
+            "not_started"
+        );
     }
-
 }
