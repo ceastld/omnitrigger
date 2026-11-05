@@ -39,6 +39,7 @@ mod process_scope;
 mod recorder;
 mod regions;
 mod registration;
+mod wheel_input;
 
 pub use engine::Engine;
 pub use model::{
@@ -53,6 +54,9 @@ pub use regions::{
     TriggerCondition,
 };
 pub use registration::{MAX_BINDINGS, RegistrationError};
+pub use wheel_input::{
+    WheelInputAdmission, WheelInputNormalizer, WheelInputPolicy, WheelSessionSnapshot,
+};
 
 #[cfg(test)]
 mod prefix_tests;

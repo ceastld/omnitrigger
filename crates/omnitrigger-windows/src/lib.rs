@@ -122,6 +122,16 @@ pub struct ListenerDiagnostics {
     pub keyboard_events: u64,
     pub mouse_events: u64,
     pub external_injected: u64,
+    /// 整个监听输入流的显式策略；普通启动保持 Unfiltered。
+    pub wheel_input_policy: omnitrigger_core::WheelInputPolicy,
+    /// 门禁之前观测到的原始滚轮包，包含后续被忽略的注入包。
+    pub wheel_input_observed: u64,
+    /// 门禁给出透传的次数；录制仍接收原始物理包，不据此修改候选。
+    pub wheel_input_passthrough: u64,
+    /// 滚轮回调到达时核心状态仍被借用；不伪造鼠标会话快照。
+    pub wheel_input_state_busy: u64,
+    /// 不满足已安装监听流不变量的观测次数；不使用默认 false 快照。
+    pub wheel_input_unavailable: u64,
     pub self_replayed: u64,
     /// 本应用快捷键动作的注入事件，与原输入补发分别计数。
     pub self_shortcuts: u64,

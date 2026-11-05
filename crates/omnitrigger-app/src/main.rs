@@ -54,6 +54,7 @@ mod trigger_panel;
 mod update_ui;
 mod updater;
 mod wheel_editor;
+mod wheel_input_cli;
 mod wheel_workspace;
 mod wheels;
 mod window_action;
@@ -68,7 +69,7 @@ use gpui::{
     WindowOptions,
 };
 use message_input::MessageInput;
-use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec};
+use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec, WheelInputPolicy};
 use omnitrigger_windows::{
     format_button, local_clock, Backend, BackendCommand, BackendEvent, HoldOutcome,
     HoldStartRejection, ListenerDiagnostics,
@@ -460,6 +461,7 @@ fn activation_label(spec: &TriggerSpec) -> String {
 }
 
 struct StartupOptions {
+    wheel_input_policy: WheelInputPolicy,
     ui_smoke: bool,
     browser_connector_settings: bool,
     appearance_settings: bool,
@@ -471,6 +473,7 @@ struct StartupOptions {
 
 struct Workspace {
     backend: Option<Backend>,
+    wheel_input_policy: WheelInputPolicy,
     events: Option<EventBridge<BackendEvent>>,
     ui_wake: UiWake,
     ready: bool,
@@ -609,6 +612,7 @@ impl Workspace {
         title_bar: Result<isize, String>,
     ) -> Self {
         let StartupOptions {
+            wheel_input_policy,
             ui_smoke,
             browser_connector_settings,
             appearance_settings,
@@ -626,10 +630,11 @@ impl Workspace {
             Ok(bindings) => (bindings, None),
             Err(error) => (Vec::new(), Some(error)),
         };
-        let (mut backend, events, mut startup_error) = match Backend::start() {
-            Ok((backend, events)) => (Some(backend), events, None),
-            Err(error) => (None, std::sync::mpsc::channel().1, Some(error)),
-        };
+        let (mut backend, events, mut startup_error) =
+            match Backend::start_with_wheel_input_policy(wheel_input_policy) {
+                Ok((backend, events)) => (Some(backend), events, None),
+                Err(error) => (None, std::sync::mpsc::channel().1, Some(error)),
+            };
         let events = match EventBridge::new(events) {
             Ok(events) => Some(events),
             Err(error) => {
@@ -846,6 +851,7 @@ impl Workspace {
         let system_executor = system_executor::SystemAdjustmentExecutor::with_wake(ui_wake.clone());
         Self {
             backend,
+            wheel_input_policy,
             events,
             ui_wake,
             ready: false,
@@ -1019,12 +1025,14 @@ impl Workspace {
         self.events = None;
         self.listener_generation += 1;
         let ui_wake = self.ui_wake.clone();
+        let wheel_input_policy = self.wheel_input_policy;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     drop(previous);
-                    let (backend, events) = Backend::start()?;
+                    let (backend, events) =
+                        Backend::start_with_wheel_input_policy(wheel_input_policy)?;
                     let events = EventBridge::with_wake(events, ui_wake)?;
                     Ok::<_, String>((backend, events))
                 })
@@ -5934,7 +5942,7 @@ impl Render for Toast {
     }
 }
 
-fn smoke_test() -> Result<(), String> {
+fn smoke_test(wheel_input_policy: WheelInputPolicy) -> Result<(), String> {
     let mut bindings = settings::defaults();
     let mut packet = bindings[0].clone();
     packet.spec.id = settings::next_id(&bindings);
@@ -6036,7 +6044,7 @@ fn smoke_test() -> Result<(), String> {
         }
     }
     settings::validate(&bindings)?;
-    let (backend, events) = Backend::start()?;
+    let (backend, events) = Backend::start_with_wheel_input_policy(wheel_input_policy)?;
     match events
         .recv_timeout(Duration::from_secs(5))
         .map_err(|e| e.to_string())?
@@ -6051,6 +6059,11 @@ fn smoke_test() -> Result<(), String> {
     loop {
         backend.send(BackendCommand::GetDiagnostics)?;
         match events.recv_timeout(Duration::from_millis(100)) {
+            Ok(BackendEvent::Diagnostics(snapshot))
+                if snapshot.wheel_input_policy != wheel_input_policy =>
+            {
+                return Err("实际监听的滚轮策略与启动参数不一致。".into());
+            }
             Ok(BackendEvent::Diagnostics(snapshot))
                 if snapshot.process_context_required
                     && snapshot.pointer_context_required
@@ -6077,6 +6090,13 @@ fn smoke_test() -> Result<(), String> {
 
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
+    let wheel_input_policy = match wheel_input_cli::parse(&arguments) {
+        Ok(policy) => policy,
+        Err(error) => {
+            eprintln!("{}", serde_json::json!({"status":"rejected","error":error}));
+            std::process::exit(1);
+        }
+    };
     #[cfg(debug_assertions)]
     if script_notify_smoke::maybe_run(&arguments) {
         return;
@@ -6192,7 +6212,7 @@ fn main() {
         return;
     }
     if arguments.iter().any(|argument| argument == "--smoke-test") {
-        if let Err(error) = smoke_test() {
+        if let Err(error) = smoke_test(wheel_input_policy) {
             eprintln!("{error}");
             std::process::exit(1);
         }
@@ -6279,6 +6299,7 @@ fn main() {
                         Workspace::new(
                             cx,
                             StartupOptions {
+                                wheel_input_policy,
                                 ui_smoke,
                                 browser_connector_settings,
                                 appearance_settings,

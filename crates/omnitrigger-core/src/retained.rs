@@ -277,6 +277,7 @@ impl Engine {
     }
 
     fn finish_retained(&mut self) {
+        self.clear_mouse_prefix_sessions();
         self.retained_adorn_order.clear();
         self.retained = None;
         self.dedicated_leader = None;

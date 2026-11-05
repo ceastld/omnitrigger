@@ -67,6 +67,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check-fs-stat.mjs target/debug/omnitrigger.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-wheel-input-cli.mjs target/debug/omnitrigger.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustfmt --edition=2024 --check tools/script-sdk-check/file-open-probe.rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --edition=2024 --crate-name omnitrigger_file_open_probe tools/script-sdk-check/file-open-probe.rs -o .tmp/file-open-probe.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 验证常用动作和浏览器工作流
         shell: pwsh
@@ -86,7 +92,7 @@ jobs:
           rustup component add rust-docs --toolchain 1.90.0
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./tools/js-engine-probe/package-runtime.ps1 -OutputDirectory "$PWD/.tmp/script-runtime-ci"
-          node tools/js-engine-probe/check-install.mjs target/debug/omnitrigger.exe .tmp/script-runtime-ci/result.json
+          node tools/js-engine-probe/check-install.mjs target/debug/omnitrigger.exe .tmp/script-runtime-ci/result.json .tmp/file-open-probe.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 验证更新服务发布通知

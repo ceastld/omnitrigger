@@ -10,8 +10,27 @@ use crate::model::direction;
 use crate::registration::validate;
 use crate::{
     Activation, ActiveDrag, Axis, Button, ContextError, Decision, DragEvent, DragPhase, InputEvent,
-    InputKind, RegistrationError, ScreenRect, TriggerSpec, WheelDirection, WheelPolicy, regions,
+    InputKind, RegistrationError, ScreenRect, TriggerSpec, WheelDirection, WheelPolicy,
+    WheelSessionSnapshot, regions,
 };
+
+const MOUSE_BUTTON_COUNT: usize = 5;
+const SESSION_OWNER_WORDS: usize = crate::MAX_BINDINGS.div_ceil(64);
+
+#[derive(Clone, Copy, Default)]
+struct MousePrefixOwners {
+    bindings: [u64; SESSION_OWNER_WORDS],
+}
+
+impl MousePrefixOwners {
+    fn is_active(&self) -> bool {
+        self.bindings.iter().any(|word| *word != 0)
+    }
+
+    fn insert(&mut self, index: usize) {
+        self.bindings[index / 64] |= 1 << (index % 64);
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PressState {
@@ -73,6 +92,8 @@ pub struct Engine {
     pointer_position: Option<(i32, i32)>,
     /// 首个等待中的鼠标前缀按下时的指针位置；移出容差后放弃组合并回放，交还拖拽。
     prefix_origin: Option<(i32, i32)>,
+    /// 仅在鼠标前缀实际扣留Down时建立；记录当时可用的规则，不借新范围重建旧会话。
+    mouse_prefix_sessions: [MousePrefixOwners; MOUSE_BUTTON_COUNT],
     screens: Vec<ScreenRect>,
     process_name: Option<String>,
     window_role: crate::WindowRole,
@@ -112,6 +133,7 @@ impl Engine {
             next_drag_session: Some(1),
             pointer_position: None,
             prefix_origin: None,
+            mouse_prefix_sessions: [MousePrefixOwners::default(); MOUSE_BUTTON_COUNT],
             screens: Vec::new(),
             process_name: None,
             window_role: crate::WindowRole::Unknown,
@@ -397,6 +419,7 @@ impl Engine {
     }
     /// 取消上下文并消费旧按压的后续释放；活动拖拽的终止事件与收尾决策同步返回。
     pub fn cancel(&mut self) -> Decision {
+        self.clear_mouse_prefix_sessions();
         self.retained_adorn_order.clear();
         let drag = self.finish_drag(DragPhase::Cancelled);
         self.dedicated_leader = None;
@@ -539,6 +562,24 @@ impl Engine {
 
     pub fn active_drag(&self) -> Option<ActiveDrag> {
         self.active_drag
+    }
+
+    /// 已建立的鼠标前缀及pending/active拖拽会话，供输入归一化器同步读取。
+    /// 普通按住、透传左键前缀、键盘层、按下/长按末键及Draining不建立此会话。
+    /// 当前拖拽只接受鼠标终键，因此holding_move_key保持false；
+    /// 带键盘前缀的鼠标拖拽仍属于captured_mouse_buttons。
+    pub fn wheel_session_snapshot(&self) -> WheelSessionSnapshot {
+        let pending = self.drag.map(|drag| drag.button);
+        let active = self.active_drag.map(|drag| drag.button);
+        WheelSessionSnapshot {
+            captured_mouse_buttons: self
+                .mouse_prefix_sessions
+                .iter()
+                .any(|owners| owners.is_active())
+                || matches!(pending, Some(Button::Mouse(_)))
+                || matches!(active, Some(Button::Mouse(_))),
+            holding_move_key: false,
+        }
     }
 
     /// 只传入物理鼠标位置；平台应在鼠标按下前同步位置，供长按记录起点。
@@ -790,6 +831,9 @@ impl Engine {
                 }
                 self.pressed.insert(button, PressState::Consumed);
             } else {
+                if let Button::Mouse(mouse) = button {
+                    self.establish_mouse_prefix_session(mouse);
+                }
                 self.pressed.insert(button, PressState::Pending);
                 self.pending.push(InputKind::Down(button));
             }
@@ -824,12 +868,16 @@ impl Engine {
     }
 
     fn up(&mut self, button: Button) -> Decision {
+        if let Button::Mouse(mouse) = button {
+            self.mouse_prefix_sessions[mouse_slot(mouse)] = MousePrefixOwners::default();
+        }
         self.repeat_owner.remove(&button);
         self.terminal_presses.remove(&button);
         self.captured_presses.remove(&button);
         let leaving_layer = self.dedicated_leader == Some(button);
         let restore_tap = leaving_layer && self.tap_restore.is_some_and(|tap| tap.button == button);
         if leaving_layer {
+            self.clear_mouse_prefix_sessions();
             self.dedicated_leader = None;
             self.layer_owner = None;
             self.repeat_owner.clear();
@@ -850,6 +898,7 @@ impl Engine {
         let Some(state) = self.pressed.remove(&button) else {
             return Decision::default();
         };
+        let released_pending_drag = self.drag.is_some();
         if leaving_layer {
             for state in self.pressed.values_mut() {
                 if matches!(*state, PressState::Consumed | PressState::PendingSuppressed) {
@@ -884,7 +933,7 @@ impl Engine {
                 ..Decision::default()
             },
             PressState::Passed | PressState::Observed => Decision {
-                replay: if observed_wheel {
+                replay: if observed_wheel || released_pending_drag {
                     self.flush_pending()
                 } else {
                     Vec::new()
@@ -1152,6 +1201,7 @@ impl Engine {
     }
 
     fn reconcile_conditions(&mut self) -> Decision {
+        self.reconcile_mouse_prefix_sessions();
         let lost_captures = self
             .captured_presses
             .iter()
@@ -1270,6 +1320,13 @@ impl Engine {
     }
 
     fn flush_pending(&mut self) -> Vec<InputKind> {
+        for (&button, &state) in &self.pressed {
+            if state == PressState::Pending
+                && let Button::Mouse(mouse) = button
+            {
+                self.mouse_prefix_sessions[mouse_slot(mouse)] = MousePrefixOwners::default();
+            }
+        }
         self.prefix_origin = None;
         self.hold = None;
         self.drag = None;
@@ -1288,6 +1345,7 @@ impl Engine {
     fn finish_drag(&mut self, phase: DragPhase) -> Option<DragEvent> {
         let drag = self.active_drag.take()?;
         if phase == DragPhase::Cancelled {
+            self.clear_mouse_prefix_sessions();
             for state in self.pressed.values_mut() {
                 if *state == PressState::Consumed {
                     *state = PressState::Draining;
@@ -1301,6 +1359,61 @@ impl Engine {
             origin: drag.origin,
             position: drag.position,
         })
+    }
+
+    fn clear_mouse_prefix_sessions(&mut self) {
+        self.mouse_prefix_sessions = [MousePrefixOwners::default(); MOUSE_BUTTON_COUNT];
+    }
+
+    fn establish_mouse_prefix_session(&mut self, mouse: crate::MouseButton) {
+        let button = Button::Mouse(mouse);
+        let mut owners = MousePrefixOwners::default();
+        for &index in &self.active_bindings {
+            let binding = &self.bindings[index];
+            if binding.keyboard.retained_prefix.is_none()
+                && !binding.keyboard.matching.is_mouse_rule()
+                && binding.held.contains(&button)
+                && self.conditions_match(binding)
+                && self
+                    .pressed
+                    .keys()
+                    .all(|pressed| binding.held.contains(pressed))
+            {
+                owners.insert(index);
+            }
+        }
+        self.mouse_prefix_sessions[mouse_slot(mouse)] = owners;
+    }
+
+    fn reconcile_mouse_prefix_sessions(&mut self) {
+        if !self
+            .mouse_prefix_sessions
+            .iter()
+            .any(|owners| owners.is_active())
+        {
+            return;
+        }
+        let mut available = MousePrefixOwners::default();
+        for &index in &self.active_bindings {
+            if self.conditions_match(&self.bindings[index]) {
+                available.insert(index);
+            }
+        }
+        for owners in &mut self.mouse_prefix_sessions {
+            for (word, valid) in owners.bindings.iter_mut().zip(&available.bindings) {
+                *word &= *valid;
+            }
+        }
+    }
+}
+
+fn mouse_slot(button: crate::MouseButton) -> usize {
+    match button {
+        crate::MouseButton::Left => 0,
+        crate::MouseButton::Right => 1,
+        crate::MouseButton::Middle => 2,
+        crate::MouseButton::X1 => 3,
+        crate::MouseButton::X2 => 4,
     }
 }
 

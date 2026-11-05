@@ -28,3 +28,5 @@ cargo test -p omnitrigger-app --bin omnitrigger --locked desktop_key_smoke::inte
 这些结果只证明自建控件与窗口中的效果，不代表物理触发、原软件快捷键处理、输入法组合态或个人绑定已验收。仅有 `submitted` 回执不能替代窗口或文本状态检查。
 
 调试版还有 `--notification-smoke <空的本地输出目录>`：在独立 GPUI 实例中，经真实 Node 与轻量宿主显示合成通知，检查重叠请求拒绝、到期收尾、活动通知随应用退出清理和前台采样。须先设置 `OMNITRIGGER_TEST_SCRIPT_HOST`；此模式不打开主窗口、不安装 Hook，也不读取个人绑定或剪贴板。第一条通知保留 30 秒，期间将本轮 PID 与通知诊断写入 `ready.json`，供外部窗口工具核对实际可见界面；最终结果写入 `report.json`。前台检查是有界采样，仍需结合非激活窗口属性和实际窗口观察。
+
+文件分支另有 `tools/script-sdk-check/check-file-open.mjs`。先把同目录的 `file-open-probe.rs` 编译到本地临时目录，再向检查器传入应用、probe 和新宿主路径。它只启动本轮复制的无界面 probe，执行实际搜索脚本、原生元数据查询及 `ctx.open`，以新生成的回执文件确认程序已启动。这个结果只证明可执行文件分支，不证明个人文档关联程序、网页加载或原软件业务效果；不改文件关联或个人绑定。

@@ -4,12 +4,14 @@ use crate::{
 };
 use omnitrigger_core::{
     Axis, Button, Decision, DragEvent, DragPhase, Engine, InputEvent, InputKind, MouseButton,
-    Recorder, ScreenRect, TriggerSpec,
+    Recorder, ScreenRect, TriggerSpec, WheelInputAdmission, WheelInputNormalizer, WheelInputPolicy,
+    WheelSessionSnapshot,
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet, VecDeque},
     mem::size_of,
+    rc::Rc,
     sync::{
         atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender, SyncSender},
@@ -24,6 +26,7 @@ use windows::Win32::{
     },
     System::{
         LibraryLoader::GetModuleHandleW,
+        SystemInformation::GetTickCount64,
         Threading::{
             CancelWaitableTimer, CreateWaitableTimerExW, GetCurrentThreadId, SetWaitableTimerEx,
             CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE, TIMER_ALL_ACCESS,
@@ -73,9 +76,65 @@ mod pointer_context;
 #[path = "pointer_platform_tests.rs"]
 mod pointer_tests;
 
+#[cfg(test)]
+#[path = "wheel_input_platform_tests.rs"]
+mod wheel_input_tests;
+
 thread_local! {
     // Hook 始终在安装它的消息线程运行；不在 UI 线程共享可变引擎。
     static STATE: RefCell<Option<ThreadState>> = const { RefCell::new(None) };
+    // 归一化不借用 STATE。回放注入重入时，即使核心仍被独占借用，也能读取
+    // 每次纯核心变更后发布的确切快照，并在注入门禁之前更新整流历史。
+    static WHEEL_INPUT: RefCell<Option<WheelInputStream>> = const { RefCell::new(None) };
+    static WHEEL_INPUT_UNAVAILABLE: Cell<u64> = const { Cell::new(0) };
+}
+
+struct WheelInputStream {
+    normalizer: WheelInputNormalizer,
+    session: Rc<Cell<WheelSessionSnapshot>>,
+    observed: u64,
+    passthrough: u64,
+    state_busy: u64,
+}
+
+impl WheelInputStream {
+    fn new(policy: WheelInputPolicy, session: Rc<Cell<WheelSessionSnapshot>>) -> Self {
+        Self {
+            normalizer: WheelInputNormalizer::new(policy),
+            session,
+            observed: 0,
+            passthrough: 0,
+            state_busy: 0,
+        }
+    }
+
+    fn admit_at(&mut self, event: InputEvent, absolute_ms: i64) -> WheelInputAdmission {
+        self.observed = self.observed.saturating_add(1);
+        let admission = self
+            .normalizer
+            .admit_at(event, absolute_ms, self.session.get());
+        if admission == WheelInputAdmission::PassThrough {
+            self.passthrough = self.passthrough.saturating_add(1);
+        }
+        admission
+    }
+}
+
+fn install_input_state(state: ThreadState) {
+    WHEEL_INPUT_UNAVAILABLE.with(|count| count.set(0));
+    WHEEL_INPUT.with(|slot| {
+        *slot.borrow_mut() = Some(WheelInputStream::new(
+            state.counters.wheel_input_policy,
+            state.wheel_session.clone(),
+        ));
+    });
+    STATE.with(|slot| *slot.borrow_mut() = Some(state));
+}
+
+fn clear_input_state() {
+    // 调用者必须先卸载所有已安装 Hook；完整监听重启才建立新历史。
+    WHEEL_INPUT.with(|slot| slot.borrow_mut().take());
+    STATE.with(|slot| slot.borrow_mut().take());
 }
 
 pub struct Backend {
@@ -112,6 +171,13 @@ impl PointerSnapshot {
 
 impl Backend {
     pub fn start() -> Result<(Self, Receiver<BackendEvent>), String> {
+        Self::start_with_wheel_input_policy(WheelInputPolicy::Unfiltered)
+    }
+
+    /// 为整个监听输入流选择策略；在安装 Hook 前生效，不修改绑定或录制格式。
+    pub fn start_with_wheel_input_policy(
+        policy: WheelInputPolicy,
+    ) -> Result<(Self, Receiver<BackendEvent>), String> {
         let (commands_tx, commands_rx) = mpsc::channel();
         let (events_tx, events_rx) = mpsc::sync_channel(EVENT_CAPACITY);
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -119,7 +185,9 @@ impl Backend {
         let worker_pointer = pointer.clone();
         let worker = thread::Builder::new()
             .name("omnitrigger-input".into())
-            .spawn(move || run_input_thread(commands_rx, events_tx, ready_tx, worker_pointer))
+            .spawn(move || {
+                run_input_thread(commands_rx, events_tx, ready_tx, worker_pointer, policy)
+            })
             .map_err(|error| format!("无法创建输入线程：{error}"))?;
         match ready_rx.recv() {
             Ok(Ok(thread_id)) => Ok((
@@ -171,6 +239,7 @@ fn run_input_thread(
     events: SyncSender<BackendEvent>,
     ready: SyncSender<Result<u32, String>>,
     pointer: Arc<PointerSnapshot>,
+    policy: WheelInputPolicy,
 ) {
     let mut message = MSG::default();
     unsafe {
@@ -192,7 +261,7 @@ fn run_input_thread(
             return;
         }
     };
-    let mut state = ThreadState::new_with_pointer(events.clone(), pointer);
+    let mut state = ThreadState::new_with_pointer_policy(events.clone(), pointer, policy);
     let foreground_events = foreground_context::ForegroundEvents::new();
     let initial_context = screen_context::collect_screens()
         .and_then(|screens| screen_context::cursor_position().map(|pointer| (screens, pointer)));
@@ -207,7 +276,7 @@ fn run_input_thread(
         return;
     }
     state.snapshot_preexisting();
-    STATE.with(|slot| *slot.borrow_mut() = Some(state));
+    install_input_state(state);
     let keyboard = match unsafe {
         SetWindowsHookExW(
             WH_KEYBOARD_LL,
@@ -218,7 +287,7 @@ fn run_input_thread(
     } {
         Ok(hook) => hook,
         Err(error) => {
-            STATE.with(|slot| slot.borrow_mut().take());
+            clear_input_state();
             let _ = ready.send(Err(format!("无法安装键盘 Hook：{error}")));
             return;
         }
@@ -231,7 +300,7 @@ fn run_input_thread(
             unsafe {
                 let _ = UnhookWindowsHookEx(keyboard);
             }
-            STATE.with(|slot| slot.borrow_mut().take());
+            clear_input_state();
             let _ = ready.send(Err(format!("无法安装鼠标 Hook：{error}")));
             return;
         }
@@ -357,7 +426,7 @@ fn run_input_thread(
         let _ = UnhookWindowsHookEx(mouse);
         let _ = UnhookWindowsHookEx(keyboard);
     }
-    STATE.with(|slot| slot.borrow_mut().take());
+    clear_input_state();
 }
 
 enum CommandBatch {
@@ -623,7 +692,10 @@ fn relative_due_100ns(deadline_ms: u64, elapsed: Duration) -> i64 {
 }
 
 struct ThreadState {
+    // 所有生产变更必须经过 with_engine，不能让后续原生调用读到过期的重入快照。
     engine: Engine,
+    /// 由 Engine 生产，绝不从 physical_held/owned_press 推断鼠标会话。
+    wheel_session: Rc<Cell<WheelSessionSnapshot>>,
     events: SyncSender<BackendEvent>,
     recording: Option<RecordingSession>,
     recording_consumed: BTreeSet<Button>,
@@ -671,17 +743,30 @@ impl ThreadState {
         state
     }
 
+    #[cfg(test)]
     fn new_with_pointer(events: SyncSender<BackendEvent>, pointer: Arc<PointerSnapshot>) -> Self {
+        Self::new_with_pointer_policy(events, pointer, WheelInputPolicy::Unfiltered)
+    }
+
+    fn new_with_pointer_policy(
+        events: SyncSender<BackendEvent>,
+        pointer: Arc<PointerSnapshot>,
+        policy: WheelInputPolicy,
+    ) -> Self {
         let foreground = foreground_context::snapshot();
         let waitable_timer = HoldDeadlineTimer::new();
         let counters = ListenerDiagnostics {
+            wheel_input_policy: policy,
             hold_timer_backend: waitable_timer
                 .as_ref()
                 .map_or("SetTimer 回退", |timer| timer.backend),
             ..ListenerDiagnostics::default()
         };
+        let engine = Engine::new(Vec::new()).expect("空绑定列表始终有效");
+        let wheel_session = Rc::new(Cell::new(engine.wheel_session_snapshot()));
         Self {
-            engine: Engine::new(Vec::new()).expect("空绑定列表始终有效"),
+            engine,
+            wheel_session,
             events,
             recording: None,
             recording_consumed: BTreeSet::new(),
@@ -717,6 +802,14 @@ impl ThreadState {
         }
     }
 
+    /// Engine 变更是无 OS 调用的纯 Rust 路径。返回外层之前立即发布快照，
+    /// 后续窗口查询、计时器或回放可能派发的重入不会读到变更前的鼠标会话。
+    fn with_engine<T>(&mut self, operation: impl FnOnce(&mut Engine) -> T) -> T {
+        let result = operation(&mut self.engine);
+        self.wheel_session.set(self.engine.wheel_session_snapshot());
+        result
+    }
+
     fn snapshot_preexisting(&mut self) {
         // 启动前已有的按压已交付给目标窗口，不能将它们的自动重复误当新前缀。
         // 此处运行在安装 Hook 之前，不能放进 Hook 回调（回调早于系统异步状态更新）。
@@ -736,13 +829,16 @@ impl ThreadState {
             self.replay.new_press(button);
             self.replay
                 .passed(InputKind::Down(button), &self.key_metadata);
-            self.engine.process_at(
-                InputEvent {
-                    kind: InputKind::Down(button),
-                    injected: false,
-                },
-                self.now_ms(),
-            );
+            let now_ms = self.now_ms();
+            self.with_engine(|engine| {
+                engine.process_at(
+                    InputEvent {
+                        kind: InputKind::Down(button),
+                        injected: false,
+                    },
+                    now_ms,
+                )
+            });
         }
     }
 
@@ -754,8 +850,7 @@ impl ThreadState {
     ) -> Result<(), String> {
         let changed = self.screens != screens;
         let decision = self
-            .engine
-            .set_screens(screens.clone())
+            .with_engine(|engine| engine.set_screens(screens.clone()))
             .map_err(|error| error.to_string())?;
         if changed {
             self.cancel_queued_replay();
@@ -766,7 +861,7 @@ impl ThreadState {
         let outcome = self.finish_decision(decision, None);
         self.queue_outcome(outcome, None);
         self.pointer.store(pointer);
-        let movement = self.engine.pointer_moved(pointer, now_ms);
+        let movement = self.with_engine(|engine| engine.pointer_moved(pointer, now_ms));
         self.observe_hold(now_ms, &movement, HoldOutcome::Configuration);
         let outcome = self.finish_decision(movement, None);
         self.queue_outcome(outcome, None);
@@ -776,12 +871,12 @@ impl ThreadState {
 
     fn screen_context_failed(&mut self, error: String) {
         self.screen_context_ready = false;
-        let cancelled = self.engine.set_enabled(false);
+        let cancelled = self.with_engine(|engine| engine.set_enabled(false));
         self.enabled = false;
         self.cancel_queued_replay();
         self.forward_cancelled_drags(cancelled);
         self.cancel_recording();
-        if let Ok(cancelled) = self.engine.set_screens(Vec::new()) {
+        if let Ok(cancelled) = self.with_engine(|engine| engine.set_screens(Vec::new())) {
             self.forward_cancelled_drags(cancelled);
         }
         self.screens.clear();
@@ -857,7 +952,7 @@ impl ThreadState {
             let (mpsc::TrySendError::Full(event) | mpsc::TrySendError::Disconnected(event)) = error;
             if let BackendEvent::Drag { event, foreground } = event {
                 self.retain_drag_cancel(event, foreground);
-                let cancelled = self.engine.set_enabled(false);
+                let cancelled = self.with_engine(|engine| engine.set_enabled(false));
                 self.enabled = false;
                 self.cancel_queued_replay();
                 for event in cancelled.drags {
@@ -907,6 +1002,18 @@ impl ThreadState {
 
     fn diagnostics(&self) -> ListenerDiagnostics {
         let mut snapshot = self.counters.clone();
+        WHEEL_INPUT.with(|slot| {
+            let slot = slot.borrow();
+            if let Some(stream) = slot
+                .as_ref()
+                .filter(|stream| Rc::ptr_eq(&stream.session, &self.wheel_session))
+            {
+                snapshot.wheel_input_observed = stream.observed;
+                snapshot.wheel_input_passthrough = stream.passthrough;
+                snapshot.wheel_input_state_busy = stream.state_busy;
+            }
+        });
+        snapshot.wheel_input_unavailable = WHEEL_INPUT_UNAVAILABLE.with(Cell::get);
         snapshot.held = self.physical_held.iter().copied().collect();
         snapshot.owned = self.owned_press.iter().copied().collect();
         snapshot.screen_context_ready = self.screen_context_ready;
@@ -958,7 +1065,7 @@ impl ThreadState {
                         })
                         .cloned()
                         .collect();
-                    match self.engine.replace_bindings(bindings) {
+                    match self.with_engine(|engine| engine.replace_bindings(bindings)) {
                         Ok(cancelled) => {
                             self.process_resolved = false;
                             self.hold_specs = hold_specs;
@@ -974,7 +1081,7 @@ impl ThreadState {
                     self.notify(BackendEvent::Error("请先松开上次录制中按住的按键".into()));
                     return;
                 }
-                let cancelled = self.engine.cancel();
+                let cancelled = self.with_engine(Engine::cancel);
                 self.cancel_queued_replay();
                 self.forward_cancelled_drags(cancelled);
                 self.recording = Some(RecordingSession {
@@ -992,7 +1099,7 @@ impl ThreadState {
                     return;
                 }
                 self.cancel_recording();
-                let cancelled = self.engine.set_enabled(enabled);
+                let cancelled = self.with_engine(|engine| engine.set_enabled(enabled));
                 self.enabled = enabled;
                 if !enabled {
                     self.cancel_queued_replay();
@@ -1010,7 +1117,7 @@ impl ThreadState {
                 self.panel_selecting = false;
             }
             BackendCommand::CancelDrag { session } => {
-                let cancelled = self.engine.cancel_drag(session);
+                let cancelled = self.with_engine(|engine| engine.cancel_drag(session));
                 if !cancelled.drags.is_empty() {
                     self.cancel_queued_replay();
                     self.forward_cancelled_drags(cancelled);
@@ -1023,7 +1130,7 @@ impl ThreadState {
 
     fn cancel_recording(&mut self) {
         if self.recording.take().is_some() {
-            let cancelled = self.engine.cancel();
+            let cancelled = self.with_engine(Engine::cancel);
             self.forward_cancelled_drags(cancelled);
             self.observe_hold(self.now_ms(), &Decision::default(), HoldOutcome::Recording);
             self.notify(BackendEvent::RecordingCancelled);
@@ -1211,7 +1318,7 @@ impl ThreadState {
     fn hold_timer_failed(&mut self, error: String) {
         self.kill_hold_timer();
         // 计时失效不能让待定按压永远悬挂，按原取消协议吞掉后续释放。
-        let cancelled = self.engine.set_enabled(false);
+        let cancelled = self.with_engine(|engine| engine.set_enabled(false));
         self.enabled = false;
         self.cancel_queued_replay();
         self.forward_cancelled_drags(cancelled);
@@ -1245,8 +1352,8 @@ impl ThreadState {
             self.counters.foreground_cancellations =
                 self.counters.foreground_cancellations.saturating_add(1);
             // 不把旧窗口的缓冲输入补发给新窗口。
-            let cancelled = self.engine.cancel();
-            let _ = self.engine.set_foreground_process(None);
+            let cancelled = self.with_engine(Engine::cancel);
+            let _ = self.with_engine(|engine| engine.set_foreground_process(None));
             self.cancel_queued_replay();
             self.forward_cancelled_drags(cancelled);
             self.observe_hold(
@@ -1261,9 +1368,9 @@ impl ThreadState {
             self.process_resolved = false;
             self.last_context_probe = None;
             self.pointer_context = None;
-            let _ = self
-                .engine
-                .set_pointer_context(None, omnitrigger_core::WindowRole::Unknown);
+            let _ = self.with_engine(|engine| {
+                engine.set_pointer_context(None, omnitrigger_core::WindowRole::Unknown)
+            });
         }
     }
 
@@ -1286,7 +1393,8 @@ impl ThreadState {
             self.engine.foreground_process().map(str::to_owned),
             self.engine.foreground_window_role(),
         );
-        if let Ok(cancelled) = self.engine.set_foreground_context(name, role) {
+        if let Ok(cancelled) = self.with_engine(|engine| engine.set_foreground_context(name, role))
+        {
             if previous.0.as_deref() == self.engine.foreground_process()
                 && previous.1 == self.engine.foreground_window_role()
             {
@@ -1311,9 +1419,10 @@ impl ThreadState {
                 .is_some_and(|snapshot| snapshot.valid_at(self.pointer.load(), Instant::now()))
         {
             self.pointer_context = None;
-            self.engine
-                .set_pointer_context(None, omnitrigger_core::WindowRole::Unknown)
-                .unwrap_or_default()
+            self.with_engine(|engine| {
+                engine.set_pointer_context(None, omnitrigger_core::WindowRole::Unknown)
+            })
+            .unwrap_or_default()
         } else {
             Decision::default()
         }
@@ -1324,10 +1433,9 @@ impl ThreadState {
         {
             return;
         }
-        if let Ok(decision) = self
-            .engine
-            .set_pointer_context(snapshot.name.as_deref(), snapshot.role)
-        {
+        if let Ok(decision) = self.with_engine(|engine| {
+            engine.set_pointer_context(snapshot.name.as_deref(), snapshot.role)
+        }) {
             self.pointer_context = Some(snapshot);
             let outcome = self.finish_decision(decision, None);
             self.queue_outcome(outcome, None);
@@ -1367,7 +1475,7 @@ impl ThreadState {
         self.report_overflow();
         let mut decision = self.validate_pointer_context();
         if self.recording.is_none() {
-            let elapsed = self.engine.advance_time(now_ms);
+            let elapsed = self.with_engine(|engine| engine.advance_time(now_ms));
             decision.consume |= elapsed.consume;
             decision.replay.extend(elapsed.replay);
             decision.triggered.extend(elapsed.triggered);
@@ -1396,7 +1504,7 @@ impl ThreadState {
         self.report_overflow();
         let mut movement = self.validate_pointer_context();
         let positional = pointer
-            .map(|position| self.engine.pointer_moved(position, now_ms))
+            .map(|position| self.with_engine(|engine| engine.pointer_moved(position, now_ms)))
             .unwrap_or_default();
         movement.consume |= positional.consume;
         movement.triggered.extend(positional.triggered);
@@ -1452,7 +1560,7 @@ impl ThreadState {
         let mut decision = if let Some(button) = failed_button {
             if matches!(kind, InputKind::Up(_)) {
                 self.failure_draining.remove(&button);
-                self.engine.process_at(event, now_ms);
+                self.with_engine(|engine| engine.process_at(event, now_ms));
             }
             Decision {
                 consume: true,
@@ -1472,10 +1580,10 @@ impl ThreadState {
                     ..Decision::default()
                 }
             } else {
-                self.engine.process_at(event, now_ms)
+                self.with_engine(|engine| engine.process_at(event, now_ms))
             }
         } else {
-            self.engine.process_at(event, now_ms)
+            self.with_engine(|engine| engine.process_at(event, now_ms))
         };
         let cancelled_by = match kind {
             InputKind::Down(_) => HoldOutcome::OtherButton,
@@ -1623,7 +1731,7 @@ impl ThreadState {
                 if matches!(event.kind, InputKind::Up(_)) {
                     session.preexisting.remove(&button);
                 }
-                return self.engine.process_at(event, now_ms);
+                return self.with_engine(|engine| engine.process_at(event, now_ms));
             }
         }
         if event.kind == InputKind::Down(Button::Key(0x1b)) {
@@ -1643,7 +1751,7 @@ impl ThreadState {
             InputKind::Wheel { .. } => (true, false),
         };
         if !consume {
-            return self.engine.process_at(event, now_ms);
+            return self.with_engine(|engine| engine.process_at(event, now_ms));
         }
         if session.candidate.is_none() {
             session.candidate = session.recorder.process(event);
@@ -1667,7 +1775,7 @@ impl ThreadState {
 
     fn replay_failed(&mut self, kinds: &[InputKind]) {
         self.counters.replay_failures = self.counters.replay_failures.saturating_add(1);
-        let cancelled = self.engine.set_enabled(false);
+        let cancelled = self.with_engine(|engine| engine.set_enabled(false));
         self.enabled = false;
         self.forward_cancelled_drags(cancelled);
         self.observe_hold(self.now_ms(), &Decision::default(), HoldOutcome::Recovery);
@@ -1812,6 +1920,84 @@ fn process_normalized_input(
         .unwrap_or(false)
 }
 
+#[derive(Clone, Copy)]
+struct MousePacket {
+    kind: Option<InputKind>,
+    movement: bool,
+    pointer: (i32, i32),
+    injected: bool,
+    tag: usize,
+}
+
+fn absolute_wheel_time_ms(ticks: u64) -> i64 {
+    i64::try_from(ticks).unwrap_or(i64::MAX)
+}
+
+fn observe_wheel_packet(packet: MousePacket, absolute_ms: i64) -> Option<WheelInputAdmission> {
+    let Some(kind @ InputKind::Wheel { .. }) = packet.kind else {
+        return Some(WheelInputAdmission::Forward);
+    };
+    let admission = WHEEL_INPUT.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            return None;
+        };
+        let stream = slot.as_mut()?;
+        Some(stream.admit_at(
+            InputEvent {
+                kind,
+                injected: packet.injected,
+            },
+            absolute_ms,
+        ))
+    });
+    if admission.is_none() {
+        // 安装期间必须已有独立输入流与真实快照。异常时仅显式透传并诊断，
+        // 不伪造 false 会话、重建历史或把未知状态交给匹配器。
+        WHEEL_INPUT_UNAVAILABLE.with(|count| count.set(count.get().saturating_add(1)));
+    }
+    admission
+}
+
+/// Hook 与平台事件序列测试共用；elapsed_ms 只供无 Hook 测试显式控制 Engine 时基。
+fn process_mouse_packet_at(packet: MousePacket, absolute_ms: i64, elapsed_ms: Option<u64>) -> bool {
+    note_callback(false, packet.injected, packet.tag);
+    // 必须先观察全部原始滚轮包，再执行任何注入/自身标记门禁。
+    let Some(admission) = observe_wheel_packet(packet, absolute_ms) else {
+        return false;
+    };
+    if packet.injected
+        || matches!(packet.tag, REPLAY_TAG | SHORTCUT_TAG | PRIORITY_PROBE_TAG)
+        || (packet.kind.is_none() && !packet.movement)
+    {
+        return false;
+    }
+    STATE.with(|slot| {
+        let Ok(mut slot) = slot.try_borrow_mut() else {
+            if matches!(packet.kind, Some(InputKind::Wheel { .. })) {
+                WHEEL_INPUT.with(|stream| {
+                    if let Some(stream) = stream.borrow_mut().as_mut() {
+                        stream.state_busy = stream.state_busy.saturating_add(1);
+                    }
+                });
+            }
+            // 与既有不可重入匹配路径一致：不在借用中的 Engine 上递归执行。
+            // 门禁历史及会话快照已在独立路径中完成观测，不因此丢失或猜测。
+            return false;
+        };
+        let Some(state) = slot.as_mut() else {
+            return false;
+        };
+        // 录制路径接收未经修改的物理包。门禁只观测历史，不改变录制候选。
+        if admission == WheelInputAdmission::PassThrough && state.recording.is_none() {
+            return false;
+        }
+        let now_ms = elapsed_ms.unwrap_or_else(|| state.now_ms());
+        let outcome = state.input_at(packet.kind, None, Some(packet.pointer), now_ms);
+        state.reschedule_hold_timer();
+        state.queue_outcome(outcome, packet.kind)
+    })
+}
+
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code < 0 {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
@@ -1863,24 +2049,19 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let started = Instant::now();
     {
         let native = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
-        note_callback(
-            false,
-            native.flags & LLMHF_INJECTED != 0,
-            native.dwExtraInfo,
-        );
-        if native.flags & LLMHF_INJECTED == 0
-            && native.dwExtraInfo != REPLAY_TAG
-            && native.dwExtraInfo != SHORTCUT_TAG
-            && native.dwExtraInfo != PRIORITY_PROBE_TAG
-        {
-            let message = wparam.0 as u32;
-            let kind = mouse_input(message, native.mouseData);
-            if (kind.is_some() || message == WM_MOUSEMOVE)
-                && process_normalized_input(kind, None, Some((native.pt.x, native.pt.y)))
-            {
-                record_hook_timing(HookTiming::Work, started.elapsed());
-                return LRESULT(1);
-            }
+        let message = wparam.0 as u32;
+        let packet = MousePacket {
+            kind: mouse_input(message, native.mouseData),
+            movement: message == WM_MOUSEMOVE,
+            pointer: (native.pt.x, native.pt.y),
+            injected: native.flags & LLMHF_INJECTED != 0,
+            tag: native.dwExtraInfo,
+        };
+        // 系统运行时间与监听相对时间独立；新建监听不把绝对时基归零。
+        let absolute_ms = absolute_wheel_time_ms(unsafe { GetTickCount64() });
+        if process_mouse_packet_at(packet, absolute_ms, None) {
+            record_hook_timing(HookTiming::Work, started.elapsed());
+            return LRESULT(1);
         }
     }
     record_hook_timing(HookTiming::Work, started.elapsed());

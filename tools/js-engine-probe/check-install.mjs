@@ -1,4 +1,4 @@
-// 本机和 CI 的真实安装验收；只使用仓库 .tmp 下的新配置，不产生输入或剪贴板副作用。
+// 本机和 CI 的真实安装验收；只使用仓库 .tmp 下的新配置和无界面 probe，不操作输入或剪贴板。
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
@@ -6,10 +6,13 @@ import {cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, u
 import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {verifyFsStat} from '../script-sdk-check/check-fs-stat.mjs';
+import {verifyFileOpen} from '../script-sdk-check/check-file-open.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const sourceApp = resolve(process.argv[2] ?? 'target/debug/omnitrigger.exe');
 const packageResult = resolve(process.argv[3]);
+const probeExecutable = resolve(process.argv[4] ?? join(repo,'.tmp/file-open-probe.exe'));
+assert(existsSync(probeExecutable), '先编译本地 file-open-probe.rs，再向检查器传入其 EXE 路径。');
 const development = JSON.parse(readFileSync(packageResult, 'utf8'));
 mkdirSync(join(repo, '.tmp'), {recursive:true});
 const root = mkdtempSync(join(repo, '.tmp/script-install-check-'));
@@ -76,6 +79,8 @@ assert.equal(outcome.output.text,'OmniTrigger');
 checks.push('generated_project_runs_without_Node_or_manual_host');
 verifyFsStat({root,entryPath:project.entry_path,call:project.call,invoke:callPath=>cli(['--run-action',callPath])});
 checks.push('installed_host_fs_stat_uses_real_native_metadata_without_UI');
+await verifyFileOpen({root,entryPath:project.entry_path,call:project.call,invoke:callPath=>cli(['--run-action',callPath]),probeExecutable});
+checks.push('installed_host_actual_file_open_starts_owned_no_ui_probe');
 assert.equal(install(development.archive).status,'installed');
 assert.equal(readFileSync(pointer,'utf8'),firstPointer);
 checks.push('same_package_reinstall');
