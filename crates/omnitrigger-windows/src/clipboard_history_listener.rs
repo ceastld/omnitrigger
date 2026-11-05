@@ -507,7 +507,9 @@ mod native {
                     value.checked_add(1)
                 })
                 .map_err(|_| HistoryListenerError::StartFailed)?;
-            let (station, desktop) = current_scope()?;
+            let listener_scope = ListenerScope::capture()?;
+            let station = listener_scope.station_name.clone();
+            let desktop = listener_scope.desktop_name.clone();
             let (wake, wakes) = mpsc::sync_channel(1);
             let (output, results) = mpsc::sync_channel(OUTPUT_CAPACITY);
             let signal = Arc::new(Signal {
@@ -517,13 +519,9 @@ mod native {
             });
             let (ready, initial) = mpsc::sync_channel(1);
             let window_signal = signal.clone();
-            let window_station = station.clone();
-            let window_desktop = desktop.clone();
             let window = thread::Builder::new()
                 .name("clipboard-history-window".into())
-                .spawn(move || {
-                    notification_window(window_signal, ready, &window_station, &window_desktop)
-                })
+                .spawn(move || notification_window(window_signal, ready, listener_scope))
                 .map_err(|_| HistoryListenerError::StartFailed)?;
             let mut listener = Self {
                 session,
@@ -625,11 +623,11 @@ mod native {
     fn notification_window(
         signal: Arc<Signal>,
         ready: mpsc::SyncSender<Result<u32, HistoryListenerError>>,
-        station: &str,
-        desktop: &str,
+        scope: ListenerScope,
     ) -> Result<(), HistoryListenerError> {
-        let result = enter_scope(station, desktop)
-            .and_then(|_scope| notification_window_inner(&signal, &ready));
+        let result = scope
+            .attach(&mut NativeListenerScope)
+            .and_then(|()| notification_window_inner(&signal, &ready, &scope));
         if let Err(error) = result {
             let _ = ready.try_send(Err(error));
         }
@@ -640,6 +638,7 @@ mod native {
     fn notification_window_inner(
         signal: &Signal,
         ready: &mpsc::SyncSender<Result<u32, HistoryListenerError>>,
+        scope: &ListenerScope,
     ) -> Result<(), HistoryListenerError> {
         let instance =
             unsafe { GetModuleHandleW(None) }.map_err(|_| HistoryListenerError::WindowFailed)?;
@@ -709,6 +708,7 @@ mod native {
             .try_send(Ok(unsafe { GetClipboardSequenceNumber() }))
             .map_err(|_| HistoryListenerError::StartFailed)?;
         while !signal.stop.load(Ordering::Acquire) {
+            scope.verify(&NativeListenerScope)?;
             let mut message = MSG::default();
             for _ in 0..64 {
                 if !unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
@@ -866,17 +866,105 @@ mod native {
         ))
     }
 
+    // 监听线程只能借用启动方的站点/桌面，不拥有也不关闭这些句柄。
+    // 调用方必须在切换进程窗口站之前stop并join；检查不替代进程全局同步。
+    struct ListenerScope {
+        station: isize,
+        desktop: isize,
+        station_name: String,
+        desktop_name: String,
+    }
+    trait ListenerScopeBackend {
+        fn station(&self) -> isize;
+        fn desktop(&self) -> isize;
+        fn name(&self, handle: isize) -> Result<String, HistoryListenerError>;
+        fn set_desktop(&mut self, handle: isize) -> Result<(), HistoryListenerError>;
+    }
+    struct NativeListenerScope;
+    impl ListenerScopeBackend for NativeListenerScope {
+        fn station(&self) -> isize {
+            unsafe { GetProcessWindowStation() }
+        }
+        fn desktop(&self) -> isize {
+            unsafe { GetThreadDesktop(GetCurrentThreadId()) }
+        }
+        fn name(&self, handle: isize) -> Result<String, HistoryListenerError> {
+            object_name(handle)
+        }
+        fn set_desktop(&mut self, handle: isize) -> Result<(), HistoryListenerError> {
+            if unsafe { SetThreadDesktop(handle) } == 0 {
+                Err(HistoryListenerError::ScopeMismatch)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    impl ListenerScope {
+        fn capture() -> Result<Self, HistoryListenerError> {
+            let backend = NativeListenerScope;
+            let station = backend.station();
+            let desktop = backend.desktop();
+            let scope = Self {
+                station,
+                desktop,
+                station_name: backend.name(station)?,
+                desktop_name: backend.name(desktop)?,
+            };
+            scope.verify(&backend)?;
+            Ok(scope)
+        }
+        fn verify_station(
+            &self,
+            backend: &impl ListenerScopeBackend,
+        ) -> Result<(), HistoryListenerError> {
+            if self.station == 0
+                || self.desktop == 0
+                || backend.station() != self.station
+                || backend.name(self.station)? != self.station_name
+            {
+                return Err(HistoryListenerError::ScopeMismatch);
+            }
+            Ok(())
+        }
+        fn verify(&self, backend: &impl ListenerScopeBackend) -> Result<(), HistoryListenerError> {
+            self.verify_station(backend)?;
+            if backend.desktop() != self.desktop || backend.name(self.desktop)? != self.desktop_name
+            {
+                return Err(HistoryListenerError::ScopeMismatch);
+            }
+            Ok(())
+        }
+        fn attach(
+            &self,
+            backend: &mut impl ListenerScopeBackend,
+        ) -> Result<(), HistoryListenerError> {
+            self.verify_station(backend)?;
+            if backend.name(self.desktop)? != self.desktop_name {
+                return Err(HistoryListenerError::ScopeMismatch);
+            }
+            // 使用明确的借用句柄，不因桌面不同而重开/重设进程站；线程退出释放其桌面引用。
+            backend.set_desktop(self.desktop)?;
+            self.verify(backend)
+        }
+    }
+
     struct Scope {
         old_station: isize,
         old_desktop: isize,
         station: isize,
         desktop: isize,
+        station_changed: bool,
+        desktop_changed: bool,
     }
     impl Drop for Scope {
         fn drop(&mut self) {
             unsafe {
-                let _ = SetThreadDesktop(self.old_desktop);
-                let _ = SetProcessWindowStation(self.old_station);
+                if self.station_changed {
+                    let _ = SetProcessWindowStation(self.old_station);
+                }
+                if self.desktop_changed {
+                    let _ = SetThreadDesktop(self.old_desktop);
+                }
                 if self.desktop != 0 {
                     let _ = CloseDesktop(self.desktop);
                 }
@@ -902,24 +990,139 @@ mod native {
             old_desktop: unsafe { GetThreadDesktop(GetCurrentThreadId()) },
             station: 0,
             desktop: 0,
+            station_changed: false,
+            desktop_changed: false,
         };
-        if current_scope()? != (station.into(), desktop.into()) {
+        // 仅供最早辅助进程入口使用：独占进程时允许进入明确站点。
+        // 站点已正确时不能仅因线程桌面不同而替换进程全局句柄。
+        if object_name(scope.old_station)? != station {
             let station_name: Vec<u16> = station.encode_utf16().chain([0]).collect();
             // 枚举桌面、读属性、剪贴板及全局原子（格式注册）；不请求创建桌面或改安全描述符。
             scope.station = unsafe { OpenWindowStationW(station_name.as_ptr(), 0, 0x27) };
             if scope.station == 0 || unsafe { SetProcessWindowStation(scope.station) } == 0 {
                 return Err(HistoryListenerError::ScopeMismatch);
             }
-            let desktop_name: Vec<u16> = desktop.encode_utf16().chain([0]).collect();
-            scope.desktop = unsafe { OpenDesktopW(desktop_name.as_ptr(), 0, 0, 0x83) };
-            if scope.desktop == 0 || unsafe { SetThreadDesktop(scope.desktop) } == 0 {
-                return Err(HistoryListenerError::ScopeMismatch);
-            }
+            scope.station_changed = true;
         }
+        let desktop_name: Vec<u16> = desktop.encode_utf16().chain([0]).collect();
+        scope.desktop = unsafe { OpenDesktopW(desktop_name.as_ptr(), 0, 0, 0x83) };
+        if scope.desktop == 0 || unsafe { SetThreadDesktop(scope.desktop) } == 0 {
+            return Err(HistoryListenerError::ScopeMismatch);
+        }
+        scope.desktop_changed = true;
         if current_scope()? != (station.into(), desktop.into()) {
             return Err(HistoryListenerError::ScopeMismatch);
         }
         Ok(scope)
+    }
+
+    #[cfg(test)]
+    mod scope_tests {
+        use super::*;
+        struct Backend {
+            station: isize,
+            desktop: isize,
+            sets: Vec<isize>,
+            change_during_set: bool,
+            refuse: bool,
+        }
+        impl ListenerScopeBackend for Backend {
+            fn station(&self) -> isize {
+                self.station
+            }
+            fn desktop(&self) -> isize {
+                self.desktop
+            }
+            fn name(&self, handle: isize) -> Result<String, HistoryListenerError> {
+                match handle {
+                    1 | 2 => Ok("synthetic-private-station".into()),
+                    10 => Ok("Default".into()),
+                    11 | 12 => Ok("Def".into()),
+                    _ => Err(HistoryListenerError::ScopeMismatch),
+                }
+            }
+            fn set_desktop(&mut self, handle: isize) -> Result<(), HistoryListenerError> {
+                self.sets.push(handle);
+                if self.refuse {
+                    return Err(HistoryListenerError::ScopeMismatch);
+                }
+                self.desktop = handle;
+                if self.change_during_set {
+                    self.station = 2;
+                }
+                Ok(())
+            }
+        }
+        fn target() -> ListenerScope {
+            ListenerScope {
+                station: 1,
+                desktop: 11,
+                station_name: "synthetic-private-station".into(),
+                desktop_name: "Def".into(),
+            }
+        }
+        fn backend() -> Backend {
+            Backend {
+                station: 1,
+                desktop: 10,
+                sets: vec![],
+                change_during_set: false,
+                refuse: false,
+            }
+        }
+        #[test]
+        fn same_station_different_thread_desktop_only_assigns_borrowed_desktop() {
+            let mut backend = backend();
+            {
+                let target = target();
+                target.attach(&mut backend).unwrap();
+                target.verify(&backend).unwrap();
+            }
+            assert_eq!(backend.station, 1);
+            assert_eq!(backend.sets, [11]);
+            assert_eq!((backend.station, backend.desktop), (1, 11));
+        }
+        #[test]
+        fn same_station_name_with_changed_handle_is_rejected_before_thread_assignment() {
+            let mut backend = backend();
+            backend.station = 2;
+            assert_eq!(
+                target().attach(&mut backend),
+                Err(HistoryListenerError::ScopeMismatch)
+            );
+            assert!(backend.sets.is_empty());
+            assert_eq!(backend.station, 2);
+        }
+        #[test]
+        fn external_station_change_during_attach_is_detected_without_restoring_global_state() {
+            let mut backend = backend();
+            backend.change_during_set = true;
+            assert_eq!(
+                target().attach(&mut backend),
+                Err(HistoryListenerError::ScopeMismatch)
+            );
+            assert_eq!(backend.station, 2);
+        }
+        #[test]
+        fn failed_desktop_assignment_does_not_enter_or_rewrite_process_station() {
+            let mut backend = backend();
+            backend.refuse = true;
+            assert_eq!(
+                target().attach(&mut backend),
+                Err(HistoryListenerError::ScopeMismatch)
+            );
+            assert_eq!((backend.station, backend.desktop), (1, 10));
+        }
+        #[test]
+        fn same_desktop_name_without_target_handle_is_not_enough() {
+            let mut backend = backend();
+            backend.desktop = 12;
+            assert_eq!(
+                target().verify(&backend),
+                Err(HistoryListenerError::ScopeMismatch)
+            );
+            assert!(backend.sets.is_empty());
+        }
     }
 
     /// 仅用于应用内部辅助进程入口。接线方须在任何 UI、插件和脚本初始化之前调用。
