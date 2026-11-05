@@ -1,0 +1,6 @@
+{
+  "package_id":"examples.line-text",
+  "action_id":"inspect-or-send-script",
+  "action_version":1,
+  "input":{"mode":"inspect","operation":"sort","text":"b\na\n"}
+}

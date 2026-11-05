@@ -1,0 +1,6 @@
+{
+  "package_id":"examples.path-text",
+  "action_id":"inspect-or-send-script",
+  "action_version":1,
+  "input":{"mode":"inspect","operation":"parent","paths":["C:\\Example\\报告.txt"]}
+}

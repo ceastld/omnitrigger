@@ -1,0 +1,6 @@
+{
+  "package_id":"examples.line-text",
+  "action_id":"inspect-or-send-script",
+  "action_version":1,
+  "input":{"mode":"send","operation":"deduplicate","text":"示例甲\n示例乙\n示例甲\n"}
+}

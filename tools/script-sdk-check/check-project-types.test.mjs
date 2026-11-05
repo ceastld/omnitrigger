@@ -28,6 +28,11 @@ test('检查既有入口与相对依赖，保留源码并且不执行模块初�
   assert(result.checkedFiles.includes('lib/text.mjs'));
   assert(result.checkedFiles.includes('sdk/api.d.ts'));
   assert.equal(result.runtimeExecuted,false);assert.equal(result.filesModified,false);
+  assert.equal(result.staticEnvironmentPassed,true);assert.equal(result.staticAnalysisComplete,true);
+  assert.deepEqual(result.environmentDiagnostics,[]);assert.deepEqual(result.skippedEntries,[]);
+  assert.equal(result.moduleChecks[0].entry,'main.mjs');
+  assert.equal(result.entryChecks[0].mainExport,'local_callable_declaration');
+  assert.equal(result.runtimeCapabilitiesChecked,false);assert.equal(result.runtimeVerified,false);
   assert.deepEqual(readFileSync(join(root,'main.mjs')),before);
 });
 
@@ -83,5 +88,99 @@ test('CLI缺参数返回结构化失败和退出码，不尝试寻找工程',()=
   assert.ifError(result.error);assert.equal(result.status,1);
   const output=JSON.parse(result.stderr);
   assert.equal(output.error.code,'project_directory_required');
+  assert.equal(output.runtimeExecuted,false);assert.equal(output.filesModified,false);
+});
+
+test('类型通过但没有main具名导出时，统一命令返回环境诊断',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'main.mjs'),'export function other(){return null;}');
+  const result=checkProjectTypes(root);
+  assert.deepEqual(result.diagnostics,[]);
+  assert.equal(result.passed,false);assert.equal(result.staticEnvironmentPassed,false);
+  assert(result.environmentDiagnostics.some(d=>d.code==='entry_main_not_exported'&&d.category==='entry'));
+  assert.equal(result.runtimeExecuted,false);
+});
+
+test('Bundler能解析的省略扩展名导入被轻量环境检查拒绝',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'lib/value.js'),'export const value=7;');
+  writeFileSync(join(root,'main.mjs'),'import {value} from "./lib/value";export function main(){return value;}');
+  const result=checkProjectTypes(root);
+  assert.deepEqual(result.diagnostics,[]);
+  assert.equal(result.passed,false);
+  assert(result.environmentDiagnostics.some(d=>d.code==='module_specifier'&&d.category==='modules'&&d.line===1));
+});
+
+test('TypeScript重定向到ts声明时仍按明确js路径检查实际静态依赖',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'lib/value.ts'),'export const value=7;');
+  writeFileSync(join(root,'lib/value.js'),'import "./child.js";export const value=7;');
+  writeFileSync(join(root,'lib/child.js'),'throw Error("RUNTIME JS MUST NOT EXECUTE");export const child=true;');
+  writeFileSync(join(root,'main.mjs'),'import {value} from "./lib/value.js";export function main(){return value;}');
+  const result=checkProjectTypes(root);
+  assert.deepEqual(result.diagnostics,[]);assert.equal(result.passed,true);
+  assert(result.checkedFiles.includes('lib/value.ts'));
+  assert(result.checkedFiles.includes('lib/value.js'));assert(result.checkedFiles.includes('lib/child.js'));
+  assert.deepEqual(result.moduleChecks[0].modules,['main.mjs','lib/value.js','lib/child.js']);
+  assert.equal(result.runtimeExecuted,false);
+});
+
+test('动态目标和再导出保留不确定性，不把警告改成运行成功',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'main.mjs'),'export function main(){if(false)import(String("not-evaluated"));return null;}');
+  const dynamic=checkProjectTypes(root);
+  assert.equal(dynamic.passed,true);assert.equal(dynamic.staticAnalysisComplete,false);
+  assert(dynamic.environmentDiagnostics.some(d=>d.code==='dynamic_import_unresolved'&&d.severity==='warning'));
+  writeFileSync(join(root,'lib/value.js'),'export function run(){return null;}');
+  writeFileSync(join(root,'main.mjs'),'export {run as main} from "./lib/value.js";');
+  const reexport=checkProjectTypes(root);
+  assert.equal(reexport.passed,true);assert.equal(reexport.staticAnalysisComplete,false);
+  assert(reexport.environmentDiagnostics.some(d=>d.code==='entry_main_value_unresolved'));
+  assert.equal(reexport.runtimeVerified,false);
+});
+
+test('旧js函数体入口继续做类型检查，不强加ESM导出要求',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[{runtime:'script',entry:'legacy.js'}]}));
+  writeFileSync(join(root,'legacy.js'),'function main(){return null;}');
+  const result=checkProjectTypes(root);
+  assert.equal(result.passed,true);assert.deepEqual(result.moduleChecks,[]);assert.deepEqual(result.entryChecks,[]);
+  assert.deepEqual(result.skippedEntries,[{entry:'legacy.js',reason:'legacy_function_body_protocol'}]);
+  assert.equal(result.staticAnalysisComplete,false);
+  assert(!result.checkedFiles.includes('main.mjs'));
+});
+
+test('类型预算内超过轻量宿主1MiB的模块图仍拒绝',()=>{
+  const root=fixture();
+  const imports=[];
+  for(let i=0;i<9;i++) {
+    imports.push('import "./lib/m'+i+'.js";');
+    writeFileSync(join(root,'lib/m'+i+'.js'),'export const value=1;//'+'x'.repeat(120*1024));
+  }
+  writeFileSync(join(root,'main.mjs'),imports.join('\n')+'\nexport function main(){return null;}');
+  const result=checkProjectTypes(root);
+  assert.deepEqual(result.diagnostics,[]);
+  assert.equal(result.passed,false);assert.equal(result.staticAnalysisComplete,false);
+  assert(result.environmentDiagnostics.some(d=>d.code==='module_total_limit'));
+});
+
+test('补读实际js边仍先检查硬链接属性，不绕过已有元数据防护',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'lib/value.ts'),'export const value=7;');
+  writeFileSync(join(root,'lib/value.js'),'export const value=7;');
+  linkSync(join(root,'lib/value.js'),join(root,'lib/linked.js'));
+  writeFileSync(join(root,'main.mjs'),'import {value} from "./lib/value.js";export function main(){return value;}');
+  assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_link_path');
+});
+
+test('统一CLI对环境失败输出JSON和退出码1，不执行作者初始化器',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'main.mjs'),'throw Error("AUTHOR MUST NOT EXECUTE");export function other(){return null;}');
+  const result=spawnSync(process.execPath,[join(repo,'tools/script-sdk-check/check-project-types.mjs'),root],
+    {encoding:'utf8',windowsHide:true,timeout:30000,maxBuffer:1024*1024});
+  assert.ifError(result.error);assert.equal(result.status,1,result.stderr);
+  const output=JSON.parse(result.stdout);
+  assert.deepEqual(output.diagnostics,[]);
+  assert(output.environmentDiagnostics.some(d=>d.code==='entry_main_not_exported'));
   assert.equal(output.runtimeExecuted,false);assert.equal(output.filesModified,false);
 });

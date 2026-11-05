@@ -4,6 +4,8 @@ import {openSync,closeSync,fstatSync,lstatSync,readdirSync,readSync} from 'node:
 import {dirname,extname,isAbsolute,join,relative,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import ts from 'typescript';
+import {analyzeScriptModules} from './analyze-script-modules.mjs';
+import {analyzeScriptEntry} from './analyze-script-entry.mjs';
 
 class ProjectCheckError extends Error {
   constructor(code) { super('脚本工程检查未完成；请检查错误代码。'); this.code=code; }
@@ -56,6 +58,7 @@ export function checkProjectTypes(projectDirectory) {
   const libraries=readdirSync(library).filter(name=>/^lib\..*\.d\.ts$/.test(name)).map(name=>join(library,name));
   guard(libraries);
   const loaded=new Map();
+  const sourceSnapshots=new Map();
   let total=0;
   function read(path,limit) {
     path=resolve(path);
@@ -77,8 +80,11 @@ export function checkProjectTypes(projectDirectory) {
         total+=count;loaded.set(path,count);
         if(loaded.size>256||total>8*1024*1024)fail('project_total_limit');
       }
-      try{return new TextDecoder('utf-8',{fatal:true}).decode(bytes.subarray(0,count));}
+      let text;
+      try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes.subarray(0,count));}
       catch {fail('project_utf8_invalid');}
+      if(within(root,path)&&['.js','.mjs'].includes(extname(path)))sourceSnapshots.set(path,text);
+      return text;
     } finally {closeSync(handle);}
   }
   function json(path,limit) {
@@ -150,9 +156,47 @@ export function checkProjectTypes(projectDirectory) {
       ...(location?{line:location.line+1,column:location.character+1}:{})};
   });
   if(fatal)throw fatal;
-  return {passed:diagnostics.length===0,compilerVersion:ts.version,project:root,
+  const localName=path=>relative(root,path).replaceAll('\\','/');
+  const moduleChecks=[],entryChecks=[],skippedEntries=[];
+  for(const entry of new Set(entries)) {
+    const name=localName(entry);
+    // 旧 .js 走函数体协议，不能假装它需要 ESM 具名导出。
+    if(extname(entry)!=='.mjs') {
+      skippedEntries.push({entry:name,reason:'legacy_function_body_protocol'});
+      continue;
+    }
+    let moduleResult;
+    const attempted=new Set();
+    for(;;) {
+      const sources=[...sourceSnapshots].map(([path,text])=>({path:localName(path),text}));
+      moduleResult=analyzeScriptModules({entry:name,sources});
+      // TypeScript可能把 ./x.js 解析到 x.ts；轻量宿主需要的是明确的 x.js。
+      // 只补读分析器给出的包内静态边，不枚举目录、不追踪动态表达式。
+      const missing=[...new Set(moduleResult.edges.filter(edge=>edge.kind==='static')
+        .map(edge=>resolve(root,edge.to)).filter(path=>!sourceSnapshots.has(path)&&!attempted.has(path)))];
+      if(missing.length===0||moduleResult.diagnostics.some(d=>['module_total_limit','snapshot_limit'].includes(d.code)))break;
+      for(const path of missing) {
+        attempted.add(path);
+        if(!within(root,path))fail('project_entry_invalid');
+        try {read(path,128*1024);}
+        catch(error) {if(error?.code!=='ENOENT')throw error;}
+      }
+    }
+    moduleChecks.push({entry:name,...moduleResult});
+    entryChecks.push({entry:name,...analyzeScriptEntry({file:name,text:sourceSnapshots.get(entry)})});
+  }
+  const environmentDiagnostics=[
+    ...moduleChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'modules',...item}))),
+    ...entryChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'entry',...item}))),
+  ];
+  const staticEnvironmentPassed=moduleChecks.every(check=>check.passed)&&entryChecks.every(check=>check.passed);
+  return {passed:diagnostics.length===0&&staticEnvironmentPassed,compilerVersion:ts.version,project:root,
     entries:entries.map(path=>relative(root,path).replaceAll('\\','/')),diagnostics,
     checkedFiles:[...loaded.keys()].map(path=>relative(root,path).replaceAll('\\','/')),
+    staticEnvironmentPassed,environmentDiagnostics,moduleChecks,entryChecks,skippedEntries,
+    staticAnalysisComplete:skippedEntries.length===0&&moduleChecks.every(check=>check.staticGraphComplete)
+      &&entryChecks.every(check=>check.mainExport==='local_callable_declaration'),
+    runtimeCapabilitiesChecked:false,runtimeVerified:false,
     runtimeExecuted:false,filesModified:false};
 }
 
