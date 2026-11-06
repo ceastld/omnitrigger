@@ -279,6 +279,7 @@ pub fn init(cx: &mut App) {
         let mut deferred: Option<UiRequest> = None;
         loop {
             cx.background_executor().timer(POLL).await;
+            let mut chooser_activation = None;
             if cx
                 .update(|cx| {
                     if let Some((handle, _)) = &history_active {
@@ -375,6 +376,8 @@ pub fn init(cx: &mut App) {
                         return;
                     }
                     let abandoned = request.abandoned.clone();
+                    let target = request.target;
+                    let mut chooser_hwnd = None;
                     let bounds = Bounds::centered(None, size(px(520.), px(480.)), cx);
                     if let Ok(handle) = cx.open_window(
                         WindowOptions {
@@ -389,14 +392,35 @@ pub fn init(cx: &mut App) {
                             app_id: Some("OmniTrigger.ScriptChoice".into()),
                             ..Default::default()
                         },
-                        |window, cx| cx.new(|cx| Chooser::new(request, window, cx)),
+                        |window, cx| {
+                            chooser_hwnd = HasWindowHandle::window_handle(&*window)
+                                .ok()
+                                .and_then(|handle| match handle.as_raw() {
+                                    RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+                                    _ => None,
+                                });
+                            cx.new(|cx| Chooser::new(request, window, cx))
+                        },
                     ) {
+                        chooser_activation = chooser_hwnd.map(|hwnd| (hwnd, target, abandoned.clone()));
                         active = Some((handle, abandoned));
                     }
                 })
                 .is_err()
             {
                 break;
+            }
+            // GPUI 0.2.2 的 Windows 创建路径未使用 focus 参数；显示窗口不保证取得前台。
+            // 原生激活会同步发送窗口消息，必须在上述 GPUI 状态借用结束后执行。
+            if let Some((hwnd, Some(snapshot), abandoned)) = chooser_activation {
+                if !abandoned.load(Ordering::Acquire)
+                    && (omnitrigger_windows::is_foreground_window(hwnd)
+                        || omnitrigger_windows::ScriptTarget::from_snapshot(snapshot)
+                            .is_ok_and(|target| target.ensure_foreground().is_ok()))
+                {
+                    // 只请求一次；用户已切到第三窗口时跳过，不通过模拟按键争夺前台。
+                    let _ = omnitrigger_windows::activate_panel_window(hwnd);
+                }
             }
         }
     })
