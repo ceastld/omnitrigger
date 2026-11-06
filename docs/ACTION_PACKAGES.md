@@ -433,6 +433,8 @@ export default async ctx => {
 
 带期限的 `sendText` 在核验原目标、等待发送门闩后和既有批次检查处遵守更早的动作期限及本次最多 5 秒的发送检查预算。它不会抢占门闩等待或正在执行的系统输入；移交发送器后超时或取消均保守标为 `unknown`，不表示文字未发送，调用方不应自动重试。
 
+[选区行清理实验示例](../examples/actions/selection-line-cleanup/)提供删除空行或整行空白的 Node 与同步 Script 入口；读取上限 8192、首版输出上限 128 个 UTF-16 单元。示例说明列出真实验收范围及冷启动 WinForms 输入异常。
+
 [文本动作示例](../examples/actions/desktop-text/)包含直接输入、粘贴、括号包裹选区、行尾换行。粘贴示例先写剪贴板、等待 50ms、发送 Ctrl+V；包裹选区先复制，保留空格和制表符，然后执行同样的粘贴过程。这些示例都实际改变目标文本，粘贴后的文本留在剪贴板。
 
 [删除到行首示例](../examples/actions/desktop-line-edit/)依次发送 Shift+Home、等待 80ms、发送 Backspace。`delete-line-start-script` 使用标准 JS 和独立轻量宿主，通过 `call-script.json` 调用，不需要 Node；`waitMs` 与 `keyDownDelayMs` 可显式设置，并在发送输入前校验。默认按原目标进程选择按下时序。它会实际编辑目标输入框，检查清单不会执行它。专用输入框的真实验证在本机显式运行：

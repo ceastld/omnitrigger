@@ -1,0 +1,8 @@
+{
+  "package_id": "examples.selection-line-cleanup",
+  "action_id": "node",
+  "action_version": 1,
+  "input": {
+    "operation": "remove-white-space-lines"
+  }
+}
