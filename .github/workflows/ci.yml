@@ -164,6 +164,10 @@ jobs:
         run: |
           node tests/n10-rust-package.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/desktop_captured_target.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/captured_target_types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/browser_workflows.test.mjs tests/browser_default_tab.test.mjs tests/browser_default_tab_sync.test.mjs tests/notification_action_contract.test.mjs examples/actions/common-desktop/recipes.test.mjs examples/actions/common-search/recipes.test.mjs examples/actions/script-choice/contract.test.mjs tests/browser_close.test.mjs tests/browser_input_snapshot.test.mjs tests/keyboard_recipe_preflight.test.mjs tests/keyboard_guarded_recipe.test.mjs tests/keyboard_sequence_shortcuts_snapshot.test.mjs tests/browser_popout.test.mjs tests/browser_close_popout_boundaries.test.mjs tests/browser_close_sync.test.mjs tests/browser_popout_script.test.mjs tests/browser_restore_session_sync.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/common-desktop/paste-arrow.test.mjs
@@ -296,6 +300,13 @@ jobs:
             cargo clippy --all-targets @engineArguments -- -D warnings
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+
+      - name: 验证 Boa Debug 宿主的共享 SDK 启动
+        run: |
+          cargo build --locked --no-default-features --features boa
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node ./check-startup.mjs ./target/debug/omnitrigger-js-probe.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 构建两种引擎并测量体积
         run: ./measure.ps1

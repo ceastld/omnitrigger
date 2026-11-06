@@ -2,6 +2,8 @@
 
 状态：可运行的同步原型，不是正式插件。两种引擎加载同一份 `src/sdk.js`，通过 JSON 桥接到 Rust。桌面 API 与 Node 共用参数校验定义，应用接入时经每次调用独立的回环连接交给现有 `NativeHost`；独立 CLI 的剪贴板和打开目标复用 `omnitrigger-windows`。不安装 Hook，不访问 GPUI。`ctx.apiVersion` 为 `1`。[类型声明](../../crates/omnitrigger-actions/runtime/script-api.d.ts)用于编辑器补全，不提供 TS 转译。
 
+Windows MSVC 的 Boa 宿主为共享 SDK 的解析保留 8 MiB 原生主栈；这不是预先提交的全部内存，也不改变 JS 的循环、递归和动作时限。QuickJS 的配置保持原值。
+
 通过 OmniTrigger 的 `script` 动作运行时接入时，`.mjs` 文件具名导出同步 `main(ctx)` 并可导入包内相对模块；已有 `.js` 文件声明 `function main(ctx)`，适配层继续将它转为函数体请求，文件本身保持标准 JavaScript。模块契约见[包内模块](MODULES.md)。`ctx.packageRoot` 为动作包目录，`ctx.invocation` 包含十进制字符串调用身份。独立 CLI 可以省略这些元数据，此时两项为 `null`。成功与失败响应均带有 `schema_version: 1`。
 
 | API | 行为 |
@@ -14,6 +16,8 @@
 | `ctx.delay(milliseconds)` | 同步等待 0–60000 毫秒的整数，返回 `undefined`；字符串、小数、非有限数等返回 `invalid_input`，不做隐式转换。 |
 | `ctx.ui.choose({items, title?, placeholder?, timeoutMs?})` | 应用 GPUI 界面中的可搜索选择菜单，返回稳定 ID 或明确取消；Node 入口使用 `await`。独立 CLI 返回 `ui_unavailable`。参数与示例见[脚本选择菜单](../../examples/actions/script-choice/)。 |
 | `ctx.desktop.target()` / `targetContext()` | 查询提交时捕获的原目标或导出 29 秒有效的目标快照；为调用方时钟粒度预留余量，提交校验上限仍为 30 秒。不重新选择前台。仅应用接入可用。 |
+| `ctx.desktop.captureForegroundTarget(options)` | 按明确 PID、FILETIME 字符串和 1–5000 毫秒有效期，捕获该进程当前前台；返回当前动作内的只读目标引用。仅应用接入可用。 |
+| `ctx.desktop.sendShortcutTo(target, keys, options?)` / `sendTextTo(target, text)` | 对捕获引用发送快捷键或 Unicode 文本；逐步复验身份、前台、取消和期限，原 `desktop` 目标保持不变。快捷键仅支持可选 `keyDownDelayMs`。 |
 | `ctx.desktop.sendShortcut(keys, options)` | 1–5 个 VK 整数，修饰键在前；支持 `keyDownDelayMs` 或原生 `timing` 配置，二者互斥。 |
 | `ctx.desktop.sendKeySequence(modifiers, keys, options)` | 0–4 个修饰键和 1–16 个普通键；修饰键跨越整组，`keyDownDelayMs` 为 0–1000 毫秒，单次等待合计最多 3000 毫秒。 |
 | `ctx.desktop.sendText(text)` | 向原目标直接发送 Unicode，不经过剪贴板；最多 65,536 个 UTF-16 单元，不含 NUL 或孤立代理项。 |
@@ -29,6 +33,22 @@
 | `ctx.openFileInParent(target)` | Windows 上复验普通本地文件与父目录，以父目录为工作目录单次打开；同步返回，系统接纳不证明关联程序已完成加载。 |
 
 原生错误转换为 JS 异常，可在 `catch (error)` 中读取 `error.code`，例如 `invalid_arguments`、`file_read_failed`、`file_write_failed`、`process_start_failed` 和 `process_timeout`。通过 SDK 每个脚本最多调用 32 次 API，文件和进程桥接请求最多 256 KiB，桌面桥接最多 512 KiB；桌面与应用接入的剪贴板文本最多 65,536 个 UTF-16 单元，文件文本最多 64 KiB UTF-8。SDK 计数是防误用措施，不是安全隔离。
+
+## 显式捕获目标
+
+```js
+const target = ctx.desktop.captureForegroundTarget({
+  expectedProcessId: ctx.input.processId,
+  expectedProcessCreatedFileTime: ctx.input.processCreatedFileTime,
+  validForMs: 500,
+});
+ctx.desktop.sendTextTo(target, '示例文本');
+return { submitted: true };
+```
+
+调用方必须明确提供预期进程身份；Node 使用相同参数并逐次 `await`。每次有效参数捕获尝试都会替换上一条新目标引用，失败也不回退旧引用。新引用不改变原 `targetContext()`、`sendShortcut()` 或 `sendText()` 的目标，不能跨动作保存或通过改写期限续期。新方法共用已有调用预算，没有另授额度。
+
+捕获不枚举、不激活窗口，不把进程身份当作浏览器 `windowId` 到 HWND 的关联。发送返回 `{submitted:true}` 仅确认系统接纳输入；输入前明确拒绝为 `not_started`，进入平台提交后未获确认的失败为 `unknown`。租约使用宿主单调时钟并受动作总期限约束，不自动重试。应用和轻量宿主须同时具备这些入口；独立引擎 CLI 没有应用目标桥接时明确报错。
 
 ## 程序输出采集
 

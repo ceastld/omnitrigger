@@ -1,3 +1,21 @@
+declare const scriptCapturedTargetBrand: unique symbol;
+type ScriptCapturedTarget = Readonly<{
+    capture_id:number;
+    context:Readonly<{
+        window_handle:string;
+        process_id:number;
+        thread_id:number;
+        process_created_file_time:string;
+        expires_at_unix_ms:number;
+    }>;
+    [scriptCapturedTargetBrand]:true;
+}>;
+interface ScriptCaptureForegroundOptions {
+    expectedProcessId:number;
+    expectedProcessCreatedFileTime:string;
+    validForMs:number;
+}
+
 interface ScriptVolumeAdjustOptions {
   /** 非零整数，-100至100个百分点；运行时校验范围。 */
   deltaPercent:number;
@@ -220,6 +238,11 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
         choose(options: ScriptChooseOptions): ScriptChooseResult;
     };
     desktop: {
+        /** 显式PID与创建时间；1–5000ms；仅捕获该进程当前前台，不激活或枚举。 */
+        captureForegroundTarget(options: ScriptCaptureForegroundOptions): ScriptCapturedTarget;
+        /** 原desktop目标不变；每次复核身份/前台/取消/期限；仅确认提交。 */
+        sendShortcutTo(target: ScriptCapturedTarget, keys: number[], options?: {keyDownDelayMs?:number}): {submitted:true};
+        sendTextTo(target: ScriptCapturedTarget, text: string): {submitted:true};
         adjustVolume(options: ScriptVolumeAdjustOptions): ScriptVolumeAdjustResult;
         /** 同步，参数与Node入口共用严格工厂；逐项检查回执。 */
         stepBrightness(options: ScriptBrightnessStepOptions): ScriptBrightnessStepResult;

@@ -266,6 +266,9 @@ export default async function (ctx) {
 | `ctx.browser.chrome.*` | 动态 Proxy，例如 `await ctx.browser.chrome.bookmarks.getTree()`；指定 profile 或超时时使用 `call`。 |
 | `ctx.desktop.target()` | 读取本次提交时捕获的目标，返回真实 `processName`、`windowRole`（`unknown`／`application`／`desktop`／`taskbar`）、`title`、`processId`、`isForeground`。角色在调用时采集，不重新选择目标。 |
 | `ctx.desktop.targetContext()` | 导出原目标的完整值快照，字段可直接保存为 `--target-context` 文件；调用时重新核验原身份，生成 29 秒的提交期限，为调用方的时钟粒度预留余量。提交校验上限仍为 30 秒。 |
+| `ctx.desktop.captureForegroundTarget(options)` | 按明确 PID、进程创建 FILETIME 字符串和 1–5000 毫秒有效期捕获该进程当前前台，返回本次动作内的只读目标引用。 |
+| `ctx.desktop.sendShortcutTo(target, keys, options?)` | 向上述捕获目标发送快捷键；可选 `keyDownDelayMs`，发送前和分步提交时复验租约、身份、前台、取消及动作期限。 |
+| `ctx.desktop.sendTextTo(target, text)` | 向上述捕获目标发送 Unicode 文本，复用既有输入校验和分批提交。 |
 | `ctx.desktop.sendShortcut(keys, options?)` | 向原目标发送一次快捷键，明确 VK、修饰键在前，最多四类修饰键加一个普通键。可设置 `keyDownDelayMs`，或用 `timing` 复用原生进程时序配置；两者互斥，默认零。返回 `{ submitted: true }` 仅表示系统接纳输入。 |
 | `ctx.desktop.sendKeySequence(modifiers, keys, options?)` | 最多四类修饰键在整组 1–16 个普通键期间保持按下。保留顺序和左右侧；可设置 `keyDownDelayMs`。 |
 | `ctx.desktop.sendText(text)` | 分批发送 Unicode 文本，不借用剪贴板；每批核验原目标及取消状态。 |
@@ -277,6 +280,10 @@ export default async function (ctx) {
 | `ctx.clipboard.writeText(text, options?)` | 替换全部剪贴板内容为 Unicode 文本，返回 `{ written: true, sequenceNumber }`，不自动恢复。临时回贴可传 `{ excludeFromHistory: true }`，同时写入 Windows 历史排除格式与 `OmniTrigger.TransientClipboard.v1`，回执另含本次随机 `writeId`；识别标记的采集器应跳过该内容。默认不排除；标记不限制其它程序读取。序号是写入后观察值，不代表独占剪贴板。 |
 
 Node 本机桥接在每次 API 调用时将参数编码为固定请求。调用返回 Promise 后再修改按键数组或嵌套时序对象，不会改变等待连接的请求；参数编码失败在连接前返回 `invalid_input/not_started`。这份快照只覆盖本次调用，后续调用仍单独核验目标和取消状态。
+
+显式捕获要求 `{expectedProcessId, expectedProcessCreatedFileTime, validForMs}` 三项全部提供，不按进程名猜窗口，也不激活或枚举窗口。每次有效参数捕获尝试都会使上一条新目标引用失效，即使本次捕获失败；原来的 `targetContext()`、`sendText()` 等仍绑定原提交目标。引用仅能在当前动作内使用，修改导出的期限或跨动作复用不能延长宿主的单调时钟租约。Node 入口须逐次 `await`，轻量脚本同步返回；新旧 API 共用既有调用预算。
+
+此接口只确认捕获时的进程与前台窗口身份，不建立浏览器 `windowId` 与原生 HWND 的关联。检查和系统输入不是原子事务；发送回执仅表示系统接纳输入。已知输入前拒绝为 `not_started`，进入平台提交后无法确认的失败为 `unknown`，不自动重试。需要更新应用及轻量宿主，旧构建不会因类型声明更新而获得能力。
 
 浏览器 API 在校验时复制参数中的嵌套 JSON 值和调用选项；`profiles` 也固定本次选项。调用方可继续修改自己的对象，连接等待与适配器内部处理均使用这份副本。方法名称、参数范围及取消检查仍按上述契约执行。
 

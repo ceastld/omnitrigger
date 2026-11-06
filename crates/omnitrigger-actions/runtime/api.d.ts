@@ -1,3 +1,21 @@
+declare const capturedTargetBrand: unique symbol;
+export type CapturedTarget = Readonly<{
+  capture_id:number;
+  context:Readonly<{
+    window_handle:string;
+    process_id:number;
+    thread_id:number;
+    process_created_file_time:string;
+    expires_at_unix_ms:number;
+  }>;
+  [capturedTargetBrand]:true;
+}>;
+export interface CaptureForegroundOptions {
+  expectedProcessId:number;
+  expectedProcessCreatedFileTime:string;
+  validForMs:number;
+}
+
 export interface VolumeAdjustOptions {
   /** 非零整数，-100至100个百分点；运行时校验范围。 */
   deltaPercent:number;
@@ -205,6 +223,11 @@ export interface ActionContext {
     choose(options: ChooseOptions): Promise<ChooseResult>;
   };
   desktop: {
+    /** 显式PID与创建时间；1–5000ms；仅捕获该进程当前前台，不激活或枚举。 */
+    captureForegroundTarget(options: CaptureForegroundOptions): Promise<CapturedTarget>;
+    /** 原desktop目标不变；每次复核身份/前台/取消/期限；仅确认提交。 */
+    sendShortcutTo(target: CapturedTarget, keys: number[], options?: {keyDownDelayMs?:number}): Promise<{submitted:true}>;
+    sendTextTo(target: CapturedTarget, text: string): Promise<{submitted:true}>;
     adjustVolume(options: VolumeAdjustOptions): Promise<VolumeAdjustResult>;
     /** 必填显式策略；逐项检查回执，无自动重试或补偿。 */
     stepBrightness(options: BrightnessStepOptions): Promise<BrightnessStepResult>;

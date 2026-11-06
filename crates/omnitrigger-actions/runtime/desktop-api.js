@@ -243,7 +243,81 @@ function createDesktopApi(invoke) {
     }catch(cause){return failure(cause);}
   }
 
+  function scopedFault(method, code, effectState) {
+    return Object.assign(new Error('显式目标调用未获确认；请检查错误代码。'), {method, code, effectState});
+  }
+  function scopedRecord(value, fields) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+      && Reflect.ownKeys(value).length === fields.length && fields.every(key => Object.hasOwn(value, key));
+  }
+  function scopedDecimal(value, max) {
+    return typeof value === 'string' && /^[1-9][0-9]*$/.test(value)
+      && (value.length < max.length || (value.length === max.length && value <= max));
+  }
+  function scopedTarget(value, method, code = 'invalid_input') {
+    const context = value?.context;
+    if (!scopedRecord(value, ['capture_id', 'context'])
+        || !Number.isInteger(value.capture_id) || value.capture_id < 1 || value.capture_id > 128
+        || !scopedRecord(context, ['window_handle','process_id','thread_id','process_created_file_time','expires_at_unix_ms'])
+        || !scopedDecimal(context.window_handle, '9223372036854775807')
+        || ![context.process_id,context.thread_id].every(n => Number.isInteger(n) && n > 0 && n <= 0xffffffff)
+        || !scopedDecimal(context.process_created_file_time, '18446744073709551615')
+        || !Number.isSafeInteger(context.expires_at_unix_ms) || context.expires_at_unix_ms <= 0) {
+      throw scopedFault(method, code, 'not_started');
+    }
+    return Object.freeze({capture_id:value.capture_id, context:Object.freeze({...context})});
+  }
+  function scopedResult(operation, method, result) {
+    const failure = cause => {
+      const code = typeof cause?.code === 'string' && /^[a-z_]{1,64}$/.test(cause.code) ? cause.code : 'native_bridge_failed';
+      throw scopedFault(method, code, method === 'target.capture_foreground' || cause?.effectState === 'not_started' ? 'not_started' : 'unknown');
+    };
+    try { const value = operation(); return value && typeof value.then === 'function' ? value.then(result, failure) : result(value); }
+    catch (cause) { return failure(cause); }
+  }
+  function captureForegroundTarget(options) {
+    const method = 'target.capture_foreground';
+    if (!scopedRecord(options, ['expectedProcessId','expectedProcessCreatedFileTime','validForMs'])
+        || !Number.isInteger(options.expectedProcessId) || options.expectedProcessId < 1 || options.expectedProcessId > 0xffffffff
+        || !scopedDecimal(options.expectedProcessCreatedFileTime, '18446744073709551615')
+        || !Number.isInteger(options.validForMs) || options.validForMs < 1 || options.validForMs > 5000) {
+      throw scopedFault(method, 'invalid_input', 'not_started');
+    }
+    const params = {expected_process_id:options.expectedProcessId,
+      expected_process_created_file_time:options.expectedProcessCreatedFileTime, valid_for_ms:options.validForMs};
+    const result = value => {
+      const target = scopedTarget(value, method, 'invalid_response');
+      if (target.context.process_id !== params.expected_process_id
+          || target.context.process_created_file_time !== params.expected_process_created_file_time) {
+        throw scopedFault(method, 'invalid_response', 'not_started');
+      }
+      return target;
+    };
+    return scopedResult(() => invoke(method, params), method, result);
+  }
+  function scopedInput(method, target, call) {
+    const stableTarget = scopedTarget(target, method);
+    const api = createDesktopApi((_innerMethod, input) => {
+      const result = value => {
+        if (!scopedRecord(value, ['submitted']) || value.submitted !== true) throw scopedFault(method, 'invalid_response', 'unknown');
+        return {submitted:true};
+      };
+      return scopedResult(() => invoke(method, {target:stableTarget, input}), method, result);
+    });
+    try { return call(api.desktop); }
+    catch (cause) { if (cause?.code === 'invalid_input') cause.method = method; throw cause; }
+  }
+
   const desktop = Object.freeze({
+    captureForegroundTarget,
+    sendShortcutTo: (target, keys, options = {}) => {
+      if (options === null || typeof options !== 'object' || Array.isArray(options)
+          || Reflect.ownKeys(options).some(key => key !== 'keyDownDelayMs')) {
+        throw scopedFault('target.keyboard.shortcut', 'invalid_input', 'not_started');
+      }
+      return scopedInput('target.keyboard.shortcut', target, desktop => desktop.sendShortcut(keys, options));
+    },
+    sendTextTo: (target, text) => scopedInput('target.keyboard.text', target, desktop => desktop.sendText(text)),
     adjustVolume: (...args) => adjustVolume(args),
     stepBrightness: (...args) => brightnessStep(args),
     target: () => invoke('target.info', {}),

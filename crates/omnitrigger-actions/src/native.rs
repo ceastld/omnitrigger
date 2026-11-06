@@ -15,7 +15,7 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 27] = [
+const METHODS: [&str; 30] = [
     "system.open",
     "system.open_file_in_parent",
     "process.capture",
@@ -32,6 +32,9 @@ const METHODS: [&str; 27] = [
     "browser.call",
     "target.info",
     "target.context",
+    "target.capture_foreground",
+    "target.keyboard.shortcut",
+    "target.keyboard.text",
     "keyboard.shortcut",
     "keyboard.sequence",
     "keyboard.text",
@@ -279,6 +282,12 @@ impl NativeBridge {
                         };
                         if opening
                             || request.method == "ui.choose"
+                            || matches!(
+                                request.method.as_str(),
+                                "target.capture_foreground"
+                                    | "target.keyboard.shortcut"
+                                    | "target.keyboard.text"
+                            )
                             || request.method == "ui.open_history"
                             || request.method == "ui.toggle_history"
                             || data_copy

@@ -972,6 +972,91 @@ mod tests {
     }
 
     #[test]
+    fn captured_target_api_preserves_original_context_on_the_same_native_bridge() {
+        if !node_available() {
+            return;
+        }
+        #[derive(Default)]
+        struct Host(std::sync::Mutex<Vec<Value>>);
+        impl NativeHost for Host {
+            fn call(
+                &self,
+                method: &str,
+                params: Value,
+                _: &CancellationToken,
+            ) -> Result<Value, ActionError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(json!({"method":method,"params":params}));
+                match method {
+                    "target.context" => {
+                        Ok(json!({"window_handle":"101","process_id":10,"thread_id":11,
+                        "process_created_file_time":"134000000000000001","expires_at_unix_ms":1000}))
+                    }
+                    "target.capture_foreground" => Ok(json!({"capture_id":1,"context":{
+                        "window_handle":"202","process_id":20,"thread_id":21,
+                        "process_created_file_time":"134000000000000002","expires_at_unix_ms":1000}})),
+                    "target.keyboard.shortcut" | "target.keyboard.text" => {
+                        Ok(json!({"submitted":true}))
+                    }
+                    _ => panic!("意外的目标请求：{method}"),
+                }
+            }
+        }
+        let fixture = Fixture::new(
+            r#"export default async ctx => {
+            const original = await ctx.desktop.targetContext();
+            const target = await ctx.desktop.captureForegroundTarget({expectedProcessId:20,
+                expectedProcessCreatedFileTime:'134000000000000002',validForMs:500});
+            await ctx.desktop.sendShortcutTo(target,[163,76],{keyDownDelayMs:7});
+            await ctx.desktop.sendTextTo(target,'合成文本');
+            return {original:original.window_handle,captured:target.context.window_handle,
+                after:(await ctx.desktop.targetContext()).window_handle};
+        }"#,
+            json!({}),
+        );
+        let host = Host::default();
+        let output = NodeRuntime::default()
+            .execute_with_host(
+                &fixture.action,
+                &context(),
+                &CancellationToken::new(),
+                Some(&host),
+            )
+            .unwrap();
+        assert_eq!(
+            output,
+            json!({"original":"101","captured":"202","after":"101"})
+        );
+        let calls = host.0.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call["method"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "target.context",
+                "target.capture_foreground",
+                "target.keyboard.shortcut",
+                "target.keyboard.text",
+                "target.context"
+            ]
+        );
+        assert_eq!(
+            calls[1]["params"],
+            json!({"expected_process_id":20,
+            "expected_process_created_file_time":"134000000000000002","valid_for_ms":500})
+        );
+        assert_eq!(calls[2]["params"]["target"]["capture_id"], 1);
+        assert_eq!(
+            calls[2]["params"]["input"],
+            json!({"keys":[163,76],"key_down_delay_ms":7})
+        );
+        assert_eq!(calls[3]["params"]["input"], json!({"text":"合成文本"}));
+    }
+
+    #[test]
     fn desktop_window_api_validates_and_preserves_original_target_faults() {
         if !node_available() {
             return;

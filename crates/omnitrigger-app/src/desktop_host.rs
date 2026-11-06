@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use std::time::Instant;
 
 pub struct DesktopHost {
+    foreground_targets: ForegroundTargets,
     target: Result<ScriptTarget, ActionError>,
 }
 
@@ -50,6 +51,7 @@ impl DesktopHost {
 
     pub fn from_snapshot(snapshot: ScriptTargetSnapshot) -> Result<Self, ActionError> {
         Ok(Self {
+            foreground_targets: ForegroundTargets::default(),
             target: Ok(ScriptTarget::from_snapshot(snapshot)
                 .map_err(|message| error("target_unavailable", message, "not_started"))?),
         })
@@ -62,7 +64,10 @@ impl DesktopHost {
             .unwrap_or_else(capture_shortcut_target)
             .and_then(ScriptTarget::capture)
             .map_err(|message| error("target_unavailable", message, "not_started"));
-        Self { target }
+        Self {
+            target,
+            foreground_targets: ForegroundTargets::default(),
+        }
     }
 }
 
@@ -284,6 +289,14 @@ impl NativeHost for DesktopHost {
         cancellation: &CancellationToken,
     ) -> Result<Value, ActionError> {
         match method {
+            "target.capture_foreground" => {
+                return self.foreground_targets.capture(params, cancellation, None)
+            }
+            "target.keyboard.shortcut" | "target.keyboard.text" => {
+                return self
+                    .foreground_targets
+                    .send(method, params, cancellation, None)
+            }
             "clipboard.read_data" => {
                 return read_data_with(
                     params,
@@ -516,6 +529,16 @@ impl NativeHost for DesktopHost {
         deadline: Instant,
     ) -> Result<Value, ActionError> {
         match method {
+            "target.capture_foreground" => {
+                return self
+                    .foreground_targets
+                    .capture(params, cancellation, Some(deadline))
+            }
+            "target.keyboard.shortcut" | "target.keyboard.text" => {
+                return self
+                    .foreground_targets
+                    .send(method, params, cancellation, Some(deadline))
+            }
             "clipboard.read_data" => read_data_with(
                 params,
                 cancellation,
@@ -534,6 +557,387 @@ impl NativeHost for DesktopHost {
     }
 }
 
+// 沿用外层现有计数：轻量 SDK 所有宿主调用共32次；Node/Native协议当前为128。
+// 新方法只经同一个 desktopCall/nativeCall 进入，不能另建或重置预算。
+#[derive(Default)]
+struct ForegroundTargets {
+    active: std::sync::Mutex<(u32, Option<ForegroundLease>)>,
+}
+
+#[derive(Clone)]
+struct ForegroundLease {
+    capture_id: u32,
+    context: Value,
+    snapshot: ScriptTargetSnapshot,
+    expires: Instant,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CaptureForegroundArgs {
+    expected_process_id: u32,
+    expected_process_created_file_time: String,
+    valid_for_ms: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapturedTargetRef {
+    capture_id: u32,
+    context: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapturedShortcutArgs {
+    target: CapturedTargetRef,
+    input: ShortcutArgs,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapturedTextArgs {
+    target: CapturedTargetRef,
+    input: TextArgs,
+}
+
+fn scoped_clock() -> Result<u64, ActionError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .ok_or_else(|| error("target_unavailable", "系统时间不可用。", "not_started"))
+}
+
+// 纯策略函数；供下方事件测试使用，不调用 Win32。
+fn scoped_policy(
+    now: Instant,
+    expires: Instant,
+    action_deadline: Option<Instant>,
+    cancelled: bool,
+    active: bool,
+    identity_equal: bool,
+    foreground: bool,
+) -> Result<(), &'static str> {
+    if cancelled {
+        return Err("cancelled");
+    }
+    if action_deadline.is_some_and(|end| now >= end) {
+        return Err("timeout");
+    }
+    if now >= expires {
+        return Err("target_expired");
+    }
+    if !active || !identity_equal || !foreground {
+        return Err("target_changed");
+    }
+    Ok(())
+}
+
+impl ForegroundTargets {
+    fn capture(
+        &self,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Value, ActionError> {
+        let args: CaptureForegroundArgs = serde_json::from_value(params)
+            .map_err(|_| error("invalid_input", "显式目标参数无效。", "not_started"))?;
+        let created: u64 = args
+            .expected_process_created_file_time
+            .parse()
+            .map_err(|_| {
+                error(
+                    "invalid_input",
+                    "创建时间必须为十进制字符串。",
+                    "not_started",
+                )
+            })?;
+        if args.expected_process_id == 0
+            || created == 0
+            || args.expected_process_created_file_time != created.to_string()
+            || !(1..=5000).contains(&args.valid_for_ms)
+        {
+            return Err(error(
+                "invalid_input",
+                "PID、创建时间和有效期必须明确。",
+                "not_started",
+            ));
+        }
+        let capture_id = {
+            let mut state = self
+                .active
+                .lock()
+                .map_err(|_| error("target_unavailable", "目标状态不可用。", "not_started"))?;
+            state.1 = None; // 捕获尝试失败也不能回退到前一次新目标。
+            state.0 = state
+                .0
+                .checked_add(1)
+                .filter(|n| *n <= 128)
+                .ok_or_else(|| {
+                    error(
+                        "desktop_call_limit",
+                        "本次动作调用预算已耗尽。",
+                        "not_started",
+                    )
+                })?;
+            state.0
+        };
+        let start = Instant::now();
+        let wall = scoped_clock()?;
+        let end = start + std::time::Duration::from_millis(u64::from(args.valid_for_ms));
+        let expires = deadline.map_or(end, |outer| outer.min(end));
+        scoped_policy(
+            start,
+            expires,
+            deadline,
+            cancellation.is_cancelled(),
+            true,
+            true,
+            true,
+        )
+        .map_err(|code| error(code, "捕获前条件已失效。", "not_started"))?;
+        // 这是调用方明确请求的“该进程当前前台”，不是窗口枚举或挑第一个窗口。
+        let target = ScriptTarget::capture(
+            capture_shortcut_target()
+                .map_err(|_| error("target_unavailable", "当前前台不可用。", "not_started"))?,
+        )
+        .map_err(|_| error("target_unavailable", "前台身份不可用。", "not_started"))?;
+        let snapshot = target
+            .snapshot()
+            .map_err(|_| error("target_changed", "捕获期间身份变化。", "not_started"))?;
+        if snapshot.process_id != args.expected_process_id
+            || snapshot.process_created_file_time != created
+        {
+            return Err(error(
+                "target_mismatch",
+                "当前前台不属于预期进程身份。",
+                "not_started",
+            ));
+        }
+        target
+            .ensure_foreground()
+            .map_err(|_| error("target_changed", "捕获期间前台变化。", "not_started"))?;
+        scoped_policy(
+            Instant::now(),
+            expires,
+            deadline,
+            cancellation.is_cancelled(),
+            true,
+            true,
+            true,
+        )
+        .map_err(|code| error(code, "捕获条件已失效。", "not_started"))?;
+        let mut context = crate::action_target_context::export(snapshot)
+            .map_err(|_| error("target_unavailable", "不能导出目标。", "not_started"))?;
+        let duration = expires.duration_since(start).as_millis() as u64;
+        context["expires_at_unix_ms"] = json!(wall.checked_add(duration).ok_or_else(|| error(
+            "target_unavailable",
+            "目标期限无效。",
+            "not_started"
+        ))?);
+        let lease = ForegroundLease {
+            capture_id,
+            context: context.clone(),
+            snapshot,
+            expires,
+        };
+        let mut state = self
+            .active
+            .lock()
+            .map_err(|_| error("target_unavailable", "目标状态不可用。", "not_started"))?;
+        if state.0 != capture_id {
+            return Err(error(
+                "target_changed",
+                "捕获已被后续请求替代。",
+                "not_started",
+            ));
+        }
+        state.1 = Some(lease);
+        Ok(json!({"capture_id":capture_id,"context":context}))
+    }
+
+    fn resolve(
+        &self,
+        reference: CapturedTargetRef,
+    ) -> Result<(ForegroundLease, ScriptTarget), ActionError> {
+        let state = self
+            .active
+            .lock()
+            .map_err(|_| error("target_unavailable", "目标状态不可用。", "not_started"))?;
+        let lease = state
+            .1
+            .as_ref()
+            .filter(|lease| {
+                lease.capture_id == reference.capture_id && lease.context == reference.context
+            })
+            .cloned()
+            .ok_or_else(|| error("target_changed", "快照不是本次有效捕获。", "not_started"))?;
+        drop(state);
+        // 重用旧DTO的严格字段/数值/期限校验；单调时钟仍是不能延长的权威期限。
+        let snapshot =
+            crate::action_target_context::validate_value(reference.context, scoped_clock()?)
+                .map_err(|_| error("target_expired", "快照已失效。", "not_started"))?;
+        if snapshot != lease.snapshot {
+            return Err(error("target_changed", "快照身份不符。", "not_started"));
+        }
+        let target = ScriptTarget::from_snapshot(snapshot)
+            .map_err(|_| error("target_changed", "进程或窗口身份变化。", "not_started"))?;
+        Ok((lease, target))
+    }
+
+    fn guard_with(
+        &self,
+        lease: &ForegroundLease,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+        mut clock: impl FnMut() -> Instant,
+        verify: impl FnOnce() -> Result<(), ActionError>,
+    ) -> Result<(), ActionError> {
+        let mut check = || {
+            let active = self
+                .active
+                .lock()
+                .map_err(|_| error("target_unavailable", "目标状态不可用。", "not_started"))?
+                .1
+                .as_ref()
+                .is_some_and(|current| {
+                    current.capture_id == lease.capture_id && current.context == lease.context
+                });
+            scoped_policy(
+                clock(),
+                lease.expires,
+                deadline,
+                cancellation.is_cancelled(),
+                active,
+                true,
+                true,
+            )
+            .map_err(|code| error(code, "显式目标调用条件已失效。", "not_started"))
+        };
+        check()?;
+        verify()?;
+        // 身份核验可能耗时；返回后重新读取期限、取消及活动租约。
+        check()
+    }
+
+    fn guard(
+        &self,
+        lease: &ForegroundLease,
+        target: &ScriptTarget,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<(), ActionError> {
+        self.guard_with(lease, cancellation, deadline, Instant::now, || {
+            target
+                .ensure_foreground()
+                .map_err(|_| error("target_changed", "目标身份变化或已失焦。", "not_started"))
+        })
+    }
+
+    fn send(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Value, ActionError> {
+        enum Input {
+            Shortcut(ShortcutArgs),
+            Text(TextArgs),
+        }
+        let (reference, input) = if method == "target.keyboard.shortcut" {
+            let args: CapturedShortcutArgs = serde_json::from_value(params)
+                .map_err(|_| error("invalid_input", "按键参数无效。", "not_started"))?;
+            omnitrigger_windows::validate_shortcut(&args.input.keys)
+                .and_then(|_| {
+                    omnitrigger_windows::validate_key_timing(1, args.input.key_down_delay_ms)
+                })
+                .map_err(|_| error("invalid_input", "按键或时序无效。", "not_started"))?;
+            (args.target, Input::Shortcut(args.input))
+        } else if method == "target.keyboard.text" {
+            let args: CapturedTextArgs = serde_json::from_value(params)
+                .map_err(|_| error("invalid_input", "文本参数无效。", "not_started"))?;
+            omnitrigger_windows::validate_automation_text(&args.input.text)
+                .map_err(|_| error("invalid_input", "文本无效。", "not_started"))?;
+            (args.target, Input::Text(args.input))
+        } else {
+            return Err(error(
+                "unknown_method",
+                "不支持此显式目标方法。",
+                "not_started",
+            ));
+        };
+        let (lease, target) = self.resolve(reference)?;
+        self.guard(&lease, &target, cancellation, deadline)?;
+        let mut rejected = None;
+        let result = {
+            let mut check = || {
+                self.guard(&lease, &target, cancellation, deadline)
+                    .map_err(|fault| {
+                        rejected = Some(fault);
+                        "显式目标条件已失效。".to_owned()
+                    })
+            };
+            match input {
+                Input::Shortcut(args) => {
+                    target.send_shortcut_timed_if(&args.keys, args.key_down_delay_ms, &mut check)
+                }
+                Input::Text(args) => target.send_text_if(&args.text, &mut check),
+            }
+        };
+        if result.is_err() {
+            let mut fault =
+                rejected.unwrap_or_else(|| error("input_failed", "输入提交未获确认。", "unknown"));
+            fault.effect_state = Some("unknown".into()); // 进入平台发送后不猜测是否已部分提交。
+            return Err(fault);
+        }
+        self.guard(&lease, &target, cancellation, deadline)
+            .map_err(|mut fault| {
+                fault.effect_state = Some("unknown".into());
+                fault
+            })?;
+        Ok(json!({"submitted":true}))
+    }
+}
+
+#[cfg(test)]
+mod scoped_target_event_tests {
+    use super::*;
+    use std::time::Duration;
+    #[test]
+    fn rejects_expiry_cancel_focus_identity_and_superseded_lease_without_any_win32_call() {
+        let start = Instant::now();
+        let end = start + Duration::from_millis(50);
+        let sequence = [
+            (start, false, true, true, true, Ok(())),
+            (start, false, true, true, false, Err("target_changed")),
+            (start, false, true, false, true, Err("target_changed")),
+            (start, false, false, true, true, Err("target_changed")),
+            (start, true, true, true, true, Err("cancelled")),
+            (end, false, true, true, true, Err("target_expired")),
+        ];
+        for (now, cancelled, active, identity_equal, foreground, expected) in sequence {
+            assert_eq!(
+                scoped_policy(
+                    now,
+                    end,
+                    None,
+                    cancelled,
+                    active,
+                    identity_equal,
+                    foreground
+                ),
+                expected
+            );
+        }
+        assert_eq!(
+            scoped_policy(start, end, Some(start), false, true, true, true),
+            Err("timeout")
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,6 +949,7 @@ mod tests {
 
         fn host_without_target() -> DesktopHost {
             DesktopHost {
+                foreground_targets: ForegroundTargets::default(),
                 target: Err(error(
                     "target_unavailable",
                     "synthetic_payload_do_not_echo",
@@ -1053,6 +1458,7 @@ mod tests {
     #[test]
     fn desktop_validation_and_cancellation_do_not_fall_back_to_another_target() {
         let host = DesktopHost {
+            foreground_targets: ForegroundTargets::default(),
             target: Err(error(
                 "target_unavailable",
                 "测试目标不存在。",
@@ -1460,6 +1866,7 @@ mod tests {
     #[test]
     fn brightness_dispatch_rejects_before_hardware_on_both_host_entries_without_valid_target() {
         let host = DesktopHost {
+            foreground_targets: ForegroundTargets::default(),
             target: Err(error(
                 "synthetic_no_target",
                 "合成不可用目标",
@@ -1488,6 +1895,7 @@ mod tests {
     #[test]
     fn volume_dispatch_both_entries_do_not_require_a_foreground_target() {
         let host = DesktopHost {
+            foreground_targets: ForegroundTargets::default(),
             target: Err(error(
                 "synthetic_no_target",
                 "合成不可用目标",
@@ -1511,5 +1919,165 @@ mod tests {
             .unwrap_err();
         assert_eq!(second.code, "timeout");
         assert_eq!(second.effect_state.as_deref(), Some("not_started"));
+    }
+}
+
+#[cfg(test)]
+mod captured_lease_tests {
+    use super::*;
+    use std::{cell::Cell, time::Duration};
+
+    fn seeded(start: Instant) -> (ForegroundTargets, ForegroundLease) {
+        let lease = ForegroundLease {
+            capture_id: 1,
+            context: json!({"synthetic":"lease-no-native-identity"}),
+            snapshot: ScriptTargetSnapshot {
+                window_handle: 1,
+                process_id: 2,
+                thread_id: 3,
+                process_created_file_time: 4,
+            },
+            expires: start + Duration::from_secs(5),
+        };
+        let targets = ForegroundTargets::default();
+        *targets.active.lock().unwrap() = (1, Some(lease.clone()));
+        (targets, lease)
+    }
+    fn valid_args() -> Value {
+        json!({"expected_process_id":2,"expected_process_created_file_time":"4","valid_for_ms":5000})
+    }
+
+    #[test]
+    fn valid_cancelled_capture_invalidates_previous_lease_without_touching_original_ctx() {
+        let (targets, _) = seeded(Instant::now());
+        let host = DesktopHost {
+            foreground_targets: targets,
+            target: Err(error(
+                "original_target_marker",
+                "原ctx合成标记",
+                "not_started",
+            )),
+        };
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let result = host
+            .foreground_targets
+            .capture(valid_args(), &cancelled, None)
+            .unwrap_err();
+        assert_eq!(result.code, "cancelled");
+        let state = host.foreground_targets.active.lock().unwrap();
+        assert_eq!(state.0, 2);
+        assert!(state.1.is_none());
+        assert_eq!(
+            host.target.as_ref().unwrap_err().code,
+            "original_target_marker"
+        );
+    }
+
+    #[test]
+    fn valid_deadline_rejected_capture_invalidates_previous_lease_before_any_win32() {
+        let (targets, _) = seeded(Instant::now());
+        let result = targets
+            .capture(
+                valid_args(),
+                &CancellationToken::new(),
+                Some(Instant::now()),
+            )
+            .unwrap_err();
+        assert_eq!(result.code, "timeout");
+        let state = targets.active.lock().unwrap();
+        assert_eq!(state.0, 2);
+        assert!(state.1.is_none());
+    }
+
+    #[test]
+    fn malformed_capture_does_not_invalidate_previous_lease() {
+        let (targets, _) = seeded(Instant::now());
+        let mut args = valid_args();
+        args["expected_process_id"] = json!(0);
+        assert_eq!(
+            targets
+                .capture(args, &CancellationToken::new(), None)
+                .unwrap_err()
+                .code,
+            "invalid_input"
+        );
+        let state = targets.active.lock().unwrap();
+        assert_eq!(state.0, 1);
+        assert_eq!(state.1.as_ref().unwrap().capture_id, 1);
+    }
+
+    #[test]
+    fn guard_rechecks_expiry_deadline_cancel_and_replacement_after_identity_verification() {
+        for scenario in ["expiry", "deadline", "cancel", "replacement"] {
+            let start = Instant::now();
+            let (targets, lease) = seeded(start);
+            let now = Cell::new(start);
+            let token = CancellationToken::new();
+            let deadline = (scenario == "deadline").then_some(start + Duration::from_millis(1));
+            let result = targets
+                .guard_with(
+                    &lease,
+                    &token,
+                    deadline,
+                    || now.get(),
+                    || {
+                        match scenario {
+                            "expiry" => now.set(lease.expires),
+                            "deadline" => now.set(deadline.unwrap()),
+                            "cancel" => token.cancel(),
+                            "replacement" => *targets.active.lock().unwrap() = (2, None),
+                            _ => unreachable!(),
+                        }
+                        Ok(())
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(
+                result.code,
+                match scenario {
+                    "expiry" => "target_expired",
+                    "deadline" => "timeout",
+                    "cancel" => "cancelled",
+                    _ => "target_changed",
+                }
+            );
+            assert_eq!(result.effect_state.as_deref(), Some("not_started"));
+        }
+    }
+
+    #[test]
+    fn guard_passes_healthy_lease_and_never_verifies_when_initially_cancelled() {
+        let start = Instant::now();
+        let (targets, lease) = seeded(start);
+        let token = CancellationToken::new();
+        let verified = Cell::new(0);
+        targets
+            .guard_with(
+                &lease,
+                &token,
+                None,
+                || start,
+                || {
+                    verified.set(verified.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(verified.get(), 1);
+        token.cancel();
+        assert_eq!(
+            targets
+                .guard_with(
+                    &lease,
+                    &token,
+                    None,
+                    || start,
+                    || panic!("初始取消不得进入身份核验")
+                )
+                .unwrap_err()
+                .code,
+            "cancelled"
+        );
     }
 }
