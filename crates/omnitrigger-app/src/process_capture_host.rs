@@ -38,6 +38,11 @@ fn fault(code: &str, effect: &str) -> ActionError {
 fn request(value: Value) -> Result<(String, Vec<String>, Options), ActionError> {
     let value: Request =
         serde_json::from_value(value).map_err(|_| fault("invalid_input", "not_started"))?;
+    if value.args.iter().any(|arg| {
+        arg == "--omni-selected-text-once" || arg.starts_with("--omni-selected-text-once=")
+    }) {
+        return Err(fault("invalid_input", "not_started"));
+    }
     let options = Options {
         timeout_ms: value.timeout_ms,
         allow_non_zero: value.allow_non_zero,
@@ -283,5 +288,19 @@ mod tests {
             .unwrap(),
             json!({"forwarded":true})
         );
+    }
+}
+
+#[cfg(test)]
+mod reserved_selection_helper_tests {
+    use super::*;
+    #[test]
+    fn scripts_cannot_request_the_internal_helper_via_capture() {
+        for flag in ["--omni-selected-text-once", "--omni-selected-text-once={}"] {
+            let error = request(json!({"program":"C:/Owned/omnitrigger.exe","args":[flag,"{}"]}))
+                .unwrap_err();
+            assert_eq!(error.code, "invalid_input");
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        }
     }
 }

@@ -63,6 +63,7 @@ mod script_open;
 mod script_projects;
 mod script_runtime;
 mod script_ui;
+mod selected_text_helper;
 mod service;
 mod settings;
 mod shortcut;
@@ -6760,6 +6761,9 @@ fn open_script_history_window(
 
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
+    if let Some(code) = selected_text_helper::cli(&arguments) {
+        std::process::exit(code);
+    }
     if let Some(result) = legacy_local_source::cli(&arguments) {
         match result {
             Ok(message) => println!("{message}"),

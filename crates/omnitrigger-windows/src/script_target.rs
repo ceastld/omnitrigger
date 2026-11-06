@@ -397,3 +397,192 @@ mod tests {
         assert!(ScriptTarget::from_snapshot(original).is_err());
     }
 }
+
+use crate::selection_text::{selection_has_range, selection_range_has_text, selection_text};
+use crate::{SelectionOverflow, SelectionReadError, SelectionTextSnapshot};
+
+impl ScriptTarget {
+    /// 只读取原前台目标中当前UIA焦点元素的单一TextPattern选区。
+    /// 不做父节点pattern发现、整篇读取、模拟复制、剪贴板访问或焦点设置。
+    pub fn read_selection_text_if(
+        &self,
+        deadline: std::time::Instant,
+        overflow: SelectionOverflow,
+        mut check: impl FnMut() -> Result<(), SelectionReadError>,
+    ) -> Result<SelectionTextSnapshot, SelectionReadError> {
+        use windows::{
+            core::Result as WinResult,
+            Win32::{
+                System::Com::{
+                    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+                    COINIT_MULTITHREADED,
+                },
+                UI::Accessibility::{
+                    CUIAutomation8, IUIAutomation2, IUIAutomationElement, IUIAutomationTextPattern,
+                    SupportedTextSelection_None, TextPatternRangeEndpoint_End,
+                    TextPatternRangeEndpoint_Start, UIA_TextPatternId,
+                },
+            },
+        };
+        fn provider<T>(
+            guard: &mut impl FnMut() -> Result<(), SelectionReadError>,
+            operation: impl FnOnce() -> WinResult<T>,
+        ) -> Result<T, SelectionReadError> {
+            guard()?;
+            let result = operation();
+            guard()?; // provider阻塞返回后重新核验取消/期限/原窗口；不回显provider正文。
+            result.map_err(|_| SelectionReadError::Unavailable)
+        }
+        let mut guard = || {
+            check()?;
+            self.ensure_foreground()
+                .map_err(|_| SelectionReadError::TargetChanged)?;
+            check() // 原身份核验也可能耗时；核验后复查取消/期限，再进入UIA。
+        };
+        let wait_ms = || {
+            let left = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis();
+            if left == 0 {
+                return Err(SelectionReadError::Timeout);
+            }
+            Ok(left.min(150) as u32)
+        };
+        guard()?;
+        let snapshot = self
+            .snapshot()
+            .map_err(|_| SelectionReadError::TargetChanged)?;
+        // 已有动作工作线程必须能初始化MTA；STA冲突明确拒绝，不另开线程。
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+            .ok()
+            .map_err(|_| SelectionReadError::Unavailable)?;
+        struct Apartment;
+        impl Drop for Apartment {
+            fn drop(&mut self) {
+                unsafe { CoUninitialize() };
+            }
+        }
+        let _apartment = Apartment;
+        let automation: IUIAutomation2 = provider(&mut guard, || unsafe {
+            CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER)
+        })?;
+        provider(&mut guard, || unsafe { automation.SetAutoSetFocus(false) })?;
+        let wait = wait_ms()?;
+        provider(&mut guard, || unsafe {
+            automation.SetConnectionTimeout(wait)
+        })?;
+        let wait = wait_ms()?;
+        provider(&mut guard, || unsafe {
+            automation.SetTransactionTimeout(wait)
+        })?;
+        let root = provider(&mut guard, || unsafe {
+            automation.ElementFromHandle(HWND(snapshot.window_handle as *mut std::ffi::c_void))
+        })?;
+        let focused = provider(&mut guard, || unsafe { automation.GetFocusedElement() })?;
+        let walker = provider(&mut guard, || unsafe { automation.RawViewWalker() })?;
+        let mut current: IUIAutomationElement = focused.clone();
+        let mut owned = false;
+        // 只走当前焦点到原窗口的祖先链验证归属，不枚举子树或读取节点文本属性。
+        for depth in 0..=32 {
+            if provider(&mut guard, || unsafe {
+                automation.CompareElements(&root, &current)
+            })?
+            .as_bool()
+            {
+                owned = true;
+                break;
+            }
+            if depth == 32 {
+                break;
+            }
+            current = provider(&mut guard, || unsafe { walker.GetParentElement(&current) })?;
+        }
+        if !owned {
+            return Err(SelectionReadError::TargetChanged);
+        }
+        if provider(&mut guard, || unsafe { focused.CurrentIsPassword() })?.as_bool() {
+            return Err(SelectionReadError::Protected);
+        }
+        let pattern: IUIAutomationTextPattern = provider(&mut guard, || unsafe {
+            focused.GetCurrentPatternAs(UIA_TextPatternId)
+        })?;
+        if provider(&mut guard, || unsafe { pattern.SupportedTextSelection() })?
+            == SupportedTextSelection_None
+        {
+            return Err(SelectionReadError::Unavailable);
+        }
+        let ranges = provider(&mut guard, || unsafe { pattern.GetSelection() })?;
+        if !selection_has_range(provider(&mut guard, || unsafe { ranges.Length() })?)? {
+            // 成功确认无选区；再次核验焦点及零范围，再交付空成功值。没有文本读取。
+            let after = provider(&mut guard, || unsafe { automation.GetFocusedElement() })?;
+            if !provider(&mut guard, || unsafe {
+                automation.CompareElements(&after, &focused)
+            })?
+            .as_bool()
+            {
+                return Err(SelectionReadError::SelectionChanged);
+            }
+            let latest = provider(&mut guard, || unsafe { pattern.GetSelection() })?;
+            if provider(&mut guard, || unsafe { latest.Length() })? != 0 {
+                return Err(SelectionReadError::SelectionChanged);
+            }
+            guard()?;
+            return selection_text(&[], overflow);
+        }
+        let range = provider(&mut guard, || unsafe { ranges.GetElement(0) })?;
+        let has_text = selection_range_has_text(provider(&mut guard, || unsafe {
+            range.CompareEndpoints(
+                TextPatternRangeEndpoint_Start,
+                &range,
+                TextPatternRangeEndpoint_End,
+            )
+        })?)?;
+        let before = provider(&mut guard, || unsafe { automation.GetFocusedElement() })?;
+        if !provider(&mut guard, || unsafe {
+            automation.CompareElements(&before, &focused)
+        })?
+        .as_bool()
+        {
+            return Err(SelectionReadError::SelectionChanged);
+        }
+        let raw = if has_text {
+            // 仅非退化范围请求129；GetText失败通过?返回错误，绝不转换为空文本。
+            let wait = wait_ms()?;
+            provider(&mut guard, || unsafe {
+                automation.SetConnectionTimeout(wait)
+            })?;
+            let wait = wait_ms()?;
+            provider(&mut guard, || unsafe {
+                automation.SetTransactionTimeout(wait)
+            })?;
+            Some(provider(&mut guard, || unsafe { range.GetText(129) })?)
+        } else {
+            None
+        };
+        let after = provider(&mut guard, || unsafe { automation.GetFocusedElement() })?;
+        if !provider(&mut guard, || unsafe {
+            automation.CompareElements(&after, &focused)
+        })?
+        .as_bool()
+        {
+            return Err(SelectionReadError::SelectionChanged);
+        }
+        let latest = provider(&mut guard, || unsafe { pattern.GetSelection() })?;
+        if provider(&mut guard, || unsafe { latest.Length() })? != 1 {
+            return Err(SelectionReadError::SelectionChanged);
+        }
+        let latest = provider(&mut guard, || unsafe { latest.GetElement(0) })?;
+        for endpoint in [TextPatternRangeEndpoint_Start, TextPatternRangeEndpoint_End] {
+            if provider(&mut guard, || unsafe {
+                range.CompareEndpoints(endpoint, &latest, endpoint)
+            })? != 0
+            {
+                return Err(SelectionReadError::SelectionChanged);
+            }
+        }
+        // windows-strings0.4.2 BSTR Deref<Target=[u16]>，长度来自SysStringLen。
+        let result = selection_text(raw.as_deref().unwrap_or(&[]), overflow)?;
+        guard()?;
+        Ok(result)
+    }
+}

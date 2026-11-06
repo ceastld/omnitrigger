@@ -1,3 +1,4 @@
+type ScriptSelectionTextSnapshot = Readonly<{text:string;truncated:boolean}>;
 declare const scriptCapturedTargetBrand: unique symbol;
 type ScriptCapturedTarget = Readonly<{
     capture_id:number;
@@ -238,6 +239,8 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
         choose(options: ScriptChooseOptions): ScriptChooseResult;
     };
     desktop: {
+        /** 原目标单选区；成功确认无选区/空文本时为 {text:"",truncated:false}，provider/目标/读取失败仍报错。默认 reject，显式 truncate 取前128 UTF-16单元；拆开代理对拒绝。 */
+        readSelectionText(options?: {overflow?: 'reject' | 'truncate'}): ScriptSelectionTextSnapshot;
         /** 显式PID与创建时间；1–5000ms；仅捕获该进程当前前台，不激活或枚举。 */
         captureForegroundTarget(options: ScriptCaptureForegroundOptions): ScriptCapturedTarget;
         /** 原desktop目标不变；每次复核身份/前台/取消/期限；仅确认提交。 */

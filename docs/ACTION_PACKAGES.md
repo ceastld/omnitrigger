@@ -266,6 +266,7 @@ export default async function (ctx) {
 | `ctx.browser.chrome.*` | 动态 Proxy，例如 `await ctx.browser.chrome.bookmarks.getTree()`；指定 profile 或超时时使用 `call`。 |
 | `ctx.desktop.target()` | 读取本次提交时捕获的目标，返回真实 `processName`、`windowRole`（`unknown`／`application`／`desktop`／`taskbar`）、`title`、`processId`、`isForeground`。角色在调用时采集，不重新选择目标。 |
 | `ctx.desktop.targetContext()` | 导出原目标的完整值快照，字段可直接保存为 `--target-context` 文件；调用时重新核验原身份，生成 29 秒的提交期限，为调用方的时钟粒度预留余量。提交校验上限仍为 30 秒。 |
+| `ctx.desktop.readSelectionText(options?)` | 只读原目标当前焦点控件的单一 UIA 文本选区，返回只读 `{text,truncated}`。目前最多 128 个 UTF-16 单元；默认超限拒绝，显式 `overflow:'truncate'` 截取前缀。 |
 | `ctx.desktop.captureForegroundTarget(options)` | 按明确 PID、进程创建 FILETIME 字符串和 1–5000 毫秒有效期捕获该进程当前前台，返回本次动作内的只读目标引用。 |
 | `ctx.desktop.sendShortcutTo(target, keys, options?)` | 向上述捕获目标发送快捷键；可选 `keyDownDelayMs`，发送前和分步提交时复验租约、身份、前台、取消及动作期限。 |
 | `ctx.desktop.sendTextTo(target, text)` | 向上述捕获目标发送 Unicode 文本，复用既有输入校验和分批提交。 |
@@ -284,6 +285,10 @@ Node 本机桥接在每次 API 调用时将参数编码为固定请求。调用�
 显式捕获要求 `{expectedProcessId, expectedProcessCreatedFileTime, validForMs}` 三项全部提供，不按进程名猜窗口，也不激活或枚举窗口。每次有效参数捕获尝试都会使上一条新目标引用失效，即使本次捕获失败；原来的 `targetContext()`、`sendText()` 等仍绑定原提交目标。引用仅能在当前动作内使用，修改导出的期限或跨动作复用不能延长宿主的单调时钟租约。Node 入口须逐次 `await`，轻量脚本同步返回；新旧 API 共用既有调用预算。
 
 此接口只确认捕获时的进程与前台窗口身份，不建立浏览器 `windowId` 与原生 HWND 的关联。检查和系统输入不是原子事务；发送回执仅表示系统接纳输入。已知输入前拒绝为 `not_started`，进入平台提交后无法确认的失败为 `unknown`，不自动重试。需要更新应用及轻量宿主，旧构建不会因类型声明更新而获得能力。
+
+`readSelectionText()` 使用原提交目标，Node 须 `await`，轻量入口同步返回。成功确认没有选区或选区退化时返回 `{text:'',truncated:false}`；控件不支持 TextPattern、受保护、多选区、目标或选区变化、取消及超时仍返回结构化错误，不能当作空成功。该 API 不读取剪贴板、不模拟复制、不激活窗口，也不自动回退到其他读取方式。显式截断按 UTF-16 单元计算，截点拆开代理对或文本含 NUL 时拒绝，不替换字符。
+
+UIA 调用在同一应用可执行文件的单次辅助进程内执行，复用创建期 Job 关联和程序输出采集收尾；父进程以动作总期限与 2 秒中较早者为读取期限，迟到结果丢弃。最多请求一次 `GetText(129)`，用于判断长度；这不能约束外部 provider 内部的实现。取消或超时会请求终止本次辅助进程，无法确认收尾时返回 `selection_helper_cleanup_failed`；终止本地进程不表示撤销外部 provider 已发起的工作。新方法共用现有调用预算，应用和轻量宿主须一同更新。
 
 浏览器 API 在校验时复制参数中的嵌套 JSON 值和调用选项；`profiles` 也固定本次选项。调用方可继续修改自己的对象，连接等待与适配器内部处理均使用这份副本。方法名称、参数范围及取消检查仍按上述契约执行。
 

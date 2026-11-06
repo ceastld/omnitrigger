@@ -16,6 +16,7 @@ Windows MSVC 的 Boa 宿主为共享 SDK 的解析保留 8 MiB 原生主栈；�
 | `ctx.delay(milliseconds)` | 同步等待 0–60000 毫秒的整数，返回 `undefined`；字符串、小数、非有限数等返回 `invalid_input`，不做隐式转换。 |
 | `ctx.ui.choose({items, title?, placeholder?, timeoutMs?})` | 应用 GPUI 界面中的可搜索选择菜单，返回稳定 ID 或明确取消；Node 入口使用 `await`。独立 CLI 返回 `ui_unavailable`。参数与示例见[脚本选择菜单](../../examples/actions/script-choice/)。 |
 | `ctx.desktop.target()` / `targetContext()` | 查询提交时捕获的原目标或导出 29 秒有效的目标快照；为调用方时钟粒度预留余量，提交校验上限仍为 30 秒。不重新选择前台。仅应用接入可用。 |
+| `ctx.desktop.readSelectionText(options?)` | 只读原目标中当前焦点控件的单一 UIA 选区，返回 `{text,truncated}`。默认拒绝超过 128 UTF-16 单元的文本，显式 `overflow:'truncate'` 截取前缀。仅应用接入可用。 |
 | `ctx.desktop.captureForegroundTarget(options)` | 按明确 PID、FILETIME 字符串和 1–5000 毫秒有效期，捕获该进程当前前台；返回当前动作内的只读目标引用。仅应用接入可用。 |
 | `ctx.desktop.sendShortcutTo(target, keys, options?)` / `sendTextTo(target, text)` | 对捕获引用发送快捷键或 Unicode 文本；逐步复验身份、前台、取消和期限，原 `desktop` 目标保持不变。快捷键仅支持可选 `keyDownDelayMs`。 |
 | `ctx.desktop.sendShortcut(keys, options)` | 1–5 个 VK 整数，修饰键在前；支持 `keyDownDelayMs` 或原生 `timing` 配置，二者互斥。 |
@@ -33,6 +34,19 @@ Windows MSVC 的 Boa 宿主为共享 SDK 的解析保留 8 MiB 原生主栈；�
 | `ctx.openFileInParent(target)` | Windows 上复验普通本地文件与父目录，以父目录为工作目录单次打开；同步返回，系统接纳不证明关联程序已完成加载。 |
 
 原生错误转换为 JS 异常，可在 `catch (error)` 中读取 `error.code`，例如 `invalid_arguments`、`file_read_failed`、`file_write_failed`、`process_start_failed` 和 `process_timeout`。通过 SDK 每个脚本最多调用 32 次 API，文件和进程桥接请求最多 256 KiB，桌面桥接最多 512 KiB；桌面与应用接入的剪贴板文本最多 65,536 个 UTF-16 单元，文件文本最多 64 KiB UTF-8。SDK 计数是防误用措施，不是安全隔离。
+
+## 只读文本选区
+
+```js
+const selection = ctx.desktop.readSelectionText({overflow: 'truncate'});
+return selection.text === ''
+  ? {empty: true}
+  : {text: selection.text, truncated: selection.truncated};
+```
+
+Node 使用相同参数并 `await`。已确认的空选区返回空字符串；provider 不可用、受保护、多选区、目标或选区变化、取消及超时均报错。只检查原提交窗口及焦点祖先链，不激活窗口或读取剪贴板，不模拟复制、不使用 DocumentRange 读取整篇，也不自动重试。截断使用前 128 个 UTF-16 单元，拆开的代理对和 NUL 拒绝。
+
+UIA 在同 exe 的单次辅助进程中执行，复用创建期 Job 与有界采集收尾，读取期限不超过 2 秒并受动作期限约束。无法确认辅助进程收尾时返回 `selection_helper_cleanup_failed`，不交付部分输出；结束本地 helper 不会撤销外部 provider 已开始的工作。`GetText(129)` 仅是请求上限。该 API 共用原调用预算，需要更新应用与相应宿主；独立引擎 CLI 无应用目标桥接时明确失败。
 
 ## 显式捕获目标
 

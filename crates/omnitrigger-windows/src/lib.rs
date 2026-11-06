@@ -2,6 +2,9 @@
 
 use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirection};
 
+mod selection_text;
+pub use selection_text::{SelectionOverflow, SelectionReadError, SelectionTextSnapshot};
+
 mod process_capture;
 pub use process_capture::{
     capture as capture_process, capture_if as capture_process_if,

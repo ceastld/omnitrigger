@@ -15,7 +15,7 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 30] = [
+const METHODS: [&str; 31] = [
     "system.open",
     "system.open_file_in_parent",
     "process.capture",
@@ -40,6 +40,7 @@ const METHODS: [&str; 30] = [
     "keyboard.text",
     "selection.copy",
     "selection.copy_data",
+    "selection.read_text",
     "clipboard.read",
     "clipboard.read_data",
     "clipboard.write",
@@ -241,7 +242,8 @@ impl NativeBridge {
                         request.method.as_str(),
                         "display.brightness_step" | "audio.volume_adjust"
                     );
-                    let data_read = request.method == "clipboard.read_data";
+                    let selection_read = request.method == "selection.read_text";
+                    let data_read = request.method == "clipboard.read_data" || selection_read;
                     let data_copy = request.method == "selection.copy_data";
                     let history_read =
                         matches!(request.method.as_str(), "history.list" | "history.get");
@@ -254,7 +256,7 @@ impl NativeBridge {
                         error.effect_state = Some("not_started".into());
                         Err(error)
                     } else if !request.params.is_object()
-                        || (data_read
+                        || (request.method == "clipboard.read_data"
                             && request
                                 .params
                                 .as_object()
@@ -291,6 +293,7 @@ impl NativeBridge {
                             || request.method == "ui.open_history"
                             || request.method == "ui.toggle_history"
                             || data_copy
+                            || selection_read
                             || history
                             || capture
                             || brightness

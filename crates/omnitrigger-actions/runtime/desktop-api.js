@@ -308,7 +308,33 @@ function createDesktopApi(invoke) {
     catch (cause) { if (cause?.code === 'invalid_input') cause.method = method; throw cause; }
   }
 
+  // 默认reject；只有显式truncate才返回精确的128 UTF16前缀，不修复拆开的代理项。
+  function readSelectionText(args) {
+    const method = 'selection.read_text';
+    const fault = code => Object.assign(new Error('只读选区读取未获确认；请检查错误代码。'), {code,method,effectState:'not_started'});
+    const options = args[0] === undefined ? {} : args[0];
+    if (args.length > 1 || options === null || typeof options !== 'object' || Array.isArray(options)
+        || Reflect.ownKeys(options).some(key => key !== 'overflow')
+        || options.overflow !== undefined && !['reject','truncate'].includes(options.overflow)) throw fault('invalid_input');
+    const overflow = options.overflow ?? 'reject';
+    const params = options.overflow === undefined ? {} : {overflow};
+    const result = value => {
+      if (!exactDataFields(value,['text','truncated']) || !dataText(value.text,128,true)
+          || typeof value.truncated !== 'boolean' || value.truncated && (overflow !== 'truncate' || value.text.length !== 128)) throw fault('invalid_response');
+      return Object.freeze({text:value.text,truncated:value.truncated});
+    };
+    const failure = cause => {
+      const code = typeof cause?.code === 'string' && /^[a-z_]{1,64}$/.test(cause.code) ? cause.code : 'native_bridge_failed';
+      throw fault(code);
+    };
+    try {
+      const value = invoke(method,params);
+      return value && typeof value.then === 'function' ? value.then(result,failure) : result(value);
+    } catch (cause) { return failure(cause); }
+  }
+
   const desktop = Object.freeze({
+    readSelectionText: (...args) => readSelectionText(args),
     captureForegroundTarget,
     sendShortcutTo: (target, keys, options = {}) => {
       if (options === null || typeof options !== 'object' || Array.isArray(options)

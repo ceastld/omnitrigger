@@ -10,7 +10,7 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 27] = [
+pub const METHODS: [&str; 28] = [
     "history.list",
     "history.get",
     "history.append",
@@ -32,6 +32,7 @@ pub const METHODS: [&str; 27] = [
     "keyboard.text",
     "selection.copy",
     "selection.copy_data",
+    "selection.read_text",
     "clipboard.read",
     "clipboard.read_data",
     "clipboard.write",

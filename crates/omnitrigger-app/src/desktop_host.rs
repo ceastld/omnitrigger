@@ -21,6 +21,29 @@ fn error(code: &str, message: impl ToString, effect: &str) -> ActionError {
 }
 
 impl DesktopHost {
+    fn read_selection(
+        &self,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Value, ActionError> {
+        let overflow = crate::selected_text_helper::options(params)?;
+        crate::selected_text_helper::check_action(cancellation, deadline)?;
+        #[cfg(windows)]
+        {
+            let target = self
+                .target
+                .as_ref()
+                .map_err(|_| crate::selected_text_helper::fault("target_unavailable"))?;
+            crate::selected_text_helper::read(target, overflow, cancellation, deadline)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = overflow;
+            Err(crate::selected_text_helper::fault("selection_unavailable"))
+        }
+    }
+
     fn copy_data(
         &self,
         params: Value,
@@ -311,6 +334,7 @@ impl NativeHost for DesktopHost {
             "display.brightness_step" => {
                 return crate::brightness_step_host::execute(params, cancellation, None)
             }
+            "selection.read_text" => return self.read_selection(params, cancellation, None),
             "selection.copy_data" => return self.copy_data(params, cancellation, None),
             _ => {}
         }
@@ -549,6 +573,7 @@ impl NativeHost for DesktopHost {
             "display.brightness_step" => {
                 crate::brightness_step_host::execute(params, cancellation, Some(deadline))
             }
+            "selection.read_text" => self.read_selection(params, cancellation, Some(deadline)),
             "selection.copy_data" => self.copy_data(params, cancellation, Some(deadline)),
             _ => self.call(method, params, cancellation),
         }
@@ -2073,6 +2098,75 @@ mod captured_lease_tests {
                     || start,
                     || panic!("初始取消不得进入身份核验")
                 )
+                .unwrap_err()
+                .code,
+            "cancelled"
+        );
+    }
+}
+
+#[cfg(test)]
+mod selection_text_dispatch_tests {
+    use super::*;
+    fn absent() -> DesktopHost {
+        DesktopHost {
+            foreground_targets: ForegroundTargets::default(),
+            target: Err(error("target_unavailable", "synthetic", "not_started")),
+        }
+    }
+    #[test]
+    fn selection_read_validates_before_target_and_keeps_default_policy() {
+        let host = absent();
+        let token = CancellationToken::new();
+        for params in [
+            json!([]),
+            json!(["truncate"]),
+            json!({"overflow":"lossy"}),
+            json!({"target":{}}),
+            json!({"overflow":null}),
+        ] {
+            assert_eq!(
+                host.call("selection.read_text", params, &token)
+                    .unwrap_err()
+                    .code,
+                "invalid_input"
+            );
+        }
+        #[cfg(windows)]
+        for params in [json!({}), json!({"overflow":"truncate"})] {
+            assert_eq!(
+                host.call("selection.read_text", params, &token)
+                    .unwrap_err()
+                    .code,
+                "target_unavailable"
+            );
+        }
+        #[cfg(not(windows))]
+        assert_eq!(
+            host.call("selection.read_text", json!({}), &token)
+                .unwrap_err()
+                .code,
+            "selection_unavailable"
+        );
+    }
+    #[test]
+    fn cancelled_or_expired_read_never_resolves_a_fresh_foreground() {
+        let host = absent();
+        let token = CancellationToken::new();
+        assert_eq!(
+            host.call_with_deadline(
+                "selection.read_text",
+                json!({"overflow":"truncate"}),
+                &token,
+                Instant::now()
+            )
+            .unwrap_err()
+            .code,
+            "timeout"
+        );
+        token.cancel();
+        assert_eq!(
+            host.call("selection.read_text", json!({}), &token)
                 .unwrap_err()
                 .code,
             "cancelled"

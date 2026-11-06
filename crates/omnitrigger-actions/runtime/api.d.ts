@@ -1,3 +1,4 @@
+export type SelectionTextSnapshot = Readonly<{text:string;truncated:boolean}>;
 declare const capturedTargetBrand: unique symbol;
 export type CapturedTarget = Readonly<{
   capture_id:number;
@@ -223,6 +224,8 @@ export interface ActionContext {
     choose(options: ChooseOptions): Promise<ChooseResult>;
   };
   desktop: {
+    /** 原目标单选区；成功确认无选区/空文本时为 {text:"",truncated:false}，provider/目标/读取失败仍报错。默认 reject，显式 truncate 取前128 UTF-16单元；拆开代理对拒绝。 */
+    readSelectionText(options?: {overflow?: 'reject' | 'truncate'}): Promise<SelectionTextSnapshot>;
     /** 显式PID与创建时间；1–5000ms；仅捕获该进程当前前台，不激活或枚举。 */
     captureForegroundTarget(options: CaptureForegroundOptions): Promise<CapturedTarget>;
     /** 原desktop目标不变；每次复核身份/前台/取消/期限；仅确认提交。 */

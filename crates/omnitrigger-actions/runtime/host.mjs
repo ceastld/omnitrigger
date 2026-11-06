@@ -17,7 +17,7 @@ let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
 const nativeMethods = new Set(['system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','ui.choose','ui.notify','ui.open_history','ui.toggle_history','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
-  'keyboard.shortcut','keyboard.sequence','keyboard.text','selection.copy','selection.copy_data','clipboard.read','clipboard.read_data','clipboard.write','window.action','display.brightness_step','audio.volume_adjust']);
+  'keyboard.shortcut','keyboard.sequence','keyboard.text','selection.copy','selection.copy_data','selection.read_text','clipboard.read','clipboard.read_data','clipboard.write','window.action','display.brightness_step','audio.volume_adjust']);
 let nativePending;
 let nativePendingMethod;
 let nativeId = 0;
@@ -105,7 +105,7 @@ function nativeCall(method, params) {
   const volume = method === 'audio.volume_adjust';
   const brightness = method === 'display.brightness_step' || volume;
   const stat = method === 'fs.stat';
-  const dataRead = method === 'clipboard.read_data';
+  const dataRead = method === 'clipboard.read_data' || method === 'selection.read_text';
   const dataCopy = method === 'selection.copy_data';
   const data = dataRead || dataCopy;
   const historyRead = method === 'history.list' || method === 'history.get';
@@ -279,7 +279,7 @@ function validateProcess(program, args, options, allowedOptions) {
   checkCancelled();
   if (typeof program !== 'string' || !program.trim() || program.includes('\0')
       || !Array.isArray(args) || args.length > 128
-      || args.some(arg => typeof arg !== 'string' || arg.includes('\0'))
+      || args.some(arg => typeof arg !== 'string' || arg.includes('\0') || arg === '--omni-selected-text-once' || arg.startsWith('--omni-selected-text-once='))
       || !options || typeof options !== 'object' || Array.isArray(options)
       || Object.keys(options).some(key => !allowedOptions.includes(key))
       || (options.cwd !== undefined && (typeof options.cwd !== 'string' || !options.cwd.trim() || options.cwd.includes('\0')))
