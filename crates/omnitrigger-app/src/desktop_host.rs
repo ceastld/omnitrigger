@@ -87,6 +87,27 @@ impl DesktopHost {
         copy_data_result(result, cancellation, deadline)
     }
 
+    fn window_action(
+        &self,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Value, ActionError> {
+        crate::window_action::execute_with(
+            params,
+            cancellation,
+            deadline,
+            || {
+                let target = self.target.as_ref().map_err(Clone::clone)?;
+                target
+                    .ensure_foreground()
+                    .map_err(|message| error("target_changed", message, "not_started"))?;
+                Ok(target)
+            },
+            |target, operation, check| target.window_action_if(operation, check),
+        )
+    }
+
     /// 选择窗口只可恢复本次捕获且身份仍有效的目标，绝不重新抓取前台。
     pub fn choice_target(&self) -> Option<ScriptTargetSnapshot> {
         self.target.as_ref().ok()?.snapshot().ok()
@@ -357,6 +378,7 @@ impl NativeHost for DesktopHost {
             "explorer.context" => return self.explorer_context(params, cancellation, None),
             "selection.read_text" => return self.read_selection(params, cancellation, None),
             "selection.copy_data" => return self.copy_data(params, cancellation, None),
+            "window.action" => return self.window_action(params, cancellation, None),
             _ => {}
         }
         if cancellation.is_cancelled() {
@@ -519,20 +541,6 @@ impl NativeHost for DesktopHost {
                     .map_err(|message| error("input_failed", message, "unknown"))?;
                 Ok(json!({"submitted":true}))
             }
-            "window.action" => {
-                let action: crate::window_action::WindowAction = serde_json::from_value(params)
-                    .map_err(|message| error("invalid_input", message, "not_started"))?;
-                let target = self.target.as_ref().map_err(Clone::clone)?;
-                target
-                    .ensure_foreground()
-                    .map_err(|message| error("target_changed", message, "not_started"))?;
-                not_cancelled(cancellation)
-                    .map_err(|message| error("cancelled", message, "not_started"))?;
-                target
-                    .window_action_if(action.platform_operation(), || not_cancelled(cancellation))
-                    .map_err(|message| error("window_action_failed", message, "unknown"))?;
-                Ok(json!({"submitted":true}))
-            }
             "keyboard.sequence" => {
                 let args: SequenceArgs = serde_json::from_value(params)
                     .map_err(|message| error("invalid_input", message, "not_started"))?;
@@ -597,6 +605,7 @@ impl NativeHost for DesktopHost {
             "explorer.context" => self.explorer_context(params, cancellation, Some(deadline)),
             "selection.read_text" => self.read_selection(params, cancellation, Some(deadline)),
             "selection.copy_data" => self.copy_data(params, cancellation, Some(deadline)),
+            "window.action" => self.window_action(params, cancellation, Some(deadline)),
             _ => self.call(method, params, cancellation),
         }
     }
@@ -2235,6 +2244,102 @@ mod explorer_context_dispatch_tests {
             assert_eq!(err.code, "cancelled");
             assert_eq!(err.effect_state.as_deref(), Some("not_started"));
             assert_eq!(err.method.as_deref(), Some("explorer.context"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod window_topmost_dispatch_tests {
+    use super::*;
+
+    fn absent() -> DesktopHost {
+        DesktopHost {
+            foreground_targets: ForegroundTargets::default(),
+            target: Err(error(
+                "synthetic_original_target",
+                "不可用原目标",
+                "not_started",
+            )),
+        }
+    }
+
+    #[test]
+    fn window_topmost_accepts_real_dto_but_never_captures_a_replacement_target() {
+        let host = absent();
+        let token = CancellationToken::new();
+        for deadline in [
+            None,
+            Some(Instant::now() + std::time::Duration::from_secs(5)),
+        ] {
+            let result = if let Some(deadline) = deadline {
+                host.call_with_deadline(
+                    "window.action",
+                    json!({"operation":"toggle_topmost"}),
+                    &token,
+                    deadline,
+                )
+            } else {
+                host.call(
+                    "window.action",
+                    json!({"operation":"toggle_topmost"}),
+                    &token,
+                )
+            };
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "synthetic_original_target");
+            assert_eq!(error.method.as_deref(), Some("window.action"));
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        }
+    }
+
+    #[test]
+    fn window_deadline_and_cancel_are_checked_before_resolving_original_target() {
+        let host = absent();
+        let token = CancellationToken::new();
+        let error = host
+            .call_with_deadline(
+                "window.action",
+                json!({"operation":"toggle_topmost"}),
+                &token,
+                Instant::now(),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "timeout");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        token.cancel();
+        for error in [
+            host.call(
+                "window.action",
+                json!({"operation":"toggle_topmost"}),
+                &token,
+            )
+            .unwrap_err(),
+            host.call_with_deadline(
+                "window.action",
+                json!({"operation":"toggle_topmost"}),
+                &token,
+                Instant::now(),
+            )
+            .unwrap_err(),
+        ] {
+            assert_eq!(error.code, "cancelled");
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        }
+    }
+
+    #[test]
+    fn window_dispatch_rejects_arbitrary_handles_and_unknown_operations() {
+        let host = absent();
+        let token = CancellationToken::new();
+        for params in [
+            json!({"operation":"toggle_topmost","target":1}),
+            json!({"operation":"topmost"}),
+            json!([]),
+        ] {
+            assert_eq!(
+                host.call("window.action", params, &token).unwrap_err().code,
+                "invalid_input"
+            );
         }
     }
 }

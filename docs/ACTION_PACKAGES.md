@@ -573,7 +573,7 @@ export default async ctx => {
 
 ### 窗口脚本
 
-同步脚本可直接调用 `ctx.desktop.windowAction('toggle_maximize')`；Node 脚本使用 `await`。操作还包括 `minimize` 和 `close`，始终针对本次提交时捕获且仍为前台的窗口，复用原生窗口能力。目标身份与取消条件在状态检查和提交前重新核验；句柄生命周期的检查不是原子锁定。
+同步脚本可直接调用 `ctx.desktop.windowAction('toggle_maximize')`；Node 脚本使用 `await`。操作还包括 `toggle_topmost`、`minimize` 和 `close`，始终针对本次提交时捕获且仍为前台的窗口，复用原生窗口能力。`toggle_topmost` 按提交前原窗口状态切换置顶，不激活、移动或缩放窗口。目标身份、取消条件和本次动作期限在状态检查和提交前重新核验；句柄生命周期的检查不是原子锁定。
 
 返回 `{submitted:true}` 仅表示系统接纳请求；关闭可能提示保存或被目标程序拒绝。原目标变化时停止，已提交的窗口请求不会因取消而撤销。此接口不接收外部窗口句柄或隐式选择新前台；参数、目标与请求失败保留结构化错误。完整参数见[窗口动作 API](../tools/js-engine-probe/API.md#窗口动作)。
 

@@ -305,8 +305,10 @@ export interface ActionContext {
      * 客户端最多等待 8 秒；不能保证取消立即抢占阻塞 Win32 调用。
      */
     copySelectionData(options?: SelectionCopyOptions): Promise<SelectionDataSnapshot>;
-    /** 操作本次捕获且仍为前台的窗口；仅表示系统接纳请求，关闭可能弹出保存提示。 */
-    windowAction(operation: 'toggle_maximize' | 'minimize' | 'close'): Promise<{submitted: true}>;
+    /** 操作本次捕获且仍为前台的窗口；仅表示系统接纳请求，关闭可能弹出保存提示。
+     * toggle_topmost按提交前原窗口状态切换置顶；不激活、移动或缩放窗口。
+     * 沿用本次动作取消和期限；提交后的迟到或取消不撤销已提交操作。 */
+    windowAction(operation: 'toggle_maximize' | 'toggle_topmost' | 'minimize' | 'close'): Promise<{submitted: true}>;
   };
   clipboard: {
     history: import('./clipboard-history-api').AsyncClipboardHistoryApi;

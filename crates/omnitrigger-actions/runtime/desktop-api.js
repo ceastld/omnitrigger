@@ -441,8 +441,8 @@ function createDesktopApi(invoke) {
       return dataCall(method, params);
     },
     windowAction: operation => {
-      if (!['toggle_maximize', 'minimize', 'close'].includes(operation)) {
-        invalid('window.action', '窗口操作需要 toggle_maximize、minimize 或 close。');
+      if (!['toggle_maximize', 'toggle_topmost', 'minimize', 'close'].includes(operation)) {
+        invalid('window.action', '窗口操作需要 toggle_maximize、toggle_topmost、minimize 或 close。');
       }
       return invoke('window.action', {operation});
     },

@@ -3,6 +3,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowOperation {
     ToggleMaximize,
+    ToggleTopmost,
     Minimize,
     /// 请求窗口按系统菜单“关闭”处理，等同 Alt+F4；应用可以询问保存或拒绝。
     Close,
@@ -16,6 +17,7 @@ struct TargetState {
     foreground: bool,
     top_level: bool,
     maximized: bool,
+    topmost: bool,
     minimized: bool,
     can_maximize: bool,
     can_minimize: bool,
@@ -24,6 +26,7 @@ struct TargetState {
 #[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WindowCommand {
+    SetTopmost(bool),
     Maximize,
     Restore,
     Minimize,
@@ -45,6 +48,7 @@ fn plan(state: TargetState, operation: WindowOperation) -> Result<WindowCommand,
         WindowOperation::ToggleMaximize if state.maximized => Ok(WindowCommand::Restore),
         WindowOperation::ToggleMaximize if state.can_maximize => Ok(WindowCommand::Maximize),
         WindowOperation::Minimize if state.can_minimize => Ok(WindowCommand::Minimize),
+        WindowOperation::ToggleTopmost => Ok(WindowCommand::SetTopmost(!state.topmost)),
         WindowOperation::Close => Ok(WindowCommand::Close),
         WindowOperation::ToggleMaximize => Err("目标窗口不支持最大化。".into()),
         WindowOperation::Minimize => Err("目标窗口不支持最小化。".into()),
@@ -92,8 +96,10 @@ pub(crate) fn perform_window_action_checked(
         Foundation::HWND,
         UI::WindowsAndMessaging::{
             GetAncestor, GetForegroundWindow, GetWindowLongPtrW, IsIconic, IsWindow,
-            IsWindowVisible, IsZoomed, PostMessageW, ShowWindowAsync, GA_ROOT, GWL_STYLE, SC_CLOSE,
-            SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_SYSCOMMAND, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+            IsWindowVisible, IsZoomed, PostMessageW, SetWindowPos, ShowWindowAsync, GA_ROOT,
+            GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST, HWND_TOPMOST, SC_CLOSE, SWP_ASYNCWINDOWPOS,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SW_MAXIMIZE, SW_MINIMIZE,
+            SW_RESTORE, WM_SYSCOMMAND, WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
         },
     };
     let hwnd = HWND(target.0 as *mut std::ffi::c_void);
@@ -110,6 +116,8 @@ pub(crate) fn perform_window_action_checked(
                 foreground: unsafe { GetForegroundWindow() } == hwnd,
                 top_level: unsafe { GetAncestor(hwnd, GA_ROOT) } == hwnd,
                 maximized: unsafe { IsZoomed(hwnd) }.as_bool(),
+                topmost: unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_TOPMOST.0
+                    != 0,
                 minimized: unsafe { IsIconic(hwnd) }.as_bool(),
                 can_maximize: style & WS_MAXIMIZEBOX.0 != 0,
                 can_minimize: style & WS_MINIMIZEBOX.0 != 0,
@@ -121,6 +129,29 @@ pub(crate) fn perform_window_action_checked(
                 return false;
             }
             let command = match command {
+                WindowCommand::SetTopmost(topmost) => {
+                    // 只改原窗口Z序；不激活、不移动或缩放，不修改整个扩展样式。
+                    return unsafe {
+                        SetWindowPos(
+                            hwnd,
+                            Some(if topmost {
+                                HWND_TOPMOST
+                            } else {
+                                HWND_NOTOPMOST
+                            }),
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOMOVE
+                                | SWP_NOSIZE
+                                | SWP_NOACTIVATE
+                                | SWP_NOOWNERZORDER
+                                | SWP_ASYNCWINDOWPOS,
+                        )
+                    }
+                    .is_ok();
+                }
                 WindowCommand::Close => {
                     return unsafe {
                         PostMessageW(
@@ -481,5 +512,132 @@ mod tests {
             assert_eq!(checks.get(), rejected_check);
             assert!(!submitted.get());
         }
+    }
+}
+
+#[cfg(test)]
+mod topmost_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn ready() -> TargetState {
+        TargetState {
+            valid: true,
+            visible: true,
+            foreground: true,
+            top_level: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn topmost_plan_uses_current_state_without_requiring_resize_support() {
+        for topmost in [false, true] {
+            assert_eq!(
+                plan(
+                    TargetState { topmost, ..ready() },
+                    WindowOperation::ToggleTopmost
+                )
+                .unwrap(),
+                WindowCommand::SetTopmost(!topmost)
+            );
+        }
+    }
+
+    #[test]
+    fn topmost_is_reinspected_before_the_single_submission() {
+        let inspections = Cell::new(0);
+        let submitted = Cell::new(0);
+        perform_with(
+            WindowOperation::ToggleTopmost,
+            || {
+                let count = inspections.get();
+                inspections.set(count + 1);
+                TargetState {
+                    topmost: count != 0,
+                    ..ready()
+                }
+            },
+            |command| {
+                assert_eq!(command, WindowCommand::SetTopmost(false));
+                submitted.set(submitted.get() + 1);
+                true
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(inspections.get(), 2);
+        assert_eq!(submitted.get(), 1);
+    }
+
+    #[test]
+    fn invalid_hidden_child_minimized_or_changed_target_never_submits_topmost() {
+        for state in [
+            TargetState::default(),
+            TargetState {
+                visible: false,
+                ..ready()
+            },
+            TargetState {
+                foreground: false,
+                ..ready()
+            },
+            TargetState {
+                top_level: false,
+                ..ready()
+            },
+            TargetState {
+                minimized: true,
+                ..ready()
+            },
+        ] {
+            assert!(perform_with(
+                WindowOperation::ToggleTopmost,
+                || state,
+                |_| panic!("失效或失焦原目标不能提交置顶"),
+                || Ok(())
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn topmost_identity_cancel_or_deadline_guard_stops_at_each_real_boundary() {
+        for stop in 1..=3 {
+            let checks = Cell::new(0);
+            let error = perform_with(
+                WindowOperation::ToggleTopmost,
+                ready,
+                |_| panic!("检查失败不得提交置顶"),
+                || {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == stop {
+                        Err("原目标/取消/期限守卫拒绝".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error, "原目标/取消/期限守卫拒绝");
+            assert_eq!(checks.get(), stop);
+        }
+    }
+
+    #[test]
+    fn native_topmost_rejection_is_returned_without_retry() {
+        let calls = Cell::new(0);
+        assert!(perform_with(
+            WindowOperation::ToggleTopmost,
+            ready,
+            |command| {
+                assert_eq!(command, WindowCommand::SetTopmost(true));
+                calls.set(calls.get() + 1);
+                false
+            },
+            || Ok(()),
+        )
+        .is_err());
+        assert_eq!(calls.get(), 1);
     }
 }

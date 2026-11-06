@@ -24,7 +24,7 @@ Windows MSVC 的 Boa 宿主为共享 SDK 的解析保留 8 MiB 原生主栈；�
 | `ctx.desktop.sendText(text)` | 向原目标直接发送 Unicode，不经过剪贴板；最多 65,536 个 UTF-16 单元，不含 NUL 或孤立代理项。 |
 | `ctx.desktop.copySelectionText()` | 向原目标发送 Ctrl+C，读取新文本；复制结果保留在剪贴板。 |
 | `ctx.desktop.copySelectionData(options)` | 向原目标发送一次 Ctrl+C，按可选等待参数返回文本或文件列表与 `changed`；需要应用本机桥接。 |
-| `ctx.desktop.windowAction(operation)` | 对仍为前台的原目标执行 `toggle_maximize`、`minimize` 或 `close`，返回 `{submitted:true}`，不重新选择窗口。 |
+| `ctx.desktop.windowAction(operation)` | 对仍为前台的原目标执行 `toggle_maximize`、`toggle_topmost`、`minimize` 或 `close`，返回 `{submitted:true}`，不重新选择窗口。 |
 | `ctx.clipboard.readText()` / `writeText(text, options)` | Windows Unicode 文本剪贴板；写入替换全部格式。应用接入支持 `{excludeFromHistory:true}`，返回写入回执；独立 CLI 不支持选项，写入返回 `undefined`，文本最多 64 KiB UTF-8。 |
 | `ctx.clipboard.readData()` | 应用接入返回 `{kind:'text',text,sequenceNumber}` 或 `{kind:'files',paths,sequenceNumber}`；无桥接明确报错。 |
 | `ctx.clipboard.history.list/get/append/remove` | 应用接入的显式纯文本历史；此处同步返回，默认不监听。独立CLI返回 `history_unavailable`。 |
@@ -151,6 +151,8 @@ ID必须是非零、无前导零的十进制u64字符串；revision也是十进�
 `get`正文仅供脚本内部处理；应返回状态、数量和长度等摘要。SDK不会自动删改可信脚本主动返回的全文。参数、完整边界及双入口示例见[动作包文档](../../docs/ACTION_PACKAGES.md#显式文本历史)和[显式历史配方](../../examples/actions/clipboard-history/)。已安装旧宿主与已有工程的SDK快照需要更新后才能使用。
 
 ## 窗口动作
+
+`toggle_topmost` 按本次原窗口提交前的置顶状态切换；不激活、不移动或缩放窗口。此调用沿用动作总期限和取消条件，提交后迟到或取消不撤销已提交操作。
 
 ```js
 /** @param {ScriptContext} ctx */

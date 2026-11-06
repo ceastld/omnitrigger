@@ -943,7 +943,7 @@ fn script_window_api_routes_operations_validates_and_preserves_faults() {
         for (const operation of [null, undefined, false, 0, {}, 'Close', 'maximize', 'resize']) {
             try { ctx.desktop.windowAction(operation); } catch(e) { rejected.push([e.code,e.effectState,e.method]); }
         }
-        const receipts = ['toggle_maximize','minimize','close'].map(op => ctx.desktop.windowAction(op));
+        const receipts = ['toggle_maximize','toggle_topmost','minimize','close'].map(op => ctx.desktop.windowAction(op));
         return {rejected,receipts};
     "#,
     );
@@ -965,16 +965,16 @@ fn script_window_api_routes_operations_validates_and_preserves_faults() {
     );
     assert_eq!(
         output["receipts"],
-        json!([{ "submitted":true },{ "submitted":true },{ "submitted":true }])
+        json!([{ "submitted":true },{ "submitted":true },{ "submitted":true },{ "submitted":true }])
     );
     assert_eq!(
         *host.calls.lock().unwrap(),
-        ["toggle_maximize", "minimize", "close"]
+        ["toggle_maximize", "toggle_topmost", "minimize", "close"]
             .into_iter()
             .map(|op| ("window.action".into(), json!({"operation":op})))
             .collect::<Vec<_>>()
     );
-    let fixture = Fixture::new("return ctx.desktop.windowAction('close');");
+    let fixture = Fixture::new("return ctx.desktop.windowAction('toggle_topmost');");
     let missing = runtime()
         .execute(
             &fixture.action(json!({})),

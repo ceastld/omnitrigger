@@ -289,7 +289,7 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
          */
         copySelectionData(options?: ScriptSelectionCopyOptions): ScriptSelectionDataSnapshot;
         /** 操作本次捕获且仍为前台的窗口；仅表示系统接纳请求，关闭可能弹出保存提示。 */
-        windowAction(operation: 'toggle_maximize' | 'minimize' | 'close'): {submitted: true};
+        windowAction(operation: 'toggle_maximize' | 'toggle_topmost' | 'minimize' | 'close'): {submitted: true};
     };
     browser: {
         profiles(options?: Pick<ScriptBrowserOptions, 'timeoutMs'>): Array<{browser_instance_id: string; session_id: string; name: string; [key: string]: unknown}>;

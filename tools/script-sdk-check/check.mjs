@@ -114,7 +114,7 @@ for (const [name, source] of Object.entries(typedInputInvalid)) {
 }
 const typedInputChecks = {positive:true, rejected:Object.keys(typedInputInvalid)};
 
-writeFileSync(project.entry_path, `${original}\n/** @param {ScriptContext} ctx */\nfunction verifyHost(ctx) { ctx.delay(0); ctx.desktop.windowAction('minimize'); }\n`);
+writeFileSync(project.entry_path, `${original}\n/** @param {ScriptContext} ctx */\nfunction verifyHost(ctx) { ctx.delay(0); ctx.desktop.windowAction('minimize'); ctx.desktop.windowAction('toggle_topmost'); }\n`);
 const withDelay = diagnostics(project.package_root);
 assert.equal(withDelay.length, 0, report(withDelay));
 // 编译器必须实际拒绝错误参数和未提供的环境能力，而不只是成功解析声明。
