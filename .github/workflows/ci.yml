@@ -35,6 +35,9 @@ jobs:
       - name: 缓存 Cargo 依赖与构建产物
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          workspaces: |
+            . -> target
+            tools/js-engine-probe -> ../../target/ci-script-engine
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: 安装宿主测试与 SDK 检查使用的 Node.js
@@ -103,6 +106,8 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Pop-Location
+          node --test tools/script-sdk-check/action-signal-types.test.mjs tools/script-sdk-check/script-project-write.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check.mjs target/debug/omnitrigger.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check-fs-stat.mjs target/debug/omnitrigger.exe
@@ -119,6 +124,23 @@ jobs:
           rustc --edition=2024 --crate-name omnitrigger_file_open_probe tools/script-sdk-check/file-open-probe.rs -o .tmp/file-open-probe.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check-node-open.mjs target/debug/omnitrigger.exe .tmp/file-open-probe.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 构建工程端到端检查所用的真实 QuickJS 宿主
+        shell: pwsh
+        run: |
+          cargo build --locked --manifest-path tools/js-engine-probe/Cargo.toml --no-default-features --features quickjs --target-dir target/ci-script-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 验证两种脚本工程的创建刷新与端到端运行
+        shell: pwsh
+        run: |
+          $projectNode = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          $projectApp = Join-Path $env:GITHUB_WORKSPACE 'target/debug/omnitrigger.exe'
+          $projectLight = Join-Path $env:GITHUB_WORKSPACE 'target/ci-script-engine/debug/omnitrigger-js-probe.exe'
+          $projectTsc = Join-Path $env:GITHUB_WORKSPACE 'tools/script-sdk-check/node_modules/typescript/lib/tsc.js'
+          $projectCase = Join-Path $env:GITHUB_WORKSPACE ('.tmp/script-environment-ci-' + [guid]::NewGuid().ToString('N'))
+          node tools/script-sdk-check/check-project-environment.mjs --app $projectApp --node $projectNode --host $projectLight --typescript $projectTsc --case-root $projectCase
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 验证 Node 输出采集与断连后的进程收尾

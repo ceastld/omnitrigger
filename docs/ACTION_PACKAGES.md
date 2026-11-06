@@ -52,6 +52,8 @@ flowchart LR
 .\target\debug\omnitrigger.exe --config D:\Demo\bindings.json --create-script-action my-script
 ```
 
+开发工具也可创建 Node 工程，并显式刷新已有工程的 SDK，见[创建和刷新 JavaScript 工程](SCRIPT_PROJECTS.md)。界面的“新建脚本”仍创建同步轻量工程。
+
 返回 JSON 包含工程、入口、调用文件和 SDK 的完整路径。创建不要求安装脚本引擎，不启动脚本、不新增绑定。工程包含：
 
 ```text

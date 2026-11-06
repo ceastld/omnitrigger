@@ -44,6 +44,7 @@ export const groups = [
       ['docs/LOCAL_ACTIONS.md', 'local-actions', '本地步骤动作'],
       ['docs/COMMAND_ACTIONS.md', 'command-actions', '程序与脚本'],
       ['docs/ACTION_PACKAGES.md', 'action-packages', '动作包与 JavaScript 入口'],
+      ['docs/SCRIPT_PROJECTS.md', 'script-projects', '脚本工程与 SDK 刷新'],
       ['docs/PLUGIN_SYSTEM.md', 'plugin-system', '插件动作与快速绑定'],
     ],
   },

@@ -1,3 +1,33 @@
+/** 无环境类型时的取消观察接口；不声明浏览器或Node环境全局。 */
+interface CancellationObserverSignal {
+  readonly aborted: boolean;
+  readonly reason: unknown;
+  throwIfAborted(): void;
+  onabort: CancellationObserverCallback | null;
+  addEventListener(type: 'abort', listener: CancellationObserverListener | null,
+    options?: boolean | {capture?: boolean; once?: boolean; passive?: boolean}): void;
+  removeEventListener(type: 'abort', listener: CancellationObserverListener | null,
+    options?: boolean | {capture?: boolean}): void;
+}
+interface CancellationObserverEvent {
+  readonly type: 'abort';
+  readonly target: CancellationObserverSignal | null;
+  readonly currentTarget: CancellationObserverSignal | null;
+}
+type CancellationObserverCallback =
+  (this: CancellationObserverSignal, event: CancellationObserverEvent) => void;
+type CancellationObserverListener = CancellationObserverCallback
+  | {handleEvent(event: CancellationObserverEvent): void};
+
+/** 作者已配置原生环境声明时保留AbortSignal兼容性；此类型本身不加载环境库。 */
+export type ActionCancellationSignal = typeof globalThis extends {
+  AbortSignal: {prototype: infer Signal};
+} ? Signal : CancellationObserverSignal;
+export type ActionCancellationCallback = NonNullable<ActionCancellationSignal['onabort']>;
+export type ActionCancellationEvent = Parameters<ActionCancellationCallback>[0];
+export type ActionCancellationListener = ActionCancellationCallback
+  | {handleEvent(event: ActionCancellationEvent): void};
+
 export type SelectionTextSnapshot = Readonly<{text:string;truncated:boolean}>;
 declare const capturedTargetBrand: unique symbol;
 export type CapturedTarget = Readonly<{
@@ -187,7 +217,7 @@ export interface ActionContext {
    * 不接收目录/参数/verb选项；无桥接明确拒绝，不回退open或process.start。
    * 成功仅确认系统接纳，错误unknown不允许据此重试。 */
   openFileInParent(target: string): Promise<OpenResult>;
-  signal: AbortSignal;
+  signal: ActionCancellationSignal;
   delay(milliseconds: number): Promise<void>;
   fs: {
     /** 普通盘符绝对路径，1–32767 UTF-16 单元；只查固定本地物理盘元数据。
