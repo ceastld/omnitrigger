@@ -364,6 +364,29 @@ pub(crate) fn cli(args: &[String]) -> Option<i32> {
     })
 }
 
+pub(crate) fn check_action(
+    cancellation: &CancellationToken,
+    deadline: Option<Instant>,
+) -> Result<(), ActionError> {
+    if cancellation.is_cancelled() {
+        return Err(fault("cancelled"));
+    }
+    if deadline.is_some_and(|end| Instant::now() >= end) {
+        return Err(fault("timeout"));
+    }
+    Ok(())
+}
+#[cfg(not(windows))]
+fn child(_: Request) -> Reply {
+    Reply::Error {
+        v: 2,
+        code: "selection_unavailable".into(),
+    }
+}
+#[cfg(windows)]
+#[path = "selected_text_helper_scope.rs"]
+mod scope;
+
 #[cfg(test)]
 mod selection_helper_protocol_tests {
     use super::*;
@@ -621,26 +644,3 @@ mod selection_helper_protocol_tests {
         );
     }
 }
-
-pub(crate) fn check_action(
-    cancellation: &CancellationToken,
-    deadline: Option<Instant>,
-) -> Result<(), ActionError> {
-    if cancellation.is_cancelled() {
-        return Err(fault("cancelled"));
-    }
-    if deadline.is_some_and(|end| Instant::now() >= end) {
-        return Err(fault("timeout"));
-    }
-    Ok(())
-}
-#[cfg(not(windows))]
-fn child(_: Request) -> Reply {
-    Reply::Error {
-        v: 2,
-        code: "selection_unavailable".into(),
-    }
-}
-#[cfg(windows)]
-#[path = "selected_text_helper_scope.rs"]
-mod scope;

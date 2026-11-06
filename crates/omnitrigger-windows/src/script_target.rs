@@ -277,127 +277,6 @@ impl ScriptTarget {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use windows::{
-        core::w,
-        Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
-        },
-    };
-
-    #[test]
-    fn script_target_reads_hidden_window_and_rejects_stale_identity_without_input() {
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                w!("STATIC"),
-                w!("独立目标验证"),
-                WINDOW_STYLE(0),
-                0,
-                0,
-                1,
-                1,
-                None,
-                None,
-                None,
-                None,
-            )
-        }
-        .unwrap();
-        let target = ScriptTarget::capture(ShortcutTarget(hwnd.0 as isize)).unwrap();
-        let info = target.info().unwrap();
-        assert_eq!(info.process_id, std::process::id());
-        assert_eq!(info.title, "独立目标验证");
-        assert!(!info.is_foreground);
-        assert!(info.process_name.ends_with(".exe"));
-        assert_eq!(info.window_role, omnitrigger_core::WindowRole::Application);
-        assert!(target.ensure_foreground().is_err());
-        assert!(!target.restore_foreground_if(0).unwrap());
-        assert!(!target.restore_foreground_if(hwnd.0 as isize).unwrap());
-        let checked = std::cell::Cell::new(false);
-        assert!(target
-            .window_action_if(crate::WindowOperation::Close, || {
-                checked.set(true);
-                Ok(())
-            })
-            .is_err());
-        assert!(!checked.get());
-        let mut stale = target;
-        stale.identity.process_created ^= 1;
-        assert!(stale.info().is_err());
-        assert!(stale.restore_foreground_if(0).is_err());
-        stale = target;
-        stale.identity.thread_id ^= 1;
-        assert!(stale.info().is_err());
-        unsafe { DestroyWindow(hwnd) }.unwrap();
-        assert!(target.info().is_err());
-        assert!(target.send_shortcut(&[65]).is_err());
-        assert!(target
-            .window_action_if(crate::WindowOperation::Minimize, || Ok(()))
-            .is_err());
-    }
-    #[test]
-    fn explicit_snapshot_restores_only_the_supplied_identity_and_rejects_closed_target() {
-        let hwnd = unsafe {
-            CreateWindowExW(
-                WINDOW_EX_STYLE(0),
-                w!("STATIC"),
-                w!("Owned snapshot target"),
-                WINDOW_STYLE(0),
-                0,
-                0,
-                1,
-                1,
-                None,
-                None,
-                None,
-                None,
-            )
-        }
-        .unwrap();
-        struct Owned(HWND);
-        impl Drop for Owned {
-            fn drop(&mut self) {
-                let _ = unsafe { DestroyWindow(self.0) };
-            }
-        }
-        let owned = Owned(hwnd);
-        let target = ScriptTarget::capture(ShortcutTarget(hwnd.0 as isize)).unwrap();
-        let original = target.snapshot().unwrap();
-        assert_eq!(
-            ScriptTarget::from_snapshot(original)
-                .unwrap()
-                .snapshot()
-                .unwrap(),
-            original
-        );
-        for changed in [
-            ScriptTargetSnapshot {
-                process_id: original.process_id + 1,
-                ..original
-            },
-            ScriptTargetSnapshot {
-                thread_id: original.thread_id + 1,
-                ..original
-            },
-            ScriptTargetSnapshot {
-                process_created_file_time: original.process_created_file_time + 1,
-                ..original
-            },
-            ScriptTargetSnapshot {
-                window_handle: 0,
-                ..original
-            },
-        ] {
-            assert!(ScriptTarget::from_snapshot(changed).is_err());
-        }
-        drop(owned);
-        assert!(ScriptTarget::from_snapshot(original).is_err());
-    }
-}
-
 use crate::selection_text::{selection_has_range, selection_range_has_text, selection_text};
 use crate::{SelectionOverflow, SelectionReadError, SelectionTextSnapshot};
 
@@ -584,5 +463,126 @@ impl ScriptTarget {
         let result = selection_text(raw.as_deref().unwrap_or(&[]), overflow)?;
         guard()?;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::{
+        core::w,
+        Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
+        },
+    };
+
+    #[test]
+    fn script_target_reads_hidden_window_and_rejects_stale_identity_without_input() {
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("独立目标验证"),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        let target = ScriptTarget::capture(ShortcutTarget(hwnd.0 as isize)).unwrap();
+        let info = target.info().unwrap();
+        assert_eq!(info.process_id, std::process::id());
+        assert_eq!(info.title, "独立目标验证");
+        assert!(!info.is_foreground);
+        assert!(info.process_name.ends_with(".exe"));
+        assert_eq!(info.window_role, omnitrigger_core::WindowRole::Application);
+        assert!(target.ensure_foreground().is_err());
+        assert!(!target.restore_foreground_if(0).unwrap());
+        assert!(!target.restore_foreground_if(hwnd.0 as isize).unwrap());
+        let checked = std::cell::Cell::new(false);
+        assert!(target
+            .window_action_if(crate::WindowOperation::Close, || {
+                checked.set(true);
+                Ok(())
+            })
+            .is_err());
+        assert!(!checked.get());
+        let mut stale = target;
+        stale.identity.process_created ^= 1;
+        assert!(stale.info().is_err());
+        assert!(stale.restore_foreground_if(0).is_err());
+        stale = target;
+        stale.identity.thread_id ^= 1;
+        assert!(stale.info().is_err());
+        unsafe { DestroyWindow(hwnd) }.unwrap();
+        assert!(target.info().is_err());
+        assert!(target.send_shortcut(&[65]).is_err());
+        assert!(target
+            .window_action_if(crate::WindowOperation::Minimize, || Ok(()))
+            .is_err());
+    }
+    #[test]
+    fn explicit_snapshot_restores_only_the_supplied_identity_and_rejects_closed_target() {
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("Owned snapshot target"),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        struct Owned(HWND);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        let owned = Owned(hwnd);
+        let target = ScriptTarget::capture(ShortcutTarget(hwnd.0 as isize)).unwrap();
+        let original = target.snapshot().unwrap();
+        assert_eq!(
+            ScriptTarget::from_snapshot(original)
+                .unwrap()
+                .snapshot()
+                .unwrap(),
+            original
+        );
+        for changed in [
+            ScriptTargetSnapshot {
+                process_id: original.process_id + 1,
+                ..original
+            },
+            ScriptTargetSnapshot {
+                thread_id: original.thread_id + 1,
+                ..original
+            },
+            ScriptTargetSnapshot {
+                process_created_file_time: original.process_created_file_time + 1,
+                ..original
+            },
+            ScriptTargetSnapshot {
+                window_handle: 0,
+                ..original
+            },
+        ] {
+            assert!(ScriptTarget::from_snapshot(changed).is_err());
+        }
+        drop(owned);
+        assert!(ScriptTarget::from_snapshot(original).is_err());
     }
 }

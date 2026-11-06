@@ -169,7 +169,7 @@ jobs:
           $selectionHadNode = Test-Path Env:OMNITRIGGER_SELECTION_TEST_NODE
           $selectionPreviousNode = $env:OMNITRIGGER_SELECTION_TEST_NODE
           try {
-            $env:OMNITRIGGER_SELECTION_TEST_NODE = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+            $env:OMNITRIGGER_SELECTION_TEST_NODE = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
             cargo test --locked -p omnitrigger-actions --test selection_read_node -- --ignored --test-threads=1
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally {
@@ -378,10 +378,18 @@ jobs:
       - name: 验证轻量引擎接入动作服务
         run: |
           $env:OMNITRIGGER_TEST_NODE = (Get-Command node).Source
-          foreach ($engine in @('boa', 'quickjs')) {
-            $env:OMNITRIGGER_TEST_SCRIPT_HOST = Join-Path $PWD "results/$engine-small.exe"
-            cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --tests -- --ignored --skip _history_ --test-threads=1
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $selectionHadNode = Test-Path Env:OMNITRIGGER_SELECTION_TEST_NODE
+          $selectionPreviousNode = $env:OMNITRIGGER_SELECTION_TEST_NODE
+          try {
+            $env:OMNITRIGGER_SELECTION_TEST_NODE = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+            foreach ($engine in @('boa', 'quickjs')) {
+              $env:OMNITRIGGER_TEST_SCRIPT_HOST = Join-Path $PWD "results/$engine-small.exe"
+              cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --tests -- --ignored --skip _history_ --test-threads=1
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          } finally {
+            if ($selectionHadNode) { $env:OMNITRIGGER_SELECTION_TEST_NODE = $selectionPreviousNode }
+            else { Remove-Item Env:OMNITRIGGER_SELECTION_TEST_NODE -ErrorAction SilentlyContinue }
           }
 
       - name: 验证显式文本历史的真实 Node 和两种轻量引擎
