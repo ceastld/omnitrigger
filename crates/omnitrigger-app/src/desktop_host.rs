@@ -530,13 +530,11 @@ impl NativeHost for DesktopHost {
     ) -> Result<Value, ActionError> {
         match method {
             "target.capture_foreground" => {
-                return self
-                    .foreground_targets
+                self.foreground_targets
                     .capture(params, cancellation, Some(deadline))
             }
             "target.keyboard.shortcut" | "target.keyboard.text" => {
-                return self
-                    .foreground_targets
+                self.foreground_targets
                     .send(method, params, cancellation, Some(deadline))
             }
             "clipboard.read_data" => read_data_with(
