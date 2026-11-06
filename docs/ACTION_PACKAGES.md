@@ -110,6 +110,18 @@ export function main(ctx) {
 
 此例读取本次原目标并整理输入文本。`ActionCall` 由应用调度入口解析，当前 `ScriptContext` 没有通用的跨动作调用方法；直接使用 API 时，业务动作额外提供的进程名单限制也不会自动附加到脚本中。
 
+输入字段确定时，可用 JSDoc 的可选输入泛型获得字段提示与拼写检查：
+
+```js
+/** @typedef {{text:string,repeats:number}} TextInput */
+/** @type {ScriptMain<TextInput>} */
+export function main(ctx) {
+  return {text:ctx.input.text.repeat(ctx.input.repeats)};
+}
+```
+
+辅助函数也可标注 `ScriptContext<TextInput>`。省略泛型时保持原有的 `Record<string, any>` 输入；这些类型只提供静态检查，脚本仍需在运行时校验实际参数。旧工程需显式更新本地 SDK 快照后使用泛型。
+
 分发独立工程时保留包内 `sdk/api.d.ts`、`jsconfig.json` 和所有被导入的模块。复用仓库示例源码时，将指向仓库的 SDK 引用改为本地快照，避免工程换目录后失去类型检查。生成工程使用 ES2022 标准库声明，具体能力仍以所选引擎为准。可在仓库根使用现有开发工具检查工程：
 
 ```powershell

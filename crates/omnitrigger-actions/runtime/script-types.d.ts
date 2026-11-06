@@ -46,8 +46,8 @@ type ScriptBrightnessStepResult=
 type ScriptJsonValue = null | boolean | number | string | readonly ScriptJsonValue[] | {
     readonly [key: string]: ScriptJsonValue;
 };
-/** 标准同步入口。用 @type {ScriptMain} 标注 main，可同时检查上下文与返回值。 */
-type ScriptMain = (ctx: ScriptContext) => ScriptJsonValue;
+/** 标准同步入口。@type {ScriptMain} 检查上下文与返回值，也可用 ScriptMain<MyInput> 检查输入字段；不校验运行时参数。 */
+type ScriptMain<Input = Record<string, any>> = (ctx: ScriptContext<Input>) => ScriptJsonValue;
 
 /** 同步宿主 API。原生异常可在脚本中 catch，并通过 error.code 区分。 */
 interface ScriptDesktopFault extends Error {
@@ -160,9 +160,9 @@ interface ScriptClipboardHistoryApi {
   remove(options: {id: ScriptHistoryDecimal}): ScriptClipboardHistoryRemove;
 }
 
-type ScriptContext = Readonly<{
+type ScriptContext<Input = Record<string, any>> = Readonly<{
     apiVersion: 1;
-    input: Record<string, any>;
+    input: Input;
     /** 动作包提供；直接使用 CLI 且未传元数据时为 null。 */
     invocation: Readonly<{invocation_id: string; binding_id: string}> | null;
     packageRoot: string | null;

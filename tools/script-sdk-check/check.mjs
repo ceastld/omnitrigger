@@ -64,8 +64,8 @@ for (const source of [
 writeFileSync(project.entry_path, original);
 // 使用新建工程实际附带的声明，验证入口签名，而不在测试中另抄一份类型。
 const entryHeader = '/// <reference path="./sdk/api.d.ts" />\n/** @type {ScriptMain} */\n';
-function checkEntry(source) {
-  writeFileSync(project.entry_path, entryHeader + (project.entry_path.endsWith('.mjs') ? 'export ' : '') + source);
+function checkEntry(source, header = entryHeader) {
+  writeFileSync(project.entry_path, header + (project.entry_path.endsWith('.mjs') ? 'export ' : '') + source);
   return diagnostics(project.package_root);
 }
 for (const source of [
@@ -92,6 +92,28 @@ for (const [name, source] of Object.entries(invalidEntries)) {
   assert(items.some(item => [1065, 2322, 2355, 2366].includes(item.code)
     && item.file && resolve(item.file.fileName) === resolve(project.entry_path)), `${name}: ${report(items)}`);
 }
+// 输入泛型只提供作者字段检查，不改变运行时参数或同步JSON返回契约。
+const typedInputHeader = '/// <reference path="./sdk/api.d.ts" />\n/** @typedef {{text:string,repeats:number,suffix?:string}} MyInput */\n/** @type {ScriptMain<MyInput>} */\n';
+const typedInputPositive = 'function main(ctx) { return format(ctx); }\n/** @param {ScriptContext<MyInput>} ctx */\nfunction format(ctx) { return {text:ctx.input.text.repeat(ctx.input.repeats)+(ctx.input.suffix ?? "")}; }';
+const typedInputItems = checkEntry(typedInputPositive, typedInputHeader);
+assert.equal(typedInputItems.length, 0, report(typedInputItems));
+const typedInputInvalid = {
+  misspelledField: 'function main(ctx) { return ctx.input.txet; }',
+  fieldType: 'function main(ctx) { ctx.input.repeats = "twice"; return null; }',
+  async: 'async function main(ctx) { return ctx.input.text; }',
+  promise: 'function main(ctx) { return Promise.resolve(ctx.input.text); }',
+  nonJsonReturn: 'function main(ctx) { return {callback:()=>ctx.input.text}; }',
+};
+for (const [name, source] of Object.entries(typedInputInvalid)) {
+  const items = checkEntry(source, typedInputHeader);
+  const expected = name === 'misspelledField' ? [2339,2551] : name === 'fieldType' ? [2322] : [1065,2322,2355,2366];
+  assert(items.some(item => expected.includes(item.code)
+    && item.file && resolve(item.file.fileName) === resolve(project.entry_path)), `${name}: ${report(items)}`);
+  if (name === 'misspelledField') assert(items.some(item => item.file
+    && item.file.text.slice(item.start,item.start+item.length) === 'txet'), report(items));
+}
+const typedInputChecks = {positive:true, rejected:Object.keys(typedInputInvalid)};
+
 writeFileSync(project.entry_path, `${original}\n/** @param {ScriptContext} ctx */\nfunction verifyHost(ctx) { ctx.delay(0); ctx.desktop.windowAction('minimize'); }\n`);
 const withDelay = diagnostics(project.package_root);
 assert.equal(withDelay.length, 0, report(withDelay));
@@ -128,6 +150,6 @@ const listed = cli(['--list-package-actions']);
 assert.equal(listed.actions.length, 1);
 assert.equal(listed.actions[0].runtime, 'script');
 assert.equal(readFileSync(config,'utf8'),'[]');
-const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,checkedExamples,entryContractChecks:Object.keys(invalidEntries),negativeTypeChecks:negative.length,structuredClipboardTypeChecks:true,historyTypeChecks,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
+const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,checkedExamples,entryContractChecks:Object.keys(invalidEntries),typedInputChecks,negativeTypeChecks:negative.length,structuredClipboardTypeChecks:true,historyTypeChecks,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
 writeFileSync(join(root,'result.json'), JSON.stringify(result,null,2));
 console.log(JSON.stringify(result));
