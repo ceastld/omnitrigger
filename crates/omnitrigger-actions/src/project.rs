@@ -140,7 +140,7 @@ fn create_project(root: &Path, id: &str, name: &str) -> Result<ScriptProject, Ac
         input: json!({"text":"  OmniTrigger  "}),
     };
     let manifest = json!({"schema_version":1,"id":id,"name":name,"version":"1.0.0","actions":[{"id":"run","title":"运行脚本","version":1,"runtime":"script","entry":"main.mjs"}]});
-    let config = json!({"compilerOptions":{"allowJs":true,"checkJs":true,"strict":true,"noEmit":true,"target":"ES2020","module":"ESNext","moduleResolution":"Bundler","lib":["ES2020"],"types":[]},"include":["**/*.js","**/*.mjs","sdk/**/*.d.ts"]});
+    let config = json!({"compilerOptions":{"allowJs":true,"checkJs":true,"strict":true,"noEmit":true,"target":"ES2020","module":"ESNext","moduleResolution":"Bundler","lib":["ES2022"],"types":[]},"include":["**/*.js","**/*.mjs","sdk/**/*.d.ts"]});
     let write = |name: &str, contents: &str| -> std::io::Result<()> {
         let mut file = fs::OpenOptions::new()
             .create_new(true)
@@ -232,6 +232,7 @@ mod tests {
             serde_json::from_slice(&fs::read(project.package_root.join("jsconfig.json")).unwrap())
                 .unwrap();
         assert_eq!(config["compilerOptions"]["module"], "ESNext");
+        assert_eq!(config["compilerOptions"]["lib"], json!(["ES2022"]));
         assert_eq!(
             config["include"],
             json!(["**/*.js", "**/*.mjs", "sdk/**/*.d.ts"])

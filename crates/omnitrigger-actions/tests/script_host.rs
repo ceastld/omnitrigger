@@ -79,6 +79,31 @@ fn context() -> InvocationContext {
 
 #[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
+fn author_standard_library_builtins_work_without_native_context() {
+    let fixture = Fixture::new(
+        "const own = Object.hasOwn(ctx.input, 'text'); return {own, text: own ? String(ctx.input.text).replaceAll(String.fromCharCode(13, 10), String.fromCharCode(10)) : null};",
+    );
+    for (input, expected) in [
+        (
+            json!({"text":"left\r\nright\r\n中😀"}),
+            json!({"own":true,"text":"left\nright\n中😀"}),
+        ),
+        (json!({}), json!({"own":false,"text":null})),
+        (json!({"text":null}), json!({"own":true,"text":"null"})),
+    ] {
+        let actual = runtime()
+            .execute(
+                &fixture.action(input),
+                &context(),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+#[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
 fn explicit_capability_requirements_allow_supported_pure_entry() {
     let fixture = Fixture::new("return {ran:true};");
     let output = runtime()
