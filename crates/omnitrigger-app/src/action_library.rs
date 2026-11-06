@@ -374,22 +374,30 @@ impl Workspace {
             Icon::Layers,
             theme::ACCENT_2,
             "历史与聚合窗口",
-            if self.legacy_source.is_none() {
-                "正式宿主尚未提供。"
+            if self.legacy_installing {
+                "正在核验宿主制品。"
+            } else if self.legacy_source.is_none() {
+                "自动安装暂不可用。"
             } else {
                 "启用后准备宿主，停用时请求正常停止。"
             },
-            button(
-                "toggle-legacy-plugin",
-                if legacy_enabled { "停用" } else { "启用" },
-                Tone::Primary,
-                if legacy_enabled {
-                    !installing || self.legacy_job.is_some()
-                } else {
-                    !installing && self.legacy_source.is_some()
-                },
-            )
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_legacy_plugin(cx))),
+            if self.legacy_source.is_none() && !legacy_enabled && !self.legacy_installing {
+                // 没有生产来源接缝，不提供必定unavailable的安装主操作。
+                status_pill("暂无安装来源", theme::TEXT_DIM).into_any_element()
+            } else {
+                button(
+                    "toggle-legacy-plugin",
+                    if legacy_enabled { "停用" } else { "启用" },
+                    Tone::Primary,
+                    if legacy_enabled {
+                        !installing || self.legacy_job.is_some() || self.legacy_installing
+                    } else {
+                        !installing && self.legacy_source.is_some()
+                    },
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_legacy_plugin(cx)))
+                .into_any_element()
+            },
         )
         .when_some(self.legacy_status.clone(), |el, status| {
             el.child(caption(status))

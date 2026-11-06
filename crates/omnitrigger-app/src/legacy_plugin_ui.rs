@@ -1,6 +1,6 @@
 //! Workspace既有安装事件泵的Legacy分支；不建立第二个manager、channel或业务队列。
 use crate::{
-    legacy_load_gate::{PrepareResult, PrepareTicket},
+    legacy_load_gate::{LegacyKey, PrepareResult, PrepareTicket},
     legacy_plugin_work::{
         self as work, LegacyArtifactSource, LegacyCompletion, LegacyFinished, LegacyJob,
         LegacyOperation,
@@ -39,6 +39,18 @@ fn close_route(
     }
 }
 
+/// 首次安装叶不承担换版；停用或stop受理均不能证明旧进程实际退出。
+fn require_same_loaded_key(
+    current: Option<&LegacyKey>,
+    incoming: &LegacyKey,
+) -> Result<(), &'static str> {
+    if current.is_some_and(|old| old != incoming) {
+        Err("legacy_update_requires_installer")
+    } else {
+        Ok(())
+    }
+}
+
 impl Workspace {
     /// 正常第一次关闭：先拒新业务，保留窗口/50ms原事件泵直到准备终止和一次stop终态。
     pub(super) fn request_legacy_close(&mut self, cx: &mut Context<Self>) -> bool {
@@ -47,6 +59,15 @@ impl Workspace {
         }
         self.legacy_close_requested = true;
         self.legacy_gate.disable();
+        if self.legacy_installing {
+            self.text_history.cancel_send();
+            self.send(BackendCommand::SetEnabled(false));
+            self.paused = true;
+            self.legacy_stop_after_job = self.legacy_session_used;
+            self.legacy_status = Some("正在退出：等待安装线程结束，不再启用新宿主…".into());
+            cx.notify();
+            return false;
+        }
         let route = close_route(
             self.legacy_job.as_ref().map(|job| job.operation),
             self.legacy_session_used,
@@ -84,7 +105,11 @@ impl Workspace {
     }
 
     fn try_finish_legacy_close(&mut self, cx: &mut Context<Self>) {
-        if !self.legacy_close_requested || self.legacy_job.is_some() || self.legacy_stop_after_job {
+        if !self.legacy_close_requested
+            || self.legacy_installing
+            || self.legacy_job.is_some()
+            || self.legacy_stop_after_job
+        {
             return;
         }
         match close_route(None, self.legacy_session_used, self.legacy_last_stop) {
@@ -102,7 +127,7 @@ impl Workspace {
         self.finish_legacy_close(cx);
     }
     fn finish_legacy_close(&mut self, cx: &mut Context<Self>) {
-        debug_assert!(self.legacy_job.is_none());
+        debug_assert!(self.legacy_job.is_none() && !self.legacy_installing);
         self.text_history.cancel_send();
         self.backend.take(); // 原有最终退出清理；此前保留事件泵，不在UI同步等待Legacy。
         cx.quit();
@@ -146,14 +171,13 @@ impl Workspace {
         if self.install_events.is_some() {
             return Err("请等待当前插件作业结束。".into());
         }
-        if self.plugins.legacy_enabled()
-            && self
-                .legacy_source
-                .as_ref()
-                .is_some_and(|old| old.key() != source.key())
-        {
-            return Err("更换宿主版本前须正常停用并核验旧宿主退出。".into());
-        }
+        require_same_loaded_key(
+            self.legacy_source.as_ref().map(|old| old.key()).as_ref(),
+            &source.key(),
+        )
+        .map_err(|code| {
+            format!("{code}：当前窗口不替换已接入版本；停用回包不等于旧宿主实际退出。")
+        })?;
         let source_changed = self.legacy_source.as_ref().map(|old| old.key()) != Some(source.key());
         self.legacy_source = Some(source);
         if source_changed {
@@ -169,6 +193,149 @@ impl Workspace {
         Ok(())
     }
 
+    /// 与RaiShot同样：显式安装意味着启用；来源仍由组合根/调用者提供。
+    pub(super) fn install_legacy_from_source(
+        &mut self,
+        source: Option<plugin_install::LegacyInstallSource>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.legacy_close_requested || !self.mode.owns_input_engine() {
+            return;
+        }
+        if self.install_events.is_some() || self.legacy_job.is_some() {
+            self.error = Some("请等待当前插件作业结束。".into());
+            cx.notify();
+            return;
+        }
+        if self.plugin_settings_error.is_some() {
+            self.error = Some("请先修复插件设置文件。".into());
+            cx.notify();
+            return;
+        }
+        if let Some(source) = source.as_ref() {
+            if let Err(error) = source.validate() {
+                self.legacy_status = Some(format!("{}：{error}", error.code));
+                cx.notify();
+                return;
+            }
+            let incoming = match crate::legacy_local_source::LocalLegacySource::new(
+                &settings::path(),
+                &source.manifest_sha256,
+            ) {
+                Ok(source) => source.key(),
+                Err(error) => {
+                    self.legacy_status = Some(format!("{}：{error}", error.code));
+                    cx.notify();
+                    return;
+                }
+            };
+            if let Err(code) = require_same_loaded_key(
+                self.legacy_source.as_ref().map(|old| old.key()).as_ref(),
+                &incoming,
+            ) {
+                self.legacy_status = Some(format!(
+                    "{code}：此窗口仍接入旧版本，未开始安装或改变启用选择。"
+                ));
+                cx.notify();
+                return;
+            }
+            if self
+                .plugins
+                .legacy_manifest_sha256()
+                .is_some_and(|old| !old.eq_ignore_ascii_case(&source.manifest_sha256))
+            {
+                self.legacy_status =
+                    Some("legacy_update_requires_installer：此入口不能替换已登记版本。".into());
+                cx.notify();
+                return;
+            }
+            // 只用原enabled字段记录此刻的显式选择；后台作业不回写该字段。
+            let mut candidate = self.plugins.clone();
+            candidate.configure_legacy_enabled(true);
+            if let Err(error) = candidate.save(&settings::path()) {
+                self.error = Some(error.to_string());
+                cx.notify();
+                return;
+            }
+            self.plugins = candidate;
+        } // None不写启用选择，由worker返回结构化unavailable。
+        match plugin_install::start_legacy_install(settings::path(), source) {
+            Ok(events) => {
+                self.install_events = Some(events);
+                self.legacy_installing = true;
+                self.legacy_status = Some("正在核验并安装宿主…".into());
+            }
+            Err(error) => self.legacy_status = Some(error),
+        }
+        self.sync_bindings();
+        cx.notify();
+    }
+
+    pub(super) fn finish_legacy_install(
+        &mut self,
+        result: Result<Box<work::VerifiedLegacyInstall>, omnitrigger_actions::ActionError>,
+        cx: &mut Context<Self>,
+    ) {
+        self.legacy_installing = false;
+        if !self.mode.owns_input_engine() {
+            return;
+        }
+        if self.legacy_close_requested {
+            // 关闭期间不登记/启用新包；已有会话只衔接原来的一次stop意图。
+            if self.legacy_stop_after_job {
+                self.legacy_stop_after_job = false;
+                self.start_legacy_stop(cx);
+            }
+            self.try_finish_legacy_close(cx);
+            cx.notify();
+            return;
+        }
+        match result {
+            Ok(installed)
+                if require_same_loaded_key(
+                    self.legacy_source.as_ref().map(|old| old.key()).as_ref(),
+                    &installed.key,
+                )
+                .is_err() =>
+            {
+                // 先核对当前接入key，再读/写登记；迟到收据不能借停用状态换代。
+                self.legacy_status = Some(
+                    "legacy_update_requires_installer：迟到收据属于另一版本，未登记或准备。".into(),
+                );
+            }
+            Ok(installed) => match crate::plugins::Plugins::load(&settings::path()) {
+                Ok(mut plugins) => {
+                    // 此处才在UI事件泵登记，读最新enabled，不使用下载前的快照。
+                    match crate::legacy_local_source::register_verified(
+                        &settings::path(),
+                        &installed,
+                        &mut plugins,
+                    ) {
+                        Ok(_) => {
+                            self.plugins = plugins;
+                            self.legacy_status = Some(if self.plugins.legacy_enabled() {
+                                "宿主已安装并登记，正在准备…".into()
+                            } else {
+                                "宿主已安装并登记，插件保持停用。".into()
+                            });
+                            self.connect_installed_legacy(cx);
+                        }
+                        Err(error) => self.legacy_status = Some(format!("{}：{error}", error.code)),
+                    }
+                }
+                Err(error) => self.legacy_status = Some(error.to_string()),
+            },
+            Err(error) => self.legacy_status = Some(format!("{}：{error}", error.code)),
+        }
+        if self.legacy_stop_after_job {
+            self.legacy_stop_after_job = false;
+            self.start_legacy_stop(cx);
+        }
+        self.sync_bindings();
+        self.refresh_panel(cx);
+        cx.notify();
+    }
+
     pub(super) fn toggle_legacy_plugin(&mut self, cx: &mut Context<Self>) {
         if self.legacy_close_requested {
             return;
@@ -177,14 +344,15 @@ impl Workspace {
             return;
         }
         let enabled = !self.plugins.legacy_enabled();
-        if self.install_events.is_some() && (enabled || self.legacy_job.is_none()) {
+        if self.install_events.is_some()
+            && (enabled || (self.legacy_job.is_none() && !self.legacy_installing))
+        {
             self.error = Some("请等待当前插件作业结束。".into());
             cx.notify();
             return;
         }
         if enabled && self.legacy_source.is_none() {
-            self.error = Some("尚未找到已安装的宿主。".into());
-            cx.notify();
+            self.install_legacy_from_source(None, cx);
             return;
         }
         if let Some(error) = &self.plugin_settings_error {
@@ -205,7 +373,10 @@ impl Workspace {
             self.start_legacy_prepare(true, cx);
         } else {
             self.legacy_gate.disable(); // 先阻止新业务；取消不等于serve已经停止。
-            if let Some(job) = &self.legacy_job {
+            if self.legacy_installing {
+                self.legacy_stop_after_job = self.legacy_session_used;
+                self.legacy_status = Some("插件已停用，安装会完成但不会启动新宿主。".into());
+            } else if let Some(job) = &self.legacy_job {
                 if job.operation == LegacyOperation::Prepare {
                     job.cancellation.cancel();
                     self.legacy_stop_after_job = true; // 仅停用控制意图，绝不排队业务/目标。
@@ -426,6 +597,26 @@ impl Workspace {
 #[cfg(test)]
 mod close_tests {
     use super::*;
+    #[test]
+    fn loaded_artifact_key_cannot_change_via_a_late_install_receipt() {
+        let current = LegacyKey {
+            package_id: work::PACKAGE_ID.into(),
+            artifact_fingerprint: "owned-old-fingerprint".into(),
+            fixed_scope: "default".into(),
+        };
+        assert!(require_same_loaded_key(None, &current).is_ok());
+        assert!(require_same_loaded_key(Some(&current), &current).is_ok());
+        let mut replacement = current.clone();
+        replacement.artifact_fingerprint = "owned-new-fingerprint".into();
+        // 判定不依赖enabled或stop受理回包，二者都不是进程实际退出凭证。
+        assert_eq!(
+            require_same_loaded_key(Some(&current), &replacement),
+            Err("legacy_update_requires_installer")
+        );
+        replacement = current.clone();
+        replacement.fixed_scope = "other-scope".into();
+        assert!(require_same_loaded_key(Some(&current), &replacement).is_err());
+    }
     #[test]
     fn disabled_unused_session_closes_without_control_work() {
         assert_eq!(close_route(None, false, None), CloseRoute::Quit);

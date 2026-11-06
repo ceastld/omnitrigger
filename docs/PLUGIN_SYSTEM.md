@@ -6,7 +6,26 @@
 
 扩展页可启停已登记的 `omnitrigger.legacy` 包。启用时在后台校验文件并准备独立宿主，准备完成后开放 `clip-toggle` 和 `search-toggle` 两个 Script 动作；准备期间拒绝业务调用，不缓存或补发操作。停用先关闭动作准入，再请求宿主正常停止。退出请求已接受与进程已经退出分别表示，失败不会自动重试或强行结束进程。
 
-当前仅支持预先布置的本机开发包，未提供在线安装包。开发者将完整包放到配置同级的 `actions/legacy-host-entry/`，其中 `action.json` 声明两个动作，宿主固定为 `host/OmniTrigger.LegacyHost.exe`。`manifest.json` 使用插件的 `schema_version`、`package_version`、`architecture`、`files` 结构，逐文件记录 `path`、`bytes` 和 `sha256`。登记前会检查完整文件集合、长度及摘要；登记只保存摘要，保留原启用状态，不启动宿主或创建绑定。
+开发接口支持从明确的制品描述获取、校验、安装并登记宿主包，普通界面尚无可用的自动安装来源。未登记宿主时，扩展页显示“暂无安装来源”。包安装到配置同级的 `actions/legacy-host-entry/`；其中 `action.json` 声明两个动作，宿主固定为 `host/OmniTrigger.LegacyHost.exe`。`manifest.json` 使用插件的 `schema_version`、`package_version`、`architecture`、`files` 结构，逐文件记录 `path`、`bytes` 和 `sha256`。
+
+本机开发者提供 UTF-8 JSON 制品描述（最多 64 KiB），再执行：
+
+```powershell
+omnitrigger.exe --config D:\Dev\OmniProfile\bindings.json --install-legacy-package D:\Dev\host-source.json
+```
+
+| 描述字段 | 值 |
+| --- | --- |
+| `archive` | 本地 ZIP 为 `{"kind":"local_archive","path":"D:\\Dev\\host.zip"}`；已发布制品也可显式提供 `{"kind":"https","url":"实际 HTTPS 地址"}`。 |
+| `archive_bytes` | ZIP 的实际字节数，1–1,073,741,824。 |
+| `archive_sha256` | ZIP 原字节的小写 SHA-256。 |
+| `manifest_sha256` | 包内 `manifest.json` 原字节的小写 SHA-256。 |
+
+ZIP 根直接包含 `manifest.json` 和清单登记的文件，条目使用正斜杠；不接受目录项、额外父目录、未登记文件或链接。HTTPS 沿用现有的 GitHub 发布主机和逐跳重定向检查，没有默认下载地址。无效参数、描述及本地归档大小或摘要在启动安装线程前拒绝；归档结构、清单和每个文件会在独立暂存目录校验，成功后才安装到固定目录并登记。
+
+成功时 stdout 返回 `status:"installed"`、包路径、清单摘要、原 `enabled` 和 `host_started:false`；失败时 stderr 返回 `status:"rejected"` 与结构化错误，退出码为 1。此命令保留完成时的启用选择，不准备或启动宿主，不执行包内程序，不创建触发绑定。已登记的不同版本或已有但不匹配的目录会被拒绝，不覆盖安装。它不能与其他命令或重复参数混用。
+
+也可预先布置完整目录，再只校验与登记。登记保留原启用状态，不启动宿主：
 
 ```powershell
 omnitrigger.exe --config D:\Dev\OmniProfile\bindings.json --register-legacy-package <manifest.json的SHA256>

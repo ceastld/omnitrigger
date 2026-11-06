@@ -583,6 +583,7 @@ struct Workspace {
     legacy_gate: legacy_load_gate::LegacyLoadGate,
     legacy_source: Option<std::sync::Arc<dyn legacy_plugin_work::LegacyArtifactSource>>,
     legacy_job: Option<legacy_plugin_ui::LegacyUiJob>,
+    legacy_installing: bool, // 现有单事件槽的作业类型，非持久化启用或授权状态。
     legacy_stop_after_job: bool,
     legacy_status: Option<String>,
     legacy_session_used: bool,
@@ -1033,6 +1034,7 @@ impl Workspace {
             legacy_gate: Default::default(),
             legacy_source,
             legacy_job: None,
+            legacy_installing: false,
             legacy_stop_after_job: false,
             legacy_status: legacy_location_error,
             legacy_session_used: false,
@@ -1346,6 +1348,20 @@ impl Workspace {
                         });
                         finished = true;
                     }
+                    Ok(plugin_install::InstallEvent::LegacyInstallProgress(message)) => {
+                        if !self.legacy_close_requested {
+                            self.legacy_status = Some(if self.plugins.legacy_enabled() {
+                                message
+                            } else {
+                                "插件已停用，安装会完成但不会启动宿主。".into()
+                            });
+                        }
+                    }
+                    Ok(plugin_install::InstallEvent::LegacyInstalled(result)) => {
+                        // 先结束安装槽，再由既有连接点按当前enabled决定是否prepare。
+                        finished = true;
+                        self.finish_legacy_install(result, cx);
+                    }
                     Ok(plugin_install::InstallEvent::LegacyFinished(event)) => {
                         self.finish_legacy_job(*event, cx);
                         finished = true;
@@ -1357,7 +1373,15 @@ impl Workspace {
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         if !finished {
-                            if self.legacy_job.is_some() {
+                            if self.legacy_installing {
+                                self.finish_legacy_install(
+                                    Err(omnitrigger_actions::ActionError::new(
+                                        "legacy_install_worker_disconnected",
+                                        "安装线程已结束，未确认制品完成。",
+                                    )),
+                                    cx,
+                                );
+                            } else if self.legacy_job.is_some() {
                                 self.legacy_worker_disconnected(cx);
                             } else {
                                 self.install_status =

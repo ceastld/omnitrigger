@@ -353,6 +353,27 @@ pub(crate) fn register(config: &Path, digest: &str) -> Result<String, ActionErro
     let installed = source.verify(config, &CancellationToken::new())?;
     let mut plugins = Plugins::load(config)
         .map_err(|error| fault("legacy_settings_invalid", error.to_string()))?;
+    register_verified(config, &installed, &mut plugins)
+}
+
+/// 仅提交本进程worker核验后的既有类型；UI串行写现有Plugins，不重做大文件哈希。
+/// enabled来自调用时最新设置，安装线程不再持有或回写旧启用快照。
+pub(crate) fn register_verified(
+    config: &Path,
+    installed: &VerifiedLegacyInstall,
+    plugins: &mut Plugins,
+) -> Result<String, ActionError> {
+    let source = LocalLegacySource::new(config, &installed.key.artifact_fingerprint)?;
+    if installed.key != source.key()
+        || installed.executable != source.root.join("host/OmniTrigger.LegacyHost.exe")
+        || installed.prepare_action.package_root != source.root
+        || installed.prepare_action.entry_path != source.root.join("prepare-host.mjs")
+    {
+        return Err(fault(
+            "legacy_package_scope_mismatch",
+            "安装收据与当前固定目录不一致。",
+        ));
+    }
     if plugins
         .legacy_manifest_sha256()
         .is_some_and(|old| !old.eq_ignore_ascii_case(&source.digest))
@@ -362,52 +383,126 @@ pub(crate) fn register(config: &Path, digest: &str) -> Result<String, ActionErro
             "开发登记入口不替换已登记版本；请沿既有停用、退出确认和安装切换流程更新。",
         ));
     }
-    let enabled = plugins.legacy_enabled();
-    plugins.pin_legacy_manifest(source.digest.clone());
-    plugins
+    let mut candidate = plugins.clone();
+    let enabled = candidate.legacy_enabled();
+    candidate.pin_legacy_manifest(source.digest.clone());
+    candidate
         .save(config)
         .map_err(|error| fault("legacy_settings_write_failed", error.to_string()))?;
+    *plugins = candidate;
     Ok(json!({"status":"registered","package_id":PACKAGE_ID,"package_root":installed.prepare_action.package_root,
         "manifest_sha256":source.digest,"enabled":enabled,"host_started":false}).to_string())
 }
 
-/// 只允许登记命令和可选--config；先验证完整参数，再访问配置或制品，不与其他模式混用。
+/// 开发安装只消费现有worker的字节收据；登记保留完成时的enabled，不运行prepare。
+fn install_from_source(
+    config: &Path,
+    source: crate::plugin_install::LegacyInstallSource,
+) -> Result<String, ActionError> {
+    let events = crate::plugin_install::start_legacy_install(config.to_path_buf(), Some(source))
+        .map_err(|message| fault("legacy_install_worker_unavailable", message))?;
+    for event in events {
+        match event {
+            crate::plugin_install::InstallEvent::LegacyInstallProgress(_) => {}
+            crate::plugin_install::InstallEvent::LegacyInstalled(result) => {
+                let installed = result?;
+                let mut plugins = Plugins::load(config)
+                    .map_err(|error| fault("legacy_settings_invalid", error.to_string()))?;
+                register_verified(config, &installed, &mut plugins)?;
+                return Ok(json!({"status":"installed","package_id":PACKAGE_ID,
+                    "package_root":installed.prepare_action.package_root,
+                    "manifest_sha256":installed.key.artifact_fingerprint,
+                    "enabled":plugins.legacy_enabled(),"host_started":false})
+                .to_string());
+            }
+            _ => {
+                return Err(fault(
+                    "legacy_install_worker_invalid_reply",
+                    "安装worker返回了其他作业的事件。",
+                ))
+            }
+        }
+    }
+    Err(fault(
+        "legacy_install_worker_disconnected",
+        "安装worker未返回完成收据。",
+    ))
+}
+
+/// 登记/安装互斥，仅接受各自模式和可选--config；坏参数/描述先于落盘和worker。
 pub(crate) fn cli(arguments: &[String]) -> Option<Result<String, ActionError>> {
-    if !arguments
-        .iter()
-        .any(|value| value == "--register-legacy-package")
-    {
+    if !arguments.iter().any(|value| {
+        matches!(
+            value.as_str(),
+            "--register-legacy-package" | "--install-legacy-package"
+        )
+    }) {
         return None;
     }
     Some((|| {
         let mut digest = None;
+        let mut descriptor = None;
         let mut config = None;
         let mut index = 1;
         while index < arguments.len() {
             let value = arguments
                 .get(index + 1)
-                .ok_or_else(|| fault("invalid_cli_arguments", "登记参数缺少值。"))?;
+                .ok_or_else(|| fault("invalid_cli_arguments", "开发安装/登记参数缺少值。"))?;
             match arguments[index].as_str() {
-                "--register-legacy-package" if digest.is_none() && valid_hash(value) => {
+                "--register-legacy-package"
+                    if digest.is_none() && descriptor.is_none() && valid_hash(value) =>
+                {
                     digest = Some(value.as_str())
                 }
-                "--config" if config.is_none() && !value.starts_with("--") => config = Some(value),
+                "--install-legacy-package"
+                    if descriptor.is_none()
+                        && digest.is_none()
+                        && !value.starts_with("--")
+                        && !value.trim().is_empty() =>
+                {
+                    descriptor = Some(value.as_str())
+                }
+                "--config"
+                    if config.is_none() && !value.starts_with("--") && !value.trim().is_empty() =>
+                {
+                    config = Some(value)
+                }
                 _ => {
                     return Err(fault(
                         "invalid_cli_arguments",
-                        "登记命令不可与其他命令混用或重复。",
+                        "开发安装/登记命令不可与其他命令混用或重复。",
                     ))
                 }
             }
             index += 2;
         }
-        let digest =
-            digest.ok_or_else(|| fault("invalid_cli_arguments", "缺少有效的清单摘要。"))?;
-        if let Some(config) = config {
-            crate::settings::use_path(config.into())
-                .map_err(|message| fault("invalid_cli_arguments", message))?;
+        // 只读校验声明文件、本地归档或HTTPS描述；此处不改settings路径或落盘。
+        let source = descriptor
+            .map(|path| crate::plugin_install::read_legacy_install_source(Path::new(path)))
+            .transpose()?;
+        if digest.is_none() && source.is_none() {
+            return Err(fault(
+                "invalid_cli_arguments",
+                "缺少安装描述或有效清单摘要。",
+            ));
         }
-        register(&crate::settings::path(), digest)
+        // 此分支随main早返回，直接传配置路径；不修改全局OnceLock或进入UI。
+        let config = match config {
+            Some(config) => std::path::absolute(Path::new(config))
+                .map_err(|error| fault("invalid_cli_arguments", error.to_string()))?,
+            None => crate::settings::path(),
+        };
+        local(&config).map_err(|error| fault("invalid_cli_arguments", error.message))?;
+        if config.is_dir() {
+            return Err(fault(
+                "invalid_cli_arguments",
+                "--config必须指向配置文件，不能是目录。",
+            ));
+        }
+        match source {
+            Some(source) => install_from_source(&config, source),
+            None => register(&config, digest.expect("validated register mode")),
+        }
     })())
 }
 
@@ -490,6 +585,168 @@ mod tests {
             {
                 let _ = fs::remove_dir_all(&self.root);
             }
+        }
+    }
+
+    #[test]
+    fn install_cli_rejects_mixed_missing_and_repeated_flags_before_descriptor_access() {
+        let f = Fixture::new();
+        let missing = f
+            .root
+            .join("must-not-read.json")
+            .to_string_lossy()
+            .into_owned();
+        let config = f.config.to_string_lossy().into_owned();
+        let cases = [
+            vec!["--install-legacy-package"],
+            vec!["--install-legacy-package", "--config", &config],
+            vec!["--install-legacy-package", &missing, "--run-action", "{}"],
+            vec![
+                "--install-legacy-package",
+                &missing,
+                "--register-legacy-package",
+                &f.digest,
+            ],
+            vec![
+                "--register-legacy-package",
+                &f.digest,
+                "--install-legacy-package",
+                &missing,
+            ],
+            vec![
+                "--install-legacy-package",
+                &missing,
+                "--install-legacy-package",
+                &missing,
+            ],
+            vec![
+                "--install-legacy-package",
+                &missing,
+                "--config",
+                &config,
+                "--config",
+                &config,
+            ],
+            vec!["--install-legacy-package", &missing, "--config"],
+        ];
+        for args in cases {
+            let arguments: Vec<String> = std::iter::once("omnitrigger")
+                .chain(args)
+                .map(str::to_owned)
+                .collect();
+            assert_eq!(
+                cli(&arguments).unwrap().unwrap_err().code,
+                "invalid_cli_arguments"
+            );
+            assert!(!f.root.join("plugins.json").exists());
+            assert!(!Path::new(&missing).exists());
+        }
+    }
+
+    #[test]
+    fn install_cli_bad_descriptor_and_local_hash_fail_before_worker_or_settings() {
+        let f = Fixture::new();
+        let archive = f.root.join("owned-not-a-zip.bin");
+        fs::write(&archive, b"owned synthetic input").unwrap();
+        let base = json!({"archive":{"kind":"local_archive","path":archive},
+            "archive_bytes":21,"archive_sha256":"0".repeat(64),"manifest_sha256":f.digest});
+        let descriptor = f.root.join("descriptor.json");
+        let mut bad_hash = base.clone();
+        bad_hash["archive_sha256"] = "bad".into();
+        let mut unknown = base.clone();
+        unknown["enabled"] = true.into();
+        let mut bad_size = base.clone();
+        bad_size["archive_bytes"] = 0.into();
+        for contents in [
+            String::new(),
+            "{".into(),
+            bad_hash.to_string(),
+            unknown.to_string(),
+            bad_size.to_string(),
+            base.to_string(),
+        ] {
+            fs::write(&descriptor, contents).unwrap();
+            let args = vec![
+                "omnitrigger".into(),
+                "--install-legacy-package".into(),
+                descriptor.to_string_lossy().into_owned(),
+                "--config".into(),
+                f.config.to_string_lossy().into_owned(),
+            ];
+            let error = cli(&args).unwrap().unwrap_err();
+            assert!(matches!(
+                error.code.as_str(),
+                "legacy_install_descriptor_invalid" | "legacy_install_source_invalid"
+            ));
+            assert!(!f.root.join("plugins.json").exists());
+            assert_eq!(
+                format!(
+                    "{:x}",
+                    Sha256::digest(fs::read(f.package.join("manifest.json")).unwrap())
+                ),
+                f.digest
+            );
+            assert!(!fs::read_dir(f.root.join("actions"))
+                .unwrap()
+                .any(|entry| entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".install-legacy-")));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn development_install_cli_registers_owned_local_archive_without_enabling_or_starting_host() {
+        use std::process::Command;
+        for enabled in [false, true] {
+            let f = Fixture::new();
+            let archive = f.root.join("owned-fixture.zip");
+            let status = Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", r#"Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$fixtureRoot = $env:FIXTURE_INPUT
+$fixtureManifest = [IO.File]::ReadAllText((Join-Path $fixtureRoot 'manifest.json')) | ConvertFrom-Json
+$fixtureNames = @($fixtureManifest.files | ForEach-Object { [string]$_.path }) + @('manifest.json')
+$fixtureZip = [IO.Compression.ZipFile]::Open($env:FIXTURE_ARCHIVE, [IO.Compression.ZipArchiveMode]::Create)
+try {
+    foreach ($fixtureName in $fixtureNames) {
+        if ($fixtureName.Contains('\') -or $fixtureName.EndsWith('/')) { throw '夹具清单路径必须是canonical文件名。' }
+        [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+            $fixtureZip, (Join-Path $fixtureRoot $fixtureName), $fixtureName, [IO.Compression.CompressionLevel]::Optimal)
+    }
+} finally { $fixtureZip.Dispose() }"#])
+                .env("FIXTURE_INPUT", &f.package).env("FIXTURE_ARCHIVE", &archive).status().unwrap();
+            assert!(status.success());
+            let source = f.root.join("synthetic-source");
+            assert!(source.starts_with(&f.root) && f.package.starts_with(&f.root));
+            fs::rename(&f.package, &source).unwrap();
+            let bytes = fs::read(&archive).unwrap();
+            let descriptor = f.root.join("descriptor.json");
+            let body = json!({"archive":{"kind":"local_archive","path":archive},"archive_bytes":bytes.len(),
+                "archive_sha256":format!("{:x}",Sha256::digest(bytes)),"manifest_sha256":f.digest}).to_string();
+            fs::write(&descriptor, format!("\u{feff}{body}")).unwrap();
+            let mut plugins = Plugins::load(&f.config).unwrap();
+            plugins.configure_legacy_enabled(enabled);
+            plugins.save(&f.config).unwrap();
+            let args = vec![
+                "omnitrigger".into(),
+                "--install-legacy-package".into(),
+                descriptor.to_string_lossy().into_owned(),
+                "--config".into(),
+                f.config.to_string_lossy().into_owned(),
+            ];
+            let output: serde_json::Value =
+                serde_json::from_str(&cli(&args).unwrap().unwrap()).unwrap();
+            assert_eq!(output["status"], "installed");
+            assert_eq!(output["host_started"], false);
+            assert_eq!(output["enabled"], enabled);
+            let plugins = Plugins::load(&f.config).unwrap();
+            assert_eq!(plugins.legacy_enabled(), enabled);
+            assert_eq!(plugins.legacy_manifest_sha256(), Some(f.digest.as_str()));
+            assert!(f.package.join("host/OmniTrigger.LegacyHost.exe").is_file());
+            assert!(!f.root.join("runtimes").exists());
         }
     }
     #[test]

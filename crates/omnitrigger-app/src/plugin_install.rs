@@ -1,6 +1,11 @@
 //! 插件依赖的后台边界。RaiShot只校验、下载和解包；Legacy固定准备/停止作业复用同一worker。
 #[path = "plugin_discovery.rs"]
 mod discovery;
+#[path = "legacy_package_install.rs"]
+mod legacy_package_install;
+pub(crate) use legacy_package_install::{
+    read_descriptor as read_legacy_install_source, LegacyInstallSource,
+};
 
 use serde::Deserialize;
 use std::{
@@ -22,6 +27,7 @@ pub const RAISHOT_DOWNLOAD: &str =
 const ARCHIVE_BYTES: u64 = 27_203_273;
 const ARCHIVE_SHA256: &str = "78894445b71d7e3fa5e028510973ce4bcf57cbde88628e7509928f64aa7abecf";
 const MANIFEST_SHA256: &str = "67edadf2f91e7793547c449f016d26f9fdb8288f54401b2bcd16bf70832d97fb";
+const TRANSPORT_SCRIPT: &str = include_str!("plugin_install_transport.ps1");
 const INSTALL_SCRIPT: &str = include_str!("plugin_install.ps1");
 
 #[derive(Debug)]
@@ -35,6 +41,13 @@ pub enum InstallEvent {
     },
     Failed(String),
     LegacyFinished(Box<crate::legacy_plugin_work::LegacyFinished>),
+    LegacyInstalled(
+        Result<
+            Box<crate::legacy_plugin_work::VerifiedLegacyInstall>,
+            omnitrigger_actions::ActionError,
+        >,
+    ),
+    LegacyInstallProgress(String),
 }
 
 /// OmniTrigger 下载 RaiShot 时使用的共享位置，与 RaiShot 自己的安装约定一致，
@@ -82,6 +95,17 @@ pub fn start_prepare(
         if let Err(message) = result {
             let _ = events.send(InstallEvent::Failed(message));
         }
+    })
+}
+
+/// 仅使用调用者显式给出的真实制品描述；没有来源也通过同一事件槽返回结构化unavailable。
+pub(crate) fn start_legacy_install(
+    config: PathBuf,
+    source: Option<LegacyInstallSource>,
+) -> Result<Receiver<InstallEvent>, String> {
+    start_worker(move |events| {
+        let result = legacy_package_install::install(&config, source.as_ref(), events);
+        let _ = events.send(InstallEvent::LegacyInstalled(result.map(Box::new)));
     })
 }
 
@@ -206,8 +230,11 @@ fn run_script(
 ) -> Result<(), String> {
     let script = stage.join("installer.ps1");
     // Windows PowerShell 5.1 需要 BOM 才能准确读取中文脚本。
-    fs::write(&script, format!("\u{feff}{INSTALL_SCRIPT}"))
-        .map_err(|error| format!("无法准备插件安装器：{error}"))?;
+    fs::write(
+        &script,
+        format!("\u{feff}{TRANSPORT_SCRIPT}\n{INSTALL_SCRIPT}"),
+    )
+    .map_err(|error| format!("无法准备插件安装器：{error}"))?;
     let mut command = Command::new("powershell.exe");
     command
         .args([
@@ -327,7 +354,11 @@ mod tests {
 
         fn run(&self, mode: &str) -> std::process::Output {
             let installer = self.stage.join("installer.ps1");
-            fs::write(&installer, format!("\u{feff}{INSTALL_SCRIPT}")).unwrap();
+            fs::write(
+                &installer,
+                format!("\u{feff}{TRANSPORT_SCRIPT}\n{INSTALL_SCRIPT}"),
+            )
+            .unwrap();
             let driver = self.stage.join("fixture.ps1");
             fs::write(&driver, format!("\u{feff}{FIXTURE_SCRIPT}")).unwrap();
             let mut command = Command::new("powershell.exe");
@@ -491,7 +522,9 @@ exit $LASTEXITCODE
                 .recv_timeout(std::time::Duration::from_secs(60))
                 .unwrap()
             {
-                InstallEvent::LegacyFinished(_) => panic!("RaiShot测试收到Legacy作业事件"),
+                InstallEvent::LegacyFinished(_)
+                | InstallEvent::LegacyInstalled(_)
+                | InstallEvent::LegacyInstallProgress(_) => panic!("RaiShot测试收到Legacy作业事件"),
                 InstallEvent::Progress(_) => {}
                 InstallEvent::Failed(message) => panic!("{message}"),
                 InstallEvent::Finished {
