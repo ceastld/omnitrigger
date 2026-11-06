@@ -146,7 +146,7 @@ function nativeCall(method, params) {
     const aborted = () => {
       const reason = controller.signal.reason;
       if (opening && reason) { reason.method = method; reason.effectState = sent ? 'unknown' : 'not_started'; }
-      if (opening || capture || brightness || stat) return finish(fail(reason?.code === 'timeout' ? 'timeout' : 'cancelled', undefined, sent ? 'unknown' : 'not_started'));
+      if (opening || capture || brightness) return finish(fail(reason?.code === 'timeout' ? 'timeout' : 'cancelled', undefined, sent ? 'unknown' : 'not_started'));
       if (method === 'ui.notify' || historyUi || stat || data || history || capture || brightness) {
         if (typeof reason?.method !== 'string') reason.method = method;
         reason.effectState = stat || dataRead || historyRead ? 'not_started' : sent ? 'unknown' : 'not_started';

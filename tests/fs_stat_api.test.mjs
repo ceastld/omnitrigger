@@ -131,7 +131,7 @@ test('预备 Rust 宿主测试中的原始 JS 片段可执行，路径转义和�
   assert.deepEqual(calls,[path,'C:/','z:/folder/','C:\\中文😀']);
 });
 
-async function nodeInvocation(source,{handle,native=true,nativeError,cancel=false,timeout=10000}={}) {
+async function nodeInvocation(source,{handle,native=true,nativeError,cancel=false,timeout=10000,method='fs.stat'}={}) {
   const scratch=resolve(repo,'.tmp/parallel-fs/sdk');
   mkdirSync(scratch,{recursive:true});
   const directory=mkdtempSync(join(scratch,'node-'));
@@ -148,7 +148,7 @@ async function nodeInvocation(source,{handle,native=true,nativeError,cancel=fals
       handled=true;
       try {
         const frame=JSON.parse(input);
-        assert.equal(frame.token,token);assert.equal(frame.method,'fs.stat');
+        assert.equal(frame.token,token);assert.equal(frame.method,method);
         handle?.(frame,socket);
         if(cancel)child.stdin.write('cancel\n');
       }catch(error){errors.push(error);socket.destroy();}
@@ -206,6 +206,20 @@ test('Node 只读取消及外层时限保留 fs.stat 与 not_started', {timeout:
   for(const mode of ['cancel','timeout']){
     const result=await nodeInvocation(script(`return await ${call};`),{cancel:mode==='cancel',timeout:mode==='timeout'?150:3000});
     assert.equal(result.error.code,mode==='cancel'?'cancelled':'timeout');assert.equal(result.error.method,'fs.stat');assert.equal(result.error.effect_state,'not_started');
+  }
+});
+
+test('Node 真实目录查询在请求发出后取消或到期，保留方法与只读效果', {timeout:8000},async()=>{
+  for(const mode of ['cancel','timeout']) {
+    let calls=0;
+    const result=await nodeInvocation(script(`return await ctx.fs.readDirectory(${JSON.stringify(path)});`),{
+      method:'fs.read_directory',cancel:mode==='cancel',timeout:mode==='timeout'?1000:3000,
+      handle:frame=>{calls++;assert.deepEqual(frame.params,{path,max_entries:128});},
+    });
+    assert.equal(calls,1,'必须已进入该本机调用，不能以入口尚未运行的超时代替');
+    assert.equal(result.error.code,mode==='cancel'?'cancelled':'timeout');
+    assert.equal(result.error.method,'fs.read_directory');
+    assert.equal(result.error.effect_state,'not_started');
   }
 });
 
