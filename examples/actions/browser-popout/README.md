@@ -1,8 +1,8 @@
 # 指定标签弹出窗口
 
-本 Node 动作使用已有 `ctx.browser.profiles()` / `ctx.browser.call()`，将选定普通窗口中的一个明确标签移入新建的浏览器 `popup` 窗口。整个目录放入配置同级 `actions/browser-popout` 后可由动作库加载；需要 Node 和已连接的浏览器连接器。`call.json` 是调用模板，必须替换示例 profile、窗口和标签 ID。
+本包的 Node 与同步 Script 动作使用已有 `ctx.browser.profiles()` / `ctx.browser.call()`，将选定普通窗口中的一个明确标签移入新建的浏览器 `popup` 窗口。整个目录放入配置同级 `actions/browser-popout` 后可由动作库加载；需要已连接的浏览器连接器。Node 动作需要 Node；同步 Script 动作需要已就绪的 Script 运行时，入口导出同步 `main(ctx)`，浏览器调用直接返回值。`call.json` 与 `pop-out-tab-script-call.json` 分别是两种运行时的调用模板，必须替换示例 profile、窗口和标签 ID。
 
-动作身份为 `examples.browser-popout/pop-out-tab@1`，单实例执行。输入字段如下，其他字段会报 `invalid_input`：
+Node 动作身份为 `examples.browser-popout/pop-out-tab@1`，同步动作身份为 `examples.browser-popout/pop-out-tab-script@1`，分别单实例执行。两者使用相同输入、API 顺序和业务回执。输入字段如下，其他字段会报 `invalid_input`：
 
 | 字段 | 要求 |
 | --- | --- |

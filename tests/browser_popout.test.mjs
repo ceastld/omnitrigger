@@ -39,7 +39,7 @@ test('包入口、版本、独占动作与调用模板可解析', async () => {
   const manifest = JSON.parse(await readFile(new URL('../examples/actions/browser-popout/action.json', import.meta.url)));
   const call = JSON.parse(await readFile(new URL('../examples/actions/browser-popout/call.json', import.meta.url)));
   assert.equal(manifest.id, call.package_id);
-  assert.equal(manifest.actions.length, 1);
+  assert.equal(manifest.actions.length, 2);
   assert.equal(manifest.actions[0].id, call.action_id);
   assert.equal(manifest.actions[0].version, call.action_version);
   assert.equal(manifest.actions[0].runtime, 'node');
