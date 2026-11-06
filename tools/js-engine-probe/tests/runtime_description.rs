@@ -21,7 +21,7 @@ fn current_descriptor_is_bounded_and_parses_as_a_new_host() {
     );
     assert_eq!(
         host.capabilities.as_ref().unwrap().len(),
-        if cfg!(windows) { 4 } else { 3 }
+        if cfg!(windows) { 5 } else { 3 }
     );
     host.check(&[
         "clipboard.history.v1".into(),
@@ -29,10 +29,12 @@ fn current_descriptor_is_bounded_and_parses_as_a_new_host() {
         "desktop.copy_selection_data.v1".into(),
     ])
     .unwrap();
-    let result = host.check(&["process.capture.v1".into()]);
-    assert_eq!(result.is_ok(), cfg!(windows));
-    if let Err(fault) = result {
-        assert_eq!(fault.code, "runtime_capability_missing");
-        assert_eq!(fault.effect_state, "not_started");
+    for capability in ["process.capture.v1", "system.open_file_in_parent.v1"] {
+        let result = host.check(&[capability.into()]);
+        assert_eq!(result.is_ok(), cfg!(windows), "{capability}");
+        if let Err(fault) = result {
+            assert_eq!(fault.code, "runtime_capability_missing");
+            assert_eq!(fault.effect_state, "not_started");
+        }
     }
 }
