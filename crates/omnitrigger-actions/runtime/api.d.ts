@@ -276,8 +276,9 @@ export interface ActionContext {
   desktop: {
     /** 本次原Explorer目标，最多32个完整文件系统路径；单条1024、总计8192 UTF-16，超量拒绝。空选区为[]；虚拟目录为null；虚拟选中项报错。不复制、不读剪贴板、不补当前目录。 */
     explorerContext(): Promise<ExplorerContextSnapshot>;
-    /** 原目标单选区；成功确认无选区/空文本时为 {text:"",truncated:false}，provider/目标/读取失败仍报错。默认 reject，显式 truncate 取前128 UTF-16单元；拆开代理对拒绝。 */
-    readSelectionText(options?: {overflow?: 'reject' | 'truncate'}): Promise<SelectionTextSnapshot>;
+    /** 原目标单选区；成功确认无选区/空文本时为 {text:"",truncated:false}，provider/目标/读取失败仍报错。默认 reject，显式 truncate 按请求上限取 UTF-16 前缀；拆开代理对拒绝。
+     * maxUtf16Units 为1–8192整数，默认128；仅请求上限+1，helper采集及动作结果64KiB界限不变。 */
+    readSelectionText(options?: {overflow?: 'reject' | 'truncate'; maxUtf16Units?: number}): Promise<SelectionTextSnapshot>;
     /** 显式PID与创建时间；1–5000ms；仅捕获该进程当前前台，不激活或枚举。 */
     captureForegroundTarget(options: CaptureForegroundOptions): Promise<CapturedTarget>;
     /** 原desktop目标不变；每次复核身份/前台/取消/期限；仅确认提交。 */

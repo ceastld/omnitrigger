@@ -1,4 +1,7 @@
 //! 只读选区的纯文本契约；不访问平台或隐含状态。
+pub const DEFAULT_SELECTION_UTF16_UNITS: usize = 128;
+// 64KiB helper采集/动作结果界限；最坏JSON转义每UTF16单元6字节，保留协议余量。
+pub const MAX_SELECTION_UTF16_UNITS: usize = 8192;
 #[derive(Debug, PartialEq, Eq)]
 pub struct SelectionTextSnapshot {
     pub text: String,
@@ -42,17 +45,35 @@ impl SelectionReadError {
     }
 }
 
-// 仅请求129哨兵；truncate精确取前128个UTF16单元，拆开的代理对按统一错误拒绝。
+/// UIA 的有界哨兵请求；无效调用在任何 provider 工作之前拒绝。
 #[cfg(any(windows, test))]
+pub(crate) fn selection_request_units(max_utf16_units: usize) -> Result<i32, SelectionReadError> {
+    if !(1..=MAX_SELECTION_UTF16_UNITS).contains(&max_utf16_units) {
+        return Err(SelectionReadError::InvalidResponse);
+    }
+    Ok((max_utf16_units + 1) as i32)
+}
+
+// 默认入口继续供既有纯协议测试使用；生产平台统一走同一个带界限解码器。
+#[cfg(test)]
 pub(crate) fn selection_text(
     raw: &[u16],
     overflow: SelectionOverflow,
 ) -> Result<SelectionTextSnapshot, SelectionReadError> {
-    let truncated = raw.len() > 128;
+    selection_text_with_limit(raw, overflow, DEFAULT_SELECTION_UTF16_UNITS)
+}
+#[cfg(any(windows, test))]
+pub(crate) fn selection_text_with_limit(
+    raw: &[u16],
+    overflow: SelectionOverflow,
+    max_utf16_units: usize,
+) -> Result<SelectionTextSnapshot, SelectionReadError> {
+    selection_request_units(max_utf16_units)?;
+    let truncated = raw.len() > max_utf16_units;
     if truncated && overflow == SelectionOverflow::Reject {
         return Err(SelectionReadError::TooLong);
     }
-    let text = String::from_utf16(&raw[..raw.len().min(128)])
+    let text = String::from_utf16(&raw[..raw.len().min(max_utf16_units)])
         .map_err(|_| SelectionReadError::InvalidResponse)?;
     if text.contains('\0') {
         return Err(SelectionReadError::InvalidResponse);
@@ -179,5 +200,72 @@ mod selection_read_pure_tests {
             selection_text(&[0], SelectionOverflow::Truncate),
             Err(SelectionReadError::InvalidResponse)
         );
+    }
+}
+
+#[cfg(test)]
+mod explicit_selection_limit_tests {
+    use super::*;
+    #[test]
+    fn request_and_decoding_use_the_same_real_bound() {
+        for limit in [1, 128, 129, 2048, 8192] {
+            assert_eq!(selection_request_units(limit).unwrap(), (limit + 1) as i32);
+            assert_eq!(
+                selection_text_with_limit(&vec![65; limit], SelectionOverflow::Reject, limit)
+                    .unwrap()
+                    .text
+                    .len(),
+                limit
+            );
+            assert_eq!(
+                selection_text_with_limit(&vec![65; limit + 1], SelectionOverflow::Reject, limit),
+                Err(SelectionReadError::TooLong)
+            );
+            let value =
+                selection_text_with_limit(&vec![65; limit + 1], SelectionOverflow::Truncate, limit)
+                    .unwrap();
+            assert_eq!(value.text.len(), limit);
+            assert!(value.truncated);
+        }
+        for limit in [0, 8193, 65536, usize::MAX] {
+            assert_eq!(
+                selection_request_units(limit),
+                Err(SelectionReadError::InvalidResponse)
+            );
+        }
+    }
+    #[test]
+    fn empty_is_success_and_splitting_surrogates_is_never_repaired() {
+        let complete: Vec<u16> = "😀".repeat(4096).encode_utf16().collect();
+        assert_eq!(
+            selection_text_with_limit(&complete, SelectionOverflow::Reject, 8192)
+                .unwrap()
+                .text,
+            "😀".repeat(4096)
+        );
+        let split: Vec<u16> = ("A".repeat(8191) + "😀").encode_utf16().collect();
+        assert_eq!(
+            selection_text_with_limit(&split, SelectionOverflow::Truncate, 8192),
+            Err(SelectionReadError::InvalidResponse)
+        );
+        assert_eq!(
+            selection_text_with_limit(&split, SelectionOverflow::Reject, 8192),
+            Err(SelectionReadError::TooLong)
+        );
+        assert_eq!(
+            selection_text_with_limit(&[], SelectionOverflow::Reject, 8192).unwrap(),
+            SelectionTextSnapshot {
+                text: String::new(),
+                truncated: false
+            }
+        );
+        assert_eq!(
+            selection_text_with_limit(&[0], SelectionOverflow::Reject, 8192),
+            Err(SelectionReadError::InvalidResponse)
+        );
+        let oversized =
+            selection_text_with_limit(&vec![65; 8194], SelectionOverflow::Truncate, 8192).unwrap();
+        assert_eq!(oversized.text.len(), 8192);
+        assert!(oversized.truncated);
     }
 }

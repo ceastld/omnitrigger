@@ -277,7 +277,10 @@ impl ScriptTarget {
     }
 }
 
-use crate::selection_text::{selection_has_range, selection_range_has_text, selection_text};
+use crate::selection_text::{
+    selection_has_range, selection_range_has_text, selection_request_units,
+    selection_text_with_limit,
+};
 use crate::{SelectionOverflow, SelectionReadError, SelectionTextSnapshot};
 
 impl ScriptTarget {
@@ -287,8 +290,25 @@ impl ScriptTarget {
         &self,
         deadline: std::time::Instant,
         overflow: SelectionOverflow,
+        check: impl FnMut() -> Result<(), SelectionReadError>,
+    ) -> Result<SelectionTextSnapshot, SelectionReadError> {
+        self.read_selection_text_with_limit_if(
+            deadline,
+            overflow,
+            crate::DEFAULT_SELECTION_UTF16_UNITS,
+            check,
+        )
+    }
+
+    /// 显式有界单选区读取；仍只请求 max_utf16_units+1，不读取整篇或回退Clipboard。
+    pub fn read_selection_text_with_limit_if(
+        &self,
+        deadline: std::time::Instant,
+        overflow: SelectionOverflow,
+        max_utf16_units: usize,
         mut check: impl FnMut() -> Result<(), SelectionReadError>,
     ) -> Result<SelectionTextSnapshot, SelectionReadError> {
+        let request_units = selection_request_units(max_utf16_units)?;
         use windows::{
             core::Result as WinResult,
             Win32::{
@@ -406,7 +426,7 @@ impl ScriptTarget {
                 return Err(SelectionReadError::SelectionChanged);
             }
             guard()?;
-            return selection_text(&[], overflow);
+            return selection_text_with_limit(&[], overflow, max_utf16_units);
         }
         let range = provider(&mut guard, || unsafe { ranges.GetElement(0) })?;
         let has_text = selection_range_has_text(provider(&mut guard, || unsafe {
@@ -425,7 +445,7 @@ impl ScriptTarget {
             return Err(SelectionReadError::SelectionChanged);
         }
         let raw = if has_text {
-            // 仅非退化范围请求129；GetText失败通过?返回错误，绝不转换为空文本。
+            // 仅非退化范围请求“上限+1”；GetText失败返回错误，绝不转换为空文本。
             let wait = wait_ms()?;
             provider(&mut guard, || unsafe {
                 automation.SetConnectionTimeout(wait)
@@ -434,7 +454,9 @@ impl ScriptTarget {
             provider(&mut guard, || unsafe {
                 automation.SetTransactionTimeout(wait)
             })?;
-            Some(provider(&mut guard, || unsafe { range.GetText(129) })?)
+            Some(provider(&mut guard, || unsafe {
+                range.GetText(request_units)
+            })?)
         } else {
             None
         };
@@ -460,7 +482,8 @@ impl ScriptTarget {
             }
         }
         // windows-strings0.4.2 BSTR Deref<Target=[u16]>，长度来自SysStringLen。
-        let result = selection_text(raw.as_deref().unwrap_or(&[]), overflow)?;
+        let result =
+            selection_text_with_limit(raw.as_deref().unwrap_or(&[]), overflow, max_utf16_units)?;
         guard()?;
         Ok(result)
     }

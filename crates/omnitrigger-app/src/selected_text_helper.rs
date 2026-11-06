@@ -2,6 +2,7 @@
 use omnitrigger_actions::{ActionError, CancellationToken};
 #[cfg(windows)]
 use omnitrigger_windows::{ScriptTarget, SelectionOverflow, SelectionReadError};
+use omnitrigger_windows::{DEFAULT_SELECTION_UTF16_UNITS, MAX_SELECTION_UTF16_UNITS};
 use serde::{Deserialize, Serialize};
 #[cfg(any(windows, test))]
 use serde_json::json;
@@ -15,7 +16,19 @@ const FLAG: &str = "--omni-selected-text-once";
 // 这是上限；原动作期限更短时仍取较早者，成功不等待余下时间。
 const MAX_MS: u64 = 2_000;
 const MAX_REQUEST: usize = 1024;
-const MAX_REPLY: usize = 2048;
+const MAX_REPLY: usize = 64 * 1024;
+fn default_max_units() -> u32 {
+    DEFAULT_SELECTION_UTF16_UNITS as u32
+}
+fn is_default_max_units(value: &u32) -> bool {
+    *value == default_max_units()
+}
+fn reply_limit(max_utf16_units: u32) -> usize {
+    // 目标已在1024字节请求内，另留256字节元数据；默认128仍沿用2048字节。
+    (max_utf16_units as usize * 6 + MAX_REQUEST + 256)
+        .max(2048)
+        .min(MAX_REPLY)
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,19 +46,23 @@ impl Overflow {
         }
     }
 }
-#[derive(Default, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReadOptions {
+pub(crate) struct ReadOptions {
     #[serde(default)]
-    overflow: Overflow,
+    pub(crate) overflow: Overflow,
+    #[serde(default = "default_max_units")]
+    pub(crate) max_utf16_units: u32,
 }
-pub(crate) fn options(params: Value) -> Result<Overflow, ActionError> {
+pub(crate) fn options(params: Value) -> Result<ReadOptions, ActionError> {
     if !params.is_object() {
         return Err(fault("invalid_input"));
     }
-    serde_json::from_value::<ReadOptions>(params)
-        .map(|value| value.overflow)
-        .map_err(|_| fault("invalid_input"))
+    let value: ReadOptions = serde_json::from_value(params).map_err(|_| fault("invalid_input"))?;
+    if !(1..=MAX_SELECTION_UTF16_UNITS as u32).contains(&value.max_utf16_units) {
+        return Err(fault("invalid_input"));
+    }
+    Ok(value)
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -54,6 +71,11 @@ struct Request {
     budget_ms: u32,
     target: Value,
     overflow: Overflow,
+    #[serde(
+        default = "default_max_units",
+        skip_serializing_if = "is_default_max_units"
+    )]
+    max_utf16_units: u32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -63,6 +85,11 @@ enum Reply {
         v: u8,
         target: Value,
         overflow: Overflow,
+        #[serde(
+            default = "default_max_units",
+            skip_serializing_if = "is_default_max_units"
+        )]
+        max_utf16_units: u32,
         text: String,
         truncated: bool,
     },
@@ -105,8 +132,8 @@ fn read_code(code: &str) -> bool {
     )
 }
 #[cfg(any(windows, test))]
-fn valid_text(text: &str) -> bool {
-    !text.contains('\0') && text.encode_utf16().count() <= 128
+fn valid_text(text: &str, max_utf16_units: u32) -> bool {
+    !text.contains('\0') && text.encode_utf16().count() <= max_utf16_units as usize
 }
 #[cfg(any(windows, test))]
 fn decode(
@@ -114,8 +141,23 @@ fn decode(
     expected: &Value,
     policy: Overflow,
 ) -> Result<Value, ActionError> {
+    decode_with_limit(captured, expected, policy, default_max_units())
+}
+#[cfg(any(windows, test))]
+fn decode_with_limit(
+    captured: omnitrigger_windows::ProcessCaptureResult,
+    expected: &Value,
+    policy: Overflow,
+    requested_limit: u32,
+) -> Result<Value, ActionError> {
+    if !(1..=MAX_SELECTION_UTF16_UNITS as u32).contains(&requested_limit) {
+        return Err(fault("invalid_response"));
+    }
     // capture_process_if仅在Job收尾成功后交付Captured；所有失败无部分输出。
-    if captured.code != 0 || !captured.stderr.is_empty() || captured.stdout.len() > MAX_REPLY {
+    if captured.code != 0
+        || !captured.stderr.is_empty()
+        || captured.stdout.len() > reply_limit(requested_limit)
+    {
         return Err(fault("selection_helper_failed"));
     }
     let reply: Reply =
@@ -125,13 +167,16 @@ fn decode(
             v: 2,
             target,
             overflow,
+            max_utf16_units,
             text,
             truncated,
         } if target == *expected
             && overflow == policy
-            && valid_text(&text)
+            && max_utf16_units == requested_limit
+            && valid_text(&text, requested_limit)
             && (!truncated
-                || policy == Overflow::Truncate && text.encode_utf16().count() == 128) =>
+                || policy == Overflow::Truncate
+                    && text.encode_utf16().count() == requested_limit as usize) =>
         {
             Ok(json!({"text":text,"truncated":truncated}))
         }
@@ -144,10 +189,12 @@ fn decode(
 #[cfg(windows)]
 pub(crate) fn read(
     target: &ScriptTarget,
-    overflow: Overflow,
+    options: ReadOptions,
     cancellation: &CancellationToken,
     deadline: Option<Instant>,
 ) -> Result<Value, ActionError> {
+    let overflow = options.overflow;
+    let max_utf16_units = options.max_utf16_units;
     let (captured, context, end) = crate::read_once_helper::capture(
         target,
         cancellation,
@@ -155,9 +202,20 @@ pub(crate) fn read(
         FLAG,
         "selection",
         fault,
-        |context, budget_ms| json!({"v":2,"budget_ms":budget_ms,"target":context,"overflow":overflow}),
+        |context, budget_ms| {
+            let mut request =
+                json!({"v":2,"budget_ms":budget_ms,"target":context,"overflow":overflow});
+            if max_utf16_units != default_max_units() {
+                request["max_utf16_units"] = json!(max_utf16_units);
+            }
+            request
+        },
     )?;
-    let result = decode(captured, &context, overflow)?;
+    let result = if max_utf16_units == default_max_units() {
+        decode(captured, &context, overflow)?
+    } else {
+        decode_with_limit(captured, &context, overflow, max_utf16_units)?
+    };
     crate::read_once_helper::check_live(target, cancellation, end).map_err(fault)?;
     Ok(result)
 }
@@ -178,7 +236,10 @@ fn parse(args: &[String]) -> Option<Result<Request, ()>> {
         serde_json::from_str::<Request>(&args[2])
             .map_err(|_| ())
             .and_then(|request| {
-                if request.v != 2 || !(1..=MAX_MS as u32).contains(&request.budget_ms) {
+                if request.v != 2
+                    || !(1..=MAX_MS as u32).contains(&request.budget_ms)
+                    || !(1..=MAX_SELECTION_UTF16_UNITS as u32).contains(&request.max_utf16_units)
+                {
                     Err(())
                 } else {
                     Ok(request)
@@ -187,10 +248,16 @@ fn parse(args: &[String]) -> Option<Result<Request, ()>> {
     )
 }
 fn emit(reply: Reply) -> i32 {
+    let limit = match &reply {
+        Reply::Ok {
+            max_utf16_units, ..
+        } => reply_limit(*max_utf16_units),
+        Reply::Error { .. } => 2048,
+    };
     let Ok(mut bytes) = serde_json::to_vec(&reply) else {
         return 2;
     };
-    if bytes.len() + 1 > MAX_REPLY {
+    if bytes.len() + 1 > limit {
         return 2;
     }
     bytes.push(b'\n');
@@ -239,18 +306,24 @@ fn child(request: Request) -> Reply {
     let Ok(target) = ScriptTarget::from_snapshot(snapshot) else {
         return fail("target_changed");
     };
-    let result = target.read_selection_text_if(end, request.overflow.platform(), || {
-        if Instant::now() >= end {
-            Err(SelectionReadError::Timeout)
-        } else {
-            Ok(())
-        }
-    });
+    let result = target.read_selection_text_with_limit_if(
+        end,
+        request.overflow.platform(),
+        request.max_utf16_units as usize,
+        || {
+            if Instant::now() >= end {
+                Err(SelectionReadError::Timeout)
+            } else {
+                Ok(())
+            }
+        },
+    );
     match result {
         Ok(value) => Reply::Ok {
             v: 2,
             target: request.target,
             overflow: request.overflow,
+            max_utf16_units: request.max_utf16_units,
             text: value.text,
             truncated: value.truncated,
         },
@@ -304,9 +377,9 @@ mod selection_helper_protocol_tests {
     }
     #[test]
     fn default_reject_explicit_truncate_and_unknown_options_are_strict() {
-        assert_eq!(options(json!({})).unwrap(), Overflow::Reject);
+        assert_eq!(options(json!({})).unwrap().overflow, Overflow::Reject);
         assert_eq!(
-            options(json!({"overflow":"truncate"})).unwrap(),
+            options(json!({"overflow":"truncate"})).unwrap().overflow,
             Overflow::Truncate
         );
         for value in [
@@ -543,3 +616,7 @@ mod selection_helper_protocol_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/selected_text_max_units.rs"]
+mod max_units_tests;

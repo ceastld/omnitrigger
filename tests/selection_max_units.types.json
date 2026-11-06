@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "lib": [
+      "ES2022"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": []
+  },
+  "files": [
+    "selection_max_units.types.ts",
+    "../crates/omnitrigger-actions/runtime/script-types.d.ts"
+  ]
+}

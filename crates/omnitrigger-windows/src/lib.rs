@@ -5,7 +5,10 @@ use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirect
 mod explorer_context;
 pub use explorer_context::{validate_explorer_context, ExplorerContextSnapshot, ExplorerReadError};
 mod selection_text;
-pub use selection_text::{SelectionOverflow, SelectionReadError, SelectionTextSnapshot};
+pub use selection_text::{
+    SelectionOverflow, SelectionReadError, SelectionTextSnapshot, DEFAULT_SELECTION_UTF16_UNITS,
+    MAX_SELECTION_UTF16_UNITS,
+};
 
 mod process_capture;
 pub use process_capture::{

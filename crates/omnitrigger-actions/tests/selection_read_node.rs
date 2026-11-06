@@ -254,3 +254,26 @@ fn cancelled_selection_does_not_continue_to_keyboard_or_clipboard() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "selection.read_text");
 }
+
+#[test]
+#[ignore = "显式 NodeRuntime 与假 NativeHost；不运行 UIA/GUI"]
+fn explicit_max_units_crosses_actual_node_runtime_with_worst_case_json() {
+    let fixture = Fixture::new(
+        r#"export default async ctx=>await ctx.desktop.readSelectionText({maxUtf16Units:8192,overflow:'truncate'});"#,
+    );
+    let text = "\u{1}".repeat(8192);
+    let reply = json!({"text":text,"truncated":true});
+    assert!(serde_json::to_vec(&reply).unwrap().len() < 64 * 1024);
+    let host = Host::new(vec![Ok(reply.clone())]);
+    assert_eq!(
+        run(&fixture, &host, &CancellationToken::new()).unwrap(),
+        reply
+    );
+    assert_eq!(
+        *host.calls.lock().unwrap(),
+        vec![(
+            "selection.read_text".into(),
+            json!({"max_utf16_units":8192,"overflow":"truncate"})
+        )]
+    );
+}

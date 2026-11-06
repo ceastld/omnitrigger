@@ -47,7 +47,7 @@ impl DesktopHost {
         cancellation: &CancellationToken,
         deadline: Option<Instant>,
     ) -> Result<Value, ActionError> {
-        let overflow = crate::selected_text_helper::options(params)?;
+        let options = crate::selected_text_helper::options(params)?;
         crate::selected_text_helper::check_action(cancellation, deadline)?;
         #[cfg(windows)]
         {
@@ -55,11 +55,11 @@ impl DesktopHost {
                 .target
                 .as_ref()
                 .map_err(|_| crate::selected_text_helper::fault("target_unavailable"))?;
-            crate::selected_text_helper::read(target, overflow, cancellation, deadline)
+            crate::selected_text_helper::read(target, options, cancellation, deadline)
         }
         #[cfg(not(windows))]
         {
-            let _ = overflow;
+            let _ = options;
             Err(crate::selected_text_helper::fault("selection_unavailable"))
         }
     }

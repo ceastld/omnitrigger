@@ -308,20 +308,33 @@ function createDesktopApi(invoke) {
     catch (cause) { if (cause?.code === 'invalid_input') cause.method = method; throw cause; }
   }
 
-  // 默认reject；只有显式truncate才返回精确的128 UTF16前缀，不修复拆开的代理项。
+  // 默认128/reject；显式界限最多8192。只接受精确UTF16前缀，不修复拆开的代理项。
   function readSelectionText(args) {
     const method = 'selection.read_text';
     const fault = code => Object.assign(new Error('只读选区读取未获确认；请检查错误代码。'), {code,method,effectState:'not_started'});
-    const options = args[0] === undefined ? {} : args[0];
-    if (args.length > 1 || options === null || typeof options !== 'object' || Array.isArray(options)
-        || Reflect.ownKeys(options).some(key => key !== 'overflow')
-        || options.overflow !== undefined && !['reject','truncate'].includes(options.overflow)) throw fault('invalid_input');
-    const overflow = options.overflow ?? 'reject';
-    const params = options.overflow === undefined ? {} : {overflow};
+    let overflow, maxUtf16Units, params;
+    try {
+      const options = args[0] === undefined ? {} : args[0];
+      if (args.length > 1 || options === null || typeof options !== 'object' || Array.isArray(options)
+          || Reflect.ownKeys(options).some(key => key !== 'overflow' && key !== 'maxUtf16Units')) throw fault('invalid_input');
+      const mode = options.overflow, limit = options.maxUtf16Units;
+      overflow = mode === undefined ? 'reject' : mode;
+      maxUtf16Units = limit === undefined ? 128 : limit;
+      if (!['reject','truncate'].includes(overflow) || !Number.isInteger(maxUtf16Units) || maxUtf16Units < 1 || maxUtf16Units > 8192) throw fault('invalid_input');
+      params = mode === undefined ? {} : {overflow};
+      if (limit !== undefined) params.max_utf16_units = maxUtf16Units;
+    } catch (_) { throw fault('invalid_input'); }
     const result = value => {
-      if (!exactDataFields(value,['text','truncated']) || !dataText(value.text,128,true)
-          || typeof value.truncated !== 'boolean' || value.truncated && (overflow !== 'truncate' || value.text.length !== 128)) throw fault('invalid_response');
-      return Object.freeze({text:value.text,truncated:value.truncated});
+      if (!exactDataFields(value,['text','truncated']) || !dataText(value.text,maxUtf16Units,true)
+          || typeof value.truncated !== 'boolean' || value.truncated && (overflow !== 'truncate' || value.text.length !== maxUtf16Units)) throw fault('invalid_response');
+      const snapshot = {text:value.text,truncated:value.truncated};
+      let bytes = 0;
+      for (const character of JSON.stringify(snapshot)) {
+        const point = character.codePointAt(0);
+        bytes += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+      }
+      if (bytes > 6*maxUtf16Units+64 || bytes > 64*1024) throw fault('invalid_response');
+      return Object.freeze(snapshot);
     };
     const failure = cause => {
       const code = typeof cause?.code === 'string' && /^[a-z_]{1,64}$/.test(cause.code) ? cause.code : 'native_bridge_failed';
@@ -332,6 +345,7 @@ function createDesktopApi(invoke) {
       return value && typeof value.then === 'function' ? value.then(result,failure) : result(value);
     } catch (cause) { return failure(cause); }
   }
+
 
 
   // 只读取本次原目标；不接受 HWND、前台重捕获、复制或截断选项。
