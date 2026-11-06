@@ -12,6 +12,7 @@
   },
   "files": [
     "recipe.js",
+    "guarded-recipe.mjs",
     "../../../tools/js-engine-probe/api.d.ts",
     "recipe.mjs",
     "prepare-recipe.mjs",
