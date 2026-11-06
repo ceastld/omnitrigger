@@ -383,8 +383,11 @@ impl Workspace {
                 "toggle-legacy-plugin",
                 if legacy_enabled { "停用" } else { "启用" },
                 Tone::Primary,
-                (legacy_enabled && (!installing || self.legacy_job.is_some()))
-                    || (!legacy_enabled && !installing && self.legacy_source.is_some()),
+                if legacy_enabled {
+                    !installing || self.legacy_job.is_some()
+                } else {
+                    !installing && self.legacy_source.is_some()
+                },
             )
             .on_click(cx.listener(|this, _, _, cx| this.toggle_legacy_plugin(cx))),
         )

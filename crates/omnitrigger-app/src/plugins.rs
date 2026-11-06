@@ -237,7 +237,7 @@ impl Plugins {
     pub fn configure_legacy_enabled(&mut self, enabled: bool) {
         self.settings
             .legacy
-            .get_or_insert_with(|| LegacySettings {
+            .get_or_insert(LegacySettings {
                 enabled: false,
                 manifest_sha256: None,
             })
@@ -253,7 +253,7 @@ impl Plugins {
     pub fn pin_legacy_manifest(&mut self, digest: String) {
         self.settings
             .legacy
-            .get_or_insert_with(|| LegacySettings {
+            .get_or_insert(LegacySettings {
                 enabled: false,
                 manifest_sha256: None,
             })
