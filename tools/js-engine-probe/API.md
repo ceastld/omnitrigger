@@ -13,7 +13,7 @@
 | `ctx.process.start(program, args)` | 创建独立程序后返回 `{pid}`，程序不随脚本结束关闭。 |
 | `ctx.delay(milliseconds)` | 同步等待 0–60000 毫秒的整数，返回 `undefined`；字符串、小数、非有限数等返回 `invalid_input`，不做隐式转换。 |
 | `ctx.ui.choose({items, title?, placeholder?, timeoutMs?})` | 应用 GPUI 界面中的可搜索选择菜单，返回稳定 ID 或明确取消；Node 入口使用 `await`。独立 CLI 返回 `ui_unavailable`。参数与示例见[脚本选择菜单](../../examples/actions/script-choice/)。 |
-| `ctx.desktop.target()` / `targetContext()` | 查询提交时捕获的原目标或导出 30 秒有效的目标快照；不重新选择前台。仅应用接入可用。 |
+| `ctx.desktop.target()` / `targetContext()` | 查询提交时捕获的原目标或导出 29 秒有效的目标快照；为调用方时钟粒度预留余量，提交校验上限仍为 30 秒。不重新选择前台。仅应用接入可用。 |
 | `ctx.desktop.sendShortcut(keys, options)` | 1–5 个 VK 整数，修饰键在前；支持 `keyDownDelayMs` 或原生 `timing` 配置，二者互斥。 |
 | `ctx.desktop.sendKeySequence(modifiers, keys, options)` | 0–4 个修饰键和 1–16 个普通键；修饰键跨越整组，`keyDownDelayMs` 为 0–1000 毫秒，单次等待合计最多 3000 毫秒。 |
 | `ctx.desktop.sendText(text)` | 向原目标直接发送 Unicode，不经过剪贴板；最多 65,536 个 UTF-16 单元，不含 NUL 或孤立代理项。 |

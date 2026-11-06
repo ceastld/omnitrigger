@@ -108,10 +108,16 @@ pub fn export(snapshot: ScriptTargetSnapshot) -> Result<serde_json::Value, Strin
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|error| error.to_string())?
         .as_millis();
-    let expires_at_unix_ms = u64::try_from(now)
-        .map_err(|_| "系统时间超出范围。")?
-        .checked_add(30_000)
-        .ok_or("系统时间超出范围。")?;
+    export_at(
+        snapshot,
+        u64::try_from(now).map_err(|_| "系统时间超出范围。")?,
+    )
+}
+
+fn export_at(snapshot: ScriptTargetSnapshot, now: u64) -> Result<serde_json::Value, String> {
+    // 调用方可能使用粒度不同的时钟。导出值不顶满30秒校验上限，
+    // 避免正常快照因毫秒取整差异被误判为期限过长。
+    let expires_at_unix_ms = now.checked_add(29_000).ok_or("系统时间超出范围。")?;
     serde_json::to_value(TargetContext {
         window_handle: snapshot.window_handle.to_string(),
         process_id: snapshot.process_id,
@@ -351,6 +357,34 @@ mod tests {
         }
         value["window_handle"] = json!(123);
         assert!(serde_json::from_value::<TargetContext>(value).is_err());
+    }
+
+    #[test]
+    fn exported_context_reserves_clock_headroom_and_keeps_the_thirty_second_limit() {
+        let original: TargetContext = serde_json::from_value(value()).unwrap();
+        let source_now = 100_001;
+        let receiver_now = source_now - 1;
+        let exported = export_at(original.validate(1000).unwrap(), source_now).unwrap();
+        let mut context: TargetContext = serde_json::from_value(exported).unwrap();
+        assert_eq!(context.window_handle, original.window_handle);
+        assert_eq!(context.process_id, original.process_id);
+        assert_eq!(context.thread_id, original.thread_id);
+        assert_eq!(
+            context.process_created_file_time,
+            original.process_created_file_time
+        );
+        assert_eq!(context.expires_at_unix_ms, source_now + 29_000);
+        assert!(context.validate(receiver_now).is_ok());
+        assert!(context.validate(source_now + 29_000).is_err());
+        // 原先顶满上限的导出在相差1ms时会拒绝；不通过放宽验证修复。
+        context.expires_at_unix_ms = source_now + 30_000;
+        assert!(context.validate(receiver_now).is_err());
+    }
+
+    #[test]
+    fn exported_context_rejects_clock_overflow() {
+        let context: TargetContext = serde_json::from_value(value()).unwrap();
+        assert!(export_at(context.validate(1000).unwrap(), u64::MAX).is_err());
     }
 
     #[test]
