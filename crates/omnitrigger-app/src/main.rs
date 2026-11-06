@@ -35,6 +35,7 @@ mod desktop_key_smoke;
 mod desktop_text_smoke;
 mod event_bridge;
 mod execution;
+mod explorer_context_helper;
 mod external_action;
 mod legacy_load_gate;
 mod legacy_local_source;
@@ -54,6 +55,8 @@ mod plugins;
 mod presets;
 mod process_capture_host;
 mod radial_wheel;
+#[cfg(windows)]
+mod read_once_helper;
 mod script_browser;
 mod script_fs;
 mod script_notify;
@@ -6761,6 +6764,9 @@ fn open_script_history_window(
 
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
+    if let Some(code) = explorer_context_helper::cli(&arguments) {
+        std::process::exit(code);
+    }
     if let Some(code) = selected_text_helper::cli(&arguments) {
         std::process::exit(code);
     }

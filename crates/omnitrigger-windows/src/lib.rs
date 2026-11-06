@@ -2,6 +2,8 @@
 
 use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirection};
 
+mod explorer_context;
+pub use explorer_context::{validate_explorer_context, ExplorerContextSnapshot, ExplorerReadError};
 mod selection_text;
 pub use selection_text::{SelectionOverflow, SelectionReadError, SelectionTextSnapshot};
 
@@ -14,7 +16,10 @@ pub use process_capture::{
 };
 
 mod local_path_stat;
-pub use local_path_stat::{stat_local_path, LocalPathKind, LocalStatError};
+pub use local_path_stat::{
+    read_local_directory, stat_local_path, LocalDirectoryEntry, LocalPathKind, LocalStatError,
+    MAX_DIRECTORY_BYTES, MAX_DIRECTORY_ENTRIES,
+};
 
 mod automation_basics;
 #[cfg(windows)]

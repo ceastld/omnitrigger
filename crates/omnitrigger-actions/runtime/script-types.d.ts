@@ -1,3 +1,4 @@
+type ScriptExplorerContextSnapshot = Readonly<{currentDirectory:string|null;selectedPaths:readonly string[]}>;
 type ScriptSelectionTextSnapshot = Readonly<{text:string;truncated:boolean}>;
 declare const scriptCapturedTargetBrand: unique symbol;
 type ScriptCapturedTarget = Readonly<{
@@ -136,6 +137,21 @@ interface ScriptFileStatFault extends Error {
     /** 仅此只读调用无副作用，不涵盖此前脚本步骤。 */
     effectState: 'not_started';
 }
+type ScriptLocalDirectoryEntry = Readonly<{
+  name: string;
+  /** 保留调用者的目录原文，仅在需要时追加反斜杠及子项名。 */
+  path: string;
+  kind: 'file' | 'directory' | 'other' | 'unavailable';
+  reason: null | 'reparse_point' | 'cloud_placeholder' | 'cloud_path' | 'unsupported_name';
+}>;
+type ScriptLocalDirectoryResult = Readonly<{entries: ReadonlyArray<ScriptLocalDirectoryEntry>; complete: true}>;
+interface ScriptDirectoryReadFault extends Error {
+  code: 'invalid_input' | 'path_not_local' | 'path_unavailable' | 'path_missing' | 'not_directory' | 'access_denied'
+    | 'directory_too_large' | 'directory_changed' | 'fs_error' | 'fs_unavailable' | 'fs_busy' | 'cancelled' | 'timeout';
+  method: 'fs.read_directory';
+  effectState: 'not_started';
+}
+
 interface ScriptBrowserOptions {
     /** browser_instance_id，省略时只接受恰好一个已连接 profile。 */
     profile?: string;
@@ -194,6 +210,10 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
          * 5 秒短时 RPC，不重试；元数据非原子，后续打开须重新检查。
          */
         stat(path: string): ScriptLocalPathStat;
+        /** 直接子项，默认 128、最多 1024；回执最多 64 KiB，超限整次拒绝。
+         * 不递归、不跟随链接、不读取内容；complete 只表示读到枚举末尾，不是原子快照。
+         * 使用与 stat 相同的本地路径守卫。OS 调用不能硬性抢占；迟到结果丢弃。 */
+        readDirectory(path: string, options?: {maxEntries?: number}): ScriptLocalDirectoryResult;
         /** UTF-8 文件，绝对路径，最多 64 KiB。 */
         readText(path: string): string;
         /** 默认不覆盖；不自动创建目录。失败可能留下部分文件。 */
@@ -239,6 +259,8 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
         choose(options: ScriptChooseOptions): ScriptChooseResult;
     };
     desktop: {
+        /** 本次原Explorer目标，最多32个完整文件系统路径；单条1024、总计8192 UTF-16，超量拒绝。空选区为[]；虚拟目录为null；虚拟选中项报错。不复制、不读剪贴板、不补当前目录。 */
+        explorerContext(): ScriptExplorerContextSnapshot;
         /** 原目标单选区；成功确认无选区/空文本时为 {text:"",truncated:false}，provider/目标/读取失败仍报错。默认 reject，显式 truncate 取前128 UTF-16单元；拆开代理对拒绝。 */
         readSelectionText(options?: {overflow?: 'reject' | 'truncate'}): ScriptSelectionTextSnapshot;
         /** 显式PID与创建时间；1–5000ms；仅捕获该进程当前前台，不激活或枚举。 */

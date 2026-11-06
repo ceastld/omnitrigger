@@ -181,28 +181,56 @@ jobs:
           node --test tools/script-sdk-check/analyze-script-modules.test.mjs tools/script-sdk-check/analyze-script-entry.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: 验证只读选区的 SDK、客户端和 Node 桥接
+      - name: 验证只读桌面与目录 API 的 SDK、客户端和 Node 桥接
         shell: pwsh
         run: |
-          node --test tests/selection_read_sdk.test.mjs tests/selection_read_bridge.test.mjs
+          node --test tests/selection_read_sdk.test.mjs tests/selection_read_bridge.test.mjs tests/fs_read_directory_api.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/selection_read_types.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $selectionHadNode = Test-Path Env:OMNITRIGGER_SELECTION_TEST_NODE
-          $selectionPreviousNode = $env:OMNITRIGGER_SELECTION_TEST_NODE
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/fs_read_directory.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/explorer_context_types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $nodeVariables = @('OMNITRIGGER_SELECTION_TEST_NODE', 'OMNITRIGGER_EXPLORER_TEST_NODE', 'OMNITRIGGER_DIRECTORY_TEST_NODE')
+          $previousNodeVariables = @{}
+          foreach ($name in $nodeVariables) {
+            $previousNodeVariables[$name] = @{ existed = Test-Path "Env:$name"; value = [Environment]::GetEnvironmentVariable($name, 'Process') }
+          }
           try {
-            $env:OMNITRIGGER_SELECTION_TEST_NODE = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-            cargo test --locked -p omnitrigger-actions --test selection_read_node -- --ignored --test-threads=1
+            $nodeExecutable = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+            foreach ($name in $nodeVariables) { [Environment]::SetEnvironmentVariable($name, $nodeExecutable, 'Process') }
+            cargo test --locked -p omnitrigger-actions --test selection_read_node --test explorer_context_node --test fs_read_directory_node -- --ignored --test-threads=1
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally {
-            if ($selectionHadNode) { $env:OMNITRIGGER_SELECTION_TEST_NODE = $selectionPreviousNode }
-            else { Remove-Item Env:OMNITRIGGER_SELECTION_TEST_NODE -ErrorAction SilentlyContinue }
+            foreach ($name in $nodeVariables) {
+              if ($previousNodeVariables[$name].existed) { [Environment]::SetEnvironmentVariable($name, $previousNodeVariables[$name].value, 'Process') }
+              else { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+            }
+          }
+
+      - name: 验证 Windows 真实目录枚举与整批上限
+        shell: pwsh
+        run: |
+          $directoryHadRoot = Test-Path Env:OMNITRIGGER_DIRECTORY_NATIVE_ROOT
+          $directoryPreviousRoot = $env:OMNITRIGGER_DIRECTORY_NATIVE_ROOT
+          try {
+            $directoryRoot = Join-Path $PWD '.tmp/ci-directory-native'
+            New-Item -ItemType Directory -Path $directoryRoot -Force | Out-Null
+            $env:OMNITRIGGER_DIRECTORY_NATIVE_ROOT = $directoryRoot
+            cargo test --locked -p omnitrigger-windows --test read_directory_native read_directory_real_windows_ -- --ignored --skip read_directory_real_windows_does_not_follow_child_or_root_link --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            if ($directoryHadRoot) { $env:OMNITRIGGER_DIRECTORY_NATIVE_ROOT = $directoryPreviousRoot }
+            else { Remove-Item Env:OMNITRIGGER_DIRECTORY_NATIVE_ROOT -ErrorAction SilentlyContinue }
           }
 
       - name: 验证常用动作和浏览器工作流
         shell: pwsh
         run: |
           node --test tests/source_close_script.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/source_file_preview.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/n10-rust-package.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

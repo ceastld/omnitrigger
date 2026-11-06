@@ -16,8 +16,8 @@ let browserConnection;
 let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
-const nativeMethods = new Set(['system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','ui.choose','ui.notify','ui.open_history','ui.toggle_history','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
-  'keyboard.shortcut','keyboard.sequence','keyboard.text','selection.copy','selection.copy_data','selection.read_text','clipboard.read','clipboard.read_data','clipboard.write','window.action','display.brightness_step','audio.volume_adjust']);
+const nativeMethods = new Set(['system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','fs.read_directory','ui.choose','ui.notify','ui.open_history','ui.toggle_history','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
+  'keyboard.shortcut','keyboard.sequence','keyboard.text','selection.copy','selection.copy_data','selection.read_text','explorer.context','clipboard.read','clipboard.read_data','clipboard.write','window.action','display.brightness_step','audio.volume_adjust']);
 let nativePending;
 let nativePendingMethod;
 let nativeId = 0;
@@ -104,8 +104,8 @@ function nativeCall(method, params) {
   const capture = method === 'process.capture';
   const volume = method === 'audio.volume_adjust';
   const brightness = method === 'display.brightness_step' || volume;
-  const stat = method === 'fs.stat';
-  const dataRead = method === 'clipboard.read_data' || method === 'selection.read_text';
+  const stat = method === 'fs.stat' || method === 'fs.read_directory';
+  const dataRead = method === 'clipboard.read_data' || method === 'selection.read_text' || method === 'explorer.context';
   const dataCopy = method === 'selection.copy_data';
   const data = dataRead || dataCopy;
   const historyRead = method === 'history.list' || method === 'history.get';
@@ -146,7 +146,7 @@ function nativeCall(method, params) {
     const aborted = () => {
       const reason = controller.signal.reason;
       if (opening && reason) { reason.method = method; reason.effectState = sent ? 'unknown' : 'not_started'; }
-      if (opening || capture || brightness) return finish(fail(reason?.code === 'timeout' ? 'timeout' : 'cancelled', undefined, sent ? 'unknown' : 'not_started'));
+      if (opening || capture || brightness || stat) return finish(fail(reason?.code === 'timeout' ? 'timeout' : 'cancelled', undefined, sent ? 'unknown' : 'not_started'));
       if (method === 'ui.notify' || historyUi || stat || data || history || capture || brightness) {
         if (typeof reason?.method !== 'string') reason.method = method;
         reason.effectState = stat || dataRead || historyRead ? 'not_started' : sent ? 'unknown' : 'not_started';
@@ -181,15 +181,15 @@ function nativeCall(method, params) {
       try {
         const response = JSON.parse(chunks);
         if (response.id !== id || typeof response.ok !== 'boolean') throw new Error('回执身份不匹配');
-        if ((opening || history || capture || brightness) && (Reflect.ownKeys(response).length !== 3 || !Object.hasOwn(response, response.ok ? 'value' : 'error'))) throw new Error();
+        if ((opening || stat || history || capture || brightness) && (Reflect.ownKeys(response).length !== 3 || !Object.hasOwn(response, response.ok ? 'value' : 'error'))) throw new Error();
         if (response.ok) finish(undefined, response.value);
         else {
           const error = response.error;
           if (!error || typeof error.code !== 'string' || typeof error.message !== 'string') throw new Error('缺少错误');
-          if ((opening || history || capture || brightness) && ((error.method !== undefined && error.method !== method)
+          if ((opening || stat || history || capture || brightness) && ((error.method !== undefined && error.method !== method)
               || (error.effect_state !== undefined && !['not_started','unknown'].includes(error.effect_state)))) throw new Error();
           const failure = fail(error.code, error.message, error.effect_state ?? 'unknown');
-          if (!history && !capture && Array.isArray(error.required_permissions)) failure.requiredPermissions = error.required_permissions;
+          if (!stat && !history && !capture && Array.isArray(error.required_permissions)) failure.requiredPermissions = error.required_permissions;
           finish(failure);
         }
       } catch { finish(fail('desktop_protocol', '桌面回执格式无效；业务结果未确认。', 'unknown')); }
@@ -279,7 +279,7 @@ function validateProcess(program, args, options, allowedOptions) {
   checkCancelled();
   if (typeof program !== 'string' || !program.trim() || program.includes('\0')
       || !Array.isArray(args) || args.length > 128
-      || args.some(arg => typeof arg !== 'string' || arg.includes('\0') || arg === '--omni-selected-text-once' || arg.startsWith('--omni-selected-text-once='))
+      || args.some(arg => typeof arg !== 'string' || arg.includes('\0') || arg === '--omni-selected-text-once' || arg.startsWith('--omni-selected-text-once=') || arg === '--omni-explorer-context-once' || arg.startsWith('--omni-explorer-context-once='))
       || !options || typeof options !== 'object' || Array.isArray(options)
       || Object.keys(options).some(key => !allowedOptions.includes(key))
       || (options.cwd !== undefined && (typeof options.cwd !== 'string' || !options.cwd.trim() || options.cwd.includes('\0')))
@@ -403,7 +403,7 @@ try {
   if (nativePending) {
     if (nativePendingMethod === 'system.open' || nativePendingMethod === 'system.open_file_in_parent') throw Object.assign(fault('pending_open', '动作返回时仍有未等待的打开请求；请使用 await。'), {effectState:'unknown',method:nativePendingMethod});
     if (nativePendingMethod === 'process.capture') throw Object.assign(fault('pending_process_capture', '动作返回时仍有未等待的程序采集；请使用 await。'), {effectState:'unknown',method:'process.capture'});
-    if (nativePendingMethod === 'fs.stat') throw Object.assign(fault('fs_error', '动作返回时仍有未等待的文件状态查询；请使用 await。'), {effectState:'not_started',method:'fs.stat'});
+    if (nativePendingMethod === 'fs.stat' || nativePendingMethod === 'fs.read_directory') throw Object.assign(fault('fs_error', '动作返回时仍有未等待的文件查询；请使用 await。'), {effectState:'not_started',method:nativePendingMethod});
     throw Object.assign(fault('pending_desktop_calls', '动作返回时仍有未等待的桌面调用；请使用 await。'), {effectState:'unknown'});
   }
   respond({ status: 'ok', output: output ?? null });

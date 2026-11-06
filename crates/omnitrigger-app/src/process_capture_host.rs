@@ -39,7 +39,10 @@ fn request(value: Value) -> Result<(String, Vec<String>, Options), ActionError> 
     let value: Request =
         serde_json::from_value(value).map_err(|_| fault("invalid_input", "not_started"))?;
     if value.args.iter().any(|arg| {
-        arg == "--omni-selected-text-once" || arg.starts_with("--omni-selected-text-once=")
+        arg == "--omni-selected-text-once"
+            || arg.starts_with("--omni-selected-text-once=")
+            || arg == "--omni-explorer-context-once"
+            || arg.starts_with("--omni-explorer-context-once=")
     }) {
         return Err(fault("invalid_input", "not_started"));
     }
@@ -296,7 +299,12 @@ mod reserved_selection_helper_tests {
     use super::*;
     #[test]
     fn scripts_cannot_request_the_internal_helper_via_capture() {
-        for flag in ["--omni-selected-text-once", "--omni-selected-text-once={}"] {
+        for flag in [
+            "--omni-selected-text-once",
+            "--omni-selected-text-once={}",
+            "--omni-explorer-context-once",
+            "--omni-explorer-context-once={}",
+        ] {
             let error = request(json!({"program":"C:/Owned/omnitrigger.exe","args":[flag,"{}"]}))
                 .unwrap_err();
             assert_eq!(error.code, "invalid_input");

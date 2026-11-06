@@ -1,19 +1,13 @@
 //! 单次内部选区辅助进程；不是通用脚本宿主。父侧不调用UIA。
 use omnitrigger_actions::{ActionError, CancellationToken};
 #[cfg(windows)]
-use omnitrigger_windows::{
-    capture_process_if, ProcessCaptureControl as Control, ProcessCaptureOptions as CaptureOptions,
-    ScriptTarget, SelectionOverflow, SelectionReadError,
-};
+use omnitrigger_windows::{ScriptTarget, SelectionOverflow, SelectionReadError};
 use serde::{Deserialize, Serialize};
 #[cfg(any(windows, test))]
 use serde_json::json;
 use serde_json::Value;
 #[cfg(windows)]
-use std::{
-    cell::Cell,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{io::Write, time::Instant};
 
 const FLAG: &str = "--omni-selected-text-once";
@@ -93,40 +87,6 @@ fn clock() -> Result<u64, ActionError> {
         .and_then(|d| u64::try_from(d.as_millis()).ok())
         .ok_or_else(|| fault("selection_unavailable"))
 }
-#[cfg(windows)]
-fn remaining(end: Instant) -> Result<u64, ActionError> {
-    let left = end
-        .saturating_duration_since(Instant::now())
-        .as_millis()
-        .min(u128::from(MAX_MS)) as u64;
-    if left == 0 {
-        Err(fault("timeout"))
-    } else {
-        Ok(left)
-    }
-}
-#[cfg(windows)]
-fn check_live(
-    target: &ScriptTarget,
-    cancellation: &CancellationToken,
-    end: Instant,
-) -> Result<(), &'static str> {
-    if cancellation.is_cancelled() {
-        return Err("cancelled");
-    }
-    if Instant::now() >= end {
-        return Err("timeout");
-    }
-    target.ensure_foreground().map_err(|_| "target_changed")?;
-    // 身份/前台核验可能耗时；核验后复查取消与动作期限。
-    if cancellation.is_cancelled() {
-        return Err("cancelled");
-    }
-    if Instant::now() >= end {
-        return Err("timeout");
-    }
-    Ok(())
-}
 #[cfg(any(windows, test))]
 fn read_code(code: &str) -> bool {
     matches!(
@@ -188,75 +148,17 @@ pub(crate) fn read(
     cancellation: &CancellationToken,
     deadline: Option<Instant>,
 ) -> Result<Value, ActionError> {
-    let end = Instant::now() + Duration::from_millis(MAX_MS);
-    let end = deadline.map_or(end, |outer| outer.min(end));
-    check_live(target, cancellation, end).map_err(fault)?;
-    let snapshot = target.snapshot().map_err(|_| fault("target_changed"))?;
-    check_live(target, cancellation, end).map_err(fault)?;
-    let mut context = crate::action_target_context::export(snapshot)
-        .map_err(|_| fault("selection_unavailable"))?;
-    let budget_ms = remaining(end)?;
-    context["expires_at_unix_ms"] = json!(clock()?
-        .checked_add(budget_ms)
-        .ok_or_else(|| fault("timeout"))?);
-    let request = Request {
-        v: 2,
-        budget_ms: budget_ms as u32,
-        target: context.clone(),
-        overflow,
-    };
-    let serialized = serde_json::to_string(&request).map_err(|_| fault("invalid_response"))?;
-    if serialized.len() > MAX_REQUEST {
-        return Err(fault("invalid_response"));
-    }
-    let executable = std::env::current_exe().map_err(|_| fault("selection_helper_start_failed"))?;
-    // 不搜索PATH，不使用解释器或配置中的可执行文件。普通本地盘符路径交由现有验证器复验。
-    let program = executable
-        .to_str()
-        .ok_or_else(|| fault("selection_helper_start_failed"))?;
-    let cwd = executable
-        .parent()
-        .and_then(|p| p.to_str())
-        .ok_or_else(|| fault("selection_helper_start_failed"))?;
-    let options = CaptureOptions {
-        timeout_ms: remaining(end)?,
-        allow_non_zero: true,
-        cwd: Some(cwd.into()),
-    };
-    let args = [FLAG.to_owned(), serialized];
-    let stop_reason = Cell::new(None);
-    let mut control = || match check_live(target, cancellation, end) {
-        Ok(()) => Control::Continue,
-        Err(code) => {
-            stop_reason.set(Some(code));
-            if code == "timeout" {
-                Control::Deadline
-            } else {
-                Control::Cancelled
-            }
-        }
-    };
-    let captured =
-        capture_process_if(program, &args, &options, &mut control).map_err(|failure| {
-            // 收尾无法确认优先于原取消/超时；不得冒称helper已终止或交付任何stdout。
-            if failure.code == "process_cleanup_failed" {
-                return fault("selection_helper_cleanup_failed");
-            }
-            if let Some(code) = stop_reason.get() {
-                return fault(code);
-            }
-            match failure.code {
-                "process_timeout" | "timeout" => fault("timeout"),
-                "cancelled" => fault("cancelled"),
-                "invalid_arguments" | "process_setup_failed" | "process_start_failed" => {
-                    fault("selection_helper_start_failed")
-                }
-                _ => fault("selection_helper_failed"),
-            }
-        })?;
-    check_live(target, cancellation, end).map_err(fault)?;
+    let (captured, context, end) = crate::read_once_helper::capture(
+        target,
+        cancellation,
+        deadline,
+        FLAG,
+        "selection",
+        fault,
+        |context, budget_ms| json!({"v":2,"budget_ms":budget_ms,"target":context,"overflow":overflow}),
+    )?;
     let result = decode(captured, &context, overflow)?;
-    check_live(target, cancellation, end).map_err(fault)?;
+    crate::read_once_helper::check_live(target, cancellation, end).map_err(fault)?;
     Ok(result)
 }
 
@@ -305,7 +207,7 @@ fn emit(reply: Reply) -> i32 {
 }
 #[cfg(windows)]
 fn child(request: Request) -> Reply {
-    if !scope::owned_capture_child() {
+    if !crate::read_once_helper::owned_capture_child() {
         return Reply::Error {
             v: 2,
             code: "selection_helper_scope_rejected".into(),
@@ -383,9 +285,6 @@ fn child(_: Request) -> Reply {
         code: "selection_unavailable".into(),
     }
 }
-#[cfg(windows)]
-#[path = "selected_text_helper_scope.rs"]
-mod scope;
 
 #[cfg(test)]
 mod selection_helper_protocol_tests {

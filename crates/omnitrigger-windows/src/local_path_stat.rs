@@ -1,4 +1,4 @@
-//! 只读本地固定卷元数据；不打开内容、不枚举目录、不追随已发现的 reparse。
+//! 只读本地固定卷元数据及有界直接目录枚举；不打开内容、不追随已发现的 reparse。
 //!
 //! 各次盘符/祖先检查不是原子快照。它们不能防止检查之间的名称空间变化，
 //! 也不构成沙盒；后续打开文件必须重新检查。check 不能抢占已进入的系统调用。
@@ -777,3 +777,8 @@ mod tests {
         }
     }
 }
+
+mod directory;
+pub use directory::{
+    read_local_directory, LocalDirectoryEntry, MAX_DIRECTORY_BYTES, MAX_DIRECTORY_ENTRIES,
+};

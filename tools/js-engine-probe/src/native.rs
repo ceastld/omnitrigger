@@ -10,12 +10,13 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 28] = [
+pub const METHODS: [&str; 30] = [
     "history.list",
     "history.get",
     "history.append",
     "history.remove",
     "fs.stat",
+    "fs.read_directory",
     "ui.choose",
     "ui.notify",
     "ui.open_history",
@@ -33,6 +34,7 @@ pub const METHODS: [&str; 28] = [
     "selection.copy",
     "selection.copy_data",
     "selection.read_text",
+    "explorer.context",
     "clipboard.read",
     "clipboard.read_data",
     "clipboard.write",
@@ -49,8 +51,8 @@ pub struct Configuration {
 }
 
 fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiError {
-    let stat = method == "fs.stat";
-    let data_read = method == "clipboard.read_data";
+    let stat = matches!(method, "fs.stat" | "fs.read_directory");
+    let data_read = matches!(method, "clipboard.read_data" | "explorer.context");
     let data_copy = method == "selection.copy_data";
     let history_read = matches!(method, "history.list" | "history.get");
     let history = matches!(
@@ -178,8 +180,10 @@ pub fn call(
         if matches!(
             method.as_str(),
             "fs.stat"
+                | "fs.read_directory"
                 | "ui.toggle_history"
                 | "clipboard.read_data"
+                | "explorer.context"
                 | "selection.copy_data"
                 | "display.brightness_step"
                 | "audio.volume_adjust"
@@ -222,8 +226,10 @@ pub fn call(
                 if matches!(
                     method.as_str(),
                     "fs.stat"
+                        | "fs.read_directory"
                         | "ui.toggle_history"
                         | "clipboard.read_data"
+                        | "explorer.context"
                         | "selection.copy_data"
                         | "display.brightness_step"
                         | "audio.volume_adjust"
@@ -336,7 +342,9 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
             if matches!(
                 method,
                 "fs.stat"
+                    | "fs.read_directory"
                     | "clipboard.read_data"
+                    | "explorer.context"
                     | "selection.copy_data"
                     | "display.brightness_step"
                     | "audio.volume_adjust"

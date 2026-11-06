@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "examples.source-file-preview",
+  "name": "文件夹预览",
+  "version": "0.1.0",
+  "actions": [
+    {
+      "id": "preview",
+      "title": "预览选中文件或文件夹",
+      "version": 1,
+      "runtime": "node",
+      "entry": "main.mjs",
+      "single_instance": true
+    }
+  ]
+}

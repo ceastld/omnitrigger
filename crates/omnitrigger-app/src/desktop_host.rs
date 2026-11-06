@@ -21,6 +21,26 @@ fn error(code: &str, message: impl ToString, effect: &str) -> ActionError {
 }
 
 impl DesktopHost {
+    fn explorer_context(
+        &self,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Value, ActionError> {
+        crate::explorer_context_helper::options(params)?;
+        crate::explorer_context_helper::check_action(cancellation, deadline)?;
+        #[cfg(windows)]
+        {
+            let target = self
+                .target
+                .as_ref()
+                .map_err(|_| crate::explorer_context_helper::fault("target_unavailable"))?;
+            crate::explorer_context_helper::read(target, cancellation, deadline)
+        }
+        #[cfg(not(windows))]
+        Err(crate::explorer_context_helper::fault("unsupported_target"))
+    }
+
     fn read_selection(
         &self,
         params: Value,
@@ -334,6 +354,7 @@ impl NativeHost for DesktopHost {
             "display.brightness_step" => {
                 return crate::brightness_step_host::execute(params, cancellation, None)
             }
+            "explorer.context" => return self.explorer_context(params, cancellation, None),
             "selection.read_text" => return self.read_selection(params, cancellation, None),
             "selection.copy_data" => return self.copy_data(params, cancellation, None),
             _ => {}
@@ -573,6 +594,7 @@ impl NativeHost for DesktopHost {
             "display.brightness_step" => {
                 crate::brightness_step_host::execute(params, cancellation, Some(deadline))
             }
+            "explorer.context" => self.explorer_context(params, cancellation, Some(deadline)),
             "selection.read_text" => self.read_selection(params, cancellation, Some(deadline)),
             "selection.copy_data" => self.copy_data(params, cancellation, Some(deadline)),
             _ => self.call(method, params, cancellation),
@@ -2171,5 +2193,48 @@ mod selection_text_dispatch_tests {
                 .code,
             "cancelled"
         );
+    }
+}
+
+#[cfg(test)]
+mod explorer_context_dispatch_tests {
+    use super::*;
+    fn unavailable() -> DesktopHost {
+        DesktopHost {
+            foreground_targets: ForegroundTargets::default(),
+            target: Err(error("target_unavailable", "synthetic", "not_started")),
+        }
+    }
+    #[test]
+    fn actual_dispatches_refuse_override_and_cancel_before_helper() {
+        let host = unavailable();
+        let token = CancellationToken::new();
+        assert_eq!(
+            host.call("explorer.context", json!({"hwnd":"1"}), &token)
+                .unwrap_err()
+                .code,
+            "invalid_input"
+        );
+        assert_eq!(
+            host.call_with_deadline("explorer.context", json!({}), &token, Instant::now())
+                .unwrap_err()
+                .code,
+            "timeout"
+        );
+        token.cancel();
+        for result in [
+            host.call("explorer.context", json!({}), &token),
+            host.call_with_deadline(
+                "explorer.context",
+                json!({}),
+                &token,
+                Instant::now() + std::time::Duration::from_secs(1),
+            ),
+        ] {
+            let err = result.unwrap_err();
+            assert_eq!(err.code, "cancelled");
+            assert_eq!(err.effect_state.as_deref(), Some("not_started"));
+            assert_eq!(err.method.as_deref(), Some("explorer.context"));
+        }
     }
 }

@@ -1,0 +1,4 @@
+{
+  "compilerOptions": {"strict":true,"noEmit":true,"skipLibCheck":false,"target":"ES2022","module":"NodeNext","moduleResolution":"NodeNext","types":[]},
+  "files": ["fs_read_directory.types.ts","../crates/omnitrigger-actions/runtime/script-types.d.ts"]
+}

@@ -333,7 +333,36 @@ function createDesktopApi(invoke) {
     } catch (cause) { return failure(cause); }
   }
 
+
+  // 只读取本次原目标；不接受 HWND、前台重捕获、复制或截断选项。
+  function explorerContext(args) {
+    const method = 'explorer.context';
+    const fault = code => Object.assign(new Error('原资源管理器上下文读取未获确认；请检查错误代码。'), {code,method,effectState:'not_started'});
+    if (args.length !== 0) throw fault('invalid_input');
+    const validPath = path => {
+      if (!dataText(path,1024,false) || /[\x00-\x1f<>"|?*]/.test(path)) return false;
+      const local = /^[A-Za-z]:\\/.test(path) && !path.slice(2).includes(':');
+      const unc = /^\\\\[^\\/:]+\\[^\\/:]+(?:\\|$)/.test(path) && !path.includes(':') && !/^\\\\[?.]\\/.test(path);
+      return (local || unc) && !path.split('\\').some(part => part === '.' || part === '..');
+    };
+    const result = value => {
+      if (!exactDataFields(value,['currentDirectory','selectedPaths']) || !(value.currentDirectory === null || validPath(value.currentDirectory))
+          || !Array.isArray(value.selectedPaths) || value.selectedPaths.length > 32
+          || Object.keys(value.selectedPaths).length !== value.selectedPaths.length
+          || value.selectedPaths.some(path => !validPath(path))
+          || value.selectedPaths.reduce((n,path) => n+path.length,value.currentDirectory?.length ?? 0) > 8192
+          || new Set(value.selectedPaths.map(path => path.toLowerCase())).size !== value.selectedPaths.length) throw fault('invalid_response');
+      return Object.freeze({currentDirectory:value.currentDirectory,selectedPaths:Object.freeze([...value.selectedPaths])});
+    };
+    const failure = cause => {throw fault(typeof cause?.code === 'string' && /^[a-z_]{1,64}$/.test(cause.code) ? cause.code : 'native_bridge_failed');};
+    try {
+      const value = invoke(method,{});
+      return value && typeof value.then === 'function' ? value.then(result,failure) : result(value);
+    } catch(cause) { return failure(cause); }
+  }
+
   const desktop = Object.freeze({
+    explorerContext: (...args) => explorerContext(args),
     readSelectionText: (...args) => readSelectionText(args),
     captureForegroundTarget,
     sendShortcutTo: (target, keys, options = {}) => {
@@ -517,48 +546,110 @@ function createDesktopApi(invoke) {
       return invoke(method, params);
     },
   });
+  function fsFault(method, code = 'invalid_input') {
+    throw Object.assign(new Error('本地文件查询失败；请检查错误代码。'), {code, effectState:'not_started', method});
+  }
+  function fsPath(path, fail) {
+    if (typeof path !== 'string' || path.length < 3 || path.length > 32767
+        || !/^[A-Za-z]:[\\/]/.test(path) || /[\x00-\x1f\x7f-\x9f]/.test(path)) fail();
+    for (let i = 0; i < path.length; i++) {
+      const unit = path.charCodeAt(i);
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        const next = path.charCodeAt(++i);
+        if (!(next >= 0xdc00 && next <= 0xdfff)) fail();
+      } else if (unit >= 0xdc00 && unit <= 0xdfff) fail();
+    }
+    // 仅对检查副本统一分隔符，查询仍传原文。字符串 split 避免 Boa 正则 split
+    // 在最大长度路径上逐位置尝试匹配。
+    const components = path.length === 3 ? [] : path.slice(3).replaceAll(String.fromCharCode(92), '/').split('/');
+    if (components.at(-1) === '') components.pop();
+    for (const component of components) {
+      if (!component || component === '.' || component === '..' || /[<>:"|?*]/.test(component) || /[ .]$/.test(component)
+          || /^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?: *\.| *$)/i.test(component)) fail();
+    }
+    if (components.some(component => {
+      const name = component.toLowerCase();
+      return name.startsWith('onedrive') || name.startsWith('icloud') || name === 'dropbox';
+    })) fail('path_unavailable');
+  }
+  function fsCall(method, params, result) {
+    const failure = error => {
+      let code = 'fs_error';
+      try {
+        const reported = error?.code;
+        const codes = ['invalid_input','path_not_local','path_unavailable','access_denied','fs_error','fs_unavailable','fs_busy','cancelled','timeout'];
+        if (method === 'fs.read_directory') codes.push('path_missing','not_directory','directory_too_large','directory_changed');
+        if (codes.includes(reported)) code = reported;
+      } catch (_) { /* 不读取或回显异常 getter 的正文。 */ }
+      fsFault(method, code);
+    };
+    try {
+      const value = invoke(method, params);
+      return value && typeof value.then === 'function' ? value.then(result, failure) : result(value);
+    } catch (error) { return failure(error); }
+  }
+  function directoryResult(value, path, maxEntries) {
+    const fail = () => fsFault('fs.read_directory', 'fs_error');
+    try {
+      if (!exactDataFields(value, ['entries','complete']) || value.complete !== true
+          || !Array.isArray(value.entries) || value.entries.length > maxEntries
+          || Reflect.ownKeys(value.entries).length !== value.entries.length + 1) fail();
+      const entries = [], names = new Set();
+      for (let i = 0; i < value.entries.length; i++) {
+        if (!Object.hasOwn(value.entries, i)) fail();
+        const entry = value.entries[i];
+        if (!exactDataFields(entry, ['name','path','kind','reason'])) fail();
+        const {name, path:childPath, kind, reason} = entry;
+        if (!dataText(name, 32767, false) || name === '.' || name === '..' || /[\\/]/.test(name)
+            || !dataText(childPath, 32767, false) || names.has(name)
+            || childPath !== path + (/[\\/]$/.test(path) ? '' : String.fromCharCode(92)) + name
+            || !['file','directory','other','unavailable'].includes(kind)
+            || (kind === 'unavailable' ? !['reparse_point','cloud_placeholder','cloud_path','unsupported_name'].includes(reason) : reason !== null)) fail();
+        if (kind !== 'unavailable') fsPath(childPath, fail);
+        names.add(name);
+        entries.push(Object.freeze({name, path:childPath, kind, reason}));
+      }
+      const result = {entries, complete:true};
+      // 对清理后的 DTO 计 UTF-8 JSON 字节，既不依赖 Node Buffer，也不丢失代理对。
+      let bytes = 0;
+      for (const character of JSON.stringify(result)) {
+        const point = character.codePointAt(0);
+        bytes += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+        if (bytes > 64*1024) fail();
+      }
+      Object.freeze(entries);
+      return Object.freeze(result);
+    } catch (_) { fail(); }
+  }
   const fs = Object.freeze({
     stat: (...args) => {
       const method = 'fs.stat';
-      const fail = (code = 'invalid_input') => {
-        throw Object.assign(new Error(code === 'path_not_local' ? '路径不属于支持的普通本地磁盘路径。' : '本地路径状态查询失败；请检查错误代码。'), {code, effectState:'not_started', method});
-      };
+      const fail = code => fsFault(method, code);
+      if (args.length !== 1) fail();
       const path = args[0];
-      if (args.length !== 1 || typeof path !== 'string' || path.length < 3 || path.length > 32767
-          || !/^[A-Za-z]:[\\/]/.test(path) || /[\x00-\x1f\x7f-\x9f]/.test(path)) fail();
-      for (let i = 0; i < path.length; i++) {
-        const unit = path.charCodeAt(i);
-        if (unit >= 0xd800 && unit <= 0xdbff) {
-          const next = path.charCodeAt(++i);
-          if (!(next >= 0xdc00 && next <= 0xdfff)) fail();
-        } else if (unit >= 0xdc00 && unit <= 0xdfff) fail();
-      }
-      // 仅对组件检查副本统一分隔符，查询仍传原文。字符串 split 避免
-      // Boa 的正则 split 在最大长度路径上逐位置尝试匹配。
-      const components = path.length === 3 ? [] : path.slice(3).replaceAll(String.fromCharCode(92), '/').split('/');
-      if (components.at(-1) === '') components.pop();
-      for (const component of components) {
-        if (!component || component === '.' || component === '..' || /[<>:"|?*]/.test(component) || /[ .]$/.test(component)
-            || /^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?: *\.| *$)/i.test(component)) fail();
-      }
-      if (components.some(component => {
-        const name = component.toLowerCase();
-        return name.startsWith('onedrive') || name.startsWith('icloud') || name === 'dropbox';
-      })) fail('path_unavailable');
-      const failure = error => {
-        const codes = ['invalid_input','path_not_local','path_unavailable','access_denied','fs_error','fs_unavailable','fs_busy','cancelled','timeout'];
-        fail(codes.includes(error?.code) ? error.code : 'fs_error');
-      };
-      const result = value => {
-        if (!value || typeof value !== 'object' || Array.isArray(value) || Reflect.ownKeys(value).length !== 1
-            || !Object.hasOwn(value, 'kind') || !['file','directory','missing','other'].includes(value.kind)) fail('fs_error');
+      fsPath(path, fail);
+      // 平台独立复验盘类型、物理卷、祖先属性和占位文件。
+      return fsCall(method, {path}, value => {
+        if (!exactDataFields(value, ['kind']) || !['file','directory','missing','other'].includes(value.kind)) fail('fs_error');
         return value;
-      };
-      // 词法检查不访问磁盘；盘类型、物理卷、祖先属性和占位文件仍由平台独立复验。
+      });
+    },
+    readDirectory: (...args) => {
+      const method = 'fs.read_directory';
+      const fail = code => fsFault(method, code);
+      if (args.length < 1 || args.length > 2) fail();
+      const [path, supplied] = args;
+      fsPath(path, fail);
+      let maxEntries;
       try {
-        const value = invoke(method, {path});
-        return value && typeof value.then === 'function' ? value.then(result, failure) : result(value);
-      } catch (error) { return failure(error); }
+        const options = supplied === undefined ? {} : supplied;
+        if (!options || typeof options !== 'object' || Array.isArray(options)
+            || Reflect.ownKeys(options).some(key => key !== 'maxEntries')) fail();
+        const value = Object.hasOwn(options, 'maxEntries') ? options.maxEntries : undefined;
+        maxEntries = value === undefined ? 128 : value;
+        if (!Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > 1024) fail();
+      } catch (_) { fail(); }
+      return fsCall(method, {path, max_entries:maxEntries}, value => directoryResult(value, path, maxEntries));
     },
   });
   return {desktop, clipboard, ui, fs};

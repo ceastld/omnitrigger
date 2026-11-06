@@ -28,6 +28,7 @@ export type ActionCancellationEvent = Parameters<ActionCancellationCallback>[0];
 export type ActionCancellationListener = ActionCancellationCallback
   | {handleEvent(event: ActionCancellationEvent): void};
 
+export type ExplorerContextSnapshot = Readonly<{currentDirectory:string|null;selectedPaths:readonly string[]}>;
 export type SelectionTextSnapshot = Readonly<{text:string;truncated:boolean}>;
 declare const capturedTargetBrand: unique symbol;
 export type CapturedTarget = Readonly<{
@@ -175,6 +176,21 @@ export interface FileStatFault extends Error {
   /** 仅此只读调用无副作用，不代表脚本之前的步骤没有副作用。 */
   effectState: 'not_started';
 }
+export type LocalDirectoryEntry = Readonly<{
+  name: string;
+  /** 保留调用者的目录原文，仅在需要时追加反斜杠及子项名。 */
+  path: string;
+  kind: 'file' | 'directory' | 'other' | 'unavailable';
+  reason: null | 'reparse_point' | 'cloud_placeholder' | 'cloud_path' | 'unsupported_name';
+}>;
+export type LocalDirectoryResult = Readonly<{entries: ReadonlyArray<LocalDirectoryEntry>; complete: true}>;
+export interface DirectoryReadFault extends Error {
+  code: 'invalid_input' | 'path_not_local' | 'path_unavailable' | 'path_missing' | 'not_directory' | 'access_denied'
+    | 'directory_too_large' | 'directory_changed' | 'fs_error' | 'fs_unavailable' | 'fs_busy' | 'cancelled' | 'timeout';
+  method: 'fs.read_directory';
+  effectState: 'not_started';
+}
+
 export interface BrowserApi {
   profiles(options?: Pick<BrowserOptions, 'timeoutMs'>): Promise<Array<{
     browser_instance_id: string;
@@ -226,6 +242,10 @@ export interface ActionContext {
      * 词法预检不替代平台复验。单调用内并发返回 fs_busy，传输限时 5 秒且不重试。
      */
     stat(path: string): Promise<LocalPathStat>;
+    /** 直接子项，默认 128、最多 1024；回执最多 64 KiB，超限整次拒绝。
+     * 不递归、不跟随链接、不读取内容；complete 只表示读到枚举末尾，不是原子快照。
+     * 使用与 stat 相同的本地路径守卫。OS 调用不能硬性抢占；迟到结果丢弃。 */
+    readDirectory(path: string, options?: {maxEntries?: number}): Promise<LocalDirectoryResult>;
   };
   process: {
     run(program: string, args?: string[], options?: {cwd?: string; allowNonZero?: boolean}): Promise<{code: number; stdout: string; stderr: string}>;
@@ -254,6 +274,8 @@ export interface ActionContext {
     choose(options: ChooseOptions): Promise<ChooseResult>;
   };
   desktop: {
+    /** 本次原Explorer目标，最多32个完整文件系统路径；单条1024、总计8192 UTF-16，超量拒绝。空选区为[]；虚拟目录为null；虚拟选中项报错。不复制、不读剪贴板、不补当前目录。 */
+    explorerContext(): Promise<ExplorerContextSnapshot>;
     /** 原目标单选区；成功确认无选区/空文本时为 {text:"",truncated:false}，provider/目标/读取失败仍报错。默认 reject，显式 truncate 取前128 UTF-16单元；拆开代理对拒绝。 */
     readSelectionText(options?: {overflow?: 'reject' | 'truncate'}): Promise<SelectionTextSnapshot>;
     /** 显式PID与创建时间；1–5000ms；仅捕获该进程当前前台，不激活或枚举。 */

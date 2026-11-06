@@ -445,6 +445,21 @@ cargo test -p omnitrigger-app interactive_script_line_edit_smoke --locked -- --i
 
 文本烟测在支持完整备份当前格式时才执行剪贴板用例，结束后恢复并逐格式读回核对；遇到不支持的格式会保留原剪贴板并明确失败，不把跳过算作通过。其他来源在测试期间更新剪贴板时，测试保留新内容。
 
+### 原资源管理器的文件系统选区
+
+`ctx.desktop.explorerContext()` 读取本次动作固定的原资源管理器窗口，Node 需要 `await`，轻量脚本同步返回。接口不接受参数，也不重新选取前台窗口。
+
+```javascript
+const value = await ctx.desktop.explorerContext();
+// {currentDirectory: 'D:\\Work', selectedPaths: ['D:\\Work\\report.txt']}
+```
+
+`currentDirectory` 是文件系统目录路径，虚拟目录为 `null`；确认没有选中项时 `selectedPaths` 为 `[]`，不会自动补入当前目录。选中的虚拟项整次报告 `unsupported_item`。结果最多32个完整路径，单条最多1024个、目录与选区合计最多8192个 UTF-16 单元，超量整次拒绝。返回路径不代表已检查文件内容或云端占位状态；要枚举目录，应显式调用下文的 `fs.readDirectory`，其本地路径限制继续生效。
+
+读取在有期限的独立辅助进程中执行，最多2秒，并受动作期限和取消约束。原目标失效或失焦、出现无法区分的活动视图、两次观察不一致时分别返回 `target_changed`、`ambiguous_target`、`selection_changed`；provider、协议或收尾失败也会明确报错，不能当成空选区。它不读取剪贴板或发送复制键，两次一致观察仍不构成原子快照。
+
+[文件夹预览示例](../examples/actions/source-file-preview/) 可接收显式 `roots`，省略时使用原资源管理器的选中文件路径。目录最多请求1024项、总回执64 KiB，每页24项，翻页复用该目录快照；五轮菜单上限包含翻页。超过 API 上限会整次报错，打开前重新检查类型，但不锁定对象身份。
+
 ### Node 打开网址或本地目标
 
 `await ctx.open(target)` 请求系统默认程序打开网址或本地路径，无需前台窗口。只接受一个目标字符串：`http`、`https`、`mailto`、`about` 或盘符开头的本地绝对路径，最多32,766个UTF-16单元；首尾空白、控制字符及非法目标会被拒绝。目标原样传递，不拆成命令行，不接收参数、verb或其他选项。
@@ -478,6 +493,26 @@ await ctx.openFileInParent('D:/Work/report.pdf'); // Node 动作
 回执只确认窗口创建，动作结束后窗口仍然存在。窗口默认关闭采集；关闭它只停止自身采集，确认停止后才移除，不停止主窗采集或退出应用。采集停止失败时窗口保留，可再次关闭以重试。已有选择窗或历史窗时返回 `ui_busy`；无应用界面的 CLI 返回 `ui_unavailable`。提交前取消或过期为 `not_started`，创建已经开始但结果无法确认时为 `unknown`，不会自动重试。
 
 `ctx.ui.toggleHistory()` 切换上述同一个窗口：无窗时沿用本次 Host 原目标创建，返回 `{opened:true}`；已有窗时仅关闭该窗，等待自身采集停止并移除后返回 `{closed:true}`。Node 需要 `await`，轻量脚本同步返回。关闭无需新的外部目标，不停止主窗采集；选择窗占用、手动关闭或切换关闭尚未确认时返回 `ui_busy`。无界面时为 `ui_unavailable`，不另启进程。调用无参数；取消或超时在开始前为 `not_started`，创建或关闭已经开始后为 `unknown`，不会回滚或自动重试。原 `openHistory()` 仍只创建窗口。
+
+### 有界直接目录枚举
+
+`ctx.fs.readDirectory(path, {maxEntries})` 用于文件预览等需要目录子项的动作。Node 用 `await`；轻量脚本同步返回。`path` 必须明确给出，与 `fs.stat` 使用相同的盘符绝对路径、本地固定卷、祖先属性及云盘检查。不会选取当前目录，不递归，不读取子项内容或跟随子项链接。
+
+```javascript
+const result = await ctx.fs.readDirectory('D:/Work', {maxEntries:128});
+for (const entry of result.entries) {
+  // kind 为 unavailable 时先显示 reason，不继续打开或进入该路径。
+  console.log(entry.name, entry.kind, entry.reason);
+}
+```
+
+成功返回只读 `{entries,complete:true}`，子项为只读 `{name,path,kind,reason}`。`kind` 是 `file`、`directory`、`other` 或 `unavailable`；普通项 `reason:null`。重解析点返回 `reparse_point`，离线/召回属性返回 `cloud_placeholder`，云盘名称返回 `cloud_path`，不能供普通路径 API 使用的名称返回 `unsupported_name`。这些子项只读取目录记录中的名称和属性，不打开子项。无法无损表示的 UTF-16 名称导致整次 `fs_error`，不会替换字符或静默丢项。结果按名称排序，保留调用者目录原文，仅在需要时追加反斜杠和子项名。
+
+默认最多 128 项，`maxEntries` 只接受 1–1024 整数。路径和 JSON 元数据回执合计最多 64 KiB；平台为固定字段预留保守余量，因此可能在实际 JSON 到达 64 KiB 前拒绝。数量、子项路径长度或总回执超过限制时整次报告 `directory_too_large`，不返回部分列表。`.` 和 `..` 不作为子项。目录为空时返回空数组及 `complete:true`。
+
+错误包含 `method:'fs.read_directory'` 和 `effectState:'not_started'`，只描述这次只读调用。不存在为 `path_missing`，普通文件为 `not_directory`，访问拒绝为 `access_denied`；路径不支持、不可用和无宿主分别为 `path_not_local`、`path_unavailable`、`fs_unavailable`。发现重复记录或目录身份改变为 `directory_changed`。Node 本机调用并发报告 `fs_busy`；RPC 总预算五秒，不因碎片回执续时，不重试。
+
+`complete:true` 仅表示已读到本次枚举末尾。句柄、路径和身份复验不构成目录锁；并发增删、重命名或名称空间变化仍可能发生，结果不是原子快照，后续打开必须重新检查。句柄最终路径无法与调用路径核对时保守报告 `path_unavailable`，包括部分短名称或非 ASCII 大小写别名。取消与截止时限在每次系统调用前后以及回执交付前检查；不能硬性抢占已经进入的 OS 调用，迟到成功和错误都会被取消或超时替代。
 
 ### 本地文件元数据
 

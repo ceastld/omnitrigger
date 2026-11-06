@@ -15,7 +15,7 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 31] = [
+const METHODS: [&str; 33] = [
     "system.open",
     "system.open_file_in_parent",
     "process.capture",
@@ -24,6 +24,7 @@ const METHODS: [&str; 31] = [
     "history.append",
     "history.remove",
     "fs.stat",
+    "fs.read_directory",
     "ui.choose",
     "ui.notify",
     "ui.open_history",
@@ -41,6 +42,7 @@ const METHODS: [&str; 31] = [
     "selection.copy",
     "selection.copy_data",
     "selection.read_text",
+    "explorer.context",
     "clipboard.read",
     "clipboard.read_data",
     "clipboard.write",
@@ -237,12 +239,17 @@ impl NativeBridge {
                         request.method.as_str(),
                         "system.open" | "system.open_file_in_parent"
                     );
+                    let file_read =
+                        matches!(request.method.as_str(), "fs.stat" | "fs.read_directory");
                     let capture = request.method == "process.capture";
                     let brightness = matches!(
                         request.method.as_str(),
                         "display.brightness_step" | "audio.volume_adjust"
                     );
-                    let selection_read = request.method == "selection.read_text";
+                    let selection_read = matches!(
+                        request.method.as_str(),
+                        "selection.read_text" | "explorer.context"
+                    );
                     let data_read = request.method == "clipboard.read_data" || selection_read;
                     let data_copy = request.method == "selection.copy_data";
                     let history_read =
@@ -268,7 +275,14 @@ impl NativeBridge {
                     } else if cancellation.is_cancelled() {
                         let mut error =
                             ActionError::new("cancelled", "动作已取消，未开始本机调用。");
-                        if opening || data_read || data_copy || history || capture || brightness {
+                        if opening
+                            || file_read
+                            || data_read
+                            || data_copy
+                            || history
+                            || capture
+                            || brightness
+                        {
                             error.effect_state = Some("not_started".into());
                         }
                         Err(error)
@@ -294,6 +308,7 @@ impl NativeBridge {
                             || request.method == "ui.toggle_history"
                             || data_copy
                             || selection_read
+                            || file_read
                             || history
                             || capture
                             || brightness
@@ -304,6 +319,12 @@ impl NativeBridge {
                         }
                     }
                     .map_err(|mut error| {
+                        if file_read {
+                            error.message = "本地文件查询失败；请检查错误代码。".into();
+                            error.method = Some(request.method.clone());
+                            error.required_permissions.clear();
+                            error.effect_state = Some("not_started".into());
+                        }
                         if brightness {
                             error.message = if request.method == "audio.volume_adjust" {
                                 "音量调节未获完整确认；请检查错误代码和效果状态。"

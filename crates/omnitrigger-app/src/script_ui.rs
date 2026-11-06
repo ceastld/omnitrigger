@@ -76,7 +76,10 @@ fn text_valid(text: &str, max: usize) -> bool {
 impl Options {
     fn parse(params: Value) -> Result<Self, ActionError> {
         let invalid = || {
-            fault("invalid_input", "选择参数无效：需要 1–200 个唯一 ID 的候选项，文本总量最多 32 KiB，时限 1–60000 毫秒。")
+            fault(
+                "invalid_input",
+                "选择参数无效：需要 1–200 个唯一 ID 的候选项，文本总量最多 32 KiB，时限 1–60000 毫秒。",
+            )
         };
         let size = serde_json::to_vec(&params).map_err(|_| invalid())?.len();
         let options: Self = serde_json::from_value(params).map_err(|_| invalid())?;
@@ -154,6 +157,8 @@ impl<H: NativeHost> NativeHost for Host<H> {
             crate::script_open::open_file_in_parent(params, cancellation, deadline)
         } else if method == "fs.stat" {
             crate::script_fs::stat(params, cancellation, deadline)
+        } else if method == "fs.read_directory" {
+            crate::script_fs::read_directory(params, cancellation, deadline)
         } else if method == "ui.notify" {
             crate::script_notify::notify(params, cancellation, deadline)
         } else if method == "ui.open_history" {
@@ -249,7 +254,7 @@ fn wait_for_choice(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(fault("ui_unavailable", "选择窗口宿主已退出。"))
+                return Err(fault("ui_unavailable", "选择窗口宿主已退出。"));
             }
         }
     }
@@ -1330,3 +1335,7 @@ mod history_open_lifecycle_tests {
 #[cfg(test)]
 #[path = "../../../tests/script_ui_choose.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../../tests/script_ui_fs_read_directory.rs"]
+mod fs_directory_dispatch_tests;

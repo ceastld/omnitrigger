@@ -1,6 +1,9 @@
 //! 无 UI 的只读文件元数据适配；本机安全检查留在 Windows 平台层独立复验。
 use omnitrigger_actions::{ActionError, CancellationToken};
-use omnitrigger_windows::{stat_local_path, LocalPathKind, LocalStatError};
+use omnitrigger_windows::{
+    read_local_directory, stat_local_path, LocalDirectoryEntry, LocalPathKind, LocalStatError,
+    MAX_DIRECTORY_BYTES, MAX_DIRECTORY_ENTRIES,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::Instant;
@@ -153,3 +156,108 @@ fn stat_with(
 #[cfg(test)]
 #[path = "../../../tests/script_fs_stat.rs"]
 mod tests;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectoryParams {
+    path: String,
+    max_entries: usize,
+}
+
+fn directory_error(code: &str) -> ActionError {
+    let (code, message) = match code {
+        "invalid_input" => (
+            "invalid_input",
+            "目录枚举需要普通盘符绝对路径及 1–1024 的 max_entries 整数。",
+        ),
+        "path_not_local" => ("path_not_local", "仅支持直接映射到本地固定卷的盘符。"),
+        "path_unavailable" => (
+            "path_unavailable",
+            "目录含有链接、云端占位或不允许访问的路径属性。",
+        ),
+        "path_missing" => ("path_missing", "目标目录或其祖先不存在。"),
+        "not_directory" => ("not_directory", "目标不是目录。"),
+        "access_denied" => ("access_denied", "系统拒绝枚举目录。"),
+        "directory_too_large" => (
+            "directory_too_large",
+            "目录子项数量或回执总大小超过上限；未返回部分结果。",
+        ),
+        "directory_changed" => (
+            "directory_changed",
+            "目录在查询期间发生变化，无法确认完整结果。",
+        ),
+        "fs_unavailable" => ("fs_unavailable", "当前宿主不提供目录枚举。"),
+        "cancelled" => ("cancelled", "目录枚举已取消。"),
+        "timeout" => ("timeout", "目录枚举超过截止时限。"),
+        _ => ("fs_error", "无法枚举本地目录。"),
+    };
+    let mut error = ActionError::new(code, message);
+    error.method = Some("fs.read_directory".into());
+    error.effect_state = Some("not_started".into());
+    error
+}
+
+pub fn read_directory(
+    params: Value,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+) -> Result<Value, ActionError> {
+    read_directory_with(
+        params,
+        cancellation,
+        deadline,
+        |path, max_entries, check| read_local_directory(path, max_entries, check),
+    )
+}
+
+fn read_directory_with(
+    params: Value,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+    query: impl FnOnce(
+        &str,
+        usize,
+        &dyn Fn() -> Result<(), LocalStatError>,
+    ) -> Result<Vec<LocalDirectoryEntry>, LocalStatError>,
+) -> Result<Value, ActionError> {
+    if !params.is_object() {
+        return Err(directory_error("invalid_input"));
+    }
+    let params: DirectoryParams =
+        serde_json::from_value(params).map_err(|_| directory_error("invalid_input"))?;
+    if !(1..=MAX_DIRECTORY_ENTRIES).contains(&params.max_entries) {
+        return Err(directory_error("invalid_input"));
+    }
+    validate_path(&params.path).map_err(|error| directory_error(&error.code))?;
+    let check_state = || check(cancellation, deadline);
+    check_state().map_err(|error| directory_error(error.code))?;
+    let result = query(&params.path, params.max_entries, &check_state);
+    // OS 调用不可强制抢占；成功和失败都必须经过返回后的取消/时限检查。
+    check_state().map_err(|error| directory_error(error.code))?;
+    let entries = result.map_err(|error| directory_error(error.code))?;
+    if entries.len() > params.max_entries {
+        return Err(directory_error("directory_too_large"));
+    }
+    let entries: Vec<Value> = entries
+        .into_iter()
+        .map(|entry| {
+            json!({
+                "name":entry.name, "path":entry.path, "kind":entry.kind, "reason":entry.reason,
+            })
+        })
+        .collect();
+    let result = json!({"entries":entries,"complete":true});
+    if serde_json::to_vec(&result)
+        .map_err(|_| directory_error("fs_error"))?
+        .len()
+        > MAX_DIRECTORY_BYTES
+    {
+        return Err(directory_error("directory_too_large"));
+    }
+    check_state().map_err(|error| directory_error(error.code))?;
+    Ok(result)
+}
+
+#[cfg(test)]
+#[path = "../../../tests/script_fs_read_directory.rs"]
+mod directory_tests;
