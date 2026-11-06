@@ -87,4 +87,3 @@ function Download-Public([string]$Url, [string]$Destination, [long]$ExpectedByte
         $installHandler.Dispose()
     }
 }
-
