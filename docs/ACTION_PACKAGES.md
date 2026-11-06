@@ -701,3 +701,20 @@ Node使用`await ctx.desktop.adjustVolume({deltaPercent:5})`，同步脚本用�
 wire为audio.volume_adjust，deltaPercent映射为delta_percent。返回匿名previousPercent、requestedPercent、currentPercent及保守effectState:'unknown'。即使在边界夹紧后请求值不变，现有原生路径仍调用设置接口；不把它称为未写入。读回可能受到设备量化或其他客户端影响，不保证等于请求，不以SDK重新计算或伪造读回。
 
 参数错误和写前取消/期限为not_started；进入设置调用后无法确认的取消、期限或原生错误为unknown。与亮度共用守卫和既有NativeBridge断连处理，在原生读写前后检查总期限，不能抢占已进入的阻塞调用。没有重试、补偿、外部工具或另一执行器。错误只含固定消息、代码、方法及效果状态，不返回设备标识或原异常正文。
+
+## N10 本地 Rust 适配示例
+
+[N10 动作包](../examples/actions/n10-rust/) 使用现有 script 运行时，业务入口直接调用本地 Rust CLI；[源码配置草稿](../examples/n10-rust.json) 默认禁用，不自动建立有效触发器。依赖程序、宿主、数据根和 profile 必须在输入中明确填写；call.json 的 null 值用于表示尚未配置，引用检查不会把它们变成可运行配置。
+
+以下引用检查要求所选配置目录已安装轻量脚本宿主；开发时也可用 `OMNITRIGGER_SCRIPT_HOST` 显式指定本地宿主。源码示例不继承其他配置的运行时安装，缺少宿主时会报告 `runtime_unavailable`。
+
+```powershell
+.\target\debug\omnitrigger.exe --config .\examples\n10-rust.json --list-package-actions
+.\target\debug\omnitrigger.exe --config .\examples\n10-rust.json --check-action .\examples\actions\n10-rust\call.json
+```
+
+以上命令仅列出目录或检查引用，不运行 N10。实际调用需要可提供原目标快照的应用宿主，以及支持显式根/目标协议的 CLI 和 Rust 宿主。入口不会自动启动依赖、重新抓前台或重试；null/空串参数使用 clip toggle，其余字符串原样发送。版本提示保留在动作名中，accepted_only 仅表示业务入口接纳，不代表外部显示或完整业务完成。未确认/部分结果走现有结构化错误通道。
+
+该示例不新增插件安装器、状态 API 或 SDK；通用导入 UI、原生依赖自动安装及参数表单尚未提供，具体见包内说明。外部原生程序没有并入动作包或 OmniTrigger 发行载荷。
+
+纯 Node 包检查可运行 `node tests/n10-rust-package.mjs`。它从清单解析真实入口，以假端口核对参数、禁用配置、协议结果和许可证，不启动原生程序；不替代真实目录加载或原生调用验收。

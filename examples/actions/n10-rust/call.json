@@ -1,0 +1,16 @@
+{
+  "package_id": "examples.n10-rust",
+  "action_id": "32c12786-9bb8-4b0c-8d55-7e6a4c8a5d10",
+  "action_version": 1,
+  "input": {
+    "cliExecutable": null,
+    "hostExecutable": null,
+    "dataRoot": null,
+    "profile": null,
+    "timeoutMs": 5000,
+    "actionParameter": {
+      "present": true,
+      "value": null
+    }
+  }
+}
