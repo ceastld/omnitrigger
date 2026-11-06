@@ -89,7 +89,7 @@ test('明确 profile 固定到每次调用，创建始终携带目标窗口', as
 });
 
 test('复用规范化精确 URL 并复查身份，激活和窗口聚焦分步确认', async () => {
-  const ctx = fixture({ ...base, url: 'https://EXAMPLE.com:443', focusWindow: true }, [window, [tab], tab, { ...tab, active: true }, window]);
+  const ctx = fixture({ ...base, url: 'https://EXAMPLE.com:443', focusWindow: true }, [window, [tab], tab, { ...tab, active: true }, { ...window, focused: true }]);
   const result = await runWorkflow(ctx, 'open-url');
   assert.equal(result.disposition, 'reused');
   assert.deepEqual(names(ctx), ['profiles', 'windows.get', 'tabs.query', 'tabs.get', 'tabs.update', 'windows.update']);
@@ -155,7 +155,7 @@ test('结构异常不当作空列表，列表重复 ID 被拒绝', async () => {
 });
 
 test('创建成功后聚焦失败保留新标签 ID、权限与部分成功，不自动重试', async () => {
-  const ctx = fixture({ ...base, focusWindow: true }, [window, [], { id: 9, windowId: 4 }, fault('permission_required', 'not_started', ['windows'])]);
+  const ctx = fixture({ ...base, focusWindow: true }, [window, [], { id: 9, windowId: 4, active: true }, fault('permission_required', 'not_started', ['windows'])]);
   const result = await runWorkflow(ctx, 'open-url');
   assert.equal(result.status, 'partial');
   assert.deepEqual(result.target, { tabId: 9, windowId: 4 });
@@ -274,7 +274,7 @@ test('Node 动作宿主实际加载入口，保留部分成功回执与抛出的
         async call(method, args) {
           if (method === 'windows.get') return {id:4,type:'normal'};
           if (method === 'tabs.query') return [];
-          if (method === 'tabs.create') return {id:12,windowId:4};
+          if (method === 'tabs.create') return {id:12,windowId:4,active:true};
           if (method === 'windows.update' || method === 'sessions.getRecentlyClosed')
             throw Object.assign(new Error('需要权限'),{code:'permission_required',method,effectState:'not_started',requiredPermissions:['sessions']});
           throw new Error('非预期调用');
@@ -357,4 +357,42 @@ test('复用标签激活返回错误身份或无效结构时停止聚焦且不�
     assert.equal(result.steps.length, 1);
     assert.deepEqual(names(ctx), ['profiles', 'windows.get', 'tabs.query', 'tabs.get', 'tabs.update']);
   }
+});
+
+
+test('新建要求激活但回执未确认时保留标签ID和partial，不继续聚焦', async () => {
+  for (const active of [false, undefined]) {
+    const created = { id: 9, windowId: 4, ...(active === undefined ? {} : { active }) };
+    const ctx = fixture({ ...base, focusWindow: true }, [window, [], created]);
+    const result = await runWorkflow(ctx, 'open-url');
+    assert.equal(result.status, 'partial');
+    assert.deepEqual(result.target, { tabId: 9, windowId: 4 });
+    assert.equal(result.disposition, 'created');
+    assert.deepEqual(result.error, { code: 'activation_unconfirmed', method: 'tabs.create', effect_state: 'partial' });
+    assert.deepEqual(names(ctx), ['profiles', 'windows.get', 'tabs.query', 'tabs.create']);
+  }
+});
+
+test('聚焦回执必须确认指定窗口与focused，失败保留partial且不重试', async () => {
+  for (const [reply, code] of [[undefined, 'invalid_response'], [null, 'invalid_response'],
+    [{ id: 5, focused: true }, 'target_changed'], [{ id: 4, focused: false }, 'focus_unconfirmed'],
+    [{ id: 4 }, 'focus_unconfirmed']]) {
+    const ctx = fixture({ ...base, focusWindow: true }, [window, [tab], tab, { ...tab, active: true }, reply]);
+    const result = await runWorkflow(ctx, 'open-url');
+    assert.equal(result.status, 'partial');
+    assert.deepEqual(result.target, { tabId: 7, windowId: 4 });
+    assert.equal(result.error.code, code);
+    assert.equal(result.error.method, 'windows.update');
+    assert.equal(result.error.effect_state, 'partial');
+    assert.equal(result.steps.length, 2);
+    assert.equal(names(ctx).filter(method => method === 'windows.update').length, 1);
+  }
+});
+
+test('新建激活和明确窗口聚焦均确认时完成', async () => {
+  const ctx = fixture({ ...base, focusWindow: true }, [window, [], { id: 9, windowId: 4, active: true }, { id: 4, focused: true }]);
+  const result = await runWorkflow(ctx, 'open-url');
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.target, { tabId: 9, windowId: 4 });
+  assert.equal(result.steps.length, 2);
 });

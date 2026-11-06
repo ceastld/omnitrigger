@@ -304,7 +304,12 @@ export async function runWorkflow(ctx, operation) {
   };
   /** @param {number} windowId */
   const focus = async windowId => {
-    if (input.focusWindow === true) await mutate('windows.update', [windowId, { focused: true }], { windowId });
+    if (input.focusWindow === true) {
+      const focused = await mutate('windows.update', [windowId, { focused: true }], { windowId });
+      if (!focused || !id(focused.id)) fail('invalid_response', '聚焦回执缺少明确窗口 ID。', 'windows.update');
+      if (focused.id !== windowId) fail('target_changed', '聚焦回执返回了其他窗口。', 'windows.update');
+      if (focused.focused !== true) fail('focus_unconfirmed', '回执未确认指定浏览器窗口已聚焦。', 'windows.update');
+    }
   };
   /** @param {string} url */
   const open = async url => {
@@ -348,6 +353,9 @@ export async function runWorkflow(ctx, operation) {
       Object.assign(steps[steps.length - 1], identity);
       tabIdentity(created, input.windowId);
       Object.assign(receipt, { disposition: 'created', target: identity });
+      if (input.activate !== false && created.active !== true) {
+        fail('activation_unconfirmed', '新标签回执未确认已激活。', 'tabs.create');
+      }
     }
     await focus(input.windowId);
   };
