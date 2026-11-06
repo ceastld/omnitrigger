@@ -1,6 +1,18 @@
 # 插件动作与快速绑定设计
 
-状态：RaiShot 动作库已由声明式清单生成，支持内置截图动作、本地多动作清单、名称搜索、已有安装发现、一键下载依赖、默认快捷键、自定义与恢复默认、共享插件设置及进程执行。当前绑定保存版本为 8，旧插件引用保持兼容。本文描述 RaiShot 进程适配；通用本地 JS 扩展使用独立的[动作包接口](ACTION_PACKAGES.md)。通用插件导入界面、业务参数表单和自动更新尚未实现。
+状态：RaiShot 动作库已由声明式清单生成，支持内置截图动作、本地多动作清单、名称搜索、已有安装发现、一键下载依赖、默认快捷键、自定义与恢复默认、共享插件设置及进程执行。当前绑定保存版本为 23，旧插件引用保持兼容。本文描述 RaiShot 进程适配及历史窗口的本机开发接入；通用本地 JS 扩展使用独立的[动作包接口](ACTION_PACKAGES.md)。通用插件导入界面、业务参数表单和自动更新尚未实现。
+
+## 历史与聚合窗口的本机开发接入
+
+扩展页可启停已登记的 `omnitrigger.legacy` 包。启用时在后台校验文件并准备独立宿主，准备完成后开放 `clip-toggle` 和 `search-toggle` 两个 Script 动作；准备期间拒绝业务调用，不缓存或补发操作。停用先关闭动作准入，再请求宿主正常停止。退出请求已接受与进程已经退出分别表示，失败不会自动重试或强行结束进程。
+
+当前仅支持预先布置的本机开发包，未提供在线安装包。开发者将完整包放到配置同级的 `actions/legacy-host-entry/`，其中 `action.json` 声明两个动作，宿主固定为 `host/OmniTrigger.LegacyHost.exe`。`manifest.json` 使用插件的 `schema_version`、`package_version`、`architecture`、`files` 结构，逐文件记录 `path`、`bytes` 和 `sha256`。登记前会检查完整文件集合、长度及摘要；登记只保存摘要，保留原启用状态，不启动宿主或创建绑定。
+
+```powershell
+omnitrigger.exe --config D:\Dev\OmniProfile\bindings.json --register-legacy-package <manifest.json的SHA256>
+```
+
+登记后重启应用或使用扩展页的刷新入口，再点击“启用”。该宿主复用独立的轻量脚本运行时；未安装脚本运行时时会报告原因。普通窗口调用会捕获原目标并由宿主再次核验，内部准备入口没有输入目标。动作启用会运行宿主，宿主的数据采集行为由其配置决定。旧配置缺省保持此插件停用。
 
 ## 目标与首版决策
 
@@ -271,7 +283,7 @@ RaiShot 是自带安装目录的独立程序，OmniTrigger 只引用它，不为
 | `omnitrigger-core` | 保持纯输入模型、确定性匹配及结构化冲突检查，不加入插件依赖 |
 | `plugins.rs` | 内置与本地 RaiShot 清单、动作目录、本机设置、可用状态、默认触发与调用解析；逻辑不依赖 GPUI |
 | `plugin_discovery.rs` / `plugin_install.rs` / `plugin_install.ps1` | 有界发现已有安装、后台下载、隔离解包、哈希及依赖校验，不运行截图程序 |
-| `settings.rs` | `Binding.action`、版本 1–7 迁移、版本 8 保存；目标不可用与格式损坏分离 |
+| `settings.rs` | `Binding.action`、版本 1–22 迁移、版本 23 保存；目标不可用与格式损坏分离 |
 | `presets.rs` | 继续只生成 `TriggerSpec`；使用预设时保留动作草稿 |
 | `execution.rs` | 复用进程执行与总容量，加入调用 ID、并发组和结构化接纳错误 |
 | `main.rs` | 动作库、共享设置、默认与自定义触发；`fire` / 面板 / 测试统一调用入口 |

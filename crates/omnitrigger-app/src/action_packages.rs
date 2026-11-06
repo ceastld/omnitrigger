@@ -226,6 +226,10 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
         }
         let call: ActionCall = serde_json::from_slice(&bytes)
             .map_err(|error| request_error(format!("动作调用格式有误：{error}")))?;
+        if run.is_some() {
+            crate::legacy_local_source::verify_cli_action(&settings::path(), &call)
+                .map_err(rejected)?;
+        }
         let explicit_host = target_path
             .map(|path| {
                 let snapshot = crate::action_target_context::read(path)?;
@@ -297,11 +301,12 @@ impl Workspace {
                 action_version: entry.definition.version,
                 input: serde_json::json!({}),
             };
-            let reason = self
-                .action_service
-                .validate(&call)
-                .err()
-                .map(|error| error.to_string());
+            let reason = self.legacy_unavailable_reason(&call).or_else(|| {
+                self.action_service
+                    .validate(&call)
+                    .err()
+                    .map(|error| error.to_string())
+            });
             let name = title.clone();
             let edit_call = call.clone();
             let is_script = entry.definition.runtime == "script";

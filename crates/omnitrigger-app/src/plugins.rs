@@ -152,6 +152,16 @@ pub struct Plugins {
 struct PluginSettings {
     version: u32,
     raishot: RaiShotSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    legacy: Option<LegacySettings>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacySettings {
+    enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest_sha256: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -166,6 +176,7 @@ impl Default for Plugins {
         let mut plugins = Self {
             settings: PluginSettings {
                 version: 1,
+                legacy: None,
                 raishot: RaiShotSettings {
                     enabled: true,
                     cli_path: String::new(),
@@ -214,6 +225,39 @@ impl Plugins {
         let text = serde_json::to_vec_pretty(&self.settings)
             .map_err(|error| PluginError::Settings(error.to_string()))?;
         crate::settings::atomic_write(&destination, &text).map_err(PluginError::Settings)
+    }
+
+    pub fn legacy_enabled(&self) -> bool {
+        self.settings
+            .legacy
+            .as_ref()
+            .is_some_and(|settings| settings.enabled)
+    }
+
+    pub fn configure_legacy_enabled(&mut self, enabled: bool) {
+        self.settings
+            .legacy
+            .get_or_insert_with(|| LegacySettings {
+                enabled: false,
+                manifest_sha256: None,
+            })
+            .enabled = enabled;
+    }
+
+    pub fn legacy_manifest_sha256(&self) -> Option<&str> {
+        self.settings
+            .legacy
+            .as_ref()
+            .and_then(|value| value.manifest_sha256.as_deref())
+    }
+    pub fn pin_legacy_manifest(&mut self, digest: String) {
+        self.settings
+            .legacy
+            .get_or_insert_with(|| LegacySettings {
+                enabled: false,
+                manifest_sha256: None,
+            })
+            .manifest_sha256 = Some(digest);
     }
 
     pub fn raishot_path(&self) -> &str {
@@ -443,6 +487,18 @@ fn settings_directory(config_path: &Path) -> &Path {
 fn decode_settings(text: &str) -> Result<PluginSettings, PluginError> {
     let settings: PluginSettings = serde_json::from_str(text)
         .map_err(|error| PluginError::Settings(format!("格式有误，原文件已保留：{error}")))?;
+    if settings
+        .legacy
+        .as_ref()
+        .and_then(|value| value.manifest_sha256.as_ref())
+        .is_some_and(|digest| {
+            digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    {
+        return Err(PluginError::Settings(
+            "宿主安装清单摘要无效，原文件已保留。".into(),
+        ));
+    }
     if settings.version != 1 {
         return Err(PluginError::Settings(
             "不支持此设置版本，原文件已保留。".into(),
@@ -1043,5 +1099,47 @@ mod tests {
         assert_eq!(plugins.raishot_path(), "旧路径");
         std::fs::remove_file(destination).unwrap();
         std::fs::remove_dir(directory).unwrap();
+    }
+    #[test]
+    fn legacy_absent_setting_does_not_enable_or_add_default_field() {
+        let settings =
+            decode_settings(r#"{"version":1,"raishot":{"enabled":true,"cliPath":""}}"#).unwrap();
+        assert!(settings.legacy.is_none());
+        assert!(settings.raishot.enabled);
+        assert!(serde_json::to_value(settings)
+            .unwrap()
+            .get("legacy")
+            .is_none());
+    }
+    #[test]
+    fn legacy_explicit_state_preserves_raishot_settings() {
+        let mut settings = decode_settings(
+            r#"{"version":1,"raishot":{"enabled":false,"cliPath":"D:/owned/raishot-cli.exe"}}"#,
+        )
+        .unwrap();
+        settings.legacy = Some(LegacySettings {
+            enabled: false,
+            manifest_sha256: None,
+        });
+        let output = serde_json::to_value(settings).unwrap();
+        assert_eq!(output["legacy"]["enabled"], false);
+        assert_eq!(output["raishot"]["enabled"], false);
+        assert_eq!(output["raishot"]["cliPath"], "D:/owned/raishot-cli.exe");
+    }
+
+    #[test]
+    fn legacy_manifest_pin_preserves_enable_state_and_survives_explicit_toggle() {
+        let mut plugins = Plugins::default();
+        let raishot = plugins.raishot_enabled();
+        plugins.pin_legacy_manifest("a".repeat(64));
+        assert!(!plugins.legacy_enabled());
+        plugins.configure_legacy_enabled(true);
+        assert_eq!(
+            plugins.legacy_manifest_sha256(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        plugins.configure_legacy_enabled(false);
+        assert!(plugins.legacy_manifest_sha256().is_some());
+        assert_eq!(plugins.raishot_enabled(), raishot);
     }
 }

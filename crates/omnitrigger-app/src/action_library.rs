@@ -369,6 +369,28 @@ impl Workspace {
                     )
                 }),
         );
+        let legacy_enabled = self.plugins.legacy_enabled();
+        let legacy = extension_card(
+            Icon::Layers,
+            theme::ACCENT_2,
+            "历史与聚合窗口",
+            if self.legacy_source.is_none() {
+                "正式宿主尚未提供。"
+            } else {
+                "启用后准备宿主，停用时请求正常停止。"
+            },
+            button(
+                "toggle-legacy-plugin",
+                if legacy_enabled { "停用" } else { "启用" },
+                Tone::Primary,
+                (legacy_enabled && (!installing || self.legacy_job.is_some()))
+                    || (!legacy_enabled && !installing && self.legacy_source.is_some()),
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_legacy_plugin(cx))),
+        )
+        .when_some(self.legacy_status.clone(), |el, status| {
+            el.child(caption(status))
+        });
         let catalog = self.action_service.catalog();
         let count = catalog.actions.len();
         let packages = extension_card(
@@ -409,6 +431,7 @@ impl Workspace {
             .children(self.render_banner(cx))
             .child(self.render_browser_connector(cx))
             .child(raishot)
+            .child(legacy)
             .child(packages);
         div()
             .id("extensions")

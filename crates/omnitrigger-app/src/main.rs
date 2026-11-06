@@ -36,6 +36,11 @@ mod desktop_text_smoke;
 mod event_bridge;
 mod execution;
 mod external_action;
+mod legacy_load_gate;
+mod legacy_local_source;
+mod legacy_plugin_ui;
+mod legacy_plugin_work;
+mod legacy_prepare_bridge;
 mod local_action;
 mod local_editor;
 mod local_executor;
@@ -575,6 +580,14 @@ struct Workspace {
     drag_wheel_session: Option<DragWheelSession>,
     install_events: Option<Receiver<plugin_install::InstallEvent>>,
     install_status: Option<String>,
+    legacy_gate: legacy_load_gate::LegacyLoadGate,
+    legacy_source: Option<std::sync::Arc<dyn legacy_plugin_work::LegacyArtifactSource>>,
+    legacy_job: Option<legacy_plugin_ui::LegacyUiJob>,
+    legacy_stop_after_job: bool,
+    legacy_status: Option<String>,
+    legacy_session_used: bool,
+    legacy_last_stop: Option<bool>,
+    legacy_close_requested: bool,
     executor: CommandExecutor,
     shortcut_executor: CommandExecutor,
     mouse_shortcut_invocations: HashMap<u64, u64>,
@@ -930,7 +943,12 @@ impl Workspace {
             Ok(queue) => (queue, None),
             Err(error) => (None, Some(error)),
         };
-        Self {
+        let (legacy_source, legacy_location_error) =
+            match legacy_local_source::locate(&settings::path(), &plugins) {
+                Ok(source) => (source, None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+        let mut workspace = Self {
             mode,
             backend,
             wheel_input_policy,
@@ -1012,6 +1030,14 @@ impl Workspace {
             drag_wheel_session: None,
             install_events: None,
             install_status: relocated,
+            legacy_gate: Default::default(),
+            legacy_source,
+            legacy_job: None,
+            legacy_stop_after_job: false,
+            legacy_status: legacy_location_error,
+            legacy_session_used: false,
+            legacy_last_stop: None,
+            legacy_close_requested: false,
             executor: CommandExecutor::new(),
             package_input,
             package_picker_for_draft: false,
@@ -1072,7 +1098,13 @@ impl Workspace {
             listener_generation: 1,
             title_bar: title_bar.ok(),
             caption_color: None,
+        };
+        if let Some(source) = workspace.legacy_source.as_ref().cloned() {
+            if let Err(error) = workspace.accept_legacy_artifact_source(source, cx) {
+                workspace.legacy_status = Some(error);
+            }
         }
+        workspace
     }
 
     fn listener(&self) -> Listener {
@@ -1113,6 +1145,9 @@ impl Workspace {
     }
 
     fn rebuild_backend(&mut self, cx: &mut Context<Self>) {
+        if self.legacy_close_requested {
+            return;
+        }
         if !self.mode.owns_input_engine() {
             self.status = self.mode.initial_status().into();
             cx.notify();
@@ -1174,6 +1209,9 @@ impl Workspace {
     }
 
     fn toggle_pause(&mut self, cx: &mut Context<Self>) {
+        if self.legacy_close_requested {
+            return;
+        }
         if !self.mode.owns_input_engine() {
             return;
         }
@@ -1308,6 +1346,10 @@ impl Workspace {
                         });
                         finished = true;
                     }
+                    Ok(plugin_install::InstallEvent::LegacyFinished(event)) => {
+                        self.finish_legacy_job(*event, cx);
+                        finished = true;
+                    }
                     Ok(plugin_install::InstallEvent::Failed(error)) => {
                         self.install_status = Some(format!("安装失败：{error}"));
                         finished = true;
@@ -1315,7 +1357,12 @@ impl Workspace {
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         if !finished {
-                            self.install_status = Some("安装线程已结束，未确认安装完成。".into());
+                            if self.legacy_job.is_some() {
+                                self.legacy_worker_disconnected(cx);
+                            } else {
+                                self.install_status =
+                                    Some("安装线程已结束，未确认安装完成。".into());
+                            }
                         }
                         finished = true;
                         break;
@@ -1817,6 +1864,9 @@ impl Workspace {
     }
 
     fn action_available(&self, action: &ActionSpec) -> bool {
+        if self.legacy_close_requested {
+            return false;
+        }
         match action {
             ActionSpec::ShowWheel(_)
             | ActionSpec::External(_)
@@ -1858,11 +1908,12 @@ impl Workspace {
                 (!self.browser_connector_ui.installed())
                     .then(|| "请先在扩展页安装浏览器连接器。".into())
             }),
-            ActionSpec::Invoke(call) => self
-                .action_service
-                .validate(call)
-                .err()
-                .map(|error| error.to_string()),
+            ActionSpec::Invoke(call) => self.legacy_unavailable_reason(call).or_else(|| {
+                self.action_service
+                    .validate(call)
+                    .err()
+                    .map(|error| error.to_string())
+            }),
             ActionSpec::External(action) => action.unavailable_reason(),
             ActionSpec::ShowWheel(reference) => self.wheels_error.clone().or_else(|| {
                 (!self
@@ -2669,6 +2720,9 @@ impl Workspace {
         pointer: Option<(i32, i32)>,
         cx: &mut Context<Self>,
     ) {
+        if self.legacy_close_requested {
+            return;
+        }
         match action {
             ActionSpec::Browser(action) => {
                 match self.browser_executor.submit(id, action) {
@@ -2684,7 +2738,15 @@ impl Workspace {
                 cx.notify();
             }
             ActionSpec::Invoke(call) => {
-                match action_packages::submit(&self.action_service, id, call.clone(), target) {
+                let submission = if let Some(reason) = self.legacy_unavailable_reason(&call) {
+                    let mut error =
+                        omnitrigger_actions::ActionError::new("legacy_unavailable", reason);
+                    error.effect_state = Some("not_started".into());
+                    Err(error)
+                } else {
+                    action_packages::submit(&self.action_service, id, call.clone(), target)
+                };
+                match submission {
                     Ok(invocation) => {
                         self.package_feedback.accepted(id, invocation, call);
                         self.action_error = None;
@@ -3425,6 +3487,11 @@ impl Workspace {
         self.plugins.refresh();
         if let Some(message) = relocate_raishot(&mut self.plugins) {
             self.install_status = Some(message);
+        }
+        let previous_legacy = self.legacy_source.as_ref().map(|source| source.key());
+        self.connect_installed_legacy(cx);
+        if self.legacy_source.as_ref().map(|source| source.key()) == previous_legacy {
+            self.refresh_script_catalog();
         }
         self.sync_bindings();
         self.refresh_panel(cx);
@@ -6669,6 +6736,16 @@ fn open_script_history_window(
 
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
+    if let Some(result) = legacy_local_source::cli(&arguments) {
+        match result {
+            Ok(message) => println!("{message}"),
+            Err(error) => {
+                eprintln!("{}", serde_json::json!({"status":"rejected","error":error}));
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // 先拒绝混用模式，尚未读配置、启动 worker、安装 Hook 或执行动作。
     let mouse_shortcuts_path = mouse_shortcut_dispatch::parse_plan_path(&arguments)
         .unwrap_or_else(|error| mouse_shortcut_dispatch::reject_cli(error));
@@ -7010,12 +7087,13 @@ fn main() {
                         })
                         .detach();
                     window.on_window_should_close(cx, move |_, cx| {
-                        let _ = closing_view.update(cx, |view, _| {
-                            view.text_history.cancel_send();
-                            view.backend.take();
-                        });
-                        cx.quit();
-                        true
+                        match closing_view.update(cx, |view, cx| view.request_legacy_close(cx)) {
+                            Ok(allow_close) => allow_close,
+                            Err(_) => {
+                                cx.quit();
+                                true
+                            }
+                        }
                     });
                     view
                 },

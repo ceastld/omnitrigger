@@ -129,7 +129,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn refresh_script_catalog(&mut self) {
+    pub(super) fn refresh_script_catalog(&mut self) {
         let (catalog, runtimes) = crate::action_packages::components(&crate::settings::path());
         let count = catalog.actions.len();
         let diagnostics = catalog.diagnostics.len();

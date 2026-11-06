@@ -1,4 +1,4 @@
-//! 插件依赖的后台发现和安装边界。只校验、下载和解包，不运行能力程序。
+//! 插件依赖的后台边界。RaiShot只校验、下载和解包；Legacy固定准备/停止作业复用同一worker。
 #[path = "plugin_discovery.rs"]
 mod discovery;
 
@@ -34,6 +34,7 @@ pub enum InstallEvent {
         downloaded: bool,
     },
     Failed(String),
+    LegacyFinished(Box<crate::legacy_plugin_work::LegacyFinished>),
 }
 
 /// OmniTrigger 下载 RaiShot 时使用的共享位置，与 RaiShot 自己的安装约定一致，
@@ -66,25 +67,41 @@ pub fn start_prepare(
     config_path: PathBuf,
     configured_cli: Option<PathBuf>,
 ) -> Result<Receiver<InstallEvent>, String> {
+    start_worker(move |events| {
+        if let Some(found) = locate(&config_path, configured_cli.as_deref()) {
+            let _ = events.send(InstallEvent::Finished {
+                cli_path: found.cli,
+                version: found.version,
+                downloaded: false,
+            });
+            return;
+        }
+        let result = shared_root()
+            .ok_or_else(|| "无法确定 RaiShot 安装位置。".to_string())
+            .and_then(|root| install(&root, None, events));
+        if let Err(message) = result {
+            let _ = events.send(InstallEvent::Failed(message));
+        }
+    })
+}
+
+pub(crate) fn start_legacy_job(
+    job: crate::legacy_plugin_work::LegacyJob,
+) -> Result<Receiver<InstallEvent>, String> {
+    start_worker(move |events| {
+        let _ = events.send(InstallEvent::LegacyFinished(Box::new(
+            crate::legacy_plugin_work::run(job),
+        )));
+    })
+}
+
+fn start_worker(
+    work: impl FnOnce(&SyncSender<InstallEvent>) + Send + 'static,
+) -> Result<Receiver<InstallEvent>, String> {
     let (events, receiver) = mpsc::sync_channel(16);
     thread::Builder::new()
         .name("omnitrigger-plugin-install".into())
-        .spawn(move || {
-            if let Some(found) = locate(&config_path, configured_cli.as_deref()) {
-                let _ = events.send(InstallEvent::Finished {
-                    cli_path: found.cli,
-                    version: found.version,
-                    downloaded: false,
-                });
-                return;
-            }
-            let result = shared_root()
-                .ok_or_else(|| "无法确定 RaiShot 安装位置。".to_string())
-                .and_then(|root| install(&root, None, &events));
-            if let Err(message) = result {
-                let _ = events.send(InstallEvent::Failed(message));
-            }
-        })
+        .spawn(move || work(&events))
         .map_err(|error| format!("无法启动插件安装线程：{error}"))?;
     Ok(receiver)
 }
@@ -474,6 +491,7 @@ exit $LASTEXITCODE
                 .recv_timeout(std::time::Duration::from_secs(60))
                 .unwrap()
             {
+                InstallEvent::LegacyFinished(_) => panic!("RaiShot测试收到Legacy作业事件"),
                 InstallEvent::Progress(_) => {}
                 InstallEvent::Failed(message) => panic!("{message}"),
                 InstallEvent::Finished {

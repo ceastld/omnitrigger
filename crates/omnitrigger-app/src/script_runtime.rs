@@ -128,7 +128,7 @@ fn read(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     }
     Ok(bytes)
 }
-fn relative(path: &str) -> bool {
+pub(super) fn relative(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= 240
         && path
