@@ -18,7 +18,7 @@ node tools/script-project.mjs create --runtime node --binary $app --config $conf
 node tools/script-project.mjs create --runtime script --binary $app --config $config --id script-demo
 ```
 
-工程位于配置旁的 `actions/<标识>/`。入口、包内模块、调用文件、SDK 和 `jsconfig.json` 一并生成；已有同名工程不会被覆盖。Node 工程另有声明 ESM 格式的 `package.json`。
+工程位于配置旁的 `actions/<标识>/`。入口、包内模块、调用文件、SDK 和 `jsconfig.json` 一并生成；已有同名工程不会被覆盖。Node 工程另有声明 ESM 格式、Node >=22 基线和固定开发依赖的 `package.json`。创建不安装依赖、不执行 npm 或作者脚本。
 
 应用与仓库 SDK 应来自同一构建版本。创建时会比对应用实际生成的同步声明；不一致返回 `project_sdk_binary_mismatch`，保留刚生成的轻量工程，不继续改成 Node。对齐版本后选择新标识创建。
 
@@ -100,16 +100,27 @@ node tools/script-project.mjs refresh --runtime script --project "$root/actions/
 
 ## 本地离线类型检查
 
-校验使用仓库现有的 TypeScript 依赖。安装一次本地开发依赖后，类型检查不需要网络或全局 `node_modules`：
+新建 Node 工程固定 TypeScript 5.9.3 与 DefinitelyTyped 的 `@types/node 22.20.5` 开发依赖。`jsconfig.json` 保持 ESNext/Bundler 模块检查，使用 ES2022 标准库和 `types: ["node"]`，可严格检查 `node:fs`、`process`、`fetch` 等 Node 22 API，同时拒绝 `window`、`document`。这仅配置 Node 工程，不修改 SDK 的环境类型。
+
+作者首次在工程目录显式安装并检查：
+
+```powershell
+Push-Location "$root/actions/node-demo"
+npm install --ignore-scripts
+npm run check
+Pop-Location
+```
+
+安装只提供开发检查所需依赖，`--ignore-scripts` 禁止依赖的生命周期脚本。首次安装生成工程自己的 `package-lock.json`；之后可在该工程目录用 `npm ci --ignore-scripts` 复现版本。检查不执行动作代码，安装后无需网络或全局 TypeScript。动作实际运行仍需 Node。
+
+轻量工程只使用仓库现有 TypeScript，不安装或加载 Node 声明：
 
 ```powershell
 npm ci --prefix tools/script-sdk-check --ignore-scripts
-node tools/script-sdk-check/node_modules/typescript/lib/tsc.js --project "$root/actions/node-demo/jsconfig.json" --noEmit --skipLibCheck false --pretty false
 node tools/script-sdk-check/node_modules/typescript/lib/tsc.js --project "$root/actions/script-demo/jsconfig.json" --noEmit --skipLibCheck false --pretty false
 ```
 
-生成的 `jsconfig.json` 开启 `checkJs`、严格检查和无输出模式。SDK 的只读捕获类型、Node Promise 返回值和相对模块导入均参与检查；运行时入口核对仍使用前面的正式调用命令。
-
+两类工程均开启 `checkJs`、严格检查和无输出模式。SDK 的只读捕获类型、Node Promise 返回值和相对模块导入均参与检查；运行时入口核对仍使用前面的正式调用命令。既有 Node 工程的作者配置不自动迁移，作者可自行添加相同开发依赖与 Node 类型配置；SDK 刷新仍只更新声明。
 
 ## 取消信号与环境类型
 
@@ -123,6 +134,6 @@ ctx.signal.addEventListener('abort', onAbort, {once: true});
 ctx.signal.removeEventListener('abort', onAbort);
 ```
 
-运行时仍传递原生取消信号；声明只覆盖 SDK 的取消观察契约。SDK 不引用完整 DOM 库，因此不会为 Node 工程添加 `window`、`document` 等浏览器全局，也不会给同步轻量工程添加 `process`、`Buffer`、`require` 等 Node 全局。作者若另外需要完整 Node 开发类型，应在自己的 Node 工程中显式配置；SDK 刷新不修改作者的 `jsconfig.json`。
+运行时仍传递原生取消信号；声明只覆盖 SDK 的取消观察契约。SDK 不引用完整 DOM 库，因此不会为 Node 工程添加 `window`、`document` 等浏览器全局，也不会给同步轻量工程添加 `process`、`Buffer`、`require` 等 Node 全局。新建 Node 工程通过自己的开发依赖和 `jsconfig.json` 显式加载 Node 类型；同步轻量工程保持独立。SDK 刷新不修改作者的 `package.json` 或 `jsconfig.json`。
 
 工程已经提供原生 `AbortSignal` 声明时，`ctx.signal` 沿用该类型，继续兼容需要原生信号的函数；没有环境声明时才使用独立的观察接口。SDK 不会为了取得信号类型自动加入环境库。

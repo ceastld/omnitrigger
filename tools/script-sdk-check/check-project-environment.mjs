@@ -9,7 +9,7 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 const defaultRepo=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../..');
 function fail(code,detail){throw Object.assign(new Error(code),{code,detail});}
 function parse(values){
-  const allowed=['--app','--node','--host','--typescript','--case-root','--source-root','--project-tool','--repo'];const result={};
+  const allowed=['--app','--node','--host','--typescript','--case-root','--source-root','--project-tool','--repo','--npm'];const result={};
   for(let index=0;index<values.length;index+=2){const flag=values[index]==='--light-host'?'--host':values[index];if(!allowed.includes(flag)||flag in result||!values[index+1]||values[index+1].startsWith('--'))fail('invalid_arguments',flag);result[flag]=path.resolve(values[index+1]);}
   for(const flag of ['--app','--node','--host','--typescript','--case-root'])if(!result[flag])fail('required_argument_missing',flag);
   result['--repo']??=defaultRepo;result['--source-root']??=result['--repo'];result['--project-tool']??=path.join(result['--repo'],'tools/script-project.mjs');return result;
@@ -36,7 +36,7 @@ function write(file,value){mkdirSync(path.dirname(file),{recursive:true});writeF
 function snapshot(root,omitSdk=false){
   const files={};const pending=[root];
   while(pending.length){const directory=pending.pop();guard([directory]);const children=readdirSync(directory).map(name=>path.join(directory,name));guard(children);for(const file of children){
-    const relative=path.relative(root,file).replaceAll('\\','/');if(omitSdk&&(relative==='sdk'||relative.startsWith('sdk/')))continue;
+    const relative=path.relative(root,file).replaceAll('\\','/');if(relative==='node_modules'||relative.startsWith('node_modules/'))continue;if(omitSdk&&(relative==='sdk'||relative.startsWith('sdk/')))continue;
     if(lstatSync(file).isDirectory())pending.push(file);else files[relative]=fileHash(file);
   }}return Object.fromEntries(Object.entries(files).sort(([a],[b])=>a.localeCompare(b)));
 }
@@ -47,6 +47,7 @@ async function main(){
   const options=parse(process.argv.slice(2));
   for(const [flag,label]of [['--app','app'],['--node','node'],['--host','light-host'],['--typescript','typescript'],['--project-tool','project-tool']])required(options[flag],label);
   progress('required-tools-present');
+  options['--npm']??=path.join(path.dirname(options['--node']),'node_modules/npm/bin/npm-cli.js');required(options['--npm'],'npm CLI');
   const compilerDir=path.dirname(options['--typescript']);required(path.join(compilerDir,'typescript.js'),'typescript API');required(path.join(compilerDir,'lib.es2022.d.ts'),'typescript standard library');
   guard(readdirSync(compilerDir).filter(name=>/^lib\..*\.d\.ts$/.test(name)).map(name=>path.join(compilerDir,name)));
   const sdkRoot=path.join(options['--source-root'],'crates/omnitrigger-actions/runtime');
@@ -70,10 +71,13 @@ async function main(){
   const runtimeResults={status:'running',node:null,script:null,native_business_calls:0,clipboard_calls:0,gui:0};
   const typeResults={status:'running',positive:{},stale:{},negative:{},global_node_modules_used:false};
   write(path.join(root,'tools.json'),{app:{path:app,sha256:fileHash(app)},node:{path:options['--node'],sha256:fileHash(options['--node'])},light:{path:light,sha256:fileHash(light)},typescript:{path:options['--typescript'],sha256:fileHash(options['--typescript'])},source_root:options['--source-root'],project_tool:options['--project-tool']});
-  function run(program,args,expected=0){const result=spawnSync(program,args,{encoding:'utf8',windowsHide:true,timeout:60000,maxBuffer:4*1024*1024,env});assert.ifError(result.error);assert.equal(result.status,expected,result.stderr+result.stdout);return{exit_code:result.status,stdout:result.stdout,stderr:result.stderr};}
+  function run(program,args,expected=0,cwd=options['--repo']){const result=spawnSync(program,args,{cwd,encoding:'utf8',windowsHide:true,timeout:60000,maxBuffer:4*1024*1024,env});assert.ifError(result.error);assert.equal(result.status,expected,result.stderr+result.stdout);return{exit_code:result.status,stdout:result.stdout,stderr:result.stderr};}
   function cli(args,expected=0){const result=run(app,[...args,'--config',config],expected);return JSON.parse(expected===0?result.stdout:result.stderr||result.stdout);}
   function tool(args,expected=0){const result=run(options['--node'],[options['--project-tool'],...args],expected);return JSON.parse(expected===0?result.stdout:result.stderr);}
   function tsc(project,expected=0){return run(options['--node'],[options['--typescript'],'--project',project,'--noEmit','--skipLibCheck','false','--pretty','false'],expected);}
+  const npmUser=path.join(root,'npm-user.npmrc'),npmGlobal=path.join(root,'npm-global.npmrc');write(npmUser,'');write(npmGlobal,'');
+  function npmProject(project,args,expected=0){return run(options['--node'],[options['--npm'],...args,'--no-audit','--no-fund','--registry=https://registry.npmjs.org','--cache',path.join(root,'npm-cache'),'--userconfig',npmUser,'--globalconfig',npmGlobal],expected,project);}
+  function installNodeTypes(project){return npmProject(project,['install','--ignore-scripts']);}
   const description=JSON.parse(run(light,['--describe-runtime']).stdout);assert.equal(description.product,'omnitrigger-script-host');assert.equal(description.api_version,1);write(path.join(root,'light-description.json'),description);
   const initialCatalog=cli(['--list-package-actions']);assert.equal(initialCatalog.actions.length,0);operations.initial_catalog_empty=true;
   progress('pinned-tools-and-light-description');
@@ -81,6 +85,21 @@ async function main(){
   for(const [runtime,id]of [['node','node-text'],['script','sync-text']]){
     const created=tool(['create','--runtime',runtime,'--binary',app,'--config',config,'--id',id,'--source-root',options['--source-root']]);assert.equal(created.status,'created');
     projects[runtime]=created.package_root;operations.created.push(created);
+    if(runtime==='node'){
+      typeResults.node_missing_dependencies=npmProject(created.package_root,['run','check'],1);
+      assert((typeResults.node_missing_dependencies.stdout+typeResults.node_missing_dependencies.stderr).includes('开发依赖尚未安装完整，请先运行 npm install --ignore-scripts'));
+      typeResults.node_install=installNodeTypes(created.package_root);
+      write(path.join(created.package_root,'node-api-check.mjs'),`import {writeFileSync} from 'node:fs';
+/** @param {import('./sdk/api').ActionContext} ctx */
+export function checkNodeTypes(ctx){
+  writeFileSync('unused-synthetic.txt','synthetic');
+  const environment=process.env.NODE_ENV;
+  const response=fetch('https://example.invalid',{signal:ctx.signal});
+  return {environment,response};
+}
+`);
+    }
+    if(runtime==='node')typeResults.node_check_command=npmProject(created.package_root,['run','check']);
     typeResults.positive[runtime]=tsc(path.join(created.package_root,'jsconfig.json'));
     write(path.join(root,'operations-results.json'),operations);write(path.join(root,'type-results.json'),typeResults);
   }
@@ -120,19 +139,20 @@ async function main(){
   const partial=path.join(root,'actions/sdk-mismatch');if(existsSync(partial)){const manifest=JSON.parse(readFileSync(path.join(partial,'action.json'),'utf8'));assert.equal(manifest.actions[0].runtime,'script');assert.equal(fileHash(path.join(partial,'sdk/api.d.ts')),fileHash(path.join(sdkRoot,'script-types.d.ts')));}
   assert.deepEqual(snapshot(nodeProject),before);operations.rejected.push({case:'SDK versus binary mismatch',reply:incompatible,existing_project_preserved:true,new_project_not_promoted_to_node:true});progress('required-refusals');
   const {default:ts}=await import(pathToFileURL(path.join(compilerDir,'typescript.js')).href);
-  for(const [runtime,body,count]of [['node','document.title;\nwindow.location.href;\n',2],['script',"process.cwd();\nBuffer.from('x');\nrequire('node:fs');\nglobal.process;\n__dirname;\ntype P = NodeJS.Process;\n",6]]){
+  for(const [runtime,body,count]of [['node','document.title;\nwindow.location.href;\n',2],['script',"import {writeFileSync} from 'node:fs';\nprocess.cwd();\nBuffer.from('x');\nrequire('node:fs');\nglobal.process;\n__dirname;\ntype P = NodeJS.Process;\n",7]]){
     const folder=path.join(root,'negative',runtime);mkdirSync(folder,{recursive:true});const sdk=path.relative(folder,path.join(projects[runtime],'sdk/api.d.ts')).replaceAll('\\','/');
     write(path.join(folder,'probe.ts'),(runtime==='node'?`import type {ActionContext} from '${sdk}';\ndeclare const ctx:ActionContext;\n`:'')+body);
-    const configuration={compilerOptions:{strict:true,target:'ES2022',module:'ESNext',moduleResolution:'Bundler',types:[],lib:['ES2022'],noEmit:true,skipLibCheck:false},files:[sdk,'probe.ts'],include:[]};write(path.join(folder,'tsconfig.json'),configuration);
+    const configuration={compilerOptions:{strict:true,target:'ES2022',module:'ESNext',moduleResolution:'Bundler',types:runtime==='node'?['node']:[],...(runtime==='node'?{typeRoots:[path.join(projects.node,'node_modules/@types')]}:{}),lib:['ES2022'],noEmit:true,skipLibCheck:false},files:[sdk,'probe.ts'],include:[]};write(path.join(folder,'tsconfig.json'),configuration);
     const parsed=ts.parseJsonConfigFileContent(configuration,ts.sys,folder),program=ts.createProgram(parsed.fileNames,parsed.options),diagnostics=ts.getPreEmitDiagnostics(program).filter(d=>d.category===ts.DiagnosticCategory.Error);
     assert.equal(diagnostics.length,count,ts.formatDiagnostics(diagnostics,{getCurrentDirectory:()=>folder,getCanonicalFileName:file=>file,getNewLine:()=> '\n'}));
     const loaded=program.getSourceFiles().map(file=>path.resolve(file.fileName));assert(!loaded.some(file=>/^lib\.dom(?:\.|$)/i.test(path.basename(file))));
     if(runtime==='script')assert(!loaded.some(file=>/[\\/]@types[\\/]node[\\/]/i.test(file)));
-    typeResults.negative[runtime]={actual_tsc:tsc(path.join(folder,'tsconfig.json'),2),diagnostics:diagnostics.map(d=>({code:d.code,message:ts.flattenDiagnosticMessageText(d.messageText,' ')})),dom_library_loaded:false,node_environment_types_loaded:runtime==='script'?false:undefined};
+    if(runtime==='node')assert(loaded.some(file=>/[\\/]@types[\\/]node[\\/]/i.test(file)));
+    typeResults.negative[runtime]={actual_tsc:tsc(path.join(folder,'tsconfig.json'),2),diagnostics:diagnostics.map(d=>({code:d.code,message:ts.flattenDiagnosticMessageText(d.messageText,' ')})),dom_library_loaded:false,node_environment_types_loaded:runtime==='node'};
   }
   assert.equal(readFileSync(config,'utf8'),'[]');
   operations.status='passed';runtimeResults.status='passed';typeResults.status='passed';typeResults.compiler_version=ts.version;
   write(path.join(root,'operations-results.json'),operations);write(path.join(root,'runtime-results.json'),runtimeResults);write(path.join(root,'type-results.json'),typeResults);
-  const summary={status:'passed',root,created_runtimes:2,refreshed_runtimes:2,actual_runtime_passes:2,rejection_cases:3,node_browser_global_diagnostics:2,script_node_global_diagnostics:6,zero_bindings:true,native_business_calls:0,clipboard_calls:0,gui:0};write(path.join(root,'result.json'),summary);console.log(JSON.stringify(summary));
+  const summary={status:'passed',root,created_runtimes:2,refreshed_runtimes:2,actual_runtime_passes:2,rejection_cases:3,node_browser_global_diagnostics:2,script_node_global_diagnostics:6,script_node_module_diagnostics:1,zero_bindings:true,native_business_calls:0,clipboard_calls:0,gui:0};write(path.join(root,'result.json'),summary);console.log(JSON.stringify(summary));
 }
 main().catch(error=>{console.error(JSON.stringify({status:'failed',error:{code:error.code??'assertion_failed',detail:error.detail??error.message},skipped:false}));process.exitCode=1;});

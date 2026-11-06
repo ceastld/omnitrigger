@@ -75,9 +75,27 @@ try{
       if(manifest.actions.length!==1||manifest.actions[0].runtime!=='script'||manifest.actions[0].entry!=='main.mjs')throw Error('project_cli_invalid_reply');
       // 应用已生成入口、相对模块、call、配置；只适配新Node工程的入口、模块格式与说明。
       write(path.join(project,'main.mjs'),nodeEntry);
-      write(path.join(project,'package.json'),JSON.stringify({private:true,type:'module'},null,2)+'\n');
+      const packageFile=path.join(project,'package.json');guard(packageFile,true);
+      writeFileSync(packageFile,JSON.stringify({private:true,type:'module',engines:{node:'>=22'},
+        scripts:{
+          precheck:`node --input-type=commonjs -e "if(!require('node:fs').existsSync('node_modules/typescript/bin/tsc')||!require('node:fs').existsSync('node_modules/@types/node/index.d.ts')){console.error('开发依赖尚未安装完整，请先运行 npm install --ignore-scripts，再运行 npm run check。');process.exit(1)}"`,
+          check:'node ./node_modules/typescript/bin/tsc --project jsconfig.json'},
+        devDependencies:{'@types/node':'22.20.5',typescript:'5.9.3'}},null,2)+'\n',{flag:'wx'});
+      const configFile=path.join(project,'jsconfig.json');const config=JSON.parse(read(configFile));
+      Object.assign(config.compilerOptions,{target:'ES2022',lib:['ES2022'],types:['node']});
+      write(configFile,JSON.stringify(config,null,2)+'\n');
       manifest.actions[0].runtime='node';write(file,JSON.stringify(manifest,null,2)+'\n');
-      write(path.join(project,'README.md'),'这是 Node ESM 工程。动作入口必须 default 导出函数。API 返回 Promise，调用时使用 await；包内模块使用相对导入。SDK 声明可用本开发工具显式 refresh 更新，作者代码与配置保持。\n');
+      write(path.join(project,'README.md'),`这是 Node.js 22 或更高版本的 ESM 工程。动作入口必须 default 导出函数。API 返回 Promise，调用时使用 await；包内模块使用相对导入。
+
+在工程目录显式安装开发依赖并检查：
+
+    npm install --ignore-scripts
+    npm run check
+
+开发依赖固定 TypeScript 5.9.3 与 @types/node 22.20.5，支持 node:fs、process、fetch 等 Node 22 API 的严格检查；只加载 ES2022 和 Node 声明，不加入 window、document 等浏览器全局。首次安装生成 package-lock.json，后续可用 npm ci --ignore-scripts 复现依赖。 未安装完整时，npm run check 会明确提示安装命令；检查固定使用本工程的 TypeScript，不从全局 PATH 查找 tsc。
+
+创建工程只写本地文件，不下载依赖、不执行 npm 或作者脚本。类型检查不执行动作代码；实际运行仍需 Node。SDK 可用本开发工具显式 refresh 更新；刷新只替换 SDK，作者 package.json、jsconfig.json、入口及说明保持。
+`);
     }
   }
   if(!project)throw Error('invalid_arguments');

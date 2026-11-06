@@ -43,7 +43,9 @@ Windows 发行流程通过 `scripts/collect-licenses.ps1` 从锁定目标的应�
 
 ## 可选的 Node.js 运行环境
 
-`tools/script-sdk-check` 仅用于开发与 CI 的工程生成和类型校验，锁定 TypeScript 5.9.3（Apache-2.0）。已核对 npm 包声明及随包 `LICENSE.txt`；上游见 [TypeScript 许可](https://github.com/microsoft/TypeScript/blob/v5.9.3/LICENSE.txt)。该编译器不进入应用、脚本宿主或生成的动作工程，动作运行不要求安装它。版本、下载来源及完整性记录在该目录的 `package-lock.json`。
+`tools/script-sdk-check` 仅用于开发与 CI 的工程生成和类型校验，锁定 TypeScript 5.9.3（Apache-2.0）。已核对 npm 包声明及随包 `LICENSE.txt`；上游见 [TypeScript 许可](https://github.com/microsoft/TypeScript/blob/v5.9.3/LICENSE.txt)。该编译器不内嵌到应用、脚本宿主或生成的 SDK 快照，动作运行不要求安装它；新建 Node 工程仅在作者显式安装开发依赖后使用它检查代码。版本、下载来源及完整性记录在该目录的 `package-lock.json`。
+
+新建 Node 工程的开发清单固定 TypeScript 5.9.3（Apache-2.0）与 `@types/node 22.20.5`（MIT，DefinitelyTyped）；后者声明依赖 `undici-types ~6.21.0`（MIT，Node.js Undici）。已核对官方 npm 元数据、完整性与随包 LICENSE；来源为 [Node 声明](https://www.npmjs.com/package/@types/node/v/22.20.5)、[Undici 声明](https://www.npmjs.com/package/undici-types/v/6.21.0)。这些依赖仅由作者显式执行 `npm install --ignore-scripts` 安装到自己的工程；生成器不下载或执行 npm，SDK 不包含它们的源码，也不引入 npm 运行依赖。实际依赖版本和完整性由工程自己的 `package-lock.json` 记录。
 
 本地 JavaScript 动作包使用用户安装的 Node.js。当前应用不下载或分发 Node 二进制，不引入 npm 运行依赖；内嵌的 JS 宿主与仓库示例由本项目实现，按项目 MIT 许可证提供。`omnitrigger-actions` 复用工作区已锁定的 `serde` 和 `serde_json`，没有新增第三方 Rust 包。
 
