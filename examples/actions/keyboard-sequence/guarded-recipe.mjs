@@ -1,5 +1,9 @@
 import {prepareRecipe} from './prepare-recipe.mjs';
 
+/** 仅作作者类型提示；运行时仍执行名单、步骤和预算校验。
+ * @typedef {{allowedProcesses:ReadonlyArray<string>,steps:ReadonlyArray<import('./prepare-recipe.mjs').RecipeStep>,keyDownDelayMs?:number}} GuardedRecipeInput
+ */
+
 /** @param {string} message @returns {never} */
 function invalid(message) {
   throw Object.assign(new Error(message), {
@@ -19,7 +23,7 @@ function requiredProcesses(input) {
   return Object.freeze(names.map(name => /** @type {string} */ (name).toLowerCase()));
 }
 
-/** @type {ScriptMain} */
+/** @type {ScriptMain<GuardedRecipeInput>} */
 export function main(ctx) {
   // 在查询原目标和发送输入前检查完整名单与步骤。
   const allowed = requiredProcesses(ctx.input);
