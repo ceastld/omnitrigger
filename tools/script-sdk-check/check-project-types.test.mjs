@@ -469,3 +469,19 @@ test('JSON作者环境契约：本地SDK和全部入口覆盖，六类错误仍�
     const position=item.file.getLineAndCharacterOfPosition(item.start);assert.deepEqual([position.line+1,item.code],expected[index]);
   });
 });
+
+
+test('导入属性在完整工程检查中返回准确行列，不执行初始化器或改写源码',()=>{
+  const root=fixture();
+  const text="// owned fixture\nimport {clean} from './lib/text.mjs' with { mode:'unsupported' };\n/** @type {ScriptMain} */\nexport function main(ctx) { return {text:clean(' owned ')}; }\n";
+  const file=join(root,'main.mjs');writeFileSync(file,text);
+  const result=checkProjectTypes(root);
+  assert.equal(result.passed,false);
+  assert.deepEqual(result.diagnostics,[]);
+  assert.equal(result.staticEnvironmentPassed,false);
+  const item=result.environmentDiagnostics.find(d=>d.code==='module_import_attributes');
+  assert(item);assert.equal(item.file,'main.mjs');assert.equal(item.line,2);
+  assert.equal(item.column,text.split('\n')[1].indexOf('with')+1);
+  assert.equal(result.runtimeExecuted,false);assert.equal(result.filesModified,false);
+  assert.equal(readFileSync(file,'utf8'),text);
+});

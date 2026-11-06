@@ -10,6 +10,7 @@ const messages={
   snapshot_utf8:'源码快照包含无法编码为有效 UTF-8 的代理字符。',
   module_entry:'轻量模块入口必须是包内 .mjs 路径，且不能以点开头。',
   module_specifier:'导入必须是 ./ 或 ../ 开头并显式包含 .js 或 .mjs 的包内路径。',
+  module_import_attributes:'轻量模块兼容检查不接受 import/export 属性块；请移除 with/assert。',
   module_path:'模块引用超出动作包。',
   snapshot_module_missing:'所需模块未包含在显式源码快照中。',
   module_file_limit:'模块单文件超过 128 KiB。',
@@ -103,7 +104,8 @@ export function analyzeScriptModules(snapshot) {
     };
     const visit=node=>{
       if((ts.isImportDeclaration(node)||ts.isExportDeclaration(node))&&node.moduleSpecifier&&ts.isStringLiteralLike(node.moduleSpecifier)) {
-        connect(node.moduleSpecifier,node.moduleSpecifier.text,false);
+        if(node.attributes) add('module_import_attributes',file,node.attributes,source);
+        else connect(node.moduleSpecifier,node.moduleSpecifier.text,false);
       } else if(ts.isCallExpression(node)&&node.expression.kind===ts.SyntaxKind.ImportKeyword) {
         partial=true;
         if(node.arguments.length===1&&ts.isStringLiteralLike(node.arguments[0]))connect(node.arguments[0],node.arguments[0].text,true);

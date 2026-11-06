@@ -112,3 +112,61 @@ test('坏语法不会假报完整图，复杂度错误保持结构化',()=>{
   const deep=analyzeScriptModules(snapshot('const x='+'('.repeat(12000)+'1'+')'.repeat(12000)+';'));
   assert.equal(deep.passed,false);assert(codes(deep).includes('module_analysis_limit'));
 });
+
+
+test('静态import与再导出的属性块明确拒绝并定位，包含Boa不支持的空属性块',()=>{
+  const forms=[
+    "import { value } from './lib/value.js' with { mode:'strict' };",
+    "import './lib/value.js' with { type:'json' };",
+    "export { value } from './lib/value.js' with { mode:'strict' };",
+    "export * from './lib/value.js' with { mode:'strict' };",
+    "import './lib/value.js' assert { type:'json' };",
+    "import * as value from './lib/value.js' with { mode:'strict' };",
+    "export * as value from './lib/value.js' with { mode:'strict' };",
+    "import './lib/value.js' with {};",
+    "export { value } from './lib/value.js' with {};",
+    "export * from './lib/value.js' assert {};",
+  ];
+  for(const text of forms) {
+    const result=analyzeScriptModules(snapshot(text,[source('lib/value.js')]));
+    assert.equal(result.passed,false,text);
+    assert.equal(result.staticGraphComplete,false);
+    const item=result.diagnostics.find(d=>d.code==='module_import_attributes');
+    assert(item,text);assert.equal(item.file,'main.mjs');assert.equal(item.line,1);
+    const marker=text.includes(' with ')?'with':'assert';
+    assert.equal(item.column,text.indexOf(marker)+1);
+    assert.equal(item.severity,'error');
+    assert.equal(result.edges.length,0);assert.deepEqual(result.modules,['main.mjs']);
+    assert.equal(result.runtimeExecuted,false);assert.equal(result.filesRead,false);assert.equal(result.filesModified,false);
+  }
+  for(const text of ["import './lib/value.js';","export { value } from './lib/value.js';"]) {
+    assert.equal(analyzeScriptModules(snapshot(text,[source('lib/value.js')])).passed,true);
+  }
+});
+
+test('属性样式的注释字符串和模板文本不会触发诊断',()=>{
+  const text=`// import './missing.js' with { type:'json' };
+/* export * from './missing.js' assert { type:'json' }; */
+const text="import './missing.js' with { mode:'strict' }";
+const template=\`export * from './missing.js' with {};\`;
+export {text,template};`;
+  const result=analyzeScriptModules(snapshot(text));
+  assert.equal(result.passed,true);assert.equal(result.staticGraphComplete,true);
+  assert.deepEqual(result.diagnostics,[]);assert.deepEqual(result.edges,[]);
+});
+test('动态import第二参数保留未决警告，不把options表达式当静态导入属性或执行它',()=>{
+  const options=['{}','{with:{}}',"{custom:'owned'}","{with:{mode:'strict'}}",
+    "{assert:{type:'json'}}",'undefined','null','4','options',
+    '{get with(){throw Error("GETTER MUST NOT RUN");}}','globalThis.__MUST_NOT_CALL()'];
+  for(const option of options) {
+    const input=snapshot(`export function main(){return import('./later.js', ${option});}`,[source('later.js')]);
+    const before=JSON.stringify(input);const result=analyzeScriptModules(input);
+    assert.equal(result.passed,true,option);assert.equal(result.staticGraphComplete,false,option);
+    assert.deepEqual(codes(result),['dynamic_import_unresolved'],option);
+    assert.equal(result.diagnostics[0].severity,'warning');
+    assert.deepEqual(result.edges,[]);assert.deepEqual(result.modules,['main.mjs']);
+    assert.equal(result.runtimeExecuted,false);assert.equal(result.runtimeVerified,false);
+    assert.equal(result.filesRead,false);assert.equal(result.filesModified,false);
+    assert.equal(JSON.stringify(input),before);
+  }
+});
