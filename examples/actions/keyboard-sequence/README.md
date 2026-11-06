@@ -33,3 +33,12 @@ Node `recipe` 也会在首次桌面调用前检查整组参数、时序和 32 �
 Node `recipe.mjs` 与纯准备 helper 也纳入本包 `jsconfig.json` 的 strict 检查；没有新增运行时依赖，安装时须保留同目录的 `.mjs` 文件。
 
 `sequence` 与 `shortcuts` 两个 Node 入口也在首次异步查询前固定输入；`shortcuts` 会先检查全部 1–16 步的 keys 与 delayAfterMs，再开始派发。键值范围、数量和单次按下等待沿用公开桌面 API；只支持原有的 keyDownDelayMs，不新增嵌套 timing 输入。任一步运行时目标变化或取消仍会立即停止，已发生输入不回滚、不重试。
+
+
+## 按原目标进程发送关闭快捷键
+
+`source-close-script` 是固定的同步轻量入口，调用模板为 `source-close-script-call.json`，输入必须是空对象。它读取本次提交时捕获的原目标，要求进程名和进程ID明确、目标仍在前台且为应用窗口；身份未知或查询失败时不发送输入。
+
+按进程文件名去除 `.exe` 后的基本名作大小写敏感匹配：`Acrobat` 发送左Ctrl+W（VK162、87），`chrome` 发送左Alt+F4（VK164、115），其余已确认进程也发送左Alt+F4。该入口不查询或关闭浏览器标签，不以其他PDF阅读器名称代替Acrobat，也不重新选择前台窗口。
+
+每次只发送一个快捷键，不重试或补偿。返回 `inputSubmitted:true` 仅表示输入提交获确认，不证明窗口、标签或文档已关闭；程序可能显示保存提示。发送后回执未确认时以 `input_unconfirmed` / `unknown` 停止，不能据此重试。
