@@ -26,6 +26,7 @@
 | `ctx.browser.profiles({timeoutMs})` | 查询连接的浏览器 profile。 |
 | `ctx.browser.call(method, args, {profile, timeoutMs})` / `ctx.browser.chrome.*` | 同步调用扩展支持的 Chrome API，保留 `undefined` 与 `null`；无 profile 时只接受恰好一个已连接 profile。 |
 | `ctx.open(target)` | 系统默认程序打开 http、https、mailto、about 或本地绝对路径；成功只表示系统接纳请求。 |
+| `ctx.openFileInParent(target)` | Windows 上复验普通本地文件与父目录，以父目录为工作目录单次打开；同步返回，系统接纳不证明关联程序已完成加载。 |
 
 原生错误转换为 JS 异常，可在 `catch (error)` 中读取 `error.code`，例如 `invalid_arguments`、`file_read_failed`、`file_write_failed`、`process_start_failed` 和 `process_timeout`。通过 SDK 每个脚本最多调用 32 次 API，文件和进程桥接请求最多 256 KiB，桌面桥接最多 512 KiB；桌面与应用接入的剪贴板文本最多 65,536 个 UTF-16 单元，文件文本最多 64 KiB UTF-8。SDK 计数是防误用措施，不是安全隔离。
 

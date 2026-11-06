@@ -148,6 +148,12 @@ export interface OpenFault extends Error {
   /** unknown不可当作未打开或允许重试；只描述该次API。 */
   effectState: 'not_started' | 'unknown';
 }
+export interface OpenFileInParentFault extends Error {
+  code: OpenFault['code'] | 'path_not_local' | 'path_unavailable' | 'access_denied' | 'fs_error'
+    | 'open_file_required' | 'open_directory_required';
+  method: 'system.open_file_in_parent';
+  effectState: 'not_started' | 'unknown';
+}
 export interface ActionContext {
   apiVersion: 1;
   input: Record<string, any>;
@@ -158,6 +164,10 @@ export interface ActionContext {
    * 不接收程序、参数、verb或选项，不搜索PATH、不回退run/start、不自动重试。
    * 单次系统调用不可强制抢占，迟到或无法确认的结果为unknown。 */
   open(target: string): Promise<OpenResult>;
+  /** 普通本地文件；沿本机桥复验目标/父目录，以父目录作工作目录单次提交，须 await。
+   * 不接收目录/参数/verb选项；无桥接明确拒绝，不回退open或process.start。
+   * 成功仅确认系统接纳，错误unknown不允许据此重试。 */
+  openFileInParent(target: string): Promise<OpenResult>;
   signal: AbortSignal;
   delay(milliseconds: number): Promise<void>;
   fs: {

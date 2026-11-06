@@ -150,6 +150,8 @@ impl<H: NativeHost> NativeHost for Host<H> {
     ) -> Result<Value, ActionError> {
         if method == "system.open" {
             crate::script_open::open(params, cancellation, deadline)
+        } else if method == "system.open_file_in_parent" {
+            crate::script_open::open_file_in_parent(params, cancellation, deadline)
         } else if method == "fs.stat" {
             crate::script_fs::stat(params, cancellation, deadline)
         } else if method == "ui.notify" {

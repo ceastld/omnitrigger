@@ -7,7 +7,7 @@ import test from 'node:test';
 const host=readFileSync(new URL('../crates/omnitrigger-actions/runtime/host.mjs', import.meta.url),'utf8');
 const body=host.slice(host.indexOf('function nativeCall('),host.indexOf('const desktopApis ='));
 const plain=value=>JSON.parse(JSON.stringify(value));
-function harness(){
+function harness(fileParent=false){
   const sockets=[],timers=[];
   class Socket extends EventEmitter{
     setEncoding(value){this.encoding=value;}
@@ -16,7 +16,7 @@ function harness(){
     destroy(){this.destroyed=true;}
   }
   const controller=new AbortController();
-  const scope={Buffer,TextDecoder,Promise,Set,controller,nativeMethods:new Set(['system.open']),
+  const scope={Buffer,TextDecoder,Promise,Set,controller,nativeMethods:new Set(['system.open','system.open_file_in_parent']),
     nativeSockets:new Set(),nativeId:0,nativePending:undefined,nativePendingMethod:undefined,
     request:{native:{port:1,token:'synthetic'}},
     fault:(code,message)=>Object.assign(Error(message),{code}),
@@ -25,8 +25,8 @@ function harness(){
     setTimeout:(fn,ms)=>{const timer={fn,ms};timers.push(timer);return timer;},
     clearTimeout:timer=>{if(timer)timer.cleared=true;},
   };
-  const open=runInNewContext(body+'\nopenTarget;',scope);
-  function start(target='https://example.invalid/',connect=true){
+  const open=runInNewContext(body+(fileParent?'\nopenFileInParent;':'\nopenTarget;'),scope);
+  function start(target=fileParent?'C:/Owned/a.pdf':'https://example.invalid/',connect=true){
     const result=open(target);result.catch(()=>{});
     const socket=sockets.at(-1);
     if(connect)socket.emit('connect');
@@ -35,9 +35,9 @@ function harness(){
   const send=(socket,value)=>socket.emit('data',JSON.stringify({id:socket.request.id,...value})+'\n');
   return{open,start,send,scope,controller,sockets,timers};
 }
-function fault(code,effect){return error=>{
+function fault(code,effect,method='system.open'){return error=>{
   assert.equal(error.code,code);assert.equal(error.effectState,effect);
-  assert.equal(error.method,'system.open');assert(!error.message.includes('PRIVATE'));
+  assert.equal(error.method,method);assert(!error.message.includes('PRIVATE'));
   assert.equal(error.requiredPermissions,undefined);return true;
 };}
 test('目标原样经过现有桥接，只返回严格系统接纳回执',async()=>{
@@ -102,4 +102,42 @@ test('并发与连接失败只返回一次错误，不排队、不重试',async(
   const limited=harness();limited.scope.nativeId=128;
   await assert.rejects(limited.open('about:blank'),fault('native_call_limit','not_started'));
   assert.equal(limited.sockets.length,0);
+});
+
+test('父目录打开使用独立方法，原样传输文件路径并保留元数据错误状态',async()=>{
+  const method='system.open_file_in_parent';
+  for(const target of ['C:/Owned/space & 中😀.pdf','C:\\Owned\\literal%20%NAME%.pdf']){
+    const h=harness(true),own=h.start(target);
+    assert.equal(own.socket.request.method,method);
+    assert.deepEqual(plain(own.socket.request.params),{target});
+    h.send(own.socket,{ok:true,value:{submitted:true}});
+    assert.deepEqual(plain(await own.result),{submitted:true});
+    assert.equal(h.sockets.length,1);
+  }
+  const h=harness(true),own=h.start();
+  h.send(own.socket,{ok:false,error:{code:'open_file_required',message:'PRIVATE',method,effect_state:'not_started'}});
+  await assert.rejects(own.result,fault('open_file_required','not_started',method));
+  assert.equal(h.sockets.length,1);
+});
+
+test('父目录打开拒绝URI和额外参数，无桥接时不回退启动程序',async()=>{
+  const method='system.open_file_in_parent';
+  for(const args of [['https://example.invalid/a.pdf'],['file:///C:/Owned/a.pdf'],['relative.pdf'],
+    ['C:/Owned/a.pdf',{}],['C:/Owned/line\nbreak.pdf'],['C:/Owned/quote".pdf'],['C:/Owned/\ud800.pdf']]){
+    const h=harness(true);await assert.rejects(h.open(...args),fault('invalid_input','not_started',method));
+    assert.equal(h.sockets.length,0);
+  }
+  const h=harness(true);delete h.scope.request.native;
+  await assert.rejects(h.open('C:/Owned/a.pdf'),fault('native_bridge_unavailable','not_started',method));
+  assert.equal(h.sockets.length,0);
+});
+
+test('父目录打开在连接前后取消时返回该方法的效果状态，不重试',async()=>{
+  const method='system.open_file_in_parent';
+  for(const sent of [false,true]){
+    const h=harness(true),own=h.start('C:/Owned/a.pdf',sent);
+    h.controller.abort(Object.assign(Error('PRIVATE'),{code:'cancelled'}));
+    await assert.rejects(own.result,fault('cancelled',sent?'unknown':'not_started',method));
+    assert.equal(own.socket.destroyed,true);assert.equal(h.sockets.length,1);
+  }
 });

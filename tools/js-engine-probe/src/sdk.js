@@ -100,4 +100,14 @@ ctx.clipboard = nativeContext ? desktopApis.clipboard : Object.freeze({
 // 独立 CLI 仍暴露历史 API，但没有应用桥接时明确不可用，不回退系统剪贴板。
 ctx.clipboard = Object.freeze({...ctx.clipboard, history:createClipboardHistoryApi(desktopCall)});
 ctx.open = target => call('open', { target });
+ctx.openFileInParent = function (target) {
+    if (arguments.length !== 1 || typeof target !== 'string' || !/^[A-Za-z]:[\\/]/.test(target)
+        || target.length > 32766 || target.trim() !== target || /[\u0000-\u001f\u007f-\u009f]/.test(target)
+        || /[:<>"|?*]/.test(target.slice(3))) {
+        throw Object.assign(new Error('需要明确的普通本地文件路径。'), {code:'invalid_input',effectState:'not_started',method:'system.open_file_in_parent'});
+    }
+    try { encodeURIComponent(target); }
+    catch (_) { throw Object.assign(new Error('路径含无效 Unicode。'), {code:'invalid_input',effectState:'not_started',method:'system.open_file_in_parent'}); }
+    return call('open_file_in_parent', {target});
+};
 Object.freeze(ctx);

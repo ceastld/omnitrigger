@@ -387,6 +387,18 @@ Node返回严格的 `{submitted:true}`，仅表示系统接纳打开请求，不
 
 错误包含 `method:'system.open'` 和 `effectState`。校验或提交前取消/过期为 `not_started`；进入系统调用后的失败、迟到、取消或丢失回执为 `unknown`。等待受动作总时限限制，但单次系统打开不能被强制抢占，取消不会撤销已接纳请求，`unknown`不能作为安全重试依据。
 
+### 在文件父目录打开
+
+`ctx.openFileInParent(target)` 打开明确的普通本地文件，并将其父目录作为这次系统打开请求的工作目录。Node 需要 `await`，返回 `{submitted:true}`；轻量脚本同步返回。需要包含该 API 的应用及对应宿主，类型声明更新不会为旧宿主增加能力。
+
+```javascript
+await ctx.openFileInParent('D:/Work/report.pdf'); // Node 动作
+```
+
+目标与父目录都会复验本地文件状态，拒绝 URI、目录、链接、云端占位和非本地固定卷路径。路径保持原样，不展开百分号、不改变进程的全局工作目录，也不接收程序参数或打开选项。系统接纳请求不证明关联程序已展示文件或采用预期的工作目录；元数据检查与打开之间仍可能发生变化。
+
+错误的方法名为 `system.open_file_in_parent`，包含 `not_started` 或 `unknown` 效果状态；不自动重试。Node 没有应用原生桥时明确返回 `native_bridge_unavailable`。轻量 Windows 宿主通过 `system.open_file_in_parent.v1` 声明该能力。
+
 ### 打开独立文本历史
 
 `ctx.ui.openHistory()` 在运行中的应用内打开独立历史窗口。Node 需要 `await`，轻量脚本同步返回 `{opened:true}`。目标沿用本次动作提交时的窗口快照，不接受目标、程序路径或配置路径参数；没有可用原目标时返回 `target_unavailable`。打开示例见[文本历史动作包](../examples/actions/clipboard-history/README.md)。

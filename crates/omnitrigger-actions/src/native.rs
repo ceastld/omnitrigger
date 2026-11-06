@@ -15,8 +15,9 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 26] = [
+const METHODS: [&str; 27] = [
     "system.open",
+    "system.open_file_in_parent",
     "process.capture",
     "history.list",
     "history.get",
@@ -228,7 +229,10 @@ impl NativeBridge {
                         return false;
                     }
                     *next_id += 1;
-                    let opening = request.method == "system.open";
+                    let opening = matches!(
+                        request.method.as_str(),
+                        "system.open" | "system.open_file_in_parent"
+                    );
                     let capture = request.method == "process.capture";
                     let brightness = matches!(
                         request.method.as_str(),
@@ -306,7 +310,7 @@ impl NativeBridge {
                         }
                         if opening {
                             error.message = "打开请求未确认，请检查错误代码。".into();
-                            error.method = Some("system.open".into());
+                            error.method = Some(request.method.clone());
                             error.required_permissions.clear();
                             if error.effect_state.as_deref() != Some("not_started") {
                                 error.effect_state = Some("unknown".into());

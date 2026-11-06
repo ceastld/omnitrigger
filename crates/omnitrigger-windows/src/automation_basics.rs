@@ -536,7 +536,7 @@ mod native {
         }
     }
 
-    pub(super) fn open(target: &str) -> Result<(), String> {
+    pub(super) fn open(target: &str, directory: Option<&str>) -> Result<(), String> {
         use windows::Win32::{
             Foundation::RPC_E_CHANGED_MODE,
             System::Com::{
@@ -564,11 +564,20 @@ mod native {
         }
         let _com = ComGuard(status.is_ok());
         let wide: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
+        let directory_wide = directory.map(|value| {
+            value
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>()
+        });
         let mut info = SHELLEXECUTEINFOW {
             cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
             fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
             lpVerb: w!("open"),
             lpFile: PCWSTR(wide.as_ptr()),
+            lpDirectory: directory_wide
+                .as_ref()
+                .map_or(PCWSTR::null(), |value| PCWSTR(value.as_ptr())),
             nShow: SW_SHOWNORMAL.0,
             ..Default::default()
         };
@@ -582,7 +591,68 @@ mod native {
 #[cfg(windows)]
 pub fn open_target(target: &str) -> Result<(), String> {
     validate_open_target(target)?;
-    native::open(target)
+    native::open(target, None)
+}
+
+/// 仅打开已复验的普通本地文件，工作目录固定为该文件父目录。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenFileInParentError {
+    pub code: &'static str,
+    pub started: bool,
+}
+
+#[cfg(any(windows, test))]
+fn open_file_in_parent_with(
+    target: &str,
+    mut stat: impl FnMut(&str) -> Result<crate::LocalPathKind, crate::LocalStatError>,
+    submit: impl FnOnce(&str, &str) -> Result<(), OpenFileInParentError>,
+) -> Result<(), OpenFileInParentError> {
+    let before = |code| OpenFileInParentError {
+        code,
+        started: false,
+    };
+    validate_open_target(target).map_err(|_| before("invalid_input"))?;
+    // stat 独立拒绝 URL、UNC、设备路径、链接、云占位和非本地固定卷。
+    let kind = stat(target).map_err(|error| before(error.code))?;
+    if kind != crate::LocalPathKind::File {
+        return Err(before("open_file_required"));
+    }
+    let split = target
+        .rfind(['\\', '/'])
+        .ok_or_else(|| before("invalid_input"))?;
+    let parent = &target[..if split == 2 { 3 } else { split }];
+    if stat(parent).map_err(|error| before(error.code))? != crate::LocalPathKind::Directory {
+        return Err(before("open_directory_required"));
+    }
+    // 两次元数据与打开并非原子事务；不修改进程工作目录，也不解释参数。
+    submit(target, parent)
+}
+
+#[cfg(windows)]
+pub fn open_file_in_parent(target: &str) -> Result<(), OpenFileInParentError> {
+    open_file_in_parent_checked(target, || Ok(()))
+}
+
+/// 沿现有元数据检查点复验取消/时限，并在系统提交前再次检查；不是硬性抢占。
+#[cfg(windows)]
+pub fn open_file_in_parent_checked(
+    target: &str,
+    check: impl Fn() -> Result<(), crate::LocalStatError>,
+) -> Result<(), OpenFileInParentError> {
+    open_file_in_parent_with(
+        target,
+        |path| crate::stat_local_path(path, &check),
+        |file, directory| {
+            check().map_err(|error| OpenFileInParentError {
+                code: error.code,
+                started: false,
+            })?;
+            native::open(file, Some(directory)).map_err(|_| OpenFileInParentError {
+                code: "open_failed",
+                started: true,
+            })
+        },
+    )
 }
 
 /// 替换剪贴板内容为 Unicode 文本；仅工作线程调用。失败时原内容可能已经清空。
@@ -728,6 +798,176 @@ mod tests {
         cell::{Cell, RefCell},
         collections::VecDeque,
     };
+
+    #[test]
+    fn open_file_parent_preserves_target_and_derives_parent_once() {
+        let calls = RefCell::new(Vec::new());
+        let result = open_file_in_parent_with(
+            r"C:\Synthetic\a.pdf",
+            |path| {
+                calls.borrow_mut().push(path.to_string());
+                Ok(if path.ends_with("a.pdf") {
+                    crate::LocalPathKind::File
+                } else {
+                    crate::LocalPathKind::Directory
+                })
+            },
+            |target, parent| {
+                assert_eq!(target, r"C:\Synthetic\a.pdf");
+                assert_eq!(parent, r"C:\Synthetic");
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn open_file_parent_metadata_failure_never_submits_and_submit_failure_is_unknown() {
+        let failure = open_file_in_parent_with(
+            r"C:\Synthetic\a.pdf",
+            |_| {
+                Err(crate::LocalStatError {
+                    code: "path_unavailable",
+                    message: "private".into(),
+                })
+            },
+            |_, _| panic!("元数据失败不能提交"),
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, "path_unavailable");
+        assert!(!failure.started);
+        let mut count = 0;
+        let failure = open_file_in_parent_with(
+            r"C:\a.pdf",
+            |path| {
+                Ok(if path == r"C:\a.pdf" {
+                    crate::LocalPathKind::File
+                } else {
+                    crate::LocalPathKind::Directory
+                })
+            },
+            |_, directory| {
+                count += 1;
+                assert_eq!(directory, "C:\\");
+                Err(OpenFileInParentError {
+                    code: "open_failed",
+                    started: true,
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(count, 1);
+        assert!(failure.started);
+    }
+
+    #[test]
+    fn open_file_parent_preserves_percent_non_bmp_and_separator_without_decoding() {
+        for (target, parent) in [
+            (r"C:\Synthetic\a%20%NAME%.pdf", r"C:\Synthetic"),
+            ("C:\\合成😀\\中文😀.pdf", "C:\\合成😀"),
+            ("C:/Synthetic/中文😀.pdf", "C:/Synthetic"),
+        ] {
+            let mut stat_count = 0;
+            let mut submit_count = 0;
+            let result = open_file_in_parent_with(
+                target,
+                |path| {
+                    stat_count += 1;
+                    assert_eq!(path, if stat_count == 1 { target } else { parent });
+                    Ok(if stat_count == 1 {
+                        crate::LocalPathKind::File
+                    } else {
+                        crate::LocalPathKind::Directory
+                    })
+                },
+                |file, directory| {
+                    submit_count += 1;
+                    assert_eq!(file, target);
+                    assert_eq!(directory, parent);
+                    Ok(())
+                },
+            );
+            assert!(result.is_ok());
+            assert_eq!(stat_count, 2);
+            assert_eq!(submit_count, 1);
+        }
+    }
+
+    #[test]
+    fn open_file_parent_rejects_controls_quotes_and_overlong_utf16_before_stat() {
+        let mut invalid = vec![
+            "C:\\Synthetic\\line\nbreak.pdf".to_string(),
+            "C:\\Synthetic\\line\rbreak.pdf".to_string(),
+            "C:\\Synthetic\\tab\tname.pdf".to_string(),
+            "C:\\Synthetic\\nul\0name.pdf".to_string(),
+            "C:\\Synthetic\\next\u{0085}line.pdf".to_string(),
+            "C:\\Synthetic\\quoted\"name.pdf".to_string(),
+            "C:\\Synthetic\\stream:extra.pdf".to_string(),
+        ];
+        invalid.push(format!("C:\\{}.pdf", "😀".repeat(16_380)));
+        for target in invalid {
+            let error = open_file_in_parent_with(
+                &target,
+                |_| panic!("词法失败不能读取元数据"),
+                |_, _| panic!("词法失败不能提交"),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "invalid_input");
+            assert!(!error.started);
+        }
+    }
+
+    #[test]
+    fn open_file_parent_requires_file_then_directory_and_does_not_retry() {
+        for kind in [
+            crate::LocalPathKind::Missing,
+            crate::LocalPathKind::Directory,
+            crate::LocalPathKind::Other,
+        ] {
+            let error = open_file_in_parent_with(
+                r"C:\Synthetic\a.pdf",
+                |_| Ok(kind),
+                |_, _| panic!("目标不是文件不能提交"),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "open_file_required");
+            assert!(!error.started);
+        }
+        for kind in [
+            crate::LocalPathKind::Missing,
+            crate::LocalPathKind::File,
+            crate::LocalPathKind::Other,
+        ] {
+            let error = open_file_in_parent_with(
+                r"C:\Synthetic\a.pdf",
+                |path| {
+                    Ok(if path.ends_with("a.pdf") {
+                        crate::LocalPathKind::File
+                    } else {
+                        kind
+                    })
+                },
+                |_, _| panic!("父路径不是目录不能提交"),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "open_directory_required");
+            assert!(!error.started);
+        }
+        let error = open_file_in_parent_with(
+            "https://example.invalid/合成😀.pdf",
+            |_| {
+                Err(crate::LocalStatError {
+                    code: "invalid_input",
+                    message: "合成stat拒绝URL".into(),
+                })
+            },
+            |_, _| panic!("stat拒绝URL后不能提交"),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_input");
+        assert!(!error.started);
+    }
 
     #[test]
     fn open_target_whitelist_preserves_local_spaces_without_shell_parsing() {

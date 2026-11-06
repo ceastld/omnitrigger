@@ -263,4 +263,6 @@ type ScriptContext = Readonly<{
     };
     /** 系统接纳请求，不等于网页或文件已经打开完成。 */
     open(target: string): void;
+    /** 普通本地文件；显式使用文件父目录为工作目录。复验元数据，单次提交，不等待关联程序退出。 */
+    openFileInParent(target: string): void;
 }>;

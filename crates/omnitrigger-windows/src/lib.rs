@@ -16,10 +16,13 @@ pub use local_path_stat::{stat_local_path, LocalPathKind, LocalStatError};
 mod automation_basics;
 #[cfg(windows)]
 pub use automation_basics::{
-    clipboard_sequence_number, copy_selection_text, open_target, read_clipboard_text, send_text_to,
+    clipboard_sequence_number, copy_selection_text, open_file_in_parent,
+    open_file_in_parent_checked, open_target, read_clipboard_text, send_text_to,
     write_clipboard_text, write_clipboard_text_excluding_history_if, write_clipboard_text_if,
 };
-pub use automation_basics::{validate_automation_text, validate_open_target};
+pub use automation_basics::{
+    validate_automation_text, validate_open_target, OpenFileInParentError,
+};
 
 #[cfg(windows)]
 mod clipboard_history_child_job;

@@ -57,6 +57,16 @@ fn error(code: &'static str, message: impl ToString) -> ApiError {
     }
 }
 
+fn open_parent_error(code: &str, started: bool) -> ApiError {
+    ApiError {
+        code: code.into(),
+        message: "本地文件打开请求未确认。".into(),
+        effect_state: Some(if started { "unknown" } else { "not_started" }.into()),
+        method: Some("system.open_file_in_parent".into()),
+        required_permissions: Vec::new(),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Call {
@@ -104,9 +114,15 @@ enum Call {
     Open {
         target: String,
     },
+    OpenFileInParent {
+        target: String,
+    },
 }
 
 pub fn dispatch(request: String) -> String {
+    let open_parent_request = request.len() <= 512 * 1024
+        && serde_json::from_str::<Value>(&request)
+            .is_ok_and(|value| value["kind"] == "open_file_in_parent");
     let capture_request = request.len() <= 512 * 1024
         && request.contains("\"capture\"")
         && serde_json::from_str::<Value>(&request).is_ok_and(|value| value["kind"] == "capture");
@@ -117,6 +133,8 @@ pub fn dispatch(request: String) -> String {
             .map_err(|cause| {
                 if capture_request {
                     capture_api_error(process_capture::fault("invalid_arguments", false))
+                } else if open_parent_request {
+                    open_parent_error("invalid_arguments", false)
                 } else {
                     error("invalid_arguments", cause)
                 }
@@ -312,6 +330,10 @@ fn execute(call: Call) -> Result<Value, ApiError> {
             desktop::open(&target)?;
             Ok(Value::Null)
         }
+        Call::OpenFileInParent { target } => {
+            desktop::open_file_in_parent(&target)?;
+            Ok(Value::Null)
+        }
     }
 }
 
@@ -331,6 +353,10 @@ mod desktop {
     pub fn open(target: &str) -> Result<(), ApiError> {
         omnitrigger_windows::open_target(target).map_err(|cause| error("open_failed", cause))
     }
+    pub fn open_file_in_parent(target: &str) -> Result<(), ApiError> {
+        omnitrigger_windows::open_file_in_parent(target)
+            .map_err(|failure| open_parent_error(failure.code, failure.started))
+    }
 }
 
 #[cfg(not(windows))]
@@ -345,11 +371,47 @@ mod desktop {
     pub fn open(_: &str) -> Result<(), ApiError> {
         read_clipboard().map(|_| ())
     }
+    pub fn open_file_in_parent(_: &str) -> Result<(), ApiError> {
+        Err(open_parent_error("unsupported_platform", false))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_parent_wire_rejects_shape_before_any_desktop_call() {
+        for request in [
+            json!({"kind":"open_file_in_parent"}),
+            json!({"kind":"open_file_in_parent","target":null}),
+            json!({"kind":"open_file_in_parent","target":123}),
+            json!({"kind":"open_file_in_parent","target":[]}),
+            json!({"kind":"open_file_in_parent","target":"C:\\Synthetic\\a.pdf","directory":"secret-extra"}),
+            json!({"kind":"open_file_in_parent","target":"C:\\Synthetic\\a.pdf","args":[]}),
+        ] {
+            let response: Value = serde_json::from_str(&dispatch(request.to_string())).unwrap();
+            assert_eq!(response["ok"], false);
+            assert_eq!(response["error"]["code"], "invalid_arguments");
+            assert_eq!(response["error"]["effect_state"], "not_started");
+            assert_eq!(response["error"]["method"], "system.open_file_in_parent");
+            assert!(!response.to_string().contains("secret-extra"));
+        }
+    }
+
+    #[test]
+    fn open_parent_wire_deserialization_preserves_percent_and_non_bmp_without_execution() {
+        let expected = "C:\\合成😀\\percent%20%NAME%.pdf";
+        let request = json!({"kind":"open_file_in_parent","target":expected});
+        let Call::OpenFileInParent { target } = serde_json::from_value::<Call>(request).unwrap()
+        else {
+            panic!("应解析成独立文件父目录打开请求");
+        };
+        assert_eq!(target, expected);
+        let error = open_parent_error("open_failed", true);
+        assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+        assert_eq!(error.method.as_deref(), Some("system.open_file_in_parent"));
+    }
 
     #[test]
     fn delay_wire_rejects_invalid_values_without_relying_on_sdk_validation() {

@@ -16,7 +16,7 @@ let browserConnection;
 let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
-const nativeMethods = new Set(['system.open','process.capture','history.list','history.get','history.append','history.remove','fs.stat','ui.choose','ui.notify','ui.open_history','ui.toggle_history','browser.profiles','browser.call','target.info','target.context',
+const nativeMethods = new Set(['system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','ui.choose','ui.notify','ui.open_history','ui.toggle_history','browser.profiles','browser.call','target.info','target.context',
   'keyboard.shortcut','keyboard.sequence','keyboard.text','selection.copy','selection.copy_data','clipboard.read','clipboard.read_data','clipboard.write','window.action','display.brightness_step','audio.volume_adjust']);
 let nativePending;
 let nativePendingMethod;
@@ -100,7 +100,7 @@ const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...
 
 function nativeCall(method, params) {
   const historyUi = method === 'ui.open_history' || method === 'ui.toggle_history';
-  const opening = method === 'system.open';
+  const opening = method === 'system.open' || method === 'system.open_file_in_parent';
   const capture = method === 'process.capture';
   const volume = method === 'audio.volume_adjust';
   const brightness = method === 'display.brightness_step' || volume;
@@ -145,6 +145,7 @@ function nativeCall(method, params) {
     };
     const aborted = () => {
       const reason = controller.signal.reason;
+      if (opening && reason) { reason.method = method; reason.effectState = sent ? 'unknown' : 'not_started'; }
       if (opening || capture || brightness) return finish(fail(reason?.code === 'timeout' ? 'timeout' : 'cancelled', undefined, sent ? 'unknown' : 'not_started'));
       if (method === 'ui.notify' || historyUi || stat || data || history || capture || brightness) {
         if (typeof reason?.method !== 'string') reason.method = method;
@@ -204,12 +205,16 @@ function nativeCall(method, params) {
 }
 
 // 只经应用桥接打开目标；不调用Node spawn/run/start，不解释命令行。
-async function openTarget(...args) {
+async function openTargetWithMethod(method, ...args) {
   const fail = (code, effectState) => Object.assign(new Error('打开请求未确认，请检查错误代码。'),
-    {code, effectState, method:'system.open'});
+    {code, effectState, method});
   const target = args[0];
   if (args.length !== 1 || typeof target !== 'string' || !target.length || target.length > 32766
       || target.trim() !== target || /[\u0000-\u001f\u007f-\u009f]/.test(target)) {
+    throw fail('invalid_input', 'not_started');
+  }
+  if (method === 'system.open_file_in_parent'
+      && (!/^[A-Za-z]:[\\/]/.test(target) || /[:<>"|?*]/.test(target.slice(3)))) {
     throw fail('invalid_input', 'not_started');
   }
   for (let index = 0; index < target.length; index++) {
@@ -223,7 +228,7 @@ async function openTarget(...args) {
   if (controller.signal.aborted) throw fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled', 'not_started');
   if (!request.native) throw fail('native_bridge_unavailable', 'not_started');
   let result;
-  try { result = await nativeCall('system.open', {target}); }
+  try { result = await nativeCall(method, {target}); }
   catch (error) {
     let code = 'native_bridge_failed', effect = 'unknown';
     try {
@@ -232,7 +237,8 @@ async function openTarget(...args) {
       const known = ['invalid_input','open_failed','open_unavailable','open_busy','cancelled','timeout',
         'invalid_response','native_bridge_unavailable','native_bridge_failed','native_call_limit'];
       const reported = aliases[error?.code] ?? error?.code;
-      if (known.includes(reported)) code = reported;
+      const fileCodes = ['path_not_local','path_unavailable','access_denied','fs_error','open_file_required','open_directory_required'];
+      if (known.includes(reported) || (method === 'system.open_file_in_parent' && fileCodes.includes(reported))) code = reported;
       if (error?.effectState === 'not_started') effect = 'not_started';
     } catch (_) { /* 不读取或回显异常getter正文。 */ }
     throw fail(code, effect);
@@ -244,6 +250,9 @@ async function openTarget(...args) {
   } catch (_) { throw fail('invalid_response', 'unknown'); }
   return {submitted:true};
 }
+
+function openTarget(...args) { return openTargetWithMethod('system.open', ...args); }
+function openFileInParent(...args) { return openTargetWithMethod('system.open_file_in_parent', ...args); }
 
 const desktopApis = createDesktopApi(nativeCall);
 // Node 保持 Promise 契约；共享定义中的同步校验异常也转为拒绝。
@@ -373,6 +382,7 @@ try {
     invocation: Object.freeze(request.invocation),
     packageRoot: request.package_root,
     open: openTarget,
+    openFileInParent,
     process: Object.freeze({ run, start, capture:createProcessCaptureApi(params => nativeCall('process.capture', params.cwd === undefined ? {...params,cwd:request.package_root} : params), true).capture }),
     browser,
     desktop,
@@ -391,7 +401,7 @@ try {
   if (children.size) throw fault('pending_processes', '动作返回时仍有未等待的 ctx.process.run 调用；请使用 await。');
   if (browserPending.size) throw fault('pending_browser_calls', '动作返回时仍有未等待的浏览器调用；请使用 await。');
   if (nativePending) {
-    if (nativePendingMethod === 'system.open') throw Object.assign(fault('pending_open', '动作返回时仍有未等待的打开请求；请使用 await。'), {effectState:'unknown',method:'system.open'});
+    if (nativePendingMethod === 'system.open' || nativePendingMethod === 'system.open_file_in_parent') throw Object.assign(fault('pending_open', '动作返回时仍有未等待的打开请求；请使用 await。'), {effectState:'unknown',method:nativePendingMethod});
     if (nativePendingMethod === 'process.capture') throw Object.assign(fault('pending_process_capture', '动作返回时仍有未等待的程序采集；请使用 await。'), {effectState:'unknown',method:'process.capture'});
     if (nativePendingMethod === 'fs.stat') throw Object.assign(fault('fs_error', '动作返回时仍有未等待的文件状态查询；请使用 await。'), {effectState:'not_started',method:'fs.stat'});
     throw Object.assign(fault('pending_desktop_calls', '动作返回时仍有未等待的桌面调用；请使用 await。'), {effectState:'unknown'});
