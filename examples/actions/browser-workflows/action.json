@@ -2,13 +2,59 @@
   "schema_version": 1,
   "id": "examples.browser-workflows",
   "name": "常用浏览器工作流",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "actions": [
-    { "id": "create-default-tab", "title": "新建指定窗口的默认标签页", "version": 1, "runtime": "node", "entry": "default-new-tab.mjs", "single_instance": true },
-    { "id": "create-default-tab-script", "title": "新建指定窗口的默认标签页（同步轻量）", "version": 1, "runtime": "script", "entry": "default-new-tab-script.mjs", "single_instance": true },
-    { "id": "open-url", "title": "按网址复用或新建标签", "version": 1, "runtime": "node", "entry": "open-url.mjs" },
-    { "id": "duplicate-tab", "title": "复制指定标签", "version": 1, "runtime": "node", "entry": "duplicate-tab.mjs" },
-    { "id": "restore-session", "title": "恢复指定关闭会话", "version": 1, "runtime": "node", "entry": "restore-session.mjs" },
-    { "id": "open-bookmark", "title": "搜索书签并打开", "version": 1, "runtime": "node", "entry": "open-bookmark.mjs" }
+    {
+      "id": "create-default-tab",
+      "title": "新建指定窗口的默认标签页",
+      "version": 1,
+      "runtime": "node",
+      "entry": "default-new-tab.mjs",
+      "single_instance": true
+    },
+    {
+      "id": "create-default-tab-script",
+      "title": "新建指定窗口的默认标签页（同步轻量）",
+      "version": 1,
+      "runtime": "script",
+      "entry": "default-new-tab-script.mjs",
+      "single_instance": true
+    },
+    {
+      "id": "open-url",
+      "title": "按网址复用或新建标签",
+      "version": 1,
+      "runtime": "node",
+      "entry": "open-url.mjs"
+    },
+    {
+      "id": "duplicate-tab",
+      "title": "复制指定标签",
+      "version": 1,
+      "runtime": "node",
+      "entry": "duplicate-tab.mjs"
+    },
+    {
+      "id": "restore-session",
+      "title": "恢复指定关闭会话",
+      "version": 1,
+      "runtime": "node",
+      "entry": "restore-session.mjs"
+    },
+    {
+      "id": "restore-session-script",
+      "title": "恢复指定关闭会话（同步轻量）",
+      "version": 1,
+      "runtime": "script",
+      "entry": "restore-session-script.mjs",
+      "single_instance": true
+    },
+    {
+      "id": "open-bookmark",
+      "title": "搜索书签并打开",
+      "version": 1,
+      "runtime": "node",
+      "entry": "open-bookmark.mjs"
+    }
   ]
 }

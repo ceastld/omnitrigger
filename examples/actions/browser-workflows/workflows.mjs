@@ -15,8 +15,8 @@ function fail(code, message, method = 'browser.workflow', requiredPermissions) {
   throw Object.assign(new Error(message), { code, method, effectState: 'not_started',
     ...(requiredPermissions ? { requiredPermissions } : {}) });
 }
-/** @param {any} value @returns {value is number} */
-function id(value) { return Number.isSafeInteger(value) && value >= 0; }
+/** @param {unknown} value @returns {value is number} */
+function id(value) { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= 2147483647; }
 /** @param {unknown} value @returns {value is string} */
 function text(value, max = 128) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
@@ -32,6 +32,14 @@ function canonicalUrl(value, response = false) {
     fail(response ? 'unsupported_url' : 'invalid_input', '网址需要不含凭据的完整 HTTP 或 HTTPS URL。');
   }
 }
+/** @typedef {{profile?:string,timeoutMs?:number,sessionId:string,sessionKind:'tab'|'window'}} RestoreInput */
+/**
+ * @overload
+ * @param {unknown} input
+ * @param {'restore-session'} operation
+ * @returns {asserts input is RestoreInput}
+ */
+/** @overload @param {unknown} input @param {string} operation @returns {void} */
 /** @param {any} input @param {string} operation */
 function validate(input, operation) {
   if (!FIELDS[operation] || !input || typeof input !== 'object' || Array.isArray(input)
@@ -105,7 +113,9 @@ function tabUrl(tab) {
 }
 
 
-/** @param {any} receipt @param {boolean} attemptedMutation @param {string} currentMethod @param {any} error @returns {DefaultTabReceipt} */
+/** @typedef {{status:string,steps:unknown[],error?:{code:string,method:string,effect_state:string,required_permissions?:string[]}}} WorkflowReceipt */
+/** @template {WorkflowReceipt} T
+ * @param {T} receipt @param {boolean} attemptedMutation @param {string} currentMethod @param {any} error @returns {T} */
 function workflowFailure(receipt, attemptedMutation, currentMethod, error) {
   if (!attemptedMutation) throw error;
   const steps = receipt.steps;
@@ -194,9 +204,82 @@ export function runDefaultTabSync(ctx) {
   return step.value;
 }
 
+/** @typedef {{method:string,args?:unknown[],options:ScriptBrowserOptions}} RestoreRequest */
+/** @typedef {{method:string,sessionId:string,sessionKind:'tab'|'window'}} RestoreStep */
+/** @typedef {{status:string,profile:string,operation:string,steps:RestoreStep[],
+ * target?:{windowId:number,tabId?:number},error?:{code:string,method:string,effect_state:string,required_permissions?:string[]}}} RestoreReceipt */
+/** @typedef {{tab?:{sessionId?:unknown}|null,window?:{sessionId?:unknown}|null}} ClosedSession */
+// 恢复只共享已有有序业务，不重选目标、不回退最近会话、不申请权限。
+/** @param {unknown} rawInput @returns {Generator<RestoreRequest,RestoreReceipt,unknown>} */
+function* restoreSessionSteps(rawInput) {
+  const input = Object.freeze({ .../** @type {Record<string,unknown>} */ (rawInput) });
+  validate(input, 'restore-session');
+  const profile = selectedProfile(yield {method:'browser.profiles',options:{timeoutMs:input.timeoutMs ?? 10000}}, input);
+  /** @type {RestoreStep[]} */
+  const steps = [];
+  /** @type {RestoreReceipt} */
+  const receipt = {status:'completed',profile,operation:'restore-session',steps};
+  const options = {profile,timeoutMs:input.timeoutMs ?? 10000};
+  let attemptedMutation = false;
+  let currentMethod = 'sessions.getRecentlyClosed';
+  try {
+    const sessions = yield {method:currentMethod,args:[{maxResults:25}],options:{...options}};
+    if (!Array.isArray(sessions)) fail('invalid_response', '关闭会话列表格式无效。', currentMethod);
+    const matches = /** @type {(ClosedSession|null|undefined)[]} */ (sessions)
+      .filter(session => session?.[input.sessionKind]?.sessionId === input.sessionId);
+    if (matches.length !== 1) fail('session_unavailable', '指定类型的关闭会话不存在或不唯一，未恢复其他会话。');
+    currentMethod = 'sessions.restore';
+    attemptedMutation = true;
+    const restored = /** @type {{tab?:unknown,window?:unknown}|null|undefined} */
+      (yield {method:currentMethod,args:[input.sessionId],options:{...options}});
+    // API已确认；结果缺少身份也必须保留已发生的步骤。
+    steps.push({method:currentMethod,sessionId:input.sessionId,sessionKind:input.sessionKind});
+    const target = restored?.[input.sessionKind];
+    if (input.sessionKind === 'tab') receipt.target = tabIdentity(target);
+    else {
+      const window = /** @type {{id?:unknown}|null|undefined} */ (target);
+      if (!window || !id(window.id)) fail('invalid_response', '恢复窗口回执缺少 ID。');
+      receipt.target = {windowId:window.id};
+    }
+    return receipt;
+  } catch (error) {
+    return workflowFailure(receipt, attemptedMutation, currentMethod, error);
+  }
+}
+/** @param {ScriptContext['browser']|import('./sdk/api').BrowserApi} browser @param {RestoreRequest} request */
+function invokeRestoreSession(browser, request) {
+  return request.method === 'browser.profiles' ? browser.profiles(request.options)
+    : browser.call(request.method, request.args, request.options);
+}
+/** @param {Pick<import('./sdk/api').ActionContext,'input'|'browser'>} ctx @returns {Promise<RestoreReceipt>} */
+async function runRestoreSessionAsync(ctx) {
+  const flow = restoreSessionSteps(ctx.input);
+  let step = flow.next();
+  while (!step.done) {
+    let value;
+    try { value = await invokeRestoreSession(ctx.browser, step.value); }
+    catch (error) { step = flow.throw(error); continue; }
+    step = flow.next(value);
+  }
+  return step.value;
+}
+/** @param {Pick<ScriptContext,'input'|'browser'>} ctx @returns {RestoreReceipt} */
+export function runRestoreSessionSync(ctx) {
+  const flow = restoreSessionSteps(ctx.input);
+  let step = flow.next();
+  while (!step.done) {
+    let value;
+    try { value = invokeRestoreSession(ctx.browser, step.value); }
+    catch (error) { step = flow.throw(error); continue; }
+    step = flow.next(value);
+  }
+  return step.value;
+}
+
 /** @param {import('./sdk/api').ActionContext} ctx @param {string} operation */
 export async function runWorkflow(ctx, operation) {
   if (operation === 'create-default-tab') return runDefaultTabAsync(ctx);
+  if (operation === 'restore-session') return runRestoreSessionAsync(ctx);
   const input = /** @type {any} */ (Object.freeze({ ...ctx.input }));
   validate(input, operation);
   const profile = await selectProfile(ctx.browser, input);
@@ -204,7 +287,7 @@ export async function runWorkflow(ctx, operation) {
   const steps = [];
   let attemptedMutation = false;
   let currentMethod = 'browser.workflow';
-  /** @type {Record<string,any>} */
+  /** @type {WorkflowReceipt & Record<string,any>} */
   const receipt = { status: 'completed', profile, operation, steps };
   /** @param {string} method @param {unknown[]} args @returns {Promise<any>} */
   const call = async (method, args) => {
@@ -284,18 +367,6 @@ export async function runWorkflow(ctx, operation) {
       tabIdentity(copy, input.windowId);
       receipt.target = identity;
       await focus(identity.windowId);
-    } else {
-      const sessions = await call('sessions.getRecentlyClosed', [{ maxResults: 25 }]);
-      if (!Array.isArray(sessions)) fail('invalid_response', '关闭会话列表格式无效。', 'sessions.getRecentlyClosed');
-      const matches = sessions.filter(session => session?.[input.sessionKind]?.sessionId === input.sessionId);
-      if (matches.length !== 1) fail('session_unavailable', '指定类型的关闭会话不存在或不唯一，未恢复其他会话。');
-      const restored = await mutate('sessions.restore', [input.sessionId], { sessionId: input.sessionId, sessionKind: input.sessionKind });
-      const target = restored?.[input.sessionKind];
-      if (input.sessionKind === 'tab') receipt.target = tabIdentity(target);
-      else {
-        if (!target || !id(target.id)) fail('invalid_response', '恢复窗口回执缺少 ID。');
-        receipt.target = { windowId: target.id };
-      }
     }
     return receipt;
   } catch (error) {

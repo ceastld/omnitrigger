@@ -1,0 +1,7 @@
+{
+  "extends": "../examples/actions/browser-workflows/jsconfig.json",
+  "files": [
+    "browser_restore_session_sync_types.ts",
+    "../crates/omnitrigger-actions/runtime/script-types.d.ts"
+  ]
+}

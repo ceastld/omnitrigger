@@ -1,6 +1,6 @@
 # 常用浏览器工作流
 
-本动作包用已有 `ctx.browser.profiles()` 和 `ctx.browser.call()` 组合五个 Node 动作和一个同步轻量入口。Node 入口需要 Node，同步入口需要已安装的 Boa 或 QuickJS 宿主；两者都需要已安装并连接的浏览器连接器，以及 Chrome 对应权限。将整个目录放入所选配置同级 `actions/browser-workflows`，重新加载应用后可在动作库设置触发。开发入口执行 `omnitrigger.exe --run-action <调用 JSON 路径>`。先修改 `call.json` 内的示例配置标识和窗口 ID；其中占位值不能直接使用。
+本动作包用已有 `ctx.browser.profiles()` 和 `ctx.browser.call()` 组合五个 Node 动作和两个同步轻量入口。Node 入口需要 Node，同步入口需要已安装的 Boa 或 QuickJS 宿主；两者都需要已安装并连接的浏览器连接器，以及 Chrome 对应权限。将整个目录放入所选配置同级 `actions/browser-workflows`，重新加载应用后可在动作库设置触发。开发入口执行 `omnitrigger.exe --run-action <调用 JSON 路径>`。先修改 `call.json` 内的示例配置标识和窗口 ID；其中占位值不能直接使用。
 
 本包没有新增依赖。离线检查在仓库根运行：
 
@@ -19,9 +19,10 @@ node --test tests/browser_workflows.test.mjs
 | `open-url` | `windowId`、`url` | `tabId`、`activate`、`focusWindow` | 在指定普通窗口中按网址复用；无匹配才新建 |
 | `duplicate-tab` | `windowId`、`tabId` | `focusWindow` | 复查源标签仍在指定窗口，再按明确 ID 复制 |
 | `restore-session` | `sessionId`、`sessionKind` | 无 | 从最近关闭列表核对 ID 和类型，再恢复该会话 |
+| `restore-session-script` | `sessionId`、`sessionKind` | 无 | 同一恢复业务的同步轻量入口，无需 Node |
 | `open-bookmark` | `windowId`、`query` | `bookmarkId`、`tabId`、`activate`、`focusWindow` | 搜索书签，得到唯一网页 URL 后复用相同打开流程 |
 
-`windowId` 与 `tabId` 必须是非负安全整数。未知字段会报错，避免拼错字段悄悄改变目标。目标 ID 需要在当前浏览器会话中获取，不能把它当作跨重启稳定标识；绑定中保存过的 ID 可能失效。
+`windowId` 与 `tabId` 必须是0–2147483647的非负 int32 整数；返回的新标签或窗口身份也按该范围核验。未知字段会报错，避免拼错字段悄悄改变目标。目标 ID 需要在当前浏览器会话中获取，不能把它当作跨重启稳定标识；绑定中保存过的 ID 可能失效。
 
 在自己的 Node 动作中可通过现有 API 查询目标，随后把选定的明确 ID 传入本包。多配置时先由用户选择配置，再读取它的窗口与标签，不把最近活动窗口解释为动作原目标：
 
@@ -72,6 +73,8 @@ URL 仅支持不含用户名、密码的完整 HTTP/HTTPS 地址，用标准 `UR
 
 恢复需要 `sessionKind: "tab"` 或 `"window"`，以及该类型的 `sessionId`。只在 `sessions.getRecentlyClosed({ maxResults: 25 })` 中找到唯一同类型会话时执行 `sessions.restore(sessionId)`。会话过期、类型不符或已不在该列表时报 `session_unavailable`；不会回退恢复最近关闭项，也不读取同步设备的会话。恢复位置由 Chrome 决定，不能要求恢复到另一个指定窗口。
 
+`restore-session` 与 `restore-session-script` 共用同一组有序步骤和回执规则；同步入口导出 `main(ctx)`，使用现有 `ScriptContext` 直接取得同步返回值。`restore-session-call.json` 与 `restore-session-script-call.json` 分别提供调用模板。`sessionId` 必须来自所选 profile 的最近关闭列表，不是连接器的 `session_id`，也不是标签 ID。两入口均不请求权限、不重试恢复；已经确认恢复但返回身份缺失或超出上述范围时保留 `partial` 和已确认步骤。
+
 复制先执行 `tabs.get(tabId)` 并核对窗口，再执行一次 `tabs.duplicate(tabId)`。Chrome 可以返回没有副本身份的成功回执，本包此时报告 `partial`，不会查询活动标签猜测副本或再次复制。
 
 ## 回执、权限和部分成功
@@ -115,3 +118,6 @@ API 语义依据：[Chrome Tabs API](https://developer.chrome.com/docs/extension
 `default-new-tab-script-call.json` 提供调用模板，需要明确替换 profile/windowId；默认后台示例使用 `activate:false`、`focusWindow:false`。参数校验、首次API调用前的输入快照、profile/普通窗口检查、默认页省略url、创建回执及partial/unknown语义与Node入口一致。创建或聚焦的派发前取消按宿主effectState处理；已经确认创建后再取消或聚焦失败会保留partial及明确目标，不自动重试或补偿关闭标签。
 
 同步入口返回JSON，不返回Promise；宿主进程被外层取消或强停时，仍由既有ActionService管理终态，不能保证脚本有机会返回回执。脚本内部不查询前台、剪贴板、URL或活动标签。
+
+
+仓库内的同步入口严格工程直接引用 `crates/omnitrigger-actions/runtime/script-types.d.ts`，不新增 SDK 声明副本；`tests/browser_restore_session_sync_types.json` 检查完整 `ScriptMain` / `ScriptContext` 与同步返回值契约。

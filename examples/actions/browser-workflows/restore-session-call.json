@@ -1,0 +1,10 @@
+{
+  "package_id": "examples.browser-workflows",
+  "action_id": "restore-session",
+  "action_version": 1,
+  "input": {
+    "profile": "替换为选定的 browser_instance_id",
+    "sessionId": "替换为用户选定的最近关闭 sessionId",
+    "sessionKind": "tab"
+  }
+}

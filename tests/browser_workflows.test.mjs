@@ -37,10 +37,10 @@ test('动作包各入口可导入，版本与运行时明确', async () => {
   for (const action of manifest.actions) {
     assert.equal(action.version, 1);
     const entry = await import(new URL(`../examples/actions/browser-workflows/${action.entry}`, import.meta.url));
-    if (action.id === 'create-default-tab-script') {
+    if (action.id === 'create-default-tab-script' || action.id === 'restore-session-script') {
       assert.equal(action.runtime, 'script');
       assert.equal(action.single_instance, true);
-      assert.equal(action.entry, 'default-new-tab-script.mjs');
+      assert.equal(action.entry, action.id === 'create-default-tab-script' ? 'default-new-tab-script.mjs' : 'restore-session-script.mjs');
       assert.equal(typeof entry.main, 'function');
     } else {
       assert.equal(action.runtime, 'node');

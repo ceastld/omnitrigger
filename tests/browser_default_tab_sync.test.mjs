@@ -20,3 +20,20 @@ test('关键回执边界独立断言',()=>{
   assert.equal(value('取消-windows.get-not_started').thrown.code,'cancelled');
   assert.equal(value('后台').returned.addressBarRequested,false);
 });
+
+
+test('int32输入边界独立断言：上界保留，超界在任何API前拒绝',()=>{
+  const max=executeSync(cases.find(c=>c.name==='int32上界'),syncEntry);
+  assert.equal(max.returned.status,'completed');assert.deepEqual(max.returned.target,{tabId:2147483647,windowId:2147483647});
+  const invalid=executeSync(cases.find(c=>c.name==='窗口超int32'),syncEntry);
+  assert.equal(invalid.thrown.code,'invalid_input');assert.deepEqual(invalid.calls,[]);
+});
+
+test('int32创建回执独立断言：已确认效果但超界身份保留partial，不猜target',()=>{
+  for(const name of ['创建标签ID超int32','创建窗口ID超int32']){
+    const value=executeSync(cases.find(c=>c.name===name),syncEntry);
+    assert.equal(value.returned.status,'partial');assert.equal(value.returned.error.code,'invalid_response');
+    assert.equal(value.returned.target,undefined);assert.deepEqual(value.returned.steps,[{method:'tabs.create',windowId:4}]);
+    assert.equal(value.calls.filter(c=>c.method==='tabs.create').length,1);
+  }
+});
