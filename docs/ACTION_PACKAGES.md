@@ -78,6 +78,52 @@ actions/my-script/
 
 工程标识为 1–64 个英文字母、数字、`-` 或 `_`，以字母或数字开头，不能是 Windows 设备名。命令拒绝重复身份、已有目录、目录容量不足，以及含诊断的动作目录；不会覆盖作者文件。链接、云盘目录和占位路径沿用动作目录校验；写入失败可能保留部分工程，错误会给出路径。该命令不能与运行、事件流、系统调节或其他操作混用。
 
+### 复用动作或直接编写 API 调用
+
+现有动作已经提供所需步骤、校验和目标限制时，保存 `ActionCall` 即可复用；需要自己的计算、条件或 API 组合时，创建脚本工程并在 `main(ctx)` 中直接编写逻辑。动作包提供可复用的业务契约，SDK 提供编辑器补全与类型检查，宿主 API 提供实际能力。
+
+例如，键盘步骤包的 `guarded-recipe-script@1` 可限定目标进程，保持左 Ctrl 并依次轻点 K、C：
+
+```json
+{
+  "package_id": "examples.keyboard-sequence",
+  "action_id": "guarded-recipe-script",
+  "action_version": 1,
+  "input": {
+    "allowedProcesses": ["code"],
+    "steps": [{"kind": "sequence", "modifiers": [162], "keys": [75, 67]}]
+  }
+}
+```
+
+此调用需要在所选配置的 `actions` 目录安装包含该入口的[键盘步骤包](../examples/actions/keyboard-sequence/README.md)（包版本 1.2.0 起提供）。`action_version` 指动作契约版本。名单必须明确提供，不含路径或 `.exe` 后缀；该入口始终核验原目标进程，最多执行 31 步。快捷键的业务效果由目标软件决定。
+
+直接编写 API 逻辑时，可将生成工程的 `main.mjs` 改为：
+
+```js
+/** @type {ScriptMain} */
+export function main(ctx) {
+  const target = ctx.desktop.target();
+  return {processName: target.processName, text: String(ctx.input.text ?? '').trim()};
+}
+```
+
+此例读取本次原目标并整理输入文本。`ActionCall` 由应用调度入口解析，当前 `ScriptContext` 没有通用的跨动作调用方法；直接使用 API 时，业务动作额外提供的进程名单限制也不会自动附加到脚本中。
+
+分发独立工程时保留包内 `sdk/api.d.ts`、`jsconfig.json` 和所有被导入的模块。复用仓库示例源码时，将指向仓库的 SDK 引用改为本地快照，避免工程换目录后失去类型检查。生成工程使用 ES2022 标准库声明，具体能力仍以所选引擎为准。可在仓库根使用现有开发工具检查工程：
+
+```powershell
+node tools/script-sdk-check/check-project-types.mjs D:\Demo\actions\my-script
+```
+
+| 检查 | 确认范围 |
+| --- | --- |
+| 编辑器与 `check-project-types` | SDK 类型、返回值声明及已覆盖的模块约束；查看 `staticAnalysisComplete` 与警告。 |
+| `--check-action` | 包、动作契约版本及运行时注册，不执行入口。 |
+| `--check-config` | 绑定与触发描述，不执行动作。 |
+
+实际参数分支、目标身份和业务效果仍须运行验证。上述开发工具需要 Node，导出的轻量工程运行不依赖 Node 或 npm。
+
 ### 轻量脚本宿主
 
 `runtime: "script"` 可通过现有动作服务运行独立的 Rust JS 宿主，无需安装 Node。宿主不链接进输入核心；脚本执行、取消与终态仍由 `ActionService` 管理。已有 Boa 和 QuickJS 两种构建使用同一份宿主 API。`.mjs` 入口具名导出同步 `main(ctx)`，`.js` 入口声明标准 JS 函数 `function main(ctx)`，均返回 JSON 值；不需要自定义文件语法或 npm 包。
