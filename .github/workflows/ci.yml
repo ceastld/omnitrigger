@@ -306,6 +306,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/path-text/recipes.test.mjs examples/actions/line-text/recipes.test.mjs examples/actions/selection-line-cleanup/recipes.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/selection-line-cleanup
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/process-output/node-capture.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

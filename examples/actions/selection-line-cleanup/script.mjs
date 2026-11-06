@@ -1,4 +1,4 @@
-/// <reference path="./types/script-types.d.ts" />
+/// <reference path="./sdk/api.d.ts" />
 import {operationFromInput,prepare,confirmOriginal,submitted,sendFailure} from './lib/selection.mjs';
 /** @param {ScriptContext} ctx */
 export default function main(ctx) {

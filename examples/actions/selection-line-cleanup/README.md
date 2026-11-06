@@ -24,4 +24,5 @@ Node 和 QuickJS 已在自建、完成输入预处理初始化的 WinForms 文�
 ```powershell
 node --test examples/actions/selection-line-cleanup/recipes.test.mjs
 node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p examples/actions/selection-line-cleanup/jsconfig.json
+node tools/script-sdk-check/check-project-types.mjs examples/actions/selection-line-cleanup
 ```
