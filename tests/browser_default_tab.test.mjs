@@ -96,7 +96,7 @@ test('原HTTP动作仍拒绝内部URL，普通URL打开行为不受默认新标�
     const ctx=fixture({...base,url},[]);
     await assert.rejects(runWorkflow(ctx,'open-url'),error=>error.code==='invalid_input');assert.deepEqual(ctx.calls,[]);
   }
-  const ctx=fixture({...base,url:'https://EXAMPLE.invalid/path'},[window,[],created]);
+  const ctx=fixture({...base,url:'https://EXAMPLE.invalid/path'},[window,[],{...created,active:true}]);
   const result=await runWorkflow(ctx,'open-url');
   assert.equal(result.status,'completed');assert.equal(result.operation,'open-url');assert.equal(result.disposition,'created');
   assert.equal(Object.hasOwn(result,'addressBarRequested'),false);
