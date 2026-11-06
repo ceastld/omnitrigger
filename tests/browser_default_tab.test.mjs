@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import test from 'node:test';
 import {runWorkflow} from '../examples/actions/browser-workflows/workflows.mjs';
+import {main as syncEntry} from '../examples/actions/browser-workflows/default-new-tab-script.mjs';
 const root=new URL('../',import.meta.url);
 const base={profile:'synthetic-profile',windowId:4};
-const window={id:4,type:'normal'};const created={id:7,windowId:4};
+const window={id:4,type:'normal'};const created={id:7,windowId:4,active:true};
 const fault=(code,effectState='unknown')=>Object.assign(new Error('合成失败'),{code,effectState});
-function fixture(input=base,replies=[window,created],profiles=[{browser_instance_id:'synthetic-profile'}],onProfiles){
+function fixture(input=base,replies=[window,{...created,active:input.activate!==false}],profiles=[{browser_instance_id:'synthetic-profile'}],onProfiles){
   const calls=[];
   return{input,calls,browser:{
     async profiles(options){calls.push({method:'profiles',options});onProfiles?.();return profiles;},
@@ -103,3 +104,46 @@ test('原HTTP动作仍拒绝内部URL，普通URL打开行为不受默认新标�
   assert.deepEqual(ctx.calls[3].args,[{windowId:4,url:'https://example.invalid/path',active:true}]);
   assert.deepEqual(names(ctx),['profiles','windows.get','tabs.query','tabs.create']);
 });
+
+// 只使用内存回执；两种实际入口分别核验，不以驱动相等代替业务断言。
+for(const [driver,entry] of [['Node',ctx=>runWorkflow(ctx,'create-default-tab')],['Script',syncEntry]]){
+  const cases=[
+    {name:'默认激活已确认'},
+    {name:'显式聚焦已确认',focus:true},
+    {name:'后台不要求激活',activate:false,tab:{id:7,windowId:4,active:false}},
+    {name:'后台不要求active字段',activate:false,tab:{id:7,windowId:4}},
+    ...[false,undefined].map(active=>({name:`创建未确认激活-${active}`,focus:true,tab:{id:7,windowId:4,active},code:'activation_unconfirmed',method:'tabs.create'})),
+    ...[false,undefined].map(focused=>({name:`窗口未确认聚焦-${focused}`,focus:true,focused:{id:4,focused},code:'focus_unconfirmed',method:'windows.update'})),
+    ...[undefined,null,{}, {id:-1}, {id:2147483648}].map((focused,i)=>({name:`聚焦身份无效-${i}`,focus:true,focused,code:'invalid_response',method:'windows.update'})),
+    {name:'聚焦返回其他窗口',focus:true,focused:{id:99,focused:true},code:'target_changed',method:'windows.update'},
+  ];
+  for(const spec of cases)test(`${driver}默认新标签回执：${spec.name}`,async()=>{
+    const calls=[];
+    const ctx={input:{profile:'own',windowId:4,activate:spec.activate??true,focusWindow:spec.focus??false},browser:{
+      profiles(){calls.push('profiles');return[{browser_instance_id:'own'}];},
+      call(method,args){calls.push(method);
+        if(method==='windows.get')return{id:4,type:'normal'};
+        if(method==='tabs.create'){
+          assert.deepEqual(args,[{windowId:4,active:spec.activate??true}]);
+          const tab={...(spec.tab??{id:7,windowId:4,active:true})};
+          Object.defineProperty(tab,'url',{get(){assert.fail('默认标签流程不得读取URL');}});return tab;
+        }
+        if(method==='windows.update'){
+          assert.deepEqual(args,[4,{focused:true}]);
+          return Object.hasOwn(spec,'focused')?spec.focused:{id:4,focused:true};
+        }
+        assert.fail(`禁止额外调用 ${method}`);
+      },
+    }};
+    for(const key of ['desktop','clipboard','process','open'])Object.defineProperty(ctx,key,{get(){assert.fail(`禁止访问 ${key}`);}});
+    const pending=entry(ctx);if(driver==='Script')assert.equal(typeof pending?.then,'undefined');
+    const result=await pending;
+    assert.equal(result.status,spec.code?'partial':'completed');
+    assert.deepEqual(result.target,{tabId:7,windowId:4});assert.equal(result.addressBarRequested,false);
+    const focusExpected=spec.focus&&spec.method!=='tabs.create';
+    assert.deepEqual(calls,['profiles','windows.get','tabs.create',...(focusExpected?['windows.update']:[])]);
+    assert.deepEqual(result.steps,[{method:'tabs.create',windowId:4,tabId:7},...(focusExpected?[{method:'windows.update',windowId:4}]:[])]);
+    if(spec.code)assert.deepEqual(result.error,{code:spec.code,method:spec.method,effect_state:'partial'});
+    else assert.equal(result.error,undefined);
+  });
+}

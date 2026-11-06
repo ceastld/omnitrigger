@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "examples.browser-workflows",
   "name": "常用浏览器工作流",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "actions": [
     {
       "id": "create-default-tab",

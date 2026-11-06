@@ -41,6 +41,8 @@ const closed = await ctx.browser.call('sessions.getRecentlyClosed', [{ maxResult
 
 `create-default-tab` 要求明确的 `profile` 和普通窗口 `windowId`，不接受 `url` 或 `tabId`。它核验窗口后只调用一次 `tabs.create`，省略 URL，由浏览器决定默认页。默认激活新标签，只有显式 `focusWindow:true` 才请求窗口聚焦；回执中的 `addressBarRequested:false` 表示没有发送地址栏快捷键。
 
+两种默认新标签入口要求创建回执在请求激活时确认 `active:true`；未确认时保留 `partial`、已知标签和创建步骤，并停止后续聚焦。显式聚焦要求回执返回指定窗口 ID 与 `focused:true`；身份或聚焦未确认时保留 `partial`，不重试。
+
 新建、窗口聚焦和地址栏获得输入焦点是不同结果。此动作不复用已有标签，不选择当前前台，也不保证地址栏焦点。失败沿用下文的部分成功回执，不重试创建。
 
 ## 打开网址和书签

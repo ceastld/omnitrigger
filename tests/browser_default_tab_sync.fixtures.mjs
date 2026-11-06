@@ -2,8 +2,8 @@ const input={profile:'own',windowId:4};
 export const cases=[
   {name:'默认激活',input}, {name:'后台',input:{...input,activate:false,focusWindow:false}},
   {name:'显式聚焦',input:{...input,focusWindow:true}}, {name:'自定超时',input:{...input,timeoutMs:1234}},
-  {name:'零窗口ID',input:{...input,windowId:0},window:{id:0,type:'normal'},tab:{id:0,windowId:0}},
-  {name:'int32上界',input:{...input,windowId:2147483647},window:{id:2147483647,type:'normal'},tab:{id:2147483647,windowId:2147483647}},
+  {name:'零窗口ID',input:{...input,windowId:0},window:{id:0,type:'normal'},tab:{id:0,windowId:0,active:true}},
+  {name:'int32上界',input:{...input,windowId:2147483647},window:{id:2147483647,type:'normal'},tab:{id:2147483647,windowId:2147483647,active:true}},
   {name:'窗口超int32',input:{...input,windowId:2147483648}},
   {name:'创建标签ID超int32',input,tab:{id:2147483648,windowId:4}},
   {name:'创建窗口ID超int32',input,tab:{id:7,windowId:2147483648}},
@@ -40,11 +40,11 @@ export function fixture(spec,asyncApi=false){
   const call=(method,args,options)=>{calls.push({method,args:copy(args),options:copy(options)});mutate(method);fault(method);
     if(method==='windows.get')return copy(has(spec,'window')?spec.window:{id:4,type:'normal'});
     if(method==='tabs.create'){
-      const tab=copy(has(spec,'tab')?spec.tab:{id:7,windowId:4});
+      const tab=copy(has(spec,'tab')?spec.tab:{id:7,windowId:4,active:args[0].active});
       if(spec.tabUrlGetter)Object.defineProperty(tab,'url',{get(){throw Error('禁止读取默认页URL');}});
       return tab;
     }
-    if(method==='windows.update')return undefined;
+    if(method==='windows.update')return {id:args[0],focused:true};
     throw Error('禁止额外调用 '+method);
   };
   const browser=asyncApi?{profiles:async options=>profiles(options),call:async(...args)=>call(...args)}:{profiles,call};

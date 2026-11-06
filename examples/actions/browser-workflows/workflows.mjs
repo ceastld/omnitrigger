@@ -163,11 +163,17 @@ function* defaultTabSteps(rawInput) {
     Object.assign(steps[steps.length - 1], identity);
     tabIdentity(created, input.windowId);
     Object.assign(receipt, {disposition:'created',target:identity});
+    if (input.activate !== false && created.active !== true) {
+      fail('activation_unconfirmed', '新标签回执未确认已激活。', 'tabs.create');
+    }
     if (input.focusWindow === true) {
       currentMethod = 'windows.update';
       attemptedMutation = true;
-      yield { method:currentMethod, args:[input.windowId,{focused:true}], options:{profile,timeoutMs:input.timeoutMs ?? 10000} };
+      const focused = yield { method:currentMethod, args:[input.windowId,{focused:true}], options:{profile,timeoutMs:input.timeoutMs ?? 10000} };
       steps.push({method:currentMethod,windowId:input.windowId});
+      if (!focused || !id(focused.id)) fail('invalid_response', '聚焦回执缺少明确窗口 ID。', 'windows.update');
+      if (focused.id !== input.windowId) fail('target_changed', '聚焦回执返回了其他窗口。', 'windows.update');
+      if (focused.focused !== true) fail('focus_unconfirmed', '回执未确认指定浏览器窗口已聚焦。', 'windows.update');
     }
     return receipt;
   } catch (error) {
