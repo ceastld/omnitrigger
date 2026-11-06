@@ -1,6 +1,7 @@
 // 对显式提供的源码快照检查轻量宿主模块路径与静态加载预算；没有文件或进程 API。
 import ts from 'typescript';
 import {Buffer} from 'node:buffer';
+import {javascriptSyntaxDiagnostics} from './javascript-syntax.mjs';
 
 const FILE_LIMIT=128*1024, TOTAL_LIMIT=1024*1024, MODULE_LIMIT=64;
 const SNAPSHOT_FILES=256, SNAPSHOT_BYTES=8*1024*1024;
@@ -18,6 +19,7 @@ const messages={
   dynamic_import_unresolved:'动态导入需要运行时参数，静态图未覆盖其目标和预算。',
   dynamic_import_deferred:'字面动态导入已检查路径，但未计入静态加载图和预算。',
   module_syntax_invalid:'源码存在语法错误，静态模块图未完整分析。',
+  module_typescript_syntax:'JavaScript 模块包含 TypeScript 专有语法；请改用 JSDoc 类型注释，不会自动转译。',
   module_analysis_limit:'源码解析或遍历超过分析器可处理的复杂度。',
 };
 function scalar(text) {
@@ -51,7 +53,8 @@ export function analyzeScriptModules(snapshot) {
   const diagnostics=[],edges=[],modules=[];
   let totalBytes=0,partial=false;
   const add=(code,file,node,source,severity='error')=>{
-    const point=node&&source?source.getLineAndCharacterOfPosition(node.getStart(source)):undefined;
+    const point=source&&node!==undefined&&node!==null
+      ?source.getLineAndCharacterOfPosition(typeof node==='number'?node:node.getStart(source)):undefined;
     diagnostics.push({code,severity,message:messages[code],...(file?{file}:{}),
       ...(point?{line:point.line+1,column:point.character+1}:{})});
   };
@@ -93,6 +96,13 @@ export function analyzeScriptModules(snapshot) {
     if(source.parseDiagnostics.length) {
       add('module_syntax_invalid',file);continue;
     }
+    try {
+      const syntax=javascriptSyntaxDiagnostics(source);
+      if(syntax.length) {
+        for(const diagnostic of syntax)add('module_typescript_syntax',file,diagnostic.start,source);
+        continue;
+      }
+    } catch {add('module_analysis_limit',file);continue;}
     const connect=(node,specifier,dynamic)=>{
       const resolved=pathParts(file.split('/').slice(0,-1),specifier,true);
       if(resolved.code) {add(resolved.code,file,node,source);return;}

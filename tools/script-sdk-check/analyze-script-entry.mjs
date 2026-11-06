@@ -1,6 +1,7 @@
 // 只检查轻量 ESM 的 main 具名导出声明；不解析依赖、不执行初始化器。
 import ts from 'typescript';
 import {Buffer} from 'node:buffer';
+import {javascriptSyntaxDiagnostics} from './javascript-syntax.mjs';
 
 export function analyzeScriptEntry(input={}) {
   const valid=input!==null&&typeof input==='object'&&!Array.isArray(input);
@@ -9,7 +10,8 @@ export function analyzeScriptEntry(input={}) {
   const result=mainExport=>({passed:!diagnostics.some(d=>d.severity==='error'),mainExport,diagnostics,
     declarationAnalysisOnly:true,runtimeVerified:false,runtimeExecuted:false,filesRead:false,filesModified:false});
   const add=(code,severity,message,node,source)=>{
-    const point=node&&source?source.getLineAndCharacterOfPosition(node.getStart(source)):undefined;
+    const point=source&&node!==undefined&&node!==null
+      ?source.getLineAndCharacterOfPosition(typeof node==='number'?node:node.getStart(source)):undefined;
     diagnostics.push({code,severity,message,file,...(point?{line:point.line+1,column:point.character+1}:{})});
   };
   if(!valid||typeof file!=='string'||file.length>2048||!file.endsWith('.mjs')||typeof text!=='string'||Buffer.byteLength(text)>128*1024) {
@@ -23,6 +25,14 @@ export function analyzeScriptEntry(input={}) {
     add('entry_syntax_invalid','error','入口源码有语法错误，未确定具名导出。');
     return result('unresolved');
   }
+  try {
+    const syntax=javascriptSyntaxDiagnostics(source);
+    if(syntax.length) {
+      for(const diagnostic of syntax)add('entry_typescript_syntax','error',
+        'JavaScript 入口包含 TypeScript 专有语法；请改用 JSDoc 类型注释，不会自动转译。',diagnostic.start,source);
+      return result('unresolved');
+    }
+  } catch {add('entry_analysis_limit','error','源码复杂度超过入口分析器可处理范围。');return result('unresolved');}
   const locals=new Map(),exported=[],stars=[];
   const has=(node,kind)=>node.modifiers?.some(m=>m.kind===kind);
   const functionKind=node=>node.asteriskToken?'generator_callable':has(node,ts.SyntaxKind.AsyncKeyword)?'async_callable':'callable';

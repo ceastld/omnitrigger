@@ -80,3 +80,36 @@ test('未作为main导出的async或生成器辅助函数不被一概拒绝',()=
     assert.equal(result.mainExport,'local_callable_declaration');
   }
 });
+
+test('JS入口中的TS专有语法明确拒绝并定位，不自动转译',()=>{
+  for(const text of [
+    'export function main(ctx: any){return null;}',
+    'interface Value {a: string}\nexport function main(){return null;}',
+    'export function main(){return 1 as number;}',
+    'import type {Value} from "./value.js"; export function main(){return null;}',
+  ]) {
+    const input={file:'nested/main.mjs',text:'// 中文定位\n'+text};
+    const before=JSON.stringify(input),result=analyzeScriptEntry(input);
+    assert.equal(result.passed,false,text);assert.equal(result.mainExport,'unresolved');
+    assert(result.diagnostics.length>0,text);
+    for(const item of result.diagnostics) {
+      assert.equal(item.code,'entry_typescript_syntax');assert.equal(item.severity,'error');
+      assert.equal(item.file,'nested/main.mjs');assert.equal(item.line,2);assert(item.column>=1);
+    }
+    assert.equal(result.runtimeExecuted,false);assert.equal(result.filesRead,false);assert.equal(result.filesModified,false);
+    assert.equal(JSON.stringify(input),before);
+  }
+});
+test('合法JSDoc和相对导入不影响main声明，default async辅助函数仍合法',()=>{
+  const result=inspect(`import {value} from './lib/value.js';
+/** @param {{input: {name: string}}} ctx */
+export function main(ctx){return {name:ctx.input.name,value};}
+export default async function helper(){return null;}`);
+  assert.equal(result.passed,true);assert.equal(result.mainExport,'local_callable_declaration');
+  assert.deepEqual(result.diagnostics,[]);
+});
+test('单独default async保持合法语法与既有缺少main具名导出的结论',()=>{
+  const result=inspect('export default async function main(){return null;}');
+  assert.equal(result.passed,false);assert.equal(result.mainExport,'missing_named_export');
+  assert.deepEqual(result.diagnostics.map(item=>item.code),['entry_main_not_exported']);
+});

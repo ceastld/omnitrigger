@@ -170,3 +170,41 @@ test('动态import第二参数保留未决警告，不把options表达式当静�
     assert.equal(JSON.stringify(input),before);
   }
 });
+
+test('JS快照中的TS专有语法明确拒绝并定位，不转译或继续建立导入边',()=>{
+  for(const text of [
+    'export function main(ctx: any){return null;}',
+    'interface Value {a: string}\nexport function main(){return null;}',
+    'export function main(){return 1 as number;}',
+    'import type {Value} from "./value.js"; export function main(){return null;}',
+  ]) {
+    const input=snapshot('// 中文定位\n'+text,[source('value.js')]);
+    const before=JSON.stringify(input),result=analyzeScriptModules(input);
+    assert.equal(result.passed,false,text);assert.equal(result.staticGraphComplete,false);
+    assert(result.diagnostics.length>0,text);
+    for(const item of result.diagnostics) {
+      assert.equal(item.code,'module_typescript_syntax');assert.equal(item.severity,'error');
+      assert.equal(item.file,'main.mjs');assert.equal(item.line,2);assert(item.column>=1);
+    }
+    assert.deepEqual(result.edges,[]);assert.deepEqual(result.modules,['main.mjs']);
+    assert.equal(result.runtimeExecuted,false);assert.equal(result.filesRead,false);assert.equal(result.filesModified,false);
+    assert.equal(JSON.stringify(input),before);
+  }
+});
+test('相对JS依赖中的TS语法也拒绝，未被静态加载的源码不扩大检查范围',()=>{
+  const bad=source('lib/value.js','export const value: number = 1;');
+  const result=analyzeScriptModules(snapshot('import {value} from "./lib/value.js";export function main(){return value;}',[bad]));
+  assert.equal(result.passed,false);assert.equal(result.staticGraphComplete,false);
+  assert.equal(result.diagnostics[0].code,'module_typescript_syntax');assert.equal(result.diagnostics[0].file,'lib/value.js');
+  assert.equal(analyzeScriptModules(snapshot('export function main(){return null;}',[bad])).passed,true);
+});
+test('合法JSDoc、相对模块和default async仍按原有静态语义通过',()=>{
+  const input=snapshot(`import {value} from './lib/value.js';
+/** @param {{input: {name: string}}} ctx */
+export function main(ctx){return {name:ctx.input.name,value};}
+export default async function helper(){return null;}`,[source('lib/value.js','/** @type {number} */\nexport const value=1;')]);
+  const result=analyzeScriptModules(input);
+  assert.equal(result.passed,true);assert.equal(result.staticGraphComplete,true);
+  assert.deepEqual(result.diagnostics,[]);assert.deepEqual(result.modules,['main.mjs','lib/value.js']);
+  assert.equal(analyzeScriptModules(snapshot('export default async function main(){return null;}')).passed,true);
+});
