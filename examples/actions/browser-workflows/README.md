@@ -47,7 +47,7 @@ const closed = await ctx.browser.call('sessions.getRecentlyClosed', [{ maxResult
 
 URL 仅支持不含用户名、密码的完整 HTTP/HTTPS 地址，用标准 `URL.href` 规范化后精确比较，包含路径、查询和 fragment；不按域名、前缀或通配符匹配。`pendingUrl` 优先于已提交 URL，避免复用正在离开目标页面的标签。多个匹配报 `ambiguous_tab`，可显式传入匹配的 `tabId`；显式标签不匹配时停止，不新建替代标签。浏览器不能提供完整标签网址时报告 `permission_required` 和 `requiredPermissions: ['tabs']`，需要扩展有 `tabs` 或足以覆盖相关 URL 的站点授权。
 
-默认 `activate: true` 会激活目标窗口内的标签。`focusWindow` 默认 false，不主动把浏览器窗口带到前台；确实希望定位到该窗口时设 true。`activate: false` 时复用没有副作用，新建使用后台标签，且不能同时要求 `focusWindow: true`。这些选项仅适用于 `open-url`、`open-bookmark` 和 `create-default-tab`；复制、恢复的激活行为由 Chrome API 决定。
+默认 `activate: true` 会激活目标窗口内的标签。复用标签时会核对 `tabs.update` 返回的标签和窗口 ID，并要求 `active: true`；成功调用没有返回值或未确认激活时报告 `partial` / `activation_unconfirmed`，身份异常也保留 `partial` 和已确认步骤，停止后续窗口聚焦且不重试。`focusWindow` 默认 false，不主动把浏览器窗口带到前台；确实希望定位到该窗口时设 true。`activate: false` 时复用没有副作用，新建使用后台标签，且不能同时要求 `focusWindow: true`。这些选项仅适用于 `open-url`、`open-bookmark` 和 `create-default-tab`；复制、恢复的激活行为由 Chrome API 决定。
 
 书签搜索先排除文件夹。多个网页书签匹配报 `ambiguous_bookmark`，使用先前搜索得到的 `bookmarkId` 消歧；指定 ID 必须仍出现在本次搜索中。非网页 URL（如 bookmarklet）报 `unsupported_url`。
 

@@ -335,7 +335,13 @@ export async function runWorkflow(ctx, operation) {
       const identity = tabIdentity(latest, input.windowId, selected.id);
       if (tabUrl(latest) !== url) fail('target_changed', '目标标签在查询后发生导航，停止操作。');
       Object.assign(receipt, { disposition: 'reused', target: identity });
-      if (input.activate !== false) await mutate('tabs.update', [selected.id, { active: true }], identity);
+      if (input.activate !== false) {
+        const activated = await mutate('tabs.update', [selected.id, { active: true }], identity);
+        // Chrome 允许成功但无返回值；调用已确认，目标激活状态仍未确认。
+        if (activated === undefined) fail('activation_unconfirmed', '激活调用未返回可核对的标签。', 'tabs.update');
+        tabIdentity(activated, input.windowId, selected.id);
+        if (activated.active !== true) fail('activation_unconfirmed', '回执未确认目标标签已激活。', 'tabs.update');
+      }
     } else {
       const created = await mutate('tabs.create', [{ windowId: input.windowId, url, active: input.activate !== false }], { windowId: input.windowId });
       const identity = tabIdentity(created);

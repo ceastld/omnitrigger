@@ -89,7 +89,7 @@ test('明确 profile 固定到每次调用，创建始终携带目标窗口', as
 });
 
 test('复用规范化精确 URL 并复查身份，激活和窗口聚焦分步确认', async () => {
-  const ctx = fixture({ ...base, url: 'https://EXAMPLE.com:443', focusWindow: true }, [window, [tab], tab, tab, window]);
+  const ctx = fixture({ ...base, url: 'https://EXAMPLE.com:443', focusWindow: true }, [window, [tab], tab, { ...tab, active: true }, window]);
   const result = await runWorkflow(ctx, 'open-url');
   assert.equal(result.disposition, 'reused');
   assert.deepEqual(names(ctx), ['profiles', 'windows.get', 'tabs.query', 'tabs.get', 'tabs.update', 'windows.update']);
@@ -327,5 +327,34 @@ test('Node 动作宿主实际加载入口，保留部分成功回执与抛出的
     assert.equal(dirname(resolve(root)), resolve(tmpdir()));
     assert.ok(basename(root).startsWith('omnitrigger-browser-workflow-host-'));
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('复用标签激活回执缺失或未确认时保留 partial 并停止聚焦', async () => {
+  for (const reply of [undefined, { ...tab, active: false }, tab]) {
+    const ctx = fixture({ ...base, focusWindow: true }, [window, [tab], tab, reply]);
+    const result = await runWorkflow(ctx, 'open-url');
+    assert.equal(result.status, 'partial');
+    assert.deepEqual(result.target, { tabId: 7, windowId: 4 });
+    assert.deepEqual(result.error, { code: 'activation_unconfirmed', method: 'tabs.update', effect_state: 'partial' });
+    assert.deepEqual(result.steps, [{ method: 'tabs.update', tabId: 7, windowId: 4 }]);
+    assert.deepEqual(names(ctx), ['profiles', 'windows.get', 'tabs.query', 'tabs.get', 'tabs.update']);
+  }
+});
+
+test('复用标签激活返回错误身份或无效结构时停止聚焦且不重试', async () => {
+  for (const [reply, code] of [
+    [null, 'invalid_response'], [{ ...tab, id: -1, active: true }, 'invalid_response'],
+    [{ ...tab, id: 8, active: true }, 'target_changed'],
+    [{ ...tab, windowId: 5, active: true }, 'target_changed'],
+  ]) {
+    const ctx = fixture({ ...base, focusWindow: true }, [window, [tab], tab, reply]);
+    const result = await runWorkflow(ctx, 'open-url');
+    assert.equal(result.status, 'partial');
+    assert.equal(result.error.code, code);
+    assert.equal(result.error.method, 'tabs.update');
+    assert.equal(result.error.effect_state, 'partial');
+    assert.equal(result.steps.length, 1);
+    assert.deepEqual(names(ctx), ['profiles', 'windows.get', 'tabs.query', 'tabs.get', 'tabs.update']);
   }
 });

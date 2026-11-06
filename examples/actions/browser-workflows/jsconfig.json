@@ -17,6 +17,7 @@
     "default-new-tab.mjs",
     "default-new-tab-script.mjs",
     "workflows.mjs",
+    "open-url.mjs",
     "restore-session.mjs",
     "restore-session-script.mjs",
     "../../../crates/omnitrigger-actions/runtime/script-types.d.ts"
