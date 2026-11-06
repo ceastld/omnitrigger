@@ -1,11 +1,10 @@
 //! 仅测试夹具：用短时核验记录防止旧数据根或旧二进制误入交互实测。
 //! 这是操作防错约束，不是可信本机代码之间的安全边界。
 use serde::Deserialize;
-use std::os::windows::process::CommandExt;
+use sha2::{Digest, Sha256};
 use std::{
     io::Read,
     path::Path,
-    process::{Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -108,59 +107,29 @@ pub(super) fn preflight(
 }
 
 fn file_hashes(paths: &[&Path]) -> Result<Vec<String>, String> {
-    // 路径通过环境中的 JSON 数组传入，不拼成 PowerShell 命令；无原生输入或剪贴板调用。
-    let script = r#"$ErrorActionPreference='Stop'; try {
-      $taskPaths=ConvertFrom-Json $env:OMNITRIGGER_CLIPBOARD_TEST_HASH_PATHS
-      $taskHasher=[System.Security.Cryptography.SHA256]::Create()
-      try { $taskHashes=@(foreach($taskPath in $taskPaths) {
-        $taskStream=[System.IO.File]::OpenRead($taskPath)
-        try { ([System.BitConverter]::ToString($taskHasher.ComputeHash($taskStream))).Replace('-','').ToLowerInvariant() }
-        finally { $taskStream.Dispose() }
-      }); ConvertTo-Json -InputObject $taskHashes -Compress } finally { $taskHasher.Dispose() }
-    } catch { [Console]::Error.WriteLine($_.Exception.GetType().FullName); exit 1 }"#;
-    let mut child = Command::new("powershell.exe")
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            script,
-        ])
-        .env(
-            "OMNITRIGGER_CLIPBOARD_TEST_HASH_PATHS",
-            serde_json::to_string(paths).map_err(|error| error.to_string())?,
-        )
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(0x08000000)
-        .spawn()
-        .map_err(|error| error.to_string())?;
+    // 已有 sha2 依赖直接处理字面路径，避免 CI 并发测试中额外启动 PowerShell。
+    // 固定缓冲区；在每次文件读取之间检查期限，不将同步文件 I/O 描述为可强制中断。
     let began = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {}
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error.to_string());
+    let mut hashes = Vec::with_capacity(paths.len());
+    let mut buffer = [0_u8; 64 * 1024];
+    for path in paths {
+        let mut file = std::fs::File::open(path).map_err(|_| "文件摘要核验失败；未开始交互操作")?;
+        let mut hasher = Sha256::new();
+        loop {
+            if began.elapsed() > Duration::from_secs(10) {
+                return Err("本次文件核验超时；未开始交互操作".into());
             }
+            let count = file
+                .read(&mut buffer)
+                .map_err(|_| "文件摘要核验失败；未开始交互操作")?;
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
         }
-        if began.elapsed() > Duration::from_secs(10) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("本次文件核验超时，已结束自有核验进程；未开始交互操作".into());
-        }
-        std::thread::sleep(Duration::from_millis(20));
+        hashes.push(format!("{:x}", hasher.finalize()));
     }
-    let output = child
-        .wait_with_output()
-        .map_err(|error| error.to_string())?;
-    if !output.status.success() || output.stdout.len() > 4096 {
-        return Err("文件摘要核验失败；未开始交互操作".into());
-    }
-    serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())
+    Ok(hashes)
 }
 
 #[cfg(test)]
@@ -179,14 +148,21 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(format!("../../.tmp/clipboard-hash-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("literal $(should-not-run).bin");
+        let path = root.join("字面路径 $(should-not-run).bin");
+        let empty = root.join("empty.bin");
         std::fs::write(&path, b"abc").unwrap();
-        let hashes = file_hashes(&[&path]).unwrap();
+        std::fs::write(&empty, b"").unwrap();
+        let hashes = file_hashes(&[&path, &empty]).unwrap();
         assert_eq!(
             hashes,
-            ["ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"]
+            [
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            ]
         );
+        assert!(file_hashes(&[&root.join("missing.bin")]).is_err());
         std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(empty).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
 
