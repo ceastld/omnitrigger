@@ -5,11 +5,16 @@ import {createHash} from 'node:crypto';
 import {existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
 import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import ts from 'typescript';
-import {checkClipboardHistoryTypes} from './check-history-types.mjs';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const binary = resolve(process.argv[2] ?? 'target/debug/omnitrigger.exe');
+const binaryArgs = process.argv.slice(2);
+if (binaryArgs.length !== 1 || !binaryArgs[0].trim() || binaryArgs[0].startsWith('--')) {
+  console.error('用法：node tools/script-sdk-check/check.mjs <与当前 SDK 匹配的本次构建应用路径>');
+  process.exit(2);
+}
+const binary = resolve(binaryArgs[0]);
+const {default: ts} = await import('typescript');
+const {checkClipboardHistoryTypes} = await import('./check-history-types.mjs');
 mkdirSync(join(repo, '.tmp'), {recursive:true});
 const root = mkdtempSync(join(repo, '.tmp/script-sdk-check-'));
 const config = join(root, 'bindings.json');
