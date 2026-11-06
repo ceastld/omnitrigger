@@ -100,7 +100,7 @@ fn serialized_worst_case_reply_is_bounded_by_the_actual_decoder_and_capture() {
         truncated: true,
     };
     let bytes = serde_json::to_vec(&value).unwrap();
-    assert!(bytes.len() + 1 <= reply_limit(8192));
+    assert!(bytes.len() < reply_limit(8192));
     assert!(reply_limit(8192) < 64 * 1024);
     assert_eq!(reply_limit(128), 2048);
     let mut too_large_default = captured(json!({}));

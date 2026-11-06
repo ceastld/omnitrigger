@@ -25,9 +25,7 @@ fn is_default_max_units(value: &u32) -> bool {
 }
 fn reply_limit(max_utf16_units: u32) -> usize {
     // 目标已在1024字节请求内，另留256字节元数据；默认128仍沿用2048字节。
-    (max_utf16_units as usize * 6 + MAX_REQUEST + 256)
-        .max(2048)
-        .min(MAX_REPLY)
+    (max_utf16_units as usize * 6 + MAX_REQUEST + 256).clamp(2048, MAX_REPLY)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
