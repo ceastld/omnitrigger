@@ -9,6 +9,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::time::Instant;
 
+#[path = "keyboard_text_deadline.rs"]
+mod keyboard_text_deadline;
+
 pub struct DesktopHost {
     foreground_targets: ForegroundTargets,
     target: Result<ScriptTarget, ActionError>,
@@ -62,6 +65,28 @@ impl DesktopHost {
             let _ = options;
             Err(crate::selected_text_helper::fault("selection_unavailable"))
         }
+    }
+
+    fn send_text(
+        &self,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Value, ActionError> {
+        keyboard_text_deadline::execute_with(
+            params,
+            cancellation,
+            deadline,
+            Instant::now,
+            || {
+                let target = self.target.as_ref().map_err(Clone::clone)?;
+                target
+                    .ensure_foreground()
+                    .map_err(|message| error("target_changed", message, "not_started"))?;
+                Ok(target)
+            },
+            |target, text, check| target.send_text_if(text, check),
+        )
     }
 
     fn copy_data(
@@ -428,20 +453,7 @@ impl NativeHost for DesktopHost {
                 }
                 Ok(receipt)
             }
-            "keyboard.text" => {
-                let args: TextArgs = serde_json::from_value(params)
-                    .map_err(|message| error("invalid_input", message, "not_started"))?;
-                omnitrigger_windows::validate_automation_text(&args.text)
-                    .map_err(|message| error("invalid_input", message, "not_started"))?;
-                let target = self.target.as_ref().map_err(Clone::clone)?;
-                target
-                    .ensure_foreground()
-                    .map_err(|message| error("target_changed", message, "not_started"))?;
-                target
-                    .send_text_if(&args.text, || not_cancelled(cancellation))
-                    .map_err(|message| error("input_failed", message, "unknown"))?;
-                Ok(json!({"submitted":true}))
-            }
+            "keyboard.text" => self.send_text(params, cancellation, None),
             "selection.copy" => {
                 if params != json!({}) {
                     return Err(error(
@@ -582,6 +594,7 @@ impl NativeHost for DesktopHost {
         deadline: Instant,
     ) -> Result<Value, ActionError> {
         match method {
+            "keyboard.text" => self.send_text(params, cancellation, Some(deadline)),
             "target.capture_foreground" => {
                 self.foreground_targets
                     .capture(params, cancellation, Some(deadline))

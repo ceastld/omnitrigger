@@ -431,6 +431,8 @@ export default async ctx => {
 
 `sendText` 将 CRLF 和 LF 分别规范为一次回车，不解析 SendKeys、模板或按键脚本语法。它拒绝仍被按住的 Ctrl、Shift、Alt、Win；已发送的文字无法回滚。`copySelectionText` 最多等待约 600ms 的序号变化，期间持续核验目标和取消；超时会报错，不使用旧剪贴板文本冒充选区。它不使用 UI Automation，也不能保证任意应用都响应 Ctrl+C；剪贴板不是隔离事务，其他程序的同时写入仍可能影响结果。
 
+带期限的 `sendText` 在核验原目标、等待发送门闩后和既有批次检查处遵守更早的动作期限及本次最多 5 秒的发送检查预算。它不会抢占门闩等待或正在执行的系统输入；移交发送器后超时或取消均保守标为 `unknown`，不表示文字未发送，调用方不应自动重试。
+
 [文本动作示例](../examples/actions/desktop-text/)包含直接输入、粘贴、括号包裹选区、行尾换行。粘贴示例先写剪贴板、等待 50ms、发送 Ctrl+V；包裹选区先复制，保留空格和制表符，然后执行同样的粘贴过程。这些示例都实际改变目标文本，粘贴后的文本留在剪贴板。
 
 [删除到行首示例](../examples/actions/desktop-line-edit/)依次发送 Shift+Home、等待 80ms、发送 Backspace。`delete-line-start-script` 使用标准 JS 和独立轻量宿主，通过 `call-script.json` 调用，不需要 Node；`waitMs` 与 `keyDownDelayMs` 可显式设置，并在发送输入前校验。默认按原目标进程选择按下时序。它会实际编辑目标输入框，检查清单不会执行它。专用输入框的真实验证在本机显式运行：
