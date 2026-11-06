@@ -2,10 +2,11 @@
   "schema_version": 1,
   "id": "examples.common-desktop",
   "name": "常用桌面脚本",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "actions": [
     {"id": "close-by-process", "title": "按进程选择关闭快捷键", "version": 1, "runtime": "script", "entry": "close.js"},
     {"id": "window-action", "title": "操作原目标窗口", "version": 1, "runtime": "script", "entry": "window.js"},
-    {"id": "paste-arrow-text", "title": "经剪贴板粘贴字面箭头文本", "version": 1, "runtime": "script", "entry": "paste-arrow.js"}
+    {"id": "paste-arrow-text", "title": "经剪贴板粘贴字面箭头文本", "version": 1, "runtime": "script", "entry": "paste-arrow.js"},
+    {"id": "send-win-a", "title": "发送 Win+A", "version": 1, "runtime": "script", "entry": "system-panel.js"}
   ]
 }
