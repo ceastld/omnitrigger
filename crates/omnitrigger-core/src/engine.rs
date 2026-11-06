@@ -765,6 +765,32 @@ impl Engine {
 
     fn down(&mut self, button: Button) -> Decision {
         if let Some(state) = self.pressed.get(&button).copied() {
+            // 普通多键前缀尚未命中时，重复表示继续输入；不能只补回首次Down而丢掉重复。
+            // 单前缀（例如原Caps单按）、专用层、鼠标、长按/拖动和已命中终止键均沿旧路径。
+            if state == PressState::Pending
+                && self.dedicated_leader.is_none()
+                && self.retained.is_none()
+                && self.hold.is_none()
+                && self.drag.is_none()
+                && matches!(button, Button::Key(_))
+                && !crate::model::is_modifier(button)
+                && self.pressed.len() >= 2
+                && self.pressed.iter().all(|(&held, &state)| {
+                    matches!(held, Button::Key(_))
+                        && !self.terminal_presses.contains(&held)
+                        && matches!(state, PressState::Pending | PressState::Consumed)
+                })
+                && self.pending.contains(&InputKind::Down(button))
+                && self
+                    .pending
+                    .iter()
+                    .all(|event| matches!(event, InputKind::Down(Button::Key(_))))
+            {
+                return Decision {
+                    replay: self.flush_pending(),
+                    ..Decision::default()
+                };
+            }
             // 自动重复不是第二次按压；已消费的按压也不能通过重复事件泄漏。
             return Decision {
                 consume: !matches!(state, PressState::Passed | PressState::Observed),
