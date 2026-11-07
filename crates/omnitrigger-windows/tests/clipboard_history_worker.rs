@@ -331,22 +331,24 @@ fn isolated_worker_cancel_during_pending_render_reaps_and_stop_is_complete() {
     delayed(&scope, &owner);
     let thread_cancel = cancel.clone();
     let (entered, ready) = std::sync::mpsc::sync_channel(1);
-    let reading = std::thread::spawn(move || {
-        entered.send(()).unwrap();
-        let result = worker.capture(previous, &thread_cancel);
-        let stats = worker.stop();
-        (result, stats)
+    std::thread::scope(|threads| {
+        let reading = threads.spawn(move || {
+            entered.send(()).unwrap();
+            let result = worker.capture(previous, &thread_cancel);
+            let stats = worker.stop();
+            (result, stats)
+        });
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        // 此等待仅安排取消；不声称准确测量helper进入GetClipboardData的时刻。
+        std::thread::sleep(Duration::from_millis(50));
+        let began = Instant::now();
+        cancel.store(true, Ordering::Release);
+        let (result, stats) = reading.join().unwrap();
+        assert_eq!(result, Err(HistoryWorkerError::Cancelled));
+        let stats = stats.unwrap();
+        assert_eq!((stats.spawned, stats.reaped), (1, 1));
+        assert!(began.elapsed() < Duration::from_secs(2));
     });
-    ready.recv_timeout(Duration::from_secs(2)).unwrap();
-    // 此等待仅安排取消；不声称准确测量helper进入GetClipboardData的时刻。
-    std::thread::sleep(Duration::from_millis(50));
-    let began = Instant::now();
-    cancel.store(true, Ordering::Release);
-    let (result, stats) = reading.join().unwrap();
-    assert_eq!(result, Err(HistoryWorkerError::Cancelled));
-    let stats = stats.unwrap();
-    assert_eq!((stats.spawned, stats.reaped), (1, 1));
-    assert!(began.elapsed() < Duration::from_secs(2));
     scope.verify();
 }
 

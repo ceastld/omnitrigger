@@ -50,6 +50,7 @@ function refresh(project,source,runtime){
   const root=path.join(source,'crates/omnitrigger-actions/runtime');
   const names=runtime==='node'?['api.d.ts','clipboard-history-api.d.ts']:['script-types.d.ts'];
   const data=names.map(name=>({name,text:read(path.join(root,name))}));
+  if(runtime==='node')data.push({name:'check-node-entry.cjs',text:read(path.join(source,'tools/script-sdk-check/check-node-entry.cjs'))});
   const sdk=path.join(project,'sdk');guard(sdk,true);if(!existsSync(sdk))mkdirSync(sdk);
   for(const item of data)write(path.join(sdk,runtime==='script'?'api.d.ts':item.name),item.text);
   return{status:'refreshed',runtime,package_root:project,files:data.map(item=>'sdk/'+(runtime==='script'?'api.d.ts':item.name)),author_files_changed:false};
@@ -79,7 +80,7 @@ try{
       writeFileSync(packageFile,JSON.stringify({private:true,type:'module',engines:{node:'>=22'},
         scripts:{
           precheck:`node --input-type=commonjs -e "if(!require('node:fs').existsSync('node_modules/typescript/bin/tsc')||!require('node:fs').existsSync('node_modules/@types/node/index.d.ts')){console.error('开发依赖尚未安装完整，请先运行 npm install --ignore-scripts，再运行 npm run check。');process.exit(1)}"`,
-          check:'node ./node_modules/typescript/bin/tsc --project jsconfig.json'},
+          check:'node ./node_modules/typescript/bin/tsc --project jsconfig.json && node ./sdk/check-node-entry.cjs .'},
         devDependencies:{'@types/node':'22.20.5',typescript:'5.9.3'}},null,2)+'\n',{flag:'wx'});
       const configFile=path.join(project,'jsconfig.json');const config=JSON.parse(read(configFile));
       Object.assign(config.compilerOptions,{target:'ES2022',lib:['ES2022'],types:['node']});
@@ -92,9 +93,9 @@ try{
     npm install --ignore-scripts
     npm run check
 
-开发依赖固定 TypeScript 5.9.3 与 @types/node 22.20.5，支持 node:fs、process、fetch 等 Node 22 API 的严格检查；只加载 ES2022 和 Node 声明，不加入 window、document 等浏览器全局。首次安装生成 package-lock.json，后续可用 npm ci --ignore-scripts 复现依赖。 未安装完整时，npm run check 会明确提示安装命令；检查固定使用本工程的 TypeScript，不从全局 PATH 查找 tsc。
+开发依赖固定 TypeScript 5.9.3 与 @types/node 22.20.5，支持 node:fs、process、fetch 等 Node 22 API 的严格检查；只加载 ES2022 和 Node 声明，不加入 window、document 等浏览器全局。首次安装生成 package-lock.json，后续可用 npm ci --ignore-scripts 复现依赖。 未安装完整时，npm run check 会明确提示安装命令；检查固定使用本工程的 TypeScript，不从全局 PATH 查找 tsc。 通过类型检查后还会按 action.json 检查 Node ESM 入口的 default 可调用导出；缺少 default 或明确非函数值会失败，不执行作者代码。动态类型或 CommonJS 入口会明确报告未确认，不冒充运行时通过。
 
-创建工程只写本地文件，不下载依赖、不执行 npm 或作者脚本。类型检查不执行动作代码；实际运行仍需 Node。SDK 可用本开发工具显式 refresh 更新；刷新只替换 SDK，作者 package.json、jsconfig.json、入口及说明保持。
+创建工程只写本地文件，不下载依赖、不执行 npm 或作者脚本。类型检查不执行动作代码；实际运行仍需 Node。SDK 可用本开发工具显式 refresh 更新；刷新只替换 SDK，作者 package.json、jsconfig.json、入口及说明保持。 已有工程刷新后可显式运行 node sdk/check-node-entry.cjs .；刷新不会改写作者的 check 命令。
 `);
     }
   }

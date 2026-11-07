@@ -29,7 +29,11 @@ node tools/script-project.mjs create --runtime script --binary $app --config $co
 | Node | `export default async function main(ctx)` | 返回 Promise，需要等待结果 |
 | 轻量脚本 | `export function main(ctx)`，使用 `ScriptMain` 类型 | 同步返回 |
 
-Node 的入口必须默认导出函数。只命名导出 `main` 即使能通过类型检查，正式 NodeRuntime 仍会拒绝为 `invalid_entry`。
+Node 的入口必须默认导出可调用函数。新建 Node 工程的 `npm run check` 会先运行严格类型检查，再按 `action.json` 检查实际入口的默认导出与明确不支持的顶层返回类型。检查不执行作者代码，也不输出编译文件。
+
+入口检查会等待类型层面的顶层 Promise：明确的函数、类构造器、symbol 或 bigint 返回类型会报错。空返回、Promise 和普通对象沿用现有宿主行为。动态类型、混合类型、自定义序列化或 CommonJS 入口会报告未确认；静态检查不保证对象内部都可序列化，实际结果仍由正式运行器处理。
+
+已有 Node 工程刷新 SDK 后会获得同一检查器，原作者的 `package.json` 不会被改写；可显式运行 `node sdk/check-node-entry.cjs .`。
 
 Node 工程的默认入口只整理输入文本，使用包内相对模块：
 
