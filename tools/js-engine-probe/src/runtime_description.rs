@@ -14,6 +14,12 @@ pub fn describe() -> Value {
         capabilities.push("process.capture.v1");
         capabilities.push("system.open_file_in_parent.v1");
         capabilities.push("ui.action_hint.v1");
+        capabilities.push("window.geometry.v1");
+        capabilities.push("window.set_rect.v1");
+        capabilities.push("pointer.state.v1");
+        capabilities.push("pointer.root.v1");
+        capabilities.push("target.handoff_pointing_root.v1");
+        capabilities.push("window.drag.v1");
     }
     json!({
         "schema_version":1,

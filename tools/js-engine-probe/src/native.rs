@@ -10,7 +10,7 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 38] = [
+pub const METHODS: [&str; 44] = [
     "actions.stop_other_instances",
     "state.read",
     "state.compare_and_swap",
@@ -47,6 +47,12 @@ pub const METHODS: [&str; 38] = [
     "clipboard.write",
     "clipboard.write_files",
     "window.action",
+    "window.geometry",
+    "window.set_rect",
+    "pointer.state",
+    "pointer.root",
+    "target.handoff_pointing_root",
+    "window.drag",
     "display.brightness_step",
     "audio.volume_adjust",
 ];
@@ -60,7 +66,15 @@ pub struct Configuration {
 
 fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiError {
     let stat = matches!(method, "fs.stat" | "fs.read_directory");
-    let data_read = matches!(method, "clipboard.read_data" | "explorer.context");
+    let data_read = matches!(
+        method,
+        "clipboard.read_data"
+            | "explorer.context"
+            | "window.geometry"
+            | "pointer.state"
+            | "pointer.root"
+    );
+
     let data_copy = method == "selection.copy_data";
     let history_read = matches!(method, "history.list" | "history.get");
     let history = matches!(
@@ -80,6 +94,16 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
         .into(),
         message: if method == "ui.action_hint" {
             "动作版本提示更新未确认；请检查错误代码和效果状态。".into()
+        } else if matches!(
+            method,
+            "window.geometry"
+                | "window.set_rect"
+                | "pointer.state"
+                | "pointer.root"
+                | "window.drag"
+                | "target.handoff_pointing_root"
+        ) {
+            "窗口矩形调用未获完整确认；请检查错误代码和效果状态。".into()
         } else if method.starts_with("raishot.resident.") {
             "RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。".into()
         } else if method == "clipboard.write_files" {
@@ -126,10 +150,16 @@ fn brightness_transport_effect(
             | "raishot.resident.find"
             | "raishot.resident.region"
             | "clipboard.write_files"
+            | "window.geometry"
+            | "window.set_rect"
+            | "pointer.state"
+            | "pointer.root"
+            | "window.drag"
             | "actions.stop_other_instances"
             | "state.read"
             | "state.compare_and_swap"
             | "ui.action_hint"
+            | "target.handoff_pointing_root"
     ) && !write_began
     {
         "not_started"
@@ -221,9 +251,15 @@ pub fn call(
                 | "raishot.resident.find"
                 | "raishot.resident.region"
                 | "clipboard.write_files"
+                | "window.geometry"
+                | "window.set_rect"
+                | "pointer.state"
+                | "pointer.root"
+                | "window.drag"
                 | "actions.stop_other_instances"
                 | "state.read"
                 | "state.compare_and_swap"
+                | "target.handoff_pointing_root"
                 | "history.list"
                 | "history.get"
                 | "history.append"
@@ -245,9 +281,15 @@ pub fn call(
                         | "raishot.resident.find"
                         | "raishot.resident.region"
                         | "clipboard.write_files"
+                        | "window.geometry"
+                        | "window.set_rect"
+                        | "pointer.state"
+                        | "pointer.root"
+                        | "window.drag"
                         | "actions.stop_other_instances"
                         | "state.read"
                         | "state.compare_and_swap"
+                        | "target.handoff_pointing_root"
                         | "history.append"
                         | "history.remove"
                         | "ui.toggle_history"
@@ -283,9 +325,15 @@ pub fn call(
                         | "raishot.resident.find"
                         | "raishot.resident.region"
                         | "clipboard.write_files"
+                        | "window.geometry"
+                        | "window.set_rect"
+                        | "pointer.state"
+                        | "pointer.root"
+                        | "window.drag"
                         | "actions.stop_other_instances"
                         | "state.read"
                         | "state.compare_and_swap"
+                        | "target.handoff_pointing_root"
                         | "history.list"
                         | "history.get"
                         | "history.append"
@@ -304,9 +352,15 @@ pub fn call(
                                 | "raishot.resident.find"
                                 | "raishot.resident.region"
                                 | "clipboard.write_files"
+                                | "window.geometry"
+                                | "window.set_rect"
+                                | "pointer.state"
+                                | "pointer.root"
+                                | "window.drag"
                                 | "actions.stop_other_instances"
                                 | "state.read"
                                 | "state.compare_and_swap"
+                                | "target.handoff_pointing_root"
                                 | "history.append"
                                 | "history.remove"
                                 | "ui.toggle_history"
@@ -420,9 +474,15 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "raishot.resident.find"
                     | "raishot.resident.region"
                     | "clipboard.write_files"
+                    | "window.geometry"
+                    | "window.set_rect"
+                    | "pointer.state"
+                    | "pointer.root"
+                    | "window.drag"
                     | "actions.stop_other_instances"
                     | "state.read"
                     | "state.compare_and_swap"
+                    | "target.handoff_pointing_root"
                     | "history.list"
                     | "history.get"
                     | "history.append"
@@ -458,9 +518,15 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "raishot.resident.find"
                     | "raishot.resident.region"
                     | "clipboard.write_files"
+                    | "window.geometry"
+                    | "window.set_rect"
+                    | "pointer.state"
+                    | "pointer.root"
+                    | "window.drag"
                     | "actions.stop_other_instances"
                     | "state.read"
                     | "state.compare_and_swap"
+                    | "target.handoff_pointing_root"
             ) {
                 error.required_permissions = permissions;
             }

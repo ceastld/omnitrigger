@@ -72,7 +72,7 @@ test('无真实作用域或无UI明确失败，不把updated:true当作可渲染
   const expired=script(false);assert.throws(()=>vm.runInContext("ctx.ui.setActionHint({text:'v123'})",expired.context),fault('ui_hint_scope_expired'));assert.equal(expired.calls.length,0);
   const absent=script(true,false);assert.throws(()=>vm.runInContext("ctx.ui.setActionHint({text:'v123'})",absent.context),fault('ui_unavailable'));assert.equal(absent.calls.length,1);
 });
-test('产品Node守卫保留scope-only与desktop边界，自述Windows8非Windows5',()=>{
+test('产品Node守卫保留scope-only与desktop边界，自述Windows14非Windows5',()=>{
   assert(host.includes("if (actionHint && request.actions_scope !== true)"));
   assert(host.includes('!actionControl && !actionHint && request.native_context_available === false'));
   assert(host.includes("'state.read','state.compare_and_swap','actions.stop_other_instances'"));
@@ -80,7 +80,7 @@ test('产品Node守卫保留scope-only与desktop边界，自述Windows8非Window
   const source=read('tools/js-engine-probe/src/runtime_description.rs');
   const base=[...source.match(/let mut capabilities = vec!\[([\s\S]*?)\];/)[1].matchAll(/"([^"]+)"/g)].map(x=>x[1]);
   const extra=[...source.match(/if cfg!\(windows\) \{([\s\S]*?)\n    \}/)[1].matchAll(/capabilities\.push\("([^"]+)"\)/g)].map(x=>x[1]);
-  assert.equal(base.length,5);assert.equal(new Set([...base,...extra]).size,8);assert(extra.includes('ui.action_hint.v1'));
+  assert.equal(base.length,5);assert.equal(new Set([...base,...extra]).size,14);assert(extra.includes('ui.action_hint.v1'));
   assert(base.includes('state.read_cas.v1')&&base.includes('actions.stop_other_instances.v1'));
-  assert.match(read('tools/js-engine-probe/tests/runtime_description.rs'),/if cfg!\(windows\) \{ 8 \} else \{ 5 \}/);
+  assert.match(read('tools/js-engine-probe/tests/runtime_description.rs'),/if cfg!\(windows\) \{ 14 \} else \{ 5 \}/);
 });

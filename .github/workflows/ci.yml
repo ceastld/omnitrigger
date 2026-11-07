@@ -387,6 +387,14 @@ jobs:
           node --test examples/actions/process-output/node-capture.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: 校验窗口脚本 API 与普通动作
+        run: |
+          node --test tools/script-sdk-check/window-toggle-for.test.mjs tools/script-sdk-check/window-api.test.mjs tests/script_sdk_whole_source_syntax.test.mjs examples/actions/window-adjust/contract.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($windowConfig in @('tools/script-sdk-check/window-toggle-for-node-jsconfig.json', 'tools/script-sdk-check/window-toggle-for-script-jsconfig.json', 'examples/actions/window-adjust/jsconfig.json')) {
+            node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p $windowConfig
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: 验证轻量脚本开发包的真实安装与切换
         shell: pwsh
         run: |
@@ -522,7 +530,7 @@ jobs:
 
       - name: 验证轻量引擎接入动作服务
         run: |
-          $nodeVariables = @('OMNITRIGGER_TEST_NODE', 'OMNITRIGGER_SELECTION_TEST_NODE', 'OMNITRIGGER_EXPLORER_TEST_NODE', 'OMNITRIGGER_DIRECTORY_TEST_NODE')
+          $nodeVariables = @('OMNITRIGGER_TEST_NODE', 'OMNITRIGGER_SELECTION_TEST_NODE', 'OMNITRIGGER_EXPLORER_TEST_NODE', 'OMNITRIGGER_DIRECTORY_TEST_NODE', 'OMNITRIGGER_CAPTURED_WINDOW_TEST_NODE')
           $previousNodeVariables = @{}
           foreach ($name in $nodeVariables) {
             $previousNodeVariables[$name] = @{ existed = Test-Path "Env:$name"; value = [Environment]::GetEnvironmentVariable($name, 'Process') }

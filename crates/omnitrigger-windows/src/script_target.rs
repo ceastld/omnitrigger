@@ -177,6 +177,34 @@ impl ScriptTarget {
         })
     }
 
+    /// 读取本次原目标的物理屏幕矩形；守卫复用身份/前台与调用取消/期限。
+    pub fn window_geometry_if(
+        &self,
+        mut check: impl FnMut() -> Result<(), crate::WindowGeometryError>,
+    ) -> Result<crate::WindowGeometry, crate::WindowGeometryError> {
+        crate::window_geometry::read_checked(self.target, || {
+            check()?;
+            self.ensure_foreground().map_err(|message| {
+                crate::WindowGeometryError::new("target_changed", message, "not_started")
+            })
+        })
+    }
+
+    /// 只提交一次调整，不隐式还原/激活，不自动重试或补偿。
+    pub fn set_window_rect_if(
+        &self,
+        rect: crate::WindowRect,
+        frame: crate::WindowRectFrame,
+        mut check: impl FnMut() -> Result<(), crate::WindowGeometryError>,
+    ) -> Result<(), crate::WindowGeometryError> {
+        crate::window_geometry::set_checked(self.target, rect, frame, || {
+            check()?;
+            self.ensure_foreground().map_err(|message| {
+                crate::WindowGeometryError::new("target_changed", message, "not_started")
+            })
+        })
+    }
+
     pub fn send_shortcut(&self, keys: &[u16]) -> Result<(), String> {
         self.send_shortcut_if(keys, || Ok(()))
     }

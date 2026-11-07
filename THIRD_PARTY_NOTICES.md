@@ -108,3 +108,7 @@ RaiShot 截图适配描述和 OmniTrigger 安装器属于本项目代码；截�
 `examples/actions/browser-workflows` 与 `examples/actions/common-search` 的离仓作者检查同样固定 TypeScript 5.9.3（Apache-2.0）作为开发依赖，版本、来源和完整性由各包 package-lock.json 记录；不增加运行依赖，也不向 Script 注入 DOM 或 Node 环境声明。
 
 `examples/actions/brightness-step` 的独立作者检查固定 TypeScript 5.9.3（Apache-2.0）作为开发依赖，来源和完整性见本包 package-lock.json，安装后的许可证位于 node_modules/typescript/LICENSE.txt；不增加动作运行依赖，也不向 Script 加入 DOM 或 Node 环境声明。
+
+## 窗口与指针适配
+
+窗口几何、指针及有界调整复用锁定的 windows 0.61.3（MIT OR Apache-2.0）绑定、现有 serde/serde_json 和标准库。仅为现有 Windows 依赖启用 Win32_System_RemoteDesktop、Win32_System_StationsAndDesktops 功能，不新增第三方包、素材、运行依赖或许可类别；主工作区及脚本宿主锁文件保持。适配、SDK、示例和测试由本项目编写，按 MIT 提供。
