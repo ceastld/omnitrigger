@@ -22,6 +22,86 @@ function fixture() {
   return root;
 }
 
+function nodeFixture(mixed=false) {
+  const root=fixture();
+  for(const name of ['api.d.ts','clipboard-history-api.d.ts',...(mixed?['script-types.d.ts']:[])]) {
+    writeFileSync(join(root,'sdk',name),readFileSync(join(repo,'crates/omnitrigger-actions/runtime',name)));
+  }
+  const nodeSource="throw Error('NODE INITIALIZER MUST NOT RUN');\n/** @param {import('./sdk/api.js').ActionContext} ctx */\nexport default async function main(ctx) { const target=await ctx.desktop.target();return {processName:target.processName}; }\n";
+  writeFileSync(join(root,'node.mjs'),nodeSource);
+  if(mixed)writeFileSync(join(root,'main.mjs'),"throw Error('SCRIPT INITIALIZER MUST NOT RUN');\n/** @type {ScriptMain} */\nexport function main(ctx) { return {processName:ctx.desktop.target().processName}; }\n");
+  writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[
+    ...(mixed?[{runtime:'script',entry:'main.mjs'}]:[]),{runtime:'node',entry:'node.mjs'}]}));
+  writeFileSync(join(root,'jsconfig.json'),JSON.stringify({compilerOptions:{strict:true,skipLibCheck:false,
+    target:'ES2020',module:'ESNext',moduleResolution:'Bundler',lib:['ES2020'],types:[]},
+    files:mixed?['sdk/script-types.d.ts']:[]}));
+  return {root,nodeSource};
+}
+
+test('统一Node检查使用真实SDK与同一受限工程，严格默认导出合同且不执行作者代码',()=>{
+  const {root,nodeSource}=nodeFixture();const result=checkProjectTypes(root);
+  assert.equal(result.passed,true,JSON.stringify(result));
+  assert.deepEqual(result.entries,['node.mjs']);assert.deepEqual(result.moduleChecks,[]);
+  assert.deepEqual(result.entryChecks,[]);assert.deepEqual(result.environmentDiagnostics,[]);
+  assert.equal(result.nodeEntryChecks.length,1);assert.equal(result.nodeEntryChecks[0].passed,true);
+  assert.equal(result.staticAnalysisComplete,true);assert.equal(result.runtimeExecuted,false);
+  assert.equal(result.filesModified,false);assert.equal(readFileSync(join(root,'node.mjs'),'utf8'),nodeSource);
+  writeFileSync(join(root,'node.mjs'),"throw Error('NODE INITIALIZER MUST NOT RUN');\nexport default 42;\n");
+  const invalid=checkProjectTypes(root);assert.equal(invalid.passed,false);
+  assert.deepEqual(invalid.diagnostics,[]);assert.equal(invalid.staticEnvironmentPassed,false);
+  const error=invalid.environmentDiagnostics.find(item=>item.code==='node_entry_default_noncallable');
+  assert(error);assert.equal(error.runtime,'node');assert.equal(error.entry,'node.mjs');
+  assert.deepEqual([error.file,error.line,error.column],['node.mjs',2,1]);
+  writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[{runtime:'node',entry:'node.cjs'}]}));
+  writeFileSync(join(root,'node.cjs'),"throw Error('CJS INITIALIZER MUST NOT RUN');\nmodule.exports = function main() { return null; };\n");
+  const cjs=checkProjectTypes(root);
+  assert(cjs.nodeEntryChecks[0].diagnostics.some(item=>item.code==='node_entry_unresolved'&&item.severity==='warning'));
+  assert.equal(cjs.staticAnalysisComplete,false);assert.deepEqual(cjs.skippedEntries,[]);
+});
+
+test('统一混合检查保留Script字段并核验Node默认导出，Promise误用仍有原数值定位',()=>{
+  const {root,nodeSource}=nodeFixture(true);
+  writeFileSync(join(root,'node.mjs'),"throw Error('NODE INITIALIZER MUST NOT RUN');\nexport function main() { return null; }\n");
+  const missing=checkProjectTypes(root);assert.equal(missing.passed,false);
+  assert.deepEqual(missing.entries,['main.mjs','node.mjs']);
+  assert.equal(missing.moduleChecks.length,1);assert.equal(missing.moduleChecks[0].passed,true);
+  assert.equal(missing.entryChecks[0].mainExport,'local_callable_declaration');
+  assert(missing.environmentDiagnostics.some(item=>item.entry==='node.mjs'&&item.code==='node_entry_default_missing'));
+  writeFileSync(join(root,'node.mjs'),nodeSource);
+  const valid=checkProjectTypes(root);assert.equal(valid.passed,true,JSON.stringify(valid));
+  const wrong=nodeSource.replace('await ctx.desktop.target()','ctx.desktop.target()');
+  writeFileSync(join(root,'node.mjs'),wrong);
+  const invalid=checkProjectTypes(root);assert.equal(invalid.passed,false);
+  const error=invalid.diagnostics.find(item=>item.file==='node.mjs'&&item.code===2339);
+  assert(error);assert.equal(error.line,3);
+  assert.equal(error.column,wrong.split('\n')[2].indexOf('target.processName')+'target.'.length+1);
+  assert.equal(invalid.entryChecks[0].passed,true);
+});
+
+test('统一Node环境按明确types解析，缺少Node依赖真实报错且混合包不注入Node全局',()=>{
+  const {root}=nodeFixture();
+  const config={compilerOptions:{strict:true,skipLibCheck:false,lib:['ES2020'],types:['node']}};
+  writeFileSync(join(root,'jsconfig.json'),JSON.stringify(config));
+  writeFileSync(join(root,'node.mjs'),"throw Error('NODE INITIALIZER MUST NOT RUN');\nexport default function main() { return {pid:process.pid}; }\n");
+  const missing=checkProjectTypes(root);assert.equal(missing.passed,false);
+  assert(missing.diagnostics.some(item=>item.code===2688&&item.message.includes('node')));
+  assert(missing.diagnostics.some(item=>item.file==='node.mjs'&&item.line===2&&[2580,2591].includes(item.code)));
+  const mixed=nodeFixture(true);writeFileSync(join(mixed.root,'jsconfig.json'),JSON.stringify(config));
+  assert.throws(()=>checkProjectTypes(mixed.root),error=>error.code==='project_mixed_types_unsupported'
+    &&error.location?.file==='jsconfig.json');
+});
+
+test('统一Node入口继续拒绝坏UTF8、源码超限与清单越界路径',()=>{
+  const {root}=nodeFixture();const file=join(root,'node.mjs');
+  writeFileSync(file,Buffer.from([0xff]));
+  assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_utf8_invalid'&&error.location?.file==='node.mjs');
+  writeFileSync(file,'x'.repeat(128*1024+1));
+  assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_file_limit');
+  writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[{runtime:'node',entry:'../external.mjs'}]}));
+  assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_entry_invalid');
+});
+
+
 test('检查既有入口与相对依赖，保留源码并且不执行模块初始化器',()=>{
   const root=fixture();const before=readFileSync(join(root,'main.mjs'));
   const result=checkProjectTypes(root);

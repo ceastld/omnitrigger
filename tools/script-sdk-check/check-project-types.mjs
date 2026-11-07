@@ -1,4 +1,4 @@
-// 对既有轻量工程做入口与依赖的 noEmit 类型检查；不创建工程、不导入或执行作者代码。
+// 对既有JavaScript工程做入口与依赖的 noEmit 类型检查；不创建工程、不导入或执行作者代码。
 import {spawnSync} from 'node:child_process';
 import {openSync,closeSync,fstatSync,lstatSync,readdirSync,readSync} from 'node:fs';
 import {dirname,extname,isAbsolute,join,relative,resolve} from 'node:path';
@@ -6,6 +6,7 @@ import {fileURLToPath} from 'node:url';
 import ts from 'typescript';
 import {analyzeScriptModules} from './analyze-script-modules.mjs';
 import {analyzeScriptEntry} from './analyze-script-entry.mjs';
+import {analyzeNodeEntries} from './check-node-entry.cjs';
 
 class ProjectCheckError extends Error {
   constructor(code,location) { super('脚本工程检查未完成；请检查错误代码。'); this.code=code; this.location=location; }
@@ -95,13 +96,15 @@ export function checkProjectTypes(projectDirectory) {
   try {manifest=json(join(root,'action.json'),256*1024);}
   catch(error){if(error?.code==='ENOENT')fail('project_manifest_missing');throw error;}
   if(manifest?.schema_version!==1||!Array.isArray(manifest.actions)||manifest.actions.length>64)fail('project_manifest_invalid');
-  const entries=[];
+  const entries=[],scriptEntries=[],nodeEntries=[];
   for(const action of manifest.actions) {
-    if(action?.runtime!=='script')continue;
+    if(!['script','node'].includes(action?.runtime))continue;
     if(typeof action.entry!=='string'||!action.entry||isAbsolute(action.entry)||action.entry.includes('\0'))fail('project_entry_invalid');
     const entry=resolve(root,action.entry);
-    if(!within(root,entry)||!['.js','.mjs'].includes(extname(entry)))fail('project_entry_invalid');
+    const extensions=action.runtime==='node'?['.js','.mjs','.cjs']:['.js','.mjs'];
+    if(!within(root,entry)||!extensions.includes(extname(entry)))fail('project_entry_invalid');
     entries.push(entry);
+    (action.runtime==='node'?nodeEntries:scriptEntries).push(entry);
   }
   if(entries.length===0)fail('project_no_script_actions');
   let sdk;
@@ -161,10 +164,15 @@ export function checkProjectTypes(projectDirectory) {
     fail('project_config_invalid',{file:'jsconfig.json',
       ...(position?{line:position.line+1,column:position.character+1}:{})});
   }
+  // 混合包保持Script的无隐式环境约定；不把Node全局类型注入同步入口。
+  if(nodeEntries.length&&scriptEntries.length&&converted.options.types?.length) {
+    fail('project_mixed_types_unsupported',{file:'jsconfig.json'});
+  }
   const options={strict:true,target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.ESNext,
     moduleResolution:ts.ModuleResolutionKind.Bundler,lib:['lib.es2020.d.ts'],...converted.options,
     // 旧 .js 入口实际各自在函数体内执行；noEmit 检查也按文件隔离，不合并作者局部声明。
-    noEmit:true,allowJs:true,checkJs:true,types:[],moduleDetection:ts.ModuleDetectionKind.Force};
+    noEmit:true,allowJs:true,checkJs:true,
+    types:nodeEntries.length&&!scriptEntries.length?(converted.options.types??[]):[],moduleDetection:ts.ModuleDetectionKind.Force};
   const host=ts.createCompilerHost(options);
   let fatal;
   const originalExists=host.fileExists;
@@ -201,7 +209,7 @@ export function checkProjectTypes(projectDirectory) {
   if(fatal)throw fatal;
   const localName=path=>relative(root,path).replaceAll('\\','/');
   const moduleChecks=[],entryChecks=[],skippedEntries=[],legacyEntryDiagnostics=[];
-  for(const entry of new Set(entries)) {
+  for(const entry of new Set(scriptEntries)) {
     const name=localName(entry);
     // 旧 .js 走函数体协议，不能假装它需要 ESM 具名导出。
     if(extname(entry)!=='.mjs') {
@@ -237,18 +245,25 @@ export function checkProjectTypes(projectDirectory) {
     moduleChecks.push({entry:name,...moduleResult});
     entryChecks.push({entry:name,...analyzeScriptEntry({file:name,text:sourceSnapshots.get(entry)})});
   }
+  const nodeEntryChecks=[...new Set(nodeEntries)].map(entry=>({entry:localName(entry),
+    ...analyzeNodeEntries({projectDirectory:root,typescript:ts,program,entries:[entry]})}));
+  if(fatal)throw fatal;
   const environmentDiagnostics=[
     ...legacyEntryDiagnostics,
     ...moduleChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'modules',...item}))),
     ...entryChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'entry',...item}))),
+    ...nodeEntryChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'entry',runtime:'node',...item}))),
   ];
-  const staticEnvironmentPassed=legacyEntryDiagnostics.length===0&&moduleChecks.every(check=>check.passed)&&entryChecks.every(check=>check.passed);
+  const staticEnvironmentPassed=legacyEntryDiagnostics.length===0&&moduleChecks.every(check=>check.passed)
+    &&entryChecks.every(check=>check.passed)&&nodeEntryChecks.every(check=>check.passed);
   return {passed:diagnostics.length===0&&staticEnvironmentPassed,compilerVersion:ts.version,project:root,
     entries:entries.map(path=>relative(root,path).replaceAll('\\','/')),diagnostics,
     checkedFiles:[...loaded.keys()].map(path=>relative(root,path).replaceAll('\\','/')),
     staticEnvironmentPassed,environmentDiagnostics,moduleChecks,entryChecks,skippedEntries,
+    ...(nodeEntries.length?{nodeEntryChecks}:{}),
     staticAnalysisComplete:skippedEntries.length===0&&moduleChecks.every(check=>check.staticGraphComplete)
-      &&entryChecks.every(check=>check.mainExport==='local_callable_declaration'),
+      &&entryChecks.every(check=>check.mainExport==='local_callable_declaration')
+      &&nodeEntryChecks.every(check=>check.passed&&!check.diagnostics.some(item=>item.severity==='warning')),
     runtimeCapabilitiesChecked:false,runtimeVerified:false,
     runtimeExecuted:false,filesModified:false};
 }

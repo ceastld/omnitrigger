@@ -54,13 +54,13 @@ export default async function main(ctx) {
 
 每个动作包保留自己的配置和声明快照。不要为了同时编辑多个包而把它们的 SDK 声明汇总到一个 `jsconfig.json`；这会混合不同全局声明或带独立标记的捕获类型。修改代码后的错误应定位到当前入口的行列，例如 Node 未等待 `ctx.desktop.target()` 就读取 `processName`，或调用不存在的 API。
 
-开发工具 `tools/script-project.mjs` 只有 `create` 和 `refresh`，没有 `check` 子命令。Node 工程使用下文的 `npm run check`；轻量普通包或生成工程可在仓库根使用现有静态检查入口：
+开发工具 `tools/script-project.mjs` 只有 `create` 和 `refresh`，没有 `check` 子命令。Node 工程可继续使用下文的 `npm run check`；Node、轻量或混合普通包及生成工程也可在仓库根使用同一受限静态检查入口：
 
 ```powershell
 node tools/script-sdk-check/check-project-types.mjs "$root/actions/script-demo"
 ```
 
-该命令读取指定包自己的 SDK 与配置，输出类型诊断及模块/入口检查结果，不执行作者初始化器或入口。类型诊断的 `file`、`line`、`column` 使用包内路径和从 1 开始的位置。它只检查轻量动作；Node 的默认导出检查使用下面的 Node 检查器。静态通过不代表宿主或目标软件已经验收。
+该命令读取指定包自己的 SDK 与配置，输出类型诊断及模块/入口检查结果，不执行作者初始化器或入口。类型诊断的 `file`、`line`、`column` 使用包内路径和从 1 开始的位置。它会按清单运行时分别核验轻量具名导出和 Node 默认导出，Node 结果见 `nodeEntryChecks`。纯 Node 的 `types:["node"]` 只解析包内显式依赖；缺少 Node 环境声明时真实报错。混合包目前保持 SDK 类型环境，非空 `types` 会明确拒绝，完整边界见[工程检查说明](../tools/script-sdk-check/PROJECT_CHECK.md)。静态通过不代表宿主或目标软件已经验收。
 
 ## 通过正式 NodeRuntime 运行
 

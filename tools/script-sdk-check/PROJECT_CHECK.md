@@ -1,21 +1,23 @@
-# 检查已有轻量脚本工程
+# 检查已有 JavaScript 动作包
 
-在仓库安装现有开发依赖后，可直接检查已有、附带本地 `sdk/api.d.ts` 的轻量工程，不必启动应用或再创建一个工程：
+在仓库安装现有开发依赖后，可直接检查已有、附带本地 SDK 的 Node、轻量或混合动作包，不必启动应用或再创建一个工程：
 
 ```powershell
 npm ci --prefix tools/script-sdk-check --ignore-scripts --no-audit --no-fund
 node tools/script-sdk-check/check-project-types.mjs "D:\Actions\my-script"
 ```
 
-同一命令读取明确工程中的 `action.json`、`jsconfig.json` 与 `sdk/api.d.ts`，检查清单里 `runtime:"script"` 的 `.js/.mjs` 入口及依赖，并对 `.mjs` 入口检查轻量宿主的静态导入图和 `main` 具名导出声明。成功退出0，有类型错误、静态环境错误或工程错误退出1。它只做静态检查，不创建、修补或覆盖工程文件，不执行模块初始化器或入口，也不启动应用、宿主或编辑器。
+同一命令读取明确工程中的 `action.json`、`jsconfig.json` 与同包 SDK（优先 `sdk/api.d.ts`，缺失时使用根目录 `api.d.ts`）。清单中的 Node 与轻量入口及其依赖都参与同一受限 TypeScript 工程；轻量 `.mjs` 另检查静态导入图和 `main` 具名导出，Node `.js/.mjs/.cjs` 复用现有 Node 默认导出分析。成功退出0，有类型错误、静态环境错误或工程错误退出1。它只做静态检查，不创建、修补或覆盖工程文件，不执行模块初始化器或入口，也不启动应用、宿主或编辑器。
 
 原有 `compilerVersion/project/entries/diagnostics/checkedFiles/runtimeExecuted/filesModified` 字段保留；`diagnostics` 仍是 TypeScript 原数值诊断代码及工程内文件名、行列。新增 `environmentDiagnostics` 保存模块和入口诊断，`category` 分别是 `modules/entry`，代码为字符串。顶层 `passed` 要求类型和静态环境检查都没有错误，`staticEnvironmentPassed` 单独表示后者；警告不改变退出码。
+
+Node 结果新增 `nodeEntryChecks`，按 Node 入口保留原检查器的诊断；轻量 `moduleChecks/entryChecks/skippedEntries` 的含义不变。Node 诊断也进入 `environmentDiagnostics`，保留原代码、文件和一基行列，并带有 `runtime:"node"`。`entries` 列出两类清单入口。Node 错误使 `staticEnvironmentPassed` 和 `passed` 为 false；未确认警告使 `staticAnalysisComplete` 为 false，类型诊断仍保留原 TypeScript 数字代码。纯轻量结果不增加 `nodeEntryChecks` 字段。
 
 `moduleChecks/entryChecks` 按入口返回完整静态结果。轻量导入图需要显式 `.js`／`.mjs`，不补全扩展名，也不支持 Node 包导入；静态加载图最多64模块、合计1MiB。TypeScript 的类型解析仍受明确工程范围限制。若 TypeScript 将 `./value.js` 重定向到 `value.ts`，工具仍按宿主需要的明确 `.js` 路径补读包内静态依赖，沿用相同的元数据、UTF-8和容量防护，不枚举目录。
 
 动态导入目标和再导出值无法静态确定时，返回警告并将 `staticAnalysisComplete` 设为 `false`。旧 `.js` 函数体入口继续接受类型检查，记录在 `skippedEntries`，不强加ESM导出要求；该字段也使静态分析完整性为 `false`。清单中的旧 `.js` 入口若出现静态 `import/export`，会另报可定位的 `legacy_entry_module_syntax`：该入口实际被宿主包装为函数体，不能按 ESM 执行；模块入口使用 `.mjs` 并具名导出 `main`。此限制只针对旧入口，不限制被 `.mjs` 导入的 `.js` 辅助模块。`main` 的函数声明不证明初始化之后仍可调用或返回合法结果。`runtimeCapabilitiesChecked/runtimeVerified` 始终为 `false`，不会探测实际宿主。更详细的静态边界见 [模块快照检查](MODULE_SNAPSHOT_CHECK.md)。
 
-这适合使用记事本或需要命令行反馈的开发流程。保留入口的 `@type {ScriptMain}` 标注及工程SDK；检查使用工程自己的声明快照，不自动升级到仓库最新版。Node动作不在此工具范围内。
+这适合使用记事本或需要命令行反馈的开发流程。保留入口的 `@type {ScriptMain}` 标注及工程SDK；检查使用工程自己的声明快照，不自动升级到仓库最新版。Node ESM 必须 default 导出可调用函数，检查也会等待类型层面的顶层 Promise，拒绝明确无法形成所需 JSON output 的函数、symbol 或 bigint 结果。CommonJS、动态类型和自定义序列化只报告未确认警告，不执行代码来猜测结果。
 
 更新已有工程时，先保留原 SDK，再由作者显式选择与入口作用域相符的同版本快照：
 
@@ -26,7 +28,11 @@ node tools/script-sdk-check/check-project-types.mjs "D:\Actions\my-script"
 
 源声明若含 `reference path`，不能只复制包装文件而遗漏它引用的类型文件；工程本地 SDK 应保持自包含。安装或升级宿主不会修改作者的 SDK；替换声明也不会升级已经安装的宿主。更新后先运行本工具，再通过原有显式运行入口验证实际行为。
 
-`jsconfig.json` 的编译选项会参与检查，始终启用 `allowJs/checkJs/noEmit` 并排除隐式环境类型。检查时固定 `moduleDetection:"force"`，使多个旧 `.js` 入口的 `main` 和局部变量分别属于各自文件，符合每次调用独立函数体的运行方式；这只影响类型作用域，不改写源码、不要求旧入口导出，也不改变运行协议。编辑器需要同样的隔离时，可在工程自己的 `jsconfig.json` 中设置该选项。当前不展开 `extends`；除清单入口和按需依赖外，也加入 `files` 逐个列明的包内 `.d.ts`，使混合 Node/同步 SDK 的显式环境声明与编辑器一致。`files` 不能隐藏清单入口，也不把未使用的 Node 源码扩为检查入口；不展开 `include` 或目录通配。声明路径必须是包内相对普通文件，沿用元数据、UTF-8及容量防护；越界、绝对或通配路径返回定位到 `jsconfig.json` 的 `project_config_unsupported`，非字符串数组或超过256项为 `project_config_invalid`。缺失的显式声明保留 TypeScript 缺文件诊断。缺少SDK或配置分别报告 `project_sdk_missing/project_config_missing`，配置不支持或损坏为 `project_config_unsupported/project_config_invalid`。`jsconfig.json` 的 JSON 语法错误及 `compilerOptions` 错误值/未知选项另附 `error.location`，包含工程内文件名 `file` 和从 1 开始的 `line/column`；函数接口抛出的错误也保留相同 `location`，便于命令行定位，使用既有 `project_config_invalid` 错误码。
+`jsconfig.json` 的编译选项会参与检查，始终启用 `allowJs/checkJs/noEmit`。纯轻量与混合包保持不自动加载环境类型；纯 Node 包默认也不发现环境类型，仅按作者明确的 `compilerOptions.types` 请求包内依赖。检查时固定 `moduleDetection:"force"`，使多个旧 `.js` 入口的 `main` 和局部变量分别属于各自文件，符合每次调用独立函数体的运行方式；这只影响类型作用域，不改写源码、不要求旧入口导出，也不改变运行协议。编辑器需要同样的隔离时，可在工程自己的 `jsconfig.json` 中设置该选项。当前不展开 `extends`；除清单入口和按需依赖外，也加入 `files` 逐个列明的包内 `.d.ts`，使混合 Node/同步 SDK 的显式环境声明与编辑器一致。`files` 不能隐藏清单入口，也不把清单之外的 Node 源码扩为动作入口；不展开 `include` 或目录通配。声明路径必须是包内相对普通文件，沿用元数据、UTF-8及容量防护；越界、绝对或通配路径返回定位到 `jsconfig.json` 的 `project_config_unsupported`，非字符串数组或超过256项为 `project_config_invalid`。缺失的显式声明保留 TypeScript 缺文件诊断。缺少SDK或配置分别报告 `project_sdk_missing/project_config_missing`，配置不支持或损坏为 `project_config_unsupported/project_config_invalid`。`jsconfig.json` 的 JSON 语法错误及 `compilerOptions` 错误值/未知选项另附 `error.location`，包含工程内文件名 `file` 和从 1 开始的 `line/column`；函数接口抛出的错误也保留相同 `location`，便于命令行定位，使用既有 `project_config_invalid` 错误码。
+
+只使用 SDK 的纯 Node 包可使用 `types:[]`，Node API 的 Promise 仍会严格参与检查。使用 `process`、`node:fs` 等 Node 环境 API 的纯 Node 包，需要自己的开发依赖和 `types:["node"]`；工具不会安装或伪造声明，缺少类型时保留 TypeScript 的 2688、2307 等实际错误。显式类型依赖也必须位于当前包内，受同样的元数据、UTF-8、单文件和工程总量限制；不会到包外寻找全局 `@types/node`。这些限制可能使大型类型依赖报工程容量错误，应使用该工程原有的 TypeScript 检查流程。
+
+混合包目前支持同包显式 SDK 声明，不向同步入口注入 Node 全局。混合包配置非空 `types` 时返回定位到 `jsconfig.json` 的 `project_mixed_types_unsupported`，需要 Node 全局类型的代码使用独立配置和原有工程检查流程。本命令不把 Node 的模块能力限制为轻量宿主的相对导入协议，也不声称检查了 Node 的实际模块加载或目标运行时。
 
 内容读取限于该工程和已定位的TypeScript标准库。云盘命名目录、符号链接、硬链接及Windows云端占位属性会拒绝；不会扫描用户目录寻找SDK。单个源码最多128KiB、声明最多512KiB，工程读取合计最多8MiB、256个文件；超限为 `project_file_limit/project_total_limit`。文本要求UTF-8，错误为 `project_utf8_invalid`，不替换坏字节后继续检查。若错误发生在工程内文件，`error.location.file` 标明入口或依赖的相对路径；无法解码时不提供或猜测 `line/column`。标准库只读取已安装TypeScript中的明确文件。
 

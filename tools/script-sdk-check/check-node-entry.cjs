@@ -27,6 +27,12 @@ function checkNodeEntry({projectDirectory, typescript:ts}) {
   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, root);
   if (parsed.errors.length) throw Object.assign(new Error('jsconfig.json 配置无效。'), {code:'node_entry_config_invalid'});
   const program = ts.createProgram([...new Set([...parsed.fileNames, ...entries])], {...parsed.options, noEmit:true});
+  return analyzeNodeEntries({projectDirectory:root, typescript:ts, program, entries});
+}
+
+// 复用调用方已构建的受限工程；此分析函数不读取文件或重建Program。
+function analyzeNodeEntries({projectDirectory, typescript:ts, program, entries}) {
+  const root = resolve(projectDirectory);
   const checker = program.getTypeChecker(), diagnostics = [];
   // host 等待顶层 Promise，再以 output ?? null 写入 JSON 响应；不要求原值逐字段都是 JSON。
   // 这里只拒绝明确的顶层不支持类型，不把未知类型或对象序列化视为运行时验证。
@@ -78,7 +84,7 @@ function checkNodeEntry({projectDirectory, typescript:ts}) {
     entries:entries.length, noEmit:true, authorCodeExecuted:false, runtimeVerified:false};
 }
 
-module.exports = {checkNodeEntry};
+module.exports = {checkNodeEntry, analyzeNodeEntries};
 if (require.main === module) {
   try {
     const result = checkNodeEntry({projectDirectory:process.argv[2] ?? '.', typescript:require('typescript')});
