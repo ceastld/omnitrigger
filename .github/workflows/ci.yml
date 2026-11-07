@@ -223,7 +223,7 @@ jobs:
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
           }
-          node --test tools/script-sdk-check/analyze-script-modules.test.mjs tools/script-sdk-check/analyze-script-entry.test.mjs
+          node --test tools/script-sdk-check/analyze-script-modules.test.mjs tools/script-sdk-check/analyze-script-entry.test.mjs tools/script-sdk-check/analyze-legacy-entry.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 验证只读桌面与目录 API 的 SDK、客户端和 Node 桥接
