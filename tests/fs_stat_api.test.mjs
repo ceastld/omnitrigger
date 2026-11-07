@@ -13,9 +13,10 @@ const runtime = resolve(repo, 'crates/omnitrigger-actions/runtime');
 const desktop = readFileSync(join(runtime,'desktop-api.js'),'utf8');
 const browser = readFileSync(join(runtime,'browser-api.js'),'utf8');
 const history = readFileSync(join(runtime,'clipboard-history-api.js'),'utf8')
-  + readFileSync(join(runtime,'process-capture-api.js'),'utf8');
+  + readFileSync(join(runtime,'process-capture-api.js'),'utf8')
+  + readFileSync(join(runtime,'actions-api.js'),'utf8');
 const host = readFileSync(join(runtime,'host.mjs'),'utf8');
-const sdk = readFileSync(join(runtime,'actions-api.js'),'utf8')+'\n'+readFileSync(join(repo,'tools/js-engine-probe/src/sdk.js'),'utf8');
+const sdk = readFileSync(join(repo,'tools/js-engine-probe/src/sdk.js'),'utf8');
 const createApi = runInNewContext(desktop+';createDesktopApi');
 const path = 'X:\\test-only-path-marker\\file.txt'; // 只传给内存接收端，不查询此路径。
 const token = 'c'.repeat(64);
