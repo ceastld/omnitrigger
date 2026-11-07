@@ -260,7 +260,7 @@ export default async function (ctx) {
 | `ctx.packageRoot` | 当前动作包的绝对目录，可用于定位包内资源。 |
 | `ctx.process.run(program, args, { cwd, allowNonZero })` | 启动进程并等待退出，返回 `code`、`stdout` 和 `stderr`；启动失败或非零退出抛错。省略 `cwd` 时使用包目录；显式设置 `allowNonZero: true` 时由脚本处理非零退出。 |
 | `ctx.process.capture(program, args?, { cwd?, timeoutMs?, allowNonZero? }?)` | Windows 严格采集，须 `await`；返回 `{code, stdout, stderr}`。默认10秒、双流合计64KiB、严格UTF-8，失败不交付部分输出；默认工作目录为包目录。 |
-| `ctx.process.start(program, args, { cwd })` | 独立启动程序，返回 `{ pid }`，不等待退出、不采集输出；省略 `cwd` 时使用包目录。成功启动后，取消动作不会关闭该程序。 |
+| `ctx.process.start(program, args?, { cwd?, windowsHide? }?)` | 独立启动程序，返回 `{ pid }`，不等待退出、不采集输出；省略 `cwd` 时使用包目录。Node 的 `windowsHide` 默认为 `true`；启动需要显示窗口的程序时可显式传入 `false`，这只取消隐藏请求，不保证窗口显示或激活。PID 不代表界面就绪。成功启动后，取消动作不会关闭该程序。 |
 | `ctx.delay(milliseconds)` | 等待指定毫秒数。 |
 | `ctx.signal` | 当前调用的取消信号；自定义异步步骤可监听此信号停止后续工作。 |
 | `ctx.browser.profiles({ timeoutMs })` | 列出已连接浏览器及其 `browser_instance_id`；连接可用不代表业务动作已完成。 |
@@ -281,6 +281,8 @@ export default async function (ctx) {
 | `ctx.clipboard.readData()` | 读取文本或文件列表及观察到的剪贴板序号，不需要前台目标，不读取文件内容。 |
 | `ctx.clipboard.history.list/get/append/remove` | 显式访问应用的有界纯文本历史；默认不监听或读取系统剪贴板。 |
 | `ctx.clipboard.writeText(text, options?)` | 替换全部剪贴板内容为 Unicode 文本，返回 `{ written: true, sequenceNumber }`，不自动恢复。临时回贴可传 `{ excludeFromHistory: true }`，同时写入 Windows 历史排除格式与 `OmniTrigger.TransientClipboard.v1`，回执另含本次随机 `writeId`；识别标记的采集器应跳过该内容。默认不排除；标记不限制其它程序读取。序号是写入后观察值，不代表独占剪贴板。 |
+
+`windowsHide` 选项仅用于 Node 动作。同步 Script 的 `process.start(program, args)` 不提供第三个选项参数；Windows 实现使用 `CREATE_NO_WINDOW` 避免控制台窗口，该标志不隐藏 GUI 窗口。两种运行时返回的 PID 都只表示进程已创建。
 
 Node 本机桥接在每次 API 调用时将参数编码为固定请求。调用返回 Promise 后再修改按键数组或嵌套时序对象，不会改变等待连接的请求；参数编码失败在连接前返回 `invalid_input/not_started`。这份快照只覆盖本次调用，后续调用仍单独核验目标和取消状态。
 

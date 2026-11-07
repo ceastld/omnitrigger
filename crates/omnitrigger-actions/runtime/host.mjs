@@ -291,11 +291,16 @@ function validateProcess(program, args, options, allowedOptions) {
 }
 
 function start(program, args = [], options = {}) {
-  validateProcess(program, args, options, ['cwd']);
+  validateProcess(program, args, options, ['cwd', 'windowsHide']);
+  const requestedWindowsHide = options.windowsHide;
+  const windowsHide = requestedWindowsHide === undefined ? true : requestedWindowsHide;
+  if (typeof windowsHide !== 'boolean') {
+    throw fault('invalid_input', 'windowsHide 必须是布尔值。');
+  }
   return new Promise((resolve, reject) => {
     const child = spawn(program, args, {
       cwd: options.cwd ?? request.package_root,
-      shell: false, windowsHide: true, detached: true, stdio: 'ignore',
+      shell: false, windowsHide, detached: true, stdio: 'ignore',
     });
     child.once('error', error => reject(fault('process_start_failed', error.message)));
     child.once('spawn', () => {

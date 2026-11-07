@@ -252,7 +252,8 @@ export interface ActionContext {
     /** 通过应用原生桥严格采集；Windows私有Job、有效UTF8、stdout/stderr合计64KiB。
      * 不回退run；无桥接/非Windows明确拒绝，取消/超时不返回部分输出。 */
     capture(program: string, args?: string[], options?: {timeoutMs?: number; allowNonZero?: boolean; cwd?: string}): Promise<{code: number; stdout: string; stderr: string}>;
-    start(program: string, args?: string[], options?: {cwd?: string}): Promise<{pid: number}>;
+    /** windowsHide 默认 true；false 只取消 Windows 隐藏请求，不保证窗口显示或激活。PID 不代表界面就绪。 */
+    start(program: string, args?: string[], options?: {cwd?: string; windowsHide?: boolean}): Promise<{pid: number}>;
   };
   browser: BrowserApi;
   ui: {

@@ -12,7 +12,7 @@ Windows MSVC 的 Boa 宿主为共享 SDK 的解析保留 8 MiB 原生主栈；�
 | `ctx.fs.writeText(path, text, {overwrite})` | 默认创建新文件，目标存在则报错；只有显式 `overwrite:true` 才覆盖，不自动创建目录。 |
 | `ctx.process.run(program, args, {timeoutMs})` | 程序和参数数组分别传递，不隐式经过 Shell。返回 `{pid, exitCode, success}`；默认等待 1000 毫秒，允许 1–1000 毫秒。非零退出由脚本判断，stdout / stderr 不采集。 |
 | `ctx.process.capture(program, args?, options?)` | 同步采集 Windows 程序输出，返回 `{code, stdout, stderr}`；默认预算 10 秒、默认拒绝非零退出，双流合计最多 64 KiB，严格 UTF-8。详见[程序输出采集](#程序输出采集)。 |
-| `ctx.process.start(program, args)` | 创建独立程序后返回 `{pid}`，程序不随脚本结束关闭。 |
+| `ctx.process.start(program, args)` | 创建独立程序后返回 `{pid}`，程序不随脚本结束关闭；PID 不表示窗口已显示或界面就绪。Windows 使用 `CREATE_NO_WINDOW` 避免控制台窗口，不主动隐藏 GUI 窗口。此同步 API 不提供第三个选项参数；Node 的 `windowsHide` 选项不适用于此处。 |
 | `ctx.delay(milliseconds)` | 同步等待 0–60000 毫秒的整数，返回 `undefined`；字符串、小数、非有限数等返回 `invalid_input`，不做隐式转换。 |
 | `ctx.ui.choose({items, title?, placeholder?, timeoutMs?})` | 应用 GPUI 界面中的可搜索选择菜单，返回稳定 ID 或明确取消；Node 入口使用 `await`。独立 CLI 返回 `ui_unavailable`。参数与示例见[脚本选择菜单](../../examples/actions/script-choice/)。 |
 | `ctx.desktop.target()` / `targetContext()` | 查询提交时捕获的原目标或导出 29 秒有效的目标快照；为调用方时钟粒度预留余量，提交校验上限仍为 30 秒。不重新选择前台。仅应用接入可用。 |
