@@ -12,7 +12,7 @@ const repo=process.cwd();
 const moduleFile=path.join(repo,'examples/actions/source-file-preview/main.mjs');
 const manifestFile=path.join(repo,'examples/actions/source-file-preview/action.json');
 const runtime=path.join(repo,'crates/omnitrigger-actions/runtime');
-const sharedFiles=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js'];
+const sharedFiles=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js'];
 const sdkFile=path.join(repo,'tools/js-engine-probe/src/sdk.js');
 const hostFile=path.join(runtime,'host.mjs');
 const fixtureParent=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../.tmp');
@@ -240,7 +240,7 @@ test('分页中取消不会重读目录；已缓存条目在打开前类型变�
 function realBudgetContext(prefill=0) {
   const calls=[],menus=[],choices=['root:0','next-page','next-page','next-page','next-page','previous-page'];
   const entries=files(120);
-  const sharedSource=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js'].map(shared).join('\n');
+  const sharedSource=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js'].map(shared).join('\n');
   const scope={ctx:{input:{roots:[root]},__nativeContext:{connection:{port:1,token:'synthetic'}}},__hostCall:serialized=>{
     const frame=JSON.parse(serialized);calls.push(frame);
     let reply=null;
@@ -288,7 +288,7 @@ test('实际共享 SDK 下四根、Explorer与五轮最深导航加打开共27�
     else throw Error('额外宿主端口 '+frame.method);
     return JSON.stringify({ok:true,value:result});
   }};
-  runInNewContext(['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js'].map(shared).join('\n')+text(sdkFile),scope);
+  runInNewContext(['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js'].map(shared).join('\n')+text(sdkFile),scope);
   const ctx={...scope.ctx,signal:new AbortController().signal,fs:asyncApi(scope.ctx.fs),ui:asyncApi(scope.ctx.ui),desktop:asyncApi(scope.ctx.desktop),open:async(...args)=>scope.ctx.open(...args)};
   assert.deepEqual(await main(ctx),{status:'open_submitted',kind:'file'});assert.equal(calls.length,27);
   assert.equal(calls.filter(call=>call.method==='fs.read_directory').length,5);assert.equal(choices.length,0);

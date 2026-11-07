@@ -16,7 +16,7 @@ let browserConnection;
 let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
-const nativeMethods = new Set(['system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','fs.read_directory','ui.choose','ui.notify','ui.open_history','ui.toggle_history','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
+const nativeMethods = new Set(['actions.stop_other_instances','system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','fs.read_directory','ui.choose','ui.notify','ui.open_history','ui.toggle_history','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
   'keyboard.shortcut','keyboard.sequence','keyboard.text','win32_edit.replace_selection','raishot.resident.find','raishot.resident.region','selection.copy','selection.copy_data','selection.read_text','explorer.context','clipboard.read','clipboard.read_data','clipboard.write','clipboard.write_files','window.action','display.brightness_step','audio.volume_adjust']);
 let nativePending;
 let nativePendingMethod;
@@ -99,6 +99,7 @@ function browserRequest(method, args, options = {}, profiles = false) {
 const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...args));
 
 function nativeCall(method, params) {
+  const actionControl = method === 'actions.stop_other_instances';
   const historyUi = method === 'ui.open_history' || method === 'ui.toggle_history';
   const opening = method === 'system.open' || method === 'system.open_file_in_parent';
   const capture = method === 'process.capture';
@@ -115,11 +116,11 @@ function nativeCall(method, params) {
   const history = historyRead || historyWrite;
   const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, rai ? 'RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。' : edit ? (method === 'clipboard.write_files' ? '文件列表剪贴板写入未获完整确认；请检查错误代码和效果状态。' : 'Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。') : volume ? '音量调节未获完整确认；请检查错误代码和效果状态。' : brightness ? '亮度步进未获完整确认；请检查结构化回执。' : capture ? '程序输出采集未完成，请检查错误代码。' : stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : history ? '剪贴板历史调用失败；请检查错误代码。' : message), {effectState:stat || dataRead || historyRead ? 'not_started' : effectState, method});
   if (!nativeMethods.has(method)) return Promise.reject(fail('invalid_input', '未提供此本机调用方法。'));
-  if ((historyUi || stat || data || history || capture || brightness || edit) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
+  if ((historyUi || stat || data || history || capture || brightness || edit || actionControl) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
   checkCancelled();
   const ui = method === 'ui.choose' || method === 'ui.notify' || historyUi;
   const unavailable = ui && request.native_error?.code === 'desktop_unavailable' ? 'ui_unavailable' : request.native_error?.code;
-  if (!request.native) return Promise.reject(fail(capture || brightness || edit ? 'native_bridge_unavailable' : history ? 'history_unavailable' : data ? 'native_bridge_unavailable' : stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
+  if (!request.native || !actionControl && request.native_context_available === false) return Promise.reject(fail(actionControl ? 'actions_unavailable' : capture || brightness || edit ? 'native_bridge_unavailable' : history ? 'history_unavailable' : data ? 'native_bridge_unavailable' : stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
   if (nativePending) return Promise.reject(fail(stat ? 'fs_busy' : method === 'ui.toggle_history' && ['ui.choose','ui.open_history','ui.toggle_history'].includes(nativePendingMethod) ? 'ui_busy' : (method === 'ui.notify' || historyUi) && nativePendingMethod === method ? 'ui_busy' : 'desktop_busy', '请 await 上一个本机调用，避免并发。'));
   if (nativeId >= 128) return Promise.reject(fail('desktop_call_limit', '单次动作最多调用 128 次桌面 API。'));
   const id = ++nativeId;
@@ -148,8 +149,8 @@ function nativeCall(method, params) {
     const aborted = () => {
       const reason = controller.signal.reason;
       if (opening && reason) { reason.method = method; reason.effectState = sent ? 'unknown' : 'not_started'; }
-      if (opening || capture || brightness || edit) return finish(fail(reason?.code === 'timeout' ? 'timeout' : 'cancelled', undefined, sent ? 'unknown' : 'not_started'));
-      if (method === 'ui.notify' || historyUi || stat || data || history || capture || brightness || edit) {
+      if (opening || capture || brightness || edit || actionControl) return finish(fail(reason?.code === 'timeout' ? 'timeout' : 'cancelled', undefined, sent ? 'unknown' : 'not_started'));
+      if (method === 'ui.notify' || historyUi || stat || data || history || capture || brightness || edit || actionControl) {
         if (typeof reason?.method !== 'string') reason.method = method;
         reason.effectState = stat || dataRead || historyRead ? 'not_started' : sent ? 'unknown' : 'not_started';
       }
@@ -158,9 +159,9 @@ function nativeCall(method, params) {
     controller.signal.addEventListener('abort', aborted, {once:true});
     if (!capture) socket.setEncoding('utf8');
     const timeout = capture ? Math.min(params.timeout_ms + 1500, 61500) : opening || method === 'ui.choose' || brightness ? 61000 : dataCopy ? 8000 : 5000;
-    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || historyUi || stat || data || history || capture || brightness || edit ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
+    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || historyUi || stat || data || history || capture || brightness || edit || actionControl ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
     // 这些方法的总传输时限不被零碎数据延长，外层取消/时限仍优先生效。
-    if (historyUi || opening || stat || data || history || capture || brightness || edit) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
+    if (historyUi || opening || stat || data || history || capture || brightness || edit || actionControl) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
     socket.once('connect', () => {
       if (controller.signal.aborted) return aborted();
       sent = true;
@@ -183,12 +184,12 @@ function nativeCall(method, params) {
       try {
         const response = JSON.parse(chunks);
         if (response.id !== id || typeof response.ok !== 'boolean') throw new Error('回执身份不匹配');
-        if ((opening || stat || history || capture || brightness || edit) && (Reflect.ownKeys(response).length !== 3 || !Object.hasOwn(response, response.ok ? 'value' : 'error'))) throw new Error();
+        if ((opening || stat || history || capture || brightness || edit || actionControl) && (Reflect.ownKeys(response).length !== 3 || !Object.hasOwn(response, response.ok ? 'value' : 'error'))) throw new Error();
         if (response.ok) finish(undefined, response.value);
         else {
           const error = response.error;
           if (!error || typeof error.code !== 'string' || typeof error.message !== 'string') throw new Error('缺少错误');
-          if ((opening || stat || history || capture || brightness || edit) && ((error.method !== undefined && error.method !== method)
+          if ((opening || stat || history || capture || brightness || edit || actionControl) && ((error.method !== undefined && error.method !== method)
               || (error.effect_state !== undefined && !['not_started','unknown'].includes(error.effect_state)))) throw new Error();
           const failure = fail(error.code, error.message, error.effect_state ?? 'unknown');
           if (!stat && !history && !capture && Array.isArray(error.required_permissions)) failure.requiredPermissions = error.required_permissions;
@@ -391,6 +392,10 @@ try {
     open: openTarget,
     openFileInParent,
     process: Object.freeze({ run, start, capture:createProcessCaptureApi(params => nativeCall('process.capture', params.cwd === undefined ? {...params,cwd:request.package_root} : params), true).capture }),
+    actions:createActionsApi((method,params) => {
+      if (request.actions_scope !== true) throw Object.assign(new Error('当前宿主没有ActionService调用作用域。'),{code:'actions_unavailable',effectState:'not_started',method});
+      return nativeCall(method,params);
+    },true),
     browser,
     desktop,
     clipboard,

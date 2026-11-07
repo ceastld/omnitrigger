@@ -54,7 +54,7 @@ for(const mode of ['script','node']){
 }
 test('真实同步SDK的native桥接：写出后缺效果字段保持unknown，错误正文不回显',()=>{
   const calls=[];
-  const sdk=readFileSync(new URL('../tools/js-engine-probe/src/sdk.js',import.meta.url),'utf8');
+  const sdk=readFileSync(new URL('../crates/omnitrigger-actions/runtime/actions-api.js',import.meta.url),'utf8')+'\n'+readFileSync(new URL('../tools/js-engine-probe/src/sdk.js',import.meta.url),'utf8');
   const context=vm.createContext({ctx:{input:{},__nativeContext:{connection:{port:9,token:'a'.repeat(64)}}},
     createProcessCaptureApi:()=>({capture(){}}),createBrowserApi:()=>({}),createClipboardHistoryApi:()=>({}),
     __hostCall(raw){const request=JSON.parse(raw);calls.push(request);

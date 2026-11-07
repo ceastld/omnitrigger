@@ -7,12 +7,16 @@ use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     thread,
 };
 
+#[path = "service_actions.rs"]
+mod actions;
+
 pub const CAPACITY: usize = 4;
+const STOP_OTHER_MAX_TIMEOUT_MS: u64 = 2000;
 
 /// 只读的动作包目录；引用检查不执行脚本，也不证明业务参数或本机能力可用。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -155,6 +159,7 @@ struct Reservations {
 
 struct ActiveInvocation {
     reservations: Arc<Mutex<Reservations>>,
+    active_changed: Arc<Condvar>,
     invocation_id: u64,
 }
 
@@ -167,6 +172,8 @@ impl Drop for ActiveInvocation {
         if let Some(entry) = reserved.entries.get_mut(&self.invocation_id) {
             entry.active = false;
         }
+        drop(reserved);
+        self.active_changed.notify_all();
     }
 }
 
@@ -241,6 +248,7 @@ pub struct ActionService {
     catalog: PackageCatalog,
     runtimes: RuntimeRegistry,
     reservations: Arc<Mutex<Reservations>>,
+    active_changed: Arc<Condvar>,
     events_tx: SyncSender<ActionEvent>,
     events_rx: Receiver<ActionEvent>,
 }
@@ -256,6 +264,7 @@ impl ActionService {
                 next_id: 1,
                 entries: BTreeMap::new(),
             })),
+            active_changed: Arc::new(Condvar::new()),
             events_tx,
             events_rx,
         }
@@ -386,6 +395,12 @@ impl ActionService {
             invocation_id,
             binding_id: id,
         };
+        let host = Some(actions::scoped_host(
+            host,
+            self.reservations.clone(),
+            self.active_changed.clone(),
+            invocation_id,
+        ));
         let task = InvocationTask {
             action,
             runtime,
@@ -394,6 +409,7 @@ impl ActionService {
             cancellation,
             _active: ActiveInvocation {
                 reservations: self.reservations.clone(),
+                active_changed: self.active_changed.clone(),
                 invocation_id,
             },
         };
