@@ -165,8 +165,7 @@ struct ClipboardBackup {
     report_path: Option<std::path::PathBuf>,
 }
 
-#[path = "../../omnitrigger-windows/tests/support/private_clipboard.rs"]
-mod private_clipboard;
+use crate::private_window_station as private_clipboard;
 
 #[test]
 #[ignore = "需要可创建命名窗口站的 Windows 管理员令牌；CI 单独串行运行，绝不使用交互剪贴板"]

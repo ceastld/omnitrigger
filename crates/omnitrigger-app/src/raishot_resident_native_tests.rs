@@ -25,10 +25,8 @@ use windows::{
     },
 };
 
-// 复用既有 helper 的原文件；它只管理站/桌面，没有剪贴板读写。
-#[path = "../../omnitrigger-windows/tests/support/private_clipboard.rs"]
-mod private_station;
-use private_station::PrivateClipboard;
+// 与其它原生测试共用站/桌面 helper，本测试不读写剪贴板。
+use crate::private_window_station::PrivateClipboard;
 
 const FIND: &str = "raishot.resident.find";
 const REGION: &str = "raishot.resident.region";

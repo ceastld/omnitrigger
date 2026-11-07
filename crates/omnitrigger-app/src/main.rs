@@ -53,6 +53,9 @@ mod package_feedback;
 mod plugin_install;
 mod plugins;
 mod presets;
+#[cfg(all(windows, test))]
+#[path = "../../omnitrigger-windows/tests/support/private_clipboard.rs"]
+mod private_window_station;
 mod process_capture_host;
 mod radial_wheel;
 #[cfg(windows)]
