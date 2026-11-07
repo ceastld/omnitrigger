@@ -786,3 +786,7 @@ wire为audio.volume_adjust，deltaPercent映射为delta_percent。返回匿名pr
 此接口不读取原文，不增加selection.read_text的一次GetText观察；它也不将原有一次读数或两次读取与当前Edit选区替换组成原子事务。此前UIA范围可能在消息处理前变化。该方法不替换sendText，不能据此声称通用文本发送或8192字符必达。
 
 可运行的[显式 Edit 行清理示例](../examples/actions/win32-edit-line-cleanup/README.md)提供 Node 与同步 Script 入口，支持删除空行或整行空白。显式指定适配器后读取并复核当前选区，再提交一次替换；非空选区清理为空时会删除选区，空选区跳过。该示例保留上述控件范围、非原子读取和未知结果限制，未配置个人绑定。
+
+### 固定喝水提醒
+
+[喝水提醒示例](../examples/actions/water-reminder/README.md)使用现有 `ctx.ui.notify`，提供 Node 和同步 Script 两个入口。输入为空对象，每次调用提交一条右上方通知；返回 `submitted:true` 只表示请求已接纳。该包不创建定时调度，不读取剪贴板或发送按键；需要已有可用的界面宿主。
