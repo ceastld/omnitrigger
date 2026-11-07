@@ -1,3 +1,4 @@
+import {whitespaceCodeUnits} from '../examples/actions/win32-edit-line-cleanup/lib/dotnet-whitespace.mjs';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
@@ -112,4 +113,19 @@ test('真实 capture 校验器复现旧拒绝、接受显式解释器；常驻�
       assert.equal(regionRequests,mode==='region'?1:0);
     }
   }
+});
+
+test('按C#空白集合区分显式参数回退、null默认与Trim后空模式',()=>{
+  assert.equal(configuration({launch_mode:null}).mode,'region');
+  assert.equal(configuration({quicker_in_param:' ',launch_mode:'tray'}).mode,'tray');
+  assert.throws(()=>configuration({launch_mode:' '}),e=>e.code==='invalid_input');
+  assert.throws(()=>configuration({quicker_in_param:' ',launch_mode:' '}),e=>e.code==='invalid_input');
+  for(const unit of whitespaceCodeUnits) {
+    const space=String.fromCharCode(unit);
+    assert.equal(configuration({quicker_in_param:space,launch_mode:'tray'}).mode,'tray');
+    assert.equal(configuration({launch_mode:space+' VERIFY '+space}).mode,'verify');
+    assert.throws(()=>configuration({launch_mode:space}),e=>e.code==='invalid_input');
+  }
+  assert.throws(()=>configuration({quicker_in_param:'\uFEFF',launch_mode:'tray'}),e=>e.code==='invalid_input');
+  assert.throws(()=>configuration({launch_mode:'\uFEFFregion\uFEFF'}),e=>e.code==='invalid_input');
 });

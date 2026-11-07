@@ -1,3 +1,12 @@
+// .NET Char.IsWhiteSpace：包含 U+0085，不包含 U+FEFF。
+const modeWhitespace=new Set([9,10,11,12,13,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288]);
+/** @param {string} value */
+function trimMode(value) {
+  let start=0,end=value.length;
+  while(start<end && modeWhitespace.has(value.charCodeAt(start))) start++;
+  while(end>start && modeWhitespace.has(value.charCodeAt(end-1))) end--;
+  return value.slice(start,end);
+}
 const modes = new Set(['region', 'tray', 'verify']);
 /** @param {string} code @param {string} message */
 function fail(code, message) { return Object.assign(new Error(message), {code, effectState:'not_started', retryAllowed:false}); }
@@ -16,9 +25,9 @@ export function absoluteDirectory(value) {
 export function configuration(input) {
   // 非空显式参数优先于 launch_mode；null 默认 region，空白模式拒绝。
   const explicit=input.quicker_in_param;
-  const raw=typeof explicit==='string' && explicit.trim()!=='' ? explicit : (input.launch_mode ?? 'region');
+  const raw=typeof explicit==='string' && trimMode(explicit)!=='' ? explicit : (input.launch_mode ?? 'region');
   if (typeof raw!=='string') throw fail('invalid_input','启动方式必须为 region、tray 或 verify。');
-  const mode=raw.trim().toLowerCase();
+  const mode=trimMode(raw).toLowerCase();
   if (!modes.has(mode)) throw fail('invalid_input','启动方式必须为 region、tray 或 verify。');
   if (explicit!=null && typeof explicit!=='string') throw fail('invalid_input','启动参数必须为字符串。');
   const directory=input.packageDirectory == null ? '' : absoluteDirectory(input.packageDirectory);
