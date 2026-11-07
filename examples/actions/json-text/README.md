@@ -52,7 +52,7 @@
 
 共享模块显式接收上下文，JSDoc 和声明引用均为包内路径。更新 SDK 时先保留作者原快照，再选择与 App/宿主匹配的声明；替换声明不会升级实际运行时。
 
-使用项目已有检查工具，路径按本机实际位置填写：
+仓库开发者也可使用已有检查工具，路径按本机实际位置填写：
 
 ```powershell
 $checkTools = 'D:\OmniTrigger\tools\script-sdk-check'
@@ -62,3 +62,11 @@ node "$checkTools\check-project-types.mjs" $package
 ```
 
 第一条检查所有 Node/同步业务模块；第二条额外检查清单中的同步入口、静态模块图和 `main` 导出。静态通过不代表目标窗口或运行时能力已经验收。
+
+### 独立作者检查
+
+在本目录运行 `npm ci --ignore-scripts`，再执行 `npm run check`。本包固定 TypeScript 5.9.3，严格检查四个入口、三个共享算法模块、自定义输入/结果声明及两种 SDK，并额外检查两个 Node 默认导出。检查只分析源码，不解析实际业务输入、不选择或发送文本。
+
+环境只加载 ES2022 与显式宿主类型，`types:[]`，不向 Node 或 Script 入口提供 window、document、process 等原生全局。NodeContext 使用 Promise，SyncContext 使用同步回执；外部 input 仍为 unknown，由既有算法校验。
+
+当前随包 SDK 可通过既有 `node tools/script-project.mjs refresh --runtime node --project <本目录>` 显式刷新。刷新保留四个入口、共享算法、自定义 json-types.d.ts、清单、调用例子、配置和开发依赖；未知 portable 声明仍拒绝覆盖。声明更新不升级实际宿主，也不代表输入效果已验收。

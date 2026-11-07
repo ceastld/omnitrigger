@@ -187,7 +187,7 @@ jobs:
       - name: 验证已有轻量工程的独立类型检查
         shell: pwsh
         run: |
-          node --test tools/script-sdk-check/check-project-types.test.mjs tools/script-sdk-check/browser-close-environment.test.mjs
+          node --test tools/script-sdk-check/check-project-types.test.mjs tools/script-sdk-check/browser-close-environment.test.mjs tools/script-sdk-check/water-reminder-environment.test.mjs tools/script-sdk-check/desktop-line-edit-environment.test.mjs tools/script-sdk-check/json-text-environment.test.mjs tools/script-sdk-check/line-text-environment.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Push-Location examples/actions/browser-close
           try {
@@ -198,6 +198,19 @@ jobs:
           } finally { Pop-Location }
           node tools/script-sdk-check/check-project-types.mjs examples/actions/browser-close
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($authorExamplePath in @('examples/actions/water-reminder', 'examples/actions/desktop-line-edit', 'examples/actions/json-text', 'examples/actions/line-text')) {
+            Push-Location $authorExamplePath
+            try {
+              npm ci --ignore-scripts --no-audit --no-fund
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              npm run check
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            } finally { Pop-Location }
+            if ($authorExamplePath -ne 'examples/actions/json-text') {
+              node tools/script-sdk-check/check-project-types.mjs $authorExamplePath
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
           node --test tools/script-sdk-check/analyze-script-modules.test.mjs tools/script-sdk-check/analyze-script-entry.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

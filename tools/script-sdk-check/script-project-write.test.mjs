@@ -387,3 +387,41 @@ test('canonical快照指纹覆盖当前来源与已携带声明的LF和CRLF，�
     }
   }
 });
+
+
+test('browser-workflows真实七个入口在ES2022宿主环境严格通过',()=>{
+  const project=join(repo,'examples/actions/browser-workflows'),configFile=join(project,'jsconfig.json');
+  const loaded=ts.readConfigFile(configFile,ts.sys.readFile);assert.equal(loaded.error,undefined);
+  const parsed=ts.parseJsonConfigFileContent(loaded.config,ts.sys,project,undefined,configFile);
+  assert.deepEqual(parsed.errors,[]);assert.deepEqual(parsed.options.lib,['lib.es2022.d.ts']);assert.deepEqual(parsed.options.types,[]);
+  assert.equal(parsed.options.strict,true);assert.equal(parsed.options.noEmit,true);assert.equal(parsed.options.skipLibCheck,false);
+  const manifest=JSON.parse(readFileSync(join(project,'action.json'),'utf8'));assert.equal(manifest.actions.length,7);
+  for(const action of manifest.actions)assert(parsed.fileNames.some(file=>resolve(file)===join(project,action.entry)),action.entry);
+  const errors=ts.getPreEmitDiagnostics(ts.createProgram(parsed.fileNames,parsed.options));
+  assert.equal(errors.length,0,ts.formatDiagnostics(errors,{getCanonicalFileName:x=>x,getCurrentDirectory:()=>project,getNewLine:()=> '\n'}));
+});
+
+test('browser-workflows不向Script伪造URL或DOM，拒绝Promise与同步快照混用',()=>{
+  const project=join(repo,'examples/actions/browser-workflows'),configFile=join(project,'jsconfig.json');
+  const loaded=ts.readConfigFile(configFile,ts.sys.readFile);assert.equal(loaded.error,undefined);
+  const parsed=ts.parseJsonConfigFileContent(loaded.config,ts.sys,project,undefined,configFile),virtual=join(project,'__environment_probe__.ts');
+  const source=`import type {ActionContext} from './sdk/api';
+declare const node:ActionContext;
+declare const script:ScriptContext;
+window.document.title;
+document.title;
+new URL('https://example.invalid/');
+globalThis.URL;
+node.browser.profiles().length;
+script.browser.profiles().then;
+`;
+  const host=ts.createCompilerHost(parsed.options),original=host.getSourceFile;
+  host.getSourceFile=(file,version,...args)=>resolve(file)===virtual?ts.createSourceFile(virtual,source,version,true):original.call(host,file,version,...args);
+  const errors=ts.getPreEmitDiagnostics(ts.createProgram([...parsed.fileNames,virtual],parsed.options,host));
+  const items=errors.map(d=>({code:d.code,file:d.file?.fileName,line:d.file&&d.start!==undefined?d.file.getLineAndCharacterOfPosition(d.start).line+1:null}));
+  assert.equal(items.length,6,JSON.stringify(items));assert(items.every(d=>resolve(d.file??'')===virtual));
+  assert(items.some(d=>d.line===4&&d.code===2304));assert(items.some(d=>d.line===5&&[2304,2584].includes(d.code)));
+  assert(items.some(d=>d.line===6&&d.code===2304));
+  assert(items.some(d=>d.line===7&&[2339,7017].includes(d.code)));
+  for(const line of [8,9])assert(items.some(d=>d.line===line&&d.code===2339));
+});
