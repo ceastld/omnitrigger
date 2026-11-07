@@ -292,8 +292,7 @@ pub(super) fn install(
                 "安装目标已出现，未覆盖现有目录。",
             ));
         }
-        fs::rename(stage.join("actions/legacy-host-entry"), &destination)
-            .map_err(|e| fault("legacy_install_io", e.to_string()))?;
+        publish_prechecked_package(&stage.join("actions/legacy-host-entry"), &destination)?;
         // 最终固定目录再核验；只返回既有收据类型，不在线程中写Plugins或启动Host。
         LocalLegacySource::new(&config, &source.manifest_sha256)?
             .verify(&config, &CancellationToken::new())
@@ -302,6 +301,34 @@ pub(super) fn install(
         let _ = fs::remove_dir_all(&stage);
     }
     result
+}
+
+// 调用方已核验stage包及配置归属，并观察过目标不存在；最后一步仍须拒绝后来出现的名字。
+fn publish_prechecked_package(
+    staged_package: &Path,
+    destination: &Path,
+) -> Result<(), ActionError> {
+    ensure_plain_ancestors(staged_package).map_err(|e| fault("legacy_install_path_invalid", e))?;
+    ensure_plain_ancestors(destination).map_err(|e| fault("legacy_install_path_invalid", e))?;
+    match omnitrigger_windows::move_owned_path_no_replace(staged_package, destination) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            // 不通过删除/替换目标来重试。仅分类已存在名字，其他失败保留原IO错误。
+            ensure_plain_ancestors(destination)
+                .map_err(|e| fault("legacy_install_path_invalid", e))?;
+            let appeared = destination
+                .try_exists()
+                .map_err(|e| fault("legacy_install_io", e.to_string()))?;
+            if error.kind() == std::io::ErrorKind::AlreadyExists || appeared {
+                Err(fault(
+                    "legacy_install_destination_exists",
+                    "安装目标已存在或在发布时出现，未覆盖。",
+                ))
+            } else {
+                Err(fault("legacy_install_io", error.to_string()))
+            }
+        }
+    }
 }
 
 // 升级仅复用既有acquire和完整验证；绝不覆盖固定目录，不写索引，不启动宿主。
@@ -447,6 +474,73 @@ fn acquire(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn first_install_publication_does_not_replace_late_file_or_empty_directory() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        for (number, file_target) in [true, false].into_iter().enumerate() {
+            let root = std::env::temp_dir().join(format!(
+                "omnitrigger install publish {}-{stamp}-{number}",
+                std::process::id()
+            ));
+            ensure_plain_ancestors(&root).unwrap();
+            fs::create_dir(&root).unwrap();
+            let staged = root.join("verified stage");
+            let destination = root.join("final package");
+            fs::create_dir(&staged).unwrap();
+            fs::write(staged.join("identity"), b"owned verified stage").unwrap();
+            assert!(!destination.exists()); // 调用方曾经看到目标不存在。
+            if file_target {
+                fs::write(&destination, b"owned late target sentinel").unwrap();
+            } else {
+                fs::create_dir(&destination).unwrap(); // 后到的空目录同样不能被替换。
+            }
+            let error = publish_prechecked_package(&staged, &destination).unwrap_err();
+            assert_eq!(error.code, "legacy_install_destination_exists");
+            assert_eq!(
+                fs::read(staged.join("identity")).unwrap(),
+                b"owned verified stage"
+            );
+            if file_target {
+                assert_eq!(
+                    fs::read(&destination).unwrap(),
+                    b"owned late target sentinel"
+                );
+            } else {
+                assert!(destination.is_dir());
+                assert!(fs::read_dir(&destination).unwrap().next().is_none());
+            }
+        } // 全新自有材料保留；不运行包、不递归删除。
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn first_install_publication_moves_verified_stage_to_absent_path() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "omnitrigger install publish absent {}-{stamp}",
+            std::process::id()
+        ));
+        ensure_plain_ancestors(&root).unwrap();
+        fs::create_dir(&root).unwrap();
+        let staged = root.join("verified stage");
+        let destination = root.join("final package");
+        fs::create_dir(&staged).unwrap();
+        fs::write(staged.join("identity"), b"owned verified stage").unwrap();
+        publish_prechecked_package(&staged, &destination).unwrap();
+        assert!(!staged.exists());
+        assert_eq!(
+            fs::read(destination.join("identity")).unwrap(),
+            b"owned verified stage"
+        );
+    }
 
     #[test]
     fn https_descriptor_uses_existing_transport_hosts_and_rejects_invalid_authorities() {
