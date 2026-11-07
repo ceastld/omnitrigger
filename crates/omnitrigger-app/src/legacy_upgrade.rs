@@ -67,7 +67,9 @@ fn profile(config: &Path) -> Result<PathBuf, ActionError> {
         .ok_or_else(|| fault("legacy_upgrade_path_invalid", "配置没有父目录。"))
 }
 pub(crate) fn block_config(config: &Path) -> Result<(), ActionError> {
-    block_profile(&profile(config)?)
+    let config = std::path::absolute(config)
+        .map_err(|e| fault("legacy_upgrade_path_invalid", e.to_string()))?;
+    block_profile(&profile(&config)?)
 }
 pub(crate) fn block_package(package: &Path) -> Result<(), ActionError> {
     let root = package
@@ -93,7 +95,9 @@ fn block_profile(root: &Path) -> Result<(), ActionError> {
 impl IndexGuard {
     // 全部Plugins写入共用这个短路径锁；Windows共享失败立即返回，不等待或轮询。
     pub(crate) fn acquire(config: &Path) -> Result<Self, ActionError> {
-        let parent = profile(config)?;
+        let config = std::path::absolute(config)
+            .map_err(|e| fault("legacy_upgrade_path_invalid", e.to_string()))?;
+        let parent = profile(&config)?;
         fs::create_dir_all(&parent).map_err(|e| fault("legacy_upgrade_io", e.to_string()))?;
         let path = parent.join(INDEX_LOCK);
         local(&path)?;
@@ -120,13 +124,13 @@ impl IndexGuard {
                 )
             })?;
             Ok(Self {
-                config: config.to_path_buf(),
+                config,
                 _file: file,
             })
         }
     }
     pub(crate) fn matches(&self, config: &Path) -> bool {
-        self.config == config
+        std::path::absolute(config).is_ok_and(|path| self.config == path)
     }
 }
 fn capture(exe: &Path, args: Vec<String>, timeout: u64) -> Result<Value, ActionError> {
@@ -564,6 +568,38 @@ fn contract_root(label: &str) -> PathBuf {
 #[cfg(test)]
 mod contracts {
     use super::*;
+    #[test]
+    fn relative_settings_keep_existing_save_and_pending_gate_behavior() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let relative = PathBuf::from(".tmp").join(format!(
+            "legacy-relative-settings-{}-{stamp}",
+            std::process::id()
+        ));
+        let root = std::path::absolute(&relative).unwrap();
+        local(&root).unwrap();
+        assert!(!root.exists());
+        fs::create_dir_all(&root).unwrap();
+        let config = relative.join("bindings.json");
+        assert!(profile(&config).is_err(), "升级事务仍要求明确绝对路径");
+        let plugins = crate::plugins::Plugins::default();
+        plugins.save(&config).unwrap();
+        let before = fs::read(root.join("plugins.json")).unwrap();
+        let guard = IndexGuard::acquire(&config).unwrap();
+        assert!(guard.matches(&root.join("bindings.json")));
+        assert!(IndexGuard::acquire(&root.join("bindings.json")).is_err());
+        drop(guard);
+        assert!(block_config(&config).is_ok());
+        fs::write(root.join(MARKER), b"owned pending fixture").unwrap();
+        assert_eq!(
+            block_config(&config).unwrap_err().code,
+            "legacy_upgrade_recovery_required"
+        );
+        assert!(plugins.save(&config).is_err());
+        assert_eq!(fs::read(root.join("plugins.json")).unwrap(), before);
+    }
     fn fixture_manifest(root: &Path, paths: &[&str]) {
         use sha2::{Digest, Sha256};
         let records=paths.iter().map(|relative| {
