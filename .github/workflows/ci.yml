@@ -267,6 +267,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/common-desktop/paste-arrow.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Push-Location examples/actions/common-desktop
+          try {
+            npm ci --ignore-scripts --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/common-desktop
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/common-desktop/system-panel.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p examples/actions/common-desktop/jsconfig.json

@@ -373,13 +373,15 @@ test('canonical快照指纹覆盖当前来源与已携带声明的LF和CRLF，�
     ['crates/omnitrigger-actions/runtime',['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts','script-api.d.ts']],
     ['examples/actions/mixed-projects/sdk',['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts']],
     ['examples/actions/source-file-preview/sdk',['api.d.ts','clipboard-history-api.d.ts']],
+    ['examples/actions/common-desktop/sdk',['api.d.ts']],
   ];
   for(const[directory,names]of groups)for(const name of names){
-    assert(known.has(name),`${name}须登记在现有canonical表`);
+    const kind=directory.endsWith('/common-desktop/sdk')&&name==='api.d.ts'?'script-types.d.ts':name;
+    assert(known.has(kind),`${name}须登记在现有canonical表`);
     const lf=readFileSync(join(repo,directory,name),'utf8').replaceAll('\r\n','\n');
     for(const[ending,text]of[['LF',lf],['CRLF',lf.replaceAll('\n','\r\n')]]){
       const digest=createHash('sha256').update(text,'utf8').digest('hex');
-      assert(known.get(name).includes(digest),`${directory}/${name} ${ending}指纹未登记：${digest}；SDK更新须追加已核验指纹并保留历史值`);
+      assert(known.get(kind).includes(digest),`${directory}/${name} ${ending}指纹未登记：${digest}；SDK更新须追加已核验指纹并保留历史值`);
     }
   }
 });
