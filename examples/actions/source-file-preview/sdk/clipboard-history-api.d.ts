@@ -1,3 +1,4 @@
+/** 作者类型声明；运行时通过 ctx.clipboard.history 调用，不导出宿主内部工厂。 */
 /** u64 的规范十进制字符串；ID 非零，revision 可以为 "0"，不转换为 JS number。 */
 export type HistoryDecimal = string;
 /** createdAt 为应用持久化的时间字符串；SDK 不重新解释时区或重写格式。 */
@@ -34,6 +35,3 @@ export interface ClipboardHistoryApi {
 export type AsyncClipboardHistoryApi = {
   [Key in keyof ClipboardHistoryApi]: (...args: Parameters<ClipboardHistoryApi[Key]>) => Promise<ReturnType<ClipboardHistoryApi[Key]>>;
 };
-/** 宿主将返回值包装为 Promise 时使用异步接口；工厂本身兼容两种执行方式。 */
-export declare function createClipboardHistoryApi(invoke: (method: ClipboardHistoryMethod, params: object) => Promise<unknown>): AsyncClipboardHistoryApi;
-export declare function createClipboardHistoryApi(invoke?: (method: ClipboardHistoryMethod, params: object) => unknown): ClipboardHistoryApi;

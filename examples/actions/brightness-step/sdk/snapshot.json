@@ -13,7 +13,7 @@
     },
     "clipboard-history-api.d.ts": {
       "source": "crates/omnitrigger-actions/runtime/clipboard-history-api.d.ts",
-      "sha256": "c40fd66fd6318909c1bab62775d097dcfb5a8a7a84a411883a4852bdbd04cf2e"
+      "sha256": "07a0f1c009ec384da046193a91825169d94854dd2afd68a91b1e53adb6c6cdc7"
     }
   }
 }

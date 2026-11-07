@@ -111,7 +111,9 @@ const canonicalSdkHashes={
   ],
   "clipboard-history-api.d.ts": [
     "c40fd66fd6318909c1bab62775d097dcfb5a8a7a84a411883a4852bdbd04cf2e",
-    "b8089bf8e920c3c818474f739c3f862ba32dffc4a1e3dfde64b647c023031134"
+    "b8089bf8e920c3c818474f739c3f862ba32dffc4a1e3dfde64b647c023031134",
+    "07a0f1c009ec384da046193a91825169d94854dd2afd68a91b1e53adb6c6cdc7",
+    "a9f6b7ecb90e0f656cfb12b711ef1748a310a15e4af3065fe67eab9ef362139e"
   ],
   "script-api.d.ts": [
     "c623dc7ead235801d87412dd5747f34dd0be7c410686a331e9fdbe23efd90c15",
