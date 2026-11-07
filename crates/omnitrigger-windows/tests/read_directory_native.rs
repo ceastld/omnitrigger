@@ -132,3 +132,89 @@ fn read_directory_real_windows_does_not_follow_child_or_root_link() {
     );
     fs::remove_dir(link).unwrap();
 }
+
+#[test]
+#[ignore = "Windows 显式目录投影和100ns原生实测；需显式测试父目录"]
+fn read_directory_real_windows_options_preserve_metadata_precision_and_filters() {
+    use omnitrigger_windows::{
+        read_local_directory_with_options, DirectoryEntryType, DirectoryOrder,
+        LocalDirectoryOptions,
+    };
+    use std::time::{Duration, UNIX_EPOCH};
+    let fixture = Fixture::new();
+    fs::write(fixture.root.join("a.txt"), b"synthetic").unwrap();
+    fs::write(fixture.root.join("z.txt"), b"synthetic").unwrap();
+    fs::create_dir(fixture.root.join("child")).unwrap();
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(fixture.root.join("a.txt"))
+        .unwrap();
+    let timestamp = UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_700);
+    file.set_times(fs::FileTimes::new().set_modified(timestamp))
+        .unwrap();
+    drop(file);
+    let options = LocalDirectoryOptions {
+        max_entries: 8,
+        order: DirectoryOrder::Native,
+        metadata: true,
+        entry_type: DirectoryEntryType::All,
+        search_pattern: None,
+    };
+    let entries = read_local_directory_with_options(fixture.path(), &options, || Ok(())).unwrap();
+    assert_eq!(entries.len(), 3);
+    for (ordinal, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.metadata.as_ref().unwrap().ordinal, ordinal);
+    }
+    let entry = entries.iter().find(|entry| entry.name == "a.txt").unwrap();
+    let meta = entry.metadata.as_ref().unwrap();
+    let expected = 116_444_736_000_000_000 + 1_700_000_000u64 * 10_000_000 + 1_234_567;
+    assert_eq!(meta.write_utc_100ns, expected);
+    assert_eq!(meta.write_local_ticks % 10_000_000, 1_234_567);
+    use std::os::windows::fs::MetadataExt;
+    assert_eq!(
+        meta.creation_utc_100ns,
+        fs::metadata(fixture.root.join("a.txt"))
+            .unwrap()
+            .creation_time()
+    );
+    let filtered = read_local_directory_with_options(
+        fixture.path(),
+        &LocalDirectoryOptions {
+            entry_type: DirectoryEntryType::File,
+            search_pattern: Some("a*".into()),
+            ..options.clone()
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].name, "a.txt");
+    assert_eq!(
+        filtered[0].metadata.as_ref().unwrap().write_utc_100ns,
+        expected
+    );
+    let directories = read_local_directory_with_options(
+        fixture.path(),
+        &LocalDirectoryOptions {
+            entry_type: DirectoryEntryType::Directory,
+            metadata: false,
+            ..options.clone()
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(directories.len(), 1);
+    assert_eq!(directories[0].name, "child");
+    assert!(directories[0].metadata.is_none());
+    let default_projection = read_local_directory(fixture.path(), 8, || Ok(())).unwrap();
+    assert_eq!(
+        default_projection
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["a.txt", "child", "z.txt"]
+    );
+    assert!(default_projection
+        .iter()
+        .all(|entry| entry.metadata.is_none()));
+}

@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import vm from 'node:vm';
 // 测试真实共享工厂、同步 SDK 及 Node nativeCall；桥接、socket 和 timer 全为内存替身。
 import assert from 'node:assert/strict';
 import {readFileSync,lstatSync} from 'node:fs';
@@ -153,4 +155,87 @@ test('真实 Node 桥接拒绝错身份/额外字段/错方法，平台错误无
   }
   const h=harness(),{pending,socket}=h.start();h.send(socket,{ok:false,error:{code:'directory_too_large',message:'PRIVATE',required_permissions:['invented']}});
   await assert.rejects(pending,error=>fault('directory_too_large')(error)&&!Object.hasOwn(error,'requiredPermissions'));
+});
+
+// 目录元数据既有七组共享 SDK 合同，不访问测试路径。
+test('目录元数据 SDK 端口合同', async t => {
+const here=new URL('../',import.meta.url);
+const relative='crates/omnitrigger-actions/runtime/desktop-api.js';
+const after=fs.readFileSync(new URL(relative,here),'utf8');
+const plain=value=>JSON.parse(JSON.stringify(value));
+const path='C:\\synthetic';
+const item=name=>({name,path:path+'\\'+name,kind:'file',reason:null});
+const metadata=(ordinal,tick='638975574001234567')=>({ordinal,attributes:0,
+ creationTimeUtc100ns:'134064342001234567',lastAccessTimeUtc100ns:'134064342001234567',lastWriteTimeUtc100ns:'134064342001234567',
+ creationTimeLocalTicks100ns:tick,lastAccessTimeLocalTicks100ns:tick,lastWriteTimeLocalTicks100ns:tick,timeZoneKey:'Pacific Standard Time'});
+const reply=entries=>({entries,complete:true});
+function api(source,value,asynchronous=false){
+ const calls=[];const c=vm.createContext({invoke:(method,params)=>{calls.push({method,params});return asynchronous?Promise.resolve(value):value;}});
+ vm.runInContext(source+'\nglobalThis.api=createDesktopApi(invoke);',c);
+ return {fs:c.api.fs,calls};
+}
+
+await t.test('默认参数、请求和返回形状保持既有契约',async()=>{
+ for(const asynchronous of [false,true]){
+  const b=api(after,reply([item('a')]),asynchronous);
+  assert.deepEqual(plain(await b.fs.readDirectory(path)),plain(reply([item('a')])));
+  assert.deepEqual(plain(b.calls),[{method:'fs.read_directory',params:{path,max_entries:128}}]);
+ }
+});
+
+await t.test('同步和异步端口保留原枚举顺序、序号及100ns字符串，不按毫秒重算',async()=>{
+ for(const asynchronous of [false,true]){
+  const b=api(after,reply([{...item('z'),metadata:metadata(0)},{...item('a'),metadata:metadata(1,'638975574001234568')}]),asynchronous);
+  const output=await b.fs.readDirectory(path,{maxEntries:4,order:'native',metadata:true,entryType:'file',searchPattern:'*.xls',matchMode:'windows-find'});
+  assert.deepEqual(plain(output.entries.map(x=>x.name)),['z','a']);
+  assert.equal(BigInt(output.entries[1].metadata.lastWriteTimeLocalTicks100ns)-BigInt(output.entries[0].metadata.lastWriteTimeLocalTicks100ns),1n);
+  assert(Object.isFrozen(output.entries[0].metadata));
+  assert.deepEqual(plain(b.calls[0].params),{path,max_entries:4,order:'native',metadata:true,entry_type:'file',search_pattern:'*.xls',match_mode:'windows-find'});
+ }
+});
+
+await t.test('名称投影可以保留原序号，属性原样保留供Hidden/System位检查',()=>{
+ const a={...metadata(1),attributes:6},b=api(after,reply([{...item('a'),metadata:a},{...item('z'),metadata:metadata(0)}]));
+ const result=b.fs.readDirectory(path,{metadata:true});
+ assert.equal(result.entries[0].metadata.ordinal,1);assert.equal(result.entries[0].metadata.attributes&6,6);
+});
+
+await t.test('坏选项、未绑定匹配口径与越目录模式在零invoke前拒绝',()=>{
+ const b=api(after,reply([]));
+ for(const options of [{maxEntries:null},{metadata:null},{metadata:1},{order:'other'},{entryType:'other'},
+  {searchPattern:'*.xls'},{matchMode:'windows-find'},{searchPattern:'*',matchMode:'dotnet-managed'},
+  {searchPattern:'sub\\*.txt',matchMode:'windows-find'},{searchPattern:'',matchMode:'windows-find'},
+  {searchPattern:'..',matchMode:'windows-find'},{searchPattern:'a\0b',matchMode:'windows-find'},{searchPattern:'*',matchMode:'windows-find',extra:true}]){
+  assert.throws(()=>b.fs.readDirectory(path,options),error=>error.code==='invalid_input'&&error.effectState==='not_started');
+ }
+ assert.equal(b.calls.length,0);
+});
+
+await t.test('参数在invoke前固定，不受调用方随后变更影响',async()=>{
+ const b=api(after,reply([]),true),options={metadata:true,order:'native',searchPattern:'*',matchMode:'windows-find'};
+ const pending=b.fs.readDirectory(path,options);options.order='name';options.searchPattern='*.wrong';
+ await pending;assert.equal(b.calls[0].params.order,'native');assert.equal(b.calls[0].params.search_pattern,'*');
+});
+
+await t.test('元数据缺失、坏精度/溢出/序号重复、额外字段拒绝，不掩盖默认契约',()=>{
+ const bad=[undefined,{...metadata(0),lastWriteTimeLocalTicks100ns:123},
+  {...metadata(0),lastWriteTimeLocalTicks100ns:'0638975574001234567'},
+  {...metadata(0),lastWriteTimeUtc100ns:'2650467744000000000'},
+  {...metadata(0),lastWriteTimeLocalTicks100ns:'3155378976000000000'},
+  {...metadata(0),attributes:2**32},{...metadata(0),ordinal:1},{...metadata(0),extra:true}];
+ for(const m of bad){const b=api(after,reply([{...item('a'),...(m?{metadata:m}:{})}]));assert.throws(()=>b.fs.readDirectory(path,{metadata:true}),error=>error.code==='fs_error');}
+ const duplicate=api(after,reply([{...item('a'),metadata:metadata(0)},{...item('b'),metadata:metadata(0)}]));
+ assert.throws(()=>duplicate.fs.readDirectory(path,{metadata:true}),error=>error.code==='fs_error');
+ const defaultReply=api(after,reply([{...item('a'),metadata:metadata(0)}]));
+ assert.throws(()=>defaultReply.fs.readDirectory(path),error=>error.code==='fs_error');
+});
+
+await t.test('通配符原文只传系统端口，不执行JS正则匹配或改写为全匹配',()=>{
+ for(const pattern of ['*.xls','a?.txt','*.*','.']){
+  const b=api(after,reply([]));b.fs.readDirectory(path,{searchPattern:pattern,matchMode:'windows-find'});
+  assert.equal(b.calls[0].params.search_pattern,pattern);assert.equal(b.calls.length,1);
+ }
+});
+
+
 });

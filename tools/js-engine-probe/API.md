@@ -29,6 +29,7 @@ Windows MSVC 的 Boa 宿主为共享 SDK 的解析保留 8 MiB 原生主栈；�
 | `ctx.desktop.windowAction(operation)` | 对仍为前台的原目标执行 `toggle_maximize`、`toggle_topmost`、`minimize` 或 `close`，返回 `{submitted:true}`，不重新选择窗口。 |
 | `ctx.clipboard.readText()` / `writeText(text, options)` | Windows Unicode 文本剪贴板；写入替换全部格式。应用接入支持 `{excludeFromHistory:true}`，返回写入回执；独立 CLI 不支持选项，写入返回 `undefined`，文本最多 64 KiB UTF-8。 |
 | `ctx.clipboard.readData()` | 应用接入返回 `{kind:'text',text,sequenceNumber}` 或 `{kind:'files',paths,sequenceNumber}`；无桥接明确报错。 |
+| `ctx.clipboard.writeFiles(paths)` | 应用接入时将 1–64 条 Windows 绝对路径写为 Unicode 文件列表，替换全部剪贴板格式，返回 `{written:true,sequenceNumber}`；不打开文件或自动粘贴，无应用桥接时明确报错。 |
 | `ctx.clipboard.history.list/get/append/remove` | 应用接入的显式纯文本历史；此处同步返回，默认不监听。独立CLI返回 `history_unavailable`。 |
 | `ctx.browser.profiles({timeoutMs})` | 查询连接的浏览器 profile。 |
 | `ctx.browser.call(method, args, {profile, timeoutMs})` / `ctx.browser.chrome.*` | 同步调用扩展支持的 Chrome API，保留 `undefined` 与 `null`；无 profile 时只接受恰好一个已连接 profile。 |

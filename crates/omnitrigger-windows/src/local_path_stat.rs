@@ -780,5 +780,7 @@ mod tests {
 
 mod directory;
 pub use directory::{
-    read_local_directory, LocalDirectoryEntry, MAX_DIRECTORY_BYTES, MAX_DIRECTORY_ENTRIES,
+    read_local_directory, read_local_directory_with_options, DirectoryEntryType, DirectoryOrder,
+    LocalDirectoryEntry, LocalDirectoryMetadata, LocalDirectoryOptions, MAX_DIRECTORY_BYTES,
+    MAX_DIRECTORY_ENTRIES,
 };

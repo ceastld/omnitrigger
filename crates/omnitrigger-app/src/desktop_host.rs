@@ -16,6 +16,9 @@ mod raishot_resident_host;
 #[path = "win32_edit_replace_host.rs"]
 mod win32_edit_replace_host;
 
+#[path = "clipboard_files_host.rs"]
+mod clipboard_files_host;
+
 pub struct DesktopHost {
     foreground_targets: ForegroundTargets,
     target: Result<ScriptTarget, ActionError>,
@@ -435,6 +438,7 @@ impl NativeHost for DesktopHost {
             ));
         }
         match method {
+            "clipboard.write_files" => clipboard_files_host::execute(params, cancellation, None),
             "clipboard.read" => {
                 if params != json!({}) {
                     return Err(error(
@@ -630,6 +634,9 @@ impl NativeHost for DesktopHost {
                     )
                 },
             ),
+            "clipboard.write_files" => {
+                clipboard_files_host::execute(params, cancellation, Some(deadline))
+            }
             "keyboard.text" => self.send_text(params, cancellation, Some(deadline)),
             "target.capture_foreground" => {
                 self.foreground_targets

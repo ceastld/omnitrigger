@@ -533,6 +533,53 @@ function createDesktopApi(invoke) {
       if (args.length !== 0) invalid('clipboard.read_data', 'readData 不接收参数。');
       return dataCall('clipboard.read_data', {});
     },
+    writeFiles: (...args) => {
+      const method = 'clipboard.write_files';
+      let paths;
+      try {
+        if (args.length !== 1 || !Array.isArray(args[0])) throw new Error();
+        const descriptors = Object.getOwnPropertyDescriptors(args[0]);
+        const length = descriptors.length?.value;
+        if (!Number.isInteger(length) || length < 1 || length > 64 || Reflect.ownKeys(descriptors).length !== length + 1) throw new Error();
+        paths = []; let units = 0;
+        for (let i = 0; i < length; i++) {
+          const descriptor = descriptors[i];
+          if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw new Error();
+          const path = descriptor.value;
+          if (!dataText(path, 32767, false) || /[\u0000-\u001f<>"|?*]/.test(path)) throw new Error();
+          let tail;
+          if (/^[A-Za-z]:[\\/]/.test(path)) tail = path.slice(3);
+          else if (path.startsWith('\\\\') && !path.startsWith('\\\\.\\')) {
+            const pieces = path.slice(2).split(/[\\/]/);
+            if (!pieces[0] || !pieces[1]) throw new Error();
+            tail = path.slice(2);
+          } else throw new Error();
+          if (tail.includes(':') || tail.split(/[\\/]/).some(part => part === '.' || part === '..')) throw new Error();
+          units += path.length; if (units > 65536) throw new Error();
+          paths.push(path);
+        }
+      } catch (_) { invalid(method, '文件列表需要1–64项有效Unicode绝对Windows路径，每项最多32767、总计最多65536个UTF-16单元。'); }
+      const failure = error => {
+        let code = 'native_bridge_failed', effectState = 'unknown';
+        try {
+          if (typeof error?.code === 'string' && /^[A-Za-z0-9_]{1,64}$/.test(error.code)) code = error.code;
+          if (error?.effectState === 'not_started') effectState = 'not_started';
+        } catch (_) { /* 不回显异常getter或路径。 */ }
+        throw Object.assign(new Error('文件列表剪贴板写入未获完整确认；请检查错误代码和效果状态。'), {code, effectState, method});
+      };
+      const receipt = value => {
+        try {
+          if (!exactDataFields(value, ['written','sequenceNumber'])) throw new Error();
+          const written=value.written, sequenceNumber=value.sequenceNumber;
+          if (written !== true || !Number.isInteger(sequenceNumber) || sequenceNumber < 0 || sequenceNumber > 0xffffffff) throw new Error();
+          return Object.freeze({written:true,sequenceNumber});
+        } catch (_) { throw Object.assign(new Error('文件列表剪贴板写入回执无效；不会自动重试。'), {code:'invalid_response',effectState:'unknown',method}); }
+      };
+      let result;
+      try { result = invoke(method, {paths}); } catch (error) { return failure(error); }
+      return result && typeof result.then === 'function' ? result.then(receipt, failure) : receipt(result);
+    },
+
     writeText: (text, options = {}) => {
       if (options === null || typeof options !== 'object' || Array.isArray(options)
           || Object.keys(options).some(key => key !== 'excludeFromHistory')
@@ -682,17 +729,32 @@ function createDesktopApi(invoke) {
       return value && typeof value.then === 'function' ? value.then(result, failure) : result(value);
     } catch (error) { return failure(error); }
   }
-  function directoryResult(value, path, maxEntries) {
+  function directoryMetadata(value, count, ordinals) {
+    const fields = ['ordinal','attributes','creationTimeUtc100ns','lastAccessTimeUtc100ns','lastWriteTimeUtc100ns',
+      'creationTimeLocalTicks100ns','lastAccessTimeLocalTicks100ns','lastWriteTimeLocalTicks100ns','timeZoneKey'];
+    const fail = () => fsFault('fs.read_directory', 'fs_error');
+    if (!exactDataFields(value, fields) || !Number.isInteger(value.ordinal) || value.ordinal < 0 || value.ordinal >= count
+        || ordinals.has(value.ordinal) || !Number.isInteger(value.attributes) || value.attributes < 0 || value.attributes > 0xffffffff
+        || !dataText(value.timeZoneKey, 128, true)) fail();
+    const decimal = (text, maximum) => typeof text === 'string' && /^(0|[1-9][0-9]{0,18})$/.test(text)
+      && (text.length < maximum.length || text.length === maximum.length && text <= maximum);
+    for (const field of fields.slice(2,5)) if (!decimal(value[field], '2650467743999999999')) fail();
+    for (const field of fields.slice(5,8)) if (!decimal(value[field], '3155378975999999999')) fail();
+    ordinals.add(value.ordinal);
+    return Object.freeze(Object.fromEntries(fields.map(field => [field,value[field]])));
+  }
+
+  function directoryResult(value, path, maxEntries, withMetadata = false) {
     const fail = () => fsFault('fs.read_directory', 'fs_error');
     try {
       if (!exactDataFields(value, ['entries','complete']) || value.complete !== true
           || !Array.isArray(value.entries) || value.entries.length > maxEntries
           || Reflect.ownKeys(value.entries).length !== value.entries.length + 1) fail();
-      const entries = [], names = new Set();
+      const entries = [], names = new Set(), ordinals = new Set();
       for (let i = 0; i < value.entries.length; i++) {
         if (!Object.hasOwn(value.entries, i)) fail();
         const entry = value.entries[i];
-        if (!exactDataFields(entry, ['name','path','kind','reason'])) fail();
+        if (!exactDataFields(entry, withMetadata ? ['name','path','kind','reason','metadata'] : ['name','path','kind','reason'])) fail();
         const {name, path:childPath, kind, reason} = entry;
         if (!dataText(name, 32767, false) || name === '.' || name === '..' || /[\\/]/.test(name)
             || !dataText(childPath, 32767, false) || names.has(name)
@@ -701,7 +763,9 @@ function createDesktopApi(invoke) {
             || (kind === 'unavailable' ? !['reparse_point','cloud_placeholder','cloud_path','unsupported_name'].includes(reason) : reason !== null)) fail();
         if (kind !== 'unavailable') fsPath(childPath, fail);
         names.add(name);
-        entries.push(Object.freeze({name, path:childPath, kind, reason}));
+        const resultEntry={name,path:childPath,kind,reason};
+        if (withMetadata) resultEntry.metadata=directoryMetadata(entry.metadata,value.entries.length,ordinals);
+        entries.push(Object.freeze(resultEntry));
       }
       const result = {entries, complete:true};
       // 对清理后的 DTO 计 UTF-8 JSON 字节，既不依赖 Node Buffer，也不丢失代理对。
@@ -734,16 +798,31 @@ function createDesktopApi(invoke) {
       if (args.length < 1 || args.length > 2) fail();
       const [path, supplied] = args;
       fsPath(path, fail);
-      let maxEntries;
+      let maxEntries, order, metadata, entryType, searchPattern, matchMode;
       try {
         const options = supplied === undefined ? {} : supplied;
         if (!options || typeof options !== 'object' || Array.isArray(options)
-            || Reflect.ownKeys(options).some(key => key !== 'maxEntries')) fail();
-        const value = Object.hasOwn(options, 'maxEntries') ? options.maxEntries : undefined;
-        maxEntries = value === undefined ? 128 : value;
-        if (!Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > 1024) fail();
+            || Reflect.ownKeys(options).some(key => !['maxEntries','order','metadata','entryType','searchPattern','matchMode'].includes(key))) fail();
+        const own = key => Object.hasOwn(options, key) ? options[key] : undefined;
+        const suppliedMax = own('maxEntries');
+        maxEntries = suppliedMax === undefined ? 128 : suppliedMax;
+        order = own('order'); metadata = own('metadata'); entryType = own('entryType');
+        searchPattern = own('searchPattern'); matchMode = own('matchMode');
+        if (!Number.isInteger(maxEntries) || maxEntries < 1 || maxEntries > 1024
+            || (order !== undefined && !['name','native'].includes(order))
+            || (metadata !== undefined && typeof metadata !== 'boolean')
+            || (entryType !== undefined && !['all','file','directory'].includes(entryType))
+            || (searchPattern === undefined ? matchMode !== undefined : matchMode !== 'windows-find')
+            || (searchPattern !== undefined && (!dataText(searchPattern,256,false)
+              || /[\u0000-\u001f\u007f-\u009f\\/:<>"|]/.test(searchPattern)
+              || !searchPattern.replace(/ +$/, '') || searchPattern.replace(/ +$/, '').endsWith('..')))) fail();
       } catch (_) { fail(); }
-      return fsCall(method, {path, max_entries:maxEntries}, value => directoryResult(value, path, maxEntries));
+      const params = {path, max_entries:maxEntries};
+      if (order !== undefined) params.order = order;
+      if (metadata !== undefined) params.metadata = metadata;
+      if (entryType !== undefined) params.entry_type = entryType;
+      if (searchPattern !== undefined) { params.search_pattern = searchPattern; params.match_mode = matchMode; }
+      return fsCall(method, params, value => directoryResult(value, path, maxEntries, metadata === true));
     },
   });
   return {desktop, clipboard, ui, fs};

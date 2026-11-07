@@ -281,6 +281,7 @@ export default async function (ctx) {
 | `ctx.desktop.copySelectionData(options?)` | 向原目标发送一次 Ctrl+C，按明确等待参数读取文本或文件列表，另返回 `changed`。 |
 | `ctx.clipboard.readText()` | 读取 Unicode 文本，保留空白；没有文本格式或 UTF-16 无效时抛错。 |
 | `ctx.clipboard.readData()` | 读取文本或文件列表及观察到的剪贴板序号，不需要前台目标，不读取文件内容。 |
+| `ctx.clipboard.writeFiles(paths)` | 将 1–64 条 Windows 绝对路径以 Unicode 文件列表替换全部剪贴板格式，返回 `{written:true,sequenceNumber}`。不读取路径对应的文件、不复制磁盘文件或自动粘贴。 |
 | `ctx.clipboard.history.list/get/append/remove` | 显式访问应用的有界纯文本历史；默认不监听或读取系统剪贴板。 |
 | `ctx.clipboard.writeText(text, options?)` | 替换全部剪贴板内容为 Unicode 文本，返回 `{ written: true, sequenceNumber }`，不自动恢复。临时回贴可传 `{ excludeFromHistory: true }`，同时写入 Windows 历史排除格式与 `OmniTrigger.TransientClipboard.v1`，回执另含本次随机 `writeId`；识别标记的采集器应跳过该内容。默认不排除；标记不限制其它程序读取。序号是写入后观察值，不代表独占剪贴板。 |
 
@@ -525,6 +526,12 @@ for (const entry of result.entries) {
 错误包含 `method:'fs.read_directory'` 和 `effectState:'not_started'`，只描述这次只读调用。不存在为 `path_missing`，普通文件为 `not_directory`，访问拒绝为 `access_denied`；路径不支持、不可用和无宿主分别为 `path_not_local`、`path_unavailable`、`fs_unavailable`。发现重复记录或目录身份改变为 `directory_changed`。Node 本机调用并发报告 `fs_busy`；RPC 总预算五秒，不因碎片回执续时，不重试。
 
 `complete:true` 仅表示已读到本次枚举末尾。句柄、路径和身份复验不构成目录锁；并发增删、重命名或名称空间变化仍可能发生，结果不是原子快照，后续打开必须重新检查。句柄最终路径无法与调用路径核对时保守报告 `path_unavailable`，包括部分短名称或非 ASCII 大小写别名。取消与截止时限在每次系统调用前后以及回执交付前检查；不能硬性抢占已经进入的 OS 调用，迟到成功和错误都会被取消或超时替代。
+
+目录枚举还可显式设置 `order:'native'`、`entryType:'file'|'directory'`、`metadata:true`。默认仍按名称排序、返回全部类型且不附元数据。`searchPattern` 仅接受一个名称组件，必须同时提供 `matchMode:'windows-find'`，使用 Windows 的名称匹配规则；不支持目录分隔符或现代 .NET 托管匹配模式。
+
+`metadata:true` 为每项增加 `{ordinal,attributes,creationTimeUtc100ns,lastAccessTimeUtc100ns,lastWriteTimeUtc100ns,creationTimeLocalTicks100ns,lastAccessTimeLocalTicks100ns,lastWriteTimeLocalTicks100ns,timeZoneKey}`。`ordinal` 保留枚举时的原始序号，随后按名称排序也不改变；属性为 Windows 位掩码。UTC FILETIME 与本地日历 ticks 都以十进制字符串返回，保留 100ns 精度。本地 ticks 用于本地日历顺序比较，不是 Unix 时间；转换使用枚举时捕获的系统时区。结果仍受原有数量、总大小、取消和目录变化限制。
+
+文件列表写入的单条路径最多 32767 个 UTF-16 单元、合计最多 65536，保留原顺序及重复项；允许盘符绝对路径和 UNC 作为列表数据，不据此访问文件或网络。相对路径、设备前缀、点路径组件、NUL、无效 UTF-16 和非法字符会在清空剪贴板前被拒绝。开始清空后发生失败、取消或超时，效果为 `unknown`，不得自动重试或声称原内容已恢复。写入后的序号只是观察值，不能证明剪贴板仍由本次调用独占。Node 使用 `await ctx.clipboard.writeFiles(paths)`，同步 Script 直接调用；两者都需要应用宿主接入。
 
 ### 本地文件元数据
 

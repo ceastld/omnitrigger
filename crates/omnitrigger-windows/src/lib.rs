@@ -25,8 +25,9 @@ pub use process_capture::{
 
 mod local_path_stat;
 pub use local_path_stat::{
-    read_local_directory, stat_local_path, LocalDirectoryEntry, LocalPathKind, LocalStatError,
-    MAX_DIRECTORY_BYTES, MAX_DIRECTORY_ENTRIES,
+    read_local_directory, read_local_directory_with_options, stat_local_path, DirectoryEntryType,
+    DirectoryOrder, LocalDirectoryEntry, LocalDirectoryMetadata, LocalDirectoryOptions,
+    LocalPathKind, LocalStatError, MAX_DIRECTORY_BYTES, MAX_DIRECTORY_ENTRIES,
 };
 
 mod automation_basics;
@@ -59,6 +60,11 @@ pub use clipboard_history_listener::{
     run_clipboard_history_capture_helper, run_clipboard_history_gated_capture_helper,
     ClipboardHistoryListener, HistoryListenerError, HistoryListenerStats, HistoryText,
 };
+
+mod clipboard_files;
+#[cfg(windows)]
+pub use automation_basics::write_clipboard_files_if;
+pub use clipboard_files::{validate_clipboard_file_paths, ClipboardFilesError};
 
 mod clipboard_data;
 #[cfg(windows)]

@@ -17,7 +17,7 @@ let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
 const nativeMethods = new Set(['system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','fs.read_directory','ui.choose','ui.notify','ui.open_history','ui.toggle_history','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
-  'keyboard.shortcut','keyboard.sequence','keyboard.text','win32_edit.replace_selection','raishot.resident.find','raishot.resident.region','selection.copy','selection.copy_data','selection.read_text','explorer.context','clipboard.read','clipboard.read_data','clipboard.write','window.action','display.brightness_step','audio.volume_adjust']);
+  'keyboard.shortcut','keyboard.sequence','keyboard.text','win32_edit.replace_selection','raishot.resident.find','raishot.resident.region','selection.copy','selection.copy_data','selection.read_text','explorer.context','clipboard.read','clipboard.read_data','clipboard.write','clipboard.write_files','window.action','display.brightness_step','audio.volume_adjust']);
 let nativePending;
 let nativePendingMethod;
 let nativeId = 0;
@@ -103,7 +103,7 @@ function nativeCall(method, params) {
   const opening = method === 'system.open' || method === 'system.open_file_in_parent';
   const capture = method === 'process.capture';
   const rai = method.startsWith('raishot.resident.');
-  const edit = method === 'win32_edit.replace_selection' || rai;
+  const edit = method === 'win32_edit.replace_selection' || rai || method === 'clipboard.write_files';
   const volume = method === 'audio.volume_adjust';
   const brightness = method === 'display.brightness_step' || volume;
   const stat = method === 'fs.stat' || method === 'fs.read_directory';
@@ -113,7 +113,7 @@ function nativeCall(method, params) {
   const historyRead = method === 'history.list' || method === 'history.get';
   const historyWrite = method === 'history.append' || method === 'history.remove';
   const history = historyRead || historyWrite;
-  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, rai ? 'RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。' : edit ? 'Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。' : volume ? '音量调节未获完整确认；请检查错误代码和效果状态。' : brightness ? '亮度步进未获完整确认；请检查结构化回执。' : capture ? '程序输出采集未完成，请检查错误代码。' : stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : history ? '剪贴板历史调用失败；请检查错误代码。' : message), {effectState:stat || dataRead || historyRead ? 'not_started' : effectState, method});
+  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, rai ? 'RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。' : edit ? (method === 'clipboard.write_files' ? '文件列表剪贴板写入未获完整确认；请检查错误代码和效果状态。' : 'Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。') : volume ? '音量调节未获完整确认；请检查错误代码和效果状态。' : brightness ? '亮度步进未获完整确认；请检查结构化回执。' : capture ? '程序输出采集未完成，请检查错误代码。' : stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : history ? '剪贴板历史调用失败；请检查错误代码。' : message), {effectState:stat || dataRead || historyRead ? 'not_started' : effectState, method});
   if (!nativeMethods.has(method)) return Promise.reject(fail('invalid_input', '未提供此本机调用方法。'));
   if ((historyUi || stat || data || history || capture || brightness || edit) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
   checkCancelled();

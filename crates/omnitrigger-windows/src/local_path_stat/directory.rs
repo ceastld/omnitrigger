@@ -2,6 +2,13 @@
 //! 路径/身份复验可发现部分并发变更，不提供名称空间锁或原子快照。
 use super::{checkpoint, fault, validate_local_path, LocalStatError};
 
+#[path = "directory_options.rs"]
+mod options;
+pub use options::{
+    read_local_directory_with_options, DirectoryEntryType, DirectoryOrder, LocalDirectoryMetadata,
+    LocalDirectoryOptions,
+};
+
 pub const MAX_DIRECTORY_ENTRIES: usize = 1024;
 pub const MAX_DIRECTORY_BYTES: usize = 64 * 1024;
 
@@ -11,6 +18,7 @@ pub struct LocalDirectoryEntry {
     pub path: String,
     pub kind: &'static str,
     pub reason: Option<&'static str>,
+    pub metadata: Option<LocalDirectoryMetadata>,
 }
 
 fn directory_fault(code: &'static str) -> LocalStatError {
@@ -142,6 +150,7 @@ impl<'a> Collector<'a> {
             path,
             kind,
             reason,
+            metadata: None,
         });
         Ok(())
     }
@@ -323,6 +332,8 @@ mod native {
             value.nFileIndexLow,
         )
     }
+
+    include!("directory_options_native.rs");
 
     pub(super) fn read(
         path: &str,

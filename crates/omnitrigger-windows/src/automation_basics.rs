@@ -328,6 +328,147 @@ mod clipboard {
             .map_err(|error| format!("文本已写入，但关闭剪贴板失败：{error}"))
     }
 
+    // 复用本模块Lease/OwnedMemory/Backend；只在清空前分配并校验完整列表。
+    pub(super) fn write_files_checked(
+        units: &[u16],
+        backend: &impl Backend,
+        mut check: impl FnMut() -> Result<(), crate::ClipboardFilesError>,
+    ) -> Result<(), crate::ClipboardFilesError> {
+        use crate::ClipboardFilesError as Fault;
+        check()?;
+        let handle = backend
+            .allocate(units)
+            .map_err(|_| Fault::before("clipboard_failed"))?;
+        let mut memory = OwnedMemory {
+            backend,
+            handle: Some(handle),
+        };
+        let lease = Lease::open(backend).map_err(|_| Fault::before("clipboard_busy"))?;
+        check()?;
+        // EmptyClipboard调用开始后，即使返回失败也不能声称原内容未变。
+        backend
+            .empty()
+            .map_err(|_| Fault::before("clipboard_failed").unknown())?;
+        check().map_err(Fault::unknown)?;
+        backend
+            .set_format(15, handle)
+            .map_err(|_| Fault::before("clipboard_failed").unknown())?;
+        memory.handle = None; // 成功后由系统拥有，不再释放或修改。
+        lease
+            .close()
+            .map_err(|_| Fault::before("clipboard_failed").unknown())?;
+        check().map_err(Fault::unknown)
+    }
+
+    #[cfg(test)]
+    mod file_drop_write_tests {
+        use super::*;
+        use std::cell::{Cell, RefCell};
+        struct Fake {
+            fail: &'static str,
+            events: RefCell<Vec<&'static str>>,
+            freed: Cell<usize>,
+        }
+        impl Fake {
+            fn event(&self, name: &'static str) -> Result<(), String> {
+                self.events.borrow_mut().push(name);
+                if self.fail == name {
+                    Err("private path must not escape".into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        impl Backend for Fake {
+            type Handle = usize;
+            fn allocate(&self, _: &[u16]) -> Result<usize, String> {
+                self.event("allocate")?;
+                Ok(7)
+            }
+            fn free(&self, _: usize) {
+                self.freed.set(self.freed.get() + 1);
+            }
+            fn open(&self) -> Result<(), String> {
+                self.event("open")
+            }
+            fn close(&self) -> Result<(), String> {
+                self.event("close")
+            }
+            fn empty(&self) -> Result<(), String> {
+                self.event("empty")
+            }
+            fn set_format(&self, format: u32, _: usize) -> Result<(), String> {
+                assert_eq!(format, 15);
+                self.event("set")
+            }
+            fn set_unicode(&self, _: usize) -> Result<(), String> {
+                panic!("不得替代为文本")
+            }
+            fn register_format(&self, _: &str) -> Result<u32, String> {
+                panic!("CF_HDROP无需注册")
+            }
+            fn read_unicode(&self) -> Result<Vec<u16>, String> {
+                panic!("不得读取原剪贴板")
+            }
+            fn wait_retry(&self) {}
+        }
+        #[test]
+        fn ownership_and_effect_follow_actual_clear_and_transfer_boundary() {
+            for (stage, effect, free) in [
+                ("allocate", "not_started", 0),
+                ("open", "not_started", 1),
+                ("empty", "unknown", 1),
+                ("set", "unknown", 1),
+                ("close", "unknown", 0),
+                ("", "", 0),
+            ] {
+                let fake = Fake {
+                    fail: stage,
+                    events: RefCell::new(vec![]),
+                    freed: Cell::new(0),
+                };
+                let result = write_files_checked(&[20, 0], &fake, || Ok(()));
+                assert_eq!(fake.freed.get(), free);
+                if stage.is_empty() {
+                    assert!(result.is_ok());
+                } else {
+                    assert_eq!(result.unwrap_err().effect_state, effect);
+                }
+                let events = fake.events.borrow();
+                assert_eq!(
+                    events.iter().filter(|e| **e == "set").count(),
+                    usize::from(matches!(stage, "set" | "close" | ""))
+                );
+            }
+        }
+        #[test]
+        fn cancellation_after_open_never_clears_and_after_clear_is_unknown() {
+            for stop in [1, 2, 3, 4] {
+                let fake = Fake {
+                    fail: "",
+                    events: RefCell::new(vec![]),
+                    freed: Cell::new(0),
+                };
+                let calls = Cell::new(0);
+                let error = write_files_checked(&[20, 0], &fake, || {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == stop {
+                        Err(crate::ClipboardFilesError::before("cancelled"))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .unwrap_err();
+                assert_eq!(
+                    error.effect_state,
+                    if stop <= 2 { "not_started" } else { "unknown" }
+                );
+                assert_eq!(fake.events.borrow().contains(&"empty"), stop >= 3);
+                assert_eq!(fake.events.borrow().contains(&"set"), stop == 4);
+            }
+        }
+    }
+
     pub(super) fn decode(units: &[u16]) -> Result<String, String> {
         let end = units
             .iter()
@@ -1374,4 +1515,18 @@ mod tests {
         maximum.insert(0, 65);
         assert!(clipboard::decode(&maximum).is_err());
     }
+}
+
+/// 以Unicode CF_HDROP替换全部剪贴板格式；不查询路径、不复制磁盘文件、不自动粘贴。
+/// 清空开始后的失败为unknown，不补发、不恢复原内容。租约重试仍沿用8次/10ms。
+#[cfg(windows)]
+pub fn write_clipboard_files_if(
+    paths: &[String],
+    mut check: impl FnMut() -> Result<(), crate::ClipboardFilesError>,
+) -> Result<(), crate::ClipboardFilesError> {
+    let units = crate::clipboard_files::encode_paths(paths)?;
+    check()?;
+    let backend = native::Clipboard::new(true)
+        .map_err(|_| crate::ClipboardFilesError::before("clipboard_failed"))?;
+    clipboard::write_files_checked(&units, &backend, check)
 }

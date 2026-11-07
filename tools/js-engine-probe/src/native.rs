@@ -10,7 +10,7 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 33] = [
+pub const METHODS: [&str; 34] = [
     "history.list",
     "history.get",
     "history.append",
@@ -41,6 +41,7 @@ pub const METHODS: [&str; 33] = [
     "clipboard.read",
     "clipboard.read_data",
     "clipboard.write",
+    "clipboard.write_files",
     "window.action",
     "display.brightness_step",
     "audio.volume_adjust",
@@ -75,6 +76,8 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
         .into(),
         message: if method.starts_with("raishot.resident.") {
             "RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。".into()
+        } else if method == "clipboard.write_files" {
+            "文件列表剪贴板写入未获完整确认；请检查错误代码和效果状态。".into()
         } else if method == "win32_edit.replace_selection" {
             "Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。".into()
         } else if method == "audio.volume_adjust" {
@@ -116,6 +119,7 @@ fn brightness_transport_effect(
             | "win32_edit.replace_selection"
             | "raishot.resident.find"
             | "raishot.resident.region"
+            | "clipboard.write_files"
     ) && !write_began
     {
         "not_started"
@@ -205,6 +209,7 @@ pub fn call(
                 | "win32_edit.replace_selection"
                 | "raishot.resident.find"
                 | "raishot.resident.region"
+                | "clipboard.write_files"
                 | "history.list"
                 | "history.get"
                 | "history.append"
@@ -225,6 +230,7 @@ pub fn call(
                         | "win32_edit.replace_selection"
                         | "raishot.resident.find"
                         | "raishot.resident.region"
+                        | "clipboard.write_files"
                         | "history.append"
                         | "history.remove"
                         | "ui.toggle_history"
@@ -257,6 +263,7 @@ pub fn call(
                         | "win32_edit.replace_selection"
                         | "raishot.resident.find"
                         | "raishot.resident.region"
+                        | "clipboard.write_files"
                         | "history.list"
                         | "history.get"
                         | "history.append"
@@ -274,6 +281,7 @@ pub fn call(
                                 | "win32_edit.replace_selection"
                                 | "raishot.resident.find"
                                 | "raishot.resident.region"
+                                | "clipboard.write_files"
                                 | "history.append"
                                 | "history.remove"
                                 | "ui.toggle_history"
@@ -322,7 +330,10 @@ pub fn call(
 fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError> {
     let invalid = || {
         fault(
-            if method == "win32_edit.replace_selection" || method.starts_with("raishot.resident.") {
+            if method == "win32_edit.replace_selection"
+                || method.starts_with("raishot.resident.")
+                || method == "clipboard.write_files"
+            {
                 "invalid_response"
             } else {
                 "native_bridge_failed"
@@ -382,6 +393,7 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "win32_edit.replace_selection"
                     | "raishot.resident.find"
                     | "raishot.resident.region"
+                    | "clipboard.write_files"
                     | "history.list"
                     | "history.get"
                     | "history.append"
@@ -416,6 +428,7 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "win32_edit.replace_selection"
                     | "raishot.resident.find"
                     | "raishot.resident.region"
+                    | "clipboard.write_files"
             ) {
                 error.required_permissions = permissions;
             }

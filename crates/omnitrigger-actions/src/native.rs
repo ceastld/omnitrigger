@@ -15,7 +15,7 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 36] = [
+const METHODS: [&str; 37] = [
     "system.open",
     "system.open_file_in_parent",
     "process.capture",
@@ -49,6 +49,7 @@ const METHODS: [&str; 36] = [
     "clipboard.read",
     "clipboard.read_data",
     "clipboard.write",
+    "clipboard.write_files",
     "window.action",
     "display.brightness_step",
     "audio.volume_adjust",
@@ -280,6 +281,7 @@ impl NativeBridge {
                             ActionError::new("cancelled", "动作已取消，未开始本机调用。");
                         if request.method == "win32_edit.replace_selection"
                             || request.method.starts_with("raishot.resident.")
+                            || request.method == "clipboard.write_files"
                             || opening
                             || file_read
                             || data_read
@@ -303,6 +305,7 @@ impl NativeBridge {
                         };
                         if request.method == "win32_edit.replace_selection"
                             || request.method.starts_with("raishot.resident.")
+                            || request.method == "clipboard.write_files"
                             || opening
                             || request.method == "ui.choose"
                             || matches!(
@@ -327,10 +330,13 @@ impl NativeBridge {
                     }
                     .map_err(|mut error| {
                         if request.method == "win32_edit.replace_selection"
+                            || request.method == "clipboard.write_files"
                             || request.method.starts_with("raishot.resident.")
                         {
                             error.message = if request.method.starts_with("raishot.resident.") {
                                 "RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。".into()
+                            } else if request.method == "clipboard.write_files" {
+                                "文件列表剪贴板写入未获完整确认；请检查错误代码和效果状态。".into()
                             } else {
                                 "Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。".into()
                             };

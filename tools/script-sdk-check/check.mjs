@@ -15,6 +15,7 @@ if (binaryArgs.length !== 1 || !binaryArgs[0].trim() || binaryArgs[0].startsWith
 const binary = resolve(binaryArgs[0]);
 const {default: ts} = await import('typescript');
 const {checkClipboardHistoryTypes} = await import('./check-history-types.mjs');
+const {checkFileDirectoryTypes} = await import('./check-file-directory-types.mjs');
 mkdirSync(join(repo, '.tmp'), {recursive:true});
 const root = mkdtempSync(join(repo, '.tmp/script-sdk-check-'));
 const config = join(root, 'bindings.json');
@@ -56,6 +57,7 @@ const checked = diagnostics(project.package_root);
 assert.equal(checked.length, 0, report(checked));
 assert.equal(readFileSync(project.sdk_path,'utf8'), readFileSync(join(repo,'crates/omnitrigger-actions/runtime/script-types.d.ts'),'utf8'));
 const historyTypeChecks = checkClipboardHistoryTypes({syncDeclarationPath:project.sdk_path, temporaryRoot:root});
+const fileDirectoryTypeChecks = checkFileDirectoryTypes({typescript:ts, syncDeclarationPath:project.sdk_path, temporaryRoot:root});
 const original = readFileSync(project.entry_path,'utf8');
 // ESM 模块没有隐式上下文；只允许入口参数或显式传参，防止编辑器补全误导作者。
 for (const source of [
@@ -155,6 +157,6 @@ const listed = cli(['--list-package-actions']);
 assert.equal(listed.actions.length, 1);
 assert.equal(listed.actions[0].runtime, 'script');
 assert.equal(readFileSync(config,'utf8'),'[]');
-const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,checkedExamples,entryContractChecks:Object.keys(invalidEntries),typedInputChecks,negativeTypeChecks:negative.length,structuredClipboardTypeChecks:true,historyTypeChecks,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
+const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,checkedExamples,entryContractChecks:Object.keys(invalidEntries),typedInputChecks,negativeTypeChecks:negative.length,structuredClipboardTypeChecks:true,historyTypeChecks,fileDirectoryTypeChecks,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
 writeFileSync(join(root,'result.json'), JSON.stringify(result,null,2));
 console.log(JSON.stringify(result));

@@ -139,6 +139,21 @@ interface ScriptFileStatFault extends Error {
     /** 仅此只读调用无副作用，不涵盖此前脚本步骤。 */
     effectState: 'not_started';
 }
+interface ScriptDirectoryReadOptions {
+    maxEntries?: number;
+    order?: 'name' | 'native';
+    metadata?: boolean;
+    entryType?: 'all' | 'file' | 'directory';
+    searchPattern?: string;
+    /** 显式Windows Find匹配；不等于现代.NET托管匹配。 */
+    matchMode?: 'windows-find';
+}
+/** UTC字段为1601纪元FILETIME；LocalTicks为0001纪元本地DateTime。均为100ns十进制字符串，不转Number。 */
+type ScriptDirectoryMetadata = Readonly<{ordinal:number;attributes:number;
+    creationTimeUtc100ns:string;lastAccessTimeUtc100ns:string;lastWriteTimeUtc100ns:string;
+    creationTimeLocalTicks100ns:string;lastAccessTimeLocalTicks100ns:string;lastWriteTimeLocalTicks100ns:string;timeZoneKey:string}>;
+type ScriptLocalDirectoryMetadataResult = Readonly<{entries:ReadonlyArray<ScriptLocalDirectoryEntry & {readonly metadata:ScriptDirectoryMetadata}> ;complete:true}>;
+
 type ScriptLocalDirectoryEntry = Readonly<{
   name: string;
   /** 保留调用者的目录原文，仅在需要时追加反斜杠及子项名。 */
@@ -215,7 +230,8 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
         /** 直接子项，默认 128、最多 1024；回执最多 64 KiB，超限整次拒绝。
          * 不递归、不跟随链接、不读取内容；complete 只表示读到枚举末尾，不是原子快照。
          * 使用与 stat 相同的本地路径守卫。OS 调用不能硬性抢占；迟到结果丢弃。 */
-        readDirectory(path: string, options?: {maxEntries?: number}): ScriptLocalDirectoryResult;
+        readDirectory(path: string, options: ScriptDirectoryReadOptions & {metadata:true}): ScriptLocalDirectoryMetadataResult;
+    readDirectory(path: string, options?: ScriptDirectoryReadOptions): ScriptLocalDirectoryResult;
         /** UTF-8 文件，绝对路径，最多 64 KiB。 */
         readText(path: string): string;
         /** 默认不覆盖；不自动创建目录。失败可能留下部分文件。 */
@@ -316,6 +332,10 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
          * 不支持格式抛 unsupported_clipboard_format，不查询或打开路径。
          */
         readData(): ScriptClipboardDataSnapshot;
+        /** 应用桥接写Unicode CF_HDROP；1–64项绝对Windows路径，总UTF-16不超65536。
+         * 不查询或打开路径，不复制磁盘文件，不粘贴；替换全部剪贴板格式且不自动恢复。
+         * 清空后的失败/取消为unknown；sequenceNumber仅为观察值，不证明独占或文件存在。 */
+        writeFiles(paths: readonly string[]): {written:true;sequenceNumber:number};
         /** 替换全部格式。独立 CLI 不支持选项并返回 void；应用接入返回写入回执。 */
         writeText(text: string, options?: {excludeFromHistory?: boolean}): void | {written: true; sequenceNumber: number; writeId?: string};
     };

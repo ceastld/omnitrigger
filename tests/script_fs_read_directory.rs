@@ -13,6 +13,7 @@ fn entry(name: &str) -> LocalDirectoryEntry {
         path: format!("C:/synthetic/{name}"),
         kind: "file",
         reason: None,
+        metadata: None,
     }
 }
 fn assert_error(error: ActionError, code: &str) {
@@ -29,7 +30,9 @@ fn read_directory_adapter_calls_real_boundary_with_original_path_and_limit() {
         deadline(),
         |path, limit, check| {
             assert_eq!(path, "C:/synthetic/");
-            assert_eq!(limit, 2);
+            assert_eq!(limit.max_entries, 2);
+            assert_eq!(limit.order, DirectoryOrder::Name);
+            assert!(!limit.metadata);
             check()?;
             Ok(vec![entry("a")])
         },
@@ -166,5 +169,82 @@ fn adapter_does_not_publish_oversized_platform_output() {
         )
         .unwrap_err(),
         "directory_too_large",
+    );
+}
+
+#[test]
+fn explicit_directory_options_preserve_native_projection_and_decimal_time_precision() {
+    let value = read_directory_with(
+        json!({"path":"C:/synthetic/","max_entries":2,"order":"native","metadata":true,
+            "entry_type":"file","search_pattern":"*.xls","match_mode":"windows-find"}),
+        &CancellationToken::new(),
+        deadline(),
+        |path, options, check| {
+            assert_eq!(path, "C:/synthetic/");
+            assert_eq!(options.order, DirectoryOrder::Native);
+            assert_eq!(options.entry_type, DirectoryEntryType::File);
+            assert!(options.metadata);
+            assert_eq!(options.search_pattern.as_deref(), Some("*.xls"));
+            check()?;
+            let mut result = entry("a.xls");
+            result.metadata = Some(omnitrigger_windows::LocalDirectoryMetadata {
+                ordinal: 0,
+                attributes: 6,
+                creation_utc_100ns: 134_064_342_001_234_567,
+                access_utc_100ns: 134_064_342_001_234_567,
+                write_utc_100ns: 134_064_342_001_234_568,
+                creation_local_ticks: 638_975_574_001_234_567,
+                access_local_ticks: 638_975_574_001_234_567,
+                write_local_ticks: 638_975_574_001_234_568,
+                time_zone_key: "Synthetic zone".into(),
+            });
+            Ok(vec![result])
+        },
+    )
+    .unwrap();
+    assert_eq!(value["entries"][0]["metadata"]["attributes"], 6);
+    assert_eq!(
+        value["entries"][0]["metadata"]["lastWriteTimeLocalTicks100ns"],
+        "638975574001234568"
+    );
+    assert_eq!(
+        value["entries"][0]["metadata"]["lastWriteTimeUtc100ns"],
+        "134064342001234568"
+    );
+}
+
+#[test]
+fn invalid_or_null_explicit_directory_options_never_query() {
+    for fields in [
+        json!({"order":null}),
+        json!({"metadata":null}),
+        json!({"order":"unknown"}),
+        json!({"entry_type":"unknown"}),
+        json!({"search_pattern":"*.txt"}),
+        json!({"match_mode":"windows-find"}),
+        json!({"search_pattern":"*","match_mode":"dotnet-managed"}),
+        json!({"search_pattern":"sub\\*.txt","match_mode":"windows-find"}),
+    ] {
+        let mut value = params();
+        for (key, item) in fields.as_object().unwrap() {
+            value[key] = item.clone();
+        }
+        assert_error(
+            read_directory_with(value, &CancellationToken::new(), deadline(), |_, _, _| {
+                panic!("invalid options queried")
+            })
+            .unwrap_err(),
+            "invalid_input",
+        );
+    }
+    assert_error(
+        read_directory_with(
+            json!({"path":"C:/synthetic/","max_entries":2,"metadata":true}),
+            &CancellationToken::new(),
+            deadline(),
+            |_, _, _| Ok(vec![entry("a")]),
+        )
+        .unwrap_err(),
+        "fs_error",
     );
 }

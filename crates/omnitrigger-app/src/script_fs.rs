@@ -1,8 +1,9 @@
 //! 无 UI 的只读文件元数据适配；本机安全检查留在 Windows 平台层独立复验。
 use omnitrigger_actions::{ActionError, CancellationToken};
 use omnitrigger_windows::{
-    read_local_directory, stat_local_path, LocalDirectoryEntry, LocalPathKind, LocalStatError,
-    MAX_DIRECTORY_BYTES, MAX_DIRECTORY_ENTRIES,
+    read_local_directory_with_options, stat_local_path, DirectoryEntryType, DirectoryOrder,
+    LocalDirectoryEntry, LocalDirectoryOptions, LocalPathKind, LocalStatError, MAX_DIRECTORY_BYTES,
+    MAX_DIRECTORY_ENTRIES,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -162,6 +163,24 @@ mod tests;
 struct DirectoryParams {
     path: String,
     max_entries: usize,
+    #[serde(default, deserialize_with = "present_option")]
+    order: Option<String>,
+    #[serde(default, deserialize_with = "present_option")]
+    metadata: Option<bool>,
+    #[serde(default, deserialize_with = "present_option")]
+    entry_type: Option<String>,
+    #[serde(default, deserialize_with = "present_option")]
+    search_pattern: Option<String>,
+    #[serde(default, deserialize_with = "present_option")]
+    match_mode: Option<String>,
+}
+
+fn present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 fn directory_error(code: &str) -> ActionError {
@@ -202,12 +221,9 @@ pub fn read_directory(
     cancellation: &CancellationToken,
     deadline: Instant,
 ) -> Result<Value, ActionError> {
-    read_directory_with(
-        params,
-        cancellation,
-        deadline,
-        |path, max_entries, check| read_local_directory(path, max_entries, check),
-    )
+    read_directory_with(params, cancellation, deadline, |path, options, check| {
+        read_local_directory_with_options(path, options, check)
+    })
 }
 
 fn read_directory_with(
@@ -216,7 +232,7 @@ fn read_directory_with(
     deadline: Instant,
     query: impl FnOnce(
         &str,
-        usize,
+        &LocalDirectoryOptions,
         &dyn Fn() -> Result<(), LocalStatError>,
     ) -> Result<Vec<LocalDirectoryEntry>, LocalStatError>,
 ) -> Result<Value, ActionError> {
@@ -229,21 +245,58 @@ fn read_directory_with(
         return Err(directory_error("invalid_input"));
     }
     validate_path(&params.path).map_err(|error| directory_error(&error.code))?;
+    let order = match params.order.as_deref() {
+        None | Some("name") => DirectoryOrder::Name,
+        Some("native") => DirectoryOrder::Native,
+        _ => return Err(directory_error("invalid_input")),
+    };
+    let entry_type = match params.entry_type.as_deref() {
+        None | Some("all") => DirectoryEntryType::All,
+        Some("file") => DirectoryEntryType::File,
+        Some("directory") => DirectoryEntryType::Directory,
+        _ => return Err(directory_error("invalid_input")),
+    };
+    if !matches!(
+        (&params.search_pattern, params.match_mode.as_deref()),
+        (Some(_), Some("windows-find")) | (None, None)
+    ) {
+        return Err(directory_error("invalid_input"));
+    }
+    let options = LocalDirectoryOptions {
+        max_entries: params.max_entries,
+        order,
+        metadata: params.metadata.unwrap_or(false),
+        entry_type,
+        search_pattern: params.search_pattern,
+    };
+    options
+        .validate()
+        .map_err(|error| directory_error(error.code))?;
+
     let check_state = || check(cancellation, deadline);
     check_state().map_err(|error| directory_error(error.code))?;
-    let result = query(&params.path, params.max_entries, &check_state);
+    let result = query(&params.path, &options, &check_state);
     // OS 调用不可强制抢占；成功和失败都必须经过返回后的取消/时限检查。
     check_state().map_err(|error| directory_error(error.code))?;
     let entries = result.map_err(|error| directory_error(error.code))?;
     if entries.len() > params.max_entries {
         return Err(directory_error("directory_too_large"));
     }
+    if options.metadata && entries.iter().any(|entry| entry.metadata.is_none()) {
+        return Err(directory_error("fs_error"));
+    }
     let entries: Vec<Value> = entries
         .into_iter()
         .map(|entry| {
-            json!({
-                "name":entry.name, "path":entry.path, "kind":entry.kind, "reason":entry.reason,
-            })
+            let mut value=json!({"name":entry.name,"path":entry.path,"kind":entry.kind,"reason":entry.reason});
+            if options.metadata {
+                if let Some(m)=entry.metadata {
+                    value["metadata"]=json!({"ordinal":m.ordinal,"attributes":m.attributes,
+                      "creationTimeUtc100ns":m.creation_utc_100ns.to_string(),"lastAccessTimeUtc100ns":m.access_utc_100ns.to_string(),"lastWriteTimeUtc100ns":m.write_utc_100ns.to_string(),
+                      "creationTimeLocalTicks100ns":m.creation_local_ticks.to_string(),"lastAccessTimeLocalTicks100ns":m.access_local_ticks.to_string(),"lastWriteTimeLocalTicks100ns":m.write_local_ticks.to_string(),"timeZoneKey":m.time_zone_key});
+                }
+            }
+            value
         })
         .collect();
     let result = json!({"entries":entries,"complete":true});

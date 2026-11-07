@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import vm from 'node:vm';
+import {EventEmitter} from 'node:events';
 // 仅调用共享公开 factory 与内存 invoke；不启动脚本宿主、不读取系统剪贴板、不注入输入。
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -230,4 +233,62 @@ test('复制格式：回执种类不符明确失败且不重试或降级', async
     await assert.rejects(async()=>result.desktop.copySelectionData({format:'files'}),structured(copyMethod,'unknown','unsupported_clipboard_format'));
     assert.equal(calls.length,1);
   }
+});
+
+// writeFiles 的既有八组端口合同；只使用真实源码与内存替身。
+test('文件列表写入 SDK 端口合同', async t => {
+const here=new URL('../',import.meta.url);
+const source=path=>fs.readFileSync(new URL(path,here),'utf8');
+const desktop=source('crates/omnitrigger-actions/runtime/desktop-api.js'),host=source('crates/omnitrigger-actions/runtime/host.mjs'),sdk=source('tools/js-engine-probe/src/sdk.js');
+const asyncLine=host.split('\n').find(line=>line.startsWith('const asyncApi ='));
+const ok={written:true,sequenceNumber:0xffffffff},paths=['C:\\合成😀.txt','\\\\server\\share\\a.txt','C:\\合成😀.txt'];
+const plain=value=>JSON.parse(JSON.stringify(value));let passed=0;
+async function test(name,fn){await t.test(name,fn);passed++;}
+const predicate=(code,effect)=>error=>{assert.equal(error.code,code);assert.equal(error.effectState,effect);assert.equal(error.method,'clipboard.write_files');assert(!error.message.includes('private'));assert.equal(error.requiredPermissions,undefined);return true;};
+function shared(invoke,async=false){const context=vm.createContext({invoke});vm.runInContext(desktop+'\n'+asyncLine+'\nglobalThis.api='+(async?'asyncApi(createDesktopApi(invoke).clipboard)':'createDesktopApi(invoke).clipboard')+';',context);return context.api;}
+function sync({bridge=true,reply=()=>ok}={}){
+ const calls=[];const context=vm.createContext({ctx:bridge?{__nativeContext:{connection:{port:9,token:'a'.repeat(64)}}}:{},__hostCall:serialized=>{const request=JSON.parse(serialized);calls.push(request);return JSON.stringify({ok:true,value:reply(request)});},createProcessCaptureApi:()=>({capture(){}}),createBrowserApi:()=>({}),createClipboardHistoryApi:()=>({})});
+ vm.runInContext(desktop+'\n'+sdk,context);return{api:context.ctx.clipboard,calls};
+}
+function node({bridge=true,mode='ok',value=ok,error}={}){
+ const calls=[],sockets=[],timers=new Map();
+ class Socket extends EventEmitter{setEncoding(){}setTimeout(_ms,fn){this.timeout=fn;}destroy(){}write(frame){const request=JSON.parse(frame);calls.push(request);if(mode==='ok')queueMicrotask(()=>this.emit('data',JSON.stringify(error?{id:request.id,ok:false,error}:{id:request.id,ok:true,value})+'\n'));}}
+ const controller=new AbortController();const context=vm.createContext({request:bridge?{native:{port:9,token:'a'.repeat(64)}}:{},controller,Buffer,fault:(code,message)=>Object.assign(new Error(message??code),{code}),checkCancelled:()=>{if(controller.signal.aborted)throw controller.signal.reason;},createConnection:()=>{const socket=new Socket();sockets.push(socket);queueMicrotask(()=>mode==='pre_error'?socket.emit('error',new Error('private')):socket.emit('connect'));return socket;},setTimeout:callback=>{const id={};timers.set(id,callback);return id;},clearTimeout:id=>timers.delete(id)});
+ const m=host.indexOf('const nativeMethods ='),methods=host.slice(m,host.indexOf(']);',m)+3);const f=host.indexOf('function nativeCall('),native=host.slice(f,host.indexOf('\n}',f)+2);
+ vm.runInContext('let nativeId=0,nativePending,nativePendingMethod;const nativeSockets=new Set();\n'+methods+'\n'+native+'\n'+desktop+'\n'+asyncLine+'\nglobalThis.api=asyncApi(createDesktopApi(nativeCall).clipboard);',context);
+ return{api:context.api,calls,sockets,timers,controller};
+}
+await test('共享SDK同步与异步保持Unicode路径顺序重复项和窄回执',async()=>{
+ for(const asynchronous of [false,true]){const calls=[];const api=shared((method,params)=>{calls.push({method,params});return asynchronous?Promise.resolve(ok):ok;},asynchronous);const result=await api.writeFiles(Object.freeze([...paths]));assert.deepEqual(plain(result),ok);assert(Object.isFrozen(result));assert.deepEqual(plain(calls),[{method:'clipboard.write_files',params:{paths}}]);}
+});
+await test('全部坏参数在零桥接时拒绝且不回显路径',async()=>{
+ let calls=0;const api=shared(()=>{calls++;return ok;},true);const sparse=Array(1);const extra=['C:\\a'];extra.extra=1;const getter=Object.defineProperty(['C:\\a'],'0',{get(){throw Error('private');}});
+ for(const args of [[],[[]],[['relative']],[[null]],[['C:relative']],[['\\\\?\\C:\\a']],[['C:\\..\\a']],[['C:\\a:stream']],[['C:\\bad\0a']],[['C:\\bad\ud800']],[sparse],[extra],[getter],[['C:\\a'],{}],[Array(65).fill('C:\\a')],[['C:\\'+'😀'.repeat(16383)]],[Array(4).fill('C:\\'+'x'.repeat(16382))]])await assert.rejects(api.writeFiles(...args),predicate('invalid_input','not_started'));
+ assert.equal(calls,0);
+});
+await test('请求发送使用独立完整快照而非调用方后续变更',async()=>{
+ let params;const api=shared((_method,p)=>{params=p;return Promise.resolve(ok);},true);const mutable=['C:\\a'];const pending=api.writeFiles(mutable);mutable[0]='private';mutable.push('relative');await pending;assert.deepEqual(plain(params),{paths:['C:\\a']});
+});
+await test('完整同步SDK一次native调用；无bridge不回退旧clipboard写入',async()=>{
+ const good=sync();assert.deepEqual(plain(good.api.writeFiles(paths)),ok);assert.equal(good.calls.length,1);assert.equal(good.calls[0].method,'clipboard.write_files');
+ const missing=sync({bridge:false});assert.throws(()=>missing.api.writeFiles(paths),predicate('native_bridge_unavailable','not_started'));assert.equal(missing.calls.length,0);
+});
+await test('实际Node nativeCall一次窄方法发送且无bridge可证未开始',async()=>{
+ const good=node();assert.deepEqual(plain(await good.api.writeFiles(paths)),ok);assert.equal(good.calls.length,1);assert.deepEqual(good.calls[0].params,{paths});assert.equal(good.timers.size,0);
+ const missing=node({bridge:false});await assert.rejects(missing.api.writeFiles(paths),predicate('native_bridge_unavailable','not_started'));assert.equal(missing.calls.length,0);
+});
+await test('传输前错误not_started；发送后取消和超时unknown且不重试',async()=>{
+ const pre=node({mode:'pre_error'});await assert.rejects(pre.api.writeFiles(paths),predicate('desktop_connection','not_started'));assert.equal(pre.calls.length,0);
+ const cancel=node({mode:'hold'});const a=cancel.api.writeFiles(paths);await new Promise(resolve=>setImmediate(resolve));cancel.controller.abort(Object.assign(new Error('private'),{code:'cancelled'}));await assert.rejects(a,predicate('cancelled','unknown'));assert.equal(cancel.calls.length,1);
+ const timeout=node({mode:'hold'});const b=timeout.api.writeFiles(paths);await new Promise(resolve=>setImmediate(resolve));[...timeout.timers.values()][0]();await assert.rejects(b,predicate('timeout','unknown'));assert.equal(timeout.calls.length,1);
+});
+await test('畸形回执或错误方法不得当写入成功',async()=>{
+ for(const value of [null,{},true,{...ok,paths:['private']},{written:false,sequenceNumber:1},{written:true,sequenceNumber:-1},{written:true,sequenceNumber:2**32}])await assert.rejects(node({value}).api.writeFiles(paths),predicate('invalid_response','unknown'));
+ await assert.rejects(node({error:{code:'clipboard_failed',message:'private',method:'wrong.method',effect_state:'not_started'}}).api.writeFiles(paths),predicate('invalid_response','unknown'));
+});
+await test('结构化前置拒绝与写后失败保持效果，隐藏正文权限字段',async()=>{
+ for(const effect of ['not_started','unknown'])await assert.rejects(node({error:{code:'clipboard_failed',message:'private',method:'clipboard.write_files',effect_state:effect,required_permissions:['private']}}).api.writeFiles(paths),predicate('clipboard_failed',effect));
+});
+
+  assert.equal(passed,8);
 });

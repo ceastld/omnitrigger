@@ -2,7 +2,8 @@
 #![cfg(windows)]
 
 use omnitrigger_windows::{
-    read_clipboard_data, ClipboardData, ClipboardDataError, ClipboardDataSnapshot,
+    read_clipboard_data, write_clipboard_files_if, ClipboardData, ClipboardDataError,
+    ClipboardDataSnapshot, ClipboardFilesError,
 };
 use windows::{
     core::w,
@@ -10,14 +11,20 @@ use windows::{
         Foundation::{GlobalFree, HANDLE, HWND},
         System::{
             DataExchange::{
-                CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard,
+                CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
+                GetOpenClipboardWindow, IsClipboardFormatAvailable, OpenClipboard,
                 RegisterClipboardFormatW, SetClipboardData,
             },
             Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
             Ole::{CF_HDROP, CF_UNICODETEXT},
+            Threading::GetCurrentThreadId,
         },
-        UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+        UI::{
+            Shell::{DragQueryFileW, HDROP},
+            WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, GetWindowThreadProcessId, HWND_MESSAGE,
+                WINDOW_EX_STYLE, WINDOW_STYLE,
+            },
         },
     },
 };
@@ -49,6 +56,125 @@ impl Owner {
             .expect("独立窗口站必须能创建隐藏所有者窗口")
         })
     }
+}
+
+/// 仅回读本用例刚写入的合成列表；不借用生产编码器/解析器、不打开列表路径。
+fn native_hdrop_snapshot(
+    scope: &PrivateClipboard,
+    owner: &Owner,
+    preferred_drop_effect: u32,
+) -> (u32, Vec<String>) {
+    scope.verify();
+    let snapshot = unsafe {
+        OpenClipboard(Some(owner.0)).unwrap();
+        let _close = Close;
+        assert!(IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT.0)).is_err());
+        assert!(IsClipboardFormatAvailable(preferred_drop_effect).is_err());
+        let handle = GetClipboardData(u32::from(CF_HDROP.0)).unwrap();
+        let drop = HDROP(handle.0); // 系统借用句柄，不能 DragFinish/GlobalFree。
+        let count = DragQueryFileW(drop, u32::MAX, None);
+        assert!((1..=64).contains(&count));
+        let mut paths = Vec::with_capacity(count as usize);
+        let mut total = 0usize;
+        for index in 0..count {
+            let length = DragQueryFileW(drop, index, None);
+            assert!((1..=32767).contains(&length));
+            total += length as usize;
+            assert!(total <= 65536);
+            let mut buffer = vec![0u16; length as usize + 1];
+            assert_eq!(DragQueryFileW(drop, index, Some(&mut buffer)), length);
+            assert_eq!(buffer[length as usize], 0);
+            paths.push(String::from_utf16(&buffer[..length as usize]).unwrap());
+        }
+        let sequence = GetClipboardSequenceNumber();
+        assert_ne!(sequence, 0, "私有站剪贴板序号不可用");
+        (sequence, paths)
+    };
+    scope.verify();
+    snapshot
+}
+
+#[test]
+#[ignore = "仅CI管理员named私有站；独立进程--exact及--test-threads=1，禁止本机站回退"]
+fn native_write_files_hdrop_roundtrip_and_preclear_rejections() {
+    // 只允许named/create-only私有站，不选择unnamed入口或已有站。
+    let mut scope = PrivateClipboard::create();
+    let owner = Owner::create(&scope);
+    let preferred = unsafe { RegisterClipboardFormatW(w!("Preferred DropEffect")) };
+    assert_ne!(preferred, 0);
+    // 仅用既有fixture producer植入合成旧格式；实际文件列表必须走生产写入入口。
+    publish(
+        &scope,
+        &owner,
+        &[
+            (u32::from(CF_UNICODETEXT.0), wide("synthetic old text\0")),
+            (preferred, 2u32.to_le_bytes().to_vec()),
+        ],
+        0,
+    );
+    let expected: Vec<String> = vec![
+        r"C:\OmniTriggerSynthetic\文😀.txt".into(),
+        r"\\omnitrigger.invalid\share\顺序😀.txt".into(),
+        r"C:\OmniTriggerSynthetic\文😀.txt".into(),
+    ];
+    write_clipboard_files_if(&expected, || Ok(())).unwrap();
+    assert_eq!(native_hdrop_snapshot(&scope, &owner, preferred).1, expected);
+    assert_eq!(
+        read(&scope).unwrap().data,
+        ClipboardData::Files(expected.clone())
+    );
+
+    let sentinel = vec![r"Z:\OmniTriggerSynthetic\sentinel.txt".to_string()];
+    write_clipboard_files_if(&sentinel, || Ok(())).unwrap();
+    let original = native_hdrop_snapshot(&scope, &owner, preferred);
+    assert_eq!(original.1, sentinel);
+    // 分别在首次检查、实际观测到本线程生产owner已OpenClipboard时取消。
+    for when_open in [false, true] {
+        let mut cancelled = false;
+        let error = write_clipboard_files_if(&expected, || {
+            scope.verify();
+            let stop = if when_open {
+                if let Ok(window) = unsafe { GetOpenClipboardWindow() } {
+                    assert_ne!(window, owner.0, "读回fixture不应留下打开租约");
+                    assert_eq!(unsafe { GetWindowThreadProcessId(window, None) }, unsafe {
+                        GetCurrentThreadId()
+                    });
+                    true
+                } else {
+                    false
+                }
+            } else {
+                true
+            };
+            if stop {
+                cancelled = true;
+                Err(ClipboardFilesError::before("cancelled"))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert!(cancelled, "未实际到达所选取消边界");
+        assert_eq!(
+            (error.code, error.effect_state),
+            ("cancelled", "not_started")
+        );
+        assert_eq!(native_hdrop_snapshot(&scope, &owner, preferred), original);
+    }
+    for invalid in [
+        Vec::<String>::new(),
+        vec![expected[0].clone(), "relative.txt".into()],
+    ] {
+        let error = write_clipboard_files_if(&invalid, || Ok(())).unwrap_err();
+        assert_eq!(
+            (error.code, error.effect_state),
+            ("invalid_input", "not_started")
+        );
+        assert_eq!(native_hdrop_snapshot(&scope, &owner, preferred), original);
+    }
+    // 所有读取租约已退出，先销毁自有message-only owner，再核验还原和关闭。
+    drop(owner);
+    scope.restore_and_close().unwrap();
 }
 
 impl Drop for Owner {
