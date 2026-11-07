@@ -347,6 +347,7 @@ fn disconnected_bridge_token_interrupts_wait_without_cancelling_current_service_
         h.service.reservations.clone(),
         h.service.active_changed.clone(),
         current.id,
+        None,
     );
     let bridge = CancellationToken::new();
     let worker_token = bridge.clone();
@@ -414,6 +415,7 @@ fn stale_scope_or_readable_invocation_metadata_cannot_select_a_live_identity() {
         h.service.reservations.clone(),
         h.service.active_changed.clone(),
         finished.id,
+        None,
     );
     assert!(!stale.native_context_available());
     assert_error(
@@ -510,6 +512,7 @@ fn unrelated_inner_host_calls_keep_original_deadline_dispatch() {
         h.service.reservations.clone(),
         h.service.active_changed.clone(),
         current.id,
+        None,
     );
     assert!(scoped.action_scope_available());
     let token = CancellationToken::new();

@@ -139,6 +139,21 @@ interface ScriptFileStatFault extends Error {
     /** 仅此只读调用无副作用，不涵盖此前脚本步骤。 */
     effectState: 'not_started';
 }
+interface ScriptDirectoryReadOptions {
+    maxEntries?: number;
+    order?: 'name' | 'native';
+    metadata?: boolean;
+    entryType?: 'all' | 'file' | 'directory';
+    searchPattern?: string;
+    /** 显式Windows Find匹配；不等于现代.NET托管匹配。 */
+    matchMode?: 'windows-find';
+}
+/** UTC字段为1601纪元FILETIME；LocalTicks为0001纪元本地DateTime。均为100ns十进制字符串，不转Number。 */
+type ScriptDirectoryMetadata = Readonly<{ordinal:number;attributes:number;
+    creationTimeUtc100ns:string;lastAccessTimeUtc100ns:string;lastWriteTimeUtc100ns:string;
+    creationTimeLocalTicks100ns:string;lastAccessTimeLocalTicks100ns:string;lastWriteTimeLocalTicks100ns:string;timeZoneKey:string}>;
+type ScriptLocalDirectoryMetadataResult = Readonly<{entries:ReadonlyArray<ScriptLocalDirectoryEntry & {readonly metadata:ScriptDirectoryMetadata}> ;complete:true}>;
+
 type ScriptLocalDirectoryEntry = Readonly<{
   name: string;
   /** 保留调用者的目录原文，仅在需要时追加反斜杠及子项名。 */
@@ -197,7 +212,33 @@ interface ScriptClipboardHistoryApi {
   remove(options: {id: ScriptHistoryDecimal}): ScriptClipboardHistoryRemove;
 }
 
+interface ScriptStopOtherInstancesFault extends Error {
+  code:'invalid_input'|'actions_unavailable'|'actions_busy'|'actions_call_limit'|'action_inactive'|'action_policy_conflict'|'action_busy'|'stop_timeout'|'timeout'|'cancelled'|'invalid_response'|'actions_failed';
+  method:'actions.stop_other_instances';
+  effectState:'not_started'|'unknown';
+}
+type ScriptStopOtherInstancesResult = Readonly<{stoppedCount:0;effectState:'not_started'} | {stoppedCount:1|2|3;effectState:'unknown'}>;
+type ScriptActionStateJson = null | boolean | number | string | ScriptActionStateJson[] | {[key:string]:ScriptActionStateJson};
+type ScriptActionStateEntry = Readonly<{present:false} | {present:true;value:ScriptActionStateJson}>;
+type ScriptActionStateSnapshot = Readonly<{revision:string;entry:ScriptActionStateEntry}>;
+type ScriptActionStateCas = Readonly<{status:'committed'|'conflict';current:ScriptActionStateSnapshot}>;
+interface ScriptActionStateFault extends Error {
+  code:'invalid_input'|'state_unavailable'|'state_busy'|'state_limit'|'state_corrupt'|'state_storage_changed'|'state_io'|'state_failed'|'action_inactive'|'cancelled'|'timeout'|'invalid_response';
+  method:'state.read'|'state.compare_and_swap';
+  effectState:'not_started'|'unknown';
+}
+interface ScriptActionStateApi {
+  /** 仅当前真实package/action；missing不补默认。session重启清空，durable需应用显式宿主。 */
+  read(area:'session'|'durable',key:string): ScriptActionStateSnapshot;
+  /** 小JSON，值<=16KiB，深度<=8，每区域最多64键；冲突不重试。 */
+  compareAndSwap(area:'session'|'durable',key:string,expectedRevision:string,next:ScriptActionStateEntry): ScriptActionStateCas;
+}
+
 type ScriptContext<Input = Record<string, any>> = Readonly<{
+    state: ScriptActionStateApi;
+    /** 同步等待同包同动作其他调用真实资源清理；排除自身。无服务作用域明确不可用。 */
+    actions: {stopOtherInstances(options?: {timeoutMs?:number}): ScriptStopOtherInstancesResult};
+
     apiVersion: 1;
     input: Input;
     /** 动作包提供；直接使用 CLI 且未传元数据时为 null。 */
@@ -215,7 +256,8 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
         /** 直接子项，默认 128、最多 1024；回执最多 64 KiB，超限整次拒绝。
          * 不递归、不跟随链接、不读取内容；complete 只表示读到枚举末尾，不是原子快照。
          * 使用与 stat 相同的本地路径守卫。OS 调用不能硬性抢占；迟到结果丢弃。 */
-        readDirectory(path: string, options?: {maxEntries?: number}): ScriptLocalDirectoryResult;
+        readDirectory(path: string, options: ScriptDirectoryReadOptions & {metadata:true}): ScriptLocalDirectoryMetadataResult;
+    readDirectory(path: string, options?: ScriptDirectoryReadOptions): ScriptLocalDirectoryResult;
         /** UTF-8 文件，绝对路径，最多 64 KiB。 */
         readText(path: string): string;
         /** 默认不覆盖；不自动创建目录。失败可能留下部分文件。 */
@@ -316,6 +358,10 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
          * 不支持格式抛 unsupported_clipboard_format，不查询或打开路径。
          */
         readData(): ScriptClipboardDataSnapshot;
+        /** 应用桥接写Unicode CF_HDROP；1–64项绝对Windows路径，总UTF-16不超65536。
+         * 不查询或打开路径，不复制磁盘文件，不粘贴；替换全部剪贴板格式且不自动恢复。
+         * 清空后的失败/取消为unknown；sequenceNumber仅为观察值，不证明独占或文件存在。 */
+        writeFiles(paths: readonly string[]): {written:true;sequenceNumber:number};
         /** 替换全部格式。独立 CLI 不支持选项并返回 void；应用接入返回写入回执。 */
         writeText(text: string, options?: {excludeFromHistory?: boolean}): void | {written: true; sequenceNumber: number; writeId?: string};
     };

@@ -7,6 +7,7 @@ pub mod project;
 pub mod runtime_capabilities;
 pub mod script_host;
 pub mod service;
+pub mod state;
 
 pub use catalog::{CatalogAction, PackageCatalog, ResolvedAction};
 pub use model::{ActionCall, ActionDefinition, ActionError, PackageManifest};

@@ -245,6 +245,7 @@ fn runtime_panic() -> ActionOutcome {
 /// 有界的应用调用服务；正在运行和终态尚未被消费的调用共用配额。
 /// 不在 Drop 中等待用户运行时，不重试已经接纳的带副作用调用。
 pub struct ActionService {
+    state_store: Option<Arc<crate::state::ActionStateStore>>,
     catalog: PackageCatalog,
     runtimes: RuntimeRegistry,
     reservations: Arc<Mutex<Reservations>>,
@@ -258,6 +259,7 @@ impl ActionService {
         // 每个配额恰有一次 Started 和一次终态，不会产生无限进度日志。
         let (events_tx, events_rx) = mpsc::sync_channel(CAPACITY * 2);
         Self {
+            state_store: None,
             catalog,
             runtimes,
             reservations: Arc::new(Mutex::new(Reservations {
@@ -268,6 +270,12 @@ impl ActionService {
             events_tx,
             events_rx,
         }
+    }
+
+    /// 仅组合根显式提供；reload复用此Arc，不在动作完成后回写旧快照。
+    pub fn with_state_store(mut self, store: Arc<crate::state::ActionStateStore>) -> Self {
+        self.state_store = Some(store);
+        self
     }
 
     pub fn catalog(&self) -> &PackageCatalog {
@@ -400,6 +408,7 @@ impl ActionService {
             self.reservations.clone(),
             self.active_changed.clone(),
             invocation_id,
+            self.state_store.clone(),
         ));
         let task = InvocationTask {
             action,
@@ -1355,3 +1364,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "state_service_tests.rs"]
+mod state_service_tests;

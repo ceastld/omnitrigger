@@ -15,8 +15,10 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 38] = [
+const METHODS: [&str; 40] = [
     "actions.stop_other_instances",
+    "state.read",
+    "state.compare_and_swap",
     "system.open",
     "system.open_file_in_parent",
     "process.capture",
@@ -256,7 +258,10 @@ impl NativeBridge {
                     );
                     let file_read =
                         matches!(request.method.as_str(), "fs.stat" | "fs.read_directory");
-                    let action_control = request.method == "actions.stop_other_instances";
+                    let action_control = matches!(
+                        request.method.as_str(),
+                        "actions.stop_other_instances" | "state.read" | "state.compare_and_swap"
+                    );
                     let capture = request.method == "process.capture";
                     let brightness = matches!(
                         request.method.as_str(),

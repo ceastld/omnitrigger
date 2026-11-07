@@ -8,7 +8,7 @@ import {fileURLToPath} from 'node:url';
 import cases from './contract-cases.mjs';
 const ROOT=fileURLToPath(new URL('../../../',import.meta.url));
 const desktop=readFileSync(ROOT+'crates/omnitrigger-actions/runtime/desktop-api.js','utf8');
-const support=['browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js'].map(name=>readFileSync(ROOT+'crates/omnitrigger-actions/runtime/'+name,'utf8')).join('\n');
+const support=['browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js','state-api.js'].map(name=>readFileSync(ROOT+'crates/omnitrigger-actions/runtime/'+name,'utf8')).join('\n');
 const sdk=readFileSync(ROOT+'tools/js-engine-probe/src/sdk.js','utf8');
 const factory=runInNewContext(desktop+'\ncreateDesktopApi;');
 const cause=(code,effectState='not_started',method='selection.read_text')=>Object.assign(Error('PRIVATE'),{code,effectState,method});

@@ -36,6 +36,32 @@ pub fn service(config: &Path) -> ActionService {
     ActionService::new(catalog, runtimes)
 }
 
+/// 只有输入引擎所有者显式启用；普通CLI的service仍无store。
+pub fn owner_service(config: &Path) -> ActionService {
+    let (mut catalog, runtimes) = components(config);
+    let store = std::path::absolute(config)
+        .map_err(|_| ())
+        .and_then(|path| {
+            crate::action_state_store::FileActionStateStorage::new(
+                path.with_file_name("action-state"),
+            )
+            .map_err(|_| ())
+        })
+        .and_then(|storage| {
+            omnitrigger_actions::state::ActionStateStore::new(Some(Arc::new(storage)))
+                .map_err(|_| ())
+        });
+    match store {
+        Ok(store) => ActionService::new(catalog, runtimes).with_state_store(Arc::new(store)),
+        Err(()) => {
+            catalog
+                .diagnostics
+                .push("动作状态宿主不可用；状态API将明确返回state_unavailable。".into());
+            ActionService::new(catalog, runtimes)
+        }
+    }
+}
+
 pub(super) fn components(config: &Path) -> (PackageCatalog, RuntimeRegistry) {
     let mut catalog = PackageCatalog::load(&root(config));
     let mut runtimes = RuntimeRegistry::new();

@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import test from 'node:test';
 
 const shared=readFileSync(new URL('./actions-api.js',import.meta.url),'utf8');
+const state=readFileSync(new URL('./state-api.js',import.meta.url),'utf8');
 const create=vm.runInThisContext(`${shared}\ncreateActionsApi;`);
 const receipt=count=>({stoppedCount:count,effectState:count===0?'not_started':'unknown'});
 const error=(code,effect)=>value=>value.code===code&&value.effectState===effect&&value.method==='actions.stop_other_instances';
@@ -58,7 +59,7 @@ function script(scope,native=true,nativeContextAvailable=true){
     createDesktopApi:()=>({fs:{},desktop:{},ui:{},clipboard:{}}),createProcessCaptureApi:()=>({capture(){throw new Error('禁止采集');}}),
     createBrowserApi:()=>({}),createClipboardHistoryApi:()=>({})});
   const sdk=readFileSync(new URL('../../../tools/js-engine-probe/src/sdk.js',import.meta.url),'utf8');
-  vm.runInContext(`${shared}\n${sdk}`,context);
+  vm.runInContext(`${shared}\n${state}\n${sdk}`,context);
   return {context,calls};
 }
 

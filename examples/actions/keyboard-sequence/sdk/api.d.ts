@@ -242,7 +242,24 @@ export interface StopOtherInstancesFault extends Error {
   effectState:'not_started'|'unknown';
 }
 export type StopOtherInstancesResult = Readonly<{stoppedCount:0;effectState:'not_started'} | {stoppedCount:1|2|3;effectState:'unknown'}>;
+export type ActionStateJson = null | boolean | number | string | ActionStateJson[] | {[key:string]:ActionStateJson};
+export type ActionStateEntry = Readonly<{present:false} | {present:true;value:ActionStateJson}>;
+export type ActionStateSnapshot = Readonly<{revision:string;entry:ActionStateEntry}>;
+export type ActionStateCas = Readonly<{status:'committed'|'conflict';current:ActionStateSnapshot}>;
+export interface ActionStateFault extends Error {
+  code:'invalid_input'|'state_unavailable'|'state_busy'|'state_limit'|'state_corrupt'|'state_storage_changed'|'state_io'|'state_failed'|'action_inactive'|'cancelled'|'timeout'|'invalid_response';
+  method:'state.read'|'state.compare_and_swap';
+  effectState:'not_started'|'unknown';
+}
+export interface ActionStateApi {
+  /** 仅当前真实package/action；missing不补默认。session重启清空，durable需应用显式宿主。 */
+  read(area:'session'|'durable',key:string): Promise<ActionStateSnapshot>;
+  /** 小JSON，值<=16KiB，深度<=8，每区域最多64键；冲突不重试。 */
+  compareAndSwap(area:'session'|'durable',key:string,expectedRevision:string,next:ActionStateEntry): Promise<ActionStateCas>;
+}
+
 export interface ActionContext {
+  state: ActionStateApi;
   /** 只操作当前服务作用域内同包同动作其他调用，排除自身；须await。 */
   actions: {stopOtherInstances(options?: {timeoutMs?:number}): Promise<StopOtherInstancesResult>};
 
