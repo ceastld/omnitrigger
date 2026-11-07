@@ -238,3 +238,118 @@ test('Node 入口结果按真实宿主契约拒绝明确非 JSON 类型并保留
   assert.equal(Object.hasOwn(response(Symbol('synthetic')),'output'),false);
   assert.throws(()=>response(1n),TypeError);
 });
+
+// create诊断合同：只启动Node前端，应用与Windows metadata均由--import替身接管。
+function createFailureFixture(mode, options={}) {
+  const root=mkdtempSync(join(parent,'create-diagnostic-'));
+  const config=join(root,'profile/bindings.json'),source=join(root,'source');
+  const project=join(dirname(config),'actions','author-cli-case');
+  mkdirSync(join(project,'sdk'),{recursive:true});
+  mkdirSync(join(source,'crates/omnitrigger-actions/runtime'),{recursive:true});
+  writeFileSync(config,'{}\n');
+  writeFileSync(join(source,'crates/omnitrigger-actions/runtime/script-types.d.ts'),'source declaration fixture\n');
+  const binary=join(root,'not-an-application.exe');writeFileSync(binary,'TEST PLACEHOLDER; NEVER EXECUTE\n');
+  writeFileSync(join(project,'main.mjs'),'throw Error("AUTHOR CODE MUST NOT RUN");\n');
+  writeFileSync(join(project,'author-note.txt'),'部分工程必须保留\n');
+  writeFileSync(join(project,'sdk/api.d.ts'),'binary declaration fixture\n');
+  const authorFiles=['main.mjs','author-note.txt','sdk/api.d.ts'];
+  const before=authorFiles.map(name=>readFileSync(join(project,name)));
+  const names=readdirSync(project).sort(),sdkNames=readdirSync(join(project,'sdk')).sort();
+  const traceFile=join(root,'trace.json'),preload=join(root,'creator-substitute.mjs');
+  const setup={mode,binary,project,traceFile,untrusted:join(root,'untrusted-reply'),...options};
+  writeFileSync(preload,`import childProcess from 'node:child_process';
+import {writeFileSync} from 'node:fs';
+import {syncBuiltinESMExports} from 'node:module';
+const setup=${JSON.stringify(setup)};
+const trace={application_spawns:0,metadata_spawns:0};
+process.once('exit',()=>writeFileSync(setup.traceFile,JSON.stringify(trace)));
+childProcess.spawnSync=(program,args,options)=>{
+  if(program==='powershell.exe'){
+    if(options.timeout!==15000)throw Error('METADATA BUDGET CHANGED');
+    trace.metadata_spawns++;trace.metadata_timeout_ms=options.timeout;return {status:0,stdout:'',stderr:''};
+  }
+  if(program!==setup.binary)throw Error('UNEXPECTED CHILD PROCESS');
+  trace.application_spawns++;
+  Object.assign(trace,{args,timeout:options.timeout,maxBuffer:options.maxBuffer,windowsHide:options.windowsHide});
+  const began=performance.now();
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,25);
+  const reply={status:'created',project:{package_root:setup.mode==='wrong-root'?setup.untrusted:setup.project}};
+  const result={status:0,signal:null,stdout:JSON.stringify(reply),stderr:'CREATOR_STDERR_SECRET'};
+  if(setup.mode==='spawn'){
+    result.error=Object.assign(Error('CREATOR_ERROR_SECRET'),{code:setup.cause});
+    result.status=setup.apparentSuccess?0:null;result.signal=setup.signal??'SIGTERM';
+    result.stdout='CREATOR_STDOUT_SECRET';
+  }else if(setup.mode==='invalid-json')result.stdout='CREATOR_STDOUT_SECRET';
+  trace.spawn_elapsed_ms=performance.now()-began;
+  return result;
+};
+syncBuiltinESMExports();
+`);
+  return {root,config,source,project,binary,preload,traceFile,options,assertPreserved(){
+    assert.deepEqual(readdirSync(project).sort(),names);
+    assert.deepEqual(readdirSync(join(project,'sdk')).sort(),sdkNames);
+    for(const[i,name]of authorFiles.entries())assert.deepEqual(readFileSync(join(project,name)),before[i],name);
+  }};
+}
+
+function inspectCreateFailure(item) {
+  const began=performance.now();
+  const result=spawnSync(process.execPath,['--import',pathToFileURL(item.preload).href,
+    join(repo,'tools/script-project.mjs'),'create','--runtime','node','--binary',item.binary,
+    '--config',item.config,'--id',item.options.id??'author-cli-case','--source-root',item.source],
+    {encoding:'utf8',windowsHide:true,timeout:60000});
+  const elapsed=performance.now()-began;
+  assert.ifError(result.error);assert.equal(result.status,1,result.stdout+result.stderr);
+  assert.equal(result.stdout,'');
+  const reply=JSON.parse(result.stderr),trace=JSON.parse(readFileSync(item.traceFile,'utf8'));
+  assert.equal(reply.status,'failed');assert.equal(reply.author_code_executed,false);
+  assert.equal(reply.error.project_state,'unconfirmed');
+  assert.equal(trace.application_spawns,1,'不自动重试应用创建');
+  assert.equal(trace.timeout,60000);assert.equal(trace.maxBuffer,4*1024*1024);assert.equal(trace.windowsHide,true);
+  if(process.platform==='win32')assert.equal(trace.metadata_timeout_ms,15000);
+  assert.deepEqual(trace.args,['--create-script-action',item.options.id??'author-cli-case','--config',item.config]);
+  assert.equal(reply.error.cli_timeout_ms,60000);
+  assert(Number.isSafeInteger(reply.error.cli_elapsed_ms));
+  assert(reply.error.cli_elapsed_ms>=trace.spawn_elapsed_ms-1,'elapsed必须包含替身内实际有界等待');
+  assert(reply.error.cli_elapsed_ms<=elapsed+2,'elapsed不能伪装为配置超时值');
+  assert(!('application_created'in reply));assert(!('files_modified'in reply));assert(!('effect_state'in reply.error));
+  assert.notEqual(reply.error.files_modified,false,'失败不能声称没有写入');
+  for(const secret of ['CREATOR_STDOUT_SECRET','CREATOR_STDERR_SECRET','CREATOR_ERROR_SECRET'])assert(!result.stderr.includes(secret));
+  item.assertPreserved();
+  return reply.error;
+}
+
+test('create失败诊断保留子进程错误、真实elapsed与部分工程，应用只尝试一次',()=>{
+  for(const cause of ['ETIMEDOUT','ENOENT','EACCES','ENOBUFS']){
+    const item=createFailureFixture('spawn',{cause,apparentSuccess:cause==='ETIMEDOUT'});
+    const error=inspectCreateFailure(item);
+    assert.equal(error.code,'project_cli_unavailable');assert.equal(error.stage,'application_create');
+    assert.equal(error.spawn_error_code,cause);assert.equal(error.project_root_to_check,item.project);
+    assert.equal(error.cli_exit_code,cause==='ETIMEDOUT'?0:null);assert.equal(error.cli_signal,'SIGTERM');
+  }
+});
+
+test('create失败诊断不建议越界路径，并限制错误码与信号字段',()=>{
+  const escaped=createFailureFixture('spawn',{cause:'ETIMEDOUT',id:'../escape'});
+  const unsafe=inspectCreateFailure(escaped);
+  assert.equal(unsafe.stage,'application_create');assert(!('project_root_to_check'in unsafe));
+  const bounded=createFailureFixture('spawn',{cause:'X'.repeat(65),signal:'SIGTERM\nCREATOR_STDERR_SECRET'});
+  const error=inspectCreateFailure(bounded);
+  assert.equal(error.spawn_error_code,'unknown');assert.equal(error.cli_signal,null);
+  assert.equal(error.project_root_to_check,bounded.project);
+});
+
+test('create失败诊断区分回复和SDK阶段，不泄露回复或采用未核对路径',()=>{
+  for(const[mode,code,stage]of[
+    ['invalid-json','project_failed','application_reply'],
+    ['wrong-root','project_cli_invalid_reply','application_reply'],
+    ['sdk-mismatch','project_sdk_binary_mismatch','sdk_validation'],
+  ]){
+    const item=createFailureFixture(mode),error=inspectCreateFailure(item);
+    assert.equal(error.code,code);assert.equal(error.stage,stage);
+    assert.equal(error.project_root_to_check,item.project);
+    assert(!JSON.stringify(error).includes(join(item.root,'untrusted-reply')));
+    assert.equal(error.cli_exit_code,0);assert.equal(error.cli_signal,null);
+    assert(!('spawn_error_code'in error));
+  }
+});

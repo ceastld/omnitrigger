@@ -20,6 +20,8 @@ node tools/script-project.mjs create --runtime script --binary $app --config $co
 
 工程位于配置旁的 `actions/<标识>/`。入口、包内模块、调用文件、SDK 和 `jsconfig.json` 一并生成；已有同名工程不会被覆盖。Node 工程另有声明 ESM 格式、Node >=22 基线和固定开发依赖的 `package.json`。创建不安装依赖、不执行 npm 或作者脚本。
 
+创建 CLI 使用 60 秒预算；阻塞中的系统进程创建可能延迟超时返回。失败会报告 `stage`、`cli_timeout_ms`、实际 `cli_elapsed_ms`，以及可用的退出码、信号或 `spawn_error_code`。`project_state:unconfirmed` 表示可能留下完整或部分工程，可按 `project_root_to_check` 核对；工具不自动重试、删除或回滚。`author_code_executed:false` 只表示没有执行作者入口，不能解释为没有写入文件。
+
 应用与仓库 SDK 应来自同一构建版本。创建时会比对应用实际生成的同步声明；不一致返回 `project_sdk_binary_mismatch`，保留刚生成的轻量工程，不继续改成 Node。对齐版本后选择新标识创建。
 
 ## 入口和相对模块
