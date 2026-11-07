@@ -22,6 +22,8 @@ jobs:
   windows:
     name: Windows 检查与构建
     runs-on: windows-latest
+    env:
+      OMNITRIGGER_METADATA_POWERSHELL: 'C:\Program Files\PowerShell\7\pwsh.exe'
     timeout-minutes: 60
     steps:
       - name: 检出代码
@@ -357,6 +359,8 @@ jobs:
   js-engines:
     name: Windows JS 引擎实验
     runs-on: windows-latest
+    env:
+      OMNITRIGGER_METADATA_POWERSHELL: 'C:\Program Files\PowerShell\7\pwsh.exe'
     timeout-minutes: 40
     defaults:
       run:
