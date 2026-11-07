@@ -18,3 +18,5 @@ node tools/script-sdk-check/check-project-types.mjs "examples/actions/source-fil
 ```
 
 SDK 可用 `tools/script-project.mjs refresh --runtime node --project <本目录>` 显式刷新。刷新保留作者入口、清单、配置与说明，不安装依赖或运行作者代码。当前包提供 Node 入口，不能直接作为同步 Script 运行。
+
+需要选择菜单时，通过应用内运行入口或正常绑定执行；独立 CLI 不创建选择窗口。
