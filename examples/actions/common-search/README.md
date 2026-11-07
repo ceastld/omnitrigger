@@ -87,4 +87,7 @@ UTF-16预算可能落在代理对中间，此时返回`query_utf16_boundary`，�
 ```powershell
 node --test examples/actions/common-search/recipes.test.mjs examples/actions/common-search/open-or-search.test.mjs
 node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p examples/actions/common-search/jsconfig.json
+node tools/script-sdk-check/check-project-types.mjs examples/actions/common-search
 ```
+
+作者类型环境由同包 `sdk/api.d.ts` 提供同步 `ScriptMain` / `ScriptContext`，移动时保留该文件及 `jsconfig.json`。配置使用 `moduleDetection:"force"` 隔离两个旧 `.js` 入口的类型作用域，不改变函数体协议或运行代码。统一检查器不执行模块；旧函数体入口会保留 `legacy_function_body_protocol` 标记，因此类型通过不能当作实际加载、宿主能力或打开/搜索效果已经验证。

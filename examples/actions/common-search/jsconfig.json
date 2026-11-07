@@ -1,7 +1,19 @@
 {
   "compilerOptions": {
-    "allowJs": true, "checkJs": true, "strict": true, "noEmit": true,
-    "target": "ES2020", "lib": ["ES2020"], "types": []
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2020",
+    "lib": [
+      "ES2020"
+    ],
+    "types": [],
+    "moduleDetection": "force"
   },
-  "files": ["search.js", "open-or-search.js", "../../../tools/js-engine-probe/api.d.ts"]
+  "files": [
+    "search.js",
+    "open-or-search.js",
+    "sdk/api.d.ts"
+  ]
 }

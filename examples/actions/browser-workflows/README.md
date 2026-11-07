@@ -122,4 +122,12 @@ API 语义依据：[Chrome Tabs API](https://developer.chrome.com/docs/extension
 同步入口返回JSON，不返回Promise；宿主进程被外层取消或强停时，仍由既有ActionService管理终态，不能保证脚本有机会返回回执。脚本内部不查询前台、剪贴板、URL或活动标签。
 
 
-仓库内的同步入口严格工程直接引用 `crates/omnitrigger-actions/runtime/script-types.d.ts`，不新增 SDK 声明副本；`tests/browser_restore_session_sync_types.json` 检查完整 `ScriptMain` / `ScriptContext` 与同步返回值契约。
+本包的 `jsconfig.json` 同时检查五个 Node、两个同步入口及共用模块。Node 上下文引用同包 `sdk/api.d.ts`，同步入口引用 `sdk/script-types.d.ts`；移动工程时保留整个 `sdk` 目录。这里沿用包内声明，不依赖仓库其它目录，也不因类型检查自动升级宿主或扩展。
+
+仓库安装现有 SDK 开发依赖后，可运行统一静态检查：
+
+```powershell
+node tools/script-sdk-check/check-project-types.mjs examples/actions/browser-workflows
+```
+
+检查不导入或运行作者入口，不连接浏览器。通过只表示当前声明和静态入口约束没有错误，仍需分别核对运行时能力、扩展权限及目标浏览器行为。配置中的 DOM 类型用于 `URL` 等标准声明，不表示同步宿主提供任意 DOM API。

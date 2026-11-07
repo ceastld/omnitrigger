@@ -374,9 +374,11 @@ test('canonical快照指纹覆盖当前来源与已携带声明的LF和CRLF，�
     ['examples/actions/mixed-projects/sdk',['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts']],
     ['examples/actions/source-file-preview/sdk',['api.d.ts','clipboard-history-api.d.ts']],
     ['examples/actions/common-desktop/sdk',['api.d.ts']],
+    ['examples/actions/common-search/sdk',['api.d.ts']],
+    ['examples/actions/browser-close/sdk',['api.d.ts','script-types.d.ts']],
   ];
   for(const[directory,names]of groups)for(const name of names){
-    const kind=directory.endsWith('/common-desktop/sdk')&&name==='api.d.ts'?'script-types.d.ts':name;
+    const kind=['/common-desktop/sdk','/common-search/sdk'].some(suffix=>directory.endsWith(suffix))&&name==='api.d.ts'?'script-types.d.ts':name;
     assert(known.has(kind),`${name}须登记在现有canonical表`);
     const lf=readFileSync(join(repo,directory,name),'utf8').replaceAll('\r\n','\n');
     for(const[ending,text]of[['LF',lf],['CRLF',lf.replaceAll('\n','\r\n')]]){

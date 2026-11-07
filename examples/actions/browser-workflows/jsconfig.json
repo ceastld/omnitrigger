@@ -18,8 +18,10 @@
     "default-new-tab-script.mjs",
     "workflows.mjs",
     "open-url.mjs",
+    "duplicate-tab.mjs",
+    "open-bookmark.mjs",
     "restore-session.mjs",
     "restore-session-script.mjs",
-    "../../../crates/omnitrigger-actions/runtime/script-types.d.ts"
+    "sdk/script-types.d.ts"
   ]
 }
