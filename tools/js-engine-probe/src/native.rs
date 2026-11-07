@@ -10,7 +10,7 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 37] = [
+pub const METHODS: [&str; 38] = [
     "actions.stop_other_instances",
     "state.read",
     "state.compare_and_swap",
@@ -24,6 +24,7 @@ pub const METHODS: [&str; 37] = [
     "ui.notify",
     "ui.open_history",
     "ui.toggle_history",
+    "ui.action_hint",
     "browser.profiles",
     "browser.call",
     "target.info",
@@ -77,7 +78,9 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
             code
         })
         .into(),
-        message: if method.starts_with("raishot.resident.") {
+        message: if method == "ui.action_hint" {
+            "动作版本提示更新未确认；请检查错误代码和效果状态。".into()
+        } else if method.starts_with("raishot.resident.") {
             "RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。".into()
         } else if method == "clipboard.write_files" {
             "文件列表剪贴板写入未获完整确认；请检查错误代码和效果状态。".into()
@@ -126,6 +129,7 @@ fn brightness_transport_effect(
             | "actions.stop_other_instances"
             | "state.read"
             | "state.compare_and_swap"
+            | "ui.action_hint"
     ) && !write_began
     {
         "not_started"
@@ -207,6 +211,7 @@ pub fn call(
             "fs.stat"
                 | "fs.read_directory"
                 | "ui.toggle_history"
+                | "ui.action_hint"
                 | "clipboard.read_data"
                 | "explorer.context"
                 | "selection.copy_data"
@@ -246,6 +251,7 @@ pub fn call(
                         | "history.append"
                         | "history.remove"
                         | "ui.toggle_history"
+                        | "ui.action_hint"
                 ) {
                     brightness_transport_effect(&method, write_began.get(), "unknown")
                 } else {
@@ -267,6 +273,7 @@ pub fn call(
                     "fs.stat"
                         | "fs.read_directory"
                         | "ui.toggle_history"
+                        | "ui.action_hint"
                         | "clipboard.read_data"
                         | "explorer.context"
                         | "selection.copy_data"
@@ -303,6 +310,7 @@ pub fn call(
                                 | "history.append"
                                 | "history.remove"
                                 | "ui.toggle_history"
+                                | "ui.action_hint"
                         ) {
                             brightness_transport_effect(&method, write_began.get(), "unknown")
                         } else {

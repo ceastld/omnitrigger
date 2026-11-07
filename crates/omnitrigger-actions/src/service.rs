@@ -141,6 +141,7 @@ struct Reservation {
     binding_id: u64,
     cancellation: CancellationToken,
     identity: ActionIdentity,
+    action_version: u32,
     single_instance: bool,
     /// 从接纳到运行时及本次调用资源清理结束；不等UI读取终态，不由取消请求清除。
     active: bool,
@@ -392,6 +393,7 @@ impl ActionService {
                     binding_id: id,
                     cancellation: cancellation.clone(),
                     identity,
+                    action_version: action.call.action_version,
                     single_instance: action.definition.single_instance,
                     active: true,
                 },

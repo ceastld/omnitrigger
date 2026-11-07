@@ -360,6 +360,10 @@ impl Workspace {
                                 "v{} · {}",
                                 call.action_version, entry.definition.runtime
                             )))
+                            .when_some(
+                                self.package_feedback.action_hint_for_call(&call),
+                                |element, text| element.child(action_version_hint(text)),
+                            )
                             .when_some(reason, |element, reason| element.child(caption(reason))),
                     )
                     .when(is_script, |element| {
@@ -510,9 +514,12 @@ impl Workspace {
         };
         let feedback = self.package_feedback.for_call(id, &call)?;
         Some(match feedback {
-            crate::package_feedback::Feedback::Running(invocation) => {
-                div().child(caption(format!("运行 #{invocation} · 正在处理")))
-            }
+            crate::package_feedback::Feedback::Running(invocation) => div()
+                .child(caption(format!("运行 #{invocation} · 正在处理")))
+                .when_some(
+                    self.package_feedback.action_hint(invocation),
+                    |element, text| element.child(action_version_hint(text)),
+                ),
             crate::package_feedback::Feedback::Completed(preview) => {
                 let invocation = preview.invocation;
                 let expanded = self.package_feedback.details_visible(invocation);
@@ -520,6 +527,10 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .gap(px(6.))
+                    .when_some(
+                        self.package_feedback.action_hint(invocation),
+                        |element, text| element.child(action_version_hint(text)),
+                    )
                     .child(
                         div()
                             .flex()
@@ -606,6 +617,13 @@ impl Workspace {
         }
         changed
     }
+}
+
+fn action_version_hint(text: &str) -> gpui::Div {
+    gpui::div()
+        .text_size(gpui::px(11.))
+        .text_color(crate::rgb(0x008000))
+        .child(text.to_owned())
 }
 
 #[cfg(test)]

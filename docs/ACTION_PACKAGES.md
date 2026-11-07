@@ -815,3 +815,8 @@ Node 可使用 `await ctx.actions.stopOtherInstances({timeoutMs:500})`，Script 
 ## 当前动作的状态
 
 Node 使用 `await ctx.state.read(area,key)` 与 `await ctx.state.compareAndSwap(area,key,revision,next)`，Script 同步调用同名方法。需要真实调用身份和服务显式提供的存储；session/durable、缺值、冲突及未知提交边界见 [当前动作的状态读写](ACTION_STATE.md)。
+
+
+## 当前动作的版本提示
+
+Node 使用 `await ctx.ui.setActionHint({text:'v123'})`，Script 同步调用同名方法。它只更新真实当前调用的界面反馈模型，不启用 desktop，也不保证像素呈现或动作成功；参数、无UI、作用域及取消边界见 [当前动作的版本提示](ACTION_VERSION_HINT.md)。

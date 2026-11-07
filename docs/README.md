@@ -27,6 +27,7 @@
 | [发送按键与快捷键](KEYBOARD_ACTIONS.md) | 快捷键配置、注入与目标窗口边界。 |
 | [本地步骤动作](LOCAL_ACTIONS.md) | 多步骤、文字、剪贴板、变量、等待和取消。 |
 | [程序与脚本](COMMAND_ACTIONS.md) | 程序参数、脚本解释器、外部动作和执行结果。 |
+| [当前动作的版本提示](ACTION_VERSION_HINT.md) | 当前调用的有界提示、作用域、UI与确认边界。 |
 | [当前动作的状态读写](ACTION_STATE.md) | session/durable、缺值、CAS 与提交边界。 |
 | [动作包与 JavaScript 入口](ACTION_PACKAGES.md) | 统一动作契约、本地动作包、JS 多步骤、输入参数与运行时扩展。 |
 | [插件动作与快速绑定](PLUGIN_SYSTEM.md) | 当前内置插件、依赖安装、共享设置和参数模型。 |
