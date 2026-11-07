@@ -35,7 +35,7 @@ test('真实Node宿主在调用时固定按键和嵌套时序，连接等待不�
   let child,timer;
   try {
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-    const source=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','host.mjs']
+    const source=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js','host.mjs']
       .map(name=>readFileSync(join(runtime,name),'utf8')).join('\n');
     const entry=join(root,'entry.mjs'),hostPath=join(root,'host.mjs'),response=join(root,'response.json');
     writeFileSync(hostPath,source);

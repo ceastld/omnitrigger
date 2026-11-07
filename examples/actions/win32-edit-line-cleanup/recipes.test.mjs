@@ -9,7 +9,7 @@ import {main as scriptMain} from './script.mjs';
 const sourceRoot=process.env.OMNITRIGGER_CONTRACT_SOURCE_ROOT??fileURLToPath(new URL('../../../',import.meta.url));
 const desktop=readFileSync(join(sourceRoot,'crates/omnitrigger-actions/runtime/desktop-api.js'),'utf8');
 const host=readFileSync(join(sourceRoot,'crates/omnitrigger-actions/runtime/host.mjs'),'utf8');
-const sdk=readFileSync(join(sourceRoot,'tools/js-engine-probe/src/sdk.js'),'utf8');
+const sdk=readFileSync(join(sourceRoot,'crates/omnitrigger-actions/runtime/actions-api.js'),'utf8')+'\n'+readFileSync(join(sourceRoot,'tools/js-engine-probe/src/sdk.js'),'utf8');
 const asyncApi=host.split('\n').find(line=>line.startsWith('const asyncApi ='));
 const method='win32_edit.replace_selection',receipt={messageProcessed:true,effectState:'unknown'};
 const json=x=>JSON.parse(JSON.stringify(x));
