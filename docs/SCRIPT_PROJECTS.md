@@ -60,7 +60,7 @@ export default async function main(ctx) {
 node tools/script-sdk-check/check-project-types.mjs "$root/actions/script-demo"
 ```
 
-该命令读取指定包自己的 SDK 与配置，输出类型诊断及模块/入口检查结果，不执行作者初始化器或入口。类型诊断的 `file`、`line`、`column` 使用包内路径和从 1 开始的位置。它会按清单运行时分别核验轻量具名导出和 Node 默认导出，Node 结果见 `nodeEntryChecks`。纯 Node 的 `types:["node"]` 只解析包内显式依赖；缺少 Node 环境声明时真实报错。混合包目前保持 SDK 类型环境，非空 `types` 会明确拒绝，完整边界见[工程检查说明](../tools/script-sdk-check/PROJECT_CHECK.md)。静态通过不代表宿主或目标软件已经验收。
+该命令读取指定包自己的 SDK 与配置，输出类型诊断及模块/入口检查结果，不执行作者初始化器或入口。类型诊断的 `file`、`line`、`column` 使用包内路径和从 1 开始的位置。它会按清单运行时分别核验轻量具名导出和 Node 默认导出，Node 结果见 `nodeEntryChecks`。纯 Node 的 `types:["node"]` 只解析包内显式依赖；缺少 Node 环境声明时真实报错。同一配置混合两种运行时时，非空 `types` 仍明确拒绝；需要 Node 内置模块的包可使用[分目录就近配置示例](../examples/actions/mixed-projects/README.md)，让同步入口保持独立环境。完整边界见[工程检查说明](../tools/script-sdk-check/PROJECT_CHECK.md)。静态通过不代表宿主或目标软件已经验收。
 
 ## 通过正式 NodeRuntime 运行
 

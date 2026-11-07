@@ -61,6 +61,7 @@ export function checkProjectTypes(projectDirectory) {
   const loaded=new Map();
   const sourceSnapshots=new Map();
   let total=0;
+  let configurationReads;
   function read(path,limit) {
     path=resolve(path);
     if(!within(root,path)&&!within(library,path))return undefined;
@@ -85,6 +86,7 @@ export function checkProjectTypes(projectDirectory) {
       try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes.subarray(0,count));}
       catch {fail('project_utf8_invalid',within(root,path)?{file:relative(root,path).replaceAll('\\','/')}:undefined);}
       if(within(root,path)&&['.js','.mjs'].includes(extname(path)))sourceSnapshots.set(path,text);
+      if(within(root,path))configurationReads?.add(path);
       return text;
     } finally {closeSync(handle);}
   }
@@ -96,7 +98,7 @@ export function checkProjectTypes(projectDirectory) {
   try {manifest=json(join(root,'action.json'),256*1024);}
   catch(error){if(error?.code==='ENOENT')fail('project_manifest_missing');throw error;}
   if(manifest?.schema_version!==1||!Array.isArray(manifest.actions)||manifest.actions.length>64)fail('project_manifest_invalid');
-  const entries=[],scriptEntries=[],nodeEntries=[];
+  const entries=[],allScriptEntries=[],allNodeEntries=[];
   for(const action of manifest.actions) {
     if(!['script','node'].includes(action?.runtime))continue;
     if(typeof action.entry!=='string'||!action.entry||isAbsolute(action.entry)||action.entry.includes('\0'))fail('project_entry_invalid');
@@ -104,7 +106,7 @@ export function checkProjectTypes(projectDirectory) {
     const extensions=action.runtime==='node'?['.js','.mjs','.cjs']:['.js','.mjs'];
     if(!within(root,entry)||!extensions.includes(extname(entry)))fail('project_entry_invalid');
     entries.push(entry);
-    (action.runtime==='node'?nodeEntries:scriptEntries).push(entry);
+    (action.runtime==='node'?allNodeEntries:allScriptEntries).push(entry);
   }
   if(entries.length===0)fail('project_no_script_actions');
   let sdk;
@@ -114,158 +116,201 @@ export function checkProjectTypes(projectDirectory) {
     catch(error){if(error?.code!=='ENOENT')throw error;}
   }
   if(!sdk)fail('project_sdk_missing');
-  const configPath=join(root,'jsconfig.json');
-  let config;
-  let configText;
-  try {
-    configText=read(configPath,128*1024);
-    const parsed=ts.parseConfigFileTextToJson(configPath.replaceAll('\\','/'),configText);
-    if(parsed.error) {
-      const diagnostic=parsed.error;
-      const position=diagnostic.file&&typeof diagnostic.start==='number'
-        ?diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start):undefined;
-      fail('project_config_invalid',position?{file:'jsconfig.json',line:position.line+1,column:position.character+1}:undefined);
-    }
-    config=parsed.config;
-  } catch(error) {if(error?.code==='ENOENT')fail('project_config_missing');throw error;}
-  if(!config||typeof config!=='object'||Array.isArray(config)||Object.hasOwn(config,'extends'))fail('project_config_unsupported');
-  const compilerOptions=Object.hasOwn(config,'compilerOptions')?config.compilerOptions:{};
-  if(!compilerOptions||typeof compilerOptions!=='object'||Array.isArray(compilerOptions))fail('project_config_invalid');
-  // 仅加入作者逐个列明的包内声明；不按 files/include 扫描目录或扩展 Node 入口。
-  const configuredFiles=Object.hasOwn(config,'files')?config.files:[];
-  if(!Array.isArray(configuredFiles)||configuredFiles.length>256
-    ||configuredFiles.some(name=>typeof name!=='string'||!name||name.length>2048||name.includes('\0'))) {
-    fail('project_config_invalid',{file:'jsconfig.json'});
-  }
-  const configuredDeclarations=[];
-  for(const name of configuredFiles) {
-    if(!name.endsWith('.d.ts'))continue;
-    const declaration=resolve(root,name);
-    if(isAbsolute(name)||/[\0*?:]/.test(name)||!within(root,declaration)) {
-      fail('project_config_unsupported',{file:'jsconfig.json'});
-    }
-    configuredDeclarations.push(declaration);
-  }
-  const converted=ts.convertCompilerOptionsFromJson(compilerOptions,root);
-  if(converted.errors.length) {
-    // 转换API不带源位置；用同一配置文本取得TS已有的位置，不读取extends/include或文件。
-    const configSource=ts.parseJsonText('jsconfig.json',configText);
-    const expression=configSource.statements[0]?.expression;
-    const property=expression&&ts.isObjectLiteralExpression(expression)
-      ? [...expression.properties].reverse().find(node=>ts.isPropertyAssignment(node)&&node.name.text==='compilerOptions')
-      : undefined;
-    const block=property?.initializer;
-    const located=ts.parseJsonSourceFileConfigFileContent(configSource,{
-      useCaseSensitiveFileNames:true,readDirectory:()=>[],fileExists:()=>false,readFile:()=>undefined,
-    },root).errors.find(error=>error.file===configSource&&typeof error.start==='number'
-      &&block&&error.start>=block.getStart(configSource)&&error.start<block.end
-      &&converted.errors.some(original=>original.code===error.code));
-    const position=located?configSource.getLineAndCharacterOfPosition(located.start):undefined;
-    fail('project_config_invalid',{file:'jsconfig.json',
-      ...(position?{line:position.line+1,column:position.character+1}:{})});
-  }
-  // 混合包保持Script的无隐式环境约定；不把Node全局类型注入同步入口。
-  if(nodeEntries.length&&scriptEntries.length&&converted.options.types?.length) {
-    fail('project_mixed_types_unsupported',{file:'jsconfig.json'});
-  }
-  const options={strict:true,target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.ESNext,
-    moduleResolution:ts.ModuleResolutionKind.Bundler,lib:['lib.es2020.d.ts'],...converted.options,
-    // 旧 .js 入口实际各自在函数体内执行；noEmit 检查也按文件隔离，不合并作者局部声明。
-    noEmit:true,allowJs:true,checkJs:true,
-    types:nodeEntries.length&&!scriptEntries.length?(converted.options.types??[]):[],moduleDetection:ts.ModuleDetectionKind.Force};
-  const host=ts.createCompilerHost(options);
-  let fatal;
-  const originalExists=host.fileExists;
-  const allowed=path=>within(root,resolve(path))||within(library,resolve(path));
-  host.getCurrentDirectory=()=>root;
-  host.fileExists=path=>allowed(path)&&originalExists(path);
-  host.realpath=path=>{if(allowed(path))guard([path]);return resolve(path);};
-  // 不做环境目录发现；只解析清单入口、显式引用和已定位的标准库。
-  host.getDirectories=()=>[];
-  host.readDirectory=()=>[];
-  host.directoryExists=path=>{
-    if(!allowed(path))return false;
-    try {guard([path]);return lstatSync(path).isDirectory();}catch(error){if(error?.code==='ENOENT')return false;throw error;}
-  };
-  host.readFile=path=>{
-    if(!allowed(path))return undefined;
-    try{return read(path,within(library,resolve(path))?2*1024*1024:path.endsWith('.d.ts')?512*1024:128*1024);}
-    catch(error){
-      if(error?.code==='ENOENT')return undefined;
-      // TypeScript可将readFile异常转成普通诊断；单独保留本工具的范围/容量拒绝。
-      fatal??=error instanceof ProjectCheckError?error:new ProjectCheckError('project_read_failed');
-      return undefined;
-    }
-  };
-  host.writeFile=()=>fail('project_emit_forbidden');
-  const program=ts.createProgram([...new Set([...entries,sdk,...configuredDeclarations])],options,host);
-  if(fatal)throw fatal;
-  const diagnostics=ts.getPreEmitDiagnostics(program).map(item=>{
-    const location=item.file&&typeof item.start==='number'?item.file.getLineAndCharacterOfPosition(item.start):undefined;
-    return {code:item.code,message:ts.flattenDiagnosticMessageText(item.messageText,'\n'),
-      ...(item.file?{file:relative(root,resolve(item.file.fileName)).replaceAll('\\','/')}:{ }),
-      ...(location?{line:location.line+1,column:location.character+1}:{})};
-  });
-  if(fatal)throw fatal;
-  const localName=path=>relative(root,path).replaceAll('\\','/');
-  const moduleChecks=[],entryChecks=[],skippedEntries=[],legacyEntryDiagnostics=[];
-  for(const entry of new Set(scriptEntries)) {
-    const name=localName(entry);
-    // 旧 .js 走函数体协议，不能假装它需要 ESM 具名导出。
-    if(extname(entry)!=='.mjs') {
-      skippedEntries.push({entry:name,reason:'legacy_function_body_protocol'});
-      const source=program.getSourceFile(entry);
-      const moduleNode=source?.statements.find(node=>ts.isImportDeclaration(node)||ts.isExportDeclaration(node)
-        ||ts.isExportAssignment(node)||node.modifiers?.some(modifier=>modifier.kind===ts.SyntaxKind.ExportKeyword));
-      if(moduleNode) {
-        const point=source.getLineAndCharacterOfPosition(moduleNode.getStart(source));
-        legacyEntryDiagnostics.push({entry:name,category:'entry',code:'legacy_entry_module_syntax',severity:'error',
-          message:'旧 .js 入口按函数体执行，不能使用静态 import/export；需要模块时改用 .mjs 入口并具名导出 main。',
-          file:name,line:point.line+1,column:point.character+1});
-      }
-      continue;
-    }
-    let moduleResult;
-    const attempted=new Set();
+  const rootConfig=join(root,'jsconfig.json');
+  const configurations=new Map();
+  // 只沿清单入口的祖先逐个尝试固定文件名，不扫描目录、不越出动作包。
+  for(const entry of entries) {
+    let directory=dirname(entry),configPath;
     for(;;) {
-      const sources=[...sourceSnapshots].map(([path,text])=>({path:localName(path),text}));
-      moduleResult=analyzeScriptModules({entry:name,sources});
-      // TypeScript可能把 ./x.js 解析到 x.ts；轻量宿主需要的是明确的 x.js。
-      // 只补读分析器给出的包内静态边，不枚举目录、不追踪动态表达式。
-      const missing=[...new Set(moduleResult.edges.filter(edge=>edge.kind==='static')
-        .map(edge=>resolve(root,edge.to)).filter(path=>!sourceSnapshots.has(path)&&!attempted.has(path)))];
-      if(missing.length===0||moduleResult.diagnostics.some(d=>['module_total_limit','snapshot_limit'].includes(d.code)))break;
-      for(const path of missing) {
-        attempted.add(path);
-        if(!within(root,path))fail('project_entry_invalid');
-        try {read(path,128*1024);}
-        catch(error) {if(error?.code!=='ENOENT')throw error;}
-      }
+      const candidate=join(directory,'jsconfig.json');
+      try {guard([candidate]);configPath=candidate;break;}
+      catch(error){if(error?.code!=='ENOENT')throw error;}
+      if(relative(root,directory)==='')fail('project_config_missing');
+      directory=dirname(directory);
     }
-    moduleChecks.push({entry:name,...moduleResult});
-    entryChecks.push({entry:name,...analyzeScriptEntry({file:name,text:sourceSnapshots.get(entry)})});
+    const key=process.platform==='win32'?configPath.toLowerCase():configPath;
+    if(!configurations.has(key))configurations.set(key,{config:configPath,entries:[]});
+    configurations.get(key).entries.push(entry);
   }
-  const nodeEntryChecks=[...new Set(nodeEntries)].map(entry=>({entry:localName(entry),
-    ...analyzeNodeEntries({projectDirectory:root,typescript:ts,program,entries:[entry]})}));
-  if(fatal)throw fatal;
-  const environmentDiagnostics=[
-    ...legacyEntryDiagnostics,
-    ...moduleChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'modules',...item}))),
-    ...entryChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'entry',...item}))),
-    ...nodeEntryChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'entry',runtime:'node',...item}))),
-  ];
-  const staticEnvironmentPassed=legacyEntryDiagnostics.length===0&&moduleChecks.every(check=>check.passed)
-    &&entryChecks.every(check=>check.passed)&&nodeEntryChecks.every(check=>check.passed);
-  return {passed:diagnostics.length===0&&staticEnvironmentPassed,compilerVersion:ts.version,project:root,
-    entries:entries.map(path=>relative(root,path).replaceAll('\\','/')),diagnostics,
-    checkedFiles:[...loaded.keys()].map(path=>relative(root,path).replaceAll('\\','/')),
-    staticEnvironmentPassed,environmentDiagnostics,moduleChecks,entryChecks,skippedEntries,
-    ...(nodeEntries.length?{nodeEntryChecks}:{}),
-    staticAnalysisComplete:skippedEntries.length===0&&moduleChecks.every(check=>check.staticGraphComplete)
-      &&entryChecks.every(check=>check.mainExport==='local_callable_declaration')
-      &&nodeEntryChecks.every(check=>check.passed&&!check.diagnostics.some(item=>item.severity==='warning')),
-    runtimeCapabilitiesChecked:false,runtimeVerified:false,
-    runtimeExecuted:false,filesModified:false};
+  function checkConfiguration(configPath,entries) {
+    const configurationDirectory=dirname(configPath);
+    const isRootConfiguration=relative(rootConfig,configPath)==='';
+    const configName=relative(root,configPath).replaceAll('\\','/');
+    const selected=new Set(entries);
+    const scriptEntries=allScriptEntries.filter(entry=>selected.has(entry));
+    const nodeEntries=allNodeEntries.filter(entry=>selected.has(entry));
+    configurationReads=new Set([join(root,'action.json'),configPath]);
+    sourceSnapshots.clear();
+    let config;
+    let configText;
+    try {
+      configText=read(configPath,128*1024);
+      const parsed=ts.parseConfigFileTextToJson(configPath.replaceAll('\\','/'),configText);
+      if(parsed.error) {
+        const diagnostic=parsed.error;
+        const position=diagnostic.file&&typeof diagnostic.start==='number'
+          ?diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start):undefined;
+        fail('project_config_invalid',position?{file:configName,line:position.line+1,column:position.character+1}:undefined);
+      }
+      config=parsed.config;
+    } catch(error) {if(error?.code==='ENOENT')fail('project_config_missing');throw error;}
+    if(!config||typeof config!=='object'||Array.isArray(config)||Object.hasOwn(config,'extends'))fail('project_config_unsupported');
+    const compilerOptions=Object.hasOwn(config,'compilerOptions')?config.compilerOptions:{};
+    if(!compilerOptions||typeof compilerOptions!=='object'||Array.isArray(compilerOptions))fail('project_config_invalid');
+    // 仅加入作者逐个列明的包内声明；不按 files/include 扫描目录或扩展 Node 入口。
+    const configuredFiles=Object.hasOwn(config,'files')?config.files:[];
+    if(!Array.isArray(configuredFiles)||configuredFiles.length>256
+      ||configuredFiles.some(name=>typeof name!=='string'||!name||name.length>2048||name.includes('\0'))) {
+      fail('project_config_invalid',{file:configName});
+    }
+    const configuredDeclarations=[];
+    for(const name of configuredFiles) {
+      if(!name.endsWith('.d.ts'))continue;
+      const declaration=resolve(configurationDirectory,name);
+      if(isAbsolute(name)||/[\0*?:]/.test(name)||!within(root,declaration)) {
+        fail('project_config_unsupported',{file:configName});
+      }
+      configuredDeclarations.push(declaration);
+    }
+    const converted=ts.convertCompilerOptionsFromJson(compilerOptions,configurationDirectory);
+    if(converted.errors.length) {
+      // 转换API不带源位置；用同一配置文本取得TS已有的位置，不读取extends/include或文件。
+      const configSource=ts.parseJsonText(configName,configText);
+      const expression=configSource.statements[0]?.expression;
+      const property=expression&&ts.isObjectLiteralExpression(expression)
+        ? [...expression.properties].reverse().find(node=>ts.isPropertyAssignment(node)&&node.name.text==='compilerOptions')
+        : undefined;
+      const block=property?.initializer;
+      const located=ts.parseJsonSourceFileConfigFileContent(configSource,{
+        useCaseSensitiveFileNames:true,readDirectory:()=>[],fileExists:()=>false,readFile:()=>undefined,
+      },configurationDirectory).errors.find(error=>error.file===configSource&&typeof error.start==='number'
+        &&block&&error.start>=block.getStart(configSource)&&error.start<block.end
+        &&converted.errors.some(original=>original.code===error.code));
+      const position=located?configSource.getLineAndCharacterOfPosition(located.start):undefined;
+      fail('project_config_invalid',{file:configName,
+        ...(position?{line:position.line+1,column:position.character+1}:{})});
+    }
+    // 混合包保持Script的无隐式环境约定；不把Node全局类型注入同步入口。
+    if(nodeEntries.length&&scriptEntries.length&&converted.options.types?.length) {
+      fail('project_mixed_types_unsupported',{file:configName});
+    }
+    const options={strict:true,target:ts.ScriptTarget.ES2020,module:ts.ModuleKind.ESNext,
+      moduleResolution:ts.ModuleResolutionKind.Bundler,lib:['lib.es2020.d.ts'],...converted.options,
+      // 旧 .js 入口实际各自在函数体内执行；noEmit 检查也按文件隔离，不合并作者局部声明。
+      noEmit:true,allowJs:true,checkJs:true,
+      types:nodeEntries.length&&!scriptEntries.length?(converted.options.types??[]):[],moduleDetection:ts.ModuleDetectionKind.Force};
+    const host=ts.createCompilerHost(options);
+    let fatal;
+    const originalExists=host.fileExists;
+    const allowed=path=>within(root,resolve(path))||within(library,resolve(path));
+    host.getCurrentDirectory=()=>configurationDirectory;
+    host.fileExists=path=>allowed(path)&&originalExists(path);
+    host.realpath=path=>{if(allowed(path))guard([path]);return resolve(path);};
+    // 不做环境目录发现；只解析清单入口、显式引用和已定位的标准库。
+    host.getDirectories=()=>[];
+    host.readDirectory=()=>[];
+    host.directoryExists=path=>{
+      if(!allowed(path))return false;
+      try {guard([path]);return lstatSync(path).isDirectory();}catch(error){if(error?.code==='ENOENT')return false;throw error;}
+    };
+    host.readFile=path=>{
+      if(!allowed(path))return undefined;
+      try{return read(path,within(library,resolve(path))?2*1024*1024:path.endsWith('.d.ts')?512*1024:128*1024);}
+      catch(error){
+        if(error?.code==='ENOENT')return undefined;
+        // TypeScript可将readFile异常转成普通诊断；单独保留本工具的范围/容量拒绝。
+        fatal??=error instanceof ProjectCheckError?error:new ProjectCheckError('project_read_failed');
+        return undefined;
+      }
+    };
+    host.writeFile=()=>fail('project_emit_forbidden');
+    const program=ts.createProgram([...new Set([...entries,...(isRootConfiguration?[sdk]:[]),...configuredDeclarations])],options,host);
+    if(fatal)throw fatal;
+    const diagnostics=ts.getPreEmitDiagnostics(program).map(item=>{
+      const location=item.file&&typeof item.start==='number'?item.file.getLineAndCharacterOfPosition(item.start):undefined;
+      return {code:item.code,message:ts.flattenDiagnosticMessageText(item.messageText,'\n'),
+        ...(item.file?{file:relative(root,resolve(item.file.fileName)).replaceAll('\\','/')}:{ }),
+        ...(location?{line:location.line+1,column:location.character+1}:{})};
+    });
+    if(fatal)throw fatal;
+    const localName=path=>relative(root,path).replaceAll('\\','/');
+    const moduleChecks=[],entryChecks=[],skippedEntries=[],legacyEntryDiagnostics=[];
+    for(const entry of new Set(scriptEntries)) {
+      const name=localName(entry);
+      // 旧 .js 走函数体协议，不能假装它需要 ESM 具名导出。
+      if(extname(entry)!=='.mjs') {
+        skippedEntries.push({entry:name,reason:'legacy_function_body_protocol'});
+        const source=program.getSourceFile(entry);
+        const moduleNode=source?.statements.find(node=>ts.isImportDeclaration(node)||ts.isExportDeclaration(node)
+          ||ts.isExportAssignment(node)||node.modifiers?.some(modifier=>modifier.kind===ts.SyntaxKind.ExportKeyword));
+        if(moduleNode) {
+          const point=source.getLineAndCharacterOfPosition(moduleNode.getStart(source));
+          legacyEntryDiagnostics.push({entry:name,category:'entry',code:'legacy_entry_module_syntax',severity:'error',
+            message:'旧 .js 入口按函数体执行，不能使用静态 import/export；需要模块时改用 .mjs 入口并具名导出 main。',
+            file:name,line:point.line+1,column:point.character+1});
+        }
+        continue;
+      }
+      let moduleResult;
+      const attempted=new Set();
+      for(;;) {
+        const sources=[...sourceSnapshots].map(([path,text])=>({path:localName(path),text}));
+        moduleResult=analyzeScriptModules({entry:name,sources});
+        // TypeScript可能把 ./x.js 解析到 x.ts；轻量宿主需要的是明确的 x.js。
+        // 只补读分析器给出的包内静态边，不枚举目录、不追踪动态表达式。
+        const missing=[...new Set(moduleResult.edges.filter(edge=>edge.kind==='static')
+          .map(edge=>resolve(root,edge.to)).filter(path=>!sourceSnapshots.has(path)&&!attempted.has(path)))];
+        if(missing.length===0||moduleResult.diagnostics.some(d=>['module_total_limit','snapshot_limit'].includes(d.code)))break;
+        for(const path of missing) {
+          attempted.add(path);
+          if(!within(root,path))fail('project_entry_invalid');
+          try {read(path,128*1024);}
+          catch(error) {if(error?.code!=='ENOENT')throw error;}
+        }
+      }
+      moduleChecks.push({entry:name,...moduleResult});
+      entryChecks.push({entry:name,...analyzeScriptEntry({file:name,text:sourceSnapshots.get(entry)})});
+    }
+    const nodeEntryChecks=[...new Set(nodeEntries)].map(entry=>({entry:localName(entry),
+      ...analyzeNodeEntries({projectDirectory:root,typescript:ts,program,entries:[entry]})}));
+    if(fatal)throw fatal;
+    const environmentDiagnostics=[
+      ...legacyEntryDiagnostics,
+      ...moduleChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'modules',...item}))),
+      ...entryChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'entry',...item}))),
+      ...nodeEntryChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'entry',runtime:'node',...item}))),
+    ];
+    const staticEnvironmentPassed=legacyEntryDiagnostics.length===0&&moduleChecks.every(check=>check.passed)
+      &&entryChecks.every(check=>check.passed)&&nodeEntryChecks.every(check=>check.passed);
+    return {passed:diagnostics.length===0&&staticEnvironmentPassed,compilerVersion:ts.version,project:root,
+      entries:entries.map(path=>relative(root,path).replaceAll('\\','/')),diagnostics,
+      checkedFiles:[...(isRootConfiguration&&configurations.size===1?loaded.keys():configurationReads)].map(path=>relative(root,path).replaceAll('\\','/')),
+      staticEnvironmentPassed,environmentDiagnostics,moduleChecks,entryChecks,skippedEntries,
+      ...(nodeEntries.length?{nodeEntryChecks}:{}),
+      staticAnalysisComplete:skippedEntries.length===0&&moduleChecks.every(check=>check.staticGraphComplete)
+        &&entryChecks.every(check=>check.mainExport==='local_callable_declaration')
+        &&nodeEntryChecks.every(check=>check.passed&&!check.diagnostics.some(item=>item.severity==='warning')),
+      runtimeCapabilitiesChecked:false,runtimeVerified:false,
+      runtimeExecuted:false,filesModified:false};
+  }
+  const results=[...configurations.values()].map(({config,entries})=>({config,result:checkConfiguration(config,entries)}));
+  configurationReads=undefined;
+  if(results.length===1&&relative(rootConfig,results[0].config)==='')return results[0].result;
+  const names=path=>relative(root,path).replaceAll('\\','/');
+  const flatten=field=>results.flatMap(({result})=>result[field]??[]);
+  const projectResults=results.map(({config,result})=>({config:names(config),entries:result.entries,
+    passed:result.passed,checkedFiles:result.checkedFiles}));
+  return {passed:results.every(({result})=>result.passed),compilerVersion:ts.version,project:root,
+    entries:entries.map(names),diagnostics:results.flatMap(({config,result})=>
+      result.diagnostics.map(item=>({...item,config:names(config)}))),
+    checkedFiles:[...loaded.keys()].map(names),
+    staticEnvironmentPassed:results.every(({result})=>result.staticEnvironmentPassed),
+    environmentDiagnostics:results.flatMap(({config,result})=>
+      result.environmentDiagnostics.map(item=>({...item,config:names(config)}))),
+    moduleChecks:flatten('moduleChecks'),entryChecks:flatten('entryChecks'),skippedEntries:flatten('skippedEntries'),
+    ...(allNodeEntries.length?{nodeEntryChecks:flatten('nodeEntryChecks')}:{}),
+    staticAnalysisComplete:results.every(({result})=>result.staticAnalysisComplete),projects:projectResults,
+    runtimeCapabilitiesChecked:false,runtimeVerified:false,runtimeExecuted:false,filesModified:false};
 }
 
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)) {

@@ -102,6 +102,76 @@ test('统一Node入口继续拒绝坏UTF8、源码超限与清单越界路径',(
 });
 
 
+function splitFixture() {
+  const {root}=nodeFixture(true);
+  unlinkSync(join(root,'jsconfig.json'));unlinkSync(join(root,'node.mjs'));unlinkSync(join(root,'main.mjs'));
+  for(const name of ['node','script','shared'])mkdirSync(join(root,name));
+  writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[
+    {runtime:'node',entry:'node/main.mjs'},{runtime:'script',entry:'script/main.mjs'}]}));
+  for(const runtime of ['node','script'])writeFileSync(join(root,runtime,'jsconfig.json'),JSON.stringify({
+    compilerOptions:{strict:true,skipLibCheck:false,target:'ES2020',module:'ESNext',moduleResolution:'Bundler',lib:['ES2020'],types:[]},
+    files:['main.mjs','../sdk/'+(runtime==='node'?'api.d.ts':'script-types.d.ts')]}));
+  writeFileSync(join(root,'node/main.mjs'),"throw Error('NODE INITIALIZER MUST NOT RUN');\nimport {cleanText} from '../shared/text.mjs';\n/** @param {import('../sdk/api.js').ActionContext} ctx */\nexport default async function main(ctx) { const target=await ctx.desktop.target();return {text:cleanText(ctx.input.text),processName:target.processName}; }\n");
+  writeFileSync(join(root,'script/main.mjs'),"throw Error('SCRIPT INITIALIZER MUST NOT RUN');\nimport {cleanText} from '../shared/text.mjs';\n/** @type {ScriptMain} */\nexport function main(ctx) { return {text:cleanText(ctx.input.text),processName:ctx.desktop.target().processName}; }\n");
+  writeFileSync(join(root,'shared/text.mjs'),"throw Error('SHARED INITIALIZER MUST NOT RUN');\n/** @param {unknown} value @returns {string} */\nexport function cleanText(value) { return String(value ?? '').trim(); }\n");
+  return root;
+}
+
+test('就近配置分别检查混合入口和共享模块，不把Node声明加入Script工程',()=>{
+  const root=splitFixture();const result=checkProjectTypes(root);
+  assert.equal(result.passed,true,JSON.stringify(result));assert.equal(result.projects.length,2);
+  assert.deepEqual(result.entries,['node/main.mjs','script/main.mjs']);
+  const node=result.projects.find(item=>item.config==='node/jsconfig.json');
+  const script=result.projects.find(item=>item.config==='script/jsconfig.json');
+  assert(node&&script);assert(node.checkedFiles.includes('sdk/api.d.ts'));
+  assert(!node.checkedFiles.includes('sdk/script-types.d.ts'));
+  assert(script.checkedFiles.includes('sdk/script-types.d.ts'));assert(!script.checkedFiles.includes('sdk/api.d.ts'));
+  for(const project of [node,script])assert(project.checkedFiles.includes('shared/text.mjs'));
+  assert.equal(result.nodeEntryChecks[0].passed,true);assert.equal(result.entryChecks[0].passed,true);
+  assert.equal(result.runtimeExecuted,false);assert.equal(result.filesModified,false);
+  writeFileSync(join(root,'shared/text.mjs'),"throw Error('SHARED INITIALIZER MUST NOT RUN');\n/** @param {unknown} value @returns {string} */\nexport function cleanText(value) { return 42; }\n");
+  const invalid=checkProjectTypes(root);assert.equal(invalid.passed,false);
+  const shared=invalid.diagnostics.filter(item=>item.file==='shared/text.mjs'&&item.code===2322);
+  assert.deepEqual(new Set(shared.map(item=>item.config)),new Set(['node/jsconfig.json','script/jsconfig.json']));
+  assert(shared.every(item=>item.line===3&&item.column>0));
+});
+
+test('就近配置损坏不回退父配置，声明仍受动作包边界而非子目录限制',()=>{
+  const root=splitFixture();
+  writeFileSync(join(root,'jsconfig.json'),JSON.stringify({compilerOptions:{strict:true,types:[]},files:['sdk/script-types.d.ts']}));
+  const file=join(root,'script/jsconfig.json');
+  writeFileSync(file,'{\n  "compilerOptions": {\n    "checkJs": }\n}\n');
+  assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_config_invalid'
+    &&error.location?.file==='script/jsconfig.json'&&error.location.line===3&&error.location.column===16);
+  writeFileSync(file,Buffer.from([0xff]));
+  assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_utf8_invalid'
+    &&error.location?.file==='script/jsconfig.json');
+  writeFileSync(file,JSON.stringify({files:['../../outside.d.ts']}));
+  assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_config_unsupported'
+    &&error.location?.file==='script/jsconfig.json');
+  if(process.platform==='win32') {
+    // 同一Windows配置不能借目录大小写不同被拆成两份，绕开混合环境拒绝。
+    writeFileSync(join(root,'node/jsconfig.json'),JSON.stringify({compilerOptions:{types:['node']}}));
+    writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[
+      {runtime:'node',entry:'node/main.mjs'},{runtime:'script',entry:'NODE/main.mjs'}]}));
+    assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_mixed_types_unsupported'
+      &&error.location?.file==='node/jsconfig.json');
+  }
+});
+
+
+test('就近配置允许根配置与子配置并存，项目读取记录不混入其他配置',()=>{
+  const root=splitFixture();unlinkSync(join(root,'script/jsconfig.json'));
+  writeFileSync(join(root,'jsconfig.json'),JSON.stringify({compilerOptions:{strict:true,skipLibCheck:false,
+    target:'ES2020',module:'ESNext',moduleResolution:'Bundler',lib:['ES2020'],types:[]},files:['sdk/script-types.d.ts']}));
+  const result=checkProjectTypes(root);assert.equal(result.passed,true,JSON.stringify(result));
+  assert.deepEqual(result.projects.map(item=>item.config),['node/jsconfig.json','jsconfig.json']);
+  const script=result.projects.find(item=>item.config==='jsconfig.json');
+  assert.deepEqual(script.entries,['script/main.mjs']);assert(script.checkedFiles.includes('shared/text.mjs'));
+  assert(!script.checkedFiles.includes('node/jsconfig.json'));
+  assert(result.checkedFiles.includes('node/jsconfig.json'));
+});
+
 test('检查既有入口与相对依赖，保留源码并且不执行模块初始化器',()=>{
   const root=fixture();const before=readFileSync(join(root,'main.mjs'));
   const result=checkProjectTypes(root);

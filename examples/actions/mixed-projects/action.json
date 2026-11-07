@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "id": "mixed-projects",
+  "name": "分项目混合动作包",
+  "version": "1.0.0",
+  "actions": [
+    {
+      "id": "node",
+      "title": "Node文件名与目标信息",
+      "version": 1,
+      "runtime": "node",
+      "entry": "node/main.mjs"
+    },
+    {
+      "id": "script",
+      "title": "同步文本与目标信息",
+      "version": 1,
+      "runtime": "script",
+      "entry": "script/main.mjs"
+    }
+  ]
+}
