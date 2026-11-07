@@ -1,5 +1,6 @@
 import ts from 'typescript';
 import {checkNodeEntry} from './check-node-entry.cjs';
+import {createHash} from 'node:crypto';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync} from 'node:fs';
@@ -351,5 +352,34 @@ test('create失败诊断区分回复和SDK阶段，不泄露回复或采用未�
     assert(!JSON.stringify(error).includes(join(item.root,'untrusted-reply')));
     assert.equal(error.cli_exit_code,0);assert.equal(error.cli_signal,null);
     assert(!('spawn_error_code'in error));
+  }
+});
+
+test('canonical快照指纹覆盖当前来源与已携带声明的LF和CRLF，保留后续刷新链',()=>{
+  const source=ts.createSourceFile('script-project.mjs',readFileSync(join(repo,'tools/script-project.mjs'),'utf8'),
+    ts.ScriptTarget.Latest,true,ts.ScriptKind.JS);
+  let initializer;
+  for(const statement of source.statements)if(ts.isVariableStatement(statement)){
+    for(const declaration of statement.declarationList.declarations)if(declaration.name.getText(source)==='canonicalSdkHashes')initializer=declaration.initializer;
+  }
+  assert(initializer&&ts.isObjectLiteralExpression(initializer),'复用现有canonical表，不执行创建/刷新工具');
+  const known=new Map(initializer.properties.map(property=>{
+    assert(ts.isPropertyAssignment(property)&&ts.isStringLiteral(property.name)&&ts.isArrayLiteralExpression(property.initializer));
+    const hashes=property.initializer.elements.map(value=>{assert(ts.isStringLiteral(value)&&/^[0-9a-f]{64}$/.test(value.text));return value.text;});
+    assert.equal(new Set(hashes).size,hashes.length,'历史指纹追加且不重复');
+    return[property.name.text,hashes];
+  }));
+  const groups=[
+    ['crates/omnitrigger-actions/runtime',['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts','script-api.d.ts']],
+    ['examples/actions/mixed-projects/sdk',['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts']],
+    ['examples/actions/source-file-preview/sdk',['api.d.ts','clipboard-history-api.d.ts']],
+  ];
+  for(const[directory,names]of groups)for(const name of names){
+    assert(known.has(name),`${name}须登记在现有canonical表`);
+    const lf=readFileSync(join(repo,directory,name),'utf8').replaceAll('\r\n','\n');
+    for(const[ending,text]of[['LF',lf],['CRLF',lf.replaceAll('\n','\r\n')]]){
+      const digest=createHash('sha256').update(text,'utf8').digest('hex');
+      assert(known.get(name).includes(digest),`${directory}/${name} ${ending}指纹未登记：${digest}；SDK更新须追加已核验指纹并保留历史值`);
+    }
   }
 });
