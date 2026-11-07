@@ -44,9 +44,9 @@ ctx.delay = milliseconds => {
     call('delay', {milliseconds});
 };
 function desktopCall(method, params) {
-    if ((method === 'win32_edit.replace_selection' || method === 'clipboard.write_files' || method.startsWith('raishot.resident.')) && calls >= 32) throw Object.assign(new Error('单次脚本最多调用32次宿主API。'),{code:'desktop_call_limit',effectState:'not_started',method});
+    if ((method === 'win32_edit.replace_selection' || method === 'clipboard.write_files' || method.startsWith('raishot.resident.') || method === 'state.read' || method === 'state.compare_and_swap') && calls >= 32) throw Object.assign(new Error('单次脚本最多调用32次宿主API。'),{code:'desktop_call_limit',effectState:'not_started',method});
 
-    if (!nativeContext || nativeContext.error || method !== 'actions.stop_other_instances' && !nativeContextAvailable) {
+    if (!nativeContext || nativeContext.error || !['actions.stop_other_instances','state.read','state.compare_and_swap'].includes(method) && !nativeContextAvailable) {
         if (method === "actions.stop_other_instances") throw Object.assign(new Error("动作控制需要当前服务调用作用域。"),{code:"actions_unavailable",effectState:"not_started",method});
         if (method.startsWith('raishot.resident.')) throw Object.assign(new Error('RaiShot 常驻接口需要应用本机桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
         if (method === 'clipboard.write_files') throw Object.assign(new Error('文件列表写入需要应用本机桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
@@ -83,6 +83,10 @@ function desktopCall(method, params) {
     nativeId++;
     return call('native', request, serialized);
 }
+ctx.state = createStateApi((method, params) => {
+    if (!actionsScope) throw Object.assign(new Error('当前宿主没有动作状态作用域。'),{code:'state_unavailable',effectState:'not_started',method});
+    return desktopCall(method,params);
+});
 ctx.actions = createActionsApi((method, params) => {
     if (!actionsScope) throw Object.assign(new Error('当前宿主没有ActionService调用作用域。'),{code:'actions_unavailable',effectState:'not_started',method});
     return desktopCall(method,params);

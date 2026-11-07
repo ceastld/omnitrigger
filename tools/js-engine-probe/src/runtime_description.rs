@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 pub fn describe() -> Value {
     let mut capabilities = vec![
         "actions.stop_other_instances.v1",
+        "state.read_cas.v1",
         "clipboard.history.v1",
         "clipboard.read_data.v1",
         "desktop.copy_selection_data.v1",

@@ -86,7 +86,7 @@ test('旧轻量宿主缺capture时明确失败，不偷偷回退run',()=>{
 
 test('新SDK的capture和通知桥接可组合，仍只使用合成JSON响应',()=>{
   const runtime=new URL('../../../crates/omnitrigger-actions/runtime/',import.meta.url);
-  const source=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js'].map(name=>readFileSync(new URL(name,runtime),'utf8')).join('\n')
+  const source=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js','state-api.js'].map(name=>readFileSync(new URL(name,runtime),'utf8')).join('\n')
     +'\n'+readFileSync(new URL('../../../tools/js-engine-probe/src/sdk.js',import.meta.url),'utf8');
   const calls=[];
   const scope={ctx:{input:{program,cwd},__nativeContext:{connection:{port:1234,token:'a'.repeat(64)}}},__hostCall:text=>{

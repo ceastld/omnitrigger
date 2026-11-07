@@ -10,8 +10,10 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 35] = [
+pub const METHODS: [&str; 37] = [
     "actions.stop_other_instances",
+    "state.read",
+    "state.compare_and_swap",
     "history.list",
     "history.get",
     "history.append",
@@ -122,6 +124,8 @@ fn brightness_transport_effect(
             | "raishot.resident.region"
             | "clipboard.write_files"
             | "actions.stop_other_instances"
+            | "state.read"
+            | "state.compare_and_swap"
     ) && !write_began
     {
         "not_started"
@@ -213,6 +217,8 @@ pub fn call(
                 | "raishot.resident.region"
                 | "clipboard.write_files"
                 | "actions.stop_other_instances"
+                | "state.read"
+                | "state.compare_and_swap"
                 | "history.list"
                 | "history.get"
                 | "history.append"
@@ -235,6 +241,8 @@ pub fn call(
                         | "raishot.resident.region"
                         | "clipboard.write_files"
                         | "actions.stop_other_instances"
+                        | "state.read"
+                        | "state.compare_and_swap"
                         | "history.append"
                         | "history.remove"
                         | "ui.toggle_history"
@@ -269,6 +277,8 @@ pub fn call(
                         | "raishot.resident.region"
                         | "clipboard.write_files"
                         | "actions.stop_other_instances"
+                        | "state.read"
+                        | "state.compare_and_swap"
                         | "history.list"
                         | "history.get"
                         | "history.append"
@@ -288,6 +298,8 @@ pub fn call(
                                 | "raishot.resident.region"
                                 | "clipboard.write_files"
                                 | "actions.stop_other_instances"
+                                | "state.read"
+                                | "state.compare_and_swap"
                                 | "history.append"
                                 | "history.remove"
                                 | "ui.toggle_history"
@@ -401,6 +413,8 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "raishot.resident.region"
                     | "clipboard.write_files"
                     | "actions.stop_other_instances"
+                    | "state.read"
+                    | "state.compare_and_swap"
                     | "history.list"
                     | "history.get"
                     | "history.append"
@@ -437,6 +451,8 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "raishot.resident.region"
                     | "clipboard.write_files"
                     | "actions.stop_other_instances"
+                    | "state.read"
+                    | "state.compare_and_swap"
             ) {
                 error.required_permissions = permissions;
             }

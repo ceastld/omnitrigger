@@ -239,7 +239,7 @@ test('复制格式：回执种类不符明确失败且不重试或降级', async
 test('文件列表写入 SDK 端口合同', async t => {
 const here=new URL('../',import.meta.url);
 const source=path=>fs.readFileSync(new URL(path,here),'utf8');
-const desktop=source('crates/omnitrigger-actions/runtime/desktop-api.js'),host=source('crates/omnitrigger-actions/runtime/host.mjs'),sdk=source('crates/omnitrigger-actions/runtime/actions-api.js')+'\n'+source('tools/js-engine-probe/src/sdk.js');
+const desktop=source('crates/omnitrigger-actions/runtime/desktop-api.js'),host=source('crates/omnitrigger-actions/runtime/host.mjs'),sdk=source('crates/omnitrigger-actions/runtime/actions-api.js')+'\n'+source('crates/omnitrigger-actions/runtime/state-api.js')+'\n'+source('tools/js-engine-probe/src/sdk.js');
 const asyncLine=host.split('\n').find(line=>line.startsWith('const asyncApi ='));
 const ok={written:true,sequenceNumber:0xffffffff},paths=['C:\\合成😀.txt','\\\\server\\share\\a.txt','C:\\合成😀.txt'];
 const plain=value=>JSON.parse(JSON.stringify(value));let passed=0;

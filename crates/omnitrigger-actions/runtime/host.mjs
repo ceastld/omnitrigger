@@ -16,7 +16,7 @@ let browserConnection;
 let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
-const nativeMethods = new Set(['actions.stop_other_instances','system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','fs.read_directory','ui.choose','ui.notify','ui.open_history','ui.toggle_history','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
+const nativeMethods = new Set(['state.read','state.compare_and_swap','actions.stop_other_instances','system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','fs.read_directory','ui.choose','ui.notify','ui.open_history','ui.toggle_history','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
   'keyboard.shortcut','keyboard.sequence','keyboard.text','win32_edit.replace_selection','raishot.resident.find','raishot.resident.region','selection.copy','selection.copy_data','selection.read_text','explorer.context','clipboard.read','clipboard.read_data','clipboard.write','clipboard.write_files','window.action','display.brightness_step','audio.volume_adjust']);
 let nativePending;
 let nativePendingMethod;
@@ -99,7 +99,7 @@ function browserRequest(method, args, options = {}, profiles = false) {
 const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...args));
 
 function nativeCall(method, params) {
-  const actionControl = method === 'actions.stop_other_instances';
+  const actionControl = method === 'actions.stop_other_instances' || method === 'state.read' || method === 'state.compare_and_swap';
   const historyUi = method === 'ui.open_history' || method === 'ui.toggle_history';
   const opening = method === 'system.open' || method === 'system.open_file_in_parent';
   const capture = method === 'process.capture';
@@ -392,6 +392,10 @@ try {
     open: openTarget,
     openFileInParent,
     process: Object.freeze({ run, start, capture:createProcessCaptureApi(params => nativeCall('process.capture', params.cwd === undefined ? {...params,cwd:request.package_root} : params), true).capture }),
+    state:createStateApi((method,params) => {
+      if (request.actions_scope !== true) throw Object.assign(new Error('当前宿主没有动作状态作用域。'),{code:'state_unavailable',effectState:'not_started',method});
+      return nativeCall(method,params);
+    },true),
     actions:createActionsApi((method,params) => {
       if (request.actions_scope !== true) throw Object.assign(new Error('当前宿主没有ActionService调用作用域。'),{code:'actions_unavailable',effectState:'not_started',method});
       return nativeCall(method,params);
@@ -413,6 +417,7 @@ try {
   if (children.size) throw fault('pending_processes', '动作返回时仍有未等待的 ctx.process.run 调用；请使用 await。');
   if (browserPending.size) throw fault('pending_browser_calls', '动作返回时仍有未等待的浏览器调用；请使用 await。');
   if (nativePending) {
+    if (nativePendingMethod === 'state.read' || nativePendingMethod === 'state.compare_and_swap') throw Object.assign(fault('pending_state_call', '动作返回时仍有未等待的状态调用；请使用 await。'), {effectState:nativePendingMethod === 'state.read' ? 'not_started' : 'unknown',method:nativePendingMethod});
     if (nativePendingMethod === 'system.open' || nativePendingMethod === 'system.open_file_in_parent') throw Object.assign(fault('pending_open', '动作返回时仍有未等待的打开请求；请使用 await。'), {effectState:'unknown',method:nativePendingMethod});
     if (nativePendingMethod === 'process.capture') throw Object.assign(fault('pending_process_capture', '动作返回时仍有未等待的程序采集；请使用 await。'), {effectState:'unknown',method:'process.capture'});
     if (nativePendingMethod === 'fs.stat' || nativePendingMethod === 'fs.read_directory') throw Object.assign(fault('fs_error', '动作返回时仍有未等待的文件查询；请使用 await。'), {effectState:'not_started',method:nativePendingMethod});

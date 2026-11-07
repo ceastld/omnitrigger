@@ -25,7 +25,7 @@ const desktop=read(sourceRoot,'crates/omnitrigger-actions/runtime/desktop-api.js
 const host=read(sourceRoot,'crates/omnitrigger-actions/runtime/host.mjs');
 const sdk=read(sourceRoot,'tools/js-engine-probe/src/sdk.js');
 const sharedRoot=process.env.OMNITRIGGER_DIRECTORY_TEST_SHARED_ROOT ?? sourceRoot;
-const shared=['browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js'].map(name=>read(sharedRoot,'crates/omnitrigger-actions/runtime/'+name)).join('\n');
+const shared=['browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js','state-api.js'].map(name=>read(sharedRoot,'crates/omnitrigger-actions/runtime/'+name)).join('\n');
 const createApi=runInNewContext(desktop+';createDesktopApi');
 const path='X:/synthetic-only/';
 const wire='fs.read_directory';

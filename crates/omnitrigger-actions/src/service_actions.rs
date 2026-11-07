@@ -16,6 +16,7 @@ pub(super) struct InvocationScopedHost {
     reservations: Arc<Mutex<Reservations>>,
     active_changed: Arc<Condvar>,
     invocation_id: u64,
+    state_store: Option<Arc<crate::state::ActionStateStore>>,
 }
 
 pub(super) fn scoped_host(
@@ -23,12 +24,14 @@ pub(super) fn scoped_host(
     reservations: Arc<Mutex<Reservations>>,
     active_changed: Arc<Condvar>,
     invocation_id: u64,
+    state_store: Option<Arc<crate::state::ActionStateStore>>,
 ) -> Arc<dyn NativeHost> {
     Arc::new(InvocationScopedHost {
         inner,
         reservations,
         active_changed,
         invocation_id,
+        state_store,
     })
 }
 
@@ -46,6 +49,45 @@ fn fault(code: &str, unknown: bool) -> ActionError {
 }
 
 impl InvocationScopedHost {
+    fn state_call(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Value, ActionError> {
+        let (scope, service_token) = {
+            let state = self
+                .reservations
+                .lock()
+                .map_err(|_| crate::state::fault("state_unavailable", method))?;
+            let current = state
+                .entries
+                .get(&self.invocation_id)
+                .filter(|e| e.active)
+                .ok_or_else(|| crate::state::fault("action_inactive", method))?;
+            (
+                crate::state::ActionStateScope {
+                    package_id: current.identity.package_id.clone(),
+                    action_id: current.identity.action_id.clone(),
+                },
+                current.cancellation.clone(),
+            )
+        };
+        // 释放服务配额锁后才进入状态锁/磁盘路径。
+        let store = self
+            .state_store
+            .as_ref()
+            .ok_or_else(|| crate::state::fault("state_unavailable", method))?;
+        store.call(
+            scope,
+            method,
+            params,
+            &|| cancellation.is_cancelled() || service_token.is_cancelled(),
+            deadline,
+        )
+    }
+
     fn stop(
         &self,
         params: Value,
@@ -151,6 +193,14 @@ impl NativeHost for InvocationScopedHost {
         params: Value,
         cancellation: &CancellationToken,
     ) -> Result<Value, ActionError> {
+        if matches!(method, "state.read" | "state.compare_and_swap") {
+            return self.state_call(
+                method,
+                params,
+                cancellation,
+                Instant::now() + Duration::from_secs(60),
+            );
+        }
         if method == METHOD {
             return self.stop(params, cancellation, None);
         }
@@ -173,6 +223,9 @@ impl NativeHost for InvocationScopedHost {
         cancellation: &CancellationToken,
         deadline: Instant,
     ) -> Result<Value, ActionError> {
+        if matches!(method, "state.read" | "state.compare_and_swap") {
+            return self.state_call(method, params, cancellation, deadline);
+        }
         if method == METHOD {
             return self.stop(params, cancellation, Some(deadline));
         }

@@ -109,7 +109,7 @@ test('Node省略cwd传明确包目录，显式cwd保留，不继承App工作目�
 });
 test('正式轻量SDK加载共同工厂后仍保持capture和旧run/start的不同契约',()=>{
   const runtime=new URL('../crates/omnitrigger-actions/runtime/',import.meta.url);
-  const shared=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js']
+  const shared=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js','state-api.js']
     .map(name=>readFileSync(new URL(name,runtime),'utf8')).join('\n');
   const sdk=readFileSync(new URL('../tools/js-engine-probe/src/sdk.js',import.meta.url),'utf8');
   const calls=[];

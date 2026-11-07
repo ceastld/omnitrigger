@@ -6,7 +6,7 @@ import {runInNewContext} from 'node:vm';
 import test from 'node:test';
 const runtime=new URL('../crates/omnitrigger-actions/runtime/',import.meta.url);
 const desktop=readFileSync(new URL('desktop-api.js',runtime),'utf8');
-const support=['browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js'].map(name=>readFileSync(new URL(name,runtime),'utf8')).join('\n');
+const support=['browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js','state-api.js'].map(name=>readFileSync(new URL(name,runtime),'utf8')).join('\n');
 const sdk=readFileSync(new URL('../tools/js-engine-probe/src/sdk.js',import.meta.url),'utf8');
 const host=readFileSync(new URL('host.mjs',runtime),'utf8');
 const createApi=runInNewContext(desktop+';createDesktopApi');
