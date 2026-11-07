@@ -212,7 +212,33 @@ interface ScriptClipboardHistoryApi {
   remove(options: {id: ScriptHistoryDecimal}): ScriptClipboardHistoryRemove;
 }
 
+interface ScriptStopOtherInstancesFault extends Error {
+  code:'invalid_input'|'actions_unavailable'|'actions_busy'|'actions_call_limit'|'action_inactive'|'action_policy_conflict'|'action_busy'|'stop_timeout'|'timeout'|'cancelled'|'invalid_response'|'actions_failed';
+  method:'actions.stop_other_instances';
+  effectState:'not_started'|'unknown';
+}
+type ScriptStopOtherInstancesResult = Readonly<{stoppedCount:0;effectState:'not_started'} | {stoppedCount:1|2|3;effectState:'unknown'}>;
+type ScriptActionStateJson = null | boolean | number | string | ScriptActionStateJson[] | {[key:string]:ScriptActionStateJson};
+type ScriptActionStateEntry = Readonly<{present:false} | {present:true;value:ScriptActionStateJson}>;
+type ScriptActionStateSnapshot = Readonly<{revision:string;entry:ScriptActionStateEntry}>;
+type ScriptActionStateCas = Readonly<{status:'committed'|'conflict';current:ScriptActionStateSnapshot}>;
+interface ScriptActionStateFault extends Error {
+  code:'invalid_input'|'state_unavailable'|'state_busy'|'state_limit'|'state_corrupt'|'state_storage_changed'|'state_io'|'state_failed'|'action_inactive'|'cancelled'|'timeout'|'invalid_response';
+  method:'state.read'|'state.compare_and_swap';
+  effectState:'not_started'|'unknown';
+}
+interface ScriptActionStateApi {
+  /** 仅当前真实package/action；missing不补默认。session重启清空，durable需应用显式宿主。 */
+  read(area:'session'|'durable',key:string): ScriptActionStateSnapshot;
+  /** 小JSON，值<=16KiB，深度<=8，每区域最多64键；冲突不重试。 */
+  compareAndSwap(area:'session'|'durable',key:string,expectedRevision:string,next:ScriptActionStateEntry): ScriptActionStateCas;
+}
+
 type ScriptContext<Input = Record<string, any>> = Readonly<{
+    state: ScriptActionStateApi;
+    /** 同步等待同包同动作其他调用真实资源清理；排除自身。无服务作用域明确不可用。 */
+    actions: {stopOtherInstances(options?: {timeoutMs?:number}): ScriptStopOtherInstancesResult};
+
     apiVersion: 1;
     input: Input;
     /** 动作包提供；直接使用 CLI 且未传元数据时为 null。 */
@@ -259,6 +285,8 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
         start(program: string, args?: string[]): { pid: number };
     };
     ui: {
+        /** 更新本次动作自己的版本提示；透明底绿色文字，1–16 UTF-16单位。回执确认模型已更新并请求刷新，不表示动作成功或像素已呈现。 */
+        setActionHint(options: {text: string}): {updated: true};
         /** 只确认创建独立历史窗；动作结束后仍存活，关闭仅停止该窗自己的采集。无UI为ui_unavailable。 */
         openHistory(): {opened: true};
         /** 与Node入口共用本次Host的原生切换：无窗创建，已有窗等自身采集停止并移除后返回closed。

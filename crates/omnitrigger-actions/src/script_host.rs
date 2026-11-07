@@ -223,9 +223,10 @@ impl ScriptHostRuntime {
         let native = host
             .map(|_| NativeBridge::new().and_then(|bridge| Ok((bridge.configuration()?, bridge))));
         let (mut bridge, native_context) = match native {
-            Some(Ok((configuration, bridge))) => {
-                (Some(bridge), json!({"connection":configuration}))
-            }
+            Some(Ok((configuration, bridge))) => (
+                Some(bridge),
+                json!({"connection":configuration,"actions_scope":host.is_some_and(|host| host.action_scope_available()),"native_context_available":host.is_some_and(|host| host.native_context_available())}),
+            ),
             Some(Err(error)) => (None, json!({"error":error})),
             None => (None, Value::Null),
         };

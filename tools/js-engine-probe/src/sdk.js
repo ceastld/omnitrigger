@@ -7,6 +7,8 @@ let calls = 0;
 let nativeId = 0;
 const nativeContext = ctx.__nativeContext;
 delete ctx.__nativeContext;
+const actionsScope = nativeContext?.actions_scope === true;
+const nativeContextAvailable = nativeContext && nativeContext.native_context_available !== false;
 ctx.apiVersion = 1;
 if (ctx.invocation) Object.freeze(ctx.invocation);
 function call(kind, args = {}, serialized) {
@@ -42,9 +44,12 @@ ctx.delay = milliseconds => {
     call('delay', {milliseconds});
 };
 function desktopCall(method, params) {
-    if ((method === 'win32_edit.replace_selection' || method === 'clipboard.write_files' || method.startsWith('raishot.resident.')) && calls >= 32) throw Object.assign(new Error('单次脚本最多调用32次宿主API。'),{code:'desktop_call_limit',effectState:'not_started',method});
+    const actionHint = method === 'ui.action_hint';
+    if (actionHint && !actionsScope) throw Object.assign(new Error('版本提示需要当前服务调用作用域。'),{code:'ui_hint_scope_expired',effectState:'not_started',method});
+    if ((method === 'win32_edit.replace_selection' || method === 'clipboard.write_files' || method.startsWith('raishot.resident.') || method === 'state.read' || method === 'state.compare_and_swap') && calls >= 32) throw Object.assign(new Error('单次脚本最多调用32次宿主API。'),{code:'desktop_call_limit',effectState:'not_started',method});
 
-    if (!nativeContext || nativeContext.error) {
+    if (!nativeContext || nativeContext.error || !['actions.stop_other_instances','state.read','state.compare_and_swap','ui.action_hint'].includes(method) && !nativeContextAvailable) {
+        if (method === "actions.stop_other_instances") throw Object.assign(new Error("动作控制需要当前服务调用作用域。"),{code:"actions_unavailable",effectState:"not_started",method});
         if (method.startsWith('raishot.resident.')) throw Object.assign(new Error('RaiShot 常驻接口需要应用本机桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
         if (method === 'clipboard.write_files') throw Object.assign(new Error('文件列表写入需要应用本机桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
         if (method === 'win32_edit.replace_selection') throw Object.assign(new Error('Win32 Edit替换需要应用本机桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
@@ -58,7 +63,7 @@ function desktopCall(method, params) {
             throw Object.assign(new Error('数据选区 API 需要应用本机能力桥接。'), {code:'native_bridge_unavailable',effectState:'not_started',method});
         }
         const cause = nativeContext?.error;
-        const ui = method === 'ui.choose' || method === 'ui.notify' || method === 'ui.open_history' || method === 'ui.toggle_history';
+        const ui = method === 'ui.choose' || method === 'ui.notify' || method === 'ui.open_history' || method === 'ui.toggle_history' || actionHint;
         if (method === 'fs.stat' || method === 'fs.read_directory') throw Object.assign(new Error('文件状态 API 需要本机宿主。'), {code:'fs_unavailable',effectState:'not_started',method});
         const code = ui && cause?.code === 'desktop_unavailable' ? 'ui_unavailable' : cause?.code;
         throw Object.assign(new Error(cause?.message ?? (method.startsWith('browser.') ? '浏览器 API 需要 OmniTrigger 应用宿主。' : ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '桌面 API 需要 OmniTrigger 本次动作的目标上下文。')), {
@@ -80,6 +85,14 @@ function desktopCall(method, params) {
     nativeId++;
     return call('native', request, serialized);
 }
+ctx.state = createStateApi((method, params) => {
+    if (!actionsScope) throw Object.assign(new Error('当前宿主没有动作状态作用域。'),{code:'state_unavailable',effectState:'not_started',method});
+    return desktopCall(method,params);
+});
+ctx.actions = createActionsApi((method, params) => {
+    if (!actionsScope) throw Object.assign(new Error('当前宿主没有ActionService调用作用域。'),{code:'actions_unavailable',effectState:'not_started',method});
+    return desktopCall(method,params);
+});
 const desktopApis = createDesktopApi(desktopCall);
 ctx.fs = Object.freeze({...ctx.fs, ...desktopApis.fs});
 ctx.desktop = desktopApis.desktop;
@@ -93,7 +106,7 @@ ctx.browser = createBrowserApi((method, args, options, profiles) => {
     if (value?.has_value === false) return undefined;
     throw Object.assign(new Error('浏览器调用回执格式无效。'), {code:'invalid_response',effectState:'unknown',method});
 });
-ctx.clipboard = nativeContext ? desktopApis.clipboard : Object.freeze({
+ctx.clipboard = nativeContextAvailable ? desktopApis.clipboard : Object.freeze({
     readData: desktopApis.clipboard.readData,
     writeFiles: desktopApis.clipboard.writeFiles,
     readText: () => call('read_clipboard'),

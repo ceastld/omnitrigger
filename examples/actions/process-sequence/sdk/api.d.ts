@@ -236,7 +236,33 @@ export interface OpenFileInParentFault extends Error {
   method: 'system.open_file_in_parent';
   effectState: 'not_started' | 'unknown';
 }
+export interface StopOtherInstancesFault extends Error {
+  code:'invalid_input'|'actions_unavailable'|'actions_busy'|'actions_call_limit'|'action_inactive'|'action_policy_conflict'|'action_busy'|'stop_timeout'|'timeout'|'cancelled'|'invalid_response'|'actions_failed';
+  method:'actions.stop_other_instances';
+  effectState:'not_started'|'unknown';
+}
+export type StopOtherInstancesResult = Readonly<{stoppedCount:0;effectState:'not_started'} | {stoppedCount:1|2|3;effectState:'unknown'}>;
+export type ActionStateJson = null | boolean | number | string | ActionStateJson[] | {[key:string]:ActionStateJson};
+export type ActionStateEntry = Readonly<{present:false} | {present:true;value:ActionStateJson}>;
+export type ActionStateSnapshot = Readonly<{revision:string;entry:ActionStateEntry}>;
+export type ActionStateCas = Readonly<{status:'committed'|'conflict';current:ActionStateSnapshot}>;
+export interface ActionStateFault extends Error {
+  code:'invalid_input'|'state_unavailable'|'state_busy'|'state_limit'|'state_corrupt'|'state_storage_changed'|'state_io'|'state_failed'|'action_inactive'|'cancelled'|'timeout'|'invalid_response';
+  method:'state.read'|'state.compare_and_swap';
+  effectState:'not_started'|'unknown';
+}
+export interface ActionStateApi {
+  /** 仅当前真实package/action；missing不补默认。session重启清空，durable需应用显式宿主。 */
+  read(area:'session'|'durable',key:string): Promise<ActionStateSnapshot>;
+  /** 小JSON，值<=16KiB，深度<=8，每区域最多64键；冲突不重试。 */
+  compareAndSwap(area:'session'|'durable',key:string,expectedRevision:string,next:ActionStateEntry): Promise<ActionStateCas>;
+}
+
 export interface ActionContext {
+  state: ActionStateApi;
+  /** 只操作当前服务作用域内同包同动作其他调用，排除自身；须await。 */
+  actions: {stopOtherInstances(options?: {timeoutMs?:number}): Promise<StopOtherInstancesResult>};
+
   apiVersion: 1;
   input: Record<string, any>;
   invocation: Readonly<{invocation_id: string; binding_id: string}>;
@@ -275,6 +301,8 @@ export interface ActionContext {
   };
   browser: BrowserApi;
   ui: {
+    /** 更新本次动作自己的版本提示；透明底绿色文字，1–16 UTF-16单位。回执确认模型已更新并请求刷新，不表示动作成功或像素已呈现。 */
+    setActionHint(options: {text: string}): Promise<{updated: true}>;
     /** 只确认创建独立历史窗；动作结束后仍存活，关闭仅停止该窗自己的采集。无UI为ui_unavailable。 */
     openHistory(): Promise<{opened: true}>;
     /** 无窗用本次Host原目标创建；已有窗仅关闭本窗，确认自身采集停止并移除后才返回closed。

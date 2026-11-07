@@ -7,12 +7,16 @@ use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     thread,
 };
 
+#[path = "service_actions.rs"]
+mod actions;
+
 pub const CAPACITY: usize = 4;
+const STOP_OTHER_MAX_TIMEOUT_MS: u64 = 2000;
 
 /// 只读的动作包目录；引用检查不执行脚本，也不证明业务参数或本机能力可用。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -137,6 +141,7 @@ struct Reservation {
     binding_id: u64,
     cancellation: CancellationToken,
     identity: ActionIdentity,
+    action_version: u32,
     single_instance: bool,
     /// 从接纳到运行时及本次调用资源清理结束；不等UI读取终态，不由取消请求清除。
     active: bool,
@@ -155,6 +160,7 @@ struct Reservations {
 
 struct ActiveInvocation {
     reservations: Arc<Mutex<Reservations>>,
+    active_changed: Arc<Condvar>,
     invocation_id: u64,
 }
 
@@ -167,6 +173,8 @@ impl Drop for ActiveInvocation {
         if let Some(entry) = reserved.entries.get_mut(&self.invocation_id) {
             entry.active = false;
         }
+        drop(reserved);
+        self.active_changed.notify_all();
     }
 }
 
@@ -238,9 +246,11 @@ fn runtime_panic() -> ActionOutcome {
 /// 有界的应用调用服务；正在运行和终态尚未被消费的调用共用配额。
 /// 不在 Drop 中等待用户运行时，不重试已经接纳的带副作用调用。
 pub struct ActionService {
+    state_store: Option<Arc<crate::state::ActionStateStore>>,
     catalog: PackageCatalog,
     runtimes: RuntimeRegistry,
     reservations: Arc<Mutex<Reservations>>,
+    active_changed: Arc<Condvar>,
     events_tx: SyncSender<ActionEvent>,
     events_rx: Receiver<ActionEvent>,
 }
@@ -250,15 +260,23 @@ impl ActionService {
         // 每个配额恰有一次 Started 和一次终态，不会产生无限进度日志。
         let (events_tx, events_rx) = mpsc::sync_channel(CAPACITY * 2);
         Self {
+            state_store: None,
             catalog,
             runtimes,
             reservations: Arc::new(Mutex::new(Reservations {
                 next_id: 1,
                 entries: BTreeMap::new(),
             })),
+            active_changed: Arc::new(Condvar::new()),
             events_tx,
             events_rx,
         }
+    }
+
+    /// 仅组合根显式提供；reload复用此Arc，不在动作完成后回写旧快照。
+    pub fn with_state_store(mut self, store: Arc<crate::state::ActionStateStore>) -> Self {
+        self.state_store = Some(store);
+        self
     }
 
     pub fn catalog(&self) -> &PackageCatalog {
@@ -375,6 +393,7 @@ impl ActionService {
                     binding_id: id,
                     cancellation: cancellation.clone(),
                     identity,
+                    action_version: action.call.action_version,
                     single_instance: action.definition.single_instance,
                     active: true,
                 },
@@ -386,6 +405,13 @@ impl ActionService {
             invocation_id,
             binding_id: id,
         };
+        let host = Some(actions::scoped_host(
+            host,
+            self.reservations.clone(),
+            self.active_changed.clone(),
+            invocation_id,
+            self.state_store.clone(),
+        ));
         let task = InvocationTask {
             action,
             runtime,
@@ -394,6 +420,7 @@ impl ActionService {
             cancellation,
             _active: ActiveInvocation {
                 reservations: self.reservations.clone(),
+                active_changed: self.active_changed.clone(),
                 invocation_id,
             },
         };
@@ -1339,3 +1366,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "state_service_tests.rs"]
+mod state_service_tests;

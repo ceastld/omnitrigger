@@ -806,3 +806,17 @@ wire为audio.volume_adjust，deltaPercent映射为delta_percent。返回匿名pr
 
 
 独立宿主的开发 CLI 升级、明确数据根约束及 pending marker 恢复见 [独立宿主升级与恢复](LEGACY_UPGRADE.md)。
+
+## 当前调用的动作控制
+
+Node 可使用 `await ctx.actions.stopOtherInstances({timeoutMs:500})`，Script 同步调用同一方法，取消并等待当前服务中同包同动作其他调用的资源清理。默认预算 500 毫秒，范围 1–2000 毫秒。现有 `single_instance` 策略保持不变；独立运行时没有服务作用域时明确不可用。效果状态、取消和期限语义见 [动作调用作用域](ACTIONS_SCOPE.md)。
+
+
+## 当前动作的状态
+
+Node 使用 `await ctx.state.read(area,key)` 与 `await ctx.state.compareAndSwap(area,key,revision,next)`，Script 同步调用同名方法。需要真实调用身份和服务显式提供的存储；session/durable、缺值、冲突及未知提交边界见 [当前动作的状态读写](ACTION_STATE.md)。
+
+
+## 当前动作的版本提示
+
+Node 使用 `await ctx.ui.setActionHint({text:'v123'})`，Script 同步调用同名方法。它只更新真实当前调用的界面反馈模型，不启用 desktop，也不保证像素呈现或动作成功；参数、无UI、作用域及取消边界见 [当前动作的版本提示](ACTION_VERSION_HINT.md)。

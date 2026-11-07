@@ -1,3 +1,55 @@
+declare const raiShotResidentBrand: unique symbol;
+export type RaiShotResident = Readonly<{readonly [raiShotResidentBrand]:true;window_handle:string;process_id:number;thread_id:number;process_created_file_time:string;expires_at_unix_ms:number}>;
+/** 无环境类型时的取消观察接口；不声明浏览器或Node环境全局。 */
+interface CancellationObserverSignal {
+  readonly aborted: boolean;
+  readonly reason: unknown;
+  throwIfAborted(): void;
+  onabort: CancellationObserverCallback | null;
+  addEventListener(type: 'abort', listener: CancellationObserverListener | null,
+    options?: boolean | {capture?: boolean; once?: boolean; passive?: boolean}): void;
+  removeEventListener(type: 'abort', listener: CancellationObserverListener | null,
+    options?: boolean | {capture?: boolean}): void;
+}
+interface CancellationObserverEvent {
+  readonly type: 'abort';
+  readonly target: CancellationObserverSignal | null;
+  readonly currentTarget: CancellationObserverSignal | null;
+}
+type CancellationObserverCallback =
+  (this: CancellationObserverSignal, event: CancellationObserverEvent) => void;
+type CancellationObserverListener = CancellationObserverCallback
+  | {handleEvent(event: CancellationObserverEvent): void};
+
+/** 作者已配置原生环境声明时保留AbortSignal兼容性；此类型本身不加载环境库。 */
+export type ActionCancellationSignal = typeof globalThis extends {
+  AbortSignal: {prototype: infer Signal};
+} ? Signal : CancellationObserverSignal;
+export type ActionCancellationCallback = NonNullable<ActionCancellationSignal['onabort']>;
+export type ActionCancellationEvent = Parameters<ActionCancellationCallback>[0];
+export type ActionCancellationListener = ActionCancellationCallback
+  | {handleEvent(event: ActionCancellationEvent): void};
+
+export type ExplorerContextSnapshot = Readonly<{currentDirectory:string|null;selectedPaths:readonly string[]}>;
+export type SelectionTextSnapshot = Readonly<{text:string;truncated:boolean}>;
+declare const capturedTargetBrand: unique symbol;
+export type CapturedTarget = Readonly<{
+  capture_id:number;
+  context:Readonly<{
+    window_handle:string;
+    process_id:number;
+    thread_id:number;
+    process_created_file_time:string;
+    expires_at_unix_ms:number;
+  }>;
+  [capturedTargetBrand]:true;
+}>;
+export interface CaptureForegroundOptions {
+  expectedProcessId:number;
+  expectedProcessCreatedFileTime:string;
+  validForMs:number;
+}
+
 export interface VolumeAdjustOptions {
   /** 非零整数，-100至100个百分点；运行时校验范围。 */
   deltaPercent:number;
@@ -63,7 +115,7 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'display.brightness_step' | 'audio.volume_adjust' | 'ui.choose' | 'ui.notify' | 'ui.open_history' | 'ui.toggle_history';
+  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'win32_edit.replace_selection' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'display.brightness_step' | 'audio.volume_adjust' | 'ui.choose' | 'ui.notify' | 'ui.open_history' | 'ui.toggle_history';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
 }
@@ -126,6 +178,36 @@ export interface FileStatFault extends Error {
   /** 仅此只读调用无副作用，不代表脚本之前的步骤没有副作用。 */
   effectState: 'not_started';
 }
+export interface DirectoryReadOptions {
+    maxEntries?: number;
+    order?: 'name' | 'native';
+    metadata?: boolean;
+    entryType?: 'all' | 'file' | 'directory';
+    searchPattern?: string;
+    /** 显式Windows Find匹配；不等于现代.NET托管匹配。 */
+    matchMode?: 'windows-find';
+}
+/** UTC字段为1601纪元FILETIME；LocalTicks为0001纪元本地DateTime。均为100ns十进制字符串，不转Number。 */
+export type DirectoryMetadata = Readonly<{ordinal:number;attributes:number;
+    creationTimeUtc100ns:string;lastAccessTimeUtc100ns:string;lastWriteTimeUtc100ns:string;
+    creationTimeLocalTicks100ns:string;lastAccessTimeLocalTicks100ns:string;lastWriteTimeLocalTicks100ns:string;timeZoneKey:string}>;
+export type LocalDirectoryMetadataResult = Readonly<{entries:ReadonlyArray<LocalDirectoryEntry & {readonly metadata:DirectoryMetadata}> ;complete:true}>;
+
+export type LocalDirectoryEntry = Readonly<{
+  name: string;
+  /** 保留调用者的目录原文，仅在需要时追加反斜杠及子项名。 */
+  path: string;
+  kind: 'file' | 'directory' | 'other' | 'unavailable';
+  reason: null | 'reparse_point' | 'cloud_placeholder' | 'cloud_path' | 'unsupported_name';
+}>;
+export type LocalDirectoryResult = Readonly<{entries: ReadonlyArray<LocalDirectoryEntry>; complete: true}>;
+export interface DirectoryReadFault extends Error {
+  code: 'invalid_input' | 'path_not_local' | 'path_unavailable' | 'path_missing' | 'not_directory' | 'access_denied'
+    | 'directory_too_large' | 'directory_changed' | 'fs_error' | 'fs_unavailable' | 'fs_busy' | 'cancelled' | 'timeout';
+  method: 'fs.read_directory';
+  effectState: 'not_started';
+}
+
 export interface BrowserApi {
   profiles(options?: Pick<BrowserOptions, 'timeoutMs'>): Promise<Array<{
     browser_instance_id: string;
@@ -148,7 +230,39 @@ export interface OpenFault extends Error {
   /** unknown不可当作未打开或允许重试；只描述该次API。 */
   effectState: 'not_started' | 'unknown';
 }
+export interface OpenFileInParentFault extends Error {
+  code: OpenFault['code'] | 'path_not_local' | 'path_unavailable' | 'access_denied' | 'fs_error'
+    | 'open_file_required' | 'open_directory_required';
+  method: 'system.open_file_in_parent';
+  effectState: 'not_started' | 'unknown';
+}
+export interface StopOtherInstancesFault extends Error {
+  code:'invalid_input'|'actions_unavailable'|'actions_busy'|'actions_call_limit'|'action_inactive'|'action_policy_conflict'|'action_busy'|'stop_timeout'|'timeout'|'cancelled'|'invalid_response'|'actions_failed';
+  method:'actions.stop_other_instances';
+  effectState:'not_started'|'unknown';
+}
+export type StopOtherInstancesResult = Readonly<{stoppedCount:0;effectState:'not_started'} | {stoppedCount:1|2|3;effectState:'unknown'}>;
+export type ActionStateJson = null | boolean | number | string | ActionStateJson[] | {[key:string]:ActionStateJson};
+export type ActionStateEntry = Readonly<{present:false} | {present:true;value:ActionStateJson}>;
+export type ActionStateSnapshot = Readonly<{revision:string;entry:ActionStateEntry}>;
+export type ActionStateCas = Readonly<{status:'committed'|'conflict';current:ActionStateSnapshot}>;
+export interface ActionStateFault extends Error {
+  code:'invalid_input'|'state_unavailable'|'state_busy'|'state_limit'|'state_corrupt'|'state_storage_changed'|'state_io'|'state_failed'|'action_inactive'|'cancelled'|'timeout'|'invalid_response';
+  method:'state.read'|'state.compare_and_swap';
+  effectState:'not_started'|'unknown';
+}
+export interface ActionStateApi {
+  /** 仅当前真实package/action；missing不补默认。session重启清空，durable需应用显式宿主。 */
+  read(area:'session'|'durable',key:string): Promise<ActionStateSnapshot>;
+  /** 小JSON，值<=16KiB，深度<=8，每区域最多64键；冲突不重试。 */
+  compareAndSwap(area:'session'|'durable',key:string,expectedRevision:string,next:ActionStateEntry): Promise<ActionStateCas>;
+}
+
 export interface ActionContext {
+  state: ActionStateApi;
+  /** 只操作当前服务作用域内同包同动作其他调用，排除自身；须await。 */
+  actions: {stopOtherInstances(options?: {timeoutMs?:number}): Promise<StopOtherInstancesResult>};
+
   apiVersion: 1;
   input: Record<string, any>;
   invocation: Readonly<{invocation_id: string; binding_id: string}>;
@@ -158,7 +272,11 @@ export interface ActionContext {
    * 不接收程序、参数、verb或选项，不搜索PATH、不回退run/start、不自动重试。
    * 单次系统调用不可强制抢占，迟到或无法确认的结果为unknown。 */
   open(target: string): Promise<OpenResult>;
-  signal: AbortSignal;
+  /** 普通本地文件；沿本机桥复验目标/父目录，以父目录作工作目录单次提交，须 await。
+   * 不接收目录/参数/verb选项；无桥接明确拒绝，不回退open或process.start。
+   * 成功仅确认系统接纳，错误unknown不允许据此重试。 */
+  openFileInParent(target: string): Promise<OpenResult>;
+  signal: ActionCancellationSignal;
   delay(milliseconds: number): Promise<void>;
   fs: {
     /** 普通盘符绝对路径，1–32767 UTF-16 单元；只查固定本地物理盘元数据。
@@ -167,16 +285,24 @@ export interface ActionContext {
      * 词法预检不替代平台复验。单调用内并发返回 fs_busy，传输限时 5 秒且不重试。
      */
     stat(path: string): Promise<LocalPathStat>;
+    /** 直接子项，默认 128、最多 1024；回执最多 64 KiB，超限整次拒绝。
+     * 不递归、不跟随链接、不读取内容；complete 只表示读到枚举末尾，不是原子快照。
+     * 使用与 stat 相同的本地路径守卫。OS 调用不能硬性抢占；迟到结果丢弃。 */
+    readDirectory(path: string, options: DirectoryReadOptions & {metadata:true}): Promise<LocalDirectoryMetadataResult>;
+    readDirectory(path: string, options?: DirectoryReadOptions): Promise<LocalDirectoryResult>;
   };
   process: {
     run(program: string, args?: string[], options?: {cwd?: string; allowNonZero?: boolean}): Promise<{code: number; stdout: string; stderr: string}>;
     /** 通过应用原生桥严格采集；Windows私有Job、有效UTF8、stdout/stderr合计64KiB。
      * 不回退run；无桥接/非Windows明确拒绝，取消/超时不返回部分输出。 */
     capture(program: string, args?: string[], options?: {timeoutMs?: number; allowNonZero?: boolean; cwd?: string}): Promise<{code: number; stdout: string; stderr: string}>;
-    start(program: string, args?: string[], options?: {cwd?: string}): Promise<{pid: number}>;
+    /** windowsHide 默认 true；false 只取消 Windows 隐藏请求，不保证窗口显示或激活。PID 不代表界面就绪。 */
+    start(program: string, args?: string[], options?: {cwd?: string; windowsHide?: boolean}): Promise<{pid: number}>;
   };
   browser: BrowserApi;
   ui: {
+    /** 更新本次动作自己的版本提示；透明底绿色文字，1–16 UTF-16单位。回执确认模型已更新并请求刷新，不表示动作成功或像素已呈现。 */
+    setActionHint(options: {text: string}): Promise<{updated: true}>;
     /** 只确认创建独立历史窗；动作结束后仍存活，关闭仅停止该窗自己的采集。无UI为ui_unavailable。 */
     openHistory(): Promise<{opened: true}>;
     /** 无窗用本次Host原目标创建；已有窗仅关闭本窗，确认自身采集停止并移除后才返回closed。
@@ -195,6 +321,16 @@ export interface ActionContext {
     choose(options: ChooseOptions): Promise<ChooseResult>;
   };
   desktop: {
+    /** 本次原Explorer目标，最多32个完整文件系统路径；单条1024、总计8192 UTF-16，超量拒绝。空选区为[]；虚拟目录为null；虚拟选中项报错。不复制、不读剪贴板、不补当前目录。 */
+    explorerContext(): Promise<ExplorerContextSnapshot>;
+    /** 原目标单选区；成功确认无选区/空文本时为 {text:"",truncated:false}，provider/目标/读取失败仍报错。默认 reject，显式 truncate 按请求上限取 UTF-16 前缀；拆开代理对拒绝。
+     * maxUtf16Units 为1–8192整数，默认128；仅请求上限+1，helper采集及动作结果64KiB界限不变。 */
+    readSelectionText(options?: {overflow?: 'reject' | 'truncate'; maxUtf16Units?: number}): Promise<SelectionTextSnapshot>;
+    /** 显式PID与创建时间；1–5000ms；仅捕获该进程当前前台，不激活或枚举。 */
+    captureForegroundTarget(options: CaptureForegroundOptions): Promise<CapturedTarget>;
+    /** 原desktop目标不变；每次复核身份/前台/取消/期限；仅确认提交。 */
+    sendShortcutTo(target: CapturedTarget, keys: number[], options?: {keyDownDelayMs?:number}): Promise<{submitted:true}>;
+    sendTextTo(target: CapturedTarget, text: string): Promise<{submitted:true}>;
     adjustVolume(options: VolumeAdjustOptions): Promise<VolumeAdjustResult>;
     /** 必填显式策略；逐项检查回执，无自动重试或补偿。 */
     stepBrightness(options: BrightnessStepOptions): Promise<BrightnessStepResult>;
@@ -206,6 +342,13 @@ export interface ActionContext {
     sendShortcut(keys: number[], options?: {keyDownDelayMs?: number; timing?: never} | {timing: ShortcutTiming; keyDownDelayMs?: never}): Promise<{submitted: true}>;
     /** 修饰键跨越整组普通键；延迟在修饰键就绪后、每个普通键按下后等待。 */
     sendKeySequence(modifiers: number[], keys: number[], options?: {keyDownDelayMs?: number}): Promise<{submitted: true}>;
+    /** 只查固定隐藏常驻类，返回本ctx的一次性5秒身份快照；不读取依赖目录，不启动进程，不认证程序版本。 */
+    findRaiShotResident(): Promise<RaiShotResident | null>;
+    /** 复验身份后投递固定WM_APP+3；只确认入队，不确认截图；身份复验与PostMessage非原子，未知结果不重试。 */
+    requestRaiShotRegion(resident:RaiShotResident): Promise<{queued:true;screenshotCompleted:false}>;
+    /** 显式跨进程Unicode标准Edit适配；必选adapter，不猜控件或回退。最多8192 UTF-16单元，不含NUL。
+     * 单条EM_REPLACESEL；仅确认消息处理，不确认正文接受；不与UIA读取原子绑定，超时/写后取消为unknown。 */
+    win32EditReplaceSelection(text: string, options: {adapter:'native-edit'|'winforms-edit'}): Promise<{messageProcessed:true;effectState:'unknown'}>;
     /** Unicode 直接输入，不使用剪贴板。最多 65,536 个 UTF-16 单元，无 NUL。 */
     sendText(text: string): Promise<{submitted: true}>;
     /** 向原目标发送 Ctrl+C 并读取新文本。复制结果保留在剪贴板。 */
@@ -216,8 +359,10 @@ export interface ActionContext {
      * 客户端最多等待 8 秒；不能保证取消立即抢占阻塞 Win32 调用。
      */
     copySelectionData(options?: SelectionCopyOptions): Promise<SelectionDataSnapshot>;
-    /** 操作本次捕获且仍为前台的窗口；仅表示系统接纳请求，关闭可能弹出保存提示。 */
-    windowAction(operation: 'toggle_maximize' | 'minimize' | 'close'): Promise<{submitted: true}>;
+    /** 操作本次捕获且仍为前台的窗口；仅表示系统接纳请求，关闭可能弹出保存提示。
+     * toggle_topmost按提交前原窗口状态切换置顶；不激活、移动或缩放窗口。
+     * 沿用本次动作取消和期限；提交后的迟到或取消不撤销已提交操作。 */
+    windowAction(operation: 'toggle_maximize' | 'toggle_topmost' | 'minimize' | 'close'): Promise<{submitted: true}>;
   };
   clipboard: {
     history: import('./clipboard-history-api').AsyncClipboardHistoryApi;
@@ -229,6 +374,10 @@ export interface ActionContext {
      * 无支持格式抛 unsupported_clipboard_format，不将图片/自定义格式当空文本。
      */
     readData(): Promise<ClipboardDataSnapshot>;
+    /** 应用桥接写Unicode CF_HDROP；1–64项绝对Windows路径，总UTF-16不超65536。
+     * 不查询或打开路径，不复制磁盘文件，不粘贴；替换全部剪贴板格式且不自动恢复。
+     * 清空后的失败/取消为unknown；sequenceNumber仅为观察值，不证明独占或文件存在。 */
+    writeFiles(paths: readonly string[]): Promise<{written:true;sequenceNumber:number}>;
     /** 替换全部格式，不自动恢复。excludeFromHistory 为临时回贴请求排除历史采集；仅遵守标记的采集器有效。 */
     writeText(text: string, options?: {excludeFromHistory?: boolean}): Promise<{written: true; sequenceNumber: number; writeId?: string}>;
   };

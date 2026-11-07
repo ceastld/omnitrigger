@@ -117,7 +117,19 @@ jobs:
             npm run check
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally { Pop-Location }
-          node --test tools/script-sdk-check/action-signal-types.test.mjs tools/script-sdk-check/script-project-write.test.mjs tools/script-sdk-check/compiler-config-location.test.mjs
+          node --test tools/script-sdk-check/action-signal-types.test.mjs tools/script-sdk-check/script-project-write.test.mjs crates/omnitrigger-actions/runtime/actions-api.test.mjs tests/actions_scope_node_sdk.test.mjs tools/script-sdk-check/node-host-composition.test.mjs tools/script-sdk-check/script-sdk-composition.test.mjs tests/state_api.test.mjs tests/ui_action_hint_sdk.test.mjs tools/script-sdk-check/compiler-config-location.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/actions_scope_node.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/actions_scope_script.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/state_api_node.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/state_api_script.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/action_hint_node.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/action_hint_script.types.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check.mjs target/debug/omnitrigger.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -447,7 +459,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 构建两种引擎并测量体积
-        run: ./measure.ps1
+        run: |
+          ./measure.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $scopedPreviousNode = $env:OMNITRIGGER_TEST_NODE
+          $scopedPreviousHost = $env:OMNITRIGGER_TEST_SCRIPT_HOST
+          try {
+            $env:OMNITRIGGER_TEST_NODE = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = (Resolve-Path -LiteralPath './results/quickjs-release.exe').Path
+            cargo test --locked --manifest-path ../../Cargo.toml -p omnitrigger-actions --test scoped_actions_runtime -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            $env:OMNITRIGGER_TEST_NODE = $scopedPreviousNode
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = $scopedPreviousHost
+          }
 
       - name: 验证输出采集的自有夹具与宿主退出收尾
         run: |
@@ -507,6 +532,7 @@ jobs:
             foreach ($name in $nodeVariables) { [Environment]::SetEnvironmentVariable($name, $nodeExecutable, 'Process') }
             foreach ($engine in @('boa', 'quickjs')) {
               $env:OMNITRIGGER_TEST_SCRIPT_HOST = Join-Path $PWD "results/$engine-small.exe"
+              # 同时覆盖真实动作提示、State与Scope；每个引擎只运行一遍。
               cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --tests -- --ignored --skip _history_ --test-threads=1
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }

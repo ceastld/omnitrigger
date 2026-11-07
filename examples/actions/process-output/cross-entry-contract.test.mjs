@@ -8,7 +8,7 @@ import {main as scriptMain} from './main-script.mjs';
 
 const runtime=new URL('../../../crates/omnitrigger-actions/runtime/',import.meta.url);
 const createDesktopApi=runInNewContext(readFileSync(new URL('desktop-api.js',runtime),'utf8')+'\ncreateDesktopApi;');
-const sdk=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js']
+const sdk=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js','state-api.js']
   .map(name=>readFileSync(new URL(name,runtime),'utf8')).join('\n')
   +'\n'+readFileSync(new URL('../../../tools/js-engine-probe/src/sdk.js',import.meta.url),'utf8');
 const input={program:'C:\\OwnedFixture\\program.exe',cwd:'C:\\OwnedFixture',args:['','空 格','"quoted"','C:\\tail\\']};

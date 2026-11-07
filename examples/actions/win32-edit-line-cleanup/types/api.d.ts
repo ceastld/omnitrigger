@@ -1,3 +1,5 @@
+declare const raiShotResidentBrand: unique symbol;
+export type RaiShotResident = Readonly<{readonly [raiShotResidentBrand]:true;window_handle:string;process_id:number;thread_id:number;process_created_file_time:string;expires_at_unix_ms:number}>;
 /** 无环境类型时的取消观察接口；不声明浏览器或Node环境全局。 */
 interface CancellationObserverSignal {
   readonly aborted: boolean;
@@ -176,6 +178,21 @@ export interface FileStatFault extends Error {
   /** 仅此只读调用无副作用，不代表脚本之前的步骤没有副作用。 */
   effectState: 'not_started';
 }
+export interface DirectoryReadOptions {
+    maxEntries?: number;
+    order?: 'name' | 'native';
+    metadata?: boolean;
+    entryType?: 'all' | 'file' | 'directory';
+    searchPattern?: string;
+    /** 显式Windows Find匹配；不等于现代.NET托管匹配。 */
+    matchMode?: 'windows-find';
+}
+/** UTC字段为1601纪元FILETIME；LocalTicks为0001纪元本地DateTime。均为100ns十进制字符串，不转Number。 */
+export type DirectoryMetadata = Readonly<{ordinal:number;attributes:number;
+    creationTimeUtc100ns:string;lastAccessTimeUtc100ns:string;lastWriteTimeUtc100ns:string;
+    creationTimeLocalTicks100ns:string;lastAccessTimeLocalTicks100ns:string;lastWriteTimeLocalTicks100ns:string;timeZoneKey:string}>;
+export type LocalDirectoryMetadataResult = Readonly<{entries:ReadonlyArray<LocalDirectoryEntry & {readonly metadata:DirectoryMetadata}> ;complete:true}>;
+
 export type LocalDirectoryEntry = Readonly<{
   name: string;
   /** 保留调用者的目录原文，仅在需要时追加反斜杠及子项名。 */
@@ -219,7 +236,33 @@ export interface OpenFileInParentFault extends Error {
   method: 'system.open_file_in_parent';
   effectState: 'not_started' | 'unknown';
 }
+export interface StopOtherInstancesFault extends Error {
+  code:'invalid_input'|'actions_unavailable'|'actions_busy'|'actions_call_limit'|'action_inactive'|'action_policy_conflict'|'action_busy'|'stop_timeout'|'timeout'|'cancelled'|'invalid_response'|'actions_failed';
+  method:'actions.stop_other_instances';
+  effectState:'not_started'|'unknown';
+}
+export type StopOtherInstancesResult = Readonly<{stoppedCount:0;effectState:'not_started'} | {stoppedCount:1|2|3;effectState:'unknown'}>;
+export type ActionStateJson = null | boolean | number | string | ActionStateJson[] | {[key:string]:ActionStateJson};
+export type ActionStateEntry = Readonly<{present:false} | {present:true;value:ActionStateJson}>;
+export type ActionStateSnapshot = Readonly<{revision:string;entry:ActionStateEntry}>;
+export type ActionStateCas = Readonly<{status:'committed'|'conflict';current:ActionStateSnapshot}>;
+export interface ActionStateFault extends Error {
+  code:'invalid_input'|'state_unavailable'|'state_busy'|'state_limit'|'state_corrupt'|'state_storage_changed'|'state_io'|'state_failed'|'action_inactive'|'cancelled'|'timeout'|'invalid_response';
+  method:'state.read'|'state.compare_and_swap';
+  effectState:'not_started'|'unknown';
+}
+export interface ActionStateApi {
+  /** 仅当前真实package/action；missing不补默认。session重启清空，durable需应用显式宿主。 */
+  read(area:'session'|'durable',key:string): Promise<ActionStateSnapshot>;
+  /** 小JSON，值<=16KiB，深度<=8，每区域最多64键；冲突不重试。 */
+  compareAndSwap(area:'session'|'durable',key:string,expectedRevision:string,next:ActionStateEntry): Promise<ActionStateCas>;
+}
+
 export interface ActionContext {
+  state: ActionStateApi;
+  /** 只操作当前服务作用域内同包同动作其他调用，排除自身；须await。 */
+  actions: {stopOtherInstances(options?: {timeoutMs?:number}): Promise<StopOtherInstancesResult>};
+
   apiVersion: 1;
   input: Record<string, any>;
   invocation: Readonly<{invocation_id: string; binding_id: string}>;
@@ -245,17 +288,21 @@ export interface ActionContext {
     /** 直接子项，默认 128、最多 1024；回执最多 64 KiB，超限整次拒绝。
      * 不递归、不跟随链接、不读取内容；complete 只表示读到枚举末尾，不是原子快照。
      * 使用与 stat 相同的本地路径守卫。OS 调用不能硬性抢占；迟到结果丢弃。 */
-    readDirectory(path: string, options?: {maxEntries?: number}): Promise<LocalDirectoryResult>;
+    readDirectory(path: string, options: DirectoryReadOptions & {metadata:true}): Promise<LocalDirectoryMetadataResult>;
+    readDirectory(path: string, options?: DirectoryReadOptions): Promise<LocalDirectoryResult>;
   };
   process: {
     run(program: string, args?: string[], options?: {cwd?: string; allowNonZero?: boolean}): Promise<{code: number; stdout: string; stderr: string}>;
     /** 通过应用原生桥严格采集；Windows私有Job、有效UTF8、stdout/stderr合计64KiB。
      * 不回退run；无桥接/非Windows明确拒绝，取消/超时不返回部分输出。 */
     capture(program: string, args?: string[], options?: {timeoutMs?: number; allowNonZero?: boolean; cwd?: string}): Promise<{code: number; stdout: string; stderr: string}>;
-    start(program: string, args?: string[], options?: {cwd?: string}): Promise<{pid: number}>;
+    /** windowsHide 默认 true；false 只取消 Windows 隐藏请求，不保证窗口显示或激活。PID 不代表界面就绪。 */
+    start(program: string, args?: string[], options?: {cwd?: string; windowsHide?: boolean}): Promise<{pid: number}>;
   };
   browser: BrowserApi;
   ui: {
+    /** 更新本次动作自己的版本提示；透明底绿色文字，1–16 UTF-16单位。回执确认模型已更新并请求刷新，不表示动作成功或像素已呈现。 */
+    setActionHint(options: {text: string}): Promise<{updated: true}>;
     /** 只确认创建独立历史窗；动作结束后仍存活，关闭仅停止该窗自己的采集。无UI为ui_unavailable。 */
     openHistory(): Promise<{opened: true}>;
     /** 无窗用本次Host原目标创建；已有窗仅关闭本窗，确认自身采集停止并移除后才返回closed。
@@ -295,6 +342,10 @@ export interface ActionContext {
     sendShortcut(keys: number[], options?: {keyDownDelayMs?: number; timing?: never} | {timing: ShortcutTiming; keyDownDelayMs?: never}): Promise<{submitted: true}>;
     /** 修饰键跨越整组普通键；延迟在修饰键就绪后、每个普通键按下后等待。 */
     sendKeySequence(modifiers: number[], keys: number[], options?: {keyDownDelayMs?: number}): Promise<{submitted: true}>;
+    /** 只查固定隐藏常驻类，返回本ctx的一次性5秒身份快照；不读取依赖目录，不启动进程，不认证程序版本。 */
+    findRaiShotResident(): Promise<RaiShotResident | null>;
+    /** 复验身份后投递固定WM_APP+3；只确认入队，不确认截图；身份复验与PostMessage非原子，未知结果不重试。 */
+    requestRaiShotRegion(resident:RaiShotResident): Promise<{queued:true;screenshotCompleted:false}>;
     /** 显式跨进程Unicode标准Edit适配；必选adapter，不猜控件或回退。最多8192 UTF-16单元，不含NUL。
      * 单条EM_REPLACESEL；仅确认消息处理，不确认正文接受；不与UIA读取原子绑定，超时/写后取消为unknown。 */
     win32EditReplaceSelection(text: string, options: {adapter:'native-edit'|'winforms-edit'}): Promise<{messageProcessed:true;effectState:'unknown'}>;
@@ -323,6 +374,10 @@ export interface ActionContext {
      * 无支持格式抛 unsupported_clipboard_format，不将图片/自定义格式当空文本。
      */
     readData(): Promise<ClipboardDataSnapshot>;
+    /** 应用桥接写Unicode CF_HDROP；1–64项绝对Windows路径，总UTF-16不超65536。
+     * 不查询或打开路径，不复制磁盘文件，不粘贴；替换全部剪贴板格式且不自动恢复。
+     * 清空后的失败/取消为unknown；sequenceNumber仅为观察值，不证明独占或文件存在。 */
+    writeFiles(paths: readonly string[]): Promise<{written:true;sequenceNumber:number}>;
     /** 替换全部格式，不自动恢复。excludeFromHistory 为临时回贴请求排除历史采集；仅遵守标记的采集器有效。 */
     writeText(text: string, options?: {excludeFromHistory?: boolean}): Promise<{written: true; sequenceNumber: number; writeId?: string}>;
   };

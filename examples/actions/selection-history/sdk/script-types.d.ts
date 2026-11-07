@@ -1,3 +1,37 @@
+declare const scriptRaiShotResidentBrand: unique symbol;
+type ScriptRaiShotResident = Readonly<{readonly [scriptRaiShotResidentBrand]:true;window_handle:string;process_id:number;thread_id:number;process_created_file_time:string;expires_at_unix_ms:number}>;
+type ScriptExplorerContextSnapshot = Readonly<{currentDirectory:string|null;selectedPaths:readonly string[]}>;
+type ScriptSelectionTextSnapshot = Readonly<{text:string;truncated:boolean}>;
+declare const scriptCapturedTargetBrand: unique symbol;
+type ScriptCapturedTarget = Readonly<{
+    capture_id:number;
+    context:Readonly<{
+        window_handle:string;
+        process_id:number;
+        thread_id:number;
+        process_created_file_time:string;
+        expires_at_unix_ms:number;
+    }>;
+    [scriptCapturedTargetBrand]:true;
+}>;
+interface ScriptCaptureForegroundOptions {
+    expectedProcessId:number;
+    expectedProcessCreatedFileTime:string;
+    validForMs:number;
+}
+
+interface ScriptVolumeAdjustOptions {
+  /** 非零整数，-100至100个百分点；运行时校验范围。 */
+  deltaPercent:number;
+}
+/** 默认多媒体输出端点；独立读回不保证与请求相同，不返回设备标识。 */
+type ScriptVolumeAdjustResult = {
+  effectState:'unknown';
+  previousPercent:number;
+  requestedPercent:number;
+  currentPercent:number;
+};
+
 interface ScriptBrightnessStepOptions {
   direction:'up'|'down';
   strategy:'physical'|'wmi_first'|'physical_then_wmi';
@@ -34,8 +68,8 @@ type ScriptBrightnessStepResult=
 type ScriptJsonValue = null | boolean | number | string | readonly ScriptJsonValue[] | {
     readonly [key: string]: ScriptJsonValue;
 };
-/** 标准同步入口。用 @type {ScriptMain} 标注 main，可同时检查上下文与返回值。 */
-type ScriptMain = (ctx: ScriptContext) => ScriptJsonValue;
+/** 标准同步入口。@type {ScriptMain} 检查上下文与返回值，也可用 ScriptMain<MyInput> 检查输入字段；不校验运行时参数。 */
+type ScriptMain<Input = Record<string, any>> = (ctx: ScriptContext<Input>) => ScriptJsonValue;
 
 /** 同步宿主 API。原生异常可在脚本中 catch，并通过 error.code 区分。 */
 interface ScriptDesktopFault extends Error {
@@ -105,6 +139,36 @@ interface ScriptFileStatFault extends Error {
     /** 仅此只读调用无副作用，不涵盖此前脚本步骤。 */
     effectState: 'not_started';
 }
+interface ScriptDirectoryReadOptions {
+    maxEntries?: number;
+    order?: 'name' | 'native';
+    metadata?: boolean;
+    entryType?: 'all' | 'file' | 'directory';
+    searchPattern?: string;
+    /** 显式Windows Find匹配；不等于现代.NET托管匹配。 */
+    matchMode?: 'windows-find';
+}
+/** UTC字段为1601纪元FILETIME；LocalTicks为0001纪元本地DateTime。均为100ns十进制字符串，不转Number。 */
+type ScriptDirectoryMetadata = Readonly<{ordinal:number;attributes:number;
+    creationTimeUtc100ns:string;lastAccessTimeUtc100ns:string;lastWriteTimeUtc100ns:string;
+    creationTimeLocalTicks100ns:string;lastAccessTimeLocalTicks100ns:string;lastWriteTimeLocalTicks100ns:string;timeZoneKey:string}>;
+type ScriptLocalDirectoryMetadataResult = Readonly<{entries:ReadonlyArray<ScriptLocalDirectoryEntry & {readonly metadata:ScriptDirectoryMetadata}> ;complete:true}>;
+
+type ScriptLocalDirectoryEntry = Readonly<{
+  name: string;
+  /** 保留调用者的目录原文，仅在需要时追加反斜杠及子项名。 */
+  path: string;
+  kind: 'file' | 'directory' | 'other' | 'unavailable';
+  reason: null | 'reparse_point' | 'cloud_placeholder' | 'cloud_path' | 'unsupported_name';
+}>;
+type ScriptLocalDirectoryResult = Readonly<{entries: ReadonlyArray<ScriptLocalDirectoryEntry>; complete: true}>;
+interface ScriptDirectoryReadFault extends Error {
+  code: 'invalid_input' | 'path_not_local' | 'path_unavailable' | 'path_missing' | 'not_directory' | 'access_denied'
+    | 'directory_too_large' | 'directory_changed' | 'fs_error' | 'fs_unavailable' | 'fs_busy' | 'cancelled' | 'timeout';
+  method: 'fs.read_directory';
+  effectState: 'not_started';
+}
+
 interface ScriptBrowserOptions {
     /** browser_instance_id，省略时只接受恰好一个已连接 profile。 */
     profile?: string;
@@ -148,9 +212,35 @@ interface ScriptClipboardHistoryApi {
   remove(options: {id: ScriptHistoryDecimal}): ScriptClipboardHistoryRemove;
 }
 
-type ScriptContext = Readonly<{
+interface ScriptStopOtherInstancesFault extends Error {
+  code:'invalid_input'|'actions_unavailable'|'actions_busy'|'actions_call_limit'|'action_inactive'|'action_policy_conflict'|'action_busy'|'stop_timeout'|'timeout'|'cancelled'|'invalid_response'|'actions_failed';
+  method:'actions.stop_other_instances';
+  effectState:'not_started'|'unknown';
+}
+type ScriptStopOtherInstancesResult = Readonly<{stoppedCount:0;effectState:'not_started'} | {stoppedCount:1|2|3;effectState:'unknown'}>;
+type ScriptActionStateJson = null | boolean | number | string | ScriptActionStateJson[] | {[key:string]:ScriptActionStateJson};
+type ScriptActionStateEntry = Readonly<{present:false} | {present:true;value:ScriptActionStateJson}>;
+type ScriptActionStateSnapshot = Readonly<{revision:string;entry:ScriptActionStateEntry}>;
+type ScriptActionStateCas = Readonly<{status:'committed'|'conflict';current:ScriptActionStateSnapshot}>;
+interface ScriptActionStateFault extends Error {
+  code:'invalid_input'|'state_unavailable'|'state_busy'|'state_limit'|'state_corrupt'|'state_storage_changed'|'state_io'|'state_failed'|'action_inactive'|'cancelled'|'timeout'|'invalid_response';
+  method:'state.read'|'state.compare_and_swap';
+  effectState:'not_started'|'unknown';
+}
+interface ScriptActionStateApi {
+  /** 仅当前真实package/action；missing不补默认。session重启清空，durable需应用显式宿主。 */
+  read(area:'session'|'durable',key:string): ScriptActionStateSnapshot;
+  /** 小JSON，值<=16KiB，深度<=8，每区域最多64键；冲突不重试。 */
+  compareAndSwap(area:'session'|'durable',key:string,expectedRevision:string,next:ScriptActionStateEntry): ScriptActionStateCas;
+}
+
+type ScriptContext<Input = Record<string, any>> = Readonly<{
+    state: ScriptActionStateApi;
+    /** 同步等待同包同动作其他调用真实资源清理；排除自身。无服务作用域明确不可用。 */
+    actions: {stopOtherInstances(options?: {timeoutMs?:number}): ScriptStopOtherInstancesResult};
+
     apiVersion: 1;
-    input: Record<string, any>;
+    input: Input;
     /** 动作包提供；直接使用 CLI 且未传元数据时为 null。 */
     invocation: Readonly<{invocation_id: string; binding_id: string}> | null;
     packageRoot: string | null;
@@ -163,6 +253,11 @@ type ScriptContext = Readonly<{
          * 5 秒短时 RPC，不重试；元数据非原子，后续打开须重新检查。
          */
         stat(path: string): ScriptLocalPathStat;
+        /** 直接子项，默认 128、最多 1024；回执最多 64 KiB，超限整次拒绝。
+         * 不递归、不跟随链接、不读取内容；complete 只表示读到枚举末尾，不是原子快照。
+         * 使用与 stat 相同的本地路径守卫。OS 调用不能硬性抢占；迟到结果丢弃。 */
+        readDirectory(path: string, options: ScriptDirectoryReadOptions & {metadata:true}): ScriptLocalDirectoryMetadataResult;
+    readDirectory(path: string, options?: ScriptDirectoryReadOptions): ScriptLocalDirectoryResult;
         /** UTF-8 文件，绝对路径，最多 64 KiB。 */
         readText(path: string): string;
         /** 默认不覆盖；不自动创建目录。失败可能留下部分文件。 */
@@ -190,6 +285,8 @@ type ScriptContext = Readonly<{
         start(program: string, args?: string[]): { pid: number };
     };
     ui: {
+        /** 更新本次动作自己的版本提示；透明底绿色文字，1–16 UTF-16单位。回执确认模型已更新并请求刷新，不表示动作成功或像素已呈现。 */
+        setActionHint(options: {text: string}): {updated: true};
         /** 只确认创建独立历史窗；动作结束后仍存活，关闭仅停止该窗自己的采集。无UI为ui_unavailable。 */
         openHistory(): {opened: true};
         /** 与Node入口共用本次Host的原生切换：无窗创建，已有窗等自身采集停止并移除后返回closed。
@@ -208,6 +305,17 @@ type ScriptContext = Readonly<{
         choose(options: ScriptChooseOptions): ScriptChooseResult;
     };
     desktop: {
+        /** 本次原Explorer目标，最多32个完整文件系统路径；单条1024、总计8192 UTF-16，超量拒绝。空选区为[]；虚拟目录为null；虚拟选中项报错。不复制、不读剪贴板、不补当前目录。 */
+        explorerContext(): ScriptExplorerContextSnapshot;
+        /** 原目标单选区；成功确认无选区/空文本时为 {text:"",truncated:false}，provider/目标/读取失败仍报错。默认 reject，显式 truncate 按请求上限取 UTF-16 前缀；拆开代理对拒绝。
+         * maxUtf16Units 为1–8192整数，默认128；仅请求上限+1，helper采集及动作结果64KiB界限不变。 */
+        readSelectionText(options?: {overflow?: 'reject' | 'truncate'; maxUtf16Units?: number}): ScriptSelectionTextSnapshot;
+        /** 显式PID与创建时间；1–5000ms；仅捕获该进程当前前台，不激活或枚举。 */
+        captureForegroundTarget(options: ScriptCaptureForegroundOptions): ScriptCapturedTarget;
+        /** 原desktop目标不变；每次复核身份/前台/取消/期限；仅确认提交。 */
+        sendShortcutTo(target: ScriptCapturedTarget, keys: number[], options?: {keyDownDelayMs?:number}): {submitted:true};
+        sendTextTo(target: ScriptCapturedTarget, text: string): {submitted:true};
+        adjustVolume(options: ScriptVolumeAdjustOptions): ScriptVolumeAdjustResult;
         /** 同步，参数与Node入口共用严格工厂；逐项检查回执。 */
         stepBrightness(options: ScriptBrightnessStepOptions): ScriptBrightnessStepResult;
         /** 本次提交时捕获的目标，不在调用时重新选择前台；独立 CLI 不提供目标。 */
@@ -217,6 +325,13 @@ type ScriptContext = Readonly<{
         /** VK 整数，修饰键在前。仅确认系统接纳输入。 */
         sendShortcut(keys: number[], options?: {keyDownDelayMs?: number; timing?: never} | {timing: ScriptShortcutTiming; keyDownDelayMs?: never}): {submitted: true};
         sendKeySequence(modifiers: number[], keys: number[], options?: {keyDownDelayMs?: number}): {submitted: true};
+        /** 只查固定隐藏常驻类，返回本ctx的一次性5秒身份快照；不读取依赖目录，不启动进程，不认证程序版本。 */
+        findRaiShotResident(): ScriptRaiShotResident | null;
+        /** 复验身份后投递固定WM_APP+3；只确认入队，不确认截图；身份复验与PostMessage非原子，未知结果不重试。 */
+        requestRaiShotRegion(resident:ScriptRaiShotResident): {queued:true;screenshotCompleted:false};
+        /** 显式跨进程Unicode标准Edit适配；必选adapter，不猜控件或回退。最多8192 UTF-16单元，不含NUL。
+         * 单条EM_REPLACESEL；仅确认消息处理，不确认正文接受；不与UIA读取原子绑定，超时/写后取消为unknown。 */
+        win32EditReplaceSelection(text: string, options: {adapter:'native-edit'|'winforms-edit'}): {messageProcessed:true;effectState:'unknown'};
         /** 有效 Unicode，无 NUL，最多 65,536 个 UTF-16 单元，不经过剪贴板。 */
         sendText(text: string): {submitted: true};
         /** 向原目标发送 Ctrl+C 并读取新文本，复制结果保留在剪贴板。 */
@@ -227,7 +342,7 @@ type ScriptContext = Readonly<{
          */
         copySelectionData(options?: ScriptSelectionCopyOptions): ScriptSelectionDataSnapshot;
         /** 操作本次捕获且仍为前台的窗口；仅表示系统接纳请求，关闭可能弹出保存提示。 */
-        windowAction(operation: 'toggle_maximize' | 'minimize' | 'close'): {submitted: true};
+        windowAction(operation: 'toggle_maximize' | 'toggle_topmost' | 'minimize' | 'close'): {submitted: true};
     };
     browser: {
         profiles(options?: Pick<ScriptBrowserOptions, 'timeoutMs'>): Array<{browser_instance_id: string; session_id: string; name: string; [key: string]: unknown}>;
@@ -245,9 +360,15 @@ type ScriptContext = Readonly<{
          * 不支持格式抛 unsupported_clipboard_format，不查询或打开路径。
          */
         readData(): ScriptClipboardDataSnapshot;
+        /** 应用桥接写Unicode CF_HDROP；1–64项绝对Windows路径，总UTF-16不超65536。
+         * 不查询或打开路径，不复制磁盘文件，不粘贴；替换全部剪贴板格式且不自动恢复。
+         * 清空后的失败/取消为unknown；sequenceNumber仅为观察值，不证明独占或文件存在。 */
+        writeFiles(paths: readonly string[]): {written:true;sequenceNumber:number};
         /** 替换全部格式。独立 CLI 不支持选项并返回 void；应用接入返回写入回执。 */
         writeText(text: string, options?: {excludeFromHistory?: boolean}): void | {written: true; sequenceNumber: number; writeId?: string};
     };
     /** 系统接纳请求，不等于网页或文件已经打开完成。 */
     open(target: string): void;
+    /** 普通本地文件；显式使用文件父目录为工作目录。复验元数据，单次提交，不等待关联程序退出。 */
+    openFileInParent(target: string): void;
 }>;

@@ -355,6 +355,104 @@ test('create失败诊断区分回复和SDK阶段，不泄露回复或采用未�
   }
 });
 
+test('state canonical的LF和CRLF声明都可继续刷新且保留作者文件',()=>{
+  for(const layout of ['sdk','flat']){
+    const item=portableFixture(layout),before=item.authorFiles.map(name=>readFileSync(join(item.project,name)));
+    for(const name of ['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts',...(item.prefix?['script-api.d.ts']:[])]){
+      const file=join(item.project,item.prefix+name);writeFileSync(file,readFileSync(file,'utf8').replaceAll('\r\n','\n').replaceAll('\n','\r\n'));
+    }
+    const result=refreshPortable(item);assert.ifError(result.error);assert.equal(result.status,0,result.stderr);
+    for(const [i,name] of item.authorFiles.entries())assert.deepEqual(readFileSync(join(item.project,name)),before[i]);
+    for(const name of ['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts',...(item.prefix?['script-api.d.ts']:[])])assert.deepEqual(readFileSync(join(item.project,item.prefix+name)),readFileSync(join(item.source,'crates/omnitrigger-actions/runtime',name)));
+  }
+});
+
+test('state Script生成布局的api.d.ts别名刷新仍使用同步声明',()=>{
+  for(const label of ['common-desktop','common-search']){
+    const root=mkdtempSync(join(parent,'state-alias-')),project=join(root,label);mkdirSync(join(project,'sdk'),{recursive:true});
+    const old=readFileSync(join(repo,'crates/omnitrigger-actions/runtime/script-types.d.ts'),'utf8').replaceAll('\r\n','\n').replaceAll('\n','\r\n');
+    writeFileSync(join(project,'sdk/api.d.ts'),old);
+    writeFileSync(join(project,'action.json'),JSON.stringify({schema_version:1,id:'synthetic.'+label,actions:[{id:'script',runtime:'script',entry:'main.mjs'}]}));
+    writeFileSync(join(project,'main.mjs'),"throw Error('AUTHOR INITIALIZER MUST NOT RUN');\n");
+    const files=['main.mjs','action.json'],before=files.map(name=>readFileSync(join(project,name)));
+    const result=spawnSync(process.execPath,[join(repo,'tools/script-project.mjs'),'refresh','--runtime','script','--project',project],{encoding:'utf8',windowsHide:true,timeout:60000});
+    assert.ifError(result.error);assert.equal(result.status,0,result.stderr);
+    assert.deepEqual(readFileSync(join(project,'sdk/api.d.ts')),readFileSync(join(repo,'crates/omnitrigger-actions/runtime/script-types.d.ts')));
+    for(const [i,name] of files.entries())assert.deepEqual(readFileSync(join(project,name)),before[i]);
+    assert.equal(JSON.parse(result.stdout).author_code_executed,false);
+  }
+});
+
+test('state第一方声明副本按实际Node或Script语义与canonical一致且严格检查',()=>{
+  const canonical=join(repo,'crates/omnitrigger-actions/runtime'),node=readFileSync(join(canonical,'api.d.ts'),'utf8'),script=readFileSync(join(canonical,'script-types.d.ts'),'utf8');
+  assert(node.includes('state: ActionStateApi'));assert(script.includes('state: ScriptActionStateApi'));
+  const files=[];
+  for(const entry of readdirSync(join(repo,'examples/actions'),{withFileTypes:true})){
+    if(!entry.isDirectory()||entry.isSymbolicLink())continue;
+    for(const folder of ['sdk','types']){
+      const root=join(repo,'examples/actions',entry.name,folder);
+      let names;try{names=readdirSync(root);}catch(error){if(error.code==='ENOENT')continue;throw error;}
+      for(const name of names){
+        if(!name.endsWith('.d.ts'))continue;const file=join(root,name),source=readFileSync(file,'utf8');
+        const kind=source.includes('export interface ActionContext')?'node':/\btype ScriptContext\b/.test(source)?'script':null;
+        if(kind){assert.equal(source,kind==='node'?node:script,file);files.push({file,kind});}
+      }
+    }
+  }
+  assert(files.length>=29,'必须覆盖现有第一方声明副本');
+  for(const item of files){
+    const virtual=join(dirname(item.file),'__state_contract__.ts');
+    const source=(item.kind==='node'?"import type {ActionContext} from './api';\ndeclare const ctx:ActionContext;\n":"export {};\ndeclare const ctx:ScriptContext;\n")+`
+async function check() {
+  const hint=${item.kind==='node'?'await ':''}ctx.ui.setActionHint({text:'v123'});
+  const updated:true=hint.updated;
+  ${item.kind==='node'?'await ':''}ctx.actions.stopOtherInstances({timeoutMs:1});
+  // @ts-expect-error Node提示返回Promise，Script直接返回回执
+  ${item.kind==='node'?"ctx.ui.setActionHint({text:'v123'}).updated;":"ctx.ui.setActionHint({text:'v123'}).then;"}
+  const snapshot=${item.kind==='node'?'await ':''}ctx.state.read('session','key');
+  if(snapshot.entry.present) { const value=snapshot.entry.value; }
+  ${item.kind==='node'?'await ':''}ctx.state.compareAndSwap('durable','key',snapshot.revision,{present:true,value:null});
+  ${item.kind==='node'?'await ':''}ctx.state.compareAndSwap('session','key',snapshot.revision,{present:true,value:0});
+  ${item.kind==='node'?'await ':''}ctx.state.compareAndSwap('session','key',snapshot.revision,{present:false});
+  // @ts-expect-error 区域只能是session或durable
+  ctx.state.read('global','key');
+  // @ts-expect-error 缺值不能带value
+  ctx.state.compareAndSwap('session','key',snapshot.revision,{present:false,value:null});
+  // @ts-expect-error 不能自报动作身份
+  ctx.state.read('session','key',{actionId:'other'});
+  // @ts-expect-error Node返回Promise，Script直接返回快照
+  ${item.kind==='node'?"ctx.state.read('session','key').entry;":"ctx.state.read('session','key').then;"}
+}
+`;
+    const options={strict:true,noEmit:true,skipLibCheck:false,target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext,moduleResolution:ts.ModuleResolutionKind.Bundler,lib:['lib.es2022.d.ts'],types:[]};
+    const host=ts.createCompilerHost(options),original=host.getSourceFile;
+    host.getSourceFile=(file,version,...args)=>resolve(file)===virtual?ts.createSourceFile(virtual,source,version,true):original.call(host,file,version,...args);
+    const program=ts.createProgram([item.file,virtual],options,host),errors=ts.getPreEmitDiagnostics(program);
+    assert.equal(errors.length,0,item.file+' '+ts.formatDiagnostics(errors,{getCanonicalFileName:x=>x,getCurrentDirectory:()=>repo,getNewLine:()=> '\n'}));
+  }
+});
+
+test('state真实browser-workflows作者工程保留brand且使用同一SDK身份',()=>{
+  const project=join(repo,'examples/actions/browser-workflows'),configFile=join(project,'jsconfig.json');
+  const loaded=ts.readConfigFile(configFile,ts.sys.readFile);assert.equal(loaded.error,undefined);
+  const parsed=ts.parseJsonConfigFileContent(loaded.config,ts.sys,project,{strict:true,noEmit:true,skipLibCheck:false},configFile);
+  assert.deepEqual(parsed.errors,[]);
+  const entry=join(project,'restore-session.mjs'),original=readFileSync(entry,'utf8');
+  function diagnostics(source){
+    const host=ts.createCompilerHost(parsed.options),getSource=host.getSourceFile;
+    if(source!==undefined)host.getSourceFile=(file,version,...args)=>resolve(file)===entry?ts.createSourceFile(entry,source,version,true,ts.ScriptKind.JS):getSource.call(host,file,version,...args);
+    return ts.getPreEmitDiagnostics(ts.createProgram(parsed.fileNames,parsed.options,host));
+  }
+  const format=items=>ts.formatDiagnostics(items,{getCanonicalFileName:x=>x,getCurrentDirectory:()=>project,getNewLine:()=> '\n'});
+  const actual=diagnostics();assert.equal(actual.length,0,format(actual));
+  const local="import('./sdk/api')",core="import('../../../crates/omnitrigger-actions/runtime/api')";
+  assert(original.includes(local),'入口和共享workflow应引用同一包内Node SDK');
+  // 只在TypeScript内存host中复现旧JSDoc，不写入或执行作者入口。
+  const previous=original.replace(local,core),errors=diagnostics(previous);
+  assert(errors.some(error=>error.code===2345&&resolve(error.file?.fileName??'')===entry
+    &&ts.flattenDiagnosticMessageText(error.messageText,' ').includes('capturedTargetBrand')),format(errors));
+});
+
 test('canonical快照指纹覆盖当前来源与已携带声明的LF和CRLF，保留后续刷新链',()=>{
   const source=ts.createSourceFile('script-project.mjs',readFileSync(join(repo,'tools/script-project.mjs'),'utf8'),
     ts.ScriptTarget.Latest,true,ts.ScriptKind.JS);

@@ -590,6 +590,31 @@ function createDesktopApi(invoke) {
     },
   });
   const ui = Object.freeze({
+    setActionHint: options => {
+      const method = 'ui.action_hint';
+      const descriptor = options && typeof options === 'object' && !Array.isArray(options)
+        ? Object.getOwnPropertyDescriptor(options, 'text') : undefined;
+      const text = descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+      let valid = typeof text === 'string' && text.length > 0 && text.length <= 16 && text.trim() === text
+        && !/[\x00-\x1f\x7f-\x9f\u2028\u2029\ufeff]/.test(text);
+      if (valid) for (let i = 0; i < text.length; i++) {
+        const unit = text.charCodeAt(i);
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+          const next = text.charCodeAt(++i);
+          if (!(next >= 0xdc00 && next <= 0xdfff)) valid = false;
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) valid = false;
+      }
+      if (!valid || Reflect.ownKeys(options).length !== 1) invalid(method, '动作版本提示需要1–16个UTF-16单位的单行非空文字。');
+      const receipt = value => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)
+            || Reflect.ownKeys(value).length !== 1 || value.updated !== true) {
+          throw Object.assign(new Error('动作版本提示更新未获确认，不会自动重试。'), {code:'invalid_response', method, effectState:'unknown'});
+        }
+        return {updated:true};
+      };
+      const result = invoke(method, {text});
+      return result && typeof result.then === 'function' ? result.then(receipt) : receipt(result);
+    },
     toggleHistory: (...args) => {
       const method = 'ui.toggle_history';
       if (args.length !== 0) invalid(method, '切换历史窗口不接受参数。');
