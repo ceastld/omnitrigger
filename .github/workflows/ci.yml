@@ -184,7 +184,7 @@ jobs:
       - name: 验证只读桌面与目录 API 的 SDK、客户端和 Node 桥接
         shell: pwsh
         run: |
-          node --test tests/selection_read_sdk.test.mjs tests/selection_read_bridge.test.mjs tests/fs_read_directory_api.test.mjs tests/process_start_sdk.test.mjs tests/raishot_resident_sdk.test.mjs
+          node --test tests/selection_read_sdk.test.mjs tests/selection_read_bridge.test.mjs tests/fs_read_directory_api.test.mjs tests/process_start_sdk.test.mjs tests/raishot_resident_sdk.test.mjs tests/raishot_consumer.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/selection_read_types.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -87,6 +87,8 @@ RaiShot 截图适配描述和 OmniTrigger 安装器属于本项目代码；截�
 
 本仓库没有复制这些外部二进制，也没有因此新增 Cargo 依赖。插件依赖当前按用户操作下载到本机配置目录；如将来把 RaiShot 或其运行库并入 OmniTrigger 发行包，需按相应上游许可另外核对分发要求并保留完整通知。
 
+`examples/actions/raishot` 为独立的三模式消费者示例，需要显式配置本机 PowerShell 解释器；它在需要准备依赖时下载 [RaiShot v0.4.18](https://github.com/ceastld/raishot/releases/tag/v0.4.18)。该版本自身代码采用 [MIT](https://github.com/ceastld/raishot/blob/ab0cf17cd707a0e757567dc000ea9e45c0d51d4f/LICENSE)，运行库和其他组件仍受各自随包许可约束。示例保留原始 ZIP、全部程序/运行库及许可通知，并按固定发布包 SHA-256、清单和文件哈希校验；没有把外部二进制复制进本仓库，也不改变上述内置安装器的版本或行为。
+
 ## 可选 N10 Rust 适配示例
 
 `examples/actions/n10-rust` 的清单、JavaScript 适配代码、文档和禁用配置草稿由本项目编写，按 MIT 提供，复用已有 script SDK，不新增第三方库或 Cargo/npm 依赖。
