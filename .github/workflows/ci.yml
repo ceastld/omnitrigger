@@ -276,6 +276,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/browser_keyboard_bundle_types.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/keyboard_bundle_types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/ui_notify_api.test.mjs examples/actions/water-reminder/recipes.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/desktop_api_open_history.test.mjs
