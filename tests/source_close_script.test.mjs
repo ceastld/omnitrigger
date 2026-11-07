@@ -61,7 +61,11 @@ test('包注册、同步入口、调用模板与作者工程一致',async()=>{
   const manifest=JSON.parse(await readFile(new URL('action.json',base),'utf8'));const entry=manifest.actions.find(a=>a.id==='source-close-script');
   assert.deepEqual(entry,{id:'source-close-script',title:'按原目标进程发送关闭快捷键',version:1,runtime:'script',entry:'source-close-script.mjs'});
   const call=JSON.parse(await readFile(new URL('source-close-script-call.json',base),'utf8'));assert.deepEqual(call,{package_id:manifest.id,action_id:entry.id,action_version:entry.version,input:{}});
-  const project=JSON.parse(await readFile(new URL('jsconfig.json',base),'utf8'));assert.ok(project.files.includes(entry.entry));assert.ok(project.files.includes('../../../tools/js-engine-probe/api.d.ts'));
+  const project=JSON.parse(await readFile(new URL('jsconfig.json',base),'utf8'));
+  assert.ok(project.files.includes(entry.entry));assert.ok(project.files.includes('sdk.d.ts'));
+  for(const name of project.files){
+    const file=new URL(name,base);assert.ok(file.href.startsWith(base.href),'作者工程只引用包内文件');await readFile(file);
+  }
 });
 
 const code=await readFile(new URL('../crates/omnitrigger-actions/runtime/desktop-api.js',import.meta.url),'utf8');
