@@ -1,6 +1,7 @@
+/// <reference path="./sdk.d.ts" />
 import {timing} from './timing.mjs';
 import {prepareSequence} from './prepare-keys.mjs';
-/** @param {{input:unknown,desktop:{target():Promise<{processName:string}>,sendKeySequence(modifiers:number[],keys:number[],options?:{keyDownDelayMs?:number}):Promise<{submitted:true}>}}} ctx */
+/** @param {OmniTriggerActionContext} ctx */
 export default async ctx => {
   const plan = prepareSequence(ctx.input);
   const options = await timing({ input:plan, desktop:ctx.desktop });

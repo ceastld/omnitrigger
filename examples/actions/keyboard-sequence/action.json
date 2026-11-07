@@ -9,6 +9,8 @@
     {"id":"recipe","title":"执行有序键盘与文本步骤","version":1,"runtime":"node","entry":"recipe.mjs"},
     {"id":"recipe-script","title":"轻量宿主执行有序键盘与文本步骤","version":1,"runtime":"script","entry":"recipe.js"},
     {"id":"guarded-recipe-script","title":"按原目标进程范围执行键盘步骤","version":1,"runtime":"script","entry":"guarded-recipe.mjs"},
-    {"id":"source-close-script","title":"按原目标进程发送关闭快捷键","version":1,"runtime":"script","entry":"source-close-script.mjs"}
+    {"id":"source-close-script","title":"按原目标进程发送关闭快捷键","version":1,"runtime":"script","entry":"source-close-script.mjs"},
+    {"id":"fold-all","title":"折叠所有快捷键","version":1,"runtime":"node","entry":"fold-all.mjs","single_instance":true},
+    {"id":"fold-all-script","title":"折叠所有快捷键","version":1,"runtime":"script","entry":"fold-all-script.mjs","single_instance":true}
   ]
 }

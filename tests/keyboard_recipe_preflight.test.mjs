@@ -1,3 +1,5 @@
+import foldNode from '../examples/actions/keyboard-sequence/fold-all.mjs';
+import {main as foldScript} from '../examples/actions/keyboard-sequence/fold-all-script.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -121,3 +123,40 @@ test('与既有同步配方核对普通有效/无效参数及输出', async () =
     else { assert.deepEqual(await recipe(f.ctx), structuredClone(syncResult)); assert.deepEqual(f.calls, structuredClone(calls)); }
   }
 });
+
+for(const [runtime,run] of [['fold-all Node',foldNode],['fold-all Script',foldScript]]) {
+    function fixture({input={},failAt,missingAckAt}={}) {
+        const calls=[];let count=0;
+        const ctx={input,desktop:{sendShortcut(keys,options){
+            count++;calls.push({kind:'shortcut',keys:Array.from(keys),options:{...options}});
+            if(failAt===count)throw {code:'target_changed',method:'keyboard.shortcut',effectState:'not_started'};
+            return missingAckAt===count?{}:{submitted:true};
+        }},delay(milliseconds){calls.push({kind:'delay',milliseconds});if(failAt==='delay')throw {code:'cancelled',method:'delay',effectState:'not_started'};}};
+        return {ctx,calls};
+    }
+    test(runtime+'：固定序列、独立修饰键和50ms延迟完整保留',async()=>{
+        const f=fixture();const result=await run(f.ctx);
+        assert.deepEqual(f.calls,[{kind:'shortcut',keys:[162,77],options:{keyDownDelayMs:0}},{kind:'delay',milliseconds:50},{kind:'shortcut',keys:[162,76],options:{keyDownDelayMs:0}}]);
+        assert.equal(result.acceptedSubmissions,2);assert.equal(result.inputSubmitted,true);
+    });
+    test(runtime+'：未知参数在任何输入前拒绝',async()=>{
+        for(const input of [null,[],{keys:[162,77]},{delay:0}]){
+            const f=fixture({input});await assert.rejects(async()=>run(f.ctx),e=>e.code==='invalid_input'&&e.effectState==='not_started');assert.deepEqual(f.calls,[]);
+        }
+    });
+    test(runtime+'：首段目标失败不等待或重试',async()=>{
+        const f=fixture({failAt:1});await assert.rejects(async()=>run(f.ctx),e=>e.code==='target_changed'&&e.acceptedSubmissions===0&&e.effectState==='not_started');assert.equal(f.calls.length,1);
+    });
+    test(runtime+'：首段确认未知不派发后续',async()=>{
+        const f=fixture({missingAckAt:1});await assert.rejects(async()=>run(f.ctx),e=>e.code==='submission_unknown'&&e.effectState==='unknown');assert.equal(f.calls.length,1);
+    });
+    test(runtime+'：等待时取消保留首段部分提交语义',async()=>{
+        const f=fixture({failAt:'delay'});await assert.rejects(async()=>run(f.ctx),e=>e.code==='cancelled'&&e.effectState==='unknown'&&e.acceptedSubmissions===1&&e.phase==='inter_chord_delay'&&e.message.includes('已确认1段'));assert.equal(f.calls.length,2);
+    });
+    test(runtime+'：末段目标变化不重发首段或末段',async()=>{
+        const f=fixture({failAt:2});await assert.rejects(async()=>run(f.ctx),e=>e.code==='target_changed'&&e.effectState==='unknown'&&e.stepEffectState==='not_started'&&e.acceptedSubmissions===1&&e.message.includes('末段按键未确认'));assert.equal(f.calls.length,3);
+    });
+    test(runtime+'：末段确认未知不补偿',async()=>{
+        const f=fixture({missingAckAt:2});await assert.rejects(async()=>run(f.ctx),e=>e.code==='submission_unknown'&&e.effectState==='unknown'&&e.acceptedSubmissions===1);assert.equal(f.calls.length,3);
+    });
+}

@@ -1,3 +1,4 @@
+/// <reference path="./sdk.d.ts" />
 import {prepareRecipe} from './prepare-recipe.mjs';
 
 /** 仅作作者类型提示；运行时仍执行名单、步骤和预算校验。

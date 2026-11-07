@@ -1,3 +1,4 @@
+/// <reference path="./sdk.d.ts" />
 // 固定关闭配方：按本次原目标进程分支，发送一次来源快捷键。
 /** @param {string} code @param {string} message @param {string} method @param {'not_started'|'unknown'} [effectState] @returns {never} */
 function fail(code, message, method, effectState = 'not_started') {

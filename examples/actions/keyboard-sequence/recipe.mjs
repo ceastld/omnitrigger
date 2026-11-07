@@ -1,7 +1,8 @@
+/// <reference path="./sdk.d.ts" />
 import {timing} from './timing.mjs';
 import {prepareRecipe} from './prepare-recipe.mjs';
 
-/** @typedef {{input:unknown,desktop:{target():Promise<{processName:string}>,sendKeySequence(modifiers:number[],keys:number[],options?:{keyDownDelayMs?:number}):Promise<unknown>,sendText(text:string):Promise<unknown>},delay(milliseconds:number):Promise<unknown>}} RecipeContext */
+/** @typedef {OmniTriggerActionContext} RecipeContext */
 /** @param {RecipeContext} ctx */
 export default async ctx => {
   const plan = prepareRecipe(ctx.input);

@@ -1,4 +1,4 @@
-/// <reference path="../../../tools/js-engine-probe/api.d.ts" />
+/// <reference path="./sdk.d.ts" />
 /** @type {ScriptMain} */
 function main(ctx) {
     /** @param {string} message @returns {never} */

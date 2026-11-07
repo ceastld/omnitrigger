@@ -1,6 +1,7 @@
+/// <reference path="./sdk.d.ts" />
 import {timing} from './timing.mjs';
 import {prepareShortcuts} from './prepare-keys.mjs';
-/** @param {{input:unknown,desktop:{target():Promise<{processName:string}>,sendShortcut(keys:number[],options?:{keyDownDelayMs?:number}):Promise<unknown>},delay(milliseconds:number):Promise<unknown>}} ctx */
+/** @param {OmniTriggerActionContext} ctx */
 export default async ctx => {
   const plan = prepareShortcuts(ctx.input);
   const {keyDownDelayMs} = await timing({ input:plan, desktop:ctx.desktop });

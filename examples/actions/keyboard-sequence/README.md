@@ -42,3 +42,19 @@ Node `recipe.mjs` 与纯准备 helper 也纳入本包 `jsconfig.json` 的 strict
 按进程文件名去除 `.exe` 后的基本名作大小写敏感匹配：`Acrobat` 发送左Ctrl+W（VK162、87），`chrome` 发送左Alt+F4（VK164、115），其余已确认进程也发送左Alt+F4。该入口不查询或关闭浏览器标签，不以其他PDF阅读器名称代替Acrobat，也不重新选择前台窗口。
 
 每次只发送一个快捷键，不重试或补偿。返回 `inputSubmitted:true` 仅表示输入提交获确认，不证明窗口、标签或文档已关闭；程序可能显示保存提示。发送后回执未确认时以 `input_unconfirmed` / `unknown` 停止，不能据此重试。
+
+## 折叠所有快捷键
+
+`fold-all` 使用 Node，`fold-all-script` 使用同步轻量宿主；调用模板分别为 [fold-all-call.json](fold-all-call.json) 和 [fold-all-script-call.json](fold-all-script-call.json)，输入只接受空对象。
+
+两个入口独立发送左 Ctrl+M，释放该段按键后等待50ms，再独立发送左 Ctrl+L；两段按下延迟均显式为0。它适用于配置了这组折叠快捷键的软件，不查询编辑器状态，也不保持 Ctrl 跨越两段。
+
+每次输入沿用并复验本次原目标，不重新选择前台窗口。目标变化、取消或回执未确认会停止后续步骤；已提交输入不撤销、不重试。首段已提交后的失败以 `unknown` 描述整轮效果，错误消息保留已确认段数。返回 `inputSubmitted:true` 及 `acceptedSubmissions:2` 只确认两段输入提交，不保证目标程序已经折叠内容。
+
+Node 与同步入口均通过 SDK JSDoc 和本包 `jsconfig.json` 检查；同目录的 `fold-all-support.mjs` 需随入口保留。
+
+## 复制后编辑与类型检查
+
+复制整个包目录时保留 `sdk.d.ts`、`sdk/` 和 `jsconfig.json`。Node 与同步 Script 入口使用包内声明，可脱离源码仓库获得补全与严格检查；无需依赖仓库的相对路径。声明固定于公开提交 `e51a45b8e312e4edc71ee4003039b0875842bb3e`，来源见 `sdk/README.md`。这些文件只提供编辑器类型，运行时仍由 OmniTrigger 注入 ctx。
+
+两个折叠入口分别启用动作单实例：同一动作服务中，同一动作 ID 的前一调用未结束时，宿主拒绝再次启动，避免该入口的两段输入交错。Node 与 Script 是不同动作 ID；绑定时选用其中一个入口，不据此假定跨入口互斥。输入序列和 50ms 等待保持不变。
