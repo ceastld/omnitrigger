@@ -69,3 +69,15 @@ test('读取stack失败回退原消息，保留既有ActionError字段且不添�
   assert.equal(result.error.method,'bookmarks.getTree');assert.deepEqual(result.error.required_permissions,['bookmarks']);
   assert.deepEqual(Object.keys(result.error).sort(),['code','effect_state','message','method','required_permissions']);
 });
+
+test('结构化本机错误保留精确消息且不读取宿主栈，普通Node错误仍保留源码',()=>{
+  for(const fields of [{code:'ui_busy',method:'ui.notify',effectState:'not_started'},
+    {code:'cancelled',effectState:'unknown'},{code:'fs_error',method:'fs.stat'}]) {
+    let stackReads=0;const error=Object.assign(new Error('未确认'),fields);
+    Object.defineProperty(error,'stack',{get(){stackReads++;return 'HOST IMPLEMENTATION STACK';}});
+    assert.equal(render(error),'未确认');assert.equal(stackReads,0);
+    assert.equal(response(error,render).error.message,'未确认');
+  }
+  const ordinary=Object.assign(new Error('NODE_SOURCE_FRAME'),{code:'ERR_SYNTHETIC'});
+  assert.equal(render(ordinary),ordinary.stack);assert(render(ordinary).includes(basename(file)));
+});

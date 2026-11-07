@@ -353,6 +353,11 @@ function run(program, args = [], options = {}) {
 // 保留Node提供的原始文件/行列，不将宿主帧重标成作者位置。
 function errorDiagnostic(error) {
   const message = String(error?.message ?? error);
+  // 本机/SDK结构化错误沿用原消息合同；宿主实现栈不是作者源码位置。
+  if (typeof error?.code === 'string' && /^[a-zA-Z0-9_]{1,64}$/.test(error.code)
+      && (typeof error?.method === 'string' || ['not_started','unknown'].includes(error?.effectState))) {
+    return message.slice(0, 4096);
+  }
   let stack;
   try { stack = error?.stack; } catch { /* 栈访问失败仍保留原消息。 */ }
   const text = (typeof stack === 'string' && stack ? stack : message).toWellFormed();
