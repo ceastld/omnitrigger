@@ -361,7 +361,8 @@ pub(crate) fn prepare(
             "--data-root".into(),
             request.source_root.to_string_lossy().into(),
         ],
-        5000,
+        // 首次同步进程创建也占预算；与迁移共用既有60秒上限，仍只调用一次。
+        60_000,
     )
     .map_err(|mut error| {
         error.message = format!(
