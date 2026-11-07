@@ -136,6 +136,10 @@ node tools/script-sdk-check/check-project-types.mjs D:\Demo\actions\my-script
 | `--check-action` | 包、动作契约版本及运行时注册，不执行入口。 |
 | `--check-config` | 绑定与触发描述，不执行动作。 |
 
+旧 `.js` 函数体入口也会分析 main 绑定与语法依赖：唯一的同步 `main(ctx)` 可完成静态覆盖，不要求 ESM 导出。静态 import/export、async 或生成器入口会被拒绝；动态 import、求值、require、main 重绑定或不确定的顶层初始化会被拒绝或保留不完整警告，不执行作者代码来猜测结果。JSDoc 类型引用由类型检查处理，不算运行时模块依赖。
+
+`staticAnalysisComplete` 只表示声明与已提供源码的静态依赖覆盖，不表示初始化、副作用、宿主能力或运行效果已验证；仍须同时查看 `passed`、诊断和 `runtimeVerified`。
+
 实际参数分支、目标身份和业务效果仍须运行验证。上述开发工具需要 Node，导出的轻量工程运行不依赖 Node 或 npm。
 
 ### 轻量脚本宿主
