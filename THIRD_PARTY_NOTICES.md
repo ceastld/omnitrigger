@@ -100,3 +100,5 @@ RaiShot 截图适配描述和 OmniTrigger 安装器属于本项目代码；截�
 `examples/actions/n10-rust` 的清单、JavaScript 适配代码、文档和禁用配置草稿由本项目编写，按 MIT 提供，复用已有 script SDK，不新增第三方库或 Cargo/npm 依赖。
 
 该包仅调用明确指定的本地 eaclip-cli 与 Rust 宿主，没有复制或分发外部原生二进制、运行库、源码及素材。外部程序由独立本地安装提供，其许可证、版权和依赖通知须随相应制品保留，不能由本项目 MIT 声明替代。脚本宿主与引擎仍适用本文件已有的独立许可及开发分发说明。
+
+`examples/actions/browser-workflows` 与 `examples/actions/common-search` 的离仓作者检查同样固定 TypeScript 5.9.3（Apache-2.0）作为开发依赖，版本、来源和完整性由各包 package-lock.json 记录；不增加运行依赖，也不向 Script 注入 DOM 或 Node 环境声明。

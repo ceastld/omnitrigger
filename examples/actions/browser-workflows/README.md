@@ -124,11 +124,14 @@ API 语义依据：[Chrome Tabs API](https://developer.chrome.com/docs/extension
 
 本包的 `jsconfig.json` 同时检查五个 Node、两个同步入口及共用模块。Node 上下文引用同包 `sdk/api.d.ts`，同步入口引用 `sdk/script-types.d.ts`；移动工程时保留整个 `sdk` 目录。这里沿用包内声明，不依赖仓库其它目录，也不因类型检查自动升级宿主或扩展。
 
-仓库安装现有 SDK 开发依赖后，可运行统一静态检查：
+在本工程目录中安装固定版本的开发依赖后，可独立检查；不需要仓库的 crates、tools 或 node_modules：
 
 ```powershell
-node tools/script-sdk-check/check-project-types.mjs examples/actions/browser-workflows
+npm ci --ignore-scripts
+npm run check
 ```
+
+TypeScript 5.9.3 仅为开发依赖。检查读取本包声明并静态核验五个 Node 入口，不导入或执行作者模块；Script 环境仍不加载 DOM 或 Node 全局。
 
 检查不导入或运行作者入口，不连接浏览器。通过只表示当前声明和静态入口约束没有错误，仍需分别核对运行时能力、扩展权限及目标浏览器行为。URL 仅在私有解析函数中按宿主实际能力局部引用，不向同步编辑器声明 DOM 或全局 URL。
 

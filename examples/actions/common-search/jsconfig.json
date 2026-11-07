@@ -9,7 +9,8 @@
       "ES2020"
     ],
     "types": [],
-    "moduleDetection": "force"
+    "moduleDetection": "force",
+    "skipLibCheck": false
   },
   "files": [
     "search.js",
