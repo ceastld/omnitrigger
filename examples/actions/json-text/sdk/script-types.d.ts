@@ -1,3 +1,18 @@
+type ScriptPointingRootHandoffOptions=Readonly<{validForMs:number;confirmTimeoutMs:number}>;
+/** requested仅表示请求发生；只有接纳且及时确认才给出现有CapturedTarget，失败不重试。 */
+type ScriptPointingRootHandoffResult=
+  |Readonly<{requested:true;requestAccepted:true;foregroundConfirmed:true;target:ScriptCapturedTarget;reason:null;effectState:'unknown'}>
+  |Readonly<{requested:true;requestAccepted:false;foregroundConfirmed:boolean;target:null;reason:'os_rejected';effectState:'unknown'}>
+  |Readonly<{requested:true;requestAccepted:true;foregroundConfirmed:false;target:null;reason:'confirmation_timeout';effectState:'unknown'}>;
+
+/** 调用时观察身份，不是CapturedTarget输入租约，不含任何写入方法。 */
+type ScriptPointingWindowIdentity=Readonly<{window_handle:string;process_id:number;thread_id:number;process_created_file_time:string}>;
+type ScriptPointingRootObservation=Readonly<{
+  sampledAt:'call-time';coordinateSpace:'physical-screen';point:Readonly<{x:number;y:number}>;
+  inputSource:Readonly<{kind:'polled-pointer';injected:null;selfInjected:null}>;
+  pointingWindow:ScriptPointingWindowIdentity;rootWindow:ScriptPointingWindowIdentity;
+}>;
+
 declare const scriptRaiShotResidentBrand: unique symbol;
 type ScriptRaiShotResident = Readonly<{readonly [scriptRaiShotResidentBrand]:true;window_handle:string;process_id:number;thread_id:number;process_created_file_time:string;expires_at_unix_ms:number}>;
 type ScriptExplorerContextSnapshot = Readonly<{currentDirectory:string|null;selectedPaths:readonly string[]}>;
@@ -212,6 +227,17 @@ interface ScriptClipboardHistoryApi {
   remove(options: {id: ScriptHistoryDecimal}): ScriptClipboardHistoryRemove;
 }
 
+/** 物理屏幕像素；右/下边界为left+width/top+height，不含该边界像素。 */
+type ScriptWindowRect = Readonly<{left:number;top:number;width:number;height:number}>;
+type ScriptWindowGeometry = Readonly<{coordinateSpace:'physical-screen';outerRect:ScriptWindowRect;visibleFrameRect:ScriptWindowRect;
+  monitorRect:ScriptWindowRect;workArea:ScriptWindowRect;primaryScreen:Readonly<{width:number;height:number}>;windowDpi:number;maximized:boolean}>;
+
+type ScriptPointerButtonState='down'|'not_down_or_unavailable';
+type ScriptPointerState=Readonly<{coordinateSpace:'physical-screen';x:number;y:number;buttons:Readonly<{left:ScriptPointerButtonState;right:ScriptPointerButtonState;middle:ScriptPointerButtonState}>;inputSource:Readonly<{kind:'polled-key-state';injected:null;selfInjected:null}>}>;
+type ScriptWindowDragOptions=Readonly<{mode:'move'|'resize';button:'left'|'right'|'middle';maxDurationMs:number;maxUpdates:number;
+  snap?:Readonly<{bounds:ScriptWindowRect;distance:number;waitMs:number;initialElapsedMs:number}>|null}>;
+type ScriptWindowDragStopped=Readonly<{stopped:true;reason:'button_not_down_or_unavailable'|'duration_limit'|'update_limit';acceptedUpdates:number;pollSamples:number;effectState:'not_started'|'unknown';dragCompleted:false}>;
+
 interface ScriptStopOtherInstancesFault extends Error {
   code:'invalid_input'|'actions_unavailable'|'actions_busy'|'actions_call_limit'|'action_inactive'|'action_policy_conflict'|'action_busy'|'stop_timeout'|'timeout'|'cancelled'|'invalid_response'|'actions_failed';
   method:'actions.stop_other_instances';
@@ -310,6 +336,16 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
         /** 原目标单选区；成功确认无选区/空文本时为 {text:"",truncated:false}，provider/目标/读取失败仍报错。默认 reject，显式 truncate 按请求上限取 UTF-16 前缀；拆开代理对拒绝。
          * maxUtf16Units 为1–8192整数，默认128；仅请求上限+1，helper采集及动作结果64KiB界限不变。 */
         readSelectionText(options?: {overflow?: 'reject' | 'truncate'; maxUtf16Units?: number}): ScriptSelectionTextSnapshot;
+        getPointingRoot(): ScriptPointingRootObservation;
+        /** 只请求一次当前指向且身份匹配的根窗；原desktop目标保持不变。 */
+        handoffPointingRoot(expected: ScriptPointingRootObservation, options: ScriptPointingRootHandoffOptions): ScriptPointingRootHandoffResult;
+        /** 显式CapturedTarget路径，原默认目标不变；每次复验租约/期限/身份及B前台。 */
+        getWindowGeometryFor(target: ScriptCapturedTarget): ScriptWindowGeometry;
+        setWindowRectFor(target: ScriptCapturedTarget, rect: ScriptWindowRect, options: {frame:'outer'|'visible'}): {submitted:true;effectState:'unknown'};
+        restoreWindowFor(target: ScriptCapturedTarget): {submitted:true};
+        /** 同步；显式B租约守卫与Node相同，仅确认提交。 */
+        toggleMaximizeWindowFor(target: ScriptCapturedTarget): {submitted:true};
+        trackWindowDragFor(target: ScriptCapturedTarget, options: ScriptWindowDragOptions): ScriptWindowDragStopped;
         /** 显式PID与创建时间；1–5000ms；仅捕获该进程当前前台，不激活或枚举。 */
         captureForegroundTarget(options: ScriptCaptureForegroundOptions): ScriptCapturedTarget;
         /** 原desktop目标不变；每次复核身份/前台/取消/期限；仅确认提交。 */
@@ -341,8 +377,20 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
          * 不恢复剪贴板，取消不撤销输入；客户端最多等待 8 秒，不保证抢占阻塞 Win32 调用。
          */
         copySelectionData(options?: ScriptSelectionCopyOptions): ScriptSelectionDataSnapshot;
+        /** 调用时只读采样物理坐标与当前按钮；不可区分未按下和不可用。 */
+        getPointerState(): ScriptPointerState;
+        /** 现有worker内单次有界调用：20–2000ms，最多64次提交、201次主采样；10ms协作等待。
+         * 不注入/消费输入、不还原窗口；非明确按下即停，返回停止原因而非拖拽完成。已提交不回滚。 */
+        trackWindowDrag(options: ScriptWindowDragOptions): ScriptWindowDragStopped;
+        /** 原捕获窗口仍可见且为前台；DWM可见边界无可用值时报错，不回退外框。
+         * windowDpi是GetDpiForWindow原值，不是坐标缩放因子；工作区为窗口所在或最近显示器。 */
+        getWindowGeometry(): ScriptWindowGeometry;
+        /** 显式外框或可见边界；坐标i32，宽高1–65535，不裁剪工作区、不激活/改Z序、不隐式还原最大化窗口。
+         * 一次异步SetWindowPos；仅确认提交，应用/DPI改变可调整结果；发起后的失败/取消/超时为unknown，无重试或补偿。 */
+        setWindowRect(rect: ScriptWindowRect, options: {frame:'outer'|'visible'}): {submitted:true;effectState:'unknown'};
         /** 操作本次捕获且仍为前台的窗口；仅表示系统接纳请求，关闭可能弹出保存提示。 */
-        windowAction(operation: 'toggle_maximize' | 'toggle_topmost' | 'minimize' | 'close'): {submitted: true};
+        /** restore 显式请求原窗口正常显示，不激活、不切换最大化状态；submitted 不代表已还原。 */
+        windowAction(operation: 'toggle_maximize' | 'restore' | 'toggle_topmost' | 'minimize' | 'close'): {submitted: true};
     };
     browser: {
         profiles(options?: Pick<ScriptBrowserOptions, 'timeoutMs'>): Array<{browser_instance_id: string; session_id: string; name: string; [key: string]: unknown}>;
