@@ -2,6 +2,11 @@
 
 use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirection};
 
+mod raishot_resident;
+#[cfg(windows)]
+pub use raishot_resident::{find_raishot_resident, request_raishot_resident_region};
+pub use raishot_resident::{RaiShotResident, RAISHOT_REGION_MESSAGE, RAISHOT_RESIDENT_CLASS};
+
 mod explorer_context;
 pub use explorer_context::{validate_explorer_context, ExplorerContextSnapshot, ExplorerReadError};
 mod selection_text;

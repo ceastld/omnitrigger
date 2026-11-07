@@ -11,6 +11,8 @@ use std::time::Instant;
 
 #[path = "keyboard_text_deadline.rs"]
 mod keyboard_text_deadline;
+#[path = "raishot_resident_host.rs"]
+mod raishot_resident_host;
 #[path = "win32_edit_replace_host.rs"]
 mod win32_edit_replace_host;
 
@@ -380,6 +382,9 @@ impl NativeHost for DesktopHost {
         cancellation: &CancellationToken,
     ) -> Result<Value, ActionError> {
         match method {
+            "raishot.resident.find" | "raishot.resident.region" => {
+                return raishot_resident_host::execute(method, params, cancellation, None);
+            }
             "win32_edit.replace_selection" => {
                 return win32_edit_replace_host::execute_with(
                     params,
@@ -610,6 +615,9 @@ impl NativeHost for DesktopHost {
         deadline: Instant,
     ) -> Result<Value, ActionError> {
         match method {
+            "raishot.resident.find" | "raishot.resident.region" => {
+                raishot_resident_host::execute(method, params, cancellation, Some(deadline))
+            }
             "win32_edit.replace_selection" => win32_edit_replace_host::execute_with(
                 params,
                 cancellation,

@@ -1,3 +1,5 @@
+declare const raiShotResidentBrand: unique symbol;
+export type RaiShotResident = Readonly<{readonly [raiShotResidentBrand]:true;window_handle:string;process_id:number;thread_id:number;process_created_file_time:string;expires_at_unix_ms:number}>;
 /** 无环境类型时的取消观察接口；不声明浏览器或Node环境全局。 */
 interface CancellationObserverSignal {
   readonly aborted: boolean;
@@ -296,6 +298,10 @@ export interface ActionContext {
     sendShortcut(keys: number[], options?: {keyDownDelayMs?: number; timing?: never} | {timing: ShortcutTiming; keyDownDelayMs?: never}): Promise<{submitted: true}>;
     /** 修饰键跨越整组普通键；延迟在修饰键就绪后、每个普通键按下后等待。 */
     sendKeySequence(modifiers: number[], keys: number[], options?: {keyDownDelayMs?: number}): Promise<{submitted: true}>;
+    /** 只查固定隐藏常驻类，返回本ctx的一次性5秒身份快照；不读取依赖目录，不启动进程，不认证程序版本。 */
+    findRaiShotResident(): Promise<RaiShotResident | null>;
+    /** 复验身份后投递固定WM_APP+3；只确认入队，不确认截图；身份复验与PostMessage非原子，未知结果不重试。 */
+    requestRaiShotRegion(resident:RaiShotResident): Promise<{queued:true;screenshotCompleted:false}>;
     /** 显式跨进程Unicode标准Edit适配；必选adapter，不猜控件或回退。最多8192 UTF-16单元，不含NUL。
      * 单条EM_REPLACESEL；仅确认消息处理，不确认正文接受；不与UIA读取原子绑定，超时/写后取消为unknown。 */
     win32EditReplaceSelection(text: string, options: {adapter:'native-edit'|'winforms-edit'}): Promise<{messageProcessed:true;effectState:'unknown'}>;

@@ -10,7 +10,7 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 31] = [
+pub const METHODS: [&str; 33] = [
     "history.list",
     "history.get",
     "history.append",
@@ -32,6 +32,8 @@ pub const METHODS: [&str; 31] = [
     "keyboard.sequence",
     "keyboard.text",
     "win32_edit.replace_selection",
+    "raishot.resident.find",
+    "raishot.resident.region",
     "selection.copy",
     "selection.copy_data",
     "selection.read_text",
@@ -71,7 +73,9 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
             code
         })
         .into(),
-        message: if method == "win32_edit.replace_selection" {
+        message: if method.starts_with("raishot.resident.") {
+            "RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。".into()
+        } else if method == "win32_edit.replace_selection" {
             "Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。".into()
         } else if method == "audio.volume_adjust" {
             "音量调节未获完整确认；请检查错误代码和效果状态。".into()
@@ -107,7 +111,11 @@ fn brightness_transport_effect(
 ) -> &'static str {
     if matches!(
         method,
-        "display.brightness_step" | "audio.volume_adjust" | "win32_edit.replace_selection"
+        "display.brightness_step"
+            | "audio.volume_adjust"
+            | "win32_edit.replace_selection"
+            | "raishot.resident.find"
+            | "raishot.resident.region"
     ) && !write_began
     {
         "not_started"
@@ -195,6 +203,8 @@ pub fn call(
                 | "display.brightness_step"
                 | "audio.volume_adjust"
                 | "win32_edit.replace_selection"
+                | "raishot.resident.find"
+                | "raishot.resident.region"
                 | "history.list"
                 | "history.get"
                 | "history.append"
@@ -213,6 +223,8 @@ pub fn call(
                         | "display.brightness_step"
                         | "audio.volume_adjust"
                         | "win32_edit.replace_selection"
+                        | "raishot.resident.find"
+                        | "raishot.resident.region"
                         | "history.append"
                         | "history.remove"
                         | "ui.toggle_history"
@@ -243,6 +255,8 @@ pub fn call(
                         | "display.brightness_step"
                         | "audio.volume_adjust"
                         | "win32_edit.replace_selection"
+                        | "raishot.resident.find"
+                        | "raishot.resident.region"
                         | "history.list"
                         | "history.get"
                         | "history.append"
@@ -258,6 +272,8 @@ pub fn call(
                                 | "display.brightness_step"
                                 | "audio.volume_adjust"
                                 | "win32_edit.replace_selection"
+                                | "raishot.resident.find"
+                                | "raishot.resident.region"
                                 | "history.append"
                                 | "history.remove"
                                 | "ui.toggle_history"
@@ -306,7 +322,7 @@ pub fn call(
 fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError> {
     let invalid = || {
         fault(
-            if method == "win32_edit.replace_selection" {
+            if method == "win32_edit.replace_selection" || method.starts_with("raishot.resident.") {
                 "invalid_response"
             } else {
                 "native_bridge_failed"
@@ -364,6 +380,8 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "display.brightness_step"
                     | "audio.volume_adjust"
                     | "win32_edit.replace_selection"
+                    | "raishot.resident.find"
+                    | "raishot.resident.region"
                     | "history.list"
                     | "history.get"
                     | "history.append"
@@ -396,6 +414,8 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "history.append"
                     | "history.remove"
                     | "win32_edit.replace_selection"
+                    | "raishot.resident.find"
+                    | "raishot.resident.region"
             ) {
                 error.required_permissions = permissions;
             }
@@ -573,5 +593,25 @@ mod tests {
         let error = parse_response(b"{\"id\":1,\"ok\":false,\"error\":{\"code\":\"edit_unsupported\",\"message\":\"private original\",\"method\":\"wrong.method\",\"effect_state\":\"not_started\"}}\n", 1, method).unwrap_err();
         assert_eq!(error.code, "invalid_response");
         assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+    }
+    #[test]
+    fn raishot_post_transport_preserves_unknown_after_write() {
+        let method = "raishot.resident.region";
+        assert_eq!(
+            brightness_transport_effect(method, false, "unknown"),
+            "not_started"
+        );
+        assert_eq!(
+            brightness_transport_effect(method, true, "unknown"),
+            "unknown"
+        );
+        let invalid =
+            parse_response(b"{\"id\":2,\"ok\":true,\"value\":null}\n", 1, method).unwrap_err();
+        assert_eq!(invalid.code, "invalid_response");
+        assert_eq!(invalid.effect_state.as_deref(), Some("unknown"));
+        let failure = parse_response(b"{\"id\":1,\"ok\":false,\"error\":{\"code\":\"timeout\",\"message\":\"PRIVATE\",\"method\":\"raishot.resident.region\",\"effect_state\":\"unknown\",\"required_permissions\":[\"PRIVATE\"]}}\n", 1, method).unwrap_err();
+        assert_eq!(failure.effect_state.as_deref(), Some("unknown"));
+        assert!(!failure.message.contains("PRIVATE"));
+        assert!(failure.required_permissions.is_empty());
     }
 }

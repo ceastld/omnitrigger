@@ -15,7 +15,7 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 34] = [
+const METHODS: [&str; 36] = [
     "system.open",
     "system.open_file_in_parent",
     "process.capture",
@@ -40,6 +40,8 @@ const METHODS: [&str; 34] = [
     "keyboard.sequence",
     "keyboard.text",
     "win32_edit.replace_selection",
+    "raishot.resident.find",
+    "raishot.resident.region",
     "selection.copy",
     "selection.copy_data",
     "selection.read_text",
@@ -277,6 +279,7 @@ impl NativeBridge {
                         let mut error =
                             ActionError::new("cancelled", "动作已取消，未开始本机调用。");
                         if request.method == "win32_edit.replace_selection"
+                            || request.method.starts_with("raishot.resident.")
                             || opening
                             || file_read
                             || data_read
@@ -299,6 +302,7 @@ impl NativeBridge {
                             None => host.call(&request.method, request.params, cancellation),
                         };
                         if request.method == "win32_edit.replace_selection"
+                            || request.method.starts_with("raishot.resident.")
                             || opening
                             || request.method == "ui.choose"
                             || matches!(
@@ -322,9 +326,14 @@ impl NativeBridge {
                         }
                     }
                     .map_err(|mut error| {
-                        if request.method == "win32_edit.replace_selection" {
-                            error.message =
-                                "Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。".into();
+                        if request.method == "win32_edit.replace_selection"
+                            || request.method.starts_with("raishot.resident.")
+                        {
+                            error.message = if request.method.starts_with("raishot.resident.") {
+                                "RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。".into()
+                            } else {
+                                "Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。".into()
+                            };
                             error.method = Some(request.method.clone());
                             error.required_permissions.clear();
                             if error.effect_state.as_deref() != Some("not_started") {

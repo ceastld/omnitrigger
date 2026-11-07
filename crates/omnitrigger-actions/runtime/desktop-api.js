@@ -403,7 +403,58 @@ function createDesktopApi(invoke) {
     } catch (cause) { return failure(cause); }
   }
 
+  const raiResidents = new WeakSet();
+  function raiFault(method, code, effectState) {
+    return Object.assign(new Error('RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。'),
+      {code,method,effectState,retryAllowed:false});
+  }
+  function raiCall(method, params, result) {
+    const failed = cause => {
+      let code='native_bridge_failed',effect=method==='raishot.resident.find'?'not_started':'unknown';
+      try {
+        if(typeof cause?.code==='string'&&/^[a-z_]{1,64}$/.test(cause.code))code=cause.code;
+        if(cause?.effectState==='not_started')effect='not_started';
+      } catch (_) { /* 不读取异常正文或回显失败getter。 */ }
+      throw raiFault(method,code,effect);
+    };
+    try {
+      const value = invoke(method,params);
+      return value && typeof value.then === 'function' ? value.then(result,failed) : result(value);
+    } catch(cause) { return failed(cause); }
+  }
+  function findRaiShotResident(args) {
+    const method='raishot.resident.find';
+    if(args.length)throw raiFault(method,'invalid_input','not_started');
+    return raiCall(method,{},value=>{
+      if(value===null)return null;
+      const decimal=(v,max)=>typeof v==='string'&&/^[1-9][0-9]*$/.test(v)&&(v.length<max.length||v.length===max.length&&v<=max);
+      const id=v=>Number.isInteger(v)&&v>0&&v<=0xffffffff;
+      const now=Date.now();
+      if(!exactDataFields(value,['window_handle','process_id','thread_id','process_created_file_time','expires_at_unix_ms'])
+          ||!decimal(value.window_handle,'9223372036854775807')||!decimal(value.process_created_file_time,'18446744073709551615')
+          ||!id(value.process_id)||!id(value.thread_id)||!Number.isSafeInteger(value.expires_at_unix_ms)
+          ||value.expires_at_unix_ms<=now||value.expires_at_unix_ms-now>5000)
+        throw raiFault(method,'invalid_response','not_started');
+      const snapshot=Object.freeze({...value});raiResidents.add(snapshot);return snapshot;
+    });
+  }
+  function requestRaiShotRegion(args) {
+    const method='raishot.resident.region',snapshot=args[0];
+    if(args.length!==1||!raiResidents.has(snapshot))throw raiFault(method,'invalid_input','not_started');
+    raiResidents.delete(snapshot);
+    const now=Date.now();
+    if(snapshot.expires_at_unix_ms<=now||snapshot.expires_at_unix_ms-now>5000)
+      throw raiFault(method,'raishot_resident_expired','not_started');
+    return raiCall(method,{resident:{...snapshot}},value=>{
+      if(!exactDataFields(value,['queued','screenshot_completed'])||value.queued!==true||value.screenshot_completed!==false)
+        throw raiFault(method,'invalid_response','unknown');
+      return Object.freeze({queued:true,screenshotCompleted:false});
+    });
+  }
+
   const desktop = Object.freeze({
+    findRaiShotResident: (...args) => findRaiShotResident(args),
+    requestRaiShotRegion: (...args) => requestRaiShotRegion(args),
     win32EditReplaceSelection: (...args) => win32EditReplaceSelection(args),
     explorerContext: (...args) => explorerContext(args),
     readSelectionText: (...args) => readSelectionText(args),

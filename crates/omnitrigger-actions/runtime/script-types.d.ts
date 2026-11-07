@@ -1,3 +1,5 @@
+declare const scriptRaiShotResidentBrand: unique symbol;
+type ScriptRaiShotResident = Readonly<{readonly [scriptRaiShotResidentBrand]:true;window_handle:string;process_id:number;thread_id:number;process_created_file_time:string;expires_at_unix_ms:number}>;
 type ScriptExplorerContextSnapshot = Readonly<{currentDirectory:string|null;selectedPaths:readonly string[]}>;
 type ScriptSelectionTextSnapshot = Readonly<{text:string;truncated:boolean}>;
 declare const scriptCapturedTargetBrand: unique symbol;
@@ -279,6 +281,10 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
         /** VK 整数，修饰键在前。仅确认系统接纳输入。 */
         sendShortcut(keys: number[], options?: {keyDownDelayMs?: number; timing?: never} | {timing: ScriptShortcutTiming; keyDownDelayMs?: never}): {submitted: true};
         sendKeySequence(modifiers: number[], keys: number[], options?: {keyDownDelayMs?: number}): {submitted: true};
+        /** 只查固定隐藏常驻类，返回本ctx的一次性5秒身份快照；不读取依赖目录，不启动进程，不认证程序版本。 */
+        findRaiShotResident(): ScriptRaiShotResident | null;
+        /** 复验身份后投递固定WM_APP+3；只确认入队，不确认截图；身份复验与PostMessage非原子，未知结果不重试。 */
+        requestRaiShotRegion(resident:ScriptRaiShotResident): {queued:true;screenshotCompleted:false};
         /** 显式跨进程Unicode标准Edit适配；必选adapter，不猜控件或回退。最多8192 UTF-16单元，不含NUL。
          * 单条EM_REPLACESEL；仅确认消息处理，不确认正文接受；不与UIA读取原子绑定，超时/写后取消为unknown。 */
         win32EditReplaceSelection(text: string, options: {adapter:'native-edit'|'winforms-edit'}): {messageProcessed:true;effectState:'unknown'};

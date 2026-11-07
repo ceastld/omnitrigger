@@ -268,6 +268,8 @@ export default async function (ctx) {
 | `ctx.browser.chrome.*` | 动态 Proxy，例如 `await ctx.browser.chrome.bookmarks.getTree()`；指定 profile 或超时时使用 `call`。 |
 | `ctx.desktop.target()` | 读取本次提交时捕获的目标，返回真实 `processName`、`windowRole`（`unknown`／`application`／`desktop`／`taskbar`）、`title`、`processId`、`isForeground`。角色在调用时采集，不重新选择目标。 |
 | `ctx.desktop.targetContext()` | 导出原目标的完整值快照，字段可直接保存为 `--target-context` 文件；调用时重新核验原身份，生成 29 秒的提交期限，为调用方的时钟粒度预留余量。提交校验上限仍为 30 秒。 |
+| `ctx.desktop.findRaiShotResident()` | 查询固定 `RustShot.MVP.Window` 类的常驻窗口，返回只读身份快照或 `null`，不启动程序。 |
+| `ctx.desktop.requestRaiShotRegion(resident)` | 复验快照后向常驻窗口投递固定区域截图请求，返回 `{queued:true,screenshotCompleted:false}`；入队不表示截图完成。 |
 | `ctx.desktop.readSelectionText(options?)` | 只读原目标当前焦点控件的单一 UIA 文本选区，返回只读 `{text,truncated}`。默认最多 128 个 UTF-16 单元；可显式设置 `maxUtf16Units` 为 1–8192 整数。默认超限拒绝，显式 `overflow:'truncate'` 截取所请求界限的前缀。 |
 | `ctx.desktop.captureForegroundTarget(options)` | 按明确 PID、进程创建 FILETIME 字符串和 1–5000 毫秒有效期捕获该进程当前前台，返回本次动作内的只读目标引用。 |
 | `ctx.desktop.sendShortcutTo(target, keys, options?)` | 向上述捕获目标发送快捷键；可选 `keyDownDelayMs`，发送前和分步提交时复验租约、身份、前台、取消及动作期限。 |
@@ -283,6 +285,8 @@ export default async function (ctx) {
 | `ctx.clipboard.writeText(text, options?)` | 替换全部剪贴板内容为 Unicode 文本，返回 `{ written: true, sequenceNumber }`，不自动恢复。临时回贴可传 `{ excludeFromHistory: true }`，同时写入 Windows 历史排除格式与 `OmniTrigger.TransientClipboard.v1`，回执另含本次随机 `writeId`；识别标记的采集器应跳过该内容。默认不排除；标记不限制其它程序读取。序号是写入后观察值，不代表独占剪贴板。 |
 
 `windowsHide` 选项仅用于 Node 动作。同步 Script 的 `process.start(program, args)` 不提供第三个选项参数；Windows 实现使用 `CREATE_NO_WINDOW` 避免控制台窗口，该标志不隐藏 GUI 窗口。两种运行时返回的 PID 都只表示进程已创建。
+
+RaiShot 常驻协议仅支持 Windows，Node 入口使用 `await`，Script 入口同步返回；应用和脚本宿主都需更新。快照由当前 `ctx` 返回，有效期五秒，在 SDK 中只允许尝试使用一次；复制或跨 `ctx` 使用会被拒绝。原生桥接复验窗口类、PID、线程及进程创建时间，但身份比较与消息投递不是原子操作，也不验证软件版本或签名。投递结果不明时不能自动重试。此 API 不提供安装、依赖校验或冷启动。
 
 Node 本机桥接在每次 API 调用时将参数编码为固定请求。调用返回 Promise 后再修改按键数组或嵌套时序对象，不会改变等待连接的请求；参数编码失败在连接前返回 `invalid_input/not_started`。这份快照只覆盖本次调用，后续调用仍单独核验目标和取消状态。
 

@@ -184,7 +184,7 @@ jobs:
       - name: 验证只读桌面与目录 API 的 SDK、客户端和 Node 桥接
         shell: pwsh
         run: |
-          node --test tests/selection_read_sdk.test.mjs tests/selection_read_bridge.test.mjs tests/fs_read_directory_api.test.mjs tests/process_start_sdk.test.mjs
+          node --test tests/selection_read_sdk.test.mjs tests/selection_read_bridge.test.mjs tests/fs_read_directory_api.test.mjs tests/process_start_sdk.test.mjs tests/raishot_resident_sdk.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/selection_read_types.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -207,6 +207,18 @@ jobs:
               if ($previousNodeVariables[$name].existed) { [Environment]::SetEnvironmentVariable($name, $previousNodeVariables[$name].value, 'Process') }
               else { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
             }
+          }
+
+      - name: 验证 RaiShot 常驻协议的隔离原生窗口
+        shell: pwsh
+        run: |
+          $previousRaiShotTest = $env:OMNITRIGGER_RAISHOT_PRIVATE_STATION_TEST
+          try {
+            $env:OMNITRIGGER_RAISHOT_PRIVATE_STATION_TEST = '1'
+            cargo test --locked -p omnitrigger-app --bin omnitrigger desktop_host::raishot_resident_host::native_tests::native_raishot_protocol_in_private_station -- --ignored --exact --test-threads=1 --nocapture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            $env:OMNITRIGGER_RAISHOT_PRIVATE_STATION_TEST = $previousRaiShotTest
           }
 
       - name: 验证 Windows 真实目录枚举与整批上限
