@@ -375,7 +375,36 @@ function createDesktopApi(invoke) {
     } catch(cause) { return failure(cause); }
   }
 
+  function editFault(code,effectState) {
+    return Object.assign(new Error('Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。'),
+      {code,effectState,method:'win32_edit.replace_selection'});
+  }
+  function win32EditReplaceSelection(args) {
+    let text,adapter;
+    try {
+      if(args.length!==2 || !dataText(args[0],8192,true))throw new Error();
+      text=args[0];adapter=brightnessRecord(args[1],['adapter']).adapter;
+      if(!['native-edit','winforms-edit'].includes(adapter))throw new Error();
+    } catch (_) { throw editFault('invalid_input','not_started'); }
+    const failure = cause => desktopMutationFailure(cause,
+      ['invalid_input','cancelled','timeout','target_changed','edit_unsupported','permission_denied',
+       'edit_message_unconfirmed','native_bridge_unavailable','native_bridge_failed','desktop_unavailable',
+       'desktop_busy','desktop_call_limit','desktop_connection','desktop_protocol','desktop_timeout','invalid_response'],editFault);
+    const result = value => {
+      try {
+        const receipt=brightnessRecord(value,['messageProcessed','effectState']);
+        if(receipt.messageProcessed!==true || receipt.effectState!=='unknown')throw new Error();
+        return Object.freeze({messageProcessed:true,effectState:'unknown'});
+      } catch (_) { throw editFault('invalid_response','unknown'); }
+    };
+    try {
+      const value=invoke('win32_edit.replace_selection',{text,adapter});
+      return value && typeof value.then==='function' ? value.then(result,failure) : result(value);
+    } catch (cause) { return failure(cause); }
+  }
+
   const desktop = Object.freeze({
+    win32EditReplaceSelection: (...args) => win32EditReplaceSelection(args),
     explorerContext: (...args) => explorerContext(args),
     readSelectionText: (...args) => readSelectionText(args),
     captureForegroundTarget,

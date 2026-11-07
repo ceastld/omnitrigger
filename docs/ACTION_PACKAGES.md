@@ -773,3 +773,14 @@ wire为audio.volume_adjust，deltaPercent映射为delta_percent。返回匿名pr
 该示例不新增插件安装器、状态 API 或 SDK；通用导入 UI、原生依赖自动安装及参数表单尚未提供，具体见包内说明。外部原生程序没有并入动作包或 OmniTrigger 发行载荷。
 
 纯 Node 包检查可运行 `node tests/n10-rust-package.mjs`。它从清单解析真实入口，以假端口核对参数、禁用配置、协议结果和许可证，不启动原生程序；不替代真实目录加载或原生调用验收。
+
+
+### 显式Win32标准Edit选区替换
+
+`ctx.desktop.win32EditReplaceSelection(text,{adapter:'native-edit'|'winforms-edit'})` 只使用本次原目标的精确focused child；必须明确选适配，不猜第三方class，不接受HWND，不回退键盘、剪贴板或UIA写入。Node使用await，同步Script直接返回 `{messageProcessed:true,effectState:'unknown'}`。只确认一条EM_REPLACESEL消息已处理，不确认全部正文被接受或业务完成；回执不含原文、控件信息或身份。
+
+文本最多8192个UTF-16单元，拒绝NUL/无效Unicode；保留CRLF，空字符串按原生语义删除当前选区，空选区会在插入点操作。写前复验原窗口、PID/线程/进程创建时间、前台、focused child、Unicode Edit类别及readonly状态；明确拒绝同进程、password、disabled控件，WinForms适配还要求系统基类为Edit。未知或第三方类返回edit_unsupported；Chrome/Office/RichEdit不在此适配范围。
+
+这是跨进程系统消息0x00C2（低于WM_USER）的字符串封送，不是任意自定义消息指针协议。沿用动作期限，操作预算最多5秒、单条SendMessageTimeout最多请求1000ms；Windows系统调用与同输入队列的例外不能承诺强wall-clock预算。写前拒绝为not_started，移交消息后超时/取消/目标变化或无法确认均unknown，不重试。原窗口身份核验不锁定HWND生命周期。
+
+此接口不读取原文，不增加selection.read_text的一次GetText观察；它也不将原有一次读数或两次读取与当前Edit选区替换组成原子事务。此前UIA范围可能在消息处理前变化。该方法不替换sendText，不能据此声称通用文本发送或8192字符必达。

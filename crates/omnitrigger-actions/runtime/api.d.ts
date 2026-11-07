@@ -113,7 +113,7 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'display.brightness_step' | 'audio.volume_adjust' | 'ui.choose' | 'ui.notify' | 'ui.open_history' | 'ui.toggle_history';
+  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'win32_edit.replace_selection' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'display.brightness_step' | 'audio.volume_adjust' | 'ui.choose' | 'ui.notify' | 'ui.open_history' | 'ui.toggle_history';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
 }
@@ -295,6 +295,9 @@ export interface ActionContext {
     sendShortcut(keys: number[], options?: {keyDownDelayMs?: number; timing?: never} | {timing: ShortcutTiming; keyDownDelayMs?: never}): Promise<{submitted: true}>;
     /** 修饰键跨越整组普通键；延迟在修饰键就绪后、每个普通键按下后等待。 */
     sendKeySequence(modifiers: number[], keys: number[], options?: {keyDownDelayMs?: number}): Promise<{submitted: true}>;
+    /** 显式跨进程Unicode标准Edit适配；必选adapter，不猜控件或回退。最多8192 UTF-16单元，不含NUL。
+     * 单条EM_REPLACESEL；仅确认消息处理，不确认正文接受；不与UIA读取原子绑定，超时/写后取消为unknown。 */
+    win32EditReplaceSelection(text: string, options: {adapter:'native-edit'|'winforms-edit'}): Promise<{messageProcessed:true;effectState:'unknown'}>;
     /** Unicode 直接输入，不使用剪贴板。最多 65,536 个 UTF-16 单元，无 NUL。 */
     sendText(text: string): Promise<{submitted: true}>;
     /** 向原目标发送 Ctrl+C 并读取新文本。复制结果保留在剪贴板。 */

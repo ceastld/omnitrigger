@@ -279,6 +279,9 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
         /** VK 整数，修饰键在前。仅确认系统接纳输入。 */
         sendShortcut(keys: number[], options?: {keyDownDelayMs?: number; timing?: never} | {timing: ScriptShortcutTiming; keyDownDelayMs?: never}): {submitted: true};
         sendKeySequence(modifiers: number[], keys: number[], options?: {keyDownDelayMs?: number}): {submitted: true};
+        /** 显式跨进程Unicode标准Edit适配；必选adapter，不猜控件或回退。最多8192 UTF-16单元，不含NUL。
+         * 单条EM_REPLACESEL；仅确认消息处理，不确认正文接受；不与UIA读取原子绑定，超时/写后取消为unknown。 */
+        win32EditReplaceSelection(text: string, options: {adapter:'native-edit'|'winforms-edit'}): {messageProcessed:true;effectState:'unknown'};
         /** 有效 Unicode，无 NUL，最多 65,536 个 UTF-16 单元，不经过剪贴板。 */
         sendText(text: string): {submitted: true};
         /** 向原目标发送 Ctrl+C 并读取新文本，复制结果保留在剪贴板。 */

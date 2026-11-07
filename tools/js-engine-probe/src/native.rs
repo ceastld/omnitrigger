@@ -10,7 +10,7 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 30] = [
+pub const METHODS: [&str; 31] = [
     "history.list",
     "history.get",
     "history.append",
@@ -31,6 +31,7 @@ pub const METHODS: [&str; 30] = [
     "keyboard.shortcut",
     "keyboard.sequence",
     "keyboard.text",
+    "win32_edit.replace_selection",
     "selection.copy",
     "selection.copy_data",
     "selection.read_text",
@@ -70,7 +71,9 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
             code
         })
         .into(),
-        message: if method == "audio.volume_adjust" {
+        message: if method == "win32_edit.replace_selection" {
+            "Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。".into()
+        } else if method == "audio.volume_adjust" {
             "音量调节未获完整确认；请检查错误代码和效果状态。".into()
         } else if method == "display.brightness_step" {
             "亮度步进未获完整确认；请检查结构化回执。".into()
@@ -102,7 +105,11 @@ fn brightness_transport_effect(
     write_began: bool,
     fallback: &'static str,
 ) -> &'static str {
-    if matches!(method, "display.brightness_step" | "audio.volume_adjust") && !write_began {
+    if matches!(
+        method,
+        "display.brightness_step" | "audio.volume_adjust" | "win32_edit.replace_selection"
+    ) && !write_began
+    {
         "not_started"
     } else {
         fallback
@@ -187,6 +194,7 @@ pub fn call(
                 | "selection.copy_data"
                 | "display.brightness_step"
                 | "audio.volume_adjust"
+                | "win32_edit.replace_selection"
                 | "history.list"
                 | "history.get"
                 | "history.append"
@@ -204,6 +212,7 @@ pub fn call(
                     "selection.copy_data"
                         | "display.brightness_step"
                         | "audio.volume_adjust"
+                        | "win32_edit.replace_selection"
                         | "history.append"
                         | "history.remove"
                         | "ui.toggle_history"
@@ -233,6 +242,7 @@ pub fn call(
                         | "selection.copy_data"
                         | "display.brightness_step"
                         | "audio.volume_adjust"
+                        | "win32_edit.replace_selection"
                         | "history.list"
                         | "history.get"
                         | "history.append"
@@ -247,6 +257,7 @@ pub fn call(
                             "selection.copy_data"
                                 | "display.brightness_step"
                                 | "audio.volume_adjust"
+                                | "win32_edit.replace_selection"
                                 | "history.append"
                                 | "history.remove"
                                 | "ui.toggle_history"
@@ -295,7 +306,11 @@ pub fn call(
 fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError> {
     let invalid = || {
         fault(
-            "native_bridge_failed",
+            if method == "win32_edit.replace_selection" {
+                "invalid_response"
+            } else {
+                "native_bridge_failed"
+            },
             "本机回执格式或调用身份不匹配。",
             method,
             "unknown",
@@ -348,6 +363,7 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "selection.copy_data"
                     | "display.brightness_step"
                     | "audio.volume_adjust"
+                    | "win32_edit.replace_selection"
                     | "history.list"
                     | "history.get"
                     | "history.append"
@@ -375,7 +391,11 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
             let mut error = fault(code, message, reported_method, effect);
             if !matches!(
                 method,
-                "history.list" | "history.get" | "history.append" | "history.remove"
+                "history.list"
+                    | "history.get"
+                    | "history.append"
+                    | "history.remove"
+                    | "win32_edit.replace_selection"
             ) {
                 error.required_permissions = permissions;
             }
@@ -515,5 +535,43 @@ mod tests {
             brightness_transport_effect("fs.stat", true, "not_started"),
             "not_started"
         );
+    }
+    #[test]
+    fn edit_invalid_frames_are_unknown_without_changing_legacy_classification() {
+        for frame in [
+            b"{}\n".as_slice(),
+            b"{not-json}\n",
+            b"{\"id\":2,\"ok\":true,\"value\":null}\n",
+            b"{\"id\":1,\"ok\":true,\"value\":null}\n{}\n",
+        ] {
+            let edit = parse_response(frame, 1, "win32_edit.replace_selection").unwrap_err();
+            assert_eq!(edit.code, "invalid_response");
+            assert_eq!(edit.effect_state.as_deref(), Some("unknown"));
+            assert_eq!(edit.method.as_deref(), Some("win32_edit.replace_selection"));
+            let legacy = parse_response(frame, 1, "keyboard.text").unwrap_err();
+            assert_eq!(legacy.code, "native_bridge_failed");
+        }
+    }
+
+    #[test]
+    fn edit_transport_and_response_errors_preserve_effect_without_private_body() {
+        let method = "win32_edit.replace_selection";
+        assert_eq!(
+            brightness_transport_effect(method, false, "unknown"),
+            "not_started"
+        );
+        assert_eq!(
+            brightness_transport_effect(method, true, "unknown"),
+            "unknown"
+        );
+        let error = parse_response(b"{\"id\":1,\"ok\":false,\"error\":{\"code\":\"timeout\",\"message\":\"private original\",\"method\":\"win32_edit.replace_selection\",\"effect_state\":\"unknown\",\"required_permissions\":[\"private\"]}}\n", 1, method).unwrap_err();
+        assert_eq!(error.code, "timeout");
+        assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+        assert_eq!(error.method.as_deref(), Some(method));
+        assert!(error.required_permissions.is_empty());
+        assert!(!error.message.contains("private"));
+        let error = parse_response(b"{\"id\":1,\"ok\":false,\"error\":{\"code\":\"edit_unsupported\",\"message\":\"private original\",\"method\":\"wrong.method\",\"effect_state\":\"not_started\"}}\n", 1, method).unwrap_err();
+        assert_eq!(error.code, "invalid_response");
+        assert_eq!(error.effect_state.as_deref(), Some("unknown"));
     }
 }

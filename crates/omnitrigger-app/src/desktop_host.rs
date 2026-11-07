@@ -11,6 +11,8 @@ use std::time::Instant;
 
 #[path = "keyboard_text_deadline.rs"]
 mod keyboard_text_deadline;
+#[path = "win32_edit_replace_host.rs"]
+mod win32_edit_replace_host;
 
 pub struct DesktopHost {
     foreground_targets: ForegroundTargets,
@@ -378,6 +380,20 @@ impl NativeHost for DesktopHost {
         cancellation: &CancellationToken,
     ) -> Result<Value, ActionError> {
         match method {
+            "win32_edit.replace_selection" => {
+                return win32_edit_replace_host::execute_with(
+                    params,
+                    cancellation,
+                    None,
+                    Instant::now,
+                    || self.target.as_ref().map_err(Clone::clone),
+                    |target, text, adapter, deadline, check| {
+                        omnitrigger_windows::replace_focused_standard_edit_selection(
+                            target, adapter, text, deadline, check,
+                        )
+                    },
+                );
+            }
             "target.capture_foreground" => {
                 return self.foreground_targets.capture(params, cancellation, None)
             }
@@ -594,6 +610,18 @@ impl NativeHost for DesktopHost {
         deadline: Instant,
     ) -> Result<Value, ActionError> {
         match method {
+            "win32_edit.replace_selection" => win32_edit_replace_host::execute_with(
+                params,
+                cancellation,
+                Some(deadline),
+                Instant::now,
+                || self.target.as_ref().map_err(Clone::clone),
+                |target, text, adapter, deadline, check| {
+                    omnitrigger_windows::replace_focused_standard_edit_selection(
+                        target, adapter, text, deadline, check,
+                    )
+                },
+            ),
             "keyboard.text" => self.send_text(params, cancellation, Some(deadline)),
             "target.capture_foreground" => {
                 self.foreground_targets

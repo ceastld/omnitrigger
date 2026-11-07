@@ -17,7 +17,7 @@ let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
 const nativeMethods = new Set(['system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','fs.read_directory','ui.choose','ui.notify','ui.open_history','ui.toggle_history','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
-  'keyboard.shortcut','keyboard.sequence','keyboard.text','selection.copy','selection.copy_data','selection.read_text','explorer.context','clipboard.read','clipboard.read_data','clipboard.write','window.action','display.brightness_step','audio.volume_adjust']);
+  'keyboard.shortcut','keyboard.sequence','keyboard.text','win32_edit.replace_selection','selection.copy','selection.copy_data','selection.read_text','explorer.context','clipboard.read','clipboard.read_data','clipboard.write','window.action','display.brightness_step','audio.volume_adjust']);
 let nativePending;
 let nativePendingMethod;
 let nativeId = 0;
@@ -102,6 +102,7 @@ function nativeCall(method, params) {
   const historyUi = method === 'ui.open_history' || method === 'ui.toggle_history';
   const opening = method === 'system.open' || method === 'system.open_file_in_parent';
   const capture = method === 'process.capture';
+  const edit = method === 'win32_edit.replace_selection';
   const volume = method === 'audio.volume_adjust';
   const brightness = method === 'display.brightness_step' || volume;
   const stat = method === 'fs.stat' || method === 'fs.read_directory';
@@ -111,13 +112,13 @@ function nativeCall(method, params) {
   const historyRead = method === 'history.list' || method === 'history.get';
   const historyWrite = method === 'history.append' || method === 'history.remove';
   const history = historyRead || historyWrite;
-  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, volume ? '音量调节未获完整确认；请检查错误代码和效果状态。' : brightness ? '亮度步进未获完整确认；请检查结构化回执。' : capture ? '程序输出采集未完成，请检查错误代码。' : stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : history ? '剪贴板历史调用失败；请检查错误代码。' : message), {effectState:stat || dataRead || historyRead ? 'not_started' : effectState, method});
+  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, edit ? 'Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。' : volume ? '音量调节未获完整确认；请检查错误代码和效果状态。' : brightness ? '亮度步进未获完整确认；请检查结构化回执。' : capture ? '程序输出采集未完成，请检查错误代码。' : stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : history ? '剪贴板历史调用失败；请检查错误代码。' : message), {effectState:stat || dataRead || historyRead ? 'not_started' : effectState, method});
   if (!nativeMethods.has(method)) return Promise.reject(fail('invalid_input', '未提供此本机调用方法。'));
-  if ((historyUi || stat || data || history || capture || brightness) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
+  if ((historyUi || stat || data || history || capture || brightness || edit) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
   checkCancelled();
   const ui = method === 'ui.choose' || method === 'ui.notify' || historyUi;
   const unavailable = ui && request.native_error?.code === 'desktop_unavailable' ? 'ui_unavailable' : request.native_error?.code;
-  if (!request.native) return Promise.reject(fail(capture || brightness ? 'native_bridge_unavailable' : history ? 'history_unavailable' : data ? 'native_bridge_unavailable' : stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
+  if (!request.native) return Promise.reject(fail(capture || brightness || edit ? 'native_bridge_unavailable' : history ? 'history_unavailable' : data ? 'native_bridge_unavailable' : stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
   if (nativePending) return Promise.reject(fail(stat ? 'fs_busy' : method === 'ui.toggle_history' && ['ui.choose','ui.open_history','ui.toggle_history'].includes(nativePendingMethod) ? 'ui_busy' : (method === 'ui.notify' || historyUi) && nativePendingMethod === method ? 'ui_busy' : 'desktop_busy', '请 await 上一个本机调用，避免并发。'));
   if (nativeId >= 128) return Promise.reject(fail('desktop_call_limit', '单次动作最多调用 128 次桌面 API。'));
   const id = ++nativeId;
@@ -146,8 +147,8 @@ function nativeCall(method, params) {
     const aborted = () => {
       const reason = controller.signal.reason;
       if (opening && reason) { reason.method = method; reason.effectState = sent ? 'unknown' : 'not_started'; }
-      if (opening || capture || brightness) return finish(fail(reason?.code === 'timeout' ? 'timeout' : 'cancelled', undefined, sent ? 'unknown' : 'not_started'));
-      if (method === 'ui.notify' || historyUi || stat || data || history || capture || brightness) {
+      if (opening || capture || brightness || edit) return finish(fail(reason?.code === 'timeout' ? 'timeout' : 'cancelled', undefined, sent ? 'unknown' : 'not_started'));
+      if (method === 'ui.notify' || historyUi || stat || data || history || capture || brightness || edit) {
         if (typeof reason?.method !== 'string') reason.method = method;
         reason.effectState = stat || dataRead || historyRead ? 'not_started' : sent ? 'unknown' : 'not_started';
       }
@@ -156,9 +157,9 @@ function nativeCall(method, params) {
     controller.signal.addEventListener('abort', aborted, {once:true});
     if (!capture) socket.setEncoding('utf8');
     const timeout = capture ? Math.min(params.timeout_ms + 1500, 61500) : opening || method === 'ui.choose' || brightness ? 61000 : dataCopy ? 8000 : 5000;
-    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || historyUi || stat || data || history || capture || brightness ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
+    socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || historyUi || stat || data || history || capture || brightness || edit ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
     // 这些方法的总传输时限不被零碎数据延长，外层取消/时限仍优先生效。
-    if (historyUi || opening || stat || data || history || capture || brightness) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
+    if (historyUi || opening || stat || data || history || capture || brightness || edit) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
     socket.once('connect', () => {
       if (controller.signal.aborted) return aborted();
       sent = true;
@@ -172,7 +173,7 @@ function nativeCall(method, params) {
         catch { return finish(fail('invalid_response', undefined, 'unknown')); }
       }
       chunks += chunk;
-      if (Buffer.byteLength(chunks) > 512 * 1024 + 1) return finish(fail('desktop_protocol', '桌面回执超过上限。', 'unknown'));
+      if (Buffer.byteLength(chunks) > 512 * 1024 + 1) return finish(fail(edit ? 'invalid_response' : 'desktop_protocol', '桌面回执超过上限。', 'unknown'));
       if (!chunks.endsWith('\n')) return;
       if (capture) {
         try { chunks += captureDecoder.decode(); }
@@ -181,18 +182,18 @@ function nativeCall(method, params) {
       try {
         const response = JSON.parse(chunks);
         if (response.id !== id || typeof response.ok !== 'boolean') throw new Error('回执身份不匹配');
-        if ((opening || stat || history || capture || brightness) && (Reflect.ownKeys(response).length !== 3 || !Object.hasOwn(response, response.ok ? 'value' : 'error'))) throw new Error();
+        if ((opening || stat || history || capture || brightness || edit) && (Reflect.ownKeys(response).length !== 3 || !Object.hasOwn(response, response.ok ? 'value' : 'error'))) throw new Error();
         if (response.ok) finish(undefined, response.value);
         else {
           const error = response.error;
           if (!error || typeof error.code !== 'string' || typeof error.message !== 'string') throw new Error('缺少错误');
-          if ((opening || stat || history || capture || brightness) && ((error.method !== undefined && error.method !== method)
+          if ((opening || stat || history || capture || brightness || edit) && ((error.method !== undefined && error.method !== method)
               || (error.effect_state !== undefined && !['not_started','unknown'].includes(error.effect_state)))) throw new Error();
           const failure = fail(error.code, error.message, error.effect_state ?? 'unknown');
           if (!stat && !history && !capture && Array.isArray(error.required_permissions)) failure.requiredPermissions = error.required_permissions;
           finish(failure);
         }
-      } catch { finish(fail('desktop_protocol', '桌面回执格式无效；业务结果未确认。', 'unknown')); }
+      } catch { finish(fail(edit ? 'invalid_response' : 'desktop_protocol', '桌面回执格式无效；业务结果未确认。', 'unknown')); }
     });
     socket.once('error', error => finish(fail(stat ? (sent ? 'fs_error' : 'fs_unavailable') : 'desktop_connection', error.message, sent ? 'unknown' : 'not_started')));
     socket.once('close', () => finish(fail(stat ? 'fs_error' : 'desktop_connection', '桌面连接已关闭；不会重试。', sent ? 'unknown' : 'not_started')));

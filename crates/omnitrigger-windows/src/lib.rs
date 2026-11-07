@@ -120,6 +120,14 @@ pub use window_action::{
     shortcut_target_process, shortcut_target_title,
 };
 
+#[cfg(any(windows, test))]
+mod standard_edit;
+#[cfg(windows)]
+pub use standard_edit::{
+    replace_focused_standard_edit_selection, StandardEditAdapter, StandardEditError,
+    StandardEditReceipt,
+};
+
 #[cfg(windows)]
 mod script_target;
 mod shortcut;

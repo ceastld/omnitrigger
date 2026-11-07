@@ -15,7 +15,7 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 33] = [
+const METHODS: [&str; 34] = [
     "system.open",
     "system.open_file_in_parent",
     "process.capture",
@@ -39,6 +39,7 @@ const METHODS: [&str; 33] = [
     "keyboard.shortcut",
     "keyboard.sequence",
     "keyboard.text",
+    "win32_edit.replace_selection",
     "selection.copy",
     "selection.copy_data",
     "selection.read_text",
@@ -275,7 +276,8 @@ impl NativeBridge {
                     } else if cancellation.is_cancelled() {
                         let mut error =
                             ActionError::new("cancelled", "动作已取消，未开始本机调用。");
-                        if opening
+                        if request.method == "win32_edit.replace_selection"
+                            || opening
                             || file_read
                             || data_read
                             || data_copy
@@ -296,7 +298,8 @@ impl NativeBridge {
                             ),
                             None => host.call(&request.method, request.params, cancellation),
                         };
-                        if opening
+                        if request.method == "win32_edit.replace_selection"
+                            || opening
                             || request.method == "ui.choose"
                             || matches!(
                                 request.method.as_str(),
@@ -319,6 +322,16 @@ impl NativeBridge {
                         }
                     }
                     .map_err(|mut error| {
+                        if request.method == "win32_edit.replace_selection" {
+                            error.message =
+                                "Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。".into();
+                            error.method = Some(request.method.clone());
+                            error.required_permissions.clear();
+                            if error.effect_state.as_deref() != Some("not_started") {
+                                error.effect_state = Some("unknown".into());
+                            }
+                        }
+
                         if file_read {
                             error.message = "本地文件查询失败；请检查错误代码。".into();
                             error.method = Some(request.method.clone());

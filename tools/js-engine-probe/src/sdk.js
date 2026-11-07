@@ -16,7 +16,7 @@ function call(kind, args = {}, serialized) {
         const error = new Error(response.error.message);
         error.code = response.error.code;
         if (response.error.effect_state) error.effectState = response.error.effect_state;
-        else if (kind === 'native') error.effectState = 'not_started';
+        else if (kind === 'native') error.effectState = args.method === 'win32_edit.replace_selection' ? 'unknown' : 'not_started';
         if (response.error.method) error.method = response.error.method;
         if (response.error.required_permissions) error.requiredPermissions = response.error.required_permissions;
         throw error;
@@ -42,7 +42,11 @@ ctx.delay = milliseconds => {
     call('delay', {milliseconds});
 };
 function desktopCall(method, params) {
+    if (method === 'win32_edit.replace_selection' && calls >= 32) throw Object.assign(new Error('单次脚本最多调用32次宿主API。'),{code:'desktop_call_limit',effectState:'not_started',method});
+
     if (!nativeContext || nativeContext.error) {
+        if (method === 'win32_edit.replace_selection') throw Object.assign(new Error('Win32 Edit替换需要应用本机桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
+
         if (method === 'audio.volume_adjust') throw Object.assign(new Error('音量调节需要应用本机能力桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
         if (method === 'display.brightness_step') throw Object.assign(new Error('亮度步进需要应用本机能力桥接。'), {code:'native_bridge_unavailable',effectState:'not_started',method});
         if (['history.list','history.get','history.append','history.remove'].includes(method)) {
