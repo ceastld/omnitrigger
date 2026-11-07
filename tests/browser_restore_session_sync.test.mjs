@@ -99,13 +99,14 @@ test('同步恢复误接异步profiles时在任何副作用前拒绝',()=>{
   let calls=0;assert.throws(()=>syncEntry({input:base,browser:{profiles:()=>Promise.resolve([{browser_instance_id:'own'}]),call:()=>calls++}}),e=>e.code==='invalid_response');assert.equal(calls,0);
 });
 
-test('同步恢复真实入口、两种模板与严格canonical工程配置完整',async()=>{
+test('同步恢复真实入口、两种模板与严格便携工程配置完整',async()=>{
   const manifest=JSON.parse(await readFile(new URL('../examples/actions/browser-workflows/action.json',import.meta.url)));
   const old=manifest.actions.find(a=>a.id==='restore-session'),sync=manifest.actions.find(a=>a.id==='restore-session-script');assert.equal(old.runtime,'node');assert.equal(old.version,1);assert.equal(sync.runtime,'script');assert.equal(sync.version,1);assert.equal(sync.single_instance,true);assert.equal(sync.entry,'restore-session-script.mjs');
   for(const [name,id] of [['restore-session-call.json','restore-session'],['restore-session-script-call.json','restore-session-script']]){
     const call=JSON.parse(await readFile(new URL('../examples/actions/browser-workflows/'+name,import.meta.url)));assert.equal(call.package_id,manifest.id);assert.equal(call.action_id,id);assert.equal(call.action_version,1);
   }
-  const project=JSON.parse(await readFile(new URL('../examples/actions/browser-workflows/jsconfig.json',import.meta.url)));assert.equal(project.compilerOptions.strict,true);assert.equal(project.compilerOptions.checkJs,true);assert.ok(project.files.includes('../../../crates/omnitrigger-actions/runtime/script-types.d.ts'));assert.ok(!project.files.includes('sdk/script-types.d.ts'));
+  const project=JSON.parse(await readFile(new URL('../examples/actions/browser-workflows/jsconfig.json',import.meta.url)));assert.equal(project.compilerOptions.strict,true);assert.equal(project.compilerOptions.checkJs,true);assert.ok(project.files.includes('sdk/script-types.d.ts'));assert.ok(project.files.every(file=>!file.startsWith('../')));
+  const types=await readFile(new URL('../examples/actions/browser-workflows/sdk/script-types.d.ts',import.meta.url),'utf8');assert.match(types,/type ScriptMain\b/);
 });
 
 
