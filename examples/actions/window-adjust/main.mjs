@@ -8,7 +8,7 @@ function options(value){
  return Object.freeze(/** @type {{mode:'move'|'resize';handoff:boolean;restore:boolean}} */(result));
 }
 /** 单次有界调整；不注入/消费按钮，不把停止回执称为完整拖拽。
- * @param {import('../../../crates/omnitrigger-actions/runtime/api.js').ActionContext} ctx */
+ * @param {import('./sdk/api').ActionContext} ctx */
 export default async function main(ctx){
  const input=options(ctx.input);
  /** @type {'not_started'|'unknown'} */let effect='not_started';let writing=false;
@@ -17,7 +17,7 @@ export default async function main(ctx){
   check();const original=await ctx.desktop.targetContext();check();
   const pointing=await ctx.desktop.getPointingRoot();check();
   const same=['window_handle','process_id','thread_id','process_created_file_time'].every(k=>original[/** @type {keyof typeof original} */(k)]===pointing.rootWindow[/** @type {keyof typeof pointing.rootWindow} */(k)]);
-  /** @type {import('../../../crates/omnitrigger-actions/runtime/api.js').CapturedTarget|null} */let target=null;
+  /** @type {import('./sdk/api').CapturedTarget|null} */let target=null;
   if(!same){
    if(!input.handoff)return {status:'different_pointing_root',effectState:effect,dragCompleted:false};
    writing=true;

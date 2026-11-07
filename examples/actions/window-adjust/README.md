@@ -8,4 +8,8 @@
 
 窗口操作只确认请求提交，应用和 DPI 变化可能影响结果。effectState:unknown 表示已有请求或旧效果不能确认；错误后不重试、不回滚。该示例不注入、消费或释放输入，不代表完整拖拽或物理输入所有权。
 
-在仓库中可使用 tools/script-sdk-check 的 TypeScript 执行 tsc -p examples/actions/window-adjust/jsconfig.json 检查类型。动作运行不依赖 TypeScript 或其他 npm 包。
+将整个动作包复制到任意本地目录后，可直接在该目录编辑 main.mjs。包内 sdk 声明提供窗口、指针与显式目标接口的类型补全，不依赖仓库路径。
+
+开发检查要求 Node.js 22 或更高版本：先运行 npm ci --ignore-scripts，再运行 npm run check。检查使用本包固定的 TypeScript 5.9.3，并静态验证清单中的 Node 入口，不执行动作代码。已有类型与入口检查通过，不代表实际窗口操作已完成。
+
+TypeScript 为 Apache-2.0 开发依赖，版本、来源与完整性由 package-lock.json 固定，安装后许可证位于 node_modules/typescript/LICENSE.txt。SDK 声明与入口检查器按本项目 MIT 提供；动作运行不依赖 TypeScript 或其他 npm 包。

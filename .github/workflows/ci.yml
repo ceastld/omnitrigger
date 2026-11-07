@@ -391,7 +391,14 @@ jobs:
         run: |
           node --test tools/script-sdk-check/window-toggle-for.test.mjs tools/script-sdk-check/window-api.test.mjs tests/script_sdk_whole_source_syntax.test.mjs examples/actions/window-adjust/contract.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($windowConfig in @('tools/script-sdk-check/window-toggle-for-node-jsconfig.json', 'tools/script-sdk-check/window-toggle-for-script-jsconfig.json', 'examples/actions/window-adjust/jsconfig.json')) {
+          Push-Location examples/actions/window-adjust
+          try {
+            npm ci --ignore-scripts --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          foreach ($windowConfig in @('tools/script-sdk-check/window-toggle-for-node-jsconfig.json', 'tools/script-sdk-check/window-toggle-for-script-jsconfig.json')) {
             node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p $windowConfig
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }

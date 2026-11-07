@@ -112,3 +112,5 @@ RaiShot 截图适配描述和 OmniTrigger 安装器属于本项目代码；截�
 ## 窗口与指针适配
 
 窗口几何、指针及有界调整复用锁定的 windows 0.61.3（MIT OR Apache-2.0）绑定、现有 serde/serde_json 和标准库。仅为现有 Windows 依赖启用 Win32_System_RemoteDesktop、Win32_System_StationsAndDesktops 功能，不新增第三方包、素材、运行依赖或许可类别；主工作区及脚本宿主锁文件保持。适配、SDK、示例和测试由本项目编写，按 MIT 提供。
+
+窗口调整示例 examples/actions/window-adjust 的离仓作者检查复用上述 TypeScript 5.9.3（Apache-2.0），由包内 package-lock.json 固定来源和完整性；sdk 仅包含本项目 MIT 声明与静态入口检查器，不引入运行依赖。
