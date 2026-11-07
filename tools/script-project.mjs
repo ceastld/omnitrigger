@@ -59,13 +59,17 @@ export default async function main(ctx) {
     return { text: cleanText(ctx.input.text), invocation: ctx.invocation };
 }
 `;
-// 公开62的精确canonical声明，保留LF/CRLF两种字节指纹；未知旧版本不猜测。
+// 已确认的公共canonical声明，保留各版本LF/CRLF字节指纹；未知版本不猜测。
 const canonicalSdkHashes={
   "api.d.ts": [
+    "495ab8e791cf0a097f1d4a9981ba9c8d42b6fc474b2e46fc3b22ed8954e893ea",
+    "1529bbe80cbfaad91e0a8b1843b83fc7e2a5b46c761333f3a62b1f417a787c40",
     "12020f626e467a1025b8eb9b08245952f0425f97a983a8f66c48a1864e6d7adc",
     "aacd818ae060a0c4391d322fb0d42b6712b01a582fef9ff3821bc150911a9a14"
   ],
   "script-types.d.ts": [
+    "230fa9343b86cbe359d436c75f9abdd36f7c5e4f17742856944a6371e10e5e1d",
+    "d0c651d9deefaf9523449446e899057d95948bb9c743a1db3cab0fd8d2daf6f5",
     "261666bf8be38669cbbe16f27fa2bf44f3a20f2ded90cef2be888de85a939f01",
     "16e2652d5f012d0d0ddcf9104462179dcaa3366b3d3a32d0e349d5fdd096b427"
   ],

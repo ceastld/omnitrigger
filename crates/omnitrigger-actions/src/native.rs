@@ -15,7 +15,8 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 37] = [
+const METHODS: [&str; 38] = [
+    "actions.stop_other_instances",
     "system.open",
     "system.open_file_in_parent",
     "process.capture",
@@ -58,6 +59,16 @@ const METHODS: [&str; 37] = [
 /// 由应用为本次调用捕获的本机上下文。不是沙盒或权限隔离。
 /// 回调在动作工作线程执行，须有界返回，并在副作用前核验取消和目标身份。
 pub trait NativeHost: Send + Sync {
+    /// 作用域包装本身不提供原有应用上下文；此标记不证明权限或设备可用。
+    fn native_context_available(&self) -> bool {
+        true
+    }
+
+    /// 只有服务为当前真实调用创建的作用域提供动作控制；默认宿主无此能力。
+    fn action_scope_available(&self) -> bool {
+        false
+    }
+
     fn call(
         &self,
         method: &str,
@@ -245,6 +256,7 @@ impl NativeBridge {
                     );
                     let file_read =
                         matches!(request.method.as_str(), "fs.stat" | "fs.read_directory");
+                    let action_control = request.method == "actions.stop_other_instances";
                     let capture = request.method == "process.capture";
                     let brightness = matches!(
                         request.method.as_str(),
@@ -265,6 +277,14 @@ impl NativeBridge {
                     let result = if !METHODS.contains(&request.method.as_str()) {
                         let mut error = ActionError::new("invalid_input", "未提供此本机调用方法。");
                         error.effect_state = Some("not_started".into());
+                        Err(error)
+                    } else if action_control && !host.action_scope_available() {
+                        let mut error = ActionError::new(
+                            "actions_unavailable",
+                            "动作控制需要当前服务调用作用域。",
+                        );
+                        error.effect_state = Some("not_started".into());
+                        error.method = Some(request.method.clone());
                         Err(error)
                     } else if !request.params.is_object()
                         || (request.method == "clipboard.read_data"
@@ -289,6 +309,7 @@ impl NativeBridge {
                             || history
                             || capture
                             || brightness
+                            || action_control
                         {
                             error.effect_state = Some("not_started".into());
                         }
@@ -322,6 +343,7 @@ impl NativeBridge {
                             || history
                             || capture
                             || brightness
+                            || action_control
                         {
                             interactive_call(&client.stream, cancellation, call)
                         } else {

@@ -10,7 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = rel => fs.readFileSync(path.join(root, rel), 'utf8');
 const desktopSource = source('crates/omnitrigger-actions/runtime/desktop-api.js');
 const host = source('crates/omnitrigger-actions/runtime/host.mjs');
-const sdk = source('tools/js-engine-probe/src/sdk.js');
+const sdk = source('crates/omnitrigger-actions/runtime/actions-api.js')+'\n'+source('tools/js-engine-probe/src/sdk.js');
 const asyncApiLine = host.split('\n').find(line => line.startsWith('const asyncApi ='));
 function core(invoke, asynchronous=false) {
   const context = vm.createContext({invoke});

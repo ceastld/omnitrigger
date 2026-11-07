@@ -9,7 +9,7 @@ const shared=source('../crates/omnitrigger-actions/runtime/desktop-api.js')
   +source('../crates/omnitrigger-actions/runtime/browser-api.js')
   +source('../crates/omnitrigger-actions/runtime/clipboard-history-api.js')
   +source('../crates/omnitrigger-actions/runtime/process-capture-api.js');
-const sdk=source('../tools/js-engine-probe/src/sdk.js');
+const sdk=source('../crates/omnitrigger-actions/runtime/actions-api.js')+'\n'+source('../tools/js-engine-probe/src/sdk.js');
 const executable='C:\\SyntheticOnly\\fixture.exe';
 const secret='synthetic_capture_private_output';
 const plain=value=>JSON.parse(JSON.stringify(value));
