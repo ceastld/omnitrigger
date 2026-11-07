@@ -360,6 +360,25 @@ mod clipboard {
         check().map_err(Fault::unknown)
     }
 
+    pub(super) fn decode(units: &[u16]) -> Result<String, String> {
+        let end = units
+            .iter()
+            .position(|unit| *unit == 0)
+            .ok_or("剪贴板 Unicode 文本缺少终止符，或超过 65,536 个 UTF-16 单元。")?;
+        if end > MAX_TEXT_UNITS {
+            return Err("剪贴板文本超过 65,536 个 UTF-16 单元。".into());
+        }
+        String::from_utf16(&units[..end]).map_err(|_| "剪贴板包含无效的 UTF-16 文本。".into())
+    }
+
+    pub(super) fn read(backend: &impl Backend) -> Result<String, String> {
+        let lease = Lease::open(backend)?;
+        let units = backend.read_unicode()?;
+        lease
+            .close()
+            .map_err(|error| format!("读取文本后关闭剪贴板失败：{error}"))?;
+        decode(&units)
+    }
     #[cfg(test)]
     mod file_drop_write_tests {
         use super::*;
@@ -467,26 +486,6 @@ mod clipboard {
                 assert_eq!(fake.events.borrow().contains(&"set"), stop == 4);
             }
         }
-    }
-
-    pub(super) fn decode(units: &[u16]) -> Result<String, String> {
-        let end = units
-            .iter()
-            .position(|unit| *unit == 0)
-            .ok_or("剪贴板 Unicode 文本缺少终止符，或超过 65,536 个 UTF-16 单元。")?;
-        if end > MAX_TEXT_UNITS {
-            return Err("剪贴板文本超过 65,536 个 UTF-16 单元。".into());
-        }
-        String::from_utf16(&units[..end]).map_err(|_| "剪贴板包含无效的 UTF-16 文本。".into())
-    }
-
-    pub(super) fn read(backend: &impl Backend) -> Result<String, String> {
-        let lease = Lease::open(backend)?;
-        let units = backend.read_unicode()?;
-        lease
-            .close()
-            .map_err(|error| format!("读取文本后关闭剪贴板失败：{error}"))?;
-        decode(&units)
     }
 }
 
@@ -930,6 +929,20 @@ pub(super) fn send_text_checked(
     }
     check()?;
     text_input::send(text, &mut Checked(&mut native::TextInput(target), check))
+}
+
+/// 以Unicode CF_HDROP替换全部剪贴板格式；不查询路径、不复制磁盘文件、不自动粘贴。
+/// 清空开始后的失败为unknown，不补发、不恢复原内容。租约重试仍沿用8次/10ms。
+#[cfg(windows)]
+pub fn write_clipboard_files_if(
+    paths: &[String],
+    mut check: impl FnMut() -> Result<(), crate::ClipboardFilesError>,
+) -> Result<(), crate::ClipboardFilesError> {
+    let units = crate::clipboard_files::encode_paths(paths)?;
+    check()?;
+    let backend = native::Clipboard::new(true)
+        .map_err(|_| crate::ClipboardFilesError::before("clipboard_failed"))?;
+    clipboard::write_files_checked(&units, &backend, check)
 }
 
 #[cfg(test)]
@@ -1515,18 +1528,4 @@ mod tests {
         maximum.insert(0, 65);
         assert!(clipboard::decode(&maximum).is_err());
     }
-}
-
-/// 以Unicode CF_HDROP替换全部剪贴板格式；不查询路径、不复制磁盘文件、不自动粘贴。
-/// 清空开始后的失败为unknown，不补发、不恢复原内容。租约重试仍沿用8次/10ms。
-#[cfg(windows)]
-pub fn write_clipboard_files_if(
-    paths: &[String],
-    mut check: impl FnMut() -> Result<(), crate::ClipboardFilesError>,
-) -> Result<(), crate::ClipboardFilesError> {
-    let units = crate::clipboard_files::encode_paths(paths)?;
-    check()?;
-    let backend = native::Clipboard::new(true)
-        .map_err(|_| crate::ClipboardFilesError::before("clipboard_failed"))?;
-    clipboard::write_files_checked(&units, &backend, check)
 }
