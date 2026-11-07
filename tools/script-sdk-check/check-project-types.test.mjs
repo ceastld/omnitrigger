@@ -38,6 +38,28 @@ function nodeFixture(mixed=false) {
   return {root,nodeSource};
 }
 
+test('Node索引的显式声明引用保持UTF8拒绝与包内父级引用语义',()=>{
+  const {root}=nodeFixture();const declarations=join(root,'node_modules/@types/node');
+  mkdirSync(declarations,{recursive:true});
+  writeFileSync(join(root,'jsconfig.json'),JSON.stringify({compilerOptions:{strict:true,
+    target:'ES2020',module:'ESNext',moduleResolution:'Bundler',lib:['ES2020'],types:['node']}}));
+  writeFileSync(join(root,'node.mjs'),"throw Error('AUTHOR MUST NOT RUN');\nexport default function main() { return {pid:process.pid}; }\n");
+  const index=join(declarations,'index.d.ts'),child=join(declarations,'globals.d.ts');
+  writeFileSync(index,'/// <reference path="globals.d.ts" />\n');
+  writeFileSync(child,'declare const process: {pid:number};\n');
+  const valid=checkProjectTypes(root);assert.equal(valid.passed,true,JSON.stringify(valid));
+  assert(valid.checkedFiles.includes('node_modules/@types/node/globals.d.ts'));
+  writeFileSync(child,Buffer.from([0xff]));
+  assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_utf8_invalid'
+    &&error.location?.file==='node_modules/@types/node/globals.d.ts');
+  // 优化范围之外的合法包内引用继续交给原TS解析，而非新增拒绝。
+  writeFileSync(index,'/// <reference path="../shared-node-global.d.ts" />\n');
+  writeFileSync(join(declarations,'../shared-node-global.d.ts'),'declare const process: {pid:number};\n');
+  const parent=checkProjectTypes(root);assert.equal(parent.passed,true,JSON.stringify(parent));
+  assert(parent.checkedFiles.includes('node_modules/@types/shared-node-global.d.ts'));
+  assert(!parent.checkedFiles.includes('node_modules/@types/node/globals.d.ts'));
+});
+
 test('统一Node检查使用真实SDK与同一受限工程，严格默认导出合同且不执行作者代码',()=>{
   const {root,nodeSource}=nodeFixture();const result=checkProjectTypes(root);
   assert.equal(result.passed,true,JSON.stringify(result));

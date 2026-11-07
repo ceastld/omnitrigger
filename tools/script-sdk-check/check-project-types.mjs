@@ -215,7 +215,26 @@ export function checkProjectTypes(projectDirectory) {
     };
     host.readFile=path=>{
       if(!allowed(path))return undefined;
-      try{return read(path,within(library,resolve(path))?2*1024*1024:path.endsWith('.d.ts')?512*1024:128*1024);}
+      try{
+        const text=read(path,within(library,resolve(path))?2*1024*1024:path.endsWith('.d.ts')?512*1024:128*1024);
+        // 仅已读Node声明入口的显式path引用；不枚举依赖目录或预读声明内容。
+        const name=relative(root,resolve(path)).replaceAll('\\','/');
+        if(text!==undefined&&!options.noResolve&&within(root,resolve(path))
+            &&/(?:^|\/)node_modules\/@types\/node\/index\.d\.ts$/i.test(name)) {
+          const references=ts.preProcessFile(text,false).referencedFiles;
+          if(references.length>0&&references.length<=128) {
+            const directory=dirname(resolve(path));
+            const declarations=references.map(item=>resolve(directory,item.fileName));
+            if(references.every((item,index)=>!isAbsolute(item.fileName)&&/^[a-z0-9_./-]+\.d\.ts$/i.test(item.fileName)
+                &&item.fileName.split('/').every(part=>part!=='.'&&part!=='..'&&part!=='')
+                &&within(directory,declarations[index]))) {
+              try {guard(declarations);}
+              catch(error) {if(error?.code!=='ENOENT')throw error;} // 缺失仍交回TS原诊断/逐项守卫。
+            }
+          }
+        }
+        return text;
+      }
       catch(error){
         if(error?.code==='ENOENT')return undefined;
         // TypeScript可将readFile异常转成普通诊断；单独保留本工具的范围/容量拒绝。
