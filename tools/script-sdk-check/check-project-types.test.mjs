@@ -1,6 +1,6 @@
 // 全部使用本次临时合成工程，作者模块含抛错初始化器，检查过程不得执行它们。
 import assert from 'node:assert/strict';
-import {mkdtempSync,mkdirSync,readFileSync,writeFileSync,unlinkSync,linkSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,readFileSync,writeFileSync,unlinkSync,linkSync,rmdirSync} from 'node:fs';
 import {basename,dirname,join,resolve,relative,isAbsolute} from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
@@ -35,6 +35,33 @@ test('检查既有入口与相对依赖，保留源码并且不执行模块初�
   assert.equal(result.entryChecks[0].mainExport,'local_callable_declaration');
   assert.equal(result.runtimeCapabilitiesChecked,false);assert.equal(result.runtimeVerified,false);
   assert.deepEqual(readFileSync(join(root,'main.mjs')),before);
+});
+
+test('平铺SDK使用真实Node与Script声明，仍执行strict负例且不运行初始化器',()=>{
+  const root=fixture();unlinkSync(join(root,'sdk/api.d.ts'));rmdirSync(join(root,'sdk'));
+  for(const name of ['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts']) {
+    writeFileSync(join(root,name),readFileSync(join(repo,'crates/omnitrigger-actions/runtime',name)));
+  }
+  writeFileSync(join(root,'ambient.d.ts'),'/// <reference path="./script-types.d.ts" />\n');
+  writeFileSync(join(root,'jsconfig.json'),JSON.stringify({compilerOptions:{strict:true,skipLibCheck:false,target:'ES2020',module:'ESNext',moduleResolution:'Bundler',lib:['ES2020'],types:[]},files:['main.mjs','ambient.d.ts','api.d.ts']}));
+  const file=join(root,'main.mjs');
+  writeFileSync(file,'/// <reference path="./ambient.d.ts" />\nimport {clean} from "./lib/text.mjs";\n/** @type {ScriptMain} */\nexport function main(ctx) { const result=ctx.clipboard.history.list(); return {count:result.items.length,value:clean(" synthetic ")}; }\n');
+  const before=readFileSync(file);const result=checkProjectTypes(root);
+  assert.equal(result.passed,true,JSON.stringify(result.diagnostics));
+  for(const name of ['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts','ambient.d.ts'])assert(result.checkedFiles.includes(name));
+  assert(!result.checkedFiles.includes('sdk/api.d.ts'));
+  assert.equal(result.runtimeExecuted,false);assert.equal(result.filesModified,false);
+  assert.deepEqual(readFileSync(file),before);
+  writeFileSync(file,'/// <reference path="./ambient.d.ts" />\n/** @type {ScriptMain} */\nexport function main(ctx) { return ctx.clipboard.history.get({id:1}); }\n');
+  const invalid=checkProjectTypes(root);assert.equal(invalid.passed,false);
+  assert(invalid.diagnostics.some(item=>item.file==='main.mjs'&&item.code===2322));
+});
+
+test('SDK优先路径损坏时不回退根声明或绕过原拒绝',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'api.d.ts'),readFileSync(join(repo,'crates/omnitrigger-actions/runtime/api.d.ts')));
+  writeFileSync(join(root,'sdk/api.d.ts'),Buffer.from([0xff]));
+  assert.throws(()=>checkProjectTypes(root),error=>error.code==='project_utf8_invalid'&&error.location?.file==='sdk/api.d.ts');
 });
 
 test('错误参数返回实际文件行列及TypeScript错误，而不运行App',()=>{

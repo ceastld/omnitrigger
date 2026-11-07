@@ -104,9 +104,13 @@ export function checkProjectTypes(projectDirectory) {
     entries.push(entry);
   }
   if(entries.length===0)fail('project_no_script_actions');
-  const sdk=join(root,'sdk/api.d.ts');
-  try {read(sdk,512*1024);}
-  catch(error){if(error?.code==='ENOENT')fail('project_sdk_missing');throw error;}
+  let sdk;
+  // 两种已支持的包布局；只在缺失时尝试根目录，不扫描或吞掉元数据/UTF8拒绝。
+  for(const candidate of [join(root,'sdk/api.d.ts'),join(root,'api.d.ts')]) {
+    try {read(candidate,512*1024);sdk=candidate;break;}
+    catch(error){if(error?.code!=='ENOENT')throw error;}
+  }
+  if(!sdk)fail('project_sdk_missing');
   const configPath=join(root,'jsconfig.json');
   let config;
   let configText;

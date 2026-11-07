@@ -2,7 +2,7 @@ import ts from 'typescript';
 import {checkNodeEntry} from './check-node-entry.cjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
+import {mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath, pathToFileURL} from 'node:url';
@@ -28,6 +28,88 @@ function refresh(project, flags = []) {
     encoding: 'utf8', windowsHide: true, timeout: 60000,
   });
 }
+
+function portableFixture(layout) {
+  const root=mkdtempSync(join(parent,'portable-'));
+  const project=join(root,'project'),source=join(root,'source');mkdirSync(project);
+  const prefix=layout==='sdk'?'sdk/':'';if(prefix)mkdirSync(join(project,'sdk'));
+  mkdirSync(join(source,'crates/omnitrigger-actions/runtime'),{recursive:true});
+  for(const name of ['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts','script-api.d.ts']) {
+    const original=readFileSync(join(repo,'crates/omnitrigger-actions/runtime',name),'utf8');
+    writeFileSync(join(source,'crates/omnitrigger-actions/runtime',name),original+'\n// target SDK revision fixture\n');
+    if(name!=='script-api.d.ts'||prefix)writeFileSync(join(project,prefix+name),original);
+  }
+  const reference=prefix?'sdk/script-api.d.ts':'ambient.d.ts';
+  if(!prefix)writeFileSync(join(project,'ambient.d.ts'),'/// <reference path="./script-types.d.ts" />\n');
+  writeFileSync(join(project,'main.mjs'),`/// <reference path="./${reference}" />
+throw Error('AUTHOR INITIALIZER MUST NOT RUN');
+/** @type {ScriptMain} */
+export function main(ctx) { return {processName:ctx.desktop.target().processName}; }
+`);
+  const actions=[{id:'script',runtime:'script',entry:'main.mjs'}];
+  const files=['main.mjs',reference,prefix+'api.d.ts'];
+  if(!prefix){
+    actions.push({id:'node',runtime:'node',entry:'node.mjs'});files.push('node.mjs');
+    writeFileSync(join(project,'node.mjs'),`throw Error('NODE AUTHOR MUST NOT RUN');
+/** @param {import('./api.js').ActionContext} ctx */
+export default async function main(ctx) { const target=await ctx.desktop.target();return {processName:target.processName}; }
+`);
+  }
+  writeFileSync(join(project,'action.json'),JSON.stringify({schema_version:1,id:'synthetic.portable',actions}));
+  writeFileSync(join(project,'jsconfig.json'),JSON.stringify({compilerOptions:{allowJs:true,checkJs:true,strict:true,noEmit:true,skipLibCheck:false,target:'ES2020',module:'ESNext',moduleResolution:'Bundler',lib:['ES2020'],types:[]},files}));
+  writeFileSync(join(project,'README.md'),'作者说明不能改写\n');
+  const authorFiles=['action.json','jsconfig.json','main.mjs','README.md',...(!prefix?['node.mjs','ambient.d.ts']:[])];
+  return {project,source,prefix,authorFiles};
+}
+function refreshPortable(item) {
+  return spawnSync(process.execPath,[join(repo,'tools/script-project.mjs'),'refresh','--runtime','script',
+    '--project',item.project,'--source-root',item.source],{encoding:'utf8',windowsHide:true,timeout:60000});
+}
+
+test('canonical普通包两种布局更新SDK并保留作者文件，各自strict且不执行代码',()=>{
+  for(const layout of ['sdk','flat']){
+    const item=portableFixture(layout),before=item.authorFiles.map(name=>readFileSync(join(item.project,name)));
+    const result=refreshPortable(item);assert.ifError(result.error);assert.equal(result.status,0,result.stderr);
+    const receipt=JSON.parse(result.stdout);assert.equal(receipt.layout,layout);assert.equal(receipt.author_code_executed,false);
+    assert.equal(receipt.author_files_changed,false);
+    for(const [i,name] of item.authorFiles.entries())assert.deepEqual(readFileSync(join(item.project,name)),before[i]);
+    for(const name of ['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts',...(item.prefix?['script-api.d.ts']:[])]){
+      assert.deepEqual(readFileSync(join(item.project,item.prefix+name)),readFileSync(join(item.source,'crates/omnitrigger-actions/runtime',name)));
+    }
+    const config=ts.readConfigFile(join(item.project,'jsconfig.json'),ts.sys.readFile);assert.equal(config.error,undefined);
+    const parsed=ts.parseJsonConfigFileContent(config.config,ts.sys,item.project);
+    const diagnostics=ts.getPreEmitDiagnostics(ts.createProgram(parsed.fileNames,parsed.options));
+    assert.equal(diagnostics.length,0,ts.formatDiagnosticsWithColorAndContext(diagnostics,{getCanonicalFileName:x=>x,getCurrentDirectory:()=>item.project,getNewLine:()=> '\n'}));
+    if(layout==='sdk'){
+      const again=refreshPortable(item);assert.ifError(again.error);assert.equal(again.status,0,again.stderr);
+      for(const [i,name] of item.authorFiles.entries())assert.deepEqual(readFileSync(join(item.project,name)),before[i]);
+    }
+  }
+});
+
+test('canonical声明被作者修改或已识别布局缺件时，预检拒绝且不部分覆盖',()=>{
+  const item=portableFixture('flat');const declarations=['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts'];
+  writeFileSync(join(item.project,'script-types.d.ts'),readFileSync(join(item.project,'script-types.d.ts'),'utf8')+'\n// author edit\n');
+  const before=[...item.authorFiles,...declarations].map(name=>[name,readFileSync(join(item.project,name))]);
+  const changed=refreshPortable(item);assert.ifError(changed.error);assert.equal(changed.status,1);
+  assert.equal(JSON.parse(changed.stderr).error.code,'project_sdk_unrecognized');
+  for(const [name,bytes] of before)assert.deepEqual(readFileSync(join(item.project,name)),bytes);
+  unlinkSync(join(item.project,'clipboard-history-api.d.ts'));
+  const incomplete=refreshPortable(item);assert.ifError(incomplete.error);assert.equal(incomplete.status,1);
+  assert.equal(JSON.parse(incomplete.stderr).error.code,'project_sdk_layout_incomplete');
+  for(const [name,bytes] of before.filter(([name])=>name!=='clipboard-history-api.d.ts'))assert.deepEqual(readFileSync(join(item.project,name)),bytes);
+});
+
+test('canonical根目录声明与旧Script SDK并存时拒绝歧义且保留全部文件',()=>{
+  const item=portableFixture('flat');mkdirSync(join(item.project,'sdk'));
+  // 真实旧生成Script布局使用sdk/api.d.ts，不能与根目录SDK一起保留。
+  writeFileSync(join(item.project,'sdk/api.d.ts'),readFileSync(join(repo,'crates/omnitrigger-actions/runtime/script-types.d.ts')));
+  const names=[...item.authorFiles,'api.d.ts','script-types.d.ts','clipboard-history-api.d.ts','sdk/api.d.ts'];
+  const before=names.map(name=>[name,readFileSync(join(item.project,name))]);
+  const result=refreshPortable(item);assert.ifError(result.error);assert.equal(result.status,1);
+  assert.equal(JSON.parse(result.stderr).error.code,'project_sdk_layout_ambiguous');
+  for(const [name,bytes] of before)assert.deepEqual(readFileSync(join(item.project,name)),bytes);
+});
 
 test('实际刷新只更新SDK声明与入口检查器并保留作者文件', () => {
   const {project} = fixture();

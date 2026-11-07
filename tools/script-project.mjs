@@ -1,6 +1,6 @@
 // 开发工程维护：复用应用的创建CLI，只分发声明与Node入口，不加载或运行作者代码。
 import {spawnSync} from 'node:child_process';
-import {randomUUID} from 'node:crypto';
+import {randomUUID,createHash} from 'node:crypto';
 import {existsSync,lstatSync,mkdirSync,readFileSync,renameSync,unlinkSync,writeFileSync} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -43,10 +43,69 @@ export default async function main(ctx) {
     return { text: cleanText(ctx.input.text), invocation: ctx.invocation };
 }
 `;
+// 公开62的精确canonical声明，保留LF/CRLF两种字节指纹；未知旧版本不猜测。
+const canonicalSdkHashes={
+  "api.d.ts": [
+    "12020f626e467a1025b8eb9b08245952f0425f97a983a8f66c48a1864e6d7adc",
+    "aacd818ae060a0c4391d322fb0d42b6712b01a582fef9ff3821bc150911a9a14"
+  ],
+  "script-types.d.ts": [
+    "261666bf8be38669cbbe16f27fa2bf44f3a20f2ded90cef2be888de85a939f01",
+    "16e2652d5f012d0d0ddcf9104462179dcaa3366b3d3a32d0e349d5fdd096b427"
+  ],
+  "clipboard-history-api.d.ts": [
+    "c40fd66fd6318909c1bab62775d097dcfb5a8a7a84a411883a4852bdbd04cf2e",
+    "b8089bf8e920c3c818474f739c3f862ba32dffc4a1e3dfde64b647c023031134"
+  ],
+  "script-api.d.ts": [
+    "c623dc7ead235801d87412dd5747f34dd0be7c410686a331e9fdbe23efd90c15",
+    "cdeaa2ec34e023a58b93b1b620ad6e366db1eff33118f60f9a400fec748290de"
+  ]
+};
+function portableSdkLayout(project,manifest){
+  const present=name=>{const file=path.join(project,name);guard(file,true);return existsSync(file);};
+  const flat=['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts'].some(present);
+  const hasScript=manifest.actions.some(action=>action?.runtime==='script');
+  let nested=['sdk/script-types.d.ts','sdk/script-api.d.ts'].some(present)
+    ||hasScript&&present('sdk/clipboard-history-api.d.ts');
+  // Script包中的Node声明不是旧生成布局，不能把缺失的其余声明当作legacy刷新。
+  if(!nested&&hasScript&&present('sdk/api.d.ts'))nested=read(path.join(project,'sdk/api.d.ts')).includes('export interface ActionContext');
+  if(flat&&(nested||present('sdk/api.d.ts')))throw Error('project_sdk_layout_ambiguous');
+  if(!flat&&!nested)return null;
+  const prefix=flat?'':'sdk/';
+  const names=['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts'];
+  if(names.some(name=>!present(prefix+name)))throw Error('project_sdk_layout_incomplete');
+  if(nested&&present('sdk/script-api.d.ts'))names.push('script-api.d.ts');
+  return {prefix,names};
+}
+function refreshPortableSdk(project,source,runtime,layout){
+  const sourceRoot=path.join(source,'crates/omnitrigger-actions/runtime');
+  const data=layout.names.map(name=>{
+    const file=path.join(project,layout.prefix+name),before=read(file);
+    const text=read(path.join(sourceRoot,name));
+    const digest=createHash('sha256').update(before,'utf8').digest('hex');
+    if(before!==text&&!canonicalSdkHashes[name].includes(digest))throw Error('project_sdk_unrecognized');
+    return {file,before,text};
+  });
+  // 所有声明先通过归属校验；写入前再复查，作者同时改动时拒绝覆盖。
+  for(const item of data){
+    if(read(item.file)!==item.before)throw Error('project_sdk_changed');
+    if(item.before!==item.text)write(item.file,item.text);
+  }
+  return {status:'refreshed',runtime,package_root:project,layout:layout.prefix?'sdk':'flat',
+    files:layout.names.map(name=>layout.prefix+name),author_files_changed:false};
+}
 function refresh(project,source,runtime){
   project=guard(project);const manifest=JSON.parse(read(path.join(project,'action.json')));
   if(manifest.schema_version!==1||!Array.isArray(manifest.actions)||!manifest.actions.length
-      ||manifest.actions.some(action=>action.runtime!==runtime)||!['node','script'].includes(runtime))throw Error('project_runtime_mismatch');
+      ||!['node','script'].includes(runtime))throw Error('project_runtime_mismatch');
+  const layout=portableSdkLayout(project,manifest);
+  if(layout){
+    if(manifest.actions.some(action=>!['node','script'].includes(action?.runtime))
+        ||!manifest.actions.some(action=>action.runtime===runtime))throw Error('project_runtime_mismatch');
+    return refreshPortableSdk(project,source,runtime,layout);
+  }
+  if(manifest.actions.some(action=>action.runtime!==runtime))throw Error('project_runtime_mismatch');
   const root=path.join(source,'crates/omnitrigger-actions/runtime');
   const names=runtime==='node'?['api.d.ts','clipboard-history-api.d.ts']:['script-types.d.ts'];
   const data=names.map(name=>({name,text:read(path.join(root,name))}));

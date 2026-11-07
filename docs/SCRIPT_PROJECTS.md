@@ -33,7 +33,7 @@ Node 的入口必须默认导出可调用函数。新建 Node 工程的 `npm run
 
 入口检查会等待类型层面的顶层 Promise：明确的函数、类构造器、symbol 或 bigint 返回类型会报错。空返回、Promise 和普通对象沿用现有宿主行为。动态类型、混合类型、自定义序列化或 CommonJS 入口会报告未确认；静态检查不保证对象内部都可序列化，实际结果仍由正式运行器处理。
 
-已有 Node 工程刷新 SDK 后会获得同一检查器，原作者的 `package.json` 不会被改写；可显式运行 `node sdk/check-node-entry.cjs .`。
+旧生成布局的 Node 工程刷新 SDK 后会获得同一检查器，原作者的 `package.json` 不会被改写；可显式运行 `node sdk/check-node-entry.cjs .`。
 
 Node 工程的默认入口只整理输入文本，使用包内相对模块：
 
@@ -47,6 +47,20 @@ export default async function main(ctx) {
 ```
 
 `lib/text.js` 可以继续命名导出辅助函数；默认导出的要求针对动作入口。相对导入须保留包内路径和文件扩展名。
+
+## 编辑器与静态检查入口
+
+在 VS Code 中打开包含 `action.json` 和 `jsconfig.json` 的动作包根文件夹，再打开入口。启用内置 JavaScript/TypeScript 语言功能时，语言服务会自动发现入口所在目录的 `jsconfig.json`；不必把 SDK 声明逐个手动打开。新建 Node 工程先按下文安装本工程开发依赖，轻量工程无需 Node 环境类型。补全依赖入口的 JSDoc 标注：Node 使用 `import('./sdk/api').ActionContext`，轻量模块使用 `ScriptMain`。跳转定义应落到当前包的 SDK，Node API 的补全签名包含 Promise，轻量 API 为同步签名。
+
+每个动作包保留自己的配置和声明快照。不要为了同时编辑多个包而把它们的 SDK 声明汇总到一个 `jsconfig.json`；这会混合不同全局声明或带独立标记的捕获类型。修改代码后的错误应定位到当前入口的行列，例如 Node 未等待 `ctx.desktop.target()` 就读取 `processName`，或调用不存在的 API。
+
+开发工具 `tools/script-project.mjs` 只有 `create` 和 `refresh`，没有 `check` 子命令。Node 工程使用下文的 `npm run check`；轻量普通包或生成工程可在仓库根使用现有静态检查入口：
+
+```powershell
+node tools/script-sdk-check/check-project-types.mjs "$root/actions/script-demo"
+```
+
+该命令读取指定包自己的 SDK 与配置，输出类型诊断及模块/入口检查结果，不执行作者初始化器或入口。类型诊断的 `file`、`line`、`column` 使用包内路径和从 1 开始的位置。它只检查轻量动作；Node 的默认导出检查使用下面的 Node 检查器。静态通过不代表宿主或目标软件已经验收。
 
 ## 通过正式 NodeRuntime 运行
 
@@ -96,7 +110,11 @@ node tools/script-project.mjs refresh --runtime node --project "$root/actions/no
 node tools/script-project.mjs refresh --runtime script --project "$root/actions/script-demo"
 ```
 
-刷新只替换相应 SDK 声明，保留入口、包内模块、调用文件、清单、作者配置和说明。Node 同时分发 `api.d.ts` 与其引用的 `clipboard-history-api.d.ts`。指定运行时必须与工程中的动作一致；混合运行时工程会被拒绝，避免声明冲突。
+刷新保留入口、包内模块、调用文件、清单、作者配置和说明。旧生成布局沿用对应运行时的刷新方式：Node 更新 `sdk/api.d.ts`、`sdk/clipboard-history-api.d.ts` 和入口检查器；轻量工程更新 `sdk/api.d.ts`。此分支仍会替换现有声明，指定运行时必须与所有动作一致。
+
+普通示例包若携带完整的 `api.d.ts`、`script-types.d.ts`、`clipboard-history-api.d.ts`，支持这组三文件位于包根或 `sdk/` 的两种布局；`sdk/` 中已存在的 `script-api.d.ts` 兼容声明也一并更新。此分支可以包含 Node 与轻量动作，`--runtime` 必须是包中存在的运行时，刷新会更新同包整组声明，不改成另一种目录布局，也不额外分发入口检查器。
+
+普通包的每份声明须与所选来源相同，或属于工具已识别的随包规范快照。作者改过声明或快照未知时返回 `project_sdk_unrecognized`；缺件返回 `project_sdk_layout_incomplete`；根目录声明与旧 `sdk/api.d.ts` 并存等布局歧义返回 `project_sdk_layout_ambiguous`。这些预检失败均不写入声明。应先核对并保留作者改动，再选择与实际运行版本配套的声明来源。这项归属检查只适用于上述已识别普通包布局，旧生成布局的替换策略不变。
 
 各声明文件分别替换，刷新不是跨文件事务。中途失败可能留下部分已更新的 SDK；作者文件保持不变，排除原因后可显式再次刷新。
 
@@ -123,6 +141,16 @@ Pop-Location
 npm ci --prefix tools/script-sdk-check --ignore-scripts
 node tools/script-sdk-check/node_modules/typescript/lib/tsc.js --project "$root/actions/script-demo/jsconfig.json" --noEmit --skipLibCheck false --pretty false
 ```
+
+只使用 SDK API、没有 `npm run check` 脚本的普通 Node 包，可在仓库根显式检查自己的配置和默认导出：
+
+```powershell
+$package = "$root/actions/node-demo"
+node tools/script-sdk-check/node_modules/typescript/lib/tsc.js --project "$package/jsconfig.json" --noEmit --skipLibCheck false --pretty false
+node tools/script-sdk-check/check-node-entry.cjs $package
+```
+
+这不会为包安装或补齐环境声明。若作者代码使用 Node 内置 API，仍需按本包配置安装相应开发依赖；SDK 声明本身不提供 `node:fs` 等内置模块或 `process` 等全局类型。
 
 两类工程均开启 `checkJs`、严格检查和无输出模式。SDK 的只读捕获类型、Node Promise 返回值和相对模块导入均参与检查；运行时入口核对仍使用前面的正式调用命令。既有 Node 工程的作者配置不自动迁移，作者可自行添加相同开发依赖与 Node 类型配置；SDK 刷新仍只更新声明。
 
