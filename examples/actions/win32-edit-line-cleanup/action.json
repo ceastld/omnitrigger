@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "id": "examples.win32-edit-line-cleanup",
+  "name": "显式Edit选区行清理（实验）",
+  "version": "0.1.0",
+  "actions": [
+    {
+      "id": "node",
+      "title": "清理选区行",
+      "version": 1,
+      "runtime": "node",
+      "entry": "node.mjs",
+      "single_instance": true
+    },
+    {
+      "id": "script",
+      "title": "清理选区行（同步Script）",
+      "version": 1,
+      "runtime": "script",
+      "entry": "script.mjs",
+      "single_instance": true
+    }
+  ]
+}

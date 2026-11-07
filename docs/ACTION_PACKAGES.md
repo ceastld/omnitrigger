@@ -784,3 +784,5 @@ wire为audio.volume_adjust，deltaPercent映射为delta_percent。返回匿名pr
 这是跨进程系统消息0x00C2（低于WM_USER）的字符串封送，不是任意自定义消息指针协议。沿用动作期限，操作预算最多5秒、单条SendMessageTimeout最多请求1000ms；Windows系统调用与同输入队列的例外不能承诺强wall-clock预算。写前拒绝为not_started，移交消息后超时/取消/目标变化或无法确认均unknown，不重试。原窗口身份核验不锁定HWND生命周期。
 
 此接口不读取原文，不增加selection.read_text的一次GetText观察；它也不将原有一次读数或两次读取与当前Edit选区替换组成原子事务。此前UIA范围可能在消息处理前变化。该方法不替换sendText，不能据此声称通用文本发送或8192字符必达。
+
+可运行的[显式 Edit 行清理示例](../examples/actions/win32-edit-line-cleanup/README.md)提供 Node 与同步 Script 入口，支持删除空行或整行空白。显式指定适配器后读取并复核当前选区，再提交一次替换；非空选区清理为空时会删除选区，空选区跳过。该示例保留上述控件范围、非原子读取和未知结果限制，未配置个人绑定。

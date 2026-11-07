@@ -1,0 +1,9 @@
+{
+  "package_id": "examples.win32-edit-line-cleanup",
+  "action_id": "node",
+  "action_version": 1,
+  "input": {
+    "operation": "remove-empty-lines",
+    "adapter": "winforms-edit"
+  }
+}
