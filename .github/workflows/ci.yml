@@ -296,7 +296,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/browser_parameters_snapshot.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test tests/clipboard_data_api.test.mjs
+          node --test tests/clipboard_data_api.test.mjs examples/actions/copy-selected-files/tests/copy-selected-files.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/clipboard_history_api.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
