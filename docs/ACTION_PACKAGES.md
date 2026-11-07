@@ -803,3 +803,6 @@ wire为audio.volume_adjust，deltaPercent映射为delta_percent。返回匿名pr
 ### 固定喝水提醒
 
 [喝水提醒示例](../examples/actions/water-reminder/README.md)使用现有 `ctx.ui.notify`，提供 Node 和同步 Script 两个入口。输入为空对象，每次调用提交一条右上方通知；返回 `submitted:true` 只表示请求已接纳。该包不创建定时调度，不读取剪贴板或发送按键；需要已有可用的界面宿主。
+
+
+独立宿主的开发 CLI 升级、明确数据根约束及 pending marker 恢复见 [独立宿主升级与恢复](LEGACY_UPGRADE.md)。

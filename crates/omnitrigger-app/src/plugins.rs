@@ -214,6 +214,23 @@ impl Plugins {
     }
 
     pub fn save(&self, config_path: &Path) -> Result<(), PluginError> {
+        let _guard = crate::legacy_upgrade::IndexGuard::acquire(config_path)
+            .map_err(|e| PluginError::Settings(e.message))?;
+        crate::legacy_upgrade::block_config(config_path)
+            .map_err(|e| PluginError::Settings(e.message))?;
+        self.save_unlocked(config_path)
+    }
+    pub(crate) fn save_for_legacy_upgrade(
+        &self,
+        config_path: &Path,
+        guard: &crate::legacy_upgrade::IndexGuard,
+    ) -> Result<(), PluginError> {
+        if !guard.matches(config_path) {
+            return Err(PluginError::Settings("升级索引锁不属于此配置。".into()));
+        }
+        self.save_unlocked(config_path)
+    }
+    fn save_unlocked(&self, config_path: &Path) -> Result<(), PluginError> {
         let destination = settings_directory(config_path).join("plugins.json");
         match std::fs::read_to_string(&destination) {
             Ok(text) => {
@@ -1034,6 +1051,7 @@ mod tests {
         ));
         assert_eq!(loaded.raishot_path(), executable.to_str().unwrap());
         std::fs::remove_file(directory.join("plugins.json")).unwrap();
+        std::fs::remove_file(directory.join("plugins.legacy-write.lock")).unwrap();
         std::fs::remove_dir(&directory).unwrap();
     }
 
@@ -1098,6 +1116,7 @@ mod tests {
             .is_err());
         assert_eq!(plugins.raishot_path(), "旧路径");
         std::fs::remove_file(destination).unwrap();
+        std::fs::remove_file(directory.join("plugins.legacy-write.lock")).unwrap();
         std::fs::remove_dir(directory).unwrap();
     }
     #[test]

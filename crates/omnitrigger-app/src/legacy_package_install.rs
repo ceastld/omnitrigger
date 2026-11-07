@@ -30,6 +30,16 @@ pub(crate) struct LegacyInstallSource {
     pub archive_bytes: u64,
     pub archive_sha256: String,
     pub manifest_sha256: String,
+    #[serde(default)]
+    pub upgrade: Option<UpgradeMigration>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UpgradeMigration {
+    pub expected_old_manifest: String,
+    pub source_root: PathBuf,
+    pub source_database_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -93,6 +103,19 @@ impl LegacyInstallSource {
                 "legacy_install_source_invalid",
                 "宿主制品大小或摘要无效。",
             ));
+        }
+        if let Some(upgrade) = &self.upgrade {
+            if !valid_hash(&upgrade.expected_old_manifest)
+                || !valid_hash(&upgrade.source_database_sha256)
+                || !upgrade.source_root.is_absolute()
+            {
+                return Err(fault(
+                    "legacy_upgrade_request_invalid",
+                    "升级必须明确旧索引、旧数据根及数据库摘要。",
+                ));
+            }
+            ensure_plain_ancestors(&upgrade.source_root)
+                .map_err(|e| fault("legacy_upgrade_path_invalid", e))?;
         }
         match &self.archive {
             LegacyArchive::LocalArchive { path } => {
@@ -217,6 +240,7 @@ pub(super) fn install(
     source.validate()?;
     let config = absolute(config).map_err(|e| fault("legacy_install_path_invalid", e))?;
     ensure_plain_ancestors(&config).map_err(|e| fault("legacy_install_path_invalid", e))?;
+    crate::legacy_upgrade::block_config(&config)?;
     let plugins = crate::plugins::Plugins::load(&config)
         .map_err(|e| fault("legacy_settings_invalid", e.to_string()))?;
     if plugins
@@ -278,6 +302,40 @@ pub(super) fn install(
         let _ = fs::remove_dir_all(&stage);
     }
     result
+}
+
+// 升级仅复用既有acquire和完整验证；绝不覆盖固定目录，不写索引，不启动宿主。
+pub(crate) fn stage_upgrade(
+    config: &Path,
+    source: &LegacyInstallSource,
+    events: &SyncSender<InstallEvent>,
+) -> Result<(PathBuf, VerifiedLegacyInstall), ActionError> {
+    source.validate()?;
+    let config = absolute(config).map_err(|e| fault("legacy_upgrade_path_invalid", e))?;
+    ensure_plain_ancestors(&config).map_err(|e| fault("legacy_upgrade_path_invalid", e))?;
+    let root = crate::action_packages::root(&config);
+    ensure_plain_ancestors(&root).map_err(|e| fault("legacy_upgrade_path_invalid", e))?;
+    fs::create_dir_all(&root).map_err(|e| fault("legacy_upgrade_io", e.to_string()))?;
+    static NEXT_UPGRADE: AtomicU64 = AtomicU64::new(0);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| fault("legacy_upgrade_io", e.to_string()))?
+        .as_nanos();
+    let stage = root.join(format!(
+        ".install-legacy-upgrade-{}-{stamp}-{}",
+        std::process::id(),
+        NEXT_UPGRADE.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&stage).map_err(|e| fault("legacy_upgrade_io", e.to_string()))?;
+    acquire(&stage, source, events)?;
+    let staged_config = stage.join("bindings.json");
+    let verified = LocalLegacySource::new(&staged_config, &source.manifest_sha256)?
+        .verify(&staged_config, &CancellationToken::new())?;
+    crate::legacy_local_source::require_explicit_host_contract(
+        &verified.prepare_action.package_root,
+        &CancellationToken::new(),
+    )?;
+    Ok((staged_config, verified)) // 成功/失败现场都保留；没有清理用户数据的分支。
 }
 
 #[derive(Deserialize)]
@@ -490,6 +548,11 @@ mod tests {
                 fs::write(input.join(name), &bytes).unwrap();
                 files.push(serde_json::json!({"path":name,"bytes":bytes.len(),"sha256":format!("{:x}", Sha256::digest(&bytes))}));
             }
+            let contract = crate::legacy_local_source::explicit_host_contract()
+                .to_string()
+                .into_bytes();
+            fs::write(input.join("host-contract.json"), &contract).unwrap();
+            files.push(serde_json::json!({"path":"host-contract.json","bytes":contract.len(),"sha256":format!("{:x}", Sha256::digest(&contract))}));
             let manifest = serde_json::json!({"schema_version":1,"package_version":"fixture","architecture":"windows-x64","files":files}).to_string();
             fs::write(input.join("manifest.json"), &manifest).unwrap();
             let archive = root.join("fixture.zip");
@@ -517,6 +580,7 @@ try {
                 root,
                 config,
                 source: LegacyInstallSource {
+                    upgrade: None,
                     archive: LegacyArchive::LocalArchive { path: archive },
                     archive_bytes: bytes.len() as u64,
                     archive_sha256: format!("{:x}", Sha256::digest(bytes)),
@@ -548,6 +612,51 @@ try {
                 let _ = fs::remove_dir_all(&self.root);
             }
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn upgrade_stage_uses_real_acquire_layout_without_publishing_or_running_host() {
+        // 复用既有工厂新建隔离的不可执行合成归档；不重用任何已存在的业务目录。
+        let fixture = Fixture::new(false);
+        let index = fixture.config.with_file_name("plugins.json");
+        let before = fs::read(&index).unwrap();
+        let (sender, _receiver) = std::sync::mpsc::sync_channel(16);
+        // 直接走真实stage_upgrade -> acquire -> 原PowerShell叶 -> LocalLegacySource校验。
+        let (staged_config, verified) =
+            stage_upgrade(&fixture.config, &fixture.source, &sender).unwrap();
+        let stage = staged_config.parent().unwrap();
+        let actions = crate::action_packages::root(&fixture.config);
+        assert_eq!(stage.parent(), Some(actions.as_path()));
+        assert!(stage
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(".install-legacy-upgrade-"));
+        assert!(stage.join("archive.zip").is_file());
+        assert_eq!(
+            verified.prepare_action.package_root,
+            stage.join("actions/legacy-host-entry")
+        );
+        assert_eq!(
+            verified.executable,
+            stage.join("actions/legacy-host-entry/host/OmniTrigger.LegacyHost.exe")
+        );
+        assert_eq!(
+            fs::read(&verified.executable).unwrap(),
+            b"non-executable synthetic fixture; never run"
+        );
+        assert!(!actions.join("legacy-host-entry").exists());
+        assert!(!fixture
+            .config
+            .parent()
+            .unwrap()
+            .join("legacy-host-data")
+            .exists());
+        assert_eq!(fs::read(index).unwrap(), before);
+        assert!(!crate::plugins::Plugins::load(&fixture.config)
+            .unwrap()
+            .legacy_enabled());
     }
 
     #[cfg(windows)]

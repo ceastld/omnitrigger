@@ -7,7 +7,7 @@ use crate::{
 use omnitrigger_actions::{
     ActionCall, ActionDefinition, ActionError, CancellationToken, PackageManifest, ResolvedAction,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::{
@@ -19,23 +19,50 @@ use std::{
 };
 
 const FOLDER: &str = "legacy-host-entry";
-const MAX_FILES: usize = 1023;
-const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+pub(crate) const MAX_FILES: usize = 1023;
+pub(crate) const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+
+pub(crate) fn explicit_host_contract() -> serde_json::Value {
+    json!({"schema_version":1,"contract":"omnitrigger.legacy.explicit-data-root.v2",
+        "executable":"host/OmniTrigger.LegacyHost.exe","data_scope":"configuration_sibling/legacy-host-data",
+        "data_root_argument":"--data-root","commands":["clip toggle","search show_or_hide"],
+        "command_errors":"action_error","cold_start":"load_only","host_build_guard":"entry_module_mvid"})
+}
+
+// 升级强制使用明确根v2；普通既有无声明包仍沿原入口核验，不隐式认作可升级。
+pub(crate) fn require_explicit_host_contract(
+    package: &Path,
+    cancel: &CancellationToken,
+) -> Result<(), ActionError> {
+    let contract: serde_json::Value = serde_json::from_slice(&read(
+        &package.join("host-contract.json"),
+        16 * 1024,
+        cancel,
+    )?)
+    .map_err(|e| fault("legacy_host_contract_invalid", e.to_string()))?;
+    if contract != explicit_host_contract() {
+        return Err(fault(
+            "legacy_host_contract_mismatch",
+            "宿主未声明明确数据根v2契约，未作为可升级包使用。",
+        ));
+    }
+    Ok(())
+}
 
 // 与plugin_discovery.rs / plugin_install.ps1已有形状相同；不是ScriptRuntime的product/engine清单。
 #[derive(Deserialize)]
-struct Manifest {
-    schema_version: u32,
-    package_version: String,
-    architecture: String,
-    files: Vec<Record>,
+pub(crate) struct Manifest {
+    pub(crate) schema_version: u32,
+    pub(crate) package_version: String,
+    pub(crate) architecture: String,
+    pub(crate) files: Vec<Record>,
 }
-#[derive(Deserialize)]
-struct Record {
-    path: String,
-    bytes: u64,
-    sha256: String,
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Record {
+    pub(crate) path: String,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: String,
 }
 
 #[derive(Debug)]
@@ -277,6 +304,9 @@ impl LegacyArtifactSource for LocalLegacySource {
                 ));
             }
         }
+        if expected.contains("host-contract.json") {
+            require_explicit_host_contract(&self.root, cancel)?;
+        }
         let catalog: PackageManifest =
             serde_json::from_slice(&read(&self.root.join("action.json"), 256 * 1024, cancel)?)
                 .map_err(|error| fault("legacy_action_manifest_invalid", error.to_string()))?;
@@ -338,6 +368,7 @@ pub(crate) fn verify_cli_action(config: &Path, call: &ActionCall) -> Result<(), 
     verify_enabled_cli(config, &plugins)
 }
 fn verify_enabled_cli(config: &Path, plugins: &Plugins) -> Result<(), ActionError> {
+    crate::legacy_upgrade::block_config(config)?;
     if !plugins.legacy_enabled() {
         return Err(fault("legacy_disabled", "历史与聚合窗口插件已停用。"));
     }
@@ -349,6 +380,7 @@ fn verify_enabled_cli(config: &Path, plugins: &Plugins) -> Result<(), ActionErro
 
 /// 开发登记入口：制品已由本机打包入口放到固定actions目录；完整校验后只写原plugins.json摘要。
 pub(crate) fn register(config: &Path, digest: &str) -> Result<String, ActionError> {
+    crate::legacy_upgrade::block_config(config)?;
     let source = LocalLegacySource::new(config, digest)?;
     let installed = source.verify(config, &CancellationToken::new())?;
     let mut plugins = Plugins::load(config)
@@ -399,8 +431,21 @@ fn install_from_source(
     config: &Path,
     source: crate::plugin_install::LegacyInstallSource,
 ) -> Result<String, ActionError> {
-    let events = crate::plugin_install::start_legacy_install(config.to_path_buf(), Some(source))
-        .map_err(|message| fault("legacy_install_worker_unavailable", message))?;
+    let mut source = source;
+    let upgrading = source.upgrade.is_some();
+    let events = match source.upgrade.take() {
+        Some(upgrade) => crate::plugin_install::start_legacy_cli_upgrade(
+            config.to_path_buf(),
+            crate::legacy_upgrade::Request {
+                source,
+                expected_old_manifest: upgrade.expected_old_manifest,
+                source_root: upgrade.source_root,
+                source_database_sha256: upgrade.source_database_sha256,
+            },
+        ),
+        None => crate::plugin_install::start_legacy_install(config.to_path_buf(), Some(source)),
+    }
+    .map_err(|message| fault("legacy_install_worker_unavailable", message))?;
     for event in events {
         match event {
             crate::plugin_install::InstallEvent::LegacyInstallProgress(_) => {}
@@ -408,6 +453,12 @@ fn install_from_source(
                 let installed = result?;
                 let mut plugins = Plugins::load(config)
                     .map_err(|error| fault("legacy_settings_invalid", error.to_string()))?;
+                if upgrading {
+                    return Ok(json!({"status":"upgraded_not_started","package_id":PACKAGE_ID,
+                        "package_root":installed.prepare_action.package_root,
+                        "manifest_sha256":installed.key.artifact_fingerprint,"enabled":plugins.legacy_enabled(),
+                        "old_package_retained":true,"old_root_retained":true,"host_started":false}).to_string());
+                }
                 register_verified(config, &installed, &mut plugins)?;
                 return Ok(json!({"status":"installed","package_id":PACKAGE_ID,
                     "package_root":installed.prepare_action.package_root,
@@ -431,6 +482,9 @@ fn install_from_source(
 
 /// 登记/安装互斥，仅接受各自模式和可选--config；坏参数/描述先于落盘和worker。
 pub(crate) fn cli(arguments: &[String]) -> Option<Result<String, ActionError>> {
+    if let Some(result) = crate::legacy_upgrade::recovery::cli(arguments) {
+        return Some(result);
+    }
     if !arguments.iter().any(|value| {
         matches!(
             value.as_str(),
@@ -484,6 +538,12 @@ pub(crate) fn cli(arguments: &[String]) -> Option<Result<String, ActionError>> {
             return Err(fault(
                 "invalid_cli_arguments",
                 "缺少安装描述或有效清单摘要。",
+            ));
+        }
+        if source.as_ref().is_some_and(|s| s.upgrade.is_some()) && config.is_none() {
+            return Err(fault(
+                "invalid_cli_arguments",
+                "显式升级必须提供--config，不能使用个人默认配置。",
             ));
         }
         // 此分支随main早返回，直接传配置路径；不修改全局OnceLock或进入UI。
@@ -841,5 +901,25 @@ try {
             input: json!({}),
         };
         assert!(verify_cli_action(&absent, &call).is_ok());
+    }
+
+    #[test]
+    fn upgrade_requires_explicit_contract_without_changing_ordinary_package_compatibility() {
+        let fixture = Fixture::new();
+        let cancel = CancellationToken::new();
+        fixture.source().verify(&fixture.config, &cancel).unwrap();
+        assert!(require_explicit_host_contract(&fixture.package, &cancel).is_err());
+        let path = fixture.package.join("host-contract.json");
+        fs::write(&path, b"{}").unwrap();
+        assert_eq!(
+            require_explicit_host_contract(&fixture.package, &cancel)
+                .unwrap_err()
+                .code,
+            "legacy_host_contract_mismatch"
+        );
+        fs::write(&path, explicit_host_contract().to_string()).unwrap();
+        require_explicit_host_contract(&fixture.package, &cancel).unwrap();
+        // 正确声明也不能绕过包的清单闭集；这里故意没有更新fixture清单。
+        assert!(fixture.source().verify(&fixture.config, &cancel).is_err());
     }
 }

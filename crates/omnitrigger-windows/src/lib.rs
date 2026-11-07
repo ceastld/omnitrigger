@@ -23,6 +23,9 @@ pub use process_capture::{
     Options as ProcessCaptureOptions,
 };
 
+mod owned_path_move;
+pub use owned_path_move::move_owned_path_no_replace;
+
 mod local_path_stat;
 pub use local_path_stat::{
     read_local_directory, read_local_directory_with_options, stat_local_path, DirectoryEntryType,

@@ -28,6 +28,7 @@ pub(crate) fn prepare_verified_host(
     context: &InvocationContext,
     cancellation: &CancellationToken,
 ) -> Result<PrepareResult, ActionError> {
+    crate::legacy_upgrade::block_package(&action.package_root)?;
     if action.definition.runtime != "script"
         || action.definition.entry != "prepare-host.mjs"
         || action.entry_path != action.package_root.join("prepare-host.mjs")

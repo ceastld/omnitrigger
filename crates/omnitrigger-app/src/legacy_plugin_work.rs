@@ -12,6 +12,62 @@ use std::{
 
 pub(crate) const PACKAGE_ID: &str = "omnitrigger.legacy";
 
+/// 与已验证包host-path.mjs同一纯路径契约；数据目录在包之外，不污染安装清单闭集。
+pub(crate) fn data_root_for(executable: &Path) -> Result<PathBuf, ActionError> {
+    let host = executable.parent();
+    let package = host.and_then(Path::parent);
+    let actions = package.and_then(Path::parent);
+    let config = actions.and_then(Path::parent);
+    let named = |path: Option<&Path>, expected: &str| {
+        path.and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+    };
+    if !executable.is_absolute()
+        || !named(Some(executable), "OmniTrigger.LegacyHost.exe")
+        || !named(host, "host")
+        || !named(package, "legacy-host-entry")
+        || !named(actions, "actions")
+    {
+        return Err(fault(
+            "legacy_data_scope_invalid",
+            "宿主不属于固定安装路径，未推断数据目录。",
+        ));
+    }
+    config
+        .map(|path| path.join("legacy-host-data"))
+        .ok_or_else(|| fault("legacy_data_scope_invalid", "缺少配置归属目录。"))
+}
+
+#[cfg(test)]
+mod data_scope_contracts {
+    use super::*;
+
+    #[test]
+    fn all_controls_use_the_package_config_owner_not_package_contents() {
+        let profile = std::env::temp_dir().join("owned-normal-legacy-contract");
+        let executable = profile.join("actions/legacy-host-entry/host/OmniTrigger.LegacyHost.exe");
+        assert_eq!(
+            data_root_for(&executable).unwrap(),
+            profile.join("legacy-host-data")
+        );
+    }
+
+    #[test]
+    fn other_and_unowned_executables_do_not_get_an_ordinary_scope() {
+        let root = std::env::temp_dir().join("owned-normal-legacy-contract");
+        for relative in [
+            "actions/legacy-host-entry/host/OtherHost.exe",
+            "actions/other/host/OmniTrigger.LegacyHost.exe",
+        ] {
+            assert_eq!(
+                data_root_for(&root.join(relative)).unwrap_err().code,
+                "legacy_data_scope_invalid"
+            );
+        }
+    }
+}
+
 /// 复用安装产物完整性的接缝，不读取用户ActionCall字段，不引入profile审批。
 /// key()只返回现有安装索引标识；verify()在worker沿既有机制核验文件和本地路径。
 pub(crate) trait LegacyArtifactSource: Send + Sync {
@@ -153,9 +209,34 @@ fn capture(
     let program = executable
         .to_str()
         .ok_or_else(|| fault("legacy_invalid_path", "宿主路径不能表示为有效字符串。"))?;
+    let contract = executable
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| fault("legacy_invalid_path", "宿主包路径无效。"))?
+        .join("host-contract.json");
+    crate::script_runtime::check_local_path(&contract)
+        .map_err(|e| fault("legacy_invalid_path", &e))?;
+    let mut args = vec![mode.to_string()];
+    if contract
+        .try_exists()
+        .map_err(|_| fault("legacy_control_unavailable", "无法读取宿主契约。"))?
+    {
+        crate::legacy_local_source::require_explicit_host_contract(
+            contract.parent().expect("joined contract has parent"),
+            cancellation,
+        )?;
+        let data_root = data_root_for(executable)?;
+        args.extend([
+            "--data-root".into(),
+            data_root
+                .to_str()
+                .ok_or_else(|| fault("legacy_invalid_path", "数据根路径无效。"))?
+                .into(),
+        ]);
+    }
     let captured = host.call_with_deadline(
         "process.capture",
-        json!({"program":program,"args":[mode],
+        json!({"program":program,"args":args,
         "timeout_ms":5000,"allow_non_zero":true}),
         cancellation,
         deadline,
@@ -193,6 +274,14 @@ fn stop_verified(
         status.get("can_start").and_then(Value::as_bool),
         status.get("error_code"),
     ) {
+        (Some("unavailable"), Some(false), Some(Value::String(code)))
+            if code == "host_build_mismatch" =>
+        {
+            return Err(fault(
+                "host_build_mismatch",
+                "常驻宿主入口构建不匹配，未发送停机请求。",
+            ));
+        }
         (Some("absent"), Some(true), Some(Value::String(code))) if code == "endpoint_missing" => {
             return Ok(LegacyCompletion::EndpointAlreadyAbsent)
         }

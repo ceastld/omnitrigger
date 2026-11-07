@@ -4,7 +4,8 @@ mod discovery;
 #[path = "legacy_package_install.rs"]
 mod legacy_package_install;
 pub(crate) use legacy_package_install::{
-    read_descriptor as read_legacy_install_source, LegacyInstallSource,
+    read_descriptor as read_legacy_install_source, stage_upgrade as stage_legacy_upgrade,
+    LegacyInstallSource,
 };
 
 use serde::Deserialize;
@@ -103,6 +104,12 @@ pub(crate) fn start_legacy_install(
     config: PathBuf,
     source: Option<LegacyInstallSource>,
 ) -> Result<Receiver<InstallEvent>, String> {
+    if source
+        .as_ref()
+        .is_some_and(|source| source.upgrade.is_some())
+    {
+        return Err("升级描述仅支持显式开发CLI，不从界面安装入口启动升级。".into());
+    }
     start_worker(move |events| {
         let result = legacy_package_install::install(&config, source.as_ref(), events);
         let _ = events.send(InstallEvent::LegacyInstalled(result.map(Box::new)));
@@ -116,6 +123,23 @@ pub(crate) fn start_legacy_job(
         let _ = events.send(InstallEvent::LegacyFinished(Box::new(
             crate::legacy_plugin_work::run(job),
         )));
+    })
+}
+
+// 仅显式CLI使用；仍占用原安装worker，进度和完成沿原事件类型返回。
+pub(crate) fn start_legacy_cli_upgrade(
+    config: PathBuf,
+    request: crate::legacy_upgrade::Request,
+) -> Result<Receiver<InstallEvent>, String> {
+    start_worker(move |events| {
+        let result = (|| {
+            let prepared = crate::legacy_upgrade::prepare(&config, request, events)?;
+            let mut plugins = crate::plugins::Plugins::load(&config).map_err(|e| {
+                omnitrigger_actions::ActionError::new("legacy_settings_invalid", e.to_string())
+            })?;
+            prepared.commit(&mut plugins)
+        })();
+        let _ = events.send(InstallEvent::LegacyInstalled(result.map(Box::new)));
     })
 }
 
