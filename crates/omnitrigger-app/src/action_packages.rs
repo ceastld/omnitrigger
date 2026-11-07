@@ -619,6 +619,13 @@ impl Workspace {
     }
 }
 
+fn action_version_hint(text: &str) -> gpui::Div {
+    gpui::div()
+        .text_size(gpui::px(11.))
+        .text_color(crate::rgb(0x008000))
+        .child(text.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -834,11 +841,4 @@ mod tests {
             .get("single_instance")
             .is_none());
     }
-}
-
-fn action_version_hint(text: &str) -> gpui::Div {
-    gpui::div()
-        .text_size(gpui::px(11.))
-        .text_color(crate::rgb(0x008000))
-        .child(text.to_owned())
 }
