@@ -7139,9 +7139,12 @@ fn main() {
                     view
                 },
             );
-            if let Err(error) = result {
-                eprintln!("无法启动 OmniTrigger 界面：{error}");
-                cx.quit();
+            match result {
+                Ok(handle) => script_ui::attach_workspace(handle),
+                Err(error) => {
+                    eprintln!("无法启动 OmniTrigger 界面：{error}");
+                    cx.quit();
+                }
             }
             if !preserve_foreground {
                 cx.activate(true);

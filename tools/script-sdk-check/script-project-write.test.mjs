@@ -403,6 +403,11 @@ test('state第一方声明副本按实际Node或Script语义与canonical一致�
     const virtual=join(dirname(item.file),'__state_contract__.ts');
     const source=(item.kind==='node'?"import type {ActionContext} from './api';\ndeclare const ctx:ActionContext;\n":"export {};\ndeclare const ctx:ScriptContext;\n")+`
 async function check() {
+  const hint=${item.kind==='node'?'await ':''}ctx.ui.setActionHint({text:'v123'});
+  const updated:true=hint.updated;
+  ${item.kind==='node'?'await ':''}ctx.actions.stopOtherInstances({timeoutMs:1});
+  // @ts-expect-error Node提示返回Promise，Script直接返回回执
+  ${item.kind==='node'?"ctx.ui.setActionHint({text:'v123'}).updated;":"ctx.ui.setActionHint({text:'v123'}).then;"}
   const snapshot=${item.kind==='node'?'await ':''}ctx.state.read('session','key');
   if(snapshot.entry.present) { const value=snapshot.entry.value; }
   ${item.kind==='node'?'await ':''}ctx.state.compareAndSwap('durable','key',snapshot.revision,{present:true,value:null});

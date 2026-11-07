@@ -49,6 +49,57 @@ fn fault(code: &str, unknown: bool) -> ActionError {
 }
 
 impl InvocationScopedHost {
+    fn action_hint(
+        &self,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Value, ActionError> {
+        use crate::action_hint::{fault, options, ActionHintScope, SCOPED_METHOD};
+        let text = options(params)?;
+        if cancellation.is_cancelled() {
+            return Err(fault("cancelled", "not_started"));
+        }
+        if Instant::now() >= deadline {
+            return Err(fault("timeout", "not_started"));
+        }
+        let (scope, service_token) = {
+            let reservations = self
+                .reservations
+                .lock()
+                .map_err(|_| fault("ui_unavailable", "not_started"))?;
+            let current = reservations
+                .entries
+                .get(&self.invocation_id)
+                .filter(|entry| entry.active)
+                .ok_or_else(|| fault("ui_hint_scope_expired", "not_started"))?;
+            (
+                ActionHintScope {
+                    binding_id: current.binding_id,
+                    invocation_id: self.invocation_id,
+                    package_id: current.identity.package_id.clone(),
+                    action_id: current.identity.action_id.clone(),
+                    action_version: current.action_version,
+                },
+                current.cancellation.clone(),
+            )
+        };
+        // 释放保留项锁后才转交UI；正常桥接令牌同时观察服务取消和本次连接断开。
+        if cancellation.is_cancelled() || service_token.is_cancelled() {
+            return Err(fault("cancelled", "not_started"));
+        }
+        let inner = self
+            .inner
+            .as_deref()
+            .ok_or_else(|| fault("ui_unavailable", "not_started"))?;
+        inner.call_with_deadline(
+            SCOPED_METHOD,
+            json!({"scope":scope,"text":text}),
+            cancellation,
+            deadline,
+        )
+    }
+
     fn state_call(
         &self,
         method: &str,
@@ -193,6 +244,16 @@ impl NativeHost for InvocationScopedHost {
         params: Value,
         cancellation: &CancellationToken,
     ) -> Result<Value, ActionError> {
+        if method == crate::action_hint::SCOPED_METHOD {
+            return Err(crate::action_hint::fault("invalid_input", "not_started"));
+        }
+        if method == crate::action_hint::METHOD {
+            return self.action_hint(
+                params,
+                cancellation,
+                Instant::now() + Duration::from_secs(1),
+            );
+        }
         if matches!(method, "state.read" | "state.compare_and_swap") {
             return self.state_call(
                 method,
@@ -223,6 +284,12 @@ impl NativeHost for InvocationScopedHost {
         cancellation: &CancellationToken,
         deadline: Instant,
     ) -> Result<Value, ActionError> {
+        if method == crate::action_hint::SCOPED_METHOD {
+            return Err(crate::action_hint::fault("invalid_input", "not_started"));
+        }
+        if method == crate::action_hint::METHOD {
+            return self.action_hint(params, cancellation, deadline);
+        }
         if matches!(method, "state.read" | "state.compare_and_swap") {
             return self.state_call(method, params, cancellation, deadline);
         }
@@ -239,3 +306,7 @@ impl NativeHost for InvocationScopedHost {
 #[cfg(test)]
 #[path = "service_actions_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "service_action_hint_tests.rs"]
+mod hint_tests;

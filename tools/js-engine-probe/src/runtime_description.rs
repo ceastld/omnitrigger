@@ -13,6 +13,7 @@ pub fn describe() -> Value {
     if cfg!(windows) {
         capabilities.push("process.capture.v1");
         capabilities.push("system.open_file_in_parent.v1");
+        capabilities.push("ui.action_hint.v1");
     }
     json!({
         "schema_version":1,

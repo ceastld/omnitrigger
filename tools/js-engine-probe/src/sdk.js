@@ -44,9 +44,11 @@ ctx.delay = milliseconds => {
     call('delay', {milliseconds});
 };
 function desktopCall(method, params) {
+    const actionHint = method === 'ui.action_hint';
+    if (actionHint && !actionsScope) throw Object.assign(new Error('版本提示需要当前服务调用作用域。'),{code:'ui_hint_scope_expired',effectState:'not_started',method});
     if ((method === 'win32_edit.replace_selection' || method === 'clipboard.write_files' || method.startsWith('raishot.resident.') || method === 'state.read' || method === 'state.compare_and_swap') && calls >= 32) throw Object.assign(new Error('单次脚本最多调用32次宿主API。'),{code:'desktop_call_limit',effectState:'not_started',method});
 
-    if (!nativeContext || nativeContext.error || !['actions.stop_other_instances','state.read','state.compare_and_swap'].includes(method) && !nativeContextAvailable) {
+    if (!nativeContext || nativeContext.error || !['actions.stop_other_instances','state.read','state.compare_and_swap','ui.action_hint'].includes(method) && !nativeContextAvailable) {
         if (method === "actions.stop_other_instances") throw Object.assign(new Error("动作控制需要当前服务调用作用域。"),{code:"actions_unavailable",effectState:"not_started",method});
         if (method.startsWith('raishot.resident.')) throw Object.assign(new Error('RaiShot 常驻接口需要应用本机桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
         if (method === 'clipboard.write_files') throw Object.assign(new Error('文件列表写入需要应用本机桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
@@ -61,7 +63,7 @@ function desktopCall(method, params) {
             throw Object.assign(new Error('数据选区 API 需要应用本机能力桥接。'), {code:'native_bridge_unavailable',effectState:'not_started',method});
         }
         const cause = nativeContext?.error;
-        const ui = method === 'ui.choose' || method === 'ui.notify' || method === 'ui.open_history' || method === 'ui.toggle_history';
+        const ui = method === 'ui.choose' || method === 'ui.notify' || method === 'ui.open_history' || method === 'ui.toggle_history' || actionHint;
         if (method === 'fs.stat' || method === 'fs.read_directory') throw Object.assign(new Error('文件状态 API 需要本机宿主。'), {code:'fs_unavailable',effectState:'not_started',method});
         const code = ui && cause?.code === 'desktop_unavailable' ? 'ui_unavailable' : cause?.code;
         throw Object.assign(new Error(cause?.message ?? (method.startsWith('browser.') ? '浏览器 API 需要 OmniTrigger 应用宿主。' : ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '桌面 API 需要 OmniTrigger 本次动作的目标上下文。')), {

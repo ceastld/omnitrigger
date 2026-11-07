@@ -46,6 +46,7 @@ export const groups = [
       ['docs/ACTION_PACKAGES.md', 'action-packages', '动作包与 JavaScript 入口'],
       ['docs/ACTIONS_SCOPE.md', 'actions-scope', '停止当前动作的其他调用'],
       ['docs/ACTION_STATE.md', 'action-state', '当前动作的状态读写'],
+      ['docs/ACTION_VERSION_HINT.md', 'action-version-hint', '当前动作的版本提示'],
       ['docs/SCRIPT_PROJECTS.md', 'script-projects', '脚本工程与 SDK 刷新'],
       ['docs/PLUGIN_SYSTEM.md', 'plugin-system', '插件动作与快速绑定'],
     ],

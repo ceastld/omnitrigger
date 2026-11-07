@@ -285,6 +285,8 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
         start(program: string, args?: string[]): { pid: number };
     };
     ui: {
+        /** 更新本次动作自己的版本提示；透明底绿色文字，1–16 UTF-16单位。回执确认模型已更新并请求刷新，不表示动作成功或像素已呈现。 */
+        setActionHint(options: {text: string}): {updated: true};
         /** 只确认创建独立历史窗；动作结束后仍存活，关闭仅停止该窗自己的采集。无UI为ui_unavailable。 */
         openHistory(): {opened: true};
         /** 与Node入口共用本次Host的原生切换：无窗创建，已有窗等自身采集停止并移除后返回closed。
