@@ -1,6 +1,9 @@
 // 显式自有程序 -> stdout通知；不读取脚本文件、不记录输出、不补发输入。
+/** @param {unknown} value @returns {value is Record<string, any>} */
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+/** @param {string} code @returns {never} */
 const fail = code => {throw Object.assign(new Error('程序输出通知参数或结果无效。'),{code});};
+/** @param {unknown} value @param {boolean} [nul] @returns {value is string} */
 function unicode(value,nul=false) {
   if(typeof value!=='string'||(!nul&&value.includes('\0')))return false;
   for(let index=0;index<value.length;index++){
@@ -10,10 +13,15 @@ function unicode(value,nul=false) {
   }
   return true;
 }
+/** @param {unknown} value @returns {value is string} */
 const local = value => unicode(value)&&/^[A-Za-z]:[\\/]/.test(value)
   &&!value.slice(3).split(/[\\/]/).some(part=>part==='.'||part==='..');
 
+/** @template {boolean} Capture
+ * @param {unknown} input @param {Capture} capture
+ * @returns {import('./types.js').Task<Capture>} */
 export function prepare(input,capture) {
+  /** @type {readonly PropertyKey[]} */
   const allowed=['program','args','cwd','allowNonZero','trimOutput',...(capture?['timeoutMs']:[])];
   if(!object(input)||Reflect.ownKeys(input).some(key=>!allowed.includes(key)))fail('invalid_input');
   const {program,args=[],cwd,allowNonZero=false,trimOutput=true,timeoutMs=10000}=input;
@@ -23,6 +31,7 @@ export function prepare(input,capture) {
       ||!Number.isInteger(timeoutMs)||timeoutMs<1||timeoutMs>60000
       ||Object.keys(input).some(key=>input[key]===undefined))fail('invalid_input');
   for(let index=0;index<args.length;index++)if(!Object.hasOwn(args,index)||!unicode(args[index])||args[index].length>32766)fail('invalid_input');
+  /** @param {string} value */
   const quoted=value=>{
     const parts=['"'];let slashes=0;
     for(const character of value){
@@ -35,23 +44,35 @@ export function prepare(input,capture) {
   return {program,args:[...args],cwd,allowNonZero,trimOutput,timeoutMs,capture};
 }
 
+/** @param {import('./types.js').NodeContext | import('./types.js').SyncContext} ctx
+ * @param {import('./types.js').Task} task */
 export function available(ctx,task) {
   if(typeof ctx.ui?.notify!=='function')fail('ui_unavailable');
   if(typeof ctx.process?.[task.capture?'capture':'run']!=='function')fail(task.capture?'process_capture_unavailable':'process_unavailable');
 }
 
+/** @overload
+ * @param {import('./types.js').NodeContext} ctx @param {import('./types.js').Task} task
+ * @returns {Promise<import('./types.js').ProcessResult>} */
+/** @overload
+ * @param {import('./types.js').SyncContext} ctx @param {import('./types.js').Task<true>} task
+ * @returns {import('./types.js').ProcessResult} */
+/** @param {import('./types.js').NodeContext | import('./types.js').SyncContext} ctx
+ * @param {import('./types.js').Task} task */
 export function execute(ctx,task) {
   const options={cwd:task.cwd,allowNonZero:task.allowNonZero,...(task.capture?{timeoutMs:task.timeoutMs}:{})};
   return ctx.process[task.capture?'capture':'run'](task.program,task.args,options);
 }
 
+/** @param {import('./types.js').ProcessResult} value
+ * @param {import('./types.js').Task} task @returns {import('./types.js').Notification} */
 export function notification(value,task) {
   if(!object(value)||Reflect.ownKeys(value).length!==3||!['code','stdout','stderr'].every(key=>Object.hasOwn(value,key))
       ||!Number.isInteger(value.code)||value.code< -2147483648||value.code>2147483647
       ||!unicode(value.stdout,true)||!unicode(value.stderr,true))fail('invalid_response');
   let bytes=0;
   for(const text of [value.stdout,value.stderr])for(const character of text){
-    const point=character.codePointAt(0);bytes+=point<0x80?1:point<0x800?2:point<0x10000?3:4;
+    const point=/** @type {number} */(character.codePointAt(0));bytes+=point<0x80?1:point<0x800?2:point<0x10000?3:4;
     if(bytes>65536)fail('process_output_too_large');
   }
   if(value.code!==0&&!task.allowNonZero)fail('process_exit_nonzero');
@@ -63,11 +84,15 @@ export function notification(value,task) {
     summary:{completed:true,exitCode:value.code,stdoutUtf16Units:value.stdout.length,stderrUtf16Units:value.stderr.length}};
 }
 
+/** @param {import('./types.js').Notification} value
+ * @param {import('./types.js').NotificationReceipt} receipt */
 export function complete(value,receipt) {
   if(!object(receipt)||Reflect.ownKeys(receipt).length!==1||receipt.submitted!==true)fail('invalid_response');
   return {...value.summary,notified:true};
 }
 
+/** 任意 JS 抛出值只在这里读取受白名单过滤的属性；不声明它已经是宿主错误。
+ * @param {any} error @param {string} method @param {boolean} completed */
 export function sanitized(error,method,completed) {
   const known=['invalid_input','invalid_arguments','invalid_response','output_not_displayable','ui_unavailable','ui_busy','ui_error',
     'process_capture_unavailable','process_unavailable','process_setup_failed','process_start_failed','process_wait_failed','process_read_failed',

@@ -1,5 +1,6 @@
 import {prepare,available,execute,notification,complete,sanitized} from './workflow.mjs';
 
+/** @param {import('./sdk/api.js').ActionContext} ctx */
 export default async function main(ctx) {
   let method='script.parameters';let completed=false;
   try{

@@ -24,4 +24,14 @@ node --test examples/actions/process-output/recipes.test.mjs
 
 测试只用RecordingHost，不启动任何进程或真实宿主。实际运行调用示例将执行调用方明确填入的EXE。
 
-新增 `call-capture.json` 指向 Node 的 notify-capture，显式给出 timeoutMs；旧 notify 仍不接受该字段，旧 notify-script 保持同步入口。三个动作分别 single_instance，不互锁。采集预算、错误与收尾范围见[动作包 API](../../../docs/ACTION_PACKAGES.md)，预算不是硬 OS 调用超时，外层动作期限可能更短。
+新增 `call-capture.json` 指向 Node 的 notify-capture，显式给出 timeoutMs；旧 notify 仍不接受该字段，旧 notify-script 保持同步入口。三个动作分别 single_instance，不互锁。采集预算、错误与收尾范围见[动作包 API](https://github.com/ceastld/omnitrigger/blob/main/docs/ACTION_PACKAGES.md)，预算不是硬 OS 调用超时，外层动作期限可能更短。
+
+复制整个目录到所选配置同级的 `actions/process-output`，保留 `sdk/`、`types.d.ts` 和 `jsconfig.json`。打开目录后，Node 两入口使用异步 SDK，同步入口使用 `ScriptMain`；共享 workflow 的类型重载保留两者的结果差异。同步 `process.run` 原本返回退出状态，不能当成 `capture` 的 stdout 结果。声明不安装宿主、改变调用方式或授予运行权限。
+
+使用 TypeScript 5.9 严格检查实际三个入口和共享 helper，不执行动作：
+
+```powershell
+tsc --project jsconfig.json --noEmit
+```
+
+这些声明只引用包内文件，不依赖原仓库目录、Node 类型包或全局 `ctx`。上面的 RecordingHost 回归命令在源码仓库内运行；运行时入口的类型检查不包含测试脚本。

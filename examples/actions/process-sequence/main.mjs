@@ -1,5 +1,6 @@
 // 两个步骤可以是 EXE，也可以显式指定解释器及脚本参数。没有隐式 shell。
 // 示例输入：{"steps":[{"program":"node","args":["--version"]},{"program":"node","args":["-p","'第二步完成'"]}]}
+/** @param {import('./sdk/api.js').ActionContext} ctx */
 export default async function (ctx) {
   const { steps } = ctx.input;
   if (!Array.isArray(steps) || steps.length !== 2) {

@@ -1,5 +1,7 @@
+/// <reference path="./sdk/script-types.d.ts" />
 import {prepare,available,execute,notification,complete,sanitized} from './workflow.mjs';
 
+/** @type {ScriptMain<Record<string, unknown>>} */
 export function main(ctx) {
   let method='script.parameters';let completed=false;
   try{
