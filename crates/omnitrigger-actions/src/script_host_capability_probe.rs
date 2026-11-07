@@ -42,7 +42,6 @@ pub(super) fn check(
             "not_started",
         ));
     }
-    let deadline = deadline.min(Instant::now() + Duration::from_secs(10));
     if Instant::now() >= deadline {
         return Err(error(
             "runtime_description_timeout",
@@ -103,6 +102,8 @@ pub(super) fn check(
             "not_started",
         )
     })?);
+    // 创建进程仍占用父动作总预算；十秒限制用于返回后的自述阶段，不刷新父期限。
+    let deadline = deadline.min(Instant::now() + Duration::from_secs(10));
     loop {
         if cancellation.is_cancelled() {
             return Err(error(
