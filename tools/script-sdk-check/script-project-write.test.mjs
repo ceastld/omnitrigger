@@ -425,3 +425,24 @@ async function check() {
     assert.equal(errors.length,0,item.file+' '+ts.formatDiagnostics(errors,{getCanonicalFileName:x=>x,getCurrentDirectory:()=>repo,getNewLine:()=> '\n'}));
   }
 });
+
+test('state真实browser-workflows作者工程保留brand且使用同一SDK身份',()=>{
+  const project=join(repo,'examples/actions/browser-workflows'),configFile=join(project,'jsconfig.json');
+  const loaded=ts.readConfigFile(configFile,ts.sys.readFile);assert.equal(loaded.error,undefined);
+  const parsed=ts.parseJsonConfigFileContent(loaded.config,ts.sys,project,{strict:true,noEmit:true,skipLibCheck:false},configFile);
+  assert.deepEqual(parsed.errors,[]);
+  const entry=join(project,'restore-session.mjs'),original=readFileSync(entry,'utf8');
+  function diagnostics(source){
+    const host=ts.createCompilerHost(parsed.options),getSource=host.getSourceFile;
+    if(source!==undefined)host.getSourceFile=(file,version,...args)=>resolve(file)===entry?ts.createSourceFile(entry,source,version,true,ts.ScriptKind.JS):getSource.call(host,file,version,...args);
+    return ts.getPreEmitDiagnostics(ts.createProgram(parsed.fileNames,parsed.options,host));
+  }
+  const format=items=>ts.formatDiagnostics(items,{getCanonicalFileName:x=>x,getCurrentDirectory:()=>project,getNewLine:()=> '\n'});
+  const actual=diagnostics();assert.equal(actual.length,0,format(actual));
+  const local="import('./sdk/api')",core="import('../../../crates/omnitrigger-actions/runtime/api')";
+  assert(original.includes(local),'入口和共享workflow应引用同一包内Node SDK');
+  // 只在TypeScript内存host中复现旧JSDoc，不写入或执行作者入口。
+  const previous=original.replace(local,core),errors=diagnostics(previous);
+  assert(errors.some(error=>error.code===2345&&resolve(error.file?.fileName??'')===entry
+    &&ts.flattenDiagnosticMessageText(error.messageText,' ').includes('capturedTargetBrand')),format(errors));
+});
