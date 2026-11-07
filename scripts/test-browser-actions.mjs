@@ -159,7 +159,7 @@ try {
   report.checks.push('未知 API、无效标签页、派发前取消且没有新建标签页');
   // 在隔离 profile 中放置合成大结果，验证 SDK 分块及脚本内处理，最终只返回摘要。
   await worker.evaluate(() => chrome.storage.local.set({omnitriggerActionFixture: '中文🦀'.repeat(100000)}));
-  const host = (await Promise.all(['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','host.mjs'].map(name => readFile(join(root,'crates/omnitrigger-actions/runtime',name),'utf8')))).join('\n');
+  const host = (await Promise.all(['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js','host.mjs'].map(name => readFile(join(root,'crates/omnitrigger-actions/runtime',name),'utf8')))).join('\n');
   const entry = join(scratch, 'main.mjs');
   await writeFile(entry, `export default async ctx => {
     const profiles = await ctx.browser.profiles();
