@@ -2140,31 +2140,10 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
             native.flags.contains(LLKHF_INJECTED),
             native.dwExtraInfo,
         );
-        if !native.flags.contains(LLKHF_INJECTED)
-            && native.dwExtraInfo != REPLAY_TAG
-            && native.dwExtraInfo != SHORTCUT_TAG
-            && native.dwExtraInfo != PRIORITY_PROBE_TAG
-        {
-            let down = match wparam.0 as u32 {
-                WM_KEYDOWN | WM_SYSKEYDOWN => Some(true),
-                WM_KEYUP | WM_SYSKEYUP => Some(false),
-                _ => None,
-            };
-            if let Some(down) = down {
-                let button = Button::Key(normalized_key(native));
-                let kind = if down {
-                    InputKind::Down(button)
-                } else {
-                    InputKind::Up(button)
-                };
-                let metadata = KeyMetadata {
-                    scan_code: native.scanCode as u16,
-                    extended: native.flags.contains(LLKHF_EXTENDED),
-                };
-                if process_input(kind, Some(metadata)) {
-                    record_hook_timing(HookTiming::Work, started.elapsed());
-                    return LRESULT(1);
-                }
+        if let Some((kind, metadata)) = keyboard_input(wparam.0 as u32, native) {
+            if process_input(kind, Some(metadata)) {
+                record_hook_timing(HookTiming::Work, started.elapsed());
+                return LRESULT(1);
             }
         }
     }
@@ -2251,6 +2230,35 @@ fn note_callback(keyboard: bool, injected: bool, tag: usize) {
     });
 }
 
+fn keyboard_input(message: u32, native: &KBDLLHOOKSTRUCT) -> Option<(InputKind, KeyMetadata)> {
+    if native.flags.contains(LLKHF_INJECTED)
+        || matches!(
+            native.dwExtraInfo,
+            REPLAY_TAG | SHORTCUT_TAG | PRIORITY_PROBE_TAG
+        )
+    {
+        return None;
+    }
+    let down = match message {
+        WM_KEYDOWN | WM_SYSKEYDOWN => true,
+        WM_KEYUP | WM_SYSKEYUP => false,
+        _ => return None,
+    };
+    let button = Button::Key(normalized_key(native));
+    let kind = if down {
+        InputKind::Down(button)
+    } else {
+        InputKind::Up(button)
+    };
+    Some((
+        kind,
+        KeyMetadata {
+            scan_code: native.scanCode as u16,
+            extended: native.flags.contains(LLKHF_EXTENDED),
+        },
+    ))
+}
+
 fn normalized_key(native: &KBDLLHOOKSTRUCT) -> u16 {
     match native.vkCode {
         0x10 => unsafe { MapVirtualKeyW(native.scanCode, MAPVK_VSC_TO_VK_EX) as u16 },
@@ -2311,14 +2319,13 @@ fn mouse_input(message: u32, data: u32) -> Option<InputKind> {
 fn replay_input(kind: InputKind, metadata: &BTreeMap<Button, KeyMetadata>) -> INPUT {
     match kind {
         InputKind::Down(Button::Key(key)) | InputKind::Up(Button::Key(key)) => {
-            let fallback_scan = unsafe { MapVirtualKeyW(key.into(), MAPVK_VK_TO_VSC_EX) };
-            let metadata = metadata
-                .get(&Button::Key(key))
-                .copied()
-                .unwrap_or(KeyMetadata {
+            let metadata = metadata.get(&Button::Key(key)).copied().unwrap_or_else(|| {
+                let fallback_scan = unsafe { MapVirtualKeyW(key.into(), MAPVK_VK_TO_VSC_EX) };
+                KeyMetadata {
                     scan_code: (fallback_scan & 0xff) as u16,
                     extended: fallback_scan & 0xff00 == 0xe000,
-                });
+                }
+            });
             let mut flags = KEYBD_EVENT_FLAGS(0);
             if metadata.scan_code != 0 {
                 flags |= KEYEVENTF_SCANCODE;

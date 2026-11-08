@@ -167,3 +167,6 @@ fn disconnected_worker_becomes_fatal_and_allows_an_owed_physical_release() {
 
 #[path = "pointer_motion_owner_tests.rs"]
 mod pointer_motion_owner;
+
+#[path = "prefix_platform_replay_tests.rs"]
+mod prefix_platform_replay;
