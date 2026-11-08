@@ -51,14 +51,14 @@ test('坏语法、大小和不支持的入口类型返回结构化拒绝',()=>{
   for(const invalid of [null,[],4])assert.equal(analyzeScriptEntry(invalid).passed,false);
 });
 
-test('轻量async入口即使没有ScriptMain注解也不能报告声明检查通过',()=>{
+test('具名async入口可以静态识别但不证明已运行',()=>{
   for(const text of ['export async function main(){return null;}',
     'async function run(){return null;}export {run as main};',
     'export const main=async()=>null;',
     'const run=async function(){return null};export {run as main};']) {
     const result=inspect(text);
-    assert.equal(result.passed,false);assert.equal(result.mainExport,'local_async_declaration');
-    assert.equal(result.diagnostics[0].code,'entry_main_async');
+    assert.equal(result.passed,true);assert.equal(result.mainExport,'local_callable_declaration');
+    assert.deepEqual(result.diagnostics,[]);
     assert.equal(result.runtimeExecuted,false);assert.equal(result.filesRead,false);
   }
 });
@@ -112,4 +112,19 @@ test('单独default async保持合法语法与既有缺少main具名导出的结
   const result=inspect('export default async function main(){return null;}');
   assert.equal(result.passed,false);assert.equal(result.mainExport,'missing_named_export');
   assert.deepEqual(result.diagnostics.map(item=>item.code),['entry_main_not_exported']);
+});
+
+test('Script默认导出不能替代具名main，声明检查不冒充真实宿主入口',()=>{
+  for(const text of ['export default async function main(){return null;}',
+    'export default function main(){return null;}', 'export default async()=>null;',
+    'const run=async()=>null;export default run;', 'async function run(){return null;}export {run as default};',
+    'export default function* main(){yield 1;}']) {
+    const result=inspect(text);assert.equal(result.passed,false);assert.equal(result.mainExport,'missing_named_export');
+    assert.deepEqual(result.diagnostics.map(d=>d.code),['entry_main_not_exported']);
+    assert.equal(result.runtimeExecuted,false);assert.equal(result.runtimeVerified,false);
+  }
+  const unresolved=inspect('export * from "./other.js";export default async()=>null;');
+  assert.equal(unresolved.mainExport,'unresolved_export');assert.equal(unresolved.diagnostics[0].severity,'warning');
+  const named=inspect('export const main=1;export default async()=>null;');
+  assert.equal(named.passed,false);assert.equal(named.mainExport,'local_noncallable_declaration');
 });

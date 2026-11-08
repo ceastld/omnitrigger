@@ -67,7 +67,7 @@ actions/my-script/
   sdk/api.d.ts
 ```
 
-使用支持 JavaScript / TypeScript 的编辑器打开整个目录，编辑 `main.mjs` 和 `lib` 中的模块。入口具名导出同步 `main(ctx)`，通过标准相对 `import` / `export` 拆分代码。工程附带本地 SDK 类型快照，启用标准 JS 类型检查，不依赖仓库路径或 npm 包，也无需转译；运行需要支持包内模块的新宿主；已有 `.js` 工程继续使用 `function main(ctx)`，更新应用不会改写作者文件。路径、缓存、循环和限额见[包内模块](../tools/js-engine-probe/MODULES.md)。入口的 `@type {ScriptMain}` 注释同时提供 `ctx` 补全和 JSON 返回值检查，能在编辑时发现异步入口、遗漏返回及 Promise、函数、`undefined` 等非 JSON 返回值；无结果时返回 `null`。静态类型无法排除 `any`、循环引用和非有限数，实际运行仍有独立校验。模块没有全局 `ctx`，辅助函数需要显式传参。SDK 的[源声明](../crates/omnitrigger-actions/runtime/script-types.d.ts)随应用维护，更新应用不会覆盖既有工程。
+使用支持 JavaScript / TypeScript 的编辑器打开整个目录，编辑 `main.mjs` 和 `lib` 中的模块。入口具名导出 `main(ctx)`（可为 async），通过标准相对 `import` / `export` 拆分代码。工程附带本地 SDK 类型快照，启用标准 JS 类型检查，不依赖仓库路径或 npm 包，也无需转译；运行需要支持包内模块的新宿主；已有 `.js` 工程继续使用 `function main(ctx)`，更新应用不会改写作者文件。路径、缓存、循环和限额见[包内模块](../tools/js-engine-probe/MODULES.md)。入口的 `@type {ScriptMain}` 注释同时提供 `ctx` 补全和 JSON 返回值检查，能在编辑时发现遗漏返回、函数、`undefined` 等非 JSON 返回值，Promise 的最终结果同样必须是 JSON。直接声明 async 函数时使用 `@type {ScriptAsyncMain}`；无结果时返回 `null`。静态类型无法排除 `any`、循环引用和非有限数，实际运行仍有独立校验。模块没有全局 `ctx`，辅助函数需要显式传参。SDK 的[源声明](../crates/omnitrigger-actions/runtime/script-types.d.ts)随应用维护，更新应用不会覆盖既有工程。
 
 安装宿主后，可使用同一配置校验和运行：
 
@@ -136,7 +136,7 @@ node tools/script-sdk-check/check-project-types.mjs D:\Demo\actions\my-script
 | `--check-action` | 包、动作契约版本及运行时注册，不执行入口。 |
 | `--check-config` | 绑定与触发描述，不执行动作。 |
 
-旧 `.js` 函数体入口也会分析 main 绑定与语法依赖：唯一的同步 `main(ctx)` 可完成静态覆盖，不要求 ESM 导出。静态 import/export、async 或生成器入口会被拒绝；动态 import、求值、require、main 重绑定或不确定的顶层初始化会被拒绝或保留不完整警告，不执行作者代码来猜测结果。JSDoc 类型引用由类型检查处理，不算运行时模块依赖。
+旧 `.js` 函数体入口也会分析 main 绑定与语法依赖：唯一的普通或 async `main(ctx)` 可完成静态覆盖，不要求 ESM 导出。静态 import/export 或生成器入口会被拒绝；动态 import、求值、require、main 重绑定或不确定的顶层初始化会被拒绝或保留不完整警告，不执行作者代码来猜测结果。JSDoc 类型引用由类型检查处理，不算运行时模块依赖。
 
 `staticAnalysisComplete` 只表示声明与已提供源码的静态依赖覆盖，不表示初始化、副作用、宿主能力或运行效果已验证；仍须同时查看 `passed`、诊断和 `runtimeVerified`。
 
@@ -144,9 +144,9 @@ node tools/script-sdk-check/check-project-types.mjs D:\Demo\actions\my-script
 
 ### 轻量脚本宿主
 
-`runtime: "script"` 可通过现有动作服务运行独立的 Rust JS 宿主，无需安装 Node。宿主不链接进输入核心；脚本执行、取消与终态仍由 `ActionService` 管理。已有 Boa 和 QuickJS 两种构建使用同一份宿主 API。`.mjs` 入口具名导出同步 `main(ctx)`，`.js` 入口声明标准 JS 函数 `function main(ctx)`，均返回 JSON 值；不需要自定义文件语法或 npm 包。
+`runtime: "script"` 可通过现有动作服务运行独立的 Rust JS 宿主，无需安装 Node。宿主不链接进输入核心；脚本执行、取消与终态仍由 `ActionService` 管理。已有 Boa 和 QuickJS 两种构建使用同一份宿主 API。`.mjs` 入口具名导出 `main(ctx)`（可为 async），`.js` 入口声明标准 JS 函数 `function main(ctx)`，均返回 JSON 值或其 Promise；不需要自定义文件语法或 npm 包。
 
-目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start/capture`、`ctx.delay`、`ctx.clipboard.readText/readData/writeText/history.*`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText/copySelectionData/windowAction/getWindowGeometry/setWindowRect/getPointerState/getPointingRoot/handoffPointingRoot/trackWindowDrag` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时提供包内相对 ESM 导入，暂不提供 Node/npm 模块或 Promise 入口；需要 Node 环境或异步入口的动作继续选择 `node` 运行时。
+目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start/capture`、`ctx.delay`、`ctx.clipboard.readText/readData/writeText/history.*`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText/copySelectionData/windowAction/getWindowGeometry/setWindowRect/getPointerState/getPointingRoot/handoffPointingRoot/trackWindowDrag` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时提供包内相对 ESM 导入，新版宿主支持 Promise 入口、全局 UTF-8 `TextEncoder` 和异步浏览器 `callAsync/profilesAsync`，原方法仍同步；缺少异步通道时明确拒绝，不回退同步调用。暂不提供 Node/npm 模块；需要 Node 环境的动作选择 `node` 运行时。
 
 Windows `process.capture` 在 Node、Boa、QuickJS 间共用 Rust 后端；应用内调用均交给应用原生桥接，Node 逐次 `await`，轻量宿主同步返回。使用本地绝对 EXE 路径，可设置绝对 `cwd`；默认10秒预算、双流合计64KiB、严格UTF-8，默认拒绝非零退出。Node 默认工作目录为动作包目录；轻量脚本在应用内继承应用进程工作目录，独立引擎 CLI 继承引擎进程工作目录，需要稳定目录时应显式设置 `cwd`。预算不是硬实时超时，失败不返回部分输出、不自动重试。应用内采集的私有 Job 由应用持有，脚本断连通过桥接请求协作取消；独立引擎 CLI 的 Job 才由引擎进程持有。旧 `process.run/start` 契约保持原样，详见[程序输出采集契约](../tools/js-engine-probe/API.md#程序输出采集)。
 

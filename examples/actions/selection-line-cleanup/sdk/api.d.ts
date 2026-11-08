@@ -94,8 +94,10 @@ type ScriptBrightnessStepResult=
 type ScriptJsonValue = null | boolean | number | string | readonly ScriptJsonValue[] | {
     readonly [key: string]: ScriptJsonValue;
 };
-/** 标准同步入口。@type {ScriptMain} 检查上下文与返回值，也可用 ScriptMain<MyInput> 检查输入字段；不校验运行时参数。 */
-type ScriptMain<Input = Record<string, any>> = (ctx: ScriptContext<Input>) => ScriptJsonValue;
+/** 标准入口可返回JSON值或其Promise；直接async函数使用ScriptAsyncMain注释。ScriptMain<MyInput>可检查输入字段，不校验运行时参数。 */
+type ScriptMain<Input = Record<string, any>> = (ctx: ScriptContext<Input>) => ScriptJsonValue | Promise<ScriptJsonValue>;
+/** 异步入口别名；结果仍须是JSON，原浏览器call/profiles保持同步。 */
+type ScriptAsyncMain<Input = Record<string, any>> = (ctx: ScriptContext<Input>) => Promise<ScriptJsonValue>;
 
 /** 同步宿主 API。原生异常可在脚本中 catch，并通过 error.code 区分。 */
 interface ScriptDesktopFault extends Error {
@@ -411,6 +413,10 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
         profiles(options?: Pick<ScriptBrowserOptions, 'timeoutMs'>): Array<{browser_instance_id: string; session_id: string; name: string; [key: string]: unknown}>;
         /** 方法不带 chrome. 前缀；同步返回，undefined 与 null 保持区别。 */
         call<T = unknown>(method: string, args?: unknown[], options?: ScriptBrowserOptions): T;
+        /** 真正异步浏览器通道；父宿主缺少连接时以browser_async_unavailable/not_started拒绝；未注入异步回调时以unsupported_runtime_feature/not_started拒绝，均不回退同步调用。 */
+        callAsync<T = unknown>(method: string, args?: unknown[], options?: ScriptBrowserOptions): Promise<T>;
+        /** profiles的独立异步入口；原profiles仍同步。 */
+        profilesAsync(options?: Pick<ScriptBrowserOptions, 'timeoutMs'>): Promise<Array<{browser_instance_id: string; session_id: string; name: string; [key: string]: unknown}>>;
         /** 同步远程 Proxy，例如 ctx.browser.chrome.bookmarks.getTree()。选项使用 call。 */
         chrome: any;
     };
@@ -435,3 +441,18 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
     /** 普通本地文件；显式使用文件父目录为工作目录。复验元数据，单次提交，不等待关联程序退出。 */
     openFileInParent(target: string): void;
 }>;
+
+/** 宿主提供的UTF-8编码器；与lib.dom及Node环境声明合并。 */
+interface TextEncoderEncodeIntoResult {
+    read: number;
+    written: number;
+}
+interface TextEncoder {
+    readonly encoding: string;
+    encode(input?: string): Uint8Array<ArrayBuffer>;
+    encodeInto(source: string, destination: Uint8Array<ArrayBufferLike>): TextEncoderEncodeIntoResult;
+}
+declare var TextEncoder: {
+    prototype: TextEncoder;
+    new(): TextEncoder;
+};

@@ -86,12 +86,9 @@ export function analyzeScriptEntry(input={}) {
     return result('missing_named_export');
   }
   const entry=exported[0],kind=entry.kind??locals.get(entry.local)??'unresolved';
-  if(kind==='async_callable'||kind==='generator_callable') {
-    const asyncMain=kind==='async_callable';
-    add(asyncMain?'entry_main_async':'entry_main_generator','error',asyncMain
-      ?'轻量 main 入口不能声明为 async；该宿主要求同步返回 JSON。'
-      :'轻量 main 入口不能声明为生成器；迭代器不是该入口需要的 JSON 结果。',entry.node,source);
-    return result(asyncMain?'local_async_declaration':'local_generator_declaration');
+  if(kind==='generator_callable') {
+    add('entry_main_generator','error','轻量main入口不能声明为生成器；迭代器不是JSON结果或其Promise。',entry.node,source);
+    return result('local_generator_declaration');
   }
   if(kind==='noncallable') {
     add('entry_main_noncallable','error','main 的静态声明是不可直接调用的值或 class。',entry.node,source);

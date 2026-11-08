@@ -16,12 +16,11 @@ test('旧协议单一同步main与安全常量完整，参数名不硬编码',()
   assert.equal(JSON.stringify(input),copy);assert.equal(graph(text).staticGraphComplete,true);
  }
 });
-test('缺失、重声明、非函数、async和生成器有准确拒绝与定位',()=>{
+test('缺失、重声明、非函数和生成器有准确拒绝与定位',()=>{
  for(const [text,code] of [
   ['// marker\nfunction other(ctx){return null;}','legacy_entry_main_missing'],
   ['function main(ctx){return null;} function main(ctx){return null;}','legacy_entry_main_ambiguous'],
   ['const main=42;','entry_main_noncallable'],
-  ['async function main(ctx){return null;}','entry_main_async'],
   ['function* main(ctx){yield 1;}','entry_main_generator'],
  ]) {const result=inspect(text);assert.equal(result.passed,false,text);assert(codes(result).includes(code),JSON.stringify(result));assert.equal(result.staticAnalysisComplete,false);assert(result.diagnostics.every(d=>d.file==='nested/work.js'&&d.line>=1&&d.column>=1));}
 });
@@ -82,12 +81,14 @@ test('动态导入只标记未覆盖的边，不读取或假装加载成功',()=
  }
  assert.equal(graph('function main(ctx){import("./later.js");return null;}').edges[0].kind,'dynamic_literal');
 });
-test('明确Promise结果不能假冒同步入口，未返回的async辅助函数不一概拒绝',()=>{
- for(const text of ['function main(ctx){return Promise.resolve(null);}',
+test('同步或异步main可返回Promise，不执行入口或辅助函数',()=>{
+ for(const text of ['async function main(ctx){return await Promise.resolve(null);}',
+  'const main=async ctx=>ctx.input;',
+  'function main(ctx){return Promise.resolve(null);}',
   'function main(ctx){return new Promise(()=>{});}',
   'function main(ctx){const value=Promise.resolve(null);return value;}',
   'async function helper(){return null;}function main(ctx){return helper();}']) {
-  const result=inspect(text);assert.equal(result.passed,false);assert(codes(result).includes('entry_main_async_result'),JSON.stringify(result));
+  const result=inspect(text);assert.equal(result.passed,true,JSON.stringify(result));assert.equal(result.staticAnalysisComplete,true);assert.equal(result.runtimeExecuted,false);
  }
  const helper=inspect('async function helper(){await other();}function main(ctx){return ctx.input;}');
  assert.equal(helper.staticAnalysisComplete,true,JSON.stringify(helper));

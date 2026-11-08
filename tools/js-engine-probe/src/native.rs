@@ -62,7 +62,7 @@ pub const METHODS: [&str; 49] = [
     "audio.volume_adjust",
 ];
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Configuration {
     port: u16,
@@ -245,6 +245,26 @@ pub fn call(
     method: String,
     params: Value,
 ) -> Result<Value, ApiError> {
+    call_controlled(connection, id, method, params, None)
+}
+
+fn call_controlled(
+    connection: Configuration,
+    id: u32,
+    method: String,
+    params: Value,
+    cancellation: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Value, ApiError> {
+    let cancelled =
+        || cancellation.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire));
+    if cancelled() {
+        return Err(fault(
+            "cancelled",
+            "异步浏览器请求已取消。",
+            &method,
+            "not_started",
+        ));
+    }
     if connection.port == 0
         || connection.token.len() != 64
         || !connection.token.bytes().all(|b| b.is_ascii_hexdigit())
@@ -373,6 +393,18 @@ pub fn call(
     };
     // 写入后不能证明服务端是否已执行；只读 stat 仍无副作用，其他方法为 unknown，均不重试。
     let remaining = || {
+        if cancelled() {
+            return Err(fault(
+                "cancelled",
+                "异步浏览器请求已取消。",
+                &method,
+                if write_began.get() {
+                    "unknown"
+                } else {
+                    "not_started"
+                },
+            ));
+        }
         deadline
             .checked_duration_since(Instant::now())
             .filter(|d| !d.is_zero())
@@ -456,7 +488,11 @@ pub fn call(
     let mut written = 0;
     while written < request.len() {
         stream
-            .set_write_timeout(Some(remaining()?))
+            .set_write_timeout(Some(if cancellation.is_some() {
+                remaining()?.min(Duration::from_millis(100))
+            } else {
+                remaining()?
+            }))
             .map_err(transport)?;
         write_began.set(true);
         let count = stream.write(&request[written..]).map_err(transport)?;
@@ -468,10 +504,25 @@ pub fn call(
     let mut bytes = Vec::new();
     loop {
         stream
-            .set_read_timeout(Some(remaining()?))
+            .set_read_timeout(Some(if cancellation.is_some() {
+                remaining()?.min(Duration::from_millis(25))
+            } else {
+                remaining()?
+            }))
             .map_err(transport)?;
         let mut chunk = [0u8; 4096];
-        let count = stream.read(&mut chunk).map_err(transport)?;
+        let count = match stream.read(&mut chunk) {
+            Err(cause)
+                if cancellation.is_some()
+                    && matches!(
+                        cause.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) =>
+            {
+                continue
+            }
+            result => result.map_err(transport)?,
+        };
         if count == 0 {
             break;
         }
@@ -480,6 +531,18 @@ pub fn call(
             return Err(network("本机回执超过方法的结果大小限制。".into()));
         }
         // 服务端每连接一帧并关闭；读到 EOF 才能排除多帧或尾随内容。
+    }
+    if cancelled() {
+        return Err(fault(
+            "cancelled",
+            "异步浏览器请求已取消。",
+            &method,
+            if write_began.get() {
+                "unknown"
+            } else {
+                "not_started"
+            },
+        ));
     }
     parse_response(&bytes, id, &method)
 }
@@ -990,5 +1053,375 @@ mod class_rejection_wire_tests {
                 assert_eq!(actual.method.as_deref(), Some("window.geometry"));
             }
         }
+    }
+}
+
+// 只有 JSON/ApiError 和取消标记跨线程；socket 在 call_controlled 的工作线程内创建并销毁。
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserAsyncRequest {
+    id: u32,
+    method: String,
+    params: Value,
+}
+
+struct BrowserCompletion {
+    id: u32,
+    result: Result<Value, ApiError>,
+}
+
+pub(crate) struct BrowserAsyncPool {
+    configuration: Option<Value>,
+    pending: std::collections::BTreeMap<
+        u32,
+        (
+            std::thread::JoinHandle<()>,
+            std::sync::Arc<std::sync::atomic::AtomicBool>,
+        ),
+    >,
+    accepted: std::collections::BTreeSet<u32>,
+    send: std::sync::mpsc::Sender<BrowserCompletion>,
+    receive: std::sync::mpsc::Receiver<BrowserCompletion>,
+    ready: std::collections::VecDeque<BrowserCompletion>,
+}
+
+impl BrowserAsyncPool {
+    pub(crate) fn new(configuration: Option<Value>) -> Self {
+        let (send, receive) = std::sync::mpsc::channel();
+        Self {
+            configuration,
+            pending: Default::default(),
+            accepted: Default::default(),
+            send,
+            receive,
+            ready: Default::default(),
+        }
+    }
+
+    fn submit_with(
+        &mut self,
+        request: BrowserAsyncRequest,
+        execute: impl FnOnce(
+                Configuration,
+                u32,
+                String,
+                Value,
+                &std::sync::atomic::AtomicBool,
+            ) -> Result<Value, ApiError>
+            + Send
+            + 'static,
+    ) -> Result<u32, ApiError> {
+        let method = request.method.clone();
+        // 连接只取自可信 Request.native_context；脚本 JSON 无 connection 字段。
+        let configuration: Configuration =
+            serde_json::from_value(self.configuration.clone().ok_or_else(|| {
+                fault(
+                    "browser_async_unavailable",
+                    "本次父宿主没有异步浏览器连接。",
+                    &method,
+                    "not_started",
+                )
+            })?)
+            .map_err(|_| {
+                fault(
+                    "invalid_input",
+                    "异步浏览器连接格式无效。",
+                    &method,
+                    "not_started",
+                )
+            })?;
+        if configuration.port == 0
+            || configuration.token.len() != 64
+            || !configuration
+                .token
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || !matches!(method.as_str(), "browser.call" | "browser.profiles")
+            || !request.params.is_object()
+            || !(1..=128).contains(&request.id)
+            || self.accepted.contains(&request.id)
+        {
+            return Err(fault(
+                "invalid_input",
+                "异步浏览器请求或调用标识无效。",
+                &method,
+                "not_started",
+            ));
+        }
+        if self.accepted.len() >= 32 {
+            return Err(fault(
+                "desktop_call_limit",
+                "单次脚本最多接纳32次异步宿主调用。",
+                &method,
+                "not_started",
+            ));
+        }
+        // 已完成但尚未交回 JS 的结果仍占槽位，没有隐式队列。
+        if self.pending.len() >= 4 {
+            return Err(fault(
+                "browser_async_capacity",
+                "异步浏览器最多四个在途请求。",
+                &method,
+                "not_started",
+            ));
+        }
+        let id = request.id;
+        let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancellation = cancellation.clone();
+        let send = self.send.clone();
+        let handle = std::thread::Builder::new()
+            .name(format!("script-browser-{id}"))
+            .spawn(move || {
+                let method = request.method.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    execute(
+                        configuration,
+                        id,
+                        request.method,
+                        request.params,
+                        &worker_cancellation,
+                    )
+                }))
+                .unwrap_or_else(|_| {
+                    Err(fault(
+                        "native_bridge_failed",
+                        "异步浏览器工作线程异常。",
+                        &method,
+                        "unknown",
+                    ))
+                });
+                let _ = send.send(BrowserCompletion { id, result });
+            })
+            .map_err(|_| {
+                fault(
+                    "worker_start_failed",
+                    "无法启动异步浏览器工作线程。",
+                    &method,
+                    "not_started",
+                )
+            })?;
+        self.accepted.insert(id);
+        self.pending.insert(id, (handle, cancellation));
+        Ok(id)
+    }
+
+    pub(crate) fn dispatch(&mut self, request: String) -> String {
+        let result = if request.len() > LIMIT {
+            Err(fault(
+                "invalid_input",
+                "异步浏览器请求超过512 KiB。",
+                "browser.call",
+                "not_started",
+            ))
+        } else {
+            serde_json::from_str::<BrowserAsyncRequest>(&request)
+                .map_err(|_| {
+                    fault(
+                        "invalid_input",
+                        "异步浏览器请求格式无效。",
+                        "browser.call",
+                        "not_started",
+                    )
+                })
+                .and_then(|request| {
+                    self.submit_with(request, |connection, id, method, params, cancellation| {
+                        call_controlled(connection, id, method, params, Some(cancellation))
+                    })
+                })
+        };
+        match result {
+            Ok(id) => json!({"ok":true,"id":id}).to_string(),
+            Err(error) => json!({"ok":false,"error":error}).to_string(),
+        }
+    }
+
+    pub(crate) fn pending(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub(crate) fn poll(&mut self) -> String {
+        let Some(completion) = self
+            .ready
+            .pop_front()
+            .or_else(|| self.receive.try_recv().ok())
+        else {
+            return "null".into();
+        };
+        if let Some((handle, _)) = self.pending.remove(&completion.id) {
+            let began = Instant::now();
+            let _ = handle.join();
+            crate::api::exclude_host_wait(began.elapsed());
+        }
+        match completion.result {
+            Ok(value) => json!({"id":completion.id,"ok":true,"value":value}).to_string(),
+            Err(error) => json!({"id":completion.id,"ok":false,"error":error}).to_string(),
+        }
+    }
+
+    pub(crate) fn wait(&mut self, duration: Duration) {
+        if self.ready.is_empty() && !self.pending.is_empty() {
+            if let Ok(completion) = self.receive.recv_timeout(duration) {
+                self.ready.push_back(completion);
+            }
+        }
+    }
+}
+
+impl Drop for BrowserAsyncPool {
+    fn drop(&mut self) {
+        for (_, cancellation) in self.pending.values() {
+            cancellation.store(true, std::sync::atomic::Ordering::Release);
+        }
+        for (_, (handle, _)) in std::mem::take(&mut self.pending) {
+            let _ = handle.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod browser_async_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc,
+    };
+    const WAIT: Duration = Duration::from_secs(3);
+    fn pool() -> BrowserAsyncPool {
+        BrowserAsyncPool::new(Some(json!({"port":1,"token":"a".repeat(64)})))
+    }
+    fn request(id: u32) -> BrowserAsyncRequest {
+        BrowserAsyncRequest {
+            id,
+            method: "browser.call".into(),
+            params: json!({}),
+        }
+    }
+    fn take(pool: &mut BrowserAsyncPool) -> Value {
+        pool.wait(WAIT);
+        serde_json::from_str(&pool.poll()).unwrap()
+    }
+
+    #[test]
+    fn two_requests_are_dispatched_before_first_completion_and_finish_in_reverse_order() {
+        let mut pool = pool();
+        let (entered, started) = mpsc::channel();
+        let mut release = Vec::new();
+        for id in 1..=2 {
+            let (send, receive) = mpsc::channel();
+            release.push(send);
+            let entered = entered.clone();
+            pool.submit_with(request(id), move |_, id, _, _, _| {
+                entered.send(id).unwrap();
+                receive.recv_timeout(WAIT).unwrap();
+                Ok(json!({"result":id}))
+            })
+            .unwrap();
+        }
+        let mut ids = [
+            started.recv_timeout(WAIT).unwrap(),
+            started.recv_timeout(WAIT).unwrap(),
+        ];
+        ids.sort();
+        assert_eq!(ids, [1, 2]);
+        assert_eq!(pool.pending(), 2);
+        release[1].send(()).unwrap();
+        let second = take(&mut pool);
+        assert_eq!(second["id"], 2);
+        release[0].send(()).unwrap();
+        let first = take(&mut pool);
+        assert_eq!(first["id"], 1);
+        assert_eq!(pool.pending(), 0);
+    }
+
+    #[test]
+    fn fifth_request_is_not_started_and_drop_cancels_and_joins_all_owners() {
+        let mut pool = pool();
+        let live = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let (send, receive) = mpsc::channel();
+        for id in 1..=4 {
+            let live = live.clone();
+            let stopped = stopped.clone();
+            let send = send.clone();
+            pool.submit_with(request(id), move |_, _, _, _, stop| {
+                live.fetch_add(1, Ordering::SeqCst);
+                send.send(()).unwrap();
+                let until = Instant::now() + WAIT;
+                while !stop.load(Ordering::Acquire) {
+                    assert!(Instant::now() < until);
+                    std::thread::yield_now();
+                }
+                live.fetch_sub(1, Ordering::SeqCst);
+                stopped.fetch_add(1, Ordering::SeqCst);
+                Ok(Value::Null)
+            })
+            .unwrap();
+        }
+        for _ in 0..4 {
+            receive.recv_timeout(WAIT).unwrap();
+        }
+        assert_eq!(
+            pool.submit_with(request(5), |_, _, _, _, _| panic!("容量拒绝不能执行IO"))
+                .unwrap_err()
+                .code,
+            "browser_async_capacity"
+        );
+        drop(pool);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        assert_eq!(stopped.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn missing_parent_configuration_and_non_browser_methods_reject_before_executor() {
+        let mut missing = BrowserAsyncPool::new(None);
+        let error = missing
+            .submit_with(request(1), |_, _, _, _, _| panic!("旧父进程不能联网"))
+            .unwrap_err();
+        assert_eq!(error.code, "browser_async_unavailable");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        let mut pool = pool();
+        let mut other = request(1);
+        other.method = "keyboard.text".into();
+        assert_eq!(
+            pool.submit_with(other, |_, _, _, _, _| panic!("不能派发非浏览器"))
+                .unwrap_err()
+                .code,
+            "invalid_input"
+        );
+        assert_eq!(pool.pending(), 0);
+    }
+
+    #[test]
+    fn completed_unpolled_slot_unique_ids_total_budget_and_errors_are_preserved() {
+        let mut pool = pool();
+        for id in 1..=32 {
+            pool.submit_with(request(id), |_, _, _, _, _| {
+                Err(ApiError {
+                    code: "permission_required".into(),
+                    message: "synthetic".into(),
+                    effect_state: Some("not_started".into()),
+                    method: Some("tabs.move".into()),
+                    required_permissions: vec!["tabs".into()],
+                })
+            })
+            .unwrap();
+            pool.wait(WAIT);
+            assert_eq!(pool.pending(), 1);
+            let reply = take(&mut pool);
+            assert_eq!(reply["error"]["required_permissions"], json!(["tabs"]));
+            assert_eq!(reply["error"]["method"], "tabs.move");
+        }
+        assert_eq!(
+            pool.submit_with(request(33), |_, _, _, _, _| panic!("总预算不能派发"))
+                .unwrap_err()
+                .code,
+            "desktop_call_limit"
+        );
+        assert_eq!(
+            pool.submit_with(request(1), |_, _, _, _, _| panic!("不能复用ID"))
+                .unwrap_err()
+                .code,
+            "invalid_input"
+        );
     }
 }
