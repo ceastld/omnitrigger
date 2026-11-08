@@ -44,7 +44,7 @@
 
 ## 编辑与静态检查
 
-用支持 JavaScript/TypeScript 的编辑器打开整个包目录。`jsconfig.json` 为所有七个业务模块启用 strict `checkJs`，测试文件不属于作者检查入口。
+用支持 JavaScript/TypeScript 的编辑器打开整个包目录。`jsconfig.json` 为原四个入口、三个共享模块及新增会话入口启用 strict `checkJs`；会话核心通过 `session-core.d.mts` 声明检查调用边界，业务由独立会话测试验证。测试文件不属于作者检查入口。
 
 - `sdk/api.d.ts` 是本地 Node API 声明。
 - `sdk/script-types.d.ts` 是本地同步模块 API 声明，没有全局 `ctx`。
@@ -65,8 +65,16 @@ node "$checkTools\check-project-types.mjs" $package
 
 ### 独立作者检查
 
-在本目录运行 `npm ci --ignore-scripts`，再执行 `npm run check`。本包固定 TypeScript 5.9.3，严格检查四个入口、三个共享算法模块、自定义输入/结果声明及两种 SDK，并额外检查两个 Node 默认导出。检查只分析源码，不解析实际业务输入、不选择或发送文本。
+在本目录运行 `npm ci --ignore-scripts`，再执行 `npm run check`。本包固定 TypeScript 5.9.3，严格检查五个入口、原三个共享算法模块、自定义输入/结果声明及两种 SDK，并额外检查两个 Node 默认导出。检查只分析源码，不解析实际业务输入、不选择或发送文本。
 
 环境只加载 ES2022 与显式宿主类型，`types:[]`，不向 Node 或 Script 入口提供 window、document、process 等原生全局。NodeContext 使用 Promise，SyncContext 使用同步回执；外部 input 仍为 unknown，由既有算法校验。
 
-当前随包 SDK 可通过既有 `node tools/script-project.mjs refresh --runtime node --project <本目录>` 显式刷新。刷新保留四个入口、共享算法、自定义 json-types.d.ts、清单、调用例子、配置和开发依赖；未知 portable 声明仍拒绝覆盖。声明更新不升级实际宿主，也不代表输入效果已验收。
+当前随包 SDK 可通过既有 `node tools/script-project.mjs refresh --runtime node --project <本目录>` 显式刷新。刷新保留作者入口、共享算法、自定义声明、清单、调用例子、配置和开发依赖；未知 portable 声明仍拒绝覆盖。声明更新不升级实际宿主，也不代表输入效果已验收。
+
+## 显式状态会话
+
+`session-step-script@1` 每次创建会话或处理一个事件，返回 `state`、分页 `view` 和 `requests`。可先调用 `session-create-call.json`，随后以 `{mode:"step",state:上轮返回的state,event:{type:"select",revision:state.revision,path:["count"]}}` 选择节点，再发送 `begin_edit`、`commit_edit`、`delete_selected` 等事件。完整类型见 `session-types.d.ts`。
+
+该入口只处理数据，不创建编辑窗口、后台会话或执行剪贴板操作。`request_output` 返回文本输出请求；调用方处理后，再用对应 `requestId` 确认、拒绝或报告未知结果。取消和未知结果不会自动重发。路径输出使用 JSON Pointer，大整数保留原十进制文本；不提供日期文化转换。
+
+动作服务输入上限为 64 KiB；会话入口自身以 UTF-8 限制输入为 60 KiB、结果为 80 KiB，并验证返回状态能再次携带控制事件提交。超限返回明确错误，不截断文档或扩大运行时预算。分页默认 32 行、最多 64 行；预览为摘要，状态保留完整文档。并行修改同一份显式状态的协调由调用方负责。

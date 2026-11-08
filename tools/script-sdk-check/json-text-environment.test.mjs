@@ -13,10 +13,10 @@ function diagnostics(probe){
   const program=ts.createProgram([...parsed.fileNames,...(probe===undefined?[]:[virtual])],parsed.options,host);
   return ts.getPreEmitDiagnostics(program).filter(d=>d.category===ts.DiagnosticCategory.Error).map(d=>({code:d.code,file:d.file?.fileName,line:d.file&&d.start!==undefined?d.file.getLineAndCharacterOfPosition(d.start).line+1:null}));
 }
-test('四个JSON入口与三个共享算法在显式ES2022宿主环境严格检查',()=>{
+test('五个JSON入口与共享算法在显式ES2022宿主环境严格检查',()=>{
   assert.deepEqual(parsed.options.lib,['lib.es2022.d.ts']);assert.deepEqual(parsed.options.types,[]);
   assert.equal(parsed.options.strict,true);assert.equal(parsed.options.noEmit,true);assert.equal(parsed.options.skipLibCheck,false);
-  assert.equal(parsed.fileNames.filter(name=>name.endsWith('.mjs')).length,7);
+  assert.equal(parsed.fileNames.filter(name=>name.endsWith('.mjs')).length,8);
   assert.deepEqual(diagnostics(),[]);
 });
 test('虚拟作者源拒绝环境全局、同步异步误用和跳过JSON输入类型',()=>{
