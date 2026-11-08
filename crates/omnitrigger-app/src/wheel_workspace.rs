@@ -488,6 +488,7 @@ impl Workspace {
     pub(super) fn set_wheel_scope(&mut self, scope: Option<String>, cx: &mut Context<Self>) {
         self.flush_wheel_label(cx);
         self.wheel_scope = scope;
+        self.wheel_scope_open = false;
         self.wheel_cell = None;
         self.wheel_moving = false;
         self.wheel_replacing = false;
@@ -616,6 +617,8 @@ impl Workspace {
         self.wheel_moving = false;
         self.wheel_replacing = false;
         self.wheel_scope = None;
+        self.wheel_scope_open = false;
+        self.wheel_hover = None;
         self.wheel_source_binding = None;
         self.wheel_name
             .update(cx, |input, cx| input.set_text(name, cx));

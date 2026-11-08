@@ -1369,8 +1369,17 @@ fn disc(center: f32, radius: f32, color: u32, blur: f32) -> Div {
 /// 编辑舞台三圈各自的方向数与半格偏移；空圈也给出几何，以便显示可放置的空格。
 pub type RingGeometry = [(u8, bool); 3];
 
+/// 编辑舞台的平面几何（舞台半径记为 330）：三圈等宽，圈间留缝，中心为轮盘名称。
+/// 与浮动轮盘的圈带不同，编辑时只需看清每个格子，不画刻度和发光。
+const EDITOR_RADIUS: f32 = 330.;
+const EDITOR_DISC: f32 = 328.;
+const EDITOR_HUB: f32 = 56.;
+const EDITOR_BANDS: [(f32, f32); 3] = [(64., 150.), (156., 240.), (246., 322.)];
+/// 格子两侧各留的缝宽（显示像素）。
+const EDITOR_GAP: f32 = 2.5;
+
 fn editor_scale(size: f32) -> f32 {
-    (size / 2. - 4.) / EXPLICIT_DISC
+    size / 2. / EDITOR_RADIUS
 }
 
 fn editor_angle(sector: u8, (sectors, half_step): (u8, bool)) -> f32 {
@@ -1382,18 +1391,28 @@ fn editor_angle(sector: u8, (sectors, half_step): (u8, bool)) -> f32 {
     })
 }
 
+/// 编辑页配色，与管理页其他控件一致。
+fn editor_accent(accent: WheelAccent) -> u32 {
+    match accent {
+        WheelAccent::Mint => theme::ACCENT,
+        WheelAccent::Violet => theme::VIOLET,
+        WheelAccent::Amber => theme::RECORD,
+    }
+}
+
 /// 编辑舞台的格子命中：圈按相邻圈带的中线划分，方向与运行时分槽一致；中心和盘外不命中。
 pub fn editor_hit(geometry: &RingGeometry, size: f32, point: (f32, f32)) -> Option<(u8, u8)> {
     let scale = editor_scale(size);
     let (dx, dy) = ((point.0 - size / 2.) / scale, (point.1 - size / 2.) / scale);
     let radius = dx.hypot(dy);
-    if !radius.is_finite() || radius <= POINTER_RADIUS || radius > EXPLICIT_BEZEL.0 {
+    let (first, last) = (EDITOR_BANDS[0].0, EDITOR_BANDS[2].1);
+    if !radius.is_finite() || radius < first || radius > last {
         return None;
     }
-    let ring = EXPLICIT_BANDS
+    let ring = EDITOR_BANDS
         .windows(2)
         .position(|pair| radius < (pair[0].1 + pair[1].0) / 2.)
-        .unwrap_or(EXPLICIT_BANDS.len() - 1);
+        .unwrap_or(EDITOR_BANDS.len() - 1);
     let (sectors, half_step) = geometry[ring];
     let angle = dx.atan2(-dy).rem_euclid(TAU);
     let offset = if half_step { 0.5 } else { 0. };
@@ -1402,87 +1421,104 @@ pub fn editor_hit(geometry: &RingGeometry, size: f32, point: (f32, f32)) -> Opti
     Some((ring as u8, sector as u8))
 }
 
-/// 管理页的编辑舞台：三圈全部方向都画成格子，空格显示“+”，动作格显示名称。
-/// `definition` 须为方位布局；`moving` 时其余格子提亮，提示点选目标。
+/// 编辑舞台中的一个格子：底色、描边与可选的虚线（移动时的空目标）。
+struct EditorCell {
+    band: (f32, f32),
+    span: (f32, f32),
+    fill: Hsla,
+    edge: Hsla,
+    edge_width: f32,
+    dashed: bool,
+}
+
+/// 平面格子：两侧按显示像素留等宽缝，缩小后缝隙不消失。
+fn editor_cell_path(builder: &mut PathBuilder, stage: Stage, cell: &EditorCell) {
+    let (inner, outer) = cell.band;
+    let gap = |radius: f32| EDITOR_GAP / (radius * stage.scale);
+    let (outer_start, outer_end) = (cell.span.0 + gap(outer), cell.span.1 - gap(outer));
+    let (inner_start, inner_end) = (cell.span.0 + gap(inner), cell.span.1 - gap(inner));
+    if inner_end <= inner_start {
+        return;
+    }
+    builder.move_to(stage.polar(outer, outer_start));
+    builder.arc_to(
+        stage.radii(outer),
+        px(0.),
+        outer_end - outer_start > PI,
+        true,
+        stage.polar(outer, outer_end),
+    );
+    builder.line_to(stage.polar(inner, inner_end));
+    builder.arc_to(
+        stage.radii(inner),
+        px(0.),
+        inner_end - inner_start > PI,
+        false,
+        stage.polar(inner, inner_start),
+    );
+    builder.close();
+}
+
+/// 管理页的编辑舞台：三圈全部方向都画成格子，空格显示“+”，动作格显示名称；
+/// 选中格以配色描边，悬停格提亮，`moving` 时其余格子以配色描边提示可点的目标。
+#[allow(clippy::too_many_arguments)]
 pub fn editor_stage(
     definition: &WheelDefinition,
     geometry: &RingGeometry,
     selected: Option<(u8, u8)>,
+    hovered: Option<(u8, u8)>,
     moving: bool,
     ready: impl Fn(usize) -> bool,
     size: f32,
     bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
 ) -> Div {
-    let color = accent_color(definition.accent);
+    let color = editor_accent(definition.accent);
     let scale = editor_scale(size);
     let center = size / 2.;
-    let mut art = WheelArt {
-        color,
-        wedges: Vec::new(),
-        bezel: EXPLICIT_BEZEL,
-        ticks: 120,
-        chevrons: Vec::new(),
-        focus: None,
-    };
+    let mut cells = Vec::new();
     let mut labels = Vec::new();
-    for (ring, band) in EXPLICIT_BANDS.into_iter().enumerate() {
+    for (ring, band) in EDITOR_BANDS.into_iter().enumerate() {
         let ring_geometry = geometry[ring];
         let half = PI / f32::from(ring_geometry.0);
         for sector in 0..ring_geometry.0 {
+            let cell = (ring as u8, sector);
             let slot = definition.slots.iter().position(|slot| {
                 slot.position.is_some_and(|position| {
                     usize::from(position.ring) == ring && position.sector == sector
                 })
             });
             let middle = editor_angle(sector, ring_geometry);
-            let span = (middle - half, middle + half);
-            let is_selected = selected == Some((ring as u8, sector));
+            let is_selected = selected == Some(cell);
+            let is_hovered = hovered == Some(cell) && !is_selected;
             let ready = slot.is_none_or(&ready);
-            let tone = if ready { color } else { UNAVAILABLE };
-            let (fill, edge) = match (is_selected, slot) {
-                (true, _) => (
-                    theme::gradient(
-                        middle.to_degrees(),
-                        theme::hsla(tone, 0.1),
-                        theme::hsla(tone, 0.4),
-                    ),
-                    theme::hsla(tone, 0.8),
-                ),
-                (false, Some(_)) => (
-                    theme::gradient(
-                        middle.to_degrees(),
-                        theme::hsla(0x151c2a, 0.98),
-                        theme::hsla(0x212b3e, 0.98),
-                    ),
-                    if !ready {
-                        theme::hsla(theme::RECORD, 0.3)
-                    } else if moving {
-                        theme::hsla(color, 0.45)
-                    } else {
-                        theme::hsla(0x9fb2d6, 0.14)
-                    },
-                ),
-                (false, None) => (
-                    theme::hsla(0x8fa3c4, 0.035).into(),
-                    theme::hsla(
-                        if moving { color } else { 0x8fa3c4 },
-                        if moving { 0.4 } else { 0.08 },
-                    ),
-                ),
+            let target = moving && !is_selected;
+            let base = match (is_selected, slot) {
+                (true, _) => theme::mix(color, 0x1c1f26, 0.24),
+                (false, Some(_)) => 0x262b34,
+                (false, None) => 0x1c1f26,
             };
-            art.wedges.push(Wedge {
+            let fill = if is_hovered {
+                theme::mix(0xffffff, base, 0.12)
+            } else {
+                base
+            };
+            let (edge, edge_width) = if is_selected {
+                (theme::hsla(color, 1.), 2.)
+            } else if !ready {
+                (theme::hsla(theme::RECORD, 0.55), 1.)
+            } else if target {
+                (theme::hsla(color, 0.45), 1.)
+            } else {
+                (rgb(0x2a2f38).into(), 1.)
+            };
+            cells.push(EditorCell {
                 band,
-                span,
-                fill,
+                span: (middle - half, middle + half),
+                fill: rgb(fill).into(),
                 edge,
+                edge_width,
+                dashed: target && slot.is_none(),
             });
-            if is_selected {
-                art.focus = Some(Focus {
-                    band,
-                    span,
-                    color: tone,
-                });
-            }
             let radius = (band.0 + band.1) / 2.;
             let width = (TAU * radius / f32::from(ring_geometry.0) * 0.86)
                 .min(band.1 - band.0 + 24.)
@@ -1495,29 +1531,27 @@ pub fn editor_stage(
                 Some(slot) => div()
                     .max_w(px(width))
                     .truncate()
-                    .text_size(px(if ring_geometry.0 > 12 { 11. } else { 12.5 }))
+                    .text_size(px(if ring_geometry.0 > 12 { 11. } else { 13. }))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(match (ready, is_selected) {
-                        (false, _) => theme::TEXT_DIM,
-                        (true, true) => theme::TEXT,
-                        (true, false) => theme::TEXT_SOFT,
-                    }))
+                    .text_color(rgb(if ready { 0xe8eaee } else { theme::TEXT_DIM }))
                     .child(definition.slots[slot].label.clone()),
                 None => div()
-                    .text_size(px(15.))
-                    .text_color(theme::hsla(
-                        if is_selected { color } else { 0x8fa3c4 },
-                        if is_selected { 1. } else { 0.3 },
-                    ))
+                    .text_size(px(16.))
+                    .font_weight(FontWeight::LIGHT)
+                    .text_color(rgb(if is_selected || is_hovered {
+                        theme::TEXT_DIM
+                    } else {
+                        0x3f4652
+                    }))
                     .child("+"),
             };
             labels.push(
                 div()
                     .absolute()
                     .left(px(x - width / 2.))
-                    .top(px(y - 10.))
+                    .top(px(y - 11.))
                     .w(px(width))
-                    .h(px(20.))
+                    .h(px(22.))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1525,50 +1559,78 @@ pub fn editor_stage(
             );
         }
     }
-    let hub_radius = HUB_RADIUS * scale;
+    let hub_radius = EDITOR_HUB * scale;
+    let (title, subtitle) = if moving {
+        ("移动中".into(), "点目标格子")
+    } else {
+        (definition.name.clone(), "松开即执行")
+    };
     let hub = div()
         .absolute()
         .left(px(center - hub_radius))
         .top(px(center - hub_radius))
         .size(px(hub_radius * 2.))
         .rounded_full()
-        .bg(theme::gradient(
-            180.,
-            theme::hsla(0x1a2233, 1.),
-            theme::hsla(0x080b12, 1.),
-        ))
-        .border_1()
-        .border_color(theme::hsla(color, 0.4))
+        .bg(rgb(0x101216))
+        .border_2()
+        .border_color(theme::hsla(color, 0.9))
         .flex()
+        .flex_col()
         .items_center()
         .justify_center()
+        .gap(px(2.))
         .child(
             div()
-                .w(px(hub_radius * 2. - 10.))
+                .w(px(hub_radius * 2. - 12.))
                 .truncate()
                 .text_center()
-                .text_size(px(11.))
+                .text_size(px(14.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(theme::TEXT_SOFT))
-                .child(definition.name.clone()),
+                .text_color(rgb(0xe8eaee))
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(px(10.5))
+                .text_color(rgb(0x8b93a1))
+                .child(subtitle),
         );
+    let disc_radius = EDITOR_DISC * scale;
     div()
         .relative()
         .flex_none()
         .size(px(size))
-        .child(disc(center, EXPLICIT_DISC * scale, color, 18.))
+        .child(
+            div()
+                .absolute()
+                .left(px(center - disc_radius))
+                .top(px(center - disc_radius))
+                .size(px(disc_radius * 2.))
+                .rounded_full()
+                .bg(rgb(0x181b21))
+                .border_1()
+                .border_color(rgb(0x252a33)),
+        )
         .child(
             canvas(
                 move |stage, _, _| bounds.set(Some(stage)),
                 move |stage, (), window, _| {
-                    art.paint(
-                        Stage {
-                            origin: stage.origin,
-                            center,
-                            scale,
-                        },
-                        window,
-                    )
+                    let stage = Stage {
+                        origin: stage.origin,
+                        center,
+                        scale,
+                    };
+                    for cell in &cells {
+                        let mut fill = PathBuilder::fill();
+                        editor_cell_path(&mut fill, stage, cell);
+                        paint(fill, cell.fill, window);
+                        let mut edge = PathBuilder::stroke(px(cell.edge_width));
+                        if cell.dashed {
+                            edge = edge.dash_array(&[px(4.), px(4.)]);
+                        }
+                        editor_cell_path(&mut edge, stage, cell);
+                        paint(edge, cell.edge, window);
+                    }
                 },
             )
             .absolute()
@@ -1847,7 +1909,7 @@ mod tests {
                 size / 2. - angle.cos() * radius * scale,
             )
         };
-        for (ring, &(inner, outer)) in EXPLICIT_BANDS.iter().enumerate() {
+        for (ring, &(inner, outer)) in EDITOR_BANDS.iter().enumerate() {
             let layout = geometry[ring];
             for sector in 0..layout.0 {
                 let middle = editor_angle(sector, layout);
@@ -1864,8 +1926,8 @@ mod tests {
             }
         }
         assert_eq!(editor_hit(&geometry, size, (size / 2., size / 2.)), None);
-        assert_eq!(editor_hit(&geometry, size, at(0., HUB_RADIUS)), None);
-        assert_eq!(editor_hit(&geometry, size, at(0., EXPLICIT_DISC)), None);
+        assert_eq!(editor_hit(&geometry, size, at(0., EDITOR_HUB)), None);
+        assert_eq!(editor_hit(&geometry, size, at(0., EDITOR_DISC)), None);
     }
 
     #[test]

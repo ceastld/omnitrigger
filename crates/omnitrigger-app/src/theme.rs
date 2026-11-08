@@ -165,6 +165,15 @@ pub fn hsla(color: u32, alpha: f32) -> Hsla {
     value
 }
 
+/// 按 `amount`（0–1）把 `color` 混入 `base`，得到不透明的 RGB 色值。
+pub fn mix(color: u32, base: u32, amount: f32) -> u32 {
+    let channel = |shift: u32| {
+        let (a, b) = ((color >> shift) & 0xff, (base >> shift) & 0xff);
+        ((a as f32 * amount + b as f32 * (1. - amount)).round() as u32).min(0xff) << shift
+    };
+    channel(16) | channel(8) | channel(0)
+}
+
 /// 两色线性渐变；`angle` 与 CSS 一致，0 指向上方、顺时针增加。
 pub fn gradient(angle: f32, from: Hsla, to: Hsla) -> Background {
     linear_gradient(

@@ -573,6 +573,10 @@ struct Workspace {
     wheel_replacing: bool,
     /// 正在编辑的应用专用布局（进程名）；`None` 为通用布局。
     wheel_scope: Option<String>,
+    /// 应用范围下拉是否展开。
+    wheel_scope_open: bool,
+    /// 鼠标悬停的格子，只用于提亮显示。
+    wheel_hover: Option<(u8, u8)>,
     wheel_source_binding: Option<u64>,
     wheel_window: Option<WindowHandle<RadialWheel>>,
     wheel_registered: Option<isize>,
@@ -1024,6 +1028,8 @@ impl Workspace {
             wheel_moving: false,
             wheel_replacing: false,
             wheel_scope: None,
+            wheel_scope_open: false,
+            wheel_hover: None,
             wheel_source_binding: None,
             wheel_window: None,
             wheel_registered: None,

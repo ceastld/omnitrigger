@@ -8,13 +8,22 @@ use crate::{
     wheels::{WheelAccent, WheelDefinition},
     ActionSpec, Context, Div, Icon, Page, Tone, Workspace,
 };
-use gpui::{div, prelude::*, px, FontWeight, MouseButton, MouseDownEvent, Stateful};
+use gpui::{
+    deferred, div, prelude::*, px, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
+    Stateful,
+};
 use std::{cell::Cell, rc::Rc};
 
 /// 编辑页轮盘舞台的边长范围（逻辑像素），按窗口高度在其间取值。
 const STAGE_RANGE: (f32, f32) = (340., 540.);
 /// 右侧面板宽度；面板文字保持单行短句，避免滚动列中自动换行被量高。
-const PANEL_WIDTH: f32 = 340.;
+const PANEL_WIDTH: f32 = 360.;
+/// 编辑页的分隔线、说明文字与色块，与轮盘舞台的平面配色一致。
+const LINE: u32 = 0x22262e;
+const MUTED: u32 = 0x8b93a1;
+const FAINT: u32 = 0x6f7785;
+const TILE: u32 = 0x1b1f26;
+const TILE_EDGE: u32 = 0x2f3540;
 
 fn accent_color(accent: WheelAccent) -> u32 {
     match accent {
@@ -50,39 +59,6 @@ fn direction_name(sector: u8, (sectors, half_step): (u8, bool)) -> &'static str 
     NAMES[(turn * 8.).round() as usize % 8]
 }
 
-fn chip(
-    id: impl Into<gpui::ElementId>,
-    label: impl Into<gpui::SharedString>,
-    active: bool,
-    enabled: bool,
-    tint: u32,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_none()
-        .px(px(10.))
-        .py(px(6.))
-        .rounded(px(8.))
-        .border_1()
-        .border_color(if active {
-            theme::hsla(tint, 0.7)
-        } else {
-            rgb(theme::BORDER).into()
-        })
-        .bg(if active {
-            theme::tint_fill(tint, 0.22, 0.04)
-        } else {
-            rgb(theme::BACKGROUND).into()
-        })
-        .text_size(px(12.))
-        .when(enabled, |el| {
-            el.cursor_pointer()
-                .hover(|style| style.border_color(theme::hsla(tint, 0.55)))
-        })
-        .when(!enabled, |el| el.opacity(0.45))
-        .child(label.into())
-}
-
 /// 下划线文字按钮，用于次要操作。
 fn link(id: impl Into<gpui::ElementId>, label: impl Into<gpui::SharedString>) -> Stateful<Div> {
     div()
@@ -97,20 +73,53 @@ fn link(id: impl Into<gpui::ElementId>, label: impl Into<gpui::SharedString>) ->
 
 fn panel_title(text: impl Into<gpui::SharedString>) -> Div {
     div()
-        .text_size(px(18.))
+        .text_size(px(20.))
         .font_weight(FontWeight::SEMIBOLD)
         .child(text.into())
 }
 
 fn label(text: impl Into<gpui::SharedString>) -> Div {
     div()
-        .text_size(px(12.))
-        .text_color(rgb(theme::TEXT_MUTED))
+        .text_size(px(13.))
+        .text_color(rgb(MUTED))
         .child(text.into())
 }
 
 fn divider() -> Div {
-    div().h(px(1.)).bg(rgb(theme::DIVIDER))
+    div().h(px(1.)).bg(rgb(LINE))
+}
+
+/// 分段切换中的一项：选中项为浅底亮字，其余透明。
+fn segment(
+    id: impl Into<gpui::ElementId>,
+    text: impl Into<gpui::SharedString>,
+    active: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .px(px(14.))
+        .py(px(8.))
+        .rounded(px(10.))
+        .text_size(px(14.))
+        .cursor_pointer()
+        .when(active, |el| {
+            el.bg(rgb(0x343945)).text_color(rgb(theme::TEXT))
+        })
+        .when(!active, |el| {
+            el.text_color(rgb(MUTED))
+                .hover(|style| style.text_color(rgb(theme::TEXT_SOFT)))
+        })
+        .child(text.into())
+}
+
+/// 面板中的浅色块：常用动作、执行内容等。
+fn tile() -> Div {
+    div()
+        .rounded(px(10.))
+        .border_1()
+        .border_color(rgb(TILE_EDGE))
+        .bg(rgb(TILE))
 }
 
 fn alert(text: impl Into<gpui::SharedString>) -> Div {
@@ -151,38 +160,39 @@ impl Workspace {
         let stage = (height - overhead)
             .min(width - PANEL_WIDTH - 262.)
             .clamp(STAGE_RANGE.0, STAGE_RANGE.1);
-        let mut tabs = div().flex().flex_wrap().items_center().gap(px(6.));
+        let mut tabs = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(4.))
+            .p(px(4.))
+            .rounded(px(12.))
+            .bg(rgb(0x24272f));
         for (index, item) in self.wheels.wheels.iter().enumerate() {
             let id = item.id.clone();
             let active = wheel.is_some_and(|wheel| wheel.id == item.id);
             tabs = tabs.child(
-                chip(
-                    ("wheel-tab", index as u64),
-                    item.name.clone(),
-                    active,
-                    true,
-                    accent_color(item.accent),
-                )
-                .px(px(14.))
-                .py(px(8.))
-                .text_size(px(13.))
-                .on_click(cx.listener(move |this, _, _, cx| this.switch_wheel(id.clone(), cx))),
+                segment(("wheel-tab", index as u64), item.name.clone(), active)
+                    .on_click(cx.listener(move |this, _, _, cx| this.switch_wheel(id.clone(), cx))),
             );
         }
         tabs = tabs.child(
-            link("create-wheel", "＋ 新建")
-                .px(px(8.))
-                .on_click(cx.listener(move |this, _, _, cx| {
+            segment("create-wheel", "＋ 新建", false).on_click(cx.listener(
+                move |this, _, _, cx| {
                     if can_edit {
                         this.create_wheel(cx);
                     }
-                })),
+                },
+            )),
         );
         let header = div()
             .flex()
             .items_center()
-            .gap(px(14.))
-            .child(div().flex_1().min_w_0().child(tabs))
+            .gap(px(16.))
+            .pb(px(14.))
+            .border_b_1()
+            .border_color(rgb(LINE))
+            .child(div().flex_1().min_w_0().flex().child(tabs))
             .when_some(wheel, |el, wheel| {
                 el.child(self.wheel_trigger_bar(wheel, cx))
             });
@@ -216,7 +226,7 @@ impl Workspace {
             .pl(px(20.))
             .pr(px(24.))
             .pt(px(6.))
-            .pb(px(18.))
+            .pb(px(14.))
             .flex()
             .flex_col()
             .gap(px(14.))
@@ -245,7 +255,7 @@ impl Workspace {
             .child(
                 div()
                     .text_size(px(13.))
-                    .text_color(rgb(theme::TEXT_DIM))
+                    .text_color(rgb(MUTED))
                     .child("呼出方式："),
             )
             .child(
@@ -263,6 +273,7 @@ impl Workspace {
                         "设置"
                     },
                 )
+                .text_size(px(13.))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if can_edit {
                         this.bind_wheel(cx);
@@ -307,41 +318,94 @@ impl Workspace {
             .justify_center()
             .gap(px(14.));
         if !wheel.app_overrides.is_empty() {
-            // 应用范围只占一行，应用较多时横向滚动，不挤压轮盘高度。
-            let mut scopes = div()
-                .id("wheel-scopes")
-                .max_w_full()
-                .overflow_x_scroll()
+            // 应用范围用下拉选择，应用再多也只占一行。
+            let current = scope.clone().unwrap_or_else(|| "所有应用".into());
+            let open = self.wheel_scope_open;
+            let mut options = div()
+                .absolute()
+                .top(px(40.))
+                .left(px(0.))
+                .w(px(200.))
+                .p(px(4.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(rgb(0x333944))
+                .bg(rgb(TILE))
+                .shadow(theme::lift(0.45))
+                .occlude()
                 .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(label("用于").flex_none())
-                .child(
-                    chip(
-                        ("wheel-scope", 0u64),
-                        "所有应用",
-                        scope.is_none(),
-                        true,
-                        tint,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.set_wheel_scope(None, cx))),
-                );
-            for (index, application) in wheel.app_overrides.iter().enumerate() {
-                let process = application.process.clone();
-                scopes = scopes.child(
-                    chip(
-                        ("wheel-scope", index as u64 + 1),
-                        application.process.clone(),
-                        scope.as_deref() == Some(application.process.as_str()),
-                        true,
-                        tint,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.set_wheel_scope(Some(process.clone()), cx)
-                    })),
+                .flex_col()
+                .gap(px(2.));
+            let choices = std::iter::once(None).chain(
+                wheel
+                    .app_overrides
+                    .iter()
+                    .map(|application| Some(application.process.clone())),
+            );
+            for (index, choice) in choices.enumerate() {
+                let active = choice == scope;
+                let name = choice.clone().unwrap_or_else(|| "所有应用".into());
+                options = options.child(
+                    div()
+                        .id(("wheel-scope", index as u64))
+                        .px(px(10.))
+                        .py(px(7.))
+                        .rounded(px(7.))
+                        .text_size(px(13.))
+                        .truncate()
+                        .cursor_pointer()
+                        .when(active, |el| el.bg(rgb(0x2a2f38)))
+                        .hover(|style| style.bg(rgb(0x262b34)))
+                        .child(name)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_wheel_scope(choice.clone(), cx)
+                        })),
                 );
             }
-            stage_column = stage_column.child(scopes);
+            stage_column = stage_column.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(label("用于"))
+                    .child(
+                        div()
+                            .relative()
+                            .child(
+                                div()
+                                    .id("wheel-scope-toggle")
+                                    .w(px(200.))
+                                    .px(px(10.))
+                                    .py(px(7.))
+                                    .rounded(px(10.))
+                                    .border_1()
+                                    .border_color(if open {
+                                        theme::hsla(tint, 0.8)
+                                    } else {
+                                        rgb(0x333944).into()
+                                    })
+                                    .bg(rgb(0x101216))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(8.))
+                                    .text_size(px(13.))
+                                    .cursor_pointer()
+                                    .child(div().min_w_0().truncate().child(current))
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(MUTED))
+                                            .child(if open { "▲" } else { "▼" }),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.wheel_scope_open = !this.wheel_scope_open;
+                                        cx.notify();
+                                    })),
+                            )
+                            .when(open, |el| el.child(deferred(options).with_priority(1))),
+                    ),
+            );
         }
         let moving_label = self
             .wheel_moving
@@ -365,7 +429,10 @@ impl Workspace {
                         .px(px(14.))
                         .py(px(8.))
                         .rounded(px(10.))
-                        .bg(theme::tint_fill(tint, 0.18, 0.05))
+                        .bg(rgb(theme::mix(tint, 0x14161b, 0.12)))
+                        .border_1()
+                        .border_color(theme::hsla(tint, 0.45))
+                        .text_color(rgb(theme::mix(tint, 0xffffff, 0.55)))
                         .text_size(px(13.))
                         .child(format!("点选新位置，“{name}”会移过去（有动作就互换）"))
                         .child(link("cancel-wheel-move", "取消").on_click(
@@ -384,70 +451,71 @@ impl Workspace {
             Some(cell) => self.wheel_add_panel(&view, cell, &geometry, can_edit, cx),
             None => self.wheel_home_panel(wheel, &view, can_edit, cx),
         };
-        let references = self.triggers.bindings().iter().filter(|binding|
-            matches!(&binding.action, ActionSpec::ShowWheel(reference) if reference.wheel_id == wheel.id)
-        ).count();
-        let can_remove = can_edit && references == 0;
         let can_open_file = !self.recording;
         let footer = div()
+            .flex_none()
+            .pl(px(28.))
+            .pt(px(14.))
             .flex()
-            .flex_wrap()
             .items_center()
-            .gap(px(16.))
-            .child(link("open-wheels-file", "编辑 JSON").on_click(cx.listener(
-                move |this, _, _, cx| {
-                    if can_open_file {
-                        this.open_wheels_file(cx);
-                    }
-                },
-            )))
-            .child(link("reload-wheels", "重新载入").on_click(cx.listener(
-                move |this, _, _, cx| {
-                    if can_open_file {
-                        this.reload_wheels(cx);
-                    }
-                },
-            )))
+            .justify_between()
+            .gap(px(12.))
             .child(
-                link(
-                    "remove-wheel",
-                    if references == 0 {
-                        "删除轮盘".to_string()
-                    } else {
-                        format!("删除轮盘（{references} 条绑定使用中）")
-                    },
-                )
-                .when(!can_remove, |el| el.opacity(0.5))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if can_remove {
-                        this.remove_wheel(cx);
-                    }
-                })),
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(FAINT))
+                    .child("改动自动保存"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(14.))
+                    .child(
+                        link("open-wheels-file", "高级：编辑 JSON").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                if can_open_file {
+                                    this.open_wheels_file(cx);
+                                }
+                            },
+                        )),
+                    )
+                    .child(link("reload-wheels", "重新载入").on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            if can_open_file {
+                                this.reload_wheels(cx);
+                            }
+                        },
+                    ))),
             );
-        let aside = div()
+        let scroll = div()
             .id("wheel-editor-content")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .pl(px(28.))
+            .pt(px(10.))
+            .pb(px(8.))
+            .flex()
+            .flex_col()
+            .child(panel);
+        let aside = div()
             .w(px(PANEL_WIDTH))
             .flex_none()
             .h_full()
             .min_h_0()
-            .overflow_y_scroll()
-            .pl(px(22.))
             .border_l_1()
-            .border_color(rgb(theme::DIVIDER))
+            .border_color(rgb(LINE))
             .flex()
             .flex_col()
-            .gap(px(18.))
-            .child(panel)
-            .child(divider())
+            .child(self.smooth_scroll.wrap("wheel-editor-content", scroll))
             .child(footer);
         div()
             .flex_1()
             .min_h_0()
             .min_w_0()
             .flex()
-            .gap(px(18.))
             .child(stage_column)
-            .child(self.smooth_scroll.wrap("wheel-editor-content", aside))
+            .child(aside)
     }
 
     /// 三圈全部格子都可点击；空格显示“＋”，移动中点目标格完成移动。
@@ -464,6 +532,7 @@ impl Workspace {
             view,
             geometry,
             self.wheel_cell,
+            self.wheel_hover,
             self.wheel_moving,
             |index| {
                 view.slots
@@ -474,11 +543,30 @@ impl Workspace {
             bounds.clone(),
         );
         let geometry = *geometry;
+        let hover_bounds = bounds.clone();
         div()
             .id("wheel-cell-stage")
             .flex_none()
             .cursor_pointer()
             .child(stage)
+            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                let cell = hover_bounds.get().and_then(|stage| {
+                    let point = (
+                        f32::from(event.position.x - stage.origin.x),
+                        f32::from(event.position.y - stage.origin.y),
+                    );
+                    crate::radial_wheel::editor_hit(&geometry, size, point)
+                });
+                if this.wheel_hover != cell {
+                    this.wheel_hover = cell;
+                    cx.notify();
+                }
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered && this.wheel_hover.take().is_some() {
+                    cx.notify();
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -489,7 +577,9 @@ impl Workspace {
                         f32::from(event.position.x - stage.origin.x),
                         f32::from(event.position.y - stage.origin.y),
                     );
+                    this.wheel_scope_open = false;
                     if !can_edit {
+                        cx.notify();
                         return;
                     }
                     if let Some(cell) = crate::radial_wheel::editor_hit(&geometry, size, point) {
@@ -510,12 +600,16 @@ impl Workspace {
         let tip = |key: &'static str, text: &'static str| {
             div()
                 .flex()
-                .gap(px(8.))
-                .text_size(px(13.))
+                .gap(px(6.))
+                .text_size(px(14.))
                 .child(div().text_color(rgb(theme::TEXT)).child(key))
-                .child(div().text_color(rgb(theme::TEXT_DIM)).child(text))
+                .child(div().text_color(rgb(0xa7aeba)).child(text))
         };
-        let mut rings = div().flex().flex_col().gap(px(8.)).child(label("每圈格数"));
+        let mut rings = div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(label("每圈格数"));
         for (ring, name) in RING_NAMES.iter().enumerate() {
             let ring = ring as u8;
             let Some((sectors, _)) = ring_geometry(view, ring) else {
@@ -531,8 +625,8 @@ impl Workspace {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.))
-                    .child(div().w(px(40.)).text_size(px(13.)).child(*name))
+                    .gap(px(10.))
+                    .child(div().w(px(44.)).text_size(px(14.)).child(*name))
                     .child(
                         small(button(
                             ("wheel-ring-less", u64::from(ring)),
@@ -548,10 +642,10 @@ impl Workspace {
                     )
                     .child(
                         div()
-                            .w(px(44.))
+                            .w(px(48.))
                             .flex()
                             .justify_center()
-                            .text_size(px(13.))
+                            .text_size(px(14.))
                             .child(format!("{sectors} 格")),
                     )
                     .child(
@@ -567,7 +661,12 @@ impl Workspace {
                             }
                         })),
                     )
-                    .child(caption(format!("{used} 个动作"))),
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(MUTED))
+                            .child(format!("已放 {used} 个")),
+                    ),
             );
         }
         let mut colors = div().flex().items_center().gap(px(8.));
@@ -596,15 +695,19 @@ impl Workspace {
                     })),
             );
         }
+        let references = self.triggers.bindings().iter().filter(|binding|
+            matches!(&binding.action, ActionSpec::ShowWheel(reference) if reference.wheel_id == wheel.id)
+        ).count();
+        let can_remove = can_edit && references == 0;
         div()
             .flex()
             .flex_col()
-            .gap(px(18.))
+            .gap(px(22.))
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(10.))
+                    .gap(px(12.))
                     .child(panel_title("点轮盘上的格子"))
                     .child(tip("空格子", "→ 添加动作"))
                     .child(tip("已有动作", "→ 改名、移动或移除"))
@@ -636,6 +739,22 @@ impl Workspace {
                     )
                     .child(colors),
             )
+            .child(
+                link(
+                    "remove-wheel",
+                    if references == 0 {
+                        "删除这个轮盘".to_string()
+                    } else {
+                        format!("有 {references} 条呼出绑定在用，不能删除")
+                    },
+                )
+                .text_color(rgb(if can_remove { 0xf0a0a0 } else { FAINT }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if can_remove {
+                        this.remove_wheel(cx);
+                    }
+                })),
+            )
     }
 
     /// 空格子或更换动作：常用动作一键放入，也可填写快捷键、本地动作或复制已有触发器。
@@ -653,36 +772,36 @@ impl Workspace {
             RING_NAMES[usize::from(ring)],
             direction_name(sector, geometry[usize::from(ring)])
         );
-        let mut presets = div().flex().flex_wrap().gap(px(6.));
+        let mut presets = div().grid().grid_cols(2).gap(px(8.));
         for (index, (name, preset)) in WHEEL_PRESETS.iter().enumerate() {
             let hint = match preset {
                 Preset::Keys(keys) => *keys,
                 Preset::Window(_) => "窗口",
             };
             presets = presets.child(
-                div()
+                tile()
                     .id(("wheel-preset", index as u64))
-                    .w(px(146.))
-                    .px(px(10.))
-                    .py(px(8.))
-                    .rounded(px(9.))
-                    .border_1()
-                    .border_color(rgb(theme::BORDER))
-                    .bg(rgb(theme::BACKGROUND))
+                    .min_w_0()
+                    .px(px(12.))
+                    .py(px(10.))
                     .flex()
+                    .items_center()
                     .justify_between()
-                    .gap(px(6.))
+                    .gap(px(8.))
                     .text_size(px(13.))
                     .when(can_edit, |el| {
-                        el.cursor_pointer()
-                            .hover(|style| style.border_color(theme::hsla(tint, 0.7)))
+                        el.cursor_pointer().hover(|style| {
+                            style
+                                .border_color(theme::hsla(tint, 0.9))
+                                .bg(rgb(theme::mix(tint, TILE, 0.08)))
+                        })
                     })
-                    .child(div().truncate().child(*name))
+                    .child(div().min_w_0().truncate().child(*name))
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(11.))
-                            .text_color(rgb(theme::TEXT_FAINT))
+                            .text_size(px(12.))
+                            .text_color(rgb(FAINT))
                             .child(hint),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -751,7 +870,7 @@ impl Workspace {
         div()
             .flex()
             .flex_col()
-            .gap(px(16.))
+            .gap(px(18.))
             .child(
                 div()
                     .flex()
@@ -762,7 +881,7 @@ impl Workspace {
                     } else {
                         "放一个动作"
                     }))
-                    .child(caption(place)),
+                    .child(label(place)),
             )
             .child(
                 div()
@@ -856,8 +975,8 @@ impl Workspace {
         div()
             .flex()
             .flex_col()
-            .gap(px(16.))
-            .child(caption(place))
+            .gap(px(18.))
+            .child(label(place))
             .child(
                 div()
                     .flex()
@@ -867,24 +986,23 @@ impl Workspace {
                     .child(self.wheel_slot_label.clone()),
             )
             .child(
-                div()
+                tile()
                     .flex()
                     .items_center()
-                    .gap(px(10.))
-                    .p(px(12.))
-                    .rounded(px(10.))
-                    .bg(rgb(theme::BACKGROUND))
+                    .gap(px(12.))
+                    .p(px(14.))
+                    .rounded(px(12.))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .gap(px(4.))
-                            .child(label("执行"))
+                            .gap(px(3.))
+                            .child(label("执行").text_size(px(12.)))
                             .child(
                                 div()
-                                    .text_size(px(13.))
+                                    .text_size(px(15.))
                                     .truncate()
                                     .child(action_text(&slot.action)),
                             )
