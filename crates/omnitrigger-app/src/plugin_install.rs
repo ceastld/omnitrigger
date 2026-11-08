@@ -76,6 +76,29 @@ pub fn locate(config_path: &Path, configured: Option<&Path>) -> Option<discovery
     discovery::find(configured, shared_root().as_deref(), &legacy)
 }
 
+/// 文件结果只使用现有已启用插件的固定console程序，不发现其它目录、不安装。
+pub(super) fn capture_result_program(config: &Path) -> Result<PathBuf, String> {
+    ensure_plain_ancestors(&config.with_file_name("plugins.json"))?;
+    ensure_plain_ancestors(
+        &config
+            .with_file_name("plugins")
+            .join("raishot")
+            .join("manifest.json"),
+    )?;
+    let plugins = crate::plugins::Plugins::load(config).map_err(|_| "RaiShot配置不可用")?;
+    let resolved = plugins
+        .resolve(&crate::plugins::PluginActionRef {
+            plugin_id: "raishot".into(),
+            action_id: "capture".into(),
+            action_version: 1,
+            parameters: Default::default(),
+        })
+        .map_err(|_| "RaiShot未启用或路径不可用")?;
+    discovery::inspect_result_cli(Path::new(&resolved.command.program))
+        .map(|installed| installed.cli)
+        .ok_or_else(|| "RaiShot完整安装或安全console入口不可用".into())
+}
+
 /// 优先接入本机已有安装，找不到时才下载到共享位置。下载与校验在后台线程。
 pub fn start_prepare(
     config_path: PathBuf,
@@ -182,7 +205,7 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
-fn ensure_plain_ancestors(path: &Path) -> Result<(), String> {
+pub(super) fn ensure_plain_ancestors(path: &Path) -> Result<(), String> {
     if discovery::is_cloud_path(path) {
         return Err("插件目录不能位于云盘同步目录。".into());
     }

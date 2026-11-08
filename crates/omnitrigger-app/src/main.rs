@@ -59,6 +59,7 @@ mod presets;
 mod private_window_station;
 mod process_capture_host;
 mod radial_wheel;
+mod raishot_result_host;
 #[cfg(windows)]
 mod read_once_helper;
 mod script_browser;

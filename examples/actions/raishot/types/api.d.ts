@@ -1,3 +1,15 @@
+/** 宿主已核对 PNG 头、长度、SHA-256；只确认文件，不代表历史或吸附完成。
+ * 引用在创建它的应用进程内有效；显式 release 仅释放 PNG，会话设置目录保留。 */
+export type RaiShotFileImage = Readonly<{path:string;fileName:'image.png';format:'png';width:number;height:number;byteLength:string;sha256:string}>;
+export type RaiShotFileResult = Readonly<{
+  requestId:string;completionScope:'png_file_only';automaticClipboardWritten:false;automaticHistoryAdded:false;
+  sourceBusinessComplete:false;sourceAutoAdsorbVerified:false;retention:'caller_owned_until_explicit_release';retryAllowed:false;
+} & (
+  {status:'completed';image:RaiShotFileImage;errorCode:null;imageEffectState:'confirmed';artifactVerified:true;warningCode:null|'worker_cleanup_failed'} |
+  {status:'cancelled'|'failed';image:null;errorCode:string;imageEffectState:'not_started'|'unknown';artifactVerified:false;warningCode:null}
+)>;
+export type RaiShotFileRelease = Readonly<{released:true;requestId:string;scope:'owned_png_file';sessionDirectoryRetained:true}>;
+
 declare const raiShotResidentBrand: unique symbol;
 export type RaiShotResident = Readonly<{readonly [raiShotResidentBrand]:true;window_handle:string;process_id:number;thread_id:number;process_created_file_time:string;expires_at_unix_ms:number}>;
 /** 无环境类型时的取消观察接口；不声明浏览器或Node环境全局。 */
@@ -178,6 +190,21 @@ export interface FileStatFault extends Error {
   /** 仅此只读调用无副作用，不代表脚本之前的步骤没有副作用。 */
   effectState: 'not_started';
 }
+export interface DirectoryReadOptions {
+    maxEntries?: number;
+    order?: 'name' | 'native';
+    metadata?: boolean;
+    entryType?: 'all' | 'file' | 'directory';
+    searchPattern?: string;
+    /** 显式Windows Find匹配；不等于现代.NET托管匹配。 */
+    matchMode?: 'windows-find';
+}
+/** UTC字段为1601纪元FILETIME；LocalTicks为0001纪元本地DateTime。均为100ns十进制字符串，不转Number。 */
+export type DirectoryMetadata = Readonly<{ordinal:number;attributes:number;
+    creationTimeUtc100ns:string;lastAccessTimeUtc100ns:string;lastWriteTimeUtc100ns:string;
+    creationTimeLocalTicks100ns:string;lastAccessTimeLocalTicks100ns:string;lastWriteTimeLocalTicks100ns:string;timeZoneKey:string}>;
+export type LocalDirectoryMetadataResult = Readonly<{entries:ReadonlyArray<LocalDirectoryEntry & {readonly metadata:DirectoryMetadata}> ;complete:true}>;
+
 export type LocalDirectoryEntry = Readonly<{
   name: string;
   /** 保留调用者的目录原文，仅在需要时追加反斜杠及子项名。 */
@@ -247,7 +274,8 @@ export interface ActionContext {
     /** 直接子项，默认 128、最多 1024；回执最多 64 KiB，超限整次拒绝。
      * 不递归、不跟随链接、不读取内容；complete 只表示读到枚举末尾，不是原子快照。
      * 使用与 stat 相同的本地路径守卫。OS 调用不能硬性抢占；迟到结果丢弃。 */
-    readDirectory(path: string, options?: {maxEntries?: number}): Promise<LocalDirectoryResult>;
+    readDirectory(path: string, options: DirectoryReadOptions & {metadata:true}): Promise<LocalDirectoryMetadataResult>;
+    readDirectory(path: string, options?: DirectoryReadOptions): Promise<LocalDirectoryResult>;
   };
   process: {
     run(program: string, args?: string[], options?: {cwd?: string; allowNonZero?: boolean}): Promise<{code: number; stdout: string; stderr: string}>;
@@ -299,6 +327,8 @@ export interface ActionContext {
     /** 修饰键跨越整组普通键；延迟在修饰键就绪后、每个普通键按下后等待。 */
     sendKeySequence(modifiers: number[], keys: number[], options?: {keyDownDelayMs?: number}): Promise<{submitted: true}>;
     /** 只查固定隐藏常驻类，返回本ctx的一次性5秒身份快照；不读取依赖目录，不启动进程，不认证程序版本。 */
+    captureRaiShotResult(options?:Readonly<{timeoutMs:number}>): Promise<RaiShotFileResult>;
+    releaseRaiShotResult(requestId:string): Promise<RaiShotFileRelease>;
     findRaiShotResident(): Promise<RaiShotResident | null>;
     /** 复验身份后投递固定WM_APP+3；只确认入队，不确认截图；身份复验与PostMessage非原子，未知结果不重试。 */
     requestRaiShotRegion(resident:RaiShotResident): Promise<{queued:true;screenshotCompleted:false}>;
@@ -330,6 +360,10 @@ export interface ActionContext {
      * 无支持格式抛 unsupported_clipboard_format，不将图片/自定义格式当空文本。
      */
     readData(): Promise<ClipboardDataSnapshot>;
+    /** 应用桥接写Unicode CF_HDROP；1–64项绝对Windows路径，总UTF-16不超65536。
+     * 不查询或打开路径，不复制磁盘文件，不粘贴；替换全部剪贴板格式且不自动恢复。
+     * 清空后的失败/取消为unknown；sequenceNumber仅为观察值，不证明独占或文件存在。 */
+    writeFiles(paths: readonly string[]): Promise<{written:true;sequenceNumber:number}>;
     /** 替换全部格式，不自动恢复。excludeFromHistory 为临时回贴请求排除历史采集；仅遵守标记的采集器有效。 */
     writeText(text: string, options?: {excludeFromHistory?: boolean}): Promise<{written: true; sequenceNumber: number; writeId?: string}>;
   };

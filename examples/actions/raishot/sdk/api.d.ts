@@ -1,3 +1,15 @@
+/** 宿主已核对 PNG 头、长度、SHA-256；只确认文件，不代表历史或吸附完成。
+ * 引用在创建它的应用进程内有效；显式 release 仅释放 PNG，会话设置目录保留。 */
+type ScriptRaiShotFileImage = Readonly<{path:string;fileName:'image.png';format:'png';width:number;height:number;byteLength:string;sha256:string}>;
+type ScriptRaiShotFileResult = Readonly<{
+  requestId:string;completionScope:'png_file_only';automaticClipboardWritten:false;automaticHistoryAdded:false;
+  sourceBusinessComplete:false;sourceAutoAdsorbVerified:false;retention:'caller_owned_until_explicit_release';retryAllowed:false;
+} & (
+  {status:'completed';image:ScriptRaiShotFileImage;errorCode:null;imageEffectState:'confirmed';artifactVerified:true;warningCode:null|'worker_cleanup_failed'} |
+  {status:'cancelled'|'failed';image:null;errorCode:string;imageEffectState:'not_started'|'unknown';artifactVerified:false;warningCode:null}
+)>;
+type ScriptRaiShotFileRelease = Readonly<{released:true;requestId:string;scope:'owned_png_file';sessionDirectoryRetained:true}>;
+
 declare const scriptRaiShotResidentBrand: unique symbol;
 type ScriptRaiShotResident = Readonly<{readonly [scriptRaiShotResidentBrand]:true;window_handle:string;process_id:number;thread_id:number;process_created_file_time:string;expires_at_unix_ms:number}>;
 type ScriptExplorerContextSnapshot = Readonly<{currentDirectory:string|null;selectedPaths:readonly string[]}>;
@@ -139,6 +151,21 @@ interface ScriptFileStatFault extends Error {
     /** 仅此只读调用无副作用，不涵盖此前脚本步骤。 */
     effectState: 'not_started';
 }
+interface ScriptDirectoryReadOptions {
+    maxEntries?: number;
+    order?: 'name' | 'native';
+    metadata?: boolean;
+    entryType?: 'all' | 'file' | 'directory';
+    searchPattern?: string;
+    /** 显式Windows Find匹配；不等于现代.NET托管匹配。 */
+    matchMode?: 'windows-find';
+}
+/** UTC字段为1601纪元FILETIME；LocalTicks为0001纪元本地DateTime。均为100ns十进制字符串，不转Number。 */
+type ScriptDirectoryMetadata = Readonly<{ordinal:number;attributes:number;
+    creationTimeUtc100ns:string;lastAccessTimeUtc100ns:string;lastWriteTimeUtc100ns:string;
+    creationTimeLocalTicks100ns:string;lastAccessTimeLocalTicks100ns:string;lastWriteTimeLocalTicks100ns:string;timeZoneKey:string}>;
+type ScriptLocalDirectoryMetadataResult = Readonly<{entries:ReadonlyArray<ScriptLocalDirectoryEntry & {readonly metadata:ScriptDirectoryMetadata}> ;complete:true}>;
+
 type ScriptLocalDirectoryEntry = Readonly<{
   name: string;
   /** 保留调用者的目录原文，仅在需要时追加反斜杠及子项名。 */
@@ -215,7 +242,8 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
         /** 直接子项，默认 128、最多 1024；回执最多 64 KiB，超限整次拒绝。
          * 不递归、不跟随链接、不读取内容；complete 只表示读到枚举末尾，不是原子快照。
          * 使用与 stat 相同的本地路径守卫。OS 调用不能硬性抢占；迟到结果丢弃。 */
-        readDirectory(path: string, options?: {maxEntries?: number}): ScriptLocalDirectoryResult;
+        readDirectory(path: string, options: ScriptDirectoryReadOptions & {metadata:true}): ScriptLocalDirectoryMetadataResult;
+    readDirectory(path: string, options?: ScriptDirectoryReadOptions): ScriptLocalDirectoryResult;
         /** UTF-8 文件，绝对路径，最多 64 KiB。 */
         readText(path: string): string;
         /** 默认不覆盖；不自动创建目录。失败可能留下部分文件。 */
@@ -282,6 +310,8 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
         sendShortcut(keys: number[], options?: {keyDownDelayMs?: number; timing?: never} | {timing: ScriptShortcutTiming; keyDownDelayMs?: never}): {submitted: true};
         sendKeySequence(modifiers: number[], keys: number[], options?: {keyDownDelayMs?: number}): {submitted: true};
         /** 只查固定隐藏常驻类，返回本ctx的一次性5秒身份快照；不读取依赖目录，不启动进程，不认证程序版本。 */
+        captureRaiShotResult(options?:Readonly<{timeoutMs:number}>): ScriptRaiShotFileResult;
+        releaseRaiShotResult(requestId:string): ScriptRaiShotFileRelease;
         findRaiShotResident(): ScriptRaiShotResident | null;
         /** 复验身份后投递固定WM_APP+3；只确认入队，不确认截图；身份复验与PostMessage非原子，未知结果不重试。 */
         requestRaiShotRegion(resident:ScriptRaiShotResident): {queued:true;screenshotCompleted:false};
@@ -316,6 +346,10 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
          * 不支持格式抛 unsupported_clipboard_format，不查询或打开路径。
          */
         readData(): ScriptClipboardDataSnapshot;
+        /** 应用桥接写Unicode CF_HDROP；1–64项绝对Windows路径，总UTF-16不超65536。
+         * 不查询或打开路径，不复制磁盘文件，不粘贴；替换全部剪贴板格式且不自动恢复。
+         * 清空后的失败/取消为unknown；sequenceNumber仅为观察值，不证明独占或文件存在。 */
+        writeFiles(paths: readonly string[]): {written:true;sequenceNumber:number};
         /** 替换全部格式。独立 CLI 不支持选项并返回 void；应用接入返回写入回执。 */
         writeText(text: string, options?: {excludeFromHistory?: boolean}): void | {written: true; sequenceNumber: number; writeId?: string};
     };

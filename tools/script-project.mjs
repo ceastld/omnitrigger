@@ -59,15 +59,19 @@ export default async function main(ctx) {
     return { text: cleanText(ctx.input.text), invocation: ctx.invocation };
 }
 `;
-// 公开62的精确canonical声明，保留LF/CRLF两种字节指纹；未知旧版本不猜测。
+// 已确认的精确canonical声明，保留LF/CRLF两种字节指纹；未知旧版本不猜测。
 const canonicalSdkHashes={
   "api.d.ts": [
     "12020f626e467a1025b8eb9b08245952f0425f97a983a8f66c48a1864e6d7adc",
-    "aacd818ae060a0c4391d322fb0d42b6712b01a582fef9ff3821bc150911a9a14"
+    "aacd818ae060a0c4391d322fb0d42b6712b01a582fef9ff3821bc150911a9a14",
+    "7e35d3cfe0db4ba9ff885e0960759ee81f40c4116035e0cb8b0ed00d94bb8b55",
+    "d6c813e4763b2b72b2b66625c2c30b149ffe3b7f7978eb88be1e75c9b8b5131a"
   ],
   "script-types.d.ts": [
     "261666bf8be38669cbbe16f27fa2bf44f3a20f2ded90cef2be888de85a939f01",
-    "16e2652d5f012d0d0ddcf9104462179dcaa3366b3d3a32d0e349d5fdd096b427"
+    "16e2652d5f012d0d0ddcf9104462179dcaa3366b3d3a32d0e349d5fdd096b427",
+    "23778a999ed3934b01e6eacd15677cd9ed7a614ba780754cd28c07f99e33fc6d",
+    "8e788d728e20194618cf810889f047e7de80bfc13e764911d0f3964223f47953"
   ],
   "clipboard-history-api.d.ts": [
     "c40fd66fd6318909c1bab62775d097dcfb5a8a7a84a411883a4852bdbd04cf2e",

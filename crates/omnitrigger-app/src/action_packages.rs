@@ -97,12 +97,7 @@ pub fn submit(
 /// 只确定应用私有文件位置；构造不读写磁盘，首次显式历史调用才访问存储。
 fn with_clipboard_history<H: omnitrigger_actions::NativeHost>(
     inner: H,
-) -> crate::process_capture_host::WithProcessCapture<
-    crate::clipboard_history_host::WithClipboardHistory<
-        H,
-        Arc<crate::clipboard_history_store::ClipboardHistoryStore>,
-    >,
-> {
+) -> impl omnitrigger_actions::NativeHost {
     let store = std::path::absolute(settings::path())
         .ok()
         .and_then(|path| {
@@ -112,8 +107,20 @@ fn with_clipboard_history<H: omnitrigger_actions::NativeHost>(
             .ok()
         })
         .map(Arc::new);
-    crate::process_capture_host::WithProcessCapture::new(
-        crate::clipboard_history_host::WithClipboardHistory::new(inner, store),
+    static RESULTS: std::sync::OnceLock<Arc<crate::raishot_result_host::Store>> =
+        std::sync::OnceLock::new();
+    let results = RESULTS
+        .get_or_init(|| {
+            Arc::new(crate::raishot_result_host::Store::new(
+                std::path::absolute(settings::path()).unwrap_or_else(|_| settings::path()),
+            ))
+        })
+        .clone();
+    crate::raishot_result_host::WithRaiShotResult::new(
+        crate::process_capture_host::WithProcessCapture::new(
+            crate::clipboard_history_host::WithClipboardHistory::new(inner, store),
+        ),
+        results,
     )
 }
 

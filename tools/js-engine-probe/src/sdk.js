@@ -16,7 +16,7 @@ function call(kind, args = {}, serialized) {
         const error = new Error(response.error.message);
         error.code = response.error.code;
         if (response.error.effect_state) error.effectState = response.error.effect_state;
-        else if (kind === 'native') error.effectState = (args.method === 'win32_edit.replace_selection' || args.method === 'clipboard.write_files' || typeof args.method === 'string' && args.method.startsWith('raishot.resident.')) ? 'unknown' : 'not_started';
+        else if (kind === 'native') error.effectState = (args.method === 'win32_edit.replace_selection' || args.method === 'clipboard.write_files' || typeof args.method === 'string' && (args.method.startsWith('raishot.resident.') || args.method === 'raishot.capture_result' || args.method === 'raishot.release_result')) ? 'unknown' : 'not_started';
         if (response.error.method) error.method = response.error.method;
         if (response.error.required_permissions) error.requiredPermissions = response.error.required_permissions;
         throw error;
@@ -42,10 +42,10 @@ ctx.delay = milliseconds => {
     call('delay', {milliseconds});
 };
 function desktopCall(method, params) {
-    if ((method === 'win32_edit.replace_selection' || method === 'clipboard.write_files' || method.startsWith('raishot.resident.')) && calls >= 32) throw Object.assign(new Error('单次脚本最多调用32次宿主API。'),{code:'desktop_call_limit',effectState:'not_started',method});
+    if ((method === 'win32_edit.replace_selection' || method === 'clipboard.write_files' || (method.startsWith('raishot.resident.') || method === 'raishot.capture_result' || method === 'raishot.release_result')) && calls >= 32) throw Object.assign(new Error('单次脚本最多调用32次宿主API。'),{code:'desktop_call_limit',effectState:'not_started',method});
 
     if (!nativeContext || nativeContext.error) {
-        if (method.startsWith('raishot.resident.')) throw Object.assign(new Error('RaiShot 常驻接口需要应用本机桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
+        if ((method.startsWith('raishot.resident.') || method === 'raishot.capture_result' || method === 'raishot.release_result')) throw Object.assign(new Error('RaiShot 常驻接口需要应用本机桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
         if (method === 'clipboard.write_files') throw Object.assign(new Error('文件列表写入需要应用本机桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
         if (method === 'win32_edit.replace_selection') throw Object.assign(new Error('Win32 Edit替换需要应用本机桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
 

@@ -10,7 +10,7 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 34] = [
+pub const METHODS: [&str; 36] = [
     "history.list",
     "history.get",
     "history.append",
@@ -34,6 +34,8 @@ pub const METHODS: [&str; 34] = [
     "win32_edit.replace_selection",
     "raishot.resident.find",
     "raishot.resident.region",
+    "raishot.capture_result",
+    "raishot.release_result",
     "selection.copy",
     "selection.copy_data",
     "selection.read_text",
@@ -52,6 +54,28 @@ pub const METHODS: [&str; 34] = [
 pub struct Configuration {
     port: u16,
     token: String,
+}
+
+fn file_result_method(method: &str) -> bool {
+    matches!(method, "raishot.capture_result" | "raishot.release_result")
+}
+fn result_wait_budget(method: &str, params: &Value) -> Result<Option<Duration>, ApiError> {
+    if method == "raishot.capture_result" {
+        let timeout = params
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .filter(|value| (1..=30_000).contains(value))
+            .ok_or_else(|| {
+                fault(
+                    "invalid_input",
+                    "文件结果超时参数无效。",
+                    method,
+                    "not_started",
+                )
+            })?;
+        return Ok(Some(Duration::from_millis(timeout + 1500)));
+    }
+    Ok((method == "raishot.release_result").then(|| Duration::from_secs(5)))
 }
 
 fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiError {
@@ -74,7 +98,9 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
             code
         })
         .into(),
-        message: if method.starts_with("raishot.resident.") {
+        message: if file_result_method(method) {
+            "截图文件结果未获确认；不会自动重试。".into()
+        } else if method.starts_with("raishot.resident.") {
             "RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。".into()
         } else if method == "clipboard.write_files" {
             "文件列表剪贴板写入未获完整确认；请检查错误代码和效果状态。".into()
@@ -119,6 +145,8 @@ fn brightness_transport_effect(
             | "win32_edit.replace_selection"
             | "raishot.resident.find"
             | "raishot.resident.region"
+            | "raishot.capture_result"
+            | "raishot.release_result"
             | "clipboard.write_files"
     ) && !write_began
     {
@@ -161,26 +189,30 @@ pub fn call(
             "not_started",
         ));
     }
+    let file_budget = result_wait_budget(&method, &params)?;
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, connection.port));
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))
         .map_err(|cause| fault("native_bridge_unavailable", cause, &method, "not_started"))?;
     let browser = method.starts_with("browser.");
     let deadline = Instant::now()
-        + Duration::from_secs(
-            if browser
-                || method == "ui.choose"
-                || matches!(
-                    method.as_str(),
-                    "display.brightness_step" | "audio.volume_adjust"
-                )
-            {
-                66
-            } else if method == "selection.copy_data" {
-                8
-            } else {
-                5
-            },
-        );
+        + match file_budget {
+            Some(budget) => budget,
+            None => Duration::from_secs(
+                if browser
+                    || method == "ui.choose"
+                    || matches!(
+                        method.as_str(),
+                        "display.brightness_step" | "audio.volume_adjust"
+                    )
+                {
+                    66
+                } else if method == "selection.copy_data" {
+                    8
+                } else {
+                    5
+                },
+            ),
+        };
     let response_limit = if browser {
         32 * 1024 * 1024 + 1024
     } else {
@@ -209,6 +241,8 @@ pub fn call(
                 | "win32_edit.replace_selection"
                 | "raishot.resident.find"
                 | "raishot.resident.region"
+                | "raishot.capture_result"
+                | "raishot.release_result"
                 | "clipboard.write_files"
                 | "history.list"
                 | "history.get"
@@ -230,6 +264,8 @@ pub fn call(
                         | "win32_edit.replace_selection"
                         | "raishot.resident.find"
                         | "raishot.resident.region"
+                        | "raishot.capture_result"
+                        | "raishot.release_result"
                         | "clipboard.write_files"
                         | "history.append"
                         | "history.remove"
@@ -263,6 +299,8 @@ pub fn call(
                         | "win32_edit.replace_selection"
                         | "raishot.resident.find"
                         | "raishot.resident.region"
+                        | "raishot.capture_result"
+                        | "raishot.release_result"
                         | "clipboard.write_files"
                         | "history.list"
                         | "history.get"
@@ -281,6 +319,8 @@ pub fn call(
                                 | "win32_edit.replace_selection"
                                 | "raishot.resident.find"
                                 | "raishot.resident.region"
+                                | "raishot.capture_result"
+                                | "raishot.release_result"
                                 | "clipboard.write_files"
                                 | "history.append"
                                 | "history.remove"
@@ -330,7 +370,8 @@ pub fn call(
 fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError> {
     let invalid = || {
         fault(
-            if method == "win32_edit.replace_selection"
+            if file_result_method(method)
+                || method == "win32_edit.replace_selection"
                 || method.starts_with("raishot.resident.")
                 || method == "clipboard.write_files"
             {
@@ -393,6 +434,8 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "win32_edit.replace_selection"
                     | "raishot.resident.find"
                     | "raishot.resident.region"
+                    | "raishot.capture_result"
+                    | "raishot.release_result"
                     | "clipboard.write_files"
                     | "history.list"
                     | "history.get"
@@ -428,6 +471,8 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "win32_edit.replace_selection"
                     | "raishot.resident.find"
                     | "raishot.resident.region"
+                    | "raishot.capture_result"
+                    | "raishot.release_result"
                     | "clipboard.write_files"
             ) {
                 error.required_permissions = permissions;
@@ -441,6 +486,29 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_result_budget_covers_capture_without_using_the_default_five_seconds() {
+        assert_eq!(
+            result_wait_budget("raishot.capture_result", &json!({"timeout_ms":30000})).unwrap(),
+            Some(Duration::from_millis(31500))
+        );
+        assert_eq!(
+            result_wait_budget("raishot.release_result", &json!({})).unwrap(),
+            Some(Duration::from_secs(5))
+        );
+        for timeout in [0, 30001] {
+            let error =
+                result_wait_budget("raishot.capture_result", &json!({"timeout_ms":timeout}))
+                    .unwrap_err();
+            assert_eq!(error.code, "invalid_input");
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        }
+        assert_eq!(
+            result_wait_budget("keyboard.text", &json!({})).unwrap(),
+            None
+        );
+    }
     use std::{net::TcpListener, thread};
 
     #[test]

@@ -134,6 +134,38 @@ jobs:
           cargo build --locked --manifest-path tools/js-engine-probe/Cargo.toml --no-default-features --features quickjs --target-dir target/ci-script-engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: 验证 RaiShot 文件结果的正式动作服务接缝
+        shell: pwsh
+        run: |
+          # 复用上一步同源 QuickJS 宿主和已安装 Node；静态自有 PNG，不启动 RaiShot。
+          $resultNode = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          $resultHost = Join-Path $env:GITHUB_WORKSPACE 'target/ci-script-engine/debug/omnitrigger-js-probe.exe'
+          if (-not (Test-Path -LiteralPath $resultHost -PathType Leaf)) { throw '缺少已构建的同源 QuickJS 宿主。' }
+          $resultRoot = Join-Path $env:RUNNER_TEMP ('raishot-service-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $resultRoot -ErrorAction Stop | Out-Null
+          $resultVariables = @('OMNITRIGGER_RAISHOT_SERVICE_NODE', 'OMNITRIGGER_RAISHOT_SERVICE_SCRIPT_HOST', 'OMNITRIGGER_RAISHOT_SERVICE_ROOT')
+          $resultPrevious = @{}
+          foreach ($name in $resultVariables) {
+            $resultPrevious[$name] = @{ existed = Test-Path "Env:$name"; value = [Environment]::GetEnvironmentVariable($name, 'Process') }
+          }
+          try {
+            $env:OMNITRIGGER_RAISHOT_SERVICE_NODE = $resultNode
+            $env:OMNITRIGGER_RAISHOT_SERVICE_SCRIPT_HOST = (Resolve-Path -LiteralPath $resultHost).Path
+            $env:OMNITRIGGER_RAISHOT_SERVICE_ROOT = (Resolve-Path -LiteralPath $resultRoot).Path
+            # 三测试共六场景；保留 Runtime 默认60秒与外部64秒观察。
+            cargo test --locked -p omnitrigger-app --bin omnitrigger raishot_result_host::service_tests::script_service_raishot_new_rejections_and_unknown_use_real_entry -- --ignored --exact --test-threads=1 --nocapture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cargo test --locked -p omnitrigger-app --bin omnitrigger raishot_result_host::service_tests::node_service_raishot_completion_and_bad_hash_use_real_png_verifier -- --ignored --exact --test-threads=1 --nocapture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cargo test --locked -p omnitrigger-app --bin omnitrigger raishot_result_host::service_tests::release_lifecycle::node_service_raishot_capture_then_release_removes_owned_png_and_registration -- --ignored --exact --test-threads=1 --nocapture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            foreach ($name in $resultVariables) {
+              if ($resultPrevious[$name].existed) { [Environment]::SetEnvironmentVariable($name, $resultPrevious[$name].value, 'Process') }
+              else { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+            }
+          }
+
       - name: 验证两种脚本工程的创建刷新与端到端运行
         shell: pwsh
         run: |
