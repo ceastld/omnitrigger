@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from action_body_projection import action_body
 from mouse_action_projection import (mouse_trigger, mouse_rule_priorities, settings_snapshot,
-                                     validate_unmodified_mouse_policy)
+                                     validate_unmodified_mouse_policy, validate_ordinary_mouse_configuration)
 
 
 def load(path):
@@ -393,8 +393,9 @@ def project_source_precedence(bindings, current):
 
 
 def build_plan(source, catalog_payload, usage, counters, current, limit=20, body_records=None, mouse_settings=None,
-               *, unmodified_mouse_policy="strict"):
+               *, unmodified_mouse_policy="strict", ordinary_mouse_prefixes=None):
     validate_unmodified_mouse_policy(unmodified_mouse_policy)
+    selected_ordinary = validate_ordinary_mouse_configuration(ordinary_mouse_prefixes, current)
     mouse_settings = settings_snapshot(mouse_settings if mouse_settings is not None else source.get("MouseSettings"))
     if body_records is not None:
         if isinstance(body_records, dict) and "resultJson" in body_records:
@@ -478,7 +479,8 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20, body
             if not rule.get("IsEnabled"):
                 continue
             identity = f"mouse:{scope}:{index}"
-            projection = mouse_trigger(rule, mouse_settings, priority=priorities[index], unmodified_mouse_policy=unmodified_mouse_policy) if scope == "global" else {"trigger":None,"trigger_gaps":["mouse_application_profile_selection"]}
+            projection = mouse_trigger(rule, mouse_settings, priority=priorities[index], unmodified_mouse_policy=unmodified_mouse_policy,
+                                       ordinary_keys=selected_ordinary) if scope == "global" else {"trigger":None,"trigger_gaps":["mouse_application_profile_selection"]}
             if projection["trigger"] and projection["trigger"].get("keyboard", {}).get("matching", {}).get("kind") in ("mouse_exact", "mouse_captured_leader", "mouse_unmodified"):
                 projection["source_normalizations"].append({"kind":"mouse_rule_order", "scope":scope,
                     "source_index":index, "priority":priorities[index], "missing_source_priority_default":0,
@@ -543,6 +545,13 @@ def build_plan(source, catalog_payload, usage, counters, current, limit=20, body
         plan["summary"]["mouse_unmodified_projected"] = sum(
             row.get("trigger", {}).get("keyboard", {}).get("matching", {}).get("kind") == "mouse_unmodified"
             for row in bindings if row.get("trigger") is not None)
+    if selected_ordinary:
+        plan["criteria"]["ordinary_mouse_prefixes"] = sorted(selected_ordinary)
+        plan["criteria"]["ordinary_mouse_configuration"] = "preserve_current_keyboard_configuration"
+        plan["criteria"]["source_power_key_rows_are_review_only"] = True
+        plan["summary"]["ordinary_mouse_prefix_adapted"] = sum(
+            any(note.get("kind") == "mouse_ordinary_prefix_adaptation" for note in row.get("source_normalizations", []))
+            for row in bindings)
     return plan
 
 
@@ -554,6 +563,8 @@ def main(argv=None):
     parser.add_argument("--mouse-settings", type=Path, help="可选的已导出鼠标全局设置，只读")
     parser.add_argument("--unmodified-mouse-policy", choices=("strict", "passed"), default="strict",
                         help="无控制键鼠标投影：strict 保持原严格策略（默认）；passed 使用配置版本22的已透传输入策略，不启用绑定")
+    parser.add_argument("--ordinary-mouse-key", type=int, action="append", default=None,
+                        help="显式将该非修饰键的鼠标规则改编为普通Exact；保留当前键盘习惯，拒绝同键捕获owner，不启用绑定；可重复指定不同键")
     args = parser.parse_args(argv)
     paths = {name: getattr(args, name) for name in ("source", "catalog", "usage", "counters", "current")}
     if args.bodies:
@@ -561,7 +572,8 @@ def main(argv=None):
     if args.mouse_settings:
         paths["mouse_settings"] = args.mouse_settings
     plan = build_plan(**{{"catalog":"catalog_payload", "bodies":"body_records"}.get(name, name): load(path)
-                         for name, path in paths.items()}, unmodified_mouse_policy=args.unmodified_mouse_policy)
+                         for name, path in paths.items()}, unmodified_mouse_policy=args.unmodified_mouse_policy,
+                      ordinary_mouse_prefixes=args.ordinary_mouse_key)
     plan["evidence"] = {name: {"path": str(path.resolve()), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
                         for name, path in paths.items()}
     # 独占新建，防止误覆盖输入文件或上次人工审阅结果。
