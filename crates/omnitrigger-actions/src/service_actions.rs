@@ -292,6 +292,9 @@ impl NativeHost for InvocationScopedHost {
         if cancellation.is_cancelled() || service_token.is_cancelled() {
             return Err(reject("cancelled"));
         }
+        if Instant::now() >= deadline {
+            return Err(reject("timeout"));
+        }
         inner.call_browser_async(method, params, cancellation, deadline)
     }
 

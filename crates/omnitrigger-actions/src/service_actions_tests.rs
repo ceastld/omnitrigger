@@ -851,3 +851,71 @@ fn browser_async_wrong_operation_or_non_object_params_reject_before_effects() {
         assert_eq!(h.terminal().invocation_id, current.id);
     }
 }
+
+// 单一辨别场景：复用现有Harness/Runtime探针；不启动程序或浏览器。
+#[test]
+fn browser_async_deadline_expiring_in_capability_query_rejects_before_dispatch() {
+    struct CapabilityGate {
+        entered: Sender<()>,
+        release: Mutex<Receiver<()>>,
+        dispatched: AtomicUsize,
+    }
+    impl NativeHost for CapabilityGate {
+        fn browser_async_available(&self) -> bool {
+            self.entered.send(()).unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(WAIT + WAIT)
+                .unwrap();
+            true
+        }
+        fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+            panic!("不得回退普通路径")
+        }
+        fn call_browser_async(
+            &self,
+            _: &str,
+            _: Value,
+            _: &CancellationToken,
+            _: Instant,
+        ) -> Result<Value, ActionError> {
+            // 记录转交本身；不替上层Scope掩盖已过期的转交。
+            self.dispatched.fetch_add(1, Ordering::SeqCst);
+            Ok(json!({"forwardedExpiredDeadline":true}))
+        }
+    }
+    let h = Harness::new(false);
+    let (entered_tx, entered) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    let inner = Arc::new(CapabilityGate {
+        entered: entered_tx,
+        release: Mutex::new(release_rx),
+        dispatched: AtomicUsize::new(0),
+    });
+    let caller = CancellationToken::new();
+    let deadline = Instant::now() + WAIT;
+    *h.runtime.browser_probe.lock().unwrap() =
+        Some(browser_async_probe(true, caller.clone(), deadline));
+    let current = h.start(57, call("browser_async_probe"), Some(inner.clone()));
+    current.go.send(()).unwrap();
+    entered.recv_timeout(WAIT).unwrap(); // 见证已通过最初deadline检查并进入capability。
+    while Instant::now() < deadline {
+        thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(20)),
+        );
+    }
+    release.send(()).unwrap();
+    let (id, result) = h.reply();
+    assert_eq!(id, current.id);
+    let error = result.unwrap_err();
+    assert_eq!(error.code, "timeout");
+    assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+    assert_eq!(error.method.as_deref(), Some(BROWSER_ASYNC_TEST_METHOD));
+    assert_eq!(inner.dispatched.load(Ordering::SeqCst), 0);
+    assert!(!caller.is_cancelled());
+    assert!(!current.token.is_cancelled());
+    assert_eq!(h.terminal().invocation_id, current.id);
+}
