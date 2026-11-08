@@ -61,9 +61,18 @@ fn file_result_method(method: &str) -> bool {
 }
 fn result_wait_budget(method: &str, params: &Value) -> Result<Option<Duration>, ApiError> {
     if method == "raishot.capture_result" {
-        let timeout = params.get("timeout_ms").and_then(Value::as_u64)
+        let timeout = params
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
             .filter(|value| (1..=30_000).contains(value))
-            .ok_or_else(|| fault("invalid_input", "文件结果超时参数无效。", method, "not_started"))?;
+            .ok_or_else(|| {
+                fault(
+                    "invalid_input",
+                    "文件结果超时参数无效。",
+                    method,
+                    "not_started",
+                )
+            })?;
         return Ok(Some(Duration::from_millis(timeout + 1500)));
     }
     Ok((method == "raishot.release_result").then(|| Duration::from_secs(5)))
@@ -185,24 +194,25 @@ pub fn call(
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))
         .map_err(|cause| fault("native_bridge_unavailable", cause, &method, "not_started"))?;
     let browser = method.starts_with("browser.");
-    let deadline = Instant::now() + match file_budget {
-        Some(budget) => budget,
-        None => Duration::from_secs(
-            if browser
-                || method == "ui.choose"
-                || matches!(
-                    method.as_str(),
-                    "display.brightness_step" | "audio.volume_adjust"
-                )
-            {
-                66
-            } else if method == "selection.copy_data" {
-                8
-            } else {
-                5
-            },
-        ),
-    };
+    let deadline = Instant::now()
+        + match file_budget {
+            Some(budget) => budget,
+            None => Duration::from_secs(
+                if browser
+                    || method == "ui.choose"
+                    || matches!(
+                        method.as_str(),
+                        "display.brightness_step" | "audio.volume_adjust"
+                    )
+                {
+                    66
+                } else if method == "selection.copy_data" {
+                    8
+                } else {
+                    5
+                },
+            ),
+        };
     let response_limit = if browser {
         32 * 1024 * 1024 + 1024
     } else {
@@ -488,12 +498,16 @@ mod tests {
             Some(Duration::from_secs(5))
         );
         for timeout in [0, 30001] {
-            let error = result_wait_budget("raishot.capture_result", &json!({"timeout_ms":timeout}))
-                .unwrap_err();
+            let error =
+                result_wait_budget("raishot.capture_result", &json!({"timeout_ms":timeout}))
+                    .unwrap_err();
             assert_eq!(error.code, "invalid_input");
             assert_eq!(error.effect_state.as_deref(), Some("not_started"));
         }
-        assert_eq!(result_wait_budget("keyboard.text", &json!({})).unwrap(), None);
+        assert_eq!(
+            result_wait_budget("keyboard.text", &json!({})).unwrap(),
+            None
+        );
     }
     use std::{net::TcpListener, thread};
 
