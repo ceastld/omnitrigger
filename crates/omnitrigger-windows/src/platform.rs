@@ -716,6 +716,8 @@ struct ThreadState {
     key_metadata: BTreeMap<Button, KeyMetadata>,
     foreground: usize,
     foreground_pid: u32,
+    #[cfg(test)]
+    test_foreground: Option<foreground_context::Identity>,
     foreground_epoch: u64,
     process_resolved: bool,
     last_context_probe: Option<Instant>,
@@ -764,8 +766,22 @@ impl ThreadState {
         pointer: Arc<PointerSnapshot>,
         policy: WheelInputPolicy,
     ) -> Self {
-        let foreground = foreground_context::snapshot();
-        let waitable_timer = HoldDeadlineTimer::new();
+        Self::from_context(
+            events,
+            pointer,
+            policy,
+            foreground_context::snapshot(),
+            HoldDeadlineTimer::new(),
+        )
+    }
+
+    fn from_context(
+        events: SyncSender<BackendEvent>,
+        pointer: Arc<PointerSnapshot>,
+        policy: WheelInputPolicy,
+        foreground: foreground_context::Identity,
+        waitable_timer: Option<HoldDeadlineTimer>,
+    ) -> Self {
         let counters = ListenerDiagnostics {
             wheel_input_policy: policy,
             hold_timer_backend: waitable_timer
@@ -801,6 +817,8 @@ impl ThreadState {
             key_metadata: BTreeMap::new(),
             foreground: foreground.hwnd,
             foreground_pid: foreground.pid,
+            #[cfg(test)]
+            test_foreground: None,
             foreground_epoch: 0,
             process_resolved: false,
             last_context_probe: None,
@@ -1354,6 +1372,11 @@ impl ThreadState {
     }
 
     fn check_foreground(&mut self) {
+        #[cfg(test)]
+        if let Some(identity) = self.test_foreground {
+            self.update_foreground_identity(identity);
+            return;
+        }
         self.update_foreground_identity(foreground_context::snapshot());
     }
 
@@ -1594,7 +1617,18 @@ impl ThreadState {
         }
         self.check_foreground();
         self.report_overflow();
-        let mut movement = self.validate_pointer_context();
+        // 纯移动本身不能执行动作；等Hook外的新点采样再确定是否失去进程范围。
+        // 离散输入、录制、到期和拖拽路径仍在匹配前立即拒绝过期/异点快照。
+        let defer_pointer_invalidation = kind.is_none()
+            && pointer.is_some()
+            && self.recording.is_none()
+            && self.engine.next_deadline_ms().is_none()
+            && self.engine.active_drag().is_none();
+        let mut movement = if defer_pointer_invalidation {
+            Decision::default()
+        } else {
+            self.validate_pointer_context()
+        };
         let positional = pointer
             .map(|position| self.with_engine(|engine| engine.pointer_moved(position, now_ms)))
             .unwrap_or_default();
@@ -2106,31 +2140,10 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
             native.flags.contains(LLKHF_INJECTED),
             native.dwExtraInfo,
         );
-        if !native.flags.contains(LLKHF_INJECTED)
-            && native.dwExtraInfo != REPLAY_TAG
-            && native.dwExtraInfo != SHORTCUT_TAG
-            && native.dwExtraInfo != PRIORITY_PROBE_TAG
-        {
-            let down = match wparam.0 as u32 {
-                WM_KEYDOWN | WM_SYSKEYDOWN => Some(true),
-                WM_KEYUP | WM_SYSKEYUP => Some(false),
-                _ => None,
-            };
-            if let Some(down) = down {
-                let button = Button::Key(normalized_key(native));
-                let kind = if down {
-                    InputKind::Down(button)
-                } else {
-                    InputKind::Up(button)
-                };
-                let metadata = KeyMetadata {
-                    scan_code: native.scanCode as u16,
-                    extended: native.flags.contains(LLKHF_EXTENDED),
-                };
-                if process_input(kind, Some(metadata)) {
-                    record_hook_timing(HookTiming::Work, started.elapsed());
-                    return LRESULT(1);
-                }
+        if let Some((kind, metadata)) = keyboard_input(wparam.0 as u32, native) {
+            if process_input(kind, Some(metadata)) {
+                record_hook_timing(HookTiming::Work, started.elapsed());
+                return LRESULT(1);
             }
         }
     }
@@ -2217,6 +2230,35 @@ fn note_callback(keyboard: bool, injected: bool, tag: usize) {
     });
 }
 
+fn keyboard_input(message: u32, native: &KBDLLHOOKSTRUCT) -> Option<(InputKind, KeyMetadata)> {
+    if native.flags.contains(LLKHF_INJECTED)
+        || matches!(
+            native.dwExtraInfo,
+            REPLAY_TAG | SHORTCUT_TAG | PRIORITY_PROBE_TAG
+        )
+    {
+        return None;
+    }
+    let down = match message {
+        WM_KEYDOWN | WM_SYSKEYDOWN => true,
+        WM_KEYUP | WM_SYSKEYUP => false,
+        _ => return None,
+    };
+    let button = Button::Key(normalized_key(native));
+    let kind = if down {
+        InputKind::Down(button)
+    } else {
+        InputKind::Up(button)
+    };
+    Some((
+        kind,
+        KeyMetadata {
+            scan_code: native.scanCode as u16,
+            extended: native.flags.contains(LLKHF_EXTENDED),
+        },
+    ))
+}
+
 fn normalized_key(native: &KBDLLHOOKSTRUCT) -> u16 {
     match native.vkCode {
         0x10 => unsafe { MapVirtualKeyW(native.scanCode, MAPVK_VSC_TO_VK_EX) as u16 },
@@ -2277,14 +2319,13 @@ fn mouse_input(message: u32, data: u32) -> Option<InputKind> {
 fn replay_input(kind: InputKind, metadata: &BTreeMap<Button, KeyMetadata>) -> INPUT {
     match kind {
         InputKind::Down(Button::Key(key)) | InputKind::Up(Button::Key(key)) => {
-            let fallback_scan = unsafe { MapVirtualKeyW(key.into(), MAPVK_VK_TO_VSC_EX) };
-            let metadata = metadata
-                .get(&Button::Key(key))
-                .copied()
-                .unwrap_or(KeyMetadata {
+            let metadata = metadata.get(&Button::Key(key)).copied().unwrap_or_else(|| {
+                let fallback_scan = unsafe { MapVirtualKeyW(key.into(), MAPVK_VK_TO_VSC_EX) };
+                KeyMetadata {
                     scan_code: (fallback_scan & 0xff) as u16,
                     extended: fallback_scan & 0xff00 == 0xe000,
-                });
+                }
+            });
             let mut flags = KEYBD_EVENT_FLAGS(0);
             if metadata.scan_code != 0 {
                 flags |= KEYEVENTF_SCANCODE;
