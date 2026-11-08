@@ -23,11 +23,12 @@ fn milliseconds(value: &str) -> Duration {
 fn descendants(root: &str, token: &str) {
     let root = Path::new(root);
     assert!(root.is_absolute() && root.is_dir());
-    assert!(root
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .starts_with("capture-case-"));
+    assert!(
+        root.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("capture-case-")
+    );
     assert!(token.len() == 32 && token.bytes().all(|byte| byte.is_ascii_hexdigit()));
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
