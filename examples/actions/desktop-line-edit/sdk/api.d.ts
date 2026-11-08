@@ -243,6 +243,15 @@ export interface BrowserApi {
   }>>;
   /** 方法不带 chrome. 前缀；参数为 JSON 数组。undefined 与 null 保持区别。 */
   call<T = unknown>(method: string, args?: unknown[], options?: BrowserOptions): Promise<T>;
+  /** 与call共用真正的异步派发、取消和并发限制。 */
+  callAsync<T = unknown>(method: string, args?: unknown[], options?: BrowserOptions): Promise<T>;
+  /** 与profiles共用真正的异步派发。 */
+  profilesAsync(options?: Pick<BrowserOptions, 'timeoutMs'>): Promise<Array<{
+    browser_instance_id: string;
+    session_id: string;
+    name: string;
+    [key: string]: unknown;
+  }>>;
   /** 动态远程 Proxy，例如 await ctx.browser.chrome.bookmarks.getTree()。选项请使用 call。 */
   chrome: any;
 }

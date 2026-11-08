@@ -9,7 +9,7 @@ const nativeContext = ctx.__nativeContext;
 delete ctx.__nativeContext;
 // Rust运行层给出明确策略；兼容旧生产者时只识别连接/非Standalone错误，不把任意对象当应用桥。
 const legacyBridgeBinding = !!nativeContext && typeof nativeContext === 'object' &&
-    (Object.hasOwn(nativeContext, 'connection') ||
+    (Object.hasOwn(nativeContext, 'connection') || Object.hasOwn(nativeContext, 'browser_async_connection') ||
      typeof nativeContext.error?.code === 'string' && nativeContext.error.code !== 'desktop_unavailable');
 const localDesktopAllowed = ctx.__localDesktopAllowed !== false && !legacyBridgeBinding;
 delete ctx.__localDesktopAllowed;
@@ -134,7 +134,7 @@ ctx.browser = createBrowserApi((method, args, options, profiles) => {
     if (value?.has_value === true && Object.hasOwn(value,'value')) return value.value;
     if (value?.has_value === false) return undefined;
     throw Object.assign(new Error('浏览器调用回执格式无效。'), {code:'invalid_response',effectState:'unknown',method});
-});
+}, undefined, asyncBrowserInvoke);
 ctx.clipboard = !localDesktopAllowed ? desktopApis.clipboard : Object.freeze({
     readData: desktopApis.clipboard.readData,
     writeFiles: desktopApis.clipboard.writeFiles,
@@ -171,4 +171,94 @@ ctx.openFileInParent = function (target) {
     catch (_) { throw Object.assign(new Error('路径含无效 Unicode。'), {code:'invalid_input',effectState:'not_started',method:'system.open_file_in_parent'}); }
     return localDesktopAllowed ? call('open_file_in_parent', {target}) : legacyOpenThroughBridge('system.open_file_in_parent', target);
 };
+
+// 请求与完成只传 JSON；Promise resolve/reject 从不离开当前引擎线程。
+const nativeAsyncCall = globalThis.__hostCallAsync;
+const nativeAsyncPoll = globalThis.__hostPollAsync;
+delete globalThis.__hostCallAsync;
+delete globalThis.__hostPollAsync;
+delete globalThis.__hostAsyncPending;
+const browserPending = new Map();
+function asyncFault(cause, method) {
+    const error = new Error(cause?.message ?? '异步浏览器请求未确认。');
+    error.code = cause?.code ?? 'invalid_response';
+    error.effectState = cause?.effect_state ?? 'unknown';
+    error.method = cause?.method ?? method;
+    if (cause?.required_permissions) error.requiredPermissions = cause.required_permissions;
+    return error;
+}
+function browserAsyncCall(method, params) {
+    if (!nativeContext?.browser_async_connection || typeof nativeAsyncCall !== 'function' || typeof nativeAsyncPoll !== 'function') {
+        throw Object.assign(new Error('当前父宿主没有异步浏览器连接。'),
+            {code:'browser_async_unavailable',effectState:'not_started',method});
+    }
+    if (calls >= 32) throw Object.assign(new Error('单次脚本最多调用32次宿主API。'),
+        {code:'desktop_call_limit',effectState:'not_started',method});
+    const id = nativeId + 1;
+    const serialized = encode({id,method,params});
+    let bytes=0;
+    for (const character of serialized) {
+        const point=character.codePointAt(0);
+        bytes += point<0x80?1:point<0x800?2:point<0x10000?3:4;
+    }
+    if (id>128 || bytes>512*1024) throw Object.assign(new Error('异步请求标识或大小超过限制。'),
+        {code:'invalid_input',effectState:'not_started',method});
+    calls++; nativeId=id;
+    return new Promise((resolve,reject)=>{
+        let reply;
+        try { reply=decode(nativeAsyncCall(serialized)); }
+        catch (_) { reject(asyncFault(null,method)); return; }
+        if (reply?.ok !== true) { reject(asyncFault(reply?.error,method)); return; }
+        if (reply.id !== id) { reject(asyncFault(null,method)); return; }
+        browserPending.set(id,{resolve,reject,method});
+    });
+}
+function pumpBrowserAsync() {
+    let count=0;
+    for (;;) {
+        const serialized = nativeAsyncPoll?.();
+        if (serialized === undefined || serialized === 'null') return count;
+        let reply;
+        try { reply=decode(serialized); }
+        catch (_) { throw asyncFault(null,'browser.call'); }
+        const pending=browserPending.get(reply?.id);
+        if (!pending || typeof reply.ok !== 'boolean') throw asyncFault(null,'browser.call');
+        browserPending.delete(reply.id);
+        count++;
+        if (reply.ok) pending.resolve(reply.value);
+        else pending.reject(asyncFault(reply.error,pending.method));
+    }
+}
+// 重用共同 browser-api 的校验/参数快照，不复制浏览器请求解析器。
+async function asyncBrowserInvoke(method,args,options,profiles) {
+    const wireMethod=profiles?"browser.profiles":"browser.call";
+    try {
+        const value=await browserAsyncCall(wireMethod,profiles?{options}:{method,args,options});
+        if (profiles) return value;
+        if (value?.has_value === true && Object.hasOwn(value,"value")) return value.value;
+        if (value?.has_value === false) return undefined;
+        throw asyncFault(null,method);
+    } catch (error) {
+        if (!profiles && error?.method === "browser.call") error.method=method;
+        throw error;
+    }
+}
+function makeScriptRunner() {
+    function serializeResult(result) {
+        const output=encode(result);
+        if (typeof output !== 'string') throw new Error('入口必须返回 JSON 结果');
+        return encode({kind:'value',value:decode(output)});
+    }
+    const runner=entry=>{
+        const result=entry(ctx);
+        return result && typeof result.then === 'function'
+            ? Promise.resolve(result).then(value=>serializeResult(value===undefined?null:value)) : serializeResult(result);
+    };
+    Object.defineProperties(runner,{
+        __pollAsync:{value:pumpBrowserAsync},
+        __pendingAsync:{value:()=>browserPending.size},
+    });
+    return runner;
+}
+
 Object.freeze(ctx);

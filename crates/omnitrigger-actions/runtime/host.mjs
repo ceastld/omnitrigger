@@ -96,7 +96,7 @@ function browserRequest(method, args, options = {}, profiles = false) {
   return operation;
 }
 
-const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...args));
+const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...args), browserRequest);
 
 function nativeCall(method, params) {
   const actionControl = method === 'actions.stop_other_instances' || method === 'state.read' || method === 'state.compare_and_swap';

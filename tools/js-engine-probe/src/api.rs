@@ -134,6 +134,7 @@ impl DesktopMode {
     ) -> Result<Self, ApiError> {
         let legacy_binding = context.is_some_and(|context| {
             context.get("connection").is_some()
+                || context.get("browser_async_connection").is_some()
                 || context
                     .get("error")
                     .and_then(|error| error.get("code"))
@@ -314,6 +315,13 @@ mod desktop_policy_tests {
 }
 
 pub fn dispatch(request: String) -> String {
+    let began = Instant::now();
+    let result = dispatch_inner(request);
+    exclude_host_wait(began.elapsed());
+    result
+}
+
+fn dispatch_inner(request: String) -> String {
     let open_parent_request = request.len() <= 512 * 1024
         && serde_json::from_str::<Value>(&request)
             .is_ok_and(|value| value["kind"] == "open_file_in_parent");
@@ -652,4 +660,63 @@ mod tests {
             assert!(!response.to_string().contains("secret-output"));
         }
     }
+}
+
+thread_local! {
+    static BROWSER_ASYNC_POOL: std::cell::RefCell<Option<crate::native::BrowserAsyncPool>> = const { std::cell::RefCell::new(None) };
+    static HOST_WAIT_MICROS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn excluded_host_micros() -> u64 {
+    HOST_WAIT_MICROS.with(|time| time.get())
+}
+pub(crate) fn exclude_host_wait(elapsed: Duration) {
+    let micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+    HOST_WAIT_MICROS.with(|time| time.set(time.get().saturating_add(micros)));
+}
+
+pub(crate) struct AsyncScope;
+impl AsyncScope {
+    pub(crate) fn enter(context: Option<&Value>) -> Self {
+        BROWSER_ASYNC_POOL.with(|pool| {
+            // 仅保存配置值。旧父进程缺字段时仍可跑同步入口，但异步请求在IO前拒绝。
+            *pool.borrow_mut() = Some(crate::native::BrowserAsyncPool::new(
+                context
+                    .and_then(|value| value.get("browser_async_connection"))
+                    .cloned(),
+            ));
+        });
+        Self
+    }
+}
+impl Drop for AsyncScope {
+    fn drop(&mut self) {
+        let pool = BROWSER_ASYNC_POOL.with(|pool| pool.borrow_mut().take());
+        drop(pool); // 标记取消并join本次所有工作线程；没有遗留到下次请求的池。
+    }
+}
+pub(crate) fn dispatch_async(request: String) -> String {
+    BROWSER_ASYNC_POOL.with(|pool| {
+        if let Some(pool) = &mut *pool.borrow_mut() { pool.dispatch(request) }
+        else { json!({"ok":false,"error":{"code":"browser_async_unavailable","message":"没有本次异步浏览器作用域。","effect_state":"not_started","method":"browser.call"}}).to_string() }
+    })
+}
+pub(crate) fn poll_async() -> String {
+    BROWSER_ASYNC_POOL.with(|pool| {
+        pool.borrow_mut()
+            .as_mut()
+            .map_or_else(|| "null".into(), |pool| pool.poll())
+    })
+}
+pub(crate) fn async_pending() -> usize {
+    BROWSER_ASYNC_POOL.with(|pool| pool.borrow().as_ref().map_or(0, |pool| pool.pending()))
+}
+pub(crate) fn wait_async() {
+    let began = Instant::now();
+    BROWSER_ASYNC_POOL.with(|pool| {
+        if let Some(pool) = &mut *pool.borrow_mut() {
+            pool.wait(Duration::from_millis(25));
+        }
+    });
+    exclude_host_wait(began.elapsed());
 }

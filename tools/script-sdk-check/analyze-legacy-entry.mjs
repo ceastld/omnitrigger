@@ -26,10 +26,8 @@ export function analyzeLegacyEntry(source, program) {
     entry=candidates[0];
     if(entry.callable) {
       kind='legacy_callable_declaration';
-      if(has(entry.callable,ts.SyntaxKind.AsyncKeyword)) {
-        kind='local_async_declaration';error('entry_main_async','轻量 main 入口不能声明为 async，必须同步返回 JSON。',entry.name);
-      } else if(entry.callable.asteriskToken) {
-        kind='local_generator_declaration';error('entry_main_generator','生成器不是旧入口需要的同步 JSON 结果。',entry.name);
+      if(entry.callable.asteriskToken) {
+        kind='local_generator_declaration';error('entry_main_generator','生成器不是旧入口需要的JSON结果或其Promise。',entry.name);
       }
       const p=entry.callable.parameters;
       if(p.length!==1||!ts.isIdentifier(p[0]?.name)||p[0].initializer||p[0].dotDotDotToken)
@@ -91,23 +89,6 @@ export function analyzeLegacyEntry(source, program) {
     }
     return false;
   };
-  function inspectReturn(expression,node,seen=new Set()) {
-    if(!expression)return;
-    if(seen.has(expression))return;seen.add(expression);
-    if(ts.isParenthesizedExpression(expression))return inspectReturn(expression.expression,node,seen);
-    if(ts.isIdentifier(expression)) {
-      const declaration=checker.getSymbolAtLocation(expression)?.valueDeclaration;
-      if(declaration&&ts.isVariableDeclaration(declaration))return inspectReturn(declaration.initializer,node,seen);
-    }
-    const callee=(ts.isCallExpression(expression)||ts.isNewExpression(expression))?expression.expression:undefined;
-    const globalPromise=callee&&(ts.isIdentifier(callee)&&callee.text==='Promise'
-      ||ts.isPropertyAccessExpression(callee)&&ts.isIdentifier(callee.expression)&&callee.expression.text==='Promise')
-      &&!checker.getSymbolAtLocation(ts.isIdentifier(callee)?callee:callee.expression);
-    const declared=callee&&ts.isIdentifier(callee)?checker.getSymbolAtLocation(callee)?.valueDeclaration:undefined;
-    const callable=fn(declared)?declared:declared&&ts.isVariableDeclaration(declared)&&fn(declared.initializer)?declared.initializer:undefined;
-    if(globalPromise||callee?.kind===ts.SyntaxKind.ImportKeyword||callable&&has(callable,ts.SyntaxKind.AsyncKeyword))
-      error('entry_main_async_result','main 明确返回 Promise，旧协议只接受同步 JSON 结果。',node);
-  }
   function visit(node) {
     const isFunction=ts.isFunctionLike(node);
     if(isFunction)functions.push(node);
@@ -122,9 +103,7 @@ export function analyzeLegacyEntry(source, program) {
       warn('legacy_entry_main_reassigned','循环目标写入 main，不能确认最终入口。',node.initializer);
     if(ts.isReturnStatement(node)) {
       if(!functions.length)warn('legacy_entry_early_return','顶层 return 会绕过宿主追加的 main(ctx) 调用。',node);
-      else if(functions.at(-1)===entry?.callable)inspectReturn(node.expression,node);
     }
-    if(ts.isArrowFunction(node)&&node===entry?.callable&&!ts.isBlock(node.body))inspectReturn(node.body,node.body);
     if((ts.isAwaitExpression(node)||ts.isForOfStatement(node)&&node.awaitModifier)
       &&!has(functions.at(-1)??source,ts.SyntaxKind.AsyncKeyword))error('legacy_entry_await_unsupported','旧函数体和同步 main 不能使用 await。',node);
     if(ts.isYieldExpression(node)&&!functions.at(-1)?.asteriskToken)

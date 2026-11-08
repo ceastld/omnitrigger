@@ -412,6 +412,44 @@ fn optional_browser_async_context_keeps_plain_script_and_hidden_context_compatib
 }
 
 #[test]
+#[ignore = "显式指定含UTF-8环境的真实Boa或QuickJS宿主；无本机能力"]
+fn script_text_encoder_keeps_utf8_boundaries_counts_and_real_array_brand() {
+    let fixture = Fixture::new(
+        r#"
+        const encoder = new TextEncoder();
+        const text = 'A中😀\ud800';
+        const destination = new Uint8Array(9).fill(165);
+        const progress = encoder.encodeInto(text, destination);
+        let forged = false, wrongArray = false, receiver = false;
+        try { encoder.encodeInto('a', {[Symbol.toStringTag]:'Uint8Array',length:9}); }
+        catch (error) { forged = error instanceof TypeError; }
+        try { encoder.encodeInto('a', new Uint16Array(9)); }
+        catch (error) { wrongArray = error instanceof TypeError; }
+        try { TextEncoder.prototype.encode.call({}, 'a'); }
+        catch (error) { receiver = error instanceof TypeError; }
+        return {encoding:encoder.encoding,bytes:Array.from(encoder.encode(text)),
+            progress,destination:Array.from(destination),forged,wrongArray,receiver};
+    "#,
+    );
+    let output = runtime()
+        .execute(
+            &fixture.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        output,
+        json!({
+            "encoding":"utf-8", "bytes":[65,228,184,173,240,159,152,128,239,191,189],
+            "progress":{"read":4,"written":8},
+            "destination":[65,228,184,173,240,159,152,128,165],
+            "forged":true,"wrongArray":true,"receiver":true
+        })
+    );
+}
+
+#[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
 fn script_host_executes_file_api_and_rejects_accidental_overwrite() {
     let fixture = Fixture::new("const text=ctx.fs.readText(ctx.input.source); ctx.fs.writeText(ctx.input.destination,text.trim()); return {written:true};");

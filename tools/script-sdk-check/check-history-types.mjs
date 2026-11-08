@@ -77,7 +77,7 @@ export function checkClipboardHistoryTypes({
 
     const cases = {
       ...(asynchronous ? {} : {
-        jsonPromise:'const main: ScriptMain = () => Promise.resolve(true);',
+        jsonPromiseFunction:'const main: ScriptMain = () => Promise.resolve({handler:()=>true});',
         jsonFunction:'const main: ScriptMain = () => ({handler:() => true});',
       }),
       toggleArity:'ctx.ui.toggleHistory({});',

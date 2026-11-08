@@ -1,10 +1,10 @@
 # 首批脚本 API
 
-状态：可运行的同步原型，不是正式插件。两种引擎加载同一份 `src/sdk.js`，通过 JSON 桥接到 Rust。桌面 API 与 Node 共用参数校验定义，应用接入时经每次调用独立的回环连接交给现有 `NativeHost`；独立 CLI 的剪贴板和打开目标复用 `omnitrigger-windows`。不安装 Hook，不访问 GPUI。`ctx.apiVersion` 为 `1`。[类型声明](../../crates/omnitrigger-actions/runtime/script-api.d.ts)用于编辑器补全，不提供 TS 转译。
+状态：可运行的脚本宿主原型，不是正式插件。两种引擎加载同一份 `src/sdk.js`，通过 JSON 桥接到 Rust。桌面 API 与 Node 共用参数校验定义，应用接入时经每次调用独立的回环连接交给现有 `NativeHost`；独立 CLI 的剪贴板和打开目标复用 `omnitrigger-windows`。不安装 Hook，不访问 GPUI。`ctx.apiVersion` 为 `1`。[类型声明](../../crates/omnitrigger-actions/runtime/script-api.d.ts)用于编辑器补全，不提供 TS 转译。
 
 Windows MSVC 的 Boa 宿主为共享 SDK 的解析保留 8 MiB 原生主栈；这不是预先提交的全部内存，也不改变 JS 的循环、递归和动作时限。QuickJS 的配置保持原值。
 
-通过 OmniTrigger 的 `script` 动作运行时接入时，`.mjs` 文件具名导出同步 `main(ctx)` 并可导入包内相对模块；已有 `.js` 文件声明 `function main(ctx)`，适配层继续将它转为函数体请求，文件本身保持标准 JavaScript。模块契约见[包内模块](MODULES.md)。`ctx.packageRoot` 为动作包目录，`ctx.invocation` 包含十进制字符串调用身份。独立 CLI 可以省略这些元数据，此时两项为 `null`。成功与失败响应均带有 `schema_version: 1`。
+通过 OmniTrigger 的 `script` 动作运行时接入时，`.mjs` 文件具名导出 `main(ctx)`（可为 async） 并可导入包内相对模块；已有 `.js` 文件声明 `function main(ctx)`，适配层继续将它转为函数体请求，文件本身保持标准 JavaScript。模块契约见[包内模块](MODULES.md)。`ctx.packageRoot` 为动作包目录，`ctx.invocation` 包含十进制字符串调用身份。独立 CLI 可以省略这些元数据，此时两项为 `null`。成功与失败响应均带有 `schema_version: 1`。
 
 | API | 行为 |
 | --- | --- |
@@ -217,7 +217,7 @@ return { before: text.length, after: cleaned.length };
 
 ## 当前执行边界
 
-- API 同步运行在独立宿主进程中，不进入输入 Hook。原生能力由 Rust 提供，JS SDK 和引擎适配分别演进。
+- 原有 API 同步运行在独立宿主进程中，不进入输入 Hook。原生能力由 Rust 提供，JS SDK 和引擎适配分别演进。
 - API 使用当前用户权限，文件路径与 JSON 桥接不是沙盒。文件覆盖、剪贴板修改和外部程序副作用不会回滚，写入失败可能留下部分内容。
 - `run` 的等待期限从进程创建返回后计算。超时会请求终止并等待直接子进程，不保证它自行创建的后代全部结束。`start` 的独立程序始终保留。
 - JS 执行限制不能中断正在阻塞的原生文件或外壳调用，目前没有覆盖所有原生调用的统一墙钟取消。正式接入需要外层执行器的超时与取消管理。
@@ -240,7 +240,7 @@ function main(ctx) {
 }
 ```
 
-需要在应用中安装、启用并连接浏览器连接器；脚本宿主自身不加载 Node SDK 或浏览器库。Node 和轻量运行时共用浏览器参数校验，但 Node 返回 Promise，轻量接口同步顺序执行。`chrome.*` 适用于默认 profile；显式 profile 或超时使用 `call`。方法不带 `chrome.` 前缀，参数必须为 JSON 数组；拒绝函数、undefined、非有限数字、循环引用及无效 Unicode。
+需要在应用中安装、启用并连接浏览器连接器；脚本宿主自身不加载 Node SDK 或浏览器库。Node 和轻量运行时共用浏览器参数校验，但 Node 返回 Promise，轻量原有接口同步顺序执行。新增 `callAsync/profilesAsync` 使用专用异步通道并返回 Promise，不改变 `call/profiles/chrome.*` 的同步行为；父宿主缺少异步连接时以 `browser_async_unavailable/not_started` 拒绝；未注入异步回调的工厂以 `unsupported_runtime_feature/not_started` 拒绝，均不回退同步调用。新版入口接受 JSON 值或其 Promise。全局 `TextEncoder` 仅提供 UTF-8 的 `encoding/encode/encodeInto`；孤立代理项编码为 U+FFFD，不代表具备其它 DOM 或 Node 全局。`chrome.*` 适用于默认 profile；显式 profile 或超时使用 `call`。方法不带 `chrome.` 前缀，参数必须为 JSON 数组；拒绝函数、undefined、非有限数字、循环引用及无效 Unicode。
 
 单次 RPC 默认等待 10 秒，允许 1–60000 毫秒；新连接另有最多 5 秒握手等待，均受外层动作时限约束。取消、超时或调用错误后关闭受影响的 Rust 连接，不重试已派发操作。异常保留 `code`、`method`、`effectState`；服务端提供权限详情时保留 `requiredPermissions`。`unknown` 不能理解为操作未发生。
 

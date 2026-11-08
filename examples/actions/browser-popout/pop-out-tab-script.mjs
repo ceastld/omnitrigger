@@ -17,7 +17,7 @@ function fail(code, message, method) {
  * target?:{tabId:number,windowId:number},error?:{code:string,method:string,effect_state:string,required_permissions?:string[]}}} PopoutReceipt */
 /** @typedef {{code?:unknown,effectState?:unknown,requiredPermissions?:unknown}} WorkflowFault */
 
-/** @type {ScriptMain} */
+/** @param {ScriptContext} ctx @returns {ScriptJsonValue} */
 export function main(ctx) {
   const raw = /** @type {unknown} */ (ctx.input);
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)
