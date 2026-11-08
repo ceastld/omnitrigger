@@ -166,7 +166,7 @@ jobs:
           node tools/script-sdk-check/check-project-environment.mjs --app $projectApp --node $projectNode --host $projectLight --typescript $projectTsc --case-root $projectCase
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: 验证 Node 输出采集与断连后的进程收尾
+      - name: 验证输出动作包与断连后的进程收尾
         shell: pwsh
         run: |
           $captureNode = (Get-Command node).Source
@@ -180,6 +180,10 @@ jobs:
           $capturePreviousNode = $env:OMNITRIGGER_APP_CAPTURE_NODE
           $capturePreviousFixture = $env:OMNITRIGGER_CAPTURE_FIXTURE
           $capturePreviousRoot = $env:OMNITRIGGER_APP_CAPTURE_CASE_ROOT
+          $packagePreviousNode = $env:OMNITRIGGER_TEST_NODE
+          $packagePreviousFixture = $env:OMNITRIGGER_TEST_PROCESS_OUTPUT_FIXTURE
+          $packagePreviousRuntime = $env:OMNITRIGGER_FALSE_CONTEXT_RUNTIME
+          $packagePreviousScriptHost = $env:OMNITRIGGER_TEST_SCRIPT_HOST
           try {
             $env:OMNITRIGGER_APP_CAPTURE_NODE = $captureNode
             $env:OMNITRIGGER_CAPTURE_FIXTURE = $captureFixture
@@ -190,10 +194,23 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             cargo test --locked -p omnitrigger-app --bin omnitrigger process_capture_host::node_native::node_outer_deadline_cleans_capture_job_while_parent_test_process_lives -- --ignored --exact --test-threads=1
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $env:OMNITRIGGER_TEST_NODE = $captureNode
+            $env:OMNITRIGGER_TEST_PROCESS_OUTPUT_FIXTURE = $captureFixture
+            $env:OMNITRIGGER_FALSE_CONTEXT_RUNTIME = 'node'
+            cargo test --locked -p omnitrigger-app --bin omnitrigger process_capture_host::package_service:: -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = (Resolve-Path -LiteralPath 'target/ci-script-engine/debug/omnitrigger-js-probe.exe' -ErrorAction Stop).Path
+            $env:OMNITRIGGER_FALSE_CONTEXT_RUNTIME = 'script'
+            cargo test --locked -p omnitrigger-app --bin omnitrigger process_capture_host::package_service::capture_ -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally {
             $env:OMNITRIGGER_APP_CAPTURE_NODE = $capturePreviousNode
             $env:OMNITRIGGER_CAPTURE_FIXTURE = $capturePreviousFixture
             $env:OMNITRIGGER_APP_CAPTURE_CASE_ROOT = $capturePreviousRoot
+            $env:OMNITRIGGER_TEST_NODE = $packagePreviousNode
+            $env:OMNITRIGGER_TEST_PROCESS_OUTPUT_FIXTURE = $packagePreviousFixture
+            $env:OMNITRIGGER_FALSE_CONTEXT_RUNTIME = $packagePreviousRuntime
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = $packagePreviousScriptHost
           }
 
       - name: 验证已有轻量工程的独立类型检查
