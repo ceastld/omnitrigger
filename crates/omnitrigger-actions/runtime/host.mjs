@@ -351,17 +351,16 @@ function run(program, args = [], options = {}) {
 }
 
 // 保留Node提供的原始文件/行列，不将宿主帧重标成作者位置。
-function errorDiagnostic(error) {
+function errorDiagnostic(error, limit = 4096) {
   const message = String(error?.message ?? error);
   // 本机/SDK结构化错误沿用原消息合同；宿主实现栈不是作者源码位置。
   if (typeof error?.code === 'string' && /^[a-zA-Z0-9_]{1,64}$/.test(error.code)
       && (typeof error?.method === 'string' || ['not_started','unknown'].includes(error?.effectState))) {
-    return message.slice(0, 4096);
+    return message.slice(0, limit);
   }
   let stack;
   try { stack = error?.stack; } catch { /* 栈访问失败仍保留原消息。 */ }
   const text = (typeof stack === 'string' && stack ? stack : message).toWellFormed();
-  const limit = 4096;
   if (text.length <= limit) return text;
   const marker = '\n…（诊断已截断）\n';
   const headLength = Math.floor((limit - marker.length) / 2);
@@ -383,9 +382,10 @@ function respond(result) {
     response = JSON.stringify({ ...envelope, ...result });
     if (Buffer.byteLength(response) > LIMIT) throw fault('output_limit', '动作结果超过 64 KiB。');
   } catch (error) {
+    const prefix = '动作结果必须可序列化为 JSON。\n返回值序列化：';
     response = JSON.stringify({ ...envelope, status: 'error', error: {
-      code: error.code === 'output_limit' ? 'output_limit' : 'invalid_output',
-      message: error.code === 'output_limit' ? error.message : '动作结果必须可序列化为 JSON。',
+      code: error?.code === 'output_limit' ? 'output_limit' : 'invalid_output',
+      message: error?.code === 'output_limit' ? error.message : (prefix + errorDiagnostic(error, 4096 - prefix.length)).toWellFormed(),
     } });
   }
   writeFileSync(request.response_path + '.tmp', response, { flag: 'wx', mode: 0o600 });
