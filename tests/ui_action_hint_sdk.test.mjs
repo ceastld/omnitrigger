@@ -74,7 +74,7 @@ test('无真实作用域或无UI明确失败，不把updated:true当作可渲染
 });
 test('产品Node守卫保留scope-only与desktop边界，自述Windows14非Windows5',()=>{
   assert(host.includes("if (actionHint && request.actions_scope !== true)"));
-  assert(host.includes('!actionControl && !actionHint && request.native_context_available === false'));
+  assert(host.includes('!actionControl && !actionHint && !capture && !opening && !statPath && request.native_context_available === false'));
   assert(host.includes("'state.read','state.compare_and_swap','actions.stop_other_instances'"));
   assert(!host.includes("'ui.action_hint.scoped'"));
   const source=read('tools/js-engine-probe/src/runtime_description.rs');
