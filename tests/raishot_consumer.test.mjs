@@ -129,3 +129,20 @@ test('按C#空白集合区分显式参数回退、null默认与Trim后空模式'
   assert.throws(()=>configuration({quicker_in_param:'\uFEFF',launch_mode:'tray'}),e=>e.code==='invalid_input');
   assert.throws(()=>configuration({launch_mode:'\uFEFFregion\uFEFF'}),e=>e.code==='invalid_input');
 });
+
+test('消费者保留两原入口并包含文件结果入口与配套声明',()=>{
+  const manifest=JSON.parse(readFileSync(new URL('../examples/actions/raishot/action.json',import.meta.url),'utf8'));
+  assert.equal(manifest.actions.length,3);
+  assert.deepEqual(manifest.actions.map(action=>action.id),['node','script','result-script']);
+  for(const action of manifest.actions) {
+    assert.equal(action.version,1);
+    assert(readFileSync(new URL('../examples/actions/raishot/'+action.entry,import.meta.url)).length>0);
+  }
+  const entry=manifest.actions[2];assert.equal(entry.runtime,'script');assert.equal(entry.entry,'result-script.mjs');assert.equal(entry.single_instance,true);
+  const config=JSON.parse(readFileSync(new URL('../examples/actions/raishot/jsconfig.json',import.meta.url),'utf8'));
+  assert(config.files.includes('result-script.mjs'));
+  for(const declaration of ['types/api.d.ts','sdk/api.d.ts']) {
+    const source=readFileSync(new URL('../examples/actions/raishot/'+declaration,import.meta.url),'utf8');
+    for(const method of ['captureRaiShotResult','releaseRaiShotResult'])assert(source.includes(method));
+  }
+});

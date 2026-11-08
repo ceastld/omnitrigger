@@ -10,6 +10,8 @@ pub fn describe() -> Value {
     // 非 Windows 的采集分支明确返回 unsupported_platform，不能声明可执行支持。
     if cfg!(windows) {
         capabilities.push("process.capture.v1");
+        capabilities.push("raishot.capture_result.v1");
+        capabilities.push("raishot.release_result.v1");
         capabilities.push("system.open_file_in_parent.v1");
     }
     json!({

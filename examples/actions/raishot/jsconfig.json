@@ -8,8 +8,15 @@
     "target": "ES2023",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "lib": ["ES2023"],
+    "lib": [
+      "ES2023"
+    ],
     "types": []
   },
-  "files": ["node.mjs", "script.mjs", "lib.mjs"]
+  "files": [
+    "node.mjs",
+    "script.mjs",
+    "lib.mjs",
+    "result-script.mjs"
+  ]
 }

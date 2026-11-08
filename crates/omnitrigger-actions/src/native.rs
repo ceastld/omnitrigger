@@ -15,7 +15,7 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 37] = [
+const METHODS: [&str; 39] = [
     "system.open",
     "system.open_file_in_parent",
     "process.capture",
@@ -42,6 +42,8 @@ const METHODS: [&str; 37] = [
     "win32_edit.replace_selection",
     "raishot.resident.find",
     "raishot.resident.region",
+    "raishot.capture_result",
+    "raishot.release_result",
     "selection.copy",
     "selection.copy_data",
     "selection.read_text",
@@ -245,7 +247,10 @@ impl NativeBridge {
                     );
                     let file_read =
                         matches!(request.method.as_str(), "fs.stat" | "fs.read_directory");
-                    let capture = request.method == "process.capture";
+                    let capture = matches!(
+                        request.method.as_str(),
+                        "process.capture" | "raishot.capture_result" | "raishot.release_result"
+                    );
                     let brightness = matches!(
                         request.method.as_str(),
                         "display.brightness_step" | "audio.volume_adjust"

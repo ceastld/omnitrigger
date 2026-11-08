@@ -17,7 +17,7 @@ let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
 const nativeMethods = new Set(['system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','fs.read_directory','ui.choose','ui.notify','ui.open_history','ui.toggle_history','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
-  'keyboard.shortcut','keyboard.sequence','keyboard.text','win32_edit.replace_selection','raishot.resident.find','raishot.resident.region','selection.copy','selection.copy_data','selection.read_text','explorer.context','clipboard.read','clipboard.read_data','clipboard.write','clipboard.write_files','window.action','display.brightness_step','audio.volume_adjust']);
+  'keyboard.shortcut','keyboard.sequence','keyboard.text','win32_edit.replace_selection','raishot.resident.find','raishot.resident.region','raishot.capture_result','raishot.release_result','selection.copy','selection.copy_data','selection.read_text','explorer.context','clipboard.read','clipboard.read_data','clipboard.write','clipboard.write_files','window.action','display.brightness_step','audio.volume_adjust']);
 let nativePending;
 let nativePendingMethod;
 let nativeId = 0;
@@ -101,8 +101,9 @@ const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...
 function nativeCall(method, params) {
   const historyUi = method === 'ui.open_history' || method === 'ui.toggle_history';
   const opening = method === 'system.open' || method === 'system.open_file_in_parent';
-  const capture = method === 'process.capture';
-  const rai = method.startsWith('raishot.resident.');
+  const fileResult = method === 'raishot.capture_result' || method === 'raishot.release_result';
+  const capture = method === 'process.capture' || fileResult;
+  const rai = method.startsWith('raishot.resident.') || fileResult;
   const edit = method === 'win32_edit.replace_selection' || rai || method === 'clipboard.write_files';
   const volume = method === 'audio.volume_adjust';
   const brightness = method === 'display.brightness_step' || volume;
@@ -157,7 +158,7 @@ function nativeCall(method, params) {
     };
     controller.signal.addEventListener('abort', aborted, {once:true});
     if (!capture) socket.setEncoding('utf8');
-    const timeout = capture ? Math.min(params.timeout_ms + 1500, 61500) : opening || method === 'ui.choose' || brightness ? 61000 : dataCopy ? 8000 : 5000;
+    const timeout = fileResult ? (method === 'raishot.capture_result' ? Math.min(params.timeout_ms + 1500, 31500) : 5000) : capture ? Math.min(params.timeout_ms + 1500, 61500) : opening || method === 'ui.choose' || brightness ? 61000 : dataCopy ? 8000 : 5000;
     socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || historyUi || stat || data || history || capture || brightness || edit ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
     // 这些方法的总传输时限不被零碎数据延长，外层取消/时限仍优先生效。
     if (historyUi || opening || stat || data || history || capture || brightness || edit) methodTimer = setTimeout(() => finish(fail('timeout', undefined, sent ? 'unknown' : 'not_started')), timeout);
@@ -433,6 +434,7 @@ try {
   if (browserPending.size) throw fault('pending_browser_calls', '动作返回时仍有未等待的浏览器调用；请使用 await。');
   if (nativePending) {
     if (nativePendingMethod === 'system.open' || nativePendingMethod === 'system.open_file_in_parent') throw Object.assign(fault('pending_open', '动作返回时仍有未等待的打开请求；请使用 await。'), {effectState:'unknown',method:nativePendingMethod});
+    if (['raishot.capture_result','raishot.release_result'].includes(nativePendingMethod)) throw Object.assign(fault('pending_raishot_result', '动作返回时仍有未等待的图像结果调用；请使用 await。'), {effectState:'unknown',method:nativePendingMethod});
     if (nativePendingMethod === 'process.capture') throw Object.assign(fault('pending_process_capture', '动作返回时仍有未等待的程序采集；请使用 await。'), {effectState:'unknown',method:'process.capture'});
     if (nativePendingMethod === 'fs.stat' || nativePendingMethod === 'fs.read_directory') throw Object.assign(fault('fs_error', '动作返回时仍有未等待的文件查询；请使用 await。'), {effectState:'not_started',method:nativePendingMethod});
     throw Object.assign(fault('pending_desktop_calls', '动作返回时仍有未等待的桌面调用；请使用 await。'), {effectState:'unknown'});

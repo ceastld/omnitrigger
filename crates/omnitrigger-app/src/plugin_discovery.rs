@@ -171,6 +171,31 @@ pub fn find(configured: Option<&Path>, shared: Option<&Path>, legacy: &Path) -> 
     find_in(&running, configured, &roots)
 }
 
+/// 仅探测已经核对未知参数会拒绝的0.4.18 console；不搜索或执行程序。
+pub(super) fn inspect_result_cli(program: &Path) -> Option<Installed> {
+    if !program
+        .file_name()?
+        .to_str()?
+        .eq_ignore_ascii_case("raishot-cli.exe")
+    {
+        return None;
+    }
+    let directory = program.parent()?;
+    super::ensure_plain_ancestors(&directory.join("manifest.json")).ok()?;
+    super::ensure_plain_ancestors(program).ok()?;
+    let installed = inspect(directory)?;
+    if installed.order != (0, 4, 18) {
+        return None;
+    }
+    for name in REQUIRED_FILES {
+        super::ensure_plain_ancestors(&directory.join(name)).ok()?;
+    }
+    if fs::canonicalize(program).ok()? != fs::canonicalize(&installed.cli).ok()? {
+        return None;
+    }
+    Some(installed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +335,19 @@ mod tests {
         assert_eq!(parse_version("0.4"), None);
         assert_eq!(parse_version("0.4.16.0"), None);
         assert_eq!(parse_version("v0.4.16"), None);
+    }
+
+    #[test]
+    fn result_probe_only_accepts_the_known_console_install() {
+        let fixture = Fixture::new();
+        let known = fixture.install("known", "0.4.18");
+        let older = fixture.install("older", "0.4.17");
+        let future = fixture.install("future", "0.4.19");
+        assert!(inspect_result_cli(&known.join("raishot-cli.exe")).is_some());
+        assert!(inspect_result_cli(&known.join("raishot-gpui.exe")).is_none());
+        assert!(inspect_result_cli(&older.join("raishot-cli.exe")).is_none());
+        assert!(inspect_result_cli(&future.join("raishot-cli.exe")).is_none());
+        fs::write(known.join("raishot-cli.exe"), "changed size").unwrap();
+        assert!(inspect_result_cli(&known.join("raishot-cli.exe")).is_none());
     }
 }
