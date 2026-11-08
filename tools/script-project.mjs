@@ -143,6 +143,40 @@ function portableSdkLayout(project,manifest){
   if(nested&&present('sdk/script-api.d.ts'))names.push('script-api.d.ts');
   return {prefix,names};
 }
+function refreshSdkSnapshot(project,layout,data){
+  // 只维护已有生成布局；来源字段仅是归属标签，绝不作为读取路径。
+  if(layout.prefix!=='sdk/')return null;
+  const file=path.join(project,'sdk/snapshot.json');guard(file,true);
+  if(!existsSync(file))return null;
+  const before=read(file);let snapshot;
+  try{snapshot=JSON.parse(before);}catch{throw Error('project_sdk_snapshot_unrecognized');}
+  const names=['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts'];
+  const keys=(value,expected)=>value!==null&&typeof value==='object'&&!Array.isArray(value)
+    &&JSON.stringify(Object.keys(value))===JSON.stringify(expected);
+  const contracts=[
+    ['ctx.desktop.stepBrightness','display.brightness_step','source'],
+    ['ctx.desktop.adjustVolume','audio.volume_adjust','canonical_source'],
+  ];
+  const contract=contracts.find(([api,wire])=>snapshot?.required_api===api&&snapshot?.wire===wire);
+  if(!keys(snapshot,['schema_version','required_api','wire','files'])||snapshot.schema_version!==1
+      ||!contract||!keys(snapshot.files,names))throw Error('project_sdk_snapshot_unrecognized');
+  const generated=JSON.stringify(snapshot,null,2)+'\n';
+  const crlf=before===generated.replaceAll('\n','\r\n');
+  if(before!==generated&&!crlf)throw Error('project_sdk_snapshot_unrecognized');
+  const digest=text=>createHash('sha256').update(text,'utf8').digest('hex');
+  for(const name of names){
+    const item=data.find(item=>item.name===name),entry=snapshot.files[name],label=contract[2];
+    if(!item||!keys(entry,[label,'sha256'])||entry[label]!=='crates/omnitrigger-actions/runtime/'+name
+        ||typeof entry.sha256!=='string'||!/^[a-f0-9]{64}$/.test(entry.sha256))throw Error('project_sdk_snapshot_unrecognized');
+    if(!canonicalSdkHashes[name].includes(digest(item.before))||!canonicalSdkHashes[name].includes(digest(item.text)))
+      throw Error('project_sdk_unrecognized');
+    // 已知版本间可能已发生声明更新，旧生成指纹仍可按已知归属一起刷新。
+    if(!canonicalSdkHashes[name].includes(entry.sha256))throw Error('project_sdk_snapshot_unrecognized');
+    entry.sha256=digest(item.text);
+  }
+  const text=JSON.stringify(snapshot,null,2)+'\n';
+  return {name:'snapshot.json',file,before,text:crlf?text.replaceAll('\n','\r\n'):text};
+}
 function refreshPortableSdk(project,source,runtime,layout){
   const sourceRoot=path.join(source,'crates/omnitrigger-actions/runtime');
   const files=layout.names.map(name=>path.join(project,layout.prefix+name));
@@ -151,15 +185,15 @@ function refreshPortableSdk(project,source,runtime,layout){
     const file=files[index],before=texts[index],text=texts[files.length+index];
     const digest=createHash('sha256').update(before,'utf8').digest('hex');
     if(before!==text&&!canonicalSdkHashes[name].includes(digest))throw Error('project_sdk_unrecognized');
-    return {file,before,text};
+    return {name,file,before,text};
   });
-  // 所有声明先通过归属校验；写入前再复查，作者同时改动时拒绝覆盖。
-  for(const item of data){
-    if(read(item.file)!==item.before)throw Error('project_sdk_changed');
-    if(item.before!==item.text)write(item.file,item.text);
-  }
+  const snapshot=refreshSdkSnapshot(project,layout,data);if(snapshot)data.push(snapshot);
+  // 声明和已有快照全部预检、复查后才开始写入；未知作者修改不会部分覆盖。
+  const current=readMany(data.map(item=>item.file));
+  if(data.some((item,index)=>current[index]!==item.before))throw Error('project_sdk_changed');
+  for(const item of data)if(item.before!==item.text)write(item.file,item.text);
   return {status:'refreshed',runtime,package_root:project,layout:layout.prefix?'sdk':'flat',
-    files:layout.names.map(name=>layout.prefix+name),author_files_changed:false};
+    files:data.map(item=>layout.prefix+item.name),author_files_changed:false};
 }
 function refresh(project,source,runtime){
   project=path.resolve(project);const [manifestText]=readMany([path.join(project,'action.json')],[project]);
