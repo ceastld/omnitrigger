@@ -1,6 +1,6 @@
 import {prepareInput,verifyProfiles,verifyWindow,verifyTab,createReceipt,acknowledge,failedReceipt} from './close-common.mjs';
 
-/** @type {ScriptMain} */
+/** @param {ScriptContext} ctx @returns {ScriptJsonValue} */
 export function main(ctx) {
   const input = prepareInput(ctx.input);
   const options = Object.freeze({profile:input.profile,timeoutMs:input.timeoutMs});

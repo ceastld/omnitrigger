@@ -54,6 +54,8 @@ export default async function main(ctx) {
 
 在 VS Code 中打开包含 `action.json` 和 `jsconfig.json` 的动作包根文件夹，再打开入口。启用内置 JavaScript/TypeScript 语言功能时，语言服务会自动发现入口所在目录的 `jsconfig.json`；不必把 SDK 声明逐个手动打开。新建 Node 工程先按下文安装本工程开发依赖，轻量工程无需 Node 环境类型。补全依赖入口的 JSDoc 标注：Node 使用 `import('./sdk/api').ActionContext`，轻量模块使用 `ScriptMain`。跳转定义应落到当前包的 SDK，Node API 的补全签名包含 Promise；轻量 API 的原方法保持同步，新增 `browser.callAsync/profilesAsync` 返回 Promise。新版轻量宿主提供全局 UTF-8 `TextEncoder` 的 `encoding/encode/encodeInto`，使用 ES2022 和 `types:[]` 即可检查，无需增加 DOM 或 Node 环境类型。
 
+`ScriptMain` 描述可返回 JSON 或 Promise 的通用入口。需要让其他模块直接同步调用入口时，可改用 `@param {ScriptContext} ctx` 和 `@returns {ScriptJsonValue}` 明确同步返回类型；直接声明 async 函数时使用 `ScriptAsyncMain`。
+
 每个动作包保留自己的配置和声明快照。不要为了同时编辑多个包而把它们的 SDK 声明汇总到一个 `jsconfig.json`；这会混合不同全局声明或带独立标记的捕获类型。修改代码后的错误应定位到当前入口的行列，例如 Node 未等待 `ctx.desktop.target()` 就读取 `processName`，或调用不存在的 API。
 
 开发工具 `tools/script-project.mjs` 只有 `create` 和 `refresh`，没有 `check` 子命令。Node 工程可继续使用下文的 `npm run check`；Node、轻量或混合普通包及生成工程也可在仓库根使用同一受限静态检查入口：
