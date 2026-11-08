@@ -82,10 +82,13 @@ const scriptSource=readFileSync(new URL('../../tools/js-engine-probe/src/sdk.js'
 new vm.Script(scriptSource,{filename:'formal-complete-script-sdk.js'});
 const scriptAst=ts.createSourceFile('sdk.js',scriptSource,ts.ScriptTarget.ESNext,true,ts.ScriptKind.JS);
 assert.equal(scriptAst.parseDiagnostics.length,0);
-const sdkFunction=name=>{const n=scriptAst.statements.find(n=>ts.isFunctionDeclaration(n)&&n.name?.text===name);assert(n,name);return n.getText(scriptAst);};
-const scriptFactory=new vm.Script(`(__hostCall)=>{${desktopSource};const nativeCall=__hostCall,encode=JSON.stringify.bind(JSON),decode=JSON.parse.bind(JSON);
-let calls=0,nativeId=0;const actionsScope=true,nativeContextAvailable=true,nativeContext={connection:{port:1,token:'a'.repeat(64)}};
-${sdkFunction('call')};${sdkFunction('desktopCall')};return createDesktopApi(desktopCall).desktop;}`).runInThisContext();
+const scriptShared=[desktopSource,...['browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js','state-api.js']
+ .map(name=>readFileSync(new URL('../../crates/omnitrigger-actions/runtime/'+name,import.meta.url),'utf8'))].join('\n');
+// 执行完整前端及真实工厂；只注入正常应用桥的ctx/globalThis，避免复制私有闭包变量。
+// 同一V8 realm保留业务JSON对象的原型，FFI仍仅记录并返回合成JSON。
+const scriptFactory=new vm.Script(`(__hostCall)=>{const globalThis={__hostCall};
+const ctx={input:{},__localDesktopAllowed:false,__nativeContext:{connection:{port:1,token:'a'.repeat(64)},native_context_available:true,actions_scope:true}};
+${scriptShared}\n${scriptSource}\nreturn ctx.desktop;}`).runInThisContext();
 for(const captured of [false,true])for(const phase of ['success','class','unknown','restore','write'])test(`Script生产前端+模拟JSON FFI（V8） ${captured?'B':'A'}：${phase}`,()=>{
  const calls=[];let restored=false;
  const desktop=scriptFactory(raw=>{
