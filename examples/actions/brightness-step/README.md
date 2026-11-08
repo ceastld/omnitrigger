@@ -12,10 +12,20 @@
 
 结果原样保留SDK的匿名逐项回执。外层返回不代表每台设备成功，顶层unknown也不能替代成员confirmed；WMI的set不保证最终读回等于请求。取消或期限不撤销已经发生的写入，不自动重试或反向恢复。single_instance按包和动作ID生效，不承诺两个入口之间的设备互斥。
 
-作者环境使用包内sdk声明和严格jsconfig。sdk/snapshot.json记录声明SHA；声明不替代宿主能力检查。仓库已安装tools/script-sdk-check依赖时，可在仓库根进行纯检查：
+作者环境使用包内sdk声明和严格jsconfig。在本工程目录中可独立安装并检查，不需要仓库的crates、tools或node_modules：
 
 ```powershell
-node tools/script-sdk-check/node_modules/typescript/bin/tsc --project examples/actions/brightness-step/jsconfig.json
+npm ci --ignore-scripts
+npm run check
+```
+
+TypeScript 5.9.3仅为开发依赖。检查同时覆盖两个入口，保持strict、exactOptionalPropertyTypes、noUncheckedIndexedAccess及skipLibCheck:false；只加载ES2022和本包SDK，不向Script加入DOM或Node全局。入口检查器只分析源码，不导入作者模块。
+
+sdk/snapshot.json记录本包声明的SHA256；check命令逐项核对包内文件，不读取清单中的仓库来源路径。指纹或类型检查通过不替代宿主能力检查。
+
+仓库中的业务回归仍可显式执行：
+
+```powershell
 node --test examples/actions/brightness-step/recipes.test.mjs
 ```
 

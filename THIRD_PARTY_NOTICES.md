@@ -43,9 +43,19 @@ Windows 发行流程通过 `scripts/collect-licenses.ps1` 从锁定目标的应�
 
 ## 可选的 Node.js 运行环境
 
+`examples/actions/common-desktop` 的作者检查使用下述同一版本的 TypeScript 及 Apache-2.0 许可，仅作开发依赖，SDK 不包含编译器。
+
+`examples/actions/keyboard-sequence` 的独立作者检查固定 TypeScript 5.9.3（Apache-2.0）作为开发依赖；来源和完整性见本包 package-lock.json，安装后的许可证位于 node_modules/typescript/LICENSE.txt，不增加动作运行依赖。
+
 `tools/script-sdk-check` 仅用于开发与 CI 的工程生成和类型校验，锁定 TypeScript 5.9.3（Apache-2.0）。已核对 npm 包声明及随包 `LICENSE.txt`；上游见 [TypeScript 许可](https://github.com/microsoft/TypeScript/blob/v5.9.3/LICENSE.txt)。该编译器不内嵌到应用、脚本宿主或生成的 SDK 快照，动作运行不要求安装它；新建 Node 工程仅在作者显式安装开发依赖后使用它检查代码。版本、下载来源及完整性记录在该目录的 `package-lock.json`。
 
-新建 Node 工程及 `examples/actions/mixed-projects` 示例的开发清单固定 TypeScript 5.9.3（Apache-2.0）与 `@types/node 22.20.5`（MIT，DefinitelyTyped）；后者声明依赖 `undici-types ~6.21.0`（MIT，Node.js Undici）。已核对官方 npm 元数据、完整性与随包 LICENSE；来源为 [Node 声明](https://www.npmjs.com/package/@types/node/v/22.20.5)、[Undici 声明](https://www.npmjs.com/package/undici-types/v/6.21.0)。这些依赖仅由作者显式执行 `npm install --ignore-scripts` 安装到自己的工程；生成器不下载或执行 npm，SDK 不包含它们的源码，也不引入 npm 运行依赖。实际依赖版本和完整性由工程自己的 `package-lock.json` 记录。
+新建 Node 工程及 `examples/actions/mixed-projects`、`examples/actions/source-file-preview` 示例的开发清单固定 TypeScript 5.9.3（Apache-2.0）与 `@types/node 22.20.5`（MIT，DefinitelyTyped）；后者声明依赖 `undici-types ~6.21.0`（MIT，Node.js Undici）。已核对官方 npm 元数据、完整性与随包 LICENSE；来源为 [Node 声明](https://www.npmjs.com/package/@types/node/v/22.20.5)、[Undici 声明](https://www.npmjs.com/package/undici-types/v/6.21.0)。这些依赖仅由作者显式执行 `npm install --ignore-scripts` 安装到自己的工程；生成器不下载或执行 npm，SDK 不包含它们的源码，也不引入 npm 运行依赖。实际依赖版本和完整性由工程自己的 `package-lock.json` 记录。
+
+`examples/actions/water-reminder`、`examples/actions/desktop-line-edit`、`examples/actions/json-text` 与 `examples/actions/line-text` 的独立作者检查仅使用上述 TypeScript 5.9.3（Apache-2.0）及本项目 SDK。版本和完整性由各包 package-lock.json 固定，安装后的许可证位于 node_modules/typescript/LICENSE.txt；不新增运行依赖。
+
+`examples/actions/selection-line-cleanup` 的独立作者检查固定 TypeScript 5.9.3（Apache-2.0）作为开发依赖；来源和完整性见本包 package-lock.json，安装后的许可证位于 node_modules/typescript/LICENSE.txt，不增加动作运行依赖。
+
+`examples/actions/browser-close` 的作者检查仅使用上述 TypeScript 5.9.3（Apache-2.0）和本项目 SDK；该示例不安装 Node 环境声明，也不引入新的运行依赖。
 
 本地 JavaScript 动作包使用用户安装的 Node.js。当前应用不下载或分发 Node 二进制，不引入 npm 运行依赖；内嵌的 JS 宿主与仓库示例由本项目实现，按项目 MIT 许可证提供。`omnitrigger-actions` 复用工作区已锁定的 `serde` 和 `serde_json`，没有新增第三方 Rust 包。
 
@@ -94,3 +104,7 @@ RaiShot 截图适配描述和 OmniTrigger 安装器属于本项目代码；截�
 `examples/actions/n10-rust` 的清单、JavaScript 适配代码、文档和禁用配置草稿由本项目编写，按 MIT 提供，复用已有 script SDK，不新增第三方库或 Cargo/npm 依赖。
 
 该包仅调用明确指定的本地 eaclip-cli 与 Rust 宿主，没有复制或分发外部原生二进制、运行库、源码及素材。外部程序由独立本地安装提供，其许可证、版权和依赖通知须随相应制品保留，不能由本项目 MIT 声明替代。脚本宿主与引擎仍适用本文件已有的独立许可及开发分发说明。
+
+`examples/actions/browser-workflows` 与 `examples/actions/common-search` 的离仓作者检查同样固定 TypeScript 5.9.3（Apache-2.0）作为开发依赖，版本、来源和完整性由各包 package-lock.json 记录；不增加运行依赖，也不向 Script 注入 DOM 或 Node 环境声明。
+
+`examples/actions/brightness-step` 的独立作者检查固定 TypeScript 5.9.3（Apache-2.0）作为开发依赖，来源和完整性见本包 package-lock.json，安装后的许可证位于 node_modules/typescript/LICENSE.txt；不增加动作运行依赖，也不向 Script 加入 DOM 或 Node 环境声明。

@@ -46,7 +46,7 @@ test('主导出优先于星号，再导出未知不冒充缺失',()=>{
 test('坏语法、大小和不支持的入口类型返回结构化拒绝',()=>{
   assert.equal(inspect('export function main( {').diagnostics[0].code,'entry_syntax_invalid');
   assert.equal(inspect('x'.repeat(128*1024+1)).diagnostics[0].code,'entry_snapshot_invalid');
-  assert.equal(analyzeScriptEntry({file:'legacy.js',text:''}).diagnostics[0].code,'entry_snapshot_invalid');
+  assert.equal(analyzeScriptEntry({file:'legacy.cjs',text:''}).diagnostics[0].code,'entry_snapshot_invalid');
   assert.equal(analyzeScriptEntry().passed,false);
   for(const invalid of [null,[],4])assert.equal(analyzeScriptEntry(invalid).passed,false);
 });

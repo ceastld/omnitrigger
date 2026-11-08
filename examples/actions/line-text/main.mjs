@@ -1,4 +1,5 @@
 import {prepare,done,send,complete,sanitized} from './workflow.mjs';
+/** @param {import('./line-types').NodeContext} ctx @returns {Promise<import('./line-types').LineReceipt>} */
 export default async function main(ctx){
   let method='script.parameters';
   try{

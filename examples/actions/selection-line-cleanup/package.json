@@ -1,0 +1,14 @@
+{
+  "name": "omnitrigger-selection-line-cleanup-example",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "node ./node_modules/typescript/bin/tsc --project jsconfig.json && node ./sdk/check-node-entry.cjs ."
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

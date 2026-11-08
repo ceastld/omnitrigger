@@ -32,7 +32,7 @@ function diagnostics(path) {
   const configPath = join(path, 'jsconfig.json');
   const loaded = ts.readConfigFile(configPath, ts.sys.readFile);
   assert.equal(loaded.error, undefined);
-  const parsed = ts.parseJsonConfigFileContent(loaded.config, ts.sys, path);
+  const parsed = ts.parseJsonConfigFileContent(loaded.config, ts.sys, path, undefined, configPath);
   assert.deepEqual(parsed.errors, []);
   const program = ts.createProgram(parsed.fileNames, parsed.options);
   return ts.getPreEmitDiagnostics(program);

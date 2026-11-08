@@ -9,10 +9,10 @@
     "moduleResolution": "Bundler",
     "moduleDetection": "force",
     "lib": [
-      "ES2022",
-      "DOM"
+      "ES2022"
     ],
-    "types": []
+    "types": [],
+    "skipLibCheck": false
   },
   "files": [
     "main.mjs",

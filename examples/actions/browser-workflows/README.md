@@ -122,4 +122,24 @@ API 语义依据：[Chrome Tabs API](https://developer.chrome.com/docs/extension
 同步入口返回JSON，不返回Promise；宿主进程被外层取消或强停时，仍由既有ActionService管理终态，不能保证脚本有机会返回回执。脚本内部不查询前台、剪贴板、URL或活动标签。
 
 
-仓库内的同步入口严格工程直接引用 `crates/omnitrigger-actions/runtime/script-types.d.ts`，不新增 SDK 声明副本；`tests/browser_restore_session_sync_types.json` 检查完整 `ScriptMain` / `ScriptContext` 与同步返回值契约。
+本包的 `jsconfig.json` 同时检查五个 Node、两个同步入口及共用模块。Node 上下文引用同包 `sdk/api.d.ts`，同步入口引用 `sdk/script-types.d.ts`；移动工程时保留整个 `sdk` 目录。这里沿用包内声明，不依赖仓库其它目录，也不因类型检查自动升级宿主或扩展。
+
+在本工程目录中安装固定版本的开发依赖后，可独立检查；不需要仓库的 crates、tools 或 node_modules：
+
+```powershell
+npm ci --ignore-scripts
+npm run check
+```
+
+TypeScript 5.9.3 仅为开发依赖。检查读取本包声明并静态核验五个 Node 入口，不导入或执行作者模块；Script 环境仍不加载 DOM 或 Node 全局。
+
+检查不导入或运行作者入口，不连接浏览器。通过只表示当前声明和静态入口约束没有错误，仍需分别核对运行时能力、扩展权限及目标浏览器行为。URL 仅在私有解析函数中按宿主实际能力局部引用，不向同步编辑器声明 DOM 或全局 URL。
+
+
+### 作者环境与 URL
+
+作者检查只加载 ES2022 和本包的 Node/Script SDK，`types:[]`、`strict:true`、`skipLibCheck:false`，覆盖清单中全部七个入口及共享模块，不向编辑器注入 DOM 的 window/document 等全局。
+
+两个私有网址解析函数局部读取宿主实际提供的标准 URL 构造器，并声明仅使用到的 href/protocol/username/password 类型。Node 仍使用当前标准 URL 解析，构造参数、规范化及凭据/协议检查保留；没有增加解析器、运行依赖或打开方式。没有 URL 的宿主明确进入原有错误处理，不补 polyfill，也不向 Script 声明全局 URL 能力。同步的新建默认标签和恢复会话路径不调用这些解析函数。
+
+包内类型入口统一指向本包 SDK；声明更新不代表运行时具备新的平台能力。严格检查与新增环境反例只分析源码，不调用浏览器或执行作者入口。

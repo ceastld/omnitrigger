@@ -4,9 +4,18 @@
     "checkJs": true,
     "strict": true,
     "noEmit": true,
-    "target": "ES2020",
-    "lib": ["ES2020"],
-    "types": []
+    "target": "ES2022",
+    "lib": [
+      "ES2022"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": [],
+    "skipLibCheck": false
   },
-  "files": ["main.js"]
+  "files": [
+    "main.js",
+    "main.mjs",
+    "sdk/script-types.d.ts"
+  ]
 }

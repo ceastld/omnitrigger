@@ -1,7 +1,21 @@
 {
   "compilerOptions": {
-    "allowJs": true, "checkJs": true, "strict": true, "noEmit": true,
-    "target": "ES2020", "lib": ["ES2020"], "types": []
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2020",
+    "lib": [
+      "ES2020"
+    ],
+    "types": [],
+    "skipLibCheck": false
   },
-  "files": ["close.js", "window.js", "paste-arrow.js", "system-panel.js", "../../../tools/js-engine-probe/api.d.ts"]
+  "files": [
+    "close.js",
+    "window.js",
+    "paste-arrow.js",
+    "system-panel.js",
+    "sdk/api.d.ts"
+  ]
 }

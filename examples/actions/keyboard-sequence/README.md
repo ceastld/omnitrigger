@@ -58,3 +58,16 @@ Node 与同步入口均通过 SDK JSDoc 和本包 `jsconfig.json` 检查；同�
 复制整个包目录时保留 `sdk.d.ts`、`sdk/` 和 `jsconfig.json`。Node 与同步 Script 入口使用包内声明，可脱离源码仓库获得补全与严格检查；无需依赖仓库的相对路径。声明固定于公开提交 `e51a45b8e312e4edc71ee4003039b0875842bb3e`，来源见 `sdk/README.md`。这些文件只提供编辑器类型，运行时仍由 OmniTrigger 注入 ctx。
 
 两个折叠入口分别启用动作单实例：同一动作服务中，同一动作 ID 的前一调用未结束时，宿主拒绝再次启动，避免该入口的两段输入交错。Node 与 Script 是不同动作 ID；绑定时选用其中一个入口，不据此假定跨入口互斥。输入序列和 50ms 等待保持不变。
+
+## 独立作者检查
+
+在本工程目录中使用 Node.js 22 或以上版本执行：
+
+```powershell
+npm ci --ignore-scripts
+npm run check
+```
+
+TypeScript 5.9.3 仅为开发依赖，版本与完整性由本包锁文件固定。检查使用本包 SDK，不需要仓库的 crates、tools 或 node_modules；strict、skipLibCheck:false、ES2020 与 types:[] 同时生效，覆盖清单全部入口及共享模块，不导入或执行作者动作。Node 上下文保持异步，Script 上下文保持同步，不向 Script 加入 DOM 或 Node 全局。
+
+开发清单不设置 package.type，保留既有 .js 函数体与 .mjs 模块的解释。静态通过不代表输入已发送、原目标仍有效或宿主具备相应能力；旧函数体入口的加载和业务效果仍需运行时验证。
