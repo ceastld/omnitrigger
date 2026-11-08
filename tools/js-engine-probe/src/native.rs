@@ -10,7 +10,10 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 44] = [
+pub const METHODS: [&str; 47] = [
+    "process.capture",
+    "system.open",
+    "system.open_file_in_parent",
     "actions.stop_other_instances",
     "state.read",
     "state.compare_and_swap",
@@ -92,7 +95,11 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
             code
         })
         .into(),
-        message: if method == "ui.action_hint" {
+        message: if method == "process.capture" {
+            "程序输出采集未完成，请检查错误代码。".into()
+        } else if method == "system.open" || method == "system.open_file_in_parent" {
+            "打开请求未获完整确认；不会本地回退或重试。".into()
+        } else if method == "ui.action_hint" {
             "动作版本提示更新未确认；请检查错误代码和效果状态。".into()
         } else if matches!(
             method,
@@ -149,6 +156,9 @@ fn brightness_transport_effect(
             | "win32_edit.replace_selection"
             | "raishot.resident.find"
             | "raishot.resident.region"
+            | "system.open"
+            | "system.open_file_in_parent"
+            | "process.capture"
             | "clipboard.write_files"
             | "window.geometry"
             | "window.set_rect"
@@ -166,6 +176,36 @@ fn brightness_transport_effect(
     } else {
         fallback
     }
+}
+
+// 回执排空余量不扩张实际采集timeout或外层动作deadline。
+fn method_wait_budget(method: &str, params: &Value) -> Result<Duration, ApiError> {
+    if method == "process.capture" {
+        let timeout = match params.get("timeout_ms") {
+            None => 10_000,
+            Some(value) => value
+                .as_u64()
+                .filter(|value| (1..=60_000).contains(value))
+                .ok_or_else(|| {
+                    fault("invalid_input", "采集超时参数无效。", method, "not_started")
+                })?,
+        };
+        return Ok(Duration::from_millis(timeout + 1500));
+    }
+    Ok(Duration::from_secs(
+        if method.starts_with("browser.")
+            || method == "ui.choose"
+            || method == "system.open"
+            || method == "system.open_file_in_parent"
+            || matches!(method, "display.brightness_step" | "audio.volume_adjust")
+        {
+            66
+        } else if method == "selection.copy_data" {
+            8
+        } else {
+            5
+        },
+    ))
 }
 
 pub fn call(
@@ -201,26 +241,12 @@ pub fn call(
             "not_started",
         ));
     }
+    let wait_budget = method_wait_budget(&method, &params)?;
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, connection.port));
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))
         .map_err(|cause| fault("native_bridge_unavailable", cause, &method, "not_started"))?;
     let browser = method.starts_with("browser.");
-    let deadline = Instant::now()
-        + Duration::from_secs(
-            if browser
-                || method == "ui.choose"
-                || matches!(
-                    method.as_str(),
-                    "display.brightness_step" | "audio.volume_adjust"
-                )
-            {
-                66
-            } else if method == "selection.copy_data" {
-                8
-            } else {
-                5
-            },
-        );
+    let deadline = Instant::now() + wait_budget;
     let response_limit = if browser {
         32 * 1024 * 1024 + 1024
     } else {
@@ -250,6 +276,9 @@ pub fn call(
                 | "win32_edit.replace_selection"
                 | "raishot.resident.find"
                 | "raishot.resident.region"
+                | "system.open"
+                | "system.open_file_in_parent"
+                | "process.capture"
                 | "clipboard.write_files"
                 | "window.geometry"
                 | "window.set_rect"
@@ -280,6 +309,9 @@ pub fn call(
                         | "win32_edit.replace_selection"
                         | "raishot.resident.find"
                         | "raishot.resident.region"
+                        | "system.open"
+                        | "system.open_file_in_parent"
+                        | "process.capture"
                         | "clipboard.write_files"
                         | "window.geometry"
                         | "window.set_rect"
@@ -324,6 +356,9 @@ pub fn call(
                         | "win32_edit.replace_selection"
                         | "raishot.resident.find"
                         | "raishot.resident.region"
+                        | "system.open"
+                        | "system.open_file_in_parent"
+                        | "process.capture"
                         | "clipboard.write_files"
                         | "window.geometry"
                         | "window.set_rect"
@@ -351,6 +386,9 @@ pub fn call(
                                 | "win32_edit.replace_selection"
                                 | "raishot.resident.find"
                                 | "raishot.resident.region"
+                                | "system.open"
+                                | "system.open_file_in_parent"
+                                | "process.capture"
                                 | "clipboard.write_files"
                                 | "window.geometry"
                                 | "window.set_rect"
@@ -412,6 +450,9 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
         fault(
             if method == "win32_edit.replace_selection"
                 || method.starts_with("raishot.resident.")
+                || method == "system.open"
+                || method == "system.open_file_in_parent"
+                || method == "process.capture"
                 || method == "clipboard.write_files"
             {
                 "invalid_response"
@@ -492,6 +533,9 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "win32_edit.replace_selection"
                     | "raishot.resident.find"
                     | "raishot.resident.region"
+                    | "system.open"
+                    | "system.open_file_in_parent"
+                    | "process.capture"
                     | "clipboard.write_files"
                     | "window.geometry"
                     | "window.set_rect"
@@ -536,6 +580,9 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "win32_edit.replace_selection"
                     | "raishot.resident.find"
                     | "raishot.resident.region"
+                    | "system.open"
+                    | "system.open_file_in_parent"
+                    | "process.capture"
                     | "clipboard.write_files"
                     | "window.geometry"
                     | "window.set_rect"
@@ -558,6 +605,95 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn process_capture_wait_budget_uses_timeout_without_network_or_execution() {
+        for (params, expected) in [
+            (json!({}), 11500),
+            (json!({"timeout_ms":1500}), 3000),
+            (json!({"timeout_ms":25000}), 26500),
+            (json!({"timeout_ms":60000}), 61500),
+        ] {
+            assert_eq!(
+                method_wait_budget("process.capture", &params).unwrap(),
+                Duration::from_millis(expected)
+            );
+        }
+        for timeout in [
+            json!(0),
+            json!(60001),
+            json!("1000"),
+            json!(true),
+            json!(null),
+        ] {
+            let error =
+                method_wait_budget("process.capture", &json!({"timeout_ms":timeout})).unwrap_err();
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+            assert_eq!(error.method.as_deref(), Some("process.capture"));
+        }
+        assert_eq!(
+            method_wait_budget("clipboard.read", &json!({})).unwrap(),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            method_wait_budget("system.open", &json!({})).unwrap(),
+            Duration::from_secs(66)
+        );
+    }
+    #[test]
+    fn process_capture_response_identity_and_submission_effects_are_checked_in_memory() {
+        assert!(METHODS.contains(&"process.capture"));
+        assert_eq!(
+            brightness_transport_effect("process.capture", false, "unknown"),
+            "not_started"
+        );
+        assert_eq!(
+            brightness_transport_effect("process.capture", true, "unknown"),
+            "unknown"
+        );
+        let body = json!({"id":1,"ok":false,"error":{"code":"process_timeout","message":"private argv/output",
+            "method":"process.capture","effect_state":"unknown","required_permissions":["private"]}});
+        let bytes = format!("{body}\n");
+        let error = parse_response(bytes.as_bytes(), 1, "process.capture").unwrap_err();
+        assert_eq!(error.code, "process_timeout");
+        assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+        assert!(!error.message.contains("private"));
+        assert!(error.required_permissions.is_empty());
+        let mut mismatch = body;
+        mismatch["error"]["method"] = "system.open".into();
+        let error =
+            parse_response(format!("{mismatch}\n").as_bytes(), 1, "process.capture").unwrap_err();
+        assert_eq!(error.code, "invalid_response");
+        assert_eq!(error.method.as_deref(), Some("process.capture"));
+        assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn opening_native_policy_preserves_submission_boundary_without_network() {
+        for method in ["system.open", "system.open_file_in_parent"] {
+            assert!(METHODS.contains(&method));
+            assert_eq!(
+                brightness_transport_effect(method, false, "unknown"),
+                "not_started"
+            );
+            assert_eq!(
+                brightness_transport_effect(method, true, "unknown"),
+                "unknown"
+            );
+            let response = json!({"id":1,"ok":false,"error":{"code":"open_failed","message":"synthetic",
+                "method":method,"effect_state":"unknown"}});
+            let bytes = format!("{response}\n");
+            let error = parse_response(bytes.as_bytes(), 1, method).unwrap_err();
+            assert_eq!(error.code, "open_failed");
+            assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+            assert_eq!(error.method.as_deref(), Some(method));
+            let other = if method == "system.open" {
+                "system.open_file_in_parent"
+            } else {
+                "system.open"
+            };
+            assert!(parse_response(bytes.as_bytes(), 1, other).is_err());
+        }
+    }
     use std::{net::TcpListener, thread};
 
     #[test]

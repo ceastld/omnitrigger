@@ -85,6 +85,9 @@ struct Request {
     package_root: Option<String>,
     #[serde(default)]
     native_context: Option<Value>,
+    /// Host绑定由生产者明确标记，即使建桥失败也禁止本地桌面回退。
+    #[serde(default)]
+    desktop_mode: Option<api::DesktopMode>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -171,7 +174,12 @@ fn run() -> Result<Value, Value> {
         }
         None
     };
-    let metadata = json!({"invocation":request.invocation,"packageRoot":request.package_root,"__nativeContext":request.native_context});
+    let desktop_mode =
+        api::DesktopMode::resolve(request.desktop_mode, request.native_context.as_ref())
+            .map_err(|error| serde_json::to_value(error).expect("API error JSON"))?;
+    let _desktop_scope = api::DesktopScope::enter(desktop_mode);
+    let metadata = json!({"invocation":request.invocation,"packageRoot":request.package_root,
+        "__nativeContext":request.native_context,"__localDesktopAllowed":desktop_mode.local_allowed()});
     let metadata =
         serde_json::to_string(&metadata.to_string()).map_err(|error| error.to_string())?;
     // 将 JSON 编码为 JS 字符串再解析，避免 __proto__ 对象字面量语义及参数插值。

@@ -110,6 +110,7 @@ function nativeCall(method, params) {
   const volume = method === 'audio.volume_adjust';
   const brightness = method === 'display.brightness_step' || volume;
   const stat = method === 'fs.stat' || method === 'fs.read_directory';
+  const statPath = method === 'fs.stat';
   const dataRead = method === 'clipboard.read_data' || method === 'selection.read_text' || method === 'explorer.context' || ['window.geometry','pointer.state','pointer.root'].includes(method);
   const dataCopy = method === 'selection.copy_data';
   const data = dataRead || dataCopy;
@@ -123,7 +124,7 @@ function nativeCall(method, params) {
   checkCancelled();
   const ui = method === 'ui.choose' || method === 'ui.notify' || historyUi;
   const unavailable = ui && request.native_error?.code === 'desktop_unavailable' ? 'ui_unavailable' : request.native_error?.code;
-  if (!request.native || !actionControl && !actionHint && request.native_context_available === false) return Promise.reject(fail(actionControl ? 'actions_unavailable' : capture || brightness || edit ? 'native_bridge_unavailable' : history ? 'history_unavailable' : data ? 'native_bridge_unavailable' : stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
+  if (!request.native || !actionControl && !actionHint && !capture && !opening && !statPath && request.native_context_available === false) return Promise.reject(fail(actionControl ? 'actions_unavailable' : capture || brightness || edit ? 'native_bridge_unavailable' : history ? 'history_unavailable' : data ? 'native_bridge_unavailable' : stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
   if (nativePending) return Promise.reject(fail(stat ? 'fs_busy' : method === 'ui.toggle_history' && ['ui.choose','ui.open_history','ui.toggle_history'].includes(nativePendingMethod) ? 'ui_busy' : (method === 'ui.notify' || historyUi) && nativePendingMethod === method ? 'ui_busy' : 'desktop_busy', '请 await 上一个本机调用，避免并发。'));
   if (nativeId >= 128) return Promise.reject(fail('desktop_call_limit', '单次动作最多调用 128 次桌面 API。'));
   const id = ++nativeId;
