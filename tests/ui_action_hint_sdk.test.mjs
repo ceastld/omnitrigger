@@ -84,3 +84,30 @@ test('产品Node守卫保留scope-only与desktop边界，自述Windows14非Windo
   assert(base.includes('state.read_cas.v1')&&base.includes('actions.stop_other_instances.v1'));
   assert.match(read('tools/js-engine-probe/tests/runtime_description.rs'),/if cfg!\(windows\) \{ 14 \} else \{ 5 \}/);
 });
+
+for(const asynchronous of [false,true]) {
+  test(`角标 placement ${asynchronous?'Node':'Script'} 默认wire保持、显式位置只调用一次`,async()=>{
+    const {ui,calls}=api(asynchronous,()=>({updated:true}));
+    for(const options of [{text:'n10'},{text:'n10',placement:'inline'},{text:'n10',placement:'topRight'}]){
+      assert.deepEqual(plain(await ui.setActionHint(options)),{updated:true});
+      assert.deepEqual(calls.at(-1),{method:'ui.action_hint',params:options});
+    }
+    assert.equal(calls.length,3);
+  });
+  test(`角标 placement ${asynchronous?'Node':'Script'} 坏位置与getter零Host调用`,async()=>{
+    const {ui,calls}=api(asynchronous,()=>({updated:true}));let getters=0;
+    for(const options of [{text:'n10',placement:null},{text:'n10',placement:undefined},{text:'n10',placement:'bottomRight'},{text:'n10',placement:1},{text:'n10',get placement(){getters++;return 'topRight';}}]){
+      if(asynchronous)await assert.rejects(ui.setActionHint(options),fault('invalid_input'));
+      else assert.throws(()=>ui.setActionHint(options),fault('invalid_input'));
+    }
+    assert.equal(getters,0);assert.equal(calls.length,0);
+  });
+  test(`角标 placement ${asynchronous?'Node':'Script'} 坏回执unknown且不重试`,async()=>{
+    for(const value of [null,{updated:false},{updated:true,placement:'topRight'}]){
+      const {ui,calls}=api(asynchronous,()=>value);
+      if(asynchronous)await assert.rejects(ui.setActionHint({text:'n10',placement:'topRight'}),fault('invalid_response','unknown'));
+      else assert.throws(()=>ui.setActionHint({text:'n10',placement:'topRight'}),fault('invalid_response','unknown'));
+      assert.equal(calls.length,1);
+    }
+  });
+}

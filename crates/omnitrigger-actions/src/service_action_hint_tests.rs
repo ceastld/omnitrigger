@@ -20,7 +20,7 @@ impl ActionRuntime for HintRuntime {
     }
     fn execute_with_host(
         &self,
-        _: &ResolvedAction,
+        action: &ResolvedAction,
         context: &InvocationContext,
         cancellation: &CancellationToken,
         host: Option<&dyn NativeHost>,
@@ -28,7 +28,11 @@ impl ActionRuntime for HintRuntime {
         let host = host.unwrap();
         assert!(host.action_scope_available());
         assert!(!host.native_context_available());
-        let receipt = host.call("ui.action_hint", json!({"text":"n10"}), cancellation)?;
+        let mut options = json!({"text":"n10"});
+        if let Some(placement) = action.call.input.get("placement") {
+            options["placement"] = placement.clone();
+        }
+        let receipt = host.call("ui.action_hint", options, cancellation)?;
         assert_eq!(receipt["binding"], context.binding_id);
         assert_eq!(receipt["invocation"], context.invocation_id);
         Ok(receipt)
@@ -216,4 +220,47 @@ fn scoped_hint_rejects_forgery_inactive_scope_and_both_cancellation_sources_befo
         "ui_hint_scope_expired"
     );
     assert_eq!(inner.0.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn corner_hint_actual_service_forwards_only_placement_with_retained_identity() {
+    struct PlacementHost;
+    impl NativeHost for PlacementHost {
+        fn native_context_available(&self) -> bool {
+            false
+        }
+        fn call(
+            &self,
+            method: &str,
+            params: Value,
+            _: &CancellationToken,
+        ) -> Result<Value, ActionError> {
+            assert_eq!(method, crate::action_hint::SCOPED_METHOD);
+            assert_eq!(params.as_object().unwrap().len(), 3);
+            let update = crate::action_hint::ScopedActionHint::parse(params)?;
+            assert_eq!(
+                update.placement,
+                crate::action_hint::ActionHintPlacement::TopRight
+            );
+            assert_eq!(update.text, "n10");
+            assert_eq!(update.scope.binding_id, 91);
+            assert_eq!(update.scope.package_id, "hint-example");
+            assert_eq!(update.scope.action_id, "work");
+            assert_eq!(update.scope.action_version, 3);
+            Ok(
+                json!({"updated":true,"binding":update.scope.binding_id,"invocation":update.scope.invocation_id,"placement":"topRight"}),
+            )
+        }
+    }
+    let service = service();
+    let mut request = call();
+    request.input = json!({"placement":"topRight","scope":"不得转交"});
+    let invocation = service
+        .submit_with_host(91, request, Some(Arc::new(PlacementHost)))
+        .unwrap();
+    let ActionOutcome::Succeeded { output } = terminal(&service).outcome else {
+        panic!("角标应成功")
+    };
+    assert_eq!(output["invocation"], invocation);
+    assert_eq!(output["placement"], "topRight");
 }
