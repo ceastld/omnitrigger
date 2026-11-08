@@ -379,6 +379,39 @@ fn script_host_round_trip_has_real_context_without_node() {
 }
 
 #[test]
+#[ignore = "显式真实宿主；也用于验证旧同步宿主忽略新增可选连接字段"]
+fn optional_browser_async_context_keeps_plain_script_and_hidden_context_compatible() {
+    struct Host(AtomicU64);
+    impl NativeHost for Host {
+        fn browser_async_available(&self) -> bool {
+            true
+        }
+        fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ActionError::new(
+                "unexpected_native_call",
+                "纯入口不应派发本机调用。",
+            ))
+        }
+    }
+    let fixture = Fixture::new("return {version:ctx.apiVersion,input:ctx.input,hidden:Object.hasOwn(ctx,'__nativeContext')};");
+    let host = Host(AtomicU64::new(0));
+    let output = runtime()
+        .execute_with_host(
+            &fixture.action(json!({"text":"可选连接不改变同步入口"})),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap();
+    assert_eq!(
+        output,
+        json!({"version":1,"input":{"text":"可选连接不改变同步入口"},"hidden":false})
+    );
+    assert_eq!(host.0.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 #[ignore = "需要显式指定实际构建的 Boa 或 QuickJS 宿主"]
 fn script_host_executes_file_api_and_rejects_accidental_overwrite() {
     let fixture = Fixture::new("const text=ctx.fs.readText(ctx.input.source); ctx.fs.writeText(ctx.input.destination,text.trim()); return {written:true};");

@@ -26,6 +26,7 @@ struct Runtime {
     replies: Sender<Reply>,
     commits: AtomicUsize,
     calls: AtomicUsize,
+    browser_probe: Mutex<Option<BrowserAsyncProbe>>,
 }
 impl ActionRuntime for Runtime {
     fn execute(
@@ -65,6 +66,31 @@ impl ActionRuntime for Runtime {
                 Ok(json!({"old_effect_may_have_happened":true}))
             }
             "idle" => Ok(json!({})),
+            "browser_async_probe" => {
+                ready
+                    .recv_timeout(WAIT)
+                    .map_err(|_| ActionError::new("test_timeout", "浏览器探针未获许可。"))?;
+                let probe = self
+                    .browser_probe
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("一次探针请求");
+                let result = if probe.invoke {
+                    host.call_browser_async(
+                        probe.method,
+                        probe.params,
+                        &probe.token,
+                        probe.deadline,
+                    )
+                } else {
+                    Ok(json!({"available":host.browser_async_available()}))
+                };
+                self.replies
+                    .send((context.invocation_id, result.clone()))
+                    .unwrap();
+                result
+            }
             "stop" => {
                 ready
                     .recv_timeout(WAIT)
@@ -128,6 +154,7 @@ impl Harness {
             replies: replies_tx,
             commits: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
+            browser_probe: Mutex::new(None),
         });
         let mut registry = RuntimeRegistry::new();
         registry.register("controlled", runtime.clone()).unwrap();
@@ -530,4 +557,297 @@ fn unrelated_inner_host_calls_keep_original_deadline_dispatch() {
     assert_eq!(inner.0.load(Ordering::SeqCst), 2);
     h.service.cancel_all();
     h.terminal();
+}
+
+// 复用本文件既有Harness/Runtime/mpsc；不启动ScriptHost、浏览器、进程或桌面接口。
+const BROWSER_ASYNC_TEST_METHOD: &str = "browser.call";
+
+struct BrowserAsyncProbe {
+    method: &'static str,
+    invoke: bool,
+    params: Value,
+    token: CancellationToken,
+    deadline: Instant,
+}
+fn browser_async_probe(
+    invoke: bool,
+    token: CancellationToken,
+    deadline: Instant,
+) -> BrowserAsyncProbe {
+    BrowserAsyncProbe {
+        method: BROWSER_ASYNC_TEST_METHOD,
+        invoke,
+        params: json!({"profileId":"synthetic-only","method":"tabs.query",
+            "params":{"active":true,"windowId":17},"requestId":"opaque-request"}),
+        token,
+        deadline,
+    }
+}
+
+#[derive(Default)]
+struct BrowserAsyncDefaultHost(AtomicUsize);
+impl NativeHost for BrowserAsyncDefaultHost {
+    fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(ActionError::new(
+            "unexpected_plain_call",
+            "可用性查询不得派发普通调用。",
+        ))
+    }
+}
+
+struct BrowserAsyncObserved {
+    method: String,
+    params: Value,
+    token: CancellationToken,
+    deadline: Instant,
+}
+#[derive(Default)]
+struct BrowserAsyncInner {
+    plain: AtomicUsize,
+    deadline: AtomicUsize,
+    asynchronous: AtomicUsize,
+    observed: Mutex<Option<BrowserAsyncObserved>>,
+}
+impl BrowserAsyncInner {
+    fn assert_no_effects(&self) {
+        assert_eq!(self.plain.load(Ordering::SeqCst), 0);
+        assert_eq!(self.deadline.load(Ordering::SeqCst), 0);
+        assert_eq!(self.asynchronous.load(Ordering::SeqCst), 0);
+        assert!(self.observed.lock().unwrap().is_none());
+    }
+}
+impl NativeHost for BrowserAsyncInner {
+    fn browser_async_available(&self) -> bool {
+        true
+    }
+    fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+        self.plain.fetch_add(1, Ordering::SeqCst);
+        Err(ActionError::new(
+            "unexpected_plain_call",
+            "不能回落普通call。",
+        ))
+    }
+    fn call_with_deadline(
+        &self,
+        _: &str,
+        _: Value,
+        _: &CancellationToken,
+        _: Instant,
+    ) -> Result<Value, ActionError> {
+        self.deadline.fetch_add(1, Ordering::SeqCst);
+        Err(ActionError::new(
+            "unexpected_deadline_call",
+            "不能回落普通deadline路径。",
+        ))
+    }
+    fn call_browser_async(
+        &self,
+        method: &str,
+        params: Value,
+        token: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Value, ActionError> {
+        assert_eq!(self.asynchronous.fetch_add(1, Ordering::SeqCst), 0);
+        assert!(!token.is_cancelled());
+        assert!(Instant::now() < deadline);
+        *self.observed.lock().unwrap() = Some(BrowserAsyncObserved {
+            method: method.into(),
+            params,
+            token: token.clone(),
+            deadline,
+        });
+        Ok(json!({"dedicatedAsync":true}))
+    }
+}
+
+#[test]
+fn browser_async_capability_is_opt_in_through_real_service_host() {
+    for variant in ["no_inner", "trait_default", "explicit_true"] {
+        let h = Harness::new(false);
+        let ordinary = Arc::new(BrowserAsyncDefaultHost::default());
+        let asynchronous = Arc::new(BrowserAsyncInner::default());
+        assert!(
+            !ordinary.browser_async_available(),
+            "NativeHost默认不能宣告异步"
+        );
+        let inner: Option<Arc<dyn NativeHost>> = match variant {
+            "no_inner" => None,
+            "trait_default" => Some(ordinary.clone()),
+            _ => Some(asynchronous.clone()),
+        };
+        *h.runtime.browser_probe.lock().unwrap() = Some(browser_async_probe(
+            false,
+            CancellationToken::new(),
+            Instant::now() + WAIT,
+        ));
+        let current = h.start(51, call("browser_async_probe"), inner);
+        current.go.send(()).unwrap();
+        let (id, result) = h.reply();
+        assert_eq!(id, current.id);
+        assert_eq!(
+            result.unwrap(),
+            json!({"available":variant=="explicit_true"})
+        );
+        assert_eq!(h.terminal().invocation_id, current.id);
+        assert_eq!(ordinary.0.load(Ordering::SeqCst), 0);
+        asynchronous.assert_no_effects();
+    }
+}
+
+#[test]
+fn browser_async_specialized_dispatch_preserves_request_token_deadline_and_invocation() {
+    let h = Harness::new(false);
+    let inner = Arc::new(BrowserAsyncInner::default());
+    let bridge_token = CancellationToken::new();
+    let deadline = Instant::now() + WAIT;
+    let request = browser_async_probe(true, bridge_token.clone(), deadline);
+    let params = request.params.clone();
+    *h.runtime.browser_probe.lock().unwrap() = Some(request);
+    let current = h.start(52, call("browser_async_probe"), Some(inner.clone()));
+    assert!(active(&h, current.id));
+    current.go.send(()).unwrap();
+    let (id, result) = h.reply();
+    assert_eq!(id, current.id);
+    assert_eq!(result.unwrap(), json!({"dedicatedAsync":true}));
+    assert_eq!(h.terminal().invocation_id, current.id);
+    assert_eq!(inner.plain.load(Ordering::SeqCst), 0);
+    assert_eq!(inner.deadline.load(Ordering::SeqCst), 0);
+    assert_eq!(inner.asynchronous.load(Ordering::SeqCst), 1);
+    let observed = inner.observed.lock().unwrap();
+    let observed = observed.as_ref().unwrap();
+    assert_eq!(observed.method, BROWSER_ASYNC_TEST_METHOD);
+    assert_eq!(observed.params, params);
+    assert_eq!(observed.deadline, deadline, "不得重建或延长传入Instant");
+    // 同一取消源，不以Service自身token或新token替代桥接caller。
+    assert!(Arc::ptr_eq(&observed.token.0, &bridge_token.0));
+    assert!(!Arc::ptr_eq(&observed.token.0, &current.token.0));
+}
+
+#[test]
+fn browser_async_cancelled_or_expired_requests_reject_before_inner_effects() {
+    for variant in ["bridge_cancelled", "service_cancelled", "expired"] {
+        let h = Harness::new(false);
+        let inner = Arc::new(BrowserAsyncInner::default());
+        let bridge_token = CancellationToken::new();
+        if variant == "bridge_cancelled" {
+            bridge_token.cancel();
+        }
+        let deadline = if variant == "expired" {
+            Instant::now()
+        } else {
+            Instant::now() + WAIT
+        };
+        *h.runtime.browser_probe.lock().unwrap() =
+            Some(browser_async_probe(true, bridge_token.clone(), deadline));
+        let current = h.start(53, call("browser_async_probe"), Some(inner.clone()));
+        if variant == "service_cancelled" {
+            h.service.cancel_id(53);
+            assert!(current.token.is_cancelled());
+            assert!(!bridge_token.is_cancelled());
+        } else {
+            assert!(!current.token.is_cancelled());
+        }
+        current.go.send(()).unwrap();
+        let (id, result) = h.reply();
+        assert_eq!(id, current.id);
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.code,
+            if variant == "expired" {
+                "timeout"
+            } else {
+                "cancelled"
+            }
+        );
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        assert_eq!(error.method.as_deref(), Some(BROWSER_ASYNC_TEST_METHOD));
+        inner.assert_no_effects();
+        assert_eq!(h.terminal().invocation_id, current.id);
+    }
+}
+
+#[test]
+fn browser_async_completed_invocation_cannot_advertise_or_dispatch() {
+    let h = Harness::new(false);
+    let inner = Arc::new(BrowserAsyncInner::default());
+    let finished = h.start(54, call("idle"), Some(inner.clone()));
+    wait_until(|| !active(&h, finished.id));
+    // 与本文件已有stale_scope测试相同：使用真实已结束id和原reservations，非input身份。
+    let stale = scoped_host(
+        Some(inner.clone()),
+        h.service.reservations.clone(),
+        h.service.active_changed.clone(),
+        finished.id,
+        None,
+    );
+    assert!(!stale.browser_async_available());
+    let probe = browser_async_probe(true, CancellationToken::new(), Instant::now() + WAIT);
+    let error = stale
+        .call_browser_async(
+            BROWSER_ASYNC_TEST_METHOD,
+            probe.params,
+            &probe.token,
+            probe.deadline,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "action_inactive");
+    assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+    assert_eq!(error.method.as_deref(), Some(BROWSER_ASYNC_TEST_METHOD));
+    inner.assert_no_effects();
+    assert_eq!(h.terminal().invocation_id, finished.id);
+}
+
+#[test]
+fn browser_async_unavailable_inner_rejects_before_plain_dispatch() {
+    for with_inner in [false, true] {
+        let h = Harness::new(false);
+        let inner = Arc::new(BrowserAsyncDefaultHost::default());
+        *h.runtime.browser_probe.lock().unwrap() = Some(browser_async_probe(
+            true,
+            CancellationToken::new(),
+            Instant::now() + WAIT,
+        ));
+        let current = h.start(
+            55,
+            call("browser_async_probe"),
+            if with_inner {
+                Some(inner.clone())
+            } else {
+                None
+            },
+        );
+        current.go.send(()).unwrap();
+        let (_, result) = h.reply();
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "unsupported_runtime_feature");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        assert_eq!(inner.0.load(Ordering::SeqCst), 0);
+        assert_eq!(h.terminal().invocation_id, current.id);
+    }
+}
+
+#[test]
+fn browser_async_wrong_operation_or_non_object_params_reject_before_effects() {
+    for wrong_operation in [false, true] {
+        let h = Harness::new(false);
+        let inner = Arc::new(BrowserAsyncInner::default());
+        let mut probe = browser_async_probe(true, CancellationToken::new(), Instant::now() + WAIT);
+        if wrong_operation {
+            probe.method = "keyboard.text";
+        } else {
+            probe.params = json!([]);
+        }
+        let expected_method = probe.method;
+        *h.runtime.browser_probe.lock().unwrap() = Some(probe);
+        let current = h.start(56, call("browser_async_probe"), Some(inner.clone()));
+        current.go.send(()).unwrap();
+        let (_, result) = h.reply();
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "invalid_input");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        assert_eq!(error.method.as_deref(), Some(expected_method));
+        inner.assert_no_effects();
+        assert_eq!(h.terminal().invocation_id, current.id);
+    }
 }
