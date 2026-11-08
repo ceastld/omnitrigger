@@ -51,7 +51,10 @@ function invoke(f){
 
 test('uses exact existing PackageManifest and ActionDefinition fields',()=>{
   assert.deepEqual(Object.keys(manifest).sort(),fields('PackageManifest'));
-  assert.deepEqual(Object.keys(action).sort(),fields('ActionDefinition'));
+  const definitionFields=fields('ActionDefinition');
+  assert(definitionFields.includes('allow_binding_reentry'));
+  assert.deepEqual(Object.keys(action).sort(),definitionFields.filter(name=>name!=='allow_binding_reentry'));
+  assert(!Object.hasOwn(action,'allow_binding_reentry'),'现有单实例清单保持默认禁止再入');
   assert.equal(manifest.schema_version,1);assert.equal(action.runtime,'script');assert.equal(action.single_instance,true);
 });
 test('identity and display variant preserve original N10 action',()=>{
