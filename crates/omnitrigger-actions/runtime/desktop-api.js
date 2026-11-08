@@ -808,6 +808,9 @@ function capturedWindow(args, count, method, buildParams, validate=value=>value)
       const descriptor = options && typeof options === 'object' && !Array.isArray(options)
         ? Object.getOwnPropertyDescriptor(options, 'text') : undefined;
       const text = descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+      const hasPlacement = options && typeof options === 'object' && Object.hasOwn(options, 'placement');
+      const placeDescriptor = hasPlacement ? Object.getOwnPropertyDescriptor(options, 'placement') : undefined;
+      const placement = hasPlacement ? placeDescriptor && Object.hasOwn(placeDescriptor, 'value') ? placeDescriptor.value : undefined : 'inline';
       let valid = typeof text === 'string' && text.length > 0 && text.length <= 16 && text.trim() === text
         && !/[\x00-\x1f\x7f-\x9f\u2028\u2029\ufeff]/.test(text);
       if (valid) for (let i = 0; i < text.length; i++) {
@@ -817,7 +820,8 @@ function capturedWindow(args, count, method, buildParams, validate=value=>value)
           if (!(next >= 0xdc00 && next <= 0xdfff)) valid = false;
         } else if (unit >= 0xdc00 && unit <= 0xdfff) valid = false;
       }
-      if (!valid || Reflect.ownKeys(options).length !== 1) invalid(method, '动作版本提示需要1–16个UTF-16单位的单行非空文字。');
+      if (!valid || Reflect.ownKeys(options).some(key => !['text','placement'].includes(key))
+          || !['inline','topRight'].includes(placement)) invalid(method, '动作版本提示只接受有效text与inline/topRight位置。');
       const receipt = value => {
         if (!value || typeof value !== 'object' || Array.isArray(value)
             || Reflect.ownKeys(value).length !== 1 || value.updated !== true) {
@@ -825,7 +829,7 @@ function capturedWindow(args, count, method, buildParams, validate=value=>value)
         }
         return {updated:true};
       };
-      const result = invoke(method, {text});
+      const result = invoke(method, {text, ...(hasPlacement ? {placement} : {})});
       return result && typeof result.then === 'function' ? result.then(receipt) : receipt(result);
     },
     toggleHistory: (...args) => {

@@ -56,7 +56,7 @@ impl InvocationScopedHost {
         deadline: Instant,
     ) -> Result<Value, ActionError> {
         use crate::action_hint::{fault, options, ActionHintScope, SCOPED_METHOD};
-        let text = options(params)?;
+        let hint = options(params)?;
         if cancellation.is_cancelled() {
             return Err(fault("cancelled", "not_started"));
         }
@@ -92,12 +92,11 @@ impl InvocationScopedHost {
             .inner
             .as_deref()
             .ok_or_else(|| fault("ui_unavailable", "not_started"))?;
-        inner.call_with_deadline(
-            SCOPED_METHOD,
-            json!({"scope":scope,"text":text}),
-            cancellation,
-            deadline,
-        )
+        let mut scoped = json!({"scope":scope,"text":hint.text});
+        if !hint.placement.is_inline() {
+            scoped["placement"] = json!(hint.placement);
+        }
+        inner.call_with_deadline(SCOPED_METHOD, scoped, cancellation, deadline)
     }
 
     fn state_call(

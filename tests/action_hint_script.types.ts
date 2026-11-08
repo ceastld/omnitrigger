@@ -15,3 +15,12 @@ ctx.ui.setActionHint({text:'v123',packageId:'other'});
 // @ts-expect-error text必须为字符串。
 ctx.ui.setActionHint({text:false});
 void updated;void promise;
+
+ctx.ui.setActionHint({text:'n10',placement:'topRight'});
+ctx.ui.setActionHint({text:'n10',placement:'inline'});
+// @ts-expect-error 不接受其他位置。
+ctx.ui.setActionHint({text:'n10',placement:'bottomRight'});
+// @ts-expect-error 不接受null位置。
+ctx.ui.setActionHint({text:'n10',placement:null});
+// @ts-expect-error 颜色与背景固定，不能作为作者参数。
+ctx.ui.setActionHint({text:'n10',placement:'topRight',background:'transparent'});

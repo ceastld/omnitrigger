@@ -1,5 +1,8 @@
 //! 动作包调试反馈：只在内存中保留有限预览，按提交时的调用身份和参数匹配。
-use omnitrigger_actions::{ActionCall, ActionEvent, ActionOutcome};
+use omnitrigger_actions::{
+    action_hint::{ActionHint, ActionHintPlacement},
+    ActionCall, ActionEvent, ActionOutcome,
+};
 use std::collections::{BTreeMap, VecDeque};
 
 const HISTORY_LIMIT: usize = 4;
@@ -8,7 +11,7 @@ const PREVIEW_BYTES: usize = 8192;
 struct Submitted {
     binding: u64,
     call: ActionCall,
-    action_hint: Option<String>,
+    action_hint: Option<ActionHint>,
 }
 
 pub(super) struct ResultPreview {
@@ -49,23 +52,23 @@ impl PackageFeedback {
                     && update.scope.matches_call(&submitted.call)
             })
             .ok_or_else(|| fault("ui_hint_scope_expired", "not_started"))?;
-        submitted.action_hint = Some(update.text.clone());
+        submitted.action_hint = Some(update.content());
         Ok(())
     }
 
-    pub fn action_hint(&self, invocation: u64) -> Option<&str> {
+    fn hint_content(&self, invocation: u64) -> Option<&ActionHint> {
         self.active
             .get(&invocation)
-            .and_then(|submitted| submitted.action_hint.as_deref())
+            .and_then(|submitted| submitted.action_hint.as_ref())
             .or_else(|| {
                 self.completed
                     .iter()
                     .find(|run| run.preview.invocation == invocation)
-                    .and_then(|run| run.submitted.action_hint.as_deref())
+                    .and_then(|run| run.submitted.action_hint.as_ref())
             })
     }
 
-    pub fn action_hint_for_call(&self, call: &ActionCall) -> Option<&str> {
+    fn hint_content_for_call(&self, call: &ActionCall) -> Option<&ActionHint> {
         let same_action = |submitted: &Submitted| {
             submitted.call.package_id == call.package_id
                 && submitted.call.action_id == call.action_id
@@ -76,16 +79,34 @@ impl PackageFeedback {
             .rev()
             .find_map(|(_, submitted)| {
                 same_action(submitted)
-                    .then_some(submitted.action_hint.as_deref())
+                    .then_some(submitted.action_hint.as_ref())
                     .flatten()
             })
             .or_else(|| {
                 self.completed.iter().find_map(|run| {
                     same_action(&run.submitted)
-                        .then_some(run.submitted.action_hint.as_deref())
+                        .then_some(run.submitted.action_hint.as_ref())
                         .flatten()
                 })
             })
+    }
+
+    pub fn action_hint(&self, invocation: u64) -> Option<&str> {
+        self.hint_content(invocation).map(|hint| hint.text.as_str())
+    }
+    pub fn action_hint_placement(&self, invocation: u64) -> ActionHintPlacement {
+        self.hint_content(invocation)
+            .map(|hint| hint.placement)
+            .unwrap_or_default()
+    }
+    pub fn action_hint_for_call(&self, call: &ActionCall) -> Option<&str> {
+        self.hint_content_for_call(call)
+            .map(|hint| hint.text.as_str())
+    }
+    pub fn action_hint_placement_for_call(&self, call: &ActionCall) -> ActionHintPlacement {
+        self.hint_content_for_call(call)
+            .map(|hint| hint.placement)
+            .unwrap_or_default()
     }
 
     pub fn toggle_details(&mut self, invocation: u64) {
@@ -322,6 +343,7 @@ mod tests {
                 action_version: 1,
             },
             text: text.into(),
+            placement: ActionHintPlacement::Inline,
         }
     }
 
@@ -410,5 +432,96 @@ mod tests {
         other = original;
         other.package_id = "different".into();
         assert_eq!(feedback.action_hint_for_call(&other), None);
+    }
+}
+
+#[cfg(test)]
+mod corner_hint_tests {
+    use super::*;
+    use omnitrigger_actions::action_hint::{ActionHintScope, ScopedActionHint};
+    fn call() -> ActionCall {
+        ActionCall {
+            package_id: "test".into(),
+            action_id: "run".into(),
+            action_version: 1,
+            input: serde_json::json!({}),
+        }
+    }
+    fn update(placement: ActionHintPlacement) -> ScopedActionHint {
+        ScopedActionHint {
+            scope: ActionHintScope {
+                binding_id: 1,
+                invocation_id: 10,
+                package_id: "test".into(),
+                action_id: "run".into(),
+                action_version: 1,
+            },
+            text: "n10".into(),
+            placement,
+        }
+    }
+    #[test]
+    fn corner_hint_uses_existing_scope_and_text_can_replace_placement() {
+        let mut state = PackageFeedback::default();
+        let call = call();
+        state.accepted(1, 10, call.clone());
+        state
+            .set_action_hint(&update(ActionHintPlacement::TopRight))
+            .unwrap();
+        assert_eq!(state.action_hint_for_call(&call), Some("n10"));
+        assert_eq!(
+            state.action_hint_placement_for_call(&call),
+            ActionHintPlacement::TopRight
+        );
+        let mut forged = update(ActionHintPlacement::Inline);
+        forged.scope.binding_id = 2;
+        assert!(state.set_action_hint(&forged).is_err());
+        assert_eq!(
+            state.action_hint_placement(10),
+            ActionHintPlacement::TopRight
+        );
+        state
+            .set_action_hint(&update(ActionHintPlacement::Inline))
+            .unwrap();
+        assert_eq!(state.action_hint_placement(10), ActionHintPlacement::Inline);
+    }
+    #[test]
+    fn corner_hint_retains_existing_failure_and_four_result_history_lifetime() {
+        let mut state = PackageFeedback::default();
+        let call = call();
+        state.accepted(1, 10, call.clone());
+        state
+            .set_action_hint(&update(ActionHintPlacement::TopRight))
+            .unwrap();
+        state.apply(&ActionEvent {
+            id: 1,
+            invocation_id: 10,
+            outcome: ActionOutcome::Failed {
+                error: omnitrigger_actions::ActionError::new("test", "synthetic"),
+            },
+        });
+        assert_eq!(
+            state.action_hint_placement(10),
+            ActionHintPlacement::TopRight
+        );
+        assert!(state
+            .set_action_hint(&update(ActionHintPlacement::Inline))
+            .is_err());
+        for invocation in 11..=14 {
+            state.accepted(1, invocation, call.clone());
+            state.apply(&ActionEvent {
+                id: 1,
+                invocation_id: invocation,
+                outcome: ActionOutcome::Succeeded {
+                    output: serde_json::Value::Null,
+                },
+            });
+        }
+        assert_eq!(state.completed.len(), HISTORY_LIMIT);
+        assert_eq!(state.action_hint_for_call(&call), None);
+        assert_eq!(
+            state.action_hint_placement_for_call(&call),
+            ActionHintPlacement::Inline
+        );
     }
 }

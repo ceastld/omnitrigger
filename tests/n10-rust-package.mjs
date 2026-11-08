@@ -39,7 +39,7 @@ function fixture(options={}){
         targetContextVersion:1,targetContextVerified:true,testProfile:ctx.input.profile==='script-test',captureEnabled:ctx.input.profile!=='script-test'};
       return{code:options.code??0,stdout:JSON.stringify(options.reply??{ok:true,state:'accepted',result}),stderr:''};
     },start(){trace.push({kind:'start'});throw Error('禁止启动');}},
-    ui:{notify(){trace.push({kind:'notify'});throw Error('禁止 UI');}}};
+    ui:{setActionHint(options){assert.deepEqual(options,{text:'n10',placement:'topRight'});assert.equal(trace.at(-1).kind,'capture');trace.push({kind:'hint',options});return {updated:true};},notify(){trace.push({kind:'notify'});throw Error('禁止 UI');}}};
   return{ctx,target,trace};
 }
 function invoke(f){
@@ -62,7 +62,7 @@ test('identity and display variant preserve original N10 action',()=>{
 test('entry is local package file and sole frozen implementation',()=>{
   assert.equal(path.dirname(entry),packageRoot);assert.equal(lstatSync(entry).isSymbolicLink(),false);
   assert.equal(typeof module.main,'function');
-  assert.equal(createHash('sha256').update(readFileSync(entry)).digest('hex'),'54b46f70a7cebffb4dad4b986d22b3faae494e8515a85f9a991c57461b2a324a');
+  assert.equal(createHash('sha256').update(readFileSync(entry)).digest('hex'),'29b2a1f3c8f75d9d9f290bdca1026a89c1ea10cf52859d5c2d2d8b3aae68afb1');
   assert.deepEqual(readdirSync(packageRoot).filter(file=>file.endsWith('.mjs')||file.endsWith('.js')),['n10-rust-bound.mjs']);
 });
 test('source catalog config resolves to sibling actions and keeps binding disabled',()=>{
@@ -95,7 +95,7 @@ test('product files have no machine temp/personal paths or SDK replacement',()=>
 for(const parameter of [null,'','clip show','  原样参数  '])test(`manifest-resolved main parameter ${String(parameter)}`,()=>{
   const f=fixture();f.ctx.input.actionParameter.value=parameter;const reply=invoke(f);
   assert.equal(reply.error,undefined);assert.equal(reply.result.commandEffectState,'accepted_only');assert.equal(reply.result.uiRendered,false);
-  assert.equal(reply.result.retryAllowed,false);assert.deepEqual(reply.trace.map(row=>row.kind),['targetContext','capture']);
+  assert.equal(reply.result.retryAllowed,false);assert.deepEqual(reply.trace.map(row=>row.kind),['targetContext','capture','hint']);
   const args=reply.trace[1].args;assert.equal(args[1],parameter===null||parameter===''?'clip toggle':parameter);
   assert(args.includes('--no-start'));assert(args.includes('--expected-data-root'));
   assert.deepEqual(JSON.parse(args[args.indexOf('--target-context')+1]),f.target);return reply;

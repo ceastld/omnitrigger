@@ -106,20 +106,36 @@ function throwOutcome(result,phase) {
     submissionState:submitted===true?'submitted':submitted===false?'not_submitted':'unknown',
     commandEffectState:effectState,retryAllowed:false};
   if(typeof result?.errorCode==='string'&&/^[A-Za-z0-9_.-]{1,64}$/.test(result.errorCode))detail.causeCode=result.errorCode;
-  const message=(phase==='prepare'?(notStarted?'N10 宿主准备未启动。':'N10 宿主准备结果未确认；不自动重试。')
+  if(phase==='action_hint'){detail.businessAccepted=true;detail.businessEffectState='accepted_only';detail.hintEffectState=result.hintEffectState==='not_started'?'not_started':'unknown';}
+  const message=(phase==='action_hint'?'N10 业务已接纳，但动作角标更新未确认；不自动重试。':phase==='prepare'?(notStarted?'N10 宿主准备未启动。':'N10 宿主准备结果未确认；不自动重试。')
     :notStarted?'N10 命令未启动。':partial?'N10 操作结果仅部分确认；不自动重试。':'N10 执行结果未确认；不自动重试。')
     +'\nN10_DETAIL='+JSON.stringify(detail);
-  throw Object.assign(new Error(message),{code,effectState,method:phase==='prepare'?'process.start':'cliphost.runVerbWithTargetV1',
+  throw Object.assign(new Error(message),{code,effectState,method:phase==='prepare'?'process.start':phase==='action_hint'?'ui.action_hint':'cliphost.runVerbWithTargetV1',
     submitted,submissionState:detail.submissionState,commandEffectState:effectState,retryAllowed:false,
     status:detail.status,phase});
 }
 
 /** Main never returns rejected/unknown/partial as an ordinary script success. */
-export function main(ctx) {
+export function runBusiness(ctx) {
   let result;
   try{result=invokeBound(ctx);}catch{return throwOutcome(uncertain('adapter_exception'),'business');}
   if(result.status==='accepted')return result;
   return throwOutcome(result,'business');
+}
+
+export function main(ctx) {
+  const result=runBusiness(ctx);
+  try{
+    if(typeof ctx.ui?.setActionHint!=='function')throw Object.assign(new Error(),{code:'ui_unavailable',effectState:'not_started'});
+    const receipt=ctx.ui.setActionHint({text:'n10',placement:'topRight'});
+    if(!receipt||typeof receipt!=='object'||Array.isArray(receipt)||Reflect.ownKeys(receipt).length!==1
+        ||!Object.hasOwn(receipt,'updated')||receipt.updated!==true)throw Object.assign(new Error(),{code:'invalid_response',effectState:'unknown'});
+  }catch(error){
+    let code='hint_unconfirmed',effect='unknown';
+    try{if(typeof error?.code==='string'&&/^[A-Za-z0-9_.-]{1,64}$/.test(error.code))code=error.code;if(error?.effectState==='not_started')effect='not_started';}catch{}
+    return throwOutcome({...uncertain(code,true,'partial'),hintEffectState:effect},'action_hint');
+  }
+  return result;
 }
 
 /** Preparation stays separate; "started" is not host readiness or business acceptance. */
