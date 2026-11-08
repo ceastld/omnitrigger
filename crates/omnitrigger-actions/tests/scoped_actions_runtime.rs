@@ -56,12 +56,21 @@ fn run(runtime_name: &str, runtime: Arc<dyn ActionRuntime>) {
         }
     }
     fs::create_dir_all(&base).unwrap();
-    let root = base.join(format!(
-        "scoped-runtime-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir(&root).unwrap();
+    // 保留的验收包可能来自被复用的进程 ID；只原子创建新目录，不复用或删除旧包。
+    let root = (0..1024)
+        .find_map(|_| {
+            let candidate = base.join(format!(
+                "scoped-runtime-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&candidate) {
+                Ok(()) => Some(candidate),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => panic!("无法创建新的合成验收目录：{error}"),
+            }
+        })
+        .expect("未找到可原子创建的合成验收目录");
     let package = root.join("scoped-real");
     fs::create_dir(&package).unwrap();
     let source = if runtime_name == "node" {

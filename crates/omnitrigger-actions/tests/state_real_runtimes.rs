@@ -49,8 +49,20 @@ fn fixture(name: &str) -> PathBuf {
         }
     }
     fs::create_dir_all(&base).unwrap();
-    let root = base.join(format!("state-real-{}-{name}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    // 不复用保留的验收目录；CI 后续运行可能分配到相同进程 ID。
+    let root = (0..1024)
+        .find_map(|attempt| {
+            let candidate = base.join(format!(
+                "state-real-{}-{name}-{attempt}",
+                std::process::id()
+            ));
+            match fs::create_dir(&candidate) {
+                Ok(()) => Some(candidate),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(error) => panic!("无法创建新的合成状态目录：{error}"),
+            }
+        })
+        .expect("未找到可原子创建的合成状态目录");
     for package in ["state-one", "state-two"] {
         let path = root.join(package);
         fs::create_dir(&path).unwrap();
