@@ -386,9 +386,9 @@ test('同包多个旧js入口的main和局部变量按文件隔离',()=>{
   const result=checkProjectTypes(root);
   assert.equal(result.passed,true,JSON.stringify(result.diagnostics));
   assert.deepEqual(result.diagnostics,[]);
-  assert.deepEqual(result.skippedEntries.map(item=>item.entry),['first.js','second.js']);
-  assert.equal(result.moduleChecks.length,1);assert.equal(result.entryChecks.length,1);
-  assert.equal(result.runtimeExecuted,false);assert.equal(result.staticAnalysisComplete,false);
+  assert.deepEqual(result.skippedEntries,[]);
+  assert.equal(result.moduleChecks.length,3);assert.equal(result.entryChecks.length,3);
+  assert.equal(result.runtimeExecuted,false);assert.equal(result.staticAnalysisComplete,true);
 });
 
 test('另一个旧js入口的局部变量不能替当前入口掩盖未定义名称',()=>{
@@ -401,7 +401,7 @@ test('另一个旧js入口的局部变量不能替当前入口掩盖未定义名
   const result=checkProjectTypes(root);
   assert.equal(result.passed,false);
   assert(result.diagnostics.some(item=>item.code===2304&&item.file==='consumer.js'));
-  assert.equal(result.runtimeExecuted,false);assert.deepEqual(result.entryChecks,[]);
+  assert.equal(result.runtimeExecuted,false);assert.equal(result.entryChecks.length,2);
 });
 
 test('旧js入口的静态import或export不能因类型通过而误放行',()=>{
@@ -418,7 +418,7 @@ test('旧js入口的静态import或export不能因类型通过而误放行',()=>
     assert.equal(diagnostic.file,'legacy.js');assert.equal(diagnostic.column,1);
     assert.equal(diagnostic.line,source.startsWith('import')?1:2);
     assert.equal(result.staticAnalysisComplete,false);assert.equal(result.runtimeExecuted,false);
-    assert.deepEqual(result.entryChecks,[]);
+    assert.equal(result.entryChecks.length,1);
   }
 });
 
@@ -443,10 +443,48 @@ test('旧js函数体入口继续做类型检查，不强加ESM导出要求',()=>
   writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[{runtime:'script',entry:'legacy.js'}]}));
   writeFileSync(join(root,'legacy.js'),'function main(){return null;}');
   const result=checkProjectTypes(root);
-  assert.equal(result.passed,true);assert.deepEqual(result.moduleChecks,[]);assert.deepEqual(result.entryChecks,[]);
-  assert.deepEqual(result.skippedEntries,[{entry:'legacy.js',reason:'legacy_function_body_protocol'}]);
+  assert.equal(result.passed,true);assert.equal(result.moduleChecks.length,1);assert.equal(result.entryChecks.length,1);
+  assert.deepEqual(result.skippedEntries,[]);
+  assert(result.environmentDiagnostics.some(d=>d.code==='legacy_entry_main_signature_unresolved'));
   assert.equal(result.staticAnalysisComplete,false);
   assert(!result.checkedFiles.includes('main.mjs'));
+});
+
+test('旧js唯一同步main被完整分析，动态求值或重绑定保留不完整且不执行',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[{runtime:'script',entry:'legacy.js'}]}));
+  const file=join(root,'legacy.js');
+  const source='/** @type {ScriptMain} */\nfunction main(ctx){return {value:ctx.input.value};}';
+  writeFileSync(file,source);
+  const result=checkProjectTypes(root);
+  assert.equal(result.passed,true,JSON.stringify(result));assert.equal(result.staticAnalysisComplete,true);
+  assert.deepEqual(result.skippedEntries,[]);assert.equal(result.entryChecks[0].entryProtocol,'legacy_function_body');
+  assert.equal(result.entryChecks[0].mainExport,'legacy_callable_declaration');
+  assert.equal(result.moduleChecks[0].staticGraphComplete,true);assert.deepEqual(result.moduleChecks[0].modules,['legacy.js']);
+  assert.deepEqual(result.moduleChecks[0].edges,[]);assert.equal(result.runtimeVerified,false);assert.equal(result.runtimeExecuted,false);
+  assert.equal(readFileSync(file,'utf8'),source);
+  writeFileSync(file,'// @ts-nocheck\nfunction main(ctx){eval(ctx.input.code);return null;}');
+  const dynamic=checkProjectTypes(root);assert.equal(dynamic.passed,true);assert.equal(dynamic.staticAnalysisComplete,false);
+  assert.equal(dynamic.moduleChecks[0].staticGraphComplete,false);
+  assert(dynamic.environmentDiagnostics.some(d=>d.code==='legacy_entry_dynamic_code'&&d.file==='legacy.js'&&d.line===2));
+  writeFileSync(file,'// @ts-nocheck\nfunction main(ctx){return null;} main=ctx.input.entry;');
+  const rebound=checkProjectTypes(root);assert.equal(rebound.passed,true);assert.equal(rebound.staticAnalysisComplete,false);
+  assert(rebound.environmentDiagnostics.some(d=>d.code==='legacy_entry_main_reassigned'));
+});
+
+test('旧js异步、生成器及不存在main不会因ts-nocheck被标记完整',()=>{
+  const root=fixture();
+  writeFileSync(join(root,'action.json'),JSON.stringify({schema_version:1,actions:[{runtime:'script',entry:'legacy.js'}]}));
+  for(const [source,code] of [
+    ['async function main(ctx){return null;}','entry_main_async'],
+    ['function* main(ctx){yield 1;}','entry_main_generator'],
+    ['function other(ctx){return null;}','legacy_entry_main_missing'],
+    ['function main(ctx){return import("./missing.js");}','entry_main_async_result'],
+  ]) {
+    writeFileSync(join(root,'legacy.js'),'// @ts-nocheck\n'+source);
+    const result=checkProjectTypes(root);assert.equal(result.passed,false);assert.equal(result.staticAnalysisComplete,false);
+    assert(result.environmentDiagnostics.some(d=>d.code===code),JSON.stringify(result));assert.equal(result.runtimeExecuted,false);
+  }
 });
 
 test('类型预算内超过轻量宿主1MiB的模块图仍拒绝',()=>{

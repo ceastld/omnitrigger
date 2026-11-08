@@ -22,6 +22,8 @@ jobs:
   windows:
     name: Windows 检查与构建
     runs-on: windows-latest
+    env:
+      OMNITRIGGER_METADATA_POWERSHELL: 'C:\Program Files\PowerShell\7\pwsh.exe'
     timeout-minutes: 60
     steps:
       - name: 检出代码
@@ -108,7 +110,26 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Pop-Location
-          node --test tools/script-sdk-check/action-signal-types.test.mjs tools/script-sdk-check/script-project-write.test.mjs tools/script-sdk-check/node-error-diagnostic.test.mjs
+          Push-Location examples/actions/source-file-preview
+          try {
+            npm ci --ignore-scripts --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          node --test tools/script-sdk-check/action-signal-types.test.mjs tools/script-sdk-check/script-project-write.test.mjs crates/omnitrigger-actions/runtime/actions-api.test.mjs tests/actions_scope_node_sdk.test.mjs tools/script-sdk-check/node-host-composition.test.mjs tools/script-sdk-check/script-sdk-composition.test.mjs tests/state_api.test.mjs tests/ui_action_hint_sdk.test.mjs tools/script-sdk-check/compiler-config-location.test.mjs tools/script-sdk-check/node-error-diagnostic.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/actions_scope_node.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/actions_scope_script.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/state_api_node.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/state_api_script.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/action_hint_node.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/action_hint_script.types.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check.mjs target/debug/omnitrigger.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -210,9 +231,31 @@ jobs:
       - name: 验证已有轻量工程的独立类型检查
         shell: pwsh
         run: |
-          node --test tools/script-sdk-check/check-project-types.test.mjs
+          node --test tools/script-sdk-check/check-project-types.test.mjs tools/script-sdk-check/browser-close-environment.test.mjs tools/script-sdk-check/water-reminder-environment.test.mjs tools/script-sdk-check/desktop-line-edit-environment.test.mjs tools/script-sdk-check/json-text-environment.test.mjs tools/script-sdk-check/line-text-environment.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test tools/script-sdk-check/analyze-script-modules.test.mjs tools/script-sdk-check/analyze-script-entry.test.mjs
+          Push-Location examples/actions/browser-close
+          try {
+            npm ci --ignore-scripts --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/browser-close
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($authorExamplePath in @('examples/actions/water-reminder', 'examples/actions/desktop-line-edit', 'examples/actions/json-text', 'examples/actions/line-text', 'examples/actions/window-size-step')) {
+            Push-Location $authorExamplePath
+            try {
+              npm ci --ignore-scripts --no-audit --no-fund
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              npm run check
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            } finally { Pop-Location }
+            if ($authorExamplePath -ne 'examples/actions/json-text') {
+              node tools/script-sdk-check/check-project-types.mjs $authorExamplePath
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
+          node --test tools/script-sdk-check/analyze-script-modules.test.mjs tools/script-sdk-check/analyze-script-entry.test.mjs tools/script-sdk-check/analyze-legacy-entry.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 验证只读桌面与目录 API 的 SDK、客户端和 Node 桥接
@@ -278,6 +321,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/source_file_preview.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/source-file-preview
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/n10-rust-package.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/desktop_captured_target.test.mjs
@@ -287,6 +332,15 @@ jobs:
           node --test tests/browser_workflows.test.mjs tests/browser_default_tab.test.mjs tests/browser_default_tab_sync.test.mjs tests/notification_action_contract.test.mjs examples/actions/common-desktop/recipes.test.mjs examples/actions/common-search/recipes.test.mjs examples/actions/script-choice/contract.test.mjs tests/browser_close.test.mjs tests/browser_input_snapshot.test.mjs tests/keyboard_recipe_preflight.test.mjs tests/keyboard_guarded_recipe.test.mjs tests/keyboard_sequence_shortcuts_snapshot.test.mjs tests/browser_popout.test.mjs tests/browser_close_popout_boundaries.test.mjs tests/browser_close_sync.test.mjs tests/browser_popout_script.test.mjs tests/browser_restore_session_sync.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/common-desktop/paste-arrow.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Push-Location examples/actions/common-desktop
+          try {
+            npm ci --ignore-scripts --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/common-desktop
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/common-desktop/system-panel.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -346,6 +400,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check-project-types.mjs examples/actions/json-text
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/browser-workflows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/common-search
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check-project-types.mjs examples/actions/clipboard-history
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check-project-types.mjs examples/actions/selection-history
@@ -361,6 +419,21 @@ jobs:
           node --test examples/actions/process-output/node-capture.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: 校验窗口脚本 API 与普通动作
+        run: |
+          node --test tools/script-sdk-check/window-toggle-for.test.mjs tools/script-sdk-check/window-api.test.mjs tools/script-sdk-check/window-class.test.mjs tools/script-sdk-check/window-class-bridges.test.mjs tools/script-sdk-check/window-for-contract.test.mjs tools/script-sdk-check/window-size-stack.test.mjs tests/script_sdk_whole_source_syntax.test.mjs examples/actions/window-adjust/contract.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Push-Location examples/actions/window-adjust
+          try {
+            npm ci --ignore-scripts --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          foreach ($windowConfig in @('tools/script-sdk-check/window-toggle-for-node-jsconfig.json', 'tools/script-sdk-check/window-toggle-for-script-jsconfig.json')) {
+            node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p $windowConfig
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: 验证轻量脚本开发包的真实安装与切换
         shell: pwsh
         run: |
@@ -385,6 +458,8 @@ jobs:
   js-engines:
     name: Windows JS 引擎实验
     runs-on: windows-latest
+    env:
+      OMNITRIGGER_METADATA_POWERSHELL: 'C:\Program Files\PowerShell\7\pwsh.exe'
     timeout-minutes: 40
     defaults:
       run:
@@ -431,7 +506,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 构建两种引擎并测量体积
-        run: ./measure.ps1
+        run: |
+          ./measure.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $scopedPreviousNode = $env:OMNITRIGGER_TEST_NODE
+          $scopedPreviousHost = $env:OMNITRIGGER_TEST_SCRIPT_HOST
+          try {
+            $env:OMNITRIGGER_TEST_NODE = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = (Resolve-Path -LiteralPath './results/quickjs-release.exe').Path
+            cargo test --locked --manifest-path ../../Cargo.toml -p omnitrigger-actions --test scoped_actions_runtime -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            $env:OMNITRIGGER_TEST_NODE = $scopedPreviousNode
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = $scopedPreviousHost
+          }
 
       - name: 验证输出采集的自有夹具与宿主退出收尾
         run: |
@@ -481,7 +569,7 @@ jobs:
 
       - name: 验证轻量引擎接入动作服务
         run: |
-          $nodeVariables = @('OMNITRIGGER_TEST_NODE', 'OMNITRIGGER_SELECTION_TEST_NODE', 'OMNITRIGGER_EXPLORER_TEST_NODE', 'OMNITRIGGER_DIRECTORY_TEST_NODE')
+          $nodeVariables = @('OMNITRIGGER_TEST_NODE', 'OMNITRIGGER_SELECTION_TEST_NODE', 'OMNITRIGGER_EXPLORER_TEST_NODE', 'OMNITRIGGER_DIRECTORY_TEST_NODE', 'OMNITRIGGER_CAPTURED_WINDOW_TEST_NODE', 'OMNITRIGGER_WINDOW_SIZE_TEST_NODE')
           $previousNodeVariables = @{}
           foreach ($name in $nodeVariables) {
             $previousNodeVariables[$name] = @{ existed = Test-Path "Env:$name"; value = [Environment]::GetEnvironmentVariable($name, 'Process') }
@@ -491,6 +579,7 @@ jobs:
             foreach ($name in $nodeVariables) { [Environment]::SetEnvironmentVariable($name, $nodeExecutable, 'Process') }
             foreach ($engine in @('boa', 'quickjs')) {
               $env:OMNITRIGGER_TEST_SCRIPT_HOST = Join-Path $PWD "results/$engine-small.exe"
+              # 同时覆盖真实动作提示、State与Scope；每个引擎只运行一遍。
               cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --tests -- --ignored --skip _history_ --test-threads=1
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }

@@ -86,16 +86,21 @@ test('旧轻量宿主缺capture时明确失败，不偷偷回退run',()=>{
 
 test('新SDK的capture和通知桥接可组合，仍只使用合成JSON响应',()=>{
   const runtime=new URL('../../../crates/omnitrigger-actions/runtime/',import.meta.url);
-  const source=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js'].map(name=>readFileSync(new URL(name,runtime),'utf8')).join('\n')
+  const source=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js','state-api.js'].map(name=>readFileSync(new URL(name,runtime),'utf8')).join('\n')
     +'\n'+readFileSync(new URL('../../../tools/js-engine-probe/src/sdk.js',import.meta.url),'utf8');
   const calls=[];
-  const scope={ctx:{input:{program,cwd},__nativeContext:{connection:{port:1234,token:'a'.repeat(64)}}},__hostCall:text=>{
+  const connection={port:1234,token:'a'.repeat(64)};
+  const scope={ctx:{input:{program,cwd},__nativeContext:{connection},__localDesktopAllowed:false},__hostCall:text=>{
     const value=JSON.parse(text);calls.push(value);
-    return JSON.stringify({ok:true,value:value.kind==='capture'?{code:0,stdout:output,stderr:''}:{submitted:true}});
+    assert.equal(value.kind,'native');assert.deepEqual(value.connection,connection);assert.equal(value.id,calls.length);
+    assert.ok(['process.capture','ui.notify'].includes(value.method));
+    if(value.method==='process.capture')assert.deepEqual(value.params,{program,args:[],cwd,timeout_ms:10000,allow_non_zero:false});
+    return JSON.stringify({ok:true,value:value.method==='process.capture'?{code:0,stdout:output,stderr:''}:{submitted:true}});
   }};
   runInNewContext(source,scope);
   assert.equal(syncMain(scope.ctx).notified,true);
-  assert.deepEqual(calls.map(value=>value.kind==='capture'?'process.capture':value.method),['process.capture','ui.notify']);
+  assert.deepEqual(calls.map(value=>value.kind),['native','native']);
+  assert.deepEqual(calls.map(value=>value.method),['process.capture','ui.notify']);
 });
 
 test('两份调用明确区分timeout策略，清单入口独立',()=>{

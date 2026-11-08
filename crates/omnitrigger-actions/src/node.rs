@@ -20,6 +20,8 @@ use std::{
 };
 
 const HOST: &str = include_str!("../runtime/host.mjs");
+const ACTIONS_API: &str = include_str!("../runtime/actions-api.js");
+const STATE_API: &str = include_str!("../runtime/state-api.js");
 const DESKTOP_API: &str = include_str!("../runtime/desktop-api.js");
 const PROCESS_CAPTURE_API: &str = include_str!("../runtime/process-capture-api.js");
 const HISTORY_API: &str = include_str!("../runtime/clipboard-history-api.js");
@@ -195,6 +197,8 @@ impl NodeRuntime {
             "response_path": scratch.response(),
             "timeout_ms": self.timeout.as_millis(),
             "browser": self.browser_connector.as_deref().and_then(browser_configuration),
+            "actions_scope": host.is_some_and(|host| host.action_scope_available()),
+            "native_context_available": host.is_some_and(|host| host.native_context_available()),
             "native": native_configuration,
             "native_error": native_error,
         });
@@ -205,8 +209,9 @@ impl NodeRuntime {
             return Err(ActionError::new("invalid_request", "动作请求超过 96 KiB。"));
         }
         let mut command = Command::new(&self.program);
-        let host_source =
-            format!("{DESKTOP_API}\n{BROWSER_API}\n{HISTORY_API}\n{PROCESS_CAPTURE_API}\n{HOST}");
+        let host_source = format!(
+            "{DESKTOP_API}\n{BROWSER_API}\n{HISTORY_API}\n{PROCESS_CAPTURE_API}\n{ACTIONS_API}\n{STATE_API}\n{HOST}"
+        );
         // 内置宿主也不能放进 --eval：Windows 的命令行长度上限会限制 SDK 扩展。
         let host_file = TemporaryHostFile::write(&scratch, &host_source)?;
         command
@@ -258,7 +263,7 @@ impl NodeRuntime {
                     }
                     Ok(Err(error)) => break Err(error),
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        break Err(ActionError::new("runtime_io", "动作请求写入线程退出。"))
+                        break Err(ActionError::new("runtime_io", "动作请求写入线程退出。"));
                     }
                     Err(mpsc::TryRecvError::Empty) => {}
                 }
@@ -303,7 +308,7 @@ impl NodeRuntime {
                     break Err(ActionError::new(
                         "runtime_io",
                         format!("无法读取 Node 运行状态：{error}"),
-                    ))
+                    ));
                 }
                 Ok(None) => {}
             }
@@ -615,7 +620,7 @@ impl ResponseDirectory {
                     return Err(ActionError::new(
                         "runtime_io",
                         format!("无法创建动作临时目录：{error}"),
-                    ))
+                    ));
                 }
             }
         }
@@ -805,7 +810,10 @@ mod tests {
         if !node_available() {
             return;
         }
-        let fixture = Fixture::new("import {writeFile,readFile} from 'node:fs/promises'; export default async ctx => { const file = ctx.packageRoot + '/joined.txt'; await writeFile(file, '普通路径', 'utf8'); return await readFile(file,'utf8'); };",json!({}));
+        let fixture = Fixture::new(
+            "import {writeFile,readFile} from 'node:fs/promises'; export default async ctx => { const file = ctx.packageRoot + '/joined.txt'; await writeFile(file, '普通路径', 'utf8'); return await readFile(file,'utf8'); };",
+            json!({}),
+        );
         let output = fixture.run().unwrap();
         assert_eq!(output, json!("普通路径"));
         assert_eq!(
@@ -1206,7 +1214,10 @@ mod tests {
                 }
             }
         }
-        let fixture = Fixture::new("export default async ctx => ({target:await ctx.desktop.targetContext(), receipt:await ctx.clipboard.writeText('literal')});", json!({}));
+        let fixture = Fixture::new(
+            "export default async ctx => ({target:await ctx.desktop.targetContext(), receipt:await ctx.clipboard.writeText('literal')});",
+            json!({}),
+        );
         let output = NodeRuntime::default()
             .execute_with_host(
                 &fixture.action,
@@ -1618,7 +1629,10 @@ mod tests {
         let error = fixture.run().unwrap_err();
         assert_eq!(error.code, "browser_unavailable");
         assert_eq!(error.effect_state.as_deref(), Some("not_started"));
-        let runtime = browser_runtime(&fixture, "export async function connect() { return { close() {}, call: async () => new Promise(() => {}) }; }");
+        let runtime = browser_runtime(
+            &fixture,
+            "export async function connect() { return { close() {}, call: async () => new Promise(() => {}) }; }",
+        );
         fs::write(
             &fixture.action.entry_path,
             "export default ctx => { ctx.browser.call('tabs.create', [{}]); return {}; }",
@@ -1686,7 +1700,10 @@ mod tests {
             "export default async ctx => ctx.browser.call('tabs.query', [])",
             json!({}),
         );
-        let mut runtime = browser_runtime(&fixture, "export async function connect() { return {close() {}, call: async () => new Promise(() => {})}; }");
+        let mut runtime = browser_runtime(
+            &fixture,
+            "export async function connect() { return {close() {}, call: async () => new Promise(() => {})}; }",
+        );
         runtime.timeout = Duration::from_millis(250);
         let began = Instant::now();
         assert_eq!(
@@ -1781,13 +1798,28 @@ mod tests {
             return;
         }
         for (script, expected) in [
-            ("export default async ctx => { await ctx.process.run(process.execPath, ['-e', 'process.exit(7)']); throw new Error('should not run'); }", "process_failed"),
-            ("export default async () => { process.exit(0); }", "invalid_response"),
-            ("export default async () => 'x'.repeat(70000)", "output_limit"),
+            (
+                "export default async ctx => { await ctx.process.run(process.execPath, ['-e', 'process.exit(7)']); throw new Error('should not run'); }",
+                "process_failed",
+            ),
+            (
+                "export default async () => { process.exit(0); }",
+                "invalid_response",
+            ),
+            (
+                "export default async () => 'x'.repeat(70000)",
+                "output_limit",
+            ),
             ("export default async () => 1n", "invalid_output"),
-            ("export default async ctx => ctx.process.run(process.execPath, ['-e', 'process.stdout.write(\"x\".repeat(70000))'])", "output_limit"),
+            (
+                "export default async ctx => ctx.process.run(process.execPath, ['-e', 'process.stdout.write(\"x\".repeat(70000))'])",
+                "output_limit",
+            ),
         ] {
-            assert_eq!(Fixture::new(script, json!({})).run().unwrap_err().code, expected);
+            assert_eq!(
+                Fixture::new(script, json!({})).run().unwrap_err().code,
+                expected
+            );
         }
     }
 

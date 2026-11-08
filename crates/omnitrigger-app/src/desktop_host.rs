@@ -19,6 +19,20 @@ mod win32_edit_replace_host;
 #[path = "clipboard_files_host.rs"]
 mod clipboard_files_host;
 
+#[path = "captured_window_host.rs"]
+mod captured_window_host;
+
+#[path = "pointing_handoff_host.rs"]
+mod pointing_handoff_host;
+
+#[path = "pointing_root_host.rs"]
+mod pointing_root_host;
+
+#[path = "window_drag_host.rs"]
+mod window_drag_host;
+#[path = "window_geometry_host.rs"]
+mod window_geometry_host;
+
 pub struct DesktopHost {
     foreground_targets: ForegroundTargets,
     target: Result<ScriptTarget, ActionError>,
@@ -119,12 +133,93 @@ impl DesktopHost {
         copy_data_result(result, cancellation, deadline)
     }
 
+    fn pointing_root(
+        &self,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Value, ActionError> {
+        pointing_root_host::execute_with(
+            params,
+            cancellation,
+            deadline,
+            || self.target.as_ref().map_err(Clone::clone),
+            |target, check| omnitrigger_windows::read_pointing_root_if(target, check),
+        )
+    }
+
+    fn window_tracking(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Value, ActionError> {
+        if method == "window.drag" && params.get("target").is_some() {
+            return captured_window_host::drag(
+                &self.foreground_targets,
+                params,
+                cancellation,
+                deadline,
+            );
+        }
+
+        window_drag_host::execute_with(
+            method,
+            params,
+            cancellation,
+            deadline,
+            || self.target.as_ref().map_err(Clone::clone),
+            |target, check| omnitrigger_windows::read_window_pointer_state_if(target, check),
+            |target, options, check| {
+                omnitrigger_windows::track_window_drag_if(target, options, check)
+            },
+        )
+    }
+
+    fn window_geometry(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Option<Instant>,
+    ) -> Result<Value, ActionError> {
+        if params.get("target").is_some() {
+            return captured_window_host::geometry(
+                &self.foreground_targets,
+                method,
+                params,
+                cancellation,
+                deadline,
+            );
+        }
+
+        window_geometry_host::execute_with(
+            method,
+            params,
+            cancellation,
+            deadline,
+            || self.target.as_ref().map_err(Clone::clone),
+            |target, check| target.window_geometry_if(check),
+            |target, rect, frame, check| target.set_window_rect_if(rect, frame, check),
+        )
+    }
+
     fn window_action(
         &self,
         params: Value,
         cancellation: &CancellationToken,
         deadline: Option<Instant>,
     ) -> Result<Value, ActionError> {
+        if params.get("target").is_some() {
+            return captured_window_host::action(
+                &self.foreground_targets,
+                params,
+                cancellation,
+                deadline,
+            );
+        }
+
         crate::window_action::execute_with(
             params,
             cancellation,
@@ -427,6 +522,22 @@ impl NativeHost for DesktopHost {
             "explorer.context" => return self.explorer_context(params, cancellation, None),
             "selection.read_text" => return self.read_selection(params, cancellation, None),
             "selection.copy_data" => return self.copy_data(params, cancellation, None),
+            "window.geometry" | "window.set_rect" => {
+                return self.window_geometry(method, params, cancellation, None)
+            }
+            "target.handoff_pointing_root" => {
+                return pointing_handoff_host::execute(
+                    &self.foreground_targets,
+                    &self.target,
+                    params,
+                    cancellation,
+                    None,
+                )
+            }
+            "pointer.root" => return self.pointing_root(params, cancellation, None),
+            "pointer.state" | "window.drag" => {
+                return self.window_tracking(method, params, cancellation, None)
+            }
             "window.action" => return self.window_action(params, cancellation, None),
             _ => {}
         }
@@ -661,6 +772,20 @@ impl NativeHost for DesktopHost {
             "explorer.context" => self.explorer_context(params, cancellation, Some(deadline)),
             "selection.read_text" => self.read_selection(params, cancellation, Some(deadline)),
             "selection.copy_data" => self.copy_data(params, cancellation, Some(deadline)),
+            "window.geometry" | "window.set_rect" => {
+                self.window_geometry(method, params, cancellation, Some(deadline))
+            }
+            "target.handoff_pointing_root" => pointing_handoff_host::execute(
+                &self.foreground_targets,
+                &self.target,
+                params,
+                cancellation,
+                Some(deadline),
+            ),
+            "pointer.root" => self.pointing_root(params, cancellation, Some(deadline)),
+            "pointer.state" | "window.drag" => {
+                self.window_tracking(method, params, cancellation, Some(deadline))
+            }
             "window.action" => self.window_action(params, cancellation, Some(deadline)),
             _ => self.call(method, params, cancellation),
         }
@@ -745,6 +870,86 @@ fn scoped_policy(
 }
 
 impl ForegroundTargets {
+    fn reserve_capture(&self) -> Result<u32, ActionError> {
+        let capture_id = {
+            let mut state = self
+                .active
+                .lock()
+                .map_err(|_| error("target_unavailable", "目标状态不可用。", "not_started"))?;
+            state.1 = None; // 捕获尝试失败也不能回退到前一次新目标。
+            state.0 = state
+                .0
+                .checked_add(1)
+                .filter(|n| *n <= 128)
+                .ok_or_else(|| {
+                    error(
+                        "desktop_call_limit",
+                        "本次动作调用预算已耗尽。",
+                        "not_started",
+                    )
+                })?;
+            state.0
+        };
+        Ok(capture_id)
+    }
+
+    fn capture_current(&self, capture_id: u32) -> Result<bool, ActionError> {
+        Ok(self
+            .active
+            .lock()
+            .map_err(|_| error("target_unavailable", "目标状态不可用。", "not_started"))?
+            .0
+            == capture_id)
+    }
+
+    fn discard_capture(&self, capture_id: u32) -> Result<(), ActionError> {
+        let mut state = self
+            .active
+            .lock()
+            .map_err(|_| error("target_unavailable", "目标状态不可用。", "not_started"))?;
+        if state.0 == capture_id {
+            state.1 = None;
+        }
+        Ok(())
+    }
+
+    fn publish_verified(
+        &self,
+        capture_id: u32,
+        snapshot: ScriptTargetSnapshot,
+        start: Instant,
+        wall: u64,
+        expires: Instant,
+    ) -> Result<Value, ActionError> {
+        let mut context = crate::action_target_context::export(snapshot)
+            .map_err(|_| error("target_unavailable", "不能导出目标。", "not_started"))?;
+        let duration = expires.duration_since(start).as_millis() as u64;
+        context["expires_at_unix_ms"] = json!(wall.checked_add(duration).ok_or_else(|| error(
+            "target_unavailable",
+            "目标期限无效。",
+            "not_started"
+        ))?);
+        let lease = ForegroundLease {
+            capture_id,
+            context: context.clone(),
+            snapshot,
+            expires,
+        };
+        let mut state = self
+            .active
+            .lock()
+            .map_err(|_| error("target_unavailable", "目标状态不可用。", "not_started"))?;
+        if state.0 != capture_id {
+            return Err(error(
+                "target_changed",
+                "捕获已被后续请求替代。",
+                "not_started",
+            ));
+        }
+        state.1 = Some(lease);
+        Ok(json!({"capture_id":capture_id,"context":context}))
+    }
+
     fn capture(
         &self,
         params: Value,
@@ -774,25 +979,7 @@ impl ForegroundTargets {
                 "not_started",
             ));
         }
-        let capture_id = {
-            let mut state = self
-                .active
-                .lock()
-                .map_err(|_| error("target_unavailable", "目标状态不可用。", "not_started"))?;
-            state.1 = None; // 捕获尝试失败也不能回退到前一次新目标。
-            state.0 = state
-                .0
-                .checked_add(1)
-                .filter(|n| *n <= 128)
-                .ok_or_else(|| {
-                    error(
-                        "desktop_call_limit",
-                        "本次动作调用预算已耗尽。",
-                        "not_started",
-                    )
-                })?;
-            state.0
-        };
+        let capture_id = self.reserve_capture()?;
         let start = Instant::now();
         let wall = scoped_clock()?;
         let end = start + std::time::Duration::from_millis(u64::from(args.valid_for_ms));
@@ -838,33 +1025,7 @@ impl ForegroundTargets {
             true,
         )
         .map_err(|code| error(code, "捕获条件已失效。", "not_started"))?;
-        let mut context = crate::action_target_context::export(snapshot)
-            .map_err(|_| error("target_unavailable", "不能导出目标。", "not_started"))?;
-        let duration = expires.duration_since(start).as_millis() as u64;
-        context["expires_at_unix_ms"] = json!(wall.checked_add(duration).ok_or_else(|| error(
-            "target_unavailable",
-            "目标期限无效。",
-            "not_started"
-        ))?);
-        let lease = ForegroundLease {
-            capture_id,
-            context: context.clone(),
-            snapshot,
-            expires,
-        };
-        let mut state = self
-            .active
-            .lock()
-            .map_err(|_| error("target_unavailable", "目标状态不可用。", "not_started"))?;
-        if state.0 != capture_id {
-            return Err(error(
-                "target_changed",
-                "捕获已被后续请求替代。",
-                "not_started",
-            ));
-        }
-        state.1 = Some(lease);
-        Ok(json!({"capture_id":capture_id,"context":context}))
+        self.publish_verified(capture_id, snapshot, start, wall, expires)
     }
 
     fn resolve(
@@ -2396,6 +2557,286 @@ mod window_topmost_dispatch_tests {
                 host.call("window.action", params, &token).unwrap_err().code,
                 "invalid_input"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod raw_wire_object_contract_tests {
+    use super::*;
+    use omnitrigger_actions::NativeHost;
+
+    fn unresolved_host() -> DesktopHost {
+        DesktopHost {
+            foreground_targets: ForegroundTargets::default(),
+            target: Err(error(
+                "raw_wire_target_resolution_reached",
+                "测试哨兵：已走到原目标解析。",
+                "not_started",
+            )),
+        }
+    }
+
+    #[test]
+    fn positional_arrays_are_invalid_before_target_resolution_in_both_real_entrypoints() {
+        let host = unresolved_host();
+        // 每个payload除对象/数组形状外均满足字段、尺寸、模式和预算合同。
+        // 顶层对象中的rect/snap数组可通过桥接params.is_object检查到达真实handler。
+        for (method, params) in [
+            ("window.geometry", json!([])),
+            ("pointer.state", json!([])),
+            (
+                "window.set_rect",
+                json!([{"left":0,"top":0,"width":100,"height":100},"outer"]),
+            ),
+            (
+                "window.set_rect",
+                json!({"rect":[0,0,100,100],"frame":"outer"}),
+            ),
+            ("window.drag", json!(["move", "left", 1000, 32, null])),
+            (
+                "window.drag",
+                json!({"mode":"move","button":"left","max_duration_ms":1000,"max_updates":32,
+                "snap":[{"left":0,"top":0,"width":1000,"height":800},30,300,301]}),
+            ),
+            (
+                "window.drag",
+                json!({"mode":"move","button":"left","max_duration_ms":1000,"max_updates":32,
+                "snap":{"bounds":[0,0,1000,800],"distance":30,"wait_ms":300,"initial_elapsed_ms":301}}),
+            ),
+        ] {
+            for deadline in [
+                None,
+                Some(Instant::now() + std::time::Duration::from_secs(5)),
+            ] {
+                let token = CancellationToken::new();
+                let result = match deadline {
+                    None => host.call(method, params.clone(), &token),
+                    Some(deadline) => {
+                        host.call_with_deadline(method, params.clone(), &token, deadline)
+                    }
+                };
+                let error = result.unwrap_err();
+                assert_eq!(error.code, "invalid_input", "{method} / {params}");
+                assert_eq!(error.method.as_deref(), Some(method));
+                assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+            }
+        }
+    }
+
+    #[test]
+    fn declared_objects_and_null_or_missing_snap_still_reach_only_the_resolution_sentinel() {
+        let host = unresolved_host();
+        for (method, params) in [
+            ("window.geometry", json!({})),
+            ("pointer.state", json!({})),
+            (
+                "window.set_rect",
+                json!({"rect":{"left":-100,"top":0,"width":100,"height":100},"frame":"outer"}),
+            ),
+            (
+                "window.drag",
+                json!({"mode":"move","button":"left","max_duration_ms":1000,"max_updates":32}),
+            ),
+            (
+                "window.drag",
+                json!({"mode":"move","button":"left","max_duration_ms":1000,"max_updates":32,"snap":null}),
+            ),
+            (
+                "window.drag",
+                json!({"mode":"move","button":"left","max_duration_ms":1000,"max_updates":32,
+                "snap":{"bounds":{"left":0,"top":0,"width":1000,"height":800},"distance":30,"wait_ms":300,"initial_elapsed_ms":301}}),
+            ),
+        ] {
+            for deadline in [
+                None,
+                Some(Instant::now() + std::time::Duration::from_secs(5)),
+            ] {
+                let token = CancellationToken::new();
+                let result = match deadline {
+                    None => host.call(method, params.clone(), &token),
+                    Some(deadline) => {
+                        host.call_with_deadline(method, params.clone(), &token, deadline)
+                    }
+                };
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error.code, "raw_wire_target_resolution_reached",
+                    "{method} / {params}"
+                );
+                assert_eq!(error.method.as_deref(), Some(method));
+                assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod pointing_root_dispatch_tests {
+    use super::*;
+    #[test]
+    fn both_real_entrypoints_validate_before_original_resolution_without_native() {
+        let host = DesktopHost {
+            foreground_targets: ForegroundTargets::default(),
+            target: Err(error(
+                "pointing_root_original_resolution_reached",
+                "目标哨兵",
+                "not_started",
+            )),
+        };
+        for with_deadline in [false, true] {
+            for (params, expected) in [
+                (json!({}), "pointing_root_original_resolution_reached"),
+                (json!([]), "invalid_input"),
+                (json!({"hwnd":"12"}), "invalid_input"),
+            ] {
+                let token = CancellationToken::new();
+                let result = if with_deadline {
+                    host.call_with_deadline(
+                        "pointer.root",
+                        params,
+                        &token,
+                        Instant::now() + std::time::Duration::from_secs(5),
+                    )
+                } else {
+                    host.call("pointer.root", params, &token)
+                };
+                let error = result.unwrap_err();
+                assert_eq!(error.code, expected);
+                assert_eq!(error.method.as_deref(), Some("pointer.root"));
+                assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod pointing_handoff_dispatch_tests {
+    use super::*;
+    #[test]
+    fn real_entrypoints_validate_then_resolve_original_without_foreground_requests() {
+        let host = DesktopHost {
+            foreground_targets: ForegroundTargets::default(),
+            target: Err(error(
+                "handoff_original_resolution_reached",
+                "原目标哨兵",
+                "not_started",
+            )),
+        };
+        let valid = json!({"expected_root":{"window_handle":"12","process_id":22,"thread_id":32,"process_created_file_time":"42"},"valid_for_ms":5000,"confirm_timeout_ms":50});
+        for deadline in [
+            None,
+            Some(Instant::now() + std::time::Duration::from_secs(5)),
+        ] {
+            for (params, expected) in [
+                (json!({"hwnd":"12"}), "invalid_input"),
+                (valid.clone(), "handoff_original_resolution_reached"),
+            ] {
+                let token = CancellationToken::new();
+                let result = match deadline {
+                    None => host.call("target.handoff_pointing_root", params, &token),
+                    Some(end) => {
+                        host.call_with_deadline("target.handoff_pointing_root", params, &token, end)
+                    }
+                };
+                let error = result.unwrap_err();
+                assert_eq!(error.code, expected);
+                assert_eq!(
+                    error.method.as_deref(),
+                    Some("target.handoff_pointing_root")
+                );
+                assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+                assert!(host.foreground_targets.active.lock().unwrap().1.is_none());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod captured_window_dispatch_tests {
+    use super::*;
+    #[test]
+    fn explicit_invalid_lease_never_falls_back_to_default_a_in_both_entrypoints() {
+        let host = DesktopHost {
+            foreground_targets: ForegroundTargets::default(),
+            target: Err(error(
+                "default_a_resolution_reached",
+                "原A哨兵",
+                "not_started",
+            )),
+        };
+        let reference = json!({"capture_id":1,"context":{"window_handle":"12","process_id":22,"thread_id":32,"process_created_file_time":"42","expires_at_unix_ms":1}});
+        for deadline in [
+            None,
+            Some(Instant::now() + std::time::Duration::from_secs(5)),
+        ] {
+            for (method, params, expected) in [
+                ("window.geometry", json!({}), "default_a_resolution_reached"),
+                (
+                    "window.geometry",
+                    json!({"target":reference}),
+                    "target_changed",
+                ),
+                (
+                    "window.set_rect",
+                    json!({"target":reference,"rect":{"left":0,"top":0,"width":100,"height":100},"frame":"outer"}),
+                    "target_changed",
+                ),
+                (
+                    "window.action",
+                    json!({"target":reference,"operation":"restore"}),
+                    "target_changed",
+                ),
+                (
+                    "window.action",
+                    json!({"target":reference,"operation":"toggle_maximize"}),
+                    "target_changed",
+                ),
+                (
+                    "window.drag",
+                    json!({"target":reference,"mode":"move","button":"left","max_duration_ms":100,"max_updates":1}),
+                    "target_changed",
+                ),
+            ] {
+                let token = CancellationToken::new();
+                let result = match deadline {
+                    None => host.call(method, params, &token),
+                    Some(end) => host.call_with_deadline(method, params, &token, end),
+                };
+                let error = result.unwrap_err();
+                assert_eq!(error.code, expected);
+                assert_eq!(error.method.as_deref(), Some(method));
+                assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+            }
+        }
+    }
+
+    #[test]
+    fn captured_toggle_both_entrypoints_reject_cancel_and_deadline_before_resolution() {
+        let host = DesktopHost {
+            foreground_targets: ForegroundTargets::default(),
+            target: Err(error(
+                "default_a_resolution_reached",
+                "原A哨兵",
+                "not_started",
+            )),
+        };
+        let params = json!({"target":{"capture_id":1,"context":{"window_handle":"12","process_id":22,"thread_id":32,"process_created_file_time":"42","expires_at_unix_ms":1}},"operation":"toggle_maximize"});
+        let token = CancellationToken::new();
+        let timeout = host
+            .call_with_deadline("window.action", params.clone(), &token, Instant::now())
+            .unwrap_err();
+        assert_eq!(timeout.code, "timeout");
+        token.cancel();
+        for deadline in [None, Some(Instant::now())] {
+            let error = match deadline {
+                None => host.call("window.action", params.clone(), &token),
+                Some(end) => host.call_with_deadline("window.action", params.clone(), &token, end),
+            }
+            .unwrap_err();
+            assert_eq!(error.code, "cancelled");
+            assert_eq!(error.method.as_deref(), Some("window.action"));
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
         }
     }
 }

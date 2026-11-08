@@ -112,6 +112,10 @@ impl<H> WithProcessCapture<H> {
     }
 }
 impl<H: NativeHost> NativeHost for WithProcessCapture<H> {
+    fn native_context_available(&self) -> bool {
+        self.inner.native_context_available()
+    }
+
     fn call(
         &self,
         method: &str,
@@ -309,6 +313,36 @@ mod reserved_selection_helper_tests {
                 .unwrap_err();
             assert_eq!(error.code, "invalid_input");
             assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_marker_tests {
+    use super::*;
+    struct Inner(bool);
+    impl NativeHost for Inner {
+        fn native_context_available(&self) -> bool {
+            self.0
+        }
+        fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+            panic!("标记检查不执行宿主调用")
+        }
+    }
+    #[test]
+    fn wrapper_never_promotes_a_false_native_context_marker() {
+        for available in [false, true] {
+            let wrapped = WithProcessCapture::new(Inner(available));
+            assert_eq!(wrapped.native_context_available(), available);
+            assert!(!wrapped.action_scope_available());
+            let wrapped = crate::raishot_result_host::WithRaiShotResult::new(
+                wrapped,
+                std::sync::Arc::new(crate::raishot_result_host::Store::new(
+                    "synthetic-bindings.json".into(),
+                )),
+            );
+            assert_eq!(wrapped.native_context_available(), available);
+            assert!(!wrapped.action_scope_available());
         }
     }
 }

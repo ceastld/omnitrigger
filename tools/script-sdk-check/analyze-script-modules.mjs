@@ -1,7 +1,8 @@
 // 对显式提供的源码快照检查轻量宿主模块路径与静态加载预算；没有文件或进程 API。
 import ts from 'typescript';
 import {Buffer} from 'node:buffer';
-import {javascriptSyntaxDiagnostics} from './javascript-syntax.mjs';
+import {javascriptAnalysisProgram} from './javascript-syntax.mjs';
+import {analyzeLegacyEntry} from './analyze-legacy-entry.mjs';
 
 const FILE_LIMIT=128*1024, TOTAL_LIMIT=1024*1024, MODULE_LIMIT=64;
 const SNAPSHOT_FILES=256, SNAPSHOT_BYTES=8*1024*1024;
@@ -21,6 +22,7 @@ const messages={
   module_syntax_invalid:'源码存在语法错误，静态模块图未完整分析。',
   module_typescript_syntax:'JavaScript 模块包含 TypeScript 专有语法；请改用 JSDoc 类型注释，不会自动转译。',
   module_analysis_limit:'源码解析或遍历超过分析器可处理的复杂度。',
+  legacy_entry_module_syntax:'旧 .js 入口按函数体执行，不支持静态 import/export；需要模块时使用 .mjs。',
 };
 function scalar(text) {
   for(let i=0;i<text.length;i++) {
@@ -75,8 +77,10 @@ export function analyzeScriptModules(snapshot) {
     if(snapshotBytes>SNAPSHOT_BYTES) {add('snapshot_limit');return result();}
     sources.set(item.path,item.text);
   }
+  const legacy=snapshot.protocol==='legacy_function_body';
+  if(snapshot.protocol!==undefined&&!['module','legacy_function_body'].includes(snapshot.protocol)) {add('snapshot_invalid');return result();}
   const entry=pathParts([],snapshot.entry,false);
-  if(!entry.path||entry.path!==snapshot.entry||!snapshot.entry.endsWith('.mjs')||snapshot.entry.startsWith('.')) {
+  if(!entry.path||entry.path!==snapshot.entry||!snapshot.entry.endsWith(legacy?'.js':'.mjs')||snapshot.entry.startsWith('.')) {
     add('module_entry');return result();
   }
   const visited=new Set(),queue=[{file:entry.path}];
@@ -97,10 +101,17 @@ export function analyzeScriptModules(snapshot) {
       add('module_syntax_invalid',file);continue;
     }
     try {
-      const syntax=javascriptSyntaxDiagnostics(source);
+      const analysisProgram=javascriptAnalysisProgram(source);
+      const syntax=analysisProgram.getSyntacticDiagnostics(source);
       if(syntax.length) {
         for(const diagnostic of syntax)add('module_typescript_syntax',file,diagnostic.start,source);
         continue;
+      }
+      if(legacy) {
+        const entryAnalysis=analyzeLegacyEntry(source,analysisProgram);
+        if(!entryAnalysis.dependencyAnalysisComplete) {
+          partial=true;diagnostics.push(...entryAnalysis.dependencyDiagnostics);
+        }
       }
     } catch {add('module_analysis_limit',file);continue;}
     const connect=(node,specifier,dynamic)=>{
@@ -113,12 +124,23 @@ export function analyzeScriptModules(snapshot) {
       } else queue.push({file:resolved.path,from:file,node,source});
     };
     const visit=node=>{
+      if(legacy&&(ts.isImportDeclaration(node)||ts.isExportDeclaration(node)||ts.isExportAssignment(node)
+          ||node.modifiers?.some(m=>m.kind===ts.SyntaxKind.ExportKeyword))) {
+        add('legacy_entry_module_syntax',file,node,source);
+      }
       if((ts.isImportDeclaration(node)||ts.isExportDeclaration(node))&&node.moduleSpecifier&&ts.isStringLiteralLike(node.moduleSpecifier)) {
-        if(node.attributes) add('module_import_attributes',file,node.attributes,source);
+        if(legacy) { /* 旧协议没有静态模块边，不补读这些文件。 */ }
+        else if(node.attributes) add('module_import_attributes',file,node.attributes,source);
         else connect(node.moduleSpecifier,node.moduleSpecifier.text,false);
       } else if(ts.isCallExpression(node)&&node.expression.kind===ts.SyntaxKind.ImportKeyword) {
         partial=true;
-        if(node.arguments.length===1&&ts.isStringLiteralLike(node.arguments[0]))connect(node.arguments[0],node.arguments[0].text,true);
+        if(legacy) {
+          if(node.arguments.length===1&&ts.isStringLiteralLike(node.arguments[0])) {
+            const resolved=pathParts(file.split('/').slice(0,-1),node.arguments[0].text,true);
+            if(resolved.code)add(resolved.code,file,node.arguments[0],source);
+            else edges.push({from:file,to:resolved.path,kind:'dynamic_literal'});
+          }
+        } else if(node.arguments.length===1&&ts.isStringLiteralLike(node.arguments[0]))connect(node.arguments[0],node.arguments[0].text,true);
         else add('dynamic_import_unresolved',file,node,source,'warning');
       }
       ts.forEachChild(node,visit);

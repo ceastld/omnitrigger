@@ -380,6 +380,25 @@ fn io_error(context: &str, error: std::io::Error) -> ActionError {
     ActionError::new("catalog_io", format!("{context}：{error}"))
 }
 
+// 可控运行时调度测试不需要文件系统、已安装动作或脚本进程。
+#[cfg(test)]
+pub(crate) fn test_catalog(actions: Vec<CatalogAction>) -> PackageCatalog {
+    let mut catalog = PackageCatalog::default();
+    for action in actions {
+        catalog.package_ids.insert(action.package_id.clone());
+        catalog.entries.insert(
+            (action.package_id.clone(), action.definition.id.clone()),
+            CatalogEntry {
+                definition: action.definition.clone(),
+                package_root: std::path::PathBuf::from("synthetic-not-opened"),
+                entry_path: std::path::PathBuf::from("synthetic-not-opened/main.mjs"),
+            },
+        );
+        catalog.actions.push(action);
+    }
+    catalog
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

@@ -118,7 +118,11 @@ node tools/script-project.mjs refresh --runtime script --project "$root/actions/
 
 普通包的每份声明须与所选来源相同，或属于工具已识别的随包规范快照。作者改过声明或快照未知时返回 `project_sdk_unrecognized`；缺件返回 `project_sdk_layout_incomplete`；根目录声明与旧 `sdk/api.d.ts` 并存等布局歧义返回 `project_sdk_layout_ambiguous`。这些预检失败均不写入声明。应先核对并保留作者改动，再选择与实际运行版本配套的声明来源。这项归属检查只适用于上述已识别普通包布局，旧生成布局的替换策略不变。
 
-各声明文件分别替换，刷新不是跨文件事务。中途失败可能留下部分已更新的 SDK；作者文件保持不变，排除原因后可显式再次刷新。
+同时含 Node 与 Script 动作的既有分离布局也可刷新：`types/api.d.ts`、`types/clipboard-history-api.d.ts` 使用 Node 与历史声明，`sdk/api.d.ts` 别名使用 Script 同步声明。命令保持这三个路径，不搬移声明或改作者导入；选择包中任一运行时都按各自声明身份一起预检和更新。缺件、与根目录或完整 `sdk/` 布局并存、声明被作者修改时会拒绝，不先覆盖其中一部分。刷新回执的 `layout` 为 `split`。
+
+完整 `sdk/` 布局若已有受支持的 `sdk/snapshot.json`，刷新也同步其三份声明的 SHA-256，保留原有 API、wire 和来源标签。当前识别亮度步进、音量百分点示例的版本 1 生成格式；不新建快照或改写其它格式。写入前要求元数据结构和归属已知，所记指纹、当前及目标声明均属于各文件已登记版本。已知旧指纹与已知较新声明可以一并刷新；未知元数据或指纹返回 `project_sdk_snapshot_unrecognized`，未知声明仍为 `project_sdk_unrecognized`，均在任何替换之前拒绝。`source/canonical_source` 只用于校验标签，不作为读取路径。刷新后继续运行包自己的检查命令。
+
+声明和已有生成快照全部通过预检及统一复查后才开始逐文件替换；复查发现同时改动返回 `project_sdk_changed`。刷新不是跨文件事务，写入中途的文件系统错误可能留下部分已更新的 SDK；作者文件保持不变，应先核对当前声明与快照再处理失败。
 
 使用与实际应用版本配套的声明来源。默认来源是当前仓库；`--source-root` 是显式开发接口。界面的“重新加载”只刷新动作目录，不等同于此命令的 SDK 刷新。
 
@@ -154,7 +158,7 @@ node tools/script-sdk-check/check-node-entry.cjs $package
 
 这不会为包安装或补齐环境声明。若作者代码使用 Node 内置 API，仍需按本包配置安装相应开发依赖；SDK 声明本身不提供 `node:fs` 等内置模块或 `process` 等全局类型。
 
-两类工程均开启 `checkJs`、严格检查和无输出模式。SDK 的只读捕获类型、Node Promise 返回值和相对模块导入均参与检查；运行时入口核对仍使用前面的正式调用命令。既有 Node 工程的作者配置不自动迁移，作者可自行添加相同开发依赖与 Node 类型配置；SDK 刷新仍只更新声明。
+两类工程均开启 `checkJs`、严格检查和无输出模式。SDK 的只读捕获类型、Node Promise 返回值和相对模块导入均参与检查；运行时入口核对仍使用前面的正式调用命令。既有 Node 工程的作者配置不自动迁移，作者可自行添加相同开发依赖与 Node 类型配置；SDK 刷新只更新声明、对应检查器及已识别的现有生成指纹。
 
 ## 取消信号与环境类型
 

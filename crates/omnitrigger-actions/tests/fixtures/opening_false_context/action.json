@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "id": "test.opening-false-context",
+  "name": "无原目标的打开桥API合同",
+  "version": "0.0.0",
+  "actions": [{"id":"open","title":"打开 API","version":1,"runtime":"script","entry":"main.mjs","single_instance":true}]
+}

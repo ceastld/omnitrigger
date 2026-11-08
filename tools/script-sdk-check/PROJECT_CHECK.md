@@ -7,7 +7,7 @@ npm ci --prefix tools/script-sdk-check --ignore-scripts --no-audit --no-fund
 node tools/script-sdk-check/check-project-types.mjs "D:\Actions\my-script"
 ```
 
-同一命令读取明确工程中的 `action.json`、`jsconfig.json` 与同包 SDK（优先 `sdk/api.d.ts`，缺失时使用根目录 `api.d.ts`）。清单中的 Node 与轻量入口及其依赖都参与同一受限 TypeScript 工程；轻量 `.mjs` 另检查静态导入图和 `main` 具名导出，Node `.js/.mjs/.cjs` 复用现有 Node 默认导出分析。成功退出0，有类型错误、静态环境错误或工程错误退出1。它只做静态检查，不创建、修补或覆盖工程文件，不执行模块初始化器或入口，也不启动应用、宿主或编辑器。
+同一命令读取明确工程中的 `action.json`、`jsconfig.json` 与同包 SDK（优先 `sdk/api.d.ts`，缺失时使用根目录 `api.d.ts`）。清单中的 Node 与轻量入口及其依赖都参与同一受限 TypeScript 工程；轻量 `.mjs` 另检查静态导入图和 `main` 具名导出，旧 `.js` 检查函数体协议的 `main` 绑定与语法依赖，Node `.js/.mjs/.cjs` 复用现有 Node 默认导出分析。成功退出0，有类型错误、静态环境错误或工程错误退出1。它只做静态检查，不创建、修补或覆盖工程文件，不执行模块初始化器或入口，也不启动应用、宿主或编辑器。
 
 原有 `compilerVersion/project/entries/diagnostics/checkedFiles/runtimeExecuted/filesModified` 字段保留；`diagnostics` 仍是 TypeScript 原数值诊断代码及工程内文件名、行列。新增 `environmentDiagnostics` 保存模块和入口诊断，`category` 分别是 `modules/entry`，代码为字符串。顶层 `passed` 要求类型和静态环境检查都没有错误，`staticEnvironmentPassed` 单独表示后者；警告不改变退出码。
 
@@ -19,7 +19,9 @@ Node 结果新增 `nodeEntryChecks`，按 Node 入口保留原检查器的诊断
 
 `moduleChecks/entryChecks` 按入口返回完整静态结果。轻量导入图需要显式 `.js`／`.mjs`，不补全扩展名，也不支持 Node 包导入；静态加载图最多64模块、合计1MiB。TypeScript 的类型解析仍受明确工程范围限制。若 TypeScript 将 `./value.js` 重定向到 `value.ts`，工具仍按宿主需要的明确 `.js` 路径补读包内静态依赖，沿用相同的元数据、UTF-8和容量防护，不枚举目录。
 
-动态导入目标和再导出值无法静态确定时，返回警告并将 `staticAnalysisComplete` 设为 `false`。旧 `.js` 函数体入口继续接受类型检查，记录在 `skippedEntries`，不强加ESM导出要求；该字段也使静态分析完整性为 `false`。清单中的旧 `.js` 入口若出现静态 `import/export`，会另报可定位的 `legacy_entry_module_syntax`：该入口实际被宿主包装为函数体，不能按 ESM 执行；模块入口使用 `.mjs` 并具名导出 `main`。此限制只针对旧入口，不限制被 `.mjs` 导入的 `.js` 辅助模块。`main` 的函数声明不证明初始化之后仍可调用或返回合法结果。`runtimeCapabilitiesChecked/runtimeVerified` 始终为 `false`，不会探测实际宿主。更详细的静态边界见 [模块快照检查](MODULE_SNAPSHOT_CHECK.md)。
+动态导入目标和再导出值无法静态确定时，返回警告并将 `staticAnalysisComplete` 设为 `false`。旧 `.js` 函数体入口也返回 `moduleChecks/entryChecks`，标明 `entryProtocol:"legacy_function_body"`；唯一同步 `main` 声明可得到 `mainExport:"legacy_callable_declaration"`，不要求 ESM 导出，也不再仅因旧协议列入 `skippedEntries`。普通函数声明、函数表达式或箭头函数变量绑定可被识别；别名值、非常规参数签名、重绑定、动态求值/加载和不确定初始化保留不完整标记或拒绝。JSDoc 类型引用仍由类型检查处理，不算运行时依赖。
+
+清单中的旧 `.js` 入口若出现静态 `import/export`，会报可定位的 `legacy_entry_module_syntax`：该入口实际被宿主包装为函数体，不能按 ESM 执行；模块入口使用 `.mjs` 并具名导出 `main`。此限制只针对旧入口，不限制被 `.mjs` 导入的 `.js` 辅助模块。`staticAnalysisComplete` 只表示入口声明与已提供源码的语法依赖覆盖，不证明任意值流、初始化、副作用或返回结果合法。`runtimeCapabilitiesChecked/runtimeVerified` 始终为 `false`，不会探测实际宿主。更详细的静态边界见 [模块快照检查](MODULE_SNAPSHOT_CHECK.md)。
 
 这适合使用记事本或需要命令行反馈的开发流程。保留入口的 `@type {ScriptMain}` 标注及工程SDK；检查使用工程自己的声明快照，不自动升级到仓库最新版。Node ESM 必须 default 导出可调用函数，检查也会等待类型层面的顶层 Promise，拒绝明确无法形成所需 JSON output 的函数、symbol 或 bigint 结果。CommonJS、动态类型和自定义序列化只报告未确认警告，不执行代码来猜测结果。
 

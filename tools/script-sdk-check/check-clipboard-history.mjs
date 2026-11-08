@@ -31,7 +31,10 @@ let activeMetadata = null;
 let metadataProcesses = 0;
 export function classifyMetadataCheck(checked, expectedCount) {
   const stderr = typeof checked.stderr === 'string' ? checked.stderr : '';
+  const stdout = typeof checked.stdout === 'string' ? checked.stdout : '';
   const base = {exitCode:Number.isInteger(checked.status) ? checked.status : null,
+    childPid:Number.isSafeInteger(checked.pid) && checked.pid > 0 && checked.pid <= 0xffffffff ? checked.pid : null,
+    stdoutSummary:{present:stdout.length > 0,bytes:Buffer.byteLength(stdout),category:stdout.length ? 'suppressed_powershell_stdout' : 'empty'},
     signal:['SIGTERM','SIGKILL','SIGABRT'].includes(checked.signal) ? checked.signal : null,
     errorCode:['ETIMEDOUT','ENOENT','EACCES','EPERM','ENOBUFS'].includes(checked.error?.code) ? checked.error.code : checked.error ? 'other' : null,
     stderrSummary:{present:stderr.length > 0,bytes:Buffer.byteLength(stderr),category:stderr.length ? 'suppressed_powershell_stderr' : 'empty'}};
@@ -49,6 +52,15 @@ export function classifyMetadataCheck(checked, expectedCount) {
   if (checked.status === 0 && !checked.signal && message?.classification === 'checked' && message.checkedCount === expectedCount) return {...base,classification:'checked'};
   return {...base,classification:'metadata_command_failed'};
 }
+export function metadataProgram(env = process.env) {
+  const configured = env.OMNITRIGGER_METADATA_POWERSHELL;
+  if (configured === undefined) return 'powershell.exe';
+  requireCheck(typeof configured === 'string' && configured === configured.trim() && configured.length <= 1024
+    && /^[a-z]:[\\/]/i.test(configured) && /\.exe$/i.test(configured) && !/[\0\r\n]/.test(configured)
+    && !configured.split(/[\\/]/).some(part => /^onedrive/i.test(part) || /^icloud/i.test(part) || /^dropbox$/i.test(part)),
+  'invalid_metadata_program');
+  return configured;
+}
 function metadataBatch(targets) {
   const paths = [...new Set(targets.flatMap(ancestors))];
   requireCheck(paths.every(value => {
@@ -60,7 +72,7 @@ function metadataBatch(targets) {
     const command = `$ErrorActionPreference='Stop'; $index=-1; try { $paths=ConvertFrom-Json $env:OMNITRIGGER_HISTORY_METADATA_PATHS; if($paths -isnot [System.Array]) { $paths=@($paths) }; foreach($p in $paths) { $index++; if(Test-Path -LiteralPath $p) { $item=Get-Item -LiteralPath $p -Force; $blocked=([long]$item.Attributes -band 0x441400); if($blocked -ne 0) { @{classification='attributes_rejected';pathIndex=$index;blockedAttributes=$blocked}|ConvertTo-Json -Compress; exit 7 } } }; @{classification='checked';checkedCount=$paths.Count}|ConvertTo-Json -Compress; exit 0 } catch { @{classification='metadata_error';pathIndex=$index;exceptionType=$_.Exception.GetType().Name}|ConvertTo-Json -Compress; exit 8 }`;
     const began = Date.now();
     metadataProcesses++;
-    const checked = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
+    const checked = spawnSync(metadataProgram(), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], {
       windowsHide:true, encoding:'utf8', timeout:15000, maxBuffer:4096,
       env:{...process.env, OMNITRIGGER_HISTORY_METADATA_PATHS:JSON.stringify(pending)},
     });

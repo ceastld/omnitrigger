@@ -223,14 +223,16 @@ impl ScriptHostRuntime {
         let native = host
             .map(|_| NativeBridge::new().and_then(|bridge| Ok((bridge.configuration()?, bridge))));
         let (mut bridge, native_context) = match native {
-            Some(Ok((configuration, bridge))) => {
-                (Some(bridge), json!({"connection":configuration}))
-            }
+            Some(Ok((configuration, bridge))) => (
+                Some(bridge),
+                json!({"connection":configuration,"actions_scope":host.is_some_and(|host| host.action_scope_available()),"native_context_available":host.is_some_and(|host| host.native_context_available())}),
+            ),
             Some(Err(error)) => (None, json!({"error":error})),
             None => (None, Value::Null),
         };
         let mut request = json!({
             "input":action.call.input,"package_root":crate::node::script_path(&root),"native_context":native_context,
+            "desktop_mode":if host.is_some() { "application_bridge" } else { "standalone" },
             "invocation":{"invocation_id":context.invocation_id.to_string(),"binding_id":context.binding_id.to_string()}
         });
         request

@@ -440,6 +440,10 @@ impl<H> WithRaiShotResult<H> {
     }
 }
 impl<H: NativeHost> NativeHost for WithRaiShotResult<H> {
+    fn native_context_available(&self) -> bool {
+        self.inner.native_context_available()
+    }
+
     fn call(
         &self,
         method: &str,

@@ -21,10 +21,13 @@ function id(value) { return typeof value === 'number' && Number.isSafeInteger(va
 function text(value, max = 128) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
 }
+/** @typedef {new (input:string) => Readonly<{href:string,protocol:string,username:string,password:string}>} WorkflowUrlConstructor */
 /** @param {unknown} value */
 function canonicalUrl(value, response = false) {
   try {
     if (!text(value, 16384)) throw new Error();
+    const URL = /** @type {typeof globalThis & {URL?:WorkflowUrlConstructor}} */ (globalThis).URL;
+    if (typeof URL !== 'function') throw new Error();
     const url = new URL(value);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error();
     return url.href;
@@ -109,7 +112,11 @@ function tabUrl(tab) {
   if (typeof url !== 'string') {
     fail('permission_required', '无法读取窗口内全部标签网址，不能可靠判断是否需要新建。', 'tabs.query', ['tabs']);
   }
-  try { return new URL(url).href; } catch { fail('invalid_response', '标签网址格式无效。', 'tabs.query'); }
+  try {
+    const URL = /** @type {typeof globalThis & {URL?:WorkflowUrlConstructor}} */ (globalThis).URL;
+    if (typeof URL !== 'function') throw new Error();
+    return new URL(url).href;
+  } catch { fail('invalid_response', '标签网址格式无效。', 'tabs.query'); }
 }
 
 

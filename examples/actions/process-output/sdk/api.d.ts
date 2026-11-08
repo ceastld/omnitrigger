@@ -1,3 +1,18 @@
+export type PointingRootHandoffOptions=Readonly<{validForMs:number;confirmTimeoutMs:number}>;
+/** requested仅表示请求发生；只有接纳且及时确认才给出现有CapturedTarget，失败不重试。 */
+export type PointingRootHandoffResult=
+  |Readonly<{requested:true;requestAccepted:true;foregroundConfirmed:true;target:CapturedTarget;reason:null;effectState:'unknown'}>
+  |Readonly<{requested:true;requestAccepted:false;foregroundConfirmed:boolean;target:null;reason:'os_rejected';effectState:'unknown'}>
+  |Readonly<{requested:true;requestAccepted:true;foregroundConfirmed:false;target:null;reason:'confirmation_timeout';effectState:'unknown'}>;
+
+/** 调用时观察身份，不是CapturedTarget输入租约，不含任何写入方法。 */
+export type PointingWindowIdentity=Readonly<{window_handle:string;process_id:number;thread_id:number;process_created_file_time:string}>;
+export type PointingRootObservation=Readonly<{
+  sampledAt:'call-time';coordinateSpace:'physical-screen';point:Readonly<{x:number;y:number}>;
+  inputSource:Readonly<{kind:'polled-pointer';injected:null;selfInjected:null}>;
+  pointingWindow:PointingWindowIdentity;rootWindow:PointingWindowIdentity;
+}>;
+
 declare const raiShotResidentBrand: unique symbol;
 export type RaiShotResident = Readonly<{readonly [raiShotResidentBrand]:true;window_handle:string;process_id:number;thread_id:number;process_created_file_time:string;expires_at_unix_ms:number}>;
 /** 无环境类型时的取消观察接口；不声明浏览器或Node环境全局。 */
@@ -115,7 +130,7 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'win32_edit.replace_selection' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'display.brightness_step' | 'audio.volume_adjust' | 'ui.choose' | 'ui.notify' | 'ui.open_history' | 'ui.toggle_history';
+  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'win32_edit.replace_selection' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'window.geometry' | 'window.set_rect' | 'pointer.state' | 'pointer.root' | 'target.handoff_pointing_root' | 'window.drag' | 'display.brightness_step' | 'audio.volume_adjust' | 'ui.choose' | 'ui.notify' | 'ui.open_history' | 'ui.toggle_history';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
 }
@@ -236,7 +251,44 @@ export interface OpenFileInParentFault extends Error {
   method: 'system.open_file_in_parent';
   effectState: 'not_started' | 'unknown';
 }
+/** 物理屏幕像素；右/下边界为left+width/top+height，不含该边界像素。 */
+export type WindowRect = Readonly<{left:number;top:number;width:number;height:number}>;
+export type WindowGeometry = Readonly<{coordinateSpace:'physical-screen';/** 原始类名1–255 UTF-16单元，随同目标/Lease复验；匹配属于调用方业务。 */className:string;outerRect:WindowRect;visibleFrameRect:WindowRect;
+  monitorRect:WindowRect;workArea:WindowRect;primaryScreen:Readonly<{width:number;height:number}>;windowDpi:number;maximized:boolean}>;
+
+export type PointerButtonState='down'|'not_down_or_unavailable';
+export type PointerState=Readonly<{coordinateSpace:'physical-screen';x:number;y:number;buttons:Readonly<{left:PointerButtonState;right:PointerButtonState;middle:PointerButtonState}>;inputSource:Readonly<{kind:'polled-key-state';injected:null;selfInjected:null}>}>;
+export type WindowDragOptions=Readonly<{mode:'move'|'resize';button:'left'|'right'|'middle';maxDurationMs:number;maxUpdates:number;
+  snap?:Readonly<{bounds:WindowRect;distance:number;waitMs:number;initialElapsedMs:number}>|null}>;
+export type WindowDragStopped=Readonly<{stopped:true;reason:'button_not_down_or_unavailable'|'duration_limit'|'update_limit';acceptedUpdates:number;pollSamples:number;effectState:'not_started'|'unknown';dragCompleted:false}>;
+
+export interface StopOtherInstancesFault extends Error {
+  code:'invalid_input'|'actions_unavailable'|'actions_busy'|'actions_call_limit'|'action_inactive'|'action_policy_conflict'|'action_busy'|'stop_timeout'|'timeout'|'cancelled'|'invalid_response'|'actions_failed';
+  method:'actions.stop_other_instances';
+  effectState:'not_started'|'unknown';
+}
+export type StopOtherInstancesResult = Readonly<{stoppedCount:0;effectState:'not_started'} | {stoppedCount:1|2|3;effectState:'unknown'}>;
+export type ActionStateJson = null | boolean | number | string | ActionStateJson[] | {[key:string]:ActionStateJson};
+export type ActionStateEntry = Readonly<{present:false} | {present:true;value:ActionStateJson}>;
+export type ActionStateSnapshot = Readonly<{revision:string;entry:ActionStateEntry}>;
+export type ActionStateCas = Readonly<{status:'committed'|'conflict';current:ActionStateSnapshot}>;
+export interface ActionStateFault extends Error {
+  code:'invalid_input'|'state_unavailable'|'state_busy'|'state_limit'|'state_corrupt'|'state_storage_changed'|'state_io'|'state_failed'|'action_inactive'|'cancelled'|'timeout'|'invalid_response';
+  method:'state.read'|'state.compare_and_swap';
+  effectState:'not_started'|'unknown';
+}
+export interface ActionStateApi {
+  /** 仅当前真实package/action；missing不补默认。session重启清空，durable需应用显式宿主。 */
+  read(area:'session'|'durable',key:string): Promise<ActionStateSnapshot>;
+  /** 小JSON，值<=16KiB，深度<=8，每区域最多64键；冲突不重试。 */
+  compareAndSwap(area:'session'|'durable',key:string,expectedRevision:string,next:ActionStateEntry): Promise<ActionStateCas>;
+}
+
 export interface ActionContext {
+  state: ActionStateApi;
+  /** 只操作当前服务作用域内同包同动作其他调用，排除自身；须await。 */
+  actions: {stopOtherInstances(options?: {timeoutMs?:number}): Promise<StopOtherInstancesResult>};
+
   apiVersion: 1;
   input: Record<string, any>;
   invocation: Readonly<{invocation_id: string; binding_id: string}>;
@@ -275,6 +327,8 @@ export interface ActionContext {
   };
   browser: BrowserApi;
   ui: {
+    /** 更新本次动作自己的版本提示；默认列内文字；topRight为右上角绿色透明底角标，均1–16 UTF-16单位。生命周期沿用有限结果历史。回执确认模型已更新并请求刷新，不表示动作成功或像素已呈现。 */
+    setActionHint(options: {text: string; placement?: 'inline' | 'topRight'}): Promise<{updated: true}>;
     /** 只确认创建独立历史窗；动作结束后仍存活，关闭仅停止该窗自己的采集。无UI为ui_unavailable。 */
     openHistory(): Promise<{opened: true}>;
     /** 无窗用本次Host原目标创建；已有窗仅关闭本窗，确认自身采集停止并移除后才返回closed。
@@ -298,6 +352,16 @@ export interface ActionContext {
     /** 原目标单选区；成功确认无选区/空文本时为 {text:"",truncated:false}，provider/目标/读取失败仍报错。默认 reject，显式 truncate 按请求上限取 UTF-16 前缀；拆开代理对拒绝。
      * maxUtf16Units 为1–8192整数，默认128；仅请求上限+1，helper采集及动作结果64KiB界限不变。 */
     readSelectionText(options?: {overflow?: 'reject' | 'truncate'; maxUtf16Units?: number}): Promise<SelectionTextSnapshot>;
+    getPointingRoot(): Promise<PointingRootObservation>;
+    /** 只请求一次当前指向且身份匹配的根窗；原desktop目标保持不变。 */
+    handoffPointingRoot(expected: PointingRootObservation, options: PointingRootHandoffOptions): Promise<PointingRootHandoffResult>;
+    /** 显式CapturedTarget路径，原默认目标不变；每次复验租约/期限/身份及B前台。 */
+    getWindowGeometryFor(target: CapturedTarget): Promise<WindowGeometry>;
+    setWindowRectFor(target: CapturedTarget, rect: WindowRect, options: {frame:'outer'|'visible'}): Promise<{submitted:true;effectState:'unknown'}>;
+    restoreWindowFor(target: CapturedTarget): Promise<{submitted:true}>;
+    /** 显式B租约沿用身份/前台/取消/期限守卫；按提交时最大化状态切换，失败不重试。 */
+    toggleMaximizeWindowFor(target: CapturedTarget): Promise<{submitted:true}>;
+    trackWindowDragFor(target: CapturedTarget, options: WindowDragOptions): Promise<WindowDragStopped>;
     /** 显式PID与创建时间；1–5000ms；仅捕获该进程当前前台，不激活或枚举。 */
     captureForegroundTarget(options: CaptureForegroundOptions): Promise<CapturedTarget>;
     /** 原desktop目标不变；每次复核身份/前台/取消/期限；仅确认提交。 */
@@ -331,10 +395,22 @@ export interface ActionContext {
      * 客户端最多等待 8 秒；不能保证取消立即抢占阻塞 Win32 调用。
      */
     copySelectionData(options?: SelectionCopyOptions): Promise<SelectionDataSnapshot>;
+    /** 调用时只读采样物理坐标与当前按钮；不可区分未按下和不可用。 */
+    getPointerState(): Promise<PointerState>;
+    /** 现有worker内单次有界调用：20–2000ms，最多64次提交、201次主采样；10ms协作等待。
+     * 不注入/消费输入、不还原窗口；非明确按下即停，返回停止原因而非拖拽完成。已提交不回滚。 */
+    trackWindowDrag(options: WindowDragOptions): Promise<WindowDragStopped>;
+    /** 原捕获窗口仍可见且为前台；DWM可见边界无可用值时报错，不回退外框。
+     * windowDpi是GetDpiForWindow原值，不是坐标缩放因子；工作区为窗口所在或最近显示器。 */
+    getWindowGeometry(): Promise<WindowGeometry>;
+    /** 显式外框或可见边界；坐标i32，宽高1–65535，不裁剪工作区、不激活/改Z序、不隐式还原最大化窗口。
+     * 一次异步SetWindowPos；仅确认提交，应用/DPI改变可调整结果；发起后的失败/取消/超时为unknown，无重试或补偿。 */
+    setWindowRect(rect: WindowRect, options: {frame:'outer'|'visible'}): Promise<{submitted:true;effectState:'unknown'}>;
     /** 操作本次捕获且仍为前台的窗口；仅表示系统接纳请求，关闭可能弹出保存提示。
      * toggle_topmost按提交前原窗口状态切换置顶；不激活、移动或缩放窗口。
      * 沿用本次动作取消和期限；提交后的迟到或取消不撤销已提交操作。 */
-    windowAction(operation: 'toggle_maximize' | 'toggle_topmost' | 'minimize' | 'close'): Promise<{submitted: true}>;
+    /** restore 显式请求原窗口正常显示，不激活、不切换最大化状态；submitted 不代表已还原。 */
+    windowAction(operation: 'toggle_maximize' | 'restore' | 'toggle_topmost' | 'minimize' | 'close'): Promise<{submitted: true}>;
   };
   clipboard: {
     history: import('./clipboard-history-api').AsyncClipboardHistoryApi;
