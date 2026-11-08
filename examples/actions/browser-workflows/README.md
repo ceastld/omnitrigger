@@ -1,8 +1,15 @@
 # 常用浏览器工作流
 
-本动作包用已有 `ctx.browser.profiles()` 和 `ctx.browser.call()` 组合五个 Node 动作和两个同步轻量入口。Node 入口需要 Node，同步入口需要已安装的 Boa 或 QuickJS 宿主；两者都需要已安装并连接的浏览器连接器，以及 Chrome 对应权限。将整个目录放入所选配置同级 `actions/browser-workflows`，重新加载应用后可在动作库设置触发。开发入口执行 `omnitrigger.exe --run-action <调用 JSON 路径>`。先修改 `call.json` 内的示例配置标识和窗口 ID；其中占位值不能直接使用。
+本动作包用已有 `ctx.browser.profiles()` 和 `ctx.browser.call()` 组合五个 Node 动作和三个同步轻量入口。Node 入口需要 Node，同步入口需要已安装的 Boa 或 QuickJS 宿主；两者都需要已安装并连接的浏览器连接器，以及 Chrome 对应权限。将整个目录放入所选配置同级 `actions/browser-workflows`，重新加载应用后可在动作库设置触发。开发入口执行 `omnitrigger.exe --run-action <调用 JSON 路径>`。先修改 `call.json` 内的示例配置标识和窗口 ID；其中占位值不能直接使用。
 
-本包没有新增依赖。离线检查在仓库根运行：
+本包没有新增依赖。在本包目录安装固定开发依赖后，可独立执行严格类型与入口检查：
+
+```powershell
+npm ci --ignore-scripts
+npm run check
+```
+
+检查包含 `type-tests/duplicate-tab.ts` 的同步与 Node 复制入口类型正反例；这些文件不注册为动作，也不在检查时执行。SDK 刷新只替换声明，保留入口、共享核心、调用样例和类型契约。仓库内的离线行为检查在仓库根运行：
 
 ```powershell
 node --test tests/browser_workflows.test.mjs
@@ -18,6 +25,7 @@ node --test tests/browser_workflows.test.mjs
 | `create-default-tab-script` | `profile`、`windowId` | `activate`、`focusWindow` | 同一完整业务的同步轻量入口，无需 Node |
 | `open-url` | `windowId`、`url` | `tabId`、`activate`、`focusWindow` | 在指定普通窗口中按网址复用；无匹配才新建 |
 | `duplicate-tab` | `windowId`、`tabId` | `focusWindow` | 复查源标签仍在指定窗口，再按明确 ID 复制 |
+| `duplicate-tab-script` | `windowId`、`tabId` | `focusWindow` | 同一复制业务的同步轻量入口，无需 Node |
 | `restore-session` | `sessionId`、`sessionKind` | 无 | 从最近关闭列表核对 ID 和类型，再恢复该会话 |
 | `restore-session-script` | `sessionId`、`sessionKind` | 无 | 同一恢复业务的同步轻量入口，无需 Node |
 | `open-bookmark` | `windowId`、`query` | `bookmarkId`、`tabId`、`activate`、`focusWindow` | 搜索书签，得到唯一网页 URL 后复用相同打开流程 |
@@ -77,7 +85,9 @@ URL 仅支持不含用户名、密码的完整 HTTP/HTTPS 地址，用标准 `UR
 
 `restore-session` 与 `restore-session-script` 共用同一组有序步骤和回执规则；同步入口导出 `main(ctx)`，使用现有 `ScriptContext` 直接取得同步返回值。`restore-session-call.json` 与 `restore-session-script-call.json` 分别提供调用模板。`sessionId` 必须来自所选 profile 的最近关闭列表，不是连接器的 `session_id`，也不是标签 ID。两入口均不请求权限、不重试恢复；已经确认恢复但返回身份缺失或超出上述范围时保留 `partial` 和已确认步骤。
 
-复制先执行 `tabs.get(tabId)` 并核对窗口，再执行一次 `tabs.duplicate(tabId)`。Chrome 可以返回没有副本身份的成功回执，本包此时报告 `partial`，不会查询活动标签猜测副本或再次复制。
+复制的 Node 与 `duplicate-tab-script` 同步入口共用同一组有序步骤：首次 API 前快照输入，固定 profile，执行 `tabs.get(tabId)` 核对源身份与窗口，再复制一次。成功回执缺少副本身份或仍返回源标签 ID 时报告 `partial` / `invalid_response`，保留已确认步骤、不猜副本目标，并停止后续聚焦。显式聚焦须确认指定窗口 ID 与 `focused:true`；失败仍保留已知副本和 `partial`，不查询活动标签、不重试或补偿关闭。复制的激活行为仍由 Chrome 决定，不增加 `activate` 参数。
+
+`duplicate-tab-call.json` 与 `duplicate-tab-script-call.json` 提供两入口模板；必须替换 profile、windowId、tabId。同步入口具名 `main(ctx)` 返回 JSON，不返回 Promise，使用已有 `ScriptContext` 和已安装的 Boa 或 QuickJS 宿主。`DuplicateInput` 和 `DuplicateReceipt` 可从 `workflows.mjs` 导入作作者类型提示；运行时仍执行参数和身份校验。
 
 ## 回执、权限和部分成功
 
@@ -122,7 +132,7 @@ API 语义依据：[Chrome Tabs API](https://developer.chrome.com/docs/extension
 同步入口返回JSON，不返回Promise；宿主进程被外层取消或强停时，仍由既有ActionService管理终态，不能保证脚本有机会返回回执。脚本内部不查询前台、剪贴板、URL或活动标签。
 
 
-本包的 `jsconfig.json` 同时检查五个 Node、两个同步入口及共用模块。Node 上下文引用同包 `sdk/api.d.ts`，同步入口引用 `sdk/script-types.d.ts`；移动工程时保留整个 `sdk` 目录。这里沿用包内声明，不依赖仓库其它目录，也不因类型检查自动升级宿主或扩展。
+本包的 `jsconfig.json` 同时检查五个 Node、三个同步入口及共用模块。Node 上下文引用同包 `sdk/api.d.ts`，同步入口引用 `sdk/script-types.d.ts`；移动工程时保留整个 `sdk` 目录。这里沿用包内声明，不依赖仓库其它目录，也不因类型检查自动升级宿主或扩展。
 
 在本工程目录中安装固定版本的开发依赖后，可独立检查；不需要仓库的 crates、tools 或 node_modules：
 
@@ -138,8 +148,8 @@ TypeScript 5.9.3 仅为开发依赖。检查读取本包声明并静态核验五
 
 ### 作者环境与 URL
 
-作者检查只加载 ES2022 和本包的 Node/Script SDK，`types:[]`、`strict:true`、`skipLibCheck:false`，覆盖清单中全部七个入口及共享模块，不向编辑器注入 DOM 的 window/document 等全局。
+作者检查只加载 ES2022 和本包的 Node/Script SDK，`types:[]`、`strict:true`、`skipLibCheck:false`，覆盖清单中全部八个入口及共享模块，不向编辑器注入 DOM 的 window/document 等全局。
 
-两个私有网址解析函数局部读取宿主实际提供的标准 URL 构造器，并声明仅使用到的 href/protocol/username/password 类型。Node 仍使用当前标准 URL 解析，构造参数、规范化及凭据/协议检查保留；没有增加解析器、运行依赖或打开方式。没有 URL 的宿主明确进入原有错误处理，不补 polyfill，也不向 Script 声明全局 URL 能力。同步的新建默认标签和恢复会话路径不调用这些解析函数。
+两个私有网址解析函数局部读取宿主实际提供的标准 URL 构造器，并声明仅使用到的 href/protocol/username/password 类型。Node 仍使用当前标准 URL 解析，构造参数、规范化及凭据/协议检查保留；没有增加解析器、运行依赖或打开方式。没有 URL 的宿主明确进入原有错误处理，不补 polyfill，也不向 Script 声明全局 URL 能力。同步的新建默认标签、恢复会话和复制路径不调用这些解析函数。
 
 包内类型入口统一指向本包 SDK；声明更新不代表运行时具备新的平台能力。严格检查与新增环境反例只分析源码，不调用浏览器或执行作者入口。

@@ -117,7 +117,7 @@ jobs:
             npm run check
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally { Pop-Location }
-          node --test tools/script-sdk-check/action-signal-types.test.mjs tools/script-sdk-check/script-project-write.test.mjs crates/omnitrigger-actions/runtime/actions-api.test.mjs tests/actions_scope_node_sdk.test.mjs tools/script-sdk-check/node-host-composition.test.mjs tools/script-sdk-check/script-sdk-composition.test.mjs tests/state_api.test.mjs tests/ui_action_hint_sdk.test.mjs tools/script-sdk-check/compiler-config-location.test.mjs
+          node --test tools/script-sdk-check/action-signal-types.test.mjs tools/script-sdk-check/script-project-write.test.mjs crates/omnitrigger-actions/runtime/actions-api.test.mjs tests/actions_scope_node_sdk.test.mjs tools/script-sdk-check/node-host-composition.test.mjs tools/script-sdk-check/script-sdk-composition.test.mjs tests/state_api.test.mjs tests/ui_action_hint_sdk.test.mjs tools/script-sdk-check/compiler-config-location.test.mjs tests/browser_duplicate_tab_sync.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/actions_scope_node.types.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -130,6 +130,10 @@ jobs:
           node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/action_hint_node.types.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/action_hint_script.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/browser_duplicate_tab_sync_types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/browser-workflows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check.mjs target/debug/omnitrigger.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -154,6 +158,45 @@ jobs:
         run: |
           cargo build --locked --manifest-path tools/js-engine-probe/Cargo.toml --no-default-features --features quickjs --target-dir target/ci-script-engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: 验证真实 Node 与 QuickJS 的复制 Service 合同
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 与 Cargo.lock/App Cargo.toml 相同的固定 a5；只取完整原 SDK 两文件，不构建外部仓。
+          $browserSdkCommit = 'a5adc50022120cc4e6b0596bb56e14ed0ec2d02e'
+          $browserSdkRoot = Join-Path $env:RUNNER_TEMP ('browser-sdk-a5-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $browserSdkRoot -ErrorAction Stop | Out-Null
+          $browserSdkFiles = @{
+            'index.mjs' = '897415e06a8f8c59cc1e1d2905b5e945e5ddd76b3ad504f0c8277138340b2728'
+            'protocol.mjs' = 'bdd7363af5bcf32d23e5e37f8f07519d21dcd347ce1100ead42b16184c12d71b'
+          }
+          foreach ($browserSdkName in $browserSdkFiles.Keys) {
+            $browserSdkFile = Join-Path $browserSdkRoot $browserSdkName
+            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/ceastld/omnitrigger-browser/$browserSdkCommit/sdk-js/$browserSdkName" -OutFile $browserSdkFile
+            if ((Get-FileHash -LiteralPath $browserSdkFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $browserSdkFiles[$browserSdkName]) {
+              throw "固定 a5 SDK 哈希不符：$browserSdkName"
+            }
+          }
+          $browserLock = Get-Content -LiteralPath Cargo.lock -Raw
+          if (-not $browserLock.Contains("https://github.com/ceastld/omnitrigger-browser?rev=$browserSdkCommit#$browserSdkCommit")) {
+            throw 'SDK 输入与锁定的 Browser 依赖不匹配。'
+          }
+          $env:OMNITRIGGER_TEST_BROWSER_SDK = (Resolve-Path -LiteralPath $browserSdkRoot).Path
+          $env:OMNITRIGGER_TEST_NODE = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          $browserQuickJs = Join-Path $env:GITHUB_WORKSPACE 'target/ci-script-engine/debug/omnitrigger-js-probe.exe'
+          if (-not (Test-Path -LiteralPath $browserQuickJs -PathType Leaf)) { throw '缺少前一步构建的真实 QuickJS 宿主。' }
+          $env:OMNITRIGGER_TEST_SCRIPT_HOST = (Resolve-Path -LiteralPath $browserQuickJs).Path
+          $browserDuplicateTest = 'script_browser::tests::service_contract::duplicate_author::duplicate_author_service_contract'
+          $browserAppTests = & cargo test --locked -p omnitrigger-app -- --list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (@($browserAppTests | Where-Object { $_ -eq "$($browserDuplicateTest): test" }).Count -ne 1) { throw '未找到唯一新增复制 Service 用例。' }
+          foreach ($browserRuntime in @('node', 'script')) {
+            $env:OMNITRIGGER_FALSE_CONTEXT_RUNTIME = $browserRuntime
+            Write-Host "复制 Service：$browserRuntime"
+            cargo test --locked -p omnitrigger-app $browserDuplicateTest -- --ignored --exact --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       - name: 验证两种脚本工程的创建刷新与端到端运行
         shell: pwsh

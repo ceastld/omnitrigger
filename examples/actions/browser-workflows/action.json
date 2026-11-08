@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "examples.browser-workflows",
   "name": "常用浏览器工作流",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "actions": [
     {
       "id": "create-default-tab",
@@ -33,6 +33,13 @@
       "version": 1,
       "runtime": "node",
       "entry": "duplicate-tab.mjs"
+    },
+    {
+      "id": "duplicate-tab-script",
+      "title": "复制指定标签（同步轻量）",
+      "version": 1,
+      "runtime": "script",
+      "entry": "duplicate-tab-script.mjs"
     },
     {
       "id": "restore-session",
