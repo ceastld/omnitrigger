@@ -604,6 +604,8 @@ export default async ctx => {
 
 先在“扩展”安装浏览器连接器，并让 Chrome 扩展连接本机。宿主从当前配置同级的固定版本连接器目录加载 SDK，无需在动作参数中保存 SDK 路径、端点或扩展 ID。未安装时只有浏览器调用报 `browser_unavailable`，其他脚本仍可运行。完整宿主类型见 [api.d.ts](../crates/omnitrigger-actions/runtime/api.d.ts)。
 
+Node 和轻量脚本的浏览器调用均不依赖原目标窗口；仍需本次应用提供可用的浏览器连接，并接受实际宿主的 profile、权限、取消与期限检查。
+
 ```javascript
 export default async ctx => {
   const tree = await ctx.browser.call('bookmarks.getTree', [], {

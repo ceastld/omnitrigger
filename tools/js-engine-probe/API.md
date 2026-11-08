@@ -229,6 +229,8 @@ return { before: text.length, after: cleaned.length };
 
 ## 浏览器调用
 
+`call` 与 `profiles` 通过本次应用的浏览器宿主执行，不要求捕获到原目标窗口。连接、profile、权限和取消仍由实际宿主校验；缺少应用桥接时明确报错。窗口和剪贴板接口继续保留各自的目标检查。
+
 ```js
 /** @param {ScriptContext} ctx */
 function main(ctx) {
