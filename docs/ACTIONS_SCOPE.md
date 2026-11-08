@@ -22,6 +22,10 @@ export function main(ctx) {
 
 没有其他调用时返回 `{stoppedCount:0,effectState:'not_started'}`。向其他调用发出过取消请求并确认清理后，返回 `{stoppedCount:1|2|3,effectState:'unknown'}`。`unknown` 表示这些调用先前可能已产生副作用，停止不能撤销它们。回执仅涵盖这次选中的集合，不承诺未来没有新调用进入，也不提供跨进程单例或事务。
 
+需要从同绑定再次进入业务判断时，动作清单须显式设置 `allow_binding_reentry: true`；普通提交会读取此策略，接纳不自动取消旧调用。该字段不能与 `single_instance: true` 同时启用；默认 false、单实例、配额及未读终态规则见[动作包说明](ACTION_PACKAGES.md)。`stopOtherInstances` 的同包同动作范围仍可跨绑定和动作版本，不随再入策略收窄。
+
+这是服务接纳策略；当前面板和草稿运行按钮仍会在提交服务前拦截忙碌动作的重复点击。
+
 现有 `single_instance` 接纳规则保持不变。当前调用声明该策略时，此 API 返回 `action_policy_conflict`；遇到同动作的活跃单例调用返回 `action_busy`，两者均为 `not_started`。它不会暗中替换单例调用，也不会为了停止而释放绑定或执行配额。
 
 等待受参数预算和外层动作期限中较早者约束。等待预算耗尽为 `stop_timeout`，外层期限耗尽为 `timeout`，取消或桥接断连为 `cancelled`。已发出取消请求后发生这些错误，效果状态为 `unknown`；调用方应终止后续依赖清理成功的操作，不自动重试或补发输入。失效作用域返回 `action_inactive`。

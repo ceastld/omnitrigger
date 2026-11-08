@@ -1529,6 +1529,7 @@ mod tests {
                         runtime: "node".into(),
                         entry: "main.mjs".into(),
                         single_instance: false,
+                        allow_binding_reentry: false,
                     },
                     package_root: root,
                     entry_path,

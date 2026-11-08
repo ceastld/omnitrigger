@@ -116,6 +116,7 @@ impl Harness {
                         runtime: "controlled".into(),
                         entry: "not-opened.mjs".into(),
                         single_instance: single,
+                        allow_binding_reentry: false,
                     },
                 })
             })

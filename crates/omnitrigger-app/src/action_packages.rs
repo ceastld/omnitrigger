@@ -868,6 +868,33 @@ mod tests {
             assert_eq!(serialized_call.as_object().unwrap().len(), 4);
             assert!(serialized_call.get("single_instance").is_none());
         }
+        for policy in [None, Some(json!(false)), Some(json!(true))] {
+            let expected = policy == Some(json!(true));
+            let fixture = Fixture::new();
+            let call = fixture.package(None);
+            let path = root(&fixture.config).join("app-policy-test/action.json");
+            let mut manifest: Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if let Some(policy) = policy {
+                manifest["actions"][0]["allow_binding_reentry"] = policy;
+            }
+            std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            let service = fixture.service("app-test");
+            assert!(service.catalog().diagnostics.is_empty());
+            service.validate(&call).unwrap();
+            let output: Value = serde_json::from_str(&catalog_json(&service).unwrap()).unwrap();
+            let action = &output["actions"][0];
+            if expected {
+                assert_eq!(action["allow_binding_reentry"], true);
+            } else {
+                assert!(action.get("allow_binding_reentry").is_none());
+            }
+            assert_eq!(action["call"], serde_json::to_value(&call).unwrap());
+            assert!(serde_json::to_value(call)
+                .unwrap()
+                .get("allow_binding_reentry")
+                .is_none());
+        }
     }
 
     #[test]
