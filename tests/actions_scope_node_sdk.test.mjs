@@ -46,12 +46,15 @@ test('Node宿主无作用域时有方法并异步拒绝，可读身份不授权�
   }
 });
 
-test('只有动作作用域时其他Node原生API维持无应用上下文错误且零传输',async()=>{
+test('仅有动作作用域不绕过其余现有上下文守卫，拒绝时零传输',async()=>{
+  let transports=0;
   const context=vm.createContext({request:{native:{port:1,token:'synthetic'},native_context_available:false},
-    controller:new AbortController(),nativeMethods:new Set(['fs.stat','ui.choose','browser.call']),
+    controller:new AbortController(),nativeMethods:new Set(['fs.read_directory','ui.choose','browser.call','clipboard.read','window.geometry']),
+    net:{createConnection(){transports++;throw Error('不应传输');}},
     fault:(code,message)=>Object.assign(new Error(message),{code}),checkCancelled:()=>{}});
   const invoke=vm.runInContext(`${nativeCalls[0]}\nnativeCall;`,context);
-  for(const [method,code] of [['fs.stat','fs_unavailable'],['ui.choose','ui_unavailable'],['browser.call','desktop_unavailable']]){
+  for(const [method,code] of [['fs.read_directory','fs_unavailable'],['ui.choose','ui_unavailable'],['browser.call','desktop_unavailable'],['clipboard.read','desktop_unavailable'],['window.geometry','native_bridge_unavailable']]){
     await assert.rejects(invoke(method,{}),error=>error.code===code&&error.effectState==='not_started'&&error.method===method);
   }
+  assert.equal(transports,0);
 });

@@ -10,12 +10,33 @@ use std::{
     time::{Duration, Instant},
 };
 
+// 专用类名拒绝是上层静默无操作的证明；必须先于通用读错误正规化验证原字段。
+fn preserve_class_rejection(method: &str, error: &mut ActionError) -> bool {
+    if error.code != "window_class_blocked" {
+        return false;
+    }
+    if !matches!(
+        method,
+        "window.geometry" | "window.set_rect" | "window.drag"
+    ) || error.method.as_deref() != Some(method)
+        || !matches!(
+            error.effect_state.as_deref(),
+            Some("not_started" | "unknown")
+        )
+    {
+        error.code = "invalid_response".into();
+        error.method = Some(method.into());
+        error.effect_state = Some("unknown".into());
+    }
+    true
+}
+
 // 65,536 个 UTF-16 单元即使全部需要 JSON 转义也能完整传输。
 const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 41] = [
+const METHODS: [&str; 47] = [
     "actions.stop_other_instances",
     "state.read",
     "state.compare_and_swap",
@@ -55,6 +76,12 @@ const METHODS: [&str; 41] = [
     "clipboard.write",
     "clipboard.write_files",
     "window.action",
+    "window.geometry",
+    "window.set_rect",
+    "pointer.state",
+    "pointer.root",
+    "target.handoff_pointing_root",
+    "window.drag",
     "display.brightness_step",
     "audio.volume_adjust",
 ];
@@ -264,6 +291,16 @@ impl NativeBridge {
                         "actions.stop_other_instances" | "state.read" | "state.compare_and_swap"
                     );
                     let capture = request.method == "process.capture";
+                    let geometry = matches!(
+                        request.method.as_str(),
+                        "window.geometry"
+                            | "window.set_rect"
+                            | "pointer.state"
+                            | "pointer.root"
+                            | "window.drag"
+                            | "target.handoff_pointing_root"
+                    ) || request.method == "window.action"
+                        && request.params.get("target").is_some();
                     let brightness = matches!(
                         request.method.as_str(),
                         "display.brightness_step" | "audio.volume_adjust"
@@ -297,6 +334,14 @@ impl NativeBridge {
                         error.effect_state = Some("not_started".into());
                         error.method = Some(request.method.clone());
                         Err(error)
+                    } else if geometry && !host.native_context_available() {
+                        let mut error = ActionError::new(
+                            "native_bridge_unavailable",
+                            "窗口接口需要应用本机上下文。",
+                        );
+                        error.effect_state = Some("not_started".into());
+                        error.method = Some(request.method.clone());
+                        Err(error)
                     } else if !request.params.is_object()
                         || (request.method == "clipboard.read_data"
                             && request
@@ -321,6 +366,7 @@ impl NativeBridge {
                             || history
                             || capture
                             || brightness
+                            || geometry
                             || action_control
                         {
                             error.effect_state = Some("not_started".into());
@@ -356,6 +402,7 @@ impl NativeBridge {
                             || history
                             || capture
                             || brightness
+                            || geometry
                             || action_control
                         {
                             interactive_call(&client.stream, cancellation, call)
@@ -364,6 +411,25 @@ impl NativeBridge {
                         }
                     }
                     .map_err(|mut error| {
+                        let precise_class_fault =
+                            preserve_class_rejection(&request.method, &mut error);
+                        if geometry {
+                            error.message =
+                                "窗口矩形调用未获完整确认；请检查错误代码和效果状态。".into();
+                            error.required_permissions.clear();
+                            if !precise_class_fault {
+                                error.method = Some(request.method.clone());
+                                if matches!(
+                                    request.method.as_str(),
+                                    "window.geometry" | "pointer.state" | "pointer.root"
+                                ) {
+                                    error.effect_state = Some("not_started".into());
+                                } else if error.effect_state.as_deref() != Some("not_started") {
+                                    error.effect_state = Some("unknown".into());
+                                }
+                            }
+                        }
+
                         if request.method == "win32_edit.replace_selection"
                             || request.method == "clipboard.write_files"
                             || request.method.starts_with("raishot.resident.")
@@ -710,6 +776,239 @@ mod tests {
             }
             worker.join().unwrap();
             assert_eq!(parent.is_cancelled(), !disconnect);
+        }
+    }
+}
+
+#[cfg(test)]
+mod window_bridge_tests {
+    use super::*;
+    use std::io::BufRead;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const WINDOW: [&str; 6] = [
+        "window.geometry",
+        "window.set_rect",
+        "pointer.state",
+        "pointer.root",
+        "target.handoff_pointing_root",
+        "window.drag",
+    ];
+    struct Host {
+        available: bool,
+        calls: AtomicUsize,
+    }
+    impl NativeHost for Host {
+        fn native_context_available(&self) -> bool {
+            self.available
+        }
+        fn action_scope_available(&self) -> bool {
+            true
+        }
+        fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut error = ActionError::new("target_expired", "private-host-details");
+            error.effect_state = Some("unknown".into());
+            Err(error)
+        }
+    }
+    fn exchange(host: &Host, method: &str, params: Value, token: &CancellationToken) -> Value {
+        let mut bridge = NativeBridge::new().unwrap();
+        let mut peer = TcpStream::connect(bridge.listener.local_addr().unwrap()).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let frame = json!({"id":1,"token":bridge.token,"method":method,"params":params});
+        writeln!(peer, "{frame}").unwrap();
+        for _ in 0..16 {
+            bridge.poll(host, token);
+            thread::sleep(Duration::from_millis(1));
+        }
+        let mut line = String::new();
+        std::io::BufReader::new(peer).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+    #[test]
+    fn window_methods_are_additive_and_reject_false_native_marker_before_dispatch() {
+        let host = Host {
+            available: false,
+            calls: AtomicUsize::new(0),
+        };
+        assert_eq!(METHODS.len(), 47);
+        for method in WINDOW {
+            assert!(METHODS.contains(&method));
+            let response = exchange(&host, method, json!({}), &CancellationToken::new());
+            assert_eq!(response["error"]["code"], "native_bridge_unavailable");
+            assert_eq!(response["error"]["effect_state"], "not_started");
+        }
+        let response = exchange(
+            &host,
+            "window.action",
+            json!({"target":{},"operation":"toggle_maximize"}),
+            &CancellationToken::new(),
+        );
+        assert_eq!(response["error"]["code"], "native_bridge_unavailable");
+        assert_eq!(host.calls.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn window_read_and_write_faults_keep_structured_effect_and_hide_host_details() {
+        let host = Host {
+            available: true,
+            calls: AtomicUsize::new(0),
+        };
+        for method in WINDOW {
+            let response = exchange(&host, method, json!({}), &CancellationToken::new());
+            let error = &response["error"];
+            assert_eq!(error["code"], "target_expired");
+            assert_eq!(error["method"], method);
+            assert_eq!(
+                error["effect_state"],
+                if matches!(method, "window.geometry" | "pointer.state" | "pointer.root") {
+                    "not_started"
+                } else {
+                    "unknown"
+                }
+            );
+            assert!(!error["message"].as_str().unwrap().contains("private"));
+            assert!(error
+                .get("required_permissions")
+                .is_none_or(|v| v.as_array().is_some_and(Vec::is_empty)));
+        }
+        assert_eq!(host.calls.load(Ordering::SeqCst), 6);
+    }
+    #[test]
+    fn pre_cancelled_window_calls_do_not_enter_the_host() {
+        let host = Host {
+            available: true,
+            calls: AtomicUsize::new(0),
+        };
+        for method in WINDOW {
+            let mut bridge = NativeBridge::new().unwrap();
+            let mut peer = TcpStream::connect(bridge.listener.local_addr().unwrap()).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+            let token = CancellationToken::new();
+            let accept_deadline = Instant::now() + Duration::from_secs(1);
+            while bridge.clients.is_empty() {
+                bridge.poll(&host, &token);
+                assert!(Instant::now() < accept_deadline);
+            }
+            writeln!(
+                peer,
+                "{}",
+                json!({"id":1,"token":bridge.token,"method":method,"params":{}})
+            )
+            .unwrap();
+            token.cancel();
+            bridge.poll(&host, &token);
+            assert!(bridge.clients.is_empty());
+            let mut bytes = Vec::new();
+            match peer.read_to_end(&mut bytes) {
+                Ok(count) => assert_eq!(count, 0),
+                Err(error) => assert!(matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                )),
+            }
+            assert!(bytes.is_empty());
+        }
+        assert_eq!(host.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod class_rejection_bridge_tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpStream,
+        thread,
+        time::{Duration, Instant},
+    };
+    #[test]
+    fn special_identity_and_original_effect_are_validated_before_read_normalization() {
+        for method in [Some("window.geometry"), Some("pointer.root"), None] {
+            for effect in [Some("not_started"), Some("unknown"), None] {
+                let mut error = ActionError::new("window_class_blocked", "same");
+                error.method = method.map(str::to_owned);
+                error.effect_state = effect.map(str::to_owned);
+                assert!(preserve_class_rejection("window.geometry", &mut error));
+                let valid = method == Some("window.geometry") && effect.is_some();
+                assert_eq!(
+                    error.code,
+                    if valid {
+                        "window_class_blocked"
+                    } else {
+                        "invalid_response"
+                    }
+                );
+                assert_eq!(
+                    error.effect_state.as_deref(),
+                    if valid { effect } else { Some("unknown") }
+                );
+            }
+        }
+        let mut other = ActionError::new("target_changed", "same");
+        assert!(!preserve_class_rejection("window.geometry", &mut other));
+        assert_eq!(other.code, "target_changed");
+        assert!(other.effect_state.is_none());
+    }
+    struct FaultHost {
+        method: Option<&'static str>,
+        effect: Option<&'static str>,
+    }
+    impl NativeHost for FaultHost {
+        fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+            let mut e = ActionError::new("window_class_blocked", "same");
+            e.method = self.method.map(str::to_owned);
+            e.effect_state = self.effect.map(str::to_owned);
+            Err(e)
+        }
+    }
+    #[test]
+    fn actual_shared_socket_bridge_does_not_rewrite_the_special_evidence() {
+        for method in [Some("window.geometry"), Some("pointer.root"), None] {
+            for effect in [Some("not_started"), Some("unknown"), None] {
+                let mut bridge = NativeBridge::new().unwrap();
+                let config = bridge.configuration().unwrap();
+                let mut peer =
+                    TcpStream::connect(("127.0.0.1", config["port"].as_u64().unwrap() as u16))
+                        .unwrap();
+                let request =
+                    json!({"id":1,"token":config["token"],"method":"window.geometry","params":{}});
+                writeln!(peer, "{request}").unwrap();
+                peer.set_nonblocking(true).unwrap();
+                let host = FaultHost { method, effect };
+                let cancellation = CancellationToken::new();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let mut output = Vec::new();
+                loop {
+                    bridge.poll(&host, &cancellation);
+                    let mut bytes = [0u8; 4096];
+                    match peer.read(&mut bytes) {
+                        Ok(0) => {}
+                        Ok(n) => output.extend_from_slice(&bytes[..n]),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(e) => panic!("{e}"),
+                    }
+                    if output.ends_with(b"\n") {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(1));
+                }
+                let value: Value = serde_json::from_slice(&output).unwrap();
+                let valid = method == Some("window.geometry") && effect.is_some();
+                assert_eq!(
+                    value["error"]["code"],
+                    if valid {
+                        "window_class_blocked"
+                    } else {
+                        "invalid_response"
+                    }
+                );
+                assert_eq!(
+                    value["error"]["effect_state"],
+                    if valid { effect.unwrap() } else { "unknown" }
+                );
+                assert_eq!(value["error"]["method"], "window.geometry");
+            }
         }
     }
 }

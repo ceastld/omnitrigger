@@ -146,9 +146,11 @@ node tools/script-sdk-check/check-project-types.mjs D:\Demo\actions\my-script
 
 `runtime: "script"` 可通过现有动作服务运行独立的 Rust JS 宿主，无需安装 Node。宿主不链接进输入核心；脚本执行、取消与终态仍由 `ActionService` 管理。已有 Boa 和 QuickJS 两种构建使用同一份宿主 API。`.mjs` 入口具名导出同步 `main(ctx)`，`.js` 入口声明标准 JS 函数 `function main(ctx)`，均返回 JSON 值；不需要自定义文件语法或 npm 包。
 
-目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start/capture`、`ctx.delay`、`ctx.clipboard.readText/readData/writeText/history.*`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText/copySelectionData/windowAction` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时提供包内相对 ESM 导入，暂不提供 Node/npm 模块或 Promise 入口；需要 Node 环境或异步入口的动作继续选择 `node` 运行时。
+目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start/capture`、`ctx.delay`、`ctx.clipboard.readText/readData/writeText/history.*`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText/copySelectionData/windowAction/getWindowGeometry/setWindowRect/getPointerState/getPointingRoot/handoffPointingRoot/trackWindowDrag` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时提供包内相对 ESM 导入，暂不提供 Node/npm 模块或 Promise 入口；需要 Node 环境或异步入口的动作继续选择 `node` 运行时。
 
-Windows `process.capture` 在 Node、Boa、QuickJS 间共用 Rust 后端；Node 通过应用原生桥接逐次 `await`，轻量宿主同步返回。使用本地绝对 EXE 路径，可设置绝对 `cwd`；默认10秒预算、双流合计64KiB、严格UTF-8，默认拒绝非零退出。Node 默认工作目录为动作包目录，轻量默认继承宿主目录。预算不是硬实时超时，失败不返回部分输出、不自动重试。轻量宿主强停由操作系统关闭它的私有Job；Node断连由应用检测后协作取消，其Job仍由应用持有。旧 `process.run/start` 契约保持原样，详见[程序输出采集契约](../tools/js-engine-probe/API.md#程序输出采集)。
+Windows `process.capture` 在 Node、Boa、QuickJS 间共用 Rust 后端；应用内调用均交给应用原生桥接，Node 逐次 `await`，轻量宿主同步返回。使用本地绝对 EXE 路径，可设置绝对 `cwd`；默认10秒预算、双流合计64KiB、严格UTF-8，默认拒绝非零退出。Node 默认工作目录为动作包目录；轻量脚本在应用内继承应用进程工作目录，独立引擎 CLI 继承引擎进程工作目录，需要稳定目录时应显式设置 `cwd`。预算不是硬实时超时，失败不返回部分输出、不自动重试。应用内采集的私有 Job 由应用持有，脚本断连通过桥接请求协作取消；独立引擎 CLI 的 Job 才由引擎进程持有。旧 `process.run/start` 契约保持原样，详见[程序输出采集契约](../tools/js-engine-probe/API.md#程序输出采集)。
+
+`process.capture`、`open`、`openFileInParent` 和 `fs.stat` 不要求原目标窗口，但仍需本次宿主实际支持相应方法。应用绑定的轻量脚本在缺少桥接、建桥失败或宿主拒绝时明确报错，不退回引擎本地采集、打开或剪贴板访问。窗口与剪贴板接口保留各自的目标和能力检查；这不改变文件读写或旧进程接口的契约。
 
 Windows x64 开发环境可先构建本机 QuickJS 包，再通过开发命令安装。包中包含独立宿主、SDK、许可通知和文件清单；构建命令不会发布或上传二进制：
 
@@ -493,7 +495,7 @@ Node返回严格的 `{submitted:true}`，仅表示系统接纳打开请求，不
 
 ### 在文件父目录打开
 
-`ctx.openFileInParent(target)` 打开明确的普通本地文件，并将其父目录作为这次系统打开请求的工作目录。Node 需要 `await`，返回 `{submitted:true}`；轻量脚本同步返回。需要包含该 API 的应用及对应宿主，类型声明更新不会为旧宿主增加能力。
+`ctx.openFileInParent(target)` 打开明确的普通本地文件，并将其父目录作为这次系统打开请求的工作目录。Node 需要 `await`，返回 `{submitted:true}`；轻量脚本同步返回 `null`。需要包含该 API 的应用及对应宿主，类型声明更新不会为旧宿主增加能力。
 
 ```javascript
 await ctx.openFileInParent('D:/Work/report.pdf'); // Node 动作
@@ -594,7 +596,7 @@ export default async ctx => {
 
 ### 窗口脚本
 
-同步脚本可直接调用 `ctx.desktop.windowAction('toggle_maximize')`；Node 脚本使用 `await`。操作还包括 `toggle_topmost`、`minimize` 和 `close`，始终针对本次提交时捕获且仍为前台的窗口，复用原生窗口能力。`toggle_topmost` 按提交前原窗口状态切换置顶，不激活、移动或缩放窗口。目标身份、取消条件和本次动作期限在状态检查和提交前重新核验；句柄生命周期的检查不是原子锁定。
+同步脚本可直接调用 `ctx.desktop.windowAction('toggle_maximize')`；Node 脚本使用 `await`。操作还包括 `restore`、`toggle_topmost`、`minimize` 和 `close`，始终针对本次提交时捕获且仍为前台的窗口，复用原生窗口能力。`toggle_topmost` 按提交前原窗口状态切换置顶，不激活、移动或缩放窗口。目标身份、取消条件和本次动作期限在状态检查和提交前重新核验；句柄生命周期的检查不是原子锁定。
 
 返回 `{submitted:true}` 仅表示系统接纳请求；关闭可能提示保存或被目标程序拒绝。原目标变化时停止，已提交的窗口请求不会因取消而撤销。此接口不接收外部窗口句柄或隐式选择新前台；参数、目标与请求失败保留结构化错误。完整参数见[窗口动作 API](../tools/js-engine-probe/API.md#窗口动作)。
 
@@ -824,3 +826,7 @@ Node 使用 `await ctx.state.read(area,key)` 与 `await ctx.state.compareAndSwap
 ## 当前动作的版本提示
 
 Node 使用 `await ctx.ui.setActionHint({text:'v123'})`，Script 同步调用同名方法。它只更新真实当前调用的界面反馈模型，不启用 desktop，也不保证像素呈现或动作成功；参数、无UI、作用域及取消边界见 [当前动作的版本提示](ACTION_VERSION_HINT.md)。
+
+## 窗口与指针
+
+窗口几何、矩形提交、指针观察、显式根窗交接与有界调整的参数及 unknown 语义见[窗口与指针接口](WINDOW_ACTION_API.md)。Node 和 Script 共用契约；[普通 Node 示例](../examples/actions/window-adjust/README.md)提供一次有界调整。

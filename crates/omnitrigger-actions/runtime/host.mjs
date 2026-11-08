@@ -17,7 +17,7 @@ let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
 const nativeMethods = new Set(['state.read','state.compare_and_swap','actions.stop_other_instances','system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','fs.read_directory','ui.choose','ui.notify','ui.open_history','ui.toggle_history','ui.action_hint','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
-  'keyboard.shortcut','keyboard.sequence','keyboard.text','win32_edit.replace_selection','raishot.resident.find','raishot.resident.region','selection.copy','selection.copy_data','selection.read_text','explorer.context','clipboard.read','clipboard.read_data','clipboard.write','clipboard.write_files','window.action','display.brightness_step','audio.volume_adjust']);
+  'keyboard.shortcut','keyboard.sequence','keyboard.text','win32_edit.replace_selection','raishot.resident.find','raishot.resident.region','selection.copy','selection.copy_data','selection.read_text','explorer.context','clipboard.read','clipboard.read_data','clipboard.write','clipboard.write_files','window.action','window.geometry','window.set_rect','pointer.state','pointer.root','target.handoff_pointing_root','window.drag','display.brightness_step','audio.volume_adjust']);
 let nativePending;
 let nativePendingMethod;
 let nativeId = 0;
@@ -105,24 +105,26 @@ function nativeCall(method, params) {
   const opening = method === 'system.open' || method === 'system.open_file_in_parent';
   const capture = method === 'process.capture';
   const rai = method.startsWith('raishot.resident.');
-  const edit = method === 'win32_edit.replace_selection' || rai || method === 'clipboard.write_files';
+  const geometry = ['window.geometry','window.set_rect','pointer.state','pointer.root','target.handoff_pointing_root','window.drag'].includes(method) || method === 'window.action' && params?.target !== undefined;
+  const edit = method === 'win32_edit.replace_selection' || rai || method === 'clipboard.write_files' || geometry;
   const volume = method === 'audio.volume_adjust';
   const brightness = method === 'display.brightness_step' || volume;
   const stat = method === 'fs.stat' || method === 'fs.read_directory';
-  const dataRead = method === 'clipboard.read_data' || method === 'selection.read_text' || method === 'explorer.context';
+  const statPath = method === 'fs.stat';
+  const dataRead = method === 'clipboard.read_data' || method === 'selection.read_text' || method === 'explorer.context' || ['window.geometry','pointer.state','pointer.root'].includes(method);
   const dataCopy = method === 'selection.copy_data';
   const data = dataRead || dataCopy;
   const historyRead = method === 'history.list' || method === 'history.get';
   const historyWrite = method === 'history.append' || method === 'history.remove';
   const history = historyRead || historyWrite;
-  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, rai ? 'RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。' : edit ? (method === 'clipboard.write_files' ? '文件列表剪贴板写入未获完整确认；请检查错误代码和效果状态。' : 'Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。') : volume ? '音量调节未获完整确认；请检查错误代码和效果状态。' : brightness ? '亮度步进未获完整确认；请检查结构化回执。' : capture ? '程序输出采集未完成，请检查错误代码。' : stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : history ? '剪贴板历史调用失败；请检查错误代码。' : message), {effectState:stat || dataRead || historyRead ? 'not_started' : effectState, method});
+  const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, geometry ? '窗口矩形调用未获完整确认；请检查错误代码和效果状态。' : rai ? 'RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。' : edit ? (method === 'clipboard.write_files' ? '文件列表剪贴板写入未获完整确认；请检查错误代码和效果状态。' : 'Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。') : volume ? '音量调节未获完整确认；请检查错误代码和效果状态。' : brightness ? '亮度步进未获完整确认；请检查结构化回执。' : capture ? '程序输出采集未完成，请检查错误代码。' : stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : history ? '剪贴板历史调用失败；请检查错误代码。' : message), {effectState:stat || dataRead || historyRead ? 'not_started' : effectState, method});
   if (actionHint && request.actions_scope !== true) return Promise.reject(fail('ui_hint_scope_expired','版本提示需要当前服务调用作用域。'));
   if (!nativeMethods.has(method)) return Promise.reject(fail('invalid_input', '未提供此本机调用方法。'));
   if ((historyUi || stat || data || history || capture || brightness || edit || actionControl) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
   checkCancelled();
   const ui = method === 'ui.choose' || method === 'ui.notify' || historyUi;
   const unavailable = ui && request.native_error?.code === 'desktop_unavailable' ? 'ui_unavailable' : request.native_error?.code;
-  if (!request.native || !actionControl && !actionHint && request.native_context_available === false) return Promise.reject(fail(actionControl ? 'actions_unavailable' : capture || brightness || edit ? 'native_bridge_unavailable' : history ? 'history_unavailable' : data ? 'native_bridge_unavailable' : stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
+  if (!request.native || !actionControl && !actionHint && !capture && !opening && !statPath && request.native_context_available === false) return Promise.reject(fail(actionControl ? 'actions_unavailable' : capture || brightness || edit ? 'native_bridge_unavailable' : history ? 'history_unavailable' : data ? 'native_bridge_unavailable' : stat ? 'fs_unavailable' : unavailable ?? (ui ? 'ui_unavailable' : 'desktop_unavailable'), request.native_error?.message ?? (ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '此宿主没有提供本次调用的桌面上下文。')));
   if (nativePending) return Promise.reject(fail(stat ? 'fs_busy' : method === 'ui.toggle_history' && ['ui.choose','ui.open_history','ui.toggle_history'].includes(nativePendingMethod) ? 'ui_busy' : (method === 'ui.notify' || historyUi) && nativePendingMethod === method ? 'ui_busy' : 'desktop_busy', '请 await 上一个本机调用，避免并发。'));
   if (nativeId >= 128) return Promise.reject(fail('desktop_call_limit', '单次动作最多调用 128 次桌面 API。'));
   const id = ++nativeId;
@@ -193,7 +195,16 @@ function nativeCall(method, params) {
           if (!error || typeof error.code !== 'string' || typeof error.message !== 'string') throw new Error('缺少错误');
           if ((opening || stat || history || capture || brightness || edit || actionControl) && ((error.method !== undefined && error.method !== method)
               || (error.effect_state !== undefined && !['not_started','unknown'].includes(error.effect_state)))) throw new Error();
+          const preciseClass = error.code === 'window_class_blocked';
+          if (preciseClass && (!['window.geometry','window.set_rect','window.drag'].includes(method)
+              || error.method !== method || !['not_started','unknown'].includes(error.effect_state))) {
+            const invalidClass = fail('invalid_response', undefined, 'unknown');
+            invalidClass.effectState = 'unknown';
+            return finish(invalidClass);
+          }
           const failure = fail(error.code, error.message, error.effect_state ?? 'unknown');
+          // 不让dataRead的通用not_started覆盖专用错误的原effect。
+          if (preciseClass) failure.effectState = error.effect_state;
           if (!stat && !history && !capture && Array.isArray(error.required_permissions)) failure.requiredPermissions = error.required_permissions;
           finish(failure);
         }

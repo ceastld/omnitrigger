@@ -71,7 +71,7 @@ return { submitted: true };
 
 ## 程序输出采集
 
-`ctx.process.capture` 在 Windows 上共用一份 Rust 采集后端：Boa、QuickJS 同步返回，Node 动作通过应用原生桥接返回 Promise，须逐次 `await`。需要更新应用和相应宿主；类型声明或示例更新不能为旧构建增加能力。Node 无原生桥接时明确失败，不回退 `run`。已有两种程序输出配方见[程序输出通知动作](../../examples/actions/process-output/)。
+`ctx.process.capture` 在 Windows 上共用一份 Rust 采集后端：Boa、QuickJS 同步返回，Node 返回 Promise，须逐次 `await`。应用内三种运行时均通过应用原生桥接采集，不要求原目标窗口；宿主仍可拒绝不支持的调用。需要更新应用和相应宿主；类型声明或示例更新不能为旧构建增加能力。应用绑定的轻量脚本在建桥失败或调用失败时不会退回引擎本地启动，Node 无原生桥接时也明确失败，不回退 `run`。已有两种程序输出配方见[程序输出通知动作](../../examples/actions/process-output/)。
 
 ```js
 const result = ctx.process.capture('C:\\OwnedFixture\\program.exe', ['--format', 'json'], {
@@ -88,14 +88,14 @@ return { code: result.code, stdoutLength: result.stdout.length };
 | --- | --- |
 | `program` | 本地盘符绝对 `.exe` 路径，不查找 `PATH`，不隐式调用 Shell；拒绝 UNC、设备路径和 `.` / `..` 路径段。脚本须显式指定解释器 EXE 与参数，不能直接传入 `.cmd` / `.bat`。 |
 | `args` | 默认 `[]`，最多 128 个字符串；保留参数边界，按 Windows 命令行规则编码。程序和参数须为有效 Unicode，不含 NUL；完整命令行连同结束 NUL 最多 32,767 个 UTF-16 单元。 |
-| `options.cwd` | 可选的本地盘符绝对目录路径，拒绝 `.` / `..`、NUL 和非字符串；Node 省略时使用动作包目录；轻量宿主省略时继承宿主工作目录。需要稳定目录时显式设置。 |
+| `options.cwd` | 可选的本地盘符绝对目录路径，拒绝 `.` / `..`、NUL 和非字符串；Node 省略时使用动作包目录；轻量脚本在应用内继承应用进程工作目录，独立引擎 CLI 继承引擎进程工作目录。需要稳定目录时显式设置。 |
 | `options.timeoutMs` | 1–60,000 的整数，默认 10,000 毫秒。未知选项、错误类型或非法值在启动前拒绝，不隐式转换。 |
 | `options.allowNonZero` | 布尔值，默认 `false`；非零退出抛出 `process_exit_nonzero`。设为 `true` 才返回该退出码与完整输出。 |
 | 返回值 | 恰含 `{code, stdout, stderr}`，`code` 为有符号 32 位退出码。两个流的原始字节合计最多 65,536，包含 stderr；等待直接进程退出和双流 EOF 后分别严格解码 UTF-8，不补替换字符。NUL 是合法输出字符，后续显示接口可有更严格限制。 |
 
 超出字节上限返回 `process_output_too_large`，无效 UTF-8 返回 `process_invalid_utf8`；错误不返回部分输出。双流交替采集，后代持有管道导致 EOF 未到也受预算约束。`timeoutMs` 是在创建、采集和等待阶段观察的预算，不能中断阻塞中的操作系统调用，不是硬实时超时；收尾可能额外等待约一秒。通过动作服务调用时，外层动作总时限可能更短，并会终止直接脚本宿主；独立 CLI 没有这层动作期限。
 
-采集使用 Windows 10+ 私有 Job，在进程创建时关联，收尾时终止 Job 内进程并检查直接进程退出及 Job 内活动进程归零，再交付结果。轻量宿主持有自己的 Job，宿主被强制终止后由操作系统关闭句柄并终止其中进程。Node 的 Job 由应用持有；Node 退出或断连由桥接检测并请求协作取消和收尾，不能等同于轻量宿主的操作系统直接关闭保证。Job 建立或关联失败即报错，不回退到无 Job 启动；不支持的平台返回 `unsupported_platform`。该范围仅覆盖 Job 内进程，不能保证外部服务或未包含的进程结束，也不能撤销程序已经产生的副作用；现有 `start` 独立程序的生命周期保持不变。
+采集使用 Windows 10+ 私有 Job，在进程创建时关联，收尾时终止 Job 内进程并检查直接进程退出及 Job 内活动进程归零，再交付结果。应用内 Node 和轻量脚本的 Job 均由应用持有；脚本退出或断连由桥接检测并请求协作取消和收尾。独立引擎 CLI 才持有自己的 Job，其进程被强制终止后由操作系统关闭句柄并终止其中进程。Job 建立或关联失败即报错，不回退到无 Job 启动；不支持的平台返回 `unsupported_platform`。该范围仅覆盖 Job 内进程，不能保证外部服务或未包含的进程结束，也不能撤销程序已经产生的副作用；现有 `start` 独立程序的生命周期保持不变。
 
 SDK 异常固定 `method: 'process.capture'`，消息为“程序输出采集未完成，请检查错误代码。”，不回显路径、参数或输出。JS 使用 `effectState`，原生协议使用 `effect_state`：确认尚未启动为 `not_started`，已启动后失败或效果不确定为 `unknown`。常见错误如下；脚本应按代码处理，不自动重试。
 
@@ -128,7 +128,7 @@ function main(ctx) {
 
 `target()` 只查询原目标；发送前由应用再次核验进程身份、前台和取消状态，并复用现有按键释放收尾逻辑。`submitted` 只表示系统接纳输入，不表示业务动作完成。独立 CLI 没有目标上下文时返回 `desktop_unavailable`，不会自行选择前台。
 
-桌面异常的 `code`、`method`、`effectState` 可在 JS 中捕获，未捕获时保留在动作终态。`not_started` 仅描述该次 API，不能证明此前脚本没有副作用；网络中断或无法确认是否执行时为 `unknown`。桥接失败不自动重试，也不退回宿主直接访问剪贴板。客户端每次连接只发送一帧，普通桌面请求最多等待 5 秒，`copySelectionData` 为 8 秒；交互选择和浏览器请求另有等待期限，外层动作仍受总时限约束。
+桌面异常的 `code`、`method`、`effectState` 可在 JS 中捕获，未捕获时保留在动作终态。`not_started` 仅描述该次 API，不能证明此前脚本没有副作用；网络中断或无法确认是否执行时为 `unknown`。应用绑定的脚本在桥接失败时不自动重试，也不退回引擎直接打开目标、访问剪贴板或采集程序输出。`open`、`openFileInParent` 和 `fs.stat` 可在没有原目标窗口时交给实际宿主判断，窗口与剪贴板仍保留原有检查。客户端每次连接只发送一帧，普通桌面请求最多等待 5 秒，`copySelectionData` 为 8 秒；打开请求、程序采集、交互选择和浏览器请求另有等待期限，外层动作仍受总时限约束。
 
 ## 选区数据
 
@@ -254,3 +254,7 @@ function main(ctx) {
 这是跨进程系统消息0x00C2（低于WM_USER）的字符串封送，不是任意自定义消息指针协议。沿用动作期限，操作预算最多5秒、单条SendMessageTimeout最多请求1000ms；Windows系统调用与同输入队列的例外不能承诺强wall-clock预算。写前拒绝为not_started，移交消息后超时/取消/目标变化或无法确认均unknown，不重试。原窗口身份核验不锁定HWND生命周期。
 
 此接口不读取原文，不增加selection.read_text的一次GetText观察；它也不将原有一次读数或两次读取与当前Edit选区替换组成原子事务。此前UIA范围可能在消息处理前变化。该方法不替换sendText，不能据此声称通用文本发送或8192字符必达。
+
+## 窗口与指针
+
+轻量宿主同步提供 getWindowGeometry、setWindowRect、getPointerState、getPointingRoot、handoffPointingRoot、trackWindowDrag，以及 getWindowGeometryFor、setWindowRectFor、restoreWindowFor、toggleMaximizeWindowFor、trackWindowDragFor。它们需要真实 Native 上下文，不能由单独的动作作用域代替。参数、预算、目标租约、取消与 unknown 规则见[窗口与指针接口](../../docs/WINDOW_ACTION_API.md)。

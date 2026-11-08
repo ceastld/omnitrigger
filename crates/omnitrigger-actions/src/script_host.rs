@@ -232,6 +232,7 @@ impl ScriptHostRuntime {
         };
         let mut request = json!({
             "input":action.call.input,"package_root":crate::node::script_path(&root),"native_context":native_context,
+            "desktop_mode":if host.is_some() { "application_bridge" } else { "standalone" },
             "invocation":{"invocation_id":context.invocation_id.to_string(),"binding_id":context.binding_id.to_string()}
         });
         request

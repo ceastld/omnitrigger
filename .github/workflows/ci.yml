@@ -210,7 +210,7 @@ jobs:
           } finally { Pop-Location }
           node tools/script-sdk-check/check-project-types.mjs examples/actions/browser-close
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($authorExamplePath in @('examples/actions/water-reminder', 'examples/actions/desktop-line-edit', 'examples/actions/json-text', 'examples/actions/line-text')) {
+          foreach ($authorExamplePath in @('examples/actions/water-reminder', 'examples/actions/desktop-line-edit', 'examples/actions/json-text', 'examples/actions/line-text', 'examples/actions/window-size-step')) {
             Push-Location $authorExamplePath
             try {
               npm ci --ignore-scripts --no-audit --no-fund
@@ -387,6 +387,21 @@ jobs:
           node --test examples/actions/process-output/node-capture.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: 校验窗口脚本 API 与普通动作
+        run: |
+          node --test tools/script-sdk-check/window-toggle-for.test.mjs tools/script-sdk-check/window-api.test.mjs tools/script-sdk-check/window-class.test.mjs tools/script-sdk-check/window-class-bridges.test.mjs tools/script-sdk-check/window-for-contract.test.mjs tools/script-sdk-check/window-size-stack.test.mjs tests/script_sdk_whole_source_syntax.test.mjs examples/actions/window-adjust/contract.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Push-Location examples/actions/window-adjust
+          try {
+            npm ci --ignore-scripts --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          foreach ($windowConfig in @('tools/script-sdk-check/window-toggle-for-node-jsconfig.json', 'tools/script-sdk-check/window-toggle-for-script-jsconfig.json')) {
+            node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p $windowConfig
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: 验证轻量脚本开发包的真实安装与切换
         shell: pwsh
         run: |
@@ -522,7 +537,7 @@ jobs:
 
       - name: 验证轻量引擎接入动作服务
         run: |
-          $nodeVariables = @('OMNITRIGGER_TEST_NODE', 'OMNITRIGGER_SELECTION_TEST_NODE', 'OMNITRIGGER_EXPLORER_TEST_NODE', 'OMNITRIGGER_DIRECTORY_TEST_NODE')
+          $nodeVariables = @('OMNITRIGGER_TEST_NODE', 'OMNITRIGGER_SELECTION_TEST_NODE', 'OMNITRIGGER_EXPLORER_TEST_NODE', 'OMNITRIGGER_DIRECTORY_TEST_NODE', 'OMNITRIGGER_CAPTURED_WINDOW_TEST_NODE', 'OMNITRIGGER_WINDOW_SIZE_TEST_NODE')
           $previousNodeVariables = @{}
           foreach ($name in $nodeVariables) {
             $previousNodeVariables[$name] = @{ existed = Test-Path "Env:$name"; value = [Environment]::GetEnvironmentVariable($name, 'Process') }

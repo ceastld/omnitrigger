@@ -284,12 +284,18 @@ test('实际共享 SDK 下四根、Explorer与五轮最深导航加打开共27�
     else if(frame.method==='fs.stat')result={kind:frame.params.path===endFile?'file':'directory'};
     else if(frame.method==='fs.read_directory')result=listings.get(frame.params.path);
     else if(frame.method==='ui.choose'){assert(choices.length);result={status:'selected',id:choices.shift()};}
-    else if(frame.kind==='open'){assert.equal(frame.target,endFile);result={submitted:true};}
+    else if(frame.kind==='native'&&frame.method==='system.open'){assert.deepEqual(frame.params,{target:endFile});result={submitted:true};}
     else throw Error('额外宿主端口 '+frame.method);
     return JSON.stringify({ok:true,value:result});
   }};
   runInNewContext(['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js','state-api.js'].map(shared).join('\n')+text(sdkFile),scope);
-  const ctx={...scope.ctx,signal:new AbortController().signal,fs:asyncApi(scope.ctx.fs),ui:asyncApi(scope.ctx.ui),desktop:asyncApi(scope.ctx.desktop),open:async(...args)=>scope.ctx.open(...args)};
+  // 这里只用同步SDK核对32次额度；Node流程要求submitted回执，Script成功契约为null。
+  // 先由真实Script SDK验证桥接回执，再显式适配返回值，不绕过SDK或少计打开调用。
+  const ctx={...scope.ctx,signal:new AbortController().signal,fs:asyncApi(scope.ctx.fs),ui:asyncApi(scope.ctx.ui),desktop:asyncApi(scope.ctx.desktop),open:async(...args)=>{
+    assert.equal(scope.ctx.open(...args),null);return {submitted:true};
+  }};
   assert.deepEqual(await main(ctx),{status:'open_submitted',kind:'file'});assert.equal(calls.length,27);
   assert.equal(calls.filter(call=>call.method==='fs.read_directory').length,5);assert.equal(choices.length,0);
+  assert.equal(calls.filter(call=>call.method==='system.open').length,1);
+  assert(calls.every(call=>call.kind==='native'));
 });

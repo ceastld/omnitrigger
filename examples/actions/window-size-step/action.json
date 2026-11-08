@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "id": "examples.window-size-step",
+  "name": "窗口大小增减",
+  "version": "0.1.0",
+  "actions": [
+    {
+      "id": "increase",
+      "title": "窗口增大",
+      "version": 1,
+      "runtime": "node",
+      "entry": "increase.mjs",
+      "single_instance": false
+    },
+    {
+      "id": "increase-script",
+      "title": "窗口增大",
+      "version": 1,
+      "runtime": "script",
+      "entry": "increase-script.mjs",
+      "single_instance": false
+    },
+    {
+      "id": "decrease",
+      "title": "窗口缩小",
+      "version": 1,
+      "runtime": "node",
+      "entry": "decrease.mjs",
+      "single_instance": false
+    },
+    {
+      "id": "decrease-script",
+      "title": "窗口缩小",
+      "version": 1,
+      "runtime": "script",
+      "entry": "decrease-script.mjs",
+      "single_instance": false
+    }
+  ]
+}

@@ -5,6 +5,7 @@ import test from 'node:test';
 
 const shared=readFileSync(new URL('./actions-api.js',import.meta.url),'utf8');
 const state=readFileSync(new URL('./state-api.js',import.meta.url),'utf8');
+const desktop=readFileSync(new URL('./desktop-api.js',import.meta.url),'utf8');
 const create=vm.runInThisContext(`${shared}\ncreateActionsApi;`);
 const receipt=count=>({stoppedCount:count,effectState:count===0?'not_started':'unknown'});
 const error=(code,effect)=>value=>value.code===code&&value.effectState===effect&&value.method==='actions.stop_other_instances';
@@ -56,10 +57,10 @@ function script(scope,native=true,nativeContextAvailable=true){
   const calls=[];
   const context=vm.createContext({ctx:{input:{},invocation:{invocation_id:'999',binding_id:'777'},__nativeContext:native?{connection:{port:1,token:'synthetic'},actions_scope:scope,native_context_available:nativeContextAvailable}:null},
     __hostCall:text=>{const request=JSON.parse(text);calls.push(request);return JSON.stringify({ok:true,value:request.kind==='read_clipboard'?'synthetic clipboard':receipt(1)});},
-    createDesktopApi:()=>({fs:{},desktop:{},ui:{},clipboard:{}}),createProcessCaptureApi:()=>({capture(){throw new Error('禁止采集');}}),
+    createProcessCaptureApi:()=>({capture(){throw new Error('禁止采集');}}),
     createBrowserApi:()=>({}),createClipboardHistoryApi:()=>({})});
   const sdk=readFileSync(new URL('../../../tools/js-engine-probe/src/sdk.js',import.meta.url),'utf8');
-  vm.runInContext(`${shared}\n${state}\n${sdk}`,context);
+  vm.runInContext(`${shared}\n${state}\n${desktop}\n${sdk}`,context);
   return {context,calls};
 }
 
@@ -80,10 +81,15 @@ test('独立CLI即使带可读invocation元数据也不可伪造服务作用域'
   }
 });
 
-test('只有动作作用域的服务调用保持原独立剪贴板路径，动作控制仍走桥接',()=>{
+test('只有动作作用域时剪贴板不回退本地，动作控制仍走桥接',()=>{
   const {context,calls}=script(true,true,false);
-  assert.equal(vm.runInContext('ctx.clipboard.readText()',context),'synthetic clipboard');
+  assert.equal(vm.runInContext('typeof ctx.clipboard.readText',context),'function');
+  assert.equal(vm.runInContext('typeof ctx.clipboard.writeText',context),'function');
+  for(const [expression,method] of [['ctx.clipboard.readText()','clipboard.read'],["ctx.clipboard.writeText('synthetic')",'clipboard.write']]){
+    assert.throws(()=>vm.runInContext(expression,context),error=>error.code==='desktop_unavailable'&&error.effectState==='not_started'&&error.method===method);
+  }
+  assert.equal(calls.length,0);
   assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(ctx.actions.stopOtherInstances())',context)),receipt(1));
-  assert.deepEqual(calls.map(call=>call.kind),['read_clipboard','native']);
-  assert.equal(calls[1].method,'actions.stop_other_instances');
+  assert.deepEqual(calls.map(call=>call.kind),['native']);
+  assert.equal(calls[0].method,'actions.stop_other_instances');
 });

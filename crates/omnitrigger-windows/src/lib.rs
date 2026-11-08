@@ -126,6 +126,31 @@ mod process_paths;
 #[cfg(windows)]
 pub use process_paths::{documents_dir, running_process_paths};
 
+#[cfg(windows)]
+mod window_pointing_handoff;
+#[cfg(windows)]
+pub use window_pointing_handoff::{handoff_pointing_root_if, PointingRootHandoffOutcome};
+
+#[cfg(windows)]
+mod window_pointing_root;
+#[cfg(windows)]
+pub use window_pointing_root::{read_pointing_root_if, PointingRootObservation};
+
+mod window_pointer;
+#[cfg(windows)]
+pub use window_pointer::read_window_pointer_state_if;
+pub use window_pointer::{PointerButtonState, WindowPointerState};
+mod window_drag;
+#[cfg(windows)]
+pub use window_drag::track_window_drag_if;
+pub use window_drag::{
+    WindowDragButton, WindowDragMode, WindowDragOptions, WindowDragStop, WindowDragStopped,
+    WindowSnapOptions,
+};
+
+mod window_geometry;
+pub use window_geometry::{WindowGeometry, WindowGeometryError, WindowRect, WindowRectFrame};
+
 mod window_action;
 pub use window_action::WindowOperation;
 #[cfg(windows)]

@@ -10,7 +10,10 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 38] = [
+pub const METHODS: [&str; 47] = [
+    "process.capture",
+    "system.open",
+    "system.open_file_in_parent",
     "actions.stop_other_instances",
     "state.read",
     "state.compare_and_swap",
@@ -47,6 +50,12 @@ pub const METHODS: [&str; 38] = [
     "clipboard.write",
     "clipboard.write_files",
     "window.action",
+    "window.geometry",
+    "window.set_rect",
+    "pointer.state",
+    "pointer.root",
+    "target.handoff_pointing_root",
+    "window.drag",
     "display.brightness_step",
     "audio.volume_adjust",
 ];
@@ -60,7 +69,15 @@ pub struct Configuration {
 
 fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiError {
     let stat = matches!(method, "fs.stat" | "fs.read_directory");
-    let data_read = matches!(method, "clipboard.read_data" | "explorer.context");
+    let data_read = matches!(
+        method,
+        "clipboard.read_data"
+            | "explorer.context"
+            | "window.geometry"
+            | "pointer.state"
+            | "pointer.root"
+    );
+
     let data_copy = method == "selection.copy_data";
     let history_read = matches!(method, "history.list" | "history.get");
     let history = matches!(
@@ -78,8 +95,22 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
             code
         })
         .into(),
-        message: if method == "ui.action_hint" {
+        message: if method == "process.capture" {
+            "程序输出采集未完成，请检查错误代码。".into()
+        } else if method == "system.open" || method == "system.open_file_in_parent" {
+            "打开请求未获完整确认；不会本地回退或重试。".into()
+        } else if method == "ui.action_hint" {
             "动作版本提示更新未确认；请检查错误代码和效果状态。".into()
+        } else if matches!(
+            method,
+            "window.geometry"
+                | "window.set_rect"
+                | "pointer.state"
+                | "pointer.root"
+                | "window.drag"
+                | "target.handoff_pointing_root"
+        ) {
+            "窗口矩形调用未获完整确认；请检查错误代码和效果状态。".into()
         } else if method.starts_with("raishot.resident.") {
             "RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。".into()
         } else if method == "clipboard.write_files" {
@@ -100,7 +131,7 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
             message.to_string()
         },
         effect_state: Some(
-            if stat || data_read || history_read {
+            if code != "window_class_blocked" && (stat || data_read || history_read) {
                 "not_started"
             } else {
                 effect
@@ -125,17 +156,56 @@ fn brightness_transport_effect(
             | "win32_edit.replace_selection"
             | "raishot.resident.find"
             | "raishot.resident.region"
+            | "system.open"
+            | "system.open_file_in_parent"
+            | "process.capture"
             | "clipboard.write_files"
+            | "window.geometry"
+            | "window.set_rect"
+            | "pointer.state"
+            | "pointer.root"
+            | "window.drag"
             | "actions.stop_other_instances"
             | "state.read"
             | "state.compare_and_swap"
             | "ui.action_hint"
+            | "target.handoff_pointing_root"
     ) && !write_began
     {
         "not_started"
     } else {
         fallback
     }
+}
+
+// 回执排空余量不扩张实际采集timeout或外层动作deadline。
+fn method_wait_budget(method: &str, params: &Value) -> Result<Duration, ApiError> {
+    if method == "process.capture" {
+        let timeout = match params.get("timeout_ms") {
+            None => 10_000,
+            Some(value) => value
+                .as_u64()
+                .filter(|value| (1..=60_000).contains(value))
+                .ok_or_else(|| {
+                    fault("invalid_input", "采集超时参数无效。", method, "not_started")
+                })?,
+        };
+        return Ok(Duration::from_millis(timeout + 1500));
+    }
+    Ok(Duration::from_secs(
+        if method.starts_with("browser.")
+            || method == "ui.choose"
+            || method == "system.open"
+            || method == "system.open_file_in_parent"
+            || matches!(method, "display.brightness_step" | "audio.volume_adjust")
+        {
+            66
+        } else if method == "selection.copy_data" {
+            8
+        } else {
+            5
+        },
+    ))
 }
 
 pub fn call(
@@ -171,26 +241,12 @@ pub fn call(
             "not_started",
         ));
     }
+    let wait_budget = method_wait_budget(&method, &params)?;
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, connection.port));
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(500))
         .map_err(|cause| fault("native_bridge_unavailable", cause, &method, "not_started"))?;
     let browser = method.starts_with("browser.");
-    let deadline = Instant::now()
-        + Duration::from_secs(
-            if browser
-                || method == "ui.choose"
-                || matches!(
-                    method.as_str(),
-                    "display.brightness_step" | "audio.volume_adjust"
-                )
-            {
-                66
-            } else if method == "selection.copy_data" {
-                8
-            } else {
-                5
-            },
-        );
+    let deadline = Instant::now() + wait_budget;
     let response_limit = if browser {
         32 * 1024 * 1024 + 1024
     } else {
@@ -220,10 +276,19 @@ pub fn call(
                 | "win32_edit.replace_selection"
                 | "raishot.resident.find"
                 | "raishot.resident.region"
+                | "system.open"
+                | "system.open_file_in_parent"
+                | "process.capture"
                 | "clipboard.write_files"
+                | "window.geometry"
+                | "window.set_rect"
+                | "pointer.state"
+                | "pointer.root"
+                | "window.drag"
                 | "actions.stop_other_instances"
                 | "state.read"
                 | "state.compare_and_swap"
+                | "target.handoff_pointing_root"
                 | "history.list"
                 | "history.get"
                 | "history.append"
@@ -244,10 +309,19 @@ pub fn call(
                         | "win32_edit.replace_selection"
                         | "raishot.resident.find"
                         | "raishot.resident.region"
+                        | "system.open"
+                        | "system.open_file_in_parent"
+                        | "process.capture"
                         | "clipboard.write_files"
+                        | "window.geometry"
+                        | "window.set_rect"
+                        | "pointer.state"
+                        | "pointer.root"
+                        | "window.drag"
                         | "actions.stop_other_instances"
                         | "state.read"
                         | "state.compare_and_swap"
+                        | "target.handoff_pointing_root"
                         | "history.append"
                         | "history.remove"
                         | "ui.toggle_history"
@@ -282,10 +356,19 @@ pub fn call(
                         | "win32_edit.replace_selection"
                         | "raishot.resident.find"
                         | "raishot.resident.region"
+                        | "system.open"
+                        | "system.open_file_in_parent"
+                        | "process.capture"
                         | "clipboard.write_files"
+                        | "window.geometry"
+                        | "window.set_rect"
+                        | "pointer.state"
+                        | "pointer.root"
+                        | "window.drag"
                         | "actions.stop_other_instances"
                         | "state.read"
                         | "state.compare_and_swap"
+                        | "target.handoff_pointing_root"
                         | "history.list"
                         | "history.get"
                         | "history.append"
@@ -303,10 +386,19 @@ pub fn call(
                                 | "win32_edit.replace_selection"
                                 | "raishot.resident.find"
                                 | "raishot.resident.region"
+                                | "system.open"
+                                | "system.open_file_in_parent"
+                                | "process.capture"
                                 | "clipboard.write_files"
+                                | "window.geometry"
+                                | "window.set_rect"
+                                | "pointer.state"
+                                | "pointer.root"
+                                | "window.drag"
                                 | "actions.stop_other_instances"
                                 | "state.read"
                                 | "state.compare_and_swap"
+                                | "target.handoff_pointing_root"
                                 | "history.append"
                                 | "history.remove"
                                 | "ui.toggle_history"
@@ -358,6 +450,9 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
         fault(
             if method == "win32_edit.replace_selection"
                 || method.starts_with("raishot.resident.")
+                || method == "system.open"
+                || method == "system.open_file_in_parent"
+                || method == "process.capture"
                 || method == "clipboard.write_files"
             {
                 "invalid_response"
@@ -395,6 +490,25 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty() && s.len() <= 16384)
                 .ok_or_else(invalid)?;
+            if code == "window_class_blocked"
+                && (!matches!(
+                    method,
+                    "window.geometry" | "window.set_rect" | "window.drag"
+                ) || error.get("method").and_then(Value::as_str) != Some(method)
+                    || !matches!(
+                        error.get("effect_state").and_then(Value::as_str),
+                        Some("not_started" | "unknown")
+                    ))
+            {
+                let mut invalid_class = fault(
+                    "invalid_response",
+                    "专用类名拒绝字段不完整或调用方法不匹配。",
+                    method,
+                    "unknown",
+                );
+                invalid_class.effect_state = Some("unknown".into());
+                return Err(invalid_class);
+            }
             let effect = match error.get("effect_state").and_then(Value::as_str) {
                 Some("not_started") => "not_started",
                 Some("unknown") | None => "unknown",
@@ -419,10 +533,19 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "win32_edit.replace_selection"
                     | "raishot.resident.find"
                     | "raishot.resident.region"
+                    | "system.open"
+                    | "system.open_file_in_parent"
+                    | "process.capture"
                     | "clipboard.write_files"
+                    | "window.geometry"
+                    | "window.set_rect"
+                    | "pointer.state"
+                    | "pointer.root"
+                    | "window.drag"
                     | "actions.stop_other_instances"
                     | "state.read"
                     | "state.compare_and_swap"
+                    | "target.handoff_pointing_root"
                     | "history.list"
                     | "history.get"
                     | "history.append"
@@ -457,10 +580,19 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                     | "win32_edit.replace_selection"
                     | "raishot.resident.find"
                     | "raishot.resident.region"
+                    | "system.open"
+                    | "system.open_file_in_parent"
+                    | "process.capture"
                     | "clipboard.write_files"
+                    | "window.geometry"
+                    | "window.set_rect"
+                    | "pointer.state"
+                    | "pointer.root"
+                    | "window.drag"
                     | "actions.stop_other_instances"
                     | "state.read"
                     | "state.compare_and_swap"
+                    | "target.handoff_pointing_root"
             ) {
                 error.required_permissions = permissions;
             }
@@ -473,6 +605,95 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn process_capture_wait_budget_uses_timeout_without_network_or_execution() {
+        for (params, expected) in [
+            (json!({}), 11500),
+            (json!({"timeout_ms":1500}), 3000),
+            (json!({"timeout_ms":25000}), 26500),
+            (json!({"timeout_ms":60000}), 61500),
+        ] {
+            assert_eq!(
+                method_wait_budget("process.capture", &params).unwrap(),
+                Duration::from_millis(expected)
+            );
+        }
+        for timeout in [
+            json!(0),
+            json!(60001),
+            json!("1000"),
+            json!(true),
+            json!(null),
+        ] {
+            let error =
+                method_wait_budget("process.capture", &json!({"timeout_ms":timeout})).unwrap_err();
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+            assert_eq!(error.method.as_deref(), Some("process.capture"));
+        }
+        assert_eq!(
+            method_wait_budget("clipboard.read", &json!({})).unwrap(),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            method_wait_budget("system.open", &json!({})).unwrap(),
+            Duration::from_secs(66)
+        );
+    }
+    #[test]
+    fn process_capture_response_identity_and_submission_effects_are_checked_in_memory() {
+        assert!(METHODS.contains(&"process.capture"));
+        assert_eq!(
+            brightness_transport_effect("process.capture", false, "unknown"),
+            "not_started"
+        );
+        assert_eq!(
+            brightness_transport_effect("process.capture", true, "unknown"),
+            "unknown"
+        );
+        let body = json!({"id":1,"ok":false,"error":{"code":"process_timeout","message":"private argv/output",
+            "method":"process.capture","effect_state":"unknown","required_permissions":["private"]}});
+        let bytes = format!("{body}\n");
+        let error = parse_response(bytes.as_bytes(), 1, "process.capture").unwrap_err();
+        assert_eq!(error.code, "process_timeout");
+        assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+        assert!(!error.message.contains("private"));
+        assert!(error.required_permissions.is_empty());
+        let mut mismatch = body;
+        mismatch["error"]["method"] = "system.open".into();
+        let error =
+            parse_response(format!("{mismatch}\n").as_bytes(), 1, "process.capture").unwrap_err();
+        assert_eq!(error.code, "invalid_response");
+        assert_eq!(error.method.as_deref(), Some("process.capture"));
+        assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn opening_native_policy_preserves_submission_boundary_without_network() {
+        for method in ["system.open", "system.open_file_in_parent"] {
+            assert!(METHODS.contains(&method));
+            assert_eq!(
+                brightness_transport_effect(method, false, "unknown"),
+                "not_started"
+            );
+            assert_eq!(
+                brightness_transport_effect(method, true, "unknown"),
+                "unknown"
+            );
+            let response = json!({"id":1,"ok":false,"error":{"code":"open_failed","message":"synthetic",
+                "method":method,"effect_state":"unknown"}});
+            let bytes = format!("{response}\n");
+            let error = parse_response(bytes.as_bytes(), 1, method).unwrap_err();
+            assert_eq!(error.code, "open_failed");
+            assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+            assert_eq!(error.method.as_deref(), Some(method));
+            let other = if method == "system.open" {
+                "system.open_file_in_parent"
+            } else {
+                "system.open"
+            };
+            assert!(parse_response(bytes.as_bytes(), 1, other).is_err());
+        }
+    }
     use std::{net::TcpListener, thread};
 
     #[test]
@@ -658,5 +879,40 @@ mod tests {
         assert_eq!(failure.effect_state.as_deref(), Some("unknown"));
         assert!(!failure.message.contains("PRIVATE"));
         assert!(failure.required_permissions.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod class_rejection_wire_tests {
+    use super::*;
+    #[test]
+    fn class_rejection_wire_preserves_unknown_and_requires_original_fields() {
+        for effect in [Some("not_started"), Some("unknown"), None] {
+            for method in [Some("window.geometry"), Some("pointer.root"), None] {
+                let mut error = json!({"code":"window_class_blocked","message":"same"});
+                if let Some(effect) = effect {
+                    error["effect_state"] = effect.into();
+                }
+                if let Some(method) = method {
+                    error["method"] = method.into();
+                }
+                let bytes = format!("{}\n", json!({"id":1,"ok":false,"error":error}));
+                let actual = parse_response(bytes.as_bytes(), 1, "window.geometry").unwrap_err();
+                let valid = method == Some("window.geometry") && effect.is_some();
+                assert_eq!(
+                    actual.code,
+                    if valid {
+                        "window_class_blocked"
+                    } else {
+                        "invalid_response"
+                    }
+                );
+                assert_eq!(
+                    actual.effect_state.as_deref(),
+                    if valid { effect } else { Some("unknown") }
+                );
+                assert_eq!(actual.method.as_deref(), Some("window.geometry"));
+            }
+        }
     }
 }
