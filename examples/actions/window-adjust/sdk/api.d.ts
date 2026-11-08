@@ -253,7 +253,7 @@ export interface OpenFileInParentFault extends Error {
 }
 /** 物理屏幕像素；右/下边界为left+width/top+height，不含该边界像素。 */
 export type WindowRect = Readonly<{left:number;top:number;width:number;height:number}>;
-export type WindowGeometry = Readonly<{coordinateSpace:'physical-screen';outerRect:WindowRect;visibleFrameRect:WindowRect;
+export type WindowGeometry = Readonly<{coordinateSpace:'physical-screen';/** 原始类名1–255 UTF-16单元，随同目标/Lease复验；匹配属于调用方业务。 */className:string;outerRect:WindowRect;visibleFrameRect:WindowRect;
   monitorRect:WindowRect;workArea:WindowRect;primaryScreen:Readonly<{width:number;height:number}>;windowDpi:number;maximized:boolean}>;
 
 export type PointerButtonState='down'|'not_down_or_unavailable';

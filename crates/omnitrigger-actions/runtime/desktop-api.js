@@ -24,8 +24,17 @@ function createDesktopApi(invoke) {
         if (result.submitted !== true || result.effectState !== 'unknown') throw new Error();
         return result;
       }
-      const result = geometryFields(value,['coordinateSpace','outerRect','visibleFrameRect','monitorRect','workArea','primaryScreen','windowDpi','maximized']);
+      const result = geometryFields(value,['coordinateSpace','className','outerRect','visibleFrameRect','monitorRect','workArea','primaryScreen','windowDpi','maximized']);
+      if (typeof result.className !== 'string' || !result.className.length || result.className.length > 255
+          || result.className.includes('\0')) throw new Error();
       if (result.coordinateSpace !== 'physical-screen' || !Number.isInteger(result.windowDpi) || result.windowDpi < 1 || result.windowDpi > 65535 || typeof result.maximized !== 'boolean') throw new Error();
+      for (let index = 0; index < result.className.length; index++) {
+        const unit = result.className.charCodeAt(index);
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+          const next = result.className.charCodeAt(++index);
+          if (!(next >= 0xdc00 && next <= 0xdfff)) throw new Error();
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) throw new Error();
+      }
       for (const name of ['outerRect','visibleFrameRect','monitorRect','workArea']) result[name] = geometryRect(result[name],false);
       result.primaryScreen = geometryFields(result.primaryScreen,['width','height']);
       if (!Object.values(result.primaryScreen).every(n => Number.isInteger(n) && n > 0 && n <= 2147483647)) throw new Error();
@@ -375,19 +384,52 @@ function createDesktopApi(invoke) {
   }
 
 
-  function capturedWindow(args, count, method, operation, validate=value=>value) {
+  function windowDragParams(args) {
+      const method='window.drag'; let params;
+      try {
+        if (args.length!==1 || !args[0] || typeof args[0]!=='object') throw new Error();
+        const names=Reflect.ownKeys(args[0]);
+        if (names.some(n=>!['mode','button','maxDurationMs','maxUpdates','snap'].includes(n))) throw new Error();
+        const value=geometryFields(args[0],names);
+        if (!['move','resize'].includes(value.mode) || !['left','right','middle'].includes(value.button)
+            || !Number.isInteger(value.maxDurationMs) || value.maxDurationMs<20 || value.maxDurationMs>2000
+            || !Number.isInteger(value.maxUpdates) || value.maxUpdates<1 || value.maxUpdates>64) throw new Error();
+        params={mode:value.mode,button:value.button,max_duration_ms:value.maxDurationMs,max_updates:value.maxUpdates};
+        if (value.snap!==undefined && value.snap!==null) {
+          const snap=geometryFields(value.snap,['bounds','distance','waitMs','initialElapsedMs']);
+          if (value.mode!=='move' || !Number.isInteger(snap.distance) || snap.distance<0 || snap.distance>100
+              || !Number.isInteger(snap.waitMs) || snap.waitMs<0 || snap.waitMs>1000
+              || !Number.isInteger(snap.initialElapsedMs) || snap.initialElapsedMs<0 || snap.initialElapsedMs>60000) throw new Error();
+          params.snap={bounds:geometryRect(snap.bounds,true),distance:snap.distance,wait_ms:snap.waitMs,initial_elapsed_ms:snap.initialElapsedMs};
+        }
+      } catch (_) { invalid(method,'有界调整需要明确mode/button、20–2000ms、1–64次预算；吸附需完整的显式物理边界/距离/时间参数。'); }
+      return params;
+  }
+
+  function windowRectParams(args) {
+      const method = 'window.set_rect';
+      let rect, frame;
+      try {
+        if (args.length !== 2) throw new Error();
+        rect = geometryRect(args[0],true);
+        frame = geometryFields(args[1],['frame']).frame;
+        if (!['outer','visible'].includes(frame)) throw new Error();
+      } catch (_) { invalid(method,'矩形需要明确left/top/width/height整数及frame=outer或visible；宽高1–65535且边界不溢出。'); }
+      return {rect,frame};
+  }
+
+function capturedWindow(args, count, method, buildParams, validate=value=>value) {
     if(args.length!==count) invalid(method,'显式窗口接口的参数数量无效。');
     const target=scopedTarget(args[0],method);
     const failure=cause=>{
-      const code=typeof cause?.code==='string'&&/^[a-z_]{1,64}$/.test(cause.code)?cause.code:'native_bridge_failed';
+      let code=typeof cause?.code==='string'&&/^[a-z_]{1,64}$/.test(cause.code)?cause.code:'native_bridge_failed';
+      // 专用类名拒绝只有同一读取方法的not_started才有证明力；不把坏字段正规化成可静默拒绝。
+      if(code==='window_class_blocked'&&(cause?.method!==method||cause?.effectState!=='not_started'))code='invalid_response';
       throw Object.assign(new Error('显式窗口租约调用未获确认；不会自动重试。'),{code,method,
         effectState:method==='window.geometry'||cause?.effectState==='not_started'?'not_started':'unknown'});
     };
-    const api=createDesktopApi((inner,input)=>{
-      if(inner!==method) invalid(method,'显式窗口接口不允许改选操作。');
-      return invoke(method,{...input,target});
-    });
-    try{const value=operation(api.desktop);return value&&typeof value.then==='function'?value.then(validate).catch(failure):validate(value);}
+    // 复用同一参数/回执解码，直接携带固定target调用；不在同步业务栈中重建整套SDK。
+    try{const value=invoke(method,{...buildParams(),target});return value&&typeof value.then==='function'?value.then(validate).catch(failure):validate(value);}
     catch(cause){return failure(cause);}
   }
 
@@ -608,17 +650,17 @@ function createDesktopApi(invoke) {
     readSelectionText: (...args) => readSelectionText(args),
     getPointingRoot: (...args) => pointingRoot(args),
     handoffPointingRoot: (...args) => handoffPointingRoot(args),
-    getWindowGeometryFor: (...args) => capturedWindow(args,1,'window.geometry',desktop=>desktop.getWindowGeometry()),
-    setWindowRectFor: (...args) => capturedWindow(args,3,'window.set_rect',desktop=>desktop.setWindowRect(args[1],args[2])),
-    restoreWindowFor: (...args) => capturedWindow(args,1,'window.action',desktop=>desktop.windowAction('restore'),value=>{
+    getWindowGeometryFor: (...args) => capturedWindow(args,1,'window.geometry',()=>({}),value=>geometryResult('window.geometry',value)),
+    setWindowRectFor: (...args) => capturedWindow(args,3,'window.set_rect',()=>windowRectParams([args[1],args[2]]),value=>geometryResult('window.set_rect',value)),
+    restoreWindowFor: (...args) => capturedWindow(args,1,'window.action',()=>({operation:'restore'}),value=>{
       if(!scopedRecord(value,['submitted'])||value.submitted!==true) throw Object.assign(new Error('还原回执无效。'),{code:'invalid_response',effectState:'unknown'});
       return {submitted:true};
     }),
-    toggleMaximizeWindowFor: (...args) => capturedWindow(args,1,'window.action',desktop=>desktop.windowAction('toggle_maximize'),value=>{
+    toggleMaximizeWindowFor: (...args) => capturedWindow(args,1,'window.action',()=>({operation:'toggle_maximize'}),value=>{
       if(!scopedRecord(value,['submitted'])||value.submitted!==true) throw Object.assign(new Error('最大化切换回执无效。'),{code:'invalid_response',effectState:'unknown'});
       return {submitted:true};
     }),
-    trackWindowDragFor: (...args) => capturedWindow(args,2,'window.drag',desktop=>desktop.trackWindowDrag(args[1])),
+    trackWindowDragFor: (...args) => capturedWindow(args,2,'window.drag',()=>windowDragParams([args[1]]),value=>trackingResult('window.drag',value)),
     captureForegroundTarget,
     sendShortcutTo: (target, keys, options = {}) => {
       if (options === null || typeof options !== 'object' || Array.isArray(options)
@@ -685,42 +727,12 @@ function createDesktopApi(invoke) {
       if (args.length!==0) invalid('pointer.state','指针采样不接收参数。');
       return trackingCall('pointer.state',{});
     },
-    trackWindowDrag: (...args) => {
-      const method='window.drag'; let params;
-      try {
-        if (args.length!==1 || !args[0] || typeof args[0]!=='object') throw new Error();
-        const names=Reflect.ownKeys(args[0]);
-        if (names.some(n=>!['mode','button','maxDurationMs','maxUpdates','snap'].includes(n))) throw new Error();
-        const value=geometryFields(args[0],names);
-        if (!['move','resize'].includes(value.mode) || !['left','right','middle'].includes(value.button)
-            || !Number.isInteger(value.maxDurationMs) || value.maxDurationMs<20 || value.maxDurationMs>2000
-            || !Number.isInteger(value.maxUpdates) || value.maxUpdates<1 || value.maxUpdates>64) throw new Error();
-        params={mode:value.mode,button:value.button,max_duration_ms:value.maxDurationMs,max_updates:value.maxUpdates};
-        if (value.snap!==undefined && value.snap!==null) {
-          const snap=geometryFields(value.snap,['bounds','distance','waitMs','initialElapsedMs']);
-          if (value.mode!=='move' || !Number.isInteger(snap.distance) || snap.distance<0 || snap.distance>100
-              || !Number.isInteger(snap.waitMs) || snap.waitMs<0 || snap.waitMs>1000
-              || !Number.isInteger(snap.initialElapsedMs) || snap.initialElapsedMs<0 || snap.initialElapsedMs>60000) throw new Error();
-          params.snap={bounds:geometryRect(snap.bounds,true),distance:snap.distance,wait_ms:snap.waitMs,initial_elapsed_ms:snap.initialElapsedMs};
-        }
-      } catch (_) { invalid(method,'有界调整需要明确mode/button、20–2000ms、1–64次预算；吸附需完整的显式物理边界/距离/时间参数。'); }
-      return trackingCall(method,params);
-    },
+    trackWindowDrag: (...args) => trackingCall('window.drag',windowDragParams(args)),
     getWindowGeometry: (...args) => {
       if (args.length !== 0) invalid('window.geometry','窗口矩形读取不接收参数。');
       return geometryCall('window.geometry',{});
     },
-    setWindowRect: (...args) => {
-      const method = 'window.set_rect';
-      let rect, frame;
-      try {
-        if (args.length !== 2) throw new Error();
-        rect = geometryRect(args[0],true);
-        frame = geometryFields(args[1],['frame']).frame;
-        if (!['outer','visible'].includes(frame)) throw new Error();
-      } catch (_) { invalid(method,'矩形需要明确left/top/width/height整数及frame=outer或visible；宽高1–65535且边界不溢出。'); }
-      return geometryCall(method,{rect,frame});
-    },
+    setWindowRect: (...args) => geometryCall('window.set_rect',windowRectParams(args)),
     windowAction: operation => {
       if (!['toggle_maximize', 'restore', 'toggle_topmost', 'minimize', 'close'].includes(operation)) {
         invalid('window.action', '窗口操作需要 toggle_maximize、restore、toggle_topmost、minimize 或 close。');

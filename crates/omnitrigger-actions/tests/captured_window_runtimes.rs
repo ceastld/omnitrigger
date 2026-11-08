@@ -155,7 +155,7 @@ fn b_token() -> Value {
         "process_created_file_time":"18446744073709551615","expires_at_unix_ms":9999999999998u64}})
 }
 fn geometry() -> Value {
-    json!({"coordinateSpace":"physical-screen","outerRect":{"left":-808,"top":92,"width":816,"height":638},
+    json!({"coordinateSpace":"physical-screen","className":"TestWindow","outerRect":{"left":-808,"top":92,"width":816,"height":638},
         "visibleFrameRect":{"left":-800,"top":100,"width":800,"height":600},
         "monitorRect":{"left":-1920,"top":0,"width":1920,"height":1080},
         "workArea":{"left":-1920,"top":0,"width":1920,"height":1040},"primaryScreen":{"width":2560,"height":1440},"windowDpi":144,"maximized":false})

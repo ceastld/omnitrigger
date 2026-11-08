@@ -14,8 +14,10 @@ pub enum WindowRectFrame {
     Visible,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WindowGeometry {
+    /// 同一目标几何检查中的原始窗口类名；业务匹配不进入平台守卫。
+    pub class_name: String,
     pub outer_rect: WindowRect,
     pub visible_rect: WindowRect,
     pub monitor_rect: WindowRect,
@@ -67,6 +69,22 @@ impl WindowRect {
         }
         Ok(self)
     }
+}
+
+// 只标记既有完整类名守卫的确切拒绝；不加入来源substring业务。
+#[cfg(any(windows, test))]
+fn ensure_geometry_class_supported(name: &str) -> Result<(), WindowGeometryError> {
+    if ["Progman", "WorkerW", "Shell_TrayWnd"]
+        .iter()
+        .any(|blocked| name.eq_ignore_ascii_case(blocked))
+    {
+        return Err(WindowGeometryError::new(
+            "window_class_blocked",
+            "不调整桌面或任务栏宿主窗口。",
+            "not_started",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(any(windows, test))]
@@ -299,18 +317,14 @@ mod native {
                 "仅支持可见、非最小化的原顶层窗口。",
             ));
         }
-        let mut name = [0u16; 256];
+        let mut name = [0u16; 257];
         let length = unsafe { GetClassNameW(hwnd, &mut name) };
-        if length <= 0 {
+        if length <= 0 || length > 255 {
             return Err(failed("geometry_unavailable", "无法读取目标窗口类型。"));
         }
-        let name = String::from_utf16_lossy(&name[..length as usize]);
-        if ["Progman", "WorkerW", "Shell_TrayWnd"]
-            .iter()
-            .any(|n| name.eq_ignore_ascii_case(n))
-        {
-            return Err(failed("unsupported_target", "不调整桌面或任务栏宿主窗口。"));
-        }
+        let name = String::from_utf16(&name[..length as usize])
+            .map_err(|_| failed("geometry_unavailable", "窗口类名不是有效UTF-16。"))?;
+        ensure_geometry_class_supported(&name)?;
         let mut cloaked = 0u32;
         unsafe {
             DwmGetWindowAttribute(
@@ -369,6 +383,7 @@ mod native {
             ));
         }
         Ok(WindowGeometry {
+            class_name: name,
             outer_rect: rect(outer)?,
             visible_rect: rect(visible)?,
             monitor_rect: rect(info.rcMonitor)?,
@@ -449,6 +464,7 @@ mod tests {
     }
     fn geometry() -> WindowGeometry {
         WindowGeometry {
+            class_name: "TestWindow".into(),
             outer_rect: rect(-808, 92, 816, 616),
             visible_rect: rect(-800, 100, 800, 600),
             monitor_rect: rect(-1920, 0, 1920, 1080),
@@ -459,6 +475,31 @@ mod tests {
             maximized: false,
         }
     }
+    #[test]
+    fn exact_builtin_class_rejection_has_a_distinct_structured_code() {
+        for name in [
+            "Progman",
+            "progman",
+            "WorkerW",
+            "WORKERW",
+            "Shell_TrayWnd",
+            "shell_traywnd",
+        ] {
+            let error = ensure_geometry_class_supported(name).unwrap_err();
+            assert_eq!(error.code, "window_class_blocked");
+            assert_eq!(error.effect_state, "not_started");
+        }
+        for name in [
+            "TestWindow",
+            "Custom.WorkerW.Proxy",
+            "窗口类",
+            "ſhell_TrayWnd",
+            "WorKerW",
+        ] {
+            ensure_geometry_class_supported(name).unwrap();
+        }
+    }
+
     #[test]
     fn physical_negative_coordinates_and_visible_border_conversion_are_exact() {
         assert_eq!(

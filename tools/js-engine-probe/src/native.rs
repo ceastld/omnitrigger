@@ -124,7 +124,7 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
             message.to_string()
         },
         effect_state: Some(
-            if stat || data_read || history_read {
+            if code != "window_class_blocked" && (stat || data_read || history_read) {
                 "not_started"
             } else {
                 effect
@@ -449,6 +449,25 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty() && s.len() <= 16384)
                 .ok_or_else(invalid)?;
+            if code == "window_class_blocked"
+                && (!matches!(
+                    method,
+                    "window.geometry" | "window.set_rect" | "window.drag"
+                ) || error.get("method").and_then(Value::as_str) != Some(method)
+                    || !matches!(
+                        error.get("effect_state").and_then(Value::as_str),
+                        Some("not_started" | "unknown")
+                    ))
+            {
+                let mut invalid_class = fault(
+                    "invalid_response",
+                    "专用类名拒绝字段不完整或调用方法不匹配。",
+                    method,
+                    "unknown",
+                );
+                invalid_class.effect_state = Some("unknown".into());
+                return Err(invalid_class);
+            }
             let effect = match error.get("effect_state").and_then(Value::as_str) {
                 Some("not_started") => "not_started",
                 Some("unknown") | None => "unknown",
@@ -724,5 +743,40 @@ mod tests {
         assert_eq!(failure.effect_state.as_deref(), Some("unknown"));
         assert!(!failure.message.contains("PRIVATE"));
         assert!(failure.required_permissions.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod class_rejection_wire_tests {
+    use super::*;
+    #[test]
+    fn class_rejection_wire_preserves_unknown_and_requires_original_fields() {
+        for effect in [Some("not_started"), Some("unknown"), None] {
+            for method in [Some("window.geometry"), Some("pointer.root"), None] {
+                let mut error = json!({"code":"window_class_blocked","message":"same"});
+                if let Some(effect) = effect {
+                    error["effect_state"] = effect.into();
+                }
+                if let Some(method) = method {
+                    error["method"] = method.into();
+                }
+                let bytes = format!("{}\n", json!({"id":1,"ok":false,"error":error}));
+                let actual = parse_response(bytes.as_bytes(), 1, "window.geometry").unwrap_err();
+                let valid = method == Some("window.geometry") && effect.is_some();
+                assert_eq!(
+                    actual.code,
+                    if valid {
+                        "window_class_blocked"
+                    } else {
+                        "invalid_response"
+                    }
+                );
+                assert_eq!(
+                    actual.effect_state.as_deref(),
+                    if valid { effect } else { Some("unknown") }
+                );
+                assert_eq!(actual.method.as_deref(), Some("window.geometry"));
+            }
+        }
     }
 }

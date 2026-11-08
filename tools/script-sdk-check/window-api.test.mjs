@@ -4,7 +4,7 @@ import {readFile} from 'node:fs/promises';
 const text=await readFile(new URL('../../crates/omnitrigger-actions/runtime/desktop-api.js',import.meta.url),'utf8');
 const create=Function(text+'\nreturn createDesktopApi;')();
 const rect={left:-800,top:100,width:800,height:600};
-const geometry={coordinateSpace:'physical-screen',outerRect:rect,visibleFrameRect:rect,monitorRect:rect,workArea:rect,primaryScreen:{width:2560,height:1440},windowDpi:144,maximized:false};
+const geometry={coordinateSpace:'physical-screen',className:'TestWindow',outerRect:rect,visibleFrameRect:rect,monitorRect:rect,workArea:rect,primaryScreen:{width:2560,height:1440},windowDpi:144,maximized:false};
 const state={coordinateSpace:'physical-screen',x:-700,y:200,buttons:{left:'down',right:'not_down_or_unavailable',middle:'not_down_or_unavailable'},inputSource:{kind:'polled-key-state',injected:null,selfInjected:null}};
 const stopped={stopped:true,reason:'update_limit',acceptedUpdates:1,pollSamples:2,effectState:'unknown',dragCompleted:false};
 function harness(asynchronous,override={}){

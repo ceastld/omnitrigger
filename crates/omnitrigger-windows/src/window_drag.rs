@@ -424,6 +424,7 @@ mod tests {
         }
         fn geometry(&mut self) -> Result<WindowGeometry, WindowGeometryError> {
             Ok(WindowGeometry {
+                class_name: "TestWindow".into(),
                 outer_rect: self.rect,
                 visible_rect: self.rect,
                 monitor_rect: WindowRect {

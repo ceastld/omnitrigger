@@ -10,6 +10,27 @@ use std::{
     time::{Duration, Instant},
 };
 
+// 专用类名拒绝是上层静默无操作的证明；必须先于通用读错误正规化验证原字段。
+fn preserve_class_rejection(method: &str, error: &mut ActionError) -> bool {
+    if error.code != "window_class_blocked" {
+        return false;
+    }
+    if !matches!(
+        method,
+        "window.geometry" | "window.set_rect" | "window.drag"
+    ) || error.method.as_deref() != Some(method)
+        || !matches!(
+            error.effect_state.as_deref(),
+            Some("not_started" | "unknown")
+        )
+    {
+        error.code = "invalid_response".into();
+        error.method = Some(method.into());
+        error.effect_state = Some("unknown".into());
+    }
+    true
+}
+
 // 65,536 个 UTF-16 单元即使全部需要 JSON 转义也能完整传输。
 const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
@@ -390,18 +411,22 @@ impl NativeBridge {
                         }
                     }
                     .map_err(|mut error| {
+                        let precise_class_fault =
+                            preserve_class_rejection(&request.method, &mut error);
                         if geometry {
                             error.message =
                                 "窗口矩形调用未获完整确认；请检查错误代码和效果状态。".into();
-                            error.method = Some(request.method.clone());
                             error.required_permissions.clear();
-                            if matches!(
-                                request.method.as_str(),
-                                "window.geometry" | "pointer.state" | "pointer.root"
-                            ) {
-                                error.effect_state = Some("not_started".into());
-                            } else if error.effect_state.as_deref() != Some("not_started") {
-                                error.effect_state = Some("unknown".into());
+                            if !precise_class_fault {
+                                error.method = Some(request.method.clone());
+                                if matches!(
+                                    request.method.as_str(),
+                                    "window.geometry" | "pointer.state" | "pointer.root"
+                                ) {
+                                    error.effect_state = Some("not_started".into());
+                                } else if error.effect_state.as_deref() != Some("not_started") {
+                                    error.effect_state = Some("unknown".into());
+                                }
                             }
                         }
 
@@ -884,5 +909,106 @@ mod window_bridge_tests {
             assert!(bytes.is_empty());
         }
         assert_eq!(host.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod class_rejection_bridge_tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpStream,
+        thread,
+        time::{Duration, Instant},
+    };
+    #[test]
+    fn special_identity_and_original_effect_are_validated_before_read_normalization() {
+        for method in [Some("window.geometry"), Some("pointer.root"), None] {
+            for effect in [Some("not_started"), Some("unknown"), None] {
+                let mut error = ActionError::new("window_class_blocked", "same");
+                error.method = method.map(str::to_owned);
+                error.effect_state = effect.map(str::to_owned);
+                assert!(preserve_class_rejection("window.geometry", &mut error));
+                let valid = method == Some("window.geometry") && effect.is_some();
+                assert_eq!(
+                    error.code,
+                    if valid {
+                        "window_class_blocked"
+                    } else {
+                        "invalid_response"
+                    }
+                );
+                assert_eq!(
+                    error.effect_state.as_deref(),
+                    if valid { effect } else { Some("unknown") }
+                );
+            }
+        }
+        let mut other = ActionError::new("target_changed", "same");
+        assert!(!preserve_class_rejection("window.geometry", &mut other));
+        assert_eq!(other.code, "target_changed");
+        assert!(other.effect_state.is_none());
+    }
+    struct FaultHost {
+        method: Option<&'static str>,
+        effect: Option<&'static str>,
+    }
+    impl NativeHost for FaultHost {
+        fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+            let mut e = ActionError::new("window_class_blocked", "same");
+            e.method = self.method.map(str::to_owned);
+            e.effect_state = self.effect.map(str::to_owned);
+            Err(e)
+        }
+    }
+    #[test]
+    fn actual_shared_socket_bridge_does_not_rewrite_the_special_evidence() {
+        for method in [Some("window.geometry"), Some("pointer.root"), None] {
+            for effect in [Some("not_started"), Some("unknown"), None] {
+                let mut bridge = NativeBridge::new().unwrap();
+                let config = bridge.configuration().unwrap();
+                let mut peer =
+                    TcpStream::connect(("127.0.0.1", config["port"].as_u64().unwrap() as u16))
+                        .unwrap();
+                let request =
+                    json!({"id":1,"token":config["token"],"method":"window.geometry","params":{}});
+                writeln!(peer, "{request}").unwrap();
+                peer.set_nonblocking(true).unwrap();
+                let host = FaultHost { method, effect };
+                let cancellation = CancellationToken::new();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let mut output = Vec::new();
+                loop {
+                    bridge.poll(&host, &cancellation);
+                    let mut bytes = [0u8; 4096];
+                    match peer.read(&mut bytes) {
+                        Ok(0) => {}
+                        Ok(n) => output.extend_from_slice(&bytes[..n]),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(e) => panic!("{e}"),
+                    }
+                    if output.ends_with(b"\n") {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(1));
+                }
+                let value: Value = serde_json::from_slice(&output).unwrap();
+                let valid = method == Some("window.geometry") && effect.is_some();
+                assert_eq!(
+                    value["error"]["code"],
+                    if valid {
+                        "window_class_blocked"
+                    } else {
+                        "invalid_response"
+                    }
+                );
+                assert_eq!(
+                    value["error"]["effect_state"],
+                    if valid { effect.unwrap() } else { "unknown" }
+                );
+                assert_eq!(value["error"]["method"], "window.geometry");
+            }
+        }
     }
 }

@@ -194,7 +194,16 @@ function nativeCall(method, params) {
           if (!error || typeof error.code !== 'string' || typeof error.message !== 'string') throw new Error('缺少错误');
           if ((opening || stat || history || capture || brightness || edit || actionControl) && ((error.method !== undefined && error.method !== method)
               || (error.effect_state !== undefined && !['not_started','unknown'].includes(error.effect_state)))) throw new Error();
+          const preciseClass = error.code === 'window_class_blocked';
+          if (preciseClass && (!['window.geometry','window.set_rect','window.drag'].includes(method)
+              || error.method !== method || !['not_started','unknown'].includes(error.effect_state))) {
+            const invalidClass = fail('invalid_response', undefined, 'unknown');
+            invalidClass.effectState = 'unknown';
+            return finish(invalidClass);
+          }
           const failure = fail(error.code, error.message, error.effect_state ?? 'unknown');
+          // 不让dataRead的通用not_started覆盖专用错误的原effect。
+          if (preciseClass) failure.effectState = error.effect_state;
           if (!stat && !history && !capture && Array.isArray(error.required_permissions)) failure.requiredPermissions = error.required_permissions;
           finish(failure);
         }

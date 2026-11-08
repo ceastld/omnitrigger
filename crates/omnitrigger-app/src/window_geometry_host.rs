@@ -60,7 +60,7 @@ fn rect_json(rect: WindowRect) -> Value {
     json!({"left":rect.left,"top":rect.top,"width":rect.width,"height":rect.height})
 }
 fn geometry_json(value: WindowGeometry) -> Value {
-    json!({"coordinateSpace":"physical-screen","outerRect":rect_json(value.outer_rect),
+    json!({"coordinateSpace":"physical-screen","className":value.class_name,"outerRect":rect_json(value.outer_rect),
         "visibleFrameRect":rect_json(value.visible_rect),"monitorRect":rect_json(value.monitor_rect),
         "workArea":rect_json(value.work_area),"primaryScreen":{"width":value.primary_screen_width,"height":value.primary_screen_height},"windowDpi":value.window_dpi,"maximized":value.maximized})
 }
@@ -269,6 +269,7 @@ mod tests {
             height: 1080,
         };
         let value = geometry_json(WindowGeometry {
+            class_name: "CaseSensitive.CustomWindow".into(),
             outer_rect: r,
             visible_rect: r,
             monitor_rect: r,
@@ -280,7 +281,8 @@ mod tests {
         });
         assert_eq!(value["primaryScreen"], json!({"width":2560,"height":1440}));
         assert_eq!(value["monitorRect"]["width"], 1920);
-        assert_eq!(value.as_object().unwrap().len(), 8);
+        assert_eq!(value.as_object().unwrap().len(), 9);
         assert_eq!(value["coordinateSpace"], "physical-screen");
+        assert_eq!(value["className"], "CaseSensitive.CustomWindow");
     }
 }
