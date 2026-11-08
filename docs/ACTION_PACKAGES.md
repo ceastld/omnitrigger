@@ -660,6 +660,8 @@ export default async ctx => {
 
 `--check-action` 只读检查，不执行 JS，不安装 Hook。`--run-action` 真实执行并返回结构化结果，也不安装 Hook。运行时或包不可用、版本不兼容、调用忙碌、进程启动失败和脚本运行失败均报告错误，不自动重试。
 
+直接运行默认不挂载动作状态。需要在多次独立 CLI 调用间保留 durable 状态时，显式使用 `--run-action <call.json> --with-action-state`；存储固定在所选配置同级的 `action-state`，不提供任意状态目录参数。此布尔参数不接受值、不能重复，也不能与检查、列目录、创建或安装命令合用。详细作用域和 CAS 语义见[动作状态](ACTION_STATE.md)。
+
 ### 外部宿主的目录与事件
 
 `--list-package-actions` 输出一个 JSON 对象：`schema_version: 1`、`actions` 和 `diagnostics`。每项包含完整 `call`（默认 `input: {}`）、`package_name`、`title`、`runtime`、可空的 `reference_error`，以及可选的 `single_instance`；启用时为 `true`，默认 `false` 省略以保留旧目录格式。该策略属于动作定义，不写入 `call`。目录只包含已安装动作包；不枚举原生动作或个人绑定，不导入 JS。引用检查通过只说明包和运行时可解析，不保证业务成功或输入满足脚本要求；目录也不是动作当前是否忙碌的快照。输出超过 4 MiB 时整体拒绝，不返回部分目录。
