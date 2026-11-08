@@ -40,9 +40,55 @@ def validate_unmodified_mouse_policy(value):
         raise ValueError("无控制键鼠标策略必须为 strict 或 passed")
 
 
-def mouse_requirements(rule, *, unmodified_mouse_policy="strict"):
+def ordinary_mouse_keys(values=None):
+    """只接受显式选择的非修饰键；默认保留来源捕获层，不能自动推断普通前缀。"""
+    if values is None:
+        return frozenset()
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        raise ValueError("普通鼠标前缀改编必须是键码集合")
+    modifiers = {16, 17, 18, 91, 92, 160, 161, 162, 163, 164, 165}
+    if any(type(key) is not int or not 7 <= key <= 254 or key in modifiers for key in values):
+        raise ValueError("普通鼠标前缀只支持7–254范围内的明确非修饰键")
+    if len(values) != len(set(values)):
+        raise ValueError("普通鼠标前缀键码不能重复")
+    return frozenset(values)
+
+
+def validate_ordinary_mouse_configuration(keys, current):
+    """普通改编不得与当前同键专用/保留捕获owner混用；不替用户删除任何绑定。"""
+    selected = ordinary_mouse_keys(keys)
+    if not selected:
+        return selected
+    if not isinstance(current, dict) or not isinstance(current.get("bindings"), list):
+        raise ValueError("普通鼠标前缀需要明确的当前键盘配置")
+    for row in current["bindings"]:
+        if not isinstance(row, dict):
+            raise ValueError("当前绑定必须为对象")
+        policy = row.get("keyboard", {})
+        if not isinstance(policy, dict):
+            raise ValueError("当前键盘策略必须为对象")
+        retained = policy.get("retained_prefix")
+        if retained is not None and not isinstance(retained, dict):
+            raise ValueError("当前保留捕获策略必须为对象")
+        prefixes = [policy.get("dedicated_prefix")]
+        if isinstance(retained, dict):
+            if retained.get("key") is None:
+                raise ValueError("当前保留捕获owner缺少明确键码")
+            prefixes.append(retained.get("key"))
+        for button in prefixes:
+            if button is not None and (not isinstance(button, dict) or button.get("kind") != "key"
+                                       or type(button.get("value")) is not int):
+                raise ValueError("当前捕获owner必须有明确键码")
+        if any(isinstance(button, dict) and button.get("kind") == "key"
+               and button.get("value") in selected for button in prefixes):
+            raise ValueError("当前同键仍有专用/保留捕获owner，不能投影普通鼠标前缀")
+    return selected
+
+
+def mouse_requirements(rule, *, unmodified_mouse_policy="strict", ordinary_keys=None):
     """已核对的 V1 控制键与区域含义；识别枚举不等于已经实现其完整匹配策略。"""
     validate_unmodified_mouse_policy(unmodified_mouse_policy)
+    selected_ordinary = ordinary_mouse_keys(ordinary_keys)
     key, location = rule.get("ControlKey"), rule.get("Location")
     gaps = []
     if "ControlKey" not in rule:
@@ -107,6 +153,14 @@ def mouse_requirements(rule, *, unmodified_mouse_policy="strict"):
             "requires_active_leader":control["key"], "source_equivalence":False}
         result["semantic_differences"] = ["source_keyboard_session_contract_review",
             "source_checks_mouse_session_captures_not_all_owned_releases"]
+        if key in selected_ordinary:
+            result["projection_policy"] = {"kind":"ordinary_exact", "creates_capture_layer":False,
+                "requires_owned_prefix":True, "source_equivalence":False}
+            result["semantic_differences"] = [
+                "source_capture_layer_explicitly_replaced_by_ordinary_exact",
+                "ordinary_exact_rejects_extra_held_inputs",
+                "passed_or_revoked_prefix_requires_fresh_physical_press",
+                "source_mouse_priority_not_represented_by_ordinary_exact"]
     return result
 
 
@@ -134,8 +188,8 @@ def mouse_rule_priorities(rules):
     return {index: priority for priority, (index, _) in enumerate(sorted(enabled, key=key))}
 
 
-def mouse_trigger(rule, settings, *, priority=None, unmodified_mouse_policy="strict"):
-    requirements = mouse_requirements(rule, unmodified_mouse_policy=unmodified_mouse_policy)
+def mouse_trigger(rule, settings, *, priority=None, unmodified_mouse_policy="strict", ordinary_keys=None):
+    requirements = mouse_requirements(rule, unmodified_mouse_policy=unmodified_mouse_policy, ordinary_keys=ordinary_keys)
     def unavailable(gaps):
         return {"trigger":None, "trigger_gaps":sorted(set(gaps)), "source_requirements":requirements}
     if requirements["unresolved"]:
@@ -160,6 +214,7 @@ def mouse_trigger(rule, settings, *, priority=None, unmodified_mouse_policy="str
     keyboard_control = control_kind in ("modifier_key", "modifier_family")
     observed_control = keyboard_control or control_kind == "unmodified"
     captured_leader = control_kind == "captured_keyboard_key"
+    ordinary_leader = captured_leader and requirements["projection_policy"]["kind"] == "ordinary_exact"
     control = None if observed_control or captured_leader else requirements["control"]["button"]
     if kind == 4:
         mouse_button = rule.get("MouseButton")
@@ -195,6 +250,9 @@ def mouse_trigger(rule, settings, *, priority=None, unmodified_mouse_policy="str
         trigger["conditions"] = [{"kind":"pointer_region", "region":{
             "kind":"screen_boundary", "edge":requirements["region"]["edge"]}}]
     if observed_control or captured_leader:
+        if priority is not None and (type(priority) is not int or not 0 <= priority < 512):
+            return unavailable(["mouse_rule_order_invalid"])
+    if observed_control or (captured_leader and not ordinary_leader):
         matching = {"kind":"mouse_captured_leader" if captured_leader else
                     "mouse_unmodified" if control_kind == "unmodified" and unmodified_mouse_policy == "passed"
                     else "mouse_exact"}
@@ -205,7 +263,9 @@ def mouse_trigger(rule, settings, *, priority=None, unmodified_mouse_policy="str
             matching["pointer_scope_priority"] = False
         trigger["keyboard"]={"matching":matching}
     if kind in (11,12): trigger["wheel"]="packet"
-    reviews = (["mouse_existing_captured_leader_dependency", "mouse_owner_lifecycle_review"] if captured_leader else
+    reviews = (["mouse_current_keyboard_configuration_required", "mouse_ordinary_prefix_habits_review",
+                "mouse_ordinary_fallback_repeat_release_review"] if ordinary_leader else
+               ["mouse_existing_captured_leader_dependency", "mouse_owner_lifecycle_review"] if captured_leader else
                ["mouse_modifier_capture_delivery_review", "mouse_modifier_state_sampling", "mouse_other_held_keys_review"]
                if keyboard_control else ["mouse_unmodified_source_ownership_review", "mouse_virtual_control_state_review",
                                          "mouse_other_held_keys_review"] if observed_control
@@ -216,7 +276,13 @@ def mouse_trigger(rule, settings, *, priority=None, unmodified_mouse_policy="str
         "mouse_queue_drop_delay_review", "pointer_host_identity_mapping", "pointer_context_sampling"],
         "source_requirements":requirements,
         "source_normalizations":[{"kind":"mouse_whitelist_precedence","bypasses_blacklists":bool(allow)}]}
-    if captured_leader:
+    if ordinary_leader:
+        result["trigger_dependencies"] = [{"kind":"ordinary_current_keyboard_configuration",
+            "key":rule["ControlKey"], "captured_owner_allowed":False}]
+        result["source_normalizations"].append({"kind":"mouse_ordinary_prefix_adaptation",
+            "key":rule["ControlKey"], "explicit":True, "creates_capture_layer":False,
+            "source_equivalence":False, "source_priority":priority, "source_priority_preserved":False})
+    elif captured_leader:
         result["trigger_dependencies"] = [{"kind":"existing_keyboard_leader","key":rule["ControlKey"],
             "creates_capture":False}]
     if control_kind == "unmodified" and unmodified_mouse_policy == "passed":
