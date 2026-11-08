@@ -134,11 +134,21 @@ const canonicalSdkHashes={
 };
 function portableSdkLayout(project,manifest){
   const candidates=['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts',
-    'sdk/api.d.ts','sdk/script-types.d.ts','sdk/script-api.d.ts','sdk/clipboard-history-api.d.ts'];
+    'sdk/api.d.ts','sdk/script-types.d.ts','sdk/script-api.d.ts','sdk/clipboard-history-api.d.ts',
+    'types/api.d.ts','types/clipboard-history-api.d.ts'];
   guardMany(candidates.map(name=>({value:path.join(project,name),missing:true})));
   const present=name=>existsSync(path.join(project,name));
   const flat=['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts'].some(present);
   const hasScript=manifest.actions.some(action=>action?.runtime==='script');
+  if(['types/api.d.ts','types/clipboard-history-api.d.ts'].some(present)){
+    if(flat||['sdk/script-types.d.ts','sdk/script-api.d.ts','sdk/clipboard-history-api.d.ts'].some(present))
+      throw Error('project_sdk_layout_ambiguous');
+    const files=['types/api.d.ts','types/clipboard-history-api.d.ts','sdk/api.d.ts'];
+    if(files.some(name=>!present(name)))throw Error('project_sdk_layout_incomplete');
+    if(!hasScript||!manifest.actions.some(action=>action?.runtime==='node'))throw Error('project_runtime_mismatch');
+    // 原有分离布局：Node声明在types，Script同步声明沿用sdk/api别名；不迁移作者路径。
+    return {prefix:'',kind:'split',files,names:['api.d.ts','clipboard-history-api.d.ts','script-types.d.ts']};
+  }
   let nested=['sdk/script-types.d.ts','sdk/script-api.d.ts'].some(present)
     ||hasScript&&present('sdk/clipboard-history-api.d.ts');
   // Script包中的Node声明不是旧生成布局，不能把缺失的其余声明当作legacy刷新。
@@ -187,7 +197,7 @@ function refreshSdkSnapshot(project,layout,data){
 }
 function refreshPortableSdk(project,source,runtime,layout){
   const sourceRoot=path.join(source,'crates/omnitrigger-actions/runtime');
-  const files=layout.names.map(name=>path.join(project,layout.prefix+name));
+  const files=(layout.files??layout.names.map(name=>layout.prefix+name)).map(name=>path.join(project,name));
   const texts=readMany([...files,...layout.names.map(name=>path.join(sourceRoot,name))]);
   const data=layout.names.map((name,index)=>{
     const file=files[index],before=texts[index],text=texts[files.length+index];
@@ -200,8 +210,8 @@ function refreshPortableSdk(project,source,runtime,layout){
   const current=readMany(data.map(item=>item.file));
   if(data.some((item,index)=>current[index]!==item.before))throw Error('project_sdk_changed');
   for(const item of data)if(item.before!==item.text)write(item.file,item.text);
-  return {status:'refreshed',runtime,package_root:project,layout:layout.prefix?'sdk':'flat',
-    files:data.map(item=>layout.prefix+item.name),author_files_changed:false};
+  return {status:'refreshed',runtime,package_root:project,layout:layout.kind??(layout.prefix?'sdk':'flat'),
+    files:data.map(item=>path.relative(project,item.file).split(path.sep).join('/')),author_files_changed:false};
 }
 function refresh(project,source,runtime){
   project=path.resolve(project);const [manifestText]=readMany([path.join(project,'action.json')],[project]);
