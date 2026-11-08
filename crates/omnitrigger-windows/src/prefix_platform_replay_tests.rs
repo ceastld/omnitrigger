@@ -88,15 +88,17 @@ impl Fixture {
     fn key(&self, message: u32, key: u32, injected: bool, tag: usize, now: u64) -> bool {
         // Caps/W不经过Shift的MapVirtualKey分支；补发保留这里显式提供的扫描码。
         assert!(matches!(key, 20 | 87));
-        let mut native = KBDLLHOOKSTRUCT::default();
-        native.vkCode = key;
-        native.scanCode = if key == 20 { 0x3a } else { 0x11 };
-        native.flags = if injected {
-            LLKHF_INJECTED
-        } else {
-            Default::default()
+        let native = KBDLLHOOKSTRUCT {
+            vkCode: key,
+            scanCode: if key == 20 { 0x3a } else { 0x11 },
+            flags: if injected {
+                LLKHF_INJECTED
+            } else {
+                Default::default()
+            },
+            dwExtraInfo: tag,
+            ..Default::default()
         };
-        native.dwExtraInfo = tag;
         let Some((kind, metadata)) = keyboard_input(message, &native) else {
             return false;
         };
