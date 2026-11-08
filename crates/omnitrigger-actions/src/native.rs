@@ -89,7 +89,8 @@ const METHODS: [&str; 49] = [
 ];
 
 /// 由应用为本次调用捕获的本机上下文。不是沙盒或权限隔离。
-/// 回调在动作工作线程执行，须有界返回，并在副作用前核验取消和目标身份。
+/// 同步桥在动作工作线程执行；显式浏览器并发桥使用有界的作用域工作线程。
+/// 回调须有界返回，并在副作用前核验取消和目标身份。
 pub trait NativeHost: Send + Sync {
     /// 作用域包装本身不提供原有应用上下文；此标记不证明权限或设备可用。
     fn native_context_available(&self) -> bool {
@@ -99,6 +100,40 @@ pub trait NativeHost: Send + Sync {
     /// 只有服务为当前真实调用创建的作用域提供动作控制；默认宿主无此能力。
     fn action_scope_available(&self) -> bool {
         false
+    }
+
+    /// 明确选择浏览器并发转发；此标记不证明浏览器已连接或具备权限。
+    fn browser_async_available(&self) -> bool {
+        false
+    }
+
+    /// 只供显式浏览器并发桥使用；默认宿主不自动选择此路径。
+    fn call_browser_async(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Value, ActionError> {
+        let reject = |code| {
+            let mut error = ActionError::new(code, "此调用未提供异步浏览器转发。");
+            error.method = Some(method.into());
+            error.effect_state = Some("not_started".into());
+            error
+        };
+        if !matches!(method, "browser.call" | "browser.profiles") || !params.is_object() {
+            return Err(reject("invalid_input"));
+        }
+        if !self.browser_async_available() {
+            return Err(reject("unsupported_runtime_feature"));
+        }
+        if cancellation.is_cancelled() {
+            return Err(reject("cancelled"));
+        }
+        if Instant::now() >= deadline {
+            return Err(reject("timeout"));
+        }
+        self.call_with_deadline(method, params, cancellation, deadline)
     }
 
     fn call(

@@ -1,4 +1,4 @@
-//! 同步脚本入口到既有异步浏览器客户端的适配，连接只在动作工作线程按需创建。
+//! 脚本入口到浏览器客户端的适配；同步会话复用连接，显式并发调用各持独立连接。
 use omnitrigger_actions::{ActionError, CancellationToken, NativeHost};
 use omnitrigger_browser::client::BrowserClient;
 use serde::Deserialize;
@@ -26,6 +26,21 @@ impl ActionHost {
     }
 }
 impl NativeHost for ActionHost {
+    fn browser_async_available(&self) -> bool {
+        true
+    }
+
+    fn call_browser_async(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Value, ActionError> {
+        self.browser
+            .call_concurrent(method, params, cancellation, deadline)
+    }
+
     fn call(
         &self,
         method: &str,
@@ -115,6 +130,22 @@ fn valid_method(method: &str) -> bool {
 }
 
 impl BrowserHost {
+    fn call_concurrent(
+        &self,
+        operation: &str,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Value, ActionError> {
+        // Rust客户端的单连接为顺序协议；并发请求各自持有连接及runtime。
+        // 复用同一捕获配置和全部参数/派发/取消检查，不争用同步会话的Mutex。
+        let call = Self {
+            config: self.config.clone(),
+            state: Mutex::new(None),
+        };
+        call.call(operation, params, cancellation, deadline)
+    }
+
     fn call(
         &self,
         operation: &str,
@@ -557,6 +588,39 @@ mod tests {
             });
         }
         out
+    }
+
+    #[test]
+    fn concurrent_profiles_use_independent_clients_while_sync_session_is_busy() {
+        let mut fixture = Fixture::new();
+        let token = CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        {
+            let _sync_session = fixture.host.state.lock().unwrap();
+            let busy = fixture
+                .host
+                .call("browser.profiles", json!({}), &token, deadline)
+                .unwrap_err();
+            assert_eq!(busy.code, "busy");
+            thread::scope(|scope| {
+                let first = scope.spawn(|| {
+                    fixture
+                        .host
+                        .call_concurrent("browser.profiles", json!({}), &token, deadline)
+                });
+                let second = scope.spawn(|| {
+                    fixture
+                        .host
+                        .call_concurrent("browser.profiles", json!({}), &token, deadline)
+                });
+                for task in [first, second] {
+                    let profiles = task.join().unwrap().unwrap();
+                    assert_eq!(profiles.as_array().unwrap().len(), 2);
+                }
+            });
+        }
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        fixture.finish();
     }
 
     #[test]

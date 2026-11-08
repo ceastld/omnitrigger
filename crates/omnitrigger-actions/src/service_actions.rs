@@ -237,6 +237,67 @@ impl NativeHost for InvocationScopedHost {
         true
     }
 
+    fn browser_async_available(&self) -> bool {
+        self.inner
+            .as_deref()
+            .is_some_and(|inner| inner.browser_async_available())
+            && self.reservations.lock().is_ok_and(|state| {
+                state
+                    .entries
+                    .get(&self.invocation_id)
+                    .is_some_and(|entry| entry.active && !entry.cancellation.is_cancelled())
+            })
+    }
+
+    fn call_browser_async(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Value, ActionError> {
+        let reject = |code| {
+            let mut error = ActionError::new(code, "异步浏览器调用未进入有效的动作作用域。");
+            error.method = Some(method.into());
+            error.effect_state = Some("not_started".into());
+            error
+        };
+        if !matches!(method, "browser.call" | "browser.profiles") || !params.is_object() {
+            return Err(reject("invalid_input"));
+        }
+        let service_token = {
+            let state = self
+                .reservations
+                .lock()
+                .map_err(|_| reject("action_inactive"))?;
+            state
+                .entries
+                .get(&self.invocation_id)
+                .filter(|entry| entry.active)
+                .map(|entry| entry.cancellation.clone())
+                .ok_or_else(|| reject("action_inactive"))?
+        };
+        if cancellation.is_cancelled() || service_token.is_cancelled() {
+            return Err(reject("cancelled"));
+        }
+        if Instant::now() >= deadline {
+            return Err(reject("timeout"));
+        }
+        let inner = self
+            .inner
+            .as_deref()
+            .filter(|inner| inner.browser_async_available())
+            .ok_or_else(|| reject("unsupported_runtime_feature"))?;
+        // 转发时不持有配额锁，也不重新捕获目标或接受脚本提供的作用域身份。
+        if cancellation.is_cancelled() || service_token.is_cancelled() {
+            return Err(reject("cancelled"));
+        }
+        if Instant::now() >= deadline {
+            return Err(reject("timeout"));
+        }
+        inner.call_browser_async(method, params, cancellation, deadline)
+    }
+
     fn call(
         &self,
         method: &str,
