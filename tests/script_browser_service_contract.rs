@@ -5,11 +5,11 @@ use omnitrigger_actions::{
     ActionCall, ActionError, ActionOutcome, ActionService, CancellationToken, NativeHost,
     NodeRuntime, PackageCatalog, RuntimeRegistry, ScriptHostRuntime,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{atomic::Ordering, Arc, Mutex},
+    sync::{Arc, Mutex, atomic::Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -36,7 +36,8 @@ impl Mode {
         }
     }
     fn wait(self) -> Duration {
-        Duration::from_secs(if self == Self::Script { 12 } else { 64 })
+        // 正常 Runtime 保留60秒；外层观察须允许冷启动及宿主自然收尾。
+        Duration::from_secs(64)
     }
     fn program(self) -> PathBuf {
         let name = if self == Self::Script {
@@ -69,15 +70,11 @@ struct Package {
     actions: PathBuf,
     package: PathBuf,
     sdk: Option<PathBuf>,
+    files: Vec<String>,
 }
 impl Package {
     fn new(fixture: &Fixture, mode: Mode, body: &str) -> Self {
-        local(&fixture.root);
-        let actions = fixture.root.join("actions");
-        let package = actions.join("service-api");
-        fs::create_dir(&actions).unwrap();
-        fs::create_dir(&package).unwrap();
-        fs::write(package.join("action.json"),serde_json::to_vec(&json!({"schema_version":1,"id":"test.browser-service-contract","name":"Browser Service合同","version":"0.0.0","actions":[{"id":"invoke","title":"API合同","version":1,"runtime":mode.runtime(),"entry":"main.mjs","single_instance":true}]})).unwrap()).unwrap();
+        let manifest=serde_json::to_vec(&json!({"schema_version":1,"id":"test.browser-service-contract","name":"Browser Service合同","version":"0.0.0","actions":[{"id":"invoke","title":"API合同","version":1,"runtime":mode.runtime(),"entry":"main.mjs","single_instance":true}]})).unwrap();
         let author = format!(
             "export {}function main(ctx) {{\n{}\n}}\n{}",
             if mode == Mode::Node { "async " } else { "" },
@@ -88,7 +85,22 @@ impl Package {
                 ""
             }
         );
-        fs::write(package.join("main.mjs"), author).unwrap();
+        Self::with_files(
+            fixture,
+            mode,
+            &[("action.json", &manifest), ("main.mjs", author.as_bytes())],
+        )
+    }
+    fn with_files(fixture: &Fixture, mode: Mode, files: &[(&str, &[u8])]) -> Self {
+        local(&fixture.root);
+        let actions = fixture.root.join("actions");
+        let package = actions.join("service-api");
+        fs::create_dir(&actions).unwrap();
+        fs::create_dir(&package).unwrap();
+        for (name, bytes) in files {
+            assert!(Path::new(name).components().count() == 1 && *name != "." && *name != "..");
+            fs::write(package.join(name), bytes).unwrap();
+        }
         let sdk = if mode == Mode::Node {
             // 显式提供与连接器版本匹配的SDK；不查找安装目录或替换connect实现。
             let source = PathBuf::from(
@@ -114,6 +126,7 @@ impl Package {
             actions,
             package,
             sdk,
+            files: files.iter().map(|(name, _)| (*name).to_owned()).collect(),
         }
     }
 }
@@ -122,7 +135,7 @@ impl Drop for Package {
         if thread::panicking() {
             return;
         }
-        for name in ["main.mjs", "action.json"] {
+        for name in &self.files {
             let _ = fs::remove_file(self.package.join(name));
         }
         let _ = fs::remove_dir(&self.package);
@@ -188,15 +201,30 @@ impl NativeHost for Host {
 }
 fn invoke(fixture: &Fixture, mode: Mode, body: &str) -> (Result<Value, ActionError>, Arc<Host>) {
     let package = Package::new(fixture, mode, body);
+    invoke_prepared(
+        fixture,
+        mode,
+        package,
+        ActionCall {
+            package_id: "test.browser-service-contract".into(),
+            action_id: "invoke".into(),
+            action_version: 1,
+            input: json!({}),
+        },
+    )
+}
+fn invoke_prepared(
+    fixture: &Fixture,
+    mode: Mode,
+    package: Package,
+    call: ActionCall,
+) -> (Result<Value, ActionError>, Arc<Host>) {
     let mut registry = RuntimeRegistry::new();
     let program = mode.program();
     assert!(!program.starts_with(&fixture.root));
     match mode {
         Mode::Script => registry
-            .register(
-                "script",
-                Arc::new(ScriptHostRuntime::new(program).with_timeout(Duration::from_secs(8))),
-            )
+            .register("script", Arc::new(ScriptHostRuntime::new(program)))
             .unwrap(),
         Mode::Node => registry
             .register(
@@ -213,18 +241,7 @@ fn invoke(fixture: &Fixture, mode: Mode, body: &str) -> (Result<Value, ActionErr
     assert!(!fixture.root.join("never.txt").exists());
     let service = ActionService::new(PackageCatalog::load(&package.actions), registry);
     let native: Arc<dyn NativeHost> = host.clone();
-    let id = service
-        .submit_with_host(
-            29,
-            ActionCall {
-                package_id: "test.browser-service-contract".into(),
-                action_id: "invoke".into(),
-                action_version: 1,
-                input: json!({}),
-            },
-            Some(native),
-        )
-        .unwrap();
+    let id = service.submit_with_host(29, call, Some(native)).unwrap();
     let began = Instant::now();
     let until = began + mode.wait();
     let mut started = 0;
@@ -274,12 +291,25 @@ fn service_false_original_context_browser_contract() {
         "reported-unknown",
     ] {
         let mut fixture = Fixture::with_lifetime(mode.wait() + Duration::from_secs(8));
-        let body=match case {
-            "profiles"=>format!("return {wait}ctx.browser.profiles({{timeoutMs:1000}});"),
-            "undefined"|"null"=>format!("const value={wait}ctx.browser.call('{}',[7],{{profile:'work',timeoutMs:1000}});return {{isUndefined:value===undefined,isNull:value===null}};",if case=="undefined" {"tabs.update"} else {"tabs.get"}),
-            "permission"=>format!("return {wait}ctx.browser.call('sessions.restore',['synthetic-closed'],{{profile:'work',timeoutMs:1000}});"),
-            "reported-unknown"=>format!("return {wait}ctx.browser.call('tabs.query',['reported-unknown'],{{profile:'work',timeoutMs:1000}});"),
-            _=>format!("return {wait}ctx.browser.call('tabs.query',[],{{profile:'work',timeoutMs:1000}});"),
+        let body = match case {
+            "profiles" => format!("return {wait}ctx.browser.profiles({{timeoutMs:1000}});"),
+            "undefined" | "null" => format!(
+                "const value={wait}ctx.browser.call('{}',[7],{{profile:'work',timeoutMs:1000}});return {{isUndefined:value===undefined,isNull:value===null}};",
+                if case == "undefined" {
+                    "tabs.update"
+                } else {
+                    "tabs.get"
+                }
+            ),
+            "permission" => format!(
+                "return {wait}ctx.browser.call('sessions.restore',['synthetic-closed'],{{profile:'work',timeoutMs:1000}});"
+            ),
+            "reported-unknown" => format!(
+                "return {wait}ctx.browser.call('tabs.query',['reported-unknown'],{{profile:'work',timeoutMs:1000}});"
+            ),
+            _ => format!(
+                "return {wait}ctx.browser.call('tabs.query',[],{{profile:'work',timeoutMs:1000}});"
+            ),
         };
         let (result, host) = invoke(&fixture, mode, &body);
         match case {
@@ -430,4 +460,8 @@ fn service_open_stat_original_budget_contract() {
             fixture.finish();
         }
     }
+}
+
+mod duplicate_author {
+    include!("script_browser_duplicate_service_contract.rs");
 }

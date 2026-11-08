@@ -331,6 +331,13 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum DuplicateScenario {
+        Distinct,
+        SameSource,
+        FocusUnknown,
+    }
+
     struct Fixture {
         root: PathBuf,
         runtime: PathBuf,
@@ -346,6 +353,12 @@ mod tests {
             Self::with_lifetime(Duration::from_secs(30))
         }
         fn with_lifetime(lifetime: Duration) -> Self {
+            Self::with_responses(lifetime, None)
+        }
+        fn with_duplicate(lifetime: Duration, scenario: DuplicateScenario) -> Self {
+            Self::with_responses(lifetime, Some(scenario))
+        }
+        fn with_responses(lifetime: Duration, duplicate: Option<DuplicateScenario>) -> Self {
             let nonce = format!(
                 "{}-{}",
                 std::process::id(),
@@ -400,7 +413,12 @@ mod tests {
                     for profile in ["work","other"] {
                         let began=Instant::now();
                         let mut extension=loop {match platform::connect(&pipe).await {Ok(stream)=>break stream,Err(_) if began.elapsed()<Duration::from_secs(5)=>tokio::time::sleep(Duration::from_millis(5)).await,Err(error)=>panic!("bridge connect: {error}")}};
-                        framing::write(&mut extension,&json!({"v":1,"type":"hello","role":"extension","name":profile,"browser_instance_id":profile,"session_id":format!("s-{profile}"),"capabilities":{"methods":["tabs.query","tabs.get","tabs.update","bookmarks.getTree","sessions.restore"]}})).await.unwrap();
+                        let methods = if duplicate.is_some() {
+                            vec!["tabs.get", "tabs.duplicate", "windows.update"]
+                        } else {
+                            vec!["tabs.query", "tabs.get", "tabs.update", "bookmarks.getTree", "sessions.restore"]
+                        };
+                        framing::write(&mut extension,&json!({"v":1,"type":"hello","role":"extension","name":profile,"browser_instance_id":profile,"session_id":format!("s-{profile}"),"capabilities":{"methods":methods}})).await.unwrap();
                         assert_eq!(framing::read(&mut extension).await.unwrap()["ok"],true);
                         connections.push(extension);
                     }
@@ -418,6 +436,23 @@ mod tests {
                             assert_eq!(message["browser_instance_id"],"work");
                             let id=message["id"].clone();
                             let method=message["method"].as_str().unwrap();
+                            if let Some(scenario) = duplicate {
+                                let value = match method {
+                                    "tabs.get" => { assert_eq!(message["args"], json!([7])); json!({"id":7,"windowId":4}) },
+                                    "tabs.duplicate" => { assert_eq!(message["args"], json!([7])); json!({"id":if scenario==DuplicateScenario::SameSource {7} else {9},"windowId":4}) },
+                                    "windows.update" => {
+                                        assert_eq!(message["args"], json!([4,{"focused":true}]));
+                                        if scenario==DuplicateScenario::FocusUnknown {
+                                            framing::write(&mut extension,&json!({"v":1,"type":"result","id":id,"session_id":"s-work","ok":false,"error":{"code":"result_unknown","message":"合成聚焦请求已派发，结果未确认","effect_state":"unknown"}})).await.unwrap();
+                                            continue;
+                                        }
+                                        json!({"id":4,"focused":true})
+                                    },
+                                    _ => panic!("复制场景不允许额外Chrome方法：{method}"),
+                                };
+                                framing::write(&mut extension,&json!({"v":1,"type":"result","id":id,"session_id":"s-work","ok":true,"has_value":true,"value":value})).await.unwrap();
+                                continue;
+                            }
                             if method=="tabs.query" && message["args"]==json!(["slow"]) {slow_tx.send(()).unwrap();continue;}
                             if method=="tabs.query" && message["args"]==json!(["reported-unknown"]) {
                                 framing::write(&mut extension,&json!({"v":1,"type":"result","id":id,"session_id":"s-work","ok":false,"error":{"code":"result_unknown","message":"上游未确认已派发操作的结果","effect_state":"unknown"}})).await.unwrap();continue;
