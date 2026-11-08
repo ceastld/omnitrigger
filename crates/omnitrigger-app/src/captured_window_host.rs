@@ -340,4 +340,30 @@ mod tests {
         }
         assert_eq!(targets.active.lock().unwrap().0, 0);
     }
+
+    #[test]
+    fn drag_initial_pointer_shape_is_validated_before_explicit_lease_resolution() {
+        let targets = ForegroundTargets::default();
+        for point in [
+            json!([0, 0]),
+            json!(null),
+            json!({"x":0,"y":0,"button":"down"}),
+        ] {
+            let error = drag(
+                &targets,
+                json!({"target":reference(),"mode":"move","button":"left","max_duration_ms":100,"max_updates":1,"initial_pointer":point}),
+                &CancellationToken::new(), None,
+            ).unwrap_err();
+            assert_eq!(error.code, "invalid_input");
+            assert_eq!(error.method.as_deref(), Some("window.drag"));
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        }
+        let error = drag(
+            &targets,
+            json!({"target":reference(),"mode":"move","button":"left","max_duration_ms":100,"max_updates":1,"initial_pointer":{"x":-700,"y":200}}),
+            &CancellationToken::new(), None,
+        ).unwrap_err();
+        assert_eq!(error.code, "target_changed");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+    }
 }

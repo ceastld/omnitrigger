@@ -496,6 +496,24 @@ jobs:
             node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p $windowConfig
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+          node --test tools/script-sdk-check/window-drag-initial-pointer.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($windowDragTypes in @('node', 'script')) {
+            node tools/script-sdk-check/node_modules/typescript/lib/tsc.js --noEmit --strict --target ES2022 --module ESNext --moduleResolution Bundler "tools/script-sdk-check/window-drag-initial-pointer-$windowDragTypes-types.ts"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          # 复用原两条ignored用例；真实Node/ScriptHost与记录Host，无窗口或输入。
+          $windowDragPreviousNode = $env:OMNITRIGGER_CAPTURED_WINDOW_TEST_NODE
+          $windowDragPreviousHost = $env:OMNITRIGGER_TEST_SCRIPT_HOST
+          try {
+            $env:OMNITRIGGER_CAPTURED_WINDOW_TEST_NODE = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = (Resolve-Path -LiteralPath 'target/ci-script-engine/debug/omnitrigger-js-probe.exe' -ErrorAction Stop).Path
+            cargo test --locked -p omnitrigger-actions --test captured_window_runtimes original_window_pointer_contract_keeps_default_target -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            $env:OMNITRIGGER_CAPTURED_WINDOW_TEST_NODE = $windowDragPreviousNode
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = $windowDragPreviousHost
+          }
       - name: 验证轻量脚本开发包的真实安装与切换
         shell: pwsh
         run: |

@@ -8,7 +8,8 @@ export default async function main(ctx){
   const pointer=await ctx.desktop.getPointerState();const geometry=await ctx.desktop.getWindowGeometry();
   const rect=await ctx.desktop.setWindowRect({left:-700,top:100,width:720,height:480},{frame:'visible'});
   const restore=await ctx.desktop.windowAction('restore');
-  const drag=await ctx.desktop.trackWindowDrag({mode:'move',button:'left',maxDurationMs:20,maxUpdates:1,snap:null});
+  const initial='withInitialPointer' in ctx.input&&ctx.input.withInitialPointer===true;
+  const drag=await ctx.desktop.trackWindowDrag({mode:'move',button:'left',maxDurationMs:20,maxUpdates:1,snap:null,...(initial?{initialPointer:{x:-12345,y:6789}}:{})});
   const after=await ctx.desktop.targetContext();return {status:'original_completed',before,after,pointer,geometry,rect,restore,drag};
  }
  const expected=await ctx.desktop.getPointingRoot();

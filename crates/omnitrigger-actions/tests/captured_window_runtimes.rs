@@ -177,12 +177,14 @@ enum Scenario {
 struct Host {
     calls: Mutex<Vec<(String, Value)>>,
     scenario: Scenario,
+    expected_initial_pointer: Option<Value>,
 }
 impl Host {
     fn new(scenario: Scenario) -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
             scenario,
+            expected_initial_pointer: None,
         }
     }
     fn methods(&self) -> Vec<String> {
@@ -306,14 +308,15 @@ impl NativeHost for Host {
                 Ok(json!({"submitted":true}))
             }
             "window.drag" => {
-                assert_eq!(
-                    params,
-                    if matches!(self.scenario, Scenario::Original) {
-                        json!({"mode":"move","button":"left","max_duration_ms":20,"max_updates":1})
-                    } else {
-                        json!({"target":b_token(),"mode":"move","button":"left","max_duration_ms":20,"max_updates":1})
-                    }
-                );
+                let mut expected = if matches!(self.scenario, Scenario::Original) {
+                    json!({"mode":"move","button":"left","max_duration_ms":20,"max_updates":1})
+                } else {
+                    json!({"target":b_token(),"mode":"move","button":"left","max_duration_ms":20,"max_updates":1})
+                };
+                if let Some(point) = &self.expected_initial_pointer {
+                    expected["initial_pointer"] = point.clone();
+                }
+                assert_eq!(params, expected);
                 Ok(drag())
             }
             _ => panic!("禁止默认A回退、capture、额外Native方法或重选窗口：{method}"),
@@ -496,26 +499,33 @@ fn pointer_state() -> Value {
     json!({"coordinateSpace":"physical-screen","x":-700,"y":200,"buttons":{"left":"down","right":"not_down_or_unavailable","middle":"not_down_or_unavailable"},"inputSource":{"kind":"polled-key-state","injected":null,"selfInjected":null}})
 }
 fn original_contract(kind: RuntimeKind) {
-    let mut fixture = Fixture::new(kind);
-    fixture.action.call.input = json!({"originalOnly":true});
-    let host = Host::new(Scenario::Original);
-    let result = kind.execute(&fixture.action, &host).unwrap();
-    assert_eq!(
-        result,
-        json!({"status":"original_completed","before":a(),"after":a(),"pointer":pointer_state(),"geometry":geometry(),"rect":{"submitted":true,"effectState":"unknown"},"restore":{"submitted":true},"drag":drag()})
-    );
-    assert_eq!(
-        host.methods(),
-        [
-            "target.context",
-            "pointer.state",
-            "window.geometry",
-            "window.set_rect",
-            "window.action",
-            "window.drag",
-            "target.context"
-        ]
-    );
+    for with_initial_pointer in [false, true] {
+        let mut fixture = Fixture::new(kind);
+        fixture.action.call.input =
+            json!({"originalOnly":true,"withInitialPointer":with_initial_pointer});
+        let mut host = Host::new(Scenario::Original);
+        if with_initial_pointer {
+            // 与pointer.state回执的(-700,200)刻意不同，不能被当前采样替换。
+            host.expected_initial_pointer = Some(json!({"x":-12345,"y":6789}));
+        }
+        let result = kind.execute(&fixture.action, &host).unwrap();
+        assert_eq!(
+            result,
+            json!({"status":"original_completed","before":a(),"after":a(),"pointer":pointer_state(),"geometry":geometry(),"rect":{"submitted":true,"effectState":"unknown"},"restore":{"submitted":true},"drag":drag()})
+        );
+        assert_eq!(
+            host.methods(),
+            [
+                "target.context",
+                "pointer.state",
+                "window.geometry",
+                "window.set_rect",
+                "window.action",
+                "window.drag",
+                "target.context"
+            ]
+        );
+    }
 }
 fn false_native_contract(kind: RuntimeKind) {
     let mut fixture = Fixture::new(kind);

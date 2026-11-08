@@ -29,7 +29,7 @@ for(const asynchronous of [false,true]){
   for(const bad of [{...rect,width:0},{...rect,width:65536},{...rect,left:2147483647}]){
    await assert.rejects(async()=>h.desktop.setWindowRect(bad,{frame:'visible'}),e=>e.code==='invalid_input'&&e.effectState==='not_started');
   }
-  for(const patch of [{maxDurationMs:19},{maxDurationMs:2001},{maxUpdates:0},{initialPointer:{x:0,y:0}}]){
+  for(const patch of [{maxDurationMs:19},{maxDurationMs:2001},{maxUpdates:0},{initialPointer:{x:0,y:0,left:'down'}}]){
    await assert.rejects(async()=>h.desktop.trackWindowDrag({mode:'move',button:'left',maxDurationMs:20,maxUpdates:1,...patch}),{code:'invalid_input'});
   }
   assert.equal(h.calls.length,0);
@@ -48,8 +48,14 @@ test('Script完整bootstrap的false Native标记在传输前拒绝六个window w
  const invoke=Function('method','let calls=0,nativeId=0;const actionsScope=true,nativeContext={connection:{}},nativeContextAvailable=false;function call(){throw Error("不得进入传输");}function encode(){throw Error("不得序列化");}'+body+';return desktopCall(method,{});');
  for(const method of ['window.geometry','window.set_rect','pointer.state','pointer.root','target.handoff_pointing_root','window.drag'])assert.throws(()=>invoke(method),e=>e.code==='native_bridge_unavailable'&&e.effectState==='not_started');
 });
-test('公开SDK只接受现有窗口参数',()=>{
- assert(!text.includes('initialPointer'));
+test('公开SDK显式起点只接受坐标，不接受按钮或epoch证明',async()=>{
+ const h=harness(false),base={mode:'move',button:'left',maxDurationMs:20,maxUpdates:1};
+ await h.desktop.trackWindowDrag({...base,initialPointer:{x:-700,y:200}});
+ assert.deepEqual(h.calls[0].params.initial_pointer,{x:-700,y:200});
+ for(const extra of [{left:'down'},{epoch:1},{injected:false}]){
+  await assert.rejects(async()=>h.desktop.trackWindowDrag({...base,initialPointer:{x:0,y:0,...extra}}),{code:'invalid_input'});
+ }
+ assert.equal(h.calls.length,1);
 });
 test('Node传输的false Native标记拒绝新wire及显式window.action，保持默认旧分支',async()=>{
  const source=await readFile(new URL('../../crates/omnitrigger-actions/runtime/host.mjs',import.meta.url),'utf8');
