@@ -25,6 +25,10 @@
     "json-types.d.ts",
     "sdk/api.d.ts",
     "sdk/script-types.d.ts",
-    "sdk/clipboard-history-api.d.ts"
+    "sdk/clipboard-history-api.d.ts",
+    "session-step-script.mjs",
+    "session-types.d.ts",
+    "session-core.d.mts",
+    "session-types.contract.mts"
   ]
 }

@@ -362,7 +362,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/process_capture_bridge_api.test.mjs tests/process_capture_bridge_transport.test.mjs tests/app_node_capture_check.test.mjs tests/process_capture_api.test.mjs tests/process_capture_contract.test.mjs tests/process_capture_sdk.test.mjs tests/clipboard_history_inspector.test.mjs tests/clipboard_history_inspector_scan_limit.test.mjs examples/actions/json-text/recipes.test.mjs examples/actions/selection-history/recipes.test.mjs examples/actions/process-output/recipes.test.mjs examples/actions/process-output/encoding-boundaries.test.mjs examples/actions/process-output/cross-entry-contract.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test examples/actions/json-text/select.test.mjs
+          node --test examples/actions/json-text/select.test.mjs examples/actions/json-text/session-core.test.mjs examples/actions/json-text/session-step.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p examples/actions/json-text/jsconfig.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -542,9 +542,14 @@ jobs:
           foreach ($name in $nodeVariables) {
             $previousNodeVariables[$name] = @{ existed = Test-Path "Env:$name"; value = [Environment]::GetEnvironmentVariable($name, 'Process') }
           }
+          $previousJsonSessionRoot = $env:OMNITRIGGER_JSON_SESSION_TEST_ROOT
           try {
             $nodeExecutable = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
             foreach ($name in $nodeVariables) { [Environment]::SetEnvironmentVariable($name, $nodeExecutable, 'Process') }
+            if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { throw '缺少明确的CI临时目录。' }
+            $jsonSessionRoot = Join-Path $env:RUNNER_TEMP ('json-session-ci-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $jsonSessionRoot -ErrorAction Stop | Out-Null
+            $env:OMNITRIGGER_JSON_SESSION_TEST_ROOT = $jsonSessionRoot
             foreach ($engine in @('boa', 'quickjs')) {
               $env:OMNITRIGGER_TEST_SCRIPT_HOST = Join-Path $PWD "results/$engine-small.exe"
               # 同时覆盖真实动作提示、State与Scope；每个引擎只运行一遍。
@@ -552,6 +557,7 @@ jobs:
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
           } finally {
+            $env:OMNITRIGGER_JSON_SESSION_TEST_ROOT = $previousJsonSessionRoot
             foreach ($name in $nodeVariables) {
               if ($previousNodeVariables[$name].existed) { [Environment]::SetEnvironmentVariable($name, $previousNodeVariables[$name].value, 'Process') }
               else { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }

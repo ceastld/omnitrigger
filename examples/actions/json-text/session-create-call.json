@@ -1,0 +1,13 @@
+{
+  "package_id": "examples.json-text",
+  "action_id": "session-step-script",
+  "action_version": 1,
+  "input": {
+    "mode": "create",
+    "initial": {
+      "sessionId": "demo",
+      "text": "{\"count\":9007199254740993,\"enabled\":false}",
+      "continuous": true
+    }
+  }
+}
