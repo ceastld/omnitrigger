@@ -62,8 +62,8 @@ export default async function main(ctx) { const target=await ctx.desktop.target(
   const authorFiles=['action.json','jsconfig.json','main.mjs','README.md',...(!prefix?['node.mjs','ambient.d.ts']:[])];
   return {project,source,prefix,authorFiles};
 }
-function refreshPortable(item) {
-  return spawnSync(process.execPath,[join(repo,'tools/script-project.mjs'),'refresh','--runtime','script',
+function refreshPortable(item,flags=[]) {
+  return spawnSync(process.execPath,[...flags,join(repo,'tools/script-project.mjs'),'refresh','--runtime','script',
     '--project',item.project,'--source-root',item.source],{encoding:'utf8',windowsHide:true,timeout:60000});
 }
 
@@ -86,6 +86,114 @@ test('canonical普通包两种布局更新SDK并保留作者文件，各自stric
       for(const [i,name] of item.authorFiles.entries())assert.deepEqual(readFileSync(join(item.project,name)),before[i]);
     }
   }
+});
+
+function generatedSnapshotFixture(example='brightness-step') {
+  const root=mkdtempSync(join(parent,'snapshot-')),project=join(root,'project');mkdirSync(join(project,'sdk'),{recursive:true});
+  const names=['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts'];
+  for(const name of [...names,'snapshot.json'])writeFileSync(join(project,'sdk',name),readFileSync(join(repo,'examples/actions',example,'sdk',name)));
+  writeFileSync(join(project,'action.json'),JSON.stringify({schema_version:1,actions:[{runtime:'script',entry:'main.mjs'}]}));
+  writeFileSync(join(project,'main.mjs'),'throw Error("AUTHOR MUST NOT RUN");export function main(ctx){return ctx.input;}\n');
+  writeFileSync(join(project,'README.md'),'作者正文不能改写\n');
+  return {root,project,source:repo,names};
+}
+const snapshotDigest=bytes=>createHash('sha256').update(bytes).digest('hex');
+function snapshotBytes(item){return ['action.json','main.mjs','README.md',...item.names.map(name=>'sdk/'+name),'sdk/snapshot.json'].map(name=>[name,readFileSync(join(item.project,name))]);}
+function saveSnapshot(item,value){writeFileSync(join(item.project,'sdk/snapshot.json'),JSON.stringify(value,null,2)+'\n');}
+
+test('生成快照独立构造已知旧指纹，声明已是目标版本时只同步元数据',()=>{
+  const item=generatedSnapshotFixture();
+  // 明确构造历史状态，不依赖仓库示例仍然保留旧声明或旧元数据。
+  for(const name of item.names)writeFileSync(join(item.project,'sdk',name),readFileSync(join(repo,'crates/omnitrigger-actions/runtime',name)));
+  const snapshot=JSON.parse(readFileSync(join(item.project,'sdk/snapshot.json'),'utf8'));
+  snapshot.files['api.d.ts'].sha256='7ae85df4d6bba81754d694e4df97ac27edc9c8bab1ddb646c9f4c396c401b72d';
+  snapshot.files['script-types.d.ts'].sha256='b01bb12f8f79e07f1bd51f771a150f0a23b2e4417d180eb2d100a24715827369';
+  saveSnapshot(item,snapshot);
+  assert.notEqual(snapshot.files['api.d.ts'].sha256,snapshotDigest(readFileSync(join(item.project,'sdk/api.d.ts'))));
+  assert.notEqual(snapshot.files['script-types.d.ts'].sha256,snapshotDigest(readFileSync(join(item.project,'sdk/script-types.d.ts'))));
+  const before=snapshotBytes(item),expected=structuredClone(snapshot),result=refreshPortable(item);
+  assert.ifError(result.error);assert.equal(result.status,0,result.stderr);
+  for(const name of item.names)expected.files[name].sha256=snapshotDigest(readFileSync(join(item.project,'sdk',name)));
+  assert.deepEqual(JSON.parse(readFileSync(join(item.project,'sdk/snapshot.json'),'utf8')),expected);
+  for(const [name,bytes] of before.filter(([name])=>name!=='sdk/snapshot.json'))assert.deepEqual(readFileSync(join(item.project,name)),bytes);
+});
+
+test('生成快照刷新同步两种来源标签、已知旧指纹与CRLF，保留作者文件并可重复刷新',()=>{
+  for(const kind of ['brightness-step','volume-adjust','crlf']) {
+    const item=generatedSnapshotFixture(kind==='crlf'?'brightness-step':kind);
+    const original=JSON.parse(readFileSync(join(item.project,'sdk/snapshot.json'),'utf8'));
+    if(kind==='crlf') {
+      for(const name of item.names) {
+        const file=join(item.project,'sdk',name),text=readFileSync(file,'utf8').replaceAll('\r\n','\n').replaceAll('\n','\r\n');
+        writeFileSync(file,text);original.files[name].sha256=snapshotDigest(Buffer.from(text));
+      }
+      writeFileSync(join(item.project,'sdk/snapshot.json'),(JSON.stringify(original,null,2)+'\n').replaceAll('\n','\r\n'));
+    }
+    const before=snapshotBytes(item),result=refreshPortable(item);assert.ifError(result.error);assert.equal(result.status,0,result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout).files,[...item.names.map(name=>'sdk/'+name),'sdk/snapshot.json']);
+    const updated=JSON.parse(readFileSync(join(item.project,'sdk/snapshot.json'),'utf8'));
+    for(const name of item.names) {
+      const actual=readFileSync(join(item.project,'sdk',name));assert.deepEqual(actual,readFileSync(join(repo,'crates/omnitrigger-actions/runtime',name)));
+      assert.equal(updated.files[name].sha256,snapshotDigest(actual));
+      const label=kind==='volume-adjust'?'canonical_source':'source';assert.equal(updated.files[name][label],original.files[name][label]);
+    }
+    assert.equal(updated.required_api,original.required_api);assert.equal(updated.wire,original.wire);
+    for(const [name,bytes] of before.filter(([name])=>!name.startsWith('sdk/')))assert.deepEqual(readFileSync(join(item.project,name)),bytes);
+    if(kind==='crlf')assert(readFileSync(join(item.project,'sdk/snapshot.json'),'utf8').endsWith('\r\n'));
+    const stable=snapshotBytes(item),again=refreshPortable(item);assert.ifError(again.error);assert.equal(again.status,0,again.stderr);
+    assert.deepEqual(snapshotBytes(item),stable);
+  }
+});
+
+test('生成快照未知结构、来源、身份、坏JSON与未知指纹均预检拒绝且不部分覆盖',()=>{
+  const cases=[
+    ['identity',s=>{s.wire='unknown.author_wire';},'project_sdk_snapshot_unrecognized'],
+    ['source',s=>{s.files['api.d.ts'].source='../AUTHOR_PRIVATE_FILE';},'project_sdk_snapshot_unrecognized'],
+    ['extra',s=>{s.author_note='keep';},'project_sdk_snapshot_unrecognized'],
+    ['files',s=>{s.files['custom.d.ts']={source:'custom',sha256:'0'.repeat(64)};},'project_sdk_snapshot_unrecognized'],
+    ['entry',s=>{s.files['api.d.ts'].author_note='keep';},'project_sdk_snapshot_unrecognized'],
+    ['sha',s=>{s.files['api.d.ts'].sha256='0'.repeat(64);},'project_sdk_snapshot_unrecognized'],
+    ['json',undefined,'project_sdk_snapshot_unrecognized'],
+    ['format',undefined,'project_sdk_snapshot_unrecognized'],
+  ];
+  for(const [kind,change,code] of cases) {
+    const item=generatedSnapshotFixture(),file=join(item.project,'sdk/snapshot.json');
+    const value=JSON.parse(readFileSync(file,'utf8'));
+    if(change){change(value);saveSnapshot(item,value);}else writeFileSync(file,kind==='json'?'{':JSON.stringify(value));
+    const before=snapshotBytes(item),result=refreshPortable(item);assert.ifError(result.error);assert.equal(result.status,1,kind+result.stdout);
+    assert.equal(JSON.parse(result.stderr).error.code,code,kind+result.stderr);assert.deepEqual(snapshotBytes(item),before);
+  }
+});
+
+test('生成快照拒绝未知声明和未知目标，即使相等或指纹自洽也不覆盖',()=>{
+  for(const kind of ['author','target','equal']) {
+    const item=generatedSnapshotFixture();
+    if(kind!=='author') {
+      item.source=join(item.root,'source');mkdirSync(join(item.source,'crates/omnitrigger-actions/runtime'),{recursive:true});
+      for(const name of item.names)writeFileSync(join(item.source,'crates/omnitrigger-actions/runtime',name),readFileSync(join(repo,'crates/omnitrigger-actions/runtime',name)));
+      const target=join(item.source,'crates/omnitrigger-actions/runtime/api.d.ts');writeFileSync(target,readFileSync(target,'utf8')+'\n// unknown target\n');
+    }
+    if(kind!=='target') {
+      for(const name of item.names)if(kind==='equal')writeFileSync(join(item.project,'sdk',name),readFileSync(join(item.source,'crates/omnitrigger-actions/runtime',name)));
+      if(kind==='author'){const file=join(item.project,'sdk/api.d.ts');writeFileSync(file,readFileSync(file,'utf8')+'\n// author edit\n');}
+      const value=JSON.parse(readFileSync(join(item.project,'sdk/snapshot.json'),'utf8'));
+      for(const name of item.names)value.files[name].sha256=snapshotDigest(readFileSync(join(item.project,'sdk',name)));saveSnapshot(item,value);
+    }
+    const before=snapshotBytes(item),result=refreshPortable(item);assert.ifError(result.error);assert.equal(result.status,1,kind+result.stdout);
+    assert.equal(JSON.parse(result.stderr).error.code,'project_sdk_unrecognized',kind+result.stderr);assert.deepEqual(snapshotBytes(item),before);
+  }
+});
+
+test('生成快照在统一复查时被作者改动，拒绝且不先写入声明',()=>{
+  const item=generatedSnapshotFixture(),file=join(item.project,'sdk/snapshot.json'),preload=join(item.root,'concurrent.mjs');
+  const before=snapshotBytes(item),original=readFileSync(file,'utf8');
+  writeFileSync(preload,`import fs from 'node:fs';import path from 'node:path';import {syncBuiltinESMExports} from 'node:module';
+const target=${JSON.stringify(file)},read=fs.readFileSync;let reads=0;
+fs.readFileSync=function(file,...args){if(path.resolve(String(file))===target&&++reads===2)fs.writeFileSync(target,${JSON.stringify(original+'\n')});return read.call(this,file,...args);};syncBuiltinESMExports();\n`);
+  const result=refreshPortable(item,['--import',pathToFileURL(preload).href]);assert.ifError(result.error);assert.equal(result.status,1,result.stdout);
+  assert.equal(JSON.parse(result.stderr).error.code,'project_sdk_changed');
+  for(const [name,bytes] of before.filter(([name])=>name!=='sdk/snapshot.json'))assert.deepEqual(readFileSync(join(item.project,name)),bytes);
+  assert.equal(readFileSync(file,'utf8'),original+'\n');assert(readdirSync(join(item.project,'sdk')).every(name=>!name.endsWith('.tmp')));
 });
 
 test('canonical声明被作者修改或已识别布局缺件时，预检拒绝且不部分覆盖',()=>{
