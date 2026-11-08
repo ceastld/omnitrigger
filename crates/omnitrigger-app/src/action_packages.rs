@@ -37,7 +37,7 @@ pub fn service(config: &Path) -> ActionService {
     ActionService::new(catalog, runtimes)
 }
 
-/// 只有输入引擎所有者显式启用；普通CLI的service仍无store。
+/// 输入引擎所有者和显式启用状态的CLI复用；普通CLI的service仍无store。
 pub fn owner_service(config: &Path) -> ActionService {
     let (mut catalog, runtimes) = components(config);
     let store = std::path::absolute(config)
@@ -179,12 +179,16 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
         .iter()
         .position(|arg| arg == "--list-package-actions");
     let stream = arguments.iter().any(|arg| arg == "--stream-action-events");
+    let with_action_state = arguments
+        .iter()
+        .position(|arg| arg == "--with-action-state" || arg.starts_with("--with-action-state="));
     let explicit_target = arguments.iter().position(|arg| arg == "--target-context");
     let index = check
         .or(run)
         .or(create)
         .or(install)
         .or(list)
+        .or(with_action_state)
         .or(explicit_target)
         .or_else(|| {
             arguments
@@ -272,7 +276,11 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
             })
             .transpose()
             .map_err(target_error)?;
-        let service = service(&settings::path());
+        let service = if with_action_state.is_some() {
+            owner_service(&settings::path())
+        } else {
+            service(&settings::path())
+        };
         service.validate(&call).map_err(rejected)?;
         if check.is_some() {
             return Ok(serde_json::json!({"valid":true,"call":call}).to_string());

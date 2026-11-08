@@ -6772,6 +6772,18 @@ fn open_script_history_window(
 
 fn main() {
     let arguments: Vec<_> = std::env::args().collect();
+    // 显式状态只属于动作运行；在更早分派的辅助命令或界面入口之前拒绝混用。
+    if arguments.iter().any(|argument| {
+        argument == "--with-action-state" || argument.starts_with("--with-action-state=")
+    }) {
+        if let Err(message) = action_target_context::validate_cli(&arguments) {
+            eprintln!(
+                "{}",
+                serde_json::json!({"status":"rejected","error":{"code":"invalid_cli_arguments","message":message,"effect_state":"not_started"}})
+            );
+            std::process::exit(1);
+        }
+    }
     if let Some(code) = explorer_context_helper::cli(&arguments) {
         std::process::exit(code);
     }

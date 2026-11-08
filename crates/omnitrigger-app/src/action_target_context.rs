@@ -19,11 +19,15 @@ pub fn validate_cli(arguments: &[String]) -> Result<(), String> {
                 | "--install-script-runtime"
                 | "--sha256"
                 | "--stream-action-events"
+                | "--with-action-state"
         ) || !seen.insert(flag)
         {
             return Err(format!("动作命令含未知或重复参数：{flag}"));
         }
-        if matches!(flag, "--list-package-actions" | "--stream-action-events") {
+        if matches!(
+            flag,
+            "--list-package-actions" | "--stream-action-events" | "--with-action-state"
+        ) {
             index += 1;
             continue;
         }
@@ -56,6 +60,9 @@ pub fn validate_cli(arguments: &[String]) -> Result<(), String> {
     }
     if seen.contains("--install-script-runtime") != seen.contains("--sha256") {
         return Err("--install-script-runtime 需要且只能搭配 --sha256 使用。".into());
+    }
+    if seen.contains("--with-action-state") && !seen.contains("--run-action") {
+        return Err("--with-action-state 只能用于 --run-action，且不接受参数值。".into());
     }
     if (seen.contains("--target-context") || seen.contains("--stream-action-events"))
         && !seen.contains("--run-action")
@@ -274,6 +281,50 @@ mod tests {
             "t.json".into()
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn action_state_flag_is_explicit_and_run_only() {
+        for args in [
+            vec!["--run-action", "call.json", "--with-action-state"],
+            vec!["--with-action-state", "--run-action", "call.json"],
+            vec![
+                "app.exe",
+                "--config",
+                "owned.json",
+                "--run-action",
+                "call.json",
+                "--with-action-state",
+                "--stream-action-events",
+            ],
+        ] {
+            assert!(validate_cli(&args.iter().map(|x| x.to_string()).collect::<Vec<_>>()).is_ok());
+        }
+        for args in [
+            vec!["--with-action-state"],
+            vec!["--with-action-state=true"],
+            vec!["--with-action-state", "false", "--run-action", "call.json"],
+            vec![
+                "--run-action",
+                "call.json",
+                "--with-action-state",
+                "--with-action-state",
+            ],
+            vec!["--check-action", "call.json", "--with-action-state"],
+            vec!["--check-config", "--with-action-state"],
+            vec!["--check-system-controls", "--with-action-state"],
+            vec!["--list-package-actions", "--with-action-state"],
+            vec!["--create-script-action", "owned", "--with-action-state"],
+            vec![
+                "--install-script-runtime",
+                "host.zip",
+                "--sha256",
+                "digest",
+                "--with-action-state",
+            ],
+        ] {
+            assert!(validate_cli(&args.iter().map(|x| x.to_string()).collect::<Vec<_>>()).is_err());
+        }
     }
 
     #[test]

@@ -143,6 +143,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check-single-instance.mjs target/debug/omnitrigger.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/action-state-cli.test.mjs --app "$PWD/target/debug/omnitrigger.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # 默认仅Node模式，不附加--light-host。
           node tools/script-sdk-check/check-clipboard-history.mjs target/debug/omnitrigger.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

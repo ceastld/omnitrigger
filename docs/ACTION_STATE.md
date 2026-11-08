@@ -11,7 +11,13 @@
 
 身份来自服务为本次真实调用保留的包 ID 和动作 ID。同一身份跨绑定、动作版本、Node/Script 和服务重载共享状态；不同包或不同动作隔离。脚本不能通过参数、可读 `ctx.invocation`、自报 scope、绑定 ID 或文件路径选择别人的状态。多个字段需要一起更新时，应放在同一个 JSON 值中；没有跨键或跨动作事务。
 
-应用输入引擎所有者显式挂载存储。没有挂载的普通 `ActionService::new`、普通 CLI、独立运行时或没有真实服务作用域的脚本，调用时明确得到 `state_unavailable`，不会改用模块变量、临时文件或全局默认值。失效调用作用域为 `action_inactive`。此本地宿主协议不是针对恶意本地代码的安全沙盒。
+应用输入引擎所有者显式挂载存储。命令行只有在 `--run-action` 同时指定布尔参数 `--with-action-state` 时才挂载相同的生产状态存储；durable 目录固定为所选 `--config` 同级的 `action-state`，构造存储不读写文件。未加参数的普通 CLI、没有挂载的 `ActionService::new`、独立运行时或没有真实服务作用域的脚本，调用时明确得到 `state_unavailable`，不会改用模块变量、临时文件或全局默认值。失效调用作用域为 `action_inactive`。此本地宿主协议不是针对恶意本地代码的安全沙盒。
+
+```powershell
+omnitrigger.exe --config D:\Demo\bindings.json --run-action D:\Demo\call.json --with-action-state
+```
+
+`--with-action-state` 不接受值、不能重复，不能单独使用或与检查、列目录、创建工程、安装运行时命令合用。不提供独立状态路径；每次 CLI 都创建新的服务会话，只有 durable 值可跨调用重新加载，session 状态不跨进程保留。
 
 ## 快照与缺值
 
