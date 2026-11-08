@@ -28,10 +28,13 @@ export function parseInput(value){
  * @param {string} className */
 export function sourceClassBlocked(className){
  if(typeof className!=='string'||!className||className.length>255||className.includes('\0'))fail('invalid_response');
- const direct=/Progman|WorkerW|Shell_TrayWnd/i.test(className);
+ // 固定ASCII模式显式折叠ASCII字母，避免引擎的/i把long-s或Kelvin加入匹配。
+ const folded=className.replace(/[A-Z]/g,c=>String.fromCharCode(c.charCodeAt(0)+32));
+ const pattern=/progman|workerw|shell_traywnd/;
+ const direct=pattern.test(folded);
  // 固定模式的BMP字面字符差分：.NET实测均不折叠long-s；Kelvin随Framework invariant文化变化。
  // 影子匹配不改原始metadata；只有Kelvin折叠会新增完整黑名单匹配时才保留文化缺口。
- if(!direct&&/Progman|WorkerW|Shell_TrayWnd/i.test(className.replace(/\u212a/g,'K')))fail('source_regex_culture_unavailable');
+ if(!direct&&pattern.test(folded.replace(/\u212a/g,'k')))fail('source_regex_culture_unavailable');
  return direct;
 }
 /** @param {import('./types.js').Identity} a @param {import('./types.js').Identity} b */

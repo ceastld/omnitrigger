@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+import {sourceClassBlocked} from '../../examples/actions/window-size-step/flow.mjs';
 const source=readFileSync(new URL('../../crates/omnitrigger-actions/runtime/desktop-api.js',import.meta.url),'utf8');
 const create=Function(source+'\nreturn createDesktopApi;')();
 const rect={left:-800,top:100,width:800,height:600};
@@ -43,3 +45,23 @@ for(const asynchronous of [false,true]){
   }
  });
 }
+
+// 模拟会在/i额外折叠long-s/Kelvin的实现；只修改独立VM的原型，不改变Node全局。
+test('固定类名模式不依赖引擎的非ASCII ignoreCase折叠',()=>{
+ const hostTest=RegExp.prototype.test;
+ const sandbox=vm.createContext({});
+ vm.runInContext(`
+  const originalTest=RegExp.prototype.test;
+  RegExp.prototype.test=function(value){
+   return originalTest.call(this,this.ignoreCase?String(value).replace(/\\u017f/g,'s').replace(/\\u212a/g,'k'):value);
+  };
+  function fail(code){throw Object.assign(new Error('synthetic'),{code});}
+ `,sandbox);
+ assert.equal(vm.runInContext("/shell_traywnd/i.test('ſhell_TrayWnd')",sandbox),true);
+ assert.equal(vm.runInContext("/shell_traywnd/.test('ſhell_TrayWnd')",sandbox),false);
+ const check=vm.runInContext(`(${sourceClassBlocked.toString()})`,sandbox);
+ for(const value of ['TestWindow','窗口类','😀窗口','ſhell_TrayWnd','custom.KelvinKWindow'])assert.equal(check(value),false,value);
+ for(const value of ['Progman','WORKERW','custom.sHeLl_TrAyWnD.proxy','窗口WorkerW代理','ſhell_TrayWnd.WorkerW','WorKerW.Shell_TrayWnd'])assert.equal(check(value),true,value);
+ for(const value of ['WorKerW','custom.WorKerW.proxy'])assert.throws(()=>check(value),error=>error.code==='source_regex_culture_unavailable');
+ assert.equal(RegExp.prototype.test,hostTest);
+});
