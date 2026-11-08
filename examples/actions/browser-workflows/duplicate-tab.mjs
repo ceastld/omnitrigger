@@ -1,3 +1,3 @@
-import { runWorkflow } from './workflows.mjs';
-/** @param {import('./sdk/api').ActionContext} ctx */
-export default ctx => runWorkflow(ctx, 'duplicate-tab');
+import {runDuplicateTab} from './workflows.mjs';
+/** @param {Pick<import('./sdk/api').ActionContext,'input'|'browser'>} ctx */
+export default ctx => runDuplicateTab(ctx);

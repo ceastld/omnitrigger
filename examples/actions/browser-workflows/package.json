@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "check": "node ./node_modules/typescript/bin/tsc --project jsconfig.json && node ./sdk/check-node-entry.cjs ."
+    "check": "node ./node_modules/typescript/bin/tsc --project jsconfig.json && node ./sdk/check-node-entry.cjs . && node ./node_modules/typescript/bin/tsc --project type-tests/jsconfig.json"
   },
   "devDependencies": {
     "typescript": "5.9.3"

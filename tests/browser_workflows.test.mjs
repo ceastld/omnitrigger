@@ -42,6 +42,10 @@ test('动作包各入口可导入，版本与运行时明确', async () => {
       assert.equal(action.single_instance, true);
       assert.equal(action.entry, action.id === 'create-default-tab-script' ? 'default-new-tab-script.mjs' : 'restore-session-script.mjs');
       assert.equal(typeof entry.main, 'function');
+    } else if (action.id === 'duplicate-tab-script') {
+      assert.equal(action.runtime, 'script');
+      assert.equal(action.entry, 'duplicate-tab-script.mjs');
+      assert.equal(typeof entry.main, 'function');
     } else {
       assert.equal(action.runtime, 'node');
       assert.equal(typeof entry.default, 'function');

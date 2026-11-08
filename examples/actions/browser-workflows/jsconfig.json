@@ -19,6 +19,7 @@
     "workflows.mjs",
     "open-url.mjs",
     "duplicate-tab.mjs",
+    "duplicate-tab-script.mjs",
     "open-bookmark.mjs",
     "restore-session.mjs",
     "restore-session-script.mjs",

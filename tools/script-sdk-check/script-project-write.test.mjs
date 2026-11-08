@@ -595,13 +595,13 @@ test('canonical快照指纹覆盖当前来源与已携带声明的LF和CRLF，�
 });
 
 
-test('browser-workflows真实七个入口在ES2022宿主环境严格通过',()=>{
+test('browser-workflows真实八个入口在ES2022宿主环境严格通过',()=>{
   const project=join(repo,'examples/actions/browser-workflows'),configFile=join(project,'jsconfig.json');
   const loaded=ts.readConfigFile(configFile,ts.sys.readFile);assert.equal(loaded.error,undefined);
   const parsed=ts.parseJsonConfigFileContent(loaded.config,ts.sys,project,undefined,configFile);
   assert.deepEqual(parsed.errors,[]);assert.deepEqual(parsed.options.lib,['lib.es2022.d.ts']);assert.deepEqual(parsed.options.types,[]);
   assert.equal(parsed.options.strict,true);assert.equal(parsed.options.noEmit,true);assert.equal(parsed.options.skipLibCheck,false);
-  const manifest=JSON.parse(readFileSync(join(project,'action.json'),'utf8'));assert.equal(manifest.actions.length,7);
+  const manifest=JSON.parse(readFileSync(join(project,'action.json'),'utf8'));assert.equal(manifest.actions.length,8);
   for(const action of manifest.actions)assert(parsed.fileNames.some(file=>resolve(file)===join(project,action.entry)),action.entry);
   const errors=ts.getPreEmitDiagnostics(ts.createProgram(parsed.fileNames,parsed.options));
   assert.equal(errors.length,0,ts.formatDiagnostics(errors,{getCanonicalFileName:x=>x,getCurrentDirectory:()=>project,getNewLine:()=> '\n'}));
