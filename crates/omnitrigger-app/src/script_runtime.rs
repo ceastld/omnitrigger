@@ -494,6 +494,7 @@ pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<
                 runtime: "script".into(),
                 entry: "main.js".into(),
                 single_instance: false,
+                allow_binding_reentry: false,
             },
         };
         let output = ScriptHostRuntime::new(payload.join("host.exe"))

@@ -68,6 +68,23 @@ pub struct ActionDefinition {
     /// 同一ActionService中按包和动作标识禁止重叠执行；不影响终态读取配额。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub single_instance: bool,
+    /// 允许同绑定、同动作版本的活跃调用重叠进入业务判断；接纳不自动取消旧调用。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_binding_reentry: bool,
+}
+
+impl ActionDefinition {
+    pub(crate) fn validate_policy(&self) -> Result<(), ActionError> {
+        if self.single_instance && self.allow_binding_reentry {
+            let mut error = ActionError::new(
+                "invalid_action_policy",
+                "动作不能同时启用 single_instance 与 allow_binding_reentry。",
+            );
+            error.effect_state = Some("not_started".into());
+            return Err(error);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +158,36 @@ mod tests {
         disabled["actions"][0]["single_instance"] = false.into();
         let manifest: PackageManifest = serde_json::from_value(disabled).unwrap();
         assert_eq!(serde_json::to_value(manifest).unwrap(), original);
+    }
+
+    #[test]
+    fn optional_allow_binding_reentry_preserves_schema_one_and_rejects_non_boolean_values() {
+        let original = json!({
+            "schema_version":1,"id":"example","name":"示例","version":"1.0.0",
+            "actions":[{"id":"run","title":"运行","version":1,"runtime":"test","entry":"main.js"}]
+        });
+        let manifest: PackageManifest = serde_json::from_value(original.clone()).unwrap();
+        assert!(!manifest.actions[0].allow_binding_reentry);
+        assert_eq!(serde_json::to_value(&manifest).unwrap(), original);
+        let mut enabled = original.clone();
+        enabled["actions"][0]["allow_binding_reentry"] = true.into();
+        let manifest: PackageManifest = serde_json::from_value(enabled.clone()).unwrap();
+        assert!(manifest.actions[0].allow_binding_reentry);
+        assert_eq!(serde_json::to_value(&manifest).unwrap(), enabled);
+        for invalid in [json!(null), json!(0), json!("true"), json!([]), json!({})] {
+            let mut value = original.clone();
+            value["actions"][0]["allow_binding_reentry"] = invalid;
+            assert!(serde_json::from_value::<PackageManifest>(value).is_err());
+        }
+        let mut disabled = original.clone();
+        disabled["actions"][0]["allow_binding_reentry"] = false.into();
+        let manifest: PackageManifest = serde_json::from_value(disabled).unwrap();
+        assert_eq!(serde_json::to_value(manifest).unwrap(), original);
+        enabled["actions"][0]["single_instance"] = true.into();
+        let conflicting: PackageManifest = serde_json::from_value(enabled).unwrap();
+        let error = conflicting.actions[0].validate_policy().unwrap_err();
+        assert_eq!(error.code, "invalid_action_policy");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
     }
 
     #[test]

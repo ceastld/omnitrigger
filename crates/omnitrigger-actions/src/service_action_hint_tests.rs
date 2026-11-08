@@ -71,6 +71,7 @@ fn service() -> ActionService {
             runtime: "hint-test".into(),
             entry: "not-opened.mjs".into(),
             single_instance: false,
+            allow_binding_reentry: false,
         },
     }]);
     let mut registry = RuntimeRegistry::new();
@@ -146,6 +147,7 @@ fn scoped_hint_rejects_forgery_inactive_scope_and_both_cancellation_sources_befo
                 },
                 action_version: 3,
                 single_instance: false,
+                binding_reentry: false,
                 active: true,
             },
         )]),

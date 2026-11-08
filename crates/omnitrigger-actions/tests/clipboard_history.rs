@@ -163,6 +163,7 @@ impl Fixture {
                 runtime: self.engine.id().into(),
                 entry: self.entry.into(),
                 single_instance: true,
+                allow_binding_reentry: false,
             },
         }
     }

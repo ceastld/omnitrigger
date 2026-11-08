@@ -53,6 +53,7 @@ impl Fixture {
                 runtime: "script".into(),
                 entry: "main.js".into(),
                 single_instance: false,
+                allow_binding_reentry: false,
             },
         }
     }

@@ -133,6 +133,7 @@ impl Fixture {
                 runtime: kind.name().into(),
                 entry: "main.mjs".into(),
                 single_instance: false,
+                allow_binding_reentry: false,
             },
         };
         Self { root, action }

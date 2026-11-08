@@ -357,6 +357,7 @@ fn run_cases(runtime: &dyn ActionRuntime, kind: &str) {
                 runtime: kind.into(),
                 entry,
                 single_instance: false,
+                allow_binding_reentry: false,
             },
         };
         let host = Host::new(scenario);

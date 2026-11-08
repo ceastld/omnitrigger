@@ -68,6 +68,7 @@ fn catalog(runtime: &str, version: u32) -> PackageCatalog {
                         runtime: runtime.into(),
                         entry: "not-opened.mjs".into(),
                         single_instance: false,
+                        allow_binding_reentry: false,
                     },
                 })
             })

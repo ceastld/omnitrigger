@@ -268,6 +268,7 @@ fn validate_manifest(manifest: &PackageManifest) -> Result<(), ActionError> {
     }
     let mut identities = BTreeSet::new();
     for action in &manifest.actions {
+        action.validate_policy()?;
         if !valid_id(&action.id)
             || !valid_label(&action.title)
             || action.version == 0
@@ -472,6 +473,40 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn conflicting_reentry_policy_is_rejected_before_catalog_admission() {
+        let fixture = Fixture::new();
+        let root = fixture.package("sample", "example", "future-runtime");
+        let path = root.join("action.json");
+        let mut manifest: PackageManifest =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        manifest.actions[0].single_instance = true;
+        manifest.actions[0].allow_binding_reentry = true;
+        let error = validate_manifest(&manifest).unwrap_err();
+        assert_eq!(error.code, "invalid_action_policy");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let rejected = PackageCatalog::load(&fixture.0);
+        assert!(rejected.actions.is_empty());
+        assert_eq!(rejected.diagnostics.len(), 1);
+        assert!(rejected.diagnostics[0].contains("invalid_action_policy"));
+        assert_eq!(
+            rejected.resolve(&Fixture::call()).unwrap_err().code,
+            "package_missing"
+        );
+        manifest.actions[0].single_instance = false;
+        fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let accepted = PackageCatalog::load(&fixture.0);
+        assert!(accepted.diagnostics.is_empty());
+        assert!(
+            accepted
+                .resolve(&Fixture::call())
+                .unwrap()
+                .definition
+                .allow_binding_reentry
+        );
+    }
+
+    #[test]
     fn duplicate_package_id_disables_every_copy() {
         let fixture = Fixture::new();
         fixture.package("a", "example", "javascript");
@@ -536,6 +571,7 @@ pub(crate) mod tests {
         manifest.actions = (0..MAX_ACTIONS_PER_PACKAGE)
             .map(|index| ActionDefinition {
                 id: format!("action-{index}"),
+                allow_binding_reentry: false,
                 ..definition.clone()
             })
             .collect();

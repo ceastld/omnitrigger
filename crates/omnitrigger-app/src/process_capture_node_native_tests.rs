@@ -123,6 +123,7 @@ fn action(root: &Path, source: &str, input: Value) -> ResolvedAction {
             runtime: "node".into(),
             entry: entry.file_name().unwrap().to_string_lossy().into_owned(),
             single_instance: false,
+            allow_binding_reentry: false,
         },
         package_root: root.to_path_buf(),
         entry_path: entry,

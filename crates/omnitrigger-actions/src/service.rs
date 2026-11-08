@@ -34,6 +34,8 @@ pub struct ActionCatalogDescription {
     pub runtime: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub single_instance: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_binding_reentry: bool,
     pub reference_error: Option<ActionError>,
 }
 
@@ -143,6 +145,8 @@ struct Reservation {
     identity: ActionIdentity,
     action_version: u32,
     single_instance: bool,
+    /// 从已解析清单快照取得，不能由脚本输入覆盖。
+    binding_reentry: bool,
     /// 从接纳到运行时及本次调用资源清理结束；不等UI读取终态，不由取消请求清除。
     active: bool,
 }
@@ -310,6 +314,7 @@ impl ActionService {
                         title: entry.definition.title.clone(),
                         runtime: entry.definition.runtime.clone(),
                         single_instance: entry.definition.single_instance,
+                        allow_binding_reentry: entry.definition.allow_binding_reentry,
                         reference_error,
                     }
                 })
@@ -320,6 +325,7 @@ impl ActionService {
 
     pub fn validate(&self, call: &ActionCall) -> Result<(), ActionError> {
         let resolved = self.catalog.resolve(call)?;
+        resolved.definition.validate_policy()?;
         self.runtimes.get(&resolved.definition.runtime)?;
         Ok(())
     }
@@ -347,6 +353,8 @@ impl ActionService {
         spawn: impl FnOnce(thread::Builder, Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
     ) -> Result<u64, ActionError> {
         let action = self.catalog.resolve(&call)?;
+        action.definition.validate_policy()?;
+        let binding_reentry = action.definition.allow_binding_reentry;
         let runtime = self.runtimes.get(&action.definition.runtime)?;
         let identity = ActionIdentity {
             package_id: action.call.package_id.clone(),
@@ -358,11 +366,15 @@ impl ActionService {
                 .reservations
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if reserved
-                .entries
-                .values()
-                .any(|entry| entry.binding_id == id)
-            {
+            if reserved.entries.values().any(|entry| {
+                entry.binding_id == id
+                    && !(binding_reentry
+                        && entry.binding_reentry
+                        && entry.active
+                        && entry.identity == identity
+                        && entry.action_version == action.call.action_version
+                        && !entry.single_instance)
+            }) {
                 return Err(ActionError::new(
                     "binding_busy",
                     "此动作的上次调用尚未结束或终态尚未读取。",
@@ -395,6 +407,7 @@ impl ActionService {
                     identity,
                     action_version: action.call.action_version,
                     single_instance: action.definition.single_instance,
+                    binding_reentry,
                     active: true,
                 },
             );
@@ -1096,6 +1109,7 @@ mod tests {
         service.reload(catalog, registry);
         let json = serde_json::to_value(service.describe_catalog()).unwrap();
         assert!(json["actions"][0].get("single_instance").is_none());
+        assert!(json["actions"][0].get("allow_binding_reentry").is_none());
         assert!(
             !serde_json::from_value::<ActionCatalogSnapshot>(json)
                 .unwrap()
@@ -1370,3 +1384,7 @@ mod tests {
 #[cfg(test)]
 #[path = "state_service_tests.rs"]
 mod state_service_tests;
+
+#[cfg(test)]
+#[path = "binding_reentry_tests.rs"]
+mod binding_reentry_tests;

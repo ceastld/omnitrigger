@@ -351,6 +351,7 @@ impl LegacyArtifactSource for LocalLegacySource {
                     runtime: "script".into(),
                     entry: "prepare-host.mjs".into(),
                     single_instance: true,
+                    allow_binding_reentry: false,
                 },
                 package_root: self.root.clone(),
                 entry_path: self.root.join("prepare-host.mjs"),
