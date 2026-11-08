@@ -25,6 +25,8 @@ pub struct WindowDragOptions {
     pub max_duration_ms: u32,
     pub max_updates: u32,
     pub snap: Option<WindowSnapOptions>,
+    /// 仅设定首次delta的前一坐标；实际按钮状态仍必须采样核验。
+    pub initial_pointer: Option<(i32, i32)>,
 }
 impl WindowDragOptions {
     pub fn validate(self) -> Result<Self, WindowGeometryError> {
@@ -196,6 +198,10 @@ fn run(
             return Ok(WindowDragStop::ButtonNotDownOrUnavailable);
         }
         let mut previous = first;
+        if let Some((x, y)) = options.initial_pointer {
+            previous.x = x;
+            previous.y = y;
+        }
         let mut last_snap = options
             .snap
             .map_or(0, |snap| -i64::from(snap.initial_elapsed_ms));
@@ -404,10 +410,17 @@ mod tests {
         rect: WindowRect,
         writes: Vec<WindowRect>,
         fail_after_write: bool,
+        checks: u32,
+        fail_at: Option<u32>,
+        set_button_up: bool,
+        events: Vec<&'static str>,
     }
     impl Backend for Fake {
         fn check(&mut self) -> Result<(), WindowGeometryError> {
-            if self.fail_after_write && !self.writes.is_empty() {
+            self.events.push("check");
+            self.checks += 1;
+            if self.fail_at == Some(self.checks) || self.fail_after_write && !self.writes.is_empty()
+            {
                 Err(WindowGeometryError::new(
                     "cancelled",
                     "合成取消",
@@ -418,11 +431,13 @@ mod tests {
             }
         }
         fn sample(&mut self) -> Result<WindowPointerState, WindowGeometryError> {
+            self.events.push("sample");
             let point = self.points[self.index.min(self.points.len() - 1)];
             self.index += 1;
             Ok(point)
         }
         fn geometry(&mut self) -> Result<WindowGeometry, WindowGeometryError> {
+            self.events.push("geometry");
             Ok(WindowGeometry {
                 class_name: "TestWindow".into(),
                 outer_rect: self.rect,
@@ -446,11 +461,20 @@ mod tests {
             })
         }
         fn set(&mut self, rect: WindowRect) -> Result<(), WindowGeometryError> {
+            self.events.push("set");
+            if self.set_button_up {
+                return Err(WindowGeometryError::new(
+                    "drag_button_not_down",
+                    "合成提交前实际按钮守卫",
+                    "not_started",
+                ));
+            }
             self.rect = rect;
             self.writes.push(rect);
             Ok(())
         }
         fn wait(&mut self) {
+            self.events.push("wait");
             self.time += 10;
         }
         fn now_ms(&self) -> u64 {
@@ -477,6 +501,7 @@ mod tests {
             max_duration_ms: 100,
             max_updates: 8,
             snap: None,
+            initial_pointer: None,
         }
     }
     fn fake(points: Vec<WindowPointerState>) -> Fake {
@@ -492,6 +517,10 @@ mod tests {
             },
             writes: vec![],
             fail_after_write: false,
+            checks: 0,
+            fail_at: None,
+            set_button_up: false,
+            events: vec![],
         }
     }
     #[test]
@@ -584,5 +613,180 @@ mod tests {
         )
         .unwrap()
         .is_empty());
+    }
+
+    #[test]
+    fn initial_pointer_changes_only_the_first_delta_then_advances_after_submission() {
+        let mut backend = fake(vec![
+            point(100, 50, true),
+            point(120, 60, true),
+            point(130, 80, true),
+            point(130, 80, false),
+        ]);
+        let mut opt = options(WindowDragMode::Move);
+        opt.initial_pointer = Some((0, 0));
+        let result = run(opt, &mut backend).unwrap();
+        assert_eq!(result.reason, WindowDragStop::ButtonNotDownOrUnavailable);
+        assert_eq!(result.poll_samples, 4);
+        assert_eq!(
+            backend.writes,
+            [
+                WindowRect {
+                    left: -680,
+                    top: 160,
+                    width: 200,
+                    height: 100
+                },
+                WindowRect {
+                    left: -670,
+                    top: 180,
+                    width: 200,
+                    height: 100
+                },
+            ]
+        );
+        assert_eq!(
+            &backend.events[..9],
+            ["check", "sample", "check", "wait", "check", "geometry", "sample", "check", "set"]
+        );
+    }
+
+    #[test]
+    fn omitted_pointer_is_equivalent_to_the_actual_first_point_in_both_modes() {
+        for mode in [WindowDragMode::Move, WindowDragMode::Resize] {
+            for (x, y) in [(100, 50), (-1000, -600)] {
+                let points = vec![
+                    point(x, y, true),
+                    point(x + 5, y + 3, true),
+                    point(x + 12, y + 4, true),
+                    point(x + 22, y + 9, true),
+                    point(x + 22, y + 9, false),
+                ];
+                let mut default = fake(points.clone());
+                let mut explicit = fake(points);
+                let without = options(mode);
+                let with = WindowDragOptions {
+                    initial_pointer: Some((x, y)),
+                    ..without
+                };
+                assert_eq!(
+                    run(without, &mut default).unwrap(),
+                    run(with, &mut explicit).unwrap()
+                );
+                assert_eq!(default.writes, explicit.writes);
+                assert_eq!(default.events, explicit.events);
+            }
+        }
+    }
+
+    #[test]
+    fn anchor_never_replaces_initial_current_or_submit_time_button_guards() {
+        let mut opt = options(WindowDragMode::Move);
+        opt.initial_pointer = Some((i32::MIN, i32::MIN));
+        let mut initial_up = fake(vec![point(100, 50, false)]);
+        let result = run(opt, &mut initial_up).unwrap();
+        assert_eq!(result.reason, WindowDragStop::ButtonNotDownOrUnavailable);
+        assert_eq!(initial_up.events, ["check", "sample"]);
+        assert!(initial_up.writes.is_empty());
+        let mut current_up = fake(vec![point(100, 50, true), point(200, 100, false)]);
+        assert_eq!(run(opt, &mut current_up).unwrap().accepted_updates, 0);
+        assert!(!current_up.events.contains(&"set"));
+        opt.initial_pointer = Some((0, 0));
+        let mut submit_up = fake(vec![point(100, 50, true), point(120, 60, true)]);
+        submit_up.set_button_up = true;
+        let result = run(opt, &mut submit_up).unwrap();
+        assert_eq!(result.reason, WindowDragStop::ButtonNotDownOrUnavailable);
+        assert_eq!(result.effect_state, "not_started");
+        assert_eq!(result.accepted_updates, 0);
+        assert!(submit_up.writes.is_empty());
+    }
+
+    #[test]
+    fn supplied_resize_baseline_keeps_micro_motion_until_ten_then_uses_both_axes() {
+        let mut backend = fake(vec![
+            point(5, 3, true),
+            point(9, 4, true),
+            point(10, 4, true),
+            point(18, 12, true),
+            point(20, 12, true),
+            point(20, 12, false),
+        ]);
+        let mut opt = options(WindowDragMode::Resize);
+        opt.initial_pointer = Some((0, 0));
+        assert_eq!(run(opt, &mut backend).unwrap().accepted_updates, 2);
+        assert_eq!(
+            (backend.writes[0].width, backend.writes[0].height),
+            (210, 104)
+        );
+        assert_eq!(
+            (backend.writes[1].width, backend.writes[1].height),
+            (220, 112)
+        );
+    }
+
+    #[test]
+    fn supplied_i32_extremes_use_i64_delta_and_reject_overflow_without_clipping() {
+        let mut opt = options(WindowDragMode::Move);
+        opt.initial_pointer = Some((i32::MIN, 0));
+        let mut backend = fake(vec![point(0, 0, true), point(i32::MAX, 0, true)]);
+        let error = run(opt, &mut backend).unwrap_err();
+        assert_eq!(error.code, "invalid_input");
+        assert_eq!(error.effect_state, "not_started");
+        assert!(backend.writes.is_empty());
+        opt.initial_pointer = Some((-1000, -600));
+        let mut negative = fake(vec![
+            point(0, 0, true),
+            point(-980, -610, true),
+            point(0, 0, false),
+        ]);
+        run(opt, &mut negative).unwrap();
+        assert_eq!(
+            (negative.writes[0].left, negative.writes[0].top),
+            (-780, 90)
+        );
+    }
+
+    #[test]
+    fn supplied_pointer_preserves_cancel_before_sampling_and_unknown_after_write() {
+        let mut opt = options(WindowDragMode::Move);
+        opt.initial_pointer = Some((0, 0));
+        for at in [1, 2] {
+            let mut backend = fake(vec![point(100, 50, true), point(120, 60, true)]);
+            backend.fail_at = Some(at);
+            let error = run(opt, &mut backend).unwrap_err();
+            assert_eq!(error.code, "cancelled");
+            assert_eq!(error.effect_state, "not_started");
+            assert!(backend.writes.is_empty());
+            if at == 1 {
+                assert_eq!(backend.index, 0);
+            }
+        }
+        let mut backend = fake(vec![point(100, 50, true), point(120, 60, true)]);
+        backend.fail_after_write = true;
+        let error = run(opt, &mut backend).unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(error.effect_state, "unknown");
+        assert_eq!(backend.writes.len(), 1);
+    }
+
+    #[test]
+    fn supplied_pointer_does_not_add_updates_samples_or_time_to_the_budget() {
+        let mut opt = options(WindowDragMode::Move);
+        opt.initial_pointer = Some((0, 0));
+        opt.max_updates = 1;
+        let mut backend = fake(vec![point(100, 50, true), point(120, 60, true)]);
+        let result = run(opt, &mut backend).unwrap();
+        assert_eq!(result.reason, WindowDragStop::UpdateLimit);
+        assert_eq!(result.accepted_updates, 1);
+        assert_eq!(result.poll_samples, 2);
+        assert_eq!(backend.time, 10);
+        opt.max_updates = 64;
+        opt.max_duration_ms = 20;
+        let mut backend = fake(vec![point(100, 50, true), point(120, 60, true)]);
+        let result = run(opt, &mut backend).unwrap();
+        assert_eq!(result.reason, WindowDragStop::DurationLimit);
+        assert_eq!(result.accepted_updates, 1);
+        assert_eq!(result.poll_samples, 2);
+        assert_eq!(backend.time, 20);
     }
 }

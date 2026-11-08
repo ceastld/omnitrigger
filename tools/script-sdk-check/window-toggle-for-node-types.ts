@@ -14,6 +14,6 @@ const pointer:Promise<import('../../crates/omnitrigger-actions/runtime/api').Poi
 const observed:Promise<import('../../crates/omnitrigger-actions/runtime/api').PointingRootObservation>=ctx.desktop.getPointingRoot();
 // @ts-expect-error 矩形必须显式提供frame。
 ctx.desktop.setWindowRect({left:0,top:0,width:100,height:100});
-// @ts-expect-error 未知初始锚点字段不属于接口合同。
-ctx.desktop.trackWindowDrag({mode:'move',button:'left',maxDurationMs:20,maxUpdates:1,initialPointer:{x:0,y:0}});
+// @ts-expect-error 起点仅为坐标，不接受按钮状态证明。
+ctx.desktop.trackWindowDrag({mode:'move',button:'left',maxDurationMs:20,maxUpdates:1,initialPointer:{x:0,y:0,button:'down'}});
 void [geometry,pointer,observed];

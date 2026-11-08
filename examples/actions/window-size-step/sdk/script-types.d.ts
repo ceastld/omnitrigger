@@ -246,6 +246,8 @@ type ScriptWindowGeometry = Readonly<{coordinateSpace:'physical-screen';/** 原�
 type ScriptPointerButtonState='down'|'not_down_or_unavailable';
 type ScriptPointerState=Readonly<{coordinateSpace:'physical-screen';x:number;y:number;buttons:Readonly<{left:ScriptPointerButtonState;right:ScriptPointerButtonState;middle:ScriptPointerButtonState}>;inputSource:Readonly<{kind:'polled-key-state';injected:null;selfInjected:null}>}>;
 type ScriptWindowDragOptions=Readonly<{mode:'move'|'resize';button:'left'|'right'|'middle';maxDurationMs:number;maxUpdates:number;
+  /** 首次delta的前一物理屏幕坐标；不代替当前按钮/身份/取消/期限采样。 */
+  initialPointer?:Readonly<{x:number;y:number}>;
   snap?:Readonly<{bounds:ScriptWindowRect;distance:number;waitMs:number;initialElapsedMs:number}>|null}>;
 type ScriptWindowDragStopped=Readonly<{stopped:true;reason:'button_not_down_or_unavailable'|'duration_limit'|'update_limit';acceptedUpdates:number;pollSamples:number;effectState:'not_started'|'unknown';dragCompleted:false}>;
 

@@ -41,12 +41,19 @@ struct Snap {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct InitialPointer {
+    x: i32,
+    y: i32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Drag {
     mode: Mode,
     button: Button,
     max_duration_ms: u32,
     max_updates: u32,
     snap: Option<Snap>,
+    initial_pointer: Option<InitialPointer>,
 }
 fn fault(method: &str, error: WindowGeometryError) -> ActionError {
     let mut value = ActionError::new(error.code, error.message);
@@ -99,19 +106,21 @@ pub(super) fn execute_with<T>(
 ) -> Result<Value, ActionError> {
     let limit = Instant::now() + Duration::from_secs(5);
     let deadline = deadline.map_or(limit, |d| d.min(limit));
-    // 同一raw-wire对象合同；null/省略snap仍表示关闭，非null时snap和bounds均须为对象。
+    // 同一raw-wire对象合同；snap的null/省略行为不变，显式initial_pointer必须为对象。
     if !params.is_object()
         || (method == "window.drag"
-            && params.get("snap").is_some_and(|snap| {
+            && (params.get("snap").is_some_and(|snap| {
                 !snap.is_null()
                     && (!snap.is_object() || !snap.get("bounds").is_some_and(Value::is_object))
-            }))
+            }) || params
+                .get("initial_pointer")
+                .is_some_and(|point| !point.is_object())))
     {
         return Err(fault(
             method,
             WindowGeometryError::new(
                 "invalid_input",
-                "指针/调整参数及非空snap、bounds必须为JSON对象。",
+                "指针/调整参数、非空snap/bounds及显式initial_pointer必须为JSON对象。",
                 "not_started",
             ),
         ));
@@ -142,6 +151,7 @@ pub(super) fn execute_with<T>(
                     },
                     max_duration_ms: args.max_duration_ms,
                     max_updates: args.max_updates,
+                    initial_pointer: args.initial_pointer.map(|point| (point.x, point.y)),
                     snap: args.snap.map(|s| WindowSnapOptions {
                         bounds: WindowRect {
                             left: s.bounds.left,
@@ -236,5 +246,103 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.code, "cancelled");
         assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+    }
+
+    #[test]
+    fn initial_pointer_is_optional_and_arrives_as_only_i32_coordinates() {
+        for point in [None, Some((i32::MIN, i32::MAX)), Some((-700, 200))] {
+            let mut params =
+                json!({"mode":"move","button":"left","max_duration_ms":100,"max_updates":1});
+            if let Some((x, y)) = point {
+                params["initial_pointer"] = json!({"x":x,"y":y});
+            }
+            let result = execute_with(
+                "window.drag",
+                params,
+                &CancellationToken::new(),
+                None,
+                || Ok("same-existing-target"),
+                |_, _| panic!("不使用独立pointer.state分支"),
+                |target, options, guard| {
+                    assert_eq!(target, "same-existing-target");
+                    assert_eq!(options.initial_pointer, point);
+                    guard()?;
+                    Ok(WindowDragStopped {
+                        reason: omnitrigger_windows::WindowDragStop::ButtonNotDownOrUnavailable,
+                        accepted_updates: 0,
+                        poll_samples: 1,
+                        effect_state: "not_started",
+                    })
+                },
+            )
+            .unwrap();
+            assert_eq!(result["reason"], "button_not_down_or_unavailable");
+            assert_eq!(result["effectState"], "not_started");
+        }
+    }
+
+    #[test]
+    fn malformed_initial_pointer_rejects_before_target_resolution_or_platform_calls() {
+        for point in [
+            json!(null),
+            json!([0, 0]),
+            json!({}),
+            json!({"x":0}),
+            json!({"x":0,"y":0,"left":"down"}),
+            json!({"x":2147483648i64,"y":0}),
+            json!({"x":0,"y":-2147483649i64}),
+            json!({"x":0.5,"y":0}),
+            json!({"x":"0","y":0}),
+        ] {
+            let error = execute_with(
+                "window.drag",
+                json!({"mode":"move","button":"left","max_duration_ms":100,"max_updates":1,"initial_pointer":point}),
+                &CancellationToken::new(), None,
+                || -> Result<(), ActionError> { panic!("无效锚点不得解析目标") },
+                |_, _| panic!(), |_, _, _| panic!(),
+            ).unwrap_err();
+            assert_eq!(error.code, "invalid_input");
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        }
+    }
+
+    #[test]
+    fn initial_pointer_never_bypasses_cancel_deadline_or_existing_target_error() {
+        let params = json!({"mode":"move","button":"left","max_duration_ms":100,"max_updates":1,"initial_pointer":{"x":-700,"y":200}});
+        for cancel in [false, true] {
+            let token = CancellationToken::new();
+            if cancel {
+                token.cancel();
+            }
+            let error = execute_with(
+                "window.drag",
+                params.clone(),
+                &token,
+                Some(Instant::now()),
+                || -> Result<(), ActionError> { panic!("先检查取消/期限") },
+                |_, _| panic!(),
+                |_, _, _| panic!(),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, if cancel { "cancelled" } else { "timeout" });
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        }
+        let error = execute_with(
+            "window.drag",
+            params,
+            &CancellationToken::new(),
+            None,
+            || -> Result<(), ActionError> {
+                let mut error = ActionError::new("target_expired", "既有租约拒绝");
+                error.effect_state = Some("not_started".into());
+                Err(error)
+            },
+            |_, _| panic!(),
+            |_, _, _| panic!(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "target_expired");
+        assert_eq!(error.method.as_deref(), Some("window.drag"));
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
     }
 }

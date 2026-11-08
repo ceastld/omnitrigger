@@ -30,3 +30,5 @@ handoffPointingRoot 必须提供完整观察及 validForMs（2～5000）和 conf
 示例见[有界窗口调整](../examples/actions/window-adjust/README.md)。该示例只执行一次有界调整，并要求显式选择是否交接或还原。
 
 [窗口大小步进](../examples/actions/window-size-step/README.md) 提供普通 Node/Script 的增大、缩小入口。它保留显式目标政策和原调用期限，只提交一次矩形，不把提交回执当成窗口效果确认。
+
+`trackWindowDrag` 和 `trackWindowDragFor` 可显式指定 `initialPointer:{x,y}`，表示首段位移计算使用的前一物理屏幕坐标。两轴均为有符号 32 位整数；省略时使用调用开始后的真实首样本。起点只影响第一次位移，成功提交后继续采用新的实采样坐标；按钮、目标身份、租约、取消与预算检查照常执行。返回仍是一次有界采样的停止原因与计数，不表示完整拖动已完成。

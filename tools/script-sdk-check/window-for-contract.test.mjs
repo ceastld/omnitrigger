@@ -62,11 +62,11 @@ for(const asynchronous of [false,true])for(const [index,[method,args,value,fault
  const [before,after]=await Promise.all(factories.map(factory=>execute(factory,method,args,value,fault,asynchronous)));
  assert.deepEqual(after,before);
  if(index<5){assert.equal(after.ok,true);assert.equal(after.calls.length,1);assert.deepEqual(after.calls[0].params.target,target);}
- if(args[1]&&Object.hasOwn(args[1],'initialPointer')){assert.equal(after.ok,false);assert.equal(after.error.code,'invalid_input');assert.equal(after.calls.length,0);}
+ if(args[1]&&Object.hasOwn(args[1],'initialPointer')){assert.equal(after.ok,true);assert.equal(after.calls.length,1);assert.deepEqual(after.calls[0].params.initial_pointer,{x:1,y:2});}
 });
 
-for(const asynchronous of [false,true])test((asynchronous?'Promise':'同步')+' 默认和For均拒绝私有anchor字段且不发调用',async()=>{
+for(const asynchronous of [false,true])test((asynchronous?'Promise':'同步')+' 默认和For均拒绝坐标外的anchor元数据且不发调用',async()=>{
  const calls=[],d=factories[1]((method,params)=>{calls.push({method,params});return asynchronous?Promise.resolve(stopped):stopped;}).desktop;
- for(const invoke of [()=>d.trackWindowDrag({...drag,initialPointer:{x:1,y:2}}),()=>d.trackWindowDragFor(target,{...drag,initialPointer:{x:1,y:2}})])await assert.rejects(async()=>invoke(),e=>e.code==='invalid_input'&&e.effectState==='not_started');
+ for(const invoke of [()=>d.trackWindowDrag({...drag,initialPointer:{x:1,y:2,epoch:1}}),()=>d.trackWindowDragFor(target,{...drag,initialPointer:{x:1,y:2,epoch:1}})])await assert.rejects(async()=>invoke(),e=>e.code==='invalid_input'&&e.effectState==='not_started');
  assert.equal(calls.length,0);
 });

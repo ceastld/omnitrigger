@@ -270,6 +270,8 @@ export type WindowGeometry = Readonly<{coordinateSpace:'physical-screen';/** 原
 export type PointerButtonState='down'|'not_down_or_unavailable';
 export type PointerState=Readonly<{coordinateSpace:'physical-screen';x:number;y:number;buttons:Readonly<{left:PointerButtonState;right:PointerButtonState;middle:PointerButtonState}>;inputSource:Readonly<{kind:'polled-key-state';injected:null;selfInjected:null}>}>;
 export type WindowDragOptions=Readonly<{mode:'move'|'resize';button:'left'|'right'|'middle';maxDurationMs:number;maxUpdates:number;
+  /** 首次delta的前一物理屏幕坐标；不代替当前按钮/身份/取消/期限采样。 */
+  initialPointer?:Readonly<{x:number;y:number}>;
   snap?:Readonly<{bounds:WindowRect;distance:number;waitMs:number;initialElapsedMs:number}>|null}>;
 export type WindowDragStopped=Readonly<{stopped:true;reason:'button_not_down_or_unavailable'|'duration_limit'|'update_limit';acceptedUpdates:number;pollSamples:number;effectState:'not_started'|'unknown';dragCompleted:false}>;
 

@@ -389,12 +389,17 @@ function createDesktopApi(invoke) {
       try {
         if (args.length!==1 || !args[0] || typeof args[0]!=='object') throw new Error();
         const names=Reflect.ownKeys(args[0]);
-        if (names.some(n=>!['mode','button','maxDurationMs','maxUpdates','snap'].includes(n))) throw new Error();
+        if (names.some(n=>!['mode','button','maxDurationMs','maxUpdates','snap','initialPointer'].includes(n))) throw new Error();
         const value=geometryFields(args[0],names);
         if (!['move','resize'].includes(value.mode) || !['left','right','middle'].includes(value.button)
             || !Number.isInteger(value.maxDurationMs) || value.maxDurationMs<20 || value.maxDurationMs>2000
             || !Number.isInteger(value.maxUpdates) || value.maxUpdates<1 || value.maxUpdates>64) throw new Error();
         params={mode:value.mode,button:value.button,max_duration_ms:value.maxDurationMs,max_updates:value.maxUpdates};
+        if (value.initialPointer!==undefined) {
+          const point=geometryFields(value.initialPointer,['x','y']);
+          if (![point.x,point.y].every(n=>Number.isInteger(n)&&n>=-2147483648&&n<=2147483647)) throw new Error();
+          params.initial_pointer={x:point.x,y:point.y};
+        }
         if (value.snap!==undefined && value.snap!==null) {
           const snap=geometryFields(value.snap,['bounds','distance','waitMs','initialElapsedMs']);
           if (value.mode!=='move' || !Number.isInteger(snap.distance) || snap.distance<0 || snap.distance>100
