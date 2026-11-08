@@ -35,13 +35,18 @@ fn descendants(root: &str, token: &str) {
         .unwrap()
         .as_millis();
     // 失败时也有明确自然退出期限；测试不会根据PID记录去kill其他进程。
-    let child = Command::new(std::env::current_exe().unwrap())
+    let mut child_command = Command::new(std::env::current_exe().unwrap());
+    child_command
         .args(["sleep", "15000"])
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::inherit());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        child_command.creation_flags(0x0800_0000); // 自有后代也不创建控制台窗口。
+    }
+    let child = child_command.spawn().unwrap();
     let mut record = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -72,6 +77,13 @@ fn main() {
         Some("warmup") => {
             assert_eq!(args.len(), 2);
             stdout(b"omnitrigger-process-capture-fixture-v1");
+        }
+        Some("q5-utf8-trim") => {
+            assert_eq!(args.len(), 2);
+            stdout("\u{3000} \t中文😀 \r\n".as_bytes());
+            let mut stream = std::io::stderr().lock();
+            stream.write_all("合成诊断\n".as_bytes()).unwrap();
+            stream.flush().unwrap();
         }
         Some("dual") => {
             assert_eq!(args.len(), 4);

@@ -148,6 +148,10 @@ impl<H: NativeHost> NativeHost for WithProcessCapture<H> {
 #[path = "process_capture_node_native_tests.rs"]
 mod node_native;
 
+#[cfg(all(test, windows))]
+#[path = "process_output_service_tests.rs"]
+mod package_service;
+
 #[cfg(test)]
 mod tests {
     use super::*;
