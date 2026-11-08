@@ -164,3 +164,6 @@ fn disconnected_worker_becomes_fatal_and_allows_an_owed_physical_release() {
     assert!(!runtime.can_pass_release(ctrl));
     assert!(!runtime.busy());
 }
+
+#[path = "pointer_motion_owner_tests.rs"]
+mod pointer_motion_owner;
