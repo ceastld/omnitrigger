@@ -489,3 +489,8 @@ fn node_service_raishot_completion_and_bad_hash_use_real_png_verifier() {
         run_case("node", &program, case);
     }
 }
+
+#[cfg(test)]
+mod release_lifecycle {
+    include!("raishot_result_release_service_test.rs");
+}

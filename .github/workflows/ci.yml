@@ -152,10 +152,12 @@ jobs:
             $env:OMNITRIGGER_RAISHOT_SERVICE_NODE = $resultNode
             $env:OMNITRIGGER_RAISHOT_SERVICE_SCRIPT_HOST = (Resolve-Path -LiteralPath $resultHost).Path
             $env:OMNITRIGGER_RAISHOT_SERVICE_ROOT = (Resolve-Path -LiteralPath $resultRoot).Path
-            # 两测试共五场景；保留 Runtime 默认60秒与外部64秒观察。
+            # 三测试共六场景；保留 Runtime 默认60秒与外部64秒观察。
             cargo test --locked -p omnitrigger-app --bin omnitrigger raishot_result_host::service_tests::script_service_raishot_new_rejections_and_unknown_use_real_entry -- --ignored --exact --test-threads=1 --nocapture
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             cargo test --locked -p omnitrigger-app --bin omnitrigger raishot_result_host::service_tests::node_service_raishot_completion_and_bad_hash_use_real_png_verifier -- --ignored --exact --test-threads=1 --nocapture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cargo test --locked -p omnitrigger-app --bin omnitrigger raishot_result_host::service_tests::release_lifecycle::node_service_raishot_capture_then_release_removes_owned_png_and_registration -- --ignored --exact --test-threads=1 --nocapture
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally {
             foreach ($name in $resultVariables) {
