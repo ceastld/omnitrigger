@@ -716,6 +716,8 @@ struct ThreadState {
     key_metadata: BTreeMap<Button, KeyMetadata>,
     foreground: usize,
     foreground_pid: u32,
+    #[cfg(test)]
+    test_foreground: Option<foreground_context::Identity>,
     foreground_epoch: u64,
     process_resolved: bool,
     last_context_probe: Option<Instant>,
@@ -764,8 +766,22 @@ impl ThreadState {
         pointer: Arc<PointerSnapshot>,
         policy: WheelInputPolicy,
     ) -> Self {
-        let foreground = foreground_context::snapshot();
-        let waitable_timer = HoldDeadlineTimer::new();
+        Self::from_context(
+            events,
+            pointer,
+            policy,
+            foreground_context::snapshot(),
+            HoldDeadlineTimer::new(),
+        )
+    }
+
+    fn from_context(
+        events: SyncSender<BackendEvent>,
+        pointer: Arc<PointerSnapshot>,
+        policy: WheelInputPolicy,
+        foreground: foreground_context::Identity,
+        waitable_timer: Option<HoldDeadlineTimer>,
+    ) -> Self {
         let counters = ListenerDiagnostics {
             wheel_input_policy: policy,
             hold_timer_backend: waitable_timer
@@ -801,6 +817,8 @@ impl ThreadState {
             key_metadata: BTreeMap::new(),
             foreground: foreground.hwnd,
             foreground_pid: foreground.pid,
+            #[cfg(test)]
+            test_foreground: None,
             foreground_epoch: 0,
             process_resolved: false,
             last_context_probe: None,
@@ -1354,6 +1372,11 @@ impl ThreadState {
     }
 
     fn check_foreground(&mut self) {
+        #[cfg(test)]
+        if let Some(identity) = self.test_foreground {
+            self.update_foreground_identity(identity);
+            return;
+        }
         self.update_foreground_identity(foreground_context::snapshot());
     }
 
@@ -1594,7 +1617,18 @@ impl ThreadState {
         }
         self.check_foreground();
         self.report_overflow();
-        let mut movement = self.validate_pointer_context();
+        // 纯移动本身不能执行动作；等Hook外的新点采样再确定是否失去进程范围。
+        // 离散输入、录制、到期和拖拽路径仍在匹配前立即拒绝过期/异点快照。
+        let defer_pointer_invalidation = kind.is_none()
+            && pointer.is_some()
+            && self.recording.is_none()
+            && self.engine.next_deadline_ms().is_none()
+            && self.engine.active_drag().is_none();
+        let mut movement = if defer_pointer_invalidation {
+            Decision::default()
+        } else {
+            self.validate_pointer_context()
+        };
         let positional = pointer
             .map(|position| self.with_engine(|engine| engine.pointer_moved(position, now_ms)))
             .unwrap_or_default();
