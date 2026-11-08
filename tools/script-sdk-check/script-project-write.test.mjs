@@ -631,3 +631,91 @@ script.browser.profiles().then;
   assert(items.some(d=>d.line===7&&[2339,7017].includes(d.code)));
   for(const line of [8,9])assert(items.some(d=>d.line===line&&d.code===2339));
 });
+
+// 既有Node types/与Script sdk/api别名共存；只读写临时工程，不执行作者入口。
+function splitFixture() {
+  const root=mkdtempSync(join(parent,'split-')),project=join(root,'project');
+  for(const name of ['types','sdk'])mkdirSync(join(project,name),{recursive:true});
+  const manifest={schema_version:1,id:'example.split',name:'分离声明',version:'1.0.0',actions:[
+    {id:'node',title:'Node',version:1,runtime:'node',entry:'node.mjs'},
+    {id:'script',title:'Script',version:1,runtime:'script',entry:'script.mjs'},
+  ]};
+  writeFileSync(join(project,'action.json'),JSON.stringify(manifest));
+  for(const name of ['node.mjs','script.mjs'])writeFileSync(join(project,name),'throw Error("AUTHOR CODE MUST NOT RUN");\n');
+  writeFileSync(join(project,'README.md'),'作者说明保持原样\n');
+  writeFileSync(join(project,'jsconfig.json'),JSON.stringify({compilerOptions:{strict:true,noEmit:true},files:['node.mjs','script.mjs']}));
+  const declarations=[['types/api.d.ts','api.d.ts'],['types/clipboard-history-api.d.ts','clipboard-history-api.d.ts'],['sdk/api.d.ts','script-types.d.ts']];
+  for(const [target,canonical] of declarations)writeFileSync(join(project,target),readFileSync(join(repo,'crates/omnitrigger-actions/runtime',canonical),'utf8').replaceAll('\r\n','\n').replaceAll('\n','\r\n'));
+  return {root,project,declarations};
+}
+function splitBytes(item) {
+  const rows=[];
+  function scan(folder,prefix='') {
+    for(const entry of readdirSync(folder,{withFileTypes:true}).sort((a,b)=>a.name.localeCompare(b.name))) {
+      const name=prefix+entry.name;
+      if(entry.isDirectory())scan(join(folder,entry.name),name+'/');
+      else {assert(entry.isFile());rows.push([name,readFileSync(join(folder,entry.name))]);}
+    }
+  }
+  scan(item.project);return rows;
+}
+function refreshSplit(item,runtime='node',flags=[]) {
+  return spawnSync(process.execPath,[...flags,join(repo,'tools/script-project.mjs'),'refresh','--runtime',runtime,
+    '--project',item.project,'--source-root',repo],{encoding:'utf8',windowsHide:true,timeout:60000});
+}
+
+test('分离SDK按实际角色更新且保留作者路径、两运行时及重复刷新',()=>{
+  for(const runtime of ['node','script']) {
+    const item=splitFixture(),before=splitBytes(item),result=refreshSplit(item,runtime);
+    assert.ifError(result.error);assert.equal(result.status,0,result.stderr);
+    const reply=JSON.parse(result.stdout);assert.equal(reply.layout,'split');
+    assert.deepEqual(reply.files,item.declarations.map(([target])=>target));assert.equal(reply.author_code_executed,false);
+    for(const [target,canonical] of item.declarations)assert.deepEqual(readFileSync(join(item.project,target)),readFileSync(join(repo,'crates/omnitrigger-actions/runtime',canonical)));
+    for(const [name,bytes] of before.filter(([name])=>!item.declarations.some(([target])=>target===name)))assert.deepEqual(readFileSync(join(item.project,name)),bytes);
+    const stable=splitBytes(item),again=refreshSplit(item,runtime);assert.ifError(again.error);assert.equal(again.status,0,again.stderr);assert.deepEqual(splitBytes(item),stable);
+  }
+});
+
+test('分离SDK任一角色被作者修改或Node与Script错位均整组拒绝',()=>{
+  for(const change of ['types/api.d.ts','types/clipboard-history-api.d.ts','sdk/api.d.ts','swapped']) {
+    const item=splitFixture();
+    if(change==='swapped') {
+      const node=readFileSync(join(item.project,'types/api.d.ts')),script=readFileSync(join(item.project,'sdk/api.d.ts'));
+      writeFileSync(join(item.project,'types/api.d.ts'),script);writeFileSync(join(item.project,'sdk/api.d.ts'),node);
+    } else {const file=join(item.project,change);writeFileSync(file,readFileSync(file,'utf8')+'\n// author declaration\n');}
+    const before=splitBytes(item),result=refreshSplit(item);assert.ifError(result.error);assert.equal(result.status,1);
+    assert.equal(JSON.parse(result.stderr).error.code,'project_sdk_unrecognized');assert.deepEqual(splitBytes(item),before);
+  }
+});
+
+test('分离SDK缺件或与另一声明布局并存时不回退覆盖',()=>{
+  for(const change of ['types/api.d.ts','types/clipboard-history-api.d.ts','sdk/api.d.ts','flat','nested']) {
+    const item=splitFixture(),ambiguous=['flat','nested'].includes(change);
+    if(ambiguous)writeFileSync(join(item.project,change==='flat'?'api.d.ts':'sdk/script-types.d.ts'),readFileSync(join(repo,'crates/omnitrigger-actions/runtime/api.d.ts')));
+    else unlinkSync(join(item.project,change));
+    const before=splitBytes(item),result=refreshSplit(item);assert.ifError(result.error);assert.equal(result.status,1);
+    assert.equal(JSON.parse(result.stderr).error.code,ambiguous?'project_sdk_layout_ambiguous':'project_sdk_layout_incomplete');assert.deepEqual(splitBytes(item),before);
+  }
+});
+
+test('分离SDK仅单一运行时或含其它运行时的清单拒绝且保留作者文件',()=>{
+  for(const kind of ['node','script','other']) {
+    const item=splitFixture(),file=join(item.project,'action.json'),manifest=JSON.parse(readFileSync(file,'utf8'));
+    if(kind==='other')manifest.actions.push({id:'other',runtime:'other',entry:'other.mjs'});
+    else manifest.actions=manifest.actions.filter(action=>action.runtime===kind);
+    writeFileSync(file,JSON.stringify(manifest));
+    const before=splitBytes(item),result=refreshSplit(item,kind==='script'?'script':'node');assert.ifError(result.error);assert.equal(result.status,1);
+    assert.equal(JSON.parse(result.stderr).error.code,'project_runtime_mismatch');assert.deepEqual(splitBytes(item),before);
+  }
+});
+
+test('分离SDK统一复查发现并发作者修改时不部分覆盖',()=>{
+  const item=splitFixture(),file=join(item.project,'sdk/api.d.ts'),before=splitBytes(item),original=readFileSync(file,'utf8'),hook=join(item.root,'change.mjs');
+  writeFileSync(hook,`import fs from 'node:fs';import path from 'node:path';import {syncBuiltinESMExports} from 'node:module';
+const target=${JSON.stringify(file)},read=fs.readFileSync;let reads=0;
+fs.readFileSync=function(file,...args){if(path.resolve(String(file))===target&&++reads===2)fs.writeFileSync(target,${JSON.stringify(original+'\n')});return read.call(this,file,...args);};syncBuiltinESMExports();\n`);
+  const result=refreshSplit(item,'node',['--import',pathToFileURL(hook).href]);assert.ifError(result.error);assert.equal(result.status,1,result.stderr);
+  assert.equal(JSON.parse(result.stderr).error.code,'project_sdk_changed');
+  for(const [name,bytes] of before.filter(([name])=>name!=='sdk/api.d.ts'))assert.deepEqual(readFileSync(join(item.project,name)),bytes);
+  assert.equal(readFileSync(file,'utf8'),original+'\n');
+});
