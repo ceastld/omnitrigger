@@ -262,7 +262,7 @@ fn failures_and_unsupported_results_are_explicit() {
         "throw new Error('测试失败')",
         "return undefined",
         "return 1n",
-        "return Promise.resolve(1)",
+        "return function () {}",
         "return {",
         "while(true) {}",
         "function recurse() { return recurse(); } return recurse();",
@@ -275,6 +275,48 @@ fn failures_and_unsupported_results_are_explicit() {
             .as_str()
             .is_some_and(|error| !error.is_empty()));
     }
+}
+
+#[test]
+fn promise_results_and_rejections_are_explicit() {
+    for (script, expected) in [
+        ("return Promise.resolve(1);", json!(1)),
+        ("return Promise.resolve();", Value::Null),
+    ] {
+        let (ok, response) = invoke(json!({"script":script,"input":{}}));
+        assert!(ok, "{script}: {response}");
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(response["result"], expected, "{response}");
+    }
+    let (ok, response) =
+        invoke(json!({"script":"return Promise.reject(new Error('promise-failed'));","input":{}}));
+    assert!(!ok, "{response}");
+    assert_eq!(response["ok"], false, "{response}");
+    assert!(
+        response["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("promise-failed")),
+        "{response}"
+    );
+    let (ok, response) = invoke(json!({
+        "script":"return Promise.reject(Object.assign(new Error('promise-permission'), {code:'permission_required',effectState:'not_started',method:'bookmarks.getTree',requiredPermissions:['bookmarks']}));",
+        "input":{}
+    }));
+    assert!(!ok, "{response}");
+    assert_eq!(response["ok"], false, "{response}");
+    assert_eq!(response["error"]["code"], "permission_required");
+    assert_eq!(response["error"]["effect_state"], "not_started");
+    assert_eq!(response["error"]["method"], "bookmarks.getTree");
+    assert_eq!(
+        response["error"]["required_permissions"],
+        json!(["bookmarks"])
+    );
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("promise-permission")),
+        "{response}"
+    );
 }
 
 #[test]

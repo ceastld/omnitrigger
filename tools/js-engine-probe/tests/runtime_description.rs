@@ -21,11 +21,12 @@ fn current_descriptor_is_bounded_and_parses_as_a_new_host() {
     );
     assert_eq!(
         host.capabilities.as_ref().unwrap().len(),
-        if cfg!(windows) { 16 } else { 5 }
+        if cfg!(windows) { 17 } else { 6 }
     );
     host.check(&[
         "actions.stop_other_instances.v1".into(),
         "state.read_cas.v1".into(),
+        "browser.async.v1".into(),
         "clipboard.history.v1".into(),
         "clipboard.read_data.v1".into(),
         "desktop.copy_selection_data.v1".into(),

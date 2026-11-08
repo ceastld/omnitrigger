@@ -72,7 +72,7 @@ test('无真实作用域或无UI明确失败，不把updated:true当作可渲染
   const expired=script(false);assert.throws(()=>vm.runInContext("ctx.ui.setActionHint({text:'v123'})",expired.context),fault('ui_hint_scope_expired'));assert.equal(expired.calls.length,0);
   const absent=script(true,false);assert.throws(()=>vm.runInContext("ctx.ui.setActionHint({text:'v123'})",absent.context),fault('ui_unavailable'));assert.equal(absent.calls.length,1);
 });
-test('产品Node守卫保留scope-only与desktop边界，自述Windows16非Windows5',()=>{
+test('产品Node守卫保留scope-only与desktop边界，自述Windows17非Windows6',()=>{
   assert(host.includes("if (actionHint && request.actions_scope !== true)"));
   assert(host.includes('!actionControl && !actionHint && !capture && !opening && !statPath && request.native_context_available === false'));
   assert(host.includes("'state.read','state.compare_and_swap','actions.stop_other_instances'"));
@@ -80,10 +80,11 @@ test('产品Node守卫保留scope-only与desktop边界，自述Windows16非Windo
   const source=read('tools/js-engine-probe/src/runtime_description.rs');
   const base=[...source.match(/let mut capabilities = vec!\[([\s\S]*?)\];/)[1].matchAll(/"([^"]+)"/g)].map(x=>x[1]);
   const extra=[...source.match(/if cfg!\(windows\) \{([\s\S]*?)\n    \}/)[1].matchAll(/capabilities\.push\("([^"]+)"\)/g)].map(x=>x[1]);
-  assert.equal(base.length,5);assert.equal(new Set([...base,...extra]).size,16);assert(extra.includes('ui.action_hint.v1'));
+  assert.equal(base.length,6);assert.equal(new Set([...base,...extra]).size,17);assert(extra.includes('ui.action_hint.v1'));
   for(const capability of ['raishot.capture_result.v1','raishot.release_result.v1'])assert(extra.includes(capability));
   assert(base.includes('state.read_cas.v1')&&base.includes('actions.stop_other_instances.v1'));
-  assert.match(read('tools/js-engine-probe/tests/runtime_description.rs'),/if cfg!\(windows\) \{ 16 \} else \{ 5 \}/);
+  assert(base.includes('browser.async.v1'));
+  assert.match(read('tools/js-engine-probe/tests/runtime_description.rs'),/if cfg!\(windows\) \{ 17 \} else \{ 6 \}/);
 });
 
 for(const asynchronous of [false,true]) {

@@ -219,7 +219,10 @@ fn entry_contract_and_unresolved_initialization_are_explicit() {
     project.write("main.mjs", "export const main=1;");
     failure(&project, "module_entry");
     project.write("main.mjs", "export async function main(){return 1;}");
-    assert!(!project.run().0);
+    let (ok, response) = project.run();
+    assert!(ok, "{response}");
+    assert_eq!(response["ok"], true, "{response}");
+    assert_eq!(response["result"], 1, "{response}");
     project.write(
         "main.mjs",
         "await new Promise(()=>{}); export function main(){return 1;}",
@@ -237,6 +240,26 @@ fn entry_contract_and_unresolved_initialization_are_explicit() {
     let (_, response) =
         invoke(json!({"module_entry":"../main.mjs","package_root":project.0,"input":{}}));
     assert_eq!(response["error"]["code"], "module_path");
+}
+
+#[test]
+fn async_module_main_preserves_rejection_faults() {
+    let project = Project::new(
+        "export async function main(){await Promise.resolve(); throw Object.assign(new Error('module-promise-permission'), {code:'permission_required',effectState:'not_started',method:'bookmarks.getTree',requiredPermissions:['bookmarks']});}",
+    );
+    let response = failure(&project, "permission_required");
+    assert_eq!(response["error"]["effect_state"], "not_started");
+    assert_eq!(response["error"]["method"], "bookmarks.getTree");
+    assert_eq!(
+        response["error"]["required_permissions"],
+        json!(["bookmarks"])
+    );
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("module-promise-permission")),
+        "{response}"
+    );
 }
 
 #[test]
