@@ -60,17 +60,20 @@ function desktopCall(method, params) {
     const actionHint = method === 'ui.action_hint';
     const opening = method === 'system.open' || method === 'system.open_file_in_parent';
     const statPath = method === 'fs.stat';
+    const browserMethod = method === 'browser.call' || method === 'browser.profiles';
+    if (browserMethod && !nativeContext?.connection && !nativeContext?.error) throw Object.assign(new Error('浏览器调用需要本次应用桥。'),
+        {code:'browser_unavailable',effectState:'not_started',method});
     if (statPath && !nativeContext?.connection && !nativeContext?.error) throw Object.assign(new Error('文件状态查询需要本次应用桥。'),
         {code:'fs_unavailable',effectState:'not_started',method});
     if (opening && !nativeContext?.connection && !nativeContext?.error) throw Object.assign(new Error('打开请求需要本次应用桥；不会本地打开。'),
         {code:'native_bridge_unavailable',effectState:'not_started',method});
-    if (method === 'process.capture' && calls >= 32) throw Object.assign(new Error('单次脚本最多调用32次宿主API。'),
+    if ((method === 'process.capture' || opening || statPath) && calls >= 32) throw Object.assign(new Error('单次脚本最多调用32次宿主API。'),
         {code:'desktop_call_limit',effectState:'not_started',method});
     const windowCall = ['window.geometry','window.set_rect','pointer.state','pointer.root','target.handoff_pointing_root','window.drag'].includes(method);
     if (actionHint && !actionsScope) throw Object.assign(new Error('版本提示需要当前服务调用作用域。'),{code:'ui_hint_scope_expired',effectState:'not_started',method});
     if ((method === 'win32_edit.replace_selection' || method === 'clipboard.write_files' || method.startsWith('raishot.resident.') || method === 'state.read' || method === 'state.compare_and_swap' || windowCall) && calls >= 32) throw Object.assign(new Error('单次脚本最多调用32次宿主API。'),{code:'desktop_call_limit',effectState:'not_started',method});
 
-    if (!nativeContext || nativeContext.error || !opening && !statPath && !['actions.stop_other_instances','state.read','state.compare_and_swap','ui.action_hint','process.capture'].includes(method) && !nativeContextAvailable) {
+    if (!nativeContext || nativeContext.error || !opening && !statPath && !browserMethod && !['actions.stop_other_instances','state.read','state.compare_and_swap','ui.action_hint','process.capture'].includes(method) && !nativeContextAvailable) {
         if (windowCall) throw Object.assign(new Error('窗口接口需要应用本机上下文。'),{code:'native_bridge_unavailable',effectState:'not_started',method});
         if (method === "actions.stop_other_instances") throw Object.assign(new Error("动作控制需要当前服务调用作用域。"),{code:"actions_unavailable",effectState:"not_started",method});
         if (method.startsWith('raishot.resident.')) throw Object.assign(new Error('RaiShot 常驻接口需要应用本机桥接。'),{code:'native_bridge_unavailable',effectState:'not_started',method});

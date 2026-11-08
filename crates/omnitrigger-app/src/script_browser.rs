@@ -338,10 +338,14 @@ mod tests {
         stop: Arc<AtomicBool>,
         worker: Option<thread::JoinHandle<()>>,
         calls: Arc<AtomicUsize>,
+        requests: Arc<Mutex<Vec<Value>>>,
         slow: mpsc::Receiver<()>,
     }
     impl Fixture {
         fn new() -> Self {
+            Self::with_lifetime(Duration::from_secs(30))
+        }
+        fn with_lifetime(lifetime: Duration) -> Self {
             let nonce = format!(
                 "{}-{}",
                 std::process::id(),
@@ -381,6 +385,8 @@ mod tests {
             let calls = Arc::new(AtomicUsize::new(0));
             let signal = Arc::clone(&stop);
             let count = Arc::clone(&calls);
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&requests);
             let (ready_tx, ready_rx) = mpsc::channel();
             let (slow_tx, slow) = mpsc::channel();
             let worker = thread::spawn(move || {
@@ -408,6 +414,7 @@ mod tests {
                             };
                             if message["type"]!="call" {continue;}
                             count.fetch_add(1,Ordering::SeqCst);
+                            recorded.lock().unwrap().push(message.clone());
                             assert_eq!(message["browser_instance_id"],"work");
                             let id=message["id"].clone();
                             let method=message["method"].as_str().unwrap();
@@ -433,7 +440,7 @@ mod tests {
                             framing::write(&mut extension,&reply).await.unwrap();
                         }
                     };
-                    tokio::time::timeout(Duration::from_secs(30),work).await.expect("fixture timeout");
+                    tokio::time::timeout(lifetime,work).await.expect("fixture timeout");
                     drop(connections);bridge.abort();let _=bridge.await;
                 });
             });
@@ -448,6 +455,7 @@ mod tests {
                 stop,
                 worker: Some(worker),
                 calls,
+                requests,
                 slow,
             }
         }
@@ -471,6 +479,9 @@ mod tests {
             self.stop.store(true, Ordering::SeqCst);
             if let Some(worker) = self.worker.take() {
                 let _ = worker.join();
+            }
+            if std::thread::panicking() {
+                return;
             }
             for file in [
                 self.root.join("browser-connector.json"),
@@ -628,5 +639,9 @@ mod tests {
         );
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 8);
         fixture.finish();
+    }
+
+    mod service_contract {
+        include!("../../../tests/script_browser_service_contract.rs");
     }
 }
