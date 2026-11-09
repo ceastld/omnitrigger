@@ -178,10 +178,10 @@ mod failure_stage {
         match reader.selection(value) {
             Err(error) if error.ordinary_unavailable() => {
                 let proof = R::proof(value);
-                if !proof
+                if proof
                     .current_directory
                     .as_ref()
-                    .is_some_and(|path| !path.is_empty())
+                    .is_none_or(|path| path.is_empty())
                 {
                     return Err(ExplorerReadError::Unavailable);
                 }
