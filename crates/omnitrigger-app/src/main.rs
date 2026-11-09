@@ -79,6 +79,7 @@ mod system_action;
 mod system_executor;
 mod system_hud;
 mod theme;
+mod trigger_browse;
 mod trigger_conditions;
 mod trigger_panel;
 mod update_ui;
@@ -94,6 +95,7 @@ mod workspace_mode;
 use assets::{Assets, Icon};
 use event_bridge::{EventBridge, UiWake};
 use execution::{CommandAction, CommandExecutor, ExecutionOutcome};
+use gpui::Focusable as _;
 use gpui::{
     div, point, prelude::*, px, size, AnyElement, AnyWindowHandle, App, Application, Bounds,
     Context, Div, Entity, FontWeight, SharedString, Stateful, TitlebarOptions, Window,
@@ -114,7 +116,7 @@ use service::TriggerError;
 use settings::{ActionSpec, Binding, Conflict};
 use shortcut::ShortcutAction;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
     time::{Duration, Instant},
@@ -191,6 +193,27 @@ enum HistoryFilter {
     Real,
     Panel,
     Preview,
+}
+
+/// 触发器页工具栏中展开的下拉。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TriggerMenu {
+    Facet(trigger_browse::Facet),
+    Group,
+}
+
+/// 下拉中的一个选项。
+#[derive(Clone, Copy)]
+enum TriggerChoice {
+    Facet(trigger_browse::Facet, Option<trigger_browse::FacetValue>),
+    Group(trigger_browse::GroupBy),
+}
+
+/// 组合中目标键之前的部分：指针区域条件与前缀键，用作前缀层名称。
+fn prefix_caps(spec: &TriggerSpec) -> Vec<Cap> {
+    let mut caps = caps_for(spec);
+    caps.truncate(spec.conditions.len() + spec.held.len());
+    caps
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -550,6 +573,12 @@ struct Workspace {
     working_directory: Entity<MessageInput>,
     shortcut_keys: Entity<MessageInput>,
     action_search: Entity<MessageInput>,
+    /// 触发器页的搜索框、筛选、分组与折叠状态，只在本次运行内保留。
+    trigger_search: Entity<MessageInput>,
+    trigger_filter: trigger_browse::Filter,
+    trigger_group: trigger_browse::GroupBy,
+    trigger_collapsed: HashSet<String>,
+    trigger_menu: Option<TriggerMenu>,
     package_input: Entity<MessageInput>,
     package_picker_for_draft: bool,
     action_service: omnitrigger_actions::ActionService,
@@ -813,6 +842,12 @@ impl Workspace {
             browser_editor.load(action, cx);
         }
         cx.observe(&action_search, |_, _, cx| cx.notify()).detach();
+        let trigger_search = cx.new(|cx| {
+            let mut input = MessageInput::new(cx).embedded();
+            input.set_placeholder("搜索名称、动作、组合或应用");
+            input
+        });
+        cx.observe(&trigger_search, |_, _, cx| cx.notify()).detach();
         let script_projects = script_projects::ScriptProjects::new(cx);
         let package_input = cx.new(|cx| {
             let mut input = MessageInput::new(cx)
@@ -1012,6 +1047,11 @@ impl Workspace {
             working_directory,
             shortcut_keys,
             action_search,
+            trigger_search,
+            trigger_filter: Default::default(),
+            trigger_group: Default::default(),
+            trigger_collapsed: HashSet::new(),
+            trigger_menu: None,
             plugins,
             plugin_settings_error,
             browser_connector_ui,
@@ -4029,15 +4069,561 @@ impl Workspace {
         })
     }
 
-    fn render_list(&self, cx: &mut Context<Self>) -> Div {
-        let listening = self.listener() == Listener::Listening;
-        let dim = matches!(self.listener(), Listener::Paused | Listener::Offline);
-        let enabled = self
-            .triggers
+    /// 触发器页参与搜索与筛选的摘要，与绑定同序。
+    fn trigger_rows(&self) -> Vec<trigger_browse::Row> {
+        self.triggers
             .bindings()
             .iter()
-            .filter(|b| b.enabled)
+            .map(|binding| {
+                let spec = &binding.spec;
+                let caps = caps_for(spec);
+                let action = trigger_browse::action_kind(&binding.action);
+                let ready = self.action_unavailable_reason(&binding.action).is_none();
+                let mut text = format!(
+                    "{} {} {}",
+                    binding.message,
+                    action_detail(&binding.action),
+                    action.label()
+                );
+                for cap in &caps {
+                    text.push(' ');
+                    text.push_str(&cap.label);
+                }
+                for scope in [&spec.process_scope, &spec.pointer_scope] {
+                    if !scope.is_global() {
+                        text.push(' ');
+                        text.push_str(&settings::process_scope_label(scope));
+                    }
+                }
+                trigger_browse::Row {
+                    id: spec.id,
+                    text: text.to_lowercase(),
+                    prefix: prefix_caps(spec)
+                        .iter()
+                        .map(|cap| cap.label.as_ref())
+                        .collect::<Vec<_>>()
+                        .join(" + "),
+                    input: trigger_browse::input_kind(spec),
+                    action,
+                    scope: trigger_browse::scope_kind(spec),
+                    status: trigger_browse::status_kind(binding, ready),
+                }
+            })
+            .collect()
+    }
+
+    fn apply_trigger_choice(&mut self, choice: TriggerChoice, cx: &mut Context<Self>) {
+        match choice {
+            TriggerChoice::Facet(facet, value) => self.trigger_filter.set(facet, value),
+            TriggerChoice::Group(group) => self.trigger_group = group,
+        }
+        self.trigger_menu = None;
+        cx.notify();
+    }
+
+    fn clear_trigger_filters(&mut self, cx: &mut Context<Self>) {
+        self.trigger_filter = Default::default();
+        self.trigger_menu = None;
+        self.trigger_search
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+        cx.notify();
+    }
+
+    /// 工具栏中的一个下拉：按钮展开选项，点击选项后收起。
+    fn trigger_dropdown(
+        &self,
+        menu: TriggerMenu,
+        text: String,
+        active: bool,
+        align_right: bool,
+        options: Vec<(String, Option<usize>, bool, TriggerChoice)>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let open = self.trigger_menu == Some(menu);
+        let element = match menu {
+            TriggerMenu::Facet(facet) => facet as u64,
+            TriggerMenu::Group => 99,
+        };
+        let mut list = div()
+            .absolute()
+            .top(px(32.))
+            .when(align_right, |el| el.right(px(0.)))
+            .when(!align_right, |el| el.left(px(0.)))
+            .min_w(px(176.))
+            .p(px(4.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(rgb(theme::BORDER_MID))
+            .bg(rgb(theme::SURFACE))
+            .shadow(theme::lift(0.45))
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap(px(2.));
+        for (index, (label, count, selected, choice)) in options.into_iter().enumerate() {
+            list = list.child(
+                div()
+                    .id(("trigger-option", element * 100 + index as u64))
+                    .h(px(28.))
+                    .px(px(8.))
+                    .rounded(px(5.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(12.))
+                    .cursor_pointer()
+                    .when(selected, |el| {
+                        el.bg(rgb(theme::SURFACE_HI)).text_color(rgb(theme::ACCENT))
+                    })
+                    .hover(|style| style.bg(rgb(theme::SURFACE_HI)))
+                    .child(div().flex_1().whitespace_nowrap().child(label))
+                    .when_some(count, |el, count| {
+                        el.child(
+                            div()
+                                .font_family(theme::MONO_FONT)
+                                .text_size(px(11.))
+                                .text_color(rgb(theme::TEXT_FAINT))
+                                .child(count.to_string()),
+                        )
+                    })
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.apply_trigger_choice(choice, cx)),
+                    ),
+            );
+        }
+        div()
+            .relative()
+            .flex_none()
+            .child(
+                div()
+                    .id(("trigger-menu", element))
+                    .h(px(28.))
+                    .px(px(10.))
+                    .rounded(px(14.))
+                    .border_1()
+                    .border_color(if active || open {
+                        rgb(theme::ACCENT_LINE)
+                    } else {
+                        rgb(theme::BORDER_MID)
+                    })
+                    .when(active, |el| el.bg(rgb(theme::ACCENT_BG)))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(12.))
+                    .text_color(rgb(if active {
+                        theme::ACCENT
+                    } else {
+                        theme::TEXT_MUTED
+                    }))
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .hover(|style| style.border_color(rgb(theme::BORDER_HI)))
+                    .child(text)
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(rgb(theme::TEXT_FAINT))
+                            .child(if open { "▲" } else { "▼" }),
+                    )
+                    // 按下即切换并阻止冒泡，避免页面的“点击空白处收起”立刻把它关掉。
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.trigger_menu = if this.trigger_menu == Some(menu) {
+                                None
+                            } else {
+                                Some(menu)
+                            };
+                            cx.notify();
+                        }),
+                    ),
+            )
+            .when(open, |el| el.child(gpui::deferred(list).with_priority(1)))
+    }
+
+    fn render_trigger_toolbar(
+        &self,
+        rows: &[trigger_browse::Row],
+        tokens: &[String],
+        shown: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let focused = self.trigger_search.focus_handle(cx).is_focused(window);
+        let search = div()
+            .h(px(34.))
+            .px(px(12.))
+            .rounded(px(6.))
+            .bg(rgb(theme::BACKGROUND))
+            .border_1()
+            .border_color(if focused {
+                theme::hsla(theme::ACCENT, 0.7)
+            } else {
+                rgb(theme::BORDER_MID).into()
+            })
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    window.focus(&this.trigger_search.focus_handle(cx));
+                }),
+            )
+            .child(icon(
+                Icon::Search,
+                14.,
+                if focused {
+                    theme::ACCENT
+                } else {
+                    theme::TEXT_FAINT
+                },
+            ))
+            .child(div().flex_1().min_w_0().child(self.trigger_search.clone()));
+        let mut facets = div().flex().flex_wrap().items_center().gap(px(6.));
+        for facet in trigger_browse::Facet::ALL {
+            let current = self.trigger_filter.get(facet);
+            let mut options = vec![(
+                "全部".to_string(),
+                None,
+                current.is_none(),
+                TriggerChoice::Facet(facet, None),
+            )];
+            for value in facet.options() {
+                let count = trigger_browse::facet_count(rows, tokens, &self.trigger_filter, value);
+                // 没有命中的选项不列出，避免点出空列表；已选中的始终保留以便取消。
+                if count > 0 || current == Some(value) {
+                    options.push((
+                        value.label().to_string(),
+                        Some(count),
+                        current == Some(value),
+                        TriggerChoice::Facet(facet, Some(value)),
+                    ));
+                }
+            }
+            facets = facets.child(self.trigger_dropdown(
+                TriggerMenu::Facet(facet),
+                format!(
+                    "{}：{}",
+                    facet.label(),
+                    current.map_or("全部", |value| value.label())
+                ),
+                current.is_some(),
+                false,
+                options,
+                cx,
+            ));
+        }
+        if !tokens.is_empty() || !self.trigger_filter.is_empty() {
+            facets = facets.child(
+                div()
+                    .id("trigger-clear-filters")
+                    .px(px(6.))
+                    .text_size(px(12.))
+                    .text_color(rgb(theme::TEXT_DIM))
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(rgb(theme::TEXT)))
+                    .child("清除筛选")
+                    .on_click(cx.listener(|this, _, _, cx| this.clear_trigger_filters(cx))),
+            );
+        }
+        let enabled = rows
+            .iter()
+            .filter(|row| row.status != trigger_browse::StatusKind::Disabled)
             .count();
+        let group_options = trigger_browse::GroupBy::ALL
+            .into_iter()
+            .map(|group| {
+                (
+                    group.label().to_string(),
+                    None,
+                    group == self.trigger_group,
+                    TriggerChoice::Group(group),
+                )
+            })
+            .collect();
+        facets = facets
+            .child(div().flex_1())
+            .child(
+                div()
+                    .flex_none()
+                    .font_family(theme::MONO_FONT)
+                    .text_size(px(11.5))
+                    .text_color(rgb(theme::TEXT_FAINT))
+                    .child(format!(
+                        "{shown} / {} 条 · {enabled} 启用 · 本次 {}",
+                        rows.len(),
+                        thousands(self.trigger_count)
+                    )),
+            )
+            .child(self.trigger_dropdown(
+                TriggerMenu::Group,
+                self.trigger_group.label().to_string(),
+                false,
+                true,
+                group_options,
+                cx,
+            ));
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(search)
+            .child(facets)
+    }
+
+    fn render_trigger_row(
+        &self,
+        binding: &settings::Binding,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let id = binding.spec.id;
+        let selected = self.pending.is_none() && !self.recording && self.selected == Some(id);
+        let stats = self.triggers.stats(id);
+        let (glyph, tint) = action_look(&binding.action);
+        let (detail, detail_color) = match self.action_unavailable_reason(&binding.action) {
+            Some(reason) => (reason, theme::RECORD),
+            None => (action_detail(&binding.action), theme::TEXT_DIM),
+        };
+        let detail = if binding.spec.process_scope.is_global() {
+            detail
+        } else {
+            format!(
+                "{} · {}",
+                settings::process_scope_label(&binding.spec.process_scope),
+                detail
+            )
+        };
+        let detail = if binding.spec.pointer_scope.is_global() {
+            detail
+        } else {
+            format!(
+                "指针窗口：{} · {}",
+                settings::process_scope_label(&binding.spec.pointer_scope),
+                detail
+            )
+        };
+        let detail = if binding.spec.keyboard == Default::default() {
+            detail
+        } else {
+            format!(
+                "{}{} · {}",
+                if binding.spec.keyboard.dedicated_prefix.is_some() {
+                    "专用层"
+                } else if binding.spec.keyboard.retained_prefix.is_some() {
+                    "保留原功能层"
+                } else if binding.spec.keyboard.matching.is_mouse_unmodified() {
+                    "鼠标无 Ctrl/Shift/Alt 观察"
+                } else if binding.spec.keyboard.matching.is_mouse_exact() {
+                    "鼠标修饰键观察"
+                } else if binding.spec.keyboard.matching.is_mouse_captured_leader() {
+                    "鼠标捕获会话引用"
+                } else {
+                    ""
+                },
+                if binding.spec.keyboard.repeat {
+                    " 按住重复"
+                } else {
+                    ""
+                },
+                detail
+            )
+        };
+        // 标题行右侧：停用标记，或本次运行的命中次数与最近时间。
+        let badge = if !binding.enabled {
+            Some(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(theme::TEXT_FAINT))
+                    .child("已停用"),
+            )
+        } else {
+            (stats.hits > 0).then(|| {
+                div()
+                    .h(px(20.))
+                    .px(px(7.))
+                    .rounded(px(10.))
+                    .bg(hsla(theme::VIOLET, 0.12))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .font_family(theme::MONO_FONT)
+                    .text_size(px(11.))
+                    .text_color(rgb(theme::VIOLET))
+                    .child(icon(Icon::Bolt, 10., theme::VIOLET))
+                    .child(match &stats.last {
+                        Some(last) => format!("{} · {}", thousands(stats.hits), &last[..5]),
+                        None => thousands(stats.hits),
+                    })
+            })
+        };
+        div()
+            .id(("row-card", id))
+            .flex_none()
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .pl(px(12.))
+            .pr(px(12.))
+            .py(px(10.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(hsla(theme::BORDER, 0.))
+            .when(selected, |el| {
+                el.bg(rgb(theme::SELECTED)).child(
+                    div()
+                        .absolute()
+                        .left(px(-1.))
+                        .top(px(18.))
+                        .bottom(px(18.))
+                        .w(px(2.))
+                        .rounded(px(2.))
+                        .bg(rgb(theme::ACCENT)),
+                )
+            })
+            .when(!selected, |el| el.hover(|s| s.bg(rgb(theme::ROW))))
+            .child(
+                div()
+                    .id(("row", id))
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .cursor_pointer()
+                    .when(!binding.enabled, |el| el.opacity(0.45))
+                    .child(icon_tile(glyph, tint, 28.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(5.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(13.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child(binding.message.clone()),
+                                    )
+                                    .when_some(badge, |el, badge| el.child(badge.flex_none())),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(10.))
+                                    .child(
+                                        combo(&caps_for(&binding.spec), CapSize::Small)
+                                            .flex_none()
+                                            .flex_nowrap(),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(12.))
+                                            .text_color(rgb(detail_color))
+                                            .child(detail),
+                                    ),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.select(id, cx))),
+            )
+            .child(
+                switch(("switch", id), binding.enabled)
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_rule(id, cx))),
+            )
+    }
+
+    fn render_group_header(
+        &self,
+        index: usize,
+        group: &trigger_browse::Group,
+        collapse_key: String,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let prefix = (self.trigger_group == trigger_browse::GroupBy::Prefix
+            && !group.key.is_empty())
+        .then(|| {
+            group
+                .ids
+                .first()
+                .and_then(|id| self.triggers.bindings().iter().find(|b| b.spec.id == *id))
+                .map(|binding| prefix_caps(&binding.spec))
+        })
+        .flatten();
+        let count = if group.disabled > 0 {
+            format!("{} · {} 停用", group.ids.len(), group.disabled)
+        } else {
+            group.ids.len().to_string()
+        };
+        div()
+            .id(("trigger-group", index as u64))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(4.))
+            .pt(px(if index == 0 { 2. } else { 12. }))
+            .pb(px(4.))
+            .cursor_pointer()
+            .child(icon(
+                if collapsed {
+                    Icon::ArrowRight
+                } else {
+                    Icon::ArrowDown
+                },
+                10.,
+                theme::TEXT_FAINT,
+            ))
+            .child(match prefix {
+                Some(caps) => combo(&caps, CapSize::Small).flex_none().flex_nowrap(),
+                None => div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme::TEXT_MUTED))
+                    .child(group.label.clone()),
+            })
+            .child(
+                div()
+                    .font_family(theme::MONO_FONT)
+                    .text_size(px(11.))
+                    .text_color(rgb(theme::TEXT_FAINT))
+                    .child(count),
+            )
+            .child(div().flex_1().h(px(1.)).bg(rgb(theme::DIVIDER)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.trigger_collapsed.remove(&collapse_key) {
+                    this.trigger_collapsed.insert(collapse_key.clone());
+                }
+                cx.notify();
+            }))
+    }
+
+    fn render_list(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let listening = self.listener() == Listener::Listening;
+        let dim = matches!(self.listener(), Listener::Paused | Listener::Offline);
+        let summary = self.trigger_rows();
+        let tokens = trigger_browse::tokens(&self.trigger_search.read(cx).text());
+        let groups =
+            trigger_browse::browse(&summary, &tokens, &self.trigger_filter, self.trigger_group);
+        let shown: usize = groups.iter().map(|group| group.ids.len()).sum();
+        let grouped = self.trigger_group != trigger_browse::GroupBy::None;
         let mut rows = div()
             .id("trigger-rows")
             .flex_1()
@@ -4047,179 +4633,21 @@ impl Workspace {
             .flex_col()
             .gap(px(2.))
             .when(dim, |el| el.opacity(0.6));
-        for binding in self.triggers.bindings() {
-            let id = binding.spec.id;
-            let selected = self.pending.is_none() && !self.recording && self.selected == Some(id);
-            let stats = self.triggers.stats(id);
-            let (glyph, tint) = action_look(&binding.action);
-            let (detail, detail_color) = match self.action_unavailable_reason(&binding.action) {
-                Some(reason) => (reason, theme::RECORD),
-                None => (action_detail(&binding.action), theme::TEXT_DIM),
-            };
-            let detail = if binding.spec.process_scope.is_global() {
-                detail
-            } else {
-                format!(
-                    "{} · {}",
-                    settings::process_scope_label(&binding.spec.process_scope),
-                    detail
-                )
-            };
-            let detail = if binding.spec.pointer_scope.is_global() {
-                detail
-            } else {
-                format!(
-                    "指针窗口：{} · {}",
-                    settings::process_scope_label(&binding.spec.pointer_scope),
-                    detail
-                )
-            };
-            let detail = if binding.spec.keyboard == Default::default() {
-                detail
-            } else {
-                format!(
-                    "{}{} · {}",
-                    if binding.spec.keyboard.dedicated_prefix.is_some() {
-                        "专用层"
-                    } else if binding.spec.keyboard.retained_prefix.is_some() {
-                        "保留原功能层"
-                    } else if binding.spec.keyboard.matching.is_mouse_unmodified() {
-                        "鼠标无 Ctrl/Shift/Alt 观察"
-                    } else if binding.spec.keyboard.matching.is_mouse_exact() {
-                        "鼠标修饰键观察"
-                    } else if binding.spec.keyboard.matching.is_mouse_captured_leader() {
-                        "鼠标捕获会话引用"
-                    } else {
-                        ""
-                    },
-                    if binding.spec.keyboard.repeat {
-                        " 按住重复"
-                    } else {
-                        ""
-                    },
-                    detail
-                )
-            };
-            // 标题行右侧：停用标记，或本次运行的命中次数与最近时间。
-            let badge = if !binding.enabled {
-                Some(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgb(theme::TEXT_FAINT))
-                        .child("已停用"),
-                )
-            } else {
-                (stats.hits > 0).then(|| {
-                    div()
-                        .h(px(20.))
-                        .px(px(7.))
-                        .rounded(px(10.))
-                        .bg(hsla(theme::VIOLET, 0.12))
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .font_family(theme::MONO_FONT)
-                        .text_size(px(11.))
-                        .text_color(rgb(theme::VIOLET))
-                        .child(icon(Icon::Bolt, 10., theme::VIOLET))
-                        .child(match &stats.last {
-                            Some(last) => format!("{} · {}", thousands(stats.hits), &last[..5]),
-                            None => thousands(stats.hits),
-                        })
-                })
-            };
-            rows = rows.child(
-                div()
-                    .id(("row-card", id))
-                    .flex_none()
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .pl(px(12.))
-                    .pr(px(12.))
-                    .py(px(10.))
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(hsla(theme::BORDER, 0.))
-                    .when(selected, |el| {
-                        el.bg(rgb(theme::SELECTED)).child(
-                            div()
-                                .absolute()
-                                .left(px(-1.))
-                                .top(px(18.))
-                                .bottom(px(18.))
-                                .w(px(2.))
-                                .rounded(px(2.))
-                                .bg(rgb(theme::ACCENT)),
-                        )
-                    })
-                    .when(!selected, |el| el.hover(|s| s.bg(rgb(theme::ROW))))
-                    .child(
-                        div()
-                            .id(("row", id))
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .cursor_pointer()
-                            .when(!binding.enabled, |el| el.opacity(0.45))
-                            .child(icon_tile(glyph, tint, 28.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(5.))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(8.))
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .text_size(px(13.))
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .child(binding.message.clone()),
-                                            )
-                                            .when_some(badge, |el, badge| {
-                                                el.child(badge.flex_none())
-                                            }),
-                                    )
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(10.))
-                                            .child(
-                                                combo(&caps_for(&binding.spec), CapSize::Small)
-                                                    .flex_none()
-                                                    .flex_nowrap(),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .text_size(px(12.))
-                                                    .text_color(rgb(detail_color))
-                                                    .child(detail),
-                                            ),
-                                    ),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| this.select(id, cx))),
-                    )
-                    .child(
-                        switch(("switch", id), binding.enabled)
-                            .on_click(cx.listener(move |this, _, _, cx| this.toggle_rule(id, cx))),
-                    ),
-            );
+        for (index, group) in groups.iter().enumerate() {
+            let collapse_key = format!("{:?}:{}", self.trigger_group, group.key);
+            let collapsed = grouped && self.trigger_collapsed.contains(&collapse_key);
+            if grouped {
+                rows =
+                    rows.child(self.render_group_header(index, group, collapse_key, collapsed, cx));
+            }
+            if collapsed {
+                continue;
+            }
+            for id in &group.ids {
+                if let Some(binding) = self.triggers.bindings().iter().find(|b| b.spec.id == *id) {
+                    rows = rows.child(self.render_trigger_row(binding, cx));
+                }
+            }
         }
         if self.triggers.bindings().is_empty() {
             rows = rows.child(
@@ -4239,6 +4667,27 @@ impl Workspace {
                     )
                     .child(caption("点击右上角“录制组合”，按下一个组合即可添加。")),
             );
+        } else if shown == 0 {
+            rows = rows.child(
+                div()
+                    .py(px(56.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(icon_tile(Icon::Search, theme::ACCENT_2, 48.))
+                    .child(
+                        div()
+                            .text_size(px(15.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(theme::TEXT_SOFT))
+                            .child("没有符合条件的触发器"),
+                    )
+                    .child(
+                        icon_button("clear-filters", Icon::Close, "清除筛选", Tone::Ghost, true)
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_trigger_filters(cx))),
+                    ),
+            );
         }
         div()
             .flex_1()
@@ -4250,7 +4699,16 @@ impl Workspace {
             .pr(px(18.))
             .flex()
             .flex_col()
-            .gap(px(16.))
+            .gap(px(14.))
+            // 点击页面其他位置收起展开的下拉；下拉本身遮挡下层，不会触发这里。
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.trigger_menu.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .child(
                 div()
                     .flex()
@@ -4266,25 +4724,7 @@ impl Workspace {
                             .on_click(cx.listener(|this, _, _, cx| this.start_recording(cx))),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(8.))
-                    .child(chip(
-                        Icon::Keyboard,
-                        theme::ACCENT_2,
-                        self.triggers.bindings().len().to_string(),
-                        "触发器",
-                    ))
-                    .child(chip(Icon::Check, theme::ACCENT, enabled.to_string(), "已启用"))
-                    .child(chip(
-                        Icon::Bolt,
-                        theme::VIOLET,
-                        thousands(self.trigger_count),
-                        "本次触发",
-                    )),
-            )
+            .child(self.render_trigger_toolbar(&summary, &tokens, shown, window, cx))
             .children(self.render_banner(cx))
             .child(self.smooth_scroll.wrap("trigger-rows", rows))
             .child(caption(format!(
@@ -6344,7 +6784,7 @@ impl Render for Workspace {
                 .flex_1()
                 .min_w_0()
                 .flex()
-                .child(self.render_list(cx))
+                .child(self.render_list(window, cx))
                 .child(self.render_inspector(cx))
                 .into_any_element(),
             Page::History => self.render_history(cx).into_any_element(),
