@@ -1,5 +1,5 @@
 // 触发器页中栏：对应 main.rs 的 render_list / render_trigger_toolbar / render_trigger_row / render_group_header。
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   browse,
   facetCount,
@@ -46,6 +46,49 @@ export function TriggerPage({ initialView = "list" }: { initialView?: View }) {
           : row,
       ),
     );
+  // 左侧分组导航：点击跳到该组，滚动时高亮当前所在的组。
+  const list = useRef<HTMLDivElement>(null);
+  const [current, setCurrent] = useState<string | null>(null);
+  // 点击导航后的平滑滚动期间保持所点的组高亮，不被滚动位置覆盖。
+  const jumping = useRef(0);
+  const showNav = view === "list" && grouped && groups.length > 1;
+  const spy = () => {
+    const container = list.current;
+    if (!container || Date.now() < jumping.current) return;
+    const top = container.getBoundingClientRect().top;
+    let active: string | null = null;
+    container.querySelectorAll<HTMLElement>("[data-group]").forEach((header) => {
+      if (header.getBoundingClientRect().top - top <= 8) active = header.dataset.group ?? null;
+    });
+    // 滚到底时最后几组可能永远到不了顶端，此时取最后一组。
+    if (container.scrollTop + container.clientHeight >= container.scrollHeight - 2) {
+      const headers = container.querySelectorAll<HTMLElement>("[data-group]");
+      active = headers[headers.length - 1]?.dataset.group ?? active;
+    }
+    setCurrent(active ?? container.querySelector<HTMLElement>("[data-group]")?.dataset.group ?? null);
+  };
+  useEffect(spy, [groupBy, query, filter, collapsed, view]);
+  const jump = (key: string) => {
+    setCurrent(key);
+    jumping.current = Date.now() + 700;
+    setCollapsed((set) => {
+      if (!set.has(key)) return set;
+      const next = new Set(set);
+      next.delete(key);
+      return next;
+    });
+    requestAnimationFrame(() => {
+      const container = list.current;
+      const header = container?.querySelector<HTMLElement>(`[data-group="${CSS.escape(key)}"]`);
+      if (container && header) {
+        container.scrollTo({
+          top: header.getBoundingClientRect().top - container.getBoundingClientRect().top + container.scrollTop,
+          behavior: "smooth",
+        });
+      }
+    });
+  };
+
   const renderRow = (row: Row) => (
     <TriggerRow key={row.id} row={row} selected={selected === row.id} onSelect={() => setSelected(row.id)} onToggle={() => toggle(row.id)} />
   );
@@ -83,7 +126,20 @@ export function TriggerPage({ initialView = "list" }: { initialView?: View }) {
         setView={setView}
         shown={shown}
       />
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 2 }}>
+      <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 14 }}>
+        {showNav && (
+          <GroupNav
+            items={groups.map((group) => ({
+              key: `${groupBy}:${group.key}`,
+              label: group.label,
+              count: group.rows.length,
+              disabled: group.disabled,
+            }))}
+            current={current}
+            onPick={jump}
+          />
+        )}
+      <div ref={list} onScroll={spy} style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 2 }}>
         {view === "list" &&
           groups.map((group, index) => {
             const key = `${groupBy}:${group.key}`;
@@ -91,6 +147,7 @@ export function TriggerPage({ initialView = "list" }: { initialView?: View }) {
             return (
               <div key={key} style={{ display: "contents" }}>
                 {grouped && (
+                  <div data-group={key} style={{ flex: "none" }}>
                   <GroupHeader
                     index={index}
                     label={group.label}
@@ -106,6 +163,7 @@ export function TriggerPage({ initialView = "list" }: { initialView?: View }) {
                       })
                     }
                   />
+                  </div>
                 )}
                 {!isCollapsed && group.rows.map(renderRow)}
               </div>
@@ -119,6 +177,7 @@ export function TriggerPage({ initialView = "list" }: { initialView?: View }) {
             <div style={{ fontSize: 15, fontWeight: 600, color: c("TEXT_SOFT") }}>没有符合条件的触发器</div>
           </div>
         )}
+      </div>
       </div>
       <Caption>最多 512 条触发器，每条最多 8 个前缀。单独按下未用于组合的前缀时，原输入会补发给应用。</Caption>
     </div>
@@ -402,6 +461,67 @@ function GroupHeader(props: {
         {props.disabled > 0 ? `${props.count} · ${props.disabled} 停用` : props.count}
       </div>
       <div style={{ flex: 1, height: 1, background: c("DIVIDER") }} />
+    </div>
+  );
+}
+
+interface NavItem {
+  key: string;
+  label: string;
+  count: number;
+  disabled: number;
+}
+
+/** 分组导航列：样式沿用应用侧栏的导航项，计数用等宽字体，整组停用时变暗。 */
+function GroupNav({ items, current, onPick }: { items: NavItem[]; current: string | null; onPick: (key: string) => void }) {
+  return (
+    <div
+      style={{
+        flex: "none",
+        width: 168,
+        minHeight: 0,
+        overflowY: "auto",
+        display: "flex",
+        flexDirection: "column",
+        gap: 2,
+        paddingRight: 10,
+        borderRight: `1px solid ${c("DIVIDER")}`,
+      }}
+    >
+      <div style={{ padding: "2px 10px 6px", fontSize: 11, color: c("TEXT_FAINT") }}>分组</div>
+      {items.map((item) => {
+        const active = item.key === current;
+        const allDisabled = item.disabled === item.count;
+        return (
+          <div
+            key={item.key}
+            className={active ? undefined : "hover-nav"}
+            onClick={() => onPick(item.key)}
+            title={item.label}
+            style={{
+              flex: "none",
+              position: "relative",
+              height: 30,
+              padding: "0 10px",
+              borderRadius: 6,
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: 12.5,
+              cursor: "pointer",
+              color: active ? c("TEXT") : allDisabled ? c("TEXT_FAINT") : c("TEXT_DIM"),
+              background: active ? c("SURFACE_HI") : undefined,
+              fontWeight: active ? 600 : undefined,
+            }}
+          >
+            {active && <div style={{ position: "absolute", left: 0, top: 8, bottom: 8, width: 2, borderRadius: 2, background: c("ACCENT") }} />}
+            <div className="truncate" style={{ flex: 1, minWidth: 0 }}>
+              {item.label}
+            </div>
+            <div style={{ ...mono, flex: "none", fontSize: 11, color: c("TEXT_FAINT") }}>{item.count}</div>
+          </div>
+        );
+      })}
     </div>
   );
 }

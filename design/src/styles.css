@@ -29,6 +29,11 @@ body {
   border-color: var(--BORDER_HI) !important;
 }
 
+.hover-nav:hover {
+  background: var(--ROW);
+  color: var(--TEXT_SOFT) !important;
+}
+
 .hover-option:hover {
   background: var(--SURFACE_HI);
 }
