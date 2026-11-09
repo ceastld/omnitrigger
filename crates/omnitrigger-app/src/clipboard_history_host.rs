@@ -338,6 +338,14 @@ impl<H: NativeHost, B: HistoryBackend> WithClipboardHistory<H, B> {
     }
 }
 impl<H: NativeHost, B: HistoryBackend> NativeHost for WithClipboardHistory<H, B> {
+    fn create_owned_left_input(
+        &self,
+        owner: omnitrigger_actions::owned_mouse::OwnedInputOwner,
+    ) -> Result<std::sync::Arc<omnitrigger_actions::owned_mouse::OwnedLeftSession>, ActionError>
+    {
+        self.inner.create_owned_left_input(owner)
+    }
+
     fn call(
         &self,
         method: &str,

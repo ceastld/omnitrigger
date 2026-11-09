@@ -174,3 +174,76 @@ fn anonymous_per_device_partial_result_keeps_unknown_and_never_serializes_labels
     assert!(!value.to_string().contains("PRIVATE"));
     assert!(!value.to_string().contains("999"));
 }
+
+#[test]
+fn cancelled_and_timed_out_write_preserve_anonymous_completed_member_receipt() {
+    use omnitrigger_windows::{PhysicalBrightnessMemberResult, PhysicalBrightnessReading};
+    for timeout in [false, true] {
+        let token = CancellationToken::new();
+        let start = Instant::now();
+        let deadline = start + std::time::Duration::from_millis(50);
+        let now = Cell::new(start);
+        let mut calls = 0;
+        let error = execute_with_clock(
+            json!({"direction":"up","strategy":"physical_then_wmi"}),
+            &token,
+            Some(deadline),
+            || Ok((999, 888)),
+            |_, _, _, check| {
+                calls += 1;
+                check(true).unwrap();
+                if timeout {
+                    now.set(deadline);
+                } else {
+                    token.cancel();
+                }
+                let before = PhysicalBrightnessReading {
+                    minimum: 0,
+                    current: 40,
+                    maximum: 100,
+                };
+                let observed = PhysicalBrightnessReading {
+                    current: 45,
+                    ..before
+                };
+                (
+                    Some(Ok(PhysicalBrightnessSetResult {
+                        point: (999, 888),
+                        logical_device: "PRIVATE_LOGICAL".into(),
+                        members: vec![
+                            PhysicalBrightnessMemberResult {
+                                index: 0,
+                                label: "PRIVATE_A".into(),
+                                status: PhysicalBrightnessStatus::Confirmed {
+                                    before,
+                                    requested: 45,
+                                    observed,
+                                },
+                            },
+                            PhysicalBrightnessMemberResult {
+                                index: 1,
+                                label: "PRIVATE_B".into(),
+                                status: PhysicalBrightnessStatus::ReadRejected {
+                                    error: synthetic_error(),
+                                },
+                            },
+                        ],
+                    })),
+                    None,
+                )
+            },
+            || now.get(),
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert_eq!(error.code, if timeout { "timeout" } else { "cancelled" });
+        assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+        let receipt = error.brightness_receipt.unwrap();
+        assert_eq!(receipt["physical"]["members"][0]["status"], "confirmed");
+        assert_eq!(receipt["physical"]["members"][1]["status"], "read_rejected");
+        assert!(receipt["wmi"].is_null());
+        let text = receipt.to_string();
+        assert!(!text.contains("PRIVATE"));
+        assert!(!text.contains("999"));
+    }
+}

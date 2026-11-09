@@ -16,7 +16,7 @@ let browserConnection;
 let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
-const nativeMethods = new Set(['state.read','state.compare_and_swap','actions.stop_other_instances','system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','fs.read_directory','fs.sort_logical_paths','ui.choose','ui.notify','ui.open_history','ui.toggle_history','ui.action_hint','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
+const nativeMethods = new Set(['mouse.left_down','mouse.left_up','state.read','state.compare_and_swap','actions.stop_other_instances','system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','fs.read_directory','fs.sort_logical_paths','ui.choose','ui.notify','ui.open_history','ui.toggle_history','ui.action_hint','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
   'keyboard.shortcut','keyboard.sequence','keyboard.text','win32_edit.replace_selection','raishot.resident.find','raishot.resident.region','raishot.capture_result','raishot.release_result','selection.copy','selection.copy_data','selection.read_text','explorer.context','clipboard.read','clipboard.read_data','clipboard.write','clipboard.write_files','window.action','window.geometry','window.set_rect','pointer.state','pointer.root','target.handoff_pointing_root','window.drag','display.brightness_step','audio.volume_adjust']);
 let nativePending;
 let nativePendingMethod;
@@ -99,6 +99,7 @@ function browserRequest(method, args, options = {}, profiles = false) {
 const browser = createBrowserApi(browserRequest, fn => async (...args) => fn(...args), browserRequest);
 
 function nativeCall(method, params) {
+  const ownedMouse = method === 'mouse.left_down' || method === 'mouse.left_up';
   const actionControl = method === 'actions.stop_other_instances' || method === 'state.read' || method === 'state.compare_and_swap';
   const actionHint = method === 'ui.action_hint';
   const historyUi = method === 'ui.open_history' || method === 'ui.toggle_history' || actionHint;
@@ -107,7 +108,7 @@ function nativeCall(method, params) {
   const capture = method === 'process.capture' || fileResult;
   const rai = method.startsWith('raishot.resident.') || fileResult;
   const geometry = ['window.geometry','window.set_rect','pointer.state','pointer.root','target.handoff_pointing_root','window.drag'].includes(method) || method === 'window.action' && params?.target !== undefined;
-  const edit = method === 'win32_edit.replace_selection' || rai || method === 'clipboard.write_files' || geometry;
+  const edit = method === 'win32_edit.replace_selection' || rai || method === 'clipboard.write_files' || geometry || ownedMouse;
   const volume = method === 'audio.volume_adjust';
   const brightness = method === 'display.brightness_step' || volume;
   const logicalSort = method === 'fs.sort_logical_paths';
@@ -120,6 +121,7 @@ function nativeCall(method, params) {
   const historyWrite = method === 'history.append' || method === 'history.remove';
   const history = historyRead || historyWrite;
   const fail = (code, message, effectState = 'not_started') => Object.assign(fault(code, geometry ? '窗口矩形调用未获完整确认；请检查错误代码和效果状态。' : rai ? 'RaiShot 常驻请求未获完整确认；请检查错误代码和效果状态。' : edit ? (method === 'clipboard.write_files' ? '文件列表剪贴板写入未获完整确认；请检查错误代码和效果状态。' : 'Win32 Edit选区替换未获完整确认；请检查错误代码和效果状态。') : volume ? '音量调节未获完整确认；请检查错误代码和效果状态。' : brightness ? '亮度步进未获完整确认；请检查结构化回执。' : capture ? '程序输出采集未完成，请检查错误代码。' : stat ? '本地路径状态查询失败；请检查错误代码。' : data ? '剪贴板或选区数据调用失败；请检查错误代码。' : history ? '剪贴板历史调用失败；请检查错误代码。' : message), {effectState:stat || dataRead || historyRead ? 'not_started' : effectState, method});
+  if (ownedMouse && request.actions_scope !== true) return Promise.reject(fail('actions_unavailable','左键输入需要真实动作作用域。'));
   if (actionHint && request.actions_scope !== true) return Promise.reject(fail('ui_hint_scope_expired','版本提示需要当前服务调用作用域。'));
   if (!nativeMethods.has(method)) return Promise.reject(fail('invalid_input', '未提供此本机调用方法。'));
   if ((historyUi || stat || data || history || capture || brightness || edit || actionControl) && controller.signal.aborted) return Promise.reject(fail(controller.signal.reason?.code === 'timeout' ? 'timeout' : 'cancelled'));
@@ -206,6 +208,10 @@ function nativeCall(method, params) {
             return finish(invalidClass);
           }
           const failure = fail(error.code, error.message, error.effect_state ?? 'unknown');
+          if (method === 'display.brightness_step' && error.method === method && ['cancelled','timeout'].includes(error.code)
+              && error.effect_state === 'unknown' && Object.hasOwn(error,'brightness_receipt')) {
+            failure.brightnessReceipt = error.brightness_receipt;
+          }
           // 新证明错误只保留Native元数据；不得借只读正规化把未知/缺失字段提升成证明。
           if (method === 'explorer.context' && params?.selection_failure_stage === true
               && error.code === 'selection_unavailable_after_directory') {
@@ -479,6 +485,9 @@ try {
       ...(typeof error?.effectState === 'string' ? { effect_state: error.effectState } : {}),
       ...(typeof error?.method === 'string' ? { method: error.method } : {}),
       ...(Array.isArray(error?.requiredPermissions) ? { required_permissions: error.requiredPermissions } : {}),
+      ...(error?.method === 'display.brightness_step' && ['cancelled','timeout'].includes(error?.code)
+        && error?.effectState === 'unknown' && Object.getOwnPropertyDescriptor(error,'brightnessReceipt')?.value !== undefined
+        ? { brightness_receipt: Object.getOwnPropertyDescriptor(error,'brightnessReceipt').value } : {}),
     } });
   } else process.exitCode = 1;
 } finally {

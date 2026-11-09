@@ -36,7 +36,9 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 50] = [
+const METHODS: [&str; 52] = [
+    "mouse.left_down",
+    "mouse.left_up",
     "actions.stop_other_instances",
     "state.read",
     "state.compare_and_swap",
@@ -93,6 +95,22 @@ const METHODS: [&str; 50] = [
 /// 同步桥在动作工作线程执行；显式浏览器并发桥使用有界的作用域工作线程。
 /// 回调须有界返回，并在副作用前核验取消和目标身份。
 pub trait NativeHost: Send + Sync {
+    /// 每次真实Service调用独立创建；未提供Hook所有权通道的宿主明确拒绝。
+    fn create_owned_left_input(
+        &self,
+        _owner: crate::owned_mouse::OwnedInputOwner,
+    ) -> Result<std::sync::Arc<crate::owned_mouse::OwnedLeftSession>, ActionError> {
+        Err(crate::owned_mouse::fault(
+            crate::owned_mouse::DOWN,
+            "input_owner_unavailable",
+            false,
+        ))
+    }
+    /// 运行时完成、取消或异常后，在active标记释放和终态发布前收尾。
+    fn finish_owned_inputs(&self) -> Result<(), ActionError> {
+        Ok(())
+    }
+
     /// 作用域包装本身不提供原有应用上下文；此标记不证明权限或设备可用。
     fn native_context_available(&self) -> bool {
         true
@@ -332,7 +350,11 @@ impl NativeBridge {
                         matches!(request.method.as_str(), "fs.stat" | "fs.read_directory");
                     let action_control = matches!(
                         request.method.as_str(),
-                        "actions.stop_other_instances" | "state.read" | "state.compare_and_swap"
+                        "actions.stop_other_instances"
+                            | "state.read"
+                            | "state.compare_and_swap"
+                            | "mouse.left_down"
+                            | "mouse.left_up"
                     );
                     let capture = matches!(
                         request.method.as_str(),
@@ -368,6 +390,14 @@ impl NativeBridge {
                         let mut error = ActionError::new("invalid_input", "未提供此本机调用方法。");
                         error.effect_state = Some("not_started".into());
                         Err(error)
+                    } else if matches!(request.method.as_str(), "mouse.left_down" | "mouse.left_up")
+                        && !host.action_scope_available()
+                    {
+                        Err(crate::owned_mouse::fault(
+                            &request.method,
+                            "actions_unavailable",
+                            false,
+                        ))
                     } else if request.method == "ui.action_hint" && !host.action_scope_available() {
                         Err(crate::action_hint::fault(
                             "ui_hint_scope_expired",
@@ -1098,7 +1128,7 @@ mod window_bridge_tests {
             available: false,
             calls: AtomicUsize::new(0),
         };
-        assert_eq!(METHODS.len(), 50);
+        assert_eq!(METHODS.len(), 52);
         for method in WINDOW {
             assert!(METHODS.contains(&method));
             let response = exchange(&host, method, json!({}), &CancellationToken::new());

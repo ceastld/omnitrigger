@@ -10,7 +10,9 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 50] = [
+pub const METHODS: [&str; 52] = [
+    "mouse.left_down",
+    "mouse.left_up",
     "process.capture",
     "system.open",
     "system.open_file_in_parent",
@@ -178,6 +180,7 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
             ),
         method: Some(method.into()),
         required_permissions: Vec::new(),
+        brightness_receipt: None,
     }
 }
 
@@ -209,6 +212,8 @@ fn brightness_transport_effect(
             | "pointer.root"
             | "window.drag"
             | "actions.stop_other_instances"
+            | "mouse.left_down"
+            | "mouse.left_up"
             | "state.read"
             | "state.compare_and_swap"
             | "ui.action_hint"
@@ -294,6 +299,14 @@ fn call_controlled(
             "not_started",
         ));
     }
+    if matches!(method.as_str(), "mouse.left_down" | "mouse.left_up") && !cfg!(windows) {
+        return Err(fault(
+            "input_owner_unavailable",
+            "此平台未提供动作左键所有权通道。",
+            &method,
+            "not_started",
+        ));
+    }
     if method == "fs.sort_logical_paths" && !cfg!(windows) {
         return Err(fault(
             "fs_unavailable",
@@ -367,6 +380,8 @@ fn call_controlled(
                 | "pointer.root"
                 | "window.drag"
                 | "actions.stop_other_instances"
+                | "mouse.left_down"
+                | "mouse.left_up"
                 | "state.read"
                 | "state.compare_and_swap"
                 | "target.handoff_pointing_root"
@@ -402,6 +417,8 @@ fn call_controlled(
                         | "pointer.root"
                         | "window.drag"
                         | "actions.stop_other_instances"
+                        | "mouse.left_down"
+                        | "mouse.left_up"
                         | "state.read"
                         | "state.compare_and_swap"
                         | "target.handoff_pointing_root"
@@ -464,6 +481,8 @@ fn call_controlled(
                         | "pointer.root"
                         | "window.drag"
                         | "actions.stop_other_instances"
+                        | "mouse.left_down"
+                        | "mouse.left_up"
                         | "state.read"
                         | "state.compare_and_swap"
                         | "target.handoff_pointing_root"
@@ -496,6 +515,8 @@ fn call_controlled(
                                 | "pointer.root"
                                 | "window.drag"
                                 | "actions.stop_other_instances"
+                                | "mouse.left_down"
+                                | "mouse.left_up"
                                 | "state.read"
                                 | "state.compare_and_swap"
                                 | "target.handoff_pointing_root"
@@ -705,6 +726,8 @@ fn parse_response_with_stage(
                     | "pointer.root"
                     | "window.drag"
                     | "actions.stop_other_instances"
+                    | "mouse.left_down"
+                    | "mouse.left_up"
                     | "state.read"
                     | "state.compare_and_swap"
                     | "target.handoff_pointing_root"
@@ -733,6 +756,13 @@ fn parse_response_with_stage(
                 None => Vec::new(),
             };
             let mut error = fault(code, message, reported_method, effect);
+            if method == "display.brightness_step"
+                && response["error"].get("method").and_then(Value::as_str) == Some(method)
+                && matches!(code, "cancelled" | "timeout")
+                && effect == "unknown"
+            {
+                error.brightness_receipt = response["error"].get("brightness_receipt").cloned();
+            }
             if !matches!(
                 method,
                 "fs.sort_logical_paths"
@@ -755,6 +785,8 @@ fn parse_response_with_stage(
                     | "pointer.root"
                     | "window.drag"
                     | "actions.stop_other_instances"
+                    | "mouse.left_down"
+                    | "mouse.left_up"
                     | "state.read"
                     | "state.compare_and_swap"
                     | "target.handoff_pointing_root"
@@ -1244,6 +1276,24 @@ mod tests {
         }
     }
     #[test]
+    fn brightness_interruption_preserves_wire_receipt_only_for_unknown_brightness() {
+        for code in ["cancelled", "timeout"] {
+            let receipt = json!({"strategy":"physical", "effectState":"unknown",
+                "physical":{"members":[{"index":0,"status":"confirmed","previousRaw":40,
+                    "requestedRaw":45,"currentRaw":45,"errorCode":null}],"errorCode":null},"wmi":null});
+            let frame = format!(
+                "{}\n",
+                json!({"id":1,"ok":false,"error":{
+                "code":code,"message":"PRIVATE","method":"display.brightness_step",
+                "effect_state":"unknown","brightness_receipt":receipt}})
+            );
+            let error = parse_response(frame.as_bytes(), 1, "display.brightness_step").unwrap_err();
+            assert_eq!(error.brightness_receipt, Some(receipt));
+            assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+            assert!(!error.message.contains("PRIVATE"));
+        }
+    }
+    #[test]
     fn brightness_timeout_before_request_write_is_not_started_and_after_attempt_is_unknown() {
         assert_eq!(
             brightness_transport_effect("audio.volume_adjust", false, "unknown"),
@@ -1712,6 +1762,7 @@ mod browser_async_tests {
                     effect_state: Some("not_started".into()),
                     method: Some("tabs.move".into()),
                     required_permissions: vec!["tabs".into()],
+                    brightness_receipt: None,
                 })
             })
             .unwrap();

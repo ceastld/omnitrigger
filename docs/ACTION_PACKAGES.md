@@ -284,6 +284,8 @@ export default async function (ctx) {
 | `ctx.desktop.captureForegroundTarget(options)` | 按明确 PID、进程创建 FILETIME 字符串和 1–5000 毫秒有效期捕获该进程当前前台，返回本次动作内的只读目标引用。 |
 | `ctx.desktop.sendShortcutTo(target, keys, options?)` | 向上述捕获目标发送快捷键；可选 `keyDownDelayMs`，发送前和分步提交时复验租约、身份、前台、取消及动作期限。 |
 | `ctx.desktop.sendTextTo(target, text)` | 向上述捕获目标发送 Unicode 文本，复用既有输入校验和分批提交。 |
+| `ctx.desktop.pressLeftButton()` | 当前真实动作作用域只按下原目标的鼠标左键；无参数，返回 submitted:true/effectState:unknown，需 mouse.owned_left.v1。 |
+| `ctx.desktop.releaseLeftButton()` | 结束本 owner 的按下；无参数，返回 ownedPressEnded:true/effectState:unknown，不证明物理设备当前状态。 |
 | `ctx.desktop.sendShortcut(keys, options?)` | 向原目标发送一次快捷键，明确 VK、修饰键在前，最多四类修饰键加一个普通键。可设置 `keyDownDelayMs`，或用 `timing` 复用原生进程时序配置；两者互斥，默认零。返回 `{ submitted: true }` 仅表示系统接纳输入。 |
 | `ctx.desktop.sendKeySequence(modifiers, keys, options?)` | 最多四类修饰键在整组 1–16 个普通键期间保持按下。保留顺序和左右侧；可设置 `keyDownDelayMs`。 |
 | `ctx.desktop.sendText(text)` | 分批发送 Unicode 文本，不借用剪贴板；每批核验原目标及取消状态。 |
@@ -770,6 +772,8 @@ profiles\<配置档 ID>\packages\<包 ID>\
 
 ## 脚本亮度步进
 
+亮度调用因 cancelled 或 timeout 结束且 effectState 为 unknown 时，错误可附可选的 brightnessReceipt，复用成功回执的匿名逐台结构；wire 字段为 brightness_receipt。仅接纳明确的 display.brightness_step 错误、原请求策略一致且通过既有 DTO 校验的进度。缺失字段不表示没有作用，已确认成员也不代表整轮成功；不得据此自动重试、补偿或切换 provider。连接断开或外层已先返回取消时，不能保证进度送达。
+
 Node 使用 `await ctx.desktop.stepBrightness({direction:'up',strategy:'physical'})`；同步脚本使用同名方法直接取得结果。`direction`只接受`up/down`，`strategy`必须显式选择`physical/wmi_first/physical_then_wmi`，不接受额外字段或默认策略。wire为`display.brightness_step`，走现有NativeBridge和App宿主，不启动另一服务或执行器。
 
 physical和physical_then_wmi在实际执行时捕获一次物理指针。physical对最近逻辑屏幕下1–64台物理显示器按各自量程±5%步进；wmi_first不读取或依赖指针，直接固定首枚举WMI对象，按支持档位严格跨过当前值±1，零档或无档不写；physical_then_wmi仅在确认DDC未写入且无有效成员时尝试首WMI。调用需要NativeBridge，不要求原前台窗口或界面。部分/未知写入后不跨设备补偿，不重试。
@@ -840,3 +844,9 @@ Node 使用 `await ctx.ui.setActionHint({text:'v123'})`，Script 同步调用同
 ## 窗口与指针
 
 窗口几何、矩形提交、指针观察、显式根窗交接与有界调整的参数及 unknown 语义见[窗口与指针接口](WINDOW_ACTION_API.md)。Node 和 Script 共用契约；[普通 Node 示例](../examples/actions/window-adjust/README.md)提供一次有界调整。
+
+## 自有左键输入作用域
+
+这两项左键 API 不接受参数，由 ActionService 为本次动作保存输入归属，使用动作的原窗口目标。Node 逐次 `await`，轻量宿主同步调用。`pressLeftButton()` 返回 `{submitted:true,effectState:'unknown'}`；`releaseLeftButton()` 返回 `{ownedPressEnded:true,effectState:'unknown'}`，仅表示本次动作拥有的按下已结束，不证明物理设备状态或业务完成。
+
+调用需要 Windows 能力 `mouse.owned_left.v1` 以及已接通的 App Hook 与 Service；缺少通道时明确拒绝。按下前检查原窗口、指针所指窗口、取消和期限。目标变化、取消或到期后，已拥有的按下仍须沿原通道释放。结束、错误和取消时 Service 也会收尾；每个按压周期在动作作用域内最多请求五次释放，Hook 也可为已在途的按下安排既有中性收尾。释放失败后保留未知状态并暂停监听。`input_cleanup_failed` 的效果始终为 `unknown`，脚本不得据此自动重试。接口不接受显式捕获的其他目标。

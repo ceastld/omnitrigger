@@ -20,3 +20,5 @@ pub use service::{
     ActionCatalogDescription, ActionCatalogSnapshot, ActionEvent, ActionOutcome, ActionRuntime,
     ActionService, CancellationToken, InvocationContext, RuntimeRegistry,
 };
+
+pub mod owned_mouse;

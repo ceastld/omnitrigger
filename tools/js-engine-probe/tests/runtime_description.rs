@@ -21,7 +21,7 @@ fn current_descriptor_is_bounded_and_parses_as_a_new_host() {
     );
     assert_eq!(
         host.capabilities.as_ref().unwrap().len(),
-        if cfg!(windows) { 18 } else { 6 }
+        if cfg!(windows) { 19 } else { 6 }
     );
     host.check(&[
         "actions.stop_other_instances.v1".into(),
@@ -34,6 +34,7 @@ fn current_descriptor_is_bounded_and_parses_as_a_new_host() {
     .unwrap();
     for capability in [
         "fs.sort_logical_paths.v1",
+        "mouse.owned_left.v1",
         "process.capture.v1",
         "system.open_file_in_parent.v1",
         "raishot.capture_result.v1",

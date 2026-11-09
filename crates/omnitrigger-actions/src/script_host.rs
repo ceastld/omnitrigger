@@ -485,7 +485,7 @@ fn parse_response(bytes: &[u8], exited_successfully: bool) -> Result<Value, Acti
         return value.get("result").cloned().ok_or_else(invalid);
     }
     if value["error"].is_object() {
-        let fault: ActionError =
+        let mut fault: ActionError =
             serde_json::from_value(value["error"].clone()).map_err(|_| invalid())?;
         if fault.code.is_empty()
             || fault.code.len() > 64
@@ -507,6 +507,7 @@ fn parse_response(bytes: &[u8], exited_successfully: bool) -> Result<Value, Acti
         {
             return Err(invalid());
         }
+        fault.retain_brightness_receipt();
         return Err(fault);
     }
     let message = value["error"]

@@ -300,6 +300,8 @@ pub struct ListenerDiagnostics {
 
 #[derive(Debug)]
 pub enum BackendCommand {
+    #[cfg(windows)]
+    OwnedLeftInput(Box<owned_left_input::OwnedLeftRequest>),
     SetBindings(Vec<TriggerSpec>),
     StartRecording,
     CancelRecording,
@@ -601,3 +603,11 @@ mod tests {
         assert_eq!(format_trigger(&spec), "左 Ctrl + 鼠标右键（长按 300ms）");
     }
 }
+
+#[cfg(windows)]
+mod owned_left_input;
+#[cfg(windows)]
+pub use owned_left_input::{
+    active_owned_left_input_client, owned_left_button_native_input, OwnedLeftInputClient,
+    OwnedLeftInputError, OwnedLeftRequest,
+};

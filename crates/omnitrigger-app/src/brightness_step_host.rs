@@ -131,7 +131,13 @@ fn execute_with_clock(
     let (physical_result, wmi_result) = invoke(direction, &args.strategy, point, &mut check);
     let _ = check(false);
     if let Some(reason) = control.reason() {
-        return Err(fault(reason, effect()));
+        let mut error = fault(reason, effect());
+        if effect() == "unknown" {
+            error.brightness_receipt =
+                Some(json!({"strategy":args.strategy,"effectState":effect(),
+                "physical":physical_result.map(physical),"wmi":wmi_result.map(wmi)}));
+        }
+        return Err(error);
     }
     Ok(
         json!({"strategy":args.strategy,"effectState":effect(),"physical":physical_result.map(physical),"wmi":wmi_result.map(wmi)}),

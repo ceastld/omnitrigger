@@ -53,7 +53,7 @@ use windows::Win32::{
     },
 };
 
-const COMMAND_MESSAGE: u32 = WM_APP + 0x26;
+pub(crate) const COMMAND_MESSAGE: u32 = WM_APP + 0x26;
 const REPLAY_TAG: usize = 0x4f4d_4e49;
 const EVENT_CAPACITY: usize = 256;
 const HOLD_POLL_MS: u64 = 25;
@@ -145,6 +145,7 @@ fn clear_input_state() {
 }
 
 pub struct Backend {
+    owned_endpoint: Arc<crate::owned_left_input::Endpoint>,
     commands: Sender<BackendCommand>,
     thread_id: u32,
     worker: Option<JoinHandle<()>>,
@@ -199,6 +200,10 @@ impl Backend {
         match ready_rx.recv() {
             Ok(Ok(thread_id)) => Ok((
                 Self {
+                    owned_endpoint: crate::owned_left_input::install(
+                        commands_tx.clone(),
+                        thread_id,
+                    ),
                     commands: commands_tx,
                     thread_id,
                     worker: Some(worker),
@@ -234,6 +239,7 @@ impl Backend {
 
 impl Drop for Backend {
     fn drop(&mut self) {
+        self.owned_endpoint.alive.store(false, Ordering::Release);
         let _ = self.send(BackendCommand::Shutdown);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -362,9 +368,11 @@ fn run_input_thread(
             refresh_pointer_context();
             if let Some(deadline) = shutdown_deadline {
                 let drained = STATE.with(|slot| {
-                    slot.borrow()
-                        .as_ref()
-                        .is_none_or(|state| state.owned_press.is_empty() && !state.replay.busy())
+                    slot.borrow().as_ref().is_none_or(|state| {
+                        state.owned_press.is_empty()
+                            && !state.replay.busy()
+                            && !state.replay.owned_left_active()
+                    })
                 });
                 if drained || Instant::now() >= deadline {
                     break;
@@ -465,7 +473,9 @@ fn drain_commands(
                 let state = slot.as_mut().expect("输入状态存在");
                 state.command(BackendCommand::SetEnabled(false));
                 state.reschedule_hold_timer();
-                state.owned_press.is_empty() && !state.replay.busy()
+                state.owned_press.is_empty()
+                    && !state.replay.busy()
+                    && !state.replay.owned_left_active()
             });
             if drained {
                 return CommandBatch::Stop;
@@ -1092,8 +1102,17 @@ impl ThreadState {
                 HoldOutcome::Recovery
             }
             BackendCommand::CancelDrag { .. } => HoldOutcome::Recovery,
+            BackendCommand::OwnedLeftInput(_) => HoldOutcome::Recovery,
         };
         match command {
+            BackendCommand::OwnedLeftInput(request) => {
+                let left = Button::Mouse(MouseButton::Left);
+                let preheld = self.physical_held.contains(&left)
+                    || self.owned_press.contains(&left)
+                    || self.recording.is_some();
+                self.replay.owned_left_request(*request, preheld);
+                return;
+            }
             BackendCommand::SetBindings(bindings) => {
                 if self.recording.is_some() {
                     self.notify(BackendEvent::Error("请先结束录制，再更新触发器".into()));
@@ -1181,7 +1200,7 @@ impl ThreadState {
     }
 
     fn cancel_queued_replay(&mut self) {
-        if self.replay.busy() {
+        if self.replay.busy() || self.replay.owned_left_active() {
             let affected = self.replay.abandon(&[]);
             for button in affected {
                 if self.physical_held.contains(&button) {
@@ -2314,6 +2333,18 @@ fn mouse_input(message: u32, data: u32) -> Option<InputKind> {
     } else {
         InputKind::Up(button)
     })
+}
+
+pub(crate) fn owned_left_button_input(down: bool) -> INPUT {
+    let button = Button::Mouse(MouseButton::Left);
+    replay_input(
+        if down {
+            InputKind::Down(button)
+        } else {
+            InputKind::Up(button)
+        },
+        &BTreeMap::new(),
+    )
 }
 
 fn replay_input(kind: InputKind, metadata: &BTreeMap<Button, KeyMetadata>) -> INPUT {
