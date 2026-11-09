@@ -58,6 +58,7 @@ mod presets;
 #[path = "../../omnitrigger-windows/tests/support/private_clipboard.rs"]
 mod private_window_station;
 mod process_capture_host;
+mod profiles;
 mod radial_wheel;
 #[cfg(windows)]
 mod read_once_helper;
@@ -257,6 +258,8 @@ enum Listener {
     Starting,
     Rebuilding,
     Offline,
+    /// 测试配置档默认不安装 Hook。
+    Suspended,
     Recording,
     Paused,
     Listening,
@@ -539,10 +542,16 @@ struct StartupOptions {
     wheel: Option<String>,
     wheel_target: Option<omnitrigger_windows::ShortcutTarget>,
     wheel_editor: bool,
+    /// 是否安装输入 Hook；测试配置档默认不安装。
+    listen: bool,
+    /// 测试配置档显示名，用于醒目标识。
+    test_profile: Option<String>,
 }
 
 struct Workspace {
     mode: WorkspaceMode,
+    listen: bool,
+    test_profile: Option<String>,
     backend: Option<Backend>,
     wheel_input_policy: WheelInputPolicy,
     events: Option<EventBridge<BackendEvent>>,
@@ -726,6 +735,8 @@ impl Workspace {
             wheel: initial_wheel,
             wheel_target: wheel_launch_target,
             wheel_editor,
+            listen,
+            test_profile,
         } = startup;
         let mode = WorkspaceMode::from_text_history_flag(text_history_page);
         let (theme_mode, theme_error) = match appearance::load(&settings::path()) {
@@ -741,7 +752,7 @@ impl Workspace {
         } else {
             (Vec::new(), None)
         };
-        let (mut backend, events, mut startup_error) = if mode.owns_input_engine() {
+        let (mut backend, events, mut startup_error) = if mode.owns_input_engine() && listen {
             match Backend::start_with_wheel_input_policy(wheel_input_policy) {
                 Ok((backend, events)) => (Some(backend), Some(events), None),
                 Err(error) => (None, Some(std::sync::mpsc::channel().1), Some(error)),
@@ -1015,6 +1026,8 @@ impl Workspace {
             };
         let mut workspace = Self {
             mode,
+            listen,
+            test_profile,
             backend,
             wheel_input_policy,
             events,
@@ -1148,7 +1161,11 @@ impl Workspace {
                 .or(title_bar.clone().err())
                 .or(mouse_shortcut_dispatch_error.map(|error| error.message().to_owned())),
             action_error: None,
-            status: mode.initial_status().into(),
+            status: if mode.owns_input_engine() && !listen {
+                "测试数据，未安装输入监听；需要验证真实输入时加 --listen 启动。".into()
+            } else {
+                mode.initial_status().into()
+            },
             hits: VecDeque::new(),
             trigger_count: 0,
             toast: None,
@@ -1188,6 +1205,8 @@ impl Workspace {
     fn listener(&self) -> Listener {
         if self.restarting {
             Listener::Rebuilding
+        } else if self.backend.is_none() && !self.listen && self.mode.owns_input_engine() {
+            Listener::Suspended
         } else if self.backend.is_none() {
             Listener::Offline
         } else if self.recording {
@@ -1228,6 +1247,11 @@ impl Workspace {
         }
         if !self.mode.owns_input_engine() {
             self.status = self.mode.initial_status().into();
+            cx.notify();
+            return;
+        }
+        if !self.listen {
+            self.status = "测试配置档未安装输入监听；需要验证真实输入时加 --listen 启动。".into();
             cx.notify();
             return;
         }
@@ -3676,6 +3700,11 @@ impl Workspace {
             Listener::Recording => ("正在录制", "输入暂被拦截 · Esc 取消".into(), theme::RECORD),
             Listener::Paused => ("已暂停", "触发器不会响应".into(), theme::TEXT_DIM),
             Listener::Offline => ("未监听", "输入线程已结束".into(), theme::DANGER),
+            Listener::Suspended => (
+                "未监听",
+                "测试数据 · 未安装输入监听".into(),
+                theme::TEXT_DIM,
+            ),
             Listener::Starting => ("正在连接", "正在安装输入监听".into(), theme::TEXT_DIM),
             Listener::Rebuilding => ("正在重建", "请松开其他按键".into(), theme::TEXT_DIM),
         };
@@ -3704,6 +3733,12 @@ impl Workspace {
                 true,
             ))
             .on_click(cx.listener(|this, _, _, cx| this.rebuild_backend(cx))),
+            Listener::Suspended => small(button(
+                "listener-action",
+                "加 --listen 启动可监听",
+                Tone::Secondary,
+                false,
+            )),
             Listener::Recording | Listener::Starting | Listener::Rebuilding => small(button(
                 "listener-action",
                 match listener {
@@ -3752,7 +3787,25 @@ impl Workspace {
                             ),
                     ),
             )
-            .child(action);
+            .child(action)
+            .when_some(self.test_profile.clone(), |card, name| {
+                card.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .px(px(8.))
+                        .py(px(5.))
+                        .rounded(px(6.))
+                        .bg(rgb(theme::RECORD_CAP))
+                        .border_1()
+                        .border_color(rgb(theme::RECORD_LINE))
+                        .text_size(px(11.5))
+                        .text_color(rgb(theme::RECORD_TEXT))
+                        .child(dot(theme::RECORD, 6.))
+                        .child(div().truncate().child(format!("测试数据：{name}"))),
+                )
+            });
 
         let panel_combo = self
             .triggers
@@ -7844,6 +7897,8 @@ fn open_script_history_window(
                         wheel: None,
                         wheel_target: None,
                         wheel_editor: false,
+                        listen: false,
+                        test_profile: None,
                     },
                     own_window,
                     title_bar,
@@ -7869,13 +7924,15 @@ fn open_script_history_window(
 }
 
 fn main() {
-    let arguments: Vec<_> = std::env::args().collect();
+    let mut arguments: Vec<_> = std::env::args().collect();
     if let Some(code) = explorer_context_helper::cli(&arguments) {
         std::process::exit(code);
     }
     if let Some(code) = selected_text_helper::cli(&arguments) {
         std::process::exit(code);
     }
+    // 配置档参数先于其他入口取出：确定数据根、处理打包重定向，配置档命令在此退出。
+    let profile_startup = profiles::startup(&mut arguments);
     if let Some(result) = legacy_local_source::cli(&arguments) {
         match result {
             Ok(message) => println!("{message}"),
@@ -8164,7 +8221,11 @@ fn main() {
                     window_min_size: Some(size(px(920.), px(620.))),
                     focus: !preserve_foreground,
                     titlebar: Some(TitlebarOptions {
-                        title: Some(startup_mode.window_title().into()),
+                        title: Some(
+                            profile_startup
+                                .window_title(startup_mode.window_title())
+                                .into(),
+                        ),
                         ..Default::default()
                     }),
                     app_id: Some("OmniTrigger".into()),
@@ -8203,6 +8264,8 @@ fn main() {
                                 wheel: initial_wheel,
                                 wheel_target: wheel_launch_target,
                                 wheel_editor,
+                                listen: profile_startup.listen,
+                                test_profile: profile_startup.test_name.clone(),
                             },
                             main_window,
                             title_bar,

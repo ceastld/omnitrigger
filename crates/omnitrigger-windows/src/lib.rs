@@ -122,6 +122,14 @@ pub use system_hud_window::{
 };
 
 #[cfg(windows)]
+mod data_root;
+#[cfg(windows)]
+pub use data_root::{
+    ask_yes_no_cancel, final_file_path, probe_final_directory, relaunch_via_shell,
+    show_error_dialog,
+};
+
+#[cfg(windows)]
 mod process_paths;
 #[cfg(windows)]
 pub use process_paths::{documents_dir, running_process_paths};

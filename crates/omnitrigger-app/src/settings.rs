@@ -2564,6 +2564,16 @@ mod tests {
     }
 
     #[test]
+    fn ui_browse_profile_fixture_stays_loadable() {
+        let bindings = decode(include_str!(
+            "../../../tests/fixtures/profiles/ui-browse/bindings.json"
+        ))
+        .unwrap();
+        validate(&bindings).unwrap();
+        assert_eq!(bindings.len(), 24);
+    }
+
+    #[test]
     fn navigation_example_consumes_whole_press_and_maps_to_expected_keys() {
         use omnitrigger_core::{InputEvent, InputKind};
         let bindings = decode(include_str!("../../../examples/capslock-navigation.json")).unwrap();

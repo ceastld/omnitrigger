@@ -38,6 +38,18 @@ cargo run -p omnitrigger-windows --locked --example hook_smoke
 
 通过 `--config <文件路径>` 使用独立配置，例如 `.\target\debug\omnitrigger.exe --config .\.local\demo\bindings.json`；后续编辑会保存到该文件，适合隔离试用。
 
+需要反复使用的测试数据用测试配置档：数据保存在数据根的 `profiles\` 下，每次启动读写同一份，默认不安装 Hook，窗口标题与侧栏标明“测试数据”。
+
+```powershell
+.\target\debug\omnitrigger.exe --profile-create ui-browse --seed fixture:tests\fixtures\profiles\ui-browse --name 浏览视图
+.\target\debug\omnitrigger.exe --profile ui-browse           # 只打开界面
+.\target\debug\omnitrigger.exe --profile ui-browse --listen  # 需要验证真实输入时
+.\target\debug\omnitrigger.exe --profile-reset ui-browse     # 恢复种子数据
+.\target\debug\omnitrigger.exe --profile-list
+```
+
+`--data-root <目录>` 或环境变量 `OMNITRIGGER_HOME` 可改用另一个数据根。从打包应用（例如桌面 Agent 客户端）的终端启动时，程序会检测到系统对 `%LOCALAPPDATA%` 的重定向，并经系统外壳重启自身，确保读写真实数据目录。详见[配置档与数据目录设计](PROFILES.md)。
+
 使用 `--check-config` 可检查所选配置的格式、动作参数、组合冲突、同目录轮盘配置及轮盘引用，不安装 Hook 或执行动作：
 
 ```powershell

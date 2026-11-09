@@ -1,0 +1,673 @@
+{
+  "version": 17,
+  "bindings": [
+    {
+      "id": 1,
+      "held": [
+        {
+          "kind": "key",
+          "value": 20
+        }
+      ],
+      "activation": {
+        "kind": "press",
+        "value": {
+          "kind": "key",
+          "value": 79
+        }
+      },
+      "message": "退格",
+      "enabled": true,
+      "action": {
+        "kind": "send_shortcut",
+        "keys": [
+          8
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "held": [
+        {
+          "kind": "key",
+          "value": 20
+        }
+      ],
+      "activation": {
+        "kind": "press",
+        "value": {
+          "kind": "key",
+          "value": 73
+        }
+      },
+      "message": "光标上移",
+      "enabled": true,
+      "action": {
+        "kind": "send_shortcut",
+        "keys": [
+          38
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "held": [
+        {
+          "kind": "key",
+          "value": 20
+        }
+      ],
+      "activation": {
+        "kind": "press",
+        "value": {
+          "kind": "key",
+          "value": 74
+        }
+      },
+      "message": "光标左移",
+      "enabled": true,
+      "action": {
+        "kind": "send_shortcut",
+        "keys": [
+          37
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "held": [
+        {
+          "kind": "key",
+          "value": 20
+        }
+      ],
+      "activation": {
+        "kind": "press",
+        "value": {
+          "kind": "key",
+          "value": 75
+        }
+      },
+      "message": "光标下移",
+      "enabled": true,
+      "action": {
+        "kind": "send_shortcut",
+        "keys": [
+          40
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "held": [
+        {
+          "kind": "key",
+          "value": 20
+        }
+      ],
+      "activation": {
+        "kind": "press",
+        "value": {
+          "kind": "key",
+          "value": 76
+        }
+      },
+      "message": "光标右移",
+      "enabled": true,
+      "action": {
+        "kind": "send_shortcut",
+        "keys": [
+          39
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "held": [],
+      "activation": {
+        "kind": "hold",
+        "value": {
+          "button": {
+            "kind": "right"
+          },
+          "duration_ms": 300
+        }
+      },
+      "message": "打开触发面板",
+      "enabled": true,
+      "action": {
+        "kind": "show_panel"
+      }
+    },
+    {
+      "id": 7,
+      "held": [
+        {
+          "kind": "x1"
+        }
+      ],
+      "activation": {
+        "kind": "wheel_up"
+      },
+      "wheel": "packet",
+      "process_scope": {
+        "allow": [
+          "chrome",
+          "msedge",
+          "firefox"
+        ]
+      },
+      "pointer_scope": {
+        "allow": [
+          "chrome",
+          "msedge",
+          "firefox"
+        ]
+      },
+      "message": "侧键加上滚：上一标签",
+      "enabled": false,
+      "action": {
+        "kind": "send_shortcut",
+        "keys": [
+          163,
+          161,
+          9
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "held": [
+        {
+          "kind": "x1"
+        }
+      ],
+      "activation": {
+        "kind": "wheel_down"
+      },
+      "wheel": "packet",
+      "process_scope": {
+        "allow": [
+          "chrome",
+          "msedge",
+          "firefox"
+        ]
+      },
+      "pointer_scope": {
+        "allow": [
+          "chrome",
+          "msedge",
+          "firefox"
+        ]
+      },
+      "message": "侧键加下滚：下一标签",
+      "enabled": false,
+      "action": {
+        "kind": "send_shortcut",
+        "keys": [
+          163,
+          9
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "held": [
+        {
+          "kind": "x1"
+        }
+      ],
+      "activation": {
+        "kind": "press",
+        "value": {
+          "kind": "right"
+        }
+      },
+      "process_scope": {
+        "allow": [
+          "chrome",
+          "msedge",
+          "firefox"
+        ]
+      },
+      "pointer_scope": {
+        "allow": [
+          "chrome",
+          "msedge",
+          "firefox"
+        ]
+      },
+      "message": "侧键加右键：关闭标签",
+      "enabled": false,
+      "action": {
+        "kind": "send_shortcut",
+        "keys": [
+          163,
+          87
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "held": [],
+      "activation": {
+        "kind": "wheel_up"
+      },
+      "conditions": [
+        {
+          "kind": "pointer_region",
+          "region": {
+            "kind": "screen_edge_segment",
+            "edge": "left",
+            "thickness_px": 8,
+            "start_inset_px": 8,
+            "end_inset_px": 0
+          }
+        }
+      ],
+      "message": "左边缘上滚增加所在屏幕亮度",
+      "enabled": true,
+      "action": {
+        "kind": "adjust_system",
+        "target": "brightness",
+        "delta_percent": 5
+      }
+    },
+    {
+      "id": 11,
+      "held": [],
+      "activation": {
+        "kind": "wheel_down"
+      },
+      "conditions": [
+        {
+          "kind": "pointer_region",
+          "region": {
+            "kind": "screen_edge_segment",
+            "edge": "left",
+            "thickness_px": 8,
+            "start_inset_px": 8,
+            "end_inset_px": 0
+          }
+        }
+      ],
+      "message": "左边缘下滚减少所在屏幕亮度",
+      "enabled": true,
+      "action": {
+        "kind": "adjust_system",
+        "target": "brightness",
+        "delta_percent": -5
+      }
+    },
+    {
+      "id": 12,
+      "held": [],
+      "activation": {
+        "kind": "wheel_up"
+      },
+      "conditions": [
+        {
+          "kind": "pointer_region",
+          "region": {
+            "kind": "screen_edge_segment",
+            "edge": "right",
+            "thickness_px": 8,
+            "start_inset_px": 8,
+            "end_inset_px": 0
+          }
+        }
+      ],
+      "message": "右边缘上滚增加所在屏幕亮度",
+      "enabled": true,
+      "action": {
+        "kind": "adjust_system",
+        "target": "brightness",
+        "delta_percent": 5
+      }
+    },
+    {
+      "id": 13,
+      "held": [],
+      "activation": {
+        "kind": "wheel_down"
+      },
+      "conditions": [
+        {
+          "kind": "pointer_region",
+          "region": {
+            "kind": "screen_edge_segment",
+            "edge": "right",
+            "thickness_px": 8,
+            "start_inset_px": 8,
+            "end_inset_px": 0
+          }
+        }
+      ],
+      "message": "右边缘下滚减少所在屏幕亮度",
+      "enabled": true,
+      "action": {
+        "kind": "adjust_system",
+        "target": "brightness",
+        "delta_percent": -5
+      }
+    },
+    {
+      "id": 14,
+      "held": [],
+      "activation": {
+        "kind": "wheel_up"
+      },
+      "conditions": [
+        {
+          "kind": "pointer_region",
+          "region": {
+            "kind": "screen_edge",
+            "edge": "top",
+            "thickness_px": 8
+          }
+        }
+      ],
+      "message": "上边缘上滚增加音量",
+      "enabled": true,
+      "action": {
+        "kind": "send_shortcut",
+        "keys": [
+          175
+        ]
+      }
+    },
+    {
+      "id": 15,
+      "held": [],
+      "activation": {
+        "kind": "wheel_down"
+      },
+      "conditions": [
+        {
+          "kind": "pointer_region",
+          "region": {
+            "kind": "screen_edge",
+            "edge": "top",
+            "thickness_px": 8
+          }
+        }
+      ],
+      "message": "上边缘下滚减少音量",
+      "enabled": true,
+      "action": {
+        "kind": "send_shortcut",
+        "keys": [
+          174
+        ]
+      }
+    },
+    {
+      "id": 16,
+      "held": [
+        {
+          "kind": "key",
+          "value": 162
+        },
+        {
+          "kind": "key",
+          "value": 164
+        }
+      ],
+      "activation": {
+        "kind": "press",
+        "value": {
+          "kind": "key",
+          "value": 124
+        }
+      },
+      "message": "输入字面文本",
+      "enabled": false,
+      "action": {
+        "kind": "local",
+        "version": 1,
+        "steps": [
+          {
+            "kind": "input_text",
+            "text": "$${literal} $$$$ 文😀 \\"
+          }
+        ]
+      }
+    },
+    {
+      "id": 17,
+      "held": [
+        {
+          "kind": "key",
+          "value": 162
+        }
+      ],
+      "activation": {
+        "kind": "press",
+        "value": {
+          "kind": "key",
+          "value": 120
+        }
+      },
+      "process_scope": {
+        "identity": "shell_context",
+        "allow": [
+          "explorer"
+        ]
+      },
+      "message": "文件窗口中的 Ctrl+F9",
+      "enabled": false,
+      "action": {
+        "kind": "notification"
+      }
+    },
+    {
+      "id": 18,
+      "held": [
+        {
+          "kind": "key",
+          "value": 162
+        }
+      ],
+      "activation": {
+        "kind": "press",
+        "value": {
+          "kind": "key",
+          "value": 120
+        }
+      },
+      "process_scope": {
+        "identity": "shell_context",
+        "allow": [
+          "desktop"
+        ]
+      },
+      "message": "桌面中的 Ctrl+F9",
+      "enabled": false,
+      "action": {
+        "kind": "notification"
+      }
+    },
+    {
+      "id": 19,
+      "held": [
+        {
+          "kind": "key",
+          "value": 162
+        }
+      ],
+      "activation": {
+        "kind": "press",
+        "value": {
+          "kind": "key",
+          "value": 120
+        }
+      },
+      "process_scope": {
+        "identity": "shell_context",
+        "allow": [
+          "taskbar"
+        ]
+      },
+      "message": "任务栏中的 Ctrl+F9",
+      "enabled": false,
+      "action": {
+        "kind": "notification"
+      }
+    },
+    {
+      "id": 20,
+      "held": [
+        {
+          "kind": "key",
+          "value": 32
+        }
+      ],
+      "activation": {
+        "kind": "press",
+        "value": {
+          "kind": "key",
+          "value": 75
+        }
+      },
+      "keyboard": {
+        "matching": {
+          "kind": "captured",
+          "priority": 1
+        },
+        "retained_prefix": {
+          "key": {
+            "kind": "key",
+            "value": 32
+          },
+          "quiet_ms": 50,
+          "fast_ms": 50
+        },
+        "repeat": true,
+        "restore_on_tap": true,
+        "tap_timeout_ms": 1500
+      },
+      "enabled": false,
+      "message": "空格保留原功能层的 K",
+      "action": {
+        "kind": "notification"
+      }
+    },
+    {
+      "id": 21,
+      "held": [
+        {
+          "kind": "key",
+          "value": 32
+        },
+        {
+          "kind": "key",
+          "value": 71
+        }
+      ],
+      "activation": {
+        "kind": "press",
+        "value": {
+          "kind": "key",
+          "value": 75
+        }
+      },
+      "keyboard": {
+        "matching": {
+          "kind": "captured",
+          "priority": 0
+        },
+        "retained_prefix": {
+          "key": {
+            "kind": "key",
+            "value": 32
+          },
+          "quiet_ms": 50,
+          "fast_ms": 50
+        },
+        "repeat": true,
+        "restore_on_tap": true,
+        "tap_timeout_ms": 1500
+      },
+      "enabled": false,
+      "message": "空格与 G 捕获后按 K",
+      "action": {
+        "kind": "notification"
+      }
+    },
+    {
+      "id": 22,
+      "held": [
+        {
+          "kind": "key",
+          "value": 32
+        }
+      ],
+      "activation": {
+        "kind": "press",
+        "value": {
+          "kind": "x2"
+        }
+      },
+      "keyboard": {
+        "matching": {
+          "kind": "captured",
+          "priority": 2
+        },
+        "retained_prefix": {
+          "key": {
+            "kind": "key",
+            "value": 32
+          },
+          "quiet_ms": 50,
+          "fast_ms": 50
+        },
+        "restore_on_tap": true,
+        "tap_timeout_ms": 1500
+      },
+      "enabled": false,
+      "message": "空格与鼠标侧键",
+      "action": {
+        "kind": "notification"
+      }
+    },
+    {
+      "id": 23,
+      "held": [
+        {
+          "kind": "x1"
+        }
+      ],
+      "activation": {
+        "kind": "wheel_up"
+      },
+      "wheel": "packet",
+      "message": "侧键加上滚：每个非零事件执行一次",
+      "enabled": false,
+      "action": {
+        "kind": "notification"
+      }
+    },
+    {
+      "id": 24,
+      "held": [
+        {
+          "kind": "x1"
+        }
+      ],
+      "activation": {
+        "kind": "wheel_up"
+      },
+      "wheel": "packet",
+      "pointer_scope": {
+        "allow": [
+          "notepad"
+        ]
+      },
+      "message": "指针在记事本内：侧键加上滚",
+      "enabled": false,
+      "action": {
+        "kind": "notification"
+      }
+    }
+  ]
+}
