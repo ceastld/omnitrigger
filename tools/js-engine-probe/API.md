@@ -70,6 +70,8 @@ return { submitted: true };
 
 捕获不枚举、不激活窗口，不把进程身份当作浏览器 `windowId` 到 HWND 的关联。发送返回 `{submitted:true}` 仅确认系统接纳输入；输入前明确拒绝为 `not_started`，进入平台提交后未获确认的失败为 `unknown`。租约使用宿主单调时钟并受动作总期限约束，不自动重试。应用和轻量宿主须同时具备这些入口；独立引擎 CLI 没有应用目标桥接时明确报错。
 
+`sendShortcut`、`sendKeySequence` 和 `sendShortcutTo` 的按键参数只接受键盘 VK；鼠标按钮 VK `1/2/4/5/6` 在调用 Native 前以 `invalid_input`、`not_started` 拒绝，不产生键盘或鼠标输入。错误的 `method` 分别为 `keyboard.shortcut`、`keyboard.sequence`、`target.keyboard.shortcut`。这三项键盘接口不负责鼠标按钮的按下、释放或所有权收尾。
+
 ## 程序输出采集
 
 `ctx.process.capture` 在 Windows 上共用一份 Rust 采集后端：Boa、QuickJS 同步返回，Node 返回 Promise，须逐次 `await`。应用内三种运行时均通过应用原生桥接采集，不要求原目标窗口；宿主仍可拒绝不支持的调用。需要更新应用和相应宿主；类型声明或示例更新不能为旧构建增加能力。应用绑定的轻量脚本在建桥失败或调用失败时不会退回引擎本地启动，Node 无原生桥接时也明确失败，不回退 `run`。已有两种程序输出配方见[程序输出通知动作](../../examples/actions/process-output/)。
@@ -263,3 +265,11 @@ function main(ctx) {
 轻量宿主同步提供 getWindowGeometry、setWindowRect、getPointerState、getPointingRoot、handoffPointingRoot、trackWindowDrag，以及 getWindowGeometryFor、setWindowRectFor、restoreWindowFor、toggleMaximizeWindowFor、trackWindowDragFor。它们需要真实 Native 上下文，不能由单独的动作作用域代替。参数、预算、目标租约、取消与 unknown 规则见[窗口与指针接口](../../docs/WINDOW_ACTION_API.md)。
 
 `ctx.fs.sortLogicalPaths` 不解析路径或查询文件，只把给定完整文本交给本次Windows宿主排序。相等比较项不承诺稳定顺序；NUL按Win32终止比较，但回执保留NUL及后缀原文。排序沿用每次动作的宿主调用计数、取消和5秒传输限制；坏UTF-8/JSON、内容或重复计数不符的回执为`fs_error/not_started`，不会自动重试或转为JS排序。
+
+## Explorer 选区读取的失败阶段
+
+`ctx.desktop.explorerContext()` 保留原请求和成功形状。显式传入 `{selectionFailureStage:true}` 时，匹配的 Windows 宿主可以额外报告 `selection_unavailable_after_directory` 错误；Node 使用 `await`，Script 同步调用。该接口只读取上下文，不复制选区或访问剪贴板。
+
+新错误码表示宿主已验证非空文件系统目录，随后选区主读取发生白名单内的 `E_FAIL`，并在同一目标、目录和视图身份复核后确认仍可交付该证据。错误仍须同时带有 `method:'explorer.context'`、`effectState:'not_started'`；它不是成功的空选区。取消、超时、目标或目录变化、校验失败及其它 HRESULT 不升级为此码。脚本若选择复制回退，应另外调用带有原目标守卫的复制接口。
+
+选项只接受一个自有数据属性 `selectionFailureStage:true`，拒绝空对象、false、访问器及额外字段。旧宿主可能拒绝新增参数；SDK 不会自动改成无参请求重试。省略选项时不会请求阶段证据，成功快照仍只有 `currentDirectory` 和 `selectedPaths`。目录复核不能使目录与选区读取成为原子事务。

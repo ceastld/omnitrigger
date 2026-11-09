@@ -63,3 +63,16 @@ const nodeDesktop:Pick<ActionContext['desktop'],DesktopMethod>=node.desktop;
 const scriptDesktop:Pick<ScriptContext['desktop'],DesktopMethod>=script.desktop;
 void [nodePromise,checkNode,nodeSnapshot,scriptSnapshot,directory,selected,scriptPromise,nonNullable,mutable,
   nodeEmpty,scriptEmpty,nodeDesktop,scriptDesktop];
+
+// 仅显式true重载，零参数原返回类型保持。
+const stageNode:Promise<ExplorerContextSnapshot>=node.desktop.explorerContext({selectionFailureStage:true});
+const stageScript:ScriptExplorerContextSnapshot=script.desktop.explorerContext({selectionFailureStage:true});
+for (const context of [node,script]) {
+  // @ts-expect-error 不是可选参数，显式undefined仍拒绝。
+  context.desktop.explorerContext(undefined);
+  // @ts-expect-error false不能请求阶段证明。
+  context.desktop.explorerContext({selectionFailureStage:false});
+  // @ts-expect-error 不接受额外选项。
+  context.desktop.explorerContext({selectionFailureStage:true,other:true});
+}
+void [stageNode,stageScript];

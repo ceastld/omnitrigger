@@ -51,7 +51,9 @@ impl DesktopHost {
         cancellation: &CancellationToken,
         deadline: Option<Instant>,
     ) -> Result<Value, ActionError> {
-        crate::explorer_context_helper::options(params)?;
+        let selection_failure_stage = crate::explorer_context_helper::options(params)?;
+        #[cfg(not(windows))]
+        let _ = selection_failure_stage;
         crate::explorer_context_helper::check_action(cancellation, deadline)?;
         #[cfg(windows)]
         {
@@ -59,7 +61,12 @@ impl DesktopHost {
                 .target
                 .as_ref()
                 .map_err(|_| crate::explorer_context_helper::fault("target_unavailable"))?;
-            crate::explorer_context_helper::read(target, cancellation, deadline)
+            crate::explorer_context_helper::read_with_selection_failure_stage(
+                target,
+                cancellation,
+                deadline,
+                selection_failure_stage,
+            )
         }
         #[cfg(not(windows))]
         Err(crate::explorer_context_helper::fault("unsupported_target"))
@@ -2431,6 +2438,39 @@ mod explorer_context_dispatch_tests {
             target: Err(error("target_unavailable", "synthetic", "not_started")),
         }
     }
+    #[test]
+    fn opted_in_dispatch_keeps_cancel_deadline_and_input_checks_before_helper() {
+        let host = unavailable();
+        let token = CancellationToken::new();
+        let opted = json!({"selection_failure_stage":true});
+        assert_eq!(
+            host.call_with_deadline("explorer.context", opted.clone(), &token, Instant::now())
+                .unwrap_err()
+                .code,
+            "timeout"
+        );
+        token.cancel();
+        for result in [
+            host.call("explorer.context", opted.clone(), &token),
+            host.call_with_deadline("explorer.context", opted, &token, Instant::now()),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "cancelled");
+            assert_eq!(error.method.as_deref(), Some("explorer.context"));
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        }
+        assert_eq!(
+            host.call(
+                "explorer.context",
+                json!({"selection_failure_stage":false}),
+                &token
+            )
+            .unwrap_err()
+            .code,
+            "invalid_input"
+        );
+    }
+
     #[test]
     fn actual_dispatches_refuse_override_and_cancel_before_helper() {
         let host = unavailable();

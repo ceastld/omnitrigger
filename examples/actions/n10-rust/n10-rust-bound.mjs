@@ -26,7 +26,7 @@ function inputs(ctx) {
   if(!record(p)||p.present!==true||!own(p,'value')||Reflect.ownKeys(p).length!==2
       ||p.value!==null&&typeof p.value!=='string') return {error:fail('explicit_action_parameter_required')};
   const command=p.value===null||p.value===''?'clip toggle':p.value;
-  if(!command.trim()||command.includes('\0')||command.length>8192) return {error:fail('unsupported_command_line')};
+  if(!command.trim()||command.startsWith('-')||command.includes('\0')||command.length>8192) return {error:fail('unsupported_command_line')};
   return {value,command};
 }
 

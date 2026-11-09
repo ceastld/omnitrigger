@@ -71,6 +71,10 @@ function createDesktopApi(invoke) {
     const result=invoke(method,params);
     return result && typeof result.then==='function' ? result.then(value=>trackingResult(method,value)) : trackingResult(method,result);
   }
+  // 鼠标按钮VK不是键盘输入；真实鼠标按下/释放需要独立的所有权与收尾协议。
+  function keyboardVirtualKey(key) {
+    return Number.isInteger(key) && key >= 1 && key <= 254 && ![1,2,4,5,6].includes(key);
+  }
   function keyTiming(options, count, method) {
     const value = options?.keyDownDelayMs === undefined ? 0 : options.keyDownDelayMs;
     if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some(key => key !== 'keyDownDelayMs')
@@ -547,7 +551,18 @@ function capturedWindow(args, count, method, buildParams, validate=value=>value)
   function explorerContext(args) {
     const method = 'explorer.context';
     const fault = code => Object.assign(new Error('原资源管理器上下文读取未获确认；请检查错误代码。'), {code,method,effectState:'not_started'});
-    if (args.length !== 0) throw fault('invalid_input');
+    let selectionFailureStage = false;
+    if (args.length !== 0) {
+      try {
+        const options = args[0];
+        if (args.length !== 1 || !options || typeof options !== 'object' || Array.isArray(options)) throw new Error();
+        const keys = Reflect.ownKeys(options);
+        const descriptor = Object.getOwnPropertyDescriptor(options, 'selectionFailureStage');
+        if (keys.length !== 1 || keys[0] !== 'selectionFailureStage' || !descriptor
+            || !Object.hasOwn(descriptor, 'value') || descriptor.value !== true) throw new Error();
+        selectionFailureStage = true;
+      } catch (_) { throw fault('invalid_input'); }
+    }
     const validPath = path => {
       if (!dataText(path,1024,false) || /[\x00-\x1f<>"|?*]/.test(path)) return false;
       const local = /^[A-Za-z]:\\/.test(path) && !path.slice(2).includes(':');
@@ -563,9 +578,15 @@ function capturedWindow(args, count, method, buildParams, validate=value=>value)
           || new Set(value.selectedPaths.map(path => path.toLowerCase())).size !== value.selectedPaths.length) throw fault('invalid_response');
       return Object.freeze({currentDirectory:value.currentDirectory,selectedPaths:Object.freeze([...value.selectedPaths])});
     };
-    const failure = cause => {throw fault(typeof cause?.code === 'string' && /^[a-z_]{1,64}$/.test(cause.code) ? cause.code : 'native_bridge_failed');};
+    const failure = cause => {
+      if (selectionFailureStage && cause?.code === 'selection_unavailable_after_directory') {
+        // 只转交Native给出的证明错误；不把未知效果/缺失method升级为可复制证据。
+        throw Object.assign(fault('selection_unavailable_after_directory'), {method:cause.method,effectState:cause.effectState});
+      }
+      throw fault(typeof cause?.code === 'string' && /^[a-z_]{1,64}$/.test(cause.code) ? cause.code : 'native_bridge_failed');
+    };
     try {
-      const value = invoke(method,{});
+      const value = invoke(method,selectionFailureStage ? {selection_failure_stage:true} : {});
       return value && typeof value.then === 'function' ? value.then(result,failure) : result(value);
     } catch(cause) { return failure(cause); }
   }
@@ -755,8 +776,8 @@ function capturedWindow(args, count, method, buildParams, validate=value=>value)
     sendShortcut: (keys, options = {}) => {
       const method = 'keyboard.shortcut';
       if (!Array.isArray(keys) || keys.length < 1 || keys.length > 5
-          || keys.some(key => !Number.isInteger(key) || key < 1 || key > 254)) {
-        invalid(method, '快捷键需要 1–5 个明确的 VK 整数；修饰键在前。');
+          || keys.some(key => !keyboardVirtualKey(key))) {
+        invalid(method, '快捷键需要 1–5 个明确的键盘 VK 整数；修饰键在前，不接受鼠标按钮 VK。');
       }
       if (options?.timing !== undefined) {
         const timing = options.timing;
@@ -777,8 +798,8 @@ function capturedWindow(args, count, method, buildParams, validate=value=>value)
     sendKeySequence: (modifiers, keys, options = {}) => {
       const method = 'keyboard.sequence';
       if (!Array.isArray(modifiers) || modifiers.length > 4 || !Array.isArray(keys) || keys.length < 1 || keys.length > 16
-          || [...modifiers,...keys].some(key => !Number.isInteger(key) || key < 1 || key > 254)) {
-        invalid(method, '连续按键需要 0–4 个修饰键和 1–16 个普通键，使用明确 VK 整数。');
+          || [...modifiers,...keys].some(key => !keyboardVirtualKey(key))) {
+        invalid(method, '连续按键需要 0–4 个修饰键和 1–16 个普通键，不接受鼠标按钮 VK。');
       }
       return invoke(method, {modifiers, keys, key_down_delay_ms:keyTiming(options, keys.length, method)});
     },

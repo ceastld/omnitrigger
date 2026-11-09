@@ -206,6 +206,12 @@ function nativeCall(method, params) {
             return finish(invalidClass);
           }
           const failure = fail(error.code, error.message, error.effect_state ?? 'unknown');
+          // 新证明错误只保留Native元数据；不得借只读正规化把未知/缺失字段提升成证明。
+          if (method === 'explorer.context' && params?.selection_failure_stage === true
+              && error.code === 'selection_unavailable_after_directory') {
+            failure.method = error.method;
+            failure.effectState = error.effect_state;
+          }
           // 不让dataRead的通用not_started覆盖专用错误的原effect。
           if (preciseClass) failure.effectState = error.effect_state;
           if (!stat && !history && !capture && Array.isArray(error.required_permissions)) failure.requiredPermissions = error.required_permissions;

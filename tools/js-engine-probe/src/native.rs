@@ -302,6 +302,10 @@ fn call_controlled(
             "not_started",
         ));
     }
+    let selection_stage_opt_in = method == "explorer.context"
+        && params.as_object().is_some_and(|params| {
+            params.len() == 1 && params.get("selection_failure_stage") == Some(&Value::Bool(true))
+        });
     let mut request = serde_json::to_vec(
         &json!({"token":connection.token,"id":id,"method":method,"params":params}),
     )
@@ -569,10 +573,20 @@ fn call_controlled(
             },
         ));
     }
-    parse_response(&bytes, id, &method)
+    parse_response_with_stage(&bytes, id, &method, selection_stage_opt_in)
 }
 
+#[cfg(test)]
 fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError> {
+    parse_response_with_stage(bytes, id, method, false)
+}
+
+fn parse_response_with_stage(
+    bytes: &[u8],
+    id: u32,
+    method: &str,
+    selection_stage_opt_in: bool,
+) -> Result<Value, ApiError> {
     let invalid = || {
         fault(
             if file_result_method(method)
@@ -618,6 +632,22 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty() && s.len() <= 16384)
                 .ok_or_else(invalid)?;
+            // 在method/effect缺省和data_read正规化之前拒绝不完整的证明元组。
+            if method == "explorer.context"
+                && code == "selection_unavailable_after_directory"
+                && (!selection_stage_opt_in
+                    || error.get("method").and_then(Value::as_str) != Some("explorer.context")
+                    || error.get("effect_state").and_then(Value::as_str) != Some("not_started"))
+            {
+                let mut invalid_stage = fault(
+                    "invalid_response",
+                    "资源管理器阶段错误字段不匹配或请求未明确启用。",
+                    method,
+                    "unknown",
+                );
+                invalid_stage.effect_state = Some("unknown".into());
+                return Err(invalid_stage);
+            }
             if code == "window_class_blocked"
                 && method != "fs.sort_logical_paths"
                 && (!matches!(
@@ -740,6 +770,152 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explorer_stage_rpc_requires_original_opt_in_and_exact_proof_fields() {
+        use std::io::BufRead;
+        let stage = "selection_unavailable_after_directory";
+        for (name, params, code, proof_method, proof_effect, expected_code, expected_effect) in [
+            (
+                "qualified",
+                json!({"selection_failure_stage":true}),
+                stage,
+                Some("explorer.context"),
+                Some("not_started"),
+                stage,
+                "not_started",
+            ),
+            (
+                "missing_method",
+                json!({"selection_failure_stage":true}),
+                stage,
+                None,
+                Some("not_started"),
+                "invalid_response",
+                "unknown",
+            ),
+            (
+                "wrong_method",
+                json!({"selection_failure_stage":true}),
+                stage,
+                Some("clipboard.read_data"),
+                Some("not_started"),
+                "invalid_response",
+                "unknown",
+            ),
+            (
+                "missing_effect",
+                json!({"selection_failure_stage":true}),
+                stage,
+                Some("explorer.context"),
+                None,
+                "invalid_response",
+                "unknown",
+            ),
+            (
+                "unknown_effect",
+                json!({"selection_failure_stage":true}),
+                stage,
+                Some("explorer.context"),
+                Some("unknown"),
+                "invalid_response",
+                "unknown",
+            ),
+            (
+                "default_request",
+                json!({}),
+                stage,
+                Some("explorer.context"),
+                Some("not_started"),
+                "invalid_response",
+                "unknown",
+            ),
+            (
+                "explicit_false",
+                json!({"selection_failure_stage":false}),
+                stage,
+                Some("explorer.context"),
+                Some("not_started"),
+                "invalid_response",
+                "unknown",
+            ),
+            (
+                "extra_options",
+                json!({"selection_failure_stage":true,"extra":1}),
+                stage,
+                Some("explorer.context"),
+                Some("not_started"),
+                "invalid_response",
+                "unknown",
+            ),
+            (
+                "legacy_error",
+                json!({}),
+                "selection_unavailable",
+                None,
+                Some("unknown"),
+                "selection_unavailable",
+                "not_started",
+            ),
+        ] {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let connection = Configuration {
+                port: listener.local_addr().unwrap().port(),
+                token: "a".repeat(64),
+            };
+            let expected_params = params.clone();
+            let server = thread::spawn(move || {
+                let until = Instant::now() + Duration::from_secs(2);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < until, "{name}: 未连接应用桥");
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("{name}: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut line = String::new();
+                std::io::BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let frame: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(frame["method"], "explorer.context", "{name}");
+                assert_eq!(frame["params"], expected_params, "{name}");
+                let mut error = json!({"code":code,"message":"private-input private-host-body"});
+                if let Some(method) = proof_method {
+                    error["method"] = json!(method);
+                }
+                if let Some(effect) = proof_effect {
+                    error["effect_state"] = json!(effect);
+                }
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({"id":frame["id"],"ok":false,"error":error})
+                )
+                .unwrap();
+            });
+            let result = call(connection, 1, "explorer.context".into(), params);
+            server.join().unwrap();
+            let error = result.unwrap_err();
+            assert_eq!(error.code, expected_code, "{name}: {error:?}");
+            assert_eq!(error.method.as_deref(), Some("explorer.context"), "{name}");
+            assert_eq!(
+                error.effect_state.as_deref(),
+                Some(expected_effect),
+                "{name}"
+            );
+            assert!(!error.message.contains("private-input"), "{name}");
+            assert!(!error.message.contains("private-host-body"), "{name}");
+        }
+    }
 
     #[test]
     fn logical_sort_transport_and_host_errors_are_pure_and_redacted() {

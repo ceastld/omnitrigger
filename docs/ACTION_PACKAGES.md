@@ -430,6 +430,8 @@ export default async ctx => {
 
 快捷键复用原生发送器的键位校验、已按住修饰键处理和输入标记。API 不确认应用是否已经关闭文档或完成其他业务操作。多步动作在每步发送前重新核验目标；发送时前台不再是原目标、目标失效、非法按键或取消会拒绝后续输入。核验不记录前台历史，不能检测两次调用之间切走又切回的情况。没有已开始副作用时错误的 `effectState` 为 `not_started`，输入发送失败或回执未确认时可能为 `unknown`；均不会自动重试。取消不撤销已提交的输入。
 
+`sendShortcut`、`sendKeySequence` 和 `sendShortcutTo` 的按键参数只接受键盘 VK；鼠标按钮 VK `1/2/4/5/6` 在调用 Native 前以 `invalid_input`、`not_started` 拒绝，不产生键盘或鼠标输入。错误的 `method` 分别为 `keyboard.shortcut`、`keyboard.sequence`、`target.keyboard.shortcut`。这三项键盘接口不负责鼠标按钮的按下、释放或所有权收尾。
+
 `effectState` 描述失败的这一次 API 调用，最终错误会保留该字段；它不表示脚本此前没有执行其他步骤。判断整段动作是否可以重试仍需结合业务结果。
 
 桌面调用须逐个 `await`，并发调用报 `desktop_busy`，每次动作最多 128 次桌面调用。单次回执等待最多 5 秒，仍受动作总运行时限限制；返回时尚有调用会报 `pending_desktop_calls`。桥接仅在本次调用期间监听回环地址，使用系统随机令牌，不占用脚本 stdout，也不新增常驻服务或桥接线程。它与脚本代码一样使用当前用户权限，不构成沙盒。

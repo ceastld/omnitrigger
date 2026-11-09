@@ -65,7 +65,7 @@ test('identity and display variant preserve original N10 action',()=>{
 test('entry is local package file and sole frozen implementation',()=>{
   assert.equal(path.dirname(entry),packageRoot);assert.equal(lstatSync(entry).isSymbolicLink(),false);
   assert.equal(typeof module.main,'function');
-  assert.equal(createHash('sha256').update(readFileSync(entry)).digest('hex'),'29b2a1f3c8f75d9d9f290bdca1026a89c1ea10cf52859d5c2d2d8b3aae68afb1');
+  assert.equal(createHash('sha256').update(readFileSync(entry)).digest('hex'),'574a00cffbf0b6a46e45648c3626006ea68081c93493077d3ce98f141fa3f87c');
   assert.deepEqual(readdirSync(packageRoot).filter(file=>file.endsWith('.mjs')||file.endsWith('.js')),['n10-rust-bound.mjs']);
 });
 test('source catalog config resolves to sibling actions and keeps binding disabled',()=>{

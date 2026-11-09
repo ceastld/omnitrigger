@@ -322,6 +322,11 @@ impl NativeBridge {
                         request.method.as_str(),
                         "system.open" | "system.open_file_in_parent"
                     );
+                    let selection_stage_opt_in = request.method == "explorer.context"
+                        && request.params.as_object().is_some_and(|params| {
+                            params.len() == 1
+                                && params.get("selection_failure_stage") == Some(&Value::Bool(true))
+                        });
                     let pure_data = request.method == "fs.sort_logical_paths";
                     let file_read =
                         matches!(request.method.as_str(), "fs.stat" | "fs.read_directory");
@@ -460,6 +465,21 @@ impl NativeBridge {
                         }
                     }
                     .map_err(|mut error| {
+                        // 阶段码是可复制证明；必须检查原Host字段，不能借只读正规化补齐。
+                        if request.method == "explorer.context"
+                            && error.code == "selection_unavailable_after_directory"
+                            && (!selection_stage_opt_in
+                                || error.method.as_deref() != Some("explorer.context")
+                                || error.effect_state.as_deref() != Some("not_started"))
+                        {
+                            let mut invalid = ActionError::new(
+                                "invalid_response",
+                                "资源管理器阶段错误字段不匹配或请求未明确启用。",
+                            );
+                            invalid.method = Some("explorer.context".into());
+                            invalid.effect_state = Some("unknown".into());
+                            return invalid;
+                        }
                         let precise_class_fault =
                             preserve_class_rejection(&request.method, &mut error);
                         if geometry {
@@ -891,6 +911,136 @@ mod window_bridge_tests {
         std::io::BufReader::new(peer).read_line(&mut line).unwrap();
         serde_json::from_str(&line).unwrap()
     }
+    #[test]
+    fn explorer_stage_bridge_requires_original_opt_in_and_exact_proof_fields() {
+        struct StageHost {
+            code: &'static str,
+            method: Option<&'static str>,
+            effect: Option<&'static str>,
+            calls: AtomicUsize,
+        }
+        impl NativeHost for StageHost {
+            fn call(
+                &self,
+                method: &str,
+                _: Value,
+                _: &CancellationToken,
+            ) -> Result<Value, ActionError> {
+                assert_eq!(method, "explorer.context");
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let mut error = ActionError::new(self.code, "private-input private-host-body");
+                error.method = self.method.map(str::to_owned);
+                error.effect_state = self.effect.map(str::to_owned);
+                Err(error)
+            }
+        }
+        let stage = "selection_unavailable_after_directory";
+        for (name, params, code, method, effect, expected_code, expected_effect) in [
+            (
+                "qualified",
+                json!({"selection_failure_stage":true}),
+                stage,
+                Some("explorer.context"),
+                Some("not_started"),
+                stage,
+                "not_started",
+            ),
+            (
+                "missing_method",
+                json!({"selection_failure_stage":true}),
+                stage,
+                None,
+                Some("not_started"),
+                "invalid_response",
+                "unknown",
+            ),
+            (
+                "wrong_method",
+                json!({"selection_failure_stage":true}),
+                stage,
+                Some("clipboard.read_data"),
+                Some("not_started"),
+                "invalid_response",
+                "unknown",
+            ),
+            (
+                "missing_effect",
+                json!({"selection_failure_stage":true}),
+                stage,
+                Some("explorer.context"),
+                None,
+                "invalid_response",
+                "unknown",
+            ),
+            (
+                "unknown_effect",
+                json!({"selection_failure_stage":true}),
+                stage,
+                Some("explorer.context"),
+                Some("unknown"),
+                "invalid_response",
+                "unknown",
+            ),
+            (
+                "default_request",
+                json!({}),
+                stage,
+                Some("explorer.context"),
+                Some("not_started"),
+                "invalid_response",
+                "unknown",
+            ),
+            (
+                "explicit_false",
+                json!({"selection_failure_stage":false}),
+                stage,
+                Some("explorer.context"),
+                Some("not_started"),
+                "invalid_response",
+                "unknown",
+            ),
+            (
+                "extra_options",
+                json!({"selection_failure_stage":true,"extra":1}),
+                stage,
+                Some("explorer.context"),
+                Some("not_started"),
+                "invalid_response",
+                "unknown",
+            ),
+            (
+                "legacy_error",
+                json!({}),
+                "selection_unavailable",
+                None,
+                Some("unknown"),
+                "selection_unavailable",
+                "not_started",
+            ),
+        ] {
+            let host = StageHost {
+                code,
+                method,
+                effect,
+                calls: AtomicUsize::new(0),
+            };
+            let response = exchange(&host, "explorer.context", params, &CancellationToken::new());
+            assert_eq!(host.calls.load(Ordering::SeqCst), 1, "{name}");
+            assert_eq!(response["ok"], false, "{name}: {response}");
+            assert_eq!(
+                response["error"]["code"], expected_code,
+                "{name}: {response}"
+            );
+            assert_eq!(response["error"]["method"], "explorer.context", "{name}");
+            assert_eq!(response["error"]["effect_state"], expected_effect, "{name}");
+            assert!(!response.to_string().contains("private-input"), "{name}");
+            assert!(
+                !response.to_string().contains("private-host-body"),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn logical_sort_bridge_is_pure_data_without_native_target_and_redacts_failures() {
         struct PureHost(AtomicUsize);
