@@ -162,6 +162,8 @@ impl<H: NativeHost> NativeHost for Host<H> {
             crate::script_open::open_file_in_parent(params, cancellation, deadline)
         } else if method == "fs.stat" {
             crate::script_fs::stat(params, cancellation, deadline)
+        } else if method == "fs.sort_logical_paths" {
+            crate::script_fs::sort_logical_paths(params, cancellation, deadline)
         } else if method == "fs.read_directory" {
             crate::script_fs::read_directory(params, cancellation, deadline)
         } else if method == "ui.notify" {

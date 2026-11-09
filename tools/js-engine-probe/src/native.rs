@@ -10,7 +10,7 @@ use std::{
 };
 
 const LIMIT: usize = 512 * 1024;
-pub const METHODS: [&str; 49] = [
+pub const METHODS: [&str; 50] = [
     "process.capture",
     "system.open",
     "system.open_file_in_parent",
@@ -23,6 +23,7 @@ pub const METHODS: [&str; 49] = [
     "history.remove",
     "fs.stat",
     "fs.read_directory",
+    "fs.sort_logical_paths",
     "ui.choose",
     "ui.notify",
     "ui.open_history",
@@ -92,6 +93,7 @@ fn result_wait_budget(method: &str, params: &Value) -> Result<Option<Duration>, 
 }
 
 fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiError {
+    let logical_sort = method == "fs.sort_logical_paths";
     let stat = matches!(method, "fs.stat" | "fs.read_directory");
     let data_read = matches!(
         method,
@@ -109,7 +111,12 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
         "history.list" | "history.get" | "history.append" | "history.remove"
     );
     ApiError {
-        code: (if history && code == "native_bridge_unavailable" {
+        code: (if logical_sort {
+            match code {
+                "invalid_input" | "cancelled" | "timeout" | "fs_unavailable" => code,
+                _ => "fs_unavailable",
+            }
+        } else if history && code == "native_bridge_unavailable" {
             "history_unavailable"
         } else if stat && code == "native_bridge_unavailable" {
             "fs_unavailable"
@@ -119,7 +126,9 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
             code
         })
         .into(),
-        message: if file_result_method(method) {
+        message: if logical_sort {
+            "字符串列表排序失败；请检查错误代码。".into()
+        } else if file_result_method(method) {
             "截图文件结果未获确认；不会自动重试。".into()
         } else if method == "process.capture" {
             "程序输出采集未完成，请检查错误代码。".into()
@@ -156,25 +165,31 @@ fn fault(code: &str, message: impl ToString, method: &str, effect: &str) -> ApiE
         } else {
             message.to_string()
         },
-        effect_state: Some(
-            if code != "window_class_blocked" && (stat || data_read || history_read) {
-                "not_started"
-            } else {
-                effect
-            }
-            .into(),
-        ),
+        effect_state:
+            Some(
+                if logical_sort
+                    || code != "window_class_blocked" && (stat || data_read || history_read)
+                {
+                    "not_started"
+                } else {
+                    effect
+                }
+                .into(),
+            ),
         method: Some(method.into()),
         required_permissions: Vec::new(),
     }
 }
 
-// 请求写入尝试前可证明未提交；开始写入后仅保守返回unknown。
+// 有副作用的请求写入尝试前可证明未提交；开始写入后仅保守返回unknown。
 fn brightness_transport_effect(
     method: &str,
     write_began: bool,
     fallback: &'static str,
 ) -> &'static str {
+    if method == "fs.sort_logical_paths" {
+        return "not_started";
+    }
     if matches!(
         method,
         "display.brightness_step"
@@ -279,6 +294,14 @@ fn call_controlled(
             "not_started",
         ));
     }
+    if method == "fs.sort_logical_paths" && !cfg!(windows) {
+        return Err(fault(
+            "fs_unavailable",
+            "此平台没有应用逻辑排序能力。",
+            &method,
+            "not_started",
+        ));
+    }
     let mut request = serde_json::to_vec(
         &json!({"token":connection.token,"id":id,"method":method,"params":params}),
     )
@@ -317,6 +340,7 @@ fn call_controlled(
             method.as_str(),
             "fs.stat"
                 | "fs.read_directory"
+                | "fs.sort_logical_paths"
                 | "ui.toggle_history"
                 | "ui.action_hint"
                 | "clipboard.read_data"
@@ -413,6 +437,7 @@ fn call_controlled(
                     method.as_str(),
                     "fs.stat"
                         | "fs.read_directory"
+                        | "fs.sort_logical_paths"
                         | "ui.toggle_history"
                         | "ui.action_hint"
                         | "clipboard.read_data"
@@ -594,6 +619,7 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                 .filter(|s| !s.is_empty() && s.len() <= 16384)
                 .ok_or_else(invalid)?;
             if code == "window_class_blocked"
+                && method != "fs.sort_logical_paths"
                 && (!matches!(
                     method,
                     "window.geometry" | "window.set_rect" | "window.drag"
@@ -628,6 +654,7 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
                 method,
                 "fs.stat"
                     | "fs.read_directory"
+                    | "fs.sort_logical_paths"
                     | "clipboard.read_data"
                     | "explorer.context"
                     | "selection.copy_data"
@@ -678,7 +705,8 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
             let mut error = fault(code, message, reported_method, effect);
             if !matches!(
                 method,
-                "history.list"
+                "fs.sort_logical_paths"
+                    | "history.list"
                     | "history.get"
                     | "history.append"
                     | "history.remove"
@@ -712,6 +740,112 @@ fn parse_response(bytes: &[u8], id: u32, method: &str) -> Result<Value, ApiError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logical_sort_transport_and_host_errors_are_pure_and_redacted() {
+        assert!(METHODS.contains(&"fs.sort_logical_paths"));
+        for wrote in [false, true] {
+            assert_eq!(
+                brightness_transport_effect("fs.sort_logical_paths", wrote, "unknown"),
+                "not_started"
+            );
+        }
+        for (code, expected) in [
+            ("invalid_input", "invalid_input"),
+            ("cancelled", "cancelled"),
+            ("timeout", "timeout"),
+            ("fs_unavailable", "fs_unavailable"),
+            ("native_bridge_failed", "fs_unavailable"),
+            ("private-os-code", "fs_unavailable"),
+            ("window_class_blocked", "fs_unavailable"),
+        ] {
+            let frame = format!(
+                "{}\n",
+                json!({"id":1,"ok":false,"error":{"code":code,"message":"private-input private-os-details","effect_state":"unknown","method":"fs.sort_logical_paths","required_permissions":["private-input"]}})
+            );
+            let error = parse_response(frame.as_bytes(), 1, "fs.sort_logical_paths").unwrap_err();
+            assert_eq!(error.code, expected);
+            assert_eq!(error.method.as_deref(), Some("fs.sort_logical_paths"));
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+            assert!(error.required_permissions.is_empty());
+            assert!(!error.message.contains("private-input"));
+            assert!(!error.message.contains("private-os-details"));
+        }
+        let frame = b"{\"id\":1,\"ok\":false,\"error\":{\"code\":\"timeout\",\"message\":\"private-input\",\"method\":\"fs.stat\"}}\n";
+        let error = parse_response(frame, 1, "fs.sort_logical_paths").unwrap_err();
+        assert_eq!(error.code, "fs_unavailable");
+        assert_eq!(error.method.as_deref(), Some("fs.sort_logical_paths"));
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn logical_sort_rpc_only_forwards_to_the_app_bridge_and_preserves_full_strings() {
+        use std::io::BufRead;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let connection = Configuration {
+            port: listener.local_addr().unwrap().port(),
+            token: "a".repeat(64),
+        };
+        let input = json!(["", "relative20", "a\0tail", "relative3", "relative3"]);
+        let expected = input.clone();
+        let server = thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(2);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < until, "未发出应用桥请求");
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let frame: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(frame["method"], "fs.sort_logical_paths");
+            assert_eq!(frame["params"], json!({"paths":expected}));
+            // 这里只证明转发与数组ABI；排序结果由应用后端测试和Framework oracle覆盖。
+            writeln!(
+                stream,
+                "{}",
+                json!({"id":frame["id"],"ok":true,"value":expected})
+            )
+            .unwrap();
+        });
+        let result = call(
+            connection,
+            1,
+            "fs.sort_logical_paths".into(),
+            json!({"paths":input}),
+        );
+        server.join().unwrap();
+        assert_eq!(result.unwrap(), input);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn logical_sort_non_windows_does_not_connect_to_a_local_substitute() {
+        let error = call(
+            Configuration {
+                port: 1,
+                token: "a".repeat(64),
+            },
+            1,
+            "fs.sort_logical_paths".into(),
+            json!({"paths":["relative"]}),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "fs_unavailable");
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+    }
 
     #[test]
     fn file_result_budget_covers_capture_without_using_the_default_five_seconds() {

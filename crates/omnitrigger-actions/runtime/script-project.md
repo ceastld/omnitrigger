@@ -13,3 +13,5 @@
 SDK 是创建时附带的类型快照，更新应用不会覆盖本工程。它提供补全和静态参数检查，不代替实际运行时校验：`any`、循环引用和非有限数等仍需作者检查；文件或系统操作可能产生副作用，失败后不会自动撤销或重试。
 
 同步函数或返回 Promise 的普通函数使用 `ScriptMain`。直接声明 `async function` 时使用 `/** @type {ScriptAsyncMain} */`：TypeScript 的 JSDoc 要求 async 函数的返回注释直接为 Promise，不能使用 JSON 与 Promise 的联合返回注释。两者使用相同的上下文，最终结果都必须是 JSON。
+
+`ctx.fs.sortLogicalPaths(paths)` 同步返回Windows逻辑排序后的冻结数组，Node对应方法返回Promise，须await。它只比较给定的完整字符串，不读文件/目录或要求前台目标；最多1024项、每项32767 UTF-16、`{paths}` UTF-8 JSON最多64KiB。空串/NUL/重复/相对文本保持内容；非Windows/缺桥为`fs_unavailable`，不使用JS近似排序。
