@@ -11,8 +11,10 @@ export function checkFileDirectoryTypes({
   syncDeclarationPath = join(repo, 'crates/omnitrigger-actions/runtime/script-types.d.ts'),
   asyncDeclarationPath = join(repo, 'crates/omnitrigger-actions/runtime/api.d.ts'),
   temporaryRoot = join(repo, '.tmp'),
+  selectors = ['files','directory','logical'],
 } = {}) {
   assert(ts && typeof ts.createProgram === 'function', '需要当前工具包的 TypeScript。');
+  assert(Array.isArray(selectors) && selectors.length > 0 && new Set(selectors).size === selectors.length && selectors.every(name => ['files','directory','logical'].includes(name)), '未知类型检查selector');
   mkdirSync(temporaryRoot, {recursive:true});
   const root = mkdtempSync(join(temporaryRoot, 'file-directory-types-'));
   const results = [];
@@ -41,7 +43,16 @@ export function checkFileDirectoryTypes({
       ['readonly', `const result=${directoryCall('{metadata:true}')};result.entries[0].metadata.ordinal=1;`, 'error'],
       ['precision-is-string', `const result=${directoryCall('{metadata:true}')};const ticks:number=result.entries[0].metadata.lastWriteTimeLocalTicks100ns;`, 'error'],
     ];
-    for (const [group, cases] of [['files', files], ['directory', directory]]) {
+    const logical = [
+      ['valid', "const paths:readonly string[]=['relative','','a\\0suffix'];const value:"+(kind==='node'?'Promise<readonly string[]>':'readonly string[]')+'=ctx.fs.sortLogicalPaths(paths);', null],
+      ['missing', 'ctx.fs.sortLogicalPaths();', 2554],
+      ['bad-array', "ctx.fs.sortLogicalPaths('x');", 2345],
+      ['bad-item', 'ctx.fs.sortLogicalPaths([1]);', 2322],
+      ['options', 'ctx.fs.sortLogicalPaths([],{});', 2554],
+      ['readonly', 'const value=await ctx.fs.sortLogicalPaths([]);value.push("x");', 2339],
+      ['timing', 'const value:'+(kind==='node'?'readonly string[]':'Promise<readonly string[]>')+'=ctx.fs.sortLogicalPaths([]);', 'error'],
+    ];
+    for (const [group, cases] of [['files', files], ['directory', directory], ['logical', logical]].filter(([group])=>selectors.includes(group))) {
       for (const [name, body, expected] of cases) {
         const file = join(root, `${kind}-${group}-${name}.ts`);
         const header = kind === 'node'

@@ -60,7 +60,7 @@ function desktopCall(method, params) {
     const fileResult = method === 'raishot.capture_result' || method === 'raishot.release_result';
     const actionHint = method === 'ui.action_hint';
     const opening = method === 'system.open' || method === 'system.open_file_in_parent';
-    const statPath = method === 'fs.stat';
+    const statPath = method === 'fs.stat' || method === 'fs.sort_logical_paths';
     const browserMethod = method === 'browser.call' || method === 'browser.profiles';
     if (browserMethod && !nativeContext?.connection && !nativeContext?.error) throw Object.assign(new Error('浏览器调用需要本次应用桥。'),
         {code:'browser_unavailable',effectState:'not_started',method});
@@ -93,7 +93,7 @@ function desktopCall(method, params) {
             {code:'native_bridge_unavailable',effectState:'not_started',method});
         const cause = nativeContext?.error;
         const ui = method === 'ui.choose' || method === 'ui.notify' || method === 'ui.open_history' || method === 'ui.toggle_history' || actionHint;
-        if (method === 'fs.stat' || method === 'fs.read_directory') throw Object.assign(new Error('文件状态 API 需要本机宿主。'), {code:'fs_unavailable',effectState:'not_started',method});
+        if (method === 'fs.stat' || method === 'fs.read_directory' || method === 'fs.sort_logical_paths') throw Object.assign(new Error('文件状态 API 需要本机宿主。'), {code:'fs_unavailable',effectState:'not_started',method});
         const code = ui && cause?.code === 'desktop_unavailable' ? 'ui_unavailable' : cause?.code;
         throw Object.assign(new Error(cause?.message ?? (method.startsWith('browser.') ? '浏览器 API 需要 OmniTrigger 应用宿主。' : ui ? '此 UI API 需要 OmniTrigger 应用界面。' : '桌面 API 需要 OmniTrigger 本次动作的目标上下文。')), {
             code:code ?? (method.startsWith('browser.') ? 'browser_unavailable' : ui ? 'ui_unavailable' : 'desktop_unavailable'), effectState:cause?.effect_state ?? 'not_started', method,

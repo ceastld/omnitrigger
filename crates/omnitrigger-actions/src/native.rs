@@ -36,7 +36,7 @@ const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 49] = [
+const METHODS: [&str; 50] = [
     "actions.stop_other_instances",
     "state.read",
     "state.compare_and_swap",
@@ -49,6 +49,7 @@ const METHODS: [&str; 49] = [
     "history.remove",
     "fs.stat",
     "fs.read_directory",
+    "fs.sort_logical_paths",
     "ui.choose",
     "ui.notify",
     "ui.open_history",
@@ -321,6 +322,7 @@ impl NativeBridge {
                         request.method.as_str(),
                         "system.open" | "system.open_file_in_parent"
                     );
+                    let pure_data = request.method == "fs.sort_logical_paths";
                     let file_read =
                         matches!(request.method.as_str(), "fs.stat" | "fs.read_directory");
                     let action_control = matches!(
@@ -374,6 +376,12 @@ impl NativeBridge {
                         error.effect_state = Some("not_started".into());
                         error.method = Some(request.method.clone());
                         Err(error)
+                    } else if pure_data && !cfg!(windows) {
+                        let mut error =
+                            ActionError::new("fs_unavailable", "本机字符串列表排序能力不可用。");
+                        error.method = Some(request.method.clone());
+                        error.effect_state = Some("not_started".into());
+                        Err(error)
                     } else if geometry && !host.native_context_available() {
                         let mut error = ActionError::new(
                             "native_bridge_unavailable",
@@ -401,6 +409,7 @@ impl NativeBridge {
                             || opening
                             || request.method == "ui.action_hint"
                             || file_read
+                            || pure_data
                             || data_read
                             || data_copy
                             || history
@@ -496,6 +505,18 @@ impl NativeBridge {
                             if error.effect_state.as_deref() != Some("not_started") {
                                 error.effect_state = Some("unknown".into());
                             }
+                        }
+                        if pure_data {
+                            if !matches!(
+                                error.code.as_str(),
+                                "invalid_input" | "cancelled" | "timeout" | "fs_unavailable"
+                            ) {
+                                error.code = "fs_unavailable".into();
+                            }
+                            error.message = "字符串列表排序失败；请检查错误代码。".into();
+                            error.method = Some(request.method.clone());
+                            error.required_permissions.clear();
+                            error.effect_state = Some("not_started".into());
                         }
                         if file_read {
                             error.message = "本地文件查询失败；请检查错误代码。".into();
@@ -851,7 +872,12 @@ mod window_bridge_tests {
             Err(error)
         }
     }
-    fn exchange(host: &Host, method: &str, params: Value, token: &CancellationToken) -> Value {
+    fn exchange(
+        host: &impl NativeHost,
+        method: &str,
+        params: Value,
+        token: &CancellationToken,
+    ) -> Value {
         let mut bridge = NativeBridge::new().unwrap();
         let mut peer = TcpStream::connect(bridge.listener.local_addr().unwrap()).unwrap();
         peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
@@ -866,12 +892,63 @@ mod window_bridge_tests {
         serde_json::from_str(&line).unwrap()
     }
     #[test]
+    fn logical_sort_bridge_is_pure_data_without_native_target_and_redacts_failures() {
+        struct PureHost(AtomicUsize);
+        impl NativeHost for PureHost {
+            fn native_context_available(&self) -> bool {
+                false
+            }
+            fn call(
+                &self,
+                method: &str,
+                params: Value,
+                _: &CancellationToken,
+            ) -> Result<Value, ActionError> {
+                assert_eq!(method, "fs.sort_logical_paths");
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(params["paths"].clone())
+            }
+        }
+        let host = PureHost(AtomicUsize::new(0));
+        let paths = json!(["", "relative", "a\0tail", "relative"]);
+        let response = exchange(
+            &host,
+            "fs.sort_logical_paths",
+            json!({"paths":paths}),
+            &CancellationToken::new(),
+        );
+        if cfg!(windows) {
+            assert_eq!(response["ok"], true, "{response}");
+            assert_eq!(response["value"], paths);
+            assert_eq!(host.0.load(Ordering::SeqCst), 1);
+        } else {
+            assert_eq!(response["error"]["code"], "fs_unavailable");
+            assert_eq!(host.0.load(Ordering::SeqCst), 0);
+        }
+        let failing = Host {
+            available: false,
+            calls: AtomicUsize::new(0),
+        };
+        let response = exchange(
+            &failing,
+            "fs.sort_logical_paths",
+            json!({"paths":["private-input"]}),
+            &CancellationToken::new(),
+        );
+        assert_eq!(response["error"]["code"], "fs_unavailable");
+        assert_eq!(response["error"]["method"], "fs.sort_logical_paths");
+        assert_eq!(response["error"]["effect_state"], "not_started");
+        assert!(!response.to_string().contains("private-host-details"));
+        assert!(!response.to_string().contains("private-input"));
+    }
+
+    #[test]
     fn window_methods_are_additive_and_reject_false_native_marker_before_dispatch() {
         let host = Host {
             available: false,
             calls: AtomicUsize::new(0),
         };
-        assert_eq!(METHODS.len(), 49);
+        assert_eq!(METHODS.len(), 50);
         for method in WINDOW {
             assert!(METHODS.contains(&method));
             let response = exchange(&host, method, json!({}), &CancellationToken::new());

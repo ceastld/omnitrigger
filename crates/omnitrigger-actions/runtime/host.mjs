@@ -16,7 +16,7 @@ let browserConnection;
 let browserDeadline;
 const browserPending = new Set();
 const nativeSockets = new Set();
-const nativeMethods = new Set(['state.read','state.compare_and_swap','actions.stop_other_instances','system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','fs.read_directory','ui.choose','ui.notify','ui.open_history','ui.toggle_history','ui.action_hint','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
+const nativeMethods = new Set(['state.read','state.compare_and_swap','actions.stop_other_instances','system.open','system.open_file_in_parent','process.capture','history.list','history.get','history.append','history.remove','fs.stat','fs.read_directory','fs.sort_logical_paths','ui.choose','ui.notify','ui.open_history','ui.toggle_history','ui.action_hint','browser.profiles','browser.call','target.info','target.context','target.capture_foreground','target.keyboard.shortcut','target.keyboard.text',
   'keyboard.shortcut','keyboard.sequence','keyboard.text','win32_edit.replace_selection','raishot.resident.find','raishot.resident.region','raishot.capture_result','raishot.release_result','selection.copy','selection.copy_data','selection.read_text','explorer.context','clipboard.read','clipboard.read_data','clipboard.write','clipboard.write_files','window.action','window.geometry','window.set_rect','pointer.state','pointer.root','target.handoff_pointing_root','window.drag','display.brightness_step','audio.volume_adjust']);
 let nativePending;
 let nativePendingMethod;
@@ -110,8 +110,9 @@ function nativeCall(method, params) {
   const edit = method === 'win32_edit.replace_selection' || rai || method === 'clipboard.write_files' || geometry;
   const volume = method === 'audio.volume_adjust';
   const brightness = method === 'display.brightness_step' || volume;
-  const stat = method === 'fs.stat' || method === 'fs.read_directory';
-  const statPath = method === 'fs.stat';
+  const logicalSort = method === 'fs.sort_logical_paths';
+  const stat = method === 'fs.stat' || method === 'fs.read_directory' || logicalSort;
+  const statPath = method === 'fs.stat' || method === 'fs.sort_logical_paths';
   const dataRead = method === 'clipboard.read_data' || method === 'selection.read_text' || method === 'explorer.context' || ['window.geometry','pointer.state','pointer.root'].includes(method);
   const dataCopy = method === 'selection.copy_data';
   const data = dataRead || dataCopy;
@@ -138,7 +139,8 @@ function nativeCall(method, params) {
     let sent = false;
     let chunks = '';
     let captureBytes = 0;
-    const captureDecoder = capture ? new TextDecoder('utf-8', {fatal:true}) : undefined;
+    const strictUtf8 = capture || logicalSort;
+    const captureDecoder = strictUtf8 ? new TextDecoder('utf-8', {fatal:true}) : undefined;
     let methodTimer;
     const socket = createConnection({host:'127.0.0.1', port:request.native.port});
     nativeSockets.add(socket);
@@ -162,7 +164,7 @@ function nativeCall(method, params) {
       finish(reason);
     };
     controller.signal.addEventListener('abort', aborted, {once:true});
-    if (!capture) socket.setEncoding('utf8');
+    if (!strictUtf8) socket.setEncoding('utf8');
     const timeout = fileResult ? (method === 'raishot.capture_result' ? Math.min(params.timeout_ms + 1500, 31500) : 5000) : capture ? Math.min(params.timeout_ms + 1500, 61500) : opening || method === 'ui.choose' || brightness ? 61000 : dataCopy ? 8000 : 5000;
     socket.setTimeout(timeout, () => finish(fail(method === 'ui.notify' || historyUi || stat || data || history || capture || brightness || edit || actionControl ? 'timeout' : 'desktop_timeout', '本机调用未在等待时限内确认；不会自动重试。', sent ? 'unknown' : 'not_started')));
     // 这些方法的总传输时限不被零碎数据延长，外层取消/时限仍优先生效。
@@ -173,18 +175,18 @@ function nativeCall(method, params) {
       socket.write(frame);
     });
     socket.on('data', chunk => {
-      if (capture) {
+      if (strictUtf8) {
         captureBytes += chunk.length;
-        if (captureBytes > 512 * 1024 + 1) return finish(fail('invalid_response', undefined, 'unknown'));
+        if (captureBytes > 512 * 1024 + 1) return finish(fail(logicalSort ? 'fs_error' : 'invalid_response', undefined, 'unknown'));
         try { chunk = captureDecoder.decode(chunk, {stream:true}); }
-        catch { return finish(fail('invalid_response', undefined, 'unknown')); }
+        catch { return finish(fail(logicalSort ? 'fs_error' : 'invalid_response', undefined, 'unknown')); }
       }
       chunks += chunk;
       if (Buffer.byteLength(chunks) > 512 * 1024 + 1) return finish(fail(edit ? 'invalid_response' : 'desktop_protocol', '桌面回执超过上限。', 'unknown'));
       if (!chunks.endsWith('\n')) return;
-      if (capture) {
+      if (strictUtf8) {
         try { chunks += captureDecoder.decode(); }
-        catch { return finish(fail('invalid_response', undefined, 'unknown')); }
+        catch { return finish(fail(logicalSort ? 'fs_error' : 'invalid_response', undefined, 'unknown')); }
       }
       try {
         const response = JSON.parse(chunks);
@@ -459,7 +461,7 @@ try {
     if (nativePendingMethod === 'system.open' || nativePendingMethod === 'system.open_file_in_parent') throw Object.assign(fault('pending_open', '动作返回时仍有未等待的打开请求；请使用 await。'), {effectState:'unknown',method:nativePendingMethod});
     if (['raishot.capture_result','raishot.release_result'].includes(nativePendingMethod)) throw Object.assign(fault('pending_raishot_result', '动作返回时仍有未等待的图像结果调用；请使用 await。'), {effectState:'unknown',method:nativePendingMethod});
     if (nativePendingMethod === 'process.capture') throw Object.assign(fault('pending_process_capture', '动作返回时仍有未等待的程序采集；请使用 await。'), {effectState:'unknown',method:'process.capture'});
-    if (nativePendingMethod === 'fs.stat' || nativePendingMethod === 'fs.read_directory') throw Object.assign(fault('fs_error', '动作返回时仍有未等待的文件查询；请使用 await。'), {effectState:'not_started',method:nativePendingMethod});
+    if (nativePendingMethod === 'fs.stat' || nativePendingMethod === 'fs.read_directory' || nativePendingMethod === 'fs.sort_logical_paths') throw Object.assign(fault('fs_error', '动作返回时仍有未等待的文件查询；请使用 await。'), {effectState:'not_started',method:nativePendingMethod});
     throw Object.assign(fault('pending_desktop_calls', '动作返回时仍有未等待的桌面调用；请使用 await。'), {effectState:'unknown'});
   }
   respond({ status: 'ok', output: output ?? null });

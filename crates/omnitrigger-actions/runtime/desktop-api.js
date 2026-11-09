@@ -1008,7 +1008,7 @@ function capturedWindow(args, count, method, buildParams, validate=value=>value)
     },
   });
   function fsFault(method, code = 'invalid_input') {
-    throw Object.assign(new Error('本地文件查询失败；请检查错误代码。'), {code, effectState:'not_started', method});
+    throw Object.assign(new Error(method === 'fs.sort_logical_paths' ? '字符串逻辑排序失败；请检查错误代码。' : '本地文件查询失败；请检查错误代码。'), {code, effectState:'not_started', method});
   }
   function fsPath(path, fail) {
     if (typeof path !== 'string' || path.length < 3 || path.length > 32767
@@ -1040,12 +1040,19 @@ function capturedWindow(args, count, method, buildParams, validate=value=>value)
         const reported = error?.code;
         const codes = ['invalid_input','path_not_local','path_unavailable','access_denied','fs_error','fs_unavailable','fs_busy','cancelled','timeout'];
         if (method === 'fs.read_directory') codes.push('path_missing','not_directory','directory_too_large','directory_changed');
+        if (method === 'fs.sort_logical_paths') codes.push('desktop_call_limit');
         if (codes.includes(reported)) code = reported;
       } catch (_) { /* 不读取或回显异常 getter 的正文。 */ }
       fsFault(method, code);
     };
     try {
       const value = invoke(method, params);
+      if (method === 'fs.sort_logical_paths') {
+        // 先校验数组，不为识别Promise读取坏回执上的then getter。
+        if (Array.isArray(value)) return result(value);
+        try { return Promise.prototype.then.call(value, result, failure); }
+        catch (_) { fsFault(method, 'fs_error'); }
+      }
       return value && typeof value.then === 'function' ? value.then(result, failure) : result(value);
     } catch (error) { return failure(error); }
   }
@@ -1099,6 +1106,40 @@ function capturedWindow(args, count, method, buildParams, validate=value=>value)
       return Object.freeze(result);
     } catch (_) { fail(); }
   }
+  // 仅处理调用方给定字符串，不套用fsPath，不读取文件或选择目标。
+  function logicalPaths(value, fail, budget = false) {
+    try {
+      if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) fail();
+      const keys = Reflect.ownKeys(value);
+      const length = Object.getOwnPropertyDescriptor(value, 'length')?.value;
+      if (!Number.isInteger(length) || length < 0 || length > 1024 || keys.length !== length + 1) fail();
+      const paths = [];
+      let bytes = 12; // {"paths":[]}，逐项加字符串JSON与逗号，禁止分配完整大JSON。
+      for (let index = 0; index < length; index++) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor || !Object.hasOwn(descriptor, 'value')) fail();
+        const text = descriptor.value;
+        if (typeof text !== 'string' || text.length > 32767) fail();
+        for (let unit = 0; unit < text.length; unit++) {
+          const code = text.charCodeAt(unit);
+          if (code >= 0xd800 && code <= 0xdbff) {
+            const next = text.charCodeAt(++unit);
+            if (!(next >= 0xdc00 && next <= 0xdfff)) fail();
+          } else if (code >= 0xdc00 && code <= 0xdfff) fail();
+        }
+        if (budget) {
+          if (index > 0) bytes++;
+          for (const character of JSON.stringify(text)) {
+            const point = character.codePointAt(0);
+            bytes += point < 0x80 ? 1 : point < 0x800 ? 2 : point < 0x10000 ? 3 : 4;
+            if (bytes > 64*1024) fail();
+          }
+        }
+        paths.push(text);
+      }
+      return paths;
+    } catch (_) { fail(); }
+  }
   const fs = Object.freeze({
     stat: (...args) => {
       const method = 'fs.stat';
@@ -1110,6 +1151,26 @@ function capturedWindow(args, count, method, buildParams, validate=value=>value)
       return fsCall(method, {path}, value => {
         if (!exactDataFields(value, ['kind']) || !['file','directory','missing','other'].includes(value.kind)) fail('fs_error');
         return value;
+      });
+    },
+    sortLogicalPaths: (...args) => {
+      const method = 'fs.sort_logical_paths';
+      const fail = code => fsFault(method, code);
+      if (args.length !== 1) fail();
+      const paths = Object.freeze(logicalPaths(args[0], fail, true));
+      const counts = new Map();
+      for (const path of paths) counts.set(path, (counts.get(path) ?? 0) + 1);
+      return fsCall(method, {paths}, value => {
+        const invalid = () => fail('fs_error');
+        const result = logicalPaths(value, invalid);
+        if (result.length !== paths.length) invalid();
+        const remaining = new Map(counts);
+        for (const path of result) {
+          const count = remaining.get(path) ?? 0;
+          if (count === 0) invalid();
+          remaining.set(path, count - 1);
+        }
+        return Object.freeze(result);
       });
     },
     readDirectory: (...args) => {

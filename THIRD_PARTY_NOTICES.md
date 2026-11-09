@@ -116,3 +116,33 @@ RaiShot 截图适配描述和 OmniTrigger 安装器属于本项目代码；截�
 窗口调整示例 examples/actions/window-adjust 的离仓作者检查复用上述 TypeScript 5.9.3（Apache-2.0），由包内 package-lock.json 固定来源和完整性；sdk 仅包含本项目 MIT 声明与静态入口检查器，不引入运行依赖。
 
 `examples/actions/window-size-step` 的独立作者检查复用 TypeScript 5.9.3（Apache-2.0），由包内锁文件固定来源和完整性；安装后的许可正文位于 node_modules/typescript/LICENSE.txt。配套 SDK 与静态入口检查器沿用本项目 MIT；不新增动作运行依赖。
+
+## Windows 逻辑路径排序
+
+`crates/omnitrigger-windows/src/logical_path_sort.rs` 的排序步骤改写自 .NET Foundation and Contributors 的 dotnet/runtime v10.0.0 `Array.Sort(Array, IComparer)` / `SorterObjectArray`，来源：https://github.com/dotnet/runtime/blob/v10.0.0/src/libraries/System.Private.CoreLib/src/System/Array.cs 。按 MIT 使用，保留原许可全文如下。比较函数复用现有 windows 0.61.3 的 `StrCmpLogicalW` 绑定，不新增第三方依赖。
+
+```text
+The MIT License (MIT)
+
+Copyright (c) .NET Foundation and Contributors
+
+All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

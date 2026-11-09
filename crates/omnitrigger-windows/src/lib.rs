@@ -26,6 +26,11 @@ pub use process_capture::{
 mod owned_path_move;
 pub use owned_path_move::move_owned_path_no_replace;
 
+#[cfg(windows)]
+mod logical_path_sort;
+#[cfg(windows)]
+pub use logical_path_sort::sort_logical_paths;
+
 mod local_path_stat;
 pub use local_path_stat::{
     read_local_directory, read_local_directory_with_options, stat_local_path, DirectoryEntryType,

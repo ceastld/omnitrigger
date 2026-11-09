@@ -294,6 +294,11 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
          * 5 秒短时 RPC，不重试；元数据非原子，后续打开须重新检查。
          */
         stat(path: string): ScriptLocalPathStat;
+        /** 同步Windows完整字符串逻辑排序；不读取文件/目录，不需要前台目标。只接受普通无洞/访问器/额外属性数组。
+         * 最多1024项、每项32767 UTF-16，{paths} UTF-8 JSON最多64KiB；保留空串、NUL、重复和相对文本。
+         * 当前Windows原生比较及宿主算法决定顺序，不做JS近似排序；非Windows/无桥接为fs_unavailable。
+         * 返回冻结副本，不修改输入；能力fs.sort_logical_paths.v1。 */
+        sortLogicalPaths(paths: readonly string[]): readonly string[];
         /** 直接子项，默认 128、最多 1024；回执最多 64 KiB，超限整次拒绝。
          * 不递归、不跟随链接、不读取内容；complete 只表示读到枚举末尾，不是原子快照。
          * 使用与 stat 相同的本地路径守卫。OS 调用不能硬性抢占；迟到结果丢弃。 */
