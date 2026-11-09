@@ -105,6 +105,8 @@ interface ScriptDesktopFault extends Error {
     method?: string;
     /** 只描述本次 API；不能用于判断此前脚本步骤是否有副作用。 */
     effectState: 'not_started' | 'unknown';
+    /** 亮度取消/超时前的匿名逐台进度；缺失不表示未作用，不可自动重试。 */
+    brightnessReceipt?: ScriptBrightnessStepResult;
 }
 interface ScriptShortcutTiming {
     key_down_delay_ms?: number;
@@ -374,6 +376,10 @@ type ScriptContext<Input = Record<string, any>> = Readonly<{
         /** 原desktop目标不变；每次复核身份/前台/取消/期限；仅确认提交。 */
         sendShortcutTo(target: ScriptCapturedTarget, keys: number[], options?: {keyDownDelayMs?:number}): {submitted:true};
         sendTextTo(target: ScriptCapturedTarget, text: string): {submitted:true};
+        /** 需当前App Hook和真实Service；只按下鼠标左键，沿用原desktop目标。结束/取消尝试收尾；失败可为unknown。 */
+        pressLeftButton(): {submitted:true;effectState:'unknown'};
+        /** 结束本调用拥有的按下；不激活/重选窗口，不确认物理设备状态。 */
+        releaseLeftButton(): {ownedPressEnded:true;effectState:'unknown'};
         adjustVolume(options: ScriptVolumeAdjustOptions): ScriptVolumeAdjustResult;
         /** 同步，参数与Node入口共用严格工厂；逐项检查回执。 */
         stepBrightness(options: ScriptBrightnessStepOptions): ScriptBrightnessStepResult;

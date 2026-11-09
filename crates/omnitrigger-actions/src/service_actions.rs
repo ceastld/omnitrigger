@@ -10,7 +10,14 @@ use std::{
 
 const METHOD: &str = "actions.stop_other_instances";
 
+#[derive(Default)]
+struct OwnedLeftScope {
+    input: Option<Arc<crate::owned_mouse::OwnedLeftSession>>,
+    closed: bool,
+}
+
 pub(super) struct InvocationScopedHost {
+    owned_left: Mutex<OwnedLeftScope>,
     // 内层本次宿主仍先清理；InvocationTask的_active守卫位于整个host之后。
     inner: Option<Arc<dyn NativeHost>>,
     reservations: Arc<Mutex<Reservations>>,
@@ -27,6 +34,7 @@ pub(super) fn scoped_host(
     state_store: Option<Arc<crate::state::ActionStateStore>>,
 ) -> Arc<dyn NativeHost> {
     Arc::new(InvocationScopedHost {
+        owned_left: Mutex::new(OwnedLeftScope::default()),
         inner,
         reservations,
         active_changed,
@@ -49,6 +57,49 @@ fn fault(code: &str, unknown: bool) -> ActionError {
 }
 
 impl InvocationScopedHost {
+    fn mouse_call(
+        &self,
+        method: &str,
+        params: Value,
+        token: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Value, ActionError> {
+        if params != json!({}) {
+            return Err(crate::owned_mouse::fault(method, "invalid_input", false));
+        }
+        let service_token = {
+            let state = self
+                .reservations
+                .lock()
+                .map_err(|_| crate::owned_mouse::fault(method, "action_inactive", false))?;
+            state
+                .entries
+                .get(&self.invocation_id)
+                .filter(|entry| entry.active)
+                .map(|entry| entry.cancellation.clone())
+                .ok_or_else(|| crate::owned_mouse::fault(method, "action_inactive", false))?
+        };
+        // 取消后的Up仍进入会话做中性收尾；Down不得借外来token绕过服务取消。
+        let input = {
+            let mut slot = self
+                .owned_left
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if slot.closed {
+                return Err(crate::owned_mouse::fault(method, "action_inactive", false));
+            }
+            if slot.input.is_none() {
+                let inner = self.inner.as_deref().ok_or_else(|| {
+                    crate::owned_mouse::fault(method, "input_owner_unavailable", false)
+                })?;
+                slot.input = Some(inner.create_owned_left_input(crate::owned_mouse::new_owner()?)?);
+            }
+            slot.input.as_ref().unwrap().clone()
+        };
+        input.call_if(method, params, deadline, || {
+            token.is_cancelled() || service_token.is_cancelled()
+        })
+    }
     fn action_hint(
         &self,
         params: Value,
@@ -227,6 +278,20 @@ impl InvocationScopedHost {
 }
 
 impl NativeHost for InvocationScopedHost {
+    fn finish_owned_inputs(&self) -> Result<(), ActionError> {
+        let input = {
+            let mut scope = self
+                .owned_left
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            scope.closed = true;
+            scope.input.clone()
+        };
+        match input {
+            Some(input) => input.finish(),
+            None => Ok(()),
+        }
+    }
     fn native_context_available(&self) -> bool {
         self.inner
             .as_deref()
@@ -304,6 +369,14 @@ impl NativeHost for InvocationScopedHost {
         params: Value,
         cancellation: &CancellationToken,
     ) -> Result<Value, ActionError> {
+        if matches!(method, "mouse.left_down" | "mouse.left_up") {
+            return self.mouse_call(
+                method,
+                params,
+                cancellation,
+                Instant::now() + Duration::from_secs(60),
+            );
+        }
         if method == crate::action_hint::SCOPED_METHOD {
             return Err(crate::action_hint::fault("invalid_input", "not_started"));
         }
@@ -344,6 +417,9 @@ impl NativeHost for InvocationScopedHost {
         cancellation: &CancellationToken,
         deadline: Instant,
     ) -> Result<Value, ActionError> {
+        if matches!(method, "mouse.left_down" | "mouse.left_up") {
+            return self.mouse_call(method, params, cancellation, deadline);
+        }
         if method == crate::action_hint::SCOPED_METHOD {
             return Err(crate::action_hint::fault("invalid_input", "not_started"));
         }
@@ -370,3 +446,14 @@ mod tests;
 #[cfg(test)]
 #[path = "service_action_hint_tests.rs"]
 mod hint_tests;
+
+impl Drop for InvocationScopedHost {
+    fn drop(&mut self) {
+        let _ =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.finish_owned_inputs()));
+    }
+}
+
+#[cfg(test)]
+#[path = "owned_left_scope_lifecycle_tests.rs"]
+mod owned_left_scope_lifecycle_tests;

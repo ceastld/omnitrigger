@@ -143,6 +143,15 @@ fn with_clipboard_history<H: omnitrigger_actions::NativeHost>(
             ))
         })
         .clone();
+    with_native_stores(inner, store, results)
+}
+
+// 生产与纯回归共用相同包装顺序；只组合显式存储，不读设置或创建另一条输入通道。
+fn with_native_stores<H: omnitrigger_actions::NativeHost>(
+    inner: H,
+    store: Option<Arc<crate::clipboard_history_store::ClipboardHistoryStore>>,
+    results: Arc<crate::raishot_result_host::Store>,
+) -> impl omnitrigger_actions::NativeHost {
     crate::raishot_result_host::WithRaiShotResult::new(
         crate::process_capture_host::WithProcessCapture::new(
             crate::clipboard_history_host::WithClipboardHistory::new(inner, store),
@@ -724,6 +733,10 @@ fn action_version_hint(text: &str, placement: ActionHintPlacement) -> gpui::Div 
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/owned_left_wrapper_tests.rs"
+    ));
     use omnitrigger_actions::{
         ActionError, ActionRuntime, CancellationToken, InvocationContext, ResolvedAction,
     };

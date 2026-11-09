@@ -141,9 +141,11 @@ export interface BrowserFault extends Error {
 }
 export interface DesktopFault extends Error {
   code: string;
-  method?: 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'win32_edit.replace_selection' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'window.geometry' | 'window.set_rect' | 'pointer.state' | 'pointer.root' | 'target.handoff_pointing_root' | 'window.drag' | 'display.brightness_step' | 'audio.volume_adjust' | 'ui.choose' | 'ui.notify' | 'ui.open_history' | 'ui.toggle_history';
+  method?: 'mouse.left_down' | 'mouse.left_up' | 'target.info' | 'target.context' | 'keyboard.shortcut' | 'keyboard.sequence' | 'keyboard.text' | 'win32_edit.replace_selection' | 'selection.copy' | 'selection.copy_data' | 'clipboard.read' | 'clipboard.read_data' | 'clipboard.write' | 'window.action' | 'window.geometry' | 'window.set_rect' | 'pointer.state' | 'pointer.root' | 'target.handoff_pointing_root' | 'window.drag' | 'display.brightness_step' | 'audio.volume_adjust' | 'ui.choose' | 'ui.notify' | 'ui.open_history' | 'ui.toggle_history';
   /** 仅描述本次 API 调用，不表示脚本之前的步骤没有副作用。 */
   effectState: 'not_started' | 'unknown';
+  /** 亮度取消/超时前可确认的匿名逐台进度；缺失不表示未作用，不可据此自动重试。 */
+  brightnessReceipt?: BrightnessStepResult;
 }
 export interface ChoiceItem {
   /** 必填且唯一的稳定 ID，最多 128 个 UTF-16 单元；不返回显示序号。 */
@@ -397,6 +399,10 @@ export interface ActionContext {
     /** 原desktop目标不变；每次复核身份/前台/取消/期限；仅确认提交。 */
     sendShortcutTo(target: CapturedTarget, keys: number[], options?: {keyDownDelayMs?:number}): Promise<{submitted:true}>;
     sendTextTo(target: CapturedTarget, text: string): Promise<{submitted:true}>;
+    /** 需当前App Hook和真实Service；只按下鼠标左键，沿用原desktop目标。结束/取消尝试收尾；失败可为unknown。 */
+    pressLeftButton(): Promise<{submitted:true;effectState:'unknown'}>;
+    /** 结束本调用拥有的按下；不激活/重选窗口，不确认物理设备状态。 */
+    releaseLeftButton(): Promise<{ownedPressEnded:true;effectState:'unknown'}>;
     adjustVolume(options: VolumeAdjustOptions): Promise<VolumeAdjustResult>;
     /** 必填显式策略；逐项检查回执，无自动重试或补偿。 */
     stepBrightness(options: BrightnessStepOptions): Promise<BrightnessStepResult>;

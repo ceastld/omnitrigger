@@ -34,6 +34,9 @@ function call(kind, args = {}, serialized) {
         else if (kind === 'native') error.effectState = (args.method === 'win32_edit.replace_selection' || args.method === 'clipboard.write_files' || ['window.set_rect','window.drag','target.handoff_pointing_root','raishot.capture_result','raishot.release_result'].includes(args.method) || typeof args.method === 'string' && args.method.startsWith('raishot.resident.')) ? 'unknown' : 'not_started';
         if (response.error.method) error.method = response.error.method;
         if (response.error.required_permissions) error.requiredPermissions = response.error.required_permissions;
+        if (kind === 'native' && args.method === 'display.brightness_step' && response.error.method === args.method
+            && ['cancelled','timeout'].includes(error.code) && error.effectState === 'unknown'
+            && response.error.brightness_receipt !== undefined) error.brightnessReceipt = response.error.brightness_receipt;
         throw error;
     }
     return response.value;

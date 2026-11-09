@@ -263,7 +263,22 @@ function createDesktopApi(invoke) {
         'desktop_unavailable','desktop_busy','desktop_call_limit','desktop_connection','desktop_protocol','desktop_timeout',
         'invalid_response','initialization_failed','monitor_unavailable','ambiguous_monitor','brightness_unavailable',
         'brightness_failed','brightness_unknown'];
-      return desktopMutationFailure(cause,allowed,brightnessFault);
+      let failure;
+      try { desktopMutationFailure(cause,allowed,brightnessFault); }
+      catch (error) { failure=error; }
+      // 只接纳当前策略、unknown 状态且通过现有匿名回执校验的数据。
+      if (['cancelled','timeout'].includes(failure.code) && failure.effectState==='unknown') {
+        try {
+          const receipt=Object.getOwnPropertyDescriptor(cause,'brightnessReceipt')?.value;
+          const reportedMethod=Object.getOwnPropertyDescriptor(cause,'method')?.value;
+          const reportedEffect=Object.getOwnPropertyDescriptor(cause,'effectState')?.value;
+          if (reportedMethod===method && reportedEffect==='unknown' && receipt!==undefined) {
+            const validated=brightnessResponse(receipt,requestedStrategy);
+            if (validated.effectState==='unknown') failure.brightnessReceipt=validated;
+          }
+        } catch (_) { /* 无效进度不能覆盖原取消/超时，也不能变为重试证明。 */ }
+      }
+      throw failure;
     };
     const result = value => {
       try { return brightnessResponse(value,requestedStrategy); }
@@ -740,7 +755,33 @@ function capturedWindow(args, count, method, buildParams, validate=value=>value)
     });
   }
 
+  function ownedLeftCall(method,args) {
+    if(args.length!==0)invalid(method,'左键调用不接受参数；owner和原目标由当前Service提供。');
+    const failed=error=>{
+      const codes=['invalid_input','invalid_response','input_owner_unavailable','input_cleanup_failed','input_busy','input_not_owned','input_interrupted','target_changed','target_unavailable','actions_unavailable','action_inactive','cancelled','timeout','input_failed','native_bridge_unavailable','desktop_unavailable','desktop_protocol'];
+      let code='input_failed',effectState='unknown';
+      try {
+        const reportedCode=Object.getOwnPropertyDescriptor(error,'code')?.value;
+        const reportedEffect=Object.getOwnPropertyDescriptor(error,'effectState')?.value;
+        if(codes.includes(reportedCode))code=reportedCode;
+        if(['unknown','not_started'].includes(reportedEffect))effectState=reportedEffect;
+      }catch(_){}
+      throw Object.assign(new Error('自有左键输入未获完整确认；请检查错误代码与效果状态。'),{code,method,effectState:code==='input_cleanup_failed'?'unknown':effectState});
+    };
+    const checked=value=>{
+      try {
+        const field=method==='mouse.left_down'?'submitted':'ownedPressEnded';
+        const result=geometryFields(value,[field,'effectState']);
+        if(result[field]!==true||result.effectState!=='unknown')throw new Error();
+        return Object.freeze(result);
+      } catch(_) {throw Object.assign(new Error('左键输入回执无效。'),{code:'invalid_response',method,effectState:'unknown'});}
+    };
+    try {const value=invoke(method,{});return value&&typeof value.then==='function'?value.then(checked,failed):checked(value);}
+    catch(error){return failed(error);}
+  }
   const desktop = Object.freeze({
+    pressLeftButton: (...args)=>ownedLeftCall("mouse.left_down",args),
+    releaseLeftButton: (...args)=>ownedLeftCall("mouse.left_up",args),
     ...createRaiShotResultApi(invoke),
     findRaiShotResident: (...args) => findRaiShotResident(args),
     requestRaiShotRegion: (...args) => requestRaiShotRegion(args),

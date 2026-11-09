@@ -28,6 +28,9 @@ mod pointing_handoff_host;
 #[path = "pointing_root_host.rs"]
 mod pointing_root_host;
 
+#[path = "owned_left_input_host.rs"]
+mod owned_left_input_host;
+
 #[path = "window_drag_host.rs"]
 mod window_drag_host;
 #[path = "window_geometry_host.rs"]
@@ -45,6 +48,19 @@ fn error(code: &str, message: impl ToString, effect: &str) -> ActionError {
 }
 
 impl DesktopHost {
+    #[cfg(test)]
+    pub(crate) fn owned_input_factory_probe() -> Self {
+        // 仅验证完整生产包装链能到原Desktop工厂；不查询窗口或绑定真实Backend。
+        Self {
+            foreground_targets: ForegroundTargets::default(),
+            target: Err(error(
+                "owned_factory_probe",
+                "已到达原Desktop工厂。",
+                "not_started",
+            )),
+        }
+    }
+
     fn explorer_context(
         &self,
         params: Value,
@@ -480,6 +496,15 @@ fn not_cancelled(cancellation: &CancellationToken) -> Result<(), String> {
 }
 
 impl NativeHost for DesktopHost {
+    fn create_owned_left_input(
+        &self,
+        owner: omnitrigger_actions::owned_mouse::OwnedInputOwner,
+    ) -> Result<std::sync::Arc<omnitrigger_actions::owned_mouse::OwnedLeftSession>, ActionError>
+    {
+        let target = *self.target.as_ref().map_err(Clone::clone)?;
+        owned_left_input_host::create(target, owner)
+    }
+
     fn call(
         &self,
         method: &str,

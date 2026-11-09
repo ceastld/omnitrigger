@@ -22,6 +22,8 @@ Windows MSVC 的 Boa 宿主为共享 SDK 的解析保留 8 MiB 原生主栈；�
 | `ctx.desktop.readSelectionText(options?)` | 只读原目标中当前焦点控件的单一 UIA 选区，返回 `{text,truncated}`。默认拒绝超过 128 UTF-16 单元的文本，显式 `overflow:'truncate'` 截取前缀。仅应用接入可用。 |
 | `ctx.desktop.captureForegroundTarget(options)` | 按明确 PID、FILETIME 字符串和 1–5000 毫秒有效期，捕获该进程当前前台；返回当前动作内的只读目标引用。仅应用接入可用。 |
 | `ctx.desktop.sendShortcutTo(target, keys, options?)` / `sendTextTo(target, text)` | 对捕获引用发送快捷键或 Unicode 文本；逐步复验身份、前台、取消和期限，原 `desktop` 目标保持不变。快捷键仅支持可选 `keyDownDelayMs`。 |
+| `ctx.desktop.pressLeftButton()` | 当前真实动作作用域只按下原目标的鼠标左键；无参数，返回 submitted:true/effectState:unknown，需 mouse.owned_left.v1。 |
+| `ctx.desktop.releaseLeftButton()` | 结束本 owner 的按下；无参数，返回 ownedPressEnded:true/effectState:unknown，不证明物理设备当前状态。 |
 | `ctx.desktop.sendShortcut(keys, options)` | 1–5 个 VK 整数，修饰键在前；支持 `keyDownDelayMs` 或原生 `timing` 配置，二者互斥。 |
 | `ctx.desktop.sendKeySequence(modifiers, keys, options)` | 0–4 个修饰键和 1–16 个普通键；修饰键跨越整组，`keyDownDelayMs` 为 0–1000 毫秒，单次等待合计最多 3000 毫秒。 |
 | `ctx.desktop.sendText(text)` | 向原目标直接发送 Unicode，不经过剪贴板；最多 65,536 个 UTF-16 单元，不含 NUL 或孤立代理项。 |
@@ -71,6 +73,10 @@ return { submitted: true };
 捕获不枚举、不激活窗口，不把进程身份当作浏览器 `windowId` 到 HWND 的关联。发送返回 `{submitted:true}` 仅确认系统接纳输入；输入前明确拒绝为 `not_started`，进入平台提交后未获确认的失败为 `unknown`。租约使用宿主单调时钟并受动作总期限约束，不自动重试。应用和轻量宿主须同时具备这些入口；独立引擎 CLI 没有应用目标桥接时明确报错。
 
 `sendShortcut`、`sendKeySequence` 和 `sendShortcutTo` 的按键参数只接受键盘 VK；鼠标按钮 VK `1/2/4/5/6` 在调用 Native 前以 `invalid_input`、`not_started` 拒绝，不产生键盘或鼠标输入。错误的 `method` 分别为 `keyboard.shortcut`、`keyboard.sequence`、`target.keyboard.shortcut`。这三项键盘接口不负责鼠标按钮的按下、释放或所有权收尾。
+
+## 亮度取消与超时回执
+
+亮度调用因 cancelled 或 timeout 结束且 effectState 为 unknown 时，错误可附可选的 brightnessReceipt，复用成功回执的匿名逐台结构；wire 字段为 brightness_receipt。仅接纳明确的 display.brightness_step 错误、原请求策略一致且通过既有 DTO 校验的进度。缺失字段不表示没有作用，已确认成员也不代表整轮成功；不得据此自动重试、补偿或切换 provider。连接断开或外层已先返回取消时，不能保证进度送达。
 
 ## 程序输出采集
 
@@ -273,3 +279,7 @@ function main(ctx) {
 新错误码表示宿主已验证非空文件系统目录，随后选区主读取发生白名单内的 `E_FAIL`，并在同一目标、目录和视图身份复核后确认仍可交付该证据。错误仍须同时带有 `method:'explorer.context'`、`effectState:'not_started'`；它不是成功的空选区。取消、超时、目标或目录变化、校验失败及其它 HRESULT 不升级为此码。脚本若选择复制回退，应另外调用带有原目标守卫的复制接口。
 
 选项只接受一个自有数据属性 `selectionFailureStage:true`，拒绝空对象、false、访问器及额外字段。旧宿主可能拒绝新增参数；SDK 不会自动改成无参请求重试。省略选项时不会请求阶段证据，成功快照仍只有 `currentDirectory` 和 `selectedPaths`。目录复核不能使目录与选区读取成为原子事务。
+
+## 自有左键输入作用域
+
+同步调用 `ctx.desktop.pressLeftButton()` 和 `ctx.desktop.releaseLeftButton()`，两者均不接受参数。需要 Windows 能力 `mouse.owned_left.v1`、真实 ActionService 作用域和 App Hook。输入归属保存在本次动作中；释放和异常收尾沿原通道进行，不接受其他捕获目标。回执的 `effectState` 为 `unknown`，不能证明物理设备状态或业务完成。完整目标、取消与收尾约束见[自有左键输入作用域](../../docs/ACTION_PACKAGES.md#自有左键输入作用域)。

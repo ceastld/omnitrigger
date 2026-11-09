@@ -553,11 +553,12 @@ fn read_response(path: &Path, invocation_id: u64) -> Result<Value, ActionError> 
     }
     match response {
         Response::Ok { output, .. } => Ok(output),
-        Response::Error { error, .. }
+        Response::Error { mut error, .. }
             if !error.code.is_empty()
                 && error.code.len() <= 64
                 && error.message.len() <= 16 * 1024 =>
         {
+            error.retain_brightness_receipt();
             Err(error)
         }
         _ => Err(invalid("Node 结果缺少终态或包含相互冲突的字段。".into())),

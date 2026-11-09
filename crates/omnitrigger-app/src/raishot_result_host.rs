@@ -440,6 +440,14 @@ impl<H> WithRaiShotResult<H> {
     }
 }
 impl<H: NativeHost> NativeHost for WithRaiShotResult<H> {
+    fn create_owned_left_input(
+        &self,
+        owner: omnitrigger_actions::owned_mouse::OwnedInputOwner,
+    ) -> Result<std::sync::Arc<omnitrigger_actions::owned_mouse::OwnedLeftSession>, ActionError>
+    {
+        self.inner.create_owned_left_input(owner)
+    }
+
     fn native_context_available(&self) -> bool {
         self.inner.native_context_available()
     }

@@ -34,6 +34,8 @@ const prefix=`import type {ActionContext,BrightnessStepResult,BrightnessStepMemb
 const results=[];
 test('严格TypeScript正例覆盖两入口、显式策略及可安全收窄的逐项回执',()=>{
   const positive=[
+    `declare const e:import('./api').DesktopFault; const r:BrightnessStepResult|undefined=e.brightnessReceipt;`,
+    `declare const e:ScriptDesktopFault; const r:ScriptBrightnessStepResult|undefined=e.brightnessReceipt;`,
     `const p:Promise<BrightnessStepResult>=ctx.desktop.stepBrightness({direction:'up',strategy:'physical'});
      async function consume(){const r=await p;if(r.physical&&r.physical.errorCode===null)for(const m of r.physical.members){if(m.status==='confirmed')m.currentRaw.toFixed();}
        if(r.wmi?.status==='set')r.wmi.requestedPercent.toFixed();}`,
@@ -45,6 +47,8 @@ test('严格TypeScript正例覆盖两入口、显式策略及可安全收窄的�
 });
 test('严格TypeScript反例分别拒绝缺参、错值、错误异步形状和不一致回执',()=>{
   const negatives={
+    node_receipt_not_string:`declare const e:import('./api').DesktopFault; const wrong:string|undefined=e.brightnessReceipt;`,
+    script_receipt_not_string:`declare const e:ScriptDesktopFault; const wrong:string|undefined=e.brightnessReceipt;`,
     missing_strategy:`ctx.desktop.stepBrightness({direction:'up'});`,
     missing_direction:`ctx.desktop.stepBrightness({strategy:'physical'});`,
     bad_direction:`ctx.desktop.stepBrightness({direction:'UP',strategy:'physical'});`,

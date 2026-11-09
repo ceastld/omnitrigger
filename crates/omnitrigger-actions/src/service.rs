@@ -207,7 +207,7 @@ impl InvocationTask {
             return;
         }
         let cancellation = self.cancellation.clone();
-        let outcome = if cancellation.is_cancelled() {
+        let mut outcome = if cancellation.is_cancelled() {
             ActionOutcome::Cancelled
         } else {
             match catch_unwind(AssertUnwindSafe(|| {
@@ -219,16 +219,51 @@ impl InvocationTask {
                 )
             })) {
                 Ok(Ok(output)) => ActionOutcome::Succeeded { output },
+                // 已交付的亮度取消错误必须保留未知副作用与匿名进度。
+                Ok(Err(error))
+                    if error.code == "cancelled"
+                        && error.method.as_deref() == Some("display.brightness_step")
+                        && error.effect_state.as_deref() == Some("unknown")
+                        && error.brightness_receipt.is_some() =>
+                {
+                    ActionOutcome::Failed { error }
+                }
                 Ok(Err(error)) if error.code == "cancelled" => ActionOutcome::Cancelled,
                 Ok(Err(error)) => ActionOutcome::Failed { error },
                 Err(_) => runtime_panic(),
             }
         };
+        let cleanup = catch_unwind(AssertUnwindSafe(|| {
+            self.host
+                .as_deref()
+                .map_or(Ok(()), NativeHost::finish_owned_inputs)
+        }));
+        let cleanup_error = match cleanup {
+            Ok(Err(error)) => Some(error),
+            Err(_) => Some(crate::owned_mouse::fault(
+                crate::owned_mouse::UP,
+                "input_cleanup_failed",
+                true,
+            )),
+            Ok(Ok(())) => None,
+        };
+        let cleanup_failed = cleanup_error.is_some();
+        if let Some(error) = cleanup_error {
+            outcome = ActionOutcome::Failed { error };
+        }
         // 包括reload后旧运行时最后一份Arc；此处不持有服务锁，不等待UI读终态。
         let cleaned = catch_unwind(AssertUnwindSafe(|| drop(self)));
-        let outcome = if cleaned.is_err() {
+        let outcome = if cleanup_failed {
+            outcome
+        } else if cleaned.is_err() {
             runtime_panic()
-        } else if cancellation.is_cancelled() {
+        } else if cancellation.is_cancelled()
+            && !matches!(&outcome, ActionOutcome::Failed { error }
+                if matches!(error.code.as_str(), "cancelled" | "timeout")
+                    && error.method.as_deref() == Some("display.brightness_step")
+                    && error.effect_state.as_deref() == Some("unknown")
+                    && error.brightness_receipt.is_some())
+        {
             ActionOutcome::Cancelled
         } else {
             outcome

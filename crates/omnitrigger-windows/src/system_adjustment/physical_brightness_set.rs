@@ -207,7 +207,8 @@ pub(super) fn step_members_if(
     }
     check(false)?;
     let result = step_members(&mut Guarded { port, check }, direction);
-    check(false)?;
+    // 守卫已阻止后续 I/O；末尾取消不能抹掉此前成员的已确认/未知回执。
+    let _ = check(false);
     result
 }
 

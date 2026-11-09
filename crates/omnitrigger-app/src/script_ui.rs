@@ -136,6 +136,14 @@ impl<H> Host<H> {
     }
 }
 impl<H: NativeHost> NativeHost for Host<H> {
+    fn create_owned_left_input(
+        &self,
+        owner: omnitrigger_actions::owned_mouse::OwnedInputOwner,
+    ) -> Result<std::sync::Arc<omnitrigger_actions::owned_mouse::OwnedLeftSession>, ActionError>
+    {
+        self.inner.create_owned_left_input(owner)
+    }
+
     fn call(
         &self,
         method: &str,

@@ -161,6 +161,52 @@ jobs:
           cargo build --locked --manifest-path tools/js-engine-probe/Cargo.toml --no-default-features --features quickjs --target-dir target/ci-script-engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: 验证 Node 与 QuickJS 的亮度匿名部分回执 Service
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 仅复用已构建宿主；Synthetic Native，不访问显示器，不额外构建另一套宿主。
+          if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { throw '缺少明确的CI临时目录。' }
+          $brightnessRoot = Join-Path $env:RUNNER_TEMP ('brightness-partial-main-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $brightnessRoot -ErrorAction Stop | Out-Null
+          $brightnessVariables = @('OMNITRIGGER_TEST_NODE', 'OMNITRIGGER_TEST_SCRIPT_HOST', 'OMNITRIGGER_TEST_SCRIPT_ENGINE', 'OMNITRIGGER_TEST_BRIGHTNESS_FIXTURE_PARENT')
+          $brightnessPrevious = @{}
+          foreach ($name in $brightnessVariables) {
+            $brightnessPrevious[$name] = @{ existed = Test-Path "Env:$name"; value = [Environment]::GetEnvironmentVariable($name, 'Process') }
+          }
+          try {
+            $env:OMNITRIGGER_TEST_NODE = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+            foreach ($engine in @('node', 'quickjs')) {
+              $brightnessParent = Join-Path $brightnessRoot $engine
+              New-Item -ItemType Directory -Path $brightnessParent -ErrorAction Stop | Out-Null
+              $env:OMNITRIGGER_TEST_BRIGHTNESS_FIXTURE_PARENT = (Resolve-Path -LiteralPath $brightnessParent).Path
+              if ($engine -eq 'node') {
+                cargo test --locked -p omnitrigger-actions --test brightness_partial_receipt_service node_brightness_partial_receipt_ordinary_service_roundtrip -- --ignored --exact --test-threads=1 --nocapture
+              } else {
+                $brightnessHost = Join-Path $env:GITHUB_WORKSPACE 'target/ci-script-engine/debug/omnitrigger-js-probe.exe'
+                if (-not (Test-Path -LiteralPath $brightnessHost -PathType Leaf)) { throw '缺少前一步构建的真实 QuickJS 宿主。' }
+                $env:OMNITRIGGER_TEST_SCRIPT_HOST = (Resolve-Path -LiteralPath $brightnessHost).Path
+                $env:OMNITRIGGER_TEST_SCRIPT_ENGINE = $engine
+                cargo test --locked -p omnitrigger-actions --test brightness_partial_receipt_service script_brightness_partial_receipt_ordinary_service_roundtrip -- --ignored --exact --test-threads=1 --nocapture
+              }
+              if ($LASTEXITCODE -ne 0) { throw "亮度Service $engine 用例失败：$LASTEXITCODE" }
+              # 防止选择器失配导致0测试假绿；只查本轮新父目录的直接子夹具。
+              $brightnessReceipts = @(Get-ChildItem -LiteralPath $brightnessParent -Directory | ForEach-Object {
+                $receiptPath = Join-Path $_.FullName 'acceptance.json'
+                if (Test-Path -LiteralPath $receiptPath -PathType Leaf) { $receiptPath }
+              })
+              if ($brightnessReceipts.Count -ne 1) { throw "亮度Service $engine 没有唯一真实回执。" }
+              $brightnessReceipt = Get-Content -LiteralPath $brightnessReceipts[0] -Raw | ConvertFrom-Json
+              if (@($brightnessReceipt.cases).Count -ne 7) { throw "亮度Service $engine 场景数不是7。" }
+              Write-Host "亮度Service $engine：7场景；回执 $($brightnessReceipts[0])"
+            }
+          } finally {
+            foreach ($name in $brightnessVariables) {
+              if ($brightnessPrevious[$name].existed) { [Environment]::SetEnvironmentVariable($name, $brightnessPrevious[$name].value, 'Process') }
+              else { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+            }
+          }
+
       - name: 验证 RaiShot 文件结果的正式动作服务接缝
         shell: pwsh
         run: |
@@ -389,7 +435,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/n10_hint_entry.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test tests/desktop_captured_target.test.mjs tests/desktop_mouse_vk_rejection.test.mjs
+          node --test tests/desktop_captured_target.test.mjs tests/desktop_mouse_vk_rejection.test.mjs tests/owned_left_api.test.mjs tests/owned_left_types.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/captured_target_types.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -434,7 +480,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/desktop_api_toggle_history.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test tests/brightness_step_api.test.mjs tests/brightness_step_contract_review.test.mjs tests/brightness_step_types.test.mjs examples/actions/brightness-step/recipes.test.mjs tests/volume_adjust_api.test.mjs examples/actions/volume-adjust/recipes.test.mjs
+          node --test tests/brightness_partial_receipt.test.mjs tests/brightness_step_api.test.mjs tests/brightness_step_contract_review.test.mjs tests/brightness_step_types.test.mjs examples/actions/brightness-step/recipes.test.mjs tests/volume_adjust_api.test.mjs examples/actions/volume-adjust/recipes.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p examples/actions/brightness-step/jsconfig.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -603,6 +649,48 @@ jobs:
             $env:OMNITRIGGER_TEST_SCRIPT_HOST = $scopedPreviousHost
           }
 
+      - name: 验证 Boa 与 QuickJS 的亮度匿名部分回执 Service
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 仅复用已构建宿主；Synthetic Native，不访问显示器，不额外构建另一套宿主。
+          if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { throw '缺少明确的CI临时目录。' }
+          $brightnessRoot = Join-Path $env:RUNNER_TEMP ('brightness-partial-engines-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $brightnessRoot -ErrorAction Stop | Out-Null
+          $brightnessVariables = @('OMNITRIGGER_TEST_NODE', 'OMNITRIGGER_TEST_SCRIPT_HOST', 'OMNITRIGGER_TEST_SCRIPT_ENGINE', 'OMNITRIGGER_TEST_BRIGHTNESS_FIXTURE_PARENT')
+          $brightnessPrevious = @{}
+          foreach ($name in $brightnessVariables) {
+            $brightnessPrevious[$name] = @{ existed = Test-Path "Env:$name"; value = [Environment]::GetEnvironmentVariable($name, 'Process') }
+          }
+          try {
+            $env:OMNITRIGGER_TEST_NODE = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+            foreach ($engine in @('boa', 'quickjs')) {
+              $brightnessParent = Join-Path $brightnessRoot $engine
+              New-Item -ItemType Directory -Path $brightnessParent -ErrorAction Stop | Out-Null
+              $env:OMNITRIGGER_TEST_BRIGHTNESS_FIXTURE_PARENT = (Resolve-Path -LiteralPath $brightnessParent).Path
+              $brightnessHost = Join-Path $PWD "results/$engine-small.exe"
+              if (-not (Test-Path -LiteralPath $brightnessHost -PathType Leaf)) { throw '缺少测量步骤构建的真实引擎宿主。' }
+              $env:OMNITRIGGER_TEST_SCRIPT_HOST = (Resolve-Path -LiteralPath $brightnessHost).Path
+              $env:OMNITRIGGER_TEST_SCRIPT_ENGINE = $engine
+              cargo test --locked --manifest-path ../../Cargo.toml -p omnitrigger-actions --test brightness_partial_receipt_service script_brightness_partial_receipt_ordinary_service_roundtrip -- --ignored --exact --test-threads=1 --nocapture
+              if ($LASTEXITCODE -ne 0) { throw "亮度Service $engine 用例失败：$LASTEXITCODE" }
+              # 防止选择器失配导致0测试假绿；只查本轮新父目录的直接子夹具。
+              $brightnessReceipts = @(Get-ChildItem -LiteralPath $brightnessParent -Directory | ForEach-Object {
+                $receiptPath = Join-Path $_.FullName 'acceptance.json'
+                if (Test-Path -LiteralPath $receiptPath -PathType Leaf) { $receiptPath }
+              })
+              if ($brightnessReceipts.Count -ne 1) { throw "亮度Service $engine 没有唯一真实回执。" }
+              $brightnessReceipt = Get-Content -LiteralPath $brightnessReceipts[0] -Raw | ConvertFrom-Json
+              if (@($brightnessReceipt.cases).Count -ne 7) { throw "亮度Service $engine 场景数不是7。" }
+              Write-Host "亮度Service $engine：7场景；回执 $($brightnessReceipts[0])"
+            }
+          } finally {
+            foreach ($name in $brightnessVariables) {
+              if ($brightnessPrevious[$name].existed) { [Environment]::SetEnvironmentVariable($name, $brightnessPrevious[$name].value, 'Process') }
+              else { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+            }
+          }
+
       - name: 验证输出采集的自有夹具与宿主退出收尾
         run: |
           if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { throw '缺少明确的CI临时目录。' }
@@ -671,7 +759,7 @@ jobs:
               node --test --test-concurrency=1 ./tests/browser_async.integration.mjs
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
               # 同时覆盖真实动作提示、State与Scope；每个引擎只运行一遍。
-              cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --tests -- --ignored --skip _history_ --test-threads=1
+              cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --tests -- --ignored --skip _history_ --skip brightness_partial_receipt_ordinary_service_roundtrip --test-threads=1
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
           } finally {

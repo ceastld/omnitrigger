@@ -26,6 +26,14 @@ impl ActionHost {
     }
 }
 impl NativeHost for ActionHost {
+    fn create_owned_left_input(
+        &self,
+        owner: omnitrigger_actions::owned_mouse::OwnedInputOwner,
+    ) -> Result<std::sync::Arc<omnitrigger_actions::owned_mouse::OwnedLeftSession>, ActionError>
+    {
+        self.desktop.create_owned_left_input(owner)
+    }
+
     fn browser_async_available(&self) -> bool {
         true
     }

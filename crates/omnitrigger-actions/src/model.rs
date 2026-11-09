@@ -93,11 +93,14 @@ pub struct ActionError {
     pub code: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effect_state: Option<String>,
+    pub effect_state: Option<Box<str>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_permissions: Vec<String>,
+    /// 仅亮度取消/超时的匿名进度；不表示可以重试。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brightness_receipt: Option<Box<serde_json::Value>>,
 }
 
 impl ActionError {
@@ -108,6 +111,16 @@ impl ActionError {
             effect_state: None,
             method: None,
             required_permissions: Vec::new(),
+            brightness_receipt: None,
+        }
+    }
+
+    pub(crate) fn retain_brightness_receipt(&mut self) {
+        if self.method.as_deref() != Some("display.brightness_step")
+            || !matches!(self.code.as_str(), "cancelled" | "timeout")
+            || self.effect_state.as_deref() != Some("unknown")
+        {
+            self.brightness_receipt = None;
         }
     }
 }

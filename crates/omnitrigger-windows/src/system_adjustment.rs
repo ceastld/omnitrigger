@@ -302,16 +302,15 @@ pub fn step_brightness_with_first_wmi_fallback_at_if(
     direction: BrightnessStepDirection,
     check: &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
 ) -> Result<BrightnessStepOutcome, SystemAdjustmentError> {
-    let physical = step_physical_brightness_set_at_if(point, direction, check);
-    check(false)?;
     let wmi_direction = match direction {
         BrightnessStepDirection::Increase => WmiBrightnessStepDirection::Increase,
         BrightnessStepDirection::Decrease => WmiBrightnessStepDirection::Decrease,
     };
-    brightness_step_fallback::run_brightness_step(
-        || Ok(point),
-        |_| physical,
-        || step_first_enumerated_wmi_brightness_if(wmi_direction, check),
+    brightness_step_fallback::run_guarded_brightness_step(
+        point,
+        |check| step_physical_brightness_set_at_if(point, direction, check),
+        |check| step_first_enumerated_wmi_brightness_if(wmi_direction, check),
+        check,
     )
 }
 

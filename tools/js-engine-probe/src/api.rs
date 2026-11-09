@@ -32,6 +32,7 @@ fn capture_api_error(failure: process_capture::Failure) -> ApiError {
         effect_state: Some(failure.effect_state.into()),
         method: Some("process.capture".into()),
         required_permissions: Vec::new(),
+        brightness_receipt: None,
     }
 }
 
@@ -40,11 +41,13 @@ pub struct ApiError {
     pub(crate) code: String,
     pub(crate) message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) effect_state: Option<String>,
+    pub(crate) effect_state: Option<Box<str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) method: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) required_permissions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) brightness_receipt: Option<Box<Value>>,
 }
 
 fn error(code: &'static str, message: impl ToString) -> ApiError {
@@ -54,6 +57,7 @@ fn error(code: &'static str, message: impl ToString) -> ApiError {
         effect_state: None,
         method: None,
         required_permissions: Vec::new(),
+        brightness_receipt: None,
     }
 }
 
@@ -64,6 +68,7 @@ fn open_parent_error(code: &str, started: bool) -> ApiError {
         effect_state: Some(if started { "unknown" } else { "not_started" }.into()),
         method: Some("system.open_file_in_parent".into()),
         required_permissions: Vec::new(),
+        brightness_receipt: None,
     }
 }
 
@@ -148,6 +153,7 @@ impl DesktopMode {
                 effect_state: Some("not_started".into()),
                 method: None,
                 required_permissions: Vec::new(),
+                brightness_receipt: None,
             }),
             Some(mode) => Ok(mode),
             None => Ok(if legacy_binding {
@@ -200,6 +206,7 @@ fn check_local_desktop(call: &Call) -> Result<(), ApiError> {
                 effect_state: Some("not_started".into()),
                 method: Some(method.into()),
                 required_permissions: Vec::new(),
+                brightness_receipt: None,
             });
         }
     }

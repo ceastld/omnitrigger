@@ -29,7 +29,7 @@ compile_error!("请选择且只选择 boa 或 quickjs 引擎。");
 const MAX_REQUEST: u64 = 256 * 1024;
 const FAULT_FIELDS: &str = "(function(error) { try {\n\
     if (typeof error?.code !== 'string' || !['not_started','unknown'].includes(error.effectState)) return null;\n\
-    return JSON.stringify({code:error.code,message:String(error.message),effect_state:error.effectState,method:error.method,required_permissions:error.requiredPermissions});\n\
+    return JSON.stringify({code:error.code,message:String(error.message),effect_state:error.effectState,method:error.method,required_permissions:error.requiredPermissions,...(error.method === 'display.brightness_step' && ['cancelled','timeout'].includes(error.code) && error.effectState === 'unknown' && Object.getOwnPropertyDescriptor(error,'brightnessReceipt')?.value !== undefined ? {brightness_receipt:Object.getOwnPropertyDescriptor(error,'brightnessReceipt').value} : {})});\n\
     } catch (_) { return null; } })";
 
 fn bounded_diagnostic(mut text: String) -> String {

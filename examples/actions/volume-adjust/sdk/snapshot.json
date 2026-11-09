@@ -5,11 +5,11 @@
   "files": {
     "api.d.ts": {
       "canonical_source": "crates/omnitrigger-actions/runtime/api.d.ts",
-      "sha256": "949127fa2812bcc10dbb8983ddf26fda7cdd793253b3a3ae79e138b3a0fbd4e0"
+      "sha256": "a3a09685a9613dacd17c5ce18418b109982dd280adc12de7325709a3f6809cf5"
     },
     "script-types.d.ts": {
       "canonical_source": "crates/omnitrigger-actions/runtime/script-types.d.ts",
-      "sha256": "c7f1228c6aa772ee446a3cd042984019944175ca98c6d6f22ff601f39828e5b9"
+      "sha256": "55a2fdd601380021e1505f8b948e728301dda182fb606294783eb3f45c2fdee7"
     },
     "clipboard-history-api.d.ts": {
       "canonical_source": "crates/omnitrigger-actions/runtime/clipboard-history-api.d.ts",
