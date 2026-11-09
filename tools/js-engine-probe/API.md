@@ -70,6 +70,8 @@ return { submitted: true };
 
 捕获不枚举、不激活窗口，不把进程身份当作浏览器 `windowId` 到 HWND 的关联。发送返回 `{submitted:true}` 仅确认系统接纳输入；输入前明确拒绝为 `not_started`，进入平台提交后未获确认的失败为 `unknown`。租约使用宿主单调时钟并受动作总期限约束，不自动重试。应用和轻量宿主须同时具备这些入口；独立引擎 CLI 没有应用目标桥接时明确报错。
 
+`sendShortcut`、`sendKeySequence` 和 `sendShortcutTo` 的按键参数只接受键盘 VK；鼠标按钮 VK `1/2/4/5/6` 在调用 Native 前以 `invalid_input`、`not_started` 拒绝，不产生键盘或鼠标输入。错误的 `method` 分别为 `keyboard.shortcut`、`keyboard.sequence`、`target.keyboard.shortcut`。这三项键盘接口不负责鼠标按钮的按下、释放或所有权收尾。
+
 ## 程序输出采集
 
 `ctx.process.capture` 在 Windows 上共用一份 Rust 采集后端：Boa、QuickJS 同步返回，Node 返回 Promise，须逐次 `await`。应用内三种运行时均通过应用原生桥接采集，不要求原目标窗口；宿主仍可拒绝不支持的调用。需要更新应用和相应宿主；类型声明或示例更新不能为旧构建增加能力。应用绑定的轻量脚本在建桥失败或调用失败时不会退回引擎本地启动，Node 无原生桥接时也明确失败，不回退 `run`。已有两种程序输出配方见[程序输出通知动作](../../examples/actions/process-output/)。

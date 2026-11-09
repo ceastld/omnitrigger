@@ -389,7 +389,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/n10_hint_entry.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test tests/desktop_captured_target.test.mjs
+          node --test tests/desktop_captured_target.test.mjs tests/desktop_mouse_vk_rejection.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/captured_target_types.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
