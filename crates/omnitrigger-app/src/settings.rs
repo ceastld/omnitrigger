@@ -946,17 +946,8 @@ struct Definitions {
 
 /// 解析配置并展开集合与场景引用；同时返回原文中的定义。
 fn decode_with_definitions(text: &str) -> Result<(Definitions, Vec<Binding>), String> {
-    let settings: Settings =
-        serde_json::from_str(text).map_err(|e| format!("配置格式有误：{e}"))?;
-    if !matches!(settings.version, 1..=CONFIG_VERSION) {
-        return Err("配置版本不受支持，原文件已保留。".into());
-    }
-    if settings.version < 24 && (!settings.app_sets.is_empty() || !settings.scenes.is_empty()) {
-        return Err(DEFINITIONS_VERSION_ERROR.into());
-    }
-    app_sets::validate(&settings.app_sets).map_err(|error| error.to_string())?;
-    let compiled =
-        scenes::compile(&settings.scenes, &settings.app_sets).map_err(|error| error.to_string())?;
+    let settings = parse(text)?;
+    let compiled = compile_definitions(&settings)?;
     let bindings = settings
         .bindings
         .into_iter()
@@ -1179,6 +1170,36 @@ pub fn load() -> Result<Vec<Binding>, String> {
 
 pub fn save(bindings: &[Binding]) -> Result<(), String> {
     save_to(&path(), bindings)
+}
+
+/// 读取配置中的场景定义并合并展开，供轮盘槽位按场景筛选；不读取或校验触发器。
+pub fn load_scenes() -> Result<CompiledScenes, String> {
+    match std::fs::read_to_string(path()) {
+        Ok(text) => compile_scenes(&text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(CompiledScenes::default()),
+        Err(error) => Err(format!("读取场景定义失败：{error}")),
+    }
+}
+
+fn compile_scenes(text: &str) -> Result<CompiledScenes, String> {
+    compile_definitions(&parse(text)?)
+}
+
+fn parse(text: &str) -> Result<Settings, String> {
+    let settings: Settings =
+        serde_json::from_str(text).map_err(|e| format!("配置格式有误：{e}"))?;
+    if !matches!(settings.version, 1..=CONFIG_VERSION) {
+        return Err("配置版本不受支持，原文件已保留。".into());
+    }
+    Ok(settings)
+}
+
+fn compile_definitions(settings: &Settings) -> Result<CompiledScenes, String> {
+    if settings.version < 24 && (!settings.app_sets.is_empty() || !settings.scenes.is_empty()) {
+        return Err(DEFINITIONS_VERSION_ERROR.into());
+    }
+    app_sets::validate(&settings.app_sets).map_err(|error| error.to_string())?;
+    scenes::compile(&settings.scenes, &settings.app_sets).map_err(|error| error.to_string())
 }
 
 fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {

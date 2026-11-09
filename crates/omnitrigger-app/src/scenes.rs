@@ -80,9 +80,13 @@ impl std::error::Error for SceneError {}
 pub struct CompiledScenes(BTreeMap<String, Scene>);
 
 impl CompiledScenes {
-    #[cfg(test)]
     pub fn get(&self, name: &str) -> Option<&Scene> {
         self.0.get(name)
+    }
+
+    /// 按名称排序的全部场景。
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Scene)> {
+        self.0.iter().map(|(name, scene)| (name.as_str(), scene))
     }
 }
 

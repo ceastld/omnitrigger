@@ -158,6 +158,41 @@ impl ProcessScope {
         })
     }
 
+    /// 规范化后的副本：名称小写并去掉 `.exe`，按注册规则校验。
+    pub fn normalized(&self) -> Result<Self, ProcessScopeError> {
+        let mut scope = self.clone();
+        scope.normalize()?;
+        Ok(scope)
+    }
+
+    /// 判断给定上下文是否命中，规则与注册后的输入匹配相同。
+    /// 范围应先经 [`Self::normalized`]；进程名在此规范化，无效进程名视为未知。
+    pub fn matches(&self, process: Option<&str>, role: WindowRole) -> bool {
+        let process = process.and_then(normalize_name);
+        self.matches_context(process.as_deref(), role)
+    }
+
+    /// 两个已规范化的范围是否存在同时命中的上下文；与注册冲突检查相同。
+    pub fn intersects(&self, other: &Self) -> bool {
+        self.overlaps(other)
+    }
+
+    /// 两个已规范化的范围中，命中 `self` 的每个上下文是否也命中 `other`。
+    /// 按标准 Windows 外壳判断：桌面与任务栏窗口只属于 `explorer` 进程。
+    /// 仅供编辑界面推断沿用关系；运行时匹配和冲突检查不依赖这一假设。
+    pub fn implies(&self, other: &Self) -> bool {
+        self.sample_contexts(other)
+            .filter(|(name, role)| *role == WindowRole::Application || name == "explorer")
+            .all(|(name, role)| {
+                !self.matches_context(Some(&name), role) || other.matches_context(Some(&name), role)
+            })
+    }
+
+    /// 范围优先级：非空白名单高于全局或只含黑名单的范围。
+    pub fn specificity(&self) -> u8 {
+        self.priority()
+    }
+
     pub(crate) fn priority(&self) -> u8 {
         u8::from(!self.allow.is_empty())
     }
@@ -208,31 +243,35 @@ impl ProcessScope {
     }
 
     pub(crate) fn overlaps(&self, other: &Self) -> bool {
-        // 匹配结果只会在名单名称、两个角色名称及名单外进程之间变化，有限枚举即可覆盖。
-        let mut names: BTreeSet<&str> = self
+        self.sample_contexts(other).any(|(name, role)| {
+            self.matches_context(Some(&name), role) && other.matches_context(Some(&name), role)
+        })
+    }
+
+    /// 已知上下文的代表样本：匹配结果只会在名单名称、两个角色名称及名单外进程之间变化，
+    /// 有限枚举即可覆盖。未知上下文只命中全局范围，无需列出。
+    fn sample_contexts(&self, other: &Self) -> impl Iterator<Item = (String, WindowRole)> {
+        let mut names: BTreeSet<String> = self
             .allow
             .iter()
             .chain(&self.deny)
             .chain(&other.allow)
             .chain(&other.deny)
-            .map(String::as_str)
+            .cloned()
             .collect();
-        names.extend(["desktop", "taskbar", "explorer"]);
+        names.extend(["desktop", "taskbar", "explorer"].map(String::from));
         let mut outside = "__other_process__".to_string();
-        while names.contains(outside.as_str()) {
+        while names.contains(&outside) {
             outside.push('_');
         }
-        names.insert(&outside);
-        names.into_iter().any(|name| {
+        names.insert(outside);
+        names.into_iter().flat_map(|name| {
             [
                 WindowRole::Application,
                 WindowRole::Desktop,
                 WindowRole::Taskbar,
             ]
-            .into_iter()
-            .any(|role| {
-                self.matches_context(Some(name), role) && other.matches_context(Some(name), role)
-            })
+            .map(|role| (name.clone(), role))
         })
     }
 }

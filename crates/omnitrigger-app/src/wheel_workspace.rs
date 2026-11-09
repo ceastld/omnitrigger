@@ -1,6 +1,8 @@
 //! 轮盘管理与执行协调；浮窗只提交选择，不在输入 Hook 内执行动作。
 use crate::{
     radial_wheel::RingGeometry,
+    scenes::CompiledScenes,
+    wheel_scenes::scene_scope,
     wheels::{WheelDefinition, WheelPosition, WheelSlot},
     window_action::{WindowAction, WindowOperation},
     ActionSpec, Activation, BackendCommand, Bounds, Context, HitSource, Page, RadialWheel,
@@ -93,33 +95,188 @@ pub(super) fn slot_at(wheel: &WheelDefinition, ring: u8, sector: u8) -> Option<u
     })
 }
 
-/// 编辑时取出一组槽位：通用布局或某个应用的专用布局；均分布局转为方位布局。
-pub(super) fn scope_view(wheel: &WheelDefinition, scope: Option<&str>) -> WheelDefinition {
-    let mut view = wheel.clone();
-    if let Some(application) = scope.and_then(|process| {
-        wheel
-            .app_overrides
-            .iter()
-            .find(|application| application.process == process)
-    }) {
-        view.slots = application.slots.clone();
+/// 编辑器中除“通用”外的范围：旧版整组应用覆盖，或引用场景的专属槽位。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum WheelScope {
+    App(String),
+    Scene(String),
+}
+
+impl WheelScope {
+    pub(super) fn label(&self) -> String {
+        match self {
+            Self::App(process) => process.clone(),
+            Self::Scene(name) => format!("场景 {name}"),
+        }
     }
+}
+
+fn shared(slots: &[WheelSlot]) -> Vec<WheelSlot> {
+    slots
+        .iter()
+        .filter(|slot| slot.scene.is_none())
+        .cloned()
+        .collect()
+}
+
+fn same_cell(left: &WheelSlot, right: &WheelSlot) -> bool {
+    left.position
+        .zip(right.position)
+        .is_some_and(|(left, right)| (left.ring, left.sector) == (right.ring, right.sector))
+}
+
+/// 编辑时取出一组槽位，均分布局转为方位布局：
+/// “通用”与应用覆盖只含通用槽位；场景视图与该场景下实际显示的一致——
+/// 该场景的槽位，加上未被覆盖的通用槽位和必然同时命中的其他场景槽位（沿用的槽位），
+/// 写回时按 `scene` 区分沿用与专属。
+pub(super) fn scope_view(
+    wheel: &WheelDefinition,
+    scope: Option<&WheelScope>,
+    scenes: &CompiledScenes,
+) -> WheelDefinition {
+    let mut view = wheel.clone();
     view.app_overrides.clear();
+    match scope {
+        Some(WheelScope::App(process)) => {
+            let slots = wheel
+                .app_overrides
+                .iter()
+                .find(|application| &application.process == process)
+                .map_or(&wheel.slots, |application| &application.slots);
+            view.slots = shared(slots);
+        }
+        Some(WheelScope::Scene(name)) => {
+            view.slots = shared(&wheel.slots);
+            convert_to_positions(&mut view);
+            let this = scene_scope(scenes, name).ok();
+            let mut inherited: Vec<(u8, WheelSlot)> =
+                view.slots.drain(..).map(|slot| (0, slot)).collect();
+            for slot in &wheel.slots {
+                let Some(other) = slot.scene.as_deref().filter(|other| *other != name) else {
+                    continue;
+                };
+                if let (Some(this), Ok(scope)) = (&this, scene_scope(scenes, other)) {
+                    if this.implies(&scope) {
+                        inherited.push((scope.specificity(), slot.clone()));
+                    }
+                }
+            }
+            let own: Vec<WheelSlot> = wheel
+                .slots
+                .iter()
+                .filter(|slot| slot.scene.as_deref() == Some(name.as_str()))
+                .cloned()
+                .collect();
+            for (index, (specificity, slot)) in inherited.iter().enumerate() {
+                let covered = own.iter().any(|scene| same_cell(scene, slot))
+                    || inherited
+                        .iter()
+                        .enumerate()
+                        .any(|(other, (better, rival))| {
+                            other != index
+                                && same_cell(rival, slot)
+                                && (better > specificity
+                                    || (better == specificity && other < index))
+                        });
+                if !covered {
+                    view.slots.push(slot.clone());
+                }
+            }
+            view.slots.extend(own);
+        }
+        None => view.slots = shared(&wheel.slots),
+    }
     convert_to_positions(&mut view);
     view
 }
 
-/// 把编辑后的槽位写回对应的布局。
-pub(super) fn store_view(wheel: &mut WheelDefinition, scope: Option<&str>, view: WheelDefinition) {
-    match scope.and_then(|process| {
-        wheel
-            .app_overrides
-            .iter_mut()
-            .find(|application| application.process == process)
-    }) {
-        Some(application) => application.slots = view.slots,
-        None => wheel.slots = view.slots,
+/// 通用槽位改动后，同组中引用场景的槽位保留原样，并沿用所在圈的新格数与半格偏移。
+fn merge_shared(view: Vec<WheelSlot>, previous: &[WheelSlot]) -> Result<Vec<WheelSlot>, String> {
+    let mut slots = view;
+    let shared_count = slots.len();
+    for slot in previous.iter().filter(|slot| slot.scene.is_some()) {
+        let mut slot = slot.clone();
+        if let Some(position) = slot.position.as_mut() {
+            let ring = usize::from(position.ring);
+            if let Some((sectors, half_step)) = slots[..shared_count]
+                .iter()
+                .filter_map(|slot| slot.position)
+                .find(|other| other.ring == position.ring)
+                .map(|other| (other.sectors, other.half_step))
+            {
+                if position.sector >= sectors {
+                    return Err(format!(
+                        "场景 {} 在{}第 {} 格还有专属动作，先把它移走再减少格数。",
+                        slot.scene.as_deref().unwrap_or_default(),
+                        RING_NAMES[ring],
+                        position.sector + 1
+                    ));
+                }
+                position.sectors = sectors;
+                position.half_step = half_step;
+            }
+        }
+        slots.push(slot);
     }
+    Ok(slots)
+}
+
+/// 把编辑后的槽位写回对应的布局。场景视图中改动通用槽位时复制为场景专属槽位；
+/// 删除或移走通用槽位、调整格数只能在“通用”中进行，否则拒绝而不替用户改动通用布局。
+pub(super) fn store_view(
+    wheel: &mut WheelDefinition,
+    scope: Option<&WheelScope>,
+    view: WheelDefinition,
+    scenes: &CompiledScenes,
+) -> Result<(), String> {
+    match scope {
+        Some(WheelScope::App(process)) => {
+            let application = wheel
+                .app_overrides
+                .iter_mut()
+                .find(|application| &application.process == process)
+                .ok_or("这个应用的专用布局已不存在。")?;
+            application.slots = merge_shared(view.slots, &application.slots)?;
+        }
+        Some(WheelScope::Scene(name)) => {
+            let before = scope_view(wheel, scope, scenes);
+            for ring in 0..3 {
+                if let (Some(old), Some(new)) =
+                    (ring_geometry(&before, ring), ring_geometry(&view, ring))
+                {
+                    if old != new {
+                        return Err("格数与半格偏移请在“通用”中调整。".into());
+                    }
+                }
+            }
+            let mine = |slot: &WheelSlot| slot.scene.as_deref() == Some(name.as_str());
+            let inherited: Vec<&WheelSlot> =
+                before.slots.iter().filter(|slot| !mine(slot)).collect();
+            if inherited
+                .iter()
+                .any(|slot| !view.slots.iter().any(|other| same_cell(slot, other)))
+            {
+                return Err(
+                    "沿用的动作（通用或其他场景）只能在其所属范围中删除或移动；在此场景中可以替换为专属动作。"
+                        .into(),
+                );
+            }
+            let own = view.slots.into_iter().filter_map(|slot| {
+                let unchanged = !mine(&slot) && inherited.iter().any(|original| **original == slot);
+                (!unchanged).then(|| WheelSlot {
+                    scene: Some(name.clone()),
+                    ..slot
+                })
+            });
+            convert_to_positions(wheel);
+            wheel
+                .slots
+                .retain(|slot| slot.scene.as_deref() != Some(name.as_str()));
+            wheel.slots.extend(own);
+        }
+        None => wheel.slots = merge_shared(view.slots, &wheel.slots)?,
+    }
+    Ok(())
 }
 
 /// 在格子上放入动作：已有动作时替换名称与动作，空格新增槽位并沿用该圈几何。
@@ -150,6 +307,7 @@ pub(super) fn put_action(
             sectors,
             half_step,
         }),
+        scene: None,
     });
     Ok(())
 }
@@ -266,6 +424,11 @@ impl Workspace {
             cx.notify();
             return false;
         }
+        if let Err(error) = self.check_wheel_scenes(&proposed) {
+            self.error = Some(error);
+            cx.notify();
+            return false;
+        }
         match proposed.save(&crate::settings::path()) {
             Ok(()) => {
                 self.apply_wheels(proposed, cx);
@@ -278,6 +441,20 @@ impl Workspace {
                 false
             }
         }
+    }
+
+    /// 槽位引用的场景须在 bindings.json 中定义且只限定前台应用；场景读取失败时说明原因。
+    fn check_wheel_scenes(&self, wheels: &Wheels) -> Result<(), String> {
+        for wheel in &wheels.wheels {
+            crate::wheel_scenes::check_wheel(wheel, &self.wheel_scenes).map_err(|error| {
+                let reason = match &self.wheel_scenes_error {
+                    Some(load) => format!("（场景定义读取失败：{load}）"),
+                    None => String::new(),
+                };
+                format!("轮盘“{}”：{error}{reason}", wheel.name)
+            })?;
+        }
+        Ok(())
     }
 
     fn apply_wheels(&mut self, wheels: Wheels, cx: &mut Context<Self>) {
@@ -302,6 +479,14 @@ impl Workspace {
 
     /// 重新读取 wheels.json；读取或校验失败时保留当前内容并显示原因。
     pub(super) fn reload_wheels(&mut self, cx: &mut Context<Self>) {
+        // 场景定义在 bindings.json 中编辑，重新载入轮盘时一并读取。
+        match crate::settings::load_scenes() {
+            Ok(scenes) => {
+                self.wheel_scenes = scenes;
+                self.wheel_scenes_error = None;
+            }
+            Err(error) => self.wheel_scenes_error = Some(error),
+        }
         match Wheels::load(&crate::settings::path()) {
             Ok(wheels) => {
                 let (cell, scope) = (self.wheel_cell, self.wheel_scope.clone());
@@ -353,20 +538,42 @@ impl Workspace {
         cx.notify();
     }
 
-    /// 当前编辑的应用范围；所选应用已不在专用布局中时回到通用布局。
-    fn wheel_scope_for(&self, wheel: &WheelDefinition) -> Option<String> {
-        self.wheel_scope.clone().filter(|process| {
-            wheel
-                .app_overrides
-                .iter()
-                .any(|application| &application.process == process)
-        })
+    /// 编辑器可选的范围：旧版应用覆盖，以及只限定前台应用的场景和槽位已引用的场景。
+    pub(super) fn wheel_scope_choices(&self, wheel: &WheelDefinition) -> Vec<WheelScope> {
+        let mut scenes: Vec<String> = self
+            .wheel_scenes
+            .iter()
+            .filter(|(_, scene)| scene.pointer.is_global() && !scene.foreground.is_global())
+            .map(|(name, _)| name.to_string())
+            .collect();
+        for name in wheel.slots.iter().filter_map(|slot| slot.scene.as_ref()) {
+            if !scenes.contains(name) {
+                scenes.push(name.clone());
+            }
+        }
+        wheel
+            .app_overrides
+            .iter()
+            .map(|application| WheelScope::App(application.process.clone()))
+            .chain(scenes.into_iter().map(WheelScope::Scene))
+            .collect()
     }
 
-    /// 选中轮盘在当前应用范围下的槽位，均分布局已转为方位布局。
+    /// 当前编辑的范围；所选应用或场景已不可选时回到通用布局。
+    pub(super) fn wheel_scope_for(&self, wheel: &WheelDefinition) -> Option<WheelScope> {
+        self.wheel_scope
+            .clone()
+            .filter(|scope| self.wheel_scope_choices(wheel).contains(scope))
+    }
+
+    /// 选中轮盘在当前范围下的槽位，均分布局已转为方位布局。
     pub(super) fn wheel_view(&self) -> Option<WheelDefinition> {
         let wheel = self.wheels.wheels.get(self.selected_wheel_index()?)?;
-        Some(scope_view(wheel, self.wheel_scope_for(wheel).as_deref()))
+        Some(scope_view(
+            wheel,
+            self.wheel_scope_for(wheel).as_ref(),
+            &self.wheel_scenes,
+        ))
     }
 
     /// 修改当前范围的槽位并立即保存；成功后按选中格子刷新面板。
@@ -382,13 +589,14 @@ impl Workspace {
         let mut proposed = self.wheels.clone();
         let wheel = &mut proposed.wheels[index];
         let scope = self.wheel_scope_for(wheel);
-        let mut view = scope_view(wheel, scope.as_deref());
-        if let Err(error) = edit(&mut view) {
+        let mut view = scope_view(wheel, scope.as_ref(), &self.wheel_scenes);
+        if let Err(error) = edit(&mut view)
+            .and_then(|()| store_view(wheel, scope.as_ref(), view, &self.wheel_scenes))
+        {
             self.error = Some(error);
             cx.notify();
             return false;
         }
-        store_view(wheel, scope.as_deref(), view);
         if !self.commit_wheels(proposed, cx) {
             return false;
         }
@@ -485,7 +693,7 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn set_wheel_scope(&mut self, scope: Option<String>, cx: &mut Context<Self>) {
+    pub(super) fn set_wheel_scope(&mut self, scope: Option<WheelScope>, cx: &mut Context<Self>) {
         self.flush_wheel_label(cx);
         self.wheel_scope = scope;
         self.wheel_scope_open = false;
@@ -893,7 +1101,20 @@ impl Workspace {
             }
         };
         let process = omnitrigger_windows::shortcut_target_context(target).ok();
-        let definition = definition.resolved_for_process(process.as_deref());
+        let (scene_process, role) = omnitrigger_windows::shortcut_target_scene_context(target)
+            .map_or(
+                (None, omnitrigger_core::WindowRole::Unknown),
+                |(process, role)| (Some(process), role),
+            );
+        let definition = crate::wheel_scenes::resolve_for_target(
+            &definition,
+            &self.wheel_scenes,
+            process.as_deref(),
+            crate::wheel_scenes::TargetContext {
+                process: scene_process.as_deref(),
+                role,
+            },
+        );
         let wheel_size = crate::radial_wheel::wheel_size(&definition);
         let window = match self.prepare_wheel(cx) {
             Ok(window) => window,
@@ -1429,17 +1650,178 @@ mod tests {
                 process: "code.exe".into(),
                 slots: wheel(&[at(1, 3, 4)]).slots,
             });
-        let mut view = scope_view(&definition, Some("code.exe"));
+        let code = WheelScope::App("code.exe".into());
+        let mut view = scope_view(&definition, Some(&code), &none());
         assert!(view.app_overrides.is_empty());
         let action = view.slots[0].action.clone();
         put_action(&mut view, (1, 0), "应用".into(), action).unwrap();
-        store_view(&mut definition, Some("code.exe"), view);
+        store_view(&mut definition, Some(&code), view, &none()).unwrap();
         assert_eq!(definition.app_overrides[0].slots.len(), 2);
         assert_eq!(definition.slots[0].position, None);
-        let general = scope_view(&definition, None);
+        let general = scope_view(&definition, None, &none());
         assert_eq!(general.slots[1].position, at(0, 1, 2));
-        store_view(&mut definition, None, general);
+        store_view(&mut definition, None, general, &none()).unwrap();
         definition.validate().unwrap();
+    }
+
+    fn none() -> CompiledScenes {
+        CompiledScenes::default()
+    }
+
+    fn labels(view: &WheelDefinition) -> Vec<(&str, Option<&str>)> {
+        view.slots
+            .iter()
+            .map(|slot| (slot.label.as_str(), slot.scene.as_deref()))
+            .collect()
+    }
+
+    #[test]
+    fn scene_view_copies_shared_slots_on_write_and_keeps_shared_layout_intact() {
+        let mut definition = wheel(&[at(0, 0, 8), at(0, 1, 8)]);
+        let chrome = WheelScope::Scene("chrome".into());
+        // 未改动时写回不产生专属槽位。
+        let view = scope_view(&definition, Some(&chrome), &none());
+        store_view(&mut definition, Some(&chrome), view, &none()).unwrap();
+        assert_eq!(definition.slots.len(), 2);
+        // 替换通用格子与在空格新增都成为场景专属槽位，通用槽位不变。
+        let mut view = scope_view(&definition, Some(&chrome), &none());
+        let action = view.slots[0].action.clone();
+        put_action(&mut view, (0, 1), "关闭网页".into(), action.clone()).unwrap();
+        put_action(&mut view, (0, 4), "新标签".into(), action).unwrap();
+        store_view(&mut definition, Some(&chrome), view, &none()).unwrap();
+        definition.validate().unwrap();
+        assert_eq!(
+            labels(&definition),
+            [
+                ("槽位0", None),
+                ("槽位1", None),
+                ("关闭网页", Some("chrome")),
+                ("新标签", Some("chrome"))
+            ]
+        );
+        assert_eq!(
+            labels(&scope_view(&definition, Some(&chrome), &none())),
+            [
+                ("槽位0", None),
+                ("关闭网页", Some("chrome")),
+                ("新标签", Some("chrome"))
+            ]
+        );
+        assert_eq!(
+            labels(&scope_view(&definition, None, &none())),
+            [("槽位0", None), ("槽位1", None)]
+        );
+        // 场景中不能删除、移走通用动作或调整格数；删除专属槽位即恢复通用动作。
+        for edit in [
+            (|view: &mut WheelDefinition| remove_at(view, (0, 0))) as fn(&mut _) -> _,
+            |view| place_slot(view, 0, 0, 6),
+            |view| set_ring_layout(view, 0, 12, false),
+        ] {
+            let mut view = scope_view(&definition, Some(&chrome), &none());
+            edit(&mut view).unwrap();
+            let before = definition.clone();
+            assert!(store_view(&mut definition, Some(&chrome), view, &none()).is_err());
+            assert_eq!(definition, before);
+        }
+        let mut view = scope_view(&definition, Some(&chrome), &none());
+        remove_at(&mut view, (0, 1)).unwrap();
+        store_view(&mut definition, Some(&chrome), view, &none()).unwrap();
+        assert_eq!(
+            labels(&scope_view(&definition, Some(&chrome), &none())),
+            [("槽位0", None), ("槽位1", None), ("新标签", Some("chrome"))]
+        );
+    }
+
+    #[test]
+    fn scene_view_shows_slots_of_scenes_it_implies_and_copies_them_on_write() {
+        let scenes = crate::scenes::compile(
+            &serde_json::from_value(serde_json::json!({
+                "chrome": {"process_scope": {"allow": ["chrome"]}},
+                "not-desktop": {"process_scope": {"identity": "shell_context", "deny": ["desktop"]}},
+                "not-chrome": {"process_scope": {"deny": ["chrome"]}}
+            }))
+            .unwrap(),
+            &crate::app_sets::AppSets::new(),
+        )
+        .unwrap();
+        let mut definition = wheel(&[at(0, 0, 8)]);
+        for (sector, scene) in [(2, "not-desktop"), (3, "not-chrome")] {
+            definition.slots.push(WheelSlot {
+                label: scene.into(),
+                scene: Some(scene.into()),
+                ..wheel(&[at(0, sector, 8)]).slots.remove(0)
+            });
+        }
+        let chrome = WheelScope::Scene("chrome".into());
+        // chrome 窗口必然不是桌面，因此沿用“not-desktop”的槽位；“not-chrome”不显示。
+        assert_eq!(
+            labels(&scope_view(&definition, Some(&chrome), &scenes)),
+            [("槽位0", None), ("not-desktop", Some("not-desktop"))]
+        );
+        let mut view = scope_view(&definition, Some(&chrome), &scenes);
+        let unchanged = definition.clone();
+        store_view(&mut definition, Some(&chrome), view.clone(), &scenes).unwrap();
+        assert_eq!(definition, unchanged);
+        view.slots[1].label = "窗口调整".into();
+        store_view(&mut definition, Some(&chrome), view, &scenes).unwrap();
+        definition.validate().unwrap();
+        assert_eq!(
+            labels(&definition),
+            [
+                ("槽位0", None),
+                ("not-desktop", Some("not-desktop")),
+                ("not-chrome", Some("not-chrome")),
+                ("窗口调整", Some("chrome"))
+            ]
+        );
+        let mut view = scope_view(
+            &definition,
+            Some(&WheelScope::Scene("not-desktop".into())),
+            &scenes,
+        );
+        assert_eq!(
+            labels(&view),
+            [("槽位0", None), ("not-desktop", Some("not-desktop"))]
+        );
+        remove_at(&mut view, (0, 2)).unwrap();
+        store_view(
+            &mut definition,
+            Some(&WheelScope::Scene("not-desktop".into())),
+            view,
+            &scenes,
+        )
+        .unwrap();
+        assert_eq!(definition.slots.len(), 3);
+    }
+
+    #[test]
+    fn shared_edits_keep_scene_slots_and_carry_ring_geometry_to_them() {
+        let mut definition = wheel(&[at(0, 0, 8), at(0, 1, 8)]);
+        definition.slots.push(WheelSlot {
+            scene: Some("chrome".into()),
+            ..wheel(&[at(0, 5, 8)]).slots.remove(0)
+        });
+        let mut view = scope_view(&definition, None, &none());
+        set_ring_layout(&mut view, 0, 12, true).unwrap();
+        store_view(&mut definition, None, view, &none()).unwrap();
+        definition.validate().unwrap();
+        assert_eq!(definition.slots.len(), 3);
+        assert_eq!(
+            definition.slots[2].position,
+            Some(WheelPosition {
+                ring: 0,
+                sector: 5,
+                sectors: 12,
+                half_step: true,
+            })
+        );
+        let mut view = scope_view(&definition, None, &none());
+        set_ring_layout(&mut view, 0, 4, false).unwrap();
+        let before = definition.clone();
+        assert!(store_view(&mut definition, None, view, &none())
+            .unwrap_err()
+            .contains("场景 chrome"));
+        assert_eq!(definition, before);
     }
 
     #[test]

@@ -35,6 +35,9 @@ pub struct WheelSlot {
     pub action: ActionSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<WheelPosition>,
+    /// 引用 bindings.json 中的场景；仅在目标窗口命中该场景时显示，并盖过同方位的通用槽位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene: Option<String>,
 }
 
 /// 原生方位从正上方开始顺时针编号；空方位不需要填充假动作。
@@ -108,8 +111,12 @@ impl WheelDefinition {
 }
 
 fn validate_slots(slots: &[WheelSlot]) -> Result<(), String> {
-    if !(1..=48).contains(&slots.len()) {
-        return Err("每组轮盘需要 1–48 个槽位。".into());
+    let shared = slots.iter().filter(|slot| slot.scene.is_none()).count();
+    if !(1..=48).contains(&shared) {
+        return Err("每组轮盘需要 1–48 个通用槽位（未引用场景）。".into());
+    }
+    if slots.len() > 192 {
+        return Err("每组轮盘连同场景槽位最多包含 192 个槽位。".into());
     }
     let explicit = slots[0].position.is_some();
     if !explicit && slots.len() > 8 {
@@ -120,6 +127,20 @@ fn validate_slots(slots: &[WheelSlot]) -> Result<(), String> {
     for (index, slot) in slots.iter().enumerate() {
         if slot.position.is_some() != explicit {
             return Err("同组轮盘槽位必须全部指定方位，或全部省略方位。".into());
+        }
+        if let Some(scene) = &slot.scene {
+            if !crate::definitions::valid_name(scene) {
+                return Err(format!(
+                    "槽位 {} 的场景名无效：{scene:?}；需要 1–32 个小写字母、数字、连字符或下划线。",
+                    index + 1
+                ));
+            }
+            if slot.position.is_none() {
+                return Err(format!(
+                    "槽位 {} 引用了场景，需要指定方位，才能确定它盖过哪个通用槽位。",
+                    index + 1
+                ));
+            }
         }
         if let Some(position) = slot.position {
             if position.ring > 2
@@ -137,7 +158,7 @@ fn validate_slots(slots: &[WheelSlot]) -> Result<(), String> {
             {
                 return Err("同一圈的所有槽位必须使用相同的分区数与半分区偏移。".into());
             }
-            if !positions.insert((position.ring, position.sector)) {
+            if !positions.insert((position.ring, position.sector, slot.scene.as_deref())) {
                 return Err(format!("槽位 {} 与已有槽位方位重复。", index + 1));
             }
         }
@@ -210,6 +231,7 @@ impl Default for Wheels {
             label: label.into(),
             action: ActionSpec::SendShortcut(ShortcutAction::new(vec![0xa2, terminal])),
             position: None,
+            scene: None,
         })
         .collect();
         Self {
@@ -260,7 +282,7 @@ impl Wheels {
                 Self::decode(&original)?;
                 let original_version: WheelsFile =
                     serde_json::from_str(&original).map_err(|error| error.to_string())?;
-                if original_version.version < 5 {
+                if original_version.version < 6 {
                     crate::settings::backup_legacy(
                         &destination,
                         original_version.version,
@@ -274,7 +296,7 @@ impl Wheels {
             }
         }
         let contents = serde_json::to_vec_pretty(&WheelsFile {
-            version: 5,
+            version: 6,
             wheels: self.wheels.clone(),
         })
         .map_err(|error| format!("编码轮盘配置失败：{error}"))?;
@@ -284,7 +306,7 @@ impl Wheels {
     fn decode(text: &str) -> Result<Self, String> {
         let file: WheelsFile =
             serde_json::from_str(text).map_err(|error| format!("轮盘配置格式有误：{error}"))?;
-        if !(1..=5).contains(&file.version) {
+        if !(1..=6).contains(&file.version) {
             return Err("轮盘配置版本不受支持，原文件已保留。".into());
         }
         if file.version < 2
@@ -333,6 +355,17 @@ impl Wheels {
             })
         {
             return Err("按键时序需要版本 5 轮盘配置。".into());
+        }
+        if file.version < 6
+            && file.wheels.iter().any(|wheel| {
+                wheel
+                    .slots
+                    .iter()
+                    .chain(wheel.app_overrides.iter().flat_map(|app| app.slots.iter()))
+                    .any(|slot| slot.scene.is_some())
+            })
+        {
+            return Err("槽位场景需要版本 6 轮盘配置。".into());
         }
         let wheels = Self {
             wheels: file.wheels,
@@ -406,7 +439,7 @@ mod tests {
 
     fn encode(wheels: &Wheels) -> String {
         serde_json::to_string(&WheelsFile {
-            version: 5,
+            version: 6,
             wheels: wheels.wheels.clone(),
         })
         .unwrap()
@@ -464,6 +497,7 @@ mod tests {
                 profile: Some("work-browser".into()),
             }),
             position: None,
+            scene: None,
         };
         wheels.wheels[0]
             .app_overrides
@@ -550,6 +584,7 @@ mod tests {
                 label: "提示".into(),
                 action: ActionSpec::Notification,
                 position: None,
+                scene: None,
             },
             WheelSlot {
                 label: "程序".into(),
@@ -559,11 +594,13 @@ mod tests {
                     working_directory: None,
                 }),
                 position: None,
+                scene: None,
             },
             WheelSlot {
                 label: "插件".into(),
                 action: ActionSpec::Plugin(PluginActionRef::raishot_capture()),
                 position: None,
+                scene: None,
             },
         ];
         expected.wheels.push(second);
@@ -578,7 +615,7 @@ mod tests {
             "绑定原样保留"
         );
         let value: serde_json::Value = serde_json::from_str(&encode(&expected)).unwrap();
-        assert_eq!(value["version"], 5);
+        assert_eq!(value["version"], 6);
         assert_eq!(value["wheels"][1]["accent"], "amber");
     }
 
@@ -650,7 +687,7 @@ mod tests {
         let base: serde_json::Value = serde_json::from_str(&encode(&wheels)).unwrap();
         let mut bad_values = vec!["not-json".to_string()];
         let mut future = base.clone();
-        future["version"] = 6.into();
+        future["version"] = 7.into();
         bad_values.push(future.to_string());
         for pointer in [
             "",
@@ -716,6 +753,7 @@ mod tests {
                 sectors,
                 half_step,
             }),
+            scene: None,
         }
     }
 
@@ -761,6 +799,63 @@ mod tests {
         wheels.validate().unwrap();
         wheels.wheels[0].slots.push(positioned(0, 0, 16, false));
         assert!(wheels.validate().is_err());
+    }
+
+    #[test]
+    fn scene_slots_need_v6_positions_and_valid_names_and_stay_outside_the_shared_limit() {
+        let scratch = Scratch::new();
+        let mut original: serde_json::Value =
+            serde_json::from_str(&encode(&Wheels::default())).unwrap();
+        original["version"] = 5.into();
+        std::fs::write(scratch.wheels(), original.to_string()).unwrap();
+        let mut wheels = Wheels::default();
+        wheels.wheels[0].slots = (0..8)
+            .map(|sector| positioned(0, sector, 8, false))
+            .collect();
+        let scoped = |sector, scene: &str| WheelSlot {
+            scene: Some(scene.into()),
+            ..positioned(0, sector, 8, false)
+        };
+        wheels.wheels[0].slots.push(scoped(1, "chrome"));
+        wheels.wheels[0].slots.push(scoped(1, "code"));
+        wheels.validate().unwrap();
+        let mut old: serde_json::Value = serde_json::from_str(&encode(&wheels)).unwrap();
+        old["version"] = 5.into();
+        assert_eq!(
+            Wheels::decode(&old.to_string()).unwrap_err(),
+            "槽位场景需要版本 6 轮盘配置。"
+        );
+        wheels.save(&scratch.bindings()).unwrap();
+        assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), wheels);
+        assert_eq!(
+            std::fs::read_to_string(scratch.0.join("wheels.json.v5.bak")).unwrap(),
+            original.to_string()
+        );
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(scratch.wheels()).unwrap()).unwrap();
+        assert_eq!(saved["wheels"][0]["slots"][8]["scene"], "chrome");
+        assert!(saved["wheels"][0]["slots"][0].get("scene").is_none());
+        for (slot, message) in [
+            (scoped(1, "chrome"), "方位重复"),
+            (scoped(2, "Bad Name"), "场景名无效"),
+            (
+                WheelSlot {
+                    position: None,
+                    ..scoped(3, "chrome")
+                },
+                "全部指定方位",
+            ),
+        ] {
+            let mut invalid = wheels.clone();
+            invalid.wheels[0].slots.push(slot);
+            let error = invalid.validate().unwrap_err();
+            assert!(error.contains(message), "{error}");
+        }
+        let mut only_scoped = wheels.clone();
+        only_scoped.wheels[0]
+            .slots
+            .retain(|slot| slot.scene.is_some());
+        assert!(only_scoped.validate().unwrap_err().contains("通用槽位"));
     }
 
     #[test]
@@ -871,6 +966,7 @@ mod tests {
                 wheel_id: "orbit-edit".into(),
             }),
             position: None,
+            scene: None,
         }];
         assert!(wheels.validate().is_err());
     }
@@ -916,6 +1012,7 @@ mod tests {
                 ],
             }),
             position: None,
+            scene: None,
         }
     }
 
@@ -932,7 +1029,7 @@ mod tests {
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.wheels()).unwrap()).unwrap();
-        assert_eq!(saved["version"], 5);
+        assert_eq!(saved["version"], 6);
         assert_eq!(saved["wheels"][0]["slots"][1]["action"]["kind"], "local");
         assert_eq!(
             saved["wheels"][0]["app_overrides"][0]["slots"][0]["action"]["version"],
@@ -988,7 +1085,7 @@ mod tests {
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.wheels()).unwrap()).unwrap();
-        assert_eq!(saved["version"], 5);
+        assert_eq!(saved["version"], 6);
         expected.wheels[0].slots[0].label = "再次修改".into();
         expected.save(&scratch.bindings()).unwrap();
         assert_eq!(std::fs::read(&backup).unwrap(), original.as_bytes());

@@ -94,6 +94,7 @@ mod updater;
 mod volume_adjust_host;
 mod wheel_editor;
 mod wheel_input_cli;
+mod wheel_scenes;
 mod wheel_workspace;
 mod wheels;
 mod window_action;
@@ -757,6 +758,9 @@ struct Workspace {
     browser_editor: browser_actions_ui::BrowserEditor,
     wheels: Wheels,
     wheels_error: Option<String>,
+    /// bindings.json 中的场景，供轮盘槽位按目标窗口筛选；读取失败时为空，原因见 `wheel_scenes_error`。
+    wheel_scenes: scenes::CompiledScenes,
+    wheel_scenes_error: Option<String>,
     wheel_selected: Option<String>,
     wheel_name: Entity<MessageInput>,
     wheel_slot_label: Entity<MessageInput>,
@@ -767,7 +771,7 @@ struct Workspace {
     wheel_moving: bool,
     wheel_replacing: bool,
     /// 正在编辑的应用专用布局（进程名）；`None` 为通用布局。
-    wheel_scope: Option<String>,
+    wheel_scope: Option<wheel_workspace::WheelScope>,
     /// 应用范围下拉是否展开。
     wheel_scope_open: bool,
     /// 鼠标悬停的格子，只用于提亮显示。
@@ -931,6 +935,10 @@ impl Workspace {
             }
         } else {
             (Wheels { wheels: Vec::new() }, None)
+        };
+        let (wheel_scenes, wheel_scenes_error) = match settings::load_scenes() {
+            Ok(scenes) => (scenes, None),
+            Err(error) => (Default::default(), Some(error)),
         };
         let initial_definition = bindings
             .iter()
@@ -1241,6 +1249,8 @@ impl Workspace {
             browser_editor,
             wheels,
             wheels_error,
+            wheel_scenes,
+            wheel_scenes_error,
             wheel_selected,
             wheel_name,
             wheel_slot_label,
@@ -8417,6 +8427,11 @@ fn main() {
         match settings::load().and_then(|bindings| {
             settings::validate(&bindings)?;
             let wheels = Wheels::load(&settings::path())?;
+            let scenes = settings::load_scenes()?;
+            for wheel in &wheels.wheels {
+                wheel_scenes::check_wheel(wheel, &scenes)
+                    .map_err(|error| format!("轮盘“{}”：{error}", wheel.name))?;
+            }
             for binding in &bindings {
                 if let ActionSpec::ShowWheel(reference) = &binding.action {
                     if !wheels

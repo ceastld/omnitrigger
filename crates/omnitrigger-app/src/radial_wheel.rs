@@ -1825,6 +1825,7 @@ mod tests {
                         sectors,
                         half_step,
                     }),
+                    scene: None,
                 })
                 .collect(),
             app_overrides: Vec::new(),

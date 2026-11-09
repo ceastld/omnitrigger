@@ -146,3 +146,29 @@ fn scene_round_trips_through_trigger_spec_context_fields() {
         })
     );
 }
+
+#[test]
+fn implication_covers_role_based_and_deny_only_scopes() {
+    use crate::{ProcessIdentity, ProcessScope};
+    let scope = |identity, allow: &[&str], deny: &[&str]| ProcessScope {
+        identity,
+        allow: allow.iter().map(|name| name.to_string()).collect(),
+        deny: deny.iter().map(|name| name.to_string()).collect(),
+    };
+    let chrome = scope(ProcessIdentity::Executable, &["chrome"], &[]);
+    let browsers = scope(ProcessIdentity::Executable, &["chrome", "msedge"], &[]);
+    let not_desktop = scope(ProcessIdentity::ShellContext, &[], &["desktop"]);
+    let not_chrome = scope(ProcessIdentity::Executable, &[], &["chrome"]);
+    assert!(chrome.implies(&browsers));
+    assert!(!browsers.implies(&chrome));
+    assert!(chrome.implies(&not_desktop));
+    assert!(!chrome.implies(&not_chrome));
+    assert!(!not_desktop.implies(&chrome));
+    assert!(chrome.implies(&ProcessScope::default()));
+    assert!(!ProcessScope::default().implies(&not_desktop));
+    let explorer = scope(ProcessIdentity::Executable, &["explorer"], &[]);
+    assert!(
+        !explorer.implies(&not_desktop),
+        "桌面窗口同属 explorer 进程"
+    );
+}

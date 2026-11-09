@@ -283,6 +283,23 @@ pub fn shortcut_target_context(target: crate::ShortcutTarget) -> Result<String, 
     }
 }
 
+/// 读取目标窗口的进程映像名与窗口角色，规则与触发器的前台范围相同；
+/// 用于按场景选择轮盘槽位。角色无法核验时返回 `Unknown`。
+#[cfg(windows)]
+pub fn shortcut_target_scene_context(
+    target: crate::ShortcutTarget,
+) -> Result<(String, omnitrigger_core::WindowRole), String> {
+    use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::GetWindowThreadProcessId};
+    let process = shortcut_target_process(target)?;
+    let hwnd = HWND(target.0 as *mut std::ffi::c_void);
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    Ok((
+        process.clone(),
+        crate::window_context::role(hwnd, pid, &process),
+    ))
+}
+
 #[cfg(any(windows, test))]
 fn effective_scale(dpi_x: u32, dpi_y: u32) -> Result<f32, String> {
     if dpi_x == 0 || dpi_y == 0 || dpi_x != dpi_y {

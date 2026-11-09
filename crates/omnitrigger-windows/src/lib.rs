@@ -139,7 +139,7 @@ pub use window_action::WindowOperation;
 #[cfg(windows)]
 pub use window_action::{
     perform_window_action, pointer_scale_at_point, shortcut_target_context,
-    shortcut_target_process, shortcut_target_title,
+    shortcut_target_process, shortcut_target_scene_context, shortcut_target_title,
 };
 
 #[cfg(any(windows, test))]

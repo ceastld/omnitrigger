@@ -1,7 +1,7 @@
 //! 自定义轮盘的管理页：轮盘本身就是编辑器，点格子添加或修改动作；保存与验证由应用层统一处理。
 use crate::theme::rgb;
 use crate::wheel_workspace::{
-    ring_geometry, slot_at, view_geometry, Preset, RING_NAMES, WHEEL_PRESETS,
+    ring_geometry, slot_at, view_geometry, Preset, WheelScope, RING_NAMES, WHEEL_PRESETS,
 };
 use crate::{
     button, caption, icon, small, theme,
@@ -152,7 +152,7 @@ impl Workspace {
         let overhead = 200.
             + if banner.is_some() { 66. } else { 0. }
             + if self.wheels_error.is_some() { 60. } else { 0. }
-            + if wheel.is_some_and(|wheel| !wheel.app_overrides.is_empty()) {
+            + if wheel.is_some_and(|wheel| !self.wheel_scope_choices(wheel).is_empty()) {
                 46.
             } else {
                 0.
@@ -301,12 +301,8 @@ impl Workspace {
         let tint = accent_color(wheel.accent);
         let view = self.wheel_view().unwrap_or_else(|| wheel.clone());
         let geometry = view_geometry(&view);
-        let scope = self.wheel_scope.clone().filter(|process| {
-            wheel
-                .app_overrides
-                .iter()
-                .any(|application| &application.process == process)
-        });
+        let scope = self.wheel_scope_for(wheel);
+        let scope_choices = self.wheel_scope_choices(wheel);
         let mut stage_column = div()
             .flex_1()
             .min_w_0()
@@ -317,9 +313,11 @@ impl Workspace {
             .items_center()
             .justify_center()
             .gap(px(14.));
-        if !wheel.app_overrides.is_empty() {
-            // 应用范围用下拉选择，应用再多也只占一行。
-            let current = scope.clone().unwrap_or_else(|| "所有应用".into());
+        if !scope_choices.is_empty() {
+            // 应用与场景范围用下拉选择，再多也只占一行。
+            let current = scope
+                .as_ref()
+                .map_or_else(|| "通用".into(), WheelScope::label);
             let open = self.wheel_scope_open;
             let mut options = div()
                 .absolute()
@@ -336,15 +334,12 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .gap(px(2.));
-            let choices = std::iter::once(None).chain(
-                wheel
-                    .app_overrides
-                    .iter()
-                    .map(|application| Some(application.process.clone())),
-            );
+            let choices = std::iter::once(None).chain(scope_choices.into_iter().map(Some));
             for (index, choice) in choices.enumerate() {
                 let active = choice == scope;
-                let name = choice.clone().unwrap_or_else(|| "所有应用".into());
+                let name = choice
+                    .as_ref()
+                    .map_or_else(|| "通用".into(), WheelScope::label);
                 options = options.child(
                     div()
                         .id(("wheel-scope", index as u64))
@@ -404,7 +399,15 @@ impl Workspace {
                                     })),
                             )
                             .when(open, |el| el.child(deferred(options).with_priority(1))),
-                    ),
+                    )
+                    .when(matches!(scope, Some(WheelScope::Scene(_))), |el| {
+                        el.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(MUTED))
+                                .child("改动只在此场景生效，其余格子沿用通用动作"),
+                        )
+                    }),
             );
         }
         let moving_label = self
