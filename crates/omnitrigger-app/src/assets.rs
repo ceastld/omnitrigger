@@ -262,6 +262,11 @@ impl Icon {
     }
 }
 
+/// 所有内置图标的资源路径与 SVG 正文，供设计预览导出。
+pub fn icon_svgs() -> impl Iterator<Item = (&'static str, &'static str)> {
+    ICONS.iter().map(|(_, path, svg)| (*path, *svg))
+}
+
 pub struct Assets;
 
 impl AssetSource for Assets {

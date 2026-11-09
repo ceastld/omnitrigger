@@ -1,0 +1,1792 @@
+{
+  "format": 1,
+  "tokens": {
+    "dark": {
+      "SIDEBAR": "#17191f",
+      "BACKGROUND": "#1c1e25",
+      "INSPECTOR": "#21242d",
+      "ROW": "#22252e",
+      "SURFACE": "#252832",
+      "SURFACE_HI": "#2c303b",
+      "SELECTED": "#2b3b3b",
+      "DIVIDER": "#2a2e38",
+      "BORDER": "#303540",
+      "BORDER_MID": "#3a414e",
+      "BORDER_HI": "#4b5566",
+      "KEYCAP": "#2d333f",
+      "KEYCAP_EDGE": "#464e5e",
+      "KEYCAP_BASE": "#20242c",
+      "TEXT": "#e8eaf0",
+      "TEXT_SOFT": "#cdd1da",
+      "TEXT_MUTED": "#a5abba",
+      "TEXT_DIM": "#9198a6",
+      "TEXT_FAINT": "#747d8e",
+      "PLUS": "#707888",
+      "ICON": "#a0a8b7",
+      "ACCENT": "#83c8b5",
+      "ACCENT_2": "#96b8da",
+      "ON_ACCENT": "#122922",
+      "ACCENT_BG": "#263c35",
+      "ACCENT_LINE": "#426257",
+      "ACCENT_DEEP": "#23372f",
+      "VIOLET": "#b0a6d2",
+      "PINK": "#d1a3bd",
+      "RECORD": "#e3b977",
+      "RECORD_TEXT": "#ffe5bf",
+      "RECORD_BG": "#18120a",
+      "RECORD_LINE": "#6b4d1f",
+      "RECORD_CAP": "#2d2210",
+      "RECORD_DIM": "#9c7c4c",
+      "DANGER": "#dc8994",
+      "DANGER_TEXT": "#ffc8d3",
+      "DANGER_BG": "#1e0d13",
+      "DANGER_LINE": "#5c2233",
+      "ON_DANGER": "#2b0710"
+    },
+    "light": {
+      "SIDEBAR": "#f0f2f5",
+      "BACKGROUND": "#f7f8fa",
+      "INSPECTOR": "#ffffff",
+      "ROW": "#ffffff",
+      "SURFACE": "#f2f4f7",
+      "SURFACE_HI": "#e8edf2",
+      "SELECTED": "#e3f1eb",
+      "DIVIDER": "#e0e5ea",
+      "BORDER": "#dbe1e8",
+      "BORDER_MID": "#c7d0db",
+      "BORDER_HI": "#aab7c7",
+      "KEYCAP": "#ffffff",
+      "KEYCAP_EDGE": "#c5cdd7",
+      "KEYCAP_BASE": "#dfe4eb",
+      "TEXT": "#202632",
+      "TEXT_SOFT": "#354152",
+      "TEXT_MUTED": "#556274",
+      "TEXT_DIM": "#657285",
+      "TEXT_FAINT": "#758293",
+      "PLUS": "#7b8796",
+      "ICON": "#586779",
+      "ACCENT": "#0d755c",
+      "ACCENT_2": "#2f649a",
+      "ON_ACCENT": "#ffffff",
+      "ACCENT_BG": "#e2f1ea",
+      "ACCENT_LINE": "#9fc6b7",
+      "ACCENT_DEEP": "#d7eadf",
+      "VIOLET": "#7054a8",
+      "PINK": "#9c4f78",
+      "RECORD": "#a46916",
+      "RECORD_TEXT": "#7e4e0e",
+      "RECORD_BG": "#fff4df",
+      "RECORD_LINE": "#dab77b",
+      "RECORD_CAP": "#ffedc7",
+      "RECORD_DIM": "#946821",
+      "DANGER": "#b54355",
+      "DANGER_TEXT": "#9c2d40",
+      "DANGER_BG": "#fff0f2",
+      "DANGER_LINE": "#e4b1bb",
+      "ON_DANGER": "#ffffff"
+    },
+    "ui_font": "Microsoft YaHei UI",
+    "mono_font": "Cascadia Mono"
+  },
+  "icons": {
+    "icons/browser.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"2.5\"/><path d=\"M3 9h18M7 6.5h.01M10 6.5h.01M13 6.5h.01\" stroke-width=\"1.7\"/></svg>",
+    "icons/sun.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"4\"/><path d=\"M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4\" stroke-width=\"1.7\"/></svg>",
+    "icons/speaker.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M3 9h4l5-4v14l-5-4H3z\" stroke-width=\"1.7\"/><path d=\"M16 8a6 6 0 0 1 0 8M19 5a10 10 0 0 1 0 14\" stroke-width=\"1.7\"/></svg>",
+    "icons/logo.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"3.5\" y=\"3.5\" width=\"17\" height=\"14\" rx=\"3.5\"/><path d=\"M7 21h10\"/><path d=\"M13.2 6.2 8.8 11.6h3.1l-.9 3.7 4.3-5.4h-3.1z\" fill=\"#000\" stroke-width=\"1.1\"/></svg>",
+    "icons/pause.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M9 5v14M15 5v14\" stroke-width=\"2.4\"/></svg>",
+    "icons/play.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M7 4.5v15l12-7.5z\" fill=\"#000\" stroke=\"none\"/></svg>",
+    "icons/refresh.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M20 11a8 8 0 1 0-2.3 5.7\" stroke-width=\"2.2\"/><path d=\"M20 4v7h-7\" stroke-width=\"2.2\"/></svg>",
+    "icons/record.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"9\" stroke-width=\"2.2\"/><circle cx=\"12\" cy=\"12\" r=\"4\" fill=\"#000\" stroke=\"none\"/></svg>",
+    "icons/keyboard.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"3\" y=\"6\" width=\"18\" height=\"12\" rx=\"2.5\"/><path d=\"M7 10h.01M11 10h.01M15 10h.01M8 14h8\"/></svg>",
+    "icons/clock.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"8.5\"/><path d=\"M12 7.5V12l3 2\"/></svg>",
+    "icons/pulse.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M3 12h4l2.5-6 5 12 2.5-6h4\"/></svg>",
+    "icons/mouse.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"6\" y=\"3\" width=\"12\" height=\"18\" rx=\"6\" stroke-width=\"2.2\"/><path d=\"M12 7v4\" stroke-width=\"2.2\"/></svg>",
+    "icons/arrow-up.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 19V5M6 11l6-6 6 6\" stroke-width=\"2.6\"/></svg>",
+    "icons/arrow-down.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 5v14M6 13l6 6 6-6\" stroke-width=\"2.6\"/></svg>",
+    "icons/arrow-left.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M19 12H5M11 6l-6 6 6 6\" stroke-width=\"2.6\"/></svg>",
+    "icons/arrow-right.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M5 12h14M13 6l6 6-6 6\" stroke-width=\"2.6\"/></svg>",
+    "icons/check.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M5 12.5 10 17 19 7.5\" stroke-width=\"2.6\"/></svg>",
+    "icons/alert.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 3.5 2.5 20h19z\" stroke-width=\"2.2\"/><path d=\"M12 10v4.5M12 17.5h.01\" stroke-width=\"2.2\"/></svg>",
+    "icons/trash.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3\"/></svg>",
+    "icons/bell.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M6.5 16v-5a5.5 5.5 0 0 1 11 0v5l1.5 2h-14z\"/><path d=\"M10 20.5a2 2 0 0 0 4 0\"/></svg>",
+    "icons/terminal.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"3\" y=\"4.5\" width=\"18\" height=\"15\" rx=\"3\"/><path d=\"m7.5 9.5 3 2.5-3 2.5M13 15h4\"/></svg>",
+    "icons/capture.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/></svg>",
+    "icons/search.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"11\" cy=\"11\" r=\"6.5\" stroke-width=\"2.2\"/><path d=\"m20 20-4.2-4.2\" stroke-width=\"2.2\"/></svg>",
+    "icons/sliders.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 7h9M17 7h3M4 17h3M11 17h9\"/><circle cx=\"15\" cy=\"7\" r=\"2\"/><circle cx=\"9\" cy=\"17\" r=\"2\"/></svg>",
+    "icons/close.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M6 6l12 12M18 6 6 18\" stroke-width=\"2.2\"/></svg>",
+    "icons/enter.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M19 5v5a3 3 0 0 1-3 3H6\" stroke-width=\"2.4\"/><path d=\"m9 9-4 4 4 4\" stroke-width=\"2.4\"/></svg>",
+    "icons/bolt.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M13.5 2.5 4.5 13.5h7l-1 8 9-11h-7z\" fill=\"#000\"/></svg>",
+    "icons/grid.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"4\" y=\"4\" width=\"6.5\" height=\"6.5\" rx=\"1.8\"/><rect x=\"13.5\" y=\"4\" width=\"6.5\" height=\"6.5\" rx=\"1.8\"/><rect x=\"4\" y=\"13.5\" width=\"6.5\" height=\"6.5\" rx=\"1.8\"/><rect x=\"13.5\" y=\"13.5\" width=\"6.5\" height=\"6.5\" rx=\"1.8\"/></svg>",
+    "icons/layers.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m12 3.5 8.5 4.5-8.5 4.5L3.5 8z\"/><path d=\"m3.5 12.5 8.5 4.5 8.5-4.5M3.5 16.5 12 21l8.5-4.5\"/></svg>",
+    "icons/panel.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"3.5\" y=\"4.5\" width=\"17\" height=\"15\" rx=\"3\"/><path d=\"M3.5 9.5h17\"/><rect x=\"7\" y=\"12.5\" width=\"4\" height=\"3.5\" rx=\"1\" fill=\"#000\" stroke=\"none\"/><rect x=\"13\" y=\"12.5\" width=\"4\" height=\"3.5\" rx=\"1\" fill=\"#000\" stroke=\"none\"/></svg>",
+    "icons/wheel.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"12\" r=\"8.5\"/><circle cx=\"12\" cy=\"12\" r=\"3\"/><path d=\"M12 3.5V9M12 15v5.5M3.5 12H9M15 12h5.5\"/></svg>",
+    "icons/plug.svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#000\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M9 3v5M15 3v5\"/><path d=\"M6 8h12v3a6 6 0 0 1-12 0z\"/><path d=\"M12 17v4\"/></svg>"
+  },
+  "facets": [
+    {
+      "key": "input",
+      "label": "输入",
+      "options": [
+        "键盘",
+        "鼠标按键",
+        "滚轮",
+        "屏幕区域"
+      ]
+    },
+    {
+      "key": "action",
+      "label": "动作",
+      "options": [
+        "触发面板",
+        "轮盘",
+        "发送快捷键",
+        "窗口",
+        "系统调节",
+        "本地动作",
+        "动作包",
+        "浏览器",
+        "运行程序",
+        "外部动作",
+        "插件",
+        "仅提示"
+      ]
+    },
+    {
+      "key": "scope",
+      "label": "范围",
+      "options": [
+        "所有应用",
+        "指定应用"
+      ]
+    },
+    {
+      "key": "status",
+      "label": "状态",
+      "options": [
+        "已启用",
+        "已停用",
+        "未就绪"
+      ]
+    }
+  ],
+  "group_by": [
+    {
+      "key": "prefix",
+      "label": "按前缀分组"
+    },
+    {
+      "key": "action",
+      "label": "按动作分组"
+    },
+    {
+      "key": "scope",
+      "label": "按应用范围分组"
+    },
+    {
+      "key": "input",
+      "label": "按输入方式分组"
+    },
+    {
+      "key": "none",
+      "label": "不分组"
+    }
+  ],
+  "keyboard": {
+    "width": 18.5,
+    "height": 6.25,
+    "slots": [
+      {
+        "vk": 27,
+        "label": "Esc",
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 112,
+        "label": "F1",
+        "x": 2.0,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 113,
+        "label": "F2",
+        "x": 3.0,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 114,
+        "label": "F3",
+        "x": 4.0,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 115,
+        "label": "F4",
+        "x": 5.0,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 116,
+        "label": "F5",
+        "x": 6.5,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 117,
+        "label": "F6",
+        "x": 7.5,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 118,
+        "label": "F7",
+        "x": 8.5,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 119,
+        "label": "F8",
+        "x": 9.5,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 120,
+        "label": "F9",
+        "x": 11.0,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 121,
+        "label": "F10",
+        "x": 12.0,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 122,
+        "label": "F11",
+        "x": 13.0,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 123,
+        "label": "F12",
+        "x": 14.0,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 44,
+        "label": "PrtSc",
+        "x": 15.5,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 145,
+        "label": "ScrLk",
+        "x": 16.5,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 19,
+        "label": "Pause",
+        "x": 17.5,
+        "y": 0.0,
+        "w": 1.0
+      },
+      {
+        "vk": 192,
+        "label": "`",
+        "x": 0.0,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 49,
+        "label": "1",
+        "x": 1.0,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 50,
+        "label": "2",
+        "x": 2.0,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 51,
+        "label": "3",
+        "x": 3.0,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 52,
+        "label": "4",
+        "x": 4.0,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 53,
+        "label": "5",
+        "x": 5.0,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 54,
+        "label": "6",
+        "x": 6.0,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 55,
+        "label": "7",
+        "x": 7.0,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 56,
+        "label": "8",
+        "x": 8.0,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 57,
+        "label": "9",
+        "x": 9.0,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 48,
+        "label": "0",
+        "x": 10.0,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 189,
+        "label": "-",
+        "x": 11.0,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 187,
+        "label": "=",
+        "x": 12.0,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 8,
+        "label": "Backspace",
+        "x": 13.0,
+        "y": 1.25,
+        "w": 2.0
+      },
+      {
+        "vk": 45,
+        "label": "Ins",
+        "x": 15.5,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 36,
+        "label": "Home",
+        "x": 16.5,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 33,
+        "label": "PgUp",
+        "x": 17.5,
+        "y": 1.25,
+        "w": 1.0
+      },
+      {
+        "vk": 9,
+        "label": "Tab",
+        "x": 0.0,
+        "y": 2.25,
+        "w": 1.5
+      },
+      {
+        "vk": 81,
+        "label": "Q",
+        "x": 1.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 87,
+        "label": "W",
+        "x": 2.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 69,
+        "label": "E",
+        "x": 3.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 82,
+        "label": "R",
+        "x": 4.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 84,
+        "label": "T",
+        "x": 5.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 89,
+        "label": "Y",
+        "x": 6.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 85,
+        "label": "U",
+        "x": 7.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 73,
+        "label": "I",
+        "x": 8.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 79,
+        "label": "O",
+        "x": 9.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 80,
+        "label": "P",
+        "x": 10.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 219,
+        "label": "[",
+        "x": 11.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 221,
+        "label": "]",
+        "x": 12.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 220,
+        "label": "\\",
+        "x": 13.5,
+        "y": 2.25,
+        "w": 1.5
+      },
+      {
+        "vk": 46,
+        "label": "Del",
+        "x": 15.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 35,
+        "label": "End",
+        "x": 16.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 34,
+        "label": "PgDn",
+        "x": 17.5,
+        "y": 2.25,
+        "w": 1.0
+      },
+      {
+        "vk": 20,
+        "label": "Caps",
+        "x": 0.0,
+        "y": 3.25,
+        "w": 1.75
+      },
+      {
+        "vk": 65,
+        "label": "A",
+        "x": 1.75,
+        "y": 3.25,
+        "w": 1.0
+      },
+      {
+        "vk": 83,
+        "label": "S",
+        "x": 2.75,
+        "y": 3.25,
+        "w": 1.0
+      },
+      {
+        "vk": 68,
+        "label": "D",
+        "x": 3.75,
+        "y": 3.25,
+        "w": 1.0
+      },
+      {
+        "vk": 70,
+        "label": "F",
+        "x": 4.75,
+        "y": 3.25,
+        "w": 1.0
+      },
+      {
+        "vk": 71,
+        "label": "G",
+        "x": 5.75,
+        "y": 3.25,
+        "w": 1.0
+      },
+      {
+        "vk": 72,
+        "label": "H",
+        "x": 6.75,
+        "y": 3.25,
+        "w": 1.0
+      },
+      {
+        "vk": 74,
+        "label": "J",
+        "x": 7.75,
+        "y": 3.25,
+        "w": 1.0
+      },
+      {
+        "vk": 75,
+        "label": "K",
+        "x": 8.75,
+        "y": 3.25,
+        "w": 1.0
+      },
+      {
+        "vk": 76,
+        "label": "L",
+        "x": 9.75,
+        "y": 3.25,
+        "w": 1.0
+      },
+      {
+        "vk": 186,
+        "label": ";",
+        "x": 10.75,
+        "y": 3.25,
+        "w": 1.0
+      },
+      {
+        "vk": 222,
+        "label": "'",
+        "x": 11.75,
+        "y": 3.25,
+        "w": 1.0
+      },
+      {
+        "vk": 13,
+        "label": "Enter",
+        "x": 12.75,
+        "y": 3.25,
+        "w": 2.25
+      },
+      {
+        "vk": 160,
+        "label": "Shift",
+        "x": 0.0,
+        "y": 4.25,
+        "w": 2.25
+      },
+      {
+        "vk": 90,
+        "label": "Z",
+        "x": 2.25,
+        "y": 4.25,
+        "w": 1.0
+      },
+      {
+        "vk": 88,
+        "label": "X",
+        "x": 3.25,
+        "y": 4.25,
+        "w": 1.0
+      },
+      {
+        "vk": 67,
+        "label": "C",
+        "x": 4.25,
+        "y": 4.25,
+        "w": 1.0
+      },
+      {
+        "vk": 86,
+        "label": "V",
+        "x": 5.25,
+        "y": 4.25,
+        "w": 1.0
+      },
+      {
+        "vk": 66,
+        "label": "B",
+        "x": 6.25,
+        "y": 4.25,
+        "w": 1.0
+      },
+      {
+        "vk": 78,
+        "label": "N",
+        "x": 7.25,
+        "y": 4.25,
+        "w": 1.0
+      },
+      {
+        "vk": 77,
+        "label": "M",
+        "x": 8.25,
+        "y": 4.25,
+        "w": 1.0
+      },
+      {
+        "vk": 188,
+        "label": ",",
+        "x": 9.25,
+        "y": 4.25,
+        "w": 1.0
+      },
+      {
+        "vk": 190,
+        "label": ".",
+        "x": 10.25,
+        "y": 4.25,
+        "w": 1.0
+      },
+      {
+        "vk": 191,
+        "label": "/",
+        "x": 11.25,
+        "y": 4.25,
+        "w": 1.0
+      },
+      {
+        "vk": 161,
+        "label": "Shift",
+        "x": 12.25,
+        "y": 4.25,
+        "w": 2.75
+      },
+      {
+        "vk": 38,
+        "label": "↑",
+        "x": 16.5,
+        "y": 4.25,
+        "w": 1.0
+      },
+      {
+        "vk": 162,
+        "label": "Ctrl",
+        "x": 0.0,
+        "y": 5.25,
+        "w": 1.25
+      },
+      {
+        "vk": 91,
+        "label": "Win",
+        "x": 1.25,
+        "y": 5.25,
+        "w": 1.25
+      },
+      {
+        "vk": 164,
+        "label": "Alt",
+        "x": 2.5,
+        "y": 5.25,
+        "w": 1.25
+      },
+      {
+        "vk": 32,
+        "label": "Space",
+        "x": 3.75,
+        "y": 5.25,
+        "w": 6.25
+      },
+      {
+        "vk": 165,
+        "label": "Alt",
+        "x": 10.0,
+        "y": 5.25,
+        "w": 1.25
+      },
+      {
+        "vk": 92,
+        "label": "Win",
+        "x": 11.25,
+        "y": 5.25,
+        "w": 1.25
+      },
+      {
+        "vk": 93,
+        "label": "Menu",
+        "x": 12.5,
+        "y": 5.25,
+        "w": 1.25
+      },
+      {
+        "vk": 163,
+        "label": "Ctrl",
+        "x": 13.75,
+        "y": 5.25,
+        "w": 1.25
+      },
+      {
+        "vk": 37,
+        "label": "←",
+        "x": 15.5,
+        "y": 5.25,
+        "w": 1.0
+      },
+      {
+        "vk": 40,
+        "label": "↓",
+        "x": 16.5,
+        "y": 5.25,
+        "w": 1.0
+      },
+      {
+        "vk": 39,
+        "label": "→",
+        "x": 17.5,
+        "y": 5.25,
+        "w": 1.0
+      }
+    ]
+  },
+  "mouse_parts": [
+    "左键",
+    "右键",
+    "中键",
+    "侧键 1",
+    "侧键 2",
+    "滚轮 ↑",
+    "滚轮 ↓",
+    "横向滚轮",
+    "屏幕区域"
+  ],
+  "rows": [
+    {
+      "id": 1,
+      "name": "退格",
+      "enabled": true,
+      "icon": "icons/keyboard.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "CapsLock",
+          "mouse": false,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "O",
+          "mouse": false,
+          "prefix": false,
+          "arrow": null
+        }
+      ],
+      "detail": "发送快捷键 · Backspace",
+      "detail_color": "TEXT_DIM",
+      "text": "退格 发送快捷键 · backspace 发送快捷键 capslock o",
+      "prefix": "CapsLock",
+      "facets": {
+        "input": "键盘",
+        "action": "发送快捷键",
+        "scope": "所有应用",
+        "status": "已启用"
+      },
+      "key_terminal": true,
+      "key_slots": [
+        79
+      ],
+      "held_slots": [
+        20
+      ],
+      "mouse_terminal": [],
+      "mouse_prefix": []
+    },
+    {
+      "id": 2,
+      "name": "光标上移",
+      "enabled": true,
+      "icon": "icons/keyboard.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "CapsLock",
+          "mouse": false,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "I",
+          "mouse": false,
+          "prefix": false,
+          "arrow": null
+        }
+      ],
+      "detail": "发送快捷键 · Up",
+      "detail_color": "TEXT_DIM",
+      "text": "光标上移 发送快捷键 · up 发送快捷键 capslock i",
+      "prefix": "CapsLock",
+      "facets": {
+        "input": "键盘",
+        "action": "发送快捷键",
+        "scope": "所有应用",
+        "status": "已启用"
+      },
+      "key_terminal": true,
+      "key_slots": [
+        73
+      ],
+      "held_slots": [
+        20
+      ],
+      "mouse_terminal": [],
+      "mouse_prefix": []
+    },
+    {
+      "id": 3,
+      "name": "光标左移",
+      "enabled": true,
+      "icon": "icons/keyboard.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "CapsLock",
+          "mouse": false,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "J",
+          "mouse": false,
+          "prefix": false,
+          "arrow": null
+        }
+      ],
+      "detail": "发送快捷键 · Left",
+      "detail_color": "TEXT_DIM",
+      "text": "光标左移 发送快捷键 · left 发送快捷键 capslock j",
+      "prefix": "CapsLock",
+      "facets": {
+        "input": "键盘",
+        "action": "发送快捷键",
+        "scope": "所有应用",
+        "status": "已启用"
+      },
+      "key_terminal": true,
+      "key_slots": [
+        74
+      ],
+      "held_slots": [
+        20
+      ],
+      "mouse_terminal": [],
+      "mouse_prefix": []
+    },
+    {
+      "id": 4,
+      "name": "光标下移",
+      "enabled": true,
+      "icon": "icons/keyboard.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "CapsLock",
+          "mouse": false,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "K",
+          "mouse": false,
+          "prefix": false,
+          "arrow": null
+        }
+      ],
+      "detail": "发送快捷键 · Down",
+      "detail_color": "TEXT_DIM",
+      "text": "光标下移 发送快捷键 · down 发送快捷键 capslock k",
+      "prefix": "CapsLock",
+      "facets": {
+        "input": "键盘",
+        "action": "发送快捷键",
+        "scope": "所有应用",
+        "status": "已启用"
+      },
+      "key_terminal": true,
+      "key_slots": [
+        75
+      ],
+      "held_slots": [
+        20
+      ],
+      "mouse_terminal": [],
+      "mouse_prefix": []
+    },
+    {
+      "id": 5,
+      "name": "光标右移",
+      "enabled": true,
+      "icon": "icons/keyboard.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "CapsLock",
+          "mouse": false,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "L",
+          "mouse": false,
+          "prefix": false,
+          "arrow": null
+        }
+      ],
+      "detail": "发送快捷键 · Right",
+      "detail_color": "TEXT_DIM",
+      "text": "光标右移 发送快捷键 · right 发送快捷键 capslock l",
+      "prefix": "CapsLock",
+      "facets": {
+        "input": "键盘",
+        "action": "发送快捷键",
+        "scope": "所有应用",
+        "status": "已启用"
+      },
+      "key_terminal": true,
+      "key_slots": [
+        76
+      ],
+      "held_slots": [
+        20
+      ],
+      "mouse_terminal": [],
+      "mouse_prefix": []
+    },
+    {
+      "id": 6,
+      "name": "打开触发面板",
+      "enabled": true,
+      "icon": "icons/panel.svg",
+      "tint": "ACCENT",
+      "caps": [
+        {
+          "label": "右键",
+          "mouse": true,
+          "prefix": false,
+          "arrow": null
+        },
+        {
+          "label": "长按 300ms",
+          "mouse": false,
+          "prefix": false,
+          "arrow": null
+        }
+      ],
+      "detail": "打开 / 收起触发面板",
+      "detail_color": "TEXT_DIM",
+      "text": "打开触发面板 打开 / 收起触发面板 触发面板 右键 长按 300ms",
+      "prefix": "",
+      "facets": {
+        "input": "鼠标按键",
+        "action": "触发面板",
+        "scope": "所有应用",
+        "status": "已启用"
+      },
+      "key_terminal": false,
+      "key_slots": [],
+      "held_slots": [],
+      "mouse_terminal": [
+        "右键"
+      ],
+      "mouse_prefix": []
+    },
+    {
+      "id": 7,
+      "name": "侧键加上滚：上一标签",
+      "enabled": false,
+      "icon": "icons/keyboard.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "侧键 1",
+          "mouse": true,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "滚轮",
+          "mouse": true,
+          "prefix": false,
+          "arrow": "icons/arrow-up.svg"
+        }
+      ],
+      "detail": "指针窗口：仅 chrome、msedge、firefox · 仅 chrome、msedge、firefox · 发送快捷键 · RightCtrl+RightShift+Tab",
+      "detail_color": "TEXT_DIM",
+      "text": "侧键加上滚：上一标签 发送快捷键 · rightctrl+rightshift+tab 发送快捷键 侧键 1 滚轮 仅 chrome、msedge、firefox 仅 chrome、msedge、firefox",
+      "prefix": "侧键 1",
+      "facets": {
+        "input": "滚轮",
+        "action": "发送快捷键",
+        "scope": "指定应用",
+        "status": "已停用"
+      },
+      "key_terminal": false,
+      "key_slots": [],
+      "held_slots": [],
+      "mouse_terminal": [
+        "滚轮 ↑"
+      ],
+      "mouse_prefix": [
+        "侧键 1"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "侧键加下滚：下一标签",
+      "enabled": false,
+      "icon": "icons/keyboard.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "侧键 1",
+          "mouse": true,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "滚轮",
+          "mouse": true,
+          "prefix": false,
+          "arrow": "icons/arrow-down.svg"
+        }
+      ],
+      "detail": "指针窗口：仅 chrome、msedge、firefox · 仅 chrome、msedge、firefox · 发送快捷键 · RightCtrl+Tab",
+      "detail_color": "TEXT_DIM",
+      "text": "侧键加下滚：下一标签 发送快捷键 · rightctrl+tab 发送快捷键 侧键 1 滚轮 仅 chrome、msedge、firefox 仅 chrome、msedge、firefox",
+      "prefix": "侧键 1",
+      "facets": {
+        "input": "滚轮",
+        "action": "发送快捷键",
+        "scope": "指定应用",
+        "status": "已停用"
+      },
+      "key_terminal": false,
+      "key_slots": [],
+      "held_slots": [],
+      "mouse_terminal": [
+        "滚轮 ↓"
+      ],
+      "mouse_prefix": [
+        "侧键 1"
+      ]
+    },
+    {
+      "id": 9,
+      "name": "侧键加右键：关闭标签",
+      "enabled": false,
+      "icon": "icons/keyboard.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "侧键 1",
+          "mouse": true,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "右键",
+          "mouse": true,
+          "prefix": false,
+          "arrow": null
+        }
+      ],
+      "detail": "指针窗口：仅 chrome、msedge、firefox · 仅 chrome、msedge、firefox · 发送快捷键 · RightCtrl+W",
+      "detail_color": "TEXT_DIM",
+      "text": "侧键加右键：关闭标签 发送快捷键 · rightctrl+w 发送快捷键 侧键 1 右键 仅 chrome、msedge、firefox 仅 chrome、msedge、firefox",
+      "prefix": "侧键 1",
+      "facets": {
+        "input": "鼠标按键",
+        "action": "发送快捷键",
+        "scope": "指定应用",
+        "status": "已停用"
+      },
+      "key_terminal": false,
+      "key_slots": [],
+      "held_slots": [],
+      "mouse_terminal": [
+        "右键"
+      ],
+      "mouse_prefix": [
+        "侧键 1"
+      ]
+    },
+    {
+      "id": 10,
+      "name": "左边缘上滚增加所在屏幕亮度",
+      "enabled": true,
+      "icon": "icons/pulse.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "左侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+          "mouse": true,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "滚轮",
+          "mouse": true,
+          "prefix": false,
+          "arrow": "icons/arrow-up.svg"
+        }
+      ],
+      "detail": "亮度增加 5%",
+      "detail_color": "TEXT_DIM",
+      "text": "左边缘上滚增加所在屏幕亮度 亮度增加 5% 系统调节 左侧边缘 8px（上端缩进 8px，下端缩进 0px） 滚轮",
+      "prefix": "左侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "facets": {
+        "input": "屏幕区域",
+        "action": "系统调节",
+        "scope": "所有应用",
+        "status": "已启用"
+      },
+      "key_terminal": false,
+      "key_slots": [],
+      "held_slots": [],
+      "mouse_terminal": [
+        "滚轮 ↑"
+      ],
+      "mouse_prefix": [
+        "屏幕区域"
+      ]
+    },
+    {
+      "id": 11,
+      "name": "左边缘下滚减少所在屏幕亮度",
+      "enabled": true,
+      "icon": "icons/pulse.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "左侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+          "mouse": true,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "滚轮",
+          "mouse": true,
+          "prefix": false,
+          "arrow": "icons/arrow-down.svg"
+        }
+      ],
+      "detail": "亮度减少 5%",
+      "detail_color": "TEXT_DIM",
+      "text": "左边缘下滚减少所在屏幕亮度 亮度减少 5% 系统调节 左侧边缘 8px（上端缩进 8px，下端缩进 0px） 滚轮",
+      "prefix": "左侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "facets": {
+        "input": "屏幕区域",
+        "action": "系统调节",
+        "scope": "所有应用",
+        "status": "已启用"
+      },
+      "key_terminal": false,
+      "key_slots": [],
+      "held_slots": [],
+      "mouse_terminal": [
+        "滚轮 ↓"
+      ],
+      "mouse_prefix": [
+        "屏幕区域"
+      ]
+    },
+    {
+      "id": 12,
+      "name": "右边缘上滚增加所在屏幕亮度",
+      "enabled": true,
+      "icon": "icons/pulse.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "右侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+          "mouse": true,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "滚轮",
+          "mouse": true,
+          "prefix": false,
+          "arrow": "icons/arrow-up.svg"
+        }
+      ],
+      "detail": "亮度增加 5%",
+      "detail_color": "TEXT_DIM",
+      "text": "右边缘上滚增加所在屏幕亮度 亮度增加 5% 系统调节 右侧边缘 8px（上端缩进 8px，下端缩进 0px） 滚轮",
+      "prefix": "右侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "facets": {
+        "input": "屏幕区域",
+        "action": "系统调节",
+        "scope": "所有应用",
+        "status": "已启用"
+      },
+      "key_terminal": false,
+      "key_slots": [],
+      "held_slots": [],
+      "mouse_terminal": [
+        "滚轮 ↑"
+      ],
+      "mouse_prefix": [
+        "屏幕区域"
+      ]
+    },
+    {
+      "id": 13,
+      "name": "右边缘下滚减少所在屏幕亮度",
+      "enabled": true,
+      "icon": "icons/pulse.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "右侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+          "mouse": true,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "滚轮",
+          "mouse": true,
+          "prefix": false,
+          "arrow": "icons/arrow-down.svg"
+        }
+      ],
+      "detail": "亮度减少 5%",
+      "detail_color": "TEXT_DIM",
+      "text": "右边缘下滚减少所在屏幕亮度 亮度减少 5% 系统调节 右侧边缘 8px（上端缩进 8px，下端缩进 0px） 滚轮",
+      "prefix": "右侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "facets": {
+        "input": "屏幕区域",
+        "action": "系统调节",
+        "scope": "所有应用",
+        "status": "已启用"
+      },
+      "key_terminal": false,
+      "key_slots": [],
+      "held_slots": [],
+      "mouse_terminal": [
+        "滚轮 ↓"
+      ],
+      "mouse_prefix": [
+        "屏幕区域"
+      ]
+    },
+    {
+      "id": 14,
+      "name": "上边缘上滚增加音量",
+      "enabled": true,
+      "icon": "icons/keyboard.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "顶部边缘 8px",
+          "mouse": true,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "滚轮",
+          "mouse": true,
+          "prefix": false,
+          "arrow": "icons/arrow-up.svg"
+        }
+      ],
+      "detail": "发送快捷键 · VolumeUp",
+      "detail_color": "TEXT_DIM",
+      "text": "上边缘上滚增加音量 发送快捷键 · volumeup 发送快捷键 顶部边缘 8px 滚轮",
+      "prefix": "顶部边缘 8px",
+      "facets": {
+        "input": "屏幕区域",
+        "action": "发送快捷键",
+        "scope": "所有应用",
+        "status": "已启用"
+      },
+      "key_terminal": false,
+      "key_slots": [],
+      "held_slots": [],
+      "mouse_terminal": [
+        "滚轮 ↑"
+      ],
+      "mouse_prefix": [
+        "屏幕区域"
+      ]
+    },
+    {
+      "id": 15,
+      "name": "上边缘下滚减少音量",
+      "enabled": true,
+      "icon": "icons/keyboard.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "顶部边缘 8px",
+          "mouse": true,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "滚轮",
+          "mouse": true,
+          "prefix": false,
+          "arrow": "icons/arrow-down.svg"
+        }
+      ],
+      "detail": "发送快捷键 · VolumeDown",
+      "detail_color": "TEXT_DIM",
+      "text": "上边缘下滚减少音量 发送快捷键 · volumedown 发送快捷键 顶部边缘 8px 滚轮",
+      "prefix": "顶部边缘 8px",
+      "facets": {
+        "input": "屏幕区域",
+        "action": "发送快捷键",
+        "scope": "所有应用",
+        "status": "已启用"
+      },
+      "key_terminal": false,
+      "key_slots": [],
+      "held_slots": [],
+      "mouse_terminal": [
+        "滚轮 ↓"
+      ],
+      "mouse_prefix": [
+        "屏幕区域"
+      ]
+    },
+    {
+      "id": 16,
+      "name": "输入字面文本",
+      "enabled": false,
+      "icon": "icons/layers.svg",
+      "tint": "ACCENT_2",
+      "caps": [
+        {
+          "label": "左 Ctrl",
+          "mouse": false,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "左 Alt",
+          "mouse": false,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "F13",
+          "mouse": false,
+          "prefix": false,
+          "arrow": null
+        }
+      ],
+      "detail": "本地动作 · 1 步",
+      "detail_color": "TEXT_DIM",
+      "text": "输入字面文本 本地动作 · 1 步 本地动作 左 ctrl 左 alt f13",
+      "prefix": "左 Ctrl + 左 Alt",
+      "facets": {
+        "input": "键盘",
+        "action": "本地动作",
+        "scope": "所有应用",
+        "status": "已停用"
+      },
+      "key_terminal": true,
+      "key_slots": [],
+      "held_slots": [
+        162,
+        164
+      ],
+      "mouse_terminal": [],
+      "mouse_prefix": []
+    },
+    {
+      "id": 17,
+      "name": "文件窗口中的 Ctrl+F9",
+      "enabled": false,
+      "icon": "icons/bell.svg",
+      "tint": "VIOLET",
+      "caps": [
+        {
+          "label": "左 Ctrl",
+          "mouse": false,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "F9",
+          "mouse": false,
+          "prefix": false,
+          "arrow": null
+        }
+      ],
+      "detail": "窗口上下文：仅 explorer · 仅提示",
+      "detail_color": "TEXT_DIM",
+      "text": "文件窗口中的 ctrl+f9 仅提示 仅提示 左 ctrl f9 窗口上下文：仅 explorer",
+      "prefix": "左 Ctrl",
+      "facets": {
+        "input": "键盘",
+        "action": "仅提示",
+        "scope": "指定应用",
+        "status": "已停用"
+      },
+      "key_terminal": true,
+      "key_slots": [
+        120
+      ],
+      "held_slots": [
+        162
+      ],
+      "mouse_terminal": [],
+      "mouse_prefix": []
+    },
+    {
+      "id": 18,
+      "name": "桌面中的 Ctrl+F9",
+      "enabled": false,
+      "icon": "icons/bell.svg",
+      "tint": "VIOLET",
+      "caps": [
+        {
+          "label": "左 Ctrl",
+          "mouse": false,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "F9",
+          "mouse": false,
+          "prefix": false,
+          "arrow": null
+        }
+      ],
+      "detail": "窗口上下文：仅 desktop · 仅提示",
+      "detail_color": "TEXT_DIM",
+      "text": "桌面中的 ctrl+f9 仅提示 仅提示 左 ctrl f9 窗口上下文：仅 desktop",
+      "prefix": "左 Ctrl",
+      "facets": {
+        "input": "键盘",
+        "action": "仅提示",
+        "scope": "指定应用",
+        "status": "已停用"
+      },
+      "key_terminal": true,
+      "key_slots": [
+        120
+      ],
+      "held_slots": [
+        162
+      ],
+      "mouse_terminal": [],
+      "mouse_prefix": []
+    },
+    {
+      "id": 19,
+      "name": "任务栏中的 Ctrl+F9",
+      "enabled": false,
+      "icon": "icons/bell.svg",
+      "tint": "VIOLET",
+      "caps": [
+        {
+          "label": "左 Ctrl",
+          "mouse": false,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "F9",
+          "mouse": false,
+          "prefix": false,
+          "arrow": null
+        }
+      ],
+      "detail": "窗口上下文：仅 taskbar · 仅提示",
+      "detail_color": "TEXT_DIM",
+      "text": "任务栏中的 ctrl+f9 仅提示 仅提示 左 ctrl f9 窗口上下文：仅 taskbar",
+      "prefix": "左 Ctrl",
+      "facets": {
+        "input": "键盘",
+        "action": "仅提示",
+        "scope": "指定应用",
+        "status": "已停用"
+      },
+      "key_terminal": true,
+      "key_slots": [
+        120
+      ],
+      "held_slots": [
+        162
+      ],
+      "mouse_terminal": [],
+      "mouse_prefix": []
+    },
+    {
+      "id": 20,
+      "name": "空格保留原功能层的 K",
+      "enabled": false,
+      "icon": "icons/bell.svg",
+      "tint": "VIOLET",
+      "caps": [
+        {
+          "label": "Space",
+          "mouse": false,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "K",
+          "mouse": false,
+          "prefix": false,
+          "arrow": null
+        }
+      ],
+      "detail": "保留原功能层 按住重复 · 仅提示",
+      "detail_color": "TEXT_DIM",
+      "text": "空格保留原功能层的 k 仅提示 仅提示 space k",
+      "prefix": "Space",
+      "facets": {
+        "input": "键盘",
+        "action": "仅提示",
+        "scope": "所有应用",
+        "status": "已停用"
+      },
+      "key_terminal": true,
+      "key_slots": [
+        75
+      ],
+      "held_slots": [
+        32
+      ],
+      "mouse_terminal": [],
+      "mouse_prefix": []
+    },
+    {
+      "id": 21,
+      "name": "空格与 G 捕获后按 K",
+      "enabled": false,
+      "icon": "icons/bell.svg",
+      "tint": "VIOLET",
+      "caps": [
+        {
+          "label": "Space",
+          "mouse": false,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "G",
+          "mouse": false,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "K",
+          "mouse": false,
+          "prefix": false,
+          "arrow": null
+        }
+      ],
+      "detail": "保留原功能层 按住重复 · 仅提示",
+      "detail_color": "TEXT_DIM",
+      "text": "空格与 g 捕获后按 k 仅提示 仅提示 space g k",
+      "prefix": "Space + G",
+      "facets": {
+        "input": "键盘",
+        "action": "仅提示",
+        "scope": "所有应用",
+        "status": "已停用"
+      },
+      "key_terminal": true,
+      "key_slots": [
+        75
+      ],
+      "held_slots": [
+        71,
+        32
+      ],
+      "mouse_terminal": [],
+      "mouse_prefix": []
+    },
+    {
+      "id": 22,
+      "name": "空格与鼠标侧键",
+      "enabled": false,
+      "icon": "icons/bell.svg",
+      "tint": "VIOLET",
+      "caps": [
+        {
+          "label": "Space",
+          "mouse": false,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "侧键 2",
+          "mouse": true,
+          "prefix": false,
+          "arrow": null
+        }
+      ],
+      "detail": "保留原功能层 · 仅提示",
+      "detail_color": "TEXT_DIM",
+      "text": "空格与鼠标侧键 仅提示 仅提示 space 侧键 2",
+      "prefix": "Space",
+      "facets": {
+        "input": "鼠标按键",
+        "action": "仅提示",
+        "scope": "所有应用",
+        "status": "已停用"
+      },
+      "key_terminal": false,
+      "key_slots": [],
+      "held_slots": [
+        32
+      ],
+      "mouse_terminal": [
+        "侧键 2"
+      ],
+      "mouse_prefix": []
+    },
+    {
+      "id": 23,
+      "name": "侧键加上滚：每个非零事件执行一次",
+      "enabled": false,
+      "icon": "icons/bell.svg",
+      "tint": "VIOLET",
+      "caps": [
+        {
+          "label": "侧键 1",
+          "mouse": true,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "滚轮",
+          "mouse": true,
+          "prefix": false,
+          "arrow": "icons/arrow-up.svg"
+        }
+      ],
+      "detail": "仅提示",
+      "detail_color": "TEXT_DIM",
+      "text": "侧键加上滚：每个非零事件执行一次 仅提示 仅提示 侧键 1 滚轮",
+      "prefix": "侧键 1",
+      "facets": {
+        "input": "滚轮",
+        "action": "仅提示",
+        "scope": "所有应用",
+        "status": "已停用"
+      },
+      "key_terminal": false,
+      "key_slots": [],
+      "held_slots": [],
+      "mouse_terminal": [
+        "滚轮 ↑"
+      ],
+      "mouse_prefix": [
+        "侧键 1"
+      ]
+    },
+    {
+      "id": 24,
+      "name": "指针在记事本内：侧键加上滚",
+      "enabled": false,
+      "icon": "icons/bell.svg",
+      "tint": "VIOLET",
+      "caps": [
+        {
+          "label": "侧键 1",
+          "mouse": true,
+          "prefix": true,
+          "arrow": null
+        },
+        {
+          "label": "滚轮",
+          "mouse": true,
+          "prefix": false,
+          "arrow": "icons/arrow-up.svg"
+        }
+      ],
+      "detail": "指针窗口：仅 notepad · 仅提示",
+      "detail_color": "TEXT_DIM",
+      "text": "指针在记事本内：侧键加上滚 仅提示 仅提示 侧键 1 滚轮 仅 notepad",
+      "prefix": "侧键 1",
+      "facets": {
+        "input": "滚轮",
+        "action": "仅提示",
+        "scope": "指定应用",
+        "status": "已停用"
+      },
+      "key_terminal": false,
+      "key_slots": [],
+      "held_slots": [],
+      "mouse_terminal": [
+        "滚轮 ↑"
+      ],
+      "mouse_prefix": [
+        "侧键 1"
+      ]
+    }
+  ]
+}

@@ -84,6 +84,7 @@ mod trigger_browse;
 mod trigger_conditions;
 mod trigger_input_map;
 mod trigger_panel;
+mod trigger_preview;
 mod update_ui;
 mod updater;
 mod volume_adjust_host;
@@ -496,6 +497,100 @@ fn action_detail(action: &ActionSpec) -> String {
 }
 
 /// 动作类型的图标与色调。
+/// 触发器列表与浏览视图共用的摘要；`ready` 为动作当前是否可用。
+fn browse_row(binding: &settings::Binding, ready: bool) -> trigger_browse::Row {
+    let spec = &binding.spec;
+    let caps = caps_for(spec);
+    let action = trigger_browse::action_kind(&binding.action);
+    let mut text = format!(
+        "{} {} {}",
+        binding.message,
+        action_detail(&binding.action),
+        action.label()
+    );
+    for cap in &caps {
+        text.push(' ');
+        text.push_str(&cap.label);
+    }
+    for scope in [&spec.process_scope, &spec.pointer_scope] {
+        if !scope.is_global() {
+            text.push(' ');
+            text.push_str(&settings::process_scope_label(scope));
+        }
+    }
+    let (held_keys, held_mouse) = trigger_browse::split_held(&spec.held);
+    trigger_browse::Row {
+        id: spec.id,
+        text: text.to_lowercase(),
+        prefix: prefix_caps(spec)
+            .iter()
+            .map(|cap| cap.label.as_ref())
+            .collect::<Vec<_>>()
+            .join(" + "),
+        input: trigger_browse::input_kind(spec),
+        action,
+        scope: trigger_browse::scope_kind(spec),
+        status: trigger_browse::status_kind(binding, ready),
+        held_keys,
+        held_mouse,
+        terminal: trigger_browse::Terminal::of(spec),
+        has_region: !spec.conditions.is_empty(),
+    }
+}
+
+/// 列表行第二行的说明文字与颜色；动作不可用时显示原因。
+fn row_detail(binding: &settings::Binding, unavailable: Option<String>) -> (String, u32) {
+    let (detail, detail_color) = match unavailable {
+        Some(reason) => (reason, theme::RECORD),
+        None => (action_detail(&binding.action), theme::TEXT_DIM),
+    };
+    let detail = if binding.spec.process_scope.is_global() {
+        detail
+    } else {
+        format!(
+            "{} · {}",
+            settings::process_scope_label(&binding.spec.process_scope),
+            detail
+        )
+    };
+    let detail = if binding.spec.pointer_scope.is_global() {
+        detail
+    } else {
+        format!(
+            "指针窗口：{} · {}",
+            settings::process_scope_label(&binding.spec.pointer_scope),
+            detail
+        )
+    };
+    let detail = if binding.spec.keyboard == Default::default() {
+        detail
+    } else {
+        format!(
+            "{}{} · {}",
+            if binding.spec.keyboard.dedicated_prefix.is_some() {
+                "专用层"
+            } else if binding.spec.keyboard.retained_prefix.is_some() {
+                "保留原功能层"
+            } else if binding.spec.keyboard.matching.is_mouse_unmodified() {
+                "鼠标无 Ctrl/Shift/Alt 观察"
+            } else if binding.spec.keyboard.matching.is_mouse_exact() {
+                "鼠标修饰键观察"
+            } else if binding.spec.keyboard.matching.is_mouse_captured_leader() {
+                "鼠标捕获会话引用"
+            } else {
+                ""
+            },
+            if binding.spec.keyboard.repeat {
+                " 按住重复"
+            } else {
+                ""
+            },
+            detail
+        )
+    };
+    (detail, detail_color)
+}
+
 fn action_look(action: &ActionSpec) -> (Icon, u32) {
     match action {
         ActionSpec::Notification => (Icon::Bell, theme::VIOLET),
@@ -4150,44 +4245,8 @@ impl Workspace {
             .bindings()
             .iter()
             .map(|binding| {
-                let spec = &binding.spec;
-                let caps = caps_for(spec);
-                let action = trigger_browse::action_kind(&binding.action);
                 let ready = self.action_unavailable_reason(&binding.action).is_none();
-                let mut text = format!(
-                    "{} {} {}",
-                    binding.message,
-                    action_detail(&binding.action),
-                    action.label()
-                );
-                for cap in &caps {
-                    text.push(' ');
-                    text.push_str(&cap.label);
-                }
-                for scope in [&spec.process_scope, &spec.pointer_scope] {
-                    if !scope.is_global() {
-                        text.push(' ');
-                        text.push_str(&settings::process_scope_label(scope));
-                    }
-                }
-                let (held_keys, held_mouse) = trigger_browse::split_held(&spec.held);
-                trigger_browse::Row {
-                    id: spec.id,
-                    text: text.to_lowercase(),
-                    prefix: prefix_caps(spec)
-                        .iter()
-                        .map(|cap| cap.label.as_ref())
-                        .collect::<Vec<_>>()
-                        .join(" + "),
-                    input: trigger_browse::input_kind(spec),
-                    action,
-                    scope: trigger_browse::scope_kind(spec),
-                    status: trigger_browse::status_kind(binding, ready),
-                    held_keys,
-                    held_mouse,
-                    terminal: trigger_browse::Terminal::of(spec),
-                    has_region: !spec.conditions.is_empty(),
-                }
+                browse_row(binding, ready)
             })
             .collect()
     }
@@ -4484,54 +4543,8 @@ impl Workspace {
         let selected = self.pending.is_none() && !self.recording && self.selected == Some(id);
         let stats = self.triggers.stats(id);
         let (glyph, tint) = action_look(&binding.action);
-        let (detail, detail_color) = match self.action_unavailable_reason(&binding.action) {
-            Some(reason) => (reason, theme::RECORD),
-            None => (action_detail(&binding.action), theme::TEXT_DIM),
-        };
-        let detail = if binding.spec.process_scope.is_global() {
-            detail
-        } else {
-            format!(
-                "{} · {}",
-                settings::process_scope_label(&binding.spec.process_scope),
-                detail
-            )
-        };
-        let detail = if binding.spec.pointer_scope.is_global() {
-            detail
-        } else {
-            format!(
-                "指针窗口：{} · {}",
-                settings::process_scope_label(&binding.spec.pointer_scope),
-                detail
-            )
-        };
-        let detail = if binding.spec.keyboard == Default::default() {
-            detail
-        } else {
-            format!(
-                "{}{} · {}",
-                if binding.spec.keyboard.dedicated_prefix.is_some() {
-                    "专用层"
-                } else if binding.spec.keyboard.retained_prefix.is_some() {
-                    "保留原功能层"
-                } else if binding.spec.keyboard.matching.is_mouse_unmodified() {
-                    "鼠标无 Ctrl/Shift/Alt 观察"
-                } else if binding.spec.keyboard.matching.is_mouse_exact() {
-                    "鼠标修饰键观察"
-                } else if binding.spec.keyboard.matching.is_mouse_captured_leader() {
-                    "鼠标捕获会话引用"
-                } else {
-                    ""
-                },
-                if binding.spec.keyboard.repeat {
-                    " 按住重复"
-                } else {
-                    ""
-                },
-                detail
-            )
-        };
+        let (detail, detail_color) =
+            row_detail(binding, self.action_unavailable_reason(&binding.action));
         // 标题行右侧：停用标记，或本次运行的命中次数与最近时间。
         let badge = if !binding.enabled {
             Some(
@@ -8099,6 +8112,16 @@ fn main() {
         return;
     }
     if let Some(result) = action_packages::cli(&arguments) {
+        match result {
+            Ok(text) => println!("{text}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Some(result) = trigger_preview::cli(&arguments) {
         match result {
             Ok(text) => println!("{text}"),
             Err(error) => {

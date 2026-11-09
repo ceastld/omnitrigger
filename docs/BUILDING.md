@@ -106,6 +106,10 @@ cargo test --locked -p omnitrigger-app captured_matching_replays_external_source
 
 回放通过只证明所列事件与上下文下的配置行为；装载了多少规则和专门验证了多少规则须分别记录。物理输入、平台采样、目标程序效果及与外部行为的等价性仍需独立验证。
 
+## 界面设计预览
+
+`design/` 用 React 组件预览触发器页的列表、键盘和鼠标视图，数据由应用 `--export-trigger-preview` 导出，改界面时先在这里迭代再移植到 GPUI。用法见 [design/README.md](../design/README.md)。
+
 ## 主页与文档站
 
 主页与文档站位于 `site/`，使用 VitePress 构建，需要 Node.js 20 或更高版本。文档页由 `site/scripts/sync-docs.mjs` 从仓库 Markdown 同步生成，仓库文档仍是唯一来源；`docs/` 下新增文档需要在该脚本中登记侧栏位置。

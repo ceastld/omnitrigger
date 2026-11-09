@@ -1077,6 +1077,11 @@ pub fn validate(bindings: &[Binding]) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+pub fn decode_for_tests(text: &str) -> Vec<Binding> {
+    decode(text).unwrap()
+}
+
 pub fn load() -> Result<Vec<Binding>, String> {
     match std::fs::read_to_string(path()) {
         Ok(text) => decode(&text),

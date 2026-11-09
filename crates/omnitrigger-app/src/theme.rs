@@ -54,6 +54,50 @@ pub const DANGER_BG: u32 = 0x1e0d13;
 pub const DANGER_LINE: u32 = 0x5c2233;
 pub const ON_DANGER: u32 = 0x2b0710;
 
+/// 语义色表，供设计预览导出；名称与常量一致。
+pub const TOKENS: &[(&str, u32)] = &[
+    ("SIDEBAR", SIDEBAR),
+    ("BACKGROUND", BACKGROUND),
+    ("INSPECTOR", INSPECTOR),
+    ("ROW", ROW),
+    ("SURFACE", SURFACE),
+    ("SURFACE_HI", SURFACE_HI),
+    ("SELECTED", SELECTED),
+    ("DIVIDER", DIVIDER),
+    ("BORDER", BORDER),
+    ("BORDER_MID", BORDER_MID),
+    ("BORDER_HI", BORDER_HI),
+    ("KEYCAP", KEYCAP),
+    ("KEYCAP_EDGE", KEYCAP_EDGE),
+    ("KEYCAP_BASE", KEYCAP_BASE),
+    ("TEXT", TEXT),
+    ("TEXT_SOFT", TEXT_SOFT),
+    ("TEXT_MUTED", TEXT_MUTED),
+    ("TEXT_DIM", TEXT_DIM),
+    ("TEXT_FAINT", TEXT_FAINT),
+    ("PLUS", PLUS),
+    ("ICON", ICON),
+    ("ACCENT", ACCENT),
+    ("ACCENT_2", ACCENT_2),
+    ("ON_ACCENT", ON_ACCENT),
+    ("ACCENT_BG", ACCENT_BG),
+    ("ACCENT_LINE", ACCENT_LINE),
+    ("ACCENT_DEEP", ACCENT_DEEP),
+    ("VIOLET", VIOLET),
+    ("PINK", PINK),
+    ("RECORD", RECORD),
+    ("RECORD_TEXT", RECORD_TEXT),
+    ("RECORD_BG", RECORD_BG),
+    ("RECORD_LINE", RECORD_LINE),
+    ("RECORD_CAP", RECORD_CAP),
+    ("RECORD_DIM", RECORD_DIM),
+    ("DANGER", DANGER),
+    ("DANGER_TEXT", DANGER_TEXT),
+    ("DANGER_BG", DANGER_BG),
+    ("DANGER_LINE", DANGER_LINE),
+    ("ON_DANGER", ON_DANGER),
+];
+
 pub const UI_FONT: &str = "Microsoft YaHei UI";
 pub const MONO_FONT: &str = "Cascadia Mono";
 
@@ -85,7 +129,7 @@ pub fn resolve_color(color: u32) -> u32 {
     }
 }
 
-fn light_color(color: u32) -> u32 {
+pub fn light_color(color: u32) -> u32 {
     match color {
         SIDEBAR => 0xf0f2f5,
         BACKGROUND => 0xf7f8fa,

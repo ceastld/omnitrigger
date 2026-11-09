@@ -1,0 +1,407 @@
+// 触发器页中栏：对应 main.rs 的 render_list / render_trigger_toolbar / render_trigger_row / render_group_header。
+import { useState } from "react";
+import {
+  browse,
+  facetCount,
+  tokens,
+  visible,
+  DISABLED,
+  type FacetKey,
+  type Filter,
+  type GroupKey,
+  type Row,
+} from "./data";
+import { Caption, Combo, Heading, Icon, IconTile, PrimaryButton, Segment, Segments, Switch, c, mono, usePreview } from "./ui";
+import { KeyboardView } from "./KeyboardView";
+import { MouseView } from "./MouseView";
+
+export type View = "list" | "keyboard" | "mouse";
+type Menu = FacetKey | "group" | null;
+
+export function TriggerPage({ initialView = "list" }: { initialView?: View }) {
+  const preview = usePreview();
+  const [rows, setRows] = useState(preview.rows);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<Filter>({});
+  const [groupBy, setGroupBy] = useState<GroupKey>("prefix");
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [menu, setMenu] = useState<Menu>(null);
+  const [view, setView] = useState<View>(initialView);
+  const [selected, setSelected] = useState<number | null>(preview.rows[0]?.id ?? null);
+
+  const words = tokens(query);
+  const groups = browse(rows, words, filter, groupBy);
+  const shown = groups.reduce((sum, group) => sum + group.rows.length, 0);
+  const shownRows = visible(rows, words, filter);
+  const grouped = groupBy !== "none";
+  const toggle = (id: number) =>
+    setRows((current) =>
+      current.map((row) =>
+        row.id === id
+          ? {
+              ...row,
+              enabled: !row.enabled,
+              facets: { ...row.facets, status: row.enabled ? DISABLED : "已启用" },
+            }
+          : row,
+      ),
+    );
+  const renderRow = (row: Row) => (
+    <TriggerRow key={row.id} row={row} selected={selected === row.id} onSelect={() => setSelected(row.id)} onToggle={() => toggle(row.id)} />
+  );
+
+  return (
+    <div
+      onMouseDown={() => setMenu(null)}
+      style={{
+        flex: 1,
+        minWidth: 0,
+        height: "100%",
+        boxSizing: "border-box",
+        padding: "6px 18px 16px 20px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 14,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12 }}>
+        <Heading title="触发器" subtitle="按住前缀再按目标键或滚轮，支持应用范围" />
+        <PrimaryButton icon="icons/record.svg" label="录制组合" />
+      </div>
+      <Toolbar
+        rows={rows}
+        words={words}
+        query={query}
+        setQuery={setQuery}
+        filter={filter}
+        setFilter={setFilter}
+        groupBy={groupBy}
+        setGroupBy={setGroupBy}
+        menu={menu}
+        setMenu={setMenu}
+        view={view}
+        setView={setView}
+        shown={shown}
+      />
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 2 }}>
+        {view === "list" &&
+          groups.map((group, index) => {
+            const key = `${groupBy}:${group.key}`;
+            const isCollapsed = grouped && collapsed.has(key);
+            return (
+              <div key={key} style={{ display: "contents" }}>
+                {grouped && (
+                  <GroupHeader
+                    index={index}
+                    label={group.label}
+                    prefixCaps={groupBy === "prefix" && group.key !== "" ? group.rows[0].caps.filter((cap) => cap.prefix) : null}
+                    count={group.rows.length}
+                    disabled={group.disabled}
+                    collapsed={isCollapsed}
+                    onClick={() =>
+                      setCollapsed((current) => {
+                        const next = new Set(current);
+                        if (!next.delete(key)) next.add(key);
+                        return next;
+                      })
+                    }
+                  />
+                )}
+                {!isCollapsed && group.rows.map(renderRow)}
+              </div>
+            );
+          })}
+        {view === "keyboard" && shown > 0 && <KeyboardView rows={shownRows} renderRow={renderRow} />}
+        {view === "mouse" && shown > 0 && <MouseView rows={shownRows} renderRow={renderRow} />}
+        {rows.length > 0 && shown === 0 && (
+          <div style={{ padding: "56px 0", display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+            <IconTile path="icons/search.svg" color="ACCENT_2" size={48} />
+            <div style={{ fontSize: 15, fontWeight: 600, color: c("TEXT_SOFT") }}>没有符合条件的触发器</div>
+          </div>
+        )}
+      </div>
+      <Caption>最多 512 条触发器，每条最多 8 个前缀。单独按下未用于组合的前缀时，原输入会补发给应用。</Caption>
+    </div>
+  );
+}
+
+interface ToolbarProps {
+  rows: Row[];
+  words: string[];
+  query: string;
+  setQuery: (query: string) => void;
+  filter: Filter;
+  setFilter: (filter: Filter) => void;
+  groupBy: GroupKey;
+  setGroupBy: (group: GroupKey) => void;
+  menu: Menu;
+  setMenu: (menu: Menu) => void;
+  view: View;
+  setView: (view: View) => void;
+  shown: number;
+}
+
+function Toolbar(props: ToolbarProps) {
+  const preview = usePreview();
+  const { rows, words, filter, setFilter, menu, setMenu } = props;
+  const enabled = rows.filter((row) => row.facets.status !== DISABLED).length;
+  const [focused, setFocused] = useState(false);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <label
+          style={{
+            flex: 1,
+            minWidth: 0,
+            height: 34,
+            padding: "0 12px",
+            boxSizing: "border-box",
+            borderRadius: 6,
+            background: c("BACKGROUND"),
+            border: `1px solid ${focused ? c("ACCENT", 0.7) : c("BORDER_MID")}`,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <Icon path="icons/search.svg" size={14} color={focused ? c("ACCENT") : c("TEXT_FAINT")} />
+          <input
+            value={props.query}
+            onChange={(event) => props.setQuery(event.target.value)}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            placeholder="搜索名称、动作、组合或应用"
+            style={{ flex: 1, minWidth: 0, border: "none", outline: "none", background: "transparent", color: c("TEXT"), fontSize: 13, font: "inherit" }}
+          />
+        </label>
+        <Segments>
+          <Segment label="列表" active={props.view === "list"} onClick={() => props.setView("list")} />
+          <Segment label="键盘" active={props.view === "keyboard"} onClick={() => props.setView("keyboard")} />
+          <Segment label="鼠标" active={props.view === "mouse"} onClick={() => props.setView("mouse")} />
+        </Segments>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+        {preview.facets.map((facet) => {
+          const current = filter[facet.key];
+          const options: Option[] = [{ label: "全部", count: null, selected: current === undefined, pick: () => setFilter({ ...filter, [facet.key]: undefined }) }];
+          for (const value of facet.options) {
+            const count = facetCount(rows, words, filter, facet.key, value);
+            if (count > 0 || current === value) {
+              options.push({ label: value, count, selected: current === value, pick: () => setFilter({ ...filter, [facet.key]: value }) });
+            }
+          }
+          return (
+            <Dropdown
+              key={facet.key}
+              text={`${facet.label}：${current ?? "全部"}`}
+              active={current !== undefined}
+              open={menu === facet.key}
+              onToggle={() => setMenu(menu === facet.key ? null : facet.key)}
+              onPick={() => setMenu(null)}
+              options={options}
+            />
+          );
+        })}
+        {(words.length > 0 || Object.values(filter).some((value) => value !== undefined)) && (
+          <div
+            className="hover-text"
+            onClick={() => {
+              props.setQuery("");
+              setFilter({});
+            }}
+            style={{ padding: "0 6px", fontSize: 12, color: c("TEXT_DIM"), cursor: "pointer" }}
+          >
+            清除筛选
+          </div>
+        )}
+        <div style={{ flex: 1 }} />
+        <div style={{ ...mono, flex: "none", fontSize: 11.5, color: c("TEXT_FAINT") }}>
+          {props.shown} / {rows.length} 条 · {enabled} 启用 · 本次 0
+        </div>
+        {props.view === "list" && (
+          <Dropdown
+            text={preview.group_by.find((group) => group.key === props.groupBy)?.label ?? ""}
+            active={false}
+            alignRight
+            open={menu === "group"}
+            onToggle={() => setMenu(menu === "group" ? null : "group")}
+            onPick={() => setMenu(null)}
+            options={preview.group_by.map((group) => ({
+              label: group.label,
+              count: null,
+              selected: group.key === props.groupBy,
+              pick: () => props.setGroupBy(group.key),
+            }))}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface Option {
+  label: string;
+  count: number | null;
+  selected: boolean;
+  pick: () => void;
+}
+
+function Dropdown(props: {
+  text: string;
+  active: boolean;
+  open: boolean;
+  alignRight?: boolean;
+  onToggle: () => void;
+  onPick: () => void;
+  options: Option[];
+}) {
+  return (
+    <div style={{ position: "relative", flex: "none" }} onMouseDown={(event) => event.stopPropagation()}>
+      <div
+        className="hover-border"
+        onClick={props.onToggle}
+        style={{
+          height: 28,
+          padding: "0 10px",
+          boxSizing: "border-box",
+          borderRadius: 14,
+          border: `1px solid ${props.active || props.open ? c("ACCENT_LINE") : c("BORDER_MID")}`,
+          background: props.active ? c("ACCENT_BG") : undefined,
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          fontSize: 12,
+          color: props.active ? c("ACCENT") : c("TEXT_MUTED"),
+          whiteSpace: "nowrap",
+          cursor: "pointer",
+        }}
+      >
+        {props.text}
+        <span style={{ fontSize: 9, color: c("TEXT_FAINT") }}>{props.open ? "▲" : "▼"}</span>
+      </div>
+      {props.open && (
+        <div
+          style={{
+            position: "absolute",
+            top: 32,
+            [props.alignRight ? "right" : "left"]: 0,
+            zIndex: 10,
+            minWidth: 176,
+            padding: 4,
+            borderRadius: 8,
+            border: `1px solid ${c("BORDER_MID")}`,
+            background: c("SURFACE"),
+            boxShadow: "0 12px 32px -6px rgba(0,0,0,0.45)",
+            display: "flex",
+            flexDirection: "column",
+            gap: 2,
+          }}
+        >
+          {props.options.map((option) => (
+            <div
+              key={option.label}
+              className="hover-option"
+              onClick={() => {
+                option.pick();
+                props.onPick();
+              }}
+              style={{
+                height: 28,
+                padding: "0 8px",
+                borderRadius: 5,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontSize: 12,
+                cursor: "pointer",
+                ...(option.selected ? { background: c("SURFACE_HI"), color: c("ACCENT") } : {}),
+              }}
+            >
+              <div style={{ flex: 1, whiteSpace: "nowrap" }}>{option.label}</div>
+              {option.count !== null && <div style={{ ...mono, fontSize: 11, color: c("TEXT_FAINT") }}>{option.count}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function TriggerRow({ row, selected, onSelect, onToggle }: { row: Row; selected: boolean; onSelect: () => void; onToggle: () => void }) {
+  return (
+    <div
+      className={selected ? undefined : "hover-row"}
+      style={{
+        flex: "none",
+        position: "relative",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "10px 12px",
+        borderRadius: 6,
+        border: "1px solid transparent",
+        background: selected ? c("SELECTED") : undefined,
+      }}
+    >
+      {selected && (
+        <div style={{ position: "absolute", left: -1, top: 18, bottom: 18, width: 2, borderRadius: 2, background: c("ACCENT") }} />
+      )}
+      <div
+        onClick={onSelect}
+        style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 10, cursor: "pointer", opacity: row.enabled ? 1 : 0.45 }}
+      >
+        <IconTile path={row.icon} color={row.tint} size={28} />
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 5 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div className="truncate" style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600 }}>
+              {row.name}
+            </div>
+            {!row.enabled && <div style={{ flex: "none", fontSize: 11, color: c("TEXT_FAINT") }}>已停用</div>}
+          </div>
+          <div style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 10 }}>
+            <Combo caps={row.caps} />
+            <div className="truncate" style={{ flex: 1, minWidth: 0, fontSize: 12, color: c(row.detail_color) }}>
+              {row.detail}
+            </div>
+          </div>
+        </div>
+      </div>
+      <Switch on={row.enabled} onClick={onToggle} />
+    </div>
+  );
+}
+
+function GroupHeader(props: {
+  index: number;
+  label: string;
+  prefixCaps: Row["caps"] | null;
+  count: number;
+  disabled: number;
+  collapsed: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <div
+      onClick={props.onClick}
+      style={{
+        flex: "none",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: `${props.index === 0 ? 2 : 12}px 4px 4px`,
+        cursor: "pointer",
+      }}
+    >
+      <Icon path={props.collapsed ? "icons/arrow-right.svg" : "icons/arrow-down.svg"} size={10} color={c("TEXT_FAINT")} />
+      {props.prefixCaps ? (
+        <Combo caps={props.prefixCaps} />
+      ) : (
+        <div style={{ fontSize: 12, fontWeight: 600, color: c("TEXT_MUTED") }}>{props.label}</div>
+      )}
+      <div style={{ ...mono, fontSize: 11, color: c("TEXT_FAINT") }}>
+        {props.disabled > 0 ? `${props.count} · ${props.disabled} 停用` : props.count}
+      </div>
+      <div style={{ flex: 1, height: 1, background: c("DIVIDER") }} />
+    </div>
+  );
+}

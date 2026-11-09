@@ -1,0 +1,77 @@
+/* 悬停态无法写在内联样式里，集中在这里；颜色同样取自导出的语义色。 */
+html,
+body {
+  margin: 0;
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hover-row:hover {
+  background: var(--ROW);
+}
+
+.hover-segment:hover {
+  color: var(--TEXT_SOFT) !important;
+  background: color-mix(in srgb, var(--SIDEBAR) 60%, black);
+}
+
+.hover-border:hover {
+  border-color: var(--BORDER_HI) !important;
+}
+
+.hover-option:hover {
+  background: var(--SURFACE_HI);
+}
+
+.hover-text:hover {
+  color: var(--TEXT) !important;
+}
+
+.hover-key:hover {
+  border-color: var(--ACCENT) !important;
+}
+
+.hover-zone:hover {
+  border-color: color-mix(in srgb, var(--ACCENT) 70%, transparent) !important;
+}
+
+.devbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--TEXT_DIM);
+  border-bottom: 1px solid var(--DIVIDER);
+  background: var(--SIDEBAR);
+}
+
+.devbar label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.devbar-button {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--BORDER_MID);
+  background: var(--SURFACE_HI);
+  color: var(--TEXT);
+  font: inherit;
+  cursor: pointer;
+}
+
+.devbar-error {
+  color: var(--DANGER);
+}
+
+input::placeholder {
+  color: var(--TEXT_FAINT);
+}
