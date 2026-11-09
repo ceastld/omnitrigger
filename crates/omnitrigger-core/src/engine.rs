@@ -9,9 +9,9 @@ use retained::RetainedSession;
 use crate::model::direction;
 use crate::registration::validate;
 use crate::{
-    Activation, ActiveDrag, Axis, Button, ContextError, Decision, DragEvent, DragPhase, InputEvent,
-    InputKind, RegistrationError, ScreenRect, TriggerSpec, WheelDirection, WheelPolicy,
-    WheelSessionSnapshot, regions,
+    Activation, ActiveDrag, Axis, Button, ContextError, Decision, DragEvent, DragPhase,
+    GestureTracker, InputEvent, InputKind, RegistrationError, ScreenRect, TriggerSpec,
+    WheelDirection, WheelPolicy, WheelSessionSnapshot, regions,
 };
 
 const MOUSE_BUTTON_COUNT: usize = 5;
@@ -69,6 +69,18 @@ struct PendingDrag {
     pointer_origin: Option<(i32, i32)>,
 }
 
+/// 一次鼠标手势会话。候选规则在按下时确定，位置条件不随轨迹移动重新判定。
+#[derive(Clone)]
+struct GestureSession {
+    button: Button,
+    candidates: MousePrefixOwners,
+    /// 按下时位置未知则在首次移动时以该点为起点。
+    tracker: Option<GestureTracker>,
+    deadline_ms: u64,
+    /// 已认领本次按压：原按下不再回放，松开时识别。
+    started: bool,
+}
+
 #[derive(Clone, Copy)]
 struct PendingTapRestore {
     button: Button,
@@ -92,6 +104,7 @@ pub struct Engine {
     hold: Option<PendingHold>,
     drag: Option<PendingDrag>,
     active_drag: Option<ActiveDrag>,
+    gesture: Option<GestureSession>,
     next_drag_session: Option<u64>,
     pointer_position: Option<(i32, i32)>,
     /// 首个等待中的鼠标前缀按下时的指针位置；移出容差后放弃组合并回放，交还拖拽。
@@ -137,6 +150,7 @@ impl Engine {
             hold: None,
             drag: None,
             active_drag: None,
+            gesture: None,
             next_drag_session: Some(1),
             pointer_position: None,
             prefix_origin: None,
@@ -473,6 +487,7 @@ impl Engine {
         self.prefix_origin = None;
         self.hold = None;
         self.drag = None;
+        self.gesture = None;
         self.wheel = [0; 4];
         self.wheel_owner = [None; 4];
         for state in self.pressed.values_mut() {
@@ -592,13 +607,16 @@ impl Engine {
             // 先归还上一条观察规则的不足一格输入，再让新按压选择动作或捕获层。
             decision.replay.extend(self.flush_pending());
         }
-        if interrupts_press && (self.hold.is_some() || self.drag.is_some()) {
+        if interrupts_press
+            && (self.hold.is_some() || self.drag.is_some() || self.gesture_pending())
+        {
             decision.replay.extend(self.flush_pending());
         }
         if interrupts_press {
             decision
                 .drags
                 .extend(self.finish_drag(DragPhase::Cancelled));
+            self.cancel_gesture();
         }
         let current = if let Some(decision) = self.retained_event(event.kind) {
             decision
@@ -633,7 +651,18 @@ impl Engine {
         {
             self.drag = None;
             // 拖拽窗口过期不取消仍在等待的长按；长按已因移动取消时才回放。
-            if self.hold.is_none() {
+            if self.hold.is_none() && !self.gesture_pending() {
+                decision.replay.extend(self.flush_pending());
+            }
+        }
+        if self
+            .gesture
+            .as_ref()
+            .is_some_and(|gesture| !gesture.started && self.now_ms >= gesture.deadline_ms)
+        {
+            self.gesture = None;
+            // 与拖拽窗口相同：仍在等待的长按继续计时，否则交还原按压。
+            if self.hold.is_none() && self.drag.is_none() {
                 decision.replay.extend(self.flush_pending());
             }
         }
@@ -652,6 +681,10 @@ impl Engine {
         [
             self.hold.map(|hold| hold.deadline_ms),
             self.drag.map(|drag| drag.deadline_ms),
+            self.gesture
+                .as_ref()
+                .filter(|gesture| !gesture.started)
+                .map(|gesture| gesture.deadline_ms),
         ]
         .into_iter()
         .flatten()
@@ -670,6 +703,55 @@ impl Engine {
         self.active_drag
     }
 
+    /// 手势会话的按键及是否已认领按压；未进入手势或已结束时为 None。
+    pub fn gesture_session(&self) -> Option<(Button, bool)> {
+        self.gesture
+            .as_ref()
+            .map(|gesture| (gesture.button, gesture.started))
+    }
+
+    fn gesture_pending(&self) -> bool {
+        self.gesture
+            .as_ref()
+            .is_some_and(|gesture| !gesture.started)
+    }
+
+    /// 已认领的手势被其他输入打断时放弃识别，消费原按压的释放。
+    fn cancel_gesture(&mut self) {
+        let Some(gesture) = self.gesture.take_if(|gesture| gesture.started) else {
+            return;
+        };
+        if let Some(state) = self.pressed.get_mut(&gesture.button)
+            && *state == PressState::Consumed
+        {
+            *state = PressState::Draining;
+        }
+    }
+
+    /// 松开手势键时只在按下时确定的候选中选择，绘制途中指针窗口变化不增删候选。
+    /// 先比较含斜向的路径，再比较只含上下左右的路径；同类按候选排序取第一条。
+    fn recognize_gesture(&self, gesture: &GestureSession) -> Option<u64> {
+        let reading = gesture.tracker.as_ref()?.reading();
+        self.bindings
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| gesture.candidates.contains(index))
+            .filter_map(|(index, binding)| match binding.activation {
+                Activation::Gesture { path, .. } if reading.matches(&path) => Some((
+                    (
+                        !path.has_diagonal(),
+                        std::cmp::Reverse(binding.scope_priority()),
+                        binding.keyboard.matching.priority(),
+                        index,
+                    ),
+                    binding.id,
+                )),
+                _ => None,
+            })
+            .min_by_key(|&(key, _)| key)
+            .map(|(_, id)| id)
+    }
+
     /// 已建立的鼠标前缀及pending/active拖拽会话，供输入归一化器同步读取。
     /// 普通按住、透传左键前缀、键盘层、按下/长按末键及Draining不建立此会话。
     /// 当前拖拽只接受鼠标终键，因此holding_move_key保持false；
@@ -683,7 +765,8 @@ impl Engine {
                 .iter()
                 .any(|owners| owners.is_active())
                 || matches!(pending, Some(Button::Mouse(_)))
-                || matches!(active, Some(Button::Mouse(_))),
+                || matches!(active, Some(Button::Mouse(_)))
+                || self.gesture.is_some(),
             holding_move_key: false,
         }
     }
@@ -711,7 +794,7 @@ impl Engine {
         };
         if moved {
             self.hold = None;
-            if self.drag.is_none() {
+            if self.drag.is_none() && self.gesture.is_none() {
                 decision.replay.extend(self.flush_pending());
             }
         }
@@ -720,6 +803,7 @@ impl Engine {
         if self.hold.is_none()
             && self.drag.is_none()
             && self.active_drag.is_none()
+            && self.gesture.is_none()
             && self.pressed.iter().any(|(button, state)| {
                 matches!(button, Button::Mouse(_)) && *state == PressState::Pending
             })
@@ -758,6 +842,18 @@ impl Engine {
                     origin,
                     position,
                 });
+            }
+        }
+        if let Some(gesture) = &mut self.gesture {
+            let tracker = gesture
+                .tracker
+                .get_or_insert_with(|| GestureTracker::new(position));
+            tracker.push(position);
+            if !gesture.started && tracker.started() {
+                let mut gesture = self.gesture.take().expect("手势会话存在");
+                self.commit_pending();
+                gesture.started = true;
+                self.gesture = Some(gesture);
             }
         }
         decision
@@ -881,7 +977,22 @@ impl Engine {
                 }
                 _ => None,
             });
-        if hold.is_some() || drag.is_some() {
+        let mut gesture_candidates = MousePrefixOwners::default();
+        if drag.is_none() && matches!(button, Button::Mouse(_)) {
+            // 各应用范围的手势同时参与：松开时同一路径按候选顺序取最具体的范围。
+            for &index in &self.active_bindings {
+                let binding = &self.bindings[index];
+                if matches!(binding.activation, Activation::Gesture { button: terminal, .. } if terminal == button)
+                    && self.mouse_prefix_allows_binding(index)
+                    && self.binding_held_matches(binding)
+                    && self.conditions_match(binding)
+                {
+                    gesture_candidates.insert(index);
+                }
+            }
+        }
+        let gesture = gesture_candidates.is_active();
+        if hold.is_some() || drag.is_some() || gesture {
             self.terminal_presses.insert(button);
             self.wheel = [0; 4];
             self.wheel_owner = [None; 4];
@@ -909,6 +1020,15 @@ impl Engine {
                 deadline_ms: self.now_ms.saturating_add(u64::from(max_start_ms)),
                 min_distance_px,
                 pointer_origin: self.pointer_position,
+            });
+            self.gesture = gesture.then(|| GestureSession {
+                button,
+                candidates: gesture_candidates,
+                tracker: self.pointer_position.map(GestureTracker::new),
+                deadline_ms: self
+                    .now_ms
+                    .saturating_add(u64::from(crate::GESTURE_START_MS)),
+                started: false,
             });
             return Decision {
                 consume: true,
@@ -1041,10 +1161,25 @@ impl Engine {
         } else {
             None
         };
+        let recognized = match self.gesture.take() {
+            Some(gesture) if gesture.button == button && gesture.started => {
+                self.recognize_gesture(&gesture)
+            }
+            Some(gesture) if gesture.button == button => None,
+            Some(gesture) => {
+                // 其他按键释放：未认领的会话按原回退路径处理，已认领的会话放弃识别。
+                self.gesture = Some(gesture);
+                if self.pressed.contains_key(&button) {
+                    self.cancel_gesture();
+                }
+                None
+            }
+            None => None,
+        };
         let Some(state) = self.pressed.remove(&button) else {
             return Decision::default();
         };
-        let released_pending_drag = self.drag.is_some();
+        let released_pending_drag = self.drag.is_some() || self.gesture_pending();
         if leaving_layer {
             for state in self.pressed.values_mut() {
                 if matches!(*state, PressState::Consumed | PressState::PendingSuppressed) {
@@ -1093,6 +1228,7 @@ impl Engine {
                 .extend([InputKind::Down(button), InputKind::Up(button)]);
         }
         decision.drags.extend(drag);
+        decision.triggered.extend(recognized);
         decision
     }
 
@@ -1452,6 +1588,7 @@ impl Engine {
         });
         let lost_prefix = self.hold.is_none()
             && self.drag.is_none()
+            && self.gesture.is_none()
             && self
                 .pressed
                 .values()
@@ -1495,6 +1632,7 @@ impl Engine {
         self.pending.clear();
         self.hold = None;
         self.drag = None;
+        self.gesture = None;
         for state in self.pressed.values_mut() {
             if matches!(*state, PressState::Pending | PressState::PendingSuppressed) {
                 *state = PressState::Consumed;
@@ -1513,6 +1651,7 @@ impl Engine {
         self.prefix_origin = None;
         self.hold = None;
         self.drag = None;
+        self.gesture = None;
         self.wheel = [0; 4];
         self.wheel_owner = [None; 4];
         for state in self.pressed.values_mut() {
@@ -1621,7 +1760,8 @@ fn same_activation_family(left: Activation, right: Activation) -> bool {
     let button = |activation| match activation {
         Activation::Press(button)
         | Activation::Hold { button, .. }
-        | Activation::Drag { button, .. } => Some(button),
+        | Activation::Drag { button, .. }
+        | Activation::Gesture { button, .. } => Some(button),
         Activation::Wheel(_) => None,
     };
     match (button(left), button(right)) {

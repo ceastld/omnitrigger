@@ -309,7 +309,9 @@ pub fn caps_for(spec: &TriggerSpec) -> Vec<Cap> {
     caps.extend(caps_for_buttons(&spec.held));
     caps.push(match &spec.activation {
         Activation::Press(button) => button_cap(button),
-        Activation::Hold { button, .. } | Activation::Drag { button, .. } => button_cap(button),
+        Activation::Hold { button, .. }
+        | Activation::Drag { button, .. }
+        | Activation::Gesture { button, .. } => button_cap(button),
         Activation::Wheel(direction) => Cap {
             label: "滚轮".into(),
             mouse: true,
@@ -325,6 +327,14 @@ pub fn caps_for(spec: &TriggerSpec) -> Vec<Cap> {
     if let Activation::Hold { duration_ms, .. } = spec.activation {
         caps.push(Cap {
             label: format!("长按 {duration_ms}ms").into(),
+            mouse: false,
+            arrow: None,
+            title: None,
+        });
+    }
+    if let Activation::Gesture { path, .. } = spec.activation {
+        caps.push(Cap {
+            label: format!("手势 {path}").into(),
             mouse: false,
             arrow: None,
             title: None,

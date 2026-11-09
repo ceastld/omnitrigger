@@ -467,10 +467,27 @@ enum ActivationDto {
         min_distance_px: u32,
         max_start_ms: u32,
     },
+    /// 方向使用稳定名称，例如 `["right", "down_left"]`。
+    Gesture {
+        button: ButtonDto,
+        path: Vec<String>,
+    },
     WheelUp,
     WheelDown,
     WheelLeft,
     WheelRight,
+}
+
+/// 未知方向名或不合法序列返回错误，不合并重复方向或截断。
+fn decode_gesture_path(tokens: &[String]) -> Result<omnitrigger_core::GesturePath, String> {
+    let steps = tokens
+        .iter()
+        .map(|token| {
+            omnitrigger_core::GestureDirection::from_token(token)
+                .ok_or_else(|| format!("未知的手势方向“{token}”。"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    omnitrigger_core::GesturePath::new(&steps).map_err(|error| error.to_string())
 }
 
 impl From<Button> for ButtonDto {
@@ -554,6 +571,14 @@ impl From<&Binding> for BindingDto {
                     button: button.into(),
                     min_distance_px,
                     max_start_ms,
+                },
+                Activation::Gesture { button, path } => ActivationDto::Gesture {
+                    button: button.into(),
+                    path: path
+                        .steps()
+                        .iter()
+                        .map(|step| step.token().to_string())
+                        .collect(),
                 },
                 Activation::Wheel(WheelDirection::Up) => ActivationDto::WheelUp,
                 Activation::Wheel(WheelDirection::Down) => ActivationDto::WheelDown,
@@ -750,6 +775,10 @@ impl BindingDto {
         };
         let (effective, scene) =
             scenes::apply(self.scene, own, compiled, id).map_err(|error| error.to_string())?;
+        let gesture_path = match &self.activation {
+            ActivationDto::Gesture { path, .. } => Some(decode_gesture_path(path)?),
+            _ => None,
+        };
         Ok(Binding {
             context: ContextSource { scene, scopes },
             spec: TriggerSpec {
@@ -785,6 +814,10 @@ impl BindingDto {
                         button: button.into(),
                         min_distance_px,
                         max_start_ms,
+                    },
+                    ActivationDto::Gesture { button, .. } => Activation::Gesture {
+                        button: button.into(),
+                        path: gesture_path.expect("手势路径已在前面解码"),
                     },
                     ActivationDto::WheelUp => Activation::Wheel(WheelDirection::Up),
                     ActivationDto::WheelDown => Activation::Wheel(WheelDirection::Down),
@@ -1041,6 +1074,19 @@ pub fn check_candidate(bindings: &[Binding], spec: &TriggerSpec) -> Result<(), C
             detail: format!("快速拖拽时窗应为 20–2000ms，当前为 {max_start_ms}ms。"),
             other: None,
         },
+        RegistrationError::InvalidGestureButton { .. } => Conflict {
+            title: "手势目标必须是鼠标按钮",
+            detail: "手势在按住鼠标按钮时绘制，键盘按键可选择按下或长按。".into(),
+            other: None,
+        },
+        RegistrationError::GestureDragConflict {
+            gesture_binding,
+            drag_binding,
+        } => Conflict {
+            title: "手势与快速拖拽冲突",
+            detail: "同一组合在重叠范围内不能同时用于快速拖拽和手势，两者都以按下后的移动认领按压。".into(),
+            other: pick(gesture_binding, drag_binding),
+        },
         RegistrationError::TimingConflict {
             hold_binding,
             drag_binding,
@@ -1269,6 +1315,51 @@ mod tests {
             bindings: bindings.iter().map(Into::into).collect(),
         })
         .unwrap()
+    }
+
+    fn gesture_document(path: serde_json::Value) -> String {
+        json!({"version":CONFIG_VERSION,"bindings":[{
+            "id":9,"held":[],
+            "activation":{"kind":"gesture","value":{"button":{"kind":"right"},"path":path}},
+            "enabled":true,"message":"手势","action":{"kind":"notification"}
+        }]})
+        .to_string()
+    }
+
+    #[test]
+    fn gesture_path_round_trips_and_invalid_sequences_are_rejected_without_rewriting() {
+        use omnitrigger_core::{GestureDirection, GesturePath};
+        let bindings = decode(&gesture_document(json!(["down", "right", "up_left"]))).unwrap();
+        let expected = GesturePath::new(&[
+            GestureDirection::Down,
+            GestureDirection::Right,
+            GestureDirection::UpLeft,
+        ])
+        .unwrap();
+        assert_eq!(
+            bindings[0].spec.activation,
+            Activation::Gesture {
+                button: Button::Mouse(MouseButton::Right),
+                path: expected,
+            }
+        );
+        let saved: serde_json::Value = serde_json::from_str(&encode(&bindings)).unwrap();
+        assert_eq!(
+            saved["bindings"][0]["activation"]["value"]["path"],
+            json!(["down", "right", "up_left"])
+        );
+        assert_eq!(decode(&encode(&bindings)).unwrap(), bindings);
+        for invalid in [
+            json!([]),
+            json!(["right", "right"]),
+            json!(["north"]),
+            json!(["up", "down", "up", "down", "up", "down", "up", "down", "up"]),
+        ] {
+            assert!(
+                decode(&gesture_document(invalid.clone())).is_err(),
+                "{invalid}"
+            );
+        }
     }
 
     mod mouse_sampled_settings {

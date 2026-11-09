@@ -2726,6 +2726,10 @@ pub(crate) fn show_notification_window(
 mod drag_tests;
 
 #[cfg(test)]
+#[path = "gesture_platform_tests.rs"]
+mod gesture_tests;
+
+#[cfg(test)]
 #[path = "region_platform_tests.rs"]
 mod region_tests;
 

@@ -547,6 +547,9 @@ pub fn format_trigger(spec: &TriggerSpec) -> String {
             "{}（快速拖拽 ≥{min_distance_px}px / {max_start_ms}ms 内）",
             format_button(button)
         ),
+        Activation::Gesture { button, path } => {
+            format!("{}（手势 {path}）", format_button(button))
+        }
         Activation::Wheel(direction) => match direction {
             WheelDirection::Up => "滚轮上滚".into(),
             WheelDirection::Down => "滚轮下滚".into(),

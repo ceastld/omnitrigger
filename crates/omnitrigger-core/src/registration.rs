@@ -102,6 +102,15 @@ pub enum RegistrationError {
         id: u64,
         max_start_ms: u32,
     },
+    InvalidGestureButton {
+        id: u64,
+        button: Button,
+    },
+    /// 同一按键组合在重叠范围内不能同时用于快速拖拽与手势：两者都以按下后的位移认领按压。
+    GestureDragConflict {
+        gesture_binding: u64,
+        drag_binding: u64,
+    },
     TimingConflict {
         hold_binding: u64,
         drag_binding: u64,
@@ -176,6 +185,10 @@ impl fmt::Display for RegistrationError {
             Self::InvalidDragButton { .. } => "快速拖拽的目标必须是鼠标按键。",
             Self::InvalidDragDistance { .. } => "快速拖拽距离应为 4 至 500 像素。",
             Self::InvalidDragWindow { .. } => "快速拖拽起始窗口应为 20 至 2000 毫秒。",
+            Self::InvalidGestureButton { .. } => "手势的目标必须是鼠标按键。",
+            Self::GestureDragConflict { .. } => {
+                "同一组合在重叠范围内不能同时用于快速拖拽和手势，请调整按键或应用范围。"
+            }
             Self::TimingConflict { .. } => "同组合的快速拖拽窗口必须严格早于长按阈值。",
             Self::DuplicateId { .. } => "触发器编号重复，请重新添加该触发器。",
             Self::DuplicateHeld { .. } => "组合中的前缀按键重复，请重新录制。",
@@ -384,10 +397,19 @@ pub(super) fn validate(
                 });
             }
         }
+        if let Activation::Gesture { button, .. } = binding.activation
+            && !matches!(button, Button::Mouse(_))
+        {
+            return Err(RegistrationError::InvalidGestureButton {
+                id: binding.id,
+                button,
+            });
+        }
         for &button in binding.held.iter().chain(match &binding.activation {
             Activation::Press(button)
             | Activation::Hold { button, .. }
-            | Activation::Drag { button, .. } => std::slice::from_ref(button),
+            | Activation::Drag { button, .. }
+            | Activation::Gesture { button, .. } => std::slice::from_ref(button),
             Activation::Wheel(_) => &[],
         }) {
             if matches!(button, Button::Key(key) if key == 0 || key > 254) {
@@ -523,7 +545,38 @@ pub(super) fn validate(
                     second: right.id,
                 });
             }
+            // 同键的不同手势路径在松开时按轨迹区分；长按在位移超出容差时取消，二者可共存。
+            let gesture_pair = match (left.activation, right.activation) {
+                (Activation::Gesture { path: a, .. }, Activation::Gesture { path: b, .. }) => {
+                    a != b
+                }
+                (Activation::Gesture { .. }, Activation::Hold { .. })
+                | (Activation::Hold { .. }, Activation::Gesture { .. }) => true,
+                _ => false,
+            };
+            if same_button
+                && left.held_sets_overlap(right)
+                && left.scopes_overlap(right)
+                && regions::conditions_overlap(&left.conditions, &right.conditions)
+            {
+                let drag_gesture = match (left.activation, right.activation) {
+                    (Activation::Gesture { .. }, Activation::Drag { .. }) => {
+                        Some((left.id, right.id))
+                    }
+                    (Activation::Drag { .. }, Activation::Gesture { .. }) => {
+                        Some((right.id, left.id))
+                    }
+                    _ => None,
+                };
+                if let Some((gesture_binding, drag_binding)) = drag_gesture {
+                    return Err(RegistrationError::GestureDragConflict {
+                        gesture_binding,
+                        drag_binding,
+                    });
+                }
+            }
             if left.held_sets_overlap(right)
+                && !gesture_pair
                 && (left.activation == right.activation || same_button)
                 && regions::conditions_overlap(&left.conditions, &right.conditions)
                 && left.scopes_overlap(right)
@@ -589,7 +642,8 @@ fn activation_button(activation: Activation) -> Option<Button> {
     match activation {
         Activation::Press(button)
         | Activation::Hold { button, .. }
-        | Activation::Drag { button, .. } => Some(button),
+        | Activation::Drag { button, .. }
+        | Activation::Gesture { button, .. } => Some(button),
         Activation::Wheel(_) => None,
     }
 }

@@ -117,7 +117,8 @@ impl Terminal {
             Activation::Wheel(direction) => Self::Wheel(direction),
             Activation::Press(button)
             | Activation::Hold { button, .. }
-            | Activation::Drag { button, .. } => match button {
+            | Activation::Drag { button, .. }
+            | Activation::Gesture { button, .. } => match button {
                 Button::Key(key) => Self::Key(key),
                 Button::Mouse(mouse) => Self::Mouse(mouse),
             },
@@ -330,7 +331,8 @@ pub fn input_kind(spec: &TriggerSpec) -> InputKind {
         Activation::Wheel(_) => return InputKind::Wheel,
         Activation::Press(button)
         | Activation::Hold { button, .. }
-        | Activation::Drag { button, .. } => button,
+        | Activation::Drag { button, .. }
+        | Activation::Gesture { button, .. } => button,
     };
     if std::iter::once(&terminal)
         .chain(&spec.held)

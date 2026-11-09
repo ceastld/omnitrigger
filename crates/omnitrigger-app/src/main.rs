@@ -39,6 +39,7 @@ mod event_bridge;
 mod execution;
 mod explorer_context_helper;
 mod external_action;
+mod gesture_editor;
 mod legacy_load_gate;
 mod legacy_local_source;
 mod legacy_plugin_ui;
@@ -145,6 +146,7 @@ enum TriggerMode {
     Press,
     Hold,
     Drag,
+    Gesture,
 }
 
 impl TriggerMode {
@@ -152,6 +154,7 @@ impl TriggerMode {
         match activation {
             Activation::Hold { .. } => Self::Hold,
             Activation::Drag { .. } => Self::Drag,
+            Activation::Gesture { .. } => Self::Gesture,
             _ => Self::Press,
         }
     }
@@ -653,6 +656,7 @@ fn activation_label(spec: &TriggerSpec) -> String {
             max_start_ms,
             ..
         } => format!("快速拖拽 ≥{min_distance_px}px · <{max_start_ms}ms"),
+        Activation::Gesture { path, .. } => format!("手势 {path}，松开时触发"),
         Activation::Wheel(_) => match spec.wheel {
             omnitrigger_core::WheelPolicy::Notch => "滚轮一格即触发".into(),
             omnitrigger_core::WheelPolicy::Packet => "每个滚轮事件触发一次".into(),
@@ -713,6 +717,7 @@ struct Workspace {
     hold_duration: Entity<MessageInput>,
     drag_distance: Entity<MessageInput>,
     drag_window: Entity<MessageInput>,
+    gesture_draft: gesture_editor::GestureDraft,
     draft_action: ActionSpec,
     recording_for_panel: bool,
     recording_preserve_action: bool,
@@ -1080,6 +1085,10 @@ impl Workspace {
             input.set_text(window_ms.to_string(), cx);
             input
         });
+        let mut gesture_draft = gesture_editor::GestureDraft::default();
+        if let Some(Activation::Gesture { path, .. }) = initial_activation {
+            gesture_draft.load(path.steps());
+        }
         for input in [&hold_duration, &drag_distance, &drag_window] {
             cx.observe(input, |_, _, cx| cx.notify()).detach();
         }
@@ -1203,6 +1212,7 @@ impl Workspace {
             hold_duration,
             drag_distance,
             drag_window,
+            gesture_draft,
             draft_action,
             recording_for_panel: false,
             recording_preserve_action: false,
@@ -2223,6 +2233,10 @@ impl Workspace {
             .update(cx, |input, cx| input.set_text(distance.to_string(), cx));
         self.drag_window
             .update(cx, |input, cx| input.set_text(window_ms.to_string(), cx));
+        match spec.activation {
+            Activation::Gesture { path, .. } => self.gesture_draft.load(path.steps()),
+            _ => self.gesture_draft.load(&[]),
+        }
     }
 
     fn draft_spec(&self, base: &TriggerSpec, cx: &App) -> Result<TriggerSpec, String> {
@@ -2234,7 +2248,8 @@ impl Workspace {
         let button = match base.activation {
             Activation::Press(button)
             | Activation::Hold { button, .. }
-            | Activation::Drag { button, .. } => button,
+            | Activation::Drag { button, .. }
+            | Activation::Gesture { button, .. } => button,
             Activation::Wheel(_) => {
                 return Ok(TriggerSpec {
                     conditions: self.condition_editor.conditions(cx)?,
@@ -2283,6 +2298,15 @@ impl Workspace {
                 min_distance_px,
                 max_start_ms,
             }
+        } else if self.trigger_mode == TriggerMode::Gesture {
+            if !matches!(button, Button::Mouse(_)) {
+                return Err("手势仅适用于鼠标按键，请选择鼠标预设或重新录制。".into());
+            }
+            Activation::Gesture {
+                button,
+                path: omnitrigger_core::GesturePath::new(&self.gesture_draft.steps)
+                    .map_err(|error| error.to_string())?,
+            }
         } else {
             Activation::Press(button)
         };
@@ -2295,7 +2319,9 @@ impl Workspace {
 
     fn set_trigger_mode(&mut self, mode: TriggerMode, cx: &mut Context<Self>) {
         self.trigger_mode = mode;
-        if let Some(base) = self.pending.clone() {
+        // 尚未绘制手势时只切换编辑面板；保存时仍会报告缺少方向。
+        let awaiting_gesture = mode == TriggerMode::Gesture && self.gesture_draft.steps.is_empty();
+        if let Some(base) = self.pending.clone().filter(|_| !awaiting_gesture) {
             match self.draft_spec(&base, cx) {
                 Ok(spec) => {
                     self.conflict = self.triggers.check_candidate(&spec, None).err();
@@ -2952,6 +2978,10 @@ impl Workspace {
                         ..
                     }
                     | Activation::Drag {
+                        button: omnitrigger_core::Button::Mouse(_),
+                        ..
+                    }
+                    | Activation::Gesture {
                         button: omnitrigger_core::Button::Mouse(_),
                         ..
                     }
@@ -5967,6 +5997,8 @@ impl Workspace {
                             self.trigger_mode == TriggerMode::Press,
                         )
                         .flex_1()
+                        .min_w_0()
+                        .px(px(6.))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_trigger_mode(TriggerMode::Press, cx)
                         })),
@@ -5978,6 +6010,8 @@ impl Workspace {
                             self.trigger_mode == TriggerMode::Hold,
                         )
                         .flex_1()
+                        .min_w_0()
+                        .px(px(6.))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_trigger_mode(TriggerMode::Hold, cx)
                         })),
@@ -5989,11 +6023,29 @@ impl Workspace {
                             self.trigger_mode == TriggerMode::Drag,
                         )
                         .flex_1()
+                        .min_w_0()
+                        .px(px(6.))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_trigger_mode(TriggerMode::Drag, cx)
                         })),
+                    )
+                    .child(
+                        segment(
+                            "trigger-gesture",
+                            "手势",
+                            self.trigger_mode == TriggerMode::Gesture,
+                        )
+                        .flex_1()
+                        .min_w_0()
+                        .px(px(6.))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.set_trigger_mode(TriggerMode::Gesture, cx)
+                        })),
                     ),
             )
+            .when(self.trigger_mode == TriggerMode::Gesture, |el| {
+                el.child(self.gesture_fields(cx))
+            })
             .when(self.trigger_mode == TriggerMode::Drag, |el| {
                 el.child(Self::input_field(
                     "启动距离（物理像素）",

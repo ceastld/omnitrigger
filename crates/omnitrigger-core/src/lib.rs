@@ -34,6 +34,7 @@
 //! ```
 
 mod engine;
+mod gesture;
 mod model;
 mod mouse_dispatch_queue;
 mod mouse_modifier_snapshot;
@@ -45,6 +46,10 @@ mod scene;
 mod wheel_input;
 
 pub use engine::Engine;
+pub use gesture::{
+    GESTURE_MIN_STROKE_PX, GESTURE_START_MS, GESTURE_START_PX, GestureDirection, GesturePath,
+    GesturePathError, GestureReading, GestureTracker, MAX_GESTURE_STEPS,
+};
 pub use model::{
     Activation, ActiveDrag, Axis, Button, Decision, DragEvent, DragPhase, InputEvent, InputKind,
     KeyboardMatching, KeyboardPolicy, MouseButton, RetainedPrefix, TriggerSpec, WheelDirection,
@@ -76,6 +81,9 @@ pub use scene::{Scene, SceneConflict, SceneDimension};
 pub use wheel_input::{
     WheelInputAdmission, WheelInputNormalizer, WheelInputPolicy, WheelSessionSnapshot,
 };
+
+#[cfg(test)]
+mod gesture_tests;
 
 #[cfg(test)]
 mod prefix_tests;
