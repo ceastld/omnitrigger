@@ -2,7 +2,7 @@
 //!
 //! 只依据绑定本身和调用方给出的就绪状态计算，结果保持绑定顺序；界面只负责绘制。
 
-use omnitrigger_core::{Activation, Button, TriggerSpec};
+use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirection};
 
 use crate::settings::{ActionSpec, Binding};
 
@@ -92,6 +92,48 @@ pub struct Row {
     pub action: ActionKind,
     pub scope: ScopeKind,
     pub status: StatusKind,
+    /// 前缀中的键盘按键码。
+    pub held_keys: Vec<u16>,
+    /// 前缀中的鼠标按键。
+    pub held_mouse: Vec<MouseButton>,
+    pub terminal: Terminal,
+    /// 是否带指针区域条件，例如屏幕边缘。
+    pub has_region: bool,
+}
+
+/// 组合的目标输入。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Terminal {
+    Key(u16),
+    Mouse(MouseButton),
+    Wheel(WheelDirection),
+}
+
+impl Terminal {
+    pub fn of(spec: &TriggerSpec) -> Self {
+        match spec.activation {
+            Activation::Wheel(direction) => Self::Wheel(direction),
+            Activation::Press(button)
+            | Activation::Hold { button, .. }
+            | Activation::Drag { button, .. } => match button {
+                Button::Key(key) => Self::Key(key),
+                Button::Mouse(mouse) => Self::Mouse(mouse),
+            },
+        }
+    }
+}
+
+/// 拆分前缀中的键盘按键与鼠标按键。
+pub fn split_held(held: &[Button]) -> (Vec<u16>, Vec<MouseButton>) {
+    let mut keys = Vec::new();
+    let mut mouse = Vec::new();
+    for button in held {
+        match *button {
+            Button::Key(key) => keys.push(key),
+            Button::Mouse(button) => mouse.push(button),
+        }
+    }
+    (keys, mouse)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -355,6 +397,13 @@ pub fn facet_count(rows: &[Row], tokens: &[String], filter: &Filter, value: Face
         .count()
 }
 
+/// 通过搜索与筛选的摘要，保持绑定顺序。
+pub fn visible<'a>(rows: &'a [Row], tokens: &[String], filter: &Filter) -> Vec<&'a Row> {
+    rows.iter()
+        .filter(|row| matches_query(row, tokens) && filter.accepts(row, None))
+        .collect()
+}
+
 /// 筛选并分组；组按首次出现排列，组内保持绑定顺序。
 pub fn browse(rows: &[Row], tokens: &[String], filter: &Filter, group_by: GroupBy) -> Vec<Group> {
     let mut groups: Vec<Group> = Vec::new();
@@ -405,6 +454,10 @@ mod tests {
             action,
             scope: ScopeKind::Global,
             status,
+            held_keys: Vec::new(),
+            held_mouse: Vec::new(),
+            terminal: Terminal::Key(0x41),
+            has_region: false,
         }
     }
 

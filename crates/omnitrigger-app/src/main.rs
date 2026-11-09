@@ -81,6 +81,7 @@ mod system_hud;
 mod theme;
 mod trigger_browse;
 mod trigger_conditions;
+mod trigger_input_map;
 mod trigger_panel;
 mod update_ui;
 mod updater;
@@ -200,6 +201,14 @@ enum HistoryFilter {
 enum TriggerMenu {
     Facet(trigger_browse::Facet),
     Group,
+}
+
+/// 触发器页的浏览方式。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TriggerView {
+    List,
+    Keyboard,
+    Mouse,
 }
 
 /// 下拉中的一个选项。
@@ -579,6 +588,14 @@ struct Workspace {
     trigger_group: trigger_browse::GroupBy,
     trigger_collapsed: HashSet<String>,
     trigger_menu: Option<TriggerMenu>,
+    trigger_view: TriggerView,
+    /// 键盘视图选中的前缀层；`None` 为全部层。
+    trigger_layer: Option<String>,
+    /// 键盘视图选中的键位。
+    trigger_key: Option<u16>,
+    trigger_mouse: Option<trigger_input_map::MousePart>,
+    /// 键盘视图可用宽度（逻辑像素），由上一帧布局测得，用于让键盘随窗口缩放。
+    trigger_board_width: std::rc::Rc<std::cell::Cell<f32>>,
     package_input: Entity<MessageInput>,
     package_picker_for_draft: bool,
     action_service: omnitrigger_actions::ActionService,
@@ -1052,6 +1069,11 @@ impl Workspace {
             trigger_group: Default::default(),
             trigger_collapsed: HashSet::new(),
             trigger_menu: None,
+            trigger_view: TriggerView::List,
+            trigger_layer: None,
+            trigger_key: None,
+            trigger_mouse: None,
+            trigger_board_width: Default::default(),
             plugins,
             plugin_settings_error,
             browser_connector_ui,
@@ -4095,6 +4117,7 @@ impl Workspace {
                         text.push_str(&settings::process_scope_label(scope));
                     }
                 }
+                let (held_keys, held_mouse) = trigger_browse::split_held(&spec.held);
                 trigger_browse::Row {
                     id: spec.id,
                     text: text.to_lowercase(),
@@ -4107,6 +4130,10 @@ impl Workspace {
                     action,
                     scope: trigger_browse::scope_kind(spec),
                     status: trigger_browse::status_kind(binding, ready),
+                    held_keys,
+                    held_mouse,
+                    terminal: trigger_browse::Terminal::of(spec),
+                    has_region: !spec.conditions.is_empty(),
                 }
             })
             .collect()
@@ -4344,21 +4371,20 @@ impl Workspace {
                 )
             })
             .collect();
-        facets = facets
-            .child(div().flex_1())
-            .child(
-                div()
-                    .flex_none()
-                    .font_family(theme::MONO_FONT)
-                    .text_size(px(11.5))
-                    .text_color(rgb(theme::TEXT_FAINT))
-                    .child(format!(
-                        "{shown} / {} 条 · {enabled} 启用 · 本次 {}",
-                        rows.len(),
-                        thousands(self.trigger_count)
-                    )),
-            )
-            .child(self.trigger_dropdown(
+        facets = facets.child(div().flex_1()).child(
+            div()
+                .flex_none()
+                .font_family(theme::MONO_FONT)
+                .text_size(px(11.5))
+                .text_color(rgb(theme::TEXT_FAINT))
+                .child(format!(
+                    "{shown} / {} 条 · {enabled} 启用 · 本次 {}",
+                    rows.len(),
+                    thousands(self.trigger_count)
+                )),
+        );
+        if self.trigger_view == TriggerView::List {
+            facets = facets.child(self.trigger_dropdown(
                 TriggerMenu::Group,
                 self.trigger_group.label().to_string(),
                 false,
@@ -4366,11 +4392,33 @@ impl Workspace {
                 group_options,
                 cx,
             ));
+        }
+        let view = self.trigger_view;
+        let tab = |id: &'static str, label: &'static str, value: TriggerView| {
+            segment(id, label, view == value).on_click(cx.listener(move |this, _, _, cx| {
+                this.trigger_view = value;
+                this.trigger_menu = None;
+                cx.notify();
+            }))
+        };
         div()
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(search)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(search.flex_1().min_w_0())
+                    .child(
+                        theme::segments()
+                            .flex_none()
+                            .child(tab("trigger-view-list", "列表", TriggerView::List))
+                            .child(tab("trigger-view-keyboard", "键盘", TriggerView::Keyboard))
+                            .child(tab("trigger-view-mouse", "鼠标", TriggerView::Mouse)),
+                    ),
+            )
             .child(facets)
     }
 
@@ -4615,6 +4663,594 @@ impl Workspace {
             }))
     }
 
+    /// 按 id 取绑定并画成列表行。
+    fn trigger_rows_for(&self, ids: &[u64], cx: &mut Context<Self>) -> Vec<AnyElement> {
+        ids.iter()
+            .filter_map(|id| self.triggers.bindings().iter().find(|b| b.spec.id == *id))
+            .map(|binding| self.render_trigger_row(binding, cx).into_any_element())
+            .collect()
+    }
+
+    fn input_view_heading(title: String, count: usize) -> Div {
+        div()
+            .flex_none()
+            .pt(px(14.))
+            .pb(px(4.))
+            .px(px(4.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme::TEXT_MUTED))
+                    .child(title),
+            )
+            .child(
+                div()
+                    .font_family(theme::MONO_FONT)
+                    .text_size(px(11.))
+                    .text_color(rgb(theme::TEXT_FAINT))
+                    .child(count.to_string()),
+            )
+            .child(div().flex_1().h(px(1.)).bg(rgb(theme::DIVIDER)))
+    }
+
+    fn input_view_panel() -> Div {
+        div()
+            .flex_none()
+            .p(px(14.))
+            .rounded(px(10.))
+            .bg(rgb(theme::SIDEBAR))
+            .border_1()
+            .border_color(rgb(theme::DIVIDER))
+    }
+
+    /// 键盘视图：选择前缀层，键盘只标出按键，点击按键后在下方列出触发器。
+    fn render_keyboard_view(
+        &self,
+        visible: &[&trigger_browse::Row],
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        // 键宽按面板可用宽度计算；首帧尚未测得时用默认值。
+        let measured = self.trigger_board_width.get();
+        let unit = if measured > 0. {
+            (measured / trigger_input_map::KEYBOARD_WIDTH).clamp(22., 40.)
+        } else {
+            30.
+        };
+        let width = self.trigger_board_width.clone();
+        let probe = gpui::canvas(
+            move |bounds, window, _| {
+                let available = f32::from(bounds.size.width);
+                if (available - width.get()).abs() > 1. {
+                    width.set(available);
+                    window.refresh();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .w_full()
+        .h(px(0.));
+        let layers = trigger_input_map::key_layers(visible);
+        let layer = self
+            .trigger_layer
+            .as_deref()
+            .filter(|layer| layers.iter().any(|(name, _)| name == layer));
+        let view = trigger_input_map::keyboard_view(visible, layer, self.trigger_key);
+        let total: usize = layers.iter().map(|(_, count)| count).sum();
+
+        let chip = |id: u64, text: String, count: usize, active: bool| {
+            div()
+                .id(("trigger-layer", id))
+                .h(px(28.))
+                .px(px(10.))
+                .rounded(px(6.))
+                .border_1()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(12.))
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .when(active, |el| {
+                    el.bg(rgb(theme::RECORD_CAP))
+                        .border_color(rgb(theme::RECORD_LINE))
+                        .text_color(rgb(theme::RECORD))
+                })
+                .when(!active, |el| {
+                    el.bg(rgb(theme::SURFACE))
+                        .border_color(rgb(theme::BORDER))
+                        .text_color(rgb(theme::TEXT_MUTED))
+                        .hover(|style| style.border_color(rgb(theme::BORDER_HI)))
+                })
+                .child(text)
+                .child(
+                    div()
+                        .font_family(theme::MONO_FONT)
+                        .text_size(px(11.))
+                        .opacity(0.75)
+                        .child(count.to_string()),
+                )
+        };
+        let mut bar = div()
+            .flex_none()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.))
+            .pb(px(10.))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(theme::TEXT_FAINT))
+                    .child("按住"),
+            )
+            .child(
+                chip(0, "全部层".into(), total, layer.is_none()).on_click(cx.listener(
+                    |this, _, _, cx| {
+                        this.trigger_layer = None;
+                        this.trigger_key = None;
+                        cx.notify();
+                    },
+                )),
+            );
+        for (index, (name, count)) in layers.iter().enumerate() {
+            let name = name.to_string();
+            let text = if name.is_empty() {
+                "无前缀".to_string()
+            } else {
+                name.clone()
+            };
+            bar = bar.child(
+                chip(index as u64 + 1, text, *count, layer == Some(name.as_str())).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.trigger_layer = Some(name.clone());
+                        this.trigger_key = None;
+                        cx.notify();
+                    }),
+                ),
+            );
+        }
+
+        let mut board = div()
+            .relative()
+            .flex_none()
+            .w(px(unit * trigger_input_map::KEYBOARD_WIDTH))
+            .h(px(unit * trigger_input_map::KEYBOARD_HEIGHT));
+        for slot in trigger_input_map::KEYBOARD {
+            let vk = slot.vk;
+            let held = view.held.contains(&vk);
+            let bound = view.bound.contains(&vk);
+            let disabled_only = view.bound_disabled.contains(&vk);
+            let picked = self.trigger_key == Some(vk);
+            let (bg, border, text) = if held {
+                (
+                    rgb(theme::RECORD_CAP).into(),
+                    rgb(theme::RECORD_LINE).into(),
+                    theme::RECORD,
+                )
+            } else if bound && !disabled_only {
+                (
+                    hsla(theme::ACCENT, 0.3),
+                    hsla(theme::ACCENT, 0.6),
+                    theme::TEXT,
+                )
+            } else if bound {
+                (
+                    rgb(theme::SURFACE_HI).into(),
+                    rgb(theme::BORDER_HI).into(),
+                    theme::TEXT_MUTED,
+                )
+            } else {
+                (
+                    rgb(theme::KEYCAP).into(),
+                    rgb(theme::KEYCAP_EDGE).into(),
+                    theme::TEXT_FAINT,
+                )
+            };
+            board = board.child(
+                div()
+                    .id(("trigger-key", vk as u64))
+                    .absolute()
+                    .left(px(slot.x * unit))
+                    .top(px(slot.y * unit))
+                    .w(px(slot.w * unit - 3.))
+                    .h(px(unit - 3.))
+                    .rounded(px(5.))
+                    .bg(bg)
+                    .border_1()
+                    .border_b_2()
+                    .border_color(if picked {
+                        rgb(theme::ACCENT).into()
+                    } else {
+                        border
+                    })
+                    .when(picked, |el| el.border_2())
+                    .when(layer.is_some() && !held && !bound, |el| el.opacity(0.45))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .overflow_hidden()
+                    .font_family(theme::MONO_FONT)
+                    .text_size(px(if slot.label.len() > 3 {
+                        (unit * 0.3).min(11.)
+                    } else {
+                        (unit * 0.36).min(13.)
+                    }))
+                    .text_color(rgb(text))
+                    .when(held, |el| el.font_weight(FontWeight::SEMIBOLD))
+                    .child(slot.label)
+                    .when(bound, |el| {
+                        el.cursor_pointer()
+                            .hover(|style| style.border_color(rgb(theme::ACCENT)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.trigger_key = if this.trigger_key == Some(vk) {
+                                    None
+                                } else {
+                                    Some(vk)
+                                };
+                                cx.notify();
+                            }))
+                    }),
+            );
+        }
+        let legend = |color: gpui::Hsla, border: gpui::Hsla, text: &'static str| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .child(
+                    div()
+                        .size(px(11.))
+                        .rounded(px(3.))
+                        .bg(color)
+                        .border_1()
+                        .border_color(border),
+                )
+                .child(text)
+        };
+        let panel = Self::input_view_panel()
+            .id("trigger-keyboard")
+            .overflow_x_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(probe)
+            .child(board)
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(14.))
+                    .text_size(px(11.))
+                    .text_color(rgb(theme::TEXT_FAINT))
+                    .child(legend(
+                        rgb(theme::RECORD_CAP).into(),
+                        rgb(theme::RECORD_LINE).into(),
+                        "按住的前缀",
+                    ))
+                    .child(legend(
+                        hsla(theme::ACCENT, 0.3),
+                        hsla(theme::ACCENT, 0.6),
+                        "已绑定",
+                    ))
+                    .child(legend(
+                        rgb(theme::SURFACE_HI).into(),
+                        rgb(theme::BORDER_HI).into(),
+                        "仅有停用绑定",
+                    ))
+                    .child("点击已绑定的键查看触发器"),
+            );
+
+        let picked_label = self.trigger_key.and_then(|vk| {
+            trigger_input_map::KEYBOARD
+                .iter()
+                .find(|slot| slot.vk == vk)
+                .map(|slot| slot.label)
+        });
+        let title = match (picked_label, layer) {
+            (Some(key), _) => format!("目标键 {key}"),
+            (None, None) => "所有以键盘按键结尾的触发器".into(),
+            (None, Some("")) => "无前缀".into(),
+            (None, Some(layer)) => format!("按住 {layer} 时"),
+        };
+        let mut elements = vec![
+            bar.into_any_element(),
+            panel.into_any_element(),
+            Self::input_view_heading(title, view.ids.len()).into_any_element(),
+        ];
+        if view.off_layout > 0 && self.trigger_key.is_none() {
+            elements.push(
+                caption(format!(
+                    "其中 {} 条的目标键不在上方布局中，例如小键盘或媒体键。",
+                    view.off_layout
+                ))
+                .px(px(4.))
+                .pb(px(4.))
+                .into_any_element(),
+            );
+        }
+        elements.extend(self.trigger_rows_for(&view.ids, cx));
+        elements
+    }
+
+    /// 鼠标视图：标出各部位用作目标或前缀的条数，点击部位后在下方列出触发器。
+    fn render_mouse_view(
+        &self,
+        visible: &[&trigger_browse::Row],
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        use trigger_input_map::MousePart;
+        // 机身左上角与尺寸；其余坐标都相对整幅图。
+        const MX: f32 = 115.;
+        const MW: f32 = 170.;
+        let picked = self.trigger_mouse;
+        let count = |part| trigger_input_map::part_count(visible, part);
+        let select = |part: MousePart| {
+            cx.listener(move |this, _, _, cx| {
+                this.trigger_mouse = if this.trigger_mouse == Some(part) {
+                    None
+                } else {
+                    Some(part)
+                };
+                cx.notify();
+            })
+        };
+        let fill = |part: MousePart| -> gpui::Hsla {
+            match count(part).total() {
+                0 => rgb(theme::SURFACE_HI).into(),
+                n => hsla(theme::ACCENT, (0.16 + n as f32 * 0.06).min(0.5)),
+            }
+        };
+        let zone = |part: MousePart, id: u64| {
+            div()
+                .id(("mouse-part", id))
+                .absolute()
+                .bg(fill(part))
+                .border_1()
+                .border_color(if picked == Some(part) {
+                    rgb(theme::ACCENT).into()
+                } else {
+                    hsla(0xffffff, 0.06)
+                })
+                .when(picked == Some(part), |el| el.border_2())
+                .occlude()
+                .cursor_pointer()
+                .hover(|style| style.border_color(hsla(theme::ACCENT, 0.7)))
+                .on_click(select(part))
+        };
+        let wheel_fill = |part: MousePart| -> gpui::Hsla {
+            if count(part).total() > 0 {
+                hsla(theme::ACCENT, 0.55)
+            } else {
+                rgb(theme::BORDER_MID).into()
+            }
+        };
+        let mut drawing = div()
+            .relative()
+            .flex_none()
+            .w(px(410.))
+            .h(px(266.))
+            // 机身
+            .child(
+                div()
+                    .absolute()
+                    .left(px(MX))
+                    .top(px(0.))
+                    .w(px(MW))
+                    .h(px(262.))
+                    .bg(rgb(theme::KEYCAP_BASE))
+                    .border_1()
+                    .border_color(rgb(theme::BORDER_MID))
+                    .rounded_tl(px(84.))
+                    .rounded_tr(px(84.))
+                    .rounded_bl(px(76.))
+                    .rounded_br(px(76.))
+                    .shadow(theme::lift(0.35)),
+            )
+            .child(
+                zone(MousePart::Left, 0)
+                    .left(px(MX + 2.))
+                    .top(px(2.))
+                    .w(px(MW / 2. - 4.))
+                    .h(px(110.))
+                    .rounded_tl(px(82.))
+                    .rounded_tr(px(3.))
+                    .rounded_bl(px(3.))
+                    .rounded_br(px(3.)),
+            )
+            .child(
+                zone(MousePart::Right, 1)
+                    .left(px(MX + MW / 2. + 2.))
+                    .top(px(2.))
+                    .w(px(MW / 2. - 4.))
+                    .h(px(110.))
+                    .rounded_tr(px(82.))
+                    .rounded_tl(px(3.))
+                    .rounded_bl(px(3.))
+                    .rounded_br(px(3.)),
+            )
+            .child(
+                zone(MousePart::Middle, 2)
+                    .left(px(MX + MW / 2. - 14.))
+                    .top(px(22.))
+                    .w(px(28.))
+                    .h(px(66.))
+                    .rounded(px(14.))
+                    .when(count(MousePart::Middle).total() == 0, |el| {
+                        el.bg(rgb(theme::SIDEBAR))
+                    }),
+            )
+            .child(
+                zone(MousePart::WheelUp, 3)
+                    .left(px(MX + MW / 2. - 9.))
+                    .top(px(27.))
+                    .w(px(18.))
+                    .h(px(27.))
+                    .rounded_t(px(9.))
+                    .bg(wheel_fill(MousePart::WheelUp)),
+            )
+            .child(
+                zone(MousePart::WheelDown, 4)
+                    .left(px(MX + MW / 2. - 9.))
+                    .top(px(56.))
+                    .w(px(18.))
+                    .h(px(27.))
+                    .rounded_b(px(9.))
+                    .bg(wheel_fill(MousePart::WheelDown)),
+            )
+            .child(
+                zone(MousePart::X2, 5)
+                    .left(px(MX - 6.))
+                    .top(px(128.))
+                    .w(px(10.))
+                    .h(px(34.))
+                    .rounded(px(4.)),
+            )
+            .child(
+                zone(MousePart::X1, 6)
+                    .left(px(MX - 6.))
+                    .top(px(168.))
+                    .w(px(10.))
+                    .h(px(34.))
+                    .rounded(px(4.)),
+            );
+        // 引线标注：部位、标注所在 y、锚点 (x, y)、是否在左侧。
+        let callouts = [
+            (MousePart::Left, 56., (MX + 40., 56.), true),
+            (MousePart::X2, 145., (MX - 6., 145.), true),
+            (MousePart::X1, 185., (MX - 6., 185.), true),
+            (MousePart::Middle, 12., (MX + MW / 2., 22.), false),
+            (MousePart::WheelUp, 40., (MX + MW / 2. + 9., 40.), false),
+            (MousePart::WheelDown, 70., (MX + MW / 2. + 9., 70.), false),
+            (MousePart::Right, 100., (MX + 130., 100.), false),
+        ];
+        for (index, (part, y, (ax, ay), left)) in callouts.into_iter().enumerate() {
+            let n = count(part).total();
+            let active = picked == Some(part);
+            let line = if active {
+                rgb(theme::ACCENT).into()
+            } else if n > 0 {
+                hsla(theme::ACCENT, 0.45)
+            } else {
+                rgb(theme::BORDER_MID).into()
+            };
+            let (from, to) = if left { (96., ax) } else { (ax, 312.) };
+            drawing = drawing
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(from))
+                        .top(px(y))
+                        .w(px(to - from))
+                        .h(px(1.))
+                        .bg(line),
+                )
+                .when(ay != y, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .left(px(ax))
+                            .top(px(y.min(ay)))
+                            .w(px(1.))
+                            .h(px((ay - y).abs()))
+                            .bg(line),
+                    )
+                })
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(ax - 2.5))
+                        .top(px(ay - 2.5))
+                        .size(px(5.))
+                        .rounded(px(3.))
+                        .bg(line),
+                )
+                .child(
+                    div()
+                        .id(("mouse-callout", index as u64))
+                        .absolute()
+                        .top(px(y - 10.))
+                        .h(px(20.))
+                        .when(left, |el| el.left(px(0.)).w(px(92.)).justify_end())
+                        .when(!left, |el| el.left(px(316.)).w(px(94.)))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_size(px(12.))
+                        .whitespace_nowrap()
+                        .cursor_pointer()
+                        .text_color(rgb(if active {
+                            theme::ACCENT
+                        } else if n > 0 {
+                            theme::TEXT_SOFT
+                        } else {
+                            theme::TEXT_FAINT
+                        }))
+                        .child(part.label())
+                        .when(n > 0, |el| {
+                            el.child(
+                                div()
+                                    .font_family(theme::MONO_FONT)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme::ACCENT))
+                                    .child(n.to_string()),
+                            )
+                        })
+                        .on_click(select(part)),
+                );
+        }
+        // 图上没有位置的部位，有绑定时以按钮列出。
+        let mut extras = div().flex().flex_wrap().gap(px(6.));
+        for (index, part) in [MousePart::WheelSide, MousePart::Region]
+            .into_iter()
+            .enumerate()
+        {
+            let n = count(part).total();
+            if n == 0 && picked != Some(part) {
+                continue;
+            }
+            extras = extras.child(
+                segment(
+                    ("mouse-extra", index as u64),
+                    format!("{} {n}", part.label()),
+                    picked == Some(part),
+                )
+                .on_click(select(part)),
+            );
+        }
+        let panel = Self::input_view_panel()
+            .id("trigger-mouse")
+            .overflow_x_scroll()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(12.))
+            .child(drawing)
+            .child(extras);
+        let ids = trigger_input_map::mouse_ids(visible, picked);
+        let title = match picked {
+            Some(part) => {
+                let count = count(part);
+                format!(
+                    "{}：作目标 {} · 作前缀 {}",
+                    part.label(),
+                    count.terminal,
+                    count.prefix
+                )
+            }
+            None => "所有用到鼠标、滚轮或屏幕区域的触发器".into(),
+        };
+        let mut elements = vec![
+            panel.into_any_element(),
+            Self::input_view_heading(title, ids.len()).into_any_element(),
+        ];
+        elements.extend(self.trigger_rows_for(&ids, cx));
+        elements
+    }
+
     fn render_list(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let listening = self.listener() == Listener::Listening;
         let dim = matches!(self.listener(), Listener::Paused | Listener::Offline);
@@ -4633,21 +5269,41 @@ impl Workspace {
             .flex_col()
             .gap(px(2.))
             .when(dim, |el| el.opacity(0.6));
-        for (index, group) in groups.iter().enumerate() {
-            let collapse_key = format!("{:?}:{}", self.trigger_group, group.key);
-            let collapsed = grouped && self.trigger_collapsed.contains(&collapse_key);
-            if grouped {
-                rows =
-                    rows.child(self.render_group_header(index, group, collapse_key, collapsed, cx));
-            }
-            if collapsed {
-                continue;
-            }
-            for id in &group.ids {
-                if let Some(binding) = self.triggers.bindings().iter().find(|b| b.spec.id == *id) {
-                    rows = rows.child(self.render_trigger_row(binding, cx));
+        match self.trigger_view {
+            TriggerView::List => {
+                for (index, group) in groups.iter().enumerate() {
+                    let collapse_key = format!("{:?}:{}", self.trigger_group, group.key);
+                    let collapsed = grouped && self.trigger_collapsed.contains(&collapse_key);
+                    if grouped {
+                        rows = rows.child(self.render_group_header(
+                            index,
+                            group,
+                            collapse_key,
+                            collapsed,
+                            cx,
+                        ));
+                    }
+                    if collapsed {
+                        continue;
+                    }
+                    for id in &group.ids {
+                        if let Some(binding) =
+                            self.triggers.bindings().iter().find(|b| b.spec.id == *id)
+                        {
+                            rows = rows.child(self.render_trigger_row(binding, cx));
+                        }
+                    }
                 }
             }
+            TriggerView::Keyboard if shown > 0 => {
+                let visible = trigger_browse::visible(&summary, &tokens, &self.trigger_filter);
+                rows = rows.children(self.render_keyboard_view(&visible, cx));
+            }
+            TriggerView::Mouse if shown > 0 => {
+                let visible = trigger_browse::visible(&summary, &tokens, &self.trigger_filter);
+                rows = rows.children(self.render_mouse_view(&visible, cx));
+            }
+            _ => {}
         }
         if self.triggers.bindings().is_empty() {
             rows = rows.child(
