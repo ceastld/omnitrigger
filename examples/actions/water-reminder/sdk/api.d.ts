@@ -376,6 +376,9 @@ export interface ActionContext {
   desktop: {
     /** 本次原Explorer目标，最多32个完整文件系统路径；单条1024、总计8192 UTF-16，超量拒绝。空选区为[]；虚拟目录为null；虚拟选中项报错。不复制、不读剪贴板、不补当前目录。 */
     explorerContext(): Promise<ExplorerContextSnapshot>;
+    /** 显式请求目录前置条件后的选区provider失败证据；仍抛错，不返回假空快照。
+     * 新码selection_unavailable_after_directory由匹配Native证明；无隐式重试，成功形状不变。 */
+    explorerContext(options: {selectionFailureStage:true}): Promise<ExplorerContextSnapshot>;
     /** 原目标单选区；成功确认无选区/空文本时为 {text:"",truncated:false}，provider/目标/读取失败仍报错。默认 reject，显式 truncate 按请求上限取 UTF-16 前缀；拆开代理对拒绝。
      * maxUtf16Units 为1–8192整数，默认128；仅请求上限+1，helper采集及动作结果64KiB界限不变。 */
     readSelectionText(options?: {overflow?: 'reject' | 'truncate'; maxUtf16Units?: number}): Promise<SelectionTextSnapshot>;

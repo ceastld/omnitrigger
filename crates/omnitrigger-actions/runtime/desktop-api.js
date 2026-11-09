@@ -547,7 +547,18 @@ function capturedWindow(args, count, method, buildParams, validate=value=>value)
   function explorerContext(args) {
     const method = 'explorer.context';
     const fault = code => Object.assign(new Error('原资源管理器上下文读取未获确认；请检查错误代码。'), {code,method,effectState:'not_started'});
-    if (args.length !== 0) throw fault('invalid_input');
+    let selectionFailureStage = false;
+    if (args.length !== 0) {
+      try {
+        const options = args[0];
+        if (args.length !== 1 || !options || typeof options !== 'object' || Array.isArray(options)) throw new Error();
+        const keys = Reflect.ownKeys(options);
+        const descriptor = Object.getOwnPropertyDescriptor(options, 'selectionFailureStage');
+        if (keys.length !== 1 || keys[0] !== 'selectionFailureStage' || !descriptor
+            || !Object.hasOwn(descriptor, 'value') || descriptor.value !== true) throw new Error();
+        selectionFailureStage = true;
+      } catch (_) { throw fault('invalid_input'); }
+    }
     const validPath = path => {
       if (!dataText(path,1024,false) || /[\x00-\x1f<>"|?*]/.test(path)) return false;
       const local = /^[A-Za-z]:\\/.test(path) && !path.slice(2).includes(':');
@@ -563,9 +574,15 @@ function capturedWindow(args, count, method, buildParams, validate=value=>value)
           || new Set(value.selectedPaths.map(path => path.toLowerCase())).size !== value.selectedPaths.length) throw fault('invalid_response');
       return Object.freeze({currentDirectory:value.currentDirectory,selectedPaths:Object.freeze([...value.selectedPaths])});
     };
-    const failure = cause => {throw fault(typeof cause?.code === 'string' && /^[a-z_]{1,64}$/.test(cause.code) ? cause.code : 'native_bridge_failed');};
+    const failure = cause => {
+      if (selectionFailureStage && cause?.code === 'selection_unavailable_after_directory') {
+        // 只转交Native给出的证明错误；不把未知效果/缺失method升级为可复制证据。
+        throw Object.assign(fault('selection_unavailable_after_directory'), {method:cause.method,effectState:cause.effectState});
+      }
+      throw fault(typeof cause?.code === 'string' && /^[a-z_]{1,64}$/.test(cause.code) ? cause.code : 'native_bridge_failed');
+    };
     try {
-      const value = invoke(method,{});
+      const value = invoke(method,selectionFailureStage ? {selection_failure_stage:true} : {});
       return value && typeof value.then === 'function' ? value.then(result,failure) : result(value);
     } catch(cause) { return failure(cause); }
   }
