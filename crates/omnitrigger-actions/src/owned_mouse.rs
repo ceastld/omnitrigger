@@ -134,13 +134,19 @@ impl OwnedLeftSession {
             state.release_attempts = RELEASE_ATTEMPTS;
             // 回调异常/交付结果不确定时也保留义务；release_owned自行核对真实owner账本。
             if let Err(error) = self.backend.down_owned(self.owner, deadline, &cancelled) {
-                self.release(&mut state)?;
+                self.release(&mut state).map_err(|mut cleanup| {
+                    cleanup.method = Some(method.into());
+                    cleanup
+                })?;
                 return Err(fault(method, &error.code, true));
             }
             let after = Self::check(method, &cancelled, deadline)
                 .and_then(|_| self.backend.check_original_target());
             if let Err(error) = after {
-                self.release(&mut state)?;
+                self.release(&mut state).map_err(|mut cleanup| {
+                    cleanup.method = Some(method.into());
+                    cleanup
+                })?;
                 return Err(fault(method, &error.code, true));
             }
             Ok(json!({"submitted":true,"effectState":"unknown"}))

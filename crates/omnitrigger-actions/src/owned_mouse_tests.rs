@@ -264,3 +264,45 @@ fn a_confirmed_new_press_cycle_has_its_own_five_attempt_budget() {
     );
     assert_eq!(*backend.held.lock().unwrap(), None);
 }
+
+// Down内部清理失败必须按Down应答；finish主动清理仍属于Up，严格桥接无需放宽。
+fn assert_owned_down_cleanup_error_method(down_error: bool) {
+    let backend = Arc::new(Backend::default());
+    backend
+        .down_error_after_delivery
+        .store(down_error, Ordering::Relaxed);
+    backend.failed_ups.store(100, Ordering::Relaxed);
+    let input = session(&backend);
+    let checks = AtomicUsize::new(0);
+    let error = input
+        .call_if(
+            DOWN,
+            json!({}),
+            Instant::now() + std::time::Duration::from_secs(1),
+            || checks.fetch_add(1, Ordering::Relaxed) != 0,
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "input_cleanup_failed");
+    assert_eq!(error.method.as_deref(), Some(DOWN));
+    assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+    let cleanup = input.finish().unwrap_err();
+    assert_eq!(cleanup.code, "input_cleanup_failed");
+    assert_eq!(cleanup.method.as_deref(), Some(UP));
+    assert_eq!(cleanup.effect_state.as_deref(), Some("unknown"));
+    drop(input);
+    let events = backend.events.lock().unwrap();
+    assert_eq!(
+        events.iter().filter(|e| **e == "mouse-left-down").count(),
+        1
+    );
+    assert_eq!(events.iter().filter(|e| **e == "mouse-left-up").count(), 5);
+    assert!(backend.held.lock().unwrap().is_some());
+}
+#[test]
+fn owned_down_backend_error_cleanup_failure_keeps_down_response_method() {
+    assert_owned_down_cleanup_error_method(true);
+}
+#[test]
+fn owned_down_post_delivery_guard_cleanup_failure_keeps_down_response_method() {
+    assert_owned_down_cleanup_error_method(false);
+}
