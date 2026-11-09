@@ -76,3 +76,48 @@ test('业务复用入口保留原业务体，不替文件菜单写后置角标',
   assert.equal(result.status,'accepted');assert.equal(result.commandEffectState,'accepted_only');
   assert.deepEqual(calls.map(x=>x.method),['target.context','process.capture']);
 });
+
+// CLI位置LINE：仅内存录制端口，不能启动CLI/Host，也不扩大目标协议。
+for(const [name,entry] of [['main',main],['runBusiness',runBusiness]]) {
+  test('CLI位置LINE '+name+'：选项形式在目标、进程及角标调用前拒绝',()=>{
+    const options=['--help','-h','--version','-V','--json','--host','--no-start','--expected-data-root','--test-data-root','--target-context','--timeout-ms','-','--','--unknown','--help\n','--host C:\\Synthetic\\other.exe'];
+    for(const profile of ['product','script-test'])for(const value of options){
+      const {ctx,calls}=setup();ctx.input.profile=profile;ctx.input.actionParameter.value=value;
+      assert.throws(()=>entry(ctx),error=>{
+        const d=detail(error);
+        assert.equal(error.code,'n10_not_started');assert.equal(error.method,'cliphost.runVerbWithTargetV1');assert.equal(error.effectState,'not_started');
+        assert.equal(d.phase,'business');assert.equal(d.causeCode,'unsupported_command_line');assert.equal(d.submitted,false);
+        assert.equal(d.commandEffectState,'not_started');assert.equal(d.retryAllowed,false);return true;
+      });
+      assert.deepEqual(calls,[]);
+    }
+  });
+  test('CLI位置LINE '+name+'：保留原LINE、两种根及五字段原期限',()=>{
+    const originalNow=Date.now;const now=1700000000000;Date.now=()=>now;
+    try{
+      const lines=['clip show --focus-search','menu file -f "C:\\Synthetic\\A 空格 😀.txt;C:\\Synthetic\\B.txt"\n',' --help','\t--version','－help','—help'];
+      for(const profile of ['product','script-test'])for(const line of lines){
+        const target={window_handle:'9007199254740993',process_id:202,thread_id:303,process_created_file_time:'18446744073709551615',expires_at_unix_ms:now+500};
+        const options={...structuredClone(input),profile,actionParameter:{present:true,value:line}};const calls=[];
+        const host=(method,raw)=>{
+          const params=plain(raw);calls.push({method,params});
+          if(method==='target.context'){assert.deepEqual(params,{});return target;}
+          if(method==='process.capture'){
+            assert.deepEqual(params,{program:options.cliExecutable,args:['verb',line,'--json','--host',options.hostExecutable,'--no-start',
+              profile==='script-test'?'--test-data-root':'--expected-data-root',options.dataRoot,'--target-context',JSON.stringify(target),'--timeout-ms','500'],
+              timeout_ms:1500,allow_non_zero:true});
+            return {code:0,stderr:'',stdout:JSON.stringify({ok:true,state:'accepted',result:{started:false,targetContextVersion:1,targetContextVerified:true,
+              executable:options.hostExecutable,dataRoot:options.dataRoot,testProfile:profile==='script-test',captureEnabled:false}})};
+          }
+          assert.equal(method,'ui.action_hint');assert.deepEqual(params,{text:'n10',placement:'topRight'});return {updated:true};
+        };
+        const api=factories.createDesktopApi(host);
+        const ctx={input:options,desktop:api.desktop,process:factories.createProcessCaptureApi(params=>host('process.capture',params)),ui:api.ui};
+        const result=entry(ctx);
+        assert.equal(result.status,'accepted');assert.equal(result.commandEffectState,'accepted_only');assert.equal(result.uiRendered,false);assert.equal(result.retryAllowed,false);
+        assert.deepEqual(calls.map(x=>x.method),name==='main'?['target.context','process.capture','ui.action_hint']:['target.context','process.capture']);
+        assert.equal(calls[1].params.args[1],line);assert.equal(calls[1].params.args[9],JSON.stringify(target));assert.equal(target.expires_at_unix_ms,now+500);
+      }
+    }finally{Date.now=originalNow;}
+  });
+}
