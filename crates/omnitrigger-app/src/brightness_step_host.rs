@@ -133,9 +133,10 @@ fn execute_with_clock(
     if let Some(reason) = control.reason() {
         let mut error = fault(reason, effect());
         if effect() == "unknown" {
-            error.brightness_receipt =
-                Some(json!({"strategy":args.strategy,"effectState":effect(),
-                "physical":physical_result.map(physical),"wmi":wmi_result.map(wmi)}));
+            error.brightness_receipt = Some(Box::new(
+                json!({"strategy":args.strategy,"effectState":effect(),
+                "physical":physical_result.map(physical),"wmi":wmi_result.map(wmi)}),
+            ));
         }
         return Err(error);
     }

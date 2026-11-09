@@ -761,7 +761,10 @@ fn parse_response_with_stage(
                 && matches!(code, "cancelled" | "timeout")
                 && effect == "unknown"
             {
-                error.brightness_receipt = response["error"].get("brightness_receipt").cloned();
+                error.brightness_receipt = response["error"]
+                    .get("brightness_receipt")
+                    .cloned()
+                    .map(Box::new);
             }
             if !matches!(
                 method,
@@ -1288,7 +1291,7 @@ mod tests {
                 "effect_state":"unknown","brightness_receipt":receipt}})
             );
             let error = parse_response(frame.as_bytes(), 1, "display.brightness_step").unwrap_err();
-            assert_eq!(error.brightness_receipt, Some(receipt));
+            assert_eq!(error.brightness_receipt, Some(Box::new(receipt)));
             assert_eq!(error.effect_state.as_deref(), Some("unknown"));
             assert!(!error.message.contains("PRIVATE"));
         }

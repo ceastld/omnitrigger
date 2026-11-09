@@ -93,14 +93,14 @@ pub struct ActionError {
     pub code: String,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effect_state: Option<String>,
+    pub effect_state: Option<Box<str>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_permissions: Vec<String>,
     /// 仅亮度取消/超时的匿名进度；不表示可以重试。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub brightness_receipt: Option<serde_json::Value>,
+    pub brightness_receipt: Option<Box<serde_json::Value>>,
 }
 
 impl ActionError {

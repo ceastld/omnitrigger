@@ -960,7 +960,7 @@ mod window_bridge_tests {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 let mut error = ActionError::new(self.code, "private-input private-host-body");
                 error.method = self.method.map(str::to_owned);
-                error.effect_state = self.effect.map(str::to_owned);
+                error.effect_state = self.effect.map(Into::into);
                 Err(error)
             }
         }
@@ -1224,7 +1224,7 @@ mod class_rejection_bridge_tests {
             for effect in [Some("not_started"), Some("unknown"), None] {
                 let mut error = ActionError::new("window_class_blocked", "same");
                 error.method = method.map(str::to_owned);
-                error.effect_state = effect.map(str::to_owned);
+                error.effect_state = effect.map(Into::into);
                 assert!(preserve_class_rejection("window.geometry", &mut error));
                 let valid = method == Some("window.geometry") && effect.is_some();
                 assert_eq!(
@@ -1254,7 +1254,7 @@ mod class_rejection_bridge_tests {
         fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
             let mut e = ActionError::new("window_class_blocked", "same");
             e.method = self.method.map(str::to_owned);
-            e.effect_state = self.effect.map(str::to_owned);
+            e.effect_state = self.effect.map(Into::into);
             Err(e)
         }
     }

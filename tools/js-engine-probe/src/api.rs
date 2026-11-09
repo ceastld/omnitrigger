@@ -41,13 +41,13 @@ pub struct ApiError {
     pub(crate) code: String,
     pub(crate) message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) effect_state: Option<String>,
+    pub(crate) effect_state: Option<Box<str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) method: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) required_permissions: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) brightness_receipt: Option<Value>,
+    pub(crate) brightness_receipt: Option<Box<Value>>,
 }
 
 fn error(code: &'static str, message: impl ToString) -> ApiError {

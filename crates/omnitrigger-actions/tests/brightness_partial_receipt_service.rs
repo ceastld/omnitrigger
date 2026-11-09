@@ -159,7 +159,7 @@ impl NativeHost for SyntheticBrightness {
         error.method = Some(METHOD.into());
         error.effect_state = Some("unknown".into());
         if self.with_receipt {
-            error.brightness_receipt = Some(receipt());
+            error.brightness_receipt = Some(Box::new(receipt()));
         }
         Err(error)
     }
@@ -220,7 +220,10 @@ fn assert_error(error: &ActionError, code: &str, with_receipt: bool) {
     assert_eq!(error.method.as_deref(), Some(METHOD));
     assert_eq!(error.effect_state.as_deref(), Some("unknown"));
     assert!(!error.message.contains(PRIVATE));
-    assert_eq!(error.brightness_receipt, with_receipt.then(receipt));
+    assert_eq!(
+        error.brightness_receipt,
+        with_receipt.then(|| Box::new(receipt()))
+    );
 }
 
 fn run(engine: Engine) {

@@ -426,7 +426,7 @@ pub(super) fn script_endpoint(config: &Path) -> Result<String, omnitrigger_actio
     {
         connector_endpoint(config).map_err(|fault| {
             let mut error = omnitrigger_actions::ActionError::new(fault.code, fault.message);
-            error.effect_state = fault.effect_state;
+            error.effect_state = fault.effect_state.map(Into::into);
             error
         })
     }
