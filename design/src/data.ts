@@ -88,6 +88,8 @@ export interface Group {
   label: string;
   rows: Row[];
   disabled: number;
+  /** 按前缀分组时，与紧邻的上层前缀组共有的键数；导航里这部分淡色显示。 */
+  inherited: number;
 }
 
 export function browse(rows: Row[], words: string[], filter: Filter, groupBy: GroupKey): Group[] {
@@ -103,13 +105,34 @@ export function browse(rows: Row[], words: string[], filter: Filter, groupBy: Gr
           : [row.facets[groupBy], row.facets[groupBy]];
     let group = groups.find((candidate) => candidate.key === key);
     if (!group) {
-      group = { key, label, rows: [], disabled: 0 };
+      group = { key, label, rows: [], disabled: 0, inherited: 0 };
       groups.push(group);
     }
     group.rows.push(row);
     if (row.facets.status === DISABLED) group.disabled += 1;
   }
-  return groups;
+  return groupBy === "prefix" ? prefixOrder(groups) : groups;
+}
+
+/** 与应用一致：延长的前缀组排在最长的上层前缀组之后，其余保持首次出现的顺序。 */
+function prefixOrder(groups: Group[]): Group[] {
+  const paths = groups.map((group) => group.rows[0].caps.filter((cap) => cap.prefix).map((cap) => cap.label));
+  const extends_ = (path: string[], head: string[]) =>
+    head.length > 0 && head.length < path.length && head.every((label, index) => path[index] === label);
+  const parent = paths.map((path) => {
+    let best = -1;
+    paths.forEach((head, index) => {
+      if (extends_(path, head) && (best < 0 || head.length > paths[best].length)) best = index;
+    });
+    return best;
+  });
+  const out: Group[] = [];
+  const visit = (index: number) => {
+    out.push({ ...groups[index], inherited: parent[index] < 0 ? 0 : paths[parent[index]].length });
+    parent.forEach((above, child) => above === index && visit(child));
+  };
+  parent.forEach((above, index) => above < 0 && visit(index));
+  return out;
 }
 
 /** 以键盘按键结尾的前缀层，按首次出现排列；空名称表示无前缀。 */

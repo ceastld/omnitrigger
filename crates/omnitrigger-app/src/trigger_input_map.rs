@@ -325,6 +325,7 @@ mod tests {
             id,
             text: String::new(),
             prefix: prefix.into(),
+            prefix_keys: Vec::new(),
             input: InputKind::Keyboard,
             action: ActionKind::Notification,
             scope: ScopeKind::Global,

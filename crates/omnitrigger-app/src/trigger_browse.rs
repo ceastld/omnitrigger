@@ -88,6 +88,8 @@ pub struct Row {
     pub text: String,
     /// 前缀层名称；没有前缀时为空。
     pub prefix: String,
+    /// 前缀中各键的名称，用来判断一个前缀是否由另一个延长而来。
+    pub prefix_keys: Vec<String>,
     pub input: InputKind,
     pub action: ActionKind,
     pub scope: ScopeKind,
@@ -143,6 +145,8 @@ pub struct Group {
     pub label: String,
     pub ids: Vec<u64>,
     pub disabled: usize,
+    /// 按前缀分组时，与紧邻的上层前缀组共有的键数；导航里这部分淡色显示。
+    pub inherited: usize,
 }
 
 impl InputKind {
@@ -427,6 +431,7 @@ pub fn browse(rows: &[Row], tokens: &[String], filter: &Filter, group_by: GroupB
                     label,
                     ids: Vec::new(),
                     disabled: 0,
+                    inherited: 0,
                 });
                 groups.len() - 1
             }
@@ -437,22 +442,33 @@ pub fn browse(rows: &[Row], tokens: &[String], filter: &Filter, group_by: GroupB
             group.disabled += 1;
         }
     }
+    if group_by == GroupBy::Prefix {
+        let paths: Vec<Vec<String>> = groups
+            .iter()
+            .map(|group| {
+                let id = group.ids[0];
+                rows.iter()
+                    .find(|row| row.id == id)
+                    .map(|row| row.prefix_keys.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        let mut slots: Vec<Option<Group>> = groups.into_iter().map(Some).collect();
+        groups = prefix_order(&paths)
+            .into_iter()
+            .filter_map(|(index, inherited)| {
+                slots[index]
+                    .take()
+                    .map(|group| Group { inherited, ..group })
+            })
+            .collect();
+    }
     groups
 }
 
-/// 分组导航中的一项。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NavEntry {
-    /// 在 `browse` 结果中的下标。
-    pub group: usize,
-    pub depth: usize,
-    /// 沿用上层的前缀键数；这部分在导航里淡色显示。
-    pub inherited: usize,
-}
-
-/// 前缀是另一组前缀延长的组挂到最长的那一组下面，按树的先序排列，同层保持原顺序。
-/// `paths` 为各组的前缀键名，非前缀分组传空。
-pub fn nest(paths: &[Vec<String>]) -> Vec<NavEntry> {
+/// 延长的前缀组排在它的上层前缀组之后（取最长的上层），其余保持首次出现的顺序。
+/// 返回各组的新顺序，以及与上层共有的键数。
+fn prefix_order(paths: &[Vec<String>]) -> Vec<(usize, usize)> {
     let parent: Vec<Option<usize>> = paths
         .iter()
         .map(|path| {
@@ -466,23 +482,18 @@ pub fn nest(paths: &[Vec<String>]) -> Vec<NavEntry> {
         .collect();
     fn visit(
         index: usize,
-        depth: usize,
         paths: &[Vec<String>],
         parent: &[Option<usize>],
-        out: &mut Vec<NavEntry>,
+        out: &mut Vec<(usize, usize)>,
     ) {
-        out.push(NavEntry {
-            group: index,
-            depth,
-            inherited: parent[index].map_or(0, |above| paths[above].len()),
-        });
+        out.push((index, parent[index].map_or(0, |above| paths[above].len())));
         for child in (0..paths.len()).filter(|&child| parent[child] == Some(index)) {
-            visit(child, depth + 1, paths, parent, out);
+            visit(child, paths, parent, out);
         }
     }
     let mut out = Vec::with_capacity(paths.len());
     for root in (0..paths.len()).filter(|&index| parent[index].is_none()) {
-        visit(root, 0, paths, &parent, &mut out);
+        visit(root, paths, &parent, &mut out);
     }
     out
 }
@@ -490,7 +501,7 @@ pub fn nest(paths: &[Vec<String>]) -> Vec<NavEntry> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn nav_nests_extended_prefixes_under_the_longest_shorter_one() {
+    fn extended_prefixes_follow_the_longest_shorter_one() {
         let path = |keys: &[&str]| keys.iter().map(|key| key.to_string()).collect::<Vec<_>>();
         let paths = vec![
             path(&["CapsLock"]),
@@ -501,28 +512,34 @@ mod tests {
             path(&["Space"]),
             path(&["左 Ctrl", "左 Alt", "左 Shift"]),
         ];
-        let entry = |group, depth, inherited| NavEntry {
-            group,
-            depth,
-            inherited,
-        };
         assert_eq!(
-            nest(&paths),
-            vec![
-                entry(0, 0, 0),
-                entry(1, 0, 0),
-                entry(4, 0, 0),
-                entry(2, 1, 1),
-                entry(6, 2, 2),
-                entry(5, 0, 0),
-                entry(3, 1, 1),
-            ]
+            prefix_order(&paths),
+            vec![(0, 0), (1, 0), (4, 0), (2, 1), (6, 2), (5, 0), (3, 1)]
         );
-        // 非前缀分组没有层级。
-        assert_eq!(
-            nest(&[vec![], vec![]]),
-            vec![entry(0, 0, 0), entry(1, 0, 0)]
-        );
+        // 非前缀分组保持原顺序。
+        assert_eq!(prefix_order(&[vec![], vec![]]), vec![(0, 0), (1, 0)]);
+    }
+
+    #[test]
+    fn prefix_groups_are_listed_in_the_same_order_as_the_nav() {
+        let mut rows = vec![
+            row(
+                1,
+                "a",
+                "Space + G",
+                ActionKind::Shortcut,
+                StatusKind::Enabled,
+            ),
+            row(2, "b", "Caps", ActionKind::Shortcut, StatusKind::Enabled),
+            row(3, "c", "Space", ActionKind::Shortcut, StatusKind::Enabled),
+        ];
+        rows[0].prefix_keys = vec!["Space".into(), "G".into()];
+        let groups = browse(&rows, &[], &Filter::default(), GroupBy::Prefix);
+        let order: Vec<_> = groups
+            .iter()
+            .map(|group| (group.key.as_str(), group.inherited))
+            .collect();
+        assert_eq!(order, vec![("Caps", 0), ("Space", 0), ("Space + G", 1)]);
     }
 
     use super::*;
@@ -533,6 +550,11 @@ mod tests {
             id,
             text: text.to_lowercase(),
             prefix: prefix.into(),
+            prefix_keys: prefix
+                .split(" + ")
+                .filter(|key| !key.is_empty())
+                .map(Into::into)
+                .collect(),
             input: InputKind::Keyboard,
             action,
             scope: ScopeKind::Global,

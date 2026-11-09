@@ -524,14 +524,15 @@ fn browse_row(binding: &settings::Binding, ready: bool) -> trigger_browse::Row {
         }
     }
     let (held_keys, held_mouse) = trigger_browse::split_held(&spec.held);
+    let prefix_keys: Vec<String> = prefix_caps(spec)
+        .iter()
+        .map(|cap| cap.label.to_string())
+        .collect();
     trigger_browse::Row {
         id: spec.id,
         text: text.to_lowercase(),
-        prefix: prefix_caps(spec)
-            .iter()
-            .map(|cap| cap.label.as_ref())
-            .collect::<Vec<_>>()
-            .join(" + "),
+        prefix: prefix_keys.join(" + "),
+        prefix_keys,
         input: trigger_browse::input_kind(spec),
         action,
         scope: trigger_browse::scope_kind(spec),
@@ -4740,32 +4741,13 @@ impl Workspace {
             }))
     }
 
-    /// 列表左侧的分组导航；按前缀分组时，延长的前缀缩进在上层前缀之下。
+    /// 列表左侧的分组导航，顺序与列表一致。
     fn render_group_nav(
         &self,
         groups: &[trigger_browse::Group],
         headers: &[usize],
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let paths: Vec<Vec<String>> = groups
-            .iter()
-            .map(|group| {
-                if self.trigger_group != trigger_browse::GroupBy::Prefix || group.key.is_empty() {
-                    return Vec::new();
-                }
-                group
-                    .ids
-                    .first()
-                    .and_then(|id| self.triggers.bindings().iter().find(|b| b.spec.id == *id))
-                    .map(|binding| {
-                        prefix_caps(&binding.spec)
-                            .into_iter()
-                            .map(|cap| cap.label.to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            })
-            .collect();
         let keys: Vec<String> = groups
             .iter()
             .map(|group| format!("{:?}:{}", self.trigger_group, group.key))
@@ -4802,30 +4784,30 @@ impl Workspace {
                     .text_color(rgb(theme::TEXT_FAINT))
                     .child("分组"),
             );
-        for entry in trigger_browse::nest(&paths) {
-            let group = &groups[entry.group];
-            let path = &paths[entry.group];
-            let (lead, rest) = if path.is_empty() {
-                (String::new(), group.label.clone())
+        for (index, group) in groups.iter().enumerate() {
+            // 紧跟上层前缀组时，共有的键淡色显示，突出新增的键。
+            let (lead, rest) = if group.inherited > 0 {
+                let mut keys = group.label.splitn(group.inherited + 1, " + ");
+                let lead: String = keys
+                    .by_ref()
+                    .take(group.inherited)
+                    .map(|key| format!("{key} + "))
+                    .collect();
+                (lead, keys.next().unwrap_or_default().to_string())
             } else {
-                let lead = path[..entry.inherited]
-                    .iter()
-                    .map(|label| format!("{label} + "))
-                    .collect::<String>();
-                (lead, path[entry.inherited..].join(" + "))
+                (String::new(), group.label.clone())
             };
-            let active = entry.group == current;
+            let active = index == current;
             let all_disabled = group.disabled == group.ids.len();
-            let key = keys[entry.group].clone();
-            let header = headers.get(entry.group).copied().unwrap_or(0);
+            let key = keys[index].clone();
+            let header = headers.get(index).copied().unwrap_or(0);
             nav = nav.child(
                 div()
-                    .id(("trigger-nav-item", entry.group))
+                    .id(("trigger-nav-item", index))
                     .flex_none()
                     .relative()
                     .h(px(30.))
-                    .pl(px(10. + entry.depth as f32 * 14.))
-                    .pr(px(10.))
+                    .px(px(10.))
                     .rounded(px(6.))
                     .flex()
                     .items_center()
