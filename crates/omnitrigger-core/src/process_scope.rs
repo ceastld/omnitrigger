@@ -61,6 +61,31 @@ impl fmt::Display for ProcessScopeError {
 }
 impl std::error::Error for ProcessScopeError {}
 
+/// 两个范围不能合并为单个范围的原因。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScopeIntersectionError {
+    /// 两侧都有限制但匹配域不同，单个范围无法同时表达。
+    IdentityMismatch,
+    /// 两侧白名单都非空且没有共同名称，合并后永远不会命中。
+    DisjointAllow,
+}
+
+impl fmt::Display for ScopeIntersectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::IdentityMismatch => "两者的匹配域（进程名／窗口上下文）不同",
+            Self::DisjointAllow => "两者的应用白名单没有共同名称",
+        })
+    }
+}
+impl std::error::Error for ScopeIntersectionError {}
+
+/// 进程名的规范形式：小写并去掉可选的 `.exe`；名称无效时返回 `None`。
+/// 与范围校验共用同一规则，供配置层判断重复名称。
+pub fn canonical_process_name(name: &str) -> Option<String> {
+    normalize_name(name)
+}
+
 pub(crate) fn normalize_name(name: &str) -> Option<String> {
     if name.is_empty()
         || name.len() > 260
@@ -81,6 +106,56 @@ pub(crate) fn normalize_name(name: &str) -> Option<String> {
 impl ProcessScope {
     pub fn is_global(&self) -> bool {
         self.allow.is_empty() && self.deny.is_empty()
+    }
+
+    /// 按注册时的规则校验名单，不修改自身；用于尚未被绑定使用的定义。
+    pub fn validate(&self) -> Result<(), ProcessScopeError> {
+        self.clone().normalize()
+    }
+
+    /// 同时满足两个范围的单个范围：白名单取交集（一侧为空时沿用另一侧），黑名单取并集。
+    /// 全局范围不限制，合并时直接返回另一侧。名称按规范形式比较并保留左侧写法；
+    /// 无效名称留给 [`Self::validate`] 报错。
+    pub fn intersect(&self, other: &Self) -> Result<Self, ScopeIntersectionError> {
+        if other.is_global() {
+            return Ok(self.clone());
+        }
+        if self.is_global() {
+            return Ok(other.clone());
+        }
+        if self.identity != other.identity {
+            return Err(ScopeIntersectionError::IdentityMismatch);
+        }
+        let key = |name: &String| normalize_name(name).unwrap_or_else(|| name.clone());
+        let allow = if other.allow.is_empty() {
+            self.allow.clone()
+        } else if self.allow.is_empty() {
+            other.allow.clone()
+        } else {
+            let theirs: BTreeSet<String> = other.allow.iter().map(key).collect();
+            let both: Vec<String> = self
+                .allow
+                .iter()
+                .filter(|name| theirs.contains(&key(name)))
+                .cloned()
+                .collect();
+            if both.is_empty() {
+                return Err(ScopeIntersectionError::DisjointAllow);
+            }
+            both
+        };
+        let mut deny = self.deny.clone();
+        let mut seen: BTreeSet<String> = deny.iter().map(key).collect();
+        for name in &other.deny {
+            if seen.insert(key(name)) {
+                deny.push(name.clone());
+            }
+        }
+        Ok(Self {
+            identity: self.identity,
+            allow,
+            deny,
+        })
     }
 
     pub(crate) fn priority(&self) -> u8 {

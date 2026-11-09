@@ -21,7 +21,7 @@ OmniTrigger 的绑定、插件与轮盘配置都保存在本机 JSON 文件中�
 
 浏览器连接器的本机状态独立保存在配置同级 `browser-connector.json`，版本程序位于 `plugins/browser-connector/runtime/0.1.0`。用户点击安装后，本机注册与启动自动完成，这些内部文件无需手工编辑。实现细节见[浏览器连接器](BROWSER_EXTENSION.md)。
 
-`bindings.json` 读取兼容版本 1–23，保存使用版本 23；首次保存旧配置前创建 `bindings.json.v<旧版本>.bak` 备份，备份失败不会覆盖原配置。版本 8 增加 `invoke` 动作引用，版本 9 增加 `browser` 浏览器动作，版本 10 增加 `process_scope`，版本 11 增加 `keyboard` 专用层与重复策略，版本 12 增加显式捕获集合匹配，版本 13 增加快捷键按下时序，版本 14 增加保留原功能的键盘层，版本 15 增加显式窗口上下文范围，版本 16 增加逐事件滚轮策略，版本 17 增加独立指针窗口范围，版本 18 增加鼠标修饰键观察匹配，版本 19 增加显示器单像素边界，版本 20 增加鼠标匹配顺序，版本 21 增加鼠标捕获会话引用，版本 22 增加无 Ctrl/Shift/Alt 的鼠标透传观察，版本 23 增加逐事件修饰快照。回退旧程序时需恢复对应备份。
+`bindings.json` 读取兼容版本 1–24，保存使用版本 24；首次保存旧配置前创建 `bindings.json.v<旧版本>.bak` 备份，备份失败不会覆盖原配置。版本 8 增加 `invoke` 动作引用，版本 9 增加 `browser` 浏览器动作，版本 10 增加 `process_scope`，版本 11 增加 `keyboard` 专用层与重复策略，版本 12 增加显式捕获集合匹配，版本 13 增加快捷键按下时序，版本 14 增加保留原功能的键盘层，版本 15 增加显式窗口上下文范围，版本 16 增加逐事件滚轮策略，版本 17 增加独立指针窗口范围，版本 18 增加鼠标修饰键观察匹配，版本 19 增加显示器单像素边界，版本 20 增加鼠标匹配顺序，版本 21 增加鼠标捕获会话引用，版本 22 增加无 Ctrl/Shift/Alt 的鼠标透传观察，版本 23 增加逐事件修饰快照，版本 24 增加命名应用集合与场景。回退旧程序时需恢复对应备份。
 
 版本 23 的 `keyboard.matching.kind=mouse_sampled` 只支持空 `held` 的鼠标按下或滚轮。`policy` 必须明确填写 `required`、`allow_other_modifiers`、`allow_extra_passed_keys` 和 `allow_extra_passed_mouse`，不推断放行策略。`required` 可为 `no_control_shift_alt`、`shift`、`control`、`alt` 或明确左右侧的 `left_shift/right_shift/left_control/right_control/left_alt/right_alt/left_windows/right_windows`。泛型要求接受任一侧或双侧；`no_control_shift_alt` 排除全部 Ctrl/Shift/Alt，是否允许 Win 由 `allow_other_modifiers` 决定。
 
@@ -76,6 +76,40 @@ Windows 在 Hook 外解析同一点的窗口、进程和角色，并前后核验
 轮盘内容保存在绑定文件同级的 `wheels.json`，读取版本 1–5，保存版本 5，版本 3 支持 `invoke` 动作、版本 4 支持 `browser` 动作、版本 5 支持快捷键时序；保存旧版前保留逐字备份。可选的 `position` 保存圈号、分区和半分区偏移，`app_overrides` 保存按进程文件名匹配的完整槽位替换。呼出组合在绑定文件中保存 `show_wheel` 动作与轮盘标识。每个槽位独立保存动作参数，不随复制来源的绑定更改。轮盘引用缺失时保留绑定并标记不可用；损坏或不支持的轮盘配置不会被保存操作覆盖，保存失败时保留原文件。配置形态见[自定义轮盘](RADIAL_WHEELS.md)。
 
 动作包引用保存 `package_id`、`action_id`、`action_version` 与 JSON 对象 `input`。保存配置只验证调用结构；运行时解析包与动作版本。包缺失或不兼容时保留原引用及参数，将对应绑定标记不可用，不静默改为其他动作。包清单的 `schema_version`、包发布 `version`、动作契约 `version` 与绑定文件版本独立，详见[动作包说明](ACTION_PACKAGES.md)。
+
+### 应用集合与场景
+
+版本 24 可在配置顶层定义两类命名常量，供多条绑定引用，避免在各处重复书写同一组名单：
+
+- `app_sets`（应用集合）：一组进程名。在 `process_scope`、`pointer_scope`、`keyboard.tap_scope` 和 `keyboard.retained_prefix.capture_scope` 的 `allow` 或 `deny` 中用 `@名称` 引用，集合之间也可互相引用。
+- `scenes`（场景）：一组上下文条件，字段与绑定相同，目前为 `process_scope`（前台应用）和 `pointer_scope`（指针窗口），名单中可引用应用集合；`extends` 可组合其他场景。绑定用 `"scene":"名称"` 引用一个场景，自身的 `process_scope`／`pointer_scope` 作为附加条件。
+
+```json
+{
+  "version": 24,
+  "app_sets": {
+    "chromium": ["chrome", "msedge"],
+    "browsers": ["@chromium", "firefox"]
+  },
+  "scenes": {
+    "browser": {"process_scope": {"allow": ["@browsers"]}, "pointer_scope": {"allow": ["@browsers"]}},
+    "chromium-browser": {"extends": ["browser"], "process_scope": {"deny": ["firefox"]}}
+  },
+  "bindings": [
+    {"scene": "browser", "...": "..."},
+    {"scene": "chromium-browser", "pointer_scope": {"deny": ["msedge"]}, "...": "..."},
+    {"process_scope": {"deny": ["@browsers"]}, "...": "..."}
+  ]
+}
+```
+
+集合只保存名称，不带 `identity`；放在白名单还是黑名单、按真实进程名还是窗口上下文匹配，由引用它的范围决定。引用带来的重复名称按并集合并，直接写出的重复名称仍报错；展开后的名单遵循与直接书写相同的规则，两个列表合计仍最多 64 项。白名单只引用空集合时报错，不会因展开为空而变成“所有应用”；黑名单引用空集合则不排除任何应用。
+
+场景组合（`extends` 与绑定的附加条件）一律按维度取交集：白名单取共同名称（一侧为空时沿用另一侧），黑名单合并。两侧白名单没有共同名称、或同一维度的 `identity` 不同时报错，并指明冲突的场景与维度，不会悄悄放宽或收窄范围。
+
+集合名和场景名只能使用小写字母、数字、`-` 和 `_`，最多 32 个字符；两类定义各最多 64 个，每个集合最多 64 项。未定义的引用、循环引用、集合内重复或无效名称均明确报错；未被引用的定义同样会检查。修改定义会同时改变所有引用它的规则，读取时按全部绑定重新检查冲突，失败时保留原文件。
+
+保存时写回原文中的 `scene` 和 `@名称`，不改成合成后的范围；定义只能在配置文件中修改，保存会沿用文件中的定义。如果定义在程序运行时被外部修改，保存会因范围与当前内存配置不一致而失败，需先重新加载配置。旧版本中以 `@` 开头的进程名仍按字面读取，但升级保存时报错，需先改名。界面显示场景名和集合名，详情中列出合成后的实际范围。完整停用示例见 [`mouse-tab-navigation.json`](../examples/mouse-tab-navigation.json)。
 
 ## 专用键盘层与按住重复
 

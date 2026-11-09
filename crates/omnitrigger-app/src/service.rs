@@ -233,6 +233,7 @@ mod tests {
             message: format!("动作 {id}"),
             enabled: true,
             action: ActionSpec::Notification,
+            context: Default::default(),
         }
     }
 

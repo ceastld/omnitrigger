@@ -4,6 +4,7 @@ mod action_library;
 mod action_packages;
 mod action_target_context;
 mod adjustment_guard;
+mod app_sets;
 mod appearance;
 mod appearance_ui;
 mod assets;
@@ -28,6 +29,7 @@ mod clipboard_history_ui_state;
 mod clipboard_restore;
 #[cfg(all(windows, test))]
 mod clipboard_smoke_protection;
+mod definitions;
 mod desktop_host;
 #[cfg(test)]
 mod desktop_key_smoke;
@@ -62,6 +64,7 @@ mod profiles;
 mod radial_wheel;
 #[cfg(windows)]
 mod read_once_helper;
+mod scenes;
 mod script_browser;
 mod script_fs;
 mod script_notify;
@@ -517,10 +520,30 @@ fn browse_row(binding: &settings::Binding, ready: bool) -> trigger_browse::Row {
         text.push(' ');
         text.push_str(&trigger_conditions::condition_label(condition));
     }
-    for scope in [&spec.process_scope, &spec.pointer_scope] {
-        if !scope.is_global() {
+    // 场景名、集合名与展开后的名称都可搜索。
+    let (scene, own) = binding.context.authored(spec);
+    if let Some(name) = scene {
+        text.push_str(" 场景 ");
+        text.push_str(name);
+    }
+    let sources = &binding.context.scopes;
+    for (scope, own, source) in [
+        (
+            &spec.process_scope,
+            &own.foreground,
+            sources.process.as_ref(),
+        ),
+        (&spec.pointer_scope, &own.pointer, sources.pointer.as_ref()),
+    ] {
+        let authored = (!own.is_global()).then(|| settings::process_scope_label(own, source));
+        if let Some(label) = &authored {
             text.push(' ');
-            text.push_str(&settings::process_scope_label(scope));
+            text.push_str(label);
+        }
+        let actual = (!scope.is_global()).then(|| settings::process_scope_label(scope, None));
+        if let Some(label) = actual.filter(|label| authored.as_ref() != Some(label)) {
+            text.push(' ');
+            text.push_str(&label);
         }
     }
     let (held_keys, held_mouse) = trigger_browse::split_held(&spec.held);
@@ -550,23 +573,30 @@ fn row_detail(binding: &settings::Binding, unavailable: Option<String>) -> (Stri
         Some(reason) => (reason, theme::RECORD),
         None => (action_detail(&binding.action), theme::TEXT_DIM),
     };
-    let detail = if binding.spec.process_scope.is_global() {
+    // 沿用场景时显示场景名与绑定自身的附加条件，完整范围见详情。
+    let (scene, own) = binding.context.authored(&binding.spec);
+    let sources = &binding.context.scopes;
+    let detail = if own.foreground.is_global() {
         detail
     } else {
         format!(
             "{} · {}",
-            settings::process_scope_label(&binding.spec.process_scope),
+            settings::process_scope_label(&own.foreground, sources.process.as_ref()),
             detail
         )
     };
-    let detail = if binding.spec.pointer_scope.is_global() {
+    let detail = if own.pointer.is_global() {
         detail
     } else {
         format!(
             "指针窗口：{} · {}",
-            settings::process_scope_label(&binding.spec.pointer_scope),
+            settings::process_scope_label(&own.pointer, sources.pointer.as_ref()),
             detail
         )
+    };
+    let detail = match scene {
+        Some(name) => format!("场景 {name} · {detail}"),
+        None => detail,
     };
     let detail = if binding.spec.keyboard == Default::default() {
         detail
@@ -3542,6 +3572,7 @@ impl Workspace {
                     message: text,
                     enabled: true,
                     action,
+                    context: Default::default(),
                 })
                 .map(Some)
         } else if let Some(id) = self.selected {
@@ -5779,21 +5810,33 @@ impl Workspace {
             .as_ref()
             .filter(|draft| draft.id == spec.id)
             .unwrap_or(spec);
+        // 草稿沿用已保存绑定的场景与集合引用；范围被改写时标签自动回到实际名称。
+        let context = self
+            .binding(spec.id)
+            .map(|binding| binding.context.clone())
+            .unwrap_or_default();
+        let scene = context.authored(spec).0.map(str::to_string);
+        let sources = context.scopes;
         let fields = div()
             .flex()
             .flex_col()
             .gap(px(10.))
             .child(section_title("触发方式"))
+            .when_some(scene, |element, name| {
+                element.child(caption(format!(
+                    "场景：{name}，生效范围如下（配置文件中设置）"
+                )))
+            })
             .when(!spec.pointer_scope.is_global(), |element| {
                 element.child(caption(format!(
                     "指针窗口范围：{}（配置文件中设置）",
-                    settings::process_scope_label(&spec.pointer_scope)
+                    settings::process_scope_detail(&spec.pointer_scope, sources.pointer.as_ref())
                 )))
             })
             .when(!spec.process_scope.is_global(), |element| {
                 element.child(caption(format!(
                     "应用范围：{}（配置文件中设置）",
-                    settings::process_scope_label(&spec.process_scope)
+                    settings::process_scope_detail(&spec.process_scope, sources.process.as_ref())
                 )))
             })
             .when(spec.keyboard.matching.is_mouse_exact(), |element| {
@@ -5840,7 +5883,10 @@ impl Workspace {
                     )))
                     .child(caption(format!(
                         "前缀捕获范围：{}。",
-                        settings::process_scope_label(&policy.capture_scope)
+                        settings::process_scope_detail(
+                            &policy.capture_scope,
+                            sources.capture.as_ref()
+                        )
                     )))
             })
             .when(spec.keyboard.restore_on_tap, |element| {
@@ -5858,7 +5904,7 @@ impl Workspace {
             .when(!spec.keyboard.tap_scope.is_global(), |element| {
                 element.child(caption(format!(
                     "单按恢复范围：{}。",
-                    settings::process_scope_label(&spec.keyboard.tap_scope)
+                    settings::process_scope_detail(&spec.keyboard.tap_scope, sources.tap.as_ref())
                 )))
             })
             .when(spec.keyboard.repeat, |element| {

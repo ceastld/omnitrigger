@@ -41,6 +41,7 @@ mod process_scope;
 mod recorder;
 mod regions;
 mod registration;
+mod scene;
 mod wheel_input;
 
 pub use engine::Engine;
@@ -61,13 +62,17 @@ pub use mouse_modifier_snapshot::{
     MouseModifierContext, MouseModifierGate, MouseModifierInput, MouseModifierPolicy,
     MouseModifierSnapshot, MouseSnapshotError, ObservationOwnership, ObservedPress,
 };
-pub use process_scope::{ProcessIdentity, ProcessScope, ProcessScopeError, WindowRole};
+pub use process_scope::{
+    ProcessIdentity, ProcessScope, ProcessScopeError, ScopeIntersectionError, WindowRole,
+    canonical_process_name,
+};
 pub use recorder::Recorder;
 pub use regions::{
     ContextError, PointerRegion, RegionError, ScreenCorner, ScreenEdge, ScreenRect,
     TriggerCondition,
 };
 pub use registration::{MAX_BINDINGS, RegistrationError};
+pub use scene::{Scene, SceneConflict, SceneDimension};
 pub use wheel_input::{
     WheelInputAdmission, WheelInputNormalizer, WheelInputPolicy, WheelSessionSnapshot,
 };
@@ -107,3 +112,5 @@ mod wheel_policy_tests;
 
 #[cfg(test)]
 mod pointer_scope_tests;
+#[cfg(test)]
+mod scene_tests;

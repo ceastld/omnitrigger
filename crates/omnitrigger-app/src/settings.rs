@@ -11,10 +11,13 @@ use std::sync::{
     OnceLock,
 };
 
+use crate::app_sets::{self, AppSets, ProcessScopeDto, ScopeField, ScopeSource, ScopeSources};
+use crate::definitions::Owner;
 use crate::execution::CommandAction;
 use crate::external_action::ExternalAction;
 use crate::local_action::LocalAction;
 use crate::plugins::PluginActionRef;
+use crate::scenes::{self, CompiledScenes, ContextSource, SceneDefinitions};
 use crate::shortcut::ShortcutAction;
 use crate::system_action::SystemAdjustmentAction;
 use crate::trigger_conditions::ConditionDto;
@@ -22,7 +25,7 @@ use crate::wheels::WheelActionRef;
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
-const CONFIG_VERSION: u32 = 23;
+const CONFIG_VERSION: u32 = 24;
 
 pub fn use_path(path: PathBuf) -> Result<(), String> {
     CUSTOM_PATH.set(path).map_err(|_| "配置路径已设置。".into())
@@ -34,6 +37,8 @@ pub struct Binding {
     pub message: String,
     pub enabled: bool,
     pub action: ActionSpec,
+    /// 配置原文中的场景与 `@集合` 引用；保存时写回，`spec` 中只有合成后的范围。
+    pub context: ContextSource,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +63,10 @@ pub enum ActionSpec {
 struct Settings {
     #[serde(rename = "version")]
     version: u32,
+    #[serde(default, skip_serializing_if = "AppSets::is_empty")]
+    app_sets: AppSets,
+    #[serde(default, skip_serializing_if = "SceneDefinitions::is_empty")]
+    scenes: SceneDefinitions,
     #[serde(rename = "bindings")]
     bindings: Vec<BindingDto>,
 }
@@ -65,6 +74,8 @@ struct Settings {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BindingDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scene: Option<String>,
     #[serde(default, skip_serializing_if = "ProcessScopeDto::is_global")]
     pointer_scope: ProcessScopeDto,
     #[serde(default, skip_serializing_if = "WheelPolicyDto::is_default")]
@@ -403,65 +414,32 @@ impl From<KeyboardMatchingDto> for KeyboardMatching {
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProcessScopeDto {
-    #[serde(default, skip_serializing_if = "ProcessIdentityDto::is_default")]
-    identity: ProcessIdentityDto,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    allow: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    deny: Vec<String>,
-}
-
-impl ProcessScopeDto {
-    fn is_global(&self) -> bool {
-        self.allow.is_empty() && self.deny.is_empty() && self.identity.is_default()
-    }
-}
-
-#[derive(Clone, Copy, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ProcessIdentityDto {
-    #[default]
-    Executable,
-    ShellContext,
-}
-impl ProcessIdentityDto {
-    fn is_default(&self) -> bool {
-        matches!(self, Self::Executable)
-    }
-}
-impl From<omnitrigger_core::ProcessIdentity> for ProcessIdentityDto {
-    fn from(value: omnitrigger_core::ProcessIdentity) -> Self {
-        match value {
-            omnitrigger_core::ProcessIdentity::Executable => Self::Executable,
-            omnitrigger_core::ProcessIdentity::ShellContext => Self::ShellContext,
-        }
-    }
-}
-impl From<ProcessIdentityDto> for omnitrigger_core::ProcessIdentity {
-    fn from(value: ProcessIdentityDto) -> Self {
-        match value {
-            ProcessIdentityDto::Executable => Self::Executable,
-            ProcessIdentityDto::ShellContext => Self::ShellContext,
-        }
-    }
-}
-
-pub fn process_scope_label(scope: &ProcessScope) -> String {
-    let mut text = if scope.allow.is_empty() {
+/// 范围的简短说明；使用集合引用时显示原文中的 `@集合` 写法。
+pub fn process_scope_label(scope: &ProcessScope, source: Option<&ScopeSource>) -> String {
+    let (allow, deny) = app_sets::display_names(scope, source);
+    let mut text = if allow.is_empty() {
         "所有应用".into()
     } else {
-        format!("仅 {}", scope.allow.join("、"))
+        format!("仅 {}", allow.join("、"))
     };
-    if !scope.deny.is_empty() {
-        text += &format!("，排除 {}", scope.deny.join("、"));
+    if !deny.is_empty() {
+        text += &format!("，排除 {}", deny.join("、"));
     }
     if scope.identity == omnitrigger_core::ProcessIdentity::ShellContext {
         format!("窗口上下文：{text}")
     } else {
         text
+    }
+}
+
+/// 详情中的范围说明；使用集合引用时附上展开后的实际名称。
+pub fn process_scope_detail(scope: &ProcessScope, source: Option<&ScopeSource>) -> String {
+    let label = process_scope_label(scope, source);
+    let plain = process_scope_label(scope, None);
+    if label == plain {
+        label
+    } else {
+        format!("{label}（展开为：{plain}）")
     }
 }
 
@@ -523,13 +501,12 @@ impl From<ButtonDto> for Button {
 
 impl From<&Binding> for BindingDto {
     fn from(binding: &Binding) -> Self {
+        let sources = &binding.context.scopes;
+        let (scene, own) = binding.context.authored(&binding.spec);
         Self {
+            scene: scene.map(Into::into),
             wheel: binding.spec.wheel.into(),
-            pointer_scope: ProcessScopeDto {
-                identity: binding.spec.pointer_scope.identity.into(),
-                allow: binding.spec.pointer_scope.allow.clone(),
-                deny: binding.spec.pointer_scope.deny.clone(),
-            },
+            pointer_scope: ProcessScopeDto::encode(&own.pointer, sources.pointer.as_ref()),
             keyboard: KeyboardPolicyDto {
                 matching: binding.spec.keyboard.matching.into(),
                 dedicated_prefix: binding.spec.keyboard.dedicated_prefix.map(Into::into),
@@ -540,11 +517,10 @@ impl From<&Binding> for BindingDto {
                     .as_ref()
                     .map(|policy| RetainedPrefixDto {
                         key: policy.key.into(),
-                        capture_scope: ProcessScopeDto {
-                            identity: policy.capture_scope.identity.into(),
-                            allow: policy.capture_scope.allow.clone(),
-                            deny: policy.capture_scope.deny.clone(),
-                        },
+                        capture_scope: ProcessScopeDto::encode(
+                            &policy.capture_scope,
+                            sources.capture.as_ref(),
+                        ),
                         quiet_ms: policy.quiet_ms,
                         fast_ms: policy.fast_ms,
                         block_with_primary_mouse: policy.block_with_primary_mouse,
@@ -552,17 +528,12 @@ impl From<&Binding> for BindingDto {
                 repeat: binding.spec.keyboard.repeat,
                 restore_on_tap: binding.spec.keyboard.restore_on_tap,
                 tap_timeout_ms: binding.spec.keyboard.tap_timeout_ms,
-                tap_scope: ProcessScopeDto {
-                    identity: binding.spec.keyboard.tap_scope.identity.into(),
-                    allow: binding.spec.keyboard.tap_scope.allow.clone(),
-                    deny: binding.spec.keyboard.tap_scope.deny.clone(),
-                },
+                tap_scope: ProcessScopeDto::encode(
+                    &binding.spec.keyboard.tap_scope,
+                    sources.tap.as_ref(),
+                ),
             },
-            process_scope: ProcessScopeDto {
-                identity: binding.spec.process_scope.identity.into(),
-                allow: binding.spec.process_scope.allow.clone(),
-                deny: binding.spec.process_scope.deny.clone(),
-            },
+            process_scope: ProcessScopeDto::encode(&own.foreground, sources.process.as_ref()),
             id: binding.spec.id,
             held: binding.spec.held.iter().copied().map(Into::into).collect(),
             conditions: binding.spec.conditions.iter().map(Into::into).collect(),
@@ -599,7 +570,15 @@ impl From<&Binding> for BindingDto {
 }
 
 impl BindingDto {
-    fn into_binding(self, version: u32) -> Result<Binding, String> {
+    fn into_binding(
+        self,
+        version: u32,
+        sets: &AppSets,
+        compiled: &CompiledScenes,
+    ) -> Result<Binding, String> {
+        if version < 24 && self.scene.is_some() {
+            return Err(DEFINITIONS_VERSION_ERROR.into());
+        }
         if version < 23
             && matches!(
                 self.keyboard.matching,
@@ -740,46 +719,54 @@ impl BindingDto {
         {
             return Err("按键时序需要版本 13 配置。".into());
         }
+        let id = self.id;
+        let owner = Owner::Binding(id);
+        let mut scopes = ScopeSources::default();
+        // 版本 24 起展开 `@集合` 引用；旧版本中的名称一律按字面进程名处理。
+        let mut resolve = |dto: ProcessScopeDto, field| -> Result<ProcessScope, String> {
+            if version < 24 {
+                return Ok(dto.literal());
+            }
+            let (scope, source) = dto
+                .resolve(sets, &owner, field)
+                .map_err(|error| error.to_string())?;
+            scopes.set(field, source);
+            Ok(scope)
+        };
+        let own = omnitrigger_core::Scene {
+            foreground: resolve(self.process_scope, ScopeField::Process)?,
+            pointer: resolve(self.pointer_scope, ScopeField::Pointer)?,
+        };
+        let tap_scope = resolve(self.keyboard.tap_scope, ScopeField::Tap)?;
+        let retained_prefix = match self.keyboard.retained_prefix {
+            Some(policy) => Some(Box::new(omnitrigger_core::RetainedPrefix {
+                key: policy.key.into(),
+                capture_scope: resolve(policy.capture_scope, ScopeField::Capture)?,
+                quiet_ms: policy.quiet_ms,
+                fast_ms: policy.fast_ms,
+                block_with_primary_mouse: policy.block_with_primary_mouse,
+            })),
+            None => None,
+        };
+        let (effective, scene) =
+            scenes::apply(self.scene, own, compiled, id).map_err(|error| error.to_string())?;
         Ok(Binding {
+            context: ContextSource { scene, scopes },
             spec: TriggerSpec {
-                pointer_scope: ProcessScope {
-                    identity: self.pointer_scope.identity.into(),
-                    allow: self.pointer_scope.allow,
-                    deny: self.pointer_scope.deny,
-                },
+                pointer_scope: effective.pointer,
                 wheel: self.wheel.into(),
                 keyboard: KeyboardPolicy {
                     matching: self.keyboard.matching.into(),
                     dedicated_prefix: self.keyboard.dedicated_prefix.map(Into::into),
-                    retained_prefix: self.keyboard.retained_prefix.map(|policy| {
-                        Box::new(omnitrigger_core::RetainedPrefix {
-                            key: policy.key.into(),
-                            capture_scope: ProcessScope {
-                                identity: policy.capture_scope.identity.into(),
-                                allow: policy.capture_scope.allow,
-                                deny: policy.capture_scope.deny,
-                            },
-                            quiet_ms: policy.quiet_ms,
-                            fast_ms: policy.fast_ms,
-                            block_with_primary_mouse: policy.block_with_primary_mouse,
-                        })
-                    }),
+                    retained_prefix,
                     repeat: self.keyboard.repeat,
                     restore_on_tap: self.keyboard.restore_on_tap,
                     tap_timeout_ms: self.keyboard.tap_timeout_ms,
-                    tap_scope: ProcessScope {
-                        identity: self.keyboard.tap_scope.identity.into(),
-                        allow: self.keyboard.tap_scope.allow,
-                        deny: self.keyboard.tap_scope.deny,
-                    },
+                    tap_scope,
                 },
-                process_scope: ProcessScope {
-                    identity: self.process_scope.identity.into(),
-                    allow: self.process_scope.allow,
-                    deny: self.process_scope.deny,
-                },
+                process_scope: effective.foreground,
                 conditions: self.conditions.into_iter().map(Into::into).collect(),
-                id: self.id,
+                id,
                 held: self.held.into_iter().map(Into::into).collect(),
                 activation: match self.activation {
                     ActivationDto::Press(button) => Activation::Press(button.into()),
@@ -828,6 +815,7 @@ pub fn defaults() -> Vec<Binding> {
             message: "CapsLock + W 已触发，OmniTrigger 工作正常。".into(),
             enabled: true,
             action: ActionSpec::Notification,
+            context: Default::default(),
         },
         Binding {
             spec: TriggerSpec {
@@ -843,6 +831,7 @@ pub fn defaults() -> Vec<Binding> {
             message: "鼠标侧键 + 滚轮上滚，组合触发成功。".into(),
             enabled: true,
             action: ActionSpec::Notification,
+            context: Default::default(),
         },
         Binding {
             spec: TriggerSpec {
@@ -858,6 +847,7 @@ pub fn defaults() -> Vec<Binding> {
             message: "鼠标侧键 + 滚轮下滚，组合触发成功。".into(),
             enabled: true,
             action: ActionSpec::Notification,
+            context: Default::default(),
         },
         Binding {
             spec: TriggerSpec {
@@ -873,6 +863,7 @@ pub fn defaults() -> Vec<Binding> {
             message: "打开触发面板".into(),
             enabled: true,
             action: ActionSpec::ShowPanel,
+            context: Default::default(),
         },
         Binding {
             spec: TriggerSpec {
@@ -891,6 +882,7 @@ pub fn defaults() -> Vec<Binding> {
             message: "打开触发面板".into(),
             enabled: true,
             action: ActionSpec::ShowPanel,
+            context: Default::default(),
         },
     ]
 }
@@ -907,18 +899,67 @@ pub fn path() -> PathBuf {
 }
 
 fn decode(text: &str) -> Result<Vec<Binding>, String> {
+    decode_with_definitions(text).map(|(_, bindings)| bindings)
+}
+
+const DEFINITIONS_VERSION_ERROR: &str = "应用集合和场景需要版本 24 配置。";
+
+/// 配置顶层的命名定义；只在配置文件中编辑，保存时原样保留。
+#[derive(Default)]
+struct Definitions {
+    app_sets: AppSets,
+    scenes: SceneDefinitions,
+}
+
+/// 解析配置并展开集合与场景引用；同时返回原文中的定义。
+fn decode_with_definitions(text: &str) -> Result<(Definitions, Vec<Binding>), String> {
     let settings: Settings =
         serde_json::from_str(text).map_err(|e| format!("配置格式有误：{e}"))?;
     if !matches!(settings.version, 1..=CONFIG_VERSION) {
         return Err("配置版本不受支持，原文件已保留。".into());
     }
+    if settings.version < 24 && (!settings.app_sets.is_empty() || !settings.scenes.is_empty()) {
+        return Err(DEFINITIONS_VERSION_ERROR.into());
+    }
+    app_sets::validate(&settings.app_sets).map_err(|error| error.to_string())?;
+    let compiled =
+        scenes::compile(&settings.scenes, &settings.app_sets).map_err(|error| error.to_string())?;
     let bindings = settings
         .bindings
         .into_iter()
-        .map(|binding| binding.into_binding(settings.version))
+        .map(|binding| binding.into_binding(settings.version, &settings.app_sets, &compiled))
         .collect::<Result<Vec<_>, _>>()?;
     validate(&bindings)?;
-    Ok(bindings)
+    Ok((
+        Definitions {
+            app_sets: settings.app_sets,
+            scenes: settings.scenes,
+        },
+        bindings,
+    ))
+}
+
+/// 按实际名称写出的范围不能以 `@` 开头，否则重新读取时会被当作集合引用。
+fn check_scope_names(binding: &Binding) -> Result<(), String> {
+    let spec = &binding.spec;
+    let (_, own) = binding.context.authored(spec);
+    let capture = spec
+        .keyboard
+        .retained_prefix
+        .as_ref()
+        .map(|policy| &policy.capture_scope);
+    for (field, scope) in [
+        (ScopeField::Process, Some(&own.foreground)),
+        (ScopeField::Pointer, Some(&own.pointer)),
+        (ScopeField::Tap, Some(&spec.keyboard.tap_scope)),
+        (ScopeField::Capture, capture),
+    ] {
+        if let Some(scope) = scope {
+            app_sets::check_saveable(spec.id, field, scope, binding.context.scopes.get(field))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 /// 录制结果与已有配置的冲突。`other` 指向冲突的已有触发器，不改写任何一方。
@@ -1096,23 +1137,49 @@ pub fn save(bindings: &[Binding]) -> Result<(), String> {
 
 fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
     validate(bindings)?;
+    for binding in bindings {
+        check_scope_names(binding)?;
+    }
+    let original = match std::fs::read_to_string(destination) {
+        // 不覆盖损坏或未来版本的配置；用户需要先明确修复原文件。
+        Ok(original) => Some(original),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("读取原配置失败，原文件已保留：{error}")),
+    };
+    // 集合与场景只在配置文件中编辑，保存时沿用原文件中的定义。
+    let definitions = match &original {
+        Some(original) => decode_with_definitions(original)?.0,
+        None => Definitions::default(),
+    };
     let text = serde_json::to_vec_pretty(&Settings {
         version: CONFIG_VERSION,
+        app_sets: definitions.app_sets,
+        scenes: definitions.scenes,
         bindings: bindings.iter().map(Into::into).collect(),
     })
     .map_err(|e| e.to_string())?;
-    match std::fs::read_to_string(destination) {
-        Ok(original) => {
-            // 不覆盖损坏或未来版本的配置；用户需要先明确修复原文件。
-            decode(&original)?;
-            let settings: Settings =
-                serde_json::from_str(&original).map_err(|error| error.to_string())?;
-            if settings.version < CONFIG_VERSION {
-                backup_legacy(destination, settings.version, original.as_bytes())?;
-            }
+    // 写出的内容重新读取后须得到相同的组合与引用；集合在外部修改后不按新定义悄悄改变范围。
+    let reread = decode(std::str::from_utf8(&text).map_err(|error| error.to_string())?)
+        .map_err(|error| format!("{error}请重新加载配置后再保存，原文件已保留。"))?;
+    if reread.len() != bindings.len()
+        || reread.iter().zip(bindings).any(|(reread, binding)| {
+            // 比较合成后的范围与写出的引用原文；不比较读取时留下的展开快照。
+            reread.spec != binding.spec
+                || serde_json::to_value(BindingDto::from(reread)).ok()
+                    != serde_json::to_value(BindingDto::from(binding)).ok()
+        })
+    {
+        return Err(
+            "应用集合或场景定义已在外部修改，保存后范围会与当前配置不同；请重新加载配置后再保存，原文件已保留。"
+                .into(),
+        );
+    }
+    if let Some(original) = &original {
+        let settings: Settings =
+            serde_json::from_str(original).map_err(|error| error.to_string())?;
+        if settings.version < CONFIG_VERSION {
+            backup_legacy(destination, settings.version, original.as_bytes())?;
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("读取原配置失败，原文件已保留：{error}")),
     }
     atomic_write(destination, &text)
 }
@@ -1197,6 +1264,8 @@ mod tests {
     fn encode(bindings: &[Binding]) -> String {
         serde_json::to_string(&Settings {
             version: CONFIG_VERSION,
+            app_sets: AppSets::new(),
+            scenes: SceneDefinitions::new(),
             bindings: bindings.iter().map(Into::into).collect(),
         })
         .unwrap()
@@ -1332,7 +1401,7 @@ mod tests {
                 .into_iter()
                 .next()
                 .unwrap()
-                .into_binding(parsed.version)
+                .into_binding(parsed.version, &AppSets::new(), &CompiledScenes::default())
                 .unwrap()
         }
 
@@ -1806,7 +1875,11 @@ mod tests {
             .into_iter()
             .next()
             .unwrap()
-            .into_binding(settings.version)
+            .into_binding(
+                settings.version,
+                &AppSets::new(),
+                &CompiledScenes::default(),
+            )
             .unwrap();
         assert!(matches!(
             Engine::new(vec![binding.spec]),
@@ -2073,7 +2146,9 @@ mod tests {
             document.pointer_mut(path).unwrap()["identity"] = "future".into();
             assert!(decode(&document.to_string()).is_err());
         }
-        assert!(process_scope_label(&bindings[0].spec.process_scope).starts_with("窗口上下文："));
+        assert!(
+            process_scope_label(&bindings[0].spec.process_scope, None).starts_with("窗口上下文：")
+        );
     }
 
     #[test]
@@ -2423,6 +2498,238 @@ mod tests {
         assert!(decode(&document.to_string())
             .unwrap_err()
             .contains("重复名称"));
+    }
+
+    mod app_set_settings {
+        use super::*;
+
+        fn document() -> serde_json::Value {
+            json!({
+                "version": 24,
+                "app_sets": {
+                    "browsers": ["@chromium", "firefox"],
+                    "chromium": ["chrome", "msedge"]
+                },
+                "scenes": {
+                    "browser": {"pointer_scope":{"allow":["@browsers"]},"process_scope":{"allow":["@browsers"]}},
+                    "chromium-browser": {"extends":["browser"],"process_scope":{"deny":["firefox"]}}
+                },
+                "bindings": [
+                    {"pointer_scope":{"allow":["@browsers"]},"process_scope":{"allow":["@browsers"]},
+                     "id":1,"held":[{"kind":"key","value":20}],"activation":{"kind":"press","value":{"kind":"key","value":87}},
+                     "message":"浏览器内","enabled":false,"action":{"kind":"notification"}},
+                    {"keyboard":{"dedicated_prefix":{"kind":"key","value":20},"restore_on_tap":true,
+                       "tap_scope":{"allow":["@chromium"]}},
+                     "process_scope":{"deny":["@browsers","Code"]},
+                     "id":2,"held":[{"kind":"key","value":20}],"activation":{"kind":"press","value":{"kind":"key","value":81}},
+                     "message":"浏览器外","enabled":false,"action":{"kind":"notification"}},
+                    {"scene":"chromium-browser","pointer_scope":{"deny":["msedge"]},
+                     "id":3,"held":[{"kind":"key","value":20}],"activation":{"kind":"press","value":{"kind":"key","value":69}},
+                     "message":"场景","enabled":false,"action":{"kind":"notification"}}
+                ]
+            })
+        }
+
+        #[test]
+        fn references_expand_for_matching_and_round_trip_unchanged() {
+            let bindings = decode(&document().to_string()).unwrap();
+            let browsers = vec!["chrome".to_string(), "msedge".into(), "firefox".into()];
+            assert_eq!(bindings[0].spec.process_scope.allow, browsers);
+            assert_eq!(bindings[0].spec.pointer_scope.allow, browsers);
+            assert_eq!(
+                bindings[1].spec.process_scope.deny,
+                [&browsers[..], &["Code".to_string()]].concat()
+            );
+            assert_eq!(
+                bindings[1].spec.keyboard.tap_scope.allow,
+                vec!["chrome".to_string(), "msedge".into()]
+            );
+            assert!(bindings[1].context.scopes.process.is_some());
+            assert_eq!(
+                bindings[2].spec.process_scope,
+                ProcessScope {
+                    identity: Default::default(),
+                    allow: browsers.clone(),
+                    deny: vec!["firefox".into()],
+                }
+            );
+            assert_eq!(
+                bindings[2].spec.pointer_scope,
+                ProcessScope {
+                    identity: Default::default(),
+                    allow: browsers.clone(),
+                    deny: vec!["msedge".into()],
+                }
+            );
+            assert_eq!(
+                bindings[2].context.authored(&bindings[2].spec).0,
+                Some("chromium-browser")
+            );
+            assert!(bindings[1].context.scopes.pointer.is_none());
+            assert_eq!(
+                process_scope_label(
+                    &bindings[0].spec.process_scope,
+                    bindings[0].context.scopes.process.as_ref()
+                ),
+                "仅 @browsers"
+            );
+            assert_eq!(
+                process_scope_detail(
+                    &bindings[1].spec.process_scope,
+                    bindings[1].context.scopes.process.as_ref()
+                ),
+                "所有应用，排除 @browsers、Code（展开为：所有应用，排除 chrome、msedge、firefox、Code）"
+            );
+
+            let scratch = Scratch::new();
+            let destination = scratch.config();
+            std::fs::write(&destination, document().to_string()).unwrap();
+            save_to(&destination, &bindings).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&destination).unwrap()).unwrap();
+            assert_eq!(saved, document());
+        }
+
+        #[test]
+        fn rewritten_scope_is_saved_with_actual_names() {
+            let mut bindings = decode(&document().to_string()).unwrap();
+            bindings[0].spec.process_scope.allow = vec!["chrome".into()];
+            bindings[2].spec.pointer_scope.deny.clear();
+            let scratch = Scratch::new();
+            let destination = scratch.config();
+            std::fs::write(&destination, document().to_string()).unwrap();
+            save_to(&destination, &bindings).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&destination).unwrap()).unwrap();
+            assert_eq!(
+                saved["bindings"][0]["process_scope"]["allow"],
+                json!(["chrome"])
+            );
+            assert_eq!(
+                saved["bindings"][0]["pointer_scope"]["allow"],
+                json!(["@browsers"])
+            );
+            assert_eq!(saved["app_sets"], document()["app_sets"]);
+            assert_eq!(saved["scenes"], document()["scenes"]);
+            // 改写后的上下文不再等于场景合成结果，按实际范围写出，不保留场景引用。
+            assert!(saved["bindings"][2].get("scene").is_none());
+            assert_eq!(
+                saved["bindings"][2]["process_scope"],
+                json!({"allow":["chrome","msedge","firefox"],"deny":["firefox"]})
+            );
+            assert_eq!(
+                saved["bindings"][2]["pointer_scope"],
+                json!({"allow":["chrome","msedge","firefox"]})
+            );
+        }
+
+        #[test]
+        fn externally_changed_sets_block_saving_stale_scopes() {
+            let bindings = decode(&document().to_string()).unwrap();
+            let scratch = Scratch::new();
+            let destination = scratch.config();
+            let mut changed = document();
+            changed["app_sets"]["browsers"] = json!(["@chromium", "firefox", "opera"]);
+            std::fs::write(&destination, changed.to_string()).unwrap();
+            let before = std::fs::read(&destination).unwrap();
+            let error = save_to(&destination, &bindings).unwrap_err();
+            assert!(error.contains("外部修改"), "{error}");
+            assert_eq!(std::fs::read(&destination).unwrap(), before);
+
+            let mut changed = document();
+            changed["scenes"]["chromium-browser"]["process_scope"] = json!({"deny":["chrome"]});
+            std::fs::write(&destination, changed.to_string()).unwrap();
+            assert!(save_to(&destination, &bindings)
+                .unwrap_err()
+                .contains("外部修改"));
+        }
+
+        #[test]
+        fn invalid_references_and_versions_are_rejected() {
+            let mut empty = document();
+            empty["app_sets"]["none"] = json!([]);
+            empty["bindings"][0]["pointer_scope"]["allow"] = json!(["@none"]);
+            assert!(decode(&empty.to_string())
+                .unwrap_err()
+                .contains("#1 的 pointer_scope 白名单引用的集合展开后为空"));
+
+            let mut unknown = document();
+            unknown["bindings"][1]["keyboard"]["tap_scope"]["allow"] = json!(["@missing"]);
+            assert_eq!(
+                decode(&unknown.to_string()).unwrap_err(),
+                "触发器 #2 的 keyboard.tap_scope 引用了未定义的应用集合 @missing。"
+            );
+
+            let mut cycle = document();
+            cycle["app_sets"]["chromium"] = json!(["@browsers"]);
+            assert!(decode(&cycle.to_string())
+                .unwrap_err()
+                .contains("@browsers → @chromium → @browsers"));
+
+            let mut too_many = document();
+            too_many["bindings"][0]["process_scope"]["allow"] = json!((0..63)
+                .map(|index| format!("p{index}"))
+                .chain(["@browsers".to_string()])
+                .collect::<Vec<_>>());
+            assert!(decode(&too_many.to_string())
+                .unwrap_err()
+                .contains("最多 64 项"));
+
+            let mut legacy = document();
+            legacy["version"] = 23.into();
+            assert_eq!(
+                decode(&legacy.to_string()).unwrap_err(),
+                "应用集合和场景需要版本 24 配置。"
+            );
+
+            let mut unknown_scene = document();
+            unknown_scene["bindings"][2]["scene"] = json!("missing");
+            assert_eq!(
+                decode(&unknown_scene.to_string()).unwrap_err(),
+                "触发器 #3 引用了未定义的场景 missing。"
+            );
+
+            let mut disjoint = document();
+            disjoint["bindings"][2]["process_scope"] = json!({"allow":["code"]});
+            assert_eq!(
+                decode(&disjoint.to_string()).unwrap_err(),
+                "触发器 #3 与场景 chromium-browser 的前台应用条件无法合并：两者的应用白名单没有共同名称。"
+            );
+
+            let mut unused_bad = document();
+            unused_bad["scenes"]["unused"] = json!({"process_scope":{"allow":["@missing"]}});
+            assert_eq!(
+                decode(&unused_bad.to_string()).unwrap_err(),
+                "场景 unused 的 process_scope 引用了未定义的应用集合 @missing。"
+            );
+        }
+
+        #[test]
+        fn legacy_literal_at_names_load_but_cannot_be_upgraded() {
+            let mut legacy = document();
+            legacy["version"] = 23.into();
+            legacy.as_object_mut().unwrap().remove("app_sets");
+            legacy.as_object_mut().unwrap().remove("scenes");
+            legacy["bindings"].as_array_mut().unwrap().truncate(1);
+            legacy["bindings"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("pointer_scope");
+            legacy["bindings"][0]["process_scope"]["allow"] = json!(["@tool"]);
+            let text = legacy.to_string();
+            let bindings = decode(&text).unwrap();
+            assert_eq!(
+                bindings[0].spec.process_scope.allow,
+                vec!["@tool".to_string()]
+            );
+            assert!(bindings[0].context.scopes.process.is_none());
+            let scratch = Scratch::new();
+            let destination = scratch.config();
+            std::fs::write(&destination, &text).unwrap();
+            let error = save_to(&destination, &bindings).unwrap_err();
+            assert!(error.contains("以 @ 开头的进程名"), "{error}");
+            assert_eq!(std::fs::read_to_string(&destination).unwrap(), text);
+        }
     }
 
     #[test]
@@ -2828,6 +3135,7 @@ mod tests {
             message: "快速拖拽已触发".into(),
             enabled: true,
             action: ActionSpec::Notification,
+            context: Default::default(),
         }
     }
 
@@ -3003,6 +3311,7 @@ mod tests {
                 target,
                 delta_percent,
             }),
+            context: Default::default(),
         }
     }
 
@@ -3059,6 +3368,7 @@ mod tests {
                 message: format!("旧动作 {index}"),
                 enabled: index % 2 == 0,
                 action,
+                context: Default::default(),
             })
             .collect();
         let original = version_five(&expected);
