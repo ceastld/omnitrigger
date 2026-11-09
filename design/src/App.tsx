@@ -20,7 +20,7 @@ export function App() {
   const [preview, setPreview] = useState<Preview>(() => load(fixture));
   const [source, setSource] = useState("仓库夹具 ui-browse");
   const [dark, setDark] = useState(params.get("theme") !== "light");
-  const [width, setWidth] = useState(Number(params.get("width")) || 660);
+  const [width, setWidth] = useState(Number(params.get("width")) || 0);
   const [error, setError] = useState<string | null>(null);
 
   const palette = dark ? preview.tokens.dark : preview.tokens.light;
@@ -45,7 +45,9 @@ export function App() {
     "--mono-font": `"${preview.tokens.mono_font}", ui-monospace, monospace`,
     fontFamily: `"${preview.tokens.ui_font}", system-ui, sans-serif`,
     color: palette.TEXT,
-    minHeight: "100vh",
+    colorScheme: dark ? "dark" : "light",
+    height: "100vh",
+    overflow: "hidden",
     display: "flex",
     flexDirection: "column",
   } as CSSProperties;
@@ -63,13 +65,28 @@ export function App() {
             {dark ? "浅色" : "深色"}
           </button>
           <label>
-            中栏宽度 {width}px
-            <input type="range" min={520} max={1100} value={width} onChange={(event) => setWidth(Number(event.target.value))} />
+            中栏宽度
+            <select className="devbar-button" value={width} onChange={(event) => setWidth(Number(event.target.value))}>
+              <option value={0}>填满窗口</option>
+              {[560, 660, 760, 900].map((value) => (
+                <option key={value} value={value}>
+                  {value}px
+                </option>
+              ))}
+            </select>
           </label>
           {error && <span className="devbar-error">{error}</span>}
         </div>
-        <div style={{ flex: 1, display: "flex", justifyContent: "center", padding: "16px 0" }}>
-          <div style={{ width, height: "calc(100vh - 80px)", display: "flex", background: palette.BACKGROUND, outline: `1px dashed ${palette.DIVIDER}` }}>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", background: palette.BACKGROUND }}>
+          <div
+            style={{
+              flex: width === 0 ? 1 : "none",
+              width: width === 0 ? undefined : width,
+              minWidth: 0,
+              display: "flex",
+              borderRight: width === 0 ? undefined : `1px solid ${palette.DIVIDER}`,
+            }}
+          >
             {/* 切换数据时重建页面状态。 */}
             <TriggerPage key={source} initialView={initialView} />
           </div>

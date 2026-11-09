@@ -4,6 +4,12 @@ body {
   margin: 0;
 }
 
+/* 应用的滚动条是贴边的细条，没有轨道。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--BORDER_HI) transparent;
+}
+
 .truncate {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -44,7 +50,10 @@ body {
   flex-wrap: wrap;
   align-items: center;
   gap: 14px;
-  padding: 8px 16px;
+  flex: none;
+  min-height: 34px;
+  box-sizing: border-box;
+  padding: 4px 16px;
   font-size: 12px;
   color: var(--TEXT_DIM);
   border-bottom: 1px solid var(--DIVIDER);
@@ -58,7 +67,9 @@ body {
 }
 
 .devbar-button {
-  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
   padding: 0 10px;
   border-radius: 6px;
   border: 1px solid var(--BORDER_MID);
