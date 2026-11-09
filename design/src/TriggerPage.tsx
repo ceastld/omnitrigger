@@ -479,8 +479,9 @@ interface NavItem {
 
 interface NestedItem extends NavItem {
   depth: number;
-  /** 子层只显示比上层多出的部分，例如 Space 下的 `+ G`。 */
-  short: string;
+  /** 子层沿用上层前缀的部分，淡色显示，例如 Space 下的 `Space + `。 */
+  lead: string;
+  rest: string;
 }
 
 /** 前缀是另一组前缀延长的组挂到那一组下面，按树的顺序排列。 */
@@ -496,7 +497,9 @@ function nestNav(items: NavItem[]): NestedItem[] {
   const out: NestedItem[] = [];
   const visit = (item: NavItem, depth: number) => {
     const above = parent.get(item.key);
-    out.push({ ...item, depth, short: above ? `+ ${item.path.slice(above.path.length).join(" + ")}` : item.label });
+    const lead = above ? `${above.path.join(" + ")} + ` : "";
+    const rest = above ? item.path.slice(above.path.length).join(" + ") : item.label;
+    out.push({ ...item, depth, lead, rest });
     for (const child of items.filter((other) => parent.get(other.key) === item)) visit(child, depth + 1);
   };
   for (const item of items.filter((candidate) => !parent.has(candidate.key))) visit(item, 0);
@@ -547,7 +550,8 @@ function GroupNav({ items, current, onPick }: { items: NestedItem[]; current: st
           >
             {active && <div style={{ position: "absolute", left: 0, top: 8, bottom: 8, width: 2, borderRadius: 2, background: c("ACCENT") }} />}
             <div className="truncate" style={{ flex: 1, minWidth: 0 }}>
-              {item.short}
+              {item.lead && <span style={{ color: c("TEXT_FAINT"), fontWeight: 400 }}>{item.lead}</span>}
+              {item.rest}
             </div>
             <div style={{ ...mono, flex: "none", fontSize: 11, color: c("TEXT_FAINT") }}>{item.count}</div>
           </div>

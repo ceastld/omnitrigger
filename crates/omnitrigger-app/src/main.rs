@@ -705,6 +705,10 @@ struct Workspace {
     trigger_mouse: Option<trigger_input_map::MousePart>,
     /// 键盘视图可用宽度（逻辑像素），由上一帧布局测得，用于让键盘随窗口缩放。
     trigger_board_width: std::rc::Rc<std::cell::Cell<f32>>,
+    /// 列表视图的滚动位置，分组导航据此跳转并标出当前分组。
+    trigger_list_scroll: gpui::ScrollHandle,
+    /// 刚在导航中点选的分组；靠近列表底部时滚不到顶，滚动前一直标为当前。
+    trigger_nav_pick: Option<String>,
     package_input: Entity<MessageInput>,
     package_picker_for_draft: bool,
     action_service: omnitrigger_actions::ActionService,
@@ -1187,6 +1191,8 @@ impl Workspace {
             trigger_key: None,
             trigger_mouse: None,
             trigger_board_width: Default::default(),
+            trigger_list_scroll: gpui::ScrollHandle::new(),
+            trigger_nav_pick: None,
             plugins,
             plugin_settings_error,
             browser_connector_ui,
@@ -4734,6 +4740,158 @@ impl Workspace {
             }))
     }
 
+    /// 列表左侧的分组导航；按前缀分组时，延长的前缀缩进在上层前缀之下。
+    fn render_group_nav(
+        &self,
+        groups: &[trigger_browse::Group],
+        headers: &[usize],
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let paths: Vec<Vec<String>> = groups
+            .iter()
+            .map(|group| {
+                if self.trigger_group != trigger_browse::GroupBy::Prefix || group.key.is_empty() {
+                    return Vec::new();
+                }
+                group
+                    .ids
+                    .first()
+                    .and_then(|id| self.triggers.bindings().iter().find(|b| b.spec.id == *id))
+                    .map(|binding| {
+                        prefix_caps(&binding.spec)
+                            .into_iter()
+                            .map(|cap| cap.label.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        let keys: Vec<String> = groups
+            .iter()
+            .map(|group| format!("{:?}:{}", self.trigger_group, group.key))
+            .collect();
+        let current = self
+            .trigger_nav_pick
+            .as_ref()
+            .and_then(|pick| keys.iter().position(|key| key == pick))
+            .unwrap_or_else(|| {
+                let top = self.trigger_list_scroll.top_item();
+                headers
+                    .iter()
+                    .rposition(|&header| header <= top)
+                    .unwrap_or(0)
+            });
+        let mut nav = div()
+            .id("trigger-nav")
+            .flex_none()
+            .w(px(168.))
+            .h_full()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .pr(px(10.))
+            .border_r_1()
+            .border_color(rgb(theme::DIVIDER))
+            .child(
+                div()
+                    .px(px(10.))
+                    .pt(px(2.))
+                    .pb(px(6.))
+                    .text_size(px(11.))
+                    .text_color(rgb(theme::TEXT_FAINT))
+                    .child("分组"),
+            );
+        for entry in trigger_browse::nest(&paths) {
+            let group = &groups[entry.group];
+            let path = &paths[entry.group];
+            let (lead, rest) = if path.is_empty() {
+                (String::new(), group.label.clone())
+            } else {
+                let lead = path[..entry.inherited]
+                    .iter()
+                    .map(|label| format!("{label} + "))
+                    .collect::<String>();
+                (lead, path[entry.inherited..].join(" + "))
+            };
+            let active = entry.group == current;
+            let all_disabled = group.disabled == group.ids.len();
+            let key = keys[entry.group].clone();
+            let header = headers.get(entry.group).copied().unwrap_or(0);
+            nav = nav.child(
+                div()
+                    .id(("trigger-nav-item", entry.group))
+                    .flex_none()
+                    .relative()
+                    .h(px(30.))
+                    .pl(px(10. + entry.depth as f32 * 14.))
+                    .pr(px(10.))
+                    .rounded(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(12.5))
+                    .cursor_pointer()
+                    .text_color(rgb(if active {
+                        theme::TEXT
+                    } else if all_disabled {
+                        theme::TEXT_FAINT
+                    } else {
+                        theme::TEXT_DIM
+                    }))
+                    .when(active, |el| {
+                        el.bg(rgb(theme::SURFACE_HI))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(
+                                div()
+                                    .absolute()
+                                    .left(px(0.))
+                                    .top(px(8.))
+                                    .bottom(px(8.))
+                                    .w(px(2.))
+                                    .rounded(px(2.))
+                                    .bg(rgb(theme::ACCENT)),
+                            )
+                    })
+                    .when(!active, |el| el.hover(|s| s.bg(rgb(theme::ROW))))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .when(!lead.is_empty(), |el| {
+                                el.child(
+                                    div()
+                                        .flex_none()
+                                        .font_weight(FontWeight::NORMAL)
+                                        .text_color(rgb(theme::TEXT_FAINT))
+                                        .whitespace_nowrap()
+                                        .child(lead),
+                                )
+                            })
+                            .child(div().flex_1().min_w_0().truncate().child(rest)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(theme::MONO_FONT)
+                            .text_size(px(11.))
+                            .text_color(rgb(theme::TEXT_FAINT))
+                            .child(group.ids.len().to_string()),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.trigger_collapsed.remove(&key);
+                        this.smooth_scroll.cancel("trigger-rows");
+                        this.trigger_list_scroll.scroll_to_top_of_item(header);
+                        this.trigger_nav_pick = Some(key.clone());
+                        cx.notify();
+                    })),
+            );
+        }
+        nav
+    }
+
     /// 按 id 取绑定并画成列表行。
     fn trigger_rows_for(&self, ids: &[u64], cx: &mut Context<Self>) -> Vec<AnyElement> {
         ids.iter()
@@ -5340,12 +5498,18 @@ impl Workspace {
             .flex_col()
             .gap(px(2.))
             .when(dim, |el| el.opacity(0.6));
+        let mut nav = None;
         match self.trigger_view {
             TriggerView::List => {
+                // 各组标题在滚动容器中的子元素下标，供导航跳转。
+                let mut headers = Vec::with_capacity(groups.len());
+                let mut child = 0;
                 for (index, group) in groups.iter().enumerate() {
                     let collapse_key = format!("{:?}:{}", self.trigger_group, group.key);
                     let collapsed = grouped && self.trigger_collapsed.contains(&collapse_key);
                     if grouped {
+                        headers.push(child);
+                        child += 1;
                         rows = rows.child(self.render_group_header(
                             index,
                             group,
@@ -5361,9 +5525,13 @@ impl Workspace {
                         if let Some(binding) =
                             self.triggers.bindings().iter().find(|b| b.spec.id == *id)
                         {
+                            child += 1;
                             rows = rows.child(self.render_trigger_row(binding, cx));
                         }
                     }
+                }
+                if grouped && groups.len() > 1 {
+                    nav = Some(self.render_group_nav(&groups, &headers, cx));
                 }
             }
             TriggerView::Keyboard if shown > 0 => {
@@ -5453,7 +5621,32 @@ impl Workspace {
             )
             .child(self.render_trigger_toolbar(&summary, &tokens, shown, window, cx))
             .children(self.render_banner(cx))
-            .child(self.smooth_scroll.wrap("trigger-rows", rows))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .gap(px(14.))
+                    .children(nav)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+                                if this.trigger_nav_pick.take().is_some() {
+                                    cx.notify();
+                                }
+                            }))
+                            .child(self.smooth_scroll.wrap_with_handle(
+                                "trigger-rows",
+                                rows,
+                                &self.trigger_list_scroll,
+                            )),
+                    ),
+            )
             .child(caption(format!(
                 "最多 {} 条触发器，每条最多 8 个前缀。单独按下未用于组合的前缀时，原输入会补发给应用。",
                 omnitrigger_core::MAX_BINDINGS,
@@ -6403,6 +6596,7 @@ impl Workspace {
                     label: "Esc".into(),
                     mouse: false,
                     arrow: None,
+                    title: None,
                 },
                 CapSize::Small,
                 CapTone::Normal,

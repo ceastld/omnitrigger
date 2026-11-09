@@ -1255,6 +1255,7 @@ mod tests {
                 label: "CapsLock".into(),
                 mouse: false,
                 arrow: None,
+                title: None,
             }],
             kind: PanelKind::Command,
             detail: detail.into(),

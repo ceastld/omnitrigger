@@ -4,8 +4,9 @@ use std::cell::Cell;
 
 use crate::{appearance::Mode, assets::Icon};
 use gpui::{
-    div, linear_color_stop, linear_gradient, point, prelude::*, px, svg, Background, BoxShadow,
-    Div, ElementId, FontWeight, Hsla, Rgba, SharedString, Stateful, Svg, WindowAppearance,
+    div, linear_color_stop, linear_gradient, point, prelude::*, px, svg, AnyView, App, Background,
+    BoxShadow, Context, Div, ElementId, FontWeight, Hsla, Rgba, SharedString, Stateful, Svg,
+    Window, WindowAppearance,
 };
 use omnitrigger_core::{Activation, Button, MouseButton, TriggerSpec, WheelDirection};
 use omnitrigger_windows::format_button;
@@ -262,6 +263,8 @@ pub struct Cap {
     pub label: SharedString,
     pub mouse: bool,
     pub arrow: Option<Icon>,
+    /// 悬停提示；位置条件在键帽上只写位置名称，完整范围放在这里。
+    pub title: Option<SharedString>,
 }
 
 fn button_cap(button: &Button) -> Cap {
@@ -277,11 +280,13 @@ fn button_cap(button: &Button) -> Cap {
             .into(),
             mouse: true,
             arrow: None,
+            title: None,
         },
         Button::Key(_) => Cap {
             label: format_button(button).into(),
             mouse: false,
             arrow: None,
+            title: None,
         },
     }
 }
@@ -298,6 +303,7 @@ pub fn caps_for(spec: &TriggerSpec) -> Vec<Cap> {
             label: crate::trigger_conditions::condition_short_label(condition).into(),
             mouse: true,
             arrow: None,
+            title: Some(crate::trigger_conditions::condition_label(condition).into()),
         })
         .collect();
     caps.extend(caps_for_buttons(&spec.held));
@@ -313,6 +319,7 @@ pub fn caps_for(spec: &TriggerSpec) -> Vec<Cap> {
                 WheelDirection::Left => Icon::ArrowLeft,
                 WheelDirection::Right => Icon::ArrowRight,
             }),
+            title: None,
         },
     });
     if let Activation::Hold { duration_ms, .. } = spec.activation {
@@ -320,6 +327,7 @@ pub fn caps_for(spec: &TriggerSpec) -> Vec<Cap> {
             label: format!("长按 {duration_ms}ms").into(),
             mouse: false,
             arrow: None,
+            title: None,
         });
     }
     if let Activation::Drag {
@@ -332,11 +340,13 @@ pub fn caps_for(spec: &TriggerSpec) -> Vec<Cap> {
             label: "快速拖拽".into(),
             mouse: false,
             arrow: None,
+            title: None,
         });
         caps.push(Cap {
             label: format!("≥{min_distance_px}px · <{max_start_ms}ms").into(),
             mouse: false,
             arrow: None,
+            title: None,
         });
     }
     caps
@@ -453,9 +463,39 @@ pub fn combo_toned(caps: &[Cap], size: CapSize, tone: CapTone) -> Div {
         if index > 0 {
             row = row.child(plus(size, PLUS));
         }
-        row = row.child(keycap(cap, size, tone));
+        row = row.child(match &cap.title {
+            Some(title) => div()
+                .id(("cap-title", index))
+                .tooltip(text_tooltip(title.clone()))
+                .child(keycap(cap, size, tone))
+                .into_any_element(),
+            None => keycap(cap, size, tone).into_any_element(),
+        });
     }
     row
+}
+
+/// 悬停时显示的一行说明文字。
+pub struct TextTooltip(SharedString);
+
+impl Render for TextTooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.))
+            .py(px(5.))
+            .rounded(px(6.))
+            .bg(rgb(SURFACE_HI))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .shadow(lift(0.3))
+            .text_size(px(12.))
+            .text_color(rgb(TEXT))
+            .child(self.0.clone())
+    }
+}
+
+pub fn text_tooltip(text: SharedString) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    move |_, cx| cx.new(|_| TextTooltip(text.clone())).into()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -440,8 +440,91 @@ pub fn browse(rows: &[Row], tokens: &[String], filter: &Filter, group_by: GroupB
     groups
 }
 
+/// 分组导航中的一项。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NavEntry {
+    /// 在 `browse` 结果中的下标。
+    pub group: usize,
+    pub depth: usize,
+    /// 沿用上层的前缀键数；这部分在导航里淡色显示。
+    pub inherited: usize,
+}
+
+/// 前缀是另一组前缀延长的组挂到最长的那一组下面，按树的先序排列，同层保持原顺序。
+/// `paths` 为各组的前缀键名，非前缀分组传空。
+pub fn nest(paths: &[Vec<String>]) -> Vec<NavEntry> {
+    let parent: Vec<Option<usize>> = paths
+        .iter()
+        .map(|path| {
+            (0..paths.len())
+                .filter(|&other| {
+                    let head = &paths[other];
+                    !head.is_empty() && head.len() < path.len() && path.starts_with(head)
+                })
+                .max_by_key(|&other| paths[other].len())
+        })
+        .collect();
+    fn visit(
+        index: usize,
+        depth: usize,
+        paths: &[Vec<String>],
+        parent: &[Option<usize>],
+        out: &mut Vec<NavEntry>,
+    ) {
+        out.push(NavEntry {
+            group: index,
+            depth,
+            inherited: parent[index].map_or(0, |above| paths[above].len()),
+        });
+        for child in (0..paths.len()).filter(|&child| parent[child] == Some(index)) {
+            visit(child, depth + 1, paths, parent, out);
+        }
+    }
+    let mut out = Vec::with_capacity(paths.len());
+    for root in (0..paths.len()).filter(|&index| parent[index].is_none()) {
+        visit(root, 0, paths, &parent, &mut out);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nav_nests_extended_prefixes_under_the_longest_shorter_one() {
+        let path = |keys: &[&str]| keys.iter().map(|key| key.to_string()).collect::<Vec<_>>();
+        let paths = vec![
+            path(&["CapsLock"]),
+            path(&[]),
+            path(&["左 Ctrl", "左 Alt"]),
+            path(&["Space", "G"]),
+            path(&["左 Ctrl"]),
+            path(&["Space"]),
+            path(&["左 Ctrl", "左 Alt", "左 Shift"]),
+        ];
+        let entry = |group, depth, inherited| NavEntry {
+            group,
+            depth,
+            inherited,
+        };
+        assert_eq!(
+            nest(&paths),
+            vec![
+                entry(0, 0, 0),
+                entry(1, 0, 0),
+                entry(4, 0, 0),
+                entry(2, 1, 1),
+                entry(6, 2, 2),
+                entry(5, 0, 0),
+                entry(3, 1, 1),
+            ]
+        );
+        // 非前缀分组没有层级。
+        assert_eq!(
+            nest(&[vec![], vec![]]),
+            vec![entry(0, 0, 0), entry(1, 0, 0)]
+        );
+    }
+
     use super::*;
     use omnitrigger_core::{MouseButton, WheelDirection};
 
