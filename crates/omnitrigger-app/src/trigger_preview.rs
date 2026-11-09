@@ -94,6 +94,8 @@ fn row(binding: &Binding) -> Value {
             "mouse": cap.mouse,
             "prefix": index < prefix_len,
             "arrow": cap.arrow.map(|arrow| arrow.path()),
+            // 位置条件的键帽只写位置名称，完整尺寸放在提示里。
+            "title": binding.spec.conditions.get(index).map(crate::trigger_conditions::condition_label),
         })).collect::<Vec<_>>(),
         "detail": detail,
         "detail_color": token_name(detail_color),

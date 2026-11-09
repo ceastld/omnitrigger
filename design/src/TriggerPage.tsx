@@ -129,12 +129,15 @@ export function TriggerPage({ initialView = "list" }: { initialView?: View }) {
       <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 14 }}>
         {showNav && (
           <GroupNav
-            items={groups.map((group) => ({
-              key: `${groupBy}:${group.key}`,
-              label: group.label,
-              count: group.rows.length,
-              disabled: group.disabled,
-            }))}
+            items={nestNav(
+              groups.map((group) => ({
+                key: `${groupBy}:${group.key}`,
+                label: group.label,
+                count: group.rows.length,
+                disabled: group.disabled,
+                path: groupBy === "prefix" && group.key !== "" ? group.rows[0].caps.filter((cap) => cap.prefix).map((cap) => cap.label) : [],
+              })),
+            )}
             current={current}
             onPick={jump}
           />
@@ -470,10 +473,38 @@ interface NavItem {
   label: string;
   count: number;
   disabled: number;
+  /** 按前缀分组时的前缀键帽序列，用来判断层级。 */
+  path: string[];
+}
+
+interface NestedItem extends NavItem {
+  depth: number;
+  /** 子层只显示比上层多出的部分，例如 Space 下的 `+ G`。 */
+  short: string;
+}
+
+/** 前缀是另一组前缀延长的组挂到那一组下面，按树的顺序排列。 */
+function nestNav(items: NavItem[]): NestedItem[] {
+  const startsWith = (path: string[], head: string[]) =>
+    head.length > 0 && head.length < path.length && head.every((label, index) => path[index] === label);
+  const parent = new Map<string, NavItem>();
+  for (const item of items) {
+    const candidates = items.filter((other) => startsWith(item.path, other.path));
+    const nearest = candidates.sort((a, b) => b.path.length - a.path.length)[0];
+    if (nearest) parent.set(item.key, nearest);
+  }
+  const out: NestedItem[] = [];
+  const visit = (item: NavItem, depth: number) => {
+    const above = parent.get(item.key);
+    out.push({ ...item, depth, short: above ? `+ ${item.path.slice(above.path.length).join(" + ")}` : item.label });
+    for (const child of items.filter((other) => parent.get(other.key) === item)) visit(child, depth + 1);
+  };
+  for (const item of items.filter((candidate) => !parent.has(candidate.key))) visit(item, 0);
+  return out;
 }
 
 /** 分组导航列：样式沿用应用侧栏的导航项，计数用等宽字体，整组停用时变暗。 */
-function GroupNav({ items, current, onPick }: { items: NavItem[]; current: string | null; onPick: (key: string) => void }) {
+function GroupNav({ items, current, onPick }: { items: NestedItem[]; current: string | null; onPick: (key: string) => void }) {
   return (
     <div
       style={{
@@ -502,7 +533,7 @@ function GroupNav({ items, current, onPick }: { items: NavItem[]; current: strin
               flex: "none",
               position: "relative",
               height: 30,
-              padding: "0 10px",
+              padding: `0 10px 0 ${10 + item.depth * 14}px`,
               borderRadius: 6,
               display: "flex",
               alignItems: "center",
@@ -516,7 +547,7 @@ function GroupNav({ items, current, onPick }: { items: NavItem[]; current: strin
           >
             {active && <div style={{ position: "absolute", left: 0, top: 8, bottom: 8, width: 2, borderRadius: 2, background: c("ACCENT") }} />}
             <div className="truncate" style={{ flex: 1, minWidth: 0 }}>
-              {item.label}
+              {item.short}
             </div>
             <div style={{ ...mono, flex: "none", fontSize: 11, color: c("TEXT_FAINT") }}>{item.count}</div>
           </div>

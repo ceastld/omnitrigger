@@ -295,7 +295,7 @@ pub fn caps_for(spec: &TriggerSpec) -> Vec<Cap> {
         .conditions
         .iter()
         .map(|condition| Cap {
-            label: crate::trigger_conditions::condition_label(condition).into(),
+            label: crate::trigger_conditions::condition_short_label(condition).into(),
             mouse: true,
             arrow: None,
         })

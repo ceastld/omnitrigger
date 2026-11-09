@@ -50,6 +50,7 @@ export function Keycap({ cap, size }: { cap: Cap; size: CapSize }) {
   const m = CAP_METRICS[size];
   return (
     <div
+      title={cap.title ?? undefined}
       style={{
         flex: "none",
         height: m.height,

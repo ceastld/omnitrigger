@@ -9,6 +9,8 @@ export interface Cap {
   mouse: boolean;
   prefix: boolean;
   arrow: string | null;
+  /** 位置条件的完整描述，键帽只显示位置名称。 */
+  title: string | null;
 }
 
 export interface Row {

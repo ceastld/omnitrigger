@@ -829,13 +829,15 @@
           "label": "CapsLock",
           "mouse": false,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "O",
           "mouse": false,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         }
       ],
       "detail": "发送快捷键 · Backspace",
@@ -869,13 +871,15 @@
           "label": "CapsLock",
           "mouse": false,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "I",
           "mouse": false,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         }
       ],
       "detail": "发送快捷键 · Up",
@@ -909,13 +913,15 @@
           "label": "CapsLock",
           "mouse": false,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "J",
           "mouse": false,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         }
       ],
       "detail": "发送快捷键 · Left",
@@ -949,13 +955,15 @@
           "label": "CapsLock",
           "mouse": false,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "K",
           "mouse": false,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         }
       ],
       "detail": "发送快捷键 · Down",
@@ -989,13 +997,15 @@
           "label": "CapsLock",
           "mouse": false,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "L",
           "mouse": false,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         }
       ],
       "detail": "发送快捷键 · Right",
@@ -1029,13 +1039,15 @@
           "label": "右键",
           "mouse": true,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "长按 300ms",
           "mouse": false,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         }
       ],
       "detail": "打开 / 收起触发面板",
@@ -1067,13 +1079,15 @@
           "label": "侧键 1",
           "mouse": true,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "滚轮",
           "mouse": true,
           "prefix": false,
-          "arrow": "icons/arrow-up.svg"
+          "arrow": "icons/arrow-up.svg",
+          "title": null
         }
       ],
       "detail": "指针窗口：仅 chrome、msedge、firefox · 仅 chrome、msedge、firefox · 发送快捷键 · RightCtrl+RightShift+Tab",
@@ -1107,13 +1121,15 @@
           "label": "侧键 1",
           "mouse": true,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "滚轮",
           "mouse": true,
           "prefix": false,
-          "arrow": "icons/arrow-down.svg"
+          "arrow": "icons/arrow-down.svg",
+          "title": null
         }
       ],
       "detail": "指针窗口：仅 chrome、msedge、firefox · 仅 chrome、msedge、firefox · 发送快捷键 · RightCtrl+Tab",
@@ -1147,13 +1163,15 @@
           "label": "侧键 1",
           "mouse": true,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "右键",
           "mouse": true,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         }
       ],
       "detail": "指针窗口：仅 chrome、msedge、firefox · 仅 chrome、msedge、firefox · 发送快捷键 · RightCtrl+W",
@@ -1184,22 +1202,24 @@
       "tint": "ACCENT_2",
       "caps": [
         {
-          "label": "左侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+          "label": "左侧边缘",
           "mouse": true,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": "左侧边缘 8px（上端缩进 8px，下端缩进 0px）"
         },
         {
           "label": "滚轮",
           "mouse": true,
           "prefix": false,
-          "arrow": "icons/arrow-up.svg"
+          "arrow": "icons/arrow-up.svg",
+          "title": null
         }
       ],
       "detail": "亮度增加 5%",
       "detail_color": "TEXT_DIM",
-      "text": "左边缘上滚增加所在屏幕亮度 亮度增加 5% 系统调节 左侧边缘 8px（上端缩进 8px，下端缩进 0px） 滚轮",
-      "prefix": "左侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "text": "左边缘上滚增加所在屏幕亮度 亮度增加 5% 系统调节 左侧边缘 滚轮 左侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "prefix": "左侧边缘",
       "facets": {
         "input": "屏幕区域",
         "action": "系统调节",
@@ -1224,22 +1244,24 @@
       "tint": "ACCENT_2",
       "caps": [
         {
-          "label": "左侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+          "label": "左侧边缘",
           "mouse": true,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": "左侧边缘 8px（上端缩进 8px，下端缩进 0px）"
         },
         {
           "label": "滚轮",
           "mouse": true,
           "prefix": false,
-          "arrow": "icons/arrow-down.svg"
+          "arrow": "icons/arrow-down.svg",
+          "title": null
         }
       ],
       "detail": "亮度减少 5%",
       "detail_color": "TEXT_DIM",
-      "text": "左边缘下滚减少所在屏幕亮度 亮度减少 5% 系统调节 左侧边缘 8px（上端缩进 8px，下端缩进 0px） 滚轮",
-      "prefix": "左侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "text": "左边缘下滚减少所在屏幕亮度 亮度减少 5% 系统调节 左侧边缘 滚轮 左侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "prefix": "左侧边缘",
       "facets": {
         "input": "屏幕区域",
         "action": "系统调节",
@@ -1264,22 +1286,24 @@
       "tint": "ACCENT_2",
       "caps": [
         {
-          "label": "右侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+          "label": "右侧边缘",
           "mouse": true,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": "右侧边缘 8px（上端缩进 8px，下端缩进 0px）"
         },
         {
           "label": "滚轮",
           "mouse": true,
           "prefix": false,
-          "arrow": "icons/arrow-up.svg"
+          "arrow": "icons/arrow-up.svg",
+          "title": null
         }
       ],
       "detail": "亮度增加 5%",
       "detail_color": "TEXT_DIM",
-      "text": "右边缘上滚增加所在屏幕亮度 亮度增加 5% 系统调节 右侧边缘 8px（上端缩进 8px，下端缩进 0px） 滚轮",
-      "prefix": "右侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "text": "右边缘上滚增加所在屏幕亮度 亮度增加 5% 系统调节 右侧边缘 滚轮 右侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "prefix": "右侧边缘",
       "facets": {
         "input": "屏幕区域",
         "action": "系统调节",
@@ -1304,22 +1328,24 @@
       "tint": "ACCENT_2",
       "caps": [
         {
-          "label": "右侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+          "label": "右侧边缘",
           "mouse": true,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": "右侧边缘 8px（上端缩进 8px，下端缩进 0px）"
         },
         {
           "label": "滚轮",
           "mouse": true,
           "prefix": false,
-          "arrow": "icons/arrow-down.svg"
+          "arrow": "icons/arrow-down.svg",
+          "title": null
         }
       ],
       "detail": "亮度减少 5%",
       "detail_color": "TEXT_DIM",
-      "text": "右边缘下滚减少所在屏幕亮度 亮度减少 5% 系统调节 右侧边缘 8px（上端缩进 8px，下端缩进 0px） 滚轮",
-      "prefix": "右侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "text": "右边缘下滚减少所在屏幕亮度 亮度减少 5% 系统调节 右侧边缘 滚轮 右侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "prefix": "右侧边缘",
       "facets": {
         "input": "屏幕区域",
         "action": "系统调节",
@@ -1344,22 +1370,24 @@
       "tint": "ACCENT_2",
       "caps": [
         {
-          "label": "顶部边缘 8px",
+          "label": "顶部边缘",
           "mouse": true,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": "顶部边缘 8px"
         },
         {
           "label": "滚轮",
           "mouse": true,
           "prefix": false,
-          "arrow": "icons/arrow-up.svg"
+          "arrow": "icons/arrow-up.svg",
+          "title": null
         }
       ],
       "detail": "发送快捷键 · VolumeUp",
       "detail_color": "TEXT_DIM",
-      "text": "上边缘上滚增加音量 发送快捷键 · volumeup 发送快捷键 顶部边缘 8px 滚轮",
-      "prefix": "顶部边缘 8px",
+      "text": "上边缘上滚增加音量 发送快捷键 · volumeup 发送快捷键 顶部边缘 滚轮 顶部边缘 8px",
+      "prefix": "顶部边缘",
       "facets": {
         "input": "屏幕区域",
         "action": "发送快捷键",
@@ -1384,22 +1412,24 @@
       "tint": "ACCENT_2",
       "caps": [
         {
-          "label": "顶部边缘 8px",
+          "label": "顶部边缘",
           "mouse": true,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": "顶部边缘 8px"
         },
         {
           "label": "滚轮",
           "mouse": true,
           "prefix": false,
-          "arrow": "icons/arrow-down.svg"
+          "arrow": "icons/arrow-down.svg",
+          "title": null
         }
       ],
       "detail": "发送快捷键 · VolumeDown",
       "detail_color": "TEXT_DIM",
-      "text": "上边缘下滚减少音量 发送快捷键 · volumedown 发送快捷键 顶部边缘 8px 滚轮",
-      "prefix": "顶部边缘 8px",
+      "text": "上边缘下滚减少音量 发送快捷键 · volumedown 发送快捷键 顶部边缘 滚轮 顶部边缘 8px",
+      "prefix": "顶部边缘",
       "facets": {
         "input": "屏幕区域",
         "action": "发送快捷键",
@@ -1427,19 +1457,22 @@
           "label": "左 Ctrl",
           "mouse": false,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "左 Alt",
           "mouse": false,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "F13",
           "mouse": false,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         }
       ],
       "detail": "本地动作 · 1 步",
@@ -1472,13 +1505,15 @@
           "label": "左 Ctrl",
           "mouse": false,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "F9",
           "mouse": false,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         }
       ],
       "detail": "窗口上下文：仅 explorer · 仅提示",
@@ -1512,13 +1547,15 @@
           "label": "左 Ctrl",
           "mouse": false,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "F9",
           "mouse": false,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         }
       ],
       "detail": "窗口上下文：仅 desktop · 仅提示",
@@ -1552,13 +1589,15 @@
           "label": "左 Ctrl",
           "mouse": false,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "F9",
           "mouse": false,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         }
       ],
       "detail": "窗口上下文：仅 taskbar · 仅提示",
@@ -1592,13 +1631,15 @@
           "label": "Space",
           "mouse": false,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "K",
           "mouse": false,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         }
       ],
       "detail": "保留原功能层 按住重复 · 仅提示",
@@ -1632,19 +1673,22 @@
           "label": "Space",
           "mouse": false,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "G",
           "mouse": false,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "K",
           "mouse": false,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         }
       ],
       "detail": "保留原功能层 按住重复 · 仅提示",
@@ -1679,13 +1723,15 @@
           "label": "Space",
           "mouse": false,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "侧键 2",
           "mouse": true,
           "prefix": false,
-          "arrow": null
+          "arrow": null,
+          "title": null
         }
       ],
       "detail": "保留原功能层 · 仅提示",
@@ -1719,13 +1765,15 @@
           "label": "侧键 1",
           "mouse": true,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "滚轮",
           "mouse": true,
           "prefix": false,
-          "arrow": "icons/arrow-up.svg"
+          "arrow": "icons/arrow-up.svg",
+          "title": null
         }
       ],
       "detail": "仅提示",
@@ -1759,13 +1807,15 @@
           "label": "侧键 1",
           "mouse": true,
           "prefix": true,
-          "arrow": null
+          "arrow": null,
+          "title": null
         },
         {
           "label": "滚轮",
           "mouse": true,
           "prefix": false,
-          "arrow": "icons/arrow-up.svg"
+          "arrow": "icons/arrow-up.svg",
+          "title": null
         }
       ],
       "detail": "指针窗口：仅 notepad · 仅提示",

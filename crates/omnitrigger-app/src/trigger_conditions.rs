@@ -417,6 +417,37 @@ impl ConditionEditor {
     }
 }
 
+/// 键帽与分组用的简短名称：只说位置，尺寸与缩进见 [`condition_label`]。
+/// 同一边或同一角的不同尺寸归为一类。
+pub fn condition_short_label(condition: &TriggerCondition) -> &'static str {
+    let TriggerCondition::PointerRegion(region) = condition;
+    let edge_name = |edge: ScreenEdge| match edge {
+        ScreenEdge::Top => "顶部边缘",
+        ScreenEdge::Right => "右侧边缘",
+        ScreenEdge::Bottom => "底部边缘",
+        ScreenEdge::Left => "左侧边缘",
+    };
+    match *region {
+        PointerRegion::ScreenBoundary { edge } => match edge {
+            ScreenEdge::Top => "顶部边界",
+            ScreenEdge::Right => "右侧边界",
+            ScreenEdge::Bottom => "底部边界",
+            ScreenEdge::Left => "左侧边界",
+        },
+        PointerRegion::ScreenEdge { edge, .. } | PointerRegion::ScreenEdgeSegment { edge, .. } => {
+            edge_name(edge)
+        }
+        PointerRegion::ScreenCorner { corner, .. } => match corner {
+            ScreenCorner::TopLeft => "左上角",
+            ScreenCorner::TopRight => "右上角",
+            ScreenCorner::BottomRight => "右下角",
+            ScreenCorner::BottomLeft => "左下角",
+        },
+        PointerRegion::Rectangle(_) => "自定义范围",
+    }
+}
+
+/// 完整描述，含尺寸与缩进；用于提示和搜索。
 pub fn condition_label(condition: &TriggerCondition) -> String {
     let TriggerCondition::PointerRegion(region) = condition;
     match *region {

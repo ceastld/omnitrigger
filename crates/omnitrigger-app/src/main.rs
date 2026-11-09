@@ -512,6 +512,11 @@ fn browse_row(binding: &settings::Binding, ready: bool) -> trigger_browse::Row {
         text.push(' ');
         text.push_str(&cap.label);
     }
+    // 键帽只显示位置名称，尺寸与缩进仍可搜索。
+    for condition in &spec.conditions {
+        text.push(' ');
+        text.push_str(&trigger_conditions::condition_label(condition));
+    }
     for scope in [&spec.process_scope, &spec.pointer_scope] {
         if !scope.is_global() {
             text.push(' ');
