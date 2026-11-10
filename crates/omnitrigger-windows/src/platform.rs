@@ -2605,6 +2605,7 @@ pub(crate) fn show_gesture_choice_at_point(
         windows::core::w!("OmniTrigger 手势选择"),
         "手势选择",
         Some((x, y)),
+        true,
     )
 }
 
