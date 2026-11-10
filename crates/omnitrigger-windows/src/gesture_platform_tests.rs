@@ -1,6 +1,6 @@
 //! 手势的平台事件序列测试，不安装 Hook，也不向桌面发送输入。
 use super::*;
-use omnitrigger_core::{Activation, GestureDirection, GesturePath};
+use omnitrigger_core::{Activation, GestureDirection, GestureShape};
 
 const RIGHT: Button = Button::Mouse(MouseButton::Right);
 
@@ -17,7 +17,11 @@ fn setup() -> (ThreadState, Receiver<BackendEvent>) {
         held: vec![],
         activation: Activation::Gesture {
             button: RIGHT,
-            path: GesturePath::new(&[GestureDirection::Down, GestureDirection::Right]).unwrap(),
+            shape: GestureShape::from_directions(&[
+                GestureDirection::Down,
+                GestureDirection::Right,
+            ])
+            .unwrap(),
         },
     }]));
     (state, receiver)

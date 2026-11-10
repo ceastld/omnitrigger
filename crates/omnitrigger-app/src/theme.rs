@@ -8,7 +8,9 @@ use gpui::{
     BoxShadow, Context, Div, ElementId, FontWeight, Hsla, Rgba, SharedString, Stateful, Svg,
     Window, WindowAppearance,
 };
-use omnitrigger_core::{Activation, Button, GesturePath, MouseButton, TriggerSpec, WheelDirection};
+use omnitrigger_core::{
+    Activation, Button, GestureShape, MouseButton, TriggerSpec, WheelDirection,
+};
 use omnitrigger_windows::format_button;
 
 pub const SIDEBAR: u32 = 0x17191f;
@@ -265,8 +267,8 @@ pub struct Cap {
     pub arrow: Option<Icon>,
     /// 悬停提示；位置条件在键帽上只写位置名称，完整范围放在这里。
     pub title: Option<SharedString>,
-    /// 手势方向序列；用统一画法的箭头图标显示在文字之后。
-    pub gesture: Option<GesturePath>,
+    /// 手势形状；以轨迹缩略图显示在文字之后。
+    pub gesture: Option<GestureShape>,
 }
 
 fn button_cap(button: &Button) -> Cap {
@@ -339,13 +341,13 @@ pub fn caps_for(spec: &TriggerSpec) -> Vec<Cap> {
             gesture: None,
         });
     }
-    if let Activation::Gesture { path, .. } = spec.activation {
+    if let Activation::Gesture { shape, .. } = spec.activation {
         caps.push(Cap {
             label: "手势".into(),
             mouse: false,
             arrow: None,
             title: None,
-            gesture: Some(path),
+            gesture: Some(shape),
         });
     }
     if let Activation::Drag {
@@ -437,20 +439,12 @@ pub fn keycap(cap: &Cap, size: CapSize, tone: CapTone) -> Div {
                 .when_some(cap.arrow, |el, arrow| {
                     el.child(icon(arrow, icon_size, ACCENT))
                 })
-                .when_some(cap.gesture, |el, path| {
-                    el.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(icon_size * 0.1))
-                            .children(path.steps().iter().map(|step| {
-                                crate::gesture_editor::direction_icon(
-                                    *step,
-                                    icon_size * 1.1,
-                                    rgb(ACCENT).into(),
-                                )
-                            })),
-                    )
+                .when_some(cap.gesture, |el, shape| {
+                    el.child(crate::gesture_editor::shape_icon(
+                        shape,
+                        icon_size * 1.5,
+                        rgb(ACCENT).into(),
+                    ))
                 }),
         )
 }

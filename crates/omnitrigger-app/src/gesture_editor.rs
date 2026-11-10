@@ -1,4 +1,4 @@
-//! 手势方向编辑：在面板中按住左键绘制，与运行时共用核心识别规则；也可逐个点选方向。
+//! 手势形状编辑：在面板中按住左键绘制，所画轨迹经与运行时相同的规则化为形状模板。
 
 use std::{cell::Cell, rc::Rc};
 
@@ -6,57 +6,43 @@ use gpui::{
     canvas, div, fill, point, prelude::*, px, size, Bounds, Context, Div, Hsla, PathBuilder,
     Pixels, Point, Window,
 };
-use omnitrigger_core::{GestureDirection, GestureTracker, MAX_GESTURE_STEPS};
+use omnitrigger_core::{GestureShape, GestureTrace};
 
-use crate::theme::{self, button, hsla, rgb, segment, small, Tone};
+use crate::theme::{self, hsla, rgb};
 use crate::{caption, TriggerMode, Workspace};
 
-/// 绘制面板只保留有限的轨迹点用于显示，识别本身不依赖这些点。
+/// 绘制面板只保留有限的轨迹点用于显示，形状本身不依赖这些点。
 const TRAIL_LIMIT: usize = 600;
 const PAD_HEIGHT: f32 = 150.;
+/// 面板中显示已保存形状时较长一边的长度。
+const SHAPE_EXTENT: f32 = 96.;
 
 #[derive(Default)]
 pub(crate) struct GestureDraft {
-    pub(crate) steps: Vec<GestureDirection>,
-    tracker: Option<GestureTracker>,
+    pub(crate) shape: Option<GestureShape>,
+    trace: Option<GestureTrace>,
     /// 相对绘制面板左上角的轨迹点；面板随布局移动或滚动时轨迹跟随。
     trail: Vec<Point<Pixels>>,
-    unrecognized: bool,
+    too_short: bool,
     /// 面板左上角在窗口中的位置，每帧布局后更新。
     pad_origin: Rc<Cell<Point<Pixels>>>,
 }
 
 impl GestureDraft {
-    pub(crate) fn load(&mut self, steps: &[GestureDirection]) {
+    pub(crate) fn load(&mut self, shape: Option<GestureShape>) {
         *self = Self {
-            steps: steps.to_vec(),
+            shape,
             ..Self::default()
         };
     }
 }
 
-/// 识别阈值以物理像素定义；面板坐标按窗口缩放换算后再交给识别器，与运行时一致。
+/// 轨迹长度下限以物理像素定义；面板坐标按窗口缩放换算后再记录，与运行时一致。
 fn physical(position: Point<Pixels>, scale: f32) -> (i32, i32) {
     (
         (f32::from(position.x) * scale).round() as i32,
         (f32::from(position.y) * scale).round() as i32,
     )
-}
-
-/// 屏幕坐标中的单位方向向量，y 轴向下。
-fn unit(direction: GestureDirection) -> (f32, f32) {
-    use GestureDirection::*;
-    const DIAGONAL: f32 = std::f32::consts::FRAC_1_SQRT_2;
-    match direction {
-        Up => (0., -1.),
-        Down => (0., 1.),
-        Left => (-1., 0.),
-        Right => (1., 0.),
-        UpLeft => (-DIAGONAL, -DIAGONAL),
-        UpRight => (DIAGONAL, -DIAGONAL),
-        DownLeft => (-DIAGONAL, DIAGONAL),
-        DownRight => (DIAGONAL, DIAGONAL),
-    }
 }
 
 fn stroke(points: &[Point<Pixels>], width: f32, color: Hsla, window: &mut Window) {
@@ -93,9 +79,8 @@ fn arrow_head(
     stroke(&[wing(1.), tip, wing(-1.)], width, color, window);
 }
 
-/// 起点标记。
-fn start_dot(center: Point<Pixels>, color: Hsla, window: &mut Window) {
-    let dot = px(7.);
+fn start_dot(center: Point<Pixels>, diameter: f32, color: Hsla, window: &mut Window) {
+    let dot = px(diameter);
     window.paint_quad(
         fill(
             Bounds::new(
@@ -108,83 +93,79 @@ fn start_dot(center: Point<Pixels>, color: Hsla, window: &mut Window) {
     );
 }
 
-/// 单个方向的箭头图标；八个方向同一画法，粗细与大小一致。
-pub(crate) fn direction_icon(
-    direction: GestureDirection,
-    extent: f32,
+/// 画一条带起点与末端箭头的轨迹；末端走向取稍远的一点，避免被末端抖动带偏。
+fn paint_route(
+    points: &[Point<Pixels>],
+    width: f32,
     color: Hsla,
-) -> impl IntoElement {
+    start_color: Hsla,
+    arrow: bool,
+    window: &mut Window,
+) {
+    stroke(points, width, color, window);
+    let (Some(&first), Some(&last)) = (points.first(), points.last()) else {
+        return;
+    };
+    start_dot(first, width * 2.4, start_color, window);
+    if !arrow {
+        return;
+    }
+    let reach = (width * 4.).max(6.);
+    let back = points.iter().rev().find(|position| {
+        let (dx, dy) = (
+            f32::from(last.x - position.x),
+            f32::from(last.y - position.y),
+        );
+        dx * dx + dy * dy >= reach * reach
+    });
+    if let Some(back) = back {
+        let (dx, dy) = (f32::from(last.x - back.x), f32::from(last.y - back.y));
+        let length = (dx * dx + dy * dy).sqrt();
+        arrow_head(
+            last,
+            (dx / length, dy / length),
+            width * 3.2,
+            width,
+            color,
+            window,
+        );
+    }
+}
+
+/// 把归一化形状放到以 `center` 为中心、较长一边为 `extent` 的范围内。
+fn place(shape: &GestureShape, center: Point<Pixels>, extent: f32) -> Vec<Point<Pixels>> {
+    let scale = extent / 2000.;
+    shape
+        .points()
+        .iter()
+        .map(|&(x, y)| {
+            point(
+                center.x + px(f32::from(x) * scale),
+                center.y + px(f32::from(y) * scale),
+            )
+        })
+        .collect()
+}
+
+/// 手势形状的小图标：带起点与末端箭头的轨迹缩略图。
+pub(crate) fn shape_icon(shape: GestureShape, extent: f32, color: Hsla) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
-            let (dx, dy) = unit(direction);
-            let center = bounds.center();
-            let reach = extent * 0.36;
-            let width = (extent / 9.).max(1.4);
-            let tail = point(center.x - px(dx * reach), center.y - px(dy * reach));
-            let tip = point(center.x + px(dx * reach), center.y + px(dy * reach));
-            stroke(&[tail, tip], width, color, window);
-            arrow_head(tip, (dx, dy), extent * 0.34, width, color, window);
+            let width = (extent / 11.).max(1.4);
+            // 四周留出线宽与箭头的余量。
+            let points = place(&shape, bounds.center(), extent - width * 5.);
+            paint_route(&points, width, color, color, true, window);
         },
     )
     .size(px(extent))
     .flex_none()
 }
 
-/// 方向序列的示意折线（单位长度）。原路折返的一笔略微偏开，避免与上一笔重叠。
-fn diagram(steps: &[GestureDirection]) -> Vec<(f32, f32)> {
-    let mut points = vec![(0., 0.)];
-    let mut previous: Option<(f32, f32)> = None;
-    for &step in steps {
-        let (dx, dy) = unit(step);
-        let reversed = previous.is_some_and(|(px, py)| px * dx + py * dy < -0.99);
-        let (ox, oy) = if reversed {
-            (-dy * 0.28, dx * 0.28)
-        } else {
-            (0., 0.)
-        };
-        let (x, y) = *points.last().expect("折线至少有起点");
-        points.push((x + dx + ox, y + dy + oy));
-        previous = Some((dx, dy));
-    }
-    points
-}
-
-/// 把示意折线缩放并居中到 `area` 内。
-fn fit(points: &[(f32, f32)], area: Bounds<Pixels>) -> Vec<Point<Pixels>> {
-    let (mut left, mut top, mut right, mut bottom) = (0f32, 0f32, 0f32, 0f32);
-    for &(x, y) in points {
-        left = left.min(x);
-        top = top.min(y);
-        right = right.max(x);
-        bottom = bottom.max(y);
-    }
-    let (width, height) = (f32::from(area.size.width), f32::from(area.size.height));
-    let scale = (width / (right - left).max(0.01))
-        .min(height / (bottom - top).max(0.01))
-        .min(54.);
-    let center = area.center();
-    let (mid_x, mid_y) = ((left + right) / 2., (top + bottom) / 2.);
-    points
-        .iter()
-        .map(|&(x, y)| {
-            point(
-                center.x + px((x - mid_x) * scale),
-                center.y + px((y - mid_y) * scale),
-            )
-        })
-        .collect()
-}
-
 impl Workspace {
-    /// 已切到手势方式但尚未给出任何方向；此时只等待绘制，不按错误提示。
+    /// 已切到手势方式但尚未画出形状；此时只等待绘制，不按错误提示。
     pub(crate) fn awaiting_gesture(&self) -> bool {
-        self.trigger_mode == TriggerMode::Gesture && self.gesture_draft.steps.is_empty()
-    }
-
-    fn gesture_steps_changed(&mut self, cx: &mut Context<Self>) {
-        self.error = None;
-        self.set_trigger_mode(TriggerMode::Gesture, cx);
+        self.trigger_mode == TriggerMode::Gesture && self.gesture_draft.shape.is_none()
     }
 
     fn gesture_local(&self, position: Point<Pixels>) -> Point<Pixels> {
@@ -195,20 +176,20 @@ impl Workspace {
     fn gesture_draw_start(&mut self, position: Point<Pixels>, scale: f32, cx: &mut Context<Self>) {
         let local = self.gesture_local(position);
         let draft = &mut self.gesture_draft;
-        draft.tracker = Some(GestureTracker::new(physical(position, scale)));
+        draft.trace = Some(GestureTrace::new(physical(position, scale)));
         draft.trail.clear();
         draft.trail.push(local);
-        draft.unrecognized = false;
+        draft.too_short = false;
         cx.notify();
     }
 
     fn gesture_draw_move(&mut self, position: Point<Pixels>, scale: f32, cx: &mut Context<Self>) {
         let local = self.gesture_local(position);
         let draft = &mut self.gesture_draft;
-        let Some(tracker) = draft.tracker.as_mut() else {
+        let Some(trace) = draft.trace.as_mut() else {
             return;
         };
-        tracker.push(physical(position, scale));
+        trace.push(physical(position, scale));
         let far = draft.trail.last().is_none_or(|last| {
             let (dx, dy) = (f32::from(local.x - last.x), f32::from(local.y - last.y));
             dx * dx + dy * dy >= 4.
@@ -220,17 +201,18 @@ impl Workspace {
     }
 
     fn gesture_draw_end(&mut self, cx: &mut Context<Self>) {
-        let Some(tracker) = self.gesture_draft.tracker.take() else {
+        let Some(trace) = self.gesture_draft.trace.take() else {
             return;
         };
-        match tracker.reading().preferred() {
-            Some(path) => {
-                // 保留所画的原始轨迹，识别出的方向序列显示在面板底部。
-                self.gesture_draft.steps = path.steps().to_vec();
-                self.gesture_steps_changed(cx);
+        match trace.shape() {
+            Ok(shape) => {
+                // 所画轨迹就是手势本身：保留原样显示，保存的是它的归一化形状。
+                self.gesture_draft.shape = Some(shape);
+                self.error = None;
+                self.set_trigger_mode(TriggerMode::Gesture, cx);
             }
-            None => {
-                self.gesture_draft.unrecognized = true;
+            Err(_) => {
+                self.gesture_draft.too_short = true;
                 cx.notify();
             }
         }
@@ -238,38 +220,29 @@ impl Workspace {
 
     pub(crate) fn gesture_fields(&self, cx: &mut Context<Self>) -> Div {
         let draft = &self.gesture_draft;
-        let drawing = draft.tracker.is_some();
+        let drawing = draft.trace.is_some();
         let trail = draft.trail.clone();
-        let steps = draft.steps.clone();
+        let shape = draft.shape;
         let origin = Rc::clone(&draft.pad_origin);
-        let trail_color = hsla(
-            if draft.unrecognized {
+        let color = hsla(
+            if draft.too_short {
                 theme::RECORD
             } else {
                 theme::ACCENT
             },
-            0.9,
+            if draft.too_short { 0.9 } else { 1. },
         );
-        let shape_color = hsla(theme::ACCENT, 1.);
         let start_color = hsla(theme::TEXT_SOFT, 1.);
-        // 没有手绘轨迹（载入已保存的手势或点选方向）时，用规整的示意图表示方向序列。
-        let show_shape = trail.is_empty() && !steps.is_empty();
-        let show_sequence = !drawing && !draft.unrecognized && !steps.is_empty();
+        let idle = !drawing && trail.is_empty() && shape.is_none();
         let (hint, hint_color) = if drawing {
             ("松开左键完成", theme::TEXT_MUTED)
-        } else if draft.unrecognized {
-            ("没有识别出方向，请画长一些或减少转折", theme::RECORD)
-        } else if steps.is_empty() {
+        } else if draft.too_short {
+            ("太短了，请画长一些", theme::RECORD)
+        } else if shape.is_none() {
             ("按住左键在此绘制手势", theme::TEXT_MUTED)
         } else {
             ("重新绘制可替换", theme::TEXT_FAINT)
         };
-        let mut sequence = div().flex().items_center().gap(px(3.));
-        for step in &steps {
-            sequence = sequence.child(direction_icon(*step, 15., hsla(theme::TEXT_SOFT, 1.)));
-        }
-        let shape_steps = steps.clone();
-        let idle = !drawing && trail.is_empty() && steps.is_empty();
         let footer = div()
             .absolute()
             .left(px(12.))
@@ -277,11 +250,9 @@ impl Workspace {
             .bottom(px(9.))
             .flex()
             .items_center()
-            .justify_between()
-            // 面板空白时提示居中；有图形或轨迹时让到底部一行。
+            .justify_end()
+            // 面板空白时提示居中；有图形或轨迹时让到右下角。
             .when(idle, |el| el.top(px(9.)).justify_center())
-            .gap(px(8.))
-            .when(show_sequence, |el| el.child(sequence))
             .child(
                 div()
                     .text_size(px(11.5))
@@ -308,24 +279,7 @@ impl Workspace {
                 canvas(
                     move |bounds, _, _| origin.set(bounds.origin),
                     move |bounds, _, window, _| {
-                        if show_shape {
-                            // 底部一行留给方向序列与提示。
-                            let area = Bounds::new(
-                                point(bounds.origin.x + px(26.), bounds.origin.y + px(18.)),
-                                size(
-                                    bounds.size.width - px(52.),
-                                    bounds.size.height - px(18. + 40.),
-                                ),
-                            );
-                            let points = fit(&diagram(&shape_steps), area);
-                            stroke(&points, 2.5, shape_color, window);
-                            if let (Some(&first), Some(&last), Some(&step)) =
-                                (points.first(), points.last(), shape_steps.last())
-                            {
-                                arrow_head(last, unit(step), 9., 2.5, shape_color, window);
-                                start_dot(first, start_color, window);
-                            }
-                        } else {
+                        if !trail.is_empty() {
                             let points: Vec<_> = trail
                                 .iter()
                                 .map(|position| {
@@ -335,35 +289,11 @@ impl Workspace {
                                     )
                                 })
                                 .collect();
-                            stroke(&points, 3., trail_color, window);
-                            if let (Some(&first), Some(&last)) = (points.first(), points.last()) {
-                                start_dot(first, start_color, window);
-                                // 画完后在末端标出走向；取稍远的一点定方向，避免末端抖动。
-                                let back = points
-                                    .iter()
-                                    .rev()
-                                    .find(|position| {
-                                        let (dx, dy) = (
-                                            f32::from(last.x - position.x),
-                                            f32::from(last.y - position.y),
-                                        );
-                                        dx * dx + dy * dy >= 144.
-                                    })
-                                    .copied();
-                                if let Some(back) = back.filter(|_| !drawing) {
-                                    let (dx, dy) =
-                                        (f32::from(last.x - back.x), f32::from(last.y - back.y));
-                                    let length = (dx * dx + dy * dy).sqrt();
-                                    arrow_head(
-                                        last,
-                                        (dx / length, dy / length),
-                                        9.,
-                                        3.,
-                                        trail_color,
-                                        window,
-                                    );
-                                }
-                            }
+                            paint_route(&points, 3., color, start_color, !drawing, window);
+                        } else if let Some(shape) = shape {
+                            // 没有手绘轨迹（载入已保存的手势）时显示保存的形状。
+                            let points = place(&shape, bounds.center(), SHAPE_EXTENT);
+                            paint_route(&points, 2.5, color, start_color, true, window);
                         }
                     },
                 )
@@ -383,7 +313,7 @@ impl Workspace {
                 cx.listener(|this, event: &gpui::MouseMoveEvent, window, cx| {
                     if event.pressed_button == Some(gpui::MouseButton::Left) {
                         this.gesture_draw_move(event.position, window.scale_factor(), cx);
-                    } else if this.gesture_draft.tracker.is_some() {
+                    } else if this.gesture_draft.trace.is_some() {
                         this.gesture_draw_end(cx);
                     }
                 }),
@@ -396,83 +326,33 @@ impl Workspace {
                 gpui::MouseButton::Left,
                 cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| this.gesture_draw_end(cx)),
             );
-        let mut arrows = theme::segments();
-        for direction in GestureDirection::ALL {
-            let allowed = steps.len() < MAX_GESTURE_STEPS && steps.last() != Some(&direction);
-            arrows = arrows.child(
-                segment(("gesture-step", direction as usize), "", false)
-                    .flex_1()
-                    .min_w_0()
-                    .px(px(2.))
-                    .child(direction_icon(
-                        direction,
-                        16.,
-                        hsla(theme::TEXT_MUTED, if allowed { 1. } else { 0.35 }),
-                    ))
-                    .when(!allowed, |el| el.cursor_default())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let steps = &mut this.gesture_draft.steps;
-                        if steps.len() < MAX_GESTURE_STEPS && steps.last() != Some(&direction) {
-                            steps.push(direction);
-                            this.gesture_draft.trail.clear();
-                            this.gesture_draft.unrecognized = false;
-                            this.gesture_steps_changed(cx);
-                        }
-                    })),
-            );
-        }
-        let has_steps = !steps.is_empty();
         div()
             .flex()
             .flex_col()
             .gap(px(10.))
             .child(pad)
-            .child(
-                div()
-                    .flex()
-                    .gap(px(8.))
-                    .items_center()
-                    .child(arrows.flex_1().min_w_0())
-                    .child(
-                        small(button("gesture-undo", "撤销", Tone::Ghost, has_steps)).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                if this.gesture_draft.steps.pop().is_some() {
-                                    this.gesture_draft.trail.clear();
-                                    this.gesture_draft.unrecognized = false;
-                                    this.gesture_steps_changed(cx);
-                                }
-                            }),
-                        ),
-                    ),
-            )
-            .child(caption("按住鼠标键画出方向后松开触发；不移动仍是原点击。"))
+            .child(caption(
+                "按住鼠标键画出相似轨迹后松开触发，不移动仍是原点击",
+            ))
+            .child(caption("多个手势同样相似时，在指针旁列出候选供选择"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use GestureDirection::{Down, DownRight, Left, Right, Up};
 
     #[test]
-    fn diagram_offsets_reversals_and_fits_inside_the_area() {
-        let straight = diagram(&[Right, Down]);
-        assert_eq!(straight, [(0., 0.), (1., 0.), (1., 1.)]);
-        // 原路折返时终点不落在上一笔上。
-        let back = diagram(&[Down, Up]);
-        assert!(back[2].0.abs() > 0.2 && back[2].1.abs() < 0.01);
-
-        let area = Bounds::new(point(px(10.), px(20.)), size(px(300.), px(90.)));
-        for steps in [
-            &[Right][..],
-            &[Down, Up, Down, Up],
-            &[Right, Down, Left, Up, Right, Down, Left, Up],
-            &[DownRight, Up, DownRight],
-        ] {
-            for position in fit(&diagram(steps), area) {
-                assert!(area.contains(&position), "{steps:?} {position:?}");
-            }
+    fn shapes_are_placed_inside_the_requested_extent() {
+        let shape = GestureShape::from_polyline(&[(0, 0), (300, 0), (300, 120)]).unwrap();
+        let center = point(px(100.), px(60.));
+        let points = place(&shape, center, 80.);
+        assert_eq!(points.len(), omnitrigger_core::GESTURE_SHAPE_POINTS);
+        for position in &points {
+            assert!((f32::from(position.x) - 100.).abs() <= 40.01);
+            assert!((f32::from(position.y) - 60.).abs() <= 40.01);
         }
+        assert!((f32::from(points[0].x) - 60.).abs() < 0.1);
     }
 
     #[test]

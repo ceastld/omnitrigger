@@ -1741,7 +1741,7 @@ impl ThreadState {
     fn ensure_gesture_trail(&mut self) {}
 
     /// 按核心的手势会话同步轨迹浮层：只投递有界事件，不在 Hook 路径绘制。
-    /// 只有结束手势的那次释放触发了动作，才按“已匹配”收起。
+    /// 只有结束手势的那次释放触发了动作或留下待选候选，才按“已匹配”收起。
     fn sync_gesture_trail(&mut self, triggered: bool, current: Option<InputKind>) {
         let Some(trail) = self.gesture_trail.as_ref() else {
             return;
@@ -1780,7 +1780,16 @@ impl ThreadState {
         mut decision: Decision,
         current: Option<InputKind>,
     ) -> HookOutcome {
-        self.sync_gesture_trail(!decision.triggered.is_empty(), current);
+        // 待选候选与触发一样算作识别成功：轨迹按“已匹配”收起，选择交给界面。
+        let choice = self.engine.take_gesture_choice();
+        self.sync_gesture_trail(!decision.triggered.is_empty() || choice.is_some(), current);
+        if let Some(choice) = choice {
+            self.notify_action(BackendEvent::GestureChoice {
+                candidates: choice.candidates().collect(),
+                pointer: self.pointer.load(),
+                foreground: self.foreground as isize,
+            });
+        }
         for event in decision.drags.drain(..) {
             let cancelled = event.phase == DragPhase::Cancelled;
             let notification = BackendEvent::Drag {
@@ -2577,6 +2586,26 @@ pub(crate) fn panel_contains_point(hwnd: isize, x: i32, y: i32) -> bool {
 
 pub(crate) fn prepare_panel_window(hwnd: isize) -> Result<(), String> {
     prepare_floating_window(hwnd, windows::core::w!("OmniTrigger 触发面板"), "触发面板")
+}
+
+pub(crate) fn prepare_gesture_choice_window(hwnd: isize) -> Result<(), String> {
+    prepare_floating_window(hwnd, windows::core::w!("OmniTrigger 手势选择"), "手势选择")
+}
+
+pub(crate) fn show_gesture_choice_at_point(
+    hwnd: isize,
+    x: i32,
+    y: i32,
+    width: f32,
+    height: f32,
+) -> Result<(), String> {
+    show_floating_at_cursor(
+        hwnd,
+        Some((width, height)),
+        windows::core::w!("OmniTrigger 手势选择"),
+        "手势选择",
+        Some((x, y)),
+    )
 }
 
 pub(crate) fn prepare_wheel_window(hwnd: isize) -> Result<(), String> {

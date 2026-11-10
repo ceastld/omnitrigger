@@ -39,6 +39,7 @@ mod event_bridge;
 mod execution;
 mod explorer_context_helper;
 mod external_action;
+mod gesture_choice;
 mod gesture_editor;
 mod legacy_load_gate;
 mod legacy_local_source;
@@ -186,6 +187,7 @@ fn should_refresh_workspace_for_backend_event(event: &BackendEvent, page: Page) 
         | BackendEvent::RecordingProgress(_)
         | BackendEvent::Recorded(_)
         | BackendEvent::Triggered { .. }
+        | BackendEvent::GestureChoice { .. }
         | BackendEvent::Error(_)
         | BackendEvent::RecordingCancelled => true,
         BackendEvent::Diagnostics(_) | BackendEvent::HoldTiming { .. } => page == Page::Diagnostics,
@@ -657,7 +659,7 @@ fn activation_label(spec: &TriggerSpec) -> String {
             max_start_ms,
             ..
         } => format!("快速拖拽 ≥{min_distance_px}px · <{max_start_ms}ms"),
-        Activation::Gesture { .. } => "按方向移动后松开时触发".into(),
+        Activation::Gesture { .. } => "画出相似轨迹后松开时触发".into(),
         Activation::Wheel(_) => match spec.wheel {
             omnitrigger_core::WheelPolicy::Notch => "滚轮一格即触发".into(),
             omnitrigger_core::WheelPolicy::Packet => "每个滚轮事件触发一次".into(),
@@ -719,6 +721,9 @@ struct Workspace {
     drag_distance: Entity<MessageInput>,
     drag_window: Entity<MessageInput>,
     gesture_draft: gesture_editor::GestureDraft,
+    /// 等待用户点选的手势候选弹窗及其匹配上下文。
+    gesture_choice: Option<gesture_choice::PendingGestureChoice>,
+    gesture_choice_generation: u64,
     draft_action: ActionSpec,
     recording_for_panel: bool,
     recording_preserve_action: bool,
@@ -1094,8 +1099,8 @@ impl Workspace {
             input
         });
         let mut gesture_draft = gesture_editor::GestureDraft::default();
-        if let Some(Activation::Gesture { path, .. }) = initial_activation {
-            gesture_draft.load(path.steps());
+        if let Some(Activation::Gesture { shape, .. }) = initial_activation {
+            gesture_draft.load(Some(shape));
         }
         for input in [&hold_duration, &drag_distance, &drag_window] {
             cx.observe(input, |_, _, cx| cx.notify()).detach();
@@ -1221,6 +1226,8 @@ impl Workspace {
             drag_distance,
             drag_window,
             gesture_draft,
+            gesture_choice: None,
+            gesture_choice_generation: 0,
             draft_action,
             recording_for_panel: false,
             recording_preserve_action: false,
@@ -1990,7 +1997,13 @@ impl Workspace {
                 BackendEvent::Drag { event, foreground } => {
                     self.handle_drag_event(event, foreground, cx)
                 }
+                BackendEvent::GestureChoice {
+                    candidates,
+                    pointer,
+                    foreground,
+                } => self.offer_gesture_choice(candidates, pointer, foreground, cx),
                 BackendEvent::PointerPressed { x, y } => {
+                    self.dismiss_gesture_choice_outside(x, y, cx);
                     if let Some(wheel) = self.wheel_window {
                         let _ = wheel.update(cx, |view, window, _| {
                             if view.is_visible() {
@@ -2033,6 +2046,7 @@ impl Workspace {
                     }
                 }
                 BackendEvent::EscapePressed => {
+                    self.close_gesture_choice(cx);
                     self.cancel_owned_mouse_shortcuts();
                     self.local_executor.cancel_all();
                     self.action_service.cancel_all();
@@ -2105,6 +2119,7 @@ impl Workspace {
                 HitSource::Preview,
                 cx,
             );
+            self.preview_gesture_choice(cx);
         }
         if changed {
             self.refresh_panel(cx);
@@ -2244,8 +2259,8 @@ impl Workspace {
         self.drag_window
             .update(cx, |input, cx| input.set_text(window_ms.to_string(), cx));
         match spec.activation {
-            Activation::Gesture { path, .. } => self.gesture_draft.load(path.steps()),
-            _ => self.gesture_draft.load(&[]),
+            Activation::Gesture { shape, .. } => self.gesture_draft.load(Some(shape)),
+            _ => self.gesture_draft.load(None),
         }
     }
 
@@ -2314,8 +2329,10 @@ impl Workspace {
             }
             Activation::Gesture {
                 button,
-                path: omnitrigger_core::GesturePath::new(&self.gesture_draft.steps)
-                    .map_err(|error| error.to_string())?,
+                shape: self
+                    .gesture_draft
+                    .shape
+                    .ok_or_else(|| "请先在面板中画出手势。".to_string())?,
             }
         } else {
             Activation::Press(button)
@@ -2329,8 +2346,8 @@ impl Workspace {
 
     fn set_trigger_mode(&mut self, mode: TriggerMode, cx: &mut Context<Self>) {
         self.trigger_mode = mode;
-        // 尚未绘制手势时只切换编辑面板；保存时仍会报告缺少方向。
-        let awaiting_gesture = mode == TriggerMode::Gesture && self.gesture_draft.steps.is_empty();
+        // 尚未绘制手势时只切换编辑面板；保存按钮在画出形状前不可用。
+        let awaiting_gesture = mode == TriggerMode::Gesture && self.gesture_draft.shape.is_none();
         if let Some(base) = self.pending.clone().filter(|_| !awaiting_gesture) {
             match self.draft_spec(&base, cx) {
                 Ok(spec) => {

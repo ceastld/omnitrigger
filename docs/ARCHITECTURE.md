@@ -59,7 +59,7 @@ rust-toolchain.toml          固定 Rust 工具链与检查组件
 | `model.rs` | 按键、滚轮、输入事件、激活方式、`TriggerSpec` 和 `Decision` 等共享模型。 |
 | `registration.rs` | 注册约束、组合冲突与结构化 `RegistrationError`。 |
 | `engine.rs` | 前缀缓冲、消费和回退、重复过滤、长按计时、拖拽与手势会话及取消状态。 |
-| `gesture.rs` | 手势方向序列与固定容量的轨迹识别，运行时与界面绘制共用。 |
+| `gesture.rs` | 手势形状模板、固定容量的轨迹记录与整数相似度评分，运行时与界面绘制共用。 |
 | `recorder.rs` | 将规范化输入序列录制为 `TriggerSpec`。 |
 | `regions.rs` | 屏幕矩形、鼠标区域条件、命中及互斥判定。 |
 | `tests.rs`、`drag_tests.rs`、`region_tests.rs` | 输入序列与预期决策测试，覆盖基础、拖拽及多屏区域语义。 |

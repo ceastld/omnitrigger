@@ -467,10 +467,14 @@ enum ActivationDto {
         min_distance_px: u32,
         max_start_ms: u32,
     },
-    /// 方向使用稳定名称，例如 `["right", "down_left"]`。
+    /// `shape` 是沿轨迹的坐标点（任意坐标与点数，载入时等距重采样并归一化）；
+    /// `path` 是方向序列简写，例如 `["right", "down_left"]`，表示等长笔画的折线。二者只能写其一。
     Gesture {
         button: ButtonDto,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         path: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        shape: Vec<[i32; 2]>,
     },
     WheelUp,
     WheelDown,
@@ -478,16 +482,39 @@ enum ActivationDto {
     WheelRight,
 }
 
-/// 未知方向名或不合法序列返回错误，不合并重复方向或截断。
-fn decode_gesture_path(tokens: &[String]) -> Result<omnitrigger_core::GesturePath, String> {
-    let steps = tokens
-        .iter()
-        .map(|token| {
-            omnitrigger_core::GestureDirection::from_token(token)
-                .ok_or_else(|| format!("未知的手势方向“{token}”。"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    omnitrigger_core::GesturePath::new(&steps).map_err(|error| error.to_string())
+/// 方向简写最多包含的步数。
+const MAX_GESTURE_PATH_STEPS: usize = 8;
+
+/// 未知方向名、重复方向、过长序列或退化的坐标点返回错误，不合并或截断。
+fn decode_gesture_shape(
+    tokens: &[String],
+    points: &[[i32; 2]],
+) -> Result<omnitrigger_core::GestureShape, String> {
+    use omnitrigger_core::{GestureDirection, GestureShape};
+    match (tokens.is_empty(), points.is_empty()) {
+        (true, true) => Err("手势需要 shape 坐标点或 path 方向序列。".into()),
+        (false, false) => Err("手势的 shape 与 path 只能写其一。".into()),
+        (true, false) => {
+            let points: Vec<(i32, i32)> = points.iter().map(|&[x, y]| (x, y)).collect();
+            GestureShape::from_points(&points).map_err(|error| error.to_string())
+        }
+        (false, true) => {
+            if tokens.len() > MAX_GESTURE_PATH_STEPS {
+                return Err(format!(
+                    "手势方向序列最多 {MAX_GESTURE_PATH_STEPS} 步，当前为 {} 步。",
+                    tokens.len()
+                ));
+            }
+            let steps = tokens
+                .iter()
+                .map(|token| {
+                    GestureDirection::from_token(token)
+                        .ok_or_else(|| format!("未知的手势方向“{token}”。"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            GestureShape::from_directions(&steps).map_err(|error| error.to_string())
+        }
+    }
 }
 
 impl From<Button> for ButtonDto {
@@ -572,12 +599,13 @@ impl From<&Binding> for BindingDto {
                     min_distance_px,
                     max_start_ms,
                 },
-                Activation::Gesture { button, path } => ActivationDto::Gesture {
+                Activation::Gesture { button, shape } => ActivationDto::Gesture {
                     button: button.into(),
-                    path: path
-                        .steps()
+                    path: Vec::new(),
+                    shape: shape
+                        .points()
                         .iter()
-                        .map(|step| step.token().to_string())
+                        .map(|&(x, y)| [i32::from(x), i32::from(y)])
                         .collect(),
                 },
                 Activation::Wheel(WheelDirection::Up) => ActivationDto::WheelUp,
@@ -775,8 +803,8 @@ impl BindingDto {
         };
         let (effective, scene) =
             scenes::apply(self.scene, own, compiled, id).map_err(|error| error.to_string())?;
-        let gesture_path = match &self.activation {
-            ActivationDto::Gesture { path, .. } => Some(decode_gesture_path(path)?),
+        let gesture_shape = match &self.activation {
+            ActivationDto::Gesture { path, shape, .. } => Some(decode_gesture_shape(path, shape)?),
             _ => None,
         };
         Ok(Binding {
@@ -817,7 +845,7 @@ impl BindingDto {
                     },
                     ActivationDto::Gesture { button, .. } => Activation::Gesture {
                         button: button.into(),
-                        path: gesture_path.expect("手势路径已在前面解码"),
+                        shape: gesture_shape.expect("手势形状已在前面解码"),
                     },
                     ActivationDto::WheelUp => Activation::Wheel(WheelDirection::Up),
                     ActivationDto::WheelDown => Activation::Wheel(WheelDirection::Down),
@@ -1338,20 +1366,27 @@ mod tests {
         .unwrap()
     }
 
-    fn gesture_document(path: serde_json::Value) -> String {
+    fn gesture_document(field: &str, value: serde_json::Value) -> String {
+        let mut activation = json!({"button":{"kind":"right"}});
+        activation[field] = value;
         json!({"version":CONFIG_VERSION,"bindings":[{
             "id":9,"held":[],
-            "activation":{"kind":"gesture","value":{"button":{"kind":"right"},"path":path}},
+            "activation":{"kind":"gesture","value":activation},
             "enabled":true,"message":"手势","action":{"kind":"notification"}
         }]})
         .to_string()
     }
 
     #[test]
-    fn gesture_path_round_trips_and_invalid_sequences_are_rejected_without_rewriting() {
-        use omnitrigger_core::{GestureDirection, GesturePath};
-        let bindings = decode(&gesture_document(json!(["down", "right", "up_left"]))).unwrap();
-        let expected = GesturePath::new(&[
+    fn gesture_shapes_round_trip_and_direction_shorthand_loads_as_a_shape() {
+        use omnitrigger_core::{GestureDirection, GestureShape};
+        // 方向简写载入为等长笔画的折线，保存为形状点；再次载入不漂移。
+        let bindings = decode(&gesture_document(
+            "path",
+            json!(["down", "right", "up_left"]),
+        ))
+        .unwrap();
+        let expected = GestureShape::from_directions(&[
             GestureDirection::Down,
             GestureDirection::Right,
             GestureDirection::UpLeft,
@@ -1361,26 +1396,53 @@ mod tests {
             bindings[0].spec.activation,
             Activation::Gesture {
                 button: Button::Mouse(MouseButton::Right),
-                path: expected,
+                shape: expected,
             }
         );
         let saved: serde_json::Value = serde_json::from_str(&encode(&bindings)).unwrap();
+        let value = &saved["bindings"][0]["activation"]["value"];
+        assert!(value.get("path").is_none());
         assert_eq!(
-            saved["bindings"][0]["activation"]["value"]["path"],
-            json!(["down", "right", "up_left"])
+            value["shape"].as_array().unwrap().len(),
+            omnitrigger_core::GESTURE_SHAPE_POINTS
         );
         assert_eq!(decode(&encode(&bindings)).unwrap(), bindings);
-        for invalid in [
-            json!([]),
-            json!(["right", "right"]),
-            json!(["north"]),
-            json!(["up", "down", "up", "down", "up", "down", "up", "down", "up"]),
+        assert_eq!(
+            decode(&encode(&decode(&encode(&bindings)).unwrap())).unwrap(),
+            bindings
+        );
+
+        // 手写的少量坐标点同样可用。
+        let drawn = decode(&gesture_document(
+            "shape",
+            json!([[0, 0], [0, 100], [100, 100], [30, 30]]),
+        ))
+        .unwrap();
+        let Activation::Gesture { shape, .. } = drawn[0].spec.activation else {
+            panic!("应为手势");
+        };
+        assert!(shape.similarity(&expected) >= 950);
+
+        for (field, invalid) in [
+            ("path", json!([])),
+            ("path", json!(["right", "right"])),
+            ("path", json!(["north"])),
+            (
+                "path",
+                json!(["up", "down", "up", "down", "up", "down", "up", "down", "up"]),
+            ),
+            ("shape", json!([[5, 5]])),
+            ("shape", json!([[5, 5], [5, 5]])),
         ] {
             assert!(
-                decode(&gesture_document(invalid.clone())).is_err(),
-                "{invalid}"
+                decode(&gesture_document(field, invalid.clone())).is_err(),
+                "{field} {invalid}"
             );
         }
+        let mut both: serde_json::Value =
+            serde_json::from_str(&gesture_document("path", json!(["right"]))).unwrap();
+        both["bindings"][0]["activation"]["value"]["shape"] = json!([[0, 0], [9, 0]]);
+        assert!(decode(&both.to_string()).is_err());
     }
 
     mod mouse_sampled_settings {

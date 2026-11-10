@@ -10,7 +10,7 @@ use crate::model::direction;
 use crate::registration::validate;
 use crate::{
     Activation, ActiveDrag, Axis, Button, ContextError, Decision, DragEvent, DragPhase,
-    GestureTracker, InputEvent, InputKind, RegistrationError, ScreenRect, TriggerSpec,
+    GestureTrace, InputEvent, InputKind, RegistrationError, ScreenRect, TriggerSpec,
     WheelDirection, WheelPolicy, WheelSessionSnapshot, regions,
 };
 
@@ -71,11 +71,18 @@ struct PendingDrag {
 
 /// 一次鼠标手势会话。候选规则在按下时确定，位置条件不随轨迹移动重新判定。
 #[derive(Clone)]
+/// 松开手势键时的识别结果。
+enum Recognition {
+    None,
+    One(u64),
+    Choice(crate::GestureChoice),
+}
+
 struct GestureSession {
     button: Button,
     candidates: MousePrefixOwners,
     /// 按下时位置未知则在首次移动时以该点为起点。
-    tracker: Option<GestureTracker>,
+    tracker: Option<GestureTrace>,
     deadline_ms: u64,
     /// 已认领本次按压：原按下不再回放，松开时识别。
     started: bool,
@@ -105,6 +112,8 @@ pub struct Engine {
     drag: Option<PendingDrag>,
     active_drag: Option<ActiveDrag>,
     gesture: Option<GestureSession>,
+    /// 最近一次松开得到的待选候选，由外层取走；不参与后续输入决策。
+    gesture_choice: Option<crate::GestureChoice>,
     next_drag_session: Option<u64>,
     pointer_position: Option<(i32, i32)>,
     /// 首个等待中的鼠标前缀按下时的指针位置；移出容差后放弃组合并回放，交还拖拽。
@@ -151,6 +160,7 @@ impl Engine {
             drag: None,
             active_drag: None,
             gesture: None,
+            gesture_choice: None,
             next_drag_session: Some(1),
             pointer_position: None,
             prefix_origin: None,
@@ -715,7 +725,13 @@ impl Engine {
         self.gesture
             .as_ref()
             .and_then(|gesture| gesture.tracker.as_ref())
-            .map(GestureTracker::origin)
+            .map(GestureTrace::origin)
+    }
+
+    /// 取走最近一次松开留下的待选候选：多个手势与轨迹同样相似时不自动触发，
+    /// 由外层在 Hook 之外询问用户；取走后清空。
+    pub fn take_gesture_choice(&mut self) -> Option<crate::GestureChoice> {
+        self.gesture_choice.take()
     }
 
     fn gesture_pending(&self) -> bool {
@@ -737,27 +753,87 @@ impl Engine {
     }
 
     /// 松开手势键时只在按下时确定的候选中选择，绘制途中指针窗口变化不增删候选。
-    /// 先比较含斜向的路径，再比较只含上下左右的路径；同类按候选排序取第一条。
-    fn recognize_gesture(&self, gesture: &GestureSession) -> Option<u64> {
-        let reading = gesture.tracker.as_ref()?.reading();
-        self.bindings
-            .iter()
-            .enumerate()
-            .filter(|&(index, _)| gesture.candidates.contains(index))
-            .filter_map(|(index, binding)| match binding.activation {
-                Activation::Gesture { path, .. } if reading.matches(&path) => Some((
-                    (
-                        !path.has_diagonal(),
-                        std::cmp::Reverse(binding.scope_priority()),
-                        binding.keyboard.matching.priority(),
-                        index,
-                    ),
-                    binding.id,
-                )),
-                _ => None,
-            })
-            .min_by_key(|&(key, _)| key)
-            .map(|(_, id)| id)
+    /// 取相似度最高且达到阈值的一条；与最高分接近的其他候选若形状不同则交给用户选择，
+    /// 形状相同（仅范围不同）的按候选排序保留最具体的一条。
+    fn recognize_gesture(&self, gesture: &GestureSession) -> Recognition {
+        const KEPT: usize = 8;
+        type Key = (std::cmp::Reverse<u8>, u16, usize);
+        let Some(drawn) = gesture
+            .tracker
+            .as_ref()
+            .and_then(|trace| trace.shape().ok())
+        else {
+            return Recognition::None;
+        };
+        // 固定容量的前 KEPT 名，按相似度从高到低，同分按候选排序。
+        let mut best: [Option<(u16, Key, u64, crate::GestureShape)>; KEPT] = [None; KEPT];
+        for (index, binding) in self.bindings.iter().enumerate() {
+            if !gesture.candidates.contains(index) {
+                continue;
+            }
+            let Activation::Gesture { shape, .. } = binding.activation else {
+                continue;
+            };
+            let score = shape.similarity(&drawn);
+            if score < crate::GESTURE_ACCEPT {
+                continue;
+            }
+            let key = (
+                std::cmp::Reverse(binding.scope_priority()),
+                binding.keyboard.matching.priority(),
+                index,
+            );
+            let mut entry = Some((score, key, binding.id, shape));
+            for slot in &mut best {
+                let better = match (&entry, &*slot) {
+                    (Some(new), Some(old)) => {
+                        (std::cmp::Reverse(new.0), new.1) < (std::cmp::Reverse(old.0), old.1)
+                    }
+                    (Some(_), None) => true,
+                    (None, _) => false,
+                };
+                if better {
+                    std::mem::swap(slot, &mut entry);
+                }
+            }
+        }
+        let Some((top, ..)) = best[0] else {
+            return Recognition::None;
+        };
+        // 接近最高分的候选中，相同形状只保留候选排序最靠前的一条。
+        let close = |entry: &(u16, Key, u64, crate::GestureShape)| {
+            entry.0.saturating_add(crate::GESTURE_CLOSE_MARGIN) >= top
+        };
+        let mut kept = [(0u64, 0u16); crate::MAX_GESTURE_CHOICES];
+        let mut len = 0;
+        for (position, entry) in best.iter().flatten().enumerate() {
+            if !close(entry) {
+                break;
+            }
+            let same = |other: &(u16, Key, u64, crate::GestureShape)| {
+                other.3.similarity(&entry.3) >= crate::GESTURE_DUPLICATE
+            };
+            // 被更靠前排序的同形候选取代；同形候选中分数更高但排序靠后的一条让位。
+            let superseded = best
+                .iter()
+                .flatten()
+                .enumerate()
+                .any(|(other_position, other)| {
+                    other_position != position
+                        && close(other)
+                        && same(other)
+                        && (other.1, other_position) < (entry.1, position)
+                });
+            if !superseded && len < kept.len() {
+                kept[len] = (entry.2, entry.0);
+                len += 1;
+            }
+        }
+        match len {
+            0 => Recognition::None,
+            1 => Recognition::One(kept[0].0),
+            _ => Recognition::Choice(crate::GestureChoice::new(&kept[..len])),
+        }
     }
 
     /// 已建立的鼠标前缀及pending/active拖拽会话，供输入归一化器同步读取。
@@ -855,7 +931,7 @@ impl Engine {
         if let Some(gesture) = &mut self.gesture {
             let tracker = gesture
                 .tracker
-                .get_or_insert_with(|| GestureTracker::new(position));
+                .get_or_insert_with(|| GestureTrace::new(position));
             tracker.push(position);
             if !gesture.started && tracker.started() {
                 let mut gesture = self.gesture.take().expect("手势会话存在");
@@ -1032,7 +1108,7 @@ impl Engine {
             self.gesture = gesture.then(|| GestureSession {
                 button,
                 candidates: gesture_candidates,
-                tracker: self.pointer_position.map(GestureTracker::new),
+                tracker: self.pointer_position.map(GestureTrace::new),
                 deadline_ms: self
                     .now_ms
                     .saturating_add(u64::from(crate::GESTURE_START_MS)),
@@ -1171,7 +1247,15 @@ impl Engine {
         };
         let recognized = match self.gesture.take() {
             Some(gesture) if gesture.button == button && gesture.started => {
-                self.recognize_gesture(&gesture)
+                match self.recognize_gesture(&gesture) {
+                    Recognition::One(id) => Some(id),
+                    Recognition::Choice(choice) => {
+                        // 候选难以区分：本次释放不触发，交给外层让用户选择。
+                        self.gesture_choice = Some(choice);
+                        None
+                    }
+                    Recognition::None => None,
+                }
             }
             Some(gesture) if gesture.button == button => None,
             Some(gesture) => {

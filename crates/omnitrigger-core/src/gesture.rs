@@ -1,34 +1,44 @@
-//! 鼠标手势的方向序列与有界轨迹识别。
+//! 鼠标手势的形状模板与相似度匹配。
 //!
-//! 轨迹按固定段长采样并量化为方向，相同方向合并为一笔；已成形的一笔对落在扇区边界附近的
-//! 采样段有粘性，贴着边界画的直线不会被切成交替的碎笔。短于下限的笔画视为抖动、转角或
-//! 松开时的甩尾，识别结束时按“最短优先”删除并合并相邻同向笔画；下限取固定像素与最长一笔
-//! 的固定比例中较大者，因此判定随手势大小缩放。识别器同时维护四向与八向两份读数：
-//! 只含上下左右的手势与四向读数比较，含斜向的手势与八向读数比较。全部状态为固定容量，
-//! 移动与读数都不分配内存，可在 Hook 同步路径中调用，也可供界面录制复用同一规则。
+//! 一个手势是一条带方向的轨迹：沿路径等距取 [`GESTURE_SHAPE_POINTS`] 个点，平移到外包框中心并
+//! 等比缩放到固定大小，得到与位置、大小无关的形状模板（不做旋转归一化，方向不同就是不同的
+//! 手势）。松开时把所画轨迹化为同样的形状，与每个候选模板逐点比较距离得到 0–1000 的相似度，
+//! 由引擎取最高分；分数接近的候选交给界面让用户选择。
+//!
+//! 全部运算为整数，结果只取决于输入坐标；轨迹缓冲为固定容量，移动时只做有界工作量，
+//! 可在 Hook 同步路径中调用，也可供界面录制复用同一规则。
 
 use std::fmt;
 
-/// 一个手势最多包含的方向数。
-pub const MAX_GESTURE_STEPS: usize = 8;
 /// 从按下点位移达到此距离（物理像素）后进入手势，不再回放原按压。
 pub const GESTURE_START_PX: u32 = 12;
 /// 按下后严格小于此时长内未达到起始位移时，放弃手势并交还原按压。
 pub const GESTURE_START_MS: u32 = 500;
-/// 识别结果中每一笔的最小长度（物理像素）；更短的笔画按抖动或转角处理。
-pub const GESTURE_MIN_STROKE_PX: u32 = 32;
-/// 短于最长一笔此比例（1/N）的笔画同样按抖动处理，使判定随手势大小与屏幕密度缩放。
-pub const GESTURE_STROKE_RATIO: u32 = 8;
-/// 已成形的一笔保持方向的半角正切（分子，分母 10 000）：四向 55°，八向 30°。
-/// 量化扇区半角分别为 45° 与 22.5°，多出的部分是边界两侧的滞回带。
-const CARDINAL_STICKY_TAN: i64 = 14_281;
-const OCTAL_STICKY_TAN: i64 = 5_774;
-/// 采样段长：相对上一采样点位移达到此距离后量化一次方向。
-const SEGMENT_PX: i64 = 16;
-/// 原始笔画缓冲容量；写满时先删除已完成的短笔画，仍无法容纳则判定为过于复杂。
-const RAW_STROKES: usize = 32;
+/// 形状模板的采样点数。
+pub const GESTURE_SHAPE_POINTS: usize = 32;
+/// 轨迹总长（物理像素）不足此值时不构成手势。
+pub const GESTURE_MIN_LENGTH_PX: u32 = 32;
+/// 相似度（千分比）达到此值才算匹配。
+pub const GESTURE_ACCEPT: u16 = 700;
+/// 与最高分相差不超过此值的其他候选视为难以区分，需要用户选择。
+pub const GESTURE_CLOSE_MARGIN: u16 = 60;
+/// 两个模板的相似度达到此值视为同一个手势，不能在重叠范围内重复注册。
+pub const GESTURE_DUPLICATE: u16 = 900;
+/// 一次选择最多列出的候选数。
+pub const MAX_GESTURE_CHOICES: usize = 4;
 
-/// 屏幕坐标中的方向，y 轴向下。
+/// 归一化坐标的半边长：较长一边恰好占满 `-EXTENT..=EXTENT`。
+const EXTENT: i64 = 1000;
+/// 重采样时的定点倍率，避免短线段的长度被整数开方抹平。
+const FIXED: i64 = 256;
+/// 轨迹缓冲容量；写满时隔点抽稀并把采样间距加倍。
+const TRACE_POINTS: usize = 128;
+/// 轨迹缓冲的初始采样间距（物理像素）。
+const TRACE_SPACING_PX: i64 = 3;
+/// 单个坐标差的限幅：远大于任何屏幕，又保证平方与乘积不溢出。
+const DELTA_LIMIT: i64 = 1 << 20;
+
+/// 屏幕坐标中的方向，y 轴向下；用于以方向序列简写折线形状。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum GestureDirection {
     Up,
@@ -53,26 +63,6 @@ impl GestureDirection {
         Self::DownRight,
     ];
 
-    pub fn is_diagonal(self) -> bool {
-        matches!(
-            self,
-            Self::UpLeft | Self::UpRight | Self::DownLeft | Self::DownRight
-        )
-    }
-
-    pub fn arrow(self) -> char {
-        match self {
-            Self::Up => '↑',
-            Self::Down => '↓',
-            Self::Left => '←',
-            Self::Right => '→',
-            Self::UpLeft => '↖',
-            Self::UpRight => '↗',
-            Self::DownLeft => '↙',
-            Self::DownRight => '↘',
-        }
-    }
-
     /// 配置文件中使用的稳定名称。
     pub fn token(self) -> &'static str {
         match self {
@@ -93,8 +83,7 @@ impl GestureDirection {
             .find(|direction| direction.token() == token)
     }
 
-    /// 屏幕坐标中的方向向量；斜向未归一化，只用于比较夹角。
-    fn vector(self) -> (i64, i64) {
+    fn vector(self) -> (i32, i32) {
         match self {
             Self::Up => (0, -1),
             Self::Down => (0, 1),
@@ -106,322 +95,200 @@ impl GestureDirection {
             Self::DownRight => (1, 1),
         }
     }
-
-    /// 位移与本方向的夹角正切是否不超过 `tan / 10 000`。位移已按 [`clamp_delta`] 限幅。
-    fn holds(self, dx: i64, dy: i64, tan: i64) -> bool {
-        let (ux, uy) = self.vector();
-        let along = dx * ux + dy * uy;
-        let across = (dx * uy - dy * ux).abs();
-        along > 0 && across * 10_000 <= along * tan
-    }
-
-    /// 四向量化：水平与竖直等长时取水平。
-    fn cardinal(dx: i64, dy: i64) -> Self {
-        if dx.abs() >= dy.abs() {
-            if dx >= 0 { Self::Right } else { Self::Left }
-        } else if dy >= 0 {
-            Self::Down
-        } else {
-            Self::Up
-        }
-    }
-
-    /// 八向量化：以 22.5° 为界（tan 22.5° ≈ 0.4142），边界上取正方向。
-    fn octal(dx: i64, dy: i64) -> Self {
-        let (ax, ay) = (dx.abs(), dy.abs());
-        if ay * 10_000 <= ax * 4_142 {
-            return if dx >= 0 { Self::Right } else { Self::Left };
-        }
-        if ax * 10_000 <= ay * 4_142 {
-            return if dy >= 0 { Self::Down } else { Self::Up };
-        }
-        match (dx >= 0, dy >= 0) {
-            (true, true) => Self::DownRight,
-            (true, false) => Self::UpRight,
-            (false, true) => Self::DownLeft,
-            (false, false) => Self::UpLeft,
-        }
-    }
-}
-
-/// 手势方向序列；相邻方向必须不同，最多 [`MAX_GESTURE_STEPS`] 步。
-#[derive(Clone, Copy, Eq, PartialEq, Hash)]
-pub struct GesturePath {
-    steps: [GestureDirection; MAX_GESTURE_STEPS],
-    len: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GesturePathError {
+pub enum GestureShapeError {
+    /// 少于两个点，或所有点重合。
     Empty,
-    TooLong { len: usize },
+    /// 轨迹总长不足 [`GESTURE_MIN_LENGTH_PX`]。
+    TooShort,
+    /// 方向序列中相邻两步相同；连续同向只是更长的一笔。
     RepeatedStep { index: usize },
 }
 
-impl fmt::Display for GesturePathError {
+impl fmt::Display for GestureShapeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Empty => f.write_str("手势至少需要一个方向。"),
-            Self::TooLong { len } => {
-                write!(f, "手势最多 {MAX_GESTURE_STEPS} 个方向，当前为 {len} 个。")
-            }
+            Self::Empty => f.write_str("手势至少需要两个不重合的点。"),
+            Self::TooShort => write!(
+                f,
+                "手势太短，请至少画出 {GESTURE_MIN_LENGTH_PX} 像素的轨迹。"
+            ),
             Self::RepeatedStep { index } => write!(
                 f,
-                "手势第 {} 步与上一步方向相同；连续同向会合并为一笔，请删除重复方向。",
+                "手势第 {} 步与上一步方向相同；连续同向只是更长的一笔，请删除重复方向。",
                 index + 1
             ),
         }
     }
 }
 
-impl std::error::Error for GesturePathError {}
+impl std::error::Error for GestureShapeError {}
 
-impl GesturePath {
-    /// 不合并或截断输入；重复方向和超长序列返回错误。
-    pub fn new(steps: &[GestureDirection]) -> Result<Self, GesturePathError> {
-        if steps.is_empty() {
-            return Err(GesturePathError::Empty);
+/// 归一化的手势形状：沿路径等距的 [`GESTURE_SHAPE_POINTS`] 个点，较长一边占满 ±1000。
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+pub struct GestureShape {
+    points: [(i16, i16); GESTURE_SHAPE_POINTS],
+}
+
+impl fmt::Debug for GestureShape {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (first, last) = (self.points[0], self.points[GESTURE_SHAPE_POINTS - 1]);
+        write!(f, "GestureShape({first:?}..{last:?})")
+    }
+}
+
+impl GestureShape {
+    /// 由任意折线（至少两个不重合的点，任意坐标与点数）得到形状：等距重采样后归一化。
+    pub fn from_polyline(points: &[(i32, i32)]) -> Result<Self, GestureShapeError> {
+        Self::normalize(&resample(points).ok_or(GestureShapeError::Empty)?)
+    }
+
+    /// 由已有的采样点得到形状。恰好 [`GESTURE_SHAPE_POINTS`] 个点时不再重采样，
+    /// 只做平移与缩放；对已归一化的形状是恒等变换，保存后再载入不会漂移。
+    pub fn from_points(points: &[(i32, i32)]) -> Result<Self, GestureShapeError> {
+        match <[(i32, i32); GESTURE_SHAPE_POINTS]>::try_from(points) {
+            Ok(exact) => Self::normalize(&exact.map(|(x, y)| (i64::from(x), i64::from(y)))),
+            Err(_) => Self::from_polyline(points),
         }
-        if steps.len() > MAX_GESTURE_STEPS {
-            return Err(GesturePathError::TooLong { len: steps.len() });
-        }
+    }
+
+    /// 由方向序列生成等长笔画的折线形状；相邻方向相同返回错误，不合并。
+    pub fn from_directions(steps: &[GestureDirection]) -> Result<Self, GestureShapeError> {
         if let Some(index) = steps.windows(2).position(|pair| pair[0] == pair[1]) {
-            return Err(GesturePathError::RepeatedStep { index: index + 1 });
+            return Err(GestureShapeError::RepeatedStep { index: index + 1 });
         }
-        let mut path = Self {
-            steps: [GestureDirection::Up; MAX_GESTURE_STEPS],
-            len: steps.len() as u8,
-        };
-        path.steps[..steps.len()].copy_from_slice(steps);
-        Ok(path)
-    }
-
-    pub fn steps(&self) -> &[GestureDirection] {
-        &self.steps[..usize::from(self.len)]
-    }
-
-    pub fn has_diagonal(&self) -> bool {
-        self.steps().iter().any(|step| step.is_diagonal())
-    }
-}
-
-impl fmt::Display for GesturePath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for step in self.steps() {
-            write!(f, "{}", step.arrow())?;
+        const STEP: i32 = 1000;
+        const DIAGONAL: i32 = 707;
+        let mut points = Vec::with_capacity(steps.len() + 1);
+        let mut position = (0, 0);
+        points.push(position);
+        for step in steps {
+            let (dx, dy) = step.vector();
+            let unit = if dx != 0 && dy != 0 { DIAGONAL } else { STEP };
+            position = (position.0 + dx * unit, position.1 + dy * unit);
+            points.push(position);
         }
-        Ok(())
-    }
-}
-
-impl fmt::Debug for GesturePath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "GesturePath({self})")
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Stroke {
-    direction: GestureDirection,
-    length: u32,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct StrokeLog {
-    strokes: [Stroke; RAW_STROKES],
-    len: usize,
-    overflow: bool,
-}
-
-impl StrokeLog {
-    const fn new() -> Self {
-        Self {
-            strokes: [Stroke {
-                direction: GestureDirection::Up,
-                length: 0,
-            }; RAW_STROKES],
-            len: 0,
-            overflow: false,
-        }
+        Self::from_polyline(&points)
     }
 
-    /// 采样段的方向：最后一笔已成形且位移仍在其滞回带内时沿用该笔方向，否则取量化结果。
-    /// 未成形的短笔没有粘性，抖动不会借此变长。
-    fn settle(&self, raw: GestureDirection, dx: i64, dy: i64, sticky_tan: i64) -> GestureDirection {
-        match self.len.checked_sub(1).map(|index| self.strokes[index]) {
-            Some(last)
-                if last.length >= GESTURE_MIN_STROKE_PX
-                    && last.direction.holds(dx, dy, sticky_tan) =>
-            {
-                last.direction
-            }
-            _ => raw,
-        }
+    pub fn points(&self) -> &[(i16, i16); GESTURE_SHAPE_POINTS] {
+        &self.points
     }
 
-    fn add(&mut self, direction: GestureDirection, length: u32) {
-        if self.overflow {
-            return;
-        }
-        if self.merge_last(direction, length) {
-            return;
-        }
-        if self.len == RAW_STROKES {
-            // 仍在绘制的最后一笔可能继续变长，只压缩已完成的笔画；此时最长一笔未定，只用固定下限。
-            if !self.remove_shortest(self.len - 1, GESTURE_MIN_STROKE_PX) {
-                self.overflow = true;
-                return;
-            }
-            if self.merge_last(direction, length) {
-                return;
-            }
-        }
-        self.strokes[self.len] = Stroke { direction, length };
-        self.len += 1;
-    }
-
-    fn merge_last(&mut self, direction: GestureDirection, length: u32) -> bool {
-        match self
-            .len
-            .checked_sub(1)
-            .map(|index| &mut self.strokes[index])
-        {
-            Some(last) if last.direction == direction => {
-                last.length = last.length.saturating_add(length);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// 删除 `..limit` 中最短且不足 `floor` 的一笔，再合并相邻同向笔画。
-    /// 同长时先删两侧同向的一笔（删除后两侧并为一笔，长度不丢失），再取最早。
-    fn remove_shortest(&mut self, limit: usize, floor: u32) -> bool {
-        let bridges = |index: usize| {
-            index > 0
-                && index + 1 < self.len
-                && self.strokes[index - 1].direction == self.strokes[index + 1].direction
-        };
-        let Some(index) = (0..limit.min(self.len))
-            .filter(|&index| self.strokes[index].length < floor)
-            .min_by_key(|&index| (self.strokes[index].length, !bridges(index), index))
-        else {
-            return false;
-        };
-        self.strokes.copy_within(index + 1..self.len, index);
-        self.len -= 1;
-        if index > 0
-            && index < self.len
-            && self.strokes[index - 1].direction == self.strokes[index].direction
-        {
-            self.strokes[index - 1].length = self.strokes[index - 1]
-                .length
-                .saturating_add(self.strokes[index].length);
-            self.strokes.copy_within(index + 1..self.len, index);
-            self.len -= 1;
-        }
-        true
-    }
-
-    /// 笔画下限：固定像素与最长一笔的 1/[`GESTURE_STROKE_RATIO`] 中较大者。
-    fn floor(&self) -> u32 {
-        let longest = self.strokes[..self.len]
+    /// 与另一形状的相似度（千分比）：对应点平均距离为 0 时是 1000，
+    /// 达到归一化半边长（方向大致垂直）时降到 0。
+    pub fn similarity(&self, other: &Self) -> u16 {
+        let total: u64 = self
+            .points
             .iter()
-            .map(|stroke| stroke.length)
-            .max()
-            .unwrap_or(0);
-        GESTURE_MIN_STROKE_PX.max(longest / GESTURE_STROKE_RATIO)
+            .zip(&other.points)
+            .map(|(a, b)| {
+                let dx = i64::from(a.0) - i64::from(b.0);
+                let dy = i64::from(a.1) - i64::from(b.1);
+                ((dx * dx + dy * dy) as u64).isqrt()
+            })
+            .sum();
+        let average = total / GESTURE_SHAPE_POINTS as u64;
+        (EXTENT as u64).saturating_sub(average) as u16
     }
 
-    /// 斜向笔画是否足够明显：最长的斜向一笔不短于最长一笔的一半。
-    /// 圆角或略微倾斜留下的短斜笔达不到这个比例。
-    fn diagonal_is_clear(&self) -> bool {
-        let longest = |diagonal: bool| {
-            self.strokes[..self.len]
-                .iter()
-                .filter(|stroke| !diagonal || stroke.direction.is_diagonal())
-                .map(|stroke| stroke.length)
-                .max()
-                .unwrap_or(0)
+    fn normalize(points: &[(i64, i64); GESTURE_SHAPE_POINTS]) -> Result<Self, GestureShapeError> {
+        let (mut left, mut top, mut right, mut bottom) = (i64::MAX, i64::MAX, i64::MIN, i64::MIN);
+        for &(x, y) in points {
+            left = left.min(x);
+            top = top.min(y);
+            right = right.max(x);
+            bottom = bottom.max(y);
+        }
+        let span = (right - left).max(bottom - top);
+        if span <= 0 {
+            return Err(GestureShapeError::Empty);
+        }
+        // 以外包框中心为原点、较长一边为 2×EXTENT；四舍五入到整数坐标。
+        let scale = |value: i64, low: i64, high: i64| {
+            let doubled = (2 * value - low - high) * EXTENT;
+            let rounded = if doubled >= 0 {
+                (doubled + span / 2) / span
+            } else {
+                (doubled - span / 2) / span
+            };
+            rounded.clamp(-EXTENT, EXTENT) as i16
         };
-        longest(true) > 0 && u64::from(longest(true)) * 2 >= u64::from(longest(false))
-    }
-
-    /// 删除全部短笔后的记录；超出容量时为 `None`。
-    fn settled(&self) -> Option<Self> {
-        if self.overflow {
-            return None;
-        }
-        let mut log = *self;
-        // 合并会让最长一笔变长，下限随之重算；每轮至少删除一笔，循环有界。
-        while log.remove_shortest(log.len, log.floor()) {}
-        Some(log)
-    }
-
-    fn path(&self) -> Option<GesturePath> {
-        let log = self;
-        let mut steps = [GestureDirection::Up; MAX_GESTURE_STEPS];
-        let kept = steps.get_mut(..log.len)?;
-        for (step, stroke) in kept.iter_mut().zip(&log.strokes) {
-            *step = stroke.direction;
-        }
-        GesturePath::new(kept).ok()
+        Ok(Self {
+            points: points.map(|(x, y)| (scale(x, left, right), scale(y, top, bottom))),
+        })
     }
 }
 
-/// 一次手势的两份识别读数；超过容量或没有有效笔画时为 `None`。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GestureReading {
-    pub cardinal: Option<GesturePath>,
-    pub octal: Option<GesturePath>,
-    /// 八向读数中的斜向是否明显（最长的斜向一笔不短于最长一笔的一半）；只影响录制时的取舍。
-    pub diagonal_clear: bool,
-}
-
-impl GestureReading {
-    /// 含斜向的手势比较八向读数，其余比较四向读数。
-    pub fn matches(&self, path: &GesturePath) -> bool {
-        if path.has_diagonal() {
-            self.octal.as_ref() == Some(path)
-        } else {
-            self.cardinal.as_ref() == Some(path)
-        }
-    }
-
-    /// 供界面录制的读数：斜向明显时取八向读数，否则取四向读数。
-    /// 圆角转弯或略微倾斜留下的短斜笔不会写进录制结果，避免录出比所画多出几步的路径。
-    pub fn preferred(&self) -> Option<GesturePath> {
-        self.octal
-            .filter(|path| self.diagonal_clear && path.has_diagonal())
-            .or(self.cardinal)
-            .or(self.octal)
-    }
-}
-
-/// 单个采样段的位移限幅：远大于任何屏幕，又保证平方与正切比较不溢出。
 fn clamp_delta(value: i64) -> i64 {
-    const LIMIT: i64 = 1 << 20;
-    value.clamp(-LIMIT, LIMIT)
+    value.clamp(-DELTA_LIMIT, DELTA_LIMIT)
 }
 
-/// 固定容量的轨迹识别器；只接收显式提供的物理坐标。
+/// 线段长度（定点）；坐标差先限幅，平方不会溢出。
+fn segment_length(from: (i64, i64), to: (i64, i64)) -> i64 {
+    let dx = clamp_delta(to.0 - from.0) * FIXED;
+    let dy = clamp_delta(to.1 - from.1) * FIXED;
+    ((dx * dx + dy * dy) as u64).isqrt() as i64
+}
+
+/// 沿折线按路径长度等距取 [`GESTURE_SHAPE_POINTS`] 个点（定点坐标）；总长为零时返回 `None`。
+fn resample(points: &[(i32, i32)]) -> Option<[(i64, i64); GESTURE_SHAPE_POINTS]> {
+    let at = |index: usize| (i64::from(points[index].0), i64::from(points[index].1));
+    let total: i64 = (1..points.len())
+        .map(|index| segment_length(at(index - 1), at(index)))
+        .sum();
+    if total <= 0 {
+        return None;
+    }
+    let mut output = [(0, 0); GESTURE_SHAPE_POINTS];
+    let (mut index, mut walked) = (1, 0i64);
+    for (slot, sample) in output.iter_mut().enumerate() {
+        let target = total * slot as i64 / (GESTURE_SHAPE_POINTS as i64 - 1);
+        // 前进到包含目标长度的线段；零长线段直接跳过。
+        let mut length = segment_length(at(index - 1), at(index));
+        while index + 1 < points.len() && walked + length < target {
+            walked += length;
+            index += 1;
+            length = segment_length(at(index - 1), at(index));
+        }
+        let (from, to) = (at(index - 1), at(index));
+        let along = (target - walked).clamp(0, length);
+        let lerp = |a: i64, b: i64| {
+            if length == 0 {
+                b * FIXED
+            } else {
+                a * FIXED + clamp_delta(b - a) * FIXED * along / length
+            }
+        };
+        *sample = (lerp(from.0, to.0), lerp(from.1, to.1));
+    }
+    Some(output)
+}
+
+/// 固定容量的轨迹记录器；只接收显式提供的物理坐标。
 #[derive(Clone, Debug)]
-pub struct GestureTracker {
+pub struct GestureTrace {
     origin: (i32, i32),
-    anchor: (i32, i32),
+    tip: (i32, i32),
     started: bool,
-    cardinal: StrokeLog,
-    octal: StrokeLog,
+    points: [(i32, i32); TRACE_POINTS],
+    len: usize,
+    spacing: i64,
 }
 
-impl GestureTracker {
+impl GestureTrace {
     pub fn new(origin: (i32, i32)) -> Self {
+        let mut points = [(0, 0); TRACE_POINTS];
+        points[0] = origin;
         Self {
             origin,
-            anchor: origin,
+            tip: origin,
             started: false,
-            cardinal: StrokeLog::new(),
-            octal: StrokeLog::new(),
+            points,
+            len: 1,
+            spacing: TRACE_SPACING_PX,
         }
     }
 
@@ -441,43 +308,75 @@ impl GestureTracker {
                 i64::from(position.1) - i64::from(from.1),
             )
         };
+        self.tip = position;
         if !self.started {
             let (dx, dy) = delta(self.origin);
             let start = i64::from(GESTURE_START_PX);
+            // 各轴先与阈值比较，只有较小差值才平方，极端坐标不会溢出。
             self.started =
                 dx.abs() >= start || dy.abs() >= start || dx * dx + dy * dy >= start * start;
         }
-        let (dx, dy) = delta(self.anchor);
-        // 各轴先与有界段长比较，只有较小差值才平方，极端坐标不会溢出。
-        if dx.abs() < SEGMENT_PX
-            && dy.abs() < SEGMENT_PX
-            && dx * dx + dy * dy < SEGMENT_PX * SEGMENT_PX
-        {
+        let (dx, dy) = delta(self.points[self.len - 1]);
+        if dx.abs() < self.spacing && dy.abs() < self.spacing {
             return;
         }
-        // 方向与长度只取决于限幅后的位移；极端坐标下乘积仍在 i64 范围内。
-        let (dx, dy) = (clamp_delta(dx), clamp_delta(dy));
-        let length = (dx * dx + dy * dy).isqrt() as u32;
-        let cardinal = self.cardinal.settle(
-            GestureDirection::cardinal(dx, dy),
-            dx,
-            dy,
-            CARDINAL_STICKY_TAN,
-        );
-        self.cardinal.add(cardinal, length);
-        let octal = self
-            .octal
-            .settle(GestureDirection::octal(dx, dy), dx, dy, OCTAL_STICKY_TAN);
-        self.octal.add(octal, length);
-        self.anchor = position;
+        if self.len == TRACE_POINTS {
+            // 隔点抽稀并把间距加倍：形状保持，长轨迹的工作量与内存仍有界。
+            for index in 1..TRACE_POINTS / 2 {
+                self.points[index] = self.points[index * 2];
+            }
+            self.len = TRACE_POINTS / 2;
+            self.spacing = self.spacing.saturating_mul(2);
+        }
+        self.points[self.len] = position;
+        self.len += 1;
     }
 
-    pub fn reading(&self) -> GestureReading {
-        let octal = self.octal.settled();
-        GestureReading {
-            cardinal: self.cardinal.settled().and_then(|log| log.path()),
-            octal: octal.and_then(|log| log.path()),
-            diagonal_clear: octal.is_some_and(|log| log.diagonal_is_clear()),
+    /// 当前轨迹的形状；总长不足 [`GESTURE_MIN_LENGTH_PX`] 时返回错误。
+    pub fn shape(&self) -> Result<GestureShape, GestureShapeError> {
+        let mut points = [(0, 0); TRACE_POINTS + 1];
+        points[..self.len].copy_from_slice(&self.points[..self.len]);
+        points[self.len] = self.tip;
+        let points = &points[..=self.len];
+        let at = |index: usize| (i64::from(points[index].0), i64::from(points[index].1));
+        let length: i64 = (1..points.len())
+            .map(|index| segment_length(at(index - 1), at(index)))
+            .sum();
+        if length < i64::from(GESTURE_MIN_LENGTH_PX) * FIXED {
+            return Err(GestureShapeError::TooShort);
         }
+        GestureShape::from_polyline(points)
+    }
+}
+
+/// 松开时难以区分的候选：按相似度从高到低，至少两项。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GestureChoice {
+    ids: [u64; MAX_GESTURE_CHOICES],
+    scores: [u16; MAX_GESTURE_CHOICES],
+    len: u8,
+}
+
+impl GestureChoice {
+    pub(crate) fn new(candidates: &[(u64, u16)]) -> Self {
+        let mut choice = Self {
+            ids: [0; MAX_GESTURE_CHOICES],
+            scores: [0; MAX_GESTURE_CHOICES],
+            len: candidates.len().min(MAX_GESTURE_CHOICES) as u8,
+        };
+        for (slot, &(id, score)) in candidates.iter().take(MAX_GESTURE_CHOICES).enumerate() {
+            choice.ids[slot] = id;
+            choice.scores[slot] = score;
+        }
+        choice
+    }
+
+    /// 候选的绑定标识与相似度（千分比）。
+    pub fn candidates(&self) -> impl Iterator<Item = (u64, u16)> + '_ {
+        let len = usize::from(self.len);
+        self.ids[..len]
+            .iter()
+            .copied()
+            .zip(self.scores[..len].iter().copied())
     }
 }

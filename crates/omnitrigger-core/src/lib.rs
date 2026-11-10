@@ -47,8 +47,9 @@ mod wheel_input;
 
 pub use engine::Engine;
 pub use gesture::{
-    GESTURE_MIN_STROKE_PX, GESTURE_START_MS, GESTURE_START_PX, GestureDirection, GesturePath,
-    GesturePathError, GestureReading, GestureTracker, MAX_GESTURE_STEPS,
+    GESTURE_ACCEPT, GESTURE_CLOSE_MARGIN, GESTURE_DUPLICATE, GESTURE_MIN_LENGTH_PX,
+    GESTURE_SHAPE_POINTS, GESTURE_START_MS, GESTURE_START_PX, GestureChoice, GestureDirection,
+    GestureShape, GestureShapeError, GestureTrace, MAX_GESTURE_CHOICES,
 };
 pub use model::{
     Activation, ActiveDrag, Axis, Button, Decision, DragEvent, DragPhase, InputEvent, InputKind,

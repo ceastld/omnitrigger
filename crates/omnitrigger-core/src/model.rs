@@ -58,12 +58,12 @@ pub enum Activation {
         max_start_ms: u32,
     },
     Wheel(WheelDirection),
-    /// 鼠标手势：按住鼠标键移动，松开时轨迹与 path 一致则触发。
+    /// 鼠标手势：按住鼠标键移动，松开时在候选中取与轨迹最相似且达到阈值的 shape 触发。
     /// 从按下起严格小于 GESTURE_START_MS 内位移达到 GESTURE_START_PX 后认领本次按压；
     /// 未达到则回放原按压。位置条件只在按下时判定。
     Gesture {
         button: Button,
-        path: crate::GesturePath,
+        shape: crate::GestureShape,
     },
 }
 

@@ -545,10 +545,11 @@ pub(super) fn validate(
                     second: right.id,
                 });
             }
-            // 同键的不同手势路径在松开时按轨迹区分；长按在位移超出容差时取消，二者可共存。
+            // 同键的不同手势形状在松开时按相似度区分，相似到难以区分的视为重复；
+            // 长按在位移超出容差时取消，与手势可共存。
             let gesture_pair = match (left.activation, right.activation) {
-                (Activation::Gesture { path: a, .. }, Activation::Gesture { path: b, .. }) => {
-                    a != b
+                (Activation::Gesture { shape: a, .. }, Activation::Gesture { shape: b, .. }) => {
+                    a.similarity(&b) < crate::GESTURE_DUPLICATE
                 }
                 (Activation::Gesture { .. }, Activation::Hold { .. })
                 | (Activation::Hold { .. }, Activation::Gesture { .. }) => true,

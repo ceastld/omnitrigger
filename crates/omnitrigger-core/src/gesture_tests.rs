@@ -1,13 +1,13 @@
 use crate::*;
 
-use GestureDirection::{Down, DownLeft, DownRight, Left, Right, Up};
+use GestureDirection::{Down, DownRight, Left, Right, Up};
 
 const RIGHT: Button = Button::Mouse(MouseButton::Right);
 const MIDDLE: Button = Button::Mouse(MouseButton::Middle);
 const CAPS: Button = Button::Key(0x14);
 
-fn path(steps: &[GestureDirection]) -> GesturePath {
-    GesturePath::new(steps).unwrap()
+fn shape(steps: &[GestureDirection]) -> GestureShape {
+    GestureShape::from_directions(steps).unwrap()
 }
 
 fn spec(id: u64, held: &[Button], activation: Activation) -> TriggerSpec {
@@ -29,7 +29,7 @@ fn gesture(id: u64, steps: &[GestureDirection]) -> TriggerSpec {
         &[],
         Activation::Gesture {
             button: RIGHT,
-            path: path(steps),
+            shape: shape(steps),
         },
     )
 }
@@ -61,36 +61,67 @@ fn stroke(engine: &mut Engine, from: (i32, i32), to: (i32, i32), now: u64) -> De
     decision
 }
 
-fn track(points: &[(i32, i32)]) -> GestureReading {
-    let mut tracker = GestureTracker::new(points[0]);
+/// 沿折线以 3px 步长记录轨迹。
+fn trace(points: &[(i32, i32)]) -> GestureTrace {
+    let mut trace = GestureTrace::new(points[0]);
     for pair in points.windows(2) {
         let (from, to) = (pair[0], pair[1]);
         let steps = ((to.0 - from.0).abs().max((to.1 - from.1).abs()) / 3).max(1);
         for step in 1..=steps {
-            tracker.push((
+            trace.push((
                 from.0 + (to.0 - from.0) * step / steps,
                 from.1 + (to.1 - from.1) * step / steps,
             ));
         }
     }
-    tracker.reading()
+    trace
+}
+
+fn drawn(points: &[(i32, i32)]) -> GestureShape {
+    trace(points).shape().unwrap()
 }
 
 #[test]
-fn path_rejects_empty_repeated_and_overlong_sequences_without_rewriting() {
-    assert_eq!(GesturePath::new(&[]), Err(GesturePathError::Empty));
+fn shapes_are_normalized_and_survive_a_save_and_load_round_trip() {
+    let corner = GestureShape::from_polyline(&[(40, 40), (240, 40), (240, 140)]).unwrap();
+    let points = corner.points();
+    assert_eq!(points.len(), GESTURE_SHAPE_POINTS);
+    // 较长一边占满 ±1000，较短一边按比例居中；起点与终点保留。
+    assert_eq!(points[0], (-1000, -500));
+    assert_eq!(points[GESTURE_SHAPE_POINTS - 1], (1000, 500));
+    // 位置与大小不影响形状。
+    let moved = GestureShape::from_polyline(&[(-900, 7), (-500, 7), (-500, 207)]).unwrap();
+    assert!(corner.similarity(&moved) >= 995);
+    // 已归一化的采样点原样载入，反复保存不漂移。
+    let saved: Vec<(i32, i32)> = points
+        .iter()
+        .map(|&(x, y)| (i32::from(x), i32::from(y)))
+        .collect();
+    assert_eq!(GestureShape::from_points(&saved), Ok(corner));
+    // 点数不同的折线会重采样。
+    assert!(
+        GestureShape::from_points(&[(0, 0), (2, 0), (2, 1)])
+            .unwrap()
+            .similarity(&corner)
+            >= 995
+    );
+
     assert_eq!(
-        GesturePath::new(&[Right, Right]),
-        Err(GesturePathError::RepeatedStep { index: 1 })
+        GestureShape::from_polyline(&[]),
+        Err(GestureShapeError::Empty)
     );
     assert_eq!(
-        GesturePath::new(&[Up, Down, Up, Down, Up, Down, Up, Down, Up]),
-        Err(GesturePathError::TooLong { len: 9 })
+        GestureShape::from_polyline(&[(5, 5), (5, 5)]),
+        Err(GestureShapeError::Empty)
     );
-    let valid = path(&[Right, Down, DownRight]);
-    assert_eq!(valid.steps(), [Right, Down, DownRight]);
-    assert!(valid.has_diagonal());
-    assert_eq!(valid.to_string(), "→↓↘");
+    assert_eq!(
+        GestureShape::from_directions(&[Right, Right]),
+        Err(GestureShapeError::RepeatedStep { index: 1 })
+    );
+    assert_eq!(
+        GestureShape::from_directions(&[]),
+        Err(GestureShapeError::Empty)
+    );
     for direction in GestureDirection::ALL {
         assert_eq!(
             GestureDirection::from_token(direction.token()),
@@ -100,165 +131,118 @@ fn path_rejects_empty_repeated_and_overlong_sequences_without_rewriting() {
 }
 
 #[test]
-fn tracker_reads_straight_corner_and_diagonal_strokes() {
-    let straight = track(&[(0, 0), (120, 6)]);
-    assert_eq!(straight.cardinal, Some(path(&[Right])));
-    assert_eq!(straight.octal, Some(path(&[Right])));
-
-    // 圆角转弯在八向读数中可能留下短斜笔；四向读数仍为“右、下”。
-    let corner = track(&[(0, 0), (100, 0), (120, 20), (120, 120)]);
-    assert_eq!(corner.cardinal, Some(path(&[Right, Down])));
-    assert!(corner.matches(&path(&[Right, Down])));
-
-    let diagonal = track(&[(0, 0), (90, 90)]);
-    assert_eq!(diagonal.octal, Some(path(&[DownRight])));
-    assert!(diagonal.matches(&path(&[DownRight])));
-    assert_eq!(diagonal.preferred(), Some(path(&[DownRight])));
-}
-
-#[test]
-fn tracker_ignores_perpendicular_jitter_and_short_tails() {
-    let mut points = vec![(0, 0)];
-    for x in (10..=200).step_by(10) {
-        points.push((x, if x % 20 == 0 { 3 } else { -3 }));
-    }
-    // 松开前的小幅回拉不足一笔。
-    points.push((190, -3));
-    let reading = track(&points);
-    assert_eq!(reading.cardinal, Some(path(&[Right])));
-    assert_eq!(reading.octal, Some(path(&[Right])));
-}
-
-#[test]
-fn tracker_keeps_one_stroke_along_a_sector_boundary() {
-    // 贴着八向扇区边界（22.5°）的长直线：采样段在“右”与“右下”之间摇摆，读数仍是一笔。
-    let mut points = vec![(0, 0)];
-    for x in (12..=360).step_by(12) {
-        let wobble = if (x / 12) % 2 == 0 { 3 } else { -3 };
-        points.push((x, x * 4_142 / 10_000 + wobble));
-    }
-    let reading = track(&points);
-    assert_eq!(reading.cardinal, Some(path(&[Right])));
-    let octal = reading.octal.expect("边界上的直线仍应读出一笔");
-    assert!(octal == path(&[Right]) || octal == path(&[DownRight]));
-
-    // 贴着四向边界（45°）的直线同理，四向读数不会因交替而丢失。
-    let mut points = vec![(0, 0)];
-    for step in 1..=30 {
-        let wobble = if step % 2 == 0 { 4 } else { -4 };
-        points.push((step * 12, step * 12 + wobble));
-    }
-    let reading = track(&points);
-    let cardinal = reading.cardinal.expect("边界上的直线仍应读出一笔");
-    assert!(cardinal == path(&[Right]) || cardinal == path(&[Down]));
-    assert_eq!(reading.octal, Some(path(&[DownRight])));
-}
-
-#[test]
-fn stroke_length_is_euclidean_so_diagonals_are_not_undercounted() {
-    // 斜向 34×34（约 48px）与水平 48px 同样成笔；按较大轴计只有 34px 的旧算法会漏掉前者。
-    assert_eq!(track(&[(0, 0), (34, 34)]).octal, Some(path(&[DownRight])));
-    assert_eq!(track(&[(0, 0), (48, 0)]).octal, Some(path(&[Right])));
-    assert_eq!(track(&[(0, 0), (20, 20)]).octal, None);
-}
-
-#[test]
-fn short_strokes_scale_with_the_longest_stroke() {
-    // 大手势松开时的甩尾（50px）超过固定下限，但不足最长一笔的 1/8。
-    let hooked = track(&[(0, 0), (480, 0), (455, -44)]);
-    assert_eq!(hooked.cardinal, Some(path(&[Right])));
-    assert_eq!(hooked.octal, Some(path(&[Right])));
-    // 同样 50px 的一笔在小手势里是有意的笔画。
-    assert_eq!(
-        track(&[(0, 0), (120, 0), (120, -50)]).cardinal,
-        Some(path(&[Right, Up]))
+fn similarity_falls_with_tilt_and_separates_different_shapes() {
+    let right = shape(&[Right]);
+    assert_eq!(right.similarity(&right), 1000);
+    // 倾斜越大越不像：10° 仍很接近，45° 已不匹配，反向几乎为零。
+    let tilted = |degrees: f64| {
+        let angle = degrees.to_radians();
+        GestureShape::from_polyline(&[
+            (0, 0),
+            ((1000. * angle.cos()) as i32, (1000. * angle.sin()) as i32),
+        ])
+        .unwrap()
+    };
+    let scores: Vec<u16> = [10., 20., 30., 45.]
+        .iter()
+        .map(|&degrees| right.similarity(&tilted(degrees)))
+        .collect();
+    assert!(
+        scores.windows(2).all(|pair| pair[0] > pair[1]),
+        "{scores:?}"
     );
-    // 含斜向的路径不受大圆角影响：圆角处的短斜笔随比例下限删除。
-    let rounded = track(&[
+    assert!(
+        scores[0] >= 900 && scores[1] >= GESTURE_ACCEPT,
+        "{scores:?}"
+    );
+    assert!(scores[3] < GESTURE_ACCEPT, "{scores:?}");
+    assert!(right.similarity(&shape(&[Left])) < 400);
+    assert!(right.similarity(&shape(&[Down])) < GESTURE_ACCEPT);
+
+    // 折线、斜线与直线互不相似；同一形状画圆角或带抖动仍然匹配。
+    let corner = shape(&[Right, Down]);
+    assert!(corner.similarity(&right) < 400);
+    assert!(corner.similarity(&shape(&[DownRight])) < GESTURE_ACCEPT);
+    assert!(corner.similarity(&shape(&[Down, Right])) < 400);
+    let rounded = drawn(&[
         (0, 0),
-        (400, 0),
-        (425, 8),
-        (442, 25),
-        (450, 50),
-        (450, 450),
-        (250, 650),
+        (150, 4),
+        (185, 14),
+        (204, 40),
+        (212, 80),
+        (208, 220),
     ]);
-    assert_eq!(rounded.octal, Some(path(&[Right, Down, DownLeft])));
-    // 长短腿 1:5 仍是两笔。
-    assert_eq!(
-        track(&[(0, 0), (0, 80), (400, 80)]).cardinal,
-        Some(path(&[Down, Right]))
-    );
+    assert!(rounded.similarity(&corner) >= 850);
+    assert!(rounded.similarity(&right) < GESTURE_ACCEPT);
+    // 任意形状同样可比：圆弧不是折线，也不是直线。
+    let arc: Vec<(i32, i32)> = (0..=18)
+        .map(|step| {
+            let angle = f64::from(step) * 10f64.to_radians();
+            (
+                (200. - 200. * angle.cos()) as i32,
+                (-200. * angle.sin()) as i32,
+            )
+        })
+        .collect();
+    let arc = GestureShape::from_polyline(&arc).unwrap();
+    assert!(arc.similarity(&arc) == 1000 && arc.similarity(&right) < GESTURE_ACCEPT);
+    assert!(arc.similarity(&shape(&[Up, Right, Down])) < GESTURE_DUPLICATE);
 }
 
 #[test]
-fn recording_keeps_only_clear_diagonals() {
-    // 大圆角的“右、下”：八向读数里有一小段右下，但远短于两条腿，录制结果仍是两步。
-    let mut rounded = vec![(0, 0), (200, 0)];
-    for step in 1..=9 {
-        let angle = f64::from(step) * 10f64.to_radians();
-        rounded.push((
-            200 + (80. * angle.sin()).round() as i32,
-            80 - (80. * angle.cos()).round() as i32,
-        ));
-    }
-    rounded.push((280, 300));
-    let reading = track(&rounded);
-    assert_eq!(reading.octal, Some(path(&[Right, DownRight, Down])));
-    assert!(!reading.diagonal_clear);
-    assert_eq!(reading.preferred(), Some(path(&[Right, Down])));
-    // 运行时匹配不受影响：含斜向的路径仍与完整的八向读数比较。
-    assert!(reading.matches(&path(&[Right, DownRight, Down])));
+fn trace_is_bounded_keeps_the_shape_and_needs_a_minimum_length() {
+    let mut short = GestureTrace::new((0, 0));
+    short.push((11, 0));
+    assert!(!short.started());
+    assert_eq!(short.shape(), Err(GestureShapeError::TooShort));
+    short.push((12, 0));
+    assert!(short.started());
+    assert_eq!(short.shape(), Err(GestureShapeError::TooShort));
+    short.push((40, 0));
+    assert!(short.shape().unwrap().similarity(&shape(&[Right])) >= 990);
 
-    // “Z”形的斜笔与横笔等长，按八向录制。
-    let zed = track(&[(0, 0), (200, 0), (20, 180), (220, 180)]);
-    assert!(zed.diagonal_clear);
-    assert_eq!(zed.preferred(), Some(path(&[Right, DownLeft, Right])));
-    // 倾斜 30° 的单笔只有一个方向，没有别的笔画可比，仍按斜向录制。
-    assert_eq!(
-        track(&[(0, 0), (173, 100)]).preferred(),
-        Some(path(&[DownRight]))
-    );
+    // 远超缓冲容量的长轨迹被抽稀后形状不变。
+    let long = drawn(&[(0, 0), (6000, 0), (6000, 6000), (0, 6000)]);
+    assert!(long.similarity(&shape(&[Right, Down, Left])) >= 950);
+    // 垂直抖动与松开前的小幅回拉不改变匹配。
+    let mut points = vec![(0, 0)];
+    for x in (10..=300).step_by(10) {
+        points.push((x, if x % 20 == 0 { 4 } else { -4 }));
+    }
+    points.push((285, -10));
+    assert!(drawn(&points).similarity(&shape(&[Right])) >= 900);
+
+    // 极端坐标不溢出。
+    let mut extreme = GestureTrace::new((i32::MIN, i32::MIN));
+    extreme.push((i32::MAX, i32::MAX));
+    extreme.push((i32::MIN, i32::MAX));
+    assert!(extreme.started() && extreme.shape().is_ok());
 }
 
 #[test]
-fn extreme_coordinates_do_not_overflow() {
-    let mut tracker = GestureTracker::new((i32::MIN, i32::MIN));
-    tracker.push((i32::MAX, i32::MAX));
-    tracker.push((i32::MIN, i32::MAX));
-    assert!(tracker.started());
-    assert_eq!(tracker.reading().octal, Some(path(&[DownRight, Left])));
-}
+fn close_scores_ask_the_user_instead_of_guessing() {
+    let mut engine = Engine::new(vec![gesture(1, &[Right]), gesture(2, &[DownRight])]).unwrap();
+    engine.pointer_moved((0, 0), 0);
+    // 约 26° 的斜线与“右”“右下”几乎同样相似：不触发，留下按分数排序的候选。
+    input(&mut engine, InputKind::Down(RIGHT), 0);
+    stroke(&mut engine, (0, 0), (200, 96), 20);
+    let up = input(&mut engine, InputKind::Up(RIGHT), 30);
+    assert!(up.consume && up.triggered.is_empty() && up.replay.is_empty());
+    let choice = engine.take_gesture_choice().expect("应留下待选候选");
+    let candidates: Vec<(u64, u16)> = choice.candidates().collect();
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates[0].1 >= candidates[1].1 && candidates[1].1 >= GESTURE_ACCEPT);
+    assert!(candidates[0].1 - candidates[1].1 <= GESTURE_CLOSE_MARGIN);
+    let mut ids: Vec<u64> = candidates.iter().map(|&(id, _)| id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2]);
+    assert_eq!(engine.take_gesture_choice(), None);
 
-#[test]
-fn tracker_needs_start_distance_and_rejects_overly_complex_traces() {
-    let mut tracker = GestureTracker::new((0, 0));
-    tracker.push((11, 0));
-    assert!(!tracker.started());
-    assert_eq!(tracker.reading().cardinal, None);
-    tracker.push((12, 0));
-    assert!(tracker.started());
-
-    // 九个完整笔画超过上限；更多往返写满原始缓冲后也不会误判为短路径。
-    let mut stairs = vec![(0, 0)];
-    for index in 1..=9 {
-        let (x, y) = stairs[index - 1];
-        stairs.push(if index % 2 == 1 {
-            (x + 60, y)
-        } else {
-            (x, y + 60)
-        });
-    }
-    assert_eq!(
-        track(&stairs[..9]).cardinal.map(|path| path.steps().len()),
-        Some(8)
-    );
-    assert_eq!(track(&stairs).cardinal, None);
-    let mut long = vec![(0, 0)];
-    for index in 1..=80 {
-        long.push((0, if index % 2 == 0 { 0 } else { 80 }));
-    }
-    assert_eq!(track(&long).cardinal, None);
+    // 明显更像其中一个时直接触发，不留候选。
+    input(&mut engine, InputKind::Down(RIGHT), 40);
+    stroke(&mut engine, (200, 96), (400, 110), 60);
+    assert_eq!(input(&mut engine, InputKind::Up(RIGHT), 70).triggered, [1]);
+    assert_eq!(engine.take_gesture_choice(), None);
 }
 
 #[test]
@@ -413,7 +397,7 @@ fn hold_fires_when_still_and_gesture_wins_after_movement() {
 }
 
 #[test]
-fn diagonal_paths_are_compared_before_cardinal_paths() {
+fn the_most_similar_gesture_wins() {
     let mut engine = Engine::new(vec![gesture(1, &[Down]), gesture(2, &[DownRight])]).unwrap();
     engine.pointer_moved((0, 0), 0);
     input(&mut engine, InputKind::Down(RIGHT), 0);
@@ -426,7 +410,7 @@ fn diagonal_paths_are_compared_before_cardinal_paths() {
 }
 
 #[test]
-fn same_path_prefers_the_most_specific_scope_while_other_scopes_still_join() {
+fn same_shape_prefers_the_most_specific_scope_while_other_scopes_still_join() {
     let mut scoped = gesture(1, &[Right]);
     scoped.process_scope.allow = vec!["chrome.exe".into()];
     let mut engine = Engine::new(vec![gesture(2, &[Right]), scoped, gesture(3, &[Left])]).unwrap();
@@ -464,7 +448,7 @@ fn held_prefix_gesture_requires_the_prefix_and_keeps_it_consumed() {
 }
 
 #[test]
-fn registration_allows_distinct_paths_and_reports_structured_conflicts() {
+fn registration_allows_distinct_shapes_and_reports_structured_conflicts() {
     assert!(Engine::new(vec![gesture(1, &[Right]), gesture(2, &[Right, Down])]).is_ok());
     assert!(matches!(
         Engine::new(vec![gesture(1, &[Right]), gesture(2, &[Right])]),
@@ -495,7 +479,7 @@ fn registration_allows_distinct_paths_and_reports_structured_conflicts() {
             &[],
             Activation::Gesture {
                 button: CAPS,
-                path: path(&[Right]),
+                shape: shape(&[Right]),
             },
         )]),
         Err(RegistrationError::InvalidGestureButton { id: 1, .. })

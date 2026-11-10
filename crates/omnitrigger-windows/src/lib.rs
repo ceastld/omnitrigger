@@ -342,6 +342,13 @@ pub enum BackendEvent {
         /// 匹配时的前台窗口；界面排队不能把动作重新定向到后来激活的窗口。
         foreground: isize,
     },
+    /// 松开时多个手势与轨迹同样相似：不自动触发，由界面在指针附近列出候选让用户选择。
+    /// 候选为绑定标识与相似度（千分比），按相似度从高到低。
+    GestureChoice {
+        candidates: Vec<(u64, u16)>,
+        pointer: Option<(i32, i32)>,
+        foreground: isize,
+    },
     Error(String),
     RecordingCancelled,
     Diagnostics(Box<ListenerDiagnostics>),
@@ -372,6 +379,24 @@ pub fn show_notification_window(
 #[cfg(windows)]
 pub fn prepare_panel_window(hwnd: isize) -> Result<(), String> {
     platform::prepare_panel_window(hwnd)
+}
+
+/// 为手势候选弹窗设置窗口名称并同步隐藏；复用浮动面板的不激活与收尾逻辑。
+#[cfg(windows)]
+pub fn prepare_gesture_choice_window(hwnd: isize) -> Result<(), String> {
+    platform::prepare_gesture_choice_window(hwnd)
+}
+
+/// 以显式屏幕坐标为中心显示手势候选弹窗；不移动鼠标、不抢占前台，限制在工作区内。
+#[cfg(windows)]
+pub fn show_gesture_choice_at_point(
+    hwnd: isize,
+    x: i32,
+    y: i32,
+    width: f32,
+    height: f32,
+) -> Result<(), String> {
+    platform::show_gesture_choice_at_point(hwnd, x, y, width, height)
 }
 
 /// 为独立轮盘设置窗口名称并同步隐藏；复用浮动面板的不激活与收尾逻辑。
@@ -547,9 +572,7 @@ pub fn format_trigger(spec: &TriggerSpec) -> String {
             "{}（快速拖拽 ≥{min_distance_px}px / {max_start_ms}ms 内）",
             format_button(button)
         ),
-        Activation::Gesture { button, path } => {
-            format!("{}（手势 {path}）", format_button(button))
-        }
+        Activation::Gesture { button, .. } => format!("{}（手势）", format_button(button)),
         Activation::Wheel(direction) => match direction {
             WheelDirection::Up => "滚轮上滚".into(),
             WheelDirection::Down => "滚轮下滚".into(),
