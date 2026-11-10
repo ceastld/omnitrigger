@@ -1256,6 +1256,7 @@ mod tests {
                 mouse: false,
                 arrow: None,
                 title: None,
+                gesture: None,
             }],
             kind: PanelKind::Command,
             detail: detail.into(),

@@ -1,9 +1,11 @@
 //! 鼠标手势的方向序列与有界轨迹识别。
 //!
-//! 轨迹按固定段长采样并量化为方向，相同方向合并为一笔；短于下限的笔画视为抖动或转角，
-//! 识别结束时按“最短优先”删除并合并相邻同向笔画。识别器同时维护四向与八向两份读数：
+//! 轨迹按固定段长采样并量化为方向，相同方向合并为一笔；已成形的一笔对落在扇区边界附近的
+//! 采样段有粘性，贴着边界画的直线不会被切成交替的碎笔。短于下限的笔画视为抖动、转角或
+//! 松开时的甩尾，识别结束时按“最短优先”删除并合并相邻同向笔画；下限取固定像素与最长一笔
+//! 的固定比例中较大者，因此判定随手势大小缩放。识别器同时维护四向与八向两份读数：
 //! 只含上下左右的手势与四向读数比较，含斜向的手势与八向读数比较。全部状态为固定容量，
-//! 每次移动只做常数工作量，可在 Hook 同步路径中调用，也可供界面录制复用同一规则。
+//! 移动与读数都不分配内存，可在 Hook 同步路径中调用，也可供界面录制复用同一规则。
 
 use std::fmt;
 
@@ -15,6 +17,12 @@ pub const GESTURE_START_PX: u32 = 12;
 pub const GESTURE_START_MS: u32 = 500;
 /// 识别结果中每一笔的最小长度（物理像素）；更短的笔画按抖动或转角处理。
 pub const GESTURE_MIN_STROKE_PX: u32 = 32;
+/// 短于最长一笔此比例（1/N）的笔画同样按抖动处理，使判定随手势大小与屏幕密度缩放。
+pub const GESTURE_STROKE_RATIO: u32 = 8;
+/// 已成形的一笔保持方向的半角正切（分子，分母 10 000）：四向 55°，八向 30°。
+/// 量化扇区半角分别为 45° 与 22.5°，多出的部分是边界两侧的滞回带。
+const CARDINAL_STICKY_TAN: i64 = 14_281;
+const OCTAL_STICKY_TAN: i64 = 5_774;
 /// 采样段长：相对上一采样点位移达到此距离后量化一次方向。
 const SEGMENT_PX: i64 = 16;
 /// 原始笔画缓冲容量；写满时先删除已完成的短笔画，仍无法容纳则判定为过于复杂。
@@ -83,6 +91,28 @@ impl GestureDirection {
         Self::ALL
             .into_iter()
             .find(|direction| direction.token() == token)
+    }
+
+    /// 屏幕坐标中的方向向量；斜向未归一化，只用于比较夹角。
+    fn vector(self) -> (i64, i64) {
+        match self {
+            Self::Up => (0, -1),
+            Self::Down => (0, 1),
+            Self::Left => (-1, 0),
+            Self::Right => (1, 0),
+            Self::UpLeft => (-1, -1),
+            Self::UpRight => (1, -1),
+            Self::DownLeft => (-1, 1),
+            Self::DownRight => (1, 1),
+        }
+    }
+
+    /// 位移与本方向的夹角正切是否不超过 `tan / 10 000`。位移已按 [`clamp_delta`] 限幅。
+    fn holds(self, dx: i64, dy: i64, tan: i64) -> bool {
+        let (ux, uy) = self.vector();
+        let along = dx * ux + dy * uy;
+        let across = (dx * uy - dy * ux).abs();
+        along > 0 && across * 10_000 <= along * tan
     }
 
     /// 四向量化：水平与竖直等长时取水平。
@@ -215,6 +245,20 @@ impl StrokeLog {
         }
     }
 
+    /// 采样段的方向：最后一笔已成形且位移仍在其滞回带内时沿用该笔方向，否则取量化结果。
+    /// 未成形的短笔没有粘性，抖动不会借此变长。
+    fn settle(&self, raw: GestureDirection, dx: i64, dy: i64, sticky_tan: i64) -> GestureDirection {
+        match self.len.checked_sub(1).map(|index| self.strokes[index]) {
+            Some(last)
+                if last.length >= GESTURE_MIN_STROKE_PX
+                    && last.direction.holds(dx, dy, sticky_tan) =>
+            {
+                last.direction
+            }
+            _ => raw,
+        }
+    }
+
     fn add(&mut self, direction: GestureDirection, length: u32) {
         if self.overflow {
             return;
@@ -223,8 +267,8 @@ impl StrokeLog {
             return;
         }
         if self.len == RAW_STROKES {
-            // 仍在绘制的最后一笔可能继续变长，只压缩已完成的笔画。
-            if !self.remove_shortest(self.len - 1) {
+            // 仍在绘制的最后一笔可能继续变长，只压缩已完成的笔画；此时最长一笔未定，只用固定下限。
+            if !self.remove_shortest(self.len - 1, GESTURE_MIN_STROKE_PX) {
                 self.overflow = true;
                 return;
             }
@@ -250,11 +294,17 @@ impl StrokeLog {
         }
     }
 
-    /// 删除 `..limit` 中最短且不足下限的一笔（同长取最早），再合并相邻同向笔画。
-    fn remove_shortest(&mut self, limit: usize) -> bool {
+    /// 删除 `..limit` 中最短且不足 `floor` 的一笔，再合并相邻同向笔画。
+    /// 同长时先删两侧同向的一笔（删除后两侧并为一笔，长度不丢失），再取最早。
+    fn remove_shortest(&mut self, limit: usize, floor: u32) -> bool {
+        let bridges = |index: usize| {
+            index > 0
+                && index + 1 < self.len
+                && self.strokes[index - 1].direction == self.strokes[index + 1].direction
+        };
         let Some(index) = (0..limit.min(self.len))
-            .filter(|&index| self.strokes[index].length < GESTURE_MIN_STROKE_PX)
-            .min_by_key(|&index| (self.strokes[index].length, index))
+            .filter(|&index| self.strokes[index].length < floor)
+            .min_by_key(|&index| (self.strokes[index].length, !bridges(index), index))
         else {
             return false;
         };
@@ -273,17 +323,29 @@ impl StrokeLog {
         true
     }
 
+    /// 笔画下限：固定像素与最长一笔的 1/[`GESTURE_STROKE_RATIO`] 中较大者。
+    fn floor(&self) -> u32 {
+        let longest = self.strokes[..self.len]
+            .iter()
+            .map(|stroke| stroke.length)
+            .max()
+            .unwrap_or(0);
+        GESTURE_MIN_STROKE_PX.max(longest / GESTURE_STROKE_RATIO)
+    }
+
     fn path(&self) -> Option<GesturePath> {
         if self.overflow {
             return None;
         }
         let mut log = *self;
-        while log.remove_shortest(log.len) {}
-        let steps = log.strokes[..log.len]
-            .iter()
-            .map(|stroke| stroke.direction)
-            .collect::<Vec<_>>();
-        GesturePath::new(&steps).ok()
+        // 合并会让最长一笔变长，下限随之重算；每轮至少删除一笔，循环有界。
+        while log.remove_shortest(log.len, log.floor()) {}
+        let mut steps = [GestureDirection::Up; MAX_GESTURE_STEPS];
+        let kept = steps.get_mut(..log.len)?;
+        for (step, stroke) in kept.iter_mut().zip(&log.strokes) {
+            *step = stroke.direction;
+        }
+        GesturePath::new(kept).ok()
     }
 }
 
@@ -310,6 +372,12 @@ impl GestureReading {
             .filter(GesturePath::has_diagonal)
             .or(self.cardinal)
     }
+}
+
+/// 单个采样段的位移限幅：远大于任何屏幕，又保证平方与正切比较不溢出。
+fn clamp_delta(value: i64) -> i64 {
+    const LIMIT: i64 = 1 << 20;
+    value.clamp(-LIMIT, LIMIT)
 }
 
 /// 固定容量的轨迹识别器；只接收显式提供的物理坐标。
@@ -363,13 +431,20 @@ impl GestureTracker {
         {
             return;
         }
-        let length = dx
-            .unsigned_abs()
-            .max(dy.unsigned_abs())
-            .min(u64::from(u32::MAX)) as u32;
-        self.cardinal
-            .add(GestureDirection::cardinal(dx, dy), length);
-        self.octal.add(GestureDirection::octal(dx, dy), length);
+        // 方向与长度只取决于限幅后的位移；极端坐标下乘积仍在 i64 范围内。
+        let (dx, dy) = (clamp_delta(dx), clamp_delta(dy));
+        let length = (dx * dx + dy * dy).isqrt() as u32;
+        let cardinal = self.cardinal.settle(
+            GestureDirection::cardinal(dx, dy),
+            dx,
+            dy,
+            CARDINAL_STICKY_TAN,
+        );
+        self.cardinal.add(cardinal, length);
+        let octal = self
+            .octal
+            .settle(GestureDirection::octal(dx, dy), dx, dy, OCTAL_STICKY_TAN);
+        self.octal.add(octal, length);
         self.anchor = position;
     }
 

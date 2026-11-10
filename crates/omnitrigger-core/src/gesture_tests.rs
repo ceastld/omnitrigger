@@ -1,6 +1,6 @@
 use crate::*;
 
-use GestureDirection::{Down, DownRight, Left, Right, Up};
+use GestureDirection::{Down, DownLeft, DownRight, Left, Right, Up};
 
 const RIGHT: Button = Button::Mouse(MouseButton::Right);
 const MIDDLE: Button = Button::Mouse(MouseButton::Middle);
@@ -127,6 +127,77 @@ fn tracker_ignores_perpendicular_jitter_and_short_tails() {
     let reading = track(&points);
     assert_eq!(reading.cardinal, Some(path(&[Right])));
     assert_eq!(reading.octal, Some(path(&[Right])));
+}
+
+#[test]
+fn tracker_keeps_one_stroke_along_a_sector_boundary() {
+    // 贴着八向扇区边界（22.5°）的长直线：采样段在“右”与“右下”之间摇摆，读数仍是一笔。
+    let mut points = vec![(0, 0)];
+    for x in (12..=360).step_by(12) {
+        let wobble = if (x / 12) % 2 == 0 { 3 } else { -3 };
+        points.push((x, x * 4_142 / 10_000 + wobble));
+    }
+    let reading = track(&points);
+    assert_eq!(reading.cardinal, Some(path(&[Right])));
+    let octal = reading.octal.expect("边界上的直线仍应读出一笔");
+    assert!(octal == path(&[Right]) || octal == path(&[DownRight]));
+
+    // 贴着四向边界（45°）的直线同理，四向读数不会因交替而丢失。
+    let mut points = vec![(0, 0)];
+    for step in 1..=30 {
+        let wobble = if step % 2 == 0 { 4 } else { -4 };
+        points.push((step * 12, step * 12 + wobble));
+    }
+    let reading = track(&points);
+    let cardinal = reading.cardinal.expect("边界上的直线仍应读出一笔");
+    assert!(cardinal == path(&[Right]) || cardinal == path(&[Down]));
+    assert_eq!(reading.octal, Some(path(&[DownRight])));
+}
+
+#[test]
+fn stroke_length_is_euclidean_so_diagonals_are_not_undercounted() {
+    // 斜向 34×34（约 48px）与水平 48px 同样成笔；按较大轴计只有 34px 的旧算法会漏掉前者。
+    assert_eq!(track(&[(0, 0), (34, 34)]).octal, Some(path(&[DownRight])));
+    assert_eq!(track(&[(0, 0), (48, 0)]).octal, Some(path(&[Right])));
+    assert_eq!(track(&[(0, 0), (20, 20)]).octal, None);
+}
+
+#[test]
+fn short_strokes_scale_with_the_longest_stroke() {
+    // 大手势松开时的甩尾（50px）超过固定下限，但不足最长一笔的 1/8。
+    let hooked = track(&[(0, 0), (480, 0), (455, -44)]);
+    assert_eq!(hooked.cardinal, Some(path(&[Right])));
+    assert_eq!(hooked.octal, Some(path(&[Right])));
+    // 同样 50px 的一笔在小手势里是有意的笔画。
+    assert_eq!(
+        track(&[(0, 0), (120, 0), (120, -50)]).cardinal,
+        Some(path(&[Right, Up]))
+    );
+    // 含斜向的路径不受大圆角影响：圆角处的短斜笔随比例下限删除。
+    let rounded = track(&[
+        (0, 0),
+        (400, 0),
+        (425, 8),
+        (442, 25),
+        (450, 50),
+        (450, 450),
+        (250, 650),
+    ]);
+    assert_eq!(rounded.octal, Some(path(&[Right, Down, DownLeft])));
+    // 长短腿 1:5 仍是两笔。
+    assert_eq!(
+        track(&[(0, 0), (0, 80), (400, 80)]).cardinal,
+        Some(path(&[Down, Right]))
+    );
+}
+
+#[test]
+fn extreme_coordinates_do_not_overflow() {
+    let mut tracker = GestureTracker::new((i32::MIN, i32::MIN));
+    tracker.push((i32::MAX, i32::MAX));
+    tracker.push((i32::MIN, i32::MAX));
+    assert!(tracker.started());
+    assert_eq!(tracker.reading().octal, Some(path(&[DownRight, Left])));
 }
 
 #[test]

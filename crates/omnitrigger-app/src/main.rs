@@ -657,7 +657,7 @@ fn activation_label(spec: &TriggerSpec) -> String {
             max_start_ms,
             ..
         } => format!("快速拖拽 ≥{min_distance_px}px · <{max_start_ms}ms"),
-        Activation::Gesture { path, .. } => format!("手势 {path}，松开时触发"),
+        Activation::Gesture { .. } => "按方向移动后松开时触发".into(),
         Activation::Wheel(_) => match spec.wheel {
             omnitrigger_core::WheelPolicy::Notch => "滚轮一格即触发".into(),
             omnitrigger_core::WheelPolicy::Packet => "每个滚轮事件触发一次".into(),
@@ -6687,6 +6687,7 @@ impl Workspace {
                     mouse: false,
                     arrow: None,
                     title: None,
+                    gesture: None,
                 },
                 CapSize::Small,
                 CapTone::Normal,
@@ -6702,8 +6703,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> (Vec<AnyElement>, Option<AnyElement>) {
         let draft = self.draft_spec(spec, cx);
+        // 刚切到手势、尚未绘制时不是错误：不提示冲突，只是暂不能添加。
+        let awaiting = self.awaiting_gesture();
         let conflict = match &draft {
             Ok(spec) => self.triggers.check_candidate(spec, None).err(),
+            Err(_) if awaiting => None,
             Err(error) => Some(Conflict {
                 title: "触发参数无效",
                 detail: error.clone(),
@@ -6721,6 +6725,7 @@ impl Workspace {
             .text_color(rgb(color))
             .child(icon(if ok { Icon::Check } else { Icon::Alert }, 14., color))
             .child(match &conflict {
+                None if awaiting => "绘制手势后即可添加",
                 None => "没有冲突，可以添加",
                 Some(conflict) => conflict.title,
             });
@@ -6757,7 +6762,7 @@ impl Workspace {
                     .flex()
                     .gap(px(8.))
                     .child(
-                        icon_button("add", Icon::Check, "添加触发器", Tone::Primary, true)
+                        icon_button("add", Icon::Check, "添加触发器", Tone::Primary, !awaiting)
                             .flex_1()
                             .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                     )
@@ -6848,8 +6853,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> (Vec<AnyElement>, Option<AnyElement>) {
         let id = binding.spec.id;
+        // 刚切到手势、尚未绘制时不是错误：不提示冲突，只是暂不能保存。
+        let awaiting = self.awaiting_gesture();
         let conflict = match self.draft_spec(&binding.spec, cx) {
             Ok(spec) => self.check_draft_trigger(&spec, Some(id)).err(),
+            Err(_) if awaiting => None,
             Err(detail) => Some(Conflict {
                 title: "触发参数无效",
                 detail,
@@ -6990,7 +6998,7 @@ impl Workspace {
                     Icon::Check,
                     "保存动作",
                     Tone::Primary,
-                    changed && conflict.is_none() && draft_available,
+                    changed && conflict.is_none() && draft_available && !awaiting,
                 )
                 .flex_1()
                 .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
