@@ -192,6 +192,36 @@ fn short_strokes_scale_with_the_longest_stroke() {
 }
 
 #[test]
+fn recording_keeps_only_clear_diagonals() {
+    // 大圆角的“右、下”：八向读数里有一小段右下，但远短于两条腿，录制结果仍是两步。
+    let mut rounded = vec![(0, 0), (200, 0)];
+    for step in 1..=9 {
+        let angle = f64::from(step) * 10f64.to_radians();
+        rounded.push((
+            200 + (80. * angle.sin()).round() as i32,
+            80 - (80. * angle.cos()).round() as i32,
+        ));
+    }
+    rounded.push((280, 300));
+    let reading = track(&rounded);
+    assert_eq!(reading.octal, Some(path(&[Right, DownRight, Down])));
+    assert!(!reading.diagonal_clear);
+    assert_eq!(reading.preferred(), Some(path(&[Right, Down])));
+    // 运行时匹配不受影响：含斜向的路径仍与完整的八向读数比较。
+    assert!(reading.matches(&path(&[Right, DownRight, Down])));
+
+    // “Z”形的斜笔与横笔等长，按八向录制。
+    let zed = track(&[(0, 0), (200, 0), (20, 180), (220, 180)]);
+    assert!(zed.diagonal_clear);
+    assert_eq!(zed.preferred(), Some(path(&[Right, DownLeft, Right])));
+    // 倾斜 30° 的单笔只有一个方向，没有别的笔画可比，仍按斜向录制。
+    assert_eq!(
+        track(&[(0, 0), (173, 100)]).preferred(),
+        Some(path(&[DownRight]))
+    );
+}
+
+#[test]
 fn extreme_coordinates_do_not_overflow() {
     let mut tracker = GestureTracker::new((i32::MIN, i32::MIN));
     tracker.push((i32::MAX, i32::MAX));

@@ -333,13 +333,33 @@ impl StrokeLog {
         GESTURE_MIN_STROKE_PX.max(longest / GESTURE_STROKE_RATIO)
     }
 
-    fn path(&self) -> Option<GesturePath> {
+    /// 斜向笔画是否足够明显：最长的斜向一笔不短于最长一笔的一半。
+    /// 圆角或略微倾斜留下的短斜笔达不到这个比例。
+    fn diagonal_is_clear(&self) -> bool {
+        let longest = |diagonal: bool| {
+            self.strokes[..self.len]
+                .iter()
+                .filter(|stroke| !diagonal || stroke.direction.is_diagonal())
+                .map(|stroke| stroke.length)
+                .max()
+                .unwrap_or(0)
+        };
+        longest(true) > 0 && u64::from(longest(true)) * 2 >= u64::from(longest(false))
+    }
+
+    /// 删除全部短笔后的记录；超出容量时为 `None`。
+    fn settled(&self) -> Option<Self> {
         if self.overflow {
             return None;
         }
         let mut log = *self;
         // 合并会让最长一笔变长，下限随之重算；每轮至少删除一笔，循环有界。
         while log.remove_shortest(log.len, log.floor()) {}
+        Some(log)
+    }
+
+    fn path(&self) -> Option<GesturePath> {
+        let log = self;
         let mut steps = [GestureDirection::Up; MAX_GESTURE_STEPS];
         let kept = steps.get_mut(..log.len)?;
         for (step, stroke) in kept.iter_mut().zip(&log.strokes) {
@@ -354,6 +374,8 @@ impl StrokeLog {
 pub struct GestureReading {
     pub cardinal: Option<GesturePath>,
     pub octal: Option<GesturePath>,
+    /// 八向读数中的斜向是否明显（最长的斜向一笔不短于最长一笔的一半）；只影响录制时的取舍。
+    pub diagonal_clear: bool,
 }
 
 impl GestureReading {
@@ -366,11 +388,13 @@ impl GestureReading {
         }
     }
 
-    /// 供界面显示的读数：八向读数含斜向时优先，否则取四向读数。
+    /// 供界面录制的读数：斜向明显时取八向读数，否则取四向读数。
+    /// 圆角转弯或略微倾斜留下的短斜笔不会写进录制结果，避免录出比所画多出几步的路径。
     pub fn preferred(&self) -> Option<GesturePath> {
         self.octal
-            .filter(GesturePath::has_diagonal)
+            .filter(|path| self.diagonal_clear && path.has_diagonal())
             .or(self.cardinal)
+            .or(self.octal)
     }
 }
 
@@ -449,9 +473,11 @@ impl GestureTracker {
     }
 
     pub fn reading(&self) -> GestureReading {
+        let octal = self.octal.settled();
         GestureReading {
-            cardinal: self.cardinal.path(),
-            octal: self.octal.path(),
+            cardinal: self.cardinal.settled().and_then(|log| log.path()),
+            octal: octal.and_then(|log| log.path()),
+            diagonal_clear: octal.is_some_and(|log| log.diagonal_is_clear()),
         }
     }
 }

@@ -93,6 +93,21 @@ fn arrow_head(
     stroke(&[wing(1.), tip, wing(-1.)], width, color, window);
 }
 
+/// 起点标记。
+fn start_dot(center: Point<Pixels>, color: Hsla, window: &mut Window) {
+    let dot = px(7.);
+    window.paint_quad(
+        fill(
+            Bounds::new(
+                point(center.x - dot / 2., center.y - dot / 2.),
+                size(dot, dot),
+            ),
+            color,
+        )
+        .corner_radii(dot / 2.),
+    );
+}
+
 /// 单个方向的箭头图标；八个方向同一画法，粗细与大小一致。
 pub(crate) fn direction_icon(
     direction: GestureDirection,
@@ -210,8 +225,7 @@ impl Workspace {
         };
         match tracker.reading().preferred() {
             Some(path) => {
-                // 识别成功后改用规整的示意图显示，原始轨迹不再保留。
-                self.gesture_draft.trail.clear();
+                // 保留所画的原始轨迹，识别出的方向序列显示在面板底部。
                 self.gesture_draft.steps = path.steps().to_vec();
                 self.gesture_steps_changed(cx);
             }
@@ -238,7 +252,9 @@ impl Workspace {
         );
         let shape_color = hsla(theme::ACCENT, 1.);
         let start_color = hsla(theme::TEXT_SOFT, 1.);
+        // 没有手绘轨迹（载入已保存的手势或点选方向）时，用规整的示意图表示方向序列。
         let show_shape = trail.is_empty() && !steps.is_empty();
+        let show_sequence = !drawing && !draft.unrecognized && !steps.is_empty();
         let (hint, hint_color) = if drawing {
             ("松开左键完成", theme::TEXT_MUTED)
         } else if draft.unrecognized {
@@ -265,7 +281,7 @@ impl Workspace {
             // 面板空白时提示居中；有图形或轨迹时让到底部一行。
             .when(idle, |el| el.top(px(9.)).justify_center())
             .gap(px(8.))
-            .when(show_shape, |el| el.child(sequence))
+            .when(show_sequence, |el| el.child(sequence))
             .child(
                 div()
                     .text_size(px(11.5))
@@ -307,17 +323,7 @@ impl Workspace {
                                 (points.first(), points.last(), shape_steps.last())
                             {
                                 arrow_head(last, unit(step), 9., 2.5, shape_color, window);
-                                let dot = px(7.);
-                                window.paint_quad(
-                                    fill(
-                                        Bounds::new(
-                                            point(first.x - dot / 2., first.y - dot / 2.),
-                                            size(dot, dot),
-                                        ),
-                                        start_color,
-                                    )
-                                    .corner_radii(dot / 2.),
-                                );
+                                start_dot(first, start_color, window);
                             }
                         } else {
                             let points: Vec<_> = trail
@@ -330,6 +336,34 @@ impl Workspace {
                                 })
                                 .collect();
                             stroke(&points, 3., trail_color, window);
+                            if let (Some(&first), Some(&last)) = (points.first(), points.last()) {
+                                start_dot(first, start_color, window);
+                                // 画完后在末端标出走向；取稍远的一点定方向，避免末端抖动。
+                                let back = points
+                                    .iter()
+                                    .rev()
+                                    .find(|position| {
+                                        let (dx, dy) = (
+                                            f32::from(last.x - position.x),
+                                            f32::from(last.y - position.y),
+                                        );
+                                        dx * dx + dy * dy >= 144.
+                                    })
+                                    .copied();
+                                if let Some(back) = back.filter(|_| !drawing) {
+                                    let (dx, dy) =
+                                        (f32::from(last.x - back.x), f32::from(last.y - back.y));
+                                    let length = (dx * dx + dy * dy).sqrt();
+                                    arrow_head(
+                                        last,
+                                        (dx / length, dy / length),
+                                        9.,
+                                        3.,
+                                        trail_color,
+                                        window,
+                                    );
+                                }
+                            }
                         }
                     },
                 )
