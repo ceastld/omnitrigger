@@ -710,6 +710,14 @@ impl Engine {
             .map(|gesture| (gesture.button, gesture.started))
     }
 
+    /// 手势轨迹的起点（物理像素）；按下时位置未知且尚未移动则为 None。
+    pub fn gesture_origin(&self) -> Option<(i32, i32)> {
+        self.gesture
+            .as_ref()
+            .and_then(|gesture| gesture.tracker.as_ref())
+            .map(GestureTracker::origin)
+    }
+
     fn gesture_pending(&self) -> bool {
         self.gesture
             .as_ref()

@@ -79,6 +79,10 @@ mod foreground_context;
 #[path = "pointer_context.rs"]
 mod pointer_context;
 
+#[path = "gesture_trail.rs"]
+mod gesture_trail;
+use gesture_trail::{GestureTrail, TrailEvent};
+
 #[cfg(test)]
 #[path = "pointer_platform_tests.rs"]
 mod pointer_tests;
@@ -372,6 +376,12 @@ fn run_input_thread(
             } else {
                 advance_pending_hold();
             }
+            // 配置更新、暂停或录制会直接取消核心会话，不经过 finish_decision。
+            STATE.with(|slot| {
+                if let Some(state) = slot.borrow_mut().as_mut() {
+                    state.sync_gesture_trail(false, None);
+                }
+            });
             // 忙碌队列每批仍复查 deadline；不因无限 drain 而饿死长按到期。
             if more_commands || message_count == MESSAGE_BATCH {
                 continue;
@@ -743,6 +753,10 @@ struct ThreadState {
     pending_drag_cancels: VecDeque<(DragEvent, isize)>,
     screens: Vec<ScreenRect>,
     screen_context_ready: bool,
+    /// 首次加载手势绑定时创建；测试不创建窗口线程。
+    gesture_trail: Option<GestureTrail>,
+    /// 正在显示轨迹的手势按键。
+    trail_button: Option<Button>,
 }
 
 impl ThreadState {
@@ -824,6 +838,8 @@ impl ThreadState {
             pending_drag_cancels: VecDeque::with_capacity(2),
             screens: Vec::new(),
             screen_context_ready: false,
+            gesture_trail: None,
+            trail_button: None,
         }
     }
 
@@ -1090,10 +1106,19 @@ impl ThreadState {
                         })
                         .cloned()
                         .collect();
+                    let has_gesture = bindings.iter().any(|binding| {
+                        matches!(
+                            binding.activation,
+                            omnitrigger_core::Activation::Gesture { .. }
+                        )
+                    });
                     match self.with_engine(|engine| engine.replace_bindings(bindings)) {
                         Ok(cancelled) => {
                             self.process_resolved = false;
                             self.hold_specs = hold_specs;
+                            if has_gesture {
+                                self.ensure_gesture_trail();
+                            }
                             self.cancel_queued_replay();
                             self.forward_cancelled_drags(cancelled);
                         }
@@ -1702,11 +1727,60 @@ impl ThreadState {
         self.finish_decision(decision, Some(kind))
     }
 
+    #[cfg(not(test))]
+    fn ensure_gesture_trail(&mut self) {
+        if self.gesture_trail.is_none() {
+            match GestureTrail::new() {
+                Ok(trail) => self.gesture_trail = Some(trail),
+                Err(error) => self.notify(BackendEvent::Error(error)),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn ensure_gesture_trail(&mut self) {}
+
+    /// 按核心的手势会话同步轨迹浮层：只投递有界事件，不在 Hook 路径绘制。
+    /// 只有结束手势的那次释放触发了动作，才按“已匹配”收起。
+    fn sync_gesture_trail(&mut self, triggered: bool, current: Option<InputKind>) {
+        let Some(trail) = self.gesture_trail.as_ref() else {
+            return;
+        };
+        let session = self
+            .engine
+            .gesture_session()
+            .filter(|&(_, started)| started)
+            .map(|(button, _)| button);
+        match (self.trail_button, session) {
+            (None, Some(button)) => {
+                if let Some(origin) = self.engine.gesture_origin() {
+                    trail.send(TrailEvent::Begin { origin });
+                    if let Some(point) = self.pointer.load() {
+                        trail.send(TrailEvent::Point(point));
+                    }
+                    self.trail_button = Some(button);
+                }
+            }
+            (Some(_), Some(_)) => {
+                if let Some(point) = self.pointer.load() {
+                    trail.send(TrailEvent::Point(point));
+                }
+            }
+            (Some(button), None) => {
+                let matched = triggered && current == Some(InputKind::Up(button));
+                trail.send(TrailEvent::End { matched });
+                self.trail_button = None;
+            }
+            (None, None) => {}
+        }
+    }
+
     fn finish_decision(
         &mut self,
         mut decision: Decision,
         current: Option<InputKind>,
     ) -> HookOutcome {
+        self.sync_gesture_trail(!decision.triggered.is_empty(), current);
         for event in decision.drags.drain(..) {
             let cancelled = event.phase == DragPhase::Cancelled;
             let notification = BackendEvent::Drag {

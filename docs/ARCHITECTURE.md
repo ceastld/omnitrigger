@@ -77,6 +77,7 @@ rust-toolchain.toml          固定 Rust 工具链与检查组件
 | `shortcut.rs`、`automation_basics.rs` | 目标身份检查、快捷键 / 文字注入、剪贴板与打开目标。 |
 | `system_adjustment.rs` | 系统音量、显示器亮度及能力检测。 |
 | `native_system_hud.rs`、`system_hud_paint.rs`、`system_hud_window.rs` | 独立 Win32 提示线程、GDI+ 位图和目标显示器定位；不依赖 GPUI 绘制。 |
+| `gesture_trail.rs` | 手势轨迹浮层：独立线程持有点击穿透的分层窗口，Hook 只投递有界坐标队列。 |
 | `window_action.rs`、`title_bar.rs`、`wheel_window.rs` | 窗口操作、标题栏和轮盘原生窗口适配。 |
 | `*_tests.rs` 与 `examples/hook_*.rs` | 输入交付和平台边界测试、需要桌面会话的 Hook 检查程序。 |
 
