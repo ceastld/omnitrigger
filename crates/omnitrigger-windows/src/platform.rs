@@ -2647,6 +2647,7 @@ pub(crate) fn show_panel_at_cursor(hwnd: isize, content: Option<(f32, f32)>) -> 
         windows::core::w!("OmniTrigger 触发面板"),
         "触发面板",
         None,
+        true,
     )
 }
 
@@ -2661,6 +2662,7 @@ pub(crate) fn show_wheel_at_cursor_with_size(
         windows::core::w!("OmniTrigger 轨道轮盘"),
         "轨道轮盘",
         None,
+        false,
     )
 }
 
@@ -2677,6 +2679,7 @@ pub(crate) fn show_wheel_at_point_with_size(
         windows::core::w!("OmniTrigger 轨道轮盘"),
         "轨道轮盘",
         Some((x, y)),
+        false,
     )
 }
 
@@ -2686,6 +2689,7 @@ fn show_floating_at_cursor(
     title: windows::core::PCWSTR,
     name: &str,
     anchor: Option<(i32, i32)>,
+    keep_on_screen: bool,
 ) -> Result<(), String> {
     use windows::Win32::{
         Foundation::{HWND, POINT, RECT},
@@ -2760,8 +2764,18 @@ fn show_floating_at_cursor(
         if width <= 0 || height <= 0 {
             return Err(format!("{name}尺寸无效。"));
         }
-        let x = panel_axis_origin(cursor.x, work.left, work.right, width);
-        let y = panel_axis_origin(cursor.y, work.top, work.bottom, height);
+        // 轮盘以触发点为圆心，不得因贴边而平移；面板仍限制在工作区内。
+        let (x, y) = if keep_on_screen {
+            (
+                panel_axis_origin(cursor.x, work.left, work.right, width),
+                panel_axis_origin(cursor.y, work.top, work.bottom, height),
+            )
+        } else {
+            (
+                cursor.x.saturating_sub(width / 2),
+                cursor.y.saturating_sub(height / 2),
+            )
+        };
         unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, width, height, flags) }
             .map_err(|error| format!("无法显示或定位{name}：{error}"))?;
     }
