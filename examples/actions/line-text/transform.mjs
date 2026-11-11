@@ -1,5 +1,7 @@
 // 规则固定且不依赖 locale、文件系统或隐含宿主状态。
+/** @type {(code:string)=>never} */
 const fail=code=>{throw Object.assign(new Error('文本行参数或结果无效。'),{code});};
+/** @param {string} text @param {import('./line-types').LineOperation} operation @returns {import('./line-types').LineTransformed} */
 export function transform(text,operation){
   if(typeof text!=='string'||text.includes('\0')||!['deduplicate','sort'].includes(operation))fail('invalid_input');
   if(text.length>65536)fail('input_too_large');

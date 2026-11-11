@@ -8,7 +8,7 @@ import {main as scriptMain} from './main-script.mjs';
 
 const runtime=new URL('../../../crates/omnitrigger-actions/runtime/',import.meta.url);
 const createDesktopApi=runInNewContext(readFileSync(new URL('desktop-api.js',runtime),'utf8')+'\ncreateDesktopApi;');
-const sdk=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js']
+const sdk=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js','state-api.js']
   .map(name=>readFileSync(new URL(name,runtime),'utf8')).join('\n')
   +'\n'+readFileSync(new URL('../../../tools/js-engine-probe/src/sdk.js',import.meta.url),'utf8');
 const input={program:'C:\\OwnedFixture\\program.exe',cwd:'C:\\OwnedFixture',args:['','空 格','"quoted"','C:\\tail\\']};
@@ -23,17 +23,23 @@ async function invoke(script,parameters=input,{result={code:0,stdout:'  合成�
   };
   let ctx;
   if(script){
-    const scope={ctx:{input:structuredClone(parameters),__nativeContext:{connection:{port:1234,token:'a'.repeat(64)}}},__hostCall:request=>{
+    const connection={port:1234,token:'a'.repeat(64)};
+    const scope={ctx:{input:structuredClone(parameters),__nativeContext:{connection},__localDesktopAllowed:false},__hostCall:request=>{
       const value=JSON.parse(request);
-      if(value.kind==='capture'){
-        calls.push({method:'process.capture',params:value});
-        return JSON.stringify(failure?{ok:false,error:{...failure,effect_state:failure.effectState,message:'私有程序错误'}}:{ok:true,value:result});
-      }
       assert.equal(value.kind,'native');
+      assert.deepEqual(value.connection,connection);assert.equal(value.id,calls.length+1);
+      if(value.method==='process.capture'){
+        assert.equal(calls.length,0);
+        assert.deepEqual(value.params,{program:parameters.program,args:parameters.args??[],cwd:parameters.cwd,
+          timeout_ms:parameters.timeoutMs??10000,allow_non_zero:parameters.allowNonZero??false});
+        calls.push({method:'process.capture',params:value.params});
+        return JSON.stringify(failure?{ok:false,error:{code:failure.code,method:'process.capture',
+          effect_state:failure.effectState,message:'私有程序错误'}}:{ok:true,value:result});
+      }
       assert.equal(value.method,'ui.notify');
       // UI 回执也通过轻量 SDK 的既有 JSON 桥接。
       try{return JSON.stringify({ok:true,value:notify(value.params)});}
-      catch(error){return JSON.stringify({ok:false,error:{code:error.code,message:error.message,effect_state:error.effectState}});}
+      catch(error){return JSON.stringify({ok:false,error:{code:error.code,method:'ui.notify',message:error.message,effect_state:error.effectState}});}
     }};
     runInNewContext(sdk,scope);ctx=scope.ctx;
   }else{
@@ -73,19 +79,23 @@ test('两入口非零策略一致，显式允许后才通知，不依赖 Node �
 
 test('两入口派发或通知失败只保留结构化结果，不重试或泄漏响应正文',async()=>{
   for(const script of [false,true]){
-    const failed=await invoke(script,input,{failure:{code:'process_timeout',effectState:'unknown'}});
-    assert.equal(failed.error.code,'process_timeout');assert.equal(failed.error.effectState,'unknown');
-    assert.equal(failed.error.method,script?'process.capture':'process.run');assert.equal(failed.calls.length,1);
+    const failures=[];
+    for(const failure of [{code:'process_start_failed',effectState:'not_started'},{code:'process_timeout',effectState:'unknown'}]){
+      const failed=await invoke(script,input,{failure});failures.push(failed);
+      assert.equal(failed.error.code,failure.code);assert.equal(failed.error.effectState,failure.effectState);
+      assert.equal(failed.error.method,script?'process.capture':'process.run');assert.equal(failed.calls.length,1);
+    }
     const notify=await invoke(script,input,{notifyFailure:{code:'ui_error',effectState:'not_started'}});
     assert.equal(notify.error.code,'ui_error');assert.equal(notify.error.effectState,'unknown');
     assert.equal(notify.error.method,'ui.notify');assert.equal(notify.calls.length,2);
-    for(const value of [failed,notify])assert.equal(JSON.stringify(value.error).includes('私有'),false);
+    for(const value of [...failures,notify])assert.equal(JSON.stringify(value.error).includes('私有'),false);
   }
 });
 
 test('严格解码错误与合法替换字符有不同结果，不能把双入口摘要相同当作字节等价',async()=>{
   const rejected=await invoke(true,input,{failure:{code:'process_invalid_utf8',effectState:'unknown'}});
-  assert.equal(rejected.error.code,'process_invalid_utf8');assert.equal(rejected.calls.length,1);
+  assert.equal(rejected.error.code,'process_invalid_utf8');assert.equal(rejected.error.method,'process.capture');
+  assert.equal(rejected.error.effectState,'unknown');assert.equal(rejected.calls.length,1);
   // 模拟 Node 已完成替换解码的字符串；此处不验证 Node 宿主的原始字节解码。
   const result={code:0,stdout:'包含\ufffd字符',stderr:''};
   const node=await invoke(false,input,{result});const script=await invoke(true,input,{result});

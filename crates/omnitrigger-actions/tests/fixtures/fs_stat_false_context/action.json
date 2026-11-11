@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "id": "test.fs-stat-false-context",
+  "name": "fs.stat API",
+  "version": "0.0.0",
+  "actions": [{"id":"stat","title":"stat API","version":1,"runtime":"script","entry":"main.mjs","single_instance":true}]
+}

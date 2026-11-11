@@ -10,12 +10,36 @@ use std::{
     time::{Duration, Instant},
 };
 
+// 专用类名拒绝是上层静默无操作的证明；必须先于通用读错误正规化验证原字段。
+fn preserve_class_rejection(method: &str, error: &mut ActionError) -> bool {
+    if error.code != "window_class_blocked" {
+        return false;
+    }
+    if !matches!(
+        method,
+        "window.geometry" | "window.set_rect" | "window.drag"
+    ) || error.method.as_deref() != Some(method)
+        || !matches!(
+            error.effect_state.as_deref(),
+            Some("not_started" | "unknown")
+        )
+    {
+        error.code = "invalid_response".into();
+        error.method = Some(method.into());
+        error.effect_state = Some("unknown".into());
+    }
+    true
+}
+
 // 65,536 个 UTF-16 单元即使全部需要 JSON 转义也能完整传输。
 const LIMIT: usize = 512 * 1024;
 const RESPONSE_LIMIT: usize = 512 * 1024;
 const BROWSER_RESPONSE_LIMIT: usize = 32 * 1024 * 1024 + 1024;
 const CLIENTS: usize = 4;
-const METHODS: [&str; 37] = [
+const METHODS: [&str; 49] = [
+    "actions.stop_other_instances",
+    "state.read",
+    "state.compare_and_swap",
     "system.open",
     "system.open_file_in_parent",
     "process.capture",
@@ -29,6 +53,7 @@ const METHODS: [&str; 37] = [
     "ui.notify",
     "ui.open_history",
     "ui.toggle_history",
+    "ui.action_hint",
     "browser.profiles",
     "browser.call",
     "target.info",
@@ -42,6 +67,8 @@ const METHODS: [&str; 37] = [
     "win32_edit.replace_selection",
     "raishot.resident.find",
     "raishot.resident.region",
+    "raishot.capture_result",
+    "raishot.release_result",
     "selection.copy",
     "selection.copy_data",
     "selection.read_text",
@@ -51,6 +78,12 @@ const METHODS: [&str; 37] = [
     "clipboard.write",
     "clipboard.write_files",
     "window.action",
+    "window.geometry",
+    "window.set_rect",
+    "pointer.state",
+    "pointer.root",
+    "target.handoff_pointing_root",
+    "window.drag",
     "display.brightness_step",
     "audio.volume_adjust",
 ];
@@ -58,6 +91,16 @@ const METHODS: [&str; 37] = [
 /// 由应用为本次调用捕获的本机上下文。不是沙盒或权限隔离。
 /// 回调在动作工作线程执行，须有界返回，并在副作用前核验取消和目标身份。
 pub trait NativeHost: Send + Sync {
+    /// 作用域包装本身不提供原有应用上下文；此标记不证明权限或设备可用。
+    fn native_context_available(&self) -> bool {
+        true
+    }
+
+    /// 只有服务为当前真实调用创建的作用域提供动作控制；默认宿主无此能力。
+    fn action_scope_available(&self) -> bool {
+        false
+    }
+
     fn call(
         &self,
         method: &str,
@@ -245,7 +288,24 @@ impl NativeBridge {
                     );
                     let file_read =
                         matches!(request.method.as_str(), "fs.stat" | "fs.read_directory");
-                    let capture = request.method == "process.capture";
+                    let action_control = matches!(
+                        request.method.as_str(),
+                        "actions.stop_other_instances" | "state.read" | "state.compare_and_swap"
+                    );
+                    let capture = matches!(
+                        request.method.as_str(),
+                        "process.capture" | "raishot.capture_result" | "raishot.release_result"
+                    );
+                    let geometry = matches!(
+                        request.method.as_str(),
+                        "window.geometry"
+                            | "window.set_rect"
+                            | "pointer.state"
+                            | "pointer.root"
+                            | "window.drag"
+                            | "target.handoff_pointing_root"
+                    ) || request.method == "window.action"
+                        && request.params.get("target").is_some();
                     let brightness = matches!(
                         request.method.as_str(),
                         "display.brightness_step" | "audio.volume_adjust"
@@ -266,6 +326,27 @@ impl NativeBridge {
                         let mut error = ActionError::new("invalid_input", "未提供此本机调用方法。");
                         error.effect_state = Some("not_started".into());
                         Err(error)
+                    } else if request.method == "ui.action_hint" && !host.action_scope_available() {
+                        Err(crate::action_hint::fault(
+                            "ui_hint_scope_expired",
+                            "not_started",
+                        ))
+                    } else if action_control && !host.action_scope_available() {
+                        let mut error = ActionError::new(
+                            "actions_unavailable",
+                            "动作控制需要当前服务调用作用域。",
+                        );
+                        error.effect_state = Some("not_started".into());
+                        error.method = Some(request.method.clone());
+                        Err(error)
+                    } else if geometry && !host.native_context_available() {
+                        let mut error = ActionError::new(
+                            "native_bridge_unavailable",
+                            "窗口接口需要应用本机上下文。",
+                        );
+                        error.effect_state = Some("not_started".into());
+                        error.method = Some(request.method.clone());
+                        Err(error)
                     } else if !request.params.is_object()
                         || (request.method == "clipboard.read_data"
                             && request
@@ -283,12 +364,15 @@ impl NativeBridge {
                             || request.method.starts_with("raishot.resident.")
                             || request.method == "clipboard.write_files"
                             || opening
+                            || request.method == "ui.action_hint"
                             || file_read
                             || data_read
                             || data_copy
                             || history
                             || capture
                             || brightness
+                            || geometry
+                            || action_control
                         {
                             error.effect_state = Some("not_started".into());
                         }
@@ -316,12 +400,15 @@ impl NativeBridge {
                             )
                             || request.method == "ui.open_history"
                             || request.method == "ui.toggle_history"
+                            || request.method == "ui.action_hint"
                             || data_copy
                             || selection_read
                             || file_read
                             || history
                             || capture
                             || brightness
+                            || geometry
+                            || action_control
                         {
                             interactive_call(&client.stream, cancellation, call)
                         } else {
@@ -329,6 +416,25 @@ impl NativeBridge {
                         }
                     }
                     .map_err(|mut error| {
+                        let precise_class_fault =
+                            preserve_class_rejection(&request.method, &mut error);
+                        if geometry {
+                            error.message =
+                                "窗口矩形调用未获完整确认；请检查错误代码和效果状态。".into();
+                            error.required_permissions.clear();
+                            if !precise_class_fault {
+                                error.method = Some(request.method.clone());
+                                if matches!(
+                                    request.method.as_str(),
+                                    "window.geometry" | "pointer.state" | "pointer.root"
+                                ) {
+                                    error.effect_state = Some("not_started".into());
+                                } else if error.effect_state.as_deref() != Some("not_started") {
+                                    error.effect_state = Some("unknown".into());
+                                }
+                            }
+                        }
+
                         if request.method == "win32_edit.replace_selection"
                             || request.method == "clipboard.write_files"
                             || request.method.starts_with("raishot.resident.")
@@ -347,6 +453,15 @@ impl NativeBridge {
                             }
                         }
 
+                        if request.method == "ui.action_hint" {
+                            error.message =
+                                "动作版本提示更新未确认；请检查错误代码和效果状态。".into();
+                            error.method = Some(request.method.clone());
+                            error.required_permissions.clear();
+                            if error.effect_state.as_deref() != Some("not_started") {
+                                error.effect_state = Some("unknown".into());
+                            }
+                        }
                         if file_read {
                             error.message = "本地文件查询失败；请检查错误代码。".into();
                             error.method = Some(request.method.clone());
@@ -554,5 +669,351 @@ mod tests {
         let address = bridge.listener.local_addr().unwrap();
         drop(bridge);
         assert!(TcpStream::connect(address).is_err());
+    }
+    #[test]
+    fn action_hint_cancelled_bridge_closes_pending_request_without_dispatch_or_wire_reply() {
+        let mut bridge = NativeBridge::new().unwrap();
+        let mut peer = TcpStream::connect(bridge.listener.local_addr().unwrap()).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        struct HintCount(AtomicUsize);
+        impl NativeHost for HintCount {
+            fn action_scope_available(&self) -> bool {
+                true
+            }
+            fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({}))
+            }
+        }
+        let host = HintCount(AtomicUsize::new(0));
+        let token = CancellationToken::new();
+        // 先接纳没有帧的连接，避免把accept调度误当成取消回执的等待条件。
+        let accept_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            bridge.poll(&host, &token);
+            if !bridge.clients.is_empty() {
+                break;
+            }
+            assert!(Instant::now() < accept_deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(bridge.clients.len(), 1);
+        assert_eq!(bridge.next_id, 1);
+        let frame =
+            json!({"id":1,"token":bridge.token,"method":"ui.action_hint","params":{"text":"n10"}});
+        writeln!(peer, "{frame}").unwrap();
+        token.cancel();
+        bridge.poll(&host, &token);
+        assert!(bridge.clients.is_empty());
+        assert_eq!(bridge.next_id, 1, "取消先于解析，不能消耗请求ID");
+        assert_eq!(host.0.load(Ordering::SeqCst), 0);
+        // 未读请求随连接关闭；不同平台可返回EOF或reset，均不能期待结构化JSON。
+        let mut response = Vec::new();
+        match peer.read_to_end(&mut response) {
+            Ok(count) => assert_eq!(count, 0),
+            Err(error) => assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ),
+                "取消连接未关闭：{error}"
+            ),
+        }
+        assert!(response.is_empty());
+        assert!(!METHODS.contains(&"ui.action_hint.scoped"));
+    }
+
+    #[test]
+    fn action_hint_actual_bridge_dispatch_observes_disconnect_and_parent_cancel() {
+        struct HintHost {
+            entered: std::sync::mpsc::SyncSender<()>,
+            observed: AtomicBool,
+        }
+        impl NativeHost for HintHost {
+            fn action_scope_available(&self) -> bool {
+                true
+            }
+            fn call(
+                &self,
+                method: &str,
+                _: Value,
+                cancellation: &CancellationToken,
+            ) -> Result<Value, ActionError> {
+                assert_eq!(method, "ui.action_hint");
+                self.entered.send(()).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !cancellation.is_cancelled() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                assert!(
+                    cancellation.is_cancelled(),
+                    "实际提示分派必须使用断连监视令牌"
+                );
+                self.observed.store(true, Ordering::Release);
+                Err(crate::action_hint::fault("cancelled", "not_started"))
+            }
+        }
+        for disconnect in [false, true] {
+            let mut bridge = NativeBridge::new().unwrap();
+            let mut peer = TcpStream::connect(bridge.listener.local_addr().unwrap()).unwrap();
+            let frame = json!({"id":1,"token":bridge.token,"method":"ui.action_hint","params":{"text":"n10"}});
+            writeln!(peer, "{frame}").unwrap();
+            let (entered, ready) = std::sync::mpsc::sync_channel(1);
+            let host = HintHost {
+                entered,
+                observed: AtomicBool::new(false),
+            };
+            let parent = CancellationToken::new();
+            let token = parent.clone();
+            let worker = thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while !host.observed.load(Ordering::Acquire) {
+                    bridge.poll(&host, &token);
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(1));
+                }
+            });
+            ready.recv_timeout(Duration::from_secs(2)).unwrap();
+            if disconnect {
+                drop(peer);
+            } else {
+                parent.cancel();
+            }
+            worker.join().unwrap();
+            assert_eq!(parent.is_cancelled(), !disconnect);
+        }
+    }
+}
+
+#[cfg(test)]
+mod window_bridge_tests {
+    use super::*;
+    use std::io::BufRead;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    const WINDOW: [&str; 6] = [
+        "window.geometry",
+        "window.set_rect",
+        "pointer.state",
+        "pointer.root",
+        "target.handoff_pointing_root",
+        "window.drag",
+    ];
+    struct Host {
+        available: bool,
+        calls: AtomicUsize,
+    }
+    impl NativeHost for Host {
+        fn native_context_available(&self) -> bool {
+            self.available
+        }
+        fn action_scope_available(&self) -> bool {
+            true
+        }
+        fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut error = ActionError::new("target_expired", "private-host-details");
+            error.effect_state = Some("unknown".into());
+            Err(error)
+        }
+    }
+    fn exchange(host: &Host, method: &str, params: Value, token: &CancellationToken) -> Value {
+        let mut bridge = NativeBridge::new().unwrap();
+        let mut peer = TcpStream::connect(bridge.listener.local_addr().unwrap()).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let frame = json!({"id":1,"token":bridge.token,"method":method,"params":params});
+        writeln!(peer, "{frame}").unwrap();
+        for _ in 0..16 {
+            bridge.poll(host, token);
+            thread::sleep(Duration::from_millis(1));
+        }
+        let mut line = String::new();
+        std::io::BufReader::new(peer).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+    #[test]
+    fn window_methods_are_additive_and_reject_false_native_marker_before_dispatch() {
+        let host = Host {
+            available: false,
+            calls: AtomicUsize::new(0),
+        };
+        assert_eq!(METHODS.len(), 49);
+        for method in WINDOW {
+            assert!(METHODS.contains(&method));
+            let response = exchange(&host, method, json!({}), &CancellationToken::new());
+            assert_eq!(response["error"]["code"], "native_bridge_unavailable");
+            assert_eq!(response["error"]["effect_state"], "not_started");
+        }
+        let response = exchange(
+            &host,
+            "window.action",
+            json!({"target":{},"operation":"toggle_maximize"}),
+            &CancellationToken::new(),
+        );
+        assert_eq!(response["error"]["code"], "native_bridge_unavailable");
+        assert_eq!(host.calls.load(Ordering::SeqCst), 0);
+    }
+    #[test]
+    fn window_read_and_write_faults_keep_structured_effect_and_hide_host_details() {
+        let host = Host {
+            available: true,
+            calls: AtomicUsize::new(0),
+        };
+        for method in WINDOW {
+            let response = exchange(&host, method, json!({}), &CancellationToken::new());
+            let error = &response["error"];
+            assert_eq!(error["code"], "target_expired");
+            assert_eq!(error["method"], method);
+            assert_eq!(
+                error["effect_state"],
+                if matches!(method, "window.geometry" | "pointer.state" | "pointer.root") {
+                    "not_started"
+                } else {
+                    "unknown"
+                }
+            );
+            assert!(!error["message"].as_str().unwrap().contains("private"));
+            assert!(error
+                .get("required_permissions")
+                .is_none_or(|v| v.as_array().is_some_and(Vec::is_empty)));
+        }
+        assert_eq!(host.calls.load(Ordering::SeqCst), 6);
+    }
+    #[test]
+    fn pre_cancelled_window_calls_do_not_enter_the_host() {
+        let host = Host {
+            available: true,
+            calls: AtomicUsize::new(0),
+        };
+        for method in WINDOW {
+            let mut bridge = NativeBridge::new().unwrap();
+            let mut peer = TcpStream::connect(bridge.listener.local_addr().unwrap()).unwrap();
+            peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+            let token = CancellationToken::new();
+            let accept_deadline = Instant::now() + Duration::from_secs(1);
+            while bridge.clients.is_empty() {
+                bridge.poll(&host, &token);
+                assert!(Instant::now() < accept_deadline);
+            }
+            writeln!(
+                peer,
+                "{}",
+                json!({"id":1,"token":bridge.token,"method":method,"params":{}})
+            )
+            .unwrap();
+            token.cancel();
+            bridge.poll(&host, &token);
+            assert!(bridge.clients.is_empty());
+            let mut bytes = Vec::new();
+            match peer.read_to_end(&mut bytes) {
+                Ok(count) => assert_eq!(count, 0),
+                Err(error) => assert!(matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                )),
+            }
+            assert!(bytes.is_empty());
+        }
+        assert_eq!(host.calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod class_rejection_bridge_tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpStream,
+        thread,
+        time::{Duration, Instant},
+    };
+    #[test]
+    fn special_identity_and_original_effect_are_validated_before_read_normalization() {
+        for method in [Some("window.geometry"), Some("pointer.root"), None] {
+            for effect in [Some("not_started"), Some("unknown"), None] {
+                let mut error = ActionError::new("window_class_blocked", "same");
+                error.method = method.map(str::to_owned);
+                error.effect_state = effect.map(str::to_owned);
+                assert!(preserve_class_rejection("window.geometry", &mut error));
+                let valid = method == Some("window.geometry") && effect.is_some();
+                assert_eq!(
+                    error.code,
+                    if valid {
+                        "window_class_blocked"
+                    } else {
+                        "invalid_response"
+                    }
+                );
+                assert_eq!(
+                    error.effect_state.as_deref(),
+                    if valid { effect } else { Some("unknown") }
+                );
+            }
+        }
+        let mut other = ActionError::new("target_changed", "same");
+        assert!(!preserve_class_rejection("window.geometry", &mut other));
+        assert_eq!(other.code, "target_changed");
+        assert!(other.effect_state.is_none());
+    }
+    struct FaultHost {
+        method: Option<&'static str>,
+        effect: Option<&'static str>,
+    }
+    impl NativeHost for FaultHost {
+        fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+            let mut e = ActionError::new("window_class_blocked", "same");
+            e.method = self.method.map(str::to_owned);
+            e.effect_state = self.effect.map(str::to_owned);
+            Err(e)
+        }
+    }
+    #[test]
+    fn actual_shared_socket_bridge_does_not_rewrite_the_special_evidence() {
+        for method in [Some("window.geometry"), Some("pointer.root"), None] {
+            for effect in [Some("not_started"), Some("unknown"), None] {
+                let mut bridge = NativeBridge::new().unwrap();
+                let config = bridge.configuration().unwrap();
+                let mut peer =
+                    TcpStream::connect(("127.0.0.1", config["port"].as_u64().unwrap() as u16))
+                        .unwrap();
+                let request =
+                    json!({"id":1,"token":config["token"],"method":"window.geometry","params":{}});
+                writeln!(peer, "{request}").unwrap();
+                peer.set_nonblocking(true).unwrap();
+                let host = FaultHost { method, effect };
+                let cancellation = CancellationToken::new();
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let mut output = Vec::new();
+                loop {
+                    bridge.poll(&host, &cancellation);
+                    let mut bytes = [0u8; 4096];
+                    match peer.read(&mut bytes) {
+                        Ok(0) => {}
+                        Ok(n) => output.extend_from_slice(&bytes[..n]),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(e) => panic!("{e}"),
+                    }
+                    if output.ends_with(b"\n") {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(1));
+                }
+                let value: Value = serde_json::from_slice(&output).unwrap();
+                let valid = method == Some("window.geometry") && effect.is_some();
+                assert_eq!(
+                    value["error"]["code"],
+                    if valid {
+                        "window_class_blocked"
+                    } else {
+                        "invalid_response"
+                    }
+                );
+                assert_eq!(
+                    value["error"]["effect_state"],
+                    if valid { effect.unwrap() } else { "unknown" }
+                );
+                assert_eq!(value["error"]["method"], "window.geometry");
+            }
+        }
     }
 }

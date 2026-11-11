@@ -59,19 +59,81 @@ export default async function main(ctx) {
     return { text: cleanText(ctx.input.text), invocation: ctx.invocation };
 }
 `;
-// 公开62的精确canonical声明，保留LF/CRLF两种字节指纹；未知旧版本不猜测。
+// 已确认的公共canonical声明，保留各版本LF/CRLF字节指纹；未知版本不猜测。
 const canonicalSdkHashes={
   "api.d.ts": [
+    "495ab8e791cf0a097f1d4a9981ba9c8d42b6fc474b2e46fc3b22ed8954e893ea",
+    "1529bbe80cbfaad91e0a8b1843b83fc7e2a5b46c761333f3a62b1f417a787c40",
     "12020f626e467a1025b8eb9b08245952f0425f97a983a8f66c48a1864e6d7adc",
-    "aacd818ae060a0c4391d322fb0d42b6712b01a582fef9ff3821bc150911a9a14"
+    "aacd818ae060a0c4391d322fb0d42b6712b01a582fef9ff3821bc150911a9a14",
+    "7e35d3cfe0db4ba9ff885e0960759ee81f40c4116035e0cb8b0ed00d94bb8b55",
+    "d6c813e4763b2b72b2b66625c2c30b149ffe3b7f7978eb88be1e75c9b8b5131a",
+    "ec277716a63ae07c55c36ffa58b58aaf92998b6219ca722539cc2a01373bf2a4",
+    "06eb52f97df7a63cf430c813b5e9ca05e2370b6d54fc77d40379c2ef0c2faf58",
+    "e6338de5fce25b6864c59d1344785e10240f092b351b487ac82be336cf89849d",
+    "c33bc088d6c8bb0d48fb0c97b5f1d0977018fb58ba0cc6f49d0d435fb68e6f4c",
+    "d893ac66aba736a6093ff15a9498e010d5df35bd2ec0c88fceae2ae1ab1f8798",
+    "54e9c5c8bc7abf1437f52c02cd4536523f7210f3478c6b56a519edb6d311f771",
+    "937f423a88e6565bc2130bcb4b9be28d9907d43511118fcfb9795d6b723c4284",
+    "521db15d9df3c83f880a38b58dd22155b8a02e80d51f5daefda3fa4763e2c85d",
+    "69f67384a1768a7b7987c3b595328184773b1d624e6996fd0574350dcdbf680b",
+    "1087192989a1692d64e3f53efbaf4be46739c39852490efd2146104c591923fa",
+    "7ae85df4d6bba81754d694e4df97ac27edc9c8bab1ddb646c9f4c396c401b72d",
+    "67aa215ce5340b2fcddfa460eaef89d9e9b66acac0511acfc61bdc4593220733",
+    "a2da2d9f3d4da9a1d50b2bb94671c157cddc3176d8d67e204486a907e3afb391",
+    "4e536fee2b28f8408e9183cbddf2017daffec99d175607e7d34dd35eb81462fd",
+    "2aa8641ecdcc6e72d39bfbed8fd8bf3457458be787d73f9c510194eea3a78445",
+    "deb1ba71d70b183680f0a94e4a87ff0f51697c05fcbedec6e4d719acd81e5d7c",
+    "a9e655eb47154a49a38f63c9e4c320b00a1d393d60c7c065fbb542c455c932d5",
+    "164874388d6b6394a1a62e361c2d9a898f021483727b32479a1a79c415cbcccd",
+    "f553fb1c74793006e563f5f0b563556d901bb98cc6179ad1d75909bca8105c60",
+    "9ea61940417f3e6238a9cd10ece6693aa53c754822a53ef0a83aa703ba0ca4ad",
+    "04b5d6a4573a87050ffbcb8078d1512749286d0efbda59cb27a32eb0e5bc30a5",
+    "5a8dde5680b942d8e2460554fc470725583267858b29b7c22994fa4e248d2d06",
+    "5101d124402fd17c1b6302fa78c58c1eaabfa1ac4751128ed99fabf49d04aba2",
+    "616246d4a14a951bf1beb7d8cd6c97967972ceed27b2392fe2b74cadba84c690",
+    "ebd8e81dce8483c993601c688d140284e37538070a682d098874e74f13f27191",
+    "3de72c1ccba7b5783e4d670daca8e0b9dfaef7d017db16fdfcf23e430d4cf84f"
   ],
   "script-types.d.ts": [
+    "230fa9343b86cbe359d436c75f9abdd36f7c5e4f17742856944a6371e10e5e1d",
+    "d0c651d9deefaf9523449446e899057d95948bb9c743a1db3cab0fd8d2daf6f5",
     "261666bf8be38669cbbe16f27fa2bf44f3a20f2ded90cef2be888de85a939f01",
-    "16e2652d5f012d0d0ddcf9104462179dcaa3366b3d3a32d0e349d5fdd096b427"
+    "16e2652d5f012d0d0ddcf9104462179dcaa3366b3d3a32d0e349d5fdd096b427",
+    "23778a999ed3934b01e6eacd15677cd9ed7a614ba780754cd28c07f99e33fc6d",
+    "8e788d728e20194618cf810889f047e7de80bfc13e764911d0f3964223f47953",
+    "1e53113a470d14b5be14aef9f75c1365bbf447c20effcf2f160108aa18c2d5df",
+    "561163bdf3db853faa7ef2a3ad4717707a1b47906015df0f28538aa6d9349b75",
+    "e65e3fb619082bd1e17edcdd2a7e6f5ad8ddc14b1c268f3874098344266daa1e",
+    "a3ef947e96503643a863dc4224f50fd39317da5c4c60264041bb238f07247f77",
+    "25d557d344f69c3e7ce0184b79705fc0e61471eb9e365bd39bb779d04e40a248",
+    "b524985ebfbe4c9a92415bf34f85ac354a34fc97a4b51c2b25436fda673f5711",
+    "32c85e7bb9fd47acb89991fcabf72a1f30da6d961e456c33d35af508066a9721",
+    "ed5651429e554302dd41ccbf28998b736f7ee99f1df0c80cabbe0ad3c3f696fb",
+    "a483323404fdb821e08e2426f4dad17dda9ae697a561d1610794506a999b237b",
+    "bdc60286993cbd047821c17336c9c13fcf5f6b5e84b5fa2d774bfa1f1f6e9350",
+    "b01bb12f8f79e07f1bd51f771a150f0a23b2e4417d180eb2d100a24715827369",
+    "d820919aa42c3b8c7388e21da3287e74cac6b67f1be348d2159948ceeb814527",
+    "e37d19588d47d2232593573f71f2391179712ef95f8d641e3defc9157c09fff8",
+    "018f73eb09492cda3defa4242f6507bbf4592b986dfe11e122be7957a33c3ab0",
+    "0ed007e227c86b53a94d03d9aa6c6ffba029b789fd7321a089dbb795af556b61",
+    "d1eab6559992e59cb0133d03ece731f8202cf22833ac6d86fff2f6621575333f",
+    "2cee7b1c828ebc16eaecbc288a49f26e184c98f020e771c48791e8a4fec145f1",
+    "b08e98fbc9b7864407f64c092b3474a454e835ba1831670337d085c91402a67b",
+    "626cf798be4aa635be0bb205c78e8d263911b445e7d80e96dd3d49e378a14086",
+    "9d6747664d06418720fce46db3459329e3c4f81e06abeb5481b22b355e3ee67c",
+    "d6231a4cf6bab6477b5e803a1f5730349b489ea490c5669745f5b6d1bdf89afd",
+    "98c28f738ee470263e63ebd9eee783c9514b75269b867ecbffcb995c89339ba5",
+    "fa36e4c11c7ec7d3e79b5f7b4015733a0cd03f417c3a29f59d484448675eca02",
+    "75df62bdede468be9c13ed3febff5323f34323206795e03364f7652f6039a7ea",
+    "d8f4d1b5b575f2eb3f624723cce47c3c098970272f12b8f757922993fe3ad94a",
+    "456048caf72080b6757a220f8a91a79413e6360a8b0a0363f5b1dc44a48e9225"
   ],
   "clipboard-history-api.d.ts": [
     "c40fd66fd6318909c1bab62775d097dcfb5a8a7a84a411883a4852bdbd04cf2e",
-    "b8089bf8e920c3c818474f739c3f862ba32dffc4a1e3dfde64b647c023031134"
+    "b8089bf8e920c3c818474f739c3f862ba32dffc4a1e3dfde64b647c023031134",
+    "07a0f1c009ec384da046193a91825169d94854dd2afd68a91b1e53adb6c6cdc7",
+    "a9f6b7ecb90e0f656cfb12b711ef1748a310a15e4af3065fe67eab9ef362139e"
   ],
   "script-api.d.ts": [
     "c623dc7ead235801d87412dd5747f34dd0be7c410686a331e9fdbe23efd90c15",
@@ -80,11 +142,21 @@ const canonicalSdkHashes={
 };
 function portableSdkLayout(project,manifest){
   const candidates=['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts',
-    'sdk/api.d.ts','sdk/script-types.d.ts','sdk/script-api.d.ts','sdk/clipboard-history-api.d.ts'];
+    'sdk/api.d.ts','sdk/script-types.d.ts','sdk/script-api.d.ts','sdk/clipboard-history-api.d.ts',
+    'types/api.d.ts','types/clipboard-history-api.d.ts'];
   guardMany(candidates.map(name=>({value:path.join(project,name),missing:true})));
   const present=name=>existsSync(path.join(project,name));
   const flat=['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts'].some(present);
   const hasScript=manifest.actions.some(action=>action?.runtime==='script');
+  if(['types/api.d.ts','types/clipboard-history-api.d.ts'].some(present)){
+    if(flat||['sdk/script-types.d.ts','sdk/script-api.d.ts','sdk/clipboard-history-api.d.ts'].some(present))
+      throw Error('project_sdk_layout_ambiguous');
+    const files=['types/api.d.ts','types/clipboard-history-api.d.ts','sdk/api.d.ts'];
+    if(files.some(name=>!present(name)))throw Error('project_sdk_layout_incomplete');
+    if(!hasScript||!manifest.actions.some(action=>action?.runtime==='node'))throw Error('project_runtime_mismatch');
+    // 原有分离布局：Node声明在types，Script同步声明沿用sdk/api别名；不迁移作者路径。
+    return {prefix:'',kind:'split',files,names:['api.d.ts','clipboard-history-api.d.ts','script-types.d.ts']};
+  }
   let nested=['sdk/script-types.d.ts','sdk/script-api.d.ts'].some(present)
     ||hasScript&&present('sdk/clipboard-history-api.d.ts');
   // Script包中的Node声明不是旧生成布局，不能把缺失的其余声明当作legacy刷新。
@@ -97,23 +169,57 @@ function portableSdkLayout(project,manifest){
   if(nested&&present('sdk/script-api.d.ts'))names.push('script-api.d.ts');
   return {prefix,names};
 }
+function refreshSdkSnapshot(project,layout,data){
+  // 只维护已有生成布局；来源字段仅是归属标签，绝不作为读取路径。
+  if(layout.prefix!=='sdk/')return null;
+  const file=path.join(project,'sdk/snapshot.json');guard(file,true);
+  if(!existsSync(file))return null;
+  const before=read(file);let snapshot;
+  try{snapshot=JSON.parse(before);}catch{throw Error('project_sdk_snapshot_unrecognized');}
+  const names=['api.d.ts','script-types.d.ts','clipboard-history-api.d.ts'];
+  const keys=(value,expected)=>value!==null&&typeof value==='object'&&!Array.isArray(value)
+    &&JSON.stringify(Object.keys(value))===JSON.stringify(expected);
+  const contracts=[
+    ['ctx.desktop.stepBrightness','display.brightness_step','source'],
+    ['ctx.desktop.adjustVolume','audio.volume_adjust','canonical_source'],
+  ];
+  const contract=contracts.find(([api,wire])=>snapshot?.required_api===api&&snapshot?.wire===wire);
+  if(!keys(snapshot,['schema_version','required_api','wire','files'])||snapshot.schema_version!==1
+      ||!contract||!keys(snapshot.files,names))throw Error('project_sdk_snapshot_unrecognized');
+  const generated=JSON.stringify(snapshot,null,2)+'\n';
+  const crlf=before===generated.replaceAll('\n','\r\n');
+  if(before!==generated&&!crlf)throw Error('project_sdk_snapshot_unrecognized');
+  const digest=text=>createHash('sha256').update(text,'utf8').digest('hex');
+  for(const name of names){
+    const item=data.find(item=>item.name===name),entry=snapshot.files[name],label=contract[2];
+    if(!item||!keys(entry,[label,'sha256'])||entry[label]!=='crates/omnitrigger-actions/runtime/'+name
+        ||typeof entry.sha256!=='string'||!/^[a-f0-9]{64}$/.test(entry.sha256))throw Error('project_sdk_snapshot_unrecognized');
+    if(!canonicalSdkHashes[name].includes(digest(item.before))||!canonicalSdkHashes[name].includes(digest(item.text)))
+      throw Error('project_sdk_unrecognized');
+    // 已知版本间可能已发生声明更新，旧生成指纹仍可按已知归属一起刷新。
+    if(!canonicalSdkHashes[name].includes(entry.sha256))throw Error('project_sdk_snapshot_unrecognized');
+    entry.sha256=digest(item.text);
+  }
+  const text=JSON.stringify(snapshot,null,2)+'\n';
+  return {name:'snapshot.json',file,before,text:crlf?text.replaceAll('\n','\r\n'):text};
+}
 function refreshPortableSdk(project,source,runtime,layout){
   const sourceRoot=path.join(source,'crates/omnitrigger-actions/runtime');
-  const files=layout.names.map(name=>path.join(project,layout.prefix+name));
+  const files=(layout.files??layout.names.map(name=>layout.prefix+name)).map(name=>path.join(project,name));
   const texts=readMany([...files,...layout.names.map(name=>path.join(sourceRoot,name))]);
   const data=layout.names.map((name,index)=>{
     const file=files[index],before=texts[index],text=texts[files.length+index];
     const digest=createHash('sha256').update(before,'utf8').digest('hex');
     if(before!==text&&!canonicalSdkHashes[name].includes(digest))throw Error('project_sdk_unrecognized');
-    return {file,before,text};
+    return {name,file,before,text};
   });
-  // 所有声明先通过归属校验；写入前再复查，作者同时改动时拒绝覆盖。
-  for(const item of data){
-    if(read(item.file)!==item.before)throw Error('project_sdk_changed');
-    if(item.before!==item.text)write(item.file,item.text);
-  }
-  return {status:'refreshed',runtime,package_root:project,layout:layout.prefix?'sdk':'flat',
-    files:layout.names.map(name=>layout.prefix+name),author_files_changed:false};
+  const snapshot=refreshSdkSnapshot(project,layout,data);if(snapshot)data.push(snapshot);
+  // 声明和已有快照全部预检、复查后才开始写入；未知作者修改不会部分覆盖。
+  const current=readMany(data.map(item=>item.file));
+  if(data.some((item,index)=>current[index]!==item.before))throw Error('project_sdk_changed');
+  for(const item of data)if(item.before!==item.text)write(item.file,item.text);
+  return {status:'refreshed',runtime,package_root:project,layout:layout.kind??(layout.prefix?'sdk':'flat'),
+    files:data.map(item=>path.relative(project,item.file).split(path.sep).join('/')),author_files_changed:false};
 }
 function refresh(project,source,runtime){
   project=path.resolve(project);const [manifestText]=readMany([path.join(project,'action.json')],[project]);

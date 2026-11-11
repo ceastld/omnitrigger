@@ -1,4 +1,5 @@
 import {prepare,available,complete,sanitized} from './notice.mjs';
+/** @param {import('./sdk/api').ActionContext} ctx */
 export default async function main(ctx){
   let method='script.parameters',began=false,returned=false;
   try{

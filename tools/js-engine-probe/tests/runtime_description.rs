@@ -21,15 +21,29 @@ fn current_descriptor_is_bounded_and_parses_as_a_new_host() {
     );
     assert_eq!(
         host.capabilities.as_ref().unwrap().len(),
-        if cfg!(windows) { 5 } else { 3 }
+        if cfg!(windows) { 16 } else { 5 }
     );
     host.check(&[
+        "actions.stop_other_instances.v1".into(),
+        "state.read_cas.v1".into(),
         "clipboard.history.v1".into(),
         "clipboard.read_data.v1".into(),
         "desktop.copy_selection_data.v1".into(),
     ])
     .unwrap();
-    for capability in ["process.capture.v1", "system.open_file_in_parent.v1"] {
+    for capability in [
+        "process.capture.v1",
+        "system.open_file_in_parent.v1",
+        "raishot.capture_result.v1",
+        "raishot.release_result.v1",
+        "ui.action_hint.v1",
+        "window.geometry.v1",
+        "window.set_rect.v1",
+        "pointer.state.v1",
+        "pointer.root.v1",
+        "target.handoff_pointing_root.v1",
+        "window.drag.v1",
+    ] {
         let result = host.check(&[capability.into()]);
         assert_eq!(result.is_ok(), cfg!(windows), "{capability}");
         if let Err(fault) = result {

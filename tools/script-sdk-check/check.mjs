@@ -16,8 +16,10 @@ const binary = resolve(binaryArgs[0]);
 const {default: ts} = await import('typescript');
 const {checkClipboardHistoryTypes} = await import('./check-history-types.mjs');
 const {checkFileDirectoryTypes} = await import('./check-file-directory-types.mjs');
+const {checkActionHint} = await import('./check-action-hint.mjs');
 mkdirSync(join(repo, '.tmp'), {recursive:true});
 const root = mkdtempSync(join(repo, '.tmp/script-sdk-check-'));
+const actionHintChecks = await checkActionHint({typescript:ts,temporaryRoot:root});
 const config = join(root, 'bindings.json');
 writeFileSync(config, '[]');
 function cli(args, code = 0) {
@@ -30,7 +32,7 @@ function diagnostics(path) {
   const configPath = join(path, 'jsconfig.json');
   const loaded = ts.readConfigFile(configPath, ts.sys.readFile);
   assert.equal(loaded.error, undefined);
-  const parsed = ts.parseJsonConfigFileContent(loaded.config, ts.sys, path);
+  const parsed = ts.parseJsonConfigFileContent(loaded.config, ts.sys, path, undefined, configPath);
   assert.deepEqual(parsed.errors, []);
   const program = ts.createProgram(parsed.fileNames, parsed.options);
   return ts.getPreEmitDiagnostics(program);
@@ -157,6 +159,6 @@ const listed = cli(['--list-package-actions']);
 assert.equal(listed.actions.length, 1);
 assert.equal(listed.actions[0].runtime, 'script');
 assert.equal(readFileSync(config,'utf8'),'[]');
-const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,checkedExamples,entryContractChecks:Object.keys(invalidEntries),typedInputChecks,negativeTypeChecks:negative.length,structuredClipboardTypeChecks:true,historyTypeChecks,fileDirectoryTypeChecks,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
+const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,checkedExamples,entryContractChecks:Object.keys(invalidEntries),typedInputChecks,negativeTypeChecks:negative.length,structuredClipboardTypeChecks:true,historyTypeChecks,fileDirectoryTypeChecks,actionHintChecks,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
 writeFileSync(join(root,'result.json'), JSON.stringify(result,null,2));
 console.log(JSON.stringify(result));

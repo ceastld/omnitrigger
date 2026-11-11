@@ -23,3 +23,12 @@ node --test examples/actions/line-text/recipes.test.mjs
 ```
 
 测试只使用合成文本与 RecordingHost。
+
+
+## 作者工程检查
+
+在本目录运行 `npm ci --ignore-scripts`，再执行 `npm run check`。固定 TypeScript 5.9.3 严格检查两个入口、共享流程、行变换和 Node 默认导出；不运行去重、排序或输入动作。随包 SDK 与 JSDoc 均为本地引用，可移出仓库使用。
+
+配置只加载 ES2022 和显式宿主声明，types:[]、strict/noEmit、skipLibCheck:false；不提供 DOM/Node 原生全局。NodeContext 使用异步回执，SyncContext 使用同步回执；外部 input 保持 unknown，由原有校验处理。类型断言连接既有校验和声明，不代替运行时参数检查。
+
+仓库根可用 `node tools/script-sdk-check/check-project-types.mjs examples/actions/line-text` 检查模块合同。既有 `node tools/script-project.mjs refresh --runtime node --project <本目录>` 显式刷新整组 SDK；入口、算法、清单、调用、配置和开发依赖保留，未知 portable 声明仍拒绝覆盖。类型通过不表示输入效果已验收。

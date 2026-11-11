@@ -42,6 +42,10 @@ test('动作包各入口可导入，版本与运行时明确', async () => {
       assert.equal(action.single_instance, true);
       assert.equal(action.entry, action.id === 'create-default-tab-script' ? 'default-new-tab-script.mjs' : 'restore-session-script.mjs');
       assert.equal(typeof entry.main, 'function');
+    } else if (action.id === 'duplicate-tab-script') {
+      assert.equal(action.runtime, 'script');
+      assert.equal(action.entry, 'duplicate-tab-script.mjs');
+      assert.equal(typeof entry.main, 'function');
     } else {
       assert.equal(action.runtime, 'node');
       assert.equal(typeof entry.default, 'function');
@@ -284,7 +288,7 @@ test('Node 动作宿主实际加载入口，保留部分成功回执与抛出的
     // 与 node.rs 相同拼接顺序，宿主源码本身不是独立可执行入口。
     const host = join(root, 'host.mjs');
     const runtime = new URL('../crates/omnitrigger-actions/runtime/', import.meta.url);
-    const sources = await Promise.all(['desktop-api.js', 'browser-api.js', 'clipboard-history-api.js', 'process-capture-api.js', 'host.mjs']
+    const sources = await Promise.all(['desktop-api.js', 'browser-api.js', 'clipboard-history-api.js', 'process-capture-api.js', 'actions-api.js', 'state-api.js', 'host.mjs']
       .map(name => readFile(new URL(name, runtime), 'utf8')));
     await writeFile(host, sources.join('\n'));
     for (const [entry, input, expected] of [

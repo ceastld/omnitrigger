@@ -3,6 +3,74 @@ function createDesktopApi(invoke) {
   function invalid(method, message) {
     throw Object.assign(new Error(message), {code:'invalid_input', effectState:'not_started', method});
   }
+  function geometryFields(value, names) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
+    const fields = Object.getOwnPropertyDescriptors(value);
+    if (Reflect.ownKeys(fields).length !== names.length || names.some(name => !Object.hasOwn(fields, name) || !Object.hasOwn(fields[name], 'value'))) throw new Error();
+    return Object.fromEntries(names.map(name => [name,fields[name].value]));
+  }
+  function geometryRect(value, request) {
+    const rect = geometryFields(value, ['left','top','width','height']);
+    if (!Object.values(rect).every(Number.isInteger) || rect.left < -2147483648 || rect.left > 2147483647
+        || rect.top < -2147483648 || rect.top > 2147483647 || rect.width < 1 || rect.height < 1
+        || rect.width > (request ? 65535 : 2147483647) || rect.height > (request ? 65535 : 2147483647)
+        || rect.left + rect.width > 2147483647 || rect.top + rect.height > 2147483647) throw new Error();
+    return rect;
+  }
+  function geometryResult(method, value) {
+    try {
+      if (method === 'window.set_rect') {
+        const result = geometryFields(value,['submitted','effectState']);
+        if (result.submitted !== true || result.effectState !== 'unknown') throw new Error();
+        return result;
+      }
+      const result = geometryFields(value,['coordinateSpace','className','outerRect','visibleFrameRect','monitorRect','workArea','primaryScreen','windowDpi','maximized']);
+      if (typeof result.className !== 'string' || !result.className.length || result.className.length > 255
+          || result.className.includes('\0')) throw new Error();
+      if (result.coordinateSpace !== 'physical-screen' || !Number.isInteger(result.windowDpi) || result.windowDpi < 1 || result.windowDpi > 65535 || typeof result.maximized !== 'boolean') throw new Error();
+      for (let index = 0; index < result.className.length; index++) {
+        const unit = result.className.charCodeAt(index);
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+          const next = result.className.charCodeAt(++index);
+          if (!(next >= 0xdc00 && next <= 0xdfff)) throw new Error();
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) throw new Error();
+      }
+      for (const name of ['outerRect','visibleFrameRect','monitorRect','workArea']) result[name] = geometryRect(result[name],false);
+      result.primaryScreen = geometryFields(result.primaryScreen,['width','height']);
+      if (!Object.values(result.primaryScreen).every(n => Number.isInteger(n) && n > 0 && n <= 2147483647)) throw new Error();
+      return result;
+    } catch (_) {
+      throw Object.assign(new Error('窗口矩形回执无效；不会自动重试。'),{code:'invalid_response',method,effectState:method === 'window.geometry' ? 'not_started' : 'unknown'});
+    }
+  }
+  function geometryCall(method, params) {
+    const result = invoke(method,params);
+    return result && typeof result.then === 'function' ? result.then(value => geometryResult(method,value)) : geometryResult(method,result);
+  }
+  function trackingResult(method,value) {
+    try {
+      if (method === 'pointer.state') {
+        const result=geometryFields(value,['coordinateSpace','x','y','buttons','inputSource']);
+        if (result.coordinateSpace!=='physical-screen'
+            || ![result.x,result.y].every(n=>Number.isInteger(n)&&n>=-2147483648&&n<=2147483647)) throw new Error();
+        result.inputSource=geometryFields(result.inputSource,['kind','injected','selfInjected']);
+        if (result.inputSource.kind!=='polled-key-state' || result.inputSource.injected!==null || result.inputSource.selfInjected!==null) throw new Error();
+        result.buttons=geometryFields(result.buttons,['left','right','middle']);
+        if (!Object.values(result.buttons).every(v=>['down','not_down_or_unavailable'].includes(v))) throw new Error();
+        return result;
+      }
+      const result=geometryFields(value,['stopped','reason','acceptedUpdates','pollSamples','effectState','dragCompleted']);
+      if (result.stopped!==true || result.dragCompleted!==false || !['button_not_down_or_unavailable','duration_limit','update_limit'].includes(result.reason)
+          || !Number.isInteger(result.acceptedUpdates) || result.acceptedUpdates<0 || result.acceptedUpdates>64
+          || !Number.isInteger(result.pollSamples) || result.pollSamples<0 || result.pollSamples>201
+          || !['not_started','unknown'].includes(result.effectState) || (result.acceptedUpdates>0 && result.effectState!=='unknown')) throw new Error();
+      return result;
+    } catch (_) { throw Object.assign(new Error('指针/有界调整回执无效；不会重试。'),{code:'invalid_response',method,effectState:method==='pointer.state'?'not_started':'unknown'}); }
+  }
+  function trackingCall(method,params) {
+    const result=invoke(method,params);
+    return result && typeof result.then==='function' ? result.then(value=>trackingResult(method,value)) : trackingResult(method,result);
+  }
   function keyTiming(options, count, method) {
     const value = options?.keyDownDelayMs === undefined ? 0 : options.keyDownDelayMs;
     if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some(key => key !== 'keyDownDelayMs')
@@ -243,6 +311,128 @@ function createDesktopApi(invoke) {
     }catch(cause){return failure(cause);}
   }
 
+  function pointingObservation(value, method, code, effectState) {
+    const identity=value=>{
+      const row=geometryFields(value,['window_handle','process_id','thread_id','process_created_file_time']);
+      if(!scopedDecimal(row.window_handle,'9223372036854775807')
+        || ![row.process_id,row.thread_id].every(value=>Number.isInteger(value)&&value>0&&value<=0xffffffff)
+        || !scopedDecimal(row.process_created_file_time,'18446744073709551615')) throw new Error();
+      return Object.freeze(row);
+    };
+
+      try{
+        const row=geometryFields(value,['sampledAt','coordinateSpace','point','inputSource','pointingWindow','rootWindow']);
+        const point=geometryFields(row.point,['x','y']);
+        const source=geometryFields(row.inputSource,['kind','injected','selfInjected']);
+        if(row.sampledAt!=='call-time'||row.coordinateSpace!=='physical-screen'
+          ||![point.x,point.y].every(value=>Number.isInteger(value)&&value>=-2147483648&&value<=2147483647)
+          ||source.kind!=='polled-pointer'||source.injected!==null||source.selfInjected!==null) throw new Error();
+        return Object.freeze({...row,point:Object.freeze(point),inputSource:Object.freeze(source),
+          pointingWindow:identity(row.pointingWindow),rootWindow:identity(row.rootWindow)});
+      }catch(_){throw Object.assign(new Error('指向根窗观察回执无效。'),{code,method,effectState});}
+  }
+
+  function pointingRoot(args) {
+    const method='pointer.root';
+    if(args.length!==0) invalid(method,'getPointingRoot 不接收参数、坐标或窗口句柄。');
+    const failure=cause=>{
+      const code=typeof cause?.code==='string'&&/^[a-z_]{1,64}$/.test(cause.code)?cause.code:'native_bridge_failed';
+      throw Object.assign(new Error('指向根窗只读查询未获确认。'),{code,method,effectState:'not_started'});
+    };
+    const result=value=>pointingObservation(value,method,'invalid_response','not_started');
+    try{const value=invoke(method,{});return value&&typeof value.then==='function'?value.then(result,failure):result(value);}
+    catch(cause){return failure(cause);}
+  }
+
+
+  function handoffPointingRoot(args) {
+    const method='target.handoff_pointing_root';
+    let expected,options;
+    try{
+      if(args.length!==2) throw new Error();
+      expected=pointingObservation(args[0],method,'invalid_input','not_started');
+      options=geometryFields(args[1],['validForMs','confirmTimeoutMs']);
+      if(!Number.isInteger(options.validForMs)||options.validForMs<2||options.validForMs>5000
+        ||!Number.isInteger(options.confirmTimeoutMs)||options.confirmTimeoutMs<1||options.confirmTimeoutMs>1000
+        ||options.confirmTimeoutMs>=options.validForMs) throw new Error();
+    }catch(_){invalid(method,'交接需要完整指向观察及显式有效期/确认预算；确认预算须短于有效期。');}
+    const failure=cause=>{
+      const code=typeof cause?.code==='string'&&/^[a-z_]{1,64}$/.test(cause.code)?cause.code:'native_bridge_failed';
+      throw Object.assign(new Error('指向根窗交接未获确认；不会自动重试。'),{code,method,effectState:cause?.effectState==='not_started'?'not_started':'unknown'});
+    };
+    const result=value=>{
+      try{
+        const row=geometryFields(value,['requested','requestAccepted','foregroundConfirmed','target','reason','effectState']);
+        if(row.requested!==true||typeof row.requestAccepted!=='boolean'||typeof row.foregroundConfirmed!=='boolean'||row.effectState!=='unknown') throw new Error();
+        if(!row.requestAccepted){
+          if(row.reason!=='os_rejected'||row.target!==null) throw new Error();
+        }else if(!row.foregroundConfirmed){
+          if(row.reason!=='confirmation_timeout'||row.target!==null) throw new Error();
+        }else{
+          if(row.reason!==null) throw new Error();
+          const target=scopedTarget(row.target,method,'invalid_response');
+          for(const field of ['window_handle','process_id','thread_id','process_created_file_time'])
+            if(target.context[field]!==expected.rootWindow[field]) throw new Error();
+          row.target=target;
+        }
+        return Object.freeze(row);
+      }catch(_){throw Object.assign(new Error('交接回执无效，不能据此发送输入。'),{code:'invalid_response',method,effectState:'unknown'});}
+    };
+    const params={expected_root:{...expected.rootWindow},valid_for_ms:options.validForMs,confirm_timeout_ms:options.confirmTimeoutMs};
+    try{const value=invoke(method,params);return value&&typeof value.then==='function'?value.then(result,failure):result(value);}
+    catch(cause){return failure(cause);}
+  }
+
+
+  function windowDragParams(args) {
+      const method='window.drag'; let params;
+      try {
+        if (args.length!==1 || !args[0] || typeof args[0]!=='object') throw new Error();
+        const names=Reflect.ownKeys(args[0]);
+        if (names.some(n=>!['mode','button','maxDurationMs','maxUpdates','snap'].includes(n))) throw new Error();
+        const value=geometryFields(args[0],names);
+        if (!['move','resize'].includes(value.mode) || !['left','right','middle'].includes(value.button)
+            || !Number.isInteger(value.maxDurationMs) || value.maxDurationMs<20 || value.maxDurationMs>2000
+            || !Number.isInteger(value.maxUpdates) || value.maxUpdates<1 || value.maxUpdates>64) throw new Error();
+        params={mode:value.mode,button:value.button,max_duration_ms:value.maxDurationMs,max_updates:value.maxUpdates};
+        if (value.snap!==undefined && value.snap!==null) {
+          const snap=geometryFields(value.snap,['bounds','distance','waitMs','initialElapsedMs']);
+          if (value.mode!=='move' || !Number.isInteger(snap.distance) || snap.distance<0 || snap.distance>100
+              || !Number.isInteger(snap.waitMs) || snap.waitMs<0 || snap.waitMs>1000
+              || !Number.isInteger(snap.initialElapsedMs) || snap.initialElapsedMs<0 || snap.initialElapsedMs>60000) throw new Error();
+          params.snap={bounds:geometryRect(snap.bounds,true),distance:snap.distance,wait_ms:snap.waitMs,initial_elapsed_ms:snap.initialElapsedMs};
+        }
+      } catch (_) { invalid(method,'有界调整需要明确mode/button、20–2000ms、1–64次预算；吸附需完整的显式物理边界/距离/时间参数。'); }
+      return params;
+  }
+
+  function windowRectParams(args) {
+      const method = 'window.set_rect';
+      let rect, frame;
+      try {
+        if (args.length !== 2) throw new Error();
+        rect = geometryRect(args[0],true);
+        frame = geometryFields(args[1],['frame']).frame;
+        if (!['outer','visible'].includes(frame)) throw new Error();
+      } catch (_) { invalid(method,'矩形需要明确left/top/width/height整数及frame=outer或visible；宽高1–65535且边界不溢出。'); }
+      return {rect,frame};
+  }
+
+function capturedWindow(args, count, method, buildParams, validate=value=>value) {
+    if(args.length!==count) invalid(method,'显式窗口接口的参数数量无效。');
+    const target=scopedTarget(args[0],method);
+    const failure=cause=>{
+      let code=typeof cause?.code==='string'&&/^[a-z_]{1,64}$/.test(cause.code)?cause.code:'native_bridge_failed';
+      // 专用类名拒绝只有同一读取方法的not_started才有证明力；不把坏字段正规化成可静默拒绝。
+      if(code==='window_class_blocked'&&(cause?.method!==method||cause?.effectState!=='not_started'))code='invalid_response';
+      throw Object.assign(new Error('显式窗口租约调用未获确认；不会自动重试。'),{code,method,
+        effectState:method==='window.geometry'||cause?.effectState==='not_started'?'not_started':'unknown'});
+    };
+    // 复用同一参数/回执解码，直接携带固定target调用；不在同步业务栈中重建整套SDK。
+    try{const value=invoke(method,{...buildParams(),target});return value&&typeof value.then==='function'?value.then(validate).catch(failure):validate(value);}
+    catch(cause){return failure(cause);}
+  }
+
   function scopedFault(method, code, effectState) {
     return Object.assign(new Error('显式目标调用未获确认；请检查错误代码。'), {method, code, effectState});
   }
@@ -452,12 +642,98 @@ function createDesktopApi(invoke) {
     });
   }
 
+  // 插入 createDesktopApi 函数体；同步 Script 与异步 Node 共用，不创建进程。
+  function createRaiShotResultApi(invoke) {
+    const capture='raishot.capture_result',release='raishot.release_result';
+    const fail=(method,code,effectState)=>{throw Object.assign(new Error('截图文件结果未获确认；不会自动重试。'),{method,code,effectState,retryAllowed:false});};
+    function data(value,names) {
+      if(!value||typeof value!=='object'||Array.isArray(value))throw new Error();
+      const fields=Object.getOwnPropertyDescriptors(value);
+      if(Reflect.ownKeys(fields).length!==names.length||names.some(k=>!Object.hasOwn(fields,k)||!Object.hasOwn(fields[k],'value')))throw new Error();
+      return Object.fromEntries(names.map(k=>[k,fields[k].value]));
+    }
+    const id=x=>typeof x==='string'&&/^[0-9a-f]{32}$/.test(x);
+    const bytes=text=>{let n=0;for(const c of text){const p=c.codePointAt(0);n+=p<128?1:p<2048?2:p<65536?3:4;}return n;};
+    function result(value) {
+      try {
+        const v=data(value,['status','requestId','completionScope','image','errorCode','imageEffectState','artifactVerified',
+          'automaticClipboardWritten','automaticHistoryAdded','sourceBusinessComplete','sourceAutoAdsorbVerified','retention','warningCode','retryAllowed']);
+        if(!id(v.requestId)||v.completionScope!=='png_file_only'||v.automaticClipboardWritten!==false
+          ||v.automaticHistoryAdded!==false||v.sourceBusinessComplete!==false||v.sourceAutoAdsorbVerified!==false
+          ||v.retention!=='caller_owned_until_explicit_release'||v.retryAllowed!==false)throw new Error();
+        if(v.status==='completed') {
+          const image=data(v.image,['path','fileName','format','width','height','byteLength','sha256']);
+          const path=typeof image.path==='string'?image.path.replaceAll('/','\\'):null;
+          if(v.artifactVerified!==true||v.imageEffectState!=='confirmed'||v.errorCode!==null
+            ||![null,'worker_cleanup_failed'].includes(v.warningCode)||image.fileName!=='image.png'||image.format!=='png'
+            ||!Number.isInteger(image.width)||!Number.isInteger(image.height)||image.width<1||image.height<1
+            ||image.width>65535||image.height>65535||image.width*image.height>32000000
+            ||typeof image.byteLength!=='string'||!/^[1-9][0-9]{0,7}$/.test(image.byteLength)||Number(image.byteLength)>67108864
+            ||typeof image.sha256!=='string'||!/^[0-9a-f]{64}$/.test(image.sha256)||path===null
+            ||!path.endsWith('\\capture-'+v.requestId+'\\image.png')||!/^[A-Za-z]:[\\]/.test(path)
+            ||bytes(path)>2048||/[\u0000-\u001f\u007f-\u009f<>:"|?*]/.test(path.slice(2))||/[\ud800-\udfff]/u.test(path)
+            ||path.slice(3).split('\\').some(x=>!x||x==='.'||x==='..'||/[. ]$/.test(x)||/^(onedrive|icloud)/i.test(x)||/^dropbox$/i.test(x)))throw new Error();
+          v.image=Object.freeze(image);
+        } else if(!['cancelled','failed'].includes(v.status)||v.artifactVerified!==false||v.image!==null
+          ||!['not_started','unknown'].includes(v.imageEffectState)||typeof v.errorCode!=='string'||!/^[a-z0-9_]{1,64}$/.test(v.errorCode)
+          ||v.warningCode!==null)throw new Error();
+        return Object.freeze(v);
+      } catch(_){fail(capture,'invalid_response','unknown');}
+    }
+    function call(method,params,checked) {
+      const failed=cause=>{
+        const code=typeof cause?.code==='string'&&/^[a-z0-9_]{1,64}$/.test(cause.code)?cause.code:'native_bridge_failed';
+        return fail(method,code,cause?.effectState==='not_started'?'not_started':'unknown');
+      };
+      try {
+        const value=invoke(method,params);
+        return value&&typeof value.then==='function'?value.then(checked).catch(failed):checked(value);
+      } catch(cause){return failed(cause);}
+    }
+    return Object.freeze({
+      captureRaiShotResult(...args) {
+        let options;
+        try {
+          if(args.length>1)throw new Error();
+          options=args.length===0||args[0]===undefined?{timeoutMs:30000}:data(args[0],['timeoutMs']);
+          if(!Number.isInteger(options.timeoutMs)||options.timeoutMs<1||options.timeoutMs>30000)throw new Error();
+        } catch(_){fail(capture,'invalid_input','not_started');}
+        return call(capture,{timeout_ms:options.timeoutMs},result);
+      },
+      releaseRaiShotResult(...args) {
+        if(args.length!==1||!id(args[0]))fail(release,'invalid_input','not_started');
+        const requestId=args[0];
+        return call(release,{request_id:requestId},value=>{
+          try {
+            const v=data(value,['released','requestId','scope','sessionDirectoryRetained']);
+            if(v.released!==true||v.requestId!==requestId||v.scope!=='owned_png_file'||v.sessionDirectoryRetained!==true)throw new Error();
+            return Object.freeze(v);
+          } catch(_){fail(release,'invalid_response','unknown');}
+        });
+      }
+    });
+  }
+
   const desktop = Object.freeze({
+    ...createRaiShotResultApi(invoke),
     findRaiShotResident: (...args) => findRaiShotResident(args),
     requestRaiShotRegion: (...args) => requestRaiShotRegion(args),
     win32EditReplaceSelection: (...args) => win32EditReplaceSelection(args),
     explorerContext: (...args) => explorerContext(args),
     readSelectionText: (...args) => readSelectionText(args),
+    getPointingRoot: (...args) => pointingRoot(args),
+    handoffPointingRoot: (...args) => handoffPointingRoot(args),
+    getWindowGeometryFor: (...args) => capturedWindow(args,1,'window.geometry',()=>({}),value=>geometryResult('window.geometry',value)),
+    setWindowRectFor: (...args) => capturedWindow(args,3,'window.set_rect',()=>windowRectParams([args[1],args[2]]),value=>geometryResult('window.set_rect',value)),
+    restoreWindowFor: (...args) => capturedWindow(args,1,'window.action',()=>({operation:'restore'}),value=>{
+      if(!scopedRecord(value,['submitted'])||value.submitted!==true) throw Object.assign(new Error('还原回执无效。'),{code:'invalid_response',effectState:'unknown'});
+      return {submitted:true};
+    }),
+    toggleMaximizeWindowFor: (...args) => capturedWindow(args,1,'window.action',()=>({operation:'toggle_maximize'}),value=>{
+      if(!scopedRecord(value,['submitted'])||value.submitted!==true) throw Object.assign(new Error('最大化切换回执无效。'),{code:'invalid_response',effectState:'unknown'});
+      return {submitted:true};
+    }),
+    trackWindowDragFor: (...args) => capturedWindow(args,2,'window.drag',()=>windowDragParams([args[1]]),value=>trackingResult('window.drag',value)),
     captureForegroundTarget,
     sendShortcutTo: (target, keys, options = {}) => {
       if (options === null || typeof options !== 'object' || Array.isArray(options)
@@ -520,9 +796,19 @@ function createDesktopApi(invoke) {
       } catch (_) { invalid(method, '复制选区数据只接受有效的 timeoutMs、pollIntervalMs、settleMs、allowUnchanged 和 format。'); }
       return dataCall(method, params);
     },
+    getPointerState: (...args) => {
+      if (args.length!==0) invalid('pointer.state','指针采样不接收参数。');
+      return trackingCall('pointer.state',{});
+    },
+    trackWindowDrag: (...args) => trackingCall('window.drag',windowDragParams(args)),
+    getWindowGeometry: (...args) => {
+      if (args.length !== 0) invalid('window.geometry','窗口矩形读取不接收参数。');
+      return geometryCall('window.geometry',{});
+    },
+    setWindowRect: (...args) => geometryCall('window.set_rect',windowRectParams(args)),
     windowAction: operation => {
-      if (!['toggle_maximize', 'toggle_topmost', 'minimize', 'close'].includes(operation)) {
-        invalid('window.action', '窗口操作需要 toggle_maximize、toggle_topmost、minimize 或 close。');
+      if (!['toggle_maximize', 'restore', 'toggle_topmost', 'minimize', 'close'].includes(operation)) {
+        invalid('window.action', '窗口操作需要 toggle_maximize、restore、toggle_topmost、minimize 或 close。');
       }
       return invoke('window.action', {operation});
     },
@@ -590,6 +876,35 @@ function createDesktopApi(invoke) {
     },
   });
   const ui = Object.freeze({
+    setActionHint: options => {
+      const method = 'ui.action_hint';
+      const descriptor = options && typeof options === 'object' && !Array.isArray(options)
+        ? Object.getOwnPropertyDescriptor(options, 'text') : undefined;
+      const text = descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+      const hasPlacement = options && typeof options === 'object' && Object.hasOwn(options, 'placement');
+      const placeDescriptor = hasPlacement ? Object.getOwnPropertyDescriptor(options, 'placement') : undefined;
+      const placement = hasPlacement ? placeDescriptor && Object.hasOwn(placeDescriptor, 'value') ? placeDescriptor.value : undefined : 'inline';
+      let valid = typeof text === 'string' && text.length > 0 && text.length <= 16 && text.trim() === text
+        && !/[\x00-\x1f\x7f-\x9f\u2028\u2029\ufeff]/.test(text);
+      if (valid) for (let i = 0; i < text.length; i++) {
+        const unit = text.charCodeAt(i);
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+          const next = text.charCodeAt(++i);
+          if (!(next >= 0xdc00 && next <= 0xdfff)) valid = false;
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) valid = false;
+      }
+      if (!valid || Reflect.ownKeys(options).some(key => !['text','placement'].includes(key))
+          || !['inline','topRight'].includes(placement)) invalid(method, '动作版本提示只接受有效text与inline/topRight位置。');
+      const receipt = value => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)
+            || Reflect.ownKeys(value).length !== 1 || value.updated !== true) {
+          throw Object.assign(new Error('动作版本提示更新未获确认，不会自动重试。'), {code:'invalid_response', method, effectState:'unknown'});
+        }
+        return {updated:true};
+      };
+      const result = invoke(method, {text, ...(hasPlacement ? {placement} : {})});
+      return result && typeof result.then === 'function' ? result.then(receipt) : receipt(result);
+    },
     toggleHistory: (...args) => {
       const method = 'ui.toggle_history';
       if (args.length !== 0) invalid(method, '切换历史窗口不接受参数。');

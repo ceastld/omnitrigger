@@ -22,6 +22,8 @@ jobs:
   windows:
     name: Windows 检查与构建
     runs-on: windows-latest
+    env:
+      OMNITRIGGER_METADATA_POWERSHELL: 'C:\Program Files\PowerShell\7\pwsh.exe'
     timeout-minutes: 60
     steps:
       - name: 检出代码
@@ -108,7 +110,30 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Pop-Location
-          node --test tools/script-sdk-check/action-signal-types.test.mjs tools/script-sdk-check/script-project-write.test.mjs
+          Push-Location examples/actions/source-file-preview
+          try {
+            npm ci --ignore-scripts --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          node --test tools/script-sdk-check/action-signal-types.test.mjs tools/script-sdk-check/script-project-write.test.mjs crates/omnitrigger-actions/runtime/actions-api.test.mjs tests/actions_scope_node_sdk.test.mjs tools/script-sdk-check/node-host-composition.test.mjs tools/script-sdk-check/script-sdk-composition.test.mjs tests/state_api.test.mjs tests/ui_action_hint_sdk.test.mjs tools/script-sdk-check/compiler-config-location.test.mjs tools/script-sdk-check/node-error-diagnostic.test.mjs tests/browser_duplicate_tab_sync.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/actions_scope_node.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/actions_scope_script.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/state_api_node.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/state_api_script.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/action_hint_node.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/action_hint_script.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/browser_duplicate_tab_sync_types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/browser-workflows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check.mjs target/debug/omnitrigger.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -134,6 +159,77 @@ jobs:
           cargo build --locked --manifest-path tools/js-engine-probe/Cargo.toml --no-default-features --features quickjs --target-dir target/ci-script-engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: 验证 RaiShot 文件结果的正式动作服务接缝
+        shell: pwsh
+        run: |
+          # 复用上一步同源 QuickJS 宿主和已安装 Node；静态自有 PNG，不启动 RaiShot。
+          $resultNode = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          $resultHost = Join-Path $env:GITHUB_WORKSPACE 'target/ci-script-engine/debug/omnitrigger-js-probe.exe'
+          if (-not (Test-Path -LiteralPath $resultHost -PathType Leaf)) { throw '缺少已构建的同源 QuickJS 宿主。' }
+          $resultRoot = Join-Path $env:RUNNER_TEMP ('raishot-service-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $resultRoot -ErrorAction Stop | Out-Null
+          $resultVariables = @('OMNITRIGGER_RAISHOT_SERVICE_NODE', 'OMNITRIGGER_RAISHOT_SERVICE_SCRIPT_HOST', 'OMNITRIGGER_RAISHOT_SERVICE_ROOT')
+          $resultPrevious = @{}
+          foreach ($name in $resultVariables) {
+            $resultPrevious[$name] = @{ existed = Test-Path "Env:$name"; value = [Environment]::GetEnvironmentVariable($name, 'Process') }
+          }
+          try {
+            $env:OMNITRIGGER_RAISHOT_SERVICE_NODE = $resultNode
+            $env:OMNITRIGGER_RAISHOT_SERVICE_SCRIPT_HOST = (Resolve-Path -LiteralPath $resultHost).Path
+            $env:OMNITRIGGER_RAISHOT_SERVICE_ROOT = (Resolve-Path -LiteralPath $resultRoot).Path
+            # 三测试共六场景；保留 Runtime 默认60秒与外部64秒观察。
+            cargo test --locked -p omnitrigger-app --bin omnitrigger raishot_result_host::service_tests::script_service_raishot_new_rejections_and_unknown_use_real_entry -- --ignored --exact --test-threads=1 --nocapture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cargo test --locked -p omnitrigger-app --bin omnitrigger raishot_result_host::service_tests::node_service_raishot_completion_and_bad_hash_use_real_png_verifier -- --ignored --exact --test-threads=1 --nocapture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cargo test --locked -p omnitrigger-app --bin omnitrigger raishot_result_host::service_tests::release_lifecycle::node_service_raishot_capture_then_release_removes_owned_png_and_registration -- --ignored --exact --test-threads=1 --nocapture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            foreach ($name in $resultVariables) {
+              if ($resultPrevious[$name].existed) { [Environment]::SetEnvironmentVariable($name, $resultPrevious[$name].value, 'Process') }
+              else { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }
+            }
+          }
+
+      - name: 验证真实 Node 与 QuickJS 的复制 Service 合同
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 与 Cargo.lock/App Cargo.toml 相同的固定 a5；只取完整原 SDK 两文件，不构建外部仓。
+          $browserSdkCommit = 'a5adc50022120cc4e6b0596bb56e14ed0ec2d02e'
+          $browserSdkRoot = Join-Path $env:RUNNER_TEMP ('browser-sdk-a5-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $browserSdkRoot -ErrorAction Stop | Out-Null
+          $browserSdkFiles = @{
+            'index.mjs' = '897415e06a8f8c59cc1e1d2905b5e945e5ddd76b3ad504f0c8277138340b2728'
+            'protocol.mjs' = 'bdd7363af5bcf32d23e5e37f8f07519d21dcd347ce1100ead42b16184c12d71b'
+          }
+          foreach ($browserSdkName in $browserSdkFiles.Keys) {
+            $browserSdkFile = Join-Path $browserSdkRoot $browserSdkName
+            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/ceastld/omnitrigger-browser/$browserSdkCommit/sdk-js/$browserSdkName" -OutFile $browserSdkFile
+            if ((Get-FileHash -LiteralPath $browserSdkFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $browserSdkFiles[$browserSdkName]) {
+              throw "固定 a5 SDK 哈希不符：$browserSdkName"
+            }
+          }
+          $browserLock = Get-Content -LiteralPath Cargo.lock -Raw
+          if (-not $browserLock.Contains("https://github.com/ceastld/omnitrigger-browser?rev=$browserSdkCommit#$browserSdkCommit")) {
+            throw 'SDK 输入与锁定的 Browser 依赖不匹配。'
+          }
+          $env:OMNITRIGGER_TEST_BROWSER_SDK = (Resolve-Path -LiteralPath $browserSdkRoot).Path
+          $env:OMNITRIGGER_TEST_NODE = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          $browserQuickJs = Join-Path $env:GITHUB_WORKSPACE 'target/ci-script-engine/debug/omnitrigger-js-probe.exe'
+          if (-not (Test-Path -LiteralPath $browserQuickJs -PathType Leaf)) { throw '缺少前一步构建的真实 QuickJS 宿主。' }
+          $env:OMNITRIGGER_TEST_SCRIPT_HOST = (Resolve-Path -LiteralPath $browserQuickJs).Path
+          $browserDuplicateTest = 'script_browser::tests::service_contract::duplicate_author::duplicate_author_service_contract'
+          $browserAppTests = & cargo test --locked -p omnitrigger-app -- --list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (@($browserAppTests | Where-Object { $_ -eq "$($browserDuplicateTest): test" }).Count -ne 1) { throw '未找到唯一新增复制 Service 用例。' }
+          foreach ($browserRuntime in @('node', 'script')) {
+            $env:OMNITRIGGER_FALSE_CONTEXT_RUNTIME = $browserRuntime
+            Write-Host "复制 Service：$browserRuntime"
+            cargo test --locked -p omnitrigger-app $browserDuplicateTest -- --ignored --exact --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
       - name: 验证两种脚本工程的创建刷新与端到端运行
         shell: pwsh
         run: |
@@ -145,7 +241,7 @@ jobs:
           node tools/script-sdk-check/check-project-environment.mjs --app $projectApp --node $projectNode --host $projectLight --typescript $projectTsc --case-root $projectCase
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: 验证 Node 输出采集与断连后的进程收尾
+      - name: 验证输出动作包与断连后的进程收尾
         shell: pwsh
         run: |
           $captureNode = (Get-Command node).Source
@@ -159,6 +255,10 @@ jobs:
           $capturePreviousNode = $env:OMNITRIGGER_APP_CAPTURE_NODE
           $capturePreviousFixture = $env:OMNITRIGGER_CAPTURE_FIXTURE
           $capturePreviousRoot = $env:OMNITRIGGER_APP_CAPTURE_CASE_ROOT
+          $packagePreviousNode = $env:OMNITRIGGER_TEST_NODE
+          $packagePreviousFixture = $env:OMNITRIGGER_TEST_PROCESS_OUTPUT_FIXTURE
+          $packagePreviousRuntime = $env:OMNITRIGGER_FALSE_CONTEXT_RUNTIME
+          $packagePreviousScriptHost = $env:OMNITRIGGER_TEST_SCRIPT_HOST
           try {
             $env:OMNITRIGGER_APP_CAPTURE_NODE = $captureNode
             $env:OMNITRIGGER_CAPTURE_FIXTURE = $captureFixture
@@ -169,18 +269,53 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             cargo test --locked -p omnitrigger-app --bin omnitrigger process_capture_host::node_native::node_outer_deadline_cleans_capture_job_while_parent_test_process_lives -- --ignored --exact --test-threads=1
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $env:OMNITRIGGER_TEST_NODE = $captureNode
+            $env:OMNITRIGGER_TEST_PROCESS_OUTPUT_FIXTURE = $captureFixture
+            $env:OMNITRIGGER_FALSE_CONTEXT_RUNTIME = 'node'
+            cargo test --locked -p omnitrigger-app --bin omnitrigger process_capture_host::package_service:: -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = (Resolve-Path -LiteralPath 'target/ci-script-engine/debug/omnitrigger-js-probe.exe' -ErrorAction Stop).Path
+            $env:OMNITRIGGER_FALSE_CONTEXT_RUNTIME = 'script'
+            cargo test --locked -p omnitrigger-app --bin omnitrigger process_capture_host::package_service::capture_ -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally {
             $env:OMNITRIGGER_APP_CAPTURE_NODE = $capturePreviousNode
             $env:OMNITRIGGER_CAPTURE_FIXTURE = $capturePreviousFixture
             $env:OMNITRIGGER_APP_CAPTURE_CASE_ROOT = $capturePreviousRoot
+            $env:OMNITRIGGER_TEST_NODE = $packagePreviousNode
+            $env:OMNITRIGGER_TEST_PROCESS_OUTPUT_FIXTURE = $packagePreviousFixture
+            $env:OMNITRIGGER_FALSE_CONTEXT_RUNTIME = $packagePreviousRuntime
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = $packagePreviousScriptHost
           }
 
       - name: 验证已有轻量工程的独立类型检查
         shell: pwsh
         run: |
-          node --test tools/script-sdk-check/check-project-types.test.mjs
+          node --test tools/script-sdk-check/check-project-types.test.mjs tools/script-sdk-check/browser-close-environment.test.mjs tools/script-sdk-check/water-reminder-environment.test.mjs tools/script-sdk-check/desktop-line-edit-environment.test.mjs tools/script-sdk-check/json-text-environment.test.mjs tools/script-sdk-check/line-text-environment.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test tools/script-sdk-check/analyze-script-modules.test.mjs tools/script-sdk-check/analyze-script-entry.test.mjs
+          Push-Location examples/actions/browser-close
+          try {
+            npm ci --ignore-scripts --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/browser-close
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($authorExamplePath in @('examples/actions/water-reminder', 'examples/actions/desktop-line-edit', 'examples/actions/json-text', 'examples/actions/line-text', 'examples/actions/window-size-step')) {
+            Push-Location $authorExamplePath
+            try {
+              npm ci --ignore-scripts --no-audit --no-fund
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              npm run check
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            } finally { Pop-Location }
+            if ($authorExamplePath -ne 'examples/actions/json-text') {
+              node tools/script-sdk-check/check-project-types.mjs $authorExamplePath
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }
+          node --test tools/script-sdk-check/analyze-script-modules.test.mjs tools/script-sdk-check/analyze-script-entry.test.mjs tools/script-sdk-check/analyze-legacy-entry.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 验证只读桌面与目录 API 的 SDK、客户端和 Node 桥接
@@ -246,6 +381,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/source_file_preview.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/source-file-preview
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tests/n10-rust-package.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/desktop_captured_target.test.mjs
@@ -255,6 +392,15 @@ jobs:
           node --test tests/browser_workflows.test.mjs tests/browser_default_tab.test.mjs tests/browser_default_tab_sync.test.mjs tests/notification_action_contract.test.mjs examples/actions/common-desktop/recipes.test.mjs examples/actions/common-search/recipes.test.mjs examples/actions/script-choice/contract.test.mjs tests/browser_close.test.mjs tests/browser_input_snapshot.test.mjs tests/keyboard_recipe_preflight.test.mjs tests/keyboard_guarded_recipe.test.mjs tests/keyboard_sequence_shortcuts_snapshot.test.mjs tests/browser_popout.test.mjs tests/browser_close_popout_boundaries.test.mjs tests/browser_close_sync.test.mjs tests/browser_popout_script.test.mjs tests/browser_restore_session_sync.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/common-desktop/paste-arrow.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Push-Location examples/actions/common-desktop
+          try {
+            npm ci --ignore-scripts --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/common-desktop
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test examples/actions/common-desktop/system-panel.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -308,11 +454,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/process_capture_bridge_api.test.mjs tests/process_capture_bridge_transport.test.mjs tests/app_node_capture_check.test.mjs tests/process_capture_api.test.mjs tests/process_capture_contract.test.mjs tests/process_capture_sdk.test.mjs tests/clipboard_history_inspector.test.mjs tests/clipboard_history_inspector_scan_limit.test.mjs examples/actions/json-text/recipes.test.mjs examples/actions/selection-history/recipes.test.mjs examples/actions/process-output/recipes.test.mjs examples/actions/process-output/encoding-boundaries.test.mjs examples/actions/process-output/cross-entry-contract.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test examples/actions/json-text/select.test.mjs
+          node --test examples/actions/json-text/select.test.mjs examples/actions/json-text/session-core.test.mjs examples/actions/json-text/session-step.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p examples/actions/json-text/jsconfig.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check-project-types.mjs examples/actions/json-text
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/browser-workflows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/check-project-types.mjs examples/actions/common-search
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check-project-types.mjs examples/actions/clipboard-history
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -329,6 +479,21 @@ jobs:
           node --test examples/actions/process-output/node-capture.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: 校验窗口脚本 API 与普通动作
+        run: |
+          node --test tools/script-sdk-check/window-toggle-for.test.mjs tools/script-sdk-check/window-api.test.mjs tools/script-sdk-check/window-class.test.mjs tools/script-sdk-check/window-class-bridges.test.mjs tools/script-sdk-check/window-for-contract.test.mjs tools/script-sdk-check/window-size-stack.test.mjs tests/script_sdk_whole_source_syntax.test.mjs examples/actions/window-adjust/contract.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Push-Location examples/actions/window-adjust
+          try {
+            npm ci --ignore-scripts --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            npm run check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+          foreach ($windowConfig in @('tools/script-sdk-check/window-toggle-for-node-jsconfig.json', 'tools/script-sdk-check/window-toggle-for-script-jsconfig.json')) {
+            node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p $windowConfig
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: 验证轻量脚本开发包的真实安装与切换
         shell: pwsh
         run: |
@@ -353,6 +518,8 @@ jobs:
   js-engines:
     name: Windows JS 引擎实验
     runs-on: windows-latest
+    env:
+      OMNITRIGGER_METADATA_POWERSHELL: 'C:\Program Files\PowerShell\7\pwsh.exe'
     timeout-minutes: 40
     defaults:
       run:
@@ -399,7 +566,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 构建两种引擎并测量体积
-        run: ./measure.ps1
+        run: |
+          ./measure.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $scopedPreviousNode = $env:OMNITRIGGER_TEST_NODE
+          $scopedPreviousHost = $env:OMNITRIGGER_TEST_SCRIPT_HOST
+          try {
+            $env:OMNITRIGGER_TEST_NODE = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = (Resolve-Path -LiteralPath './results/quickjs-release.exe').Path
+            cargo test --locked --manifest-path ../../Cargo.toml -p omnitrigger-actions --test scoped_actions_runtime -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            $env:OMNITRIGGER_TEST_NODE = $scopedPreviousNode
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = $scopedPreviousHost
+          }
 
       - name: 验证输出采集的自有夹具与宿主退出收尾
         run: |
@@ -449,20 +629,27 @@ jobs:
 
       - name: 验证轻量引擎接入动作服务
         run: |
-          $nodeVariables = @('OMNITRIGGER_TEST_NODE', 'OMNITRIGGER_SELECTION_TEST_NODE', 'OMNITRIGGER_EXPLORER_TEST_NODE', 'OMNITRIGGER_DIRECTORY_TEST_NODE')
+          $nodeVariables = @('OMNITRIGGER_TEST_NODE', 'OMNITRIGGER_SELECTION_TEST_NODE', 'OMNITRIGGER_EXPLORER_TEST_NODE', 'OMNITRIGGER_DIRECTORY_TEST_NODE', 'OMNITRIGGER_CAPTURED_WINDOW_TEST_NODE', 'OMNITRIGGER_WINDOW_SIZE_TEST_NODE')
           $previousNodeVariables = @{}
           foreach ($name in $nodeVariables) {
             $previousNodeVariables[$name] = @{ existed = Test-Path "Env:$name"; value = [Environment]::GetEnvironmentVariable($name, 'Process') }
           }
+          $previousJsonSessionRoot = $env:OMNITRIGGER_JSON_SESSION_TEST_ROOT
           try {
             $nodeExecutable = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
             foreach ($name in $nodeVariables) { [Environment]::SetEnvironmentVariable($name, $nodeExecutable, 'Process') }
+            if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { throw '缺少明确的CI临时目录。' }
+            $jsonSessionRoot = Join-Path $env:RUNNER_TEMP ('json-session-ci-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $jsonSessionRoot -ErrorAction Stop | Out-Null
+            $env:OMNITRIGGER_JSON_SESSION_TEST_ROOT = $jsonSessionRoot
             foreach ($engine in @('boa', 'quickjs')) {
               $env:OMNITRIGGER_TEST_SCRIPT_HOST = Join-Path $PWD "results/$engine-small.exe"
+              # 同时覆盖真实动作提示、State与Scope；每个引擎只运行一遍。
               cargo test --manifest-path ../../Cargo.toml --locked -p omnitrigger-actions --tests -- --ignored --skip _history_ --test-threads=1
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
           } finally {
+            $env:OMNITRIGGER_JSON_SESSION_TEST_ROOT = $previousJsonSessionRoot
             foreach ($name in $nodeVariables) {
               if ($previousNodeVariables[$name].existed) { [Environment]::SetEnvironmentVariable($name, $previousNodeVariables[$name].value, 'Process') }
               else { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }

@@ -27,3 +27,11 @@ node --test examples/actions/common-desktop/recipes.test.mjs
 node --test examples/actions/common-desktop/paste-arrow.test.mjs
 node --test examples/actions/common-desktop/system-panel.test.mjs
 ```
+
+## 单独编辑和检查此动作包
+
+本包随附同步 SDK 和本地 jsconfig，可复制到普通作者目录。四个已有入口只改为引用包内声明，动作身份、参数、键盘时序和业务代码不变。
+
+在本目录运行 `npm ci --ignore-scripts`，再运行 `npm run check`。固定 TypeScript 5.9.3 只用于严格类型检查，不输出代码、不执行这些动作；Node.js 22 只用于开发检查，动作本身仍由同步 Script 宿主运行。配置使用 `types:[]`，不引入 Node 或浏览器全局。
+
+仓库内还可用 `node tools/script-sdk-check/check-project-types.mjs examples/actions/common-desktop` 检查包内SDK、配置和四个文件的类型。它明确跳过旧 `.js` 函数体协议的模块入口分析，报告 `legacy_function_body_protocol`，不会把这些入口当作已通过模块合同验证。SDK可用既有 `tools/script-project.mjs refresh --runtime script --project <本目录>` 显式更新；刷新保留作者入口、配置、说明与开发依赖，不安装依赖或运行作者代码。静态检查不证明目标窗口、权限或实际输入效果。

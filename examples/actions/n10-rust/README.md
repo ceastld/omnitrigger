@@ -34,3 +34,13 @@ product 使用显式预期根；script-test 只连接显式 Debug 隔离测试�
 将整个包目录放到指定配置同级 `actions` 下即可使用现有目录发现和重新加载。当前没有通用插件导入 UI、原生依赖自动安装、N10 专属插件就绪卡片或逐字段业务参数表单；可使用已有 JSON 输入。目录发现/引用检查只证明清单与入口可解析，不校验这四个必填配置或宿主是否可用；未配置模板的真实调用会明确拒绝。
 
 本包代码采用随附 MIT 许可证；原生依赖和脚本引擎的独立许可见 THIRD_PARTY_NOTICES.md。
+
+## 动作角标
+
+现有同步入口在业务返回接纳后，单次调用 `ctx.ui.setActionHint({text:'n10', placement:'topRight'})`，使用本次动作作用域显示右上角绿色文字、透明底角标。未启动、unknown或partial业务错误停止后续角标更新。成功仍只返回原accepted_only结果，不表示业务窗口或角标像素已呈现。
+
+包内其他业务调用者复用 `runBusiness(ctx)`；该导出保留原业务体，不代替调用者执行正常N10入口的后置角标步骤。
+
+角标更新失败保留业务已接纳、submitted=true的证据，错误method为ui.action_hint，整轮effectState为unknown，禁止重试clip。错误详情中的businessEffectState=accepted_only与hintEffectState分别表示业务接纳及角标步骤的效果；不会因角标自身not_started把整轮降为未开始。
+
+默认setActionHint文本提示行为保持；placement省略或inline仍使用列内文字。此入口需要支持placement参数的配套脚本宿主及应用；旧宿主明确拒绝后不能重试已接纳的clip。角标沿用已有有限结果历史，不新增计时清除、跨重启持久化或常驻窗口。原端保留期限未明确，当前生命周期差值仍保留；实际位置、字形及可见效果需要界面验收。

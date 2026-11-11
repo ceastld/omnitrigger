@@ -1,4 +1,5 @@
 //! 与输入匹配及界面无关的应用动作契约。执行发生在后台，目录加载不执行用户代码。
+pub mod action_hint;
 pub mod catalog;
 pub mod model;
 mod native;
@@ -7,6 +8,7 @@ pub mod project;
 pub mod runtime_capabilities;
 pub mod script_host;
 pub mod service;
+pub mod state;
 
 pub use catalog::{CatalogAction, PackageCatalog, ResolvedAction};
 pub use model::{ActionCall, ActionDefinition, ActionError, PackageManifest};

@@ -1,4 +1,5 @@
 import {prepare,available,complete,sanitized} from './notice.mjs';
+/** @type {ScriptMain} */
 export function main(ctx){
   let method='script.parameters',began=false;
   try{

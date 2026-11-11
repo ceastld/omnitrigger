@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {mkdtempSync, mkdirSync, writeFileSync} from 'node:fs';
+import {createRequire} from 'node:module';
+import {mkdtempSync, mkdirSync, writeFileSync, readFileSync} from 'node:fs';
 import {dirname, join, relative, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import ts from 'typescript';
@@ -63,4 +64,33 @@ void nativeSignal; void fromNative; void response;
 `, true);
   assert.equal(result.diagnostics.length, 0, result.message);
   assert.equal(result.domLoaded, true);
+});
+
+
+test('历史SDK仅分发类型，不导出没有运行时模块的内部工厂', () => {
+  const root = mkdtempSync(join(parent, 'history-type-only-'));
+  mkdirSync(join(root, 'sdk'));
+  writeFileSync(join(root, 'sdk/clipboard-history-api.d.ts'),
+    readFileSync(join(repo, 'crates/omnitrigger-actions/runtime/clipboard-history-api.d.ts')));
+  const entry = join(root, 'probe.ts');
+  writeFileSync(entry, "import {createClipboardHistoryApi} from './sdk/clipboard-history-api.js';\ncreateClipboardHistoryApi();\n");
+  const program = ts.createProgram([entry], {strict:true, noEmit:true, skipLibCheck:false, types:[],
+    target:ts.ScriptTarget.ES2022, module:ts.ModuleKind.ESNext,
+    moduleResolution:ts.ModuleResolutionKind.Bundler, lib:['lib.es2022.d.ts']});
+  const errors = ts.getPreEmitDiagnostics(program).filter(d=>d.category===ts.DiagnosticCategory.Error);
+  assert.equal(errors.length, 1, '工厂只在宿主内部拼接，不是作者可导入的运行时模块');
+  assert([2305,2724].includes(errors[0].code), '缺少导出；TypeScript可提示相似的接口类型名称');
+  const declaration=program.getSourceFile(join(root, 'sdk/clipboard-history-api.d.ts'));
+  const checker=program.getTypeChecker();
+  assert(!checker.getExportsOfModule(checker.getSymbolAtLocation(declaration)).some(symbol=>symbol.name==='createClipboardHistoryApi'));
+  assert.throws(()=>createRequire(entry).resolve('./sdk/clipboard-history-api.js'), error=>error.code==='MODULE_NOT_FOUND');
+  const positive = check(`
+const listed = ctx.clipboard.history.list({limit:1});
+listed.then(value => { const revision:string=value.revision; void revision; });
+ctx.clipboard.history.get({id:'1'}).then(value=>{const text:string=value.text;void text;});
+ctx.clipboard.history.append({text:'synthetic'}).then(value=>{const inserted:boolean=value.inserted;void inserted;});
+ctx.clipboard.history.remove({id:'1'}).then(value=>{const removed:boolean=value.removed;void removed;});
+`);
+  assert.equal(positive.diagnostics.length, 0, positive.message);
+  assert.equal(positive.domLoaded, false);
 });

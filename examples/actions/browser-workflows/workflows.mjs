@@ -21,10 +21,13 @@ function id(value) { return typeof value === 'number' && Number.isSafeInteger(va
 function text(value, max = 128) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
 }
+/** @typedef {new (input:string) => Readonly<{href:string,protocol:string,username:string,password:string}>} WorkflowUrlConstructor */
 /** @param {unknown} value */
 function canonicalUrl(value, response = false) {
   try {
     if (!text(value, 16384)) throw new Error();
+    const URL = /** @type {typeof globalThis & {URL?:WorkflowUrlConstructor}} */ (globalThis).URL;
+    if (typeof URL !== 'function') throw new Error();
     const url = new URL(value);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error();
     return url.href;
@@ -32,6 +35,7 @@ function canonicalUrl(value, response = false) {
     fail(response ? 'unsupported_url' : 'invalid_input', '网址需要不含凭据的完整 HTTP 或 HTTPS URL。');
   }
 }
+/** @typedef {{profile?:string,windowId:number,tabId:number,focusWindow?:boolean,timeoutMs?:number}} DuplicateInput */
 /** @typedef {{profile?:string,timeoutMs?:number,sessionId:string,sessionKind:'tab'|'window'}} RestoreInput */
 /**
  * @overload
@@ -39,6 +43,7 @@ function canonicalUrl(value, response = false) {
  * @param {'restore-session'} operation
  * @returns {asserts input is RestoreInput}
  */
+/** @overload @param {unknown} input @param {'duplicate-tab'} operation @returns {asserts input is DuplicateInput} */
 /** @overload @param {unknown} input @param {string} operation @returns {void} */
 /** @param {any} input @param {string} operation */
 function validate(input, operation) {
@@ -109,7 +114,11 @@ function tabUrl(tab) {
   if (typeof url !== 'string') {
     fail('permission_required', '无法读取窗口内全部标签网址，不能可靠判断是否需要新建。', 'tabs.query', ['tabs']);
   }
-  try { return new URL(url).href; } catch { fail('invalid_response', '标签网址格式无效。', 'tabs.query'); }
+  try {
+    const URL = /** @type {typeof globalThis & {URL?:WorkflowUrlConstructor}} */ (globalThis).URL;
+    if (typeof URL !== 'function') throw new Error();
+    return new URL(url).href;
+  } catch { fail('invalid_response', '标签网址格式无效。', 'tabs.query'); }
 }
 
 
@@ -282,10 +291,83 @@ export function runRestoreSessionSync(ctx) {
   return step.value;
 }
 
+/** @typedef {{method:string,args?:unknown[],options:ScriptBrowserOptions}} DuplicateRequest */
+/** @typedef {{method:string,windowId:number,sourceTabId?:number,tabId?:number}} DuplicateStep */
+/** @typedef {{status:string,profile:string,operation:string,steps:DuplicateStep[],
+ * target?:{tabId:number,windowId:number},error?:{code:string,method:string,effect_state:string,required_permissions?:string[]}}} DuplicateReceipt */
+// 复制两种入口共用输入快照、身份核对与有序副作用；不查询活动标签或重派。
+/** @param {unknown} rawInput @returns {Generator<DuplicateRequest,DuplicateReceipt,unknown>} */
+function* duplicateTabSteps(rawInput) {
+  const input = Object.freeze({.../** @type {Record<string,unknown>} */ (rawInput)});
+  validate(input, 'duplicate-tab');
+  const profile = selectedProfile(yield {method:'browser.profiles',options:{timeoutMs:input.timeoutMs ?? 10000}}, input);
+  /** @type {DuplicateStep[]} */
+  const steps = [];
+  /** @type {DuplicateReceipt} */
+  const receipt = {status:'completed',profile,operation:'duplicate-tab',steps};
+  let attemptedMutation = false;
+  let currentMethod = 'tabs.get';
+  try {
+    const source = yield {method:currentMethod,args:[input.tabId],options:{profile,timeoutMs:input.timeoutMs ?? 10000}};
+    tabIdentity(source, input.windowId, input.tabId);
+    currentMethod = 'tabs.duplicate';
+    attemptedMutation = true;
+    const copy = yield {method:currentMethod,args:[input.tabId],options:{profile,timeoutMs:input.timeoutMs ?? 10000}};
+    steps.push({method:currentMethod,sourceTabId:input.tabId,windowId:input.windowId});
+    const identity = tabIdentity(copy);
+    Object.assign(steps[steps.length - 1], identity);
+    tabIdentity(copy, input.windowId);
+    if (identity.tabId === input.tabId) fail('invalid_response', '复制回执返回了源标签 ID，未确认独立副本。', 'tabs.duplicate');
+    receipt.target = identity;
+    if (input.focusWindow === true) {
+      currentMethod = 'windows.update';
+      const focused = /** @type {{id?:unknown,focused?:unknown}|null|undefined} */
+        (yield {method:currentMethod,args:[identity.windowId,{focused:true}],options:{profile,timeoutMs:input.timeoutMs ?? 10000}});
+      steps.push({method:currentMethod,windowId:identity.windowId});
+      if (!focused || !id(focused.id)) fail('invalid_response', '聚焦回执缺少明确窗口 ID。', 'windows.update');
+      if (focused.id !== identity.windowId) fail('target_changed', '聚焦回执返回了其他窗口。', 'windows.update');
+      if (focused.focused !== true) fail('focus_unconfirmed', '回执未确认指定浏览器窗口已聚焦。', 'windows.update');
+    }
+    return receipt;
+  } catch (error) {
+    return workflowFailure(receipt, attemptedMutation, currentMethod, error);
+  }
+}
+/** @param {ScriptContext['browser']|import('./sdk/api').BrowserApi} browser @param {DuplicateRequest} request */
+function invokeDuplicateTab(browser, request) {
+  return request.method === 'browser.profiles' ? browser.profiles(request.options)
+    : browser.call(request.method, request.args, request.options);
+}
+/** @param {Pick<import('./sdk/api').ActionContext,'input'|'browser'>} ctx @returns {Promise<DuplicateReceipt>} */
+export async function runDuplicateTab(ctx) {
+  const flow = duplicateTabSteps(ctx.input);
+  let step = flow.next();
+  while (!step.done) {
+    let value;
+    try { value = await invokeDuplicateTab(ctx.browser, step.value); }
+    catch (error) { step = flow.throw(error); continue; }
+    step = flow.next(value);
+  }
+  return step.value;
+}
+/** @param {Pick<ScriptContext,'input'|'browser'>} ctx @returns {DuplicateReceipt} */
+export function runDuplicateTabSync(ctx) {
+  const flow = duplicateTabSteps(ctx.input);
+  let step = flow.next();
+  while (!step.done) {
+    let value;
+    try { value = invokeDuplicateTab(ctx.browser, step.value); }
+    catch (error) { step = flow.throw(error); continue; }
+    step = flow.next(value);
+  }
+  return step.value;
+}
+
 /** @param {import('./sdk/api').ActionContext} ctx @param {string} operation */
 export async function runWorkflow(ctx, operation) {
   if (operation === 'create-default-tab') return runDefaultTabAsync(ctx);
   if (operation === 'restore-session') return runRestoreSessionAsync(ctx);
+  if (operation === 'duplicate-tab') return runDuplicateTab(ctx);
   const input = /** @type {any} */ (Object.freeze({ ...ctx.input }));
   validate(input, operation);
   const profile = await selectProfile(ctx.browser, input);
@@ -379,14 +461,6 @@ export async function runWorkflow(ctx, operation) {
       if (matches.length > 1) fail('ambiguous_bookmark', '有多个匹配书签，请明确填写 bookmarkId。');
       receipt.bookmarkId = matches[0].id;
       await open(canonicalUrl(matches[0].url, true));
-    } else if (operation === 'duplicate-tab') {
-      tabIdentity(await call('tabs.get', [input.tabId]), input.windowId, input.tabId);
-      const copy = await mutate('tabs.duplicate', [input.tabId], { sourceTabId: input.tabId, windowId: input.windowId });
-      const identity = tabIdentity(copy);
-      Object.assign(steps[steps.length - 1], identity);
-      tabIdentity(copy, input.windowId);
-      receipt.target = identity;
-      await focus(identity.windowId);
     }
     return receipt;
   } catch (error) {

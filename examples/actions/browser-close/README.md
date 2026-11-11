@@ -21,3 +21,11 @@
 同步入口是具名 `main(ctx)`，返回JSON回执，不返回Promise。两个入口使用同一参数、身份和回执校验，分别直接调用对应的异步/同步API；正常路径固定为profiles、windows.get、tabs.get、tabs.remove。宿主整体强停仍可能阻止回执交付，不能据此认定没有效果。
 
 本地 `jsconfig.json` 同时严格检查两个入口、共享纯helper和随包的同步SDK声明。此声明来自当前正式SDK；没有给同步作者注入Promise版browser接口。入口契约测试：`node --test tests/browser_close_sync.test.mjs`；类型正反例：`node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/browser_close_sync_types.json`。
+
+## 普通作者工程检查
+
+在本目录运行 `npm ci --ignore-scripts` 后，执行 `npm run check`。检查使用固定TypeScript 5.9.3和本包SDK，严格检查两个已有入口、共享算法及Node默认导出，不执行关闭动作或连接浏览器。
+
+本例仅依赖ES2022和显式宿主SDK，`types:[]`；不向Node或同步Script入口添加window、document等DOM全局。Node入口通过JSDoc的ActionContext使用Promise，Script入口通过ScriptMain使用同步回执。当前代码不依赖Node原生全局，若作者增加此类依赖，应为相应入口单独配置显式环境，避免泄漏给同步入口。
+
+仓库内还可运行 `node tools/script-sdk-check/check-project-types.mjs examples/actions/browser-close`。声明可用既有 `tools/script-project.mjs refresh --runtime node --project <本目录>` 刷新整组公共SDK；刷新保留入口、清单、配置、说明及开发依赖。旧包中未经识别的声明仍由工具拒绝，不自动覆盖作者修改。

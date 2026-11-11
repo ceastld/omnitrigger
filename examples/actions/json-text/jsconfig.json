@@ -9,10 +9,10 @@
     "moduleResolution": "Bundler",
     "moduleDetection": "force",
     "lib": [
-      "ES2022",
-      "DOM"
+      "ES2022"
     ],
-    "types": []
+    "types": [],
+    "skipLibCheck": false
   },
   "files": [
     "main.mjs",
@@ -25,6 +25,10 @@
     "json-types.d.ts",
     "sdk/api.d.ts",
     "sdk/script-types.d.ts",
-    "sdk/clipboard-history-api.d.ts"
+    "sdk/clipboard-history-api.d.ts",
+    "session-step-script.mjs",
+    "session-types.d.ts",
+    "session-core.d.mts",
+    "session-types.contract.mts"
   ]
 }

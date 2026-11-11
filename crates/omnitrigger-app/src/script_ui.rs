@@ -4,6 +4,10 @@ use gpui::{
     div, prelude::*, px, size, App, Bounds, Context, Entity, Focusable, KeyDownEvent, ScrollHandle,
     TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions,
 };
+use omnitrigger_actions::action_hint::{
+    fault as hint_fault, ScopedActionHint, METHOD as ACTION_HINT_METHOD,
+    SCOPED_METHOD as SCOPED_ACTION_HINT_METHOD,
+};
 use omnitrigger_actions::{ActionError, CancellationToken, NativeHost};
 use omnitrigger_windows::ScriptTargetSnapshot;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -26,6 +30,7 @@ static BROKER: OnceLock<Mutex<Option<Broker>>> = OnceLock::new();
 struct Broker {
     sender: SyncSender<UiRequest>,
     busy: Arc<AtomicBool>,
+    workspace: Arc<Mutex<Option<WindowHandle<crate::Workspace>>>>,
 }
 
 fn fault(code: &str, message: &str) -> ActionError {
@@ -165,6 +170,10 @@ impl<H: NativeHost> NativeHost for Host<H> {
             open_history(params, cancellation, deadline, self.target)
         } else if method == "ui.toggle_history" {
             toggle_history(params, cancellation, deadline, self.target)
+        } else if method == SCOPED_ACTION_HINT_METHOD {
+            set_action_hint(params, cancellation, deadline)
+        } else if method == ACTION_HINT_METHOD {
+            Err(hint_fault("ui_hint_scope_expired", "not_started"))
         } else if method == "ui.choose" {
             choose(params, cancellation, deadline, self.target)
         } else {
@@ -172,6 +181,169 @@ impl<H: NativeHost> NativeHost for Host<H> {
                 .call_with_deadline(method, params, cancellation, deadline)
         }
     }
+}
+
+const ACTION_HINT_LIMIT: Duration = Duration::from_millis(1000);
+
+pub fn attach_workspace(handle: WindowHandle<crate::Workspace>) {
+    if let Some(broker) = BROKER.get().and_then(|value| value.lock().ok()?.clone()) {
+        *broker
+            .workspace
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(handle);
+    }
+}
+
+#[derive(Clone)]
+enum ActionHintPhase {
+    Pending,
+    Applied,
+    Failed(ActionError),
+}
+struct ActionHintSubmission {
+    phase: Mutex<ActionHintPhase>,
+}
+impl ActionHintSubmission {
+    fn new() -> Self {
+        Self {
+            phase: Mutex::new(ActionHintPhase::Pending),
+        }
+    }
+    fn result(
+        &self,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+    ) -> Option<Result<Value, ActionError>> {
+        let mut phase = self.phase.lock().unwrap_or_else(|error| error.into_inner());
+        if let ActionHintPhase::Failed(error) = &*phase {
+            return Some(Err(error.clone()));
+        }
+        let interrupted = if cancellation.is_cancelled() {
+            Some("cancelled")
+        } else if Instant::now() >= deadline {
+            Some("timeout")
+        } else {
+            None
+        };
+        if let Some(code) = interrupted {
+            let error = hint_fault(
+                code,
+                if matches!(*phase, ActionHintPhase::Pending) {
+                    "not_started"
+                } else {
+                    "unknown"
+                },
+            );
+            if matches!(*phase, ActionHintPhase::Pending) {
+                *phase = ActionHintPhase::Failed(error.clone());
+            }
+            return Some(Err(error));
+        }
+        if matches!(*phase, ActionHintPhase::Applied) {
+            Some(Ok(json!({"updated":true})))
+        } else {
+            None
+        }
+    }
+    fn apply(
+        &self,
+        cancellation: &CancellationToken,
+        deadline: Instant,
+        update: impl FnOnce() -> Result<(), ActionError>,
+    ) {
+        let mut phase = self.phase.lock().unwrap_or_else(|error| error.into_inner());
+        if !matches!(*phase, ActionHintPhase::Pending) {
+            return;
+        }
+        let interrupted = if cancellation.is_cancelled() {
+            Some("cancelled")
+        } else if Instant::now() >= deadline {
+            Some("timeout")
+        } else {
+            None
+        };
+        if let Some(code) = interrupted {
+            *phase = ActionHintPhase::Failed(hint_fault(code, "not_started"));
+            return;
+        }
+        *phase = match update() {
+            Ok(()) => ActionHintPhase::Applied,
+            Err(error) => ActionHintPhase::Failed(error),
+        };
+    }
+}
+struct ActionHintRequest {
+    update: ScopedActionHint,
+    owner: WindowHandle<crate::Workspace>,
+    submission: Arc<ActionHintSubmission>,
+    cancellation: CancellationToken,
+    deadline: Instant,
+}
+
+fn set_action_hint(
+    params: Value,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+) -> Result<Value, ActionError> {
+    let update = ScopedActionHint::parse(params)?;
+    let deadline = deadline.min(Instant::now() + ACTION_HINT_LIMIT);
+    let submission = Arc::new(ActionHintSubmission::new());
+    if let Some(result) = submission.result(cancellation, deadline) {
+        return result;
+    }
+    let broker = BROKER
+        .get()
+        .and_then(|value| value.lock().ok()?.clone())
+        .ok_or_else(|| hint_fault("ui_unavailable", "not_started"))?;
+    let owner = (*broker
+        .workspace
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()))
+    .ok_or_else(|| hint_fault("ui_unavailable", "not_started"))?;
+    broker
+        .sender
+        .try_send(UiRequest::ActionHint(ActionHintRequest {
+            update,
+            owner,
+            submission: submission.clone(),
+            cancellation: cancellation.clone(),
+            deadline,
+        }))
+        .map_err(|error| {
+            hint_fault(
+                if matches!(error, mpsc::TrySendError::Full(_)) {
+                    "ui_busy"
+                } else {
+                    "ui_unavailable"
+                },
+                "not_started",
+            )
+        })?;
+    loop {
+        if let Some(result) = submission.result(cancellation, deadline) {
+            return result;
+        }
+        std::thread::sleep(POLL);
+    }
+}
+
+fn dispatch_action_hint(request: ActionHintRequest, cx: &mut App) {
+    let ActionHintRequest {
+        update,
+        owner,
+        submission,
+        cancellation,
+        deadline,
+    } = request;
+    submission.apply(&cancellation, deadline, || {
+        owner
+            .update(cx, |workspace, _, cx| -> Result<(), ActionError> {
+                workspace.package_feedback.set_action_hint(&update)?;
+                cx.notify();
+                Ok(())
+            })
+            .map_err(|_| hint_fault("ui_unavailable", "not_started"))?
+    });
 }
 
 fn choose(
@@ -267,6 +439,7 @@ pub fn init(cx: &mut App) {
     let broker = Broker {
         sender,
         busy: Arc::new(AtomicBool::new(false)),
+        workspace: Arc::new(Mutex::new(None)),
     };
     *BROKER
         .get_or_init(|| Mutex::new(None))
@@ -322,6 +495,7 @@ pub fn init(cx: &mut App) {
                         if deferred.is_none() {
                             if let Ok(request) = receiver.try_recv() {
                                 match request {
+                                    UiRequest::ActionHint(request) => dispatch_action_hint(request, cx),
                                     UiRequest::ToggleHistory(request) => finish_history_toggle(
                                         &request,
                                         HistoryTogglePhase::Failed(history_toggle_fault("ui_busy", "not_started")),
@@ -336,6 +510,7 @@ pub fn init(cx: &mut App) {
                         return;
                     };
                     let request = match request {
+                        UiRequest::ActionHint(request) => { dispatch_action_hint(request, cx); return; }
                         UiRequest::Choose(request) => request,
                         UiRequest::ToggleHistory(request) => {
                             dispatch_history_toggle(request, &mut history_active, &mut history_toggle, cx);
@@ -605,6 +780,7 @@ impl Render for Chooser {
 }
 
 enum UiRequest {
+    ActionHint(ActionHintRequest),
     Choose(Request),
     History(HistoryRequest),
     ToggleHistory(HistoryToggleRequest),
@@ -1363,3 +1539,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../../../tests/script_ui_fs_read_directory.rs"]
 mod fs_directory_dispatch_tests;
+
+#[cfg(test)]
+#[path = "../../../tests/script_ui_action_hint.rs"]
+mod action_hint_tests;

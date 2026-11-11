@@ -4,6 +4,7 @@ use crate::{
     Page, Tone, Workspace,
 };
 use gpui::{div, prelude::*, px, FontWeight};
+use omnitrigger_actions::action_hint::ActionHintPlacement;
 use omnitrigger_actions::{
     ActionCall, ActionOutcome, ActionService, NodeRuntime, PackageCatalog, RuntimeRegistry,
 };
@@ -34,6 +35,32 @@ fn node_program() -> Option<PathBuf> {
 pub fn service(config: &Path) -> ActionService {
     let (catalog, runtimes) = components(config);
     ActionService::new(catalog, runtimes)
+}
+
+/// 只有输入引擎所有者显式启用；普通CLI的service仍无store。
+pub fn owner_service(config: &Path) -> ActionService {
+    let (mut catalog, runtimes) = components(config);
+    let store = std::path::absolute(config)
+        .map_err(|_| ())
+        .and_then(|path| {
+            crate::action_state_store::FileActionStateStorage::new(
+                path.with_file_name("action-state"),
+            )
+            .map_err(|_| ())
+        })
+        .and_then(|storage| {
+            omnitrigger_actions::state::ActionStateStore::new(Some(Arc::new(storage)))
+                .map_err(|_| ())
+        });
+    match store {
+        Ok(store) => ActionService::new(catalog, runtimes).with_state_store(Arc::new(store)),
+        Err(()) => {
+            catalog
+                .diagnostics
+                .push("动作状态宿主不可用；状态API将明确返回state_unavailable。".into());
+            ActionService::new(catalog, runtimes)
+        }
+    }
 }
 
 pub(super) fn components(config: &Path) -> (PackageCatalog, RuntimeRegistry) {
@@ -97,12 +124,7 @@ pub fn submit(
 /// 只确定应用私有文件位置；构造不读写磁盘，首次显式历史调用才访问存储。
 fn with_clipboard_history<H: omnitrigger_actions::NativeHost>(
     inner: H,
-) -> crate::process_capture_host::WithProcessCapture<
-    crate::clipboard_history_host::WithClipboardHistory<
-        H,
-        Arc<crate::clipboard_history_store::ClipboardHistoryStore>,
-    >,
-> {
+) -> impl omnitrigger_actions::NativeHost {
     let store = std::path::absolute(settings::path())
         .ok()
         .and_then(|path| {
@@ -112,8 +134,20 @@ fn with_clipboard_history<H: omnitrigger_actions::NativeHost>(
             .ok()
         })
         .map(Arc::new);
-    crate::process_capture_host::WithProcessCapture::new(
-        crate::clipboard_history_host::WithClipboardHistory::new(inner, store),
+    static RESULTS: std::sync::OnceLock<Arc<crate::raishot_result_host::Store>> =
+        std::sync::OnceLock::new();
+    let results = RESULTS
+        .get_or_init(|| {
+            Arc::new(crate::raishot_result_host::Store::new(
+                std::path::absolute(settings::path()).unwrap_or_else(|_| settings::path()),
+            ))
+        })
+        .clone();
+    crate::raishot_result_host::WithRaiShotResult::new(
+        crate::process_capture_host::WithProcessCapture::new(
+            crate::clipboard_history_host::WithClipboardHistory::new(inner, store),
+        ),
+        results,
     )
 }
 
@@ -301,6 +335,8 @@ impl Workspace {
                 action_version: entry.definition.version,
                 input: serde_json::json!({}),
             };
+            let hint = self.package_feedback.action_hint_for_call(&call);
+            let hint_placement = self.package_feedback.action_hint_placement_for_call(&call);
             let reason = self.legacy_unavailable_reason(&call).or_else(|| {
                 self.action_service
                     .validate(&call)
@@ -312,6 +348,13 @@ impl Workspace {
             let is_script = entry.definition.runtime == "script";
             list = list.child(
                 card()
+                    .relative()
+                    .when_some(
+                        hint_for_placement(hint, hint_placement, ActionHintPlacement::TopRight),
+                        |element, text| {
+                            element.child(action_version_hint(text, ActionHintPlacement::TopRight))
+                        },
+                    )
                     .p(px(16.))
                     .flex()
                     .items_center()
@@ -334,6 +377,19 @@ impl Workspace {
                                 "v{} · {}",
                                 call.action_version, entry.definition.runtime
                             )))
+                            .when_some(
+                                hint_for_placement(
+                                    hint,
+                                    hint_placement,
+                                    ActionHintPlacement::Inline,
+                                ),
+                                |element, text| {
+                                    element.child(action_version_hint(
+                                        text,
+                                        ActionHintPlacement::Inline,
+                                    ))
+                                },
+                            )
                             .when_some(reason, |element, reason| element.child(caption(reason))),
                     )
                     .when(is_script, |element| {
@@ -484,16 +540,57 @@ impl Workspace {
         };
         let feedback = self.package_feedback.for_call(id, &call)?;
         Some(match feedback {
-            crate::package_feedback::Feedback::Running(invocation) => {
-                div().child(caption(format!("运行 #{invocation} · 正在处理")))
-            }
+            crate::package_feedback::Feedback::Running(invocation) => div()
+                .relative()
+                .when_some(
+                    hint_for_placement(
+                        self.package_feedback.action_hint(invocation),
+                        self.package_feedback.action_hint_placement(invocation),
+                        ActionHintPlacement::TopRight,
+                    ),
+                    |element, text| {
+                        element.child(action_version_hint(text, ActionHintPlacement::TopRight))
+                    },
+                )
+                .child(caption(format!("运行 #{invocation} · 正在处理")))
+                .when_some(
+                    hint_for_placement(
+                        self.package_feedback.action_hint(invocation),
+                        self.package_feedback.action_hint_placement(invocation),
+                        ActionHintPlacement::Inline,
+                    ),
+                    |element, text| {
+                        element.child(action_version_hint(text, ActionHintPlacement::Inline))
+                    },
+                ),
             crate::package_feedback::Feedback::Completed(preview) => {
                 let invocation = preview.invocation;
                 let expanded = self.package_feedback.details_visible(invocation);
                 div()
+                    .relative()
+                    .when_some(
+                        hint_for_placement(
+                            self.package_feedback.action_hint(invocation),
+                            self.package_feedback.action_hint_placement(invocation),
+                            ActionHintPlacement::TopRight,
+                        ),
+                        |element, text| {
+                            element.child(action_version_hint(text, ActionHintPlacement::TopRight))
+                        },
+                    )
                     .flex()
                     .flex_col()
                     .gap(px(6.))
+                    .when_some(
+                        hint_for_placement(
+                            self.package_feedback.action_hint(invocation),
+                            self.package_feedback.action_hint_placement(invocation),
+                            ActionHintPlacement::Inline,
+                        ),
+                        |element, text| {
+                            element.child(action_version_hint(text, ActionHintPlacement::Inline))
+                        },
+                    )
                     .child(
                         div()
                             .flex()
@@ -580,6 +677,40 @@ impl Workspace {
         }
         changed
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ActionHintRenderPlan {
+    placement: ActionHintPlacement,
+    foreground: u32,
+    background: Option<u32>,
+}
+fn action_hint_render_plan(placement: ActionHintPlacement) -> ActionHintRenderPlan {
+    ActionHintRenderPlan {
+        placement,
+        foreground: 0x008000,
+        background: (placement == ActionHintPlacement::TopRight).then_some(0x00000000),
+    }
+}
+fn hint_for_placement(
+    text: Option<&str>,
+    placement: ActionHintPlacement,
+    slot: ActionHintPlacement,
+) -> Option<&str> {
+    text.filter(|_| placement == slot)
+}
+fn action_version_hint(text: &str, placement: ActionHintPlacement) -> gpui::Div {
+    let plan = action_hint_render_plan(placement);
+    gpui::div()
+        .text_size(gpui::px(11.))
+        .text_color(crate::rgb(plan.foreground))
+        .when_some(plan.background, |element, color| {
+            element.bg(gpui::rgba(color))
+        })
+        .when(plan.placement == ActionHintPlacement::TopRight, |element| {
+            element.absolute().top(px(4.)).right(px(6.))
+        })
+        .child(text.to_owned())
 }
 
 #[cfg(test)]
@@ -796,5 +927,52 @@ mod tests {
             .unwrap()
             .get("single_instance")
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod corner_hint_render_tests {
+    use super::*;
+    #[test]
+    fn default_hint_plan_keeps_inline_text_and_no_background_override() {
+        assert_eq!(
+            action_hint_render_plan(ActionHintPlacement::Inline),
+            ActionHintRenderPlan {
+                placement: ActionHintPlacement::Inline,
+                foreground: 0x008000,
+                background: None
+            }
+        );
+    }
+    #[test]
+    fn corner_hint_plan_is_top_right_green_and_fully_transparent() {
+        assert_eq!(
+            action_hint_render_plan(ActionHintPlacement::TopRight),
+            ActionHintRenderPlan {
+                placement: ActionHintPlacement::TopRight,
+                foreground: 0x008000,
+                background: Some(0)
+            }
+        );
+    }
+    #[test]
+    fn library_and_result_slots_choose_one_mode_without_duplicate_text() {
+        for placement in [ActionHintPlacement::Inline, ActionHintPlacement::TopRight] {
+            let inline = hint_for_placement(Some("n10"), placement, ActionHintPlacement::Inline);
+            let corner = hint_for_placement(Some("n10"), placement, ActionHintPlacement::TopRight);
+            assert_eq!(
+                usize::from(inline.is_some()) + usize::from(corner.is_some()),
+                1
+            );
+            assert_eq!(inline.is_some(), placement == ActionHintPlacement::Inline);
+        }
+        assert_eq!(
+            hint_for_placement(
+                None,
+                ActionHintPlacement::TopRight,
+                ActionHintPlacement::TopRight
+            ),
+            None
+        );
     }
 }
