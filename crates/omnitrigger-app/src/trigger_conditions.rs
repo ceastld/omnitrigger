@@ -234,6 +234,7 @@ impl RegionChoice {
 
 pub struct ConditionEditor {
     choice: RegionChoice,
+    loaded_region: Option<PointerRegion>,
     extent: Entity<MessageInput>,
     start_inset: Entity<MessageInput>,
     end_inset: Entity<MessageInput>,
@@ -263,6 +264,7 @@ impl ConditionEditor {
         });
         let mut editor = Self {
             choice: RegionChoice::Any,
+            loaded_region: None,
             extent,
             start_inset,
             end_inset,
@@ -283,12 +285,16 @@ impl ConditionEditor {
     }
     pub fn load(&mut self, spec: &TriggerSpec, cx: &mut Context<Workspace>) {
         self.choice = RegionChoice::Any;
+        self.loaded_region = spec
+            .conditions
+            .first()
+            .map(|TriggerCondition::PointerRegion(region)| *region);
         self.start_inset
             .update(cx, |input, cx| input.set_text("0", cx));
         self.end_inset
             .update(cx, |input, cx| input.set_text("0", cx));
-        if let Some(TriggerCondition::PointerRegion(region)) = spec.conditions.first() {
-            match *region {
+        if let Some(region) = self.loaded_region {
+            match region {
                 PointerRegion::ScreenBoundary { edge } => {
                     self.choice = RegionChoice::Boundary(edge);
                 }
@@ -308,7 +314,7 @@ impl ConditionEditor {
                         start_inset_px,
                         end_inset_px,
                         ..
-                    } = *region
+                    } = region
                     {
                         self.start_inset.update(cx, |input, cx| {
                             input.set_text(start_inset_px.to_string(), cx)
@@ -392,19 +398,13 @@ impl ConditionEditor {
                     .trim()
                     .parse::<u32>()
                     .map_err(|_| "边缘终点缩进应为非负整数物理像素。")?;
-                if start_inset_px == 0 && end_inset_px == 0 {
-                    PointerRegion::ScreenEdge {
-                        edge,
-                        thickness_px: value,
-                    }
-                } else {
-                    PointerRegion::ScreenEdgeSegment {
-                        edge,
-                        thickness_px: value,
-                        start_inset_px,
-                        end_inset_px,
-                    }
-                }
+                edited_edge(
+                    self.loaded_region,
+                    edge,
+                    value,
+                    start_inset_px,
+                    end_inset_px,
+                )
             } else {
                 PointerRegion::ScreenCorner {
                     corner: self.choice.corner().expect("角落选项"),
@@ -414,6 +414,27 @@ impl ConditionEditor {
         };
         region.validate().map_err(|error| error.to_string())?;
         Ok(vec![TriggerCondition::PointerRegion(region)])
+    }
+}
+
+fn edited_edge(
+    loaded: Option<PointerRegion>,
+    edge: ScreenEdge,
+    thickness_px: u32,
+    start_inset_px: u32,
+    end_inset_px: u32,
+) -> PointerRegion {
+    let segment = PointerRegion::ScreenEdgeSegment {
+        edge,
+        thickness_px,
+        start_inset_px,
+        end_inset_px,
+    };
+    // 已有边段允许两端都不缩进。界面没改动时保留原表示，避免误报未保存的编辑。
+    if start_inset_px != 0 || end_inset_px != 0 || loaded == Some(segment) {
+        segment
+    } else {
+        PointerRegion::ScreenEdge { edge, thickness_px }
     }
 }
 
@@ -653,5 +674,36 @@ impl Workspace {
                         .child(error),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_insets_preserve_the_loaded_edge_kind_until_its_fields_change() {
+        let edge = ScreenEdge::Top;
+        let whole = PointerRegion::ScreenEdge {
+            edge,
+            thickness_px: 8,
+        };
+        let segment = PointerRegion::ScreenEdgeSegment {
+            edge,
+            thickness_px: 8,
+            start_inset_px: 0,
+            end_inset_px: 0,
+        };
+        let inset = PointerRegion::ScreenEdgeSegment {
+            edge,
+            thickness_px: 8,
+            start_inset_px: 3,
+            end_inset_px: 0,
+        };
+        assert_eq!(edited_edge(Some(segment), edge, 8, 0, 0), segment);
+        assert_eq!(edited_edge(Some(whole), edge, 8, 0, 0), whole);
+        assert_eq!(edited_edge(None, edge, 8, 0, 0), whole);
+        assert_eq!(edited_edge(Some(inset), edge, 8, 0, 0), whole);
+        assert_eq!(edited_edge(Some(whole), edge, 8, 3, 0), inset);
     }
 }

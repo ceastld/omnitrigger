@@ -126,6 +126,15 @@ pub(super) fn view_geometry(view: &WheelDefinition) -> RingGeometry {
     std::array::from_fn(|ring| ring_geometry(view, ring as u8).unwrap_or((DEFAULT_SECTORS, false)))
 }
 
+/// 允许保留仍可编辑的空格；缩减格数后已经消失的方位不应打开添加面板。
+fn retained_cell(view: &WheelDefinition, cell: Option<(u8, u8)>) -> Option<(u8, u8)> {
+    cell.filter(|&(ring, sector)| {
+        view_geometry(view)
+            .get(usize::from(ring))
+            .is_some_and(|(sectors, _)| sector < *sectors)
+    })
+}
+
 /// 返回占用该方位的槽位序号。
 pub(super) fn slot_at(wheel: &WheelDefinition, ring: u8, sector: u8) -> Option<usize> {
     wheel.slots.iter().position(|slot| {
@@ -461,8 +470,10 @@ impl Workspace {
         }
         match proposed.save_changes(&crate::settings::path(), &self.wheels, &self.wheel_scenes) {
             Ok(()) => {
-                self.apply_wheels(proposed, cx);
+                self.replace_wheels(proposed, cx);
+                self.sync_bindings();
                 self.status = "轮盘已保存。".into();
+                cx.notify();
                 true
             }
             Err(error) => {
@@ -487,7 +498,7 @@ impl Workspace {
         Ok(())
     }
 
-    fn apply_wheels(&mut self, wheels: Wheels, cx: &mut Context<Self>) {
+    pub(super) fn replace_wheels(&mut self, wheels: Wheels, cx: &mut Context<Self>) {
         self.hide_wheel(cx);
         self.wheel_preview = None;
         self.wheels = wheels;
@@ -502,48 +513,56 @@ impl Workspace {
                 || self.shortcut_executor.is_running(*runtime_id)
                 || self.system_executor.is_running(*runtime_id)
                 || self.local_executor.is_running(*runtime_id)
+                || self.browser_executor.is_running(*runtime_id)
                 || self.action_service.is_running(*runtime_id)
         });
-        self.sync_bindings();
-        cx.notify();
     }
 
-    /// 重新读取 wheels.json；读取或校验失败时保留当前内容并显示原因。
+    /// 按同一批磁盘配置刷新轮盘及其呼出热键，只有成功后才恢复编辑位置。
     pub(super) fn reload_wheels(&mut self, cx: &mut Context<Self>) {
-        // 两份文件都有效、槽位引用也能解析后，再一起替换正在使用的轮盘和场景。
-        let loaded = Wheels::load(&crate::settings::path()).and_then(|wheels| {
-            let scenes = crate::settings::load_scenes()?;
-            for wheel in &wheels.wheels {
-                crate::wheel_scenes::check_wheel(wheel, &scenes)
-                    .map_err(|error| format!("轮盘“{}”：{error}", wheel.name))?;
-            }
-            Ok((wheels, scenes))
-        });
-        match loaded {
-            Ok((wheels, scenes)) => {
-                let (cell, scope) = (self.wheel_cell, self.wheel_scope.clone());
-                self.wheel_scenes = scenes;
-                self.wheel_scenes_error = None;
-                self.apply_wheels(wheels, cx);
-                let kept = self
-                    .wheel_selected
-                    .clone()
-                    .filter(|id| self.wheels.wheels.iter().any(|wheel| &wheel.id == id));
-                if let Some(id) = kept {
+        if self.recording {
+            return;
+        }
+        let selected = self.wheel_selected.clone();
+        let scope = self.wheel_scope.clone();
+        let cell = self.wheel_cell;
+        match self.reload_wheel_and_binding_snapshot(cx) {
+            Ok(()) => {
+                if let Some(wheel) = self
+                    .wheels
+                    .wheels
+                    .iter()
+                    .find(|wheel| Some(&wheel.id) == selected.as_ref())
+                {
+                    let kept_scope = scope
+                        .as_ref()
+                        .is_none_or(|scope| self.wheel_scope_choices(wheel).contains(scope));
+                    let id = wheel.id.clone();
                     self.select_wheel(id, cx);
-                    self.wheel_scope = scope;
-                    self.wheel_cell = cell;
-                    self.load_wheel_cell(cx);
+                    if kept_scope {
+                        self.wheel_scope = scope;
+                        self.wheel_cell = self
+                            .wheel_view()
+                            .and_then(|view| retained_cell(&view, cell));
+                        self.load_wheel_cell(cx);
+                    }
                 } else if let Some(first) = self.wheels.wheels.first() {
                     self.select_wheel(first.id.clone(), cx);
                 } else {
                     self.wheel_selected = None;
                     self.wheel_scope = None;
                     self.wheel_cell = None;
+                    self.wheel_hover = None;
+                    self.wheel_moving = false;
+                    self.wheel_replacing = false;
+                    self.wheel_scope_open = false;
+                    self.wheel_source_binding = None;
                     self.load_wheel_cell(cx);
                 }
-                self.status = "已重新载入轮盘配置。".into();
+                self.status = "已重新载入轮盘和热键配置。".into();
             }
+            // 热键草稿冲突已有可操作的横幅，显式重新载入后会清除。
+            Err(error) if self.binding_reload_notice.as_ref() == Some(&error) => {}
             Err(error) => {
                 if self.wheels_error.is_some() {
                     self.wheels_error = Some(error.clone());
@@ -1686,6 +1705,17 @@ mod tests {
             })
             .collect();
         wheel
+    }
+
+    #[test]
+    fn reload_keeps_editable_empty_cells_and_clears_directions_removed_by_resize() {
+        let view = wheel(&[at(1, 0, 4)]);
+        assert_eq!(retained_cell(&view, Some((1, 0))), Some((1, 0)));
+        assert_eq!(retained_cell(&view, Some((1, 3))), Some((1, 3)));
+        assert_eq!(retained_cell(&view, Some((2, 7))), Some((2, 7)));
+        assert_eq!(retained_cell(&view, Some((1, 4))), None);
+        assert_eq!(retained_cell(&view, Some((3, 0))), None);
+        assert_eq!(retained_cell(&view, None), None);
     }
 
     #[test]

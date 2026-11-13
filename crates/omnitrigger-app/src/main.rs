@@ -3720,18 +3720,41 @@ impl Workspace {
         if self.recording {
             return;
         }
-        if let Err(error) = self.apply_disk_bindings(cx) {
-            self.binding_reload_notice = Some(error);
+        let loaded = settings::reload_bindings_from(&settings::path())
+            .and_then(|(bindings, scenes)| self.apply_disk_bindings(bindings, scenes, None, cx));
+        match loaded {
+            Ok(()) => self.status = "已载入磁盘上的热键配置。".into(),
+            Err(error) => self.binding_reload_notice = Some(error),
         }
         cx.notify();
     }
 
-    fn apply_disk_bindings(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        let (bindings, scenes) = settings::reload_bindings_from(&settings::path())?;
-        for wheel in &self.wheels.wheels {
+    fn reload_wheel_and_binding_snapshot(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let path = settings::path();
+        // 首次启动时数据文件可以尚未生成。已有自定义绑定的窗口须等文件恢复。
+        let allow_missing = self.triggers.bindings() == settings::defaults()
+            && self.wheel_scenes == scenes::CompiledScenes::default();
+        let snapshot = self.wheels.reload_with_bindings(&path, allow_missing)?;
+        self.apply_disk_bindings(
+            snapshot.bindings,
+            snapshot.scenes,
+            Some(snapshot.wheels),
+            cx,
+        )
+    }
+
+    fn apply_disk_bindings(
+        &mut self,
+        bindings: Vec<Binding>,
+        scenes: scenes::CompiledScenes,
+        wheels: Option<Wheels>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        for wheel in &wheels.as_ref().unwrap_or(&self.wheels).wheels {
             wheel_scenes::check_wheel(wheel, &scenes)
                 .map_err(|error| format!("轮盘“{}”：{error}", wheel.name))?;
         }
+        let from_wheels = wheels.is_some();
         let by_id: HashMap<_, _> = bindings
             .iter()
             .map(|binding| (binding.spec.id, binding))
@@ -3750,7 +3773,27 @@ impl Workspace {
                 .filter(|id| by_id.contains_key(id))
                 .copied(),
         );
-        retired.extend(self.pending.as_ref().map(|spec| spec.id));
+        let selected_changed = self.selected.is_some_and(|id| retired.contains(&id));
+        if from_wheels {
+            let pending_collision = self
+                .pending
+                .as_ref()
+                .is_some_and(|spec| by_id.contains_key(&spec.id));
+            let edited_externally = self.pending.is_none()
+                && selected_changed
+                && self
+                    .selected
+                    .and_then(|id| self.binding(id))
+                    .is_some_and(|binding| self.has_binding_edits(binding, cx));
+            if pending_collision || edited_externally {
+                let reason =
+                    "外部修改与未保存的热键编辑冲突。请先返回触发器页处理草稿，再重新载入轮盘。";
+                self.binding_reload_notice = Some(reason.into());
+                return Err(reason.into());
+            }
+        } else {
+            retired.extend(self.pending.as_ref().map(|spec| spec.id));
+        }
         if retired.iter().any(|id| {
             self.action_running(*id)
                 || self
@@ -3760,24 +3803,34 @@ impl Workspace {
         }) {
             return Err("待替换的动作仍在运行，请在动作结束后重新载入。".to_owned());
         }
-        self.hide_wheel(cx);
+        if !from_wheels {
+            self.hide_wheel(cx);
+        }
         self.close_gesture_choice(cx);
         self.wheel_runtime_ids
             .retain(|_, id| !by_id.contains_key(id));
         self.wheel_source_binding = self
             .wheel_source_binding
             .filter(|id| by_id.contains_key(id));
-        self.selected = self
+        let selected = self
             .selected
             .filter(|id| by_id.contains_key(id))
             .or_else(|| bindings.first().map(|binding| binding.spec.id));
+        let refresh_editor = !from_wheels
+            || (self.pending.is_none() && (selected_changed || selected != self.selected));
+        self.selected = selected;
         self.triggers.replace_bindings(bindings);
         self.wheel_scenes = scenes;
         self.wheel_scenes_error = None;
-        self.clear_pending();
-        self.confirm_delete = None;
-        self.conflict = None;
-        self.preset_edit_id = None;
+        if !from_wheels {
+            self.clear_pending();
+        }
+        if refresh_editor {
+            self.confirm_delete = None;
+            self.conflict = None;
+            self.preset_edit_id = None;
+            self.load_selected_message(cx);
+        }
         self.binding_reload_notice = None;
         for id in retired {
             self.cancel_mouse_shortcut_rule(id);
@@ -3790,11 +3843,18 @@ impl Workspace {
                 self.action_error = None;
             }
         }
-        self.load_selected_message(cx);
+        if let Some(wheels) = wheels {
+            self.replace_wheels(wheels, cx);
+        }
         self.sync_bindings();
         self.refresh_panel(cx);
-        self.status = "已载入磁盘上的热键配置。".into();
         Ok(())
+    }
+
+    fn has_binding_edits(&self, binding: &Binding, cx: &App) -> bool {
+        self.message.read(cx).text() != binding.message
+            || self.draft_spec(&binding.spec, cx).as_ref() != Ok(&binding.spec)
+            || self.draft_action_spec(cx).as_ref() != Ok(&binding.action)
     }
 
     fn clear_pending(&mut self) {
@@ -7027,18 +7087,7 @@ impl Workspace {
             .is_ok_and(|action| self.action_available(&action));
         let stats = self.triggers.stats(id);
         let draft = self.message.read(cx).text();
-        let changed = !draft.trim().is_empty()
-            && (draft != binding.message
-                || self
-                    .draft_spec(&binding.spec, cx)
-                    .as_ref()
-                    .map(|spec| spec != &binding.spec)
-                    .unwrap_or(true)
-                || self
-                    .draft_action_spec(cx)
-                    .as_ref()
-                    .map(|action| action != &binding.action)
-                    .unwrap_or(true));
+        let changed = !draft.trim().is_empty() && self.has_binding_edits(binding, cx);
         let confirming = self.confirm_delete == Some(id);
         let display = self
             .draft_spec(&binding.spec, cx)

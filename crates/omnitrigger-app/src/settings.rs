@@ -1202,9 +1202,22 @@ pub fn load() -> Result<Vec<Binding>, String> {
 }
 
 pub(super) fn load_from(config_path: &Path) -> Result<Vec<Binding>, String> {
-    match std::fs::read_to_string(config_path) {
-        Ok(text) => decode(&text),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(defaults()),
+    load_bindings_and_scenes(config_path, true).map(|(bindings, _)| bindings)
+}
+
+/// 从同一份文件解析绑定和场景；新配置档可在首次保存前使用内置默认值。
+pub(super) fn load_bindings_and_scenes(
+    path: &Path,
+    allow_missing: bool,
+) -> Result<(Vec<Binding>, CompiledScenes), String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let snapshot = decode_with_definitions(&text)?;
+            Ok((snapshot.bindings, snapshot.compiled))
+        }
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+            Ok((defaults(), CompiledScenes::default()))
+        }
         Err(error) => Err(format!("读取配置失败：{error}")),
     }
 }
@@ -1219,9 +1232,7 @@ pub(super) fn wheel_references(bindings: &[Binding]) -> impl Iterator<Item = (u6
 
 /// 显式重载只接受可读取的文件。绑定和轮盘使用同一次读取的场景定义。
 pub fn reload_bindings_from(path: &Path) -> Result<(Vec<Binding>, CompiledScenes), String> {
-    let text = std::fs::read_to_string(path).map_err(|error| format!("读取配置失败：{error}"))?;
-    let snapshot = decode_with_definitions(&text)?;
-    Ok((snapshot.bindings, snapshot.compiled))
+    load_bindings_and_scenes(path, false)
 }
 
 pub fn save(previous: &[Binding], bindings: &[Binding]) -> Result<(), TriggerError> {
@@ -3189,15 +3200,27 @@ mod tests {
         let scratch = Scratch::new();
         let path = scratch.config();
         assert!(reload_bindings_from(&path).is_err());
+        assert_eq!(
+            load_bindings_and_scenes(&path, true).unwrap(),
+            (defaults(), CompiledScenes::default())
+        );
         assert!(!path.exists());
         std::fs::write(&path, "{").unwrap();
-        assert!(reload_bindings_from(&path).is_err());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{");
-        let source = include_str!("../../../examples/literal-text.json");
-        std::fs::write(&path, source).unwrap();
         assert_eq!(
-            reload_bindings_from(&path).unwrap().0,
-            decode(source).unwrap()
+            load_bindings_and_scenes(&path, true).unwrap_err(),
+            reload_bindings_from(&path).unwrap_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{");
+        let source = json!({"version":24, "bindings":[],
+            "scenes":{"writing":{"process_scope":{"allow":["editor"]}}}})
+        .to_string();
+        std::fs::write(&path, &source).unwrap();
+        let (bindings, scenes) = reload_bindings_from(&path).unwrap();
+        assert!(bindings.is_empty());
+        assert_eq!(scenes.get("writing").unwrap().foreground.allow, ["editor"]);
+        assert_eq!(
+            load_bindings_and_scenes(&path, true).unwrap(),
+            (bindings, scenes)
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
     }

@@ -211,6 +211,13 @@ pub struct Wheels {
     pub wheels: Vec<WheelDefinition>,
 }
 
+#[derive(Debug)]
+pub(super) struct WheelSnapshot {
+    pub wheels: Wheels,
+    pub bindings: Vec<crate::settings::Binding>,
+    pub scenes: CompiledScenes,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WheelsFile {
@@ -249,10 +256,35 @@ impl Default for Wheels {
 impl Wheels {
     /// 配置路径为当前 bindings.json；轮盘存于同目录 wheels.json。
     pub fn load(config_path: &Path) -> Result<Self, String> {
+        Self::read(config_path, true)
+    }
+
+    pub(super) fn reload_with_bindings(
+        &self,
+        config_path: &Path,
+        allow_missing_bindings: bool,
+    ) -> Result<WheelSnapshot, String> {
+        // 与保存方使用相同锁序，避免把新热键注册到另一窗口刚刚替换的旧轮盘。
+        let _bindings_lock = crate::settings::lock_config(config_path, "热键")?;
+        let _wheels_lock =
+            crate::settings::lock_config(&config_path.with_file_name("wheels.json"), "轮盘")?;
+        let wheels = Self::read(config_path, self == &Self::default())?;
+        let (bindings, scenes) =
+            crate::settings::load_bindings_and_scenes(config_path, allow_missing_bindings)?;
+        Ok(WheelSnapshot {
+            wheels,
+            bindings,
+            scenes,
+        })
+    }
+
+    fn read(config_path: &Path, allow_missing: bool) -> Result<Self, String> {
         let destination = config_path.with_file_name("wheels.json");
         match std::fs::read_to_string(destination) {
             Ok(text) => Self::decode(&text),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(Self::default())
+            }
             Err(error) => Err(format!("读取轮盘配置失败：{error}")),
         }
     }
@@ -363,7 +395,7 @@ impl Wheels {
             return Ok(());
         }
         if self != &Self::default() {
-            return Err("轮盘配置文件已移走，请点击“重新载入”后再编辑。".into());
+            return Err("轮盘配置文件已移走，请先恢复文件，再点击“重新载入”。".into());
         }
         crate::settings::atomic_create(&destination, &self.contents()?)
     }
@@ -534,6 +566,67 @@ mod tests {
             wheels: wheels.wheels.clone(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn reload_does_not_replace_missing_custom_wheels_with_defaults() {
+        let scratch = Scratch::new();
+        let defaults = Wheels::default();
+        assert_eq!(
+            defaults
+                .reload_with_bindings(&scratch.bindings(), true)
+                .unwrap()
+                .wheels,
+            defaults
+        );
+        let mut custom = defaults.clone();
+        custom.wheels[0].name = "自定义轮盘".into();
+        assert!(custom
+            .reload_with_bindings(&scratch.bindings(), true)
+            .is_err());
+        assert!(!scratch.bindings().exists() && !scratch.wheels().exists());
+        std::fs::write(scratch.wheels(), encode(&custom)).unwrap();
+        assert_eq!(
+            custom
+                .reload_with_bindings(&scratch.bindings(), true)
+                .unwrap()
+                .wheels,
+            custom
+        );
+    }
+
+    #[test]
+    fn wheel_reload_reads_external_bindings_and_layout_only_after_both_writers_finish() {
+        let scratch = Scratch::new();
+        let path = scratch.bindings();
+        let previous = Wheels::default();
+        let mut updated = previous.clone();
+        updated.wheels[0].slots[0].label = "外部更新".into();
+        let mut bindings: serde_json::Value =
+            serde_json::from_str(include_str!("../../../examples/literal-text.json")).unwrap();
+        bindings["version"] = 24.into();
+        bindings["bindings"][0]["action"] = json!({"kind":"show_wheel", "wheel_id":"orbit-edit"});
+        for (file, kind) in [(&path, "热键"), (&scratch.wheels(), "轮盘")] {
+            let lock = crate::settings::lock_config(file, kind).unwrap();
+            let error = previous.reload_with_bindings(&path, true).unwrap_err();
+            assert!(error.contains(&format!("正在保存{kind}")), "{error}");
+            drop(lock);
+        }
+        std::fs::write(scratch.wheels(), encode(&updated)).unwrap();
+        std::fs::write(&path, bindings.to_string()).unwrap();
+        let snapshot = previous.reload_with_bindings(&path, false).unwrap();
+        assert_eq!(snapshot.wheels, updated);
+        assert_eq!(
+            crate::settings::wheel_references(&snapshot.bindings).collect::<Vec<_>>(),
+            [(9401, "orbit-edit")]
+        );
+        bindings["bindings"] = json!([]);
+        std::fs::write(&path, bindings.to_string()).unwrap();
+        assert!(updated
+            .reload_with_bindings(&path, false)
+            .unwrap()
+            .bindings
+            .is_empty());
     }
 
     #[test]
