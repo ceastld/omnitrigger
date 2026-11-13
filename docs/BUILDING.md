@@ -9,11 +9,11 @@
 ```powershell
 git clone https://github.com/ceastld/omnitrigger.git
 cd omnitrigger
-.\start.ps1                                      # 构建并打开界面
-cargo run -p omnitrigger-app --locked             # 在终端运行
+.\start.ps1                                      # 构建并打开本机测试配置档
+cargo run -p omnitrigger-app --locked -- --test-workspace
 ```
 
-直接启动产物：`target\debug\omnitrigger.exe`。
+用 `target\debug\omnitrigger.exe --test-workspace` 可再次打开同一测试配置档。直接运行无参数 EXE 会打开日常配置。
 
 上述路径为默认 Cargo 输出目录；`start.ps1` 和检查脚本共用 `scripts/build-app.ps1`，从本次 Cargo 构建回执定位 EXE，支持自定义 `CARGO_TARGET_DIR` 与 Windows 构建目标目录。非 Windows 环境可运行 `cargo test -p omnitrigger-core --locked` 验证核心；桌面程序仍仅面向 Windows。
 

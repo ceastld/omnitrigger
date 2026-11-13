@@ -1,7 +1,7 @@
 #requires -Version 7.0
 <#
 .SYNOPSIS
-构建、检查并打包 Windows x64 发行 ZIP 与 SHA-256 清单。
+构建、检查并打包 Windows x64 安装器、便携 ZIP 与 SHA-256 清单。
 #>
 [CmdletBinding()]
 param([ValidateSet('x86_64-pc-windows-msvc')][string]$Target = 'x86_64-pc-windows-msvc')
@@ -31,6 +31,11 @@ try {
     $distRoot = Join-Path $projectRoot 'dist'
     $null = New-Item -ItemType Directory -Path $distRoot -Force
     $packageName = "OmniTrigger-$version-windows-x86_64"
+    $installerPath = Join-Path $distRoot "$packageName-setup.exe"
+    $zipPath = Join-Path $distRoot "$packageName.zip"
+    foreach ($output in @($installerPath, $zipPath)) {
+        if (Test-Path -LiteralPath $output) { throw "发行文件已存在：$output" }
+    }
     $stagingRoot = Join-Path $distRoot ".staging-$([Guid]::NewGuid().ToString('N'))"
     $null = New-Item -ItemType Directory -Path $stagingRoot
     try {
@@ -45,12 +50,14 @@ try {
         $readme = @"
 OmniTrigger $version — Windows x64 早期预览版
 
-解压全部文件后运行 omnitrigger.exe。建议使用 Windows 11 x64；Windows 10 尚未完整验证。
+安装完成后从开始菜单打开 OmniTrigger。便携版解压全部文件后运行 omnitrigger.exe。
+建议使用 Windows 11 x64，Windows 10 尚未完整验证。
 程序未进行代码签名。需要 Microsoft Visual C++ v14 Redistributable x64，缺少 VCRUNTIME140.dll 时请安装官方运行库：
 https://aka.ms/vc14/vc_redist.x64.exe
 官方运行库说明：https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist
 
-配置默认保存到 %LOCALAPPDATA%\OmniTrigger；可用 --config <文件> 隔离试用。
+日常配置保存在 %LOCALAPPDATA%\OmniTrigger，卸载或重装后保留。
+开始菜单中的 OmniTrigger 测试使用单独保存的测试数据，默认关闭输入监听。便携版可使用 --test-workspace 打开。
 应用支持键鼠组合、长按、快速拖拽、区域条件和本地动作。输入补发会改变时序，不能保证无损恢复。
 可选截图插件需另行安装，不包含在本压缩包中；下载可能需要相应仓库访问权限。
 
@@ -61,13 +68,17 @@ licenses/dependencies.json 记录锁定目标依赖、来源、许可文件与 S
 "@
         [IO.File]::WriteAllText((Join-Path $stagingRoot 'README.txt'), $readme, [Text.UTF8Encoding]::new($false))
 
-        $zipPath = Join-Path $distRoot "$packageName.zip"
-        if (Test-Path -LiteralPath $zipPath) { throw "发行包已存在，不覆盖：$zipPath" }
+        $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+        if (-not (Test-Path -LiteralPath $compiler)) { $compiler = (Get-Command ISCC.exe -ErrorAction Stop).Source }
+        & $compiler /Qp "/DAppVersion=$version" "/DPayload=$stagingRoot" "/O$distRoot" (Join-Path $PSScriptRoot 'omnitrigger.iss')
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installerPath -PathType Leaf)) { throw '安装器构建失败。' }
         [IO.Compression.ZipFile]::CreateFromDirectory($stagingRoot, $zipPath, [IO.Compression.CompressionLevel]::Optimal, $false)
-        $hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        [IO.File]::WriteAllText((Join-Path $distRoot 'SHA256SUMS.txt'), "$hash  $packageName.zip`n", [Text.UTF8Encoding]::new($false))
-        Write-Host "发行包：$zipPath"
-        Write-Host "SHA-256：$hash"
+        $lines = foreach ($file in @($zipPath, $installerPath)) {
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $([IO.Path]::GetFileName($file))"
+        }
+        [IO.File]::WriteAllLines((Join-Path $distRoot 'SHA256SUMS.txt'), $lines, [Text.UTF8Encoding]::new($false))
+        Write-Host ($lines -join "`n")
     } finally {
         # 仅清理本次创建且位于 dist 内的随机暂存目录。
         $resolvedStaging = [IO.Path]::GetFullPath($stagingRoot)

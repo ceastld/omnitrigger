@@ -649,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "omnitrigger-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "omnitrigger-js-probe"
@@ -664,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "omnitrigger-windows"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "omnitrigger-core",
  "windows",

@@ -1536,7 +1536,7 @@ impl Workspace {
     }
 
     fn sync_bindings(&mut self) {
-        if !self.mode.owns_input_engine() {
+        if !self.mode.owns_input_engine() || !self.listen {
             self.bindings_need_sync = false;
             return;
         }
@@ -8590,6 +8590,14 @@ fn main() {
                             _ => None,
                         });
                     let main_window = gpui::Window::window_handle(&*window);
+                    let tray_window = text_history_ui_window.filter(|_| {
+                        let reopened_by_updater = std::env::var_os("OMNITRIGGER_UPDATE_HEALTH")
+                            .is_some()
+                            || std::env::var_os("OMNITRIGGER_UPDATE_ERROR").is_some();
+                        profile_startup.test_name.is_none()
+                            && (arguments.iter().skip(1).all(|arg| arg == "--settings")
+                                || (appearance_settings && reopened_by_updater))
+                    });
                     let view = cx.new(|cx| {
                         Workspace::new(
                             cx,
@@ -8620,6 +8628,14 @@ fn main() {
                         });
                     }
                     let closing_view = view.downgrade();
+                    if let Some(error) =
+                        tray_window.and_then(|hwnd| omnitrigger_windows::install_tray(hwnd).err())
+                    {
+                        view.update(cx, |view, cx| {
+                            view.status = error;
+                            cx.notify();
+                        });
+                    }
                     let appearance_view = view.downgrade();
                     window
                         .observe_window_appearance(move |window, cx| {
@@ -8632,7 +8648,17 @@ fn main() {
                         })
                         .detach();
                     window.on_window_should_close(cx, move |_, cx| {
-                        match closing_view.update(cx, |view, cx| view.request_legacy_close(cx)) {
+                        match closing_view.update(cx, |view, cx| {
+                            if !view.legacy_close_requested
+                                && tray_window.is_some_and(omnitrigger_windows::hide_to_tray)
+                            {
+                                if view.recording {
+                                    view.send(BackendCommand::CancelRecording);
+                                }
+                                return false;
+                            }
+                            view.request_legacy_close(cx)
+                        }) {
                             Ok(allow_close) => allow_close,
                             Err(_) => {
                                 cx.quit();

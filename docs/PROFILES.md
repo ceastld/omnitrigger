@@ -2,6 +2,8 @@
 
 状态：部分实现。
 
+安装后的开始菜单提供“OmniTrigger”和“OmniTrigger 测试”。后者与开发入口 `start.ps1` 共用 `--test-workspace`，首次自动创建 `testing` 测试配置档，之后沿用。日常数据与测试数据均属于当前 Windows 用户，独立于安装目录，卸载和重装后保留。
+
 - 已实现：数据根解析（`--data-root`、`OMNITRIGGER_HOME`、默认目录）、打包重定向检测与脱离重启、持久测试配置档（`--profile`、`--profile-create`、`--profile-reset`、`--profile-list`，种子 `empty`、`fixture:`、`copy:`）、测试配置档默认不安装 Hook 与 `--listen`、窗口标题和侧栏的测试数据标识、启动时发现更新的外部副本并询问导入。
 - 首阶段的默认配置档就是数据根本身，文件仍在 `%LOCALAPPDATA%\OmniTrigger` 原位，尚未迁移进 `profiles\<ID>\`；`examples` 种子、单实例、运行中切换、自动备份、设置页管理界面和账号关联尚未实现。
 - `--config` 保持原有行为（照常安装 Hook），不能与配置档参数同用。

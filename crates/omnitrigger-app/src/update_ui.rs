@@ -68,6 +68,9 @@ impl Workspace {
     }
 
     pub(super) fn poll_update(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.test_profile.is_some() {
+            return false;
+        }
         // 首个成功打开窗口且输入后端就绪的版本才允许更新器删除备份。
         if self.ready {
             updater::mark_healthy();

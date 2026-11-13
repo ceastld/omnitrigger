@@ -23,13 +23,13 @@ git diff --check
 
 ## 分发 Windows 程序前
 
-发行包由 [`scripts/package-windows.ps1`](../scripts/package-windows.ps1) 生成，不直接分发调试 EXE：
+发行脚本需要 Inno Setup 6，使用 [`scripts/package-windows.ps1`](../scripts/package-windows.ps1) 从同一份 Release 文件生成安装器和便携版。
 
 ```powershell
 .\scripts\package-windows.ps1 -Target x86_64-pc-windows-msvc
 ```
 
-脚本使用锁定依赖和 Release 配置，从本次 Cargo 回执定位 EXE，先以该 EXE 只读验证全部公开 JSON 示例，再生成 `dist\OmniTrigger-<版本>-windows-x86_64.zip` 和 `dist\SHA256SUMS.txt`。包内包含项目许可证、运行说明、发布说明及按实际目标收集的第三方许可 / 版权 / NOTICE / PATENTS 和机器可读清单；缺少所需许可正文、只有相对链接占位文本时打包失败。许可文件来源与补充规则见 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
+脚本使用锁定依赖，从本次 Cargo 回执定位 EXE，以该 EXE 只读验证公开 JSON 示例。产物位于 `dist`，包括 `OmniTrigger-<版本>-windows-x86_64-setup.exe`、同名前缀的 ZIP 和列出两项摘要的 `SHA256SUMS.txt`。两种包均包含项目许可证、运行说明、发布说明、目标依赖许可及机器可读清单。缺少许可正文时打包失败。发行 CI 还会静默安装、核对两个开始菜单入口，并检查卸载、重装后两份配置的哈希。许可文件来源见 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
 
 发布前核对：
 

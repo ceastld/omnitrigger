@@ -63,6 +63,46 @@ jobs:
       - name: 构建发行包并收集第三方许可
         run: ./scripts/package-windows.ps1 -Target x86_64-pc-windows-msvc
 
+      - name: 验证安装、卸载和重装保留配置
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $setup = (Get-Item "dist/OmniTrigger-$env:RELEASE_VERSION-windows-x86_64-setup.exe").FullName
+          $app = Join-Path $env:LOCALAPPDATA 'Programs/OmniTrigger'
+          $menu = Join-Path ([Environment]::GetFolderPath('Programs')) 'OmniTrigger'
+          if (Test-Path $app) { throw '测试需要未安装的用户目录。' }
+          $data = Join-Path $env:RUNNER_TEMP 'omnitrigger-reinstall-data'
+          $env:OMNITRIGGER_HOME = $data
+          $null = New-Item -ItemType Directory -Path $data
+          $bindings = Join-Path $data 'bindings.json'
+          Copy-Item examples/capslock-navigation.json $bindings
+          $hash = (Get-FileHash $bindings).Hash
+          $shell = New-Object -ComObject WScript.Shell
+          foreach ($round in 1..2) {
+            $result = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -WindowStyle Hidden -PassThru -Wait
+            if ($result.ExitCode) { throw "安装失败：$($result.ExitCode)" }
+            $exe = Join-Path $app 'omnitrigger.exe'
+            foreach ($name in @('OmniTrigger','OmniTrigger 测试')) {
+              $shortcut = $shell.CreateShortcut((Join-Path $menu "$name.lnk"))
+              $arguments = if ($name -eq 'OmniTrigger') { '' } else { '--test-workspace' }
+              if ($shortcut.TargetPath -ine $exe -or $shortcut.Arguments -cne $arguments) { throw "快捷方式错误：$name" }
+            }
+            & $exe --test-workspace --check-config | Out-Host
+            if ($LASTEXITCODE) { throw '测试配置档启动失败。' }
+            $entry = @((Get-Content (Join-Path $data 'profiles.json') -Raw | ConvertFrom-Json).profiles | Where-Object alias -eq 'testing')
+            if ($entry.Count -ne 1 -or $entry[0].kind -ne 'test') { throw '测试配置档登记错误。' }
+            $testConfig = Join-Path $data "profiles/$($entry[0].id)/bindings.json"
+            if ($round -eq 1) {
+              Copy-Item examples/literal-text.json $testConfig -Force
+              $testHash = (Get-FileHash $testConfig).Hash
+            }
+            if ((Get-FileHash $testConfig).Hash -ne $testHash) { throw '测试配置未保留。' }
+            $result = Start-Process -FilePath (Join-Path $app 'unins000.exe') -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -WindowStyle Hidden -PassThru -Wait
+            if ($result.ExitCode -or (Test-Path $exe) -or (Get-FileHash $bindings).Hash -ne $hash -or (Get-FileHash $testConfig).Hash -ne $testHash) {
+              throw '卸载或配置保留验证失败。'
+            }
+          }
+
       - name: 准备对应版本的发布说明
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
@@ -80,6 +120,7 @@ jobs:
           name: windows-x64-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             dist/OmniTrigger-${{ steps.version.outputs.version }}-windows-x86_64.zip
+            dist/OmniTrigger-${{ steps.version.outputs.version }}-windows-x86_64-setup.exe
             dist/SHA256SUMS.txt
             dist/RELEASE_NOTES.md
           if-no-files-found: error
@@ -114,22 +155,25 @@ jobs:
           if ($tag -cne $env:GITHUB_REF_NAME) { throw '发布标签与构建版本不一致。' }
           $archiveName = "OmniTrigger-$env:RELEASE_VERSION-windows-x86_64.zip"
           $archive = Join-Path 'dist' $archiveName
+          $setupName = "OmniTrigger-$env:RELEASE_VERSION-windows-x86_64-setup.exe"
+          $setup = Join-Path 'dist' $setupName
           $checksums = Join-Path 'dist' 'SHA256SUMS.txt'
           $releaseNotes = Join-Path 'dist' 'RELEASE_NOTES.md'
           $files = @(Get-ChildItem -LiteralPath dist -Force)
-          if ($files.Count -ne 3 -or @($files | Where-Object PSIsContainer).Count -ne 0 -or
+          if ($files.Count -ne 4 -or @($files | Where-Object PSIsContainer).Count -ne 0 -or
+              -not (Test-Path -LiteralPath $setup -PathType Leaf) -or
               -not (Test-Path -LiteralPath $archive -PathType Leaf) -or
               -not (Test-Path -LiteralPath $checksums -PathType Leaf) -or
               -not (Test-Path -LiteralPath $releaseNotes -PathType Leaf)) {
-            throw '发行产物必须仅包含预期 ZIP、SHA256SUMS.txt 和发布说明。'
+            throw '发行产物必须包含安装器、ZIP、SHA256SUMS.txt 和发布说明。'
           }
           $lines = @(Get-Content -LiteralPath $checksums | Where-Object { $_.Trim() })
-          if ($lines.Count -ne 1 -or $lines[0] -notmatch '^([0-9a-fA-F]{64}) [ *](.+)$') {
-            throw 'SHA256SUMS.txt 格式无效。'
-          }
-          $expectedHash = $Matches[1]
-          if ($Matches[2] -cne $archiveName -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $expectedHash) {
-            throw 'ZIP 文件名或 SHA-256 校验失败。'
+          if ($lines.Count -ne 2) { throw 'SHA256SUMS.txt 应列出两项。' }
+          foreach ($path in @($archive, $setup)) {
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($lines -cnotcontains "$hash  $([IO.Path]::GetFileName($path))") {
+              throw "SHA-256 校验失败：$path"
+            }
           }
 
           $headers = @{
@@ -163,7 +207,7 @@ jobs:
           $notes += "`n`n源码提交：$env:RELEASE_COMMIT`n构建记录：$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID`n"
           $notesPath = Join-Path $env:RUNNER_TEMP 'omnitrigger-release-notes.md'
           [IO.File]::WriteAllText($notesPath, $notes, [Text.UTF8Encoding]::new($false))
-          gh release create $tag $archive $checksums --repo $env:GITHUB_REPOSITORY --verify-tag --draft --prerelease --latest=false --title "OmniTrigger $tag · Windows 预览版" --notes-file $notesPath
+          gh release create $tag $archive $setup $checksums --repo $env:GITHUB_REPOSITORY --verify-tag --draft --prerelease --latest=false --title "OmniTrigger $tag · Windows 预览版" --notes-file $notesPath
           if ($LASTEXITCODE -ne 0) { throw '创建草稿或上传资产失败；保留已有草稿供检查。' }
 
           # gh 会通过 GraphQL 定位尚未发布的标签，再读取真实 Release；REST tags 端点不支持草稿。
@@ -171,16 +215,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw '无法读取刚创建的草稿，停止公开。' }
           $release = $releaseJson | ConvertFrom-Json
           $assets = @($release.assets)
-          if (-not $release.isDraft -or -not $release.isPrerelease -or $assets.Count -ne 2) {
+          if (-not $release.isDraft -or -not $release.isPrerelease -or $assets.Count -ne 3) {
             throw '草稿状态或发行资产数量异常，停止公开。'
           }
-          foreach ($path in @($archive, $checksums)) {
+          foreach ($path in @($archive, $setup, $checksums)) {
             $file = Get-Item -LiteralPath $path
             $asset = @($assets | Where-Object name -CEQ $file.Name)
             if ($asset.Count -ne 1 -or $asset[0].state -ne 'uploaded' -or $asset[0].size -ne $file.Length) {
               throw "远端资产核验失败：$($file.Name)"
             }
-            if ($asset[0].digest -and $asset[0].digest -ine "sha256:$((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash)") {
+            if ($asset[0].digest -ine "sha256:$((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash)") {
               throw "远端资产摘要不符：$($file.Name)"
             }
           }

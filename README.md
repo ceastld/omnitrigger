@@ -24,7 +24,7 @@
 
 录下一个操作，就能将其注册为触发器，例如 `CapsLock + W`、`鼠标侧键 + 滚轮上滚`。当前提供 Windows 桌面测试程序，触发后显示本地提示、发送快捷键、运行程序或脚本，也可呼出自定义动作轮盘；还可在“扩展”页一键启用 RaiShot，自动复用兼容的已有安装或下载依赖，再选择截图动作并设置触发。
 
-项目处于 `0.1.0` 早期开发阶段，API 与配置格式可能调整。目前仅支持 Windows，不提供稳定版本。当前源码支持在设置页检查更新、后台下载并重启更新；已发布的 v0.1.0 包尚未包含这一功能。
+当前为 Windows x64 开发预览版，API 与配置格式可能调整。v0.2.0 提供当前用户安装器和独立的本机测试配置档，日常窗口的设置页支持检查更新、后台下载并重启更新。
 
 [源码仓库](https://github.com/ceastld/omnitrigger) · [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md) · [MIT 许可证](LICENSE)
 
@@ -46,11 +46,13 @@
 | :---: | :---: | :---: |
 | <img src="site/public/screenshots/panel.webp" width="260" alt="浮动触发面板"> | <img src="site/public/screenshots/wheel.webp" width="200" alt="轨道轮盘"> | <img src="site/public/screenshots/presets.webp" width="260" alt="触发预设"> |
 
-详细交互、执行限制与界面说明见[当前功能](docs/FEATURES.md)，专题入口见[文档目录](docs/README.md)。尚未实现双击 / 连击、按设备区分、系统托盘或插件市场。[Chrome API 桥接扩展](docs/BROWSER_EXTENSION.md)提供本地 RPC、JS Proxy、书签读取和浏览器动作；Chrome 扩展单独安装。按需授权功能需要新版扩展源码或本地测试包，公开 v0.1.0 包尚未包含本轮更新。
+日常主窗口关闭后收至系统托盘，触发器继续监听。单击托盘图标可返回主窗口，右键选择“退出 OmniTrigger”可结束程序。测试配置档仍随窗口关闭而退出。
+
+详细交互、执行限制与界面说明见[当前功能](docs/FEATURES.md)，专题入口见[文档目录](docs/README.md)。尚未实现双击 / 连击、按设备区分或插件市场。[Chrome API 桥接扩展](docs/BROWSER_EXTENSION.md)提供本地 RPC、JS Proxy、书签读取和浏览器动作；Chrome 扩展单独安装。按需授权功能需要新版扩展源码或本地测试包，公开 v0.1.0 包尚未包含本轮更新。
 
 ## 下载 Windows 预览版
 
-从 [Releases](https://github.com/ceastld/omnitrigger/releases) 下载 `OmniTrigger-<版本>-windows-x86_64.zip`，完整解压后运行 `omnitrigger.exe`。当前只提供 Windows x64 包，建议使用 Windows 11；Windows 10 尚未完成全面兼容验证。发布包包含项目及依赖许可，旁附 `SHA256SUMS.txt` 供核验下载完整性。
+运行 `OmniTrigger-<版本>-windows-x86_64-setup.exe` 安装到当前 Windows 用户。开始菜单的 **OmniTrigger** 沿用日常配置，卸载和重装后仍保留。**OmniTrigger 测试** 使用独立的持久配置，默认关闭全局监听。需要便携版时下载 ZIP，完整解压后运行 `omnitrigger.exe`。两个包的摘要见 `SHA256SUMS.txt`。建议使用 Windows 11 x64。[前往下载](https://github.com/ceastld/omnitrigger/releases)
 
 程序未经代码签名。运行需要 [Microsoft Visual C++ v14 Redistributable x64](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)；如提示缺少 `VCRUNTIME140.dll`，请安装微软官方运行库。无需安装 Rust 或开发工具。预览版仍有下文说明的输入、焦点与权限限制。
 
@@ -83,8 +85,8 @@
 ```powershell
 git clone https://github.com/ceastld/omnitrigger.git
 cd omnitrigger
-.\start.ps1                                      # 构建并打开界面
-cargo run -p omnitrigger-app --locked             # 在终端运行
+.\start.ps1                                      # 构建并打开本机测试配置档
+cargo run -p omnitrigger-app --locked -- --test-workspace
 .\scripts\check.ps1                               # 与 Windows CI 共用的检查
 ```
 

@@ -2921,7 +2921,7 @@ dependencies = [
 
 [[package]]
 name = "omnitrigger-actions"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.3.4",
  "serde",
@@ -2931,7 +2931,7 @@ dependencies = [
 
 [[package]]
 name = "omnitrigger-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "embed-resource",
  "gpui",
@@ -2963,11 +2963,11 @@ dependencies = [
 
 [[package]]
 name = "omnitrigger-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "omnitrigger-windows"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "omnitrigger-core",
  "windows",

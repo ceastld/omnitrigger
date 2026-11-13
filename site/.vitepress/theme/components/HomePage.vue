@@ -182,7 +182,7 @@ const limits = [
   ['补发会改变时序', '前缀暂存后回放、右键短按回放都会改变原始时序，不能承诺完全无损。'],
   ['受系统约束', 'Windows 安全桌面和系统保留组合仍受系统限制；向权限更高的应用补发可能失败，此时暂停监听并提示。'],
   ['与其他 Hook 并存', '其他软件在上游拦截的输入，OmniTrigger 收不到；诊断页帮助判断，但不能仅凭漏触发认定来源。'],
-  ['尚未实现', '双击 / 连击、按设备区分、系统托盘、插件市场与自动更新。'],
+  ['尚未实现', '双击 / 连击、按设备区分、插件市场。'],
   ['预览阶段', '仅 Windows x64，程序未签名；API 与配置格式可能调整。'],
 ]
 
@@ -439,7 +439,7 @@ const privacy = [
           <div class="cta-copy">
             <img class="cta-logo" :src="withBase('/logo.svg')" alt="" width="64" height="64" />
             <h2>把常用操作，交给一个组合</h2>
-            <p>解压即用，无需安装驱动。首次启动加载示例绑定，先按住 <Keycap size="sm">CapsLock</Keycap> 再按 <Keycap size="sm">W</Keycap> 试试。</p>
+            <p>运行安装器，从开始菜单打开 OmniTrigger。首次使用示例配置时，先按住 <Keycap size="sm">CapsLock</Keycap> 再按 <Keycap size="sm">W</Keycap> 试试。</p>
             <div class="actions">
               <a class="btn primary" :href="releases" target="_blank" rel="noopener">下载 v{{ version }} 预览版</a>
               <a class="btn" :href="withBase('/docs/getting-started')">快速开始</a>
@@ -449,7 +449,7 @@ const privacy = [
           <ul class="cta-reqs">
             <li><b>系统</b>Windows x64，建议 Windows 11</li>
             <li><b>运行库</b>Microsoft Visual C++ v14 Redistributable x64</li>
-            <li><b>发布包</b>ZIP，附 SHA256SUMS.txt 与依赖许可</li>
+            <li><b>发布包</b>当前用户安装器、便携 ZIP 与 SHA-256 清单</li>
             <li><b>状态</b>早期预览，未签名，不提供自动更新</li>
           </ul>
         </div>

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 const CATALOG_VERSION: u32 = 1;
 const DEFAULT_ID: &str = "default";
+const TEST_ALIAS: &str = "testing";
 const RESULT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// 启动解析结果，交给界面决定标题、标识与是否安装 Hook。
@@ -53,6 +54,7 @@ enum Command {
 struct Arguments {
     data_root: Option<String>,
     profile: Option<String>,
+    test_workspace: bool,
     listen: bool,
     relaunched: Option<String>,
     result_file: Option<String>,
@@ -159,6 +161,7 @@ fn take_arguments(arguments: &mut Vec<String>) -> Result<Arguments, String> {
         match argument.as_str() {
             "--data-root" => value("--data-root", &mut parsed.data_root, &mut iter)?,
             "--profile" => value("--profile", &mut parsed.profile, &mut iter)?,
+            "--test-workspace" if !parsed.test_workspace => parsed.test_workspace = true,
             "--relaunched" => value("--relaunched", &mut parsed.relaunched, &mut iter)?,
             "--relaunch-result" => value("--relaunch-result", &mut parsed.result_file, &mut iter)?,
             "--profile-create" => value("--profile-create", &mut create, &mut iter)?,
@@ -168,12 +171,20 @@ fn take_arguments(arguments: &mut Vec<String>) -> Result<Arguments, String> {
             "--name" if create.is_some() => value("--name", &mut name, &mut iter)?,
             "--listen" if !parsed.listen => parsed.listen = true,
             "--profile-list" if !list => list = true,
-            "--listen" | "--profile-list" => return Err(format!("{argument} 只能出现一次。")),
+            "--listen" | "--profile-list" | "--test-workspace" => {
+                return Err(format!("{argument} 只能出现一次。"))
+            }
             _ => kept.push(argument),
         }
     }
     drop(iter);
     *arguments = kept;
+    if parsed.test_workspace {
+        if parsed.profile.is_some() {
+            return Err("--test-workspace 不能与 --profile 同用。".into());
+        }
+        parsed.profile = Some(TEST_ALIAS.into());
+    }
     let commands = usize::from(create.is_some()) + usize::from(reset.is_some()) + usize::from(list);
     if commands > 1 {
         return Err("--profile-create、--profile-reset 与 --profile-list 只能选一个。".into());
@@ -490,12 +501,55 @@ fn create_profile(
     seed: &Seed,
     name: Option<&str>,
 ) -> Result<Entry, String> {
+    let _lock = lock_catalog(root)?;
     let mut catalog = read_catalog(root)?;
     if catalog.find(alias).is_some() {
         return Err(format!(
             "配置档 {alias} 已存在；要恢复种子数据请用 --profile-reset {alias}。"
         ));
     }
+    insert_profile(root, &mut catalog, alias, seed, name)
+}
+
+fn lock_catalog(root: &Path) -> Result<std::fs::File, String> {
+    std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
+    let lock = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join("profiles.lock"))
+        .map_err(|error| format!("打开配置档目录锁失败：{error}"))?;
+    lock.lock()
+        .map_err(|error| format!("锁定配置档目录失败：{error}"))?;
+    Ok(lock)
+}
+
+fn testing_workspace(root: &Path) -> Result<Entry, String> {
+    let _lock = lock_catalog(root)?;
+    let mut catalog = read_catalog(root)?;
+    if let Some(entry) = catalog.find(TEST_ALIAS) {
+        if entry.kind != "test" {
+            return Err(format!("配置档 {TEST_ALIAS} 已用于其他用途。"));
+        }
+        return Ok(entry.clone());
+    }
+    insert_profile(
+        root,
+        &mut catalog,
+        TEST_ALIAS,
+        &Seed::Empty,
+        Some("本机测试"),
+    )
+}
+
+fn insert_profile(
+    root: &Path,
+    catalog: &mut Catalog,
+    alias: &str,
+    seed: &Seed,
+    name: Option<&str>,
+) -> Result<Entry, String> {
     let seed = match seed {
         Seed::Fixture(path) => Seed::Fixture(
             std::path::absolute(path)
@@ -512,13 +566,16 @@ fn create_profile(
         created_ms: now_ms(),
     };
     let directory = profile_dir(root, &entry.id);
-    if let Err(error) = seed_into(root, &catalog, &seed, &directory) {
+    let result = seed_into(root, catalog, &seed, &directory)
+        .and_then(|()| write_json(&directory.join("profile.json"), &entry))
+        .and_then(|()| {
+            catalog.profiles.push(entry.clone());
+            write_json(&catalog_path(root), catalog)
+        });
+    if let Err(error) = result {
         let _ = std::fs::remove_dir_all(&directory);
         return Err(error);
     }
-    write_json(&directory.join("profile.json"), &entry)?;
-    catalog.profiles.push(entry.clone());
-    write_json(&catalog_path(root), &catalog)?;
     Ok(entry)
 }
 
@@ -695,11 +752,16 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
     }
     let (config, startup) = match profile {
         Some(key) => {
-            let catalog = read_catalog(&root).unwrap_or_else(|message| exit_rejected(&message));
-            let entry = catalog.find(key).cloned().unwrap_or_else(|| {
-                let message = format!(
-                    "找不到配置档 {key}；先用 --profile-create {key} --type test 创建，或用 --profile-list 查看。"
-                );
+            let result = if parsed.test_workspace {
+                testing_workspace(&root)
+            } else {
+                read_catalog(&root).and_then(|catalog| {
+                    catalog.find(key).cloned().ok_or_else(|| {
+                        format!("找不到配置档 {key}；先用 --profile-create {key} --type test 创建，或用 --profile-list 查看。")
+                    })
+                })
+            };
+            let entry = result.unwrap_or_else(|message| {
                 #[cfg(windows)]
                 if interactive {
                     omnitrigger_windows::show_error_dialog("OmniTrigger", &message);
@@ -1187,6 +1249,32 @@ mod tests {
             pending_copy(vec![a, b], Some(100), &ignored).unwrap().0,
             "B"
         );
+    }
+
+    #[test]
+    fn shortcut_reuses_one_isolated_test_profile_even_on_concurrent_first_launch() {
+        let root = temp_root("testing-shortcut");
+        std::fs::write(root.join("bindings.json"), "daily").unwrap();
+        let ids = std::thread::scope(|scope| {
+            let first = scope.spawn(|| testing_workspace(&root).unwrap().id);
+            let second = testing_workspace(&root).unwrap().id;
+            (first.join().unwrap(), second)
+        });
+        assert_eq!(ids.0, ids.1);
+        let config = profile_dir(&root, &ids.0).join("bindings.json");
+        assert!(!config.exists());
+        std::fs::write(&config, "test").unwrap();
+        assert_eq!(testing_workspace(&root).unwrap().id, ids.0);
+        assert_eq!(std::fs::read_to_string(config).unwrap(), "test");
+        assert_eq!(
+            std::fs::read_to_string(root.join("bindings.json")).unwrap(),
+            "daily"
+        );
+        let parsed = take_arguments(&mut args(&["--test-workspace"])).unwrap();
+        assert_eq!(parsed.profile.as_deref(), Some(TEST_ALIAS));
+        assert!(!parsed.listen);
+        assert!(take_arguments(&mut args(&["--test-workspace", "--profile", "default"])).is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

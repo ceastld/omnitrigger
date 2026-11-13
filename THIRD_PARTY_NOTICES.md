@@ -79,6 +79,10 @@ Windows 发行流程通过 `scripts/collect-licenses.ps1` 从锁定目标的应�
 
 站点使用访问者系统中的字体，不分发字体文件，也不加载外部字体、统计或广告脚本。界面截图与社交预览图来自本项目程序和图标，按 MIT 提供；预览图中的文字由系统字体渲染为图像，不包含字体文件。
 
+## Windows 安装器
+
+Windows 安装程序由 Jordan Russell 与 Martijn Laan 的 Inno Setup 6 生成。安装器保留原有版权信息，所用版本的许可正文随安装写入 `licenses/inno-setup/license.txt`。[Inno Setup 项目](https://jrsoftware.org/isinfo.php)
+
 ## 界面设计预览
 
 `design/` 是开发用的界面设计预览，依赖 React 18.3.1 与 React DOM 18.3.1（MIT），开发工具为 Vite 7.3.7、`@vitejs/plugin-react` 5.1.4、`@types/react`、`@types/react-dom`（均为 MIT）与 TypeScript 5.9.3（Apache-2.0）。精确版本、下载来源与完整性以 `design/package-lock.json` 为准，已核对 npm 包声明的许可。这些依赖只在作者本机运行预览时安装，不进入 Windows 发行包、网站或 CI 构建产物。预览数据由应用导出，图标与配色来自本项目源码。
