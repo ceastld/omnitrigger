@@ -6,6 +6,8 @@
 
 这个入口使用 Node.js 和支持目标窗口校验的 EaClip 客户端及宿主。动作输入包含三个本机绝对路径：`cliExecutable`、`hostExecutable` 和 `dataRoot`。填写正在使用的 EaClip 数据目录即可继续访问其中的记录。程序与客户端可由 EaClip 源码中的 `host/Build-Standalone.ps1 -IncludeCli` 配套构建。
 
+已有三字段绑定默认连接日常剪贴板。要在 OmniTrigger 测试配置档验证同一个动作，在测试绑定的输入中增加 `"profile": "script-test"`，同时将 `dataRoot` 设为 EaClip 测试库。该模式需要支持私有测试实例的 Debug 宿主，测试库位于该宿主构建工作区的 `.tmp` 子目录。动作通过私有端点切换窗口并核对采集已关闭。从日常配置复制绑定时，外部程序和数据库的绝对路径会随绑定原样复制。
+
 ### 已运行宿主的脚本入口
 
 原有的脚本入口通过已有的 `script` 运行时调用本地 Rust CLI，再由对应宿主解释命令。它不包含原生程序、不安装或启动宿主、不注册触发器，也不会自行选择、迁移或改写数据根配置。

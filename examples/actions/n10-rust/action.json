@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "examples.n10-rust",
   "name": "N10 剪贴板适配",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "actions": [
     {
       "id": "32c12786-9bb8-4b0c-8d55-7e6a4c8a5d10",

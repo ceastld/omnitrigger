@@ -133,12 +133,16 @@ function expiredBeforeSubmit(errorCode = 'invalid_arguments') {
 }
 for (const started of [true, false]) {
   const { ctx, target } = fixture();
+  // 已安装的三字段调用没有 profile，仍连接日常实例。
+  if (started) delete ctx.input.profile;
   let count = 0;
   ctx.process.run = async (program, args) => {
     count++;
     assert.equal(program, ctx.input.cliExecutable);
     assert.equal(args[0], 'toggle');
     assert(!args.includes('--no-start'));
+    assert.equal(args[args.indexOf('--expected-data-root') + 1], ctx.input.dataRoot);
+    assert(!args.includes('--test-data-root'));
     assert.deepEqual(JSON.parse(args[args.indexOf('--target-context') + 1]), target);
     return { code: 0, stdout: JSON.stringify({ ok: true, state: 'accepted', result: {
       started, targetContextVerified: true, targetContextVersion: 1, testProfile: false,
@@ -147,6 +151,33 @@ for (const started of [true, false]) {
   };
   assert.deepEqual(await toggle(ctx), { accepted: true, started });
   assert.equal(count, 1);
+}
+{
+  const { ctx, trace } = fixture();
+  ctx.input.profile = 'other';
+  await assert.rejects(toggle(ctx), error => error.effectState === 'not_started');
+  assert.deepEqual(trace, []);
+}
+for (const [testProfile, captureEnabled] of [[true, false], [false, false], [true, true], [true, undefined]]) {
+  const { ctx } = fixture();
+  ctx.input.profile = 'script-test';
+  let runs = 0;
+  ctx.process.run = async (_program, args) => {
+    runs++;
+    assert.equal(args[args.indexOf('--test-data-root') + 1], ctx.input.dataRoot);
+    assert(!args.includes('--expected-data-root'));
+    if (runs === 1) return expiredBeforeSubmit();
+    return { code: 0, stdout: JSON.stringify({ ok: true, state: 'accepted', result: {
+      started: false, testProfile, captureEnabled, targetContextVerified: true, targetContextVersion: 1,
+      executable: ctx.input.hostExecutable, dataRoot: ctx.input.dataRoot,
+    } }) };
+  };
+  if (testProfile && captureEnabled === false) {
+    assert.deepEqual(await toggle(ctx), { accepted: true, started: false });
+  } else {
+    await assert.rejects(toggle(ctx), error => error.effectState === 'unknown');
+  }
+  assert.equal(runs, 2);
 }
 for (const errorCode of ['invalid_arguments', 'local_error']) {
   const { ctx, target } = fixture();
