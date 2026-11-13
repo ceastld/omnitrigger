@@ -9,15 +9,15 @@ use std::collections::HashMap;
 
 /// 绑定的持久化位置；测试用内存实现替换真实配置文件。
 pub trait BindingStore {
-    fn save(&mut self, bindings: &[Binding]) -> Result<(), String>;
+    fn save(&mut self, previous: &[Binding], bindings: &[Binding]) -> Result<(), String>;
 }
 
 /// 写入当前配置路径下的 `bindings.json`。
 pub struct SettingsFile;
 
 impl BindingStore for SettingsFile {
-    fn save(&mut self, bindings: &[Binding]) -> Result<(), String> {
-        settings::save(bindings)
+    fn save(&mut self, previous: &[Binding], bindings: &[Binding]) -> Result<(), String> {
+        settings::save(previous, bindings)
     }
 }
 
@@ -191,7 +191,9 @@ impl<S: BindingStore> TriggerService<S> {
 
     fn commit(&mut self, next: Vec<Binding>) -> Result<(), TriggerError> {
         settings::validate(&next).map_err(TriggerError::Invalid)?;
-        self.store.save(&next).map_err(TriggerError::Invalid)?;
+        self.store
+            .save(&self.bindings, &next)
+            .map_err(TriggerError::Invalid)?;
         self.bindings = next;
         Ok(())
     }
@@ -209,7 +211,7 @@ mod tests {
     }
 
     impl BindingStore for Memory {
-        fn save(&mut self, bindings: &[Binding]) -> Result<(), String> {
+        fn save(&mut self, _previous: &[Binding], bindings: &[Binding]) -> Result<(), String> {
             if let Some(error) = &self.fail {
                 return Err(error.clone());
             }

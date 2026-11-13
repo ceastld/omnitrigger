@@ -1196,8 +1196,8 @@ pub fn load() -> Result<Vec<Binding>, String> {
     }
 }
 
-pub fn save(bindings: &[Binding]) -> Result<(), String> {
-    save_to(&path(), bindings)
+pub fn save(previous: &[Binding], bindings: &[Binding]) -> Result<(), String> {
+    save_changes(&path(), previous, bindings)
 }
 
 /// 读取配置中的场景定义并合并展开，供轮盘槽位按场景筛选；不读取或校验触发器。
@@ -1230,11 +1230,39 @@ fn compile_definitions(settings: &Settings) -> Result<CompiledScenes, String> {
     scenes::compile(&settings.scenes, &settings.app_sets).map_err(|error| error.to_string())
 }
 
-fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
+fn save_changes(
+    destination: &Path,
+    previous: &[Binding],
+    bindings: &[Binding],
+) -> Result<(), String> {
     validate(bindings)?;
     for binding in bindings {
         check_scope_names(binding)?;
     }
+    let mut lock_name = destination
+        .file_name()
+        .ok_or("配置路径不可用")?
+        .to_os_string();
+    lock_name.push(".lock");
+    let lock_path = destination.with_file_name(lock_name);
+    if let Some(parent) = lock_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|error| format!("创建配置目录失败：{error}"))?;
+    }
+    // 文件本身会被原子替换。用固定的同级锁串行化不同窗口的读取、比较和写入。
+    let lock = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|error| format!("打开热键配置锁失败：{error}"))?;
+    lock.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => "另一窗口正在保存热键配置，请稍后重试。".into(),
+        std::fs::TryLockError::Error(error) => format!("锁定热键配置失败：{error}"),
+    })?;
     let original = match std::fs::read_to_string(destination) {
         // 不覆盖损坏或未来版本的配置；用户需要先明确修复原文件。
         Ok(original) => Some(original),
@@ -1242,10 +1270,15 @@ fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
         Err(error) => return Err(format!("读取原配置失败，原文件已保留：{error}")),
     };
     // 集合与场景只在配置文件中编辑，保存时沿用原文件中的定义。
-    let definitions = match &original {
-        Some(original) => decode_with_definitions(original)?.0,
-        None => Definitions::default(),
+    let (definitions, stored) = match &original {
+        Some(original) => decode_with_definitions(original)?,
+        None => (Definitions::default(), defaults()),
     };
+    if !same_bindings(&stored, previous) {
+        return Err(
+            "热键配置已在其他窗口或文件中修改，磁盘上的修改已保留。请重启当前实例后再编辑。".into(),
+        );
+    }
     let text = serde_json::to_vec_pretty(&Settings {
         version: CONFIG_VERSION,
         app_sets: definitions.app_sets,
@@ -1256,14 +1289,7 @@ fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
     // 写出的内容重新读取后须得到相同的组合与引用；集合在外部修改后不按新定义悄悄改变范围。
     let reread = decode(std::str::from_utf8(&text).map_err(|error| error.to_string())?)
         .map_err(|error| format!("{error}请重新加载配置后再保存，原文件已保留。"))?;
-    if reread.len() != bindings.len()
-        || reread.iter().zip(bindings).any(|(reread, binding)| {
-            // 比较合成后的范围与写出的引用原文；不比较读取时留下的展开快照。
-            reread.spec != binding.spec
-                || serde_json::to_value(BindingDto::from(reread)).ok()
-                    != serde_json::to_value(BindingDto::from(binding)).ok()
-        })
-    {
+    if !same_bindings(&reread, bindings) {
         return Err(
             "应用集合或场景定义已在外部修改，保存后范围会与当前配置不同；请重新加载配置后再保存，原文件已保留。"
                 .into(),
@@ -1277,6 +1303,16 @@ fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
         }
     }
     atomic_write(destination, &text)
+}
+
+fn same_bindings(left: &[Binding], right: &[Binding]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(a, b)| {
+            // 比较合成后的范围与持久化的引用原文，忽略读取时留下的展开快照。
+            a.spec == b.spec
+                && serde_json::to_value(BindingDto::from(a)).ok()
+                    == serde_json::to_value(BindingDto::from(b)).ok()
+        })
 }
 
 pub(crate) fn backup_legacy(
@@ -1355,6 +1391,14 @@ mod tests {
     use crate::system_action::AdjustmentTarget;
     use omnitrigger_core::{PointerRegion, ScreenCorner, ScreenEdge, ScreenRect, TriggerCondition};
     use serde_json::json;
+
+    fn save_to(destination: &Path, bindings: &[Binding]) -> Result<(), String> {
+        let previous = std::fs::read_to_string(destination)
+            .ok()
+            .and_then(|original| decode(&original).ok())
+            .unwrap_or_else(defaults);
+        save_changes(destination, &previous, bindings)
+    }
 
     fn encode(bindings: &[Binding]) -> String {
         serde_json::to_string(&Settings {
@@ -3050,6 +3094,55 @@ mod tests {
     }
 
     #[test]
+    fn stale_edit_preserves_external_changes_and_reopened_editor_can_save() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let loaded = defaults();
+        save_changes(&destination, &loaded, &loaded).unwrap();
+        let mut external = loaded.clone();
+        external[0].message = "外部修改".into();
+        let raw = encode(&external);
+        std::fs::write(&destination, &raw).unwrap();
+        let mut edited = loaded.clone();
+        edited[0].enabled = !edited[0].enabled;
+        assert!(save_changes(&destination, &loaded, &edited)
+            .unwrap_err()
+            .contains("已在其他窗口或文件中修改"));
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), raw);
+        let mut reopened = external.clone();
+        reopened[0].enabled = !reopened[0].enabled;
+        save_changes(&destination, &external, &reopened).unwrap();
+        assert_eq!(
+            decode(&std::fs::read_to_string(destination).unwrap()).unwrap(),
+            reopened
+        );
+    }
+
+    #[test]
+    fn only_one_editor_can_commit_from_the_same_baseline() {
+        let scratch = Scratch::new();
+        let destination = scratch.config();
+        let baseline = defaults();
+        let barrier = std::sync::Barrier::new(2);
+        let save = |title: &str| {
+            let mut changed = baseline.clone();
+            changed[0].message = title.into();
+            barrier.wait();
+            save_changes(&destination, &baseline, &changed).map(|()| changed)
+        };
+        let (first, second) = std::thread::scope(|s| {
+            let writer = s.spawn(|| save("窗口一"));
+            let other = save("窗口二");
+            (writer.join().unwrap(), other)
+        });
+        assert_ne!(first.is_ok(), second.is_ok());
+        assert_eq!(
+            decode(&std::fs::read_to_string(destination).unwrap()).unwrap(),
+            first.or(second).unwrap()
+        );
+    }
+
+    #[test]
     fn ui_browse_profile_fixture_stays_loadable() {
         let bindings = decode(include_str!(
             "../../../tests/fixtures/profiles/ui-browse/bindings.json"
@@ -4002,7 +4095,8 @@ mod tests {
             assert!(save_to(&destination, std::slice::from_ref(&valid)).is_err());
             assert_eq!(std::fs::read_to_string(&destination).unwrap(), original);
         }
-        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 1);
+        assert!(scratch.0.join("bindings.json.lock").is_file());
+        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 2);
     }
 
     #[test]
@@ -4036,7 +4130,8 @@ mod tests {
             decode(&std::fs::read_to_string(&destination).unwrap()).unwrap(),
             bindings
         );
-        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 2);
+        assert!(scratch.0.join("bindings.json.lock").is_file());
+        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 3);
     }
 
     fn local_binding() -> Binding {
@@ -4100,7 +4195,8 @@ mod tests {
             assert!(save_to(&destination, &expected).is_err());
             assert_eq!(std::fs::read(&destination).unwrap(), original.as_bytes());
         }
-        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 1);
+        assert!(scratch.0.join("bindings.json.lock").is_file());
+        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 2);
     }
 
     #[test]
@@ -4129,6 +4225,7 @@ mod tests {
             decode(&std::fs::read_to_string(&destination).unwrap()).unwrap(),
             expected
         );
-        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 2);
+        assert!(scratch.0.join("bindings.json.lock").is_file());
+        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 3);
     }
 }
