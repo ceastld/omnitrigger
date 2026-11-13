@@ -17,14 +17,14 @@
 便携版可完整解压 ZIP 后运行 `omnitrigger.exe`。安装器和 ZIP 的 SHA-256 都列在同一版的 `SHA256SUMS.txt` 中。
 
 ```powershell
-Get-FileHash .\OmniTrigger-0.2.0-windows-x86_64-setup.exe -Algorithm SHA256
+Get-FileHash .\OmniTrigger-0.2.1-windows-x86_64-setup.exe -Algorithm SHA256
 ```
 
 程序未经代码签名。关闭日常主窗口后，OmniTrigger 收至系统托盘，快捷键和轮盘继续工作。单击托盘图标可重新打开，右键选择“退出 OmniTrigger”可停止监听并退出。测试窗口关闭时直接退出。
 
 ## 检查与安装更新
 
-从 v0.1.0 升级时先运行新版安装器。v0.2.0 起可在日常窗口的“设置”页使用“应用更新”。
+从 v0.1.0 升级时先运行新版安装器。v0.2.1 起可在日常窗口的“设置”页使用“应用更新”。
 
 1. 点击左下角“设置”，在“应用更新”点击“检查更新”。没有新版时显示“当前已是最新版本”。
 2. 发现新版后查看版本与发布说明，点击“更新并重启”。下载在后台完成，显示下载进度，可继续使用应用。

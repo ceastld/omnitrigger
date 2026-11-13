@@ -77,15 +77,15 @@ jobs:
           $bindings = Join-Path $data 'bindings.json'
           Copy-Item examples/capslock-navigation.json $bindings
           $hash = (Get-FileHash $bindings).Hash
-          $shell = New-Object -ComObject WScript.Shell
+          $shell = New-Object -ComObject Shell.Application
           foreach ($round in 1..2) {
             $result = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -WindowStyle Hidden -PassThru -Wait
             if ($result.ExitCode) { throw "安装失败：$($result.ExitCode)" }
             $exe = Join-Path $app 'omnitrigger.exe'
             foreach ($name in @('OmniTrigger','OmniTrigger 测试')) {
-              $shortcut = $shell.CreateShortcut((Join-Path $menu "$name.lnk"))
+              $shortcut = $shell.Namespace($menu).ParseName("$name.lnk").GetLink
               $arguments = if ($name -eq 'OmniTrigger') { '' } else { '--test-workspace' }
-              if ($shortcut.TargetPath -ine $exe -or $shortcut.Arguments -cne $arguments) { throw "快捷方式错误：$name" }
+              if ($shortcut.Path -ine $exe -or $shortcut.Arguments -cne $arguments) { throw "快捷方式错误：$name，目标 $($shortcut.Path)，参数 $($shortcut.Arguments)" }
             }
             & $exe --test-workspace --check-config | Out-Host
             if ($LASTEXITCODE) { throw '测试配置档启动失败。' }

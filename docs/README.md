@@ -54,7 +54,7 @@
 | [安全说明](../SECURITY.md) | 报告漏洞、运行权限与配置隐私。 |
 | [开源与发布检查](RELEASING.md) | 公开源码与分发 Windows 程序前的检查。 |
 | [v0.1.0 发布说明](releases/v0.1.0.md) | 首个 Windows x64 预览版的功能、运行前提和验证范围。 |
-| [v0.2.0 发布说明](releases/v0.2.0.md) | Windows 安装器、日常与测试入口和配置保留。 |
+| [v0.2.1 发布说明](releases/v0.2.1.md) | Windows 安装器、日常与测试入口和配置保留。 |
 | [第三方通知](../THIRD_PARTY_NOTICES.md) | 第三方依赖、插件和分发许可说明。 |
 | [MIT 许可证](../LICENSE) | 项目自身代码、文档与资源的许可。 |
 
