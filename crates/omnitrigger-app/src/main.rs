@@ -822,6 +822,7 @@ struct Workspace {
     action_log: VecDeque<String>,
     triggers: service::TriggerService,
     error: Option<String>,
+    binding_reload_notice: Option<String>,
     action_error: Option<(u64, String)>,
     status: String,
     hits: VecDeque<Hit>,
@@ -1327,6 +1328,7 @@ impl Workspace {
                 .or(title_bar.clone().err())
                 .or(mouse_shortcut_dispatch_error.map(|error| error.message().to_owned())),
             action_error: None,
+            binding_reload_notice: None,
             status: if mode.owns_input_engine() && !listen {
                 "测试数据，未安装输入监听；需要验证真实输入时加 --listen 启动。".into()
             } else {
@@ -2199,12 +2201,7 @@ impl Workspace {
         ) {
             return false;
         }
-        self.executor.is_running(id)
-            || self.shortcut_executor.is_running(id)
-            || self.system_executor.is_running(id)
-            || self.local_executor.is_running(id)
-            || self.action_service.is_running(id)
-            || self.browser_executor.is_running(id)
+        self.action_running(id)
             || match action {
                 ActionSpec::Plugin(reference) => self
                     .plugins
@@ -2212,6 +2209,15 @@ impl Workspace {
                     .is_some_and(|group| self.executor.is_group_running(&group)),
                 _ => false,
             }
+    }
+
+    fn action_running(&self, id: u64) -> bool {
+        self.executor.is_running(id)
+            || self.shortcut_executor.is_running(id)
+            || self.system_executor.is_running(id)
+            || self.local_executor.is_running(id)
+            || self.action_service.is_running(id)
+            || self.browser_executor.is_running(id)
     }
 
     fn action_unavailable_reason(&self, action: &ActionSpec) -> Option<String> {
@@ -3674,7 +3680,7 @@ impl Workspace {
                 if let TriggerError::Conflict(conflict) = &error {
                     self.conflict = Some(conflict.clone());
                 }
-                self.error = Some(error.message());
+                self.binding_save_error(error);
             }
         }
         cx.notify();
@@ -3683,7 +3689,96 @@ impl Workspace {
     /// 服务层已提交绑定变更后，清除旧错误并同步输入后端。
     fn applied(&mut self) {
         self.error = None;
+        self.binding_reload_notice = None;
         self.sync_bindings();
+    }
+
+    fn binding_save_error(&mut self, error: TriggerError) {
+        match error {
+            TriggerError::ReloadRequired(message) => self.binding_reload_notice = Some(message),
+            error => self.error = Some(error.message()),
+        }
+    }
+
+    fn reload_bindings(&mut self, cx: &mut Context<Self>) {
+        if self.recording {
+            return;
+        }
+        if let Err(error) = self.apply_disk_bindings(cx) {
+            self.binding_reload_notice = Some(error);
+        }
+        cx.notify();
+    }
+
+    fn apply_disk_bindings(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let (bindings, scenes) = settings::reload_bindings_from(&settings::path())?;
+        for wheel in &self.wheels.wheels {
+            wheel_scenes::check_wheel(wheel, &scenes)
+                .map_err(|error| format!("轮盘“{}”：{error}", wheel.name))?;
+        }
+        let by_id: HashMap<_, _> = bindings
+            .iter()
+            .map(|binding| (binding.spec.id, binding))
+            .collect();
+        let mut retired: HashSet<_> = self
+            .triggers
+            .bindings()
+            .iter()
+            .filter(|old| by_id.get(&old.spec.id).copied() != Some(*old))
+            .map(|old| old.spec.id)
+            .collect();
+        // 外部新增的绑定可能刚好用了本进程留给轮盘槽位或录制草稿的编号。
+        retired.extend(
+            self.wheel_runtime_ids
+                .values()
+                .filter(|id| by_id.contains_key(id))
+                .copied(),
+        );
+        retired.extend(self.pending.as_ref().map(|spec| spec.id));
+        if retired.iter().any(|id| {
+            self.action_running(*id)
+                || self
+                    .mouse_shortcut_invocations
+                    .values()
+                    .any(|binding| binding == id)
+        }) {
+            return Err("待替换的动作仍在运行，请在动作结束后重新载入。".to_owned());
+        }
+        self.hide_wheel(cx);
+        self.close_gesture_choice(cx);
+        self.wheel_runtime_ids
+            .retain(|_, id| !by_id.contains_key(id));
+        self.wheel_source_binding = self
+            .wheel_source_binding
+            .filter(|id| by_id.contains_key(id));
+        self.selected = self
+            .selected
+            .filter(|id| by_id.contains_key(id))
+            .or_else(|| bindings.first().map(|binding| binding.spec.id));
+        self.triggers.replace_bindings(bindings);
+        self.wheel_scenes = scenes;
+        self.wheel_scenes_error = None;
+        self.clear_pending();
+        self.confirm_delete = None;
+        self.conflict = None;
+        self.preset_edit_id = None;
+        self.binding_reload_notice = None;
+        for id in retired {
+            self.cancel_mouse_shortcut_rule(id);
+            self.action_status.remove(&id);
+            if self
+                .action_error
+                .as_ref()
+                .is_some_and(|(failed, _)| *failed == id)
+            {
+                self.action_error = None;
+            }
+        }
+        self.load_selected_message(cx);
+        self.sync_bindings();
+        self.refresh_panel(cx);
+        self.status = "已载入磁盘上的热键配置。".into();
+        Ok(())
     }
 
     fn clear_pending(&mut self) {
@@ -3860,7 +3955,7 @@ impl Workspace {
         }
         match self.triggers.toggle(id) {
             Ok(_) => self.applied(),
-            Err(error) => self.error = Some(error.message()),
+            Err(error) => self.binding_save_error(error),
         }
         cx.notify();
     }
@@ -3887,7 +3982,7 @@ impl Workspace {
                 self.status = "触发器已删除。".into();
                 self.load_selected_message(cx);
             }
-            Err(error) => self.error = Some(error.message()),
+            Err(error) => self.binding_save_error(error),
         }
         cx.notify();
     }
@@ -4298,8 +4393,9 @@ impl Workspace {
                 .child(icon_tile(glyph, color, 30.))
         };
         if let Some(error) = self
-            .error
+            .binding_reload_notice
             .as_ref()
+            .or(self.error.as_ref())
             .or_else(|| self.action_error.as_ref().map(|(_, error)| error))
         {
             let offline = self.listener() == Listener::Offline;
@@ -4311,9 +4407,21 @@ impl Workspace {
                             .min_w_0()
                             .text_size(px(12.5))
                             .text_color(rgb(theme::DANGER_TEXT))
-                            .child(error.clone()),
+                            .child(if self.binding_reload_notice.is_some() {
+                                format!("{error} 重新载入会放弃未保存的热键编辑。")
+                            } else {
+                                error.clone()
+                            }),
                     )
-                    .child(if offline {
+                    .child(if self.binding_reload_notice.is_some() {
+                        small(button(
+                            "banner-reload-bindings",
+                            "重新载入",
+                            Tone::Secondary,
+                            !self.recording,
+                        ))
+                        .on_click(cx.listener(|this, _, _, cx| this.reload_bindings(cx)))
+                    } else if offline {
                         small(button(
                             "banner-rebuild",
                             "重建监听",

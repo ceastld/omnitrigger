@@ -18,6 +18,7 @@ use crate::external_action::ExternalAction;
 use crate::local_action::LocalAction;
 use crate::plugins::PluginActionRef;
 use crate::scenes::{self, CompiledScenes, ContextSource, SceneDefinitions};
+use crate::service::TriggerError;
 use crate::shortcut::ShortcutAction;
 use crate::system_action::SystemAdjustmentAction;
 use crate::trigger_conditions::ConditionDto;
@@ -960,7 +961,7 @@ pub fn path() -> PathBuf {
 }
 
 fn decode(text: &str) -> Result<Vec<Binding>, String> {
-    decode_with_definitions(text).map(|(_, bindings)| bindings)
+    decode_with_definitions(text).map(|snapshot| snapshot.bindings)
 }
 
 const DEFINITIONS_VERSION_ERROR: &str = "应用集合和场景需要版本 24 配置。";
@@ -972,8 +973,14 @@ struct Definitions {
     scenes: SceneDefinitions,
 }
 
+struct Snapshot {
+    definitions: Definitions,
+    bindings: Vec<Binding>,
+    compiled: CompiledScenes,
+}
+
 /// 解析配置并展开集合与场景引用；同时返回原文中的定义。
-fn decode_with_definitions(text: &str) -> Result<(Definitions, Vec<Binding>), String> {
+fn decode_with_definitions(text: &str) -> Result<Snapshot, String> {
     let settings = parse(text)?;
     let compiled = compile_definitions(&settings)?;
     let bindings = settings
@@ -982,13 +989,14 @@ fn decode_with_definitions(text: &str) -> Result<(Definitions, Vec<Binding>), St
         .map(|binding| binding.into_binding(settings.version, &settings.app_sets, &compiled))
         .collect::<Result<Vec<_>, _>>()?;
     validate(&bindings)?;
-    Ok((
-        Definitions {
+    Ok(Snapshot {
+        definitions: Definitions {
             app_sets: settings.app_sets,
             scenes: settings.scenes,
         },
         bindings,
-    ))
+        compiled,
+    })
 }
 
 /// 按实际名称写出的范围不能以 `@` 开头，否则重新读取时会被当作集合引用。
@@ -1196,7 +1204,14 @@ pub fn load() -> Result<Vec<Binding>, String> {
     }
 }
 
-pub fn save(previous: &[Binding], bindings: &[Binding]) -> Result<(), String> {
+/// 显式重载只接受可读取的文件。绑定和轮盘使用同一次读取的场景定义。
+pub fn reload_bindings_from(path: &Path) -> Result<(Vec<Binding>, CompiledScenes), String> {
+    let text = std::fs::read_to_string(path).map_err(|error| format!("读取配置失败：{error}"))?;
+    let snapshot = decode_with_definitions(&text)?;
+    Ok((snapshot.bindings, snapshot.compiled))
+}
+
+pub fn save(previous: &[Binding], bindings: &[Binding]) -> Result<(), TriggerError> {
     save_changes(&path(), previous, bindings)
 }
 
@@ -1234,14 +1249,14 @@ fn save_changes(
     destination: &Path,
     previous: &[Binding],
     bindings: &[Binding],
-) -> Result<(), String> {
+) -> Result<(), TriggerError> {
     validate(bindings)?;
     for binding in bindings {
         check_scope_names(binding)?;
     }
     let mut lock_name = destination
         .file_name()
-        .ok_or("配置路径不可用")?
+        .ok_or_else(|| "配置路径不可用".to_owned())?
         .to_os_string();
     lock_name.push(".lock");
     let lock_path = destination.with_file_name(lock_name);
@@ -1267,17 +1282,21 @@ fn save_changes(
         // 不覆盖损坏或未来版本的配置；用户需要先明确修复原文件。
         Ok(original) => Some(original),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(format!("读取原配置失败，原文件已保留：{error}")),
+        Err(error) => return Err(format!("读取原配置失败，原文件已保留：{error}").into()),
     };
     // 集合与场景只在配置文件中编辑，保存时沿用原文件中的定义。
     let (definitions, stored) = match &original {
-        Some(original) => decode_with_definitions(original)?,
+        Some(original) => {
+            let snapshot =
+                decode_with_definitions(original).map_err(TriggerError::ReloadRequired)?;
+            (snapshot.definitions, snapshot.bindings)
+        }
         None => (Definitions::default(), defaults()),
     };
     if !same_bindings(&stored, previous) {
-        return Err(
-            "热键配置已在其他窗口或文件中修改，磁盘上的修改已保留。请重启当前实例后再编辑。".into(),
-        );
+        return Err(TriggerError::ReloadRequired(
+            "热键配置已在其他窗口或文件中修改。".into(),
+        ));
     }
     let text = serde_json::to_vec_pretty(&Settings {
         version: CONFIG_VERSION,
@@ -1287,13 +1306,16 @@ fn save_changes(
     })
     .map_err(|e| e.to_string())?;
     // 写出的内容重新读取后须得到相同的组合与引用；集合在外部修改后不按新定义悄悄改变范围。
-    let reread = decode(std::str::from_utf8(&text).map_err(|error| error.to_string())?)
-        .map_err(|error| format!("{error}请重新加载配置后再保存，原文件已保留。"))?;
+    let reread = decode(std::str::from_utf8(&text).map_err(|error| error.to_string())?).map_err(
+        |error| {
+            TriggerError::ReloadRequired(format!("{error}请重新加载配置后再保存，原文件已保留。"))
+        },
+    )?;
     if !same_bindings(&reread, bindings) {
-        return Err(
+        return Err(TriggerError::ReloadRequired(
             "应用集合或场景定义已在外部修改，保存后范围会与当前配置不同；请重新加载配置后再保存，原文件已保留。"
                 .into(),
-        );
+        ));
     }
     if let Some(original) = &original {
         let settings: Settings =
@@ -1302,7 +1324,7 @@ fn save_changes(
             backup_legacy(destination, settings.version, original.as_bytes())?;
         }
     }
-    atomic_write(destination, &text)
+    atomic_write(destination, &text).map_err(Into::into)
 }
 
 fn same_bindings(left: &[Binding], right: &[Binding]) -> bool {
@@ -1397,7 +1419,7 @@ mod tests {
             .ok()
             .and_then(|original| decode(&original).ok())
             .unwrap_or_else(defaults);
-        save_changes(destination, &previous, bindings)
+        save_changes(destination, &previous, bindings).map_err(|error| error.message())
     }
 
     fn encode(bindings: &[Binding]) -> String {
@@ -3094,6 +3116,24 @@ mod tests {
     }
 
     #[test]
+    fn reload_requires_a_readable_file_and_tracks_external_repair() {
+        let scratch = Scratch::new();
+        let path = scratch.config();
+        assert!(reload_bindings_from(&path).is_err());
+        assert!(!path.exists());
+        std::fs::write(&path, "{").unwrap();
+        assert!(reload_bindings_from(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{");
+        let source = include_str!("../../../examples/literal-text.json");
+        std::fs::write(&path, source).unwrap();
+        assert_eq!(
+            reload_bindings_from(&path).unwrap().0,
+            decode(source).unwrap()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    }
+
+    #[test]
     fn stale_edit_preserves_external_changes_and_reopened_editor_can_save() {
         let scratch = Scratch::new();
         let destination = scratch.config();
@@ -3105,9 +3145,10 @@ mod tests {
         std::fs::write(&destination, &raw).unwrap();
         let mut edited = loaded.clone();
         edited[0].enabled = !edited[0].enabled;
-        assert!(save_changes(&destination, &loaded, &edited)
-            .unwrap_err()
-            .contains("已在其他窗口或文件中修改"));
+        assert!(matches!(
+            save_changes(&destination, &loaded, &edited),
+            Err(TriggerError::ReloadRequired(_))
+        ));
         assert_eq!(std::fs::read_to_string(&destination).unwrap(), raw);
         let mut reopened = external.clone();
         reopened[0].enabled = !reopened[0].enabled;

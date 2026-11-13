@@ -9,14 +9,14 @@ use std::collections::HashMap;
 
 /// 绑定的持久化位置；测试用内存实现替换真实配置文件。
 pub trait BindingStore {
-    fn save(&mut self, previous: &[Binding], bindings: &[Binding]) -> Result<(), String>;
+    fn save(&mut self, previous: &[Binding], bindings: &[Binding]) -> Result<(), TriggerError>;
 }
 
 /// 写入当前配置路径下的 `bindings.json`。
 pub struct SettingsFile;
 
 impl BindingStore for SettingsFile {
-    fn save(&mut self, previous: &[Binding], bindings: &[Binding]) -> Result<(), String> {
+    fn save(&mut self, previous: &[Binding], bindings: &[Binding]) -> Result<(), TriggerError> {
         settings::save(previous, bindings)
     }
 }
@@ -25,6 +25,7 @@ impl BindingStore for SettingsFile {
 pub enum TriggerError {
     NotFound(u64),
     Conflict(Conflict),
+    ReloadRequired(String),
     /// 配置校验或写入失败，原配置保持不变。
     Invalid(String),
     IdsExhausted,
@@ -35,9 +36,15 @@ impl TriggerError {
         match self {
             Self::NotFound(_) => "触发器已不存在，请刷新后重试。".into(),
             Self::Conflict(conflict) => format!("{}：{}", conflict.title, conflict.detail),
-            Self::Invalid(error) => error.clone(),
+            Self::Invalid(error) | Self::ReloadRequired(error) => error.clone(),
             Self::IdsExhausted => "触发器编号已用尽，无法添加新绑定。".into(),
         }
+    }
+}
+
+impl From<String> for TriggerError {
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
     }
 }
 
@@ -57,12 +64,7 @@ pub struct TriggerService<S = SettingsFile> {
 
 impl<S: BindingStore> TriggerService<S> {
     pub fn new(bindings: Vec<Binding>, store: S) -> Self {
-        let next_id = bindings
-            .iter()
-            .map(|binding| binding.spec.id)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1);
+        let next_id = Self::next_after(&bindings);
         Self {
             bindings,
             next_id,
@@ -73,6 +75,26 @@ impl<S: BindingStore> TriggerService<S> {
 
     pub fn bindings(&self) -> &[Binding] {
         &self.bindings
+    }
+
+    fn next_after(bindings: &[Binding]) -> Option<u64> {
+        bindings
+            .iter()
+            .map(|binding| binding.spec.id)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+    }
+
+    /// 载入已经校验的绑定，保留仍在使用的统计与本进程分配过的编号上界。
+    pub fn replace_bindings(&mut self, bindings: Vec<Binding>) {
+        self.next_id = self
+            .next_id
+            .zip(Self::next_after(&bindings))
+            .map(|(current, loaded)| current.max(loaded));
+        self.stats
+            .retain(|id, _| bindings.iter().any(|binding| binding.spec.id == *id));
+        self.bindings = bindings;
     }
 
     pub fn get(&self, id: u64) -> Option<&Binding> {
@@ -191,9 +213,7 @@ impl<S: BindingStore> TriggerService<S> {
 
     fn commit(&mut self, next: Vec<Binding>) -> Result<(), TriggerError> {
         settings::validate(&next).map_err(TriggerError::Invalid)?;
-        self.store
-            .save(&self.bindings, &next)
-            .map_err(TriggerError::Invalid)?;
+        self.store.save(&self.bindings, &next)?;
         self.bindings = next;
         Ok(())
     }
@@ -211,9 +231,13 @@ mod tests {
     }
 
     impl BindingStore for Memory {
-        fn save(&mut self, _previous: &[Binding], bindings: &[Binding]) -> Result<(), String> {
+        fn save(
+            &mut self,
+            _previous: &[Binding],
+            bindings: &[Binding],
+        ) -> Result<(), TriggerError> {
             if let Some(error) = &self.fail {
-                return Err(error.clone());
+                return Err(error.clone().into());
             }
             self.saved.push(bindings.to_vec());
             Ok(())
@@ -251,6 +275,25 @@ mod tests {
 
         let mut full = service(vec![binding(u64::MAX, 0x41)]);
         assert_eq!(full.allocate_id(), Err(TriggerError::IdsExhausted));
+    }
+
+    #[test]
+    fn reload_preserves_live_ids_and_counts_after_external_edits() {
+        let mut triggers = service(vec![binding(1, 0x41), binding(2, 0x42)]);
+        triggers.record_hit(1, "09:00:00".into());
+        triggers.record_hit(2, "09:00:01".into());
+        assert_eq!(triggers.allocate_id(), Ok(3));
+        triggers.replace_bindings(vec![binding(1, 0x41)]);
+        assert_eq!(triggers.stats(1).hits, 1);
+        assert_eq!(triggers.stats(2).hits, 0);
+        assert_eq!(triggers.allocate_id(), Ok(4));
+        triggers.replace_bindings(vec![binding(9, 0x43)]);
+        assert_eq!(triggers.allocate_id(), Ok(10));
+        assert_eq!(triggers.toggle(9), Ok(false));
+        assert_eq!(triggers.store.saved.len(), 1);
+        triggers.replace_bindings(vec![binding(u64::MAX, 0x44)]);
+        triggers.replace_bindings(Vec::new());
+        assert_eq!(triggers.allocate_id(), Err(TriggerError::IdsExhausted));
     }
 
     #[test]
