@@ -4,6 +4,7 @@ use omnitrigger_core::{
     MouseModifierPolicy, ProcessScope, RegistrationError, TriggerSpec, WheelDirection, WheelPolicy,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -22,7 +23,7 @@ use crate::service::TriggerError;
 use crate::shortcut::ShortcutAction;
 use crate::system_action::SystemAdjustmentAction;
 use crate::trigger_conditions::ConditionDto;
-use crate::wheels::WheelActionRef;
+use crate::wheels::{WheelActionRef, Wheels};
 use crate::window_action::WindowAction;
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -1197,11 +1198,23 @@ pub fn decode_for_tests(text: &str) -> Vec<Binding> {
 }
 
 pub fn load() -> Result<Vec<Binding>, String> {
-    match std::fs::read_to_string(path()) {
+    load_from(&path())
+}
+
+pub(super) fn load_from(config_path: &Path) -> Result<Vec<Binding>, String> {
+    match std::fs::read_to_string(config_path) {
         Ok(text) => decode(&text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(defaults()),
         Err(error) => Err(format!("读取配置失败：{error}")),
     }
+}
+
+/// 禁用绑定也保留呼出关系，和配置检查一致。
+pub(super) fn wheel_references(bindings: &[Binding]) -> impl Iterator<Item = (u64, &str)> {
+    bindings.iter().filter_map(|binding| match &binding.action {
+        ActionSpec::ShowWheel(reference) => Some((binding.spec.id, reference.wheel_id.as_str())),
+        _ => None,
+    })
 }
 
 /// 显式重载只接受可读取的文件。绑定和轮盘使用同一次读取的场景定义。
@@ -1278,6 +1291,19 @@ fn save_changes(
         return Err(TriggerError::ReloadRequired(
             "热键配置已在其他窗口或文件中修改。".into(),
         ));
+    }
+    // 删除轮盘也必须持有热键锁。只检查本次新增的引用，允许修复或保留旧配置中的失效引用。
+    let previous_refs: BTreeSet<_> = wheel_references(&stored).collect();
+    let added: Vec<_> = wheel_references(bindings)
+        .filter(|reference| !previous_refs.contains(reference))
+        .collect();
+    if !added.is_empty() {
+        let wheels = Wheels::load(destination)?;
+        for (binding_id, wheel_id) in added {
+            if !wheels.wheels.iter().any(|wheel| wheel.id == wheel_id) {
+                return Err(format!("触发器 #{binding_id} 引用的轮盘“{wheel_id}”不存在，请在轮盘页重新载入后选择可用轮盘。").into());
+            }
+        }
     }
     let text = serde_json::to_vec_pretty(&Settings {
         version: CONFIG_VERSION,
@@ -3224,6 +3250,70 @@ mod tests {
             decode(&std::fs::read_to_string(destination).unwrap()).unwrap(),
             first.or(second).unwrap()
         );
+    }
+
+    #[test]
+    fn wheel_reference_and_deletion_check_both_save_orders_in_the_same_profile() {
+        let scratch = Scratch::new();
+        let path = scratch.config();
+        let layout = Wheels::default();
+        let id = &layout.wheels[0].id;
+        let action = ActionSpec::ShowWheel(WheelActionRef {
+            wheel_id: id.clone(),
+        });
+        let baseline = defaults();
+        let mut bound = baseline.clone();
+        bound[0].action = action;
+        bound[0].enabled = false;
+        save_changes(&path, &baseline, &bound).unwrap();
+        assert!(!path.with_file_name("wheels.json").exists());
+
+        let empty = Wheels { wheels: vec![] };
+        let scenes = CompiledScenes::default();
+        let error = empty.save_changes(&path, &layout, &scenes).unwrap_err();
+        assert!(error.contains(id) && error.contains(&format!("#{}", bound[0].spec.id)));
+        assert!(!path.with_file_name("wheels.json").exists());
+
+        save_changes(&path, &bound, &baseline).unwrap();
+        empty.save_changes(&path, &layout, &scenes).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        assert!(save_changes(&path, &baseline, &bound)
+            .unwrap_err()
+            .message()
+            .contains(id));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(Wheels::load(&path).unwrap(), empty);
+    }
+
+    #[test]
+    fn old_missing_wheel_reference_can_be_preserved_or_repaired() {
+        let scratch = Scratch::new();
+        let path = scratch.config();
+        let mut old = defaults();
+        old[0].action = ActionSpec::ShowWheel(WheelActionRef {
+            wheel_id: "old-missing".into(),
+        });
+        std::fs::write(&path, encode(&old)).unwrap();
+        let mut retargeted = old.clone();
+        retargeted[0].action = ActionSpec::ShowWheel(WheelActionRef {
+            wheel_id: "other-missing".into(),
+        });
+        assert!(save_changes(&path, &old, &retargeted)
+            .unwrap_err()
+            .message()
+            .contains("other-missing"));
+        assert_eq!(load_from(&path).unwrap(), old);
+        let wheels_file = path.with_file_name("wheels.json");
+        std::fs::write(&wheels_file, b"{").unwrap();
+        let mut edited = old.clone();
+        edited[1].message = "另一条绑定更新".into();
+        save_changes(&path, &old, &edited).unwrap();
+        assert_eq!(load_from(&path).unwrap(), edited);
+        let mut repaired = edited.clone();
+        repaired.remove(0);
+        save_changes(&path, &edited, &repaired).unwrap();
+        assert_eq!(load_from(&path).unwrap(), repaired);
+        assert_eq!(std::fs::read(wheels_file).unwrap(), b"{");
     }
 
     #[test]

@@ -273,7 +273,7 @@ impl Wheels {
         Ok(())
     }
 
-    /// 引用场景时按热键、轮盘的顺序持锁，直到核对基线、备份和写入完成。
+    /// 删除轮盘或引用场景时按热键、轮盘的顺序持锁，直到核对基线、备份和写入完成。
     pub fn save_changes(
         &self,
         config_path: &Path,
@@ -292,10 +292,27 @@ impl Wheels {
             })
             .filter_map(|slot| slot.scene.as_deref())
             .collect();
-        let _bindings_lock = if referenced.is_empty() {
-            None
+        let removed: BTreeSet<_> = previous
+            .wheels
+            .iter()
+            .filter(|old| !self.wheels.iter().any(|wheel| wheel.id == old.id))
+            .map(|wheel| wheel.id.as_str())
+            .collect();
+        let _bindings_lock = if !removed.is_empty() || !referenced.is_empty() {
+            Some(crate::settings::lock_config(config_path, "热键")?)
         } else {
-            let lock = crate::settings::lock_config(config_path, "热键")?;
+            None
+        };
+        if !removed.is_empty() {
+            let bindings = crate::settings::load_from(config_path)
+                .map_err(|error| format!("无法核对待删除轮盘的呼出绑定：{error}"))?;
+            for (binding_id, wheel_id) in crate::settings::wheel_references(&bindings) {
+                if removed.contains(wheel_id) {
+                    return Err(format!("触发器 #{binding_id} 仍引用轮盘“{wheel_id}”，请先移除或更改对应的呼出绑定。"));
+                }
+            }
+        }
+        if !referenced.is_empty() {
             let current = crate::settings::load_scenes_from(config_path)
                 .map_err(|error| format!("读取轮盘引用的场景失败：{error} 请修复后重新载入。"))?;
             for name in referenced {
@@ -307,8 +324,7 @@ impl Wheels {
                     ));
                 }
             }
-            Some(lock)
-        };
+        }
         let destination = config_path.with_file_name("wheels.json");
         let _lock = crate::settings::lock_config(&destination, "轮盘")?;
         let (stored, legacy) = match std::fs::read_to_string(&destination) {
