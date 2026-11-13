@@ -14,9 +14,9 @@ use windows::{
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, DestroyMenu, IsIconic, IsWindowVisible, LoadIconW,
                 PostMessageW, RegisterWindowMessageW, SetForegroundWindow, ShowWindow,
-                TrackPopupMenu, IDI_APPLICATION, MF_STRING, SW_HIDE, SW_RESTORE, SW_SHOW,
-                TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
-                WM_NCDESTROY, WM_NULL,
+                TrackPopupMenu, ENDSESSION_CLOSEAPP, IDI_APPLICATION, MF_STRING, SW_HIDE,
+                SW_RESTORE, SW_SHOW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
+                WM_CLOSE, WM_CONTEXTMENU, WM_ENDSESSION, WM_NCDESTROY, WM_NULL, WM_QUERYENDSESSION,
             },
         },
     },
@@ -107,6 +107,12 @@ unsafe fn remove_tray(hwnd: HWND) {
     let _ = Shell_NotifyIconW(NIM_DELETE, &icon_data(hwnd));
 }
 
+/// 让下一条 WM_CLOSE 进入 GPUI 原有的宿主停机与 Hook 收尾路径。
+unsafe fn request_exit(hwnd: HWND) {
+    remove_tray(hwnd);
+    let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+}
+
 unsafe fn show_menu(hwnd: HWND, position: WPARAM) {
     let Ok(menu) = CreatePopupMenu() else { return };
     let items = AppendMenuW(menu, MF_STRING, OPEN, w!("打开主窗口"))
@@ -133,10 +139,8 @@ unsafe fn show_menu(hwnd: HWND, position: WPARAM) {
     match selection {
         OPEN => show_main(hwnd),
         EXIT => {
-            // 撤下托盘拦截后，把关闭请求交回 GPUI 的既有宿主停机与 Hook 收尾路径。
-            remove_tray(hwnd);
             show_main(hwnd);
-            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            request_exit(hwnd);
         }
         _ => {
             let _ = Shell_NotifyIconW(NIM_SETFOCUS, &icon_data(hwnd));
@@ -152,6 +156,19 @@ unsafe extern "system" fn tray_proc(
     _: usize,
     restart: usize,
 ) -> LRESULT {
+    if lp.0 as u32 & ENDSESSION_CLOSEAPP != 0 {
+        match msg {
+            // Restart Manager 的查询可能被取消。只有确认结束才撤下托盘。
+            WM_QUERYENDSESSION => return LRESULT(1),
+            WM_ENDSESSION => {
+                if wp.0 != 0 {
+                    request_exit(hwnd);
+                }
+                return LRESULT(0);
+            }
+            _ => {}
+        }
+    }
     if msg == CALLBACK && (lp.0 as u32 >> 16) == ICON_ID {
         match lp.0 as u16 as u32 {
             event if event == NIN_SELECT || event == (NIN_SELECT | NINF_KEY) => show_main(hwnd),
