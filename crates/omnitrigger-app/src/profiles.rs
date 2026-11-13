@@ -277,7 +277,7 @@ fn redirected_package(expected: &Path, actual: &Path, local_app_data: &Path) -> 
         return None;
     }
     let prefix = format!("{}\\Packages\\", normalize(local_app_data));
-    if actual.len() <= prefix.len() || !actual[..prefix.len()].eq_ignore_ascii_case(&prefix) {
+    if !actual.get(..prefix.len())?.eq_ignore_ascii_case(&prefix) {
         return None;
     }
     actual[prefix.len()..]
@@ -580,7 +580,8 @@ fn insert_profile(
 }
 
 /// 用记录的种子重建测试配置档；原目录整体移入 `backups\profile-reset\`。
-fn reset_profile(root: &Path, key: &str) -> Result<(Entry, PathBuf), String> {
+fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), String> {
+    let _lock = lock_catalog(root)?;
     let catalog = read_catalog(root)?;
     let entry = catalog
         .find(key)
@@ -595,16 +596,39 @@ fn reset_profile(root: &Path, key: &str) -> Result<(Entry, PathBuf), String> {
     let seed = Seed::parse(&entry.seed)?;
     let directory = profile_dir(root, &entry.id);
     let backup_root = root.join("backups").join("profile-reset");
-    let backup = backup_root.join(format!("{}-{}", entry.id, now_ms()));
+    let tag = format!("{}-{}-{}", entry.id, now_ms(), new_id());
+    let backup = backup_root.join(&tag);
+    let staging = backup_root.join(format!(".{tag}.tmp"));
     std::fs::create_dir_all(&backup_root)
         .map_err(|error| format!("创建 {} 失败：{error}", backup_root.display()))?;
-    if directory.exists() {
-        std::fs::rename(&directory, &backup)
-            .map_err(|error| format!("备份 {} 失败：{error}", directory.display()))?;
+    std::fs::create_dir(&staging)
+        .map_err(|error| format!("创建 {} 失败：{error}", staging.display()))?;
+    let result = (|| {
+        seed_into(root, &catalog, &seed, &staging)?;
+        write_json(&staging.join("profile.json"), &entry)?;
+        std::fs::create_dir_all(root.join("profiles")).map_err(|error| error.to_string())?;
+        let backed_up = match std::fs::rename(&directory, &backup) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(format!("备份 {} 失败：{error}", directory.display())),
+        };
+        if let Err(error) = std::fs::rename(&staging, &directory) {
+            if backed_up {
+                std::fs::rename(&backup, &directory).map_err(|restore| {
+                    format!(
+                        "重置失败：{error}；恢复原配置失败：{restore}。原配置位于 {}",
+                        backup.display()
+                    )
+                })?;
+            }
+            return Err(format!("替换 {} 失败：{error}", directory.display()));
+        }
+        Ok(backed_up.then_some(backup))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
     }
-    seed_into(root, &catalog, &seed, &directory)?;
-    write_json(&directory.join("profile.json"), &entry)?;
-    Ok((entry, backup))
+    result.map(|backup| (entry, backup))
 }
 
 fn list_profiles(root: &Path, source: RootSource) -> Result<serde_json::Value, String> {
@@ -1108,6 +1132,8 @@ mod tests {
             redirected_package(&root, Path::new(r"D:\linked\OmniTrigger"), local),
             None
         );
+        let chinese = PathBuf::from(format!("D:\\{}", "配置".repeat(10)));
+        assert_eq!(redirected_package(&root, &chinese, local), None);
     }
 
     #[test]
@@ -1176,7 +1202,7 @@ mod tests {
             "daily"
         );
         assert_eq!(
-            std::fs::read_to_string(backup.join("bindings.json")).unwrap(),
+            std::fs::read_to_string(backup.unwrap().join("bindings.json")).unwrap(),
             "edited"
         );
         assert!(reset_profile(&root, "missing").is_err());
@@ -1207,6 +1233,54 @@ mod tests {
         assert!(create_profile(&root, "ui", &Seed::Fixture(missing), None).is_err());
         assert!(read_catalog(&root).unwrap().profiles.is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn failed_reset_preserves_live_files_and_can_be_retried() {
+        let root = temp_root("reset-retry");
+        let fixture = root.join("fixture");
+        std::fs::create_dir(&fixture).unwrap();
+        std::fs::write(fixture.join("bindings.json"), "seed").unwrap();
+        let entry = create_profile(&root, "ui", &Seed::Fixture(fixture.clone()), None).unwrap();
+        let directory = profile_dir(&root, &entry.id);
+        std::fs::write(directory.join("bindings.json"), "edited").unwrap();
+        std::fs::write(directory.join("wheels.json"), "wheel").unwrap();
+        let moved = root.join("moved");
+        std::fs::rename(&fixture, &moved).unwrap();
+        assert!(reset_profile(&root, "ui").is_err());
+        assert_eq!(
+            std::fs::read(directory.join("bindings.json")).unwrap(),
+            b"edited"
+        );
+        assert_eq!(
+            std::fs::read(directory.join("wheels.json")).unwrap(),
+            b"wheel"
+        );
+        assert!(directory.join("profile.json").is_file());
+        assert_eq!(
+            std::fs::read_dir(root.join("backups/profile-reset"))
+                .unwrap()
+                .count(),
+            0
+        );
+        std::fs::rename(moved, fixture).unwrap();
+        let (_, backup) = reset_profile(&root, "ui").unwrap();
+        assert_eq!(
+            std::fs::read(directory.join("bindings.json")).unwrap(),
+            b"seed"
+        );
+        assert_eq!(
+            std::fs::read(backup.unwrap().join("wheels.json")).unwrap(),
+            b"wheel"
+        );
+        // 已登记的目录意外缺失时也能从种子恢复，回执只列真实备份。
+        std::fs::rename(&directory, root.join("displaced")).unwrap();
+        assert!(reset_profile(&root, "ui").unwrap().1.is_none());
+        assert_eq!(
+            std::fs::read(directory.join("bindings.json")).unwrap(),
+            b"seed"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

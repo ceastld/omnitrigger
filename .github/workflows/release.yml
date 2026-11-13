@@ -71,22 +71,40 @@ jobs:
           $app = Join-Path $env:LOCALAPPDATA 'Programs/OmniTrigger'
           $menu = Join-Path ([Environment]::GetFolderPath('Programs')) 'OmniTrigger'
           if (Test-Path $app) { throw '测试需要未安装的用户目录。' }
-          $data = Join-Path $env:RUNNER_TEMP 'omnitrigger-reinstall-data'
-          $env:OMNITRIGGER_HOME = $data
+          # 在独立的 Hosted Runner 上使用安装版的真实默认位置，才能发现误删用户数据的问题。
+          $data = Join-Path $env:LOCALAPPDATA 'OmniTrigger'
+          if ($env:OMNITRIGGER_HOME -or (Test-Path -LiteralPath $data)) { throw '验收需要全新的默认数据目录。' }
           $null = New-Item -ItemType Directory -Path $data
           $bindings = Join-Path $data 'bindings.json'
           Copy-Item examples/capslock-navigation.json $bindings
-          $hash = (Get-FileHash $bindings).Hash
+          $wheels = Join-Path $data 'wheels.json'
+          '{"version":6,"wheels":[{"id":"daily-wheel","name":"日常轮盘","slots":[{"label":"复制","action":{"kind":"send_shortcut","keys":[162,67]}}]}]}' | Set-Content -LiteralPath $wheels -Encoding utf8
+          $actions = New-Item -ItemType Directory -Path (Join-Path $data 'actions')
+          Copy-Item -LiteralPath examples/actions/line-text -Destination $actions.FullName -Recurse
+          $expected = @{}
+          foreach ($file in @($bindings, $wheels) + @(Get-ChildItem -LiteralPath $actions.FullName -File -Recurse | ForEach-Object FullName)) {
+            $expected[$file] = (Get-FileHash -LiteralPath $file).Hash
+          }
+          function Assert-ProfileFiles {
+            foreach ($file in $expected.Keys) {
+              if ((Get-FileHash -LiteralPath $file -ErrorAction Stop).Hash -ne $expected[$file]) { throw "配置已改变：$file" }
+            }
+          }
           $shell = New-Object -ComObject Shell.Application
           foreach ($round in 1..2) {
             $result = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -WindowStyle Hidden -PassThru -Wait
             if ($result.ExitCode) { throw "安装失败：$($result.ExitCode)" }
+            Assert-ProfileFiles
             $exe = Join-Path $app 'omnitrigger.exe'
             foreach ($name in @('OmniTrigger','OmniTrigger 测试')) {
               $shortcut = $shell.Namespace($menu).ParseName("$name.lnk").GetLink
               $arguments = if ($name -eq 'OmniTrigger') { '' } else { '--test-workspace' }
               if ($shortcut.Path -ine $exe -or $shortcut.Arguments -cne $arguments) { throw "快捷方式错误：$name，目标 $($shortcut.Path)，参数 $($shortcut.Arguments)" }
             }
+            & $exe --check-config | Out-Host
+            if ($LASTEXITCODE) { throw '日常热键或轮盘无效。' }
+            & $exe --check-action examples/actions/line-text/call.json | Out-Host
+            if ($LASTEXITCODE) { throw '日常扩展没有加载。' }
             & $exe --test-workspace --check-config | Out-Host
             if ($LASTEXITCODE) { throw '测试配置档启动失败。' }
             $entry = @((Get-Content (Join-Path $data 'profiles.json') -Raw | ConvertFrom-Json).profiles | Where-Object alias -eq 'testing')
@@ -94,13 +112,13 @@ jobs:
             $testConfig = Join-Path $data "profiles/$($entry[0].id)/bindings.json"
             if ($round -eq 1) {
               Copy-Item examples/literal-text.json $testConfig -Force
-              $testHash = (Get-FileHash $testConfig).Hash
+              foreach ($file in @($testConfig, (Join-Path $data 'profiles.json'))) {
+                $expected[$file] = (Get-FileHash -LiteralPath $file).Hash
+              }
             }
-            if ((Get-FileHash $testConfig).Hash -ne $testHash) { throw '测试配置未保留。' }
             $result = Start-Process -FilePath (Join-Path $app 'unins000.exe') -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -WindowStyle Hidden -PassThru -Wait
-            if ($result.ExitCode -or (Test-Path $exe) -or (Get-FileHash $bindings).Hash -ne $hash -or (Get-FileHash $testConfig).Hash -ne $testHash) {
-              throw '卸载或配置保留验证失败。'
-            }
+            if ($result.ExitCode -or (Test-Path $exe)) { throw '卸载失败。' }
+            Assert-ProfileFiles
           }
 
       - name: 准备对应版本的发布说明

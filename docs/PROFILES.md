@@ -85,7 +85,7 @@
 | --- | --- |
 | `--profile <别名或 ID>` | 使用指定配置档启动。别名不存在时报错退出，不隐式创建。 |
 | `--profile-create <别名> [--type test] [--seed <来源>] [--name <显示名>]` | 创建测试配置档后退出。来源为 `empty`（默认，即程序默认数据）、`fixture:<目录>`，或 `copy:<别名或 ID>`，`copy:default` 复制日常数据。合并仓库示例的 `examples` 来源尚未实现。 |
-| `--profile-reset <别名>` | 用创建时记录的来源重新生成数据；原目录整体移入 `backups\profile-reset\`。仅测试类型可用。 |
+| `--profile-reset <别名>` | 用创建时记录的来源重建测试配置档。新数据准备成功后才把原目录移入 `backups\profile-reset\`。模板缺失或读取失败时，现有配置仍可使用。 |
 | `--profile-list` | 以 JSON 输出所有配置档的 ID、别名、类型、目录与默认标记。 |
 
 - 别名限定为小写字母、数字和 `-`，在数据根内唯一。界面同样可以创建测试配置档，命令行与界面写同一份 `profiles.json`。
