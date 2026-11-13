@@ -8679,9 +8679,19 @@ fn main() {
     } else {
         None
     };
-    let workspace_instance = if arguments.len() == 1 {
+    // 更新器的成功和回滚入口都用原配置打开设置页。标准配置仍要占用其日常窗口身份。
+    let updater_settings = matches!(&arguments[1..], [config, _, page] if config == "--config" && page == "--settings")
+        && (std::env::var_os("OMNITRIGGER_UPDATE_HEALTH").is_some()
+            || std::env::var_os("OMNITRIGGER_UPDATE_ERROR").is_some());
+    let config_path = settings::path();
+    let workspace_instance = if arguments.len() == 1
+        || (updater_settings
+            && config_path
+                .file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json")))
+    {
         match profile_startup
-            .workspace_key(&settings::path())
+            .workspace_key(&config_path)
             .and_then(|key| omnitrigger_windows::WorkspaceInstance::open(&key))
         {
             Ok(Some(instance)) => Some(instance),
@@ -8734,12 +8744,9 @@ fn main() {
                         });
                     let main_window = gpui::Window::window_handle(&*window);
                     let tray_window = text_history_ui_window.filter(|_| {
-                        let reopened_by_updater = std::env::var_os("OMNITRIGGER_UPDATE_HEALTH")
-                            .is_some()
-                            || std::env::var_os("OMNITRIGGER_UPDATE_ERROR").is_some();
                         profile_startup.test_name.is_none()
                             && (arguments.iter().skip(1).all(|arg| arg == "--settings")
-                                || (appearance_settings && reopened_by_updater))
+                                || updater_settings)
                     });
                     let view = cx.new(|cx| {
                         let mut workspace = Workspace::new(
