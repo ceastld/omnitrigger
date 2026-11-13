@@ -108,7 +108,7 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Pop-Location
-          node --test tools/script-sdk-check/action-signal-types.test.mjs tools/script-sdk-check/script-project-write.test.mjs
+          node --test tools/script-sdk-check/action-signal-types.test.mjs tools/script-sdk-check/script-project-write.test.mjs tools/script-sdk-check/node-error-diagnostic.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check.mjs target/debug/omnitrigger.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

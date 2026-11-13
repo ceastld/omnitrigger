@@ -350,6 +350,30 @@ function run(program, args = [], options = {}) {
   });
 }
 
+// 保留Node提供的原始文件/行列，不将宿主帧重标成作者位置。
+function errorDiagnostic(error) {
+  const message = String(error?.message ?? error);
+  // 本机/SDK结构化错误沿用原消息合同；宿主实现栈不是作者源码位置。
+  if (typeof error?.code === 'string' && /^[a-zA-Z0-9_]{1,64}$/.test(error.code)
+      && (typeof error?.method === 'string' || ['not_started','unknown'].includes(error?.effectState))) {
+    return message.slice(0, 4096);
+  }
+  let stack;
+  try { stack = error?.stack; } catch { /* 栈访问失败仍保留原消息。 */ }
+  const text = (typeof stack === 'string' && stack ? stack : message).toWellFormed();
+  const limit = 4096;
+  if (text.length <= limit) return text;
+  const marker = '\n…（诊断已截断）\n';
+  const headLength = Math.floor((limit - marker.length) / 2);
+  let head = text.slice(0, headLength);
+  let tail = text.slice(-(limit - marker.length - headLength));
+  // 不把代理对切成非法JSON Unicode，保持Rust响应读取可解码。
+  const last = head.charCodeAt(head.length - 1), first = tail.charCodeAt(0);
+  if (last >= 0xD800 && last <= 0xDBFF) head = head.slice(0, -1);
+  if (first >= 0xDC00 && first <= 0xDFFF) tail = tail.slice(1);
+  return head + marker + tail;
+}
+
 function respond(result) {
   if (replied) return;
   replied = true;
@@ -418,7 +442,7 @@ try {
   if (request?.response_path && request?.invocation) {
     respond({ status: 'error', error: {
       code: typeof error?.code === 'string' && /^[a-zA-Z0-9_]{1,64}$/.test(error.code) ? error.code : 'script_failed',
-      message: String(error?.message ?? error).slice(0, 4096),
+      message: errorDiagnostic(error),
       ...(typeof error?.effectState === 'string' ? { effect_state: error.effectState } : {}),
       ...(typeof error?.method === 'string' ? { method: error.method } : {}),
       ...(Array.isArray(error?.requiredPermissions) ? { required_permissions: error.requiredPermissions } : {}),
