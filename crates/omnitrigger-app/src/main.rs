@@ -8266,6 +8266,36 @@ fn open_script_history_window(
     .map_err(|_| "无法创建历史窗口。".to_string())
 }
 
+fn check_config() -> Result<String, String> {
+    let bindings = settings::load()?;
+    settings::validate(&bindings)?;
+    let wheels = Wheels::load(&settings::path())?;
+    let scenes = settings::load_scenes()?;
+    for wheel in &wheels.wheels {
+        wheel_scenes::check_wheel(wheel, &scenes)
+            .map_err(|error| format!("轮盘“{}”：{error}", wheel.name))?;
+    }
+    for binding in &bindings {
+        if let ActionSpec::ShowWheel(reference) = &binding.action {
+            if !wheels
+                .wheels
+                .iter()
+                .any(|wheel| wheel.id == reference.wheel_id)
+            {
+                return Err(format!(
+                    "触发器 #{} 引用的轮盘“{}”不存在。",
+                    binding.spec.id, reference.wheel_id
+                ));
+            }
+        }
+    }
+    Ok(format!(
+        "配置有效，共 {} 条绑定：{}",
+        bindings.len(),
+        settings::path().display()
+    ))
+}
+
 fn main() {
     let mut arguments: Vec<_> = std::env::args().collect();
     if let Some(code) = explorer_context_helper::cli(&arguments) {
@@ -8465,34 +8495,8 @@ fn main() {
         .iter()
         .any(|argument| argument == "--check-config")
     {
-        match settings::load().and_then(|bindings| {
-            settings::validate(&bindings)?;
-            let wheels = Wheels::load(&settings::path())?;
-            let scenes = settings::load_scenes()?;
-            for wheel in &wheels.wheels {
-                wheel_scenes::check_wheel(wheel, &scenes)
-                    .map_err(|error| format!("轮盘“{}”：{error}", wheel.name))?;
-            }
-            for binding in &bindings {
-                if let ActionSpec::ShowWheel(reference) = &binding.action {
-                    if !wheels
-                        .wheels
-                        .iter()
-                        .any(|wheel| wheel.id == reference.wheel_id)
-                    {
-                        return Err(format!(
-                            "触发器 #{} 引用的轮盘“{}”不存在。",
-                            binding.spec.id, reference.wheel_id
-                        ));
-                    }
-                }
-            }
-            Ok(bindings.len())
-        }) {
-            Ok(count) => println!(
-                "配置有效，共 {count} 条绑定：{}",
-                settings::path().display()
-            ),
+        match check_config() {
+            Ok(message) => println!("{message}"),
             Err(error) => {
                 eprintln!("{error}");
                 std::process::exit(1);

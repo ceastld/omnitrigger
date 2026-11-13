@@ -720,7 +720,7 @@ struct Relayed {
 
 fn finish_command(result: Result<String, String>, result_file: Option<&str>) -> ! {
     let ok = result.is_ok();
-    let text = result.unwrap_or_else(|error| rejected(&error));
+    let text = result.unwrap_or_else(|error| error);
     if let Some(file) = result_file {
         let path = Path::new(file);
         let _ = write_json(path, &Relayed { ok, text });
@@ -753,21 +753,31 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
         exit_rejected("配置档命令不能与其他参数混用。");
     }
     let interactive = plain && parsed.command.is_none();
+    let check_config = matches!(&arguments[1..], [arg] if arg == "--check-config");
     let env_root = std::env::var_os("OMNITRIGGER_HOME").filter(|root| !root.is_empty());
-    if !parsed.any() && !interactive && env_root.is_none() {
+    if !parsed.any() && !interactive && !check_config && env_root.is_none() {
         // 未指定数据根的其他命令无需探测桌面或预先设置路径。
         return Startup::daily();
     }
     let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    if check_config && !parsed.any() && env_root.is_none() && local_app_data.is_none() {
+        return Startup::daily(); // 沿用 settings::path() 的临时目录回退。
+    }
     let (root, source) = resolve_root(
         parsed.data_root.as_deref(),
         env_root,
         local_app_data.clone(),
     )
     .unwrap_or_else(|message| exit_rejected(&message));
-    if plain {
+    if plain || check_config {
         #[cfg(windows)]
-        escape_redirect(&root, local_app_data.as_deref(), &parsed, &original);
+        escape_redirect(
+            &root,
+            local_app_data.as_deref(),
+            &parsed,
+            &original,
+            check_config,
+        );
     }
     if let Some(link) = &parsed.relaunched {
         let _ = std::fs::remove_file(link);
@@ -776,7 +786,8 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
         finish_command(
             std::fs::create_dir_all(&root)
                 .map_err(|error| format!("创建数据根 {} 失败：{error}", root.display()))
-                .and_then(|()| run_command(&root, source, command)),
+                .and_then(|()| run_command(&root, source, command))
+                .map_err(|error| rejected(&error)),
             parsed.result_file.as_deref(),
         );
     }
@@ -803,7 +814,7 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
                 if interactive {
                     omnitrigger_windows::show_error_dialog("OmniTrigger", &message);
                 }
-                exit_rejected(&message)
+                finish_command(Err(rejected(&message)), parsed.result_file.as_deref())
             });
             let test = entry.kind == "test";
             (
@@ -821,50 +832,97 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
     };
     if let Some(config) = config {
         if let Err(message) = crate::settings::use_path(config) {
-            exit_rejected(&message);
+            finish_command(Err(rejected(&message)), parsed.result_file.as_deref());
         }
+    }
+    if check_config {
+        finish_command(crate::check_config(), parsed.result_file.as_deref());
     }
     startup
 }
 
 #[cfg(windows)]
-fn fail_redirect(is_command: bool, message: &str) -> ! {
+fn fail_redirect(is_command: bool, result_file: Option<&str>, message: &str) -> ! {
     if is_command {
-        exit_rejected(message);
+        finish_command(Err(rejected(message)), result_file);
     }
     omnitrigger_windows::show_error_dialog("OmniTrigger 无法使用真实数据目录", message);
     std::process::exit(1);
 }
 
-/// 数据根被打包应用重定向时，经系统外壳重启自身；配置档命令等待新进程转交结果。
+/// 只读校验逐个检查将读取的现存文件。MSIX 可以在同一个目录内只重定向部分文件。
+#[cfg(windows)]
+fn redirected_check_file(
+    root: &Path,
+    parsed: &Arguments,
+    local: &Path,
+) -> Result<Option<String>, String> {
+    fn package(file: &Path, local: &Path) -> Result<Option<String>, String> {
+        if !file
+            .try_exists()
+            .map_err(|error| format!("检查 {} 失败：{error}", file.display()))?
+        {
+            return Ok(None);
+        }
+        let actual = omnitrigger_windows::final_file_path(file)?;
+        Ok(redirected_package(file, &actual, local))
+    }
+    let dir = match parsed.profile.as_deref().filter(|key| *key != DEFAULT_ID) {
+        Some(key) => {
+            if let Some(name) = package(&catalog_path(root), local)? {
+                return Ok(Some(name));
+            }
+            let catalog = read_catalog(root)?;
+            let Some(entry) = catalog.find(key) else {
+                if parsed.test_workspace {
+                    // 首次创建 testing 会写登记文件，沿用普通启动时的写入探针。
+                    std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
+                    let actual = omnitrigger_windows::probe_final_directory(root)?;
+                    return Ok(redirected_package(root, &actual, local));
+                }
+                return Ok(None);
+            };
+            profile_dir(root, &entry.id)
+        }
+        None => root.to_path_buf(),
+    };
+    for name in ["bindings.json", "wheels.json"] {
+        if let Some(name) = package(&dir.join(name), local)? {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
+}
+
+/// 数据根被打包应用重定向时，经系统外壳重启自身；命令等待新进程转交结果。
 #[cfg(windows)]
 fn escape_redirect(
     root: &Path,
     local_app_data: Option<&Path>,
     parsed: &Arguments,
     original: &[String],
+    check_config: bool,
 ) {
     let Some(local_app_data) = local_app_data else {
         return;
     };
-    let is_command = parsed.command.is_some();
-    if let Err(error) = std::fs::create_dir_all(root) {
-        fail_redirect(
-            is_command,
-            &format!("创建数据根 {} 失败：{error}", root.display()),
-        );
-    }
-    let actual = match omnitrigger_windows::probe_final_directory(root) {
-        Ok(actual) => actual,
-        Err(error) => fail_redirect(is_command, &error),
+    let is_command = parsed.command.is_some() || check_config;
+    let fail =
+        |message: &str| -> ! { fail_redirect(is_command, parsed.result_file.as_deref(), message) };
+    let redirected = if check_config {
+        redirected_check_file(root, parsed, local_app_data)
+    } else {
+        std::fs::create_dir_all(root)
+            .map_err(|error| format!("创建数据根 {} 失败：{error}", root.display()))
+            .and_then(|()| omnitrigger_windows::probe_final_directory(root))
+            .map(|actual| redirected_package(root, &actual, local_app_data))
     };
-    let Some(package) = redirected_package(root, &actual, local_app_data) else {
+    let Some(package) = redirected.unwrap_or_else(|error| fail(&error)) else {
         return;
     };
     if parsed.relaunched.is_some() {
-        fail_redirect(is_command, &format!(
-            "当前进程仍处在打包应用 {package} 的文件重定向中，读写的是：\n{}\n\n真实数据目录：\n{}\n\n请从开始菜单或资源管理器启动 OmniTrigger，或用 --data-root 显式指定数据目录。",
-            actual.display(),
+        fail(&format!(
+            "当前进程仍处在打包应用 {package} 的文件重定向中。\n\n预期数据目录：\n{}\n\n请从开始菜单或资源管理器启动 OmniTrigger，或用 --data-root 显式指定数据目录。",
             root.display()
         ));
     }
@@ -872,13 +930,21 @@ fn escape_redirect(
         .and_then(std::path::absolute)
         .map_err(|error| error.to_string())
         .and_then(|path| omnitrigger_windows::final_file_path(&path))
-        .unwrap_or_else(|error| fail_redirect(is_command, &format!("无法确定程序路径：{error}")));
+        .unwrap_or_else(|error| fail(&format!("无法确定程序路径：{error}")));
     let scratch = std::env::temp_dir().join("OmniTrigger");
     let _ = std::fs::create_dir_all(&scratch);
     let tag = format!("{}-{}", std::process::id(), now_ms());
     let link = scratch.join(format!("relaunch-{tag}.lnk"));
     let result_file = scratch.join(format!("relaunch-{tag}.json"));
     let mut forwarded = parsed.forwarded(original);
+    if check_config {
+        // 外壳使用自己的工作目录与环境，转交调用者已经解析好的绝对数据根。
+        if let Some(index) = forwarded.iter().position(|arg| arg == "--data-root") {
+            forwarded[index + 1] = root.to_string_lossy().into_owned();
+        } else {
+            forwarded.extend(["--data-root".into(), root.to_string_lossy().into_owned()]);
+        }
+    }
     forwarded.extend(["--relaunched".into(), link.to_string_lossy().into_owned()]);
     if is_command {
         forwarded.extend([
@@ -896,7 +962,7 @@ fn escape_redirect(
         &working,
         &link,
     ) {
-        fail_redirect(is_command, &error);
+        fail(&error);
     }
     if !is_command {
         std::process::exit(0);
