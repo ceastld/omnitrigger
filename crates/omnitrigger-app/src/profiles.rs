@@ -464,32 +464,66 @@ pub(crate) fn seed_sources_for_config(config: &Path) -> Vec<PathBuf> {
     let Ok(catalog) = read_catalog(root) else {
         return Vec::new();
     };
-    let Some(mut entry) = catalog
+    let Some(entry) = catalog
         .profiles
         .iter()
         .find(|entry| entry.is_test_at(&directory))
     else {
         return Vec::new();
     };
-    let mut seen = BTreeSet::from([normalize(&directory).to_lowercase()]);
+    // TEMP、8.3 短名或目录联接可能让调用者使用另一条数据根路径。只从已经
+    // 核对身份的目标档推导这个别名，不打开可能已移走的种子目录。
+    let supplied = std::path::absolute(config).ok();
+    let root_alias = supplied
+        .as_deref()
+        .and_then(Path::parent)
+        .filter(|dir| entry.is_test_at(dir))
+        .and_then(Path::parent)
+        .filter(|dir| {
+            dir.file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("profiles"))
+        })
+        .and_then(Path::parent)
+        .filter(|alias| !normalize(alias).eq_ignore_ascii_case(&normalize(root)));
+    trace_seed_sources(root, root_alias, &catalog, entry)
+}
+
+fn trace_seed_sources<'a>(
+    root: &Path,
+    root_alias: Option<&Path>,
+    catalog: &'a Catalog,
+    mut entry: &'a Entry,
+) -> Vec<PathBuf> {
+    let mut seen = BTreeSet::from([normalize(&profile_dir(root, &entry.id)).to_lowercase()]);
+    if let Some(alias) = root_alias {
+        seen.insert(normalize(&profile_dir(alias, &entry.id)).to_lowercase());
+    }
     let mut sources = Vec::new();
     loop {
-        let (path, upstream) = match Seed::parse(&entry.seed) {
+        let (path, alias, upstream) = match Seed::parse(&entry.seed) {
             Ok(Seed::Empty) => break,
-            Ok(Seed::Copy(key)) if key == DEFAULT_ID => (root.to_path_buf(), None),
+            Ok(Seed::Copy(key)) if key == DEFAULT_ID => {
+                (root.to_path_buf(), root_alias.map(Path::to_path_buf), None)
+            }
             Ok(Seed::Copy(key)) => {
                 let Some(source) = catalog.source_profile(&key) else {
                     return Vec::new();
                 };
-                (profile_dir(root, &source.id), Some(source))
+                (
+                    profile_dir(root, &source.id),
+                    root_alias.map(|alias| profile_dir(alias, &source.id)),
+                    Some(source),
+                )
             }
-            Ok(Seed::Fixture(path)) if path.is_absolute() => (path, None),
+            Ok(Seed::Fixture(path)) if path.is_absolute() => (path, None, None),
             _ => return Vec::new(),
         };
-        if !seen.insert(normalize(&path).to_lowercase()) {
-            return Vec::new();
+        for candidate in std::iter::once(path).chain(alias) {
+            if !seen.insert(normalize(&candidate).to_lowercase()) {
+                return Vec::new();
+            }
+            sources.push(candidate);
         }
-        sources.push(path);
         let Some(source) = upstream else { break };
         entry = source;
     }
@@ -1489,25 +1523,41 @@ mod tests {
         let empty_copy =
             create_profile(&root, "empty-copy", &Seed::Copy(empty.id.clone()), None).unwrap();
         let config = |id: &str| profile_dir(&root, id).join("bindings.json");
+        let registered = |at: &Path| {
+            let relative = at.strip_prefix(&canonical).unwrap();
+            let mut paths = vec![at.to_path_buf()];
+            if !normalize(&root).eq_ignore_ascii_case(&normalize(&canonical)) {
+                paths.push(root.join(relative));
+            }
+            paths
+        };
         assert_eq!(
             seed_sources_for_config(&config(&base.id)),
-            [canonical.clone()]
+            registered(&canonical)
         );
         assert!(seed_sources_for_config(&config(&empty.id)).is_empty());
         assert_eq!(
             seed_sources_for_config(&config(&empty_copy.id)),
-            [profile_dir(&canonical, &empty.id)]
+            registered(&profile_dir(&canonical, &empty.id))
         );
         // 源目录已移动也可识别旧状态中的源路径。
         std::fs::rename(profile_dir(&root, &base.id), root.join("moved-base")).unwrap();
         std::fs::rename(&fixture, root.join("moved-fixture")).unwrap();
         assert_eq!(
             seed_sources_for_config(&config(&from_base.id)),
-            [profile_dir(&canonical, &base.id), canonical.clone()]
+            [
+                registered(&profile_dir(&canonical, &base.id)),
+                registered(&canonical)
+            ]
+            .concat()
         );
         assert_eq!(
             seed_sources_for_config(&config(&fixture_copy.id)),
-            [profile_dir(&canonical, &from_fixture.id), fixture]
+            [
+                registered(&profile_dir(&canonical, &from_fixture.id)),
+                vec![fixture]
+            ]
+            .concat()
         );
         assert!(seed_sources_for_config(&root.join("bindings.json")).is_empty());
         let unregistered = profile_dir(&root, &from_base.alias);
@@ -1530,6 +1580,16 @@ mod tests {
         let second = create_profile(&root, "second", &Seed::Copy(first.id.clone()), None).unwrap();
         let config = profile_dir(&root, &second.id).join("bindings.json");
         let mut catalog = read_catalog(&root).unwrap();
+        let alternate = root.with_file_name("alternate-root-name");
+        assert_eq!(
+            trace_seed_sources(&root, Some(&alternate), &catalog, &second),
+            [
+                profile_dir(&root, &first.id),
+                profile_dir(&alternate, &first.id)
+            ]
+        );
+        catalog.profiles[0].seed = Seed::Fixture(profile_dir(&alternate, &first.id)).record();
+        assert!(trace_seed_sources(&root, Some(&alternate), &catalog, &second).is_empty());
         for seed in [
             Seed::Copy(first.id.clone()),
             Seed::Copy(second.alias.clone()),
@@ -1538,7 +1598,7 @@ mod tests {
         ] {
             catalog.profiles[0].seed = seed.record();
             write_json(&catalog_path(&root), &catalog).unwrap();
-            assert!(seed_sources_for_config(&config).is_empty());
+            assert!(seed_sources_for_config(&config).is_empty(), "{seed:?}");
         }
         std::fs::remove_dir_all(root).unwrap();
     }
