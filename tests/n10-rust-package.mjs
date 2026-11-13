@@ -127,6 +127,10 @@ const dailyAction = manifest.actions.find(item => item.id === 'toggle');
 assert.equal(dailyAction.runtime, 'node');
 assert.equal(dailyAction.single_instance, true);
 const { default: toggle } = await import(pathToFileURL(path.join(packageRoot, dailyAction.entry)));
+function expiredBeforeSubmit(errorCode = 'invalid_arguments') {
+  return { code: 2, stdout: JSON.stringify({ ok: false, state: 'failed', submitted: false,
+    error: { code: errorCode, message: 'invalid_or_expired_target' } }) };
+}
 for (const started of [true, false]) {
   const { ctx, target } = fixture();
   let count = 0;
@@ -144,12 +148,50 @@ for (const started of [true, false]) {
   assert.deepEqual(await toggle(ctx), { accepted: true, started });
   assert.equal(count, 1);
 }
+for (const errorCode of ['invalid_arguments', 'local_error']) {
+  const { ctx, target } = fixture();
+  const first = { ...target, expires_at_unix_ms: Date.now() - 1 };
+  const fresh = { ...target, expires_at_unix_ms: Date.now() + 29_000 };
+  const snapshots = [first, fresh];
+  ctx.desktop.targetContext = () => snapshots.shift();
+  const sent = [];
+  ctx.process.run = async (_program, args) => {
+    sent.push(JSON.parse(args[args.indexOf('--target-context') + 1]));
+    if (sent.length === 1) return expiredBeforeSubmit(errorCode);
+    return { code: 0, stdout: JSON.stringify({ ok: true, state: 'accepted', result: {
+      started: false, targetContextVerified: true, targetContextVersion: 1, testProfile: false,
+      executable: ctx.input.hostExecutable, dataRoot: ctx.input.dataRoot,
+    } }) };
+  };
+  assert.deepEqual(await toggle(ctx), { accepted: true, started: false });
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[0], first);
+  assert(sent[1].expires_at_unix_ms > Date.now() && sent[1].expires_at_unix_ms <= fresh.expires_at_unix_ms);
+  assert.deepEqual({ ...sent[1], expires_at_unix_ms: fresh.expires_at_unix_ms }, fresh);
+}
+{
+  const { ctx, target } = fixture();
+  const snapshots = [target, { ...target, process_created_file_time: '555' }];
+  ctx.desktop.targetContext = () => snapshots.shift();
+  let runs = 0;
+  ctx.process.run = async () => { runs++; return expiredBeforeSubmit(); };
+  await assert.rejects(toggle(ctx), error => error.effectState === 'not_started');
+  assert.equal(runs, 1);
+}
+{
+  const { ctx } = fixture();
+  let runs = 0;
+  ctx.process.run = async () => { runs++; return expiredBeforeSubmit(); };
+  await assert.rejects(toggle(ctx), error => error.effectState === 'not_started');
+  assert.equal(runs, 2);
+}
 {
   const { ctx } = fixture();
   let count = 0;
   ctx.process.run = async () => {
     count++;
-    return { code: 4, stdout: JSON.stringify({ ok: false, submitted: true, state: 'unknown' }) };
+    return { code: 4, stdout: JSON.stringify({ ok: false, submitted: true, state: 'unknown',
+      error: { code: 'remote_error', message: 'invalid_or_expired_target' } }) };
   };
   await assert.rejects(toggle(ctx), error => error.effectState === 'unknown');
   assert.equal(count, 1);

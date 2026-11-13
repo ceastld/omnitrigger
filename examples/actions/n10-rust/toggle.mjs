@@ -15,21 +15,39 @@ function fault(message, effectState) {
   return Object.assign(new Error(message), { code: 'clipboard_toggle_failed', effectState });
 }
 
+async function runToggle(ctx, target) {
+  const { cliExecutable, hostExecutable, dataRoot } = ctx.input;
+  // 给不同进程的时钟留出余量，且只缩短宿主签发的有效期。
+  const expires = Math.min(target.expires_at_unix_ms, Date.now() + 20_000);
+  const args = ['toggle', '--host', hostExecutable, '--expected-data-root', dataRoot,
+    '--target-context', JSON.stringify({ ...target, expires_at_unix_ms: expires }),
+    '--timeout-ms', '15000', '--json'];
+  // run 允许按需启动的独立剪贴板在本次调用结束后继续采集。
+  const { code, stdout } = await ctx.process.run(cliExecutable, args, { allowNonZero: true });
+  try {
+    return { code, reply: JSON.parse(stdout) };
+  } catch {
+    throw fault('未能读取剪贴板回执。', 'unknown');
+  }
+}
+
 export default async function toggle(ctx) {
   const { cliExecutable, hostExecutable, dataRoot } = ctx.input ?? {};
   if (![cliExecutable, hostExecutable, dataRoot].every(localPath)) {
     throw fault('剪贴板客户端、宿主和数据目录需要完整本机路径。', 'not_started');
   }
-  const target = await ctx.desktop.targetContext();
-  const args = ['toggle', '--host', hostExecutable, '--expected-data-root', dataRoot,
-    '--target-context', JSON.stringify(target), '--timeout-ms', '15000', '--json'];
-  // run 允许按需启动的独立剪贴板在本次调用结束后继续采集。
-  const { code, stdout } = await ctx.process.run(cliExecutable, args, { allowNonZero: true });
-  let reply;
-  try {
-    reply = JSON.parse(stdout);
-  } catch {
-    throw fault('未能读取剪贴板回执。', 'unknown');
+  const original = await ctx.desktop.targetContext();
+  let { code, reply } = await runToggle(ctx, original);
+  if (code !== 0 && reply?.ok === false && reply.state === 'failed' && reply.submitted === false &&
+      ['invalid_arguments', 'local_error'].includes(reply.error?.code) &&
+      reply.error.message === 'invalid_or_expired_target') {
+    // targetContext 会重新核验本次按键捕获的窗口，再签发短时快照。
+    const fresh = await ctx.desktop.targetContext();
+    if (!['window_handle', 'process_id', 'thread_id', 'process_created_file_time']
+      .every(field => original[field] === fresh[field])) {
+      throw fault('原目标窗口已改变，请在需要粘贴的窗口重新按热键。', 'not_started');
+    }
+    ({ code, reply } = await runToggle(ctx, fresh));
   }
   if (code !== 0 || reply?.ok !== true) {
     throw fault(reply?.error?.message || '剪贴板未确认切换。',
