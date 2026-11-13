@@ -246,7 +246,7 @@ fn run(directory: &Path) -> Result<(), String> {
             )
             .expect("创建隐藏验收宿主");
             crate::message_input::init(cx);
-            crate::script_ui::init(cx);
+            crate::script_ui::init(false, cx);
             thread::spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     exercise(&root, host_path, &sender, &worker_hits, &worker_samples)

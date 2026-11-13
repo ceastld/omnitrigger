@@ -15,6 +15,7 @@ const MAX_ACTIONS_PER_PACKAGE: usize = 128;
 pub struct CatalogAction {
     pub package_id: String,
     pub package_name: String,
+    pub package_version: String,
     pub definition: ActionDefinition,
 }
 
@@ -144,6 +145,7 @@ impl PackageCatalog {
                         self.actions.push(CatalogAction {
                             package_id: manifest.id.clone(),
                             package_name: manifest.name.clone(),
+                            package_version: manifest.version.clone(),
                             definition: entry.definition.clone(),
                         });
                         self.entries

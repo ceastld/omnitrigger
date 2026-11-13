@@ -36,6 +36,58 @@ pub fn service(config: &Path) -> ActionService {
     ActionService::new(catalog, runtimes)
 }
 
+/// 复制配置档会保留外部程序的绝对路径。只为项目提供的两个 N10 入口解释这些路径。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ClipboardRoute {
+    Package,
+    WorkspaceHistory,
+}
+
+pub(super) fn clipboard_route(
+    test_data: bool,
+    call: &ActionCall,
+    catalog: &PackageCatalog,
+) -> Result<ClipboardRoute, omnitrigger_actions::ActionError> {
+    const VERB: &str = "32c12786-9bb8-4b0c-8d55-7e6a4c8a5d10";
+    if !test_data
+        || call.package_id != "examples.n10-rust"
+        || !matches!(call.action_id.as_str(), "toggle" | VERB)
+    {
+        return Ok(ClipboardRoute::Package);
+    }
+    let rejected = |message| {
+        let mut error = omnitrigger_actions::ActionError::new("test_clipboard_profile", message);
+        error.effect_state = Some("not_started".into());
+        error
+    };
+    call.validate()?;
+    if call.action_version != 1 {
+        return Err(rejected("当前测试档尚不支持此剪贴板动作版本。"));
+    }
+    let profile = call.input.get("profile");
+    let test_profile = profile.is_some_and(|value| value == "script-test");
+    if test_profile {
+        // 0.2.0 的 toggle 会忽略 profile，仍然向日常宿主发送命令。业务指令从第一版即支持测试端点。
+        if call.action_id == "toggle"
+            && catalog.actions.iter().any(|entry| {
+                entry.package_id == call.package_id
+                    && entry.definition.id == call.action_id
+                    && !semver::Version::parse(&entry.package_version)
+                        .is_ok_and(|version| version >= semver::Version::new(0, 3, 0))
+            })
+        {
+            return Err(rejected(
+                "请将本测试档的 N10 动作包更新到 0.3.0 或更高版本，再连接独立测试库。",
+            ));
+        }
+        return Ok(ClipboardRoute::Package);
+    }
+    if call.action_id == "toggle" && profile.is_none_or(|value| value == "product") {
+        return Ok(ClipboardRoute::WorkspaceHistory);
+    }
+    Err(rejected("如需在测试档中操作外部剪贴板，请将动作输入的 profile 设为 script-test，并将 dataRoot 设为独立测试库。"))
+}
+
 pub(super) fn components(config: &Path) -> (PackageCatalog, RuntimeRegistry) {
     let mut catalog = PackageCatalog::load(&root(config));
     let mut runtimes = RuntimeRegistry::new();
@@ -132,7 +184,7 @@ fn catalog_json(service: &ActionService) -> Result<String, omnitrigger_actions::
 }
 
 /// 校验与运行共用服务；读清单不会导入 JS，也不安装 Hook。
-pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
+pub fn cli(arguments: &[String], test_data: bool) -> Option<Result<String, String>> {
     let install = arguments
         .iter()
         .position(|arg| arg == "--install-script-runtime");
@@ -226,6 +278,18 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
         }
         let call: ActionCall = serde_json::from_slice(&bytes)
             .map_err(|error| request_error(format!("动作调用格式有误：{error}")))?;
+        let service = service(&settings::path());
+        if clipboard_route(test_data, &call, service.catalog()).map_err(rejected)?
+            == ClipboardRoute::WorkspaceHistory
+        {
+            if check.is_some() {
+                return Ok(serde_json::json!({"valid":true,"call":call,"handler":"workspace_text_history"}).to_string());
+            }
+            return Err(rejected(omnitrigger_actions::ActionError::new(
+                "ui_unavailable",
+                "此测试档使用本档文本历史，请在 OmniTrigger 测试窗口运行动作或打开“文本历史”。",
+            )));
+        }
         if run.is_some() {
             crate::legacy_local_source::verify_cli_action(&settings::path(), &call)
                 .map_err(rejected)?;
@@ -238,7 +302,6 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
             })
             .transpose()
             .map_err(target_error)?;
-        let service = service(&settings::path());
         service.validate(&call).map_err(rejected)?;
         if check.is_some() {
             return Ok(serde_json::json!({"valid":true,"call":call}).to_string());
@@ -281,6 +344,19 @@ pub fn cli(arguments: &[String]) -> Option<Result<String, String>> {
 }
 
 impl Workspace {
+    pub(super) fn package_unavailable_reason(&self, call: &ActionCall) -> Option<String> {
+        match clipboard_route(self.test_data, call, self.action_service.catalog()) {
+            Ok(ClipboardRoute::WorkspaceHistory) => None,
+            Ok(ClipboardRoute::Package) => self.legacy_unavailable_reason(call).or_else(|| {
+                self.action_service
+                    .validate(call)
+                    .err()
+                    .map(|error| error.to_string())
+            }),
+            Err(error) => Some(error.message),
+        }
+    }
+
     /// 动作库中的动作包卡片；没有匹配项时返回 `None`，由调用方省略整个分组。
     pub(super) fn package_catalog(&self, query: &str, cx: &mut Context<Self>) -> Option<Div> {
         let mut list = div().flex().flex_col().gap(px(10.));
@@ -301,12 +377,7 @@ impl Workspace {
                 action_version: entry.definition.version,
                 input: serde_json::json!({}),
             };
-            let reason = self.legacy_unavailable_reason(&call).or_else(|| {
-                self.action_service
-                    .validate(&call)
-                    .err()
-                    .map(|error| error.to_string())
-            });
+            let reason = self.package_unavailable_reason(&call);
             let name = title.clone();
             let edit_call = call.clone();
             let is_script = entry.definition.runtime == "script";
@@ -413,7 +484,12 @@ impl Workspace {
             .map(|spec| spec.id)
             .or(self.selected)
             .unwrap_or(0);
-        let title = if let ActionSpec::Invoke(call) = &self.draft_action {
+        let draft = self.draft_action_spec(cx);
+        let local_history = matches!(&draft, Ok(ActionSpec::Invoke(call))
+            if matches!(clipboard_route(self.test_data, call, self.action_service.catalog()), Ok(ClipboardRoute::WorkspaceHistory)));
+        let title = if local_history {
+            "切换本测试档的文本历史".into()
+        } else if let ActionSpec::Invoke(call) = &self.draft_action {
             self.action_service
                 .catalog()
                 .actions
@@ -434,9 +510,13 @@ impl Workspace {
             .child(Self::input_field(
                 "动作参数（JSON 对象）",
                 &self.package_input,
-                Some("参数原样传入 ctx.input；代码在动作包的入口文件中编辑。"),
+                Some(if local_history {
+                    "本档文本历史保存在测试目录。要连接外部测试库，请填写 script-test 和测试库路径。"
+                } else {
+                    "参数原样传入 ctx.input；代码在动作包的入口文件中编辑。"
+                }),
             ))
-            .when_some(self.draft_action_spec(cx).err(), |element, error| {
+            .when_some(draft.err(), |element, error| {
                 element.child(caption(error))
             })
             .child(
@@ -592,6 +672,68 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct NeverExecute;
+
+    #[test]
+    fn copied_clipboard_calls_respect_the_selected_data_and_installed_package_version() {
+        let fixture = Fixture::new();
+        let mut call = fixture.package(None);
+        let mut catalog = PackageCatalog::load(&root(&fixture.config));
+        call.package_id = "examples.n10-rust".into();
+        call.action_id = "toggle".into();
+        let entry = &mut catalog.actions[0];
+        entry.package_id = call.package_id.clone();
+        entry.definition.id = call.action_id.clone();
+        entry.package_version = "0.2.0".into();
+        let copied = json!({"cliExecutable":"R:/qa/cli.exe", "hostExecutable":"R:/qa/host.exe", "dataRoot":"R:/qa/daily"});
+        call.input = copied;
+        assert_eq!(
+            clipboard_route(false, &call, &catalog),
+            Ok(ClipboardRoute::Package)
+        );
+        assert_eq!(
+            clipboard_route(true, &call, &catalog),
+            Ok(ClipboardRoute::WorkspaceHistory)
+        );
+        call.input["profile"] = json!("product");
+        assert_eq!(
+            clipboard_route(true, &call, &catalog),
+            Ok(ClipboardRoute::WorkspaceHistory)
+        );
+        call.input["profile"] = json!("script-test");
+        for version in ["0.2.0", "0.3.0-rc.1", "unknown"] {
+            catalog.actions[0].package_version = version.into();
+            let error = clipboard_route(true, &call, &catalog).unwrap_err();
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+            assert!(error.message.contains("0.3.0"));
+        }
+        for version in ["0.3.0", "0.10.0"] {
+            catalog.actions[0].package_version = version.into();
+            assert_eq!(
+                clipboard_route(true, &call, &catalog),
+                Ok(ClipboardRoute::Package)
+            );
+        }
+        call.action_id = "32c12786-9bb8-4b0c-8d55-7e6a4c8a5d10".into();
+        assert_eq!(
+            clipboard_route(true, &call, &catalog),
+            Ok(ClipboardRoute::Package)
+        );
+        call.input["profile"] = json!("product");
+        assert_eq!(
+            clipboard_route(true, &call, &catalog).unwrap_err().code,
+            "test_clipboard_profile"
+        );
+        assert_eq!(
+            clipboard_route(false, &call, &catalog),
+            Ok(ClipboardRoute::Package)
+        );
+        call.package_id = "other".into();
+        assert_eq!(
+            clipboard_route(true, &call, &catalog),
+            Ok(ClipboardRoute::Package)
+        );
+    }
+
     impl ActionRuntime for NeverExecute {
         fn execute(
             &self,

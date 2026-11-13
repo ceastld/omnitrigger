@@ -19,6 +19,8 @@ const RESULT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 pub struct Startup {
     /// 测试配置档的显示名；日常数据为 `None`。
     pub test_name: Option<String>,
+    /// 动作数据是否属于已登记的测试档，与窗口标题、启动参数及监听状态无关。
+    pub test_data: bool,
     /// 是否安装输入 Hook。测试配置档默认不安装，`--listen` 显式开启。
     pub listen: bool,
 }
@@ -39,7 +41,24 @@ impl Startup {
     fn daily() -> Self {
         Self {
             test_name: None,
+            test_data: false,
             listen: true,
+        }
+    }
+
+    fn for_config(config: &Path) -> Self {
+        Self {
+            test_data: registered_test_data(config),
+            ..Self::daily()
+        }
+    }
+
+    fn for_entry(entry: &Entry, listen: bool) -> Self {
+        let test = entry.kind == "test";
+        Self {
+            test_name: test.then(|| entry.name.clone()),
+            test_data: test,
+            listen: !test || listen,
         }
     }
 
@@ -378,6 +397,52 @@ fn catalog_path(root: &Path) -> PathBuf {
 
 fn profile_dir(root: &Path, id: &str) -> PathBuf {
     root.join("profiles").join(id)
+}
+
+/// 旧版 --config 仍从文件所在目录读取动作数据。以实际目录和登记表确认其身份，
+/// 不依赖文件名或别名；新建空白测试档可以还没有 bindings.json。
+fn registered_test_data(config_path: &Path) -> bool {
+    let Some(parent) = config_path.parent() else {
+        return false;
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let Ok(directory) = parent.canonicalize() else {
+        return false;
+    };
+    let Some(profiles) = directory.parent() else {
+        return false;
+    };
+    if !profiles
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("profiles"))
+    {
+        return false;
+    }
+    let Some((root, id)) = profiles.parent().zip(directory.file_name()) else {
+        return false;
+    };
+    let matches = |entry: &Entry| {
+        entry.kind == "test" && id.eq_ignore_ascii_case(std::ffi::OsStr::new(&entry.id))
+    };
+    if let Ok(catalog) = read_catalog(root) {
+        if catalog.profiles.iter().any(matches) {
+            return true;
+        }
+        // 有效总登记是权威来源；别名、备份和相邻的普通目录都不算已登记的测试档。
+        if catalog_path(root).exists() {
+            return false;
+        }
+    }
+    // 总登记缺失或损坏时，以原目录自己的身份文件保守隔离动作，保留 --config 启动能力。
+    std::fs::read_to_string(directory.join("profile.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Entry>(&text).ok())
+        .as_ref()
+        .is_some_and(matches)
 }
 
 fn read_catalog(root: &Path) -> Result<Catalog, String> {
@@ -736,17 +801,17 @@ fn finish_command(result: Result<String, String>, result_file: Option<&str>) -> 
 pub fn startup(arguments: &mut Vec<String>) -> Startup {
     let original = arguments.clone();
     let parsed = take_arguments(arguments).unwrap_or_else(|message| exit_rejected(&message));
-    let has_config = arguments
-        .iter()
-        .skip(1)
-        .any(|argument| argument == "--config");
-    if has_config {
+    let config_index = arguments.iter().position(|argument| argument == "--config");
+    if let Some(index) = config_index {
         if parsed.any() {
             exit_rejected(
                 "--config 是临时配置路径，不能与 --data-root、--profile 或配置档命令同用。",
             );
         }
-        return Startup::daily();
+        return arguments
+            .get(index + 1)
+            .filter(|path| !path.starts_with("--"))
+            .map_or_else(Startup::daily, |path| Startup::for_config(Path::new(path)));
     }
     let plain = arguments.len() == 1;
     if parsed.command.is_some() && !plain {
@@ -816,19 +881,18 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
                 }
                 finish_command(Err(rejected(&message)), parsed.result_file.as_deref())
             });
-            let test = entry.kind == "test";
             (
                 Some(profile_dir(&root, &entry.id).join("bindings.json")),
-                Startup {
-                    test_name: test.then(|| entry.name.clone()),
-                    listen: !test || parsed.listen,
-                },
+                Startup::for_entry(&entry, parsed.listen),
             )
         }
-        None => (
-            (source != RootSource::Default).then(|| root.join("bindings.json")),
-            Startup::daily(),
-        ),
+        None => {
+            let config = (source != RootSource::Default).then(|| root.join("bindings.json"));
+            let startup = config
+                .as_deref()
+                .map_or_else(Startup::daily, Startup::for_config);
+            (config, startup)
+        }
     };
     if let Some(config) = config {
         if let Err(message) = crate::settings::use_path(config) {
@@ -1431,9 +1495,76 @@ mod tests {
     }
 
     #[test]
+    fn explicit_config_recognizes_test_action_data_without_changing_launch_mode() {
+        let root = temp_root("explicit-action-identity");
+        let entry = create_profile(&root, "scene-test", &Seed::Empty, Some("动作测试")).unwrap();
+        let directory = profile_dir(&root, &entry.id);
+        let config = directory.join("alternate.json");
+        assert!(!config.exists());
+        let mut arguments = args(&["--config", config.to_str().unwrap(), "--settings"]);
+        let original = arguments.clone();
+        let explicit = startup(&mut arguments);
+        assert_eq!(arguments, original);
+        assert!(explicit.test_data && explicit.listen);
+        assert_eq!(explicit.test_name, None);
+        assert_eq!(explicit.window_title("OmniTrigger"), "OmniTrigger");
+        assert!(!registered_test_data(&root.join("bindings.json")));
+        assert!(!registered_test_data(
+            &directory.join("nested/unknown.json")
+        ));
+
+        let alias_dir = profile_dir(&root, &entry.alias);
+        std::fs::create_dir(&alias_dir).unwrap();
+        std::fs::copy(
+            directory.join("profile.json"),
+            alias_dir.join("profile.json"),
+        )
+        .unwrap();
+        assert!(!registered_test_data(&alias_dir.join("bindings.json")));
+        for listen in [false, true] {
+            let selected = Startup::for_entry(&entry, listen);
+            assert!(selected.test_data);
+            assert_eq!(selected.listen, listen);
+            assert_eq!(selected.test_name.as_deref(), Some("动作测试"));
+        }
+
+        std::fs::write(catalog_path(&root), "{").unwrap();
+        assert!(startup(&mut arguments).test_data);
+        assert!(!registered_test_data(&alias_dir.join("bindings.json")));
+        std::fs::remove_file(catalog_path(&root)).unwrap();
+        assert!(registered_test_data(&config));
+        std::fs::write(directory.join("profile.json"), "broken").unwrap();
+        assert_eq!(startup(&mut arguments), Startup::daily());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn flag_and_env_roots_share_the_explicit_config_identity() {
+        let root = temp_root("root-action-identity");
+        let test = create_profile(&root, "testing-root", &Seed::Empty, None).unwrap();
+        let directory = profile_dir(&root, &test.id);
+        for (flag, env) in [
+            (directory.to_str(), None),
+            (None, Some(directory.as_os_str().to_owned())),
+        ] {
+            let (resolved, source) = resolve_root(flag, env, None).unwrap();
+            assert_ne!(source, RootSource::Default);
+            let startup = Startup::for_config(&resolved.join("bindings.json"));
+            assert!(startup.test_data && startup.listen);
+            assert!(startup.test_name.is_none());
+        }
+        assert_eq!(
+            Startup::for_config(&root.join("bindings.json")),
+            Startup::daily()
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn startup_title_marks_test_data() {
         let test = Startup {
             test_name: Some("浏览视图".into()),
+            test_data: true,
             listen: false,
         };
         assert_eq!(

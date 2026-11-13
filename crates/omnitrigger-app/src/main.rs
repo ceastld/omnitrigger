@@ -684,6 +684,7 @@ struct StartupOptions {
     listen: bool,
     /// 测试配置档显示名，用于醒目标识。
     test_profile: Option<String>,
+    test_data: bool,
 }
 
 struct Workspace {
@@ -691,6 +692,7 @@ struct Workspace {
     mode: WorkspaceMode,
     listen: bool,
     test_profile: Option<String>,
+    test_data: bool,
     backend: Option<Backend>,
     wheel_input_policy: WheelInputPolicy,
     events: Option<EventBridge<BackendEvent>>,
@@ -888,6 +890,7 @@ impl Workspace {
             wheel_editor,
             listen,
             test_profile,
+            test_data,
         } = startup;
         let mode = WorkspaceMode::from_text_history_flag(text_history_page);
         let (theme_mode, theme_error) = match appearance::load(&settings::path()) {
@@ -1188,6 +1191,7 @@ impl Workspace {
             mode,
             listen,
             test_profile,
+            test_data,
             backend,
             wheel_input_policy,
             events,
@@ -2226,12 +2230,7 @@ impl Workspace {
                 (!self.browser_connector_ui.installed())
                     .then(|| "请先在扩展页安装浏览器连接器。".into())
             }),
-            ActionSpec::Invoke(call) => self.legacy_unavailable_reason(call).or_else(|| {
-                self.action_service
-                    .validate(call)
-                    .err()
-                    .map(|error| error.to_string())
-            }),
+            ActionSpec::Invoke(call) => self.package_unavailable_reason(call),
             ActionSpec::External(action) => action.unavailable_reason(),
             ActionSpec::ShowWheel(reference) => self.wheels_error.clone().or_else(|| {
                 (!self
@@ -3078,7 +3077,21 @@ impl Workspace {
                 cx.notify();
             }
             ActionSpec::Invoke(call) => {
-                let submission = if let Some(reason) = self.legacy_unavailable_reason(&call) {
+                let route = action_packages::clipboard_route(
+                    self.test_data,
+                    &call,
+                    self.action_service.catalog(),
+                );
+                if matches!(route, Ok(action_packages::ClipboardRoute::WorkspaceHistory)) {
+                    let snapshot = target.and_then(|target| {
+                        desktop_host::DesktopHost::capture(Some(target)).choice_target()
+                    });
+                    script_ui::toggle_workspace_history(id, snapshot, cx);
+                    return;
+                }
+                let submission = if let Err(error) = route {
+                    Err(error)
+                } else if let Some(reason) = self.legacy_unavailable_reason(&call) {
                     let mut error =
                         omnitrigger_actions::ActionError::new("legacy_unavailable", reason);
                     error.effect_state = Some("not_started".into());
@@ -8301,6 +8314,7 @@ fn smoke_test(wheel_input_policy: WheelInputPolicy) -> Result<(), String> {
 /// 仅由既有UI broker在GPUI线程调用；该窗关闭不退出主应用。
 fn open_script_history_window(
     target: clipboard_history_send::HistoryLaunchTarget,
+    test_data: bool,
     cx: &mut App,
 ) -> Result<WindowHandle<Workspace>, String> {
     let bounds = Bounds::centered(None, size(px(1060.), px(780.)), cx);
@@ -8350,6 +8364,7 @@ fn open_script_history_window(
                         wheel_editor: false,
                         listen: false,
                         test_profile: None,
+                        test_data,
                     },
                     own_window,
                     title_bar,
@@ -8579,7 +8594,7 @@ fn main() {
         }
         return;
     }
-    if let Some(result) = action_packages::cli(&arguments) {
+    if let Some(result) = action_packages::cli(&arguments, profile_startup.test_data) {
         match result {
             Ok(text) => println!("{text}"),
             Err(error) => {
@@ -8708,7 +8723,7 @@ fn main() {
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             message_input::init(cx);
-            script_ui::init(cx);
+            script_ui::init(profile_startup.test_data, cx);
             let bounds = Bounds::centered(None, size(px(1060.), px(780.)), cx);
             let result = cx.open_window(
                 WindowOptions {
@@ -8766,6 +8781,7 @@ fn main() {
                                 wheel_editor,
                                 listen: profile_startup.listen,
                                 test_profile: profile_startup.test_name.clone(),
+                                test_data: profile_startup.test_data,
                             },
                             main_window,
                             title_bar,

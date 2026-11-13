@@ -4,6 +4,8 @@
 
 安装后的开始菜单提供“OmniTrigger”和“OmniTrigger 测试”。测试入口与开发入口 `start.ps1` 共用 `--test-workspace`，首次自动创建 `testing` 测试配置档，之后沿用。日常数据与测试数据均属于当前 Windows 用户，独立于安装目录，卸载和重装后保留。同一 Windows 会话再次打开同一入口会唤回原窗口，日常和测试窗口可同时使用。
 
+在测试档使用从日常档复制的 N10 剪贴板切换热键或轮盘槽位，会打开本档的文本历史。要测试独立的 EaClip 数据库，可以在测试绑定中显式选择 `script-test` 并填写测试库路径。两种方式同样适用于已有测试档和 `--listen` 模式。[剪贴板动作配置](../examples/actions/n10-rust/README.md)
+
 - 已实现：数据根解析（`--data-root`、`OMNITRIGGER_HOME`、默认目录）、打包重定向检测与脱离重启、持久测试配置档（`--profile`、`--profile-create`、`--profile-reset`、`--profile-list`，种子 `empty`、`fixture:`、`copy:`）、测试配置档默认不安装 Hook 与 `--listen`、窗口标题和侧栏的测试数据标识、启动时发现更新的外部副本并询问导入。
 - 首阶段的默认配置档就是数据根本身，文件仍在 `%LOCALAPPDATA%\OmniTrigger` 原位，尚未迁移进 `profiles\<ID>\`；`examples` 种子、跨配置档监听互斥、运行中切换、自动备份、设置页管理界面和账号关联尚未实现。
 - `--config` 保持原有行为（照常安装 Hook），不能与配置档参数同用。

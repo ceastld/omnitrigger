@@ -82,6 +82,7 @@ jobs:
           $actions = New-Item -ItemType Directory -Path (Join-Path $data 'actions')
           $historyPackage = 'examples/actions/clipboard-history'
           Copy-Item -LiteralPath $historyPackage -Destination $actions.FullName -Recurse
+          Copy-Item -LiteralPath 'examples/actions/n10-rust' -Destination $actions.FullName -Recurse
           $append = Get-Content -LiteralPath "$historyPackage/append-call.json" -Raw | ConvertFrom-Json
           $append.action_id = 'manage'
           $appendFile = Join-Path $env:RUNNER_TEMP 'append-history.json'
@@ -102,6 +103,30 @@ jobs:
               throw "剪贴板历史写入或去重失败（配置参数：$profileArgs，应新增：$shouldInsert）。"
             }
           }
+          function Assert-CopiedClipboardRoute {
+            $callFile = Join-Path $env:RUNNER_TEMP 'n10-toggle.json'
+            $inputPaths = @{
+              cliExecutable = Join-Path $env:RUNNER_TEMP 'absent-cli.exe'
+              hostExecutable = Join-Path $env:RUNNER_TEMP 'absent-host.exe'
+              dataRoot = Join-Path $env:RUNNER_TEMP 'synthetic-clipboard'
+            }
+            @{ package_id = 'examples.n10-rust'; action_id = 'toggle'; action_version = 1; input = $inputPaths } |
+              ConvertTo-Json | Set-Content -LiteralPath $callFile -Encoding utf8
+            $daily = & $exe --check-action $callFile | ConvertFrom-Json
+            if ($LASTEXITCODE -or $daily.valid -ne $true -or $daily.handler) { throw '日常档未按外部 N10 动作校验。' }
+            & $exe --profile-create clipboard-copy --type test --seed copy:default | Out-Host
+            if ($LASTEXITCODE) { throw '复制日常档失败。' }
+            $check = & $exe --profile clipboard-copy --check-action $callFile | ConvertFrom-Json
+            if ($LASTEXITCODE -or $check.valid -ne $true -or $check.handler -ne 'workspace_text_history') {
+              throw '测试档未将三字段 N10 toggle 路由到本档文本历史。'
+            }
+            $PSNativeCommandUseErrorActionPreference = $false
+            $receipt = & $exe --profile clipboard-copy --run-action $callFile 2>&1 | Out-String | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 1 -or $receipt.status -ne 'rejected' -or
+                $receipt.error.code -ne 'ui_unavailable' -or $receipt.error.effect_state -ne 'not_started') {
+              throw "测试档无窗口运行的拒绝回执错误：$($receipt | ConvertTo-Json -Compress)"
+            }
+          }
           $shell = New-Object -ComObject Shell.Application
           foreach ($round in 1..2) {
             $result = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -WindowStyle Hidden -PassThru -Wait
@@ -116,6 +141,7 @@ jobs:
             & $exe --check-config | Out-Host
             if ($LASTEXITCODE) { throw '日常热键或轮盘无效。' }
             Assert-HistoryAppend @() ($round -eq 1)
+            if ($round -eq 1) { Assert-CopiedClipboardRoute }
             & $exe --test-workspace --check-config | Out-Host
             if ($LASTEXITCODE) { throw '测试配置档启动失败。' }
             $entry = @((Get-Content (Join-Path $data 'profiles.json') -Raw | ConvertFrom-Json).profiles | Where-Object alias -eq 'testing')

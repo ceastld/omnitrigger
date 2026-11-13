@@ -261,7 +261,7 @@ fn wait_for_choice(
 }
 
 /// 仅在 GPUI 线程初始化。接收器随 App 任务销毁，等待中的动作会立即得知宿主退出。
-pub fn init(cx: &mut App) {
+pub fn init(test_data: bool, cx: &mut App) {
     crate::script_notify::init(cx);
     let (sender, receiver) = mpsc::sync_channel(1);
     let broker = Broker {
@@ -338,7 +338,7 @@ pub fn init(cx: &mut App) {
                     let request = match request {
                         UiRequest::Choose(request) => request,
                         UiRequest::ToggleHistory(request) => {
-                            dispatch_history_toggle(request, &mut history_active, &mut history_toggle, cx);
+                            dispatch_history_toggle(request, &mut history_active, &mut history_toggle, test_data, cx);
                             return;
                         }
                         UiRequest::History(request) => {
@@ -357,7 +357,7 @@ pub fn init(cx: &mut App) {
                                 let _ = request.changed.try_send(());
                                 return;
                             }
-                            let result = crate::open_script_history_window(target, cx)
+                            let result = crate::open_script_history_window(target, test_data, cx)
                                 .map_err(|_| history_fault("ui_unavailable", "unknown"));
                             let mut phase = request.phase.lock().unwrap_or_else(|error| error.into_inner());
                             match result {
@@ -924,6 +924,7 @@ fn dispatch_history_toggle(
     request: HistoryToggleRequest,
     history: &mut Option<(WindowHandle<crate::Workspace>, HistorySlot)>,
     closing: &mut Option<HistoryToggleRequest>,
+    test_data: bool,
     cx: &mut App,
 ) {
     if closing.is_some() {
@@ -953,7 +954,7 @@ fn dispatch_history_toggle(
         return;
     }
     if let Some((target, slot)) = prepare_history_toggle_open(&request) {
-        match crate::open_script_history_window(target, cx) {
+        match crate::open_script_history_window(target, test_data, cx) {
             Ok(handle) => {
                 *history = Some((handle, slot));
                 finish_history_toggle(&request, HistoryTogglePhase::Opened);
@@ -975,6 +976,88 @@ fn toggle_history(
     if params != json!({}) {
         return Err(history_toggle_fault("invalid_input", "not_started"));
     }
+    submit_history_toggle(cancellation.clone(), deadline, target)?.wait()
+}
+
+/// 主窗口和脚本使用同一队列；主窗口在后台等待回执，GPUI 线程继续处理开闭请求。
+pub(super) fn toggle_workspace_history(
+    id: u64,
+    target: Option<ScriptTargetSnapshot>,
+    cx: &mut Context<crate::Workspace>,
+) {
+    let target = target.filter(|snapshot| snapshot.process_id != std::process::id());
+    let submitted = submit_history_toggle(
+        CancellationToken::new(),
+        Instant::now() + Duration::from_secs(5),
+        target,
+    );
+    cx.spawn(async move |this, cx| {
+        let result = match submitted {
+            Ok(pending) => {
+                cx.background_executor()
+                    .spawn(async move { pending.wait() })
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        let _ = this.update(cx, |workspace, cx| {
+            let status = match result {
+                Ok(value) if value.get("closed") == Some(&Value::Bool(true)) => {
+                    "已收起本档文本历史。"
+                }
+                Ok(_) => "已打开本档文本历史。",
+                Err(error)
+                    if target.is_none()
+                        && error.code == "target_unavailable"
+                        && !workspace.recording =>
+                {
+                    workspace.open_page(crate::Page::TextHistory, cx);
+                    "已打开本档文本历史供浏览。"
+                }
+                Err(error) => {
+                    workspace.action_error = Some((id, error.message.clone()));
+                    workspace.record_action_status(id, error.message);
+                    cx.notify();
+                    return;
+                }
+            };
+            if workspace
+                .action_error
+                .as_ref()
+                .is_some_and(|(failed_id, _)| *failed_id == id)
+            {
+                workspace.action_error = None;
+            }
+            workspace.record_action_status(id, status.into());
+            cx.notify();
+        });
+    })
+    .detach();
+}
+
+struct PendingHistoryToggle {
+    phase: Arc<Mutex<HistoryTogglePhase>>,
+    receiver: Receiver<()>,
+    cancellation: CancellationToken,
+    deadline: Instant,
+}
+
+impl PendingHistoryToggle {
+    fn wait(self) -> Result<Value, ActionError> {
+        wait_history_toggle(
+            &self.phase,
+            self.receiver,
+            &self.cancellation,
+            self.deadline,
+        )
+    }
+}
+
+fn submit_history_toggle(
+    cancellation: CancellationToken,
+    deadline: Instant,
+    target: Option<ScriptTargetSnapshot>,
+) -> Result<PendingHistoryToggle, ActionError> {
     let accepted = Instant::now();
     let deadline = deadline.min(accepted + Duration::from_secs(5));
     if cancellation.is_cancelled() {
@@ -1012,7 +1095,12 @@ fn toggle_history(
                 "not_started",
             )
         })?;
-    wait_history_toggle(&phase, receiver, cancellation, deadline)
+    Ok(PendingHistoryToggle {
+        phase,
+        receiver,
+        cancellation,
+        deadline,
+    })
 }
 
 fn wait_history_toggle(
@@ -1141,6 +1229,22 @@ mod history_toggle_lifecycle_tests {
         .unwrap_err();
         assert_eq!(error.code, "target_unavailable");
         assert!(!request.busy.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn workspace_waiter_can_read_a_close_receipt_after_the_ui_has_finished() {
+        let (request, receiver) = request();
+        let pending = PendingHistoryToggle {
+            phase: request.phase.clone(),
+            receiver,
+            cancellation: request.cancellation.clone(),
+            deadline: request.deadline,
+        };
+        // 工作线程可能在 GPUI 已经确认并释放请求后才开始运行。
+        assert!(begin_history_toggle_close(&request, false));
+        finish_history_toggle(&request, HistoryTogglePhase::Closed);
+        drop(request);
+        assert_eq!(pending.wait().unwrap(), json!({"closed": true}));
     }
 
     #[test]
