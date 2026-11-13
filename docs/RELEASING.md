@@ -29,7 +29,9 @@ git diff --check
 .\scripts\package-windows.ps1 -Target x86_64-pc-windows-msvc
 ```
 
-脚本使用锁定依赖，从本次 Cargo 回执定位 EXE，以该 EXE 只读验证公开 JSON 示例。产物位于 `dist`，包括 `OmniTrigger-<版本>-windows-x86_64-setup.exe`、同名前缀的 ZIP 和列出两项摘要的 `SHA256SUMS.txt`。两种包均包含项目许可证、运行说明、发布说明、目标依赖许可及机器可读清单。缺少许可正文时打包失败。发行 CI 还会静默安装、核对两个开始菜单入口，并在默认数据目录核对日常与测试热键、轮盘、动作包和配置档登记文件的哈希。重装后的程序还会加载日常配置并检查扩展入口。许可文件来源见 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
+脚本使用锁定依赖，从本次 Cargo 回执定位 EXE，以该 EXE 只读验证公开 JSON 示例。产物位于 `dist`，包括 `OmniTrigger-<版本>-windows-x86_64-setup.exe`、同名前缀的 ZIP 和列出两项摘要的 `SHA256SUMS.txt`。两种包均包含项目许可证、运行说明、发布说明、目标依赖许可及机器可读清单。缺少许可正文时打包失败。许可文件来源见 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
+
+发行 CI 静默安装程序并核对两个开始菜单入口。日常和测试配置各运行一次剪贴板动作包，分别保存同一条合成文本。重装后再次执行动作，两份历史都应识别已有记录。每次卸载后还会核对热键、轮盘、动作包、剪贴板历史和配置档登记文件的哈希。
 
 发布前核对：
 

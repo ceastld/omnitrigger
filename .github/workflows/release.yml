@@ -80,7 +80,12 @@ jobs:
           $wheels = Join-Path $data 'wheels.json'
           '{"version":6,"wheels":[{"id":"daily-wheel","name":"日常轮盘","slots":[{"label":"复制","action":{"kind":"send_shortcut","keys":[162,67]}}]}]}' | Set-Content -LiteralPath $wheels -Encoding utf8
           $actions = New-Item -ItemType Directory -Path (Join-Path $data 'actions')
-          Copy-Item -LiteralPath examples/actions/line-text -Destination $actions.FullName -Recurse
+          $historyPackage = 'examples/actions/clipboard-history'
+          Copy-Item -LiteralPath $historyPackage -Destination $actions.FullName -Recurse
+          $append = Get-Content -LiteralPath "$historyPackage/append-call.json" -Raw | ConvertFrom-Json
+          $append.action_id = 'manage'
+          $appendFile = Join-Path $env:RUNNER_TEMP 'append-history.json'
+          $append | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $appendFile -Encoding utf8
           $expected = @{}
           foreach ($file in @($bindings, $wheels) + @(Get-ChildItem -LiteralPath $actions.FullName -File -Recurse | ForEach-Object FullName)) {
             $expected[$file] = (Get-FileHash -LiteralPath $file).Hash
@@ -88,6 +93,13 @@ jobs:
           function Assert-ProfileFiles {
             foreach ($file in $expected.Keys) {
               if ((Get-FileHash -LiteralPath $file -ErrorAction Stop).Hash -ne $expected[$file]) { throw "配置已改变：$file" }
+            }
+          }
+          function Assert-HistoryAppend([string[]]$profileArgs, [bool]$shouldInsert) {
+            $receipt = & $exe @profileArgs --run-action $appendFile | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $receipt.status -ne 'succeeded' -or
+                $receipt.output.inserted -isnot [bool] -or $receipt.output.inserted -ne $shouldInsert) {
+              throw "剪贴板历史写入或去重失败（配置参数：$profileArgs，应新增：$shouldInsert）。"
             }
           }
           $shell = New-Object -ComObject Shell.Application
@@ -103,16 +115,22 @@ jobs:
             }
             & $exe --check-config | Out-Host
             if ($LASTEXITCODE) { throw '日常热键或轮盘无效。' }
-            & $exe --check-action examples/actions/line-text/call.json | Out-Host
-            if ($LASTEXITCODE) { throw '日常扩展没有加载。' }
+            Assert-HistoryAppend @() ($round -eq 1)
             & $exe --test-workspace --check-config | Out-Host
             if ($LASTEXITCODE) { throw '测试配置档启动失败。' }
             $entry = @((Get-Content (Join-Path $data 'profiles.json') -Raw | ConvertFrom-Json).profiles | Where-Object alias -eq 'testing')
             if ($entry.Count -ne 1 -or $entry[0].kind -ne 'test') { throw '测试配置档登记错误。' }
-            $testConfig = Join-Path $data "profiles/$($entry[0].id)/bindings.json"
+            $testDir = Join-Path $data "profiles/$($entry[0].id)"
+            $testConfig = Join-Path $testDir 'bindings.json'
             if ($round -eq 1) {
               Copy-Item examples/literal-text.json $testConfig -Force
-              foreach ($file in @($testConfig, (Join-Path $data 'profiles.json'))) {
+              $testActions = New-Item -ItemType Directory -Path (Join-Path $testDir 'actions')
+              Copy-Item -LiteralPath $historyPackage -Destination $testActions.FullName -Recurse
+            }
+            Assert-HistoryAppend @('--test-workspace') ($round -eq 1)
+            if ($round -eq 1) {
+              foreach ($file in @($testConfig, (Join-Path $data 'profiles.json'),
+                  (Join-Path $data 'clipboard-history.json'), (Join-Path $testDir 'clipboard-history.json'))) {
                 $expected[$file] = (Get-FileHash -LiteralPath $file).Hash
               }
             }
