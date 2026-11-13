@@ -4,7 +4,7 @@
 //! `<数据根>\profiles\<ID>\`，由 `<数据根>\profiles.json` 登记。选中配置档等价于把
 //! 该目录下的 `bindings.json` 作为配置路径，其余数据文件随之切换。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -399,37 +399,45 @@ fn profile_dir(root: &Path, id: &str) -> PathBuf {
     root.join("profiles").join(id)
 }
 
-/// 旧版 --config 仍从文件所在目录读取动作数据。以实际目录和登记表确认其身份，
-/// 不依赖文件名或别名；新建空白测试档可以还没有 bindings.json。
-fn registered_test_data(config_path: &Path) -> bool {
-    let Some(parent) = config_path.parent() else {
-        return false;
-    };
+/// 只定位配置文件自己的实际目录；新建空白档可能还没有 bindings.json。
+fn profile_directory(config_path: &Path) -> Option<PathBuf> {
+    let parent = config_path.parent()?;
     let parent = if parent.as_os_str().is_empty() {
         Path::new(".")
     } else {
         parent
     };
-    let Ok(directory) = parent.canonicalize() else {
-        return false;
-    };
-    let Some(profiles) = directory.parent() else {
-        return false;
-    };
-    if !profiles
-        .file_name()
-        .is_some_and(|name| name.eq_ignore_ascii_case("profiles"))
-    {
-        return false;
+    let directory = parent.canonicalize().ok()?;
+    directory
+        .parent()?
+        .file_name()?
+        .eq_ignore_ascii_case("profiles")
+        .then_some(directory)
+}
+
+impl Entry {
+    fn is_test_at(&self, directory: &Path) -> bool {
+        self.kind == "test"
+            && directory
+                .file_name()
+                .is_some_and(|id| id.eq_ignore_ascii_case(std::ffi::OsStr::new(&self.id)))
     }
-    let Some((root, id)) = profiles.parent().zip(directory.file_name()) else {
+}
+
+/// 旧版 --config 仍从文件所在目录读取动作数据。以实际目录和登记表确认其身份。
+fn registered_test_data(config_path: &Path) -> bool {
+    let Some(directory) = profile_directory(config_path) else {
         return false;
     };
-    let matches = |entry: &Entry| {
-        entry.kind == "test" && id.eq_ignore_ascii_case(std::ffi::OsStr::new(&entry.id))
+    let Some(root) = directory.parent().and_then(Path::parent) else {
+        return false;
     };
     if let Ok(catalog) = read_catalog(root) {
-        if catalog.profiles.iter().any(matches) {
+        if catalog
+            .profiles
+            .iter()
+            .any(|entry| entry.is_test_at(&directory))
+        {
             return true;
         }
         // 有效总登记是权威来源；别名、备份和相邻的普通目录都不算已登记的测试档。
@@ -442,7 +450,50 @@ fn registered_test_data(config_path: &Path) -> bool {
         .ok()
         .and_then(|text| serde_json::from_str::<Entry>(&text).ok())
         .as_ref()
-        .is_some_and(matches)
+        .is_some_and(|entry| entry.is_test_at(&directory))
+}
+
+/// 按复制顺序向上追溯种子，只读本根总登记。损坏或循环的登记链不能用作安装来源。
+pub(crate) fn seed_sources_for_config(config: &Path) -> Vec<PathBuf> {
+    let Some(directory) = profile_directory(config) else {
+        return Vec::new();
+    };
+    let Some(root) = directory.parent().and_then(Path::parent) else {
+        return Vec::new();
+    };
+    let Ok(catalog) = read_catalog(root) else {
+        return Vec::new();
+    };
+    let Some(mut entry) = catalog
+        .profiles
+        .iter()
+        .find(|entry| entry.is_test_at(&directory))
+    else {
+        return Vec::new();
+    };
+    let mut seen = BTreeSet::from([normalize(&directory).to_lowercase()]);
+    let mut sources = Vec::new();
+    loop {
+        let (path, upstream) = match Seed::parse(&entry.seed) {
+            Ok(Seed::Empty) => break,
+            Ok(Seed::Copy(key)) if key == DEFAULT_ID => (root.to_path_buf(), None),
+            Ok(Seed::Copy(key)) => {
+                let Some(source) = catalog.source_profile(&key) else {
+                    return Vec::new();
+                };
+                (profile_dir(root, &source.id), Some(source))
+            }
+            Ok(Seed::Fixture(path)) if path.is_absolute() => (path, None),
+            _ => return Vec::new(),
+        };
+        if !seen.insert(normalize(&path).to_lowercase()) {
+            return Vec::new();
+        }
+        sources.push(path);
+        let Some(source) = upstream else { break };
+        entry = source;
+    }
+    sources
 }
 
 fn read_catalog(root: &Path) -> Result<Catalog, String> {
@@ -482,6 +533,12 @@ impl Catalog {
             .iter()
             .find(|entry| entry.alias == key || entry.id == key)
     }
+
+    fn source_profile(&self, key: &str) -> Option<&Entry> {
+        self.find(key).filter(|entry| {
+            Path::new(&entry.id).file_name() == Some(std::ffi::OsStr::new(&entry.id))
+        })
+    }
 }
 
 /// 参与复制、导入与备份的数据文件：顶层普通文件，排除锁、旧备份与配置档自身的登记文件。
@@ -511,7 +568,7 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// 复制一份配置档数据（顶层数据文件与托管动作包 `actions\`），返回复制的顶层文件数。
-fn copy_data(from: &Path, to: &Path) -> Result<usize, String> {
+fn copy_data(from: &Path, to: &Path, include_file: fn(&str) -> bool) -> Result<usize, String> {
     let fail = |error: std::io::Error| {
         format!(
             "从 {} 复制数据到 {} 失败：{error}",
@@ -525,7 +582,7 @@ fn copy_data(from: &Path, to: &Path) -> Result<usize, String> {
         let entry = entry.map_err(fail)?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let kind = entry.file_type().map_err(fail)?;
-        if kind.is_file() && is_data_file(&name) {
+        if kind.is_file() && include_file(&name) {
             std::fs::copy(entry.path(), to.join(&name)).map_err(fail)?;
             copied += 1;
         } else if kind.is_dir() && name == "actions" {
@@ -553,12 +610,15 @@ fn source_dir(root: &Path, catalog: &Catalog, key: &str) -> Result<PathBuf, Stri
         return Ok(root.to_path_buf());
     }
     catalog
-        .find(key)
+        .source_profile(key)
         .map(|entry| profile_dir(root, &entry.id))
         .ok_or_else(|| format!("找不到配置档 {key}；可用 --profile-list 查看。"))
 }
 
 fn seed_into(root: &Path, catalog: &Catalog, seed: &Seed, target: &Path) -> Result<(), String> {
+    // 连接器登记包含源目录的程序路径和桥接进程身份，只属于该安装。
+    let seed_file =
+        |name: &str| is_data_file(name) && !name.eq_ignore_ascii_case("browser-connector.json");
     match seed {
         Seed::Empty => std::fs::create_dir_all(target)
             .map_err(|error| format!("创建 {} 失败：{error}", target.display())),
@@ -566,9 +626,9 @@ fn seed_into(root: &Path, catalog: &Catalog, seed: &Seed, target: &Path) -> Resu
             if !path.is_dir() {
                 return Err(format!("夹具目录 {} 不存在。", path.display()));
             }
-            copy_data(path, target).map(drop)
+            copy_data(path, target, seed_file).map(drop)
         }
-        Seed::Copy(key) => copy_data(&source_dir(root, catalog, key)?, target).map(drop),
+        Seed::Copy(key) => copy_data(&source_dir(root, catalog, key)?, target, seed_file).map(drop),
     }
 }
 
@@ -1133,7 +1193,8 @@ fn offer_external_copy(root: &Path, local_app_data: &Path) {
             let backup = root
                 .join("backups")
                 .join(format!("before-import-{}", now_ms()));
-            let result = copy_data(root, &backup).and_then(|_| copy_data(&directory, root));
+            let result = copy_data(root, &backup, is_data_file)
+                .and_then(|_| copy_data(&directory, root, is_data_file));
             if let Err(error) = result {
                 omnitrigger_windows::show_error_dialog(
                     "OmniTrigger 导入失败",
@@ -1367,6 +1428,119 @@ mod tests {
             .collect();
         assert_eq!(aliases, ["default", "ui", "ui-copy", "blank"]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_seeds_skip_connector_registration_and_backups_preserve_it() {
+        let root = temp_root("connector-registration");
+        let fixture = root.join("fixture");
+        std::fs::create_dir(&fixture).unwrap();
+        let registration = "browser-connector.json";
+        for source in [&root, &fixture] {
+            std::fs::write(source.join(registration), "source installation").unwrap();
+            std::fs::write(source.join("bindings.json"), "binding data").unwrap();
+        }
+        for (alias, seed) in [
+            ("copy", Seed::Copy(DEFAULT_ID.into())),
+            ("fixture", Seed::Fixture(fixture.clone())),
+        ] {
+            let entry = create_profile(&root, alias, &seed, None).unwrap();
+            let directory = profile_dir(&root, &entry.id);
+            assert!(!directory.join(registration).exists());
+            assert_eq!(
+                std::fs::read(directory.join("bindings.json")).unwrap(),
+                b"binding data"
+            );
+            std::fs::write(directory.join(registration), "test installation").unwrap();
+            let (_, backup) = reset_profile(&root, alias).unwrap();
+            assert!(!directory.join(registration).exists());
+            assert_eq!(
+                std::fs::read(backup.unwrap().join(registration)).unwrap(),
+                b"test installation"
+            );
+        }
+        let backup = root.join("full-backup");
+        copy_data(&root, &backup, is_data_file).unwrap();
+        assert_eq!(
+            std::fs::read(backup.join(registration)).unwrap(),
+            b"source installation"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn seed_sources_follow_registered_copies_without_probing_the_sources() {
+        let root = temp_root("seed-source");
+        let canonical = root.canonicalize().unwrap();
+        let fixture = root.join("fixture");
+        std::fs::create_dir(&fixture).unwrap();
+        let base = create_profile(&root, "base", &Seed::Copy(DEFAULT_ID.into()), None).unwrap();
+        let from_base = create_profile(&root, "second", &Seed::Copy("base".into()), None).unwrap();
+        let from_fixture =
+            create_profile(&root, "third", &Seed::Fixture(fixture.clone()), None).unwrap();
+        let fixture_copy = create_profile(
+            &root,
+            "fixture-copy",
+            &Seed::Copy(from_fixture.id.clone()),
+            None,
+        )
+        .unwrap();
+        let empty = create_profile(&root, "empty", &Seed::Empty, None).unwrap();
+        let empty_copy =
+            create_profile(&root, "empty-copy", &Seed::Copy(empty.id.clone()), None).unwrap();
+        let config = |id: &str| profile_dir(&root, id).join("bindings.json");
+        assert_eq!(
+            seed_sources_for_config(&config(&base.id)),
+            [canonical.clone()]
+        );
+        assert!(seed_sources_for_config(&config(&empty.id)).is_empty());
+        assert_eq!(
+            seed_sources_for_config(&config(&empty_copy.id)),
+            [profile_dir(&canonical, &empty.id)]
+        );
+        // 源目录已移动也可识别旧状态中的源路径。
+        std::fs::rename(profile_dir(&root, &base.id), root.join("moved-base")).unwrap();
+        std::fs::rename(&fixture, root.join("moved-fixture")).unwrap();
+        assert_eq!(
+            seed_sources_for_config(&config(&from_base.id)),
+            [profile_dir(&canonical, &base.id), canonical.clone()]
+        );
+        assert_eq!(
+            seed_sources_for_config(&config(&fixture_copy.id)),
+            [profile_dir(&canonical, &from_fixture.id), fixture]
+        );
+        assert!(seed_sources_for_config(&root.join("bindings.json")).is_empty());
+        let unregistered = profile_dir(&root, &from_base.alias);
+        std::fs::create_dir(&unregistered).unwrap();
+        std::fs::copy(
+            profile_dir(&root, &from_base.id).join("profile.json"),
+            unregistered.join("profile.json"),
+        )
+        .unwrap();
+        assert!(seed_sources_for_config(&config(&from_base.alias)).is_empty());
+        std::fs::write(catalog_path(&root), "{").unwrap();
+        assert!(seed_sources_for_config(&config(&from_base.id)).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn broken_or_cyclic_seed_chain_cannot_identify_an_installation() {
+        let root = temp_root("cyclic-seed-source");
+        let first = create_profile(&root, "first", &Seed::Empty, None).unwrap();
+        let second = create_profile(&root, "second", &Seed::Copy(first.id.clone()), None).unwrap();
+        let config = profile_dir(&root, &second.id).join("bindings.json");
+        let mut catalog = read_catalog(&root).unwrap();
+        for seed in [
+            Seed::Copy(first.id.clone()),
+            Seed::Copy(second.alias.clone()),
+            Seed::Copy("no-longer-registered".into()),
+            Seed::Fixture(profile_dir(&root, &first.id)),
+        ] {
+            catalog.profiles[0].seed = seed.record();
+            write_json(&catalog_path(&root), &catalog).unwrap();
+            assert!(seed_sources_for_config(&config).is_empty());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

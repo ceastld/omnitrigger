@@ -1,6 +1,7 @@
 //! 浏览器连接器的可选安装与本机生命周期；所有进程、磁盘和网络工作均在后台。
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     fmt, fs,
     io::Read,
@@ -125,16 +126,73 @@ pub(crate) fn ensure_plain(path: &Path) -> Result<(), ConnectorError> {
 }
 
 fn absolute(path: &Path) -> Result<PathBuf, ConnectorError> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        std::env::current_dir()
-            .map(|current| current.join(path))
-            .map_err(|error| ConnectorError::new("path_unavailable", error.to_string()))
+    let path = std::path::absolute(path)
+        .map_err(|error| ConnectorError::new("path_unavailable", error.to_string()))?;
+    #[cfg(windows)]
+    if disk_path_key(&path).is_none() {
+        return Err(ConnectorError::new(
+            "unsafe_path",
+            "连接器仅支持本地磁盘路径。",
+        ));
+    }
+    Ok(path)
+}
+
+#[cfg(windows)]
+fn disk_path_key(path: &Path) -> Option<String> {
+    use std::path::{Component, Prefix};
+    let mut parts = path.components();
+    let Component::Prefix(prefix) = parts.next()? else {
+        return None;
+    };
+    let (Prefix::Disk(drive) | Prefix::VerbatimDisk(drive)) = prefix.kind() else {
+        return None;
+    };
+    if parts.next() != Some(Component::RootDir) {
+        return None;
+    }
+    let mut key = format!("{}:", char::from(drive));
+    for component in parts {
+        let Component::Normal(name) = component else {
+            return None;
+        };
+        key.push('\\');
+        key.push_str(name.to_str()?);
+    }
+    Some(key)
+}
+
+fn same_cli_path(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        disk_path_key(left)
+            .zip(disk_path_key(right))
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(&b))
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
     }
 }
 
+fn expected_cli(config_path: &Path) -> PathBuf {
+    runtime_root(config_path)
+        .join(CONNECTOR_VERSION)
+        .join("omnitrigger-browser.exe")
+}
+
+#[derive(Default)]
+struct SavedState {
+    snapshot: Snapshot,
+    digest: Option<String>,
+    inherited: bool,
+}
+
 pub fn load(config_path: &Path) -> Result<Snapshot, ConnectorError> {
+    read_state(config_path).map(|saved| saved.snapshot)
+}
+
+fn read_state(config_path: &Path) -> Result<SavedState, ConnectorError> {
     let config_path = absolute(config_path)?;
     let path = state_path(&config_path);
     ensure_plain(&path)?;
@@ -147,7 +205,7 @@ pub fn load(config_path: &Path) -> Result<Snapshot, ConnectorError> {
             bytes
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Snapshot::default())
+            return Ok(SavedState::default())
         }
         Err(error) => return Err(ConnectorError::new("settings_read", error.to_string())),
     };
@@ -169,30 +227,51 @@ pub fn load(config_path: &Path) -> Result<Snapshot, ConnectorError> {
             "已保存的连接器版本不兼容，配置已保留。",
         ));
     }
-    let expected = runtime_root(&config_path)
-        .join(CONNECTOR_VERSION)
-        .join("omnitrigger-browser.exe");
-    if !state.cli_path.as_os_str().is_empty() && state.cli_path != expected {
-        return Err(ConnectorError::new(
-            "settings_invalid",
-            "连接器程序路径不在版本安装目录内。",
-        ));
-    }
     if !state.extension_id.is_empty() && !valid_extension_id(&state.extension_id) {
         return Err(ConnectorError::new(
             "settings_invalid",
             "已保存的 Chrome 扩展 ID 无效。",
         ));
     }
+    let expected = expected_cli(&config_path);
+    let digest = Some(format!("{:x}", Sha256::digest(&bytes)));
+    if !state.cli_path.as_os_str().is_empty() && !same_cli_path(&state.cli_path, &expected) {
+        let inherited = state.version == CONNECTOR_VERSION
+            && crate::profiles::seed_sources_for_config(&config_path)
+                .iter()
+                .any(|source| {
+                    same_cli_path(
+                        &state.cli_path,
+                        &expected_cli(&source.join("bindings.json")),
+                    )
+                });
+        if inherited {
+            return Ok(SavedState {
+                snapshot: Snapshot::default(),
+                digest,
+                inherited: true,
+            });
+        }
+        return Err(ConnectorError::new(
+            "settings_invalid",
+            "连接器程序路径不在版本安装目录内。",
+        ));
+    }
     ensure_plain(&expected)?;
     ensure_plain(&expected.with_file_name("omnitrigger-browser-host.exe"))?;
     state.installed = !state.cli_path.as_os_str().is_empty()
-        && state.cli_path.is_file()
-        && state
-            .cli_path
+        && expected.is_file()
+        && expected
             .with_file_name("omnitrigger-browser-host.exe")
             .is_file();
-    Ok(state)
+    if !state.cli_path.as_os_str().is_empty() {
+        state.cli_path = expected;
+    }
+    Ok(SavedState {
+        snapshot: state,
+        digest,
+        inherited: false,
+    })
 }
 
 pub fn valid_extension_id(value: &str) -> bool {
@@ -287,6 +366,11 @@ fn run(
     let config_path = absolute(config_path)?;
     let root = runtime_root(&config_path);
     ensure_plain(&root)?;
+    let state_file = state_path(&config_path);
+    ensure_plain(&state_file.with_file_name("browser-connector.json.lock"))?;
+    let _lock = crate::settings::lock_config(&state_file, "浏览器连接器")
+        .map_err(|message| ConnectorError::new("state_busy", message))?;
+    let saved = read_state(&config_path)?;
     fs::create_dir_all(&root)
         .map_err(|error| ConnectorError::new("install_directory", error.to_string()))?;
     let stamp = std::time::SystemTime::now()
@@ -322,7 +406,15 @@ fn run(
         .env("OMNITRIGGER_BROWSER_OPERATION", mode)
         .env("OMNITRIGGER_BROWSER_ROOT", &root)
         .env("OMNITRIGGER_BROWSER_STAGE", &stage)
-        .env("OMNITRIGGER_BROWSER_STATE", state_path(&config_path))
+        .env("OMNITRIGGER_BROWSER_STATE", &state_file)
+        .env(
+            "OMNITRIGGER_BROWSER_STATE_HASH",
+            saved.digest.as_deref().unwrap_or("absent"),
+        )
+        .env(
+            "OMNITRIGGER_BROWSER_INHERITED",
+            if saved.inherited { "1" } else { "0" },
+        )
         .env("OMNITRIGGER_BROWSER_VERSION", CONNECTOR_VERSION)
         .env("OMNITRIGGER_BROWSER_RELEASE_MANIFEST", RELEASE_MANIFEST_URL)
         .env_remove("OMNITRIGGER_BROWSER_EXTENSION_ID")
@@ -460,5 +552,80 @@ mod tests {
         };
         assert_eq!(code, "checksum_mismatch");
         assert_eq!(message, "校验失败");
+    }
+
+    #[test]
+    fn copied_connector_state_discards_source_identity_but_keeps_a_local_install() {
+        let root = std::env::temp_dir().join(format!(
+            "omnitrigger-connector-copy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dest = root.join("profiles").join("t000000000001");
+        fs::create_dir_all(&dest).unwrap();
+        let config = dest.join("bindings.json");
+        let state_file = state_path(&config);
+        let fixture = root.join("missing-fixture");
+        let catalog = serde_json::json!({"version":1,"profiles":[{"id":"t000000000001","kind":"test","alias":"qa","name":"QA",
+            "seed": format!("fixture:{}", fixture.display()),"created_ms":1}]});
+        fs::write(root.join("profiles.json"), catalog.to_string()).unwrap();
+        let mut state = Snapshot {
+            cli_path: expected_cli(&fixture.join("bindings.json")),
+            installed: true,
+            enabled: true,
+            registered: true,
+            version: CONNECTOR_VERSION.into(),
+            extension_id: "a".repeat(32),
+            bridge_pid: Some(4512),
+            bridge_started_at: "source".into(),
+        };
+        let original = serde_json::to_vec(&state).unwrap();
+        fs::write(&state_file, &original).unwrap();
+        let local = expected_cli(&config);
+        fs::create_dir_all(local.parent().unwrap()).unwrap();
+        fs::write(&local, b"").unwrap();
+        fs::write(local.with_file_name("omnitrigger-browser-host.exe"), b"").unwrap();
+        let inherited = read_state(&config).unwrap();
+        assert!(inherited.inherited);
+        assert_eq!(
+            inherited.digest.unwrap(),
+            format!("{:x}", Sha256::digest(&original))
+        );
+        assert_eq!(
+            serde_json::to_value(inherited.snapshot).unwrap(),
+            serde_json::to_value(Snapshot::default()).unwrap()
+        );
+        assert_eq!(fs::read(&state_file).unwrap(), original);
+        assert!(!fixture.exists());
+
+        state.cli_path = expected_cli(&root.join("unrelated").join("bindings.json"));
+        fs::write(&state_file, serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(load(&config).unwrap_err().code, "settings_invalid");
+        state.cli_path = local.clone();
+        fs::write(&state_file, serde_json::to_vec(&state).unwrap()).unwrap();
+        let own = read_state(&config).unwrap();
+        assert!(!own.inherited && own.snapshot.installed);
+        assert_eq!(own.snapshot.cli_path, local);
+        assert_eq!(own.snapshot.bridge_pid, Some(4512));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owned_cli_accepts_only_equivalent_local_drive_paths() {
+        let own = Path::new(r"C:\work\qa\cli.exe");
+        assert!(same_cli_path(Path::new(r"\\?\c:\WORK\QA\CLI.exe"), own));
+        for other in [
+            r"c:work\qa\cli.exe",
+            r"C:\work\qa\..\qa\cli.exe",
+            r"\\server\share\work\qa\cli.exe",
+            r"\\?\UNC\server\share\work\qa\cli.exe",
+            r"\\.\C:\work\qa\cli.exe",
+        ] {
+            assert!(!same_cli_path(Path::new(other), own));
+        }
     }
 }

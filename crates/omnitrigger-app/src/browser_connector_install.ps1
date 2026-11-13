@@ -32,6 +32,20 @@ function Hash-File([string]$Path) {
         return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-','').ToLowerInvariant()
     } finally {if ($null -ne $algorithm) {$algorithm.Dispose()};$stream.Dispose()}
 }
+function Read-VerifiedState {
+    Assert-Plain $script:statePath
+    $actual='absent'
+    if (Test-Path -LiteralPath $script:statePath) {
+        $file=Get-Item -LiteralPath $script:statePath
+        if ($file.PSIsContainer -or $file.Length -gt 65536) { Fail 'state_changed' '连接器配置已改变，请重试。' }
+        $bytes=[IO.File]::ReadAllBytes($script:statePath)
+        $sha=[Security.Cryptography.SHA256]::Create()
+        try { $actual=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+    }
+    if ($actual -cne $env:OMNITRIGGER_BROWSER_STATE_HASH) { Fail 'state_changed' '连接器配置已被其他进程修改，请重试。' }
+    if ($actual -cne 'absent') { return ,$bytes }
+}
 function Atomic-Json([string]$Path, $Value) {
     Assert-Plain $Path
     $temporary=$Path+'.tmp-'+[Guid]::NewGuid().ToString('N')
@@ -356,15 +370,17 @@ try {
     if ($script:version -cne '0.1.0' -or [IO.Path]::GetDirectoryName($script:stage) -cne $script:root -or -not [IO.Path]::GetFileName($script:stage).StartsWith('.install-')) { Fail 'invalid_request' '连接器操作目录或版本无效。' }
     Assert-Plain $script:root;Assert-Plain $script:stage;Assert-Plain $statePath
     $script:state=[ordered]@{enabled=$false;extension_id='';version='';cli_path='';installed=$false;registered=$false;bridge_pid=$null;bridge_started_at=''}
-    if (Test-Path -LiteralPath $statePath) {
-        $saved=Read-Json $statePath 65536
+    # Rust 已在本档锁内校验格式、来源路径和原始字节。旧种子状态从空开始，不沿用来源 PID 或注册。
+    $verified=Read-VerifiedState
+    if ($env:OMNITRIGGER_BROWSER_INHERITED -cne '1' -and $null -ne $verified) {
+        $saved=[Text.Encoding]::UTF8.GetString($verified) | ConvertFrom-Json
         foreach ($property in $saved.PSObject.Properties) {
             if (-not $script:state.Contains($property.Name)) { Fail 'settings_invalid' '连接器设置包含未知字段，原文件已保留。' }
             $script:state[$property.Name]=$property.Value
         }
     }
     $expected=Join-Path (Join-Path $script:root $script:version) 'omnitrigger-browser.exe'
-    if ($script:state.cli_path -and $script:state.cli_path -cne $expected) { Fail 'settings_invalid' '连接器设置指向安装目录以外。' }
+    if ($script:state.cli_path) { $script:state.cli_path=$expected }
     if (($script:state.version -and $script:state.version -cne $script:version) -or ($script:state.extension_id -and $script:state.extension_id -cnotmatch '^[a-p]{32}$')) { Fail 'settings_invalid' '连接器设置的版本或扩展 ID 无效，原文件已保留。' }
     $profiles=@();$message='连接器状态已刷新。';$mode=$env:OMNITRIGGER_BROWSER_OPERATION
     if ($mode -eq 'install') {
@@ -422,6 +438,7 @@ try {
             }
         }
     } else { Fail 'invalid_request' '不支持的连接器操作。' }
+    [void](Read-VerifiedState)
     Atomic-Json $statePath $script:state
     Send-Event @{kind='finished';snapshot=$script:state;profiles=@($profiles);message=$message}
 } catch {
