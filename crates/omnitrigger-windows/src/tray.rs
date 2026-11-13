@@ -88,6 +88,10 @@ pub fn hide_to_tray(raw: isize) -> bool {
     true
 }
 
+pub fn show_workspace_window(raw: isize) {
+    unsafe { show_main(HWND(raw as _)) }
+}
+
 unsafe fn show_main(hwnd: HWND) {
     let cmd = if IsIconic(hwnd).as_bool() {
         SW_RESTORE

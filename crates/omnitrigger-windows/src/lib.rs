@@ -361,7 +361,11 @@ mod title_bar;
 #[cfg(windows)]
 mod tray;
 #[cfg(windows)]
-pub use tray::{hide_to_tray, install_tray};
+pub use tray::{hide_to_tray, install_tray, show_workspace_window};
+#[cfg(windows)]
+mod workspace_instance;
+#[cfg(windows)]
+pub use workspace_instance::WorkspaceInstance;
 #[cfg(windows)]
 mod wheel_window;
 #[cfg(windows)]

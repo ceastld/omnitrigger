@@ -24,6 +24,18 @@ pub struct Startup {
 }
 
 impl Startup {
+    /// 普通主窗口按数据目录与监听模式复用。定向启动页和一次性命令保留各自的入口。
+    pub fn workspace_key(&self, config: &Path) -> Result<String, String> {
+        use sha2::{Digest, Sha256};
+        let dir = config.parent().ok_or("找不到配置文件的父目录。")?;
+        std::fs::create_dir_all(dir).map_err(|error| format!("无法打开配置目录：{error}"))?;
+        let dir = dir
+            .canonicalize()
+            .map_err(|error| format!("无法确定配置目录：{error}"))?;
+        let id = Sha256::digest(normalize(&dir).to_lowercase().as_bytes());
+        Ok(format!("{id:x}-{}", self.listen))
+    }
+
     fn daily() -> Self {
         Self {
             test_name: None,

@@ -46,7 +46,7 @@
 | :---: | :---: | :---: |
 | <img src="site/public/screenshots/panel.webp" width="260" alt="浮动触发面板"> | <img src="site/public/screenshots/wheel.webp" width="200" alt="轨道轮盘"> | <img src="site/public/screenshots/presets.webp" width="260" alt="触发预设"> |
 
-日常主窗口关闭后收至系统托盘，触发器继续监听。单击托盘图标可返回主窗口，右键选择“退出 OmniTrigger”可结束程序。测试配置档仍随窗口关闭而退出。
+日常主窗口关闭后收至系统托盘，触发器继续监听。单击托盘图标可返回主窗口，右键选择“退出 OmniTrigger”可结束程序。从源码构建的版本也支持从开始菜单再次打开同一入口，唤回现有窗口。测试配置档仍随窗口关闭而退出。
 
 详细交互、执行限制与界面说明见[当前功能](docs/FEATURES.md)，专题入口见[文档目录](docs/README.md)。尚未实现双击 / 连击、按设备区分或插件市场。[Chrome API 桥接扩展](docs/BROWSER_EXTENSION.md)提供本地 RPC、JS Proxy、书签读取和浏览器动作；Chrome 扩展单独安装。按需授权功能需要新版扩展源码或本地测试包，公开 v0.1.0 包尚未包含本轮更新。
 

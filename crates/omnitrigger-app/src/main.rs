@@ -687,6 +687,7 @@ struct StartupOptions {
 }
 
 struct Workspace {
+    workspace_instance: Option<omnitrigger_windows::WorkspaceInstance>,
     mode: WorkspaceMode,
     listen: bool,
     test_profile: Option<String>,
@@ -1182,6 +1183,7 @@ impl Workspace {
                 Err(error) => (None, Some(error.to_string())),
             };
         let mut workspace = Self {
+            workspace_instance: None,
             mode,
             listen,
             test_profile,
@@ -1552,6 +1554,20 @@ impl Workspace {
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) {
+        if self
+            .workspace_instance
+            .as_ref()
+            .is_some_and(|instance| instance.take_open_request())
+        {
+            let _ = self.main_window.update(cx, |_, window, _| {
+                if let Ok(RawWindowHandle::Win32(handle)) =
+                    HasWindowHandle::window_handle(&*window).map(|handle| handle.as_raw())
+                {
+                    omnitrigger_windows::show_workspace_window(handle.hwnd.get());
+                }
+                window.activate_window();
+            });
+        }
         if self.mode.history_only() {
             if self.text_history.poll() {
                 cx.notify();
@@ -8551,6 +8567,21 @@ fn main() {
     } else {
         None
     };
+    let workspace_instance = if arguments.len() == 1 {
+        match profile_startup
+            .workspace_key(&settings::path())
+            .and_then(|key| omnitrigger_windows::WorkspaceInstance::open(&key))
+        {
+            Ok(Some(instance)) => Some(instance),
+            Ok(None) => return,
+            Err(message) => {
+                omnitrigger_windows::show_error_dialog("OmniTrigger 无法打开配置窗口", &message);
+                return;
+            }
+        }
+    } else {
+        None
+    };
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {
@@ -8599,7 +8630,7 @@ fn main() {
                                 || (appearance_settings && reopened_by_updater))
                     });
                     let view = cx.new(|cx| {
-                        Workspace::new(
+                        let mut workspace = Workspace::new(
                             cx,
                             StartupOptions {
                                 mouse_shortcuts: mouse_shortcuts_plan,
@@ -8619,7 +8650,9 @@ fn main() {
                             },
                             main_window,
                             title_bar,
-                        )
+                        );
+                        workspace.workspace_instance = workspace_instance;
+                        workspace
                     });
                     if text_history_page {
                         view.update(cx, |view, cx| {
