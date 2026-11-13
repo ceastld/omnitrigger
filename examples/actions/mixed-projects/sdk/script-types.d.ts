@@ -212,7 +212,16 @@ interface ScriptClipboardHistoryApi {
   remove(options: {id: ScriptHistoryDecimal}): ScriptClipboardHistoryRemove;
 }
 
+interface ScriptStopOtherInstancesFault extends Error {
+  code:'invalid_input'|'actions_unavailable'|'actions_busy'|'actions_call_limit'|'action_inactive'|'action_policy_conflict'|'action_busy'|'stop_timeout'|'timeout'|'cancelled'|'invalid_response'|'actions_failed';
+  method:'actions.stop_other_instances';
+  effectState:'not_started'|'unknown';
+}
+type ScriptStopOtherInstancesResult = Readonly<{stoppedCount:0;effectState:'not_started'} | {stoppedCount:1|2|3;effectState:'unknown'}>;
 type ScriptContext<Input = Record<string, any>> = Readonly<{
+    /** 同步等待同包同动作其他调用真实资源清理；排除自身。无服务作用域明确不可用。 */
+    actions: {stopOtherInstances(options?: {timeoutMs?:number}): ScriptStopOtherInstancesResult};
+
     apiVersion: 1;
     input: Input;
     /** 动作包提供；直接使用 CLI 且未传元数据时为 null。 */

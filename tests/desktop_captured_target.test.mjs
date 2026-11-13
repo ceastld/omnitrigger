@@ -4,7 +4,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const source=readFileSync(new URL('../crates/omnitrigger-actions/runtime/desktop-api.js',import.meta.url),'utf8');
-const sdk=readFileSync(new URL('../tools/js-engine-probe/src/sdk.js',import.meta.url),'utf8');
+const sdk=readFileSync(new URL('../crates/omnitrigger-actions/runtime/actions-api.js',import.meta.url),'utf8')+'\n'+readFileSync(new URL('../tools/js-engine-probe/src/sdk.js',import.meta.url),'utf8');
 const options={expectedProcessId:20,expectedProcessCreatedFileTime:'18446744073709550000',validForMs:500};
 const original={window_handle:'101',process_id:10,thread_id:11,process_created_file_time:'134000000000000001',expires_at_unix_ms:1000};
 const target={capture_id:1,context:{window_handle:'9007199254740993',process_id:20,thread_id:21,

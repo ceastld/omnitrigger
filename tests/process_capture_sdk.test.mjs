@@ -5,7 +5,7 @@ import {runInNewContext} from 'node:vm';
 import test from 'node:test';
 
 const runtime = new URL('../crates/omnitrigger-actions/runtime/',import.meta.url);
-const source = ['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js']
+const source = ['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js']
   .map(name=>readFileSync(new URL(name,runtime),'utf8')).join('\n')
   + '\n' + readFileSync(new URL('../tools/js-engine-probe/src/sdk.js',import.meta.url),'utf8');
 const program='C:\\owned fixture\\program.exe';

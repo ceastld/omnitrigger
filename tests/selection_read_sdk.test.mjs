@@ -5,7 +5,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 const runtime=new URL('../crates/omnitrigger-actions/runtime/',import.meta.url);
 const desktopSource=readFileSync(new URL('desktop-api.js',runtime),'utf8');
-const sharedSource=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js']
+const sharedSource=['desktop-api.js','browser-api.js','clipboard-history-api.js','process-capture-api.js','actions-api.js']
   .map(name=>readFileSync(new URL(name,runtime),'utf8')).join('\n')+'\n'
   +readFileSync(new URL('../tools/js-engine-probe/src/sdk.js',import.meta.url),'utf8');
 const plain=value=>JSON.parse(JSON.stringify(value));

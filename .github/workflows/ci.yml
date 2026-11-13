@@ -22,6 +22,8 @@ jobs:
   windows:
     name: Windows 检查与构建
     runs-on: windows-latest
+    env:
+      OMNITRIGGER_METADATA_POWERSHELL: 'C:\Program Files\PowerShell\7\pwsh.exe'
     timeout-minutes: 60
     steps:
       - name: 检出代码
@@ -108,7 +110,11 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Pop-Location
-          node --test tools/script-sdk-check/action-signal-types.test.mjs tools/script-sdk-check/script-project-write.test.mjs
+          node --test tools/script-sdk-check/action-signal-types.test.mjs tools/script-sdk-check/script-project-write.test.mjs crates/omnitrigger-actions/runtime/actions-api.test.mjs tests/actions_scope_node_sdk.test.mjs tools/script-sdk-check/node-host-composition.test.mjs tools/script-sdk-check/script-sdk-composition.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/actions_scope_node.types.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p tests/actions_scope_script.types.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node tools/script-sdk-check/check.mjs target/debug/omnitrigger.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -353,6 +359,8 @@ jobs:
   js-engines:
     name: Windows JS 引擎实验
     runs-on: windows-latest
+    env:
+      OMNITRIGGER_METADATA_POWERSHELL: 'C:\Program Files\PowerShell\7\pwsh.exe'
     timeout-minutes: 40
     defaults:
       run:
@@ -399,7 +407,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 构建两种引擎并测量体积
-        run: ./measure.ps1
+        run: |
+          ./measure.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $scopedPreviousNode = $env:OMNITRIGGER_TEST_NODE
+          $scopedPreviousHost = $env:OMNITRIGGER_TEST_SCRIPT_HOST
+          try {
+            $env:OMNITRIGGER_TEST_NODE = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = (Resolve-Path -LiteralPath './results/quickjs-release.exe').Path
+            cargo test --locked --manifest-path ../../Cargo.toml -p omnitrigger-actions --test scoped_actions_runtime -- --ignored --test-threads=1
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            $env:OMNITRIGGER_TEST_NODE = $scopedPreviousNode
+            $env:OMNITRIGGER_TEST_SCRIPT_HOST = $scopedPreviousHost
+          }
 
       - name: 验证输出采集的自有夹具与宿主退出收尾
         run: |
