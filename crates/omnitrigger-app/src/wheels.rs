@@ -273,37 +273,65 @@ impl Wheels {
         Ok(())
     }
 
-    /// 原文件无法读取或校验时拒绝覆盖；写完整临时文件后再原子替换。
-    pub fn save(&self, config_path: &Path) -> Result<(), String> {
+    /// 在同一把锁内核对窗口载入的轮盘、备份旧版本并写入新内容。
+    pub fn save_changes(&self, config_path: &Path, previous: &Self) -> Result<(), String> {
         self.validate()?;
         let destination = config_path.with_file_name("wheels.json");
-        match std::fs::read_to_string(&destination) {
+        let _lock = crate::settings::lock_config(&destination, "轮盘")?;
+        let (stored, legacy) = match std::fs::read_to_string(&destination) {
             Ok(original) => {
-                Self::decode(&original)?;
-                let original_version: WheelsFile =
-                    serde_json::from_str(&original).map_err(|error| error.to_string())?;
-                if original_version.version < 6 {
-                    crate::settings::backup_legacy(
-                        &destination,
-                        original_version.version,
-                        original.as_bytes(),
-                    )?;
-                }
+                let (stored, version) = Self::decode_version(&original)?;
+                (stored, (version < 6).then_some((version, original)))
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Self::default(), None),
             Err(error) => {
                 return Err(format!("读取原轮盘配置失败，原文件已保留：{error}"));
             }
+        };
+        if &stored != previous {
+            return Err("轮盘配置已在其他窗口或文件中修改，请点击“重新载入”后再编辑。".into());
         }
-        let contents = serde_json::to_vec_pretty(&WheelsFile {
+        if let Some((version, original)) = legacy {
+            crate::settings::backup_legacy(&destination, version, original.as_bytes())?;
+        }
+        crate::settings::atomic_write(&destination, &self.contents()?)
+    }
+
+    /// 给外部编辑器准备文件。已有文件直接打开，包括等待用户修复的损坏文件。
+    pub fn prepare_file(&self, config_path: &Path) -> Result<(), String> {
+        let destination = config_path.with_file_name("wheels.json");
+        if destination
+            .try_exists()
+            .map_err(|error| format!("无法检查轮盘配置：{error}"))?
+        {
+            return Ok(());
+        }
+        let _lock = crate::settings::lock_config(&destination, "轮盘")?;
+        if destination
+            .try_exists()
+            .map_err(|error| format!("无法检查轮盘配置：{error}"))?
+        {
+            return Ok(());
+        }
+        if self != &Self::default() {
+            return Err("轮盘配置文件已移走，请点击“重新载入”后再编辑。".into());
+        }
+        crate::settings::atomic_create(&destination, &self.contents()?)
+    }
+
+    fn contents(&self) -> Result<Vec<u8>, String> {
+        serde_json::to_vec_pretty(&WheelsFile {
             version: 6,
             wheels: self.wheels.clone(),
         })
-        .map_err(|error| format!("编码轮盘配置失败：{error}"))?;
-        crate::settings::atomic_write(&destination, &contents)
+        .map_err(|error| format!("编码轮盘配置失败：{error}"))
     }
 
     fn decode(text: &str) -> Result<Self, String> {
+        Self::decode_version(text).map(|(wheels, _)| wheels)
+    }
+
+    fn decode_version(text: &str) -> Result<(Self, u32), String> {
         let file: WheelsFile =
             serde_json::from_str(text).map_err(|error| format!("轮盘配置格式有误：{error}"))?;
         if !(1..=6).contains(&file.version) {
@@ -371,7 +399,7 @@ impl Wheels {
             wheels: file.wheels,
         };
         wheels.validate()?;
-        Ok(wheels)
+        Ok((wheels, file.version))
     }
 }
 
@@ -422,6 +450,20 @@ mod tests {
             Self(directory)
         }
 
+        fn save(&self, proposed: &Wheels) -> Result<(), String> {
+            let previous = Wheels::load(&self.bindings()).unwrap_or_default();
+            proposed.save_changes(&self.bindings(), &previous)
+        }
+
+        fn assert_files(&self, expected: &[&str]) {
+            let mut files: Vec<_> = std::fs::read_dir(&self.0)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            files.sort();
+            assert_eq!(files, expected);
+        }
+
         fn bindings(&self) -> PathBuf {
             self.0.join("bindings.json")
         }
@@ -443,6 +485,73 @@ mod tests {
             wheels: wheels.wheels.clone(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn stale_edit_preserves_external_application_layout_and_reloaded_edit_can_save() {
+        let scratch = Scratch::new();
+        let baseline = Wheels::default();
+        let mut external = baseline.clone();
+        external.wheels[0]
+            .app_overrides
+            .push(WheelApplicationOverride {
+                process: "notepad.exe".into(),
+                slots: baseline.wheels[0].slots.clone(),
+            });
+        let original = encode(&external);
+        std::fs::write(scratch.wheels(), &original).unwrap();
+        let mut proposed = baseline.clone();
+        proposed.wheels[0].accent = WheelAccent::Amber;
+        assert!(proposed
+            .save_changes(&scratch.bindings(), &baseline)
+            .unwrap_err()
+            .contains("重新载入"));
+        assert_eq!(std::fs::read_to_string(scratch.wheels()).unwrap(), original);
+        let mut edited = Wheels::load(&scratch.bindings()).unwrap();
+        edited.wheels[0].accent = WheelAccent::Amber;
+        edited.save_changes(&scratch.bindings(), &external).unwrap();
+        assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), edited);
+    }
+
+    #[test]
+    fn only_one_wheel_editor_can_save_from_the_same_baseline() {
+        let scratch = Scratch::new();
+        let baseline = Wheels::default();
+        let barrier = std::sync::Barrier::new(2);
+        let save = |name: &str| {
+            let mut edited = baseline.clone();
+            edited.wheels[0].name = name.into();
+            barrier.wait();
+            edited
+                .save_changes(&scratch.bindings(), &baseline)
+                .map(|()| edited)
+        };
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| save("窗口一"));
+            let second = save("窗口二");
+            (first.join().unwrap(), second)
+        });
+        assert_ne!(first.is_ok(), second.is_ok());
+        assert_eq!(
+            Wheels::load(&scratch.bindings()).unwrap(),
+            first.or(second).unwrap()
+        );
+    }
+
+    #[test]
+    fn opening_json_only_initializes_a_missing_default_file() {
+        let scratch = Scratch::new();
+        let defaults = Wheels::default();
+        let mut moved = defaults.clone();
+        moved.wheels[0].name = "移走的轮盘".into();
+        assert!(moved.prepare_file(&scratch.bindings()).is_err());
+        assert!(!scratch.wheels().exists());
+        defaults.prepare_file(&scratch.bindings()).unwrap();
+        assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), defaults);
+        std::fs::write(scratch.wheels(), b"{").unwrap();
+        moved.prepare_file(&scratch.bindings()).unwrap();
+        crate::settings::atomic_create(&scratch.wheels(), b"replacement").unwrap();
+        assert_eq!(std::fs::read(scratch.wheels()).unwrap(), b"{");
     }
 
     #[test]
@@ -479,7 +588,7 @@ mod tests {
                 "按键时序需要版本 5 轮盘配置。"
             );
         }
-        wheels.save(&scratch.bindings()).unwrap();
+        scratch.save(&wheels).unwrap();
         assert_eq!(
             std::fs::read(scratch.0.join("wheels.json.v4.bak")).unwrap(),
             original.as_bytes()
@@ -542,7 +651,7 @@ mod tests {
         original["version"] = 2.into();
         let bytes = format!(" \r\n{original}\r\n");
         std::fs::write(scratch.wheels(), &bytes).unwrap();
-        expected.save(&scratch.bindings()).unwrap();
+        scratch.save(&expected).unwrap();
         assert_eq!(
             std::fs::read_to_string(scratch.0.join("wheels.json.v2.bak")).unwrap(),
             bytes
@@ -604,11 +713,11 @@ mod tests {
             },
         ];
         expected.wheels.push(second);
-        expected.save(&scratch.bindings()).unwrap();
+        scratch.save(&expected).unwrap();
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
         expected.wheels[0].accent = WheelAccent::Amber;
         expected.wheels.swap(0, 1);
-        expected.save(&scratch.bindings()).unwrap();
+        scratch.save(&expected).unwrap();
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
         assert_eq!(
             std::fs::read_to_string(scratch.bindings()).unwrap(),
@@ -711,7 +820,7 @@ mod tests {
         for original in bad_values {
             std::fs::write(scratch.wheels(), &original).unwrap();
             assert!(Wheels::load(&scratch.bindings()).is_err());
-            assert!(wheels.save(&scratch.bindings()).is_err());
+            assert!(scratch.save(&wheels).is_err());
             assert_eq!(std::fs::read_to_string(scratch.wheels()).unwrap(), original);
         }
     }
@@ -732,10 +841,10 @@ mod tests {
     fn invalid_edits_leave_the_last_valid_file_unchanged() {
         let scratch = Scratch::new();
         let mut wheels = Wheels::default();
-        wheels.save(&scratch.bindings()).unwrap();
+        scratch.save(&wheels).unwrap();
         let original = std::fs::read(scratch.wheels()).unwrap();
         wheels.wheels[0].slots.clear();
-        assert!(wheels.save(&scratch.bindings()).is_err());
+        assert!(scratch.save(&wheels).is_err());
         assert_eq!(std::fs::read(scratch.wheels()).unwrap(), original);
         assert_eq!(
             Wheels::load(&scratch.bindings()).unwrap(),
@@ -767,7 +876,7 @@ mod tests {
             positioned(1, 12, 16, true),
             positioned(2, 6, 8, false),
         ];
-        expected.save(&scratch.bindings()).unwrap();
+        scratch.save(&expected).unwrap();
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
         let value: serde_json::Value = serde_json::from_str(&encode(&expected)).unwrap();
         assert_eq!(
@@ -825,7 +934,7 @@ mod tests {
             Wheels::decode(&old.to_string()).unwrap_err(),
             "槽位场景需要版本 6 轮盘配置。"
         );
-        wheels.save(&scratch.bindings()).unwrap();
+        scratch.save(&wheels).unwrap();
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), wheels);
         assert_eq!(
             std::fs::read_to_string(scratch.0.join("wheels.json.v5.bak")).unwrap(),
@@ -889,7 +998,7 @@ mod tests {
             process: "Chrome.EXE".into(),
             slots: replacement.clone(),
         }];
-        expected.save(&scratch.bindings()).unwrap();
+        scratch.save(&expected).unwrap();
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
         let original = expected.wheels[0].clone();
         let resolved = original.resolved_for_process(Some("chrome.exe"));
@@ -1025,7 +1134,7 @@ mod tests {
             process: "Code.EXE".into(),
             slots: vec![local_slot()],
         }];
-        expected.save(&scratch.bindings()).unwrap();
+        scratch.save(&expected).unwrap();
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.wheels()).unwrap()).unwrap();
@@ -1036,9 +1145,9 @@ mod tests {
             1
         );
         expected.wheels[0].slots.swap(0, 1);
-        expected.save(&scratch.bindings()).unwrap();
+        scratch.save(&expected).unwrap();
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
-        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 1);
+        scratch.assert_files(&["wheels.json", "wheels.json.lock"]);
     }
 
     #[test]
@@ -1061,13 +1170,13 @@ mod tests {
             assert!(Wheels::load(&scratch.bindings())
                 .unwrap_err()
                 .contains("版本 2"));
-            assert!(wheels.save(&scratch.bindings()).is_err());
+            assert!(scratch.save(&wheels).is_err());
             assert_eq!(
                 std::fs::read(scratch.wheels()).unwrap(),
                 original.as_bytes()
             );
         }
-        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 1);
+        scratch.assert_files(&["wheels.json", "wheels.json.lock"]);
     }
 
     #[test]
@@ -1080,16 +1189,16 @@ mod tests {
         std::fs::write(scratch.wheels(), original.as_bytes()).unwrap();
         let mut expected = Wheels::load(&scratch.bindings()).unwrap();
         expected.wheels[0].slots[0] = local_slot();
-        expected.save(&scratch.bindings()).unwrap();
+        scratch.save(&expected).unwrap();
         assert_eq!(std::fs::read(&backup).unwrap(), original.as_bytes());
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(scratch.wheels()).unwrap()).unwrap();
         assert_eq!(saved["version"], 6);
         expected.wheels[0].slots[0].label = "再次修改".into();
-        expected.save(&scratch.bindings()).unwrap();
+        scratch.save(&expected).unwrap();
         assert_eq!(std::fs::read(&backup).unwrap(), original.as_bytes());
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
-        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 2);
+        scratch.assert_files(&["wheels.json", "wheels.json.lock", "wheels.json.v1.bak"]);
     }
 }

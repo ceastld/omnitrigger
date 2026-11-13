@@ -1254,30 +1254,7 @@ fn save_changes(
     for binding in bindings {
         check_scope_names(binding)?;
     }
-    let mut lock_name = destination
-        .file_name()
-        .ok_or_else(|| "配置路径不可用".to_owned())?
-        .to_os_string();
-    lock_name.push(".lock");
-    let lock_path = destination.with_file_name(lock_name);
-    if let Some(parent) = lock_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-    {
-        std::fs::create_dir_all(parent).map_err(|error| format!("创建配置目录失败：{error}"))?;
-    }
-    // 文件本身会被原子替换。用固定的同级锁串行化不同窗口的读取、比较和写入。
-    let lock = std::fs::File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path)
-        .map_err(|error| format!("打开热键配置锁失败：{error}"))?;
-    lock.try_lock().map_err(|error| match error {
-        std::fs::TryLockError::WouldBlock => "另一窗口正在保存热键配置，请稍后重试。".into(),
-        std::fs::TryLockError::Error(error) => format!("锁定热键配置失败：{error}"),
-    })?;
+    let _lock = lock_config(destination, "热键")?;
     let original = match std::fs::read_to_string(destination) {
         // 不覆盖损坏或未来版本的配置；用户需要先明确修复原文件。
         Ok(original) => Some(original),
@@ -1337,6 +1314,34 @@ fn same_bindings(left: &[Binding], right: &[Binding]) -> bool {
         })
 }
 
+/// 锁住固定的同级文件，让不同窗口的读取、基线比较、备份和原子替换串行执行。
+pub(crate) fn lock_config(destination: &Path, kind: &str) -> Result<std::fs::File, String> {
+    let mut lock_name = destination
+        .file_name()
+        .ok_or("配置路径不可用")?
+        .to_os_string();
+    lock_name.push(".lock");
+    let lock_path = destination.with_file_name(lock_name);
+    if let Some(parent) = lock_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).map_err(|error| format!("创建配置目录失败：{error}"))?;
+    }
+    let lock = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(|error| format!("打开{kind}配置锁失败：{error}"))?;
+    lock.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => format!("另一窗口正在保存{kind}配置，请稍后重试。"),
+        std::fs::TryLockError::Error(error) => format!("锁定{kind}配置失败：{error}"),
+    })?;
+    Ok(lock)
+}
+
 pub(crate) fn backup_legacy(
     destination: &Path,
     version: u32,
@@ -1375,6 +1380,43 @@ pub(crate) fn backup_legacy(
 
 /// 在同目录写完整临时文件后替换；失败不会删除现有配置。
 pub(crate) fn atomic_write(destination: &Path, contents: &[u8]) -> Result<(), String> {
+    write_and_commit(destination, contents, |temporary, target| {
+        std::fs::rename(temporary, target)
+    })
+}
+
+/// 原子创建配置。如果外部编辑器在准备期间已创建目标，保留它写入的文件。
+pub(crate) fn atomic_create(destination: &Path, contents: &[u8]) -> Result<(), String> {
+    write_and_commit(destination, contents, |temporary, target| {
+        #[cfg(windows)]
+        let result = {
+            use std::os::windows::ffi::OsStrExt;
+            use windows::{core::PCWSTR, Win32::Storage::FileSystem::MoveFileW};
+            let wide = |path: &Path| {
+                path.as_os_str()
+                    .encode_wide()
+                    .chain(Some(0))
+                    .collect::<Vec<_>>()
+            };
+            let (source, dest) = (wide(temporary), wide(target));
+            // MoveFileW 在目标已存在时返回错误，与 rename 的替换语义不同。
+            unsafe { MoveFileW(PCWSTR(source.as_ptr()), PCWSTR(dest.as_ptr())) }
+                .map_err(|error| std::io::Error::from_raw_os_error(error.code().0 & 0xffff))
+        };
+        #[cfg(not(windows))]
+        let result = std::fs::hard_link(temporary, target);
+        match result {
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            other => other,
+        }
+    })
+}
+
+fn write_and_commit(
+    destination: &Path,
+    contents: &[u8],
+    commit: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let parent = destination
         .parent()
@@ -1398,12 +1440,9 @@ pub(crate) fn atomic_write(destination: &Path, contents: &[u8]) -> Result<(), St
         .map_err(|error| format!("创建临时配置失败：{error}"))?;
     let result = file.write_all(contents).and_then(|_| file.sync_all());
     drop(file);
-    let result = result.and_then(|_| std::fs::rename(&temporary, destination));
-    if let Err(error) = result {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(format!("保存配置失败，原文件已保留：{error}"));
-    }
-    Ok(())
+    let result = result.and_then(|_| commit(&temporary, destination));
+    let _ = std::fs::remove_file(&temporary);
+    result.map_err(|error| format!("保存配置失败，原文件已保留：{error}"))
 }
 
 #[cfg(test)]

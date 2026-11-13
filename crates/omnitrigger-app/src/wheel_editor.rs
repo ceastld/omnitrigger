@@ -207,16 +207,22 @@ impl Workspace {
                 .justify_center()
                 .gap(px(14.))
                 .child(theme::icon_tile(Icon::Layers, theme::ACCENT, 56.))
-                .child(panel_title("还没有轮盘"))
-                .child(
-                    button("empty-create-wheel", "新建轮盘", Tone::Primary, can_edit).on_click(
-                        cx.listener(move |this, _, _, cx| {
-                            if can_edit {
-                                this.create_wheel(cx);
-                            }
-                        }),
-                    ),
-                ),
+                .child(panel_title(if self.wheels_error.is_some() {
+                    "轮盘配置无法载入"
+                } else {
+                    "还没有轮盘"
+                }))
+                .when(self.wheels_error.is_none(), |el| {
+                    el.child(
+                        button("empty-create-wheel", "新建轮盘", Tone::Primary, can_edit).when(
+                            can_edit,
+                            |button| {
+                                button.on_click(cx.listener(|this, _, _, cx| this.create_wheel(cx)))
+                            },
+                        ),
+                    )
+                })
+                .child(self.wheel_file_actions(cx)),
         };
         div()
             .flex_1()
@@ -230,12 +236,31 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(px(14.))
-            .child(header)
+            .when(!self.wheels.wheels.is_empty(), |el| el.child(header))
             .children(banner)
             .when_some(self.wheels_error.clone(), |el, error| {
                 el.child(alert(error))
             })
             .child(content)
+    }
+
+    fn wheel_file_actions(&self, cx: &mut Context<Self>) -> Div {
+        let actions = div().flex().items_center().gap(px(14.));
+        if self.recording {
+            return actions
+                .opacity(0.45)
+                .child(caption("高级：编辑 JSON"))
+                .child(caption("重新载入"));
+        }
+        actions
+            .child(
+                link("open-wheels-file", "高级：编辑 JSON")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_wheels_file(cx))),
+            )
+            .child(
+                link("reload-wheels", "重新载入")
+                    .on_click(cx.listener(|this, _, _, cx| this.reload_wheels(cx))),
+            )
     }
 
     /// 呼出方式与试用：已有绑定时显示组合并可跳转修改，没有时引导设置。
@@ -454,7 +479,6 @@ impl Workspace {
             Some(cell) => self.wheel_add_panel(&view, cell, &geometry, can_edit, cx),
             None => self.wheel_home_panel(wheel, &view, can_edit, cx),
         };
-        let can_open_file = !self.recording;
         let footer = div()
             .flex_none()
             .pl(px(28.))
@@ -469,27 +493,7 @@ impl Workspace {
                     .text_color(rgb(FAINT))
                     .child("改动自动保存"),
             )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(14.))
-                    .child(
-                        link("open-wheels-file", "高级：编辑 JSON").on_click(cx.listener(
-                            move |this, _, _, cx| {
-                                if can_open_file {
-                                    this.open_wheels_file(cx);
-                                }
-                            },
-                        )),
-                    )
-                    .child(link("reload-wheels", "重新载入").on_click(cx.listener(
-                        move |this, _, _, cx| {
-                            if can_open_file {
-                                this.reload_wheels(cx);
-                            }
-                        },
-                    ))),
-            );
+            .child(self.wheel_file_actions(cx));
         let scroll = div()
             .id("wheel-editor-content")
             .flex_1()

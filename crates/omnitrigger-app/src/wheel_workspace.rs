@@ -415,21 +415,12 @@ impl Workspace {
             cx.notify();
             return false;
         }
-        // 文件可能已在外部编辑器中修改；不同于已载入内容时拒绝保存，避免覆盖这些修改。
-        if Wheels::load(&crate::settings::path()).is_ok_and(|disk| disk != self.wheels) {
-            self.error = Some(
-                "wheels.json 已在外部修改，请先点击“重新载入”，再在页面中编辑，以免覆盖文件中的修改。"
-                    .into(),
-            );
-            cx.notify();
-            return false;
-        }
         if let Err(error) = self.check_wheel_scenes(&proposed) {
             self.error = Some(error);
             cx.notify();
             return false;
         }
-        match proposed.save(&crate::settings::path()) {
+        match proposed.save_changes(&crate::settings::path(), &self.wheels) {
             Ok(()) => {
                 self.apply_wheels(proposed, cx);
                 self.status = "轮盘已保存。".into();
@@ -479,30 +470,38 @@ impl Workspace {
 
     /// 重新读取 wheels.json；读取或校验失败时保留当前内容并显示原因。
     pub(super) fn reload_wheels(&mut self, cx: &mut Context<Self>) {
-        // 场景定义在 bindings.json 中编辑，重新载入轮盘时一并读取。
-        match crate::settings::load_scenes() {
-            Ok(scenes) => {
+        // 两份文件都有效、槽位引用也能解析后，再一起替换正在使用的轮盘和场景。
+        let loaded = Wheels::load(&crate::settings::path()).and_then(|wheels| {
+            let scenes = crate::settings::load_scenes()?;
+            for wheel in &wheels.wheels {
+                crate::wheel_scenes::check_wheel(wheel, &scenes)
+                    .map_err(|error| format!("轮盘“{}”：{error}", wheel.name))?;
+            }
+            Ok((wheels, scenes))
+        });
+        match loaded {
+            Ok((wheels, scenes)) => {
+                let (cell, scope) = (self.wheel_cell, self.wheel_scope.clone());
                 self.wheel_scenes = scenes;
                 self.wheel_scenes_error = None;
-            }
-            Err(error) => self.wheel_scenes_error = Some(error),
-        }
-        match Wheels::load(&crate::settings::path()) {
-            Ok(wheels) => {
-                let (cell, scope) = (self.wheel_cell, self.wheel_scope.clone());
                 self.apply_wheels(wheels, cx);
-                let id = self
+                let kept = self
                     .wheel_selected
                     .clone()
-                    .filter(|id| self.wheels.wheels.iter().any(|wheel| &wheel.id == id))
-                    .or_else(|| self.wheels.wheels.first().map(|wheel| wheel.id.clone()));
-                match id {
-                    Some(id) => self.select_wheel(id, cx),
-                    None => self.wheel_selected = None,
+                    .filter(|id| self.wheels.wheels.iter().any(|wheel| &wheel.id == id));
+                if let Some(id) = kept {
+                    self.select_wheel(id, cx);
+                    self.wheel_scope = scope;
+                    self.wheel_cell = cell;
+                    self.load_wheel_cell(cx);
+                } else if let Some(first) = self.wheels.wheels.first() {
+                    self.select_wheel(first.id.clone(), cx);
+                } else {
+                    self.wheel_selected = None;
+                    self.wheel_scope = None;
+                    self.wheel_cell = None;
+                    self.load_wheel_cell(cx);
                 }
-                self.wheel_scope = scope;
-                self.wheel_cell = cell;
-                self.load_wheel_cell(cx);
                 self.status = "已重新载入轮盘配置。".into();
             }
             Err(error) => {
@@ -519,12 +518,10 @@ impl Workspace {
     pub(super) fn open_wheels_file(&mut self, cx: &mut Context<Self>) {
         let path = crate::settings::path().with_file_name("wheels.json");
         let path = std::path::absolute(&path).unwrap_or(path);
-        if !path.exists() && self.wheels_error.is_none() {
-            if let Err(error) = self.wheels.save(&crate::settings::path()) {
-                self.error = Some(error);
-                cx.notify();
-                return;
-            }
+        if let Err(error) = self.wheels.prepare_file(&crate::settings::path()) {
+            self.error = Some(error);
+            cx.notify();
+            return;
         }
         let target = path.to_string_lossy().into_owned();
         std::thread::spawn(move || {
@@ -629,41 +626,44 @@ impl Workspace {
             .update(cx, |input, cx| input.set_text("", cx));
     }
 
-    /// 名称在离开格子前自动保存；内容未变或为空时不写文件。
-    fn flush_wheel_label(&mut self, cx: &mut Context<Self>) {
+    /// 离开格子前保存名称。写入失败时由调用方保留选中项和输入框。
+    fn flush_wheel_label(&mut self, cx: &mut Context<Self>) -> bool {
         let Some((view, (ring, sector))) = self.wheel_view().zip(self.wheel_cell) else {
-            return;
+            return true;
         };
         let Some(slot) = slot_at(&view, ring, sector) else {
-            return;
+            return true;
         };
         let label = self.wheel_slot_label.read(cx).text().trim().to_string();
         if label.is_empty() || label == view.slots[slot].label {
-            return;
+            return true;
         }
         self.edit_wheel_view("名称已保存。", cx, |view| {
             view.slots[slot].label = label;
             Ok(())
-        });
+        })
     }
 
     /// 点格子：移动中则把动作移到这里（有动作就互换），否则选中或取消选中。
     pub(super) fn select_wheel_cell(&mut self, cell: (u8, u8), cx: &mut Context<Self>) {
         if self.wheel_moving {
-            self.wheel_moving = false;
             if let Some(from) = self.wheel_cell.filter(|from| *from != cell) {
-                if self.edit_wheel_view("已移动。", cx, |view| {
+                if !self.edit_wheel_view("已移动。", cx, |view| {
                     let slot = slot_at(view, from.0, from.1).ok_or("要移动的动作已不存在。")?;
                     place_slot(view, slot, cell.0, cell.1)
                 }) {
-                    self.wheel_cell = Some(cell);
-                    self.load_wheel_cell(cx);
+                    return;
                 }
+                self.wheel_cell = Some(cell);
+                self.load_wheel_cell(cx);
             }
+            self.wheel_moving = false;
             cx.notify();
             return;
         }
-        self.flush_wheel_label(cx);
+        if !self.flush_wheel_label(cx) {
+            return;
+        }
         self.wheel_cell = (self.wheel_cell != Some(cell)).then_some(cell);
         self.wheel_replacing = false;
         self.wheel_source_binding = None;
@@ -672,7 +672,9 @@ impl Workspace {
     }
 
     pub(super) fn deselect_wheel_cell(&mut self, cx: &mut Context<Self>) {
-        self.flush_wheel_label(cx);
+        if !self.flush_wheel_label(cx) {
+            return;
+        }
         self.wheel_cell = None;
         self.wheel_moving = false;
         self.wheel_replacing = false;
@@ -681,20 +683,26 @@ impl Workspace {
     }
 
     pub(super) fn set_wheel_moving(&mut self, moving: bool, cx: &mut Context<Self>) {
-        self.flush_wheel_label(cx);
+        if !self.flush_wheel_label(cx) {
+            return;
+        }
         self.wheel_moving = moving;
         cx.notify();
     }
 
     pub(super) fn set_wheel_replacing(&mut self, replacing: bool, cx: &mut Context<Self>) {
-        self.flush_wheel_label(cx);
+        if !self.flush_wheel_label(cx) {
+            return;
+        }
         self.wheel_replacing = replacing;
         self.wheel_source_binding = None;
         cx.notify();
     }
 
     pub(super) fn set_wheel_scope(&mut self, scope: Option<WheelScope>, cx: &mut Context<Self>) {
-        self.flush_wheel_label(cx);
+        if !self.flush_wheel_label(cx) {
+            return;
+        }
         self.wheel_scope = scope;
         self.wheel_scope_open = false;
         self.wheel_cell = None;
@@ -774,9 +782,12 @@ impl Workspace {
                 return;
             }
         };
-        self.flush_wheel_label(cx);
+        let label = self.wheel_slot_label.read(cx).text().trim().to_owned();
         self.edit_wheel_view("本地动作已保存。", cx, |view| {
             let slot = slot_at(view, ring, sector).ok_or("这个格子是空的。")?;
+            if !label.is_empty() {
+                view.slots[slot].label = label;
+            }
             view.slots[slot].action = ActionSpec::Local(action);
             Ok(())
         });
@@ -809,8 +820,9 @@ impl Workspace {
 
     /// 切换轮盘前先保存正在编辑的名称。
     pub(super) fn switch_wheel(&mut self, id: String, cx: &mut Context<Self>) {
-        self.flush_wheel_label(cx);
-        self.select_wheel(id, cx);
+        if self.flush_wheel_label(cx) {
+            self.select_wheel(id, cx);
+        }
     }
 
     pub(super) fn select_wheel(&mut self, id: String, cx: &mut Context<Self>) {
@@ -838,6 +850,9 @@ impl Workspace {
         if self.wheels.wheels.len() >= 16 {
             self.error = Some("最多可配置 16 个轮盘。".into());
             cx.notify();
+            return;
+        }
+        if !self.flush_wheel_label(cx) {
             return;
         }
         let number = (1..)
