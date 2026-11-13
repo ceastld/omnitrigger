@@ -776,6 +776,7 @@ struct Workspace {
     wheel_slot_selected: Option<usize>,
     /// 轮盘编辑器中选中的格子（圈, 方向）。
     wheel_cell: Option<(u8, u8)>,
+    wheel_preview: Option<wheel_workspace::WheelPreview>,
     wheel_moving: bool,
     wheel_replacing: bool,
     /// 正在编辑的应用专用布局（进程名）；`None` 为通用布局。
@@ -1271,6 +1272,7 @@ impl Workspace {
             wheel_slot_shortcut,
             wheel_slot_selected: None,
             wheel_cell: None,
+            wheel_preview: None,
             wheel_moving: false,
             wheel_replacing: false,
             wheel_scope: None,
@@ -1400,6 +1402,7 @@ impl Workspace {
         if self.recording {
             return;
         }
+        self.wheel_preview = None;
         if page != Page::TextHistory {
             self.text_history.cancel_send();
         }

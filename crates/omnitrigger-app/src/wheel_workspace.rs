@@ -34,6 +34,45 @@ struct DragPlacement {
 }
 
 pub(super) const RING_NAMES: [&str; 3] = ["内圈", "中圈", "外圈"];
+
+#[derive(Default)]
+pub(super) struct WheelPreview {
+    pub(super) selected: Option<(u8, u8)>,
+}
+
+impl WheelPreview {
+    pub(super) fn selected_slot<'a>(&self, view: &'a WheelDefinition) -> Option<&'a WheelSlot> {
+        let (ring, sector) = self.selected?;
+        slot_at(view, ring, sector).map(|index| &view.slots[index])
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PreviewAction {
+    Describe,
+    Notification,
+    BrowseHistory,
+}
+
+/// 编辑器没有外部目标。这里只演示提示和本档浏览，其他动作均留给实际触发。
+fn preview_action(
+    action: &ActionSpec,
+    catalog: &omnitrigger_actions::PackageCatalog,
+) -> PreviewAction {
+    match action {
+        ActionSpec::Notification => PreviewAction::Notification,
+        ActionSpec::Invoke(call)
+            if matches!(
+                crate::action_packages::clipboard_route(true, call, catalog),
+                Ok(crate::action_packages::ClipboardRoute::WorkspaceHistory)
+            ) =>
+        {
+            PreviewAction::BrowseHistory
+        }
+        _ => PreviewAction::Describe,
+    }
+}
+
 /// 尚无动作的圈首次放入槽位时使用的方向数。
 const DEFAULT_SECTORS: u8 = 8;
 
@@ -450,6 +489,7 @@ impl Workspace {
 
     fn apply_wheels(&mut self, wheels: Wheels, cx: &mut Context<Self>) {
         self.hide_wheel(cx);
+        self.wheel_preview = None;
         self.wheels = wheels;
         self.wheels_error = None;
         self.error = None;
@@ -830,6 +870,7 @@ impl Workspace {
             return;
         };
         let name = wheel.name.clone();
+        self.wheel_preview = None;
         self.smooth_scroll.cancel("wheel-editor-content");
         self.smooth_scroll.cancel("wheel-source-list");
         self.wheel_selected = Some(id);
@@ -961,9 +1002,44 @@ impl Workspace {
     }
 
     pub(super) fn preview_wheel(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.wheel_selected.clone() {
+        if self.recording || self.wheels_error.is_some() {
+            return;
+        }
+        if self.test_data && !self.listen {
+            self.wheel_preview = Some(WheelPreview::default());
+            cx.notify();
+        } else if let Some(id) = self.wheel_selected.clone() {
             self.open_wheel(&id, cx);
         }
+    }
+
+    pub(super) fn preview_wheel_cell(&mut self, cell: (u8, u8), cx: &mut Context<Self>) {
+        if self.recording {
+            return;
+        }
+        let Some(view) = self.wheel_view() else {
+            return;
+        };
+        let Some(preview) = &mut self.wheel_preview else {
+            return;
+        };
+        preview.selected = Some(cell);
+        if let Some(slot) = preview.selected_slot(&view) {
+            match preview_action(&slot.action, self.action_service.catalog()) {
+                PreviewAction::Notification => self.show_message(
+                    Vec::new(),
+                    format!("{} · {}", view.name, slot.label),
+                    HitSource::Preview,
+                    cx,
+                ),
+                PreviewAction::BrowseHistory => {
+                    self.status = "已从轮盘打开本测试档文本历史。点“轮盘”可返回编辑。".into();
+                    self.open_page(Page::TextHistory, cx);
+                }
+                PreviewAction::Describe => {}
+            }
+        }
+        cx.notify();
     }
 
     pub(super) fn hide_wheel(&mut self, cx: &mut Context<Self>) {
@@ -1610,6 +1686,77 @@ mod tests {
             })
             .collect();
         wheel
+    }
+
+    #[test]
+    fn editor_preview_reads_selected_scope_and_keeps_empty_cells_empty() {
+        let mut definition = wheel(&[at(0, 0, 8)]);
+        let mut application = definition.slots[0].clone();
+        application.label = "专用动作".into();
+        application.position = at(1, 3, 8);
+        let process = "test.exe".to_owned();
+        definition
+            .app_overrides
+            .push(crate::wheels::WheelApplicationOverride {
+                process: process.clone(),
+                slots: vec![application],
+            });
+        let original = definition.clone();
+        let view = scope_view(
+            &definition,
+            Some(&WheelScope::App(process)),
+            &CompiledScenes::default(),
+        );
+        let mut preview = WheelPreview::default();
+        assert!(preview.selected_slot(&view).is_none());
+        preview.selected = Some((0, 0));
+        assert!(preview.selected_slot(&view).is_none());
+        preview.selected = Some((1, 3));
+        assert_eq!(preview.selected_slot(&view).unwrap().label, "专用动作");
+        assert_eq!(definition, original);
+    }
+
+    #[test]
+    fn editor_preview_demonstrates_only_notifications_and_own_history() {
+        let catalog = omnitrigger_actions::PackageCatalog::default();
+        assert_eq!(
+            preview_action(&ActionSpec::Notification, &catalog),
+            PreviewAction::Notification
+        );
+        let mut call = omnitrigger_actions::ActionCall {
+            package_id: "examples.n10-rust".into(),
+            action_id: "toggle".into(),
+            action_version: 1,
+            input: serde_json::json!({}),
+        };
+        assert_eq!(
+            preview_action(&ActionSpec::Invoke(call.clone()), &catalog),
+            PreviewAction::BrowseHistory
+        );
+        call.input = serde_json::json!({"profile":"script-test"});
+        assert_eq!(
+            preview_action(&ActionSpec::Invoke(call.clone()), &catalog),
+            PreviewAction::Describe
+        );
+        call.input = serde_json::json!({"profile":"other"});
+        let external = crate::external_action::ExternalAction {
+            provider: "测试".into(),
+            command: crate::execution::CommandAction {
+                program: "example.exe".into(),
+                args: vec![],
+                working_directory: None,
+            },
+            disabled_reason: None,
+        };
+        for action in [
+            ActionSpec::Invoke(call),
+            ActionSpec::Command(external.command.clone()),
+            ActionSpec::External(external),
+            preset_action(&Preset::Keys("Ctrl+W")),
+            preset_action(&Preset::Window(WindowOperation::Close)),
+        ] {
+            assert_eq!(preview_action(&action, &catalog), PreviewAction::Describe);
+        }
     }
 
     #[test]

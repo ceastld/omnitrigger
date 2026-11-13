@@ -160,6 +160,68 @@ impl Workspace {
         let stage = (height - overhead)
             .min(width - PANEL_WIDTH - 262.)
             .clamp(STAGE_RANGE.0, STAGE_RANGE.1);
+        if let Some((preview, view)) = self
+            .wheel_preview
+            .as_ref()
+            .and_then(|preview| self.wheel_view().map(|view| (preview, view)))
+        {
+            let slot = preview.selected_slot(&view);
+            let description = match slot {
+                Some(slot) if matches!(slot.action, ActionSpec::Notification) => "已显示测试提示。",
+                Some(_) => "要验证此动作的实际效果，请在启用监听的配置档触发轮盘。",
+                None if preview.selected.is_some() => "这个方位没有配置动作。",
+                None => "点选轮盘上的格子，查看它对应的动作。",
+            };
+            return div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .p(px(20.))
+                .flex()
+                .flex_col()
+                .gap(px(20.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(panel_title(format!("试用轮盘 · {}", view.name)))
+                        .child(
+                            button("end-wheel-preview", "结束试用", Tone::Secondary, true)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.wheel_preview = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .items_center()
+                        .flex()
+                        .gap(px(24.))
+                        .child(self.wheel_cell_stage(
+                            &view,
+                            &view_geometry(&view),
+                            stage,
+                            can_edit,
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(10.))
+                                .when_some(slot, |el, slot| {
+                                    el.child(panel_title(slot.label.clone()))
+                                        .child(label(action_text(&slot.action)))
+                                })
+                                .child(caption(description)),
+                        ),
+                );
+        }
         let mut tabs = div()
             .flex()
             .flex_wrap()
@@ -538,9 +600,11 @@ impl Workspace {
         let stage = crate::radial_wheel::editor_stage(
             view,
             geometry,
-            self.wheel_cell,
+            self.wheel_preview
+                .as_ref()
+                .map_or(self.wheel_cell, |preview| preview.selected),
             self.wheel_hover,
-            self.wheel_moving,
+            self.wheel_preview.is_none() && self.wheel_moving,
             |index| {
                 view.slots
                     .get(index)
@@ -584,13 +648,19 @@ impl Workspace {
                         f32::from(event.position.x - stage.origin.x),
                         f32::from(event.position.y - stage.origin.y),
                     );
-                    this.wheel_scope_open = false;
+                    if this.wheel_preview.is_none() {
+                        this.wheel_scope_open = false;
+                    }
                     if !can_edit {
                         cx.notify();
                         return;
                     }
                     if let Some(cell) = crate::radial_wheel::editor_hit(&geometry, size, point) {
-                        this.select_wheel_cell(cell, cx);
+                        if this.wheel_preview.is_some() {
+                            this.preview_wheel_cell(cell, cx);
+                        } else {
+                            this.select_wheel_cell(cell, cx);
+                        }
                     }
                 }),
             )
