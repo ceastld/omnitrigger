@@ -741,14 +741,15 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
         exit_rejected("配置档命令不能与其他参数混用。");
     }
     let interactive = plain && parsed.command.is_none();
-    if !parsed.any() && !interactive {
-        // 其他命令行入口保持原有路径解析，不做探针。
+    let env_root = std::env::var_os("OMNITRIGGER_HOME").filter(|root| !root.is_empty());
+    if !parsed.any() && !interactive && env_root.is_none() {
+        // 未指定数据根的其他命令无需探测桌面或预先设置路径。
         return Startup::daily();
     }
     let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     let (root, source) = resolve_root(
         parsed.data_root.as_deref(),
-        std::env::var_os("OMNITRIGGER_HOME"),
+        env_root,
         local_app_data.clone(),
     )
     .unwrap_or_else(|message| exit_rejected(&message));
