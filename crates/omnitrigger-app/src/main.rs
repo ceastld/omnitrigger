@@ -4302,7 +4302,7 @@ impl Workspace {
             .as_ref()
             .or_else(|| self.action_error.as_ref().map(|(_, error)| error))
         {
-            let offline = self.backend.is_none() && !self.restarting;
+            let offline = self.listener() == Listener::Offline;
             return Some(
                 banner(theme::DANGER, Icon::Alert)
                     .child(
