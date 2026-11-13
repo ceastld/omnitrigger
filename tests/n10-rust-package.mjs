@@ -56,14 +56,15 @@ test('uses exact existing PackageManifest and ActionDefinition fields',()=>{
 });
 test('identity and display variant preserve original N10 action',()=>{
   assert.equal(manifest.id,'examples.n10-rust');assert.equal(action.id,'32c12786-9bb8-4b0c-8d55-7e6a4c8a5d10');
-  assert.equal(action.title,'剪贴板 n10');assert.equal(action.version,1);assert.equal(manifest.actions.length,1);
+  assert.equal(action.title,'剪贴板 n10');assert.equal(action.version,1);
+  assert.deepEqual(manifest.actions.map(item=>item.id),[action.id,'toggle']);
   for(const value of [manifest.id,action.id])assert(/^[A-Za-z0-9_.-]{1,100}$/.test(value)&&!['.','..'].includes(value));
 });
 test('entry is local package file and sole frozen implementation',()=>{
   assert.equal(path.dirname(entry),packageRoot);assert.equal(lstatSync(entry).isSymbolicLink(),false);
   assert.equal(typeof module.main,'function');
   assert.equal(createHash('sha256').update(readFileSync(entry)).digest('hex'),'54b46f70a7cebffb4dad4b986d22b3faae494e8515a85f9a991c57461b2a324a');
-  assert.deepEqual(readdirSync(packageRoot).filter(file=>file.endsWith('.mjs')||file.endsWith('.js')),['n10-rust-bound.mjs']);
+  assert.deepEqual(readdirSync(packageRoot).filter(file=>file.endsWith('.mjs')||file.endsWith('.js')).sort(),['n10-rust-bound.mjs','toggle.mjs']);
 });
 test('source catalog config resolves to sibling actions and keeps binding disabled',()=>{
   const expectedVersion=Number(readFileSync(path.join(root,'crates/omnitrigger-app/src/settings.rs'),'utf8').match(/const CONFIG_VERSION: u32 = (\d+);/)[1]);
@@ -122,6 +123,37 @@ test('other data root never becomes acceptance or retry',()=>{
   const f=fixture({wrongRoot:true});const reply=invoke(f);assert.equal(reply.result,undefined);assert.equal(reply.error.effect_state,'unknown');
   assert.equal(reply.trace.filter(row=>row.kind==='capture').length,1);return reply;
 });
+const dailyAction = manifest.actions.find(item => item.id === 'toggle');
+assert.equal(dailyAction.runtime, 'node');
+assert.equal(dailyAction.single_instance, true);
+const { default: toggle } = await import(pathToFileURL(path.join(packageRoot, dailyAction.entry)));
+for (const started of [true, false]) {
+  const { ctx, target } = fixture();
+  let count = 0;
+  ctx.process.run = async (program, args) => {
+    count++;
+    assert.equal(program, ctx.input.cliExecutable);
+    assert.equal(args[0], 'toggle');
+    assert(!args.includes('--no-start'));
+    assert.deepEqual(JSON.parse(args[args.indexOf('--target-context') + 1]), target);
+    return { code: 0, stdout: JSON.stringify({ ok: true, state: 'accepted', result: {
+      started, targetContextVerified: true, targetContextVersion: 1, testProfile: false,
+      executable: ctx.input.hostExecutable, dataRoot: ctx.input.dataRoot,
+    } }) };
+  };
+  assert.deepEqual(await toggle(ctx), { accepted: true, started });
+  assert.equal(count, 1);
+}
+{
+  const { ctx } = fixture();
+  let count = 0;
+  ctx.process.run = async () => {
+    count++;
+    return { code: 4, stdout: JSON.stringify({ ok: false, submitted: true, state: 'unknown' }) };
+  };
+  await assert.rejects(toggle(ctx), error => error.effectState === 'unknown');
+  assert.equal(count, 1);
+}
 const result={result:'passed',cases:reports.length,reports,actualEntryFromManifest:path.relative(root,entry).replaceAll('\\','/'),
   actualBusinessModuleSha256:createHash('sha256').update(readFileSync(entry)).digest('hex'),actualNativeProcesses:0,realRustCatalogLoaderExecuted:false};
 

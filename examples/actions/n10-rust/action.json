@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "examples.n10-rust",
   "name": "N10 剪贴板适配",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "actions": [
     {
       "id": "32c12786-9bb8-4b0c-8d55-7e6a4c8a5d10",
@@ -10,6 +10,14 @@
       "version": 1,
       "runtime": "script",
       "entry": "n10-rust-bound.mjs",
+      "single_instance": true
+    },
+    {
+      "id": "toggle",
+      "title": "切换独立剪贴板",
+      "version": 1,
+      "runtime": "node",
+      "entry": "toggle.mjs",
       "single_instance": true
     }
   ]
