@@ -420,7 +420,7 @@ impl Workspace {
             cx.notify();
             return false;
         }
-        match proposed.save_changes(&crate::settings::path(), &self.wheels) {
+        match proposed.save_changes(&crate::settings::path(), &self.wheels, &self.wheel_scenes) {
             Ok(()) => {
                 self.apply_wheels(proposed, cx);
                 self.status = "轮盘已保存。".into();

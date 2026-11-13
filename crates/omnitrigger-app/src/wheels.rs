@@ -1,8 +1,8 @@
 //! 自定义轮盘的动作配置；热键绑定只引用轮盘标识，槽位直接保存可执行动作。
-use crate::{settings::ActionSpec, shortcut::ShortcutAction};
+use crate::{scenes::CompiledScenes, settings::ActionSpec, shortcut::ShortcutAction};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::Path,
 };
 
@@ -273,9 +273,42 @@ impl Wheels {
         Ok(())
     }
 
-    /// 在同一把锁内核对窗口载入的轮盘、备份旧版本并写入新内容。
-    pub fn save_changes(&self, config_path: &Path, previous: &Self) -> Result<(), String> {
+    /// 引用场景时按热键、轮盘的顺序持锁，直到核对基线、备份和写入完成。
+    pub fn save_changes(
+        &self,
+        config_path: &Path,
+        previous: &Self,
+        loaded_scenes: &CompiledScenes,
+    ) -> Result<(), String> {
         self.validate()?;
+        let referenced: BTreeSet<_> = self
+            .wheels
+            .iter()
+            .flat_map(|wheel| {
+                wheel
+                    .slots
+                    .iter()
+                    .chain(wheel.app_overrides.iter().flat_map(|app| &app.slots))
+            })
+            .filter_map(|slot| slot.scene.as_deref())
+            .collect();
+        let _bindings_lock = if referenced.is_empty() {
+            None
+        } else {
+            let lock = crate::settings::lock_config(config_path, "热键")?;
+            let current = crate::settings::load_scenes_from(config_path)
+                .map_err(|error| format!("读取轮盘引用的场景失败：{error} 请修复后重新载入。"))?;
+            for name in referenced {
+                let disk = crate::wheel_scenes::effective_scene_scope(&current, name)
+                    .map_err(|error| format!("{error} 请修复场景引用或重新载入。"))?;
+                if disk != crate::wheel_scenes::effective_scene_scope(loaded_scenes, name)? {
+                    return Err(format!(
+                        "场景 {name} 的应用范围已在其他窗口或文件中修改，请重新载入后再编辑轮盘。"
+                    ));
+                }
+            }
+            Some(lock)
+        };
         let destination = config_path.with_file_name("wheels.json");
         let _lock = crate::settings::lock_config(&destination, "轮盘")?;
         let (stored, legacy) = match std::fs::read_to_string(&destination) {
@@ -452,7 +485,7 @@ mod tests {
 
         fn save(&self, proposed: &Wheels) -> Result<(), String> {
             let previous = Wheels::load(&self.bindings()).unwrap_or_default();
-            proposed.save_changes(&self.bindings(), &previous)
+            proposed.save_changes(&self.bindings(), &previous, &CompiledScenes::default())
         }
 
         fn assert_files(&self, expected: &[&str]) {
@@ -503,13 +536,15 @@ mod tests {
         let mut proposed = baseline.clone();
         proposed.wheels[0].accent = WheelAccent::Amber;
         assert!(proposed
-            .save_changes(&scratch.bindings(), &baseline)
+            .save_changes(&scratch.bindings(), &baseline, &CompiledScenes::default())
             .unwrap_err()
             .contains("重新载入"));
         assert_eq!(std::fs::read_to_string(scratch.wheels()).unwrap(), original);
         let mut edited = Wheels::load(&scratch.bindings()).unwrap();
         edited.wheels[0].accent = WheelAccent::Amber;
-        edited.save_changes(&scratch.bindings(), &external).unwrap();
+        edited
+            .save_changes(&scratch.bindings(), &external, &CompiledScenes::default())
+            .unwrap();
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), edited);
     }
 
@@ -523,7 +558,7 @@ mod tests {
             edited.wheels[0].name = name.into();
             barrier.wait();
             edited
-                .save_changes(&scratch.bindings(), &baseline)
+                .save_changes(&scratch.bindings(), &baseline, &CompiledScenes::default())
                 .map(|()| edited)
         };
         let (first, second) = std::thread::scope(|scope| {
@@ -867,6 +902,78 @@ mod tests {
     }
 
     #[test]
+    fn save_checks_only_the_effective_scopes_still_used_by_wheel_slots() {
+        let scratch = Scratch::new();
+        let config = scratch.bindings();
+        let source = json!({
+            "version": 24, "bindings": [],
+            "app_sets": {"editors": ["code", "notepad"]},
+            "scenes": {
+                "editing": {"process_scope": {"allow": ["@editors"]}},
+                "writer": {"extends": ["editing"]},
+                "other": {}
+            }
+        });
+        std::fs::write(&config, source.to_string()).unwrap();
+        let loaded = crate::settings::load_scenes_from(&config).unwrap();
+        let mut baseline = Wheels::default();
+        let mut slots = vec![positioned(0, 0, 8, false), positioned(0, 0, 8, false)];
+        slots[1].scene = Some("writer".into());
+        baseline.wheels[0]
+            .app_overrides
+            .push(WheelApplicationOverride {
+                process: "code.exe".into(),
+                slots,
+            });
+        let original = encode(&baseline);
+        std::fs::write(scratch.wheels(), &original).unwrap();
+        let mut proposed = baseline.clone();
+        proposed.wheels[0].accent = WheelAccent::Violet;
+
+        let mut removed = source.clone();
+        removed["scenes"].as_object_mut().unwrap().remove("writer");
+        let mut pointer = source.clone();
+        pointer["scenes"]["editing"]["pointer_scope"] = json!({"allow":["code"]});
+        let mut membership = source.clone();
+        membership["app_sets"]["editors"] = json!(["chrome"]);
+        let mut identity = source.clone();
+        identity["scenes"]["editing"]["process_scope"]["identity"] = "shell_context".into();
+        for modified in [removed, pointer, membership, identity] {
+            std::fs::write(&config, modified.to_string()).unwrap();
+            let error = proposed
+                .save_changes(&config, &baseline, &loaded)
+                .unwrap_err();
+            assert!(
+                error.contains("writer") && error.contains("重新载入"),
+                "{modified}: {error}"
+            );
+            assert_eq!(std::fs::read_to_string(scratch.wheels()).unwrap(), original);
+        }
+
+        let mut equivalent = source;
+        equivalent["app_sets"]["editors"] = json!(["NOTEPAD.EXE", "Code"]);
+        equivalent["scenes"]["editing"]["process_scope"]["deny"] = json!(["calc"]);
+        equivalent["scenes"]["other"] = json!({"pointer_scope":{"allow":["explorer"]}});
+        std::fs::write(&config, equivalent.to_string()).unwrap();
+        let lock = crate::settings::lock_config(&config, "热键").unwrap();
+        assert!(proposed
+            .save_changes(&config, &baseline, &loaded)
+            .unwrap_err()
+            .contains("正在保存热键"));
+        drop(lock);
+        proposed.save_changes(&config, &baseline, &loaded).unwrap();
+        assert_eq!(Wheels::load(&config).unwrap(), proposed);
+
+        // 即使热键文件损坏，也允许删掉最后一个场景槽位来修复轮盘。
+        std::fs::write(&config, "{").unwrap();
+        let mut repaired = proposed.clone();
+        repaired.wheels[0].app_overrides[0].slots.pop();
+        repaired.save_changes(&config, &proposed, &loaded).unwrap();
+        assert_eq!(Wheels::load(&config).unwrap(), repaired);
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "{");
+    }
+
+    #[test]
     fn sparse_three_ring_layout_preserves_gaps_and_half_step_on_round_trip() {
         let scratch = Scratch::new();
         let mut expected = Wheels::default();
@@ -913,6 +1020,8 @@ mod tests {
     #[test]
     fn scene_slots_need_v6_positions_and_valid_names_and_stay_outside_the_shared_limit() {
         let scratch = Scratch::new();
+        std::fs::write(scratch.bindings(), r#"{"version":24,"scenes":{"chrome":{"process_scope":{"allow":["chrome"]}},"code":{"process_scope":{"allow":["code"]}}},"bindings":[]}"#).unwrap();
+        let scenes = crate::settings::load_scenes_from(&scratch.bindings()).unwrap();
         let mut original: serde_json::Value =
             serde_json::from_str(&encode(&Wheels::default())).unwrap();
         original["version"] = 5.into();
@@ -934,7 +1043,9 @@ mod tests {
             Wheels::decode(&old.to_string()).unwrap_err(),
             "槽位场景需要版本 6 轮盘配置。"
         );
-        scratch.save(&wheels).unwrap();
+        wheels
+            .save_changes(&scratch.bindings(), &Wheels::default(), &scenes)
+            .unwrap();
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), wheels);
         assert_eq!(
             std::fs::read_to_string(scratch.0.join("wheels.json.v5.bak")).unwrap(),

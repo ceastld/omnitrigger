@@ -1217,7 +1217,11 @@ pub fn save(previous: &[Binding], bindings: &[Binding]) -> Result<(), TriggerErr
 
 /// 读取配置中的场景定义并合并展开，供轮盘槽位按场景筛选；不读取或校验触发器。
 pub fn load_scenes() -> Result<CompiledScenes, String> {
-    match std::fs::read_to_string(path()) {
+    load_scenes_from(&path())
+}
+
+pub fn load_scenes_from(config_path: &Path) -> Result<CompiledScenes, String> {
+    match std::fs::read_to_string(config_path) {
         Ok(text) => compile_scenes(&text),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(CompiledScenes::default()),
         Err(error) => Err(format!("读取场景定义失败：{error}")),

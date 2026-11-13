@@ -32,6 +32,25 @@ pub fn scene_scope(scenes: &CompiledScenes, name: &str) -> Result<ProcessScope, 
         .map_err(|error| error.to_string())
 }
 
+/// 用于编辑基线比较：同一匹配域里，名单顺序和不影响白名单的排除项不改变可见槽位。
+pub(super) fn effective_scene_scope(
+    scenes: &CompiledScenes,
+    name: &str,
+) -> Result<ProcessScope, String> {
+    let mut scope = scene_scope(scenes, name)?;
+    if scope.is_global() {
+        return Ok(ProcessScope::default());
+    }
+    if scope.allow.is_empty() {
+        scope.deny.sort_unstable();
+    } else {
+        scope.allow.retain(|name| !scope.deny.contains(name));
+        scope.allow.sort_unstable();
+        scope.deny.clear();
+    }
+    Ok(scope)
+}
+
 /// 校验一组槽位的场景引用：场景存在、不限制指针窗口，且同一方位的槽位不会同时以相同具体程度命中。
 pub fn check_slots(slots: &[WheelSlot], scenes: &CompiledScenes) -> Result<(), String> {
     let mut by_position: HashMap<(u8, u8), Vec<(usize, ProcessScope)>> = HashMap::new();
