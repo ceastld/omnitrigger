@@ -710,6 +710,8 @@ struct Workspace {
     page: Page,
     theme_mode: appearance::Mode,
     theme_error: Option<String>,
+    opening_test_copy: bool,
+    test_copy_error: Option<String>,
     update_ui: update_ui::UpdateUi,
     history_filter: HistoryFilter,
     smooth_scroll: smooth_scroll::ScrollRegions,
@@ -1210,6 +1212,8 @@ impl Workspace {
             confirm_delete: None,
             theme_mode,
             theme_error,
+            opening_test_copy: false,
+            test_copy_error: None,
             update_ui: update_ui::UpdateUi::new(),
             page: if text_history_page {
                 Page::TextHistory

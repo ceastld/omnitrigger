@@ -876,12 +876,7 @@ fn testing_workspace(root: &Path) -> Result<Entry, String> {
         if entry.kind != "test" {
             return Err(format!("配置档 {TEST_ALIAS} 已用于其他用途。"));
         }
-        if !catalog_path(root)
-            .try_exists()
-            .map_err(|error| error.to_string())?
-        {
-            write_json(&catalog_path(root), &catalog)?;
-        }
+        persist_recovered_catalog(root, &catalog)?;
         return Ok(entry.clone());
     }
     insert_profile(
@@ -891,6 +886,50 @@ fn testing_workspace(root: &Path) -> Result<Entry, String> {
         &Seed::Empty,
         Some("本机测试"),
     )
+}
+
+fn persist_recovered_catalog(root: &Path, catalog: &Catalog) -> Result<(), String> {
+    let path = catalog_path(root);
+    if !path.try_exists().map_err(|error| error.to_string())? {
+        write_json(&path, catalog)?;
+    }
+    Ok(())
+}
+
+fn daily_test_copy(root: &Path) -> Result<Entry, String> {
+    let _lock = lock_catalog(root)?;
+    let mut catalog = read_catalog(root)?;
+    let seed = Seed::Copy(DEFAULT_ID.into());
+    let mut alias = String::from("daily-copy");
+    let mut suffix = 2;
+    while let Some(entry) = catalog.find(&alias) {
+        if entry.alias == alias && entry.kind == "test" && entry.seed == "copy:default" {
+            persist_recovered_catalog(root, &catalog)?;
+            return Ok(entry.clone());
+        }
+        // 别名可能已被用户用于其他数据，保留原配置档。
+        alias = format!("daily-copy-{suffix}");
+        suffix += 1;
+    }
+    insert_profile(root, &mut catalog, &alias, &seed, Some("日常配置副本"))
+}
+
+pub(super) fn open_daily_test_copy(root: &Path) -> Result<(), String> {
+    let program = std::env::current_exe().map_err(|error| error.to_string())?;
+    let entry = daily_test_copy(root)?;
+    let mut launch = std::process::Command::new(program);
+    launch
+        .arg("--data-root")
+        .arg(root)
+        .arg("--profile")
+        .arg(entry.id);
+    launch
+        .env_remove("OMNITRIGGER_UPDATE_HEALTH")
+        .env_remove("OMNITRIGGER_UPDATE_ERROR");
+    launch
+        .spawn()
+        .map_err(|error| format!("无法启动测试窗口：{error}"))?;
+    Ok(())
 }
 
 fn insert_profile(
@@ -2223,6 +2262,38 @@ mod tests {
         assert!(testing_workspace(&root).unwrap_err().contains("重复"));
         assert!(!path.exists());
         assert_eq!(std::fs::read(&config).unwrap(), b"test bindings");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn settings_test_copy_reuses_edits_and_preserves_existing_workspaces() {
+        let root = temp_root("settings-copy");
+        let testing = testing_workspace(&root).unwrap();
+        let occupied = create_profile(&root, "daily-copy", &Seed::Empty, None).unwrap();
+        let file = |entry: &Entry| profile_dir(&root, &entry.id).join("bindings.json");
+        std::fs::write(file(&testing), "testing").unwrap();
+        std::fs::write(file(&occupied), "existing").unwrap();
+        std::fs::write(root.join("bindings.json"), "daily").unwrap();
+        std::fs::write(root.join("clipboard-history.json"), "personal history").unwrap();
+        let copy = std::thread::scope(|scope| {
+            let first = scope.spawn(|| daily_test_copy(&root).unwrap());
+            let second = daily_test_copy(&root).unwrap();
+            assert_eq!(first.join().unwrap(), second);
+            second
+        });
+        assert_eq!(copy.alias, "daily-copy-2");
+        assert_eq!(std::fs::read(file(&copy)).unwrap(), b"daily");
+        assert!(!profile_dir(&root, &copy.id)
+            .join("clipboard-history.json")
+            .exists());
+        std::fs::write(file(&copy), "edited").unwrap();
+        std::fs::remove_file(catalog_path(&root)).unwrap();
+        assert_eq!(daily_test_copy(&root).unwrap(), copy);
+        assert!(catalog_path(&root).is_file());
+        assert_eq!(std::fs::read(file(&copy)).unwrap(), b"edited");
+        assert_eq!(std::fs::read(file(&occupied)).unwrap(), b"existing");
+        assert_eq!(std::fs::read(file(&testing)).unwrap(), b"testing");
+        assert_eq!(std::fs::read(root.join("bindings.json")).unwrap(), b"daily");
         std::fs::remove_dir_all(root).unwrap();
     }
 

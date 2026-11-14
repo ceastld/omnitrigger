@@ -29,6 +29,76 @@ fn preview(dark: bool) -> Div {
 }
 
 impl Workspace {
+    fn open_test_copy(&mut self, cx: &mut Context<Self>) {
+        if self.opening_test_copy || self.test_data {
+            return;
+        }
+        let config = crate::settings::path();
+        let Some(root) = config.parent() else { return };
+        let root = if root.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            root
+        }
+        .to_owned();
+        self.opening_test_copy = true;
+        self.test_copy_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::profiles::open_daily_test_copy(&root) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.opening_test_copy = false;
+                this.test_copy_error = result.err();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_test_copy(&self, cx: &mut Context<Self>) -> Div {
+        let label = if self.opening_test_copy {
+            "正在打开…"
+        } else {
+            "打开测试副本"
+        };
+        card()
+            .p(px(18.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(16.))
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("测试配置"),
+                    )
+                    .child(
+                        theme::button(
+                            "open-test-copy",
+                            label,
+                            theme::Tone::Primary,
+                            !self.opening_test_copy,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.open_test_copy(cx))),
+                    ),
+            )
+            .child(caption(
+                "首次复制已保存的热键、轮盘和动作。之后打开同一副本，保留测试修改。",
+            ))
+            .when_some(self.test_copy_error.clone(), |el, error| {
+                el.child(caption(error).text_color(theme::rgb(theme::DANGER)))
+            })
+    }
+
     fn choose_theme(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
         match crate::appearance::save(&crate::settings::path(), mode) {
             Ok(()) => {
@@ -48,6 +118,11 @@ impl Workspace {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let test_copy = (!self.test_data
+            && crate::settings::path()
+                .file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json")))
+        .then(|| self.render_test_copy(cx));
         let choices = Mode::ALL.into_iter().enumerate().map(|(index, mode)| {
             let selected = self.theme_mode == mode;
             card()
@@ -89,6 +164,7 @@ impl Workspace {
         div().id("appearance-settings").flex_1().min_w_0().h_full().overflow_y_scroll()
             .child(div().pt(px(6.)).pb(px(24.)).pl(px(20.)).pr(px(24.)).flex().flex_col().gap(px(24.))
                 .child(heading("设置", "让 OmniTrigger 更适合你的使用习惯"))
+                .children(test_copy)
                 .child(div().flex().flex_col().gap(px(14.))
                     .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("颜色主题"))
                     .child(caption("选择后立即生效，自动保存。跟随系统会与 Windows 的浅色或深色模式保持一致。"))
