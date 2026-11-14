@@ -23,9 +23,17 @@ pub struct Startup {
     pub test_data: bool,
     /// 是否安装输入 Hook。测试配置档默认不安装，`--listen` 显式开启。
     pub listen: bool,
+    external_copy_roots: Option<(PathBuf, PathBuf)>,
 }
 
 impl Startup {
+    #[cfg(windows)]
+    pub fn offer_external_copy(&self) {
+        if let Some((root, local_app_data)) = &self.external_copy_roots {
+            offer_external_copy(root, local_app_data);
+        }
+    }
+
     /// 普通主窗口按数据目录与监听模式复用。定向启动页和一次性命令保留各自的入口。
     pub fn workspace_key(&self, config: &Path) -> Result<String, String> {
         use sha2::{Digest, Sha256};
@@ -43,6 +51,7 @@ impl Startup {
             test_name: None,
             test_data: false,
             listen: true,
+            external_copy_roots: None,
         }
     }
 
@@ -59,6 +68,7 @@ impl Startup {
             test_name: test.then(|| entry.name.clone()),
             test_data: test,
             listen: !test || listen,
+            external_copy_roots: None,
         }
     }
 
@@ -577,6 +587,8 @@ impl Catalog {
 
 /// 参与复制、导入与备份的数据文件：顶层普通文件，排除锁、旧备份与配置档自身的登记文件。
 fn is_data_file(name: &str) -> bool {
+    #[cfg(windows)]
+    let name = name.to_ascii_lowercase();
     !(name.ends_with(".lock")
         || name.ends_with(".bak")
         || name.ends_with(".tmp")
@@ -614,14 +626,22 @@ fn copy_data(from: &Path, to: &Path, include_file: fn(&str) -> bool) -> Result<u
     let mut copied = 0;
     for entry in std::fs::read_dir(from).map_err(fail)? {
         let entry = entry.map_err(fail)?;
-        let name = entry.file_name().to_string_lossy().into_owned();
+        let name = entry.file_name();
         let kind = entry.file_type().map_err(fail)?;
-        if kind.is_file() && include_file(&name) {
-            std::fs::copy(entry.path(), to.join(&name)).map_err(fail)?;
+        if kind.is_file() && include_file(&name.to_string_lossy()) {
+            std::fs::copy(entry.path(), to.join(name)).map_err(fail)?;
             copied += 1;
-        } else if kind.is_dir() && name == "actions" {
-            copy_tree(&entry.path(), &to.join(&name)).map_err(fail)?;
         }
+    }
+    // 与动作目录服务使用同一路径，由文件系统解析大小写；不跟随目录符号链接。
+    let actions = from.join("actions");
+    match actions.symlink_metadata() {
+        Ok(metadata) if metadata.is_dir() => {
+            copy_tree(&actions, &to.join("actions")).map_err(fail)?
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(fail(error)),
     }
     Ok(copied)
 }
@@ -951,12 +971,6 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
         );
     }
     let profile = parsed.profile.as_deref().filter(|key| *key != DEFAULT_ID);
-    #[cfg(windows)]
-    if interactive && profile.is_none() && source == RootSource::Default {
-        if let Some(local_app_data) = &local_app_data {
-            offer_external_copy(&root, local_app_data);
-        }
-    }
     let (config, startup) = match profile {
         Some(key) => {
             let result = if parsed.test_workspace {
@@ -982,9 +996,12 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
         }
         None => {
             let config = (source != RootSource::Default).then(|| root.join("bindings.json"));
-            let startup = config
+            let mut startup = config
                 .as_deref()
                 .map_or_else(Startup::daily, Startup::for_config);
+            if interactive && source == RootSource::Default {
+                startup.external_copy_roots = local_app_data.map(|local| (root, local));
+            }
             (config, startup)
         }
     };
@@ -1465,6 +1482,66 @@ mod tests {
     }
 
     #[test]
+    fn copies_the_actions_directory_resolved_by_the_filesystem() {
+        let root = temp_root("actions-spelling");
+        let fixture = root.join("fixture");
+        let package = Path::new("actions/example/action.json");
+        let mixed = fixture.join("Actions/example/action.json");
+        std::fs::create_dir_all(mixed.parent().unwrap()).unwrap();
+        std::fs::write(&mixed, "source").unwrap();
+        std::fs::write(fixture.join("PrOfIlEs.JsOn"), "foreign catalog").unwrap();
+        let entry = create_profile(&root, "ui", &Seed::Fixture(fixture.clone()), None).unwrap();
+        let directory = profile_dir(&root, &entry.id);
+        assert_eq!(directory.join("PrOfIlEs.JsOn").exists(), !cfg!(windows));
+        if !fixture.join(package).exists() {
+            // 在区分大小写的目录中，Actions 并不是动作服务使用的目录。
+            assert!(!directory.join("Actions").exists());
+            assert!(!directory.join("actions").exists());
+        } else {
+            assert_eq!(std::fs::read(directory.join(package)).unwrap(), b"source");
+            std::fs::write(directory.join(package), "edited").unwrap();
+            let (_, previous) = reset_profile(&root, "ui").unwrap();
+            assert_eq!(std::fs::read(directory.join(package)).unwrap(), b"source");
+            assert_eq!(
+                std::fs::read(previous.unwrap().join(package)).unwrap(),
+                b"edited"
+            );
+
+            // 外部副本导入先备份现有动作；两侧原有目录可使用不同大小写。
+            let existing = root.join("ACTIONS/example");
+            std::fs::create_dir_all(&existing).unwrap();
+            std::fs::write(existing.join("action.json"), "original").unwrap();
+            let backup = root.join("backups/before-import");
+            let catalog = std::fs::read(catalog_path(&root)).unwrap();
+            copy_data(&root, &backup, is_data_file).unwrap();
+            copy_data(&fixture, &root, is_data_file).unwrap();
+            assert_eq!(std::fs::read(catalog_path(&root)).unwrap(), catalog);
+            assert_eq!(std::fs::read(root.join(package)).unwrap(), b"source");
+            assert_eq!(std::fs::read(backup.join(package)).unwrap(), b"original");
+            copy_data(&backup, &root, is_data_file).unwrap();
+            assert_eq!(std::fs::read(root.join(package)).unwrap(), b"original");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_file_exclusions_follow_platform_case_rules() {
+        for name in [
+            "profiles.json",
+            "profile.json",
+            "bindings.lock",
+            "wheels.old.bak",
+            "save.tmp",
+            ".root-probe-123",
+            "connector.previous-registration-123.json",
+        ] {
+            assert!(!is_data_file(name));
+            assert_eq!(is_data_file(&name.to_ascii_uppercase()), !cfg!(windows));
+        }
+        assert!(is_data_file("My Actions.JSON"));
+    }
+
+    #[test]
     fn test_seeds_skip_connector_registration_and_backups_preserve_it() {
         let root = temp_root("connector-registration");
         let fixture = root.join("fixture");
@@ -1800,6 +1877,7 @@ mod tests {
             test_name: Some("浏览视图".into()),
             test_data: true,
             listen: false,
+            ..Startup::daily()
         };
         assert_eq!(
             test.window_title("OmniTrigger"),

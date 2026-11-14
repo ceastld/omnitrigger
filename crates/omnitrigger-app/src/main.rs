@@ -8772,7 +8772,12 @@ fn main() {
             .workspace_key(&config_path)
             .and_then(|key| omnitrigger_windows::WorkspaceInstance::open(&key))
         {
-            Ok(Some(instance)) => Some(instance),
+            Ok(Some(instance)) => {
+                // 只有新主窗口能在载入配置前导入；重复启动只唤回原窗口。
+                #[cfg(windows)]
+                profile_startup.offer_external_copy();
+                Some(instance)
+            }
             Ok(None) => return,
             Err(message) => {
                 omnitrigger_windows::show_error_dialog("OmniTrigger 无法打开配置窗口", &message);
