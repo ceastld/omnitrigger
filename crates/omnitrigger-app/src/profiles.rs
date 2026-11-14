@@ -133,6 +133,31 @@ impl Startup {
     }
 }
 
+/// 显式数据根可以位于另一个测试档里。先持有外层目录，再读取其中的登记与数据。
+fn prepare_root_access(
+    config: &Path,
+    check_only: bool,
+) -> Result<(Startup, Vec<std::fs::File>), String> {
+    let Some(target) = config_directory(config) else {
+        return Ok((Startup::daily(), Vec::new()));
+    };
+    let directories: Vec<_> = target
+        .ancestors()
+        .filter(|dir| is_profile_directory(dir))
+        .collect();
+    let mut guards = Vec::new();
+    let mut startup = Startup::daily();
+    for directory in directories.into_iter().rev() {
+        let path = directory.join("bindings.json");
+        let profile = Startup::for_config(&path);
+        guards.extend(profile.prepare_access(&path, check_only)?);
+        if directory == target {
+            startup = profile;
+        }
+    }
+    Ok((startup, guards))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Command {
     Create {
@@ -462,29 +487,34 @@ fn profile_dir(root: &Path, id: &str) -> PathBuf {
     root.join("profiles").join(id)
 }
 
-/// 只定位配置文件自己的实际目录；新建空白档可能还没有 bindings.json。
-fn profile_directory(config_path: &Path) -> Option<PathBuf> {
+/// 确定配置所在的实际目录。重置期间目录可能暂时缺失，从最近的现有祖先补回后缀。
+fn config_directory(config_path: &Path) -> Option<PathBuf> {
     let parent = config_path.parent()?;
     let parent = if parent.as_os_str().is_empty() {
         Path::new(".")
     } else {
         parent
     };
-    let directory = match parent.canonicalize() {
-        Ok(directory) => directory,
-        // 重置替换目录的间隙，仍可由父目录和登记的 ID 确定配置档。
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => parent
-            .parent()?
-            .canonicalize()
-            .ok()?
-            .join(parent.file_name()?),
-        Err(_) => return None,
-    };
-    directory
-        .parent()?
-        .file_name()?
-        .eq_ignore_ascii_case("profiles")
-        .then_some(directory)
+    let parent = std::path::absolute(parent).ok()?;
+    for ancestor in parent.ancestors() {
+        match ancestor.canonicalize() {
+            Ok(real) if ancestor == parent => return Some(real),
+            Ok(real) => return Some(real.join(parent.strip_prefix(ancestor).ok()?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+fn is_profile_directory(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name.eq_ignore_ascii_case("profiles"))
+}
+
+fn profile_directory(config_path: &Path) -> Option<PathBuf> {
+    config_directory(config_path).filter(|dir| is_profile_directory(dir))
 }
 
 impl Entry {
@@ -1283,7 +1313,7 @@ fn finish_command(result: Result<String, String>, result_file: Option<&str>) -> 
 }
 
 /// 解析配置档参数并设置配置路径。配置档命令、脱离重定向的重启在此直接退出进程。
-pub fn startup(arguments: &mut Vec<String>) -> (Startup, Option<std::fs::File>) {
+pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     let original = arguments.clone();
     let parsed = take_arguments(arguments).unwrap_or_else(|message| exit_rejected(&message));
     let check_only = arguments.iter().any(|arg| arg == "--check-config");
@@ -1298,13 +1328,10 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Option<std::fs::File>) 
             .get(index + 1)
             .filter(|path| !path.starts_with("--"))
         else {
-            return (Startup::daily(), None);
+            return (Startup::daily(), Vec::new());
         };
-        let setup = Startup::for_config(Path::new(path));
-        let guard = setup
-            .prepare_access(Path::new(path), check_only)
+        return prepare_root_access(Path::new(path), check_only)
             .unwrap_or_else(|error| exit_rejected(&error));
-        return (setup, guard);
     }
     let plain = arguments.len() == 1;
     if parsed.command.is_some() && !plain {
@@ -1316,11 +1343,11 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Option<std::fs::File>) 
     let env_root = std::env::var_os("OMNITRIGGER_HOME").filter(|root| !root.is_empty());
     if !parsed.any() && !interactive && !check_config && env_root.is_none() {
         // 未指定数据根的其他命令无需探测桌面或预先设置路径。
-        return (Startup::daily(), None);
+        return (Startup::daily(), Vec::new());
     }
     let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     if check_config && !parsed.any() && env_root.is_none() && local_app_data.is_none() {
-        return (Startup::daily(), None); // 沿用 settings::path() 的临时目录回退。
+        return (Startup::daily(), Vec::new()); // 沿用 settings::path() 的临时目录回退。
     }
     let (root, source) = resolve_root(
         parsed.data_root.as_deref(),
@@ -1328,15 +1355,13 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Option<std::fs::File>) 
         local_app_data.clone(),
     )
     .unwrap_or_else(|message| exit_rejected(&message));
-    let mut data_root_guard = None;
-    if source != RootSource::Default {
-        let config = root.join("bindings.json");
-        data_root_guard = Startup::for_config(&config)
-            .prepare_access(&config, check_only)
-            .unwrap_or_else(|error| {
-                finish_command(Err(rejected(&error)), parsed.result_file.as_deref())
-            });
-    }
+    let (root_startup, mut guards) = if source != RootSource::Default {
+        prepare_root_access(&root.join("bindings.json"), check_only).unwrap_or_else(|error| {
+            finish_command(Err(rejected(&error)), parsed.result_file.as_deref())
+        })
+    } else {
+        (Startup::daily(), Vec::new())
+    };
     if plain || interactive || check_config {
         #[cfg(windows)]
         escape_redirect(
@@ -1383,25 +1408,9 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Option<std::fs::File>) 
                 }
                 finish_command(Err(rejected(&message)), parsed.result_file.as_deref())
             });
-            (
-                Some(profile_dir(&root, &entry.id).join("bindings.json")),
-                Startup::for_entry(&entry, parsed.listen),
-            )
-        }
-        None => {
-            let config = (source != RootSource::Default).then(|| root.join("bindings.json"));
-            let mut startup = config
-                .as_deref()
-                .map_or_else(Startup::daily, Startup::for_config);
-            if interactive && source == RootSource::Default {
-                startup.external_copy_roots = local_app_data.map(|local| (root, local));
-            }
-            (config, startup)
-        }
-    };
-    if let Some(config) = config {
-        if data_root_guard.is_none() {
-            data_root_guard =
+            let config = profile_dir(&root, &entry.id).join("bindings.json");
+            let startup = Startup::for_entry(&entry, parsed.listen);
+            guards.extend(
                 startup
                     .prepare_access(&config, check_only)
                     .unwrap_or_else(|message| {
@@ -1413,8 +1422,20 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Option<std::fs::File>) 
                             );
                         }
                         finish_command(Err(rejected(&message)), parsed.result_file.as_deref())
-                    });
+                    }),
+            );
+            (Some(config), startup)
         }
+        None => {
+            let config = (source != RootSource::Default).then(|| root.join("bindings.json"));
+            let mut startup = root_startup;
+            if interactive && source == RootSource::Default {
+                startup.external_copy_roots = local_app_data.map(|local| (root, local));
+            }
+            (config, startup)
+        }
+    };
+    if let Some(config) = config {
         if let Err(message) = crate::settings::use_path(config) {
             finish_command(Err(rejected(&message)), parsed.result_file.as_deref());
         }
@@ -1422,7 +1443,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Option<std::fs::File>) 
     if check_config {
         finish_command(crate::check_config(), parsed.result_file.as_deref());
     }
-    (startup, data_root_guard)
+    (startup, guards)
 }
 
 #[cfg(windows)]
@@ -2796,6 +2817,51 @@ mod tests {
     }
 
     #[test]
+    fn nested_test_workspaces_hold_each_registered_directory_and_restore_the_parent_first() {
+        let root = temp_root("nested-profile-use");
+        let outer = create_profile(&root, "parent", &Seed::Empty, None).unwrap();
+        let parent = profile_dir(&root, &outer.id);
+        let inner = create_profile(&parent, "child", &Seed::Empty, None).unwrap();
+        let child = profile_dir(&parent, &inner.id);
+        let config = child.join("alternate.json");
+        let history = crate::clipboard_history_store::FILE_NAME;
+        std::fs::write(child.join(history), b"child record").unwrap();
+        std::fs::write(parent.join(history), b"parent record").unwrap();
+        let backup_root = root.join("backups/profile-reset");
+        let tag = format!("{}-123-{}", outer.id, new_id());
+        let stage = backup_root.join(format!(".{tag}.tmp"));
+        let saved = backup_root.join(tag);
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::copy(parent.join("profile.json"), stage.join("profile.json")).unwrap();
+        std::fs::rename(&parent, &saved).unwrap();
+        assert!(prepare_root_access(&config, true).is_err());
+        assert!(!parent.exists());
+        let (profile, guards) = prepare_root_access(&config, false).unwrap();
+        assert_eq!(profile.test_name.as_deref(), Some("child"));
+        assert_eq!(guards.len(), 2);
+        assert!(matches!(
+            reset_profile(&root, "parent"),
+            Err(ProfileCommandError::InUse(_))
+        ));
+        assert!(matches!(
+            reset_profile(&parent, "child"),
+            Err(ProfileCommandError::InUse(_))
+        ));
+        assert_eq!(std::fs::read(child.join(history)).unwrap(), b"child record");
+        drop(guards);
+        let (_, backup) = reset_profile(&parent, "child").unwrap();
+        assert_eq!(
+            std::fs::read(backup.unwrap().join(history)).unwrap(),
+            b"child record"
+        );
+        assert_eq!(
+            std::fs::read(parent.join(history)).unwrap(),
+            b"parent record"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn explicit_config_recognizes_test_action_data_without_changing_launch_mode() {
         let root = temp_root("explicit-action-identity");
         let entry = create_profile(&root, "scene-test", &Seed::Empty, Some("动作测试")).unwrap();
@@ -2805,7 +2871,7 @@ mod tests {
         let mut arguments = args(&["--config", config.to_str().unwrap(), "--settings"]);
         let original = arguments.clone();
         let (explicit, guard) = startup(&mut arguments);
-        assert!(guard.is_some());
+        assert_eq!(guard.len(), 1);
         drop(guard);
         assert_eq!(arguments, original);
         assert!(explicit.test_data && explicit.listen);

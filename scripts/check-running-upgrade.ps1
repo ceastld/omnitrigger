@@ -198,25 +198,31 @@ foreach ($busy in @($true, $false)) {
 Write-Host '已验证配置被编辑器占用时直接打开日常窗口，释放后可重新导入。'
 
 # 使用单独的数据根，验证安装版窗口确实持有测试档，正常退出后才允许重置。
-$profileRoot = Join-Path $probe.FullName 'profiles-test'
+$outerRoot = Join-Path $probe.FullName 'profiles-test'
+$parentEntry = & $appFile.FullName --data-root $outerRoot --profile-create parent-test --seed empty | ConvertFrom-Json
+if ($LASTEXITCODE -or $parentEntry.status -ne 'created') { throw '未能创建外层测试档。' }
+$profileRoot = $parentEntry.directory
 $testStart = New-AppStart
 foreach ($arg in @('--data-root', $profileRoot, '--test-workspace')) { $testStart.ArgumentList.Add($arg) }
 $testUi = [Diagnostics.Process]::Start($testStart)
 try {
     $null = Wait-AppWindow $testUi ''
     $resetArgs = @('--data-root', $profileRoot, '--profile-reset', 'testing')
-    $resetError = Join-Path $probe.FullName 'reset-error.json'
-    # 重置被占用的配置档应以非零退出码和结构化错误返回。
-    $reset = New-AppStart
-    foreach ($arg in $resetArgs) { $reset.ArgumentList.Add($arg) }
-    $reset.ArgumentList.Add('--relaunch-result')
-    $reset.ArgumentList.Add($resetError)
-    $attempt = [Diagnostics.Process]::Start($reset)
-    try {
-        if (-not $attempt.WaitForExit(20000) -or $attempt.ExitCode -ne 1) { throw '测试窗口打开时未拒绝重置。' }
-    } finally { Stop-TestProcess $attempt }
-    $receipt = Get-Content -Raw -LiteralPath $resetError | ConvertFrom-Json
-    if ($receipt.ok -or ($receipt.text | ConvertFrom-Json).error.code -ne 'profile_in_use') { throw '重置错误未指出测试档正在使用。' }
+    foreach ($case in @(@{root=$profileRoot; alias='testing'}, @{root=$outerRoot; alias='parent-test'})) {
+        $resetError = Join-Path $probe.FullName "reset-$($case.alias).json"
+        $reset = New-AppStart
+        foreach ($arg in @('--data-root', $case.root, '--profile-reset', $case.alias, '--relaunch-result', $resetError)) {
+            $reset.ArgumentList.Add($arg)
+        }
+        $attempt = [Diagnostics.Process]::Start($reset)
+        try {
+            if (-not $attempt.WaitForExit(20000) -or $attempt.ExitCode -ne 1) { throw "窗口打开时未拒绝重置 $($case.alias)。" }
+        } finally { Stop-TestProcess $attempt }
+        $receipt = Get-Content -Raw -LiteralPath $resetError | ConvertFrom-Json
+        if ($receipt.ok -or ($receipt.text | ConvertFrom-Json).error.code -ne 'profile_in_use') {
+            throw "重置错误未指出 $($case.alias) 正在使用。"
+        }
+    }
     if (-not $testUi.CloseMainWindow() -or -not $testUi.WaitForExit(20000)) { throw '测试窗口没有正常关闭。' }
     $result = & $appFile.FullName @resetArgs | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0 -or $result.status -ne 'reset') { throw '关闭测试窗口后无法重置。' }
