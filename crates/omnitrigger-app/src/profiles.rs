@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::plugins::{local_manifest_metadata, read_local_manifest, RAISHOT_MANIFEST_PATH};
 use serde::{Deserialize, Serialize};
 
 const CATALOG_VERSION: u32 = 1;
@@ -697,7 +698,7 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 复制一份配置档数据（顶层数据文件与托管动作包 `actions\`），返回复制的顶层文件数。
+/// 复制配置档的顶层数据、托管动作包与 RaiShot 自定义动作清单。
 fn copy_data(from: &Path, to: &Path, include_file: impl Fn(&str) -> bool) -> Result<usize, String> {
     let fail = |error: std::io::Error| {
         format!(
@@ -706,6 +707,14 @@ fn copy_data(from: &Path, to: &Path, include_file: impl Fn(&str) -> bool) -> Res
             to.display()
         )
     };
+    let source_manifest = from.join(RAISHOT_MANIFEST_PATH);
+    let manifest = read_local_manifest(&source_manifest)
+        .map_err(|error| format!("读取 {} 失败：{error}", source_manifest.display()))?;
+    let destination = to.join(RAISHOT_MANIFEST_PATH);
+    if manifest.is_some() {
+        local_manifest_metadata(&destination)
+            .map_err(|error| format!("检查 {} 失败：{error}", destination.display()))?;
+    }
     std::fs::create_dir_all(to).map_err(fail)?;
     let mut copied = 0;
     for entry in std::fs::read_dir(from).map_err(fail)? {
@@ -727,15 +736,21 @@ fn copy_data(from: &Path, to: &Path, include_file: impl Fn(&str) -> bool) -> Res
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(fail(error)),
     }
+    if let Some(bytes) = manifest {
+        crate::settings::atomic_write(&destination, &bytes)?;
+    }
     Ok(copied)
 }
 
-/// 顶层数据与托管动作包内文件的最近修改时间。仅读元数据。
+/// 配置档数据的最近修改时间。仅读元数据。
 fn data_modified_ms(directory: &Path) -> Option<u64> {
     if !crate::local_files::is_plain_directory(directory) {
         return None;
     }
-    let mut latest = None;
+    let mut latest = local_manifest_metadata(&directory.join(RAISHOT_MANIFEST_PATH))
+        .ok()
+        .flatten()
+        .and_then(|metadata| metadata.modified().ok());
     let mut directories = vec![directory.to_owned()];
     while let Some(path) = directories.pop() {
         let Ok(entries) = std::fs::read_dir(&path) else {
@@ -1612,6 +1627,53 @@ mod tests {
     }
 
     #[test]
+    fn custom_raishot_actions_follow_profile_copies_resets_and_imports() {
+        let root = temp_root("raishot-manifest");
+        let manifest = root.join(RAISHOT_MANIFEST_PATH);
+        let plugin = manifest.parent().unwrap();
+        std::fs::create_dir_all(plugin.join("runtime")).unwrap();
+        std::fs::write(plugin.join("runtime/local-only"), "runtime").unwrap();
+        let mut custom: serde_json::Value =
+            serde_json::from_str(include_str!("../plugins/raishot.json")).unwrap();
+        let mut second = custom["actions"][0].clone();
+        second["id"] = "custom-capture".into();
+        custom["actions"].as_array_mut().unwrap().push(second);
+        let bytes = serde_json::to_vec_pretty(&custom).unwrap();
+        std::fs::write(&manifest, &bytes).unwrap();
+
+        let entry = create_profile(&root, "ui", &Seed::Copy(DEFAULT_ID.into()), None).unwrap();
+        let copied = profile_dir(&root, &entry.id);
+        let catalogue = || {
+            crate::plugins::Plugins::load(&copied.join("bindings.json"))
+                .unwrap()
+                .catalogue()
+                .unwrap()
+        };
+        assert!(catalogue()
+            .iter()
+            .any(|action| action.reference.action_id == "custom-capture"));
+        assert!(!copied.join("plugins/raishot/runtime").exists());
+        std::fs::write(copied.join(RAISHOT_MANIFEST_PATH), "edited").unwrap();
+        let (_, backup) = reset_profile(&root, "ui").unwrap();
+        assert_eq!(
+            std::fs::read(backup.unwrap().join(RAISHOT_MANIFEST_PATH)).unwrap(),
+            b"edited"
+        );
+        assert_eq!(
+            std::fs::read(copied.join(RAISHOT_MANIFEST_PATH)).unwrap(),
+            bytes
+        );
+        assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
+
+        let restore = root.join("before-import");
+        copy_data(&copied, &restore, is_data_file).unwrap();
+        std::fs::write(copied.join(RAISHOT_MANIFEST_PATH), "before restore").unwrap();
+        copy_data(&restore, &copied, is_data_file).unwrap();
+        assert_eq!(catalogue().len(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn copies_the_actions_directory_resolved_by_the_filesystem() {
         let root = temp_root("actions-spelling");
         let fixture = root.join("fixture");
@@ -1931,6 +1993,17 @@ mod tests {
         std::fs::create_dir_all(&local_package).unwrap();
         write_at(local_package.join("action.json"), 1_700_000_040);
         assert!(pending_copy(external_copies(&root), data_modified_ms(&daily), &ignored).is_none());
+        let manifest = source.join(RAISHOT_MANIFEST_PATH);
+        let plugin = manifest.parent().unwrap();
+        std::fs::create_dir_all(plugin.join("runtime")).unwrap();
+        write_at(plugin.join("runtime/manifest.json"), 1_700_000_100);
+        assert!(pending_copy(external_copies(&root), data_modified_ms(&daily), &ignored).is_none());
+        write_at(manifest, 1_700_000_050);
+        assert_eq!(
+            pending_copy(external_copies(&root), data_modified_ms(&daily), &ignored)
+                .map(|entry| entry.2),
+            Some(1_700_000_050_000)
+        );
         std::fs::remove_dir_all(root).unwrap();
         assert_eq!(offered.map(|entry| entry.2), Some(1_700_000_030_000));
     }

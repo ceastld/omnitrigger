@@ -10,6 +10,7 @@ use std::{
 };
 
 const RAISHOT_MANIFEST: &str = include_str!("../plugins/raishot.json");
+pub(crate) const RAISHOT_MANIFEST_PATH: &str = "plugins/raishot/manifest.json";
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,12 +202,7 @@ impl Plugins {
         };
         let mut plugins = Self {
             settings,
-            manifest_path: Some(
-                settings_directory(config_path)
-                    .join("plugins")
-                    .join("raishot")
-                    .join("manifest.json"),
-            ),
+            manifest_path: Some(settings_directory(config_path).join(RAISHOT_MANIFEST_PATH)),
             ..Self::default()
         };
         plugins.refresh();
@@ -491,8 +487,42 @@ impl Plugins {
 }
 
 fn load_manifest(path: &Path) -> Result<PluginManifest, PluginError> {
+    let Some(bytes) = read_local_manifest(path)? else {
+        return PluginManifest::decode(RAISHOT_MANIFEST);
+    };
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|error| PluginError::InvalidManifest(format!("清单必须是 UTF-8：{error}")))?;
+    PluginManifest::decode(text)
+}
+
+/// 返回原字节供配置档复制，保留可由用户修复的清单内容。
+pub(crate) fn read_local_manifest(path: &Path) -> Result<Option<Vec<u8>>, PluginError> {
+    if local_manifest_metadata(path)?.is_none() {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| {
+            file.take(MAX_MANIFEST_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|error| PluginError::InvalidManifest(format!("读取清单失败：{error}")))?;
+    if bytes.len() > MAX_MANIFEST_BYTES {
+        return Err(PluginError::InvalidManifest("清单超过 64 KiB。".into()));
+    }
+    Ok(Some(bytes))
+}
+
+pub(crate) fn local_manifest_metadata(
+    path: &Path,
+) -> Result<Option<std::fs::Metadata>, PluginError> {
     let path = std::path::absolute(path)
         .map_err(|error| PluginError::InvalidManifest(format!("解析清单路径失败：{error}")))?;
+    if crate::local_files::is_cloud_path(&path) {
+        return Err(PluginError::InvalidManifest(
+            "清单位于云盘同步目录，请使用本机配置目录。".into(),
+        ));
+    }
     // 仅访问一个明确路径；逐层检查，防止通过目录联接点进入云盘或读取占位文件。
     for ancestor in path
         .ancestors()
@@ -501,25 +531,23 @@ fn load_manifest(path: &Path) -> Result<PluginManifest, PluginError> {
         .into_iter()
         .rev()
     {
-        if ancestor.file_name().is_some_and(|name| {
-            let name = name.to_string_lossy().to_ascii_lowercase();
-            name.starts_with("onedrive") || name == "dropbox" || name.starts_with("icloud")
-        }) {
-            return Err(PluginError::InvalidManifest(
-                "清单位于云盘同步目录，请使用本机配置目录。".into(),
-            ));
-        }
         match std::fs::symlink_metadata(ancestor) {
             Ok(metadata) => {
-                if metadata.file_type().is_symlink() || unavailable_manifest_attributes(&metadata) {
+                if !crate::local_files::is_plain(&metadata) {
                     return Err(PluginError::InvalidManifest(
                         "清单路径含链接或云端占位文件，请使用普通本机文件。".into(),
                     ));
                 }
+                if ancestor == path {
+                    if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES as u64 {
+                        return Err(PluginError::InvalidManifest(
+                            "清单必须是最大 64 KiB 的本机文件。".into(),
+                        ));
+                    }
+                    return Ok(Some(metadata));
+                }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return PluginManifest::decode(RAISHOT_MANIFEST)
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => {
                 return Err(PluginError::InvalidManifest(format!(
                     "检查清单路径失败：{error}"
@@ -527,37 +555,7 @@ fn load_manifest(path: &Path) -> Result<PluginManifest, PluginError> {
             }
         }
     }
-    let metadata = std::fs::symlink_metadata(&path)
-        .map_err(|error| PluginError::InvalidManifest(format!("检查清单失败：{error}")))?;
-    if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES as u64 {
-        return Err(PluginError::InvalidManifest(
-            "清单必须是最大 64 KiB 的本机文件。".into(),
-        ));
-    }
-    let mut bytes = Vec::new();
-    std::fs::File::open(&path)
-        .and_then(|file| {
-            file.take(MAX_MANIFEST_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-        })
-        .map_err(|error| PluginError::InvalidManifest(format!("读取清单失败：{error}")))?;
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|error| PluginError::InvalidManifest(format!("清单必须是 UTF-8：{error}")))?;
-    PluginManifest::decode(text)
-}
-
-fn unavailable_manifest_attributes(metadata: &std::fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        // ReparsePoint、Offline、RecallOnOpen、RecallOnDataAccess。
-        metadata.file_attributes() & (0x400 | 0x1000 | 0x40000 | 0x400000) != 0
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = metadata;
-        false
-    }
+    Ok(None)
 }
 
 fn settings_directory(config_path: &Path) -> &Path {
