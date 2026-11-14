@@ -22,12 +22,32 @@ if (Get-Process -Name $appFile.BaseName -ErrorAction SilentlyContinue | Where-Ob
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 public static class OmniTriggerUpgradeWindow {
+    private delegate bool EnumWindow(IntPtr hwnd, IntPtr parameter);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder title, int capacity);
+    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern uint RegisterWindowMessage(string message);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeout, out UIntPtr result);
+    public static IntPtr FindWorkspace(uint processId) {
+        IntPtr workspace = IntPtr.Zero;
+        EnumWindows((hwnd, unused) => {
+            uint owner;
+            GetWindowThreadProcessId(hwnd, out owner);
+            if (owner != processId || !IsWindowVisible(hwnd)) return true;
+            var title = new StringBuilder(256);
+            GetWindowText(hwnd, title, title.Capacity);
+            string name = title.ToString();
+            if (name != "OmniTrigger" && !name.StartsWith("OmniTrigger — 测试：", StringComparison.Ordinal)) return true;
+            workspace = hwnd;
+            return false;
+        }, IntPtr.Zero);
+        return workspace;
+    }
 }
 '@
 
@@ -58,7 +78,7 @@ function Wait-AppWindow([Diagnostics.Process]$ui, [string]$healthFile) {
     do {
         $ui.Refresh()
         if ($ui.HasExited) { throw "安装版未能打开窗口，退出码 $($ui.ExitCode)。" }
-        $window = $ui.MainWindowHandle
+        $window = [OmniTriggerUpgradeWindow]::FindWorkspace($ui.Id)
         if ($window -ne [IntPtr]::Zero -and [OmniTriggerUpgradeWindow]::IsWindowVisible($window) -and
             (-not $healthFile -or (Test-Path -LiteralPath $healthFile -PathType Leaf))) { break }
         Start-Sleep -Milliseconds 150
@@ -123,6 +143,9 @@ try {
 } finally { Stop-TestProcess $testUi }
 
 # 同一测试档可以通过文件、目录或环境变量打开。各入口即使收到更新器的环境变量也应直接关窗退出。
+$profileDir = Get-Item -LiteralPath $result.directory
+$identity = Get-Content -Raw -LiteralPath (Join-Path $profileDir.FullName 'profile.json') | ConvertFrom-Json
+if ($identity.kind -ne 'test' -or $identity.id -ne $profileDir.Name) { throw '重置回执未指向登记的测试档。' }
 foreach ($entry in 'config', 'data-root', 'env') {
     $receiptDir = New-Item -ItemType Directory -Path (Join-Path $probe.FullName $entry)
     $testHealth = Join-Path $receiptDir.FullName 'healthy'
@@ -131,25 +154,33 @@ foreach ($entry in 'config', 'data-root', 'env') {
     switch ($entry) {
         'config' {
             $testStart.ArgumentList.Add('--config')
-            $testStart.ArgumentList.Add((Join-Path $result.directory 'bindings.json'))
+            $testStart.ArgumentList.Add((Join-Path $profileDir.FullName 'bindings.json'))
         }
         'data-root' {
             $testStart.ArgumentList.Add('--data-root')
-            $testStart.ArgumentList.Add($result.directory)
+            $testStart.ArgumentList.Add($profileDir.FullName)
         }
-        'env' { $testStart.Environment['OMNITRIGGER_HOME'] = $result.directory }
+        'env' { $testStart.Environment['OMNITRIGGER_HOME'] = $profileDir.FullName }
     }
     $testStart.ArgumentList.Add('--settings')
     $testUi = [Diagnostics.Process]::Start($testStart)
     try {
-        $null = Wait-AppWindow $testUi ''
+        $testWindow = Wait-AppWindow $testUi ''
         # 留出输入后端就绪和界面轮询的时间，避免在首轮健康检查之前关窗。
         $timer = [Diagnostics.Stopwatch]::StartNew()
         while ($timer.Elapsed.TotalSeconds -lt 2 -and -not (Test-Path -LiteralPath $testHealth)) {
             Start-Sleep -Milliseconds 100
         }
-        if (-not $testUi.CloseMainWindow() -or -not $testUi.WaitForExit(20000) -or $testUi.ExitCode -ne 0) {
-            throw "通过 $entry 打开的测试窗口没有正常退出。"
+        if (Test-Path -LiteralPath $testHealth) { throw "通过 $entry 打开的测试档误确认了安装版更新。" }
+        if (-not [OmniTriggerUpgradeWindow]::PostMessage($testWindow, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)) {
+            throw "通过 $entry 打开的测试窗口未收到关闭消息。"
+        }
+        if (-not $testUi.WaitForExit(20000)) {
+            $visible = [OmniTriggerUpgradeWindow]::IsWindowVisible($testWindow)
+            throw "通过 $entry 打开的测试进程仍在运行。窗口可见：$visible，配置目录：$($result.directory)"
+        }
+        if ($testUi.ExitCode -ne 0) {
+            throw "通过 $entry 打开的测试窗口退出码为 $($testUi.ExitCode)。"
         }
         if (Test-Path -LiteralPath $testHealth) { throw "通过 $entry 打开的测试档误确认了安装版更新。" }
     } finally { Stop-TestProcess $testUi }
