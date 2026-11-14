@@ -94,19 +94,14 @@ impl WheelDefinition {
         Ok(())
     }
 
-    /// 按前台进程文件名选择完整槽位快照；未知或未提供进程时保留全局槽位。
-    pub fn resolved_for_process(&self, process: Option<&str>) -> Self {
-        let mut resolved = self.clone();
-        if let Some(application) = process.and_then(|process| {
+    /// 按前台进程文件名查找对应的整组应用覆盖。
+    pub fn override_for_process(&self, process: Option<&str>) -> Option<&WheelApplicationOverride> {
+        process.and_then(|process| {
             let key = process.to_lowercase();
             self.app_overrides
                 .iter()
                 .find(|application| application.process.to_lowercase() == key)
-        }) {
-            resolved.slots = application.slots.clone();
-        }
-        resolved.app_overrides.clear();
-        resolved
+        })
     }
 }
 
@@ -1221,7 +1216,21 @@ mod tests {
         scratch.save(&expected).unwrap();
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
         let original = expected.wheels[0].clone();
-        let resolved = original.resolved_for_process(Some("chrome.exe"));
+        let scenes =
+            crate::scenes::compile(&Default::default(), &crate::app_sets::AppSets::new()).unwrap();
+        let resolve = |process| {
+            crate::wheel_scenes::resolve_for_target(
+                &original,
+                &scenes,
+                process,
+                crate::wheel_scenes::TargetContext {
+                    process,
+                    role: omnitrigger_core::WindowRole::Application,
+                },
+            )
+            .0
+        };
+        let resolved = resolve(Some("chrome.exe"));
         assert_eq!(resolved.slots, replacement);
         assert!(resolved.app_overrides.is_empty());
         assert_eq!(
@@ -1229,7 +1238,7 @@ mod tests {
             (&original.id, &original.name, original.accent)
         );
         for process in [None, Some("other.exe")] {
-            let fallback = original.resolved_for_process(process);
+            let fallback = resolve(process);
             assert_eq!(fallback.slots, original.slots);
             assert!(fallback.app_overrides.is_empty());
         }

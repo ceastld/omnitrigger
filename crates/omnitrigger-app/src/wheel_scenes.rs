@@ -94,26 +94,69 @@ pub fn check_wheel(wheel: &WheelDefinition, scenes: &CompiledScenes) -> Result<(
     Ok(())
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(super) struct WheelSlotKey {
+    pub wheel_id: String,
+    pub application: Option<String>,
+    pub source_index: usize,
+}
+
+impl WheelSlotKey {
+    pub(super) fn new(
+        wheel: &WheelDefinition,
+        application: Option<&str>,
+        source_index: usize,
+    ) -> Self {
+        Self {
+            wheel_id: wheel.id.clone(),
+            application: application.map(str::to_lowercase),
+            source_index,
+        }
+    }
+}
+
 /// 打开轮盘时的完整槽位快照：先按旧版应用覆盖选组，再按场景筛选槽位。
 /// `legacy_process` 是旧版覆盖使用的上下文（桌面为 `@desktop`）。
-pub fn resolve_for_target(
+pub(super) fn resolve_for_target(
     wheel: &WheelDefinition,
     scenes: &CompiledScenes,
     legacy_process: Option<&str>,
     context: TargetContext<'_>,
-) -> WheelDefinition {
-    let mut resolved = wheel.resolved_for_process(legacy_process);
-    resolved.slots = resolve_slots(&resolved.slots, scenes, context);
-    resolved
+) -> (WheelDefinition, Vec<WheelSlotKey>) {
+    let application = wheel.override_for_process(legacy_process);
+    let slots = application.map_or(wheel.slots.as_slice(), |app| app.slots.as_slice());
+    let layout_name = application.map(|app| app.process.as_str());
+    let (slots, keys) = visible_indices(slots, scenes, context)
+        .into_iter()
+        .map(|index| {
+            (
+                WheelSlot {
+                    scene: None,
+                    ..slots[index].clone()
+                },
+                WheelSlotKey::new(wheel, layout_name, index),
+            )
+        })
+        .unzip();
+    (
+        WheelDefinition {
+            id: wheel.id.clone(),
+            name: wheel.name.clone(),
+            accent: wheel.accent,
+            slots,
+            app_overrides: Vec::new(),
+        },
+        keys,
+    )
 }
 
 /// 目标上下文下实际显示的槽位：去掉不命中的场景槽位，同一方位保留范围最具体的一个。
 /// 场景缺失或无效的槽位不显示；校验阶段会报告原因。
-pub fn resolve_slots(
+fn visible_indices(
     slots: &[WheelSlot],
     scenes: &CompiledScenes,
     context: TargetContext<'_>,
-) -> Vec<WheelSlot> {
+) -> Vec<usize> {
     let mut winners: HashMap<(u8, u8), (u8, usize)> = HashMap::new();
     let mut visible = Vec::new();
     for (index, slot) in slots.iter().enumerate() {
@@ -140,12 +183,6 @@ pub fn resolve_slots(
     visible.extend(winners.into_values().map(|(_, index)| index));
     visible.sort_unstable();
     visible
-        .into_iter()
-        .map(|index| WheelSlot {
-            scene: None,
-            ..slots[index].clone()
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -154,6 +191,16 @@ mod tests {
     use crate::app_sets::AppSets;
     use crate::settings::ActionSpec;
     use crate::wheels::WheelPosition;
+
+    fn resolve_slots(
+        slots: &[WheelSlot],
+        scenes: &CompiledScenes,
+        context: TargetContext<'_>,
+    ) -> Vec<WheelSlot> {
+        let mut wheel = crate::wheels::Wheels::default().wheels.remove(0);
+        wheel.slots = slots.to_vec();
+        resolve_for_target(&wheel, scenes, None, context).0.slots
+    }
 
     fn scenes(json: serde_json::Value) -> CompiledScenes {
         crate::scenes::compile(&serde_json::from_value(json).unwrap(), &AppSets::new()).unwrap()

@@ -284,12 +284,7 @@ impl LocalEditor {
 impl Workspace {
     pub(super) fn stop_local_action(&mut self, wheel: bool, cx: &mut Context<Self>) {
         let id = if wheel {
-            self.wheel_selected
-                .as_ref()
-                .zip(self.wheel_slot_selected)
-                .and_then(|(wheel, slot)| {
-                    self.wheel_runtime_ids.get(&(wheel.clone(), slot)).copied()
-                })
+            self.selected_wheel_runtime_id()
         } else {
             self.pending.as_ref().map(|spec| spec.id).or(self.selected)
         };

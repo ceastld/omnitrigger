@@ -15,10 +15,51 @@ use omnitrigger_core::{DragEvent, DragPhase};
 use raw_window_handle::HasWindowHandle;
 use std::time::Duration;
 
+#[derive(Clone)]
+pub(super) struct ActiveWheel {
+    definition: WheelDefinition,
+    runtime_ids: Vec<u64>,
+}
+
+impl ActiveWheel {
+    fn for_target(
+        wheel: &WheelDefinition,
+        scenes: &crate::scenes::CompiledScenes,
+        process: Option<&str>,
+        context: crate::wheel_scenes::TargetContext<'_>,
+        ids: &mut std::collections::HashMap<crate::wheel_scenes::WheelSlotKey, u64>,
+        triggers: &mut crate::service::TriggerService,
+    ) -> Result<Self, crate::service::TriggerError> {
+        use std::collections::hash_map::Entry;
+        let (definition, keys) =
+            crate::wheel_scenes::resolve_for_target(wheel, scenes, process, context);
+        let mut runtime_ids = Vec::with_capacity(keys.len());
+        for key in keys {
+            let id = match ids.entry(key) {
+                Entry::Occupied(slot) => *slot.get(),
+                Entry::Vacant(slot) => *slot.insert(triggers.allocate_id()?),
+            };
+            runtime_ids.push(id);
+        }
+        Ok(Self {
+            definition,
+            runtime_ids,
+        })
+    }
+
+    fn selection(&self, index: usize) -> Option<(u64, String, WheelSlot)> {
+        Some((
+            *self.runtime_ids.get(index)?,
+            self.definition.name.clone(),
+            self.definition.slots.get(index)?.clone(),
+        ))
+    }
+}
+
 pub(super) struct DragWheelSession {
     session: u64,
     binding_id: u64,
-    definition: WheelDefinition,
+    wheel: ActiveWheel,
     origin: (i32, i32),
     cancel_radius_px: u32,
     scale: f32,
@@ -181,6 +222,34 @@ fn same_cell(left: &WheelSlot, right: &WheelSlot) -> bool {
     left.position
         .zip(right.position)
         .is_some_and(|(left, right)| (left.ring, left.sector) == (right.ring, right.sector))
+}
+
+/// 编辑视图会筛选和重排槽位；用所选方位和所属场景找到原配置里的动作。
+fn editor_slot_key(
+    wheel: &WheelDefinition,
+    scope: Option<&WheelScope>,
+    slot: &WheelSlot,
+) -> Option<crate::wheel_scenes::WheelSlotKey> {
+    let application = match scope {
+        Some(WheelScope::App(process)) => wheel.override_for_process(Some(process)),
+        _ => None,
+    };
+    let slots = application.map_or(wheel.slots.as_slice(), |app| app.slots.as_slice());
+    let position = slot.position?;
+    let index = if slots.first()?.position.is_none() {
+        // 均分布局在编辑器中按原顺序显示在内圈。
+        usize::from(position.sector)
+    } else {
+        slots
+            .iter()
+            .position(|source| source.scene == slot.scene && same_cell(source, slot))?
+    };
+    slots.get(index)?;
+    Some(crate::wheel_scenes::WheelSlotKey::new(
+        wheel,
+        application.map(|app| app.process.as_str()),
+        index,
+    ))
 }
 
 /// 编辑时取出一组槽位，均分布局转为方位布局：
@@ -467,6 +536,14 @@ impl Workspace {
             .and_then(|id| self.wheels.wheels.iter().position(|wheel| &wheel.id == id))
     }
 
+    pub(super) fn selected_wheel_runtime_id(&self) -> Option<u64> {
+        let definition = self.wheels.wheels.get(self.selected_wheel_index()?)?;
+        let view = self.wheel_view()?;
+        let slot = view.slots.get(self.wheel_slot_selected?)?;
+        let key = editor_slot_key(definition, self.wheel_scope_for(definition).as_ref(), slot)?;
+        self.wheel_runtime_ids.get(&key).copied()
+    }
+
     fn commit_wheels(&mut self, proposed: Wheels, cx: &mut Context<Self>) -> bool {
         if let Some(error) = &self.wheels_error {
             self.error = Some(format!("原轮盘配置不可用，请先修复文件：{error}"));
@@ -515,10 +592,16 @@ impl Workspace {
         self.wheels_error = None;
         self.error = None;
         let definitions = &self.wheels.wheels;
-        self.wheel_runtime_ids.retain(|(id, index), runtime_id| {
+        self.wheel_runtime_ids.retain(|key, runtime_id| {
             definitions
                 .iter()
-                .any(|wheel| &wheel.id == id && *index < wheel.slots.len())
+                .find(|wheel| wheel.id == key.wheel_id)
+                .is_some_and(|wheel| match key.application.as_deref() {
+                    None => key.source_index < wheel.slots.len(),
+                    Some(process) => wheel
+                        .override_for_process(Some(process))
+                        .is_some_and(|app| key.source_index < app.slots.len()),
+                })
                 || self.executor.is_running(*runtime_id)
                 || self.shortcut_executor.is_running(*runtime_id)
                 || self.system_executor.is_running(*runtime_id)
@@ -1076,7 +1159,7 @@ impl Workspace {
             let _ = wheel.update(cx, |view, window, _| view.hide(window));
         }
         self.wheel_active = None;
-        self.wheel_active_definition = None;
+        self.active_wheel = None;
         self.wheel_target = None;
         if self.wheel_registered.take().is_some() {
             self.send(BackendCommand::SetPanelWindow(None));
@@ -1139,20 +1222,19 @@ impl Workspace {
         Ok(wheel)
     }
 
-    fn wheel_slot_states(&self, definition: &WheelDefinition) -> Vec<Option<String>> {
-        definition
+    fn wheel_slot_states(&self, wheel: &ActiveWheel) -> Vec<Option<String>> {
+        wheel
+            .definition
             .slots
             .iter()
-            .enumerate()
-            .map(|(index, slot)| {
+            .zip(&wheel.runtime_ids)
+            .map(|(slot, runtime_id)| {
                 if self.paused || !self.ready {
                     return Some("监听尚未就绪或已暂停。".into());
                 }
                 self.action_unavailable_reason(&slot.action).or_else(|| {
-                    self.wheel_runtime_ids
-                        .get(&(definition.id.clone(), index))
-                        .filter(|id| self.action_busy(**id, &slot.action))
-                        .map(|_| "此动作仍在执行，请稍后重试。".into())
+                    self.action_busy(*runtime_id, &slot.action)
+                        .then(|| "此动作仍在执行，请稍后重试。".into())
                 })
             })
             .collect()
@@ -1220,7 +1302,7 @@ impl Workspace {
                 (None, omnitrigger_core::WindowRole::Unknown),
                 |(process, role)| (Some(process), role),
             );
-        let definition = crate::wheel_scenes::resolve_for_target(
+        let wheel = match ActiveWheel::for_target(
             &definition,
             &self.wheel_scenes,
             process.as_deref(),
@@ -1228,8 +1310,17 @@ impl Workspace {
                 process: scene_process.as_deref(),
                 role,
             },
-        );
-        let wheel_size = crate::radial_wheel::wheel_size(&definition);
+            &mut self.wheel_runtime_ids,
+            &mut self.triggers,
+        ) {
+            Ok(wheel) => wheel,
+            Err(error) => {
+                self.error = Some(error.message());
+                cx.notify();
+                return;
+            }
+        };
+        let wheel_size = crate::radial_wheel::wheel_size(&wheel.definition);
         let window = match self.prepare_wheel(cx) {
             Ok(window) => window,
             Err(error) => {
@@ -1238,23 +1329,11 @@ impl Workspace {
                 return;
             }
         };
-        for index in 0..definition.slots.len() {
-            if !self
-                .wheel_runtime_ids
-                .contains_key(&(id.to_string(), index))
-            {
-                let Some(runtime_id) = self.draft_id(None) else {
-                    cx.notify();
-                    return;
-                };
-                self.wheel_runtime_ids
-                    .insert((id.to_string(), index), runtime_id);
-            }
-        }
-        let states = self.wheel_slot_states(&definition);
+        let states = self.wheel_slot_states(&wheel);
+        let definition = wheel.definition.clone();
         let generation = self.wheel_generation;
         let wheel_id = id.to_string();
-        self.wheel_active_definition = Some(definition.clone());
+        self.active_wheel = Some(wheel);
         let result = window.update(cx, |view, window, cx| {
             view.present(definition, generation, states, window, cx);
             if let Some(drag) = placement {
@@ -1359,8 +1438,8 @@ impl Workspace {
             {
                 return;
             }
-            if let Some(definition) = &self.wheel_active_definition {
-                let states = self.wheel_slot_states(definition);
+            if let Some(wheel) = &self.active_wheel {
+                let states = self.wheel_slot_states(wheel);
                 let _ = window.update(cx, |view, _, cx| view.update_states(states, cx));
             }
         }
@@ -1427,13 +1506,13 @@ impl Workspace {
                 let Some(target) = self.wheel_target else {
                     return;
                 };
-                let Some(definition) = self.wheel_active_definition.clone() else {
+                let Some(wheel) = self.active_wheel.clone() else {
                     return;
                 };
                 self.drag_wheel_session = Some(DragWheelSession {
                     session: event.session,
                     binding_id: event.id,
-                    definition,
+                    wheel,
                     origin: event.origin,
                     cancel_radius_px: placement.cancel_radius_px,
                     scale: placement.scale,
@@ -1503,18 +1582,13 @@ impl Workspace {
                 let selected = crate::radial_wheel::drag_slot_for_definition(
                     drag.origin,
                     event.position,
-                    &drag.definition,
+                    &drag.wheel.definition,
                     drag.cancel_radius_px,
                     drag.scale,
                 );
                 if let Some(index) = selected {
-                    if let (Some(entry), Some(id)) = (
-                        drag.definition.slots.get(index).cloned(),
-                        self.wheel_runtime_ids
-                            .get(&(drag.definition.id.clone(), index))
-                            .copied(),
-                    ) {
-                        self.execute_wheel_entry(id, drag.definition.name, entry, drag.target, cx);
+                    if let Some((id, name, entry)) = drag.wheel.selection(index) {
+                        self.execute_wheel_entry(id, name, entry, drag.target, cx);
                     }
                 } else {
                     self.status = "已回到起点，取消轮盘。".into();
@@ -1634,22 +1708,16 @@ impl Workspace {
                     let target = self.wheel_target;
                     let target_unchanged = target.is_some()
                         && omnitrigger_windows::capture_shortcut_target().ok() == target;
-                    let selected = self.wheel_active_definition.as_ref().and_then(|wheel| {
-                        wheel
-                            .slots
-                            .get(slot)
-                            .cloned()
-                            .map(|entry| (wheel.name.clone(), entry))
-                    });
-                    let runtime_id = self.wheel_runtime_ids.get(&(wheel_id, slot)).copied();
+                    let selected = self
+                        .active_wheel
+                        .as_ref()
+                        .and_then(|wheel| wheel.selection(slot));
                     self.hide_wheel(cx);
                     if self.paused || self.recording || !self.ready || !target_unchanged {
                         self.status = "轮盘已取消：前台、监听或录制状态已变化。".into();
                         continue;
                     }
-                    if let (Some((name, entry)), Some(id), Some(target)) =
-                        (selected, runtime_id, target)
-                    {
+                    if let (Some((id, name, entry)), Some(target)) = (selected, target) {
                         self.execute_wheel_entry(id, name, entry, target, cx);
                     }
                 }
@@ -1732,6 +1800,88 @@ mod tests {
             })
             .collect();
         wheel
+    }
+
+    #[test]
+    fn running_slots_follow_their_source_across_application_and_scene_changes() {
+        use crate::{
+            execution::{CommandAction, CommandExecutor},
+            wheel_scenes::TargetContext,
+        };
+        use omnitrigger_core::WindowRole;
+        let command = CommandAction {
+            program: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec!["--list".into(), "--exact".into(), "no_fixture_tests".into()],
+            working_directory: None,
+        };
+        let mut definition = wheel(&[at(0, 0, 8), at(0, 1, 8), at(0, 0, 8)]);
+        for slot in &mut definition.slots {
+            slot.action = ActionSpec::Command(command.clone());
+        }
+        definition.slots[2].scene = Some("edit".into());
+        definition.app_overrides = vec![crate::wheels::WheelApplicationOverride {
+            process: "Browser.EXE".into(),
+            slots: vec![WheelSlot {
+                label: "网页动作".into(),
+                ..definition.slots[0].clone()
+            }],
+        }];
+        let scenes = crate::scenes::compile(
+            &serde_json::from_value(serde_json::json!({
+                "edit":{"process_scope":{"allow":["editor"]}}
+            }))
+            .unwrap(),
+            &crate::app_sets::AppSets::new(),
+        )
+        .unwrap();
+        let mut ids = std::collections::HashMap::new();
+        let mut triggers =
+            crate::service::TriggerService::new(Vec::new(), crate::service::SettingsFile);
+        let mut open = |process| {
+            ActiveWheel::for_target(
+                &definition,
+                &scenes,
+                Some(process),
+                TargetContext {
+                    process: Some(process),
+                    role: WindowRole::Application,
+                },
+                &mut ids,
+                &mut triggers,
+            )
+            .unwrap()
+        };
+        let global = open("other.exe");
+        let browser = open("browser.exe");
+        let editor = open("editor.exe");
+        let executor = CommandExecutor::new();
+        let (run_id, _, running) = global.selection(1).unwrap();
+        executor.submit(run_id, command.clone()).unwrap();
+        let (editor_id, _, moved) = editor.selection(0).unwrap();
+        assert_eq!((editor_id, moved), (run_id, running));
+        assert!(executor.is_running(editor_id));
+        assert!(executor.submit(editor_id, command.clone()).is_err());
+        for (snapshot, index) in [(&global, 0), (&editor, 1), (&browser, 0)] {
+            let id = snapshot.selection(index).unwrap().0;
+            assert!(!executor.is_running(id));
+            executor.submit(id, command.clone()).unwrap();
+        }
+        assert_eq!(browser.runtime_ids, open("BROWSER.exe").runtime_ids);
+        assert_eq!(global.runtime_ids, open("third.exe").runtime_ids);
+        assert!(browser.selection(1).is_none());
+        for (scope, snapshot, index) in [
+            (None, &global, 0),
+            (Some(WheelScope::Scene("edit".into())), &editor, 0),
+            (Some(WheelScope::Scene("edit".into())), &editor, 1),
+            (Some(WheelScope::App("Browser.EXE".into())), &browser, 0),
+        ] {
+            let view = scope_view(&definition, scope.as_ref(), &scenes);
+            let key = editor_slot_key(&definition, scope.as_ref(), &view.slots[index]).unwrap();
+            assert_eq!(ids.get(&key), snapshot.runtime_ids.get(index));
+        }
     }
 
     #[test]
