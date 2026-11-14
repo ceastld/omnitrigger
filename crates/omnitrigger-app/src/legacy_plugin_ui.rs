@@ -250,14 +250,18 @@ impl Workspace {
                 return;
             }
             // 只用原enabled字段记录此刻的显式选择；后台作业不回写该字段。
-            let mut candidate = self.plugins.clone();
-            candidate.configure_legacy_enabled(true);
-            if let Err(error) = candidate.save(&settings::path()) {
-                self.error = Some(error.to_string());
-                cx.notify();
-                return;
+            match crate::plugins::Plugins::set_legacy_enabled(
+                &settings::path(),
+                true,
+                self.plugins.legacy_manifest_sha256(),
+            ) {
+                Ok(latest) => self.plugins = latest,
+                Err(error) => {
+                    self.error = Some(error.to_string());
+                    cx.notify();
+                    return;
+                }
             }
-            self.plugins = candidate;
         } // None不写启用选择，由worker返回结构化unavailable。
         match plugin_install::start_legacy_install(settings::path(), source) {
             Ok(events) => {
@@ -360,14 +364,19 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let mut candidate = self.plugins.clone();
-        candidate.configure_legacy_enabled(enabled);
-        if let Err(error) = candidate.save(&settings::path()) {
-            self.error = Some(error.to_string());
-            cx.notify();
-            return;
+        let loaded = self.legacy_source.as_ref().map(|source| source.key());
+        match crate::plugins::Plugins::set_legacy_enabled(
+            &settings::path(),
+            enabled,
+            loaded.as_ref().map(|key| key.artifact_fingerprint.as_str()),
+        ) {
+            Ok(latest) => self.plugins = latest,
+            Err(error) => {
+                self.error = Some(error.to_string());
+                cx.notify();
+                return;
+            }
         }
-        self.plugins = candidate; // 只持久化本次显式选择；不改原RaiShot默认值或绑定。
         self.error = None;
         if enabled {
             self.start_legacy_prepare(true, cx);
@@ -401,6 +410,14 @@ impl Workspace {
         let Some(source) = self.legacy_source.as_ref().cloned() else {
             return;
         };
+        if !self
+            .plugins
+            .legacy_pin_matches(Some(&source.key().artifact_fingerprint))
+        {
+            self.legacy_status = Some("已登记的宿主版本已变更，请重新打开此窗口。".into());
+            cx.notify();
+            return;
+        }
         match self.legacy_gate.begin(source.key(), explicit) {
             Ok(Some(ticket)) => self.start_legacy_job(ticket, LegacyOperation::Prepare, source, cx),
             Ok(None) => {}
@@ -506,7 +523,12 @@ impl Workspace {
             }
             match event.result {
                 Ok(LegacyCompletion::Prepared(result)) => {
-                    if self.plugins.legacy_enabled() && !self.legacy_close_requested {
+                    if self.plugins.legacy_enabled()
+                        && !self.legacy_close_requested
+                        && self
+                            .plugins
+                            .legacy_pin_matches(Some(&event.ticket.key.artifact_fingerprint))
+                    {
                         self.legacy_gate.finish(&event.ticket, result);
                         self.legacy_status = Some(match result {
                             PrepareResult::Ready => "宿主已就绪。".into(),
@@ -587,6 +609,12 @@ impl Workspace {
         let Some(source) = &self.legacy_source else {
             return Some("正式宿主尚未核验。".into());
         };
+        if !self
+            .plugins
+            .legacy_pin_matches(Some(&source.key().artifact_fingerprint))
+        {
+            return Some("已登记的宿主版本已变更，请重新打开此窗口。".into());
+        }
         self.legacy_gate
             .admit(&source.key())
             .err()

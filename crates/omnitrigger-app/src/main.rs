@@ -340,12 +340,9 @@ fn relocate_raishot(plugins: &mut Plugins) -> Option<String> {
     if configured.as_deref() == Some(found.cli.as_path()) {
         return None;
     }
-    let mut candidate = plugins.clone();
-    candidate
-        .configure_raishot(found.cli.to_string_lossy().into_owned(), true)
+    *plugins = plugins
+        .save_raishot_install(&settings::path(), found.cli.to_string_lossy().into_owned())
         .ok()?;
-    candidate.save(&settings::path()).ok()?;
-    *plugins = candidate;
     Some(if configured.is_some() {
         format!("已改用本机的 RaiShot {}。", found.version)
     } else {
@@ -799,6 +796,7 @@ struct Workspace {
     wheel_launch_target: Option<omnitrigger_windows::ShortcutTarget>,
     drag_wheel_session: Option<DragWheelSession>,
     install_events: Option<Receiver<plugin_install::InstallEvent>>,
+    raishot_install_origin: Option<Plugins>,
     install_status: Option<String>,
     legacy_gate: legacy_load_gate::LegacyLoadGate,
     legacy_source: Option<std::sync::Arc<dyn legacy_plugin_work::LegacyArtifactSource>>,
@@ -1292,6 +1290,7 @@ impl Workspace {
             wheel_launch_target,
             drag_wheel_session: None,
             install_events: None,
+            raishot_install_origin: None,
             install_status: relocated,
             legacy_gate: Default::default(),
             legacy_source,
@@ -1621,11 +1620,24 @@ impl Workspace {
                         version,
                         downloaded,
                     }) => {
-                        let saved = self.save_plugin_configuration(
-                            cli_path.to_string_lossy().into_owned(),
-                            true,
-                            cx,
-                        );
+                        let result = if self.executor.is_plugin_running("raishot") {
+                            Err("请等待 RaiShot 动作结束后再更改插件设置。".into())
+                        } else {
+                            self.raishot_install_origin
+                                .take()
+                                .ok_or_else(|| {
+                                    "找不到本次 RaiShot 安装的初始设置，请重新启用。".to_string()
+                                })
+                                .and_then(|origin| {
+                                    origin
+                                        .save_raishot_install(
+                                            &settings::path(),
+                                            cli_path.to_string_lossy().into_owned(),
+                                        )
+                                        .map_err(|error| error.to_string())
+                                })
+                        };
+                        let saved = self.apply_raishot_settings(result, true, cx);
                         self.install_status = Some(if !saved {
                             "运行文件已就绪，插件设置保存失败；处理错误后重试启用。".into()
                         } else if downloaded {
@@ -1685,6 +1697,8 @@ impl Workspace {
             }
             if !finished {
                 self.install_events = Some(events);
+            } else {
+                self.raishot_install_origin = None;
             }
         }
         changed |= self.poll_browser_connector(cx);
@@ -3932,15 +3946,6 @@ impl Workspace {
     }
 
     fn save_plugin_settings(&mut self, enabled: bool, cx: &mut Context<Self>) -> bool {
-        self.save_plugin_configuration(self.plugins.raishot_path().to_string(), enabled, cx)
-    }
-
-    fn save_plugin_configuration(
-        &mut self,
-        path: String,
-        enabled: bool,
-        cx: &mut Context<Self>,
-    ) -> bool {
         if self.executor.is_plugin_running("raishot") {
             self.error = Some("请等待 RaiShot 动作结束后再更改插件设置。".into());
             cx.notify();
@@ -3949,20 +3954,25 @@ impl Workspace {
         let result = if let Some(error) = &self.plugin_settings_error {
             Err(error.clone())
         } else {
-            let mut candidate = self.plugins.clone();
-            candidate
-                .configure_raishot(path, enabled)
-                .and_then(|()| candidate.save(&settings::path()))
-                .map(|()| candidate)
+            Plugins::set_raishot_enabled(&settings::path(), enabled)
                 .map_err(|error| error.to_string())
-                .map(|candidate| {
-                    self.plugins = candidate;
-                })
         };
-        if let Err(error) = result {
-            self.error = Some(error);
-            cx.notify();
-            return false;
+        self.apply_raishot_settings(result, enabled, cx)
+    }
+
+    fn apply_raishot_settings(
+        &mut self,
+        result: Result<Plugins, String>,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match result {
+            Ok(latest) => self.plugins = latest,
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+                return false;
+            }
         }
         self.error = None;
         self.sync_bindings();
@@ -4017,6 +4027,7 @@ impl Workspace {
             match plugin_install::start_prepare(settings::path(), configured) {
                 Ok(events) => {
                     self.install_events = Some(events);
+                    self.raishot_install_origin = Some(self.plugins.clone());
                     self.install_status = Some("正在查找本机已有的 RaiShot…".into());
                 }
                 Err(error) => self.install_status = Some(format!("无法开始安装：{error}")),

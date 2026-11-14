@@ -128,6 +128,14 @@ impl LocalLegacySource {
             digest: digest.to_ascii_lowercase(),
         })
     }
+
+    fn verified_manifest(&self, cancel: &CancellationToken) -> Result<Vec<u8>, ActionError> {
+        let bytes = read(&self.root.join("manifest.json"), 256 * 1024, cancel)?;
+        if format!("{:x}", Sha256::digest(&bytes)) != self.digest {
+            return Err(fault("legacy_manifest_changed", "宿主包清单摘要不符。"));
+        }
+        Ok(bytes)
+    }
 }
 
 /// 启动/安装完成时只组装既有定位信息；完整读取与哈希在原plugin worker中进行。
@@ -164,10 +172,7 @@ impl LegacyArtifactSource for LocalLegacySource {
                 "宿主包不属于本次配置的动作目录。",
             ));
         }
-        let bytes = read(&self.root.join("manifest.json"), 256 * 1024, cancel)?;
-        if format!("{:x}", Sha256::digest(&bytes)) != self.digest {
-            return Err(fault("legacy_manifest_changed", "宿主包清单摘要不符。"));
-        }
+        let bytes = self.verified_manifest(cancel)?;
         let manifest: Manifest = serde_json::from_slice(&bytes)
             .map_err(|error| fault("legacy_manifest_invalid", error.to_string()))?;
         if manifest.schema_version != 1
@@ -388,8 +393,7 @@ pub(crate) fn register(config: &Path, digest: &str) -> Result<String, ActionErro
     register_verified(config, &installed, &mut plugins)
 }
 
-/// 仅提交本进程worker核验后的既有类型；UI串行写现有Plugins，不重做大文件哈希。
-/// enabled来自调用时最新设置，安装线程不再持有或回写旧启用快照。
+/// 收据可能晚于配置档重置。持有写锁时核对当前包清单，登记到同一时刻的设置。
 pub(crate) fn register_verified(
     config: &Path,
     installed: &VerifiedLegacyInstall,
@@ -406,7 +410,13 @@ pub(crate) fn register_verified(
             "安装收据与当前固定目录不一致。",
         ));
     }
-    if plugins
+    let write_failed = |message| fault("legacy_settings_write_failed", message);
+    let guard = crate::legacy_upgrade::IndexGuard::acquire(config)
+        .map_err(|error| write_failed(error.message))?;
+    crate::legacy_upgrade::block_config(config).map_err(|error| write_failed(error.message))?;
+    let mut latest = Plugins::load(config)
+        .map_err(|error| fault("legacy_settings_invalid", error.to_string()))?;
+    if latest
         .legacy_manifest_sha256()
         .is_some_and(|old| !old.eq_ignore_ascii_case(&source.digest))
     {
@@ -415,13 +425,15 @@ pub(crate) fn register_verified(
             "开发登记入口不替换已登记版本；请沿既有停用、退出确认和安装切换流程更新。",
         ));
     }
-    let mut candidate = plugins.clone();
-    let enabled = candidate.legacy_enabled();
-    candidate.pin_legacy_manifest(source.digest.clone());
-    candidate
-        .save(config)
-        .map_err(|error| fault("legacy_settings_write_failed", error.to_string()))?;
-    *plugins = candidate;
+    source.verified_manifest(&CancellationToken::new())?;
+    let enabled = latest.legacy_enabled();
+    if latest.legacy_manifest_sha256() != Some(source.digest.as_str()) {
+        latest.pin_legacy_manifest(source.digest.clone());
+        latest
+            .save_for_legacy_upgrade(config, &guard)
+            .map_err(|error| write_failed(error.to_string()))?;
+    }
+    *plugins = latest;
     Ok(json!({"status":"registered","package_id":PACKAGE_ID,"package_root":installed.prepare_action.package_root,
         "manifest_sha256":source.digest,"enabled":enabled,"host_started":false}).to_string())
 }
@@ -822,6 +834,71 @@ try {
             f.package.join("host/OmniTrigger.LegacyHost.exe")
         );
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn registration_checks_current_manifest_after_profile_reset() {
+        let f = Fixture::new();
+        let installed = f
+            .source()
+            .verify(&f.config, &CancellationToken::new())
+            .unwrap();
+        let mut plugins = Plugins::load(&f.config).unwrap();
+        fs::rename(&f.package, f.root.join("previous-package")).unwrap();
+        assert_eq!(
+            register_verified(&f.config, &installed, &mut plugins)
+                .unwrap_err()
+                .code,
+            "legacy_package_missing"
+        );
+        fs::create_dir(&f.package).unwrap();
+        fs::write(f.package.join("manifest.json"), b"replacement manifest").unwrap();
+        assert_eq!(
+            register_verified(&f.config, &installed, &mut plugins)
+                .unwrap_err()
+                .code,
+            "legacy_manifest_changed"
+        );
+        assert!(plugins.legacy_manifest_sha256().is_none());
+        assert!(!f.root.join("plugins.json").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn registration_preserves_other_edits_and_refuses_another_current_pin() {
+        let f = Fixture::new();
+        let installed = f
+            .source()
+            .verify(&f.config, &CancellationToken::new())
+            .unwrap();
+        let mut stale = Plugins::load(&f.config).unwrap();
+        let mut latest = stale.clone();
+        latest.configure_raishot("other.exe".into(), false).unwrap();
+        latest.configure_legacy_enabled(true);
+        latest.save(&f.config).unwrap();
+
+        register_verified(&f.config, &installed, &mut stale).unwrap();
+        assert!(stale.legacy_enabled());
+        assert_eq!(stale.raishot_path(), "other.exe");
+        let mut latest = Plugins::load(&f.config).unwrap();
+        assert_eq!(latest.legacy_manifest_sha256(), Some(f.digest.as_str()));
+        assert_eq!(latest.raishot_path(), "other.exe");
+        assert!(latest.legacy_enabled());
+
+        latest.configure_legacy_enabled(false);
+        latest.pin_legacy_manifest("a".repeat(64));
+        latest.save(&f.config).unwrap();
+        let index = f.root.join("plugins.json");
+        let before = fs::read(&index).unwrap();
+        assert_eq!(
+            register_verified(&f.config, &installed, &mut stale)
+                .unwrap_err()
+                .code,
+            "legacy_update_requires_installer"
+        );
+        assert_eq!(fs::read(index).unwrap(), before);
+    }
+
     #[test]
     fn unlisted_file_and_changed_image_are_rejected() {
         let f = Fixture::new();

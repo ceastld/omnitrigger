@@ -213,12 +213,27 @@ impl Plugins {
         Ok(plugins)
     }
 
-    pub fn save(&self, config_path: &Path) -> Result<(), PluginError> {
+    fn edit_settings(
+        config_path: &Path,
+        edit: impl FnOnce(&mut Self) -> Result<(), PluginError>,
+    ) -> Result<Self, PluginError> {
         let _guard = crate::legacy_upgrade::IndexGuard::acquire(config_path)
             .map_err(|e| PluginError::Settings(e.message))?;
         crate::legacy_upgrade::block_config(config_path)
             .map_err(|e| PluginError::Settings(e.message))?;
-        self.save_unlocked(config_path)
+        let mut latest = Self::load(config_path)?;
+        edit(&mut latest)?;
+        latest.save_unlocked(config_path)?;
+        Ok(latest)
+    }
+
+    #[cfg(test)]
+    pub fn save(&self, config_path: &Path) -> Result<(), PluginError> {
+        Self::edit_settings(config_path, |latest| {
+            latest.settings = self.settings.clone();
+            Ok(())
+        })
+        .map(drop)
     }
     pub(crate) fn save_for_legacy_upgrade(
         &self,
@@ -267,6 +282,31 @@ impl Plugins {
             .as_ref()
             .and_then(|value| value.manifest_sha256.as_deref())
     }
+
+    pub(crate) fn legacy_pin_matches(&self, expected: Option<&str>) -> bool {
+        match (self.legacy_manifest_sha256(), expected) {
+            (Some(current), Some(expected)) => current.eq_ignore_ascii_case(expected),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn set_legacy_enabled(
+        config: &Path,
+        enabled: bool,
+        expected_pin: Option<&str>,
+    ) -> Result<Self, PluginError> {
+        Self::edit_settings(config, |latest| {
+            if enabled && !latest.legacy_pin_matches(expected_pin) {
+                return Err(PluginError::Settings(
+                    "legacy_update_requires_installer：已登记的宿主版本已变更，请刷新后重试。"
+                        .into(),
+                ));
+            }
+            latest.configure_legacy_enabled(enabled);
+            Ok(())
+        })
+    }
     pub fn pin_legacy_manifest(&mut self, digest: String) {
         self.settings
             .legacy
@@ -283,6 +323,32 @@ impl Plugins {
 
     pub fn raishot_enabled(&self) -> bool {
         self.settings.raishot.enabled
+    }
+
+    pub(crate) fn set_raishot_enabled(config: &Path, enabled: bool) -> Result<Self, PluginError> {
+        Self::edit_settings(config, |latest| {
+            latest.configure_raishot(latest.raishot_path().to_string(), enabled)
+        })
+    }
+
+    /// 自动定位或安装回执只能接入发起查找时的设置和动作清单。
+    pub(crate) fn save_raishot_install(
+        &self,
+        config: &Path,
+        path: String,
+    ) -> Result<Self, PluginError> {
+        Self::edit_settings(config, |latest| {
+            let manifest = latest.manifest.as_ref().map_err(Clone::clone)?;
+            if self.raishot_enabled() != latest.raishot_enabled()
+                || self.raishot_path() != latest.raishot_path()
+                || self.manifest.as_ref().map_err(Clone::clone)?.fingerprint != manifest.fingerprint
+            {
+                return Err(PluginError::Settings(
+                    "RaiShot 设置或动作清单已变更，请刷新后重新启用。".into(),
+                ));
+            }
+            latest.configure_raishot(path, true)
+        })
     }
 
     pub fn configure_raishot(&mut self, path: String, enabled: bool) -> Result<(), PluginError> {
@@ -566,6 +632,8 @@ fn validate_program(path: &str) -> Result<(), PluginError> {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PluginManifest {
+    #[serde(skip)]
+    fingerprint: [u8; 32],
     schema_version: u32,
     host_api_version: u32,
     id: String,
@@ -710,7 +778,7 @@ impl PluginManifest {
         if text.len() > MAX_MANIFEST_BYTES {
             return Err(PluginError::InvalidManifest("清单超过 64 KiB。".into()));
         }
-        let manifest: Self = serde_json::from_str(text)
+        let mut manifest: Self = serde_json::from_str(text)
             .map_err(|error| PluginError::InvalidManifest(error.to_string()))?;
         if manifest.schema_version != 1 || manifest.host_api_version != 1 {
             return Err(PluginError::IncompatibleVersion);
@@ -767,6 +835,8 @@ impl PluginManifest {
             Engine::new(vec![action.default_trigger.spec(1)])
                 .map_err(|error| PluginError::InvalidManifest(error.to_string()))?;
         }
+        use sha2::{Digest, Sha256};
+        manifest.fingerprint = Sha256::digest(text.as_bytes()).into();
         Ok(manifest)
     }
 }
@@ -1144,6 +1214,92 @@ mod tests {
         assert_eq!(output["legacy"]["enabled"], false);
         assert_eq!(output["raishot"]["enabled"], false);
         assert_eq!(output["raishot"]["cliPath"], "D:/owned/raishot-cli.exe");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn plugin_toggles_keep_the_other_plugins_latest_settings_after_reset() {
+        let directory = scratch();
+        std::fs::create_dir(&directory).unwrap();
+        let config = directory.join("bindings.json");
+        let executable = directory.join("current.exe");
+        std::fs::write(&executable, b"fixture").unwrap();
+        let mut seed = Plugins::load(&config).unwrap();
+        seed.configure_raishot(executable.to_string_lossy().into_owned(), true)
+            .unwrap();
+        seed.pin_legacy_manifest("b".repeat(64));
+        seed.configure_legacy_enabled(true);
+        seed.save(&config).unwrap();
+
+        let stopped = Plugins::set_legacy_enabled(&config, false, Some(&"a".repeat(64))).unwrap();
+        assert_eq!(stopped.raishot_path(), executable.to_str().unwrap());
+        assert!(stopped
+            .availability(&PluginActionRef::raishot_capture())
+            .is_ok());
+        assert!(!stopped.legacy_enabled());
+        assert_eq!(
+            stopped.legacy_manifest_sha256(),
+            seed.legacy_manifest_sha256()
+        );
+        assert!(Plugins::set_legacy_enabled(&config, true, Some(&"a".repeat(64))).is_err());
+
+        let enabled = Plugins::set_legacy_enabled(&config, true, Some(&"B".repeat(64))).unwrap();
+        let stopped = Plugins::set_raishot_enabled(&config, false).unwrap();
+        assert!(stopped.legacy_enabled());
+        assert_eq!(
+            stopped.legacy_manifest_sha256(),
+            enabled.legacy_manifest_sha256()
+        );
+        let disk = Plugins::load(&config).unwrap();
+        assert_eq!(disk.raishot_path(), executable.to_str().unwrap());
+        assert!(!disk.raishot_enabled());
+        assert!(disk.legacy_enabled());
+
+        std::fs::remove_file(directory.join("plugins.json")).unwrap();
+        let fresh = Plugins::set_legacy_enabled(&config, false, None).unwrap();
+        assert!(fresh.raishot_enabled());
+        assert!(fresh.raishot_path().is_empty());
+        assert!(fresh.legacy_manifest_sha256().is_none());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn raishot_install_merges_legacy_and_rejects_replaced_settings_or_manifest() {
+        let directory = scratch();
+        std::fs::create_dir(&directory).unwrap();
+        let config = directory.join("bindings.json");
+        let destination = directory.join("plugins.json");
+        let executable = directory.join("selected.exe");
+        std::fs::write(&executable, b"fixture").unwrap();
+        let path = executable.to_str().unwrap();
+        let origin = Plugins::load(&config).unwrap();
+        let mut latest = Plugins::load(&config).unwrap();
+        latest.pin_legacy_manifest("b".repeat(64));
+        latest.configure_legacy_enabled(true);
+        latest.save(&config).unwrap();
+        let installed = origin.save_raishot_install(&config, path.into()).unwrap();
+        assert!(installed.legacy_enabled());
+        assert_eq!(
+            installed.legacy_manifest_sha256(),
+            latest.legacy_manifest_sha256()
+        );
+        assert!(installed
+            .availability(&PluginActionRef::raishot_capture())
+            .is_ok());
+        assert!(origin.save_raishot_install(&config, path.into()).is_err());
+
+        let current_bytes = std::fs::read(&destination).unwrap();
+        external_manifest(&directory, &two_action_manifest().to_string());
+        assert!(installed
+            .save_raishot_install(&config, path.into())
+            .is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), current_bytes);
+        std::fs::write(&destination, b"{").unwrap();
+        assert!(Plugins::set_legacy_enabled(&config, false, None).is_err());
+        assert!(Plugins::set_raishot_enabled(&config, false).is_err());
+        assert_eq!(std::fs::read(destination).unwrap(), b"{");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
