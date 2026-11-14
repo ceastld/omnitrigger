@@ -8866,6 +8866,26 @@ fn main() {
         && (std::env::var_os("OMNITRIGGER_UPDATE_HEALTH").is_some()
             || std::env::var_os("OMNITRIGGER_UPDATE_ERROR").is_some());
     let config_path = settings::path();
+    let shared_workspace = arguments.iter().skip(1).all(|arg| arg == "--settings")
+        || ((config_main || config_settings)
+            && config_path
+                .file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json")));
+    // 重复启动只通知现有窗口。先取得窗口身份，再恢复磁盘数据，避免改写运行中的配置。
+    let workspace_instance = if shared_workspace {
+        match profile_startup.workspace_key(&config_path).and_then(|key| {
+            omnitrigger_windows::WorkspaceInstance::open_with_settings(&key, appearance_settings)
+        }) {
+            Ok(Some(instance)) => Some(instance),
+            Ok(None) => return,
+            Err(message) => {
+                omnitrigger_windows::show_error_dialog("OmniTrigger 无法打开配置窗口", &message);
+                return;
+            }
+        }
+    } else {
+        None
+    };
     if !profile_startup.test_data {
         if let Some(root) = config_path.parent() {
             if let Err(error) = profiles::recover_external_import(root) {
@@ -8874,38 +8894,20 @@ fn main() {
             }
         }
     }
-    let shared_workspace = arguments.iter().skip(1).all(|arg| arg == "--settings")
-        || ((config_main || config_settings)
-            && config_path
-                .file_name()
-                .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json")));
-    let (workspace_instance, external_copy_notice) = if shared_workspace {
-        match profile_startup.workspace_key(&config_path).and_then(|key| {
-            omnitrigger_windows::WorkspaceInstance::open_with_settings(&key, appearance_settings)
-        }) {
-            Ok(Some(instance)) => {
-                // 只有新主窗口能在载入配置前导入；重复启动只唤回原窗口。
-                #[cfg(windows)]
-                let notice = match profile_startup.offer_external_copy() {
-                    Ok(notice) => notice,
-                    Err(error) => {
-                        omnitrigger_windows::show_error_dialog("OmniTrigger 导入恢复失败", &error);
-                        return;
-                    }
-                };
-                #[cfg(not(windows))]
-                let notice = None;
-                (Some(instance), notice)
-            }
-            Ok(None) => return,
-            Err(message) => {
-                omnitrigger_windows::show_error_dialog("OmniTrigger 无法打开配置窗口", &message);
+    #[cfg(windows)]
+    let external_copy_notice = if workspace_instance.is_some() {
+        match profile_startup.offer_external_copy() {
+            Ok(notice) => notice,
+            Err(error) => {
+                omnitrigger_windows::show_error_dialog("OmniTrigger 导入恢复失败", &error);
                 return;
             }
         }
     } else {
-        (None, None)
+        None
     };
+    #[cfg(not(windows))]
+    let external_copy_notice = None;
     Application::new()
         .with_assets(Assets)
         .run(move |cx: &mut App| {

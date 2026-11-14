@@ -365,3 +365,39 @@ foreach ($restart in '更新成功', '更新回滚', '主窗口打开设置', '�
         } finally { Stop-TestProcess $launcher }
     } finally { Stop-TestProcess $ui }
 }
+
+# 重复启动应只唤回原进程，导入恢复留给下一次真正打开工作区。
+$wakeRoot = New-Item -ItemType Directory -Path (Join-Path $probe.FullName 'wake-during-import')
+$bindings = Join-Path $wakeRoot.FullName 'bindings.json'
+$beforeImport = '{"version":24,"bindings":[]}'
+$imported = Get-Item -LiteralPath (Join-Path $data.FullName 'bindings.json')
+Copy-Item -LiteralPath $imported.FullName -Destination $bindings
+$incomingHash = [Security.Cryptography.SHA256]::HashData([IO.File]::ReadAllBytes($bindings))
+$wake = New-AppStart
+$wake.Environment['OMNITRIGGER_HOME'] = $wakeRoot.FullName
+$ui = [Diagnostics.Process]::Start($wake)
+try {
+    $window = Close-ToTray $ui ''
+    $pending = Join-Path $wakeRoot.FullName 'backups/external-import.pending'
+    $null = New-Item -ItemType Directory -Path (Join-Path $pending 'incoming'), (Join-Path $pending 'originals') -Force
+    [IO.File]::WriteAllText((Join-Path $pending 'originals/bindings.json'), $beforeImport)
+    $plan = @{ backup = 'before-import-wake'; directories = @(); files = @(@{path = 'bindings.json'; sha256 = [int[]]$incomingHash}) }
+    [IO.File]::WriteAllText((Join-Path $pending 'plan.json'), ($plan | ConvertTo-Json -Depth 5))
+    $launcher = [Diagnostics.Process]::Start($wake)
+    try {
+        if (-not $launcher.WaitForExit(20000) -or $launcher.ExitCode -ne 0) { throw '有待恢复的导入时，重复启动未正常返回。' }
+        if ((Wait-AppWindow $ui '' 'OmniTrigger') -ne $window) { throw '未唤回原托盘窗口。' }
+        if (-not (Test-Path -LiteralPath (Join-Path $pending 'plan.json')) -or
+            (Get-FileHash -LiteralPath $bindings).Hash -ne [Convert]::ToHexString($incomingHash)) {
+            throw '唤回托盘时提前恢复了正在使用的热键文件。'
+        }
+    } finally { Stop-TestProcess $launcher }
+} finally { Stop-TestProcess $ui }
+$ui = [Diagnostics.Process]::Start($wake)
+try {
+    $null = Wait-AppWindow $ui '' 'OmniTrigger'
+    if ((Test-Path -LiteralPath $pending) -or [IO.File]::ReadAllText($bindings) -cne $beforeImport) {
+        throw '重新打开日常窗口时未恢复导入前的热键。'
+    }
+    Write-Host '已验证唤回托盘保留当前热键，日常实例退出后再启动会恢复导入前的数据。'
+} finally { Stop-TestProcess $ui }
