@@ -269,6 +269,7 @@ mod navigation_tests {
             preview: preview.into(),
             utf16_units: 20,
             created_at: created_at.into(),
+            text_sha256: [0; 32],
         })
         .collect()
     }
@@ -494,6 +495,7 @@ mod tests {
             preview: (*preview).into(),
             utf16_units: 100,
             created_at: "10".into(),
+            text_sha256: [0; 32],
         })
         .collect()
     }
@@ -645,6 +647,7 @@ mod keyboard_operation_tests {
             preview: preview.into(),
             utf16_units,
             created_at: "1".into(),
+            text_sha256: [0; 32],
         })
         .collect()
     }
@@ -847,6 +850,7 @@ mod full_text_view_tests {
                 preview: preview.into(),
                 utf16_units: 100,
                 created_at: "1".into(),
+                text_sha256: [0; 32],
             })
             .collect()
     }

@@ -1,7 +1,7 @@
 //! 由打开界面前捕获的原目标执行一次明确发送。正文只在后台临时持有。
 
 use crate::clipboard_history_host::WithClipboardHistory;
-use crate::clipboard_history_store::{preview, ClipboardHistoryStore, HistorySummary};
+use crate::clipboard_history_store::{ClipboardHistoryStore, HistorySummary};
 use crate::desktop_host::DesktopHost;
 use omnitrigger_actions::{ActionError, CancellationToken, NativeHost};
 use omnitrigger_windows::{ScriptTarget, ScriptTargetSnapshot, ShortcutTarget};
@@ -572,11 +572,11 @@ impl HistorySendRequest {
             })?;
         let item: ItemDto = serde_json::from_value(value)
             .map_err(|_| SendFailure::before("history_selection_changed"))?;
-        if item.id != self.selected.summary.id
-            || item.revision != self.selected.revision
-            || item.created_at != self.selected.summary.created_at
-            || item.text.encode_utf16().count() != self.selected.summary.utf16_units
-            || preview(&item.text) != self.selected.summary.preview
+        if item.revision != self.selected.revision
+            || !self
+                .selected
+                .summary
+                .matches_item(&item.id, &item.created_at, &item.text)
             || item.text.contains('\0')
             || self.selected.summary.utf16_units > 65_536
         {
@@ -693,12 +693,7 @@ mod tests {
 
     fn selected() -> HistorySendSelection {
         HistorySendSelection {
-            summary: HistorySummary {
-                id: "1".into(),
-                preview: preview(" A😀\n"),
-                utf16_units: 5,
-                created_at: "10".into(),
-            },
+            summary: HistorySummary::from_text("1", "10", " A😀\n"),
             revision: "2".into(),
         }
     }
@@ -894,6 +889,34 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn reset_with_identical_preview_and_revision_never_submits_replacement_text() {
+        let now = time();
+        let old = format!("{}旧", "界".repeat(64));
+        let new = format!("{}新", "界".repeat(64));
+        let item = |text: &str| json!({"id":"1","text":text,"createdAt":"10","revision":"2"});
+        for replaced_after_restore in [false, true] {
+            let host = port();
+            let mut request = request(now);
+            request.selected.summary = HistorySummary::from_text("1", "10", &old);
+            *host.items.lock().unwrap() = if replaced_after_restore {
+                vec![item(&old), item(&new)]
+            } else {
+                vec![item(&new)]
+            };
+            let failure = request.execute(&host, || Ok(now)).unwrap_err();
+            assert_eq!(failure.code, "history_selection_changed");
+            assert_eq!(failure.effect, InputEffect::NotStarted);
+            assert!(host.sent.lock().unwrap().is_empty());
+            let calls = host.calls.lock().unwrap();
+            assert_eq!(
+                calls.iter().filter(|call| **call == "history.get").count(),
+                if replaced_after_restore { 2 } else { 1 }
+            );
+            assert!(!calls.contains(&"keyboard.text"));
+        }
     }
 
     #[test]

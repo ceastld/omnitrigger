@@ -243,11 +243,16 @@ impl HistoryUiState {
         });
     }
 
-    pub fn remove(&mut self) -> Option<(u64, String)> {
+    pub fn remove(&mut self) -> Option<(u64, HistorySummary)> {
         if !self.can_remove() {
             return None;
         }
-        let selected = self.selected.clone()?;
+        let selected_id = self.selected.as_ref()?;
+        let selected = self
+            .items
+            .iter()
+            .find(|item| &item.id == selected_id)?
+            .clone();
         let id = self.query()?;
         // 删除是否生效不明时，必须先明确刷新，不能从旧列表重复删除。
         self.refresh_required = true;
@@ -266,15 +271,21 @@ impl HistoryUiState {
         }
         match result {
             Ok(list) => {
+                if let Some(previous) = self
+                    .items
+                    .iter()
+                    .find(|item| Some(&item.id) == self.selected.as_ref())
+                {
+                    let current = list.items.iter().find(|item| item.id == previous.id);
+                    if current != Some(previous) {
+                        self.selected = None;
+                        if current.is_some() {
+                            self.message = Some("选中的历史项已被替换，请重新选择。");
+                        }
+                    }
+                }
                 self.revision = Some(list.revision);
                 self.items = list.items;
-                if !self
-                    .selected
-                    .as_ref()
-                    .is_some_and(|id| self.items.iter().any(|item| &item.id == id))
-                {
-                    self.selected = None;
-                }
                 self.refresh_required = false;
             }
             Err(message) => {
@@ -418,6 +429,7 @@ mod initial_load_tests {
                 preview: "合成摘要".into(),
                 utf16_units: 20,
                 created_at: "1".into(),
+                text_sha256: [0; 32],
             }],
             revision: "9007199254740993".into(),
         }
@@ -520,6 +532,7 @@ mod tests {
                     preview: "合成摘要".into(),
                     utf16_units: 4,
                     created_at: "1".into(),
+                    text_sha256: [0; 32],
                 })
                 .collect(),
             revision: "1".into(),
@@ -623,7 +636,7 @@ mod tests {
         state.listed(None, Ok(list(&["1"])));
         state.select("1");
         let (id, item) = state.remove().unwrap();
-        assert_eq!(item, "1");
+        assert_eq!(item.id, "1");
         state.listed(Some(id), Err("删除是否生效尚不确定，请刷新。"));
         assert!(!state.can_remove());
         state.listed(None, Ok(list(&["1"])));

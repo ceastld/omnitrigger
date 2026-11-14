@@ -12,7 +12,7 @@ use crate::clipboard_history_send::{
     HistoryLaunchTarget, HistorySendRequest, HistorySendSession, SendFailure, SendReceipt,
 };
 use crate::clipboard_history_store::{
-    ClipboardHistoryStore, HistoryError, HistoryList, HistorySearch, MAX_ITEMS,
+    ClipboardHistoryStore, HistoryError, HistoryList, HistorySearch, HistorySummary, MAX_ITEMS,
 };
 use crate::clipboard_history_ui_state::{Control, HistoryUiState, Phase};
 use crate::event_bridge::{EventBridge, UiWake};
@@ -41,7 +41,7 @@ enum Request {
     },
     Remove {
         id: u64,
-        item: String,
+        item: HistorySummary,
     },
     Send {
         id: u64,
@@ -644,14 +644,18 @@ fn run_worker(
             }
             Ok(Request::Remove { id, item }) => {
                 let deadline = Instant::now() + Duration::from_secs(3);
-                let result = match store.remove(&item, || operation_check(&shutdown, deadline)) {
-                    Ok(_) => summaries(&store, &shutdown)
-                        .map_err(|_| "删除已完成，但列表未能刷新。请明确刷新后继续。"),
-                    Err(error) if error.effect_state == "unknown" => {
-                        Err("删除是否生效尚不确定，请先刷新，不要重复删除。")
-                    }
-                    Err(_) => Err("无法删除选中项，请先刷新后再明确操作。"),
-                };
+                let result =
+                    match store.remove_selected(&item, || operation_check(&shutdown, deadline)) {
+                        Ok(_) => summaries(&store, &shutdown)
+                            .map_err(|_| "删除已完成，但列表未能刷新。请明确刷新后继续。"),
+                        Err(error) if error.effect_state == "unknown" => {
+                            Err("删除是否生效尚不确定，请先刷新，不要重复删除。")
+                        }
+                        Err(error) if error.code == "history_conflict" => {
+                            Err("选中的历史项或文件已变更，请刷新并重新选择后再删除。")
+                        }
+                        Err(_) => Err("无法删除选中项，请先刷新后再明确操作。"),
+                    };
                 if replies
                     .send(Reply::List {
                         id: Some(id),

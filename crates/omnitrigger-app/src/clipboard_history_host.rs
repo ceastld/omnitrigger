@@ -421,6 +421,7 @@ mod tests {
                     },
                     utf16_units: TEXT.encode_utf16().count(),
                     created_at: "0".into(),
+                    text_sha256: [0; 32],
                 }],
                 revision: "1".into(),
             })

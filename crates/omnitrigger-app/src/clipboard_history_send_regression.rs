@@ -23,12 +23,7 @@ fn context(expires: u64) -> Value {
 
 fn selection(id: &str) -> HistorySendSelection {
     HistorySendSelection {
-        summary: HistorySummary {
-            id: id.into(),
-            preview: "合成".into(),
-            utf16_units: 2,
-            created_at: "10".into(),
-        },
+        summary: HistorySummary::from_text(id, "10", "合成"),
         revision: "2".into(),
     }
 }

@@ -137,7 +137,7 @@ fn real_unknown_removal_cannot_be_retried_until_an_explicit_summary_refresh() {
     let original = history_bytes(&fixture.path);
     let error = fixture
         .store
-        .remove(&item, || {
+        .remove_selected(&item, || {
             if history_bytes(&fixture.path) != original {
                 Err(crate::clipboard_history_store::HistoryError::new(
                     "cancelled",
@@ -165,6 +165,62 @@ fn real_unknown_removal_cannot_be_retried_until_an_explicit_summary_refresh() {
 }
 
 #[test]
+fn reset_reusing_id_revision_and_preview_requires_reselecting_before_delete() {
+    let fixture = Fixture::new();
+    let replacement = Fixture::new();
+    let prefix = "共".repeat(64);
+    fixture
+        .store
+        .append_at(&format!("{prefix}甲"), 1, || Ok(()))
+        .unwrap();
+    replacement
+        .store
+        .append_at(&format!("{prefix}乙"), 1, || Ok(()))
+        .unwrap();
+    let mut ui = HistoryUiState::new(true);
+    ui.listed(None, Ok(fixture.store.list(200, || Ok(())).unwrap()));
+    ui.select("1");
+    let (request, selected) = ui.remove().unwrap();
+    fs::copy(&replacement.path, &fixture.path).unwrap();
+    let replacement_bytes = history_bytes(&fixture.path);
+    let latest = fixture.store.list(200, || Ok(())).unwrap();
+    assert_eq!(latest.revision, "1");
+    assert_eq!(
+        serde_json::to_value(&latest.items[0]).unwrap(),
+        serde_json::to_value(&selected).unwrap()
+    );
+    let error = fixture
+        .store
+        .remove_selected(&selected, || Ok(()))
+        .unwrap_err();
+    assert_eq!(
+        (error.code, error.effect_state),
+        ("history_conflict", "not_started")
+    );
+    assert_eq!(history_bytes(&fixture.path), replacement_bytes);
+    ui.listed(Some(request), Err("历史已变化，请刷新。"));
+    assert!(!ui.can_remove());
+    let refresh = ui.query().unwrap();
+    ui.listed(Some(refresh), Ok(latest));
+    assert!(ui.selected.is_none());
+    assert!(ui.message.unwrap().contains("请重新选择"));
+
+    ui.select("1");
+    let (_, selected) = ui.remove().unwrap();
+    fixture.store.append_at("无关新增项", 2, || Ok(())).unwrap();
+    assert!(
+        fixture
+            .store
+            .remove_selected(&selected, || Ok(()))
+            .unwrap()
+            .removed
+    );
+    let list = fixture.store.list(200, || Ok(())).unwrap();
+    assert_eq!(list.items.len(), 1);
+    assert_eq!(list.items[0].preview, "无关新增项");
+}
+
+#[test]
 fn committed_removal_with_real_list_lock_failure_keeps_refresh_barrier() {
     let fixture = Fixture::new();
     seed(&fixture);
@@ -172,7 +228,13 @@ fn committed_removal_with_real_list_lock_failure_keeps_refresh_barrier() {
     ui.listed(None, Ok(fixture.store.list(200, || Ok(())).unwrap()));
     ui.select("1");
     let (request, item) = ui.remove().unwrap();
-    assert!(fixture.store.remove(&item, || Ok(())).unwrap().removed);
+    assert!(
+        fixture
+            .store
+            .remove_selected(&item, || Ok(()))
+            .unwrap()
+            .removed
+    );
     let held = held_sidecar(&fixture);
     assert_eq!(
         fixture.store.list(200, || Ok(())).unwrap_err().code,

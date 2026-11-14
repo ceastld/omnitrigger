@@ -1,6 +1,6 @@
 //! 原目标发送的合成候选。尚无主页面原目标交接入口，仅编入测试，不接入输入执行。
 
-use crate::clipboard_history_store::{preview, HistorySummary};
+use crate::clipboard_history_store::HistorySummary;
 use omnitrigger_actions::{CancellationToken, NativeHost};
 use omnitrigger_windows::ScriptTargetSnapshot;
 use serde::Deserialize;
@@ -174,11 +174,10 @@ impl HistorySendAttempt {
             .map_err(|_| SendError::before("history_unavailable"))?;
         let item: ItemDto = serde_json::from_value(value)
             .map_err(|_| SendError::before("history_invalid_result"))?;
-        if item.id != self.selected.id
-            || item.revision != self.revision
-            || item.created_at != self.selected.created_at
-            || item.text.encode_utf16().count() != self.selected.utf16_units
-            || preview(&item.text) != self.selected.preview
+        if item.revision != self.revision
+            || !self
+                .selected
+                .matches_item(&item.id, &item.created_at, &item.text)
         {
             return Err(SendError::before("history_selection_changed"));
         }
@@ -248,12 +247,7 @@ mod tests {
     }
 
     fn summary() -> HistorySummary {
-        HistorySummary {
-            id: "1".into(),
-            preview: preview(" A😀\n"),
-            utf16_units: 5,
-            created_at: "10".into(),
-        }
+        HistorySummary::from_text("1", "10", " A😀\n")
     }
 
     fn attempt(now: Instant) -> HistorySendAttempt {
@@ -422,12 +416,11 @@ mod tests {
             let mut attempt = attempt(now);
             match mode {
                 "empty" => {
-                    attempt.selected.utf16_units = 0;
-                    attempt.selected.preview.clear();
+                    attempt.selected = HistorySummary::from_text("1", "10", "");
                     host.item.lock().unwrap()["text"] = json!("");
                 }
                 "nul" => {
-                    attempt.selected.preview = preview(" A\0 \n");
+                    attempt.selected = HistorySummary::from_text("1", "10", " A\0 \n");
                     host.item.lock().unwrap()["text"] = json!(" A\0 \n");
                 }
                 _ => host.item.lock().unwrap()["private"] = json!("合成正文"),

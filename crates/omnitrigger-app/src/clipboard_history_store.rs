@@ -1,5 +1,6 @@
 //! 显式私有路径中的有界纯文本历史。不监听系统剪贴板，不从用户配置推断路径。
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
@@ -120,6 +121,28 @@ pub struct HistorySummary {
     pub preview: String,
     pub utf16_units: usize,
     pub created_at: String,
+    // 仅供本机窗口核对已显示的条目，外部动作与历史文件均不暴露此摘要。
+    #[serde(skip)]
+    pub(super) text_sha256: [u8; 32],
+}
+impl HistorySummary {
+    pub(super) fn from_text(id: &str, created_at: &str, text: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            preview: preview(text),
+            utf16_units: text.encode_utf16().count(),
+            created_at: created_at.to_owned(),
+            text_sha256: Sha256::digest(text.as_bytes()).into(),
+        }
+    }
+
+    pub(super) fn matches_item(&self, id: &str, created_at: &str, text: &str) -> bool {
+        id == self.id
+            && created_at == self.created_at
+            && text.encode_utf16().count() == self.utf16_units
+            && preview(text) == self.preview
+            && <[u8; 32]>::from(Sha256::digest(text.as_bytes())) == self.text_sha256
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct HistoryList {
@@ -212,12 +235,7 @@ impl Document {
                 .iter()
                 .rev()
                 .take(limit)
-                .map(|item| HistorySummary {
-                    id: item.id.clone(),
-                    preview: preview(&item.text),
-                    utf16_units: item.text.encode_utf16().count(),
-                    created_at: item.created_at.clone(),
-                })
+                .map(|item| HistorySummary::from_text(&item.id, &item.created_at, &item.text))
                 .collect(),
         })
     }
@@ -706,6 +724,22 @@ impl ClipboardHistoryStore {
             let result = document.remove(id)?;
             let changed = result.removed;
             Ok((result, changed))
+        })
+    }
+
+    pub(super) fn remove_selected(
+        &self,
+        selected: &HistorySummary,
+        check: impl FnMut() -> Result<()>,
+    ) -> Result<RemoveResult> {
+        self.update(check, |document| {
+            let current = document.items.iter().find(|item| item.id == selected.id);
+            if !current
+                .is_some_and(|item| selected.matches_item(&item.id, &item.created_at, &item.text))
+            {
+                return Err(HistoryError::new("history_conflict"));
+            }
+            document.remove(&selected.id).map(|result| (result, true))
         })
     }
 }
