@@ -35,6 +35,16 @@ struct DragPlacement {
 
 pub(super) const RING_NAMES: [&str; 3] = ["内圈", "中圈", "外圈"];
 
+/// 顶部显示与“更改”使用同一条绑定。全都停用时仍可打开原绑定修改。
+pub(super) fn wheel_binding<'a>(
+    bindings: &'a [crate::settings::Binding],
+    wheel_id: &str,
+) -> Option<&'a crate::settings::Binding> {
+    bindings.iter().filter(|binding| {
+        matches!(&binding.action, ActionSpec::ShowWheel(reference) if reference.wheel_id == wheel_id)
+    }).min_by_key(|binding| !binding.enabled)
+}
+
 #[derive(Default)]
 pub(super) struct WheelPreview {
     pub(super) selected: Option<(u8, u8)>,
@@ -983,14 +993,8 @@ impl Workspace {
             return;
         };
         let wheel = self.wheels.wheels[index].clone();
-        if let Some(existing) = self.triggers.bindings().iter().find(|binding|
-            matches!(&binding.action, ActionSpec::ShowWheel(reference) if reference.wheel_id == wheel.id)
-                && matches!(binding.spec.activation, Activation::Drag { .. })).map(|binding| binding.spec.id) {
-            self.clear_pending();
-            self.selected = Some(existing);
-            self.load_selected_message(cx);
-            self.page = Page::Triggers;
-            cx.notify();
+        if let Some(existing) = wheel_binding(self.triggers.bindings(), &wheel.id) {
+            self.select(existing.spec.id, cx);
             return;
         }
         let Some(id) = self.draft_id(self.pending.as_ref().map(|spec| spec.id)) else {
@@ -1682,6 +1686,29 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn displayed_wheel_binding_is_the_first_enabled_match_or_first_disabled_match() {
+        let mut bindings = crate::settings::defaults();
+        let action = ActionSpec::ShowWheel(WheelActionRef {
+            wheel_id: "edit".into(),
+        });
+        bindings[0].action = action.clone();
+        bindings[0].enabled = false;
+        bindings[1].action = action.clone();
+        bindings[1].enabled = true;
+        bindings[1].spec.activation = Activation::Hold {
+            button: omnitrigger_core::Button::Key(119),
+            duration_ms: 640,
+        };
+        bindings[2].action = action;
+        bindings[2].enabled = true;
+        assert_eq!(wheel_binding(&bindings, "edit"), Some(&bindings[1]));
+        bindings[1].enabled = false;
+        bindings[2].enabled = false;
+        assert_eq!(wheel_binding(&bindings, "edit"), Some(&bindings[0]));
+        assert!(wheel_binding(&bindings, "another").is_none());
+    }
 
     fn at(ring: u8, sector: u8, sectors: u8) -> Option<WheelPosition> {
         Some(WheelPosition {

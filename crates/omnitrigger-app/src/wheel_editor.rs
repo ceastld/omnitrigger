@@ -1,7 +1,8 @@
 //! 自定义轮盘的管理页：轮盘本身就是编辑器，点格子添加或修改动作；保存与验证由应用层统一处理。
 use crate::theme::rgb;
 use crate::wheel_workspace::{
-    ring_geometry, slot_at, view_geometry, Preset, WheelScope, RING_NAMES, WHEEL_PRESETS,
+    ring_geometry, slot_at, view_geometry, wheel_binding, Preset, WheelScope, RING_NAMES,
+    WHEEL_PRESETS,
 };
 use crate::{
     button, caption, icon, small, theme,
@@ -328,12 +329,18 @@ impl Workspace {
     /// 呼出方式与试用：已有绑定时显示组合并可跳转修改，没有时引导设置。
     fn wheel_trigger_bar(&self, wheel: &WheelDefinition, cx: &mut Context<Self>) -> Div {
         let can_edit = self.wheels_error.is_none() && !self.recording;
-        let trigger = self
-            .triggers
-            .bindings()
-            .iter()
-            .find(|binding| matches!(&binding.action, ActionSpec::ShowWheel(reference) if reference.wheel_id == wheel.id))
-            .map(|binding| crate::activation_label(&binding.spec));
+        let binding = wheel_binding(self.triggers.bindings(), &wheel.id);
+        let trigger = binding.map_or_else(
+            || "未设置".to_string(),
+            |binding| {
+                let combo = omnitrigger_windows::format_trigger(&binding.spec);
+                if binding.enabled {
+                    combo
+                } else {
+                    format!("{combo}（已停用）")
+                }
+            },
+        );
         div()
             .flex_none()
             .flex()
@@ -347,14 +354,18 @@ impl Workspace {
             )
             .child(
                 div()
+                    .id("wheel-trigger-combo")
+                    .max_w(px(260.))
+                    .truncate()
+                    .tooltip(theme::text_tooltip(trigger.clone().into()))
                     .text_size(px(13.))
                     .text_color(rgb(theme::TEXT))
-                    .child(trigger.clone().unwrap_or_else(|| "未设置".into())),
+                    .child(trigger),
             )
             .child(
                 link(
                     "bind-wheel",
-                    if trigger.is_some() {
+                    if binding.is_some() {
                         "更改"
                     } else {
                         "设置"
