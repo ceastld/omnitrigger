@@ -183,6 +183,8 @@ OmniTrigger/
 
 默认根目录是 `%LOCALAPPDATA%\OmniTrigger`；使用 `--config D:\Demo\bindings.json` 时，动作目录为 `D:\Demo\actions`。程序只读取 `actions` 下一级目录里的 `action.json`，不会递归寻找包。包目录、清单和入口不支持云端占位文件或符号链接；将需要使用的文件放在普通本地目录。
 
+Legacy 安装器在动作根目录下生成的安装和升级暂存目录不参与动作发现，也不占用动作包名额。已安装的动作继续从正式包目录加载。
+
 `action.json`：
 
 ```json

@@ -734,7 +734,7 @@ fn copy_action_tree(from: &Path, to: &Path, skip_stages: bool) -> std::io::Resul
         }
         let target = to.join(entry.file_name());
         if kind.is_dir() {
-            if !skip_stages || !crate::plugin_install::is_legacy_stage(&entry.file_name()) {
+            if !skip_stages || !omnitrigger_actions::catalog::is_legacy_stage(&entry.file_name()) {
                 copy_action_tree(&entry.path(), &target, false)?;
             }
         } else if kind.is_file() {
@@ -837,7 +837,7 @@ fn data_modified_ms(directory: &Path) -> Option<u64> {
                     name == "actions"
                 };
                 let install_stage = path.parent() == Some(directory)
-                    && crate::plugin_install::is_legacy_stage(&name);
+                    && omnitrigger_actions::catalog::is_legacy_stage(&name);
                 if (!top || actions)
                     && !install_stage
                     && !crate::local_files::is_cloud_path(Path::new(&name))

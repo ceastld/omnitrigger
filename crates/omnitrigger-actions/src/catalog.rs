@@ -11,6 +11,30 @@ const MAX_PACKAGES: usize = 128;
 const MAX_DIRECTORY_ENTRIES: usize = 512;
 const MAX_ACTIONS_PER_PACKAGE: usize = 128;
 
+pub const LEGACY_INSTALL_STAGE_PREFIX: &str = ".install-legacy-";
+pub const LEGACY_UPGRADE_STAGE_PREFIX: &str = ".install-legacy-upgrade-";
+
+/// 安装器在动作根下保留的首次安装和升级工作目录。
+pub fn is_legacy_stage(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    #[cfg(windows)]
+    let name = name.to_ascii_lowercase();
+    let Some(suffix) = name
+        .strip_prefix(LEGACY_UPGRADE_STAGE_PREFIX)
+        .or_else(|| name.strip_prefix(LEGACY_INSTALL_STAGE_PREFIX))
+    else {
+        return false;
+    };
+    let mut fields = suffix.split('-');
+    (0..3).all(|_| {
+        fields
+            .next()
+            .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+    }) && fields.next().is_none()
+}
+
 #[derive(Clone, Debug)]
 pub struct CatalogAction {
     pub package_id: String,
@@ -71,14 +95,24 @@ impl PackageCatalog {
         let directory =
             fs::read_dir(&canonical_root).map_err(|error| io_error("枚举动作目录失败", error))?;
         let mut folders = Vec::new();
-        for (index, entry) in directory.enumerate() {
-            if index == MAX_DIRECTORY_ENTRIES - reserved {
+        let mut entries = reserved;
+        for entry in directory {
+            let entry = entry.map_err(|error| io_error("读取动作目录项目失败", error))?;
+            if is_legacy_stage(&entry.file_name())
+                && entry
+                    .file_type()
+                    .map_err(|err| io_error("读取暂存目录类型失败", err))?
+                    .is_dir()
+            {
+                continue;
+            }
+            entries += 1;
+            if entries > MAX_DIRECTORY_ENTRIES {
                 return Err(ActionError::new(
                     "catalog_limit",
                     "动作目录超过 512 个项目，请减少目录内容后重新加载。",
                 ));
             }
-            let entry = entry.map_err(|error| io_error("读取动作目录项目失败", error))?;
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path)
                 .map_err(|error| io_error("读取动作包属性失败", error))?;
@@ -452,6 +486,41 @@ pub(crate) mod tests {
         assert_eq!(catalog.resolve(&call).unwrap_err().code, "action_missing");
         call.package_id = "absent".into();
         assert_eq!(catalog.resolve(&call).unwrap_err().code, "package_missing");
+    }
+
+    #[test]
+    fn installer_stages_neither_hide_packages_nor_block_new_projects() {
+        let fixture = Fixture::new();
+        fixture.package(".install-legacy-personal", "example", "javascript");
+        for i in 0..MAX_DIRECTORY_ENTRIES {
+            let prefix = if i % 2 == 0 {
+                LEGACY_INSTALL_STAGE_PREFIX
+            } else {
+                LEGACY_UPGRADE_STAGE_PREFIX
+            };
+            let directory = fixture.0.join(format!("{prefix}11-22-{i}"));
+            fs::create_dir(&directory).unwrap();
+            if i == 0 {
+                fs::write(directory.join("action.json"), b"partial archive").unwrap();
+            }
+        }
+        let catalog = PackageCatalog::load(&fixture.0);
+        assert!(catalog.diagnostics.is_empty(), "{:?}", catalog.diagnostics);
+        assert_eq!(
+            catalog.resolve(&Fixture::call()).unwrap().definition.id,
+            "run"
+        );
+        validate_new_package(&fixture.0, "another").unwrap();
+        // 普通目录仍计入名额，即使名字与暂存目录相似。
+        for i in 1..=MAX_PACKAGES {
+            fs::create_dir(fixture.0.join(format!(".install-legacy-user-{i}"))).unwrap();
+        }
+        assert_eq!(
+            validate_new_package(&fixture.0, "another")
+                .unwrap_err()
+                .code,
+            "catalog_limit"
+        );
     }
 
     #[test]
