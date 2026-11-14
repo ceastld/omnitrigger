@@ -8,8 +8,8 @@ use windows::{
             Shell::{
                 DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
                 Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD,
-                NIM_DELETE, NIM_SETFOCUS, NIM_SETVERSION, NINF_KEY, NIN_SELECT, NOTIFYICONDATAW,
-                NOTIFYICON_VERSION_4,
+                NIM_DELETE, NIM_MODIFY, NIM_SETFOCUS, NIM_SETVERSION, NINF_KEY, NIN_SELECT,
+                NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, DestroyMenu, IsIconic, IsWindowVisible, LoadIconW,
@@ -49,7 +49,10 @@ unsafe fn add_icon(hwnd: HWND) -> bool {
     for (slot, ch) in data.szTip.iter_mut().zip("OmniTrigger".encode_utf16()) {
         *slot = ch;
     }
-    if !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
+    // 任务栏通知可能重复到达。已有图标可直接更新，再协商回调版本。
+    if !Shell_NotifyIconW(NIM_ADD, &data).as_bool()
+        && !Shell_NotifyIconW(NIM_MODIFY, &data).as_bool()
+    {
         return false;
     }
     data.Anonymous.uVersion = NOTIFYICON_VERSION_4;

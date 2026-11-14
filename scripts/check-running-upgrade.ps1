@@ -26,6 +26,8 @@ public static class OmniTriggerUpgradeWindow {
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern uint RegisterWindowMessage(string message);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeout, out UIntPtr result);
 }
 '@
 
@@ -66,6 +68,12 @@ function Close-ToTray([Diagnostics.Process]$ui, [string]$healthFile) {
     if ($owner -ne $ui.Id -or -not [OmniTriggerUpgradeWindow]::IsWindowVisible($window) -or
         ($healthFile -and -not (Test-Path -LiteralPath $healthFile -PathType Leaf))) {
         throw '安装版窗口或预期的健康回执没有就绪，无法验证真实托盘。'
+    }
+    $taskbarCreated = [OmniTriggerUpgradeWindow]::RegisterWindowMessage('TaskbarCreated')
+    [UIntPtr]$result = [UIntPtr]::Zero
+    if ($taskbarCreated -eq 0 -or [OmniTriggerUpgradeWindow]::SendMessageTimeout(
+        $window, $taskbarCreated, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 5000, [ref]$result) -eq [IntPtr]::Zero) {
+        throw '测试窗口未处理任务栏重建通知。'
     }
     if (-not $ui.CloseMainWindow()) { throw '无法向日常窗口发送普通关闭请求。' }
     $timer.Restart()
