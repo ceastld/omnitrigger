@@ -218,26 +218,33 @@ try {
     Stop-TestProcess $ui
 }
 
-foreach ($restart in '更新成功', '更新回滚') {
+foreach ($restart in '更新成功', '更新回滚', '主窗口打开设置', '设置返回主窗口') {
     $start = New-AppStart
-    foreach ($argument in @('--config', (Join-Path $data.FullName 'bindings.json'), '--settings')) {
-        $start.ArgumentList.Add($argument)
+    $reopen = New-AppStart
+    switch ($restart) {
+        '主窗口打开设置' { $reopen.ArgumentList.Add('--settings') }
+        '设置返回主窗口' { $start.ArgumentList.Add('--settings') }
+        default {
+            foreach ($argument in @('--config', (Join-Path $data.FullName 'bindings.json'), '--settings')) {
+                $start.ArgumentList.Add($argument)
+            }
+        }
     }
     $healthFile = $null
     if ($restart -eq '更新成功') {
         $receiptDir = New-Item -ItemType Directory -Path (Join-Path $probe.FullName 'update')
         $healthFile = Join-Path $receiptDir.FullName 'healthy'
         $start.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $healthFile
-    } else {
+    } elseif ($restart -eq '更新回滚') {
         $start.Environment['OMNITRIGGER_UPDATE_ERROR'] = '测试更新回滚'
     }
     $ui = [Diagnostics.Process]::Start($start)
     try {
         $window = Close-ToTray $ui $healthFile
-        $launcher = [Diagnostics.Process]::Start((New-AppStart))
+        $launcher = [Diagnostics.Process]::Start($reopen)
         try {
             if (-not $launcher.WaitForExit(20000) -or $launcher.ExitCode -ne 0) {
-                throw "${restart}后，无参数启动的进程未正常退出。"
+                throw "${restart}时，重复启动的进程未正常退出。"
             }
             $timer = [Diagnostics.Stopwatch]::StartNew()
             while (-not $ui.HasExited -and -not [OmniTriggerUpgradeWindow]::IsWindowVisible($window) -and $timer.Elapsed.TotalSeconds -lt 10) {
@@ -246,9 +253,9 @@ foreach ($restart in '更新成功', '更新回滚') {
             [uint32]$owner = 0
             $null = [OmniTriggerUpgradeWindow]::GetWindowThreadProcessId($window, [ref]$owner)
             if ($ui.HasExited -or $owner -ne $ui.Id -or -not [OmniTriggerUpgradeWindow]::IsWindowVisible($window)) {
-                throw "${restart}后，日常入口未能唤回原来的设置窗口。"
+                throw "${restart}时，未能唤回原来的窗口。"
             }
-            Write-Host "${restart}后，日常入口已唤回原托盘进程和窗口。"
+            Write-Host "${restart}时，已唤回原托盘进程和窗口。"
         } finally { Stop-TestProcess $launcher }
     } finally { Stop-TestProcess $ui }
 }

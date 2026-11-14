@@ -1567,11 +1567,14 @@ impl Workspace {
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) {
-        if self
+        if let Some(instance) = self
             .workspace_instance
             .as_ref()
-            .is_some_and(|instance| instance.take_open_request())
+            .filter(|instance| instance.take_open_request())
         {
+            if instance.take_settings_request() {
+                self.open_page(Page::Settings, cx);
+            }
             let _ = self.main_window.update(cx, |_, window, _| {
                 if let Ok(RawWindowHandle::Win32(handle)) =
                     HasWindowHandle::window_handle(&*window).map(|handle| handle.as_raw())
@@ -8766,9 +8769,11 @@ fn main() {
     } else {
         None
     };
-    // 更新器的成功和回滚入口都用原配置打开设置页。标准配置仍要占用其日常窗口身份。
-    let updater_settings = !profile_startup.test_data
-        && matches!(&arguments[1..], [config, _, page] if config == "--config" && page == "--settings")
+    let config_main = matches!(&arguments[1..], [config, _] if config == "--config");
+    let config_settings = matches!(&arguments[1..],
+        [config, _, page] if config == "--config" && page == "--settings")
+        || matches!(&arguments[1..], [page, config, _] if page == "--settings" && config == "--config");
+    let updater_settings = config_settings
         && (std::env::var_os("OMNITRIGGER_UPDATE_HEALTH").is_some()
             || std::env::var_os("OMNITRIGGER_UPDATE_ERROR").is_some());
     let config_path = settings::path();
@@ -8779,16 +8784,15 @@ fn main() {
             return;
         }
     };
-    let workspace_instance = if arguments.len() == 1
-        || (updater_settings
+    let shared_workspace = arguments.iter().skip(1).all(|arg| arg == "--settings")
+        || ((config_main || config_settings)
             && config_path
                 .file_name()
-                .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json")))
-    {
-        match profile_startup
-            .workspace_key(&config_path)
-            .and_then(|key| omnitrigger_windows::WorkspaceInstance::open(&key))
-        {
+                .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json")));
+    let workspace_instance = if shared_workspace {
+        match profile_startup.workspace_key(&config_path).and_then(|key| {
+            omnitrigger_windows::WorkspaceInstance::open_with_settings(&key, appearance_settings)
+        }) {
             Ok(Some(instance)) => {
                 // 只有新主窗口能在载入配置前导入；重复启动只唤回原窗口。
                 #[cfg(windows)]
@@ -8844,9 +8848,7 @@ fn main() {
                         });
                     let main_window = gpui::Window::window_handle(&*window);
                     let tray_window = text_history_ui_window.filter(|_| {
-                        !profile_startup.test_data
-                            && (arguments.iter().skip(1).all(|arg| arg == "--settings")
-                                || updater_settings)
+                        !profile_startup.test_data && (shared_workspace || updater_settings)
                     });
                     let view = cx.new(|cx| {
                         let mut workspace = Workspace::new(

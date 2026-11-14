@@ -35,10 +35,15 @@ impl Startup {
         }
     }
 
-    /// 普通主窗口按数据目录与监听模式复用。定向启动页和一次性命令保留各自的入口。
+    /// 主窗口和设置页按配置目录与监听模式复用。
     pub fn workspace_key(&self, config: &Path) -> Result<String, String> {
         use sha2::{Digest, Sha256};
         let dir = config.parent().ok_or("找不到配置文件的父目录。")?;
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
         std::fs::create_dir_all(dir).map_err(|error| format!("无法打开配置目录：{error}"))?;
         let dir = dir
             .canonicalize()
@@ -1179,7 +1184,8 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
     if parsed.command.is_some() && !plain {
         exit_rejected("配置档命令不能与其他参数混用。");
     }
-    let interactive = plain && parsed.command.is_none();
+    let interactive =
+        arguments.iter().skip(1).all(|arg| arg == "--settings") && parsed.command.is_none();
     let check_config = matches!(&arguments[1..], [arg] if arg == "--check-config");
     let env_root = std::env::var_os("OMNITRIGGER_HOME").filter(|root| !root.is_empty());
     if !parsed.any() && !interactive && !check_config && env_root.is_none() {
@@ -1196,7 +1202,7 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
         local_app_data.clone(),
     )
     .unwrap_or_else(|message| exit_rejected(&message));
-    if plain || check_config {
+    if plain || interactive || check_config {
         #[cfg(windows)]
         escape_redirect(
             &root,
@@ -1365,8 +1371,11 @@ fn escape_redirect(
     let link = scratch.join(format!("relaunch-{tag}.lnk"));
     let result_file = scratch.join(format!("relaunch-{tag}.json"));
     let mut forwarded = parsed.forwarded(original);
-    if check_config {
-        // 外壳使用自己的工作目录与环境，转交调用者已经解析好的绝对数据根。
+    if check_config
+        || parsed.data_root.is_some()
+        || std::env::var_os("OMNITRIGGER_HOME").is_some_and(|root| !root.is_empty())
+    {
+        // 外壳使用自己的工作目录与环境，显式选择的数据根按已解析的绝对路径转交。
         if let Some(index) = forwarded.iter().position(|arg| arg == "--data-root") {
             forwarded[index + 1] = root.to_string_lossy().into_owned();
         } else {
