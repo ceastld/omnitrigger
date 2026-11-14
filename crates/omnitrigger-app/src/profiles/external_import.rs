@@ -31,6 +31,18 @@ struct IncomingFile {
     sha256: [u8; 32],
 }
 
+impl Plan {
+    fn contains_file(&self, name: &str) -> bool {
+        self.files
+            .iter()
+            .any(|file| file.path.as_os_str().eq_ignore_ascii_case(name))
+    }
+
+    fn replaces_editor_files(&self) -> bool {
+        self.contains_file("bindings.json") || self.contains_file("wheels.json")
+    }
+}
+
 fn digest(path: &Path) -> io::Result<[u8; 32]> {
     let mut hash = Sha256::new();
     io::copy(&mut fs::File::open(path)?, &mut hash)?;
@@ -243,6 +255,34 @@ fn hold_history(root: &Path) -> io::Result<fs::File> {
         .map_err(|e| io::Error::other(e.message))
 }
 
+/// 热键和轮盘可以相互引用，替换其中之一时也要与两个编辑器互斥。
+fn hold_editor_files(root: &Path) -> io::Result<[fs::File; 2]> {
+    let lock = |name: &str, kind| {
+        metadata(&root.join(format!("{name}.lock")))?;
+        crate::settings::lock_config(&root.join(name), kind).map_err(io::Error::other)
+    };
+    Ok([lock("bindings.json", "热键")?, lock("wheels.json", "轮盘")?])
+}
+
+fn source_has_file(source: &Path, name: &str) -> Result<bool, String> {
+    let path = source.join(name);
+    match path.symlink_metadata() {
+        Ok(meta) => Ok(meta.is_file() && is_plain(&meta) && !is_cloud_path(&path)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("检查来源文件 {} 失败：{error}", path.display())),
+    }
+}
+
+fn restore_plan(root: &Path, pending: &Path, plan: &Plan) -> io::Result<()> {
+    rollback(root, pending, plan).map_err(|e| {
+        io::Error::other(format!(
+            "恢复导入前的数据失败：{e}。备份位于 {}",
+            root.join("backups").join(&plan.backup).display()
+        ))
+    })?;
+    finish(pending)
+}
+
 fn recover_locked(root: &Path, pending: &Path) -> io::Result<()> {
     if metadata(pending)?.is_none() {
         return Ok(());
@@ -259,18 +299,15 @@ fn recover_locked(root: &Path, pending: &Path) -> io::Result<()> {
         if !plan.directories.is_empty() && !is_plain_directory(&pending.join("directories")) {
             return Err(invalid(&pending.join("directories")));
         }
+        let _editors = plan
+            .replaces_editor_files()
+            .then(|| hold_editor_files(root))
+            .transpose()?;
         let _history = plan
-            .files
-            .iter()
-            .any(|file| file.path.as_os_str().eq_ignore_ascii_case(HISTORY_FILE))
+            .contains_file(HISTORY_FILE)
             .then(|| hold_history(root))
             .transpose()?;
-        rollback(root, pending, &plan).map_err(|e| {
-            io::Error::other(format!(
-                "恢复导入前的数据失败：{e}。备份位于 {}",
-                root.join("backups").join(&plan.backup).display()
-            ))
-        })?;
+        return restore_plan(root, pending, &plan);
     }
     finish(pending)
 }
@@ -313,27 +350,36 @@ pub(super) fn import(root: &Path, source: &Path) -> Result<(), String> {
         files: Vec::new(),
         directories: Vec::new(),
     };
+    // 在备份前取得目标文件的写锁，直到替换或撤回全部完成。
+    let has_editors =
+        source_has_file(source, "bindings.json")? || source_has_file(source, "wheels.json")?;
+    let editors = has_editors
+        .then(|| hold_editor_files(root))
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    let history = source_has_file(source, HISTORY_FILE)?
+        .then(|| hold_history(root))
+        .transpose()
+        .map_err(|e| e.to_string())?;
     fs::create_dir(&pending).map_err(|e| e.to_string())?;
     let staged = pending.join("incoming");
+    let mut plan_recorded = false;
     let result = (|| -> io::Result<()> {
-        // 在备份之前取得历史锁，直至最后一个文件就位；旧记录与备份属于同一时刻。
-        let history_path = source.join(HISTORY_FILE);
-        let source_has_history = match history_path.symlink_metadata() {
-            Ok(meta) => meta.is_file() && is_plain(&meta) && !is_cloud_path(&history_path),
-            Err(error) if error.kind() == ErrorKind::NotFound => false,
-            Err(error) => return Err(error),
-        };
-        let history_guard = source_has_history.then(|| hold_history(root)).transpose()?;
         let snapshot = pending.join("backup");
         copy_data(root, &snapshot, DataCopy::Backup).map_err(io::Error::other)?;
         fs::rename(&snapshot, &backup_dir)?;
         copy_transferable_data(source, &staged, DataCopy::FixtureOrImport)
             .map_err(io::Error::other)?;
-        if history_guard.is_none() && metadata(&staged.join(HISTORY_FILE))?.is_some() {
-            return Err(io::Error::other("备份期间来源新增了文本历史，请重新导入。"));
-        }
         collect(&staged, root, Path::new(""), &mut plan)?;
         validate(&plan)?;
+        if editors.is_none() && plan.replaces_editor_files() {
+            return Err(io::Error::other(
+                "备份期间来源新增了热键或轮盘配置，请重新导入。",
+            ));
+        }
+        if history.is_none() && plan.contains_file(HISTORY_FILE) {
+            return Err(io::Error::other("备份期间来源新增了文本历史，请重新导入。"));
+        }
         let directories = pending.join("directories");
         fs::create_dir(&directories)?;
         for i in 0..plan.directories.len() {
@@ -341,11 +387,17 @@ pub(super) fn import(root: &Path, source: &Path) -> Result<(), String> {
         }
         let bytes = serde_json::to_vec(&plan)?;
         crate::settings::atomic_write(&pending.join(PLAN), &bytes).map_err(io::Error::other)?;
+        plan_recorded = true;
         apply(root, &pending, &plan)?;
         finish(&pending)
     })();
     if let Err(error) = result {
-        recover_locked(root, &pending).map_err(|recovery| format!("{error}\n{recovery}"))?;
+        let recovery = if plan_recorded {
+            restore_plan(root, &pending, &plan)
+        } else {
+            finish(&pending)
+        };
+        recovery.map_err(|recovery| format!("{error}\n{recovery}"))?;
         return if backup_dir.exists() {
             Err(format!(
                 "{error}\n\n导入前的备份位于：\n{}",
@@ -380,6 +432,76 @@ mod tests {
         let path = root.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, value).unwrap();
+    }
+
+    #[test]
+    fn importing_either_editor_file_waits_for_both_saves_and_backs_up_finished_edits() {
+        for incoming in ["BINDINGS.JSON", "Wheels.json"] {
+            let fixture = Fixture::new();
+            let root = fixture.0.join("daily");
+            let source = fixture.0.join("incoming");
+            write(&root, "bindings.json", "daily bindings");
+            write(&root, "wheels.json", "daily wheels");
+            write(&source, incoming, "imported");
+            for (name, kind) in [("bindings.json", "热键"), ("wheels.json", "轮盘")] {
+                let _writer = crate::settings::lock_config(&root.join(name), kind).unwrap();
+                let before = fs::read(root.join(incoming)).unwrap();
+                let error = import(&root, &source).unwrap_err();
+                assert!(error.contains(kind), "{error}");
+                assert_eq!(fs::read(root.join(incoming)).unwrap(), before);
+                assert_eq!(fs::read_dir(root.join("backups")).unwrap().count(), 0);
+                write(&root, name, "just saved");
+            }
+            import(&root, &source).unwrap();
+            let backup = fs::read_dir(root.join("backups"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            assert_eq!(fs::read(root.join(incoming)).unwrap(), b"imported");
+            for name in ["bindings.json", "wheels.json"] {
+                assert_eq!(fs::read(backup.join(name)).unwrap(), b"just saved");
+            }
+            fs::remove_file(source.join(incoming)).unwrap();
+            write(&source, "actions/demo/bindings.json", "action resource");
+            let _writer =
+                crate::settings::lock_config(&root.join("bindings.json"), "热键").unwrap();
+            import(&root, &source).unwrap();
+            assert_eq!(
+                fs::read(root.join("actions/demo/bindings.json")).unwrap(),
+                b"action resource"
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_import_waits_for_the_editor_before_restoring_daily_files() {
+        let fixture = Fixture::new();
+        let root = &fixture.0;
+        let pending = root.join("backups").join(PENDING);
+        let staged = pending.join("incoming");
+        write(root, "wheels.json", "daily wheels");
+        write(&staged, "WHEELS.JSON", "imported wheels");
+        let mut plan = Plan {
+            backup: "before-import-test".into(),
+            files: Vec::new(),
+            directories: Vec::new(),
+        };
+        collect(&staged, root, Path::new(""), &mut plan).unwrap();
+        fs::write(pending.join(PLAN), serde_json::to_vec(&plan).unwrap()).unwrap();
+        apply(root, &pending, &plan).unwrap();
+        let writer = crate::settings::lock_config(&root.join("bindings.json"), "热键").unwrap();
+        assert!(recover(root).unwrap_err().contains("热键"));
+        assert_eq!(
+            fs::read(root.join("wheels.json")).unwrap(),
+            b"imported wheels"
+        );
+        assert!(pending.join(PLAN).exists());
+        drop(writer);
+        recover(root).unwrap();
+        assert_eq!(fs::read(root.join("wheels.json")).unwrap(), b"daily wheels");
+        assert!(!pending.exists());
     }
 
     #[test]
