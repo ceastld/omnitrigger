@@ -827,6 +827,8 @@ struct Workspace {
     triggers: service::TriggerService,
     error: Option<String>,
     binding_reload_notice: Option<String>,
+    external_copy_notice: Option<profiles::ExternalCopyNotice>,
+    retrying_ignore: bool,
     action_error: Option<(u64, String)>,
     status: String,
     hits: VecDeque<Hit>,
@@ -1339,6 +1341,8 @@ impl Workspace {
                 .or(mouse_shortcut_dispatch_error.map(|error| error.message().to_owned())),
             action_error: None,
             binding_reload_notice: None,
+            external_copy_notice: None,
+            retrying_ignore: false,
             status: if mode.owns_input_engine() && !listen {
                 "测试数据，未安装输入监听；需要验证真实输入时加 --listen 启动。".into()
             } else {
@@ -4473,6 +4477,82 @@ impl Workspace {
                         None,
                     )),
             )
+    }
+
+    fn retry_ignored_copy(&mut self, cx: &mut Context<Self>) {
+        if self.retrying_ignore {
+            return;
+        }
+        let Some(choice) = self
+            .external_copy_notice
+            .as_ref()
+            .and_then(|notice| notice.retry.clone())
+        else {
+            return;
+        };
+        self.retrying_ignore = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { choice.save() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.retrying_ignore = false;
+                match result {
+                    Ok(()) => this.external_copy_notice = None,
+                    Err(message) => {
+                        if let Some(notice) = &mut this.external_copy_notice {
+                            notice.message = message;
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_external_copy_notice(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let notice = self.external_copy_notice.as_ref()?;
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(14.))
+                .py(px(8.))
+                .bg(theme::tint_fill(theme::DANGER, 0.14, 0.04))
+                .child(icon_tile(Icon::Alert, theme::DANGER, 28.))
+                .child(div().flex_1().min_w_0().child(notice.message.clone()))
+                .when(notice.retry.is_some(), |el| {
+                    el.child(
+                        small(button(
+                            "retry-ignore-copy",
+                            if self.retrying_ignore {
+                                "保存中…"
+                            } else {
+                                "重试保存"
+                            },
+                            Tone::Secondary,
+                            !self.retrying_ignore,
+                        ))
+                        .on_click(cx.listener(|this, _, _, cx| this.retry_ignored_copy(cx))),
+                    )
+                })
+                .child(
+                    small(button(
+                        "dismiss-ignore-copy",
+                        "知道了",
+                        Tone::Secondary,
+                        true,
+                    ))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.external_copy_notice = None;
+                        cx.notify();
+                    })),
+                ),
+        )
     }
 
     // ───────────────────────────── 触发器页 ─────────────────────────────
@@ -8083,6 +8163,7 @@ impl Render for Workspace {
                                         .child(pill("独立历史窗口", theme::TEXT_MUTED)),
                                 )
                             })
+                            .children(self.render_external_copy_notice(cx))
                             .child(main),
                     ),
             )
@@ -8797,18 +8878,23 @@ fn main() {
             && config_path
                 .file_name()
                 .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json")));
-    let workspace_instance = if shared_workspace {
+    let (workspace_instance, external_copy_notice) = if shared_workspace {
         match profile_startup.workspace_key(&config_path).and_then(|key| {
             omnitrigger_windows::WorkspaceInstance::open_with_settings(&key, appearance_settings)
         }) {
             Ok(Some(instance)) => {
                 // 只有新主窗口能在载入配置前导入；重复启动只唤回原窗口。
                 #[cfg(windows)]
-                if let Err(error) = profile_startup.offer_external_copy() {
-                    omnitrigger_windows::show_error_dialog("OmniTrigger 导入恢复失败", &error);
-                    return;
-                }
-                Some(instance)
+                let notice = match profile_startup.offer_external_copy() {
+                    Ok(notice) => notice,
+                    Err(error) => {
+                        omnitrigger_windows::show_error_dialog("OmniTrigger 导入恢复失败", &error);
+                        return;
+                    }
+                };
+                #[cfg(not(windows))]
+                let notice = None;
+                (Some(instance), notice)
             }
             Ok(None) => return,
             Err(message) => {
@@ -8817,7 +8903,7 @@ fn main() {
             }
         }
     } else {
-        None
+        (None, None)
     };
     Application::new()
         .with_assets(Assets)
@@ -8885,6 +8971,7 @@ fn main() {
                             title_bar,
                         );
                         workspace.workspace_instance = workspace_instance;
+                        workspace.external_copy_notice = external_copy_notice;
                         workspace
                     });
                     if text_history_page {

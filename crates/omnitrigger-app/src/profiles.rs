@@ -34,11 +34,11 @@ pub struct Startup {
 
 impl Startup {
     #[cfg(windows)]
-    pub fn offer_external_copy(&self) -> Result<(), String> {
+    pub fn offer_external_copy(&self) -> Result<Option<ExternalCopyNotice>, String> {
         if let Some((root, local_app_data)) = &self.external_copy_roots {
-            offer_external_copy(root, local_app_data)?;
+            return offer_external_copy(root, local_app_data);
         }
-        Ok(())
+        Ok(None)
     }
 
     /// 主窗口和设置页按配置目录与监听模式复用。
@@ -1445,6 +1445,62 @@ fn ignored_path(root: &Path) -> PathBuf {
     root.join("device").join("external-copies.json")
 }
 
+#[derive(Clone)]
+pub(super) struct IgnoreCopy {
+    root: PathBuf,
+    directory: PathBuf,
+    modified: u64,
+}
+
+pub(super) struct ExternalCopyNotice {
+    pub message: String,
+    pub retry: Option<IgnoreCopy>,
+}
+
+fn read_ignored(root: &Path) -> Result<BTreeMap<String, u64>, String> {
+    let file = ignored_path(root);
+    let read = || {
+        let device = file.parent().unwrap();
+        if !crate::local_files::is_plain_directory(root) {
+            return Err(std::io::Error::other("配置目录不是普通本机目录"));
+        }
+        let dir = device.symlink_metadata()?;
+        if !dir.is_dir() || !crate::local_files::is_plain(&dir) {
+            return Err(std::io::Error::other("device 不是普通本机目录"));
+        }
+        let meta = file.symlink_metadata()?;
+        if !meta.is_file() || !crate::local_files::is_plain(&meta) {
+            return Err(std::io::Error::other("忽略记录不是普通本机文件"));
+        }
+        serde_json::from_slice(&std::fs::read(&file)?).map_err(std::io::Error::other)
+    };
+    match read() {
+        Ok(map) => Ok(map),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(e) => Err(format!("无法读取 {}。{e}", file.display())),
+    }
+}
+
+impl IgnoreCopy {
+    pub fn save(&self) -> Result<(), String> {
+        let file = ignored_path(&self.root);
+        let result = (|| {
+            if !crate::local_files::is_plain_directory(&self.root) {
+                return Err(format!("无法访问本机配置目录 {}。", self.root.display()));
+            }
+            let _lock = lock_catalog(&self.root)?;
+            let mut ignored = read_ignored(&self.root)?;
+            ignored.insert(
+                normalize(&self.directory).to_ascii_lowercase(),
+                self.modified,
+            );
+            let bytes = serde_json::to_vec_pretty(&ignored).map_err(|e| e.to_string())?;
+            crate::settings::atomic_write(&file, &bytes)
+        })();
+        result.map_err(|e: String| format!("忽略选择未保存。{e}"))
+    }
+}
+
 fn relative_age(modified_ms: u64) -> String {
     let minutes = now_ms().saturating_sub(modified_ms) / 60_000;
     match minutes {
@@ -1505,17 +1561,29 @@ fn pending_copy(
 
 /// 发现比当前数据更新的外部副本时询问用户：导入（先备份当前数据）、忽略或本次不处理。
 #[cfg(windows)]
-fn offer_external_copy(root: &Path, local_app_data: &Path) -> Result<(), String> {
-    let ignored_file = ignored_path(root);
-    let mut ignored: BTreeMap<String, u64> = std::fs::read_to_string(&ignored_file)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
+fn offer_external_copy(
+    root: &Path,
+    local_app_data: &Path,
+) -> Result<Option<ExternalCopyNotice>, String> {
     let current = data_modified_ms(root);
-    let Some((package, directory, modified)) =
-        pending_copy(external_copies(local_app_data), current, &ignored)
-    else {
-        return Ok(());
+    let copies = external_copies(local_app_data);
+    if !copies
+        .iter()
+        .any(|(_, _, ms)| current.is_none_or(|current| *ms > current))
+    {
+        return Ok(None);
+    }
+    let ignored = match read_ignored(root) {
+        Ok(map) => map,
+        Err(error) => {
+            return Ok(Some(ExternalCopyNotice {
+                message: format!("本次已跳过外部副本提示。{error}"),
+                retry: None,
+            }))
+        }
+    };
+    let Some((package, directory, modified)) = pending_copy(copies, current, &ignored) else {
+        return Ok(None);
     };
     let current_text = current
         .map(|ms| format!("修改于 {}", relative_age(ms)))
@@ -1536,13 +1604,21 @@ fn offer_external_copy(root: &Path, local_app_data: &Path) -> Result<(), String>
             }
         }
         Some(false) => {
-            ignored.insert(normalize(&directory).to_ascii_lowercase(), modified);
-            let _ = std::fs::create_dir_all(root.join("device"));
-            let _ = write_json(&ignored_file, &ignored);
+            let choice = IgnoreCopy {
+                root: root.to_owned(),
+                directory,
+                modified,
+            };
+            if let Err(message) = choice.save() {
+                return Ok(Some(ExternalCopyNotice {
+                    message,
+                    retry: Some(choice),
+                }));
+            }
         }
         None => {}
     }
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -2187,6 +2263,87 @@ mod tests {
         );
         std::fs::remove_dir_all(root).unwrap();
         assert_eq!(offered.map(|entry| entry.2), Some(1_700_000_030_000));
+    }
+
+    #[test]
+    fn ignore_choices_merge_and_keep_the_version_seen_by_the_user() {
+        let root = temp_root("ignore-merge");
+        let a = IgnoreCopy {
+            root: root.clone(),
+            directory: root.join("a"),
+            modified: 10,
+        };
+        let b = IgnoreCopy {
+            root: root.clone(),
+            directory: root.join("b"),
+            modified: 20,
+        };
+        assert!(read_ignored(&root).unwrap().is_empty());
+        a.save().unwrap();
+        b.save().unwrap();
+        let ignored = read_ignored(&root).unwrap();
+        let copies = vec![
+            ("a".into(), a.directory.clone(), 10),
+            ("b".into(), b.directory.clone(), 20),
+        ];
+        assert!(pending_copy(copies, None, &ignored).is_none());
+        assert!(pending_copy(vec![("a".into(), a.directory, 11)], None, &ignored).is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unreadable_ignore_records_are_reported_and_preserved() {
+        let root = temp_root("ignore-invalid");
+        let device = root.join("device");
+        let path = ignored_path(&root);
+        let choice = IgnoreCopy {
+            root: root.clone(),
+            directory: root.join("copy"),
+            modified: 10,
+        };
+        std::fs::write(&device, "占用目录名").unwrap();
+        assert!(choice.save().is_err());
+        assert_eq!(std::fs::read_to_string(&device).unwrap(), "占用目录名");
+        std::fs::remove_file(&device).unwrap();
+        std::fs::create_dir(&device).unwrap();
+        std::fs::write(&path, b"{").unwrap();
+        assert!(read_ignored(&root).is_err());
+        assert!(choice.save().is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"{");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn retry_after_sharing_violation_preserves_other_choices() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = temp_root("ignore-locked");
+        let choice = IgnoreCopy {
+            root: root.clone(),
+            directory: root.join("copy"),
+            modified: 10,
+        };
+        let path = ignored_path(&root);
+        let device = path.parent().unwrap();
+        std::fs::create_dir(device).unwrap();
+        std::fs::write(&path, br#"{"other":20}"#).unwrap();
+        let lock = std::fs::File::options()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        assert!(choice.save().is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), br#"{"other":20}"#);
+        assert_eq!(std::fs::read_dir(device).unwrap().count(), 1);
+        drop(lock);
+        choice.save().unwrap();
+        let ignored = read_ignored(&root).unwrap();
+        assert_eq!(ignored.get("other"), Some(&20));
+        assert_eq!(
+            ignored.get(&normalize(&choice.directory).to_ascii_lowercase()),
+            Some(&10)
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

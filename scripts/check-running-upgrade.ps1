@@ -30,10 +30,11 @@ public static class OmniTriggerUpgradeWindow {
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hwnd, int id);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern uint RegisterWindowMessage(string message);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeout, out UIntPtr result);
-    public static IntPtr FindWorkspace(uint processId) {
+    public static IntPtr FindAppWindow(uint processId, string expectedTitle) {
         IntPtr workspace = IntPtr.Zero;
         EnumWindows((hwnd, unused) => {
             uint owner;
@@ -42,7 +43,9 @@ public static class OmniTriggerUpgradeWindow {
             var title = new StringBuilder(256);
             GetWindowText(hwnd, title, title.Capacity);
             string name = title.ToString();
-            if (name != "OmniTrigger" && !name.StartsWith("OmniTrigger — 测试：", StringComparison.Ordinal)) return true;
+            if (!string.IsNullOrEmpty(expectedTitle)) {
+                if (name != expectedTitle) return true;
+            } else if (name != "OmniTrigger" && !name.StartsWith("OmniTrigger — 测试：", StringComparison.Ordinal)) return true;
             workspace = hwnd;
             return false;
         }, IntPtr.Zero);
@@ -73,12 +76,12 @@ function New-AppStart {
     return $start
 }
 
-function Wait-AppWindow([Diagnostics.Process]$ui, [string]$healthFile) {
+function Wait-AppWindow([Diagnostics.Process]$ui, [string]$healthFile, [string]$expectedTitle = '') {
     $timer = [Diagnostics.Stopwatch]::StartNew()
     do {
         $ui.Refresh()
         if ($ui.HasExited) { throw "安装版未能打开窗口，退出码 $($ui.ExitCode)。" }
-        $window = [OmniTriggerUpgradeWindow]::FindWorkspace($ui.Id)
+        $window = [OmniTriggerUpgradeWindow]::FindAppWindow($ui.Id, $expectedTitle)
         if ($window -ne [IntPtr]::Zero -and [OmniTriggerUpgradeWindow]::IsWindowVisible($window) -and
             (-not $healthFile -or (Test-Path -LiteralPath $healthFile -PathType Leaf))) { break }
         Start-Sleep -Milliseconds 150
@@ -87,7 +90,7 @@ function Wait-AppWindow([Diagnostics.Process]$ui, [string]$healthFile) {
     $null = [OmniTriggerUpgradeWindow]::GetWindowThreadProcessId($window, [ref]$owner)
     if ($owner -ne $ui.Id -or -not [OmniTriggerUpgradeWindow]::IsWindowVisible($window) -or
         ($healthFile -and -not (Test-Path -LiteralPath $healthFile -PathType Leaf))) {
-        throw '安装版窗口或预期的健康回执没有就绪。'
+        throw "安装版窗口或预期的健康回执没有就绪。期望窗口标题为 '$expectedTitle'。"
     }
     return $window
 }
@@ -116,6 +119,50 @@ function Stop-TestProcess([Diagnostics.Process]$ui) {
         if (-not $ui.HasExited) { $ui.Kill(); $null = $ui.WaitForExit(5000) }
     } finally { $ui.Dispose() }
 }
+
+# 为 CI 安装版构造独立的默认目录，使外部副本提示走正常启动入口。
+$local = Join-Path $probe.FullName 'ignore-copy'
+$daily = Join-Path $local 'OmniTrigger'
+$external = Join-Path $local 'Packages\Example\LocalCache\Local\OmniTrigger'
+$device = Join-Path $daily 'device'
+$null = New-Item -ItemType Directory -Force -Path $device, $external
+$sourceFile = Join-Path $external 'bindings.json'
+$ignoredFile = Join-Path $device 'external-copies.json'
+[IO.File]::WriteAllText((Join-Path $daily 'bindings.json'), '{"version":1,"bindings":[]}')
+[IO.File]::WriteAllText($sourceFile, '{"version":1,"bindings":[]}')
+[IO.File]::SetLastWriteTimeUtc($sourceFile, [DateTime]::UtcNow.AddHours(1))
+[IO.File]::WriteAllText($ignoredFile, '{"prior":100}')
+$ignoreStart = New-AppStart
+$null = $ignoreStart.Environment.Remove('OMNITRIGGER_HOME')
+$ignoreStart.Environment['LOCALAPPDATA'] = $local
+foreach ($case in '文件占用', '解除占用', '同一副本', '副本有新修改') {
+    if ($case -eq '副本有新修改') {
+        [IO.File]::SetLastWriteTimeUtc($sourceFile, [IO.File]::GetLastWriteTimeUtc($sourceFile).AddHours(1))
+    }
+    $held = if ($case -eq '文件占用') { [IO.File]::Open($ignoredFile, 'Open', 'Read', 'Read') }
+    try {
+        $ui = [Diagnostics.Process]::Start($ignoreStart)
+        try {
+            if ($case -ne '同一副本') {
+                $prompt = Wait-AppWindow $ui '' 'OmniTrigger 发现外部数据副本'
+                if ([OmniTriggerUpgradeWindow]::GetDlgItem($prompt, 7) -eq [IntPtr]::Zero -or
+                    -not [OmniTriggerUpgradeWindow]::PostMessage($prompt, 0x0111, [UIntPtr]7, [IntPtr]::Zero)) {
+                    throw "未能在副本提示中选择忽略（$case）。"
+                }
+            }
+            $null = Wait-AppWindow $ui '' 'OmniTrigger'
+            $saved = Get-Content -LiteralPath $ignoredFile -Raw | ConvertFrom-Json -AsHashtable
+            if ($saved.prior -ne 100) { throw "旧的忽略记录丢失（$case）。" }
+            if ($case -eq '文件占用') {
+                if ($saved.Count -ne 1) { throw '被占用的忽略记录发生变化。' }
+            } else {
+                $expected = ([DateTimeOffset][IO.File]::GetLastWriteTimeUtc($sourceFile)).ToUnixTimeMilliseconds()
+                if ($saved[$external.ToLowerInvariant()] -ne $expected) { throw "未保存对应的副本版本（$case）。" }
+            }
+        } finally { Stop-TestProcess $ui }
+    } finally { if ($held) { $held.Dispose() } }
+}
+Write-Host '已验证忽略选择在文件占用后可保存，重复启动跳过旧副本，副本更新后重新提示。'
 
 # 使用单独的数据根，验证安装版窗口确实持有测试档，正常退出后才允许重置。
 $profileRoot = Join-Path $probe.FullName 'profiles-test'
