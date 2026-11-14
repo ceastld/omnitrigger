@@ -793,7 +793,30 @@ fn transferable_file(name: &str) -> bool {
         && !name.eq_ignore_ascii_case(crate::legacy_upgrade::MARKER)
 }
 
-fn copy_action_tree(from: &Path, to: &Path, skip_stages: bool) -> std::io::Result<()> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DataCopy {
+    Backup,
+    Profile,
+    FixtureOrImport,
+}
+
+impl DataCopy {
+    fn copy_file(self, from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::copy(from, to)?;
+        #[cfg(windows)]
+        if self != Self::Backup {
+            // Windows 复制文件时保留只读属性。工作副本需要能被编辑器原子替换。
+            let mut permissions = to.metadata()?.permissions();
+            if permissions.readonly() {
+                permissions.set_readonly(false);
+                std::fs::set_permissions(to, permissions)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn copy_action_tree(from: &Path, to: &Path, mode: DataCopy, top: bool) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
@@ -804,21 +827,17 @@ fn copy_action_tree(from: &Path, to: &Path, skip_stages: bool) -> std::io::Resul
         }
         let target = to.join(entry.file_name());
         if kind.is_dir() {
-            if !skip_stages || !omnitrigger_actions::catalog::is_legacy_stage(&entry.file_name()) {
-                copy_action_tree(&entry.path(), &target, false)?;
+            if !top
+                || mode == DataCopy::Backup
+                || !omnitrigger_actions::catalog::is_legacy_stage(&entry.file_name())
+            {
+                copy_action_tree(&entry.path(), &target, mode, false)?;
             }
         } else if kind.is_file() {
-            std::fs::copy(entry.path(), target)?;
+            mode.copy_file(&entry.path(), &target)?;
         }
     }
     Ok(())
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DataCopy {
-    Backup,
-    Profile,
-    FixtureOrImport,
 }
 
 /// 复制配置档的顶层数据、托管动作包与 RaiShot 自定义动作清单。
@@ -864,7 +883,8 @@ fn copy_data(from: &Path, to: &Path, mode: DataCopy) -> Result<usize, String> {
                 }
             }
         {
-            std::fs::copy(entry.path(), to.join(name)).map_err(fail)?;
+            mode.copy_file(&entry.path(), &to.join(name))
+                .map_err(fail)?;
             copied += 1;
         }
     }
@@ -878,8 +898,7 @@ fn copy_data(from: &Path, to: &Path, mode: DataCopy) -> Result<usize, String> {
     let actions = from.join("actions");
     match actions.symlink_metadata() {
         Ok(metadata) if metadata.is_dir() && crate::local_files::is_plain(&metadata) => {
-            copy_action_tree(&actions, &to.join("actions"), mode != DataCopy::Backup)
-                .map_err(fail)?
+            copy_action_tree(&actions, &to.join("actions"), mode, true).map_err(fail)?
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2022,6 +2041,55 @@ mod tests {
             .collect();
         assert_eq!(aliases, ["default", "ui", "ui-copy", "blank"]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_only_seeds_create_editable_files_and_keep_originals_in_backups() {
+        let root = temp_root("read-only-seed");
+        let files = ["bindings.json", "wheels.json", "actions/pkg/lib/main.mjs"];
+        std::fs::create_dir_all(root.join("actions/pkg/lib")).unwrap();
+        let set_readonly = |path: &Path, readonly| {
+            let mut permissions = path.metadata().unwrap().permissions();
+            permissions.set_readonly(readonly);
+            std::fs::set_permissions(path, permissions).unwrap();
+        };
+        for file in files {
+            let path = root.join(file);
+            std::fs::write(&path, file).unwrap();
+            set_readonly(&path, true);
+        }
+        let snapshot = root.join("snapshot");
+        copy_data(&root, &snapshot, DataCopy::Backup).unwrap();
+        for (alias, seed) in [
+            ("copy", Seed::Copy(DEFAULT_ID.into())),
+            ("fixture", Seed::Fixture(root.clone())),
+        ] {
+            let entry = create_profile(&root, alias, &seed, None).unwrap();
+            let directory = profile_dir(&root, &entry.id);
+            for file in files {
+                let path = directory.join(file);
+                assert_eq!(std::fs::read(&path).unwrap(), file.as_bytes());
+                crate::settings::atomic_write(&path, b"edited").unwrap();
+            }
+            let (_, backup) = reset_profile(&root, alias).unwrap();
+            let backup = backup.unwrap();
+            for file in files {
+                assert_eq!(std::fs::read(backup.join(file)).unwrap(), b"edited");
+                let path = directory.join(file);
+                assert_eq!(std::fs::read(&path).unwrap(), file.as_bytes());
+                crate::settings::atomic_write(&path, b"edited again").unwrap();
+            }
+        }
+        for dir in [&root, &snapshot] {
+            for file in files {
+                let path = dir.join(file);
+                assert_eq!(std::fs::read(&path).unwrap(), file.as_bytes());
+                assert!(path.metadata().unwrap().permissions().readonly());
+                set_readonly(&path, false);
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
