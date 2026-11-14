@@ -111,6 +111,11 @@ function Close-ToTray([Diagnostics.Process]$ui, [string]$healthFile) {
     if ($ui.HasExited -or -not [OmniTriggerUpgradeWindow]::IsWindow($window) -or [OmniTriggerUpgradeWindow]::IsWindowVisible($window)) {
         throw '普通关闭后未保留原进程及隐藏窗口。'
     }
+    if ([OmniTriggerUpgradeWindow]::SendMessageTimeout(
+        $window, $taskbarCreated, [UIntPtr]::Zero, [IntPtr]::Zero, 2, 5000, [ref]$result) -eq [IntPtr]::Zero -or
+        [OmniTriggerUpgradeWindow]::IsWindowVisible($window) -or $ui.HasExited) {
+        throw '任务栏重建通知使托盘中的日常窗口弹出或退出。'
+    }
     return $window
 }
 

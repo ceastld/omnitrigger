@@ -12,11 +12,12 @@ use windows::{
                 NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
             },
             WindowsAndMessaging::{
-                AppendMenuW, CreatePopupMenu, DestroyMenu, IsIconic, IsWindowVisible, LoadIconW,
-                PostMessageW, RegisterWindowMessageW, SetForegroundWindow, ShowWindow,
-                TrackPopupMenu, ENDSESSION_CLOSEAPP, IDI_APPLICATION, MF_STRING, SW_HIDE,
-                SW_RESTORE, SW_SHOW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
-                WM_CLOSE, WM_CONTEXTMENU, WM_ENDSESSION, WM_NCDESTROY, WM_NULL, WM_QUERYENDSESSION,
+                AppendMenuW, CreatePopupMenu, DestroyMenu, IsIconic, IsWindowVisible, KillTimer,
+                LoadIconW, PostMessageW, RegisterWindowMessageW, SetForegroundWindow, SetTimer,
+                ShowWindow, TrackPopupMenu, ENDSESSION_CLOSEAPP, IDI_APPLICATION, MF_STRING,
+                SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE, TPM_NONOTIFY, TPM_RETURNCMD,
+                TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_ENDSESSION, WM_NCDESTROY,
+                WM_NULL, WM_QUERYENDSESSION, WM_TIMER,
             },
         },
     },
@@ -27,6 +28,59 @@ const CALLBACK: u32 = WM_APP + 0x34a;
 const ICON_ID: u32 = 1;
 const OPEN: usize = 1;
 const EXIT: usize = 2;
+const RETRY_TIMER: usize = SUBCLASS;
+const RETRY_DELAYS_MS: [u32; 3] = [250, 1000, 3000];
+const NO_ICON: usize = RETRY_DELAYS_MS.len() + 1;
+
+// 注册消息占低 16 位，剩余位存已安排的重试次数。状态随 HWND 的子类登记一起销毁。
+#[derive(Clone, Copy)]
+struct TrayRegistration {
+    restart: u32,
+    retries: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IconRecovery {
+    Ready,
+    AwaitTimer,
+    RetryAfter(u32),
+    Unavailable,
+}
+
+impl TrayRegistration {
+    fn from_data(data: usize) -> Self {
+        Self {
+            restart: (data & 0xffff) as u32,
+            retries: data >> 16,
+        }
+    }
+
+    fn data(self) -> usize {
+        self.restart as usize | (self.retries << 16)
+    }
+
+    fn timer_pending(self) -> bool {
+        (1..=RETRY_DELAYS_MS.len()).contains(&self.retries)
+    }
+
+    fn after_attempt(&mut self, added: bool, timer: bool) -> IconRecovery {
+        if added {
+            self.retries = 0;
+            return IconRecovery::Ready;
+        }
+        if !timer && self.timer_pending() {
+            return IconRecovery::AwaitTimer;
+        }
+        if self.retries == NO_ICON {
+            self.retries = 0; // 下一次任务栏重建开始新一轮恢复。
+        }
+        let delay = RETRY_DELAYS_MS.get(self.retries);
+        self.retries += 1;
+        delay.map_or(IconRecovery::Unavailable, |ms| {
+            IconRecovery::RetryAfter(*ms)
+        })
+    }
+}
 
 fn icon_data(hwnd: HWND) -> NOTIFYICONDATAW {
     NOTIFYICONDATAW {
@@ -73,8 +127,16 @@ pub fn install_tray(raw: isize) -> Result<(), String> {
             return Err("无法接收系统托盘消息，关闭窗口将退出程序。".into());
         }
         if !add_icon(hwnd) {
-            let _ = RemoveWindowSubclass(hwnd, Some(tray_proc), SUBCLASS);
-            return Err("系统托盘图标未能创建，关闭窗口将退出程序。".into());
+            update_registration(
+                hwnd,
+                TrayRegistration {
+                    restart,
+                    retries: 0,
+                },
+                false,
+                false,
+            );
+            return Err("系统托盘暂不可用，可从开始菜单重新打开主窗口。".into());
         }
     }
     Ok(())
@@ -83,7 +145,10 @@ pub fn install_tray(raw: isize) -> Result<(), String> {
 pub fn hide_to_tray(raw: isize) -> bool {
     let hwnd = HWND(raw as _);
     unsafe {
-        if !GetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, None).as_bool() {
+        let mut data = 0;
+        if !GetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, Some(&mut data)).as_bool()
+            || TrayRegistration::from_data(data).retries == NO_ICON
+        {
             return false;
         }
         let _ = ShowWindow(hwnd, SW_HIDE);
@@ -106,6 +171,7 @@ unsafe fn show_main(hwnd: HWND) {
 }
 
 unsafe fn remove_tray(hwnd: HWND) {
+    let _ = KillTimer(Some(hwnd), RETRY_TIMER);
     let _ = RemoveWindowSubclass(hwnd, Some(tray_proc), SUBCLASS);
     let _ = Shell_NotifyIconW(NIM_DELETE, &icon_data(hwnd));
 }
@@ -157,8 +223,9 @@ unsafe extern "system" fn tray_proc(
     wp: WPARAM,
     lp: LPARAM,
     _: usize,
-    restart: usize,
+    data: usize,
 ) -> LRESULT {
+    let registration = TrayRegistration::from_data(data);
     if lp.0 as u32 & ENDSESSION_CLOSEAPP != 0 {
         match msg {
             // Restart Manager 的查询可能被取消。只有确认结束才撤下托盘。
@@ -180,13 +247,111 @@ unsafe extern "system" fn tray_proc(
         }
         return LRESULT(0);
     }
-    if msg == restart as u32 && !add_icon(hwnd) {
-        let _ = RemoveWindowSubclass(hwnd, Some(tray_proc), SUBCLASS);
-        if !IsWindowVisible(hwnd).as_bool() {
-            show_main(hwnd);
+    let retry_timer = msg == WM_TIMER && wp.0 == RETRY_TIMER;
+    if msg == registration.restart || retry_timer {
+        if retry_timer && !registration.timer_pending() {
+            return LRESULT(0); // 已取消的计时器消息可能仍在队列中。
         }
-    } else if msg == WM_NCDESTROY {
+        update_registration(hwnd, registration, add_icon(hwnd), retry_timer);
+        return LRESULT(0);
+    }
+    if msg == WM_NCDESTROY {
         remove_tray(hwnd);
     }
     DefSubclassProc(hwnd, msg, wp, lp)
+}
+
+unsafe fn update_registration(
+    hwnd: HWND,
+    mut registration: TrayRegistration,
+    added: bool,
+    timer: bool,
+) {
+    let action = registration.after_attempt(added, timer);
+    let restored_or_scheduled = match action {
+        IconRecovery::AwaitTimer => return,
+        IconRecovery::Ready => {
+            let _ = KillTimer(Some(hwnd), RETRY_TIMER);
+            true
+        }
+        IconRecovery::RetryAfter(delay) => {
+            let scheduled = SetTimer(Some(hwnd), RETRY_TIMER, delay, None) != 0;
+            if !scheduled {
+                registration.retries = NO_ICON;
+            }
+            scheduled
+        }
+        IconRecovery::Unavailable => false,
+    };
+    if !restored_or_scheduled {
+        let _ = KillTimer(Some(hwnd), RETRY_TIMER);
+    }
+    if !SetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, registration.data()).as_bool() {
+        remove_tray(hwnd);
+    } else if restored_or_scheduled {
+        return;
+    }
+    // 图标持续不可用时保留一个任务栏入口。下次重建仍可重新注册。
+    if !IsWindowVisible(hwnd).as_bool() {
+        let _ = ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_recovery_keeps_hidden_on_transient_failure_and_ignores_duplicate_notifications() {
+        let mut registration = TrayRegistration {
+            restart: 0xc153,
+            retries: 0,
+        };
+        assert_eq!(
+            registration.after_attempt(false, false),
+            IconRecovery::RetryAfter(RETRY_DELAYS_MS[0])
+        );
+        for _ in 0..8 {
+            assert_eq!(
+                registration.after_attempt(false, false),
+                IconRecovery::AwaitTimer
+            );
+            assert!(registration.timer_pending());
+            registration = TrayRegistration::from_data(registration.data());
+            assert_eq!(registration.restart, 0xc153);
+        }
+        assert_eq!(registration.after_attempt(true, true), IconRecovery::Ready);
+        assert!(!registration.timer_pending());
+        assert_eq!(registration.data(), 0xc153);
+    }
+
+    #[test]
+    fn tray_recovery_stops_after_exhaustion_and_recovers_on_the_next_taskbar() {
+        let mut registration = TrayRegistration {
+            restart: 0xffff,
+            retries: 0,
+        };
+        for (attempt, delay) in RETRY_DELAYS_MS.into_iter().enumerate() {
+            assert_eq!(
+                registration.after_attempt(false, attempt != 0),
+                IconRecovery::RetryAfter(delay)
+            );
+            assert!(registration.timer_pending());
+        }
+        assert_eq!(
+            registration.after_attempt(false, true),
+            IconRecovery::Unavailable
+        );
+        assert!(!registration.timer_pending());
+        assert_eq!(
+            TrayRegistration::from_data(registration.data()).retries,
+            NO_ICON
+        );
+        assert_eq!(
+            registration.after_attempt(false, false),
+            IconRecovery::RetryAfter(RETRY_DELAYS_MS[0])
+        );
+        assert_eq!(registration.after_attempt(true, false), IconRecovery::Ready);
+        assert!(!registration.timer_pending());
+    }
 }
