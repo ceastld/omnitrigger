@@ -10,6 +10,11 @@ use std::path::{Path, PathBuf};
 use crate::plugins::{local_manifest_metadata, read_local_manifest, RAISHOT_MANIFEST_PATH};
 use serde::{Deserialize, Serialize};
 
+#[cfg(windows)]
+mod external_import;
+#[cfg(windows)]
+pub(super) use external_import::recover as recover_external_import;
+
 const CATALOG_VERSION: u32 = 1;
 const DEFAULT_ID: &str = "default";
 const TEST_ALIAS: &str = "testing";
@@ -29,10 +34,11 @@ pub struct Startup {
 
 impl Startup {
     #[cfg(windows)]
-    pub fn offer_external_copy(&self) {
+    pub fn offer_external_copy(&self) -> Result<(), String> {
         if let Some((root, local_app_data)) = &self.external_copy_roots {
-            offer_external_copy(root, local_app_data);
+            offer_external_copy(root, local_app_data)?;
         }
+        Ok(())
     }
 
     /// 主窗口和设置页按配置目录与监听模式复用。
@@ -714,7 +720,11 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
-        let kind = entry.file_type()?;
+        let kind = entry.path().symlink_metadata()?;
+        if !crate::local_files::is_plain(&kind) || crate::local_files::is_cloud_path(&entry.path())
+        {
+            continue;
+        }
         let target = to.join(entry.file_name());
         if kind.is_dir() {
             copy_tree(&entry.path(), &target)?;
@@ -747,8 +757,12 @@ fn copy_data(from: &Path, to: &Path, include_file: impl Fn(&str) -> bool) -> Res
     for entry in std::fs::read_dir(from).map_err(fail)? {
         let entry = entry.map_err(fail)?;
         let name = entry.file_name();
-        let kind = entry.file_type().map_err(fail)?;
-        if kind.is_file() && include_file(&name.to_string_lossy()) {
+        let kind = entry.path().symlink_metadata().map_err(fail)?;
+        if kind.is_file()
+            && crate::local_files::is_plain(&kind)
+            && !crate::local_files::is_cloud_path(&entry.path())
+            && include_file(&name.to_string_lossy())
+        {
             std::fs::copy(entry.path(), to.join(name)).map_err(fail)?;
             copied += 1;
         }
@@ -756,7 +770,7 @@ fn copy_data(from: &Path, to: &Path, include_file: impl Fn(&str) -> bool) -> Res
     // 与动作目录服务使用同一路径，由文件系统解析大小写；不跟随目录符号链接。
     let actions = from.join("actions");
     match actions.symlink_metadata() {
-        Ok(metadata) if metadata.is_dir() => {
+        Ok(metadata) if metadata.is_dir() && crate::local_files::is_plain(&metadata) => {
             copy_tree(&actions, &to.join("actions")).map_err(fail)?
         }
         Ok(_) => {}
@@ -1488,7 +1502,7 @@ fn pending_copy(
 
 /// 发现比当前数据更新的外部副本时询问用户：导入（先备份当前数据）、忽略或本次不处理。
 #[cfg(windows)]
-fn offer_external_copy(root: &Path, local_app_data: &Path) {
+fn offer_external_copy(root: &Path, local_app_data: &Path) -> Result<(), String> {
     let ignored_file = ignored_path(root);
     let mut ignored: BTreeMap<String, u64> = std::fs::read_to_string(&ignored_file)
         .ok()
@@ -1498,7 +1512,7 @@ fn offer_external_copy(root: &Path, local_app_data: &Path) {
     let Some((package, directory, modified)) =
         pending_copy(external_copies(local_app_data), current, &ignored)
     else {
-        return;
+        return Ok(());
     };
     let current_text = current
         .map(|ms| format!("修改于 {}", relative_age(ms)))
@@ -1511,16 +1525,11 @@ fn offer_external_copy(root: &Path, local_app_data: &Path) {
     );
     match omnitrigger_windows::ask_yes_no_cancel("OmniTrigger 发现外部数据副本", &text) {
         Some(true) => {
-            let backup = root
-                .join("backups")
-                .join(format!("before-import-{}", now_ms()));
-            let result = copy_data(root, &backup, is_data_file)
-                .and_then(|_| copy_data(&directory, root, is_data_file));
-            if let Err(error) = result {
-                omnitrigger_windows::show_error_dialog(
-                    "OmniTrigger 导入失败",
-                    &format!("{error}\n\n当前数据的备份位于：\n{}", backup.display()),
-                );
+            if let Err(error) = external_import::import(root, &directory) {
+                // 收尾受阻时保留恢复记录，避免主窗口载入并保存尚未恢复的配置。
+                external_import::recover(root)
+                    .map_err(|recovery| format!("{error}\n{recovery}"))?;
+                omnitrigger_windows::show_error_dialog("OmniTrigger 导入失败", &error);
             }
         }
         Some(false) => {
@@ -1530,6 +1539,7 @@ fn offer_external_copy(root: &Path, local_app_data: &Path) {
         }
         None => {}
     }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -8777,6 +8777,14 @@ fn main() {
         && (std::env::var_os("OMNITRIGGER_UPDATE_HEALTH").is_some()
             || std::env::var_os("OMNITRIGGER_UPDATE_ERROR").is_some());
     let config_path = settings::path();
+    if !profile_startup.test_data {
+        if let Some(root) = config_path.parent() {
+            if let Err(error) = profiles::recover_external_import(root) {
+                omnitrigger_windows::show_error_dialog("OmniTrigger 导入恢复失败", &error);
+                return;
+            }
+        }
+    }
     let _profile_in_use = match profile_startup.hold_window_profile(&config_path) {
         Ok(file) => file,
         Err(error) => {
@@ -8796,7 +8804,10 @@ fn main() {
             Ok(Some(instance)) => {
                 // 只有新主窗口能在载入配置前导入；重复启动只唤回原窗口。
                 #[cfg(windows)]
-                profile_startup.offer_external_copy();
+                if let Err(error) = profile_startup.offer_external_copy() {
+                    omnitrigger_windows::show_error_dialog("OmniTrigger 导入恢复失败", &error);
+                    return;
+                }
                 Some(instance)
             }
             Ok(None) => return,
