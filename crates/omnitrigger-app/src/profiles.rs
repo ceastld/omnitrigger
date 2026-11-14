@@ -123,7 +123,7 @@ impl Startup {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(format!("无法读取 {}：{error}", path.display())),
         };
-        if !directory.is_dir() {
+        if !reset_recovery::directory_present(&directory).map_err(|error| error.to_string())? {
             return Err(format!(
                 "测试档目录缺失，无法校验配置。请先打开该配置档以恢复中断的重置：{}",
                 directory.display()
@@ -949,7 +949,9 @@ fn source_dir(root: &Path, catalog: &Catalog, key: &str) -> Result<PathBuf, Stri
         .source_profile(key)
         .ok_or_else(|| format!("找不到配置档 {key}；可用 --profile-list 查看。"))?;
     let dir = profile_dir(root, &entry.id);
-    if !dir.try_exists().map_err(|e| e.to_string())? && entry.is_test_at(&dir) {
+    if !reset_recovery::directory_present(&dir).map_err(|e| e.to_string())?
+        && entry.is_test_at(&dir)
+    {
         // 调用者持有总登记锁，此时其他重置及启动恢复都不会进入目录交换。
         let file = open_profile_use_file(&dir)?;
         file.try_lock()

@@ -3,9 +3,13 @@ use super::{lock_catalog, open_profile_use_file, read_catalog, Entry};
 use crate::local_files::{is_plain, is_plain_directory};
 use std::{fs, io, path::Path};
 
-fn present(path: &Path) -> io::Result<bool> {
+pub(super) fn directory_present(path: &Path) -> io::Result<bool> {
     match path.symlink_metadata() {
-        Ok(_) => Ok(true),
+        Ok(meta) if meta.is_dir() && is_plain(&meta) => Ok(true),
+        Ok(_) => Err(io::Error::other(format!(
+            "此位置需要一个普通本机目录：{}。请检查占用此位置的文件或目录后重试。",
+            path.display()
+        ))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
@@ -37,19 +41,16 @@ pub(super) fn restore_missing(directory: &Path, entry: &Entry) -> Result<bool, S
         .ok_or("找不到测试配置档的数据根。")?;
     let backups = root.join("backups/profile-reset");
     let restore = || -> io::Result<bool> {
-        if present(directory)? {
+        if directory_present(directory)? {
             return Ok(true);
         }
         if !entry.is_test_at(directory) || !is_plain_directory(directory.parent().unwrap()) {
             return Err(io::Error::other("测试档身份或目录无效"));
         }
-        if !present(&root.join("backups"))? {
+        if !directory_present(&root.join("backups"))? {
             return Ok(false);
         }
-        if !is_plain_directory(&root.join("backups")) {
-            return Err(io::Error::other("备份根不是普通本机目录"));
-        }
-        if !present(&backups)? {
+        if !directory_present(&backups)? {
             return Ok(false);
         }
         if !is_plain_directory(&backups) {
@@ -79,7 +80,7 @@ pub(super) fn restore_missing(directory: &Path, entry: &Entry) -> Result<bool, S
                 continue;
             }
             let original = backups.join(tag);
-            if !present(&original)? {
+            if !directory_present(&original)? {
                 continue;
             }
             if identity(&item.path())? != *entry || identity(&original)? != *entry {
@@ -112,7 +113,7 @@ pub(super) fn hold_for_use(directory: &Path) -> Result<fs::File, String> {
     loop {
         file.lock_shared()
             .map_err(|e| format!("无法打开测试配置档：{e}"))?;
-        if present(directory).map_err(|e| e.to_string())? {
+        if directory_present(directory).map_err(|e| e.to_string())? {
             return Ok(file);
         }
         file.unlock().map_err(|e| e.to_string())?;
@@ -122,7 +123,7 @@ pub(super) fn hold_for_use(directory: &Path) -> Result<fs::File, String> {
             .ok_or("找不到测试配置档的数据根。")?;
         let _catalog = lock_catalog(root)?;
         // 其他打开者可能已经完成恢复并持有共享锁，此时无需再抢占独占锁。
-        if present(directory).map_err(|e| e.to_string())? {
+        if directory_present(directory).map_err(|e| e.to_string())? {
             continue;
         }
         file.lock()
@@ -260,6 +261,43 @@ mod tests {
             fs::read(f.backup.join("bindings.json")).unwrap(),
             b"my hotkeys"
         );
+    }
+
+    #[test]
+    fn file_at_live_path_leaves_the_reset_pair_available_for_a_later_open() {
+        let f = Fixture::interrupt();
+        let catalog = super::super::catalog_path(&f.root);
+        let registration = fs::read(&catalog).unwrap();
+        fs::write(&f.dir, b"unrelated file").unwrap();
+
+        let reset = reset_profile(&f.root, "testing").unwrap_err();
+        let ProfileCommandError::Other(reset_error) = reset else {
+            panic!("目录被文件占用时应报告路径错误")
+        };
+        let copy_error =
+            create_profile(&f.root, "child", &Seed::Copy("testing".into()), None).unwrap_err();
+        for error in [reset_error, copy_error, hold_for_use(&f.dir).unwrap_err()] {
+            assert!(error.contains(f.dir.to_str().unwrap()), "{error}");
+        }
+        assert_eq!(fs::read(&f.dir).unwrap(), b"unrelated file");
+        assert_eq!(fs::read(&catalog).unwrap(), registration);
+        assert_eq!(
+            fs::read(f.backup.join("wheels.json")).unwrap(),
+            b"my wheels"
+        );
+        assert_eq!(
+            fs::read(f.stage.join("bindings.json")).unwrap(),
+            b"prepared"
+        );
+
+        fs::rename(&f.dir, f.root.join("saved-file")).unwrap();
+        let _guard = hold_for_use(&f.dir).unwrap();
+        assert_eq!(fs::read(f.dir.join("wheels.json")).unwrap(), b"my wheels");
+        assert_eq!(
+            fs::read(f.dir.join("actions/one/main.mjs")).unwrap(),
+            b"my action"
+        );
+        assert!(!f.backup.exists());
     }
 
     #[test]
