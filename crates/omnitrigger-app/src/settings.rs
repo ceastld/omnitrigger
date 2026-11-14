@@ -1357,12 +1357,7 @@ fn same_bindings(left: &[Binding], right: &[Binding]) -> bool {
 
 /// 锁住固定的同级文件，让不同窗口的读取、基线比较、备份和原子替换串行执行。
 pub(crate) fn lock_config(destination: &Path, kind: &str) -> Result<std::fs::File, String> {
-    let mut lock_name = destination
-        .file_name()
-        .ok_or("配置路径不可用")?
-        .to_os_string();
-    lock_name.push(".lock");
-    let lock_path = destination.with_file_name(lock_name);
+    let lock_path = config_lock_path(destination)?;
     if let Some(parent) = lock_path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -1381,6 +1376,55 @@ pub(crate) fn lock_config(destination: &Path, kind: &str) -> Result<std::fs::Fil
         std::fs::TryLockError::Error(error) => format!("锁定{kind}配置失败：{error}"),
     })?;
     Ok(lock)
+}
+
+fn config_lock_path(destination: &Path) -> Result<PathBuf, String> {
+    let mut name = destination
+        .file_name()
+        .ok_or("配置路径不可用")?
+        .to_os_string();
+    name.push(".lock");
+    Ok(destination.with_file_name(name))
+}
+
+/// 来源可能只读。锁文件首次使用后会保留，因此也能检测复制期间第一次创建的锁。
+pub(super) struct ConfigCopyGuard {
+    path: PathBuf,
+    kind: &'static str,
+    file: Option<std::fs::File>,
+}
+
+impl ConfigCopyGuard {
+    pub(super) fn acquire(destination: &Path, kind: &'static str) -> Result<Self, String> {
+        let path = config_lock_path(destination)?;
+        crate::script_runtime::check_local_path(&path)?;
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => {
+                file.try_lock_shared().map_err(|error| match error {
+                    std::fs::TryLockError::WouldBlock => {
+                        format!("来源正在保存{kind}配置，请稍后重试。")
+                    }
+                    std::fs::TryLockError::Error(error) => {
+                        format!("无法锁定来源{kind}配置：{error}")
+                    }
+                })?;
+                Some(file)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("无法读取来源{kind}配置锁：{error}")),
+        };
+        Ok(Self { path, kind, file })
+    }
+
+    pub(super) fn verify(&self) -> Result<(), String> {
+        if self.file.is_none() && self.path.try_exists().map_err(|e| e.to_string())? {
+            return Err(format!(
+                "复制期间其他操作访问了来源{}配置，请稍后重试。",
+                self.kind
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub(crate) fn backup_legacy(

@@ -791,6 +791,14 @@ fn copy_data(from: &Path, to: &Path, mode: DataCopy) -> Result<usize, String> {
             .map_err(|error| format!("检查 {} 失败：{error}", destination.display()))?;
     }
     std::fs::create_dir_all(to).map_err(fail)?;
+    let config_locks = if mode == DataCopy::Backup {
+        None
+    } else {
+        Some([
+            crate::settings::ConfigCopyGuard::acquire(&from.join("bindings.json"), "热键")?,
+            crate::settings::ConfigCopyGuard::acquire(&from.join("wheels.json"), "轮盘")?,
+        ])
+    };
     let mut copied = 0;
     for entry in std::fs::read_dir(from).map_err(fail)? {
         let entry = entry.map_err(fail)?;
@@ -812,6 +820,12 @@ fn copy_data(from: &Path, to: &Path, mode: DataCopy) -> Result<usize, String> {
             copied += 1;
         }
     }
+    if let Some(locks) = config_locks {
+        for lock in &locks {
+            lock.verify()?;
+        }
+    }
+    // 复制动作包时，来源窗口已经可以继续保存热键和轮盘。
     // 与动作目录服务使用同一路径，由文件系统解析大小写；不跟随目录符号链接。
     let actions = from.join("actions");
     match actions.symlink_metadata() {
@@ -2640,6 +2654,78 @@ mod tests {
         assert!(testing_workspace(&root).unwrap_err().contains("重复"));
         assert!(!path.exists());
         assert_eq!(std::fs::read(&config).unwrap(), b"test bindings");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copying_from_a_fixture_leaves_no_lock_files_and_detects_the_first_writer() {
+        let root = temp_root("fixture-config-locks");
+        let destination = root.join("copy");
+        copy_transferable_data(&root, &destination, DataCopy::FixtureOrImport).unwrap();
+        for (name, kind) in [("bindings.json", "热键"), ("wheels.json", "轮盘")] {
+            let path = root.join(name);
+            let first_copy = crate::settings::ConfigCopyGuard::acquire(&path, kind).unwrap();
+            assert!(!root.join(format!("{name}.lock")).exists());
+            first_copy.verify().unwrap();
+            drop(crate::settings::lock_config(&path, kind).unwrap());
+            assert!(first_copy.verify().unwrap_err().contains(kind));
+
+            let reader = crate::settings::ConfigCopyGuard::acquire(&path, kind).unwrap();
+            let other_reader = crate::settings::ConfigCopyGuard::acquire(&path, kind).unwrap();
+            drop(reader);
+            assert!(crate::settings::lock_config(&path, kind).is_err());
+            other_reader.verify().unwrap();
+            drop(other_reader);
+            drop(crate::settings::lock_config(&path, kind).unwrap());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copying_and_resetting_a_profile_require_one_saved_binding_and_wheel_snapshot() {
+        let root = temp_root("copy-while-saving");
+        let config = root.join("bindings.json");
+        let wheels = root.join("wheels.json");
+        let mut bindings: serde_json::Value =
+            serde_json::from_str(include_str!("../../../examples/literal-text.json")).unwrap();
+        bindings["version"] = 24.into();
+        bindings["bindings"][0]["action"] =
+            serde_json::json!({"kind":"show_wheel","wheel_id":"work"});
+        let layout = serde_json::json!({"version":6,"wheels":[{"id":"work","name":"测试轮盘","slots":[
+            {"label":"动作","action":{"kind":"notification"}}
+        ]}]});
+        std::fs::write(&config, bindings.to_string()).unwrap();
+        std::fs::write(&wheels, layout.to_string()).unwrap();
+        for (path, kind) in [(&config, "热键"), (&wheels, "轮盘")] {
+            let _saving = crate::settings::lock_config(path, kind).unwrap();
+            let error = daily_test_copy(&root).unwrap_err();
+            assert!(error.contains(kind), "{error}");
+            assert!(read_catalog(&root).unwrap().profiles.is_empty());
+        }
+        let copy = daily_test_copy(&root).unwrap();
+        let child = profile_dir(&root, &copy.id);
+        let snapshot = crate::wheels::Wheels::default()
+            .reload_with_bindings(&child.join("bindings.json"), false)
+            .unwrap();
+        let refs = crate::settings::wheel_references(&snapshot.bindings).collect::<Vec<_>>();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].1, snapshot.wheels.wheels[0].id);
+
+        let local_edit = child.join("wheels.json");
+        std::fs::write(&local_edit, b"test edit").unwrap();
+        let saving = crate::settings::lock_config(&wheels, "轮盘").unwrap();
+        assert!(reset_profile(&root, &copy.alias).is_err());
+        assert_eq!(std::fs::read(&local_edit).unwrap(), b"test edit");
+        drop(saving);
+        let (_, backup) = reset_profile(&root, &copy.alias).unwrap();
+        assert_eq!(
+            std::fs::read(backup.unwrap().join("wheels.json")).unwrap(),
+            b"test edit"
+        );
+        assert_eq!(
+            std::fs::read(&local_edit).unwrap(),
+            std::fs::read(wheels).unwrap()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
