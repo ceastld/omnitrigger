@@ -30,7 +30,7 @@ pub(super) fn identity(directory: &Path) -> io::Result<Entry> {
             path.display()
         )));
     }
-    serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)
+    crate::local_files::parse_config_json(&fs::read_to_string(path)?).map_err(io::Error::other)
 }
 
 /// 调用者持有目录登记锁及本档独占锁。无成对现场时不从普通历史备份猜测。
@@ -189,6 +189,35 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn utf8_bom_preserves_registration_across_reset_and_catalog_recovery() {
+        let f = Fixture::interrupt();
+        let catalog = super::super::catalog_path(&f.root);
+        for path in [
+            &catalog,
+            &f.backup.join("profile.json"),
+            &f.stage.join("profile.json"),
+        ] {
+            let original = fs::read_to_string(path).unwrap();
+            fs::write(path, format!("\u{feff}{original}")).unwrap();
+        }
+        let original_catalog = fs::read(&catalog).unwrap();
+        let original_identity = fs::read(f.backup.join("profile.json")).unwrap();
+        let guard = hold_for_use(&f.dir).unwrap();
+        assert_eq!(fs::read(&catalog).unwrap(), original_catalog);
+        assert_eq!(
+            fs::read(f.dir.join("profile.json")).unwrap(),
+            original_identity
+        );
+        drop(guard);
+        fs::remove_file(&catalog).unwrap();
+        assert_eq!(
+            read_catalog(&f.root).unwrap().find("testing"),
+            Some(&f.entry)
+        );
+        assert!(!catalog.exists());
     }
 
     #[test]

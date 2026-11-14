@@ -1258,7 +1258,7 @@ fn compile_scenes(text: &str) -> Result<CompiledScenes, String> {
 
 fn parse(text: &str) -> Result<Settings, String> {
     let settings: Settings =
-        serde_json::from_str(text).map_err(|e| format!("配置格式有误：{e}"))?;
+        crate::local_files::parse_config_json(text).map_err(|e| format!("配置格式有误：{e}"))?;
     if !matches!(settings.version, 1..=CONFIG_VERSION) {
         return Err("配置版本不受支持，原文件已保留。".into());
     }
@@ -1336,8 +1336,7 @@ fn save_changes(
         ));
     }
     if let Some(original) = &original {
-        let settings: Settings =
-            serde_json::from_str(original).map_err(|error| error.to_string())?;
+        let settings = parse(original)?;
         if settings.version < CONFIG_VERSION {
             backup_legacy(destination, settings.version, original.as_bytes())?;
         }
@@ -4345,7 +4344,7 @@ mod tests {
         let scratch = Scratch::new();
         let destination = scratch.config();
         let backup = scratch.0.join("bindings.json.v5.bak");
-        let original = format!(" \r\n{}\r\n ", version_five(&defaults()));
+        let original = format!("\u{feff} \r\n{}\r\n ", version_five(&defaults()));
         std::fs::write(&destination, original.as_bytes()).unwrap();
         let mut bindings = decode(&original).unwrap();
         bindings.push(regional_binding(

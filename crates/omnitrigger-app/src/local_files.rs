@@ -1,5 +1,11 @@
 use std::{fs::Metadata, path::Path};
 
+pub(crate) fn parse_config_json<T: serde::de::DeserializeOwned>(
+    text: &str,
+) -> serde_json::Result<T> {
+    serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(text))
+}
+
 pub(crate) fn is_cloud_path(path: &Path) -> bool {
     path.components().any(|component| {
         let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();

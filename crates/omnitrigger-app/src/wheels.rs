@@ -408,8 +408,8 @@ impl Wheels {
     }
 
     fn decode_version(text: &str) -> Result<(Self, u32), String> {
-        let file: WheelsFile =
-            serde_json::from_str(text).map_err(|error| format!("轮盘配置格式有误：{error}"))?;
+        let file: WheelsFile = crate::local_files::parse_config_json(text)
+            .map_err(|error| format!("轮盘配置格式有误：{error}"))?;
         if !(1..=6).contains(&file.version) {
             return Err("轮盘配置版本不受支持，原文件已保留。".into());
         }
@@ -1414,7 +1414,7 @@ pub(super) mod tests {
         let backup = scratch.0.join("wheels.json.v1.bak");
         let mut old: serde_json::Value = serde_json::from_str(&encode(&Wheels::default())).unwrap();
         old["version"] = 1.into();
-        let original = format!(" \r\n{}\r\n ", old);
+        let original = format!("\u{feff} \r\n{}\r\n ", old);
         std::fs::write(scratch.wheels(), original.as_bytes()).unwrap();
         let mut expected = Wheels::load(&scratch.bindings()).unwrap();
         expected.wheels[0].slots[0] = local_slot();

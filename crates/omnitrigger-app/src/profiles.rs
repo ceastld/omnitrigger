@@ -673,7 +673,7 @@ fn read_catalog(root: &Path) -> Result<Catalog, String> {
     let path = catalog_path(root);
     match std::fs::read_to_string(&path) {
         Ok(text) => {
-            let catalog: Catalog = serde_json::from_str(&text)
+            let catalog: Catalog = crate::local_files::parse_config_json(&text)
                 .map_err(|error| format!("{} 格式有误：{error}", path.display()))?;
             if catalog.version != CATALOG_VERSION {
                 return Err(format!(
@@ -733,7 +733,7 @@ fn recover_catalog(root: &Path) -> Result<Catalog, String> {
             ));
         }
         let text = std::fs::read_to_string(&path).map_err(unavailable)?;
-        let entry: Entry = serde_json::from_str(&text)
+        let entry: Entry = crate::local_files::parse_config_json(&text)
             .map_err(|error| format!("{} 格式有误：{error}", path.display()))?;
         if !entry.is_test_at(&item.path()) {
             return Err(format!("配置档身份与目录不符：{}", path.display()));

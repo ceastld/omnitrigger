@@ -1,6 +1,50 @@
 use std::{path::Path, process::Command};
 
 #[test]
+fn check_config_reads_bom_in_hotkeys_and_referenced_wheel_without_rewriting() {
+    let root = std::env::temp_dir().join(format!("omnitrigger-cli-bom-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let bindings = root.join("bindings.json");
+    let wheels = root.join("wheels.json");
+    let binding = r#"{"version":24,"bindings":[{"id":1,"held":[{"kind":"key","value":20}],"activation":{"kind":"press","value":{"kind":"key","value":87}},"message":"轮盘","enabled":true,"action":{"kind":"show_wheel","wheel_id":"notes"}}]}"#;
+    let wheel = r#"{"version":6,"wheels":[{"id":"notes","name":"笔记","slots":[{"label":"提示","action":{"kind":"notification"}}]}]}"#;
+    let check = || {
+        Command::new(env!("CARGO_BIN_EXE_omnitrigger"))
+            .arg("--data-root")
+            .arg(&root)
+            .arg("--check-config")
+            .output()
+            .unwrap()
+    };
+    for (hotkey_prefix, wheel_prefix) in [
+        ("", ""),
+        ("\u{feff}", ""),
+        ("", "\u{feff}"),
+        ("\u{feff}", "\u{feff}"),
+    ] {
+        let hotkeys = format!("{hotkey_prefix}{binding}");
+        let layout = format!("{wheel_prefix}{wheel}");
+        std::fs::write(&bindings, &hotkeys).unwrap();
+        std::fs::write(&wheels, &layout).unwrap();
+        let result = check();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("共 1 条绑定"));
+        assert_eq!(std::fs::read(&bindings).unwrap(), hotkeys.as_bytes());
+        assert_eq!(std::fs::read(&wheels).unwrap(), layout.as_bytes());
+    }
+    for invalid in [format!("\u{feff}\u{feff}{binding}"), "\u{feff}{".into()] {
+        std::fs::write(&bindings, &invalid).unwrap();
+        assert!(!check().status.success());
+        assert_eq!(std::fs::read(&bindings).unwrap(), invalid.as_bytes());
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn check_config_uses_the_selected_data_root() {
     let root = std::env::temp_dir().join(format!("omnitrigger-cli-root-{}", std::process::id()));
     let default = root.join("local").join("OmniTrigger");
