@@ -161,6 +161,15 @@ impl Workspace {
                     cx.listener(move |this, _, window, cx| this.choose_theme(mode, window, cx)),
                 )
         });
+        let quit = theme::button(
+            "quit-omnitrigger",
+            "退出 OmniTrigger",
+            theme::Tone::Secondary,
+            !self.legacy_close_requested,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.request_legacy_close(cx);
+        }));
         div().id("appearance-settings").flex_1().min_w_0().h_full().overflow_y_scroll()
             .child(div().pt(px(6.)).pb(px(24.)).pl(px(20.)).pr(px(24.)).flex().flex_col().gap(px(24.))
                 .child(heading("设置", "让 OmniTrigger 更适合你的使用习惯"))
@@ -170,7 +179,7 @@ impl Workspace {
                     .child(caption("选择后立即生效，自动保存。跟随系统会与 Windows 的浅色或深色模式保持一致。"))
                     .child(div().flex().flex_wrap().gap(px(12.)).children(choices)))
                 .when_some(self.theme_error.clone(), |el, error| el.child(caption(error).text_color(theme::rgb(theme::DANGER))))
-                .when(!self.test_data, |el| el.child(self.render_update(cx))))
+                .when(!self.test_data, |el| el.child(self.render_update(cx)).child(div().flex().child(quit))))
             .map(|el| self.smooth_scroll.wrap("appearance-settings", el))
     }
 }

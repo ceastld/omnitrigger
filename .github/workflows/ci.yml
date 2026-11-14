@@ -51,6 +51,10 @@ jobs:
         shell: pwsh
         run: ./scripts/check.ps1
 
+      - name: 验证托盘丢失时关闭窗口和从托盘退出
+        shell: pwsh
+        run: cargo test --locked -p omnitrigger-windows --lib tray::tests::native_tray_close_and_exit -- --exact --ignored
+
       - name: 验证独立窗口站中的剪贴板排除格式
         shell: pwsh
         run: |

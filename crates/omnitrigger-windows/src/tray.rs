@@ -142,16 +142,20 @@ pub fn install_tray(raw: isize) -> Result<(), String> {
     Ok(())
 }
 
+/// 日常窗口优先收至托盘；图标恢复失败时，关闭仍保留任务栏入口和输入监听。
 pub fn hide_to_tray(raw: isize) -> bool {
     let hwnd = HWND(raw as _);
     unsafe {
         let mut data = 0;
-        if !GetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, Some(&mut data)).as_bool()
-            || TrayRegistration::from_data(data).retries == NO_ICON
-        {
+        if !GetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, Some(&mut data)).as_bool() {
             return false;
         }
-        let _ = ShowWindow(hwnd, SW_HIDE);
+        let mode = if TrayRegistration::from_data(data).retries == NO_ICON {
+            SW_SHOWMINNOACTIVE
+        } else {
+            SW_HIDE
+        };
+        let _ = ShowWindow(hwnd, mode);
     }
     true
 }
@@ -205,12 +209,13 @@ unsafe fn show_menu(hwnd: HWND, position: WPARAM) {
     };
     let _ = DestroyMenu(menu);
     let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+    handle_menu_selection(hwnd, selection);
+}
+
+unsafe fn handle_menu_selection(hwnd: HWND, selection: usize) {
     match selection {
         OPEN => show_main(hwnd),
-        EXIT => {
-            show_main(hwnd);
-            request_exit(hwnd);
-        }
+        EXIT => request_exit(hwnd),
         _ => {
             let _ = Shell_NotifyIconW(NIM_SETFOCUS, &icon_data(hwnd));
         }
@@ -300,6 +305,73 @@ unsafe fn update_registration(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, PeekMessageW, MSG, PM_REMOVE, WINDOW_EX_STYLE,
+        WS_OVERLAPPEDWINDOW,
+    };
+
+    #[test]
+    #[ignore = "仅在隔离的 Windows 桌面验证真实窗口的最小化和退出"]
+    fn native_tray_close_and_exit() {
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("OmniTrigger 托盘关闭测试"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                200,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let raw = hwnd.0 as isize;
+            assert!(!hide_to_tray(raw));
+            let restart = RegisterWindowMessageW(w!("TaskbarCreated"));
+            assert_ne!(restart, 0);
+            let mut registration = TrayRegistration {
+                restart,
+                retries: 0,
+            };
+            assert!(
+                SetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, registration.data()).as_bool()
+            );
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            assert!(hide_to_tray(raw));
+            assert!(!IsWindowVisible(hwnd).as_bool());
+
+            for timer in [false, true, true, true] {
+                update_registration(hwnd, registration, false, timer);
+                let mut data = 0;
+                assert!(
+                    GetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, Some(&mut data)).as_bool()
+                );
+                registration = TrayRegistration::from_data(data);
+            }
+            assert_eq!(registration.retries, NO_ICON);
+            assert!(IsIconic(hwnd).as_bool());
+            show_main(hwnd);
+            assert!(hide_to_tray(raw), "关闭时应继续保留日常实例");
+            assert!(IsWindowVisible(hwnd).as_bool() && IsIconic(hwnd).as_bool());
+
+            update_registration(hwnd, registration, true, false);
+            handle_menu_selection(hwnd, OPEN);
+            assert!(IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool());
+            assert!(hide_to_tray(raw));
+            handle_menu_selection(hwnd, EXIT);
+            assert!(!IsWindowVisible(hwnd).as_bool(), "托盘退出时不应弹出主窗口");
+            let mut message = MSG::default();
+            assert!(
+                PeekMessageW(&mut message, Some(hwnd), WM_CLOSE, WM_CLOSE, PM_REMOVE).as_bool()
+            );
+            assert!(!hide_to_tray(raw), "明确退出后应交回正常关闭流程");
+            DestroyWindow(hwnd).unwrap();
+        }
+    }
 
     #[test]
     fn tray_recovery_keeps_hidden_on_transient_failure_and_ignores_duplicate_notifications() {
