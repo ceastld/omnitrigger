@@ -554,14 +554,34 @@ fn registered_test_profile(config_path: &Path) -> Option<Entry> {
         .filter(|entry| entry.is_test_at(&directory))
 }
 
-/// 按复制顺序向上追溯种子，只读本根总登记。损坏或循环的登记链不能用作安装来源。
-pub(crate) fn seed_sources_for_config(config: &Path) -> Vec<PathBuf> {
-    seed_paths(config, SeedPaths::All)
-}
-
 /// 只有已登记配置档的安装可用于运行复制来的脚本；夹具仅提供动作和测试数据。
 pub(crate) fn copied_profile_sources(config: &Path) -> Vec<PathBuf> {
-    seed_paths(config, SeedPaths::Profiles)
+    let mut sources = Vec::new();
+    let mut directory = profile_directory(config);
+    while let Some(current) = directory {
+        let Some(root) = current.parent().and_then(Path::parent) else {
+            break;
+        };
+        let Ok(catalog) = read_catalog(root) else {
+            break;
+        };
+        let Some(entry) = catalog
+            .profiles
+            .iter()
+            .find(|entry| entry.is_test_at(&current))
+        else {
+            break;
+        };
+        let chain = trace_seed_sources(root, None, &catalog, entry, SeedPaths::Profiles);
+        // copy:default 指向本层数据根。只有到达它且它也是已登记测试档，才继续沿外层来源查找。
+        let reached_root = chain.last().is_some_and(|source| source == root);
+        sources.extend(chain);
+        if !reached_root || !is_profile_directory(root) {
+            break;
+        }
+        directory = Some(root.to_path_buf());
+    }
+    sources
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -570,7 +590,8 @@ enum SeedPaths {
     Profiles,
 }
 
-fn seed_paths(config: &Path, paths: SeedPaths) -> Vec<PathBuf> {
+/// 识别复制来的连接器登记时，同时考虑夹具路径和数据根的别名。
+pub(crate) fn seed_sources_for_config(config: &Path) -> Vec<PathBuf> {
     let Some(directory) = profile_directory(config) else {
         return Vec::new();
     };
@@ -587,9 +608,6 @@ fn seed_paths(config: &Path, paths: SeedPaths) -> Vec<PathBuf> {
     else {
         return Vec::new();
     };
-    if paths == SeedPaths::Profiles {
-        return trace_seed_sources(root, None, &catalog, entry, paths);
-    }
     // TEMP、8.3 短名或目录联接可能让调用者使用另一条数据根路径。只从已经
     // 核对身份的目标档推导这个别名，不打开可能已移走的种子目录。
     let supplied = std::path::absolute(config).ok();
@@ -604,7 +622,7 @@ fn seed_paths(config: &Path, paths: SeedPaths) -> Vec<PathBuf> {
         })
         .and_then(Path::parent)
         .filter(|alias| !normalize(alias).eq_ignore_ascii_case(&normalize(root)));
-    trace_seed_sources(root, root_alias, &catalog, entry, paths)
+    trace_seed_sources(root, root_alias, &catalog, entry, SeedPaths::All)
 }
 
 fn trace_seed_sources<'a>(
@@ -2324,6 +2342,47 @@ mod tests {
         assert!(seed_sources_for_config(&config(&from_base.alias)).is_empty());
         std::fs::write(catalog_path(&root), "{").unwrap();
         assert!(seed_sources_for_config(&config(&from_base.id)).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_script_sources_follow_registered_copies_across_data_roots() {
+        let root = temp_root("nested-script-sources");
+        let daily = root.canonicalize().unwrap();
+        let base = create_profile(&daily, "base", &Seed::Copy(DEFAULT_ID.into()), None).unwrap();
+        let parent = create_profile(&daily, "parent", &Seed::Copy(base.id.clone()), None).unwrap();
+        let parent_dir = profile_dir(&daily, &parent.id);
+        let child =
+            create_profile(&parent_dir, "child", &Seed::Copy(DEFAULT_ID.into()), None).unwrap();
+        let nested =
+            create_profile(&parent_dir, "nested", &Seed::Copy(child.id.clone()), None).unwrap();
+        let config = profile_dir(&parent_dir, &nested.id).join("bindings.json");
+        let immediate = profile_dir(&parent_dir, &child.id);
+        assert_eq!(
+            copied_profile_sources(&config),
+            [
+                immediate.clone(),
+                parent_dir.clone(),
+                profile_dir(&daily, &base.id),
+                daily.clone()
+            ]
+        );
+
+        let mut catalog = read_catalog(&daily).unwrap();
+        let entry = catalog
+            .profiles
+            .iter_mut()
+            .find(|entry| entry.id == parent.id)
+            .unwrap();
+        entry.seed = Seed::Fixture(daily.clone()).record();
+        write_json(&catalog_path(&daily), &catalog).unwrap();
+        assert_eq!(
+            copied_profile_sources(&config),
+            [immediate.clone(), parent_dir.clone()]
+        );
+        catalog.profiles.retain(|entry| entry.id != parent.id);
+        write_json(&catalog_path(&daily), &catalog).unwrap();
+        assert_eq!(copied_profile_sources(&config), [immediate, parent_dir]);
         std::fs::remove_dir_all(root).unwrap();
     }
 

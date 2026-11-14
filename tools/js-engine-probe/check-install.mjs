@@ -142,6 +142,12 @@ const copiedEntry = join(copiedPackage,copiedManifest.actions[0].entry);
 writeFileSync(copiedEntry,'export function main() { return {text:"copied profile"}; }');
 assert.equal(cli(['--run-action',project.call_path],0,copiedArgs).output.text,'copied profile');
 assert.equal(cli(['--run-action',project.call_path]).output.text,'OmniTrigger');
+const nested = cli(['--profile-create','nested','--seed','copy:default'],0,['--data-root',copy.directory]);
+const nestedArgs = ['--data-root',copy.directory,'--profile',nested.id];
+const nestedEntry = join(nested.directory,'actions','installed-script',copiedManifest.actions[0].entry);
+writeFileSync(nestedEntry,'export function main() { return {text:"nested copy"}; }');
+assert.equal(cli(['--run-action',project.call_path],0,nestedArgs).output.text,'nested copy');
+assert(!existsSync(join(nested.directory,'runtimes')));
 const copiedRuntime = join(copy.directory,'runtimes','script');
 const fromFixture = cli(['--profile-create','runtime-fixture','--seed',`fixture:${root}`],0,['--data-root',root]);
 const fixtureArgs = ['--data-root',root,'--profile',fromFixture.id];
@@ -155,6 +161,7 @@ mkdirSync(copiedRuntime,{recursive:true});
 const copiedPointer = join(copiedRuntime,'current.json');
 writeFileSync(copiedPointer,'{invalid');
 assert.equal(cli(['--run-action',project.call_path],1,copiedArgs).error.code,'runtime_unavailable');
+assert.equal(cli(['--run-action',project.call_path],1,nestedArgs).error.code,'runtime_unavailable');
 unlinkSync(copiedPointer);
 const override=cli(['--install-script-runtime',development.archive,'--sha256',development.sha256],0,copiedArgs);
 assert.equal(override.status,'installed');
@@ -162,8 +169,10 @@ const validSourcePointer=readFileSync(pointer,'utf8');
 try {
   writeFileSync(pointer,'{invalid');
   assert.equal(cli(['--run-action',project.call_path],0,copiedArgs).output.text,'copied profile');
+  assert.equal(cli(['--run-action',project.call_path],0,nestedArgs).output.text,'nested copy');
 } finally { writeFileSync(pointer,validSourcePointer); }
 checks.push('copied_profile_reuses_host_with_own_code_and_explicit_runtime_override');
+checks.push('nested_copy_runs_own_code_with_nearest_managed_host');
 
 const next = variant('next',folder=>{
   const data=Buffer.from('本机更新安装验证');
