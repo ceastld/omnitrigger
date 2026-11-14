@@ -502,7 +502,7 @@ fn validate_label(label: &str, field: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::local_action::{LocalAction, LocalStep};
     use crate::{execution::CommandAction, plugins::PluginActionRef};
@@ -512,10 +512,10 @@ mod tests {
         sync::atomic::{AtomicU64, Ordering},
     };
 
-    struct Scratch(PathBuf);
+    pub(crate) struct Scratch(PathBuf);
 
     impl Scratch {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let directory = std::env::temp_dir().join(format!(
                 "omnitrigger-wheels-{}-{}",
@@ -526,7 +526,7 @@ mod tests {
             Self(directory)
         }
 
-        fn save(&self, proposed: &Wheels) -> Result<(), String> {
+        pub(crate) fn save(&self, proposed: &Wheels) -> Result<(), String> {
             let previous = Wheels::load(&self.bindings()).unwrap_or_default();
             proposed.save_changes(&self.bindings(), &previous, &CompiledScenes::default())
         }
@@ -540,7 +540,7 @@ mod tests {
             assert_eq!(files, expected);
         }
 
-        fn bindings(&self) -> PathBuf {
+        pub(crate) fn bindings(&self) -> PathBuf {
             self.0.join("bindings.json")
         }
 

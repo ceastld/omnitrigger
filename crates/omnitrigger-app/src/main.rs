@@ -3820,12 +3820,20 @@ impl Workspace {
         } else {
             retired.extend(self.pending.as_ref().map(|spec| spec.id));
         }
-        if retired.iter().any(|id| {
-            self.action_running(*id)
+        // 有些运行中的动作已从布局中移除。只需对将分配给新热键的编号做运行检查。
+        let existing: HashSet<_> = self
+            .triggers
+            .bindings()
+            .iter()
+            .map(|binding| binding.spec.id)
+            .collect();
+        let newly_bound = by_id.keys().copied().filter(|id| !existing.contains(id));
+        if retired.iter().copied().chain(newly_bound).any(|id| {
+            self.action_running(id)
                 || self
                     .mouse_shortcut_invocations
                     .values()
-                    .any(|binding| binding == id)
+                    .any(|binding| *binding == id)
         }) {
             return Err("待替换的动作仍在运行，请在动作结束后重新载入。".to_owned());
         }

@@ -2,7 +2,7 @@
 use crate::{
     radial_wheel::RingGeometry,
     scenes::CompiledScenes,
-    wheel_scenes::scene_scope,
+    wheel_scenes::{scene_scope, WheelSlotKey},
     wheels::{WheelDefinition, WheelPosition, WheelSlot},
     window_action::{WindowAction, WindowOperation},
     ActionSpec, Activation, BackendCommand, Bounds, Context, HitSource, Page, RadialWheel,
@@ -13,7 +13,102 @@ use crate::{
 use gpui::{prelude::*, px, size};
 use omnitrigger_core::{DragEvent, DragPhase};
 use raw_window_handle::HasWindowHandle;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
+
+/// 先找名称和动作都保留的槽位，再处理改名。每轮先对齐原方位，再对应唯一的换位。
+fn remap_wheel_layout(
+    old: &[WheelSlot],
+    new: &[WheelSlot],
+    wheel: &WheelDefinition,
+    process: Option<&str>,
+    previous: &HashMap<WheelSlotKey, u64>,
+    current: &mut HashMap<WheelSlotKey, u64>,
+) {
+    if old == new {
+        for index in 0..old.len() {
+            let key = WheelSlotKey::new(wheel, process, index);
+            if let Some(id) = previous.get(&key) {
+                current.insert(key, *id);
+            }
+        }
+        return;
+    }
+    let cell = |slot: &WheelSlot, index: usize| {
+        slot.position
+            .map_or((0, index), |p| (p.ring, usize::from(p.sector)))
+    };
+    let mut mapping = vec![None; old.len()];
+    let mut used = vec![false; new.len()];
+    for check_label in [true, false] {
+        let matches = |a: &WheelSlot, b: &WheelSlot| {
+            a.scene == b.scene && a.action == b.action && (!check_label || a.label == b.label)
+        };
+        for (index, slot) in old.iter().enumerate() {
+            if mapping[index].is_some() {
+                continue;
+            }
+            let next = new.iter().enumerate().position(|(i, other)| {
+                !used[i] && cell(other, i) == cell(slot, index) && matches(slot, other)
+            });
+            if let Some(next) = next {
+                mapping[index] = Some(next);
+                used[next] = true;
+            }
+        }
+        for (index, slot) in old.iter().enumerate() {
+            if mapping[index].is_some() {
+                continue;
+            }
+            let mut candidates = new
+                .iter()
+                .enumerate()
+                .filter(|(i, other)| !used[*i] && matches(slot, other));
+            if let Some((next, _)) = candidates.next() {
+                let ambiguous = candidates.next().is_some()
+                    || old.iter().enumerate().any(|(i, other)| {
+                        i != index && mapping[i].is_none() && matches(slot, other)
+                    });
+                if !ambiguous {
+                    mapping[index] = Some(next);
+                    used[next] = true;
+                }
+            }
+        }
+    }
+    for (index, next) in mapping.into_iter().enumerate() {
+        if let (Some(next), Some(id)) = (
+            next,
+            previous.get(&WheelSlotKey::new(wheel, process, index)),
+        ) {
+            current.insert(WheelSlotKey::new(wheel, process, next), *id);
+        }
+    }
+}
+
+fn remap_wheel_runtime_ids(old: &Wheels, new: &Wheels, ids: &mut HashMap<WheelSlotKey, u64>) {
+    if ids.is_empty() || old == new {
+        return;
+    }
+    let previous = std::mem::take(ids);
+    for wheel in &new.wheels {
+        let Some(before) = old.wheels.iter().find(|item| item.id == wheel.id) else {
+            continue;
+        };
+        remap_wheel_layout(&before.slots, &wheel.slots, wheel, None, &previous, ids);
+        for app in &wheel.app_overrides {
+            if let Some(old_app) = before.override_for_process(Some(&app.process)) {
+                remap_wheel_layout(
+                    &old_app.slots,
+                    &app.slots,
+                    wheel,
+                    Some(&app.process),
+                    &previous,
+                    ids,
+                );
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct ActiveWheel {
@@ -588,27 +683,10 @@ impl Workspace {
     pub(super) fn replace_wheels(&mut self, wheels: Wheels, cx: &mut Context<Self>) {
         self.hide_wheel(cx);
         self.wheel_preview = None;
+        remap_wheel_runtime_ids(&self.wheels, &wheels, &mut self.wheel_runtime_ids);
         self.wheels = wheels;
         self.wheels_error = None;
         self.error = None;
-        let definitions = &self.wheels.wheels;
-        self.wheel_runtime_ids.retain(|key, runtime_id| {
-            definitions
-                .iter()
-                .find(|wheel| wheel.id == key.wheel_id)
-                .is_some_and(|wheel| match key.application.as_deref() {
-                    None => key.source_index < wheel.slots.len(),
-                    Some(process) => wheel
-                        .override_for_process(Some(process))
-                        .is_some_and(|app| key.source_index < app.slots.len()),
-                })
-                || self.executor.is_running(*runtime_id)
-                || self.shortcut_executor.is_running(*runtime_id)
-                || self.system_executor.is_running(*runtime_id)
-                || self.local_executor.is_running(*runtime_id)
-                || self.browser_executor.is_running(*runtime_id)
-                || self.action_service.is_running(*runtime_id)
-        });
     }
 
     /// 按同一批磁盘配置刷新轮盘及其呼出热键，只有成功后才恢复编辑位置。
@@ -1800,6 +1878,134 @@ mod tests {
             })
             .collect();
         wheel
+    }
+
+    #[test]
+    fn saving_a_wheel_edit_keeps_only_the_matching_running_action() {
+        use crate::{
+            execution::{CommandAction, CommandExecutor},
+            wheel_scenes::TargetContext,
+        };
+        let command = CommandAction {
+            program: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec!["--list".into(), "--exact".into(), "no_fixture_tests".into()],
+            working_directory: None,
+        };
+        let mut definition = wheel(&[at(0, 0, 8), at(0, 1, 8), at(0, 2, 8)]);
+        definition.slots[1].action = ActionSpec::Command(command.clone());
+        let before = Wheels {
+            wheels: vec![definition],
+        };
+        let disk = crate::wheels::tests::Scratch::new();
+        disk.save(&before).unwrap();
+        let mut edited_config = Wheels::load(&disk.bindings()).unwrap();
+        let scenes = CompiledScenes::default();
+        let edited = &mut edited_config.wheels[0];
+        let mut view = scope_view(edited, None, &scenes);
+        remove_at(&mut view, (0, 0)).unwrap();
+        place_slot(&mut view, 0, 1, 4).unwrap();
+        view.slots[0].label = "改名后的命令".into();
+        store_view(edited, None, view, &scenes).unwrap();
+        let executor = CommandExecutor::new();
+        let mut ids = HashMap::new();
+        let mut triggers =
+            crate::service::TriggerService::new(Vec::new(), crate::service::SettingsFile);
+        let mut open = |wheels: &Wheels, ids: &mut HashMap<_, _>| {
+            ActiveWheel::for_target(
+                &wheels.wheels[0],
+                &scenes,
+                None,
+                TargetContext {
+                    process: None,
+                    role: omnitrigger_core::WindowRole::Unknown,
+                },
+                ids,
+                &mut triggers,
+            )
+            .unwrap()
+        };
+        let initial = open(&before, &mut ids);
+        let running = initial.runtime_ids[1];
+        executor.submit(running, command.clone()).unwrap();
+        disk.save(&edited_config).unwrap();
+        let after = Wheels::load(&disk.bindings()).unwrap();
+        remap_wheel_runtime_ids(&before, &after, &mut ids);
+        let saved = open(&after, &mut ids);
+        assert_eq!(saved.runtime_ids, initial.runtime_ids[1..]);
+        assert!(executor
+            .submit(saved.runtime_ids[0], command.clone())
+            .is_err());
+
+        let mut replaced = after.clone();
+        let mut next_command = command.clone();
+        next_command.args.push("different-fixture".into());
+        put_action(
+            &mut replaced.wheels[0],
+            (1, 4),
+            "新命令".into(),
+            ActionSpec::Command(next_command.clone()),
+        )
+        .unwrap();
+        disk.save(&replaced).unwrap();
+        let replaced = Wheels::load(&disk.bindings()).unwrap();
+        remap_wheel_runtime_ids(&after, &replaced, &mut ids);
+        let fresh = open(&replaced, &mut ids);
+        assert_eq!(fresh.runtime_ids[1], saved.runtime_ids[1]);
+        assert!(executor.is_running(running));
+        assert!(!executor.is_running(fresh.runtime_ids[0]));
+        executor.submit(fresh.runtime_ids[0], next_command).unwrap();
+    }
+
+    #[test]
+    fn remapping_duplicate_actions_prefers_same_cells_and_unique_names_within_layout() {
+        let mut wheel = wheel(&[at(0, 0, 8), at(0, 1, 8), at(0, 2, 8)]);
+        for slot in &mut wheel.slots {
+            slot.action = ActionSpec::Notification;
+        }
+        wheel.slots[0].label = "重复".into();
+        wheel.slots[2].label = "重复".into();
+        let scene_slot = WheelSlot {
+            scene: Some("edit".into()),
+            ..wheel.slots[0].clone()
+        };
+        wheel.slots.push(scene_slot);
+        wheel
+            .app_overrides
+            .push(crate::wheels::WheelApplicationOverride {
+                process: "Editor.EXE".into(),
+                slots: wheel.slots.clone(),
+            });
+        let before = Wheels {
+            wheels: vec![wheel],
+        };
+        let mut after = before.clone();
+        place_slot(&mut after.wheels[0], 0, 0, 1).unwrap();
+        let app = &mut after.wheels[0].app_overrides[0];
+        app.process = "editor.exe".into();
+        for (i, slot) in app.slots.iter_mut().enumerate() {
+            slot.position = at(1, i as u8, 8);
+        }
+        app.slots.swap(0, 1);
+        let key = |app, index| WheelSlotKey::new(&before.wheels[0], app, index);
+        let mut ids = HashMap::from([
+            (key(None, 0), 10),
+            (key(Some("editor.exe"), 0), 20),
+            (key(Some("editor.exe"), 1), 21),
+            (key(Some("editor.exe"), 2), 22),
+            (key(Some("editor.exe"), 3), 23),
+        ]);
+        remap_wheel_runtime_ids(&before, &after, &mut ids);
+        assert_eq!(
+            ids,
+            HashMap::from([
+                (key(None, 0), 10),
+                (key(Some("editor.exe"), 0), 21),
+                (key(Some("editor.exe"), 3), 23),
+            ])
+        );
     }
 
     #[test]
