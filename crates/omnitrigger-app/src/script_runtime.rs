@@ -270,6 +270,18 @@ pub fn locate(config: &Path) -> Result<Option<Installed>, String> {
             Err("OMNITRIGGER_SCRIPT_HOST 需要存在的完整本地宿主路径。".into())
         };
     }
+    if let Some(host) = locate_installed(config)? {
+        return Ok(Some(host));
+    }
+    for source in crate::profiles::seed_sources_for_config(config) {
+        if let Some(host) = locate_installed(&source.join("bindings.json"))? {
+            return Ok(Some(host));
+        }
+    }
+    Ok(None)
+}
+
+fn locate_installed(config: &Path) -> Result<Option<Installed>, String> {
     let root = root(config)?;
     let current = root.join("current.json");
     check_local_path(&current)?;

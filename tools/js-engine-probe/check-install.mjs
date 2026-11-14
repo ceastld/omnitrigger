@@ -26,8 +26,8 @@ delete env.OMNITRIGGER_SCRIPT_HOST;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const pointer = join(root, 'runtimes/script/current.json');
 const checks = [];
-function cli(args, code=0) {
-  const result = spawnSync(app, ['--config',config,...args], {encoding:'utf8',windowsHide:true,timeout:120000,maxBuffer:1024*1024,env});
+function cli(args, code=0, profileArgs=['--config',config]) {
+  const result = spawnSync(app, [...profileArgs,...args], {encoding:'utf8',windowsHide:true,timeout:120000,maxBuffer:1024*1024,env});
   assert.ifError(result.error);
   assert.equal(result.status, code, result.stderr || result.stdout);
   return JSON.parse(code===0 ? result.stdout : result.stderr);
@@ -131,6 +131,31 @@ try {
   assert.equal(failure.error.code,'runtime_unavailable');
 } finally { writeFileSync(pointer,firstPointer); unlinkSync(legacyHost); }
 checks.push('invalid_managed_pointer_does_not_fall_back');
+
+const copy = cli(['--profile-create','runtime-copy','--seed','copy:default'],0,['--data-root',root]);
+const copiedArgs = ['--data-root',root,'--profile','runtime-copy'];
+assert(!existsSync(join(copy.directory,'runtimes')));
+assert.equal(cli(['--run-action',project.call_path],0,copiedArgs).output.text,'OmniTrigger');
+const copiedPackage = join(copy.directory,'actions','installed-script');
+const copiedManifest = JSON.parse(readFileSync(join(copiedPackage,'action.json'),'utf8'));
+const copiedEntry = join(copiedPackage,copiedManifest.actions[0].entry);
+writeFileSync(copiedEntry,'export function main() { return {text:"copied profile"}; }');
+assert.equal(cli(['--run-action',project.call_path],0,copiedArgs).output.text,'copied profile');
+assert.equal(cli(['--run-action',project.call_path]).output.text,'OmniTrigger');
+const copiedRuntime = join(copy.directory,'runtimes','script');
+mkdirSync(copiedRuntime,{recursive:true});
+const copiedPointer = join(copiedRuntime,'current.json');
+writeFileSync(copiedPointer,'{invalid');
+assert.equal(cli(['--run-action',project.call_path],1,copiedArgs).error.code,'runtime_unavailable');
+unlinkSync(copiedPointer);
+const override=cli(['--install-script-runtime',development.archive,'--sha256',development.sha256],0,copiedArgs);
+assert.equal(override.status,'installed');
+const validSourcePointer=readFileSync(pointer,'utf8');
+try {
+  writeFileSync(pointer,'{invalid');
+  assert.equal(cli(['--run-action',project.call_path],0,copiedArgs).output.text,'copied profile');
+} finally { writeFileSync(pointer,validSourcePointer); }
+checks.push('copied_profile_reuses_host_with_own_code_and_explicit_runtime_override');
 
 const next = variant('next',folder=>{
   const data=Buffer.from('本机更新安装验证');
