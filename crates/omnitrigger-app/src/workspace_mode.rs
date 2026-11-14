@@ -6,6 +6,55 @@ pub(super) enum WorkspaceMode {
     HistoryWindow,
 }
 
+/// 只有已分发的命令都没有接管时才解析窗口入口。
+#[derive(Default, Debug)]
+pub(super) struct WindowArguments {
+    pub settings: bool,
+    pub browser_connector_settings: bool,
+    pub panel: bool,
+    pub wheel_editor: bool,
+    pub ui_smoke: bool,
+    pub wheel: Option<String>,
+}
+
+impl WindowArguments {
+    pub fn parse(arguments: &[String]) -> Result<Self, String> {
+        let mut window = Self::default();
+        let mut args = arguments.iter().skip(1);
+        while let Some(argument) = args.next() {
+            match argument.as_str() {
+                "--settings" => window.settings = true,
+                "--browser-connector-settings" => window.browser_connector_settings = true,
+                "--panel" => window.panel = true,
+                "--wheel-editor" => window.wheel_editor = true,
+                "--ui-smoke" => window.ui_smoke = true,
+                "--text-history" => {} // 已由 WorkspaceMode 校验。
+                "--config" | "--wheel-input-policy" | "--mouse-shortcut-queue" | "--wheel" => {
+                    let value = args
+                        .next()
+                        .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                        .ok_or_else(|| format!("{argument} 后缺少参数值。"))?;
+                    if argument == "--wheel" {
+                        let reference = crate::wheels::WheelActionRef {
+                            wheel_id: value.clone(),
+                        };
+                        reference.validate()?;
+                        if window.wheel.replace(reference.wheel_id).is_some() {
+                            return Err("--wheel 只能出现一次。".into());
+                        }
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "无法识别窗口启动参数 {argument}，可用 --help 查看常用命令。"
+                    ))
+                }
+            }
+        }
+        Ok(window)
+    }
+}
+
 impl WorkspaceMode {
     /// 独立历史入口只允许自己的窗口参数；在任何用户CLI副作用前检查。
     pub fn from_arguments(arguments: &[String]) -> Result<Self, &'static str> {
@@ -86,6 +135,51 @@ mod tests {
             .chain(values.iter().copied())
             .map(str::to_owned)
             .collect()
+    }
+
+    #[test]
+    fn window_startup_consumes_option_values_and_preserves_requested_pages() {
+        assert!(WindowArguments::parse(&arguments(&[])).is_ok());
+        let window = WindowArguments::parse(&arguments(&[
+            "--config",
+            "带空格的配置/--help.json",
+            "--wheel",
+            "orbit-edit",
+            "--wheel-editor",
+            "--settings",
+            "--panel",
+            "--ui-smoke",
+            "--browser-connector-settings",
+        ]))
+        .unwrap();
+        assert_eq!(window.wheel.as_deref(), Some("orbit-edit"));
+        assert!(window.wheel_editor && window.settings && window.panel);
+        assert!(window.ui_smoke && window.browser_connector_settings);
+        for values in [
+            vec!["--wheel-input-policy", "unfiltered"],
+            vec!["--mouse-shortcut-queue", "queue.json", "--panel"],
+            vec!["--text-history", "--config", "测试/bindings.json"],
+        ] {
+            assert!(WindowArguments::parse(&arguments(&values)).is_ok());
+        }
+    }
+
+    #[test]
+    fn unknown_or_incomplete_window_arguments_cannot_launch_the_main_window() {
+        for values in [
+            vec!["--check-confg"],
+            vec!["--settings", "--check-config=true"],
+            vec!["unexpected.json"],
+            vec!["--panel", "unexpected"],
+            vec!["--wheel", "--settings"],
+            vec!["--wheel", ""],
+            vec!["--wheel", "a", "--wheel", "b"],
+        ] {
+            assert!(
+                WindowArguments::parse(&arguments(&values)).is_err(),
+                "{values:?}"
+            );
+        }
     }
 
     #[test]

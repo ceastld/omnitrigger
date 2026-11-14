@@ -161,7 +161,7 @@ jobs:
                   (Join-Path $data 'clipboard-history.json'), (Join-Path $testDir 'clipboard-history.json'))) {
                 $expected[$file] = (Get-FileHash -LiteralPath $file).Hash
               }
-              ./scripts/check-running-upgrade.ps1 -Setup $setup -Executable $exe -DataRoot $data -Archive "dist/OmniTrigger-$env:RELEASE_VERSION-windows-x86_64.zip"
+              ./scripts/check-running-upgrade.ps1 -Setup $setup -Executable $exe -DataRoot $data -Archive "dist/OmniTrigger-$env:RELEASE_VERSION-windows-x86_64.zip" -ExpectedVersion $env:RELEASE_VERSION
               Assert-ProfileFiles
               $catalog = Join-Path $data 'profiles.json'
               Move-Item -LiteralPath $catalog -Destination (Join-Path $env:RUNNER_TEMP 'original-profiles.json')

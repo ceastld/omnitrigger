@@ -142,7 +142,7 @@ use trigger_panel::{
 };
 use wheel_workspace::DragWheelSession;
 use wheels::{WheelAccent, WheelActionRef, Wheels};
-use workspace_mode::WorkspaceMode;
+use workspace_mode::{WindowArguments, WorkspaceMode};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TriggerMode {
@@ -8583,8 +8583,44 @@ fn check_config() -> Result<String, String> {
     ))
 }
 
+fn reject_cli_arguments(message: &str) -> ! {
+    eprintln!(
+        "{}",
+        serde_json::json!({"status":"rejected","error":{
+            "code":"invalid_cli_arguments","message":message,"effect_state":"not_started"
+        }})
+    );
+    std::process::exit(1);
+}
+
 fn main() {
     let mut arguments: Vec<_> = std::env::args().collect();
+    // 查询程序信息无需访问配置档，也不应唤回托盘中的窗口。
+    if arguments
+        .iter()
+        .skip(1)
+        .any(|arg| matches!(arg.as_str(), "--version" | "--help"))
+        || matches!(arguments.get(1).map(String::as_str), Some("-h" | "-V"))
+    {
+        if arguments.len() != 2 {
+            reject_cli_arguments("版本和帮助查询需单独使用。");
+        }
+        match arguments[1].as_str() {
+            "--version" | "-V" => println!("OmniTrigger {}", env!("CARGO_PKG_VERSION")),
+            _ => println!(
+                "OmniTrigger {}\n用法：omnitrigger.exe [参数]\n\
+                 无参数              打开日常窗口\n\
+                 --settings          打开设置\n\
+                 --test-workspace    打开独立测试档\n\
+                 --config <路径>     使用指定配置文件\n\
+                 --check-config      检查配置并退出\n\
+                 --version           显示版本并退出\n\
+                 --help              显示常用命令并退出",
+                env!("CARGO_PKG_VERSION")
+            ),
+        }
+        return;
+    }
     if let Some(code) = explorer_context_helper::cli(&arguments) {
         std::process::exit(code);
     }
@@ -8651,15 +8687,7 @@ fn main() {
     }
     let startup_mode = match WorkspaceMode::from_arguments(&arguments) {
         Ok(mode) => mode,
-        Err(message) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({"status":"rejected","error":{
-                    "code":"invalid_cli_arguments","message":message,"effect_state":"not_started"
-                }})
-            );
-            std::process::exit(1);
-        }
+        Err(message) => reject_cli_arguments(message),
     };
     let text_history_page = startup_mode.history_only();
     let wheel_input_policy = match wheel_input_cli::parse(&arguments) {
@@ -8798,42 +8826,14 @@ fn main() {
         }
         return;
     }
-    let ui_smoke = arguments.iter().any(|argument| argument == "--ui-smoke");
-    let appearance_settings = arguments.iter().any(|argument| argument == "--settings");
-    let browser_connector_settings = arguments
-        .iter()
-        .any(|argument| argument == "--browser-connector-settings");
-    let open_panel = arguments.iter().any(|argument| argument == "--panel");
-    let initial_wheel = arguments
-        .iter()
-        .position(|argument| argument == "--wheel")
-        .map(|index| {
-            arguments
-                .get(index + 1)
-                .filter(|value| !value.starts_with("--"))
-                .cloned()
-                .ok_or_else(|| "--wheel 后需要轮盘标识。".to_string())
-        })
-        .transpose()
-        .and_then(|id| {
-            if let Some(id) = &id {
-                WheelActionRef {
-                    wheel_id: id.clone(),
-                }
-                .validate()?;
-            }
-            Ok(id)
-        });
-    let initial_wheel = match initial_wheel {
-        Ok(id) => id,
-        Err(error) => {
-            eprintln!("{error}");
-            std::process::exit(1);
-        }
-    };
-    let wheel_editor = arguments
-        .iter()
-        .any(|argument| argument == "--wheel-editor");
+    let WindowArguments {
+        settings: appearance_settings,
+        browser_connector_settings,
+        panel: open_panel,
+        wheel_editor,
+        ui_smoke,
+        wheel: initial_wheel,
+    } = WindowArguments::parse(&arguments).unwrap_or_else(|error| reject_cli_arguments(&error));
     let preserve_foreground = initial_wheel.is_some() && !wheel_editor;
     let launch_target = if preserve_foreground || text_history_page {
         match omnitrigger_windows::capture_shortcut_target() {

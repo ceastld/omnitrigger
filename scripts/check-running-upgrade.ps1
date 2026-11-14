@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory)][string]$Setup,
     [Parameter(Mandatory)][string]$Archive,
     [Parameter(Mandatory)][string]$Executable,
-    [Parameter(Mandatory)][string]$DataRoot
+    [Parameter(Mandatory)][string]$DataRoot,
+    [Parameter(Mandatory)][string]$ExpectedVersion
 )
 $ErrorActionPreference = 'Stop'
 $setupFile = Get-Item -LiteralPath $Setup
@@ -297,6 +298,32 @@ $start.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $health
 $ui = [Diagnostics.Process]::Start($start)
 try {
     $dailyWindow = Close-ToTray $ui $health
+    # 快捷方式参数拼错或脚本查询版本时，命令应独立结束，已收起的日常窗口仍由原进程持有。
+    foreach ($flag in '--version', '--help', '--check-confg') {
+        $query = New-AppStart
+        $query.ArgumentList.Add($flag)
+        $query.CreateNoWindow = $true
+        $query.RedirectStandardOutput = $true
+        $query.RedirectStandardError = $true
+        $query.StandardOutputEncoding = $query.StandardErrorEncoding = [Text.Encoding]::UTF8
+        $child = [Diagnostics.Process]::Start($query)
+        try {
+            $stdout = $child.StandardOutput.ReadToEndAsync()
+            $stderr = $child.StandardError.ReadToEndAsync()
+            if (-not $child.WaitForExit(10000)) { throw "$flag 未在后台退出。" }
+            if ($flag -eq '--check-confg') {
+                $receipt = $stderr.Result | ConvertFrom-Json
+                if ($child.ExitCode -ne 1 -or $stdout.Result -ne '' -or $receipt.error.code -ne 'invalid_cli_arguments' -or
+                    $receipt.error.message -notlike "*$flag*") { throw "$flag 未返回具体参数错误。" }
+            } else {
+                if ($child.ExitCode -ne 0 -or $stderr.Result -ne '' -or
+                    ($flag -eq '--version' -and $stdout.Result.Trim() -cne "OmniTrigger $ExpectedVersion") -or
+                    ($flag -eq '--help' -and $stdout.Result -notmatch '--test-workspace')) { throw "$flag 的输出或退出码错误。" }
+            }
+            if ($ui.HasExited -or -not [OmniTriggerUpgradeWindow]::IsWindow($dailyWindow) -or
+                [OmniTriggerUpgradeWindow]::IsWindowVisible($dailyWindow)) { throw "$flag 改变了日常窗口的托盘状态。" }
+        } finally { Stop-TestProcess $child }
+    }
     # 日常窗口已经确认 Hook 就绪。另一进程的真实监听请求应在安装 Hook 前返回占用原因。
     $listen = New-AppStart
     foreach ($arg in @('--data-root', $profileRoot, '--test-workspace', '--listen', '--smoke-test')) {
