@@ -49,13 +49,6 @@ struct Record {
     bytes: u64,
 }
 
-pub(super) fn is_cloud_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
-        name.starts_with("onedrive") || name == "dropbox" || name.starts_with("icloud")
-    })
-}
-
 fn parse_version(text: &str) -> Option<Version> {
     let mut parts = text.split('.').map(|part| part.parse::<u32>().ok());
     let version = (parts.next()??, parts.next()??, parts.next()??);

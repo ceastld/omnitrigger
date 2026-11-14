@@ -646,17 +646,46 @@ fn copy_data(from: &Path, to: &Path, include_file: impl Fn(&str) -> bool) -> Res
     Ok(copied)
 }
 
-/// 目录中数据文件的最后修改时间（毫秒）；没有数据文件时为 `None`。
+/// 顶层数据与托管动作包内文件的最近修改时间。仅读元数据。
 fn data_modified_ms(directory: &Path) -> Option<u64> {
-    std::fs::read_dir(directory)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-        .filter(|entry| is_data_file(&entry.file_name().to_string_lossy()))
-        .filter_map(|entry| entry.metadata().ok()?.modified().ok())
-        .filter_map(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|time| time.as_millis() as u64)
-        .max()
+    if !crate::local_files::is_plain_directory(directory) {
+        return None;
+    }
+    let mut latest = None;
+    let mut directories = vec![directory.to_owned()];
+    while let Some(path) = directories.pop() {
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        let top = path == directory;
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !crate::local_files::is_plain(&metadata) {
+                continue;
+            }
+            let name = entry.file_name();
+            if metadata.is_dir() {
+                let actions = if cfg!(windows) {
+                    name.eq_ignore_ascii_case("actions")
+                } else {
+                    name == "actions"
+                };
+                if (!top || actions) && !crate::local_files::is_cloud_path(Path::new(&name)) {
+                    directories.push(entry.path());
+                }
+            } else if metadata.is_file() && (!top || is_data_file(&name.to_string_lossy())) {
+                latest = latest.max(metadata.modified().ok());
+            }
+        }
+    }
+    Some(
+        latest?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis() as u64,
+    )
 }
 
 fn source_dir(root: &Path, catalog: &Catalog, key: &str) -> Result<PathBuf, String> {
@@ -1181,7 +1210,11 @@ fn relative_age(modified_ms: u64) -> String {
 
 /// 外部副本：打包应用重定向产生的 `<LOCALAPPDATA>\Packages\<包>\LocalCache\Local\OmniTrigger`。
 fn external_copies(local_app_data: &Path) -> Vec<(String, PathBuf, u64)> {
-    let Ok(packages) = std::fs::read_dir(local_app_data.join("Packages")) else {
+    let packages = local_app_data.join("Packages");
+    if !crate::local_files::is_plain_directory(&packages) {
+        return Vec::new();
+    }
+    let Ok(packages) = std::fs::read_dir(packages) else {
         return Vec::new();
     };
     packages
@@ -1192,14 +1225,18 @@ fn external_copies(local_app_data: &Path) -> Vec<(String, PathBuf, u64)> {
                 .join("LocalCache")
                 .join("Local")
                 .join("OmniTrigger");
-            directory.join("bindings.json").is_file().then(|| {
-                let modified = data_modified_ms(&directory)?;
-                Some((
-                    entry.file_name().to_string_lossy().into_owned(),
-                    directory,
-                    modified,
-                ))
-            })?
+            let modified = data_modified_ms(&directory)?;
+            directory
+                .join("bindings.json")
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.is_file() && crate::local_files::is_plain(&metadata))
+                .then(|| {
+                    (
+                        entry.file_name().to_string_lossy().into_owned(),
+                        directory,
+                        modified,
+                    )
+                })
         })
         .collect()
 }
@@ -1769,6 +1806,40 @@ mod tests {
             b"seed"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn external_copy_with_a_newer_managed_action_is_offered_again() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let root = temp_root("action-copy-time");
+        let source = root.join("Packages/sample/LocalCache/Local/OmniTrigger");
+        let daily = root.join("daily");
+        let package = source.join("actions/package/scripts");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::create_dir(&daily).unwrap();
+        let write_at = |path: PathBuf, seconds| {
+            let file = std::fs::File::create(path).unwrap();
+            file.set_modified(UNIX_EPOCH + Duration::from_secs(seconds))
+                .unwrap();
+        };
+        write_at(daily.join("bindings.json"), 1_700_000_020);
+        write_at(source.join("bindings.json"), 1_700_000_010);
+        write_at(package.join("action.mjs"), 1_700_000_030);
+        for unrelated in [source.join("backups/old"), package.join("OneDrive")] {
+            std::fs::create_dir_all(&unrelated).unwrap();
+            write_at(unrelated.join("ignored.json"), 1_700_000_050);
+        }
+        let ignored =
+            BTreeMap::from([(normalize(&source).to_ascii_lowercase(), 1_700_000_010_000)]);
+        let offered = pending_copy(external_copies(&root), data_modified_ms(&daily), &ignored);
+        let seen = BTreeMap::from([(normalize(&source).to_ascii_lowercase(), 1_700_000_030_000)]);
+        assert!(pending_copy(external_copies(&root), data_modified_ms(&daily), &seen).is_none());
+        let local_package = daily.join("actions/local");
+        std::fs::create_dir_all(&local_package).unwrap();
+        write_at(local_package.join("action.json"), 1_700_000_040);
+        assert!(pending_copy(external_copies(&root), data_modified_ms(&daily), &ignored).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(offered.map(|entry| entry.2), Some(1_700_000_030_000));
     }
 
     #[test]

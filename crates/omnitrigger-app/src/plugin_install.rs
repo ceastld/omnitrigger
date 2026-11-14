@@ -183,21 +183,14 @@ fn absolute(path: &Path) -> Result<PathBuf, String> {
 }
 
 fn ensure_plain_ancestors(path: &Path) -> Result<(), String> {
-    if discovery::is_cloud_path(path) {
+    if crate::local_files::is_cloud_path(path) {
         return Err("插件目录不能位于云盘同步目录。".into());
     }
     // 从根向下检查，避免先访问链接或云端目录内部的子路径。
     for ancestor in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
         match fs::symlink_metadata(ancestor) {
             Ok(metadata) => {
-                #[cfg(windows)]
-                let reparse = {
-                    use std::os::windows::fs::MetadataExt;
-                    metadata.file_attributes() & (0x400 | 0x1000 | 0x40000 | 0x400000) != 0
-                };
-                #[cfg(not(windows))]
-                let reparse = metadata.file_type().is_symlink();
-                if reparse {
+                if !crate::local_files::is_plain(&metadata) {
                     return Err(format!(
                         "插件目录不能包含链接、联接点或云端占位文件：{}",
                         ancestor.display()
