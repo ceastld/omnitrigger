@@ -26,8 +26,8 @@ delete env.OMNITRIGGER_SCRIPT_HOST;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const pointer = join(root, 'runtimes/script/current.json');
 const checks = [];
-function cli(args, code=0, profileArgs=['--config',config]) {
-  const result = spawnSync(app, [...profileArgs,...args], {encoding:'utf8',windowsHide:true,timeout:120000,maxBuffer:1024*1024,env});
+function cli(args, code=0, profileArgs=['--config',config], environment=env) {
+  const result = spawnSync(app, [...profileArgs,...args], {encoding:'utf8',windowsHide:true,timeout:120000,maxBuffer:1024*1024,env:environment});
   assert.ifError(result.error);
   assert.equal(result.status, code, result.stderr || result.stdout);
   return JSON.parse(code===0 ? result.stdout : result.stderr);
@@ -132,6 +132,9 @@ try {
 } finally { writeFileSync(pointer,firstPointer); unlinkSync(legacyHost); }
 checks.push('invalid_managed_pointer_does_not_fall_back');
 
+const jsonPackage = join(root,'actions','json-text');
+cpSync(join(repo,'examples/actions/json-text'),jsonPackage,{recursive:true,errorOnExist:true});
+const nodeArgs = ['--run-action',join(jsonPackage,'call.json')];
 const copy = cli(['--profile-create','runtime-copy','--seed','copy:default'],0,['--data-root',root]);
 const copiedArgs = ['--data-root',root,'--profile','runtime-copy'];
 assert(!existsSync(join(copy.directory,'runtimes')));
@@ -142,6 +145,16 @@ const copiedEntry = join(copiedPackage,copiedManifest.actions[0].entry);
 writeFileSync(copiedEntry,'export function main() { return {text:"copied profile"}; }');
 assert.equal(cli(['--run-action',project.call_path],0,copiedArgs).output.text,'copied profile');
 assert.equal(cli(['--run-action',project.call_path]).output.text,'OmniTrigger');
+const cleared = {...env, OMNITRIGGER_NODE:'', OMNITRIGGER_SCRIPT_HOST:''};
+const missing = {...env, OMNITRIGGER_SCRIPT_HOST:join(root,'missing-script-host.exe')};
+for (const [profileArgs,text] of [[['--config',config],'OmniTrigger'],[copiedArgs,'copied profile']]) {
+  const scriptArgs = ['--run-action',project.call_path];
+  assert.equal(cli(scriptArgs,0,profileArgs,cleared).output.text,text);
+  assert.equal(cli(nodeArgs,0,profileArgs,cleared).output.status,'inspected');
+  assert.equal(cli(scriptArgs,1,profileArgs,missing).error.code,'runtime_unavailable');
+  assert.equal(cli(nodeArgs,1,profileArgs,missing).error.code,'runtime_unavailable');
+}
+checks.push('empty_host_paths_restore_default_runtimes_in_daily_and_copied_profiles');
 const nested = cli(['--profile-create','nested','--seed','copy:default'],0,['--data-root',copy.directory]);
 const nestedArgs = ['--data-root',copy.directory,'--profile',nested.id];
 const nestedEntry = join(nested.directory,'actions','installed-script',copiedManifest.actions[0].entry);

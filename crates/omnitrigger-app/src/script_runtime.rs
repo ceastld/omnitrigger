@@ -258,7 +258,8 @@ fn verify_package(directory: &Path, expected_manifest: &str) -> Result<Manifest,
     Ok(parsed)
 }
 pub fn locate(config: &Path) -> Result<Option<Installed>, String> {
-    if let Some(path) = std::env::var_os("OMNITRIGGER_SCRIPT_HOST") {
+    if let Some(path) = std::env::var_os("OMNITRIGGER_SCRIPT_HOST").filter(|path| !path.is_empty())
+    {
         let program = PathBuf::from(path);
         check_local_path(&program)?;
         return if program.is_absolute() && program.is_file() {

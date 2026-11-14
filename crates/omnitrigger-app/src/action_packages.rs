@@ -19,7 +19,7 @@ pub fn root(config: &Path) -> PathBuf {
 }
 
 fn node_program() -> Option<PathBuf> {
-    if let Some(program) = std::env::var_os("OMNITRIGGER_NODE") {
+    if let Some(program) = std::env::var_os("OMNITRIGGER_NODE").filter(|path| !path.is_empty()) {
         let path = PathBuf::from(program);
         return (path.is_absolute() && path.is_file()).then_some(path);
     }
