@@ -143,6 +143,14 @@ writeFileSync(copiedEntry,'export function main() { return {text:"copied profile
 assert.equal(cli(['--run-action',project.call_path],0,copiedArgs).output.text,'copied profile');
 assert.equal(cli(['--run-action',project.call_path]).output.text,'OmniTrigger');
 const copiedRuntime = join(copy.directory,'runtimes','script');
+const fromFixture = cli(['--profile-create','runtime-fixture','--seed',`fixture:${root}`],0,['--data-root',root]);
+const fixtureArgs = ['--data-root',root,'--profile',fromFixture.id];
+assert.equal(cli(['--run-action',project.call_path],1,fixtureArgs).error.code,'runtime_unavailable');
+const bareRuntime = join(fromFixture.directory,'runtimes','script');
+mkdirSync(bareRuntime,{recursive:true});
+cpSync(firstHost,join(bareRuntime,'host.exe'));
+const bareCopy = cli(['--profile-create','runtime-bare-copy','--seed',`copy:${fromFixture.id}`],0,['--data-root',root]);
+assert.equal(cli(['--run-action',project.call_path],1,['--data-root',root,'--profile',bareCopy.id]).error.code,'runtime_unavailable');
 mkdirSync(copiedRuntime,{recursive:true});
 const copiedPointer = join(copiedRuntime,'current.json');
 writeFileSync(copiedPointer,'{invalid');

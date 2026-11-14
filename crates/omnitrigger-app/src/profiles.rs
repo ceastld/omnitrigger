@@ -470,6 +470,21 @@ fn registered_test_data(config_path: &Path) -> bool {
 
 /// 按复制顺序向上追溯种子，只读本根总登记。损坏或循环的登记链不能用作安装来源。
 pub(crate) fn seed_sources_for_config(config: &Path) -> Vec<PathBuf> {
+    seed_paths(config, SeedPaths::All)
+}
+
+/// 只有已登记配置档的安装可用于运行复制来的脚本；夹具仅提供动作和测试数据。
+pub(crate) fn copied_profile_sources(config: &Path) -> Vec<PathBuf> {
+    seed_paths(config, SeedPaths::Profiles)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SeedPaths {
+    All,
+    Profiles,
+}
+
+fn seed_paths(config: &Path, paths: SeedPaths) -> Vec<PathBuf> {
     let Some(directory) = profile_directory(config) else {
         return Vec::new();
     };
@@ -486,6 +501,9 @@ pub(crate) fn seed_sources_for_config(config: &Path) -> Vec<PathBuf> {
     else {
         return Vec::new();
     };
+    if paths == SeedPaths::Profiles {
+        return trace_seed_sources(root, None, &catalog, entry, paths);
+    }
     // TEMP、8.3 短名或目录联接可能让调用者使用另一条数据根路径。只从已经
     // 核对身份的目标档推导这个别名，不打开可能已移走的种子目录。
     let supplied = std::path::absolute(config).ok();
@@ -500,7 +518,7 @@ pub(crate) fn seed_sources_for_config(config: &Path) -> Vec<PathBuf> {
         })
         .and_then(Path::parent)
         .filter(|alias| !normalize(alias).eq_ignore_ascii_case(&normalize(root)));
-    trace_seed_sources(root, root_alias, &catalog, entry)
+    trace_seed_sources(root, root_alias, &catalog, entry, paths)
 }
 
 fn trace_seed_sources<'a>(
@@ -508,6 +526,7 @@ fn trace_seed_sources<'a>(
     root_alias: Option<&Path>,
     catalog: &'a Catalog,
     mut entry: &'a Entry,
+    paths: SeedPaths,
 ) -> Vec<PathBuf> {
     let mut seen = BTreeSet::from([normalize(&profile_dir(root, &entry.id)).to_lowercase()]);
     if let Some(alias) = root_alias {
@@ -530,6 +549,7 @@ fn trace_seed_sources<'a>(
                     Some(source),
                 )
             }
+            Ok(Seed::Fixture(_)) if paths == SeedPaths::Profiles => break,
             Ok(Seed::Fixture(path)) if path.is_absolute() => (path, None, None),
             _ => return Vec::new(),
         };
@@ -1800,14 +1820,17 @@ mod tests {
         let mut catalog = read_catalog(&root).unwrap();
         let alternate = root.with_file_name("alternate-root-name");
         assert_eq!(
-            trace_seed_sources(&root, Some(&alternate), &catalog, &second),
+            trace_seed_sources(&root, Some(&alternate), &catalog, &second, SeedPaths::All),
             [
                 profile_dir(&root, &first.id),
                 profile_dir(&alternate, &first.id)
             ]
         );
         catalog.profiles[0].seed = Seed::Fixture(profile_dir(&alternate, &first.id)).record();
-        assert!(trace_seed_sources(&root, Some(&alternate), &catalog, &second).is_empty());
+        assert!(
+            trace_seed_sources(&root, Some(&alternate), &catalog, &second, SeedPaths::All)
+                .is_empty()
+        );
         for seed in [
             Seed::Copy(first.id.clone()),
             Seed::Copy(second.alias.clone()),

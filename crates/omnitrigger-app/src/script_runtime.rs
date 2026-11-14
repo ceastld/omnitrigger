@@ -270,28 +270,31 @@ pub fn locate(config: &Path) -> Result<Option<Installed>, String> {
             Err("OMNITRIGGER_SCRIPT_HOST 需要存在的完整本地宿主路径。".into())
         };
     }
-    if let Some(host) = locate_installed(config)? {
+    let own_root = root(config)?;
+    if let Some(host) = locate_managed(&own_root)? {
         return Ok(Some(host));
     }
-    for source in crate::profiles::seed_sources_for_config(config) {
-        if let Some(host) = locate_installed(&source.join("bindings.json"))? {
+    let program = own_root.join(if cfg!(windows) { "host.exe" } else { "host" });
+    check_local_path(&program)?;
+    if program.is_file() {
+        return Ok(Some(Installed {
+            program,
+            integrity: None,
+        }));
+    }
+    for source in crate::profiles::copied_profile_sources(config) {
+        if let Some(host) = locate_managed(&root(&source.join("bindings.json"))?)? {
             return Ok(Some(host));
         }
     }
     Ok(None)
 }
 
-fn locate_installed(config: &Path) -> Result<Option<Installed>, String> {
-    let root = root(config)?;
+fn locate_managed(root: &Path) -> Result<Option<Installed>, String> {
     let current = root.join("current.json");
     check_local_path(&current)?;
-    if !current.exists() {
-        let program = root.join(if cfg!(windows) { "host.exe" } else { "host" });
-        check_local_path(&program)?;
-        return Ok(program.is_file().then_some(Installed {
-            program,
-            integrity: None,
-        }));
+    if !current.try_exists().map_err(|error| error.to_string())? {
+        return Ok(None);
     }
     let pointer: Pointer =
         serde_json::from_slice(&read(&current, 4096)?).map_err(|e| e.to_string())?;
