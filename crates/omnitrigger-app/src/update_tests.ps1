@@ -79,7 +79,10 @@ class Fixture {
         if (version == "bad") return 1;
         string health = Environment.GetEnvironmentVariable("OMNITRIGGER_UPDATE_HEALTH");
         if (!String.IsNullOrEmpty(health)) File.WriteAllText(health, "0.2.0");
-        File.WriteAllText(args[1], version + "|" + Process.GetCurrentProcess().Id + "|" + Environment.GetEnvironmentVariable("OMNITRIGGER_UPDATE_ERROR"));
+        // 测试端以回执文件出现作为就绪信号，发布前先写完并关闭句柄。
+        string receipt = args[1] + ".tmp";
+        File.WriteAllText(receipt, version + "|" + Process.GetCurrentProcess().Id + "|" + Environment.GetEnvironmentVariable("OMNITRIGGER_UPDATE_ERROR"));
+        File.Move(receipt, args[1]);
         Thread.Sleep(60000);
         return 0;
     }
