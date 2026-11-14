@@ -808,6 +808,10 @@ impl DataCopy {
             // Windows 复制文件时保留只读属性。工作副本需要能被编辑器原子替换。
             let mut permissions = to.metadata()?.permissions();
             if permissions.readonly() {
+                #[expect(
+                    clippy::permissions_set_readonly_false,
+                    reason = "此分支仅在 Windows 编译，只清除副本的只读属性"
+                )]
                 permissions.set_readonly(false);
                 std::fs::set_permissions(to, permissions)?;
             }
