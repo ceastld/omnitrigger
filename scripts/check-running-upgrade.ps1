@@ -232,7 +232,7 @@ foreach ($entry in 'config', 'data-root', 'env') {
     $testStart.ArgumentList.Add('--settings')
     $testUi = [Diagnostics.Process]::Start($testStart)
     try {
-        $testWindow = Wait-AppWindow $testUi ''
+        $testWindow = Wait-AppWindow $testUi '' "OmniTrigger — 测试：$($identity.name)"
         # 留出输入后端就绪和界面轮询的时间，避免在首轮健康检查之前关窗。
         $timer = [Diagnostics.Stopwatch]::StartNew()
         while ($timer.Elapsed.TotalSeconds -lt 2 -and -not (Test-Path -LiteralPath $testHealth)) {

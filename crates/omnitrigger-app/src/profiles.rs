@@ -73,10 +73,8 @@ impl Startup {
     }
 
     fn for_config(config: &Path) -> Self {
-        Self {
-            test_data: registered_test_data(config),
-            ..Self::daily()
-        }
+        registered_test_profile(config)
+            .map_or_else(Self::daily, |entry| Self::for_entry(&entry, true))
     }
 
     fn for_entry(entry: &Entry, listen: bool) -> Self {
@@ -504,32 +502,26 @@ impl Entry {
 }
 
 /// 旧版 --config 仍从文件所在目录读取动作数据。以实际目录和登记表确认其身份。
-fn registered_test_data(config_path: &Path) -> bool {
-    let Some(directory) = profile_directory(config_path) else {
-        return false;
-    };
-    let Some(root) = directory.parent().and_then(Path::parent) else {
-        return false;
-    };
+fn registered_test_profile(config_path: &Path) -> Option<Entry> {
+    let directory = profile_directory(config_path)?;
+    let root = directory.parent()?.parent()?;
     if let Ok(catalog) = read_catalog(root) {
-        if catalog
+        if let Some(entry) = catalog
             .profiles
-            .iter()
-            .any(|entry| entry.is_test_at(&directory))
+            .into_iter()
+            .find(|entry| entry.is_test_at(&directory))
         {
-            return true;
+            return Some(entry);
         }
         // 有效总登记是权威来源；别名、备份和相邻的普通目录都不算已登记的测试档。
         if catalog_path(root).exists() {
-            return false;
+            return None;
         }
     }
     // 总登记缺失或损坏时，以原目录自己的身份文件保守隔离动作，保留 --config 启动能力。
-    std::fs::read_to_string(directory.join("profile.json"))
+    reset_recovery::identity(&directory)
         .ok()
-        .and_then(|text| serde_json::from_str::<Entry>(&text).ok())
-        .as_ref()
-        .is_some_and(|entry| entry.is_test_at(&directory))
+        .filter(|entry| entry.is_test_at(&directory))
 }
 
 /// 按复制顺序向上追溯种子，只读本根总登记。损坏或循环的登记链不能用作安装来源。
@@ -2723,12 +2715,13 @@ mod tests {
         drop(guard);
         assert_eq!(arguments, original);
         assert!(explicit.test_data && explicit.listen);
-        assert_eq!(explicit.test_name, None);
-        assert_eq!(explicit.window_title("OmniTrigger"), "OmniTrigger");
-        assert!(!registered_test_data(&root.join("bindings.json")));
-        assert!(!registered_test_data(
-            &directory.join("nested/unknown.json")
-        ));
+        assert_eq!(explicit.test_name.as_deref(), Some("动作测试"));
+        assert_eq!(
+            explicit.window_title("OmniTrigger"),
+            "OmniTrigger — 测试：动作测试"
+        );
+        assert!(registered_test_profile(&root.join("bindings.json")).is_none());
+        assert!(registered_test_profile(&directory.join("nested/unknown.json")).is_none());
 
         let alias_dir = profile_dir(&root, &entry.alias);
         std::fs::create_dir(&alias_dir).unwrap();
@@ -2737,7 +2730,7 @@ mod tests {
             alias_dir.join("profile.json"),
         )
         .unwrap();
-        assert!(!registered_test_data(&alias_dir.join("bindings.json")));
+        assert!(registered_test_profile(&alias_dir.join("bindings.json")).is_none());
         for listen in [false, true] {
             let selected = Startup::for_entry(&entry, listen);
             assert!(selected.test_data);
@@ -2746,10 +2739,10 @@ mod tests {
         }
 
         std::fs::write(catalog_path(&root), "{").unwrap();
-        assert!(startup(&mut arguments).0.test_data);
-        assert!(!registered_test_data(&alias_dir.join("bindings.json")));
+        assert_eq!(startup(&mut arguments).0, explicit);
+        assert!(registered_test_profile(&alias_dir.join("bindings.json")).is_none());
         std::fs::remove_file(catalog_path(&root)).unwrap();
-        assert!(registered_test_data(&config));
+        assert_eq!(registered_test_profile(&config), Some(entry));
         std::fs::write(directory.join("profile.json"), "broken").unwrap();
         assert_eq!(startup(&mut arguments).0, Startup::daily());
         let _ = std::fs::remove_dir_all(root);
@@ -2768,7 +2761,7 @@ mod tests {
             assert_ne!(source, RootSource::Default);
             let startup = Startup::for_config(&resolved.join("bindings.json"));
             assert!(startup.test_data && startup.listen);
-            assert!(startup.test_name.is_none());
+            assert_eq!(startup.test_name.as_deref(), Some(test.name.as_str()));
         }
         assert_eq!(
             Startup::for_config(&root.join("bindings.json")),

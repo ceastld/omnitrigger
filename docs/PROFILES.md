@@ -11,7 +11,7 @@
 - 已实现：数据根解析（`--data-root`、`OMNITRIGGER_HOME`、默认目录）、打包重定向检测与脱离重启、持久测试配置档（`--profile`、`--profile-create`、`--profile-reset`、`--profile-list`，种子 `empty`、`fixture:`、`copy:`）、测试配置档默认不安装 Hook 与 `--listen`、窗口标题和侧栏的测试数据标识、启动时发现更新的外部副本并询问导入。
 - 首阶段的默认配置档就是数据根本身，文件仍在 `%LOCALAPPDATA%\OmniTrigger` 原位，尚未迁移进 `profiles\<ID>\`；`examples` 种子、跨配置档监听互斥、运行中切换、自动备份、配置档列表管理和账号关联尚未实现。
 - `--config` 保持原有行为（照常安装 Hook），不能与配置档参数同用。
-- 直接用 `--config`、`--data-root` 或 `OMNITRIGGER_HOME` 打开已登记的测试档时，侧栏显示“测试数据”，关窗会退出。应用更新和更新后的启动确认由日常窗口处理。
+- 直接用 `--config`、`--data-root` 或 `OMNITRIGGER_HOME` 打开已登记的测试档时，任务栏和 Alt+Tab 中的窗口标题会显示“OmniTrigger — 测试：配置档名称”，侧栏也会显示该名称。关闭测试窗口会退出该实例。应用更新和更新后的启动确认由日常窗口处理。
 
 本页解决四个问题：
 

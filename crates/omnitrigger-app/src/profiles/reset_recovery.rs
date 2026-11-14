@@ -11,7 +11,7 @@ fn present(path: &Path) -> io::Result<bool> {
     }
 }
 
-fn identity(directory: &Path) -> io::Result<Entry> {
+pub(super) fn identity(directory: &Path) -> io::Result<Entry> {
     if !is_plain_directory(directory) {
         return Err(io::Error::other(format!(
             "配置档不是普通本机目录：{}",
