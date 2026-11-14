@@ -428,9 +428,14 @@ fn profile_directory(config_path: &Path) -> Option<PathBuf> {
 impl Entry {
     fn is_test_at(&self, directory: &Path) -> bool {
         self.kind == "test"
-            && directory
-                .file_name()
-                .is_some_and(|id| id.eq_ignore_ascii_case(std::ffi::OsStr::new(&self.id)))
+            && directory.file_name().is_some_and(|id| {
+                let expected = std::ffi::OsStr::new(&self.id);
+                if cfg!(windows) {
+                    id.eq_ignore_ascii_case(expected)
+                } else {
+                    id == expected
+                }
+            })
     }
 }
 
@@ -555,12 +560,71 @@ fn read_catalog(root: &Path) -> Result<Catalog, String> {
             }
             Ok(catalog)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Catalog {
-            version: CATALOG_VERSION,
-            profiles: Vec::new(),
-        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => recover_catalog(root),
         Err(error) => Err(format!("读取 {} 失败：{error}", path.display())),
     }
+}
+
+/// 总登记缺失时，只从本根直属的配置档身份文件恢复，不读取热键、动作或历史。
+fn recover_catalog(root: &Path) -> Result<Catalog, String> {
+    let mut catalog = Catalog {
+        version: CATALOG_VERSION,
+        profiles: Vec::new(),
+    };
+    let directory = root.join("profiles");
+    let fail = |error| format!("无法恢复 {} 中的配置档登记：{error}", directory.display());
+    match directory.symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(catalog),
+        Err(error) => return Err(fail(error)),
+        Ok(_) if !crate::local_files::is_plain_directory(&directory) => {
+            return Err(format!(
+                "无法从普通本机目录读取配置档：{}",
+                directory.display()
+            ));
+        }
+        Ok(_) => {}
+    }
+    let mut keys = BTreeSet::new();
+    for item in std::fs::read_dir(&directory).map_err(fail)? {
+        let item = item.map_err(fail)?;
+        let id = item.file_name();
+        // 历代测试档均由 new_id 生成。忽略旁置的备份、别名目录及非本机条目。
+        let Some(hex) = id.to_str().and_then(|s| s.strip_prefix(['t', 'T'])) else {
+            continue;
+        };
+        if hex.len() != 12 || !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        let metadata = item.metadata().map_err(fail)?;
+        if !metadata.is_dir() || !crate::local_files::is_plain(&metadata) {
+            continue;
+        }
+        let path = item.path().join("profile.json");
+        let unavailable = |error| format!("无法读取配置档身份文件 {}：{error}", path.display());
+        let metadata = path.symlink_metadata().map_err(unavailable)?;
+        if !metadata.is_file() || !crate::local_files::is_plain(&metadata) {
+            return Err(format!(
+                "配置档身份文件须为普通本机文件：{}",
+                path.display()
+            ));
+        }
+        let text = std::fs::read_to_string(&path).map_err(unavailable)?;
+        let entry: Entry = serde_json::from_str(&text)
+            .map_err(|error| format!("{} 格式有误：{error}", path.display()))?;
+        if !entry.is_test_at(&item.path()) {
+            return Err(format!("配置档身份与目录不符：{}", path.display()));
+        }
+        validate_alias(&entry.alias)?;
+        let key = entry.id.to_ascii_lowercase();
+        if (entry.alias != key && !keys.insert(entry.alias.clone())) || !keys.insert(key) {
+            return Err(format!("配置档标识或别名重复：{}", path.display()));
+        }
+        catalog.profiles.push(entry);
+    }
+    catalog
+        .profiles
+        .sort_by(|a, b| (a.created_ms, &a.id).cmp(&(b.created_ms, &b.id)));
+    Ok(catalog)
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
@@ -754,6 +818,12 @@ fn testing_workspace(root: &Path) -> Result<Entry, String> {
     if let Some(entry) = catalog.find(TEST_ALIAS) {
         if entry.kind != "test" {
             return Err(format!("配置档 {TEST_ALIAS} 已用于其他用途。"));
+        }
+        if !catalog_path(root)
+            .try_exists()
+            .map_err(|error| error.to_string())?
+        {
+            write_json(&catalog_path(root), &catalog)?;
         }
         return Ok(entry.clone());
     }
@@ -1882,6 +1952,64 @@ mod tests {
             pending_copy(vec![a, b], Some(100), &ignored).unwrap().0,
             "B"
         );
+    }
+
+    #[test]
+    fn shortcut_recovers_all_original_profiles_only_when_the_catalog_is_missing() {
+        let root = temp_root("recover-catalog");
+        let other = create_profile(
+            &root,
+            "other",
+            &Seed::Copy(DEFAULT_ID.into()),
+            Some("轮盘测试"),
+        )
+        .unwrap();
+        let testing = testing_workspace(&root).unwrap();
+        let config = profile_dir(&root, &testing.id).join("bindings.json");
+        std::fs::write(&config, b"test bindings").unwrap();
+        let path = catalog_path(&root);
+        std::fs::remove_file(&path).unwrap();
+        let archive = root.join("profiles/old-backup");
+        std::fs::create_dir(&archive).unwrap();
+        std::fs::copy(
+            profile_dir(&root, &testing.id).join("profile.json"),
+            archive.join("profile.json"),
+        )
+        .unwrap();
+        let recovered = read_catalog(&root).unwrap();
+        assert_eq!(recovered.profiles.len(), 2);
+        assert_eq!(recovered.find("other"), Some(&other));
+        assert_eq!(recovered.find(TEST_ALIAS), Some(&testing));
+        assert!(!path.exists());
+        assert_eq!(testing_workspace(&root).unwrap(), testing);
+        assert_eq!(read_catalog(&root).unwrap(), recovered);
+        assert!(path.is_file());
+        assert_eq!(std::fs::read(&config).unwrap(), b"test bindings");
+
+        write_json(
+            &path,
+            &Catalog {
+                version: CATALOG_VERSION,
+                profiles: vec![testing.clone()],
+            },
+        )
+        .unwrap();
+        assert!(read_catalog(&root).unwrap().find("other").is_none());
+        std::fs::write(&path, "{").unwrap();
+        assert!(testing_workspace(&root).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{");
+        std::fs::remove_file(&path).unwrap();
+        let mut duplicate = other.clone();
+        duplicate.alias = TEST_ALIAS.into();
+        write_json(
+            &profile_dir(&root, &other.id).join("profile.json"),
+            &duplicate,
+        )
+        .unwrap();
+        assert!(testing_workspace(&root).unwrap_err().contains("重复"));
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&config).unwrap(), b"test bindings");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

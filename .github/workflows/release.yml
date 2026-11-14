@@ -163,6 +163,11 @@ jobs:
               }
               ./scripts/check-running-upgrade.ps1 -Setup $setup -Executable $exe -DataRoot $data -Archive "dist/OmniTrigger-$env:RELEASE_VERSION-windows-x86_64.zip"
               Assert-ProfileFiles
+              $catalog = Join-Path $data 'profiles.json'
+              Move-Item -LiteralPath $catalog -Destination (Join-Path $env:RUNNER_TEMP 'original-profiles.json')
+              Assert-HistoryAppend @('--test-workspace') $false
+              Assert-HistoryAppend @('--profile', 'clipboard-copy') $false
+              Assert-ProfileFiles
             }
             $result = Start-Process -FilePath (Join-Path $app 'unins000.exe') -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -WindowStyle Hidden -PassThru -Wait
             if ($result.ExitCode -or (Test-Path $exe)) { throw '卸载失败。' }
