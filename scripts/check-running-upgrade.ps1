@@ -355,8 +355,9 @@ try {
 }
 
 $takeover = New-AppStart
-$takeover.Environment['OMNITRIGGER_HOME'] = Join-Path $probe.FullName 'listener-takeover'
-$takeoverHealth = Join-Path $probe.FullName 'takeover-healthy'
+$takeoverRoot = New-Item -ItemType Directory -Path (Join-Path $probe.FullName 'listener-takeover')
+$takeover.Environment['OMNITRIGGER_HOME'] = $takeoverRoot.FullName
+$takeoverHealth = Join-Path $takeoverRoot.FullName 'healthy'
 $takeover.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $takeoverHealth
 $next = [Diagnostics.Process]::Start($takeover)
 try {
