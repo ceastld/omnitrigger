@@ -30,7 +30,7 @@ impl UpdateUi {
 
 impl Workspace {
     fn update_application(&mut self, cx: &mut Context<Self>) {
-        if self.update_ui.events.is_some() {
+        if self.test_data || self.update_ui.events.is_some() {
             return;
         }
         let operation = self
@@ -68,7 +68,7 @@ impl Workspace {
     }
 
     pub(super) fn poll_update(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.test_profile.is_some() {
+        if self.test_data {
             return false;
         }
         // 首个成功打开窗口且输入后端就绪的版本才允许更新器删除备份。

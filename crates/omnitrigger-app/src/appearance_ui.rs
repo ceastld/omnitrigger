@@ -170,7 +170,7 @@ impl Workspace {
                     .child(caption("选择后立即生效，自动保存。跟随系统会与 Windows 的浅色或深色模式保持一致。"))
                     .child(div().flex().flex_wrap().gap(px(12.)).children(choices)))
                 .when_some(self.theme_error.clone(), |el, error| el.child(caption(error).text_color(theme::rgb(theme::DANGER))))
-                .when(self.test_profile.is_none(), |el| el.child(self.render_update(cx))))
+                .when(!self.test_data, |el| el.child(self.render_update(cx))))
             .map(|el| self.smooth_scroll.wrap("appearance-settings", el))
     }
 }

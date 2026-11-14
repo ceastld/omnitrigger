@@ -4186,7 +4186,11 @@ impl Workspace {
                     ),
             )
             .child(action)
-            .when_some(self.test_profile.clone(), |card, name| {
+            .when(self.test_data, |card| {
+                let label = match &self.test_profile {
+                    Some(name) => format!("测试数据：{name}"),
+                    None => "测试数据".into(),
+                };
                 card.child(
                     div()
                         .flex()
@@ -4201,7 +4205,7 @@ impl Workspace {
                         .text_size(px(11.5))
                         .text_color(rgb(theme::RECORD_TEXT))
                         .child(dot(theme::RECORD, 6.))
-                        .child(div().truncate().child(format!("测试数据：{name}"))),
+                        .child(div().truncate().child(label)),
                 )
             });
 
@@ -8763,7 +8767,8 @@ fn main() {
         None
     };
     // 更新器的成功和回滚入口都用原配置打开设置页。标准配置仍要占用其日常窗口身份。
-    let updater_settings = matches!(&arguments[1..], [config, _, page] if config == "--config" && page == "--settings")
+    let updater_settings = !profile_startup.test_data
+        && matches!(&arguments[1..], [config, _, page] if config == "--config" && page == "--settings")
         && (std::env::var_os("OMNITRIGGER_UPDATE_HEALTH").is_some()
             || std::env::var_os("OMNITRIGGER_UPDATE_ERROR").is_some());
     let config_path = settings::path();
@@ -8839,7 +8844,7 @@ fn main() {
                         });
                     let main_window = gpui::Window::window_handle(&*window);
                     let tray_window = text_history_ui_window.filter(|_| {
-                        profile_startup.test_name.is_none()
+                        !profile_startup.test_data
                             && (arguments.iter().skip(1).all(|arg| arg == "--settings")
                                 || updater_settings)
                     });

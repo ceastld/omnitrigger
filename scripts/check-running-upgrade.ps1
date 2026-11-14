@@ -122,6 +122,39 @@ try {
     if ($LASTEXITCODE -ne 0 -or $result.status -ne 'reset') { throw '关闭测试窗口后无法重置。' }
 } finally { Stop-TestProcess $testUi }
 
+# 同一测试档可以通过文件、目录或环境变量打开。各入口即使收到更新器的环境变量也应直接关窗退出。
+foreach ($entry in 'config', 'data-root', 'env') {
+    $receiptDir = New-Item -ItemType Directory -Path (Join-Path $probe.FullName $entry)
+    $testHealth = Join-Path $receiptDir.FullName 'healthy'
+    $testStart = New-AppStart
+    $testStart.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $testHealth
+    switch ($entry) {
+        'config' {
+            $testStart.ArgumentList.Add('--config')
+            $testStart.ArgumentList.Add((Join-Path $result.directory 'bindings.json'))
+        }
+        'data-root' {
+            $testStart.ArgumentList.Add('--data-root')
+            $testStart.ArgumentList.Add($result.directory)
+        }
+        'env' { $testStart.Environment['OMNITRIGGER_HOME'] = $result.directory }
+    }
+    $testStart.ArgumentList.Add('--settings')
+    $testUi = [Diagnostics.Process]::Start($testStart)
+    try {
+        $null = Wait-AppWindow $testUi ''
+        # 留出输入后端就绪和界面轮询的时间，避免在首轮健康检查之前关窗。
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        while ($timer.Elapsed.TotalSeconds -lt 2 -and -not (Test-Path -LiteralPath $testHealth)) {
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not $testUi.CloseMainWindow() -or -not $testUi.WaitForExit(20000) -or $testUi.ExitCode -ne 0) {
+            throw "通过 $entry 打开的测试窗口没有正常退出。"
+        }
+        if (Test-Path -LiteralPath $testHealth) { throw "通过 $entry 打开的测试档误确认了安装版更新。" }
+    } finally { Stop-TestProcess $testUi }
+}
+
 $start = New-AppStart
 $start.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $health
 $ui = [Diagnostics.Process]::Start($start)
