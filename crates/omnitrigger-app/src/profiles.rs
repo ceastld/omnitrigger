@@ -716,6 +716,11 @@ fn is_data_file(name: &str) -> bool {
         || name == "profile.json")
 }
 
+/// 浏览器连接器的程序路径与桥接进程属于当前安装，只在原配置的备份中保留。
+fn transferable_file(name: &str) -> bool {
+    is_data_file(name) && !name.eq_ignore_ascii_case("browser-connector.json")
+}
+
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
@@ -815,7 +820,7 @@ fn data_modified_ms(directory: &Path) -> Option<u64> {
                 if (!top || actions) && !crate::local_files::is_cloud_path(Path::new(&name)) {
                     directories.push(entry.path());
                 }
-            } else if metadata.is_file() && (!top || is_data_file(&name.to_string_lossy())) {
+            } else if metadata.is_file() && (!top || transferable_file(&name.to_string_lossy())) {
                 latest = latest.max(metadata.modified().ok());
             }
         }
@@ -839,9 +844,6 @@ fn source_dir(root: &Path, catalog: &Catalog, key: &str) -> Result<PathBuf, Stri
 }
 
 fn seed_into(root: &Path, catalog: &Catalog, seed: &Seed, target: &Path) -> Result<(), String> {
-    // 连接器登记包含源目录的程序路径和桥接进程身份，只属于该安装。
-    let seed_file =
-        |name: &str| is_data_file(name) && !name.eq_ignore_ascii_case("browser-connector.json");
     match seed {
         Seed::Empty => std::fs::create_dir_all(target)
             .map_err(|error| format!("创建 {} 失败：{error}", target.display())),
@@ -849,10 +851,11 @@ fn seed_into(root: &Path, catalog: &Catalog, seed: &Seed, target: &Path) -> Resu
             if !path.is_dir() {
                 return Err(format!("夹具目录 {} 不存在。", path.display()));
             }
-            copy_data(path, target, seed_file).map(drop)
+            copy_data(path, target, transferable_file).map(drop)
         }
         Seed::Copy(key) => copy_data(&source_dir(root, catalog, key)?, target, |name| {
-            seed_file(name) && !name.eq_ignore_ascii_case(crate::clipboard_history_store::FILE_NAME)
+            transferable_file(name)
+                && !name.eq_ignore_ascii_case(crate::clipboard_history_store::FILE_NAME)
         })
         .map(drop),
     }
@@ -2155,6 +2158,8 @@ mod tests {
         };
         write_at(daily.join("bindings.json"), 1_700_000_020);
         write_at(source.join("bindings.json"), 1_700_000_010);
+        write_at(source.join("browser-connector.json"), 1_700_000_090);
+        write_at(daily.join("browser-connector.json"), 1_700_000_100);
         write_at(package.join("action.mjs"), 1_700_000_030);
         for unrelated in [source.join("backups/old"), package.join("OneDrive")] {
             std::fs::create_dir_all(&unrelated).unwrap();

@@ -1,5 +1,7 @@
 //! 日常配置导入。先读取整份副本，逐个替换文件；中断后用原文件收尾。
-use super::{copy_data, is_data_file, lock_catalog, new_id, now_ms, RAISHOT_MANIFEST_PATH};
+use super::{
+    copy_data, is_data_file, lock_catalog, new_id, now_ms, transferable_file, RAISHOT_MANIFEST_PATH,
+};
 use crate::local_files::{is_cloud_path, is_plain, is_plain_directory};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -296,7 +298,7 @@ pub(super) fn import(root: &Path, source: &Path) -> Result<(), String> {
         let snapshot = pending.join("backup");
         copy_data(root, &snapshot, is_data_file).map_err(io::Error::other)?;
         fs::rename(&snapshot, &backup_dir)?;
-        copy_data(source, &staged, is_data_file).map_err(io::Error::other)?;
+        copy_data(source, &staged, transferable_file).map_err(io::Error::other)?;
         collect(&staged, root, Path::new(""), &mut plan)?;
         validate(&plan)?;
         let directories = pending.join("directories");
@@ -411,6 +413,46 @@ mod tests {
                 b"local catalog"
             );
             assert!(!root.join("backups").join(PENDING).exists());
+        }
+    }
+
+    #[test]
+    fn connector_registration_stays_with_the_installation_and_its_backup() {
+        let fixture = Fixture::new();
+        let source = fixture.0.join("other");
+        let registration = "browser-connector.json";
+        write(&source, "BROWSER-CONNECTOR.JSON", "other installation");
+        write(&source, "bindings.json", "hotkeys");
+        for registered in [false, true] {
+            let root = fixture
+                .0
+                .join(if registered { "installed" } else { "fresh" });
+            fs::create_dir(&root).unwrap();
+            if registered {
+                write(&root, registration, "local installation");
+            }
+            import(&root, &source).unwrap();
+            let backup = fs::read_dir(root.join("backups"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            for dir in [&root, &backup] {
+                if registered {
+                    assert_eq!(
+                        fs::read(dir.join(registration)).unwrap(),
+                        b"local installation"
+                    );
+                } else {
+                    assert!(!dir.join(registration).exists());
+                }
+            }
+            assert_eq!(fs::read(root.join("bindings.json")).unwrap(), b"hotkeys");
+            assert_eq!(
+                fs::read(source.join(registration)).unwrap(),
+                b"other installation"
+            );
         }
     }
 
