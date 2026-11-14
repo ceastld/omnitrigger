@@ -8763,6 +8763,13 @@ fn main() {
         && (std::env::var_os("OMNITRIGGER_UPDATE_HEALTH").is_some()
             || std::env::var_os("OMNITRIGGER_UPDATE_ERROR").is_some());
     let config_path = settings::path();
+    let _profile_in_use = match profile_startup.hold_window_profile(&config_path) {
+        Ok(file) => file,
+        Err(error) => {
+            omnitrigger_windows::show_error_dialog("OmniTrigger 无法打开配置窗口", &error);
+            return;
+        }
+    };
     let workspace_instance = if arguments.len() == 1
         || (updater_settings
             && config_path

@@ -79,6 +79,19 @@ impl Startup {
             None => base.into(),
         }
     }
+
+    /// 测试窗口加载数据前取得共享锁，直到退出。普通窗口、设置及历史入口共用此规则。
+    pub fn hold_window_profile(&self, config: &Path) -> Result<Option<std::fs::File>, String> {
+        if !self.test_data {
+            return Ok(None);
+        }
+        let directory = profile_directory(config)
+            .ok_or_else(|| format!("无法定位测试配置目录：{}", config.display()))?;
+        let file = open_profile_use_file(&directory)?;
+        file.lock_shared()
+            .map_err(|error| format!("无法打开正在重置的测试配置档：{error}"))?;
+        Ok(Some(file))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -418,7 +431,16 @@ fn profile_directory(config_path: &Path) -> Option<PathBuf> {
     } else {
         parent
     };
-    let directory = parent.canonicalize().ok()?;
+    let directory = match parent.canonicalize() {
+        Ok(directory) => directory,
+        // 重置替换目录的间隙，仍可由父目录和登记的 ID 确定配置档。
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => parent
+            .parent()?
+            .canonicalize()
+            .ok()?
+            .join(parent.file_name()?),
+        Err(_) => return None,
+    };
     directory
         .parent()?
         .file_name()?
@@ -908,7 +930,7 @@ fn insert_profile(
 }
 
 /// 用记录的种子重建测试配置档；原目录整体移入 `backups\profile-reset\`。
-fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), String> {
+fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), ProfileCommandError> {
     let _lock = lock_catalog(root)?;
     let catalog = read_catalog(root)?;
     let entry = catalog
@@ -916,13 +938,15 @@ fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), Str
         .cloned()
         .ok_or_else(|| format!("找不到配置档 {key}；可用 --profile-list 查看。"))?;
     if entry.kind != "test" {
-        return Err(format!(
-            "只有测试配置档可以重置，{key} 的类型是 {}。",
-            entry.kind
-        ));
+        return Err(format!("只有测试配置档可以重置，{key} 的类型是 {}。", entry.kind).into());
     }
     let seed = Seed::parse(&entry.seed)?;
     let directory = profile_dir(root, &entry.id);
+    let use_file = open_profile_use_file(&directory)?;
+    use_file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => ProfileCommandError::InUse(entry.alias.clone()),
+        std::fs::TryLockError::Error(error) => format!("无法锁定测试配置档：{error}").into(),
+    })?;
     let backup_root = root.join("backups").join("profile-reset");
     let tag = format!("{}-{}-{}", entry.id, now_ms(), new_id());
     let backup = backup_root.join(&tag);
@@ -956,7 +980,23 @@ fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), Str
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&staging);
     }
-    result.map(|backup| (entry, backup))
+    Ok((entry, result?))
+}
+
+/// 锁文件与配置档目录并列，两次目录重命名不会改变打开的锁。
+fn open_profile_use_file(directory: &Path) -> Result<std::fs::File, String> {
+    let path = directory.with_extension("window.lock");
+    let parent = path.parent().ok_or("找不到测试配置档的父目录。")?;
+    std::fs::create_dir_all(parent)
+        .and_then(|()| {
+            std::fs::File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+        })
+        .map_err(|error| format!("打开测试配置档使用锁 {} 失败：{error}", path.display()))
 }
 
 fn list_profiles(root: &Path, source: RootSource) -> Result<serde_json::Value, String> {
@@ -988,7 +1028,35 @@ fn list_profiles(root: &Path, source: RootSource) -> Result<serde_json::Value, S
     }))
 }
 
-fn run_command(root: &Path, source: RootSource, command: &Command) -> Result<String, String> {
+#[derive(Debug)]
+enum ProfileCommandError {
+    InUse(String),
+    Other(String),
+}
+
+impl From<String> for ProfileCommandError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
+impl ProfileCommandError {
+    fn response(self) -> String {
+        match self {
+            Self::InUse(alias) => rejection(
+                "profile_in_use",
+                &format!("测试配置档 {alias} 正在使用，请关闭使用该配置档的窗口后再重置。"),
+            ),
+            Self::Other(message) => rejected(&message),
+        }
+    }
+}
+
+fn run_command(
+    root: &Path,
+    source: RootSource,
+    command: &Command,
+) -> Result<String, ProfileCommandError> {
     let value = match command {
         Command::Create { alias, seed, name } => {
             let entry = create_profile(root, alias, seed, name.as_deref())?;
@@ -1017,8 +1085,12 @@ fn run_command(root: &Path, source: RootSource, command: &Command) -> Result<Str
 }
 
 fn rejected(message: &str) -> String {
+    rejection("invalid_profile_arguments", message)
+}
+
+fn rejection(code: &str, message: &str) -> String {
     serde_json::json!({"status":"rejected","error":{
-        "code":"invalid_profile_arguments","message":message,"effect_state":"not_started"
+        "code":code,"message":message,"effect_state":"not_started"
     }})
     .to_string()
 }
@@ -1101,9 +1173,14 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
     if let Some(command) = &parsed.command {
         finish_command(
             std::fs::create_dir_all(&root)
-                .map_err(|error| format!("创建数据根 {} 失败：{error}", root.display()))
+                .map_err(|error| {
+                    ProfileCommandError::Other(format!(
+                        "创建数据根 {} 失败：{error}",
+                        root.display()
+                    ))
+                })
                 .and_then(|()| run_command(&root, source, command))
-                .map_err(|error| rejected(&error)),
+                .map_err(ProfileCommandError::response),
             parsed.result_file.as_deref(),
         );
     }
@@ -1913,6 +1990,47 @@ mod tests {
         assert!(create_profile(&root, "ui", &Seed::Fixture(missing), None).is_err());
         assert!(read_catalog(&root).unwrap().profiles.is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reset_requires_all_windows_using_the_target_profile_to_close() {
+        let root = temp_root("live-reset");
+        let edited = create_profile(&root, "editing", &Seed::Empty, None).unwrap();
+        let other = create_profile(&root, "other", &Seed::Empty, None).unwrap();
+        let config = profile_dir(&root, &edited.id).join("bindings.json");
+        std::fs::write(&config, b"saved").unwrap();
+        let window = Startup::for_entry(&edited, false)
+            .hold_window_profile(&config)
+            .unwrap()
+            .unwrap();
+        let explicit = Startup::for_config(&config)
+            .hold_window_profile(&config)
+            .unwrap()
+            .unwrap();
+        assert!(Startup::daily()
+            .hold_window_profile(&root.join("bindings.json"))
+            .unwrap()
+            .is_none());
+        assert!(matches!(
+            reset_profile(&root, &edited.id),
+            Err(ProfileCommandError::InUse(_))
+        ));
+        assert!(!root.join("backups/profile-reset").exists());
+        assert!(reset_profile(&root, &other.alias).is_ok());
+        drop(window);
+        assert!(matches!(
+            reset_profile(&root, &edited.alias),
+            Err(ProfileCommandError::InUse(_))
+        ));
+        assert_eq!(std::fs::read(&config).unwrap(), b"saved");
+        drop(explicit);
+        let (_, backup) = reset_profile(&root, &edited.alias).unwrap();
+        assert_eq!(
+            std::fs::read(backup.unwrap().join("bindings.json")).unwrap(),
+            b"saved"
+        );
+        assert!(!config.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

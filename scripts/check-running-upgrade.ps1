@@ -53,11 +53,11 @@ function New-AppStart {
     return $start
 }
 
-function Close-ToTray([Diagnostics.Process]$ui, [string]$healthFile) {
+function Wait-AppWindow([Diagnostics.Process]$ui, [string]$healthFile) {
     $timer = [Diagnostics.Stopwatch]::StartNew()
     do {
         $ui.Refresh()
-        if ($ui.HasExited) { throw "安装版未能打开日常窗口，退出码 $($ui.ExitCode)。" }
+        if ($ui.HasExited) { throw "安装版未能打开窗口，退出码 $($ui.ExitCode)。" }
         $window = $ui.MainWindowHandle
         if ($window -ne [IntPtr]::Zero -and [OmniTriggerUpgradeWindow]::IsWindowVisible($window) -and
             (-not $healthFile -or (Test-Path -LiteralPath $healthFile -PathType Leaf))) { break }
@@ -67,8 +67,13 @@ function Close-ToTray([Diagnostics.Process]$ui, [string]$healthFile) {
     $null = [OmniTriggerUpgradeWindow]::GetWindowThreadProcessId($window, [ref]$owner)
     if ($owner -ne $ui.Id -or -not [OmniTriggerUpgradeWindow]::IsWindowVisible($window) -or
         ($healthFile -and -not (Test-Path -LiteralPath $healthFile -PathType Leaf))) {
-        throw '安装版窗口或预期的健康回执没有就绪，无法验证真实托盘。'
+        throw '安装版窗口或预期的健康回执没有就绪。'
     }
+    return $window
+}
+
+function Close-ToTray([Diagnostics.Process]$ui, [string]$healthFile) {
+    $window = Wait-AppWindow $ui $healthFile
     $taskbarCreated = [OmniTriggerUpgradeWindow]::RegisterWindowMessage('TaskbarCreated')
     [UIntPtr]$result = [UIntPtr]::Zero
     if ($taskbarCreated -eq 0 -or [OmniTriggerUpgradeWindow]::SendMessageTimeout(
@@ -76,7 +81,7 @@ function Close-ToTray([Diagnostics.Process]$ui, [string]$healthFile) {
         throw '测试窗口未处理任务栏重建通知。'
     }
     if (-not $ui.CloseMainWindow()) { throw '无法向日常窗口发送普通关闭请求。' }
-    $timer.Restart()
+    $timer = [Diagnostics.Stopwatch]::StartNew()
     while ([OmniTriggerUpgradeWindow]::IsWindowVisible($window) -and $timer.Elapsed.TotalSeconds -lt 10) {
         Start-Sleep -Milliseconds 100
     }
@@ -91,6 +96,31 @@ function Stop-TestProcess([Diagnostics.Process]$ui) {
         if (-not $ui.HasExited) { $ui.Kill(); $null = $ui.WaitForExit(5000) }
     } finally { $ui.Dispose() }
 }
+
+# 使用单独的数据根，验证安装版窗口确实持有测试档，正常退出后才允许重置。
+$profileRoot = Join-Path $probe.FullName 'profiles-test'
+$testStart = New-AppStart
+foreach ($arg in @('--data-root', $profileRoot, '--test-workspace')) { $testStart.ArgumentList.Add($arg) }
+$testUi = [Diagnostics.Process]::Start($testStart)
+try {
+    $null = Wait-AppWindow $testUi ''
+    $resetArgs = @('--data-root', $profileRoot, '--profile-reset', 'testing')
+    $resetError = Join-Path $probe.FullName 'reset-error.json'
+    # 重置被占用的配置档应以非零退出码和结构化错误返回。
+    $reset = New-AppStart
+    foreach ($arg in $resetArgs) { $reset.ArgumentList.Add($arg) }
+    $reset.ArgumentList.Add('--relaunch-result')
+    $reset.ArgumentList.Add($resetError)
+    $attempt = [Diagnostics.Process]::Start($reset)
+    try {
+        if (-not $attempt.WaitForExit(20000) -or $attempt.ExitCode -ne 1) { throw '测试窗口打开时未拒绝重置。' }
+    } finally { Stop-TestProcess $attempt }
+    $receipt = Get-Content -Raw -LiteralPath $resetError | ConvertFrom-Json
+    if ($receipt.ok -or ($receipt.text | ConvertFrom-Json).error.code -ne 'profile_in_use') { throw '重置错误未指出测试档正在使用。' }
+    if (-not $testUi.CloseMainWindow() -or -not $testUi.WaitForExit(20000)) { throw '测试窗口没有正常关闭。' }
+    $result = & $appFile.FullName @resetArgs | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $result.status -ne 'reset') { throw '关闭测试窗口后无法重置。' }
+} finally { Stop-TestProcess $testUi }
 
 $start = New-AppStart
 $start.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $health
