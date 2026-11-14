@@ -14,8 +14,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MARKER: &str = "legacy-upgrade-in-progress.json";
-const INDEX_LOCK: &str = "plugins.legacy-write.lock";
+pub(crate) const MARKER: &str = "legacy-upgrade-in-progress.json";
+pub(crate) const INDEX_LOCK: &str = "plugins.legacy-write.lock";
 pub(crate) struct Request {
     pub source: crate::plugin_install::LegacyInstallSource,
     pub expected_old_manifest: String,

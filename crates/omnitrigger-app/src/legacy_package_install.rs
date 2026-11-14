@@ -21,6 +21,28 @@ use std::{
 
 const EXTRACT_SCRIPT: &str = include_str!("legacy_package_install.ps1");
 const MAX_DESCRIPTOR_BYTES: u64 = 64 * 1024;
+const INSTALL_STAGE_PREFIX: &str = ".install-legacy-";
+const UPGRADE_STAGE_PREFIX: &str = ".install-legacy-upgrade-";
+
+pub(crate) fn is_legacy_stage(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    #[cfg(windows)]
+    let name = name.to_ascii_lowercase();
+    let Some(suffix) = name
+        .strip_prefix(UPGRADE_STAGE_PREFIX)
+        .or_else(|| name.strip_prefix(INSTALL_STAGE_PREFIX))
+    else {
+        return false;
+    };
+    let mut fields = suffix.split('-');
+    (0..3).all(|_| {
+        fields
+            .next()
+            .is_some_and(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+    }) && fields.next().is_none()
+}
 
 /// 普通制品描述，来自调用者；不保存另一份启用/授权/收据状态。
 #[derive(Clone, Debug, Deserialize)]
@@ -270,7 +292,7 @@ pub(super) fn install(
         .map_err(|e| fault("legacy_install_io", e.to_string()))?
         .as_nanos();
     let stage = root.join(format!(
-        ".install-legacy-{}-{stamp}-{}",
+        "{INSTALL_STAGE_PREFIX}{}-{stamp}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
@@ -349,7 +371,7 @@ pub(crate) fn stage_upgrade(
         .map_err(|e| fault("legacy_upgrade_io", e.to_string()))?
         .as_nanos();
     let stage = root.join(format!(
-        ".install-legacy-upgrade-{}-{stamp}-{}",
+        "{UPGRADE_STAGE_PREFIX}{}-{stamp}-{}",
         std::process::id(),
         NEXT_UPGRADE.fetch_add(1, Ordering::Relaxed)
     ));

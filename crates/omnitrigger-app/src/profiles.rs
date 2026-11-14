@@ -718,10 +718,12 @@ fn is_data_file(name: &str) -> bool {
 
 /// 浏览器连接器的程序路径与桥接进程属于当前安装，只在原配置的备份中保留。
 fn transferable_file(name: &str) -> bool {
-    is_data_file(name) && !name.eq_ignore_ascii_case("browser-connector.json")
+    is_data_file(name)
+        && !name.eq_ignore_ascii_case("browser-connector.json")
+        && !name.eq_ignore_ascii_case(crate::legacy_upgrade::MARKER)
 }
 
-fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+fn copy_action_tree(from: &Path, to: &Path, skip_stages: bool) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
@@ -732,7 +734,9 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
         }
         let target = to.join(entry.file_name());
         if kind.is_dir() {
-            copy_tree(&entry.path(), &target)?;
+            if !skip_stages || !crate::plugin_install::is_legacy_stage(&entry.file_name()) {
+                copy_action_tree(&entry.path(), &target, false)?;
+            }
         } else if kind.is_file() {
             std::fs::copy(entry.path(), target)?;
         }
@@ -740,8 +744,15 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DataCopy {
+    Backup,
+    Profile,
+    FixtureOrImport,
+}
+
 /// 复制配置档的顶层数据、托管动作包与 RaiShot 自定义动作清单。
-fn copy_data(from: &Path, to: &Path, include_file: impl Fn(&str) -> bool) -> Result<usize, String> {
+fn copy_data(from: &Path, to: &Path, mode: DataCopy) -> Result<usize, String> {
     let fail = |error: std::io::Error| {
         format!(
             "从 {} 复制数据到 {} 失败：{error}",
@@ -766,7 +777,14 @@ fn copy_data(from: &Path, to: &Path, include_file: impl Fn(&str) -> bool) -> Res
         if kind.is_file()
             && crate::local_files::is_plain(&kind)
             && !crate::local_files::is_cloud_path(&entry.path())
-            && include_file(&name.to_string_lossy())
+            && match mode {
+                DataCopy::Backup => is_data_file(&name.to_string_lossy()),
+                DataCopy::FixtureOrImport => transferable_file(&name.to_string_lossy()),
+                DataCopy::Profile => {
+                    transferable_file(&name.to_string_lossy())
+                        && !name.eq_ignore_ascii_case(crate::clipboard_history_store::FILE_NAME)
+                }
+            }
         {
             std::fs::copy(entry.path(), to.join(name)).map_err(fail)?;
             copied += 1;
@@ -776,7 +794,8 @@ fn copy_data(from: &Path, to: &Path, include_file: impl Fn(&str) -> bool) -> Res
     let actions = from.join("actions");
     match actions.symlink_metadata() {
         Ok(metadata) if metadata.is_dir() && crate::local_files::is_plain(&metadata) => {
-            copy_tree(&actions, &to.join("actions")).map_err(fail)?
+            copy_action_tree(&actions, &to.join("actions"), mode != DataCopy::Backup)
+                .map_err(fail)?
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -817,7 +836,12 @@ fn data_modified_ms(directory: &Path) -> Option<u64> {
                 } else {
                     name == "actions"
                 };
-                if (!top || actions) && !crate::local_files::is_cloud_path(Path::new(&name)) {
+                let install_stage = path.parent() == Some(directory)
+                    && crate::plugin_install::is_legacy_stage(&name);
+                if (!top || actions)
+                    && !install_stage
+                    && !crate::local_files::is_cloud_path(Path::new(&name))
+                {
                     directories.push(entry.path());
                 }
             } else if metadata.is_file() && (!top || transferable_file(&name.to_string_lossy())) {
@@ -851,14 +875,44 @@ fn seed_into(root: &Path, catalog: &Catalog, seed: &Seed, target: &Path) -> Resu
             if !path.is_dir() {
                 return Err(format!("夹具目录 {} 不存在。", path.display()));
             }
-            copy_data(path, target, transferable_file).map(drop)
+            copy_transferable_data(path, target, DataCopy::FixtureOrImport)
         }
-        Seed::Copy(key) => copy_data(&source_dir(root, catalog, key)?, target, |name| {
-            transferable_file(name)
-                && !name.eq_ignore_ascii_case(crate::clipboard_history_store::FILE_NAME)
-        })
-        .map(drop),
+        Seed::Copy(key) => {
+            copy_transferable_data(&source_dir(root, catalog, key)?, target, DataCopy::Profile)
+        }
     }
+}
+
+/// 只读取来源，夹具可以位于只读目录。既有索引锁和升级写入互斥；
+/// 首次升级还没有锁文件，则在复制结束时检测它是否刚刚创建。
+fn copy_transferable_data(from: &Path, to: &Path, mode: DataCopy) -> Result<(), String> {
+    let config = from.join("bindings.json");
+    let lock_path = from.join(crate::legacy_upgrade::INDEX_LOCK);
+    crate::script_runtime::check_local_path(&lock_path)?;
+    let mut options = std::fs::File::options();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(1);
+    }
+    let source_lock = match options.open(&lock_path) {
+        Ok(file) => Some(file),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(format!(
+                "无法读取来源插件索引锁 {}。{e}",
+                lock_path.display()
+            ))
+        }
+    };
+    crate::legacy_upgrade::block_config(&config)
+        .map_err(|e| format!("无法复制 {}。{}", from.display(), e.message))?;
+    copy_data(from, to, mode)?;
+    if source_lock.is_none() && lock_path.try_exists().map_err(|e| e.to_string())? {
+        return Err("来源插件在复制期间发生写入，请稍后重试。".into());
+    }
+    Ok(())
 }
 
 fn create_profile(
@@ -1880,9 +1934,9 @@ mod tests {
         assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
 
         let restore = root.join("before-import");
-        copy_data(&copied, &restore, is_data_file).unwrap();
+        copy_data(&copied, &restore, DataCopy::Backup).unwrap();
         std::fs::write(copied.join(RAISHOT_MANIFEST_PATH), "before restore").unwrap();
-        copy_data(&restore, &copied, is_data_file).unwrap();
+        copy_data(&restore, &copied, DataCopy::Backup).unwrap();
         assert_eq!(catalogue().len(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1919,12 +1973,12 @@ mod tests {
             std::fs::write(existing.join("action.json"), "original").unwrap();
             let backup = root.join("backups/before-import");
             let catalog = std::fs::read(catalog_path(&root)).unwrap();
-            copy_data(&root, &backup, is_data_file).unwrap();
-            copy_data(&fixture, &root, is_data_file).unwrap();
+            copy_data(&root, &backup, DataCopy::Backup).unwrap();
+            copy_data(&fixture, &root, DataCopy::FixtureOrImport).unwrap();
             assert_eq!(std::fs::read(catalog_path(&root)).unwrap(), catalog);
             assert_eq!(std::fs::read(root.join(package)).unwrap(), b"source");
             assert_eq!(std::fs::read(backup.join(package)).unwrap(), b"original");
-            copy_data(&backup, &root, is_data_file).unwrap();
+            copy_data(&backup, &root, DataCopy::Backup).unwrap();
             assert_eq!(std::fs::read(root.join(package)).unwrap(), b"original");
         }
         std::fs::remove_dir_all(root).unwrap();
@@ -1977,12 +2031,90 @@ mod tests {
             );
         }
         let backup = root.join("full-backup");
-        copy_data(&root, &backup, is_data_file).unwrap();
+        copy_data(&root, &backup, DataCopy::Backup).unwrap();
         assert_eq!(
             std::fs::read(backup.join(registration)).unwrap(),
             b"source installation"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copies_skip_install_stages_and_retry_after_source_upgrade() {
+        use crate::legacy_upgrade::{INDEX_LOCK, MARKER};
+        use std::fs;
+        let root = temp_root("upgrade-copy");
+        let source = root.join("fixture");
+        let actions = source.join("Actions");
+        #[cfg(not(windows))]
+        let actions = source.join("actions");
+        for path in [
+            ".install-legacy-17-23-0",
+            ".install-legacy-upgrade-17-23-1",
+            ".install-legacy-custom",
+            "work/.install-legacy-upgrade-17-23-1",
+        ] {
+            fs::create_dir_all(actions.join(path)).unwrap();
+            fs::write(actions.join(path).join("notes"), path).unwrap();
+        }
+        let stamp = data_modified_ms(&source).unwrap();
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(actions.join(".install-legacy-upgrade-17-23-1/notes"))
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+        assert_eq!(data_modified_ms(&source), Some(stamp));
+        let seed = Seed::Fixture(source.clone());
+        let target = create_profile(&root, "child", &seed, None).unwrap();
+        let child = profile_dir(&root, &target.id);
+        for path in [".install-legacy-17-23-0", ".install-legacy-upgrade-17-23-1"] {
+            assert!(!child.join("actions").join(path).exists());
+        }
+        assert!(child.join("actions/.install-legacy-custom/notes").is_file());
+        assert!(child
+            .join("actions/work/.install-legacy-upgrade-17-23-1/notes")
+            .is_file());
+        assert!(!source.join(INDEX_LOCK).exists());
+        fs::write(child.join("bindings.json"), "test edits").unwrap();
+        // 旧版曾把来源的升级标记和暂存文件带进子档；显式重置应完整保留这份旧档。
+        let carried_stage = "actions/.install-legacy-upgrade-17-23-1/plugins.before.json";
+        fs::create_dir_all(child.join(carried_stage).parent().unwrap()).unwrap();
+        fs::write(child.join(carried_stage), "copied state").unwrap();
+        fs::write(child.join(MARKER), "copied marker").unwrap();
+        fs::write(source.join(MARKER), "source pending").unwrap();
+        assert!(create_profile(&root, "new", &seed, None).is_err());
+        assert!(
+            create_profile(&source, "from-daily", &Seed::Copy(DEFAULT_ID.into()), None).is_err()
+        );
+        assert!(reset_profile(&root, "child").is_err());
+        assert_eq!(
+            fs::read(child.join("bindings.json")).unwrap(),
+            b"test edits"
+        );
+        assert_eq!(fs::read(source.join(MARKER)).unwrap(), b"source pending");
+        fs::remove_file(source.join(MARKER)).unwrap();
+        #[cfg(windows)]
+        {
+            let lock =
+                crate::legacy_upgrade::IndexGuard::acquire(&source.join("bindings.json")).unwrap();
+            assert!(reset_profile(&root, "child").is_err());
+            drop(lock);
+        }
+        let backup = reset_profile(&root, "child").unwrap().1.unwrap();
+        assert_eq!(
+            fs::read(backup.join("bindings.json")).unwrap(),
+            b"test edits"
+        );
+        assert_eq!(fs::read(backup.join(MARKER)).unwrap(), b"copied marker");
+        assert_eq!(
+            fs::read(backup.join(carried_stage)).unwrap(),
+            b"copied state"
+        );
+        assert!(!child.join(MARKER).exists());
+        assert!(!child.join(carried_stage).exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

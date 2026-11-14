@@ -4,8 +4,8 @@ mod discovery;
 #[path = "legacy_package_install.rs"]
 mod legacy_package_install;
 pub(crate) use legacy_package_install::{
-    read_descriptor as read_legacy_install_source, stage_upgrade as stage_legacy_upgrade,
-    LegacyInstallSource,
+    is_legacy_stage, read_descriptor as read_legacy_install_source,
+    stage_upgrade as stage_legacy_upgrade, LegacyInstallSource,
 };
 
 use serde::Deserialize;

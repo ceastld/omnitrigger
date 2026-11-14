@@ -1,6 +1,7 @@
 //! 日常配置导入。先读取整份副本，逐个替换文件；中断后用原文件收尾。
 use super::{
-    copy_data, is_data_file, lock_catalog, new_id, now_ms, transferable_file, RAISHOT_MANIFEST_PATH,
+    copy_data, copy_transferable_data, is_data_file, lock_catalog, new_id, now_ms, DataCopy,
+    RAISHOT_MANIFEST_PATH,
 };
 use crate::local_files::{is_cloud_path, is_plain, is_plain_directory};
 use serde::{Deserialize, Serialize};
@@ -271,17 +272,26 @@ pub(crate) fn recover(root: &Path) -> Result<(), String> {
     let pending = backups.join(PENDING);
     if metadata(&pending).map_err(|e| e.to_string())?.is_some() {
         let _lock = lock_catalog(root)?;
+        let _index = crate::legacy_upgrade::IndexGuard::acquire(&root.join("bindings.json"))
+            .map_err(|e| e.message)?;
         recover_locked(root, &pending).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
 
 pub(super) fn import(root: &Path, source: &Path) -> Result<(), String> {
+    if !is_plain_directory(source) || !is_plain_directory(root) {
+        return Err("导入需要普通本机配置目录。".into());
+    }
     let _lock = lock_catalog(root)?;
+    let config = root.join("bindings.json");
+    let _index = crate::legacy_upgrade::IndexGuard::acquire(&config).map_err(|e| e.message)?;
     let backups = root.join("backups");
     ensure_directory(&backups).map_err(|e| e.to_string())?;
     let pending = backups.join(PENDING);
     recover_locked(root, &pending).map_err(|e| e.to_string())?;
+    crate::legacy_upgrade::block_config(&config)
+        .map_err(|e| format!("无法导入当前配置。{}", e.message))?;
     let backup = format!("before-import-{}-{}", now_ms(), new_id());
     let backup_dir = backups.join(&backup);
     let mut plan = Plan {
@@ -289,16 +299,14 @@ pub(super) fn import(root: &Path, source: &Path) -> Result<(), String> {
         files: Vec::new(),
         directories: Vec::new(),
     };
-    if !is_plain_directory(source) || !is_plain_directory(root) {
-        return Err("导入需要普通本机配置目录。".into());
-    }
     fs::create_dir(&pending).map_err(|e| e.to_string())?;
     let staged = pending.join("incoming");
     let result = (|| -> io::Result<()> {
         let snapshot = pending.join("backup");
-        copy_data(root, &snapshot, is_data_file).map_err(io::Error::other)?;
+        copy_data(root, &snapshot, DataCopy::Backup).map_err(io::Error::other)?;
         fs::rename(&snapshot, &backup_dir)?;
-        copy_data(source, &staged, transferable_file).map_err(io::Error::other)?;
+        copy_transferable_data(source, &staged, DataCopy::FixtureOrImport)
+            .map_err(io::Error::other)?;
         collect(&staged, root, Path::new(""), &mut plan)?;
         validate(&plan)?;
         let directories = pending.join("directories");
@@ -414,6 +422,33 @@ mod tests {
             );
             assert!(!root.join("backups").join(PENDING).exists());
         }
+    }
+
+    #[test]
+    fn import_keeps_upgrade_state_local_and_waits_for_the_plugin_writer() {
+        use crate::legacy_upgrade::{IndexGuard, MARKER};
+        let fixture = Fixture::new();
+        let root = fixture.0.join("daily");
+        let source = fixture.0.join("other");
+        let staging = "actions/.install-legacy-upgrade-12-23-0/plugins.before.json";
+        write(&root, "bindings.json", "old");
+        write(&source, "bindings.json", "new");
+        write(&source, staging, "source stage");
+        for dir in [&root, &source] {
+            write(dir, MARKER, "pending");
+            assert!(import(&root, &source).is_err());
+            assert_eq!(fs::read(root.join("bindings.json")).unwrap(), b"old");
+            assert_eq!(fs::read(dir.join(MARKER)).unwrap(), b"pending");
+            fs::remove_file(dir.join(MARKER)).unwrap();
+            let lock = IndexGuard::acquire(&dir.join("bindings.json")).unwrap();
+            assert!(import(&root, &source).is_err());
+            assert_eq!(fs::read(root.join("bindings.json")).unwrap(), b"old");
+            drop(lock);
+        }
+        import(&root, &source).unwrap();
+        assert_eq!(fs::read(root.join("bindings.json")).unwrap(), b"new");
+        assert!(!root.join(staging).exists());
+        assert_eq!(fs::read(source.join(staging)).unwrap(), b"source stage");
     }
 
     #[test]
