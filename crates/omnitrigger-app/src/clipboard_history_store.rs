@@ -458,6 +458,12 @@ impl ClipboardHistoryStore {
         Ok(Self { path })
     }
 
+    /// 外部导入修改原始文件时，与历史窗口和动作包使用同一把锁。
+    #[cfg(windows)]
+    pub(crate) fn hold_for_import(&self) -> Result<File> {
+        self.lease().map(|lease| lease.file)
+    }
+
     fn lock_path(&self) -> Result<PathBuf> {
         let mut name = self
             .path

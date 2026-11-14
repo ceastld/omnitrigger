@@ -3,6 +3,7 @@ use super::{
     copy_data, copy_transferable_data, is_data_file, lock_catalog, new_id, now_ms, DataCopy,
     RAISHOT_MANIFEST_PATH,
 };
+use crate::clipboard_history_store::{ClipboardHistoryStore, FILE_NAME as HISTORY_FILE};
 use crate::local_files::{is_cloud_path, is_plain, is_plain_directory};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -235,6 +236,13 @@ fn finish(pending: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn hold_history(root: &Path) -> io::Result<fs::File> {
+    let path = root.join(HISTORY_FILE);
+    ClipboardHistoryStore::new(path)
+        .and_then(|store| store.hold_for_import())
+        .map_err(|e| io::Error::other(e.message))
+}
+
 fn recover_locked(root: &Path, pending: &Path) -> io::Result<()> {
     if metadata(pending)?.is_none() {
         return Ok(());
@@ -251,6 +259,12 @@ fn recover_locked(root: &Path, pending: &Path) -> io::Result<()> {
         if !plan.directories.is_empty() && !is_plain_directory(&pending.join("directories")) {
             return Err(invalid(&pending.join("directories")));
         }
+        let _history = plan
+            .files
+            .iter()
+            .any(|file| file.path.as_os_str().eq_ignore_ascii_case(HISTORY_FILE))
+            .then(|| hold_history(root))
+            .transpose()?;
         rollback(root, pending, &plan).map_err(|e| {
             io::Error::other(format!(
                 "恢复导入前的数据失败：{e}。备份位于 {}",
@@ -302,11 +316,22 @@ pub(super) fn import(root: &Path, source: &Path) -> Result<(), String> {
     fs::create_dir(&pending).map_err(|e| e.to_string())?;
     let staged = pending.join("incoming");
     let result = (|| -> io::Result<()> {
+        // 在备份之前取得历史锁，直至最后一个文件就位；旧记录与备份属于同一时刻。
+        let history_path = source.join(HISTORY_FILE);
+        let source_has_history = match history_path.symlink_metadata() {
+            Ok(meta) => meta.is_file() && is_plain(&meta) && !is_cloud_path(&history_path),
+            Err(error) if error.kind() == ErrorKind::NotFound => false,
+            Err(error) => return Err(error),
+        };
+        let history_guard = source_has_history.then(|| hold_history(root)).transpose()?;
         let snapshot = pending.join("backup");
         copy_data(root, &snapshot, DataCopy::Backup).map_err(io::Error::other)?;
         fs::rename(&snapshot, &backup_dir)?;
         copy_transferable_data(source, &staged, DataCopy::FixtureOrImport)
             .map_err(io::Error::other)?;
+        if history_guard.is_none() && metadata(&staged.join(HISTORY_FILE))?.is_some() {
+            return Err(io::Error::other("备份期间来源新增了文本历史，请重新导入。"));
+        }
         collect(&staged, root, Path::new(""), &mut plan)?;
         validate(&plan)?;
         let directories = pending.join("directories");
@@ -355,6 +380,90 @@ mod tests {
         let path = root.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, value).unwrap();
+    }
+
+    #[test]
+    fn clipboard_history_import_respects_the_writer_and_preserves_the_completed_backup() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("daily");
+        let source = fixture.0.join("incoming");
+        write(&root, "wheels.json", "old");
+        write(&source, "wheels.json", "new");
+        let daily = ClipboardHistoryStore::new(root.join(HISTORY_FILE)).unwrap();
+        let incoming = ClipboardHistoryStore::new(source.join(HISTORY_FILE)).unwrap();
+        daily.append_at("daily record", 1, || Ok(())).unwrap();
+        incoming.append_at("imported record", 2, || Ok(())).unwrap();
+        let mut attempted = None;
+        let mut checks = 0;
+        daily
+            .append_at("copy in progress", 3, || {
+                checks += 1;
+                if checks == 3 {
+                    attempted = Some(import(&root, &source));
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(attempted.unwrap().unwrap_err().contains("历史存储正在使用"));
+        assert_eq!(fs::read(root.join("wheels.json")).unwrap(), b"old");
+        let completed = fs::read(root.join(HISTORY_FILE)).unwrap();
+        import(&root, &source).unwrap();
+        assert_eq!(fs::read(root.join("wheels.json")).unwrap(), b"new");
+        assert_eq!(
+            fs::read(root.join(HISTORY_FILE)).unwrap(),
+            fs::read(source.join(HISTORY_FILE)).unwrap()
+        );
+        let snapshots = fs::read_dir(root.join("backups"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            fs::read(snapshots[0].join(HISTORY_FILE)).unwrap(),
+            completed
+        );
+        assert_eq!(daily.list(10, || Ok(())).unwrap().items.len(), 1);
+
+        fs::remove_file(source.join(HISTORY_FILE)).unwrap();
+        write(&source, "wheels.json", "layout only");
+        let guard = daily.hold_for_import().unwrap();
+        import(&root, &source).unwrap();
+        drop(guard);
+        assert_eq!(fs::read(root.join("wheels.json")).unwrap(), b"layout only");
+        assert_eq!(daily.get("1", || Ok(())).unwrap().text, "imported record");
+    }
+
+    #[test]
+    fn interrupted_history_import_waits_for_store_and_recovers_original() {
+        let fixture = Fixture::new();
+        let root = &fixture.0;
+        let pending = root.join("backups").join(PENDING);
+        let staged = pending.join("incoming");
+        write(root, HISTORY_FILE, "old history");
+        write(&staged, HISTORY_FILE, "imported history");
+        let mut plan = Plan {
+            backup: "before-import-fixture".into(),
+            files: Vec::new(),
+            directories: Vec::new(),
+        };
+        collect(&staged, root, Path::new(""), &mut plan).unwrap();
+        fs::write(pending.join(PLAN), serde_json::to_vec(&plan).unwrap()).unwrap();
+        let originals = pending.join("originals");
+        fs::create_dir(&originals).unwrap();
+        move_new(&root.join(HISTORY_FILE), &originals.join(HISTORY_FILE)).unwrap();
+        move_new(&staged.join(HISTORY_FILE), &root.join(HISTORY_FILE)).unwrap();
+        let store = ClipboardHistoryStore::new(root.join(HISTORY_FILE)).unwrap();
+        let writer = store.hold_for_import().unwrap();
+        assert!(recover(root).is_err());
+        assert_eq!(
+            fs::read(root.join(HISTORY_FILE)).unwrap(),
+            b"imported history"
+        );
+        assert!(pending.join(PLAN).is_file());
+        drop(writer);
+        recover(root).unwrap();
+        assert_eq!(fs::read(root.join(HISTORY_FILE)).unwrap(), b"old history");
+        assert!(!pending.exists());
     }
 
     #[test]
