@@ -169,6 +169,34 @@ foreach ($case in '文件占用', '解除占用', '同一副本', '副本有新�
 }
 Write-Host '已验证忽略选择在文件占用后可保存，重复启动跳过旧副本，副本更新后重新提示。'
 
+# 用户选择导入后，编辑器占用应直接进入日常窗口。释放后重新启动可正常导入。
+$importDaily = Join-Path $daily 'bindings.json'
+[IO.File]::WriteAllText($sourceFile, '{"version":1, "bindings":[]}')
+[IO.File]::SetLastWriteTimeUtc($sourceFile, [DateTime]::UtcNow.AddHours(4))
+$originalHash = (Get-FileHash -LiteralPath $importDaily).Hash
+$sourceHash = (Get-FileHash -LiteralPath $sourceFile).Hash
+foreach ($busy in @($true, $false)) {
+    $writer = $null
+    try {
+        if ($busy) {
+            $writer = [IO.File]::Open((Join-Path $daily 'wheels.json.lock'), 'OpenOrCreate', 'ReadWrite', 'ReadWrite')
+            $writer.Lock(0, 1)
+        }
+        $ui = [Diagnostics.Process]::Start($ignoreStart)
+        try {
+            $prompt = Wait-AppWindow $ui '' 'OmniTrigger 发现外部数据副本'
+            if ([OmniTriggerUpgradeWindow]::GetDlgItem($prompt, 6) -eq [IntPtr]::Zero -or
+                -not [OmniTriggerUpgradeWindow]::PostMessage($prompt, 0x0111, [UIntPtr]6, [IntPtr]::Zero)) {
+                throw '未能在外部副本提示中选择导入。'
+            }
+            $null = Wait-AppWindow $ui '' 'OmniTrigger'
+            $expectedConfigHash = if ($busy) { $originalHash } else { $sourceHash }
+            if ((Get-FileHash -LiteralPath $importDaily).Hash -ne $expectedConfigHash) { throw '日常配置与导入结果不符。' }
+        } finally { Stop-TestProcess $ui }
+    } finally { if ($writer) { $writer.Dispose() } }
+}
+Write-Host '已验证配置被编辑器占用时直接打开日常窗口，释放后可重新导入。'
+
 # 使用单独的数据根，验证安装版窗口确实持有测试档，正常退出后才允许重置。
 $profileRoot = Join-Path $probe.FullName 'profiles-test'
 $testStart = New-AppStart

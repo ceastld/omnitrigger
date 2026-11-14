@@ -1728,14 +1728,7 @@ fn offer_external_copy(
         root.display(),
     );
     match omnitrigger_windows::ask_yes_no_cancel("OmniTrigger 发现外部数据副本", &text) {
-        Some(true) => {
-            if let Err(error) = external_import::import(root, &directory) {
-                // 收尾受阻时保留恢复记录，避免主窗口载入并保存尚未恢复的配置。
-                external_import::recover(root)
-                    .map_err(|recovery| format!("{error}\n{recovery}"))?;
-                omnitrigger_windows::show_error_dialog("OmniTrigger 导入失败", &error);
-            }
-        }
+        Some(true) => return import_for_startup(root, &directory),
         Some(false) => {
             let choice = IgnoreCopy {
                 root: root.to_owned(),
@@ -1752,6 +1745,21 @@ fn offer_external_copy(
         None => {}
     }
     Ok(None)
+}
+
+#[cfg(windows)]
+fn import_for_startup(root: &Path, directory: &Path) -> Result<Option<ExternalCopyNotice>, String> {
+    match external_import::import(root, directory) {
+        Ok(()) => Ok(None),
+        Err(error) => {
+            // 允许主窗口打开前，确认之前的日常数据已完整恢复。
+            external_import::recover(root).map_err(|recovery| format!("{error}\n{recovery}"))?;
+            Ok(Some(ExternalCopyNotice {
+                message: format!("未导入外部副本。{error}"),
+                retry: None,
+            }))
+        }
+    }
 }
 
 #[cfg(test)]
