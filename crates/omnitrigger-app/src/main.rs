@@ -8584,7 +8584,7 @@ fn main() {
         std::process::exit(code);
     }
     // 配置档参数先于其他入口取出：确定数据根、处理打包重定向，配置档命令在此退出。
-    let profile_startup = profiles::startup(&mut arguments);
+    let (profile_startup, _profile_in_use) = profiles::startup(&mut arguments);
     if let Some(result) = legacy_local_source::cli(&arguments) {
         match result {
             Ok(message) => println!("{message}"),
@@ -8866,13 +8866,6 @@ fn main() {
             }
         }
     }
-    let _profile_in_use = match profile_startup.hold_window_profile(&config_path) {
-        Ok(file) => file,
-        Err(error) => {
-            omnitrigger_windows::show_error_dialog("OmniTrigger 无法打开配置窗口", &error);
-            return;
-        }
-    };
     let shared_workspace = arguments.iter().skip(1).all(|arg| arg == "--settings")
         || ((config_main || config_settings)
             && config_path

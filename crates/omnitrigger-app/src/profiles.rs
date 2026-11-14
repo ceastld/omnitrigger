@@ -12,8 +12,13 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
 mod external_import;
+mod reset_recovery;
+#[cfg(windows)]
+use external_import::move_new;
 #[cfg(windows)]
 pub(super) use external_import::recover as recover_external_import;
+#[cfg(not(windows))]
+use std::fs::rename as move_new;
 
 const CATALOG_VERSION: u32 = 1;
 const DEFAULT_ID: &str = "default";
@@ -91,17 +96,42 @@ impl Startup {
         }
     }
 
-    /// 测试窗口加载数据前取得共享锁，直到退出。普通窗口、设置及历史入口共用此规则。
-    pub fn hold_window_profile(&self, config: &Path) -> Result<Option<std::fs::File>, String> {
+    /// 窗口与命令在访问测试档前共同取得共享锁，直到本次使用结束。
+    fn hold_profile(&self, config: &Path) -> Result<Option<std::fs::File>, String> {
         if !self.test_data {
             return Ok(None);
         }
         let directory = profile_directory(config)
             .ok_or_else(|| format!("无法定位测试配置目录：{}", config.display()))?;
-        let file = open_profile_use_file(&directory)?;
-        file.lock_shared()
-            .map_err(|error| format!("无法打开正在重置的测试配置档：{error}"))?;
-        Ok(Some(file))
+        reset_recovery::hold_for_use(&directory).map(Some)
+    }
+
+    fn prepare_access(
+        &self,
+        config: &Path,
+        check_only: bool,
+    ) -> Result<Option<std::fs::File>, String> {
+        if !check_only || !self.test_data {
+            return self.hold_profile(config);
+        }
+        let directory = profile_directory(config).ok_or("无法定位待检查的测试档目录。")?;
+        let path = directory.with_extension("window.lock");
+        let guard = match std::fs::File::open(&path) {
+            Ok(file) => {
+                file.lock_shared()
+                    .map_err(|error| format!("无法锁定待检查的测试档：{error}"))?;
+                Some(file)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("无法读取 {}：{error}", path.display())),
+        };
+        if !directory.is_dir() {
+            return Err(format!(
+                "测试档目录缺失，无法校验配置。请先打开该配置档以恢复中断的重置：{}",
+                directory.display()
+            ));
+        }
+        Ok(guard)
     }
 }
 
@@ -861,10 +891,20 @@ fn source_dir(root: &Path, catalog: &Catalog, key: &str) -> Result<PathBuf, Stri
     if key == DEFAULT_ID {
         return Ok(root.to_path_buf());
     }
-    catalog
+    let entry = catalog
         .source_profile(key)
-        .map(|entry| profile_dir(root, &entry.id))
-        .ok_or_else(|| format!("找不到配置档 {key}；可用 --profile-list 查看。"))
+        .ok_or_else(|| format!("找不到配置档 {key}；可用 --profile-list 查看。"))?;
+    let dir = profile_dir(root, &entry.id);
+    if !dir.try_exists().map_err(|e| e.to_string())? && entry.is_test_at(&dir) {
+        // 调用者持有总登记锁，此时其他重置及启动恢复都不会进入目录交换。
+        let file = open_profile_use_file(&dir)?;
+        file.try_lock()
+            .map_err(|e| format!("待恢复的来源档 {key} 正在使用：{e}"))?;
+        if !reset_recovery::restore_missing(&dir, entry)? {
+            return Err(format!("来源配置档 {key} 的目录缺失：{}", dir.display()));
+        }
+    }
+    Ok(dir)
 }
 
 fn seed_into(root: &Path, catalog: &Catalog, seed: &Seed, target: &Path) -> Result<(), String> {
@@ -1062,6 +1102,7 @@ fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), Pro
         std::fs::TryLockError::WouldBlock => ProfileCommandError::InUse(entry.alias.clone()),
         std::fs::TryLockError::Error(error) => format!("无法锁定测试配置档：{error}").into(),
     })?;
+    reset_recovery::restore_missing(&directory, &entry)?;
     let backup_root = root.join("backups").join("profile-reset");
     let tag = format!("{}-{}-{}", entry.id, now_ms(), new_id());
     let backup = backup_root.join(&tag);
@@ -1074,14 +1115,14 @@ fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), Pro
         seed_into(root, &catalog, &seed, &staging)?;
         write_json(&staging.join("profile.json"), &entry)?;
         std::fs::create_dir_all(root.join("profiles")).map_err(|error| error.to_string())?;
-        let backed_up = match std::fs::rename(&directory, &backup) {
+        let backed_up = match move_new(&directory, &backup) {
             Ok(()) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(format!("备份 {} 失败：{error}", directory.display())),
         };
-        if let Err(error) = std::fs::rename(&staging, &directory) {
+        if let Err(error) = move_new(&staging, &directory) {
             if backed_up {
-                std::fs::rename(&backup, &directory).map_err(|restore| {
+                move_new(&backup, &directory).map_err(|restore| {
                     format!(
                         "重置失败：{error}；恢复原配置失败：{restore}。原配置位于 {}",
                         backup.display()
@@ -1090,12 +1131,12 @@ fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), Pro
             }
             return Err(format!("替换 {} 失败：{error}", directory.display()));
         }
-        Ok(backed_up.then_some(backup))
+        Ok(backed_up)
     })();
-    if result.is_err() {
+    if result.is_err() && matches!(backup.try_exists(), Ok(false)) {
         let _ = std::fs::remove_dir_all(&staging);
     }
-    Ok((entry, result?))
+    Ok((entry, result?.then_some(backup)))
 }
 
 /// 锁文件与配置档目录并列，两次目录重命名不会改变打开的锁。
@@ -1160,7 +1201,7 @@ impl ProfileCommandError {
         match self {
             Self::InUse(alias) => rejection(
                 "profile_in_use",
-                &format!("测试配置档 {alias} 正在使用，请关闭使用该配置档的窗口后再重置。"),
+                &format!("测试配置档 {alias} 正在使用，请关闭该档窗口或等待正在使用它的命令结束，再重置。"),
             ),
             Self::Other(message) => rejected(&message),
         }
@@ -1236,9 +1277,10 @@ fn finish_command(result: Result<String, String>, result_file: Option<&str>) -> 
 }
 
 /// 解析配置档参数并设置配置路径。配置档命令、脱离重定向的重启在此直接退出进程。
-pub fn startup(arguments: &mut Vec<String>) -> Startup {
+pub fn startup(arguments: &mut Vec<String>) -> (Startup, Option<std::fs::File>) {
     let original = arguments.clone();
     let parsed = take_arguments(arguments).unwrap_or_else(|message| exit_rejected(&message));
+    let check_only = arguments.iter().any(|arg| arg == "--check-config");
     let config_index = arguments.iter().position(|argument| argument == "--config");
     if let Some(index) = config_index {
         if parsed.any() {
@@ -1246,10 +1288,17 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
                 "--config 是临时配置路径，不能与 --data-root、--profile 或配置档命令同用。",
             );
         }
-        return arguments
+        let Some(path) = arguments
             .get(index + 1)
             .filter(|path| !path.starts_with("--"))
-            .map_or_else(Startup::daily, |path| Startup::for_config(Path::new(path)));
+        else {
+            return (Startup::daily(), None);
+        };
+        let setup = Startup::for_config(Path::new(path));
+        let guard = setup
+            .prepare_access(Path::new(path), check_only)
+            .unwrap_or_else(|error| exit_rejected(&error));
+        return (setup, guard);
     }
     let plain = arguments.len() == 1;
     if parsed.command.is_some() && !plain {
@@ -1261,11 +1310,11 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
     let env_root = std::env::var_os("OMNITRIGGER_HOME").filter(|root| !root.is_empty());
     if !parsed.any() && !interactive && !check_config && env_root.is_none() {
         // 未指定数据根的其他命令无需探测桌面或预先设置路径。
-        return Startup::daily();
+        return (Startup::daily(), None);
     }
     let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     if check_config && !parsed.any() && env_root.is_none() && local_app_data.is_none() {
-        return Startup::daily(); // 沿用 settings::path() 的临时目录回退。
+        return (Startup::daily(), None); // 沿用 settings::path() 的临时目录回退。
     }
     let (root, source) = resolve_root(
         parsed.data_root.as_deref(),
@@ -1273,6 +1322,15 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
         local_app_data.clone(),
     )
     .unwrap_or_else(|message| exit_rejected(&message));
+    let mut data_root_guard = None;
+    if source != RootSource::Default {
+        let config = root.join("bindings.json");
+        data_root_guard = Startup::for_config(&config)
+            .prepare_access(&config, check_only)
+            .unwrap_or_else(|error| {
+                finish_command(Err(rejected(&error)), parsed.result_file.as_deref())
+            });
+    }
     if plain || interactive || check_config {
         #[cfg(windows)]
         escape_redirect(
@@ -1336,6 +1394,21 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
         }
     };
     if let Some(config) = config {
+        if data_root_guard.is_none() {
+            data_root_guard =
+                startup
+                    .prepare_access(&config, check_only)
+                    .unwrap_or_else(|message| {
+                        #[cfg(windows)]
+                        if interactive {
+                            omnitrigger_windows::show_error_dialog(
+                                "OmniTrigger 无法打开配置档",
+                                &message,
+                            );
+                        }
+                        finish_command(Err(rejected(&message)), parsed.result_file.as_deref())
+                    });
+        }
         if let Err(message) = crate::settings::use_path(config) {
             finish_command(Err(rejected(&message)), parsed.result_file.as_deref());
         }
@@ -1343,7 +1416,7 @@ pub fn startup(arguments: &mut Vec<String>) -> Startup {
     if check_config {
         finish_command(crate::check_config(), parsed.result_file.as_deref());
     }
-    startup
+    (startup, data_root_guard)
 }
 
 #[cfg(windows)]
@@ -1686,7 +1759,7 @@ mod tests {
             .collect()
     }
 
-    fn temp_root(tag: &str) -> PathBuf {
+    pub(super) fn temp_root(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("omnitrigger-profiles-{tag}-{}", new_id()));
         std::fs::create_dir_all(&root).unwrap();
         root
@@ -2269,15 +2342,15 @@ mod tests {
         let config = profile_dir(&root, &edited.id).join("bindings.json");
         std::fs::write(&config, b"saved").unwrap();
         let window = Startup::for_entry(&edited, false)
-            .hold_window_profile(&config)
+            .hold_profile(&config)
             .unwrap()
             .unwrap();
         let explicit = Startup::for_config(&config)
-            .hold_window_profile(&config)
+            .hold_profile(&config)
             .unwrap()
             .unwrap();
         assert!(Startup::daily()
-            .hold_window_profile(&root.join("bindings.json"))
+            .hold_profile(&root.join("bindings.json"))
             .unwrap()
             .is_none());
         assert!(matches!(
@@ -2645,7 +2718,9 @@ mod tests {
         assert!(!config.exists());
         let mut arguments = args(&["--config", config.to_str().unwrap(), "--settings"]);
         let original = arguments.clone();
-        let explicit = startup(&mut arguments);
+        let (explicit, guard) = startup(&mut arguments);
+        assert!(guard.is_some());
+        drop(guard);
         assert_eq!(arguments, original);
         assert!(explicit.test_data && explicit.listen);
         assert_eq!(explicit.test_name, None);
@@ -2671,12 +2746,12 @@ mod tests {
         }
 
         std::fs::write(catalog_path(&root), "{").unwrap();
-        assert!(startup(&mut arguments).test_data);
+        assert!(startup(&mut arguments).0.test_data);
         assert!(!registered_test_data(&alias_dir.join("bindings.json")));
         std::fs::remove_file(catalog_path(&root)).unwrap();
         assert!(registered_test_data(&config));
         std::fs::write(directory.join("profile.json"), "broken").unwrap();
-        assert_eq!(startup(&mut arguments), Startup::daily());
+        assert_eq!(startup(&mut arguments).0, Startup::daily());
         let _ = std::fs::remove_dir_all(root);
     }
 

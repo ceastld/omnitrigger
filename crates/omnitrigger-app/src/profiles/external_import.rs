@@ -70,7 +70,7 @@ fn check_parents(base: &Path, path: &Path) -> io::Result<()> {
 }
 
 /// 原路径若在导入期间被其他程序占用或新建，不能用 rename 的覆盖语义。
-fn move_new(from: &Path, to: &Path) -> io::Result<()> {
+pub(super) fn move_new(from: &Path, to: &Path) -> io::Result<()> {
     let wide = |path: &Path| {
         path.as_os_str()
             .encode_wide()

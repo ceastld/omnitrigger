@@ -193,6 +193,26 @@ try {
 $profileDir = Get-Item -LiteralPath $result.directory
 $identity = Get-Content -Raw -LiteralPath (Join-Path $profileDir.FullName 'profile.json') | ConvertFrom-Json
 if ($identity.kind -ne 'test' -or $identity.id -ne $profileDir.Name) { throw '重置回执未指向登记的测试档。' }
+$backupRoot = Get-Item -LiteralPath (Join-Path $profileRoot 'backups/profile-reset')
+$tag = "$($identity.id)-1720000000000-t123456789abc"
+$staging = New-Item -ItemType Directory -Path (Join-Path $backupRoot.FullName ".$tag.tmp")
+Copy-Item -LiteralPath (Join-Path $profileDir.FullName 'profile.json') -Destination $staging.FullName
+$marker = 'recovery-probe.txt'
+[IO.File]::WriteAllText((Join-Path $profileDir.FullName $marker), '原测试档')
+[IO.File]::WriteAllText((Join-Path $staging.FullName $marker), '待替换的种子')
+$backup = Join-Path $backupRoot.FullName $tag
+[IO.Directory]::Move($profileDir.FullName, $backup)
+$recoverStart = New-AppStart
+foreach ($arg in @('--data-root', $profileRoot, '--test-workspace')) { $recoverStart.ArgumentList.Add($arg) }
+$recovered = [Diagnostics.Process]::Start($recoverStart)
+try {
+    $null = Wait-AppWindow $recovered ''
+    if ([IO.File]::ReadAllText((Join-Path $profileDir.FullName $marker)) -ne '原测试档' -or
+        [IO.File]::ReadAllText((Join-Path $staging.FullName $marker)) -ne '待替换的种子' -or
+        (Test-Path -LiteralPath $backup)) { throw '打开测试窗口后未恢复中断前的完整目录。' }
+    if (-not $recovered.CloseMainWindow() -or -not $recovered.WaitForExit(20000)) { throw '恢复后的测试窗口没有正常关闭。' }
+    Write-Host '安装版测试入口已从中断的重置恢复原档，并正常关闭。'
+} finally { Stop-TestProcess $recovered }
 foreach ($entry in 'config', 'data-root', 'env') {
     $receiptDir = New-Item -ItemType Directory -Path (Join-Path $probe.FullName $entry)
     $testHealth = Join-Path $receiptDir.FullName 'healthy'
