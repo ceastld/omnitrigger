@@ -27,7 +27,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-真实 Hook 检查需要交互式 Windows 桌面，CI 不覆盖实际按键、输入焦点或权限差异：
+真实 Hook 检查需要交互式 Windows 桌面。请在空闲的 Windows 会话中运行；同一会话已有新版 OmniTrigger 监听时，检查会报告占用并退出。发行 CI 验证实例之间的监听占用和释放，实际按键、输入焦点与权限差异仍需实机验证。
 
 ```powershell
 .\target\debug\omnitrigger.exe --smoke-test

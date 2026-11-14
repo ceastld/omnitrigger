@@ -76,6 +76,9 @@ mod screen_context;
 #[path = "foreground_context.rs"]
 mod foreground_context;
 
+#[path = "listener_owner.rs"]
+mod listener_owner;
+
 #[path = "pointer_context.rs"]
 mod pointer_context;
 
@@ -252,6 +255,14 @@ fn run_input_thread(
     pointer: Arc<PointerSnapshot>,
     policy: WheelInputPolicy,
 ) {
+    // 从初始化到所有 Hook 卸载共用同一资格，线程提前结束时也会自动释放。
+    let _owner = match listener_owner::acquire() {
+        Ok(owner) => owner,
+        Err(error) => {
+            let _ = ready.send(Err(error));
+            return;
+        }
+    };
     let mut message = MSG::default();
     unsafe {
         let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);

@@ -296,7 +296,37 @@ $start = New-AppStart
 $start.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $health
 $ui = [Diagnostics.Process]::Start($start)
 try {
-    $null = Close-ToTray $ui $health
+    $dailyWindow = Close-ToTray $ui $health
+    # 日常窗口已经确认 Hook 就绪。另一进程的真实监听请求应在安装 Hook 前返回占用原因。
+    $listen = New-AppStart
+    foreach ($arg in @('--data-root', $profileRoot, '--test-workspace', '--listen', '--smoke-test')) {
+        $listen.ArgumentList.Add($arg)
+    }
+    $listen.RedirectStandardError = $true
+    $listen.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $listen.CreateNoWindow = $true
+    $attempt = [Diagnostics.Process]::Start($listen)
+    try {
+        $message = $attempt.StandardError.ReadToEndAsync()
+        if (-not $attempt.WaitForExit(20000)) { throw '日常窗口收起时，测试档的监听检查超时。' }
+        if ($attempt.ExitCode -ne 1 -or $message.Result -notmatch '另一个 OmniTrigger 实例正在监听') {
+            throw "测试档的监听请求未报告占用。退出码 $($attempt.ExitCode)，回执 $($message.Result)"
+        }
+    } finally { Stop-TestProcess $attempt }
+    $edit = New-AppStart
+    foreach ($arg in @('--data-root', $profileRoot, '--test-workspace', '--listen')) {
+        $edit.ArgumentList.Add($arg)
+    }
+    $editor = [Diagnostics.Process]::Start($edit)
+    try {
+        $null = Wait-AppWindow $editor '' "OmniTrigger — 测试：$($identity.name)"
+        if (-not $editor.CloseMainWindow() -or -not $editor.WaitForExit(20000) -or $editor.ExitCode -ne 0) {
+            throw '监听被占用时，测试配置窗口没有正常关闭。'
+        }
+    } finally { Stop-TestProcess $editor }
+    if ($ui.HasExited -or [OmniTriggerUpgradeWindow]::IsWindowVisible($dailyWindow)) {
+        throw '测试档的监听请求影响了日常托盘窗口。'
+    }
     $install = [Diagnostics.ProcessStartInfo]::new($setupFile.FullName)
     $install.UseShellExecute = $false
     foreach ($argument in @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CLOSEAPPLICATIONS',
@@ -323,6 +353,16 @@ try {
     # 只收尾本脚本创建并持有句柄的测试进程；上述断言在收尾之前执行。
     Stop-TestProcess $ui
 }
+
+$takeover = New-AppStart
+$takeover.Environment['OMNITRIGGER_HOME'] = Join-Path $probe.FullName 'listener-takeover'
+$takeoverHealth = Join-Path $probe.FullName 'takeover-healthy'
+$takeover.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $takeoverHealth
+$next = [Diagnostics.Process]::Start($takeover)
+try {
+    $null = Wait-AppWindow $next $takeoverHealth 'OmniTrigger'
+    Write-Host '已验证日常托盘监听不会被测试档抢占，旧进程退出后其他配置可正常监听。'
+} finally { Stop-TestProcess $next }
 
 foreach ($restart in '更新成功', '更新回滚', '主窗口打开设置', '设置返回主窗口') {
     $start = New-AppStart
