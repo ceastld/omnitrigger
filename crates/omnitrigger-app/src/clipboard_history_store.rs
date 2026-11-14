@@ -10,6 +10,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub const FILE_NAME: &str = "clipboard-history.json";
 pub const MAX_ITEMS: usize = 200;
 pub const MAX_TEXT_UNITS: usize = 65_536;
 pub const MAX_TOTAL_UNITS: usize = 1_048_576;

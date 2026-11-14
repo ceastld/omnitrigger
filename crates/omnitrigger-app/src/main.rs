@@ -1152,7 +1152,7 @@ impl Workspace {
             .ok()
             .and_then(|path| {
                 clipboard_history_store::ClipboardHistoryStore::new(
-                    path.with_file_name("clipboard-history.json"),
+                    path.with_file_name(clipboard_history_store::FILE_NAME),
                 )
                 .ok()
             })

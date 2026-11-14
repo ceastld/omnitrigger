@@ -116,6 +116,8 @@ jobs:
             if ($LASTEXITCODE -or $daily.valid -ne $true -or $daily.handler) { throw '日常档未按外部 N10 动作校验。' }
             & $exe --profile-create clipboard-copy --type test --seed copy:default | Out-Host
             if ($LASTEXITCODE) { throw '复制日常档失败。' }
+            Assert-HistoryAppend @('--profile', 'clipboard-copy') $true
+            Assert-HistoryAppend @('--profile', 'clipboard-copy') $false
             $check = & $exe --profile clipboard-copy --check-action $callFile | ConvertFrom-Json
             if ($LASTEXITCODE -or $check.valid -ne $true -or $check.handler -ne 'workspace_text_history') {
               throw '测试档未将三字段 N10 toggle 路由到本档文本历史。'

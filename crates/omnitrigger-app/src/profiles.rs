@@ -614,7 +614,7 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// 复制一份配置档数据（顶层数据文件与托管动作包 `actions\`），返回复制的顶层文件数。
-fn copy_data(from: &Path, to: &Path, include_file: fn(&str) -> bool) -> Result<usize, String> {
+fn copy_data(from: &Path, to: &Path, include_file: impl Fn(&str) -> bool) -> Result<usize, String> {
     let fail = |error: std::io::Error| {
         format!(
             "从 {} 复制数据到 {} 失败：{error}",
@@ -682,7 +682,10 @@ fn seed_into(root: &Path, catalog: &Catalog, seed: &Seed, target: &Path) -> Resu
             }
             copy_data(path, target, seed_file).map(drop)
         }
-        Seed::Copy(key) => copy_data(&source_dir(root, catalog, key)?, target, seed_file).map(drop),
+        Seed::Copy(key) => copy_data(&source_dir(root, catalog, key)?, target, |name| {
+            seed_file(name) && !name.eq_ignore_ascii_case(crate::clipboard_history_store::FILE_NAME)
+        })
+        .map(drop),
     }
 }
 
@@ -1575,6 +1578,37 @@ mod tests {
         assert_eq!(
             std::fs::read(backup.join(registration)).unwrap(),
             b"source installation"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_copies_start_with_empty_history_and_reset_backs_up_the_old_history() {
+        let root = temp_root("copy-history");
+        let filename = crate::clipboard_history_store::FILE_NAME;
+        let history = |dir: &Path| dir.join(filename);
+        let daily = history(&root);
+        #[cfg(windows)]
+        let daily = daily.with_file_name(filename.to_ascii_uppercase());
+        std::fs::write(daily, b"daily history").unwrap();
+
+        let copy = create_profile(&root, "copy", &Seed::Copy(DEFAULT_ID.into()), None).unwrap();
+        let directory = profile_dir(&root, &copy.id);
+        assert!(!history(&directory).exists());
+        std::fs::write(history(&directory), b"test history").unwrap();
+        let nested = create_profile(&root, "nested", &Seed::Copy(copy.id), None).unwrap();
+        assert!(!history(&profile_dir(&root, &nested.id)).exists());
+
+        let (_, backup) = reset_profile(&root, "copy").unwrap();
+        let backup = backup.unwrap();
+        assert!(!history(&directory).exists());
+        assert_eq!(std::fs::read(history(&backup)).unwrap(), b"test history");
+        assert_eq!(std::fs::read(history(&root)).unwrap(), b"daily history");
+
+        let fixture = create_profile(&root, "fixture", &Seed::Fixture(backup), None).unwrap();
+        assert_eq!(
+            std::fs::read(history(&profile_dir(&root, &fixture.id))).unwrap(),
+            b"test history"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

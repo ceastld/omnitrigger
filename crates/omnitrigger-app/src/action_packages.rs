@@ -159,7 +159,7 @@ fn with_clipboard_history<H: omnitrigger_actions::NativeHost>(
         .ok()
         .and_then(|path| {
             crate::clipboard_history_store::ClipboardHistoryStore::new(
-                path.with_file_name("clipboard-history.json"),
+                path.with_file_name(crate::clipboard_history_store::FILE_NAME),
             )
             .ok()
         })
