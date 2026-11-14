@@ -1074,6 +1074,8 @@ fn daily_test_copy(root: &Path) -> Result<Entry, String> {
     let mut suffix = 2;
     while let Some(entry) = catalog.find(&alias) {
         if entry.alias == alias && entry.kind == "test" && entry.seed == "copy:default" {
+            // 设置页先确认副本可用，目录交换中断时复用同一套备份恢复逻辑。
+            source_dir(root, &catalog, &alias)?;
             persist_recovered_catalog(root, &catalog)?;
             return Ok(entry.clone());
         }
@@ -2846,6 +2848,34 @@ mod tests {
         assert_eq!(std::fs::read(file(&occupied)).unwrap(), b"existing");
         assert_eq!(std::fs::read(file(&testing)).unwrap(), b"testing");
         assert_eq!(std::fs::read(root.join("bindings.json")).unwrap(), b"daily");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn settings_checks_and_recovers_its_registered_test_copy_before_launch() {
+        let root = temp_root("settings-missing-copy");
+        let entry = daily_test_copy(&root).unwrap();
+        let directory = profile_dir(&root, &entry.id);
+        std::fs::write(directory.join("wheels.json"), "edited wheels").unwrap();
+        let backups = root.join("backups/profile-reset");
+        let tag = format!("{}-12-{}", entry.id, new_id());
+        let backup = backups.join(&tag);
+        let staging = backups.join(format!(".{tag}.tmp"));
+        std::fs::create_dir_all(&backups).unwrap();
+        std::fs::rename(&directory, &backup).unwrap();
+
+        let error = daily_test_copy(&root).unwrap_err();
+        assert!(error.contains(&entry.alias) && error.contains("目录缺失"));
+        assert!(!directory.exists());
+        assert_eq!(read_catalog(&root).unwrap().profiles.len(), 1);
+
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::copy(backup.join("profile.json"), staging.join("profile.json")).unwrap();
+        assert_eq!(daily_test_copy(&root).unwrap(), entry);
+        assert_eq!(
+            std::fs::read(directory.join("wheels.json")).unwrap(),
+            b"edited wheels"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
