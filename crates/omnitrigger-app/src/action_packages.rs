@@ -260,16 +260,14 @@ pub fn cli(
             });
         }
         if let Some(index) = create {
-            let project = omnitrigger_actions::project::create_script_project(
-                &root(&settings::path()),
-                &arguments[index + 1],
-            )
-            .map_err(|mut error| {
-                error
-                    .effect_state
-                    .get_or_insert_with(|| "not_started".into());
-                serde_json::json!({"status":"failed","error":error}).to_string()
-            })?;
+            let project = crate::script_projects::NewScript::Id(&arguments[index + 1])
+                .create(&settings::path())
+                .map_err(|mut error| {
+                    error
+                        .effect_state
+                        .get_or_insert_with(|| "not_started".into());
+                    serde_json::json!({"status":"failed","error":error}).to_string()
+                })?;
             return Ok(
                 serde_json::json!({"schema_version":1,"status":"created","project":project})
                     .to_string(),
@@ -872,8 +870,51 @@ mod tests {
                 let _ = std::fs::remove_dir(actions.join(directory));
             }
             let _ = std::fs::remove_dir(actions);
+            let _ = std::fs::remove_file(self.directory.join(crate::legacy_upgrade::INDEX_LOCK));
             let _ = std::fs::remove_dir(&self.directory);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn script_creation_respects_profile_readers_and_retries_after_release() {
+        use crate::script_projects::NewScript;
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let fixture = Fixture::new();
+        let original = fixture.package(None);
+        let lock = fixture.directory.join(crate::legacy_upgrade::INDEX_LOCK);
+        std::fs::File::create_new(&lock).unwrap();
+        // 复制测试档时，来源索引允许其他读取者，同时排斥写入。
+        let copying = std::fs::File::options()
+            .read(true)
+            .share_mode(1)
+            .open(lock)
+            .unwrap();
+        for request in [
+            NewScript::DisplayName("整理选区"),
+            NewScript::Id("generated-script"),
+        ] {
+            assert_eq!(
+                request.create(&fixture.config).unwrap_err().code,
+                "project_index_busy"
+            );
+        }
+        let actions = root(&fixture.config);
+        assert_eq!(std::fs::read_dir(&actions).unwrap().count(), 1);
+        PackageCatalog::load(&actions).resolve(&original).unwrap();
+
+        let other = Fixture::new();
+        NewScript::Id("generated-script")
+            .create(&other.config)
+            .unwrap();
+        drop(copying);
+        let created = NewScript::Id("generated-script")
+            .create(&fixture.config)
+            .unwrap();
+        let catalog = PackageCatalog::load(&actions);
+        catalog.resolve(&original).unwrap();
+        catalog.resolve(&created.call).unwrap();
     }
 
     #[test]

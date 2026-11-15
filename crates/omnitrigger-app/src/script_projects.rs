@@ -3,13 +3,40 @@ use crate::{
     button, caption, card, icon_button, Context, Div, Icon, MessageInput, Tone, Workspace,
 };
 use gpui::{div, prelude::*, px, Entity};
-use omnitrigger_actions::ActionCall;
+use omnitrigger_actions::{project, ActionCall, ActionError};
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
     process::Command,
     sync::mpsc::{self, Receiver, TryRecvError},
 };
+
+pub(super) enum NewScript<'a> {
+    DisplayName(&'a str),
+    Id(&'a str),
+}
+
+impl NewScript<'_> {
+    pub(super) fn create(self, config: &Path) -> Result<project::ScriptProject, ActionError> {
+        // 与配置副本读取、导入共用索引锁，从容量检查持有到清单写完。
+        #[cfg(windows)]
+        let _index = crate::legacy_upgrade::IndexGuard::acquire(config).map_err(|error| {
+            if error.code == "legacy_upgrade_index_busy" {
+                ActionError::new(
+                    "project_index_busy",
+                    "当前配置暂时无法写入，请稍后重新创建脚本。",
+                )
+            } else {
+                error
+            }
+        })?;
+        let root = crate::action_packages::root(config);
+        match self {
+            Self::DisplayName(name) => project::create_named_script_project(&root, name),
+            Self::Id(id) => project::create_script_project(&root, id),
+        }
+    }
+}
 
 pub(super) struct ScriptProjects {
     name: Entity<MessageInput>,
@@ -148,10 +175,7 @@ impl Workspace {
             return;
         }
         let name = self.script_projects.name.read(cx).text();
-        match omnitrigger_actions::project::create_named_script_project(
-            &crate::action_packages::root(&crate::settings::path()),
-            &name,
-        ) {
+        match NewScript::DisplayName(&name).create(&crate::settings::path()) {
             Ok(_) => {
                 self.refresh_script_catalog();
                 self.script_projects.creating = false;
