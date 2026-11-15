@@ -2,6 +2,9 @@
 AppId=OmniTrigger
 AppName=OmniTrigger
 AppVersion={#AppVersion}
+VersionInfoVersion={#NumericVersion}
+VersionInfoTextVersion={#AppVersion}
+VersionInfoProductTextVersion={#ProductVersionText}
 AppPublisher=OmniTrigger
 AppPublisherURL=https://github.com/ceastld/omnitrigger
 DefaultDirName={localappdata}\Programs\OmniTrigger

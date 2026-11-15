@@ -25,6 +25,8 @@ git diff --check
 
 发行脚本需要 Inno Setup 6，使用 [`scripts/package-windows.ps1`](../scripts/package-windows.ps1) 从同一份 Release 文件生成安装器和便携版。
 
+在 Windows 中右键安装器或已安装的 `omnitrigger.exe`，打开“属性 → 详细信息”即可核对版本。CI 发行包的“产品版本”在版本号后附有构建提交的前 12 位，便于区分同版本的预览包。也可用 PowerShell 查看 `(Get-Item .\omnitrigger.exe).VersionInfo.ProductVersion`。
+
 要在安装完成后直接恢复日常热键监听，可给安装器传入 `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /STARTINTRAY=1`。新版从托盘启动，用开始菜单或托盘图标可以打开同一窗口。已安装的程序也支持 `omnitrigger.exe --tray`，重复运行会沿用现有日常实例。后台启动会跳过外部副本提示，下一次正常启动仍可处理该副本。
 
 ```powershell

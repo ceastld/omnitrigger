@@ -26,6 +26,17 @@ try {
     if ($artifacts.Count -ne 1) { throw 'Cargo 未返回唯一的 Release EXE。' }
     $binaryPath = [string]$artifacts[0].executable
     if (-not (Test-Path -LiteralPath $binaryPath -PathType Leaf)) { throw '本次 Release EXE 不存在。' }
+    $productVersion = if ($env:OMNITRIGGER_BUILD_COMMIT) { "$version ($($env:OMNITRIGGER_BUILD_COMMIT.Substring(0, 12)))" } else { $version }
+    $numericVersion = ($version -split '-', 2)[0] + '.0'
+    function Assert-ReleaseFileVersion([string]$path) {
+        $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($path)
+        $fixedVersion = [Version]::new($info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart)
+        if (([string]$info.ProductName).TrimEnd() -cne 'OmniTrigger' -or ([string]$info.FileVersion).TrimEnd() -cne $version -or
+            ([string]$info.ProductVersion).TrimEnd() -cne $productVersion -or $fixedVersion.ToString() -cne $numericVersion) {
+            throw "文件属性与本次构建版本或提交不符：$path"
+        }
+    }
+    Assert-ReleaseFileVersion $binaryPath
     & (Join-Path $PSScriptRoot 'check-configs.ps1') -BinaryPath $binaryPath
 
     $distRoot = Join-Path $projectRoot 'dist'
@@ -70,8 +81,9 @@ licenses/dependencies.json 记录锁定目标依赖、来源、许可文件与 S
 
         $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
         if (-not (Test-Path -LiteralPath $compiler)) { $compiler = (Get-Command ISCC.exe -ErrorAction Stop).Source }
-        & $compiler /Qp "/DAppVersion=$version" "/DPayload=$stagingRoot" "/O$distRoot" (Join-Path $PSScriptRoot 'omnitrigger.iss')
+        & $compiler /Qp "/DAppVersion=$version" "/DNumericVersion=$numericVersion" "/DProductVersionText=$productVersion" "/DPayload=$stagingRoot" "/O$distRoot" (Join-Path $PSScriptRoot 'omnitrigger.iss')
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installerPath -PathType Leaf)) { throw '安装器构建失败。' }
+        Assert-ReleaseFileVersion $installerPath
         [IO.Compression.ZipFile]::CreateFromDirectory($stagingRoot, $zipPath, [IO.Compression.CompressionLevel]::Optimal, $false)
         $lines = foreach ($file in @($zipPath, $installerPath)) {
             $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()

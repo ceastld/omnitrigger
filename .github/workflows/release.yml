@@ -61,6 +61,8 @@ jobs:
         run: ./scripts/check.ps1
 
       - name: 构建发行包并收集第三方许可
+        env:
+          OMNITRIGGER_BUILD_COMMIT: ${{ steps.version.outputs.commit }}
         run: ./scripts/package-windows.ps1 -Target x86_64-pc-windows-msvc
 
       - name: 验证安装、卸载和重装保留配置

@@ -1,2 +1,29 @@
 // GPUI 以资源 ID 1 加载窗口类图标；同一图标也用于资源管理器与任务栏。
 1 ICON "omnitrigger.ico"
+
+#include <winver.h>
+
+1 VERSIONINFO
+FILEVERSION OMNI_VERSION_PARTS
+PRODUCTVERSION OMNI_VERSION_PARTS
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "OmniTrigger"
+            VALUE "FileDescription", "OmniTrigger"
+            VALUE "FileVersion", OMNI_FILE_VERSION
+            VALUE "InternalName", "omnitrigger"
+            VALUE "OriginalFilename", "omnitrigger.exe"
+            VALUE "ProductName", "OmniTrigger"
+            VALUE "ProductVersion", OMNI_PRODUCT_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
