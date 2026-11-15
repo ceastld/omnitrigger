@@ -1385,6 +1385,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
             .unwrap_or_else(|error| crate::reject_cli_arguments(&error));
     }
     let check_only = inspect_actions || arguments.iter().any(|arg| arg == "--check-config");
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     let config_index = arguments.iter().position(|argument| argument == "--config");
     if let Some(index) = config_index {
         if parsed.any() {
@@ -1398,6 +1399,20 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
         else {
             return (Startup::daily(), Vec::new());
         };
+        #[cfg(windows)]
+        if inspect_actions {
+            let config = std::path::absolute(path)
+                .unwrap_or_else(|error| exit_rejected(&format!("无法定位配置路径：{error}")));
+            if let Some(root) = config.parent() {
+                escape_redirect(
+                    root,
+                    local_app_data.as_deref(),
+                    &parsed,
+                    &original,
+                    Some(Inspection::Actions),
+                );
+            }
+        }
         return prepare_root_access(Path::new(path), check_only)
             .unwrap_or_else(|error| exit_rejected(&error));
     }
@@ -1409,12 +1424,21 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
         arguments.iter().skip(1).all(|arg| arg == "--settings") && parsed.command.is_none();
     let check_config = matches!(&arguments[1..], [arg] if arg == "--check-config");
     let env_root = std::env::var_os("OMNITRIGGER_HOME").filter(|root| !root.is_empty());
-    if !parsed.any() && !interactive && !tray && !check_config && env_root.is_none() {
+    if !parsed.any()
+        && !interactive
+        && !tray
+        && !check_config
+        && !inspect_actions
+        && env_root.is_none()
+    {
         // 未指定数据根的其他命令无需探测桌面或预先设置路径。
         return (Startup::daily(), Vec::new());
     }
-    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    if check_config && !parsed.any() && env_root.is_none() && local_app_data.is_none() {
+    if (check_config || inspect_actions)
+        && !parsed.any()
+        && env_root.is_none()
+        && local_app_data.is_none()
+    {
         return (Startup::daily(), Vec::new()); // 沿用 settings::path() 的临时目录回退。
     }
     let (root, source) = resolve_root(
@@ -1423,6 +1447,17 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
         local_app_data.clone(),
     )
     .unwrap_or_else(|message| exit_rejected(&message));
+    #[cfg(windows)]
+    if inspect_actions {
+        // 先选定真实数据视图，避免查询在重定向副本中的测试档上取锁或报告重置中断。
+        escape_redirect(
+            &root,
+            local_app_data.as_deref(),
+            &parsed,
+            &original,
+            Some(Inspection::Actions),
+        );
+    }
     let (root_startup, mut guards) = if source != RootSource::Default {
         prepare_root_access(&root.join("bindings.json"), check_only).unwrap_or_else(|error| {
             finish_command(Err(rejected(&error)), parsed.result_file.as_deref())
@@ -1437,7 +1472,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
             local_app_data.as_deref(),
             &parsed,
             &original,
-            check_config,
+            check_config.then_some(Inspection::Config),
         );
     }
     if let Some(link) = &parsed.relaunched {
@@ -1511,6 +1546,11 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     if check_config {
         finish_command(crate::check_config(), parsed.result_file.as_deref());
     }
+    if inspect_actions && parsed.result_file.is_some() {
+        let result =
+            crate::action_packages::cli(arguments, startup.test_data).expect("已验证的动作查询");
+        finish_command(result, parsed.result_file.as_deref());
+    }
     (startup, guards)
 }
 
@@ -1529,6 +1569,7 @@ fn redirected_check_file(
     root: &Path,
     parsed: &Arguments,
     local: &Path,
+    create_testing: bool,
 ) -> Result<Option<String>, String> {
     fn package(file: &Path, local: &Path) -> Result<Option<String>, String> {
         if !file
@@ -1547,7 +1588,7 @@ fn redirected_check_file(
             }
             let catalog = read_catalog(root)?;
             let Some(entry) = catalog.find(key) else {
-                if parsed.test_workspace {
+                if parsed.test_workspace && create_testing {
                     // 首次创建 testing 会写登记文件，沿用普通启动时的写入探针。
                     std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
                     let actual = omnitrigger_windows::probe_final_directory(root)?;
@@ -1567,6 +1608,24 @@ fn redirected_check_file(
     Ok(None)
 }
 
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Inspection {
+    Config,
+    Actions,
+}
+
+/// 外部夹具及显式选择的缓存副本沿用调用者看到的目录。日常根和其中的测试档应使用安装版的数据。
+#[cfg(windows)]
+fn daily_data_tree(root: &Path, local: &Path) -> bool {
+    let daily = normalize(&local.join("OmniTrigger")).to_ascii_lowercase();
+    let root = normalize(root).to_ascii_lowercase();
+    root == daily
+        || root
+            .strip_prefix(&daily)
+            .is_some_and(|tail| tail.starts_with('\\'))
+}
+
 /// 数据根被打包应用重定向时，经系统外壳重启自身；命令等待新进程转交结果。
 #[cfg(windows)]
 fn escape_redirect(
@@ -1574,12 +1633,12 @@ fn escape_redirect(
     local_app_data: Option<&Path>,
     parsed: &Arguments,
     original: &[String],
-    check_config: bool,
+    inspection: Option<Inspection>,
 ) {
     let Some(local_app_data) = local_app_data else {
         return;
     };
-    let is_command = parsed.command.is_some() || check_config;
+    let is_command = parsed.command.is_some() || inspection.is_some();
     let fail = |message: &str| -> ! {
         fail_redirect(
             is_command || original.iter().skip(1).any(|arg| arg == "--tray"),
@@ -1587,13 +1646,24 @@ fn escape_redirect(
             message,
         )
     };
-    let redirected = if check_config {
-        redirected_check_file(root, parsed, local_app_data)
-    } else {
-        std::fs::create_dir_all(root)
+    let redirected = match inspection {
+        Some(Inspection::Actions) => {
+            if !daily_data_tree(root, local_app_data)
+                || !crate::local_files::is_plain_directory(local_app_data)
+            {
+                return;
+            }
+            // 即使目录句柄指向日常根，单个清单或脚本仍可能来自打包副本。
+            // 探针关闭即删除，放在配置档之外，查询不创建配置档或改动其内容。
+            omnitrigger_windows::probe_final_directory(local_app_data)
+                .map(|actual| redirected_package(local_app_data, &actual, local_app_data))
+                .or_else(|_| redirected_check_file(root, parsed, local_app_data, false))
+        }
+        Some(Inspection::Config) => redirected_check_file(root, parsed, local_app_data, true),
+        None => std::fs::create_dir_all(root)
             .map_err(|error| format!("创建数据根 {} 失败：{error}", root.display()))
             .and_then(|()| omnitrigger_windows::probe_final_directory(root))
-            .map(|actual| redirected_package(root, &actual, local_app_data))
+            .map(|actual| redirected_package(root, &actual, local_app_data)),
     };
     let Some(package) = redirected.unwrap_or_else(|error| fail(&error)) else {
         return;
@@ -1615,7 +1685,26 @@ fn escape_redirect(
     let link = scratch.join(format!("relaunch-{tag}.lnk"));
     let result_file = scratch.join(format!("relaunch-{tag}.json"));
     let mut forwarded = parsed.forwarded(original);
-    if check_config
+    if inspection == Some(Inspection::Actions) {
+        // 查询以文件所在目录选取动作与测试档身份。转交数据根后，由新进程重新取得配置档使用锁。
+        if let Some(index) = forwarded.iter().position(|arg| arg == "--config") {
+            forwarded.drain(index..index + 2);
+        }
+        if let Some(index) = forwarded.iter().position(|arg| arg == "--check-action") {
+            let path = omnitrigger_windows::final_file_path(Path::new(&forwarded[index + 1]))
+                .unwrap_or_else(|error| {
+                    finish_command(
+                        Err(rejection(
+                            "invalid_action_request",
+                            &format!("读取动作调用失败：{error}"),
+                        )),
+                        parsed.result_file.as_deref(),
+                    )
+                });
+            forwarded[index + 1] = path.to_string_lossy().into_owned();
+        }
+    }
+    if inspection.is_some()
         || parsed.data_root.is_some()
         || std::env::var_os("OMNITRIGGER_HOME").is_some_and(|root| !root.is_empty())
     {
@@ -1655,12 +1744,15 @@ fn escape_redirect(
             .and_then(|text| serde_json::from_str::<Relayed>(&text).ok())
         {
             let _ = std::fs::remove_file(&result_file);
-            if relayed.ok {
-                println!("{}", relayed.text);
-                std::process::exit(0);
-            }
-            eprintln!("{}", relayed.text);
-            std::process::exit(1);
+            let _ = std::fs::remove_file(&link);
+            finish_command(
+                if relayed.ok {
+                    Ok(relayed.text)
+                } else {
+                    Err(relayed.text)
+                },
+                parsed.result_file.as_deref(),
+            );
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
@@ -1953,6 +2045,25 @@ mod tests {
             (base.join("OmniTrigger"), RootSource::Default)
         );
         assert!(resolve_root(None, None, None).is_err());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn action_queries_use_the_installed_view_only_inside_the_daily_tree() {
+        let local = Path::new(r"C:\UserData\Local");
+        for root in [
+            r"C:\UserData\Local\OmniTrigger",
+            r"\\?\C:\userdata\LOCAL\omnitrigger\profiles\test",
+        ] {
+            assert!(daily_data_tree(Path::new(root), local));
+        }
+        for root in [
+            r"C:\UserData\Local\OmniTrigger-old",
+            r"C:\UserData\Local\Packages\example\LocalCache\Local\OmniTrigger",
+            r"D:\fixtures\OmniTrigger",
+        ] {
+            assert!(!daily_data_tree(Path::new(root), local));
+        }
     }
 
     #[test]

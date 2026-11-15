@@ -1,6 +1,67 @@
 use std::{path::Path, process::Command};
 
 #[test]
+fn relayed_action_queries_match_direct_catalog_validation_and_errors() {
+    let root =
+        std::env::temp_dir().join(format!("omnitrigger-query-result-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let receipt = root.join("result.json");
+    let run = |args: &[&str], relay: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_omnitrigger"));
+        command.arg("--data-root").arg(&root).args(args);
+        if relay {
+            command.arg("--relaunch-result").arg(&receipt);
+        }
+        command.output().unwrap()
+    };
+    assert!(
+        run(&["--profile-create", "testing", "--seed", "empty"], false)
+            .status
+            .success()
+    );
+    let request = root.join("调用 1.json");
+    std::fs::write(
+        &request,
+        r#"{"package_id":"examples.n10-rust","action_id":"toggle","action_version":1}"#,
+    )
+    .unwrap();
+    for (args, success) in [
+        (&["--list-package-actions"][..], true),
+        (
+            &[
+                "--profile",
+                "testing",
+                "--check-action",
+                request.to_str().unwrap(),
+            ],
+            true,
+        ),
+        (&["--check-action", request.to_str().unwrap()], false),
+        (&["--profile", "absent", "--list-package-actions"], false),
+    ] {
+        let direct = run(args, false);
+        assert_eq!(direct.status.success(), success);
+        let relayed = run(args, true);
+        assert_eq!(relayed.status.success(), success);
+        assert!(relayed.stdout.is_empty() && relayed.stderr.is_empty());
+        let result: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+        assert_eq!(result["ok"], success);
+        let expected = if success {
+            direct.stdout
+        } else {
+            direct.stderr
+        };
+        let expected: serde_json::Value = serde_json::from_slice(&expected).unwrap();
+        let actual: serde_json::Value =
+            serde_json::from_str(result["text"].as_str().unwrap()).unwrap();
+        assert_eq!(actual, expected);
+        std::fs::remove_file(&receipt).unwrap();
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn action_inspection_leaves_test_registration_and_interrupted_reset_untouched() {
     let root = std::env::temp_dir().join(format!("omnitrigger-cli-inspect-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
