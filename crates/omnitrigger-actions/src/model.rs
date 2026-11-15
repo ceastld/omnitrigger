@@ -4,6 +4,11 @@ use std::fmt;
 
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 
+/// 读取本地动作 JSON 文件时识别开头的 UTF-8 BOM。大小与摘要由调用方按原始字节检查。
+pub fn parse_action_file<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> serde_json::Result<T> {
+    serde_json::from_slice(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes))
+}
+
 /// 稳定的持久化调用信封；包是否安装与参数业务含义由目录和运行时分别判断。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

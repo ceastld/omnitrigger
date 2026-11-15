@@ -1,4 +1,6 @@
-use crate::model::{valid_id, ActionCall, ActionDefinition, ActionError, PackageManifest};
+use crate::model::{
+    parse_action_file, valid_id, ActionCall, ActionDefinition, ActionError, PackageManifest,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, Metadata},
@@ -273,7 +275,7 @@ fn read_manifest(folder: &Path) -> Result<PackageManifest, ActionError> {
             "action.json 超过 256 KiB。",
         ));
     }
-    serde_json::from_slice(&bytes).map_err(|error| {
+    parse_action_file(&bytes).map_err(|error| {
         ActionError::new("invalid_manifest", format!("action.json 格式有误：{error}"))
     })
 }
@@ -457,6 +459,28 @@ pub(crate) mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn utf8_bom_manifest_resolves_without_rewriting_or_skipping_invalid_prefixes() {
+        let fixture = Fixture::new();
+        let path = fixture
+            .package("sample", "example", "node")
+            .join("action.json");
+        let original = fs::read(&path).unwrap();
+        for (prefix, valid) in [
+            (b"\xef\xbb\xbf".as_slice(), true),
+            (b"\xef\xbb\xbf\xef\xbb\xbf".as_slice(), false),
+            (b" \xef\xbb\xbf".as_slice(), false),
+            (b"\xff\xfe".as_slice(), false),
+        ] {
+            let bytes = [prefix, &original].concat();
+            fs::write(&path, &bytes).unwrap();
+            let catalog = PackageCatalog::load(&fixture.0);
+            assert_eq!(catalog.resolve(&Fixture::call()).is_ok(), valid);
+            assert_eq!(catalog.diagnostics.is_empty(), valid);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
         }
     }
 

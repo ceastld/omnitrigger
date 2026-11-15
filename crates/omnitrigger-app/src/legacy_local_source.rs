@@ -312,9 +312,12 @@ impl LegacyArtifactSource for LocalLegacySource {
         if expected.contains("host-contract.json") {
             require_explicit_host_contract(&self.root, cancel)?;
         }
-        let catalog: PackageManifest =
-            serde_json::from_slice(&read(&self.root.join("action.json"), 256 * 1024, cancel)?)
-                .map_err(|error| fault("legacy_action_manifest_invalid", error.to_string()))?;
+        let catalog: PackageManifest = omnitrigger_actions::model::parse_action_file(&read(
+            &self.root.join("action.json"),
+            256 * 1024,
+            cancel,
+        )?)
+        .map_err(|error| fault("legacy_action_manifest_invalid", error.to_string()))?;
         if catalog.schema_version != 1
             || catalog.id != PACKAGE_ID
             || catalog.version != manifest.package_version
@@ -603,7 +606,7 @@ mod tests {
             let catalog = json!({"schema_version":1,"id":PACKAGE_ID,"name":"不执行的本地夹具","version":"fixture","actions":[
                 {"id":"clip-toggle","title":"fixture","version":1,"runtime":"script","entry":"clip-toggle.mjs","single_instance":true},
                 {"id":"search-toggle","title":"fixture","version":1,"runtime":"script","entry":"search-toggle.mjs"}]});
-            fs::write(package.join("action.json"), catalog.to_string()).unwrap();
+            fs::write(package.join("action.json"), format!("\u{feff}{catalog}")).unwrap();
             for name in [
                 "entry.mjs",
                 "ensure-ready.mjs",

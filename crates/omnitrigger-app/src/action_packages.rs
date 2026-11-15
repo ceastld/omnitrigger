@@ -276,7 +276,7 @@ pub fn cli(arguments: &[String], test_data: bool) -> Option<Result<String, Strin
         if bytes.len() > 128 * 1024 {
             return Err(request_error("动作调用文件不能超过 128 KiB。".into()));
         }
-        let call: ActionCall = serde_json::from_slice(&bytes)
+        let call: ActionCall = omnitrigger_actions::model::parse_action_file(&bytes)
             .map_err(|error| request_error(format!("动作调用格式有误：{error}")))?;
         let service = service(&settings::path());
         if clipboard_route(test_data, &call, service.catalog()).map_err(rejected)?
