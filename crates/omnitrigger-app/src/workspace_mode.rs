@@ -9,6 +9,7 @@ pub(super) enum WorkspaceMode {
 /// 只有已分发的命令都没有接管时才解析窗口入口。
 #[derive(Default, Debug)]
 pub(super) struct WindowArguments {
+    pub tray: bool,
     pub settings: bool,
     pub browser_connector_settings: bool,
     pub panel: bool,
@@ -18,11 +19,41 @@ pub(super) struct WindowArguments {
 }
 
 impl WindowArguments {
+    /// 配置档参数已取出。托盘入口只接管日常主工作区，不能同时运行其他动作。
+    pub fn tray_launch(arguments: &[String]) -> Result<bool, String> {
+        let flags = arguments.get(1..).unwrap_or_default();
+        if !flags.iter().any(|flag| flag == "--tray") {
+            return Ok(false);
+        }
+        let path = match flags {
+            [_] => return Ok(true),
+            [tray, config, path] if tray == "--tray" && config == "--config" => Some(path),
+            [config, path, tray] if tray == "--tray" && config == "--config" => Some(path),
+            _ => None,
+        };
+        if path.is_some_and(|path| {
+            !path.starts_with("--")
+                && std::path::Path::new(path)
+                    .file_name()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json"))
+        }) {
+            return Ok(true);
+        }
+        Err(
+            "--tray 用于日常工作区，可用 --data-root 指定目录，或用 --config 指定 bindings.json。"
+                .into(),
+        )
+    }
+
     pub fn parse(arguments: &[String]) -> Result<Self, String> {
-        let mut window = Self::default();
+        let mut window = Self {
+            tray: Self::tray_launch(arguments)?,
+            ..Self::default()
+        };
         let mut args = arguments.iter().skip(1);
         while let Some(argument) = args.next() {
             match argument.as_str() {
+                "--tray" => {}
                 "--settings" => window.settings = true,
                 "--browser-connector-settings" => window.browser_connector_settings = true,
                 "--panel" => window.panel = true,
@@ -135,6 +166,30 @@ mod tests {
             .chain(values.iter().copied())
             .map(str::to_owned)
             .collect()
+    }
+
+    #[test]
+    fn tray_launch_accepts_the_daily_workspace_without_opening_another_page() {
+        for flags in [
+            vec!["--tray"],
+            vec!["--tray", "--config", "日常 值/bindings.json"],
+            vec!["--config", "日常 值/BINDINGS.JSON", "--tray"],
+        ] {
+            WindowArguments::parse(&arguments(&flags)).unwrap();
+        }
+        for flags in [
+            vec!["--tray", "--tray"],
+            vec!["--tray", "--panel"],
+            vec!["--settings", "--tray"],
+            vec!["--config", "other.json", "--tray"],
+            vec!["--tray", "--config"],
+            vec!["--tray", "--run-action", "call.json"],
+        ] {
+            assert!(
+                WindowArguments::parse(&arguments(&flags)).is_err(),
+                "{flags:?}"
+            );
+        }
     }
 
     #[test]

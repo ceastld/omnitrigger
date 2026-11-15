@@ -344,6 +344,22 @@ foreach ($changed in @($false, $true)) {
 }
 Write-Host '已验证恢复日常备份后直接启动，来源有新修改时才再次提示。'
 
+# 保留上一步尚未处理的较新副本，后台启动仍需直接进入托盘。
+$ignoreStart.ArgumentList.Add('--tray')
+$quiet = [OmniTriggerUpgradeWindow]::StartAndVerifyWindows($ignoreStart, $false, $true)
+try {
+    $original = [OmniTriggerUpgradeWindow]::FindAppWindow($quiet.Id, 'OmniTrigger', $false)
+    $repeat = [Diagnostics.Process]::Start($ignoreStart)
+    try {
+        if (-not $repeat.WaitForExit(20000) -or $repeat.ExitCode -ne 0 -or $quiet.HasExited -or
+            [OmniTriggerUpgradeWindow]::IsWindowVisible($original) -or
+            (Get-FileHash -LiteralPath $importDaily).Hash -ne $restoredHash) {
+            throw '重复托盘启动改变了日常配置或显示了主窗口。'
+        }
+    } finally { Stop-TestProcess $repeat }
+} finally { Stop-TestProcess $quiet }
+Write-Host '已验证存在待导入的外部副本时，首次托盘启动和重复启动都保持隐藏。'
+
 # 使用单独的数据根，验证安装版窗口确实持有测试档，正常退出后才允许重置。
 $outerRoot = Join-Path $probe.FullName 'profiles-test'
 $parentEntry = & $appFile.FullName --data-root $outerRoot --profile-create parent-test --seed empty | ConvertFrom-Json
@@ -448,6 +464,19 @@ foreach ($requested in @($false, $true)) {
 }
 Write-Host '已验证预热面板保持隐藏，首次呼出显示在指针所在屏幕并保留前台。'
 
+$testTray = New-AppStart
+foreach ($arg in @('--config', (Join-Path $profileDir.FullName 'bindings.json'), '--tray')) {
+    $testTray.ArgumentList.Add($arg)
+}
+$testTray.RedirectStandardError = $true
+$testTray.StandardErrorEncoding = [Text.Encoding]::UTF8
+$rejected = [Diagnostics.Process]::Start($testTray)
+try {
+    $reason = $rejected.StandardError.ReadToEndAsync()
+    if (-not $rejected.WaitForExit(20000) -or $rejected.ExitCode -ne 1 -or
+        $reason.Result -notmatch '只用于日常工作区') { throw '已登记的测试档未拒绝后台托盘启动。' }
+} finally { Stop-TestProcess $rejected }
+
 $start = New-AppStart
 $start.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $health
 $ui = [Diagnostics.Process]::Start($start)
@@ -512,8 +541,13 @@ try {
     }
     $install = [Diagnostics.ProcessStartInfo]::new($setupFile.FullName)
     $install.UseShellExecute = $false
+    $receiptDir = New-Item -ItemType Directory -Path (Join-Path $probe.FullName 'after-install')
+    $receipt = Join-Path $receiptDir.FullName 'healthy'
+    $install.Environment['OMNITRIGGER_HOME'] = $data.FullName
+    $install.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $receipt
+    $started = [DateTime]::Now
     foreach ($argument in @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CLOSEAPPLICATIONS',
-        '/NORESTARTAPPLICATIONS', "/DIR=$($appFile.DirectoryName)", "/LOG=$log")) {
+        '/NORESTARTAPPLICATIONS', '/STARTINTRAY=1', "/DIR=$($appFile.DirectoryName)", "/LOG=$log")) {
         $install.ArgumentList.Add($argument)
     }
     $installer = [Diagnostics.Process]::Start($install)
@@ -532,6 +566,35 @@ try {
         throw '覆盖安装后的程序与发行 ZIP 不一致。'
     }
     Write-Host '普通关闭已收起到托盘，覆盖安装成功，原进程已退出。'
+    $replacement = $null
+    try {
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            if (-not $replacement) {
+                $matchesInstall = @(Get-Process -Name $appFile.BaseName -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Path -eq $appFile.FullName -and $_.Id -ne $ui.Id -and $_.StartTime -ge $started })
+                if ($matchesInstall.Count -gt 1) { throw '安装器启动了多个日常进程。' }
+                $replacement = $matchesInstall | Select-Object -First 1
+            }
+            if ($replacement -and (Test-Path -LiteralPath $receipt -PathType Leaf)) { break }
+            Start-Sleep -Milliseconds 150
+        } while ($timer.Elapsed.TotalSeconds -lt 45)
+        if (-not $replacement -or $replacement.HasExited -or
+            -not (Test-Path -LiteralPath $receipt -PathType Leaf) -or
+            [IO.File]::ReadAllText($receipt) -cne $ExpectedVersion) { throw '覆盖安装后新版日常监听未就绪。' }
+        $hidden = [OmniTriggerUpgradeWindow]::FindAppWindow($replacement.Id, 'OmniTrigger', $false)
+        if ($hidden -eq [IntPtr]::Zero -or [OmniTriggerUpgradeWindow]::IsWindowVisible($hidden)) {
+            throw '覆盖安装后新版主窗口未收在托盘。'
+        }
+        $launcher = [Diagnostics.Process]::Start((New-AppStart))
+        try {
+            if (-not $launcher.WaitForExit(20000) -or $launcher.ExitCode -ne 0 -or
+                (Wait-AppWindow $replacement $receipt 'OmniTrigger') -ne $hidden) {
+                throw '普通启动未能唤回原日常配置的托盘窗口。'
+            }
+        } finally { Stop-TestProcess $launcher }
+        Write-Host '已验证静默覆盖安装后，新版在托盘接手日常监听，普通启动唤回同一窗口。'
+    } finally { if ($replacement) { Stop-TestProcess $replacement } }
 } finally {
     # 只收尾本脚本创建并持有句柄的测试进程；上述断言在收尾之前执行。
     Stop-TestProcess $ui

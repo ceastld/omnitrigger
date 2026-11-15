@@ -26,4 +26,11 @@ Name: "{userprograms}\OmniTrigger\OmniTrigger"; Filename: "{app}\omnitrigger.exe
 Name: "{userprograms}\OmniTrigger\OmniTrigger 测试"; Filename: "{app}\omnitrigger.exe"; Parameters: "--test-workspace"
 
 [Run]
-Filename: "{app}\omnitrigger.exe"; Description: "启动 OmniTrigger"; Flags: postinstall nowait skipifsilent
+Filename: "{app}\omnitrigger.exe"; Parameters: "--tray"; Flags: nowait runasoriginaluser; Check: StartInTray
+Filename: "{app}\omnitrigger.exe"; Description: "启动 OmniTrigger"; Flags: postinstall nowait skipifsilent; Check: not StartInTray
+
+[Code]
+function StartInTray: Boolean;
+begin
+  Result := ExpandConstant('{param:STARTINTRAY|0}') = '1';
+end;

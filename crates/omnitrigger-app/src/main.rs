@@ -8614,6 +8614,7 @@ fn main() {
             _ => println!(
                 "OmniTrigger {}\n用法：omnitrigger.exe [参数]\n\
                  无参数              打开日常窗口\n\
+                 --tray              在托盘启动日常监听\n\
                  --settings          打开设置\n\
                  --test-workspace    打开独立测试档\n\
                  --config <路径>     使用指定配置文件\n\
@@ -8831,6 +8832,7 @@ fn main() {
         return;
     }
     let WindowArguments {
+        tray: tray_requested,
         settings: appearance_settings,
         browser_connector_settings,
         panel: open_panel,
@@ -8838,6 +8840,9 @@ fn main() {
         ui_smoke,
         wheel: initial_wheel,
     } = WindowArguments::parse(&arguments).unwrap_or_else(|error| reject_cli_arguments(&error));
+    if tray_requested && profile_startup.test_data {
+        reject_cli_arguments("--tray 只用于日常工作区，测试档请从测试入口打开。");
+    }
     let preserve_foreground = initial_wheel.is_some() && !wheel_editor;
     let launch_target = if preserve_foreground || text_history_page {
         match omnitrigger_windows::capture_shortcut_target() {
@@ -8869,17 +8874,26 @@ fn main() {
     let updater_settings = config_settings
         && (std::env::var_os("OMNITRIGGER_UPDATE_HEALTH").is_some()
             || std::env::var_os("OMNITRIGGER_UPDATE_ERROR").is_some());
-    let start_in_tray = updater_settings
-        && !profile_startup.test_data
-        && std::env::var_os("OMNITRIGGER_UPDATE_TRAY").is_some_and(|value| value == "1");
+    let start_in_tray = tray_requested
+        || (updater_settings
+            && !profile_startup.test_data
+            && std::env::var_os("OMNITRIGGER_UPDATE_TRAY").is_some_and(|value| value == "1"));
     std::env::remove_var("OMNITRIGGER_UPDATE_TRAY");
     let config_path = settings::path();
-    let shared_workspace = arguments.iter().skip(1).all(|arg| arg == "--settings")
+    let shared_workspace = tray_requested
+        || arguments.iter().skip(1).all(|arg| arg == "--settings")
         || ((config_main || config_settings)
             && config_path
                 .file_name()
                 .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json")));
     // 重复启动只通知现有窗口。先取得窗口身份，再恢复磁盘数据，避免改写运行中的配置。
+    let startup_error = |title: &str, message: &str| {
+        if start_in_tray {
+            eprintln!("{title}：{message}");
+            std::process::exit(1);
+        }
+        omnitrigger_windows::show_error_dialog(title, message);
+    };
     let workspace_instance = if shared_workspace {
         match profile_startup.workspace_key(&config_path).and_then(|key| {
             if start_in_tray {
@@ -8894,7 +8908,7 @@ fn main() {
             Ok(Some(instance)) => Some(instance),
             Ok(None) => return,
             Err(message) => {
-                omnitrigger_windows::show_error_dialog("OmniTrigger 无法打开配置窗口", &message);
+                startup_error("OmniTrigger 无法打开配置窗口", &message);
                 return;
             }
         }
@@ -8904,13 +8918,13 @@ fn main() {
     if !profile_startup.test_data {
         if let Some(root) = config_path.parent() {
             if let Err(error) = profiles::recover_external_import(root) {
-                omnitrigger_windows::show_error_dialog("OmniTrigger 导入恢复失败", &error);
+                startup_error("OmniTrigger 导入恢复失败", &error);
                 return;
             }
         }
     }
     #[cfg(windows)]
-    let external_copy_notice = if workspace_instance.is_some() {
+    let external_copy_notice = if workspace_instance.is_some() && !start_in_tray {
         match profile_startup.offer_external_copy() {
             Ok(notice) => notice,
             Err(error) => {
@@ -9023,8 +9037,8 @@ fn main() {
                                 .detach();
                             });
                         } else {
-                            // 无法接收托盘消息时，保留可见的主窗口入口。
-                            window.activate_window();
+                            // 无法接收托盘消息时仍保留任务栏入口，后台启动不抢占前台。
+                            window.minimize_window();
                         }
                     }
                     window

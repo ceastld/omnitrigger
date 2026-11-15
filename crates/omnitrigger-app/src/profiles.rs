@@ -1361,6 +1361,11 @@ fn finish_command(result: Result<String, String>, result_file: Option<&str>) -> 
 pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     let original = arguments.clone();
     let parsed = take_arguments(arguments).unwrap_or_else(|message| exit_rejected(&message));
+    let tray = crate::workspace_mode::WindowArguments::tray_launch(arguments)
+        .unwrap_or_else(|message| exit_rejected(&message));
+    if tray && (parsed.test_workspace || parsed.listen || parsed.command.is_some()) {
+        exit_rejected("--tray 只用于启动日常工作区。");
+    }
     let check_only = arguments.iter().any(|arg| arg == "--check-config");
     let config_index = arguments.iter().position(|argument| argument == "--config");
     if let Some(index) = config_index {
@@ -1386,7 +1391,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
         arguments.iter().skip(1).all(|arg| arg == "--settings") && parsed.command.is_none();
     let check_config = matches!(&arguments[1..], [arg] if arg == "--check-config");
     let env_root = std::env::var_os("OMNITRIGGER_HOME").filter(|root| !root.is_empty());
-    if !parsed.any() && !interactive && !check_config && env_root.is_none() {
+    if !parsed.any() && !interactive && !tray && !check_config && env_root.is_none() {
         // 未指定数据根的其他命令无需探测桌面或预先设置路径。
         return (Startup::daily(), Vec::new());
     }
@@ -1407,7 +1412,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     } else {
         (Startup::daily(), Vec::new())
     };
-    if plain || interactive || check_config {
+    if plain || interactive || tray || check_config {
         #[cfg(windows)]
         escape_redirect(
             &root,
@@ -1557,8 +1562,13 @@ fn escape_redirect(
         return;
     };
     let is_command = parsed.command.is_some() || check_config;
-    let fail =
-        |message: &str| -> ! { fail_redirect(is_command, parsed.result_file.as_deref(), message) };
+    let fail = |message: &str| -> ! {
+        fail_redirect(
+            is_command || original.iter().skip(1).any(|arg| arg == "--tray"),
+            parsed.result_file.as_deref(),
+            message,
+        )
+    };
     let redirected = if check_config {
         redirected_check_file(root, parsed, local_app_data)
     } else {
