@@ -541,6 +541,42 @@ mod tests {
         fs::remove_file(state).unwrap();
         fs::remove_dir(root).unwrap();
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn refresh_drops_its_temporary_registration_after_a_sharing_failure() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "omnitrigger-connector-save-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let config = root.join("bindings.json");
+        let state = state_path(&config);
+        let original = serde_json::to_vec(&Snapshot::default()).unwrap();
+        fs::write(&state, &original).unwrap();
+        let reader = fs::File::options()
+            .read(true)
+            .share_mode(1)
+            .open(&state)
+            .unwrap();
+        let error = run(&config, Operation::Refresh, |_| {}).unwrap_err();
+        assert_eq!(error.code, "connector_failed", "{}", error.message);
+        assert_eq!(fs::read(&state).unwrap(), original);
+        assert!(!fs::read_dir(&root).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("browser-connector.json.tmp-")));
+        drop(reader);
+        run(&config, Operation::Refresh, |_| {}).unwrap();
+        assert!(!load(&config).unwrap().installed);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn event_preserves_structured_error_and_unicode() {
         let decoded: ScriptEvent = serde_json::from_str(

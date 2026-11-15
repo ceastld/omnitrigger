@@ -49,12 +49,16 @@ function Read-VerifiedState {
 function Atomic-Json([string]$Path, $Value) {
     Assert-Plain $Path
     $temporary=$Path+'.tmp-'+[Guid]::NewGuid().ToString('N')
-    [IO.File]::WriteAllText($temporary,($Value | ConvertTo-Json -Depth 30), (New-Object Text.UTF8Encoding($false)))
-    if ([IO.File]::Exists($Path)) {
-        $backup=$Path+'.backup-'+[Guid]::NewGuid().ToString('N')
-        [IO.File]::Replace($temporary,$Path,$backup)
-        try { [IO.File]::Delete($backup) } catch {}
-    } else { [IO.File]::Move($temporary,$Path) }
+    try {
+        [IO.File]::WriteAllText($temporary,($Value | ConvertTo-Json -Depth 30), (New-Object Text.UTF8Encoding($false)))
+        if ([IO.File]::Exists($Path)) {
+            $backup=$Path+'.backup-'+[Guid]::NewGuid().ToString('N')
+            [IO.File]::Replace($temporary,$Path,$backup)
+            try { [IO.File]::Delete($backup) } catch {}
+        } else { [IO.File]::Move($temporary,$Path) }
+    } finally {
+        try { [IO.File]::Delete($temporary) } catch {}
+    }
 }
 function Read-Json([string]$Path, [long]$Limit) {
     Assert-Plain $Path

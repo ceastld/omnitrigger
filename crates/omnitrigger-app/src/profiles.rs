@@ -856,8 +856,21 @@ fn is_data_file(name: &str) -> bool {
 /// 浏览器连接器的程序路径与桥接进程属于当前安装，只在原配置的备份中保留。
 fn transferable_file(name: &str) -> bool {
     is_data_file(name)
-        && !name.eq_ignore_ascii_case("browser-connector.json")
+        && !is_browser_connector_state(name)
         && !name.eq_ignore_ascii_case(crate::legacy_upgrade::MARKER)
+}
+
+fn is_browser_connector_state(name: &str) -> bool {
+    if name.eq_ignore_ascii_case("browser-connector.json") {
+        return true;
+    }
+    // Atomic-Json 在替换登记时使用无连字符的 GUID；用户自命名的草稿仍随配置复制。
+    name.rsplit_once('-').is_some_and(|(prefix, id)| {
+        (prefix.eq_ignore_ascii_case("browser-connector.json.tmp")
+            || prefix.eq_ignore_ascii_case("browser-connector.json.backup"))
+            && id.len() == 32
+            && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2707,9 +2720,24 @@ mod tests {
         let fixture = root.join("fixture");
         std::fs::create_dir(&fixture).unwrap();
         let registration = "browser-connector.json";
+        let leftovers = [
+            "browser-connector.json.tmp-0123456789abcdef0123456789abcdef",
+            "BROWSER-CONNECTOR.JSON.BACKUP-0123456789ABCDEF0123456789ABCDEF",
+        ];
+        let user_file = "browser-connector.json.backup-personal";
         for source in [&root, &fixture] {
             std::fs::write(source.join(registration), "source installation").unwrap();
             std::fs::write(source.join("bindings.json"), "binding data").unwrap();
+            std::fs::write(source.join(user_file), "personal copy").unwrap();
+            let modified = data_modified_ms(source).unwrap();
+            for name in leftovers {
+                let file = std::fs::File::create(source.join(name)).unwrap();
+                file.set_modified(
+                    std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
+                )
+                .unwrap();
+            }
+            assert_eq!(data_modified_ms(source), Some(modified));
         }
         for (alias, seed) in [
             ("copy", Seed::Copy(DEFAULT_ID.into())),
@@ -2718,6 +2746,13 @@ mod tests {
             let entry = create_profile(&root, alias, &seed, None).unwrap();
             let directory = profile_dir(&root, &entry.id);
             assert!(!directory.join(registration).exists());
+            for name in leftovers {
+                assert!(!directory.join(name).exists());
+            }
+            assert_eq!(
+                std::fs::read(directory.join(user_file)).unwrap(),
+                b"personal copy"
+            );
             assert_eq!(
                 std::fs::read(directory.join("bindings.json")).unwrap(),
                 b"binding data"
@@ -2725,6 +2760,9 @@ mod tests {
             std::fs::write(directory.join(registration), "test installation").unwrap();
             let (_, backup) = reset_profile(&root, alias).unwrap();
             assert!(!directory.join(registration).exists());
+            for name in leftovers {
+                assert!(!directory.join(name).exists());
+            }
             assert_eq!(
                 std::fs::read(backup.unwrap().join(registration)).unwrap(),
                 b"test installation"
@@ -2732,6 +2770,9 @@ mod tests {
         }
         let backup = root.join("full-backup");
         copy_data(&root, &backup, DataCopy::Backup).unwrap();
+        for name in leftovers {
+            assert!(backup.join(name).is_file());
+        }
         assert_eq!(
             std::fs::read(backup.join(registration)).unwrap(),
             b"source installation"
