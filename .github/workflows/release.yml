@@ -143,9 +143,24 @@ jobs:
             }
           }
           $shell = New-Object -ComObject Shell.Application
-          foreach ($round in 1..2) {
-            $result = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -WindowStyle Hidden -PassThru -Wait
+          $startup = [Environment]::GetFolderPath('Startup')
+          $loginShortcut = Join-Path $startup 'OmniTrigger 托盘.lnk'
+          function Install-TestPackage([string]$taskSelection) {
+            $flags = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+            if ($taskSelection) { $flags += "/MERGETASKS=$taskSelection" }
+            $result = Start-Process -FilePath $setup -ArgumentList $flags -WindowStyle Hidden -PassThru -Wait
             if ($result.ExitCode) { throw "安装失败：$($result.ExitCode)" }
+          }
+          function Assert-LoginShortcut([bool]$selected) {
+            if ((Test-Path -LiteralPath $loginShortcut -PathType Leaf) -ne $selected) { throw "登录启动项与安装选择不符：$selected" }
+            if ($selected) {
+              $link = $shell.Namespace($startup).ParseName('OmniTrigger 托盘.lnk').GetLink
+              if ($link.Path -ine $exe -or $link.Arguments -cne '--tray') { throw '登录启动项未指向安装版的日常托盘入口。' }
+            }
+          }
+          foreach ($round in 1..2) {
+            Install-TestPackage
+            Assert-LoginShortcut $false
             Assert-ProfileFiles
             $exe = Join-Path $app 'omnitrigger.exe'
             foreach ($name in @('OmniTrigger','OmniTrigger 测试')) {
@@ -170,6 +185,8 @@ jobs:
               Copy-Item -LiteralPath $historyPackage -Destination $testActions.FullName -Recurse
             }
             Assert-HistoryAppend @('--test-workspace') ($round -eq 1)
+            Install-TestPackage 'logintray'
+            Assert-LoginShortcut $true
             if ($round -eq 1) {
               $histories = @((Join-Path $data 'clipboard-history.json'), (Join-Path $testDir 'clipboard-history.json'))
               foreach ($file in $histories) {
@@ -178,16 +195,23 @@ jobs:
               foreach ($file in @($testConfig, (Join-Path $data 'profiles.json')) + $histories) {
                 $expected[$file] = (Get-FileHash -LiteralPath $file).Hash
               }
-              ./scripts/check-running-upgrade.ps1 -Setup $setup -Executable $exe -DataRoot $data -Archive "dist/OmniTrigger-$env:RELEASE_VERSION-windows-x86_64.zip" -ExpectedVersion $env:RELEASE_VERSION
+              ./scripts/check-running-upgrade.ps1 -Setup $setup -Executable $exe -DataRoot $data -Archive "dist/OmniTrigger-$env:RELEASE_VERSION-windows-x86_64.zip" -ExpectedVersion $env:RELEASE_VERSION -LoginShortcut $loginShortcut
+              Assert-LoginShortcut $true
               Assert-ProfileFiles
               $catalog = Join-Path $data 'profiles.json'
               Move-Item -LiteralPath $catalog -Destination (Join-Path $env:RUNNER_TEMP 'original-profiles.json')
               Assert-HistoryAppend @('--test-workspace') $false
               Assert-HistoryAppend @('--profile', 'clipboard-copy') $false
               Assert-ProfileFiles
+            } else {
+              Install-TestPackage '!logintray'
+              Assert-LoginShortcut $false
+              Install-TestPackage
+              Assert-LoginShortcut $false
             }
             $result = Start-Process -FilePath (Join-Path $app 'unins000.exe') -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -WindowStyle Hidden -PassThru -Wait
             if ($result.ExitCode -or (Test-Path $exe)) { throw '卸载失败。' }
+            Assert-LoginShortcut $false
             Assert-ProfileFiles
           }
 

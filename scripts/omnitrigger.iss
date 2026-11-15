@@ -20,6 +20,9 @@ Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 
+[Tasks]
+Name: "logintray"; Description: "登录 Windows 时在托盘启动 OmniTrigger"; Flags: unchecked
+
 [Files]
 Source: "{#Payload}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 Source: "compiler:license.txt"; DestDir: "{app}\licenses\inno-setup"
@@ -27,12 +30,29 @@ Source: "compiler:license.txt"; DestDir: "{app}\licenses\inno-setup"
 [Icons]
 Name: "{userprograms}\OmniTrigger\OmniTrigger"; Filename: "{app}\omnitrigger.exe"
 Name: "{userprograms}\OmniTrigger\OmniTrigger 测试"; Filename: "{app}\omnitrigger.exe"; Parameters: "--test-workspace"
+Name: "{userstartup}\OmniTrigger 托盘"; Filename: "{app}\omnitrigger.exe"; Parameters: "--tray"; Tasks: logintray
+
+[InstallDelete]
+Type: files; Name: "{userstartup}\OmniTrigger 托盘.lnk"; Tasks: not logintray; Check: HadLoginShortcut
 
 [Run]
 Filename: "{app}\omnitrigger.exe"; Parameters: "--tray"; Flags: nowait runasoriginaluser; Check: StartInTray
 Filename: "{app}\omnitrigger.exe"; Description: "启动 OmniTrigger"; Flags: postinstall nowait skipifsilent; Check: not StartInTray
 
 [Code]
+function HadLoginShortcut: Boolean;
+begin
+  Result := GetPreviousData('LoginShortcut', '0') = '1';
+end;
+
+procedure RegisterPreviousData(PreviousDataKey: Integer);
+begin
+  if WizardIsTaskSelected('logintray') then
+    SetPreviousData(PreviousDataKey, 'LoginShortcut', '1')
+  else
+    SetPreviousData(PreviousDataKey, 'LoginShortcut', '0');
+end;
+
 function StartInTray: Boolean;
 begin
   Result := ExpandConstant('{param:STARTINTRAY|0}') = '1';

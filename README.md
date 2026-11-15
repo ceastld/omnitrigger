@@ -55,6 +55,8 @@
 
 运行 `OmniTrigger-<版本>-windows-x86_64-setup.exe` 安装到当前 Windows 用户。开始菜单的 **OmniTrigger** 沿用日常配置，卸载和重装后仍保留。**OmniTrigger 测试** 使用独立的持久配置，默认关闭全局监听。需要便携版时下载 ZIP，完整解压后运行 `omnitrigger.exe`。两个包的摘要见 `SHA256SUMS.txt`。建议使用 Windows 11 x64。[前往下载](https://github.com/ceastld/omnitrigger/releases)
 
+在当前源码构建的安装包中，勾选“登录 Windows 时在托盘启动 OmniTrigger”，下次登录即可使用日常热键。这项设置默认关闭，覆盖安装会记住上次的选择。要关闭它，重新运行安装器并取消勾选即可。
+
 程序未经代码签名。运行需要 [Microsoft Visual C++ v14 Redistributable x64](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)；如提示缺少 `VCRUNTIME140.dll`，请安装微软官方运行库。无需安装 Rust 或开发工具。预览版仍有下文说明的输入、焦点与权限限制。
 
 首次启动加载示例绑定：先按住 `CapsLock` 再按 `W`，松开后确认提示浮层和列表中的命中次数；然后测试侧键加滚轮，最后录制一个自定义组合。单独按下并松开未被组合使用的前缀时，会回放原输入。试用步骤、截图插件安装与命令行参数见[快速开始](docs/GETTING_STARTED.md)。

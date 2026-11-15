@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory)][string]$Archive,
     [Parameter(Mandatory)][string]$Executable,
     [Parameter(Mandatory)][string]$DataRoot,
-    [Parameter(Mandatory)][string]$ExpectedVersion
+    [Parameter(Mandatory)][string]$ExpectedVersion,
+    [string]$LoginShortcut
 )
 $ErrorActionPreference = 'Stop'
 $setupFile = Get-Item -LiteralPath $Setup
@@ -243,6 +244,35 @@ function Stop-TestProcess([Diagnostics.Process]$ui) {
     try {
         if (-not $ui.HasExited) { $ui.Kill(); $null = $ui.WaitForExit(5000) }
     } finally { $ui.Dispose() }
+}
+
+if ($LoginShortcut) {
+    $login = [Diagnostics.ProcessStartInfo]::new((Get-Item -LiteralPath $LoginShortcut).FullName)
+    $login.UseShellExecute = $true
+    $loginProbe = New-Item -ItemType Directory -Path (Join-Path $probe.FullName 'login')
+    $loginHealth = Join-Path $loginProbe.FullName 'healthy'
+    $previousHealth = $env:OMNITRIGGER_UPDATE_HEALTH
+    try {
+        $env:OMNITRIGGER_UPDATE_HEALTH = $loginHealth
+        $resident = [OmniTriggerUpgradeWindow]::StartAndVerifyWindows($login, $false, $true)
+    } finally { $env:OMNITRIGGER_UPDATE_HEALTH = $previousHealth }
+    try {
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        while (-not (Test-Path -LiteralPath $loginHealth) -and -not $resident.HasExited -and $timer.Elapsed.TotalSeconds -lt 30) {
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not (Test-Path -LiteralPath $loginHealth) -or [IO.File]::ReadAllText($loginHealth) -cne $ExpectedVersion) {
+            throw '登录启动后未收到日常热键监听就绪的回执。'
+        }
+        $window = [OmniTriggerUpgradeWindow]::FindAppWindow($resident.Id, 'OmniTrigger', $false)
+        $repeat = [Diagnostics.Process]::Start($login)
+        try {
+            if (-not $repeat.WaitForExit(20000) -or $repeat.ExitCode -ne 0 -or $resident.HasExited -or
+                $resident.Path -ine $appFile.FullName -or -not [OmniTriggerUpgradeWindow]::IsWindow($window) -or
+                [OmniTriggerUpgradeWindow]::IsWindowVisible($window)) { throw '登录启动项没有复用日常托盘进程。' }
+        } finally { Stop-TestProcess $repeat }
+    } finally { Stop-TestProcess $resident }
+    Write-Host '已通过实际登录快捷方式验证首次启动保持隐藏、监听就绪，重复启动复用同一进程。'
 }
 
 # 为 CI 安装版构造独立的默认目录，使外部副本提示走正常启动入口。
