@@ -17,13 +17,20 @@ function Invoke-UpdateFileOperation([scriptblock]$Action) {
     }
 }
 function Start-UpdatedApplication([bool]$HealthCheck) {
-    if ($HealthCheck) { $env:OMNITRIGGER_UPDATE_HEALTH = Join-Path $updateStage 'healthy' }
-    else { Remove-Item Env:OMNITRIGGER_UPDATE_HEALTH -ErrorAction SilentlyContinue }
-    try {
-        # Windows 文件名不能包含双引号；配置路径作为完整独立参数引用。
-        # 这是用户需要看到的交互界面；下载器和替换器自身保持隐藏。
-        return Start-Process -FilePath $updatePlan.executable -ArgumentList @('--config', ('"' + $updatePlan.config + '"'), '--settings') -WorkingDirectory $updateRoot -WindowStyle Normal -PassThru
-    } finally { Remove-Item Env:OMNITRIGGER_UPDATE_HEALTH -ErrorAction SilentlyContinue }
+    # Windows 文件名不能包含双引号；主程序按退出授权中的窗口状态启动。
+    $start = New-Object Diagnostics.ProcessStartInfo
+    $start.FileName = $updatePlan.executable
+    $start.Arguments = '--config "' + $updatePlan.config + '" --settings'
+    $start.WorkingDirectory = $updateRoot
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    if ($HealthCheck) {
+        $start.EnvironmentVariables['OMNITRIGGER_UPDATE_HEALTH'] = Join-Path $updateStage 'healthy'
+        $start.EnvironmentVariables.Remove('OMNITRIGGER_UPDATE_ERROR')
+    } else { $start.EnvironmentVariables.Remove('OMNITRIGGER_UPDATE_HEALTH') }
+    if ($updateInTray) { $start.EnvironmentVariables['OMNITRIGGER_UPDATE_TRAY'] = '1' }
+    else { $start.EnvironmentVariables.Remove('OMNITRIGGER_UPDATE_TRAY') }
+    return [Diagnostics.Process]::Start($start)
 }
 try {
     $updateStage = [IO.Path]::GetFullPath($env:OMNITRIGGER_UPDATE_STAGE)
@@ -52,7 +59,9 @@ try {
         Start-Sleep -Milliseconds 100
     }
     Assert-UpdatePath $updateAuthorization
-    if ([IO.File]::ReadAllText($updateAuthorization) -cne $updatePlan.token) { throw '本次更新的退出授权身份不匹配。' }
+    $authorization = [IO.File]::ReadAllText($updateAuthorization)
+    $updateInTray = $authorization -ceq ($updatePlan.token + "`ntray")
+    if (-not $updateInTray -and $authorization -cne $updatePlan.token) { throw '本次更新的退出授权身份不匹配。' }
     if (-not $updateParent.WaitForExit(30000)) { throw '应用未能退出，已取消更新。' }
     $updateParent.Dispose()
     $updateParentExited = $true

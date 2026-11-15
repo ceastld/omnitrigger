@@ -32,6 +32,14 @@ impl WorkspaceInstance {
     }
 
     pub fn open_with_settings(key: &str, settings_page: bool) -> Result<Option<Self>, String> {
+        Self::acquire(key, Some(settings_page))
+    }
+
+    pub fn open_in_tray(key: &str) -> Result<Option<Self>, String> {
+        Self::acquire(key, None)
+    }
+
+    fn acquire(key: &str, request_settings: Option<bool>) -> Result<Option<Self>, String> {
         let name = format!("Local\\OmniTrigger.Workspace.{key}");
         // 先打开页请求事件，确保并发启动时，取得窗口身份的进程能读到最早的设置请求。
         let (settings, _) = workspace_event(&format!("{name}.Settings"))?;
@@ -39,6 +47,9 @@ impl WorkspaceInstance {
         if !existing {
             return Ok(Some(Self { show, settings }));
         }
+        let Some(settings_page) = request_settings else {
+            return Ok(None);
+        };
         unsafe {
             if settings_page {
                 SetEvent(HANDLE(settings.as_raw_handle()))
@@ -71,6 +82,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!first.take_open_request());
+        assert!(WorkspaceInstance::open_in_tray(&key).unwrap().is_none());
+        assert!(!first.take_open_request() && !first.take_settings_request());
         assert!(WorkspaceInstance::open(&key).unwrap().is_none());
         assert!(first.take_open_request());
         assert!(!first.take_open_request());

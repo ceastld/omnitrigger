@@ -687,6 +687,7 @@ struct StartupOptions {
 
 struct Workspace {
     workspace_instance: Option<omnitrigger_windows::WorkspaceInstance>,
+    tray_window: Option<isize>,
     mode: WorkspaceMode,
     listen: bool,
     test_profile: Option<String>,
@@ -1192,6 +1193,7 @@ impl Workspace {
             };
         let mut workspace = Self {
             workspace_instance: None,
+            tray_window: None,
             mode,
             listen,
             test_profile,
@@ -8865,6 +8867,10 @@ fn main() {
     let updater_settings = config_settings
         && (std::env::var_os("OMNITRIGGER_UPDATE_HEALTH").is_some()
             || std::env::var_os("OMNITRIGGER_UPDATE_ERROR").is_some());
+    let start_in_tray = updater_settings
+        && !profile_startup.test_data
+        && std::env::var_os("OMNITRIGGER_UPDATE_TRAY").is_some_and(|value| value == "1");
+    std::env::remove_var("OMNITRIGGER_UPDATE_TRAY");
     let config_path = settings::path();
     let shared_workspace = arguments.iter().skip(1).all(|arg| arg == "--settings")
         || ((config_main || config_settings)
@@ -8874,7 +8880,14 @@ fn main() {
     // 重复启动只通知现有窗口。先取得窗口身份，再恢复磁盘数据，避免改写运行中的配置。
     let workspace_instance = if shared_workspace {
         match profile_startup.workspace_key(&config_path).and_then(|key| {
-            omnitrigger_windows::WorkspaceInstance::open_with_settings(&key, appearance_settings)
+            if start_in_tray {
+                omnitrigger_windows::WorkspaceInstance::open_in_tray(&key)
+            } else {
+                omnitrigger_windows::WorkspaceInstance::open_with_settings(
+                    &key,
+                    appearance_settings,
+                )
+            }
         }) {
             Ok(Some(instance)) => Some(instance),
             Ok(None) => return,
@@ -8918,7 +8931,8 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     window_min_size: Some(size(px(920.), px(620.))),
-                    focus: !preserve_foreground,
+                    show: !start_in_tray,
+                    focus: !preserve_foreground && !start_in_tray,
                     titlebar: Some(TitlebarOptions {
                         title: Some(
                             profile_startup
@@ -8974,6 +8988,7 @@ fn main() {
                             title_bar,
                         );
                         workspace.workspace_instance = workspace_instance;
+                        workspace.tray_window = tray_window;
                         workspace.external_copy_notice = external_copy_notice;
                         workspace
                     });
@@ -8993,6 +9008,23 @@ fn main() {
                         });
                     }
                     let appearance_view = view.downgrade();
+                    if start_in_tray {
+                        if tray_window.is_some_and(omnitrigger_windows::hide_to_tray) {
+                            // 原生托盘点击直接显示 HWND。首次唤回时应用 GPUI 为隐藏窗口保留的位置。
+                            view.update(cx, |_, cx| {
+                                let mut first = true;
+                                cx.observe_window_activation(window, move |_, window, _| {
+                                    if window.is_window_active() && std::mem::take(&mut first) {
+                                        window.activate_window();
+                                    }
+                                })
+                                .detach();
+                            });
+                        } else {
+                            // 无法接收托盘消息时，保留可见的主窗口入口。
+                            window.activate_window();
+                        }
+                    }
                     window
                         .observe_window_appearance(move |window, cx| {
                             let _ = appearance_view.update(cx, |view, cx| {
@@ -9029,7 +9061,7 @@ fn main() {
                 eprintln!("无法启动 OmniTrigger 界面：{error}");
                 cx.quit();
             }
-            if !preserve_foreground {
+            if !preserve_foreground && !start_in_tray {
                 cx.activate(true);
             }
         });

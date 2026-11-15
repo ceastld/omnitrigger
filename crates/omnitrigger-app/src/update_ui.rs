@@ -104,7 +104,10 @@ impl Workspace {
                     self.update_ui.failed = true;
                     terminal = true;
                 }
-                Ok(updater::Event::Restart(permit)) => match permit.authorize() {
+                Ok(updater::Event::Restart(permit)) => match permit.authorize(
+                    self.tray_window
+                        .is_some_and(omnitrigger_windows::is_in_tray),
+                ) {
                     Ok(()) => {
                         self.update_ui.status = "更新已准备好，正在重启…".into();
                         self.backend.take();

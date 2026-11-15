@@ -1471,29 +1471,39 @@ pub(crate) fn atomic_write(destination: &Path, contents: &[u8]) -> Result<(), St
 
 /// 原子创建配置。如果外部编辑器在准备期间已创建目标，保留它写入的文件。
 pub(crate) fn atomic_create(destination: &Path, contents: &[u8]) -> Result<(), String> {
-    write_and_commit(destination, contents, |temporary, target| {
-        #[cfg(windows)]
-        let result = {
-            use std::os::windows::ffi::OsStrExt;
-            use windows::{core::PCWSTR, Win32::Storage::FileSystem::MoveFileW};
-            let wide = |path: &Path| {
-                path.as_os_str()
-                    .encode_wide()
-                    .chain(Some(0))
-                    .collect::<Vec<_>>()
-            };
-            let (source, dest) = (wide(temporary), wide(target));
-            // MoveFileW 在目标已存在时返回错误，与 rename 的替换语义不同。
-            unsafe { MoveFileW(PCWSTR(source.as_ptr()), PCWSTR(dest.as_ptr())) }
-                .map_err(|error| std::io::Error::from_raw_os_error(error.code().0 & 0xffff))
-        };
-        #[cfg(not(windows))]
-        let result = std::fs::hard_link(temporary, target);
-        match result {
+    write_and_commit(
+        destination,
+        contents,
+        |temporary, target| match move_new_file(temporary, target) {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
             other => other,
-        }
-    })
+        },
+    )
+}
+
+/// 发布完整文件。目标已存在时返回错误，供只能授予一次的更新退出授权使用。
+pub(crate) fn atomic_create_new(destination: &Path, contents: &[u8]) -> Result<(), String> {
+    write_and_commit(destination, contents, move_new_file)
+}
+
+fn move_new_file(temporary: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::{core::PCWSTR, Win32::Storage::FileSystem::MoveFileW};
+        let wide = |path: &Path| {
+            path.as_os_str()
+                .encode_wide()
+                .chain(Some(0))
+                .collect::<Vec<_>>()
+        };
+        let (source, dest) = (wide(temporary), wide(target));
+        // MoveFileW 在目标已存在时返回错误，与 rename 的替换语义不同。
+        unsafe { MoveFileW(PCWSTR(source.as_ptr()), PCWSTR(dest.as_ptr())) }
+            .map_err(|error| std::io::Error::from_raw_os_error(error.code().0 & 0xffff))
+    }
+    #[cfg(not(windows))]
+    std::fs::hard_link(temporary, target)
 }
 
 fn write_and_commit(

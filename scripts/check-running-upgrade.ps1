@@ -34,6 +34,13 @@ public static class OmniTriggerUpgradeWindow {
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam);
     [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+    [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+    public static long WindowSize(IntPtr hwnd) {
+        Rect r;
+        if (!GetWindowRect(hwnd, out r)) throw new Exception("无法读取主窗口尺寸。");
+        return ((long)(r.Right - r.Left) << 32) | (uint)(r.Bottom - r.Top);
+    }
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hwnd, int id);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern uint RegisterWindowMessage(string message);
@@ -41,7 +48,7 @@ public static class OmniTriggerUpgradeWindow {
     public static IntPtr FindAppWindow(uint processId, string expectedTitle) {
         return FindAppWindow(processId, expectedTitle, true);
     }
-    private static IntPtr FindAppWindow(uint processId, string expectedTitle, bool visibleOnly) {
+    public static IntPtr FindAppWindow(uint processId, string expectedTitle, bool visibleOnly) {
         IntPtr workspace = IntPtr.Zero;
         EnumWindows((hwnd, unused) => {
             uint owner;
@@ -74,7 +81,7 @@ public static class OmniTriggerUpgradeWindow {
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromPoint(Point p, uint flags);
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
 
-    public static void VerifyPanelStartup(ProcessStartInfo start, bool requested) {
+    public static Process StartAndVerifyWindows(ProcessStartInfo start, bool requested, bool inTray) {
         const uint show = 0x8002; // EVENT_OBJECT_SHOW
         uint pid = 0;
         var shown = new HashSet<IntPtr>();
@@ -95,30 +102,35 @@ public static class OmniTriggerUpgradeWindow {
             while (!ui.HasExited && timer.Elapsed.TotalSeconds < 30) {
                 Message m;
                 while (PeekMessage(out m, IntPtr.Zero, 0, 0, 1)) DispatchMessage(ref m);
-                var main = FindAppWindow(pid, "OmniTrigger");
+                var main = FindAppWindow(pid, "OmniTrigger", false);
                 var panel = FindAppWindow(pid, "OmniTrigger 触发面板", false);
                 bool visible = panel != IntPtr.Zero && IsWindowVisible(panel);
                 if (!requested && (shown.Contains(panel) || visible))
                     throw new Exception("普通启动在呼出前显示了触发面板。");
-                bool ready = shown.Contains(main) && panel != IntPtr.Zero && (!requested || (shown.Contains(panel) && visible));
+                if (inTray && (shown.Contains(main) || IsWindowVisible(main)))
+                    throw new Exception("托盘更新在用户主动唤回前显示了主窗口。");
+                bool ready = main != IntPtr.Zero && (inTray || shown.Contains(main)) && panel != IntPtr.Zero && (!requested || (shown.Contains(panel) && visible));
                 if (ready) settled.Start(); else settled.Reset();
                 if (settled.ElapsedMilliseconds >= 750) {
-                    if (!requested) return;
-                    if (GetForegroundWindow() == panel) throw new Exception("首次呼出面板抢占了前台。");
-                    Point cursor;
-                    if (!GetCursorPos(out cursor) || MonitorFromWindow(panel, 0) != MonitorFromPoint(cursor, 2))
-                        throw new Exception("首次呼出的触发面板未出现在指针所在屏幕。");
-                    return;
+                    if (requested) {
+                        if (GetForegroundWindow() == panel) throw new Exception("首次呼出面板抢占了前台。");
+                        Point cursor;
+                        if (!GetCursorPos(out cursor) || MonitorFromWindow(panel, 0) != MonitorFromPoint(cursor, 2))
+                            throw new Exception("首次呼出的触发面板未出现在指针所在屏幕。");
+                    }
+                    return ui;
                 }
                 Thread.Sleep(10);
             }
             throw new Exception("未观察到预期的主窗口和面板状态。");
-        } finally {
-            UnhookWinEvent(hookHandle);
-            GC.KeepAlive(observe);
+        } catch {
             if (ui != null) {
                 try { if (!ui.HasExited) { ui.Kill(); ui.WaitForExit(5000); } } finally { ui.Dispose(); }
             }
+            throw;
+        } finally {
+            UnhookWinEvent(hookHandle);
+            GC.KeepAlive(observe);
         }
     }
 }
@@ -143,6 +155,7 @@ function New-AppStart {
     $start.Environment['OMNITRIGGER_HOME'] = $data.FullName
     $null = $start.Environment.Remove('OMNITRIGGER_UPDATE_HEALTH')
     $null = $start.Environment.Remove('OMNITRIGGER_UPDATE_ERROR')
+    $null = $start.Environment.Remove('OMNITRIGGER_UPDATE_TRAY')
     return $start
 }
 
@@ -348,6 +361,7 @@ foreach ($entry in 'config', 'data-root', 'env') {
     $testHealth = Join-Path $receiptDir.FullName 'healthy'
     $testStart = New-AppStart
     $testStart.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $testHealth
+    $testStart.Environment['OMNITRIGGER_UPDATE_TRAY'] = '1'
     switch ($entry) {
         'config' {
             $testStart.ArgumentList.Add('--config')
@@ -387,7 +401,7 @@ foreach ($requested in @($false, $true)) {
     $panelStart = New-AppStart
     $panelStart.Environment['OMNITRIGGER_HOME'] = Join-Path $probe.FullName '面板启动'
     if ($requested) { $panelStart.ArgumentList.Add('--panel') }
-    [OmniTriggerUpgradeWindow]::VerifyPanelStartup($panelStart, $requested)
+    Stop-TestProcess ([OmniTriggerUpgradeWindow]::StartAndVerifyWindows($panelStart, $requested, $false))
 }
 Write-Host '已验证预热面板保持隐藏，首次呼出显示在指针所在屏幕并保留前台。'
 
@@ -491,7 +505,7 @@ try {
     Write-Host '已验证日常托盘监听不会被测试档抢占，旧进程退出后其他配置可正常监听。'
 } finally { Stop-TestProcess $next }
 
-foreach ($restart in '更新成功', '更新回滚', '主窗口打开设置', '设置返回主窗口') {
+foreach ($restart in '更新成功', '更新回滚', '托盘更新成功', '托盘更新回滚', '手动打开设置', '主窗口打开设置', '设置返回主窗口') {
     $start = New-AppStart
     $reopen = New-AppStart
     switch ($restart) {
@@ -504,16 +518,48 @@ foreach ($restart in '更新成功', '更新回滚', '主窗口打开设置', '�
         }
     }
     $healthFile = $null
-    if ($restart -eq '更新成功') {
-        $receiptDir = New-Item -ItemType Directory -Path (Join-Path $probe.FullName 'update')
+    if ($restart.EndsWith('更新成功')) {
+        $receiptDir = New-Item -ItemType Directory -Path (Join-Path $probe.FullName $restart)
         $healthFile = Join-Path $receiptDir.FullName 'healthy'
         $start.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $healthFile
-    } elseif ($restart -eq '更新回滚') {
+    } elseif ($restart.EndsWith('更新回滚')) {
         $start.Environment['OMNITRIGGER_UPDATE_ERROR'] = '测试更新回滚'
     }
-    $ui = [Diagnostics.Process]::Start($start)
+    $inTray = $restart.StartsWith('托盘')
+    if ($inTray -or $restart -eq '手动打开设置') { $start.Environment['OMNITRIGGER_UPDATE_TRAY'] = '1' }
+    $ui = if ($inTray) {
+        [OmniTriggerUpgradeWindow]::StartAndVerifyWindows($start, $false, $true)
+    } else { [Diagnostics.Process]::Start($start) }
     try {
+        if ($inTray) {
+            $hidden = [OmniTriggerUpgradeWindow]::FindAppWindow($ui.Id, 'OmniTrigger', $false)
+            if ($healthFile) {
+                $timer = [Diagnostics.Stopwatch]::StartNew()
+                while (-not $ui.HasExited -and -not (Test-Path -LiteralPath $healthFile) -and $timer.Elapsed.TotalSeconds -lt 30) {
+                    Start-Sleep -Milliseconds 100
+                }
+                if ([IO.File]::ReadAllText($healthFile) -cne $ExpectedVersion) { throw '后台重启未在托盘完成输入后端健康确认。' }
+            }
+            $duplicate = [Diagnostics.Process]::Start($start)
+            try {
+                if (-not $duplicate.WaitForExit(10000) -or $duplicate.ExitCode -ne 0) { throw '重复后台重启未退出。' }
+            } finally { Stop-TestProcess $duplicate }
+            if ($ui.HasExited -or [OmniTriggerUpgradeWindow]::IsWindowVisible($hidden)) { throw '重复后台重启唤起了窗口。' }
+            # 模拟通知区域对该图标发出的 NIN_SELECT 回调。
+            if (-not [OmniTriggerUpgradeWindow]::PostMessage($hidden, 0x834a, [UIntPtr]::Zero, [IntPtr]0x10400)) {
+                throw '托盘选择消息未送达。'
+            }
+            $restored = Wait-AppWindow $ui '' 'OmniTrigger'
+            $timer = [Diagnostics.Stopwatch]::StartNew()
+            while ([OmniTriggerUpgradeWindow]::WindowSize($restored) -ne $normalSize -and $timer.Elapsed.TotalSeconds -lt 10) {
+                Start-Sleep -Milliseconds 100
+            }
+            if ($restored -ne $hidden -or [OmniTriggerUpgradeWindow]::WindowSize($restored) -ne $normalSize) {
+                throw '从托盘首次打开时没有恢复正常大小的原窗口。'
+            }
+        }
         $window = Close-ToTray $ui $healthFile
+        if ($restart -eq '更新成功') { $normalSize = [OmniTriggerUpgradeWindow]::WindowSize($window) }
         $launcher = [Diagnostics.Process]::Start($reopen)
         try {
             if (-not $launcher.WaitForExit(20000) -or $launcher.ExitCode -ne 0) {

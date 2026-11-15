@@ -81,7 +81,8 @@ class Fixture {
         if (!String.IsNullOrEmpty(health)) File.WriteAllText(health, "0.2.0");
         // 测试端以回执文件出现作为就绪信号，发布前先写完并关闭句柄。
         string receipt = args[1] + ".tmp";
-        File.WriteAllText(receipt, version + "|" + Process.GetCurrentProcess().Id + "|" + Environment.GetEnvironmentVariable("OMNITRIGGER_UPDATE_ERROR"));
+        if (args.Length != 3 || args[0] != "--config" || args[2] != "--settings") return 2;
+        File.WriteAllText(receipt, version + "|" + Process.GetCurrentProcess().Id + "|" + Environment.GetEnvironmentVariable("OMNITRIGGER_UPDATE_ERROR") + "|" + Environment.GetEnvironmentVariable("OMNITRIGGER_UPDATE_TRAY"));
         File.Move(receipt, args[1]);
         Thread.Sleep(60000);
         return 0;
@@ -89,7 +90,7 @@ class Fixture {
 }
 '@
     Add-Type -TypeDefinition $updateSource -OutputAssembly $updateFixtureExe -OutputType WindowsApplication
-    foreach ($updateCase in @('success', 'rollback', 'tampered', 'cancelled')) {
+    foreach ($updateCase in @('success', 'rollback', 'success-tray', 'rollback-tray', 'tampered', 'cancelled', 'wrong-token-tray')) {
         $updateRoot = Join-Path $updateTestRoot "安装 空格-$updateCase"
         $updateStage = Join-Path $updateRoot '.omnitrigger-update-fixture'
         $updatePayload = Join-Path $updateStage 'payload'
@@ -98,7 +99,7 @@ class Fixture {
         Copy-Item -LiteralPath $updateFixtureExe -Destination $updateExe
         Copy-Item -LiteralPath $updateFixtureExe -Destination (Join-Path $updatePayload 'omnitrigger.exe')
         [IO.File]::WriteAllText((Join-Path $updateRoot 'README.txt'), 'old')
-        [IO.File]::WriteAllText((Join-Path $updatePayload 'README.txt'), $(if ($updateCase -eq 'rollback') { 'bad' } else { 'new' }))
+        [IO.File]::WriteAllText((Join-Path $updatePayload 'README.txt'), $(if ($updateCase -like 'rollback*') { 'bad' } else { 'new' }))
         $updateConfig = Join-Path $updateRoot '隔离 配置.json'
         $updateParent = Start-TestProcess $updateExe @('--parent') $updateRoot
         $updateManifest = @('omnitrigger.exe', 'README.txt') | ForEach-Object {
@@ -125,10 +126,14 @@ class Fixture {
         }
         Assert-Test (Test-Path -LiteralPath (Join-Path $updateStage 'helper-ready')) '替换器未就绪。'
         Assert-Test ([IO.File]::ReadAllText((Join-Path $updateRoot 'README.txt')) -ceq 'old') '旧版退出前不能替换文件。'
-        if ($updateCase -ne 'cancelled') { [IO.File]::WriteAllText((Join-Path $updateStage 'authorize'), $updatePlan.token) }
+        if ($updateCase -ne 'cancelled') {
+            $authorization = if ($updateCase -eq 'wrong-token-tray') { 'wrong-session' } else { $updatePlan.token }
+            if ($updateCase.EndsWith('-tray')) { $authorization += "`ntray" }
+            [IO.File]::WriteAllText((Join-Path $updateStage 'authorize'), $authorization)
+        }
         [IO.File]::WriteAllText((Join-Path $updateRoot 'exit-parent'), 'exit')
         Assert-Test ($updateHelper.WaitForExit(45000)) '替换器未能及时结束。'
-        if ($updateCase -eq 'cancelled') {
+        if ($updateCase -in 'cancelled', 'wrong-token-tray') {
             Assert-Test ($updateHelper.ExitCode -ne 0) '未授权的普通退出不能安装更新。'
             Assert-Test ([IO.File]::ReadAllText((Join-Path $updateRoot 'README.txt')) -ceq 'old') '未授权时不能替换原文件。'
             continue
@@ -138,7 +143,9 @@ class Fixture {
         $updateResult = [IO.File]::ReadAllText($updateConfig).Split('|')
         $updateChildProcess = Get-Process -Id ([int]$updateResult[1])
         $updateTestChildren.Add($updateChildProcess)
-        if ($updateCase -eq 'success') {
+        $expectedTray = if ($updateCase.EndsWith('-tray')) { '1' } else { '' }
+        Assert-Test ($updateResult[3] -ceq $expectedTray) '更新重启或回滚没有保留授权时的窗口状态。'
+        if ($updateCase -like 'success*') {
             Assert-Test ($updateHelper.ExitCode -eq 0 -and $updateResult[0] -ceq 'new') '更新后没有成功启动新版。'
             Assert-Test (-not (Test-Path -LiteralPath $updateStage)) '成功后应清理暂存和备份。'
         } else {

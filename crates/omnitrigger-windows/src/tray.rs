@@ -160,6 +160,14 @@ pub fn hide_to_tray(raw: isize) -> bool {
     true
 }
 
+pub fn is_in_tray(raw: isize) -> bool {
+    let hwnd = HWND(raw as _);
+    unsafe {
+        GetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, None).as_bool()
+            && (!IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool())
+    }
+}
+
 pub fn show_workspace_window(raw: isize) {
     unsafe { show_main(HWND(raw as _)) }
 }
@@ -331,6 +339,7 @@ mod tests {
             .unwrap();
             let raw = hwnd.0 as isize;
             assert!(!hide_to_tray(raw));
+            assert!(!is_in_tray(raw));
             let restart = RegisterWindowMessageW(w!("TaskbarCreated"));
             assert_ne!(restart, 0);
             let mut registration = TrayRegistration {
@@ -341,7 +350,9 @@ mod tests {
                 SetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, registration.data()).as_bool()
             );
             let _ = ShowWindow(hwnd, SW_SHOW);
+            assert!(!is_in_tray(raw));
             assert!(hide_to_tray(raw));
+            assert!(is_in_tray(raw));
             assert!(!IsWindowVisible(hwnd).as_bool());
 
             for timer in [false, true, true, true] {
@@ -354,7 +365,9 @@ mod tests {
             }
             assert_eq!(registration.retries, NO_ICON);
             assert!(IsIconic(hwnd).as_bool());
+            assert!(is_in_tray(raw));
             show_main(hwnd);
+            assert!(!is_in_tray(raw));
             assert!(hide_to_tray(raw), "关闭时应继续保留日常实例");
             assert!(IsWindowVisible(hwnd).as_bool() && IsIconic(hwnd).as_bool());
 

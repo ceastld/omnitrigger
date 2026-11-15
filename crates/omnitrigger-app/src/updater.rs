@@ -188,16 +188,14 @@ pub struct RestartPermit {
     token: String,
 }
 impl RestartPermit {
-    pub fn authorize(self) -> Result<(), String> {
-        use std::io::Write;
+    pub fn authorize(self, in_tray: bool) -> Result<(), String> {
         plain_path(&self.stage)?;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(self.stage.join("authorize"))
-            .map_err(|error| format!("无法授权更新重启：{error}"))?;
-        file.write_all(self.token.as_bytes())
-            .map_err(|error| error.to_string())
+        let mut authorization = self.token;
+        if in_tray {
+            authorization.push_str("\ntray");
+        }
+        crate::settings::atomic_create_new(&self.stage.join("authorize"), authorization.as_bytes())
+            .map_err(|error| format!("无法授权更新重启：{error}"))
     }
 }
 
@@ -483,6 +481,38 @@ pub fn mark_healthy() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restart_permit_publishes_visibility_once_with_its_token() {
+        let stage = std::env::temp_dir().join(format!(
+            "omnitrigger-permit-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&stage).unwrap();
+        let permit = || RestartPermit {
+            stage: stage.clone(),
+            token: "this-update".into(),
+        };
+        let path = stage.join("authorize");
+        for in_tray in [true, false] {
+            permit().authorize(in_tray).unwrap();
+            assert!(permit().authorize(!in_tray).is_err());
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                if in_tray {
+                    "this-update\ntray"
+                } else {
+                    "this-update"
+                }
+            );
+            fs::remove_file(&path).unwrap();
+        }
+        fs::remove_dir(stage).unwrap();
+    }
     fn release(tag: &str) -> Release {
         let mut release = Release {
             tag_name: tag.into(),
