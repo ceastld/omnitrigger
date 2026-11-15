@@ -829,7 +829,7 @@ struct Workspace {
     error: Option<String>,
     binding_reload_notice: Option<String>,
     external_copy_notice: Option<profiles::ExternalCopyNotice>,
-    retrying_ignore: bool,
+    saving_copy_choice: bool,
     action_error: Option<(u64, String)>,
     status: String,
     hits: VecDeque<Hit>,
@@ -1344,7 +1344,7 @@ impl Workspace {
             action_error: None,
             binding_reload_notice: None,
             external_copy_notice: None,
-            retrying_ignore: false,
+            saving_copy_choice: false,
             status: if mode.owns_input_engine() && !listen {
                 "测试数据，未安装输入监听；需要验证真实输入时加 --listen 启动。".into()
             } else {
@@ -4489,8 +4489,8 @@ impl Workspace {
             )
     }
 
-    fn retry_ignored_copy(&mut self, cx: &mut Context<Self>) {
-        if self.retrying_ignore {
+    fn retry_external_copy_choice(&mut self, cx: &mut Context<Self>) {
+        if self.saving_copy_choice {
             return;
         }
         let Some(choice) = self
@@ -4500,7 +4500,7 @@ impl Workspace {
         else {
             return;
         };
-        self.retrying_ignore = true;
+        self.saving_copy_choice = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -4508,7 +4508,7 @@ impl Workspace {
                 .spawn(async move { choice.save() })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.retrying_ignore = false;
+                this.saving_copy_choice = false;
                 match result {
                     Ok(()) => this.external_copy_notice = None,
                     Err(message) => {
@@ -4539,15 +4539,17 @@ impl Workspace {
                     el.child(
                         small(button(
                             "retry-ignore-copy",
-                            if self.retrying_ignore {
+                            if self.saving_copy_choice {
                                 "保存中…"
                             } else {
                                 "重试保存"
                             },
                             Tone::Secondary,
-                            !self.retrying_ignore,
+                            !self.saving_copy_choice,
                         ))
-                        .on_click(cx.listener(|this, _, _, cx| this.retry_ignored_copy(cx))),
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.retry_external_copy_choice(cx)),
+                        ),
                     )
                 })
                 .child(

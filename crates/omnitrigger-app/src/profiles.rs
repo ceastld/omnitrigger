@@ -1639,13 +1639,13 @@ fn escape_redirect(
     exit_rejected("已脱离打包重定向重启，但新进程没有在 60 秒内返回结果。");
 }
 
-/// 已忽略的外部副本：目录 → 忽略时的最后修改时间。
-fn ignored_path(root: &Path) -> PathBuf {
+/// 已导入或已忽略的外部副本：目录 → 用户选择时看到的最后修改时间。
+fn copy_choices_path(root: &Path) -> PathBuf {
     root.join("device").join("external-copies.json")
 }
 
 #[derive(Clone)]
-pub(super) struct IgnoreCopy {
+pub(super) struct ExternalCopyChoice {
     root: PathBuf,
     directory: PathBuf,
     modified: u64,
@@ -1653,11 +1653,11 @@ pub(super) struct IgnoreCopy {
 
 pub(super) struct ExternalCopyNotice {
     pub message: String,
-    pub retry: Option<IgnoreCopy>,
+    pub retry: Option<ExternalCopyChoice>,
 }
 
-fn read_ignored(root: &Path) -> Result<BTreeMap<String, u64>, String> {
-    let file = ignored_path(root);
+fn read_copy_choices(root: &Path) -> Result<BTreeMap<String, u64>, String> {
+    let file = copy_choices_path(root);
     let read = || {
         let device = file.parent().unwrap();
         if !crate::local_files::is_plain_directory(root) {
@@ -1669,7 +1669,7 @@ fn read_ignored(root: &Path) -> Result<BTreeMap<String, u64>, String> {
         }
         let meta = file.symlink_metadata()?;
         if !meta.is_file() || !crate::local_files::is_plain(&meta) {
-            return Err(std::io::Error::other("忽略记录不是普通本机文件"));
+            return Err(std::io::Error::other("外部副本处理记录不是普通本机文件"));
         }
         serde_json::from_slice(&std::fs::read(&file)?).map_err(std::io::Error::other)
     };
@@ -1680,15 +1680,15 @@ fn read_ignored(root: &Path) -> Result<BTreeMap<String, u64>, String> {
     }
 }
 
-impl IgnoreCopy {
+impl ExternalCopyChoice {
     pub fn save(&self) -> Result<(), String> {
-        let file = ignored_path(&self.root);
+        let file = copy_choices_path(&self.root);
         let result = (|| {
             if !crate::local_files::is_plain_directory(&self.root) {
                 return Err(format!("无法访问本机配置目录 {}。", self.root.display()));
             }
             let _lock = lock_catalog(&self.root)?;
-            let mut ignored = read_ignored(&self.root)?;
+            let mut ignored = read_copy_choices(&self.root)?;
             ignored.insert(
                 normalize(&self.directory).to_ascii_lowercase(),
                 self.modified,
@@ -1696,7 +1696,7 @@ impl IgnoreCopy {
             let bytes = serde_json::to_vec_pretty(&ignored).map_err(|e| e.to_string())?;
             crate::settings::atomic_write(&file, &bytes)
         })();
-        result.map_err(|e: String| format!("忽略选择未保存。{e}"))
+        result.map_err(|e: String| format!("外部副本的处理记录未保存。{e}"))
     }
 }
 
@@ -1743,7 +1743,7 @@ fn external_copies(local_app_data: &Path) -> Vec<(String, PathBuf, u64)> {
         .collect()
 }
 
-/// 选出比当前数据新、且未在该修改时间被忽略的最新副本。
+/// 选出比当前数据新、且本次修改尚未处理的最新副本。
 fn pending_copy(
     copies: Vec<(String, PathBuf, u64)>,
     current_ms: Option<u64>,
@@ -1772,7 +1772,7 @@ fn offer_external_copy(
     {
         return Ok(None);
     }
-    let ignored = match read_ignored(root) {
+    let ignored = match read_copy_choices(root) {
         Ok(map) => map,
         Err(error) => {
             return Ok(Some(ExternalCopyNotice {
@@ -1793,39 +1793,46 @@ fn offer_external_copy(
         relative_age(modified),
         root.display(),
     );
-    match omnitrigger_windows::ask_yes_no_cancel("OmniTrigger 发现外部数据副本", &text) {
-        Some(true) => return import_for_startup(root, &directory),
-        Some(false) => {
-            let choice = IgnoreCopy {
-                root: root.to_owned(),
-                directory,
-                modified,
-            };
-            if let Err(message) = choice.save() {
-                return Ok(Some(ExternalCopyNotice {
-                    message,
-                    retry: Some(choice),
-                }));
-            }
-        }
-        None => {}
-    }
-    Ok(None)
+    let Some(import) =
+        omnitrigger_windows::ask_yes_no_cancel("OmniTrigger 发现外部数据副本", &text)
+    else {
+        return Ok(None);
+    };
+    apply_external_copy_choice(
+        ExternalCopyChoice {
+            root: root.to_owned(),
+            directory,
+            modified,
+        },
+        import,
+    )
 }
 
 #[cfg(windows)]
-fn import_for_startup(root: &Path, directory: &Path) -> Result<Option<ExternalCopyNotice>, String> {
-    match external_import::import(root, directory) {
-        Ok(()) => Ok(None),
-        Err(error) => {
+fn apply_external_copy_choice(
+    choice: ExternalCopyChoice,
+    import: bool,
+) -> Result<Option<ExternalCopyNotice>, String> {
+    if import {
+        if let Err(error) = external_import::import(&choice.root, &choice.directory) {
             // 允许主窗口打开前，确认之前的日常数据已完整恢复。
-            external_import::recover(root).map_err(|recovery| format!("{error}\n{recovery}"))?;
-            Ok(Some(ExternalCopyNotice {
+            external_import::recover(&choice.root)
+                .map_err(|recovery| format!("{error}\n{recovery}"))?;
+            return Ok(Some(ExternalCopyNotice {
                 message: format!("未导入外部副本。{error}"),
                 retry: None,
-            }))
+            }));
         }
     }
+    // 导入已完成时，“重试保存”只写本机处理记录，不重复覆盖用户的修改。
+    Ok(choice.save().err().map(|error| ExternalCopyNotice {
+        message: if import {
+            format!("副本已导入。{error}")
+        } else {
+            error
+        },
+        retry: Some(choice),
+    }))
 }
 
 #[cfg(test)]
@@ -2640,23 +2647,116 @@ mod tests {
         assert_eq!(offered.map(|entry| entry.2), Some(1_700_000_030_000));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn imported_copy_does_not_prompt_again_after_restoring_older_daily_files() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let root = temp_root("remember-import");
+        let source = root.join("Packages/sample/LocalCache/Local/OmniTrigger");
+        let daily = root.join("daily");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir(&daily).unwrap();
+        let save_at = |path: PathBuf, bytes: &[u8], seconds| {
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_secs(seconds))
+                .unwrap();
+        };
+        let before = 1_700_000_000;
+        save_at(daily.join("bindings.json"), b"daily", before);
+        save_at(source.join("bindings.json"), b"imported", before + 60);
+        let pending = || {
+            pending_copy(
+                external_copies(&root),
+                data_modified_ms(&daily),
+                &read_copy_choices(&daily).unwrap(),
+            )
+        };
+        let (_, directory, modified) = pending().unwrap();
+        assert_eq!(modified, (before + 60) * 1000);
+        let choice = ExternalCopyChoice {
+            root: daily.clone(),
+            directory,
+            modified,
+        };
+        assert!(apply_external_copy_choice(choice, true).unwrap().is_none());
+        assert_eq!(
+            std::fs::read(daily.join("bindings.json")).unwrap(),
+            b"imported"
+        );
+        save_at(daily.join("bindings.json"), b"daily", before);
+        assert!(
+            pending().is_none(),
+            "已接受的同一副本在恢复本地备份后重复提示"
+        );
+        save_at(source.join("bindings.json"), b"new edit", before + 120);
+        assert_eq!(pending().unwrap().2, (before + 120) * 1000);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retrying_the_record_after_an_import_keeps_later_edits() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = temp_root("remember-import-locked");
+        let daily = root.join("daily");
+        let source = root.join("external");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir_all(daily.join("device")).unwrap();
+        let file = daily.join("bindings.json");
+        std::fs::write(&file, b"daily").unwrap();
+        std::fs::write(source.join("bindings.json"), b"imported").unwrap();
+        let record = copy_choices_path(&daily);
+        std::fs::write(&record, br#"{"other":15}"#).unwrap();
+        let lock = std::fs::File::options()
+            .read(true)
+            .share_mode(1)
+            .open(&record)
+            .unwrap();
+        let choice = ExternalCopyChoice {
+            root: daily.clone(),
+            directory: source.clone(),
+            modified: data_modified_ms(&source).unwrap(),
+        };
+        let notice = apply_external_copy_choice(choice, true).unwrap().unwrap();
+        assert!(notice.message.contains("副本已导入"));
+        assert_eq!(std::fs::read(&file).unwrap(), b"imported");
+        assert_eq!(read_copy_choices(&daily).unwrap().len(), 1);
+        std::fs::write(&file, b"edited after import").unwrap();
+        drop(lock);
+        let choice = notice.retry.unwrap();
+        choice.save().unwrap();
+        let saved = read_copy_choices(&daily).unwrap();
+        assert_eq!(saved.get("other"), Some(&15));
+        assert_eq!(
+            saved.get(&normalize(&source).to_ascii_lowercase()),
+            Some(&choice.modified)
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"edited after import");
+        assert_eq!(std::fs::read_dir(daily.join("backups")).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn ignore_choices_merge_and_keep_the_version_seen_by_the_user() {
         let root = temp_root("ignore-merge");
-        let a = IgnoreCopy {
+        let a = ExternalCopyChoice {
             root: root.clone(),
             directory: root.join("a"),
             modified: 10,
         };
-        let b = IgnoreCopy {
+        let b = ExternalCopyChoice {
             root: root.clone(),
             directory: root.join("b"),
             modified: 20,
         };
-        assert!(read_ignored(&root).unwrap().is_empty());
+        assert!(read_copy_choices(&root).unwrap().is_empty());
         a.save().unwrap();
         b.save().unwrap();
-        let ignored = read_ignored(&root).unwrap();
+        let ignored = read_copy_choices(&root).unwrap();
         let copies = vec![
             ("a".into(), a.directory.clone(), 10),
             ("b".into(), b.directory.clone(), 20),
@@ -2670,8 +2770,8 @@ mod tests {
     fn unreadable_ignore_records_are_reported_and_preserved() {
         let root = temp_root("ignore-invalid");
         let device = root.join("device");
-        let path = ignored_path(&root);
-        let choice = IgnoreCopy {
+        let path = copy_choices_path(&root);
+        let choice = ExternalCopyChoice {
             root: root.clone(),
             directory: root.join("copy"),
             modified: 10,
@@ -2682,7 +2782,7 @@ mod tests {
         std::fs::remove_file(&device).unwrap();
         std::fs::create_dir(&device).unwrap();
         std::fs::write(&path, b"{").unwrap();
-        assert!(read_ignored(&root).is_err());
+        assert!(read_copy_choices(&root).is_err());
         assert!(choice.save().is_err());
         assert_eq!(std::fs::read(path).unwrap(), b"{");
         std::fs::remove_dir_all(root).unwrap();
@@ -2693,12 +2793,12 @@ mod tests {
     fn retry_after_sharing_violation_preserves_other_choices() {
         use std::os::windows::fs::OpenOptionsExt;
         let root = temp_root("ignore-locked");
-        let choice = IgnoreCopy {
+        let choice = ExternalCopyChoice {
             root: root.clone(),
             directory: root.join("copy"),
             modified: 10,
         };
-        let path = ignored_path(&root);
+        let path = copy_choices_path(&root);
         let device = path.parent().unwrap();
         std::fs::create_dir(device).unwrap();
         std::fs::write(&path, br#"{"other":20}"#).unwrap();
@@ -2712,7 +2812,7 @@ mod tests {
         assert_eq!(std::fs::read_dir(device).unwrap().count(), 1);
         drop(lock);
         choice.save().unwrap();
-        let ignored = read_ignored(&root).unwrap();
+        let ignored = read_copy_choices(&root).unwrap();
         assert_eq!(ignored.get("other"), Some(&20));
         assert_eq!(
             ignored.get(&normalize(&choice.directory).to_ascii_lowercase()),

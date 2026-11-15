@@ -301,6 +301,34 @@ foreach ($busy in @($true, $false)) {
 }
 Write-Host '已验证配置被编辑器占用时直接打开日常窗口，释放后可重新导入。'
 
+# 恢复较早的日常备份后，已成功导入过的副本不应再次阻塞热键启动。
+[IO.File]::WriteAllText($importDaily, '{"version":1,"bindings":[]}')
+[IO.File]::SetLastWriteTimeUtc($importDaily, [DateTime]::UtcNow.AddDays(-1))
+$restoredHash = (Get-FileHash -LiteralPath $importDaily).Hash
+$importBackups = Join-Path $daily 'backups'
+$savedCount = @(Get-ChildItem -LiteralPath $importBackups -Directory -Filter 'before-import-*').Count
+foreach ($changed in @($false, $true)) {
+    if ($changed) {
+        [IO.File]::WriteAllText($sourceFile, '{"version":1, "bindings": []}')
+        [IO.File]::SetLastWriteTimeUtc($sourceFile, [DateTime]::UtcNow.AddHours(5))
+    }
+    $ui = [Diagnostics.Process]::Start($ignoreStart)
+    try {
+        if ($changed) {
+            $prompt = Wait-AppWindow $ui '' 'OmniTrigger 发现外部数据副本'
+            if (-not [OmniTriggerUpgradeWindow]::PostMessage($prompt, 0x0111, [UIntPtr]2, [IntPtr]::Zero)) {
+                throw '来源修改后的提示未能取消。'
+            }
+        }
+        $null = Wait-AppWindow $ui '' 'OmniTrigger'
+        if ((Get-FileHash -LiteralPath $importDaily).Hash -ne $restoredHash -or
+            @(Get-ChildItem -LiteralPath $importBackups -Directory -Filter 'before-import-*').Count -ne $savedCount) {
+            throw '恢复备份后，日常数据被覆盖或再次执行了导入。'
+        }
+    } finally { Stop-TestProcess $ui }
+}
+Write-Host '已验证恢复日常备份后直接启动，来源有新修改时才再次提示。'
+
 # 使用单独的数据根，验证安装版窗口确实持有测试档，正常退出后才允许重置。
 $outerRoot = Join-Path $probe.FullName 'profiles-test'
 $parentEntry = & $appFile.FullName --data-root $outerRoot --profile-create parent-test --seed empty | ConvertFrom-Json
