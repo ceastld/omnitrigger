@@ -1386,18 +1386,28 @@ fn config_lock_path(destination: &Path) -> Result<PathBuf, String> {
     Ok(destination.with_file_name(name))
 }
 
-/// 来源可能只读。锁文件首次使用后会保留，因此也能检测复制期间第一次创建的锁。
-pub(super) struct ConfigCopyGuard {
+/// 读者不创建锁文件。保存方保留用过的锁，因此读取后也能发现期间出现的第一个写入者。
+pub(super) struct ConfigReadGuard {
     path: PathBuf,
     kind: &'static str,
     file: Option<std::fs::File>,
 }
 
-impl ConfigCopyGuard {
-    pub(super) fn acquire(destination: &Path, kind: &'static str) -> Result<Self, String> {
+impl ConfigReadGuard {
+    pub(super) fn for_copy(destination: &Path, kind: &'static str) -> Result<Self, String> {
         let path = config_lock_path(destination)?;
         crate::script_runtime::check_local_path(&path)?;
-        let file = match std::fs::File::open(&path) {
+        Self::open(path, kind)
+    }
+
+    fn open(path: PathBuf, kind: &'static str) -> Result<Self, String> {
+        let opened = path.symlink_metadata().and_then(|metadata| {
+            if !metadata.is_file() || !crate::local_files::is_plain(&metadata) {
+                return Err(std::io::Error::other("配置锁必须是普通文件。"));
+            }
+            std::fs::File::open(&path)
+        });
+        let file = match opened {
             Ok(file) => {
                 file.try_lock_shared().map_err(|error| match error {
                     std::fs::TryLockError::WouldBlock => {
@@ -1418,12 +1428,31 @@ impl ConfigCopyGuard {
     pub(super) fn verify(&self) -> Result<(), String> {
         if self.file.is_none() && self.path.try_exists().map_err(|e| e.to_string())? {
             return Err(format!(
-                "复制期间其他操作访问了来源{}配置，请稍后重试。",
+                "读取期间其他操作访问了来源{}配置，请稍后重试。",
                 self.kind
             ));
         }
         Ok(())
     }
+}
+
+pub(super) fn read_config_pair<T>(
+    bindings: &Path,
+    read: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let guards = [
+        ConfigReadGuard::open(config_lock_path(bindings)?, "热键")?,
+        ConfigReadGuard::open(
+            config_lock_path(&bindings.with_file_name("wheels.json"))?,
+            "轮盘",
+        )?,
+    ];
+    let result = read();
+    // 首次保存可能在两个文件的读取之间开始，其间产生的解析错误也应提示重试。
+    for guard in guards {
+        guard.verify()?;
+    }
+    result
 }
 
 pub(crate) fn backup_legacy(
@@ -3245,6 +3274,25 @@ mod tests {
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn checking_a_pair_detects_the_first_save_even_when_the_read_returned_an_error() {
+        for (name, kind) in [("custom.json", "热键"), ("wheels.json", "轮盘")] {
+            let scratch = Scratch::new();
+            let config = scratch.0.join("custom.json");
+            let saved = scratch.0.join(name);
+            let error = read_config_pair(&config, || {
+                assert!(!config_lock_path(&saved)?.exists());
+                drop(lock_config(&saved, kind)?);
+                Err::<(), _>("读取到不完整的引用".into())
+            })
+            .unwrap_err();
+            assert!(
+                error.contains(kind) && error.contains("稍后重试"),
+                "{error}"
+            );
         }
     }
 

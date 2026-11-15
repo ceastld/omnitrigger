@@ -8559,10 +8559,12 @@ fn open_script_history_window(
 
 fn check_config(allow_missing_bindings: bool) -> Result<String, String> {
     let path = settings::path();
-    let (bindings, scenes) = settings::load_bindings_and_scenes(&path, allow_missing_bindings)
-        .map_err(|error| format!("{}：{error}", path.display()))?;
+    let (bindings, scenes, wheels) = settings::read_config_pair(&path, || {
+        let (bindings, scenes) = settings::load_bindings_and_scenes(&path, allow_missing_bindings)
+            .map_err(|error| format!("{}：{error}", path.display()))?;
+        Ok((bindings, scenes, Wheels::load(&path)?))
+    })?;
     settings::validate(&bindings)?;
-    let wheels = Wheels::load(&path)?;
     for wheel in &wheels.wheels {
         wheel_scenes::check_wheel(wheel, &scenes)
             .map_err(|error| format!("轮盘“{}”：{error}", wheel.name))?;

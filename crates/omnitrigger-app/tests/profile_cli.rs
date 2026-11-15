@@ -301,6 +301,68 @@ fn check_config_reads_bom_in_hotkeys_and_referenced_wheel_without_rewriting() {
 }
 
 #[test]
+fn check_config_reports_a_save_instead_of_an_incomplete_wheel_reference() {
+    let root = std::env::temp_dir().join(format!("omnitrigger-cli-pair-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let bindings = root.join("bindings.json");
+    let wheels = root.join("wheels.json");
+    let receipt = root.join("result.json");
+    let binding = r#"{"version":24,"bindings":[{"id":1,"held":[{"kind":"key","value":20}],"activation":{"kind":"press","value":{"kind":"key","value":87}},"message":"轮盘","enabled":true,"action":{"kind":"show_wheel","wheel_id":"notes"}}]}"#;
+    let layout = r#"{"version":6,"wheels":[{"id":"notes","name":"笔记","slots":[{"label":"提示","action":{"kind":"notification"}}]}]}"#;
+    std::fs::write(&bindings, binding).unwrap();
+    std::fs::write(&wheels, layout).unwrap();
+    let check = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_omnitrigger"))
+            .arg("--check-config")
+            .args(args)
+            .env("OMNITRIGGER_HOME", &root)
+            .output()
+            .unwrap()
+    };
+    let explicit = ["--config", bindings.to_str().unwrap()];
+    assert!(check(&explicit).status.success());
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+    std::fs::write(&bindings, binding.replace("notes", "updated")).unwrap();
+    for (file, kind) in [("bindings.json.lock", "热键"), ("wheels.json.lock", "轮盘")] {
+        let lock = std::fs::File::create(root.join(file)).unwrap();
+        lock.lock().unwrap();
+        let result = check(&explicit);
+        assert!(!result.status.success() && result.stdout.is_empty());
+        let error = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            error.contains(kind) && error.contains("稍后重试"),
+            "{error}"
+        );
+        let relayed = check(&[
+            "--data-root",
+            root.to_str().unwrap(),
+            "--relaunch-result",
+            receipt.to_str().unwrap(),
+        ]);
+        assert!(
+            !relayed.status.success() && relayed.stdout.is_empty() && relayed.stderr.is_empty()
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["text"].as_str().unwrap(), error.trim_end());
+        std::fs::remove_file(&receipt).unwrap();
+    }
+    let incomplete = check(&explicit);
+    assert!(!incomplete.status.success());
+    assert!(String::from_utf8_lossy(&incomplete.stderr).contains("不存在"));
+    let updated = layout.replace("notes", "updated");
+    std::fs::write(&wheels, &updated).unwrap();
+    assert!(check(&explicit).status.success());
+    assert_eq!(std::fs::read_to_string(wheels).unwrap(), updated);
+    assert_eq!(
+        std::fs::read_to_string(bindings).unwrap(),
+        binding.replace("notes", "updated")
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn check_config_uses_the_selected_data_root() {
     let root = std::env::temp_dir().join(format!("omnitrigger-cli-root-{}", std::process::id()));
     let default = root.join("local").join("OmniTrigger");

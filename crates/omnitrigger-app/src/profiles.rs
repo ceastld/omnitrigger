@@ -921,8 +921,8 @@ fn copy_data(from: &Path, to: &Path, mode: DataCopy) -> Result<usize, String> {
         None
     } else {
         Some([
-            crate::settings::ConfigCopyGuard::acquire(&from.join("bindings.json"), "热键")?,
-            crate::settings::ConfigCopyGuard::acquire(&from.join("wheels.json"), "轮盘")?,
+            crate::settings::ConfigReadGuard::for_copy(&from.join("bindings.json"), "热键")?,
+            crate::settings::ConfigReadGuard::for_copy(&from.join("wheels.json"), "轮盘")?,
         ])
     };
     let mut copied = 0;
@@ -1649,7 +1649,7 @@ fn redirected_check_file(
     root: &Path,
     parsed: &Arguments,
     local: &Path,
-    create_testing: bool,
+    inspection: Inspection,
 ) -> Result<Option<String>, String> {
     fn package(file: &Path, local: &Path) -> Result<Option<String>, String> {
         if !file
@@ -1668,7 +1668,7 @@ fn redirected_check_file(
             }
             let catalog = read_catalog(root)?;
             let Some(entry) = catalog.find(key) else {
-                if parsed.test_workspace && create_testing {
+                if parsed.test_workspace && inspection == Inspection::Config {
                     // 首次创建 testing 会写登记文件，沿用普通启动时的写入探针。
                     std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
                     let actual = omnitrigger_windows::probe_final_directory(root)?;
@@ -1680,7 +1680,16 @@ fn redirected_check_file(
         }
         None => root.to_path_buf(),
     };
-    for name in ["bindings.json", "wheels.json"] {
+    let files: &[&str] = match inspection {
+        Inspection::Config => &[
+            "bindings.json",
+            "wheels.json",
+            "bindings.json.lock",
+            "wheels.json.lock",
+        ],
+        Inspection::Actions => &["bindings.json", "wheels.json"],
+    };
+    for name in files {
         if let Some(name) = package(&dir.join(name), local)? {
             return Ok(Some(name));
         }
@@ -1737,9 +1746,13 @@ fn escape_redirect(
             // 探针关闭即删除，放在配置档之外，查询不创建配置档或改动其内容。
             omnitrigger_windows::probe_final_directory(local_app_data)
                 .map(|actual| redirected_package(local_app_data, &actual, local_app_data))
-                .or_else(|_| redirected_check_file(root, parsed, local_app_data, false))
+                .or_else(|_| {
+                    redirected_check_file(root, parsed, local_app_data, Inspection::Actions)
+                })
         }
-        Some(Inspection::Config) => redirected_check_file(root, parsed, local_app_data, true),
+        Some(Inspection::Config) => {
+            redirected_check_file(root, parsed, local_app_data, Inspection::Config)
+        }
         None => std::fs::create_dir_all(root)
             .map_err(|error| format!("创建数据根 {} 失败：{error}", root.display()))
             .and_then(|()| omnitrigger_windows::probe_final_directory(root))
@@ -3253,14 +3266,14 @@ mod tests {
         copy_transferable_data(&root, &destination, DataCopy::FixtureOrImport).unwrap();
         for (name, kind) in [("bindings.json", "热键"), ("wheels.json", "轮盘")] {
             let path = root.join(name);
-            let first_copy = crate::settings::ConfigCopyGuard::acquire(&path, kind).unwrap();
+            let first_copy = crate::settings::ConfigReadGuard::for_copy(&path, kind).unwrap();
             assert!(!root.join(format!("{name}.lock")).exists());
             first_copy.verify().unwrap();
             drop(crate::settings::lock_config(&path, kind).unwrap());
             assert!(first_copy.verify().unwrap_err().contains(kind));
 
-            let reader = crate::settings::ConfigCopyGuard::acquire(&path, kind).unwrap();
-            let other_reader = crate::settings::ConfigCopyGuard::acquire(&path, kind).unwrap();
+            let reader = crate::settings::ConfigReadGuard::for_copy(&path, kind).unwrap();
+            let other_reader = crate::settings::ConfigReadGuard::for_copy(&path, kind).unwrap();
             drop(reader);
             assert!(crate::settings::lock_config(&path, kind).is_err());
             other_reader.verify().unwrap();
