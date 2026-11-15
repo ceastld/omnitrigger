@@ -750,13 +750,13 @@ mod tests {
             .0
             .join("Packages/Ready/LocalCache/Local/OmniTrigger");
         write(&ready, "bindings.json", "other bindings");
+        let other = fixture.0.join("other");
         let offered = || {
-            super::super::external_copies(&fixture.0)
+            super::super::external_copies(&other, &fixture.0)
                 .into_iter()
                 .map(|(_, directory, _)| directory)
                 .collect::<Vec<_>>()
         };
-        let other = fixture.0.join("other");
         write(&root, "bindings.json", "old binding");
         write(&root, "wheels.json", "old wheel");
         package(&root, "tools", "local.tools", "old script");
@@ -1006,13 +1006,30 @@ mod tests {
         use crate::legacy_upgrade::{IndexGuard, MARKER};
         let fixture = Fixture::new();
         let root = fixture.0.join("daily");
-        let source = fixture.0.join("other");
+        let source = fixture
+            .0
+            .join("Packages/Edited/LocalCache/Local/OmniTrigger");
+        let ready = fixture
+            .0
+            .join("Packages/Ready/LocalCache/Local/OmniTrigger");
+        write(&ready, "bindings.json", "other");
+        let offered = || {
+            super::super::external_copies(&root, &fixture.0)
+                .into_iter()
+                .map(|(_, path, _)| path)
+                .collect::<Vec<_>>()
+        };
         let staging = "actions/.install-legacy-upgrade-12-23-0/plugins.before.json";
         write(&root, "bindings.json", "old");
         write(&source, "bindings.json", "new");
         write(&source, staging, "source stage");
         for dir in [&root, &source] {
             write(dir, MARKER, "pending");
+            if dir == &source {
+                assert_eq!(offered().as_slice(), std::slice::from_ref(&ready));
+            } else {
+                assert!(offered().is_empty());
+            }
             assert!(import(&root, &source).is_err());
             assert_eq!(fs::read(root.join("bindings.json")).unwrap(), b"old");
             assert_eq!(fs::read(dir.join(MARKER)).unwrap(), b"pending");
@@ -1022,6 +1039,7 @@ mod tests {
             assert_eq!(fs::read(root.join("bindings.json")).unwrap(), b"old");
             drop(lock);
         }
+        assert!(offered().contains(&source));
         import(&root, &source).unwrap();
         assert_eq!(fs::read(root.join("bindings.json")).unwrap(), b"new");
         assert!(!root.join(staging).exists());

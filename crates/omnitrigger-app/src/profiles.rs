@@ -1078,7 +1078,6 @@ fn seed_into(root: &Path, catalog: &Catalog, seed: &Seed, target: &Path) -> Resu
 /// 只读取来源，夹具可以位于只读目录。既有索引锁和升级写入互斥；
 /// 首次升级还没有锁文件，则在复制结束时检测它是否刚刚创建。
 fn copy_transferable_data(from: &Path, to: &Path, mode: DataCopy) -> Result<(), String> {
-    let config = from.join("bindings.json");
     let lock_path = from.join(crate::legacy_upgrade::INDEX_LOCK);
     crate::script_runtime::check_local_path(&lock_path)?;
     let mut options = std::fs::File::options();
@@ -1098,7 +1097,16 @@ fn copy_transferable_data(from: &Path, to: &Path, mode: DataCopy) -> Result<(), 
             ))
         }
     };
-    crate::legacy_upgrade::block_config(&config)
+    check_copy_source_state(from)?;
+    copy_data(from, to, mode)?;
+    if source_lock.is_none() && lock_path.try_exists().map_err(|e| e.to_string())? {
+        return Err("来源插件在复制期间发生写入，请稍后重试。".into());
+    }
+    Ok(())
+}
+
+fn check_copy_source_state(from: &Path) -> Result<(), String> {
+    crate::legacy_upgrade::block_config(&from.join("bindings.json"))
         .map_err(|e| format!("无法复制 {}。{}", from.display(), e.message))?;
     #[cfg(windows)]
     if let Some(pending) = external_import::recorded_import(from)? {
@@ -1106,10 +1114,6 @@ fn copy_transferable_data(from: &Path, to: &Path, mode: DataCopy) -> Result<(), 
             "来源配置有未恢复的导入：{}。请先恢复来源，或选择该次导入前的备份作为夹具。",
             pending.display()
         ));
-    }
-    copy_data(from, to, mode)?;
-    if source_lock.is_none() && lock_path.try_exists().map_err(|e| e.to_string())? {
-        return Err("来源插件在复制期间发生写入，请稍后重试。".into());
     }
     Ok(())
 }
@@ -2015,9 +2019,11 @@ fn relative_age(modified_ms: u64) -> String {
 }
 
 /// 外部副本：打包应用重定向产生的 `<LOCALAPPDATA>\Packages\<包>\LocalCache\Local\OmniTrigger`。
-fn external_copies(local_app_data: &Path) -> Vec<(String, PathBuf, u64)> {
+fn external_copies(root: &Path, local_app_data: &Path) -> Vec<(String, PathBuf, u64)> {
     let packages = local_app_data.join("Packages");
-    if !crate::local_files::is_plain_directory(&packages) {
+    if crate::legacy_upgrade::block_config(&root.join("bindings.json")).is_err()
+        || !crate::local_files::is_plain_directory(&packages)
+    {
         return Vec::new();
     }
     let Ok(packages) = std::fs::read_dir(packages) else {
@@ -2031,22 +2037,22 @@ fn external_copies(local_app_data: &Path) -> Vec<(String, PathBuf, u64)> {
                 .join("LocalCache")
                 .join("Local")
                 .join("OmniTrigger");
-            let modified = data_modified_ms(&directory)?;
-            #[cfg(windows)]
-            if !matches!(external_import::recorded_import(&directory), Ok(None)) {
+            if !crate::local_files::is_plain_directory(&directory) {
                 return None;
             }
-            directory
-                .join("bindings.json")
-                .symlink_metadata()
-                .is_ok_and(|metadata| metadata.is_file() && crate::local_files::is_plain(&metadata))
-                .then(|| {
-                    (
-                        entry.file_name().to_string_lossy().into_owned(),
-                        directory,
-                        modified,
-                    )
-                })
+            let bindings = directory.join("bindings.json").symlink_metadata().ok()?;
+            if !bindings.is_file()
+                || !crate::local_files::is_plain(&bindings)
+                || check_copy_source_state(&directory).is_err()
+            {
+                return None;
+            }
+            let modified = data_modified_ms(&directory)?;
+            Some((
+                entry.file_name().to_string_lossy().into_owned(),
+                directory,
+                modified,
+            ))
         })
         .collect()
 }
@@ -2075,7 +2081,7 @@ fn offer_external_copy(
     local_app_data: &Path,
 ) -> Result<Option<ExternalCopyNotice>, String> {
     let current = data_modified_ms(root);
-    let copies = external_copies(local_app_data);
+    let copies = external_copies(root, local_app_data);
     if !copies
         .iter()
         .any(|(_, _, ms)| current.is_none_or(|current| *ms > current))
@@ -3090,27 +3096,30 @@ mod tests {
         }
         let ignored =
             BTreeMap::from([(normalize(&source).to_ascii_lowercase(), 1_700_000_010_000)]);
-        let offered = pending_copy(external_copies(&root), data_modified_ms(&daily), &ignored);
+        let pending = |choices| {
+            pending_copy(
+                external_copies(&daily, &root),
+                data_modified_ms(&daily),
+                choices,
+            )
+        };
+        let offered = pending(&ignored);
         let seen = BTreeMap::from([(normalize(&source).to_ascii_lowercase(), 1_700_000_030_000)]);
-        assert!(pending_copy(external_copies(&root), data_modified_ms(&daily), &seen).is_none());
+        assert!(pending(&seen).is_none());
         // 来源恢复了旧脚本：它仍比日常档新，但用户已经处理过此来源更晚的版本。
         write_at(package.join("action.mjs"), 1_700_000_025);
-        assert!(pending_copy(external_copies(&root), data_modified_ms(&daily), &seen).is_none());
+        assert!(pending(&seen).is_none());
         let local_package = daily.join("actions/local");
         std::fs::create_dir_all(&local_package).unwrap();
         write_at(local_package.join("action.json"), 1_700_000_040);
-        assert!(pending_copy(external_copies(&root), data_modified_ms(&daily), &ignored).is_none());
+        assert!(pending(&ignored).is_none());
         let manifest = source.join(RAISHOT_MANIFEST_PATH);
         let plugin = manifest.parent().unwrap();
         std::fs::create_dir_all(plugin.join("runtime")).unwrap();
         write_at(plugin.join("runtime/manifest.json"), 1_700_000_100);
-        assert!(pending_copy(external_copies(&root), data_modified_ms(&daily), &ignored).is_none());
+        assert!(pending(&ignored).is_none());
         write_at(manifest, 1_700_000_050);
-        assert_eq!(
-            pending_copy(external_copies(&root), data_modified_ms(&daily), &seen)
-                .map(|entry| entry.2),
-            Some(1_700_000_050_000)
-        );
+        assert_eq!(pending(&seen).map(|entry| entry.2), Some(1_700_000_050_000));
         std::fs::remove_dir_all(root).unwrap();
         assert_eq!(offered.map(|entry| entry.2), Some(1_700_000_030_000));
     }
@@ -3138,7 +3147,7 @@ mod tests {
         save_at(source.join("bindings.json"), b"imported", before + 60);
         let pending = || {
             pending_copy(
-                external_copies(&root),
+                external_copies(&daily, &root),
                 data_modified_ms(&daily),
                 &read_copy_choices(&daily).unwrap(),
             )
