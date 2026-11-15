@@ -713,6 +713,7 @@ struct Workspace {
     theme_error: Option<String>,
     opening_test_copy: bool,
     test_copy_error: Option<String>,
+    backup_notice: Option<String>,
     update_ui: update_ui::UpdateUi,
     history_filter: HistoryFilter,
     smooth_scroll: smooth_scroll::ScrollRegions,
@@ -1218,6 +1219,7 @@ impl Workspace {
             theme_error,
             opening_test_copy: false,
             test_copy_error: None,
+            backup_notice: None,
             update_ui: update_ui::UpdateUi::new(),
             page: if text_history_page {
                 Page::TextHistory

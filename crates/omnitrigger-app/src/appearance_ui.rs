@@ -29,6 +29,24 @@ fn preview(dark: bool) -> Div {
 }
 
 impl Workspace {
+    fn open_edit_history(&mut self, cx: &mut Context<Self>) {
+        let config = crate::settings::path();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let folder = crate::settings::edit_history_folder_to_open(&config)?;
+                    omnitrigger_windows::open_target(&folder)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.backup_notice = result.err();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn open_test_copy(&mut self, cx: &mut Context<Self>) {
         if self.opening_test_copy || self.test_data {
             return;
@@ -174,6 +192,10 @@ impl Workspace {
             .child(div().pt(px(6.)).pb(px(24.)).pl(px(20.)).pr(px(24.)).flex().flex_col().gap(px(24.))
                 .child(heading("设置", "让 OmniTrigger 更适合你的使用习惯"))
                 .children(test_copy)
+                .child(div().flex().flex_col().gap(px(8.))
+                    .child(div().flex().child(theme::button("open-edit-history", "查看配置备份", theme::Tone::Secondary, true)
+                        .on_click(cx.listener(|this, _, _, cx| this.open_edit_history(cx)))))
+                    .when_some(self.backup_notice.clone(), |el, notice| el.child(caption(notice))))
                 .child(div().flex().flex_col().gap(px(14.))
                     .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("颜色主题"))
                     .child(caption("选择后立即生效，自动保存。跟随系统会与 Windows 的浅色或深色模式保持一致。"))

@@ -92,6 +92,10 @@ jobs:
           $appendFile = Join-Path $env:RUNNER_TEMP 'append-history.json'
           $append | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $appendFile -Encoding utf8BOM
           $expected = @{}
+          $dailyHistory = New-Item -ItemType Directory -Path (Join-Path $data 'backups/edits/bindings.json') -Force
+          $dailyRevision = Join-Path $dailyHistory.FullName 'edit-0000000000000001.json'
+          Copy-Item -LiteralPath 'examples/literal-text.json' -Destination $dailyRevision
+          $expected[$dailyRevision] = (Get-FileHash -LiteralPath $dailyRevision).Hash
           foreach ($file in @($bindings, $wheels) + @(Get-ChildItem -LiteralPath $actions.FullName -File -Recurse | ForEach-Object FullName)) {
             $expected[$file] = (Get-FileHash -LiteralPath $file).Hash
           }
@@ -121,6 +125,7 @@ jobs:
             if ($createCopy) {
               $created = & $exe --profile-create clipboard-copy --type test --seed copy:default | ConvertFrom-Json
               if ($LASTEXITCODE -or $created.status -ne 'created') { throw '复制日常档失败。' }
+              if (Test-Path -LiteralPath (Join-Path $created.directory 'backups/edits')) { throw '测试副本继承了日常档编辑历史。' }
               $copyManifest = Join-Path $created.directory 'actions/n10-rust/action.json'
               $expected[$copyManifest] = $expected[$n10Manifest]
             }
@@ -181,6 +186,10 @@ jobs:
             $testConfig = Join-Path $testDir 'bindings.json'
             if ($round -eq 1) {
               Copy-Item examples/literal-text.json $testConfig -Force
+              $testHistory = New-Item -ItemType Directory -Path (Join-Path $testDir 'backups/edits/wheels.json') -Force
+              $testRevision = Join-Path $testHistory.FullName 'edit-0000000000000001.json'
+              Copy-Item -LiteralPath $wheels -Destination $testRevision
+              $expected[$testRevision] = (Get-FileHash -LiteralPath $testRevision).Hash
               $testActions = New-Item -ItemType Directory -Path (Join-Path $testDir 'actions')
               Copy-Item -LiteralPath $historyPackage -Destination $testActions.FullName -Recurse
             }

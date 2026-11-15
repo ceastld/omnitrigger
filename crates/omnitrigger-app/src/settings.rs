@@ -26,6 +26,9 @@ use crate::trigger_conditions::ConditionDto;
 use crate::wheels::{WheelActionRef, Wheels};
 use crate::window_action::WindowAction;
 
+mod edit_history;
+pub(crate) use edit_history::{edit_history_folder_to_open, save_editor_file};
+
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
 const CONFIG_VERSION: u32 = 24;
 
@@ -1341,7 +1344,7 @@ fn save_changes(
             backup_legacy(destination, settings.version, original.as_bytes())?;
         }
     }
-    atomic_write(destination, &text).map_err(Into::into)
+    save_editor_file(destination, original.as_deref(), &text).map_err(Into::into)
 }
 
 fn same_bindings(left: &[Binding], right: &[Binding]) -> bool {
@@ -3278,6 +3281,86 @@ mod tests {
     }
 
     #[test]
+    fn editor_saves_keep_previous_hotkeys_and_wheels_in_the_current_profile() {
+        let scratch = Scratch::new();
+        let config = scratch.config();
+        assert!(edit_history_folder_to_open(&config)
+            .unwrap_err()
+            .contains("还没有编辑备份"));
+        let hotkeys = format!("\u{feff}{}\r\n", encode(&defaults()));
+        let layout = "\u{feff}{\"version\":6, \"wheels\":[]}\r\n";
+        std::fs::write(&config, &hotkeys).unwrap();
+        std::fs::write(scratch.0.join("wheels.json"), layout).unwrap();
+        let previous = load_from(&config).unwrap();
+        let mut edited = previous.clone();
+        edited[0].message = "恢复前的测试修改".into();
+        save_changes(&config, &previous, &edited).unwrap();
+        let previous_wheels = Wheels::load(&config).unwrap();
+        Wheels::default()
+            .save_changes(&config, &previous_wheels, &CompiledScenes::default())
+            .unwrap();
+        let folder_to_open = edit_history_folder_to_open(&config).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(folder_to_open).unwrap(),
+            scratch.0.join("backups/edits").canonicalize().unwrap()
+        );
+        for (name, bytes) in [
+            ("bindings.json", hotkeys.as_bytes()),
+            ("wheels.json", layout.as_bytes()),
+        ] {
+            let folder = scratch.0.join("backups/edits").join(name);
+            let entries: Vec<_> = std::fs::read_dir(&folder)
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(std::fs::read(entries[0].path()).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn an_unwritable_backup_location_keeps_the_original_config() {
+        let scratch = Scratch::new();
+        let config = scratch.config();
+        let original = encode(&defaults());
+        std::fs::write(&config, &original).unwrap();
+        std::fs::write(scratch.0.join("backups"), "keep").unwrap();
+        let mut edited = defaults();
+        edited[0].message = "新说明".into();
+        assert!(save_to(&config, &edited).unwrap_err().contains("备份"));
+        assert_eq!(std::fs::read(&config).unwrap(), original.as_bytes());
+        assert_eq!(std::fs::read(scratch.0.join("backups")).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retrying_a_locked_editor_save_reuses_the_complete_previous_version() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let scratch = Scratch::new();
+        let path = scratch.config();
+        let original = encode(&defaults());
+        std::fs::write(&path, &original).unwrap();
+        let mut edited = defaults();
+        edited[0].message = "新说明".into();
+        let reader = std::fs::File::options()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        assert!(save_to(&path, &edited).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+        drop(reader);
+        save_to(&path, &edited).unwrap();
+        save_to(&path, &edited).unwrap();
+        let saved = scratch.0.join("backups/edits/bindings.json");
+        assert_eq!(std::fs::read_dir(&saved).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read(saved.join("edit-0000000000000001.json")).unwrap(),
+            original.as_bytes()
+        );
+    }
+
+    #[test]
     fn checking_a_pair_detects_the_first_save_even_when_the_read_returned_an_error() {
         for (name, kind) in [("custom.json", "热键"), ("wheels.json", "轮盘")] {
             let scratch = Scratch::new();
@@ -4429,7 +4512,8 @@ mod tests {
             bindings
         );
         assert!(scratch.0.join("bindings.json.lock").is_file());
-        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 3);
+        assert!(scratch.0.join("backups/edits/bindings.json").is_dir());
+        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 4);
     }
 
     fn local_binding() -> Binding {
@@ -4524,6 +4608,7 @@ mod tests {
             expected
         );
         assert!(scratch.0.join("bindings.json.lock").is_file());
-        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 3);
+        assert!(scratch.0.join("backups/edits/bindings.json").is_dir());
+        assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 4);
     }
 }

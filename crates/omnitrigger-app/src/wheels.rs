@@ -354,10 +354,10 @@ impl Wheels {
         }
         let destination = config_path.with_file_name("wheels.json");
         let _lock = crate::settings::lock_config(&destination, "轮盘")?;
-        let (stored, legacy) = match std::fs::read_to_string(&destination) {
+        let (stored, original) = match std::fs::read_to_string(&destination) {
             Ok(original) => {
                 let (stored, version) = Self::decode_version(&original)?;
-                (stored, (version < 6).then_some((version, original)))
+                (stored, Some((version, original)))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Self::default(), None),
             Err(error) => {
@@ -367,10 +367,16 @@ impl Wheels {
         if &stored != previous {
             return Err("轮盘配置已在其他窗口或文件中修改，请点击“重新载入”后再编辑。".into());
         }
-        if let Some((version, original)) = legacy {
-            crate::settings::backup_legacy(&destination, version, original.as_bytes())?;
+        if let Some((version, text)) = &original {
+            if *version < 6 {
+                crate::settings::backup_legacy(&destination, *version, text.as_bytes())?;
+            }
         }
-        crate::settings::atomic_write(&destination, &self.contents()?)
+        crate::settings::save_editor_file(
+            &destination,
+            original.as_ref().map(|(_, text)| text.as_str()),
+            &self.contents()?,
+        )
     }
 
     /// 给外部编辑器准备文件。已有文件直接打开，包括等待用户修复的损坏文件。
@@ -1376,7 +1382,7 @@ pub(super) mod tests {
         expected.wheels[0].slots.swap(0, 1);
         scratch.save(&expected).unwrap();
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
-        scratch.assert_files(&["wheels.json", "wheels.json.lock"]);
+        scratch.assert_files(&["backups", "wheels.json", "wheels.json.lock"]);
     }
 
     #[test]
@@ -1428,6 +1434,11 @@ pub(super) mod tests {
         scratch.save(&expected).unwrap();
         assert_eq!(std::fs::read(&backup).unwrap(), original.as_bytes());
         assert_eq!(Wheels::load(&scratch.bindings()).unwrap(), expected);
-        scratch.assert_files(&["wheels.json", "wheels.json.lock", "wheels.json.v1.bak"]);
+        scratch.assert_files(&[
+            "backups",
+            "wheels.json",
+            "wheels.json.lock",
+            "wheels.json.v1.bak",
+        ]);
     }
 }
