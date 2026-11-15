@@ -1992,10 +1992,11 @@ impl ExternalCopyChoice {
             }
             let _lock = lock_catalog(&self.root)?;
             let mut ignored = read_copy_choices(&self.root)?;
-            ignored.insert(
-                normalize(&self.directory).to_ascii_lowercase(),
-                self.modified,
-            );
+            let key = normalize(&self.directory).to_ascii_lowercase();
+            if ignored.get(&key).is_some_and(|seen| *seen >= self.modified) {
+                return Ok(());
+            }
+            ignored.insert(key, self.modified);
             let bytes = serde_json::to_vec_pretty(&ignored).map_err(|e| e.to_string())?;
             crate::settings::atomic_write(&file, &bytes)
         })();
@@ -2060,7 +2061,9 @@ fn pending_copy(
         .into_iter()
         .filter(|(_, _, modified)| current_ms.is_none_or(|current| *modified > current))
         .filter(|(_, directory, modified)| {
-            ignored.get(&normalize(directory).to_ascii_lowercase()) != Some(modified)
+            ignored
+                .get(&normalize(directory).to_ascii_lowercase())
+                .is_none_or(|seen| modified > seen)
         })
         .max_by_key(|(_, _, modified)| *modified)
 }
@@ -3090,6 +3093,9 @@ mod tests {
         let offered = pending_copy(external_copies(&root), data_modified_ms(&daily), &ignored);
         let seen = BTreeMap::from([(normalize(&source).to_ascii_lowercase(), 1_700_000_030_000)]);
         assert!(pending_copy(external_copies(&root), data_modified_ms(&daily), &seen).is_none());
+        // 来源恢复了旧脚本：它仍比日常档新，但用户已经处理过此来源更晚的版本。
+        write_at(package.join("action.mjs"), 1_700_000_025);
+        assert!(pending_copy(external_copies(&root), data_modified_ms(&daily), &seen).is_none());
         let local_package = daily.join("actions/local");
         std::fs::create_dir_all(&local_package).unwrap();
         write_at(local_package.join("action.json"), 1_700_000_040);
@@ -3101,7 +3107,7 @@ mod tests {
         assert!(pending_copy(external_copies(&root), data_modified_ms(&daily), &ignored).is_none());
         write_at(manifest, 1_700_000_050);
         assert_eq!(
-            pending_copy(external_copies(&root), data_modified_ms(&daily), &ignored)
+            pending_copy(external_copies(&root), data_modified_ms(&daily), &seen)
                 .map(|entry| entry.2),
             Some(1_700_000_050_000)
         );
@@ -3218,6 +3224,13 @@ mod tests {
         assert!(read_copy_choices(&root).unwrap().is_empty());
         a.save().unwrap();
         b.save().unwrap();
+        // 旧窗口重试写入同一来源的处理记录。
+        ExternalCopyChoice {
+            modified: 9,
+            ..a.clone()
+        }
+        .save()
+        .unwrap();
         let ignored = read_copy_choices(&root).unwrap();
         let copies = vec![
             ("a".into(), a.directory.clone(), 10),
@@ -3264,11 +3277,14 @@ mod tests {
         let device = path.parent().unwrap();
         std::fs::create_dir(device).unwrap();
         std::fs::write(&path, br#"{"other":20}"#).unwrap();
-        let lock = std::fs::File::options()
-            .read(true)
-            .share_mode(1)
-            .open(&path)
-            .unwrap();
+        let hold_for_read = || {
+            std::fs::File::options()
+                .read(true)
+                .share_mode(1)
+                .open(&path)
+                .unwrap()
+        };
+        let lock = hold_for_read();
         assert!(choice.save().is_err());
         assert_eq!(std::fs::read(&path).unwrap(), br#"{"other":20}"#);
         assert_eq!(std::fs::read_dir(device).unwrap().count(), 1);
@@ -3280,6 +3296,9 @@ mod tests {
             ignored.get(&normalize(&choice.directory).to_ascii_lowercase()),
             Some(&10)
         );
+        let lock = hold_for_read();
+        choice.save().unwrap();
+        drop(lock);
         std::fs::remove_dir_all(root).unwrap();
     }
 
