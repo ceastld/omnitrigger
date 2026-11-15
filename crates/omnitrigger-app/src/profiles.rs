@@ -113,16 +113,27 @@ impl Startup {
             return self.hold_profile(config);
         }
         let directory = profile_directory(config).ok_or("无法定位待检查的测试档目录。")?;
-        let path = directory.with_extension("window.lock");
-        let guard = match std::fs::File::open(&path) {
-            Ok(file) => {
-                file.lock_shared()
-                    .map_err(|error| format!("无法锁定待检查的测试档：{error}"))?;
-                Some(file)
+        let root = directory
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("找不到测试档的数据根。")?;
+        // 新档可能还没有窗口锁。重置先锁登记表，查询复用已有登记锁即可避免读到一半被替换。
+        let mut guard = None;
+        for path in [
+            directory.with_extension("window.lock"),
+            root.join("profiles.lock"),
+        ] {
+            match std::fs::File::open(&path) {
+                Ok(file) => {
+                    file.lock_shared()
+                        .map_err(|error| format!("无法锁定待检查的测试档：{error}"))?;
+                    guard = Some(file);
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(format!("无法读取 {}：{error}", path.display())),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(format!("无法读取 {}：{error}", path.display())),
-        };
+        }
         if !reset_recovery::directory_present(&directory).map_err(|error| error.to_string())? {
             return Err(format!(
                 "测试档目录缺失，无法校验配置。请先打开该配置档以恢复中断的重置：{}",
@@ -1366,7 +1377,14 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     if tray && (parsed.test_workspace || parsed.listen || parsed.command.is_some()) {
         exit_rejected("--tray 只用于启动日常工作区。");
     }
-    let check_only = arguments.iter().any(|arg| arg == "--check-config");
+    let inspect_actions = arguments
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--list-package-actions" | "--check-action"));
+    if inspect_actions {
+        crate::action_target_context::validate_cli(arguments)
+            .unwrap_or_else(|error| crate::reject_cli_arguments(&error));
+    }
+    let check_only = inspect_actions || arguments.iter().any(|arg| arg == "--check-config");
     let config_index = arguments.iter().position(|argument| argument == "--config");
     if let Some(index) = config_index {
         if parsed.any() {
@@ -1442,7 +1460,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     let profile = parsed.profile.as_deref().filter(|key| *key != DEFAULT_ID);
     let (config, startup) = match profile {
         Some(key) => {
-            let result = if parsed.test_workspace {
+            let result = if parsed.test_workspace && !inspect_actions {
                 testing_workspace(&root)
             } else {
                 read_catalog(&root).and_then(|catalog| {
@@ -1999,6 +2017,28 @@ mod tests {
         ]);
         let parsed = Arguments::default();
         assert_eq!(parsed.forwarded(&original), vec!["--profile", "ui"]);
+    }
+
+    #[test]
+    fn inspecting_a_new_test_profile_holds_the_catalog_lock_until_the_query_finishes() {
+        let root = temp_root("inspect-lock");
+        let entry = create_profile(&root, "inspect", &Seed::Empty, None).unwrap();
+        let directory = profile_dir(&root, &entry.id);
+        let (_, guards) = prepare_root_access(&directory.join("bindings.json"), true).unwrap();
+        let catalog_lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join("profiles.lock"))
+            .unwrap();
+        assert!(!directory.with_extension("window.lock").exists());
+        assert!(matches!(
+            catalog_lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(guards);
+        catalog_lock.try_lock().unwrap();
+        drop(catalog_lock);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

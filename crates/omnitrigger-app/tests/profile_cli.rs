@@ -1,6 +1,94 @@
 use std::{path::Path, process::Command};
 
 #[test]
+fn action_inspection_leaves_test_registration_and_interrupted_reset_untouched() {
+    let root = std::env::temp_dir().join(format!("omnitrigger-cli-inspect-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_omnitrigger"))
+            .args(args)
+            .env("OMNITRIGGER_HOME", &root)
+            .output()
+            .unwrap()
+    };
+    let call = root.join("request.json");
+    std::fs::write(
+        &call,
+        r#"{"package_id":"examples.n10-rust","action_id":"toggle","action_version":1}"#,
+    )
+    .unwrap();
+    let check = ["--check-action", call.to_str().unwrap()];
+    let queries = [&["--list-package-actions"][..], &check[..]];
+    for query in queries {
+        assert!(!run(&[&["--test-workspace"][..], query].concat())
+            .status
+            .success());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+    }
+    let created = run(&["--profile-create", "testing", "--seed", "empty"]);
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let entry: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
+    let dir = Path::new(entry["directory"].as_str().unwrap());
+    let config = dir.join("bindings.json");
+    let identity = std::fs::read(dir.join("profile.json")).unwrap();
+    let registration = std::fs::read(root.join("profiles.json")).unwrap();
+    let listed = run(&["--test-workspace", "--list-package-actions"]);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let checked = run(&[&["--profile", "testing"][..], &check].concat());
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(response["handler"], "workspace_text_history");
+    assert!(!dir.with_extension("window.lock").exists());
+
+    let tag = format!("{}-12-t0123456789ab", entry["id"].as_str().unwrap());
+    let backups = root.join("backups/profile-reset");
+    let backup = backups.join(&tag);
+    let stage = backups.join(format!(".{tag}.tmp"));
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::write(stage.join("profile.json"), &identity).unwrap();
+    std::fs::rename(dir, &backup).unwrap();
+    for selector in [
+        &["--profile", "testing"][..],
+        &["--test-workspace"],
+        &["--config", config.to_str().unwrap()],
+    ] {
+        for query in queries {
+            let result = run(&[selector, query].concat());
+            assert!(!result.status.success());
+            let error: serde_json::Value = serde_json::from_slice(&result.stderr).unwrap();
+            assert!(error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("测试档目录缺失"));
+            assert!(!dir.exists());
+            assert!(!dir.with_extension("window.lock").exists());
+            assert_eq!(
+                std::fs::read(backup.join("profile.json")).unwrap(),
+                identity
+            );
+            assert_eq!(std::fs::read(stage.join("profile.json")).unwrap(), identity);
+            assert_eq!(
+                std::fs::read(root.join("profiles.json")).unwrap(),
+                registration
+            );
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn check_config_reads_bom_in_hotkeys_and_referenced_wheel_without_rewriting() {
     let root = std::env::temp_dir().join(format!("omnitrigger-cli-bom-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
