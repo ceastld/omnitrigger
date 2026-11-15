@@ -201,21 +201,23 @@ impl Arguments {
             || self.command.is_some()
     }
 
-    /// 重启时原样转交的配置档参数（不含重启标记本身）。
-    fn forwarded(&self, original: &[String]) -> Vec<String> {
+    /// 外壳使用安装目录作为工作目录，夹具来源须在调用方解析。
+    fn forwarded(&self, original: &[String]) -> Result<Vec<String>, String> {
         let mut out = Vec::new();
-        let mut index = 1;
-        while index < original.len() {
-            let flag = original[index].as_str();
-            match flag {
-                "--relaunched" | "--relaunch-result" => index += 2,
-                _ => {
-                    out.push(original[index].clone());
-                    index += 1;
+        let mut args = original.iter().skip(1);
+        while let Some(arg) = args.next() {
+            match (arg.as_str(), &self.command) {
+                ("--relaunched" | "--relaunch-result", _) => {
+                    args.next();
                 }
+                ("--seed", Some(Command::Create { seed, .. })) => {
+                    args.next();
+                    out.extend([arg.clone(), seed.for_creation()?.record()]);
+                }
+                _ => out.push(arg.clone()),
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -253,6 +255,15 @@ impl Seed {
             Self::Empty => "empty".into(),
             Self::Fixture(path) => format!("fixture:{}", path.display()),
             Self::Copy(source) => format!("copy:{source}"),
+        }
+    }
+
+    fn for_creation(&self) -> Result<Self, String> {
+        match self {
+            Self::Fixture(path) => std::path::absolute(path)
+                .map(Self::Fixture)
+                .map_err(|error| format!("夹具目录 {} 无效：{error}", path.display())),
+            other => Ok(other.clone()),
         }
     }
 }
@@ -1147,13 +1158,7 @@ fn insert_profile(
     seed: &Seed,
     name: Option<&str>,
 ) -> Result<Entry, String> {
-    let seed = match seed {
-        Seed::Fixture(path) => Seed::Fixture(
-            std::path::absolute(path)
-                .map_err(|error| format!("夹具目录 {} 无效：{error}", path.display()))?,
-        ),
-        other => other.clone(),
-    };
+    let seed = seed.for_creation()?;
     let entry = Entry {
         id: new_id(),
         alias: alias.into(),
@@ -1703,7 +1708,9 @@ fn escape_redirect(
     let tag = format!("{}-{}", std::process::id(), now_ms());
     let link = scratch.join(format!("relaunch-{tag}.lnk"));
     let result_file = scratch.join(format!("relaunch-{tag}.json"));
-    let mut forwarded = parsed.forwarded(original);
+    let mut forwarded = parsed
+        .forwarded(original)
+        .unwrap_or_else(|error| fail(&error));
     if inspection == Some(Inspection::Actions) {
         // 查询以文件所在目录选取动作与测试档身份。转交数据根后，由新进程重新取得配置档使用锁。
         if let Some(index) = forwarded.iter().position(|arg| arg == "--config") {
@@ -2157,7 +2164,38 @@ mod tests {
             "r.json",
         ]);
         let parsed = Arguments::default();
-        assert_eq!(parsed.forwarded(&original), vec!["--profile", "ui"]);
+        assert_eq!(
+            parsed.forwarded(&original).unwrap(),
+            vec!["--profile", "ui"]
+        );
+    }
+
+    #[test]
+    fn relayed_profile_create_keeps_the_callers_fixture_directory() {
+        let original = args(&[
+            "--profile-create",
+            "ui",
+            "--name",
+            "轮盘测试",
+            "--seed",
+            "fixture:测试资料/轮盘 示例",
+        ]);
+        let parsed = take_arguments(&mut original.clone()).unwrap();
+        let mut incoming = vec![original[0].clone()];
+        incoming.extend(parsed.forwarded(&original).unwrap());
+        let Some(Command::Create {
+            seed: Seed::Fixture(path),
+            name,
+            ..
+        }) = take_arguments(&mut incoming).unwrap().command
+        else {
+            panic!("未收到测试夹具");
+        };
+        // 外壳在安装目录启动。即使那里也存有同名夹具，仍应读发起命令时选择的目录。
+        let caller = std::env::current_dir().unwrap();
+        let installed = caller.join("安装目录");
+        assert_eq!(installed.join(path), caller.join("测试资料/轮盘 示例"));
+        assert_eq!(name.as_deref(), Some("轮盘测试"));
     }
 
     #[test]
