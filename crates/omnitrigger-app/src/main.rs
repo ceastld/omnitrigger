@@ -2552,8 +2552,8 @@ impl Workspace {
                     is_minimizable: false,
                     is_movable: false,
                     focus: false,
-                    // 避免 GPUI 缓存待激活的位置；原生窗口在同一创建回调中立即隐藏。
-                    show: true,
+                    // 首次显示由 show_panel_at_cursor_with_size 在指针所在屏幕上定位。
+                    show: false,
                     app_id: Some("OmniTrigger.Panel".into()),
                     ..Default::default()
                 },

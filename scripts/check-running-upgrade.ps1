@@ -22,8 +22,11 @@ if (Get-Process -Name $appFile.BaseName -ErrorAction SilentlyContinue | Where-Ob
 
 Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 public static class OmniTriggerUpgradeWindow {
     private delegate bool EnumWindow(IntPtr hwnd, IntPtr parameter);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
@@ -36,11 +39,14 @@ public static class OmniTriggerUpgradeWindow {
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern uint RegisterWindowMessage(string message);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeout, out UIntPtr result);
     public static IntPtr FindAppWindow(uint processId, string expectedTitle) {
+        return FindAppWindow(processId, expectedTitle, true);
+    }
+    private static IntPtr FindAppWindow(uint processId, string expectedTitle, bool visibleOnly) {
         IntPtr workspace = IntPtr.Zero;
         EnumWindows((hwnd, unused) => {
             uint owner;
             GetWindowThreadProcessId(hwnd, out owner);
-            if (owner != processId || !IsWindowVisible(hwnd)) return true;
+            if (owner != processId || (visibleOnly && !IsWindowVisible(hwnd))) return true;
             var title = new StringBuilder(256);
             GetWindowText(hwnd, title, title.Capacity);
             string name = title.ToString();
@@ -51,6 +57,69 @@ public static class OmniTriggerUpgradeWindow {
             return false;
         }, IntPtr.Zero);
         return workspace;
+    }
+
+    private delegate void WinEvent(IntPtr hook, uint kind, IntPtr hwnd, int objectId, int childId, uint thread, uint time);
+    [DllImport("user32.dll")] private static extern IntPtr SetWinEventHook(uint first, uint last, IntPtr mod, WinEvent callback, uint pid, uint tid, uint flags);
+    [DllImport("user32.dll")] private static extern bool UnhookWinEvent(IntPtr hook);
+    [StructLayout(LayoutKind.Sequential)] private struct Message {
+        public IntPtr Window; public uint Id; public UIntPtr WParam; public IntPtr LParam;
+        public uint Time; public int X, Y; public uint Private;
+    }
+    [DllImport("user32.dll", EntryPoint="PeekMessageW")] private static extern bool PeekMessage(out Message m, IntPtr hwnd, uint first, uint last, uint remove);
+    [DllImport("user32.dll", EntryPoint="DispatchMessageW")] private static extern IntPtr DispatchMessage(ref Message m);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [StructLayout(LayoutKind.Sequential)] private struct Point { public int X, Y; }
+    [DllImport("user32.dll")] private static extern bool GetCursorPos(out Point p);
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromPoint(Point p, uint flags);
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
+
+    public static void VerifyPanelStartup(ProcessStartInfo start, bool requested) {
+        const uint show = 0x8002; // EVENT_OBJECT_SHOW
+        uint pid = 0;
+        var shown = new HashSet<IntPtr>();
+        WinEvent observe = (hook, kind, hwnd, obj, child, thread, time) => {
+            if (pid == 0 || obj != 0 || child != 0 || hwnd == IntPtr.Zero) return;
+            uint owner; GetWindowThreadProcessId(hwnd, out owner);
+            if (owner == pid) shown.Add(hwnd);
+        };
+        // 先订阅再启动；即使同一毫秒内显示又隐藏，也能观察到首次显示。
+        var hookHandle = SetWinEventHook(show, show, IntPtr.Zero, observe, 0, 0, 0);
+        if (hookHandle == IntPtr.Zero) throw new Exception("无法观察窗口显示事件。");
+        Process ui = null;
+        try {
+            ui = Process.Start(start);
+            pid = (uint)ui.Id;
+            var timer = Stopwatch.StartNew();
+            var settled = new Stopwatch();
+            while (!ui.HasExited && timer.Elapsed.TotalSeconds < 30) {
+                Message m;
+                while (PeekMessage(out m, IntPtr.Zero, 0, 0, 1)) DispatchMessage(ref m);
+                var main = FindAppWindow(pid, "OmniTrigger");
+                var panel = FindAppWindow(pid, "OmniTrigger 触发面板", false);
+                bool visible = panel != IntPtr.Zero && IsWindowVisible(panel);
+                if (!requested && (shown.Contains(panel) || visible))
+                    throw new Exception("普通启动在呼出前显示了触发面板。");
+                bool ready = shown.Contains(main) && panel != IntPtr.Zero && (!requested || (shown.Contains(panel) && visible));
+                if (ready) settled.Start(); else settled.Reset();
+                if (settled.ElapsedMilliseconds >= 750) {
+                    if (!requested) return;
+                    if (GetForegroundWindow() == panel) throw new Exception("首次呼出面板抢占了前台。");
+                    Point cursor;
+                    if (!GetCursorPos(out cursor) || MonitorFromWindow(panel, 0) != MonitorFromPoint(cursor, 2))
+                        throw new Exception("首次呼出的触发面板未出现在指针所在屏幕。");
+                    return;
+                }
+                Thread.Sleep(10);
+            }
+            throw new Exception("未观察到预期的主窗口和面板状态。");
+        } finally {
+            UnhookWinEvent(hookHandle);
+            GC.KeepAlive(observe);
+            if (ui != null) {
+                try { if (!ui.HasExited) { ui.Kill(); ui.WaitForExit(5000); } } finally { ui.Dispose(); }
+            }
+        }
     }
 }
 '@
@@ -118,6 +187,27 @@ function Close-ToTray([Diagnostics.Process]$ui, [string]$healthFile) {
         throw '任务栏重建通知使托盘中的日常窗口弹出或退出。'
     }
     return $window
+}
+
+function Assert-TrayIdle([Diagnostics.Process]$ui, [IntPtr]$window) {
+    # 以单个逻辑核计量。连续两个采样区间均超过半核才报告，给关闭动画和调度抖动留余量。
+    $busyIntervals = 0
+    foreach ($interval in 1..2) {
+        $ui.Refresh()
+        $before = $ui.TotalProcessorTime
+        $elapsed = [Diagnostics.Stopwatch]::StartNew()
+        foreach ($second in 1..4) {
+            Start-Sleep -Seconds 1
+            if ($ui.HasExited -or -not [OmniTriggerUpgradeWindow]::IsWindow($window) -or
+                [OmniTriggerUpgradeWindow]::IsWindowVisible($window)) { throw '托盘采样期间主窗口重新出现或进程已退出。' }
+        }
+        $ui.Refresh()
+        $cpu = ($ui.TotalProcessorTime - $before).TotalSeconds
+        $wall = $elapsed.Elapsed.TotalSeconds
+        Write-Host ('托盘空闲采样 {0}：{1:F2} 秒内使用了 {2:F3} 秒 CPU。' -f $interval, $wall, $cpu)
+        if ($cpu -gt $wall / 2) { $busyIntervals++ }
+    }
+    if ($busyIntervals -eq 2) { throw '收起日常主窗口后，进程持续占用超过半个逻辑核。' }
 }
 
 function Stop-TestProcess([Diagnostics.Process]$ui) {
@@ -293,11 +383,20 @@ foreach ($entry in 'config', 'data-root', 'env') {
     } finally { Stop-TestProcess $testUi }
 }
 
+foreach ($requested in @($false, $true)) {
+    $panelStart = New-AppStart
+    $panelStart.Environment['OMNITRIGGER_HOME'] = Join-Path $probe.FullName '面板启动'
+    if ($requested) { $panelStart.ArgumentList.Add('--panel') }
+    [OmniTriggerUpgradeWindow]::VerifyPanelStartup($panelStart, $requested)
+}
+Write-Host '已验证预热面板保持隐藏，首次呼出显示在指针所在屏幕并保留前台。'
+
 $start = New-AppStart
 $start.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $health
 $ui = [Diagnostics.Process]::Start($start)
 try {
     $dailyWindow = Close-ToTray $ui $health
+    Assert-TrayIdle $ui $dailyWindow
     # 快捷方式参数拼错或脚本查询版本时，命令应独立结束，已收起的日常窗口仍由原进程持有。
     foreach ($flag in '--version', '--help', '--check-confg') {
         $query = New-AppStart
