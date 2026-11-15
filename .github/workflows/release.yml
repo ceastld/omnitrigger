@@ -203,14 +203,15 @@ jobs:
               Assert-HistoryAppend @('--test-workspace') $false
               Assert-HistoryAppend @('--profile', 'clipboard-copy') $false
               Assert-ProfileFiles
+              ./scripts/check-running-uninstall.ps1 -Executable $exe -Archive "dist/OmniTrigger-$env:RELEASE_VERSION-windows-x86_64.zip" -ExpectedVersion $env:RELEASE_VERSION
             } else {
               Install-TestPackage '!logintray'
               Assert-LoginShortcut $false
               Install-TestPackage
               Assert-LoginShortcut $false
+              $result = Start-Process -FilePath (Join-Path $app 'unins000.exe') -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -WindowStyle Hidden -PassThru -Wait
+              if ($result.ExitCode -or (Test-Path $exe)) { throw '卸载失败。' }
             }
-            $result = Start-Process -FilePath (Join-Path $app 'unins000.exe') -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -WindowStyle Hidden -PassThru -Wait
-            if ($result.ExitCode -or (Test-Path $exe)) { throw '卸载失败。' }
             Assert-LoginShortcut $false
             Assert-ProfileFiles
           }

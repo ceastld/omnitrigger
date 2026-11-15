@@ -31,6 +31,8 @@ git diff --check
 
 要在以后每次登录 Windows 时启动日常监听，可在安装器中勾选“登录 Windows 时在托盘启动 OmniTrigger”。安装器会把带 `--tray` 参数的快捷方式放进当前用户的启动文件夹。静默安装可用 `/MERGETASKS=logintray` 开启，或用 `/MERGETASKS=!logintray` 关闭。省略参数会沿用上一次安装的选择。全新安装默认关闭，卸载会移除该启动项。
 
+确认卸载后，卸载器会请当前安装目录的日常实例和测试窗口退出，然后移除程序。其他目录的便携版可以继续使用。若其他程序仍占用 `omnitrigger.exe` 并阻止删除，卸载器会停止，解除占用后可重新卸载。日常与测试配置保留在各自的数据目录中。
+
 ```powershell
 .\scripts\package-windows.ps1 -Target x86_64-pc-windows-msvc
 ```

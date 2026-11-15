@@ -57,3 +57,5 @@ function StartInTray: Boolean;
 begin
   Result := ExpandConstant('{param:STARTINTRAY|0}') = '1';
 end;
+
+#include "uninstall-running.iss"
