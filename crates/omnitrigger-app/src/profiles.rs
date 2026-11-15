@@ -168,13 +168,15 @@ fn prepare_root_access(
     for directory in directories.into_iter().rev() {
         let path = directory.join("bindings.json");
         let profile = Startup::for_config(&path)?;
-        if access == RootAccess::Tray && profile.test_data {
+        if !profile.test_data {
+            continue;
+        }
+        if access == RootAccess::Tray {
             return Err(ProfileCommandError::TestInTray);
         }
         guards.extend(profile.prepare_access(&path, access == RootAccess::Inspect)?);
-        if directory == target {
-            startup = profile;
-        }
+        // 从外到内取锁，子目录中的配置沿用最近的测试档身份。
+        startup = profile;
     }
     Ok((startup, guards))
 }
@@ -3505,6 +3507,36 @@ mod tests {
             std::fs::read(parent.join(history)).unwrap(),
             b"parent record"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn config_below_a_test_profile_inherits_the_nearest_registered_identity() {
+        let root = temp_root("test-subdirectory-identity");
+        let outer = create_profile(&root, "outer", &Seed::Empty, None).unwrap();
+        let parent = profile_dir(&root, &outer.id);
+        let inner = create_profile(&parent, "inner", &Seed::Empty, None).unwrap();
+        let child = profile_dir(&parent, &inner.id);
+
+        for (directory, owner, lock_count) in [
+            (parent.join("scenario"), &outer, 1),
+            (child.join("scenario"), &inner, 2),
+            (child.join("profiles/unregistered"), &inner, 2),
+        ] {
+            let config = directory.join("bindings.json");
+            let expected = Startup::for_entry(owner, true);
+            let (inspected, guards) = prepare_root_access(&config, RootAccess::Inspect).unwrap();
+            assert_eq!(inspected, expected);
+            drop(guards);
+            let (opened, guards) = prepare_root_access(&config, RootAccess::Open).unwrap();
+            assert_eq!(opened, expected);
+            assert_eq!(guards.len(), lock_count);
+            assert!(!directory.exists());
+        }
+        let (plain, guards) =
+            prepare_root_access(&root.join("scenario/bindings.json"), RootAccess::Open).unwrap();
+        assert_eq!(plain, Startup::daily());
+        assert!(guards.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 
