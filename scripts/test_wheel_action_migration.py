@@ -8,8 +8,8 @@ from unittest.mock import patch
 from migrate_wheel_action import main, migrate
 
 
-OLD = {"kind": "invoke", "package_id": "old", "action_id": "toggle", "input": {"flag": True}}
-NEW = {"kind": "invoke", "package_id": "local", "action_id": "toggle", "input": {"profile": "daily"}}
+OLD = {"kind": "invoke", "package_id": "old", "action_id": "toggle", "action_version": 1, "input": {"flag": True}}
+NEW = {"kind": "invoke", "package_id": "local", "action_id": "toggle", "action_version": 1, "input": {"profile": "daily"}}
 BINDINGS = {"bindings": [{"id": 9, "action": NEW}]}
 
 
@@ -23,7 +23,7 @@ class WheelActionMigration(unittest.TestCase):
             dict(selected, action=dict(OLD, input={"flag": 1})),
         ]
         wheel = {"id": "personal", "slots": [selected], "app_overrides": [{"process": "editor.exe", "slots": alternatives}]}
-        wheels = {"wheels": [wheel, dict(wheel, id="other")]}
+        wheels = {"version": 6, "wheels": [wheel, dict(wheel, id="other")]}
         expected = json.loads(json.dumps(wheels))
         expected["wheels"][0]["slots"][0]["action"] = NEW
         expected["wheels"][0]["app_overrides"][0]["slots"][0]["action"] = NEW
@@ -36,18 +36,40 @@ class WheelActionMigration(unittest.TestCase):
         slot = {"label": "A", "action": OLD}
         wheel = {"id": "w", "slots": [slot, slot], "app_overrides": [
             {"process": "one", "slots": [slot]}, {"process": "two", "slots": [slot, slot]}]}
-        source = json.loads(json.dumps({"wheels": [wheel]}))
+        source = json.loads(json.dumps({"version": 3, "wheels": [wheel]}))
         before = deepcopy(source)
         result, changed = migrate(BINDINGS, source, 9, "w", 2)
         self.assertEqual(changed, [None, "two"])
         self.assertEqual(result["wheels"][0]["app_overrides"][1]["slots"][0]["action"], OLD)
         self.assertEqual(source, before)
 
+    def test_candidate_uses_the_minimum_version_for_the_copied_action(self):
+        shortcut = {"kind": "send_shortcut", "keys": [162, 67]}
+        for action, required in [
+            (shortcut, 1),
+            (dict(shortcut, timing={"key_down_delay_ms": 0, "process_overrides": {}}), 1),
+            ({"kind": "local", "version": 1, "steps": [{"kind": "delay", "milliseconds": 50}]}, 2),
+            (NEW, 3),
+            ({"kind": "browser", "command": {"operation": "reload_tab"}}, 4),
+            (dict(shortcut, timing={"key_down_delay_ms": 20}), 5),
+            (dict(shortcut, timing={"process_overrides": {"editor.exe": 0}}), 5),
+        ]:
+            for version in range(1, 7):
+                with self.subTest(action=action, version=version):
+                    source = {"version": version, "wheels": [{"id": "w", "slots": [{"action": {"kind": "notification"}}]}]}
+                    result, changed = migrate({"bindings": [{"id": 1, "action": action}]}, source, 1, "w", 1)
+                    self.assertEqual((result["version"], changed), (max(version, required), [None]))
+                    self.assertEqual(source["version"], version)
+
+        for version in (0, 7, True, "1"):
+            with self.subTest(unsupported_version=version), self.assertRaisesRegex(ValueError, "轮盘配置版本"):
+                migrate(BINDINGS, {"version": version, "wheels": []}, 9, "w", 1)
+
     def test_existing_output_is_preserved(self):
         with tempfile.TemporaryDirectory() as root:
             bindings, wheels = Path(root, "bindings.json"), Path(root, "wheels.json")
             bindings.write_text(json.dumps(BINDINGS), encoding="utf-8")
-            wheels.write_text(json.dumps({"wheels": [{"id": "w", "slots": [{"action": OLD}]}]}), encoding="utf-8")
+            wheels.write_text(json.dumps({"version": 3, "wheels": [{"id": "w", "slots": [{"action": OLD}]}]}), encoding="utf-8")
             original = wheels.read_bytes()
             with patch("sys.stderr"):
                 self.assertEqual(main(["--bindings", str(bindings), "--wheels", str(wheels), "--binding-id", "9",

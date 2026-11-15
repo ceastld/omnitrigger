@@ -28,7 +28,19 @@ def position_of(slot):
     return (position["ring"], position["sector"], position["sectors"], position.get("half_step", False))
 
 
+def required_wheel_version(action):
+    # 与 Wheels::decode_version 的动作规则一致。无时序的普通发键可用于版本 1。
+    if action["kind"] == "send_shortcut":
+        timing = action.get("timing", {})
+        if timing.get("key_down_delay_ms", 0) or timing.get("process_overrides"):
+            return 5
+    return {"local": 2, "invoke": 3, "browser": 4}.get(action["kind"], 1)
+
+
 def migrate(bindings, wheels, binding_id, wheel_id, base_slot):
+    version = wheels["version"]
+    if type(version) is not int or not 1 <= version <= 6:
+        raise ValueError("轮盘配置版本不受支持。")
     action = unique(bindings["bindings"], "id", binding_id)["action"]
     if action["kind"] in {"show_panel", "show_wheel"}:
         raise ValueError("轮盘槽位不能打开面板或另一个轮盘。")
@@ -44,6 +56,7 @@ def migrate(bindings, wheels, binding_id, wheel_id, base_slot):
     changed = []
     if identity(action) == old:
         return candidate, changed
+    candidate["version"] = max(version, required_wheel_version(action))
 
     def replace(slot, layout):
         slot["action"] = deepcopy(action)
