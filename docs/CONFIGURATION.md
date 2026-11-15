@@ -29,6 +29,8 @@ OmniTrigger 正在保存热键或轮盘、或正在导入这两份文件时，�
 
 浏览器连接器的本机状态独立保存在配置同级 `browser-connector.json`，版本程序位于 `plugins/browser-connector/runtime/0.1.0`。用户点击安装后，本机注册与启动自动完成，这些内部文件无需手工编辑。实现细节见[浏览器连接器](BROWSER_EXTENSION.md)。
 
+恢复的 `browser-connector.json` 可以使用带 BOM 的 UTF-8。应用读取内置浏览器动作的 `connection.json` 和 `--browser-action` 指定的动作文件时也接受这种编码。
+
 `bindings.json` 读取兼容版本 1–24，保存使用版本 24；首次保存旧配置前创建 `bindings.json.v<旧版本>.bak` 备份，备份失败不会覆盖原配置。版本 8 增加 `invoke` 动作引用，版本 9 增加 `browser` 浏览器动作，版本 10 增加 `process_scope`，版本 11 增加 `keyboard` 专用层与重复策略，版本 12 增加显式捕获集合匹配，版本 13 增加快捷键按下时序，版本 14 增加保留原功能的键盘层，版本 15 增加显式窗口上下文范围，版本 16 增加逐事件滚轮策略，版本 17 增加独立指针窗口范围，版本 18 增加鼠标修饰键观察匹配，版本 19 增加显示器单像素边界，版本 20 增加鼠标匹配顺序，版本 21 增加鼠标捕获会话引用，版本 22 增加无 Ctrl/Shift/Alt 的鼠标透传观察，版本 23 增加逐事件修饰快照，版本 24 增加命名应用集合与场景。回退旧程序时需恢复对应备份。
 
 版本 23 的 `keyboard.matching.kind=mouse_sampled` 只支持空 `held` 的鼠标按下或滚轮。`policy` 必须明确填写 `required`、`allow_other_modifiers`、`allow_extra_passed_keys` 和 `allow_extra_passed_mouse`，不推断放行策略。`required` 可为 `no_control_shift_alt`、`shift`、`control`、`alt` 或明确左右侧的 `left_shift/right_shift/left_control/right_control/left_alt/right_alt/left_windows/right_windows`。泛型要求接受任一侧或双侧；`no_control_shift_alt` 排除全部 Ctrl/Shift/Alt，是否允许 Win 由 `allow_other_modifiers` 决定。

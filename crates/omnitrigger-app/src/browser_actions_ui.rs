@@ -407,7 +407,7 @@ pub(super) fn cli(arguments: &[String]) -> Option<Result<String, String>> {
         if bytes.len() > 128 * 1024 {
             return Err("浏览器动作不能超过 128 KiB。".into());
         }
-        let action: BrowserAction = serde_json::from_slice(&bytes)
+        let action: BrowserAction = crate::local_files::parse_config_json_bytes(&bytes)
             .map_err(|error| format!("浏览器动作格式有误：{error}"))?;
         action.validate()?;
         let executor = crate::browser_actions::BrowserExecutor::new(settings::path());

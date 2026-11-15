@@ -377,7 +377,8 @@ try {
     # Rust 已在本档锁内校验格式、来源路径和原始字节。旧种子状态从空开始，不沿用来源 PID 或注册。
     $verified=Read-VerifiedState
     if ($env:OMNITRIGGER_BROWSER_INHERITED -cne '1' -and $null -ne $verified) {
-        $saved=[Text.Encoding]::UTF8.GetString($verified) | ConvertFrom-Json
+        $json=[Text.Encoding]::UTF8.GetString($verified) -creplace '^\uFEFF',''
+        $saved=ConvertFrom-Json -InputObject $json
         foreach ($property in $saved.PSObject.Properties) {
             if (-not $script:state.Contains($property.Name)) { Fail 'settings_invalid' '连接器设置包含未知字段，原文件已保留。' }
             $script:state[$property.Name]=$property.Value

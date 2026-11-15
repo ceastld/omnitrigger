@@ -1,5 +1,33 @@
 use std::{path::Path, process::Command};
 
+#[cfg(windows)]
+#[test]
+fn browser_action_reads_a_bom_prefixed_file_in_the_selected_profile() {
+    let root = std::env::temp_dir().join(format!("omnitrigger-browser-cli-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let action = root.join("query.json");
+    let json =
+        "\u{feff}{\"command\":{\"operation\":\"call\",\"method\":\"tabs.query\",\"args\":[{}]}}";
+    std::fs::write(&action, json).unwrap();
+    let registration = root.join("browser-connector.json");
+    let saved = "\u{feff}{\"version\":\"unknown\"}";
+    std::fs::write(&registration, saved).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_omnitrigger"))
+        .arg("--config")
+        .arg(root.join("bindings.json"))
+        .arg("--browser-action")
+        .arg(&action)
+        .env("LOCALAPPDATA", &root)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::from_slice(&result.stderr).unwrap();
+    assert_eq!(error["code"], "version_incompatible");
+    assert_eq!(std::fs::read(&action).unwrap(), json.as_bytes());
+    assert_eq!(std::fs::read(&registration).unwrap(), saved.as_bytes());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn relayed_catalog_uses_caller_runtime_choices_and_profile_managed_host() {
     let root =

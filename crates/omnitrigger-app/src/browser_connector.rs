@@ -215,12 +215,13 @@ fn read_state(config_path: &Path) -> Result<SavedState, ConnectorError> {
             "浏览器连接器配置超过大小限制，原文件已保留。",
         ));
     }
-    let mut state: Snapshot = serde_json::from_slice(&bytes).map_err(|error| {
-        ConnectorError::new(
-            "settings_invalid",
-            format!("浏览器连接器配置有误，原文件已保留：{error}"),
-        )
-    })?;
+    let mut state: Snapshot =
+        crate::local_files::parse_config_json_bytes(&bytes).map_err(|error| {
+            ConnectorError::new(
+                "settings_invalid",
+                format!("浏览器连接器配置有误，原文件已保留：{error}"),
+            )
+        })?;
     if !state.version.is_empty() && state.version != CONNECTOR_VERSION {
         return Err(ConnectorError::new(
             "version_incompatible",
@@ -557,7 +558,12 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let config = root.join("bindings.json");
         let state = state_path(&config);
-        let original = serde_json::to_vec(&Snapshot::default()).unwrap();
+        let snapshot = Snapshot {
+            extension_id: "abcdefghijklmnopabcdefghijklmnop".into(),
+            ..Default::default()
+        };
+        let original =
+            format!("\u{feff}{}", serde_json::to_string(&snapshot).unwrap()).into_bytes();
         fs::write(&state, &original).unwrap();
         let reader = fs::File::options()
             .read(true)
@@ -574,7 +580,9 @@ mod tests {
             .starts_with("browser-connector.json.tmp-")));
         drop(reader);
         run(&config, Operation::Refresh, |_| {}).unwrap();
-        assert!(!load(&config).unwrap().installed);
+        let refreshed = load(&config).unwrap();
+        assert!(!refreshed.installed);
+        assert_eq!(refreshed.extension_id, snapshot.extension_id);
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
@@ -618,7 +626,7 @@ mod tests {
             bridge_pid: Some(4512),
             bridge_started_at: "source".into(),
         };
-        let original = serde_json::to_vec(&state).unwrap();
+        let original = format!("\u{feff}{}", serde_json::to_string(&state).unwrap()).into_bytes();
         fs::write(&state_file, &original).unwrap();
         let local = expected_cli(&config);
         fs::create_dir_all(local.parent().unwrap()).unwrap();

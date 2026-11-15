@@ -402,7 +402,7 @@ fn connector_endpoint(config: &Path) -> Result<String, Fault> {
             "浏览器连接配置超过大小限制。",
         ));
     }
-    let value: Value = serde_json::from_slice(&bytes)
+    let value: Value = crate::local_files::parse_config_json_bytes(&bytes)
         .map_err(|error| Fault::before("connection_config", error.to_string()))?;
     let pipe = value["pipe"]
         .as_str()
@@ -1021,10 +1021,10 @@ mod tests {
         )
         .unwrap();
         let pipe = format!(r"\\.\pipe\omnitrigger-browser-app-test-{nonce}");
+        let connection = json!({"pipe":pipe,"extension_ids":[snapshot.extension_id]});
         std::fs::write(
             runtime.join("connection.json"),
-            serde_json::to_vec(&json!({"pipe":pipe,"extension_ids":[snapshot.extension_id]}))
-                .unwrap(),
+            format!("\u{feff}{connection}"),
         )
         .unwrap();
         assert_eq!(connector_endpoint(&config).unwrap(), pipe);
