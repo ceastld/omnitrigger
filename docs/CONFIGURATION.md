@@ -10,7 +10,7 @@ OmniTrigger 的绑定、插件与轮盘配置都保存在本机 JSON 文件中�
 
 绑定、提示文字、位置条件与动作参数保存在 `%LOCALAPPDATA%\OmniTrigger\bindings.json`；没有 `LOCALAPPDATA` 时使用系统临时目录下的 `OmniTrigger\bindings.json`。初次运行加载示例，之后保留用户配置，编辑后自动保存。
 
-启动时加 `--config <文件路径>` 可以使用独立配置，后续编辑保存到该文件；`--check-config` 只读检查所选配置，不安装 Hook 或执行动作。完整参数见[快速开始](GETTING_STARTED.md#命令行参数)。
+启动时加 `--config <文件路径>` 可以使用独立配置，后续编辑保存到该文件。用 `--config <文件路径> --check-config` 检查迁移或备份时，指定的热键文件必须存在。新配置档首次保存前，单独运行 `--check-config` 会检查内置默认配置。校验只读，不安装 Hook 或执行动作。完整参数见[快速开始](GETTING_STARTED.md#命令行参数)。
 
 | 文件 | 位置 | 内容 |
 | --- | --- | --- |

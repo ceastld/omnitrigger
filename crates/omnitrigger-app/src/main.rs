@@ -8557,11 +8557,12 @@ fn open_script_history_window(
     .map_err(|_| "无法创建历史窗口。".to_string())
 }
 
-fn check_config() -> Result<String, String> {
-    let bindings = settings::load()?;
+fn check_config(allow_missing_bindings: bool) -> Result<String, String> {
+    let path = settings::path();
+    let (bindings, scenes) = settings::load_bindings_and_scenes(&path, allow_missing_bindings)
+        .map_err(|error| format!("{}：{error}", path.display()))?;
     settings::validate(&bindings)?;
-    let wheels = Wheels::load(&settings::path())?;
-    let scenes = settings::load_scenes()?;
+    let wheels = Wheels::load(&path)?;
     for wheel in &wheels.wheels {
         wheel_scenes::check_wheel(wheel, &scenes)
             .map_err(|error| format!("轮盘“{}”：{error}", wheel.name))?;
@@ -8583,7 +8584,7 @@ fn check_config() -> Result<String, String> {
     Ok(format!(
         "配置有效，共 {} 条绑定：{}",
         bindings.len(),
-        settings::path().display()
+        path.display()
     ))
 }
 
@@ -8741,7 +8742,8 @@ fn main() {
         }
         return;
     }
-    if let Some(index) = arguments.iter().position(|argument| argument == "--config") {
+    let config_index = arguments.iter().position(|argument| argument == "--config");
+    if let Some(index) = config_index {
         let result = arguments
             .get(index + 1)
             .filter(|path| !path.starts_with("--"))
@@ -8815,7 +8817,7 @@ fn main() {
         .iter()
         .any(|argument| argument == "--check-config")
     {
-        match check_config() {
+        match check_config(config_index.is_none()) {
             Ok(message) => println!("{message}"),
             Err(error) => {
                 eprintln!("{error}");

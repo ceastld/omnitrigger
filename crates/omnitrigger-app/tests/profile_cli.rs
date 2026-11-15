@@ -338,6 +338,16 @@ fn check_config_uses_the_selected_data_root() {
     let unused = root.join("未创建的配置目录");
     assert!(run(&[], &unused).status.success());
     assert!(!unused.exists());
+    for missing in [isolated.join("旧版热键.json"), unused.join("bindings.json")] {
+        let result = run(&["--config", missing.to_str().unwrap()], &isolated);
+        assert!(!result.status.success());
+        assert!(result.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&result.stderr).contains(missing.to_str().unwrap()));
+        assert!(!missing.exists() && !unused.exists());
+    }
+    let explicit = run(&["--config", selected.to_str().unwrap()], &default);
+    assert!(explicit.status.success());
+    assert!(String::from_utf8_lossy(&explicit.stdout).contains("共 0 条绑定"));
 
     // 外壳重启的子进程通过同一回执转交成功文本、配置格式错误和配置档错误。
     let receipt = root.join("check-result.json");

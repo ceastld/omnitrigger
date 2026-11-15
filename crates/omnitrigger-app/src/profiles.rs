@@ -1586,7 +1586,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
         }
     }
     if check_config {
-        finish_command(crate::check_config(), parsed.result_file.as_deref());
+        finish_command(crate::check_config(true), parsed.result_file.as_deref());
     }
     if let Some(file) = parsed.result_file.as_deref().filter(|_| inspect_actions) {
         let result = parsed
