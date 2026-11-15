@@ -15,9 +15,9 @@ use windows::{
                 AppendMenuW, CreatePopupMenu, DestroyMenu, IsIconic, IsWindowVisible, KillTimer,
                 LoadIconW, PostMessageW, RegisterWindowMessageW, SetForegroundWindow, SetTimer,
                 ShowWindow, TrackPopupMenu, ENDSESSION_CLOSEAPP, IDI_APPLICATION, MF_STRING,
-                SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE, TPM_NONOTIFY, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_ENDSESSION, WM_NCDESTROY,
-                WM_NULL, WM_QUERYENDSESSION, WM_TIMER,
+                SIZE_MAXIMIZED, SIZE_RESTORED, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
+                TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
+                WM_ENDSESSION, WM_NCDESTROY, WM_NULL, WM_QUERYENDSESSION, WM_SIZE, WM_TIMER,
             },
         },
     },
@@ -32,10 +32,11 @@ const RETRY_TIMER: usize = SUBCLASS;
 const RETRY_DELAYS_MS: [u32; 3] = [250, 1000, 3000];
 const NO_ICON: usize = RETRY_DELAYS_MS.len() + 1;
 
-// 注册消息占低 16 位，剩余位存已安排的重试次数。状态随 HWND 的子类登记一起销毁。
+// 低 16 位是注册消息，其后分别保存任务栏回退标记和重试次数。
 #[derive(Clone, Copy)]
 struct TrayRegistration {
     restart: u32,
+    taskbar_fallback: bool,
     retries: usize,
 }
 
@@ -48,15 +49,35 @@ enum IconRecovery {
 }
 
 impl TrayRegistration {
+    fn new(restart: u32) -> Self {
+        Self {
+            restart,
+            taskbar_fallback: false,
+            retries: 0,
+        }
+    }
+
     fn from_data(data: usize) -> Self {
         Self {
             restart: (data & 0xffff) as u32,
-            retries: data >> 16,
+            taskbar_fallback: data & (1 << 16) != 0,
+            retries: data >> 17,
         }
     }
 
     fn data(self) -> usize {
-        self.restart as usize | (self.retries << 16)
+        self.restart as usize | (usize::from(self.taskbar_fallback) << 16) | (self.retries << 17)
+    }
+
+    unsafe fn get(hwnd: HWND) -> Option<Self> {
+        let mut data = 0;
+        GetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, Some(&mut data))
+            .as_bool()
+            .then(|| Self::from_data(data))
+    }
+
+    unsafe fn store(self, hwnd: HWND) -> bool {
+        SetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, self.data()).as_bool()
     }
 
     fn timer_pending(self) -> bool {
@@ -121,21 +142,12 @@ pub fn install_tray(raw: isize) -> Result<(), String> {
     let hwnd = HWND(raw as _);
     unsafe {
         let restart = RegisterWindowMessageW(w!("TaskbarCreated"));
-        if restart == 0
-            || !SetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, restart as usize).as_bool()
-        {
+        let registration = TrayRegistration::new(restart);
+        if restart == 0 || !registration.store(hwnd) {
             return Err("无法接收系统托盘消息，关闭窗口将退出程序。".into());
         }
         if !add_icon(hwnd) {
-            update_registration(
-                hwnd,
-                TrayRegistration {
-                    restart,
-                    retries: 0,
-                },
-                false,
-                false,
-            );
+            update_registration(hwnd, registration, false, false);
             return Err("系统托盘暂不可用，可从开始菜单重新打开主窗口。".into());
         }
     }
@@ -146,11 +158,12 @@ pub fn install_tray(raw: isize) -> Result<(), String> {
 pub fn hide_to_tray(raw: isize) -> bool {
     let hwnd = HWND(raw as _);
     unsafe {
-        let mut data = 0;
-        if !GetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, Some(&mut data)).as_bool() {
+        let Some(mut registration) = TrayRegistration::get(hwnd) else {
             return false;
-        }
-        let mode = if TrayRegistration::from_data(data).retries == NO_ICON {
+        };
+        let mode = if registration.retries == NO_ICON {
+            registration.taskbar_fallback = true;
+            registration.store(hwnd);
             SW_SHOWMINNOACTIVE
         } else {
             SW_HIDE
@@ -238,7 +251,15 @@ unsafe extern "system" fn tray_proc(
     _: usize,
     data: usize,
 ) -> LRESULT {
-    let registration = TrayRegistration::from_data(data);
+    let mut registration = TrayRegistration::from_data(data);
+    if registration.taskbar_fallback
+        && msg == WM_SIZE
+        && matches!(wp.0 as u32, SIZE_RESTORED | SIZE_MAXIMIZED)
+    {
+        // 用户已还原窗口。即使之后手动最小化，图标恢复也不应把它从任务栏收起。
+        registration.taskbar_fallback = false;
+        registration.store(hwnd);
+    }
     if lp.0 as u32 & ENDSESSION_CLOSEAPP != 0 {
         match msg {
             // Restart Manager 的查询可能被取消。只有确认结束才撤下托盘。
@@ -299,9 +320,16 @@ unsafe fn update_registration(
     if !restored_or_scheduled {
         let _ = KillTimer(Some(hwnd), RETRY_TIMER);
     }
-    if !SetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, registration.data()).as_bool() {
+    let return_to_tray = added && std::mem::take(&mut registration.taskbar_fallback);
+    if !restored_or_scheduled && !IsWindowVisible(hwnd).as_bool() {
+        registration.taskbar_fallback = true;
+    }
+    if !registration.store(hwnd) {
         remove_tray(hwnd);
     } else if restored_or_scheduled {
+        if return_to_tray && IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
         return;
     }
     // 图标持续不可用时保留一个任务栏入口。下次重建仍可重新注册。
@@ -342,36 +370,64 @@ mod tests {
             assert!(!is_in_tray(raw));
             let restart = RegisterWindowMessageW(w!("TaskbarCreated"));
             assert_ne!(restart, 0);
-            let mut registration = TrayRegistration {
-                restart,
-                retries: 0,
+            assert!(TrayRegistration::new(restart).store(hwnd));
+            let attempt = |added, timer| {
+                update_registration(hwnd, TrayRegistration::get(hwnd).unwrap(), added, timer);
             };
-            assert!(
-                SetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, registration.data()).as_bool()
-            );
+            let lose_icon = || {
+                for timer in [false, true, true, true] {
+                    attempt(false, timer);
+                }
+                assert_eq!(TrayRegistration::get(hwnd).unwrap().retries, NO_ICON);
+            };
             let _ = ShowWindow(hwnd, SW_SHOW);
             assert!(!is_in_tray(raw));
             assert!(hide_to_tray(raw));
             assert!(is_in_tray(raw));
             assert!(!IsWindowVisible(hwnd).as_bool());
 
-            for timer in [false, true, true, true] {
-                update_registration(hwnd, registration, false, timer);
-                let mut data = 0;
-                assert!(
-                    GetWindowSubclass(hwnd, Some(tray_proc), SUBCLASS, Some(&mut data)).as_bool()
-                );
-                registration = TrayRegistration::from_data(data);
-            }
-            assert_eq!(registration.retries, NO_ICON);
+            lose_icon();
+            assert!(IsWindowVisible(hwnd).as_bool() && IsIconic(hwnd).as_bool());
+            attempt(false, false); // 任务栏重建后，图标在下一次定时重试才可用。
+            attempt(true, true);
+            assert!(
+                !IsWindowVisible(hwnd).as_bool(),
+                "图标恢复应收起临时任务栏入口"
+            );
+            handle_menu_selection(hwnd, OPEN);
+            assert!(IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool());
+
+            assert!(hide_to_tray(raw));
+            lose_icon();
             assert!(IsIconic(hwnd).as_bool());
             assert!(is_in_tray(raw));
             show_main(hwnd);
             assert!(!is_in_tray(raw));
-            assert!(hide_to_tray(raw), "关闭时应继续保留日常实例");
+            let _ = ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
+            attempt(true, false);
+            assert!(
+                IsWindowVisible(hwnd).as_bool() && IsIconic(hwnd).as_bool(),
+                "还原后手动最小化的窗口应留在任务栏"
+            );
+            lose_icon();
+            attempt(true, false);
             assert!(IsWindowVisible(hwnd).as_bool() && IsIconic(hwnd).as_bool());
 
-            update_registration(hwnd, registration, true, false);
+            show_main(hwnd);
+            lose_icon();
+            attempt(true, false);
+            assert!(
+                IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool(),
+                "正在使用的窗口应保持打开"
+            );
+            lose_icon();
+            assert!(hide_to_tray(raw), "关闭时应继续保留日常实例");
+            assert!(IsWindowVisible(hwnd).as_bool() && IsIconic(hwnd).as_bool());
+            attempt(true, false);
+            assert!(
+                !IsWindowVisible(hwnd).as_bool(),
+                "用户主动关闭的窗口应收回托盘"
+            );
             handle_menu_selection(hwnd, OPEN);
             assert!(IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool());
             assert!(hide_to_tray(raw));
@@ -388,10 +444,7 @@ mod tests {
 
     #[test]
     fn tray_recovery_keeps_hidden_on_transient_failure_and_ignores_duplicate_notifications() {
-        let mut registration = TrayRegistration {
-            restart: 0xc153,
-            retries: 0,
-        };
+        let mut registration = TrayRegistration::new(0xc153);
         assert_eq!(
             registration.after_attempt(false, false),
             IconRecovery::RetryAfter(RETRY_DELAYS_MS[0])
@@ -412,10 +465,8 @@ mod tests {
 
     #[test]
     fn tray_recovery_stops_after_exhaustion_and_recovers_on_the_next_taskbar() {
-        let mut registration = TrayRegistration {
-            restart: 0xffff,
-            retries: 0,
-        };
+        let mut registration = TrayRegistration::new(0xffff);
+        registration.taskbar_fallback = true;
         for (attempt, delay) in RETRY_DELAYS_MS.into_iter().enumerate() {
             assert_eq!(
                 registration.after_attempt(false, attempt != 0),
@@ -428,10 +479,10 @@ mod tests {
             IconRecovery::Unavailable
         );
         assert!(!registration.timer_pending());
-        assert_eq!(
-            TrayRegistration::from_data(registration.data()).retries,
-            NO_ICON
-        );
+        registration = TrayRegistration::from_data(registration.data());
+        assert_eq!(registration.retries, NO_ICON);
+        assert_eq!(registration.restart, 0xffff);
+        assert!(registration.taskbar_fallback);
         assert_eq!(
             registration.after_attempt(false, false),
             IconRecovery::RetryAfter(RETRY_DELAYS_MS[0])
