@@ -2285,7 +2285,7 @@ mod tests {
         let result = create_profile_directory(&directory, |staging| {
             std::fs::write(staging.join("bindings.json"), "partial").unwrap();
             let visible = read_catalog(&root).unwrap();
-            assert_eq!(visible.profiles, [existing.clone()]);
+            assert_eq!(visible.profiles.as_slice(), std::slice::from_ref(&existing));
             assert!(!directory.exists());
             Err("复制失败".into())
         });
