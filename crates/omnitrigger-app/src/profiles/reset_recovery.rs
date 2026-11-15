@@ -1,4 +1,4 @@
-//! 重置的两次目录替换之间退出时，匹配同一事务的备份与暂存档，恢复用户原来的目录。
+//! 按登记的身份恢复已准备好的新副本，或在重置中断时恢复原目录。
 use super::{lock_catalog, open_profile_use_file, read_catalog, Entry};
 use crate::local_files::{is_plain, is_plain_directory};
 use std::{
@@ -16,6 +16,24 @@ pub(super) fn directory_present(path: &Path) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+/// 发布使用不覆盖目标的改名。两个目录同时存在时，保留现场供用户核对。
+pub(super) fn live_profile_present(directory: &Path) -> io::Result<bool> {
+    if !directory_present(directory)? {
+        return Ok(false);
+    }
+    let creating = directory.with_extension("creating");
+    if creating.symlink_metadata().is_ok()
+        && identity(&creating).is_ok_and(|staged| staged.is_test_at(directory))
+    {
+        return Err(io::Error::other(format!(
+            "配置档目录及其待发布的副本同时存在，请核对 {} 和 {}。",
+            directory.display(),
+            creating.display()
+        )));
+    }
+    Ok(true)
 }
 
 pub(super) fn identity(directory: &Path) -> io::Result<Entry> {
@@ -85,7 +103,7 @@ pub(super) fn interrupted_resets(
     Ok(pending)
 }
 
-/// 调用者持有目录登记锁及本档独占锁。无成对现场时不从普通历史备份猜测。
+/// 调用者持有目录登记锁及本档独占锁。只发布相符的新副本，或从成对的重置现场恢复。
 pub(super) fn restore_missing(directory: &Path, entry: &Entry) -> Result<bool, String> {
     let root = directory
         .parent()
@@ -93,13 +111,24 @@ pub(super) fn restore_missing(directory: &Path, entry: &Entry) -> Result<bool, S
         .ok_or("找不到测试配置档的数据根。")?;
     let backups = root.join("backups/profile-reset");
     let restore = || -> io::Result<bool> {
-        if directory_present(directory)? {
+        if live_profile_present(directory)? {
             return Ok(true);
         }
         if !entry.is_test_at(directory) || !is_plain_directory(directory.parent().unwrap()) {
             return Err(io::Error::other("测试档身份或目录无效"));
         }
         let pending = interrupted_resets(root, |id| id == entry.id)?;
+        let creating = directory.with_extension("creating");
+        if directory_present(&creating)? {
+            if !pending.is_empty() || identity(&creating)? != *entry {
+                return Err(io::Error::other(format!(
+                    "创建现场与登记或重置备份不符：{}",
+                    creating.display()
+                )));
+            }
+            super::move_new(&creating, directory)?;
+            return Ok(true);
+        }
         let original = match pending.as_slice() {
             [] => return Ok(false),
             [(found, path)] if found == entry => path,
@@ -128,7 +157,7 @@ pub(super) fn hold_for_use(directory: &Path) -> Result<fs::File, String> {
     loop {
         file.lock_shared()
             .map_err(|e| format!("无法打开测试配置档：{e}"))?;
-        if directory_present(directory).map_err(|e| e.to_string())? {
+        if live_profile_present(directory).map_err(|e| e.to_string())? {
             return Ok(file);
         }
         file.unlock().map_err(|e| e.to_string())?;
@@ -138,7 +167,7 @@ pub(super) fn hold_for_use(directory: &Path) -> Result<fs::File, String> {
             .ok_or("找不到测试配置档的数据根。")?;
         let _catalog = lock_catalog(root)?;
         // 其他打开者可能已经完成恢复并持有共享锁，此时无需再抢占独占锁。
-        if directory_present(directory).map_err(|e| e.to_string())? {
+        if live_profile_present(directory).map_err(|e| e.to_string())? {
             continue;
         }
         file.lock()
@@ -150,7 +179,7 @@ pub(super) fn hold_for_use(directory: &Path) -> Result<fs::File, String> {
             .find(|entry| entry.is_test_at(directory))
             .ok_or("找不到待恢复测试档的登记。")?;
         if !restore_missing(directory, entry)? {
-            return Err(format!("测试档 {} 的目录缺失，找不到成对的重置备份。请检查 {}，或用 --profile-reset {} 从种子重建。", entry.alias, root.join("backups/profile-reset").display(), entry.alias));
+            return Err(format!("测试档 {} 的目录缺失，找不到成对的重置备份或已登记的创建副本。请检查 {}，或用 --profile-reset {} 从种子重建。", entry.alias, root.join("backups/profile-reset").display(), entry.alias));
         }
         file.unlock().map_err(|e| e.to_string())?;
     }

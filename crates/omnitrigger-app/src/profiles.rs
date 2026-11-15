@@ -134,9 +134,9 @@ impl Startup {
                 Err(error) => return Err(format!("无法读取 {}：{error}", path.display())),
             }
         }
-        if !reset_recovery::directory_present(&directory).map_err(|error| error.to_string())? {
+        if !reset_recovery::live_profile_present(&directory).map_err(|error| error.to_string())? {
             return Err(format!(
-                "测试档目录缺失，无法校验配置。请先打开该配置档以恢复中断的重置：{}",
+                "测试档目录缺失，无法校验配置。请先打开该配置档以恢复中断的创建或重置：{}",
                 directory.display()
             ));
         }
@@ -1039,7 +1039,7 @@ fn source_dir(root: &Path, catalog: &Catalog, key: &str) -> Result<PathBuf, Stri
         .source_profile(key)
         .ok_or_else(|| format!("找不到配置档 {key}；可用 --profile-list 查看。"))?;
     let dir = profile_dir(root, &entry.id);
-    if !reset_recovery::directory_present(&dir).map_err(|e| e.to_string())?
+    if !reset_recovery::live_profile_present(&dir).map_err(|e| e.to_string())?
         && entry.is_test_at(&dir)
     {
         // 调用者持有总登记锁，此时其他重置及启动恢复都不会进入目录交换。
@@ -1109,7 +1109,20 @@ fn create_profile(
 ) -> Result<Entry, String> {
     let _lock = lock_catalog(root)?;
     let mut catalog = read_catalog(root)?;
-    if catalog.find(alias).is_some() {
+    if let Some(entry) = catalog.find(alias) {
+        let dir = profile_dir(root, &entry.id);
+        if entry.alias == alias
+            && generated_profile_id(&entry.id)
+            && entry.kind == "test"
+            && entry.name == name.unwrap_or(alias)
+            && entry.seed == seed.for_creation()?.record()
+            && !reset_recovery::live_profile_present(&dir).map_err(|e| e.to_string())?
+            && reset_recovery::directory_present(&dir.with_extension("creating"))
+                .map_err(|e| e.to_string())?
+        {
+            source_dir(root, &catalog, alias)?;
+            return Ok(entry.clone());
+        }
         return Err(format!(
             "配置档 {alias} 已存在；要恢复种子数据请用 --profile-reset {alias}。"
         ));
@@ -1215,36 +1228,55 @@ fn insert_profile(
         created_ms: now_ms(),
     };
     let directory = profile_dir(root, &entry.id);
-    create_profile_directory(&directory, |staging| {
+    if catalog.find(&entry.id).is_some() {
+        return Err("新配置档标识已被使用，请重试创建。".into());
+    }
+    stage_profile_directory(&directory, |staging| {
         seed_into(root, catalog, &seed, staging)?;
         write_json(&staging.join("profile.json"), &entry)
     })?;
-    catalog.profiles.push(entry.clone());
-    if let Err(error) = write_json(&catalog_path(root), catalog) {
-        catalog.profiles.pop();
-        let _ = std::fs::remove_dir_all(&directory);
-        return Err(error);
-    }
+    publish_staged_profile(root, catalog, &entry, &directory)?;
     Ok(entry)
 }
 
-/// 只有完整副本才占用配置档 ID。总登记缺失时，恢复流程不会看到正在复制的目录。
-fn create_profile_directory(
+fn stage_profile_directory(
     directory: &Path,
     prepare: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
+    if reset_recovery::directory_present(directory).map_err(|error| error.to_string())? {
+        return Err(format!("配置档目录已存在：{}", directory.display()));
+    }
     let staging = directory.with_extension("creating");
     std::fs::create_dir_all(directory.parent().ok_or("找不到测试配置档的父目录。")?)
         .and_then(|()| std::fs::create_dir(&staging))
         .map_err(|error| format!("创建 {} 失败：{error}", staging.display()))?;
-    let result = prepare(&staging).and_then(|()| {
-        move_new(&staging, directory)
-            .map_err(|error| format!("保存测试配置档 {} 失败：{error}", directory.display()))
-    });
-    if result.is_err() {
+    if let Err(error) = prepare(&staging) {
         let _ = std::fs::remove_dir_all(staging);
+        return Err(error);
     }
-    result
+    Ok(())
+}
+
+/// 完整副本先登记再改名。登记一旦写入，就保留可按原身份恢复的副本。
+fn publish_staged_profile(
+    root: &Path,
+    catalog: &mut Catalog,
+    entry: &Entry,
+    directory: &Path,
+) -> Result<(), String> {
+    let staging = directory.with_extension("creating");
+    catalog.profiles.push(entry.clone());
+    if let Err(error) = write_json(&catalog_path(root), catalog) {
+        catalog.profiles.pop();
+        let _ = std::fs::remove_dir_all(staging);
+        return Err(error);
+    }
+    move_new(&staging, directory).map_err(|error| {
+        format!(
+            "测试配置档已登记，完整副本保存在 {}，请稍后重试。{error}",
+            staging.display()
+        )
+    })
 }
 
 /// 用记录的种子重建测试配置档；原目录整体移入 `backups\profile-reset\`。
@@ -2328,7 +2360,7 @@ mod tests {
         let existing = create_profile(&root, "existing", &Seed::Empty, None).unwrap();
         std::fs::remove_file(catalog_path(&root)).unwrap();
         let directory = profile_dir(&root, &new_id());
-        let result = create_profile_directory(&directory, |staging| {
+        let result = stage_profile_directory(&directory, |staging| {
             std::fs::write(staging.join("bindings.json"), "partial").unwrap();
             let visible = read_catalog(&root).unwrap();
             assert_eq!(visible.profiles.as_slice(), std::slice::from_ref(&existing));
@@ -2356,6 +2388,50 @@ mod tests {
             std::fs::read(staging.join("bindings.json")).unwrap(),
             b"partial"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn interrupted_creation_retries_the_registered_snapshot_without_reseeding() {
+        let root = temp_root("registered-create");
+        create_profile(&root, "unrelated", &Seed::Empty, None).unwrap();
+        let mut previous = read_catalog(&root).unwrap();
+        let seed = Seed::Copy(DEFAULT_ID.into());
+        std::fs::write(root.join("wheels.json"), b"original layout").unwrap();
+        let entry = create_profile(&root, "work", &seed, None).unwrap();
+        let directory = profile_dir(&root, &entry.id);
+        let staging = directory.with_extension("creating");
+        std::fs::rename(&directory, &staging).unwrap();
+        write_json(&catalog_path(&root), &previous).unwrap();
+        // 最后改名时发现同名目录。保留两个目录，且登记已指向第一次复制的身份。
+        std::fs::create_dir(&directory).unwrap();
+        assert!(publish_staged_profile(&root, &mut previous, &entry, &directory).is_err());
+        assert!(reset_profile(&root, "work").is_err());
+        assert!(directory.read_dir().unwrap().next().is_none());
+        std::fs::remove_dir(&directory).unwrap();
+        std::fs::write(root.join("wheels.json"), b"new daily layout").unwrap();
+        assert_eq!(read_catalog(&root).unwrap().find("work"), Some(&entry));
+        assert!(
+            prepare_root_access(&directory.join("bindings.json"), RootAccess::Inspect).is_err()
+        );
+        assert!(create_profile(&root, "work", &Seed::Empty, None).is_err());
+        assert!(!directory.exists());
+
+        let mut wrong_identity = entry.clone();
+        wrong_identity.alias = "different".into();
+        write_json(&staging.join("profile.json"), &wrong_identity).unwrap();
+        assert!(create_profile(&root, "work", &seed, None).is_err());
+        assert!(!directory.exists());
+        write_json(&staging.join("profile.json"), &entry).unwrap();
+
+        assert_eq!(create_profile(&root, "work", &seed, None).unwrap(), entry);
+        assert_eq!(
+            std::fs::read(directory.join("wheels.json")).unwrap(),
+            b"original layout"
+        );
+        assert!(!staging.exists());
+        assert!(create_profile(&root, "work", &seed, None).is_err());
+        assert_eq!(read_catalog(&root).unwrap().profiles.len(), 2);
         std::fs::remove_dir_all(root).unwrap();
     }
 
