@@ -81,35 +81,52 @@ public static class OmniTriggerUpgradeWindow {
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromPoint(Point p, uint flags);
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
 
+    public sealed class WindowShows : IDisposable {
+        private readonly HashSet<IntPtr> shown = new HashSet<IntPtr>();
+        private readonly WinEvent observe;
+        private readonly IntPtr hookHandle;
+
+        public WindowShows() {
+            const uint show = 0x8002; // EVENT_OBJECT_SHOW
+            // 安装器启动的接替进程尚无 PID。记录句柄，待按进程找到主窗口后再核对。
+            observe = (hook, kind, hwnd, obj, child, thread, time) => {
+                if (hwnd != IntPtr.Zero && obj == 0 && child == 0) shown.Add(hwnd);
+            };
+            hookHandle = SetWinEventHook(show, show, IntPtr.Zero, observe, 0, 0, 0);
+            if (hookHandle == IntPtr.Zero) throw new Exception("无法观察窗口显示事件。");
+        }
+
+        public bool WasShown(IntPtr hwnd) {
+            Message m;
+            while (PeekMessage(out m, IntPtr.Zero, 0, 0, 1)) DispatchMessage(ref m);
+            return shown.Contains(hwnd);
+        }
+
+        public void Dispose() {
+            UnhookWinEvent(hookHandle);
+            GC.KeepAlive(observe);
+        }
+    }
+
     public static Process StartAndVerifyWindows(ProcessStartInfo start, bool requested, bool inTray) {
-        const uint show = 0x8002; // EVENT_OBJECT_SHOW
-        uint pid = 0;
-        var shown = new HashSet<IntPtr>();
-        WinEvent observe = (hook, kind, hwnd, obj, child, thread, time) => {
-            if (pid == 0 || obj != 0 || child != 0 || hwnd == IntPtr.Zero) return;
-            uint owner; GetWindowThreadProcessId(hwnd, out owner);
-            if (owner == pid) shown.Add(hwnd);
-        };
-        // 先订阅再启动；即使同一毫秒内显示又隐藏，也能观察到首次显示。
-        var hookHandle = SetWinEventHook(show, show, IntPtr.Zero, observe, 0, 0, 0);
-        if (hookHandle == IntPtr.Zero) throw new Exception("无法观察窗口显示事件。");
+        var shown = new WindowShows();
         Process ui = null;
         try {
             ui = Process.Start(start);
-            pid = (uint)ui.Id;
+            uint pid = (uint)ui.Id;
             var timer = Stopwatch.StartNew();
             var settled = new Stopwatch();
             while (!ui.HasExited && timer.Elapsed.TotalSeconds < 30) {
-                Message m;
-                while (PeekMessage(out m, IntPtr.Zero, 0, 0, 1)) DispatchMessage(ref m);
                 var main = FindAppWindow(pid, "OmniTrigger", false);
                 var panel = FindAppWindow(pid, "OmniTrigger 触发面板", false);
                 bool visible = panel != IntPtr.Zero && IsWindowVisible(panel);
-                if (!requested && (shown.Contains(panel) || visible))
+                bool mainShown = shown.WasShown(main);
+                bool panelShown = shown.WasShown(panel);
+                if (!requested && (panelShown || visible))
                     throw new Exception("普通启动在呼出前显示了触发面板。");
-                if (inTray && (shown.Contains(main) || IsWindowVisible(main)))
+                if (inTray && (mainShown || IsWindowVisible(main)))
                     throw new Exception("托盘更新在用户主动唤回前显示了主窗口。");
-                bool ready = main != IntPtr.Zero && (inTray || shown.Contains(main)) && panel != IntPtr.Zero && (!requested || (shown.Contains(panel) && visible));
+                bool ready = main != IntPtr.Zero && (inTray || mainShown) && panel != IntPtr.Zero && (!requested || (panelShown && visible));
                 if (ready) settled.Start(); else settled.Reset();
                 if (settled.ElapsedMilliseconds >= 750) {
                     if (requested) {
@@ -129,8 +146,7 @@ public static class OmniTriggerUpgradeWindow {
             }
             throw;
         } finally {
-            UnhookWinEvent(hookHandle);
-            GC.KeepAlive(observe);
+            shown.Dispose();
         }
     }
 }
@@ -480,13 +496,17 @@ try {
 $start = New-AppStart
 $start.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $health
 $ui = [Diagnostics.Process]::Start($start)
+$shows = $null
 try {
     $dailyWindow = Close-ToTray $ui $health
+    $shows = [OmniTriggerUpgradeWindow+WindowShows]::new()
     Assert-TrayIdle $ui $dailyWindow
-    # 快捷方式参数拼错或脚本查询版本时，命令应独立结束，已收起的日常窗口仍由原进程持有。
-    foreach ($flag in '--version', '--help', '--check-confg') {
+    $actionFile = Join-Path $probe.FullName '检查剪贴板 toggle.json'
+    [IO.File]::WriteAllText($actionFile, '{"package_id":"examples.n10-rust","action_id":"toggle","action_version":1}')
+    foreach ($flag in '--version', '--help', '--check-confg', '--list-package-actions', '--check-action') {
         $query = New-AppStart
         $query.ArgumentList.Add($flag)
+        if ($flag -eq '--check-action') { $query.ArgumentList.Add($actionFile) }
         $query.CreateNoWindow = $true
         $query.RedirectStandardOutput = $true
         $query.RedirectStandardError = $true
@@ -504,9 +524,17 @@ try {
                 if ($child.ExitCode -ne 0 -or $stderr.Result -ne '' -or
                     ($flag -eq '--version' -and $stdout.Result.Trim() -cne "OmniTrigger $ExpectedVersion") -or
                     ($flag -eq '--help' -and $stdout.Result -notmatch '--test-workspace')) { throw "$flag 的输出或退出码错误。" }
+                if ($flag -eq '--list-package-actions') {
+                    $catalog = $stdout.Result | ConvertFrom-Json
+                    $toggle = @($catalog.actions | Where-Object { $_.call.package_id -ceq 'examples.n10-rust' -and $_.call.action_id -ceq 'toggle' })
+                    if ($toggle.Count -ne 1) { throw '托盘查询未列出独立剪贴板动作。' }
+                } elseif ($flag -eq '--check-action') {
+                    $checked = $stdout.Result | ConvertFrom-Json
+                    if ($checked.valid -ne $true -or $checked.call.action_id -cne 'toggle') { throw '托盘中的剪贴板动作校验未成功。' }
+                }
             }
             if ($ui.HasExited -or -not [OmniTriggerUpgradeWindow]::IsWindow($dailyWindow) -or
-                [OmniTriggerUpgradeWindow]::IsWindowVisible($dailyWindow)) { throw "$flag 改变了日常窗口的托盘状态。" }
+                $shows.WasShown($dailyWindow) -or [OmniTriggerUpgradeWindow]::IsWindowVisible($dailyWindow)) { throw "$flag 检查期间日常主窗口退出或重新显示。" }
         } finally { Stop-TestProcess $child }
     }
     # 日常窗口已经确认 Hook 就绪。另一进程的真实监听请求应在安装 Hook 前返回占用原因。
@@ -586,6 +614,12 @@ try {
         if ($hidden -eq [IntPtr]::Zero -or [OmniTriggerUpgradeWindow]::IsWindowVisible($hidden)) {
             throw '覆盖安装后新版主窗口未收在托盘。'
         }
+        $timer.Restart()
+        do {
+            if ($shows.WasShown($dailyWindow)) { throw '覆盖安装完成前，旧版日常主窗口曾重新显示。' }
+            if ($shows.WasShown($hidden) -or [OmniTriggerUpgradeWindow]::IsWindowVisible($hidden)) { throw '新版日常主窗口在用户唤回前曾显示。' }
+            Start-Sleep -Milliseconds 50
+        } while ($timer.ElapsedMilliseconds -lt 750)
         $launcher = [Diagnostics.Process]::Start((New-AppStart))
         try {
             if (-not $launcher.WaitForExit(20000) -or $launcher.ExitCode -ne 0 -or
@@ -593,9 +627,14 @@ try {
                 throw '普通启动未能唤回原日常配置的托盘窗口。'
             }
         } finally { Stop-TestProcess $launcher }
-        Write-Host '已验证静默覆盖安装后，新版在托盘接手日常监听，普通启动唤回同一窗口。'
+        if ((Close-ToTray $replacement $receipt) -ne $hidden) { throw '再次收起的不是刚唤回的窗口。' }
+        $timer.Restart()
+        while (-not $shows.WasShown($hidden) -and $timer.Elapsed.TotalSeconds -lt 5) { Start-Sleep -Milliseconds 50 }
+        if (-not $shows.WasShown($hidden)) { throw '再次收起后，窗口观察器未能报告刚才的显示事件。' }
+        Write-Host '已验证动作查询和静默覆盖安装期间新旧日常主窗口都保持隐藏，主动唤回时记录到同一窗口的显示事件。'
     } finally { if ($replacement) { Stop-TestProcess $replacement } }
 } finally {
+    if ($shows) { $shows.Dispose() }
     # 只收尾本脚本创建并持有句柄的测试进程；上述断言在收尾之前执行。
     Stop-TestProcess $ui
 }
