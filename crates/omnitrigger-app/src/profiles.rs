@@ -72,9 +72,9 @@ impl Startup {
         }
     }
 
-    fn for_config(config: &Path) -> Self {
-        registered_test_profile(config)
-            .map_or_else(Self::daily, |entry| Self::for_entry(&entry, true))
+    fn for_config(config: &Path) -> Result<Self, String> {
+        Ok(registered_test_profile(config)?
+            .map_or_else(Self::daily, |entry| Self::for_entry(&entry, true)))
     }
 
     fn for_entry(entry: &Entry, listen: bool) -> Self {
@@ -160,7 +160,7 @@ fn prepare_root_access(
     let mut startup = Startup::daily();
     for directory in directories.into_iter().rev() {
         let path = directory.join("bindings.json");
-        let profile = Startup::for_config(&path);
+        let profile = Startup::for_config(&path)?;
         guards.extend(profile.prepare_access(&path, check_only)?);
         if directory == target {
             startup = profile;
@@ -554,26 +554,40 @@ impl Entry {
 }
 
 /// 旧版 --config 仍从文件所在目录读取动作数据。以实际目录和登记表确认其身份。
-fn registered_test_profile(config_path: &Path) -> Option<Entry> {
-    let directory = profile_directory(config_path)?;
-    let root = directory.parent()?.parent()?;
-    if let Ok(catalog) = read_catalog(root) {
-        if let Some(entry) = catalog
-            .profiles
-            .into_iter()
-            .find(|entry| entry.is_test_at(&directory))
+fn registered_test_profile(config_path: &Path) -> Result<Option<Entry>, String> {
+    let Some(directory) = profile_directory(config_path) else {
+        return Ok(None);
+    };
+    let Some(root) = directory.parent().and_then(Path::parent) else {
+        return Ok(None);
+    };
+    match read_catalog(root) {
+        Ok(catalog) => {
+            let entry = catalog
+                .profiles
+                .into_iter()
+                .find(|entry| entry.is_test_at(&directory));
+            // 有效总登记是权威来源；别名、备份和相邻的普通目录都不算已登记的测试档。
+            if entry.is_some() || catalog_path(root).exists() {
+                return Ok(entry);
+            }
+        }
+        Err(error)
+            if directory
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(generated_profile_id)
+                && !directory.is_dir() =>
         {
-            return Some(entry);
+            // 目录替换中途退出时，本地身份也被移走。登记有冲突时不能把这个路径当作日常档打开。
+            return Err(error);
         }
-        // 有效总登记是权威来源；别名、备份和相邻的普通目录都不算已登记的测试档。
-        if catalog_path(root).exists() {
-            return None;
-        }
+        Err(_) => {}
     }
     // 总登记缺失或损坏时，以原目录自己的身份文件保守隔离动作，保留 --config 启动能力。
-    reset_recovery::identity(&directory)
+    Ok(reset_recovery::identity(&directory)
         .ok()
-        .filter(|entry| entry.is_test_at(&directory))
+        .filter(|entry| entry.is_test_at(&directory)))
 }
 
 /// 只有已登记配置档的安装可用于运行复制来的脚本；夹具仅提供动作和测试数据。
@@ -711,7 +725,12 @@ fn read_catalog(root: &Path) -> Result<Catalog, String> {
     }
 }
 
-/// 总登记缺失时，只从本根直属的配置档身份文件恢复，不读取热键、动作或历史。
+fn generated_profile_id(id: &str) -> bool {
+    id.strip_prefix(['t', 'T'])
+        .is_some_and(|hex| hex.len() == 12 && hex.bytes().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// 总登记缺失时，只读取本根的配置档身份，包括尚未完成目录替换的重置现场。
 fn recover_catalog(root: &Path) -> Result<Catalog, String> {
     let mut catalog = Catalog {
         version: CATALOG_VERSION,
@@ -719,8 +738,8 @@ fn recover_catalog(root: &Path) -> Result<Catalog, String> {
     };
     let directory = root.join("profiles");
     let fail = |error| format!("无法恢复 {} 中的配置档登记：{error}", directory.display());
-    match directory.symlink_metadata() {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(catalog),
+    let live = match directory.symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(fail(error)),
         Ok(_) if !crate::local_files::is_plain_directory(&directory) => {
             return Err(format!(
@@ -728,17 +747,13 @@ fn recover_catalog(root: &Path) -> Result<Catalog, String> {
                 directory.display()
             ));
         }
-        Ok(_) => {}
-    }
-    let mut keys = BTreeSet::new();
-    for item in std::fs::read_dir(&directory).map_err(fail)? {
+        Ok(_) => Some(std::fs::read_dir(&directory).map_err(fail)?),
+    };
+    for item in live.into_iter().flatten() {
         let item = item.map_err(fail)?;
         let id = item.file_name();
         // 历代测试档均由 new_id 生成。忽略旁置的备份、别名目录及非本机条目。
-        let Some(hex) = id.to_str().and_then(|s| s.strip_prefix(['t', 'T'])) else {
-            continue;
-        };
-        if hex.len() != 12 || !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
+        if !id.to_str().is_some_and(generated_profile_id) {
             continue;
         }
         let metadata = item.metadata().map_err(fail)?;
@@ -760,12 +775,30 @@ fn recover_catalog(root: &Path) -> Result<Catalog, String> {
         if !entry.is_test_at(&item.path()) {
             return Err(format!("配置档身份与目录不符：{}", path.display()));
         }
+        catalog.profiles.push(entry);
+    }
+    let pending =
+        reset_recovery::interrupted_resets(root, generated_profile_id).map_err(|error| {
+            format!(
+                "无法从 {} 恢复配置档登记：{error}",
+                root.join("backups/profile-reset").display()
+            )
+        })?;
+    catalog
+        .profiles
+        .extend(pending.into_iter().map(|(entry, _)| entry));
+    let mut keys = BTreeSet::new();
+    for entry in &catalog.profiles {
         validate_alias(&entry.alias)?;
         let key = entry.id.to_ascii_lowercase();
         if (entry.alias != key && !keys.insert(entry.alias.clone())) || !keys.insert(key) {
-            return Err(format!("配置档标识或别名重复：{}", path.display()));
+            return Err(format!(
+                "配置档标识或别名重复：{}（{}）。请检查 {} 下的配置档及重置备份。",
+                entry.alias,
+                entry.id,
+                root.display()
+            ));
         }
-        catalog.profiles.push(entry);
     }
     catalog
         .profiles
@@ -1086,14 +1119,16 @@ fn lock_catalog(root: &Path) -> Result<std::fs::File, String> {
     Ok(lock)
 }
 
-fn testing_workspace(root: &Path) -> Result<Entry, String> {
+fn testing_workspace(root: &Path, check_only: bool) -> Result<Entry, String> {
     let _lock = lock_catalog(root)?;
     let mut catalog = read_catalog(root)?;
     if let Some(entry) = catalog.find(TEST_ALIAS) {
         if entry.kind != "test" {
             return Err(format!("配置档 {TEST_ALIAS} 已用于其他用途。"));
         }
-        persist_recovered_catalog(root, &catalog)?;
+        if !check_only {
+            persist_recovered_catalog(root, &catalog)?;
+        }
         return Ok(entry.clone());
     }
     insert_profile(
@@ -1211,6 +1246,8 @@ fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), Pro
     let result = (|| {
         seed_into(root, &catalog, &seed, &staging)?;
         write_json(&staging.join("profile.json"), &entry)?;
+        // 还原后可能只有各档的身份文件。在移走原目录前先保存其登记。
+        persist_recovered_catalog(root, &catalog)?;
         std::fs::create_dir_all(root.join("profiles")).map_err(|error| error.to_string())?;
         let backed_up = match move_new(&directory, &backup) {
             Ok(()) => true,
@@ -1501,7 +1538,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     let (config, startup) = match profile {
         Some(key) => {
             let result = if parsed.test_workspace && !inspect_actions {
-                testing_workspace(&root)
+                testing_workspace(&root, check_only)
             } else {
                 read_catalog(&root).and_then(|catalog| {
                     catalog.find(key).cloned().ok_or_else(|| {
@@ -2752,6 +2789,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let explicit = Startup::for_config(&config)
+            .unwrap()
             .hold_profile(&config)
             .unwrap()
             .unwrap();
@@ -3102,7 +3140,7 @@ mod tests {
             Some("轮盘测试"),
         )
         .unwrap();
-        let testing = testing_workspace(&root).unwrap();
+        let testing = testing_workspace(&root, false).unwrap();
         let config = profile_dir(&root, &testing.id).join("bindings.json");
         std::fs::write(&config, b"test bindings").unwrap();
         let path = catalog_path(&root);
@@ -3119,7 +3157,7 @@ mod tests {
         assert_eq!(recovered.find("other"), Some(&other));
         assert_eq!(recovered.find(TEST_ALIAS), Some(&testing));
         assert!(!path.exists());
-        assert_eq!(testing_workspace(&root).unwrap(), testing);
+        assert_eq!(testing_workspace(&root, false).unwrap(), testing);
         assert_eq!(read_catalog(&root).unwrap(), recovered);
         assert!(path.is_file());
         assert_eq!(std::fs::read(&config).unwrap(), b"test bindings");
@@ -3134,7 +3172,7 @@ mod tests {
         .unwrap();
         assert!(read_catalog(&root).unwrap().find("other").is_none());
         std::fs::write(&path, "{").unwrap();
-        assert!(testing_workspace(&root).is_err());
+        assert!(testing_workspace(&root, false).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"{");
         std::fs::remove_file(&path).unwrap();
         let mut duplicate = other.clone();
@@ -3144,7 +3182,9 @@ mod tests {
             &duplicate,
         )
         .unwrap();
-        assert!(testing_workspace(&root).unwrap_err().contains("重复"));
+        assert!(testing_workspace(&root, false)
+            .unwrap_err()
+            .contains("重复"));
         assert!(!path.exists());
         assert_eq!(std::fs::read(&config).unwrap(), b"test bindings");
         std::fs::remove_dir_all(root).unwrap();
@@ -3225,7 +3265,7 @@ mod tests {
     #[test]
     fn settings_test_copy_reuses_edits_and_preserves_existing_workspaces() {
         let root = temp_root("settings-copy");
-        let testing = testing_workspace(&root).unwrap();
+        let testing = testing_workspace(&root, false).unwrap();
         let occupied = create_profile(&root, "daily-copy", &Seed::Empty, None).unwrap();
         let file = |entry: &Entry| profile_dir(&root, &entry.id).join("bindings.json");
         std::fs::write(file(&testing), "testing").unwrap();
@@ -3287,15 +3327,15 @@ mod tests {
         let root = temp_root("testing-shortcut");
         std::fs::write(root.join("bindings.json"), "daily").unwrap();
         let ids = std::thread::scope(|scope| {
-            let first = scope.spawn(|| testing_workspace(&root).unwrap().id);
-            let second = testing_workspace(&root).unwrap().id;
+            let first = scope.spawn(|| testing_workspace(&root, false).unwrap().id);
+            let second = testing_workspace(&root, false).unwrap().id;
             (first.join().unwrap(), second)
         });
         assert_eq!(ids.0, ids.1);
         let config = profile_dir(&root, &ids.0).join("bindings.json");
         assert!(!config.exists());
         std::fs::write(&config, "test").unwrap();
-        assert_eq!(testing_workspace(&root).unwrap().id, ids.0);
+        assert_eq!(testing_workspace(&root, false).unwrap().id, ids.0);
         assert_eq!(std::fs::read_to_string(config).unwrap(), "test");
         assert_eq!(
             std::fs::read_to_string(root.join("bindings.json")).unwrap(),
@@ -3372,8 +3412,14 @@ mod tests {
             explicit.window_title("OmniTrigger"),
             "OmniTrigger — 测试：动作测试"
         );
-        assert!(registered_test_profile(&root.join("bindings.json")).is_none());
-        assert!(registered_test_profile(&directory.join("nested/unknown.json")).is_none());
+        assert!(registered_test_profile(&root.join("bindings.json"))
+            .unwrap()
+            .is_none());
+        assert!(
+            registered_test_profile(&directory.join("nested/unknown.json"))
+                .unwrap()
+                .is_none()
+        );
 
         let alias_dir = profile_dir(&root, &entry.alias);
         std::fs::create_dir(&alias_dir).unwrap();
@@ -3382,7 +3428,9 @@ mod tests {
             alias_dir.join("profile.json"),
         )
         .unwrap();
-        assert!(registered_test_profile(&alias_dir.join("bindings.json")).is_none());
+        assert!(registered_test_profile(&alias_dir.join("bindings.json"))
+            .unwrap()
+            .is_none());
         for listen in [false, true] {
             let selected = Startup::for_entry(&entry, listen);
             assert!(selected.test_data);
@@ -3392,9 +3440,11 @@ mod tests {
 
         std::fs::write(catalog_path(&root), "{").unwrap();
         assert_eq!(startup(&mut arguments).0, explicit);
-        assert!(registered_test_profile(&alias_dir.join("bindings.json")).is_none());
+        assert!(registered_test_profile(&alias_dir.join("bindings.json"))
+            .unwrap()
+            .is_none());
         std::fs::remove_file(catalog_path(&root)).unwrap();
-        assert_eq!(registered_test_profile(&config), Some(entry));
+        assert_eq!(registered_test_profile(&config).unwrap(), Some(entry));
         std::fs::write(directory.join("profile.json"), "broken").unwrap();
         assert_eq!(startup(&mut arguments).0, Startup::daily());
         let _ = std::fs::remove_dir_all(root);
@@ -3411,12 +3461,12 @@ mod tests {
         ] {
             let (resolved, source) = resolve_root(flag, env, None).unwrap();
             assert_ne!(source, RootSource::Default);
-            let startup = Startup::for_config(&resolved.join("bindings.json"));
+            let startup = Startup::for_config(&resolved.join("bindings.json")).unwrap();
             assert!(startup.test_data && startup.listen);
             assert_eq!(startup.test_name.as_deref(), Some(test.name.as_str()));
         }
         assert_eq!(
-            Startup::for_config(&root.join("bindings.json")),
+            Startup::for_config(&root.join("bindings.json")).unwrap(),
             Startup::daily()
         );
         let _ = std::fs::remove_dir_all(root);

@@ -215,6 +215,44 @@ fn action_inspection_leaves_test_registration_and_interrupted_reset_untouched() 
             );
         }
     }
+    let registry = root.join("profiles.json");
+    std::fs::remove_file(&registry).unwrap();
+    let list = run(&["--profile-list"]);
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let list: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    let testing = list["profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["alias"] == "testing")
+        .unwrap();
+    assert_eq!(testing["id"], entry["id"]);
+    assert!(!registry.exists() && !dir.exists());
+    for args in [
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--list-package-actions",
+        ][..],
+        &["--test-workspace", "--check-config"],
+    ] {
+        let query = run(args);
+        assert!(!query.status.success());
+        assert!(String::from_utf8_lossy(&query.stderr).contains("测试档目录缺失"));
+        assert!(!registry.exists() && !dir.exists());
+    }
+    let copy = run(&["--profile-create", "copy", "--seed", "copy:testing"]);
+    assert!(
+        copy.status.success(),
+        "{}",
+        String::from_utf8_lossy(&copy.stderr)
+    );
+    assert_eq!(std::fs::read(dir.join("profile.json")).unwrap(), identity);
+    assert!(registry.is_file() && !backup.exists());
     std::fs::remove_dir_all(root).unwrap();
 }
 

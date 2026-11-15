@@ -1,7 +1,10 @@
 //! 重置的两次目录替换之间退出时，匹配同一事务的备份与暂存档，恢复用户原来的目录。
 use super::{lock_catalog, open_profile_use_file, read_catalog, Entry};
 use crate::local_files::{is_plain, is_plain_directory};
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 pub(super) fn directory_present(path: &Path) -> io::Result<bool> {
     match path.symlink_metadata() {
@@ -33,6 +36,55 @@ pub(super) fn identity(directory: &Path) -> io::Result<Entry> {
     crate::local_files::parse_config_json(&fs::read_to_string(path)?).map_err(io::Error::other)
 }
 
+fn reset_tag(name: &str) -> Option<(&str, &str)> {
+    let tag = name.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let (prefix, nonce) = tag.rsplit_once("-t")?;
+    let (id, time) = prefix.rsplit_once('-')?;
+    (nonce.len() == 12
+        && nonce.bytes().all(|c| c.is_ascii_hexdigit())
+        && !time.is_empty()
+        && time.bytes().all(|c| c.is_ascii_digit()))
+    .then_some((id, tag))
+}
+
+/// 只识别原目录缺失、同一轮重置的两份身份相符的现场。枚举本身不恢复目录。
+pub(super) fn interrupted_resets(
+    root: &Path,
+    include: impl Fn(&str) -> bool,
+) -> io::Result<Vec<(Entry, PathBuf)>> {
+    let backups = root.join("backups/profile-reset");
+    let mut pending = Vec::new();
+    if !directory_present(&root.join("backups"))? || !directory_present(&backups)? {
+        return Ok(pending);
+    }
+    if !is_plain_directory(&backups) {
+        return Err(io::Error::other("重置备份不是普通本机目录"));
+    }
+    for item in fs::read_dir(&backups)? {
+        let item = item?;
+        let name = item.file_name();
+        let Some((id, tag)) = name.to_str().and_then(reset_tag) else {
+            continue;
+        };
+        if !include(id) {
+            continue;
+        }
+        let original = backups.join(tag);
+        if directory_present(&super::profile_dir(root, id))? || !directory_present(&original)? {
+            continue;
+        }
+        let entry = identity(&original)?;
+        if entry.kind != "test" || entry.id != id || identity(&item.path())? != entry {
+            return Err(io::Error::other(format!(
+                "备份与暂存目录的身份不符：{}",
+                original.display()
+            )));
+        }
+        pending.push((entry, original));
+    }
+    Ok(pending)
+}
+
 /// 调用者持有目录登记锁及本档独占锁。无成对现场时不从普通历史备份猜测。
 pub(super) fn restore_missing(directory: &Path, entry: &Entry) -> Result<bool, String> {
     let root = directory
@@ -47,56 +99,19 @@ pub(super) fn restore_missing(directory: &Path, entry: &Entry) -> Result<bool, S
         if !entry.is_test_at(directory) || !is_plain_directory(directory.parent().unwrap()) {
             return Err(io::Error::other("测试档身份或目录无效"));
         }
-        if !directory_present(&root.join("backups"))? {
-            return Ok(false);
-        }
-        if !directory_present(&backups)? {
-            return Ok(false);
-        }
-        if !is_plain_directory(&backups) {
-            return Err(io::Error::other("重置备份不是普通本机目录"));
-        }
-        let mut backup = None;
-        let prefix = format!("{}-", entry.id);
-        for item in fs::read_dir(&backups)? {
-            let item = item?;
-            let name = item.file_name();
-            let Some(tag) = name
-                .to_str()
-                .and_then(|s| s.strip_prefix('.'))
-                .and_then(|s| s.strip_suffix(".tmp"))
-            else {
-                continue;
-            };
-            let Some((time, nonce)) = tag.strip_prefix(&prefix).and_then(|s| s.split_once("-t"))
-            else {
-                continue;
-            };
-            if time.is_empty()
-                || !time.bytes().all(|c| c.is_ascii_digit())
-                || nonce.len() != 12
-                || !nonce.bytes().all(|c| c.is_ascii_hexdigit())
-            {
-                continue;
-            }
-            let original = backups.join(tag);
-            if !directory_present(&original)? {
-                continue;
-            }
-            if identity(&item.path())? != *entry || identity(&original)? != *entry {
+        let pending = interrupted_resets(root, |id| id == entry.id)?;
+        let original = match pending.as_slice() {
+            [] => return Ok(false),
+            [(found, path)] if found == entry => path,
+            [(_, path)] => {
                 return Err(io::Error::other(format!(
-                    "备份或暂存目录的身份与总登记不符：{}",
-                    original.display()
-                )));
+                    "重置备份的身份与总登记不符：{}",
+                    path.display()
+                )))
             }
-            if backup.replace(original).is_some() {
-                return Err(io::Error::other("存在多组未完成的重置备份"));
-            }
-        }
-        let Some(original) = backup else {
-            return Ok(false);
+            _ => return Err(io::Error::other("存在多组未完成的重置备份")),
         };
-        super::move_new(&original, directory)?;
+        super::move_new(original, directory)?;
         Ok(true)
     };
     restore().map_err(|e| {
@@ -145,8 +160,8 @@ pub(super) fn hold_for_use(directory: &Path) -> Result<fs::File, String> {
 mod tests {
     use super::*;
     use crate::profiles::{
-        create_profile, new_id, profile_dir, reset_profile, tests::temp_root, ProfileCommandError,
-        Seed,
+        catalog_path, create_profile, new_id, prepare_root_access, profile_dir, reset_profile,
+        testing_workspace, tests::temp_root, write_json, Catalog, ProfileCommandError, Seed,
     };
     use std::path::PathBuf;
 
@@ -192,9 +207,85 @@ mod tests {
     }
 
     #[test]
+    fn missing_catalog_lists_an_interrupted_reset_and_the_shortcut_reopens_its_original_id() {
+        let f = Fixture::interrupt();
+        let catalog = catalog_path(&f.root);
+        fs::remove_file(&catalog).unwrap();
+
+        let listed = read_catalog(&f.root).unwrap();
+        assert_eq!(listed.find("testing"), Some(&f.entry));
+        let check = prepare_root_access(&f.dir.join("bindings.json"), true).unwrap_err();
+        assert!(check.contains("测试档目录缺失"), "{check}");
+        assert!(!catalog.exists() && !f.dir.exists());
+        assert_eq!(
+            fs::read(f.backup.join("bindings.json")).unwrap(),
+            b"my hotkeys"
+        );
+        let opened = testing_workspace(&f.root, false).unwrap();
+        assert_eq!(opened, f.entry);
+        let _guard = hold_for_use(&f.dir).unwrap();
+        assert_eq!(fs::read(f.dir.join("wheels.json")).unwrap(), b"my wheels");
+        assert_eq!(
+            fs::read(f.dir.join("actions/one/main.mjs")).unwrap(),
+            b"my action"
+        );
+        assert_eq!(
+            read_catalog(&f.root).unwrap().profiles,
+            vec![f.entry.clone()]
+        );
+    }
+
+    #[test]
+    fn missing_catalog_preserves_conflicting_pairs_and_ignores_an_ordinary_backup() {
+        let f = Fixture::interrupt();
+        let catalog = catalog_path(&f.root);
+        fs::remove_file(&catalog).unwrap();
+        let mut wrong = f.entry.clone();
+        wrong.alias = "other".into();
+        write_json(&f.stage.join("profile.json"), &wrong).unwrap();
+        for error in [
+            testing_workspace(&f.root, false).unwrap_err(),
+            prepare_root_access(&f.dir.join("bindings.json"), false).unwrap_err(),
+        ] {
+            assert!(error.contains("身份"), "{error}");
+        }
+        assert!(!catalog.exists() && !f.dir.exists());
+        assert_eq!(
+            fs::read(f.backup.join("wheels.json")).unwrap(),
+            b"my wheels"
+        );
+        fs::remove_dir_all(&f.stage).unwrap();
+        assert!(read_catalog(&f.root).unwrap().profiles.is_empty());
+        assert!(f.backup.join("bindings.json").is_file());
+        assert!(!catalog.exists());
+    }
+
+    #[test]
+    fn reset_persists_a_recovered_catalog_before_replacing_the_live_directory() {
+        let f = Fixture::interrupt();
+        fs::rename(&f.backup, &f.dir).unwrap();
+        let catalog = catalog_path(&f.root);
+        fs::remove_file(&catalog).unwrap();
+        let blocked = catalog.with_extension("json.tmp");
+        fs::create_dir(&blocked).unwrap();
+        assert!(reset_profile(&f.root, "testing").is_err());
+        assert_eq!(fs::read(f.dir.join("wheels.json")).unwrap(), b"my wheels");
+        assert!(!catalog.exists());
+        fs::remove_dir(blocked).unwrap();
+        let (entry, backup) = reset_profile(&f.root, "testing").unwrap();
+        let saved: Catalog = serde_json::from_slice(&fs::read(catalog).unwrap()).unwrap();
+        assert_eq!(entry, f.entry);
+        assert_eq!(saved.profiles, vec![entry]);
+        assert_eq!(
+            fs::read(backup.unwrap().join("wheels.json")).unwrap(),
+            b"my wheels"
+        );
+    }
+
+    #[test]
     fn utf8_bom_preserves_registration_across_reset_and_catalog_recovery() {
         let f = Fixture::interrupt();
-        let catalog = super::super::catalog_path(&f.root);
+        let catalog = catalog_path(&f.root);
         for path in [
             &catalog,
             &f.backup.join("profile.json"),
@@ -274,6 +365,14 @@ mod tests {
             fs::copy(f.stage.join("profile.json"), path.join("profile.json")).unwrap();
         }
         assert!(hold_for_use(&f.dir).unwrap_err().contains("多组"));
+        let registry = catalog_path(&f.root);
+        let registered = fs::read(&registry).unwrap();
+        fs::remove_file(&registry).unwrap();
+        assert!(testing_workspace(&f.root, false)
+            .unwrap_err()
+            .contains("重复"));
+        assert!(!registry.exists() && !f.dir.exists());
+        fs::write(registry, registered).unwrap();
         fs::remove_dir_all(other_backup).unwrap();
         let mut wrong = f.entry.clone();
         wrong.alias = "another".into();
@@ -295,7 +394,7 @@ mod tests {
     #[test]
     fn file_at_live_path_leaves_the_reset_pair_available_for_a_later_open() {
         let f = Fixture::interrupt();
-        let catalog = super::super::catalog_path(&f.root);
+        let catalog = catalog_path(&f.root);
         let registration = fs::read(&catalog).unwrap();
         fs::write(&f.dir, b"unrelated file").unwrap();
 
