@@ -21,6 +21,35 @@ def unique(rows, key, value):
     return matches[0]
 
 
+def binding_action(bindings, binding_id):
+    binding = unique(bindings["bindings"], "id", binding_id)
+    version = bindings.get("version")
+    legacy = type(version) is int and 1 <= version <= 4
+    action = binding.get("action")
+    command = binding.get("command")
+    panel = binding.get("show_panel")
+    if action is not None:
+        if legacy or command is not None or panel is not None:
+            raise ValueError("热键的 action 与旧版配置格式冲突。")
+        return action
+    if not legacy:
+        raise ValueError("热键缺少 action，无法确定要复制的动作。")
+
+    # 按 BindingDto 解释旧版字段；没有程序或面板的热键使用通知动作。
+    if panel is not None and type(panel) is not bool:
+        raise ValueError("旧版热键的 show_panel 必须是布尔值。")
+    if panel:
+        if command is not None:
+            raise ValueError("旧版热键不能同时运行程序和打开面板。")
+        return {"kind": "show_panel"}
+    if command is None:
+        return {"kind": "notification"}
+    if (not isinstance(command, dict) or "program" not in command
+            or command.keys() - {"program", "args", "working_directory"}):
+        raise ValueError("旧版热键的 command 格式无效。")
+    return {"kind": "command", **command}
+
+
 def position_of(slot):
     position = slot.get("position")
     if position is None:
@@ -41,7 +70,7 @@ def migrate(bindings, wheels, binding_id, wheel_id, base_slot):
     version = wheels["version"]
     if type(version) is not int or not 1 <= version <= 6:
         raise ValueError("轮盘配置版本不受支持。")
-    action = unique(bindings["bindings"], "id", binding_id)["action"]
+    action = binding_action(bindings, binding_id)
     if action["kind"] in {"show_panel", "show_wheel"}:
         raise ValueError("轮盘槽位不能打开面板或另一个轮盘。")
     candidate = deepcopy(wheels)

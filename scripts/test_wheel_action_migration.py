@@ -43,6 +43,46 @@ class WheelActionMigration(unittest.TestCase):
         self.assertEqual(result["wheels"][0]["app_overrides"][1]["slots"][0]["action"], OLD)
         self.assertEqual(source, before)
 
+    def test_legacy_binding_notifications_and_commands_keep_slot_labels_and_arguments(self):
+        command = {"program": "历史 工具.exe", "args": ["", "含 空格", "--mode=编辑"],
+                   "working_directory": "D:/测试 数据"}
+        base = {"label": "通用工具", "action": OLD}
+        override = dict(base, label="编辑器工具")
+        source = {"version": 3, "wheels": [{"id": "w", "slots": [base],
+                  "app_overrides": [{"process": "editor.exe", "slots": [override]}]}]}
+        for version in range(1, 5):
+            for fields, expected in [
+                ({}, {"kind": "notification"}),
+                ({"action": None, "command": None, "show_panel": False}, {"kind": "notification"}),
+                ({"command": command}, {"kind": "command", **command}),
+                ({"show_panel": False, "command": {"program": "工具.exe"}}, {"kind": "command", "program": "工具.exe"}),
+            ]:
+                with self.subTest(version=version, fields=fields):
+                    binding = {"id": 9, "message": "热键名称", **fields}
+                    result, changed = migrate({"version": version, "bindings": [binding]}, source, 9, "w", 1)
+                    wheel = result["wheels"][0]
+                    self.assertEqual(wheel["slots"], [dict(base, action=expected)])
+                    self.assertEqual(wheel["app_overrides"][0]["slots"], [dict(override, action=expected)])
+                    self.assertEqual(changed, [None, "editor.exe"])
+                    self.assertEqual(base["action"], OLD)
+
+    def test_invalid_or_panel_bindings_never_create_a_candidate(self):
+        with tempfile.TemporaryDirectory() as root:
+            bindings, wheels, output = (Path(root, name) for name in ("bindings.json", "wheels.json", "out.json"))
+            wheels.write_text(json.dumps({"version": 3, "wheels": [{"id": "w", "slots": [{"action": OLD}]}]}))
+            flags = ["--bindings", str(bindings), "--wheels", str(wheels), "--binding-id", "9",
+                     "--wheel-id", "w", "--base-slot", "1", "--output", str(output)]
+            for version, fields in [
+                (1, {"show_panel": True}), (2, {"show_panel": True, "command": {"program": "tool"}}),
+                (3, {"show_panel": 1}), (4, {"action": NEW}),
+                (4, {"command": {"program": "tool", "kind": "notification"}}),
+                (5, {}), (5, {"action": NEW, "show_panel": False}), (24, {"command": {"program": "tool"}}),
+            ]:
+                with self.subTest(version=version, fields=fields), patch("sys.stderr"):
+                    bindings.write_text(json.dumps({"version": version, "bindings": [{"id": 9, **fields}]}))
+                    self.assertEqual(main(flags), 1)
+                    self.assertFalse(output.exists())
+
     def test_candidate_uses_the_minimum_version_for_the_copied_action(self):
         shortcut = {"kind": "send_shortcut", "keys": [162, 67]}
         for action, required in [

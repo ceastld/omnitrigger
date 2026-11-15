@@ -180,7 +180,7 @@ Windows 上，从只读文件创建或重置测试档后，可以直接编辑副
 
 ## 备份与恢复
 
-在轮盘编辑器里可以将已有热键的动作复制到一个格子。需要迁移多个应用布局时，可对配置副本运行下面的命令。示例将热键 12 的完整动作复制到轮盘 `personal` 通用布局的第 4 个槽位，并更新同一轮盘中方位、场景和原动作都相同的应用槽位。每个槽位保留自己的名称。
+在轮盘编辑器里可以将已有热键的动作复制到一个格子。需要迁移多个应用布局时，可对配置副本运行下面的命令。示例将热键 12 的完整动作复制到轮盘 `personal` 通用布局的第 4 个槽位，并更新同一轮盘中方位、场景和原动作都相同的应用槽位。每个槽位保留自己的名称。工具也能读取版本 1–4 的热键配置，包括通知和运行程序的动作，程序参数与工作目录会一并复制。
 
 ```powershell
 python scripts/migrate_wheel_action.py --bindings .\copy\bindings.json --wheels .\copy\wheels.json --binding-id 12 --wheel-id personal --base-slot 4 --output .\candidate\wheels.json
