@@ -743,7 +743,19 @@ mod tests {
     fn profile_reset_recovers_its_daily_seed_and_external_sources_stay_read_only() {
         use super::super::{create_profile, profile_dir, reset_profile, Seed, DEFAULT_ID};
         let fixture = Fixture::new();
-        let root = fixture.0.join("daily");
+        let root = fixture
+            .0
+            .join("Packages/Edited/LocalCache/Local/OmniTrigger");
+        let ready = fixture
+            .0
+            .join("Packages/Ready/LocalCache/Local/OmniTrigger");
+        write(&ready, "bindings.json", "other bindings");
+        let offered = || {
+            super::super::external_copies(&fixture.0)
+                .into_iter()
+                .map(|(_, directory, _)| directory)
+                .collect::<Vec<_>>()
+        };
         let other = fixture.0.join("other");
         write(&root, "bindings.json", "old binding");
         write(&root, "wheels.json", "old wheel");
@@ -773,6 +785,8 @@ mod tests {
         .unwrap();
         move_new(&incoming.join("bindings.json"), &root.join("bindings.json")).unwrap();
 
+        assert_eq!(offered(), vec![ready]);
+        assert!(pending.join(PLAN).is_file());
         let source = Seed::Fixture(root.clone());
         assert!(create_profile(&other, "trial", &source, None)
             .unwrap_err()
@@ -803,6 +817,7 @@ mod tests {
             );
         }
         assert!(!pending.exists());
+        assert!(offered().contains(&root));
         assert!(create_profile(&other, "trial", &source, None).is_ok());
     }
 

@@ -2031,6 +2031,10 @@ fn external_copies(local_app_data: &Path) -> Vec<(String, PathBuf, u64)> {
                 .join("Local")
                 .join("OmniTrigger");
             let modified = data_modified_ms(&directory)?;
+            #[cfg(windows)]
+            if !matches!(external_import::recorded_import(&directory), Ok(None)) {
+                return None;
+            }
             directory
                 .join("bindings.json")
                 .symlink_metadata()
