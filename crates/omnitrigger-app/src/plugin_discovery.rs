@@ -10,7 +10,6 @@ use std::{
 const MIN_VERSION: Version = (0, 4, 15);
 const MAX_VERSION_EXCLUSIVE: Version = (0, 5, 0);
 const MAX_VERSIONS_PER_ROOT: usize = 64;
-const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 /// 运行必需的程序与运行库；说明和许可文件缺失不影响运行，不作为接入条件。
 const REQUIRED_FILES: &[&str] = &[
     "raishot.exe",
@@ -55,21 +54,28 @@ fn parse_version(text: &str) -> Option<Version> {
     parts.next().is_none().then_some(version)
 }
 
+fn local_install_path(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        path.is_absolute()
+            && matches!(path.components().next(), Some(Component::Prefix(p))
+                if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
+    }
+    #[cfg(not(windows))]
+    {
+        path.is_absolute()
+    }
+}
+
 /// 检查一个目录是否为完整、兼容的 RaiShot 安装。依据 RaiShot 自带清单的版本、
 /// 架构与文件大小判断；目录或其祖先含链接、联接点、云端占位时拒绝。
 pub fn inspect(directory: &Path) -> Option<Installed> {
-    if !directory.is_absolute()
-        || directory.to_string_lossy().starts_with(r"\\")
-        || super::ensure_plain_ancestors(directory).is_err()
-    {
+    if !local_install_path(directory) {
         return None;
     }
-    let manifest_path = directory.join("manifest.json");
-    let metadata = fs::symlink_metadata(&manifest_path).ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_MANIFEST_BYTES {
-        return None;
-    }
-    let manifest: Manifest = serde_json::from_slice(&fs::read(&manifest_path).ok()?).ok()?;
+    let bytes = crate::plugins::read_local_manifest(&directory.join("manifest.json")).ok()??;
+    let manifest: Manifest = crate::local_files::parse_config_json_bytes(&bytes).ok()?;
     let order = parse_version(&manifest.package_version)?;
     if manifest.schema_version != 1
         || manifest.architecture != "windows-x64"
@@ -81,7 +87,10 @@ pub fn inspect(directory: &Path) -> Option<Installed> {
     for name in REQUIRED_FILES {
         let record = manifest.files.iter().find(|record| record.path == *name)?;
         let metadata = fs::symlink_metadata(directory.join(name)).ok()?;
-        if !metadata.is_file() || metadata.len() != record.bytes {
+        if !metadata.is_file()
+            || !crate::local_files::is_plain(&metadata)
+            || metadata.len() != record.bytes
+        {
             return None;
         }
     }
@@ -118,7 +127,7 @@ fn find_in(running: &[PathBuf], configured: Option<&Path>, roots: &[PathBuf]) ->
         .collect();
     for root in roots {
         directories.push(root.clone());
-        if !root.is_absolute() || super::ensure_plain_ancestors(root).is_err() {
+        if !local_install_path(root) || super::ensure_plain_ancestors(root).is_err() {
             continue;
         }
         let Ok(reader) = fs::read_dir(root) else {
@@ -244,6 +253,9 @@ mod tests {
     fn configured_path_is_kept_when_version_ties() {
         let fixture = Fixture::new();
         let configured = fixture.install("configured", "0.4.16");
+        let manifest = configured.join("manifest.json");
+        let restored = format!("\u{feff}{}", fs::read_to_string(&manifest).unwrap());
+        fs::write(&manifest, &restored).unwrap();
         fixture.install("packages/0.4.16", "0.4.16");
         let found = find_in(
             &[],
@@ -252,6 +264,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(found.cli, configured.join("raishot-cli.exe"));
+        assert_eq!(fs::read(&manifest).unwrap(), restored.as_bytes());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn canonical_local_paths_work_for_saved_programs_and_shared_roots() {
+        let fixture = Fixture::new();
+        let directory = fixture
+            .install("shared/0.4.16", "0.4.16")
+            .canonicalize()
+            .unwrap();
+        let cli = directory.join("raishot-cli.exe");
+        let settings =
+            serde_json::json!({"version": 1, "raishot": {"enabled": true, "cliPath": cli}});
+        fs::write(fixture.0.join("plugins.json"), settings.to_string()).unwrap();
+        let plugins = crate::plugins::Plugins::load(&fixture.0.join("bindings.json")).unwrap();
+        let saved = Path::new(plugins.raishot_path());
+        assert_eq!(find_in(&[], Some(saved), &[]).unwrap().cli, cli);
+        let capture = plugins
+            .resolve(&crate::plugins::PluginActionRef::raishot_capture())
+            .unwrap();
+        assert_eq!(Path::new(&capture.command.program), cli);
+        let shared = directory.parent().unwrap().to_owned();
+        assert_eq!(find_in(&[], None, &[shared]).unwrap().cli, cli);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn discovery_only_accepts_absolute_disk_paths() {
+        for path in [
+            r"versions\0.4.16",
+            r"C:raishot",
+            r"\\server\share\raishot",
+            r"\\?\UNC\server\share\raishot",
+            r"\\.\device",
+        ] {
+            assert!(!local_install_path(Path::new(path)), "{path}");
+        }
     }
 
     #[test]
