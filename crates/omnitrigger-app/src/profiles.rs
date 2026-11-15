@@ -1546,10 +1546,29 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     if check_config {
         finish_command(crate::check_config(), parsed.result_file.as_deref());
     }
-    if inspect_actions && parsed.result_file.is_some() {
-        let result =
-            crate::action_packages::cli(arguments, startup.test_data).expect("已验证的动作查询");
-        finish_command(result, parsed.result_file.as_deref());
+    if let Some(file) = parsed.result_file.as_deref().filter(|_| inspect_actions) {
+        let result = parsed
+            .relaunched
+            .as_deref()
+            .map(|link| {
+                if Path::new(link).with_extension("json") != Path::new(file) {
+                    return Err(rejected("动作查询回执与本次重启不匹配。"));
+                }
+                crate::script_runtime::check_local_path(Path::new(file))
+                    .map_err(|error| rejected(&error))?;
+                let input =
+                    std::fs::File::open(file).map_err(|error| rejected(&error.to_string()))?;
+                // 回执最初保存调用方解析出的运行时选择，完成校验后由结果原子替换。
+                use std::io::Read;
+                serde_json::from_reader(input.take(1024 * 1024))
+                    .map_err(|error| rejected(&format!("动作查询的运行时选择无效：{error}")))
+            })
+            .transpose()
+            .and_then(|runtimes| {
+                crate::action_packages::cli(arguments, startup.test_data, runtimes)
+                    .expect("已验证的动作查询")
+            });
+        finish_command(result, Some(file));
     }
     (startup, guards)
 }
@@ -1722,6 +1741,13 @@ fn escape_redirect(
             result_file.to_string_lossy().into_owned(),
         ]);
     }
+    if inspection == Some(Inspection::Actions) {
+        write_json(
+            &result_file,
+            &crate::action_packages::RuntimeSelection::current(),
+        )
+        .unwrap_or_else(|error| fail(&error));
+    }
     let working = program
         .parent()
         .map(Path::to_path_buf)
@@ -1732,6 +1758,8 @@ fn escape_redirect(
         &working,
         &link,
     ) {
+        let _ = std::fs::remove_file(&result_file);
+        let _ = std::fs::remove_file(&link);
         fail(&error);
     }
     if !is_command {
@@ -1756,6 +1784,8 @@ fn escape_redirect(
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    let _ = std::fs::remove_file(&result_file);
+    let _ = std::fs::remove_file(&link);
     exit_rejected("已脱离打包重定向重启，但新进程没有在 60 秒内返回结果。");
 }
 

@@ -32,8 +32,29 @@ fn node_program() -> Option<PathBuf> {
 }
 
 pub fn service(config: &Path) -> ActionService {
-    let (catalog, runtimes) = components(config);
+    service_with(config, RuntimeSelection::current())
+}
+
+fn service_with(config: &Path, selected: RuntimeSelection) -> ActionService {
+    let (catalog, runtimes) = components_with(config, selected);
     ActionService::new(catalog, runtimes)
+}
+
+/// Node 和显式脚本宿主由发起命令的环境决定，托管脚本宿主按所选配置档查找。
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RuntimeSelection {
+    node: Option<PathBuf>,
+    script: Option<Result<crate::script_runtime::Installed, String>>,
+}
+
+impl RuntimeSelection {
+    pub(super) fn current() -> Self {
+        Self {
+            node: node_program(),
+            script: crate::script_runtime::environment_host(),
+        }
+    }
 }
 
 /// 复制配置档会保留外部程序的绝对路径。只为项目提供的两个 N10 入口解释这些路径。
@@ -89,13 +110,20 @@ pub(super) fn clipboard_route(
 }
 
 pub(super) fn components(config: &Path) -> (PackageCatalog, RuntimeRegistry) {
+    components_with(config, RuntimeSelection::current())
+}
+
+fn components_with(config: &Path, selected: RuntimeSelection) -> (PackageCatalog, RuntimeRegistry) {
     let mut catalog = PackageCatalog::load(&root(config));
     let mut runtimes = RuntimeRegistry::new();
     let needs_script = catalog
         .actions
         .iter()
         .any(|action| action.definition.runtime == "script");
-    match crate::script_runtime::locate(config) {
+    match selected.script.map_or_else(
+        || crate::script_runtime::locate_in_profile(config),
+        |host| host.map(Some),
+    ) {
         Ok(Some(host)) => {
             if let Err(error) = runtimes.register("script", Arc::new(host.runtime())) {
                 catalog.diagnostics.push(error.to_string());
@@ -108,7 +136,7 @@ pub(super) fn components(config: &Path) -> (PackageCatalog, RuntimeRegistry) {
         Err(error) if needs_script => catalog.diagnostics.push(error),
         _ => {}
     }
-    if let Some(program) = node_program() {
+    if let Some(program) = selected.node {
         let runtime = NodeRuntime::new(program).with_browser_connector(
             crate::browser_connector::runtime_root(config)
                 .join(crate::browser_connector::CONNECTOR_VERSION),
@@ -184,7 +212,11 @@ fn catalog_json(service: &ActionService) -> Result<String, omnitrigger_actions::
 }
 
 /// 校验与运行共用服务；读清单不会导入 JS，也不安装 Hook。
-pub fn cli(arguments: &[String], test_data: bool) -> Option<Result<String, String>> {
+pub fn cli(
+    arguments: &[String],
+    test_data: bool,
+    inspected_runtimes: Option<RuntimeSelection>,
+) -> Option<Result<String, String>> {
     let install = arguments
         .iter()
         .position(|arg| arg == "--install-script-runtime");
@@ -253,8 +285,15 @@ pub fn cli(arguments: &[String], test_data: bool) -> Option<Result<String, Strin
                 message,
             ))
         };
+        let inspected_runtimes = inspected_runtimes.filter(|_| check.is_some() || list.is_some());
+        let service = || {
+            service_with(
+                &settings::path(),
+                inspected_runtimes.unwrap_or_else(RuntimeSelection::current),
+            )
+        };
         if list.is_some() {
-            return catalog_json(&service(&settings::path())).map_err(rejected);
+            return catalog_json(&service()).map_err(rejected);
         }
         let target_error = |message: String| {
             serde_json::json!({"status":"rejected","error":{
@@ -278,7 +317,7 @@ pub fn cli(arguments: &[String], test_data: bool) -> Option<Result<String, Strin
         }
         let call: ActionCall = omnitrigger_actions::model::parse_action_file(&bytes)
             .map_err(|error| request_error(format!("动作调用格式有误：{error}")))?;
-        let service = service(&settings::path());
+        let service = service();
         if clipboard_route(test_data, &call, service.catalog()).map_err(rejected)?
             == ClipboardRoute::WorkspaceHistory
         {

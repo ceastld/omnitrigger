@@ -49,6 +49,7 @@ struct Pointer {
     manifest_sha256: String,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Installed {
     pub program: PathBuf,
     pub integrity: Option<(String, u64)>,
@@ -258,19 +259,25 @@ fn verify_package(directory: &Path, expected_manifest: &str) -> Result<Manifest,
     Ok(parsed)
 }
 pub fn locate(config: &Path) -> Result<Option<Installed>, String> {
-    if let Some(path) = std::env::var_os("OMNITRIGGER_SCRIPT_HOST").filter(|path| !path.is_empty())
-    {
-        let program = PathBuf::from(path);
-        check_local_path(&program)?;
-        return if program.is_absolute() && program.is_file() {
-            Ok(Some(Installed {
+    environment_host().map_or_else(|| locate_in_profile(config), |result| result.map(Some))
+}
+
+pub(super) fn environment_host() -> Option<Result<Installed, String>> {
+    let path = std::env::var_os("OMNITRIGGER_SCRIPT_HOST").filter(|path| !path.is_empty())?;
+    let program = PathBuf::from(path);
+    Some(check_local_path(&program).and_then(|()| {
+        if program.is_absolute() && program.is_file() {
+            Ok(Installed {
                 program,
                 integrity: None,
-            }))
+            })
         } else {
             Err("OMNITRIGGER_SCRIPT_HOST 需要存在的完整本地宿主路径。".into())
-        };
-    }
+        }
+    }))
+}
+
+pub(super) fn locate_in_profile(config: &Path) -> Result<Option<Installed>, String> {
     let own_root = root(config)?;
     if let Some(host) = locate_managed(&own_root)? {
         return Ok(Some(host));

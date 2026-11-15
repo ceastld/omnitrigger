@@ -1,6 +1,75 @@
 use std::{path::Path, process::Command};
 
 #[test]
+fn relayed_catalog_uses_caller_runtime_choices_and_profile_managed_host() {
+    let root =
+        std::env::temp_dir().join(format!("omnitrigger-cli-runtimes-{}", std::process::id()));
+    let package = root.join("actions/demo");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("main.js"), "").unwrap();
+    let manifest = serde_json::json!({
+        "schema_version": 1, "id": "demo", "name": "测试", "version": "1.0.0",
+        "actions": [
+            {"id":"one","title":"一","version":1,"runtime":"node","entry":"main.js"},
+            {"id":"two","title":"二","version":1,"runtime":"script","entry":"main.js"}
+        ]
+    });
+    std::fs::write(package.join("action.json"), manifest.to_string()).unwrap();
+    let runtime =
+        root.join("runtimes/script")
+            .join(if cfg!(windows) { "host.exe" } else { "host" });
+    std::fs::create_dir_all(runtime.parent().unwrap()).unwrap();
+    std::fs::write(&runtime, "查询夹具").unwrap();
+    let receipt = root.join("relaunch.json");
+    let link = receipt.with_extension("lnk");
+    for (selection, node, script) in [
+        (
+            serde_json::json!({"node":null,"script":{"Err":"调用方宿主不可用"}}),
+            false,
+            false,
+        ),
+        (
+            serde_json::json!({"node":runtime,"script":{"Ok":{"program":runtime,"integrity":null}}}),
+            true,
+            true,
+        ),
+        (serde_json::json!({"node":null,"script":null}), false, true),
+    ] {
+        std::fs::write(&receipt, selection.to_string()).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_omnitrigger"))
+            .arg("--data-root")
+            .arg(&root)
+            .arg("--relaunched")
+            .arg(&link)
+            .arg("--relaunch-result")
+            .arg(&receipt)
+            .arg("--list-package-actions")
+            .env("OMNITRIGGER_NODE", &runtime)
+            .env("OMNITRIGGER_SCRIPT_HOST", root.join("missing.exe"))
+            .output()
+            .unwrap();
+        let response: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+        assert!(result.status.success(), "{response}");
+        let report: serde_json::Value =
+            serde_json::from_str(response["text"].as_str().unwrap()).unwrap();
+        let actions = report["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 2);
+        for (id, available) in [("one", node), ("two", script)] {
+            let action = actions
+                .iter()
+                .find(|item| item["call"]["action_id"] == id)
+                .unwrap();
+            assert_eq!(action["reference_error"].is_null(), available);
+            if !available {
+                assert_eq!(action["reference_error"]["code"], "runtime_unavailable");
+            }
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn relayed_action_queries_match_direct_catalog_validation_and_errors() {
     let root =
         std::env::temp_dir().join(format!("omnitrigger-query-result-{}", std::process::id()));

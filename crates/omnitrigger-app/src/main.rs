@@ -8791,7 +8791,7 @@ fn main() {
         }
         return;
     }
-    if let Some(result) = action_packages::cli(&arguments, profile_startup.test_data) {
+    if let Some(result) = action_packages::cli(&arguments, profile_startup.test_data, None) {
         match result {
             Ok(text) => println!("{text}"),
             Err(error) => {
