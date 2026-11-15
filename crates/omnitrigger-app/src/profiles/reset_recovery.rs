@@ -161,7 +161,8 @@ mod tests {
     use super::*;
     use crate::profiles::{
         catalog_path, create_profile, new_id, prepare_root_access, profile_dir, reset_profile,
-        testing_workspace, tests::temp_root, write_json, Catalog, ProfileCommandError, Seed,
+        testing_workspace, tests::temp_root, write_json, Catalog, ProfileCommandError, RootAccess,
+        Seed,
     };
     use std::path::PathBuf;
 
@@ -214,7 +215,9 @@ mod tests {
 
         let listed = read_catalog(&f.root).unwrap();
         assert_eq!(listed.find("testing"), Some(&f.entry));
-        let check = prepare_root_access(&f.dir.join("bindings.json"), true).unwrap_err();
+        let check = prepare_root_access(&f.dir.join("bindings.json"), RootAccess::Inspect)
+            .unwrap_err()
+            .response();
         assert!(check.contains("测试档目录缺失"), "{check}");
         assert!(!catalog.exists() && !f.dir.exists());
         assert_eq!(
@@ -245,7 +248,9 @@ mod tests {
         write_json(&f.stage.join("profile.json"), &wrong).unwrap();
         for error in [
             testing_workspace(&f.root, false).unwrap_err(),
-            prepare_root_access(&f.dir.join("bindings.json"), false).unwrap_err(),
+            prepare_root_access(&f.dir.join("bindings.json"), RootAccess::Open)
+                .unwrap_err()
+                .response(),
         ] {
             assert!(error.contains("身份"), "{error}");
         }

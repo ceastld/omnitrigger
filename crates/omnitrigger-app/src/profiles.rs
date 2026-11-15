@@ -144,11 +144,18 @@ impl Startup {
     }
 }
 
-/// 显式数据根可以位于另一个测试档里。先持有外层目录，再读取其中的登记与数据。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RootAccess {
+    Open,
+    Inspect,
+    Tray,
+}
+
+/// 显式数据根可以位于另一个测试档里。先判定外层目录，再读取其中的登记与数据。
 fn prepare_root_access(
     config: &Path,
-    check_only: bool,
-) -> Result<(Startup, Vec<std::fs::File>), String> {
+    access: RootAccess,
+) -> Result<(Startup, Vec<std::fs::File>), ProfileCommandError> {
     let Some(target) = config_directory(config) else {
         return Ok((Startup::daily(), Vec::new()));
     };
@@ -161,7 +168,10 @@ fn prepare_root_access(
     for directory in directories.into_iter().rev() {
         let path = directory.join("bindings.json");
         let profile = Startup::for_config(&path)?;
-        guards.extend(profile.prepare_access(&path, check_only)?);
+        if access == RootAccess::Tray && profile.test_data {
+            return Err(ProfileCommandError::TestInTray);
+        }
+        guards.extend(profile.prepare_access(&path, access == RootAccess::Inspect)?);
         if directory == target {
             startup = profile;
         }
@@ -1340,6 +1350,7 @@ fn list_profiles(root: &Path, source: RootSource) -> Result<serde_json::Value, S
 #[derive(Debug)]
 enum ProfileCommandError {
     InUse(String),
+    TestInTray,
     Other(String),
 }
 
@@ -1355,6 +1366,10 @@ impl ProfileCommandError {
             Self::InUse(alias) => rejection(
                 "profile_in_use",
                 &format!("测试配置档 {alias} 正在使用，请关闭该档窗口或等待正在使用它的命令结束，再重置。"),
+            ),
+            Self::TestInTray => rejection(
+                "invalid_cli_arguments",
+                "--tray 只用于日常工作区，测试档请从测试入口打开。",
             ),
             Self::Other(message) => rejected(&message),
         }
@@ -1446,6 +1461,18 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
             .unwrap_or_else(|error| crate::reject_cli_arguments(&error));
     }
     let check_only = inspect_actions || arguments.iter().any(|arg| arg == "--check-config");
+    let access = if tray {
+        RootAccess::Tray
+    } else if check_only {
+        RootAccess::Inspect
+    } else {
+        RootAccess::Open
+    };
+    let open_root = |config: &Path| {
+        prepare_root_access(config, access).unwrap_or_else(|error| {
+            finish_command(Err(error.response()), parsed.result_file.as_deref())
+        })
+    };
     let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     let config_index = arguments.iter().position(|argument| argument == "--config");
     if let Some(index) = config_index {
@@ -1474,8 +1501,14 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
                 );
             }
         }
-        return prepare_root_access(Path::new(path), check_only)
-            .unwrap_or_else(|error| exit_rejected(&error));
+        return open_root(Path::new(path));
+    }
+    let profile = parsed.profile.as_deref().filter(|key| *key != DEFAULT_ID);
+    if tray && profile.is_some() {
+        finish_command(
+            Err(ProfileCommandError::TestInTray.response()),
+            parsed.result_file.as_deref(),
+        );
     }
     let plain = arguments.len() == 1;
     if parsed.command.is_some() && !plain {
@@ -1519,10 +1552,8 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
             Some(Inspection::Actions),
         );
     }
-    let (root_startup, mut guards) = if source != RootSource::Default {
-        prepare_root_access(&root.join("bindings.json"), check_only).unwrap_or_else(|error| {
-            finish_command(Err(rejected(&error)), parsed.result_file.as_deref())
-        })
+    let (root_startup, mut guards) = if source != RootSource::Default || tray {
+        open_root(&root.join("bindings.json"))
     } else {
         (Startup::daily(), Vec::new())
     };
@@ -1553,7 +1584,6 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
             parsed.result_file.as_deref(),
         );
     }
-    let profile = parsed.profile.as_deref().filter(|key| *key != DEFAULT_ID);
     let (config, startup) = match profile {
         Some(key) => {
             let result = if parsed.test_workspace && !inspect_actions {
@@ -2272,7 +2302,8 @@ mod tests {
         let root = temp_root("inspect-lock");
         let entry = create_profile(&root, "inspect", &Seed::Empty, None).unwrap();
         let directory = profile_dir(&root, &entry.id);
-        let (_, guards) = prepare_root_access(&directory.join("bindings.json"), true).unwrap();
+        let (_, guards) =
+            prepare_root_access(&directory.join("bindings.json"), RootAccess::Inspect).unwrap();
         let catalog_lock = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -3424,6 +3455,14 @@ mod tests {
         let parent = profile_dir(&root, &outer.id);
         let inner = create_profile(&parent, "child", &Seed::Empty, None).unwrap();
         let child = profile_dir(&parent, &inner.id);
+        for daily in [
+            root.join("bindings.json"),
+            root.join("profiles/unregistered/bindings.json"),
+        ] {
+            let (profile, guards) = prepare_root_access(&daily, RootAccess::Tray).unwrap();
+            assert_eq!(profile, Startup::daily());
+            assert!(guards.is_empty());
+        }
         let config = child.join("alternate.json");
         let history = crate::clipboard_history_store::FILE_NAME;
         std::fs::write(child.join(history), b"child record").unwrap();
@@ -3435,9 +3474,16 @@ mod tests {
         std::fs::create_dir_all(&stage).unwrap();
         std::fs::copy(parent.join("profile.json"), stage.join("profile.json")).unwrap();
         std::fs::rename(&parent, &saved).unwrap();
-        assert!(prepare_root_access(&config, true).is_err());
+        assert!(prepare_root_access(&config, RootAccess::Inspect).is_err());
         assert!(!parent.exists());
-        let (profile, guards) = prepare_root_access(&config, false).unwrap();
+        for nested in [&config, &parent.join("scratch/bindings.json")] {
+            assert!(matches!(
+                prepare_root_access(nested, RootAccess::Tray),
+                Err(ProfileCommandError::TestInTray)
+            ));
+            assert!(!parent.exists() && !parent.with_extension("window.lock").exists());
+        }
+        let (profile, guards) = prepare_root_access(&config, RootAccess::Open).unwrap();
         assert_eq!(profile.test_name.as_deref(), Some("child"));
         assert_eq!(guards.len(), 2);
         assert!(matches!(

@@ -8844,9 +8844,6 @@ fn main() {
         ui_smoke,
         wheel: initial_wheel,
     } = WindowArguments::parse(&arguments).unwrap_or_else(|error| reject_cli_arguments(&error));
-    if tray_requested && profile_startup.test_data {
-        reject_cli_arguments("--tray 只用于日常工作区，测试档请从测试入口打开。");
-    }
     let preserve_foreground = initial_wheel.is_some() && !wheel_editor;
     let launch_target = if preserve_foreground || text_history_page {
         match omnitrigger_windows::capture_shortcut_target() {

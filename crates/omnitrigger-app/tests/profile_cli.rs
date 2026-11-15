@@ -131,6 +131,75 @@ fn relayed_action_queries_match_direct_catalog_validation_and_errors() {
 }
 
 #[test]
+fn tray_rejects_test_profiles_before_recovering_or_locking_them() {
+    let root = std::env::temp_dir().join(format!(
+        "omnitrigger-cli-tray-profile-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let run = |home: &Path, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_omnitrigger"))
+            .args(args)
+            .env("OMNITRIGGER_HOME", home)
+            .output()
+            .unwrap()
+    };
+    let created = run(&root, &["--profile-create", "testing"]);
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let entry: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
+    let id = entry["id"].as_str().unwrap();
+    let dir = Path::new(entry["directory"].as_str().unwrap());
+    let config = dir.join("bindings.json");
+    let registry = root.join("profiles.json");
+    let registration = std::fs::read(&registry).unwrap();
+    let identity = std::fs::read(dir.join("profile.json")).unwrap();
+    let tag = format!("{id}-12-t0123456789ab");
+    let backups = root.join("backups/profile-reset");
+    let backup = backups.join(&tag);
+    let stage = backups.join(format!(".{tag}.tmp"));
+    std::fs::create_dir_all(&stage).unwrap();
+    std::fs::write(stage.join("profile.json"), &identity).unwrap();
+    std::fs::write(&config, b"my hotkeys").unwrap();
+    std::fs::rename(dir, &backup).unwrap();
+
+    for registered in [true, false] {
+        if !registered {
+            std::fs::remove_file(&registry).unwrap();
+        }
+        for (home, args) in [
+            (root.as_path(), &["--profile", "testing", "--tray"][..]),
+            (&root, &["--profile", id, "--tray"]),
+            (&root, &["--config", config.to_str().unwrap(), "--tray"]),
+            (&root, &["--data-root", dir.to_str().unwrap(), "--tray"]),
+            (dir, &["--tray"]),
+            (dir, &["--profile", "default", "--tray"]),
+        ] {
+            let output = run(home, args);
+            assert_eq!(output.status.code(), Some(1), "{args:?}");
+            assert!(output.stdout.is_empty());
+            let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(error["error"]["code"], "invalid_cli_arguments");
+            assert_eq!(error["error"]["effect_state"], "not_started");
+            assert!(!dir.exists() && !dir.with_extension("window.lock").exists());
+            assert_eq!(
+                std::fs::read(backup.join("bindings.json")).unwrap(),
+                b"my hotkeys"
+            );
+            assert_eq!(std::fs::read(stage.join("profile.json")).unwrap(), identity);
+            assert_eq!(
+                std::fs::read(&registry).ok().as_ref(),
+                registered.then_some(&registration)
+            );
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn action_inspection_leaves_test_registration_and_interrupted_reset_untouched() {
     let root = std::env::temp_dir().join(format!("omnitrigger-cli-inspect-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
