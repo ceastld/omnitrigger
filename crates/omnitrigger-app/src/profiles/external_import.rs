@@ -15,6 +15,8 @@ use std::{
 };
 use windows::{core::PCWSTR, Win32::Storage::FileSystem::MoveFileW};
 
+mod packages;
+
 const PENDING: &str = "external-import.pending";
 const PLAN: &str = "plan.json";
 
@@ -370,6 +372,7 @@ pub(super) fn import(root: &Path, source: &Path) -> Result<(), String> {
         fs::rename(&snapshot, &backup_dir)?;
         copy_transferable_data(source, &staged, DataCopy::FixtureOrImport)
             .map_err(io::Error::other)?;
+        packages::align(&pending, &backup_dir, root)?;
         collect(&staged, root, Path::new(""), &mut plan)?;
         validate(&plan)?;
         if editors.is_none() && plan.replaces_editor_files() {
@@ -432,6 +435,154 @@ mod tests {
         let path = root.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, value).unwrap();
+    }
+
+    fn package(root: &Path, folder: &str, id: &str, entry: &str) {
+        let path = root.join("actions").join(folder);
+        let manifest = serde_json::json!({
+            "schema_version": 1, "id": id, "name": id, "version": "1",
+            "actions": [{"id":"toggle","title":"切换","version":1,"runtime":"node","entry":"run.mjs"}]
+        });
+        write(&path, "action.json", &manifest.to_string());
+        write(&path, "run.mjs", entry);
+    }
+
+    fn action_entry(root: &Path, id: &str) -> PathBuf {
+        let catalog = omnitrigger_actions::PackageCatalog::load(&root.join("actions"));
+        assert!(catalog.diagnostics.is_empty(), "{:?}", catalog.diagnostics);
+        let call = omnitrigger_actions::ActionCall {
+            package_id: id.into(),
+            action_id: "toggle".into(),
+            action_version: 1,
+            input: serde_json::json!({}),
+        };
+        catalog.resolve(&call).unwrap().entry_path
+    }
+
+    #[test]
+    fn import_package_follows_id_when_folders_have_swapped() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("daily");
+        let source = fixture.0.join("external");
+        package(&root, "clipboard", "daily.clipboard", "old clipboard");
+        package(&root, "wheel", "daily.wheel", "old wheel");
+        package(&source, "wheel", "daily.clipboard", "updated clipboard");
+        package(&source, "clipboard", "daily.wheel", "updated wheel");
+        write(&root, "bindings.json", "daily bindings");
+        write(&root, "wheels.json", "daily wheels");
+        write(&root, "actions/clipboard/local.txt", "local file");
+        let clipboard = action_entry(&root, "daily.clipboard");
+        let wheel = action_entry(&root, "daily.wheel");
+        import(&root, &source).unwrap();
+        assert_eq!(action_entry(&root, "daily.clipboard"), clipboard);
+        assert_eq!(action_entry(&root, "daily.wheel"), wheel);
+        assert_eq!(fs::read(clipboard).unwrap(), b"updated clipboard");
+        assert_eq!(fs::read(wheel).unwrap(), b"updated wheel");
+        assert_eq!(
+            fs::read(root.join("actions/clipboard/local.txt")).unwrap(),
+            b"local file"
+        );
+        assert_eq!(
+            fs::read(root.join("bindings.json")).unwrap(),
+            b"daily bindings"
+        );
+        assert_eq!(fs::read(root.join("wheels.json")).unwrap(), b"daily wheels");
+        let backup = fs::read_dir(root.join("backups"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            fs::read(action_entry(&backup, "daily.clipboard")).unwrap(),
+            b"old clipboard"
+        );
+        assert_eq!(
+            fs::read(action_entry(&source, "daily.wheel")).unwrap(),
+            b"updated wheel"
+        );
+    }
+
+    #[test]
+    fn import_package_keeps_both_ids_when_new_package_name_is_taken() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("daily");
+        let source = fixture.0.join("external");
+        package(&root, "tools", "daily.existing", "local");
+        package(&source, "TOOLS", "daily.clipboard", "incoming");
+        let original = action_entry(&root, "daily.existing");
+        import(&root, &source).unwrap();
+        let imported = action_entry(&root, "daily.clipboard");
+        assert_ne!(original, imported);
+        assert_eq!(fs::read(&original).unwrap(), b"local");
+        assert_eq!(fs::read(&imported).unwrap(), b"incoming");
+        import(&root, &source).unwrap();
+        assert_eq!(action_entry(&root, "daily.clipboard"), imported);
+        assert_eq!(action_entry(&root, "daily.existing"), original);
+    }
+
+    #[test]
+    fn import_package_keeps_an_unrelated_draft_and_rolls_back_a_locked_entry() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("daily");
+        let source = fixture.0.join("external");
+        package(&root, "installed", "daily.clipboard", "old");
+        package(&source, "renamed", "daily.clipboard", "new");
+        write(&source, "actions/draft/action.json", "unfinished draft");
+        write(&root, "bindings.json", "original");
+        write(&source, "bindings.json", "incoming");
+        let current = action_entry(&root, "daily.clipboard");
+        let locked = fs::File::options()
+            .read(true)
+            .share_mode(1)
+            .open(&current)
+            .unwrap();
+        assert!(import(&root, &source).is_err());
+        assert_eq!(fs::read(&current).unwrap(), b"old");
+        assert_eq!(fs::read(root.join("bindings.json")).unwrap(), b"original");
+        assert!(!root.join("actions/renamed").exists());
+        assert!(!root.join("actions/draft").exists());
+        drop(locked);
+        import(&root, &source).unwrap();
+        assert_eq!(fs::read(&current).unwrap(), b"new");
+        assert_eq!(
+            fs::read(root.join("actions/draft/action.json")).unwrap(),
+            b"unfinished draft"
+        );
+        write(&source, "actions/installed/action.json", "unreadable");
+        let error = import(&root, &source).unwrap_err();
+        assert!(error.contains("installed"), "{error}");
+        assert_eq!(fs::read(&current).unwrap(), b"new");
+    }
+
+    #[test]
+    fn import_package_rejects_ambiguous_id_before_changing_daily_files() {
+        for duplicates_in_daily in [false, true] {
+            let fixture = Fixture::new();
+            let root = fixture.0.join("daily");
+            let source = fixture.0.join("external");
+            package(&root, "daily", "daily.clipboard", "old");
+            package(&source, "external", "daily.clipboard", "new");
+            package(
+                if duplicates_in_daily { &root } else { &source },
+                "second",
+                "daily.clipboard",
+                "duplicate",
+            );
+            write(&root, "bindings.json", "original");
+            write(&source, "bindings.json", "incoming");
+            let error = import(&root, &source).unwrap_err();
+            assert!(
+                error.contains("daily.clipboard") && error.contains("second"),
+                "{error}"
+            );
+            assert_eq!(fs::read(root.join("bindings.json")).unwrap(), b"original");
+            assert_eq!(
+                fs::read(root.join("actions/daily/run.mjs")).unwrap(),
+                b"old"
+            );
+            assert!(!root.join("backups").join(PENDING).exists());
+        }
     }
 
     #[test]

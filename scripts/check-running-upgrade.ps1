@@ -275,6 +275,13 @@ Write-Host '已验证忽略选择在文件占用后可保存，重复启动跳�
 
 # 用户选择导入后，编辑器占用应直接进入日常窗口。释放后重新启动可正常导入。
 $importDaily = Join-Path $daily 'bindings.json'
+$n10 = Join-Path $PSScriptRoot '../examples/actions/n10-rust'
+$installedN10 = Join-Path $daily 'actions/clipboard-local'
+$externalN10 = Join-Path $external 'actions/old-clipboard'
+$null = New-Item -ItemType Directory -Force -Path (Split-Path $installedN10), (Split-Path $externalN10)
+Copy-Item -LiteralPath $n10 -Destination $installedN10 -Recurse
+Copy-Item -LiteralPath $n10 -Destination $externalN10 -Recurse
+[IO.File]::WriteAllText((Join-Path $externalN10 'import-marker.txt'), 'from external copy')
 [IO.File]::WriteAllText($sourceFile, '{"version":1, "bindings":[]}')
 [IO.File]::SetLastWriteTimeUtc($sourceFile, [DateTime]::UtcNow.AddHours(4))
 $originalHash = (Get-FileHash -LiteralPath $importDaily).Hash
@@ -300,6 +307,14 @@ foreach ($busy in @($true, $false)) {
     } finally { if ($writer) { $writer.Dispose() } }
 }
 Write-Host '已验证配置被编辑器占用时直接打开日常窗口，释放后可重新导入。'
+$catalog = & $appFile.FullName --config $importDaily --list-package-actions | ConvertFrom-Json
+$clipboard = @($catalog.actions | Where-Object { $_.call.package_id -ceq 'examples.n10-rust' })
+if ($LASTEXITCODE -or $clipboard.Count -ne 2 -or 'toggle' -cnotin $clipboard.call.action_id -or
+    (Test-Path -LiteralPath (Join-Path $daily 'actions/old-clipboard')) -or
+    [IO.File]::ReadAllText((Join-Path $installedN10 'import-marker.txt')) -cne 'from external copy') {
+    throw '从不同目录名导入后，剪贴板扩展未沿用日常安装目录或动作无法解析。'
+}
+Write-Host '已验证安装版从异名目录导入剪贴板扩展，原目录和 toggle 动作继续可用。'
 
 # 恢复较早的日常备份后，已成功导入过的副本不应再次阻塞热键启动。
 [IO.File]::WriteAllText($importDaily, '{"version":1,"bindings":[]}')

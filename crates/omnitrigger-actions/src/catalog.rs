@@ -280,7 +280,14 @@ fn read_manifest(folder: &Path) -> Result<PackageManifest, ActionError> {
     })
 }
 
-fn validate_manifest(manifest: &PackageManifest) -> Result<(), ActionError> {
+/// 读取配置副本里声明的包身份，不依赖运行时或入口文件是否已安装。
+pub fn read_package_manifest(folder: &Path) -> Result<PackageManifest, ActionError> {
+    check_ancestors(&folder.join("action.json"))?;
+    read_manifest(folder)
+}
+
+/// 检查清单契约，不执行动作。
+pub fn validate_manifest(manifest: &PackageManifest) -> Result<(), ActionError> {
     if manifest.schema_version != 1 {
         return Err(ActionError::new(
             "incompatible_manifest",
