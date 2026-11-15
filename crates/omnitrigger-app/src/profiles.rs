@@ -14,11 +14,9 @@ use serde::{Deserialize, Serialize};
 mod external_import;
 mod reset_recovery;
 #[cfg(windows)]
-use external_import::move_new;
-#[cfg(windows)]
 pub(super) use external_import::recover as recover_external_import;
 #[cfg(not(windows))]
-use std::fs::rename as move_new;
+use std::fs::rename as move_profile_directory;
 
 const CATALOG_VERSION: u32 = 1;
 const DEFAULT_ID: &str = "default";
@@ -1287,6 +1285,26 @@ fn stage_profile_directory(
     Ok(())
 }
 
+/// Windows 短暂占用刚写完的目录时，重试同一次改名。目标必须始终为空位。
+#[cfg(windows)]
+fn move_profile_directory(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::{io::ErrorKind, thread, time::Duration};
+
+    for delay_ms in [20, 40, 80, 160] {
+        match external_import::move_new(from, to) {
+            // ERROR_ACCESS_DENIED、ERROR_SHARING_VIOLATION、ERROR_LOCK_VIOLATION。
+            Err(error)
+                if matches!(error.raw_os_error(), Some(5 | 32 | 33))
+                    && matches!(to.symlink_metadata(), Err(e) if e.kind() == ErrorKind::NotFound) =>
+            {
+                thread::sleep(Duration::from_millis(delay_ms));
+            }
+            result => return result,
+        }
+    }
+    external_import::move_new(from, to)
+}
+
 /// 完整副本先登记再改名。登记一旦写入，就保留可按原身份恢复的副本。
 fn publish_staged_profile(
     root: &Path,
@@ -1301,7 +1319,7 @@ fn publish_staged_profile(
         let _ = std::fs::remove_dir_all(staging);
         return Err(error);
     }
-    move_new(&staging, directory).map_err(|error| {
+    move_profile_directory(&staging, directory).map_err(|error| {
         format!(
             "测试配置档已登记，完整副本保存在 {}，请稍后重试。{error}",
             staging.display()
@@ -1342,14 +1360,14 @@ fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), Pro
         // 还原后可能只有各档的身份文件。在移走原目录前先保存其登记。
         persist_recovered_catalog(root, &catalog)?;
         std::fs::create_dir_all(root.join("profiles")).map_err(|error| error.to_string())?;
-        let backed_up = match move_new(&directory, &backup) {
+        let backed_up = match move_profile_directory(&directory, &backup) {
             Ok(()) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(format!("备份 {} 失败：{error}", directory.display())),
         };
-        if let Err(error) = move_new(&staging, &directory) {
+        if let Err(error) = move_profile_directory(&staging, &directory) {
             if backed_up {
-                move_new(&backup, &directory).map_err(|restore| {
+                move_profile_directory(&backup, &directory).map_err(|restore| {
                     format!(
                         "重置失败：{error}；恢复原配置失败：{restore}。原配置位于 {}",
                         backup.display()
@@ -3131,6 +3149,51 @@ mod tests {
             b"seed"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reset_waits_for_a_directory_reader_and_backs_up_the_edited_profile_once() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+
+        let root = temp_root("reset-reader");
+        std::fs::write(root.join("wheels.json"), b"daily layout").unwrap();
+        let entry = create_profile(&root, "work", &Seed::Copy(DEFAULT_ID.into()), None).unwrap();
+        let directory = profile_dir(&root, &entry.id);
+        std::fs::write(directory.join("wheels.json"), b"edited layout").unwrap();
+        let reader = std::fs::File::options()
+            .read(true)
+            .share_mode(3) // 允许其他读写者，目录改名须等待读者关闭。
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0)
+            .open(&directory)
+            .unwrap();
+        assert!(reset_profile(&root, "work").is_err());
+        assert_eq!(
+            std::fs::read(directory.join("wheels.json")).unwrap(),
+            b"edited layout"
+        );
+        let backups = root.join("backups/profile-reset");
+        assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
+
+        let (_, backup) = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                drop(reader);
+            });
+            reset_profile(&root, "work").unwrap()
+        });
+        assert_eq!(std::fs::read_dir(backups).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read(backup.unwrap().join("wheels.json")).unwrap(),
+            b"edited layout"
+        );
+        assert_eq!(
+            std::fs::read(directory.join("wheels.json")).unwrap(),
+            b"daily layout"
+        );
+        assert_eq!(read_catalog(&root).unwrap().find("work"), Some(&entry));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

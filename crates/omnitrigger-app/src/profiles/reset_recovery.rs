@@ -126,7 +126,7 @@ pub(super) fn restore_missing(directory: &Path, entry: &Entry) -> Result<bool, S
                     creating.display()
                 )));
             }
-            super::move_new(&creating, directory)?;
+            super::move_profile_directory(&creating, directory)?;
             return Ok(true);
         }
         let original = match pending.as_slice() {
@@ -140,7 +140,7 @@ pub(super) fn restore_missing(directory: &Path, entry: &Entry) -> Result<bool, S
             }
             _ => return Err(io::Error::other("存在多组未完成的重置备份")),
         };
-        super::move_new(original, directory)?;
+        super::move_profile_directory(original, directory)?;
         Ok(true)
     };
     restore().map_err(|e| {
