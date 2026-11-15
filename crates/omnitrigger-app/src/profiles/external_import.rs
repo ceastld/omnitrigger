@@ -325,11 +325,29 @@ pub(crate) fn recover(root: &Path) -> Result<(), String> {
     let pending = backups.join(PENDING);
     if metadata(&pending).map_err(|e| e.to_string())?.is_some() {
         let _lock = lock_catalog(root)?;
-        let _index = crate::legacy_upgrade::IndexGuard::acquire(&root.join("bindings.json"))
-            .map_err(|e| e.message)?;
-        recover_locked(root, &pending).map_err(|e| e.to_string())?;
+        recover_with_catalog_lock(root, &pending)?;
     }
     Ok(())
+}
+
+/// 日常启动和以本数据根为种子的配置档命令共用恢复，调用者已持有本根的登记锁。
+pub(super) fn recover_with_catalog_lock(root: &Path, pending: &Path) -> Result<(), String> {
+    let _index = crate::legacy_upgrade::IndexGuard::acquire(&root.join("bindings.json"))
+        .map_err(|e| e.message)?;
+    recover_locked(root, pending).map_err(|e| e.to_string())
+}
+
+/// 只有已写入计划的导入才可能替换过来源文件。跳过与复制无关的非本机备份目录。
+pub(super) fn recorded_import(root: &Path) -> Result<Option<PathBuf>, String> {
+    let pending = root.join("backups").join(PENDING);
+    if is_plain_directory(&pending)
+        && metadata(&pending.join(PLAN))
+            .map_err(|e| e.to_string())?
+            .is_some()
+    {
+        return Ok(Some(pending));
+    }
+    Ok(None)
 }
 
 pub(super) fn import(root: &Path, source: &Path) -> Result<(), String> {
@@ -719,6 +737,73 @@ mod tests {
                 b"action resource"
             );
         }
+    }
+
+    #[test]
+    fn profile_reset_recovers_its_daily_seed_and_external_sources_stay_read_only() {
+        use super::super::{create_profile, profile_dir, reset_profile, Seed, DEFAULT_ID};
+        let fixture = Fixture::new();
+        let root = fixture.0.join("daily");
+        let other = fixture.0.join("other");
+        write(&root, "bindings.json", "old binding");
+        write(&root, "wheels.json", "old wheel");
+        package(&root, "tools", "local.tools", "old script");
+        let child = create_profile(&root, "work", &Seed::Copy(DEFAULT_ID.into()), None).unwrap();
+        let edits = profile_dir(&root, &child.id);
+        write(&edits, "bindings.json", "test edit");
+
+        let pending = root.join("backups").join(PENDING);
+        let incoming = pending.join("incoming");
+        write(&incoming, "bindings.json", "new binding");
+        write(&incoming, "wheels.json", "new wheel");
+        package(&incoming, "tools", "local.tools", "new script");
+        let mut plan = Plan {
+            backup: "before-import-test".into(),
+            files: Vec::new(),
+            directories: Vec::new(),
+        };
+        collect(&incoming, &root, Path::new(""), &mut plan).unwrap();
+        fs::write(pending.join(PLAN), serde_json::to_vec(&plan).unwrap()).unwrap();
+        let originals = pending.join("originals");
+        fs::create_dir(&originals).unwrap();
+        move_new(
+            &root.join("bindings.json"),
+            &originals.join("bindings.json"),
+        )
+        .unwrap();
+        move_new(&incoming.join("bindings.json"), &root.join("bindings.json")).unwrap();
+
+        let source = Seed::Fixture(root.clone());
+        assert!(create_profile(&other, "trial", &source, None)
+            .unwrap_err()
+            .contains("未恢复的导入"));
+        assert!(import(&other, &root).unwrap_err().contains("未恢复的导入"));
+        assert!(!other.join("bindings.json").exists());
+        let writer = crate::settings::lock_config(&root.join("wheels.json"), "轮盘").unwrap();
+        assert!(reset_profile(&root, "work").is_err());
+        assert_eq!(
+            fs::read(root.join("bindings.json")).unwrap(),
+            b"new binding"
+        );
+        assert_eq!(fs::read(edits.join("bindings.json")).unwrap(), b"test edit");
+        drop(writer);
+
+        let (returned, backup) = reset_profile(&root, "work").unwrap();
+        assert_eq!(returned, child);
+        assert_eq!(
+            fs::read(backup.unwrap().join("bindings.json")).unwrap(),
+            b"test edit"
+        );
+        for dir in [&root, &edits] {
+            assert_eq!(fs::read(dir.join("bindings.json")).unwrap(), b"old binding");
+            assert_eq!(fs::read(dir.join("wheels.json")).unwrap(), b"old wheel");
+            assert_eq!(
+                fs::read(action_entry(dir, "local.tools")).unwrap(),
+                b"old script"
+            );
+        }
+        assert!(!pending.exists());
+        assert!(create_profile(&other, "trial", &source, None).is_ok());
     }
 
     #[test]

@@ -1064,6 +1064,12 @@ fn seed_into(root: &Path, catalog: &Catalog, seed: &Seed, target: &Path) -> Resu
             copy_transferable_data(path, target, DataCopy::FixtureOrImport)
         }
         Seed::Copy(key) => {
+            #[cfg(windows)]
+            if key == DEFAULT_ID {
+                if let Some(pending) = external_import::recorded_import(root)? {
+                    external_import::recover_with_catalog_lock(root, &pending)?;
+                }
+            }
             copy_transferable_data(&source_dir(root, catalog, key)?, target, DataCopy::Profile)
         }
     }
@@ -1094,6 +1100,13 @@ fn copy_transferable_data(from: &Path, to: &Path, mode: DataCopy) -> Result<(), 
     };
     crate::legacy_upgrade::block_config(&config)
         .map_err(|e| format!("无法复制 {}。{}", from.display(), e.message))?;
+    #[cfg(windows)]
+    if let Some(pending) = external_import::recorded_import(from)? {
+        return Err(format!(
+            "来源配置有未恢复的导入：{}。请先恢复来源，或选择该次导入前的备份作为夹具。",
+            pending.display()
+        ));
+    }
     copy_data(from, to, mode)?;
     if source_lock.is_none() && lock_path.try_exists().map_err(|e| e.to_string())? {
         return Err("来源插件在复制期间发生写入，请稍后重试。".into());
