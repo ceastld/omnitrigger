@@ -172,6 +172,14 @@ Windows 上，从只读文件创建或重置测试档后，可以直接编辑副
 
 ## 备份与恢复
 
+在轮盘编辑器里可以将已有热键的动作复制到一个格子。需要迁移多个应用布局时，可对配置副本运行下面的命令。示例将热键 12 的完整动作复制到轮盘 `personal` 通用布局的第 4 个槽位，并更新同一轮盘中方位、场景和原动作都相同的应用槽位。每个槽位保留自己的名称。
+
+```powershell
+python scripts/migrate_wheel_action.py --bindings .\copy\bindings.json --wheels .\copy\wheels.json --binding-id 12 --wheel-id personal --base-slot 4 --output .\candidate\wheels.json
+```
+
+槽位序号按 `slots` 数组从 1 开始。输出目录需已存在，候选文件由命令新建。把对应的 `bindings.json` 放到候选目录后，用 `omnitrigger.exe --config .\candidate\bindings.json --check-config` 校验，再在测试档中核对布局。
+
 - 每次保存前，把将被覆盖的文件放入该配置档的 `backups\`。保留最近 20 次，另外每天保留一份，最多 30 天。
 - 迁移、导入、重置、同步合并和切换前的冲突处理，额外创建一份带原因标记的快照。
 - 设置中可按时间查看备份、恢复为当前数据，或另存为新配置档。恢复本身也先备份当前数据。
