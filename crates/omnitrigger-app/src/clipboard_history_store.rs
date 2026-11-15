@@ -558,8 +558,8 @@ impl ClipboardHistoryStore {
     fn load(&self, lease: &mut Lease) -> Result<(Document, Option<Vec<u8>>)> {
         let raw = self.raw()?;
         let document = if let Some(bytes) = &raw {
-            let document: Document =
-                serde_json::from_slice(bytes).map_err(|_| HistoryError::new("history_corrupt"))?;
+            let document: Document = crate::local_files::parse_config_json_bytes(bytes)
+                .map_err(|_| HistoryError::new("history_corrupt"))?;
             document.validate()?;
             lease.initialize()?; // 之后文件消失不能被当作新历史，避免复用已返回的 ID。
             document
@@ -1113,6 +1113,28 @@ mod persistence_tests {
         assert_eq!(error.effect_state, "not_started");
         assert_eq!(fixture.bytes(), foreign);
         assert!(!fixture.temporary_exists());
+    }
+
+    #[test]
+    fn bom_history_keeps_its_bytes_on_read_and_duplicate_append() {
+        let fixture = Fixture::new();
+        fixture.store.append_at("one", 1, || Ok(())).unwrap();
+        let saved = [b"\xef\xbb\xbf".as_slice(), &fixture.bytes()].concat();
+        fs::write(&fixture.store.path, &saved).unwrap();
+        assert_eq!(fixture.store.get("1", || Ok(())).unwrap().text, "one");
+        assert!(
+            !fixture
+                .store
+                .append_at("one", 2, || Ok(()))
+                .unwrap()
+                .inserted
+        );
+        assert_eq!(fixture.bytes(), saved);
+        assert_eq!(
+            fixture.store.append_at("two", 3, || Ok(())).unwrap().id,
+            "2"
+        );
+        assert_eq!(fixture.store.list(10, || Ok(())).unwrap().revision, "2");
     }
 
     #[test]

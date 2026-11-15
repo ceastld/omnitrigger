@@ -56,7 +56,7 @@ pub fn load(bindings_path: &Path) -> Result<Mode, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Mode::default()),
         Err(error) => return Err(format!("读取主题设置失败（{}）：{error}", path.display())),
     };
-    serde_json::from_slice::<Preference>(&bytes)
+    crate::local_files::parse_config_json_bytes::<Preference>(&bytes)
         .map(|settings| settings.mode)
         .map_err(|error| format!("主题设置格式无效（{}）：{error}", path.display()))
 }

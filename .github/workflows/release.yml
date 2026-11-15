@@ -171,8 +171,11 @@ jobs:
             }
             Assert-HistoryAppend @('--test-workspace') ($round -eq 1)
             if ($round -eq 1) {
-              foreach ($file in @($testConfig, (Join-Path $data 'profiles.json'),
-                  (Join-Path $data 'clipboard-history.json'), (Join-Path $testDir 'clipboard-history.json'))) {
+              $histories = @((Join-Path $data 'clipboard-history.json'), (Join-Path $testDir 'clipboard-history.json'))
+              foreach ($file in $histories) {
+                [IO.File]::WriteAllText($file, [IO.File]::ReadAllText($file), [Text.UTF8Encoding]::new($true))
+              }
+              foreach ($file in @($testConfig, (Join-Path $data 'profiles.json')) + $histories) {
                 $expected[$file] = (Get-FileHash -LiteralPath $file).Hash
               }
               ./scripts/check-running-upgrade.ps1 -Setup $setup -Executable $exe -DataRoot $data -Archive "dist/OmniTrigger-$env:RELEASE_VERSION-windows-x86_64.zip" -ExpectedVersion $env:RELEASE_VERSION

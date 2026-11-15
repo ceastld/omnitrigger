@@ -6,6 +6,8 @@ OmniTrigger 的绑定、插件与轮盘配置都保存在本机 JSON 文件中�
 
 用编辑器修改 `bindings.json`、`wheels.json`、`profiles.json` 或测试档的 `profile.json` 时，可以保存为 UTF-8 或带 BOM 的 UTF-8。运行 `--check-config` 会保留热键和轮盘文件的原始字节。首次保存旧版本的热键或轮盘时，迁移备份也会保留原文件开头的 BOM。
 
+插件设置 `plugins.json`、RaiShot 自定义动作清单 `plugins/raishot/manifest.json`、主题偏好 `appearance.json` 和工作区文本历史 `clipboard-history.json` 也支持这两种编码。用夹具预置文本历史时，读记录或连续追加相同文本都会保留原文件。新增记录后，原有条目的 ID 继续有效。
+
 窗口打开期间，如果其他窗口或编辑器修改了同一份热键，继续保存时会提示配置已变化。点击“重新载入”会放弃当前未保存的热键编辑，载入磁盘上的绑定和场景，保留当前监听或暂停状态。文件格式有误时会显示原因，修好后可再次点击。
 
 绑定、提示文字、位置条件与动作参数保存在 `%LOCALAPPDATA%\OmniTrigger\bindings.json`；没有 `LOCALAPPDATA` 时使用系统临时目录下的 `OmniTrigger\bindings.json`。初次运行加载示例，之后保留用户配置，编辑后自动保存。

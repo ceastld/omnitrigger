@@ -566,7 +566,7 @@ fn settings_directory(config_path: &Path) -> &Path {
 }
 
 fn decode_settings(text: &str) -> Result<PluginSettings, PluginError> {
-    let settings: PluginSettings = serde_json::from_str(text)
+    let settings: PluginSettings = crate::local_files::parse_config_json(text)
         .map_err(|error| PluginError::Settings(format!("格式有误，原文件已保留：{error}")))?;
     if settings
         .legacy
@@ -776,7 +776,7 @@ impl PluginManifest {
         if text.len() > MAX_MANIFEST_BYTES {
             return Err(PluginError::InvalidManifest("清单超过 64 KiB。".into()));
         }
-        let mut manifest: Self = serde_json::from_str(text)
+        let mut manifest: Self = crate::local_files::parse_config_json(text)
             .map_err(|error| PluginError::InvalidManifest(error.to_string()))?;
         if manifest.schema_version != 1 || manifest.host_api_version != 1 {
             return Err(PluginError::IncompatibleVersion);
@@ -1097,7 +1097,11 @@ mod tests {
             .configure_raishot(executable.to_string_lossy().into_owned(), true)
             .unwrap();
         plugins.save(&config_path).unwrap();
+        let settings = directory.join("plugins.json");
+        let saved = format!("\u{feff}{}", std::fs::read_to_string(&settings).unwrap());
+        std::fs::write(&settings, &saved).unwrap();
         let mut loaded = Plugins::load(&config_path).unwrap();
+        assert_eq!(std::fs::read(&settings).unwrap(), saved.as_bytes());
         assert!(loaded.availability(&reference).is_ok());
         let resolved = loaded.resolve(&reference).unwrap();
         assert_eq!(resolved.command.program, executable.to_string_lossy());

@@ -3,7 +3,13 @@ use std::{fs::Metadata, path::Path};
 pub(crate) fn parse_config_json<T: serde::de::DeserializeOwned>(
     text: &str,
 ) -> serde_json::Result<T> {
-    serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(text))
+    parse_config_json_bytes(text.as_bytes())
+}
+
+pub(crate) fn parse_config_json_bytes<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> serde_json::Result<T> {
+    serde_json::from_slice(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes))
 }
 
 pub(crate) fn is_cloud_path(path: &Path) -> bool {

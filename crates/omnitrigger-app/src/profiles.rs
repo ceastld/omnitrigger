@@ -2574,6 +2574,26 @@ mod tests {
     }
 
     #[test]
+    fn daily_theme_is_preserved_when_opening_a_copy_saved_with_a_bom() {
+        use crate::appearance::{self, Mode};
+        let root = temp_root("appearance-bom");
+        let saved = "\u{feff}{\"mode\":\"dark\"}";
+        std::fs::write(root.join("appearance.json"), saved).unwrap();
+        let entry = daily_test_copy(&root).unwrap();
+        let config = profile_dir(&root, &entry.id).join("bindings.json");
+        assert_eq!(appearance::load(&config).unwrap(), Mode::Dark);
+        assert_eq!(
+            std::fs::read(appearance::path_for(&config)).unwrap(),
+            saved.as_bytes()
+        );
+        assert_eq!(
+            std::fs::read(root.join("appearance.json")).unwrap(),
+            saved.as_bytes()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn custom_raishot_actions_follow_profile_copies_resets_and_imports() {
         let root = temp_root("raishot-manifest");
         let manifest = root.join(RAISHOT_MANIFEST_PATH);
@@ -2585,7 +2605,8 @@ mod tests {
         let mut second = custom["actions"][0].clone();
         second["id"] = "custom-capture".into();
         custom["actions"].as_array_mut().unwrap().push(second);
-        let bytes = serde_json::to_vec_pretty(&custom).unwrap();
+        let bytes =
+            format!("\u{feff}{}", serde_json::to_string_pretty(&custom).unwrap()).into_bytes();
         std::fs::write(&manifest, &bytes).unwrap();
 
         let entry = create_profile(&root, "ui", &Seed::Copy(DEFAULT_ID.into()), None).unwrap();
