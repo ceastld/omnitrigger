@@ -1203,17 +1203,36 @@ fn insert_profile(
         created_ms: now_ms(),
     };
     let directory = profile_dir(root, &entry.id);
-    let result = seed_into(root, catalog, &seed, &directory)
-        .and_then(|()| write_json(&directory.join("profile.json"), &entry))
-        .and_then(|()| {
-            catalog.profiles.push(entry.clone());
-            write_json(&catalog_path(root), catalog)
-        });
-    if let Err(error) = result {
+    create_profile_directory(&directory, |staging| {
+        seed_into(root, catalog, &seed, staging)?;
+        write_json(&staging.join("profile.json"), &entry)
+    })?;
+    catalog.profiles.push(entry.clone());
+    if let Err(error) = write_json(&catalog_path(root), catalog) {
+        catalog.profiles.pop();
         let _ = std::fs::remove_dir_all(&directory);
         return Err(error);
     }
     Ok(entry)
+}
+
+/// 只有完整副本才占用配置档 ID。总登记缺失时，恢复流程不会看到正在复制的目录。
+fn create_profile_directory(
+    directory: &Path,
+    prepare: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<(), String> {
+    let staging = directory.with_extension("creating");
+    std::fs::create_dir_all(directory.parent().ok_or("找不到测试配置档的父目录。")?)
+        .and_then(|()| std::fs::create_dir(&staging))
+        .map_err(|error| format!("创建 {} 失败：{error}", staging.display()))?;
+    let result = prepare(&staging).and_then(|()| {
+        move_new(&staging, directory)
+            .map_err(|error| format!("保存测试配置档 {} 失败：{error}", directory.display()))
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(staging);
+    }
+    result
 }
 
 /// 用记录的种子重建测试配置档；原目录整体移入 `backups\profile-reset\`。
@@ -2254,6 +2273,43 @@ mod tests {
         drop(guards);
         catalog_lock.try_lock().unwrap();
         drop(catalog_lock);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn partial_creation_stays_out_of_catalog_recovery_and_allows_retry() {
+        let root = temp_root("interrupted-create");
+        let existing = create_profile(&root, "existing", &Seed::Empty, None).unwrap();
+        std::fs::remove_file(catalog_path(&root)).unwrap();
+        let directory = profile_dir(&root, &new_id());
+        let result = create_profile_directory(&directory, |staging| {
+            std::fs::write(staging.join("bindings.json"), "partial").unwrap();
+            let visible = read_catalog(&root).unwrap();
+            assert_eq!(visible.profiles, [existing.clone()]);
+            assert!(!directory.exists());
+            Err("复制失败".into())
+        });
+        assert_eq!(result.unwrap_err(), "复制失败");
+        let staging = directory.with_extension("creating");
+        assert!(!staging.exists() && !directory.exists());
+
+        // 进程突然退出不会执行清理。旧暂存目录仍在时，下一次创建应能登记完整副本。
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("bindings.json"), "partial").unwrap();
+        std::fs::write(root.join("bindings.json"), "complete").unwrap();
+        let copied = create_profile(&root, "retry", &Seed::Copy(DEFAULT_ID.into()), None).unwrap();
+        let catalog = read_catalog(&root).unwrap();
+        assert_eq!(catalog.profiles, [existing, copied.clone()]);
+        let registered = profile_dir(&root, &copied.id);
+        assert_eq!(reset_recovery::identity(&registered).unwrap(), copied);
+        assert_eq!(
+            std::fs::read(registered.join("bindings.json")).unwrap(),
+            b"complete"
+        );
+        assert_eq!(
+            std::fs::read(staging.join("bindings.json")).unwrap(),
+            b"partial"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
