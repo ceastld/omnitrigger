@@ -372,7 +372,7 @@ pub(super) fn import(root: &Path, source: &Path) -> Result<(), String> {
         fs::rename(&snapshot, &backup_dir)?;
         copy_transferable_data(source, &staged, DataCopy::FixtureOrImport)
             .map_err(io::Error::other)?;
-        packages::align(&pending, &backup_dir, root)?;
+        let available_packages = packages::align(&pending, &backup_dir, root)?;
         collect(&staged, root, Path::new(""), &mut plan)?;
         validate(&plan)?;
         if editors.is_none() && plan.replaces_editor_files() {
@@ -392,6 +392,7 @@ pub(super) fn import(root: &Path, source: &Path) -> Result<(), String> {
         crate::settings::atomic_write(&pending.join(PLAN), &bytes).map_err(io::Error::other)?;
         plan_recorded = true;
         apply(root, &pending, &plan)?;
+        packages::verify_available(root, &available_packages)?;
         finish(&pending)
     })();
     if let Err(error) = result {
@@ -457,6 +458,100 @@ mod tests {
             input: serde_json::json!({}),
         };
         catalog.resolve(&call).unwrap().entry_path
+    }
+
+    #[test]
+    fn import_preserves_available_packages_when_an_entry_is_missing() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("daily");
+        let source = fixture.0.join("external");
+        let id = "daily.clipboard";
+        package(&root, "installed", id, "working");
+        package(&source, "renamed", id, "updated");
+        write(&root, "bindings.json", "daily bindings");
+        write(&source, "bindings.json", "incoming bindings");
+        let manifest = source.join("actions/renamed/action.json");
+        let original = fs::read(root.join("actions/installed/action.json")).unwrap();
+        let mut incoming: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+        incoming["actions"][0]["entry"] = "local/run.mjs".into();
+        fs::write(&manifest, incoming.to_string()).unwrap();
+
+        let result = import(&root, &source);
+        let catalog = omnitrigger_actions::PackageCatalog::load(&root.join("actions"));
+        assert!(
+            result.is_err(),
+            "导入返回 {result:?}，合并后的动作目录诊断：{:?}",
+            catalog.diagnostics
+        );
+        let error = result.unwrap_err();
+        assert!(
+            error.contains(id) && error.contains("local/run.mjs"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(root.join("bindings.json")).unwrap(),
+            b"daily bindings"
+        );
+        assert_eq!(
+            fs::read(root.join("actions/installed/action.json")).unwrap(),
+            original
+        );
+        assert_eq!(fs::read(action_entry(&root, id)).unwrap(), b"working");
+        assert!(!root.join("actions/renamed").exists());
+        assert!(!root.join("backups").join(PENDING).exists());
+
+        // 本机独有的入口在合并后可用时，允许只从副本导入清单。
+        write(&root, "actions/installed/local/run.mjs", "local entry");
+        import(&root, &source).unwrap();
+        assert_eq!(fs::read(action_entry(&root, id)).unwrap(), b"local entry");
+        assert_eq!(
+            fs::read(root.join("bindings.json")).unwrap(),
+            b"incoming bindings"
+        );
+    }
+
+    #[test]
+    fn import_preserves_available_packages_when_merged_catalog_exceeds_capacity() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("daily");
+        let source = fixture.0.join("external");
+        package(&root, "installed", "daily.clipboard", "working");
+        package(&source, "added", "extra.wheel", "incoming");
+        for i in 1..128 {
+            fs::create_dir(root.join(format!("actions/draft-{i}"))).unwrap();
+        }
+        let actions = root.join("actions");
+        let available = || {
+            omnitrigger_actions::PackageCatalog::load(&actions)
+                .actions
+                .into_iter()
+                .map(|a| a.package_id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(available(), ["daily.clipboard"]);
+        let result = import(&root, &source);
+        assert!(
+            result.is_err(),
+            "导入返回 {result:?}，合并后的可用动作：{:?}",
+            available()
+        );
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("128")
+                && error.contains("daily.clipboard")
+                && error.contains("extra.wheel"),
+            "{error}"
+        );
+        assert_eq!(available(), ["daily.clipboard"]);
+        assert!(!actions.join("added").exists());
+        assert!(!root.join("backups").join(PENDING).exists());
+
+        fs::remove_dir(actions.join("draft-1")).unwrap();
+        import(&root, &source).unwrap();
+        let mut ids = available();
+        ids.sort();
+        assert_eq!(ids, ["daily.clipboard", "extra.wheel"]);
     }
 
     #[test]

@@ -70,6 +70,11 @@ pub struct PackageCatalog {
 }
 
 impl PackageCatalog {
+    /// 已通过清单与入口检查的动作包标识。
+    pub fn package_ids(&self) -> &BTreeSet<String> {
+        &self.package_ids
+    }
+
     pub fn load(root: &Path) -> Self {
         let mut catalog = Self::default();
         if let Err(error) = catalog.load_inner(root, 0) {
@@ -353,8 +358,8 @@ fn checked_entry(root: &Path, entry: &str) -> Result<PathBuf, ActionError> {
             ));
         };
         path.push(name);
-        let metadata =
-            fs::symlink_metadata(&path).map_err(|error| io_error("读取动作入口属性失败", error))?;
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| io_error(&format!("读取动作入口 {entry} 的属性失败"), error))?;
         check_local(&path, &metadata)?;
     }
     if !path.is_file() {

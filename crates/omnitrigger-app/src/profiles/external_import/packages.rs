@@ -1,7 +1,13 @@
 //! 导入动作时沿用已安装包的位置。目录名由用户选择，热键和轮盘通过清单标识查找动作。
 use super::{metadata, move_new};
 use omnitrigger_actions::catalog::{is_legacy_stage, read_package_manifest, validate_manifest};
-use std::{collections::BTreeMap, ffi::OsString, fs, io, path::Path};
+use omnitrigger_actions::PackageCatalog;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
+    fs, io,
+    path::Path,
+};
 
 fn package_folders(actions: &Path) -> io::Result<BTreeMap<String, Vec<OsString>>> {
     let mut packages = BTreeMap::<String, Vec<OsString>>::new();
@@ -43,10 +49,10 @@ fn unique<'a>(id: &str, names: &'a [OsString], location: &str) -> io::Result<&'a
     )))
 }
 
-pub(super) fn align(pending: &Path, backup: &Path, root: &Path) -> io::Result<()> {
+pub(super) fn align(pending: &Path, backup: &Path, root: &Path) -> io::Result<BTreeSet<String>> {
     let actions = pending.join("incoming/actions");
     if metadata(&actions)?.is_none() {
-        return Ok(());
+        return Ok(BTreeSet::new());
     }
     let incoming = package_folders(&actions)?;
     let installed = package_folders(&backup.join("actions"))?;
@@ -108,5 +114,30 @@ pub(super) fn align(pending: &Path, backup: &Path, root: &Path) -> io::Result<()
             )
         })?;
     }
-    Ok(())
+    let mut available = PackageCatalog::load(&daily).package_ids().clone();
+    available.extend(PackageCatalog::load(&actions).package_ids().iter().cloned());
+    Ok(available)
+}
+
+/// 替换后按真实目录检查，允许导入的清单继续引用本机独有的入口。
+pub(super) fn verify_available(root: &Path, expected: &BTreeSet<String>) -> io::Result<()> {
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let catalog = PackageCatalog::load(&root.join("actions"));
+    let missing: Vec<_> = expected
+        .difference(catalog.package_ids())
+        .map(String::as_str)
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let reason = match catalog.diagnostics.as_slice() {
+        [reason] => reason.as_str(),
+        _ => "请检查动作目录中的清单和入口文件。",
+    };
+    Err(io::Error::other(format!(
+        "导入后无法加载动作包 {}。{reason}",
+        missing.join("、")
+    )))
 }
