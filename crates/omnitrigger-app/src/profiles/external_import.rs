@@ -15,7 +15,9 @@ use std::{
 };
 use windows::{core::PCWSTR, Win32::Storage::FileSystem::MoveFileW};
 
+mod comparison;
 mod packages;
+pub(super) use comparison::already_present;
 
 const PENDING: &str = "external-import.pending";
 const PLAN: &str = "plan.json";

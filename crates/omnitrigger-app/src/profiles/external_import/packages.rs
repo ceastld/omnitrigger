@@ -18,11 +18,18 @@ fn package_folders(actions: &Path) -> io::Result<BTreeMap<String, Vec<OsString>>
         let entry = entry?;
         let name = entry.file_name();
         let folder = entry.path();
-        if is_legacy_stage(&name)
-            || !metadata(&folder)?.is_some_and(|meta| meta.is_dir())
-            || metadata(&folder.join("action.json"))?.is_none()
-        {
+        if is_legacy_stage(&name) || crate::local_files::is_cloud_path(&folder) {
             continue;
+        }
+        let entry_meta = folder.symlink_metadata()?;
+        if !entry_meta.is_dir() || !crate::local_files::is_plain(&entry_meta) {
+            continue;
+        }
+        match folder.join("action.json").symlink_metadata() {
+            Ok(meta) if !crate::local_files::is_plain(&meta) => continue,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+            Ok(_) => {}
         }
         let manifest = match read_package_manifest(&folder) {
             Ok(manifest) => manifest,
@@ -33,6 +40,27 @@ fn package_folders(actions: &Path) -> io::Result<BTreeMap<String, Vec<OsString>>
         packages.entry(manifest.id).or_default().push(name);
     }
     Ok(packages)
+}
+
+/// 比较与导入均按清单 ID 找到日常档中的包目录。
+pub(super) fn installed_folders(
+    source: &Path,
+    daily: &Path,
+) -> io::Result<Option<BTreeMap<OsString, OsString>>> {
+    let incoming = package_folders(source)?;
+    let mut folders = BTreeMap::new();
+    if incoming.is_empty() {
+        return Ok(Some(folders));
+    }
+    let installed = package_folders(daily)?;
+    for (id, names) in incoming {
+        let from = unique(&id, &names, "外部副本")?;
+        let Some(names) = installed.get(&id) else {
+            return Ok(None);
+        };
+        folders.insert(from.clone(), unique(&id, names, "日常档")?.clone());
+    }
+    Ok(Some(folders))
 }
 
 fn unique<'a>(id: &str, names: &'a [OsString], location: &str) -> io::Result<&'a OsString> {

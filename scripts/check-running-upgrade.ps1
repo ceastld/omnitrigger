@@ -290,15 +290,18 @@ $ignoredFile = Join-Path $device 'external-copies.json'
 $ignoreStart = New-AppStart
 $null = $ignoreStart.Environment.Remove('OMNITRIGGER_HOME')
 $ignoreStart.Environment['LOCALAPPDATA'] = $local
-foreach ($case in '文件占用', '解除占用', '同一副本', '副本有新修改') {
-    if ($case -eq '副本有新修改') {
-        [IO.File]::SetLastWriteTimeUtc($sourceFile, [IO.File]::GetLastWriteTimeUtc($sourceFile).AddHours(1))
+foreach ($case in '仅文件时间不同', '文件占用', '解除占用', '同一副本', '副本有新修改') {
+    if ($case -in '文件占用', '副本有新修改') {
+        $timestamp = [IO.File]::GetLastWriteTimeUtc($sourceFile).AddHours(1)
+        $content = if ($case -eq '文件占用') { '{"version":2,"bindings":[]}' } else { '{"version":3,"bindings":[]}' }
+        [IO.File]::WriteAllText($sourceFile, $content)
+        [IO.File]::SetLastWriteTimeUtc($sourceFile, $timestamp)
     }
     $held = if ($case -eq '文件占用') { [IO.File]::Open($ignoredFile, 'Open', 'Read', 'Read') }
     try {
         $ui = [Diagnostics.Process]::Start($ignoreStart)
         try {
-            if ($case -ne '同一副本') {
+            if ($case -notin '仅文件时间不同', '同一副本') {
                 $prompt = Wait-AppWindow $ui '' 'OmniTrigger 发现外部数据副本'
                 if ([OmniTriggerUpgradeWindow]::GetDlgItem($prompt, 7) -eq [IntPtr]::Zero -or
                     -not [OmniTriggerUpgradeWindow]::PostMessage($prompt, 0x0111, [UIntPtr]7, [IntPtr]::Zero)) {
@@ -308,8 +311,8 @@ foreach ($case in '文件占用', '解除占用', '同一副本', '副本有新�
             $null = Wait-AppWindow $ui '' 'OmniTrigger'
             $saved = Get-Content -LiteralPath $ignoredFile -Raw | ConvertFrom-Json -AsHashtable
             if ($saved.prior -ne 100) { throw "旧的忽略记录丢失（$case）。" }
-            if ($case -eq '文件占用') {
-                if ($saved.Count -ne 1) { throw '被占用的忽略记录发生变化。' }
+            if ($case -in '仅文件时间不同', '文件占用') {
+                if ($saved.Count -ne 1) { throw "忽略记录发生变化（$case）。" }
             } else {
                 $expected = ([DateTimeOffset][IO.File]::GetLastWriteTimeUtc($sourceFile)).ToUnixTimeMilliseconds()
                 if ($saved[$external.ToLowerInvariant()] -ne $expected) { throw "未保存对应的副本版本（$case）。" }
@@ -317,7 +320,7 @@ foreach ($case in '文件占用', '解除占用', '同一副本', '副本有新�
         } finally { Stop-TestProcess $ui }
     } finally { if ($held) { $held.Dispose() } }
 }
-Write-Host '已验证忽略选择在文件占用后可保存，重复启动跳过旧副本，副本更新后重新提示。'
+Write-Host '已验证只有文件时间变化时直接打开主窗口，忽略记录可重试，有不同内容的较新副本仍提示。'
 
 # 用户选择导入后，编辑器占用应直接进入日常窗口。释放后重新启动可正常导入。
 $importDaily = Join-Path $daily 'bindings.json'

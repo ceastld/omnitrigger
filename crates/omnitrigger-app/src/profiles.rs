@@ -2197,13 +2197,13 @@ fn external_copies(root: &Path, local_app_data: &Path) -> Vec<(String, PathBuf, 
         .collect()
 }
 
-/// 选出比当前数据新、且本次修改尚未处理的最新副本。
-fn pending_copy(
+/// 从最新开始返回候选，已经处理过的来源版本不再参与内容比较。
+fn newer_copies(
     copies: Vec<(String, PathBuf, u64)>,
     current_ms: Option<u64>,
     ignored: &BTreeMap<String, u64>,
-) -> Option<(String, PathBuf, u64)> {
-    copies
+) -> impl Iterator<Item = (String, PathBuf, u64)> {
+    let mut candidates: Vec<_> = copies
         .into_iter()
         .filter(|(_, _, modified)| current_ms.is_none_or(|current| *modified > current))
         .filter(|(_, directory, modified)| {
@@ -2211,7 +2211,22 @@ fn pending_copy(
                 .get(&normalize(directory).to_ascii_lowercase())
                 .is_none_or(|seen| modified > seen)
         })
-        .max_by_key(|(_, _, modified)| *modified)
+        .collect();
+    candidates.sort_by_key(|(_, _, modified)| *modified);
+    candidates.into_iter().rev()
+}
+
+#[cfg(windows)]
+fn pending_external_copy(
+    root: &Path,
+    copies: Vec<(String, PathBuf, u64)>,
+    current_ms: Option<u64>,
+    ignored: &BTreeMap<String, u64>,
+) -> Option<(String, PathBuf, u64)> {
+    // 仅在能够确认全部来源内容已存在时跳过；读失败仍沿用原有提示。
+    newer_copies(copies, current_ms, ignored).find(|(_, directory, _)| {
+        !external_import::already_present(root, directory).unwrap_or(false)
+    })
 }
 
 /// 发现比当前数据更新的外部副本时询问用户：导入（先备份当前数据）、忽略或本次不处理。
@@ -2237,7 +2252,9 @@ fn offer_external_copy(
             }))
         }
     };
-    let Some((package, directory, modified)) = pending_copy(copies, current, &ignored) else {
+    let Some((package, directory, modified)) =
+        pending_external_copy(root, copies, current, &ignored)
+    else {
         return Ok(None);
     };
     let current_text = current
@@ -3306,6 +3323,46 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn newer_identical_external_copy_does_not_hide_an_older_real_change() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let local = temp_root("identical-external-copy");
+        let daily = local.join("daily");
+        let identical = local.join("Packages/Latest/LocalCache/Local/OmniTrigger");
+        let changed = local.join("Packages/Changed/LocalCache/Local/OmniTrigger");
+        for (path, bytes, time) in [
+            (&daily, "daily", 100),
+            (&identical, "daily", 300),
+            (&changed, "other", 200),
+        ] {
+            std::fs::create_dir_all(path).unwrap();
+            let file = path.join("bindings.json");
+            std::fs::write(&file, bytes).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(file)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_secs(time))
+                .unwrap();
+        }
+        let choose = |ignored| {
+            pending_external_copy(
+                &daily,
+                external_copies(&daily, &local),
+                data_modified_ms(&daily),
+                ignored,
+            )
+        };
+        let empty = BTreeMap::new();
+        let first = choose(&empty);
+        let ignored = BTreeMap::from([(normalize(&changed).to_ascii_lowercase(), 200_000)]);
+        let second = choose(&ignored);
+        std::fs::remove_dir_all(local).unwrap();
+        assert_eq!(first.unwrap().0, "Changed");
+        assert!(second.is_none());
+    }
+
+    #[test]
     fn external_copy_with_a_newer_managed_action_is_offered_again() {
         use std::time::{Duration, UNIX_EPOCH};
         let root = temp_root("action-copy-time");
@@ -3331,11 +3388,12 @@ mod tests {
         let ignored =
             BTreeMap::from([(normalize(&source).to_ascii_lowercase(), 1_700_000_010_000)]);
         let pending = |choices| {
-            pending_copy(
+            newer_copies(
                 external_copies(&daily, &root),
                 data_modified_ms(&daily),
                 choices,
             )
+            .next()
         };
         let offered = pending(&ignored);
         let seen = BTreeMap::from([(normalize(&source).to_ascii_lowercase(), 1_700_000_030_000)]);
@@ -3380,7 +3438,8 @@ mod tests {
         save_at(daily.join("bindings.json"), b"daily", before);
         save_at(source.join("bindings.json"), b"imported", before + 60);
         let pending = || {
-            pending_copy(
+            pending_external_copy(
+                &daily,
                 external_copies(&daily, &root),
                 data_modified_ms(&daily),
                 &read_copy_choices(&daily).unwrap(),
@@ -3479,8 +3538,12 @@ mod tests {
             ("a".into(), a.directory.clone(), 10),
             ("b".into(), b.directory.clone(), 20),
         ];
-        assert!(pending_copy(copies, None, &ignored).is_none());
-        assert!(pending_copy(vec![("a".into(), a.directory, 11)], None, &ignored).is_some());
+        assert!(newer_copies(copies, None, &ignored).next().is_none());
+        assert!(
+            newer_copies(vec![("a".into(), a.directory, 11)], None, &ignored)
+                .next()
+                .is_some()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3559,30 +3622,41 @@ mod tests {
         );
         let none = BTreeMap::new();
         assert_eq!(
-            pending_copy(vec![a.clone(), b.clone()], Some(100), &none)
+            newer_copies(vec![a.clone(), b.clone()], Some(100), &none)
+                .next()
                 .unwrap()
                 .0,
             "B"
         );
         assert_eq!(
-            pending_copy(vec![a.clone(), b.clone()], Some(250), &none)
+            newer_copies(vec![a.clone(), b.clone()], Some(250), &none)
+                .next()
                 .unwrap()
                 .0,
             "B"
         );
-        assert!(pending_copy(vec![a.clone(), b.clone()], Some(300), &none).is_none());
-        assert_eq!(pending_copy(vec![a.clone()], None, &none).unwrap().0, "A");
+        assert!(newer_copies(vec![a.clone(), b.clone()], Some(300), &none)
+            .next()
+            .is_none());
+        assert_eq!(
+            newer_copies(vec![a.clone()], None, &none).next().unwrap().0,
+            "A"
+        );
         let mut ignored = BTreeMap::new();
         ignored.insert(normalize(&b.1).to_ascii_lowercase(), 300);
         assert_eq!(
-            pending_copy(vec![a.clone(), b.clone()], Some(100), &ignored)
+            newer_copies(vec![a.clone(), b.clone()], Some(100), &ignored)
+                .next()
                 .unwrap()
                 .0,
             "A"
         );
         ignored.insert(normalize(&b.1).to_ascii_lowercase(), 250);
         assert_eq!(
-            pending_copy(vec![a, b], Some(100), &ignored).unwrap().0,
+            newer_copies(vec![a, b], Some(100), &ignored)
+                .next()
+                .unwrap()
+                .0,
             "B"
         );
     }
