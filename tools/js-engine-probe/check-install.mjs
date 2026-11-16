@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import {execFile, spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync} from 'node:fs';
+import {chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync} from 'node:fs';
 import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {promisify} from 'node:util';
@@ -90,13 +90,18 @@ const stages = () => readdirSync(runtimeRoot).filter(name => name.startsWith('.i
 const earlier = join(runtimeRoot,'.install-earlier');
 mkdirSync(earlier);
 writeFileSync(join(earlier,'note.txt'),'previous failure');
+const formattedPointer = JSON.stringify(first,null,2) + '\n';
+writeFileSync(pointer,formattedPointer);
 const repeated = install(development.archive);
 assert.equal(repeated.status,'installed');
 assert.equal(repeated.cleanup_warning,undefined);
 assert.deepEqual(stages(),['.install-earlier']);
 assert.equal(readFileSync(join(earlier,'note.txt'),'utf8'),'previous failure');
+assert.equal(readFileSync(pointer,'utf8'),formattedPointer);
+writeFileSync(pointer,'{');
+assert.equal(install(development.archive).status,'installed');
 assert.equal(readFileSync(pointer,'utf8'),firstPointer);
-checks.push('same_package_reinstall');
+checks.push('same_package_reinstall_preserves_valid_pointer_and_restores_invalid_pointer');
 
 for (const args of [
   ['--install-script-runtime',development.archive],
@@ -313,6 +318,23 @@ assert.notEqual(JSON.parse(readFileSync(pointer,'utf8')).archive_sha256,first.ar
 assert.equal(hash(readFileSync(firstHost)),hash(originalHost));
 assert.equal(cli(['--run-action',project.call_path]).output.text,'OmniTrigger');
 checks.push('verified_new_package_switches_pointer_and_preserves_old_package');
+
+const activeAfterSwitch = readFileSync(pointer,'utf8');
+const runtimeFiles = () => readdirSync(runtimeRoot,{withFileTypes:true}).filter(entry=>entry.isFile()).map(entry=>entry.name).sort();
+const beforeFailure = runtimeFiles();
+chmodSync(pointer,0o444);
+try {
+  const refused = install(development.archive,1);
+  assert.equal(refused.error.code,'runtime_install_failed');
+  assert(refused.error.message.includes(pointer),refused.error.message);
+  assert.equal(readFileSync(pointer,'utf8'),activeAfterSwitch);
+  assert.deepEqual(runtimeFiles(),beforeFailure);
+  assert.equal(cli(['--run-action',project.call_path]).output.text,'OmniTrigger');
+} finally { chmodSync(pointer,0o666); }
+assert.equal(install(development.archive).status,'installed');
+assert.equal(readFileSync(pointer,'utf8'),firstPointer);
+checks.push('blocked_switch_preserves_active_actions_and_retry_activates_the_requested_package');
+
 assert.equal(readFileSync(config,'utf8'),'[]');
 const result = {passed:true,root,checks,personalBindingsModified:false,engine:development.engine,archive_sha256:development.sha256};
 writeFileSync(join(root,'result.json'),JSON.stringify(result,null,2));

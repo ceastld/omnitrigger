@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeSet,
     fs::{self, File},
-    io::{Read, Seek, Write},
+    io::{Read, Seek},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -41,7 +41,7 @@ struct Manifest {
     source_dirty: bool,
     files: Vec<PackageFile>,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Pointer {
     schema_version: u32,
@@ -386,6 +386,22 @@ fn active_pointer(root: &Path) -> Result<Option<Pointer>, String> {
     Ok(Some(pointer))
 }
 
+fn activate_package(root: &Path, stage: &Path, pointer: &Pointer) -> Result<(), String> {
+    if active_pointer(root).is_ok_and(|active| active.as_ref() == Some(pointer)) {
+        return Ok(());
+    }
+    // 已校验的包可以重建损坏的记录。即使上面的读取失败，替换前仍须核对路径。
+    let current = root.join("current.json");
+    check_local_path(&current)?;
+    let prepared = stage.join("current.json");
+    check_local_path(&prepared)?;
+    let bytes = serde_json::to_vec(pointer).map_err(|error| error.to_string())?;
+    crate::settings::atomic_create_new(&prepared, &bytes)
+        .map_err(|error| format!("无法准备宿主版本记录 {}：{error}", prepared.display()))?;
+    fs::rename(&prepared, &current)
+        .map_err(|error| format!("无法替换宿主版本记录 {}：{error}", current.display()))
+}
+
 fn locate_managed(root: &Path) -> Result<Option<Installed>, String> {
     let Some(pointer) = active_pointer(root)? else {
         return Ok(None);
@@ -716,7 +732,10 @@ pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<
             }
             if let Err(error) = fs::rename(&payload, &destination) {
                 if !destination.try_exists().map_err(|e| e.to_string())? {
-                    return Err(error.to_string());
+                    return Err(format!(
+                        "无法将已校验的宿主包移到 {}：{error}",
+                        destination.display()
+                    ));
                 }
                 // 另一个安装进程可能刚发布了同一摘要，两边都须核对实际内容。
                 reused = true;
@@ -732,19 +751,7 @@ pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<
             archive_sha256: archive_hash.clone(),
             manifest_sha256: digest,
         };
-        let current = root.join("current.json");
-        check_local_path(&current)?;
-        let next = root.join(format!(".current-{nonce}.json"));
-        let mut file = File::options()
-            .create_new(true)
-            .write(true)
-            .open(&next)
-            .map_err(|e| e.to_string())?;
-        file.write_all(&serde_json::to_vec(&pointer).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        file.sync_all().map_err(|e| e.to_string())?;
-        drop(file);
-        fs::rename(&next, &current).map_err(|e| e.to_string())?;
+        activate_package(&root, &stage, &pointer)?;
         let mut receipt = json!({"schema_version":1,"status":"installed","program":destination.join("host.exe"),"engine":manifest.engine,"version":manifest.version,"source_revision":manifest.source_revision,"source_dirty":manifest.source_dirty,"distribution":manifest.distribution,"archive_sha256":archive_hash,"protocol_and_JS_verified":true});
         if repaired != 0 {
             receipt["repaired_files"] = json!(repaired);
@@ -762,6 +769,58 @@ pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn reinstall_and_switch_with_a_shared_read_handle_on_the_active_pointer() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "omnitrigger-active-pointer-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let reinstall = root.join(".install-reinstall");
+        let update = root.join(".install-update");
+        fs::create_dir(&reinstall).unwrap();
+        fs::create_dir(&update).unwrap();
+        let current = root.join("current.json");
+        let active = Pointer {
+            schema_version: 1,
+            archive_sha256: "a".repeat(64),
+            manifest_sha256: "b".repeat(64),
+        };
+        let next = Pointer {
+            schema_version: 1,
+            archive_sha256: "c".repeat(64),
+            manifest_sha256: "d".repeat(64),
+        };
+        let original = serde_json::to_vec_pretty(&active).unwrap();
+        fs::write(&current, &original).unwrap();
+        let reader = File::options()
+            .read(true)
+            .share_mode(1)
+            .open(&current)
+            .unwrap();
+
+        let same_package = activate_package(&root, &reinstall, &active);
+        let switch = activate_package(&root, &update, &next);
+        assert_eq!(fs::read(&current).unwrap(), original);
+        assert_eq!(same_package, Ok(()));
+        assert!(switch.unwrap_err().contains(&current.display().to_string()));
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 3);
+        drop(reader);
+
+        let retry = root.join(".install-retry");
+        fs::create_dir(&retry).unwrap();
+        activate_package(&root, &retry, &next).unwrap();
+        assert!(active_pointer(&root).unwrap().as_ref() == Some(&next));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn stage_cleanup_preserves_files_created_by_another_operation() {
