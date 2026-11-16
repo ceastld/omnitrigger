@@ -8604,13 +8604,15 @@ fn reject_cli_arguments(message: &str) -> ! {
     std::process::exit(1);
 }
 
+const BUILD_LABEL: &str = env!("OMNITRIGGER_BUILD_LABEL");
+
 fn main() {
     let mut arguments: Vec<_> = std::env::args().collect();
     // 查询程序信息无需访问配置档，也不应唤回托盘中的窗口。
     if arguments
         .iter()
         .skip(1)
-        .any(|arg| matches!(arg.as_str(), "--version" | "--help"))
+        .any(|arg| matches!(arg.as_str(), "--version" | "--build-version" | "--help"))
         || matches!(arguments.get(1).map(String::as_str), Some("-h" | "-V"))
     {
         if arguments.len() != 2 {
@@ -8618,8 +8620,9 @@ fn main() {
         }
         match arguments[1].as_str() {
             "--version" | "-V" => println!("OmniTrigger {}", env!("CARGO_PKG_VERSION")),
+            "--build-version" => println!("{BUILD_LABEL}"),
             _ => println!(
-                "OmniTrigger {}\n用法：omnitrigger.exe [参数]\n\
+                "{BUILD_LABEL}\n用法：omnitrigger.exe [参数]\n\
                  无参数              打开日常窗口\n\
                  --tray              在托盘启动日常监听\n\
                  --settings          打开设置\n\
@@ -8627,8 +8630,8 @@ fn main() {
                  --config <路径>     使用指定配置文件\n\
                  --check-config      检查配置并退出\n\
                  --version           显示版本并退出\n\
-                 --help              显示常用命令并退出",
-                env!("CARGO_PKG_VERSION")
+                 --build-version     显示产品版本及构建时记录的提交并退出\n\
+                 --help              显示常用命令并退出"
             ),
         }
         return;

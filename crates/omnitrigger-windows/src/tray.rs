@@ -1,6 +1,6 @@
 //! 日常主窗口的通知区域图标。所有操作均在窗口线程上，随窗口销毁清理。
 use windows::{
-    core::{w, PCWSTR},
+    core::{w, PCWSTR, PWSTR},
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
@@ -13,11 +13,12 @@ use windows::{
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, DestroyMenu, IsIconic, IsWindowVisible, KillTimer,
-                LoadIconW, PostMessageW, RegisterWindowMessageW, SetForegroundWindow, SetTimer,
-                ShowWindow, TrackPopupMenu, ENDSESSION_CLOSEAPP, IDI_APPLICATION, MF_STRING,
-                SIZE_MAXIMIZED, SIZE_RESTORED, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE,
-                TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
-                WM_ENDSESSION, WM_NCDESTROY, WM_NULL, WM_QUERYENDSESSION, WM_SIZE, WM_TIMER,
+                LoadIconW, LoadStringW, PostMessageW, RegisterWindowMessageW, SetForegroundWindow,
+                SetTimer, ShowWindow, TrackPopupMenu, ENDSESSION_CLOSEAPP, IDI_APPLICATION,
+                MF_STRING, SIZE_MAXIMIZED, SIZE_RESTORED, SW_HIDE, SW_RESTORE, SW_SHOW,
+                SW_SHOWMINNOACTIVE, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE,
+                WM_CONTEXTMENU, WM_ENDSESSION, WM_NCDESTROY, WM_NULL, WM_QUERYENDSESSION, WM_SIZE,
+                WM_TIMER,
             },
         },
     },
@@ -114,15 +115,24 @@ fn icon_data(hwnd: HWND) -> NOTIFYICONDATAW {
 
 unsafe fn add_icon(hwnd: HWND) -> bool {
     let mut data = icon_data(hwnd);
-    let icon = GetModuleHandleW(None)
-        .and_then(|module| LoadIconW(Some(module.into()), PCWSTR(std::ptr::without_provenance(1))))
+    let module = GetModuleHandleW(None).ok().map(Into::into);
+    let icon = LoadIconW(module, PCWSTR(std::ptr::without_provenance(1)))
         .or_else(|_| LoadIconW(None, IDI_APPLICATION));
     let Ok(icon) = icon else { return false };
     data.hIcon = icon;
     data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     data.uCallbackMessage = CALLBACK;
-    for (slot, ch) in data.szTip.iter_mut().zip("OmniTrigger".encode_utf16()) {
-        *slot = ch;
+    // app.rc 的字符串来自当前进程映像。未嵌入应用资源的宿主仍显示应用名。
+    if LoadStringW(
+        module,
+        0x4F54,
+        PWSTR(data.szTip.as_mut_ptr()),
+        data.szTip.len() as i32,
+    ) == 0
+    {
+        for (slot, ch) in data.szTip.iter_mut().zip("OmniTrigger".encode_utf16()) {
+            *slot = ch;
+        }
     }
     // 任务栏通知可能重复到达。已有图标可直接更新，再协商回调版本。
     if !Shell_NotifyIconW(NIM_ADD, &data).as_bool()

@@ -190,7 +190,7 @@ impl Workspace {
         }));
         div().id("appearance-settings").flex_1().min_w_0().h_full().overflow_y_scroll()
             .child(div().pt(px(6.)).pb(px(24.)).pl(px(20.)).pr(px(24.)).flex().flex_col().gap(px(24.))
-                .child(heading("设置", "让 OmniTrigger 更适合你的使用习惯"))
+                .child(heading("设置", format!("{} · Windows x64 预览版", crate::BUILD_LABEL)))
                 .children(test_copy)
                 .child(self.render_backup_settings(cx))
                 .child(div().flex().flex_col().gap(px(14.))

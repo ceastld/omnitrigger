@@ -162,19 +162,9 @@ impl Workspace {
                     .gap(px(16.))
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(6.))
-                            .child(
-                                div()
-                                    .text_size(px(14.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("应用更新"),
-                            )
-                            .child(caption(format!(
-                                "OmniTrigger {} · Windows x64 预览版",
-                                updater::VERSION
-                            ))),
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("应用更新"),
                     )
                     .child(
                         theme::button("application-update", label, theme::Tone::Primary, !busy)

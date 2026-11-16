@@ -29,6 +29,20 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 public static class OmniTriggerUpgradeWindow {
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
+    [DllImport("kernel32.dll")] private static extern bool FreeLibrary(IntPtr module);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+    private static extern int LoadStringW(IntPtr module, uint id, StringBuilder buffer, int capacity);
+    public static string TrayBuildLabel(string executable) {
+        var module = LoadLibraryExW(executable, IntPtr.Zero, 0x22); // 只映射资源，避免外壳缓存同路径的旧版本。
+        if (module == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        try {
+            var text = new StringBuilder(128);
+            if (LoadStringW(module, 0x4F54, text, text.Capacity) == 0) throw new Exception("程序缺少托盘版本资源。");
+            return text.ToString();
+        } finally { FreeLibrary(module); }
+    }
     private delegate bool EnumWindow(IntPtr hwnd, IntPtr parameter);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindow callback, IntPtr parameter);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr hwnd, StringBuilder title, int capacity);
@@ -542,7 +556,9 @@ try {
     Assert-TrayIdle $ui $dailyWindow
     $actionFile = Join-Path $probe.FullName '检查剪贴板 toggle.json'
     [IO.File]::WriteAllText($actionFile, '{"package_id":"examples.n10-rust","action_id":"toggle","action_version":1}')
-    foreach ($flag in '--version', '--help', '--check-confg', '--list-package-actions', '--check-action') {
+    $buildLabel = "OmniTrigger $($appFile.VersionInfo.ProductVersion.TrimEnd())"
+    if ([OmniTriggerUpgradeWindow]::TrayBuildLabel($appFile.FullName) -cne $buildLabel) { throw '托盘提示与已安装程序的产品版本不符。' }
+    foreach ($flag in '--version', '--build-version', '--help', '--check-confg', '--list-package-actions', '--check-action') {
         $query = New-AppStart
         $query.ArgumentList.Add($flag)
         if ($flag -eq '--check-action') { $query.ArgumentList.Add($actionFile) }
@@ -562,7 +578,9 @@ try {
             } else {
                 if ($child.ExitCode -ne 0 -or $stderr.Result -ne '' -or
                     ($flag -eq '--version' -and $stdout.Result.Trim() -cne "OmniTrigger $ExpectedVersion") -or
-                    ($flag -eq '--help' -and $stdout.Result -notmatch '--test-workspace')) { throw "$flag 的输出或退出码错误。" }
+                    ($flag -eq '--build-version' -and $stdout.Result.Trim() -cne $buildLabel) -or
+                    ($flag -eq '--help' -and (($stdout.Result -split '\r?\n', 2)[0] -cne $buildLabel -or
+                        $stdout.Result -notmatch '--test-workspace' -or $stdout.Result -notmatch '--build-version'))) { throw "$flag 的输出或退出码错误。" }
                 if ($flag -eq '--list-package-actions') {
                     $catalog = $stdout.Result | ConvertFrom-Json
                     $toggle = @($catalog.actions | Where-Object { $_.call.package_id -ceq 'examples.n10-rust' -and $_.call.action_id -ceq 'toggle' })
