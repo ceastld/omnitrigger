@@ -16,6 +16,7 @@ mod external_import;
 mod reset_recovery;
 mod restored_copies;
 mod saved_profiles;
+mod seed_source;
 #[cfg(windows)]
 pub(super) use external_import::recover as recover_external_import;
 pub(super) use restored_copies::{saved_backup_copies, RestoredCopy};
@@ -762,7 +763,9 @@ fn trace_seed_sources<'a>(
                 (root.to_path_buf(), root_alias.map(Path::to_path_buf), None)
             }
             Ok(Seed::Copy(key) | Seed::Backup { source: key, .. }) => {
-                let Some(source) = catalog.source_profile(&key) else {
+                let Ok(source) =
+                    seed_source::resolve(catalog, Some(&profile_dir(root, &entry.id)), entry, &key)
+                else {
                     return Vec::new();
                 };
                 (
@@ -1140,6 +1143,7 @@ fn seed_into(
     root: &Path,
     catalog: &Catalog,
     seed: &Seed,
+    entry: &Entry,
     target: &Path,
     previous_profile: Option<&Path>,
 ) -> Result<(), String> {
@@ -1159,7 +1163,16 @@ fn seed_into(
                     external_import::recover_with_catalog_lock(root, &pending)?;
                 }
             }
-            let source = source_dir(root, catalog, key)?;
+            let parent = if key == DEFAULT_ID {
+                None
+            } else {
+                Some(seed_source::resolve(catalog, previous_profile, entry, key)?)
+            };
+            let source = source_dir(
+                root,
+                catalog,
+                parent.map_or(key.as_str(), |parent| parent.id.as_str()),
+            )?;
             copy_transferable_data(&source, target, DataCopy::Profile)?;
             if let Seed::Backup {
                 bindings, wheels, ..
@@ -1168,6 +1181,9 @@ fn seed_into(
                 backup_revisions::restore(&source, target, previous_profile, *bindings, *wheels)?;
                 crate::check_config(&target.join("bindings.json"), true)
                     .map_err(|error| format!("选择的热键和轮盘无法一起使用：{error}"))?;
+            }
+            if let Some(parent) = parent {
+                seed_source::save(target, entry, parent, seed.record())?;
             }
             Ok(())
         }
@@ -1227,17 +1243,19 @@ fn create_profile(
     let mut catalog = read_catalog(root)?;
     if let Some(entry) = catalog.find(alias) {
         let dir = profile_dir(root, &entry.id);
+        let staged = dir.with_extension("creating");
         if entry.alias == alias
             && generated_profile_id(&entry.id)
             && entry.kind == "test"
             && entry.name == name.unwrap_or(alias)
-            && entry.seed == seed.for_creation()?.record()
             && !reset_recovery::live_profile_present(&dir).map_err(|e| e.to_string())?
-            && reset_recovery::directory_present(&dir.with_extension("creating"))
-                .map_err(|e| e.to_string())?
+            && reset_recovery::directory_present(&staged).map_err(|e| e.to_string())?
         {
-            source_dir(root, &catalog, alias)?;
-            return Ok(entry.clone());
+            let requested = seed.for_creation()?.record();
+            if entry.seed == requested || seed_source::requested(&staged, entry, &requested)? {
+                source_dir(root, &catalog, alias)?;
+                return Ok(entry.clone());
+            }
         }
         return Err(format!(
             "配置档 {alias} 已存在；要恢复种子数据请用 --profile-reset {alias}。"
@@ -1316,7 +1334,7 @@ fn daily_copy_slot(entry: &Entry) -> Option<u64> {
     None
 }
 
-fn read_copy_origin(path: &Path) -> Result<Option<CopyOrigin>, String> {
+fn read_copy_origin<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
     let fail = |e| format!("无法读取测试副本来源 {}：{e}", path.display());
     match path.symlink_metadata() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -1461,12 +1479,22 @@ fn insert_profile(
     origin: CopyOrigin,
 ) -> Result<Entry, String> {
     let seed = seed.for_creation()?;
+    let mut stored_seed = seed.clone();
+    if let Seed::Copy(key) | Seed::Backup { source: key, .. } = &mut stored_seed {
+        if key != DEFAULT_ID {
+            *key = catalog
+                .source_profile(key)
+                .ok_or_else(|| format!("找不到配置档 {key}；可用 --profile-list 查看。"))?
+                .id
+                .clone();
+        }
+    }
     let entry = Entry {
         id: new_id(),
         alias: alias.into(),
         kind: "test".into(),
         name: name.unwrap_or(alias).into(),
-        seed: seed.record(),
+        seed: stored_seed.record(),
         created_ms: now_ms(),
     };
     let directory = profile_dir(root, &entry.id);
@@ -1476,7 +1504,7 @@ fn insert_profile(
     // 来源按稳定 ID 保存在档外，重置不替换它，旧版也能读取原登记与身份文件。
     let origin_path = daily_copy_slot(&entry).map(|_| directory.with_extension("copy-origin.json"));
     stage_profile_directory(&directory, |staging| {
-        seed_into(root, catalog, &seed, staging, None)?;
+        seed_into(root, catalog, &seed, &entry, staging, None)?;
         write_json(&staging.join("profile.json"), &entry)?;
         if let Some(path) = &origin_path {
             write_json(path, &origin)?;
@@ -1580,7 +1608,7 @@ fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), Pro
     std::fs::create_dir(&staging)
         .map_err(|error| format!("创建 {} 失败：{error}", staging.display()))?;
     let result = (|| {
-        seed_into(root, &catalog, &seed, &staging, Some(&directory))?;
+        seed_into(root, &catalog, &seed, &entry, &staging, Some(&directory))?;
         write_json(&staging.join("profile.json"), &entry)?;
         // 还原后可能只有各档的身份文件。在移走原目录前先保存其登记。
         persist_recovered_catalog(root, &catalog)?;

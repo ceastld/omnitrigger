@@ -53,7 +53,7 @@ impl RestoredCopy {
         prepare_test_open(&self.root, &self.id, |catalog, entry| {
             let alias = source_alias(catalog, &self.source_id)?;
             Ok(entry.created_ms == self.created_ms
-                && revisions_for_source(entry, &self.source_id, alias).is_some())
+                && copy_for_source(&self.root, entry, &self.source_id, alias)?.is_some())
         })
     }
 
@@ -74,38 +74,54 @@ fn source_alias<'a>(catalog: &'a Catalog, id: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("找不到恢复副本的来源档 {id}。"))
 }
 
-fn revisions_for_source(
+fn copy_for_source(
+    root: &Path,
     entry: &Entry,
     id: &str,
     alias: &str,
-) -> Option<(Option<u64>, Option<u64>)> {
+) -> Result<Option<RestoredCopy>, String> {
     if entry.kind != "test" || !super::generated_profile_id(&entry.id) {
-        return None;
+        return Ok(None);
     }
-    let Seed::Backup {
+    let Ok(Seed::Backup {
         source,
         bindings,
         wheels,
-    } = Seed::parse(&entry.seed).ok()?
+    }) = Seed::parse(&entry.seed)
     else {
-        return None;
+        return Ok(None);
     };
-    (source == id || source == alias).then_some((bindings, wheels))
+    let same = if id == DEFAULT_ID || source == DEFAULT_ID {
+        source == id
+    } else {
+        super::seed_source::recorded_id(&profile_dir(root, &entry.id), entry)?.map_or_else(
+            || source == id || (!super::generated_profile_id(&source) && source == alias),
+            |recorded| recorded == id,
+        )
+    };
+    Ok(same.then(|| RestoredCopy::from_entry(root, id, entry, bindings, wheels)))
 }
 
-fn copies_in(root: &Path, source_id: &str) -> Result<Vec<RestoredCopy>, String> {
+fn copies_in(
+    root: &Path,
+    source_id: &str,
+    errors: &mut Vec<String>,
+) -> Result<Vec<RestoredCopy>, String> {
     crate::script_runtime::check_local_path(&catalog_path(root))?;
     let catalog = read_catalog(root)?;
     let alias = source_alias(&catalog, source_id)?;
     Ok(catalog
         .profiles
         .iter()
-        .filter_map(|entry| {
-            let (bindings, wheels) = revisions_for_source(entry, source_id, alias)?;
-            Some(RestoredCopy::from_entry(
-                root, source_id, entry, bindings, wheels,
-            ))
-        })
+        .filter_map(
+            |entry| match copy_for_source(root, entry, source_id, alias) {
+                Ok(result) => result,
+                Err(error) => {
+                    errors.push(error);
+                    None
+                }
+            },
+        )
         .collect())
 }
 
@@ -121,7 +137,7 @@ pub(crate) fn saved_backup_copies(config: &Path) -> Result<SavedCopies, String> 
     // 以测试档目录作为 --data-root 建档时，backup:default 指向这一档本身。
     let nested = (source_id != DEFAULT_ID).then(|| (profile_dir(&root, &source_id), DEFAULT_ID));
     for (directory, id) in std::iter::once((root, source_id.as_str())).chain(nested) {
-        match copies_in(&directory, id) {
+        match copies_in(&directory, id, &mut errors) {
             Ok(found) => copies.extend(found),
             Err(error) => errors.push(error),
         }
@@ -158,6 +174,47 @@ mod tests {
             br#"{"version":24,"bindings":[]}"#,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn resetting_an_old_backup_seed_keeps_it_with_its_source_after_alias_reuse() {
+        let root = temp_root("legacy-backup-source");
+        let mut source = create_profile(&root, "notes", &Seed::Empty, None).unwrap();
+        let source_dir = profile_dir(&root, &source.id);
+        add_history(&source_dir);
+        let seed = Seed::parse("backup:notes:1:current").unwrap();
+        let mut copy = create_profile(&root, "restored", &seed, None).unwrap();
+        let dir = profile_dir(&root, &copy.id);
+        // 构造旧版实际保存的登记：只有别名，没有独立的来源 ID 记录。
+        copy.seed = seed.record();
+        fs::remove_file(dir.join("backups/seed-source.json")).unwrap();
+        write_json(&dir.join("profile.json"), &copy).unwrap();
+        let mut catalog = read_catalog(&root).unwrap();
+        *catalog
+            .profiles
+            .iter_mut()
+            .find(|entry| entry.id == copy.id)
+            .unwrap() = copy.clone();
+        write_json(&catalog_path(&root), &catalog).unwrap();
+        crate::profiles::reset_profile(&root, &copy.id).unwrap();
+        source.alias = "recovered".into();
+        write_json(&source_dir.join("profile.json"), &source).unwrap();
+        fs::remove_file(catalog_path(&root)).unwrap();
+        let replacement = create_profile(&root, "notes", &Seed::Empty, None).unwrap();
+        let other = profile_dir(&root, &replacement.id);
+        assert!(saved_backup_copies(&other.join("bindings.json"))
+            .unwrap()
+            .items
+            .is_empty());
+        let mine = saved_backup_copies(&source_dir.join("bindings.json")).unwrap();
+        assert_eq!(mine.items.len(), 1);
+        mine.items[0].prepare_to_open().unwrap();
+        crate::profiles::reset_profile(&root, &copy.id).unwrap();
+        assert_eq!(
+            fs::read(dir.join("bindings.json")).unwrap(),
+            br#"{"version":24,"bindings":[]}"#
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
