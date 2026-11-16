@@ -22,8 +22,8 @@ use crate::event_bridge::{EventBridge, UiWake};
 use crate::message_input::MessageInput;
 use crate::theme::{self, button, rgb, Tone};
 use gpui::{
-    div, prelude::*, px, Context, Div, Entity, FocusHandle, KeyDownEvent, KeyUpEvent, MouseButton,
-    ScrollHandle, Subscription, Window,
+    div, prelude::*, px, Context, Div, Entity, FocusHandle, Focusable, KeyDownEvent, KeyUpEvent,
+    MouseButton, ScrollHandle, Subscription, Window,
 };
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -748,6 +748,48 @@ fn run_worker(
 }
 
 impl super::Workspace {
+    pub(super) fn open_test_history_search(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.recording || self.mode.history_only() || self.text_history.store.is_none() {
+            let reason = if self.recording {
+                "请先结束录制，再搜索测试档。"
+            } else {
+                "当前窗口无法打开测试档的文本历史。"
+            };
+            self.action_error = Some((id, reason.into()));
+            self.record_action_status(id, reason.into());
+            cx.notify();
+            return;
+        }
+        self.open_page(super::Page::TextHistory, cx);
+        if self
+            .action_error
+            .as_ref()
+            .is_some_and(|(failed, _)| *failed == id)
+        {
+            self.action_error = None;
+        }
+        self.record_action_status(id, "已打开本测试档的文本历史搜索。".into());
+        // 动作也能由窗口内的按钮发起。等当前窗口回调释放借用后再激活并聚焦。
+        let workspace = cx.weak_entity();
+        let main_window = self.main_window;
+        cx.defer(move |cx| {
+            let _ = main_window.update(cx, |_, window, cx| {
+                let Some(view) = workspace.upgrade() else {
+                    return;
+                };
+                let view = view.read(cx);
+                if view.page == super::Page::TextHistory && !view.recording {
+                    super::reveal_workspace_window(window);
+                    view.text_history
+                        .search
+                        .read(cx)
+                        .focus_handle(cx)
+                        .focus(window);
+                }
+            });
+        });
+    }
+
     #[cfg(windows)]
     fn dismiss_history_on_escape(
         &mut self,
@@ -755,7 +797,6 @@ impl super::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use gpui::Focusable;
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};
         use windows::Win32::{
             Foundation::HWND,

@@ -29,6 +29,47 @@ pub struct CommandAction {
 }
 
 impl CommandAction {
+    /// 只识别安装版的无数据目录参数组合。显式指定端点、测试库或其他子命令时沿用原命令。
+    pub fn is_default_eaclip_search(&self) -> bool {
+        use std::{ffi::OsStr, path::Path};
+
+        let exe = Path::new(&self.program);
+        if !exe.is_absolute()
+            || !exe
+                .file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case(OsStr::new("eaclip-cli.exe")))
+            || self.validate().is_err()
+        {
+            return false;
+        }
+        let expected_host = exe.with_file_name("cliphost-gpui.exe");
+        let mut args = self.args.iter();
+        let (mut search, mut host, mut json) = (false, false, false);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "search-toggle" if !search => search = true,
+                "--json" if !json => json = true,
+                "--host" if !host => {
+                    let Some(path) = args.next() else {
+                        return false;
+                    };
+                    let folded =
+                        |part: std::path::Component<'_>| part.as_os_str().to_ascii_lowercase();
+                    if !expected_host
+                        .components()
+                        .map(folded)
+                        .eq(Path::new(path).components().map(folded))
+                    {
+                        return false;
+                    }
+                    host = true;
+                }
+                _ => return false,
+            }
+        }
+        search && host
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.program.trim().is_empty() {
             return Err("请填写要执行的程序。".into());
@@ -652,6 +693,47 @@ fn run(requests: Receiver<Request>, events: SyncSender<ExecutionEvent>, stopping
 mod tests {
     use super::*;
     use std::{collections::HashSet, path::PathBuf, sync::atomic::AtomicU64, time::Instant};
+
+    #[cfg(windows)]
+    #[test]
+    fn default_eaclip_search_requires_the_paired_host_and_unscoped_verb() {
+        let program = r"C:\Apps\Clip\EaClip-CLI.exe";
+        let host = "c:/apps/CLIP/cliphost-gpui.EXE";
+        let is_search = |exe: &str, args: &[&str]| {
+            CommandAction {
+                program: exe.into(),
+                args: args.iter().map(|arg| (*arg).into()).collect(),
+                working_directory: Some(r"C:\Apps\Clip".into()),
+            }
+            .is_default_eaclip_search()
+        };
+        assert!(is_search(
+            program,
+            &["search-toggle", "--host", host, "--json"]
+        ));
+        assert!(is_search(program, &["--host", host, "search-toggle"]));
+        for args in [
+            vec!["search-toggle"],
+            vec!["search-toggle", "--host"],
+            vec!["toggle", "--host", host],
+            vec!["search-toggle", "--host", "cliphost-gpui.exe"],
+            vec!["search-toggle", "--host", r"C:\Other\cliphost-gpui.exe"],
+            vec![
+                "search-toggle",
+                "--host",
+                host,
+                "--test-data-root",
+                r"C:\Test",
+            ],
+            vec!["search-toggle", "--host", host, "--no-start"],
+            vec!["search-toggle", "--host", host, "--host", host],
+        ] {
+            assert!(!is_search(program, &args), "{args:?}");
+        }
+        for exe in ["eaclip-cli.exe", r"C:\Apps\Clip\another.exe"] {
+            assert!(!is_search(exe, &["--host", host, "search-toggle"]));
+        }
+    }
 
     fn scratch() -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);

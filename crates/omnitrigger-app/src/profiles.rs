@@ -4475,4 +4475,50 @@ mod tests {
         );
         assert_eq!(Startup::daily().window_title("OmniTrigger"), "OmniTrigger");
     }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "在 Windows 安装验收机验证测试副本的搜索窗口与焦点"]
+    fn copied_search_focuses_only_the_test_history() {
+        let scratch = crate::wheels::tests::Scratch::new();
+        let config = scratch.bindings();
+        let root = config.parent().unwrap();
+        let binding = serde_json::json!({"version":7, "bindings":[{
+            "id":65, "held":[{"kind":"key","value":32}],
+            "activation":{"kind":"press","value":{"kind":"key","value":70}},
+            "enabled":true,"message":"测试聚合搜索","action":{
+                "kind":"command","program":root.join("eaclip-cli.exe"),
+                "args":["search-toggle","--host",root.join("cliphost-gpui.exe"),"--json"]
+            }
+        }]});
+        let saved = serde_json::to_vec(&binding).unwrap();
+        std::fs::write(&config, &saved).unwrap();
+        let history = |text: &str| {
+            serde_json::to_vec(&serde_json::json!({
+            "version":1,"lastId":"1","revision":"1","items":[{"id":"1","text":text,"createdAt":"1"}]
+        })).unwrap()
+        };
+        let daily_history = root.join(crate::clipboard_history_store::FILE_NAME);
+        let daily_bytes = history("daily-only");
+        std::fs::write(&daily_history, &daily_bytes).unwrap();
+        let copy = daily_test_copy(root).unwrap();
+        let dir = profile_dir(root, &copy.id);
+        let test_history = dir.join(crate::clipboard_history_store::FILE_NAME);
+        let test_bytes = history("test-only");
+        std::fs::write(&test_history, &test_bytes).unwrap();
+        let (profile, _locks) = startup(&mut args(&[
+            "--data-root",
+            root.to_str().unwrap(),
+            "--profile",
+            &copy.id,
+        ]));
+        assert!(profile.test_data && !profile.listen);
+        assert_eq!(crate::settings::path(), dir.join("bindings.json"));
+        crate::clipboard_history_ui::keyboard_smoke::verify_profile_search(profile);
+        assert_eq!(std::fs::read(daily_history).unwrap(), daily_bytes);
+        assert_eq!(std::fs::read(test_history).unwrap(), test_bytes);
+        for path in [config, dir.join("bindings.json")] {
+            assert_eq!(std::fs::read(path).unwrap(), saved);
+        }
+    }
 }

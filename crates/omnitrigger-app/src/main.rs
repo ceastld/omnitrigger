@@ -183,6 +183,15 @@ enum Page {
     Settings,
 }
 
+fn reveal_workspace_window(window: &mut Window) {
+    if let Ok(RawWindowHandle::Win32(handle)) =
+        HasWindowHandle::window_handle(&*window).map(|handle| handle.as_raw())
+    {
+        omnitrigger_windows::show_workspace_window(handle.hwnd.get());
+    }
+    window.activate_window();
+}
+
 fn should_refresh_workspace_for_backend_event(event: &BackendEvent, page: Page) -> bool {
     match event {
         BackendEvent::Ready
@@ -1589,12 +1598,7 @@ impl Workspace {
                 self.open_page(Page::Settings, cx);
             }
             let _ = self.main_window.update(cx, |_, window, _| {
-                if let Ok(RawWindowHandle::Win32(handle)) =
-                    HasWindowHandle::window_handle(&*window).map(|handle| handle.as_raw())
-                {
-                    omnitrigger_windows::show_workspace_window(handle.hwnd.get());
-                }
-                window.activate_window();
+                reveal_workspace_window(window);
             });
         }
         if self.mode.history_only() {
@@ -3238,6 +3242,11 @@ impl Workspace {
                     }
                 }
                 cx.notify();
+            }
+            ActionSpec::Command(command)
+                if self.test_data && command.is_default_eaclip_search() =>
+            {
+                self.open_test_history_search(id, cx);
             }
             ActionSpec::Command(command) => self.submit_action(id, command, cx),
             ActionSpec::External(action) => {

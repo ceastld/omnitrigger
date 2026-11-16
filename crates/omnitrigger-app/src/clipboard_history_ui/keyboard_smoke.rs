@@ -199,3 +199,97 @@ pub(crate) fn verify(target: HistoryLaunchTarget) {
     receive.recv().unwrap().unwrap();
     assert_eq!(fs::read(history).unwrap(), sample);
 }
+
+pub(crate) fn verify_profile_search(profile: crate::profiles::Startup) {
+    let (send, receive) = mpsc::channel();
+    Application::new()
+        .with_assets(crate::Assets)
+        .run(move |cx| {
+            crate::message_input::init(cx);
+            let window = cx
+                .open_window(Default::default(), |window, cx| {
+                    let handle = gpui::Window::window_handle(&*window);
+                    cx.new(|cx| {
+                        Workspace::new(
+                            cx,
+                            crate::StartupOptions {
+                                mouse_shortcuts: None,
+                                wheel_input_policy: omnitrigger_core::WheelInputPolicy::Unfiltered,
+                                ui_smoke: false,
+                                browser_connector_settings: false,
+                                appearance_settings: false,
+                                text_history_page: false,
+                                text_history_target: None,
+                                text_history_ui_window: None,
+                                panel: false,
+                                wheel: None,
+                                wheel_target: None,
+                                wheel_editor: false,
+                                listen: profile.listen,
+                                test_data: profile.test_data,
+                                test_profile: profile.test_name,
+                            },
+                            handle,
+                            Err("测试使用系统标题栏".into()),
+                        )
+                    })
+                })
+                .unwrap();
+            window
+                .update(cx, |v, _, cx| {
+                    assert!(v.page != crate::Page::TextHistory);
+                    v.fire(65, crate::HitSource::Input, cx);
+                    assert!(v.page == crate::Page::TextHistory);
+                    assert!(!v.executor.is_running(65));
+                })
+                .unwrap();
+            cx.spawn(async move |cx| {
+                let result = exercise_profile_search(window, cx).await;
+                send.send(result).unwrap();
+                cx.update(|cx| cx.quit()).unwrap();
+            })
+            .detach();
+        });
+    receive.recv().unwrap().unwrap();
+}
+
+async fn exercise_profile_search(
+    window: WindowHandle<Workspace>,
+    cx: &mut AsyncApp,
+) -> Result<(), String> {
+    wait_for(window, cx, "没有读到测试档自己的摘要", |ui| {
+        ui.state.items.len() == 1 && ui.state.items[0].preview == "test-only"
+    })
+    .await?;
+    window
+        .update(cx, |v, w, cx| {
+            if !v
+                .text_history
+                .search
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(w)
+            {
+                return Err("搜索未聚焦测试档筛选框".to_string());
+            }
+            v.text_history
+                .search
+                .update(cx, |input, cx| input.set_text("test", cx));
+            v.text_history.focus_list(w, cx);
+            v.test_action(cx);
+            Ok(())
+        })
+        .map_err(|e| e.to_string())??;
+    window
+        .update(cx, |v, w, cx| {
+            let input = v.text_history.search.read(cx);
+            if input.text() != "test"
+                || !input.focus_handle(cx).is_focused(w)
+                || v.executor.is_running(65)
+            {
+                return Err("再次执行未保留筛选词和焦点，或启动了外部命令".into());
+            }
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?
+}

@@ -64,6 +64,10 @@ jobs:
         timeout-minutes: 5
         run: cargo test --locked -p omnitrigger-app --bin omnitrigger clipboard_history_send::tests::popup_keyboard_without_mouse -- --ignored --exact
 
+      - name: 验证测试副本的搜索热键和窗口焦点
+        timeout-minutes: 5
+        run: cargo test --locked -p omnitrigger-app --bin omnitrigger profiles::tests::copied_search_focuses_only_the_test_history -- --ignored --exact
+
       - name: 构建发行包并收集第三方许可
         env:
           OMNITRIGGER_BUILD_COMMIT: ${{ steps.version.outputs.commit }}
