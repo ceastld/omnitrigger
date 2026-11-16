@@ -605,15 +605,29 @@ fn profile_directory(config_path: &Path) -> Option<PathBuf> {
 
 impl Entry {
     fn is_test_at(&self, directory: &Path) -> bool {
-        self.kind == "test"
-            && directory.file_name().is_some_and(|id| {
-                let expected = std::ffi::OsStr::new(&self.id);
-                if cfg!(windows) {
-                    id.eq_ignore_ascii_case(expected)
-                } else {
-                    id == expected
-                }
-            })
+        self.kind == "test" && self.id_matches_directory(directory)
+    }
+
+    fn id_matches_directory(&self, directory: &Path) -> bool {
+        directory.file_name().is_some_and(|id| {
+            let expected = std::ffi::OsStr::new(&self.id);
+            if cfg!(windows) {
+                id.eq_ignore_ascii_case(expected)
+            } else {
+                id == expected
+            }
+        })
+    }
+
+    fn check_directory_id(&self, directory: &Path) -> std::io::Result<()> {
+        if self.id_matches_directory(directory) {
+            return Ok(());
+        }
+        Err(std::io::Error::other(format!(
+            "{} 记载的配置档 ID 为 {}，与目录名不符，请核对恢复的目录。",
+            directory.join("profile.json").display(),
+            self.id
+        )))
     }
 }
 
@@ -625,6 +639,10 @@ fn registered_test_profile(config_path: &Path) -> Result<Option<Entry>, String> 
     let Some(root) = directory.parent().and_then(Path::parent) else {
         return Ok(None);
     };
+    let generated_id = directory
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(generated_profile_id);
     match read_catalog(root) {
         Ok(catalog) => {
             let entry = catalog
@@ -636,22 +654,22 @@ fn registered_test_profile(config_path: &Path) -> Result<Option<Entry>, String> 
                 return Ok(entry);
             }
         }
-        Err(error)
-            if directory
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(generated_profile_id)
-                && !directory.is_dir() =>
-        {
+        Err(error) if generated_id && !directory.is_dir() => {
             // 目录替换中途退出时，本地身份也被移走。登记有冲突时不能把这个路径当作日常档打开。
             return Err(error);
         }
         Err(_) => {}
     }
     // 总登记缺失或损坏时，以原目录自己的身份文件保守隔离动作，保留 --config 启动能力。
-    Ok(reset_recovery::identity(&directory)
-        .ok()
-        .filter(|entry| entry.is_test_at(&directory)))
+    let Ok(entry) = reset_recovery::identity(&directory) else {
+        return Ok(None);
+    };
+    if generated_id {
+        entry
+            .check_directory_id(&directory)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(entry.is_test_at(&directory).then_some(entry))
 }
 
 /// 只有已登记配置档的安装可用于运行复制来的脚本；夹具仅提供动作和测试数据。

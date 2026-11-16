@@ -33,6 +33,19 @@ pub(super) fn live_profile_present(directory: &Path) -> io::Result<bool> {
             creating.display()
         )));
     }
+    // 总登记决定选中哪个档，目录里现存的身份须属于同一个 ID。
+    // 旧备份只有总登记、缺少自述文件时，沿用原来的打开方式。
+    let path = directory.join("profile.json");
+    match identity(directory) {
+        Ok(entry) => entry.check_directory_id(directory)?,
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("无法核对 {}：{error}", path.display()),
+            ));
+        }
+        _ => {}
+    }
     Ok(true)
 }
 
@@ -234,6 +247,55 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn restored_directory_of_another_profile_is_not_opened_copied_or_reset() {
+        let root = temp_root("restored-wrong-id");
+        let original = create_profile(&root, "first", &Seed::Empty, None).unwrap();
+        let other = create_profile(&root, "second", &Seed::Empty, None).unwrap();
+        let directory = profile_dir(&root, &original.id);
+        let identity_path = directory.join("profile.json");
+        let config = directory.join("bindings.json");
+        let action = directory.join("actions/demo/settings.json");
+        fs::create_dir_all(action.parent().unwrap()).unwrap();
+        fs::write(&action, b"restored settings").unwrap();
+        write_json(&identity_path, &other).unwrap();
+        for access in [RootAccess::Inspect, RootAccess::Open] {
+            assert!(prepare_root_access(&config, access).is_err());
+        }
+        let seed = Seed::Copy(original.id.clone());
+        let error = create_profile(&root, "fork", &seed, None).unwrap_err();
+        assert!(error.contains("profile.json") && error.contains(&other.id));
+        assert!(reset_profile(&root, "first").is_err());
+        assert!(read_catalog(&root).unwrap().find("fork").is_none());
+        assert_eq!(fs::read(&action).unwrap(), b"restored settings");
+        assert_eq!(identity(&directory).unwrap(), other);
+        assert!(!root.join("backups/profile-reset").exists());
+
+        // 显式数据根入口也不能把身份冲突的目录当作普通日常档。
+        let catalog = catalog_path(&root);
+        let saved = fs::read(&catalog).unwrap();
+        fs::write(&catalog, "{").unwrap();
+        assert!(prepare_root_access(&config, RootAccess::Open).is_err());
+        fs::remove_file(&catalog).unwrap();
+        assert!(prepare_root_access(&config, RootAccess::Inspect).is_err());
+        fs::write(&catalog, saved).unwrap();
+
+        // 总登记中的显示名可以比备份新，稳定 ID 相同仍可使用。
+        let mut restored = original;
+        restored.name = "备份里的旧名称".into();
+        write_json(&identity_path, &restored).unwrap();
+        let copy = create_profile(&root, "fork", &seed, None).unwrap();
+        fs::write(
+            profile_dir(&root, &copy.id).join("actions/demo/settings.json"),
+            b"edited",
+        )
+        .unwrap();
+        assert_eq!(fs::read(&action).unwrap(), b"restored settings");
+        fs::remove_file(identity_path).unwrap();
+        assert!(prepare_root_access(&config, RootAccess::Inspect).is_ok());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
