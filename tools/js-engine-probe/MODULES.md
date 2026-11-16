@@ -1,6 +1,6 @@
 # 包内 JavaScript 模块
 
-轻量脚本宿主使用引擎原生 ESM，不转译源码，不依赖 Node、npm、打包器或自定义文件语法。新工程采用 `main.mjs`，具名导出同步函数 `main(ctx)`：
+轻量脚本宿主使用引擎原生 ESM，不转译源码，不依赖 Node、npm、打包器或自定义文件语法。新工程采用 `main.mjs`，具名导出函数 `main(ctx)`（同步模板如下）：
 
 ```js
 import { cleanText } from './lib/text.js';
@@ -10,7 +10,7 @@ export function main(ctx) {
 }
 ```
 
-`lib/text.js` 使用普通 `export`，不隐式获得 `ctx`；需要 SDK 时将上下文或所需能力显式传入。入口仍接受同一份 SDK，结果仍必须是 JSON，不能返回 Promise。只导出 `default`、缺少 `main` 或 `main` 不是函数会返回 `module_entry`。
+`lib/text.js` 使用普通 `export`，不隐式获得 `ctx`；需要 SDK 时将上下文或所需能力显式传入。入口仍接受同一份 SDK，入口可返回 JSON 值或其 Promise，最终结果仍必须是 JSON。必须具名导出 `main`；仅默认导出、缺少具名 `main` 或该导出不是函数时返回 `module_entry`。
 
 ## 入口及协议兼容
 
@@ -43,7 +43,7 @@ export function main(ctx) {
 
 两个引擎各自使用原生模块记录缓存，不自行执行依赖排序。相同规范化文件在一次调用中解析及初始化一次；循环导入和实时绑定遵循 ESM，循环中提前访问未初始化绑定产生原生异常。文件快照只活到本次宿主进程退出，下次调用重新读取。保存源码即可让下一次执行使用新内容。
 
-模块初始化推进引擎内部任务队列，无法完成的初始化 Promise 返回 `module_pending`；宿主没有外部异步事件循环。工程的可移植契约是静态 `import` / `export` 和同步 `main`；不把动态导入、顶层异步初始化或后台 Promise 任务作为动作完成协议。入口 Promise 仍被拒绝。
+模块初始化推进引擎内部任务队列，无法完成的初始化 Promise 返回 `module_pending`；宿主没有外部异步事件循环。工程采用静态 `import` / `export`，入口可为 async 或返回 Promise。新版运行器等待入口结果，并推进引擎任务和已配置的异步浏览器通道；不把动态导入、顶层异步初始化或未被入口等待的后台任务作为动作完成协议。
 
 ## 错误与源文件定位
 
@@ -58,3 +58,5 @@ export function main(ctx) {
 实现核对了当前锁定源码：Boa **0.21.1** 的 `ModuleLoader::load_imported_module`、`Module::parse/load/link/evaluate/get_value` 及 `Source::with_path`；rquickjs **0.14.0** 的 `Resolver` / `Loader`（含 `ImportAttributes` 参数）、`Runtime::set_loader`、`Module::declare/eval/get` 和 `Promise::finish`。QuickJS 路线需启用现有依赖的 `loader` 特性；不启用 `dyn-load` 或 Rust 异步适配。`loader` 使用已在独立锁文件中的 relative-path 2.0.3（MIT OR Apache-2.0，选择 MIT）。可参考 [Boa 0.21.1 模块接口](https://docs.rs/boa_engine/0.21.1/boa_engine/module/index.html) 和 [rquickjs 0.14.0 特性说明](https://docs.rs/rquickjs/0.14.0/rquickjs/#advanced)；不要按 `latest` 页面实现，因为 Boa 新版的 trait 签名已经不同。
 
 `tests/modules.rs` 提供两引擎共用的命令行回归，覆盖真实多文件导入、再导出、规范化缓存、循环及实时绑定、跨调用重载、边界拒绝、缺失/损坏/超限文件、入口契约、初始化未完成、辅助文件诊断和原生错误字段。应用适配与工程生成的定向单元测试分别位于 `script_host.rs`、`project.rs`；编辑器参数测试位于 `script_projects.rs`。
+
+同步函数或返回 Promise 的普通函数使用 `ScriptMain`。直接声明 `async function` 时使用 `/** @type {ScriptAsyncMain} */`：TypeScript 的 JSDoc 要求 async 函数的返回注释直接为 Promise，不能使用 JSON 与 Promise 的联合返回注释。两者使用相同的上下文，最终结果都必须是 JSON。

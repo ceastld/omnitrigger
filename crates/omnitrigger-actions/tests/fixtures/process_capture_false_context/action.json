@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "id": "test.process-capture-false-context",
+  "name": "无原目标的采集桥API合同",
+  "version": "0.0.0",
+  "actions": [{"id":"capture","title":"capture API","version":1,"runtime":"script","entry":"main.mjs","single_instance":true}]
+}

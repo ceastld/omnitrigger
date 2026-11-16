@@ -26,6 +26,11 @@ pub use process_capture::{
 mod owned_path_move;
 pub use owned_path_move::move_owned_path_no_replace;
 
+#[cfg(windows)]
+mod logical_path_sort;
+#[cfg(windows)]
+pub use logical_path_sort::sort_logical_paths;
+
 mod local_path_stat;
 pub use local_path_stat::{
     read_local_directory, read_local_directory_with_options, stat_local_path, DirectoryEntryType,
@@ -133,6 +138,31 @@ pub use data_root::{
 mod process_paths;
 #[cfg(windows)]
 pub use process_paths::{documents_dir, running_process_paths};
+
+#[cfg(windows)]
+mod window_pointing_handoff;
+#[cfg(windows)]
+pub use window_pointing_handoff::{handoff_pointing_root_if, PointingRootHandoffOutcome};
+
+#[cfg(windows)]
+mod window_pointing_root;
+#[cfg(windows)]
+pub use window_pointing_root::{read_pointing_root_if, PointingRootObservation};
+
+mod window_pointer;
+#[cfg(windows)]
+pub use window_pointer::read_window_pointer_state_if;
+pub use window_pointer::{PointerButtonState, WindowPointerState};
+mod window_drag;
+#[cfg(windows)]
+pub use window_drag::track_window_drag_if;
+pub use window_drag::{
+    WindowDragButton, WindowDragMode, WindowDragOptions, WindowDragStop, WindowDragStopped,
+    WindowSnapOptions,
+};
+
+mod window_geometry;
+pub use window_geometry::{WindowGeometry, WindowGeometryError, WindowRect, WindowRectFrame};
 
 mod window_action;
 pub use window_action::WindowOperation;
@@ -278,6 +308,8 @@ pub struct ListenerDiagnostics {
 
 #[derive(Debug)]
 pub enum BackendCommand {
+    #[cfg(windows)]
+    OwnedLeftInput(Box<owned_left_input::OwnedLeftRequest>),
     SetBindings(Vec<TriggerSpec>),
     StartRecording,
     CancelRecording,
@@ -613,3 +645,11 @@ mod tests {
         assert_eq!(format_trigger(&spec), "左 Ctrl + 鼠标右键（长按 300ms）");
     }
 }
+
+#[cfg(windows)]
+mod owned_left_input;
+#[cfg(windows)]
+pub use owned_left_input::{
+    active_owned_left_input_client, owned_left_button_native_input, OwnedLeftInputClient,
+    OwnedLeftInputError, OwnedLeftRequest,
+};

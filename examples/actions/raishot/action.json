@@ -4,7 +4,29 @@
   "name": "RaiShot 截图与托盘",
   "version": "0.1.0",
   "actions": [
-    {"id":"node","title":"RaiShot","version":1,"runtime":"node","entry":"node.mjs","single_instance":true},
-    {"id":"script","title":"RaiShot","version":1,"runtime":"script","entry":"script.mjs","single_instance":true}
+    {
+      "id": "node",
+      "title": "RaiShot",
+      "version": 1,
+      "runtime": "node",
+      "entry": "node.mjs",
+      "single_instance": true
+    },
+    {
+      "id": "script",
+      "title": "RaiShot",
+      "version": 1,
+      "runtime": "script",
+      "entry": "script.mjs",
+      "single_instance": true
+    },
+    {
+      "id": "result-script",
+      "title": "RaiShot 图像文件结果",
+      "version": 1,
+      "runtime": "script",
+      "entry": "result-script.mjs",
+      "single_instance": true
+    }
   ]
 }

@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "lib": [
+      "ES2022"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": [],
+    "skipLibCheck": false
+  },
+  "files": [
+    "main.mjs",
+    "main-script.mjs",
+    "workflow.mjs",
+    "transform.mjs",
+    "line-types.d.ts",
+    "sdk/script-types.d.ts"
+  ]
+}

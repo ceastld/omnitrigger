@@ -1,4 +1,5 @@
 import {prepare,done,send,complete,sanitized} from './workflow.mjs';
+/** @param {import('./line-types').SyncContext} ctx @returns {import('./line-types').LineReceipt} */
 export function main(ctx){
   let method='script.parameters';
   try{

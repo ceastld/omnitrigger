@@ -1,0 +1,7 @@
+{
+  "extends": "../examples/actions/browser-workflows/jsconfig.json",
+  "files": [
+    "browser_duplicate_tab_sync_types.ts",
+    "../examples/actions/browser-workflows/sdk/script-types.d.ts"
+  ]
+}

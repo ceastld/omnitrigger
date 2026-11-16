@@ -8,7 +8,11 @@ mod native;
 mod runtime_description;
 const DESKTOP_API: &str =
     include_str!("../../../crates/omnitrigger-actions/runtime/desktop-api.js");
+const STATE_API: &str = include_str!("../../../crates/omnitrigger-actions/runtime/state-api.js");
+const ACTIONS_API: &str =
+    include_str!("../../../crates/omnitrigger-actions/runtime/actions-api.js");
 const SDK: &str = include_str!("sdk.js");
+const TEXT_ENCODER: &str = include_str!("text-encoder.js");
 const PROCESS_CAPTURE_API: &str =
     include_str!("../../../crates/omnitrigger-actions/runtime/process-capture-api.js");
 const HISTORY_API: &str =
@@ -25,7 +29,7 @@ compile_error!("请选择且只选择 boa 或 quickjs 引擎。");
 const MAX_REQUEST: u64 = 256 * 1024;
 const FAULT_FIELDS: &str = "(function(error) { try {\n\
     if (typeof error?.code !== 'string' || !['not_started','unknown'].includes(error.effectState)) return null;\n\
-    return JSON.stringify({code:error.code,message:String(error.message),effect_state:error.effectState,method:error.method,required_permissions:error.requiredPermissions});\n\
+    return JSON.stringify({code:error.code,message:String(error.message),effect_state:error.effectState,method:error.method,required_permissions:error.requiredPermissions,...(error.method === 'display.brightness_step' && ['cancelled','timeout'].includes(error.code) && error.effectState === 'unknown' && Object.getOwnPropertyDescriptor(error,'brightnessReceipt')?.value !== undefined ? {brightness_receipt:Object.getOwnPropertyDescriptor(error,'brightnessReceipt').value} : {})});\n\
     } catch (_) { return null; } })";
 
 fn bounded_diagnostic(mut text: String) -> String {
@@ -69,7 +73,7 @@ fn diagnostic_error(fields: Option<String>, rendered: String) -> Value {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
-    /// 同步函数体；通过 ctx.input 读取参数，通过 return 返回 JSON 结果。
+    /// 函数体；通过 ctx.input 读取参数，返回 JSON 或最终解析为 JSON 的 Promise。
     #[serde(default)]
     script: Option<String>,
     /// 标准 ESM 入口；与 script 互斥，路径相对于 package_root。
@@ -82,6 +86,9 @@ struct Request {
     package_root: Option<String>,
     #[serde(default)]
     native_context: Option<Value>,
+    /// Host绑定由生产者明确标记，即使建桥失败也禁止本地桌面回退。
+    #[serde(default)]
+    desktop_mode: Option<api::DesktopMode>,
 }
 
 #[derive(Deserialize, serde::Serialize)]
@@ -168,20 +175,21 @@ fn run() -> Result<Value, Value> {
         }
         None
     };
-    let metadata = json!({"invocation":request.invocation,"packageRoot":request.package_root,"__nativeContext":request.native_context});
+    let desktop_mode =
+        api::DesktopMode::resolve(request.desktop_mode, request.native_context.as_ref())
+            .map_err(|error| serde_json::to_value(error).expect("API error JSON"))?;
+    let _desktop_scope = api::DesktopScope::enter(desktop_mode);
+    let _async_scope = api::AsyncScope::enter(request.native_context.as_ref());
+    let metadata = json!({"invocation":request.invocation,"packageRoot":request.package_root,
+        "__nativeContext":request.native_context,"__localDesktopAllowed":desktop_mode.local_allowed()});
     let metadata =
         serde_json::to_string(&metadata.to_string()).map_err(|error| error.to_string())?;
     // 将 JSON 编码为 JS 字符串再解析，避免 __proto__ 对象字面量语义及参数插值。
     let input = serde_json::to_string(&request.input).map_err(|error| error.to_string())?;
     let literal = serde_json::to_string(&input).map_err(|error| error.to_string())?;
     let source = format!(
-        "(() => {{ const ctx = {{ input: JSON.parse({literal}), ...JSON.parse({metadata}) }};\n{DESKTOP_API}\n{BROWSER_API}\n{HISTORY_API}\n{PROCESS_CAPTURE_API}\n{SDK}\n\
-         return function(entry) {{ const result = entry(ctx);\n\
-         if (result && typeof result.then === 'function') throw new Error('脚本入口必须同步返回 JSON 数据');\n\
-         const output = JSON.stringify(result);\n\
-         if (typeof output !== 'string') throw new Error('入口必须返回 JSON 结果');\n\
-         return JSON.stringify({{kind:'value', value:JSON.parse(output)}});\n\
-         }} }})()",
+        "(() => {{ const ctx = {{ input: JSON.parse({literal}), ...JSON.parse({metadata}) }};\n{TEXT_ENCODER}\n{DESKTOP_API}\n{BROWSER_API}\n{HISTORY_API}\n{PROCESS_CAPTURE_API}\n{ACTIONS_API}\n{STATE_API}\n{SDK}\n\
+         return makeScriptRunner(); }})()",
     );
     // 首行不插入换行，避免把用户文件行号平移到 SDK 后面；首行列号含函数前缀。
     let entry = format!(
@@ -214,13 +222,22 @@ fn evaluate(
 ) -> Result<String, Value> {
     use boa_engine::{Context, Source};
     let loader = modules.map(|package| modules::boa::Loader::new(std::rc::Rc::clone(package)));
+    let budget = ExecutionBudget::new();
+    let jobs = std::rc::Rc::new(BoundedJobs {
+        inner: std::rc::Rc::new(boa_engine::job::SimpleJobExecutor::new()),
+        budget: budget.clone(),
+    });
     let mut context = if let Some(loader) = &loader {
         Context::builder()
             .module_loader(std::rc::Rc::clone(loader))
+            .job_executor(jobs.clone())
             .build()
             .map_err(|e| e.to_string())?
     } else {
-        Context::default()
+        Context::builder()
+            .job_executor(jobs.clone())
+            .build()
+            .map_err(|error| error.to_string())?
     };
     use boa_engine::{js_string, JsValue, NativeFunction};
     context
@@ -235,6 +252,34 @@ fn evaluate(
                     .to_std_string_escaped();
                 Ok(js_string!(api::dispatch(request)).into())
             }),
+        )
+        .map_err(|error| error.to_string())?;
+    context
+        .register_global_builtin_callable(
+            js_string!("__hostCallAsync"),
+            1,
+            NativeFunction::from_fn_ptr(|_, args, context| {
+                let request = args
+                    .first()
+                    .unwrap_or(&JsValue::undefined())
+                    .to_string(context)?
+                    .to_std_string_escaped();
+                Ok(js_string!(api::dispatch_async(request)).into())
+            }),
+        )
+        .map_err(|error| error.to_string())?;
+    context
+        .register_global_builtin_callable(
+            js_string!("__hostPollAsync"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(js_string!(api::poll_async()).into())),
+        )
+        .map_err(|error| error.to_string())?;
+    context
+        .register_global_builtin_callable(
+            js_string!("__hostAsyncPending"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, _| Ok((api::async_pending() as u32).into())),
         )
         .map_err(|error| error.to_string())?;
     context
@@ -262,10 +307,85 @@ fn evaluate(
         .ok_or("SDK 未返回入口执行函数。")?
         .call(&JsValue::undefined(), &[entry], &mut context)
         .map_err(|error| boa_error(error, &fields, &mut context))?;
+    budget.check()?;
+    let runner_object = runner.as_object().ok_or("SDK未返回函数对象。")?;
+    let poll = runner_object
+        .get(js_string!("__pollAsync"), &mut context)
+        .map_err(|error| boa_error(error, &fields, &mut context))?;
+    let pending = runner_object
+        .get(js_string!("__pendingAsync"), &mut context)
+        .map_err(|error| boa_error(error, &fields, &mut context))?;
+    let promise = value.as_object().and_then(|object| {
+        boa_engine::object::builtins::JsPromise::from_object(object.clone()).ok()
+    });
+    if let Some(promise) = promise {
+        loop {
+            budget.check()?;
+            if let Err(error) = context.run_jobs() {
+                budget.check()?;
+                return Err(boa_error(error, &fields, &mut context));
+            }
+            budget.check()?;
+            match promise.state() {
+                boa_engine::builtins::promise::PromiseState::Fulfilled(value) => {
+                    let outstanding = pending
+                        .as_callable()
+                        .ok_or("异步计数函数缺失。")?
+                        .call(&JsValue::undefined(), &[], &mut context)
+                        .map_err(|error| boa_error(error, &fields, &mut context))?
+                        .as_number()
+                        .unwrap_or_default();
+                    if api::async_pending() != 0 || outstanding != 0. {
+                        return Err(unfinished_async());
+                    }
+                    return value
+                        .as_string()
+                        .map(|text| text.to_std_string_escaped())
+                        .ok_or_else(|| Value::from("引擎未返回JSON字符串。"));
+                }
+                boa_engine::builtins::promise::PromiseState::Rejected(value) => {
+                    return Err(boa_error(
+                        boa_engine::JsError::from_opaque(value),
+                        &fields,
+                        &mut context,
+                    ))
+                }
+                boa_engine::builtins::promise::PromiseState::Pending => {}
+            }
+            let completed = poll
+                .as_callable()
+                .ok_or("异步完成函数缺失。")?
+                .call(&JsValue::undefined(), &[], &mut context)
+                .map_err(|error| boa_error(error, &fields, &mut context))?
+                .as_number()
+                .unwrap_or_default();
+            if completed != 0. {
+                continue;
+            }
+            if api::async_pending() == 0 {
+                return Err(modules::fault(
+                    "script_promise_pending",
+                    "Promise尚未结束且没有可等待的本机调用。",
+                    "unknown",
+                ));
+            }
+            api::wait_async();
+        }
+    }
+    let outstanding = pending
+        .as_callable()
+        .ok_or("异步计数函数缺失。")?
+        .call(&JsValue::undefined(), &[], &mut context)
+        .map_err(|error| boa_error(error, &fields, &mut context))?
+        .as_number()
+        .unwrap_or_default();
+    if api::async_pending() != 0 || outstanding != 0. {
+        return Err(unfinished_async());
+    }
     value
         .as_string()
         .map(|value| value.to_std_string_escaped())
-        .ok_or_else(|| "引擎未返回 JSON 字符串。".into())
+        .ok_or_else(|| "引擎未返回JSON字符串。".into())
 }
 
 #[cfg(feature = "boa")]
@@ -301,13 +421,7 @@ fn evaluate(
     modules: Option<&std::rc::Rc<modules::PackageModules>>,
 ) -> Result<String, Value> {
     use rquickjs::{Context, Runtime};
-    use std::{
-        sync::{
-            atomic::{AtomicU64, Ordering},
-            Arc,
-        },
-        time::{Duration, Instant},
-    };
+    let budget = ExecutionBudget::new();
     let runtime = Runtime::new().map_err(|error| error.to_string())?;
     if let Some(package) = modules {
         runtime.set_loader(
@@ -317,34 +431,50 @@ fn evaluate(
     }
     runtime.set_memory_limit(32 * 1024 * 1024);
     runtime.set_max_stack_size(512 * 1024);
-    let began = Instant::now();
-    let host_time = Arc::new(AtomicU64::new(0));
-    let elapsed = Arc::clone(&host_time);
-    runtime.set_interrupt_handler(Some(Box::new(move || {
-        began.elapsed()
-            >= Duration::from_secs(2) + Duration::from_micros(elapsed.load(Ordering::Relaxed))
-    })));
+    let interrupt = budget.clone();
+    runtime.set_interrupt_handler(Some(Box::new(move || interrupt.expired())));
     let context = Context::full(&runtime).map_err(|error| error.to_string())?;
     context.with(|ctx| {
+        for (name, function) in [
+            (
+                "__hostCall",
+                rquickjs::Function::new(ctx.clone(), api::dispatch),
+            ),
+            (
+                "__hostCallAsync",
+                rquickjs::Function::new(ctx.clone(), api::dispatch_async),
+            ),
+        ] {
+            ctx.globals()
+                .set(name, function.map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        }
         ctx.globals()
             .set(
-                "__hostCall",
-                rquickjs::Function::new(ctx.clone(), move |request: String| {
-                    let began = Instant::now();
-                    let result = api::dispatch(request);
-                    host_time.fetch_add(began.elapsed().as_micros() as u64, Ordering::Relaxed);
-                    result
-                })
-                .map_err(|error| error.to_string())?,
+                "__hostPollAsync",
+                rquickjs::Function::new(ctx.clone(), api::poll_async).map_err(|e| e.to_string())?,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|e| e.to_string())?;
+        ctx.globals()
+            .set(
+                "__hostAsyncPending",
+                rquickjs::Function::new(ctx.clone(), api::async_pending)
+                    .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
         let mut options = rquickjs::context::EvalOptions::default();
         options.filename = Some("omnitrigger-sdk.js".into());
         let fields: rquickjs::Function =
             ctx.eval(FAULT_FIELDS).map_err(|error| error.to_string())?;
         let runner: rquickjs::Function = ctx
             .eval_with_options(source, options)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| quickjs_error(&ctx, &fields, error))?;
+        let poll: rquickjs::Function = runner
+            .get("__pollAsync")
+            .map_err(|error| quickjs_error(&ctx, &fields, error))?;
+        let pending: rquickjs::Function = runner
+            .get("__pendingAsync")
+            .map_err(|error| quickjs_error(&ctx, &fields, error))?;
         let mut options = rquickjs::context::EvalOptions::default();
         options.filename = Some("action.js".into());
         let entry: rquickjs::Function = if let Some(package) = modules {
@@ -353,8 +483,61 @@ fn evaluate(
             ctx.eval_with_options(entry, options)
                 .map_err(|error| quickjs_error(&ctx, &fields, error))?
         };
-        runner
+        let value: rquickjs::Value = runner
             .call((entry,))
+            .map_err(|error| quickjs_error(&ctx, &fields, error))?;
+        if let Some(promise) = value.as_promise() {
+            loop {
+                budget.check()?;
+                while ctx.execute_pending_job() {
+                    if !budget.next_job() {
+                        return Err(modules::fault(
+                            "script_budget_exceeded",
+                            "Promise任务预算已耗尽。",
+                            "unknown",
+                        ));
+                    }
+                }
+                if let Some(result) = promise.result::<String>() {
+                    let result = result.map_err(|error| quickjs_error(&ctx, &fields, error))?;
+                    if api::async_pending() != 0
+                        || pending
+                            .call::<_, usize>(())
+                            .map_err(|error| quickjs_error(&ctx, &fields, error))?
+                            != 0
+                    {
+                        return Err(unfinished_async());
+                    }
+                    return Ok(result);
+                }
+                let completed: usize = poll
+                    .call(())
+                    .map_err(|error| quickjs_error(&ctx, &fields, error))?;
+                if completed != 0 {
+                    continue;
+                }
+                if api::async_pending() == 0 {
+                    return Err(modules::fault(
+                        "script_promise_pending",
+                        "Promise尚未结束且没有可等待的本机调用。",
+                        "unknown",
+                    ));
+                }
+                api::wait_async();
+            }
+        }
+        if api::async_pending() != 0
+            || pending
+                .call::<_, usize>(())
+                .map_err(|error| quickjs_error(&ctx, &fields, error))?
+                != 0
+        {
+            return Err(unfinished_async());
+        }
+        value
+            .as_string()
+            .ok_or_else(|| Value::from("引擎未返回JSON字符串。"))?
+            .to_string()
             .map_err(|error| quickjs_error(&ctx, &fields, error))
     })
 }
@@ -397,4 +580,104 @@ fn quickjs_error<'js>(
         }
     };
     diagnostic_error(fields, rendered)
+}
+
+struct ExecutionBudget {
+    began: std::time::Instant,
+    host_baseline: u64,
+    jobs: std::sync::atomic::AtomicUsize,
+}
+impl ExecutionBudget {
+    fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            began: std::time::Instant::now(),
+            host_baseline: api::excluded_host_micros(),
+            jobs: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+    fn expired(&self) -> bool {
+        let excluded = api::excluded_host_micros().saturating_sub(self.host_baseline);
+        self.began.elapsed()
+            >= std::time::Duration::from_secs(2) + std::time::Duration::from_micros(excluded)
+    }
+    fn next_job(&self) -> bool {
+        self.jobs.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 10_000 && !self.expired()
+    }
+    fn check(&self) -> Result<(), Value> {
+        if self.expired() || self.jobs.load(std::sync::atomic::Ordering::Relaxed) >= 10_000 {
+            Err(modules::fault(
+                "script_budget_exceeded",
+                "脚本CPU或Promise任务预算已耗尽。",
+                "unknown",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn unfinished_async() -> Value {
+    modules::fault(
+        "async_calls_pending",
+        "入口已结束，但仍有未完成的异步浏览器调用；本次资源将取消收尾。",
+        "unknown",
+    )
+}
+
+#[cfg(feature = "boa")]
+struct BoundedJobs {
+    inner: std::rc::Rc<boa_engine::job::SimpleJobExecutor>,
+    budget: std::sync::Arc<ExecutionBudget>,
+}
+#[cfg(feature = "boa")]
+impl boa_engine::job::JobExecutor for BoundedJobs {
+    fn enqueue_job(
+        self: std::rc::Rc<Self>,
+        job: boa_engine::job::Job,
+        context: &mut boa_engine::Context,
+    ) {
+        use boa_engine::job::{GenericJob, Job, PromiseJob};
+        let budget = self.budget.clone();
+        let check = move || -> boa_engine::JsResult<()> {
+            if budget.next_job() {
+                Ok(())
+            } else {
+                Err(boa_engine::JsNativeError::error()
+                    .with_message("脚本Promise任务预算已耗尽。")
+                    .into())
+            }
+        };
+        let wrapped = match job {
+            Job::PromiseJob(job) => {
+                let realm = job.realm().cloned();
+                let run = move |context: &mut boa_engine::Context| {
+                    check()?;
+                    job.call(context)
+                };
+                Job::PromiseJob(if let Some(realm) = realm {
+                    PromiseJob::with_realm(run, realm)
+                } else {
+                    PromiseJob::new(run)
+                })
+            }
+            Job::GenericJob(job) => {
+                let realm = job.realm().clone();
+                Job::GenericJob(GenericJob::new(
+                    move |context| {
+                        check()?;
+                        job.call(context)
+                    },
+                    realm,
+                ))
+            }
+            other => other,
+        };
+        boa_engine::job::JobExecutor::enqueue_job(self.inner.clone(), wrapped, context);
+    }
+    fn run_jobs(
+        self: std::rc::Rc<Self>,
+        context: &mut boa_engine::Context,
+    ) -> boa_engine::JsResult<()> {
+        boa_engine::job::JobExecutor::run_jobs(self.inner.clone(), context)
+    }
 }

@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": false,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "moduleDetection": "force",
+    "lib": [
+      "ES2022"
+    ],
+    "types": []
+  },
+  "files": [
+    "sdk/script-types.d.ts",
+    "types.d.ts"
+  ],
+  "include": [
+    "*.mjs"
+  ]
+}

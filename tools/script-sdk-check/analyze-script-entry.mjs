@@ -1,7 +1,8 @@
-// 只检查轻量 ESM 的 main 具名导出声明；不解析依赖、不执行初始化器。
+// 检查轻量 ESM 具名入口或旧函数体 main 绑定；不执行源码。
 import ts from 'typescript';
 import {Buffer} from 'node:buffer';
-import {javascriptSyntaxDiagnostics} from './javascript-syntax.mjs';
+import {javascriptAnalysisProgram} from './javascript-syntax.mjs';
+import {analyzeLegacyEntry} from './analyze-legacy-entry.mjs';
 
 export function analyzeScriptEntry(input={}) {
   const valid=input!==null&&typeof input==='object'&&!Array.isArray(input);
@@ -14,8 +15,8 @@ export function analyzeScriptEntry(input={}) {
       ?source.getLineAndCharacterOfPosition(typeof node==='number'?node:node.getStart(source)):undefined;
     diagnostics.push({code,severity,message,file,...(point?{line:point.line+1,column:point.character+1}:{})});
   };
-  if(!valid||typeof file!=='string'||file.length>2048||!file.endsWith('.mjs')||typeof text!=='string'||Buffer.byteLength(text)>128*1024) {
-    add('entry_snapshot_invalid','error','需要不超过 128 KiB 的明确 .mjs 入口文本。');
+  if(!valid||typeof file!=='string'||file.length>2048||!['.mjs','.js'].some(ext=>file.endsWith(ext))||typeof text!=='string'||Buffer.byteLength(text)>128*1024) {
+    add('entry_snapshot_invalid','error','需要不超过 128 KiB 的明确 .mjs 或 .js 入口文本。');
     return result('unresolved');
   }
   let source;
@@ -25,14 +26,20 @@ export function analyzeScriptEntry(input={}) {
     add('entry_syntax_invalid','error','入口源码有语法错误，未确定具名导出。');
     return result('unresolved');
   }
+  let analysisProgram;
   try {
-    const syntax=javascriptSyntaxDiagnostics(source);
+    analysisProgram=javascriptAnalysisProgram(source);
+    const syntax=analysisProgram.getSyntacticDiagnostics(source);
     if(syntax.length) {
       for(const diagnostic of syntax)add('entry_typescript_syntax','error',
         'JavaScript 入口包含 TypeScript 专有语法；请改用 JSDoc 类型注释，不会自动转译。',diagnostic.start,source);
       return result('unresolved');
     }
   } catch {add('entry_analysis_limit','error','源码复杂度超过入口分析器可处理范围。');return result('unresolved');}
+  if(file.endsWith('.js')) {
+    try {return analyzeLegacyEntry(source,analysisProgram);}
+    catch {add('entry_analysis_limit','error','源码复杂度超过入口分析器可处理范围。');return result('unresolved');}
+  }
   const locals=new Map(),exported=[],stars=[];
   const has=(node,kind)=>node.modifiers?.some(m=>m.kind===kind);
   const functionKind=node=>node.asteriskToken?'generator_callable':has(node,ts.SyntaxKind.AsyncKeyword)?'async_callable':'callable';
@@ -79,12 +86,9 @@ export function analyzeScriptEntry(input={}) {
     return result('missing_named_export');
   }
   const entry=exported[0],kind=entry.kind??locals.get(entry.local)??'unresolved';
-  if(kind==='async_callable'||kind==='generator_callable') {
-    const asyncMain=kind==='async_callable';
-    add(asyncMain?'entry_main_async':'entry_main_generator','error',asyncMain
-      ?'轻量 main 入口不能声明为 async；该宿主要求同步返回 JSON。'
-      :'轻量 main 入口不能声明为生成器；迭代器不是该入口需要的 JSON 结果。',entry.node,source);
-    return result(asyncMain?'local_async_declaration':'local_generator_declaration');
+  if(kind==='generator_callable') {
+    add('entry_main_generator','error','轻量main入口不能声明为生成器；迭代器不是JSON结果或其Promise。',entry.node,source);
+    return result('local_generator_declaration');
   }
   if(kind==='noncallable') {
     add('entry_main_noncallable','error','main 的静态声明是不可直接调用的值或 class。',entry.node,source);

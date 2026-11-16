@@ -1,4 +1,4 @@
-//! 无 UI 的只读文件元数据适配；本机安全检查留在 Windows 平台层独立复验。
+//! 无 UI 的文件元数据与字符串列表适配；文件系统安全检查留在平台层独立复验。
 use omnitrigger_actions::{ActionError, CancellationToken};
 use omnitrigger_windows::{
     read_local_directory_with_options, stat_local_path, DirectoryEntryType, DirectoryOrder,
@@ -314,3 +314,105 @@ fn read_directory_with(
 #[cfg(test)]
 #[path = "../../../tests/script_fs_read_directory.rs"]
 mod directory_tests;
+
+const LOGICAL_SORT_MAX_PATHS: usize = 1024;
+const LOGICAL_SORT_MAX_UTF16: usize = 32767;
+const LOGICAL_SORT_MAX_BYTES: usize = 64 * 1024;
+
+#[derive(Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct LogicalSortParams {
+    paths: Vec<String>,
+}
+
+// 只计数到上限，不为超大直接调用参数构造完整序列化副本。
+struct LogicalSortBudget(usize);
+impl std::io::Write for LogicalSortBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > LOGICAL_SORT_MAX_BYTES - self.0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "limit",
+            ));
+        }
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn logical_sort_error(code: &str) -> ActionError {
+    let (code, message) = match code {
+        "invalid_input" => ("invalid_input", "字符串列表排序参数无效或超过大小限制。"),
+        "cancelled" => ("cancelled", "动作已取消，未返回字符串列表排序结果。"),
+        "timeout" => ("timeout", "字符串列表排序超过动作运行时限。"),
+        _ => ("fs_unavailable", "本机字符串列表排序能力不可用。"),
+    };
+    let mut error = ActionError::new(code, message);
+    error.method = Some("fs.sort_logical_paths".into());
+    error.effect_state = Some("not_started".into());
+    error
+}
+
+pub fn sort_logical_paths(
+    params: Value,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+) -> Result<Value, ActionError> {
+    sort_logical_paths_with(params, cancellation, deadline, Instant::now, |paths| {
+        #[cfg(windows)]
+        {
+            Ok(omnitrigger_windows::sort_logical_paths(paths))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = paths;
+            Err(logical_sort_error("fs_unavailable"))
+        }
+    })
+}
+
+fn sort_logical_paths_with(
+    params: Value,
+    cancellation: &CancellationToken,
+    deadline: Instant,
+    now: impl Fn() -> Instant,
+    sort: impl FnOnce(&[String]) -> Result<Vec<String>, ActionError>,
+) -> Result<Value, ActionError> {
+    let check_state = || {
+        if cancellation.is_cancelled() {
+            Err(logical_sort_error("cancelled"))
+        } else if now() >= deadline {
+            Err(logical_sort_error("timeout"))
+        } else {
+            Ok(())
+        }
+    };
+    check_state()?;
+    if !params.is_object() {
+        return Err(logical_sort_error("invalid_input"));
+    }
+    let params: LogicalSortParams =
+        serde_json::from_value(params).map_err(|_| logical_sort_error("invalid_input"))?;
+    if params.paths.len() > LOGICAL_SORT_MAX_PATHS
+        || serde_json::to_writer(LogicalSortBudget(0), &params).is_err()
+        || params.paths.iter().any(|path| {
+            path.encode_utf16().take(LOGICAL_SORT_MAX_UTF16 + 1).count() > LOGICAL_SORT_MAX_UTF16
+        })
+    {
+        return Err(logical_sort_error("invalid_input"));
+    }
+    check_state()?;
+    let result = sort(&params.paths);
+    // 系统比较器不可抢占，但本API有界；取消或迟到结果不发布为成功。
+    check_state()?;
+    let paths = result.map_err(|error| logical_sort_error(&error.code))?;
+    Ok(json!(paths))
+}
+
+#[cfg(test)]
+#[path = "../../../tests/script_fs_logical_sort.rs"]
+mod logical_sort_tests;

@@ -3,6 +3,8 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowOperation {
     ToggleMaximize,
+    /// 显式请求正常显示，不激活、不按当前最大化状态切换。
+    Restore,
     ToggleTopmost,
     Minimize,
     /// 请求窗口按系统菜单“关闭”处理，等同 Alt+F4；应用可以询问保存或拒绝。
@@ -29,6 +31,7 @@ enum WindowCommand {
     SetTopmost(bool),
     Maximize,
     Restore,
+    RestoreNoActivate,
     Minimize,
     Close,
 }
@@ -45,6 +48,7 @@ fn plan(state: TargetState, operation: WindowOperation) -> Result<WindowCommand,
         return Err("目标窗口当前无法执行窗口动作。".into());
     }
     match operation {
+        WindowOperation::Restore => Ok(WindowCommand::RestoreNoActivate),
         WindowOperation::ToggleMaximize if state.maximized => Ok(WindowCommand::Restore),
         WindowOperation::ToggleMaximize if state.can_maximize => Ok(WindowCommand::Maximize),
         WindowOperation::Minimize if state.can_minimize => Ok(WindowCommand::Minimize),
@@ -99,7 +103,8 @@ pub(crate) fn perform_window_action_checked(
             IsWindowVisible, IsZoomed, PostMessageW, SetWindowPos, ShowWindowAsync, GA_ROOT,
             GWL_EXSTYLE, GWL_STYLE, HWND_NOTOPMOST, HWND_TOPMOST, SC_CLOSE, SWP_ASYNCWINDOWPOS,
             SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SW_MAXIMIZE, SW_MINIMIZE,
-            SW_RESTORE, WM_SYSCOMMAND, WS_EX_TOPMOST, WS_MAXIMIZEBOX, WS_MINIMIZEBOX,
+            SW_RESTORE, SW_SHOWNOACTIVATE, WM_SYSCOMMAND, WS_EX_TOPMOST, WS_MAXIMIZEBOX,
+            WS_MINIMIZEBOX,
         },
     };
     let hwnd = HWND(target.0 as *mut std::ffi::c_void);
@@ -165,6 +170,8 @@ pub(crate) fn perform_window_action_checked(
                 }
                 WindowCommand::Maximize => SW_MAXIMIZE,
                 WindowCommand::Restore => SW_RESTORE,
+                // 显式还原只请求正常显示，不激活；正常窗口重复调用也不会最大化。
+                WindowCommand::RestoreNoActivate => SW_SHOWNOACTIVATE,
                 WindowCommand::Minimize => SW_MINIMIZE,
             };
             unsafe { ShowWindowAsync(hwnd, command) }.as_bool()
@@ -656,5 +663,231 @@ mod topmost_tests {
         )
         .is_err());
         assert_eq!(calls.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn ready(maximized: bool) -> TargetState {
+        TargetState {
+            valid: true,
+            visible: true,
+            foreground: true,
+            top_level: true,
+            maximized,
+            // 显式还原不依赖最大化/最小化按钮能力。
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn restore_is_idempotent_for_normal_and_maximized_fixed_windows() {
+        for maximized in [false, true] {
+            assert_eq!(
+                plan(ready(maximized), WindowOperation::Restore).unwrap(),
+                WindowCommand::RestoreNoActivate
+            );
+        }
+    }
+
+    #[test]
+    fn restore_never_becomes_maximize_when_state_changes_before_submission() {
+        for initially_maximized in [false, true] {
+            let inspections = Cell::new(0);
+            let submissions = Cell::new(0);
+            perform_with(
+                WindowOperation::Restore,
+                || {
+                    let index = inspections.get();
+                    inspections.set(index + 1);
+                    ready(if index == 0 {
+                        initially_maximized
+                    } else {
+                        !initially_maximized
+                    })
+                },
+                |command| {
+                    assert_eq!(command, WindowCommand::RestoreNoActivate);
+                    submissions.set(submissions.get() + 1);
+                    true
+                },
+                || Ok(()),
+            )
+            .unwrap();
+            assert_eq!(inspections.get(), 2);
+            assert_eq!(submissions.get(), 1);
+        }
+    }
+
+    #[test]
+    fn restore_invalid_hidden_child_minimized_or_changed_target_never_submits() {
+        for state in [
+            TargetState::default(),
+            TargetState {
+                visible: false,
+                ..ready(true)
+            },
+            TargetState {
+                foreground: false,
+                ..ready(true)
+            },
+            TargetState {
+                top_level: false,
+                ..ready(true)
+            },
+            TargetState {
+                minimized: true,
+                ..ready(true)
+            },
+        ] {
+            assert!(perform_with(
+                WindowOperation::Restore,
+                || state,
+                |_| panic!("失效或失焦原目标不得提交还原"),
+                || Ok(()),
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn restore_checks_identity_cancel_and_deadline_at_every_existing_boundary() {
+        for stop in 1..=3 {
+            let checks = Cell::new(0);
+            assert!(perform_with(
+                WindowOperation::Restore,
+                || ready(true),
+                |_| panic!("守卫失败不得提交还原"),
+                || {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == stop {
+                        Err("守卫拒绝".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .is_err());
+            assert_eq!(checks.get(), stop);
+        }
+    }
+
+    #[test]
+    fn restore_native_rejection_is_returned_after_one_submission_without_retry() {
+        let submissions = Cell::new(0);
+        assert!(perform_with(
+            WindowOperation::Restore,
+            || ready(true),
+            |command| {
+                assert_eq!(command, WindowCommand::RestoreNoActivate);
+                submissions.set(submissions.get() + 1);
+                false
+            },
+            || Ok(()),
+        )
+        .is_err());
+        assert_eq!(submissions.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod captured_toggle_contract_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    fn ready(maximized: bool) -> TargetState {
+        TargetState {
+            valid: true,
+            visible: true,
+            foreground: true,
+            top_level: true,
+            maximized,
+            can_maximize: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn toggle_replans_from_the_second_inspection_and_keeps_all_pre_submit_guards() {
+        let reads = Cell::new(0);
+        let events = RefCell::new(Vec::new());
+        perform_with(
+            WindowOperation::ToggleMaximize,
+            || {
+                events.borrow_mut().push("inspect");
+                reads.set(reads.get() + 1);
+                ready(reads.get() == 2)
+            },
+            |command| {
+                events.borrow_mut().push("submit");
+                assert_eq!(command, WindowCommand::Restore);
+                true
+            },
+            || {
+                events.borrow_mut().push("guard");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            *events.borrow(),
+            ["guard", "inspect", "guard", "inspect", "guard", "submit"]
+        );
+        perform_with(
+            WindowOperation::ToggleMaximize,
+            || ready(false),
+            |command| command == WindowCommand::Maximize,
+            || Ok(()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn captured_toggle_never_submits_after_any_guard_or_foreground_boundary_fails() {
+        for boundary in 1..=3 {
+            let guards = Cell::new(0);
+            let submitted = Cell::new(false);
+            assert!(perform_with(
+                WindowOperation::ToggleMaximize,
+                || ready(false),
+                |_| {
+                    submitted.set(true);
+                    true
+                },
+                || {
+                    guards.set(guards.get() + 1);
+                    if guards.get() == boundary {
+                        Err("合成身份/租约/取消/期限守卫拒绝".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .is_err());
+            assert!(!submitted.get());
+        }
+        let reads = Cell::new(0);
+        let submitted = Cell::new(false);
+        assert!(perform_with(
+            WindowOperation::ToggleMaximize,
+            || {
+                reads.set(reads.get() + 1);
+                TargetState {
+                    foreground: reads.get() == 1,
+                    ..ready(false)
+                }
+            },
+            |_| {
+                submitted.set(true);
+                true
+            },
+            || Ok(()),
+        )
+        .is_err());
+        assert_eq!(reads.get(), 2);
+        assert!(!submitted.get());
     }
 }

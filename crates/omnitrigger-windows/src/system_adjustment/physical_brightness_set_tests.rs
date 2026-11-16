@@ -253,7 +253,16 @@ fn guard_cancels_between_members_without_second_native_read_or_retry() {
             Ok(())
         }
     });
-    assert!(result.is_err());
+    let members = result.unwrap();
+    assert_eq!(members.len(), 2);
+    assert!(matches!(
+        members[0].status,
+        PhysicalBrightnessStatus::Confirmed { requested: 45, .. }
+    ));
+    assert!(matches!(
+        members[1].status,
+        PhysicalBrightnessStatus::ReadRejected { .. }
+    ));
     assert_eq!(
         port.operations,
         vec![
@@ -273,4 +282,32 @@ fn guard_rejection_at_write_boundary_never_calls_native_set() {
     )
     .is_ok());
     assert_eq!(port.operations, vec![Operation::Read(0)]);
+}
+
+#[test]
+fn cancellation_after_set_retains_unknown_member_and_blocks_remaining_io() {
+    use std::cell::Cell;
+    let mut port = fake(vec![slot(vec![Ok(reading(0, 40, 100))]), slot(vec![])]);
+    let checks = Cell::new(0);
+    let members = step_members_if(&mut port, BrightnessStepDirection::Increase, &mut |_| {
+        checks.set(checks.get() + 1);
+        if checks.get() >= 5 {
+            Err(error())
+        } else {
+            Ok(())
+        }
+    })
+    .unwrap();
+    assert!(matches!(
+        members[0].status,
+        PhysicalBrightnessStatus::SetUnconfirmed { requested: 45, .. }
+    ));
+    assert!(matches!(
+        members[1].status,
+        PhysicalBrightnessStatus::ReadRejected { .. }
+    ));
+    assert_eq!(
+        port.operations,
+        vec![Operation::Read(0), Operation::Set(0, 45)]
+    );
 }

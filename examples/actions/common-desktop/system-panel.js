@@ -1,4 +1,4 @@
-/// <reference path="../../../tools/js-engine-probe/api.d.ts" />
+/// <reference path="./sdk/api.d.ts" />
 /** @type {ScriptMain} */
 function main(ctx) {
     if (!ctx.input || typeof ctx.input !== 'object' || Array.isArray(ctx.input)

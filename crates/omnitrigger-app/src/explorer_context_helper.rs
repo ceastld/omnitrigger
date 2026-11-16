@@ -19,6 +19,12 @@ struct Request {
     v: u8,
     budget_ms: u32,
     target: Value,
+    #[serde(
+        default,
+        deserialize_with = "explicit_selection_failure_stage",
+        skip_serializing_if = "is_false"
+    )]
+    selection_failure_stage: bool,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
@@ -46,9 +52,13 @@ pub(crate) fn fault(code: &str) -> ActionError {
     error.effect_state = Some("not_started".into());
     error
 }
-pub(crate) fn options(params: Value) -> Result<(), ActionError> {
+pub(crate) fn options(params: Value) -> Result<bool, ActionError> {
     if params.as_object().is_some_and(|params| params.is_empty()) {
-        Ok(())
+        Ok(false)
+    } else if params.as_object().is_some_and(|params| {
+        params.len() == 1 && params.get("selection_failure_stage") == Some(&Value::Bool(true))
+    }) {
+        Ok(true)
     } else {
         Err(fault("invalid_input"))
     }
@@ -130,6 +140,75 @@ pub(crate) fn read(
     crate::read_once_helper::check_live(target, token, end).map_err(fault)?;
     Ok(value)
 }
+#[cfg(any(windows, test))]
+const SELECTION_FAILURE_STAGE: &str = "selection_unavailable_after_directory";
+fn explicit_selection_failure_stage<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<bool, D::Error> {
+    if bool::deserialize(deserializer)? {
+        Ok(true)
+    } else {
+        Err(serde::de::Error::custom(
+            "selection_failure_stage 只允许 true；默认应省略",
+        ))
+    }
+}
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+#[cfg(any(windows, test))]
+fn decode_selection_failure_stage(
+    captured: omnitrigger_windows::ProcessCaptureResult,
+    expected: &Value,
+) -> Result<Value, ActionError> {
+    if captured.code == 0 && captured.stderr.is_empty() && captured.stdout.len() <= MAX_REPLY {
+        if let Ok(Reply::Error { v: 1, code }) = serde_json::from_str::<Reply>(&captured.stdout) {
+            if code == SELECTION_FAILURE_STAGE {
+                return Err(fault(SELECTION_FAILURE_STAGE));
+            }
+        }
+    }
+    // 所有旧结果及坏回执沿用原解码，默认解码器仍拒绝新码。
+    decode(captured, expected)
+}
+#[cfg(any(windows, test))]
+fn finish_selection_failure_stage(
+    result: Result<Value, ActionError>,
+    check_live: impl FnOnce() -> Result<(), &'static str>,
+) -> Result<Value, ActionError> {
+    if result.is_ok()
+        || result
+            .as_ref()
+            .is_err_and(|error| error.code == SELECTION_FAILURE_STAGE)
+    {
+        check_live().map_err(fault)?;
+    }
+    result
+}
+#[cfg(windows)]
+pub(crate) fn read_with_selection_failure_stage(
+    target: &omnitrigger_windows::ScriptTarget,
+    token: &CancellationToken,
+    deadline: Option<Instant>,
+    selection_failure_stage: bool,
+) -> Result<Value, ActionError> {
+    if !selection_failure_stage {
+        return read(target, token, deadline);
+    }
+    let (captured, expected, end) = crate::read_once_helper::capture(
+        target,
+        token,
+        deadline,
+        FLAG,
+        "explorer",
+        fault,
+        |target, budget_ms| json!({"v":1,"budget_ms":budget_ms,"target":target,"selection_failure_stage":true}),
+    )?;
+    finish_selection_failure_stage(decode_selection_failure_stage(captured, &expected), || {
+        crate::read_once_helper::check_live(target, token, end)
+    })
+}
+
 fn parse(args: &[String]) -> Option<Result<Request, ()>> {
     if !args.iter().skip(1).any(|arg| {
         arg == FLAG
@@ -188,7 +267,13 @@ fn child(request: Request) -> Reply {
     let Ok(target) = omnitrigger_windows::ScriptTarget::from_snapshot(snapshot) else {
         return fail("target_changed");
     };
-    match target.read_explorer_context_if(Instant::now() + Duration::from_millis(budget)) {
+    let deadline = Instant::now() + Duration::from_millis(budget);
+    let result = if request.selection_failure_stage {
+        target.read_explorer_context_with_selection_failure_stage_if(deadline)
+    } else {
+        target.read_explorer_context_if(deadline)
+    };
+    match result {
         Ok(value) => Reply::Ok {
             v: 1,
             target: request.target,
@@ -313,6 +398,147 @@ mod tests {
         assert!(parse(&["self.exe".into(), format!("{FLAG}=bad")])
             .unwrap()
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod selection_failure_stage_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn target() -> Value {
+        json!({"window_handle":"101","process_id":10,"thread_id":11,"process_created_file_time":"123","expires_at_unix_ms":1000})
+    }
+    fn captured(value: Value) -> omnitrigger_windows::ProcessCaptureResult {
+        omnitrigger_windows::ProcessCaptureResult {
+            code: 0,
+            stdout: value.to_string(),
+            stderr: String::new(),
+        }
+    }
+    fn stage_error() -> Value {
+        json!({"v":1,"status":"error","code":SELECTION_FAILURE_STAGE})
+    }
+    #[test]
+    fn private_wire_rejects_explicit_false_or_malformed_opt_in() {
+        for value in [
+            json!(false),
+            json!(null),
+            json!(1),
+            json!("true"),
+            json!([]),
+        ] {
+            let request =
+                json!({"v":1,"target":target(),"budget_ms":1000,"selection_failure_stage":value});
+            assert!(serde_json::from_value::<Request>(request.clone()).is_err());
+            assert!(
+                parse(&["self.exe".into(), FLAG.into(), request.to_string()])
+                    .unwrap()
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn native_options_accept_only_empty_default_or_exact_true_opt_in() {
+        assert!(!options(json!({})).unwrap());
+        assert!(options(json!({"selection_failure_stage":true})).unwrap());
+        for params in [
+            json!({"selection_failure_stage":false}),
+            json!({"selection_failure_stage":null}),
+            json!({"selection_failure_stage":1}),
+            json!({"selection_failure_stage":"true"}),
+            json!({"selection_failure_stage":true,"hwnd":"101"}),
+            json!({"selectionFailureStage":true}),
+        ] {
+            assert_eq!(options(params).unwrap_err().code, "invalid_input");
+        }
+        let value = json!({"v":1,"target":target(),"budget_ms":1000});
+        let default: Request = serde_json::from_value(value.clone()).unwrap();
+        assert!(!default.selection_failure_stage);
+        assert_eq!(serde_json::to_value(default).unwrap(), value);
+        let mut opted = value;
+        opted["selection_failure_stage"] = json!(true);
+        let decoded: Request = serde_json::from_value(opted.clone()).unwrap();
+        assert!(decoded.selection_failure_stage);
+        assert_eq!(serde_json::to_value(decoded).unwrap(), opted);
+    }
+    #[test]
+    fn default_decoder_rejects_new_code_and_opt_in_still_rejects_bad_envelopes() {
+        assert_eq!(
+            decode(captured(stage_error()), &target()).unwrap_err().code,
+            "invalid_response"
+        );
+        let error = decode_selection_failure_stage(captured(stage_error()), &target()).unwrap_err();
+        assert_eq!(error.code, SELECTION_FAILURE_STAGE);
+        assert_eq!(error.method.as_deref(), Some("explorer.context"));
+        assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        let mut extra = stage_error();
+        extra["current_directory"] = json!("D:\\fixture");
+        let mut bad_version = stage_error();
+        bad_version["v"] = json!(2);
+        for value in [extra, bad_version] {
+            assert_eq!(
+                decode_selection_failure_stage(captured(value), &target())
+                    .unwrap_err()
+                    .code,
+                "invalid_response"
+            );
+        }
+        let mut bad_process = captured(stage_error());
+        bad_process.stderr = "synthetic".into();
+        assert_eq!(
+            decode_selection_failure_stage(bad_process, &target())
+                .unwrap_err()
+                .code,
+            "explorer_helper_failed"
+        );
+        let success = json!({"v":1,"status":"ok","target":target(),"current_directory":"D:\\fixture","selected_paths":[]});
+        assert_eq!(
+            decode_selection_failure_stage(captured(success.clone()), &target()).unwrap(),
+            decode(captured(success), &target()).unwrap()
+        );
+        assert_eq!(
+            decode_selection_failure_stage(
+                captured(json!({"v":1,"status":"error","code":"selection_unavailable"})),
+                &target()
+            )
+            .unwrap_err()
+            .code,
+            "selection_unavailable"
+        );
+    }
+    #[test]
+    fn parent_live_check_overrides_stage_proof_but_keeps_ordinary_failures() {
+        for code in ["cancelled", "timeout", "target_changed"] {
+            let calls = Cell::new(0);
+            let error = finish_selection_failure_stage(Err(fault(SELECTION_FAILURE_STAGE)), || {
+                calls.set(calls.get() + 1);
+                Err(code)
+            })
+            .unwrap_err();
+            assert_eq!(calls.get(), 1);
+            assert_eq!(error.code, code);
+        }
+        let calls = Cell::new(0);
+        let error = finish_selection_failure_stage(Err(fault(SELECTION_FAILURE_STAGE)), || {
+            calls.set(calls.get() + 1);
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(error.code, SELECTION_FAILURE_STAGE);
+        assert_eq!(calls.get(), 1);
+        let error = finish_selection_failure_stage(Err(fault("selection_unavailable")), || {
+            panic!("普通错误不可新加复核")
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "selection_unavailable");
+        let value = finish_selection_failure_stage(
+            Ok(json!({"currentDirectory":null,"selectedPaths":[]})),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(value, json!({"currentDirectory":null,"selectedPaths":[]}));
     }
 }
 

@@ -75,7 +75,14 @@ test('同步入口不会把Promise回执冒充完成',()=>{
 });
 test('新增动作和inspect示例保留旧动作身份与契约',()=>{
   const manifest=JSON.parse(readFileSync(new URL('action.json',import.meta.url),'utf8'));
-  assert.equal(manifest.version,'1.1.0');assert.equal(manifest.actions.length,4);
+  assert.equal(manifest.version,'1.2.0');assert.equal(manifest.actions.length,5);
+  assert.deepEqual(manifest.actions.map(action=>[action.id,action.entry,action.runtime,action.version,action.single_instance]),[
+    ['inspect-or-send','main.mjs','node',1,true],
+    ['inspect-or-send-script','main-script.mjs','script',1,true],
+    ['select-or-send','select.mjs','node',1,true],
+    ['select-or-send-script','select-script.mjs','script',1,true],
+    ['session-step-script','session-step-script.mjs','script',1,false],
+  ]);
   for(const name of ['select-call.json','select-script-call.json']) {
     const call=JSON.parse(readFileSync(new URL(name,import.meta.url),'utf8'));
     const action=manifest.actions.find(a=>a.id===call.action_id);

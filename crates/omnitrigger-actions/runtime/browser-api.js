@@ -1,5 +1,5 @@
 // 运行时共用的浏览器 API；调用适配器决定同步或 Promise 返回。
-function createBrowserApi(invoke, wrap = fn => fn) {
+function createBrowserApi(invoke, wrap = fn => fn, invokeAsync) {
   function invalid(code, message, method) {
     throw Object.assign(new Error(message), {code, effectState:'not_started', method:typeof method === 'string' && method.length <= 256 ? method : 'browser.call'});
   }
@@ -43,7 +43,7 @@ function createBrowserApi(invoke, wrap = fn => fn) {
     seen.delete(value);
     return copy;
   }
-  const call = wrap((method, args = [], options = {}) => {
+  function callThrough(dispatch, method, args = [], options = {}) {
     if (typeof method !== 'string' || method.length > 256 || method.startsWith('chrome.')
         || !/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+$/.test(method)
         || method.split('.').some(part => ['__proto__','prototype','constructor'].includes(part))) {
@@ -52,8 +52,24 @@ function createBrowserApi(invoke, wrap = fn => fn) {
     if (!Array.isArray(args)) invalid('invalid_request','浏览器 args 必须为 JSON 数组。',method);
     const snapshotOptions = optionsFor(options,method);
     const snapshotArgs = jsonArgument(args,method);
-    return invoke(method,snapshotArgs,snapshotOptions,false);
-  });
+    return dispatch(method,snapshotArgs,snapshotOptions,false);
+  }
+  const call = wrap((method, args = [], options = {}) => callThrough(invoke,method,args,options));
+  function asyncDispatch(method, args, options, profiles) {
+    if (typeof invokeAsync !== 'function') {
+      invalid('unsupported_runtime_feature','此宿主未配置异步浏览器能力。',profiles ? 'browser.profiles' : method);
+    }
+    const result = invokeAsync(method,args,options,profiles);
+    // 回调必须是真正的异步通道；工厂绝不调用同步invoke作为回退。
+    if (!result || typeof result.then !== 'function') {
+      throw Object.assign(new Error('异步浏览器适配器未返回Promise。'), {
+        code:'invalid_response',effectState:'unknown',method:profiles ? 'browser.profiles' : method,
+      });
+    }
+    return result;
+  }
+  const callAsync = async (method, args = [], options = {}) => callThrough(asyncDispatch,method,args,options);
+  const profilesAsync = async (options = {}) => asyncDispatch(undefined,undefined,optionsFor(options,'browser.profiles'),true);
   function chrome(parts = []) {
     return new Proxy(function () {}, {
       get(_target, name) {
@@ -63,7 +79,7 @@ function createBrowserApi(invoke, wrap = fn => fn) {
       apply(_target, _this, args) { return call(parts.join('.'),args); },
     });
   }
-  return Object.freeze({call,profiles:wrap((options = {}) => {
+  return Object.freeze({call,callAsync,profilesAsync,profiles:wrap((options = {}) => {
     return invoke(undefined,undefined,optionsFor(options,'browser.profiles'),true);
   }),chrome:chrome()});
 }

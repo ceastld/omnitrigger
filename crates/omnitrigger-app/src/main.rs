@@ -2,6 +2,7 @@
 
 mod action_library;
 mod action_packages;
+mod action_state_store;
 mod action_target_context;
 mod adjustment_guard;
 mod app_sets;
@@ -66,6 +67,7 @@ mod private_window_station;
 mod process_capture_host;
 mod profiles;
 mod radial_wheel;
+mod raishot_result_host;
 #[cfg(windows)]
 mod read_once_helper;
 mod scenes;
@@ -1330,7 +1332,7 @@ impl Workspace {
             package_input,
             package_picker_for_draft: false,
             action_service: if mode.owns_input_engine() {
-                action_packages::service(&settings::path())
+                action_packages::owner_service(&settings::path())
             } else {
                 omnitrigger_actions::ActionService::new(
                     omnitrigger_actions::PackageCatalog::default(),
@@ -2360,7 +2362,7 @@ impl Workspace {
                 return Ok(TriggerSpec {
                     conditions: self.condition_editor.conditions(cx)?,
                     ..base.clone()
-                })
+                });
             }
         };
         let activation = if self.trigger_mode == TriggerMode::Hold {
@@ -8497,7 +8499,7 @@ fn smoke_test(wheel_input_policy: WheelInputPolicy) -> Result<(), String> {
                     && snapshot.foreground_process.is_some()
                     && snapshot.foreground_window_role != omnitrigger_core::WindowRole::Unknown =>
             {
-                break
+                break;
             }
             Ok(BackendEvent::Error(error)) => return Err(error),
             _ => {}
@@ -8509,7 +8511,9 @@ fn smoke_test(wheel_input_policy: WheelInputPolicy) -> Result<(), String> {
     }
     backend.send(BackendCommand::SetEnabled(false))?;
     drop(backend);
-    println!("OmniTrigger 开发检查：键盘/鼠标 Hook 已安装并正常卸载；应用/指针窗口范围、Shell 上下文、专用/保留层、重复、上下文终止键、捕获匹配、鼠标引导引用、无控制键鼠标及逐事件修饰快照注册有效；前台与指针进程/窗口角色已在 Hook 外解析。本检查不注入输入，未验证物理触发效果。");
+    println!(
+        "OmniTrigger 开发检查：键盘/鼠标 Hook 已安装并正常卸载；应用/指针窗口范围、Shell 上下文、专用/保留层、重复、上下文终止键、捕获匹配、鼠标引导引用、无控制键鼠标及逐事件修饰快照注册有效；前台与指针进程/窗口角色已在 Hook 外解析。本检查不注入输入，未验证物理触发效果。"
+    );
     Ok(())
 }
 
@@ -8665,11 +8669,13 @@ fn main() {
         }
         return;
     }
-    if let Some(code) = explorer_context_helper::cli(&arguments) {
-        std::process::exit(code);
-    }
-    if let Some(code) = selected_text_helper::cli(&arguments) {
-        std::process::exit(code);
+    if !action_target_context::action_cli_requested(&arguments) {
+        if let Some(code) = explorer_context_helper::cli(&arguments) {
+            std::process::exit(code);
+        }
+        if let Some(code) = selected_text_helper::cli(&arguments) {
+            std::process::exit(code);
+        }
     }
     // 配置档参数先于其他入口取出：确定数据根、处理打包重定向，配置档命令在此退出。
     let (profile_startup, _profile_in_use) = profiles::startup(&mut arguments);
@@ -9101,9 +9107,12 @@ fn main() {
                     view
                 },
             );
-            if let Err(error) = result {
-                eprintln!("无法启动 OmniTrigger 界面：{error}");
-                cx.quit();
+            match result {
+                Ok(handle) => script_ui::attach_workspace(handle),
+                Err(error) => {
+                    eprintln!("无法启动 OmniTrigger 界面：{error}");
+                    cx.quit();
+                }
             }
             if !preserve_foreground && !start_in_tray {
                 cx.activate(true);

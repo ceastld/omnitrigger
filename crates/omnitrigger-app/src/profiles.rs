@@ -1859,10 +1859,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
         exit_rejected("--tray 只用于启动日常工作区。");
     }
     // 打开配置档可能创建测试档或发布中断的副本，先拒绝无效的动作命令。
-    if arguments
-        .iter()
-        .any(|arg| crate::action_target_context::is_action_argument(arg))
-    {
+    if crate::action_target_context::action_cli_requested(arguments) {
         crate::action_target_context::validate_cli(arguments)
             .unwrap_or_else(|error| crate::reject_cli_arguments(&error));
     }

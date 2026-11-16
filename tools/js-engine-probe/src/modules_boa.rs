@@ -126,7 +126,7 @@ pub fn entry(
         PromiseState::Pending => {
             return Err(fault(
                 "module_pending",
-                "模块初始化仍在等待 Promise；宿主没有异步事件循环。",
+                "模块初始化存在未完成的顶层 Promise；异步本机等待仅支持 main(ctx)。",
                 "unknown",
             ))
         }
@@ -138,7 +138,7 @@ pub fn entry(
         return Err(fault(
             "module_entry",
             format!(
-                "{}：模块入口须具名导出同步函数 main(ctx)。",
+                "{}：模块入口须具名导出函数 main(ctx)。",
                 loader.package.entry.display()
             ),
             "unknown",

@@ -1,4 +1,4 @@
-/// <reference path="../../../tools/js-engine-probe/api.d.ts" />
+/// <reference path="./sdk/script-types.d.ts" />
 /** @param {ScriptContext} ctx */
 function main(ctx) {
     const waitMs = ctx.input.waitMs === undefined ? 80 : ctx.input.waitMs;
