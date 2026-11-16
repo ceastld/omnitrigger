@@ -180,6 +180,8 @@ jobs:
             if ($round -eq 1) {
               $custom = & $exe --profile-create daily-copy --seed copy:default --name '日常配置副本' | ConvertFrom-Json
               if ($LASTEXITCODE -or $custom.status -ne 'created') { throw '安装版创建同名自建档失败。' }
+              $other = & $exe --profile-create wheel-lab --seed empty --name '日常配置副本' | ConvertFrom-Json
+              if ($LASTEXITCODE -or $other.status -ne 'created' -or $other.id -ceq $custom.id) { throw '第二份同名测试档登记失败。' }
               $origin = Join-Path $data "profiles/$($custom.id).copy-origin.json"
               if ((Get-Content -LiteralPath $origin -Raw | ConvertFrom-Json) -cne 'custom') { throw '同名自建档来源登记有误。' }
               $expected[$origin] = (Get-FileHash -LiteralPath $origin).Hash
@@ -204,6 +206,11 @@ jobs:
               $all = & $exe --profile-list | ConvertFrom-Json
               $customAfter = @($all.profiles | Where-Object { $_.alias -ceq 'daily-copy' })
               if ($LASTEXITCODE -or $customAfter.Count -ne 1 -or $customAfter[0].id -cne $custom.id) { throw '重装后同名自建档的登记身份不符。' }
+              $env:OMNITRIGGER_QA_PROFILE_ROOT = $data
+              $env:OMNITRIGGER_QA_INSTALLED_EXE = $exe
+              $env:OMNITRIGGER_QA_NAMED_ID = $custom.id
+              cargo test --locked -p omnitrigger-app --bin omnitrigger profiles::saved_profiles::tests::reopen_installed_profile_from_settings_selection -- --ignored --exact
+              if ($LASTEXITCODE) { throw '从设置的测试档列表重新打开安装版窗口失败。' }
               $saved = @($all.profiles | Where-Object { $_.alias -ceq 'restored-edit' -and $_.seed -ceq 'backup:default:1:current' })
               if ($LASTEXITCODE -or $saved.Count -ne 1 -or $saved[0].id -cne $restored.id) { throw '重装后恢复副本的登记身份不符。' }
               $start = [Diagnostics.ProcessStartInfo]::new($exe)

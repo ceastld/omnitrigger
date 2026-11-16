@@ -1,5 +1,5 @@
 //! 设置页提供外观选择和应用更新。
-use crate::{appearance::Mode, caption, card, heading, icon, theme, Workspace};
+use crate::{appearance::Mode, caption, card, heading, icon, profiles, theme, Workspace};
 use gpui::{div, prelude::*, px, Context, Div, FontWeight, Window};
 
 fn preview(dark: bool) -> Div {
@@ -28,6 +28,12 @@ fn preview(dark: bool) -> Div {
         )
 }
 
+enum TestProfileAction {
+    List,
+    DailyCopy,
+    Open(profiles::SavedTestProfile),
+}
+
 impl Workspace {
     pub(super) fn open_edit_history(&mut self, cx: &mut Context<Self>) {
         let config = crate::settings::path();
@@ -47,8 +53,13 @@ impl Workspace {
         .detach();
     }
 
-    fn open_test_copy(&mut self, cx: &mut Context<Self>) {
-        if self.opening_test_copy || self.test_data {
+    fn select_test_profile(&mut self, action: TestProfileAction, cx: &mut Context<Self>) {
+        if self.test_profiles_busy || self.test_data {
+            return;
+        }
+        self.test_profiles_error = None;
+        if matches!(action, TestProfileAction::List) && self.saved_test_profiles.take().is_some() {
+            cx.notify();
             return;
         }
         let config = crate::settings::path();
@@ -59,28 +70,46 @@ impl Workspace {
             root
         }
         .to_owned();
-        self.opening_test_copy = true;
-        self.test_copy_error = None;
+        let list_visible = self.saved_test_profiles.is_some();
+        self.test_profiles_busy = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { crate::profiles::open_daily_test_copy(&root) })
+                .spawn(async move {
+                    match action {
+                        TestProfileAction::List => profiles::saved_test_profiles(&root).map(Some),
+                        TestProfileAction::DailyCopy => {
+                            profiles::open_daily_test_copy(&root)?;
+                            if list_visible {
+                                profiles::saved_test_profiles(&root).map(Some)
+                            } else {
+                                Ok(None)
+                            }
+                        }
+                        TestProfileAction::Open(selected) => selected.open().map(|()| None),
+                    }
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.opening_test_copy = false;
-                this.test_copy_error = result.err();
+                this.test_profiles_busy = false;
+                match result {
+                    Ok(Some(items)) => this.saved_test_profiles = Some(items),
+                    Ok(None) => {}
+                    Err(error) => this.test_profiles_error = Some(error),
+                }
                 cx.notify();
             });
         })
         .detach();
     }
 
-    fn render_test_copy(&self, cx: &mut Context<Self>) -> Div {
-        let label = if self.opening_test_copy {
-            "正在打开…"
+    fn render_test_profiles(&self, can_copy: bool, cx: &mut Context<Self>) -> Div {
+        let enabled = !self.test_profiles_busy;
+        let list_label = if self.saved_test_profiles.is_some() {
+            "收起测试档"
         } else {
-            "打开测试副本"
+            "查看已有测试档"
         };
         card()
             .p(px(18.))
@@ -100,19 +129,91 @@ impl Workspace {
                             .child("测试配置"),
                     )
                     .child(
-                        theme::button(
-                            "open-test-copy",
-                            label,
-                            theme::Tone::Primary,
-                            !self.opening_test_copy,
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| this.open_test_copy(cx))),
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(8.))
+                            .child(
+                                theme::button(
+                                    "list-test-profiles",
+                                    list_label,
+                                    theme::Tone::Secondary,
+                                    enabled,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.select_test_profile(TestProfileAction::List, cx)
+                                    },
+                                )),
+                            )
+                            .when(can_copy, |el| {
+                                el.child(
+                                    theme::button(
+                                        "open-test-copy",
+                                        "打开测试副本",
+                                        theme::Tone::Primary,
+                                        enabled,
+                                    )
+                                    .on_click(cx.listener(
+                                        |this, _, _, cx| {
+                                            this.select_test_profile(
+                                                TestProfileAction::DailyCopy,
+                                                cx,
+                                            )
+                                        },
+                                    )),
+                                )
+                            }),
                     ),
             )
-            .child(caption(
-                "首次复制已保存的热键、轮盘和动作。之后打开同一副本，保留测试修改。",
-            ))
-            .when_some(self.test_copy_error.clone(), |el, error| {
+            .when(can_copy, |el| {
+                el.child(caption(
+                    "首次复制已保存的热键、轮盘和动作。之后打开同一副本，保留测试修改。",
+                ))
+            })
+            .when_some(self.saved_test_profiles.as_ref(), |el, items| {
+                el.when(items.is_empty(), |el| {
+                    el.child(caption("当前数据目录还没有测试档。"))
+                })
+                .children(items.iter().enumerate().map(|(i, profile)| {
+                    let selected = profile.clone();
+                    let (name, alias) = profile.labels();
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(div().truncate().child(name.to_owned()))
+                                .when(name != alias, |el| el.child(caption(alias.to_owned()))),
+                        )
+                        .child(
+                            theme::button(
+                                ("open-test-profile", i),
+                                "打开",
+                                theme::Tone::Secondary,
+                                enabled,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.select_test_profile(
+                                        TestProfileAction::Open(selected.clone()),
+                                        cx,
+                                    )
+                                },
+                            )),
+                        )
+                }))
+            })
+            .when(self.test_profiles_busy, |el| {
+                el.child(caption("正在读取配置档…"))
+            })
+            .when_some(self.test_profiles_error.clone(), |el, error| {
                 el.child(caption(error).text_color(theme::rgb(theme::DANGER)))
             })
     }
@@ -136,11 +237,12 @@ impl Workspace {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let test_copy = (!self.test_data
-            && crate::settings::path()
+        let test_profiles = (!self.test_data).then(|| {
+            let can_copy = crate::settings::path()
                 .file_name()
-                .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json")))
-        .then(|| self.render_test_copy(cx));
+                .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json"));
+            self.render_test_profiles(can_copy, cx)
+        });
         let choices = Mode::ALL.into_iter().enumerate().map(|(index, mode)| {
             let selected = self.theme_mode == mode;
             card()
@@ -191,7 +293,7 @@ impl Workspace {
         div().id("appearance-settings").flex_1().min_w_0().h_full().overflow_y_scroll()
             .child(div().pt(px(6.)).pb(px(24.)).pl(px(20.)).pr(px(24.)).flex().flex_col().gap(px(24.))
                 .child(heading("设置", format!("{} · Windows x64 预览版", crate::BUILD_LABEL)))
-                .children(test_copy)
+                .children(test_profiles)
                 .child(self.render_backup_settings(cx))
                 .child(div().flex().flex_col().gap(px(14.))
                     .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("颜色主题"))

@@ -1,7 +1,7 @@
 //! 读取当前配置直接恢复出的测试档。原版本清理后，副本仍可按登记身份打开。
 use super::{
-    backup_source, catalog_path, lock_catalog, open_test_profile, profile_dir, read_catalog,
-    relative_age, source_dir, Catalog, Entry, Seed, DEFAULT_ID,
+    backup_source, catalog_path, open_test_profile, profile_dir, read_catalog, relative_age,
+    saved_profiles::prepare_test_open, Catalog, Entry, Seed, DEFAULT_ID,
 };
 use std::path::{Path, PathBuf};
 
@@ -50,23 +50,11 @@ impl RestoredCopy {
 
     /// 列表可能已经过时。重读登记，以原 ID 唤回复用窗口；中断的目录交换沿用启动恢复。
     fn prepare_to_open(&self) -> Result<(), String> {
-        if !crate::local_files::is_plain_directory(&self.root) {
-            return Err("恢复副本的数据根不可用。请重新查看已有副本。".into());
-        }
-        crate::script_runtime::check_local_path(&catalog_path(&self.root))?;
-        let _lock = lock_catalog(&self.root)?;
-        let catalog = read_catalog(&self.root)?;
-        let alias = source_alias(&catalog, &self.source_id)?;
-        let entry = catalog
-            .source_profile(&self.id)
-            .filter(|entry| {
-                entry.id == self.id
-                    && entry.created_ms == self.created_ms
-                    && revisions_for_source(entry, &self.source_id, alias).is_some()
-            })
-            .ok_or("这个恢复副本的登记已变更。请重新查看已有副本。")?;
-        source_dir(&self.root, &catalog, &entry.id)?;
-        Ok(())
+        prepare_test_open(&self.root, &self.id, |catalog, entry| {
+            let alias = source_alias(catalog, &self.source_id)?;
+            Ok(entry.created_ms == self.created_ms
+                && revisions_for_source(entry, &self.source_id, alias).is_some())
+        })
     }
 
     pub(crate) fn open(&self) -> Result<(), String> {

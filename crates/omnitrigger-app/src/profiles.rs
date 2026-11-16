@@ -14,9 +14,11 @@ use serde::{Deserialize, Serialize};
 mod external_import;
 mod reset_recovery;
 mod restored_copies;
+mod saved_profiles;
 #[cfg(windows)]
 pub(super) use external_import::recover as recover_external_import;
 pub(super) use restored_copies::{saved_backup_copies, RestoredCopy};
+pub(super) use saved_profiles::{saved_test_profiles, SavedTestProfile};
 #[cfg(not(windows))]
 use std::fs::rename as move_profile_directory;
 
@@ -1414,6 +1416,14 @@ pub(super) fn create_backup_copy(
 
 pub(super) fn open_test_profile(root: &Path, key: &str) -> Result<(), String> {
     let program = std::env::current_exe().map_err(|error| error.to_string())?;
+    spawn_test_profile(&program, root, key).map(drop)
+}
+
+fn spawn_test_profile(
+    program: &Path,
+    root: &Path,
+    key: &str,
+) -> Result<std::process::Child, String> {
     let mut launch = std::process::Command::new(program);
     launch
         .arg("--data-root")
@@ -1425,8 +1435,7 @@ pub(super) fn open_test_profile(root: &Path, key: &str) -> Result<(), String> {
         .env_remove("OMNITRIGGER_UPDATE_ERROR");
     launch
         .spawn()
-        .map_err(|error| format!("无法启动测试窗口：{error}"))?;
-    Ok(())
+        .map_err(|error| format!("无法启动测试窗口：{error}"))
 }
 
 fn insert_profile(
