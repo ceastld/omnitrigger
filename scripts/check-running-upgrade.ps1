@@ -716,10 +716,15 @@ try {
     [IO.File]::WriteAllText($actionFile, '{"package_id":"examples.n10-rust","action_id":"toggle","action_version":1}')
     $buildLabel = "OmniTrigger $($appFile.VersionInfo.ProductVersion.TrimEnd())"
     if ([OmniTriggerUpgradeWindow]::TrayBuildLabel($appFile.FullName) -cne $buildLabel) { throw '托盘提示与已安装程序的产品版本不符。' }
-    foreach ($flag in '--version', '--build-version', '--help', '--check-confg', '--list-package-actions', '--check-action') {
+    $unusedData = Join-Path $probe.FullName '尚未创建的测试数据'
+    foreach ($flag in '--version', '--build-version', '--help', '--check-confg', '--list-package-actions', '--check-action', '--install-script-runtime') {
         $query = New-AppStart
+        if ($flag -eq '--install-script-runtime') {
+            foreach ($arg in '--data-root', $unusedData, '--test-workspace') { $query.ArgumentList.Add($arg) }
+        }
         $query.ArgumentList.Add($flag)
         if ($flag -eq '--check-action') { $query.ArgumentList.Add($actionFile) }
+        if ($flag -eq '--install-script-runtime') { $query.ArgumentList.Add('missing-hash.zip') }
         $query.CreateNoWindow = $true
         $query.RedirectStandardOutput = $true
         $query.RedirectStandardError = $true
@@ -729,10 +734,12 @@ try {
             $stdout = $child.StandardOutput.ReadToEndAsync()
             $stderr = $child.StandardError.ReadToEndAsync()
             if (-not $child.WaitForExit(10000)) { throw "$flag 未在后台退出。" }
-            if ($flag -eq '--check-confg') {
+            if ($flag -in '--check-confg', '--install-script-runtime') {
                 $receipt = $stderr.Result | ConvertFrom-Json
                 if ($child.ExitCode -ne 1 -or $stdout.Result -ne '' -or $receipt.error.code -ne 'invalid_cli_arguments' -or
                     $receipt.error.message -notlike "*$flag*") { throw "$flag 未返回具体参数错误。" }
+                if ($flag -eq '--install-script-runtime' -and
+                    ($receipt.error.effect_state -ne 'not_started' -or (Test-Path -LiteralPath $unusedData))) { throw '缺少摘要的安装命令创建了测试档或未确认拒绝执行。' }
             } else {
                 if ($child.ExitCode -ne 0 -or $stderr.Result -ne '' -or
                     ($flag -eq '--version' -and $stdout.Result.Trim() -cne "OmniTrigger $ExpectedVersion") -or

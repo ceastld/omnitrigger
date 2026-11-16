@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import {execFile, spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
+import {cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync} from 'node:fs';
 import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {promisify} from 'node:util';
@@ -105,6 +105,45 @@ for (const args of [
 ]) assert.equal(cli(args,1).error.code,'invalid_cli_arguments');
 assert(!existsSync(join(root,'actions/forbidden')));
 checks.push('invalid_CLI_rejected_before_side_effects');
+
+const profileRoot = join(root, 'action-profiles');
+const newTest = ['--data-root',profileRoot,'--test-workspace'];
+for (const args of [
+  ['--install-script-runtime',development.archive],
+  ['--create-script-action'],
+  ['--run-action',''],
+  ['--stream-action-events'],
+  ['--target-context','target.json'],
+  ['--check-action'],
+  ['--list-package-actions','--create-script-action','forbidden'],
+]) {
+  const {error} = cli(args,1,newTest);
+  assert.equal(error.code,'invalid_cli_arguments');
+  assert.equal(error.effect_state,'not_started');
+  assert(!existsSync(profileRoot));
+}
+
+const selected = ['--data-root',profileRoot,'--profile','pending'];
+const {directory} = cli(['--profile-create','pending','--seed','empty'],0,['--data-root',profileRoot]);
+const staged = directory + '.creating';
+renameSync(directory,staged);
+const identity = readFileSync(join(staged,'profile.json'));
+const catalogBefore = readFileSync(join(profileRoot,'profiles.json'));
+for (const profileArgs of [selected, ['--config',join(directory,'bindings.json')]]) {
+  const {error} = cli(['--run-action','call.json','--target-context'],1,profileArgs);
+  assert.equal(error.code,'invalid_cli_arguments');
+  assert.equal(error.effect_state,'not_started');
+  assert(!existsSync(directory));
+  assert.deepEqual(readFileSync(join(staged,'profile.json')),identity);
+  assert.deepEqual(readFileSync(join(profileRoot,'profiles.json')),catalogBefore);
+}
+const recovered = cli(['--create-script-action','profile-only'],0,selected);
+assert(existsSync(recovered.project.entry_path));
+assert(existsSync(join(directory,'actions/profile-only/action.json')));
+assert(!existsSync(staged));
+assert(!existsSync(join(profileRoot,'actions/profile-only')));
+checks.push('invalid_action_arguments_preserve_new_and_pending_profiles');
+
 assert.equal(install(development.archive,1,'0'.repeat(64)).error.code,'runtime_install_failed');
 
 const damaged = variant('damaged',folder=>writeFileSync(join(folder,'sdk/api.d.ts'),'changed'));

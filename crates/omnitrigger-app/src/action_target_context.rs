@@ -3,23 +3,28 @@ use omnitrigger_windows::ScriptTargetSnapshot;
 use serde::{Deserialize, Serialize};
 use std::{io::Read, path::Path, time::SystemTime};
 
+fn is_action_command(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--check-action"
+            | "--run-action"
+            | "--list-package-actions"
+            | "--create-script-action"
+            | "--install-script-runtime"
+    )
+}
+
+pub fn is_action_argument(flag: &str) -> bool {
+    is_action_command(flag) || matches!(flag, "--target-context" | "--stream-action-events")
+}
+
 pub fn validate_cli(arguments: &[String]) -> Result<(), String> {
     let mut index = usize::from(arguments.first().is_some_and(|arg| !arg.starts_with("--")));
     let mut seen = std::collections::BTreeSet::new();
     while index < arguments.len() {
         let flag = arguments[index].as_str();
-        if !matches!(
-            flag,
-            "--config"
-                | "--check-action"
-                | "--run-action"
-                | "--target-context"
-                | "--list-package-actions"
-                | "--create-script-action"
-                | "--install-script-runtime"
-                | "--sha256"
-                | "--stream-action-events"
-        ) || !seen.insert(flag)
+        if !(is_action_argument(flag) || matches!(flag, "--config" | "--sha256"))
+            || !seen.insert(flag)
         {
             return Err(format!("动作命令含未知或重复参数：{flag}"));
         }
@@ -29,7 +34,7 @@ pub fn validate_cli(arguments: &[String]) -> Result<(), String> {
         }
         if arguments
             .get(index + 1)
-            .is_none_or(|value| value.starts_with("--"))
+            .is_none_or(|value| value.is_empty() || value.starts_with("--"))
         {
             return Err(if flag == "--create-script-action" {
                 "--create-script-action 后需要工程标识。".into()
@@ -39,16 +44,7 @@ pub fn validate_cli(arguments: &[String]) -> Result<(), String> {
         }
         index += 2;
     }
-    let commands = [
-        "--check-action",
-        "--run-action",
-        "--list-package-actions",
-        "--create-script-action",
-        "--install-script-runtime",
-    ]
-    .iter()
-    .filter(|flag| seen.contains(**flag))
-    .count();
+    let commands = seen.iter().filter(|flag| is_action_command(flag)).count();
     if commands != 1 {
         return Err(
             "需要且只能指定一次 --check-action、--run-action、--list-package-actions、--create-script-action 或 --install-script-runtime。".into(),

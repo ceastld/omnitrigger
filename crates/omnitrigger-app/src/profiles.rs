@@ -1858,13 +1858,17 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     if tray && (parsed.test_workspace || parsed.listen || parsed.command.is_some()) {
         exit_rejected("--tray 只用于启动日常工作区。");
     }
-    let inspect_actions = arguments
+    // 打开配置档可能创建测试档或发布中断的副本，先拒绝无效的动作命令。
+    if arguments
         .iter()
-        .any(|arg| matches!(arg.as_str(), "--list-package-actions" | "--check-action"));
-    if inspect_actions {
+        .any(|arg| crate::action_target_context::is_action_argument(arg))
+    {
         crate::action_target_context::validate_cli(arguments)
             .unwrap_or_else(|error| crate::reject_cli_arguments(&error));
     }
+    let inspect_actions = arguments
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--list-package-actions" | "--check-action"));
     let check_only = config_check_requested(arguments)
         .unwrap_or_else(|error| finish_command(Err(error), parsed.result_file.as_deref()))
         || inspect_actions;
