@@ -528,6 +528,32 @@ fn join_arguments(arguments: &[String]) -> String {
         .join(" ")
 }
 
+/// Restart Manager 使用自己的工作目录和环境，恢复日常监听时显式选回原配置。
+#[cfg(windows)]
+pub(super) fn set_update_restart(config: &Path, listening: bool) -> Result<(), String> {
+    use windows::{
+        core::HSTRING,
+        Win32::System::Recovery::{
+            RegisterApplicationRestart, UnregisterApplicationRestart, RESTART_NO_CRASH,
+            RESTART_NO_HANG, RESTART_NO_REBOOT,
+        },
+    };
+    let result = if listening {
+        let path = std::path::absolute(config).map_err(|error| error.to_string())?;
+        let path = path.to_str().ok_or("无法把当前配置路径传给 Windows。")?;
+        let args = join_arguments(&["--tray".into(), "--config".into(), path.into()]);
+        unsafe {
+            RegisterApplicationRestart(
+                &HSTRING::from(args),
+                RESTART_NO_CRASH | RESTART_NO_HANG | RESTART_NO_REBOOT,
+            )
+        }
+    } else {
+        unsafe { UnregisterApplicationRestart() }
+    };
+    result.map_err(|error| format!("无法更新 Windows 的覆盖安装恢复登记：{error}"))
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Catalog {
@@ -2683,6 +2709,51 @@ mod tests {
         assert_eq!(
             join_arguments(&["--profile".into(), "ui".into(), r"C:\x y".into()]),
             r#"--profile ui "C:\x y""#
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn update_restart_registers_the_selected_tray_config_and_can_be_withdrawn() {
+        use windows::{
+            core::PWSTR,
+            Win32::System::{
+                Recovery::GetApplicationRestartSettings, Threading::GetCurrentProcess,
+            },
+        };
+        let config = Path::new(r"C:\测试 日常档\bindings.json");
+        set_update_restart(config, true).unwrap();
+        let mut text = [0u16; 1024];
+        let mut size = text.len() as u32;
+        let mut flags = 0;
+        let settings = unsafe {
+            GetApplicationRestartSettings(
+                GetCurrentProcess(),
+                Some(PWSTR(text.as_mut_ptr())),
+                &mut size,
+                Some(&mut flags),
+            )
+        };
+        set_update_restart(config, false).unwrap();
+        settings.unwrap();
+        let end = text.iter().position(|unit| *unit == 0).unwrap();
+        assert_eq!(
+            String::from_utf16(&text[..end]).unwrap(),
+            r#"--tray --config "C:\测试 日常档\bindings.json""#
+        );
+        assert_eq!(flags, 0x0b);
+        size = text.len() as u32;
+        let result = unsafe {
+            GetApplicationRestartSettings(
+                GetCurrentProcess(),
+                Some(PWSTR(text.as_mut_ptr())),
+                &mut size,
+                Some(&mut flags),
+            )
+        };
+        assert_eq!(
+            result.unwrap_err().code(),
+            windows::Win32::Foundation::ERROR_NOT_FOUND.to_hresult()
         );
     }
 

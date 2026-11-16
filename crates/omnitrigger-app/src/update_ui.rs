@@ -9,6 +9,8 @@ pub(super) struct UpdateUi {
     status: String,
     failed: bool,
     schedule: updater::CheckSchedule,
+    #[cfg(windows)]
+    restart_requested: bool,
 }
 
 impl UpdateUi {
@@ -67,10 +69,35 @@ impl Workspace {
         cx.notify();
     }
 
+    #[cfg(windows)]
+    pub(super) fn sync_update_restart(&mut self, cx: &mut Context<Self>) {
+        if self.legacy_close_requested {
+            // 正常关停时为收尾临时暂停输入，保留安装器关闭窗口前的登记。
+            return;
+        }
+        let listening = self.workspace_instance.is_some()
+            && self.tray_window.is_some()
+            && self.ready
+            && !self.paused
+            && !self.test_data;
+        if listening == self.update_ui.restart_requested {
+            return;
+        }
+        // 系统调用只在监听状态改变时发生。失败也不在界面轮询中反复登记。
+        self.update_ui.restart_requested = listening;
+        if let Err(error) = crate::profiles::set_update_restart(&crate::settings::path(), listening)
+        {
+            self.error = Some(error);
+            cx.notify();
+        }
+    }
+
     pub(super) fn poll_update(&mut self, cx: &mut Context<Self>) -> bool {
         if self.test_data {
             return false;
         }
+        #[cfg(windows)]
+        self.sync_update_restart(cx);
         // 首个成功打开窗口且输入后端就绪的版本才允许更新器删除备份。
         if self.ready {
             updater::mark_healthy();

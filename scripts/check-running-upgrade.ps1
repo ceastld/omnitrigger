@@ -29,6 +29,17 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 public static class OmniTriggerUpgradeWindow {
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)]
+    private static extern int GetApplicationRestartSettings(IntPtr process, StringBuilder arguments, ref uint size, out uint flags);
+    public static string UpdateRestartCommand(Process process) {
+        var text = new StringBuilder(1024);
+        uint size = (uint)text.Capacity, flags;
+        int status = GetApplicationRestartSettings(process.Handle, text, ref size, out flags);
+        if (status == unchecked((int)0x80070490)) return null;
+        Marshal.ThrowExceptionForHR(status);
+        if (flags != 0x0b) throw new Exception("日常实例应只登记更新后的恢复。");
+        return text.ToString();
+    }
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     private static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
     [DllImport("kernel32.dll")] private static extern bool FreeLibrary(IntPtr module);
@@ -574,6 +585,7 @@ foreach ($entry in 'config', 'data-root', 'env') {
         while ($timer.Elapsed.TotalSeconds -lt 2 -and -not (Test-Path -LiteralPath $testHealth)) {
             Start-Sleep -Milliseconds 100
         }
+        if ([OmniTriggerUpgradeWindow]::UpdateRestartCommand($testUi)) { throw "通过 $entry 打开的测试档登记了更新后的自动启动。" }
         if (Test-Path -LiteralPath $testHealth) { throw "通过 $entry 打开的测试档误确认了安装版更新。" }
         if (-not [OmniTriggerUpgradeWindow]::PostMessage($testWindow, 0x0010, [UIntPtr]::Zero, [IntPtr]::Zero)) {
             throw "通过 $entry 打开的测试窗口未收到关闭消息。"
@@ -761,15 +773,67 @@ try {
 }
 
 $takeover = New-AppStart
-$takeoverRoot = New-Item -ItemType Directory -Path (Join-Path $probe.FullName 'listener-takeover')
+$takeoverRoot = New-Item -ItemType Directory -Path (Join-Path $probe.FullName '日常 listener-takeover')
+$takeoverBindings = Join-Path $takeoverRoot.FullName 'bindings.json'
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../examples/mouse-tab-navigation.json') -Destination $takeoverBindings
+$bindingsHash = (Get-FileHash -LiteralPath $takeoverBindings).Hash
 $takeover.Environment['OMNITRIGGER_HOME'] = $takeoverRoot.FullName
 $takeoverHealth = Join-Path $takeoverRoot.FullName 'healthy'
 $takeover.Environment['OMNITRIGGER_UPDATE_HEALTH'] = $takeoverHealth
 $next = [Diagnostics.Process]::Start($takeover)
+$resumed = $null
+$shows = $null
 try {
-    $null = Wait-AppWindow $next $takeoverHealth 'OmniTrigger'
+    $window = Close-ToTray $next $takeoverHealth
     Write-Host '已验证日常托盘监听不会被测试档抢占，旧进程退出后其他配置可正常监听。'
-} finally { Stop-TestProcess $next }
+    $expectedArgs = '--tray --config "' + $takeoverBindings + '"'
+    if ([OmniTriggerUpgradeWindow]::UpdateRestartCommand($next) -cne $expectedArgs) {
+        throw '运行中的日常监听没有登记原配置的托盘启动参数。'
+    }
+    # Windows 对自动重启有最短运行时间要求。
+    while (([DateTime]::Now - $next.StartTime).TotalSeconds -lt 65) {
+        Start-Sleep -Milliseconds 500
+        if ($next.HasExited) { throw '覆盖安装前日常实例意外退出。' }
+    }
+    $shows = [OmniTriggerUpgradeWindow+WindowShows]::new()
+    $started = [DateTime]::Now
+    $normal = [Diagnostics.ProcessStartInfo]::new($setupFile.FullName)
+    $normal.UseShellExecute = $false
+    $normalLog = Join-Path $probe.FullName 'restart-manager-install.log'
+    foreach ($arg in @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$($appFile.DirectoryName)", "/LOG=$normalLog")) {
+        $normal.ArgumentList.Add($arg)
+    }
+    $installer = [Diagnostics.Process]::Start($normal)
+    try {
+        if (-not $installer.WaitForExit(120000)) { $installer.Kill($true); throw '普通覆盖安装超时。' }
+        if ($installer.ExitCode -ne 0 -or -not $next.WaitForExit(10000)) { throw '普通覆盖安装未正常替换旧进程。' }
+    } finally { $installer.Dispose() }
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        if (-not $resumed) {
+            $instances = @(Get-Process -Name $appFile.BaseName -ErrorAction SilentlyContinue | Where-Object {
+                $_.Path -eq $appFile.FullName -and $_.Id -ne $next.Id -and $_.StartTime -ge $started
+            })
+            if ($instances.Count -gt 1) { throw '普通覆盖安装启动了多个日常实例。' }
+            $resumed = $instances | Select-Object -First 1
+        }
+        if ($resumed -and [OmniTriggerUpgradeWindow]::UpdateRestartCommand($resumed) -ceq $expectedArgs) { break }
+        Start-Sleep -Milliseconds 150
+    } while ($timer.Elapsed.TotalSeconds -lt 45)
+    if (-not $resumed -or [OmniTriggerUpgradeWindow]::UpdateRestartCommand($resumed) -cne $expectedArgs) {
+        Select-String -LiteralPath $normalLog -Pattern 'Restart Manager|restart.*application' | ForEach-Object Line
+        throw '普通覆盖安装后，原数据目录的日常监听没有恢复。'
+    }
+    if ((Get-FileHash -LiteralPath $takeoverBindings).Hash -cne $bindingsHash) { throw '恢复监听时原热键配置发生了变化。' }
+    $hidden = [OmniTriggerUpgradeWindow]::FindAppWindow($resumed.Id, 'OmniTrigger', $false)
+    if ($hidden -eq [IntPtr]::Zero -or [OmniTriggerUpgradeWindow]::IsWindowVisible($hidden) -or
+        $shows.WasShown($window) -or $shows.WasShown($hidden)) { throw '自动恢复期间日常主窗口曾弹出。' }
+    Write-Host '已验证普通静默覆盖安装后，Windows 在原配置目录恢复了托盘监听。'
+} finally {
+    if ($resumed) { Stop-TestProcess $resumed }
+    if ($shows) { $shows.Dispose() }
+    Stop-TestProcess $next
+}
 
 foreach ($restart in '更新成功', '更新回滚', '托盘更新成功', '托盘更新回滚', '手动打开设置', '主窗口打开设置', '设置返回主窗口') {
     $start = New-AppStart

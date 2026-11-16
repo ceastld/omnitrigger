@@ -1524,6 +1524,8 @@ impl Workspace {
         let paused = !self.paused;
         if self.send(BackendCommand::SetEnabled(!paused)) {
             self.paused = paused;
+            #[cfg(windows)]
+            self.sync_update_restart(cx);
             if paused {
                 self.hide_wheel(cx);
             }

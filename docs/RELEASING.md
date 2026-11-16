@@ -29,7 +29,9 @@ git diff --check
 
 运行 `omnitrigger.exe --build-version` 可以在后台核对该程序文件的产品版本。安装器和程序文件的“属性 → 详细信息 → 产品版本”也显示这一值。`--version` 继续输出应用版本号。
 
-要在安装完成后直接恢复日常热键监听，可给安装器传入 `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /STARTINTRAY=1`。新版从托盘启动，用开始菜单或托盘图标可以打开同一窗口。已安装的程序也支持 `omnitrigger.exe --tray`，重复运行会沿用现有日常实例。后台启动会跳过外部副本提示，下一次正常启动仍可处理该副本。
+日常工作区的监听就绪后会向 Windows 登记原配置文件。普通覆盖安装若通过 Restart Manager 关闭这个实例，Windows 会按原路径从托盘恢复监听。暂停监听会撤销登记，恢复监听后重新登记。测试档独立运行。Windows 要求进程已运行至少 60 秒才会自动重启。[Windows 应用重启说明](https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-registerapplicationrestart)
+
+首次安装、从尚未支持登记的旧版升级，或需要直接启动安装器所选的日常档时，可传入 `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NORESTARTAPPLICATIONS /STARTINTRAY=1`。这会由安装器启动一次托盘入口。开始菜单或托盘图标可以打开同一窗口。已安装的程序也支持 `omnitrigger.exe --tray`，重复运行会沿用现有日常实例。后台启动会跳过外部副本提示，下一次正常启动仍可处理该副本。
 
 要在以后每次登录 Windows 时启动日常监听，可在安装器中勾选“登录 Windows 时在托盘启动 OmniTrigger”。安装器会把带 `--tray` 参数的快捷方式放进当前用户的启动文件夹。静默安装可用 `/MERGETASKS=logintray` 开启，或用 `/MERGETASKS=!logintray` 关闭。省略参数会沿用上一次安装的选择。全新安装默认关闭，卸载会移除该启动项。
 
