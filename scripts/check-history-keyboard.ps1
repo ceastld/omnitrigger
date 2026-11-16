@@ -85,7 +85,9 @@ try {
         Write-Host '此会话未授予专用输入框系统前台。已验证安装版启动并读取独立历史；按键和选择由 GPUI 窗口验收验证。'
     }
     if ((Get-FileHash -LiteralPath $history).Hash -cne $originalHash) { throw '键盘浏览和发送改变了历史文件。' }
-    if (!$app.CloseMainWindow() -or !$app.WaitForExit(20000) -or $app.ExitCode) { throw '独立历史窗口未正常退出。' }
+    [HistoryKeyboardCheck]::Press($hwnd, 0x1B, 0x01, $false)
+    if (!$app.WaitForExit(20000) -or $app.ExitCode) { throw '按 Esc 后独立历史窗口未正常退出。' }
+    if ((Get-FileHash -LiteralPath $history).Hash -cne $originalHash) { throw '关闭窗口改变了历史文件。' }
 } finally {
     if ($app) {
         if (!$app.HasExited) { $app.Kill(); [void]$app.WaitForExit(10000) }

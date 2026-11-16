@@ -1,7 +1,10 @@
 //! 仅向本次创建的 GPUI 窗口投递 Win32 键盘消息，无需系统前台或全局输入。
 use super::ClipboardHistoryUi;
 use crate::{clipboard_history_send::HistoryLaunchTarget, wheels::tests::Scratch, Workspace};
-use gpui::{AppContext, Application, AsyncApp, WindowHandle};
+use gpui::{
+    AppContext, Application, AsyncApp, EntityInputHandler, Focusable, KeyDownEvent, Keystroke,
+    WindowHandle,
+};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{
     fs,
@@ -10,7 +13,9 @@ use std::{
 };
 use windows::Win32::{
     Foundation::{HWND, LPARAM, WPARAM},
-    UI::WindowsAndMessaging::{PostMessageW, WM_KEYDOWN, WM_KEYUP},
+    UI::WindowsAndMessaging::{
+        PeekMessageW, PostMessageW, MSG, PM_NOREMOVE, WM_CLOSE, WM_KEYDOWN, WM_KEYUP,
+    },
 };
 
 fn post_key(hwnd: HWND, vk: usize, scan: u32, down: bool) -> Result<(), String> {
@@ -100,6 +105,73 @@ async fn exercise(window: WindowHandle<Workspace>, cx: &mut AsyncApp) -> Result<
             ui.state.message == Some("原窗口身份已变化或无法核验，请从原窗口重新打开文本历史。")
                 && ui.state.selected.as_deref() == Some("1")
         },
+    )
+    .await?;
+
+    window
+        .update(cx, |v, w, cx| {
+            v.text_history.search.read(cx).focus_handle(cx).focus(w);
+        })
+        .map_err(|e| e.to_string())?;
+    cx.update_window(window.into(), |_, w, cx| w.draw(cx).clear())
+        .map_err(|e| e.to_string())?;
+    for (key, held, composing) in [
+        ("ctrl-escape", false, false),
+        ("escape", true, false),
+        ("escape", false, true),
+    ] {
+        if composing {
+            window
+                .update(cx, |v, w, cx| {
+                    v.text_history.search.update(cx, |input, cx| {
+                        input.replace_and_mark_text_in_range(None, "拼", None, w, cx);
+                    });
+                })
+                .map_err(|e| e.to_string())?;
+        }
+        let closing = window
+            .update(cx, |view, w, cx| {
+                view.dismiss_history_on_escape(
+                    &KeyDownEvent {
+                        keystroke: Keystroke::parse(key).unwrap(),
+                        is_held: held,
+                    },
+                    w,
+                    cx,
+                );
+                // 处理后直接查看本窗消息队列，避免用延时猜测 Esc 是否误发关闭请求。
+                unsafe {
+                    PeekMessageW(
+                        &mut MSG::default(),
+                        Some(hwnd),
+                        WM_CLOSE,
+                        WM_CLOSE,
+                        PM_NOREMOVE,
+                    )
+                    .as_bool()
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        if closing {
+            return Err(format!(
+                "筛选框误收起窗口：{key}，重复={held}，组字={composing}"
+            ));
+        }
+    }
+    window
+        .update(cx, |v, w, cx| {
+            v.text_history
+                .search
+                .update(cx, |input, cx| input.unmark_text(w, cx));
+        })
+        .map_err(|e| e.to_string())?;
+    post_key(hwnd, 0x1b, 0x01, true)?;
+    post_key(hwnd, 0x1b, 0x01, false)?;
+    wait_for(
+        window,
+        cx,
+        "筛选框按 Esc 后未进入弹窗关闭流程",
+        ClipboardHistoryUi::popup_close_ready,
     )
     .await
 }

@@ -341,12 +341,7 @@ impl ClipboardHistoryUi {
             self.enter_send.cancel();
             return false;
         }
-        let modifiers = &event.keystroke.modifiers;
-        let modified = modifiers.shift
-            || modifiers.control
-            || modifiers.alt
-            || modifiers.platform
-            || modifiers.function;
+        let modified = event.keystroke.modifiers.modified();
         if modified || event.keystroke.key != "enter" || !event.is_held {
             self.enter_send.cancel();
         }
@@ -382,12 +377,7 @@ impl ClipboardHistoryUi {
             return false;
         }
         let owned_press = self.enter_send.is_armed();
-        let modifiers = &event.keystroke.modifiers;
-        let modified = modifiers.shift
-            || modifiers.control
-            || modifiers.alt
-            || modifiers.platform
-            || modifiers.function;
+        let modified = event.keystroke.modifiers.modified();
         let allowed = self.list_focus.is_focused(window)
             && !modified
             && self.state.can_send()
@@ -758,6 +748,48 @@ fn run_worker(
 }
 
 impl super::Workspace {
+    #[cfg(windows)]
+    fn dismiss_history_on_escape(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use gpui::Focusable;
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows::Win32::{
+            Foundation::HWND,
+            UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE},
+        };
+
+        if event.keystroke.key != "escape" || event.keystroke.modifiers.modified() || event.is_held
+        {
+            return;
+        }
+        let input = self.text_history.search.read(cx);
+        if input.focus_handle(cx).is_focused(window) && input.is_composing() {
+            return;
+        }
+        cx.stop_propagation();
+        // 与点击本窗的关闭按钮共用收尾逻辑。动作弹窗由主进程回收，独立进程自行退出。
+        let posted = match HasWindowHandle::window_handle(&*window).map(|handle| handle.as_raw()) {
+            Ok(RawWindowHandle::Win32(handle)) => unsafe {
+                PostMessageW(
+                    Some(HWND(handle.hwnd.get() as _)),
+                    WM_CLOSE,
+                    Default::default(),
+                    Default::default(),
+                )
+                .is_ok()
+            },
+            _ => false,
+        };
+        if !posted {
+            self.text_history.state.message = Some("未能关闭历史窗口，请点击标题栏的关闭按钮。");
+            cx.notify();
+        }
+    }
+
     pub(super) fn render_text_history(&self, cx: &mut Context<Self>) -> Div {
         let state = &self.text_history.state;
         let subtitle = match state.phase {
@@ -836,8 +868,12 @@ impl super::Workspace {
                 },
             )));
         }
-        div()
-            .flex_1()
+        let page = div();
+        #[cfg(windows)]
+        let page = page.when(self.mode.history_only(), |el| {
+            el.on_key_down(cx.listener(Self::dismiss_history_on_escape))
+        });
+        page.flex_1()
             .min_w_0()
             .h_full()
             .pt(px(6.))
@@ -1001,9 +1037,11 @@ impl super::Workspace {
                 element.child(super::caption(message))
             })
             .child(super::caption(self.text_history.sending.status()))
-            .child(super::caption(
-                "点击列表后：↑↓ / Home / End 选择，Enter 发送选中项。",
-            ))
+            .child(super::caption(if self.mode.history_only() {
+                "↑↓ / Home / End 选择，Enter 发送选中项，Esc 关闭窗口。"
+            } else {
+                "点击列表后：↑↓ / Home / End 选择，Enter 发送选中项。"
+            }))
             .child(list)
     }
 }

@@ -110,6 +110,10 @@ impl MessageInput {
         self.content.to_string()
     }
 
+    pub(super) fn is_composing(&self) -> bool {
+        self.marked.is_some()
+    }
+
     pub fn set_placeholder(&mut self, text: impl Into<SharedString>) {
         self.placeholder = text.into();
     }
