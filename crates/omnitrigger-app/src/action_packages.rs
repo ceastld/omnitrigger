@@ -352,10 +352,11 @@ pub fn cli(
             })
             .transpose()
             .map_err(target_error)?;
-        service.validate(&call).map_err(rejected)?;
         if check.is_some() {
+            service.check_availability(&call).map_err(rejected)?;
             return Ok(serde_json::json!({"valid":true,"call":call}).to_string());
         }
+        service.validate(&call).map_err(rejected)?;
         let invocation_id = match explicit_host {
             Some(host) => {
                 let target = host.choice_target();
@@ -399,7 +400,7 @@ impl Workspace {
             Ok(ClipboardRoute::WorkspaceHistory) => None,
             Ok(ClipboardRoute::Package) => self.legacy_unavailable_reason(call).or_else(|| {
                 self.action_service
-                    .validate(call)
+                    .check_availability(call)
                     .err()
                     .map(|error| error.to_string())
             }),

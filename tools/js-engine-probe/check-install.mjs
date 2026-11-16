@@ -126,16 +126,6 @@ for (const [archive,reason] of [[damaged,/文件校验失败/],[wrongEngine,/自
 assert(!readdirSync(join(root,'runtimes/script'),{recursive:true}).some(name=>basename(name)==='outside.txt'));
 checks.push('hash_layout_duplicate_identity_and_startup_failures_preserve_active_host');
 
-const changed = Buffer.from(originalHost);
-changed[changed.length-1] ^= 1;
-try {
-  writeFileSync(firstHost,changed);
-  const failure = cli(['--run-action',project.call_path],1);
-  assert.equal(failure.error.code,'runtime_integrity');
-  assert.equal(failure.error.effect_state,'not_started');
-} finally { writeFileSync(firstHost,originalHost); }
-checks.push('same_size_installed_image_tampering_rejected_before_execution');
-
 const legacyHost=join(root,'runtimes/script/host.exe');
 cpSync(firstHost,legacyHost,{errorOnExist:true});
 try {
@@ -151,6 +141,29 @@ const nodeArgs = ['--run-action',join(jsonPackage,'call.json')];
 const copy = cli(['--profile-create','runtime-copy','--seed','copy:default'],0,['--data-root',root]);
 const copiedArgs = ['--data-root',root,'--profile','runtime-copy'];
 assert(!existsSync(join(copy.directory,'runtimes')));
+const runtimeProfiles = [['--config',config],copiedArgs];
+const changed = Buffer.from(originalHost);
+changed[changed.length-1] ^= 1;
+try {
+  writeFileSync(firstHost,changed);
+  for (const profileArgs of runtimeProfiles) {
+    const checked = cli(['--check-action',project.call_path],1,profileArgs);
+    assert.equal(checked.error.code,'runtime_integrity');
+    assert.equal(checked.error.effect_state,'not_started');
+    const catalog = cli(['--list-package-actions'],0,profileArgs);
+    const row = catalog.actions.find(({call}) => call.package_id === project.call.package_id && call.action_id === project.call.action_id);
+    assert.equal(row.reference_error.code,'runtime_integrity');
+  }
+  const failure = cli(['--run-action',project.call_path],1);
+  assert.equal(failure.status,'failed');
+  assert.equal(failure.error.code,'runtime_integrity');
+  assert.equal(failure.error.effect_state,'not_started');
+} finally { writeFileSync(firstHost,originalHost); }
+for (const profileArgs of runtimeProfiles) {
+  assert.equal(cli(['--check-action',project.call_path],0,profileArgs).valid,true);
+}
+checks.push('same_size_installed_image_tampering_rejected_before_execution');
+checks.push('catalog_and_check_report_damaged_managed_host_in_daily_and_copy');
 assert.equal(cli(['--run-action',project.call_path],0,copiedArgs).output.text,'OmniTrigger');
 const copiedPackage = join(copy.directory,'actions','installed-script');
 const copiedManifest = JSON.parse(readFileSync(join(copiedPackage,'action.json'),'utf8'));

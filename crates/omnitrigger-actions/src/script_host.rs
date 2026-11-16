@@ -172,6 +172,10 @@ impl ScriptHostRuntime {
 }
 
 impl ActionRuntime for ScriptHostRuntime {
+    fn check_installation(&self) -> Result<(), ActionError> {
+        self.checked_program().map(drop)
+    }
+
     fn execute(
         &self,
         action: &ResolvedAction,

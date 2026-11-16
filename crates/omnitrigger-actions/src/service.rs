@@ -56,6 +56,11 @@ impl CancellationToken {
 
 /// 业务执行适配点。实现负责其自身阻塞调用、输出上限以及取消收尾。
 pub trait ActionRuntime: Send + Sync {
+    /// 构建动作目录时检查本机运行时；不启动进程或执行业务脚本。
+    fn check_installation(&self) -> Result<(), ActionError> {
+        Ok(())
+    }
+
     fn execute(
         &self,
         action: &ResolvedAction,
@@ -76,7 +81,12 @@ pub trait ActionRuntime: Send + Sync {
 
 #[derive(Default)]
 pub struct RuntimeRegistry {
-    entries: BTreeMap<String, Arc<dyn ActionRuntime>>,
+    entries: BTreeMap<String, RegisteredRuntime>,
+}
+
+struct RegisteredRuntime {
+    runtime: Arc<dyn ActionRuntime>,
+    installation: Result<(), ActionError>,
 }
 
 impl RuntimeRegistry {
@@ -98,12 +108,19 @@ impl RuntimeRegistry {
                 format!("运行时 {id} 已注册。"),
             ));
         }
-        self.entries.insert(id.into(), runtime);
+        let installation = runtime.check_installation();
+        self.entries.insert(
+            id.into(),
+            RegisteredRuntime {
+                runtime,
+                installation,
+            },
+        );
         Ok(())
     }
 
-    fn get(&self, id: &str) -> Result<Arc<dyn ActionRuntime>, ActionError> {
-        self.entries.get(id).cloned().ok_or_else(|| {
+    fn get(&self, id: &str) -> Result<&RegisteredRuntime, ActionError> {
+        self.entries.get(id).ok_or_else(|| {
             ActionError::new(
                 "runtime_unavailable",
                 format!("未注册动作运行时 {id}，原调用已保留。"),
@@ -285,7 +302,7 @@ impl ActionService {
                         action_version: entry.definition.version,
                         input: serde_json::json!({}),
                     };
-                    let reference_error = self.validate(&call).err();
+                    let reference_error = self.check_availability(&call).err();
                     ActionCatalogDescription {
                         call,
                         package_name: entry.package_name.clone(),
@@ -301,9 +318,17 @@ impl ActionService {
     }
 
     pub fn validate(&self, call: &ActionCall) -> Result<(), ActionError> {
-        let resolved = self.catalog.resolve(call)?;
-        self.runtimes.get(&resolved.definition.runtime)?;
-        Ok(())
+        self.registered_runtime(call).map(|_| ())
+    }
+
+    /// 目录、热键和轮盘共用一次加载时的检查结果，渲染每条绑定时不重复读宿主映像。
+    pub fn check_availability(&self, call: &ActionCall) -> Result<(), ActionError> {
+        self.registered_runtime(call)?.installation.clone()
+    }
+
+    fn registered_runtime(&self, call: &ActionCall) -> Result<&RegisteredRuntime, ActionError> {
+        self.runtimes
+            .get(&self.catalog.resolve(call)?.definition.runtime)
     }
 
     pub fn submit(&self, id: u64, call: ActionCall) -> Result<u64, ActionError> {
@@ -329,7 +354,7 @@ impl ActionService {
         spawn: impl FnOnce(thread::Builder, Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
     ) -> Result<u64, ActionError> {
         let action = self.catalog.resolve(&call)?;
-        let runtime = self.runtimes.get(&action.definition.runtime)?;
+        let runtime = Arc::clone(&self.runtimes.get(&action.definition.runtime)?.runtime);
         let identity = ActionIdentity {
             package_id: action.call.package_id.clone(),
             action_id: action.call.action_id.clone(),
