@@ -126,7 +126,7 @@ mod tests {
         save_editor_file(&wheels, Some(&format!("{WHEELS}\n")), WHEELS.as_bytes()).unwrap();
         assert_refused("轮盘的第 1 份备份内容已变化");
         fs::write(&wheel_backup, WHEELS).unwrap();
-        let (_, backup) = reset_profile(&root, "trial").unwrap();
+        let backup = reset_profile(&root, "trial").unwrap().backup;
         assert_eq!(
             fs::read(backup.unwrap().join("bindings.json")).unwrap(),
             b"test edit"

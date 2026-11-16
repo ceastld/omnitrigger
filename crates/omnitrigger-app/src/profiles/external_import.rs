@@ -804,7 +804,9 @@ mod tests {
         assert_eq!(fs::read(edits.join("bindings.json")).unwrap(), b"test edit");
         drop(writer);
 
-        let (returned, backup) = reset_profile(&root, "work").unwrap();
+        let reset = reset_profile(&root, "work").unwrap();
+        let returned = reset.entry;
+        let backup = reset.backup;
         assert_eq!(returned, child);
         assert_eq!(
             fs::read(backup.unwrap().join("bindings.json")).unwrap(),
@@ -883,7 +885,7 @@ mod tests {
             b"test edit"
         );
         drop(writer);
-        let (_, backup) = reset_profile(root, "restored").unwrap();
+        let backup = reset_profile(root, "restored").unwrap().backup;
         assert_eq!(
             fs::read(backup.unwrap().join("bindings.json")).unwrap(),
             b"test edit"

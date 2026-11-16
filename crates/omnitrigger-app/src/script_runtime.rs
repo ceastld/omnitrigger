@@ -298,7 +298,7 @@ pub(super) fn locate_in_profile(config: &Path) -> Result<Option<Installed>, Stri
     Ok(None)
 }
 
-fn locate_managed(root: &Path) -> Result<Option<Installed>, String> {
+fn active_pointer(root: &Path) -> Result<Option<Pointer>, String> {
     let current = root.join("current.json");
     check_local_path(&current)?;
     if !current.try_exists().map_err(|error| error.to_string())? {
@@ -312,6 +312,13 @@ fn locate_managed(root: &Path) -> Result<Option<Installed>, String> {
     {
         return Err("宿主激活指针无效，未回退到旧解释器。".into());
     }
+    Ok(Some(pointer))
+}
+
+fn locate_managed(root: &Path) -> Result<Option<Installed>, String> {
+    let Some(pointer) = active_pointer(root)? else {
+        return Ok(None);
+    };
     let package = root.join("packages").join(&pointer.archive_sha256);
     check_local_path(&package)?;
     let (parsed, digest) = manifest(&package.join("manifest.json"))?;
@@ -332,6 +339,50 @@ fn locate_managed(root: &Path) -> Result<Option<Installed>, String> {
         program,
         integrity: Some((image.sha256, image.size)),
     }))
+}
+
+/// 重置数据时只沿用本档已登记的活动包。旧版本和手工放入的宿主留在原档备份。
+pub(super) fn preserve_on_reset(previous: &Path, staging: &Path) -> Result<Option<String>, String> {
+    let original = previous.join("runtimes/script");
+    let verified: Result<_, String> = (|| {
+        let Some(pointer) = active_pointer(&original)? else {
+            return Ok(None);
+        };
+        let package = original.join("packages").join(&pointer.archive_sha256);
+        let manifest = verify_package(&package, &pointer.manifest_sha256)?;
+        Ok(Some((pointer, package, manifest)))
+    })();
+    let (pointer, package, manifest) = match verified {
+        Ok(Some(active)) => active,
+        Ok(None) => return Ok(None),
+        Err(reason) => {
+            return Ok(Some(format!(
+                "本档脚本宿主未通过校验：{reason}。原安装保存在重置备份中。"
+            )))
+        }
+    };
+    let runtime = staging.join("runtimes/script");
+    let dest = runtime.join("packages").join(&pointer.archive_sha256);
+    for name in manifest
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .chain(["manifest.json"])
+    {
+        let bytes = read(&package.join(name), FILE_LIMIT)?;
+        let target = dest.join(name);
+        check_local_path(&target)?;
+        fs::create_dir_all(target.parent().ok_or("宿主包目录无效。")?)
+            .map_err(|e| e.to_string())?;
+        fs::write(target, bytes).map_err(|e| e.to_string())?;
+    }
+    // 原文件即使在复制期间被外部修改，暂存档也只能登记经过完整校验的字节。
+    verify_package(&dest, &pointer.manifest_sha256)?;
+    crate::settings::atomic_write(
+        &runtime.join("current.json"),
+        &serde_json::to_vec(&pointer).map_err(|e| e.to_string())?,
+    )?;
+    Ok(None)
 }
 
 struct Process(std::process::Child);

@@ -1606,8 +1606,15 @@ fn publish_staged_profile(
     })
 }
 
+#[derive(Debug)]
+struct ResetResult {
+    entry: Entry,
+    backup: Option<PathBuf>,
+    runtime_warning: Option<String>,
+}
+
 /// 用记录的种子重建测试配置档；原目录整体移入 `backups\profile-reset\`。
-fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), ProfileCommandError> {
+fn reset_profile(root: &Path, key: &str) -> Result<ResetResult, ProfileCommandError> {
     let _lock = lock_catalog(root)?;
     let catalog = read_catalog(root)?;
     let entry = catalog
@@ -1635,6 +1642,7 @@ fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), Pro
         .map_err(|error| format!("创建 {} 失败：{error}", staging.display()))?;
     let result = (|| {
         seed_into(root, &catalog, &seed, &entry, &staging, Some(&directory))?;
+        let runtime_warning = crate::script_runtime::preserve_on_reset(&directory, &staging)?;
         write_json(&staging.join("profile.json"), &entry)?;
         // 还原后可能只有各档的身份文件。在移走原目录前先保存其登记。
         persist_recovered_catalog(root, &catalog)?;
@@ -1655,12 +1663,16 @@ fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), Pro
             }
             return Err(format!("替换 {} 失败：{error}", directory.display()));
         }
-        Ok(backed_up)
+        Ok(ResetResult {
+            entry,
+            backup: backed_up.then(|| backup.clone()),
+            runtime_warning,
+        })
     })();
     if result.is_err() && matches!(backup.try_exists(), Ok(false)) {
         let _ = std::fs::remove_dir_all(&staging);
     }
-    Ok((entry, result?.then_some(backup)))
+    result.map_err(Into::into)
 }
 
 /// 锁文件与配置档目录并列，两次目录重命名不会改变打开的锁。
@@ -1754,15 +1766,19 @@ fn run_command(
             })
         }
         Command::Reset(key) => {
-            let (entry, backup) = reset_profile(root, key)?;
-            serde_json::json!({
+            let reset = reset_profile(root, key)?;
+            let mut receipt = serde_json::json!({
                 "status": "reset",
-                "id": entry.id,
-                "alias": entry.alias,
-                "seed": entry.seed,
-                "directory": profile_dir(root, &entry.id),
-                "backup": backup,
-            })
+                "id": reset.entry.id,
+                "alias": reset.entry.alias,
+                "seed": reset.entry.seed,
+                "directory": profile_dir(root, &reset.entry.id),
+                "backup": reset.backup,
+            });
+            if let Some(warning) = reset.runtime_warning {
+                receipt["runtime_warning"] = warning.into();
+            }
+            receipt
         }
         Command::List => list_profiles(root, source)?,
     };
@@ -2939,7 +2955,7 @@ mod tests {
             "edited"
         );
 
-        let (_, backup) = reset_profile(&root, "ui").unwrap();
+        let backup = reset_profile(&root, "ui").unwrap().backup;
         assert_eq!(
             std::fs::read_to_string(directory.join("bindings.json")).unwrap(),
             "daily"
@@ -2998,7 +3014,7 @@ mod tests {
                 assert_eq!(std::fs::read(&path).unwrap(), file.as_bytes());
                 crate::settings::atomic_write(&path, b"edited").unwrap();
             }
-            let (_, backup) = reset_profile(&root, alias).unwrap();
+            let backup = reset_profile(&root, alias).unwrap().backup;
             let backup = backup.unwrap();
             for file in files {
                 assert_eq!(std::fs::read(backup.join(file)).unwrap(), b"edited");
@@ -3067,7 +3083,7 @@ mod tests {
             .any(|action| action.reference.action_id == "custom-capture"));
         assert!(!copied.join("plugins/raishot/runtime").exists());
         std::fs::write(copied.join(RAISHOT_MANIFEST_PATH), "edited").unwrap();
-        let (_, backup) = reset_profile(&root, "ui").unwrap();
+        let backup = reset_profile(&root, "ui").unwrap().backup;
         assert_eq!(
             std::fs::read(backup.unwrap().join(RAISHOT_MANIFEST_PATH)).unwrap(),
             b"edited"
@@ -3105,7 +3121,7 @@ mod tests {
         } else {
             assert_eq!(std::fs::read(directory.join(package)).unwrap(), b"source");
             std::fs::write(directory.join(package), "edited").unwrap();
-            let (_, previous) = reset_profile(&root, "ui").unwrap();
+            let previous = reset_profile(&root, "ui").unwrap().backup;
             assert_eq!(std::fs::read(directory.join(package)).unwrap(), b"source");
             assert_eq!(
                 std::fs::read(previous.unwrap().join(package)).unwrap(),
@@ -3190,7 +3206,7 @@ mod tests {
                 b"binding data"
             );
             std::fs::write(directory.join(registration), "test installation").unwrap();
-            let (_, backup) = reset_profile(&root, alias).unwrap();
+            let backup = reset_profile(&root, alias).unwrap().backup;
             assert!(!directory.join(registration).exists());
             for name in leftovers {
                 assert!(!directory.join(name).exists());
@@ -3275,7 +3291,7 @@ mod tests {
             assert!(reset_profile(&root, "child").is_err());
             drop(lock);
         }
-        let backup = reset_profile(&root, "child").unwrap().1.unwrap();
+        let backup = reset_profile(&root, "child").unwrap().backup.unwrap();
         assert_eq!(
             fs::read(backup.join("bindings.json")).unwrap(),
             b"test edits"
@@ -3307,7 +3323,7 @@ mod tests {
         let nested = create_profile(&root, "nested", &Seed::Copy(copy.id), None).unwrap();
         assert!(!history(&profile_dir(&root, &nested.id)).exists());
 
-        let (_, backup) = reset_profile(&root, "copy").unwrap();
+        let backup = reset_profile(&root, "copy").unwrap().backup;
         let backup = backup.unwrap();
         assert!(!history(&directory).exists());
         assert_eq!(std::fs::read(history(&backup)).unwrap(), b"test history");
@@ -3508,7 +3524,7 @@ mod tests {
         ));
         assert_eq!(std::fs::read(&config).unwrap(), b"saved");
         drop(explicit);
-        let (_, backup) = reset_profile(&root, &edited.alias).unwrap();
+        let backup = reset_profile(&root, &edited.alias).unwrap().backup;
         assert_eq!(
             std::fs::read(backup.unwrap().join("bindings.json")).unwrap(),
             b"saved"
@@ -3546,7 +3562,7 @@ mod tests {
             0
         );
         std::fs::rename(moved, fixture).unwrap();
-        let (_, backup) = reset_profile(&root, "ui").unwrap();
+        let backup = reset_profile(&root, "ui").unwrap().backup;
         assert_eq!(
             std::fs::read(directory.join("bindings.json")).unwrap(),
             b"seed"
@@ -3557,7 +3573,7 @@ mod tests {
         );
         // 已登记的目录意外缺失时也能从种子恢复，回执只列真实备份。
         std::fs::rename(&directory, root.join("displaced")).unwrap();
-        assert!(reset_profile(&root, "ui").unwrap().1.is_none());
+        assert!(reset_profile(&root, "ui").unwrap().backup.is_none());
         assert_eq!(
             std::fs::read(directory.join("bindings.json")).unwrap(),
             b"seed"
@@ -3590,12 +3606,12 @@ mod tests {
         let backups = root.join("backups/profile-reset");
         assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
 
-        let (_, backup) = std::thread::scope(|scope| {
+        let backup = std::thread::scope(|scope| {
             scope.spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(80));
                 drop(reader);
             });
-            reset_profile(&root, "work").unwrap()
+            reset_profile(&root, "work").unwrap().backup
         });
         assert_eq!(std::fs::read_dir(backups).unwrap().count(), 1);
         assert_eq!(
@@ -4138,7 +4154,7 @@ mod tests {
         assert!(reset_profile(&root, &copy.alias).is_err());
         assert_eq!(std::fs::read(&local_edit).unwrap(), b"test edit");
         drop(saving);
-        let (_, backup) = reset_profile(&root, &copy.alias).unwrap();
+        let backup = reset_profile(&root, &copy.alias).unwrap().backup;
         assert_eq!(
             std::fs::read(backup.unwrap().join("wheels.json")).unwrap(),
             b"test edit"
@@ -4441,7 +4457,7 @@ mod tests {
         ));
         assert_eq!(std::fs::read(child.join(history)).unwrap(), b"child record");
         drop(guards);
-        let (_, backup) = reset_profile(&parent, "child").unwrap();
+        let backup = reset_profile(&parent, "child").unwrap().backup;
         assert_eq!(
             std::fs::read(backup.unwrap().join(history)).unwrap(),
             b"child record"

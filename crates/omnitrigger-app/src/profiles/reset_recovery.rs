@@ -368,7 +368,9 @@ mod tests {
         assert_eq!(fs::read(f.dir.join("wheels.json")).unwrap(), b"my wheels");
         assert!(!catalog.exists());
         fs::remove_dir(blocked).unwrap();
-        let (entry, backup) = reset_profile(&f.root, "testing").unwrap();
+        let reset = reset_profile(&f.root, "testing").unwrap();
+        let entry = reset.entry;
+        let backup = reset.backup;
         let saved: Catalog = serde_json::from_slice(&fs::read(catalog).unwrap()).unwrap();
         assert_eq!(entry, f.entry);
         assert_eq!(saved.profiles, vec![entry]);
@@ -443,7 +445,7 @@ mod tests {
             fs::read(f.stage.join("bindings.json")).unwrap(),
             b"prepared"
         );
-        let (_, backup) = reset_profile(&f.root, "testing").unwrap();
+        let backup = reset_profile(&f.root, "testing").unwrap().backup;
         assert_eq!(
             fs::read(backup.unwrap().join("bindings.json")).unwrap(),
             b"my hotkeys"
@@ -533,7 +535,7 @@ mod tests {
             b"my hotkeys"
         );
         fs::rename(&f.dir, &f.backup).unwrap();
-        let (_, original) = reset_profile(&f.root, "testing").unwrap();
+        let original = reset_profile(&f.root, "testing").unwrap().backup;
         assert_eq!(
             fs::read(original.unwrap().join("wheels.json")).unwrap(),
             b"my wheels"

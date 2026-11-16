@@ -187,6 +187,26 @@ try {
 checks.push('copied_profile_reuses_host_with_own_code_and_explicit_runtime_override');
 checks.push('nested_copy_runs_own_code_with_nearest_managed_host');
 
+// 重置应恢复来源的数据，并保留本档明确安装的解释器。
+const resetCopy = () => cli(['--profile-reset','runtime-copy'],0,['--data-root',root]);
+const activeCopyPointer = readFileSync(copiedPointer,'utf8');
+try {
+  writeFileSync(pointer,'{invalid');
+  const restored = resetCopy();
+  assert.equal(restored.runtime_warning,undefined);
+  assert.equal(readFileSync(copiedPointer,'utf8'),activeCopyPointer);
+  assert.equal(cli(['--run-action',project.call_path],0,copiedArgs).output.text,'OmniTrigger');
+  assert.match(readFileSync(join(restored.backup,'actions','installed-script',copiedManifest.actions[0].entry),'utf8'),/copied profile/);
+
+  unlinkSync(override.program);
+  const damaged = resetCopy();
+  assert.match(damaged.runtime_warning,/脚本宿主/);
+  assert.equal(existsSync(copiedPointer),false);
+  assert.equal(readFileSync(join(damaged.backup,'runtimes','script','current.json'),'utf8'),activeCopyPointer);
+  assert.equal(cli(['--run-action',project.call_path],1,copiedArgs).error.code,'runtime_unavailable');
+} finally { writeFileSync(pointer,validSourcePointer); }
+checks.push('reset_preserves_own_verified_runtime_and_reports_a_damaged_install');
+
 const next = variant('next',folder=>{
   const data=Buffer.from('本机更新安装验证');
   writeFileSync(join(folder,'README.txt'),data);
