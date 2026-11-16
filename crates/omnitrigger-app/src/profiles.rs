@@ -23,6 +23,7 @@ use std::fs::rename as move_profile_directory;
 const CATALOG_VERSION: u32 = 1;
 const DEFAULT_ID: &str = "default";
 const TEST_ALIAS: &str = "testing";
+const DAILY_COPY_NAME: &str = "日常配置副本";
 const RESULT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// 启动解析结果，交给界面决定标题、标识与是否安装 Hook。
@@ -1226,7 +1227,7 @@ fn create_profile(
             "配置档 {alias} 已存在；要恢复种子数据请用 --profile-reset {alias}。"
         ));
     }
-    insert_profile(root, &mut catalog, alias, seed, name)
+    insert_profile(root, &mut catalog, alias, seed, name, CopyOrigin::Custom)
 }
 
 fn lock_catalog(root: &Path) -> Result<std::fs::File, String> {
@@ -1261,6 +1262,7 @@ fn testing_workspace(root: &Path, check_only: bool) -> Result<Entry, String> {
         TEST_ALIAS,
         &Seed::Empty,
         Some("本机测试"),
+        CopyOrigin::Custom,
     )
 }
 
@@ -1272,24 +1274,98 @@ fn persist_recovered_catalog(root: &Path, catalog: &Catalog) -> Result<(), Strin
     Ok(())
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum CopyOrigin {
+    Settings,
+    Custom,
+}
+
+/// 旧版设置只会创建 daily-copy 或从 2 起不带前导零的编号。
+fn daily_copy_slot(entry: &Entry) -> Option<u64> {
+    if entry.kind != "test"
+        || entry.name != DAILY_COPY_NAME
+        || entry.seed != "copy:default"
+        || !generated_profile_id(&entry.id)
+    {
+        return None;
+    }
+    if entry.alias == "daily-copy" {
+        return Some(1);
+    }
+    let suffix = entry.alias.strip_prefix("daily-copy-")?;
+    if !suffix.starts_with('0') && suffix.bytes().all(|c| c.is_ascii_digit()) {
+        return suffix.parse::<u64>().ok().filter(|n| *n >= 2);
+    }
+    None
+}
+
+fn read_copy_origin(path: &Path) -> Result<Option<CopyOrigin>, String> {
+    let fail = |e| format!("无法读取测试副本来源 {}：{e}", path.display());
+    match path.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(fail(e)),
+        Ok(meta) if meta.is_file() && crate::local_files::is_plain(&meta) => {
+            let bytes = std::fs::read(path).map_err(fail)?;
+            crate::local_files::parse_config_json_bytes(&bytes)
+                .map(Some)
+                .map_err(|e| format!("{} 格式有误：{e}", path.display()))
+        }
+        Ok(_) => Err(format!("测试副本来源须为普通本机文件：{}", path.display())),
+    }
+}
+
 fn daily_test_copy(root: &Path) -> Result<Entry, String> {
     let _lock = lock_catalog(root)?;
     let mut catalog = read_catalog(root)?;
-    let seed = Seed::Copy(DEFAULT_ID.into());
+    let mut selected = None;
+    let mut unreadable_origin = None;
+    for entry in &catalog.profiles {
+        let Some(slot) = daily_copy_slot(entry) else {
+            continue;
+        };
+        let path = profile_dir(root, &entry.id).with_extension("copy-origin.json");
+        let origin = match read_copy_origin(&path) {
+            Ok(origin) => origin,
+            Err(error) => {
+                unreadable_origin.get_or_insert(error);
+                continue;
+            }
+        };
+        // 先选设置创建的副本，其次按旧版的别名顺序兼容没有来源记录的副本。
+        let rank = (origin.is_none(), slot);
+        if origin != Some(CopyOrigin::Custom) && selected.is_none_or(|(best, _)| rank < best) {
+            selected = Some((rank, entry));
+        }
+    }
+    if let Some(error) =
+        unreadable_origin.filter(|_| selected.is_none_or(|((legacy, _), _)| legacy))
+    {
+        return Err(error);
+    }
+    if let Some(((legacy, _), entry)) = selected {
+        source_dir(root, &catalog, &entry.alias)?;
+        persist_recovered_catalog(root, &catalog)?;
+        if legacy {
+            let path = profile_dir(root, &entry.id).with_extension("copy-origin.json");
+            write_json(&path, &CopyOrigin::Settings)?;
+        }
+        return Ok(entry.clone());
+    }
     let mut alias = String::from("daily-copy");
     let mut suffix = 2;
-    while let Some(entry) = catalog.find(&alias) {
-        if entry.alias == alias && entry.kind == "test" && entry.seed == "copy:default" {
-            // 设置页先确认副本可用，目录交换中断时复用同一套备份恢复逻辑。
-            source_dir(root, &catalog, &alias)?;
-            persist_recovered_catalog(root, &catalog)?;
-            return Ok(entry.clone());
-        }
-        // 别名可能已被用户用于其他数据，保留原配置档。
+    while catalog.find(&alias).is_some() {
         alias = format!("daily-copy-{suffix}");
         suffix += 1;
     }
-    insert_profile(root, &mut catalog, &alias, &seed, Some("日常配置副本"))
+    insert_profile(
+        root,
+        &mut catalog,
+        &alias,
+        &Seed::Copy(DEFAULT_ID.into()),
+        Some(DAILY_COPY_NAME),
+        CopyOrigin::Settings,
+    )
 }
 
 pub(super) fn open_daily_test_copy(root: &Path) -> Result<(), String> {
@@ -1359,6 +1435,7 @@ fn insert_profile(
     alias: &str,
     seed: &Seed,
     name: Option<&str>,
+    origin: CopyOrigin,
 ) -> Result<Entry, String> {
     let seed = seed.for_creation()?;
     let entry = Entry {
@@ -1373,11 +1450,22 @@ fn insert_profile(
     if catalog.find(&entry.id).is_some() {
         return Err("新配置档标识已被使用，请重试创建。".into());
     }
+    // 来源按稳定 ID 保存在档外，重置不替换它，旧版也能读取原登记与身份文件。
+    let origin_path = daily_copy_slot(&entry).map(|_| directory.with_extension("copy-origin.json"));
     stage_profile_directory(&directory, |staging| {
         seed_into(root, catalog, &seed, staging)?;
-        write_json(&staging.join("profile.json"), &entry)
+        write_json(&staging.join("profile.json"), &entry)?;
+        if let Some(path) = &origin_path {
+            write_json(path, &origin)?;
+        }
+        Ok(())
     })?;
-    publish_staged_profile(root, catalog, &entry, &directory)?;
+    if let Err(error) = publish_staged_profile(root, catalog, &entry, &directory) {
+        if let Some(path) = origin_path.filter(|_| catalog.find(&entry.id).is_none()) {
+            let _ = std::fs::remove_file(path);
+        }
+        return Err(error);
+    }
     Ok(entry)
 }
 
@@ -3887,6 +3975,75 @@ mod tests {
         ] {
             assert!(Seed::parse(seed).is_err(), "{seed}");
         }
+    }
+
+    #[test]
+    fn settings_copy_keeps_user_named_copies_separate_even_after_reset() {
+        let root = temp_root("settings-user-copies");
+        let seed = Seed::Copy(DEFAULT_ID.into());
+        let custom = create_profile(&root, "daily-copy", &seed, Some("轮盘实验")).unwrap();
+        let same_name = create_profile(&root, "daily-copy-2", &seed, Some("日常配置副本")).unwrap();
+        reset_profile(&root, &same_name.alias).unwrap();
+        for entry in [&custom, &same_name] {
+            std::fs::write(
+                profile_dir(&root, &entry.id).join("wheels.json"),
+                &entry.alias,
+            )
+            .unwrap();
+        }
+        std::fs::write(root.join("wheels.json"), "daily wheels").unwrap();
+
+        let settings = daily_test_copy(&root).unwrap();
+        assert_eq!(settings.alias, "daily-copy-3");
+        assert_eq!(
+            std::fs::read(profile_dir(&root, &settings.id).join("wheels.json")).unwrap(),
+            b"daily wheels"
+        );
+        std::fs::remove_file(catalog_path(&root)).unwrap();
+        assert_eq!(daily_test_copy(&root).unwrap(), settings);
+        // 恢复一个没有来源标记的旧同名档，已经确认属于设置的副本仍然优先。
+        let marker = profile_dir(&root, &same_name.id).with_extension("copy-origin.json");
+        std::fs::remove_file(&marker).unwrap();
+        assert_eq!(daily_test_copy(&root).unwrap(), settings);
+        std::fs::write(&marker, "broken").unwrap();
+        assert_eq!(daily_test_copy(&root).unwrap(), settings);
+        let owned = profile_dir(&root, &settings.id).with_extension("copy-origin.json");
+        std::fs::write(&owned, "broken").unwrap();
+        assert!(daily_test_copy(&root).unwrap_err().contains("格式有误"));
+        assert_eq!(read_catalog(&root).unwrap().profiles.len(), 3);
+        for entry in [&custom, &same_name] {
+            assert_eq!(
+                std::fs::read_to_string(profile_dir(&root, &entry.id).join("wheels.json")).unwrap(),
+                entry.alias
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn settings_copy_reopens_legacy_numbered_copy_across_alias_gaps() {
+        let root = temp_root("settings-legacy-gap");
+        // 旧版的副本只在登记表和档内身份文件里记录别名、显示名和种子。
+        let legacy = Entry {
+            id: new_id(),
+            alias: "daily-copy-7".into(),
+            kind: "test".into(),
+            name: "日常配置副本".into(),
+            seed: "copy:default".into(),
+            created_ms: 1,
+        };
+        let dir = profile_dir(&root, &legacy.id);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_json(&dir.join("profile.json"), &legacy).unwrap();
+        std::fs::write(dir.join("bindings.json"), "edited legacy hotkeys").unwrap();
+
+        assert_eq!(daily_test_copy(&root).unwrap(), legacy);
+        assert_eq!(read_catalog(&root).unwrap().profiles, [legacy]);
+        assert_eq!(
+            std::fs::read(dir.join("bindings.json")).unwrap(),
+            b"edited legacy hotkeys"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

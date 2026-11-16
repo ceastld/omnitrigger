@@ -178,6 +178,14 @@ jobs:
             Assert-HistoryAppend @() ($round -eq 1)
             Assert-CopiedClipboardRoute ($round -eq 1)
             if ($round -eq 1) {
+              $custom = & $exe --profile-create daily-copy --seed copy:default --name '日常配置副本' | ConvertFrom-Json
+              if ($LASTEXITCODE -or $custom.status -ne 'created') { throw '安装版创建同名自建档失败。' }
+              $origin = Join-Path $data "profiles/$($custom.id).copy-origin.json"
+              if ((Get-Content -LiteralPath $origin -Raw | ConvertFrom-Json) -cne 'custom') { throw '同名自建档来源登记有误。' }
+              $expected[$origin] = (Get-FileHash -LiteralPath $origin).Hash
+              $customHotkeys = Join-Path $custom.directory 'bindings.json'
+              Copy-Item -LiteralPath 'examples/application-scopes.json' -Destination $customHotkeys -Force
+              $expected[$customHotkeys] = (Get-FileHash -LiteralPath $customHotkeys).Hash
               $restored = & $exe --profile-create restored-edit --seed backup:default:1:current | ConvertFrom-Json
               if ($LASTEXITCODE -or $restored.status -ne 'created') { throw '从已安装版本新建备份副本失败。' }
               $expected[(Join-Path $restored.directory 'bindings.json')] = $expected[$dailyRevision]
@@ -194,6 +202,8 @@ jobs:
               $expected[$edited] = (Get-FileHash -LiteralPath $edited).Hash
             } else {
               $all = & $exe --profile-list | ConvertFrom-Json
+              $customAfter = @($all.profiles | Where-Object { $_.alias -ceq 'daily-copy' })
+              if ($LASTEXITCODE -or $customAfter.Count -ne 1 -or $customAfter[0].id -cne $custom.id) { throw '重装后同名自建档的登记身份不符。' }
               $saved = @($all.profiles | Where-Object { $_.alias -ceq 'restored-edit' -and $_.seed -ceq 'backup:default:1:current' })
               if ($LASTEXITCODE -or $saved.Count -ne 1 -or $saved[0].id -cne $restored.id) { throw '重装后恢复副本的登记身份不符。' }
               $start = [Diagnostics.ProcessStartInfo]::new($exe)
