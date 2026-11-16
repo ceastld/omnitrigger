@@ -1,14 +1,15 @@
 //! 设置页在当前档选择历史版本，新建隔离测试副本。
 use crate::{caption, card, profiles, settings, theme, Workspace};
 use gpui::{div, prelude::*, px, Context, Div, FontWeight};
-use std::{path::PathBuf, time::SystemTime};
+use std::time::SystemTime;
 
 #[derive(Default)]
 pub(super) struct BackupRestore {
     choices: Option<[Versions; 2]>,
     busy: bool,
     alias: Option<String>,
-    created: Option<(PathBuf, String)>,
+    created: Option<profiles::RestoredCopy>,
+    saved: Option<Vec<profiles::RestoredCopy>>,
     notice: Option<String>,
 }
 
@@ -145,6 +146,10 @@ impl Workspace {
         if self.backup_restore.busy {
             return;
         }
+        if let Some(copy) = self.backup_restore.created.clone() {
+            self.open_restored_copy(copy, cx);
+            return;
+        }
         let Some([bindings, wheels]) = self.backup_restore.choices.as_ref() else {
             return;
         };
@@ -154,7 +159,6 @@ impl Workspace {
             return;
         }
         let config = settings::path();
-        let created = self.backup_restore.created.clone();
         let alias = self
             .backup_restore
             .alias
@@ -166,25 +170,73 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move {
-                    if let Some((root, key)) = created {
-                        profiles::open_test_profile(&root, &key)?;
-                        Ok(None)
-                    } else {
-                        profiles::create_backup_copy(&config, &alias, bindings, wheels).map(Some)
-                    }
-                })
+                .spawn(
+                    async move { profiles::create_backup_copy(&config, &alias, bindings, wheels) },
+                )
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.backup_restore.busy = false;
                 match result {
-                    Ok(Some((root, key))) => {
-                        this.backup_restore.notice = Some(format!("已创建测试副本 {key}。"));
-                        this.backup_restore.created = Some((root, key));
+                    Ok(copy) => {
+                        this.backup_restore.notice =
+                            Some(format!("已创建测试副本 {}。", copy.alias));
+                        this.backup_restore.created = Some(copy);
                     }
-                    Ok(None) => {}
                     Err(error) => this.backup_restore.notice = Some(error),
                 }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn show_saved_backup_copies(&mut self, cx: &mut Context<Self>) {
+        if self.backup_restore.busy {
+            return;
+        }
+        self.backup_restore.notice = None;
+        if self.backup_restore.saved.take().is_some() {
+            cx.notify();
+            return;
+        }
+        self.backup_restore.busy = true;
+        let config = settings::path();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { profiles::saved_backup_copies(&config) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.backup_restore.busy = false;
+                match result {
+                    Ok(list) => {
+                        this.backup_restore.saved = Some(list.items);
+                        this.backup_restore.notice = list.notice;
+                    }
+                    Err(error) => this.backup_restore.notice = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn open_restored_copy(&mut self, copy: profiles::RestoredCopy, cx: &mut Context<Self>) {
+        if self.backup_restore.busy {
+            return;
+        }
+        self.backup_restore.busy = true;
+        self.backup_restore.notice = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { copy.open() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.backup_restore.busy = false;
+                this.backup_restore.notice = result.err();
                 cx.notify();
             });
         })
@@ -220,6 +272,21 @@ impl Workspace {
                                 cx.listener(|this, _, _, cx| this.choose_backup_versions(cx)),
                             ),
                         )
+                        .child(
+                            theme::button(
+                                "list-restored-copies",
+                                if state.saved.is_some() {
+                                    "收起已有副本"
+                                } else {
+                                    "查看已有恢复副本"
+                                },
+                                theme::Tone::Secondary,
+                                !state.busy,
+                            )
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.show_saved_backup_copies(cx)),
+                            ),
+                        )
                     })
                     .child(
                         theme::button(
@@ -231,6 +298,44 @@ impl Workspace {
                         .on_click(cx.listener(|this, _, _, cx| this.open_edit_history(cx))),
                     ),
             )
+            .when_some(state.saved.as_ref(), |el, copies| {
+                el.when(copies.is_empty(), |el| {
+                    el.child(caption("本档还没有从备份创建的测试副本。"))
+                })
+                .children(copies.iter().enumerate().map(|(i, copy)| {
+                    let title = if copy.name == copy.alias {
+                        copy.name.clone()
+                    } else {
+                        format!("{}（{}）", copy.name, copy.alias)
+                    };
+                    let item = copy.clone();
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .child(title)
+                                .child(caption(copy.summary())),
+                        )
+                        .child(
+                            theme::button(
+                                ("open-saved-backup", i),
+                                "打开",
+                                theme::Tone::Secondary,
+                                !state.busy,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| this.open_restored_copy(item.clone(), cx),
+                            )),
+                        )
+                }))
+            })
             .when_some(state.choices.as_ref(), |el, choices| {
                 let enabled = !state.busy && choices.iter().any(|v| v.selected().is_some());
                 let label = if state.busy {

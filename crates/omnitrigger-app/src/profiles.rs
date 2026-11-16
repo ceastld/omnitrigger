@@ -13,8 +13,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 mod external_import;
 mod reset_recovery;
+mod restored_copies;
 #[cfg(windows)]
 pub(super) use external_import::recover as recover_external_import;
+pub(super) use restored_copies::{saved_backup_copies, RestoredCopy};
 #[cfg(not(windows))]
 use std::fs::rename as move_profile_directory;
 
@@ -1299,33 +1301,39 @@ pub(super) fn new_restore_alias() -> String {
     format!("restore-{}", new_id())
 }
 
+fn backup_source(config: &Path) -> Result<(PathBuf, String), String> {
+    let directory = config_directory(config).ok_or("配置目录不可用。")?;
+    if let Some(entry) = registered_test_profile(config)? {
+        let root = directory
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("测试档缺少数据根。")?;
+        Ok((root.to_owned(), entry.id))
+    } else {
+        Ok((directory, DEFAULT_ID.to_owned()))
+    }
+}
+
 /// 从所选档的历史新建测试副本。重试未完成的创建时沿用原别名。
 pub(super) fn create_backup_copy(
     config: &Path,
     alias: &str,
     bindings: Option<u64>,
     wheels: Option<u64>,
-) -> Result<(PathBuf, String), String> {
+) -> Result<RestoredCopy, String> {
     if bindings.is_none() && wheels.is_none() {
         return Err("请至少选择一份备份。".into());
     }
-    let directory = config_directory(config).ok_or("配置目录不可用。")?;
-    let (root, source) = if let Some(entry) = registered_test_profile(config)? {
-        let root = directory
-            .parent()
-            .and_then(Path::parent)
-            .ok_or("测试档缺少数据根。")?;
-        (root.to_owned(), entry.id)
-    } else {
-        (directory, DEFAULT_ID.to_owned())
-    };
+    let (root, source) = backup_source(config)?;
     let seed = Seed::Backup {
-        source,
+        source: source.clone(),
         bindings,
         wheels,
     };
     let entry = create_profile(&root, alias, &seed, Some("备份恢复副本"))?;
-    Ok((root, entry.alias))
+    Ok(RestoredCopy::from_entry(
+        &root, &source, &entry, bindings, wheels,
+    ))
 }
 
 pub(super) fn open_test_profile(root: &Path, key: &str) -> Result<(), String> {
@@ -3826,13 +3834,13 @@ mod tests {
         assert!(incompatible.contains("archived-wheel"), "{incompatible}");
         assert!(read_catalog(&root).unwrap().find(&alias).is_none());
         std::fs::write(&backup, raw).unwrap();
-        let (selected_root, key) = create_backup_copy(&config, &alias, Some(1), None).unwrap();
+        let created = create_backup_copy(&config, &alias, Some(1), None).unwrap();
         assert_eq!(
-            selected_root.canonicalize().unwrap(),
-            root.canonicalize().unwrap()
+            saved_backup_copies(&config).unwrap().items[0].alias,
+            created.alias
         );
         let catalog = read_catalog(&root).unwrap();
-        let entry = catalog.find(&key).unwrap();
+        let entry = catalog.find(&created.alias).unwrap();
         assert_eq!(entry.seed, format!("backup:{}:1:current", source.id));
         let copy = profile_dir(&root, &entry.id);
         assert_eq!(

@@ -188,6 +188,34 @@ jobs:
             & $exe --profile restored-edit --check-config | Out-Host
             if ($LASTEXITCODE) { throw '备份副本中的热键和轮盘未通过安装版检查。' }
             Assert-ProfileFiles
+            if ($round -eq 1) {
+              $edited = Join-Path $restored.directory 'bindings.json'
+              Copy-Item -LiteralPath 'examples/application-scopes.json' -Destination $edited -Force
+              $expected[$edited] = (Get-FileHash -LiteralPath $edited).Hash
+            } else {
+              $all = & $exe --profile-list | ConvertFrom-Json
+              $saved = @($all.profiles | Where-Object { $_.alias -ceq 'restored-edit' -and $_.seed -ceq 'backup:default:1:current' })
+              if ($LASTEXITCODE -or $saved.Count -ne 1 -or $saved[0].id -cne $restored.id) { throw '重装后恢复副本的登记身份不符。' }
+              $start = [Diagnostics.ProcessStartInfo]::new($exe)
+              $start.UseShellExecute = $false
+              foreach ($argument in @('--data-root', $data, '--profile', $saved[0].id)) { $start.ArgumentList.Add($argument) }
+              $window = [Diagnostics.Process]::Start($start)
+              try {
+                $title = "OmniTrigger — 测试：$($saved[0].name)"
+                $timer = [Diagnostics.Stopwatch]::StartNew()
+                while (-not $window.HasExited -and $window.MainWindowTitle -cne $title -and $timer.Elapsed.TotalSeconds -lt 25) {
+                  Start-Sleep -Milliseconds 100
+                  $window.Refresh()
+                }
+                if ($window.HasExited -or $window.MainWindowTitle -cne $title) { throw '按登记 ID 未能打开原恢复副本窗口。' }
+                if (-not $window.CloseMainWindow() -or -not $window.WaitForExit(20000) -or $window.ExitCode) { throw '恢复副本窗口未正常退出。' }
+              } finally {
+                if (-not $window.HasExited) { $window.Kill(); $window.WaitForExit(10000) | Out-Null }
+                $window.Dispose()
+              }
+              Assert-ProfileFiles
+              Write-Host '已验证重装后按原 ID 打开恢复副本的测试窗口，副本内编辑及日常配置均保留。'
+            }
             Write-Host "第 $round 轮安装已验证剪贴板扩展可读取带 BOM 的清单与调用，测试副本使用本档历史。"
             & $exe --test-workspace --check-config | Out-Host
             if ($LASTEXITCODE) { throw '测试配置档启动失败。' }
