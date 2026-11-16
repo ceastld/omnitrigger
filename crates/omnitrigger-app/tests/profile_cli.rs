@@ -460,6 +460,75 @@ fn check_config_reports_a_save_instead_of_an_incomplete_wheel_reference() {
 }
 
 #[test]
+fn check_config_rejects_ambiguous_input_before_creating_a_workspace() {
+    let root =
+        std::env::temp_dir().join(format!("omnitrigger-cli-check-args-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(
+        root.join("鼠标.json"),
+        include_bytes!("../../../examples/mouse-tab-navigation.json"),
+    )
+    .unwrap();
+    std::fs::write(root.join("损坏.json"), "{").unwrap();
+    std::fs::write(
+        root.join("queue.json"),
+        r#"{"bindings":[1],"policy":{"kind":"drop"}}"#,
+    )
+    .unwrap();
+    let unused = root.join("未创建的测试根");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_omnitrigger"))
+            .args(args)
+            .current_dir(&root)
+            .env("OMNITRIGGER_HOME", &unused)
+            .env("LOCALAPPDATA", root.join("local"))
+            .output()
+            .unwrap()
+    };
+
+    for args in [
+        vec![
+            "--config",
+            "鼠标.json",
+            "--config",
+            "损坏.json",
+            "--check-config",
+        ],
+        vec![
+            "--check-config",
+            "--config",
+            "损坏.json",
+            "--config",
+            "鼠标.json",
+        ],
+        vec!["--test-workspace", "--check-config", "--settings"],
+        vec!["--check-config", "--check-config"],
+    ] {
+        let result = run(&args);
+        assert_eq!(result.status.code(), Some(1), "{args:?}");
+        let receipt: serde_json::Value = serde_json::from_slice(&result.stderr).unwrap();
+        assert_eq!(receipt["error"]["code"], "invalid_cli_arguments");
+        assert_eq!(receipt["error"]["effect_state"], "not_started");
+        assert!(result.stdout.is_empty() && !unused.exists());
+    }
+    let result = run(&[
+        "--config",
+        "鼠标.json",
+        "--mouse-shortcut-queue",
+        "queue.json",
+        "--check-config",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("共 3 条绑定"));
+    assert!(!unused.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn check_config_uses_the_selected_data_root() {
     let root = std::env::temp_dir().join(format!("omnitrigger-cli-root-{}", std::process::id()));
     let default = root.join("local").join("OmniTrigger");

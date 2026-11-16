@@ -1779,6 +1779,34 @@ fn finish_command(result: Result<String, String>, result_file: Option<&str>) -> 
     std::process::exit(if ok { 0 } else { 1 });
 }
 
+/// 配置档选择参数已经取出。校验模式须在取得配置锁、创建 testing 或分发界面命令前确定。
+fn config_check_requested(arguments: &[String]) -> Result<bool, String> {
+    let flags = arguments.get(1..).unwrap_or_default();
+    if !flags
+        .iter()
+        .any(|arg| arg == "--check-config" || arg.starts_with("--check-config="))
+    {
+        return Ok(false);
+    }
+    let path = match flags {
+        [check] if check == "--check-config" => return Ok(true),
+        [check, config, path] if check == "--check-config" && config == "--config" => Some(path),
+        [config, path, check] if check == "--check-config" && config == "--config" => Some(path),
+        _ => None,
+    };
+    if path.is_some_and(|p| !p.is_empty() && !p.starts_with("--")) {
+        return Ok(true);
+    }
+    if crate::mouse_shortcut_dispatch::parse_plan_path(arguments)
+        .map_err(|error| rejection(error.code, &error.message))?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    Err(rejection("invalid_cli_arguments",
+        "--check-config 只能使用一次，可选择一个配置文件或配置档，并可附带 --mouse-shortcut-queue 计划；请单独运行其他命令。"))
+}
+
 /// 解析配置档参数并设置配置路径。配置档命令、脱离重定向的重启在此直接退出进程。
 pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     let original = arguments.clone();
@@ -1795,7 +1823,9 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
         crate::action_target_context::validate_cli(arguments)
             .unwrap_or_else(|error| crate::reject_cli_arguments(&error));
     }
-    let check_only = inspect_actions || arguments.iter().any(|arg| arg == "--check-config");
+    let check_only = config_check_requested(arguments)
+        .unwrap_or_else(|error| finish_command(Err(error), parsed.result_file.as_deref()))
+        || inspect_actions;
     let access = if tray {
         RootAccess::Tray
     } else if check_only {
