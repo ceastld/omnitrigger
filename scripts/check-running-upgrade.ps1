@@ -223,7 +223,8 @@ public static class OmniTriggerUpgradeWindow {
                 if ((GetMenuState(info.Menu, (uint)target, byPosition) & highlighted) != 0) break;
             } while (timer.ElapsedMilliseconds < 250);
         }
-        throw new Exception("无法在安装版托盘菜单内选中“" + expected + "”。实际菜单：" + String.Join("、", items));
+        throw new Exception(String.Format("无法在安装版托盘菜单内选中“{0}”。菜单可见={1}，主窗口可见={2}。实际菜单：{3}",
+            expected, IsWindowVisible(popup), IsWindowVisible(owner), String.Join("、", items)));
     }
 
     public sealed class WindowShows : IDisposable {
@@ -376,12 +377,15 @@ function Assert-TrayListenerMenu([Diagnostics.Process]$ui, [IntPtr]$window, [str
                 Start-Sleep -Milliseconds 50
             } while ($timer.Elapsed.TotalSeconds -lt 10 -and -not $ui.HasExited)
             if ($ui.HasExited -or $actual -cne $expected -or [OmniTriggerUpgradeWindow]::IsWindowVisible($popup)) { throw ('选择“{0}”后监听状态或菜单未更新。' -f $label) }
-            if ($shows.WasShown($window) -or [OmniTriggerUpgradeWindow]::IsWindowVisible($window)) { throw ('选择“{0}”时主窗口曾弹出。' -f $label) }
+        } catch {
+            if ($shows.WasShown($window)) { throw ('选择“{0}”时主窗口曾弹出。{1}' -f $label, $_) }
+            throw
         } finally {
             if ([OmniTriggerUpgradeWindow]::IsWindowVisible($popup)) {
                 $null = [OmniTriggerUpgradeWindow]::PostMessage($window, 0x001f, [UIntPtr]::Zero, [IntPtr]::Zero)
             }
         }
+        if ($shows.WasShown($window) -or [OmniTriggerUpgradeWindow]::IsWindowVisible($window)) { throw ('选择“{0}”时主窗口曾弹出。' -f $label) }
     }
     Write-Host '已通过安装版托盘菜单暂停并恢复原档监听，主窗口始终隐藏。'
 }

@@ -9062,12 +9062,18 @@ fn main() {
                     }
                     let appearance_view = view.downgrade();
                     if start_in_tray {
-                        if tray_window.is_some_and(omnitrigger_windows::hide_to_tray) {
-                            // 原生托盘点击直接显示 HWND。首次唤回时应用 GPUI 为隐藏窗口保留的位置。
+                        if let Some(hwnd) =
+                            tray_window.filter(|hwnd| omnitrigger_windows::hide_to_tray(*hwnd))
+                        {
+                            // 托盘菜单也会激活隐藏宿主。只在用户已显示主窗口后恢复 GPUI 的窗口位置。
                             view.update(cx, |_, cx| {
                                 let mut first = true;
                                 cx.observe_window_activation(window, move |_, window, _| {
-                                    if window.is_window_active() && std::mem::take(&mut first) {
+                                    if first
+                                        && window.is_window_active()
+                                        && !omnitrigger_windows::is_in_tray(hwnd)
+                                    {
+                                        first = false;
                                         window.activate_window();
                                     }
                                 })
