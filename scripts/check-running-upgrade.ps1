@@ -290,7 +290,11 @@ $ignoredFile = Join-Path $device 'external-copies.json'
 $ignoreStart = New-AppStart
 $null = $ignoreStart.Environment.Remove('OMNITRIGGER_HOME')
 $ignoreStart.Environment['LOCALAPPDATA'] = $local
-foreach ($case in '仅文件时间不同', '文件占用', '解除占用', '同一副本', '副本有新修改') {
+foreach ($case in '仅文件时间不同', '文件占用', '解除占用', '同一副本', '忽略后只改时间', '副本有新修改') {
+    if ($case -eq '忽略后只改时间') {
+        $acceptedTime = [IO.File]::GetLastWriteTimeUtc($sourceFile)
+        [IO.File]::SetLastWriteTimeUtc($sourceFile, $acceptedTime.AddMinutes(10))
+    }
     if ($case -in '文件占用', '副本有新修改') {
         $timestamp = [IO.File]::GetLastWriteTimeUtc($sourceFile).AddHours(1)
         $content = if ($case -eq '文件占用') { '{"version":2,"bindings":[]}' } else { '{"version":3,"bindings":[]}' }
@@ -301,7 +305,7 @@ foreach ($case in '仅文件时间不同', '文件占用', '解除占用', '同�
     try {
         $ui = [Diagnostics.Process]::Start($ignoreStart)
         try {
-            if ($case -notin '仅文件时间不同', '同一副本') {
+            if ($case -notin '仅文件时间不同', '同一副本', '忽略后只改时间') {
                 $prompt = Wait-AppWindow $ui '' 'OmniTrigger 发现外部数据副本'
                 if ([OmniTriggerUpgradeWindow]::GetDlgItem($prompt, 7) -eq [IntPtr]::Zero -or
                     -not [OmniTriggerUpgradeWindow]::PostMessage($prompt, 0x0111, [UIntPtr]7, [IntPtr]::Zero)) {
@@ -315,12 +319,13 @@ foreach ($case in '仅文件时间不同', '文件占用', '解除占用', '同�
                 if ($saved.Count -ne 1) { throw "忽略记录发生变化（$case）。" }
             } else {
                 $expected = ([DateTimeOffset][IO.File]::GetLastWriteTimeUtc($sourceFile)).ToUnixTimeMilliseconds()
+                if ($case -eq '忽略后只改时间') { $expected = ([DateTimeOffset]$acceptedTime).ToUnixTimeMilliseconds() }
                 if ($saved[$external.ToLowerInvariant()] -ne $expected) { throw "未保存对应的副本版本（$case）。" }
             }
         } finally { Stop-TestProcess $ui }
     } finally { if ($held) { $held.Dispose() } }
 }
-Write-Host '已验证只有文件时间变化时直接打开主窗口，忽略记录可重试，有不同内容的较新副本仍提示。'
+Write-Host '已验证与日常档相同或已忽略的副本只改时间时直接打开主窗口，忽略后有真实修改仍会提示。'
 
 # 用户选择导入后，编辑器占用应直接进入日常窗口。释放后重新启动可正常导入。
 $importDaily = Join-Path $daily 'bindings.json'
@@ -371,6 +376,7 @@ Write-Host '已验证安装版从异名目录导入剪贴板扩展，原目录�
 $restoredHash = (Get-FileHash -LiteralPath $importDaily).Hash
 $importBackups = Join-Path $daily 'backups'
 $savedCount = @(Get-ChildItem -LiteralPath $importBackups -Directory -Filter 'before-import-*').Count
+[IO.File]::SetLastWriteTimeUtc((Join-Path $externalN10 'import-marker.txt'), [DateTime]::UtcNow.AddHours(4).AddMinutes(10))
 foreach ($changed in @($false, $true)) {
     if ($changed) {
         [IO.File]::WriteAllText($sourceFile, '{"version":1, "bindings": []}')

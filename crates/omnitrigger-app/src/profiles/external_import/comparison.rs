@@ -1,11 +1,11 @@
 //! 导入只覆盖来源提供的数据，本机独有的文件不参与相同副本判定。
-use super::{metadata, packages};
+use super::{digest, invalid, metadata, packages};
 use crate::local_files::{is_cloud_path, is_plain, is_plain_directory};
 use crate::plugins::{local_manifest_metadata, RAISHOT_MANIFEST_PATH};
 use crate::profiles::transferable_file;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    ffi::OsString,
     fs,
     io::{self, BufRead, BufReader},
     path::Path,
@@ -32,48 +32,50 @@ fn same_file(source: &Path, source_meta: &fs::Metadata, target: &Path) -> io::Re
     }
 }
 
-fn same_actions(
-    source: &Path,
-    target: &Path,
-    packages: Option<&BTreeMap<OsString, OsString>>,
+fn sorted_entries(path: &Path) -> io::Result<Vec<fs::DirEntry>> {
+    let mut entries = fs::read_dir(path)?.collect::<io::Result<Vec<_>>>()?;
+    entries.sort_unstable_by_key(|entry| entry.file_name());
+    Ok(entries)
+}
+
+fn visit_actions(
+    root: &Path,
+    relative: &Path,
+    visit: &mut impl FnMut(&Path, &fs::Metadata) -> io::Result<bool>,
 ) -> io::Result<bool> {
-    if !metadata(target)?.is_some_and(|m| m.is_dir()) {
-        return Ok(false);
-    }
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
+    for entry in sorted_entries(&root.join(relative))? {
         let path = entry.path();
         let meta = path.symlink_metadata()?;
         if !is_plain(&meta) || is_cloud_path(&path) {
             continue;
         }
         let name = entry.file_name();
-        if packages.is_some()
+        if relative == Path::new("actions")
             && meta.is_dir()
             && omnitrigger_actions::catalog::is_legacy_stage(&name)
         {
             continue;
         }
-        let destination = target.join(
-            packages
-                .and_then(|folders| folders.get(&name))
-                .unwrap_or(&name),
-        );
-        if meta.is_dir() && !same_actions(&path, &destination, None)?
-            || meta.is_file() && !same_file(&path, &meta, &destination)?
-        {
+        let child = relative.join(name);
+        if (meta.is_file() || meta.is_dir()) && !visit(&child, &meta)? {
+            return Ok(false);
+        }
+        if meta.is_dir() && !visit_actions(root, &child, visit)? {
             return Ok(false);
         }
     }
     Ok(true)
 }
 
-pub(in crate::profiles) fn already_present(daily: &Path, source: &Path) -> io::Result<bool> {
-    if !is_plain_directory(daily) || !is_plain_directory(source) {
-        return Ok(false);
+/// 两种比较遍历相同的导入范围，先处理顶层配置，再检查扩展。发现差异即可停止。
+fn visit_copy(
+    source: &Path,
+    mut visit: impl FnMut(&Path, &fs::Metadata) -> io::Result<bool>,
+) -> io::Result<bool> {
+    if !is_plain_directory(source) {
+        return Err(invalid(source));
     }
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
+    for entry in sorted_entries(source)? {
         let name = entry.file_name();
         let path = entry.path();
         let meta = path.symlink_metadata()?;
@@ -81,35 +83,80 @@ pub(in crate::profiles) fn already_present(daily: &Path, source: &Path) -> io::R
             && is_plain(&meta)
             && !is_cloud_path(&path)
             && transferable_file(&name.to_string_lossy())
-            && !same_file(&path, &meta, &daily.join(name))?
+            && !visit(Path::new(&name), &meta)?
         {
             return Ok(false);
         }
     }
-    let manifest = source.join(RAISHOT_MANIFEST_PATH);
-    if let Some(meta) = local_manifest_metadata(&manifest).map_err(io::Error::other)? {
-        let target = daily.join(RAISHOT_MANIFEST_PATH);
-        if local_manifest_metadata(&target)
-            .map_err(io::Error::other)?
-            .is_none()
-            || !same_file(&manifest, &meta, &target)?
-        {
+    let manifest = Path::new(RAISHOT_MANIFEST_PATH);
+    if let Some(meta) = local_manifest_metadata(&source.join(manifest)).map_err(io::Error::other)? {
+        if !visit(manifest, &meta)? {
             return Ok(false);
         }
     }
-    let actions = source.join("actions");
-    match actions.symlink_metadata() {
+    let actions = Path::new("actions");
+    match source.join(actions).symlink_metadata() {
         Ok(meta) if meta.is_dir() && is_plain(&meta) => {
-            let target = daily.join("actions");
-            let Some(packages) = packages::installed_folders(&actions, &target)? else {
-                return Ok(false);
-            };
-            same_actions(&actions, &target, Some(&packages))
+            Ok(visit(actions, &meta)? && visit_actions(source, actions, &mut visit)?)
         }
         Ok(_) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
-        Err(error) => Err(error),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e),
     }
+}
+
+pub(in crate::profiles) fn already_present(daily: &Path, source: &Path) -> io::Result<bool> {
+    if !is_plain_directory(daily) || !is_plain_directory(source) {
+        return Ok(false);
+    }
+    let mut folders = BTreeMap::new();
+    visit_copy(source, |relative, meta| {
+        let mut target = daily.join(relative);
+        if let Ok(action) = relative.strip_prefix("actions") {
+            let mut parts = action.iter();
+            if let Some(folder) = parts.next() {
+                if let Some(installed) = folders.get(folder) {
+                    target = daily.join("actions").join(installed).join(parts.as_path());
+                }
+            } else if meta.is_dir() {
+                let Some(installed) = packages::installed_folders(&source.join(relative), &target)?
+                else {
+                    return Ok(false);
+                };
+                folders = installed;
+            }
+        }
+        if meta.is_dir() {
+            return Ok(metadata(&target)?.is_some_and(|m| m.is_dir()));
+        }
+        if relative == Path::new(RAISHOT_MANIFEST_PATH)
+            && local_manifest_metadata(&target)
+                .map_err(io::Error::other)?
+                .is_none()
+        {
+            return Ok(false);
+        }
+        same_file(&source.join(relative), meta, &target)
+    })
+}
+
+/// 按路径、类型和文件内容计算摘要。长度前缀区分路径的边界，空目录也参与计算。
+pub(in crate::profiles) fn copy_digest(source: &Path) -> io::Result<[u8; 32]> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut hash = Sha256::new();
+    visit_copy(source, |relative, meta| {
+        let name: Vec<_> = relative.as_os_str().encode_wide().collect();
+        hash.update((name.len() as u64).to_le_bytes());
+        for unit in name {
+            hash.update(unit.to_le_bytes());
+        }
+        hash.update([u8::from(meta.is_file())]);
+        if meta.is_file() {
+            hash.update(digest(&source.join(relative))?);
+        }
+        Ok(true)
+    })?;
+    Ok(hash.finalize().into())
 }
 
 #[cfg(test)]
@@ -121,6 +168,48 @@ mod tests {
         let file = root.join(relative);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(file, bytes).unwrap();
+    }
+
+    #[test]
+    fn digest_covers_transferable_paths_and_bytes_in_a_stable_order() {
+        let root = crate::profiles::tests::temp_root("copy-digest");
+        let first = root.join("first");
+        let second = root.join("second");
+        let files = [
+            ("wheels.json", "layout"),
+            ("actions/pkg/run.js", "code"),
+            (RAISHOT_MANIFEST_PATH, "manifest"),
+        ];
+        for (name, value) in files {
+            save(&first, name, value.as_bytes());
+        }
+        for (name, value) in files.into_iter().rev() {
+            save(&second, name, value.as_bytes());
+        }
+        save(&first, "browser-connector.json", b"local");
+        save(&first, "backups/edits/old.json", b"backup");
+        save(&first, "actions/pkg/OneDrive-test/skipped.js", b"excluded");
+        let original = copy_digest(&first).unwrap();
+        assert_eq!(original, copy_digest(&second).unwrap());
+        for (name, value) in files {
+            save(&second, name, b"edited");
+            assert_ne!(original, copy_digest(&second).unwrap(), "{name}");
+            save(&second, name, value.as_bytes());
+        }
+        fs::rename(
+            second.join("actions/pkg/run.js"),
+            second.join("actions/pkg/new.js"),
+        )
+        .unwrap();
+        assert_ne!(original, copy_digest(&second).unwrap());
+        let lock = fs::File::options()
+            .read(true)
+            .share_mode(0)
+            .open(first.join("wheels.json"))
+            .unwrap();
+        assert!(copy_digest(&first).is_err());
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -2192,6 +2192,7 @@ pub(super) struct ExternalCopyChoice {
     root: PathBuf,
     directory: PathBuf,
     modified: u64,
+    digest: Option<[u8; 32]>,
 }
 
 pub(super) struct ExternalCopyNotice {
@@ -2199,8 +2200,10 @@ pub(super) struct ExternalCopyNotice {
     pub retry: Option<ExternalCopyChoice>,
 }
 
-fn read_copy_choices(root: &Path) -> Result<BTreeMap<String, u64>, String> {
-    let file = copy_choices_path(root);
+fn read_choice_record<T: serde::de::DeserializeOwned>(
+    root: &Path,
+    file: &Path,
+) -> Result<Option<T>, String> {
     let read = || {
         let device = file.parent().unwrap();
         if !crate::local_files::is_plain_directory(root) {
@@ -2214,13 +2217,31 @@ fn read_copy_choices(root: &Path) -> Result<BTreeMap<String, u64>, String> {
         if !meta.is_file() || !crate::local_files::is_plain(&meta) {
             return Err(std::io::Error::other("外部副本处理记录不是普通本机文件"));
         }
-        serde_json::from_slice(&std::fs::read(&file)?).map_err(std::io::Error::other)
+        serde_json::from_slice(&std::fs::read(file)?).map_err(std::io::Error::other)
     };
     match read() {
-        Ok(map) => Ok(map),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Ok(value) => Ok(Some(value)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("无法读取 {}。{e}", file.display())),
     }
+}
+
+fn read_copy_choices(root: &Path) -> Result<BTreeMap<String, u64>, String> {
+    Ok(read_choice_record(root, &copy_choices_path(root))?.unwrap_or_default())
+}
+
+// 旧版也会更新来源时间，只使用与该时间对应的摘要。每个来源只保留一份。
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+struct CopyReceipt {
+    modified: u64,
+    digest: [u8; 32],
+}
+
+fn receipt_path(root: &Path, key: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let source = Sha256::digest(key.as_bytes());
+    root.join("device")
+        .join(format!("external-copy-{source:x}.json"))
 }
 
 impl ExternalCopyChoice {
@@ -2233,12 +2254,28 @@ impl ExternalCopyChoice {
             let _lock = lock_catalog(&self.root)?;
             let mut ignored = read_copy_choices(&self.root)?;
             let key = normalize(&self.directory).to_ascii_lowercase();
-            if ignored.get(&key).is_some_and(|seen| *seen >= self.modified) {
+            let seen = ignored.get(&key).copied();
+            if seen.is_some_and(|seen| seen > self.modified) {
                 return Ok(());
             }
-            ignored.insert(key, self.modified);
-            let bytes = serde_json::to_vec_pretty(&ignored).map_err(|e| e.to_string())?;
-            crate::settings::atomic_write(&file, &bytes)
+            if seen != Some(self.modified) {
+                ignored.insert(key.clone(), self.modified);
+                let bytes = serde_json::to_vec_pretty(&ignored).map_err(|e| e.to_string())?;
+                crate::settings::atomic_write(&file, &bytes)?;
+            }
+            if let Some(digest) = self.digest {
+                let path = receipt_path(&self.root, &key);
+                let old: Option<CopyReceipt> = read_choice_record(&self.root, &path)?;
+                if old.is_none_or(|old| old.modified != self.modified) {
+                    let receipt = CopyReceipt {
+                        modified: self.modified,
+                        digest,
+                    };
+                    let bytes = serde_json::to_vec(&receipt).map_err(|e| e.to_string())?;
+                    crate::settings::atomic_write(&path, &bytes)?;
+                }
+            }
+            Ok(())
         })();
         result.map_err(|e: String| format!("外部副本的处理记录未保存。{e}"))
     }
@@ -2318,10 +2355,22 @@ fn pending_external_copy(
     copies: Vec<(String, PathBuf, u64)>,
     current_ms: Option<u64>,
     ignored: &BTreeMap<String, u64>,
-) -> Option<(String, PathBuf, u64)> {
-    // 仅在能够确认全部来源内容已存在时跳过；读失败仍沿用原有提示。
-    newer_copies(copies, current_ms, ignored).find(|(_, directory, _)| {
-        !external_import::already_present(root, directory).unwrap_or(false)
+) -> Option<(String, ExternalCopyChoice)> {
+    newer_copies(copies, current_ms, ignored).find_map(|(package, directory, modified)| {
+        // 在显示提示前固定用户看到的版本。关闭提示或稍后重试时不重新读取来源。
+        let digest = std::cell::LazyCell::new(|| external_import::copy_digest(&directory).ok());
+        let key = normalize(&directory).to_ascii_lowercase();
+        if let Some(&seen) = ignored.get(&key) {
+            let receipt = read_choice_record::<CopyReceipt>(root, &receipt_path(root, &key));
+            if matches!(receipt, Ok(Some(saved)) if saved.modified == seen && Some(saved.digest) == *digest) {
+                return None;
+            }
+        }
+        if external_import::already_present(root, &directory).unwrap_or(false) {
+            return None;
+        }
+        let digest = *digest;
+        Some((package, ExternalCopyChoice { root: root.to_owned(), directory, modified, digest }))
     })
 }
 
@@ -2348,9 +2397,7 @@ fn offer_external_copy(
             }))
         }
     };
-    let Some((package, directory, modified)) =
-        pending_external_copy(root, copies, current, &ignored)
-    else {
+    let Some((package, choice)) = pending_external_copy(root, copies, current, &ignored) else {
         return Ok(None);
     };
     let current_text = current
@@ -2358,8 +2405,8 @@ fn offer_external_copy(
         .unwrap_or_else(|| "还没有数据".into());
     let text = format!(
         "发现另一份更新的 OmniTrigger 数据：\n{}\n（来自 {package}，修改于 {}）\n\n当前数据目录：\n{}\n（{current_text}）\n\n这份副本通常是从其他应用的终端启动时被系统重定向保存的。\n\n是：导入这份数据，当前数据先备份到 backups 目录\n否：忽略这份副本，之后有新修改时再提示\n取消：本次不处理",
-        directory.display(),
-        relative_age(modified),
+        choice.directory.display(),
+        relative_age(choice.modified),
         root.display(),
     );
     let Some(import) =
@@ -2367,14 +2414,7 @@ fn offer_external_copy(
     else {
         return Ok(None);
     };
-    apply_external_copy_choice(
-        ExternalCopyChoice {
-            root: root.to_owned(),
-            directory,
-            modified,
-        },
-        import,
-    )
+    apply_external_copy_choice(choice, import)
 }
 
 #[cfg(windows)]
@@ -3459,6 +3499,75 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn ignored_external_copy_only_prompts_again_for_changed_contents() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::time::{Duration, UNIX_EPOCH};
+        let local = temp_root("ignored-copy-contents");
+        let daily = local.join("daily");
+        let source = local.join("Packages/sample/LocalCache/Local/OmniTrigger");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir(&daily).unwrap();
+        let set_time = |path: &Path, seconds| {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_secs(seconds))
+                .unwrap();
+        };
+        let file = source.join("bindings.json");
+        std::fs::write(daily.join("bindings.json"), b"daily").unwrap();
+        set_time(&daily.join("bindings.json"), 100);
+        std::fs::write(&file, b"external").unwrap();
+        set_time(&file, 200);
+        let pending = || {
+            pending_external_copy(
+                &daily,
+                external_copies(&daily, &local),
+                data_modified_ms(&daily),
+                &read_copy_choices(&daily).unwrap(),
+            )
+        };
+        let (_, choice) = pending().unwrap();
+        assert!(apply_external_copy_choice(choice, false).unwrap().is_none());
+        set_time(&file, 300);
+        assert!(pending().is_none(), "副本仅更新时间，程序却要再次询问");
+        std::fs::write(&file, b"External").unwrap();
+        set_time(&file, 300);
+        let (_, changed) = pending().expect("同长度的真实修改仍应提示");
+        let receipt = receipt_path(&daily, &normalize(&source).to_ascii_lowercase());
+        let lock = std::fs::File::options()
+            .read(true)
+            .share_mode(1)
+            .open(&receipt)
+            .unwrap();
+        let retry = apply_external_copy_choice(changed, false)
+            .unwrap()
+            .unwrap()
+            .retry
+            .unwrap();
+        std::fs::write(&file, b"external").unwrap();
+        set_time(&file, 400);
+        assert!(pending().is_some(), "时间记录更新后不能继续采用旧摘要");
+        std::fs::write(&file, b"newer!!!").unwrap();
+        set_time(&file, 400);
+        drop(lock);
+        retry.save().unwrap();
+        assert!(pending().is_some(), "重试不得忽略用户未见的新内容");
+        std::fs::write(&file, b"External").unwrap();
+        set_time(&file, 400);
+        assert!(pending().is_none());
+        std::fs::remove_file(&receipt).unwrap();
+        assert!(pending().is_some(), "只有旧版时间记录时不能推断内容相同");
+        assert_eq!(
+            std::fs::read(daily.join("bindings.json")).unwrap(),
+            b"daily"
+        );
+        std::fs::remove_dir_all(local).unwrap();
+    }
+
+    #[test]
     fn external_copy_with_a_newer_managed_action_is_offered_again() {
         use std::time::{Duration, UNIX_EPOCH};
         let root = temp_root("action-copy-time");
@@ -3541,13 +3650,8 @@ mod tests {
                 &read_copy_choices(&daily).unwrap(),
             )
         };
-        let (_, directory, modified) = pending().unwrap();
-        assert_eq!(modified, (before + 60) * 1000);
-        let choice = ExternalCopyChoice {
-            root: daily.clone(),
-            directory,
-            modified,
-        };
+        let (_, choice) = pending().unwrap();
+        assert_eq!(choice.modified, (before + 60) * 1000);
         assert!(apply_external_copy_choice(choice, true).unwrap().is_none());
         assert_eq!(
             std::fs::read(daily.join("bindings.json")).unwrap(),
@@ -3559,7 +3663,7 @@ mod tests {
             "已接受的同一副本在恢复本地备份后重复提示"
         );
         save_at(source.join("bindings.json"), b"new edit", before + 120);
-        assert_eq!(pending().unwrap().2, (before + 120) * 1000);
+        assert_eq!(pending().unwrap().1.modified, (before + 120) * 1000);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3586,6 +3690,7 @@ mod tests {
             root: daily.clone(),
             directory: source.clone(),
             modified: data_modified_ms(&source).unwrap(),
+            digest: external_import::copy_digest(&source).ok(),
         };
         let notice = apply_external_copy_choice(choice, true).unwrap().unwrap();
         assert!(notice.message.contains("副本已导入"));
@@ -3613,11 +3718,13 @@ mod tests {
             root: root.clone(),
             directory: root.join("a"),
             modified: 10,
+            digest: None,
         };
         let b = ExternalCopyChoice {
             root: root.clone(),
             directory: root.join("b"),
             modified: 20,
+            digest: None,
         };
         assert!(read_copy_choices(&root).unwrap().is_empty());
         a.save().unwrap();
@@ -3652,6 +3759,7 @@ mod tests {
             root: root.clone(),
             directory: root.join("copy"),
             modified: 10,
+            digest: None,
         };
         std::fs::write(&device, "占用目录名").unwrap();
         assert!(choice.save().is_err());
@@ -3674,6 +3782,7 @@ mod tests {
             root: root.clone(),
             directory: root.join("copy"),
             modified: 10,
+            digest: None,
         };
         let path = copy_choices_path(&root);
         let device = path.parent().unwrap();
