@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum WindowOperation {
     ToggleMaximize,
+    Restore,
     ToggleTopmost,
     Minimize,
     Close,
@@ -20,6 +21,7 @@ impl WindowAction {
     pub fn display(self) -> &'static str {
         match self.operation {
             WindowOperation::ToggleMaximize => "最大化 / 恢复",
+            WindowOperation::Restore => "恢复窗口",
             WindowOperation::ToggleTopmost => "置顶 / 取消置顶",
             WindowOperation::Minimize => "最小化",
             WindowOperation::Close => "关闭窗口",
@@ -29,6 +31,7 @@ impl WindowAction {
     pub fn platform_operation(self) -> omnitrigger_windows::WindowOperation {
         match self.operation {
             WindowOperation::ToggleMaximize => omnitrigger_windows::WindowOperation::ToggleMaximize,
+            WindowOperation::Restore => omnitrigger_windows::WindowOperation::Restore,
             WindowOperation::ToggleTopmost => omnitrigger_windows::WindowOperation::ToggleTopmost,
             WindowOperation::Minimize => omnitrigger_windows::WindowOperation::Minimize,
             WindowOperation::Close => omnitrigger_windows::WindowOperation::Close,
@@ -70,6 +73,14 @@ pub(crate) fn execute_with<T>(
         &mut dyn FnMut() -> Result<(), String>,
     ) -> Result<(), String>,
 ) -> Result<serde_json::Value, omnitrigger_actions::ActionError> {
+    // 命名结构体的序列形式不属于既有 window.action 对象合同。
+    if !params.is_object() {
+        return Err(fault(
+            "invalid_input",
+            "窗口操作参数必须为 JSON 对象。",
+            "not_started",
+        ));
+    }
     let action: WindowAction = serde_json::from_value(params)
         .map_err(|message| fault("invalid_input", message, "not_started"))?;
     check_action(cancellation, deadline, "not_started")?;
@@ -245,6 +256,125 @@ mod topmost_tests {
                     }
                 );
                 assert_eq!(error.effect_state.as_deref(), Some("unknown"));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::*;
+    use omnitrigger_actions::{ActionError, CancellationToken};
+    use serde_json::json;
+    use std::{cell::Cell, time::Instant};
+
+    #[test]
+    fn restore_roundtrips_and_maps_to_the_explicit_platform_operation() {
+        let action: WindowAction = serde_json::from_value(json!({"operation":"restore"})).unwrap();
+        assert_eq!(action.operation, WindowOperation::Restore);
+        assert_eq!(action.display(), "恢复窗口");
+        assert_eq!(
+            action.platform_operation(),
+            omnitrigger_windows::WindowOperation::Restore
+        );
+        assert_eq!(
+            serde_json::to_value(action).unwrap(),
+            json!({"operation":"restore"})
+        );
+    }
+
+    #[test]
+    fn restore_raw_wire_invalid_shapes_never_resolve_or_submit() {
+        for params in [
+            json!(["restore"]),
+            json!("restore"),
+            json!({"operation":"restore","hwnd":17}),
+        ] {
+            let error = execute_with(
+                params,
+                &CancellationToken::new(),
+                None,
+                || -> Result<(), ActionError> { panic!("无效还原参数不得解析目标") },
+                |_, _, _| panic!("无效还原参数不得提交"),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "invalid_input");
+            assert_eq!(error.method.as_deref(), Some("window.action"));
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        }
+    }
+
+    #[test]
+    fn restore_cancel_or_deadline_before_resolution_preserves_not_started() {
+        for cancelled in [false, true] {
+            let token = CancellationToken::new();
+            if cancelled {
+                token.cancel();
+            }
+            let error = execute_with(
+                json!({"operation":"restore"}),
+                &token,
+                Some(Instant::now()),
+                || -> Result<(), ActionError> { panic!("取消或过期不得解析目标") },
+                |_, _, _| panic!("取消或过期不得提交"),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, if cancelled { "cancelled" } else { "timeout" });
+            assert_eq!(error.method.as_deref(), Some("window.action"));
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        }
+    }
+
+    #[test]
+    fn restore_submits_once_and_does_not_claim_completion_or_retry_after_failure() {
+        for scenario in ["accepted", "rejected", "late_cancel", "guard_cancel"] {
+            let token = CancellationToken::new();
+            let calls = Cell::new(0);
+            let result = execute_with(
+                json!({"operation":"restore"}),
+                &token,
+                None,
+                || Ok(17),
+                |target, operation, check| {
+                    assert_eq!(target, 17);
+                    assert_eq!(operation, omnitrigger_windows::WindowOperation::Restore);
+                    if scenario == "guard_cancel" {
+                        token.cancel();
+                    }
+                    check()?;
+                    calls.set(calls.get() + 1);
+                    if scenario == "late_cancel" {
+                        token.cancel();
+                    }
+                    if scenario == "rejected" {
+                        Err("未接纳".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(calls.get(), if scenario == "guard_cancel" { 0 } else { 1 });
+            if scenario == "accepted" {
+                assert_eq!(result.unwrap(), json!({"submitted":true}));
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error.code,
+                    if scenario == "rejected" {
+                        "window_action_failed"
+                    } else {
+                        "cancelled"
+                    }
+                );
+                assert_eq!(error.method.as_deref(), Some("window.action"));
+                assert_eq!(
+                    error.effect_state.as_deref(),
+                    Some(if scenario == "guard_cancel" {
+                        "not_started"
+                    } else {
+                        "unknown"
+                    })
+                );
             }
         }
     }

@@ -45,6 +45,26 @@ pub(super) fn run_brightness_step(
     })
 }
 
+// 仅把guarded策略的provider边界提成可注入私有函数；不创建执行器。
+#[cfg(any(windows, test))]
+pub(super) fn run_guarded_brightness_step(
+    point: (i32, i32),
+    physical: impl FnOnce(
+        &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
+    ) -> Result<PhysicalBrightnessSetResult, SystemAdjustmentError>,
+    wmi: impl FnOnce(
+        &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
+    ) -> Result<FirstWmiBrightnessResult, SystemAdjustmentError>,
+    check: &mut dyn FnMut(bool) -> Result<(), SystemAdjustmentError>,
+) -> Result<BrightnessStepOutcome, SystemAdjustmentError> {
+    check(false)?;
+    let physical = physical(check);
+    if check(false).is_err() {
+        return Ok(BrightnessStepOutcome::Physical(physical));
+    }
+    run_brightness_step(|| Ok(point), |_| physical, || wmi(check))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{
@@ -265,4 +285,5 @@ mod tests {
             BrightnessStepOutcome::Physical(Ok(_))
         ));
     }
+    include!("brightness_step_guard_tests.rs");
 }

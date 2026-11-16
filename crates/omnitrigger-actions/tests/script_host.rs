@@ -53,6 +53,7 @@ impl Fixture {
                 runtime: "script".into(),
                 entry: "main.js".into(),
                 single_instance: false,
+                allow_binding_reentry: false,
             },
         }
     }
@@ -374,6 +375,77 @@ fn script_host_round_trip_has_real_context_without_node() {
     assert_eq!(
         output,
         json!({"input":input,"invocation":{"invocation_id":u64::MAX.to_string(),"binding_id":"9007199254740993"},"version":1})
+    );
+}
+
+#[test]
+#[ignore = "显式真实宿主；也用于验证旧同步宿主忽略新增可选连接字段"]
+fn optional_browser_async_context_keeps_plain_script_and_hidden_context_compatible() {
+    struct Host(AtomicU64);
+    impl NativeHost for Host {
+        fn browser_async_available(&self) -> bool {
+            true
+        }
+        fn call(&self, _: &str, _: Value, _: &CancellationToken) -> Result<Value, ActionError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ActionError::new(
+                "unexpected_native_call",
+                "纯入口不应派发本机调用。",
+            ))
+        }
+    }
+    let fixture = Fixture::new("return {version:ctx.apiVersion,input:ctx.input,hidden:Object.hasOwn(ctx,'__nativeContext')};");
+    let host = Host(AtomicU64::new(0));
+    let output = runtime()
+        .execute_with_host(
+            &fixture.action(json!({"text":"可选连接不改变同步入口"})),
+            &context(),
+            &CancellationToken::new(),
+            Some(&host),
+        )
+        .unwrap();
+    assert_eq!(
+        output,
+        json!({"version":1,"input":{"text":"可选连接不改变同步入口"},"hidden":false})
+    );
+    assert_eq!(host.0.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+#[ignore = "显式指定含UTF-8环境的真实Boa或QuickJS宿主；无本机能力"]
+fn script_text_encoder_keeps_utf8_boundaries_counts_and_real_array_brand() {
+    let fixture = Fixture::new(
+        r#"
+        const encoder = new TextEncoder();
+        const text = 'A中😀\ud800';
+        const destination = new Uint8Array(9).fill(165);
+        const progress = encoder.encodeInto(text, destination);
+        let forged = false, wrongArray = false, receiver = false;
+        try { encoder.encodeInto('a', {[Symbol.toStringTag]:'Uint8Array',length:9}); }
+        catch (error) { forged = error instanceof TypeError; }
+        try { encoder.encodeInto('a', new Uint16Array(9)); }
+        catch (error) { wrongArray = error instanceof TypeError; }
+        try { TextEncoder.prototype.encode.call({}, 'a'); }
+        catch (error) { receiver = error instanceof TypeError; }
+        return {encoding:encoder.encoding,bytes:Array.from(encoder.encode(text)),
+            progress,destination:Array.from(destination),forged,wrongArray,receiver};
+    "#,
+    );
+    let output = runtime()
+        .execute(
+            &fixture.action(json!({})),
+            &context(),
+            &CancellationToken::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        output,
+        json!({
+            "encoding":"utf-8", "bytes":[65,228,184,173,240,159,152,128,239,191,189],
+            "progress":{"read":4,"written":8},
+            "destination":[65,228,184,173,240,159,152,128,165],
+            "forged":true,"wrongArray":true,"receiver":true
+        })
     );
 }
 

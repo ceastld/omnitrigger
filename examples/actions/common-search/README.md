@@ -82,9 +82,19 @@ UTF-16预算可能落在代理对中间，此时返回`query_utf16_boundary`，�
 
 分隔符、模板和查询预算错误在复制前拒绝；文件格式/数据错误在复制后报告 unknown。目标、复制、stat 或打开接口的结构化错误原样传播，不回退；接口自身的 not_started 不代表之前没有复制效果。source:"text"/"selection" 默认行为不变；新文件列表连接是明确的调用契约。
 
-定向测试只使用内存元数据与合成选区：
+仓库中的业务回归只使用内存元数据与合成选区：
 
 ```powershell
 node --test examples/actions/common-search/recipes.test.mjs examples/actions/common-search/open-or-search.test.mjs
-node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p examples/actions/common-search/jsconfig.json
 ```
+
+在本工程目录中可独立安装并检查作者类型环境，不需要仓库的 crates、tools 或 node_modules：
+
+```powershell
+npm ci --ignore-scripts
+npm run check
+```
+
+TypeScript 5.9.3 仅为开发依赖；严格检查保留 ES2020 与 types:[]，不向 Script 添加 DOM 或 Node 全局。
+
+作者类型环境由同包 `sdk/api.d.ts` 提供同步 `ScriptMain` / `ScriptContext`，移动时保留该文件及 `jsconfig.json`。配置使用 `moduleDetection:"force"` 隔离两个旧 `.js` 入口的类型作用域，不改变函数体协议或运行代码。统一检查器不执行模块；旧函数体入口会保留 `legacy_function_body_protocol` 标记，因此类型通过不能当作实际加载、宿主能力或打开/搜索效果已经验证。

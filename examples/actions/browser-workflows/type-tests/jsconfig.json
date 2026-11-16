@@ -1,0 +1,7 @@
+{
+  "extends": "../jsconfig.json",
+  "files": [
+    "duplicate-tab.ts",
+    "../sdk/script-types.d.ts"
+  ]
+}

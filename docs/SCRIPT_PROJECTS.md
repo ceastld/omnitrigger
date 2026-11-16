@@ -31,7 +31,7 @@ node tools/script-project.mjs create --runtime script --binary $app --config $co
 | 运行时 | ESM 入口 | SDK 调用 |
 | --- | --- | --- |
 | Node | `export default async function main(ctx)` | 返回 Promise，需要等待结果 |
-| 轻量脚本 | `export function main(ctx)`，使用 `ScriptMain` 类型 | 同步返回 |
+| 轻量脚本 | `export function main(ctx)` 或 async 函数，分别使用 `ScriptMain` / `ScriptAsyncMain` 类型；须具名导出 main | 返回 JSON 值或其 Promise |
 
 Node 的入口必须默认导出可调用函数。新建 Node 工程的 `npm run check` 会先运行严格类型检查，再按 `action.json` 检查实际入口的默认导出与明确不支持的顶层返回类型。检查不执行作者代码，也不输出编译文件。
 
@@ -54,7 +54,9 @@ export default async function main(ctx) {
 
 ## 编辑器与静态检查入口
 
-在 VS Code 中打开包含 `action.json` 和 `jsconfig.json` 的动作包根文件夹，再打开入口。启用内置 JavaScript/TypeScript 语言功能时，语言服务会自动发现入口所在目录的 `jsconfig.json`；不必把 SDK 声明逐个手动打开。新建 Node 工程先按下文安装本工程开发依赖，轻量工程无需 Node 环境类型。补全依赖入口的 JSDoc 标注：Node 使用 `import('./sdk/api').ActionContext`，轻量模块使用 `ScriptMain`。跳转定义应落到当前包的 SDK，Node API 的补全签名包含 Promise，轻量 API 为同步签名。
+在 VS Code 中打开包含 `action.json` 和 `jsconfig.json` 的动作包根文件夹，再打开入口。启用内置 JavaScript/TypeScript 语言功能时，语言服务会自动发现入口所在目录的 `jsconfig.json`；不必把 SDK 声明逐个手动打开。新建 Node 工程先按下文安装本工程开发依赖，轻量工程无需 Node 环境类型。补全依赖入口的 JSDoc 标注：Node 使用 `import('./sdk/api').ActionContext`，轻量模块使用 `ScriptMain`。跳转定义应落到当前包的 SDK，Node API 的补全签名包含 Promise；轻量 API 的原方法保持同步，新增 `browser.callAsync/profilesAsync` 返回 Promise。新版轻量宿主提供全局 UTF-8 `TextEncoder` 的 `encoding/encode/encodeInto`，使用 ES2022 和 `types:[]` 即可检查，无需增加 DOM 或 Node 环境类型。
+
+`ScriptMain` 描述可返回 JSON 或 Promise 的通用入口。需要让其他模块直接同步调用入口时，可改用 `@param {ScriptContext} ctx` 和 `@returns {ScriptJsonValue}` 明确同步返回类型；直接声明 async 函数时使用 `ScriptAsyncMain`。
 
 每个动作包保留自己的配置和声明快照。不要为了同时编辑多个包而把它们的 SDK 声明汇总到一个 `jsconfig.json`；这会混合不同全局声明或带独立标记的捕获类型。修改代码后的错误应定位到当前入口的行列，例如 Node 未等待 `ctx.desktop.target()` 就读取 `processName`，或调用不存在的 API。
 
@@ -64,7 +66,7 @@ export default async function main(ctx) {
 node tools/script-sdk-check/check-project-types.mjs "$root/actions/script-demo"
 ```
 
-该命令读取指定包自己的 SDK 与配置，输出类型诊断及模块/入口检查结果，不执行作者初始化器或入口。类型诊断的 `file`、`line`、`column` 使用包内路径和从 1 开始的位置。它会按清单运行时分别核验轻量具名导出和 Node 默认导出，Node 结果见 `nodeEntryChecks`。纯 Node 的 `types:["node"]` 只解析包内显式依赖；缺少 Node 环境声明时真实报错。同一配置混合两种运行时时，非空 `types` 仍明确拒绝；需要 Node 内置模块的包可使用[分目录就近配置示例](../examples/actions/mixed-projects/README.md)，让同步入口保持独立环境。完整边界见[工程检查说明](../tools/script-sdk-check/PROJECT_CHECK.md)。静态通过不代表宿主或目标软件已经验收。
+该命令读取指定包自己的 SDK 与配置，输出类型诊断及模块/入口检查结果，不执行作者初始化器或入口。类型诊断的 `file`、`line`、`column` 使用包内路径和从 1 开始的位置。它会按清单运行时分别核验轻量具名 main 入口和 Node 默认导出，Node 结果见 `nodeEntryChecks`。纯 Node 的 `types:["node"]` 只解析包内显式依赖；缺少 Node 环境声明时真实报错。同一配置混合两种运行时时，非空 `types` 仍明确拒绝；需要 Node 内置模块的包可使用[分目录就近配置示例](../examples/actions/mixed-projects/README.md)，让同步入口保持独立环境。完整边界见[工程检查说明](../tools/script-sdk-check/PROJECT_CHECK.md)。静态通过不代表宿主或目标软件已经验收。
 
 ## 通过正式 NodeRuntime 运行
 
@@ -120,7 +122,11 @@ node tools/script-project.mjs refresh --runtime script --project "$root/actions/
 
 普通包的每份声明须与所选来源相同，或属于工具已识别的随包规范快照。作者改过声明或快照未知时返回 `project_sdk_unrecognized`；缺件返回 `project_sdk_layout_incomplete`；根目录声明与旧 `sdk/api.d.ts` 并存等布局歧义返回 `project_sdk_layout_ambiguous`。这些预检失败均不写入声明。应先核对并保留作者改动，再选择与实际运行版本配套的声明来源。这项归属检查只适用于上述已识别普通包布局，旧生成布局的替换策略不变。
 
-各声明文件分别替换，刷新不是跨文件事务。中途失败可能留下部分已更新的 SDK；作者文件保持不变，排除原因后可显式再次刷新。
+同时含 Node 与 Script 动作的既有分离布局也可刷新：`types/api.d.ts`、`types/clipboard-history-api.d.ts` 使用 Node 与历史声明，`sdk/api.d.ts` 别名使用 Script 同步声明。命令保持这三个路径，不搬移声明或改作者导入；选择包中任一运行时都按各自声明身份一起预检和更新。缺件、与根目录或完整 `sdk/` 布局并存、声明被作者修改时会拒绝，不先覆盖其中一部分。刷新回执的 `layout` 为 `split`。
+
+完整 `sdk/` 布局若已有受支持的 `sdk/snapshot.json`，刷新也同步其三份声明的 SHA-256，保留原有 API、wire 和来源标签。当前识别亮度步进、音量百分点示例的版本 1 生成格式；不新建快照或改写其它格式。写入前要求元数据结构和归属已知，所记指纹、当前及目标声明均属于各文件已登记版本。已知旧指纹与已知较新声明可以一并刷新；未知元数据或指纹返回 `project_sdk_snapshot_unrecognized`，未知声明仍为 `project_sdk_unrecognized`，均在任何替换之前拒绝。`source/canonical_source` 只用于校验标签，不作为读取路径。刷新后继续运行包自己的检查命令。
+
+声明和已有生成快照全部通过预检及统一复查后才开始逐文件替换；复查发现同时改动返回 `project_sdk_changed`。刷新不是跨文件事务，写入中途的文件系统错误可能留下部分已更新的 SDK；作者文件保持不变，应先核对当前声明与快照再处理失败。
 
 使用与实际应用版本配套的声明来源。默认来源是当前仓库；`--source-root` 是显式开发接口。界面的“重新加载”只刷新动作目录，不等同于此命令的 SDK 刷新。
 
@@ -156,7 +162,7 @@ node tools/script-sdk-check/check-node-entry.cjs $package
 
 这不会为包安装或补齐环境声明。若作者代码使用 Node 内置 API，仍需按本包配置安装相应开发依赖；SDK 声明本身不提供 `node:fs` 等内置模块或 `process` 等全局类型。
 
-两类工程均开启 `checkJs`、严格检查和无输出模式。SDK 的只读捕获类型、Node Promise 返回值和相对模块导入均参与检查；运行时入口核对仍使用前面的正式调用命令。既有 Node 工程的作者配置不自动迁移，作者可自行添加相同开发依赖与 Node 类型配置；SDK 刷新仍只更新声明。
+两类工程均开启 `checkJs`、严格检查和无输出模式。SDK 的只读捕获类型、Node Promise 返回值和相对模块导入均参与检查；运行时入口核对仍使用前面的正式调用命令。既有 Node 工程的作者配置不自动迁移，作者可自行添加相同开发依赖与 Node 类型配置；SDK 刷新只更新声明、对应检查器及已识别的现有生成指纹。
 
 ## 取消信号与环境类型
 
@@ -173,3 +179,5 @@ ctx.signal.removeEventListener('abort', onAbort);
 运行时仍传递原生取消信号；声明只覆盖 SDK 的取消观察契约。SDK 不引用完整 DOM 库，因此不会为 Node 工程添加 `window`、`document` 等浏览器全局，也不会给同步轻量工程添加 `process`、`Buffer`、`require` 等 Node 全局。新建 Node 工程通过自己的开发依赖和 `jsconfig.json` 显式加载 Node 类型；同步轻量工程保持独立。SDK 刷新不修改作者的 `package.json` 或 `jsconfig.json`。
 
 工程已经提供原生 `AbortSignal` 声明时，`ctx.signal` 沿用该类型，继续兼容需要原生信号的函数；没有环境声明时才使用独立的观察接口。SDK 不会为了取得信号类型自动加入环境库。
+
+同步函数或返回 Promise 的普通函数使用 `ScriptMain`。直接声明 `async function` 时使用 `/** @type {ScriptAsyncMain} */`：TypeScript 的 JSDoc 要求 async 函数的返回注释直接为 Promise，不能使用 JSON 与 Promise 的联合返回注释。两者使用相同的上下文，最终结果都必须是 JSON。

@@ -76,7 +76,7 @@ node tools/js-engine-probe/check-install.mjs target/debug/omnitrigger.exe .tmp/s
 {"schema_version":1,"ok":true,"result":{"total":6}}
 ```
 
-入口为同步函数体，通过 `ctx.input` 读入 JSON 对象，`return` 返回 JSON 值。失败带有 `schema_version:1` 和 `ok:false` 并以退出码 1 结束，普通异常的 `error` 为原因字符串，桌面异常为保留 `code`、`effect_state` 和 `method` 的对象。支持的语言语法以实际引擎为准；回归覆盖箭头函数、可选链、空值合并、BigInt 运算后转字符串、中文及特殊字符。拒绝 Promise、无返回值、语法错误和不能 JSON 序列化的返回值。
+入口为函数体，通过 `ctx.input` 读入 JSON 对象，`return` 返回 JSON 值。失败带有 `schema_version:1` 和 `ok:false` 并以退出码 1 结束，普通异常的 `error` 为原因字符串，桌面异常为保留 `code`、`effect_state` 和 `method` 的对象。支持的语言语法以实际引擎为准；回归覆盖箭头函数、可选链、空值合并、BigInt 运算后转字符串、中文及特殊字符。新版宿主等待入口 Promise，最终结果须为 JSON；拒绝无返回值、语法错误和不能 JSON 序列化的返回值。异步浏览器能力需应用配置专用通道，原有宿主 API 保持同步。
 
 用户代码与 SDK 分别以 `action.js`、`omnitrigger-sdk.js` 求值，用户函数内部的调用栈行号对应输入代码；应用自动调用 `main` 的尾部栈帧属于执行包装。首行列号包含执行包装的函数前缀，不提供源映射。应用接入会在错误前附带实际入口文件路径。诊断文本按 UTF-8 限制为 16 KiB，JSON 编码后的消息另限 32 KiB；超限保留首尾与截断标记。读取原生错误的 `code`、`effect_state`、`method` 和 `required_permissions` 不改变这些字段；语法和限额异常的位置细节仍受引擎限制。这些改动保持协议版本 1。
 

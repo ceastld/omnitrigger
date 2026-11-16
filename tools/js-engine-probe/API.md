@@ -1,10 +1,10 @@
 # 首批脚本 API
 
-状态：可运行的同步原型，不是正式插件。两种引擎加载同一份 `src/sdk.js`，通过 JSON 桥接到 Rust。桌面 API 与 Node 共用参数校验定义，应用接入时经每次调用独立的回环连接交给现有 `NativeHost`；独立 CLI 的剪贴板和打开目标复用 `omnitrigger-windows`。不安装 Hook，不访问 GPUI。`ctx.apiVersion` 为 `1`。[类型声明](../../crates/omnitrigger-actions/runtime/script-api.d.ts)用于编辑器补全，不提供 TS 转译。
+状态：可运行的脚本宿主原型，不是正式插件。两种引擎加载同一份 `src/sdk.js`，通过 JSON 桥接到 Rust。桌面 API 与 Node 共用参数校验定义，应用接入时经每次调用独立的回环连接交给现有 `NativeHost`；独立 CLI 的剪贴板和打开目标复用 `omnitrigger-windows`。不安装 Hook，不访问 GPUI。`ctx.apiVersion` 为 `1`。[类型声明](../../crates/omnitrigger-actions/runtime/script-api.d.ts)用于编辑器补全，不提供 TS 转译。
 
 Windows MSVC 的 Boa 宿主为共享 SDK 的解析保留 8 MiB 原生主栈；这不是预先提交的全部内存，也不改变 JS 的循环、递归和动作时限。QuickJS 的配置保持原值。
 
-通过 OmniTrigger 的 `script` 动作运行时接入时，`.mjs` 文件具名导出同步 `main(ctx)` 并可导入包内相对模块；已有 `.js` 文件声明 `function main(ctx)`，适配层继续将它转为函数体请求，文件本身保持标准 JavaScript。模块契约见[包内模块](MODULES.md)。`ctx.packageRoot` 为动作包目录，`ctx.invocation` 包含十进制字符串调用身份。独立 CLI 可以省略这些元数据，此时两项为 `null`。成功与失败响应均带有 `schema_version: 1`。
+通过 OmniTrigger 的 `script` 动作运行时接入时，`.mjs` 文件具名导出 `main(ctx)`（可为 async） 并可导入包内相对模块；已有 `.js` 文件声明 `function main(ctx)`，适配层继续将它转为函数体请求，文件本身保持标准 JavaScript。模块契约见[包内模块](MODULES.md)。`ctx.packageRoot` 为动作包目录，`ctx.invocation` 包含十进制字符串调用身份。独立 CLI 可以省略这些元数据，此时两项为 `null`。成功与失败响应均带有 `schema_version: 1`。
 
 | API | 行为 |
 | --- | --- |
@@ -13,6 +13,7 @@ Windows MSVC 的 Boa 宿主为共享 SDK 的解析保留 8 MiB 原生主栈；�
 | `ctx.process.run(program, args, {timeoutMs})` | 程序和参数数组分别传递，不隐式经过 Shell。返回 `{pid, exitCode, success}`；默认等待 1000 毫秒，允许 1–1000 毫秒。非零退出由脚本判断，stdout / stderr 不采集。 |
 | `ctx.process.capture(program, args?, options?)` | 同步采集 Windows 程序输出，返回 `{code, stdout, stderr}`；默认预算 10 秒、默认拒绝非零退出，双流合计最多 64 KiB，严格 UTF-8。详见[程序输出采集](#程序输出采集)。 |
 | `ctx.process.start(program, args)` | 创建独立程序后返回 `{pid}`，程序不随脚本结束关闭；PID 不表示窗口已显示或界面就绪。Windows 使用 `CREATE_NO_WINDOW` 避免控制台窗口，不主动隐藏 GUI 窗口。此同步 API 不提供第三个选项参数；Node 的 `windowsHide` 选项不适用于此处。 |
+| `ctx.fs.sortLogicalPaths(paths)` | 同步调用Windows完整字符串逻辑排序，返回冻结只读数组；最多1024项、单项32767 UTF-16、`{paths}` UTF-8 JSON最多64KiB。保留空串、NUL、重复、相对文本；不查文件、不要求前台。需要能力`fs.sort_logical_paths.v1`；非Windows或无本机桥为`fs_unavailable`，不回退JS排序。 |
 | `ctx.delay(milliseconds)` | 同步等待 0–60000 毫秒的整数，返回 `undefined`；字符串、小数、非有限数等返回 `invalid_input`，不做隐式转换。 |
 | `ctx.ui.choose({items, title?, placeholder?, timeoutMs?})` | 应用 GPUI 界面中的可搜索选择菜单，返回稳定 ID 或明确取消；Node 入口使用 `await`。独立 CLI 返回 `ui_unavailable`。参数与示例见[脚本选择菜单](../../examples/actions/script-choice/)。 |
 | `ctx.desktop.target()` / `targetContext()` | 查询提交时捕获的原目标或导出 29 秒有效的目标快照；为调用方时钟粒度预留余量，提交校验上限仍为 30 秒。不重新选择前台。仅应用接入可用。 |
@@ -21,6 +22,8 @@ Windows MSVC 的 Boa 宿主为共享 SDK 的解析保留 8 MiB 原生主栈；�
 | `ctx.desktop.readSelectionText(options?)` | 只读原目标中当前焦点控件的单一 UIA 选区，返回 `{text,truncated}`。默认拒绝超过 128 UTF-16 单元的文本，显式 `overflow:'truncate'` 截取前缀。仅应用接入可用。 |
 | `ctx.desktop.captureForegroundTarget(options)` | 按明确 PID、FILETIME 字符串和 1–5000 毫秒有效期，捕获该进程当前前台；返回当前动作内的只读目标引用。仅应用接入可用。 |
 | `ctx.desktop.sendShortcutTo(target, keys, options?)` / `sendTextTo(target, text)` | 对捕获引用发送快捷键或 Unicode 文本；逐步复验身份、前台、取消和期限，原 `desktop` 目标保持不变。快捷键仅支持可选 `keyDownDelayMs`。 |
+| `ctx.desktop.pressLeftButton()` | 当前真实动作作用域只按下原目标的鼠标左键；无参数，返回 submitted:true/effectState:unknown，需 mouse.owned_left.v1。 |
+| `ctx.desktop.releaseLeftButton()` | 结束本 owner 的按下；无参数，返回 ownedPressEnded:true/effectState:unknown，不证明物理设备当前状态。 |
 | `ctx.desktop.sendShortcut(keys, options)` | 1–5 个 VK 整数，修饰键在前；支持 `keyDownDelayMs` 或原生 `timing` 配置，二者互斥。 |
 | `ctx.desktop.sendKeySequence(modifiers, keys, options)` | 0–4 个修饰键和 1–16 个普通键；修饰键跨越整组，`keyDownDelayMs` 为 0–1000 毫秒，单次等待合计最多 3000 毫秒。 |
 | `ctx.desktop.sendText(text)` | 向原目标直接发送 Unicode，不经过剪贴板；最多 65,536 个 UTF-16 单元，不含 NUL 或孤立代理项。 |
@@ -69,9 +72,15 @@ return { submitted: true };
 
 捕获不枚举、不激活窗口，不把进程身份当作浏览器 `windowId` 到 HWND 的关联。发送返回 `{submitted:true}` 仅确认系统接纳输入；输入前明确拒绝为 `not_started`，进入平台提交后未获确认的失败为 `unknown`。租约使用宿主单调时钟并受动作总期限约束，不自动重试。应用和轻量宿主须同时具备这些入口；独立引擎 CLI 没有应用目标桥接时明确报错。
 
+`sendShortcut`、`sendKeySequence` 和 `sendShortcutTo` 的按键参数只接受键盘 VK；鼠标按钮 VK `1/2/4/5/6` 在调用 Native 前以 `invalid_input`、`not_started` 拒绝，不产生键盘或鼠标输入。错误的 `method` 分别为 `keyboard.shortcut`、`keyboard.sequence`、`target.keyboard.shortcut`。这三项键盘接口不负责鼠标按钮的按下、释放或所有权收尾。
+
+## 亮度取消与超时回执
+
+亮度调用因 cancelled 或 timeout 结束且 effectState 为 unknown 时，错误可附可选的 brightnessReceipt，复用成功回执的匿名逐台结构；wire 字段为 brightness_receipt。仅接纳明确的 display.brightness_step 错误、原请求策略一致且通过既有 DTO 校验的进度。缺失字段不表示没有作用，已确认成员也不代表整轮成功；不得据此自动重试、补偿或切换 provider。连接断开或外层已先返回取消时，不能保证进度送达。
+
 ## 程序输出采集
 
-`ctx.process.capture` 在 Windows 上共用一份 Rust 采集后端：Boa、QuickJS 同步返回，Node 动作通过应用原生桥接返回 Promise，须逐次 `await`。需要更新应用和相应宿主；类型声明或示例更新不能为旧构建增加能力。Node 无原生桥接时明确失败，不回退 `run`。已有两种程序输出配方见[程序输出通知动作](../../examples/actions/process-output/)。
+`ctx.process.capture` 在 Windows 上共用一份 Rust 采集后端：Boa、QuickJS 同步返回，Node 返回 Promise，须逐次 `await`。应用内三种运行时均通过应用原生桥接采集，不要求原目标窗口；宿主仍可拒绝不支持的调用。需要更新应用和相应宿主；类型声明或示例更新不能为旧构建增加能力。应用绑定的轻量脚本在建桥失败或调用失败时不会退回引擎本地启动，Node 无原生桥接时也明确失败，不回退 `run`。已有两种程序输出配方见[程序输出通知动作](../../examples/actions/process-output/)。
 
 ```js
 const result = ctx.process.capture('C:\\OwnedFixture\\program.exe', ['--format', 'json'], {
@@ -88,14 +97,14 @@ return { code: result.code, stdoutLength: result.stdout.length };
 | --- | --- |
 | `program` | 本地盘符绝对 `.exe` 路径，不查找 `PATH`，不隐式调用 Shell；拒绝 UNC、设备路径和 `.` / `..` 路径段。脚本须显式指定解释器 EXE 与参数，不能直接传入 `.cmd` / `.bat`。 |
 | `args` | 默认 `[]`，最多 128 个字符串；保留参数边界，按 Windows 命令行规则编码。程序和参数须为有效 Unicode，不含 NUL；完整命令行连同结束 NUL 最多 32,767 个 UTF-16 单元。 |
-| `options.cwd` | 可选的本地盘符绝对目录路径，拒绝 `.` / `..`、NUL 和非字符串；Node 省略时使用动作包目录；轻量宿主省略时继承宿主工作目录。需要稳定目录时显式设置。 |
+| `options.cwd` | 可选的本地盘符绝对目录路径，拒绝 `.` / `..`、NUL 和非字符串；Node 省略时使用动作包目录；轻量脚本在应用内继承应用进程工作目录，独立引擎 CLI 继承引擎进程工作目录。需要稳定目录时显式设置。 |
 | `options.timeoutMs` | 1–60,000 的整数，默认 10,000 毫秒。未知选项、错误类型或非法值在启动前拒绝，不隐式转换。 |
 | `options.allowNonZero` | 布尔值，默认 `false`；非零退出抛出 `process_exit_nonzero`。设为 `true` 才返回该退出码与完整输出。 |
 | 返回值 | 恰含 `{code, stdout, stderr}`，`code` 为有符号 32 位退出码。两个流的原始字节合计最多 65,536，包含 stderr；等待直接进程退出和双流 EOF 后分别严格解码 UTF-8，不补替换字符。NUL 是合法输出字符，后续显示接口可有更严格限制。 |
 
 超出字节上限返回 `process_output_too_large`，无效 UTF-8 返回 `process_invalid_utf8`；错误不返回部分输出。双流交替采集，后代持有管道导致 EOF 未到也受预算约束。`timeoutMs` 是在创建、采集和等待阶段观察的预算，不能中断阻塞中的操作系统调用，不是硬实时超时；收尾可能额外等待约一秒。通过动作服务调用时，外层动作总时限可能更短，并会终止直接脚本宿主；独立 CLI 没有这层动作期限。
 
-采集使用 Windows 10+ 私有 Job，在进程创建时关联，收尾时终止 Job 内进程并检查直接进程退出及 Job 内活动进程归零，再交付结果。轻量宿主持有自己的 Job，宿主被强制终止后由操作系统关闭句柄并终止其中进程。Node 的 Job 由应用持有；Node 退出或断连由桥接检测并请求协作取消和收尾，不能等同于轻量宿主的操作系统直接关闭保证。Job 建立或关联失败即报错，不回退到无 Job 启动；不支持的平台返回 `unsupported_platform`。该范围仅覆盖 Job 内进程，不能保证外部服务或未包含的进程结束，也不能撤销程序已经产生的副作用；现有 `start` 独立程序的生命周期保持不变。
+采集使用 Windows 10+ 私有 Job，在进程创建时关联，收尾时终止 Job 内进程并检查直接进程退出及 Job 内活动进程归零，再交付结果。应用内 Node 和轻量脚本的 Job 均由应用持有；脚本退出或断连由桥接检测并请求协作取消和收尾。独立引擎 CLI 才持有自己的 Job，其进程被强制终止后由操作系统关闭句柄并终止其中进程。Job 建立或关联失败即报错，不回退到无 Job 启动；不支持的平台返回 `unsupported_platform`。该范围仅覆盖 Job 内进程，不能保证外部服务或未包含的进程结束，也不能撤销程序已经产生的副作用；现有 `start` 独立程序的生命周期保持不变。
 
 SDK 异常固定 `method: 'process.capture'`，消息为“程序输出采集未完成，请检查错误代码。”，不回显路径、参数或输出。JS 使用 `effectState`，原生协议使用 `effect_state`：确认尚未启动为 `not_started`，已启动后失败或效果不确定为 `unknown`。常见错误如下；脚本应按代码处理，不自动重试。
 
@@ -128,7 +137,7 @@ function main(ctx) {
 
 `target()` 只查询原目标；发送前由应用再次核验进程身份、前台和取消状态，并复用现有按键释放收尾逻辑。`submitted` 只表示系统接纳输入，不表示业务动作完成。独立 CLI 没有目标上下文时返回 `desktop_unavailable`，不会自行选择前台。
 
-桌面异常的 `code`、`method`、`effectState` 可在 JS 中捕获，未捕获时保留在动作终态。`not_started` 仅描述该次 API，不能证明此前脚本没有副作用；网络中断或无法确认是否执行时为 `unknown`。桥接失败不自动重试，也不退回宿主直接访问剪贴板。客户端每次连接只发送一帧，普通桌面请求最多等待 5 秒，`copySelectionData` 为 8 秒；交互选择和浏览器请求另有等待期限，外层动作仍受总时限约束。
+桌面异常的 `code`、`method`、`effectState` 可在 JS 中捕获，未捕获时保留在动作终态。`not_started` 仅描述该次 API，不能证明此前脚本没有副作用；网络中断或无法确认是否执行时为 `unknown`。应用绑定的脚本在桥接失败时不自动重试，也不退回引擎直接打开目标、访问剪贴板或采集程序输出。`open`、`openFileInParent` 和 `fs.stat` 可在没有原目标窗口时交给实际宿主判断，窗口与剪贴板仍保留原有检查。客户端每次连接只发送一帧，普通桌面请求最多等待 5 秒，`copySelectionData` 为 8 秒；打开请求、程序采集、交互选择和浏览器请求另有等待期限，外层动作仍受总时限约束。
 
 ## 选区数据
 
@@ -217,7 +226,7 @@ return { before: text.length, after: cleaned.length };
 
 ## 当前执行边界
 
-- API 同步运行在独立宿主进程中，不进入输入 Hook。原生能力由 Rust 提供，JS SDK 和引擎适配分别演进。
+- 原有 API 同步运行在独立宿主进程中，不进入输入 Hook。原生能力由 Rust 提供，JS SDK 和引擎适配分别演进。
 - API 使用当前用户权限，文件路径与 JSON 桥接不是沙盒。文件覆盖、剪贴板修改和外部程序副作用不会回滚，写入失败可能留下部分内容。
 - `run` 的等待期限从进程创建返回后计算。超时会请求终止并等待直接子进程，不保证它自行创建的后代全部结束。`start` 的独立程序始终保留。
 - JS 执行限制不能中断正在阻塞的原生文件或外壳调用，目前没有覆盖所有原生调用的统一墙钟取消。正式接入需要外层执行器的超时与取消管理。
@@ -229,6 +238,8 @@ return { before: text.length, after: cleaned.length };
 
 ## 浏览器调用
 
+`call` 与 `profiles` 通过本次应用的浏览器宿主执行，不要求捕获到原目标窗口。连接、profile、权限和取消仍由实际宿主校验；缺少应用桥接时明确报错。窗口和剪贴板接口继续保留各自的目标检查。
+
 ```js
 /** @param {ScriptContext} ctx */
 function main(ctx) {
@@ -238,7 +249,7 @@ function main(ctx) {
 }
 ```
 
-需要在应用中安装、启用并连接浏览器连接器；脚本宿主自身不加载 Node SDK 或浏览器库。Node 和轻量运行时共用浏览器参数校验，但 Node 返回 Promise，轻量接口同步顺序执行。`chrome.*` 适用于默认 profile；显式 profile 或超时使用 `call`。方法不带 `chrome.` 前缀，参数必须为 JSON 数组；拒绝函数、undefined、非有限数字、循环引用及无效 Unicode。
+需要在应用中安装、启用并连接浏览器连接器；脚本宿主自身不加载 Node SDK 或浏览器库。Node 和轻量运行时共用浏览器参数校验，但 Node 返回 Promise，轻量原有接口同步顺序执行。新增 `callAsync/profilesAsync` 使用专用异步通道并返回 Promise，不改变 `call/profiles/chrome.*` 的同步行为；父宿主缺少异步连接时以 `browser_async_unavailable/not_started` 拒绝；未注入异步回调的工厂以 `unsupported_runtime_feature/not_started` 拒绝，均不回退同步调用。新版入口接受 JSON 值或其 Promise。全局 `TextEncoder` 仅提供 UTF-8 的 `encoding/encode/encodeInto`；孤立代理项编码为 U+FFFD，不代表具备其它 DOM 或 Node 全局。`chrome.*` 适用于默认 profile；显式 profile 或超时使用 `call`。方法不带 `chrome.` 前缀，参数必须为 JSON 数组；拒绝函数、undefined、非有限数字、循环引用及无效 Unicode。
 
 单次 RPC 默认等待 10 秒，允许 1–60000 毫秒；新连接另有最多 5 秒握手等待，均受外层动作时限约束。取消、超时或调用错误后关闭受影响的 Rust 连接，不重试已派发操作。异常保留 `code`、`method`、`effectState`；服务端提供权限详情时保留 `requiredPermissions`。`unknown` 不能理解为操作未发生。
 
@@ -254,3 +265,21 @@ function main(ctx) {
 这是跨进程系统消息0x00C2（低于WM_USER）的字符串封送，不是任意自定义消息指针协议。沿用动作期限，操作预算最多5秒、单条SendMessageTimeout最多请求1000ms；Windows系统调用与同输入队列的例外不能承诺强wall-clock预算。写前拒绝为not_started，移交消息后超时/取消/目标变化或无法确认均unknown，不重试。原窗口身份核验不锁定HWND生命周期。
 
 此接口不读取原文，不增加selection.read_text的一次GetText观察；它也不将原有一次读数或两次读取与当前Edit选区替换组成原子事务。此前UIA范围可能在消息处理前变化。该方法不替换sendText，不能据此声称通用文本发送或8192字符必达。
+
+## 窗口与指针
+
+轻量宿主同步提供 getWindowGeometry、setWindowRect、getPointerState、getPointingRoot、handoffPointingRoot、trackWindowDrag，以及 getWindowGeometryFor、setWindowRectFor、restoreWindowFor、toggleMaximizeWindowFor、trackWindowDragFor。它们需要真实 Native 上下文，不能由单独的动作作用域代替。参数、预算、目标租约、取消与 unknown 规则见[窗口与指针接口](../../docs/WINDOW_ACTION_API.md)。
+
+`ctx.fs.sortLogicalPaths` 不解析路径或查询文件，只把给定完整文本交给本次Windows宿主排序。相等比较项不承诺稳定顺序；NUL按Win32终止比较，但回执保留NUL及后缀原文。排序沿用每次动作的宿主调用计数、取消和5秒传输限制；坏UTF-8/JSON、内容或重复计数不符的回执为`fs_error/not_started`，不会自动重试或转为JS排序。
+
+## Explorer 选区读取的失败阶段
+
+`ctx.desktop.explorerContext()` 保留原请求和成功形状。显式传入 `{selectionFailureStage:true}` 时，匹配的 Windows 宿主可以额外报告 `selection_unavailable_after_directory` 错误；Node 使用 `await`，Script 同步调用。该接口只读取上下文，不复制选区或访问剪贴板。
+
+新错误码表示宿主已验证非空文件系统目录，随后选区主读取发生白名单内的 `E_FAIL`，并在同一目标、目录和视图身份复核后确认仍可交付该证据。错误仍须同时带有 `method:'explorer.context'`、`effectState:'not_started'`；它不是成功的空选区。取消、超时、目标或目录变化、校验失败及其它 HRESULT 不升级为此码。脚本若选择复制回退，应另外调用带有原目标守卫的复制接口。
+
+选项只接受一个自有数据属性 `selectionFailureStage:true`，拒绝空对象、false、访问器及额外字段。旧宿主可能拒绝新增参数；SDK 不会自动改成无参请求重试。省略选项时不会请求阶段证据，成功快照仍只有 `currentDirectory` 和 `selectedPaths`。目录复核不能使目录与选区读取成为原子事务。
+
+## 自有左键输入作用域
+
+同步调用 `ctx.desktop.pressLeftButton()` 和 `ctx.desktop.releaseLeftButton()`，两者均不接受参数。需要 Windows 能力 `mouse.owned_left.v1`、真实 ActionService 作用域和 App Hook。输入归属保存在本次动作中；释放和异常收尾沿原通道进行，不接受其他捕获目标。回执的 `effectState` 为 `unknown`，不能证明物理设备状态或业务完成。完整目标、取消与收尾约束见[自有左键输入作用域](../../docs/ACTION_PACKAGES.md#自有左键输入作用域)。

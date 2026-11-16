@@ -1,0 +1,6 @@
+{
+  "package_id": "examples.window-adjust",
+  "action_id": "adjust",
+  "action_version": 1,
+  "input": {"mode": "move", "handoff": false, "restore": false}
+}

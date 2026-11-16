@@ -1,0 +1,10 @@
+{
+  "package_id": "examples.window-size-step",
+  "action_id": "increase-script",
+  "action_version": 1,
+  "input": {
+    "trigger": "AdvancedMouseAction",
+    "step": 50,
+    "targetPolicy": "original-only"
+  }
+}

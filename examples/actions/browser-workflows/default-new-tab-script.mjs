@@ -1,3 +1,3 @@
 import { runDefaultTabSync } from './workflows.mjs';
-/** @type {ScriptMain} */
+/** @param {ScriptContext} ctx @returns {ScriptJsonValue} */
 export function main(ctx) { return runDefaultTabSync(ctx); }

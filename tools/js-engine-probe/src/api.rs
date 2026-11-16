@@ -32,6 +32,7 @@ fn capture_api_error(failure: process_capture::Failure) -> ApiError {
         effect_state: Some(failure.effect_state.into()),
         method: Some("process.capture".into()),
         required_permissions: Vec::new(),
+        brightness_receipt: None,
     }
 }
 
@@ -40,11 +41,13 @@ pub struct ApiError {
     pub(crate) code: String,
     pub(crate) message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) effect_state: Option<String>,
+    pub(crate) effect_state: Option<Box<str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) method: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) required_permissions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) brightness_receipt: Option<Box<Value>>,
 }
 
 fn error(code: &'static str, message: impl ToString) -> ApiError {
@@ -54,6 +57,7 @@ fn error(code: &'static str, message: impl ToString) -> ApiError {
         effect_state: None,
         method: None,
         required_permissions: Vec::new(),
+        brightness_receipt: None,
     }
 }
 
@@ -64,6 +68,7 @@ fn open_parent_error(code: &str, started: bool) -> ApiError {
         effect_state: Some(if started { "unknown" } else { "not_started" }.into()),
         method: Some("system.open_file_in_parent".into()),
         required_permissions: Vec::new(),
+        brightness_receipt: None,
     }
 }
 
@@ -119,7 +124,211 @@ enum Call {
     },
 }
 
+/// 调用来源策略；它不是脚本安全沙箱，文件/进程能力仍属于可信脚本。
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DesktopMode {
+    Standalone,
+    ApplicationBridge,
+}
+
+impl DesktopMode {
+    pub(crate) fn resolve(
+        explicit: Option<Self>,
+        context: Option<&Value>,
+    ) -> Result<Self, ApiError> {
+        let legacy_binding = context.is_some_and(|context| {
+            context.get("connection").is_some()
+                || context.get("browser_async_connection").is_some()
+                || context
+                    .get("error")
+                    .and_then(|error| error.get("code"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|code| code != "desktop_unavailable")
+        });
+        match explicit {
+            Some(Self::Standalone) if legacy_binding => Err(ApiError {
+                code: "invalid_request".into(),
+                message: "Standalone策略不能覆盖已声明的应用桥连接或失败。".into(),
+                effect_state: Some("not_started".into()),
+                method: None,
+                required_permissions: Vec::new(),
+                brightness_receipt: None,
+            }),
+            Some(mode) => Ok(mode),
+            None => Ok(if legacy_binding {
+                Self::ApplicationBridge
+            } else {
+                Self::Standalone
+            }),
+        }
+    }
+    pub(crate) fn local_allowed(self) -> bool {
+        self == Self::Standalone
+    }
+}
+
+thread_local! {
+    // 独立CLI沿用旧桌面能力；每次应用请求在进入解释器前显式关闭。
+    static LOCAL_DESKTOP_ALLOWED: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+pub(crate) struct DesktopScope {
+    previous: bool,
+}
+impl DesktopScope {
+    pub(crate) fn enter(mode: DesktopMode) -> Self {
+        let previous = LOCAL_DESKTOP_ALLOWED.with(|value| value.replace(mode.local_allowed()));
+        Self { previous }
+    }
+}
+impl Drop for DesktopScope {
+    fn drop(&mut self) {
+        LOCAL_DESKTOP_ALLOWED.with(|value| value.set(self.previous));
+    }
+}
+
+fn local_desktop_method(call: &Call) -> Option<&'static str> {
+    match call {
+        Call::Capture { .. } => Some("process.capture"),
+        Call::Open { .. } => Some("system.open"),
+        Call::OpenFileInParent { .. } => Some("system.open_file_in_parent"),
+        Call::ReadClipboard => Some("clipboard.read"),
+        Call::WriteClipboard { .. } => Some("clipboard.write"),
+        _ => None,
+    }
+}
+fn check_local_desktop(call: &Call) -> Result<(), ApiError> {
+    if let Some(method) = local_desktop_method(call) {
+        if !LOCAL_DESKTOP_ALLOWED.with(std::cell::Cell::get) {
+            return Err(ApiError {
+                code: "local_desktop_forbidden".into(),
+                message: "应用桥调用禁止退回宿主本地桌面API。".into(),
+                effect_state: Some("not_started".into()),
+                method: Some(method.into()),
+                required_permissions: Vec::new(),
+                brightness_receipt: None,
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod desktop_policy_tests {
+    use super::*;
+    #[test]
+    fn application_capture_cannot_use_local_kind_but_standalone_policy_is_preserved() {
+        let call = serde_json::from_value::<Call>(
+            json!({"kind":"capture","program":"C:/Owned/never.exe"}),
+        )
+        .unwrap();
+        {
+            let _scope = DesktopScope::enter(DesktopMode::ApplicationBridge);
+            let error = check_local_desktop(&call).unwrap_err();
+            assert_eq!(error.code, "local_desktop_forbidden");
+            assert_eq!(error.method.as_deref(), Some("process.capture"));
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+        }
+        assert!(check_local_desktop(&call).is_ok());
+        // 只检查纯策略，绝不调用dispatch/execute或启动never.exe。
+    }
+
+    #[test]
+    fn desktop_policy_uses_binding_evidence_and_explicit_producer_mode() {
+        for context in [
+            Value::Null,
+            json!({"error":{"code":"desktop_unavailable"}}),
+            json!({"unrelated":true}),
+        ] {
+            assert_eq!(
+                DesktopMode::resolve(None, Some(&context)).unwrap(),
+                DesktopMode::Standalone
+            );
+            assert_eq!(
+                DesktopMode::resolve(Some(DesktopMode::ApplicationBridge), Some(&context)).unwrap(),
+                DesktopMode::ApplicationBridge
+            );
+        }
+        assert_eq!(
+            DesktopMode::resolve(None, None).unwrap(),
+            DesktopMode::Standalone
+        );
+        for context in [
+            json!({"connection":{},"native_context_available":false}),
+            json!({"error":{"code":"native_bridge_unavailable"}}),
+        ] {
+            assert_eq!(
+                DesktopMode::resolve(None, Some(&context)).unwrap(),
+                DesktopMode::ApplicationBridge
+            );
+            assert!(DesktopMode::resolve(Some(DesktopMode::Standalone), Some(&context)).is_err());
+        }
+    }
+
+    #[test]
+    fn desktop_policy_stops_all_four_legacy_calls_without_executing_them() {
+        let _scope = DesktopScope::enter(DesktopMode::ApplicationBridge);
+        for (call, method) in [
+            (
+                Call::Open {
+                    target: "unused".into(),
+                },
+                "system.open",
+            ),
+            (
+                Call::OpenFileInParent {
+                    target: "unused".into(),
+                },
+                "system.open_file_in_parent",
+            ),
+            (Call::ReadClipboard, "clipboard.read"),
+            (
+                Call::WriteClipboard {
+                    text: "unused".into(),
+                },
+                "clipboard.write",
+            ),
+        ] {
+            // 只调用纯门函数，不测试真实desktop::函数或dispatch的副作用路径。
+            let error = check_local_desktop(&call).unwrap_err();
+            assert_eq!(error.code, "local_desktop_forbidden");
+            assert_eq!(error.effect_state.as_deref(), Some("not_started"));
+            assert_eq!(error.method.as_deref(), Some(method));
+        }
+        assert!(check_local_desktop(&Call::ReadText {
+            path: "unused".into()
+        })
+        .is_ok());
+        assert!(check_local_desktop(&Call::Run {
+            program: "unused".into(),
+            args: vec![],
+            timeout_ms: 1
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn desktop_policy_restores_scope_and_does_not_promote_false_availability() {
+        assert!(LOCAL_DESKTOP_ALLOWED.with(std::cell::Cell::get));
+        let context = json!({"connection":{},"native_context_available":false});
+        {
+            let mode = DesktopMode::resolve(None, Some(&context)).unwrap();
+            let _scope = DesktopScope::enter(mode);
+            assert!(!LOCAL_DESKTOP_ALLOWED.with(std::cell::Cell::get));
+            assert_eq!(context["native_context_available"], false);
+        }
+        assert!(LOCAL_DESKTOP_ALLOWED.with(std::cell::Cell::get));
+    }
+}
+
 pub fn dispatch(request: String) -> String {
+    let began = Instant::now();
+    let result = dispatch_inner(request);
+    exclude_host_wait(began.elapsed());
+    result
+}
+
+fn dispatch_inner(request: String) -> String {
     let open_parent_request = request.len() <= 512 * 1024
         && serde_json::from_str::<Value>(&request)
             .is_ok_and(|value| value["kind"] == "open_file_in_parent");
@@ -143,6 +352,7 @@ pub fn dispatch(request: String) -> String {
                 if request.len() > 256 * 1024 && !matches!(call, Call::Native { .. }) {
                     return Err(error("request_too_large", "API 请求超过 256 KiB。"));
                 }
+                check_local_desktop(&call)?;
                 execute(call)
             })
     };
@@ -457,4 +667,63 @@ mod tests {
             assert!(!response.to_string().contains("secret-output"));
         }
     }
+}
+
+thread_local! {
+    static BROWSER_ASYNC_POOL: std::cell::RefCell<Option<crate::native::BrowserAsyncPool>> = const { std::cell::RefCell::new(None) };
+    static HOST_WAIT_MICROS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn excluded_host_micros() -> u64 {
+    HOST_WAIT_MICROS.with(|time| time.get())
+}
+pub(crate) fn exclude_host_wait(elapsed: Duration) {
+    let micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+    HOST_WAIT_MICROS.with(|time| time.set(time.get().saturating_add(micros)));
+}
+
+pub(crate) struct AsyncScope;
+impl AsyncScope {
+    pub(crate) fn enter(context: Option<&Value>) -> Self {
+        BROWSER_ASYNC_POOL.with(|pool| {
+            // 仅保存配置值。旧父进程缺字段时仍可跑同步入口，但异步请求在IO前拒绝。
+            *pool.borrow_mut() = Some(crate::native::BrowserAsyncPool::new(
+                context
+                    .and_then(|value| value.get("browser_async_connection"))
+                    .cloned(),
+            ));
+        });
+        Self
+    }
+}
+impl Drop for AsyncScope {
+    fn drop(&mut self) {
+        let pool = BROWSER_ASYNC_POOL.with(|pool| pool.borrow_mut().take());
+        drop(pool); // 标记取消并join本次所有工作线程；没有遗留到下次请求的池。
+    }
+}
+pub(crate) fn dispatch_async(request: String) -> String {
+    BROWSER_ASYNC_POOL.with(|pool| {
+        if let Some(pool) = &mut *pool.borrow_mut() { pool.dispatch(request) }
+        else { json!({"ok":false,"error":{"code":"browser_async_unavailable","message":"没有本次异步浏览器作用域。","effect_state":"not_started","method":"browser.call"}}).to_string() }
+    })
+}
+pub(crate) fn poll_async() -> String {
+    BROWSER_ASYNC_POOL.with(|pool| {
+        pool.borrow_mut()
+            .as_mut()
+            .map_or_else(|| "null".into(), |pool| pool.poll())
+    })
+}
+pub(crate) fn async_pending() -> usize {
+    BROWSER_ASYNC_POOL.with(|pool| pool.borrow().as_ref().map_or(0, |pool| pool.pending()))
+}
+pub(crate) fn wait_async() {
+    let began = Instant::now();
+    BROWSER_ASYNC_POOL.with(|pool| {
+        if let Some(pool) = &mut *pool.borrow_mut() {
+            pool.wait(Duration::from_millis(25));
+        }
+    });
+    exclude_host_wait(began.elapsed());
 }

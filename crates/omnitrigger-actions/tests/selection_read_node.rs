@@ -88,6 +88,7 @@ impl Fixture {
                 runtime: "node".into(),
                 entry: "main.mjs".into(),
                 single_instance: false,
+                allow_binding_reentry: false,
             },
             package_root: root.clone(),
             entry_path,

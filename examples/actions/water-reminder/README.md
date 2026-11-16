@@ -11,3 +11,11 @@
 ```powershell
 node --test examples/actions/water-reminder/recipes.test.mjs
 ```
+
+## 作者工程检查
+
+在本目录运行 `npm ci --ignore-scripts`，再执行 `npm run check`。固定的 TypeScript 5.9.3 严格检查两个入口、共享通知参数与回执处理，以及 Node 默认导出；检查不会调用通知。Node 入口使用异步 ActionContext，Script 入口使用同步 ScriptMain。
+
+本包随附 SDK 声明，配置只加载 ES2022 与显式宿主类型，`types:[]`，不注入 DOM 或 Node 全局。共享 helper 的未知输入、异常及回执由既有运行时检查处理，JSDoc 断言仅连接这些检查和作者类型，不替代输入校验。
+
+仓库根可运行 `node tools/script-sdk-check/check-project-types.mjs examples/actions/water-reminder`。随包声明通过既有 `node tools/script-project.mjs refresh --runtime node --project <本目录>` 显式刷新；入口、通知内容、清单、配置和开发依赖保留。工具仍拒绝覆盖不能识别的作者声明。

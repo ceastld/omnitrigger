@@ -1,4 +1,5 @@
 //! 轻量脚本宿主的进程适配；引擎作为独立可执行文件，不链接进输入引擎或桌面程序。
+use crate::browser_async::AsyncBrowserBridge;
 use crate::native::NativeBridge;
 use crate::{
     ActionError, ActionRuntime, CancellationToken, InvocationContext, NativeHost, ResolvedAction,
@@ -203,6 +204,17 @@ impl ScriptHostRuntime {
         cancellation: &CancellationToken,
         host: Option<&dyn NativeHost>,
     ) -> Result<Value, ActionError> {
+        thread::scope(|scope| self.execute_scoped(action, context, cancellation, host, scope))
+    }
+
+    fn execute_scoped<'scope, 'env: 'scope>(
+        &self,
+        action: &ResolvedAction,
+        context: &InvocationContext,
+        cancellation: &CancellationToken,
+        host: Option<&'env dyn NativeHost>,
+        scope: &'scope thread::Scope<'scope, 'env>,
+    ) -> Result<Value, ActionError> {
         let began = Instant::now();
         if cancellation.is_cancelled() {
             return Err(error("cancelled", "动作提交前已取消。", "not_started"));
@@ -227,14 +239,28 @@ impl ScriptHostRuntime {
         let native = host
             .map(|_| NativeBridge::new().and_then(|bridge| Ok((bridge.configuration()?, bridge))));
         let (mut bridge, native_context) = match native {
-            Some(Ok((configuration, bridge))) => {
-                (Some(bridge), json!({"connection":configuration}))
-            }
+            Some(Ok((configuration, bridge))) => (
+                Some(bridge),
+                json!({"connection":configuration,"actions_scope":host.is_some_and(|host| host.action_scope_available()),"native_context_available":host.is_some_and(|host| host.native_context_available())}),
+            ),
             Some(Err(error)) => (None, json!({"error":error})),
             None => (None, Value::Null),
         };
+        let mut native_context = native_context;
+        let mut browser_async = None;
+        if host.is_some_and(|host| host.browser_async_available()) && native_context.is_object() {
+            match AsyncBrowserBridge::new().and_then(|bridge| Ok((bridge.configuration()?, bridge)))
+            {
+                Ok((configuration, bridge)) => {
+                    native_context["browser_async_connection"] = configuration;
+                    browser_async = Some(bridge);
+                }
+                Err(error) => native_context["browser_async_error"] = json!(error),
+            }
+        }
         let mut request = json!({
             "input":action.call.input,"package_root":crate::node::script_path(&root),"native_context":native_context,
+            "desktop_mode":if host.is_some() { "application_bridge" } else { "standalone" },
             "invocation":{"invocation_id":context.invocation_id.to_string(),"binding_id":context.binding_id.to_string()}
         });
         request
@@ -317,6 +343,9 @@ impl ScriptHostRuntime {
             }
             if let (Some(bridge), Some(host)) = (&mut bridge, host) {
                 bridge.poll_until(host, cancellation, Some(deadline));
+            }
+            if let (Some(bridge), Some(host)) = (&mut browser_async, host) {
+                bridge.poll(scope, host, cancellation, deadline);
             }
             // 本机调用可能耗尽剩余预算，不在同一轮接受迟到的成功退出。
             if cancellation.is_cancelled() || Instant::now() >= deadline {
@@ -460,7 +489,7 @@ fn parse_response(bytes: &[u8], exited_successfully: bool) -> Result<Value, Acti
         return value.get("result").cloned().ok_or_else(invalid);
     }
     if value["error"].is_object() {
-        let fault: ActionError =
+        let mut fault: ActionError =
             serde_json::from_value(value["error"].clone()).map_err(|_| invalid())?;
         if fault.code.is_empty()
             || fault.code.len() > 64
@@ -482,6 +511,7 @@ fn parse_response(bytes: &[u8], exited_successfully: bool) -> Result<Value, Acti
         {
             return Err(invalid());
         }
+        fault.retain_brightness_receipt();
         return Err(fault);
     }
     let message = value["error"]

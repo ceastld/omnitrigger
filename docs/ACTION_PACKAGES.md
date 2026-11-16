@@ -69,7 +69,7 @@ actions/my-script/
   sdk/api.d.ts
 ```
 
-使用支持 JavaScript / TypeScript 的编辑器打开整个目录，编辑 `main.mjs` 和 `lib` 中的模块。入口具名导出同步 `main(ctx)`，通过标准相对 `import` / `export` 拆分代码。工程附带本地 SDK 类型快照，启用标准 JS 类型检查，不依赖仓库路径或 npm 包，也无需转译；运行需要支持包内模块的新宿主；已有 `.js` 工程继续使用 `function main(ctx)`，更新应用不会改写作者文件。路径、缓存、循环和限额见[包内模块](../tools/js-engine-probe/MODULES.md)。入口的 `@type {ScriptMain}` 注释同时提供 `ctx` 补全和 JSON 返回值检查，能在编辑时发现异步入口、遗漏返回及 Promise、函数、`undefined` 等非 JSON 返回值；无结果时返回 `null`。静态类型无法排除 `any`、循环引用和非有限数，实际运行仍有独立校验。模块没有全局 `ctx`，辅助函数需要显式传参。SDK 的[源声明](../crates/omnitrigger-actions/runtime/script-types.d.ts)随应用维护，更新应用不会覆盖既有工程。
+使用支持 JavaScript / TypeScript 的编辑器打开整个目录，编辑 `main.mjs` 和 `lib` 中的模块。入口具名导出 `main(ctx)`（可为 async），通过标准相对 `import` / `export` 拆分代码。工程附带本地 SDK 类型快照，启用标准 JS 类型检查，不依赖仓库路径或 npm 包，也无需转译；运行需要支持包内模块的新宿主；已有 `.js` 工程继续使用 `function main(ctx)`，更新应用不会改写作者文件。路径、缓存、循环和限额见[包内模块](../tools/js-engine-probe/MODULES.md)。入口的 `@type {ScriptMain}` 注释同时提供 `ctx` 补全和 JSON 返回值检查，能在编辑时发现遗漏返回、函数、`undefined` 等非 JSON 返回值，Promise 的最终结果同样必须是 JSON。直接声明 async 函数时使用 `@type {ScriptAsyncMain}`；无结果时返回 `null`。静态类型无法排除 `any`、循环引用和非有限数，实际运行仍有独立校验。模块没有全局 `ctx`，辅助函数需要显式传参。SDK 的[源声明](../crates/omnitrigger-actions/runtime/script-types.d.ts)随应用维护，更新应用不会覆盖既有工程。
 
 安装宿主后，可使用同一配置校验和运行：
 
@@ -138,15 +138,21 @@ node tools/script-sdk-check/check-project-types.mjs D:\Demo\actions\my-script
 | `--check-action` | 包、动作契约版本及运行时注册，不执行入口。 |
 | `--check-config` | 绑定与触发描述，不执行动作。 |
 
+旧 `.js` 函数体入口也会分析 main 绑定与语法依赖：唯一的普通或 async `main(ctx)` 可完成静态覆盖，不要求 ESM 导出。静态 import/export 或生成器入口会被拒绝；动态 import、求值、require、main 重绑定或不确定的顶层初始化会被拒绝或保留不完整警告，不执行作者代码来猜测结果。JSDoc 类型引用由类型检查处理，不算运行时模块依赖。
+
+`staticAnalysisComplete` 只表示声明与已提供源码的静态依赖覆盖，不表示初始化、副作用、宿主能力或运行效果已验证；仍须同时查看 `passed`、诊断和 `runtimeVerified`。
+
 实际参数分支、目标身份和业务效果仍须运行验证。上述开发工具需要 Node，导出的轻量工程运行不依赖 Node 或 npm。
 
 ### 轻量脚本宿主
 
-`runtime: "script"` 可通过现有动作服务运行独立的 Rust JS 宿主，无需安装 Node。宿主不链接进输入核心；脚本执行、取消与终态仍由 `ActionService` 管理。已有 Boa 和 QuickJS 两种构建使用同一份宿主 API。`.mjs` 入口具名导出同步 `main(ctx)`，`.js` 入口声明标准 JS 函数 `function main(ctx)`，均返回 JSON 值；不需要自定义文件语法或 npm 包。
+`runtime: "script"` 可通过现有动作服务运行独立的 Rust JS 宿主，无需安装 Node。宿主不链接进输入核心；脚本执行、取消与终态仍由 `ActionService` 管理。已有 Boa 和 QuickJS 两种构建使用同一份宿主 API。`.mjs` 入口具名导出 `main(ctx)`（可为 async），`.js` 入口声明标准 JS 函数 `function main(ctx)`，均返回 JSON 值或其 Promise；不需要自定义文件语法或 npm 包。
 
-目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start/capture`、`ctx.delay`、`ctx.clipboard.readText/readData/writeText/history.*`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText/copySelectionData/windowAction` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时提供包内相对 ESM 导入，暂不提供 Node/npm 模块或 Promise 入口；需要 Node 环境或异步入口的动作继续选择 `node` 运行时。
+目前可用的同步 API 为 `ctx.fs.readText/writeText`、`ctx.process.run/start/capture`、`ctx.delay`、`ctx.clipboard.readText/readData/writeText/history.*`、`ctx.open`，以及 `ctx.desktop.target/targetContext/sendShortcut/sendKeySequence/sendText/copySelectionText/copySelectionData/windowAction/getWindowGeometry/setWindowRect/getPointerState/getPointingRoot/handoffPointingRoot/trackWindowDrag` 和 `ctx.browser.call/profiles/chrome.*`，完整参数与限制见[宿主 API](../tools/js-engine-probe/API.md)。动作上下文额外提供 `ctx.packageRoot` 和保留完整整数精度的 `ctx.invocation`。可使用 [ScriptContext 类型声明](../crates/omnitrigger-actions/runtime/script-api.d.ts)获得编辑器提示；示例见[脚本文本清理动作](../examples/actions/script-clean-file/)和[只读目标查询](../examples/actions/script-target/)。目标查询示例附带 `jsconfig.json`，编辑器可直接检查标准 JS 与 `ScriptContext` 类型，无需转译后执行。桌面 API 复用应用捕获的原目标与 Rust 适配层，和 Node 共用参数校验；浏览器调用复用应用的 Rust 客户端，此处 API 同步返回，不使用 `await`。该运行时提供包内相对 ESM 导入，新版宿主支持 Promise 入口、全局 UTF-8 `TextEncoder` 和异步浏览器 `callAsync/profilesAsync`，原方法仍同步；缺少异步通道时明确拒绝，不回退同步调用。暂不提供 Node/npm 模块；需要 Node 环境的动作选择 `node` 运行时。
 
-Windows `process.capture` 在 Node、Boa、QuickJS 间共用 Rust 后端；Node 通过应用原生桥接逐次 `await`，轻量宿主同步返回。使用本地绝对 EXE 路径，可设置绝对 `cwd`；默认10秒预算、双流合计64KiB、严格UTF-8，默认拒绝非零退出。Node 默认工作目录为动作包目录，轻量默认继承宿主目录。预算不是硬实时超时，失败不返回部分输出、不自动重试。轻量宿主强停由操作系统关闭它的私有Job；Node断连由应用检测后协作取消，其Job仍由应用持有。旧 `process.run/start` 契约保持原样，详见[程序输出采集契约](../tools/js-engine-probe/API.md#程序输出采集)。
+Windows `process.capture` 在 Node、Boa、QuickJS 间共用 Rust 后端；应用内调用均交给应用原生桥接，Node 逐次 `await`，轻量宿主同步返回。使用本地绝对 EXE 路径，可设置绝对 `cwd`；默认10秒预算、双流合计64KiB、严格UTF-8，默认拒绝非零退出。Node 默认工作目录为动作包目录；轻量脚本在应用内继承应用进程工作目录，独立引擎 CLI 继承引擎进程工作目录，需要稳定目录时应显式设置 `cwd`。预算不是硬实时超时，失败不返回部分输出、不自动重试。应用内采集的私有 Job 由应用持有，脚本断连通过桥接请求协作取消；独立引擎 CLI 的 Job 才由引擎进程持有。旧 `process.run/start` 契约保持原样，详见[程序输出采集契约](../tools/js-engine-probe/API.md#程序输出采集)。
+
+`process.capture`、`open`、`openFileInParent` 和 `fs.stat` 不要求原目标窗口，但仍需本次宿主实际支持相应方法。应用绑定的轻量脚本在缺少桥接、建桥失败或宿主拒绝时明确报错，不退回引擎本地采集、打开或剪贴板访问。窗口与剪贴板接口保留各自的目标和能力检查；这不改变文件读写或旧进程接口的契约。
 
 Windows x64 开发环境可先构建本机 QuickJS 包，再通过开发命令安装。包中包含独立宿主、SDK、许可通知和文件清单；构建命令不会发布或上传二进制：
 
@@ -249,6 +255,10 @@ export default async function (ctx) {
 
 动作定义可设置 `single_instance: true`，同一 `ActionService` 中相同 `package_id` 与 `action_id` 的调用不能重叠执行，即使它们来自不同绑定、传入不同参数、使用不同契约版本或运行时。不同包或动作分别判断；该策略同时适用于 `node` 和 `script`。省略或设置 `false` 保留原行为；新建脚本工程也默认关闭，由作者编辑 `action.json` 后重新加载。值只能是 JSON 布尔值，`null`、字符串、数值或其他类型会使清单无效。动作包 `schema_version` 仍为 1，绑定及 `ActionCall` 不增加字段。
 
+需要同一绑定重复触发、由新调用判断是否停止旧调用的动作，可在动作定义中显式设置 `"allow_binding_reentry": true`。普通 `submit` 与 `submit_with_host` 直接读取已解析的清单策略；应用和脚本不需要选择专用执行入口，`input` 中的同名值不影响接纳。省略或设为 `false` 时序列化省略，保留旧 JSON 和同绑定互斥行为；该字段只接受 JSON 布尔值。它不能与 `single_instance: true` 同时启用，冲突清单以 `invalid_action_policy` 拒绝进入目录，服务预检也会拒绝。
+
+只有新旧调用都从清单启用该策略、同绑定、同包及动作 ID、同动作契约版本，且旧调用仍活跃时才能重叠。重载后新增的策略不能借用旧调用的默认预留，换版本也不能借用。接纳本身不取消、替换或等待旧调用；新调用自行读取状态并按业务条件调用 `ctx.actions.stopOtherInstances`。四项配额和未读终态占用保持不变；完成但未读的同绑定调用仍会拒绝新调用。该策略不保证最后触发者获胜，不替代状态 CAS 或资源清理。
+
 同一动作已有活跃调用时，只要已有调用或新调用中任一个启用单实例，新调用就返回 `action_busy`、`effect_state: "not_started"`。因此重载清单开启或关闭策略，不会绕过已经运行的调用；两边都关闭时仍遵守原有绑定与总配额限制。重复同一绑定时优先保留原来的 `binding_busy`。拒绝不会执行入口，也不排队、替换、取消旧调用或自动重试。
 
 单实例占用在运行时返回、工作线程持有的运行时与宿主引用清理完成后释放，不必等界面读取终态；请求取消本身不会提前释放。原绑定占用和最多 4 次未完成或终态未读取调用的配额仍沿用原协议，所以单实例已经释放，也可能因绑定或总配额尚未释放而被拒绝。
@@ -280,6 +290,8 @@ export default async function (ctx) {
 | `ctx.desktop.captureForegroundTarget(options)` | 按明确 PID、进程创建 FILETIME 字符串和 1–5000 毫秒有效期捕获该进程当前前台，返回本次动作内的只读目标引用。 |
 | `ctx.desktop.sendShortcutTo(target, keys, options?)` | 向上述捕获目标发送快捷键；可选 `keyDownDelayMs`，发送前和分步提交时复验租约、身份、前台、取消及动作期限。 |
 | `ctx.desktop.sendTextTo(target, text)` | 向上述捕获目标发送 Unicode 文本，复用既有输入校验和分批提交。 |
+| `ctx.desktop.pressLeftButton()` | 当前真实动作作用域只按下原目标的鼠标左键；无参数，返回 submitted:true/effectState:unknown，需 mouse.owned_left.v1。 |
+| `ctx.desktop.releaseLeftButton()` | 结束本 owner 的按下；无参数，返回 ownedPressEnded:true/effectState:unknown，不证明物理设备当前状态。 |
 | `ctx.desktop.sendShortcut(keys, options?)` | 向原目标发送一次快捷键，明确 VK、修饰键在前，最多四类修饰键加一个普通键。可设置 `keyDownDelayMs`，或用 `timing` 复用原生进程时序配置；两者互斥，默认零。返回 `{ submitted: true }` 仅表示系统接纳输入。 |
 | `ctx.desktop.sendKeySequence(modifiers, keys, options?)` | 最多四类修饰键在整组 1–16 个普通键期间保持按下。保留顺序和左右侧；可设置 `keyDownDelayMs`。 |
 | `ctx.desktop.sendText(text)` | 分批发送 Unicode 文本，不借用剪贴板；每批核验原目标及取消状态。 |
@@ -426,6 +438,8 @@ export default async ctx => {
 
 快捷键复用原生发送器的键位校验、已按住修饰键处理和输入标记。API 不确认应用是否已经关闭文档或完成其他业务操作。多步动作在每步发送前重新核验目标；发送时前台不再是原目标、目标失效、非法按键或取消会拒绝后续输入。核验不记录前台历史，不能检测两次调用之间切走又切回的情况。没有已开始副作用时错误的 `effectState` 为 `not_started`，输入发送失败或回执未确认时可能为 `unknown`；均不会自动重试。取消不撤销已提交的输入。
 
+`sendShortcut`、`sendKeySequence` 和 `sendShortcutTo` 的按键参数只接受键盘 VK；鼠标按钮 VK `1/2/4/5/6` 在调用 Native 前以 `invalid_input`、`not_started` 拒绝，不产生键盘或鼠标输入。错误的 `method` 分别为 `keyboard.shortcut`、`keyboard.sequence`、`target.keyboard.shortcut`。这三项键盘接口不负责鼠标按钮的按下、释放或所有权收尾。
+
 `effectState` 描述失败的这一次 API 调用，最终错误会保留该字段；它不表示脚本此前没有执行其他步骤。判断整段动作是否可以重试仍需结合业务结果。
 
 桌面调用须逐个 `await`，并发调用报 `desktop_busy`，每次动作最多 128 次桌面调用。单次回执等待最多 5 秒，仍受动作总运行时限限制；返回时尚有调用会报 `pending_desktop_calls`。桥接仅在本次调用期间监听回环地址，使用系统随机令牌，不占用脚本 stdout，也不新增常驻服务或桥接线程。它与脚本代码一样使用当前用户权限，不构成沙盒。
@@ -495,7 +509,7 @@ Node返回严格的 `{submitted:true}`，仅表示系统接纳打开请求，不
 
 ### 在文件父目录打开
 
-`ctx.openFileInParent(target)` 打开明确的普通本地文件，并将其父目录作为这次系统打开请求的工作目录。Node 需要 `await`，返回 `{submitted:true}`；轻量脚本同步返回。需要包含该 API 的应用及对应宿主，类型声明更新不会为旧宿主增加能力。
+`ctx.openFileInParent(target)` 打开明确的普通本地文件，并将其父目录作为这次系统打开请求的工作目录。Node 需要 `await`，返回 `{submitted:true}`；轻量脚本同步返回 `null`。需要包含该 API 的应用及对应宿主，类型声明更新不会为旧宿主增加能力。
 
 ```javascript
 await ctx.openFileInParent('D:/Work/report.pdf'); // Node 动作
@@ -596,13 +610,15 @@ export default async ctx => {
 
 ### 窗口脚本
 
-同步脚本可直接调用 `ctx.desktop.windowAction('toggle_maximize')`；Node 脚本使用 `await`。操作还包括 `toggle_topmost`、`minimize` 和 `close`，始终针对本次提交时捕获且仍为前台的窗口，复用原生窗口能力。`toggle_topmost` 按提交前原窗口状态切换置顶，不激活、移动或缩放窗口。目标身份、取消条件和本次动作期限在状态检查和提交前重新核验；句柄生命周期的检查不是原子锁定。
+同步脚本可直接调用 `ctx.desktop.windowAction('toggle_maximize')`；Node 脚本使用 `await`。操作还包括 `restore`、`toggle_topmost`、`minimize` 和 `close`，始终针对本次提交时捕获且仍为前台的窗口，复用原生窗口能力。`toggle_topmost` 按提交前原窗口状态切换置顶，不激活、移动或缩放窗口。目标身份、取消条件和本次动作期限在状态检查和提交前重新核验；句柄生命周期的检查不是原子锁定。
 
 返回 `{submitted:true}` 仅表示系统接纳请求；关闭可能提示保存或被目标程序拒绝。原目标变化时停止，已提交的窗口请求不会因取消而撤销。此接口不接收外部窗口句柄或隐式选择新前台；参数、目标与请求失败保留结构化错误。完整参数见[窗口动作 API](../tools/js-engine-probe/API.md#窗口动作)。
 
 ### 浏览器脚本
 
 先在“扩展”安装浏览器连接器，并让 Chrome 扩展连接本机。宿主从当前配置同级的固定版本连接器目录加载 SDK，无需在动作参数中保存 SDK 路径、端点或扩展 ID。未安装时只有浏览器调用报 `browser_unavailable`，其他脚本仍可运行。完整宿主类型见 [api.d.ts](../crates/omnitrigger-actions/runtime/api.d.ts)。
+
+Node 和轻量脚本的浏览器调用均不依赖原目标窗口；仍需本次应用提供可用的浏览器连接，并接受实际宿主的 profile、权限、取消与期限检查。
 
 ```javascript
 export default async ctx => {
@@ -658,9 +674,11 @@ export default async ctx => {
 
 `--check-action` 只读检查，不执行 JS，不安装 Hook。`--run-action` 真实执行并返回结构化结果，也不安装 Hook。运行时或包不可用、版本不兼容、调用忙碌、进程启动失败和脚本运行失败均报告错误，不自动重试。
 
+直接运行默认不挂载动作状态。需要在多次独立 CLI 调用间保留 durable 状态时，显式使用 `--run-action <call.json> --with-action-state`；存储固定在所选配置同级的 `action-state`，不提供任意状态目录参数。此布尔参数不接受值、不能重复，也不能与检查、列目录、创建或安装命令合用。详细作用域和 CAS 语义见[动作状态](ACTION_STATE.md)。
+
 ### 外部宿主的目录与事件
 
-`--list-package-actions` 输出一个 JSON 对象，包含 `schema_version: 1`、`actions` 和 `diagnostics`。每项包含完整 `call`（默认 `input: {}`）、`package_name`、`title`、清单声明的 `runtime`、可空的 `reference_error`，以及可选的 `single_instance`。启用单实例时该字段为 `true`，默认值 `false` 省略以保留旧目录格式。该策略属于动作定义，不写入 `call`。目录只包含已安装动作包，不枚举原生动作或个人绑定，不导入 JS。输出超过 4 MiB 时整体拒绝。
+`--list-package-actions` 输出一个 JSON 对象，包含 `schema_version: 1`、`actions` 和 `diagnostics`。每项包含完整 `call`（默认 `input: {}`）、`package_name`、`title`、清单声明的 `runtime`、可空的 `reference_error`，以及可选的 `single_instance` 和 `allow_binding_reentry`。这两项策略属于动作定义，启用时为 `true`，默认值 `false` 省略以保留旧目录格式。目录只包含已安装动作包，不枚举原生动作或个人绑定，不导入 JS。输出超过 4 MiB 时整体拒绝。
 
 `reference_error` 按所选配置档和目录中的默认输入校验动作引用。测试档的 N10 `toggle` 由本档文本历史处理，没有 Node 时也可用。N10 业务指令使用默认输入时会返回 `test_clipboard_profile`，需要在输入中显式选择测试库。可用 `--check-action` 校验实际调用的输入。引用校验不执行业务脚本，也不查询动作当前是否忙碌。
 
@@ -699,7 +717,7 @@ omnitrigger.exe --config D:\Demo\bindings.json --run-action D:\Demo\call.json --
 
 ## 执行与权限边界
 
-通用动作服务最多接纳 4 次未完成或终态未读取的调用；同一绑定不重叠执行。启用 `single_instance` 的动作还会按上文的动作身份拒绝跨绑定重叠。每次调用获得独立 ID，终态区分成功、失败和取消。工作线程异常转为失败，不把异常当作成功继续执行。动作编辑区的“停止此动作”请求取消；Node 先通知 `ctx.signal`，协作取消会请求终止 `ctx.process.run` 启动的直接子进程，宽限后强制停止仅作用于 Node 宿主。脚本占满 CPU、阻塞事件循环或自行通过原生 API 创建进程时，不能保证子进程全部结束；不提供完整进程树收尾保证。`ctx.process.start` 已成功启动的独立程序始终不随动作取消关闭。取消和超时不能撤销已经发生的文件修改或其他副作用。
+通用动作服务最多接纳 4 次未完成或终态未读取的调用；同一绑定默认不重叠执行，显式清单策略 `allow_binding_reentry` 的边界见上文。启用 `single_instance` 的动作还会按上文的动作身份拒绝跨绑定重叠。每次调用获得独立 ID，终态区分成功、失败和取消。工作线程异常转为失败，不把异常当作成功继续执行。动作编辑区的“停止此动作”请求取消；Node 先通知 `ctx.signal`，协作取消会请求终止 `ctx.process.run` 启动的直接子进程，宽限后强制停止仅作用于 Node 宿主。脚本占满 CPU、阻塞事件循环或自行通过原生 API 创建进程时，不能保证子进程全部结束；不提供完整进程树收尾保证。`ctx.process.start` 已成功启动的独立程序始终不随动作取消关闭。取消和超时不能撤销已经发生的文件修改或其他副作用。
 
 JS 宿主必须返回匹配协议版本和调用 ID 的有效结果；仅有进程退出码 0 不算动作成功。成功结果表示脚本完成其声明的逻辑，外部程序的业务是否真正完成仍由动作自行验证。默认运行预算为 60 秒；每个子程序的标准输出和标准错误合计最多 64 KiB，最终 JSON 回执最多 64 KiB。宿主不保留 `console` 日志；需要带回的信息应通过 `return` 返回，界面提供有界结果预览，完整 JSON 结果可从命令行读取。协议使用独立临时响应文件，与日志输出分开，运行后清理临时目录。
 
@@ -762,6 +780,8 @@ profiles\<配置档 ID>\packages\<包 ID>\
 
 ## 脚本亮度步进
 
+亮度调用因 cancelled 或 timeout 结束且 effectState 为 unknown 时，错误可附可选的 brightnessReceipt，复用成功回执的匿名逐台结构；wire 字段为 brightness_receipt。仅接纳明确的 display.brightness_step 错误、原请求策略一致且通过既有 DTO 校验的进度。缺失字段不表示没有作用，已确认成员也不代表整轮成功；不得据此自动重试、补偿或切换 provider。连接断开或外层已先返回取消时，不能保证进度送达。
+
 Node 使用 `await ctx.desktop.stepBrightness({direction:'up',strategy:'physical'})`；同步脚本使用同名方法直接取得结果。`direction`只接受`up/down`，`strategy`必须显式选择`physical/wmi_first/physical_then_wmi`，不接受额外字段或默认策略。wire为`display.brightness_step`，走现有NativeBridge和App宿主，不启动另一服务或执行器。
 
 physical和physical_then_wmi在实际执行时捕获一次物理指针。physical对最近逻辑屏幕下1–64台物理显示器按各自量程±5%步进；wmi_first不读取或依赖指针，直接固定首枚举WMI对象，按支持档位严格跨过当前值±1，零档或无档不写；physical_then_wmi仅在确认DDC未写入且无有效成员时尝试首WMI。调用需要NativeBridge，不要求原前台窗口或界面。部分/未知写入后不跨设备补偿，不重试。
@@ -814,3 +834,27 @@ wire为audio.volume_adjust，deltaPercent映射为delta_percent。返回匿名pr
 
 
 独立宿主的开发 CLI 升级、明确数据根约束及 pending marker 恢复见 [独立宿主升级与恢复](LEGACY_UPGRADE.md)。
+
+## 当前调用的动作控制
+
+Node 可使用 `await ctx.actions.stopOtherInstances({timeoutMs:500})`，Script 同步调用同一方法，取消并等待当前服务中同包同动作其他调用的资源清理。默认预算 500 毫秒，范围 1–2000 毫秒。现有 `single_instance` 策略保持不变；独立运行时没有服务作用域时明确不可用。效果状态、取消和期限语义见 [动作调用作用域](ACTIONS_SCOPE.md)。
+
+
+## 当前动作的状态
+
+Node 使用 `await ctx.state.read(area,key)` 与 `await ctx.state.compareAndSwap(area,key,revision,next)`，Script 同步调用同名方法。需要真实调用身份和服务显式提供的存储；session/durable、缺值、冲突及未知提交边界见 [当前动作的状态读写](ACTION_STATE.md)。
+
+
+## 当前动作的版本提示
+
+Node 使用 `await ctx.ui.setActionHint({text:'v123'})`，Script 同步调用同名方法。它只更新真实当前调用的界面反馈模型，不启用 desktop，也不保证像素呈现或动作成功；参数、无UI、作用域及取消边界见 [当前动作的版本提示](ACTION_VERSION_HINT.md)。
+
+## 窗口与指针
+
+窗口几何、矩形提交、指针观察、显式根窗交接与有界调整的参数及 unknown 语义见[窗口与指针接口](WINDOW_ACTION_API.md)。Node 和 Script 共用契约；[普通 Node 示例](../examples/actions/window-adjust/README.md)提供一次有界调整。
+
+## 自有左键输入作用域
+
+这两项左键 API 不接受参数，由 ActionService 为本次动作保存输入归属，使用动作的原窗口目标。Node 逐次 `await`，轻量宿主同步调用。`pressLeftButton()` 返回 `{submitted:true,effectState:'unknown'}`；`releaseLeftButton()` 返回 `{ownedPressEnded:true,effectState:'unknown'}`，仅表示本次动作拥有的按下已结束，不证明物理设备状态或业务完成。
+
+调用需要 Windows 能力 `mouse.owned_left.v1` 以及已接通的 App Hook 与 Service；缺少通道时明确拒绝。按下前检查原窗口、指针所指窗口、取消和期限。目标变化、取消或到期后，已拥有的按下仍须沿原通道释放。结束、错误和取消时 Service 也会收尾；每个按压周期在动作作用域内最多请求五次释放，Hook 也可为已在途的按下安排既有中性收尾。释放失败后保留未知状态并暂停监听。`input_cleanup_failed` 的效果始终为 `unknown`，脚本不得据此自动重试。接口不接受显式捕获的其他目标。

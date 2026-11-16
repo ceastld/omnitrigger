@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "id": "examples.window-adjust",
+  "name": "有界窗口调整",
+  "version": "0.1.0",
+  "actions": [
+    {
+      "id": "adjust",
+      "title": "有界移动或调整窗口",
+      "version": 1,
+      "runtime": "node",
+      "entry": "main.mjs",
+      "single_instance": true
+    }
+  ]
+}

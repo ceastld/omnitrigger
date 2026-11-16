@@ -1,4 +1,4 @@
-import type {ActionContext} from '../crates/omnitrigger-actions/runtime/api';
+import type {ActionContext} from '../examples/actions/browser-workflows/sdk/api';
 import nodeEntry from '../examples/actions/browser-workflows/restore-session.mjs';
 import {main} from '../examples/actions/browser-workflows/restore-session-script.mjs';
 declare const syncContext:ScriptContext;

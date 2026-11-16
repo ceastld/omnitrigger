@@ -26,3 +26,16 @@ node --test examples/actions/selection-line-cleanup/recipes.test.mjs
 node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p examples/actions/selection-line-cleanup/jsconfig.json
 node tools/script-sdk-check/check-project-types.mjs examples/actions/selection-line-cleanup
 ```
+
+## 独立作者检查
+
+在本工程目录中使用 Node.js 22 或以上版本执行：
+
+```powershell
+npm ci --ignore-scripts
+npm run check
+```
+
+TypeScript 5.9.3 仅为开发依赖，版本与完整性由本包锁文件固定。检查使用本包声明与静态入口检查器，不需要仓库的 crates、tools 或 node_modules，不导入或执行作者动作；保持 strict、skipLibCheck:false、NodeNext 与 types:[]，只加载 ES2022，不向 Script 加入 DOM 或 Node 全局。
+
+命名为 sdk/api.d.ts 的文件仍是同步 Script 声明；Node 入口使用 types/api.d.ts 的异步声明。开发清单不设置 package.type，保留既有 .mjs 模块与 NodeNext 声明的解释。类型通过不代表选区已经复制或替换，也不能替代原目标、取消与宿主能力验证。

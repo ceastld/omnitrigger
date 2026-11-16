@@ -1262,3 +1262,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "shortcut_mouse_vk_tests.rs"]
+mod mouse_virtual_key_tests;

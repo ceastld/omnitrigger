@@ -16,8 +16,10 @@ const binary = resolve(binaryArgs[0]);
 const {default: ts} = await import('typescript');
 const {checkClipboardHistoryTypes} = await import('./check-history-types.mjs');
 const {checkFileDirectoryTypes} = await import('./check-file-directory-types.mjs');
+const {checkActionHint} = await import('./check-action-hint.mjs');
 mkdirSync(join(repo, '.tmp'), {recursive:true});
 const root = mkdtempSync(join(repo, '.tmp/script-sdk-check-'));
+const actionHintChecks = await checkActionHint({typescript:ts,temporaryRoot:root});
 const config = join(root, 'bindings.json');
 writeFileSync(config, '[]');
 function cli(args, code = 0) {
@@ -30,7 +32,7 @@ function diagnostics(path) {
   const configPath = join(path, 'jsconfig.json');
   const loaded = ts.readConfigFile(configPath, ts.sys.readFile);
   assert.equal(loaded.error, undefined);
-  const parsed = ts.parseJsonConfigFileContent(loaded.config, ts.sys, path);
+  const parsed = ts.parseJsonConfigFileContent(loaded.config, ts.sys, path, undefined, configPath);
   assert.deepEqual(parsed.errors, []);
   const program = ts.createProgram(parsed.fileNames, parsed.options);
   return ts.getPreEmitDiagnostics(program);
@@ -80,13 +82,18 @@ for (const source of [
   'function main(ctx) { if (ctx.input.fail) throw new Error("failure"); return null; }',
   'function main(ctx) { const value = ctx.clipboard.readData(); return value.kind === "files" ? {count:value.paths.length, sequence:value.sequenceNumber} : {units:value.text.length, sequence:value.sequenceNumber}; }',
   'function main(ctx) { const value = ctx.desktop.copySelectionData({timeoutMs:400,pollIntervalMs:10,settleMs:0,allowUnchanged:false}); return {kind:value.kind,changed:value.changed}; }',
+  'function main(ctx) { return Promise.resolve({text:String(ctx.input.text)}); }',
 ]) {
   const items = checkEntry(source);
   assert.equal(items.length, 0, report(items));
 }
+const asyncEntryHeader = entryHeader.replace('{ScriptMain}', '{ScriptAsyncMain}');
+const asyncEntryItems = checkEntry('async function main(ctx) { return {text:String(ctx.input.text)}; }', asyncEntryHeader);
+assert.equal(asyncEntryItems.length, 0, report(asyncEntryItems));
 const invalidEntries = {
-  async: 'async function main(ctx) { return {text: String(ctx.input.text)}; }',
-  promise: 'function main() { return Promise.resolve("later"); }',
+  asyncWithoutAsyncType: 'async function main(ctx) { return {text: String(ctx.input.text)}; }',
+  promiseNonJson: 'function main() { return Promise.resolve({handler:()=>true}); }',
+  promiseUndefined: 'function main() { return Promise.resolve(undefined); }',
   missingReturn: 'function main(ctx) { String(ctx.input.text); }',
   partialReturn: 'function main(ctx) { if (ctx.input.text) return "text"; }',
   undefined: 'function main() { return undefined; }',
@@ -99,16 +106,23 @@ for (const [name, source] of Object.entries(invalidEntries)) {
   assert(items.some(item => [1065, 2322, 2355, 2366].includes(item.code)
     && item.file && resolve(item.file.fileName) === resolve(project.entry_path)), `${name}: ${report(items)}`);
 }
-// 输入泛型只提供作者字段检查，不改变运行时参数或同步JSON返回契约。
+// 输入泛型只提供作者字段检查，不改变运行时参数或最终JSON结果契约。
 const typedInputHeader = '/// <reference path="./sdk/api.d.ts" />\n/** @typedef {{text:string,repeats:number,suffix?:string}} MyInput */\n/** @type {ScriptMain<MyInput>} */\n';
 const typedInputPositive = 'function main(ctx) { return format(ctx); }\n/** @param {ScriptContext<MyInput>} ctx */\nfunction format(ctx) { return {text:ctx.input.text.repeat(ctx.input.repeats)+(ctx.input.suffix ?? "")}; }';
 const typedInputItems = checkEntry(typedInputPositive, typedInputHeader);
 assert.equal(typedInputItems.length, 0, report(typedInputItems));
+for (const [source, header] of [
+  ['function main(ctx) { return Promise.resolve(ctx.input.text); }', typedInputHeader],
+  ['async function main(ctx) { return ctx.input.text; }', typedInputHeader.replace('{ScriptMain<MyInput>}', '{ScriptAsyncMain<MyInput>}')],
+]) {
+  const items = checkEntry(source, header);
+  assert.equal(items.length, 0, report(items));
+}
 const typedInputInvalid = {
   misspelledField: 'function main(ctx) { return ctx.input.txet; }',
   fieldType: 'function main(ctx) { ctx.input.repeats = "twice"; return null; }',
-  async: 'async function main(ctx) { return ctx.input.text; }',
-  promise: 'function main(ctx) { return Promise.resolve(ctx.input.text); }',
+  asyncWithoutAsyncType: 'async function main(ctx) { return ctx.input.text; }',
+  promiseNonJson: 'function main(ctx) { return Promise.resolve({callback:()=>ctx.input.text}); }',
   nonJsonReturn: 'function main(ctx) { return {callback:()=>ctx.input.text}; }',
 };
 for (const [name, source] of Object.entries(typedInputInvalid)) {
@@ -157,6 +171,6 @@ const listed = cli(['--list-package-actions']);
 assert.equal(listed.actions.length, 1);
 assert.equal(listed.actions[0].runtime, 'script');
 assert.equal(readFileSync(config,'utf8'),'[]');
-const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,checkedExamples,entryContractChecks:Object.keys(invalidEntries),typedInputChecks,negativeTypeChecks:negative.length,structuredClipboardTypeChecks:true,historyTypeChecks,fileDirectoryTypeChecks,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
+const result = {passed:true,root,compilerVersion:ts.version,positiveTypeCheck:true,checkedExamples,entryContractChecks:Object.keys(invalidEntries),typedInputChecks,negativeTypeChecks:negative.length,structuredClipboardTypeChecks:true,historyTypeChecks,fileDirectoryTypeChecks,actionHintChecks,existingFilesPreserved:true,invalidCliDidNotCreateProject:true,personalBindingsModified:false};
 writeFileSync(join(root,'result.json'), JSON.stringify(result,null,2));
 console.log(JSON.stringify(result));

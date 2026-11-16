@@ -45,6 +45,7 @@ enum Queued {
 }
 
 struct Job {
+    owned: Option<crate::owned_left_input::OwnedLeftJobGuard>,
     sequence: u64,
     inputs: Vec<INPUT>,
     tags: Vec<Tag>,
@@ -65,6 +66,7 @@ struct Ack {
 }
 
 struct Flight {
+    owned: Option<crate::owned_left_input::OwnedLeftRequest>,
     sequence: u64,
     tags: Vec<Tag>,
     cleanup: bool,
@@ -114,8 +116,13 @@ impl Worker {
                     let Work::Submit(job) = work else {
                         return;
                     };
-                    let skipped = !job.cleanup
-                        && unsafe { GetForegroundWindow() }.0 as usize != job.foreground;
+                    let skipped = job.owned.as_ref().map_or_else(
+                        || {
+                            !job.cleanup
+                                && unsafe { GetForegroundWindow() }.0 as usize != job.foreground
+                        },
+                        |guard| !guard.permits(),
+                    );
                     let started = Instant::now();
                     let sent = if skipped {
                         0
@@ -223,6 +230,7 @@ pub(super) enum Effect {
 }
 
 pub(super) struct ReplayRuntime {
+    owned_left: owned_left::OwnedLeftState,
     worker: Option<Worker>,
     queue: VecDeque<Queued>,
     flight: Option<Flight>,
@@ -238,6 +246,7 @@ pub(super) struct ReplayRuntime {
 impl ReplayRuntime {
     pub fn new() -> Self {
         Self {
+            owned_left: Default::default(),
             worker: None,
             queue: VecDeque::new(),
             flight: None,
@@ -265,10 +274,14 @@ impl ReplayRuntime {
         self.epochs.get(&button).copied().unwrap_or(0)
     }
     pub fn busy(&self) -> bool {
-        self.flight.is_some() || !self.queue.is_empty() || !self.recovery.is_empty()
+        self.flight.is_some()
+            || !self.queue.is_empty()
+            || !self.recovery.is_empty()
+            || self.owned_left_pending()
     }
     pub fn retry_cleanup(&mut self) {
         self.fatal_cleanup = false;
+        self.cancel_owned_left();
     }
     pub fn is_fatal(&self) -> bool {
         self.fatal_cleanup
@@ -278,6 +291,13 @@ impl ReplayRuntime {
     }
 
     pub fn passed(&mut self, kind: InputKind, metadata: &BTreeMap<Button, KeyMetadata>) {
+        if matches!(
+            kind,
+            InputKind::Down(Button::Mouse(omnitrigger_core::MouseButton::Left))
+                | InputKind::Up(Button::Mouse(omnitrigger_core::MouseButton::Left))
+        ) {
+            self.revoke_owned_left();
+        }
         match kind {
             InputKind::Down(button) => {
                 if self.fatal_cleanup {
@@ -321,6 +341,16 @@ impl ReplayRuntime {
         foreground: usize,
         metadata: &BTreeMap<Button, KeyMetadata>,
     ) -> Result<(), BTreeSet<Button>> {
+        if kinds.iter().any(|kind| {
+            matches!(
+                kind,
+                InputKind::Down(Button::Mouse(omnitrigger_core::MouseButton::Left))
+                    | InputKind::Up(Button::Mouse(omnitrigger_core::MouseButton::Left))
+            )
+        }) {
+            // 旧输入必须接在动作的中性释放之后；不混用两个按下周期。
+            self.cancel_owned_left();
+        }
         if self.size().saturating_add(kinds.len()) > CAPACITY {
             return Err(self.abandon(&kinds));
         }
@@ -349,6 +379,7 @@ impl ReplayRuntime {
     }
 
     pub fn abandon(&mut self, extra: &[InputKind]) -> BTreeSet<Button> {
+        self.cancel_owned_left();
         let mut affected = self.recovery.clone();
         for kind in extra
             .iter()
@@ -374,7 +405,7 @@ impl ReplayRuntime {
 
     pub fn pump(&mut self, foreground: usize) -> Vec<Effect> {
         let mut effects = Vec::new();
-        if self.fatal_cleanup && self.flight.is_none() {
+        if self.fatal_cleanup && self.flight.is_none() && !self.owned_left_pending() {
             return effects;
         }
         let acknowledgement = self
@@ -382,15 +413,17 @@ impl ReplayRuntime {
             .as_ref()
             .map(|worker| worker.acknowledgements.try_recv());
         if matches!(acknowledgement, Some(Err(mpsc::TryRecvError::Disconnected))) {
-            let kinds: Vec<_> = self
-                .flight
-                .take()
+            let flight = self.flight.take();
+            let kinds: Vec<_> = flight
+                .as_ref()
                 .into_iter()
-                .flat_map(|flight| flight.tags)
+                .flat_map(|flight| flight.tags.iter())
                 .map(|tag| tag.kind)
                 .collect();
-            let affected = self.abandon(&kinds);
+            // 先暂停，避免abandon再为已经退出的worker自动排入owned Up。
             self.fatal_cleanup = true;
+            self.finish_owned_left_worker_exit(flight.and_then(|flight| flight.owned));
+            let affected = self.abandon(&kinds);
             effects.push(Effect::Failed {
                 affected,
                 message: "输入补发线程已断开，监听已暂停；请松开按键后重建监听。".into(),
@@ -404,48 +437,71 @@ impl ReplayRuntime {
                     return effects;
                 }
                 effects.push(Effect::Timing(ack.elapsed));
-                for tag in flight.tags.iter().take(ack.sent) {
-                    match tag.kind {
-                        InputKind::Down(button) => {
-                            self.delivered.insert(button, tag.epoch);
-                            if let Some(release) = tag.release {
-                                self.templates.insert(button, release);
-                            }
-                        }
-                        InputKind::Up(button) => {
-                            if self.delivered.get(&button) == Some(&tag.epoch) {
-                                self.delivered.remove(&button);
-                            }
-                        }
-                        InputKind::Wheel { .. } => {}
+                if let Some(request) = flight.owned {
+                    self.finish_owned_left_ack(request, &flight.tags, ack.sent, ack.skipped);
+                    if self.fatal_cleanup {
+                        effects.push(Effect::Failed {
+                            affected: BTreeSet::from([Button::Mouse(
+                                omnitrigger_core::MouseButton::Left,
+                            )]),
+                            message: "动作左键释放未确认，监听已暂停；保留原所有权账本。".into(),
+                        });
                     }
-                }
-                if ack.sent == flight.tags.len() && !ack.skipped {
-                    effects.push(Effect::Delivered(flight.tags));
-                    self.recovery
-                        .retain(|button| self.delivered.contains_key(button));
                 } else {
-                    let kinds: Vec<_> = flight.tags.iter().map(|tag| tag.kind).collect();
-                    let affected = self.abandon(&kinds);
-                    if flight.cleanup {
-                        self.fatal_cleanup = true;
+                    for tag in flight.tags.iter().take(ack.sent) {
+                        match tag.kind {
+                            InputKind::Down(button) => {
+                                self.delivered.insert(button, tag.epoch);
+                                if let Some(release) = tag.release {
+                                    self.templates.insert(button, release);
+                                }
+                            }
+                            InputKind::Up(button) => {
+                                if self.delivered.get(&button) == Some(&tag.epoch) {
+                                    self.delivered.remove(&button);
+                                }
+                            }
+                            InputKind::Wheel { .. } => {}
+                        }
                     }
-                    effects.push(Effect::Failed {
-                        affected,
-                        message: if ack.skipped {
-                            "补发前前台窗口已改变，旧输入已取消，监听已暂停。".into()
-                        } else {
-                            format!(
-                                "输入补发失败（{}/{}），监听已暂停；释放收尾将尽力完成。",
-                                ack.sent,
-                                flight.tags.len()
-                            )
-                        },
-                    });
+                    if ack.sent == flight.tags.len() && !ack.skipped {
+                        effects.push(Effect::Delivered(flight.tags));
+                        self.recovery
+                            .retain(|button| self.delivered.contains_key(button));
+                    } else {
+                        let kinds: Vec<_> = flight.tags.iter().map(|tag| tag.kind).collect();
+                        let affected = self.abandon(&kinds);
+                        if flight.cleanup {
+                            self.fatal_cleanup = true;
+                        }
+                        effects.push(Effect::Failed {
+                            affected,
+                            message: if ack.skipped {
+                                "补发前前台窗口已改变，旧输入已取消，监听已暂停。".into()
+                            } else {
+                                format!(
+                                    "输入补发失败（{}/{}），监听已暂停；释放收尾将尽力完成。",
+                                    ack.sent,
+                                    flight.tags.len()
+                                )
+                            },
+                        });
+                    }
                 }
             }
         }
-        if self.flight.is_some() || self.fatal_cleanup {
+        if self.flight.is_some() {
+            return effects;
+        }
+        // 暂停状态仍允许同一owner的中性释放；成功后也不擅自恢复监听。
+        let was_fatal = self.fatal_cleanup;
+        if self.pump_owned_left() || self.fatal_cleanup {
+            if !was_fatal && self.fatal_cleanup {
+                effects.push(Effect::Failed {
+                    affected: BTreeSet::from([Button::Mouse(omnitrigger_core::MouseButton::Left)]),
+                    message: "动作左键释放通道不可用，监听已暂停；保留原所有权账本。".into(),
+                });
+            }
             return effects;
         }
         self.recovery
@@ -512,6 +568,7 @@ impl ReplayRuntime {
         self.next_sequence = self.next_sequence.wrapping_add(1);
         let sequence = self.next_sequence;
         let job = Job {
+            owned: None,
             sequence,
             inputs,
             tags: tags.clone(),
@@ -524,6 +581,7 @@ impl ReplayRuntime {
             .is_some_and(|worker| worker.jobs.try_send(Work::Submit(job)).is_ok())
         {
             self.flight = Some(Flight {
+                owned: None,
                 sequence,
                 tags,
                 cleanup,
@@ -543,8 +601,15 @@ impl ReplayRuntime {
 
 impl Drop for ReplayRuntime {
     fn drop(&mut self) {
-        let idle = !self.busy();
-        let affected = self.abandon(&[]);
+        let idle = !self.busy() && !self.owned_left_active();
+        let revoked_owned_flight = self.owned_left_stop_revoked();
+        let mut affected = self.abandon(&[]);
+        if self.owned_left_active() {
+            affected.insert(Button::Mouse(omnitrigger_core::MouseButton::Left));
+        }
+        if revoked_owned_flight {
+            affected.remove(&Button::Mouse(omnitrigger_core::MouseButton::Left));
+        }
         if let Some(worker) = &mut self.worker {
             worker.shutdown(
                 StopCleanup {
@@ -566,3 +631,6 @@ mod tests;
 #[cfg(test)]
 #[path = "replay_platform_tests.rs"]
 mod platform_tests;
+
+#[path = "replay_owned_left.rs"]
+mod owned_left;

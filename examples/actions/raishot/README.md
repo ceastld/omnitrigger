@@ -57,4 +57,12 @@ node --test tests/raishot_consumer.test.mjs
 node tools/script-sdk-check/node_modules/typescript/lib/tsc.js -p examples/actions/raishot/jsconfig.json
 ```
 
-类型声明快照来自本仓库公开提交 `56e35e2bf6a9a54210dde1ae038da907bd3cd031`。TypeScript 使用现有 `tools/script-sdk-check` 开发依赖，不新增运行时依赖。
+同包声明随当前入口维护，包含文件结果接口。TypeScript 使用现有 `tools/script-sdk-check` 开发依赖，不新增运行时依赖。
+
+## PNG 文件结果协议
+
+result-script@1 输入为 `{"operation":"capture","timeoutMs":30000}`；释放为 `{"operation":"release","requestId":"..."}`。只使用已启用插件所配置、清单及必需文件大小符合接入条件的 0.4.18 console CLI，不自动发现其它安装或下载。接入检查不计算程序哈希；程序仍须明确支持 capture-result v1，现有发行包不因版本号相同而被视为支持。
+
+完成仅确认 PNG 文件：请求ID、唯一会话、相对文件名、长度、SHA-256和PNG头/尺寸均由宿主核对。图片不放进JSON，元数据小于4 KiB，普通服务硬限仍为64 KiB。unknown不重试，图像历史和吸附未由此协议确认。
+
+结果引用仅在当前应用进程内可显式释放。应用重启后不重导入这些引用，也不自动清理结果文件；调用方需自行保存或管理文件。

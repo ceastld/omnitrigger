@@ -253,28 +253,15 @@ export function checkProjectTypes(projectDirectory) {
     });
     if(fatal)throw fatal;
     const localName=path=>relative(root,path).replaceAll('\\','/');
-    const moduleChecks=[],entryChecks=[],skippedEntries=[],legacyEntryDiagnostics=[];
+    const moduleChecks=[],entryChecks=[],skippedEntries=[];
     for(const entry of new Set(scriptEntries)) {
-      const name=localName(entry);
-      // 旧 .js 走函数体协议，不能假装它需要 ESM 具名导出。
-      if(extname(entry)!=='.mjs') {
-        skippedEntries.push({entry:name,reason:'legacy_function_body_protocol'});
-        const source=program.getSourceFile(entry);
-        const moduleNode=source?.statements.find(node=>ts.isImportDeclaration(node)||ts.isExportDeclaration(node)
-          ||ts.isExportAssignment(node)||node.modifiers?.some(modifier=>modifier.kind===ts.SyntaxKind.ExportKeyword));
-        if(moduleNode) {
-          const point=source.getLineAndCharacterOfPosition(moduleNode.getStart(source));
-          legacyEntryDiagnostics.push({entry:name,category:'entry',code:'legacy_entry_module_syntax',severity:'error',
-            message:'旧 .js 入口按函数体执行，不能使用静态 import/export；需要模块时改用 .mjs 入口并具名导出 main。',
-            file:name,line:point.line+1,column:point.character+1});
-        }
-        continue;
-      }
+      const name=localName(entry),legacy=extname(entry)!=='.mjs';
+      const entryResult=analyzeScriptEntry({file:name,text:sourceSnapshots.get(entry)});
       let moduleResult;
       const attempted=new Set();
       for(;;) {
         const sources=[...sourceSnapshots].map(([path,text])=>({path:localName(path),text}));
-        moduleResult=analyzeScriptModules({entry:name,sources});
+        moduleResult=analyzeScriptModules({entry:name,sources,...(legacy?{protocol:'legacy_function_body'}:{})});
         // TypeScript可能把 ./x.js 解析到 x.ts；轻量宿主需要的是明确的 x.js。
         // 只补读分析器给出的包内静态边，不枚举目录、不追踪动态表达式。
         const missing=[...new Set(moduleResult.edges.filter(edge=>edge.kind==='static')
@@ -287,19 +274,19 @@ export function checkProjectTypes(projectDirectory) {
           catch(error) {if(error?.code!=='ENOENT')throw error;}
         }
       }
-      moduleChecks.push({entry:name,...moduleResult});
-      entryChecks.push({entry:name,...analyzeScriptEntry({file:name,text:sourceSnapshots.get(entry)})});
+      if(legacy&&entryResult.dependencyAnalysisComplete===false)moduleResult={...moduleResult,staticGraphComplete:false};
+      moduleChecks.push({entry:name,...(legacy?{entryProtocol:'legacy_function_body'}:{}),...moduleResult});
+      entryChecks.push({entry:name,...entryResult});
     }
     const nodeEntryChecks=[...new Set(nodeEntries)].map(entry=>({entry:localName(entry),
       ...analyzeNodeEntries({projectDirectory:root,typescript:ts,program,entries:[entry]})}));
     if(fatal)throw fatal;
     const environmentDiagnostics=[
-      ...legacyEntryDiagnostics,
       ...moduleChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'modules',...item}))),
       ...entryChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'entry',...item}))),
       ...nodeEntryChecks.flatMap(check=>check.diagnostics.map(item=>({entry:check.entry,category:'entry',runtime:'node',...item}))),
     ];
-    const staticEnvironmentPassed=legacyEntryDiagnostics.length===0&&moduleChecks.every(check=>check.passed)
+    const staticEnvironmentPassed=moduleChecks.every(check=>check.passed)
       &&entryChecks.every(check=>check.passed)&&nodeEntryChecks.every(check=>check.passed);
     return {passed:diagnostics.length===0&&staticEnvironmentPassed,compilerVersion:ts.version,project:root,
       entries:entries.map(path=>relative(root,path).replaceAll('\\','/')),diagnostics,
@@ -307,7 +294,7 @@ export function checkProjectTypes(projectDirectory) {
       staticEnvironmentPassed,environmentDiagnostics,moduleChecks,entryChecks,skippedEntries,
       ...(nodeEntries.length?{nodeEntryChecks}:{}),
       staticAnalysisComplete:skippedEntries.length===0&&moduleChecks.every(check=>check.staticGraphComplete)
-        &&entryChecks.every(check=>check.mainExport==='local_callable_declaration')
+        &&entryChecks.every(check=>['local_callable_declaration','legacy_callable_declaration'].includes(check.mainExport)&&check.staticAnalysisComplete!==false)
         &&nodeEntryChecks.every(check=>check.passed&&!check.diagnostics.some(item=>item.severity==='warning')),
       runtimeCapabilitiesChecked:false,runtimeVerified:false,
       runtimeExecuted:false,filesModified:false};

@@ -7,12 +7,16 @@ use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     thread,
 };
 
+#[path = "service_actions.rs"]
+mod actions;
+
 pub const CAPACITY: usize = 4;
+const STOP_OTHER_MAX_TIMEOUT_MS: u64 = 2000;
 
 /// 只读的动作包目录；引用检查不执行脚本，也不证明业务参数或本机能力可用。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -30,6 +34,8 @@ pub struct ActionCatalogDescription {
     pub runtime: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub single_instance: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_binding_reentry: bool,
     pub reference_error: Option<ActionError>,
 }
 
@@ -154,7 +160,10 @@ struct Reservation {
     binding_id: u64,
     cancellation: CancellationToken,
     identity: ActionIdentity,
+    action_version: u32,
     single_instance: bool,
+    /// 从已解析清单快照取得，不能由脚本输入覆盖。
+    binding_reentry: bool,
     /// 从接纳到运行时及本次调用资源清理结束；不等UI读取终态，不由取消请求清除。
     active: bool,
 }
@@ -172,6 +181,7 @@ struct Reservations {
 
 struct ActiveInvocation {
     reservations: Arc<Mutex<Reservations>>,
+    active_changed: Arc<Condvar>,
     invocation_id: u64,
 }
 
@@ -184,6 +194,8 @@ impl Drop for ActiveInvocation {
         if let Some(entry) = reserved.entries.get_mut(&self.invocation_id) {
             entry.active = false;
         }
+        drop(reserved);
+        self.active_changed.notify_all();
     }
 }
 
@@ -212,7 +224,7 @@ impl InvocationTask {
             return;
         }
         let cancellation = self.cancellation.clone();
-        let outcome = if cancellation.is_cancelled() {
+        let mut outcome = if cancellation.is_cancelled() {
             ActionOutcome::Cancelled
         } else {
             match catch_unwind(AssertUnwindSafe(|| {
@@ -224,16 +236,51 @@ impl InvocationTask {
                 )
             })) {
                 Ok(Ok(output)) => ActionOutcome::Succeeded { output },
+                // 已交付的亮度取消错误必须保留未知副作用与匿名进度。
+                Ok(Err(error))
+                    if error.code == "cancelled"
+                        && error.method.as_deref() == Some("display.brightness_step")
+                        && error.effect_state.as_deref() == Some("unknown")
+                        && error.brightness_receipt.is_some() =>
+                {
+                    ActionOutcome::Failed { error }
+                }
                 Ok(Err(error)) if error.code == "cancelled" => ActionOutcome::Cancelled,
                 Ok(Err(error)) => ActionOutcome::Failed { error },
                 Err(_) => runtime_panic(),
             }
         };
+        let cleanup = catch_unwind(AssertUnwindSafe(|| {
+            self.host
+                .as_deref()
+                .map_or(Ok(()), NativeHost::finish_owned_inputs)
+        }));
+        let cleanup_error = match cleanup {
+            Ok(Err(error)) => Some(error),
+            Err(_) => Some(crate::owned_mouse::fault(
+                crate::owned_mouse::UP,
+                "input_cleanup_failed",
+                true,
+            )),
+            Ok(Ok(())) => None,
+        };
+        let cleanup_failed = cleanup_error.is_some();
+        if let Some(error) = cleanup_error {
+            outcome = ActionOutcome::Failed { error };
+        }
         // 包括reload后旧运行时最后一份Arc；此处不持有服务锁，不等待UI读终态。
         let cleaned = catch_unwind(AssertUnwindSafe(|| drop(self)));
-        let outcome = if cleaned.is_err() {
+        let outcome = if cleanup_failed {
+            outcome
+        } else if cleaned.is_err() {
             runtime_panic()
-        } else if cancellation.is_cancelled() {
+        } else if cancellation.is_cancelled()
+            && !matches!(&outcome, ActionOutcome::Failed { error }
+                if matches!(error.code.as_str(), "cancelled" | "timeout")
+                    && error.method.as_deref() == Some("display.brightness_step")
+                    && error.effect_state.as_deref() == Some("unknown")
+                    && error.brightness_receipt.is_some())
+        {
             ActionOutcome::Cancelled
         } else {
             outcome
@@ -255,9 +302,11 @@ fn runtime_panic() -> ActionOutcome {
 /// 有界的应用调用服务；正在运行和终态尚未被消费的调用共用配额。
 /// 不在 Drop 中等待用户运行时，不重试已经接纳的带副作用调用。
 pub struct ActionService {
+    state_store: Option<Arc<crate::state::ActionStateStore>>,
     catalog: PackageCatalog,
     runtimes: RuntimeRegistry,
     reservations: Arc<Mutex<Reservations>>,
+    active_changed: Arc<Condvar>,
     events_tx: SyncSender<ActionEvent>,
     events_rx: Receiver<ActionEvent>,
 }
@@ -267,15 +316,23 @@ impl ActionService {
         // 每个配额恰有一次 Started 和一次终态，不会产生无限进度日志。
         let (events_tx, events_rx) = mpsc::sync_channel(CAPACITY * 2);
         Self {
+            state_store: None,
             catalog,
             runtimes,
             reservations: Arc::new(Mutex::new(Reservations {
                 next_id: 1,
                 entries: BTreeMap::new(),
             })),
+            active_changed: Arc::new(Condvar::new()),
             events_tx,
             events_rx,
         }
+    }
+
+    /// 仅组合根显式提供；reload复用此Arc，不在动作完成后回写旧快照。
+    pub fn with_state_store(mut self, store: Arc<crate::state::ActionStateStore>) -> Self {
+        self.state_store = Some(store);
+        self
     }
 
     pub fn catalog(&self) -> &PackageCatalog {
@@ -309,6 +366,7 @@ impl ActionService {
                         title: entry.definition.title.clone(),
                         runtime: entry.definition.runtime.clone(),
                         single_instance: entry.definition.single_instance,
+                        allow_binding_reentry: entry.definition.allow_binding_reentry,
                         reference_error,
                     }
                 })
@@ -327,8 +385,9 @@ impl ActionService {
     }
 
     fn registered_runtime(&self, call: &ActionCall) -> Result<&RegisteredRuntime, ActionError> {
-        self.runtimes
-            .get(&self.catalog.resolve(call)?.definition.runtime)
+        let resolved = self.catalog.resolve(call)?;
+        resolved.definition.validate_policy()?;
+        self.runtimes.get(&resolved.definition.runtime)
     }
 
     pub fn submit(&self, id: u64, call: ActionCall) -> Result<u64, ActionError> {
@@ -354,6 +413,8 @@ impl ActionService {
         spawn: impl FnOnce(thread::Builder, Box<dyn FnOnce() + Send>) -> std::io::Result<()>,
     ) -> Result<u64, ActionError> {
         let action = self.catalog.resolve(&call)?;
+        action.definition.validate_policy()?;
+        let binding_reentry = action.definition.allow_binding_reentry;
         let runtime = Arc::clone(&self.runtimes.get(&action.definition.runtime)?.runtime);
         let identity = ActionIdentity {
             package_id: action.call.package_id.clone(),
@@ -365,11 +426,15 @@ impl ActionService {
                 .reservations
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if reserved
-                .entries
-                .values()
-                .any(|entry| entry.binding_id == id)
-            {
+            if reserved.entries.values().any(|entry| {
+                entry.binding_id == id
+                    && !(binding_reentry
+                        && entry.binding_reentry
+                        && entry.active
+                        && entry.identity == identity
+                        && entry.action_version == action.call.action_version
+                        && !entry.single_instance)
+            }) {
                 return Err(ActionError::new(
                     "binding_busy",
                     "此动作的上次调用尚未结束或终态尚未读取。",
@@ -400,7 +465,9 @@ impl ActionService {
                     binding_id: id,
                     cancellation: cancellation.clone(),
                     identity,
+                    action_version: action.call.action_version,
                     single_instance: action.definition.single_instance,
+                    binding_reentry,
                     active: true,
                 },
             );
@@ -411,6 +478,13 @@ impl ActionService {
             invocation_id,
             binding_id: id,
         };
+        let host = Some(actions::scoped_host(
+            host,
+            self.reservations.clone(),
+            self.active_changed.clone(),
+            invocation_id,
+            self.state_store.clone(),
+        ));
         let task = InvocationTask {
             action,
             runtime,
@@ -419,6 +493,7 @@ impl ActionService {
             cancellation,
             _active: ActiveInvocation {
                 reservations: self.reservations.clone(),
+                active_changed: self.active_changed.clone(),
                 invocation_id,
             },
         };
@@ -1094,6 +1169,7 @@ mod tests {
         service.reload(catalog, registry);
         let json = serde_json::to_value(service.describe_catalog()).unwrap();
         assert!(json["actions"][0].get("single_instance").is_none());
+        assert!(json["actions"][0].get("allow_binding_reentry").is_none());
         assert!(
             !serde_json::from_value::<ActionCatalogSnapshot>(json)
                 .unwrap()
@@ -1364,3 +1440,11 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "state_service_tests.rs"]
+mod state_service_tests;
+
+#[cfg(test)]
+#[path = "binding_reentry_tests.rs"]
+mod binding_reentry_tests;

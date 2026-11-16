@@ -1,0 +1,11 @@
+{
+  "package_id": "examples.browser-workflows",
+  "action_id": "duplicate-tab-script",
+  "action_version": 1,
+  "input": {
+    "profile": "选定的 browser_instance_id",
+    "windowId": 123,
+    "tabId": 456,
+    "focusWindow": false
+  }
+}

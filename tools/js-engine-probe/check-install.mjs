@@ -117,6 +117,8 @@ for (const args of [
   ['--install-script-runtime',development.archive],
   ['--create-script-action'],
   ['--run-action',''],
+  ['--with-action-state=true'],
+  ['--list-package-actions','--with-action-state'],
   ['--stream-action-events'],
   ['--target-context','target.json'],
   ['--check-action'],
