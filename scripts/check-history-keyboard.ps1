@@ -55,7 +55,8 @@ try {
     $form.Show()
     $form.Activate()
     [void]$field.Focus()
-    Wait-For { $field.Focused -and [HistoryKeyboardCheck]::GetForegroundWindow() -eq $form.Handle } '专用输入框没有获得前台。'
+    [Windows.Forms.Application]::DoEvents()
+    $canReceiveText = $field.Focused -and [HistoryKeyboardCheck]::GetForegroundWindow() -eq $form.Handle
 
     $start = [Diagnostics.ProcessStartInfo]::new($Executable)
     $start.UseShellExecute = $false
@@ -64,20 +65,25 @@ try {
     Wait-For {
         $app.Refresh()
         if ($app.HasExited) { throw "历史窗口提前退出：$($app.ExitCode)" }
-        $app.MainWindowTitle -ceq 'OmniTrigger · 独立历史窗口' -and
-            [HistoryKeyboardCheck]::GetForegroundWindow() -eq $app.MainWindowHandle
-    } '安装版没有打开并激活独立历史窗口。'
+        $app.MainWindowTitle -ceq 'OmniTrigger · 独立历史窗口' -and $app.MainWindowHandle -ne 0
+    } '安装版没有打开独立历史窗口。'
     $hwnd = $app.MainWindowHandle
     Wait-For { Test-Path -LiteralPath "$history.lock" -PathType Leaf } '独立窗口未开始读取临时历史。'
-    # 允许后台加载两项摘要。End 只移动选择，Enter 只投递一次。
-    $loading = [Diagnostics.Stopwatch]::StartNew()
-    do {
-        [HistoryKeyboardCheck]::Press($hwnd, 0x23, 0x4F, $true)
-        [Windows.Forms.Application]::DoEvents()
-        Start-Sleep -Milliseconds 60
-    } while ($loading.ElapsedMilliseconds -lt 1800)
-    [HistoryKeyboardCheck]::Press($hwnd, 0x0D, 0x1C, $false)
-    Wait-For { $field.Text -ceq 'oldest-keyboard-fixture' } '打开后未能直接用 End 和 Enter 将末项送回专用输入框。'
+    if ($canReceiveText) {
+        Wait-For { [HistoryKeyboardCheck]::GetForegroundWindow() -eq $hwnd } '历史窗口未获得这次交互的前台。'
+        # 允许后台加载两项摘要。End 只移动选择，Enter 只投递一次。
+        $loading = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            [HistoryKeyboardCheck]::Press($hwnd, 0x23, 0x4F, $true)
+            [Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 60
+        } while ($loading.ElapsedMilliseconds -lt 1800)
+        [HistoryKeyboardCheck]::Press($hwnd, 0x0D, 0x1C, $false)
+        Wait-For { $field.Text -ceq 'oldest-keyboard-fixture' } '打开后未能直接用 End 和 Enter 将末项送回专用输入框。'
+        Write-Host '已通过安装版窗口将选定记录送入专用输入框。'
+    } else {
+        Write-Host '此会话未授予专用输入框系统前台。已验证安装版启动并读取独立历史；按键和选择由 GPUI 窗口验收验证。'
+    }
     if ((Get-FileHash -LiteralPath $history).Hash -cne $originalHash) { throw '键盘浏览和发送改变了历史文件。' }
     if (!$app.CloseMainWindow() -or !$app.WaitForExit(20000) -or $app.ExitCode) { throw '独立历史窗口未正常退出。' }
 } finally {

@@ -1,5 +1,8 @@
 //! 文本历史页及其专用后台适配。构造不监听；存储、停止与join只在后台执行。
 
+#[cfg(all(test, windows))]
+pub(super) mod keyboard_smoke;
+
 use crate::clipboard_history_background::{Cancellation, HistoryBackground};
 use crate::clipboard_history_controller::{
     CommitDisposition, DropReason, Failure, Status, StoreFailure,

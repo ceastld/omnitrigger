@@ -691,6 +691,14 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "在 Windows 安装验收机打开真实的本档历史窗口"]
+    fn popup_keyboard_without_mouse() {
+        // 已不存在的目标，后台只允许返回身份核验失败。
+        crate::clipboard_history_ui::keyboard_smoke::verify(launch(time()));
+    }
+
     fn selected() -> HistorySendSelection {
         HistorySendSelection {
             summary: HistorySummary::from_text("1", "10", " A😀\n"),

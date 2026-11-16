@@ -60,6 +60,10 @@ jobs:
       - name: 格式、测试、Clippy 与示例配置检查
         run: ./scripts/check.ps1
 
+      - name: 验证独立历史窗口的键盘选择和发送回执
+        timeout-minutes: 5
+        run: cargo test --locked -p omnitrigger-app --bin omnitrigger clipboard_history_send::tests::popup_keyboard_without_mouse -- --ignored --exact
+
       - name: 构建发行包并收集第三方许可
         env:
           OMNITRIGGER_BUILD_COMMIT: ${{ steps.version.outputs.commit }}
