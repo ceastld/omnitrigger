@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::plugins::{local_manifest_metadata, read_local_manifest, RAISHOT_MANIFEST_PATH};
 use serde::{Deserialize, Serialize};
 
+mod backup_revisions;
 #[cfg(windows)]
 mod external_import;
 mod reset_recovery;
@@ -1117,7 +1118,13 @@ fn source_dir(root: &Path, catalog: &Catalog, key: &str) -> Result<PathBuf, Stri
     Ok(dir)
 }
 
-fn seed_into(root: &Path, catalog: &Catalog, seed: &Seed, target: &Path) -> Result<(), String> {
+fn seed_into(
+    root: &Path,
+    catalog: &Catalog,
+    seed: &Seed,
+    target: &Path,
+    previous_profile: Option<&Path>,
+) -> Result<(), String> {
     match seed {
         Seed::Empty => std::fs::create_dir_all(target)
             .map_err(|error| format!("创建 {} 失败：{error}", target.display())),
@@ -1140,18 +1147,7 @@ fn seed_into(root: &Path, catalog: &Catalog, seed: &Seed, target: &Path) -> Resu
                 bindings, wheels, ..
             } = seed
             {
-                for (name, revision) in [("bindings.json", bindings), ("wheels.json", wheels)] {
-                    if let Some(number) = revision {
-                        let file = crate::settings::edit_backup_file(
-                            &source.join("bindings.json"),
-                            name,
-                            *number,
-                        )?;
-                        DataCopy::Profile
-                            .copy_file(&file, &target.join(name))
-                            .map_err(|e| format!("复制 {name} 备份失败：{e}"))?;
-                    }
-                }
+                backup_revisions::restore(&source, target, previous_profile, *bindings, *wheels)?;
                 crate::check_config(&target.join("bindings.json"), true)
                     .map_err(|error| format!("选择的热键和轮盘无法一起使用：{error}"))?;
             }
@@ -1462,7 +1458,7 @@ fn insert_profile(
     // 来源按稳定 ID 保存在档外，重置不替换它，旧版也能读取原登记与身份文件。
     let origin_path = daily_copy_slot(&entry).map(|_| directory.with_extension("copy-origin.json"));
     stage_profile_directory(&directory, |staging| {
-        seed_into(root, catalog, &seed, staging)?;
+        seed_into(root, catalog, &seed, staging, None)?;
         write_json(&staging.join("profile.json"), &entry)?;
         if let Some(path) = &origin_path {
             write_json(path, &origin)?;
@@ -1566,7 +1562,7 @@ fn reset_profile(root: &Path, key: &str) -> Result<(Entry, Option<PathBuf>), Pro
     std::fs::create_dir(&staging)
         .map_err(|error| format!("创建 {} 失败：{error}", staging.display()))?;
     let result = (|| {
-        seed_into(root, &catalog, &seed, &staging)?;
+        seed_into(root, &catalog, &seed, &staging, Some(&directory))?;
         write_json(&staging.join("profile.json"), &entry)?;
         // 还原后可能只有各档的身份文件。在移走原目录前先保存其登记。
         persist_recovered_catalog(root, &catalog)?;

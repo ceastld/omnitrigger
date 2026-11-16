@@ -190,6 +190,8 @@ jobs:
               $expected[$customHotkeys] = (Get-FileHash -LiteralPath $customHotkeys).Hash
               $restored = & $exe --profile-create restored-edit --seed backup:default:1:current | ConvertFrom-Json
               if ($LASTEXITCODE -or $restored.status -ne 'created') { throw '从已安装版本新建备份副本失败。' }
+              $revisionRecord = Join-Path $restored.directory 'backups/restored-revisions.json'
+              $expected[$revisionRecord] = (Get-FileHash -LiteralPath $revisionRecord).Hash
               $expected[(Join-Path $restored.directory 'bindings.json')] = $expected[$dailyRevision]
               $expected[(Join-Path $restored.directory 'wheels.json')] = $expected[$wheels]
               $expected[(Join-Path $restored.directory 'actions/n10-rust/action.json')] = $expected[$n10Manifest]
@@ -213,6 +215,20 @@ jobs:
               if ($LASTEXITCODE) { throw '从设置的测试档列表重新打开安装版窗口失败。' }
               $saved = @($all.profiles | Where-Object { $_.alias -ceq 'restored-edit' -and $_.seed -ceq 'backup:default:1:current' })
               if ($LASTEXITCODE -or $saved.Count -ne 1 -or $saved[0].id -cne $restored.id) { throw '重装后恢复副本的登记身份不符。' }
+              & {
+                $PSNativeCommandUseErrorActionPreference = $false
+                $original = [IO.File]::ReadAllBytes($dailyRevision)
+                try {
+                  Copy-Item -LiteralPath 'examples/capslock-navigation.json' -Destination $dailyRevision -Force
+                  $reply = & $exe --profile-reset $restored.id 2>&1 | Out-String | ConvertFrom-Json
+                  if ($LASTEXITCODE -eq 0 -or $reply.status -ne 'rejected' -or $reply.error.message -notlike '*备份内容已变化*') {
+                    throw '同号备份更换后，重置未报告内容变化。'
+                  }
+                } finally {
+                  [IO.File]::WriteAllBytes($dailyRevision, $original)
+                }
+              }
+              Assert-ProfileFiles
               $start = [Diagnostics.ProcessStartInfo]::new($exe)
               $start.UseShellExecute = $false
               foreach ($argument in @('--data-root', $data, '--profile', $saved[0].id)) { $start.ArgumentList.Add($argument) }
