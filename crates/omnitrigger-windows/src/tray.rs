@@ -15,10 +15,10 @@ use windows::{
                 AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, IsIconic, IsWindowVisible,
                 KillTimer, LoadIconW, LoadStringW, PostMessageW, RegisterWindowMessageW,
                 SetForegroundWindow, SetTimer, ShowWindow, TrackPopupMenu, ENDSESSION_CLOSEAPP,
-                IDI_APPLICATION, MF_STRING, SIZE_MAXIMIZED, SIZE_RESTORED, SW_HIDE, SW_RESTORE,
-                SW_SHOW, SW_SHOWMINNOACTIVE, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
-                WM_CLOSE, WM_CONTEXTMENU, WM_ENDSESSION, WM_NCDESTROY, WM_NULL, WM_QUERYENDSESSION,
-                WM_SIZE, WM_TIMER,
+                IDI_APPLICATION, MF_GRAYED, MF_STRING, SIZE_MAXIMIZED, SIZE_RESTORED, SW_HIDE,
+                SW_RESTORE, SW_SHOW, SW_SHOWMINNOACTIVE, TPM_NONOTIFY, TPM_RETURNCMD,
+                TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_ENDSESSION, WM_NCDESTROY,
+                WM_NULL, WM_QUERYENDSESSION, WM_SIZE, WM_TIMER,
             },
         },
     },
@@ -29,16 +29,63 @@ const CALLBACK: u32 = WM_APP + 0x34a;
 const ICON_ID: u32 = 1;
 const OPEN: usize = 1;
 const EXIT: usize = 2;
+const PAUSE: usize = 3;
+const RESUME: usize = 4;
 const RETRY_TIMER: usize = SUBCLASS;
 const RETRY_DELAYS_MS: [u32; 3] = [250, 1000, 3000];
 const NO_ICON: usize = RETRY_DELAYS_MS.len() + 1;
 
-// 低 16 位是注册消息，其后分别保存任务栏回退标记和重试次数。
+// 子类数据的低 16 位是注册消息，其后为任务栏回退、监听菜单状态（3 位）和重试次数。
 #[derive(Clone, Copy)]
 struct TrayRegistration {
     restart: u32,
     taskbar_fallback: bool,
+    listener: ListenerMenu,
     retries: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+enum ListenerMenu {
+    Unavailable,
+    Listening,
+    Paused,
+    PauseRequested,
+    ResumeRequested,
+}
+
+impl ListenerMenu {
+    fn from_bits(bits: usize) -> Self {
+        match bits {
+            1 => Self::Listening,
+            2 => Self::Paused,
+            3 => Self::PauseRequested,
+            4 => Self::ResumeRequested,
+            _ => Self::Unavailable,
+        }
+    }
+
+    fn request(self, selection: usize) -> Option<Self> {
+        match (self, selection) {
+            (Self::Listening, PAUSE) => Some(Self::PauseRequested),
+            (Self::Paused, RESUME) => Some(Self::ResumeRequested),
+            _ => None,
+        }
+    }
+
+    fn sync(&mut self, paused: Option<bool>) -> Option<bool> {
+        let request = match (*self, paused) {
+            (Self::PauseRequested, Some(false)) => Some(true),
+            (Self::ResumeRequested, Some(true)) => Some(false),
+            _ => None,
+        };
+        *self = match paused {
+            None => Self::Unavailable,
+            Some(false) => Self::Listening,
+            Some(true) => Self::Paused,
+        };
+        request
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +101,7 @@ impl TrayRegistration {
         Self {
             restart,
             taskbar_fallback: false,
+            listener: ListenerMenu::Unavailable,
             retries: 0,
         }
     }
@@ -62,12 +110,16 @@ impl TrayRegistration {
         Self {
             restart: (data & 0xffff) as u32,
             taskbar_fallback: data & (1 << 16) != 0,
-            retries: data >> 17,
+            listener: ListenerMenu::from_bits((data >> 17) & 7),
+            retries: data >> 20,
         }
     }
 
     fn data(self) -> usize {
-        self.restart as usize | (usize::from(self.taskbar_fallback) << 16) | (self.retries << 17)
+        self.restart as usize
+            | (usize::from(self.taskbar_fallback) << 16)
+            | ((self.listener as usize) << 17)
+            | (self.retries << 20)
     }
 
     unsafe fn get(hwnd: HWND) -> Option<Self> {
@@ -191,6 +243,20 @@ pub fn is_in_tray(raw: isize) -> bool {
     }
 }
 
+/// 在窗口线程发布监听状态，并领取仍适用的暂停或恢复请求。
+pub fn sync_tray_listener(raw: isize, paused: Option<bool>) -> Option<bool> {
+    let hwnd = HWND(raw as _);
+    unsafe {
+        let mut registration = TrayRegistration::get(hwnd)?;
+        let previous = registration.listener;
+        let request = registration.listener.sync(paused);
+        if registration.listener != previous && !registration.store(hwnd) {
+            return None;
+        }
+        request
+    }
+}
+
 pub fn show_workspace_window(raw: isize) {
     unsafe { show_main(HWND(raw as _)) }
 }
@@ -230,7 +296,7 @@ fn menu_anchor(icon: Option<RECT>, cursor: Option<POINT>) -> Option<POINT> {
     }))
 }
 
-unsafe fn show_menu(hwnd: HWND) {
+unsafe fn show_menu(hwnd: HWND, listener: ListenerMenu) {
     // 版本 4 托盘回调没有为 WM_CONTEXTMENU 定义 wParam 的坐标。
     let icon = Shell_NotifyIconGetRect(&NOTIFYICONIDENTIFIER {
         cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
@@ -246,7 +312,16 @@ unsafe fn show_menu(hwnd: HWND) {
         return;
     };
     let Ok(menu) = CreatePopupMenu() else { return };
+    let (command, label) = match listener {
+        ListenerMenu::Paused | ListenerMenu::ResumeRequested => (RESUME, w!("恢复监听")),
+        _ => (PAUSE, w!("暂停监听")),
+    };
+    let flags = match listener {
+        ListenerMenu::Listening | ListenerMenu::Paused => MF_STRING,
+        _ => MF_STRING | MF_GRAYED,
+    };
     let items = AppendMenuW(menu, MF_STRING, OPEN, w!("打开主窗口"))
+        .and_then(|()| AppendMenuW(menu, flags, command, label))
         .and_then(|()| AppendMenuW(menu, MF_STRING, EXIT, w!("退出 OmniTrigger")));
     let selection = if items.is_ok() {
         let _ = SetForegroundWindow(hwnd);
@@ -272,6 +347,16 @@ unsafe fn handle_menu_selection(hwnd: HWND, selection: usize) {
     match selection {
         OPEN => show_main(hwnd),
         EXIT => request_exit(hwnd),
+        PAUSE | RESUME => {
+            // 菜单有自己的消息循环；使用选择完成时的状态，过期命令不反转监听。
+            if let Some(mut registration) = TrayRegistration::get(hwnd) {
+                if let Some(request) = registration.listener.request(selection) {
+                    registration.listener = request;
+                    registration.store(hwnd);
+                }
+            }
+            let _ = Shell_NotifyIconW(NIM_SETFOCUS, &icon_data(hwnd));
+        }
         _ => {
             let _ = Shell_NotifyIconW(NIM_SETFOCUS, &icon_data(hwnd));
         }
@@ -311,7 +396,7 @@ unsafe extern "system" fn tray_proc(
     if msg == CALLBACK && (lp.0 as u32 >> 16) == ICON_ID {
         match lp.0 as u16 as u32 {
             event if event == NIN_SELECT || event == (NIN_SELECT | NINF_KEY) => show_main(hwnd),
-            WM_CONTEXTMENU => show_menu(hwnd),
+            WM_CONTEXTMENU => show_menu(hwnd, registration.listener),
             _ => {}
         }
         return LRESULT(0);
@@ -380,6 +465,34 @@ mod tests {
         CreateWindowExW, DestroyWindow, PeekMessageW, MSG, PM_REMOVE, WINDOW_EX_STYLE,
         WS_OVERLAPPEDWINDOW,
     };
+
+    #[test]
+    fn tray_listener_requests_apply_once_and_only_to_the_state_shown() {
+        let mut registration = TrayRegistration::new(0xc153);
+        registration.taskbar_fallback = true;
+        registration.retries = NO_ICON;
+        for (paused, command, next, expected) in [
+            (Some(false), PAUSE, Some(false), Some(true)),
+            (Some(true), RESUME, Some(true), Some(false)),
+            (Some(false), PAUSE, Some(true), None),
+            (Some(true), RESUME, Some(false), None),
+            (Some(false), PAUSE, None, None),
+        ] {
+            registration.listener.sync(paused);
+            registration.listener = registration.listener.request(command).unwrap();
+            assert!(registration.listener.request(command).is_none());
+            registration = TrayRegistration::from_data(registration.data());
+            assert_eq!(registration.listener.sync(next), expected);
+            assert_eq!(registration.listener.sync(next), None);
+            assert_eq!(registration.retries, NO_ICON);
+            assert_eq!(registration.restart, 0xc153);
+            assert!(registration.taskbar_fallback);
+        }
+        assert!(ListenerMenu::Unavailable.request(PAUSE).is_none());
+        assert!(ListenerMenu::Unavailable.request(RESUME).is_none());
+        assert!(ListenerMenu::Paused.request(PAUSE).is_none());
+        assert!(ListenerMenu::Listening.request(RESUME).is_none());
+    }
 
     #[test]
     fn tray_menu_anchor_uses_the_icon_when_the_pointer_is_elsewhere() {

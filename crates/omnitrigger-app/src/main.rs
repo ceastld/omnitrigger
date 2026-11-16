@@ -1511,21 +1511,26 @@ impl Workspace {
         cx.notify();
     }
 
-    fn toggle_pause(&mut self, cx: &mut Context<Self>) {
-        if self.legacy_close_requested {
+    fn can_toggle_pause(&self) -> bool {
+        !self.legacy_close_requested
+            && self.mode.owns_input_engine()
+            && !self.recording
+            && self.ready
+    }
+
+    fn set_paused(&mut self, paused: bool, cx: &mut Context<Self>) {
+        if self.paused == paused || !self.can_toggle_pause() {
             return;
         }
-        if !self.mode.owns_input_engine() {
-            return;
-        }
-        if self.recording || !self.ready {
-            return;
-        }
-        let paused = !self.paused;
         if self.send(BackendCommand::SetEnabled(!paused)) {
             self.paused = paused;
             #[cfg(windows)]
-            self.sync_update_restart(cx);
+            {
+                if let Some(hwnd) = self.tray_window {
+                    omnitrigger_windows::sync_tray_listener(hwnd, Some(paused));
+                }
+                self.sync_update_restart(cx);
+            }
             if paused {
                 self.hide_wheel(cx);
             }
@@ -1537,6 +1542,10 @@ impl Workspace {
             .into();
         }
         cx.notify();
+    }
+
+    fn toggle_pause(&mut self, cx: &mut Context<Self>) {
+        self.set_paused(!self.paused, cx);
     }
 
     fn send(&mut self, command: BackendCommand) -> bool {
@@ -2152,6 +2161,13 @@ impl Workspace {
                     }
                 }
                 BackendEvent::Diagnostics(snapshot) => self.diagnostics = *snapshot,
+            }
+        }
+        #[cfg(windows)]
+        if let Some(hwnd) = self.tray_window {
+            let paused = self.can_toggle_pause().then_some(self.paused);
+            if let Some(request) = omnitrigger_windows::sync_tray_listener(hwnd, paused) {
+                self.set_paused(request, cx);
             }
         }
         changed |= self.pump_mouse_shortcuts();

@@ -113,8 +113,9 @@ public static class OmniTriggerUpgradeWindow {
     [DllImport("shell32.dll")] private static extern int Shell_NotifyIconGetRect(ref TrayId id, out Rect rect);
     [DllImport("user32.dll")] private static extern bool EnumThreadWindows(uint thread, EnumWindow callback, IntPtr parameter);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder text, int length);
-    private static bool TryGetMenuRect(uint thread, out Rect bounds) {
+    private static IntPtr FindMenu(uint thread, out Rect bounds) {
         Rect rect = default(Rect);
+        var popup = IntPtr.Zero;
         EnumThreadWindows(thread, (hwnd, unused) => {
             if (!IsWindowVisible(hwnd)) return true;
             var name = new StringBuilder(32);
@@ -122,14 +123,15 @@ public static class OmniTriggerUpgradeWindow {
             if (name.ToString() != "#32768" || !GetWindowRect(hwnd, out Rect candidate) ||
                 candidate.Left >= candidate.Right || candidate.Top >= candidate.Bottom) return true;
             rect = candidate;
+            popup = hwnd;
             return false;
         }, IntPtr.Zero);
         bounds = rect;
-        return rect.Left < rect.Right && rect.Top < rect.Bottom;
+        return popup;
     }
 
     // 只给本次安装的隐藏窗口投递托盘通知。wParam 故意远离图标，验证实际菜单位置。
-    public static void VerifyTrayMenu(IntPtr owner) {
+    public static IntPtr OpenTrayMenu(IntPtr owner) {
         var icon = new TrayId { Size = (uint)Marshal.SizeOf(typeof(TrayId)), Owner = owner, Id = 1 };
         Rect anchor;
         bool hasIcon = Shell_NotifyIconGetRect(ref icon, out anchor) >= 0 && anchor.Left < anchor.Right && anchor.Top < anchor.Bottom;
@@ -149,7 +151,8 @@ public static class OmniTriggerUpgradeWindow {
         try {
             var timer = Stopwatch.StartNew();
             Rect menu;
-            while (!TryGetMenuRect(thread, out menu)) {
+            IntPtr popup;
+            while ((popup = FindMenu(thread, out menu)) == IntPtr.Zero) {
                 if (timer.ElapsedMilliseconds >= 5000) throw new Exception("安装版未显示托盘菜单。");
                 Thread.Sleep(20);
             }
@@ -159,12 +162,21 @@ public static class OmniTriggerUpgradeWindow {
                 throw new Exception(String.Format("菜单位置 ({0},{1},{2},{3}) 偏离预期位置 ({4},{5},{6},{7})。",
                     menu.Left, menu.Top, menu.Right, menu.Bottom, anchor.Left, anchor.Top, anchor.Right, anchor.Bottom));
             Console.WriteLine(hasIcon ? "托盘菜单在安装版图标旁打开。" : "外壳没有提供图标位置，菜单在指针旁打开。");
-        } finally {
-            PostMessage(owner, 0x001f, UIntPtr.Zero, IntPtr.Zero); // WM_CANCELMODE，收起本窗菜单。
+            return popup;
+        } catch {
+            PostMessage(owner, 0x001f, UIntPtr.Zero, IntPtr.Zero);
+            throw;
         }
+    }
+
+    public static void VerifyTrayMenu(IntPtr owner) {
+        OpenTrayMenu(owner);
+        PostMessage(owner, 0x001f, UIntPtr.Zero, IntPtr.Zero); // WM_CANCELMODE，收起本窗菜单。
         var close = Stopwatch.StartNew();
+        uint pid;
+        uint thread = GetWindowThreadProcessId(owner, out pid);
         Rect remaining;
-        while (TryGetMenuRect(thread, out remaining)) {
+        while (FindMenu(thread, out remaining) != IntPtr.Zero) {
             if (close.ElapsedMilliseconds >= 5000) throw new Exception("取消后托盘菜单仍然可见。");
             Thread.Sleep(20);
         }
@@ -790,12 +802,37 @@ try {
     if ([OmniTriggerUpgradeWindow]::UpdateRestartCommand($next) -cne $expectedArgs) {
         throw '运行中的日常监听没有登记原配置的托盘启动参数。'
     }
+    $shows = [OmniTriggerUpgradeWindow+WindowShows]::new()
+    Add-Type -AssemblyName UIAutomationClient
+    foreach ($label in '暂停监听', '恢复监听') {
+        $popup = [OmniTriggerUpgradeWindow]::OpenTrayMenu($window)
+        try {
+            $menu = [System.Windows.Automation.AutomationElement]::FromHandle($popup)
+            $name = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, $label)
+            $item = $menu.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $name)
+            if (-not $item -or -not $item.Current.IsEnabled) { throw ('安装版托盘菜单缺少可用的“{0}”。' -f $label) }
+            $item.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+            $expected = if ($label -eq '恢复监听') { $expectedArgs } else { $null }
+            $timer = [Diagnostics.Stopwatch]::StartNew()
+            do {
+                $actual = [OmniTriggerUpgradeWindow]::UpdateRestartCommand($next)
+                if ($actual -ceq $expected -and -not [OmniTriggerUpgradeWindow]::IsWindowVisible($popup)) { break }
+                Start-Sleep -Milliseconds 50
+            } while ($timer.Elapsed.TotalSeconds -lt 10 -and -not $next.HasExited)
+            if ($next.HasExited -or $actual -cne $expected -or [OmniTriggerUpgradeWindow]::IsWindowVisible($popup)) { throw ('选择“{0}”后监听状态或菜单未更新。' -f $label) }
+            if ($shows.WasShown($window) -or [OmniTriggerUpgradeWindow]::IsWindowVisible($window)) { throw ('选择“{0}”时主窗口曾弹出。' -f $label) }
+        } finally {
+            if ([OmniTriggerUpgradeWindow]::IsWindowVisible($popup)) {
+                $null = [OmniTriggerUpgradeWindow]::PostMessage($window, 0x001f, [UIntPtr]::Zero, [IntPtr]::Zero)
+            }
+        }
+    }
+    Write-Host '已通过安装版托盘菜单暂停并恢复原档监听，主窗口始终隐藏。'
     # Windows 对自动重启有最短运行时间要求。
     while (([DateTime]::Now - $next.StartTime).TotalSeconds -lt 65) {
         Start-Sleep -Milliseconds 500
         if ($next.HasExited) { throw '覆盖安装前日常实例意外退出。' }
     }
-    $shows = [OmniTriggerUpgradeWindow+WindowShows]::new()
     $started = [DateTime]::Now
     $normal = [Diagnostics.ProcessStartInfo]::new($setupFile.FullName)
     $normal.UseShellExecute = $false
