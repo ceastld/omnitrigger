@@ -133,10 +133,20 @@ jobs:
               $copyManifest = Join-Path $created.directory 'actions/n10-rust/action.json'
               $expected[$copyManifest] = $expected[$n10Manifest]
             }
-            $snapshot = & $exe --profile clipboard-copy --list-package-actions | ConvertFrom-Json
+            $savedNode = $env:OMNITRIGGER_NODE
+            try {
+              $env:OMNITRIGGER_NODE = Join-Path $env:RUNNER_TEMP 'missing-node-for-catalog.exe'
+              $snapshot = & $exe --profile clipboard-copy --list-package-actions | ConvertFrom-Json
+              if ($LASTEXITCODE) { throw '读取测试档动作目录失败。' }
+            } finally {
+              $env:OMNITRIGGER_NODE = $savedNode
+            }
             $actionsInCopy = @($snapshot.actions | Where-Object { $_.call.package_id -ceq 'examples.n10-rust' })
-            if ($LASTEXITCODE -or $actionsInCopy.Count -ne 2 -or 'toggle' -cnotin $actionsInCopy.call.action_id) {
-              throw '测试档动作目录没有保留剪贴板扩展的两个动作。'
+            $toggle = $actionsInCopy | Where-Object { $_.call.action_id -ceq 'toggle' }
+            $verb = $actionsInCopy | Where-Object { $_.call.action_id -ceq '32c12786-9bb8-4b0c-8d55-7e6a4c8a5d10' }
+            if ($actionsInCopy.Count -ne 2 -or !$toggle -or $toggle.reference_error -or
+                $verb.reference_error.code -cne 'test_clipboard_profile') {
+              throw '测试档动作目录应允许无 Node 时打开本档历史，并提示业务指令需要显式测试库。'
             }
             Assert-HistoryAppend @('--profile', 'clipboard-copy') $createCopy
             Assert-HistoryAppend @('--profile', 'clipboard-copy') $false

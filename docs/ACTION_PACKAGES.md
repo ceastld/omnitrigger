@@ -658,7 +658,9 @@ export default async ctx => {
 
 ### 外部宿主的目录与事件
 
-`--list-package-actions` 输出一个 JSON 对象：`schema_version: 1`、`actions` 和 `diagnostics`。每项包含完整 `call`（默认 `input: {}`）、`package_name`、`title`、`runtime`、可空的 `reference_error`，以及可选的 `single_instance`；启用时为 `true`，默认 `false` 省略以保留旧目录格式。该策略属于动作定义，不写入 `call`。目录只包含已安装动作包；不枚举原生动作或个人绑定，不导入 JS。引用检查通过只说明包和运行时可解析，不保证业务成功或输入满足脚本要求；目录也不是动作当前是否忙碌的快照。输出超过 4 MiB 时整体拒绝，不返回部分目录。
+`--list-package-actions` 输出一个 JSON 对象，包含 `schema_version: 1`、`actions` 和 `diagnostics`。每项包含完整 `call`（默认 `input: {}`）、`package_name`、`title`、清单声明的 `runtime`、可空的 `reference_error`，以及可选的 `single_instance`。启用单实例时该字段为 `true`，默认值 `false` 省略以保留旧目录格式。该策略属于动作定义，不写入 `call`。目录只包含已安装动作包，不枚举原生动作或个人绑定，不导入 JS。输出超过 4 MiB 时整体拒绝。
+
+`reference_error` 按所选配置档和目录中的默认输入校验动作引用。测试档的 N10 `toggle` 由本档文本历史处理，没有 Node 时也可用。N10 业务指令使用默认输入时会返回 `test_clipboard_profile`，需要在输入中显式选择测试库。可用 `--check-action` 校验实际调用的输入。引用校验不执行业务脚本，也不查询动作当前是否忙碌。
 
 ```powershell
 omnitrigger.exe --config D:\Demo\bindings.json --list-package-actions

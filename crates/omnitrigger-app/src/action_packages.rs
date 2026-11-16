@@ -198,8 +198,21 @@ fn with_clipboard_history<H: omnitrigger_actions::NativeHost>(
 }
 
 /// 外部目录原样保留共享模型的可选策略字段，不读取绑定或执行动作入口。
-fn catalog_json(service: &ActionService) -> Result<String, omnitrigger_actions::ActionError> {
-    let output = serde_json::to_string(&service.describe_catalog()).map_err(|error| {
+fn catalog_json(
+    service: &ActionService,
+    test_data: bool,
+) -> Result<String, omnitrigger_actions::ActionError> {
+    let mut snapshot = service.describe_catalog();
+    if test_data {
+        for entry in &mut snapshot.actions {
+            match clipboard_route(test_data, &entry.call, service.catalog()) {
+                Ok(ClipboardRoute::Package) => {}
+                Ok(ClipboardRoute::WorkspaceHistory) => entry.reference_error = None,
+                Err(error) => entry.reference_error = Some(error),
+            }
+        }
+    }
+    let output = serde_json::to_string(&snapshot).map_err(|error| {
         omnitrigger_actions::ActionError::new("invalid_action_request", error.to_string())
     })?;
     if output.len() > 4 * 1024 * 1024 {
@@ -291,7 +304,7 @@ pub fn cli(
             )
         };
         if list.is_some() {
-            return catalog_json(&service()).map_err(rejected);
+            return catalog_json(&service(), test_data).map_err(rejected);
         }
         let target_error = |message: String| {
             serde_json::json!({"status":"rejected","error":{
@@ -918,6 +931,41 @@ mod tests {
     }
 
     #[test]
+    fn catalog_default_clipboard_calls_follow_the_selected_profile() {
+        let fixture = Fixture::new();
+        fixture.package(None);
+        let manifest = root(&fixture.config).join("app-policy-test/action.json");
+        let verb = "32c12786-9bb8-4b0c-8d55-7e6a4c8a5d10";
+        let actions: Vec<_> = ["toggle", verb, "other"].iter().map(|id| {
+            json!({"id":id, "title":id, "version":1, "runtime":"app-test", "entry":"main.js"})
+        }).collect();
+        std::fs::write(manifest, json!({
+            "schema_version":1, "id":"examples.n10-rust", "name":"目录测试", "version":"0.3.0", "actions":actions
+        }).to_string()).unwrap();
+        for installed in [false, true] {
+            let service = fixture.service(if installed { "app-test" } else { "unused" });
+            for test_data in [false, true] {
+                let snapshot: omnitrigger_actions::ActionCatalogSnapshot =
+                    serde_json::from_str(&catalog_json(&service, test_data).unwrap()).unwrap();
+                assert_eq!(snapshot.actions.len(), 3);
+                for row in snapshot.actions {
+                    let expected = match (test_data, row.call.action_id.as_str()) {
+                        (true, "toggle") => None,
+                        (true, id) if id == verb => Some("test_clipboard_profile"),
+                        _ if !installed => Some("runtime_unavailable"),
+                        _ => None,
+                    };
+                    assert_eq!(
+                        row.reference_error.as_ref().map(|e| e.code.as_str()),
+                        expected
+                    );
+                    assert_eq!(row.runtime, "app-test");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn action_catalog_and_validation_preserve_optional_single_instance_without_execution() {
         for policy in [None, Some(json!(false)), Some(json!(true))] {
             let expected = policy == Some(json!(true));
@@ -935,7 +983,8 @@ mod tests {
                 expected
             );
             service.validate(&call).unwrap();
-            let output: Value = serde_json::from_str(&catalog_json(&service).unwrap()).unwrap();
+            let output: Value =
+                serde_json::from_str(&catalog_json(&service, false).unwrap()).unwrap();
             assert_eq!(output["schema_version"], 1);
             assert_eq!(output["actions"].as_array().unwrap().len(), 1);
             let action = &output["actions"][0];
@@ -970,7 +1019,8 @@ mod tests {
             assert!(service.catalog().actions.is_empty());
             assert!(!service.catalog().diagnostics.is_empty());
             assert!(service.validate(&call).is_err());
-            let output: Value = serde_json::from_str(&catalog_json(&service).unwrap()).unwrap();
+            let output: Value =
+                serde_json::from_str(&catalog_json(&service, false).unwrap()).unwrap();
             assert!(output["actions"].as_array().unwrap().is_empty());
             assert!(!output["diagnostics"].as_array().unwrap().is_empty());
         }
