@@ -1184,7 +1184,7 @@ fn seed_into(
         }
         Seed::Copy(key) | Seed::Backup { source: key, .. } => {
             #[cfg(windows)]
-            if key == DEFAULT_ID && matches!(seed, Seed::Copy(_)) {
+            if key == DEFAULT_ID {
                 if let Some(pending) = external_import::recorded_import(root)? {
                     external_import::recover_with_catalog_lock(root, &pending)?;
                 }

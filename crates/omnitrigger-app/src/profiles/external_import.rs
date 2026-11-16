@@ -824,6 +824,74 @@ mod tests {
     }
 
     #[test]
+    fn daily_edit_backup_recovers_interrupted_import_on_create_and_reset() {
+        use super::super::{create_profile, profile_dir, reset_profile, Seed};
+
+        let fixture = Fixture::new();
+        let root = &fixture.0;
+        let saved = include_str!("../../../../examples/capslock-navigation.json");
+        let bindings = root.join("bindings.json");
+        crate::settings::save_editor_file(
+            &bindings,
+            Some(saved),
+            br#"{"version":24,"bindings":[]}"#,
+        )
+        .unwrap();
+        let wheels = r#"{"version":1,"wheels":[]}"#;
+        write(root, "wheels.json", wheels);
+        package(root, "tools", "daily.clipboard", "original");
+        let pending = root.join("backups").join(PENDING);
+        let interrupt = || {
+            let incoming = pending.join("incoming");
+            write(&incoming, "wheels.json", "incomplete");
+            write(&incoming, "actions/tools/run.mjs", "partial");
+            let mut plan = Plan {
+                backup: "before-import-test".into(),
+                files: Vec::new(),
+                directories: Vec::new(),
+            };
+            collect(&incoming, root, Path::new(""), &mut plan).unwrap();
+            fs::write(pending.join(PLAN), serde_json::to_vec(&plan).unwrap()).unwrap();
+            apply(root, &pending, &plan).unwrap();
+        };
+        interrupt();
+        let seed = Seed::parse("backup:default:1:current").unwrap();
+        let entry = create_profile(root, "restored", &seed, None).unwrap();
+        let profile = profile_dir(root, &entry.id);
+        let check = || {
+            assert!(!pending.exists());
+            assert_eq!(
+                fs::read_to_string(profile.join("bindings.json")).unwrap(),
+                saved
+            );
+            for dir in [root, &profile] {
+                assert_eq!(fs::read_to_string(dir.join("wheels.json")).unwrap(), wheels);
+                assert_eq!(
+                    fs::read(action_entry(dir, "daily.clipboard")).unwrap(),
+                    b"original"
+                );
+            }
+        };
+        check();
+        write(&profile, "bindings.json", "test edit");
+        interrupt();
+        let writer = crate::settings::lock_config(&root.join("wheels.json"), "轮盘").unwrap();
+        assert!(reset_profile(root, "restored").is_err());
+        assert!(pending.exists());
+        assert_eq!(
+            fs::read(profile.join("bindings.json")).unwrap(),
+            b"test edit"
+        );
+        drop(writer);
+        let (_, backup) = reset_profile(root, "restored").unwrap();
+        assert_eq!(
+            fs::read(backup.unwrap().join("bindings.json")).unwrap(),
+            b"test edit"
+        );
+        check();
+    }
+
+    #[test]
     fn interrupted_import_waits_for_the_editor_before_restoring_daily_files() {
         let fixture = Fixture::new();
         let root = &fixture.0;
