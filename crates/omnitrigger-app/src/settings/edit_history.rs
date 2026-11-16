@@ -33,7 +33,7 @@ pub(crate) fn edit_history_folder_to_open(config: &Path) -> Result<String, Strin
 struct Revision {
     number: u64,
     path: PathBuf,
-    day: u64,
+    modified: SystemTime,
     size: u64,
 }
 
@@ -72,7 +72,7 @@ fn revisions(directory: &Path) -> io::Result<(u64, Vec<Revision>)> {
             records.push(Revision {
                 number,
                 path,
-                day: utc_day(meta.modified()?),
+                modified: meta.modified()?,
                 size: meta.len(),
             });
         }
@@ -97,8 +97,9 @@ impl Revision {
 fn trim(records: &[Revision], today: u64) {
     let mut kept_days = BTreeSet::new();
     for (index, record) in records.iter().rev().enumerate() {
-        let daily = (today.saturating_sub(DAYS - 1)..=today).contains(&record.day)
-            && kept_days.insert(record.day);
+        let day = utc_day(record.modified);
+        let daily =
+            (today.saturating_sub(DAYS - 1)..=today).contains(&day) && kept_days.insert(day);
         if index >= RECENT
             && !daily
             && record
@@ -140,7 +141,7 @@ pub(crate) fn save_editor_file(
         .map_err(|e| format!("无法写入配置备份：{e}"))?;
     fs::create_dir_all(&directory).map_err(backup_error)?;
     let (highest, mut records) = revisions(&directory).map_err(backup_error)?;
-    let today = utc_day(SystemTime::now());
+    let now = SystemTime::now();
     // 上次已备份但目标文件被占用时，重试沿用那份原文。
     let already_saved = records.last().is_some_and(|r| r.matches(original));
     if !already_saved {
@@ -151,13 +152,44 @@ pub(crate) fn save_editor_file(
         records.push(Revision {
             number,
             path: next,
-            day: today,
+            modified: now,
             size: original.len() as u64,
         });
     }
     super::atomic_write(path, contents)?;
-    trim(&records, today);
+    trim(&records, utc_day(now));
     Ok(())
+}
+
+pub(crate) fn edit_versions(config: &Path, name: &str) -> Result<Vec<(u64, SystemTime)>, String> {
+    let directory = edit_history_root(config).join(name);
+    crate::script_runtime::check_local_path(&directory)?;
+    match revisions(&directory) {
+        Ok((_, records)) => Ok(records
+            .into_iter()
+            .rev()
+            .map(|r| (r.number, r.modified))
+            .collect()),
+        Err(e)
+            if e.kind() == io::ErrorKind::NotFound
+                && !directory.try_exists().map_err(|e| e.to_string())? =>
+        {
+            Ok(Vec::new())
+        }
+        Err(e) => Err(format!("无法读取 {name} 的备份列表：{e}")),
+    }
+}
+
+pub(crate) fn edit_backup_file(config: &Path, name: &str, number: u64) -> Result<PathBuf, String> {
+    let file = edit_history_root(config).join(name).join(filename(number));
+    crate::script_runtime::check_local_path(&file)?;
+    let meta = file
+        .symlink_metadata()
+        .map_err(|e| format!("无法读取 {name} 的第 {number} 份备份：{e}"))?;
+    if !meta.is_file() || !crate::local_files::is_plain(&meta) {
+        return Err(format!("{name} 的第 {number} 份备份不是普通本机文件。"));
+    }
+    Ok(file)
 }
 
 #[cfg(test)]

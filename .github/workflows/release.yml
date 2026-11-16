@@ -177,6 +177,17 @@ jobs:
             if ($LASTEXITCODE) { throw '日常热键或轮盘无效。' }
             Assert-HistoryAppend @() ($round -eq 1)
             Assert-CopiedClipboardRoute ($round -eq 1)
+            if ($round -eq 1) {
+              $restored = & $exe --profile-create restored-edit --seed backup:default:1:current | ConvertFrom-Json
+              if ($LASTEXITCODE -or $restored.status -ne 'created') { throw '从已安装版本新建备份副本失败。' }
+              $expected[(Join-Path $restored.directory 'bindings.json')] = $expected[$dailyRevision]
+              $expected[(Join-Path $restored.directory 'wheels.json')] = $expected[$wheels]
+              $expected[(Join-Path $restored.directory 'actions/n10-rust/action.json')] = $expected[$n10Manifest]
+              if (Test-Path -LiteralPath (Join-Path $restored.directory 'clipboard-history.json')) { throw '备份副本继承了日常剪贴板历史。' }
+            }
+            & $exe --profile restored-edit --check-config | Out-Host
+            if ($LASTEXITCODE) { throw '备份副本中的热键和轮盘未通过安装版检查。' }
+            Assert-ProfileFiles
             Write-Host "第 $round 轮安装已验证剪贴板扩展可读取带 BOM 的清单与调用，测试副本使用本档历史。"
             & $exe --test-workspace --check-config | Out-Host
             if ($LASTEXITCODE) { throw '测试配置档启动失败。' }

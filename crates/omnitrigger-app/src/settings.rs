@@ -27,7 +27,9 @@ use crate::wheels::{WheelActionRef, Wheels};
 use crate::window_action::WindowAction;
 
 mod edit_history;
-pub(crate) use edit_history::{edit_history_folder_to_open, save_editor_file};
+pub(crate) use edit_history::{
+    edit_backup_file, edit_history_folder_to_open, edit_versions, save_editor_file,
+};
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
 const CONFIG_VERSION: u32 = 24;

@@ -8,6 +8,7 @@ mod app_sets;
 mod appearance;
 mod appearance_ui;
 mod assets;
+mod backup_ui;
 mod brightness_step_host;
 mod browser_actions;
 mod browser_actions_ui;
@@ -714,6 +715,7 @@ struct Workspace {
     opening_test_copy: bool,
     test_copy_error: Option<String>,
     backup_notice: Option<String>,
+    backup_restore: backup_ui::BackupRestore,
     update_ui: update_ui::UpdateUi,
     history_filter: HistoryFilter,
     smooth_scroll: smooth_scroll::ScrollRegions,
@@ -1220,6 +1222,7 @@ impl Workspace {
             opening_test_copy: false,
             test_copy_error: None,
             backup_notice: None,
+            backup_restore: Default::default(),
             update_ui: update_ui::UpdateUi::new(),
             page: if text_history_page {
                 Page::TextHistory
@@ -8559,12 +8562,11 @@ fn open_script_history_window(
     .map_err(|_| "无法创建历史窗口。".to_string())
 }
 
-fn check_config(allow_missing_bindings: bool) -> Result<String, String> {
-    let path = settings::path();
-    let (bindings, scenes, wheels) = settings::read_config_pair(&path, || {
-        let (bindings, scenes) = settings::load_bindings_and_scenes(&path, allow_missing_bindings)
+fn check_config(path: &std::path::Path, allow_missing_bindings: bool) -> Result<String, String> {
+    let (bindings, scenes, wheels) = settings::read_config_pair(path, || {
+        let (bindings, scenes) = settings::load_bindings_and_scenes(path, allow_missing_bindings)
             .map_err(|error| format!("{}：{error}", path.display()))?;
-        Ok((bindings, scenes, Wheels::load(&path)?))
+        Ok((bindings, scenes, Wheels::load(path)?))
     })?;
     settings::validate(&bindings)?;
     for wheel in &wheels.wheels {
@@ -8821,7 +8823,7 @@ fn main() {
         .iter()
         .any(|argument| argument == "--check-config")
     {
-        match check_config(config_index.is_none()) {
+        match check_config(&settings::path(), config_index.is_none()) {
             Ok(message) => println!("{message}"),
             Err(error) => {
                 eprintln!("{error}");

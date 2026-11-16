@@ -236,6 +236,11 @@ enum Seed {
     Empty,
     Fixture(PathBuf),
     Copy(String),
+    Backup {
+        source: String,
+        bindings: Option<u64>,
+        wheels: Option<u64>,
+    },
 }
 
 impl Seed {
@@ -255,8 +260,38 @@ impl Seed {
         {
             return Ok(Self::Copy(source.into()));
         }
+        if let Some(rest) = text.strip_prefix("backup:") {
+            let mut parts = rest.split(':');
+            let source = parts.next().unwrap_or_default();
+            if source != DEFAULT_ID {
+                validate_alias(source)?;
+            }
+            let revision = |part: Option<&str>| match part {
+                Some("current") => Ok(None),
+                Some(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) => s
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .map(Some)
+                    .ok_or("备份编号必须是正整数。"),
+                _ => Err("热键和轮盘各需指定一个备份编号或 current。"),
+            };
+            let bindings = revision(parts.next())?;
+            let wheels = revision(parts.next())?;
+            if parts.next().is_some() || (bindings.is_none() && wheels.is_none()) {
+                return Err(
+                    "备份种子格式为 backup:<来源档>:<热键版本>:<轮盘版本>，至少选择一份备份。"
+                        .into(),
+                );
+            }
+            return Ok(Self::Backup {
+                source: source.into(),
+                bindings,
+                wheels,
+            });
+        }
         Err(format!(
-            "未知种子 {text}；可用 empty、fixture:<目录> 或 copy:<别名或 ID>。"
+            "未知种子 {text}；可用 empty、fixture:<目录>、copy:<配置档> 或 backup:<配置档>:<热键版本>:<轮盘版本>。"
         ))
     }
 
@@ -265,6 +300,19 @@ impl Seed {
             Self::Empty => "empty".into(),
             Self::Fixture(path) => format!("fixture:{}", path.display()),
             Self::Copy(source) => format!("copy:{source}"),
+            Self::Backup {
+                source,
+                bindings,
+                wheels,
+            } => {
+                let version =
+                    |n: Option<u64>| n.map_or_else(|| "current".into(), |v| v.to_string());
+                format!(
+                    "backup:{source}:{}:{}",
+                    version(*bindings),
+                    version(*wheels)
+                )
+            }
         }
     }
 
@@ -686,10 +734,10 @@ fn trace_seed_sources<'a>(
     loop {
         let (path, alias, upstream) = match Seed::parse(&entry.seed) {
             Ok(Seed::Empty) => break,
-            Ok(Seed::Copy(key)) if key == DEFAULT_ID => {
+            Ok(Seed::Copy(key) | Seed::Backup { source: key, .. }) if key == DEFAULT_ID => {
                 (root.to_path_buf(), root_alias.map(Path::to_path_buf), None)
             }
-            Ok(Seed::Copy(key)) => {
+            Ok(Seed::Copy(key) | Seed::Backup { source: key, .. }) => {
                 let Some(source) = catalog.source_profile(&key) else {
                     return Vec::new();
                 };
@@ -1074,14 +1122,35 @@ fn seed_into(root: &Path, catalog: &Catalog, seed: &Seed, target: &Path) -> Resu
             }
             copy_transferable_data(path, target, DataCopy::FixtureOrImport)
         }
-        Seed::Copy(key) => {
+        Seed::Copy(key) | Seed::Backup { source: key, .. } => {
             #[cfg(windows)]
-            if key == DEFAULT_ID {
+            if key == DEFAULT_ID && matches!(seed, Seed::Copy(_)) {
                 if let Some(pending) = external_import::recorded_import(root)? {
                     external_import::recover_with_catalog_lock(root, &pending)?;
                 }
             }
-            copy_transferable_data(&source_dir(root, catalog, key)?, target, DataCopy::Profile)
+            let source = source_dir(root, catalog, key)?;
+            copy_transferable_data(&source, target, DataCopy::Profile)?;
+            if let Seed::Backup {
+                bindings, wheels, ..
+            } = seed
+            {
+                for (name, revision) in [("bindings.json", bindings), ("wheels.json", wheels)] {
+                    if let Some(number) = revision {
+                        let file = crate::settings::edit_backup_file(
+                            &source.join("bindings.json"),
+                            name,
+                            *number,
+                        )?;
+                        DataCopy::Profile
+                            .copy_file(&file, &target.join(name))
+                            .map_err(|e| format!("复制 {name} 备份失败：{e}"))?;
+                    }
+                }
+                crate::check_config(&target.join("bindings.json"), true)
+                    .map_err(|error| format!("选择的热键和轮盘无法一起使用：{error}"))?;
+            }
+            Ok(())
         }
     }
 }
@@ -1222,14 +1291,51 @@ fn daily_test_copy(root: &Path) -> Result<Entry, String> {
 }
 
 pub(super) fn open_daily_test_copy(root: &Path) -> Result<(), String> {
-    let program = std::env::current_exe().map_err(|error| error.to_string())?;
     let entry = daily_test_copy(root)?;
+    open_test_profile(root, &entry.id)
+}
+
+pub(super) fn new_restore_alias() -> String {
+    format!("restore-{}", new_id())
+}
+
+/// 从所选档的历史新建测试副本。重试未完成的创建时沿用原别名。
+pub(super) fn create_backup_copy(
+    config: &Path,
+    alias: &str,
+    bindings: Option<u64>,
+    wheels: Option<u64>,
+) -> Result<(PathBuf, String), String> {
+    if bindings.is_none() && wheels.is_none() {
+        return Err("请至少选择一份备份。".into());
+    }
+    let directory = config_directory(config).ok_or("配置目录不可用。")?;
+    let (root, source) = if let Some(entry) = registered_test_profile(config)? {
+        let root = directory
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("测试档缺少数据根。")?;
+        (root.to_owned(), entry.id)
+    } else {
+        (directory, DEFAULT_ID.to_owned())
+    };
+    let seed = Seed::Backup {
+        source,
+        bindings,
+        wheels,
+    };
+    let entry = create_profile(&root, alias, &seed, Some("备份恢复副本"))?;
+    Ok((root, entry.alias))
+}
+
+pub(super) fn open_test_profile(root: &Path, key: &str) -> Result<(), String> {
+    let program = std::env::current_exe().map_err(|error| error.to_string())?;
     let mut launch = std::process::Command::new(program);
     launch
         .arg("--data-root")
         .arg(root)
         .arg("--profile")
-        .arg(entry.id);
+        .arg(key);
     launch
         .env_remove("OMNITRIGGER_UPDATE_HEALTH")
         .env_remove("OMNITRIGGER_UPDATE_ERROR");
@@ -1717,7 +1823,10 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
         }
     }
     if check_config {
-        finish_command(crate::check_config(true), parsed.result_file.as_deref());
+        finish_command(
+            crate::check_config(&crate::settings::path(), true),
+            parsed.result_file.as_deref(),
+        );
     }
     if let Some(file) = parsed.result_file.as_deref().filter(|_| inspect_actions) {
         let result = parsed
@@ -3608,6 +3717,94 @@ mod tests {
             std::fs::read(wheels).unwrap()
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restore_settings_selects_history_from_the_open_profile_and_validates_before_publication() {
+        let root = temp_root("settings-backup-copy");
+        let source = create_profile(&root, "notes", &Seed::Copy(DEFAULT_ID.into()), None).unwrap();
+        let config = profile_dir(&root, &source.id).join("bindings.json");
+        std::fs::write(&config, r#"{"version":24,"bindings":[]}"#).unwrap();
+        let raw = "\u{feff}{\"version\":24,\r\n\"bindings\":[]}\r\n";
+        let backup = config
+            .parent()
+            .unwrap()
+            .join("backups/edits/bindings.json/edit-0000000000000001.json");
+        std::fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        std::fs::write(&backup, raw).unwrap();
+        let versions = crate::settings::edit_versions(&config, "bindings.json").unwrap();
+        assert_eq!(versions.iter().map(|v| v.0).collect::<Vec<_>>(), [1]);
+        assert!(crate::settings::edit_versions(&config, "wheels.json")
+            .unwrap()
+            .is_empty());
+        let alias = new_restore_alias();
+        std::fs::write(&backup, "bad").unwrap();
+        assert!(create_backup_copy(&config, &alias, Some(1), None).is_err());
+        let mut archived = serde_json::from_str::<serde_json::Value>(include_str!(
+            "../../../examples/literal-text.json"
+        ))
+        .unwrap();
+        archived["version"] = 24.into();
+        archived["bindings"][0]["action"] =
+            serde_json::json!({"kind":"show_wheel","wheel_id":"archived-wheel"});
+        std::fs::write(&backup, archived.to_string()).unwrap();
+        let incompatible = create_backup_copy(&config, &alias, Some(1), None).unwrap_err();
+        assert!(incompatible.contains("archived-wheel"), "{incompatible}");
+        assert!(read_catalog(&root).unwrap().find(&alias).is_none());
+        std::fs::write(&backup, raw).unwrap();
+        let (selected_root, key) = create_backup_copy(&config, &alias, Some(1), None).unwrap();
+        assert_eq!(
+            selected_root.canonicalize().unwrap(),
+            root.canonicalize().unwrap()
+        );
+        let catalog = read_catalog(&root).unwrap();
+        let entry = catalog.find(&key).unwrap();
+        assert_eq!(entry.seed, format!("backup:{}:1:current", source.id));
+        let copy = profile_dir(&root, &entry.id);
+        assert_eq!(
+            std::fs::read(copy.join("bindings.json")).unwrap(),
+            raw.as_bytes()
+        );
+        assert!(!copy.join("backups/edits").exists());
+        assert_eq!(std::fs::read(&backup).unwrap(), raw.as_bytes());
+        assert_eq!(
+            std::fs::read(&config).unwrap(),
+            br#"{"version":24,"bindings":[]}"#
+        );
+        let inherited = copied_profile_sources(&copy.join("bindings.json"));
+        assert_eq!(inherited.len(), 2);
+        assert_eq!(
+            inherited[0].canonicalize().unwrap(),
+            config.parent().unwrap().canonicalize().unwrap()
+        );
+        assert_eq!(
+            inherited[1].canonicalize().unwrap(),
+            root.canonicalize().unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn backup_seed_accepts_only_revisions_or_current_and_requires_a_backup() {
+        for seed in [
+            "backup:default:current:8",
+            "backup:test-1:1:current",
+            "backup:t1234:2:3",
+        ] {
+            assert_eq!(Seed::parse(seed).unwrap().record(), seed);
+        }
+        for seed in [
+            "backup:default:current:current",
+            "backup:default:0:8",
+            "backup:default:1",
+            "backup:../other:1:2",
+            "backup::1:current",
+            "backup:default:+1:2",
+            "backup:x:2:18446744073709551616",
+            "backup:x:1:2:3",
+        ] {
+            assert!(Seed::parse(seed).is_err(), "{seed}");
+        }
     }
 
     #[test]
