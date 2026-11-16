@@ -1,10 +1,11 @@
 // 本机和 CI 的真实安装验收；只使用仓库 .tmp 下的新配置和无界面 probe，不操作输入或剪贴板。
 import assert from 'node:assert/strict';
-import {spawnSync} from 'node:child_process';
+import {execFile, spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync} from 'node:fs';
 import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {promisify} from 'node:util';
 import {verifyFsStat} from '../script-sdk-check/check-fs-stat.mjs';
 import {verifyFileOpen} from '../script-sdk-check/check-file-open.mjs';
 
@@ -52,7 +53,10 @@ try {
     $inputStream=[IO.File]::OpenRead($file.FullName); $outputStream=$entry.Open()
     try { $inputStream.CopyTo($outputStream) } finally { $inputStream.Dispose(); $outputStream.Dispose() }
   }
-  if ($env:TEST_EXTRA) { $entry=$zip.CreateEntry($env:TEST_EXTRA); $stream=$entry.Open(); $stream.WriteByte(0); $stream.Dispose() }
+  if ($env:TEST_EXTRA) {
+    $entry=$zip.CreateEntry($env:TEST_EXTRA)
+    if (-not $env:TEST_EXTRA.EndsWith('/')) { $stream=$entry.Open(); $stream.WriteByte(0); $stream.Dispose() }
+  }
 } finally { $zip.Dispose() }`;
   const packed = spawnSync('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-Command',script],{encoding:'utf8',windowsHide:true,timeout:30000,env:{...env,TEST_SOURCE:folder,TEST_ARCHIVE:archive,TEST_EXTRA:extra}});
   assert.ifError(packed.error);
@@ -81,7 +85,16 @@ verifyFsStat({root,entryPath:project.entry_path,call:project.call,invoke:callPat
 checks.push('installed_host_fs_stat_uses_real_native_metadata_without_UI');
 await verifyFileOpen({root,entryPath:project.entry_path,call:project.call,invoke:callPath=>cli(['--run-action',callPath]),probeExecutable});
 checks.push('installed_host_actual_file_open_starts_owned_no_ui_probe');
-assert.equal(install(development.archive).status,'installed');
+const runtimeRoot = dirname(pointer);
+const stages = () => readdirSync(runtimeRoot).filter(name => name.startsWith('.install-')).sort();
+const earlier = join(runtimeRoot,'.install-earlier');
+mkdirSync(earlier);
+writeFileSync(join(earlier,'note.txt'),'previous failure');
+const repeated = install(development.archive);
+assert.equal(repeated.status,'installed');
+assert.equal(repeated.cleanup_warning,undefined);
+assert.deepEqual(stages(),['.install-earlier']);
+assert.equal(readFileSync(join(earlier,'note.txt'),'utf8'),'previous failure');
 assert.equal(readFileSync(pointer,'utf8'),firstPointer);
 checks.push('same_package_reinstall');
 
@@ -211,8 +224,20 @@ const next = variant('next',folder=>{
   const data=Buffer.from('本机更新安装验证');
   writeFileSync(join(folder,'README.txt'),data);
   updateManifest(folder,m=>Object.assign(m.files.find(f=>f.path==='README.txt'),{size:data.length,sha256:hash(data)}));
-});
-assert.equal(install(next).status,'installed');
+},'licenses/empty/subdirectory/');
+const beforeConcurrent = stages();
+const runFile = promisify(execFile);
+const args = ['--config',config,'--install-script-runtime',next,'--sha256',hash(readFileSync(next))];
+const installNext = () => runFile(app,args,{encoding:'utf8',windowsHide:true,env,timeout:120000});
+const installed = await Promise.all([installNext(),installNext()]);
+for (const result of installed) {
+  const receipt = JSON.parse(result.stdout);
+  assert.equal(receipt.status,'installed');
+  assert.equal(receipt.cleanup_warning,undefined);
+  assert(existsSync(join(dirname(receipt.program),'licenses','empty','subdirectory')));
+}
+assert.deepEqual(stages(),beforeConcurrent);
+checks.push('concurrent_same_archive_installs_clear_only_their_staging');
 assert.notEqual(JSON.parse(readFileSync(pointer,'utf8')).archive_sha256,first.archive_sha256);
 assert.equal(hash(readFileSync(firstHost)),hash(originalHost));
 assert.equal(cli(['--run-action',project.call_path]).output.text,'OmniTrigger');

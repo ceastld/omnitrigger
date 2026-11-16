@@ -207,7 +207,13 @@ fn manifest(path: &Path) -> Result<(Manifest, String), String> {
     }
     Ok((parsed, sha(&bytes)))
 }
-fn verify_package(directory: &Path, expected_manifest: &str) -> Result<Manifest, String> {
+struct VerifiedPackage {
+    manifest: Manifest,
+    /// 相对包根的目录，父目录先于子目录，包含 ZIP 中显式创建的空目录。
+    directories: Vec<PathBuf>,
+}
+
+fn verify_package(directory: &Path, expected_manifest: &str) -> Result<VerifiedPackage, String> {
     check_local_path(directory)?;
     let (parsed, hash) = manifest(&directory.join("manifest.json"))?;
     if hash != expected_manifest {
@@ -219,32 +225,31 @@ fn verify_package(directory: &Path, expected_manifest: &str) -> Result<Manifest,
         .map(|f| f.path.clone())
         .chain(std::iter::once("manifest.json".into()))
         .collect::<BTreeSet<_>>();
-    let mut pending = vec![directory.to_path_buf()];
+    let mut pending = vec![PathBuf::new()];
+    let mut directories = Vec::new();
     let mut found = BTreeSet::new();
     let mut entries = 0;
     while let Some(folder) = pending.pop() {
-        for item in fs::read_dir(folder).map_err(|e| e.to_string())? {
+        for item in fs::read_dir(directory.join(&folder)).map_err(|e| e.to_string())? {
             let item = item.map_err(|e| e.to_string())?;
             entries += 1;
             if entries > 2048 {
                 return Err("宿主目录项目数量超限。".into());
             }
+            let relative = folder.join(item.file_name());
             let path = item.path();
             check_local_path(&path)?;
             let metadata = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
             if metadata.is_dir() {
-                pending.push(path);
+                pending.push(relative);
             } else {
-                let name = path
-                    .strip_prefix(directory)
-                    .map_err(|e| e.to_string())?
-                    .to_string_lossy()
-                    .replace('\\', "/");
+                let name = relative.to_string_lossy().replace('\\', "/");
                 if !expected.contains(&name) || !found.insert(name) {
                     return Err("宿主目录包含清单外文件。".into());
                 }
             }
         }
+        directories.push(folder);
     }
     if found != expected {
         return Err("宿主目录缺少清单文件。".into());
@@ -256,7 +261,10 @@ fn verify_package(directory: &Path, expected_manifest: &str) -> Result<Manifest,
             return Err(format!("宿主文件校验失败：{}", file.path));
         }
     }
-    Ok(parsed)
+    Ok(VerifiedPackage {
+        manifest: parsed,
+        directories,
+    })
 }
 pub fn locate(config: &Path) -> Result<Option<Installed>, String> {
     environment_host().map_or_else(|| locate_in_profile(config), |result| result.map(Some))
@@ -349,7 +357,7 @@ pub(super) fn preserve_on_reset(previous: &Path, staging: &Path) -> Result<Optio
             return Ok(None);
         };
         let package = original.join("packages").join(&pointer.archive_sha256);
-        let manifest = verify_package(&package, &pointer.manifest_sha256)?;
+        let manifest = verify_package(&package, &pointer.manifest_sha256)?.manifest;
         Ok(Some((pointer, package, manifest)))
     })();
     let (pointer, package, manifest) = match verified {
@@ -448,6 +456,46 @@ fn description(program: &Path, stage: &Path) -> Result<Value, String> {
     }
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
+/// 只清理这次成功安装创建并校验过的暂存内容。对目录仅尝试删除空目录。
+fn finish_install_stage(stage: &Path, duplicate: Option<VerifiedPackage>) -> Result<(), String> {
+    let mut files = vec![
+        stage.join("extract.ps1"),
+        stage.join("description.json"),
+        stage.join("probe/main.js"),
+    ];
+    let mut directories = vec![stage.to_owned(), stage.join("probe")];
+    if let Some(package) = duplicate {
+        let payload = stage.join("payload");
+        files.push(payload.join("manifest.json"));
+        files.extend(
+            package
+                .manifest
+                .files
+                .iter()
+                .map(|file| payload.join(&file.path)),
+        );
+        directories.extend(package.directories.iter().map(|dir| payload.join(dir)));
+    }
+    for (path, directory) in files
+        .into_iter()
+        .map(|path| (path, false))
+        .chain(directories.into_iter().rev().map(|path| (path, true)))
+    {
+        check_local_path(&path)?;
+        let removed = if directory {
+            fs::remove_dir(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        if let Err(error) = removed {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("{}：{error}", path.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<Value, String> {
     if !valid_hash(expected) {
         return Err("本机开发安装需要完整 SHA-256。".into());
@@ -529,7 +577,7 @@ pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<
         drop(child);
         drop(source);
         let (_, digest) = manifest(&payload.join("manifest.json"))?;
-        let manifest = verify_package(&payload, &digest)?;
+        let manifest = verify_package(&payload, &digest)?.manifest;
         let image = manifest
             .files
             .iter()
@@ -585,15 +633,14 @@ pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<
         if output != json!({"version":1,"value":"安装验证"}) {
             return Err("宿主实际 JS 调用失败，未激活。".into());
         }
-        verify_package(&payload, &digest)?;
+        let verified = verify_package(&payload, &digest)?;
         let packages = root.join("packages");
         check_local_path(&packages)?;
         fs::create_dir_all(&packages).map_err(|e| e.to_string())?;
         let destination = packages.join(&archive_hash);
         check_local_path(&destination)?;
-        if destination.exists() {
-            verify_package(&destination, &digest)?;
-        } else {
+        let mut reused = destination.try_exists().map_err(|e| e.to_string())?;
+        if !reused {
             let resolved_root = fs::canonicalize(&root).map_err(|e| e.to_string())?;
             if !fs::canonicalize(&payload)
                 .map_err(|e| e.to_string())?
@@ -604,7 +651,16 @@ pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<
             {
                 return Err("暂存目录超出安装根目录。".into());
             }
-            fs::rename(&payload, &destination).map_err(|e| e.to_string())?;
+            if let Err(error) = fs::rename(&payload, &destination) {
+                if !destination.try_exists().map_err(|e| e.to_string())? {
+                    return Err(error.to_string());
+                }
+                // 另一个安装进程可能刚发布了同一摘要，两边都须核对实际内容。
+                reused = true;
+            }
+        }
+        if reused {
+            verify_package(&destination, &digest)?;
         }
         let pointer = Pointer {
             schema_version: 1,
@@ -624,21 +680,45 @@ pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
         fs::rename(&next, &current).map_err(|e| e.to_string())?;
-        Ok(
-            json!({"schema_version":1,"status":"installed","program":destination.join("host.exe"),"engine":manifest.engine,"version":manifest.version,"source_revision":manifest.source_revision,"source_dirty":manifest.source_dirty,"distribution":manifest.distribution,"archive_sha256":archive_hash,"protocol_and_JS_verified":true}),
-        )
+        let receipt = json!({"schema_version":1,"status":"installed","program":destination.join("host.exe"),"engine":manifest.engine,"version":manifest.version,"source_revision":manifest.source_revision,"source_dirty":manifest.source_dirty,"distribution":manifest.distribution,"archive_sha256":archive_hash,"protocol_and_JS_verified":true});
+        Ok((receipt, reused.then_some(verified)))
     })();
-    // 只删除明确创建的非包文件；额外内容及失败暂存保留供排障，不递归清理未知目录。
-    if result.is_ok() {
-        for file in [
-            script,
-            stage.join("description.json"),
-            stage.join("probe/main.js"),
-        ] {
-            let _ = fs::remove_file(file);
-        }
-        let _ = fs::remove_dir(stage.join("probe"));
-        let _ = fs::remove_dir(&stage);
+    let (mut receipt, duplicate) =
+        result.map_err(|e: String| format!("{e} 暂存位置：{}", stage.display()))?;
+    if let Err(error) = finish_install_stage(&stage, duplicate) {
+        receipt["cleanup_warning"] = format!("宿主已安装，暂存目录未能清理完毕：{error}").into();
     }
-    result.map_err(|e: String| format!("{e} 暂存位置：{}", stage.display()))
+    Ok(receipt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_cleanup_preserves_files_created_by_another_operation() {
+        let stage = std::env::temp_dir().join(format!(
+            "omnitrigger-install-cleanup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&stage).unwrap();
+        let probe = stage.join("probe");
+        fs::create_dir(&probe).unwrap();
+        fs::write(probe.join("main.js"), "probe").unwrap();
+        let other = probe.join("diagnostic.txt");
+        fs::write(&other, "keep").unwrap();
+
+        assert!(finish_install_stage(&stage, None)
+            .unwrap_err()
+            .contains(&probe.display().to_string()));
+        assert_eq!(fs::read_to_string(&other).unwrap(), "keep");
+        assert!(!probe.join("main.js").exists());
+        fs::remove_file(other).unwrap();
+        finish_install_stage(&stage, None).unwrap();
+        assert!(!stage.exists());
+    }
 }
