@@ -13,11 +13,18 @@ public static class HistoryKeyboardCheck {
     public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", SetLastError = true)]
     static extern bool PostMessageW(IntPtr window, uint message, UIntPtr key, IntPtr flags);
-    public static void Press(IntPtr window, uint key, int scan, bool extended) {
+    public static void PostKey(IntPtr window, uint key, int scan, bool extended, bool released) {
         int flags = 1 | (scan << 16) | (extended ? 1 << 24 : 0);
-        if (!PostMessageW(window, 0x0100, (UIntPtr)key, (IntPtr)flags) ||
-            !PostMessageW(window, 0x0101, (UIntPtr)key, (IntPtr)(flags | unchecked((int)0xC0000000))))
-            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        if (released) flags |= unchecked((int)0xC0000000);
+        if (!PostMessageW(window, released ? 0x0101u : 0x0100u, (UIntPtr)key, (IntPtr)flags)) {
+            int error = Marshal.GetLastWin32Error();
+            throw new System.ComponentModel.Win32Exception(error,
+                String.Format("投递按键 0x{0:X2} 的{1}消息失败（Win32 {2}）。", key, released ? "释放" : "按下", error));
+        }
+    }
+    public static void Press(IntPtr window, uint key, int scan, bool extended) {
+        PostKey(window, key, scan, extended, false);
+        PostKey(window, key, scan, extended, true);
     }
 }
 '@
@@ -62,10 +69,11 @@ try {
     $start.UseShellExecute = $false
     foreach ($arg in @('--text-history', '--config', $config)) { $start.ArgumentList.Add($arg) }
     $app = [Diagnostics.Process]::Start($start)
+    $title = 'OmniTrigger · 独立历史窗口'
     Wait-For {
         $app.Refresh()
         if ($app.HasExited) { throw "历史窗口提前退出：$($app.ExitCode)" }
-        $app.MainWindowTitle -ceq 'OmniTrigger · 独立历史窗口' -and $app.MainWindowHandle -ne 0
+        $app.MainWindowTitle -ceq $title -and $app.MainWindowHandle -ne 0
     } '安装版没有打开独立历史窗口。'
     $hwnd = $app.MainWindowHandle
     Wait-For { Test-Path -LiteralPath "$history.lock" -PathType Leaf } '独立窗口未开始读取临时历史。'
@@ -85,7 +93,12 @@ try {
         Write-Host '此会话未授予专用输入框系统前台。已验证安装版启动并读取独立历史；按键和选择由 GPUI 窗口验收验证。'
     }
     if ((Get-FileHash -LiteralPath $history).Hash -cne $originalHash) { throw '键盘浏览和发送改变了历史文件。' }
-    [HistoryKeyboardCheck]::Press($hwnd, 0x1B, 0x01, $false)
+    $app.Refresh()
+    if ($app.HasExited -or $app.MainWindowTitle -cne $title -or $app.MainWindowHandle -eq 0) {
+        throw '发送 Esc 前，安装版的独立历史窗口已不可用。'
+    }
+    # Esc 在按下时关闭窗口；释放时原句柄可能已经失效。投递消息不会改变物理按键状态。
+    [HistoryKeyboardCheck]::PostKey($app.MainWindowHandle, 0x1B, 0x01, $false, $false)
     if (!$app.WaitForExit(20000) -or $app.ExitCode) { throw '按 Esc 后独立历史窗口未正常退出。' }
     if ((Get-FileHash -LiteralPath $history).Hash -cne $originalHash) { throw '关闭窗口改变了历史文件。' }
 } finally {
