@@ -8546,7 +8546,7 @@ fn open_script_history_window(
                 )
             });
             view.update(cx, |view, cx| {
-                view.text_history.activate();
+                view.text_history.activate_window(window, cx);
                 cx.notify();
             });
             let closing = view.downgrade();
@@ -9020,7 +9020,7 @@ fn main() {
                     });
                     if text_history_page {
                         view.update(cx, |view, cx| {
-                            view.text_history.activate();
+                            view.text_history.activate_window(window, cx);
                             cx.notify();
                         });
                     }

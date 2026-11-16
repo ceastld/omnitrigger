@@ -248,6 +248,7 @@ jobs:
               }
               Assert-ProfileFiles
               Write-Host '已验证重装后按原 ID 打开恢复副本的测试窗口，副本内编辑及日常配置均保留。'
+              & ./scripts/check-history-keyboard.ps1 -Executable $exe -Scratch $env:RUNNER_TEMP
             }
             Write-Host "第 $round 轮安装已验证剪贴板扩展可读取带 BOM 的清单与调用，测试副本使用本档历史。"
             & $exe --test-workspace --check-config | Out-Host

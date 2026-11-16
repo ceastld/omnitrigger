@@ -226,6 +226,12 @@ impl ClipboardHistoryUi {
         }
     }
 
+    /// 独立窗口只在首次打开时聚焦列表，后续刷新继续保留筛选框或列表的焦点。
+    pub fn activate_window(&mut self, window: &mut Window, cx: &mut Context<super::Workspace>) {
+        self.activate();
+        self.focus_list(window, cx);
+    }
+
     fn refresh(&mut self) {
         self.enter_send.cancel();
         if let Some(id) = self.state.query() {
