@@ -183,6 +183,49 @@ public static class OmniTriggerUpgradeWindow {
         if (IsWindowVisible(owner)) throw new Exception("取消托盘菜单后主窗口意外弹出。");
     }
 
+    [StructLayout(LayoutKind.Sequential)] private struct MenuBarInfo {
+        public uint Size; public Rect Bounds; public IntPtr Menu, SubMenuWindow; public uint Focus;
+    }
+    [DllImport("user32.dll")] private static extern bool GetMenuBarInfo(IntPtr hwnd, int obj, int item, ref MenuBarInfo info);
+    [DllImport("user32.dll")] private static extern int GetMenuItemCount(IntPtr menu);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetMenuStringW(IntPtr menu, uint item, StringBuilder text, int size, uint flags);
+    [DllImport("user32.dll")] private static extern uint GetMenuState(IntPtr menu, uint item, uint flags);
+
+    // 仅在本次测试进程的菜单消息循环内选择；按回车前向 Windows 核对高亮项。
+    public static void SelectTrayItem(IntPtr owner, IntPtr popup, string expected) {
+        var info = new MenuBarInfo { Size = (uint)Marshal.SizeOf(typeof(MenuBarInfo)) };
+        if (!GetMenuBarInfo(popup, -4, 0, ref info) || info.Menu == IntPtr.Zero)
+            throw new Exception("无法读取本次托盘弹出菜单的句柄。");
+        const uint byPosition = 0x400, disabled = 3, highlighted = 0x80, keyDown = 0x0100;
+        int count = GetMenuItemCount(info.Menu);
+        var items = new List<string>();
+        int target = -1;
+        for (int i = 0; i < count; i++) {
+            var name = new StringBuilder(128);
+            GetMenuStringW(info.Menu, (uint)i, name, name.Capacity, byPosition);
+            uint flags = GetMenuState(info.Menu, (uint)i, byPosition);
+            items.Add(String.Format("{0} (0x{1:x})", name, flags));
+            if (name.ToString() == expected && (flags & disabled) == 0) target = i;
+        }
+        if (target < 0) throw new Exception("托盘菜单缺少可用的“" + expected + "”。实际菜单：" + String.Join("、", items));
+        for (int step = 0; step <= count; step++) {
+            uint flags = GetMenuState(info.Menu, (uint)target, byPosition);
+            if (flags == UInt32.MaxValue || !IsWindowVisible(popup)) break;
+            if ((flags & (highlighted | disabled)) == highlighted) {
+                if (!PostMessage(owner, keyDown, (UIntPtr)0x0d, (IntPtr)1))
+                    throw new Exception("未能选择已高亮的托盘菜单项。");
+                return;
+            }
+            if (!PostMessage(owner, keyDown, (UIntPtr)0x28, (IntPtr)1)) break;
+            var timer = Stopwatch.StartNew();
+            do {
+                Thread.Sleep(20);
+                if ((GetMenuState(info.Menu, (uint)target, byPosition) & highlighted) != 0) break;
+            } while (timer.ElapsedMilliseconds < 250);
+        }
+        throw new Exception("无法在安装版托盘菜单内选中“" + expected + "”。实际菜单：" + String.Join("、", items));
+    }
+
     public sealed class WindowShows : IDisposable {
         private readonly HashSet<IntPtr> shown = new HashSet<IntPtr>();
         private readonly WinEvent observe;
@@ -318,6 +361,29 @@ function Close-ToTray([Diagnostics.Process]$ui, [string]$healthFile) {
         throw '任务栏重建通知使托盘中的日常窗口弹出或退出。'
     }
     return $window
+}
+
+function Assert-TrayListenerMenu([Diagnostics.Process]$ui, [IntPtr]$window, [string]$expectedArgs, [OmniTriggerUpgradeWindow+WindowShows]$shows) {
+    foreach ($label in '暂停监听', '恢复监听') {
+        $popup = [OmniTriggerUpgradeWindow]::OpenTrayMenu($window)
+        try {
+            [OmniTriggerUpgradeWindow]::SelectTrayItem($window, $popup, $label)
+            $expected = if ($label -eq '恢复监听') { $expectedArgs } else { $null }
+            $timer = [Diagnostics.Stopwatch]::StartNew()
+            do {
+                $actual = [OmniTriggerUpgradeWindow]::UpdateRestartCommand($ui)
+                if ($actual -ceq $expected -and -not [OmniTriggerUpgradeWindow]::IsWindowVisible($popup)) { break }
+                Start-Sleep -Milliseconds 50
+            } while ($timer.Elapsed.TotalSeconds -lt 10 -and -not $ui.HasExited)
+            if ($ui.HasExited -or $actual -cne $expected -or [OmniTriggerUpgradeWindow]::IsWindowVisible($popup)) { throw ('选择“{0}”后监听状态或菜单未更新。' -f $label) }
+            if ($shows.WasShown($window) -or [OmniTriggerUpgradeWindow]::IsWindowVisible($window)) { throw ('选择“{0}”时主窗口曾弹出。' -f $label) }
+        } finally {
+            if ([OmniTriggerUpgradeWindow]::IsWindowVisible($popup)) {
+                $null = [OmniTriggerUpgradeWindow]::PostMessage($window, 0x001f, [UIntPtr]::Zero, [IntPtr]::Zero)
+            }
+        }
+    }
+    Write-Host '已通过安装版托盘菜单暂停并恢复原档监听，主窗口始终隐藏。'
 }
 
 function Assert-TrayIdle([Diagnostics.Process]$ui, [IntPtr]$window) {
@@ -803,31 +869,7 @@ try {
         throw '运行中的日常监听没有登记原配置的托盘启动参数。'
     }
     $shows = [OmniTriggerUpgradeWindow+WindowShows]::new()
-    Add-Type -AssemblyName UIAutomationClient
-    foreach ($label in '暂停监听', '恢复监听') {
-        $popup = [OmniTriggerUpgradeWindow]::OpenTrayMenu($window)
-        try {
-            $menu = [System.Windows.Automation.AutomationElement]::FromHandle($popup)
-            $name = [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, $label)
-            $item = $menu.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $name)
-            if (-not $item -or -not $item.Current.IsEnabled) { throw ('安装版托盘菜单缺少可用的“{0}”。' -f $label) }
-            $item.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-            $expected = if ($label -eq '恢复监听') { $expectedArgs } else { $null }
-            $timer = [Diagnostics.Stopwatch]::StartNew()
-            do {
-                $actual = [OmniTriggerUpgradeWindow]::UpdateRestartCommand($next)
-                if ($actual -ceq $expected -and -not [OmniTriggerUpgradeWindow]::IsWindowVisible($popup)) { break }
-                Start-Sleep -Milliseconds 50
-            } while ($timer.Elapsed.TotalSeconds -lt 10 -and -not $next.HasExited)
-            if ($next.HasExited -or $actual -cne $expected -or [OmniTriggerUpgradeWindow]::IsWindowVisible($popup)) { throw ('选择“{0}”后监听状态或菜单未更新。' -f $label) }
-            if ($shows.WasShown($window) -or [OmniTriggerUpgradeWindow]::IsWindowVisible($window)) { throw ('选择“{0}”时主窗口曾弹出。' -f $label) }
-        } finally {
-            if ([OmniTriggerUpgradeWindow]::IsWindowVisible($popup)) {
-                $null = [OmniTriggerUpgradeWindow]::PostMessage($window, 0x001f, [UIntPtr]::Zero, [IntPtr]::Zero)
-            }
-        }
-    }
-    Write-Host '已通过安装版托盘菜单暂停并恢复原档监听，主窗口始终隐藏。'
+    Assert-TrayListenerMenu $next $window $expectedArgs $shows
     # Windows 对自动重启有最短运行时间要求。
     while (([DateTime]::Now - $next.StartTime).TotalSeconds -lt 65) {
         Start-Sleep -Milliseconds 500
@@ -865,6 +907,7 @@ try {
     $hidden = [OmniTriggerUpgradeWindow]::FindAppWindow($resumed.Id, 'OmniTrigger', $false)
     if ($hidden -eq [IntPtr]::Zero -or [OmniTriggerUpgradeWindow]::IsWindowVisible($hidden) -or
         $shows.WasShown($window) -or $shows.WasShown($hidden)) { throw '自动恢复期间日常主窗口曾弹出。' }
+    Assert-TrayListenerMenu $resumed $hidden $expectedArgs $shows
     Write-Host '已验证普通静默覆盖安装后，Windows 在原配置目录恢复了托盘监听。'
 } finally {
     if ($resumed) { Stop-TestProcess $resumed }
