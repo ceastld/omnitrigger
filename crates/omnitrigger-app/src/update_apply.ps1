@@ -84,11 +84,19 @@ try {
     $updateChild = Start-UpdatedApplication $true
     $updateDeadline = [DateTime]::UtcNow.AddSeconds(30)
     $updateHealthy = Join-Path $updateStage 'healthy'
-    while (-not (Test-Path -LiteralPath $updateHealthy)) {
+    while ($true) {
         if ($updateChild.HasExited -or [DateTime]::UtcNow -gt $updateDeadline) { throw '新版启动失败，已恢复原版本。' }
+        try {
+            $reportedVersion = [IO.File]::ReadAllText($updateHealthy)
+            if ($reportedVersion -cne $updatePlan.release.tag_name.Substring(1)) { throw '新版启动版本不符，已恢复原版本。' }
+            if ($updateChild.HasExited) { throw '新版启动后已退出，已恢复原版本。' }
+            break
+        } catch [IO.IOException] {
+            # 回执尚未生成或被写入端、扫描器暂时占用，沿用同一个启动期限。
+            if (($_.Exception.GetBaseException().HResult -band 0xffff) -notin 2, 32, 33) { throw }
+        }
         Start-Sleep -Milliseconds 100
     }
-    if ([IO.File]::ReadAllText($updateHealthy) -cne $updatePlan.release.tag_name.Substring(1)) { throw '新版启动版本不符，已恢复原版本。' }
     # 仅清理本次应用目录下的暂存子目录。
     try {
         Assert-UpdatePath $updateStage

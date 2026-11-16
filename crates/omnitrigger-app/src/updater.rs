@@ -471,16 +471,76 @@ pub fn mark_healthy() {
         if let Some(path) = std::env::var_os("OMNITRIGGER_UPDATE_HEALTH") {
             std::env::remove_var("OMNITRIGGER_UPDATE_HEALTH");
             let path = PathBuf::from(path);
-            if path.file_name().is_some_and(|name| name == "healthy") && plain_path(&path).is_ok() {
-                let _ = fs::write(path, VERSION);
+            if path.file_name().is_some_and(|name| name == "healthy") {
+                // 短暂的文件占用不能阻塞主窗口和托盘消息。
+                let worker = thread::Builder::new()
+                    .name("update-health".into())
+                    .spawn(move || {
+                        if let Err(error) = publish_health(&path) {
+                            eprintln!("写入更新启动回执失败：{error}");
+                        }
+                    });
+                if let Err(error) = worker {
+                    eprintln!("无法启动更新回执线程：{error}");
+                }
             }
         }
     });
 }
 
+fn publish_health(path: &Path) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        plain_path(path)?;
+        if !path.parent().is_some_and(Path::is_dir) {
+            return Err("更新暂存目录已不存在。".into());
+        }
+        match crate::settings::atomic_write(path, VERSION.as_bytes()) {
+            Ok(()) => return Ok(()),
+            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(_) => thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn health_receipt_survives_a_temporary_file_lock() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "omni-health-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = root.join("healthy");
+        assert!(publish_health(&path).is_err());
+        assert!(!root.exists());
+        fs::create_dir(&root).unwrap();
+        fs::write(&path, "previous").unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        thread::scope(|scope| {
+            let worker = scope.spawn(|| publish_health(&path));
+            thread::sleep(Duration::from_millis(250));
+            assert_eq!(fs::read_to_string(&path).unwrap(), "previous");
+            drop(held);
+            worker.join().unwrap().unwrap();
+        });
+        assert_eq!(fs::read_to_string(&path).unwrap(), VERSION);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     fn restart_permit_publishes_visibility_once_with_its_token() {

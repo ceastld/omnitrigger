@@ -78,7 +78,18 @@ class Fixture {
         string version = File.ReadAllText(Path.Combine(root, "README.txt"));
         if (version == "bad") return 1;
         string health = Environment.GetEnvironmentVariable("OMNITRIGGER_UPDATE_HEALTH");
-        if (!String.IsNullOrEmpty(health)) File.WriteAllText(health, "0.2.0");
+        if (!String.IsNullOrEmpty(health)) {
+            if (version == "locked-receipt") {
+                // 回执已写完，但更新器读它时句柄仍被短暂占用。
+                using (var stream = new FileStream(health, FileMode.CreateNew, FileAccess.Write, FileShare.None)) {
+                    byte[] data = System.Text.Encoding.ASCII.GetBytes("0.2.0");
+                    stream.Write(data, 0, data.Length);
+                    stream.Flush();
+                    Thread.Sleep(600);
+                }
+            } else File.WriteAllText(health, version == "wrong-version" ? "0.3.0" : "0.2.0");
+        }
+        if (version == "wrong-version") { Thread.Sleep(60000); return 0; }
         // 测试端以回执文件出现作为就绪信号，发布前先写完并关闭句柄。
         string receipt = args[1] + ".tmp";
         if (args.Length != 3 || args[0] != "--config" || args[2] != "--settings") return 2;
@@ -90,7 +101,7 @@ class Fixture {
 }
 '@
     Add-Type -TypeDefinition $updateSource -OutputAssembly $updateFixtureExe -OutputType WindowsApplication
-    foreach ($updateCase in @('success', 'rollback', 'success-tray', 'rollback-tray', 'tampered', 'cancelled', 'wrong-token-tray')) {
+    foreach ($updateCase in @('success', 'rollback', 'success-tray', 'rollback-tray', 'success-locked-tray', 'rollback-version-tray', 'tampered', 'cancelled', 'wrong-token-tray')) {
         $updateRoot = Join-Path $updateTestRoot "安装 空格-$updateCase"
         $updateStage = Join-Path $updateRoot '.omnitrigger-update-fixture'
         $updatePayload = Join-Path $updateStage 'payload'
@@ -99,7 +110,12 @@ class Fixture {
         Copy-Item -LiteralPath $updateFixtureExe -Destination $updateExe
         Copy-Item -LiteralPath $updateFixtureExe -Destination (Join-Path $updatePayload 'omnitrigger.exe')
         [IO.File]::WriteAllText((Join-Path $updateRoot 'README.txt'), 'old')
-        [IO.File]::WriteAllText((Join-Path $updatePayload 'README.txt'), $(if ($updateCase -like 'rollback*') { 'bad' } else { 'new' }))
+        $payloadVersion = switch ($updateCase) {
+            'success-locked-tray' { 'locked-receipt' }
+            'rollback-version-tray' { 'wrong-version' }
+            default { if ($updateCase -like 'rollback*') { 'bad' } else { 'new' } }
+        }
+        [IO.File]::WriteAllText((Join-Path $updatePayload 'README.txt'), $payloadVersion)
         $updateConfig = Join-Path $updateRoot '隔离 配置.json'
         $updateParent = Start-TestProcess $updateExe @('--parent') $updateRoot
         $updateManifest = @('omnitrigger.exe', 'README.txt') | ForEach-Object {
@@ -146,7 +162,7 @@ class Fixture {
         $expectedTray = if ($updateCase.EndsWith('-tray')) { '1' } else { '' }
         Assert-Test ($updateResult[3] -ceq $expectedTray) '更新重启或回滚没有保留授权时的窗口状态。'
         if ($updateCase -like 'success*') {
-            Assert-Test ($updateHelper.ExitCode -eq 0 -and $updateResult[0] -ceq 'new') '更新后没有成功启动新版。'
+            Assert-Test ($updateHelper.ExitCode -eq 0 -and $updateResult[0] -ceq $payloadVersion) "更新后没有成功启动新版：$updateCase。"
             Assert-Test (-not (Test-Path -LiteralPath $updateStage)) '成功后应清理暂存和备份。'
         } else {
             Assert-Test ($updateHelper.ExitCode -ne 0 -and $updateResult[0] -ceq 'old') '新版启动失败后没有重启旧版。'
