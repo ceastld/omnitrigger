@@ -96,6 +96,70 @@ public static class OmniTriggerUpgradeWindow {
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromPoint(Point p, uint flags);
     [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
 
+    [StructLayout(LayoutKind.Sequential)] private struct TrayId {
+        public uint Size; public IntPtr Owner; public uint Id; public Guid Guid;
+    }
+    [DllImport("shell32.dll")] private static extern int Shell_NotifyIconGetRect(ref TrayId id, out Rect rect);
+    [DllImport("user32.dll")] private static extern bool EnumThreadWindows(uint thread, EnumWindow callback, IntPtr parameter);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr hwnd, StringBuilder text, int length);
+    private static bool TryGetMenuRect(uint thread, out Rect bounds) {
+        Rect rect = default(Rect);
+        EnumThreadWindows(thread, (hwnd, unused) => {
+            if (!IsWindowVisible(hwnd)) return true;
+            var name = new StringBuilder(32);
+            GetClassName(hwnd, name, name.Capacity);
+            if (name.ToString() != "#32768" || !GetWindowRect(hwnd, out Rect candidate) ||
+                candidate.Left >= candidate.Right || candidate.Top >= candidate.Bottom) return true;
+            rect = candidate;
+            return false;
+        }, IntPtr.Zero);
+        bounds = rect;
+        return rect.Left < rect.Right && rect.Top < rect.Bottom;
+    }
+
+    // 只给本次安装的隐藏窗口投递托盘通知。wParam 故意远离图标，验证实际菜单位置。
+    public static void VerifyTrayMenu(IntPtr owner) {
+        var icon = new TrayId { Size = (uint)Marshal.SizeOf(typeof(TrayId)), Owner = owner, Id = 1 };
+        Rect anchor;
+        bool hasIcon = Shell_NotifyIconGetRect(ref icon, out anchor) >= 0 && anchor.Left < anchor.Right && anchor.Top < anchor.Bottom;
+        if (!hasIcon) {
+            Point p;
+            if (!GetCursorPos(out p)) throw new Exception("无法确定测试托盘菜单的位置。");
+            anchor = new Rect { Left = p.X, Top = p.Y, Right = p.X + 1, Bottom = p.Y + 1 };
+        }
+        uint pid;
+        uint thread = GetWindowThreadProcessId(owner, out pid);
+        // 旧实现会按这对坐标 (30000,30000) 或 (0,0) 打开，容易与图标位置区分。
+        uint misleading = anchor.Left < 300 && anchor.Top < 300 ? 0x75307530u : 0;
+        const uint trayCallback = 0x8000 + 0x34a;
+        const int contextMenu = (1 << 16) | 0x007b; // 通知图标 1、WM_CONTEXTMENU
+        if (!PostMessage(owner, trayCallback, (UIntPtr)misleading, (IntPtr)contextMenu))
+            throw new Exception("测试窗口未接收托盘菜单通知。");
+        try {
+            var timer = Stopwatch.StartNew();
+            Rect menu;
+            while (!TryGetMenuRect(thread, out menu)) {
+                if (timer.ElapsedMilliseconds >= 5000) throw new Exception("安装版未显示托盘菜单。");
+                Thread.Sleep(20);
+            }
+            int margin = Math.Max(12, anchor.Bottom - anchor.Top);
+            if (menu.Right < anchor.Left - margin || menu.Left > anchor.Right + margin ||
+                menu.Bottom < anchor.Top - margin || menu.Top > anchor.Bottom + margin)
+                throw new Exception(String.Format("菜单位置 ({0},{1},{2},{3}) 偏离预期位置 ({4},{5},{6},{7})。",
+                    menu.Left, menu.Top, menu.Right, menu.Bottom, anchor.Left, anchor.Top, anchor.Right, anchor.Bottom));
+            Console.WriteLine(hasIcon ? "托盘菜单在安装版图标旁打开。" : "外壳没有提供图标位置，菜单在指针旁打开。");
+        } finally {
+            PostMessage(owner, 0x001f, UIntPtr.Zero, IntPtr.Zero); // WM_CANCELMODE，收起本窗菜单。
+        }
+        var close = Stopwatch.StartNew();
+        Rect remaining;
+        while (TryGetMenuRect(thread, out remaining)) {
+            if (close.ElapsedMilliseconds >= 5000) throw new Exception("取消后托盘菜单仍然可见。");
+            Thread.Sleep(20);
+        }
+        if (IsWindowVisible(owner)) throw new Exception("取消托盘菜单后主窗口意外弹出。");
+    }
+
     public sealed class WindowShows : IDisposable {
         private readonly HashSet<IntPtr> shown = new HashSet<IntPtr>();
         private readonly WinEvent observe;
@@ -793,6 +857,7 @@ $wake.Environment['OMNITRIGGER_HOME'] = $wakeRoot.FullName
 $ui = [Diagnostics.Process]::Start($wake)
 try {
     $window = Close-ToTray $ui ''
+    [OmniTriggerUpgradeWindow]::VerifyTrayMenu($window)
     $pending = Join-Path $wakeRoot.FullName 'backups/external-import.pending'
     $null = New-Item -ItemType Directory -Path (Join-Path $pending 'incoming'), (Join-Path $pending 'originals') -Force
     [IO.File]::WriteAllText((Join-Path $pending 'originals/bindings.json'), $beforeImport)

@@ -2,23 +2,23 @@
 use windows::{
     core::{w, PCWSTR, PWSTR},
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             Shell::{
                 DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
-                Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD,
-                NIM_DELETE, NIM_MODIFY, NIM_SETFOCUS, NIM_SETVERSION, NINF_KEY, NIN_SELECT,
-                NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
+                Shell_NotifyIconGetRect, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP,
+                NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETFOCUS, NIM_SETVERSION, NINF_KEY,
+                NIN_SELECT, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, NOTIFYICON_VERSION_4,
             },
             WindowsAndMessaging::{
-                AppendMenuW, CreatePopupMenu, DestroyMenu, IsIconic, IsWindowVisible, KillTimer,
-                LoadIconW, LoadStringW, PostMessageW, RegisterWindowMessageW, SetForegroundWindow,
-                SetTimer, ShowWindow, TrackPopupMenu, ENDSESSION_CLOSEAPP, IDI_APPLICATION,
-                MF_STRING, SIZE_MAXIMIZED, SIZE_RESTORED, SW_HIDE, SW_RESTORE, SW_SHOW,
-                SW_SHOWMINNOACTIVE, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_CLOSE,
-                WM_CONTEXTMENU, WM_ENDSESSION, WM_NCDESTROY, WM_NULL, WM_QUERYENDSESSION, WM_SIZE,
-                WM_TIMER,
+                AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, IsIconic, IsWindowVisible,
+                KillTimer, LoadIconW, LoadStringW, PostMessageW, RegisterWindowMessageW,
+                SetForegroundWindow, SetTimer, ShowWindow, TrackPopupMenu, ENDSESSION_CLOSEAPP,
+                IDI_APPLICATION, MF_STRING, SIZE_MAXIMIZED, SIZE_RESTORED, SW_HIDE, SW_RESTORE,
+                SW_SHOW, SW_SHOWMINNOACTIVE, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
+                WM_CLOSE, WM_CONTEXTMENU, WM_ENDSESSION, WM_NCDESTROY, WM_NULL, WM_QUERYENDSESSION,
+                WM_SIZE, WM_TIMER,
             },
         },
     },
@@ -217,19 +217,44 @@ unsafe fn request_exit(hwnd: HWND) {
     let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
 }
 
-unsafe fn show_menu(hwnd: HWND, position: WPARAM) {
+fn menu_anchor(icon: Option<RECT>, cursor: Option<POINT>) -> Option<POINT> {
+    let Some(rect) = icon.filter(|r| r.left < r.right && r.top < r.bottom) else {
+        return cursor;
+    };
+    let point = cursor.filter(|p| {
+        (rect.left..rect.right).contains(&p.x) && (rect.top..rect.bottom).contains(&p.y)
+    });
+    Some(point.unwrap_or(POINT {
+        x: rect.left,
+        y: rect.top,
+    }))
+}
+
+unsafe fn show_menu(hwnd: HWND) {
+    // 版本 4 托盘回调没有为 WM_CONTEXTMENU 定义 wParam 的坐标。
+    let icon = Shell_NotifyIconGetRect(&NOTIFYICONIDENTIFIER {
+        cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
+        hWnd: hwnd,
+        uID: ICON_ID,
+        ..Default::default()
+    })
+    .ok();
+    let mut cursor = POINT::default();
+    let cursor = GetCursorPos(&mut cursor).is_ok().then_some(cursor);
+    let Some(position) = menu_anchor(icon, cursor) else {
+        handle_menu_selection(hwnd, 0);
+        return;
+    };
     let Ok(menu) = CreatePopupMenu() else { return };
     let items = AppendMenuW(menu, MF_STRING, OPEN, w!("打开主窗口"))
         .and_then(|()| AppendMenuW(menu, MF_STRING, EXIT, w!("退出 OmniTrigger")));
-    let x = position.0 as i16 as i32;
-    let y = (position.0 >> 16) as i16 as i32;
     let selection = if items.is_ok() {
         let _ = SetForegroundWindow(hwnd);
         TrackPopupMenu(
             menu,
             TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
-            x,
-            y,
+            position.x,
+            position.y,
             None,
             hwnd,
             None,
@@ -286,7 +311,7 @@ unsafe extern "system" fn tray_proc(
     if msg == CALLBACK && (lp.0 as u32 >> 16) == ICON_ID {
         match lp.0 as u16 as u32 {
             event if event == NIN_SELECT || event == (NIN_SELECT | NINF_KEY) => show_main(hwnd),
-            WM_CONTEXTMENU => show_menu(hwnd, wp),
+            WM_CONTEXTMENU => show_menu(hwnd),
             _ => {}
         }
         return LRESULT(0);
@@ -355,6 +380,39 @@ mod tests {
         CreateWindowExW, DestroyWindow, PeekMessageW, MSG, PM_REMOVE, WINDOW_EX_STYLE,
         WS_OVERLAPPEDWINDOW,
     };
+
+    #[test]
+    fn tray_menu_anchor_uses_the_icon_when_the_pointer_is_elsewhere() {
+        let rect = RECT {
+            left: -41032,
+            top: -80,
+            right: -41000,
+            bottom: -48,
+        };
+        let origin = POINT {
+            x: rect.left,
+            y: rect.top,
+        };
+        let click = POINT { x: -41008, y: -56 };
+        assert_eq!(menu_anchor(Some(rect), Some(click)), Some(click));
+        for pointer in [
+            Some(POINT { x: 0, y: 0 }),
+            Some(POINT {
+                x: rect.right,
+                y: click.y,
+            }),
+            Some(POINT {
+                x: click.x,
+                y: rect.bottom,
+            }),
+            None,
+        ] {
+            assert_eq!(menu_anchor(Some(rect), pointer), Some(origin));
+        }
+        assert_eq!(menu_anchor(None, Some(click)), Some(click));
+        assert_eq!(menu_anchor(Some(RECT::default()), Some(click)), Some(click));
+        assert_eq!(menu_anchor(None, None), None);
+    }
 
     #[test]
     #[ignore = "仅在隔离的 Windows 桌面验证真实窗口的最小化和退出"]
