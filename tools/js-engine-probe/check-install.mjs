@@ -158,12 +158,31 @@ try {
   assert.equal(failure.status,'failed');
   assert.equal(failure.error.code,'runtime_integrity');
   assert.equal(failure.error.effect_state,'not_started');
+  const directory = dirname(firstHost);
+  const note = join(directory,'personal-note.txt');
+  writeFileSync(note,'keep');
+  assert.match(install(development.archive,1).error.message,/清单外文件/);
+  assert.equal(readFileSync(note,'utf8'),'keep');
+  assert.deepEqual(readFileSync(firstHost),changed);
+  assert.equal(readFileSync(pointer,'utf8'),firstPointer);
+  unlinkSync(note);
+  const sdk = join(directory,'sdk','api.d.ts');
+  const sdkBefore = hash(readFileSync(sdk));
+  unlinkSync(sdk);
+  writeFileSync(join(directory,'manifest.json'),'{');
+  const repaired = install(development.archive);
+  assert.equal(repaired.repaired_files,3);
+  assert.equal(repaired.cleanup_warning,undefined);
+  assert.equal(readFileSync(pointer,'utf8'),firstPointer);
+  assert.deepEqual(readFileSync(firstHost),originalHost);
+  assert.equal(hash(readFileSync(sdk)),sdkBefore);
 } finally { writeFileSync(firstHost,originalHost); }
 for (const profileArgs of runtimeProfiles) {
   assert.equal(cli(['--check-action',project.call_path],0,profileArgs).valid,true);
 }
 checks.push('same_size_installed_image_tampering_rejected_before_execution');
 checks.push('catalog_and_check_report_damaged_managed_host_in_daily_and_copy');
+checks.push('same_archive_repairs_missing_and_damaged_managed_files_without_overwriting_unknown_files');
 assert.equal(cli(['--run-action',project.call_path],0,copiedArgs).output.text,'OmniTrigger');
 const copiedPackage = join(copy.directory,'actions','installed-script');
 const copiedManifest = JSON.parse(readFileSync(join(copiedPackage,'action.json'),'utf8'));

@@ -213,12 +213,12 @@ struct VerifiedPackage {
     directories: Vec<PathBuf>,
 }
 
-fn verify_package(directory: &Path, expected_manifest: &str) -> Result<VerifiedPackage, String> {
+fn package_directories(
+    directory: &Path,
+    parsed: &Manifest,
+    require_complete: bool,
+) -> Result<Vec<PathBuf>, String> {
     check_local_path(directory)?;
-    let (parsed, hash) = manifest(&directory.join("manifest.json"))?;
-    if hash != expected_manifest {
-        return Err("已安装宿主的清单摘要不符。".into());
-    }
     let expected = parsed
         .files
         .iter()
@@ -251,13 +251,34 @@ fn verify_package(directory: &Path, expected_manifest: &str) -> Result<VerifiedP
         }
         directories.push(folder);
     }
-    if found != expected {
+    if require_complete && found != expected {
         return Err("宿主目录缺少清单文件。".into());
     }
+    Ok(directories)
+}
+
+fn file_matches(path: &Path, file: &PackageFile) -> Result<bool, String> {
+    check_local_path(path)?;
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("{}：{error}", path.display())),
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(format!("需要普通文件：{}", path.display()))
+        }
+        Ok(metadata) if metadata.len() != file.size => return Ok(false),
+        Ok(_) => {}
+    }
+    Ok(sha(&read(path, file.size)?).eq_ignore_ascii_case(&file.sha256))
+}
+
+fn verify_package(directory: &Path, expected_manifest: &str) -> Result<VerifiedPackage, String> {
+    let (parsed, hash) = manifest(&directory.join("manifest.json"))?;
+    if hash != expected_manifest {
+        return Err("已安装宿主的清单摘要不符。".into());
+    }
+    let directories = package_directories(directory, &parsed, true)?;
     for file in &parsed.files {
-        let path = directory.join(&file.path);
-        let bytes = read(&path, FILE_LIMIT)?;
-        if bytes.len() as u64 != file.size || !sha(&bytes).eq_ignore_ascii_case(&file.sha256) {
+        if !file_matches(&directory.join(&file.path), file)? {
             return Err(format!("宿主文件校验失败：{}", file.path));
         }
     }
@@ -266,6 +287,48 @@ fn verify_package(directory: &Path, expected_manifest: &str) -> Result<VerifiedP
         directories,
     })
 }
+
+/// 先核对整个目标目录，再逐个发布已验证的文件。中断后可用同一包继续。
+fn repair_installation(
+    payload: &Path,
+    destination: &Path,
+    parsed: &Manifest,
+    digest: &str,
+) -> Result<usize, String> {
+    package_directories(destination, parsed, false)?;
+    let record = PackageFile {
+        path: "manifest.json".into(),
+        size: fs::metadata(payload.join("manifest.json"))
+            .map_err(|error| error.to_string())?
+            .len(),
+        sha256: digest.into(),
+    };
+    let mut repairs = Vec::new();
+    for file in parsed.files.iter().chain(std::iter::once(&record)) {
+        if !file_matches(&destination.join(&file.path), file)? {
+            repairs.push(file);
+        }
+    }
+    for file in &repairs {
+        let from = payload.join(&file.path);
+        let to = destination.join(&file.path);
+        check_local_path(&from)?;
+        check_local_path(&to)?;
+        fs::create_dir_all(to.parent().expect("包内文件应有父目录"))
+            .map_err(|error| error.to_string())?;
+        if let Err(error) = fs::rename(&from, &to) {
+            // 并行安装可能已经修复该文件；仍不匹配时保留现场供重试。
+            if !file_matches(&to, file)? {
+                return Err(format!("无法修复宿主文件 {}：{error}", file.path));
+            }
+        }
+    }
+    if !repairs.is_empty() {
+        verify_package(destination, digest)?;
+    }
+    Ok(repairs.len())
+}
+
 pub fn locate(config: &Path) -> Result<Option<Installed>, String> {
     environment_host().map_or_else(|| locate_in_profile(config), |result| result.map(Some))
 }
@@ -659,9 +722,11 @@ pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<
                 reused = true;
             }
         }
-        if reused {
-            verify_package(&destination, &digest)?;
-        }
+        let repaired = if reused {
+            repair_installation(&payload, &destination, &verified.manifest, &digest)?
+        } else {
+            0
+        };
         let pointer = Pointer {
             schema_version: 1,
             archive_sha256: archive_hash.clone(),
@@ -680,7 +745,10 @@ pub fn install_archive(config: &Path, archive: &Path, expected: &str) -> Result<
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
         fs::rename(&next, &current).map_err(|e| e.to_string())?;
-        let receipt = json!({"schema_version":1,"status":"installed","program":destination.join("host.exe"),"engine":manifest.engine,"version":manifest.version,"source_revision":manifest.source_revision,"source_dirty":manifest.source_dirty,"distribution":manifest.distribution,"archive_sha256":archive_hash,"protocol_and_JS_verified":true});
+        let mut receipt = json!({"schema_version":1,"status":"installed","program":destination.join("host.exe"),"engine":manifest.engine,"version":manifest.version,"source_revision":manifest.source_revision,"source_dirty":manifest.source_dirty,"distribution":manifest.distribution,"archive_sha256":archive_hash,"protocol_and_JS_verified":true});
+        if repaired != 0 {
+            receipt["repaired_files"] = json!(repaired);
+        }
         Ok((receipt, reused.then_some(verified)))
     })();
     let (mut receipt, duplicate) =
