@@ -10,6 +10,23 @@
 
 如需验证 EaClip 自己的窗口，请在测试档使用 0.3.0 或更高版本的 N10 动作包，在切换绑定中增加 `"profile": "script-test"`，并将 `dataRoot` 设为 EaClip 独立测试库。此模式需要支持私有测试实例的 Debug 宿主，测试库位于该宿主构建工作区的 `.tmp` 子目录。动作通过私有端点切换窗口并核对采集已关闭。测试档执行下述业务指令同样需要显式选择 `script-test`。
 
+### 在本机重装后恢复热键
+
+日常热键会按动作输入中的路径寻找 EaClip。备份 OmniTrigger 配置档时保留 `bindings.json`、`wheels.json` 和 `actions/n10-rust/`。另外保留与当前绑定配套的 EaClip 程序目录（含客户端、宿主和随附 DLL），以及 EaClip 自己的数据目录。历史和收藏由 EaClip 保存在该数据目录中。
+
+重装后，将程序恢复到原位置，沿用原来的数据目录。如果程序换了位置，要一起更新热键和轮盘槽位中的 `cliExecutable` 和 `hostExecutable`。更改 `dataRoot` 只会改变热键要连接的目录，已有历史需要通过 EaClip 的备份恢复。
+
+要确认日常宿主正在使用哪个数据目录，可在 PowerShell 中将下面三个路径换成绑定的实际值，再查询状态。
+
+```powershell
+$client = 'C:\Apps\EaClip\eaclip-cli.exe'
+$hostProgram = 'C:\Apps\EaClip\cliphost-gpui.exe'
+$dataRoot = 'D:\ClipboardData'
+& $client status --no-start --host $hostProgram --expected-data-root $dataRoot --json
+```
+
+这个命令只查询已运行的宿主。返回 `state=ready` 时，核对 `result.executable` 和 `result.dataRoot`。宿主尚未运行时，可在日常窗口按一次绑定的热键，等窗口打开后再查。
+
 ### 已运行宿主的脚本入口
 
 原有的脚本入口通过已有的 `script` 运行时调用本地 Rust CLI，再由对应宿主解释命令。它不包含原生程序、不安装或启动宿主、不注册触发器，也不会自行选择、迁移或改写数据根配置。
