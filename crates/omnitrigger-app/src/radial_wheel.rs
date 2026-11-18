@@ -1563,7 +1563,7 @@ pub fn editor_stage(
     let (title, subtitle) = if moving {
         ("移动中".into(), "点目标格子")
     } else {
-        (definition.name.clone(), "松开即执行")
+        (definition.name.clone(), "点选格子")
     };
     let hub = div()
         .absolute()

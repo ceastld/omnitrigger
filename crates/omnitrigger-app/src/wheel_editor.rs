@@ -167,11 +167,16 @@ impl Workspace {
             .and_then(|preview| self.wheel_view().map(|view| (preview, view)))
         {
             let slot = preview.selected_slot(&view);
-            let description = match slot {
-                Some(slot) if matches!(slot.action, ActionSpec::Notification) => "已显示测试提示。",
-                Some(_) => "要验证此动作的实际效果，请在启用监听的配置档触发轮盘。",
-                None if preview.selected.is_some() => "这个方位没有配置动作。",
-                None => "点选轮盘上的格子，查看它对应的动作。",
+            let hint = match slot {
+                Some(slot) => match self.action_unavailable_reason(&slot.action) {
+                    Some(reason) => caption(reason).text_color(rgb(theme::RECORD)),
+                    None if matches!(slot.action, ActionSpec::Notification) => {
+                        caption("已显示测试提示。")
+                    }
+                    None => caption("要验证此动作的实际效果，请在启用监听的配置档触发轮盘。"),
+                },
+                None if preview.selected.is_some() => caption("这个方位没有配置动作。"),
+                None => caption("点选轮盘上的格子，查看它对应的动作。"),
             };
             return div()
                 .flex_1()
@@ -219,7 +224,7 @@ impl Workspace {
                                     el.child(panel_title(slot.label.clone()))
                                         .child(label(action_text(&slot.action)))
                                 })
-                                .child(caption(description)),
+                                .child(hint),
                         ),
                 );
         }
