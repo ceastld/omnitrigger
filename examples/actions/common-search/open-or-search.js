@@ -2,7 +2,8 @@
 /** @type {ScriptMain} */
 function main(ctx) {
     const source = ctx.input.source;
-    let filesCopied = false;
+    const usesSelectionData = source === 'auto' || source === 'files';
+    let selectionCopied = false;
     const template = ctx.input.urlTemplate === undefined ? 'https://www.google.com/search?q=%s' : ctx.input.urlTemplate;
     const lengthUnit = ctx.input.queryLengthUnit === undefined ? 'codepoints' : ctx.input.queryLengthUnit;
     const limit = lengthUnit === 'utf16'
@@ -11,17 +12,21 @@ function main(ctx) {
     /** @param {string} message */
     function invalid(message) {
         throw Object.assign(new Error(message), {
-            code: 'invalid_input', effectState: filesCopied ? 'unknown' : 'not_started', method: 'script.parameters',
+            code: 'invalid_input', effectState: selectionCopied ? 'unknown' : 'not_started', method: 'script.parameters',
         });
     }
     /** @param {string} code @param {string} message */
     function pathError(code, message) {
         throw Object.assign(new Error(message), {
-            code, effectState: filesCopied ? 'unknown' : 'not_started', method: 'fs.stat',
+            code, effectState: selectionCopied ? 'unknown' : 'not_started', method: 'fs.stat',
         });
     }
+    /** @param {string} code @param {string} message @returns {never} */
+    function selectionError(code, message) {
+        throw Object.assign(new Error(message), {code, method: 'script.selection', effectState: 'unknown'});
+    }
     // 与 web-search 相同：先验证参数，只复制新选区，不读取旧剪贴板。
-    if (source !== 'selection' && source !== 'text' && source !== 'files') invalid('source 需要 selection、text 或 files。');
+    if (source !== 'selection' && source !== 'text' && !usesSelectionData) invalid('source 需要 selection、text、files 或 auto。');
     if (typeof template !== 'string' || template.length > 2048 ||
         !/^https?:\/\/[A-Za-z0-9.-]+(?::[0-9]{1,5})?\/[^\s\\\x00-\x1f]*$/.test(template) ||
         template.split('%s').length !== 2 || template.indexOf('%s') < template.indexOf('/', template.indexOf('://') + 3)) {
@@ -43,7 +48,7 @@ function main(ctx) {
     if (source === 'text' && (typeof ctx.input.text !== 'string' || !ctx.input.text.trim() ||
         ctx.input.text.length > 65536 || ctx.input.text.includes('\0'))) invalid('text 需要非空文本，最多 65,536 个 UTF-16 单元。');
     const separator = ctx.input.fileListSeparator;
-    if (source === 'files' && Object.prototype.hasOwnProperty.call(ctx.input, 'fileListSeparator')) {
+    if (usesSelectionData && Object.prototype.hasOwnProperty.call(ctx.input, 'fileListSeparator')) {
         if (typeof separator !== 'string' || !separator.length || separator.length > 32 || separator.includes('\0')) {
             invalid('fileListSeparator 需要不含 NUL 的 1–32 个 UTF-16 单元。');
         }
@@ -52,34 +57,34 @@ function main(ctx) {
     let text = source === 'selection' ? ctx.desktop.copySelectionText() : ctx.input.text;
     /** @type {number | undefined} */
     let fileCount;
-    if (source === 'files') {
-        const data = ctx.desktop.copySelectionData({format:'files'});
-        filesCopied = true;
-        /** @param {string} code @param {string} message @returns {never} */
-        function fileError(code, message) {
-            throw Object.assign(new Error(message), {code, method: 'script.selection', effectState: 'unknown'});
+    const data = usesSelectionData ? ctx.desktop.copySelectionData({format: source === 'auto' ? 'auto' : 'files'}) : undefined;
+    selectionCopied = source === 'selection' || usesSelectionData;
+    if (usesSelectionData) {
+        if (!data || data.changed !== true || !Number.isInteger(data.sequenceNumber) ||
+            data.sequenceNumber < 0 || data.sequenceNumber > 0xffffffff ||
+            (data.kind !== 'files' && !(source === 'auto' && data.kind === 'text'))) {
+            selectionError(source === 'files' ? 'invalid_file_selection' : 'invalid_selection', '复制结果不是有效的新选区。');
         }
-        if (!data || data.kind !== 'files' || !Array.isArray(data.paths) ||
-            !Number.isInteger(data.sequenceNumber) || data.sequenceNumber < 0 || data.sequenceNumber > 0xffffffff ||
-            data.changed !== true || data.paths.length > 64) {
-            fileError('invalid_file_selection', '复制结果不是有效的新文件列表。');
-        }
-        if (!data.paths.length) fileError('empty_file_list', '文件列表为空。');
+        if (data.kind === 'text') text = data.text;
+    }
+    if (data?.kind === 'files') {
+        if (!Array.isArray(data.paths) || data.paths.length > 64) selectionError('invalid_file_selection', '复制结果不是有效的新文件列表。');
+        if (!data.paths.length) selectionError('empty_file_list', '文件列表为空。');
         let units = 0;
         for (const path of data.paths) {
             if (typeof path !== 'string' || !path.trim() || path.includes('\0')) {
-                fileError('invalid_file_selection', '文件列表包含无效路径数据。');
+                selectionError('invalid_file_selection', '文件列表包含无效路径数据。');
             }
-            try { encodeURIComponent(path); } catch (_) { fileError('invalid_file_selection', '文件列表含无效 Unicode。'); }
+            try { encodeURIComponent(path); } catch (_) { selectionError('invalid_file_selection', '文件列表含无效 Unicode。'); }
             units += path.length;
-            if (units > 65536) fileError('file_list_too_large', '文件列表超过 65,536 个 UTF-16 单元。');
+            if (units > 65536) selectionError('file_list_too_large', '文件列表超过 65,536 个 UTF-16 单元。');
         }
         fileCount = data.paths.length;
         if (fileCount > 1 && separator === undefined) {
-            fileError('file_list_separator_required', '多个文件需要显式提供 fileListSeparator。');
+            selectionError('file_list_separator_required', '多个文件需要显式提供 fileListSeparator。');
         }
         text = fileCount === 1 ? data.paths[0] : data.paths.join(separator);
-        if (text.length > 65536) fileError('file_list_too_large', '连接后的文件列表超过 65,536 个 UTF-16 单元。');
+        if (text.length > 65536) selectionError('file_list_too_large', '连接后的文件列表超过 65,536 个 UTF-16 单元。');
     }
     const multipleFiles = fileCount !== undefined && fileCount > 1;
     if (typeof text !== 'string' || !text.trim() || text.length > 65536 || text.includes('\0')) {
@@ -102,7 +107,7 @@ function main(ctx) {
     const absolute = /^[A-Za-z]:[\\/]/.test(text);
     const pathLike = candidate.includes('\\') || /^[^\s/:\\]:|^[^\s/:\\]+:\/(?!\/)|^[\\/]|^\.{1,2}(?:[\\/]|$)|^~(?:[\\/]|$)|^file:|^%[^%]+%|^\$(?:env:|\{)/i.test(candidate);
     let pathKind;
-    if (!multipleFiles && (source === 'files' || absolute || pathLike)) {
+    if (!multipleFiles && (fileCount !== undefined || absolute || pathLike)) {
         if (!absolute || candidate !== text) invalid('路径仅接受未加引号、没有外围空白的 Windows 普通盘符绝对路径。');
         // stat 的云端占位/拒绝访问/取消等错误原样传播；没有搜索回退。
         if (!ctx.fs || typeof ctx.fs.stat !== 'function') pathError('fs_unavailable', '当前宿主没有文件元数据接口。');

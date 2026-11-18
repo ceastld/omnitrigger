@@ -14,7 +14,7 @@ function run(input, options = {}) {
             if (options.copyError) throw options.copyError;
             return options.selection ?? '合成选中文本';
         }, copySelectionData(copyOptions) {
-            assert.deepEqual(JSON.parse(JSON.stringify(copyOptions)), {format: 'files'});
+            assert.deepEqual(JSON.parse(JSON.stringify(copyOptions)), {format: input.source === 'auto' ? 'auto' : 'files'});
             calls.push(['copy-data']);
             if (options.copyDataError) throw options.copyDataError;
             return Object.prototype.hasOwnProperty.call(options, 'fileData') ? options.fileData
@@ -292,6 +292,46 @@ test('非文本文件列表与数据对象不隐式转换为路径或查询',()=
 
 const fileInput = extra => ({source: 'files', urlTemplate: 'https://example.invalid/search?q=%s', ...extra});
 const fileData = paths => ({kind: 'files', paths, sequenceNumber: 7, changed: true});
+test('自动选区只复制一次，根据返回格式搜索文本、打开单文件或搜索多文件', () => {
+    const input = {source: 'auto', urlTemplate: 'https://example.invalid/find?q=%s', fileListSeparator: '\r\n'};
+    const text = {kind: 'text', text: 'A + B', changed: true, sequenceNumber: 8};
+    const path = 'C:/Synthetic/资料.txt';
+    for (const [snapshot, expected, operation] of [
+        [text, [['open', 'https://example.invalid/find?q=A%20%2B%20B']], 'search'],
+        [{...text, text: path}, [['stat', path], ['open', path]], 'open-file'],
+        [fileData([path]), [['stat', path], ['open', path]], 'open-file'],
+        [fileData([path, path]), [['open', input.urlTemplate.replace('%s', encodeURIComponent([path, path].join('\r\n')))]], 'search'],
+    ]) {
+        const out = run(input, {fileData: snapshot});
+        assert.deepEqual(out.calls, [['copy-data'], ...expected]);
+        assert.equal(out.result.source, 'auto');
+        assert.equal(out.result.operation, operation);
+        assert.equal(out.result.fileCount, snapshot.paths?.length);
+    }
+});
+test('自动选区拒绝旧回执和空文本，复制失败保留原错误', () => {
+    const input = {source: 'auto', text: '不可用作回退'};
+    const text = {kind: 'text', text: '合成选区', changed: true, sequenceNumber: 0};
+    for (const snapshot of [{...text, changed: false}, {...text, sequenceNumber: -1}, {...text, text: ''}, null]) {
+        const out = run(input, {fileData: snapshot});
+        assert.equal(out.error.code, 'invalid_selection');
+        assert.equal(out.error.effectState, 'unknown');
+        assert.deepEqual(out.calls, [['copy-data']]);
+    }
+    const err = fault('target_changed');
+    assert.equal(run(input, {copyDataError: err}).error, err);
+    assert.deepEqual(run({...input, fileListSeparator: ''}).calls, []);
+});
+test('取得选中文本后遇到无效路径，保留已经复制的效果状态', () => {
+    const path = 'C:relative.txt';
+    const text = {kind: 'text', text: path, changed: true, sequenceNumber: 1};
+    for (const source of ['selection', 'auto']) {
+        const out = run({source}, {selection: path, fileData: text});
+        assert.equal(out.error.code, 'invalid_input');
+        assert.equal(out.error.effectState, 'unknown');
+        assert.deepEqual(out.calls, [[source === 'selection' ? 'copy' : 'copy-data']]);
+    }
+});
 test('文件列表：单文件先查完整路径，不套查询预算或要求分隔符', () => {
     const path = 'C:/Synthetic/中😀 file.txt';
     const out = run(fileInput({queryLengthUnit: 'utf16', maxUtf16Units: 1}), {fileData: fileData([path])});

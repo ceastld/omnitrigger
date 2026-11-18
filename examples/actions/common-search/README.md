@@ -28,6 +28,8 @@ node --test examples/actions/common-search/recipes.test.mjs
 
 ## 打开本地文件或搜索文本
 
+要让同一条热键既能搜索编辑器选中的文字，也能打开资源管理器选中的文件，可以在 `open-or-search` 的输入中使用 `{"source":"auto","fileListSeparator":"\r\n"}`（动作包 1.5.0 起）。它从原窗口复制一次，按宿主返回的格式处理。文本优先，空文本会提示选区无效。单个普通文件按原路径打开，多个文件按指定分隔符连接后作为一个搜索词。网页搜索沿用 `urlTemplate` 和长度设置，通过系统打开结果网址。
+
 新增动作 `open-or-search`（契约版本 1，入口 `open-or-search.js`）为标准同步 JS，使用轻量宿主的 `ctx.fs.stat(path)`。需要提供该 API 的应用、SDK 和轻量宿主，旧版宿主没有此接口时返回 `fs_unavailable`，不会改为搜索文件路径。
 
 它接受与 `web-search` 相同的 `source`、`text`、`urlTemplate`、`maxCodePoints`。模板、来源、文本长度、Unicode 和截断规则相同，先完成参数校验再复制。`source: "selection"` 仍向本次动作的原目标复制新选区一次，结果保留在剪贴板；空选区、复制失败、取消均不使用旧剪贴板。`source: "text"` 不访问选区或剪贴板。两个动作不共享运行时状态。
