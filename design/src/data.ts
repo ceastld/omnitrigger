@@ -23,6 +23,7 @@ export interface Row {
   detail: string;
   detail_color: string;
   text: string;
+  chord?: string[];
   prefix: string;
   facets: Record<FacetKey, string>;
   key_terminal: boolean;
@@ -60,12 +61,38 @@ export type Filter = Partial<Record<FacetKey, string>>;
 
 export const DISABLED = "已停用";
 
-export function tokens(query: string): string[] {
-  return query.split(/\s+/).filter(Boolean).map((word) => word.toLowerCase());
+export function normalizeQuery(query: string): string {
+  return query.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-function matchesQuery(row: Row, words: string[]): boolean {
-  return words.every((word) => row.text.includes(word));
+function afterChord(query: string, chord: string[]): string | undefined {
+  if (chord.length < 2) return;
+  for (const [index, key] of chord.entries()) {
+    if (index > 0) {
+      const separator = /^ *[+＋加] */.exec(query);
+      if (!separator) return;
+      query = query.slice(separator[0].length);
+    }
+    const label = key === "capslock" && !query.startsWith(key) ? "caps" : key;
+    if (!query.startsWith(label)) return;
+    query = query.slice(label.length);
+  }
+  if (query === "") return "";
+  if (query.startsWith(" ")) return query.slice(1);
+}
+
+function matchesQuery(row: Row, query: string): boolean {
+  while (query) {
+    const rest = afterChord(query, row.chord ?? []);
+    if (rest !== undefined) {
+      query = rest;
+      continue;
+    }
+    const literal = /^\S+(?: [+＋加] \S+)*/.exec(query)![0];
+    if (!row.text.includes(literal)) return false;
+    query = query.slice(literal.length).trimStart();
+  }
+  return true;
 }
 
 function accepts(row: Row, filter: Filter, skip?: FacetKey): boolean {
@@ -74,12 +101,12 @@ function accepts(row: Row, filter: Filter, skip?: FacetKey): boolean {
   );
 }
 
-export function visible(rows: Row[], words: string[], filter: Filter): Row[] {
-  return rows.filter((row) => matchesQuery(row, words) && accepts(row, filter));
+export function visible(rows: Row[], query: string, filter: Filter): Row[] {
+  return rows.filter((row) => matchesQuery(row, query) && accepts(row, filter));
 }
 
-export function facetCount(rows: Row[], words: string[], filter: Filter, facet: FacetKey, value: string): number {
-  return rows.filter((row) => matchesQuery(row, words) && accepts(row, filter, facet) && row.facets[facet] === value)
+export function facetCount(rows: Row[], query: string, filter: Filter, facet: FacetKey, value: string): number {
+  return rows.filter((row) => matchesQuery(row, query) && accepts(row, filter, facet) && row.facets[facet] === value)
     .length;
 }
 
@@ -92,9 +119,9 @@ export interface Group {
   inherited: number;
 }
 
-export function browse(rows: Row[], words: string[], filter: Filter, groupBy: GroupKey): Group[] {
+export function browse(rows: Row[], query: string, filter: Filter, groupBy: GroupKey): Group[] {
   const groups: Group[] = [];
-  for (const row of visible(rows, words, filter)) {
+  for (const row of visible(rows, query, filter)) {
     const [key, label] =
       groupBy === "prefix"
         ? row.prefix === ""

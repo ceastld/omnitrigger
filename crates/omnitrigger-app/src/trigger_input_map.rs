@@ -324,6 +324,7 @@ mod tests {
         Row {
             id,
             text: String::new(),
+            chord: Vec::new(),
             prefix: prefix.into(),
             prefix_keys: Vec::new(),
             input: InputKind::Keyboard,

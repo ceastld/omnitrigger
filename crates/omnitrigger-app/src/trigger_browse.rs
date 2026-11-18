@@ -86,6 +86,8 @@ pub struct Row {
     pub id: u64,
     /// 已转小写的搜索文本。
     pub text: String,
+    /// 按界面顺序排列的小写键帽，不含位置和时长条件。
+    pub chord: Vec<String>,
     /// 前缀层名称；没有前缀时为空。
     pub prefix: String,
     /// 前缀中各键的名称，用来判断一个前缀是否由另一个延长而来。
@@ -379,17 +381,66 @@ pub fn status_kind(binding: &Binding, ready: bool) -> StatusKind {
     }
 }
 
-/// 把搜索框文字拆成小写词；每个词都需出现在搜索文本中。
-pub fn tokens(query: &str) -> Vec<String> {
-    query.split_whitespace().map(str::to_lowercase).collect()
+pub fn normalize_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
-fn matches_query(row: &Row, tokens: &[String]) -> bool {
-    tokens.iter().all(|token| row.text.contains(token.as_str()))
+/// 从一个词的开头匹配整组键帽，允许在键帽之间输入不同形式的加号。
+fn after_chord<'a>(mut query: &'a str, chord: &[String]) -> Option<&'a str> {
+    if chord.len() < 2 {
+        return None;
+    }
+    for (index, key) in chord.iter().enumerate() {
+        if index > 0 {
+            query = query
+                .trim_start()
+                .strip_prefix(['+', '＋', '加'])?
+                .trim_start();
+        }
+        query = if key == "capslock" {
+            query
+                .strip_prefix("capslock")
+                .or_else(|| query.strip_prefix("caps"))?
+        } else {
+            query.strip_prefix(key.as_str())?
+        };
+    }
+    if query.is_empty() {
+        Some(query)
+    } else {
+        query.strip_prefix(' ')
+    }
+}
+
+fn matches_query(row: &Row, mut query: &str) -> bool {
+    while !query.is_empty() {
+        if let Some(rest) = after_chord(query, &row.chord) {
+            query = rest;
+            continue;
+        }
+        // 动作名也可能含有组合写法。带空格的加号需与两侧文字一起出现，
+        // 避免在 CapsLock+W 的说明中分别命中 CapsLock、C++ 和 Q。
+        let mut words = query.split(' ');
+        let mut length = words.next().unwrap_or_default().len();
+        while let (Some(separator @ ("+" | "＋" | "加")), Some(key)) = (words.next(), words.next())
+        {
+            length += 2 + separator.len() + key.len();
+        }
+        let (literal, rest) = query.split_at(length);
+        if !row.text.contains(literal) {
+            return false;
+        }
+        query = rest.trim_start();
+    }
+    true
 }
 
 /// 在其他维度和搜索条件下，某一选项还能命中多少条；用于下拉中的计数。
-pub fn facet_count(rows: &[Row], tokens: &[String], filter: &Filter, value: FacetValue) -> usize {
+pub fn facet_count(rows: &[Row], query: &str, filter: &Filter, value: FacetValue) -> usize {
     let facet = match value {
         FacetValue::Input(_) => Facet::Input,
         FacetValue::Action(_) => Facet::Action,
@@ -398,24 +449,24 @@ pub fn facet_count(rows: &[Row], tokens: &[String], filter: &Filter, value: Face
     };
     rows.iter()
         .filter(|row| {
-            matches_query(row, tokens) && filter.accepts(row, Some(facet)) && value.matches(row)
+            matches_query(row, query) && filter.accepts(row, Some(facet)) && value.matches(row)
         })
         .count()
 }
 
 /// 通过搜索与筛选的摘要，保持绑定顺序。
-pub fn visible<'a>(rows: &'a [Row], tokens: &[String], filter: &Filter) -> Vec<&'a Row> {
+pub fn visible<'a>(rows: &'a [Row], query: &str, filter: &Filter) -> Vec<&'a Row> {
     rows.iter()
-        .filter(|row| matches_query(row, tokens) && filter.accepts(row, None))
+        .filter(|row| matches_query(row, query) && filter.accepts(row, None))
         .collect()
 }
 
 /// 筛选并分组；组按首次出现排列，组内保持绑定顺序。
-pub fn browse(rows: &[Row], tokens: &[String], filter: &Filter, group_by: GroupBy) -> Vec<Group> {
+pub fn browse(rows: &[Row], query: &str, filter: &Filter, group_by: GroupBy) -> Vec<Group> {
     let mut groups: Vec<Group> = Vec::new();
     for row in rows
         .iter()
-        .filter(|row| matches_query(row, tokens) && filter.accepts(row, None))
+        .filter(|row| matches_query(row, query) && filter.accepts(row, None))
     {
         let (key, label) = match group_by {
             GroupBy::Prefix if row.prefix.is_empty() => (String::new(), "无前缀".to_string()),
@@ -536,7 +587,7 @@ mod tests {
             row(3, "c", "Space", ActionKind::Shortcut, StatusKind::Enabled),
         ];
         rows[0].prefix_keys = vec!["Space".into(), "G".into()];
-        let groups = browse(&rows, &[], &Filter::default(), GroupBy::Prefix);
+        let groups = browse(&rows, "", &Filter::default(), GroupBy::Prefix);
         let order: Vec<_> = groups
             .iter()
             .map(|group| (group.key.as_str(), group.inherited))
@@ -551,6 +602,7 @@ mod tests {
         Row {
             id,
             text: text.to_lowercase(),
+            chord: Vec::new(),
             prefix: prefix.into(),
             prefix_keys: prefix
                 .split(" + ")
@@ -623,7 +675,7 @@ mod tests {
 
     #[test]
     fn groups_by_prefix_in_first_seen_order_and_keep_binding_order() {
-        let groups = browse(&sample(), &[], &Filter::default(), GroupBy::Prefix);
+        let groups = browse(&sample(), "", &Filter::default(), GroupBy::Prefix);
         let shape: Vec<_> = groups
             .iter()
             .map(|group| (group.label.as_str(), group.ids.clone(), group.disabled))
@@ -642,7 +694,7 @@ mod tests {
     fn every_query_word_must_match() {
         let groups = browse(
             &sample(),
-            &tokens("  CAPS   光标 l "),
+            &normalize_query("  CAPS   光标 l "),
             &Filter::default(),
             GroupBy::None,
         );
@@ -650,11 +702,43 @@ mod tests {
         assert_eq!(groups[0].ids, vec![3]);
         assert!(browse(
             &sample(),
-            &tokens("caps 终端"),
+            &normalize_query("caps 终端"),
             &Filter::default(),
             GroupBy::None
         )
         .is_empty());
+    }
+
+    #[test]
+    fn chord_search_accepts_key_names_separators_and_other_search_words() {
+        let mut clipboard = row(
+            73,
+            "增加剪贴板 C++ 工具 CapsLock Q",
+            "CapsLock",
+            ActionKind::Notification,
+            StatusKind::Enabled,
+        );
+        clipboard.chord = vec!["capslock".into(), "q".into()];
+        let mut other = clipboard.clone();
+        other.id = 74;
+        other.chord = vec!["capslock".into(), "w".into()];
+        for query in [
+            "CapsLock+Q",
+            "CapsLock  +  Q",
+            "CAPS＋q",
+            "CAPS加Q",
+            "增加剪贴板 Caps 加 Q C++",
+        ] {
+            let query = normalize_query(query);
+            assert!(matches_query(&clipboard, &query), "{query}");
+            assert!(!matches_query(&other, &query), "{query}");
+        }
+        assert!(!matches_query(&clipboard, "caps+qwerty"));
+        assert!(!matches_query(&clipboard, "caps+q 浏览器"));
+        assert!(matches_query(&clipboard, "增加剪贴板 c++"));
+        other.chord = vec!["左 ctrl".into(), "侧键 1".into(), "q".into()];
+        assert!(matches_query(&other, "工具 左 ctrl + 侧键 1＋q"));
+        assert!(!matches_query(&other, "右 ctrl+侧键 1+q"));
     }
 
     #[test]
@@ -665,12 +749,12 @@ mod tests {
             Some(FacetValue::Action(ActionKind::Shortcut)),
         );
         filter.set(Facet::Status, Some(FacetValue::Status(StatusKind::Enabled)));
-        let groups = browse(&sample(), &[], &filter, GroupBy::None);
+        let groups = browse(&sample(), "", &filter, GroupBy::None);
         assert_eq!(groups[0].ids, vec![1]);
 
         // 状态下拉的计数只受动作筛选约束，不受当前选中的状态约束。
         let rows = sample();
-        let count = |status| facet_count(&rows, &[], &filter, FacetValue::Status(status));
+        let count = |status| facet_count(&rows, "", &filter, FacetValue::Status(status));
         assert_eq!(count(StatusKind::Enabled), 1);
         assert_eq!(count(StatusKind::Disabled), 1);
         assert_eq!(count(StatusKind::Unready), 0);

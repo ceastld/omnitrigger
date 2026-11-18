@@ -570,6 +570,10 @@ fn browse_row(binding: &settings::Binding, ready: bool) -> trigger_browse::Row {
     trigger_browse::Row {
         id: spec.id,
         text: text.to_lowercase(),
+        chord: caps[spec.conditions.len()..=spec.conditions.len() + spec.held.len()]
+            .iter()
+            .map(|cap| cap.label.to_lowercase())
+            .collect(),
         prefix: prefix_keys.join(" + "),
         prefix_keys,
         input: trigger_browse::input_kind(spec),
@@ -4836,7 +4840,7 @@ impl Workspace {
     fn render_trigger_toolbar(
         &self,
         rows: &[trigger_browse::Row],
-        tokens: &[String],
+        query: &str,
         shown: usize,
         window: &Window,
         cx: &mut Context<Self>,
@@ -4882,7 +4886,7 @@ impl Workspace {
                 TriggerChoice::Facet(facet, None),
             )];
             for value in facet.options() {
-                let count = trigger_browse::facet_count(rows, tokens, &self.trigger_filter, value);
+                let count = trigger_browse::facet_count(rows, query, &self.trigger_filter, value);
                 // 没有命中的选项不列出，避免点出空列表；已选中的始终保留以便取消。
                 if count > 0 || current == Some(value) {
                     options.push((
@@ -4906,7 +4910,7 @@ impl Workspace {
                 cx,
             ));
         }
-        if !tokens.is_empty() || !self.trigger_filter.is_empty() {
+        if !query.is_empty() || !self.trigger_filter.is_empty() {
             facets = facets.child(
                 div()
                     .id("trigger-clear-filters")
@@ -5905,9 +5909,9 @@ impl Workspace {
         let listening = self.listener() == Listener::Listening;
         let dim = matches!(self.listener(), Listener::Paused | Listener::Offline);
         let summary = self.trigger_rows();
-        let tokens = trigger_browse::tokens(&self.trigger_search.read(cx).text());
+        let query = trigger_browse::normalize_query(&self.trigger_search.read(cx).text());
         let groups =
-            trigger_browse::browse(&summary, &tokens, &self.trigger_filter, self.trigger_group);
+            trigger_browse::browse(&summary, &query, &self.trigger_filter, self.trigger_group);
         let shown: usize = groups.iter().map(|group| group.ids.len()).sum();
         let grouped = self.trigger_group != trigger_browse::GroupBy::None;
         let mut rows = div()
@@ -5956,11 +5960,11 @@ impl Workspace {
                 }
             }
             TriggerView::Keyboard if shown > 0 => {
-                let visible = trigger_browse::visible(&summary, &tokens, &self.trigger_filter);
+                let visible = trigger_browse::visible(&summary, &query, &self.trigger_filter);
                 rows = rows.children(self.render_keyboard_view(&visible, cx));
             }
             TriggerView::Mouse if shown > 0 => {
-                let visible = trigger_browse::visible(&summary, &tokens, &self.trigger_filter);
+                let visible = trigger_browse::visible(&summary, &query, &self.trigger_filter);
                 rows = rows.children(self.render_mouse_view(&visible, cx));
             }
             _ => {}
@@ -6040,7 +6044,7 @@ impl Workspace {
                             .on_click(cx.listener(|this, _, _, cx| this.start_recording(cx))),
                     ),
             )
-            .child(self.render_trigger_toolbar(&summary, &tokens, shown, window, cx))
+            .child(self.render_trigger_toolbar(&summary, &query, shown, window, cx))
             .children(self.render_banner(cx))
             .child(
                 div()

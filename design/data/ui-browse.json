@@ -843,6 +843,10 @@
       "detail": "发送快捷键 · Backspace",
       "detail_color": "TEXT_DIM",
       "text": "退格 发送快捷键 · backspace 发送快捷键 capslock o",
+      "chord": [
+        "capslock",
+        "o"
+      ],
       "prefix": "CapsLock",
       "facets": {
         "input": "键盘",
@@ -885,6 +889,10 @@
       "detail": "发送快捷键 · Up",
       "detail_color": "TEXT_DIM",
       "text": "光标上移 发送快捷键 · up 发送快捷键 capslock i",
+      "chord": [
+        "capslock",
+        "i"
+      ],
       "prefix": "CapsLock",
       "facets": {
         "input": "键盘",
@@ -927,6 +935,10 @@
       "detail": "发送快捷键 · Left",
       "detail_color": "TEXT_DIM",
       "text": "光标左移 发送快捷键 · left 发送快捷键 capslock j",
+      "chord": [
+        "capslock",
+        "j"
+      ],
       "prefix": "CapsLock",
       "facets": {
         "input": "键盘",
@@ -969,6 +981,10 @@
       "detail": "发送快捷键 · Down",
       "detail_color": "TEXT_DIM",
       "text": "光标下移 发送快捷键 · down 发送快捷键 capslock k",
+      "chord": [
+        "capslock",
+        "k"
+      ],
       "prefix": "CapsLock",
       "facets": {
         "input": "键盘",
@@ -1011,6 +1027,10 @@
       "detail": "发送快捷键 · Right",
       "detail_color": "TEXT_DIM",
       "text": "光标右移 发送快捷键 · right 发送快捷键 capslock l",
+      "chord": [
+        "capslock",
+        "l"
+      ],
       "prefix": "CapsLock",
       "facets": {
         "input": "键盘",
@@ -1053,6 +1073,9 @@
       "detail": "打开 / 收起触发面板",
       "detail_color": "TEXT_DIM",
       "text": "打开触发面板 打开 / 收起触发面板 触发面板 右键 长按 300ms",
+      "chord": [
+        "右键"
+      ],
       "prefix": "",
       "facets": {
         "input": "鼠标按键",
@@ -1093,6 +1116,10 @@
       "detail": "指针窗口：仅 chrome、msedge、firefox · 仅 chrome、msedge、firefox · 发送快捷键 · RightCtrl+RightShift+Tab",
       "detail_color": "TEXT_DIM",
       "text": "侧键加上滚：上一标签 发送快捷键 · rightctrl+rightshift+tab 发送快捷键 侧键 1 滚轮 仅 chrome、msedge、firefox 仅 chrome、msedge、firefox",
+      "chord": [
+        "侧键 1",
+        "滚轮"
+      ],
       "prefix": "侧键 1",
       "facets": {
         "input": "滚轮",
@@ -1135,6 +1162,10 @@
       "detail": "指针窗口：仅 chrome、msedge、firefox · 仅 chrome、msedge、firefox · 发送快捷键 · RightCtrl+Tab",
       "detail_color": "TEXT_DIM",
       "text": "侧键加下滚：下一标签 发送快捷键 · rightctrl+tab 发送快捷键 侧键 1 滚轮 仅 chrome、msedge、firefox 仅 chrome、msedge、firefox",
+      "chord": [
+        "侧键 1",
+        "滚轮"
+      ],
       "prefix": "侧键 1",
       "facets": {
         "input": "滚轮",
@@ -1177,6 +1208,10 @@
       "detail": "指针窗口：仅 chrome、msedge、firefox · 仅 chrome、msedge、firefox · 发送快捷键 · RightCtrl+W",
       "detail_color": "TEXT_DIM",
       "text": "侧键加右键：关闭标签 发送快捷键 · rightctrl+w 发送快捷键 侧键 1 右键 仅 chrome、msedge、firefox 仅 chrome、msedge、firefox",
+      "chord": [
+        "侧键 1",
+        "右键"
+      ],
       "prefix": "侧键 1",
       "facets": {
         "input": "鼠标按键",
@@ -1219,6 +1254,9 @@
       "detail": "亮度增加 5%",
       "detail_color": "TEXT_DIM",
       "text": "左边缘上滚增加所在屏幕亮度 亮度增加 5% 系统调节 左侧边缘 滚轮 左侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "chord": [
+        "滚轮"
+      ],
       "prefix": "左侧边缘",
       "facets": {
         "input": "屏幕区域",
@@ -1261,6 +1299,9 @@
       "detail": "亮度减少 5%",
       "detail_color": "TEXT_DIM",
       "text": "左边缘下滚减少所在屏幕亮度 亮度减少 5% 系统调节 左侧边缘 滚轮 左侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "chord": [
+        "滚轮"
+      ],
       "prefix": "左侧边缘",
       "facets": {
         "input": "屏幕区域",
@@ -1303,6 +1344,9 @@
       "detail": "亮度增加 5%",
       "detail_color": "TEXT_DIM",
       "text": "右边缘上滚增加所在屏幕亮度 亮度增加 5% 系统调节 右侧边缘 滚轮 右侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "chord": [
+        "滚轮"
+      ],
       "prefix": "右侧边缘",
       "facets": {
         "input": "屏幕区域",
@@ -1345,6 +1389,9 @@
       "detail": "亮度减少 5%",
       "detail_color": "TEXT_DIM",
       "text": "右边缘下滚减少所在屏幕亮度 亮度减少 5% 系统调节 右侧边缘 滚轮 右侧边缘 8px（上端缩进 8px，下端缩进 0px）",
+      "chord": [
+        "滚轮"
+      ],
       "prefix": "右侧边缘",
       "facets": {
         "input": "屏幕区域",
@@ -1387,6 +1434,9 @@
       "detail": "发送快捷键 · VolumeUp",
       "detail_color": "TEXT_DIM",
       "text": "上边缘上滚增加音量 发送快捷键 · volumeup 发送快捷键 顶部边缘 滚轮 顶部边缘 8px",
+      "chord": [
+        "滚轮"
+      ],
       "prefix": "顶部边缘",
       "facets": {
         "input": "屏幕区域",
@@ -1429,6 +1479,9 @@
       "detail": "发送快捷键 · VolumeDown",
       "detail_color": "TEXT_DIM",
       "text": "上边缘下滚减少音量 发送快捷键 · volumedown 发送快捷键 顶部边缘 滚轮 顶部边缘 8px",
+      "chord": [
+        "滚轮"
+      ],
       "prefix": "顶部边缘",
       "facets": {
         "input": "屏幕区域",
@@ -1478,6 +1531,11 @@
       "detail": "本地动作 · 1 步",
       "detail_color": "TEXT_DIM",
       "text": "输入字面文本 本地动作 · 1 步 本地动作 左 ctrl 左 alt f13",
+      "chord": [
+        "左 ctrl",
+        "左 alt",
+        "f13"
+      ],
       "prefix": "左 Ctrl + 左 Alt",
       "facets": {
         "input": "键盘",
@@ -1519,6 +1577,10 @@
       "detail": "窗口上下文：仅 explorer · 仅提示",
       "detail_color": "TEXT_DIM",
       "text": "文件窗口中的 ctrl+f9 仅提示 仅提示 左 ctrl f9 窗口上下文：仅 explorer",
+      "chord": [
+        "左 ctrl",
+        "f9"
+      ],
       "prefix": "左 Ctrl",
       "facets": {
         "input": "键盘",
@@ -1561,6 +1623,10 @@
       "detail": "窗口上下文：仅 desktop · 仅提示",
       "detail_color": "TEXT_DIM",
       "text": "桌面中的 ctrl+f9 仅提示 仅提示 左 ctrl f9 窗口上下文：仅 desktop",
+      "chord": [
+        "左 ctrl",
+        "f9"
+      ],
       "prefix": "左 Ctrl",
       "facets": {
         "input": "键盘",
@@ -1603,6 +1669,10 @@
       "detail": "窗口上下文：仅 taskbar · 仅提示",
       "detail_color": "TEXT_DIM",
       "text": "任务栏中的 ctrl+f9 仅提示 仅提示 左 ctrl f9 窗口上下文：仅 taskbar",
+      "chord": [
+        "左 ctrl",
+        "f9"
+      ],
       "prefix": "左 Ctrl",
       "facets": {
         "input": "键盘",
@@ -1645,6 +1715,10 @@
       "detail": "保留原功能层 按住重复 · 仅提示",
       "detail_color": "TEXT_DIM",
       "text": "空格保留原功能层的 k 仅提示 仅提示 space k",
+      "chord": [
+        "space",
+        "k"
+      ],
       "prefix": "Space",
       "facets": {
         "input": "键盘",
@@ -1694,6 +1768,11 @@
       "detail": "保留原功能层 按住重复 · 仅提示",
       "detail_color": "TEXT_DIM",
       "text": "空格与 g 捕获后按 k 仅提示 仅提示 space g k",
+      "chord": [
+        "space",
+        "g",
+        "k"
+      ],
       "prefix": "Space + G",
       "facets": {
         "input": "键盘",
@@ -1737,6 +1816,10 @@
       "detail": "保留原功能层 · 仅提示",
       "detail_color": "TEXT_DIM",
       "text": "空格与鼠标侧键 仅提示 仅提示 space 侧键 2",
+      "chord": [
+        "space",
+        "侧键 2"
+      ],
       "prefix": "Space",
       "facets": {
         "input": "鼠标按键",
@@ -1779,6 +1862,10 @@
       "detail": "仅提示",
       "detail_color": "TEXT_DIM",
       "text": "侧键加上滚：每个非零事件执行一次 仅提示 仅提示 侧键 1 滚轮",
+      "chord": [
+        "侧键 1",
+        "滚轮"
+      ],
       "prefix": "侧键 1",
       "facets": {
         "input": "滚轮",
@@ -1821,6 +1908,10 @@
       "detail": "指针窗口：仅 notepad · 仅提示",
       "detail_color": "TEXT_DIM",
       "text": "指针在记事本内：侧键加上滚 仅提示 仅提示 侧键 1 滚轮 仅 notepad",
+      "chord": [
+        "侧键 1",
+        "滚轮"
+      ],
       "prefix": "侧键 1",
       "facets": {
         "input": "滚轮",

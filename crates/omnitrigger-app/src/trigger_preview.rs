@@ -100,6 +100,7 @@ fn row(binding: &Binding) -> Value {
         "detail": detail,
         "detail_color": token_name(detail_color),
         "text": summary.text,
+        "chord": summary.chord,
         "prefix": summary.prefix,
         "facets": {
             "input": summary.input.label(),
@@ -218,7 +219,8 @@ mod tests {
         let mut bound = view.bound.clone();
         bound.sort_unstable();
         assert_eq!(exported, bound);
-        let capslock = rows.iter().find(|row| row["prefix"] == "CapsLock").unwrap();
+        let capslock = rows.iter().find(|row| row["id"] == 1).unwrap();
+        assert_eq!(capslock["chord"], json!(["capslock", "o"]));
         assert_eq!(capslock["held_slots"], json!([0x14]));
         assert!(value["icons"][rows[0]["icon"].as_str().unwrap()].is_string());
         assert!(value["tokens"]["dark"]["ACCENT"].is_string());

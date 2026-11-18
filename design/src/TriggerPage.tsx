@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   browse,
   facetCount,
-  tokens,
+  normalizeQuery,
   visible,
   DISABLED,
   type FacetKey,
@@ -29,10 +29,10 @@ export function TriggerPage({ initialView = "list" }: { initialView?: View }) {
   const [view, setView] = useState<View>(initialView);
   const [selected, setSelected] = useState<number | null>(preview.rows[0]?.id ?? null);
 
-  const words = tokens(query);
-  const groups = browse(rows, words, filter, groupBy);
+  const search = normalizeQuery(query);
+  const groups = browse(rows, search, filter, groupBy);
   const shown = groups.reduce((sum, group) => sum + group.rows.length, 0);
-  const shownRows = visible(rows, words, filter);
+  const shownRows = visible(rows, search, filter);
   const grouped = groupBy !== "none";
   const toggle = (id: number) =>
     setRows((current) =>
@@ -113,7 +113,7 @@ export function TriggerPage({ initialView = "list" }: { initialView?: View }) {
       </div>
       <Toolbar
         rows={rows}
-        words={words}
+        search={search}
         query={query}
         setQuery={setQuery}
         filter={filter}
@@ -191,7 +191,7 @@ export function TriggerPage({ initialView = "list" }: { initialView?: View }) {
 
 interface ToolbarProps {
   rows: Row[];
-  words: string[];
+  search: string;
   query: string;
   setQuery: (query: string) => void;
   filter: Filter;
@@ -207,7 +207,7 @@ interface ToolbarProps {
 
 function Toolbar(props: ToolbarProps) {
   const preview = usePreview();
-  const { rows, words, filter, setFilter, menu, setMenu } = props;
+  const { rows, search, filter, setFilter, menu, setMenu } = props;
   const enabled = rows.filter((row) => row.facets.status !== DISABLED).length;
   const [focused, setFocused] = useState(false);
   return (
@@ -249,7 +249,7 @@ function Toolbar(props: ToolbarProps) {
           const current = filter[facet.key];
           const options: Option[] = [{ label: "全部", count: null, selected: current === undefined, pick: () => setFilter({ ...filter, [facet.key]: undefined }) }];
           for (const value of facet.options) {
-            const count = facetCount(rows, words, filter, facet.key, value);
+            const count = facetCount(rows, search, filter, facet.key, value);
             if (count > 0 || current === value) {
               options.push({ label: value, count, selected: current === value, pick: () => setFilter({ ...filter, [facet.key]: value }) });
             }
@@ -266,7 +266,7 @@ function Toolbar(props: ToolbarProps) {
             />
           );
         })}
-        {(words.length > 0 || Object.values(filter).some((value) => value !== undefined)) && (
+        {(search.length > 0 || Object.values(filter).some((value) => value !== undefined)) && (
           <div
             className="hover-text"
             onClick={() => {
