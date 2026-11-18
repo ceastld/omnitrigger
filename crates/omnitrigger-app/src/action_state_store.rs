@@ -26,6 +26,16 @@ struct Document {
     values: BTreeMap<String, Value>,
 }
 
+impl Document {
+    fn decode(bytes: &[u8]) -> Result<Self> {
+        let doc: Self = serde_json::from_slice(bytes).map_err(|_| StateStorageError::Corrupt)?;
+        if doc.schema_version != 1 || doc.revision == 0 || !valid_state_values(&doc.values) {
+            return Err(StateStorageError::Corrupt);
+        }
+        Ok(doc)
+    }
+}
+
 pub struct FileActionStateStorage {
     root: PathBuf,
     #[cfg(test)]
@@ -84,15 +94,18 @@ impl FileActionStateStorage {
             fail_before_replace: std::sync::atomic::AtomicBool::new(false),
         })
     }
-    fn path(&self, scope: &ActionStateScope) -> Result<PathBuf> {
+    fn document_name(scope: &ActionStateScope) -> Result<String> {
         if !valid_id(&scope.package_id) || !valid_id(&scope.action_id) {
             return Err(StateStorageError::Unavailable);
         }
         let identity = serde_json::to_vec(scope).map_err(|_| StateStorageError::Unavailable)?;
         // 用户key不参与路径；文档内也复核真实scope，不能仅依赖文件名hash。
-        Ok(self.root.join(format!("{}.json", digest(&identity))))
+        Ok(format!("{}.json", digest(&identity)))
     }
-    fn bytes(&self, path: &Path) -> Result<Option<Vec<u8>>> {
+    fn path(&self, scope: &ActionStateScope) -> Result<PathBuf> {
+        Ok(self.root.join(Self::document_name(scope)?))
+    }
+    fn bytes(path: &Path) -> Result<Option<Vec<u8>>> {
         local(path)?;
         let file = match File::open(path) {
             Ok(file) => file,
@@ -114,6 +127,31 @@ impl FileActionStateStorage {
             return Err(StateStorageError::Corrupt);
         }
         Ok(Some(bytes))
+    }
+
+    /// 只把已经验证过的原始字节写进待发布的配置档，避免再次打开可能已被替换的来源。
+    pub(super) fn restore_document(source: &Path, destination_dir: &Path) -> std::io::Result<()> {
+        let invalid = |reason: &str| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("无法还原动作状态文档 {}：{reason}", source.display()),
+            )
+        };
+        let bytes = Self::bytes(source)
+            .map_err(|error| match error {
+                StateStorageError::Corrupt => invalid("文件类型或大小超出支持范围"),
+                _ => invalid("无法读取本机文件"),
+            })?
+            .ok_or_else(|| invalid("文件已不存在"))?;
+        let doc = Document::decode(&bytes).map_err(|_| invalid("内容损坏或版本不受支持"))?;
+        let name = Self::document_name(&doc.scope).map_err(|_| invalid("动作标识无效"))?;
+        if !source
+            .file_name()
+            .is_some_and(|file| file.eq_ignore_ascii_case(&name))
+        {
+            return Err(invalid("文件名与记录的动作标识不符"));
+        }
+        File::create_new(destination_dir.join(name))?.write_all(&bytes)
     }
     fn version(bytes: Option<&[u8]>) -> String {
         bytes.map_or_else(|| "missing".into(), digest)
@@ -164,16 +202,11 @@ impl FileActionStateStorage {
 impl DurableStateStorage for FileActionStateStorage {
     fn load(&self, scope: &ActionStateScope) -> Result<DurableStateSnapshot> {
         let path = self.path(scope)?;
-        let bytes = self.bytes(&path)?;
+        let bytes = Self::bytes(&path)?;
         let values = match bytes.as_deref() {
             Some(bytes) => {
-                let doc: Document =
-                    serde_json::from_slice(bytes).map_err(|_| StateStorageError::Corrupt)?;
-                if doc.schema_version != 1
-                    || doc.revision == 0
-                    || &doc.scope != scope
-                    || !valid_state_values(&doc.values)
-                {
+                let doc = Document::decode(bytes)?;
+                if &doc.scope != scope {
                     return Err(StateStorageError::Corrupt);
                 }
                 doc.values
@@ -213,19 +246,14 @@ impl DurableStateStorage for FileActionStateStorage {
             TryLockError::WouldBlock => StateStorageError::Busy,
             _ => StateStorageError::Io,
         })?;
-        let current = self.bytes(&path)?;
+        let current = Self::bytes(&path)?;
         if Self::version(current.as_deref()) != expected_version {
             return Err(StateStorageError::Changed);
         }
         let revision = match current.as_deref() {
             Some(bytes) => {
-                let previous: Document =
-                    serde_json::from_slice(bytes).map_err(|_| StateStorageError::Corrupt)?;
-                if previous.schema_version != 1
-                    || previous.revision == 0
-                    || previous.scope != *scope
-                    || !valid_state_values(&previous.values)
-                {
+                let previous = Document::decode(bytes)?;
+                if previous.scope != *scope {
                     return Err(StateStorageError::Corrupt);
                 }
                 previous

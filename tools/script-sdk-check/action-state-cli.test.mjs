@@ -123,6 +123,30 @@ test('显式CLI状态：独立进程durable计数1→2，默认无存储，非�
   assert.deepEqual(readFileSync(stored), secondBytes);
   const restoredDocument = join(restoredState, documents[0]);
   const beforeFailedReset = readFileSync(restoredDocument);
+  const catalog = join(root, 'profiles.json');
+  const beforeCatalog = readFileSync(catalog);
+  const original = JSON.parse(beforeRestore);
+  const wrongAction = {...original, scope: {...original.scope, action_id: 'other-action'}};
+  for (const damaged of [
+    Buffer.from('{"schema_version":'),
+    Buffer.from(JSON.stringify({...original, revision: 0})),
+    Buffer.from(JSON.stringify(wrongAction)),
+    Buffer.concat([beforeRestore, Buffer.alloc(300 * 1024, 0x20)]),
+  ]) {
+    writeFileSync(backupState, damaged);
+    const failure = cli(['--profile-reset', 'restored-counter'], 1, dataRoot);
+    assert.match(failure.error.message, /动作状态文档/);
+    assert(failure.error.message.includes(documents[0]));
+    assert.deepEqual(readFileSync(restoredDocument), beforeFailedReset);
+    assert.deepEqual(readFileSync(backupState), damaged);
+  }
+  const failedCreate = cli(['--profile-create', 'retry-restore', '--seed', 'fixture:' + reset.backup], 1, dataRoot);
+  assert.match(failedCreate.error.message, /动作状态文档/);
+  assert.deepEqual(readFileSync(catalog), beforeCatalog);
+  assert.deepEqual(readFileSync(stored), secondBytes);
+  writeFileSync(backupState, beforeRestore);
+  const retry = cli(['--profile-create', 'retry-restore', '--seed', 'fixture:' + reset.backup], 0, dataRoot);
+  assert.deepEqual(readFileSync(join(retry.directory, 'action-state', documents[0])), beforeRestore);
   mkdirSync(join(reset.backup, 'action-state', 'f'.repeat(64) + '.json'));
   const rejected = cli(['--profile-reset', 'restored-counter'], 1, dataRoot);
   assert.match(rejected.error.message, /动作状态文档/);

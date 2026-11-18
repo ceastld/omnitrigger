@@ -1054,7 +1054,7 @@ fn copy_fixture_action_state(from: &Path, to: &Path) -> std::io::Result<()> {
                 path.display()
             )));
         }
-        DataCopy::FixtureOrImport.copy_file(&path, &destination.join(item.file_name()))?;
+        crate::action_state_store::FileActionStateStorage::restore_document(&path, &destination)?;
     }
     Ok(())
 }
