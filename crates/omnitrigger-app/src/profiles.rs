@@ -1024,6 +1024,41 @@ fn copy_action_tree(from: &Path, to: &Path, mode: DataCopy, top: bool) -> std::i
     Ok(())
 }
 
+/// 显式使用旧档或重置备份作夹具时，恢复每个动作独立提交的状态文档。
+fn copy_fixture_action_state(from: &Path, to: &Path) -> std::io::Result<()> {
+    let source = from.join("action-state");
+    if !reset_recovery::directory_present(&source)? {
+        return Ok(());
+    }
+    let destination = to.join("action-state");
+    std::fs::create_dir(&destination)?;
+    for item in std::fs::read_dir(source)? {
+        let item = item?;
+        let path = item.path();
+        let document = path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            && path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| {
+                    stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
+                });
+        if !document {
+            continue;
+        }
+        let metadata = path.symlink_metadata()?;
+        if !metadata.is_file() || !crate::local_files::is_plain(&metadata) {
+            return Err(std::io::Error::other(format!(
+                "动作状态文档须为普通本机文件：{}",
+                path.display()
+            )));
+        }
+        DataCopy::FixtureOrImport.copy_file(&path, &destination.join(item.file_name()))?;
+    }
+    Ok(())
+}
+
 /// 复制配置档的顶层数据、托管动作包与 RaiShot 自定义动作清单。
 fn copy_data(from: &Path, to: &Path, mode: DataCopy) -> Result<usize, String> {
     let fail = |error: std::io::Error| {
@@ -1181,7 +1216,9 @@ fn seed_into(
             if !path.is_dir() {
                 return Err(format!("夹具目录 {} 不存在。", path.display()));
             }
-            copy_transferable_data(path, target, DataCopy::FixtureOrImport)
+            copy_transferable_data(path, target, DataCopy::FixtureOrImport)?;
+            copy_fixture_action_state(path, target)
+                .map_err(|error| format!("从 {} 恢复扩展的持久状态失败：{error}", path.display()))
         }
         Seed::Copy(key) | Seed::Backup { source: key, .. } => {
             #[cfg(windows)]

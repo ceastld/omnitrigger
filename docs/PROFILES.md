@@ -28,6 +28,8 @@ Windows 短暂占用测试档目录时，创建、重置和中断恢复会在同
 
 旧版留下的完整测试档目录若未列入登记，可用 `--profile-create <新别名> --seed fixture:<旧目录>` 将其复制为新档。如果已有配置档提示缺少 `profile.json`，可从备份恢复该身份文件。若提示指向未完成的新副本，可将该目录完整移到 `profiles` 之外，再用原入口重试。
 
+从重置备份恢复扩展自己的设置时，把重置命令返回的 `backup` 目录用作 `fixture:` 来源。新档会带回 `action-state` 中已保存的动作状态，再次运行动作会从备份的值继续。用 `copy:default` 创建日常测试副本时，扩展状态从空白开始。
+
 - 已实现：数据根解析（`--data-root`、`OMNITRIGGER_HOME`、默认目录）、打包重定向检测与脱离重启、持久测试配置档（`--profile`、`--profile-create`、`--profile-reset`、`--profile-list`，种子 `empty`、`fixture:`、`copy:`、`backup:`）、测试配置档默认不安装 Hook 与 `--listen`、窗口标题和侧栏的测试数据标识、启动时发现更新的外部副本并询问导入。
 - 默认配置档就是数据根本身，文件仍在 `%LOCALAPPDATA%\OmniTrigger` 原位。热键和轮盘编辑器已支持保存前备份，日常设置可以列出并打开已登记的测试档。`examples` 种子、运行中切换和账号关联尚未实现。
 - `--config` 保持原有行为（照常安装 Hook），不能与配置档参数同用。

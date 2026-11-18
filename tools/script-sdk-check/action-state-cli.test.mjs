@@ -108,6 +108,25 @@ test('显式CLI状态：独立进程durable计数1→2，默认无存储，非�
   assert.deepEqual(inCopy.output,{status:'committed',count:1});
   assert(existsSync(join(copy.directory,'action-state',documents[0])));
   assert.deepEqual(readFileSync(stored),secondBytes);
+
+  const dataRoot = ['--data-root', root];
+  const reset = cli(['--profile-reset', 'counter-copy'], 0, dataRoot);
+  const backupState = join(reset.backup, 'action-state', documents[0]);
+  const beforeRestore = readFileSync(backupState);
+  const restored = cli(['--profile-create', 'restored-counter', '--seed', 'fixture:' + reset.backup], 0, dataRoot);
+  const restoredState = join(restored.directory, 'action-state');
+  assert.deepEqual(readdirSync(restoredState), documents, '仅恢复已提交的状态文档');
+  assert.deepEqual(readFileSync(join(restoredState, documents[0])), beforeRestore);
+  const next = cli(['--run-action', callPath, '--with-action-state'], 0, [...dataRoot, '--profile', 'restored-counter']);
+  assert.deepEqual(next.output, {status: 'committed', count: 2});
+  assert.deepEqual(readFileSync(backupState), beforeRestore);
+  assert.deepEqual(readFileSync(stored), secondBytes);
+  const restoredDocument = join(restoredState, documents[0]);
+  const beforeFailedReset = readFileSync(restoredDocument);
+  mkdirSync(join(reset.backup, 'action-state', 'f'.repeat(64) + '.json'));
+  const rejected = cli(['--profile-reset', 'restored-counter'], 1, dataRoot);
+  assert.match(rejected.error.message, /动作状态文档/);
+  assert.deepEqual(readFileSync(restoredDocument), beforeFailedReset);
   writeFileSync(join(root,'result.json'),JSON.stringify({passed:true,application,root,
     durableCounts:[first.output.count,second.output.count],invocationPids:[firstPid,secondPid],separateCompletedCliProcesses:true,
     defaultStateUnavailable:true,invalidCombinations:invalid.length,invocations},null,2)+'\n',{flag:'wx'});
