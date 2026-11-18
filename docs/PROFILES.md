@@ -219,6 +219,17 @@ Windows 上，从只读文件创建或重置测试档后，可以直接编辑副
 
 ## 备份与恢复
 
+重装前，如果已将数据根的内容保存为 ZIP，可在仓库根目录用 Python 核对备份是否跟得上最近的编辑。ZIP 顶层应直接包含配置文件。将下面的 `$archive` 换成实际文件路径。
+
+```powershell
+$app = Join-Path $env:LOCALAPPDATA 'Programs\OmniTrigger\omnitrigger.exe'
+$root = Join-Path $env:LOCALAPPDATA 'OmniTrigger'
+$archive = 'D:\Backups\OmniTrigger-config.zip'
+python scripts/compare_profile_backup.py --app $app --data-root $root --archive $archive
+```
+
+这条命令读取日常档和测试档的登记、身份、热键、轮盘、外观、插件登记、RaiShot 清单及 `actions/` 内已安装的动作文件。它按相对路径和文件内容比对，返回 `0` 表示这些文件一致，`1` 会列出 ZIP 缺少、多出或内容有变化的路径，`2` 表示读取失败或比对期间配置发生改变。剪贴板内容、历史版本和运行时程序不在比对范围内。
+
 在安装版中保存对已有热键或轮盘的修改时，程序会先把即将覆盖的原文件保存在当前本机配置档中。打开“设置 → 查看配置备份”，选择 `bindings.json` 或 `wheels.json` 文件夹。编号越大的 JSON 文件保存得越晚，资源管理器的修改日期可用来查找版本。每个文件分别保留最近 20 份，以及最近 30 个 UTC 自然日中每天最后一份。相同的原文在保存重试时只留一份。
 
 在当前档的“设置 → 从备份新建测试副本”里，分别选择热键和轮盘的版本。只恢复其中一项时，另一项保留“当前配置”。点击“校验并新建测试副本”，通过格式、场景和轮盘引用检查后才创建副本。窗口中会显示新档别名，点击“打开这个测试副本”即可核对布局。测试副本使用所选版本的原文件和来源档当前的动作包，拥有独立的编辑历史与剪贴板历史。
