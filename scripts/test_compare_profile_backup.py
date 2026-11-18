@@ -62,6 +62,15 @@ class ProfileBackupTest(unittest.TestCase):
                        "actions/.install-legacy-1-2-3/staged.js": b"partial"})
         self.assertTrue(self.compare()["matches"])
 
+    def test_retired_profile_origin_is_distinct_from_local_backups(self):
+        self.save_live("bindings.json", b"[]")
+        origin = "profiles/tabcdef012345.copy-origin.json"
+        self.save_zip({"bindings.json": b"[]", origin: b'"custom"',
+                       "backups/seed-source.json": b"unrelated",
+                       "profiles/other.copy-origin.json": b"unrelated",
+                       "profiles/t0123456789ab/backups/profile-reset/seed-source.json": b"old"})
+        self.assertEqual(self.compare()["only_in_backup"], [origin])
+
     def test_rejects_ambiguous_zip_and_empty_comparison(self):
         self.save_zip({"bindings.json": b"one", "Bindings.json": b"two"})
         with self.assertRaisesRegex(ValueError, "重复"):
@@ -90,23 +99,43 @@ class ProfileBackupTest(unittest.TestCase):
         app = os.environ["OMNITRIGGER_BACKUP_CHECK_APP"]
         self.root = self.root / "isolated"
         self.root.mkdir()
-        output = subprocess.run(
-            [app, "--data-root", str(self.root), "--profile-create", "backup-test", "--seed", "empty"],
-            capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        self.assertEqual(output.returncode, 0, output.stderr)
-        directories = backup.profile_dirs(app, self.root)
-        self.assertEqual(len(directories), 2)
-        entries = backup.live_files(self.root, directories).values()
-        files = {name: (self.root / name).read_bytes() for name, _ in entries}
+
+        def create(alias, seed, *args):
+            output = subprocess.run(
+                [app, "--data-root", str(self.root), "--profile-create", alias, "--seed", seed, *args],
+                capture_output=True, timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            self.assertEqual(output.returncode, 0, output.stderr)
+            return "profiles/" + json.loads(output.stdout)["id"]
+
+        bindings = b'{"version":1,"bindings":[]}'
+        self.save_live("bindings.json", bindings)
+        source = create("daily-copy", "copy:default", "--name", "日常配置副本")
+        self.save_live(source + "/backups/edits/bindings.json/edit-0000000000000001.json", bindings)
+        restored = create("from-history", "backup:daily-copy:1:current")
+        files = {path.relative_to(self.root).as_posix(): path.read_bytes()
+                 for path in self.root.rglob("*") if path.is_file() and path.suffix == ".json"}
         args = ["--app", app, "--data-root", str(self.root), "--archive", str(self.zip_path)]
         self.save_zip(files)
         with contextlib.redirect_stdout(io.StringIO()) as log:
             self.assertEqual(backup.main(args), 0)
-            self.assertTrue(json.loads(log.getvalue())["matches"])
-        self.save_live("wheels.json", b"changed after backup")
-        with contextlib.redirect_stdout(io.StringIO()):
+            result = json.loads(log.getvalue())
+            self.assertTrue(result["matches"])
+            self.assertEqual(result["checked_profiles"], 3)
+        origin = source + ".copy-origin.json"
+        seed = restored + "/backups/seed-source.json"
+        revisions = restored + "/backups/restored-revisions.json"
+        self.assertEqual(json.loads(files.pop(origin)), "custom")
+        self.assertIn(seed, files)
+        self.assertIn(revisions, files)
+        files.pop(seed)
+        files[revisions] = b"{}"
+        self.save_zip(files)
+        with contextlib.redirect_stdout(io.StringIO()) as log:
             self.assertEqual(backup.main(args), 1)
+            result = json.loads(log.getvalue())
+            self.assertCountEqual(result["missing_from_backup"], [origin, seed])
+            self.assertEqual(result["changed"], [revisions])
         self.zip_path.write_bytes(b"invalid zip")
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(backup.main(args), 2)

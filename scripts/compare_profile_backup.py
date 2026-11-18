@@ -18,6 +18,8 @@ CONFIG_FILES = (
     "profiles.json", "profile.json", "bindings.json", "wheels.json",
     "appearance.json", "plugins.json", "plugins/raishot/manifest.json",
 )
+COPY_ORIGIN = ".copy-origin.json"
+PROFILE_RECORDS = ("backups/seed-source.json", "backups/restored-revisions.json")
 STAGE = re.compile(r"\.install-legacy-(?:upgrade-)?[0-9]+-[0-9]+-[0-9]+", re.I)
 PROFILE_ID = re.compile(r"t[0-9a-f]{12}")
 
@@ -74,8 +76,12 @@ def live_files(root, directories):
         files[key] = (name, stamp(meta))
 
     for directory in directories:
-        for name in CONFIG_FILES:
-            path = guard(directory / name, missing=True)
+        paths = [directory / name for name in CONFIG_FILES]
+        if directory != root:
+            paths.append(directory.with_suffix(COPY_ORIGIN))
+            paths.extend(directory / name for name in PROFILE_RECORDS)
+        for path in paths:
+            path = guard(path, missing=True)
             if path.exists():
                 add(path)
         actions = guard(directory / "actions", missing=True)
@@ -92,6 +98,23 @@ def live_files(root, directories):
     return files
 
 
+def in_scope(parts, current_ids):
+    if parts[0] == "profiles" and len(parts) >= 2:
+        profile_id = parts[1]
+        if len(parts) == 2:
+            if not profile_id.endswith(COPY_ORIGIN):
+                return False
+            profile_id = profile_id.removesuffix(COPY_ORIGIN)
+        if profile_id not in current_ids and not PROFILE_ID.fullmatch(profile_id):
+            return False
+        parts = parts[2:]
+        if not parts or "/".join(parts) in PROFILE_RECORDS:
+            return True
+    if len(parts) >= 2 and parts[0] == "actions":
+        return not STAGE.fullmatch(parts[1])
+    return "/".join(parts) in CONFIG_FILES
+
+
 def archived_files(archive, root, directories):
     current_ids = {folder.name.casefold() for folder in directories if folder != root}
     files = {}
@@ -103,14 +126,7 @@ def archived_files(archive, root, directories):
         parts = key.split("/")
         if any(part in ("", ".", "..") or ":" in part for part in parts):
             raise ValueError(f"ZIP 内的路径无效：{name}")
-        if len(parts) >= 3 and parts[0] == "profiles":
-            if parts[1] not in current_ids and not PROFILE_ID.fullmatch(parts[1]):
-                continue
-            rel = parts[2:]
-        else:
-            rel = parts
-        action = len(rel) >= 2 and rel[0] == "actions" and not STAGE.fullmatch(rel[1])
-        if not action and "/".join(rel) not in CONFIG_FILES:
+        if not in_scope(parts, current_ids):
             continue
         if stat.S_IFMT(info.external_attr >> 16) not in (0, stat.S_IFREG):
             raise ValueError(f"ZIP 内的配置须为普通文件：{name}")
