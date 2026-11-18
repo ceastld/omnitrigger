@@ -130,6 +130,32 @@ const dailyAction = manifest.actions.find(item => item.id === 'toggle');
 assert.equal(dailyAction.runtime, 'node');
 assert.equal(dailyAction.single_instance, true);
 const { default: toggle } = await import(pathToFileURL(path.join(packageRoot, dailyAction.entry)));
+{
+  const { ctx } = fixture();
+  const detail = '拒绝访问。 (os error 5)';
+  const denied = { ok: false, state: 'failed', submitted: false, error: { code: 'transport_error', message: detail } };
+  for (const [exitCode, receipt, effect, showHint] of [
+    [6, denied, 'not_started', true],
+    [6, { ...denied, error: { code: 'transport_error', message: 'timeout (os error 50)' } }, 'not_started', false],
+    [6, { ...denied, error: { code: 'remote_error', message: detail } }, 'not_started', false],
+    [6, { ...denied, submitted: true }, 'unknown', false],
+    [6, { ...denied, state: 'partial' }, 'unknown', false],
+    [6, { ...denied, ok: true }, 'unknown', false],
+    [0, denied, 'unknown', false],
+    [null, denied, 'unknown', false],
+  ]) {
+    let calls = 0;
+    ctx.process.run = async () => { calls++; return { code: exitCode, stdout: JSON.stringify(receipt) }; };
+    await assert.rejects(toggle(ctx), error => {
+      assert.equal(error.code, 'clipboard_toggle_failed');
+      assert.equal(error.effectState, effect);
+      assert.ok(error.message.includes(receipt.error.message));
+      assert.equal(error.message.includes('Windows 用户和运行权限'), showHint);
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+}
 function expiredBeforeSubmit(errorCode = 'invalid_arguments') {
   return { code: 2, stdout: JSON.stringify({ ok: false, state: 'failed', submitted: false,
     error: { code: errorCode, message: 'invalid_or_expired_target' } }) };

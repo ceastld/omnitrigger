@@ -15,6 +15,11 @@ function fault(message, effectState) {
   return Object.assign(new Error(message), { code: 'clipboard_toggle_failed', effectState });
 }
 
+function failedBeforeSubmit(code, reply) {
+  return Number.isInteger(code) && code > 0 && reply?.ok === false && reply.state === 'failed' &&
+    reply.submitted === false && typeof reply.error?.code === 'string' && reply.error.code.length > 0;
+}
+
 async function runToggle(ctx, target, testProfile) {
   const { cliExecutable, hostExecutable, dataRoot } = ctx.input;
   // 给不同进程的时钟留出余量，且只缩短宿主签发的有效期。
@@ -42,8 +47,7 @@ export default async function toggle(ctx) {
   const testProfile = profile === 'script-test';
   const original = await ctx.desktop.targetContext();
   let { code, reply } = await runToggle(ctx, original, testProfile);
-  if (code !== 0 && reply?.ok === false && reply.state === 'failed' && reply.submitted === false &&
-      ['invalid_arguments', 'local_error'].includes(reply.error?.code) &&
+  if (failedBeforeSubmit(code, reply) && ['invalid_arguments', 'local_error'].includes(reply.error.code) &&
       reply.error.message === 'invalid_or_expired_target') {
     // targetContext 会重新核验本次按键捕获的窗口，再签发短时快照。
     const fresh = await ctx.desktop.targetContext();
@@ -54,8 +58,13 @@ export default async function toggle(ctx) {
     ({ code, reply } = await runToggle(ctx, fresh, testProfile));
   }
   if (code !== 0 || reply?.ok !== true) {
-    throw fault(reply?.error?.message || '剪贴板未确认切换。',
-      reply?.submitted === false ? 'not_started' : 'unknown');
+    const notSubmitted = failedBeforeSubmit(code, reply);
+    const detail = reply?.error?.message;
+    let message = typeof detail === 'string' && detail.length > 0 ? detail : '剪贴板未确认切换。';
+    if (notSubmitted && reply.error.code === 'transport_error' && /\(os error 5\)\s*$/i.test(message)) {
+      message = `Windows 拒绝连接 EaClip。请核对 EaClip 与 OmniTrigger 的 Windows 用户和运行权限。系统返回 ${message}`;
+    }
+    throw fault(message, notSubmitted ? 'not_started' : 'unknown');
   }
   const result = reply.result;
   if (reply.state !== 'accepted' || result?.targetContextVerified !== true ||
