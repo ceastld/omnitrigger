@@ -63,19 +63,20 @@ def stamp(meta):
     return FileVersion(meta.st_dev, meta.st_ino, meta.st_size, meta.st_mtime_ns)
 
 
-def live_files(root, directories):
+def register_file(root, files, path):
+    meta = guard(path).stat()
+    if not stat.S_ISREG(meta.st_mode):
+        raise ValueError(f"配置或动作文件类型不符：{path}")
+    name = path.relative_to(root).as_posix()
+    key = name.casefold()
+    if key in files:
+        raise ValueError(f"配置含有同名文件：{name}")
+    files[key] = (name, stamp(meta))
+    return key
+
+
+def live_files(root, directories, *, action_directories=None):
     files = {}
-
-    def add(path):
-        meta = guard(path).stat()
-        if not stat.S_ISREG(meta.st_mode):
-            raise ValueError(f"配置或动作文件类型不符：{path}")
-        name = path.relative_to(root).as_posix()
-        key = name.casefold()
-        if key in files:
-            raise ValueError(f"配置含有同名文件：{name}")
-        files[key] = (name, stamp(meta))
-
     for directory in directories:
         paths = [directory / name for name in CONFIG_FILES]
         if directory != root:
@@ -84,23 +85,25 @@ def live_files(root, directories):
         for path in paths:
             path = guard(path, missing=True)
             if path.exists():
-                add(path)
+                register_file(root, files, path)
         state = guard(directory / "action-state", missing=True)
         if state.exists():
             for path in state.iterdir():
                 if STATE_DOCUMENT.fullmatch(path.name):
-                    add(path)
+                    register_file(root, files, path)
         actions = guard(directory / "actions", missing=True)
         pending = [actions] if actions.exists() else []
         while pending:
             folder = guard(pending.pop())
+            if action_directories is not None:
+                action_directories.add(folder.relative_to(root).as_posix())
             for path in folder.iterdir():
                 if folder == actions and STAGE.fullmatch(path.name):
                     continue
                 if guard(path).is_dir():
                     pending.append(path)
                 else:
-                    add(path)
+                    register_file(root, files, path)
     return files
 
 

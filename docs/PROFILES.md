@@ -221,7 +221,15 @@ Windows 上，从只读文件创建或重置测试档后，可以直接编辑副
 
 ## 备份与恢复
 
-重装前，如果已将数据根的内容保存为 ZIP，可在仓库根目录用 Python 核对备份是否跟得上最近的编辑。ZIP 顶层应直接包含配置文件。将下面的 `$archive` 换成实际文件路径。
+重装前，在仓库根目录运行下面的命令，即可为当前 Windows 用户的日常档和已登记的测试档生成一份新 ZIP。命令逐文件回读核对，再把 ZIP 保存到数据根的 `backups` 目录，并输出完整路径。可用 `--output <新文件.zip>` 指定位置，自定义安装或数据目录可传 `--app` 和 `--data-root`。
+
+```powershell
+python scripts/create_profile_backup.py
+```
+
+ZIP 包含下文列出的配置和扩展状态，以及热键、轮盘的编辑历史和各档当前登记的脚本运行时。旧版单文件宿主也可随档保存。运行时包的文件会与登记清单中的摘要核对。剪贴板历史、浏览器连接凭据和单独安装的外部程序留在本机。
+
+要试读备份，可将 ZIP 解压到一个新的本机目录，运行 `omnitrigger.exe --data-root <解压目录> --profile-list`，再用 `omnitrigger.exe --data-root <解压目录> --profile <别名> --check-config` 检查该档。要核对已有 ZIP 是否跟得上最近的编辑，将下面的 `$archive` 换成实际文件路径。
 
 ```powershell
 $app = Join-Path $env:LOCALAPPDATA 'Programs\OmniTrigger\omnitrigger.exe'

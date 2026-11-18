@@ -584,10 +584,10 @@ jobs:
       - name: 验证动作正文快照工具
         run: python -m unittest discover -s scripts -p 'test_snapshot_action_candidates.py' -v
 
-      - name: 验证配置 ZIP 与实际登记档案的比对
+      - name: 验证配置 ZIP 的生成、核对和还原
         run: |
           $env:OMNITRIGGER_BACKUP_CHECK_APP = (Resolve-Path 'target/debug/omnitrigger.exe').Path
-          python -m unittest discover -s scripts -p 'test_compare_profile_backup.py' -v
+          python -m unittest discover -s scripts -p 'test_*profile_backup.py' -v
 
       - name: 验证鼠标快照配置投影
         run: python -m unittest discover -s scripts -p 'test_mouse_snapshot_projection.py' -v
