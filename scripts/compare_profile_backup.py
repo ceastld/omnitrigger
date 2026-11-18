@@ -1,4 +1,4 @@
-"""只读比对配置 ZIP 和本机档案中的热键、轮盘及托管动作文件。"""
+"""只读比对配置 ZIP 和本机档案中的热键、轮盘、托管动作及扩展持久状态。"""
 import argparse
 import hashlib
 import json
@@ -22,6 +22,7 @@ COPY_ORIGIN = ".copy-origin.json"
 PROFILE_RECORDS = ("backups/seed-source.json", "backups/restored-revisions.json")
 STAGE = re.compile(r"\.install-legacy-(?:upgrade-)?[0-9]+-[0-9]+-[0-9]+", re.I)
 PROFILE_ID = re.compile(r"t[0-9a-f]{12}")
+STATE_DOCUMENT = re.compile(r"[0-9a-f]{64}\.json", re.IGNORECASE | re.ASCII)
 
 
 def profile_dirs(app, root):
@@ -84,6 +85,11 @@ def live_files(root, directories):
             path = guard(path, missing=True)
             if path.exists():
                 add(path)
+        state = guard(directory / "action-state", missing=True)
+        if state.exists():
+            for path in state.iterdir():
+                if STATE_DOCUMENT.fullmatch(path.name):
+                    add(path)
         actions = guard(directory / "actions", missing=True)
         pending = [actions] if actions.exists() else []
         while pending:
@@ -98,21 +104,34 @@ def live_files(root, directories):
     return files
 
 
-def in_scope(parts, current_ids):
-    if parts[0] == "profiles" and len(parts) >= 2:
-        profile_id = parts[1]
+def in_scope(parts, current_ids, is_directory):
+    relative = parts
+    if parts[0].casefold() == "profiles" and len(parts) >= 2:
+        profile_id = parts[1].casefold()
         if len(parts) == 2:
             if not profile_id.endswith(COPY_ORIGIN):
                 return False
             profile_id = profile_id.removesuffix(COPY_ORIGIN)
         if profile_id not in current_ids and not PROFILE_ID.fullmatch(profile_id):
             return False
-        parts = parts[2:]
-        if not parts or "/".join(parts) in PROFILE_RECORDS:
-            return True
-    if len(parts) >= 2 and parts[0] == "actions":
-        return not STAGE.fullmatch(parts[1])
-    return "/".join(parts) in CONFIG_FILES
+        relative = parts[2:]
+        if not relative or "/".join(relative).casefold() in PROFILE_RECORDS:
+            return not is_directory
+    if relative[0].casefold() == "action-state":
+        if len(relative) == 1:
+            if not is_directory:
+                raise ValueError(f"ZIP 内的扩展状态目录类型不符：{'/'.join(parts)}")
+            return False
+        if not STATE_DOCUMENT.fullmatch(relative[1]):
+            return False
+        if is_directory or len(relative) != 2:
+            raise ValueError(f"ZIP 内的扩展状态文档须为普通文件：{'/'.join(parts)}")
+        return True
+    if is_directory:
+        return False
+    if len(relative) >= 2 and relative[0].casefold() == "actions":
+        return not STAGE.fullmatch(relative[1])
+    return "/".join(relative).casefold() in CONFIG_FILES
 
 
 def archived_files(archive, root, directories):
@@ -120,14 +139,13 @@ def archived_files(archive, root, directories):
     files = {}
     for info in archive.infolist():
         name = info.filename.replace("\\", "/")
-        if name.endswith("/"):
+        is_directory = name.endswith("/")
+        parts = name.removesuffix("/").split("/")
+        if not is_directory and any(part in ("", ".", "..") or ":" in part for part in parts):
+            raise ValueError(f"ZIP 内的路径无效：{name}")
+        if not in_scope(parts, current_ids, is_directory):
             continue
         key = name.casefold()
-        parts = key.split("/")
-        if any(part in ("", ".", "..") or ":" in part for part in parts):
-            raise ValueError(f"ZIP 内的路径无效：{name}")
-        if not in_scope(parts, current_ids):
-            continue
         if stat.S_IFMT(info.external_attr >> 16) not in (0, stat.S_IFREG):
             raise ValueError(f"ZIP 内的配置须为普通文件：{name}")
         if key in files:

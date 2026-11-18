@@ -71,6 +71,40 @@ class ProfileBackupTest(unittest.TestCase):
                        "profiles/t0123456789ab/backups/profile-reset/seed-source.json": b"old"})
         self.assertEqual(self.compare()["only_in_backup"], [origin])
 
+    def test_state_documents_are_compared_per_profile(self):
+        document = "a" * 64 + ".json"
+        daily = "action-state/" + document
+        trial = self.test_dir.relative_to(self.root).as_posix() + "/" + daily
+        retired = "profiles/tabcdef012345/" + daily
+        self.save_live(daily, b'{"count":1}')
+        self.save_live(trial, b'{"count":2}')
+        self.save_live(daily + ".23.0.tmp", b"staging")
+        self.save_live(daily.removesuffix(".json") + ".lock", b"")
+        self.save_live("action-state/scratch/" + document, b"old")
+        self.save_zip({daily.upper(): b'{"count":1}', trial: b'{"count":2}',
+                       daily.replace(".json", ".jſon"): b"unrelated",
+                       "action-state/notes.json": b"notes", "action-state/": b""})
+        self.assertTrue(self.compare()["matches"])
+        self.save_zip({trial: b'{"count":1}', retired: b'{"count":5}'})
+        result = self.compare()
+        self.assertFalse(result["matches"])
+        self.assertEqual(result["missing_from_backup"], [daily])
+        self.assertEqual(result["changed"], [trial])
+        self.assertEqual(result["only_in_backup"], [retired])
+
+    def test_state_document_cannot_be_a_directory(self):
+        doc = self.test_dir.relative_to(self.root).as_posix() + "/action-state/" + "a" * 64 + ".json"
+        self.save_live("bindings.json", b"[]")
+        for entry in (doc + "/", doc + "/child", doc.rsplit("/", 1)[0]):
+            with self.subTest(entry=entry):
+                self.save_zip({"bindings.json": b"[]", entry: b""})
+                with self.assertRaisesRegex(ValueError, "扩展状态"):
+                    self.compare()
+        (self.root / doc).mkdir(parents=True)
+        self.save_zip({"bindings.json": b"[]"})
+        with self.assertRaisesRegex(ValueError, "文件类型不符"):
+            self.compare()
+
     def test_rejects_ambiguous_zip_and_empty_comparison(self):
         self.save_zip({"bindings.json": b"one", "Bindings.json": b"two"})
         with self.assertRaisesRegex(ValueError, "重复"):
