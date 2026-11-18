@@ -352,7 +352,11 @@ pub(super) fn recorded_import(root: &Path) -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
-pub(super) fn import(root: &Path, source: &Path) -> Result<(), String> {
+pub(super) fn import_offered_copy(
+    root: &Path,
+    source: &Path,
+    offered_digest: Option<[u8; 32]>,
+) -> Result<(), String> {
     if !is_plain_directory(source) || !is_plain_directory(root) {
         return Err("导入需要普通本机配置目录。".into());
     }
@@ -392,6 +396,15 @@ pub(super) fn import(root: &Path, source: &Path) -> Result<(), String> {
         fs::rename(&snapshot, &backup_dir)?;
         copy_transferable_data(source, &staged, DataCopy::FixtureOrImport)
             .map_err(io::Error::other)?;
+        // 此处仍保留来源的目录名，后续按动作包 ID 对齐目录只影响本机的导入目标。
+        let expected = offered_digest.ok_or_else(|| {
+            io::Error::other("提示时无法完整读取副本，请确认来源可读后重新打开日常窗口。")
+        })?;
+        if copy_digest(&staged)? != expected {
+            return Err(io::Error::other(
+                "外部副本在提示后已有变化，请重新打开日常窗口，核对最新副本后再导入。",
+            ));
+        }
         let available_packages = packages::align(&pending, &backup_dir, root)?;
         collect(&staged, root, Path::new(""), &mut plan)?;
         validate(&plan)?;
@@ -438,6 +451,10 @@ pub(super) fn import(root: &Path, source: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::os::windows::fs::OpenOptionsExt;
+
+    fn import(root: &Path, source: &Path) -> Result<(), String> {
+        import_offered_copy(root, source, copy_digest(source).ok())
+    }
 
     struct Fixture(PathBuf);
     impl Fixture {

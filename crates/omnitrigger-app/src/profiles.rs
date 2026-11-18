@@ -2585,7 +2585,9 @@ fn apply_external_copy_choice(
     import: bool,
 ) -> Result<Option<ExternalCopyNotice>, String> {
     if import {
-        if let Err(error) = external_import::import(&choice.root, &choice.directory) {
+        if let Err(error) =
+            external_import::import_offered_copy(&choice.root, &choice.directory, choice.digest)
+        {
             // 允许主窗口打开前，确认之前的日常数据已完整恢复。
             external_import::recover(&choice.root)
                 .map_err(|recovery| format!("{error}\n{recovery}"))?;
@@ -3826,6 +3828,69 @@ mod tests {
         assert_eq!(pending(&seen).map(|entry| entry.2), Some(1_700_000_050_000));
         std::fs::remove_dir_all(root).unwrap();
         assert_eq!(offered.map(|entry| entry.2), Some(1_700_000_030_000));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn accepted_copy_uses_the_contents_seen_when_offered() {
+        use std::fs;
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = temp_root("changed-before-import");
+        let daily = root.join("daily");
+        let source = root.join("Packages/sample/LocalCache/Local/OmniTrigger");
+        fs::create_dir(&daily).unwrap();
+        fs::create_dir_all(&source).unwrap();
+        let file = daily.join("bindings.json");
+        fs::write(&file, b"daily").unwrap();
+        let incoming = source.join("bindings.json");
+        let stamp = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let save = |bytes| {
+            fs::write(&incoming, bytes).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&incoming)
+                .unwrap()
+                .set_modified(stamp)
+                .unwrap();
+        };
+        let pending = || {
+            pending_external_copy(
+                &daily,
+                external_copies(&daily, &root),
+                data_modified_ms(&daily),
+                &read_copy_choices(&daily).unwrap(),
+            )
+            .unwrap()
+            .1
+        };
+        save(b"first");
+        let offered = pending();
+        save(b"other");
+        let notice = apply_external_copy_choice(offered, true).unwrap();
+        assert!(notice.unwrap().message.contains("外部副本在提示后已有变化"));
+        assert_eq!(fs::read(&file).unwrap(), b"daily");
+        assert!(read_copy_choices(&daily).unwrap().is_empty());
+
+        let lock = fs::File::options()
+            .read(true)
+            .share_mode(0)
+            .open(&incoming)
+            .unwrap();
+        let unreadable = pending();
+        assert!(unreadable.digest.is_none());
+        drop(lock);
+        let notice = apply_external_copy_choice(unreadable, true)
+            .unwrap()
+            .unwrap();
+        assert!(notice.message.contains("提示时无法完整读取副本"));
+        assert_eq!(fs::read(&file).unwrap(), b"daily");
+        assert!(read_copy_choices(&daily).unwrap().is_empty());
+
+        assert!(apply_external_copy_choice(pending(), true)
+            .unwrap()
+            .is_none());
+        assert_eq!(fs::read(&file).unwrap(), b"other");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(windows)]
