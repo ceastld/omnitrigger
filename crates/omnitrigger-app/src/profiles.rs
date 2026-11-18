@@ -818,7 +818,7 @@ fn trace_seed_sources<'a>(
 
 fn read_catalog(root: &Path) -> Result<Catalog, String> {
     let path = catalog_path(root);
-    match std::fs::read_to_string(&path) {
+    let catalog = match std::fs::read_to_string(&path) {
         Ok(text) => {
             let catalog: Catalog = crate::local_files::parse_config_json(&text)
                 .map_err(|error| format!("{} 格式有误：{error}", path.display()))?;
@@ -829,11 +829,25 @@ fn read_catalog(root: &Path) -> Result<Catalog, String> {
                     catalog.version
                 ));
             }
-            Ok(catalog)
+            catalog
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => recover_catalog(root),
-        Err(error) => Err(format!("读取 {} 失败：{error}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => recover_catalog(root)?,
+        Err(error) => return Err(format!("读取 {} 失败：{error}", path.display())),
+    };
+    let mut keys = BTreeSet::new();
+    for entry in &catalog.profiles {
+        validate_alias(&entry.alias)?;
+        let id = entry.id.to_ascii_lowercase();
+        if (entry.alias != id && !keys.insert(entry.alias.clone())) || !keys.insert(id) {
+            return Err(format!(
+                "配置档标识或别名重复：{}（{}）。请核对 {} 下的配置档登记、身份文件和重置备份。",
+                entry.alias,
+                entry.id,
+                root.display()
+            ));
+        }
     }
+    Ok(catalog)
 }
 
 fn generated_profile_id(id: &str) -> bool {
@@ -898,19 +912,6 @@ fn recover_catalog(root: &Path) -> Result<Catalog, String> {
     catalog
         .profiles
         .extend(pending.into_iter().map(|(entry, _)| entry));
-    let mut keys = BTreeSet::new();
-    for entry in &catalog.profiles {
-        validate_alias(&entry.alias)?;
-        let key = entry.id.to_ascii_lowercase();
-        if (entry.alias != key && !keys.insert(entry.alias.clone())) || !keys.insert(key) {
-            return Err(format!(
-                "配置档标识或别名重复：{}（{}）。请检查 {} 下的配置档及重置备份。",
-                entry.alias,
-                entry.id,
-                root.display()
-            ));
-        }
-    }
     catalog
         .profiles
         .sort_by(|a, b| (a.created_ms, &a.id).cmp(&(b.created_ms, &b.id)));
@@ -4092,6 +4093,45 @@ mod tests {
             .contains("重复"));
         assert!(!path.exists());
         assert_eq!(std::fs::read(&config).unwrap(), b"test bindings");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ambiguous_saved_catalog_keeps_both_profiles_edits_on_reset() {
+        let root = temp_root("ambiguous-catalog");
+        let first = create_profile(&root, "work", &Seed::Empty, None).unwrap();
+        let second = create_profile(&root, "review", &Seed::Empty, None).unwrap();
+        let paths =
+            [&first, &second].map(|entry| profile_dir(&root, &entry.id).join("wheels.json"));
+        for (path, value) in paths.iter().zip(["work wheels", "review wheels"]) {
+            std::fs::write(path, value).unwrap();
+        }
+        let path = catalog_path(&root);
+        let mut catalog = read_catalog(&root).unwrap();
+        for (alias, id, key) in [
+            (&first.alias, &second.id, &first.alias),
+            (&first.id, &second.id, &first.id),
+            (&second.alias, &first.id, &first.id),
+        ] {
+            catalog.profiles[1].alias.clone_from(alias);
+            catalog.profiles[1].id.clone_from(id);
+            write_json(&path, &catalog).unwrap();
+            let original = std::fs::read(&path).unwrap();
+            let error = reset_profile(&root, key).unwrap_err().response();
+            assert!(error.contains("配置档标识或别名重复") && error.contains(key));
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert_eq!(std::fs::read(&paths[0]).unwrap(), b"work wheels");
+            assert_eq!(std::fs::read(&paths[1]).unwrap(), b"review wheels");
+            assert!(!root.join("backups/profile-reset").exists());
+        }
+        catalog.profiles[1] = second;
+        write_json(&path, &catalog).unwrap();
+        let backup = reset_profile(&root, "review").unwrap().backup.unwrap();
+        assert_eq!(
+            std::fs::read(backup.join("wheels.json")).unwrap(),
+            b"review wheels"
+        );
+        assert_eq!(std::fs::read(&paths[0]).unwrap(), b"work wheels");
         std::fs::remove_dir_all(root).unwrap();
     }
 
