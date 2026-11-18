@@ -246,6 +246,14 @@ fn action_inspection_leaves_test_registration_and_interrupted_reset_untouched() 
     .unwrap();
     let check = ["--check-action", call.to_str().unwrap()];
     let queries = [&["--list-package-actions"][..], &check[..]];
+    let absent = root.join("not-created");
+    let list = run(&["--data-root", absent.to_str().unwrap(), "--profile-list"]);
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    assert!(!absent.exists());
     for query in queries {
         assert!(!run(&[&["--test-workspace"][..], query].concat())
             .status
@@ -263,6 +271,9 @@ fn action_inspection_leaves_test_registration_and_interrupted_reset_untouched() 
     let config = dir.join("bindings.json");
     let identity = std::fs::read(dir.join("profile.json")).unwrap();
     let registration = std::fs::read(root.join("profiles.json")).unwrap();
+    let children = run(&["--data-root", dir.to_str().unwrap(), "--profile-list"]);
+    assert!(children.status.success());
+    assert!(!dir.with_extension("window.lock").exists());
     let listed = run(&["--test-workspace", "--list-package-actions"]);
     assert!(
         listed.status.success(),
@@ -336,11 +347,18 @@ fn action_inspection_leaves_test_registration_and_interrupted_reset_untouched() 
             "--list-package-actions",
         ][..],
         &["--test-workspace", "--check-config"],
+        &["--data-root", dir.to_str().unwrap(), "--profile-list"],
     ] {
         let query = run(args);
         assert!(!query.status.success());
         assert!(String::from_utf8_lossy(&query.stderr).contains("测试档目录缺失"));
         assert!(!registry.exists() && !dir.exists());
+        assert!(!dir.with_extension("window.lock").exists());
+        assert_eq!(
+            std::fs::read(backup.join("profile.json")).unwrap(),
+            identity
+        );
+        assert_eq!(std::fs::read(stage.join("profile.json")).unwrap(), identity);
     }
     let copy = run(&["--profile-create", "copy", "--seed", "copy:testing"]);
     assert!(

@@ -1904,12 +1904,13 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     let inspect_actions = arguments
         .iter()
         .any(|arg| matches!(arg.as_str(), "--list-package-actions" | "--check-action"));
+    let list_profiles_only = matches!(parsed.command, Some(Command::List));
     let check_only = config_check_requested(arguments)
         .unwrap_or_else(|error| finish_command(Err(error), parsed.result_file.as_deref()))
         || inspect_actions;
     let access = if tray {
         RootAccess::Tray
-    } else if check_only {
+    } else if check_only || list_profiles_only {
         RootAccess::Inspect
     } else {
         RootAccess::Open
@@ -1988,14 +1989,18 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     )
     .unwrap_or_else(|message| exit_rejected(&message));
     #[cfg(windows)]
-    if inspect_actions {
+    if inspect_actions || list_profiles_only {
         // 先选定真实数据视图，避免查询在重定向副本中的测试档上取锁或报告重置中断。
         escape_redirect(
             &root,
             local_app_data.as_deref(),
             &parsed,
             &original,
-            Some(Inspection::Actions),
+            Some(if list_profiles_only {
+                Inspection::Profiles
+            } else {
+                Inspection::Actions
+            }),
         );
     }
     let (root_startup, mut guards) = if source != RootSource::Default || tray {
@@ -2003,7 +2008,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     } else {
         (Startup::daily(), Vec::new())
     };
-    if plain || interactive || tray || check_config {
+    if (plain && !list_profiles_only) || interactive || tray || check_config {
         #[cfg(windows)]
         escape_redirect(
             &root,
@@ -2018,15 +2023,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     }
     if let Some(command) = &parsed.command {
         finish_command(
-            std::fs::create_dir_all(&root)
-                .map_err(|error| {
-                    ProfileCommandError::Other(format!(
-                        "创建数据根 {} 失败：{error}",
-                        root.display()
-                    ))
-                })
-                .and_then(|()| run_command(&root, source, command))
-                .map_err(ProfileCommandError::response),
+            run_command(&root, source, command).map_err(ProfileCommandError::response),
             parsed.result_file.as_deref(),
         );
     }
@@ -2167,6 +2164,7 @@ fn redirected_check_file(
             "wheels.json.lock",
         ],
         Inspection::Actions => &["bindings.json", "wheels.json"],
+        Inspection::Profiles => &["profiles.json"],
     };
     for name in files {
         if let Some(name) = package(&dir.join(name), local)? {
@@ -2181,6 +2179,7 @@ fn redirected_check_file(
 enum Inspection {
     Config,
     Actions,
+    Profiles,
 }
 
 /// 外部夹具及显式选择的缓存副本沿用调用者看到的目录。日常根和其中的测试档应使用安装版的数据。
@@ -2228,6 +2227,22 @@ fn escape_redirect(
                 .or_else(|_| {
                     redirected_check_file(root, parsed, local_app_data, Inspection::Actions)
                 })
+        }
+        Some(Inspection::Profiles) => {
+            match redirected_check_file(root, parsed, local_app_data, Inspection::Profiles) {
+                Ok(None)
+                    if daily_data_tree(root, local_app_data)
+                        && crate::local_files::is_plain_directory(local_app_data) =>
+                {
+                    // 登记文件尚未创建时，在配置树之外辨认打包视图，保留原档或重置现场。
+                    Ok(omnitrigger_windows::probe_final_directory(local_app_data)
+                        .ok()
+                        .and_then(|actual| {
+                            redirected_package(local_app_data, &actual, local_app_data)
+                        }))
+                }
+                other => other,
+            }
         }
         Some(Inspection::Config) => {
             redirected_check_file(root, parsed, local_app_data, Inspection::Config)

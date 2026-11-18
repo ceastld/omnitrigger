@@ -1,5 +1,6 @@
 """只读比对配置 ZIP 和本机档案中的热键、轮盘、托管动作及扩展持久状态。"""
 import argparse
+from collections import deque
 import hashlib
 import json
 import os
@@ -26,29 +27,43 @@ STATE_DOCUMENT = re.compile(r"[0-9a-f]{64}\.json", re.IGNORECASE | re.ASCII)
 
 
 def profile_dirs(app, root):
-    guard(root / "profiles.json", missing=True)
-    guard(root / "profiles", missing=True)
+    app = guard(app)
+    directories = []
+    pending = deque([root])
+    while pending:
+        parent = pending.popleft()
+        directories.append(parent)
+        catalog = guard(parent / "profiles.json", missing=True)
+        children = guard(parent / "profiles", missing=True)
+        if parent != root and not catalog.exists() and not children.exists():
+            # 父档也可能在缺少总登记时从中断的重置记录找回子档身份。
+            if not guard(parent / "backups/profile-reset", missing=True).exists():
+                continue
+        pending.extend(registered_children(app, parent))
+    return directories
+
+
+def registered_children(app, parent):
     result = subprocess.run(
-        [str(guard(app)), "--data-root", str(root), "--profile-list"],
+        [str(app), "--data-root", str(parent), "--profile-list"],
         capture_output=True, timeout=60,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if result.returncode:
         raise ValueError(f"安装版读取配置档登记失败：{result.stderr.decode('utf-8', 'replace').strip()}")
     listing = json.loads(result.stdout)
-    if not guard(listing["data_root"]).samefile(root):
+    if not guard(listing["data_root"]).samefile(parent):
         raise ValueError("安装版返回了不同的数据根。")
-    directories = [root]
     for entry in listing["profiles"]:
         if entry["default"]:
             continue
         directory = Path(entry["directory"])
-        if directory.parent != root / "profiles" or directory.name != entry["id"]:
+        if directory.parent != parent / "profiles" or directory.name != entry["id"]:
             raise ValueError(f"配置档目录与登记不符：{entry['id']}")
-        if not guard(directory).is_dir():
+        directory = guard(directory)
+        if not directory.is_dir() or not directory.resolve().parent.samefile(parent / "profiles"):
             raise ValueError(f"配置档目录与登记不符：{entry['id']}")
-        directories.append(directory)
-    return directories
+        yield directory
 
 
 class FileVersion(NamedTuple):
@@ -107,17 +122,19 @@ def live_files(root, directories, *, action_directories=None):
     return files
 
 
-def in_scope(parts, current_ids, is_directory):
+def in_scope(parts, current_profiles, is_directory):
     relative = parts
-    if parts[0].casefold() == "profiles" and len(parts) >= 2:
-        profile_id = parts[1].casefold()
-        if len(parts) == 2:
+    profile = ()
+    while len(relative) >= 2 and relative[0].casefold() == "profiles":
+        profile_id = relative[1].casefold()
+        if len(relative) == 2:
             if not profile_id.endswith(COPY_ORIGIN):
                 return False
             profile_id = profile_id.removesuffix(COPY_ORIGIN)
-        if profile_id not in current_ids and not PROFILE_ID.fullmatch(profile_id):
+        profile += ("profiles", profile_id)
+        if profile not in current_profiles and not PROFILE_ID.fullmatch(profile_id):
             return False
-        relative = parts[2:]
+        relative = relative[2:]
         if not relative or "/".join(relative).casefold() in PROFILE_RECORDS:
             return not is_directory
     if relative[0].casefold() == "action-state":
@@ -138,7 +155,8 @@ def in_scope(parts, current_ids, is_directory):
 
 
 def archived_files(archive, root, directories):
-    current_ids = {folder.name.casefold() for folder in directories if folder != root}
+    current_profiles = {tuple(part.casefold() for part in folder.relative_to(root).parts)
+                        for folder in directories if folder != root}
     files = {}
     for info in archive.infolist():
         name = info.filename.replace("\\", "/")
@@ -146,7 +164,7 @@ def archived_files(archive, root, directories):
         parts = name.removesuffix("/").split("/")
         if not is_directory and any(part in ("", ".", "..") or ":" in part for part in parts):
             raise ValueError(f"ZIP 内的路径无效：{name}")
-        if not in_scope(parts, current_ids, is_directory):
+        if not in_scope(parts, current_profiles, is_directory):
             continue
         key = name.casefold()
         if stat.S_IFMT(info.external_attr >> 16) not in (0, stat.S_IFREG):

@@ -9,6 +9,7 @@ from unittest.mock import patch
 import zipfile
 
 import create_profile_backup as backup
+from compare_profile_backup import compare
 
 
 class ExportTest(unittest.TestCase):
@@ -118,18 +119,34 @@ class ExportTest(unittest.TestCase):
         revision = self.save(root / "backups/edits/bindings.json/edit-0000000000000001.json",
                              self.hotkeys.read_bytes() + b"\n")
 
-        def create(directory, alias, seed):
-            result = subprocess.run([app, "--data-root", str(directory), "--profile-create", alias, "--seed", seed],
+        def create(directory, alias, seed, *options):
+            result = subprocess.run([app, "--data-root", str(directory), "--profile-create", alias, "--seed", seed, *options],
                                     timeout=30, capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             self.assertEqual(result.returncode, 0, result.stderr)
             return json.loads(result.stdout)
 
         trial = create(root, "trial", "copy:default")
-        backup.create_backup(app, root, self.out)
+        parent = Path(trial["directory"])
+        child = Path(create(parent, "daily-copy", "copy:default", "--name", "日常配置副本")["directory"])
+        leaf = Path(create(child, "leaf", "copy:default")["directory"])
+        nested_edit = self.save(leaf / "bindings.json", revision.read_bytes() + b" ")
+        # 兼容只剩身份文件的登记；旁置目录不属于已登记的子档。
+        (child / "profiles.json").unlink()
+        self.save(child / "profiles/unregistered/bindings.json", b"unrelated")
+        receipt = backup.create_backup(app, root, self.out)
+        self.assertEqual(receipt["profiles"], 4)
         restored = self.root.parent / "restored"
         with zipfile.ZipFile(self.out) as archive:
+            self.assertFalse(any("/unregistered/" in name for name in archive.namelist()))
             archive.extractall(restored)
         dirs = backup.profile_dirs(app, restored)
-        self.assertEqual([directory.name for directory in dirs[1:]], [trial["id"]])
+        expected_dirs = [p.relative_to(root) for p in (root, parent, child, leaf)]
+        self.assertEqual([p.relative_to(restored) for p in dirs], expected_dirs)
+        self.assertFalse((dirs[-2] / "profiles.json").exists())
+        self.assertEqual((dirs[-1] / "bindings.json").read_bytes(), nested_edit.read_bytes())
+        self.assertTrue(compare(restored, dirs, self.out)["matches"])
+        (dirs[-1] / "bindings.json").write_bytes(b"another edit")
+        self.assertEqual(compare(restored, dirs, self.out)["changed"], [nested_edit.relative_to(root).as_posix()])
+        self.assertEqual((restored / "bindings.json").read_bytes(), self.hotkeys.read_bytes())
         recovered = create(restored, "recovered", "backup:default:1:current")
         self.assertEqual((Path(recovered["directory"]) / "bindings.json").read_bytes(), revision.read_bytes())

@@ -71,6 +71,18 @@ class ProfileBackupTest(unittest.TestCase):
                        "profiles/t0123456789ab/backups/profile-reset/seed-source.json": b"old"})
         self.assertEqual(self.compare()["only_in_backup"], [origin])
 
+    def test_archive_only_nested_files_use_their_parent_registration(self):
+        parent = self.test_dir.relative_to(self.root).as_posix()
+        child = self.test_dir / "profiles" / "legacy-child"
+        child.mkdir(parents=True)
+        self.dirs.append(child)
+        self.save_live("bindings.json", b"[]")
+        origin = parent + "/profiles/legacy-child.copy-origin.json"
+        retired = parent + "/profiles/tabcdef012345/bindings.json"
+        unknown = "profiles/tabcdef012345/profiles/legacy-child/bindings.json"
+        self.save_zip({"bindings.json": b"[]", origin: b'"custom"', retired: b"[]", unknown: b"unregistered"})
+        self.assertCountEqual(self.compare()["only_in_backup"], [origin, retired])
+
     def test_state_documents_are_compared_per_profile(self):
         document = "a" * 64 + ".json"
         daily = "action-state/" + document
