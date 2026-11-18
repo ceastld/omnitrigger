@@ -6,7 +6,8 @@ use crate::{
 use gpui::{div, prelude::*, px, FontWeight};
 use omnitrigger_actions::action_hint::ActionHintPlacement;
 use omnitrigger_actions::{
-    ActionCall, ActionOutcome, ActionService, NodeRuntime, PackageCatalog, RuntimeRegistry,
+    ActionCall, ActionError, ActionOutcome, ActionRuntime, ActionService, NodeRuntime,
+    PackageCatalog, RuntimeRegistry,
 };
 use std::{
     io::{Read, Write},
@@ -143,40 +144,45 @@ pub(super) fn components(config: &Path) -> (PackageCatalog, RuntimeRegistry) {
 fn components_with(config: &Path, selected: RuntimeSelection) -> (PackageCatalog, RuntimeRegistry) {
     let mut catalog = PackageCatalog::load(&root(config));
     let mut runtimes = RuntimeRegistry::new();
-    let needs_script = catalog
-        .actions
-        .iter()
-        .any(|action| action.definition.runtime == "script");
-    match selected.script.map_or_else(
+    let script = match selected.script.map_or_else(
         || crate::script_runtime::locate_in_profile(config),
         |host| host.map(Some),
     ) {
-        Ok(Some(host)) => {
-            if let Err(error) = runtimes.register("script", Arc::new(host.runtime())) {
-                catalog.diagnostics.push(error.to_string());
-            }
-        }
-        Ok(None) if needs_script => catalog.diagnostics.push(
-            "轻量脚本宿主未安装；开发时可用本机包安装接口或 OMNITRIGGER_SCRIPT_HOST 指定完整路径。"
-                .into(),
+        Ok(Some(host)) => Ok(Arc::new(host.runtime()) as Arc<dyn ActionRuntime>),
+        Ok(None) => Err(
+            "此配置档缺少轻量脚本宿主。请在本档安装宿主包，或在复制来源档安装后重新加载动作目录。"
+                .to_owned(),
         ),
-        Err(error) if needs_script => catalog.diagnostics.push(error),
-        _ => {}
-    }
-    if let Some(program) = selected.node {
-        let runtime = NodeRuntime::new(program).with_browser_connector(
-            crate::browser_connector::runtime_root(config)
-                .join(crate::browser_connector::CONNECTOR_VERSION),
-        );
-        if let Err(error) = runtimes.register("node", Arc::new(runtime)) {
+        Err(reason) => Err(reason),
+    };
+    let node = selected
+        .node
+        .map(|program| {
+            let runtime = NodeRuntime::new(program).with_browser_connector(
+                crate::browser_connector::runtime_root(config)
+                    .join(crate::browser_connector::CONNECTOR_VERSION),
+            );
+            Arc::new(runtime) as Arc<dyn ActionRuntime>
+        })
+        .ok_or_else(|| {
+            "未找到 Node.js。请安装 Node.js，或检查 OMNITRIGGER_NODE 指定的程序路径，然后重启。"
+                .to_owned()
+        });
+    for (id, runtime) in [("script", script), ("node", node)] {
+        if let Err(reason) = &runtime {
+            if !catalog
+                .actions
+                .iter()
+                .any(|action| action.definition.runtime == id)
+            {
+                continue;
+            }
+            catalog.diagnostics.push(reason.clone());
+        }
+        let resolved = runtime.map_err(|reason| ActionError::new("runtime_unavailable", reason));
+        if let Err(error) = runtimes.register_resolved(id, resolved) {
             catalog.diagnostics.push(error.to_string());
         }
-    } else if catalog
-        .actions
-        .iter()
-        .any(|action| action.definition.runtime == "node")
-    {
-        catalog.diagnostics.push("未找到 Node.js；请安装 Node.js，或用 OMNITRIGGER_NODE 指定 node.exe 的完整路径后重启。".into());
     }
     (catalog, runtimes)
 }

@@ -242,8 +242,12 @@ for (const [profileArgs,text] of [[['--config',config],'OmniTrigger'],[copiedArg
   const scriptArgs = ['--run-action',project.call_path];
   assert.equal(cli(scriptArgs,0,profileArgs,cleared).output.text,text);
   assert.equal(cli(nodeArgs,0,profileArgs,cleared).output.status,'inspected');
-  assert.equal(cli(scriptArgs,1,profileArgs,missing).error.code,'runtime_unavailable');
-  assert.equal(cli(nodeArgs,1,profileArgs,missing).error.code,'runtime_unavailable');
+  const scriptError = cli(scriptArgs,1,profileArgs,missing).error;
+  assert.equal(scriptError.code, 'runtime_unavailable');
+  assert.match(scriptError.message, /OMNITRIGGER_SCRIPT_HOST/);
+  const nodeError = cli(nodeArgs,1,profileArgs,missing).error;
+  assert.equal(nodeError.code, 'runtime_unavailable');
+  assert.match(nodeError.message, /Node\.js/);
 }
 checks.push('empty_host_paths_restore_default_runtimes_in_daily_and_copied_profiles');
 const nested = cli(['--profile-create','nested','--seed','copy:default'],0,['--data-root',copy.directory]);
@@ -260,12 +264,25 @@ const bareRuntime = join(fromFixture.directory,'runtimes','script');
 mkdirSync(bareRuntime,{recursive:true});
 cpSync(firstHost,join(bareRuntime,'host.exe'));
 const bareCopy = cli(['--profile-create','runtime-bare-copy','--seed',`copy:${fromFixture.id}`],0,['--data-root',root]);
-assert.equal(cli(['--run-action',project.call_path],1,['--data-root',root,'--profile',bareCopy.id]).error.code,'runtime_unavailable');
+function checkUnavailableScript(args, reason) {
+  const catalog = cli(['--list-package-actions'], 0, args);
+  const row = catalog.actions.find(({call}) => call.package_id === project.call.package_id && call.action_id === project.call.action_id);
+  assert.equal(row.reference_error.code, 'runtime_unavailable');
+  assert.match(row.reference_error.message, reason);
+  assert(catalog.diagnostics.includes(row.reference_error.message));
+  for (const flag of ['--check-action', '--run-action']) {
+    const failure = cli([flag, project.call_path], 1, args);
+    assert.equal(failure.error.code, 'runtime_unavailable');
+    assert.equal(failure.error.message, row.reference_error.message);
+    assert.equal(failure.error.effect_state, 'not_started');
+  }
+}
+checkUnavailableScript(['--data-root',root,'--profile',bareCopy.id], /安装宿主包/);
 mkdirSync(copiedRuntime,{recursive:true});
 const copiedPointer = join(copiedRuntime,'current.json');
 writeFileSync(copiedPointer,'{invalid');
-assert.equal(cli(['--run-action',project.call_path],1,copiedArgs).error.code,'runtime_unavailable');
-assert.equal(cli(['--run-action',project.call_path],1,nestedArgs).error.code,'runtime_unavailable');
+checkUnavailableScript(copiedArgs, /版本记录格式有误/);
+checkUnavailableScript(nestedArgs, /版本记录格式有误/);
 unlinkSync(copiedPointer);
 const override=cli(['--install-script-runtime',development.archive,'--sha256',development.sha256],0,copiedArgs);
 assert.equal(override.status,'installed');

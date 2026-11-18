@@ -375,8 +375,8 @@ fn active_pointer(root: &Path) -> Result<Option<Pointer>, String> {
     if !current.try_exists().map_err(|error| error.to_string())? {
         return Ok(None);
     }
-    let pointer: Pointer =
-        serde_json::from_slice(&read(&current, 4096)?).map_err(|e| e.to_string())?;
+    let pointer: Pointer = serde_json::from_slice(&read(&current, 4096)?)
+        .map_err(|e| format!("轻量脚本宿主的版本记录格式有误：{e}。请用原宿主包重新安装。"))?;
     if pointer.schema_version != 1
         || !valid_hash(&pointer.archive_sha256)
         || !valid_hash(&pointer.manifest_sha256)

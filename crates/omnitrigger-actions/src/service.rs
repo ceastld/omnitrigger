@@ -87,7 +87,7 @@ pub trait ActionRuntime: Send + Sync {
 
 #[derive(Default)]
 pub struct RuntimeRegistry {
-    entries: BTreeMap<String, RegisteredRuntime>,
+    entries: BTreeMap<String, Result<RegisteredRuntime, ActionError>>,
 }
 
 struct RegisteredRuntime {
@@ -105,6 +105,15 @@ impl RuntimeRegistry {
         id: &str,
         runtime: Arc<dyn ActionRuntime>,
     ) -> Result<(), ActionError> {
+        self.register_resolved(id, Ok(runtime))
+    }
+
+    /// 保留配置档查找运行时的结果，使目录、校验和提交能报告同一原因。
+    pub fn register_resolved(
+        &mut self,
+        id: &str,
+        runtime: Result<Arc<dyn ActionRuntime>, ActionError>,
+    ) -> Result<(), ActionError> {
         if !valid_id(id) {
             return Err(ActionError::new("invalid_runtime", "运行时标识无效。"));
         }
@@ -114,24 +123,25 @@ impl RuntimeRegistry {
                 format!("运行时 {id} 已注册。"),
             ));
         }
-        let installation = runtime.check_installation();
-        self.entries.insert(
-            id.into(),
+        let entry = runtime.map(|runtime| {
+            let installation = runtime.check_installation();
             RegisteredRuntime {
                 runtime,
                 installation,
-            },
-        );
+            }
+        });
+        self.entries.insert(id.into(), entry);
         Ok(())
     }
 
     fn get(&self, id: &str) -> Result<&RegisteredRuntime, ActionError> {
-        self.entries.get(id).ok_or_else(|| {
-            ActionError::new(
+        match self.entries.get(id) {
+            Some(entry) => entry.as_ref().map_err(Clone::clone),
+            None => Err(ActionError::new(
                 "runtime_unavailable",
                 format!("未注册动作运行时 {id}，原调用已保留。"),
-            )
-        })
+            )),
+        }
     }
 }
 
