@@ -66,6 +66,7 @@ mod presets;
 mod private_window_station;
 mod process_capture_host;
 mod profiles;
+mod quick_search;
 mod radial_wheel;
 mod raishot_result_host;
 #[cfg(windows)]
@@ -860,6 +861,7 @@ struct Workspace {
     toast: Option<WindowHandle<Toast>>,
     toast_time: Option<Instant>,
     panel: Option<WindowHandle<TriggerPanel>>,
+    quick_search: Option<WindowHandle<quick_search::QuickSearch>>,
     panel_prepared: bool,
     /// 已向输入采集登记的面板窗口；面板收起后撤销。
     panel_registered: Option<isize>,
@@ -1394,6 +1396,7 @@ impl Workspace {
             toast: None,
             toast_time: None,
             panel: None,
+            quick_search: None,
             panel_prepared: false,
             panel_registered: None,
             panel_show_generation: 0,
@@ -2635,6 +2638,29 @@ impl Workspace {
         }
         self.panel = Some(panel);
         Ok(panel)
+    }
+
+    fn open_quick_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recording || self.mode.history_only() {
+            return;
+        }
+        if let Some(search) = self.quick_search {
+            if search
+                .update(cx, |view, window, cx| view.activate(window, cx))
+                .is_ok()
+            {
+                return;
+            }
+            self.quick_search = None;
+        }
+        let display = window.display(cx).map(|display| display.id());
+        match quick_search::QuickSearch::open(display, self.theme_mode, cx) {
+            Ok(search) => self.quick_search = Some(search),
+            Err(error) => {
+                self.error = Some(error);
+                cx.notify();
+            }
+        }
     }
 
     fn toggle_panel(&mut self, cx: &mut Context<Self>) {
@@ -4298,6 +4324,18 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(px(8.))
+            .child(
+                icon_button(
+                    "open-quick-search",
+                    Icon::Search,
+                    "快速搜索  Ctrl+K",
+                    Tone::Secondary,
+                    !self.recording,
+                )
+                .h(px(40.))
+                .w_full()
+                .on_click(cx.listener(|this, _, window, cx| this.open_quick_search(window, cx))),
+            )
             .child(
                 icon_button(
                     "open-panel",
@@ -9065,6 +9103,21 @@ fn main() {
                             cx.notify();
                         });
                     }
+                    let search_workspace = view.downgrade();
+                    cx.intercept_keystrokes(move |event, window, cx| {
+                        let key = &event.keystroke;
+                        if gpui::Window::window_handle(window) == main_window
+                            && key.key == "k"
+                            && key.modifiers.control
+                            && key.modifiers.number_of_modifiers() == 1
+                        {
+                            let _ = search_workspace.update(cx, |view, cx| {
+                                view.open_quick_search(window, cx);
+                                cx.stop_propagation();
+                            });
+                        }
+                    })
+                    .detach();
                     let closing_view = view.downgrade();
                     if let Some(error) =
                         tray_window.and_then(|hwnd| omnitrigger_windows::install_tray(hwnd).err())
