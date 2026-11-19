@@ -462,8 +462,8 @@ unsafe fn update_registration(
 mod tests {
     use super::*;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, PeekMessageW, MSG, PM_REMOVE, WINDOW_EX_STYLE,
-        WS_OVERLAPPEDWINDOW,
+        CreateWindowExW, DestroyWindow, GetWindowRect, IsZoomed, PeekMessageW, MSG, PM_REMOVE,
+        SW_MAXIMIZE, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
     };
 
     #[test]
@@ -536,8 +536,8 @@ mod tests {
                 w!("STATIC"),
                 w!("OmniTrigger 托盘关闭测试"),
                 WS_OVERLAPPEDWINDOW,
-                0,
-                0,
+                48,
+                64,
                 200,
                 100,
                 None,
@@ -562,6 +562,10 @@ mod tests {
                 assert_eq!(TrayRegistration::get(hwnd).unwrap().retries, NO_ICON);
             };
             let _ = ShowWindow(hwnd, SW_SHOW);
+            let mut normal = RECT::default();
+            GetWindowRect(hwnd, &mut normal).unwrap();
+            let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+            assert!(IsZoomed(hwnd).as_bool());
             assert!(!is_in_tray(raw));
             assert!(hide_to_tray(raw));
             assert!(is_in_tray(raw));
@@ -577,6 +581,15 @@ mod tests {
             );
             handle_menu_selection(hwnd, OPEN);
             assert!(IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool());
+
+            assert!(
+                IsZoomed(hwnd).as_bool(),
+                "托盘图标恢复后应重新打开最大化窗口"
+            );
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+            let mut restored = RECT::default();
+            GetWindowRect(hwnd, &mut restored).unwrap();
+            assert_eq!(restored, normal, "还原后应回到原窗口位置和大小");
 
             assert!(hide_to_tray(raw));
             lose_icon();
