@@ -8668,6 +8668,7 @@ fn main() {
                  --test-workspace    打开独立测试档\n\
                  --config <路径>     使用指定配置文件\n\
                  --check-config      检查配置并退出\n\
+                 --profile-export-zip <文件.zip>  导出所选配置档和已登记子档\n\
                  --version           显示版本并退出\n\
                  --build-version     显示产品版本及构建时记录的提交并退出\n\
                  --help              显示常用命令并退出"

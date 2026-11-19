@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {execFile, spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync} from 'node:fs';
-import {basename, dirname, join, resolve} from 'node:path';
+import {basename, dirname, join, relative, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {promisify} from 'node:util';
 import {verifyFsStat} from '../script-sdk-check/check-fs-stat.mjs';
@@ -236,6 +236,21 @@ const copiedEntry = join(copiedPackage,copiedManifest.actions[0].entry);
 writeFileSync(copiedEntry,'export function main() { return {text:"copied profile"}; }');
 assert.equal(cli(['--run-action',project.call_path],0,copiedArgs).output.text,'copied profile');
 assert.equal(cli(['--run-action',project.call_path]).output.text,'OmniTrigger');
+const restored = join(root,'standalone-test');
+const backupZip = join(root,'standalone-test.zip');
+const exported = cli(['--profile-export-zip',backupZip],0,copiedArgs);
+assert.equal(exported.profiles,1);
+assert(exported.files > 0 && exported.bytes > 0);
+assert(!existsSync(join(copy.directory,'runtimes')));
+const unpacked = spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',
+  "$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [IO.Compression.ZipFile]::ExtractToDirectory($env:PROFILE_ZIP,$env:RESTORED_ROOT)"],
+  {encoding:'utf8',windowsHide:true,timeout:30000,env:{...env,PROFILE_ZIP:backupZip,RESTORED_ROOT:restored}});
+assert.ifError(unpacked.error);
+assert.equal(unpacked.status,0,unpacked.stderr);
+assert.equal(readFileSync(join(restored,'runtimes/script/current.json'),'utf8'),firstPointer);
+const restoredCall = join(restored,relative(root,project.call_path));
+assert.equal(cli(['--run-action',restoredCall],0,['--data-root',restored]).output.text,'copied profile');
+checks.push('standalone_backup_executes_the_copied_script_using_its_restored_host');
 const cleared = {...env, OMNITRIGGER_NODE:'', OMNITRIGGER_SCRIPT_HOST:''};
 const missing = {...env, OMNITRIGGER_SCRIPT_HOST:join(root,'missing-script-host.exe')};
 for (const [profileArgs,text] of [[['--config',config],'OmniTrigger'],[copiedArgs,'copied profile']]) {

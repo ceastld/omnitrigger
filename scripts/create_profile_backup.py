@@ -126,6 +126,17 @@ def create_backup(app, root, output):
         raise ValueError("备份文件名须以 .zip 结尾。")
     if output.exists():
         raise FileExistsError(f"备份已存在：{output}")
+    if app is not None:
+        program = str(guard(app))
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        help_result = subprocess.run([program, "--help"], capture_output=True, creationflags=flags, timeout=60)
+        if help_result.returncode == 0 and b"--profile-export-zip " in help_result.stdout:
+            result = subprocess.run([program, "--data-root", str(root), "--profile-export-zip", str(output)],
+                                    capture_output=True, creationflags=flags)
+            if result.returncode:
+                raise ValueError(result.stderr.decode("utf-8", "replace").strip())
+            return decode(result.stdout)
+    # 旧安装版的后备实现只收集各档本地保存的文件。
     directories = profile_dirs(app, root)
     for directory in directories:
         if any(output.is_relative_to(directory / subdir) for subdir in ("actions", "runtimes", "action-state")):

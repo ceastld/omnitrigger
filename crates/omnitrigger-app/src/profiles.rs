@@ -240,6 +240,10 @@ enum Command {
     },
     Reset(String),
     List,
+    ExportZip {
+        output: PathBuf,
+        profile: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -275,6 +279,10 @@ impl Arguments {
                 ("--seed", Some(Command::Create { seed, .. })) => {
                     args.next();
                     out.extend([arg.clone(), seed.for_creation()?.record()]);
+                }
+                ("--profile-export-zip", Some(Command::ExportZip { output, .. })) => {
+                    args.next();
+                    out.extend([arg.clone(), output.to_string_lossy().into_owned()]);
                 }
                 _ => out.push(arg.clone()),
             }
@@ -386,6 +394,7 @@ fn take_arguments(arguments: &mut Vec<String>) -> Result<Arguments, String> {
     let mut seed: Option<String> = None;
     let mut name: Option<String> = None;
     let mut reset: Option<String> = None;
+    let mut export = None;
     let mut list = false;
     let mut kept = Vec::with_capacity(arguments.len());
     let mut iter = arguments.drain(..);
@@ -417,6 +426,7 @@ fn take_arguments(arguments: &mut Vec<String>) -> Result<Arguments, String> {
             "--relaunch-result" => value("--relaunch-result", &mut parsed.result_file, &mut iter)?,
             "--profile-create" => value("--profile-create", &mut create, &mut iter)?,
             "--profile-reset" => value("--profile-reset", &mut reset, &mut iter)?,
+            "--profile-export-zip" => value("--profile-export-zip", &mut export, &mut iter)?,
             "--type" if create.is_some() => value("--type", &mut kind, &mut iter)?,
             "--seed" if create.is_some() => value("--seed", &mut seed, &mut iter)?,
             "--name" if create.is_some() => value("--name", &mut name, &mut iter)?,
@@ -436,14 +446,17 @@ fn take_arguments(arguments: &mut Vec<String>) -> Result<Arguments, String> {
         }
         parsed.profile = Some(TEST_ALIAS.into());
     }
-    let commands = usize::from(create.is_some()) + usize::from(reset.is_some()) + usize::from(list);
+    let commands = [create.is_some(), reset.is_some(), list, export.is_some()]
+        .into_iter()
+        .filter(|set| *set)
+        .count();
     if commands > 1 {
-        return Err("--profile-create、--profile-reset 与 --profile-list 只能选一个。".into());
+        return Err("一次只能执行一个配置档命令。".into());
     }
     if create.is_none() && (kind.is_some() || seed.is_some() || name.is_some()) {
         return Err("--type、--seed、--name 只用于 --profile-create。".into());
     }
-    if commands == 1 && (parsed.profile.is_some() || parsed.listen) {
+    if commands == 1 && ((parsed.profile.is_some() && export.is_none()) || parsed.listen) {
         return Err("配置档命令不能与 --profile 或 --listen 同用。".into());
     }
     if parsed.listen && parsed.profile.is_none() {
@@ -460,6 +473,11 @@ fn take_arguments(arguments: &mut Vec<String>) -> Result<Arguments, String> {
         parsed.command = Some(Command::Reset(alias));
     } else if list {
         parsed.command = Some(Command::List);
+    } else if let Some(output) = export {
+        parsed.command = Some(Command::ExportZip {
+            output: std::path::absolute(output).map_err(|e| e.to_string())?,
+            profile: parsed.profile.take(),
+        });
     }
     Ok(parsed)
 }
@@ -643,6 +661,16 @@ fn catalog_path(root: &Path) -> PathBuf {
 
 fn profile_dir(root: &Path, id: &str) -> PathBuf {
     root.join("profiles").join(id)
+}
+
+fn checked_profile_dir(root: &Path, entry: &Entry) -> Result<PathBuf, String> {
+    let directory = profile_dir(root, &entry.id);
+    if directory.parent() != Some(root.join("profiles").as_path())
+        || directory.file_name() != Some(entry.id.as_ref())
+    {
+        return Err(format!("配置档登记中的目录无效：{}", entry.id));
+    }
+    Ok(directory)
 }
 
 /// 确定配置所在的实际目录。重置期间目录可能暂时缺失，从最近的现有祖先补回后缀。
@@ -839,8 +867,11 @@ fn trace_seed_sources<'a>(
                 else {
                     return Vec::new();
                 };
+                let Ok(directory) = checked_profile_dir(root, source) else {
+                    return Vec::new();
+                };
                 (
-                    profile_dir(root, &source.id),
+                    directory,
                     root_alias.map(|alias| profile_dir(alias, &source.id)),
                     Some(source),
                 )
@@ -1873,6 +1904,27 @@ fn run_command(
             receipt
         }
         Command::List => list_profiles(root, source, root_startup.test_name.as_deref())?,
+        Command::ExportZip { output, profile } => {
+            let (directory, _profile_guard) =
+                if let Some(key) = profile.as_deref().filter(|key| *key != DEFAULT_ID) {
+                    let catalog = read_catalog(root)?;
+                    let entry = catalog
+                        .find(key)
+                        .ok_or_else(|| format!("找不到配置档 {key}。"))?;
+                    let directory = checked_profile_dir(root, entry)?;
+                    crate::script_runtime::check_local_path(&directory)?;
+                    let guard = Startup::for_entry(entry, false)
+                        .prepare_access(&directory.join("bindings.json"), true)?;
+                    (directory, guard)
+                } else {
+                    (root.to_owned(), None)
+                };
+            serde_json::to_value(config_archive::export_to(
+                &directory.join("bindings.json"),
+                output,
+            )?)
+            .map_err(|e| e.to_string())?
+        }
     };
     Ok(value.to_string())
 }
@@ -1958,13 +2010,16 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     let inspect_actions = arguments
         .iter()
         .any(|arg| matches!(arg.as_str(), "--list-package-actions" | "--check-action"));
-    let list_profiles_only = matches!(parsed.command, Some(Command::List));
+    let inspect_profile_tree = matches!(
+        parsed.command,
+        Some(Command::List | Command::ExportZip { .. })
+    );
     let check_only = config_check_requested(arguments)
         .unwrap_or_else(|error| finish_command(Err(error), parsed.result_file.as_deref()))
         || inspect_actions;
     let access = if tray {
         RootAccess::Tray
-    } else if check_only || list_profiles_only {
+    } else if check_only || inspect_profile_tree {
         RootAccess::Inspect
     } else {
         RootAccess::Open
@@ -2043,14 +2098,14 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     )
     .unwrap_or_else(|message| exit_rejected(&message));
     #[cfg(windows)]
-    if inspect_actions || list_profiles_only {
+    if inspect_actions || inspect_profile_tree {
         // 先选定真实数据视图，避免查询在重定向副本中的测试档上取锁或报告重置中断。
         escape_redirect(
             &root,
             local_app_data.as_deref(),
             &parsed,
             &original,
-            Some(if list_profiles_only {
+            Some(if inspect_profile_tree {
                 Inspection::Profiles
             } else {
                 Inspection::Actions
@@ -2062,7 +2117,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     } else {
         (Startup::daily(), Vec::new())
     };
-    if (plain && !list_profiles_only) || interactive || tray || check_config {
+    if (plain && !inspect_profile_tree) || interactive || tray || check_config {
         #[cfg(windows)]
         escape_redirect(
             &root,
@@ -2736,6 +2791,20 @@ mod tests {
     fn conflicting_profile_arguments_are_rejected() {
         for list in [
             args(&["--profile-list", "--profile-reset", "ui"]),
+            args(&["--profile-list", "--profile-export-zip", "backup.zip"]),
+            args(&[
+                "--profile-export-zip",
+                "a.zip",
+                "--profile-export-zip",
+                "b.zip",
+            ]),
+            args(&[
+                "--profile",
+                "ui",
+                "--listen",
+                "--profile-export-zip",
+                "backup.zip",
+            ]),
             args(&["--profile-list", "--profile", "ui"]),
             args(&["--listen"]),
             args(&["--profile", "a", "--profile", "b"]),
@@ -2899,6 +2968,29 @@ mod tests {
         assert_eq!(
             parsed.forwarded(&original).unwrap(),
             vec!["--profile", "ui"]
+        );
+    }
+
+    #[test]
+    fn relayed_zip_export_keeps_the_selected_profile_and_output_directory() {
+        let original = args(&["--profile", "ui", "--profile-export-zip", "测试备份.zip"]);
+        let parsed = take_arguments(&mut original.clone()).unwrap();
+        let output = std::path::absolute("测试备份.zip").unwrap();
+        assert_eq!(
+            parsed.command,
+            Some(Command::ExportZip {
+                output: output.clone(),
+                profile: Some("ui".into())
+            })
+        );
+        assert_eq!(
+            parsed.forwarded(&original).unwrap(),
+            [
+                "--profile",
+                "ui",
+                "--profile-export-zip",
+                output.to_str().unwrap()
+            ]
         );
     }
 

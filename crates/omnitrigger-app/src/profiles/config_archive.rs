@@ -1,5 +1,5 @@
 //! 从当前数据根导出配置和已登记的子档，不在来源目录执行扩展。
-use super::{is_action_state_document, profile_dir, read_catalog};
+use super::{checked_profile_dir, is_action_state_document, read_catalog};
 use crate::{plugins::RAISHOT_MANIFEST_PATH, script_runtime, settings};
 use chrono::{Datelike, Local};
 use sha2::{Digest, Sha256};
@@ -16,6 +16,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 
 #[derive(Debug, PartialEq, Eq)]
 struct SourceFile {
+    path: PathBuf,
     size: u64,
     modified: SystemTime,
     hash: String,
@@ -23,7 +24,8 @@ struct SourceFile {
 
 #[derive(Default, PartialEq, Eq)]
 struct Inventory {
-    profiles: usize,
+    profiles: BTreeSet<PathBuf>,
+    inherited_sources: BTreeSet<PathBuf>,
     folders: BTreeSet<String>,
     files: BTreeMap<String, SourceFile>,
 }
@@ -57,15 +59,25 @@ impl Inventory {
         meta: Metadata,
         expected_hash: Option<String>,
     ) -> Result<()> {
+        self.add_named(name(root, path)?, path, meta, expected_hash)
+    }
+
+    fn add_named(
+        &mut self,
+        key: String,
+        path: &Path,
+        meta: Metadata,
+        expected_hash: Option<String>,
+    ) -> Result<()> {
         if !meta.is_file() || !crate::local_files::is_plain(&meta) {
             return Err(format!("需要普通本机文件：{}", path.display()).into());
         }
-        let key = name(root, path)?;
         let hash = digest(File::open(path)?)?;
         if expected_hash.is_some_and(|expected| !expected.eq_ignore_ascii_case(&hash)) {
             return Err(format!("宿主文件与登记的摘要不符：{key}").into());
         }
         let file = SourceFile {
+            path: path.to_owned(),
             size: meta.len(),
             modified: meta.modified()?,
             hash,
@@ -129,7 +141,13 @@ impl Inventory {
     }
 
     fn collect(root: &Path) -> Result<Self> {
+        if !crate::local_files::is_plain_directory(root) {
+            return Err(format!("配置档目录不可用：{}", root.display()).into());
+        }
+        let canonical = root.canonicalize()?;
+        let root = canonical.as_path();
         let mut inventory = Self::default();
+        let mut own_hosts = BTreeSet::new();
         let mut pending = vec![root.to_owned()];
         while let Some(directory) = pending.pop() {
             if !crate::local_files::is_plain_directory(&directory) {
@@ -145,7 +163,7 @@ impl Inventory {
                     );
                 }
             }
-            inventory.profiles += 1;
+            inventory.profiles.insert(directory.clone());
             if directory != root {
                 inventory.folders.insert(name(root, &directory)?);
                 inventory.add_existing(root, &directory.with_extension("copy-origin.json"))?;
@@ -180,20 +198,28 @@ impl Inventory {
                 )?;
             }
             inventory.actions(root, &directory.join("actions"))?;
-            for (path, hash) in script_runtime::backup_files(&directory)? {
+            let runtime_files = script_runtime::backup_files(&directory)?;
+            if !runtime_files.is_empty() {
+                own_hosts.insert(directory.clone());
+            }
+            for (path, hash) in runtime_files {
                 let meta =
                     metadata(&path)?.ok_or_else(|| format!("缺少宿主文件：{}", path.display()))?;
                 inventory.add(root, &path, meta, hash)?;
             }
             for entry in read_catalog(&directory)?.profiles {
-                let child = profile_dir(&directory, &entry.id);
-                if child.parent() != Some(directory.join("profiles").as_path())
-                    || child.file_name() != Some(entry.id.as_ref())
-                {
-                    return Err(format!("配置档登记中的目录无效：{}", entry.id).into());
-                }
-                pending.push(child);
+                pending.push(checked_profile_dir(&directory, &entry)?);
             }
+        }
+        for (destination, source) in
+            script_runtime::inherited_backup_sources(&inventory.profiles, &own_hosts)?
+        {
+            for (path, hash) in script_runtime::inherited_backup_files(&source)? {
+                let member = destination.join(path.strip_prefix(&source)?);
+                let meta = metadata(&path)?.ok_or("来源档的脚本宿主文件已变更。")?;
+                inventory.add_named(name(root, &member)?, &path, meta, hash)?;
+            }
+            inventory.inherited_sources.insert(source);
         }
         if inventory.files.is_empty() {
             return Err("本档还没有可导出的配置。".into());
@@ -243,14 +269,13 @@ fn digest(mut input: impl Read) -> io::Result<String> {
     Ok(format!("{:x}", sha.finalize()))
 }
 
-fn write_verified(root: &Path, inventory: &Inventory, archive: &mut File) -> Result<()> {
+fn write_verified(inventory: &Inventory, archive: &mut File) -> Result<()> {
     let mut zip = ZipWriter::new(&mut *archive);
     for folder in &inventory.folders {
         zip.add_directory(format!("{folder}/"), SimpleFileOptions::default())?;
     }
     for (name, entry) in &inventory.files {
-        let path = root.join(name);
-        let mut source = entry.open(&path)?;
+        let mut source = entry.open(&entry.path)?;
         let options = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Deflated)
             .large_file(entry.size >= u64::from(u32::MAX) / 2)
@@ -259,7 +284,7 @@ fn write_verified(root: &Path, inventory: &Inventory, archive: &mut File) -> Res
         if io::copy(&mut source, &mut zip)? != entry.size {
             return Err(format!("备份期间文件长度有改动：{name}").into());
         }
-        entry.verify(&source, &path)?;
+        entry.verify(&source, &entry.path)?;
     }
     zip.finish()?.sync_all()?;
     archive.rewind()?;
@@ -272,17 +297,64 @@ fn write_verified(root: &Path, inventory: &Inventory, archive: &mut File) -> Res
     Ok(())
 }
 
+#[derive(serde::Serialize)]
 pub(crate) struct ExportedArchive {
+    #[serde(rename = "archive")]
     pub path: PathBuf,
     pub profiles: usize,
     pub files: usize,
+    pub bytes: u64,
 }
 
 pub(crate) fn export_config_archive(config: &Path) -> std::result::Result<ExportedArchive, String> {
-    export(config).map_err(|e| format!("无法导出配置备份：{e}"))
+    export(config, None).map_err(|e| format!("无法导出配置备份：{e}"))
 }
 
-fn export(config: &Path) -> Result<ExportedArchive> {
+pub(super) fn export_to(
+    config: &Path,
+    output: &Path,
+) -> std::result::Result<ExportedArchive, String> {
+    export(config, Some(output)).map_err(|e| format!("无法导出配置备份：{e}"))
+}
+
+fn archive_target(output: &Path, inventory: &Inventory) -> Result<PathBuf> {
+    let output = std::path::absolute(output)?;
+    script_runtime::check_local_path(&output)?;
+    if !output
+        .extension()
+        .is_some_and(|s| s.eq_ignore_ascii_case("zip"))
+    {
+        return Err("备份文件名须以 .zip 结尾。".into());
+    }
+    if output.try_exists()? {
+        return Err(format!("备份文件已存在：{}", output.display()).into());
+    }
+    let directory = super::config_directory(&output).ok_or("无法定位备份目标目录。")?;
+    if directory.components().any(|c| c == Component::ParentDir) {
+        return Err("请指定可确定的备份目标目录。".into());
+    }
+    if inventory
+        .profiles
+        .iter()
+        .chain(&inventory.inherited_sources)
+        .any(|profile| {
+            directory
+                .strip_prefix(profile)
+                .ok()
+                .and_then(|relative| relative.components().next())
+                .is_some_and(|first| {
+                    ["actions", "action-state", "runtimes"]
+                        .iter()
+                        .any(|protected| first.as_os_str().eq_ignore_ascii_case(protected))
+                })
+        })
+    {
+        return Err("请选择动作包、扩展状态或运行时目录以外的位置保存备份。".into());
+    }
+    Ok(output)
+}
+
+fn export(config: &Path, output: Option<&Path>) -> Result<ExportedArchive> {
     if !config
         .file_name()
         .is_some_and(|n| n.eq_ignore_ascii_case("bindings.json"))
@@ -292,7 +364,12 @@ fn export(config: &Path) -> Result<ExportedArchive> {
     let config = std::path::absolute(config)?;
     let root = config.parent().ok_or("无法定位当前配置档。")?;
     let inventory = Inventory::collect(root)?;
-    let destination = root.join("backups");
+    let output = output.map(|p| archive_target(p, &inventory)).transpose()?;
+    let destination = output
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_owned)
+        .unwrap_or_else(|| root.join("backups"));
     script_runtime::check_local_path(&destination)?;
     fs::create_dir_all(&destination)?;
     let prefix = format!(
@@ -303,24 +380,26 @@ fn export(config: &Path) -> Result<ExportedArchive> {
         .prefix(&prefix)
         .suffix(".part")
         .tempfile_in(&destination)?;
-    write_verified(root, &inventory, stage.as_file_mut())?;
+    write_verified(&inventory, stage.as_file_mut())?;
     if inventory != Inventory::collect(root)? {
         return Err("备份期间配置档有改动，请重试。".into());
     }
-    let path = stage.path().with_extension("zip");
+    let path = output.unwrap_or_else(|| stage.path().with_extension("zip"));
+    let bytes = stage.as_file().metadata()?.len();
     script_runtime::check_local_path(&path)?;
     stage.persist_noclobber(&path)?;
     Ok(ExportedArchive {
         path,
-        profiles: inventory.profiles,
+        profiles: inventory.profiles.len(),
         files: inventory.files.len(),
+        bytes,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profiles::{create_profile, Seed};
+    use crate::profiles::{create_profile, profile_dir, Seed};
 
     fn put(root: &Path, path: &str, content: &[u8]) {
         let path = root.join(path);
@@ -420,14 +499,11 @@ mod tests {
             .set_modified(time)
             .unwrap();
         let mut stage = tempfile::tempfile().unwrap();
-        assert!(write_verified(root, &original, &mut stage).is_err());
+        assert!(write_verified(&original, &mut stage).is_err());
         assert!(original != Inventory::collect(root).unwrap());
     }
 
-    #[test]
-    fn backs_up_only_verified_files_of_the_active_runtime() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
+    fn put_managed_host(root: &Path) -> PathBuf {
         let hash = "a".repeat(64);
         let package = root.join("runtimes/script/packages").join(&hash);
         let contents = b"fixture";
@@ -456,6 +532,14 @@ mod tests {
             "schema_version":1, "archive_sha256":hash, "manifest_sha256":digest(manifest.as_slice()).unwrap()
         })).unwrap());
         put(root, "runtimes/script/packages/inactive/host.exe", b"older");
+        package
+    }
+
+    #[test]
+    fn backs_up_only_verified_files_of_the_active_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let package = put_managed_host(root);
         let config = root.join("bindings.json");
         let result = export_config_archive(&config).unwrap();
         assert_eq!(result.files, 8);
@@ -469,5 +553,84 @@ mod tests {
                 .contains(message));
             assert_eq!(fs::read_dir(root.join("backups")).unwrap().count(), 1);
         }
+    }
+
+    #[test]
+    fn detached_copies_retain_their_effective_host_and_internal_inheritance() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        put(root, "bindings.json", br#"{"version":24,"bindings":[]}"#);
+        let package = put_managed_host(root);
+        let copied = |root: &Path, alias: &str, seed: &str| {
+            let entry = create_profile(root, alias, &Seed::Copy(seed.into()), None).unwrap();
+            profile_dir(root, &entry.id)
+        };
+        let parent = copied(root, "trial", "default");
+        let child = copied(&parent, "child", "default");
+        let sibling = copied(&parent, "other", "child");
+        let child_relative = child.strip_prefix(&parent).unwrap();
+        let sibling_relative = sibling.strip_prefix(&parent).unwrap();
+        let pointer = Path::new("runtimes/script/current.json");
+        let legacy =
+            Path::new("runtimes/script").join(if cfg!(windows) { "host.exe" } else { "host" });
+        for has_legacy in [false, true] {
+            if has_legacy {
+                fs::create_dir_all(parent.join("runtimes/script")).unwrap();
+                fs::write(parent.join(&legacy), b"legacy").unwrap();
+            }
+            let result = export_config_archive(&parent.join("bindings.json")).unwrap();
+            let copy = tempfile::tempdir().unwrap();
+            ZipArchive::new(File::open(result.path).unwrap())
+                .unwrap()
+                .extract(copy.path())
+                .unwrap();
+            assert!(!parent.join(pointer).exists() && !child.join(pointer).exists());
+            assert_eq!(copy.path().join(pointer).is_file(), !has_legacy);
+            assert_eq!(
+                copy.path().join(child_relative).join(pointer).is_file(),
+                has_legacy
+            );
+            assert!(!copy.path().join(sibling_relative).join(pointer).exists());
+            for dir in [Path::new(""), child_relative, sibling_relative] {
+                let restored =
+                    script_runtime::locate_in_profile(&copy.path().join(dir).join("bindings.json"))
+                        .unwrap()
+                        .unwrap();
+                assert!(restored
+                    .program
+                    .canonicalize()
+                    .unwrap()
+                    .starts_with(copy.path().canonicalize().unwrap()));
+                let expected = if has_legacy && dir == Path::new("") {
+                    b"legacy".as_slice()
+                } else {
+                    b"fixture"
+                };
+                assert_eq!(fs::read(restored.program).unwrap(), expected);
+            }
+        }
+        fs::write(package.join("host.exe"), b"changed").unwrap();
+        assert!(export_config_archive(&parent.join("bindings.json"))
+            .err()
+            .unwrap()
+            .contains("摘要"));
+    }
+
+    #[test]
+    fn custom_output_preserves_existing_files_and_avoids_action_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        let config = root.path().join("bindings.json");
+        fs::write(&config, b"[]").unwrap();
+        let output = dest.path().join("new/group.zip");
+        let result = export_to(&config, &output).unwrap();
+        assert_eq!(result.path, output);
+        let original = fs::read(&output).unwrap();
+        assert!(export_to(&config, &output).is_err());
+        assert_eq!(fs::read(output).unwrap(), original);
+        let child = create_profile(root.path(), "trial", &Seed::Empty, None).unwrap();
+        let protected = profile_dir(root.path(), &child.id).join("actions");
+        assert!(export_to(&config, &protected.join("out.zip")).is_err());
+        assert!(!protected.exists());
     }
 }

@@ -361,21 +361,64 @@ pub(super) fn locate_in_profile(config: &Path) -> Result<Option<Installed>, Stri
             integrity: None,
         }));
     }
-    for source in crate::profiles::copied_profile_sources(config) {
-        if let Some(host) = locate_managed(&root(&source.join("bindings.json"))?)? {
-            return Ok(Some(host));
+    let sources = crate::profiles::copied_profile_sources(config);
+    inherited_package(&sources)?
+        .map(|(source, pointer)| managed_program(&source.join("runtimes/script"), pointer))
+        .transpose()
+}
+
+fn inherited_package(sources: &[PathBuf]) -> Result<Option<(&Path, Pointer)>, String> {
+    for source in sources {
+        if let Some(pointer) = active_pointer(&source.join("runtimes/script"))? {
+            return Ok(Some((source, pointer)));
         }
     }
     Ok(None)
 }
 
+/// 完整数据树内继续沿来源继承。来源在 ZIP 之外时，将活动包放到链上最靠近来源、
+/// 且没有本档宿主的位置。手动放置的宿主始终只属于原档。
+pub(super) fn inherited_backup_sources(
+    profiles: &BTreeSet<PathBuf>,
+    own_hosts: &BTreeSet<PathBuf>,
+) -> Result<std::collections::BTreeMap<PathBuf, PathBuf>, String> {
+    let mut copies = std::collections::BTreeMap::new();
+    for directory in profiles.difference(own_hosts) {
+        let chain = crate::profiles::copied_profile_sources(&directory.join("bindings.json"));
+        let Some((source, _)) = inherited_package(&chain)? else {
+            continue;
+        };
+        if profiles.contains(source) {
+            continue;
+        }
+        let destination = chain
+            .iter()
+            .take_while(|candidate| candidate.as_path() != source)
+            .filter(|candidate| profiles.contains(*candidate) && !own_hosts.contains(*candidate))
+            .last()
+            .unwrap_or(directory);
+        if copies
+            .insert(destination.clone(), source.to_owned())
+            .is_some_and(|previous| previous != source)
+        {
+            return Err("备份期间测试档的脚本宿主来源发生变化。".into());
+        }
+    }
+    Ok(copies)
+}
+
 fn active_pointer(root: &Path) -> Result<Option<Pointer>, String> {
+    Ok(active_record(root)?.map(|(pointer, _)| pointer))
+}
+
+fn active_record(root: &Path) -> Result<Option<(Pointer, Vec<u8>)>, String> {
     let current = root.join("current.json");
     check_local_path(&current)?;
     if !current.try_exists().map_err(|error| error.to_string())? {
         return Ok(None);
     }
-    let pointer: Pointer = serde_json::from_slice(&read(&current, 4096)?)
+    let bytes = read(&current, 4096)?;
+    let pointer: Pointer = serde_json::from_slice(&bytes)
         .map_err(|e| format!("轻量脚本宿主的版本记录格式有误：{e}。请用原宿主包重新安装。"))?;
     if pointer.schema_version != 1
         || !valid_hash(&pointer.archive_sha256)
@@ -383,13 +426,13 @@ fn active_pointer(root: &Path) -> Result<Option<Pointer>, String> {
     {
         return Err("宿主激活指针无效，未回退到旧解释器。".into());
     }
-    Ok(Some(pointer))
+    Ok(Some((pointer, bytes)))
 }
 
 /// 导出本档登记的宿主文件；归档时以清单摘要复核实际写入的字节。
 pub(super) fn backup_files(directory: &Path) -> Result<Vec<(PathBuf, Option<String>)>, String> {
     let root = directory.join("runtimes/script");
-    let Some(pointer) = active_pointer(&root)? else {
+    let Some((pointer, bytes)) = active_record(&root)? else {
         let host = root.join(if cfg!(windows) { "host.exe" } else { "host" });
         check_local_path(&host)?;
         return Ok(if host.try_exists().map_err(|e| e.to_string())? {
@@ -398,13 +441,32 @@ pub(super) fn backup_files(directory: &Path) -> Result<Vec<(PathBuf, Option<Stri
             vec![]
         });
     };
+    managed_backup_files(&root, pointer, sha(&bytes))
+}
+
+pub(super) fn inherited_backup_files(
+    directory: &Path,
+) -> Result<Vec<(PathBuf, Option<String>)>, String> {
+    let root = directory.join("runtimes/script");
+    let (pointer, bytes) = active_record(&root)?.ok_or("备份期间来源档的宿主登记已变更。")?;
+    managed_backup_files(&root, pointer, sha(&bytes))
+}
+
+fn managed_backup_files(
+    root: &Path,
+    pointer: Pointer,
+    pointer_hash: String,
+) -> Result<Vec<(PathBuf, Option<String>)>, String> {
     let package = root.join("packages").join(pointer.archive_sha256);
     let path = package.join("manifest.json");
     let (manifest, hash) = manifest(&path)?;
     if hash != pointer.manifest_sha256 {
         return Err(format!("宿主清单摘要不符：{}", path.display()));
     }
-    let mut files = vec![(root.join("current.json"), None), (path, Some(hash))];
+    let mut files = vec![
+        (root.join("current.json"), Some(pointer_hash)),
+        (path, Some(hash)),
+    ];
     for file in manifest.files {
         let path = package.join(file.path);
         check_local_path(&path)?;
@@ -435,9 +497,12 @@ fn activate_package(root: &Path, stage: &Path, pointer: &Pointer) -> Result<(), 
 }
 
 fn locate_managed(root: &Path) -> Result<Option<Installed>, String> {
-    let Some(pointer) = active_pointer(root)? else {
-        return Ok(None);
-    };
+    active_pointer(root)?
+        .map(|pointer| managed_program(root, pointer))
+        .transpose()
+}
+
+fn managed_program(root: &Path, pointer: Pointer) -> Result<Installed, String> {
     let package = root.join("packages").join(&pointer.archive_sha256);
     check_local_path(&package)?;
     let (parsed, digest) = manifest(&package.join("manifest.json"))?;
@@ -454,10 +519,10 @@ fn locate_managed(root: &Path) -> Result<Option<Installed>, String> {
     if !program.is_file() {
         return Err("已安装宿主映像缺失。".into());
     }
-    Ok(Some(Installed {
+    Ok(Installed {
         program,
         integrity: Some((image.sha256, image.size)),
-    }))
+    })
 }
 
 /// 重置数据时只沿用本档已登记的活动包。旧版本和手工放入的宿主留在原档备份。
