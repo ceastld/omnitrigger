@@ -452,10 +452,10 @@ $restoreRoot = Join-Path $restoreLocal 'OmniTrigger'
 $restoreExternal = Join-Path $restoreLocal 'Packages\Example\LocalCache\Local\OmniTrigger'
 $restoreSource = Join-Path $probe.FullName 'export-source'
 $restoreZip = Join-Path $probe.FullName 'test-profile.zip'
-$null = & $appFile.FullName --data-root $restoreSource --profile-create journal --name '日志测试'
-if ($LASTEXITCODE) { throw '无法创建要还原的测试档。' }
-$null = & $appFile.FullName --data-root $restoreSource --profile journal --profile-export-zip $restoreZip
-if ($LASTEXITCODE) { throw '无法导出测试档。' }
+$created = & $appFile.FullName --data-root $restoreSource --profile-create journal --name '日志测试' | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $created.status -ne 'created') { throw '无法创建要还原的测试档。' }
+$exported = & $appFile.FullName --data-root $restoreSource --profile $created.id --profile-export-zip $restoreZip | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $exported.profiles -ne 1) { throw '无法导出测试档。' }
 [IO.Compression.ZipFile]::ExtractToDirectory($restoreZip, $restoreRoot)
 $null = New-Item -ItemType Directory -Path $restoreExternal -Force
 [IO.File]::WriteAllText((Join-Path $restoreExternal 'bindings.json'), '{"version":24,"bindings":[]}')
