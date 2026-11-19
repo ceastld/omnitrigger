@@ -491,7 +491,7 @@ fn action_detail(action: &ActionSpec) -> String {
     match action {
         ActionSpec::Notification => "仅提示".into(),
         ActionSpec::ShowPanel => "打开 / 收起触发面板".into(),
-        ActionSpec::ShowSearch => "打开快速搜索".into(),
+        ActionSpec::ShowSearch => "打开 / 收起快速搜索".into(),
         ActionSpec::ShowWheel(reference) => format!("轨道轮盘 · {}", reference.wheel_id),
         ActionSpec::SendShortcut(shortcut) => format!("发送快捷键 · {}", shortcut.display()),
         ActionSpec::Window(action) => format!("窗口 · {}", action.display()),
@@ -3291,6 +3291,13 @@ impl Workspace {
                 cx.notify();
             }
             ActionSpec::ShowSearch => {
+                if self.quick_search.take().is_some_and(|search| {
+                    search
+                        .update(cx, |_, window, _| window.remove_window())
+                        .is_ok()
+                }) {
+                    return;
+                }
                 let target = target.or_else(|| omnitrigger_windows::capture_shortcut_target().ok());
                 match self.show_quick_search(None, cx) {
                     Ok(Some(search)) => quick_search::request_foreground(search, target, cx),
