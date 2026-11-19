@@ -1,5 +1,5 @@
 //! 核对复制来源的稳定 ID。创建时的选择另存一份，用于中断后按原命令发布暂存档。
-use super::{read_copy_origin, write_json, Catalog, Entry};
+use super::{read_optional_profile_json, write_json, Catalog, Entry};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -16,7 +16,7 @@ struct Source {
 fn read(profile: &Path, entry: &Entry) -> Result<Option<Source>, String> {
     let path = profile.join(RECORD);
     crate::script_runtime::check_local_path(&path)?;
-    let Some(saved) = read_copy_origin::<Source>(&path)? else {
+    let Some(saved) = read_optional_profile_json::<Source>(&path)? else {
         return Ok(None);
     };
     if saved.profile_id != entry.id || saved.seed != entry.seed || saved.source_id.is_empty() {

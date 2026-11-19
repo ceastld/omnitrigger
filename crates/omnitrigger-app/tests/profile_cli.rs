@@ -1,5 +1,76 @@
 use std::{path::Path, process::Command};
 
+#[test]
+fn restored_test_root_routes_copied_clipboard_to_its_own_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_omnitrigger"))
+            .args(args)
+            .env_remove("OMNITRIGGER_HOME")
+            .output()
+            .unwrap()
+    };
+    let created = run(&[
+        "--data-root",
+        root.to_str().unwrap(),
+        "--profile-create",
+        "notes",
+        "--name",
+        "笔记测试",
+    ]);
+    assert!(created.status.success());
+    let entry: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
+    let identity = Path::new(entry["directory"].as_str().unwrap()).join("profile.json");
+    let restored = root.join("还原的配置");
+    std::fs::create_dir(&restored).unwrap();
+    std::fs::copy(identity, restored.join("profile.json")).unwrap();
+    let call = root.join("toggle.json");
+    std::fs::write(
+        &call,
+        r#"{"package_id":"examples.n10-rust","action_id":"toggle","action_version":1}"#,
+    )
+    .unwrap();
+    let directory = restored.to_str().unwrap();
+    let config = restored.join("bindings.json");
+    for (flag, path) in [
+        ("--data-root", directory),
+        ("--config", config.to_str().unwrap()),
+    ] {
+        let output = run(&[flag, path, "--check-action", call.to_str().unwrap()]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let checked: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(checked["handler"], "workspace_text_history");
+    }
+    let listed = run(&["--data-root", directory, "--profile-list"]);
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["profiles"][0]["kind"], "test");
+    assert_eq!(listed["profiles"][0]["name"], "笔记测试");
+    assert_eq!(std::fs::read_dir(&restored).unwrap().count(), 1);
+    // 即使解压目录恰好位于 profiles 下，也不能把未登记的测试数据交给日常动作。
+    let other = root.join("other");
+    std::fs::create_dir_all(other.join("profiles")).unwrap();
+    std::fs::write(
+        other.join("profiles.json"),
+        r#"{"version":1,"profiles":[]}"#,
+    )
+    .unwrap();
+    let beside = other.join("profiles").join(entry["id"].as_str().unwrap());
+    std::fs::rename(&restored, &beside).unwrap();
+    let checked = run(&[
+        "--data-root",
+        beside.to_str().unwrap(),
+        "--check-action",
+        call.to_str().unwrap(),
+    ]);
+    let checked: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+    assert_eq!(checked["handler"], "workspace_text_history");
+}
+
 #[cfg(windows)]
 #[test]
 fn browser_action_reads_a_bom_prefixed_file_in_the_selected_profile() {

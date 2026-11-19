@@ -37,7 +37,7 @@ const RESULT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 pub struct Startup {
     /// 测试配置档的显示名；日常数据为 `None`。
     pub test_name: Option<String>,
-    /// 动作数据是否属于已登记的测试档，与窗口标题、启动参数及监听状态无关。
+    /// 动作数据是否来自测试档，包括单独从备份还原的测试档。
     pub test_data: bool,
     /// 是否安装输入 Hook。测试配置档默认不安装，`--listen` 显式开启。
     pub listen: bool,
@@ -184,8 +184,51 @@ fn prepare_root_access(
         guards.extend(profile.prepare_access(&path, access == RootAccess::Inspect)?);
         // 从外到内取锁，子目录中的配置沿用最近的测试档身份。
         startup = profile;
+        if directory == target {
+            return Ok((startup, guards));
+        }
+    }
+    if let Some(entry) = restored_root_identity(&target)? {
+        if access == RootAccess::Tray {
+            return Err(ProfileCommandError::TestInTray);
+        }
+        // 独立解压目录没有父档能重置它，也不应在其上级目录创建窗口锁。
+        startup = Startup::for_entry(&entry, false);
     }
     Ok((startup, guards))
+}
+
+/// 测试档单独导出时，自己的 profile.json 位于 ZIP 顶层。只读取用户选中的目录。
+fn restored_root_identity(directory: &Path) -> Result<Option<Entry>, String> {
+    if !crate::local_files::is_plain_directory(directory) {
+        return Ok(None);
+    }
+    let path = directory.join("profile.json");
+    let identity = match read_optional_profile_json::<serde_json::Value>(&path) {
+        Ok(Some(identity)) => identity,
+        Ok(None) => return Ok(None),
+        // 对原登记位置的损坏身份沿用 registered_test_profile 已检查的兼容行为。
+        Err(_)
+            if is_profile_directory(directory)
+                && directory
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(generated_profile_id) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    if identity.get("kind").and_then(|v| v.as_str()) != Some("test") {
+        return Ok(None);
+    }
+    let entry: Entry = serde_json::from_value(identity)
+        .map_err(|e| format!("测试档身份文件 {} 无效：{e}", path.display()))?;
+    if !generated_profile_id(&entry.id) {
+        return Err(format!("测试档身份文件 {} 的 ID 无效。", path.display()));
+    }
+    validate_alias(&entry.alias)?;
+    Ok(Some(entry))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1402,8 +1445,10 @@ fn daily_copy_slot(entry: &Entry) -> Option<u64> {
     None
 }
 
-fn read_copy_origin<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
-    let fail = |e| format!("无法读取测试副本来源 {}：{e}", path.display());
+fn read_optional_profile_json<T: serde::de::DeserializeOwned>(
+    path: &Path,
+) -> Result<Option<T>, String> {
+    let fail = |e| format!("无法读取配置档记录 {}：{e}", path.display());
     match path.symlink_metadata() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(fail(e)),
@@ -1413,7 +1458,7 @@ fn read_copy_origin<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Optio
                 .map(Some)
                 .map_err(|e| format!("{} 格式有误：{e}", path.display()))
         }
-        Ok(_) => Err(format!("测试副本来源须为普通本机文件：{}", path.display())),
+        Ok(_) => Err(format!("配置档记录须为普通本机文件：{}", path.display())),
     }
 }
 
@@ -1427,7 +1472,7 @@ fn daily_test_copy(root: &Path) -> Result<Entry, String> {
             continue;
         };
         let path = profile_dir(root, &entry.id).with_extension("copy-origin.json");
-        let origin = match read_copy_origin(&path) {
+        let origin = match read_optional_profile_json(&path) {
             Ok(origin) => origin,
             Err(error) => {
                 unreadable_origin.get_or_insert(error);
@@ -1733,13 +1778,17 @@ fn open_profile_use_file(directory: &Path) -> Result<std::fs::File, String> {
         .map_err(|error| format!("打开测试配置档使用锁 {} 失败：{error}", path.display()))
 }
 
-fn list_profiles(root: &Path, source: RootSource) -> Result<serde_json::Value, String> {
+fn list_profiles(
+    root: &Path,
+    source: RootSource,
+    test_name: Option<&str>,
+) -> Result<serde_json::Value, String> {
     let catalog = read_catalog(root)?;
     let mut profiles = vec![serde_json::json!({
         "id": DEFAULT_ID,
         "alias": DEFAULT_ID,
-        "kind": "local",
-        "name": "我的配置",
+        "kind": if test_name.is_some() { "test" } else { "local" },
+        "name": test_name.unwrap_or("我的配置"),
         "directory": root,
         "default": true,
     })];
@@ -1795,6 +1844,7 @@ fn run_command(
     root: &Path,
     source: RootSource,
     command: &Command,
+    root_startup: &Startup,
 ) -> Result<String, ProfileCommandError> {
     let value = match command {
         Command::Create { alias, seed, name } => {
@@ -1822,7 +1872,7 @@ fn run_command(
             }
             receipt
         }
-        Command::List => list_profiles(root, source)?,
+        Command::List => list_profiles(root, source, root_startup.test_name.as_deref())?,
     };
     Ok(value.to_string())
 }
@@ -2027,7 +2077,8 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     }
     if let Some(command) = &parsed.command {
         finish_command(
-            run_command(&root, source, command).map_err(ProfileCommandError::response),
+            run_command(&root, source, command, &root_startup)
+                .map_err(ProfileCommandError::response),
             parsed.result_file.as_deref(),
         );
     }
@@ -2070,6 +2121,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
         None => {
             let config = (source != RootSource::Default).then(|| root.join("bindings.json"));
             let mut startup = root_startup;
+            startup.listen |= parsed.listen;
             if interactive && source == RootSource::Default {
                 startup.external_copy_roots = local_app_data.map(|local| (root, local));
             }
@@ -3034,7 +3086,7 @@ mod tests {
         let empty = create_profile(&root, "blank", &Seed::Empty, None).unwrap();
         assert!(!profile_dir(&root, &empty.id).join("bindings.json").exists());
 
-        let listed = list_profiles(&root, RootSource::Flag).unwrap();
+        let listed = list_profiles(&root, RootSource::Flag, None).unwrap();
         let aliases: Vec<_> = listed["profiles"]
             .as_array()
             .unwrap()

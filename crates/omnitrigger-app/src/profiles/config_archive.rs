@@ -384,11 +384,24 @@ mod tests {
         assert!(excluded.iter().all(|p| !restored.path().join(p).exists()));
         let isolated = export_config_archive(&child_dir.join("bindings.json")).unwrap();
         assert_eq!(isolated.profiles, 1);
-        let zip = ZipArchive::new(File::open(isolated.path).unwrap()).unwrap();
+        let mut zip = ZipArchive::new(File::open(isolated.path).unwrap()).unwrap();
         assert!(!zip
             .file_names()
             .any(|n| n.starts_with("profiles/") || n == revision));
         assert!(zip.file_names().any(|n| n == state));
+        let detached = tempfile::tempdir().unwrap();
+        zip.extract(detached.path()).unwrap();
+        let config = detached.path().join("bindings.json");
+        use crate::profiles::{prepare_root_access, ProfileCommandError, RootAccess};
+        for access in [RootAccess::Inspect, RootAccess::Open] {
+            let (startup, locks) = prepare_root_access(&config, access).unwrap();
+            assert_eq!(startup.test_name.as_deref(), Some(child.name.as_str()));
+            assert!(startup.test_data && !startup.listen && locks.is_empty());
+        }
+        assert!(matches!(
+            prepare_root_access(&config, RootAccess::Tray),
+            Err(ProfileCommandError::TestInTray)
+        ));
     }
 
     #[test]
