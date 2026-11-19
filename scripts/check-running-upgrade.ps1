@@ -446,6 +446,40 @@ if ($LoginShortcut) {
     Write-Host '已通过实际登录快捷方式验证首次启动保持隐藏、监听就绪，重复启动复用同一进程。'
 }
 
+# 模拟重装时将单独导出的测试档解压到了默认目录，开始菜单入口应沿用其身份。
+$restoreLocal = Join-Path $probe.FullName 'restored-test-user'
+$restoreRoot = Join-Path $restoreLocal 'OmniTrigger'
+$restoreExternal = Join-Path $restoreLocal 'Packages\Example\LocalCache\Local\OmniTrigger'
+$restoreSource = Join-Path $probe.FullName 'export-source'
+$restoreZip = Join-Path $probe.FullName 'test-profile.zip'
+$null = & $appFile.FullName --data-root $restoreSource --profile-create journal --name '日志测试'
+if ($LASTEXITCODE) { throw '无法创建要还原的测试档。' }
+$null = & $appFile.FullName --data-root $restoreSource --profile journal --profile-export-zip $restoreZip
+if ($LASTEXITCODE) { throw '无法导出测试档。' }
+[IO.Compression.ZipFile]::ExtractToDirectory($restoreZip, $restoreRoot)
+$null = New-Item -ItemType Directory -Path $restoreExternal -Force
+[IO.File]::WriteAllText((Join-Path $restoreExternal 'bindings.json'), '{"version":24,"bindings":[]}')
+[IO.File]::SetLastWriteTimeUtc((Join-Path $restoreExternal 'bindings.json'), [DateTime]::UtcNow.AddHours(1))
+$restoreStart = New-AppStart
+$null = $restoreStart.Environment.Remove('OMNITRIGGER_HOME')
+$restoreStart.Environment['LOCALAPPDATA'] = $restoreLocal
+$restoredUi = [Diagnostics.Process]::Start($restoreStart)
+try {
+    $null = Wait-AppWindow $restoredUi '' 'OmniTrigger — 测试：日志测试'
+    if (-not $restoredUi.CloseMainWindow() -or -not $restoredUi.WaitForExit(10000) -or $restoredUi.ExitCode -ne 0) {
+        throw '还原的测试窗口关闭后应正常退出。'
+    }
+} finally { Stop-TestProcess $restoredUi }
+$restoreStart.ArgumentList.Add('--tray')
+$restoreStart.RedirectStandardError = $true
+$restoredTray = [Diagnostics.Process]::Start($restoreStart)
+try {
+    if (-not $restoredTray.WaitForExit(10000) -or $restoredTray.ExitCode -eq 0) { throw '托盘误启动了还原的测试档。' }
+    $reason = $restoredTray.StandardError.ReadToEnd() | ConvertFrom-Json
+    if ($reason.error.code -ne 'invalid_cli_arguments') { throw '托盘未说明测试档不可用于日常启动。' }
+} finally { Stop-TestProcess $restoredTray }
+Write-Host '已验证默认目录中的测试备份保留测试窗口和关闭行为，登录入口拒绝接管测试数据。'
+
 # 为 CI 安装版构造独立的默认目录，使外部副本提示走正常启动入口。
 $local = Join-Path $probe.FullName 'ignore-copy'
 $daily = Join-Path $local 'OmniTrigger'

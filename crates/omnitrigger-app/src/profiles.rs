@@ -2048,7 +2048,8 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
         exit_rejected("--tray 只用于启动日常工作区。");
     }
     // 打开配置档可能创建测试档或发布中断的副本，先拒绝无效的动作命令。
-    if crate::action_target_context::action_cli_requested(arguments) {
+    let action_command = crate::action_target_context::action_cli_requested(arguments);
+    if action_command {
         crate::action_target_context::validate_cli(arguments)
             .unwrap_or_else(|error| crate::reject_cli_arguments(&error));
     }
@@ -2126,7 +2127,10 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
         && !inspect_actions
         && env_root.is_none()
     {
-        // 未指定数据根的其他命令无需探测桌面或预先设置路径。
+        // 动作和窗口也可能打开还原到默认目录的测试档。辅助命令无需读取配置身份。
+        if action_command || crate::workspace_mode::WindowArguments::parse(arguments).is_ok() {
+            return open_root(&crate::settings::path());
+        }
         return (Startup::daily(), Vec::new());
     }
     if (check_config || inspect_actions)
@@ -2134,7 +2138,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
         && env_root.is_none()
         && local_app_data.is_none()
     {
-        return (Startup::daily(), Vec::new()); // 沿用 settings::path() 的临时目录回退。
+        return open_root(&crate::settings::path());
     }
     let (root, source) = resolve_root(
         parsed.data_root.as_deref(),
@@ -2157,11 +2161,9 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
             }),
         );
     }
-    let (root_startup, mut guards) = if source != RootSource::Default || tray {
-        open_root(&root.join("bindings.json"))
-    } else {
-        (Startup::daily(), Vec::new())
-    };
+    let root_config = root.join("bindings.json");
+    // 显式目录可能处在重置中，须先锁住现场；默认目录则在确定真实数据视图后再读身份。
+    let explicit_access = (source != RootSource::Default).then(|| open_root(&root_config));
     if (plain && !inspect_profile_tree) || interactive || tray || check_config {
         #[cfg(windows)]
         escape_redirect(
@@ -2175,6 +2177,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     if let Some(link) = &parsed.relaunched {
         let _ = std::fs::remove_file(link);
     }
+    let (root_startup, mut guards) = explicit_access.unwrap_or_else(|| open_root(&root_config));
     if let Some(command) = &parsed.command {
         finish_command(
             run_command(&root, source, command, &root_startup)
@@ -2222,7 +2225,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
             let config = (source != RootSource::Default).then(|| root.join("bindings.json"));
             let mut startup = root_startup;
             startup.listen |= parsed.listen;
-            if interactive && source == RootSource::Default {
+            if interactive && source == RootSource::Default && !startup.test_data {
                 startup.external_copy_roots = local_app_data.map(|local| (root, local));
             }
             (config, startup)

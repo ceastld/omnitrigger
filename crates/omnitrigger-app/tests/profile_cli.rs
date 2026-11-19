@@ -8,6 +8,7 @@ fn restored_test_root_routes_copied_clipboard_to_its_own_history() {
         Command::new(env!("CARGO_BIN_EXE_omnitrigger"))
             .args(args)
             .env_remove("OMNITRIGGER_HOME")
+            .env("LOCALAPPDATA", root)
             .output()
             .unwrap()
     };
@@ -22,7 +23,7 @@ fn restored_test_root_routes_copied_clipboard_to_its_own_history() {
     assert!(created.status.success());
     let entry: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
     let identity = Path::new(entry["directory"].as_str().unwrap()).join("profile.json");
-    let restored = root.join("还原的配置");
+    let restored = root.join("OmniTrigger");
     std::fs::create_dir(&restored).unwrap();
     std::fs::copy(identity, restored.join("profile.json")).unwrap();
     let call = root.join("toggle.json");
@@ -33,11 +34,12 @@ fn restored_test_root_routes_copied_clipboard_to_its_own_history() {
     .unwrap();
     let directory = restored.to_str().unwrap();
     let config = restored.join("bindings.json");
-    for (flag, path) in [
-        ("--data-root", directory),
-        ("--config", config.to_str().unwrap()),
+    for selection in [
+        &[][..],
+        &["--data-root", directory],
+        &["--config", config.to_str().unwrap()],
     ] {
-        let output = run(&[flag, path, "--check-action", call.to_str().unwrap()]);
+        let output = run(&[selection, &["--check-action", call.to_str().unwrap()]].concat());
         assert!(
             output.status.success(),
             "{}",
@@ -46,10 +48,20 @@ fn restored_test_root_routes_copied_clipboard_to_its_own_history() {
         let checked: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(checked["handler"], "workspace_text_history");
     }
-    let listed = run(&["--data-root", directory, "--profile-list"]);
-    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
-    assert_eq!(listed["profiles"][0]["kind"], "test");
-    assert_eq!(listed["profiles"][0]["name"], "笔记测试");
+    for args in [
+        &["--profile-list"][..],
+        &["--data-root", directory, "--profile-list"],
+    ] {
+        let listed = run(args);
+        assert!(
+            listed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listed.stderr)
+        );
+        let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+        assert_eq!(listed["profiles"][0]["kind"], "test");
+        assert_eq!(listed["profiles"][0]["name"], "笔记测试");
+    }
     assert_eq!(std::fs::read_dir(&restored).unwrap().count(), 1);
     // 即使解压目录恰好位于 profiles 下，也不能把未登记的测试数据交给日常动作。
     let other = root.join("other");

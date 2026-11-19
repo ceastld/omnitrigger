@@ -245,6 +245,8 @@ ZIP 包含下文列出的配置和扩展状态，以及热键、轮盘的编辑�
 
 从测试档单独导出的 ZIP 可以解压到新的本机目录。运行 `omnitrigger.exe --data-root <解压目录> --settings`，窗口会显示原测试档名称，默认关闭全局监听。复制来的剪贴板切换热键仍使用这个目录自己的文本历史。要在这份副本中测试真实按键，使用 `--data-root <解压目录> --profile default --listen`。
 
+如果重装时把这份测试备份还原到了默认数据目录，从开始菜单打开 OmniTrigger 也会显示原测试档名称，并保持监听关闭。`--profile-list` 可以核对身份。登录时的托盘入口只启动日常档，读到测试档身份会直接退出。
+
 要试读备份，可将 ZIP 解压到一个新的本机目录，运行 `omnitrigger.exe --data-root <解压目录> --profile-list`，再用 `omnitrigger.exe --data-root <解压目录> --profile <别名> --check-config` 检查该档。要核对已有 ZIP 是否跟得上最近的编辑，将下面的 `$archive` 换成实际文件路径。
 
 ```powershell
