@@ -10,8 +10,8 @@ use crate::{
     ActionSpec, Context, Div, Icon, Page, Tone, Workspace,
 };
 use gpui::{
-    deferred, div, prelude::*, px, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent,
-    Stateful,
+    anchored, deferred, div, point, prelude::*, px, FontWeight, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Stateful,
 };
 use std::{cell::Cell, rc::Rc};
 
@@ -423,10 +423,11 @@ impl Workspace {
                 .map_or_else(|| "通用".into(), WheelScope::label);
             let open = self.wheel_scope_open;
             let mut options = div()
-                .absolute()
-                .top(px(40.))
-                .left(px(0.))
+                .id("wheel-scope-options")
                 .w(px(200.))
+                .max_h(px(280.))
+                .overflow_y_scroll()
+                .track_scroll(&self.wheel_scope_scroll)
                 .p(px(4.))
                 .rounded(px(10.))
                 .border_1()
@@ -438,14 +439,19 @@ impl Workspace {
                 .flex_col()
                 .gap(px(2.));
             let choices = std::iter::once(None).chain(scope_choices.into_iter().map(Some));
+            let mut selected_index = 0;
             for (index, choice) in choices.enumerate() {
                 let active = choice == scope;
+                if active {
+                    selected_index = index;
+                }
                 let name = choice
                     .as_ref()
                     .map_or_else(|| "通用".into(), WheelScope::label);
                 options = options.child(
                     div()
                         .id(("wheel-scope", index as u64))
+                        .flex_none()
                         .px(px(10.))
                         .py(px(7.))
                         .rounded(px(7.))
@@ -496,21 +502,19 @@ impl Workspace {
                                             .text_color(rgb(MUTED))
                                             .child(if open { "▲" } else { "▼" }),
                                     )
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .on_click(cx.listener(move |this, _, _, cx| {
                                         this.wheel_scope_open = !this.wheel_scope_open;
+                                        if this.wheel_scope_open {
+                                            this.wheel_scope_scroll.scroll_to_item(selected_index);
+                                        }
                                         cx.notify();
                                     })),
                             )
-                            .when(open, |el| el.child(deferred(options).with_priority(1))),
-                    )
-                    .when(matches!(scope, Some(WheelScope::Scene(_))), |el| {
-                        el.child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(rgb(MUTED))
-                                .child("改动只在此场景生效，其余格子沿用通用动作"),
-                        )
-                    }),
+                            .when(open, |el| {
+                                let menu = anchored().offset(point(px(0.), px(4.))).child(options);
+                                el.child(deferred(menu).with_priority(1))
+                            }),
+                    ),
             );
         }
         let moving_label = self
@@ -526,6 +530,10 @@ impl Workspace {
             .h(px(38.))
             .flex()
             .items_center()
+            .when(
+                !self.wheel_moving && matches!(scope, Some(WheelScope::Scene(_))),
+                |el| el.child(label("改动只在此场景生效，其余格子沿用通用动作").text_size(px(12.))),
+            )
             .when_some(moving_label, |el, name| {
                 el.child(
                     div()

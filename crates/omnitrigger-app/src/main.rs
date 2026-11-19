@@ -803,6 +803,7 @@ struct Workspace {
     wheel_scope: Option<wheel_workspace::WheelScope>,
     /// 应用范围下拉是否展开。
     wheel_scope_open: bool,
+    wheel_scope_scroll: gpui::ScrollHandle,
     /// 鼠标悬停的格子，只用于提亮显示。
     wheel_hover: Option<(u8, u8)>,
     wheel_source_binding: Option<u64>,
@@ -1306,6 +1307,7 @@ impl Workspace {
             wheel_replacing: false,
             wheel_scope: None,
             wheel_scope_open: false,
+            wheel_scope_scroll: gpui::ScrollHandle::new(),
             wheel_hover: None,
             wheel_source_binding: None,
             wheel_window: None,
