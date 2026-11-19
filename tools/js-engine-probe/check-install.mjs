@@ -21,8 +21,7 @@ const root = mkdtempSync(join(repo, '.tmp/script-install-check-'));
 const app = join(root,'application.exe');
 cpSync(sourceApp,app,{errorOnExist:true});
 const config = join(root, 'bindings.json');
-const emptyBindings = JSON.stringify({version:24,bindings:[]});
-writeFileSync(config, emptyBindings);
+writeFileSync(config, '[]');
 const env = {...process.env, OMNITRIGGER_NODE:join(root, 'missing-node.exe')};
 delete env.OMNITRIGGER_SCRIPT_HOST;
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -239,6 +238,8 @@ assert.equal(cli(['--run-action',project.call_path],0,copiedArgs).output.text,'c
 assert.equal(cli(['--run-action',project.call_path]).output.text,'OmniTrigger');
 const restored = join(root,'standalone-test');
 const backupZip = join(root,'standalone-test.zip');
+// 文件打开探针要求来源保持原始空数组；要还原的测试副本使用应用的热键文档格式。
+writeFileSync(join(copy.directory,'bindings.json'),JSON.stringify({version:24,bindings:[]}));
 const exported = cli(['--profile-export-zip',backupZip],0,copiedArgs);
 assert.equal(exported.profiles,1);
 assert(exported.files > 0 && exported.bytes > 0);
@@ -380,7 +381,7 @@ assert.equal(install(development.archive).status,'installed');
 assert.equal(readFileSync(pointer,'utf8'),firstPointer);
 checks.push('blocked_switch_preserves_active_actions_and_retry_activates_the_requested_package');
 
-assert.equal(readFileSync(config,'utf8'),emptyBindings);
+assert.equal(readFileSync(config,'utf8'),'[]');
 const result = {passed:true,root,checks,personalBindingsModified:false,engine:development.engine,archive_sha256:development.sha256};
 writeFileSync(join(root,'result.json'),JSON.stringify(result,null,2));
 console.log(JSON.stringify(result));
