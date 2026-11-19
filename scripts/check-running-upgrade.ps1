@@ -454,6 +454,35 @@ $restoreSource = Join-Path $probe.FullName 'export-source'
 $restoreZip = Join-Path $probe.FullName 'test-profile.zip'
 $created = & $appFile.FullName --data-root $restoreSource --profile-create journal --name '日志测试' | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $created.status -ne 'created') { throw '无法创建要还原的测试档。' }
+$namedStart = New-AppStart
+$namedStart.Environment['OMNITRIGGER_HOME'] = $restoreSource
+$namedStart.ArgumentList.Add('--profile')
+$namedStart.ArgumentList.Add($created.id)
+$namedUi = [Diagnostics.Process]::Start($namedStart)
+try {
+    $title = 'OmniTrigger — 测试：日志测试'
+    $originalWindow = Wait-AppWindow $namedUi '' $title
+    $defaultStart = New-AppStart
+    $defaultStart.Environment['OMNITRIGGER_HOME'] = $created.directory
+    $defaultStart.ArgumentList.Add('--profile')
+    $defaultStart.ArgumentList.Add('default')
+    $defaultStart.ArgumentList.Add('--settings')
+    $reopen = [Diagnostics.Process]::Start($defaultStart)
+    try {
+        if (-not $reopen.WaitForExit(15000) -or $reopen.ExitCode -ne 0 -or
+            (Wait-AppWindow $namedUi '' $title) -ne $originalWindow) {
+            throw '从测试档目录选择 default 时没有唤回原编辑窗口。'
+        }
+    } finally { Stop-TestProcess $reopen }
+    $defaultStart.ArgumentList.Add('--listen')
+    $listening = [Diagnostics.Process]::Start($defaultStart)
+    try {
+        $listeningWindow = Wait-AppWindow $listening '' $title
+        if ($listeningWindow -eq $originalWindow -or $namedUi.HasExited) { throw '显式监听窗口应与原编辑窗口分开。' }
+        if (-not $listening.CloseMainWindow() -or -not $listening.WaitForExit(15000) -or $listening.ExitCode) { throw '显式监听的测试窗口未正常退出。' }
+    } finally { Stop-TestProcess $listening }
+    if (-not $namedUi.CloseMainWindow() -or -not $namedUi.WaitForExit(15000) -or $namedUi.ExitCode) { throw '测试档的编辑窗口未正常退出。' }
+} finally { Stop-TestProcess $namedUi }
 $exported = & $appFile.FullName --data-root $restoreSource --profile $created.id --profile-export-zip $restoreZip | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0 -or $exported.profiles -ne 1) { throw '无法导出测试档。' }
 [IO.Compression.ZipFile]::ExtractToDirectory($restoreZip, $restoreRoot)

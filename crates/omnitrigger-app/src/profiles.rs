@@ -2226,7 +2226,10 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
         None => {
             let config = (source != RootSource::Default).then(|| root.join("bindings.json"));
             let mut startup = root_startup;
-            startup.listen |= parsed.listen;
+            // 用配置档名称选择测试档时只接受显式监听。同一目录也可能通过旧的裸路径入口启动。
+            if startup.test_data && parsed.profile.as_deref() == Some(DEFAULT_ID) {
+                startup.listen = parsed.listen;
+            }
             if interactive && source == RootSource::Default && !startup.test_data {
                 startup.external_copy_roots = local_app_data.map(|local| (root, local));
             }
