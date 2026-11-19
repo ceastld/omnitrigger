@@ -222,10 +222,23 @@ jobs:
               $edited = Join-Path $restored.directory 'bindings.json'
               Copy-Item -LiteralPath 'examples/application-scopes.json' -Destination $edited -Force
               $expected[$edited] = (Get-FileHash -LiteralPath $edited).Hash
+              $configZip = Join-Path $env:RUNNER_TEMP '配置还原.zip'
+              $export = & $exe --profile $custom.id --profile-export-zip $configZip | ConvertFrom-Json
+              if ($LASTEXITCODE -or $export.profiles -ne 1) { throw '安装版导出测试档 ZIP 失败。' }
+              $zipRestored = & $exe --profile-create restored-zip --seed "zip:$configZip" | ConvertFrom-Json
+              if ($LASTEXITCODE -or $zipRestored.status -ne 'created') { throw '安装版从 ZIP 创建测试档失败。' }
+              $expected[(Join-Path $zipRestored.directory 'bindings.json')] = $expected[$customHotkeys]
+              $expected[(Join-Path $zipRestored.directory 'wheels.json')] = $expected[$wheels]
+              $expected[(Join-Path $zipRestored.directory 'actions/n10-rust/action.json')] = $expected[$n10Manifest]
+              Assert-ProfileFiles
             } else {
               $all = & $exe --profile-list | ConvertFrom-Json
               $customAfter = @($all.profiles | Where-Object { $_.alias -ceq 'daily-copy' })
               if ($LASTEXITCODE -or $customAfter.Count -ne 1 -or $customAfter[0].id -cne $custom.id) { throw '重装后同名自建档的登记身份不符。' }
+              $fromZip = @($all.profiles | Where-Object { $_.alias -ceq 'restored-zip' })
+              if ($fromZip.Count -ne 1 -or $fromZip[0].id -cne $zipRestored.id) { throw '重装后 ZIP 测试副本的身份有误。' }
+              & $exe --profile $fromZip[0].id --check-config | Out-Host
+              if ($LASTEXITCODE) { throw '重装后读取 ZIP 测试副本失败。' }
               $env:OMNITRIGGER_QA_PROFILE_ROOT = $data
               $env:OMNITRIGGER_QA_INSTALLED_EXE = $exe
               $env:OMNITRIGGER_QA_NAMED_ID = $custom.id

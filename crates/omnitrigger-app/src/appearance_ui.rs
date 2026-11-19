@@ -54,7 +54,9 @@ impl Workspace {
     }
 
     fn select_test_profile(&mut self, action: TestProfileAction, cx: &mut Context<Self>) {
-        if self.test_profiles_busy || self.test_data {
+        if self.test_profiles_busy
+            || (self.test_data && matches!(action, TestProfileAction::DailyCopy))
+        {
             return;
         }
         self.test_profiles_error = None;
@@ -237,12 +239,11 @@ impl Workspace {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let test_profiles = (!self.test_data).then(|| {
-            let can_copy = crate::settings::path()
-                .file_name()
-                .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json"));
-            self.render_test_profiles(can_copy, cx)
-        });
+        let standard = crate::settings::path()
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json"));
+        let test_profiles = (standard || !self.test_data)
+            .then(|| self.render_test_profiles(standard && !self.test_data, cx));
         let choices = Mode::ALL.into_iter().enumerate().map(|(index, mode)| {
             let selected = self.theme_mode == mode;
             card()

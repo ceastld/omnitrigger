@@ -251,6 +251,16 @@ assert.equal(readFileSync(join(restored,'runtimes/script/current.json'),'utf8'),
 const restoredCall = join(restored,relative(root,project.call_path));
 assert.equal(cli(['--run-action',restoredCall],0,['--data-root',restored]).output.text,'copied profile');
 checks.push('standalone_backup_executes_the_copied_script_using_its_restored_host');
+const importRoot = ['--data-root',join(root,'zip-import-tests')];
+const imported = cli(['--profile-create','zip-test','--seed',`zip:${backupZip}`],0,importRoot);
+assert.equal(readFileSync(join(imported.directory,'runtimes/script/current.json'),'utf8'),firstPointer);
+const derived = cli(['--profile-create','derived','--seed','copy:zip-test'],0,importRoot);
+assert(!existsSync(join(derived.directory,'runtimes/script/current.json')));
+for (const profile of [imported,derived]) {
+  const call = join(profile.directory,relative(root,project.call_path));
+  assert.equal(cli(['--run-action',call],0,[...importRoot,'--profile',profile.id]).output.text,'copied profile');
+}
+checks.push('zip_seed_restores_working_script_and_supplies_runtime_to_derived_profile');
 const cleared = {...env, OMNITRIGGER_NODE:'', OMNITRIGGER_SCRIPT_HOST:''};
 const missing = {...env, OMNITRIGGER_SCRIPT_HOST:join(root,'missing-script-host.exe')};
 for (const [profileArgs,text] of [[['--config',config],'OmniTrigger'],[copiedArgs,'copied profile']]) {

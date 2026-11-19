@@ -11,6 +11,8 @@ use std::{
     time::SystemTime,
 };
 use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipArchive, ZipWriter};
+mod restore;
+pub(super) use restore::{archive_digest, restore_archive};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -141,6 +143,10 @@ impl Inventory {
     }
 
     fn collect(root: &Path) -> Result<Self> {
+        Self::collect_profile_files(root, true)
+    }
+
+    fn collect_profile_files(root: &Path, include_inherited: bool) -> Result<Self> {
         if !crate::local_files::is_plain_directory(root) {
             return Err(format!("配置档目录不可用：{}", root.display()).into());
         }
@@ -211,15 +217,17 @@ impl Inventory {
                 pending.push(checked_profile_dir(&directory, &entry)?);
             }
         }
-        for (destination, source) in
-            script_runtime::inherited_backup_sources(&inventory.profiles, &own_hosts)?
-        {
-            for (path, hash) in script_runtime::inherited_backup_files(&source)? {
-                let member = destination.join(path.strip_prefix(&source)?);
-                let meta = metadata(&path)?.ok_or("来源档的脚本宿主文件已变更。")?;
-                inventory.add_named(name(root, &member)?, &path, meta, hash)?;
+        if include_inherited {
+            for (destination, source) in
+                script_runtime::inherited_backup_sources(&inventory.profiles, &own_hosts)?
+            {
+                for (path, hash) in script_runtime::inherited_backup_files(&source)? {
+                    let member = destination.join(path.strip_prefix(&source)?);
+                    let meta = metadata(&path)?.ok_or("来源档的脚本宿主文件已变更。")?;
+                    inventory.add_named(name(root, &member)?, &path, meta, hash)?;
+                }
+                inventory.inherited_sources.insert(source);
             }
-            inventory.inherited_sources.insert(source);
         }
         if inventory.files.is_empty() {
             return Err("本档还没有可导出的配置。".into());
@@ -533,6 +541,113 @@ mod tests {
         })).unwrap());
         put(root, "runtimes/script/packages/inactive/host.exe", b"older");
         package
+    }
+
+    #[test]
+    fn zip_seed_restores_nested_profiles_state_history_and_the_archived_runtime() {
+        use crate::profiles::{read_catalog, reset_profile};
+        let source = tempfile::tempdir().unwrap();
+        let src = source.path();
+        let config = br#"{"version":24,"bindings":[]}"#;
+        put(src, "bindings.json", config);
+        let child = create_profile(src, "child", &Seed::Copy("default".into()), None).unwrap();
+        let state_name = format!(
+            "action-state/{}.json",
+            digest(br#"{"package_id":"demo","action_id":"echo"}"#.as_slice()).unwrap()
+        );
+        let state = br#"{"schema_version":1,"revision":2,"scope":{"package_id":"demo","action_id":"echo"},"values":{"example":42}}"#;
+        put(&profile_dir(src, &child.id), &state_name, state);
+        let edit = "backups/edits/bindings.json/edit-0000000000000001.json";
+        put(src, edit, b"previous");
+        let edit_time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        File::options()
+            .write(true)
+            .open(src.join(edit))
+            .unwrap()
+            .set_modified(edit_time)
+            .unwrap();
+        let host = put_managed_host(src)
+            .join("host.exe")
+            .strip_prefix(src)
+            .unwrap()
+            .to_owned();
+        let zip = export_config_archive(&src.join("bindings.json"))
+            .unwrap()
+            .path;
+        let destination = tempfile::tempdir().unwrap();
+        let root = destination.path();
+        put(root, "bindings.json", b"original");
+        let seed = Seed::Zip {
+            path: zip.clone(),
+            digest: None,
+        };
+        let entry = create_profile(root, "restored", &seed, None).unwrap();
+        let imported = profile_dir(root, &entry.id);
+        assert_eq!(fs::read(root.join("bindings.json")).unwrap(), b"original");
+        assert_eq!(
+            read_catalog(&imported).unwrap().profiles.as_slice(),
+            std::slice::from_ref(&child)
+        );
+        assert_eq!(
+            fs::read(profile_dir(&imported, &child.id).join(state_name)).unwrap(),
+            state
+        );
+        assert_eq!(fs::read(imported.join(edit)).unwrap(), b"previous");
+        assert_eq!(
+            fs::metadata(imported.join(edit))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            edit_time
+        );
+        assert_eq!(fs::read(imported.join(&host)).unwrap(), b"fixture");
+        assert!(entry.seed.starts_with("zip-sha256:"));
+        put(&imported, "bindings.json", b"edited");
+        let previous = reset_profile(root, "restored").unwrap().backup.unwrap();
+        assert_eq!(fs::read(previous.join("bindings.json")).unwrap(), b"edited");
+        assert_eq!(fs::read(imported.join("bindings.json")).unwrap(), config);
+        assert_eq!(fs::read(imported.join(host)).unwrap(), b"fixture");
+        put(&imported, "bindings.json", b"still editing");
+        fs::write(&zip, b"changed archive").unwrap();
+        assert!(reset_profile(root, "restored").is_err());
+        assert_eq!(
+            fs::read(imported.join("bindings.json")).unwrap(),
+            b"still editing"
+        );
+    }
+
+    #[test]
+    fn invalid_zip_seed_never_publishes_a_partial_profile() {
+        let source = tempfile::tempdir().unwrap();
+        let src = source.path();
+        let root = tempfile::tempdir().unwrap();
+        let state_path = format!("action-state/{}.json", "a".repeat(64));
+        for (file, bytes) in [
+            ("bindings.json", b"bad config".as_slice()),
+            (state_path.as_str(), b"bad state"),
+        ] {
+            put(src, file, bytes);
+            let zip = export_config_archive(&src.join("bindings.json"))
+                .unwrap()
+                .path;
+            let error = create_profile(
+                root.path(),
+                "new",
+                &Seed::Zip {
+                    path: zip,
+                    digest: None,
+                },
+                None,
+            )
+            .unwrap_err();
+            assert!(error.contains("无法还原配置 ZIP"), "{error}");
+            assert!(read_catalog(root.path()).unwrap().profiles.is_empty());
+            assert_eq!(
+                fs::read_dir(root.path().join("profiles")).unwrap().count(),
+                0
+            );
+            fs::remove_file(src.join(file)).unwrap();
+        }
     }
 
     #[test]

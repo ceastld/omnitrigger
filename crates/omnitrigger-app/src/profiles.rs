@@ -295,6 +295,10 @@ impl Arguments {
 enum Seed {
     Empty,
     Fixture(PathBuf),
+    Zip {
+        path: PathBuf,
+        digest: Option<String>,
+    },
     Copy(String),
     Backup {
         source: String,
@@ -307,6 +311,22 @@ impl Seed {
     fn parse(text: &str) -> Result<Self, String> {
         if text == "empty" {
             return Ok(Self::Empty);
+        }
+        if let Some(path) = text.strip_prefix("zip:").filter(|s| !s.is_empty()) {
+            return Ok(Self::Zip {
+                path: path.into(),
+                digest: None,
+            });
+        }
+        if let Some(record) = text.strip_prefix("zip-sha256:") {
+            let (hash, path) = record.split_once(':').ok_or("ZIP 种子缺少路径或摘要。")?;
+            if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) || path.is_empty() {
+                return Err("ZIP 种子的路径或摘要无效。".into());
+            }
+            return Ok(Self::Zip {
+                path: path.into(),
+                digest: Some(hash.to_ascii_lowercase()),
+            });
         }
         if let Some(path) = text
             .strip_prefix("fixture:")
@@ -351,7 +371,7 @@ impl Seed {
             });
         }
         Err(format!(
-            "未知种子 {text}；可用 empty、fixture:<目录>、copy:<配置档> 或 backup:<配置档>:<热键版本>:<轮盘版本>。"
+            "未知种子 {text}。可使用 empty、fixture:<目录>、zip:<文件>、copy:<配置档> 或 backup:<配置档>:<热键版本>:<轮盘版本>。"
         ))
     }
 
@@ -359,6 +379,11 @@ impl Seed {
         match self {
             Self::Empty => "empty".into(),
             Self::Fixture(path) => format!("fixture:{}", path.display()),
+            Self::Zip {
+                path,
+                digest: Some(hash),
+            } => format!("zip-sha256:{hash}:{}", path.display()),
+            Self::Zip { path, digest: None } => format!("zip:{}", path.display()),
             Self::Copy(source) => format!("copy:{source}"),
             Self::Backup {
                 source,
@@ -378,6 +403,17 @@ impl Seed {
 
     fn for_creation(&self) -> Result<Self, String> {
         match self {
+            Self::Zip { path, digest } => {
+                let path = std::path::absolute(path).map_err(|e| e.to_string())?;
+                let hash = match digest {
+                    Some(hash) => hash.clone(),
+                    None => config_archive::archive_digest(&path)?,
+                };
+                Ok(Self::Zip {
+                    path,
+                    digest: Some(hash),
+                })
+            }
             Self::Fixture(path) => std::path::absolute(path)
                 .map(Self::Fixture)
                 .map_err(|error| format!("夹具目录 {} 无效：{error}", path.display())),
@@ -857,7 +893,7 @@ fn trace_seed_sources<'a>(
     let mut sources = Vec::new();
     loop {
         let (path, alias, upstream) = match Seed::parse(&entry.seed) {
-            Ok(Seed::Empty) => break,
+            Ok(Seed::Empty | Seed::Zip { .. }) => break,
             Ok(Seed::Copy(key) | Seed::Backup { source: key, .. }) if key == DEFAULT_ID => {
                 (root.to_path_buf(), root_alias.map(Path::to_path_buf), None)
             }
@@ -1288,6 +1324,11 @@ fn seed_into(
     previous_profile: Option<&Path>,
 ) -> Result<(), String> {
     match seed {
+        Seed::Zip { path, digest } => config_archive::restore_archive(
+            path,
+            digest.as_deref().ok_or("ZIP 种子缺少原文件摘要。")?,
+            target,
+        ),
         Seed::Empty => std::fs::create_dir_all(target)
             .map_err(|error| format!("创建 {} 失败：{error}", target.display())),
         Seed::Fixture(path) => {
@@ -1760,7 +1801,11 @@ fn reset_profile(root: &Path, key: &str) -> Result<ResetResult, ProfileCommandEr
         .map_err(|error| format!("创建 {} 失败：{error}", staging.display()))?;
     let result = (|| {
         seed_into(root, &catalog, &seed, &entry, &staging, Some(&directory))?;
-        let runtime_warning = crate::script_runtime::preserve_on_reset(&directory, &staging)?;
+        let runtime_warning = if matches!(seed, Seed::Zip { .. }) {
+            None
+        } else {
+            crate::script_runtime::preserve_on_reset(&directory, &staging)?
+        };
         write_json(&staging.join("profile.json"), &entry)?;
         // 还原后可能只有各档的身份文件。在移走原目录前先保存其登记。
         persist_recovered_catalog(root, &catalog)?;

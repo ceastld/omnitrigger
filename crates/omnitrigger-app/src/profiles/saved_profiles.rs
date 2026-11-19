@@ -1,4 +1,4 @@
-//! 日常设置中的测试档选择器。列表只读，用户选定后才恢复该档并启动窗口。
+//! 当前数据根中的测试档选择器。选定已有配置档后才启动窗口。
 use super::{
     catalog_path, generated_profile_id, lock_catalog, profile_dir, read_catalog, source_dir,
     spawn_test_profile, Catalog, Entry,
@@ -52,6 +52,29 @@ pub(super) fn prepare_test_open(
 }
 
 impl SavedTestProfile {
+    pub(crate) fn from_config_zip(
+        config: &Path,
+        archive: &Path,
+        alias: &str,
+    ) -> Result<Self, String> {
+        let root = std::path::absolute(config).map_err(|e| e.to_string())?;
+        let root = root.parent().ok_or("无法确定当前配置档目录。")?;
+        crate::script_runtime::check_local_path(&root.join("profiles"))?;
+        let title = archive
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("配置备份");
+        let seed = super::Seed::Zip {
+            path: archive.to_owned(),
+            digest: None,
+        };
+        let entry = super::create_profile(root, alias, &seed, Some(title))?;
+        Ok(Self {
+            root: root.to_owned(),
+            entry,
+        })
+    }
+
     pub(crate) fn labels(&self) -> (&str, &str) {
         (&self.entry.name, &self.entry.alias)
     }

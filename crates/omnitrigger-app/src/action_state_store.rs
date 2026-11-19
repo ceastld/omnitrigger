@@ -131,6 +131,11 @@ impl FileActionStateStorage {
 
     /// 只把已经验证过的原始字节写进待发布的配置档，避免再次打开可能已被替换的来源。
     pub(super) fn restore_document(source: &Path, destination_dir: &Path) -> std::io::Result<()> {
+        let (name, bytes) = Self::read_restore_document(source)?;
+        File::create_new(destination_dir.join(name))?.write_all(&bytes)
+    }
+
+    pub(super) fn read_restore_document(source: &Path) -> std::io::Result<(String, Vec<u8>)> {
         let invalid = |reason: &str| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -151,7 +156,7 @@ impl FileActionStateStorage {
         {
             return Err(invalid("文件名与记录的动作标识不符"));
         }
-        File::create_new(destination_dir.join(name))?.write_all(&bytes)
+        Ok((name, bytes))
     }
     fn version(bytes: Option<&[u8]>) -> String {
         bytes.map_or_else(|| "missing".into(), digest)

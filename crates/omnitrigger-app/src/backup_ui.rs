@@ -11,6 +11,8 @@ pub(super) struct BackupRestore {
     created: Option<profiles::RestoredCopy>,
     saved: Option<Vec<profiles::RestoredCopy>>,
     archive: Option<std::path::PathBuf>,
+    imported: Option<profiles::SavedTestProfile>,
+    pending_zip: Option<(std::path::PathBuf, String)>,
     notice: Option<String>,
 }
 
@@ -44,6 +46,72 @@ impl Versions {
 }
 
 impl Workspace {
+    fn import_config_archive(&mut self, cx: &mut Context<Self>) {
+        if self.backup_restore.busy {
+            return;
+        }
+        let picker = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("从 ZIP 新建测试副本".into()),
+        });
+        self.backup_restore.busy = true;
+        let config = settings::path();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let paths = picker
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
+                let Some(archive) = paths.and_then(|mut paths| paths.pop()) else {
+                    return Ok(None);
+                };
+                let alias = this
+                    .update(cx, |this, cx| {
+                        let state = &mut this.backup_restore;
+                        state.notice = Some("正在校验 ZIP 并创建测试副本…".into());
+                        state.imported = None;
+                        let alias = state
+                            .pending_zip
+                            .as_ref()
+                            .filter(|(path, _)| path == &archive)
+                            .map(|(_, alias)| alias.clone())
+                            .unwrap_or_else(profiles::new_restore_alias);
+                        state.pending_zip = Some((archive.clone(), alias.clone()));
+                        cx.notify();
+                        alias
+                    })
+                    .map_err(|e| e.to_string())?;
+                cx.background_executor()
+                    .spawn(async move {
+                        profiles::SavedTestProfile::from_config_zip(&config, &archive, &alias)
+                    })
+                    .await
+                    .map(Some)
+            }
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                let state = &mut this.backup_restore;
+                state.busy = false;
+                match result {
+                    Ok(Some(copy)) => {
+                        state.notice =
+                            Some(format!("已从 ZIP 创建测试副本“{}”。", copy.labels().0));
+                        state.imported = Some(copy);
+                        state.pending_zip = None;
+                        this.saved_test_profiles = None;
+                    }
+                    Ok(None) => {}
+                    Err(error) => state.notice = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn export_config_archive(&mut self, cx: &mut Context<Self>) {
         if self.backup_restore.busy {
             return;
@@ -181,7 +249,7 @@ impl Workspace {
             return;
         }
         if let Some(copy) = self.backup_restore.created.clone() {
-            self.open_restored_copy(copy, cx);
+            self.open_backup_copy(move || copy.open(), cx);
             return;
         }
         let Some([bindings, wheels]) = self.backup_restore.choices.as_ref() else {
@@ -256,7 +324,11 @@ impl Workspace {
         .detach();
     }
 
-    fn open_restored_copy(&mut self, copy: profiles::RestoredCopy, cx: &mut Context<Self>) {
+    fn open_backup_copy(
+        &mut self,
+        open: impl FnOnce() -> Result<(), String> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
         if self.backup_restore.busy {
             return;
         }
@@ -264,10 +336,7 @@ impl Workspace {
         self.backup_restore.notice = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { copy.open() })
-                .await;
+            let result = cx.background_executor().spawn(async move { open() }).await;
             let _ = this.update(cx, |this, cx| {
                 this.backup_restore.busy = false;
                 this.backup_restore.notice = result.err();
@@ -305,6 +374,15 @@ impl Workspace {
                             )
                             .on_click(cx.listener(|this, _, _, cx| this.export_config_archive(cx))),
                         )
+                        .child(
+                            theme::button(
+                                "import-config-archive",
+                                "从 ZIP 新建测试副本",
+                                theme::Tone::Secondary,
+                                !state.busy,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.import_config_archive(cx))),
+                        )
                         .when_some(state.archive.clone(), |row, path| {
                             row.child(
                                 theme::button(
@@ -318,6 +396,20 @@ impl Workspace {
                         }),
                 )
             })
+            .when_some(state.imported.clone(), |el, copy| {
+                el.child(
+                    theme::button(
+                        "open-zip-copy",
+                        "打开 ZIP 测试副本",
+                        theme::Tone::Secondary,
+                        !state.busy,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let copy = copy.clone();
+                        this.open_backup_copy(move || copy.open(), cx)
+                    })),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -327,7 +419,7 @@ impl Workspace {
                         el.child(
                             theme::button(
                                 "choose-backup",
-                                "从备份新建测试副本",
+                                "从编辑历史新建测试副本",
                                 theme::Tone::Secondary,
                                 !state.busy,
                             )
@@ -394,7 +486,10 @@ impl Workspace {
                                 !state.busy,
                             )
                             .on_click(cx.listener(
-                                move |this, _, _, cx| this.open_restored_copy(item.clone(), cx),
+                                move |this, _, _, cx| {
+                                    let copy = item.clone();
+                                    this.open_backup_copy(move || copy.open(), cx)
+                                },
                             )),
                         )
                 }))
