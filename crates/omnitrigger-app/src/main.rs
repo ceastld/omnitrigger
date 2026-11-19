@@ -792,6 +792,8 @@ struct Workspace {
     wheel_selected: Option<String>,
     wheel_name: Entity<MessageInput>,
     wheel_copy_target: Entity<MessageInput>,
+    /// 等待用户确认改用通用布局的轮盘 ID 和进程名。
+    wheel_reset_pending: Option<(String, String)>,
     wheel_slot_label: Entity<MessageInput>,
     wheel_slot_shortcut: Entity<MessageInput>,
     wheel_slot_selected: Option<usize>,
@@ -1310,6 +1312,7 @@ impl Workspace {
             wheel_selected,
             wheel_name,
             wheel_copy_target,
+            wheel_reset_pending: None,
             wheel_slot_label,
             wheel_slot_shortcut,
             wheel_slot_selected: None,
@@ -1449,6 +1452,7 @@ impl Workspace {
             return;
         }
         self.wheel_preview = None;
+        self.wheel_reset_pending = None;
         if page != Page::TextHistory {
             self.text_history.cancel_send();
         }

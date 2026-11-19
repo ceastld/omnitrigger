@@ -681,6 +681,7 @@ impl Workspace {
     }
 
     pub(super) fn replace_wheels(&mut self, wheels: Wheels, cx: &mut Context<Self>) {
+        self.wheel_reset_pending = None;
         self.hide_wheel(cx);
         self.wheel_preview = None;
         remap_wheel_runtime_ids(&self.wheels, &wheels, &mut self.wheel_runtime_ids);
@@ -834,6 +835,7 @@ impl Workspace {
 
     /// 按选中格子同步槽位序号与面板输入。
     fn load_wheel_cell(&mut self, cx: &mut Context<Self>) {
+        self.wheel_reset_pending = None;
         let slot = self
             .wheel_view()
             .zip(self.wheel_cell)
@@ -965,6 +967,30 @@ impl Workspace {
         if self.commit_wheels(proposed, cx) {
             self.set_wheel_scope(Some(WheelScope::App(target.clone())), cx);
             self.status = format!("已创建 {target} 的应用布局。");
+        }
+    }
+
+    pub(super) fn confirm_wheel_layout_reset(&mut self, cx: &mut Context<Self>) {
+        let Some((id, process)) = self.wheel_reset_pending.take() else {
+            return;
+        };
+        let Some(index) = self.selected_wheel_index() else {
+            return;
+        };
+        if self.wheels.wheels[index].id != id
+            || !matches!(&self.wheel_scope, Some(WheelScope::App(current)) if current == &process)
+        {
+            return;
+        }
+        let mut proposed = self.wheels.clone();
+        if let Err(error) = proposed.wheels[index].remove_application_layout(&process) {
+            self.error = Some(error);
+            cx.notify();
+            return;
+        }
+        if self.commit_wheels(proposed, cx) {
+            self.set_wheel_scope(None, cx);
+            self.status = format!("{process} 已改用通用布局。");
         }
     }
 
@@ -1217,6 +1243,7 @@ impl Workspace {
         if self.recording || self.wheels_error.is_some() {
             return;
         }
+        self.wheel_reset_pending = None;
         if self.test_data && !self.listen {
             self.wheel_preview = Some(WheelPreview::default());
             cx.notify();

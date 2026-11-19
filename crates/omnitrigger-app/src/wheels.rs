@@ -98,12 +98,23 @@ impl WheelDefinition {
 
     /// 按前台进程文件名查找对应的整组应用覆盖。
     pub fn override_for_process(&self, process: Option<&str>) -> Option<&WheelApplicationOverride> {
-        process.and_then(|process| {
-            let key = process.to_lowercase();
-            self.app_overrides
-                .iter()
-                .find(|application| application.process.to_lowercase() == key)
-        })
+        let index = self.application_index(process?)?;
+        self.app_overrides.get(index)
+    }
+
+    fn application_index(&self, process: &str) -> Option<usize> {
+        let key = process.to_lowercase();
+        self.app_overrides
+            .iter()
+            .position(|application| application.process.to_lowercase() == key)
+    }
+
+    pub(super) fn remove_application_layout(&mut self, process: &str) -> Result<(), String> {
+        let index = self
+            .application_index(process)
+            .ok_or_else(|| format!("找不到应用布局“{process}”，请重新载入轮盘。"))?;
+        self.app_overrides.remove(index);
+        Ok(())
     }
 
     /// 复制完整槽位组（含场景槽位），新应用此后独立编辑。
@@ -1280,6 +1291,53 @@ pub(super) mod tests {
             assert!(fallback.app_overrides.is_empty());
         }
         assert_eq!(expected.wheels[0], original);
+    }
+
+    #[test]
+    fn removing_one_app_layout_resumes_the_live_shared_layout_after_reload() {
+        let scratch = Scratch::new();
+        let mut before = Wheels::default();
+        let wheel = &mut before.wheels[0];
+        wheel.copy_layout_to_application(None, "编辑.exe").unwrap();
+        wheel.copy_layout_to_application(None, "@desktop").unwrap();
+        wheel.app_overrides[0].slots[0].label = "编辑器专用".into();
+        wheel.app_overrides[1].slots[0].label = "桌面专用".into();
+        scratch.save(&before).unwrap();
+        let mut after = before.clone();
+        after.wheels[0]
+            .remove_application_layout("编辑.EXE")
+            .unwrap();
+        assert!(after.wheels[0]
+            .remove_application_layout("编辑.exe")
+            .is_err());
+        after
+            .save_changes(&scratch.bindings(), &before, &CompiledScenes::default())
+            .unwrap();
+        let mut saved = Wheels::load(&scratch.bindings()).unwrap();
+        assert_eq!(saved, after);
+        assert_eq!(saved.wheels[0].slots, before.wheels[0].slots);
+        assert_eq!(
+            saved.wheels[0].app_overrides,
+            before.wheels[0].app_overrides[1..]
+        );
+        saved.wheels[0].slots[0].label = "新的通用动作".into();
+        scratch.save(&saved).unwrap();
+        let active = Wheels::load(&scratch.bindings()).unwrap();
+        let resolve = |process| {
+            crate::wheel_scenes::resolve_for_target(
+                &active.wheels[0],
+                &CompiledScenes::default(),
+                Some(process),
+                crate::wheel_scenes::TargetContext {
+                    process: Some(process),
+                    role: omnitrigger_core::WindowRole::Application,
+                },
+            )
+            .0
+            .slots
+        };
+        assert_eq!(resolve("编辑.exe"), active.wheels[0].slots);
+        assert_eq!(resolve("@desktop"), before.wheels[0].app_overrides[1].slots);
     }
 
     #[test]

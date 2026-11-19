@@ -842,10 +842,14 @@ impl Workspace {
             matches!(&binding.action, ActionSpec::ShowWheel(reference) if reference.wheel_id == wheel.id)
         ).count();
         let can_remove = can_edit && references == 0;
-        let copy_label = match self.wheel_scope_for(wheel) {
-            Some(WheelScope::App(process)) => format!("将 {process} 布局复制给应用"),
-            _ => "将通用布局复制给应用".into(),
+        let application = match self.wheel_scope_for(wheel) {
+            Some(WheelScope::App(process)) => wheel.override_for_process(Some(&process)),
+            _ => None,
         };
+        let copy_label = application.map_or_else(
+            || "将通用布局复制给应用".into(),
+            |app| format!("将 {} 布局复制给应用", app.process),
+        );
         let can_copy = can_edit && !self.wheel_copy_target.read(cx).text().is_empty();
         div()
             .flex()
@@ -897,7 +901,16 @@ impl Workspace {
                                     }))
                                 }),
                             ),
-                    ),
+                    )
+                    .children(application.map(|app| {
+                        self.wheel_reset_control(
+                            &wheel.id,
+                            &app.process,
+                            app.slots.len(),
+                            can_edit,
+                            cx,
+                        )
+                    })),
             )
             .child(divider())
             .child(rings)
@@ -925,21 +938,82 @@ impl Workspace {
                     )
                     .child(colors),
             )
-            .child(
-                link(
-                    "remove-wheel",
-                    if references == 0 {
-                        "删除这个轮盘".to_string()
-                    } else {
-                        format!("有 {references} 条呼出绑定在用，不能删除")
-                    },
+            .when(application.is_none(), |el| {
+                el.child(
+                    link(
+                        "remove-wheel",
+                        if references == 0 {
+                            "删除这个轮盘".to_string()
+                        } else {
+                            format!("有 {references} 条呼出绑定在用，不能删除")
+                        },
+                    )
+                    .text_color(rgb(if can_remove { 0xf0a0a0 } else { FAINT }))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if can_remove {
+                            this.remove_wheel(cx);
+                        }
+                    })),
                 )
-                .text_color(rgb(if can_remove { 0xf0a0a0 } else { FAINT }))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if can_remove {
-                        this.remove_wheel(cx);
-                    }
-                })),
+            })
+    }
+
+    fn wheel_reset_control(
+        &self,
+        wheel_id: &str,
+        process: &str,
+        slots: usize,
+        can_edit: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let target = (wheel_id.to_owned(), process.to_owned());
+        if self.wheel_reset_pending.as_ref() != Some(&target) {
+            return div().child(
+                small(button(
+                    "use-shared-layout",
+                    "改用通用布局…",
+                    Tone::Secondary,
+                    can_edit,
+                ))
+                .when(can_edit, |el| {
+                    el.on_click(cx.listener(move |this, _, _, cx| {
+                        this.wheel_reset_pending = Some(target.clone());
+                        cx.notify();
+                    }))
+                }),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(caption(format!(
+                "移除 {process} 的专用布局（{slots} 个槽位）后，该应用将使用通用布局。"
+            )))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        small(button("cancel-layout-reset", "取消", Tone::Secondary, true))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.wheel_reset_pending = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        small(button(
+                            "confirm-layout-reset",
+                            "移除专用布局",
+                            Tone::Danger,
+                            can_edit,
+                        ))
+                        .when(can_edit, |el| {
+                            el.on_click(cx.listener(|this, _, _, cx| {
+                                this.confirm_wheel_layout_reset(cx);
+                            }))
+                        }),
+                    ),
             )
     }
 
