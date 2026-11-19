@@ -394,6 +394,46 @@ impl Workspace {
             )
     }
 
+    fn wheel_scene_hint(
+        &self,
+        wheel: &WheelDefinition,
+        scene: &str,
+        stage: f32,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        if wheel.app_overrides.is_empty() {
+            return label("改动只在此场景生效，其余格子沿用通用动作").text_size(px(12.));
+        }
+        let application =
+            crate::wheel_scenes::named_scene_application(wheel, &self.wheel_scenes, scene)
+                .map(str::to_owned);
+        let target = application.as_ref().map_or_else(
+            || "在“用于”中选择应用布局".to_owned(),
+            |name| format!("编辑 {name} 布局"),
+        );
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .max_w(px(stage))
+            .child(label("此处编辑通用布局的场景槽位，应用专用布局优先。").text_size(px(12.)))
+            .child(
+                link("wheel-scene-app-layout", target.clone())
+                    .max_w_full()
+                    .truncate()
+                    .tooltip(theme::text_tooltip(target.into()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(process) = &application {
+                            this.set_wheel_scope(Some(WheelScope::App(process.clone())), cx);
+                        } else {
+                            this.wheel_scope_open = true;
+                            this.wheel_scope_scroll.scroll_to_item(1);
+                            cx.notify();
+                        }
+                    })),
+            )
+    }
+
     fn wheel_editor_content(
         &self,
         wheel: &WheelDefinition,
@@ -530,10 +570,12 @@ impl Workspace {
             .h(px(38.))
             .flex()
             .items_center()
-            .when(
-                !self.wheel_moving && matches!(scope, Some(WheelScope::Scene(_))),
-                |el| el.child(label("改动只在此场景生效，其余格子沿用通用动作").text_size(px(12.))),
-            )
+            .when(!self.wheel_moving, |el| match &scope {
+                Some(WheelScope::Scene(name)) => {
+                    el.child(self.wheel_scene_hint(wheel, name, stage, cx))
+                }
+                _ => el,
+            })
             .when_some(moving_label, |el, name| {
                 el.child(
                     div()

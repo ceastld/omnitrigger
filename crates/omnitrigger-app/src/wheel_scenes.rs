@@ -6,7 +6,7 @@
 //! 盖过通用槽位；具体程度相同且范围重叠的两个槽位在校验时报错，不按书写顺序暗中取舍。
 use crate::scenes::CompiledScenes;
 use crate::wheels::{WheelDefinition, WheelSlot};
-use omnitrigger_core::{ProcessScope, WindowRole};
+use omnitrigger_core::{ProcessIdentity, ProcessScope, WindowRole};
 use std::collections::HashMap;
 
 /// 目标窗口的进程映像名与窗口角色；读取失败时进程为 `None`，场景槽位均不显示。
@@ -49,6 +49,34 @@ pub(super) fn effective_scene_scope(
         scope.deny.clear();
     }
     Ok(scope)
+}
+
+/// 单个具名程序与一个已保存应用布局对应时，编辑器可直接跳到那个布局。
+pub(super) fn named_scene_application<'a>(
+    wheel: &'a WheelDefinition,
+    scenes: &CompiledScenes,
+    name: &str,
+) -> Option<&'a str> {
+    let scope = effective_scene_scope(scenes, name).ok()?;
+    let [process] = scope.allow.as_slice() else {
+        return None;
+    };
+    // 桌面和任务栏是窗口角色，不能仅凭这个名称确定所属程序。
+    if scope.identity == ProcessIdentity::ShellContext
+        && matches!(process.as_str(), "desktop" | "taskbar")
+    {
+        return None;
+    }
+    let mut layouts = wheel
+        .app_overrides
+        .iter()
+        .map(|app| app.process.as_str())
+        .filter(|process| {
+            !process.eq_ignore_ascii_case("@desktop")
+                && scope.matches(Some(process), WindowRole::Application)
+        });
+    let application = layouts.next()?;
+    layouts.next().is_none().then_some(application)
 }
 
 /// 校验一组槽位的场景引用：场景存在、不限制指针窗口，且同一方位的槽位不会同时以相同具体程度命中。
@@ -231,6 +259,71 @@ mod tests {
             "not-desktop": {"process_scope": {"identity": "shell_context", "deny": ["desktop"]}},
             "browser-pointer": {"pointer_scope": {"allow": ["chrome"]}}
         }))
+    }
+
+    #[test]
+    fn editor_link_opens_the_application_layout_used_before_scene_resolution() {
+        let scenes = library();
+        let mut wheel = crate::wheels::Wheels::default().wheels.remove(0);
+        wheel.slots = vec![slot("通用场景", 1, Some("chrome"))];
+        wheel.app_overrides = vec![crate::wheels::WheelApplicationOverride {
+            process: "Chrome.EXE".into(),
+            slots: vec![slot("应用动作", 1, None)],
+        }];
+        let target = TargetContext {
+            process: Some("chrome.exe"),
+            role: WindowRole::Application,
+        };
+        let (resolved, _) = resolve_for_target(&wheel, &scenes, target.process, target);
+        assert_eq!(labels(&resolved.slots), ["应用动作"]);
+        let name = named_scene_application(&wheel, &scenes, "chrome").unwrap();
+        assert_eq!(name, "Chrome.EXE");
+        assert_eq!(
+            wheel.override_for_process(Some(name)).unwrap().slots,
+            resolved.slots
+        );
+        for scene in ["editors", "not-desktop", "browser-pointer", "missing"] {
+            assert_eq!(named_scene_application(&wheel, &scenes, scene), None);
+        }
+        // 场景允许省略后缀，旧版应用布局则分别按完整文件名保存。
+        wheel
+            .app_overrides
+            .push(crate::wheels::WheelApplicationOverride {
+                process: "chrome".into(),
+                slots: vec![slot("另一布局", 1, None)],
+            });
+        assert_eq!(named_scene_application(&wheel, &scenes, "chrome"), None);
+    }
+
+    #[test]
+    fn editor_link_uses_effective_process_names_and_leaves_shell_roles_to_the_picker() {
+        let scenes = scenes(serde_json::json!({
+            "two": {"process_scope": {"allow": ["code", "devenv"]}},
+            "one": {"process_scope": {"allow": ["code", "devenv"], "deny": ["devenv"]}},
+            "desktop": {"process_scope": {"identity": "shell_context", "allow": ["desktop"]}},
+            "taskbar": {"process_scope": {"identity": "shell_context", "allow": ["taskbar"]}}
+        }));
+        let mut wheel = crate::wheels::Wheels::default().wheels.remove(0);
+        wheel.app_overrides = [
+            "CODE.exe",
+            "devenv.exe",
+            "@desktop",
+            "desktop.exe",
+            "taskbar.exe",
+        ]
+        .into_iter()
+        .map(|name| crate::wheels::WheelApplicationOverride {
+            process: name.into(),
+            slots: wheel.slots.clone(),
+        })
+        .collect();
+        assert_eq!(
+            named_scene_application(&wheel, &scenes, "one"),
+            Some("CODE.exe")
+        );
+        for scene in ["two", "desktop", "taskbar"] {
+            assert_eq!(named_scene_application(&wheel, &scenes, scene), None);
+        }
     }
 
     #[test]
