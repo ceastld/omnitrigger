@@ -1061,6 +1061,22 @@ try {
             throw '唤回托盘时提前恢复了正在使用的热键文件。'
         }
     } finally { Stop-TestProcess $launcher }
+    foreach ($page in '--wheel-editor', '--browser-connector-settings') {
+        $null = Close-ToTray $ui ''
+        $pageStart = New-AppStart
+        $pageStart.ArgumentList.Add('--config')
+        $pageStart.ArgumentList.Add($bindings)
+        $pageStart.ArgumentList.Add($page)
+        $launcher = [Diagnostics.Process]::Start($pageStart)
+        try {
+            if (-not $launcher.WaitForExit(20000) -or $launcher.ExitCode -ne 0) { throw "打开 $page 时出现了第二个进程。" }
+            if ((Wait-AppWindow $ui '' 'OmniTrigger') -ne $window) { throw "$page 未唤回原托盘窗口。" }
+            if (-not (Test-Path -LiteralPath (Join-Path $pending 'plan.json')) -or
+                (Get-FileHash -LiteralPath $bindings).Hash -ne [Convert]::ToHexString($incomingHash)) {
+                throw "$page 唤回窗口时改写了使用中的配置。"
+            }
+        } finally { Stop-TestProcess $launcher }
+    }
 } finally { Stop-TestProcess $ui }
 $ui = [Diagnostics.Process]::Start($wake)
 try {

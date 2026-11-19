@@ -2118,10 +2118,12 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     }
     let interactive =
         arguments.iter().skip(1).all(|arg| arg == "--settings") && parsed.command.is_none();
+    let workspace_page = parsed.command.is_none()
+        && crate::workspace_mode::WindowArguments::shared_page(arguments).is_some();
     let check_config = matches!(&arguments[1..], [arg] if arg == "--check-config");
     let env_root = std::env::var_os("OMNITRIGGER_HOME").filter(|root| !root.is_empty());
     if !parsed.any()
-        && !interactive
+        && !workspace_page
         && !tray
         && !check_config
         && !inspect_actions
@@ -2133,7 +2135,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
         }
         return (Startup::daily(), Vec::new());
     }
-    if (check_config || inspect_actions)
+    if (check_config || inspect_actions || (workspace_page && !interactive))
         && !parsed.any()
         && env_root.is_none()
         && local_app_data.is_none()
@@ -2164,7 +2166,7 @@ pub fn startup(arguments: &mut Vec<String>) -> (Startup, Vec<std::fs::File>) {
     let root_config = root.join("bindings.json");
     // 显式目录可能处在重置中，须先锁住现场；默认目录则在确定真实数据视图后再读身份。
     let explicit_access = (source != RootSource::Default).then(|| open_root(&root_config));
-    if (plain && !inspect_profile_tree) || interactive || tray || check_config {
+    if (plain && !inspect_profile_tree) || workspace_page || tray || check_config {
         #[cfg(windows)]
         escape_redirect(
             &root,

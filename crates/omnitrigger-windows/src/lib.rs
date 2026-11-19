@@ -397,7 +397,7 @@ pub use tray::{hide_to_tray, install_tray, is_in_tray, show_workspace_window, sy
 #[cfg(windows)]
 mod workspace_instance;
 #[cfg(windows)]
-pub use workspace_instance::WorkspaceInstance;
+pub use workspace_instance::{WorkspaceInstance, WorkspacePage};
 #[cfg(windows)]
 mod wheel_window;
 #[cfg(windows)]

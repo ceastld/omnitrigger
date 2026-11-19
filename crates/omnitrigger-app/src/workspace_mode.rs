@@ -19,6 +19,32 @@ pub(super) struct WindowArguments {
 }
 
 impl WindowArguments {
+    /// 单独打开工作区页面可以唤回原窗口。带动作或临时配置名的入口仍独立启动。
+    pub fn shared_page(arguments: &[String]) -> Option<omnitrigger_windows::WorkspacePage> {
+        use omnitrigger_windows::WorkspacePage;
+        let flags = arguments.get(1..).unwrap_or_default();
+        let canonical_config = |flag: &str, path: &str| {
+            flag == "--config"
+                && std::path::Path::new(path)
+                    .file_name()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json"))
+        };
+        let pages = match flags {
+            [flag, path, rest @ ..] if canonical_config(flag, path) => rest,
+            [rest @ .., flag, path] if canonical_config(flag, path) => rest,
+            _ => flags,
+        };
+        match pages {
+            [] => Some(WorkspacePage::Current),
+            [page] if page == "--wheel-editor" => Some(WorkspacePage::WheelEditor),
+            [page] if page == "--browser-connector-settings" => {
+                Some(WorkspacePage::BrowserConnector)
+            }
+            pages if pages.iter().all(|page| page == "--settings") => Some(WorkspacePage::Settings),
+            _ => None,
+        }
+    }
+
     /// 配置档参数已取出。托盘入口只接管日常主工作区，不能同时运行其他动作。
     pub fn tray_launch(arguments: &[String]) -> Result<bool, String> {
         let flags = arguments.get(1..).unwrap_or_default();
@@ -160,6 +186,40 @@ impl WorkspaceMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_page_launches_preserve_standalone_actions_and_custom_files() {
+        use omnitrigger_windows::WorkspacePage::*;
+        for (flag, page) in [
+            ("--settings", Settings),
+            ("--wheel-editor", WheelEditor),
+            ("--browser-connector-settings", BrowserConnector),
+        ] {
+            for args in [
+                vec![flag],
+                vec!["--config", "测试/BINDINGS.JSON", flag],
+                vec![flag, "--config", "测试/bindings.json"],
+            ] {
+                assert_eq!(WindowArguments::shared_page(&arguments(&args)), Some(page));
+            }
+        }
+        for args in [vec![], vec!["--config", "测试/bindings.json"]] {
+            assert_eq!(
+                WindowArguments::shared_page(&arguments(&args)),
+                Some(Current)
+            );
+        }
+        for args in [
+            vec!["--panel"],
+            vec!["--text-history"],
+            vec!["--wheel-editor", "--wheel", "orbit-edit"],
+            vec!["--settings", "--wheel-editor"],
+            vec!["--config", "另一份.json", "--wheel-editor"],
+            vec!["--wheel-input-policy", "unfiltered", "--wheel-editor"],
+        ] {
+            assert_eq!(WindowArguments::shared_page(&arguments(&args)), None);
+        }
+    }
 
     fn arguments(values: &[&str]) -> Vec<String> {
         std::iter::once("omnitrigger")

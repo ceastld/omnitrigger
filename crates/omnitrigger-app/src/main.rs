@@ -1624,13 +1624,17 @@ impl Workspace {
     }
 
     fn poll(&mut self, cx: &mut Context<Self>) {
-        if let Some(instance) = self
+        if let Some(page) = self
             .workspace_instance
             .as_ref()
-            .filter(|instance| instance.take_open_request())
+            .and_then(|instance| instance.take_page_request())
         {
-            if instance.take_settings_request() {
-                self.open_page(Page::Settings, cx);
+            use omnitrigger_windows::WorkspacePage;
+            match page {
+                WorkspacePage::Settings => self.open_page(Page::Settings, cx),
+                WorkspacePage::WheelEditor => self.open_page(Page::Wheels, cx),
+                WorkspacePage::BrowserConnector => self.open_page(Page::Extensions, cx),
+                WorkspacePage::Current => {}
             }
             let _ = self.main_window.update(cx, |_, window, _| {
                 reveal_workspace_window(window);
@@ -8918,7 +8922,6 @@ fn main() {
     } else {
         None
     };
-    let config_main = matches!(&arguments[1..], [config, _] if config == "--config");
     let config_settings = matches!(&arguments[1..],
         [config, _, page] if config == "--config" && page == "--settings")
         || matches!(&arguments[1..], [page, config, _] if page == "--settings" && config == "--config");
@@ -8931,12 +8934,12 @@ fn main() {
             && std::env::var_os("OMNITRIGGER_UPDATE_TRAY").is_some_and(|value| value == "1"));
     std::env::remove_var("OMNITRIGGER_UPDATE_TRAY");
     let config_path = settings::path();
-    let shared_workspace = tray_requested
-        || arguments.iter().skip(1).all(|arg| arg == "--settings")
-        || ((config_main || config_settings)
-            && config_path
-                .file_name()
-                .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json")));
+    let requested_page = if tray_requested {
+        Some(omnitrigger_windows::WorkspacePage::Current)
+    } else {
+        WindowArguments::shared_page(&arguments)
+    };
+    let shared_workspace = requested_page.is_some();
     // 重复启动只通知现有窗口。先取得窗口身份，再恢复磁盘数据，避免改写运行中的配置。
     let startup_error = |title: &str, message: &str| {
         if start_in_tray {
@@ -8945,15 +8948,12 @@ fn main() {
         }
         omnitrigger_windows::show_error_dialog(title, message);
     };
-    let workspace_instance = if shared_workspace {
+    let workspace_instance = if let Some(page) = requested_page {
         match profile_startup.workspace_key(&config_path).and_then(|key| {
             if start_in_tray {
                 omnitrigger_windows::WorkspaceInstance::open_in_tray(&key)
             } else {
-                omnitrigger_windows::WorkspaceInstance::open_with_settings(
-                    &key,
-                    appearance_settings,
-                )
+                omnitrigger_windows::WorkspaceInstance::open_page(&key, page)
             }
         }) {
             Ok(Some(instance)) => Some(instance),
