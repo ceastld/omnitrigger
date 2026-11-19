@@ -1490,14 +1490,20 @@ impl ThreadState {
         {
             return;
         }
+        let first_resolution = !self.process_resolved;
         self.process_resolved = true;
         self.last_context_probe = Some(Instant::now());
         let previous = (
             self.engine.foreground_process().map(str::to_owned),
             self.engine.foreground_window_role(),
         );
-        if let Ok(cancelled) = self.with_engine(|engine| engine.set_foreground_context(name, role))
-        {
+        if let Ok(cancelled) = self.with_engine(|engine| {
+            if first_resolution {
+                engine.resolve_foreground_context(name, role)
+            } else {
+                engine.set_foreground_context(name, role)
+            }
+        }) {
             if previous.0.as_deref() == self.engine.foreground_process()
                 && previous.1 == self.engine.foreground_window_role()
             {
@@ -2937,6 +2943,79 @@ mod region_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_prefix_survives_first_resolution_in_new_foreground() {
+        let (events, received) = mpsc::sync_channel(EVENT_CAPACITY);
+        let mut state = ThreadState::new(events);
+        let editor = foreground_context::Identity { hwnd: 100, pid: 10 };
+        let search = foreground_context::Identity { hwnd: 200, pid: 20 };
+        let space = Button::Key(32);
+        let s = Button::Key(83);
+        state.command(BackendCommand::SetBindings(vec![TriggerSpec {
+            id: 1,
+            held: vec![space],
+            activation: omnitrigger_core::Activation::Press(s),
+            conditions: vec![],
+            process_scope: omnitrigger_core::ProcessScope {
+                deny: vec!["excluded".into()],
+                ..Default::default()
+            },
+            pointer_scope: Default::default(),
+            wheel: Default::default(),
+            keyboard: omnitrigger_core::KeyboardPolicy {
+                retained_prefix: Some(Box::new(omnitrigger_core::RetainedPrefix {
+                    key: space,
+                    quiet_ms: 50,
+                    fast_ms: 50,
+                    capture_scope: Default::default(),
+                    block_with_primary_mouse: false,
+                })),
+                matching: omnitrigger_core::KeyboardMatching::Captured { priority: 1 },
+                restore_on_tap: true,
+                ..Default::default()
+            },
+        }]));
+        let resolve = |state: &mut ThreadState, window, process| {
+            state.apply_process_context(
+                window,
+                state.foreground_epoch,
+                Some(process),
+                omnitrigger_core::WindowRole::Application,
+            );
+        };
+        let input = |state: &mut ThreadState, kind, at| {
+            let outcome = state.input_at(Some(kind), None, None, at);
+            assert!(outcome.replay_kinds.is_empty());
+            outcome.consume
+        };
+
+        state.test_foreground = Some(editor);
+        state.update_foreground_identity(editor);
+        resolve(&mut state, editor, "editor");
+        assert!(input(&mut state, InputKind::Down(space), 100));
+        assert!(input(&mut state, InputKind::Down(s), 150));
+        assert!(input(&mut state, InputKind::Up(s), 155));
+        assert!(input(&mut state, InputKind::Up(space), 160));
+
+        state.test_foreground = Some(search);
+        assert!(input(&mut state, InputKind::Down(space), 180));
+        assert!(!state.process_resolved);
+        resolve(&mut state, search, "omnitrigger");
+        assert!(input(&mut state, InputKind::Down(s), 230));
+        assert!(input(&mut state, InputKind::Up(s), 235));
+        assert!(input(&mut state, InputKind::Up(space), 240));
+
+        for _ in 0..2 {
+            assert!(matches!(
+                received.try_recv().unwrap(),
+                BackendEvent::Triggered { id: 1, .. }
+            ));
+        }
+        assert!(received.try_recv().is_err());
+        assert!(state.physical_held.is_empty());
+        assert!(state.owned_press.is_empty());
+    }
 
     #[test]
     fn retained_keyboard_layer_forwards_release_trigger_and_orders_restore_before_successor() {

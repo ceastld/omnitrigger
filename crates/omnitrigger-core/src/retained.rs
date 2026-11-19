@@ -13,6 +13,43 @@ pub(super) struct RetainedSession {
 }
 
 impl Engine {
+    /// 补全同一前台窗口的首次识别结果。调用方须已核验窗口与输入代次一致。
+    pub fn resolve_foreground_context(
+        &mut self,
+        name: Option<&str>,
+        role: crate::WindowRole,
+    ) -> Result<Decision, crate::ProcessScopeError> {
+        let fresh_prefix = self.retained.filter(|session| {
+            self.process_name.is_none()
+                && self.window_role == crate::WindowRole::Unknown
+                && !session.used
+                && self.pressed.get(&session.key) == Some(&PressState::Consumed)
+        });
+        let decision = self.set_foreground_context(name, role)?;
+        // 让新窗口中已经按下的前缀继续等待首个末键，同时按新进程范围匹配。
+        if let Some(session) = fresh_prefix
+            && self.retained.is_none()
+            && self.retained_starter(session.key) == Some(session.owner)
+        {
+            self.dedicated_leader = Some(session.key);
+            self.layer_owner = Some(session.owner);
+            self.pressed.insert(session.key, PressState::Consumed);
+            self.retained = Some(session);
+        }
+        Ok(decision)
+    }
+
+    fn retained_starter(&self, button: Button) -> Option<usize> {
+        self.retained_starters.iter().copied().find(|&index| {
+            self.bindings[index]
+                .keyboard
+                .retained_prefix
+                .as_ref()
+                .is_some_and(|policy| policy.key == button)
+                && self.conditions_match(&self.bindings[index])
+        })
+    }
+
     pub(super) fn retained_event(&mut self, event: InputKind) -> Option<Decision> {
         let Some(session) = self.retained else {
             let InputKind::Down(button @ Button::Key(_)) = event else {
@@ -32,14 +69,7 @@ impl Engine {
             let previous = self.last_keyboard_down;
             if self.enabled
                 && !self.pressed.contains_key(&button)
-                && let Some(owner) = self.retained_starters.iter().copied().find(|&index| {
-                    self.bindings[index]
-                        .keyboard
-                        .retained_prefix
-                        .as_ref()
-                        .is_some_and(|policy| policy.key == button)
-                        && self.conditions_match(&self.bindings[index])
-                })
+                && let Some(owner) = self.retained_starter(button)
             {
                 let policy = self.bindings[owner]
                     .keyboard
