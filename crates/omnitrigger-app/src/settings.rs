@@ -54,6 +54,7 @@ pub struct Binding {
 pub enum ActionSpec {
     Notification,
     ShowPanel,
+    ShowSearch,
     ShowWheel(WheelActionRef),
     Command(CommandAction),
     SendShortcut(ShortcutAction),
@@ -1189,7 +1190,10 @@ pub fn validate(bindings: &[Binding]) -> Result<(), String> {
             ActionSpec::Plugin(reference) => {
                 reference.validate().map_err(|error| error.to_string())
             }
-            ActionSpec::Notification | ActionSpec::ShowPanel | ActionSpec::Window(_) => Ok(()),
+            ActionSpec::Notification
+            | ActionSpec::ShowPanel
+            | ActionSpec::ShowSearch
+            | ActionSpec::Window(_) => Ok(()),
         };
         if let Err(error) = result {
             return Err(format!("触发器 #{}：{error}", binding.spec.id));
@@ -3598,6 +3602,7 @@ mod tests {
     #[test]
     fn current_round_trip_preserves_all_action_variants_and_unavailable_plugin_parameters() {
         let mut expected = defaults();
+        expected[0].action = ActionSpec::ShowSearch;
         expected[1].enabled = false;
         expected[1].action = ActionSpec::Command(CommandAction {
             program: "C:\\截图 工具\\raishot-cli.exe".into(),
@@ -3614,6 +3619,10 @@ mod tests {
             ActionSpec::SendShortcut(ShortcutAction::parse("RightCtrl+Backspace").unwrap());
         assert_eq!(decode(&encode(&expected)).unwrap(), expected);
         let value: serde_json::Value = serde_json::from_str(&encode(&expected)).unwrap();
+        assert_eq!(
+            value["bindings"][0]["action"],
+            json!({"kind":"show_search"})
+        );
         assert!(value["bindings"][1].get("command").is_none());
         assert!(value["bindings"][4].get("show_panel").is_none());
         assert_eq!(value["bindings"][2]["action"]["pluginId"], "missing-plugin");

@@ -491,6 +491,7 @@ fn action_detail(action: &ActionSpec) -> String {
     match action {
         ActionSpec::Notification => "仅提示".into(),
         ActionSpec::ShowPanel => "打开 / 收起触发面板".into(),
+        ActionSpec::ShowSearch => "打开快速搜索".into(),
         ActionSpec::ShowWheel(reference) => format!("轨道轮盘 · {}", reference.wheel_id),
         ActionSpec::SendShortcut(shortcut) => format!("发送快捷键 · {}", shortcut.display()),
         ActionSpec::Window(action) => format!("窗口 · {}", action.display()),
@@ -652,6 +653,7 @@ fn action_look(action: &ActionSpec) -> (Icon, u32) {
     match action {
         ActionSpec::Notification => (Icon::Bell, theme::VIOLET),
         ActionSpec::ShowPanel => (Icon::Panel, theme::ACCENT),
+        ActionSpec::ShowSearch => (Icon::Search, theme::ACCENT),
         ActionSpec::ShowWheel(_) => (Icon::Pulse, theme::VIOLET),
         ActionSpec::SendShortcut(_) => (Icon::Keyboard, theme::ACCENT_2),
         ActionSpec::Window(_) => (Icon::Panel, theme::ACCENT_2),
@@ -2641,26 +2643,33 @@ impl Workspace {
     }
 
     fn open_quick_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let display = window.display(cx).map(|display| display.id());
+        if let Err(error) = self.show_quick_search(display, cx) {
+            self.error = Some(error);
+            cx.notify();
+        }
+    }
+
+    fn show_quick_search(
+        &mut self,
+        display: Option<gpui::DisplayId>,
+        cx: &mut Context<Self>,
+    ) -> Result<Option<WindowHandle<quick_search::QuickSearch>>, String> {
         if self.recording || self.mode.history_only() {
-            return;
+            return Ok(None);
         }
         if let Some(search) = self.quick_search {
             if search
                 .update(cx, |view, window, cx| view.activate(window, cx))
                 .is_ok()
             {
-                return;
+                return Ok(Some(search));
             }
             self.quick_search = None;
         }
-        let display = window.display(cx).map(|display| display.id());
-        match quick_search::QuickSearch::open(display, self.theme_mode, cx) {
-            Ok(search) => self.quick_search = Some(search),
-            Err(error) => {
-                self.error = Some(error);
-                cx.notify();
-            }
-        }
+        let search = quick_search::QuickSearch::open(display, self.theme_mode, cx)?;
+        self.quick_search = Some(search);
+        Ok(Some(search))
     }
 
     fn toggle_panel(&mut self, cx: &mut Context<Self>) {
@@ -3280,6 +3289,18 @@ impl Workspace {
                     }
                 }
                 cx.notify();
+            }
+            ActionSpec::ShowSearch => {
+                let target = target.or_else(|| omnitrigger_windows::capture_shortcut_target().ok());
+                match self.show_quick_search(None, cx) {
+                    Ok(Some(search)) => quick_search::request_foreground(search, target, cx),
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.action_error = Some((id, error.clone()));
+                        self.record_action_status(id, error);
+                        cx.notify();
+                    }
+                }
             }
             ActionSpec::ShowWheel(reference) => self.open_wheel(&reference.wheel_id, cx),
             ActionSpec::SendShortcut(shortcut) => {
@@ -6812,6 +6833,7 @@ impl Workspace {
         let notification = matches!(self.draft_action, ActionSpec::Notification);
         let command = matches!(self.draft_action, ActionSpec::Command(_));
         let panel = matches!(self.draft_action, ActionSpec::ShowPanel);
+        let search = matches!(self.draft_action, ActionSpec::ShowSearch);
         let plugin = matches!(self.draft_action, ActionSpec::Plugin(_));
         let shortcut = matches!(self.draft_action, ActionSpec::SendShortcut(_));
         let wheel = matches!(self.draft_action, ActionSpec::ShowWheel(_));
@@ -6907,6 +6929,19 @@ impl Workspace {
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.draft_action = ActionSpec::ShowPanel;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        Self::kind_tile(
+                            "show-search-action",
+                            Icon::Search,
+                            theme::ACCENT,
+                            "快速搜索",
+                            search,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.draft_action = ActionSpec::ShowSearch;
                             cx.notify();
                         })),
                     )

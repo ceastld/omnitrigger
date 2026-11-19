@@ -19,6 +19,7 @@ pub enum InputKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionKind {
     Panel,
+    Search,
     Wheel,
     Shortcut,
     Window,
@@ -171,8 +172,9 @@ impl InputKind {
 }
 
 impl ActionKind {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Panel,
+        Self::Search,
         Self::Wheel,
         Self::Shortcut,
         Self::Window,
@@ -189,6 +191,7 @@ impl ActionKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Panel => "触发面板",
+            Self::Search => "快速搜索",
             Self::Wheel => "轮盘",
             Self::Shortcut => "发送快捷键",
             Self::Window => "窗口",
@@ -350,6 +353,7 @@ pub fn action_kind(action: &ActionSpec) -> ActionKind {
     match action {
         ActionSpec::Notification => ActionKind::Notification,
         ActionSpec::ShowPanel => ActionKind::Panel,
+        ActionSpec::ShowSearch => ActionKind::Search,
         ActionSpec::ShowWheel(_) => ActionKind::Wheel,
         ActionSpec::SendShortcut(_) => ActionKind::Shortcut,
         ActionSpec::Window(_) => ActionKind::Window,

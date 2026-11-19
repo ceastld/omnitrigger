@@ -47,6 +47,7 @@ fn action_text(action: &ActionSpec) -> String {
         ActionSpec::Command(_) => "运行程序 / 脚本".into(),
         ActionSpec::Plugin(_) => "插件动作".into(),
         ActionSpec::ShowPanel => "打开触发面板".into(),
+        ActionSpec::ShowSearch => "打开快速搜索".into(),
         ActionSpec::ShowWheel(_) => "打开轮盘".into(),
     }
 }

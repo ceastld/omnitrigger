@@ -201,7 +201,7 @@ fn validate_slots(slots: &[WheelSlot]) -> Result<(), String> {
         }
         validate_label(&slot.label, "槽位名称")
             .and_then(|()| match &slot.action {
-                ActionSpec::Notification | ActionSpec::Window(_) => Ok(()),
+                ActionSpec::Notification | ActionSpec::ShowSearch | ActionSpec::Window(_) => Ok(()),
                 ActionSpec::Command(command) => command.validate(),
                 ActionSpec::External(action) => action.validate(),
                 ActionSpec::AdjustSystem(action) => action.validate(),

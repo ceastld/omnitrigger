@@ -13,10 +13,42 @@ use crate::{
     theme::{self, button, icon, rgb, Tone},
 };
 use calculator::{calculate, CalculationError, QUERY_LIMIT};
+use omnitrigger_windows::ShortcutTarget;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+pub(super) fn request_foreground(
+    search: WindowHandle<QuickSearch>,
+    target: Option<ShortcutTarget>,
+    cx: &mut App,
+) {
+    cx.spawn(async move |cx| {
+        let hwnd = search
+            .update(cx, |_, window, _| {
+                match HasWindowHandle::window_handle(&*window).ok()?.as_raw() {
+                    RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+                    _ => None,
+                }
+            })
+            .ok()
+            .flatten();
+        if let Some(hwnd) = hwnd {
+            // 原生激活可能同步进入窗口回调，等 GPUI 的可变借用结束后再请求。
+            if omnitrigger_windows::is_foreground_window(hwnd)
+                || target.is_some_and(|target| {
+                    omnitrigger_windows::ensure_shortcut_target(target).is_ok()
+                })
+            {
+                let _ = omnitrigger_windows::activate_panel_window(hwnd);
+            }
+        }
+    })
+    .detach();
+}
 
 pub(super) struct QuickSearch {
     theme_mode: appearance::Mode,
     input: Entity<MessageInput>,
+    was_active: bool,
     calculation: Option<Result<String, CalculationError>>,
     _input_changes: Subscription,
     _activation: Subscription,
@@ -65,8 +97,12 @@ impl QuickSearch {
                 cx.notify();
             }
         });
-        let activation = cx.observe_window_activation(window, |_, window, _| {
-            if !window.is_window_active() {
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.was_active = true;
+                window.focus(&this.input.focus_handle(cx));
+                cx.notify();
+            } else if this.was_active {
                 window.remove_window();
             }
         });
@@ -74,6 +110,7 @@ impl QuickSearch {
         Self {
             theme_mode,
             input,
+            was_active: window.is_window_active(),
             calculation: None,
             _input_changes: input_changes,
             _activation: activation,
