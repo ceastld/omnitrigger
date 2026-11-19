@@ -21,12 +21,13 @@ function local(path) {
 local(application);assert(lstatSync(application).isFile(),'--app 不是普通文件');
 const repo=resolve(dirname(fileURLToPath(import.meta.url)),'../..');
 
-test('显式CLI状态：独立进程durable计数1→2，默认无存储，非法组合提前拒绝', {timeout:360000}, () => {
+test('显式CLI状态：独立进程durable计数1→2，默认无存储，非法组合提前拒绝', {timeout:360000}, async t => {
   const parent=join(repo,'.tmp');local(parent);mkdirSync(parent,{recursive:true});
   const root=mkdtempSync(join(parent,'action-state-cli-'));
   const config=join(root,'bindings.json'),state=join(root,'action-state');
   const folder=join(root,'actions','counter');mkdirSync(folder,{recursive:true});
-  writeFileSync(config,'[]',{flag:'wx'});
+  const emptyConfig = JSON.stringify({version: 24, bindings: []});
+  writeFileSync(config,emptyConfig,{flag:'wx'});
   const entry=`export default async function counter(ctx) {
     let before;
     try { before = await ctx.state.read('durable','counter'); }
@@ -52,7 +53,7 @@ test('显式CLI状态：独立进程durable计数1→2，默认无存储，非�
       windowsHide:true,encoding:'utf8',timeout:code===0?60000:10000,maxBuffer:1024*1024,env,
     });
     assert.ifError(child.error);assert.equal(child.signal,null);assert.equal(child.status,code,child.stderr||child.stdout);
-    assert.equal(readFileSync(config,'utf8'),'[]');assert.equal(readFileSync(entryPath,'utf8'),entry);
+    assert.equal(readFileSync(config,'utf8'),emptyConfig);assert.equal(readFileSync(entryPath,'utf8'),entry);
     assert.deepEqual(JSON.parse(readFileSync(manifestPath,'utf8')),manifest);
     assert.deepEqual(JSON.parse(readFileSync(callPath,'utf8')),call);
     const output=JSON.parse(code===0?child.stdout:child.stderr);
@@ -110,6 +111,31 @@ test('显式CLI状态：独立进程durable计数1→2，默认无存储，非�
   assert.deepEqual(readFileSync(stored),secondBytes);
 
   const dataRoot = ['--data-root', root];
+  await t.test('从测试档 ZIP 恢复后，扩展继续计数，原档数据保持独立', () => {
+    const copyState = join(copy.directory, 'action-state', documents[0]);
+    const snapshot = readFileSync(copyState);
+    const transferRoot = mkdtempSync(join(parent, 'action-state-transfer-'));
+    const archive = join(transferRoot, '测试档.zip');
+    const exported = cli(['--profile-export-zip', archive], 0, [...dataRoot, '--profile', copy.id]);
+    assert.equal(exported.profiles, 1);
+
+    const freshRoot = ['--data-root', join(transferRoot, 'profiles-root')];
+    const imported = cli(['--profile-create', 'imported-counter', '--seed', `zip:${archive}`], 0, freshRoot);
+    const importedState = join(imported.directory, 'action-state', documents[0]);
+    assert.deepEqual(readFileSync(importedState), snapshot);
+    const importedCall = join(transferRoot, 'call.json');
+    writeFileSync(importedCall, JSON.stringify(call), {flag: 'wx'});
+    const importedArgs = [...freshRoot, '--profile', imported.id];
+    for (const count of [2, 3]) {
+      const resumed = cli(['--run-action', importedCall, '--with-action-state'], 0, importedArgs);
+      assert.equal(resumed.status, 'succeeded');
+      assert.deepEqual(resumed.output, {status: 'committed', count});
+    }
+    assert.notDeepEqual(readFileSync(importedState), snapshot);
+    assert.deepEqual(readFileSync(copyState), snapshot);
+    assert.deepEqual(readFileSync(stored), secondBytes);
+  });
+
   const reset = cli(['--profile-reset', 'counter-copy'], 0, dataRoot);
   const backupState = join(reset.backup, 'action-state', documents[0]);
   const beforeRestore = readFileSync(backupState);
