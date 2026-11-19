@@ -21,7 +21,8 @@ const root = mkdtempSync(join(repo, '.tmp/script-install-check-'));
 const app = join(root,'application.exe');
 cpSync(sourceApp,app,{errorOnExist:true});
 const config = join(root, 'bindings.json');
-writeFileSync(config, '[]');
+const emptyBindings = JSON.stringify({version:24,bindings:[]});
+writeFileSync(config, emptyBindings);
 const env = {...process.env, OMNITRIGGER_NODE:join(root, 'missing-node.exe')};
 delete env.OMNITRIGGER_SCRIPT_HOST;
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -379,7 +380,7 @@ assert.equal(install(development.archive).status,'installed');
 assert.equal(readFileSync(pointer,'utf8'),firstPointer);
 checks.push('blocked_switch_preserves_active_actions_and_retry_activates_the_requested_package');
 
-assert.equal(readFileSync(config,'utf8'),'[]');
+assert.equal(readFileSync(config,'utf8'),emptyBindings);
 const result = {passed:true,root,checks,personalBindingsModified:false,engine:development.engine,archive_sha256:development.sha256};
 writeFileSync(join(root,'result.json'),JSON.stringify(result,null,2));
 console.log(JSON.stringify(result));
