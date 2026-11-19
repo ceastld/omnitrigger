@@ -93,6 +93,28 @@ class ExportTest(unittest.TestCase):
                 self.export()
         self.assertEqual(list(self.out.parent.iterdir()), [])
 
+    def test_standalone_catalog_only_profile_retains_identity(self):
+        entry = {"id": self.trial.name, "alias": "trial", "name": "历史工作区", "kind": "test",
+                 "created_ms": 123, "seed": "empty"}
+        def register():
+            self.save(self.root / "profiles.json", json.dumps({"version": 1, "profiles": [entry]}).encode())
+
+        register()
+        with patch.object(backup, "profile_dirs", return_value=[self.trial]):
+            receipt = backup.create_backup(None, self.trial, self.out)
+        self.assertEqual(receipt["files"], 1)
+        with zipfile.ZipFile(self.out) as archived:
+            self.assertEqual(archived.namelist(), ["profile.json"])
+            self.assertEqual(json.loads(archived.read("profile.json")), entry)
+        self.assertFalse((self.trial / "profile.json").exists())
+        self.assertTrue(compare(self.trial, [self.trial], self.out)["matches"])
+        entry["name"] = "新名称"
+        register()
+        self.assertEqual(compare(self.trial, [self.trial], self.out)["changed"], ["profile.json"])
+        with zipfile.ZipFile(self.out, "w"):
+            pass
+        self.assertEqual(compare(self.trial, [self.trial], self.out)["missing_from_backup"], ["profile.json"])
+
     def test_existing_backup_wins_a_publication_race(self):
         verify = backup.verify_archive
 

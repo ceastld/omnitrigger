@@ -12,7 +12,7 @@ import sys
 from typing import NamedTuple
 import zipfile
 
-from snapshot_action_candidates import guard
+from snapshot_action_candidates import decode, guard
 
 
 CONFIG_FILES = (
@@ -24,6 +24,28 @@ PROFILE_RECORDS = ("backups/seed-source.json", "backups/restored-revisions.json"
 STAGE = re.compile(r"\.install-legacy-(?:upgrade-)?[0-9]+-[0-9]+-[0-9]+", re.I)
 PROFILE_ID = re.compile(r"t[0-9a-f]{12}")
 STATE_DOCUMENT = re.compile(r"[0-9a-f]{64}\.json", re.IGNORECASE | re.ASCII)
+
+
+def catalog_identity(root):
+    """旧测试档单独导出时，按安装版的字段顺序生成 ZIP 顶层的身份文件。"""
+    if (root.parent.name.casefold() != "profiles" or not PROFILE_ID.fullmatch(root.name.lower())
+            or guard(root / "profile.json", missing=True).exists()):
+        return None
+    path = guard(root.parent.parent / "profiles.json", missing=True)
+    if not path.exists():
+        return None
+    catalog = decode(path.read_bytes())
+    if catalog["version"] != 1:
+        raise ValueError(f"不支持的配置档登记版本：{path}")
+    keys = ("id", "alias", "kind", "name", "seed", "created_ms")
+    for entry in catalog["profiles"]:
+        if entry["kind"] == "test" and os.path.normcase(entry["id"]) == os.path.normcase(root.name):
+            if (set(entry) != set(keys) or not all(isinstance(entry[k], str) for k in keys[:-1])
+                    or type(entry["created_ms"]) is not int or not 0 <= entry["created_ms"] < 2**64
+                    or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", entry["alias"]) or entry["alias"] == "default"):
+                raise ValueError(f"测试档登记无效：{path}")
+            return json.dumps({k: entry[k] for k in keys}, indent=2, ensure_ascii=False).encode("utf-8")
+    return None
 
 
 def profile_dirs(app, root):
@@ -184,15 +206,23 @@ def digest(stream):
 
 def compare(root, directories, archive_path):
     live = live_files(root, directories)
+    identity = catalog_identity(root)
     archive_path = guard(archive_path)
     archive_version = stamp(archive_path.stat())
     with zipfile.ZipFile(archive_path) as archive:
         saved = archived_files(archive, root, directories)
-        if not live and not saved:
+        if not live and not saved and identity is None:
             raise ValueError("数据根和 ZIP 中均未找到可比对的配置文件。")
-        missing = [live[k][0] for k in sorted(live.keys() - saved.keys())]
-        extra = [saved[k].filename.replace("\\", "/") for k in sorted(saved.keys() - live.keys())]
         changed = []
+        identity_missing = identity is not None and "profile.json" not in saved
+        if identity is not None and not identity_missing:
+            with archive.open(saved.pop("profile.json")) as copy:
+                if digest(copy) != hashlib.sha256(identity).digest():
+                    changed.append("profile.json")
+        missing = [live[k][0] for k in sorted(live.keys() - saved.keys())]
+        if identity_missing:
+            missing.append("profile.json")
+        extra = [saved[k].filename.replace("\\", "/") for k in sorted(saved.keys() - live.keys())]
         for key in sorted(live.keys() & saved.keys()):
             name, original = live[key]
             info = saved[key]
@@ -208,7 +238,7 @@ def compare(root, directories, archive_path):
                     raise ValueError(f"比对期间文件已变化：{name}")
     if stamp(guard(archive_path).stat()) != archive_version:
         raise ValueError("比对期间 ZIP 文件有改动，请重新运行。")
-    if live != live_files(root, directories):
+    if live != live_files(root, directories) or identity != catalog_identity(root):
         raise ValueError("比对期间配置文件有改动，请重新运行。")
     return {"matches": not (missing or extra or changed), "checked_profiles": len(directories),
             "missing_from_backup": missing, "only_in_backup": extra, "changed": changed}

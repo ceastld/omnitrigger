@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, Metadata},
-    io::{self, Read, Seek},
+    io::{self, Read, Seek, Write},
     path::{Component, Path, PathBuf},
     time::SystemTime,
 };
@@ -30,6 +30,32 @@ struct Inventory {
     inherited_sources: BTreeSet<PathBuf>,
     folders: BTreeSet<String>,
     files: BTreeMap<String, SourceFile>,
+    catalog_identity: Option<Vec<u8>>,
+}
+
+// 旧测试档可能只在父档登记。独立备份需要能在原目录之外识别这份配置。
+fn catalog_identity(root: &Path) -> Result<Option<Vec<u8>>> {
+    if !super::is_profile_directory(root)
+        || !root
+            .file_name()
+            .and_then(|id| id.to_str())
+            .is_some_and(super::generated_profile_id)
+    {
+        return Ok(None);
+    }
+    let parent = root
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("无法定位测试档的父档。")?;
+    if metadata(&super::catalog_path(parent))?.is_none() {
+        return Ok(None);
+    }
+    read_catalog(parent)?
+        .profiles
+        .into_iter()
+        .find(|entry| entry.is_test_at(root))
+        .map(|entry| Ok(serde_json::to_vec_pretty(&entry)?))
+        .transpose()
 }
 
 fn metadata(path: &Path) -> Result<Option<Metadata>> {
@@ -218,6 +244,9 @@ impl Inventory {
             }
         }
         if include_inherited {
+            if !inventory.files.contains_key("profile.json") {
+                inventory.catalog_identity = catalog_identity(root)?;
+            }
             for (destination, source) in
                 script_runtime::inherited_backup_sources(&inventory.profiles, &own_hosts)?
             {
@@ -229,7 +258,7 @@ impl Inventory {
                 inventory.inherited_sources.insert(source);
             }
         }
-        if inventory.files.is_empty() {
+        if inventory.files.is_empty() && inventory.catalog_identity.is_none() {
             return Err("本档还没有可导出的配置。".into());
         }
         let mut names = BTreeSet::new();
@@ -279,6 +308,13 @@ fn digest(mut input: impl Read) -> io::Result<String> {
 
 fn write_verified(inventory: &Inventory, archive: &mut File) -> Result<()> {
     let mut zip = ZipWriter::new(&mut *archive);
+    if let Some(identity) = &inventory.catalog_identity {
+        zip.start_file(
+            "profile.json",
+            SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+        )?;
+        zip.write_all(identity)?;
+    }
     for folder in &inventory.folders {
         zip.add_directory(format!("{folder}/"), SimpleFileOptions::default())?;
     }
@@ -297,6 +333,11 @@ fn write_verified(inventory: &Inventory, archive: &mut File) -> Result<()> {
     zip.finish()?.sync_all()?;
     archive.rewind()?;
     let mut zip = ZipArchive::new(archive)?;
+    if let Some(identity) = &inventory.catalog_identity {
+        if digest(zip.by_name("profile.json")?)? != digest(identity.as_slice())? {
+            return Err("备份校验未通过：profile.json".into());
+        }
+    }
     for (name, entry) in &inventory.files {
         if digest(zip.by_name(name)?)? != entry.hash {
             return Err(format!("备份校验未通过：{name}").into());
@@ -399,7 +440,7 @@ fn export(config: &Path, output: Option<&Path>) -> Result<ExportedArchive> {
     Ok(ExportedArchive {
         path,
         profiles: inventory.profiles.len(),
-        files: inventory.files.len(),
+        files: inventory.files.len() + usize::from(inventory.catalog_identity.is_some()),
         bytes,
     })
 }
@@ -489,6 +530,51 @@ mod tests {
             prepare_root_access(&config, RootAccess::Tray),
             Err(ProfileCommandError::TestInTray)
         ));
+    }
+
+    #[test]
+    fn standalone_legacy_test_exports_its_catalog_identity_without_changing_the_source() {
+        let base = tempfile::tempdir().unwrap();
+        let parent = base.path();
+        let entry = create_profile(parent, "old-test", &Seed::Empty, Some("历史工作区")).unwrap();
+        let root = profile_dir(parent, &entry.id);
+        let identity = root.join("profile.json");
+        fs::remove_file(&identity).unwrap();
+        let exported = export_config_archive(&root.join("bindings.json")).unwrap();
+        assert_eq!(exported.files, 1);
+        let detached = tempfile::tempdir().unwrap();
+        ZipArchive::new(File::open(exported.path).unwrap())
+            .unwrap()
+            .extract(detached.path())
+            .unwrap();
+        assert_eq!(
+            super::super::restored_root_identity(detached.path()).unwrap(),
+            Some(entry.clone())
+        );
+        assert!(!identity.exists());
+        assert!(!detached.path().join("profiles.json").exists());
+
+        let full = Inventory::collect(parent).unwrap();
+        assert!(full.catalog_identity.is_none());
+        assert!(!full
+            .files
+            .contains_key(&format!("profiles/{}/profile.json", entry.id)));
+        let other = profile_dir(parent, "t000000000000");
+        put(&other, "bindings.json", b"{}");
+        assert!(Inventory::collect(&other)
+            .unwrap()
+            .catalog_identity
+            .is_none());
+
+        let mut raw = serde_json::to_vec(&entry).unwrap();
+        raw.extend_from_slice(b"\r\n");
+        fs::write(&identity, &raw).unwrap();
+        let exported = export_config_archive(&root.join("bindings.json")).unwrap();
+        ZipArchive::new(File::open(exported.path).unwrap())
+            .unwrap()
+            .extract(detached.path())
+            .unwrap();
+        assert_eq!(fs::read(detached.path().join("profile.json")).unwrap(), raw);
     }
 
     #[test]

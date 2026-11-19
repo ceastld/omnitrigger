@@ -13,7 +13,7 @@ import sys
 import tempfile
 import zipfile
 
-from compare_profile_backup import digest, live_files, profile_dirs, register_file, stamp
+from compare_profile_backup import catalog_identity, digest, live_files, profile_dirs, register_file, stamp
 from snapshot_action_candidates import decode, guard
 
 
@@ -88,13 +88,15 @@ def inventory(root, directories):
             key = register_file(root, files, path)
             if checksum is not None:
                 expected[key] = checksum
-    if not files:
+    if not files and catalog_identity(root) is None:
         raise ValueError(f"找不到可备份的配置：{root}")
     return files, expected, folders
 
 
-def write_archive(stage, root, folders, files):
+def write_archive(stage, root, folders, files, identity=None):
     with zipfile.ZipFile(stage, "x") as archive:
+        if identity is not None:
+            archive.writestr("profile.json", identity, compress_type=zipfile.ZIP_DEFLATED)
         for folder in sorted(folders):
             archive.writestr(folder + "/", b"")
         for name, version in sorted(files.values()):
@@ -108,8 +110,10 @@ def write_archive(stage, root, folders, files):
                     shutil.copyfileobj(source, target, 256 * 1024)
 
 
-def verify_archive(stage, root, files, expected):
+def verify_archive(stage, root, files, expected, identity=None):
     with zipfile.ZipFile(stage) as archive:
+        if identity is not None and archive.read("profile.json") != identity:
+            raise ValueError("备份中的测试档身份与登记不符。")
         for key, (name, version) in files.items():
             with guard(root / name).open("rb") as source, archive.open(name) as saved:
                 copied = digest(saved)
@@ -142,12 +146,14 @@ def create_backup(app, root, output):
         if any(output.is_relative_to(directory / subdir) for subdir in ("actions", "runtimes", "action-state")):
             raise ValueError("请选择动作包、运行时和扩展状态目录之外的位置保存备份。")
     files, expected, folders = inventory(root, directories)
+    identity = catalog_identity(root)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".omnitrigger-backup-", dir=guard(output.parent)) as temp:
         stage = Path(temp) / "config.zip"
-        write_archive(stage, root, folders, files)
-        verify_archive(stage, root, files, expected)
+        write_archive(stage, root, folders, files, identity)
+        verify_archive(stage, root, files, expected, identity)
         if (inventory(root, directories) != (files, expected, folders)
+                or catalog_identity(root) != identity
                 or profile_dirs(app, root) != directories):
             raise ValueError("备份期间配置档有改动，请重新运行。")
         size = stage.stat().st_size
@@ -157,7 +163,7 @@ def create_backup(app, root, output):
             os.rename(stage, output)
         else:
             os.link(stage, output)
-    return {"archive": str(output), "profiles": len(directories), "files": len(files), "bytes": size}
+    return {"archive": str(output), "profiles": len(directories), "files": len(files) + (identity is not None), "bytes": size}
 
 
 def main(argv=None):
