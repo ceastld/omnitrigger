@@ -5454,7 +5454,7 @@ impl Workspace {
         &self,
         visible: &[&trigger_browse::Row],
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    ) -> (Vec<AnyElement>, Vec<u64>) {
         // 键宽按面板可用宽度计算；首帧尚未测得时用默认值。
         let measured = self.trigger_board_width.get();
         let unit = if measured > 0. {
@@ -5714,8 +5714,7 @@ impl Workspace {
                 .into_any_element(),
             );
         }
-        elements.extend(self.trigger_rows_for(&view.ids, cx));
-        elements
+        (elements, view.ids)
     }
 
     /// 鼠标视图：标出各部位用作目标或前缀的条数，点击部位后在下方列出触发器。
@@ -5723,7 +5722,7 @@ impl Workspace {
         &self,
         visible: &[&trigger_browse::Row],
         cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    ) -> (Vec<AnyElement>, Vec<u64>) {
         use trigger_input_map::MousePart;
         // 机身左上角与尺寸；其余坐标都相对整幅图。
         const MX: f32 = 115.;
@@ -5985,15 +5984,14 @@ impl Workspace {
             }
             None => "所有用到鼠标、滚轮或屏幕区域的触发器".into(),
         };
-        let mut elements = vec![
+        let elements = vec![
             panel.into_any_element(),
             Self::input_view_heading(title, ids.len()).into_any_element(),
         ];
-        elements.extend(self.trigger_rows_for(&ids, cx));
-        elements
+        (elements, ids)
     }
 
-    fn render_list(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn render_triggers(&mut self, window: &Window, cx: &mut Context<Self>) -> Div {
         let listening = self.listener() == Listener::Listening;
         let dim = matches!(self.listener(), Listener::Paused | Listener::Offline);
         let summary = self.trigger_rows();
@@ -6012,6 +6010,7 @@ impl Workspace {
             .gap(px(2.))
             .when(dim, |el| el.opacity(0.6));
         let mut nav = None;
+        let mut selection_visible = false;
         match self.trigger_view {
             TriggerView::List => {
                 // 各组标题在滚动容器中的子元素下标，供导航跳转。
@@ -6039,6 +6038,7 @@ impl Workspace {
                             self.triggers.bindings().iter().find(|b| b.spec.id == *id)
                         {
                             child += 1;
+                            selection_visible |= self.selected == Some(*id);
                             rows = rows.child(self.render_trigger_row(binding, cx));
                         }
                     }
@@ -6047,13 +6047,17 @@ impl Workspace {
                     nav = Some(self.render_group_nav(&groups, &headers, cx));
                 }
             }
-            TriggerView::Keyboard if shown > 0 => {
+            TriggerView::Keyboard | TriggerView::Mouse if shown > 0 => {
                 let visible = trigger_browse::visible(&summary, &query, &self.trigger_filter);
-                rows = rows.children(self.render_keyboard_view(&visible, cx));
-            }
-            TriggerView::Mouse if shown > 0 => {
-                let visible = trigger_browse::visible(&summary, &query, &self.trigger_filter);
-                rows = rows.children(self.render_mouse_view(&visible, cx));
+                let (controls, ids) = if self.trigger_view == TriggerView::Keyboard {
+                    self.render_keyboard_view(&visible, cx)
+                } else {
+                    self.render_mouse_view(&visible, cx)
+                };
+                selection_visible = self.selected.is_some_and(|id| ids.contains(&id));
+                rows = rows
+                    .children(controls)
+                    .children(self.trigger_rows_for(&ids, cx));
             }
             _ => {}
         }
@@ -6097,7 +6101,7 @@ impl Workspace {
                     ),
             );
         }
-        div()
+        let list = div()
             .flex_1()
             .min_w_0()
             .h_full()
@@ -6163,7 +6167,21 @@ impl Workspace {
             .child(caption(format!(
                 "最多 {} 条触发器，每条最多 8 个前缀。单独按下未用于组合的前缀时，原输入会补发给应用。",
                 omnitrigger_core::MAX_BINDINGS,
-            )))
+            )));
+        // 保留原选择及编辑草稿。隐藏行的删除确认在其重新出现后须重新开始。
+        if !selection_visible {
+            self.confirm_delete = None;
+        }
+        let selected = self
+            .selected
+            .filter(|_| selection_visible)
+            .and_then(|id| self.binding(id));
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .child(list)
+            .child(self.render_inspector(selected, cx))
     }
 
     fn inspector_header(title: &'static str, right: impl IntoElement) -> Div {
@@ -7484,14 +7502,18 @@ impl Workspace {
         (body, Some(footer))
     }
 
-    fn render_inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_inspector(
+        &self,
+        selected: Option<&settings::Binding>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let package_result = self.package_result(cx);
         let (body, footer) = if self.recording {
             self.render_recording()
         } else if let Some(spec) = self.pending.clone() {
             self.render_captured(&spec, cx)
-        } else if let Some(binding) = self.selected.and_then(|id| self.binding(id)).cloned() {
-            self.render_edit(&binding, cx)
+        } else if let Some(binding) = selected {
+            self.render_edit(binding, cx)
         } else {
             (
                 vec![
@@ -8262,13 +8284,7 @@ impl Render for Workspace {
                 .into_any_element(),
             Page::Presets => self.render_presets(cx).into_any_element(),
             Page::Extensions => self.render_extensions(cx).into_any_element(),
-            Page::Triggers => div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .child(self.render_list(window, cx))
-                .child(self.render_inspector(cx))
-                .into_any_element(),
+            Page::Triggers => self.render_triggers(window, cx).into_any_element(),
             Page::History => self.render_history(cx).into_any_element(),
             Page::TextHistory => self.render_text_history(cx).into_any_element(),
             Page::Diagnostics => self.render_diagnostics(cx).into_any_element(),
