@@ -11,6 +11,8 @@ use crate::plugins::{local_manifest_metadata, read_local_manifest, RAISHOT_MANIF
 use serde::{Deserialize, Serialize};
 
 mod backup_revisions;
+mod config_archive;
+pub(crate) use config_archive::export_config_archive;
 #[cfg(windows)]
 mod external_import;
 mod reset_recovery;
@@ -1024,6 +1026,17 @@ fn copy_action_tree(from: &Path, to: &Path, mode: DataCopy, top: bool) -> std::i
     Ok(())
 }
 
+fn is_action_state_document(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        && path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| {
+                stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+}
+
 /// 显式使用旧档或重置备份作夹具时，恢复每个动作独立提交的状态文档。
 fn copy_fixture_action_state(from: &Path, to: &Path) -> std::io::Result<()> {
     let source = from.join("action-state");
@@ -1035,16 +1048,7 @@ fn copy_fixture_action_state(from: &Path, to: &Path) -> std::io::Result<()> {
     for item in std::fs::read_dir(source)? {
         let item = item?;
         let path = item.path();
-        let document = path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
-            && path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .is_some_and(|stem| {
-                    stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
-                });
-        if !document {
+        if !is_action_state_document(&path) {
             continue;
         }
         let metadata = path.symlink_metadata()?;

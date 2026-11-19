@@ -48,23 +48,25 @@ fn filename(number: u64) -> String {
     format!("edit-{number:016}.json")
 }
 
+pub(crate) fn edit_revision_number(name: &std::ffi::OsStr) -> Option<u64> {
+    let name = name.to_str()?;
+    let number = name
+        .strip_prefix("edit-")?
+        .strip_suffix(".json")?
+        .parse()
+        .ok()?;
+    (number > 0 && filename(number) == name).then_some(number)
+}
+
 fn revisions(directory: &Path) -> io::Result<(u64, Vec<Revision>)> {
     let mut records = Vec::new();
     let mut highest = 0;
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let name = entry.file_name();
-        let Some(number) = name.to_str().and_then(|s| {
-            s.strip_prefix("edit-")?
-                .strip_suffix(".json")?
-                .parse::<u64>()
-                .ok()
-        }) else {
+        let Some(number) = edit_revision_number(&name) else {
             continue;
         };
-        if number == 0 || name != filename(number).as_str() {
-            continue;
-        }
         highest = highest.max(number);
         let path = entry.path();
         let meta = path.symlink_metadata()?;

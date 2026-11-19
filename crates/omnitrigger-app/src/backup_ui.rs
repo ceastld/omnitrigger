@@ -10,6 +10,7 @@ pub(super) struct BackupRestore {
     alias: Option<String>,
     created: Option<profiles::RestoredCopy>,
     saved: Option<Vec<profiles::RestoredCopy>>,
+    archive: Option<std::path::PathBuf>,
     notice: Option<String>,
 }
 
@@ -43,6 +44,39 @@ impl Versions {
 }
 
 impl Workspace {
+    fn export_config_archive(&mut self, cx: &mut Context<Self>) {
+        if self.backup_restore.busy {
+            return;
+        }
+        let config = settings::path();
+        self.backup_restore.busy = true;
+        self.backup_restore.archive = None;
+        self.backup_restore.notice = Some("正在导出并校验配置备份…".into());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { profiles::export_config_archive(&config) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let state = &mut this.backup_restore;
+                state.busy = false;
+                state.notice = Some(match result {
+                    Ok(archive) => {
+                        state.archive = Some(archive.path);
+                        format!(
+                            "已导出并校验 {} 个配置档、{} 个文件。",
+                            archive.profiles, archive.files
+                        )
+                    }
+                    Err(error) => error,
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn choose_backup_versions(&mut self, cx: &mut Context<Self>) {
         if self.backup_restore.busy {
             return;
@@ -255,6 +289,35 @@ impl Workspace {
             .flex_col()
             .gap(px(10.))
             .child(div().font_weight(FontWeight::SEMIBOLD).child("配置备份"))
+            .when(standard, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .flex_wrap()
+                        .gap(px(8.))
+                        .child(
+                            theme::button(
+                                "export-config-archive",
+                                "导出配置 ZIP",
+                                theme::Tone::Primary,
+                                !state.busy,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.export_config_archive(cx))),
+                        )
+                        .when_some(state.archive.clone(), |row, path| {
+                            row.child(
+                                theme::button(
+                                    "reveal-config-archive",
+                                    "在文件夹中显示",
+                                    theme::Tone::Secondary,
+                                    true,
+                                )
+                                .on_click(move |_, _, cx| cx.reveal_path(&path)),
+                            )
+                        }),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -291,7 +354,7 @@ impl Workspace {
                     .child(
                         theme::button(
                             "open-edit-history",
-                            "查看配置备份",
+                            "查看编辑历史",
                             theme::Tone::Secondary,
                             true,
                         )

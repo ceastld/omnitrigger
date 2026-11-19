@@ -386,6 +386,38 @@ fn active_pointer(root: &Path) -> Result<Option<Pointer>, String> {
     Ok(Some(pointer))
 }
 
+/// 导出本档登记的宿主文件；归档时以清单摘要复核实际写入的字节。
+pub(super) fn backup_files(directory: &Path) -> Result<Vec<(PathBuf, Option<String>)>, String> {
+    let root = directory.join("runtimes/script");
+    let Some(pointer) = active_pointer(&root)? else {
+        let host = root.join(if cfg!(windows) { "host.exe" } else { "host" });
+        check_local_path(&host)?;
+        return Ok(if host.try_exists().map_err(|e| e.to_string())? {
+            vec![(host, None)]
+        } else {
+            vec![]
+        });
+    };
+    let package = root.join("packages").join(pointer.archive_sha256);
+    let path = package.join("manifest.json");
+    let (manifest, hash) = manifest(&path)?;
+    if hash != pointer.manifest_sha256 {
+        return Err(format!("宿主清单摘要不符：{}", path.display()));
+    }
+    let mut files = vec![(root.join("current.json"), None), (path, Some(hash))];
+    for file in manifest.files {
+        let path = package.join(file.path);
+        check_local_path(&path)?;
+        let meta = fs::symlink_metadata(&path)
+            .map_err(|e| format!("无法读取宿主文件 {}：{e}", path.display()))?;
+        if !meta.is_file() || meta.len() != file.size {
+            return Err(format!("宿主文件与登记长度不符：{}", path.display()));
+        }
+        files.push((path, Some(file.sha256)));
+    }
+    Ok(files)
+}
+
 fn activate_package(root: &Path, stage: &Path, pointer: &Pointer) -> Result<(), String> {
     if active_pointer(root).is_ok_and(|active| active.as_ref() == Some(pointer)) {
         return Ok(());

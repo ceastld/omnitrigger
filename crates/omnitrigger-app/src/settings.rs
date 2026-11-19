@@ -28,7 +28,8 @@ use crate::window_action::WindowAction;
 
 mod edit_history;
 pub(crate) use edit_history::{
-    edit_backup_file, edit_history_folder_to_open, edit_versions, save_editor_file,
+    edit_backup_file, edit_history_folder_to_open, edit_revision_number, edit_versions,
+    save_editor_file,
 };
 
 static CUSTOM_PATH: OnceLock<PathBuf> = OnceLock::new();
