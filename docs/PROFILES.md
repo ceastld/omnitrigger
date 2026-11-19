@@ -234,7 +234,7 @@ Windows 上，从只读文件创建或重置测试档后，可以直接编辑副
 
 也可以运行 `omnitrigger.exe --profile testing --profile-export-zip D:\Backups\testing.zip` 单独导出测试档。省略 `--profile testing` 会导出日常档和已登记的子档。目标文件须为新的 ZIP 文件。
 
-在仓库根目录可用下面的命令调用安装版导出。可用 `--output <新文件.zip>` 指定位置，自定义安装或数据目录可传 `--app` 和 `--data-root`。搭配较早的安装版时，脚本沿用旧的导出方式，只收集各档本地保存的文件。
+在仓库根目录可用下面的命令调用安装版导出。可用 `--output <新文件.zip>` 指定位置，自定义安装或数据目录可传 `--app` 和 `--data-root`。升级前单独备份旧测试档时，脚本会在发布 ZIP 前核对只保存在父档登记中的身份，并在旧版导出器遗漏时补齐。对于还没有 ZIP 导出命令的安装版，脚本只收集各档本地保存的文件。
 
 ```powershell
 python scripts/create_profile_backup.py

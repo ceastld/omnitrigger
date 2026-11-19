@@ -115,6 +115,61 @@ class ExportTest(unittest.TestCase):
             pass
         self.assertEqual(compare(self.trial, [self.trial], self.out)["missing_from_backup"], ["profile.json"])
 
+    def test_old_native_export_preserves_inherited_files_and_rechecks_catalog(self):
+        entry = {"id": self.trial.name, "alias": "trial", "name": "升级前的测试档", "kind": "test",
+                 "created_ms": 123, "seed": "copy:default"}
+        catalog = self.root / "profiles.json"
+        catalog.write_text(json.dumps({"version": 1, "profiles": [entry]}))
+        inherited = "runtimes/script/packages/" + "a" * 64 + "/host.exe"
+        hotkeys = self.save(self.trial / "bindings.json", self.hotkeys.read_bytes())
+
+        def native(args, **kwargs):
+            if args[-1] == "--help":
+                return subprocess.CompletedProcess(args, 0, b"--profile-export-zip <file>", b"")
+            self.assertEqual(args[1:-1], ["--data-root", str(self.trial), "--profile-export-zip"])
+            with zipfile.ZipFile(args[-1], "x") as archive:
+                archive.writestr("bindings.json", hotkeys.read_bytes())
+                archive.writestr(inherited, b"inherited")
+            if edit_source is not None:
+                edit_source()
+            return subprocess.CompletedProcess(args, 0, b'{"profiles":1,"files":2}', b"")
+
+        def rename():
+            entry["name"] = "刚改的名称"
+            catalog.write_text(json.dumps({"version": 1, "profiles": [entry]}))
+
+        program = Path(__file__)
+        with patch.object(backup, "profile_dirs", return_value=[self.trial]), patch.object(subprocess, "run", native):
+            edit_source = None
+            receipt = backup.create_backup(program, self.trial, self.out)
+            self.assertEqual((receipt["files"], receipt["bytes"]), (3, self.out.stat().st_size))
+            with zipfile.ZipFile(self.out) as archive:
+                self.assertEqual(json.loads(archive.read("profile.json")), entry)
+                self.assertEqual(archive.read(inherited), b"inherited")
+            self.assertFalse((self.trial / "profile.json").exists())
+            retry = self.out.with_name("retry.zip")
+            edit_source = rename
+            with self.assertRaisesRegex(ValueError, "配置档有改动"):
+                backup.create_backup(program, self.trial, retry)
+            local_identity = self.save(self.trial / "profile.json", backup.catalog_identity(self.trial))
+            edit_source = local_identity.unlink
+            with self.assertRaisesRegex(ValueError, "配置档有改动"):
+                backup.create_backup(program, self.trial, retry)
+            self.assertEqual(list(self.out.parent.iterdir()), [self.out])
+
+    def test_native_empty_profile_compatibility_keeps_other_errors(self):
+        rejection = {"status": "rejected", "error": {"code": "invalid_profile_arguments",
+                     "message": "无法导出配置备份：本档还没有可导出的配置。", "effect_state": "not_started"}}
+        failed = subprocess.CompletedProcess([], 1, b"", json.dumps(rejection).encode())
+        with patch.object(subprocess, "run", return_value=failed):
+            self.assertIsNone(backup.native_export("app", self.trial, self.out, allow_empty=True))
+            with self.assertRaises(ValueError):
+                backup.native_export("app", self.trial, self.out)
+            rejection["error"]["message"] = "备份期间配置档有改动，请重试。"
+            failed.stderr = json.dumps(rejection, ensure_ascii=False).encode()
+            with self.assertRaisesRegex(ValueError, "配置档有改动"):
+                backup.native_export("app", self.trial, self.out, allow_empty=True)
+
     def test_standalone_backup_keeps_and_checks_both_reset_records(self):
         records = {
             "backups/seed-source.json": b'{"source_id":"t123456789abc"}',

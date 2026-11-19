@@ -13,7 +13,9 @@ import sys
 import tempfile
 import zipfile
 
-from compare_profile_backup import catalog_identity, digest, live_files, profile_dirs, register_file, stamp
+from compare_profile_backup import (
+    catalog_identity, digest, is_catalog_profile_path, live_files, profile_dirs, register_file, stamp,
+)
 from snapshot_action_candidates import decode, guard
 
 
@@ -21,6 +23,11 @@ SHA256 = re.compile(r"[0-9a-fA-F]{64}")
 REVISION = re.compile(r"edit-([0-9]{16,20})\.json")
 PACKAGE_PATH = re.compile(r"[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*")
 DEVICE = re.compile(r"(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?", re.IGNORECASE | re.ASCII)
+EMPTY_PROFILE_REJECTION = {
+    "status": "rejected",
+    "error": {"code": "invalid_profile_arguments", "message": "无法导出配置备份：本档还没有可导出的配置。",
+              "effect_state": "not_started"},
+}
 
 
 def metadata(path, limit):
@@ -123,6 +130,36 @@ def verify_archive(stage, root, files, expected, identity=None):
                     raise ValueError(f"脚本运行时文件摘要不符：{name}")
 
 
+def native_export(program, root, output, *, allow_empty=False):
+    result = subprocess.run([str(program), "--data-root", str(root), "--profile-export-zip", str(output)],
+                            capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if not result.returncode:
+        return decode(result.stdout)
+    message = result.stderr.decode("utf-8", "replace").strip()
+    if allow_empty:
+        # 旧版把只在父档登记、尚未保存任何文件的档报告为空。其余错误照常返回。
+        try:
+            reason = json.loads(message)
+        except ValueError:
+            reason = None
+        if reason == EMPTY_PROFILE_REJECTION:
+            return None
+    raise ValueError(message)
+
+
+def complete_native_identity(stage, identity):
+    # 在旧版已经校验的 ZIP 上追加一个成员，继承的宿主、编辑历史与动作资源都保留。
+    with zipfile.ZipFile(stage) as archive:
+        missing = "profile.json" not in archive.namelist()
+    if missing:
+        with zipfile.ZipFile(stage, "a") as archive:
+            archive.writestr("profile.json", identity, compress_type=zipfile.ZIP_DEFLATED)
+    with zipfile.ZipFile(stage) as archive:
+        if archive.read("profile.json") != identity:
+            raise ValueError("备份中的测试档身份与登记不符。")
+        return sum(not entry.is_dir() for entry in archive.infolist())
+
+
 def create_backup(app, root, output):
     root = guard(root)
     output = guard(output, missing=True)
@@ -130,40 +167,52 @@ def create_backup(app, root, output):
         raise ValueError("备份文件名须以 .zip 结尾。")
     if output.exists():
         raise FileExistsError(f"备份已存在：{output}")
+    identity = catalog_identity(root)
+    native_program = None
     if app is not None:
         program = str(guard(app))
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         help_result = subprocess.run([program, "--help"], capture_output=True, creationflags=flags, timeout=60)
         if help_result.returncode == 0 and b"--profile-export-zip " in help_result.stdout:
-            result = subprocess.run([program, "--data-root", str(root), "--profile-export-zip", str(output)],
-                                    capture_output=True, creationflags=flags)
-            if result.returncode:
-                raise ValueError(result.stderr.decode("utf-8", "replace").strip())
-            return decode(result.stdout)
-    # 旧安装版的后备实现只收集各档本地保存的文件。
+            # 普通数据根直接交给安装版。登记目录在导出期间也可能从本档身份切换到父档登记。
+            if not is_catalog_profile_path(root):
+                return native_export(program, root, output)
+            native_program = program
     directories = profile_dirs(app, root)
     for directory in directories:
         if any(output.is_relative_to(directory / subdir) for subdir in ("actions", "runtimes", "action-state")):
             raise ValueError("请选择动作包、运行时和扩展状态目录之外的位置保存备份。")
-    files, expected, folders = inventory(root, directories)
-    identity = catalog_identity(root)
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".omnitrigger-backup-", dir=guard(output.parent)) as temp:
         stage = Path(temp) / "config.zip"
-        write_archive(stage, root, folders, files, identity)
-        verify_archive(stage, root, files, expected, identity)
-        if (inventory(root, directories) != (files, expected, folders)
-                or catalog_identity(root) != identity
-                or profile_dirs(app, root) != directories):
+        receipt = None
+        if native_program:
+            receipt = native_export(native_program, root, stage, allow_empty=identity is not None)
+        if receipt is None:
+            files, expected, folders = inventory(root, directories)
+            if native_program and files:
+                raise ValueError("安装版报告空档后发现了配置文件，请重新运行。")
+            write_archive(stage, root, folders, files, identity)
+            verify_archive(stage, root, files, expected, identity)
+            if inventory(root, directories) != (files, expected, folders):
+                raise ValueError("备份期间配置档有改动，请重新运行。")
+            count = len(files) + (identity is not None)
+        else:
+            count = receipt["files"] if identity is None else complete_native_identity(stage, identity)
+            if receipt["profiles"] != len(directories):
+                raise ValueError("备份期间配置档有改动，请重新运行。")
+        if catalog_identity(root) != identity or profile_dirs(app, root) != directories:
             raise ValueError("备份期间配置档有改动，请重新运行。")
-        size = stage.stat().st_size
+        with stage.open("r+b") as saved:
+            os.fsync(saved.fileno())
+            size = os.fstat(saved.fileno()).st_size
         # 同一卷内一次发布。两个导出者同时指定一个新文件名时只有一个能成功。
         guard(output, missing=True)
         if os.name == "nt":
             os.rename(stage, output)
         else:
             os.link(stage, output)
-    return {"archive": str(output), "profiles": len(directories), "files": len(files) + (identity is not None), "bytes": size}
+    return {"archive": str(output), "profiles": len(directories), "files": count, "bytes": size}
 
 
 def main(argv=None):

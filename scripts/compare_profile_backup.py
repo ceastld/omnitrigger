@@ -26,10 +26,13 @@ PROFILE_ID = re.compile(r"t[0-9a-f]{12}")
 STATE_DOCUMENT = re.compile(r"[0-9a-f]{64}\.json", re.IGNORECASE | re.ASCII)
 
 
+def is_catalog_profile_path(root):
+    return root.parent.name.casefold() == "profiles" and PROFILE_ID.fullmatch(root.name.lower()) is not None
+
+
 def catalog_identity(root):
     """旧测试档单独导出时，按安装版的字段顺序生成 ZIP 顶层的身份文件。"""
-    if (root.parent.name.casefold() != "profiles" or not PROFILE_ID.fullmatch(root.name.lower())
-            or guard(root / "profile.json", missing=True).exists()):
+    if not is_catalog_profile_path(root) or guard(root / "profile.json", missing=True).exists():
         return None
     path = guard(root.parent.parent / "profiles.json", missing=True)
     if not path.exists():
