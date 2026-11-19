@@ -929,6 +929,13 @@ fn trace_seed_sources<'a>(
 }
 
 fn read_catalog(root: &Path) -> Result<Catalog, String> {
+    match read_saved_catalog(root)? {
+        Some(catalog) => Ok(catalog),
+        None => validate_catalog(root, recover_catalog(root)?),
+    }
+}
+
+fn read_saved_catalog(root: &Path) -> Result<Option<Catalog>, String> {
     let path = catalog_path(root);
     let catalog = match std::fs::read_to_string(&path) {
         Ok(text) => {
@@ -943,9 +950,13 @@ fn read_catalog(root: &Path) -> Result<Catalog, String> {
             }
             catalog
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => recover_catalog(root)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("读取 {} 失败：{error}", path.display())),
     };
+    validate_catalog(root, catalog).map(Some)
+}
+
+fn validate_catalog(root: &Path, catalog: Catalog) -> Result<Catalog, String> {
     let mut keys = BTreeSet::new();
     for entry in &catalog.profiles {
         validate_alias(&entry.alias)?;
@@ -1462,6 +1473,14 @@ fn lock_catalog(root: &Path) -> Result<std::fs::File, String> {
 }
 
 fn testing_workspace(root: &Path, check_only: bool) -> Result<Entry, String> {
+    // 已发布的登记可直接读取。目标档的使用锁仍由打开者取得，重置该档时照常等待。
+    if let Some(entry) = read_saved_catalog(root)?
+        .as_ref()
+        .and_then(|catalog| catalog.find(TEST_ALIAS))
+        .filter(|entry| entry.kind == "test")
+    {
+        return Ok(entry.clone());
+    }
     let _lock = lock_catalog(root)?;
     let mut catalog = read_catalog(root)?;
     if let Some(entry) = catalog.find(TEST_ALIAS) {
@@ -4766,6 +4785,27 @@ mod tests {
         assert!(!parsed.listen);
         assert!(take_arguments(&mut args(&["--test-workspace", "--profile", "default"])).is_err());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shortcut_reopens_a_saved_test_profile_while_the_catalog_is_locked() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let expected = testing_workspace(root, false).unwrap();
+        let lock = lock_catalog(root).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let result = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                send.send(testing_workspace(root, false)).unwrap();
+            });
+            let result = receive.recv_timeout(std::time::Duration::from_secs(8));
+            drop(lock);
+            result
+        });
+        assert_eq!(
+            result.expect("已有测试档不应等待其他档的登记写入").unwrap(),
+            expected
+        );
     }
 
     #[test]

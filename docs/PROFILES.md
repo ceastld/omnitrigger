@@ -4,6 +4,8 @@
 
 安装后的开始菜单提供“OmniTrigger”和“OmniTrigger 测试”。测试入口与开发入口 `start.ps1` 共用 `--test-workspace`，首次自动创建 `testing` 测试配置档，之后沿用。日常数据与测试数据均属于当前 Windows 用户，独立于安装目录，卸载和重装后保留。同一 Windows 会话再次打开同一入口会唤回原窗口，日常和测试窗口可同时使用。
 
+其他配置档正在创建或重置时，仍可从开始菜单唤回已打开的“OmniTrigger 测试”窗口。
+
 单独使用 `--settings`、`--wheel-editor` 或 `--browser-connector-settings` 时，会在同一配置档、同一监听模式的原窗口中切到相应页面，也可以从托盘唤回该窗口。普通启动保留当前页面。`--wheel <轮盘 ID>` 仍按呼出轮盘的方式运行。
 
 要让开始菜单的测试入口直接使用自己的热键和轮盘，可在首次打开前运行 `omnitrigger.exe --profile-create testing --seed copy:default --name "日常配置测试"`。创建后可用 `omnitrigger.exe --test-workspace --check-config` 核对配置。若已有 `testing` 档，可在日常窗口的“设置 → 打开测试副本”另建副本，保留原测试档里的编辑。
