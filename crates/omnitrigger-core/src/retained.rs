@@ -9,10 +9,28 @@ pub(super) struct RetainedSession {
     started_ms: u64,
     temporary: Option<Button>,
     used: bool,
+    committed: bool,
     restored_down: bool,
 }
 
 impl Engine {
+    /// 切换前台并丢弃旧窗口的缓冲。已完成键盘组合的保留前缀可等待新的末键。
+    pub fn switch_foreground(&mut self) -> Decision {
+        let held_prefix = self.held_retained_prefix.or_else(|| {
+            self.retained
+                .filter(|session| session.committed && !session.restored_down)
+                .map(|session| session.key)
+        });
+        let decision = self.cancel();
+        if self.process_name.is_some() || self.window_role != crate::WindowRole::Unknown {
+            self.process_name = None;
+            self.window_role = crate::WindowRole::Unknown;
+            self.refresh_active_bindings();
+        }
+        self.held_retained_prefix = held_prefix;
+        decision
+    }
+
     /// 补全同一前台窗口的首次识别结果。调用方须已核验窗口与输入代次一致。
     pub fn resolve_foreground_context(
         &mut self,
@@ -25,7 +43,9 @@ impl Engine {
                 && !session.used
                 && self.pressed.get(&session.key) == Some(&PressState::Consumed)
         });
+        let held_prefix = self.held_retained_prefix;
         let decision = self.set_foreground_context(name, role)?;
+        self.held_retained_prefix = held_prefix;
         // 让新窗口中已经按下的前缀继续等待首个末键，同时按新进程范围匹配。
         if let Some(session) = fresh_prefix
             && self.retained.is_none()
@@ -51,6 +71,23 @@ impl Engine {
     }
 
     pub(super) fn retained_event(&mut self, event: InputKind) -> Option<Decision> {
+        if let Some(prefix) = self.held_retained_prefix {
+            // 旧按压仍由收尾路径消费。仅新窗口的末键可用此前缀，不能恢复旧按下。
+            return match event {
+                InputKind::Up(button) if button == prefix => {
+                    self.held_retained_prefix = None;
+                    None
+                }
+                InputKind::Down(button) if button == PRIMARY => {
+                    self.held_retained_prefix = None;
+                    None
+                }
+                InputKind::Down(button @ Button::Key(_)) if button != prefix => {
+                    self.held_retained_action(prefix, button)
+                }
+                _ => None,
+            };
+        }
         let Some(session) = self.retained else {
             let InputKind::Down(button @ Button::Key(_)) = event else {
                 return None;
@@ -98,6 +135,7 @@ impl Engine {
                     started_ms: self.now_ms,
                     temporary: None,
                     used: false,
+                    committed: false,
                     restored_down: false,
                 });
                 return Some(Decision {
@@ -153,6 +191,35 @@ impl Engine {
             .map(|binding| (binding.id, binding.keyboard.repeat))
     }
 
+    fn held_retained_action(&mut self, prefix: Button, button: Button) -> Option<Decision> {
+        let state = self.pressed.get(&button);
+        if matches!(state, Some(PressState::Passed | PressState::Observed)) {
+            self.last_keyboard_down = Some(self.now_ms);
+        }
+        if !matches!(state, None | Some(PressState::Consumed)) {
+            return None;
+        }
+        let action = self.retained_starter(prefix).and_then(|_| {
+            self.candidates()
+                .find(|binding| {
+                    binding.activation == Activation::Press(button)
+                        && binding.held == [prefix]
+                        && binding.keyboard.retained_prefix.is_some()
+                        && self.conditions_match(binding)
+                })
+                .map(|binding| (binding.id, binding.keyboard.repeat))
+        });
+        if let Some((id, repeat)) = action
+            && (state.is_none() || (repeat && self.repeat_owner.get(&button) == Some(&id)))
+        {
+            return Some(self.retained_hit(button, id, repeat));
+        }
+        if state.is_none() {
+            self.last_keyboard_down = Some(self.now_ms);
+        }
+        None
+    }
+
     fn record_retained_adorn(&mut self, button: Button, owner: usize) {
         if self.bindings[owner].held.contains(&button)
             && self.bindings[owner].keyboard.prefix() != Some(button)
@@ -191,6 +258,9 @@ impl Engine {
     }
 
     fn retained_hit(&mut self, button: Button, id: u64, repeat: bool) -> Decision {
+        if let Some(session) = &mut self.retained {
+            session.committed = true;
+        }
         self.commit_pending();
         self.pressed.entry(button).or_insert(PressState::Consumed);
         self.terminal_presses.insert(button);
@@ -363,11 +433,11 @@ impl Engine {
                     .extend([InputKind::Down(button), InputKind::Up(button)]);
                 return Some(decision);
             }
-            if action.is_some() {
-                self.commit_pending();
-            }
-            self.retained.as_mut().unwrap().temporary = None;
-            self.retained.as_mut().unwrap().used = true;
+            self.commit_pending();
+            let active = self.retained.as_mut().unwrap();
+            active.temporary = None;
+            active.used = true;
+            active.committed = true;
             let consume = !matches!(
                 self.pressed.remove(&button),
                 Some(PressState::Passed | PressState::Observed)

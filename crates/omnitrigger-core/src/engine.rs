@@ -138,6 +138,7 @@ pub struct Engine {
     layer_owner: Option<usize>,
     tap_allowed: Vec<bool>,
     retained: Option<RetainedSession>,
+    held_retained_prefix: Option<Button>,
     last_keyboard_down: Option<u64>,
     retained_starters: Vec<usize>,
     mouse_modifier_gate: Option<crate::MouseModifierGate>,
@@ -184,6 +185,7 @@ impl Engine {
             layer_owner: None,
             tap_allowed: Vec::new(),
             retained: None,
+            held_retained_prefix: None,
             last_keyboard_down: None,
             retained_starters: Vec::new(),
             mouse_modifier_gate: None,
@@ -507,6 +509,7 @@ impl Engine {
         self.captured_presses.clear();
         self.tap_restore = None;
         self.retained = None;
+        self.held_retained_prefix = None;
         self.pending.clear();
         self.prefix_origin = None;
         self.hold = None;

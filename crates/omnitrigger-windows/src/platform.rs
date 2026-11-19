@@ -1455,8 +1455,7 @@ impl ThreadState {
             self.counters.foreground_cancellations =
                 self.counters.foreground_cancellations.saturating_add(1);
             // 不把旧窗口的缓冲输入补发给新窗口。
-            let cancelled = self.with_engine(Engine::cancel);
-            let _ = self.with_engine(|engine| engine.set_foreground_process(None));
+            let cancelled = self.with_engine(Engine::switch_foreground);
             self.cancel_queued_replay();
             self.forward_cancelled_drags(cancelled);
             self.observe_hold(
@@ -2945,7 +2944,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retained_prefix_survives_first_resolution_in_new_foreground() {
+    fn retained_space_can_trigger_again_across_foreground_changes() {
         let (events, received) = mpsc::sync_channel(EVENT_CAPACITY);
         let mut state = ThreadState::new(events);
         let editor = foreground_context::Identity { hwnd: 100, pid: 10 };
@@ -3006,11 +3005,34 @@ mod tests {
         assert!(input(&mut state, InputKind::Up(s), 235));
         assert!(input(&mut state, InputKind::Up(space), 240));
 
-        for _ in 0..2 {
-            assert!(matches!(
-                received.try_recv().unwrap(),
-                BackendEvent::Triggered { id: 1, .. }
-            ));
+        assert!(input(&mut state, InputKind::Down(space), 300));
+        assert!(input(&mut state, InputKind::Down(s), 350));
+        state.test_foreground = Some(editor);
+        assert!(input(&mut state, InputKind::Down(s), 351));
+        resolve(&mut state, editor, "editor");
+        assert!(input(&mut state, InputKind::Up(s), 360));
+        assert!(input(&mut state, InputKind::Down(s), 370));
+        assert!(input(&mut state, InputKind::Down(s), 375));
+        assert!(input(&mut state, InputKind::Up(s), 380));
+
+        let excluded = foreground_context::Identity { hwnd: 300, pid: 30 };
+        state.test_foreground = Some(excluded);
+        state.update_foreground_identity(excluded);
+        resolve(&mut state, excluded, "excluded");
+        assert!(!input(&mut state, InputKind::Down(s), 390));
+        assert!(!input(&mut state, InputKind::Up(s), 400));
+
+        state.test_foreground = Some(search);
+        state.update_foreground_identity(search);
+        resolve(&mut state, search, "omnitrigger");
+        assert!(input(&mut state, InputKind::Down(s), 410));
+        assert!(input(&mut state, InputKind::Up(s), 420));
+        assert!(input(&mut state, InputKind::Up(space), 430));
+
+        for foreground in [editor, search, search, editor, search] {
+            assert!(matches!(received.try_recv().unwrap(),
+                BackendEvent::Triggered { id: 1, foreground: target, .. }
+                    if target == foreground.hwnd as isize));
         }
         assert!(received.try_recv().is_err());
         assert!(state.physical_held.is_empty());
