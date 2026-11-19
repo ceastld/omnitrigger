@@ -29,7 +29,6 @@ pub(super) fn calculate(query: &str) -> Result<String, CalculationError> {
     let normalized: String = query
         .chars()
         .map(|ch| match ch {
-            '×' => '*',
             '÷' => '/',
             '−' => '-',
             '！'..='～' => char::from_u32(u32::from(ch) - 0xfee0).unwrap_or(ch),
@@ -70,47 +69,52 @@ struct Parser<'a>(&'a str);
 impl Parser<'_> {
     fn expression(&mut self, min_binding: u8) -> Result<f64, CalculationError> {
         let mut lhs = match self.peek() {
-            Some(b'+') => {
+            Some('+') => {
                 self.0 = &self.0[1..];
                 self.expression(5)?
             }
-            Some(b'-') => {
+            Some('-') => {
                 self.0 = &self.0[1..];
                 -self.expression(5)?
             }
-            Some(b'(') => {
+            Some('(') => {
                 self.0 = &self.0[1..];
                 let value = self.expression(0)?;
                 match self.peek() {
-                    Some(b')') => self.0 = &self.0[1..],
+                    Some(')') => self.0 = &self.0[1..],
                     None => return Err(CalculationError::Incomplete),
                     _ => return Err(CalculationError::Invalid),
                 }
                 value
             }
-            Some(b'0'..=b'9' | b'.') => self.number()?,
+            Some('0'..='9' | '.') => self.number()?,
             Some(_) => return Err(CalculationError::Invalid),
             None => return Err(CalculationError::Incomplete),
         };
 
         while let Some(op) = self.peek() {
+            let (op, width) = if self.0.starts_with("**") {
+                ('^', 2)
+            } else {
+                (op, op.len_utf8())
+            };
             let (left, right) = match op {
-                b'+' | b'-' => (1, 2),
-                b'*' | b'/' => (3, 4),
-                b'^' => (6, 5),
+                '+' | '-' => (1, 2),
+                '*' | '×' | '/' => (3, 4),
+                '^' => (6, 5),
                 _ => break,
             };
             if left < min_binding {
                 break;
             }
-            self.0 = &self.0[1..];
+            self.0 = &self.0[width..];
             let rhs = self.expression(right)?;
             lhs = match op {
-                b'+' => lhs + rhs,
-                b'-' => lhs - rhs,
-                b'*' => lhs * rhs,
-                b'/' if rhs == 0.0 => return Err(CalculationError::DivisionByZero),
-                b'/' => lhs / rhs,
+                '+' => lhs + rhs,
+                '-' => lhs - rhs,
+                '*' | '×' => lhs * rhs,
+                '/' if rhs == 0.0 => return Err(CalculationError::DivisionByZero),
+                '/' => lhs / rhs,
                 _ => lhs.powf(rhs),
             };
             finite(lhs)?;
@@ -118,9 +122,9 @@ impl Parser<'_> {
         Ok(lhs)
     }
 
-    fn peek(&mut self) -> Option<u8> {
+    fn peek(&mut self) -> Option<char> {
         self.0 = self.0.trim_start();
-        self.0.as_bytes().first().copied()
+        self.0.chars().next()
     }
 
     fn number(&mut self) -> Result<f64, CalculationError> {
@@ -175,6 +179,12 @@ mod tests {
             ("-2^2", "-4"),
             ("2^3^2", "512"),
             ("2^-3", "0.125"),
+            ("2**10", "1024"),
+            ("2**3**2", "512"),
+            ("-2**2", "-4"),
+            ("2**-3", "0.125"),
+            ("3 × 2**3", "24"),
+            ("２＊＊１０", "1024"),
             ("＝（１．５＋２．５）÷２", "2"),
             ("1e-3 + .002", "0.003"),
             ("0.1 + 0.2", "0.3"),
@@ -191,6 +201,10 @@ mod tests {
         for (query, expected) in [
             ("(1+2", CalculationError::Incomplete),
             ("2 ^ -", CalculationError::Incomplete),
+            ("2**", CalculationError::Incomplete),
+            ("2***3", CalculationError::Invalid),
+            ("2 * * 3", CalculationError::Invalid),
+            ("2×*3", CalculationError::Invalid),
             ("1e-", CalculationError::Incomplete),
             ("12 34", CalculationError::Invalid),
             ("2+3)", CalculationError::Invalid),

@@ -172,7 +172,7 @@ impl QuickSearch {
                 .child(error.message()),
             None => row
                 .text_color(rgb(theme::TEXT_MUTED))
-                .child("支持括号、乘方和科学计数法"),
+                .child("支持括号、乘方（^ 或 **）和科学计数法"),
         }
     }
 }
