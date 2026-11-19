@@ -259,7 +259,7 @@ $archive = 'D:\Backups\OmniTrigger-config.zip'
 python scripts/compare_profile_backup.py --app $app --data-root $root --archive $archive
 ```
 
-这条命令读取日常档和测试档的登记、身份、热键、轮盘、外观、插件登记、RaiShot 清单及 `actions/` 内已安装的动作文件。对于测试副本，还会核对创建来源、种子来源档 ID，以及从编辑备份恢复时记录的版本号和摘要。这样可以在重装前发现会影响选择或重置副本的缺项。
+这条命令读取日常档和测试档的登记、身份、热键、轮盘、外观、插件登记、RaiShot 清单及 `actions/` 内已安装的动作文件。对于测试副本，还会核对创建来源、种子来源档 ID，以及从编辑备份恢复时记录的版本号和摘要。要核对单独导出的测试档，可将 `--data-root` 指向该档目录，核对范围包括本档的 `backups/seed-source.json` 和 `backups/restored-revisions.json`。
 
 扩展通过动作接口保存的持久设置位于各档自己的 `action-state/` 目录。备份时带上该目录下以 64 个十六进制字符命名的 JSON 文件。同一动作在日常档和测试档可以有不同的值，命令会分别核对，按差异类别列出文件的相对路径。
 

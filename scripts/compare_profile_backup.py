@@ -116,9 +116,9 @@ def live_files(root, directories, *, action_directories=None):
     files = {}
     for directory in directories:
         paths = [directory / name for name in CONFIG_FILES]
+        paths.extend(directory / name for name in PROFILE_RECORDS)
         if directory != root:
             paths.append(directory.with_suffix(COPY_ORIGIN))
-            paths.extend(directory / name for name in PROFILE_RECORDS)
         for path in paths:
             path = guard(path, missing=True)
             if path.exists():
@@ -144,7 +144,7 @@ def live_files(root, directories, *, action_directories=None):
     return files
 
 
-def in_scope(parts, current_profiles, is_directory):
+def in_scope(parts, current_profiles, is_directory, root_records):
     relative = parts
     profile = ()
     while len(relative) >= 2 and relative[0].casefold() == "profiles":
@@ -157,7 +157,7 @@ def in_scope(parts, current_profiles, is_directory):
         if profile not in current_profiles and not PROFILE_ID.fullmatch(profile_id):
             return False
         relative = relative[2:]
-        if not relative or "/".join(relative).casefold() in PROFILE_RECORDS:
+        if not relative:
             return not is_directory
     if relative[0].casefold() == "action-state":
         if len(relative) == 1:
@@ -173,10 +173,11 @@ def in_scope(parts, current_profiles, is_directory):
         return False
     if len(relative) >= 2 and relative[0].casefold() == "actions":
         return not STAGE.fullmatch(relative[1])
-    return "/".join(relative).casefold() in CONFIG_FILES
+    name = "/".join(relative).casefold()
+    return name in CONFIG_FILES or name in (PROFILE_RECORDS if profile else root_records)
 
 
-def archived_files(archive, root, directories):
+def archived_files(archive, root, directories, root_records):
     current_profiles = {tuple(part.casefold() for part in folder.relative_to(root).parts)
                         for folder in directories if folder != root}
     files = {}
@@ -186,7 +187,7 @@ def archived_files(archive, root, directories):
         parts = name.removesuffix("/").split("/")
         if not is_directory and any(part in ("", ".", "..") or ":" in part for part in parts):
             raise ValueError(f"ZIP 内的路径无效：{name}")
-        if not in_scope(parts, current_profiles, is_directory):
+        if not in_scope(parts, current_profiles, is_directory, root_records):
             continue
         key = name.casefold()
         if stat.S_IFMT(info.external_attr >> 16) not in (0, stat.S_IFREG):
@@ -207,10 +208,12 @@ def digest(stream):
 def compare(root, directories, archive_path):
     live = live_files(root, directories)
     identity = catalog_identity(root)
+    # 单独导出的测试档可能只在父档登记。普通数据根只核对本机实际保存的来源记录。
+    root_records = PROFILE_RECORDS if "profile.json" in live or identity is not None else live.keys() & PROFILE_RECORDS
     archive_path = guard(archive_path)
     archive_version = stamp(archive_path.stat())
     with zipfile.ZipFile(archive_path) as archive:
-        saved = archived_files(archive, root, directories)
+        saved = archived_files(archive, root, directories, root_records)
         if not live and not saved and identity is None:
             raise ValueError("数据根和 ZIP 中均未找到可比对的配置文件。")
         changed = []

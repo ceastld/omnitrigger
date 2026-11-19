@@ -115,6 +115,38 @@ class ExportTest(unittest.TestCase):
             pass
         self.assertEqual(compare(self.trial, [self.trial], self.out)["missing_from_backup"], ["profile.json"])
 
+    def test_standalone_backup_keeps_and_checks_both_reset_records(self):
+        records = {
+            "backups/seed-source.json": b'{"source_id":"t123456789abc"}',
+            "backups/restored-revisions.json": b'{"bindings.json":{"number":1}}',
+        }
+        identity = {"id": self.trial.name, "alias": "trial", "name": "测试档", "kind": "test",
+                    "created_ms": 10, "seed": "backup:t123456789abc:1:current"}
+        self.save(self.root / "profiles.json", json.dumps({"version": 1, "profiles": [identity]}).encode())
+        for name, data in records.items():
+            self.save(self.trial / name, data)
+        with patch.object(backup, "profile_dirs", return_value=[self.trial]):
+            receipt = backup.create_backup(None, self.trial, self.out)
+        self.assertEqual(receipt["files"], 3)
+        detached = self.root.parent / "restored"
+        with zipfile.ZipFile(self.out) as archive:
+            for name, data in records.items():
+                self.assertEqual(archive.read(name), data)
+            archive.extractall(detached)
+        for root in (self.trial, detached):
+            with self.subTest(root=root):
+                self.assertTrue(compare(root, [root], self.out)["matches"])
+                (root / "backups/seed-source.json").unlink()
+                (root / "backups/restored-revisions.json").write_bytes(b"{}")
+                result = compare(root, [root], self.out)
+                self.assertEqual(result["only_in_backup"], ["backups/seed-source.json"])
+                self.assertEqual(result["changed"], ["backups/restored-revisions.json"])
+        incomplete = self.root.parent / "incomplete.zip"
+        with zipfile.ZipFile(incomplete, "w") as archive:
+            archive.writestr("profile.json", (detached / "profile.json").read_bytes())
+        self.assertEqual(compare(detached, [detached], incomplete)["missing_from_backup"],
+                         ["backups/restored-revisions.json"])
+
     def test_existing_backup_wins_a_publication_race(self):
         verify = backup.verify_archive
 
