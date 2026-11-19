@@ -791,6 +791,7 @@ struct Workspace {
     wheel_scenes_error: Option<String>,
     wheel_selected: Option<String>,
     wheel_name: Entity<MessageInput>,
+    wheel_copy_target: Entity<MessageInput>,
     wheel_slot_label: Entity<MessageInput>,
     wheel_slot_shortcut: Entity<MessageInput>,
     wheel_slot_selected: Option<usize>,
@@ -1000,6 +1001,11 @@ impl Workspace {
             );
             input
         });
+        let wheel_copy_target = cx.new(|cx| {
+            let mut input = MessageInput::new(cx);
+            input.set_placeholder("进程文件名，如 notepad.exe");
+            input
+        });
         let wheel_slot_label = cx.new(|cx| {
             let mut input = MessageInput::new(cx).with_character_limit(30);
             input.set_placeholder("动作名称，例如：复制");
@@ -1011,7 +1017,12 @@ impl Workspace {
             input.set_text("Ctrl+C", cx);
             input
         });
-        for input in [&wheel_name, &wheel_slot_label, &wheel_slot_shortcut] {
+        for input in [
+            &wheel_name,
+            &wheel_copy_target,
+            &wheel_slot_label,
+            &wheel_slot_shortcut,
+        ] {
             cx.observe(input, |_, _, cx| cx.notify()).detach();
         }
         let command = match &draft_action {
@@ -1298,6 +1309,7 @@ impl Workspace {
             wheel_scenes_error,
             wheel_selected,
             wheel_name,
+            wheel_copy_target,
             wheel_slot_label,
             wheel_slot_shortcut,
             wheel_slot_selected: None,

@@ -938,8 +938,34 @@ impl Workspace {
         self.wheel_cell = None;
         self.wheel_moving = false;
         self.wheel_replacing = false;
+        self.wheel_copy_target
+            .update(cx, |input, cx| input.set_text("", cx));
         self.load_wheel_cell(cx);
         cx.notify();
+    }
+
+    pub(super) fn copy_wheel_layout(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self.selected_wheel_index() else {
+            return;
+        };
+        let target = self.wheel_copy_target.read(cx).text();
+        let mut proposed = self.wheels.clone();
+        let source = self.wheel_scope_for(&proposed.wheels[index]);
+        let source_process = match &source {
+            Some(WheelScope::App(process)) => Some(process.as_str()),
+            _ => None,
+        };
+        if let Err(error) =
+            proposed.wheels[index].copy_layout_to_application(source_process, &target)
+        {
+            self.error = Some(error);
+            cx.notify();
+            return;
+        }
+        if self.commit_wheels(proposed, cx) {
+            self.set_wheel_scope(Some(WheelScope::App(target.clone())), cx);
+            self.status = format!("已创建 {target} 的应用布局。");
+        }
     }
 
     fn put_wheel_action(&mut self, label: String, action: ActionSpec, cx: &mut Context<Self>) {
@@ -1064,6 +1090,8 @@ impl Workspace {
         self.smooth_scroll.cancel("wheel-editor-content");
         self.smooth_scroll.cancel("wheel-source-list");
         self.wheel_selected = Some(id);
+        self.wheel_copy_target
+            .update(cx, |input, cx| input.set_text("", cx));
         self.wheel_cell = None;
         self.wheel_moving = false;
         self.wheel_replacing = false;

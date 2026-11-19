@@ -72,11 +72,13 @@ pub struct WheelDefinition {
 }
 
 impl WheelDefinition {
+    const MAX_APPLICATIONS: usize = 32;
+
     pub fn validate(&self) -> Result<(), String> {
         validate_id(&self.id)?;
         validate_label(&self.name, "轮盘名称")?;
         validate_slots(&self.slots)?;
-        if self.app_overrides.len() > 32 {
+        if self.app_overrides.len() > Self::MAX_APPLICATIONS {
             return Err("每个轮盘最多配置 32 个应用覆盖。".into());
         }
         let mut processes = HashSet::new();
@@ -102,6 +104,35 @@ impl WheelDefinition {
                 .iter()
                 .find(|application| application.process.to_lowercase() == key)
         })
+    }
+
+    /// 复制完整槽位组（含场景槽位），新应用此后独立编辑。
+    pub(super) fn copy_layout_to_application(
+        &mut self,
+        source: Option<&str>,
+        target: &str,
+    ) -> Result<(), String> {
+        validate_process(target)?;
+        if self.override_for_process(Some(target)).is_some() {
+            return Err(format!("“{target}”已有布局，可在“用于”中选择并编辑。"));
+        }
+        if self.app_overrides.len() >= Self::MAX_APPLICATIONS {
+            return Err("每个轮盘最多配置 32 个应用覆盖。".into());
+        }
+        let slots = match source {
+            None => &self.slots,
+            Some(process) => {
+                &self
+                    .override_for_process(Some(process))
+                    .ok_or_else(|| format!("找不到来源应用布局“{process}”。"))?
+                    .slots
+            }
+        };
+        self.app_overrides.push(WheelApplicationOverride {
+            process: target.into(),
+            slots: slots.clone(),
+        });
+        Ok(())
     }
 }
 
@@ -1252,6 +1283,37 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn copied_application_layout_keeps_scene_slots_and_edits_independently() {
+        let mut wheel = Wheels::default().wheels.remove(0);
+        let mut scene_slot = positioned(1, 4, 8, true);
+        scene_slot.scene = Some("writing".into());
+        wheel.slots = vec![positioned(1, 0, 8, true), scene_slot];
+        wheel.copy_layout_to_application(None, "编辑.exe").unwrap();
+        assert_eq!(wheel.app_overrides[0].slots, wheel.slots);
+        wheel.app_overrides[0].slots[0].label = "源应用专用".into();
+        wheel
+            .copy_layout_to_application(Some("编辑.EXE"), "@desktop")
+            .unwrap();
+        assert_eq!(wheel.app_overrides[1].slots, wheel.app_overrides[0].slots);
+        wheel.app_overrides[1].slots[0].label = "桌面专用".into();
+        assert_ne!(wheel.slots[0].label, wheel.app_overrides[0].slots[0].label);
+        assert_ne!(
+            wheel.app_overrides[0].slots[0].label,
+            wheel.app_overrides[1].slots[0].label
+        );
+        wheel.validate().unwrap();
+        let before = wheel.clone();
+        for (source, target) in [
+            (None, "编辑.EXE"),
+            (None, "dir/other.exe"),
+            (Some("missing.exe"), "other.exe"),
+        ] {
+            assert!(wheel.copy_layout_to_application(source, target).is_err());
+            assert_eq!(wheel, before);
+        }
+    }
+
+    #[test]
     fn application_overrides_require_unique_basenames_bounded_count_and_valid_full_slots() {
         let base_slots = Wheels::default().wheels.remove(0).slots;
         for process in [
@@ -1294,6 +1356,10 @@ pub(super) mod tests {
             })
             .collect();
         wheels.validate().unwrap();
+        assert!(wheels.wheels[0]
+            .copy_layout_to_application(None, "extra.exe")
+            .is_err());
+        assert_eq!(wheels.wheels[0].app_overrides.len(), 32);
         wheels.wheels[0]
             .app_overrides
             .push(WheelApplicationOverride {

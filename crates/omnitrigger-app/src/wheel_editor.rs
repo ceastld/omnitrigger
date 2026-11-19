@@ -842,6 +842,11 @@ impl Workspace {
             matches!(&binding.action, ActionSpec::ShowWheel(reference) if reference.wheel_id == wheel.id)
         ).count();
         let can_remove = can_edit && references == 0;
+        let copy_label = match self.wheel_scope_for(wheel) {
+            Some(WheelScope::App(process)) => format!("将 {process} 布局复制给应用"),
+            _ => "将通用布局复制给应用".into(),
+        };
+        let can_copy = can_edit && !self.wheel_copy_target.read(cx).text().is_empty();
         div()
             .flex()
             .flex_col()
@@ -855,6 +860,44 @@ impl Workspace {
                     .child(tip("空格子", "→ 添加动作"))
                     .child(tip("已有动作", "→ 改名、移动或移除"))
                     .child(tip("使用时", "→ 按住呼出键往方向拖，松开执行")),
+            )
+            .child(divider())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(
+                        label(copy_label.clone())
+                            .id("wheel-copy-source")
+                            .truncate()
+                            .tooltip(theme::text_tooltip(copy_label.into())),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(self.wheel_copy_target.clone()),
+                            )
+                            .child(
+                                small(button(
+                                    "copy-wheel-layout",
+                                    "复制",
+                                    Tone::Secondary,
+                                    can_copy,
+                                ))
+                                .when(can_copy, |el| {
+                                    el.on_click(cx.listener(|this, _, _, cx| {
+                                        this.copy_wheel_layout(cx);
+                                    }))
+                                }),
+                            ),
+                    ),
             )
             .child(divider())
             .child(rings)
