@@ -121,6 +121,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "估算下载时间",
+        query: "下载: 1 GiB 按 100 Mbps",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "Unix 时间戳",
         query: "时间戳: 1700000000123ms",
     },

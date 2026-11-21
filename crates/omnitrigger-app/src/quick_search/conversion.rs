@@ -1,6 +1,7 @@
 use std::f64::consts::{PI, TAU};
 
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
+use super::duration::convert_duration;
 use super::radix::Base;
 use super::InputSuggestion;
 
@@ -11,6 +12,7 @@ pub(super) enum ConversionError {
     InvalidInteger,
     UnknownUnit,
     DifferentDimensions,
+    InvalidTransfer,
     OutOfRange,
     TooLong,
 }
@@ -23,6 +25,7 @@ impl ConversionError {
             Self::InvalidInteger => "进制转换需要整数，例如 0xff to dec",
             Self::UnknownUnit => "无法识别换算单位",
             Self::DifferentDimensions => "两个单位不属于同一类型",
+            Self::InvalidTransfer => "输入非负的数据量和大于零的数据速率",
             Self::OutOfRange => "结果超出换算范围",
             Self::TooLong => "换算式过长",
         }
@@ -416,6 +419,38 @@ fn parse_quantity(source: &str) -> Result<(f64, Unit), ConversionError> {
     Ok((evaluate_amount(amount)?, unit))
 }
 
+pub(super) fn estimate_transfer_time(query: &str) -> Result<String, ConversionError> {
+    if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
+        return Err(ConversionError::TooLong);
+    }
+    let input = normalize(query).replace(char::is_whitespace, " ");
+    let (data, rate) = input
+        .split_once('按')
+        .or_else(|| {
+            let index = input.to_ascii_lowercase().find(" at ")?;
+            Some((&input[..index], &input[index + 4..]))
+        })
+        .ok_or(ConversionError::Incomplete)?;
+    let (data, rate) = (data.trim(), rate.trim());
+    if data.is_empty() || rate.is_empty() {
+        return Err(ConversionError::Incomplete);
+    }
+    let (size, size_unit) = parse_quantity(data)?;
+    let (speed, speed_unit) = parse_quantity(rate)?;
+    if size_unit.dimension != Dimension::Data
+        || speed_unit.dimension != Dimension::DataRate
+        || size < 0.
+        || speed <= 0.
+    {
+        return Err(ConversionError::InvalidTransfer);
+    }
+    let seconds = (size / speed) * (size_unit.scale / speed_unit.scale);
+    if !seconds.is_finite() {
+        return Err(ConversionError::OutOfRange);
+    }
+    convert_duration(&format!("{seconds:.3}s")).map_err(|_| ConversionError::OutOfRange)
+}
+
 pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     let input = normalize(query).replace(char::is_whitespace, " ");
     let (source, target) = split_conversion(input.trim())?;
@@ -738,6 +773,33 @@ mod tests {
         let items = suggested_targets("1 m转y").unwrap();
         assert_eq!(items[0].expression, "1 m转 yd");
         assert!(suggested_targets("10 km to nonexistent").is_none());
+    }
+
+    #[test]
+    fn estimates_transfer_time_using_storage_and_rate_units() {
+        for (query, expected) in [
+            ("1 GB 按 100 Mbps", "00:01:20"),
+            ("1 GiB at 100 Mbps", "00:01:25.899"),
+            ("2 GiB AT 10 MiB/s", "00:03:24.8"),
+            ("600 Mb按 10 MB/s", "00:00:07.5"),
+            ("0 B at 5 B/s", "00:00:00"),
+        ] {
+            assert_eq!(
+                estimate_transfer_time(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, expected) in [
+            ("1 GB 按", ConversionError::Incomplete),
+            ("1 kg at 10 Mbps", ConversionError::InvalidTransfer),
+            ("1 GB at 10 MB", ConversionError::InvalidTransfer),
+            ("-2 GB at 100 Mbps", ConversionError::InvalidTransfer),
+            ("1 GB at 0 Mbps", ConversionError::InvalidTransfer),
+            ("1e308 TB at 1 b/s", ConversionError::OutOfRange),
+        ] {
+            assert_eq!(estimate_transfer_time(query), Err(expected), "{query}");
+        }
     }
 
     #[test]

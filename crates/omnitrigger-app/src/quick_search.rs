@@ -43,7 +43,7 @@ use actions::{matching_actions, SearchAction};
 use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, DateError};
 use color::{calculate_contrast, convert_color, ColorError};
-use conversion::{convert, suggested_targets, ConversionError};
+use conversion::{convert, estimate_transfer_time, suggested_targets, ConversionError};
 use duration::{convert_duration, DurationError};
 use examples::{matching_examples, tool_operation_examples, EXAMPLES};
 use fraction::{simplify_fraction, FractionError};
@@ -378,6 +378,7 @@ impl Results {
                 Scope::Duration => {
                     Self::text_value(convert_duration(term).map_err(ValueError::Duration))
                 }
+                Scope::TransferTime => Self::conversion_value(estimate_transfer_time(term)),
                 Scope::Timestamp => Self::text_value(
                     convert_timestamp(term, chrono::Utc::now()).map_err(ValueError::Timestamp),
                 ),
@@ -421,14 +422,7 @@ impl Results {
                         Self::ConversionTargets,
                     )
                 }
-                result => Self::Value(
-                    result
-                        .map(|text| ResultValue {
-                            text,
-                            kind: ValueKind::Conversion,
-                        })
-                        .map_err(ValueError::Conversion),
-                ),
+                result => Self::conversion_value(result),
             };
         }
         if let Some(targets) = suggested_targets(query) {
@@ -499,6 +493,17 @@ impl Results {
             text,
             kind: ValueKind::Text,
         }))
+    }
+
+    fn conversion_value(result: Result<String, ConversionError>) -> Self {
+        Self::Value(
+            result
+                .map(|text| ResultValue {
+                    text,
+                    kind: ValueKind::Conversion,
+                })
+                .map_err(ValueError::Conversion),
+        )
     }
 
     fn arithmetic_result(&self) -> Option<&str> {
