@@ -117,6 +117,7 @@
 - 输入 `颜色: hwb(210 10% 20%)` 得到 `#1A73CC`，也可用 `to hwb` 输出色相、白度和黑度。白度和黑度各可输入 0 至 100 的数值或百分数。参见 [CSS Color 4 的 HWB 语法](https://www.w3.org/TR/css-color-4/#the-hwb-notation)。
 - 输入 `对比度: #fff vs #000` 会预览两个不透明颜色，并显示 `21:1`。计算采用 [WCAG 2.2 的对比度定义](https://www.w3.org/TR/WCAG22/#dfn-contrast-ratio)。
 - 输入 `颜色: #0080FF80 叠加 #fff` 得到 `#7FBFFF`。前一种颜色覆盖在后一种颜色上，也可用 `over`，按 sRGB 通道计算 [透明度叠加](https://www.w3.org/TR/compositing-1/#simplealphacompositing)。
+- 输入 `颜色: color-mix(in srgb, #fff 25%, #000)` 得到 `#404040`。搜索框按 8 位 sRGB 通道混合两个颜色，支持在色值前后指定百分比。两个比例都省略时各占 50%，都指定且总和低于 100% 时会保留相应的透明度。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
 - 输入 `字数: 你好👩‍💻` 得到 `3 字符 · 17 UTF-8 字节`。加引号可统计首尾空格，例如 `字数: " a "`。
 - 输入 `文本: 码位 北京` 得到 `U+5317 U+4EAC`，用 `文本: 码位解码 U+5317 U+4EAC` 转回文字。组合字符按各自的 Unicode 码位显示。
 - 输入 `文本: UTF8编码 北京` 可查看 UTF-8 字节 `E5 8C 97 E4 BA AC`。用 `文本: UTF8解码` 加上十六进制字节可还原文字，接受连续数字、空白分隔或带 `0x` 的字节组。

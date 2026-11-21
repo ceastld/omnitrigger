@@ -695,6 +695,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "颜色: #0080FF80 叠加 #fff",
     },
     Example {
+        icon: Icon::Layers,
+        title: "按比例混合两个颜色",
+        query: "颜色: color-mix(in srgb, #fff 25%, #000)",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "找回用过的算式",
         query: "算式历史: ",

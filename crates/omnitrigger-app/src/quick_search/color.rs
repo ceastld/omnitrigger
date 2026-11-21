@@ -21,6 +21,8 @@ pub(super) enum ColorError {
     IncompleteContrast,
     Invalid,
     InvalidFormat,
+    InvalidMix,
+    MixColorSpace,
     TransparentContrast,
 }
 
@@ -31,6 +33,8 @@ impl ColorError {
             Self::IncompleteContrast => "输入两个颜色，例如 对比度: #fff vs #000",
             Self::Invalid => "检查颜色名、HEX 位数或颜色通道范围",
             Self::InvalidFormat => "目标颜色格式可用 HEX、RGB、HSL 或 HWB",
+            Self::InvalidMix => "输入两个颜色，权重范围为 0% 到 100%，总权重需大于 0%",
+            Self::MixColorSpace => "颜色混合支持 in srgb",
             Self::TransparentContrast => "计算对比度需要两个不透明颜色",
         }
     }
@@ -100,6 +104,32 @@ impl Channels {
             rgb,
             alpha: (alpha != 255).then_some(alpha),
         }
+    }
+
+    fn mix(self, other: Self, first: f64, second: f64) -> Result<Self, ColorError> {
+        let total = first + second;
+        if total == 0. {
+            return Err(ColorError::InvalidMix);
+        }
+
+        // 用预乘 Alpha 的 sRGB 通道插值。总权重不足 100% 时保留剩余透明度。
+        let first = first * f64::from(self.alpha.unwrap_or(255));
+        let second = second * f64::from(other.alpha.unwrap_or(255));
+        let combined = first + second;
+        let rgb = if combined == 0. {
+            [0; 3]
+        } else {
+            std::array::from_fn(|index| {
+                let left = f64::from(self.rgb[index]) * first;
+                let right = f64::from(other.rgb[index]) * second;
+                ((left + right) / combined).round() as u8
+            })
+        };
+        let alpha = (combined / total.max(100.)).round() as u8;
+        Ok(Self {
+            rgb,
+            alpha: (alpha != 255).then_some(alpha),
+        })
     }
 
     fn hex(digits: &str) -> Result<Self, ColorError> {
@@ -307,6 +337,59 @@ fn format_hue_color(name: &str, values: [f64; 3], alpha: Option<u8>) -> String {
     }
 }
 
+fn mix_color(input: &str) -> Result<Channels, ColorError> {
+    let input = input.strip_suffix(')').ok_or(ColorError::Incomplete)?;
+    let (space, stops) = input.split_once(',').ok_or(ColorError::InvalidMix)?;
+    let mut space = space.split_whitespace();
+    if !matches!(
+        (space.next(), space.next(), space.next()),
+        (Some(keyword), Some(name), None)
+            if keyword.eq_ignore_ascii_case("in") && name.eq_ignore_ascii_case("srgb")
+    ) {
+        return Err(ColorError::MixColorSpace);
+    }
+
+    let mut depth = 0usize;
+    let mut separator = None;
+    for (index, character) in stops.char_indices() {
+        match (character, depth) {
+            ('(', _) => depth += 1,
+            (')', _) => depth = depth.checked_sub(1).ok_or(ColorError::InvalidMix)?,
+            (',', 0) if separator.is_none() => separator = Some(index),
+            (',', 0) => return Err(ColorError::InvalidMix),
+            _ => {}
+        }
+    }
+    let index = separator
+        .filter(|_| depth == 0)
+        .ok_or(ColorError::InvalidMix)?;
+    let (first, left) = mix_stop(stops[..index].trim())?;
+    let (second, right) = mix_stop(stops[index + 1..].trim())?;
+    let (left, right) = match (left, right) {
+        (Some(left), Some(right)) => (left, right),
+        (Some(left), None) => (left, 100. - left),
+        (None, Some(right)) => (100. - right, right),
+        (None, None) => (50., 50.),
+    };
+    first.mix(second, left, right)
+}
+
+fn mix_stop(input: &str) -> Result<(Channels, Option<f64>), ColorError> {
+    let weighted = input
+        .split_once(char::is_whitespace)
+        .and_then(|(first, rest)| first.strip_suffix('%').map(|weight| (rest, weight)))
+        .or_else(|| {
+            input
+                .rsplit_once(char::is_whitespace)
+                .and_then(|(rest, last)| last.strip_suffix('%').map(|weight| (rest, weight)))
+        });
+    let Some((color, weight)) = weighted else {
+        return Ok((Channels::parse(input)?, None));
+    };
+    let weight = bounded_number(weight, 100.).map_err(|_| ColorError::InvalidMix)?;
+    Ok((Channels::parse(color.trim())?, Some(weight)))
+}
+
 pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
     let normalized = normalize(input);
     let input = normalized.trim();
@@ -326,8 +409,13 @@ pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
     } else {
         (input, None)
     };
-    let (channels, default) = if let Some((front, backdrop)) = color_pair(input, "叠加", " over ")
+    let mix_prefix = "color-mix(";
+    let (channels, default) = if input
+        .get(..mix_prefix.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(mix_prefix))
     {
+        (mix_color(&input[mix_prefix.len()..])?, ColorFormat::Hex)
+    } else if let Some((front, backdrop)) = color_pair(input, "叠加", " over ") {
         (
             Channels::parse(front.trim())?.over(Channels::parse(backdrop.trim())?),
             ColorFormat::Hex,
@@ -407,6 +495,61 @@ pub(super) fn calculate_contrast(input: &str) -> Result<ColorContrast, ColorErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixes_two_srgb_colors_with_premultiplied_alpha_and_relative_weights() {
+        for (input, output, swatch) in [
+            ("color-mix(in srgb, white, black)", "#808080", 0x808080ff),
+            ("COLOR-MIX(IN SRGB, 75% #000, #fff)", "#404040", 0x404040ff),
+            (
+                "color-mix(in srgb, rgba(255, 0, 0, 0.5), blue)",
+                "#5500AAC0",
+                0x5500aac0,
+            ),
+            (
+                "color-mix(in srgb, #f00 20%, #00f 30%)",
+                "#66009980",
+                0x66009980,
+            ),
+            (
+                "color-mix(in srgb, #fff 80%, #000 80%)",
+                "#808080",
+                0x808080ff,
+            ),
+            (
+                "color-mix(in srgb, transparent, #f00) to rgb",
+                "rgba(255, 0, 0, 0.502)",
+                0xff000080,
+            ),
+        ] {
+            assert_eq!(
+                convert_color(input),
+                Ok(Color {
+                    output: output.to_owned(),
+                    swatch,
+                }),
+                "{input}",
+            );
+        }
+
+        for input in [
+            "color-mix(in srgb, white 0%, black 0%)",
+            "color-mix(in srgb, white, black -3%)",
+            "color-mix(in srgb, white 101%, black)",
+            "color-mix(in srgb, white, black, red)",
+            "color-mix(in srgb, rgba(1, 2, 3, 1, blue)",
+        ] {
+            assert_eq!(convert_color(input), Err(ColorError::InvalidMix), "{input}");
+        }
+        assert_eq!(
+            convert_color("color-mix(in oklab, white, black)"),
+            Err(ColorError::MixColorSpace),
+        );
+        assert_eq!(
+            convert_color("color-mix(in srgb, white, black"),
+            Err(ColorError::Incomplete),
+        );
+    }
 
     #[test]
     fn composites_foreground_over_background_using_both_alpha_channels() {
