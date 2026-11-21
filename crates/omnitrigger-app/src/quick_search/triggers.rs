@@ -2,6 +2,7 @@ use crate::{
     assets::Icon, binding_context_label, browse_row, caps_for, settings::Binding, trigger_browse,
 };
 
+#[derive(Clone)]
 pub(super) struct SearchTrigger {
     row: trigger_browse::Row,
     title_key: String,

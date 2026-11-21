@@ -27,7 +27,7 @@ pub(super) fn matching_settings(sections: &[SettingsSection], query: &str) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quick_search::{Destination, RecentSearch, Results};
+    use crate::quick_search::{Destination, Results, SearchIndex};
 
     #[test]
     fn finds_settings_by_labels_and_matches_the_available_controls() {
@@ -52,16 +52,12 @@ mod tests {
             matching_settings(&SettingsSection::ALL, "更新"),
             [SettingsSection::Updates]
         );
+        let index = SearchIndex {
+            settings: visible,
+            ..SearchIndex::default()
+        };
         for query in ["主题", "设置：深色", "settings: theme"] {
-            let results = Results::for_query(
-                query,
-                &[],
-                &[],
-                &[],
-                &[],
-                &visible,
-                &RecentSearch::default(),
-            );
+            let results = index.results(query);
             assert!(
                 matches!(results, Results::Destinations(items) if items == [Destination::SettingsSection(SettingsSection::Theme)]),
                 "{query}"

@@ -91,7 +91,7 @@ pub(super) fn matching_slots(slots: &[SearchWheelSlot], query: &str) -> Vec<Dest
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quick_search::{RecentSearch, Results};
+    use crate::quick_search::{Results, SearchIndex};
     use crate::wheels::{WheelApplicationOverride, Wheels};
 
     #[test]
@@ -115,15 +115,11 @@ mod tests {
             ] if *key == WheelSlotKey::new(&wheel, app, 0) && label == expected));
         }
         assert!(matching_slots(&slots, "不存在的槽位").is_empty());
-        let results = Results::for_query(
-            "槽位：CHROME.EXE 复制",
-            &[],
-            &[],
-            &slots,
-            &[],
-            &[],
-            &RecentSearch::default(),
-        );
+        let results = SearchIndex {
+            wheel_slots: Some(slots),
+            ..SearchIndex::default()
+        }
+        .results("槽位：CHROME.EXE 复制");
         assert!(
             matches!(results, Results::Destinations(items) if matches!(items.as_slice(), [
             Destination::WheelSlot { label, .. }

@@ -65,6 +65,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "触发器: ",
     },
     Example {
+        icon: Icon::Grid,
+        title: "搜索 Windows 应用",
+        query: "应用:",
+    },
+    Example {
         icon: Icon::Keyboard,
         title: "搜索已启用的触发器",
         query: "已启用触发器: ",

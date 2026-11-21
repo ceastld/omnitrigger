@@ -2765,6 +2765,25 @@ impl Workspace {
         self.quick_search_recent.destinations.record(&destination);
         match destination {
             quick_search::Destination::Page(page) => self.open_page(page, cx),
+            quick_search::Destination::InstalledApp(app) => {
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move { app.open() })
+                        .await;
+                    if let Err(error) = result {
+                        let _ = this.update(cx, |this, cx| {
+                            this.error = Some(error);
+                            let _ = this.main_window.update(cx, |_, window, _| {
+                                reveal_workspace_window(window);
+                            });
+                            cx.notify();
+                        });
+                    }
+                })
+                .detach();
+                return;
+            }
             quick_search::Destination::TextHistoryQuery(query) => {
                 self.text_history.search_from_quick_search(query, cx);
                 self.open_page(Page::TextHistory, cx);

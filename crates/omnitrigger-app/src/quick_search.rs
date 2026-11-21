@@ -1,4 +1,5 @@
 mod actions;
+mod applications;
 mod calculator;
 mod calendar;
 mod color;
@@ -40,6 +41,7 @@ use crate::{
     Page, Workspace,
 };
 use actions::{matching_actions, SearchAction};
+use applications::ApplicationIndex;
 use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, DateError};
 use color::{calculate_contrast, convert_color, ColorError};
@@ -48,7 +50,7 @@ use duration::{convert_duration, DurationError};
 use examples::{matching_examples, tool_operation_examples, EXAMPLES};
 use fraction::{simplify_fraction, FractionError};
 use json_tools::{transform_json, JsonError};
-use omnitrigger_windows::ShortcutTarget;
+use omnitrigger_windows::{ShellApp, ShortcutTarget};
 use percentage::{compare_percentages, PercentageError};
 use presets::matching_presets;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -90,6 +92,8 @@ const PAGES: [(Page, &str); 9] = [
 enum Results {
     Value(Result<ResultValue, ValueError>),
     Destinations(Vec<Destination>),
+    ApplicationsLoading,
+    ApplicationsUnavailable(String),
     Help(Vec<usize>),
     Calculations(Vec<InputSuggestion>),
     Conversions(Vec<InputSuggestion>),
@@ -120,6 +124,7 @@ enum ValueKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Destination {
     Page(Page),
+    InstalledApp(ShellApp),
     Trigger(u64),
     Wheel(String),
     WheelSlot {
@@ -139,6 +144,7 @@ pub(super) enum Destination {
     },
 }
 
+#[derive(Default)]
 pub(super) struct SearchIndex {
     triggers: Vec<SearchTrigger>,
     wheels: Vec<SearchWheel>,
@@ -146,6 +152,7 @@ pub(super) struct SearchIndex {
     actions: Vec<SearchAction>,
     settings: Vec<SettingsSection>,
     recent: RecentSearch,
+    applications: ApplicationIndex,
 }
 
 #[derive(Clone, Default)]
@@ -198,19 +205,12 @@ impl SearchIndex {
                 .filter(|section| section.available(standard_config, workspace.test_data))
                 .collect(),
             recent: workspace.quick_search_recent.clone(),
+            applications: ApplicationIndex::default(),
         }
     }
 
     fn results(&self, query: &str) -> Results {
-        Results::for_query(
-            query,
-            &self.triggers,
-            &self.wheels,
-            self.wheel_slots.as_deref().unwrap_or_default(),
-            &self.actions,
-            &self.settings,
-            &self.recent,
-        )
+        Results::for_query(query, self)
     }
 }
 
@@ -292,15 +292,16 @@ impl ValueError {
 }
 
 impl Results {
-    fn for_query(
-        query: &str,
-        triggers: &[SearchTrigger],
-        wheels: &[SearchWheel],
-        wheel_slots: &[SearchWheelSlot],
-        actions: &[SearchAction],
-        settings: &[SettingsSection],
-        recent: &RecentSearch,
-    ) -> Self {
+    fn for_query(query: &str, index: &SearchIndex) -> Self {
+        let SearchIndex {
+            triggers,
+            wheels,
+            wheel_slots,
+            actions,
+            settings,
+            recent,
+            applications,
+        } = index;
         if query.len() > INPUT_CHARACTER_LIMIT
             && query.chars().take(INPUT_CHARACTER_LIMIT + 1).count() > INPUT_CHARACTER_LIMIT
         {
@@ -333,7 +334,10 @@ impl Results {
                 Scope::WheelSlots if term.is_empty() => {
                     Self::Destinations(vec![Destination::Page(Page::Wheels)])
                 }
-                Scope::WheelSlots => Self::Destinations(matching_slots(wheel_slots, term)),
+                Scope::WheelSlots => Self::Destinations(matching_slots(
+                    wheel_slots.as_deref().unwrap_or_default(),
+                    term,
+                )),
                 Scope::Presets if term.is_empty() => {
                     Self::Destinations(vec![Destination::Page(Page::Presets)])
                 }
@@ -363,6 +367,7 @@ impl Results {
                 }
                 Scope::CalculationHistory => Self::Calculations(recent.calculations.matching(term)),
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
+                Scope::Applications => applications.results(term),
                 Scope::Actions => {
                     let mut entries = matching_actions(actions, term);
                     entries.insert(
@@ -664,16 +669,7 @@ impl QuickSearch {
                     }
                 }));
             }
-            let next = this.index.results(&query);
-            if this.results != next {
-                let height_changed = this.results.height() != next.height();
-                this.results = next;
-                this.selected = 0;
-                if height_changed {
-                    window.resize(size(px(WIDTH), px(this.results.height())));
-                }
-            }
-            cx.notify();
+            this.refresh_results(&query, window, cx);
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
@@ -701,6 +697,38 @@ impl QuickSearch {
     pub(super) fn activate(&self, window: &mut Window, cx: &mut Context<Self>) {
         window.activate_window();
         window.focus(&self.input.focus_handle(cx));
+    }
+
+    fn refresh_results(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let next = self.index.results(query);
+        if self.results != next {
+            let height_changed = self.results.height() != next.height();
+            self.results = next;
+            self.selected = 0;
+            if height_changed {
+                window.resize(size(px(WIDTH), px(self.results.height())));
+            }
+        }
+        if matches!(self.results, Results::ApplicationsLoading)
+            && matches!(self.index.applications, ApplicationIndex::Unloaded)
+        {
+            self.index.applications = ApplicationIndex::Loading;
+            cx.spawn_in(window, async move |this, cx| {
+                let applications = cx
+                    .background_executor()
+                    .spawn(async { ApplicationIndex::load() })
+                    .await;
+                let _ = cx.update(|window, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.index.applications = applications;
+                        let query = this.input.read(cx).text();
+                        this.refresh_results(&query, window, cx);
+                    });
+                });
+            })
+            .detach();
+        }
+        cx.notify();
     }
 
     fn open_destination(
@@ -820,7 +848,9 @@ impl QuickSearch {
                     Results::Calculations(items)
                     | Results::Conversions(items)
                     | Results::ConversionTargets(items) => items.len(),
-                    Results::Value(_) => 0,
+                    Results::Value(_)
+                    | Results::ApplicationsLoading
+                    | Results::ApplicationsUnavailable(_) => 0,
                 };
                 if count == 0 {
                     return;
@@ -1145,6 +1175,12 @@ impl QuickSearch {
             Results::ConversionTargets(items) => {
                 self.render_input_suggestions(items, Icon::Layers, CONVERSION_PAGE_SIZE, cx)
             }
+            Results::ApplicationsLoading => row
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child("正在读取 Windows 应用"),
+            Results::ApplicationsUnavailable(error) => row
+                .text_color(rgb(theme::DANGER_TEXT))
+                .child(div().truncate().child(error.clone())),
             Results::Destinations(items) if items.is_empty() => {
                 row.text_color(rgb(theme::TEXT_MUTED)).child("未找到匹配项")
             }
@@ -1162,6 +1198,14 @@ impl QuickSearch {
                                 Destination::Page(page) => {
                                     (page.icon(), page.title().to_owned(), None)
                                 }
+                                Destination::InstalledApp(app) => (
+                                    Icon::Grid,
+                                    app.title().to_owned(),
+                                    self.index
+                                        .applications
+                                        .has_namesake(app)
+                                        .then(|| app.identifier().to_owned()),
+                                ),
                                 Destination::Trigger(id) => {
                                     let trigger = self
                                         .index
@@ -1357,15 +1401,11 @@ mod tests {
     use super::*;
 
     fn for_query(query: &str, triggers: &[SearchTrigger]) -> Results {
-        Results::for_query(
-            query,
-            triggers,
-            &[],
-            &[],
-            &[],
-            &[],
-            &RecentSearch::default(),
-        )
+        SearchIndex {
+            triggers: triggers.to_vec(),
+            ..SearchIndex::default()
+        }
+        .results(query)
     }
 
     #[test]
@@ -1403,7 +1443,8 @@ mod tests {
 
     #[test]
     fn quick_search_finds_session_conversions_by_expression_and_result() {
-        let recent = RecentSearch::default();
+        let index = SearchIndex::default();
+        let recent = &index.recent;
         let Results::Value(Ok(value)) = for_query("8 Mbps to MB/s", &[]) else {
             panic!("换算没有生成结果");
         };
@@ -1416,12 +1457,12 @@ mod tests {
             ("conversion history: MBPS", "8 Mbps to MB/s"),
         ] {
             assert!(matches!(
-                Results::for_query(query, &[], &[], &[], &[], &[], &recent),
+                index.results(query),
                 Results::Conversions(items) if items.len() == 1 && items[0].expression == expected
             ));
         }
         assert!(matches!(
-            Results::for_query("算式历史:", &[], &[], &[], &[], &[], &recent),
+            index.results("算式历史:"),
             Results::Calculations(items) if items.len() == 1 && items[0].expression == "2**10"
         ));
     }
@@ -1537,14 +1578,7 @@ mod tests {
         gpui::Application::new()
             .with_assets(crate::Assets)
             .run(move |cx| {
-                let index = SearchIndex {
-                    triggers: Vec::new(),
-                    wheels: Vec::new(),
-                    wheel_slots: None,
-                    actions: Vec::new(),
-                    settings: Vec::new(),
-                    recent: RecentSearch::default(),
-                };
+                let index = SearchIndex::default();
                 let results = index.results("");
                 let window = cx
                     .open_window(
@@ -1654,14 +1688,13 @@ mod tests {
                 .iter()
                 .map(SearchWheel::from_definition)
                 .collect(),
-            wheel_slots: None,
-            actions: Vec::new(),
             settings: SettingsSection::ALL.to_vec(),
-            recent: RecentSearch::default(),
+            ..SearchIndex::default()
         };
         for example in EXAMPLES {
             match index.results(example.query) {
                 Results::Value(Ok(_)) | Results::Calculations(_) | Results::Conversions(_) => {}
+                Results::ApplicationsLoading => {}
                 Results::ConversionTargets(items) if !items.is_empty() => {}
                 Results::Destinations(items) if !items.is_empty() => {}
                 _ => panic!("用法示例没有可用结果：{}", example.query),
@@ -1672,15 +1705,33 @@ mod tests {
     #[test]
     fn quick_search_routes_wheel_names_and_scope_to_wheel_entries() {
         let settings = crate::wheels::Wheels::default();
-        let wheels = [SearchWheel::from_definition(&settings.wheels[0])];
+        let index = SearchIndex {
+            wheels: vec![SearchWheel::from_definition(&settings.wheels[0])],
+            ..SearchIndex::default()
+        };
         for query in ["编辑轨道", "wheel: orbit-edit", "轮盘：", "轨道轮盘：编辑"] {
-            let result =
-                Results::for_query(query, &[], &wheels, &[], &[], &[], &RecentSearch::default());
+            let result = index.results(query);
             assert!(
                 matches!(result, Results::Destinations(items) if items == [Destination::Wheel("orbit-edit".into())]),
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn installed_app_search_uses_an_explicit_scope() {
+        let index = SearchIndex::default();
+        for query in ["应用: 计算器", "apps: calculator", "程序：记事本"] {
+            assert!(matches!(index.results(query), Results::ApplicationsLoading));
+        }
+        assert!(matches!(
+            index.results("动作: calculator"),
+            Results::Destinations(_)
+        ));
+        assert!(!matches!(
+            index.results("calculator"),
+            Results::ApplicationsLoading
+        ));
     }
 
     #[test]

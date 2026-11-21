@@ -70,7 +70,7 @@ pub(super) fn matching_actions(actions: &[SearchAction], query: &str) -> Vec<Des
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quick_search::{RecentSearch, Results};
+    use crate::quick_search::{Results, SearchIndex};
 
     #[test]
     fn ranks_action_names_and_builds_the_library_filter() {
@@ -94,15 +94,11 @@ mod tests {
         assert!(matching_actions(&actions, "").is_empty());
         assert!(matching_actions(&actions, "无匹配内容").is_empty());
 
-        let result = Results::for_query(
-            "动作：文本工具 format-JSON",
-            &[],
-            &[],
-            &[],
-            &actions,
-            &[],
-            &RecentSearch::default(),
-        );
+        let result = SearchIndex {
+            actions: actions.into(),
+            ..SearchIndex::default()
+        }
+        .results("动作：文本工具 format-JSON");
         assert!(matches!(
             result,
             Results::Destinations(items) if items == [
