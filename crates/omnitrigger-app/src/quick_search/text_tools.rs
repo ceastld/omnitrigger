@@ -92,6 +92,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
     let operation = operation.to_ascii_lowercase();
     match operation.as_str() {
         "替换" | "replace" => return replace_text(text),
+        "正则替换" | "regex-replace" => return replace_regex(text),
         "按行拼接" | "join-lines" => return join_lines(text),
         "拆分成行" | "split-lines" => return split_lines(text),
         "保留行" | "keep-lines" => return filter_lines(text, true),
@@ -474,15 +475,18 @@ fn filter_regex_lines(input: &str, keep_matches: bool) -> Result<String, TextErr
 
 fn regex_text_argument(input: &str) -> Result<(Regex, &str), TextError> {
     let (pattern, text) = quoted_text_argument(input)?;
+    Ok((compile_regex(&pattern)?, text))
+}
+
+fn compile_regex(pattern: &str) -> Result<Regex, TextError> {
     if pattern.is_empty() {
         return Err(TextError::EmptySearchText);
     }
-    let pattern = RegexBuilder::new(&pattern)
+    RegexBuilder::new(pattern)
         .size_limit(256 * 1024)
         .dfa_size_limit(256 * 1024)
         .build()
-        .map_err(|_| TextError::InvalidRegex)?;
-    Ok((pattern, text))
+        .map_err(|_| TextError::InvalidRegex)
 }
 
 fn select_lines(text: &str, matches: impl Fn(&str) -> bool) -> String {
@@ -492,13 +496,18 @@ fn select_lines(text: &str, matches: impl Fn(&str) -> bool) -> String {
         .join("\n")
 }
 
-fn replace_text(input: &str) -> Result<String, TextError> {
+fn replacement_parts(input: &str) -> Result<(String, String, &str), TextError> {
     let (needle, rest) = replacement_argument(input)?;
     let (replacement, rest) = replacement_argument(rest)?;
     let text = text_payload(rest).map_err(|error| match error {
         TextError::MissingText => TextError::IncompleteReplacement,
         _ => error,
     })?;
+    Ok((needle, replacement, text))
+}
+
+fn replace_text(input: &str) -> Result<String, TextError> {
+    let (needle, replacement, text) = replacement_parts(input)?;
     if needle.is_empty() {
         return Err(TextError::EmptySearchText);
     }
@@ -514,9 +523,66 @@ fn replace_text(input: &str) -> Result<String, TextError> {
     Ok(text.replace(&needle, &replacement))
 }
 
+fn replace_regex(input: &str) -> Result<String, TextError> {
+    let (pattern, replacement, text) = replacement_parts(input)?;
+    let pattern = compile_regex(&pattern)?;
+    let mut result = String::with_capacity(text.len());
+    let mut last_end = 0;
+    for captures in pattern.captures_iter(text) {
+        let matched = captures.get_match();
+        result.push_str(&text[last_end..matched.start()]);
+        captures.expand(&replacement, &mut result);
+        if result.len() > MAX_EXPANDED_TEXT_BYTES {
+            return Err(TextError::ResultTooLarge);
+        }
+        last_end = matched.end();
+    }
+    if result.len().saturating_add(text.len() - last_end) > MAX_EXPANDED_TEXT_BYTES {
+        return Err(TextError::ResultTooLarge);
+    }
+    result.push_str(&text[last_end..]);
+    if result.contains('\0') {
+        return Err(TextError::NullCharacter);
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replaces_each_regex_match_with_expanded_captures_and_bounds_the_result() {
+        for (query, expected) in [
+            (
+                r#"正则替换 "([0-9]{4})/([0-9]{2})/([0-9]{2})" "$1-$2-$3" 2026/11/21、2027/01/02"#,
+                "2026-11-21、2027-01-02",
+            ),
+            (
+                r#"regex-replace "(?<name>[A-Z]+)=([0-9]+)" "$${${name}: $2}" A=15"#,
+                "${A: 15}",
+            ),
+            ("正则替换 “\\d+” \"\" 北京42上海", "北京上海"),
+            (r#"正则替换 "a" "b" 北京"#, "北京"),
+            (r#"正则替换 "x?" "!" ab"#, "!a!b!"),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            (r#"正则替换 "[" "x" A"#, TextError::InvalidRegex),
+            (r#"正则替换 "" "x" A"#, TextError::EmptySearchText),
+            (r#"正则替换 "A" "x""#, TextError::IncompleteReplacement),
+            (r#"正则替换 "A" "\u0000" A"#, TextError::NullCharacter),
+        ] {
+            assert_eq!(transform_text(query), Err(error), "{query}");
+        }
+        let query = format!(
+            "正则替换 \"a\" \"{}\" {}",
+            "x".repeat(1500),
+            "a".repeat(1500)
+        );
+        assert_eq!(transform_text(&query), Err(TextError::ResultTooLarge));
+    }
 
     #[test]
     fn converts_identifier_styles_with_acronyms_digits_and_combining_marks() {
