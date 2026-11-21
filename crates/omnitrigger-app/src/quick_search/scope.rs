@@ -43,6 +43,7 @@ pub(super) enum Scope {
     Csv,
     Fraction,
     Equation,
+    LinearFit,
     Percentage,
     UrlEncoding,
 }
@@ -103,6 +104,7 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
         Scope::Csv => Some("CSV:"),
         Scope::Fraction => Some("分数:"),
         Scope::Equation => Some("方程:"),
+        Scope::LinearFit => Some("拟合:"),
         Scope::Percentage => Some("百分比:"),
         Scope::UrlEncoding => Some("URL:"),
         _ => None,
@@ -164,6 +166,7 @@ fn parse_scope(prefix: &str) -> Option<Scope> {
         "csv" => Scope::Csv,
         "分数" | "fraction" => Scope::Fraction,
         "方程" | "二次方程" | "equation" | "quadratic" => Scope::Equation,
+        "拟合" | "线性拟合" | "回归" | "linear fit" => Scope::LinearFit,
         "百分比" | "比例" | "percentage" => Scope::Percentage,
         "网址" | "url" => Scope::UrlEncoding,
         _ => return None,

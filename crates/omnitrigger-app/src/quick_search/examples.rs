@@ -40,6 +40,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "方程: 1, -2, -1",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "用最小二乘法拟合直线",
+        query: "拟合: 0,1; 1,3; 2,5",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用拟合直线预测给定 x 对应的 y",
+        query: "拟合: 预测 10 @ 0,1; 1,3; 2,5",
+    },
+    Example {
         icon: Icon::Layers,
         title: "换算单位",
         query: "10 km to mi",
@@ -1430,6 +1440,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::TextCount
         | Scope::Fraction
         | Scope::Equation
+        | Scope::LinearFit
             if term.is_empty() => {}
         _ => return None,
     }
@@ -1503,6 +1514,7 @@ mod tests {
             Scope::TextCount,
             Scope::Fraction,
             Scope::Equation,
+            Scope::LinearFit,
         ] {
             let items = tool_operation_examples(scope, "").unwrap();
             assert!(items.into_iter().all(|index| {

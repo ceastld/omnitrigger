@@ -3,6 +3,7 @@ use num_rational::BigRational;
 
 use super::calculator::{normalize, QUERY_LIMIT};
 use super::fraction::{calculate_fraction, ensure_exact_size, FractionError};
+use super::operators::split_top_level_commas;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EquationError {
@@ -26,16 +27,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
         return Err(EquationError::Evaluation(FractionError::TooLong));
     }
     let input = normalize(query);
-    let mut depth = 0usize;
-    let mut terms = input.split(|ch| {
-        match ch {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            ',' => return depth == 0,
-            _ => {}
-        }
-        false
-    });
+    let mut terms = split_top_level_commas(&input);
     let (Some(a), Some(b), Some(c), None) =
         (terms.next(), terms.next(), terms.next(), terms.next())
     else {

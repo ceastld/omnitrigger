@@ -15,6 +15,7 @@ mod folders;
 mod fraction;
 mod identifiers;
 mod json_tools;
+mod linear_fit;
 mod open_windows;
 mod operators;
 mod paper;
@@ -74,6 +75,7 @@ use folders::{matching_folders, SearchFolder};
 use fraction::{simplify_fraction, FractionError};
 use identifiers::{transform_ulid, transform_uuid, IdentifierError};
 use json_tools::{transform_json, JsonError};
+use linear_fit::{calculate_linear_fit, LinearFitError};
 use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
 use open_windows::OpenWindowsIndex;
 use paper::{calculate_paper, PaperError};
@@ -303,6 +305,7 @@ enum ValueError {
     FileMode(FileModeError),
     Renminbi(RenminbiError),
     Date(DateError),
+    LinearFit(LinearFitError),
     Duration(DurationError),
     VideoFrames(VideoFrameError),
     Timecode(TimecodeError),
@@ -331,6 +334,7 @@ impl ValueError {
             Self::FileMode(error) => error.message(),
             Self::Renminbi(error) => error.message(),
             Self::Date(error) => error.message(),
+            Self::LinearFit(error) => error.message(),
             Self::Duration(error) => error.message(),
             Self::VideoFrames(error) => error.message(),
             Self::Timecode(error) => error.message(),
@@ -359,6 +363,7 @@ impl ValueError {
                 | Self::FileMode(FileModeError::Incomplete)
                 | Self::Renminbi(RenminbiError::Incomplete)
                 | Self::Date(DateError::Incomplete)
+                | Self::LinearFit(LinearFitError::Incomplete)
                 | Self::Duration(DurationError::Incomplete)
                 | Self::VideoFrames(VideoFrameError::Incomplete)
                 | Self::Timecode(TimecodeError::Incomplete)
@@ -565,6 +570,9 @@ impl Results {
                 ),
                 Scope::Equation => {
                     Self::text_value(solve_equation(term).map_err(ValueError::Equation))
+                }
+                Scope::LinearFit => {
+                    Self::text_value(calculate_linear_fit(term).map_err(ValueError::LinearFit))
                 }
                 Scope::Percentage => {
                     Self::text_value(compare_percentages(term).map_err(ValueError::Percentage))

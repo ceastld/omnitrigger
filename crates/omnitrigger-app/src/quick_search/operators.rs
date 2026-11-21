@@ -1,5 +1,17 @@
 use super::calculator::CalculationError;
 
+pub(super) fn split_top_level_commas(input: &str) -> impl Iterator<Item = &str> {
+    let mut depth = 0usize;
+    input.split(move |ch| {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        depth == 0 && ch == ','
+    })
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum Operator {
     Add,
