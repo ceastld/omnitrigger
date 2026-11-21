@@ -26,8 +26,8 @@ mod wheels;
 
 use gpui::{
     div, prelude::*, px, size, App, Bounds, ClipboardItem, Context, DisplayId, Div, Entity,
-    Focusable, FontWeight, KeyDownEvent, Stateful, Subscription, TitlebarOptions, WeakEntity,
-    Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
+    EntityInputHandler, Focusable, FontWeight, KeyDownEvent, Stateful, Subscription,
+    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
 
 use crate::appearance_ui::SettingsSection;
@@ -505,6 +505,16 @@ impl Results {
         Some(text)
     }
 
+    fn suggested_input(&self, selected: usize) -> Option<&str> {
+        match self {
+            Self::Help(items) => Some(EXAMPLES[*items.get(selected)?].query),
+            Self::Calculations(items)
+            | Self::Conversions(items)
+            | Self::ConversionTargets(items) => Some(&items.get(selected)?.expression),
+            _ => None,
+        }
+    }
+
     fn continuation_query(&self) -> Option<String> {
         let text = self.arithmetic_result()?;
         Some(if text.starts_with('-') {
@@ -709,19 +719,11 @@ impl QuickSearch {
                     self.open_destination(destination, window, cx);
                 }
             }
-            Results::Help(items) => {
-                if let Some(&index) = items.get(self.selected) {
-                    self.fill_query(EXAMPLES[index].query, window, cx);
+            _ => {
+                if let Some(query) = self.results.suggested_input(self.selected) {
+                    self.fill_query(query.to_owned(), window, cx);
                 }
             }
-            Results::Calculations(items)
-            | Results::Conversions(items)
-            | Results::ConversionTargets(items) => {
-                if let Some(item) = items.get(self.selected) {
-                    self.fill_query(item.expression.clone(), window, cx);
-                }
-            }
-            Results::Value(Err(_)) => {}
         }
     }
 
@@ -758,12 +760,23 @@ impl QuickSearch {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if event.keystroke.modifiers.number_of_modifiers() != 0
-            || self.input.read(cx).is_composing()
-        {
+        if self.input.read(cx).is_composing() {
             return;
         }
-        match event.keystroke.key.as_str() {
+        let keystroke = &event.keystroke;
+        let modifiers = keystroke.modifiers.number_of_modifiers();
+        if modifiers != 0 {
+            if modifiers == 1 && keystroke.modifiers.shift && keystroke.key == "enter" {
+                if !event.is_held {
+                    self.input.update(cx, |input, cx| {
+                        input.replace_text_in_range(None, "\n", window, cx);
+                    });
+                }
+                cx.stop_propagation();
+            }
+            return;
+        }
+        match keystroke.key.as_str() {
             "enter" => {
                 if !event.is_held {
                     self.confirm(window, cx);
@@ -776,11 +789,16 @@ impl QuickSearch {
                 }
             }
             "tab" => {
-                if self.results.arithmetic_result().is_none() {
+                let suggestion = self.results.suggested_input(self.selected);
+                if suggestion.is_none() && self.results.arithmetic_result().is_none() {
                     return;
                 }
                 if !event.is_held {
-                    self.continue_calculation(window, cx);
+                    if let Some(query) = suggestion {
+                        self.fill_query(query.to_owned(), window, cx);
+                    } else {
+                        self.continue_calculation(window, cx);
+                    }
                 }
             }
             key @ ("up" | "down") => {
@@ -916,7 +934,7 @@ impl QuickSearch {
                             )
                             .when(index == self.selected, |row| {
                                 row.child(
-                                    div().text_color(rgb(theme::TEXT_MUTED)).child("Enter 填入"),
+                                    div().text_color(rgb(theme::TEXT_MUTED)).child("Tab 填入"),
                                 )
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -975,7 +993,7 @@ impl QuickSearch {
                             .child(format!("= {}", item.result)),
                     )
                     .when(index == self.selected, |row| {
-                        row.child(div().text_color(rgb(theme::TEXT_MUTED)).child("Enter 填入"))
+                        row.child(div().text_color(rgb(theme::TEXT_MUTED)).child("Tab 填入"))
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.fill_query(expression.clone(), window, cx);
@@ -1497,6 +1515,19 @@ mod tests {
             for_query("文本: 大写 abc", &[]),
             Results::Value(Ok(value)) if value.text == "ABC"
         ));
+    }
+
+    #[test]
+    fn shared_input_suggestions_include_templates_and_compatible_targets() {
+        let targets = for_query("0xff to", &[]);
+        assert_eq!(targets.suggested_input(1), Some("0xff to bin"));
+        assert_eq!(targets.suggested_input(4), None);
+        assert_eq!(
+            for_query("文本: 按行去", &[]).suggested_input(0),
+            Some("文本: 按行去重 苹果\n梨\n苹果")
+        );
+        assert_eq!(for_query("2+3", &[]).suggested_input(0), None);
+        assert_eq!(for_query("触发器", &[]).suggested_input(0), None);
     }
 
     #[test]
