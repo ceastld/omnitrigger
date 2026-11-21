@@ -117,6 +117,7 @@
 - 输入 `文本: JSON转义 他写下 "你好"` 可把文字转成 JSON 字符串。输入 `文本: JSON还原 "\u4F60\n好"` 会还原为两行文字。 [RFC 8259 的字符串语法](https://www.rfc-editor.org/rfc/rfc8259.html#section-7)
 - 输入 `文本: 大写 Straße` 得到 `STRASSE`。也可用 `文本: 小写 ÉTÉ` 转成小写，或用 `文本: 合并空白 A   B` 得到 `A B`。
 - 输入 `文本: 转半角 ＡＢＣ１２３！` 得到 `ABC123!`，用 `文本: 转全角 ABC123!` 可转回全角。支持有全角对应形式的 ASCII 字符和空格。 [Unicode 全角字符表](https://www.unicode.org/charts/PDF/UFF00.pdf) [Unicode 表意空格表](https://www.unicode.org/charts/PDF/U3000.pdf)
+- 输入 `文本: 下划线命名 HTTPServer2URL` 得到 `http_server2_url`。输入 `文本: 小驼峰命名 http_server2_url` 得到 `httpServer2Url`。
 - 输入 `文本: 替换 "北京" "上海" 北京 A+B` 得到 `上海 A+B`。在替换内容中可用 `""` 删除、用 `"\n"` 换行。`文本: 倒序 你好ABC` 得到 `CBA好你`，并保留组合字符的完整性。
 - 输入 `文本: SHA-256 北京` 或 `文本: SHA-512 abc` 可计算 UTF-8 文本的摘要。可用引号保留开头和末尾的空格。
 - 输入 `URL: 编码 北京 A+B` 可把文本转换为 URL 参数值，得到 `%E5%8C%97%E4%BA%AC%20A%2BB`。用 `URL: 解码` 加上编码后的值即可还原文本，解码保留原样写入的加号。

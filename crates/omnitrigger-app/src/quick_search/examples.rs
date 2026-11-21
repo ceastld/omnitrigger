@@ -700,6 +700,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "转为下划线命名",
+        query: "文本: 下划线命名 HTTPServer2URL",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "转为小驼峰命名",
+        query: "文本: 小驼峰命名 http_server2_url",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按行排序",
         query: "文本: 按行排序 B\nA\nC",
     },

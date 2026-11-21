@@ -113,6 +113,12 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
     match operation.as_str() {
         "大写" | "upper" | "uppercase" => Ok(text.to_uppercase()),
         "小写" | "lower" | "lowercase" => Ok(text.to_lowercase()),
+        "下划线命名" | "snake-case" => Ok(identifier_words(text)
+            .into_iter()
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>()
+            .join("_")),
+        "小驼峰命名" | "camel-case" => Ok(lower_camel_case(text)),
         "转半角" | "halfwidth" => Ok(text
             .chars()
             .map(|ch| match ch {
@@ -178,6 +184,52 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         }
         _ => Err(TextError::UnknownOperation),
     }
+}
+
+fn identifier_words(text: &str) -> Vec<&str> {
+    let mut graphemes = text.grapheme_indices(true).peekable();
+    let mut words = Vec::new();
+    let mut word_start = 0;
+    let mut previous: Option<char> = None;
+    while let Some((index, grapheme)) = graphemes.next() {
+        let character = grapheme.chars().next().expect("字素至少包含一个字符");
+        if !character.is_alphanumeric() {
+            if previous.take().is_some() {
+                words.push(&text[word_start..index]);
+            }
+            continue;
+        }
+        let follows_lowercase_or_digit =
+            previous.is_some_and(|value| value.is_lowercase() || value.is_numeric());
+        let follows_acronym = previous.is_some_and(char::is_uppercase)
+            && graphemes
+                .peek()
+                .and_then(|(_, next)| next.chars().next())
+                .is_some_and(char::is_lowercase);
+        if character.is_uppercase() && (follows_lowercase_or_digit || follows_acronym) {
+            words.push(&text[word_start..index]);
+            word_start = index;
+        } else if previous.is_none() {
+            word_start = index;
+        }
+        previous = Some(character);
+    }
+    if previous.is_some() {
+        words.push(&text[word_start..]);
+    }
+    words
+}
+
+fn lower_camel_case(text: &str) -> String {
+    let mut words = identifier_words(text).into_iter();
+    let mut output = words.next().unwrap_or_default().to_lowercase();
+    for word in words {
+        let mut characters = word.chars();
+        let first = characters.next().expect("命名片段至少包含一个字符");
+        output.extend(first.to_uppercase());
+        output.push_str(&characters.as_str().to_lowercase());
+    }
+    output
 }
 
 fn compare_natural_lines(left: &str, right: &str) -> Ordering {
@@ -465,6 +517,21 @@ fn replace_text(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_identifier_styles_with_acronyms_digits_and_combining_marks() {
+        for (input, expected) in [
+            ("下划线命名 HTTPServer2URL", "http_server2_url"),
+            ("snake-case XML-HTTP Request", "xml_http_request"),
+            ("小驼峰命名 --HTTP_server-2_URL", "httpServer2Url"),
+            ("camel-case user__HTTP_server", "userHttpServer"),
+            ("下划线命名 Cafe\u{301}Name", "cafe\u{301}_name"),
+            ("下划线命名 用户 ID", "用户_id"),
+            ("小驼峰命名 --_--", ""),
+        ] {
+            assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");
+        }
+    }
 
     #[test]
     fn extracts_the_first_regex_match_from_each_line_in_order() {
