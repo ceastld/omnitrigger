@@ -5,6 +5,11 @@ const URL_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'.')
     .remove(b'_')
     .remove(b'~');
+const FORM_VALUE: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'*')
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_');
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum UrlEncodingError {
@@ -19,7 +24,7 @@ impl UrlEncodingError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入要编码或解码的文本，例如 URL: 编码 北京",
-            Self::InvalidOperation => "在 URL: 后输入 编码 或 解码，再输入文本",
+            Self::InvalidOperation => "输入 编码、解码、表单编码 或 表单解码，再输入文本",
             Self::InvalidEscape => "每个 % 后需要两个十六进制数字",
             Self::InvalidUtf8 => "解码结果无法表示为 UTF-8 文本",
             Self::NullCharacter => "解码结果含空字符，无法完整复制",
@@ -35,12 +40,18 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
     if value.is_empty() {
         return Err(UrlEncodingError::Incomplete);
     }
-    if operation == "编码" || operation.eq_ignore_ascii_case("encode") {
-        return Ok(utf8_percent_encode(value, URL_COMPONENT).to_string());
+    match operation.to_ascii_lowercase().as_str() {
+        "编码" | "encode" => Ok(utf8_percent_encode(value, URL_COMPONENT).to_string()),
+        "解码" | "decode" => decode_value(value),
+        "表单编码" | "form-encode" => Ok(utf8_percent_encode(value, FORM_VALUE)
+            .to_string()
+            .replace("%20", "+")),
+        "表单解码" | "form-decode" => decode_value(&value.replace('+', " ")),
+        _ => Err(UrlEncodingError::InvalidOperation),
     }
-    if operation != "解码" && !operation.eq_ignore_ascii_case("decode") {
-        return Err(UrlEncodingError::InvalidOperation);
-    }
+}
+
+fn decode_value(value: &str) -> Result<String, UrlEncodingError> {
     let mut rest = value;
     while let Some((_, suffix)) = rest.split_once('%') {
         let digits = suffix
@@ -73,6 +84,32 @@ mod tests {
         ] {
             assert_eq!(convert_url_component(input).as_deref(), Ok(expected));
         }
+    }
+
+    #[test]
+    fn converts_form_values_with_spaces_and_literal_plus() {
+        for (input, expected) in [
+            ("表单编码 北京 A+B", "%E5%8C%97%E4%BA%AC+A%2BB"),
+            ("FORM-DECODE %E5%8C%97%E4%BA%AC+A%2BB", "北京 A+B"),
+            ("form-encode !*'()~-._", "%21*%27%28%29%7E-._"),
+            ("form-decode +%2B+", " + "),
+            ("form-decode %252B", "%2B"),
+            ("decode +%2B+", "+++"),
+        ] {
+            assert_eq!(
+                convert_url_component(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            convert_url_component("表单解码 +%2G"),
+            Err(UrlEncodingError::InvalidEscape)
+        );
+        assert_eq!(
+            convert_url_component("表单解码 +%FF"),
+            Err(UrlEncodingError::InvalidUtf8)
+        );
     }
 
     #[test]

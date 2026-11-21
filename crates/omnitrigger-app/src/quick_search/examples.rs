@@ -473,6 +473,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "URL: 解码 %E5%8C%97%E4%BA%AC%20A%2BB",
     },
     Example {
+        icon: Icon::Browser,
+        title: "编码表单参数值",
+        query: "URL: 表单编码 北京 A+B",
+    },
+    Example {
+        icon: Icon::Browser,
+        title: "解码表单参数值",
+        query: "URL: 表单解码 %E5%8C%97%E4%BA%AC+A%2BB",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "约分",
         query: "分数: 42/56",
