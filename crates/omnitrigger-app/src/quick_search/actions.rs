@@ -40,12 +40,8 @@ impl SearchAction {
     }
 }
 
-pub(super) fn matching_actions(
-    actions: &[SearchAction],
-    query: &str,
-    limit: usize,
-) -> Vec<Destination> {
-    if limit == 0 || query.is_empty() {
+pub(super) fn matching_actions(actions: &[SearchAction], query: &str) -> Vec<Destination> {
+    if query.is_empty() {
         return Vec::new();
     }
     let query = query.to_lowercase();
@@ -59,21 +55,16 @@ pub(super) fn matching_actions(
         .collect();
     matches.sort_by_key(|action| title_rank(&action.title_key, &query));
 
-    let mut destinations = Vec::new();
-    for action in matches {
-        let destination = Destination::ActionLibraryEntry {
+    let mut seen = std::collections::HashSet::new();
+    matches
+        .into_iter()
+        .filter(|action| seen.insert((&action.title, &action.provider, &action.filter)))
+        .map(|action| Destination::ActionLibraryEntry {
             title: action.title.clone(),
             provider: action.provider.clone(),
             filter: action.filter.clone(),
-        };
-        if !destinations.contains(&destination) {
-            destinations.push(destination);
-        }
-        if destinations.len() == limit {
-            break;
-        }
-    }
-    destinations
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -98,13 +89,10 @@ mod tests {
             filter: "文本工具 / JSON".into(),
         };
         for query in ["JSON", "文本工具 format-JSON"] {
-            assert_eq!(
-                matching_actions(&actions, query, 1).as_slice(),
-                std::slice::from_ref(&exact)
-            );
+            assert_eq!(matching_actions(&actions, query).first(), Some(&exact));
         }
-        assert!(matching_actions(&actions, "", 4).is_empty());
-        assert!(matching_actions(&actions, "无匹配内容", 4).is_empty());
+        assert!(matching_actions(&actions, "").is_empty());
+        assert!(matching_actions(&actions, "无匹配内容").is_empty());
 
         let result = Results::for_query(
             "动作：文本工具 format-JSON",

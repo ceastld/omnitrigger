@@ -61,7 +61,7 @@ use wheels::{matching_wheels, SearchWheel};
 
 const WIDTH: f32 = 500.;
 const PAGE_ROW_HEIGHT: f32 = 38.;
-const PAGE_RESULT_LIMIT: usize = 4;
+const DESTINATION_PAGE_SIZE: usize = 4;
 const EXAMPLE_ROW_HEIGHT: f32 = 30.;
 const EXAMPLE_PAGE_SIZE: usize = 8;
 const VALUE_COLUMNS: usize = 40;
@@ -298,13 +298,13 @@ impl Results {
         if let Some((scope, term)) = scoped_query(query) {
             return match scope {
                 Scope::Triggers(filter) => Self::Destinations(
-                    matching_triggers(triggers, term, filter, PAGE_RESULT_LIMIT)
+                    matching_triggers(triggers, term, filter)
                         .into_iter()
                         .map(Destination::Trigger)
                         .collect(),
                 ),
                 Scope::Wheels => Self::Destinations(
-                    matching_wheels(wheels, term, PAGE_RESULT_LIMIT)
+                    matching_wheels(wheels, term)
                         .into_iter()
                         .map(|wheel| Destination::Wheel(wheel.id.clone()))
                         .collect(),
@@ -312,14 +312,12 @@ impl Results {
                 Scope::WheelSlots if term.is_empty() => {
                     Self::Destinations(vec![Destination::Page(Page::Wheels)])
                 }
-                Scope::WheelSlots => {
-                    Self::Destinations(matching_slots(wheel_slots, term, PAGE_RESULT_LIMIT))
-                }
+                Scope::WheelSlots => Self::Destinations(matching_slots(wheel_slots, term)),
                 Scope::Presets if term.is_empty() => {
                     Self::Destinations(vec![Destination::Page(Page::Presets)])
                 }
                 Scope::Presets => Self::Destinations(
-                    matching_presets(term, PAGE_RESULT_LIMIT)
+                    matching_presets(term)
                         .into_iter()
                         .map(|preset| Destination::Preset(preset.key))
                         .collect(),
@@ -328,7 +326,7 @@ impl Results {
                     Self::Destinations(vec![Destination::Page(Page::Settings)])
                 }
                 Scope::Settings => Self::Destinations(
-                    matching_settings(settings, term, PAGE_RESULT_LIMIT)
+                    matching_settings(settings, term)
                         .into_iter()
                         .map(Destination::SettingsSection)
                         .collect(),
@@ -344,8 +342,11 @@ impl Results {
                 }
                 Scope::CalculationHistory => Self::Calculations(recent.calculations.matching(term)),
                 Scope::Actions => {
-                    let mut entries = matching_actions(actions, term, PAGE_RESULT_LIMIT - 1);
-                    entries.push(Destination::ActionLibraryQuery(term.to_owned()));
+                    let mut entries = matching_actions(actions, term);
+                    entries.insert(
+                        entries.len().min(DESTINATION_PAGE_SIZE - 1),
+                        Destination::ActionLibraryQuery(term.to_owned()),
+                    );
                     Self::Destinations(entries)
                 }
                 Scope::Date => Self::text_value(
@@ -426,36 +427,26 @@ impl Results {
         pages.sort_by_key(|&(rank, _)| rank);
         let mut destinations: Vec<_> = pages
             .into_iter()
-            .take(PAGE_RESULT_LIMIT)
             .map(|(_, page)| Destination::Page(page))
             .collect();
         destinations.extend(
-            matching_triggers(
-                triggers,
-                &query,
-                None,
-                PAGE_RESULT_LIMIT - destinations.len(),
-            )
-            .into_iter()
-            .map(Destination::Trigger),
+            matching_triggers(triggers, &query, None)
+                .into_iter()
+                .map(Destination::Trigger),
         );
         destinations.extend(
-            matching_wheels(wheels, &query, PAGE_RESULT_LIMIT - destinations.len())
+            matching_wheels(wheels, &query)
                 .into_iter()
                 .map(|wheel| Destination::Wheel(wheel.id.clone())),
         );
         destinations.extend(
-            matching_presets(&query, PAGE_RESULT_LIMIT - destinations.len())
+            matching_presets(&query)
                 .into_iter()
                 .map(|preset| Destination::Preset(preset.key)),
         );
-        destinations.extend(matching_actions(
-            actions,
-            &query,
-            PAGE_RESULT_LIMIT - destinations.len(),
-        ));
+        destinations.extend(matching_actions(actions, &query));
         destinations.extend(
-            matching_settings(settings, &query, PAGE_RESULT_LIMIT - destinations.len())
+            matching_settings(settings, &query)
                 .into_iter()
                 .map(Destination::SettingsSection),
         );
@@ -498,7 +489,7 @@ impl Results {
     fn height(&self) -> f32 {
         match self {
             Self::Destinations(items) if items.len() > 1 => {
-                132. + items.len() as f32 * PAGE_ROW_HEIGHT
+                132. + items.len().min(DESTINATION_PAGE_SIZE) as f32 * PAGE_ROW_HEIGHT
             }
             Self::Value(Ok(value)) => {
                 let hint_height = if value.kind == ValueKind::Calculation {
@@ -743,7 +734,7 @@ impl QuickSearch {
             }
             "escape" => window.remove_window(),
             key @ ("pageup" | "pagedown") => {
-                if !self.change_example_page(key == "pagedown", cx) {
+                if !self.change_page(key == "pagedown", cx) {
                     return;
                 }
             }
@@ -777,22 +768,24 @@ impl QuickSearch {
         cx.stop_propagation();
     }
 
-    fn change_example_page(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
-        let Results::Help(items) = &self.results else {
-            return false;
+    fn change_page(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
+        let (count, page_size) = match &self.results {
+            Results::Destinations(items) => (items.len(), DESTINATION_PAGE_SIZE),
+            Results::Help(items) => (items.len(), EXAMPLE_PAGE_SIZE),
+            _ => return false,
         };
-        if items.len() <= EXAMPLE_PAGE_SIZE {
+        if count <= page_size {
             return false;
         }
-        let page = self.selected / EXAMPLE_PAGE_SIZE;
-        let last_page = (items.len() - 1) / EXAMPLE_PAGE_SIZE;
+        let page = self.selected / page_size;
+        let last_page = (count - 1) / page_size;
         let next = if forward {
             (page + 1).min(last_page)
         } else {
             page.saturating_sub(1)
         };
         if next != page {
-            self.selected = next * EXAMPLE_PAGE_SIZE;
+            self.selected = next * page_size;
             cx.notify();
         }
         true
@@ -823,19 +816,49 @@ impl QuickSearch {
             .child(label)
     }
 
+    fn render_pagination(
+        &self,
+        count: usize,
+        page_size: usize,
+        hint: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let page = self.selected / page_size;
+        let page_count = count.div_ceil(page_size);
+        Self::selection_hint(hint)
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(div().flex_1())
+            .child(
+                button("result-prev", "上一页", Tone::Ghost, page > 0)
+                    .h(px(20.))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.change_page(false, cx);
+                    })),
+            )
+            .child(format!("{} / {page_count}", page + 1))
+            .child(
+                button("result-next", "下一页", Tone::Ghost, page + 1 < page_count)
+                    .h(px(20.))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.change_page(true, cx);
+                    })),
+            )
+    }
+
     fn render_examples(&self, items: &[usize], cx: &mut Context<Self>) -> Div {
-        let page = self.selected / EXAMPLE_PAGE_SIZE;
-        let start = page * EXAMPLE_PAGE_SIZE;
-        let end = (start + EXAMPLE_PAGE_SIZE).min(items.len());
+        let start = self.selected / EXAMPLE_PAGE_SIZE * EXAMPLE_PAGE_SIZE;
         div()
             .flex()
             .flex_col()
             .children(
-                items[start..end]
+                items
                     .iter()
                     .enumerate()
-                    .map(|(offset, &example)| {
-                        let index = start + offset;
+                    .skip(start)
+                    .take(EXAMPLE_PAGE_SIZE)
+                    .map(|(index, &example)| {
                         let example = &EXAMPLES[example];
                         let query = example.query;
                         self.suggestion_row(index, EXAMPLE_ROW_HEIGHT)
@@ -862,29 +885,12 @@ impl QuickSearch {
                     }),
             )
             .when(items.len() > EXAMPLE_PAGE_SIZE, |list| {
-                let page_count = items.len().div_ceil(EXAMPLE_PAGE_SIZE);
-                list.child(
-                    Self::selection_hint("↑ ↓ 选择  ·  ? 后筛选  ·  PgUp / PgDn")
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .child(div().flex_1())
-                        .child(
-                            button("example-prev", "上一页", Tone::Ghost, page > 0)
-                                .h(px(20.))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.change_example_page(false, cx);
-                                })),
-                        )
-                        .child(format!("{} / {page_count}", page + 1))
-                        .child(
-                            button("example-next", "下一页", Tone::Ghost, page + 1 < page_count)
-                                .h(px(20.))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.change_example_page(true, cx);
-                                })),
-                        ),
-                )
+                list.child(self.render_pagination(
+                    items.len(),
+                    EXAMPLE_PAGE_SIZE,
+                    "↑ ↓ 选择  ·  ? 后筛选  ·  PgUp / PgDn",
+                    cx,
+                ))
             })
             .when((2..=EXAMPLE_PAGE_SIZE).contains(&items.len()), |list| {
                 let hint = if matches!(self.input.read(cx).text().trim(), "?" | "？") {
@@ -1047,118 +1053,137 @@ impl QuickSearch {
             Results::Destinations(items) => div()
                 .flex()
                 .flex_col()
-                .children(items.iter().enumerate().filter_map(|(index, destination)| {
-                    let (glyph, title, detail) = match destination {
-                        Destination::Page(page) => (page.icon(), page.title().to_owned(), None),
-                        Destination::Trigger(id) => {
-                            let trigger = self
-                                .index
-                                .triggers
-                                .iter()
-                                .find(|trigger| trigger.id() == *id)?;
-                            let detail = if trigger.enabled {
-                                trigger.shortcut.clone()
-                            } else {
-                                format!("{} · 已停用", trigger.shortcut)
+                .children(
+                    items
+                        .iter()
+                        .enumerate()
+                        .skip(self.selected / DESTINATION_PAGE_SIZE * DESTINATION_PAGE_SIZE)
+                        .take(DESTINATION_PAGE_SIZE)
+                        .filter_map(|(index, destination)| {
+                            let (glyph, title, detail) = match destination {
+                                Destination::Page(page) => {
+                                    (page.icon(), page.title().to_owned(), None)
+                                }
+                                Destination::Trigger(id) => {
+                                    let trigger = self
+                                        .index
+                                        .triggers
+                                        .iter()
+                                        .find(|trigger| trigger.id() == *id)?;
+                                    let detail = if trigger.enabled {
+                                        trigger.shortcut.clone()
+                                    } else {
+                                        format!("{} · 已停用", trigger.shortcut)
+                                    };
+                                    (trigger.icon, trigger.title.clone(), Some(detail))
+                                }
+                                Destination::Wheel(id) => {
+                                    let wheel =
+                                        self.index.wheels.iter().find(|wheel| &wheel.id == id)?;
+                                    let duplicate =
+                                        self.index.wheels.iter().any(|other| {
+                                            other.id != *id && other.name == wheel.name
+                                        });
+                                    let detail = if duplicate {
+                                        wheel.id.clone()
+                                    } else {
+                                        Page::Wheels.title().to_owned()
+                                    };
+                                    (Page::Wheels.icon(), wheel.name.clone(), Some(detail))
+                                }
+                                Destination::WheelSlot { label, detail, .. } => {
+                                    (Page::Wheels.icon(), label.clone(), Some(detail.clone()))
+                                }
+                                Destination::Preset(key) => {
+                                    let preset = crate::presets::PRESETS
+                                        .iter()
+                                        .find(|preset| preset.key == *key)?;
+                                    (
+                                        Page::Presets.icon(),
+                                        preset.title.to_owned(),
+                                        Some(preset.group.to_owned()),
+                                    )
+                                }
+                                Destination::SettingsSection(section) => (
+                                    Page::Settings.icon(),
+                                    section.title().to_owned(),
+                                    Some(Page::Settings.title().to_owned()),
+                                ),
+                                Destination::TextHistoryQuery(_) => {
+                                    (Icon::Clock, "搜索文本历史正文".to_owned(), None)
+                                }
+                                Destination::TriggerHistoryQuery(term) => {
+                                    let title = if term.is_empty() {
+                                        "打开触发记录"
+                                    } else {
+                                        "筛选触发记录"
+                                    };
+                                    (Page::History.icon(), title.to_owned(), None)
+                                }
+                                Destination::ActionLibraryQuery(term) => {
+                                    let title = if term.is_empty() {
+                                        "打开动作库"
+                                    } else {
+                                        "筛选动作库"
+                                    };
+                                    (Page::Actions.icon(), title.to_owned(), None)
+                                }
+                                Destination::ActionLibraryEntry {
+                                    title, provider, ..
+                                } => (Page::Actions.icon(), title.clone(), Some(provider.clone())),
                             };
-                            (trigger.icon, trigger.title.clone(), Some(detail))
-                        }
-                        Destination::Wheel(id) => {
-                            let wheel = self.index.wheels.iter().find(|wheel| &wheel.id == id)?;
-                            let duplicate = self
-                                .index
-                                .wheels
-                                .iter()
-                                .any(|other| other.id != *id && other.name == wheel.name);
-                            let detail = if duplicate {
-                                wheel.id.clone()
-                            } else {
-                                Page::Wheels.title().to_owned()
-                            };
-                            (Page::Wheels.icon(), wheel.name.clone(), Some(detail))
-                        }
-                        Destination::WheelSlot { label, detail, .. } => {
-                            (Page::Wheels.icon(), label.clone(), Some(detail.clone()))
-                        }
-                        Destination::Preset(key) => {
-                            let preset = crate::presets::PRESETS
-                                .iter()
-                                .find(|preset| preset.key == *key)?;
-                            (
-                                Page::Presets.icon(),
-                                preset.title.to_owned(),
-                                Some(preset.group.to_owned()),
-                            )
-                        }
-                        Destination::SettingsSection(section) => (
-                            Page::Settings.icon(),
-                            section.title().to_owned(),
-                            Some(Page::Settings.title().to_owned()),
-                        ),
-                        Destination::TextHistoryQuery(_) => {
-                            (Icon::Clock, "搜索文本历史正文".to_owned(), None)
-                        }
-                        Destination::TriggerHistoryQuery(term) => {
-                            let title = if term.is_empty() {
-                                "打开触发记录"
-                            } else {
-                                "筛选触发记录"
-                            };
-                            (Page::History.icon(), title.to_owned(), None)
-                        }
-                        Destination::ActionLibraryQuery(term) => {
-                            let title = if term.is_empty() {
-                                "打开动作库"
-                            } else {
-                                "筛选动作库"
-                            };
-                            (Page::Actions.icon(), title.to_owned(), None)
-                        }
-                        Destination::ActionLibraryEntry {
-                            title, provider, ..
-                        } => (Page::Actions.icon(), title.clone(), Some(provider.clone())),
-                    };
-                    let destination = destination.clone();
-                    let selected = index == self.selected;
-                    Some(
-                        self.suggestion_row(index, PAGE_ROW_HEIGHT)
-                            .child(icon(glyph, 16., theme::ACCENT))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .child(div().truncate().child(title))
-                                    .when_some(detail, |label, detail| {
-                                        label.child(
-                                            div()
-                                                .truncate()
-                                                .text_size(px(11.))
-                                                .text_color(rgb(theme::TEXT_MUTED))
-                                                .child(detail),
+                            let destination = destination.clone();
+                            let selected = index == self.selected;
+                            Some(
+                                self.suggestion_row(index, PAGE_ROW_HEIGHT)
+                                    .child(icon(glyph, 16., theme::ACCENT))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .child(div().truncate().child(title))
+                                            .when_some(detail, |label, detail| {
+                                                label.child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_size(px(11.))
+                                                        .text_color(rgb(theme::TEXT_MUTED))
+                                                        .child(detail),
+                                                )
+                                            }),
+                                    )
+                                    .when(selected, |row| {
+                                        let hint = match &destination {
+                                            Destination::TextHistoryQuery(_) => "Enter 查找",
+                                            Destination::ActionLibraryQuery(term)
+                                            | Destination::TriggerHistoryQuery(term)
+                                                if !term.is_empty() =>
+                                            {
+                                                "Enter 筛选"
+                                            }
+                                            _ => "Enter 打开",
+                                        };
+                                        row.child(
+                                            div().text_color(rgb(theme::TEXT_MUTED)).child(hint),
                                         )
-                                    }),
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open_destination(destination.clone(), window, cx)
+                                    })),
                             )
-                            .when(selected, |row| {
-                                let hint = match &destination {
-                                    Destination::TextHistoryQuery(_) => "Enter 查找",
-                                    Destination::ActionLibraryQuery(term)
-                                    | Destination::TriggerHistoryQuery(term)
-                                        if !term.is_empty() =>
-                                    {
-                                        "Enter 筛选"
-                                    }
-                                    _ => "Enter 打开",
-                                };
-                                row.child(div().text_color(rgb(theme::TEXT_MUTED)).child(hint))
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.open_destination(destination.clone(), window, cx)
-                            })),
-                    )
-                }))
-                .when(items.len() > 1, |list| {
+                        }),
+                )
+                .when(items.len() > DESTINATION_PAGE_SIZE, |list| {
+                    list.child(self.render_pagination(
+                        items.len(),
+                        DESTINATION_PAGE_SIZE,
+                        "↑ ↓ 选择  ·  PgUp / PgDn",
+                        cx,
+                    ))
+                })
+                .when((2..=DESTINATION_PAGE_SIZE).contains(&items.len()), |list| {
                     let hint = if self.input.read(cx).text().trim().is_empty() {
                         "↑ ↓ 选择  ·  输入 ? 查看用法"
                     } else {
@@ -1392,7 +1417,7 @@ mod tests {
             );
         }
         assert!(
-            matches!(for_query(" ", &[]), Results::Destinations(items) if items.len() == PAGE_RESULT_LIMIT)
+            matches!(for_query(" ", &[]), Results::Destinations(items) if items.len() == DESTINATION_PAGE_SIZE)
         );
     }
 
@@ -1499,6 +1524,28 @@ mod tests {
             };
             assert_eq!(items, expected, "{query}");
         }
+    }
+
+    #[test]
+    fn trigger_search_keeps_matches_for_later_pages() {
+        let bindings = crate::settings::defaults();
+        let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();
+        let results = for_query("trigger:", &triggers);
+        assert_eq!(
+            results.height(),
+            132. + DESTINATION_PAGE_SIZE as f32 * PAGE_ROW_HEIGHT
+        );
+        let Results::Destinations(items) = results else {
+            panic!("触发器搜索没有返回结果");
+        };
+        assert!(items.len() > DESTINATION_PAGE_SIZE);
+        assert_eq!(
+            items,
+            bindings
+                .iter()
+                .map(|binding| Destination::Trigger(binding.spec.id))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

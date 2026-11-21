@@ -1,4 +1,4 @@
-use super::{Destination, SearchTrigger, PAGES, PAGE_RESULT_LIMIT};
+use super::{Destination, SearchTrigger, DESTINATION_PAGE_SIZE, PAGES};
 use crate::Page;
 
 /// 当前工作台会话中，从快速搜索打开的页面或触发器。
@@ -22,7 +22,7 @@ impl RecentDestinations {
         };
         self.0.retain(|existing| existing != &item);
         self.0.insert(0, item);
-        self.0.truncate(PAGE_RESULT_LIMIT);
+        self.0.truncate(DESTINATION_PAGE_SIZE);
     }
 
     pub(crate) fn forget_trigger(&mut self, id: u64) {
@@ -40,7 +40,7 @@ impl RecentDestinations {
             .cloned()
             .collect();
         for (page, _) in PAGES {
-            if items.len() == PAGE_RESULT_LIMIT {
+            if items.len() == DESTINATION_PAGE_SIZE {
                 break;
             }
             let item = Destination::Page(page);

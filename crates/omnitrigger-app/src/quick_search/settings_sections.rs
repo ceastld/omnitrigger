@@ -9,11 +9,7 @@ fn keywords(section: SettingsSection) -> &'static str {
     }
 }
 
-pub(super) fn matching_settings(
-    sections: &[SettingsSection],
-    query: &str,
-    limit: usize,
-) -> Vec<SettingsSection> {
+pub(super) fn matching_settings(sections: &[SettingsSection], query: &str) -> Vec<SettingsSection> {
     let query = query.to_lowercase();
     let mut results: Vec<_> = sections
         .iter()
@@ -25,7 +21,6 @@ pub(super) fn matching_settings(
         })
         .collect();
     results.sort_by_key(|section| super::title_rank(section.title(), &query));
-    results.truncate(limit);
     results
 }
 
@@ -41,20 +36,20 @@ mod tests {
             .filter(|section| section.available(true, true))
             .collect();
         assert_eq!(
-            matching_settings(&visible, "深色", 4),
+            matching_settings(&visible, "深色"),
             [SettingsSection::Theme]
         );
         assert_eq!(
-            matching_settings(&visible, "配置备份", 4),
+            matching_settings(&visible, "配置备份"),
             [SettingsSection::Backup]
         );
         assert_eq!(
-            matching_settings(&visible, "TEST PROFILE", 4),
+            matching_settings(&visible, "TEST PROFILE"),
             [SettingsSection::Profiles]
         );
-        assert!(matching_settings(&visible, "更新", 4).is_empty());
+        assert!(matching_settings(&visible, "更新").is_empty());
         assert_eq!(
-            matching_settings(&SettingsSection::ALL, "更新", 4),
+            matching_settings(&SettingsSection::ALL, "更新"),
             [SettingsSection::Updates]
         );
         for query in ["主题", "设置：深色", "settings: theme"] {

@@ -42,11 +42,7 @@ pub(super) fn matching_triggers(
     triggers: &[SearchTrigger],
     query: &str,
     filter: Option<trigger_browse::FacetValue>,
-    limit: usize,
 ) -> Vec<u64> {
-    if limit == 0 {
-        return Vec::new();
-    }
     let query = trigger_browse::normalize_query(query);
     let mut matches: Vec<_> = triggers
         .iter()
@@ -61,7 +57,6 @@ pub(super) fn matching_triggers(
     matches.sort_unstable();
     matches
         .into_iter()
-        .take(limit)
         .map(|(_, _, index)| triggers[index].id())
         .collect()
 }

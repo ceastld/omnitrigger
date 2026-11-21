@@ -67,11 +67,7 @@ pub(super) fn index_slots(wheels: &[WheelDefinition]) -> Vec<SearchWheelSlot> {
     result
 }
 
-pub(super) fn matching_slots(
-    slots: &[SearchWheelSlot],
-    query: &str,
-    limit: usize,
-) -> Vec<Destination> {
+pub(super) fn matching_slots(slots: &[SearchWheelSlot], query: &str) -> Vec<Destination> {
     let query = query.to_lowercase();
     let mut matched: Vec<_> = slots
         .iter()
@@ -84,7 +80,6 @@ pub(super) fn matching_slots(
     matched.sort_by_key(|slot| title_rank(&slot.label_key, &query));
     matched
         .into_iter()
-        .take(limit)
         .map(|slot| Destination::WheelSlot {
             key: slot.key.clone(),
             label: slot.label.clone(),
@@ -115,11 +110,11 @@ mod tests {
             ("编辑轨道 通用复制", None, "通用复制"),
             ("CHROME.EXE 复制", Some("chrome.exe"), "网页复制"),
         ] {
-            assert!(matches!(matching_slots(&slots, query, 4).as_slice(), [
+            assert!(matches!(matching_slots(&slots, query).as_slice(), [
                 Destination::WheelSlot { key, label, .. }
             ] if *key == WheelSlotKey::new(&wheel, app, 0) && label == expected));
         }
-        assert!(matching_slots(&slots, "不存在的槽位", 4).is_empty());
+        assert!(matching_slots(&slots, "不存在的槽位").is_empty());
         let results = Results::for_query(
             "槽位：CHROME.EXE 复制",
             &[],

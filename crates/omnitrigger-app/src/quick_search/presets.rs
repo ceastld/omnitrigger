@@ -1,9 +1,6 @@
 use crate::presets::{TriggerPreset, PRESETS};
 
-pub(super) fn matching_presets(query: &str, limit: usize) -> Vec<&'static TriggerPreset> {
-    if limit == 0 {
-        return Vec::new();
-    }
+pub(super) fn matching_presets(query: &str) -> Vec<&'static TriggerPreset> {
     let query = query.to_lowercase();
     let mut matches: Vec<_> = PRESETS
         .iter()
@@ -21,11 +18,7 @@ pub(super) fn matching_presets(query: &str, limit: usize) -> Vec<&'static Trigge
         })
         .collect();
     matches.sort_by_key(|(rank, _)| *rank);
-    matches
-        .into_iter()
-        .take(limit)
-        .map(|(_, preset)| preset)
-        .collect()
+    matches.into_iter().map(|(_, preset)| preset).collect()
 }
 
 #[cfg(test)]
@@ -40,8 +33,8 @@ mod tests {
             ("RIGHT-QUICK-DRAG", "right-quick-drag"),
             ("右键 长按 300ms", "right-300"),
         ] {
-            assert_eq!(matching_presets(query, 1)[0].key, expected, "{query}");
+            assert_eq!(matching_presets(query)[0].key, expected, "{query}");
         }
-        assert!(matching_presets("无对应的预设", 4).is_empty());
+        assert!(matching_presets("无对应的预设").is_empty());
     }
 }

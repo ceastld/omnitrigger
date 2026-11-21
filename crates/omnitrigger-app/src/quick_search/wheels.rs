@@ -18,14 +18,7 @@ impl SearchWheel {
     }
 }
 
-pub(super) fn matching_wheels<'a>(
-    wheels: &'a [SearchWheel],
-    query: &str,
-    limit: usize,
-) -> Vec<&'a SearchWheel> {
-    if limit == 0 {
-        return Vec::new();
-    }
+pub(super) fn matching_wheels<'a>(wheels: &'a [SearchWheel], query: &str) -> Vec<&'a SearchWheel> {
     let query = query.to_lowercase();
     let mut matches: Vec<_> = wheels
         .iter()
@@ -38,7 +31,6 @@ pub(super) fn matching_wheels<'a>(
     matches.sort_by_key(|wheel| {
         super::title_rank(&wheel.name_key, &query).min(super::title_rank(&wheel.id_key, &query))
     });
-    matches.truncate(limit);
     matches
 }
 
@@ -58,14 +50,14 @@ mod tests {
             SearchWheel::from_definition(&preview),
             SearchWheel::from_definition(&base),
         ];
-        for (query, limit, expected) in [
-            ("编辑轨道", 1, vec!["orbit-edit"]),
-            ("ORBIT-Edit", 4, vec!["orbit-edit"]),
-            ("预览 ORBIT", 4, vec!["orbit-preview"]),
-            ("无对应轮盘", 4, vec![]),
+        for (query, expected) in [
+            ("编辑轨道", vec!["orbit-edit", "orbit-preview"]),
+            ("ORBIT-Edit", vec!["orbit-edit"]),
+            ("预览 ORBIT", vec!["orbit-preview"]),
+            ("无对应轮盘", vec![]),
         ] {
             assert_eq!(
-                matching_wheels(&wheels, query, limit)
+                matching_wheels(&wheels, query)
                     .into_iter()
                     .map(|wheel| wheel.id.as_str())
                     .collect::<Vec<_>>(),
