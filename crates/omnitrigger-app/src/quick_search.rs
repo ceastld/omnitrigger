@@ -16,6 +16,7 @@ mod fraction;
 mod identifiers;
 mod json_tools;
 mod linear_fit;
+mod local_files;
 mod open_windows;
 mod operators;
 mod paper;
@@ -76,6 +77,7 @@ use fraction::{simplify_fraction, FractionError};
 use identifiers::{transform_ulid, transform_uuid, IdentifierError};
 use json_tools::{transform_json, JsonError};
 use linear_fit::{calculate_linear_fit, LinearFitError};
+use local_files::{load_directory, LocalFilesIndex, FOLDER_DEBOUNCE};
 use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
 use open_windows::OpenWindowsIndex;
 use paper::{calculate_paper, PaperError};
@@ -128,6 +130,9 @@ enum Results {
     ApplicationsUnavailable(String),
     OpenWindowsLoading,
     OpenWindowsUnavailable(String),
+    LocalFilesPrompt,
+    LocalFilesLoading,
+    LocalFilesUnavailable(String),
     Help(Vec<usize>),
     Calculations(Vec<InputSuggestion>),
     Conversions(Vec<InputSuggestion>),
@@ -173,6 +178,11 @@ pub(super) enum Destination {
     Page(Page),
     InstalledApp(ShellApp),
     KnownFolder(SearchFolder),
+    LocalFile {
+        name: String,
+        path: String,
+        is_directory: bool,
+    },
     OpenWindow(OpenWindow),
     Trigger(u64),
     Wheel(String),
@@ -203,6 +213,7 @@ pub(super) struct SearchIndex {
     recent: RecentSearch,
     applications: ApplicationIndex,
     open_windows: OpenWindowsIndex,
+    local_files: LocalFilesIndex,
 }
 
 #[derive(Clone, Default)]
@@ -258,6 +269,7 @@ impl SearchIndex {
             recent: workspace.quick_search_recent.clone(),
             applications: workspace.quick_search_recent.applications.snapshot(),
             open_windows: OpenWindowsIndex::default(),
+            local_files: LocalFilesIndex::default(),
         }
     }
 
@@ -402,6 +414,7 @@ impl Results {
             recent,
             applications,
             open_windows,
+            local_files,
         } = index;
         if query.len() > INPUT_CHARACTER_LIMIT
             && query.chars().take(INPUT_CHARACTER_LIMIT + 1).count() > INPUT_CHARACTER_LIMIT
@@ -471,6 +484,7 @@ impl Results {
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
                 Scope::Applications => applications.results(term),
                 Scope::Folders => Self::Destinations(matching_folders(term)),
+                Scope::LocalFiles => local_files.results(term),
                 Scope::OpenWindows => open_windows.results(term),
                 Scope::Actions => {
                     let mut entries = matching_actions(actions, term);
@@ -911,6 +925,15 @@ impl QuickSearch {
             }
         }
         let query = query.trim();
+        let local_files_query = match scoped_query(query) {
+            Some((Scope::LocalFiles, term))
+                if !matches!(self.results, Results::Value(Err(ValueError::InputTooLong))) =>
+            {
+                Some(term)
+            }
+            _ => None,
+        };
+        self.refresh_local_files(local_files_query, window, cx);
         if !self.requested_applications
             && !matches!(self.results, Results::Value(Err(ValueError::InputTooLong)))
             && (matches!(scoped_query(query), Some((Scope::Applications, _)))
@@ -984,6 +1007,34 @@ impl QuickSearch {
             .detach();
         }
         cx.notify();
+    }
+
+    fn refresh_local_files(
+        &mut self,
+        query: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((directory, cancelled)) = self.index.local_files.request(query) else {
+            return;
+        };
+        cx.spawn_in(window, async move |this, cx| {
+            let reader = cx.background_executor();
+            reader.timer(FOLDER_DEBOUNCE).await;
+            let token = cancelled.clone();
+            let entries = reader
+                .spawn(async move { load_directory(&directory, &token) })
+                .await;
+            let _ = cx.update(|window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if this.index.local_files.finish(&cancelled, entries) {
+                        let query = this.input.read(cx).text();
+                        this.refresh_results(&query, window, cx);
+                    }
+                });
+            });
+        })
+        .detach();
     }
 
     fn open_destination(
@@ -1171,7 +1222,10 @@ impl QuickSearch {
                     | Results::ApplicationsLoading
                     | Results::ApplicationsUnavailable(_)
                     | Results::OpenWindowsLoading
-                    | Results::OpenWindowsUnavailable(_) => 0,
+                    | Results::OpenWindowsUnavailable(_)
+                    | Results::LocalFilesPrompt
+                    | Results::LocalFilesLoading
+                    | Results::LocalFilesUnavailable(_) => 0,
                 };
                 if count == 0 {
                     return;
@@ -1505,7 +1559,15 @@ impl QuickSearch {
             Results::OpenWindowsLoading => row
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child("正在读取当前窗口"),
-            Results::ApplicationsUnavailable(error) | Results::OpenWindowsUnavailable(error) => row
+            Results::LocalFilesPrompt => row
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child(r"输入本地目录和文件名，例如 文件: C:\工作 | 报告"),
+            Results::LocalFilesLoading => {
+                row.text_color(rgb(theme::TEXT_MUTED)).child("正在读取目录")
+            }
+            Results::ApplicationsUnavailable(error)
+            | Results::OpenWindowsUnavailable(error)
+            | Results::LocalFilesUnavailable(error) => row
                 .text_color(rgb(theme::DANGER_TEXT))
                 .child(div().truncate().child(error.clone())),
             Results::Destinations(items) if items.is_empty() => {
@@ -1536,6 +1598,13 @@ impl QuickSearch {
                                 Destination::KnownFolder(folder) => {
                                     (Icon::Layers, folder.title.to_owned(), None)
                                 }
+                                Destination::LocalFile {
+                                    name, is_directory, ..
+                                } => (
+                                    Icon::Layers,
+                                    name.clone(),
+                                    is_directory.then(|| "文件夹".to_owned()),
+                                ),
                                 Destination::OpenWindow(window) => {
                                     (Icon::Grid, window.title.clone(), window.process.clone())
                                 }
@@ -1632,6 +1701,7 @@ impl QuickSearch {
                                         let hint = match &destination {
                                             Destination::TextHistoryQuery(_) => "Enter 查找",
                                             Destination::OpenWindow(_) => "Enter 切换",
+                                            Destination::LocalFile { .. } => "Enter 复制路径",
                                             Destination::ActionLibraryQuery(term)
                                             | Destination::TriggerHistoryQuery(term)
                                                 if !term.is_empty() =>
@@ -2099,7 +2169,9 @@ mod tests {
         for example in EXAMPLES {
             match index.results(example.query) {
                 Results::Value(Ok(_)) | Results::Calculations(_) | Results::Conversions(_) => {}
-                Results::ApplicationsLoading | Results::OpenWindowsLoading => {}
+                Results::ApplicationsLoading
+                | Results::OpenWindowsLoading
+                | Results::LocalFilesPrompt => {}
                 Results::ConversionTargets(items) if !items.is_empty() => {}
                 Results::Destinations(items) if !items.is_empty() => {}
                 _ => panic!("用法示例没有可用结果：{}", example.query),

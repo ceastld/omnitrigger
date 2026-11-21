@@ -10,6 +10,7 @@ impl RecentDestinations {
         let item = match destination {
             Destination::InstalledApp(_)
             | Destination::KnownFolder(_)
+            | Destination::LocalFile { .. }
             | Destination::OpenWindow(_) => return,
             Destination::TextHistoryQuery(_) => Destination::Page(Page::TextHistory),
             Destination::TriggerHistoryQuery(_) => Destination::Page(Page::History),

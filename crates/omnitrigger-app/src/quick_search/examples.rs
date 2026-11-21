@@ -66,6 +66,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "按名称查找本地目录中的文件",
+        query: "文件:",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "按符号筛选换算单位",
         query: "1 GiB to Ti",
     },

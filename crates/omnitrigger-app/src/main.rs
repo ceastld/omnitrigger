@@ -2766,6 +2766,10 @@ impl Workspace {
         match destination {
             quick_search::Destination::Page(page) => self.open_page(page, cx),
             quick_search::Destination::OpenWindow(_) => return,
+            quick_search::Destination::LocalFile { path, .. } => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(path));
+                return;
+            }
             quick_search::Destination::InstalledApp(app) => {
                 Self::open_shell_search_target(move || app.open(), cx);
                 return;
