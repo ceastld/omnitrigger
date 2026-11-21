@@ -544,6 +544,12 @@ mod tests {
     fn evaluates_degree_trigonometry_at_regular_angles_and_axes() {
         for (query, expected) in [
             ("sind(30)", "0.5"),
+            ("asind(0.5)", "30"),
+            ("asind(-1)", "-90"),
+            ("acosd(-1)", "180"),
+            ("atand(-1)", "-45"),
+            ("atan2d(1,-1)", "135"),
+            ("atan2d(-1,-1)", "-135"),
             ("cosd(60)", "0.5"),
             ("tand(45)", "1"),
             ("sind(-270)", "1"),
@@ -786,6 +792,10 @@ mod tests {
         for query in [
             "atan2(1)",
             "atan2(1,2,3)",
+            "atan2d(1)",
+            "atan2d(1,2,3)",
+            "asind(2)",
+            "acosd(-2)",
             "log(2,0)",
             "log(2,1)",
             "log(2,-1)",

@@ -433,7 +433,12 @@ pub(super) const EXAMPLES: &[Example] = &[
     Example {
         icon: Icon::Terminal,
         title: "计算反三角函数",
-        query: "degrees(asin(0.5))",
+        query: "asind(0.5)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按度数求方向角",
+        query: "atan2d(1,-1)",
     },
     Example {
         icon: Icon::Terminal,

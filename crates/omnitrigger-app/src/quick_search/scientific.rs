@@ -92,12 +92,8 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
                 values.iter().copied().fold(0., f64::hypot)
             }));
         }
-        "atan2" => {
-            return Some(NamedValue::Aggregate(|values| match values {
-                [y, x] => y.atan2(*x),
-                _ => f64::NAN,
-            }));
-        }
+        "atan2" => return Some(NamedValue::Aggregate(atan2)),
+        "atan2d" => return Some(NamedValue::Aggregate(|values| atan2(values).to_degrees())),
         "min" => {
             return Some(NamedValue::Aggregate(|values| {
                 values.iter().copied().fold(f64::INFINITY, f64::min)
@@ -127,6 +123,9 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "asin" => f64::asin,
         "acos" => f64::acos,
         "atan" => f64::atan,
+        "asind" => |value| value.asin().to_degrees(),
+        "acosd" => |value| value.acos().to_degrees(),
+        "atand" => |value| value.atan().to_degrees(),
         "ln" => f64::ln,
         "log1p" => f64::ln_1p,
         "log2" => f64::log2,
@@ -139,6 +138,13 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         _ => return None,
     };
     Some(NamedValue::Function(function))
+}
+
+fn atan2(values: &[f64]) -> f64 {
+    match values {
+        [y, x] => y.atan2(*x),
+        _ => f64::NAN,
+    }
 }
 
 fn sin_degrees(angle: f64) -> f64 {
