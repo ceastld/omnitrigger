@@ -571,6 +571,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按行编号",
+        query: "文本: 按行编号 苹果\n梨",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "统计每行出现次数",
+        query: "文本: 按行计数 苹果\n梨\n苹果",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算文本 SHA-256",
         query: "文本: SHA-256 北京",
     },

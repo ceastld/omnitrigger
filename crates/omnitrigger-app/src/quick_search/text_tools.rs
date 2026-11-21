@@ -1,4 +1,8 @@
-use std::{collections::HashSet, fmt::Write as _};
+use std::{
+    cmp::Reverse,
+    collections::{HashMap, HashSet},
+    fmt::Write as _,
+};
 
 use base64::{
     engine::general_purpose::{
@@ -102,6 +106,13 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
             .filter(|line| !line.trim().is_empty())
             .collect::<Vec<_>>()
             .join("\n")),
+        "按行编号" | "number-lines" => Ok(text
+            .lines()
+            .enumerate()
+            .map(|(index, line)| format!("{}\t{line}", index + 1))
+            .collect::<Vec<_>>()
+            .join("\n")),
+        "按行计数" | "line-counts" => Ok(count_lines(text)),
         "sha256" | "sha-256" => Ok(format!("{:x}", Sha256::digest(text.as_bytes()))),
         "sha512" | "sha-512" => Ok(format!("{:x}", Sha512::digest(text.as_bytes()))),
         "base64编码" | "base64-encode" => Ok(STANDARD.encode(text)),
@@ -115,6 +126,24 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         }
         _ => Err(TextError::UnknownOperation),
     }
+}
+
+fn count_lines(text: &str) -> String {
+    let mut indices = HashMap::new();
+    let mut counts = Vec::new();
+    for line in text.lines() {
+        let index = *indices.entry(line).or_insert_with(|| {
+            counts.push((line, 0usize));
+            counts.len() - 1
+        });
+        counts[index].1 += 1;
+    }
+    counts.sort_by_key(|&(_, count)| Reverse(count));
+    counts
+        .into_iter()
+        .map(|(line, count)| format!("{count}\t{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn encode_code_points(text: &str) -> String {
@@ -246,6 +275,17 @@ mod tests {
             ("去空行 \" 甲\r\n  \t\r\n乙 \n\n丙\"", " 甲\n乙 \n丙"),
             ("按行去重 \"A\nA \nA\"", "A\nA "),
             ("去空行 \"\n\t\n \"", ""),
+            ("按行编号 \" 甲\r\n\r\n乙 \"", "1\t 甲\n2\t\n3\t乙 "),
+            ("number-lines \"A\n\"", "1\tA"),
+            (
+                "按行计数 梨\n苹果\n梨\n苹果\n苹果\n桃",
+                "3\t苹果\n2\t梨\n1\t桃",
+            ),
+            (
+                "line-counts \"B\r\nA\nB\nA\nA \n\n\"",
+                "2\tB\n2\tA\n1\tA \n1\t",
+            ),
+            ("按行计数 \"\"", ""),
         ] {
             assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
         }
