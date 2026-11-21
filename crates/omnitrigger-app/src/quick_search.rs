@@ -909,7 +909,7 @@ pub(super) struct QuickSearch {
     index: SearchIndex,
     was_active: bool,
     results: Results,
-    expanded_value: bool,
+    expanded_value_pages: Option<Vec<usize>>,
     selected: usize,
     requested_applications: bool,
     input_before_help: Option<String>,
@@ -1000,7 +1000,7 @@ impl QuickSearch {
             index,
             was_active: window.is_window_active(),
             results,
-            expanded_value: false,
+            expanded_value_pages: None,
             selected: 0,
             requested_applications: false,
             input_before_help: None,
@@ -1015,7 +1015,7 @@ impl QuickSearch {
     }
 
     fn value_line_limit(&self) -> usize {
-        if self.expanded_value {
+        if self.expanded_value_pages.is_some() {
             EXPANDED_VALUE_LINES
         } else {
             MAX_VALUE_LINES
@@ -1023,10 +1023,17 @@ impl QuickSearch {
     }
 
     fn toggle_value_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Results::Value(Ok(value)) = &self.results else {
+            return;
+        };
         if !self.results.value_preview_expandable() {
             return;
         }
-        self.expanded_value = !self.expanded_value;
+        self.expanded_value_pages = self
+            .expanded_value_pages
+            .is_none()
+            .then(|| value_preview::page_starts(&value.text, EXPANDED_VALUE_LINES));
+        self.selected = 0;
         window.resize(size(
             px(WIDTH),
             px(self.results.height(self.value_line_limit())),
@@ -1043,7 +1050,7 @@ impl QuickSearch {
             let previous_height = self.results.height(self.value_line_limit());
             let next_height = next.height(MAX_VALUE_LINES);
             self.results = next;
-            self.expanded_value = false;
+            self.expanded_value_pages = None;
             self.selected = 0;
             if previous_height != next_height {
                 window.resize(size(px(WIDTH), px(next_height)));
@@ -1391,6 +1398,7 @@ impl QuickSearch {
             Results::Destinations(items) => (items.len(), DESTINATION_PAGE_SIZE),
             Results::ConversionTargets(items) => (items.len(), CONVERSION_PAGE_SIZE),
             Results::Help(items) => (items.len(), EXAMPLE_PAGE_SIZE),
+            Results::Value(Ok(_)) => (self.expanded_value_pages.as_ref().map_or(0, Vec::len), 1),
             _ => return false,
         };
         if count <= page_size {
@@ -1428,11 +1436,14 @@ impl QuickSearch {
     }
 
     fn selection_hint(label: &'static str) -> Div {
+        Self::result_footer().child(label)
+    }
+
+    fn result_footer() -> Div {
         div()
             .mt(px(5.))
             .px(px(10.))
             .text_color(rgb(theme::TEXT_MUTED))
-            .child(label)
     }
 
     fn render_pagination(
@@ -1442,13 +1453,22 @@ impl QuickSearch {
         hint: &'static str,
         cx: &mut Context<Self>,
     ) -> Div {
-        let page = self.selected / page_size;
-        let page_count = count.div_ceil(page_size);
         Self::selection_hint(hint)
             .flex()
             .items_center()
             .gap(px(6.))
             .child(div().flex_1())
+            .child(self.page_controls(count, page_size, cx))
+    }
+
+    fn page_controls(&self, count: usize, page_size: usize, cx: &mut Context<Self>) -> Div {
+        let page = self.selected / page_size;
+        let page_count = count.div_ceil(page_size);
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(6.))
             .child(
                 button("result-prev", "上一页", Tone::Ghost, page > 0)
                     .h(px(20.))
@@ -1579,6 +1599,7 @@ impl QuickSearch {
             Results::Value(Ok(output)) => {
                 let result = &output.text;
                 let line_limit = self.value_line_limit();
+                let extra_height = value_extra_height(result, line_limit);
                 let swatches: &[u32] = match &output.kind {
                     ValueKind::Color(color) => std::slice::from_ref(color),
                     ValueKind::ColorContrast(colors) => colors,
@@ -1603,12 +1624,19 @@ impl QuickSearch {
                         .sum::<usize>()
                         > large_text_columns;
                 let value = if compact {
-                    let mut preview = value_preview::lines(result);
+                    let start = self
+                        .expanded_value_pages
+                        .as_ref()
+                        .map_or(0, |pages| pages[self.selected]);
+                    let mut preview = value_preview::lines(&result[start..]);
                     let lines: Vec<_> = preview.by_ref().take(line_limit).collect();
-                    let clipped = preview.next().is_some();
+                    let clipped = self.expanded_value_pages.is_none() && preview.next().is_some();
                     value
                         .flex()
                         .flex_col()
+                        .when(self.expanded_value_pages.is_some(), |value| {
+                            value.min_h(px(extra_height + 2. * VALUE_LINE_HEIGHT))
+                        })
                         .text_size(px(14.))
                         .line_height(px(VALUE_LINE_HEIGHT))
                         .children(lines.into_iter().enumerate().map(|(index, text)| {
@@ -1641,7 +1669,7 @@ impl QuickSearch {
                         .child(format!("= {}", value_preview::display_tabs(result)))
                 };
                 let row = row
-                    .h(px(38. + value_extra_height(result, line_limit)))
+                    .h(px(38. + extra_height))
                     .children(swatches.iter().map(|&color| {
                         div()
                             .size(px(26.))
@@ -1673,19 +1701,33 @@ impl QuickSearch {
                         )
                     })
                     .when(self.results.value_preview_expandable(), |result| {
-                        let hint = if self.expanded_value {
+                        let hint = if self.expanded_value_pages.is_some() {
                             "F2 收起预览"
                         } else {
                             "F2 展开预览"
                         };
+                        let page_count = self.expanded_value_pages.as_ref().map_or(0, Vec::len);
                         result.child(
-                            Self::selection_hint(hint)
-                                .id("toggle-value-preview")
-                                .cursor_pointer()
-                                .hover(|style| style.text_color(rgb(theme::ACCENT)))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.toggle_value_preview(window, cx);
-                                })),
+                            Self::result_footer()
+                                .flex()
+                                .items_center()
+                                .gap(px(10.))
+                                .child(
+                                    div()
+                                        .id("toggle-value-preview")
+                                        .child(hint)
+                                        .cursor_pointer()
+                                        .hover(|style| style.text_color(rgb(theme::ACCENT)))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.toggle_value_preview(window, cx);
+                                        })),
+                                )
+                                .when(page_count > 1, |footer| {
+                                    footer
+                                        .child("PgUp PgDn 翻页")
+                                        .child(div().flex_1())
+                                        .child(self.page_controls(page_count, 1, cx))
+                                }),
                         )
                     })
             }
