@@ -86,6 +86,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在 2 至 36 进制之间精确换算",
+        query: "进制: 2_147_483_647 从 10 到 36",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "选择目标进制",
         query: "0xff to",
     },
@@ -1450,6 +1455,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::TextCount
         | Scope::Fraction
         | Scope::Equation
+        | Scope::Radix
         | Scope::LinearFit
         | Scope::Triangle
             if term.is_empty() => {}
@@ -1526,6 +1532,7 @@ mod tests {
             Scope::Fraction,
             Scope::Equation,
             Scope::LinearFit,
+            Scope::Radix,
             Scope::Triangle,
         ] {
             let items = tool_operation_examples(scope, "").unwrap();

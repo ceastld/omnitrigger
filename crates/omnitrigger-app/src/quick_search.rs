@@ -78,12 +78,13 @@ use fraction::{simplify_fraction, FractionError};
 use identifiers::{transform_ulid, transform_uuid, IdentifierError};
 use json_tools::{transform_json, JsonError};
 use linear_fit::{calculate_linear_fit, LinearFitError};
-use local_files::{LocalFilesIndex, FOLDER_DEBOUNCE};
+use local_files::{directory_query, LocalFilesIndex, FOLDER_DEBOUNCE};
 use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
 use open_windows::OpenWindowsIndex;
 use paper::{calculate_paper, PaperError};
 use percentage::{compare_percentages, PercentageError};
 use presets::matching_presets;
+use radix::{convert_arbitrary_radix, RadixError};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use recent::RecentDestinations;
 use rectangle::{calculate_rectangle, RectangleError};
@@ -312,6 +313,7 @@ enum ValueError {
     InputTooLong,
     Calculation(CalculationError),
     Conversion(ConversionError),
+    Radix(RadixError),
     AspectRatio(AspectRatioError),
     Paper(PaperError),
     Rectangle(RectangleError),
@@ -342,6 +344,7 @@ impl ValueError {
             Self::InputTooLong => "输入最多支持 4096 个字符",
             Self::Calculation(error) => error.message(),
             Self::Conversion(error) => error.message(),
+            Self::Radix(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
             Self::Paper(error) => error.message(),
             Self::Rectangle(error) => error.message(),
@@ -380,6 +383,7 @@ impl ValueError {
                 | Self::Renminbi(RenminbiError::Incomplete)
                 | Self::Date(DateError::Incomplete)
                 | Self::LinearFit(LinearFitError::Incomplete)
+                | Self::Radix(RadixError::Incomplete)
                 | Self::Triangle(TriangleError::Dimensions)
                 | Self::Duration(DurationError::Incomplete)
                 | Self::VideoFrames(VideoFrameError::Incomplete)
@@ -487,6 +491,14 @@ impl Results {
                 }
                 Scope::CalculationHistory => Self::Calculations(recent.calculations.matching(term)),
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
+                Scope::Radix => Self::Value(
+                    convert_arbitrary_radix(term)
+                        .map(|text| ResultValue {
+                            text,
+                            kind: ValueKind::Conversion(None),
+                        })
+                        .map_err(ValueError::Radix),
+                ),
                 Scope::Applications => applications.results(term),
                 Scope::Folders => Self::Destinations(matching_folders(term)),
                 Scope::LocalFiles => local_files.results(term),
@@ -767,7 +779,7 @@ impl Results {
             ..
         } = items.get(selected)?
         {
-            Some(format!("文件: {path} |"))
+            Some(directory_query(path))
         } else {
             None
         }
@@ -1186,6 +1198,17 @@ impl QuickSearch {
                     });
                     let next = filter.map_or_else(|| format!("{PREFIX}{query}"), str::to_owned);
                     self.fill_query(next, window, cx);
+                }
+                cx.stop_propagation();
+            } else if modifiers == 1 && keystroke.modifiers.alt && keystroke.key == "up" {
+                let query = self.input.read(cx).text();
+                let Some((Scope::LocalFiles, term)) = scoped_query(&query) else {
+                    return;
+                };
+                if !event.is_held {
+                    if let Some(parent) = self.index.local_files.parent_query(term) {
+                        self.fill_query(parent, window, cx);
+                    }
                 }
                 cx.stop_propagation();
             }

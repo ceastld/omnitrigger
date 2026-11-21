@@ -11,6 +11,7 @@ pub(super) enum Scope {
     TriggerHistory,
     CalculationHistory,
     ConversionHistory,
+    Radix,
     Actions,
     Applications,
     Folders,
@@ -75,6 +76,7 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
     match parse_scope(query)? {
         Scope::CalculationHistory => Some("算式历史:"),
         Scope::ConversionHistory => Some("换算历史:"),
+        Scope::Radix => Some("进制:"),
         Scope::Applications => Some("应用:"),
         Scope::Folders => Some("文件夹:"),
         Scope::LocalFiles => Some("文件:"),
@@ -138,6 +140,7 @@ fn parse_scope(prefix: &str) -> Option<Scope> {
         "触发记录" | "trigger history" | "hits" => Scope::TriggerHistory,
         "算式历史" | "calc history" => Scope::CalculationHistory,
         "换算历史" | "conversion history" | "unit history" => Scope::ConversionHistory,
+        "进制" | "radix" | "base" => Scope::Radix,
         "动作" | "动作库" | "action" | "actions" => Scope::Actions,
         "应用" | "程序" | "app" | "apps" => Scope::Applications,
         "文件夹" | "目录" | "folder" | "folders" => Scope::Folders,

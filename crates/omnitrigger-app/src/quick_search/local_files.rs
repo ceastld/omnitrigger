@@ -1,4 +1,5 @@
 use std::{
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -70,6 +71,17 @@ impl DirectoryLoad {
 }
 
 impl LocalFilesIndex {
+    pub(super) fn parent_query(&self, query: &str) -> Option<String> {
+        let (directory, filter) = split_query(query)?;
+        let request = self.current.as_ref()?;
+        if !request.load.matches(directory, wildcard_pattern(filter)) {
+            return None;
+        }
+        request.entries.as_ref()?.as_ref().ok()?;
+        let parent = Path::new(directory).parent()?.to_str()?;
+        Some(directory_query(parent))
+    }
+
     pub(super) fn request(&mut self, query: Option<&str>) -> Option<Arc<DirectoryLoad>> {
         let Some((directory, filter)) = query.and_then(split_query) else {
             self.current = None;
@@ -171,6 +183,10 @@ fn wildcard_pattern(filter: &str) -> Option<&str> {
     filter.contains(['*', '?']).then_some(filter)
 }
 
+pub(super) fn directory_query(directory: &str) -> String {
+    format!("文件: {directory} |")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +267,25 @@ mod tests {
         let closing = index.request(Some(r"C:\Work |")).unwrap();
         drop(index);
         assert!(closing.cancelled.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn navigates_to_the_parent_of_the_current_directory() {
+        let mut index = LocalFilesIndex::default();
+        let child = r#""C:\Work\Budget 2026" | draft"#;
+        let current = index.request(Some(child)).unwrap();
+        assert_eq!(index.parent_query(child), None);
+        assert!(index.finish(&current, Ok(Vec::new())));
+        assert_eq!(
+            index.parent_query(child).as_deref(),
+            Some(r"文件: C:\Work |")
+        );
+        assert_eq!(index.parent_query(r"C:\Other |"), None);
+        let root_query = r"C:\ |";
+        let root = index.request(Some(root_query)).unwrap();
+        assert!(index.finish(&root, Ok(Vec::new())));
+        assert_eq!(index.parent_query(root_query), None);
     }
 
     #[test]
