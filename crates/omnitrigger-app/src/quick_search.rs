@@ -54,7 +54,7 @@ use conversion::{
     conversion_target_input, convert, estimate_transfer, suggested_targets, ConversionError,
 };
 use duration::{convert_duration, DurationError};
-use examples::{matching_examples, tool_operation_examples, EXAMPLES};
+use examples::{function_examples, matching_examples, tool_operation_examples, EXAMPLES};
 use fraction::{simplify_fraction, FractionError};
 use json_tools::{transform_json, JsonError};
 use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
@@ -483,8 +483,18 @@ impl Results {
         }
         let is_date = looks_like_date_query(query);
         if !is_date && looks_like_calculation(query) {
+            let result = calculate(query);
+            let examples = match result {
+                Err(CalculationError::Incomplete | CalculationError::Invalid) => {
+                    function_examples(query)
+                }
+                _ => None,
+            };
+            if let Some(examples) = examples {
+                return Self::Help(examples);
+            }
             return Self::Value(
-                calculate(query)
+                result
                     .map(|text| ResultValue {
                         text,
                         kind: ValueKind::Calculation,
@@ -539,6 +549,9 @@ impl Results {
                     calculate_date(&query, chrono::Local::now().date_naive())
                         .map_err(ValueError::Date),
                 );
+            }
+            if let Some(examples) = function_examples(&query) {
+                return Self::Help(examples);
             }
             return tool_example_keyword(&query).map_or_else(
                 || Self::Destinations(destinations),
@@ -668,6 +681,7 @@ pub(super) struct QuickSearch {
     results: Results,
     selected: usize,
     requested_applications: bool,
+    input_before_help: Option<String>,
     _input_changes: Subscription,
     _activation: Subscription,
 }
@@ -753,6 +767,7 @@ impl QuickSearch {
             results,
             selected: 0,
             requested_applications: false,
+            input_before_help: None,
             _input_changes: input_changes,
             _activation: activation,
         }
@@ -764,6 +779,9 @@ impl QuickSearch {
     }
 
     fn refresh_results(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !query.trim_start().starts_with(['?', '？']) {
+            self.input_before_help = None;
+        }
         let next = self.index.results(query);
         if self.results != next {
             let height_changed = self.results.height() != next.height();
@@ -977,6 +995,19 @@ impl QuickSearch {
             return;
         }
         match keystroke.key.as_str() {
+            "f1" => {
+                if !event.is_held {
+                    let query = self.input.read(cx).text();
+                    if query.trim_start().starts_with(['?', '？']) {
+                        if let Some(previous) = self.input_before_help.take() {
+                            self.fill_query(previous, window, cx);
+                        }
+                    } else {
+                        self.input_before_help = Some(query);
+                        self.fill_query("?".to_owned(), window, cx);
+                    }
+                }
+            }
             "enter" => {
                 if !event.is_held {
                     self.confirm(window, cx);
@@ -1502,7 +1533,7 @@ impl QuickSearch {
                 })
                 .when((2..=DESTINATION_PAGE_SIZE).contains(&items.len()), |list| {
                     let hint = if self.input.read(cx).text().trim().is_empty() {
-                        "↑ ↓ 选择  ·  输入 ? 查看用法"
+                        "↑ ↓ 选择  ·  F1 或 ? 查看用法"
                     } else {
                         "↑ ↓ 选择"
                     };
@@ -1800,6 +1831,11 @@ mod tests {
                             ("ctrl-r", false),
                             ("ctrl-r", true),
                             ("ctrl-r", false),
+                            ("f1", true),
+                            ("shift-f1", false),
+                            ("f1", false),
+                            ("f1", true),
+                            ("f1", false),
                         ]
                         .map(|(key, is_held)| {
                             let event = KeyDownEvent {
@@ -1827,6 +1863,11 @@ mod tests {
                 "算式历史: 换行验证甲\n",
                 "算式历史: 换行验证甲\n",
                 "换行验证甲\n",
+                "换行验证甲\n",
+                "换行验证甲\n",
+                "?",
+                "?",
+                "换行验证甲\n",
             ]
         );
     }
@@ -1842,6 +1883,22 @@ mod tests {
         );
         assert_eq!(for_query("2+3", &[]).suggested_input(0), None);
         assert_eq!(for_query("触发器", &[]).suggested_input(0), None);
+    }
+
+    #[test]
+    fn offers_function_templates_for_partial_names_and_empty_calls() {
+        for query in ["sqr", "sqrt", "sqrt(", "ＳＱＲＴ（"] {
+            assert_eq!(
+                for_query(query, &[]).suggested_input(0),
+                Some("sqrt(2)"),
+                "{query}"
+            );
+        }
+        assert_eq!(for_query("sin", &[]).suggested_input(0), Some("sin(pi/2)"));
+        assert!(
+            matches!(for_query("sqrt(9)", &[]), Results::Value(Ok(value)) if value.text == "3")
+        );
+        assert!(for_query("sq(", &[]).suggested_input(0).is_none());
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 use crate::assets::Icon;
 
 use super::calculator::narrow_ascii_graphic;
+use super::scientific::split_name;
 use super::scope::{scoped_query, Scope};
 use super::title_rank;
 
@@ -17,6 +18,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "计算算式",
         query: "2**10",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算平方根",
+        query: "sqrt(2)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算弧度的正弦",
+        query: "sin(pi/2)",
     },
     Example {
         icon: Icon::Layers,
@@ -1090,6 +1101,32 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         })
         .collect();
     (!items.is_empty()).then_some(items)
+}
+
+pub(super) fn function_examples(query: &str) -> Option<Vec<usize>> {
+    let query = search_key(query);
+    let (name, exact) = query
+        .strip_suffix('(')
+        .map_or((query.as_str(), false), |name| (name, true));
+    if name.len() < 2
+        || !name.starts_with(|ch: char| ch.is_ascii_alphabetic())
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return None;
+    }
+    let mut matches: Vec<_> = EXAMPLES
+        .iter()
+        .enumerate()
+        .filter_map(|(index, example)| {
+            let (function, tail) = split_name(example.query);
+            let name_matches = function == name || (!exact && function.starts_with(name));
+            (tail.starts_with('(') && name_matches).then_some((function != name, index))
+        })
+        .collect();
+    matches.sort_unstable();
+    (!matches.is_empty()).then(|| matches.into_iter().map(|(_, index)| index).collect())
 }
 
 #[cfg(test)]
