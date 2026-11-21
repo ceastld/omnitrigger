@@ -14,6 +14,7 @@ pub(super) enum Scope {
     Timestamp,
     Color,
     TextCount,
+    TextTools,
     Fraction,
     UrlEncoding,
 }
@@ -36,6 +37,7 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
         Scope::Timestamp => Some("时间戳"),
         Scope::Color => Some("颜色:"),
         Scope::TextCount => Some("字数:"),
+        Scope::TextTools => Some("文本:"),
         Scope::Fraction => Some("分数:"),
         Scope::UrlEncoding => Some("URL:"),
         _ => None,
@@ -58,6 +60,7 @@ fn parse_scope(prefix: &str) -> Option<Scope> {
         "时间戳" | "unix" | "timestamp" => Scope::Timestamp,
         "颜色" | "color" | "colour" => Scope::Color,
         "字数" | "text count" | "text length" => Scope::TextCount,
+        "文本" | "文本工具" | "text tools" => Scope::TextTools,
         "分数" | "fraction" => Scope::Fraction,
         "网址" | "url" => Scope::UrlEncoding,
         _ => return None,

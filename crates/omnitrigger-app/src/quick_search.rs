@@ -15,7 +15,7 @@ mod recent;
 mod scientific;
 mod scope;
 mod settings_sections;
-mod text_count;
+mod text_tools;
 mod timestamp;
 mod triggers;
 mod url_encoding;
@@ -52,7 +52,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use recent::RecentDestinations;
 use scope::{scoped_query, tool_example_keyword, Scope};
 use settings_sections::matching_settings;
-use text_count::{count_text, TextCountError};
+use text_tools::{count_text, transform_text, TextError};
 use timestamp::{convert_timestamp, TimestampError};
 use triggers::{matching_triggers, SearchTrigger};
 use url_encoding::{convert_url_component, UrlEncodingError};
@@ -237,7 +237,7 @@ enum ValueError {
     Duration(DurationError),
     Timestamp(TimestampError),
     Color(ColorError),
-    TextCount(TextCountError),
+    Text(TextError),
     Fraction(FractionError),
     UrlEncoding(UrlEncodingError),
 }
@@ -251,7 +251,7 @@ impl ValueError {
             Self::Duration(error) => error.message(),
             Self::Timestamp(error) => error.message(),
             Self::Color(error) => error.message(),
-            Self::TextCount(error) => error.message(),
+            Self::Text(error) => error.message(),
             Self::Fraction(error) => error.message(),
             Self::UrlEncoding(error) => error.message(),
         }
@@ -266,7 +266,11 @@ impl ValueError {
                 | Self::Duration(DurationError::Incomplete)
                 | Self::Timestamp(TimestampError::Incomplete)
                 | Self::Color(ColorError::Incomplete)
-                | Self::TextCount(_)
+                | Self::Text(
+                    TextError::MissingText
+                        | TextError::UnclosedQuote
+                        | TextError::IncompleteTransform
+                )
                 | Self::Fraction(FractionError::Incomplete)
                 | Self::UrlEncoding(UrlEncodingError::Incomplete)
         )
@@ -361,8 +365,9 @@ impl Results {
                         })
                         .map_err(ValueError::Color),
                 ),
-                Scope::TextCount => {
-                    Self::text_value(count_text(term).map_err(ValueError::TextCount))
+                Scope::TextCount => Self::text_value(count_text(term).map_err(ValueError::Text)),
+                Scope::TextTools => {
+                    Self::text_value(transform_text(term).map_err(ValueError::Text))
                 }
                 Scope::Fraction => {
                     Self::text_value(simplify_fraction(term).map_err(ValueError::Fraction))
@@ -1229,6 +1234,7 @@ mod tests {
             ("date", "日期:"),
             ("COLOUR", "颜色:"),
             ("URL", "URL:"),
+            ("文本工具", "文本:"),
         ] {
             let Results::Help(items) = for_query(query, &[]) else {
                 panic!("未显示对应工具的示例：{query}");

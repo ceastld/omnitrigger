@@ -288,6 +288,21 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "字数: 你好👩‍💻",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "转成大写",
+        query: "文本: 大写 Straße",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "转成小写",
+        query: "文本: 小写 ÉTÉ",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "合并连续空白",
+        query: "文本: 合并空白 A   B",
+    },
+    Example {
         icon: Icon::Browser,
         title: "编码 URL 参数值",
         query: "URL: 编码 北京 A+B",
