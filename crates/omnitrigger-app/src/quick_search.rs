@@ -15,6 +15,7 @@ mod fraction;
 mod json_tools;
 mod open_windows;
 mod operators;
+mod paper;
 mod percentage;
 mod presets;
 mod radix;
@@ -28,6 +29,7 @@ mod triggers;
 mod url_encoding;
 mod value_history;
 mod value_preview;
+mod video_frames;
 mod wheel_slots;
 mod wheels;
 
@@ -66,6 +68,7 @@ use fraction::{simplify_fraction, FractionError};
 use json_tools::{transform_json, JsonError};
 use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
 use open_windows::OpenWindowsIndex;
+use paper::{calculate_paper, PaperError};
 use percentage::{compare_percentages, PercentageError};
 use presets::matching_presets;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -78,6 +81,7 @@ use triggers::{matching_triggers, SearchTrigger};
 use unicode_segmentation::UnicodeSegmentation;
 use url_encoding::{convert_url_component, UrlEncodingError};
 use value_history::RecentValues;
+use video_frames::{convert_video_frames, VideoFrameError};
 use wheel_slots::{index_slots, matching_slots, SearchWheelSlot};
 use wheels::{matching_wheels, SearchWheel};
 
@@ -282,9 +286,11 @@ enum ValueError {
     Calculation(CalculationError),
     Conversion(ConversionError),
     AspectRatio(AspectRatioError),
+    Paper(PaperError),
     Cidr(CidrError),
     Date(DateError),
     Duration(DurationError),
+    VideoFrames(VideoFrameError),
     Timestamp(TimestampError),
     Color(ColorError),
     Text(TextError),
@@ -303,9 +309,11 @@ impl ValueError {
             Self::Calculation(error) => error.message(),
             Self::Conversion(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
+            Self::Paper(error) => error.message(),
             Self::Cidr(error) => error.message(),
             Self::Date(error) => error.message(),
             Self::Duration(error) => error.message(),
+            Self::VideoFrames(error) => error.message(),
             Self::Timestamp(error) => error.message(),
             Self::Color(error) => error.message(),
             Self::Text(error) => error.message(),
@@ -324,9 +332,11 @@ impl ValueError {
             Self::Calculation(CalculationError::Incomplete)
                 | Self::Conversion(ConversionError::Incomplete)
                 | Self::AspectRatio(AspectRatioError::Incomplete)
+                | Self::Paper(PaperError::Incomplete)
                 | Self::Cidr(CidrError::Incomplete)
                 | Self::Date(DateError::Incomplete)
                 | Self::Duration(DurationError::Incomplete)
+                | Self::VideoFrames(VideoFrameError::Incomplete)
                 | Self::Timestamp(TimestampError::Incomplete)
                 | Self::Color(ColorError::Incomplete | ColorError::IncompleteContrast)
                 | Self::Text(
@@ -446,6 +456,9 @@ impl Results {
                 Scope::Duration => {
                     Self::text_value(convert_duration(term).map_err(ValueError::Duration))
                 }
+                Scope::VideoFrames => {
+                    Self::text_value(convert_video_frames(term).map_err(ValueError::VideoFrames))
+                }
                 Scope::TransferTime => Self::conversion_value(estimate_transfer(term), None),
                 Scope::Pace => {
                     Self::text_value(calculate_pace(term).map_err(ValueError::Conversion))
@@ -462,6 +475,7 @@ impl Results {
                 Scope::PixelDensity => {
                     Self::text_value(calculate_pixel_density(term).map_err(ValueError::Conversion))
                 }
+                Scope::Paper => Self::text_value(calculate_paper(term).map_err(ValueError::Paper)),
                 Scope::Cidr => Self::text_value(calculate_cidr(term).map_err(ValueError::Cidr)),
                 Scope::Timestamp => Self::text_value(
                     convert_timestamp(term, chrono::Utc::now()).map_err(ValueError::Timestamp),
@@ -1993,6 +2007,8 @@ mod tests {
                     "时长: 45分钟 * 12",
                     "时长: 01:30:00 to min",
                     "时长: 23:45 到 01:15",
+                    "帧数: 125 帧 @ 25 fps",
+                    "帧数: 10秒 @ 30000/1001 fps",
                     "时间戳: 现在 + 90分钟 to UTC+8",
                 ][..],
             ),

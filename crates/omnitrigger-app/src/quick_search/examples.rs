@@ -176,6 +176,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "按帧率把视频帧数换成时长",
+        query: "帧数: 125 帧 @ 25 fps",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "按分数帧率把时长换成帧数",
+        query: "帧数: 10秒 @ 30000/1001 fps",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "估算下载时间",
         query: "下载: 1 GiB 按 100 Mbps",
     },
@@ -238,6 +248,21 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Layers,
         title: "计算屏幕像素密度和尺寸",
         query: "像素密度: 3840×2160 @ 27 in",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "查询标准纸张尺寸",
+        query: "纸张: B5",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "计算纸张对应的图像像素",
+        query: "纸张: A4 @ 300 dpi",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "计算等比缩放到目标纸张的比例",
+        query: "纸张: A4 to A5",
     },
     Example {
         icon: Icon::Layers,
@@ -1238,12 +1263,14 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
             if !term.contains(char::is_whitespace) => {}
         Scope::Date
         | Scope::Duration
+        | Scope::VideoFrames
         | Scope::TransferTime
         | Scope::Pace
         | Scope::FuelEconomy
         | Scope::UnitPrice
         | Scope::AspectRatio
         | Scope::PixelDensity
+        | Scope::Paper
         | Scope::Cidr
         | Scope::Timestamp
         | Scope::Color
@@ -1303,12 +1330,14 @@ mod tests {
         for scope in [
             Scope::Date,
             Scope::Duration,
+            Scope::VideoFrames,
             Scope::TransferTime,
             Scope::Pace,
             Scope::FuelEconomy,
             Scope::UnitPrice,
             Scope::AspectRatio,
             Scope::PixelDensity,
+            Scope::Paper,
             Scope::Cidr,
             Scope::Timestamp,
             Scope::Color,

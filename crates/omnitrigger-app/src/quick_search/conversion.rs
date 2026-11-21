@@ -125,7 +125,7 @@ struct Unit {
 }
 
 const STANDARD_GRAVITY: f64 = 9.806_65;
-const INCH_IN_METERS: f64 = 0.0254;
+pub(super) const INCH_IN_METERS: f64 = 0.0254;
 const METERS_PER_MILE: f64 = 1609.344;
 const LITERS_PER_US_GALLON: f64 = 3.785_411_784;
 const LITERS_PER_IMPERIAL_GALLON: f64 = 4.546_09;

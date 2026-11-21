@@ -3,7 +3,7 @@ use std::time::Duration;
 use super::calculator::{format_result, normalize};
 use super::conversion::split_conversion;
 
-const NANOS_PER_SECOND: u128 = 1_000_000_000;
+pub(super) const NANOS_PER_SECOND: u128 = 1_000_000_000;
 const NANOS_PER_DAY: u128 = 86_400 * NANOS_PER_SECOND;
 const MAX_DURATION_NANOS: u128 = (u64::MAX as u128 + 1) * NANOS_PER_SECOND - 1;
 // 去掉末尾的零后，精度由单位纳秒数中的因子 2 和 5 决定。一天含有 16 个因子 2。
@@ -55,17 +55,20 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     if let Some(output) = output {
         return format_duration_unit(nanos, sign, output);
     }
-    let seconds = nanos / NANOS_PER_SECOND;
-    let fraction = nanos % NANOS_PER_SECOND;
-    let suffix = fraction_suffix(fraction, 9);
     if show_seconds {
+        let seconds = nanos / NANOS_PER_SECOND;
+        let suffix = fraction_suffix(nanos % NANOS_PER_SECOND, 9);
         Ok(format!("{sign}{seconds}{suffix} 秒"))
     } else {
-        let (hours, minutes, remainder) = (seconds / 3_600, seconds / 60 % 60, seconds % 60);
-        Ok(format!(
-            "{sign}{hours:02}:{minutes:02}:{remainder:02}{suffix}"
-        ))
+        Ok(format_clock_duration(nanos, sign))
     }
+}
+
+pub(super) fn format_clock_duration(nanos: u128, sign: &str) -> String {
+    let seconds = nanos / NANOS_PER_SECOND;
+    let suffix = fraction_suffix(nanos % NANOS_PER_SECOND, 9);
+    let (hours, minutes, remainder) = (seconds / 3_600, seconds / 60 % 60, seconds % 60);
+    format!("{sign}{hours:02}:{minutes:02}:{remainder:02}{suffix}")
 }
 
 fn signed_duration(input: &str) -> Result<(i128, bool), DurationError> {
