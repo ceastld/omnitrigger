@@ -646,6 +646,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按数字顺序排列文件名",
+        query: "文本: 自然排序 照片10\n照片2\n照片1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "移除空行",
         query: "文本: 去空行 甲\n\n乙",
     },

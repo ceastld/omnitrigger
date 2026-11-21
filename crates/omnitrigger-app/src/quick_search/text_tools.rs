@@ -1,5 +1,5 @@
 use std::{
-    cmp::Reverse,
+    cmp::{Ordering, Reverse},
     collections::{HashMap, HashSet},
     fmt::Write as _,
 };
@@ -113,6 +113,11 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
             lines.sort_unstable();
             Ok(lines.join("\n"))
         }
+        "自然排序" | "natural-sort" => {
+            let mut lines: Vec<_> = text.lines().collect();
+            lines.sort_by(|left, right| compare_natural_lines(left, right));
+            Ok(lines.join("\n"))
+        }
         "去空行" | "remove-empty-lines" => Ok(text
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -140,6 +145,43 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         }
         _ => Err(TextError::UnknownOperation),
     }
+}
+
+fn compare_natural_lines(left: &str, right: &str) -> Ordering {
+    let (mut left, mut right) = (left.as_bytes(), right.as_bytes());
+    while let (Some((&left_byte, left_tail)), Some((&right_byte, right_tail))) =
+        (left.split_first(), right.split_first())
+    {
+        let order = if left_byte.is_ascii_digit() && right_byte.is_ascii_digit() {
+            let (left_number, next_left) = decimal_run(left);
+            let (right_number, next_right) = decimal_run(right);
+            (left, right) = (next_left, next_right);
+            left_number
+                .len()
+                .cmp(&right_number.len())
+                .then_with(|| left_number.cmp(right_number))
+        } else {
+            (left, right) = (left_tail, right_tail);
+            left_byte.cmp(&right_byte)
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+fn decimal_run(text: &[u8]) -> (&[u8], &[u8]) {
+    let end = text
+        .iter()
+        .position(|byte| !byte.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (digits, rest) = text.split_at(end);
+    let significant = digits
+        .iter()
+        .position(|&byte| byte != b'0')
+        .unwrap_or(digits.len());
+    (&digits[significant..], rest)
 }
 
 fn count_lines(text: &str) -> String {
@@ -365,6 +407,23 @@ fn replace_text(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sorts_digit_runs_by_value_and_keeps_equivalent_lines_in_input_order() {
+        assert_eq!(
+            transform_text("自然排序 照片10\r\n照片02\r\n照片1\r\n照片2").as_deref(),
+            Ok("照片1\n照片02\n照片2\n照片10")
+        );
+        assert_eq!(
+            transform_text("natural-sort p2-q10\np02-q2\np2-q02\np1").as_deref(),
+            Ok("p1\np02-q2\np2-q02\np2-q10")
+        );
+        assert_eq!(
+            transform_text("自然排序 p1000000000000000000000000000000000000000\np999999999999999999999999999999999999999\np0\np00").as_deref(),
+            Ok("p0\np00\np999999999999999999999999999999999999999\np1000000000000000000000000000000000000000")
+        );
+        assert_eq!(transform_text("按行排序 p2\np10").as_deref(), Ok("p10\np2"));
+    }
 
     #[test]
     fn round_trips_utf8_bytes_in_hex_and_validates_decoded_text() {
