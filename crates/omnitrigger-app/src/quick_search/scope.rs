@@ -24,8 +24,13 @@ pub(super) enum Scope {
 }
 
 pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
-    let (prefix, term) = query.split_once([':', '：'])?;
-    Some((parse_scope(prefix)?, term.trim()))
+    if let Some((prefix, term)) = query.split_once([':', '：']) {
+        return Some((parse_scope(prefix)?, term.trim()));
+    }
+    match parse_scope(query)? {
+        scope @ Scope::Triggers(Some(_)) => Some((scope, "")),
+        _ => None,
+    }
 }
 
 pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {

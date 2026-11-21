@@ -637,35 +637,37 @@ fn browse_row(binding: &settings::Binding, ready: bool) -> trigger_browse::Row {
     }
 }
 
+/// 沿用场景时显示场景名与绑定自身的附加条件。
+fn binding_context_label(binding: &settings::Binding) -> Option<String> {
+    let (scene, own) = binding.context.authored(&binding.spec);
+    let sources = &binding.context.scopes;
+    let mut labels = Vec::new();
+    if let Some(name) = scene {
+        labels.push(format!("场景 {name}"));
+    }
+    if !own.pointer.is_global() {
+        labels.push(format!(
+            "指针窗口：{}",
+            settings::process_scope_label(&own.pointer, sources.pointer.as_ref())
+        ));
+    }
+    if !own.foreground.is_global() {
+        labels.push(settings::process_scope_label(
+            &own.foreground,
+            sources.process.as_ref(),
+        ));
+    }
+    (!labels.is_empty()).then(|| labels.join(" · "))
+}
+
 /// 列表行第二行的说明文字与颜色；动作不可用时显示原因。
 fn row_detail(binding: &settings::Binding, unavailable: Option<String>) -> (String, u32) {
     let (detail, detail_color) = match unavailable {
         Some(reason) => (reason, theme::RECORD),
         None => (action_detail(&binding.action), theme::TEXT_DIM),
     };
-    // 沿用场景时显示场景名与绑定自身的附加条件，完整范围见详情。
-    let (scene, own) = binding.context.authored(&binding.spec);
-    let sources = &binding.context.scopes;
-    let detail = if own.foreground.is_global() {
-        detail
-    } else {
-        format!(
-            "{} · {}",
-            settings::process_scope_label(&own.foreground, sources.process.as_ref()),
-            detail
-        )
-    };
-    let detail = if own.pointer.is_global() {
-        detail
-    } else {
-        format!(
-            "指针窗口：{} · {}",
-            settings::process_scope_label(&own.pointer, sources.pointer.as_ref()),
-            detail
-        )
-    };
-    let detail = match scene {
-        Some(name) => format!("场景 {name} · {detail}"),
+    let detail = match binding_context_label(binding) {
+        Some(context) => format!("{context} · {detail}"),
         None => detail,
     };
     let detail = if binding.spec.keyboard == Default::default() {

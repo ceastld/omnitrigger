@@ -1091,12 +1091,11 @@ impl QuickSearch {
                                         .triggers
                                         .iter()
                                         .find(|trigger| trigger.id() == *id)?;
-                                    let detail = if trigger.enabled {
-                                        trigger.shortcut.clone()
-                                    } else {
-                                        format!("{} · 已停用", trigger.shortcut)
-                                    };
-                                    (trigger.icon, trigger.title.clone(), Some(detail))
+                                    (
+                                        trigger.icon,
+                                        trigger.title.clone(),
+                                        Some(trigger.detail.clone()),
+                                    )
                                 }
                                 Destination::Wheel(id) => {
                                     let wheel =
@@ -1564,10 +1563,12 @@ mod tests {
         let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();
         let global = Destination::Trigger(bindings[0].spec.id);
         let app = Destination::Trigger(bindings[1].spec.id);
+        assert!(triggers[1].detail.contains("已停用 · 指针窗口：仅 editor"));
         for (query, expected) in [
             ("触发器: 发送正文", vec![global.clone(), app.clone()]),
             ("已启用触发器: 发送正文", vec![global.clone()]),
             ("已停用触发器：", vec![app.clone()]),
+            ("已停用触发器", vec![app.clone()]),
             ("DISABLED TRIGGERS: editor", vec![app.clone()]),
             ("全局触发器: 发送正文", vec![global]),
             ("指定应用触发器: editor", vec![app]),
