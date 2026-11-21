@@ -1387,6 +1387,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "保留存在指定路径的 JSON 数组项",
+        query: r#"JSON: 有路径 /状态 [{"编号":"001","状态":null},{"编号":"002"}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "保留缺少指定路径的 JSON 数组项",
+        query: r#"JSON: 缺路径 /状态 [{"编号":"001","状态":null},{"编号":"002"}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 CSV 转成 JSON 行数组",
         query: "CSV: 转JSON 编号,名称\n001,\"茶,咖啡\"",
     },

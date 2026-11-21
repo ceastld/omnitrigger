@@ -76,6 +76,8 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "压缩" | "compact" | "minify" => false,
         "取值" | "get" | "pointer" => return select_json_value(source),
         "取列" | "column" => return select_json_column(source),
+        "有路径" | "has-pointer" => return filter_json_by_pointer(source, true),
+        "缺路径" | "missing-pointer" => return filter_json_by_pointer(source, false),
         "键名" | "keys" => return json_keys(source),
         "长度" | "length" => return json_length(source),
         "展开数组" | "to-jsonl" => return json_array_to_lines(source),
@@ -168,12 +170,32 @@ fn select_json_column(query: &str) -> Result<String, JsonError> {
     let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
     let values = items
         .into_iter()
-        .map(|item| {
-            keys.iter()
-                .try_fold(item, |value, key| select_member(value, key))
-        })
+        .map(|item| select_pointer_keys(item, &keys))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(serde_json::to_string(&values).expect("有效的原始 JSON 值可以直接序列化"))
+}
+
+fn filter_json_by_pointer(query: &str, keep_present: bool) -> Result<String, JsonError> {
+    let (pointer, source) = pointer_and_source(query)?;
+    let items = read_json_array(source)?;
+    let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
+    let mut retained = Vec::new();
+    for item in items {
+        let present = match select_pointer_keys(item, &keys) {
+            Ok(_) => true,
+            Err(JsonError::MissingValue) => false,
+            Err(error) => return Err(error),
+        };
+        if present == keep_present {
+            retained.push(item);
+        }
+    }
+    Ok(serde_json::to_string(&retained).expect("有效的原始 JSON 值可以直接序列化"))
+}
+
+fn select_pointer_keys<'a>(item: &'a RawValue, keys: &[String]) -> Result<&'a RawValue, JsonError> {
+    keys.iter()
+        .try_fold(item, |value, key| select_member(value, key))
 }
 
 fn read_json_array(source: &str) -> Result<Vec<&RawValue>, JsonError> {
@@ -724,6 +746,39 @@ mod tests {
             Err(JsonError::DuplicateKey)
         );
         assert_eq!(list_json_pointers("[1,]"), Err(JsonError::Invalid));
+    }
+
+    #[test]
+    fn filters_json_items_by_pointer_presence_and_keeps_original_values() {
+        let source = r#"[{"id":"001","a":{"b":null},"n":9007199254740993},{"id":"002","a": {}},{"id":"003","a":{"b":false}},null]"#;
+        for (operation, expected) in [
+            (
+                "有路径",
+                r#"[{"id":"001","a":{"b":null},"n":9007199254740993},{"id":"003","a":{"b":false}}]"#,
+            ),
+            ("missing-pointer", r#"[{"id":"002","a": {}},null]"#),
+        ] {
+            assert_eq!(
+                transform_json(&format!("{operation} /a/b {source}")).as_deref(),
+                Ok(expected)
+            );
+        }
+        assert_eq!(
+            transform_json(r#"has-pointer /0 [[null],[],[false]]"#).as_deref(),
+            Ok("[[null],[false]]")
+        );
+        assert_eq!(
+            transform_json(r#"有路径 "" [3,{},null]"#).as_deref(),
+            Ok("[3,{},null]")
+        );
+        assert_eq!(
+            transform_json("有路径 /a~2b []"),
+            Err(JsonError::InvalidPointer)
+        );
+        assert_eq!(
+            transform_json(r#"缺路径 /a [{"a":1,"a":2}]"#),
+            Err(JsonError::DuplicateKey)
+        );
     }
 
     #[test]
