@@ -309,6 +309,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "转成度分秒",
+        query: "12.5° to dms",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算温差",
         query: "10 dC to dF",
     },

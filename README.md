@@ -77,6 +77,7 @@
 - 用 `PageUp` 和 `PageDown` 浏览更多换算单位。输入目标单位符号的开头可筛选，例如 `1 GiB to Ti` 会列出 `TiB` 和 `Tib`。
 - 输入 `10 dC to dF` 可将摄氏温差换成 `18 Δ°F`。也可直接输入 `Δ°C`、`Δ°F` 或 `ΔK`。 [NIST 温差换算表](https://www.nist.gov/pml/special-publication-811/nist-guide-si-appendix-b-conversion-factors/nist-guide-si-appendix-b9)
 - 输入 `60′ to °` 可将角分换成 `1 °`。角分和角秒也可分别写作 `arcmin` 和 `arcsec`。 [BIPM《国际单位制手册》表 8](https://www.bipm.org/documents/20126/41483022/SI-Brochure-9.pdf/fcf090b2-04e6-88cc-1149-c3e029ad8232)
+- 输入 `30° 15′ 30″ to °` 可把组合角度换算成十进制度，`12.5° to dms` 得到 `12° 30′ 0″`。组合写法中角分与角秒均小于 60，角秒最多显示六位小数。
 - 输入 `1度电转MJ` 得到 `3.6 MJ`，输入 `500 mW to W` 得到 `0.5 W`。
 - 输入 `1000 kg/m³ to g/cm³` 可换算密度，输入 `1 L/min to m³/h` 可换算体积流量，得到 `0.06 m³/h`。
 - 输入 `1 kgf to N` 可换算力，得到 `9.80665 N`。输入 `1 g0 to m/s²` 可将标准重力加速度换算为 `9.80665 m/s²`。换算系数见 [NIST SI 指南](https://www.nist.gov/pml/special-publication-811/nist-guide-si-appendix-b-conversion-factors/nist-guide-si-appendix-b9)。

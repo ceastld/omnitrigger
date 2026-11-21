@@ -377,9 +377,31 @@ fn feet_and_inches(source: &str) -> Option<(&str, &str)> {
     ))
 }
 
+fn degrees_minutes_seconds(source: &str) -> Option<(&str, &str, &str)> {
+    let (degrees, rest) = source.split_once(['°', '度'])?;
+    let (minutes, seconds) = rest.split_once(['′', '\'', '分'])?;
+    let seconds = seconds.trim();
+    let seconds = if seconds.is_empty() {
+        "0"
+    } else {
+        seconds.strip_suffix(['″', '"', '秒'])?
+    };
+    Some((degrees, minutes, seconds))
+}
+
 fn parse_quantity(source: &str) -> Result<(f64, Unit), ConversionError> {
     let evaluate_amount =
         |amount: &str| evaluate(amount).map_err(|_| ConversionError::InvalidAmount);
+    if let Some((degrees, minutes, seconds)) = degrees_minutes_seconds(source) {
+        let degrees = evaluate_amount(degrees)?;
+        let minutes = evaluate_amount(minutes)?;
+        let seconds = evaluate_amount(seconds)?;
+        if !(0. ..60.).contains(&minutes) || !(0. ..60.).contains(&seconds) {
+            return Err(ConversionError::InvalidAmount);
+        }
+        let amount = (degrees.abs() + minutes / 60. + seconds / 3600.).copysign(degrees);
+        return Ok((amount, Unit::parse("°")?));
+    }
     if let Some((feet, inches)) = feet_and_inches(source) {
         let feet = evaluate_amount(feet)?;
         let inches = evaluate_amount(inches)?;
@@ -455,14 +477,16 @@ pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
 
 fn convert_quantity(source: &str, target: &str) -> Result<String, ConversionError> {
     let (amount, source) = parse_quantity(source)?;
-    if matches!(
-        target.trim().to_ascii_lowercase().as_str(),
-        "ft in" | "feet inches" | "英尺英寸" | "英尺 英寸"
-    ) {
-        return format_feet_and_inches(amount, &source);
+    match target.trim().to_ascii_lowercase().as_str() {
+        "ft in" | "feet inches" | "英尺英寸" | "英尺 英寸" => {
+            format_feet_and_inches(amount, &source)
+        }
+        "dms" | "度分秒" => format_degrees_minutes_seconds(amount, &source),
+        _ => {
+            let target = Unit::parse(target)?;
+            format_conversion(amount, &source, &target)
+        }
     }
-    let target = Unit::parse(target)?;
-    format_conversion(amount, &source, &target)
 }
 
 fn format_feet_and_inches(amount: f64, source: &Unit) -> Result<String, ConversionError> {
@@ -481,6 +505,41 @@ fn format_feet_and_inches(amount: f64, source: &Unit) -> Result<String, Conversi
     let feet = format_result(feet).map_err(|_| ConversionError::OutOfRange)?;
     let sign = if amount < 0. { "-" } else { "" };
     Ok(format!("{sign}{feet} ft {inches} in"))
+}
+
+fn format_degrees_minutes_seconds(amount: f64, source: &Unit) -> Result<String, ConversionError> {
+    if source.dimension != Dimension::Angle {
+        return Err(ConversionError::DifferentDimensions);
+    }
+    let degree = Unit::parse("°")?;
+    let total = amount.abs() * (source.scale / degree.scale);
+    if !total.is_finite() {
+        return Err(ConversionError::OutOfRange);
+    }
+    let mut degrees = total.floor();
+    let minutes_with_fraction = (total - degrees) * 60.;
+    let mut minutes = minutes_with_fraction.floor();
+    let mut seconds = ((minutes_with_fraction - minutes) * 60. * 1_000_000.).round() / 1_000_000.;
+    if seconds >= 60. {
+        seconds = 0.;
+        minutes += 1.;
+    }
+    if minutes >= 60. {
+        minutes = 0.;
+        degrees += 1.;
+    }
+    let sign = if amount < 0. && (degrees != 0. || minutes != 0. || seconds != 0.) {
+        "-"
+    } else {
+        ""
+    };
+    let display = |value| format_result(value).map_err(|_| ConversionError::OutOfRange);
+    Ok(format!(
+        "{sign}{}° {}′ {}″",
+        display(degrees)?,
+        display(minutes)?,
+        display(seconds)?
+    ))
 }
 
 fn format_conversion(amount: f64, source: &Unit, target: &Unit) -> Result<String, ConversionError> {
@@ -590,6 +649,35 @@ mod tests {
             convert("1 L/min to kg/m³"),
             Some(Err(ConversionError::DifferentDimensions)),
         );
+    }
+
+    #[test]
+    fn converts_degree_minute_second_angles_in_both_directions() {
+        for (query, expected) in [
+            ("30° 15′ 30″ to °", "30.2583333333333 °"),
+            ("12度30分15秒转度", "12.5041666666667 °"),
+            ("30°15'30\" to °", "30.2583333333333 °"),
+            ("-0° 30′ to °", "-0.5 °"),
+            ("12.5° to dms", "12° 30′ 0″"),
+            ("-0.5° to 度分秒", "-0° 30′ 0″"),
+            ("1 rad to dms", "57° 17′ 44.806247″"),
+            ("359.99999999999° to dms", "360° 0′ 0″"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.into())), "{query}");
+        }
+        assert_eq!(
+            convert("1°60′ to °"),
+            Some(Err(ConversionError::InvalidAmount))
+        );
+        assert_eq!(
+            convert("1°20′60″ to °"),
+            Some(Err(ConversionError::InvalidAmount))
+        );
+        assert_eq!(
+            convert("1 km to dms"),
+            Some(Err(ConversionError::DifferentDimensions))
+        );
+        assert_eq!(convert("5′10″ to cm"), Some(Ok("177.8 cm".into())));
     }
 
     #[test]
