@@ -23,8 +23,8 @@ pub(super) enum TextError {
     UnknownOperation,
     IncompleteReplacement,
     InvalidReplacementArguments,
-    IncompleteDelimiter,
-    InvalidDelimiter,
+    IncompleteTextArgument,
+    InvalidTextArgument,
     EmptyDelimiter,
     EmptySearchText,
     ResultTooLarge,
@@ -45,8 +45,8 @@ impl TextError {
             Self::UnknownOperation => "输入 ? 文本 查看可用操作",
             Self::IncompleteReplacement => "输入查找内容、替换内容和原文",
             Self::InvalidReplacementArguments => "查找内容和替换内容要加引号，并用空格分隔",
-            Self::IncompleteDelimiter => "输入带引号的分隔符和原文",
-            Self::InvalidDelimiter => "分隔符要加引号，并和原文用空格分开",
+            Self::IncompleteTextArgument => "输入带引号的内容和原文",
+            Self::InvalidTextArgument => "第一个参数要加引号，并和原文用空格分开",
             Self::EmptyDelimiter => "拆分成行时分隔符不能为空",
             Self::EmptySearchText => "请输入要查找的文字",
             Self::ResultTooLarge => "文本结果超过 1 MiB",
@@ -89,6 +89,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "替换" | "replace" => return replace_text(text),
         "按行拼接" | "join-lines" => return join_lines(text),
         "拆分成行" | "split-lines" => return split_lines(text),
+        "保留行" | "keep-lines" => return filter_lines(text, true),
+        "排除行" | "exclude-lines" => return filter_lines(text, false),
         "json还原" | "json-unquote" => return decode_json_string(text),
         _ => {}
     }
@@ -289,24 +291,24 @@ fn replacement_argument(input: &str) -> Result<(String, &str), TextError> {
     Ok((operand, rest))
 }
 
-fn delimiter_payload(input: &str) -> Result<(String, &str), TextError> {
-    let (delimiter, rest) = replacement_argument(input).map_err(|error| match error {
-        TextError::IncompleteReplacement => TextError::IncompleteDelimiter,
-        TextError::InvalidReplacementArguments => TextError::InvalidDelimiter,
+fn quoted_text_argument(input: &str) -> Result<(String, &str), TextError> {
+    let (argument, rest) = replacement_argument(input).map_err(|error| match error {
+        TextError::IncompleteReplacement => TextError::IncompleteTextArgument,
+        TextError::InvalidReplacementArguments => TextError::InvalidTextArgument,
         _ => error,
     })?;
     let text = text_payload(rest).map_err(|error| match error {
-        TextError::MissingText => TextError::IncompleteDelimiter,
+        TextError::MissingText => TextError::IncompleteTextArgument,
         _ => error,
     })?;
-    if delimiter.contains('\0') {
+    if argument.contains('\0') {
         return Err(TextError::NullCharacter);
     }
-    Ok((delimiter, text))
+    Ok((argument, text))
 }
 
 fn join_lines(input: &str) -> Result<String, TextError> {
-    let (delimiter, text) = delimiter_payload(input)?;
+    let (delimiter, text) = quoted_text_argument(input)?;
     let lines: Vec<_> = text.lines().collect();
     let content_bytes = lines.iter().map(|line| line.len()).sum::<usize>();
     let delimiter_bytes = delimiter
@@ -319,11 +321,23 @@ fn join_lines(input: &str) -> Result<String, TextError> {
 }
 
 fn split_lines(input: &str) -> Result<String, TextError> {
-    let (delimiter, text) = delimiter_payload(input)?;
+    let (delimiter, text) = quoted_text_argument(input)?;
     if delimiter.is_empty() {
         return Err(TextError::EmptyDelimiter);
     }
     Ok(text.replace(&delimiter, "\n"))
+}
+
+fn filter_lines(input: &str, keep_matches: bool) -> Result<String, TextError> {
+    let (needle, text) = quoted_text_argument(input)?;
+    if needle.is_empty() {
+        return Err(TextError::EmptySearchText);
+    }
+    Ok(text
+        .lines()
+        .filter(|line| line.contains(needle.as_str()) == keep_matches)
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 fn replace_text(input: &str) -> Result<String, TextError> {
@@ -543,14 +557,31 @@ mod tests {
         }
         for (query, error) in [
             (r#"拆分成行 "" A"#, TextError::EmptyDelimiter),
-            (r#"拆分成行 ",""#, TextError::IncompleteDelimiter),
-            (r#"按行拼接 ","A"#, TextError::InvalidDelimiter),
+            (r#"拆分成行 ",""#, TextError::IncompleteTextArgument),
+            (r#"按行拼接 ","A"#, TextError::InvalidTextArgument),
             (r#"按行拼接 "\u0000" A"#, TextError::NullCharacter),
         ] {
             assert_eq!(transform_text(query), Err(error), "{query}");
         }
         let large = format!(r#"按行拼接 "{}" {}"#, ",".repeat(1500), "x\n".repeat(1000));
         assert_eq!(transform_text(&large), Err(TextError::ResultTooLarge));
+    }
+
+    #[test]
+    fn includes_or_excludes_literal_matching_lines_in_input_order() {
+        for (query, expected) in [
+            ("保留行 \"错误\" 成功\r\n错误 A\n错误 B", "错误 A\n错误 B"),
+            ("排除行 “错误” 成功 A\r\n错误 B\n成功 C", "成功 A\n成功 C"),
+            ("keep-lines \"b.\" beta\nb.\nB.", "b."),
+            ("exclude-lines \"x\" \" 甲\nx\n乙 \"", " 甲\n乙 "),
+            ("keep-lines \"x\" abc", ""),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            transform_text(r#"保留行 "" 内容"#),
+            Err(TextError::EmptySearchText)
+        );
     }
 
     #[test]

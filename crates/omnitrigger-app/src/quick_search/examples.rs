@@ -626,6 +626,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "只保留含关键词的行",
+        query: "文本: 保留行 \"错误\" 成功\n错误 A\n错误 B",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "排除含关键词的行",
+        query: "文本: 排除行 \"错误\" 成功 A\n错误 B\n成功 C",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算文本 SHA-256",
         query: "文本: SHA-256 北京",
     },
