@@ -2765,6 +2765,7 @@ impl Workspace {
         self.quick_search_recent.destinations.record(&destination);
         match destination {
             quick_search::Destination::Page(page) => self.open_page(page, cx),
+            quick_search::Destination::OpenWindow(_) => return,
             quick_search::Destination::InstalledApp(app) => {
                 cx.spawn(async move |this, cx| {
                     let result = cx

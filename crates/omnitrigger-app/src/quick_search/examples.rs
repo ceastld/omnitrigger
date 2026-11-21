@@ -24,6 +24,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "10 km to mi",
     },
     Example {
+        icon: Icon::Grid,
+        title: "按标题或程序名查找当前窗口",
+        query: "窗口:",
+    },
+    Example {
         icon: Icon::Layers,
         title: "按符号筛选换算单位",
         query: "1 GiB to Ti",

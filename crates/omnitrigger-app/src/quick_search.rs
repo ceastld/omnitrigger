@@ -10,6 +10,7 @@ mod duration;
 mod examples;
 mod fraction;
 mod json_tools;
+mod open_windows;
 mod operators;
 mod percentage;
 mod presets;
@@ -56,7 +57,8 @@ use duration::{convert_duration, DurationError};
 use examples::{matching_examples, tool_operation_examples, EXAMPLES};
 use fraction::{simplify_fraction, FractionError};
 use json_tools::{transform_json, JsonError};
-use omnitrigger_windows::{ShellApp, ShortcutTarget};
+use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
+use open_windows::OpenWindowsIndex;
 use percentage::{compare_percentages, PercentageError};
 use presets::matching_presets;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -100,6 +102,8 @@ enum Results {
     Destinations(Vec<Destination>),
     ApplicationsLoading,
     ApplicationsUnavailable(String),
+    OpenWindowsLoading,
+    OpenWindowsUnavailable(String),
     Help(Vec<usize>),
     Calculations(Vec<InputSuggestion>),
     Conversions(Vec<InputSuggestion>),
@@ -144,6 +148,7 @@ enum ValueKind {
 pub(super) enum Destination {
     Page(Page),
     InstalledApp(ShellApp),
+    OpenWindow(OpenWindow),
     Trigger(u64),
     Wheel(String),
     WheelSlot {
@@ -172,6 +177,7 @@ pub(super) struct SearchIndex {
     settings: Vec<SettingsSection>,
     recent: RecentSearch,
     applications: ApplicationIndex,
+    open_windows: OpenWindowsIndex,
 }
 
 #[derive(Clone, Default)]
@@ -226,6 +232,7 @@ impl SearchIndex {
                 .collect(),
             recent: workspace.quick_search_recent.clone(),
             applications: workspace.quick_search_recent.applications.snapshot(),
+            open_windows: OpenWindowsIndex::default(),
         }
     }
 
@@ -328,6 +335,7 @@ impl Results {
             settings,
             recent,
             applications,
+            open_windows,
         } = index;
         if query.len() > INPUT_CHARACTER_LIMIT
             && query.chars().take(INPUT_CHARACTER_LIMIT + 1).count() > INPUT_CHARACTER_LIMIT
@@ -395,6 +403,7 @@ impl Results {
                 Scope::CalculationHistory => Self::Calculations(recent.calculations.matching(term)),
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
                 Scope::Applications => applications.results(term),
+                Scope::OpenWindows => open_windows.results(term),
                 Scope::Actions => {
                     let mut entries = matching_actions(actions, term);
                     entries.insert(
@@ -813,6 +822,25 @@ impl QuickSearch {
             })
             .detach();
         }
+        if matches!(self.index.open_windows, OpenWindowsIndex::Unloaded)
+            && matches!(self.results, Results::OpenWindowsLoading)
+        {
+            self.index.open_windows = OpenWindowsIndex::Loading;
+            cx.spawn_in(window, async move |this, cx| {
+                let open_windows = cx
+                    .background_executor()
+                    .spawn(async { OpenWindowsIndex::load() })
+                    .await;
+                let _ = cx.update(|window, cx| {
+                    let _ = this.update(cx, |this, cx| {
+                        this.index.open_windows = open_windows;
+                        let query = this.input.read(cx).text();
+                        this.refresh_results(&query, window, cx);
+                    });
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -822,6 +850,39 @@ impl QuickSearch {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Destination::OpenWindow(target) = destination {
+            let Some(hwnd) = window
+                .window_handle()
+                .ok()
+                .and_then(|handle| match handle.as_raw() {
+                    RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+                    _ => None,
+                })
+            else {
+                return;
+            };
+            cx.spawn_in(window, async move |this, cx| {
+                // 切换前台可能同步进入窗口回调，在 GPUI 可变借用之外执行。
+                let result = if omnitrigger_windows::is_foreground_window(hwnd) {
+                    target.activate()
+                } else {
+                    Err("搜索框已失去焦点，请重新打开后切换。".to_owned())
+                };
+                let _ = cx.update(|window, cx| match result {
+                    Ok(()) => window.remove_window(),
+                    Err(error) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.results = Results::OpenWindowsUnavailable(error);
+                            this.selected = 0;
+                            window.resize(size(px(WIDTH), px(this.results.height())));
+                            cx.notify();
+                        });
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
         let workspace = self.workspace.clone();
         window.remove_window();
         cx.spawn(async move |_, cx| {
@@ -953,7 +1014,9 @@ impl QuickSearch {
                     | Results::ConversionTargets(items) => items.len(),
                     Results::Value(_)
                     | Results::ApplicationsLoading
-                    | Results::ApplicationsUnavailable(_) => 0,
+                    | Results::ApplicationsUnavailable(_)
+                    | Results::OpenWindowsLoading
+                    | Results::OpenWindowsUnavailable(_) => 0,
                 };
                 if count == 0 {
                     return;
@@ -1284,7 +1347,10 @@ impl QuickSearch {
             Results::ApplicationsLoading => row
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child("正在读取 Windows 应用"),
-            Results::ApplicationsUnavailable(error) => row
+            Results::OpenWindowsLoading => row
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child("正在读取当前窗口"),
+            Results::ApplicationsUnavailable(error) | Results::OpenWindowsUnavailable(error) => row
                 .text_color(rgb(theme::DANGER_TEXT))
                 .child(div().truncate().child(error.clone())),
             Results::Destinations(items) if items.is_empty() => {
@@ -1312,6 +1378,9 @@ impl QuickSearch {
                                         .has_namesake(app)
                                         .then(|| app.identifier().to_owned()),
                                 ),
+                                Destination::OpenWindow(window) => {
+                                    (Icon::Grid, window.title.clone(), window.process.clone())
+                                }
                                 Destination::Trigger(id) => {
                                     let trigger = self
                                         .index
@@ -1404,6 +1473,7 @@ impl QuickSearch {
                                     .when(selected, |row| {
                                         let hint = match &destination {
                                             Destination::TextHistoryQuery(_) => "Enter 查找",
+                                            Destination::OpenWindow(_) => "Enter 切换",
                                             Destination::ActionLibraryQuery(term)
                                             | Destination::TriggerHistoryQuery(term)
                                                 if !term.is_empty() =>
@@ -1827,7 +1897,7 @@ mod tests {
         for example in EXAMPLES {
             match index.results(example.query) {
                 Results::Value(Ok(_)) | Results::Calculations(_) | Results::Conversions(_) => {}
-                Results::ApplicationsLoading => {}
+                Results::ApplicationsLoading | Results::OpenWindowsLoading => {}
                 Results::ConversionTargets(items) if !items.is_empty() => {}
                 Results::Destinations(items) if !items.is_empty() => {}
                 _ => panic!("用法示例没有可用结果：{}", example.query),
@@ -1865,6 +1935,30 @@ mod tests {
             index.results("calculator"),
             Results::ApplicationsLoading
         ));
+    }
+
+    #[test]
+    fn open_window_catalog_requires_an_explicit_scope_and_uses_the_loaded_snapshot() {
+        let index = SearchIndex::default();
+        assert!(matches!(
+            index.results("窗口: 浏览器"),
+            Results::OpenWindowsLoading
+        ));
+        assert!(matches!(
+            index.results("windows："),
+            Results::OpenWindowsLoading
+        ));
+        assert!(!matches!(
+            index.results("窗口"),
+            Results::OpenWindowsLoading
+        ));
+        let loaded = SearchIndex {
+            open_windows: OpenWindowsIndex::Ready(Vec::new()),
+            ..index
+        };
+        assert!(
+            matches!(loaded.results("窗口: 浏览器"), Results::Destinations(items) if items.is_empty())
+        );
     }
 
     #[test]

@@ -177,6 +177,11 @@ pub use window_action::{
     shortcut_target_process, shortcut_target_scene_context, shortcut_target_title,
 };
 
+#[cfg(windows)]
+mod open_windows;
+#[cfg(windows)]
+pub use open_windows::{list_open_windows, OpenWindow};
+
 #[cfg(any(windows, test))]
 mod standard_edit;
 #[cfg(windows)]
