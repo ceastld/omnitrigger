@@ -219,6 +219,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         title: "统计字符与 UTF-8 字节",
         query: "字数: 你好👩‍💻",
     },
+    Example {
+        icon: Icon::Terminal,
+        title: "约分",
+        query: "分数: 42/56",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "从小数求分数",
+        query: "分数: 0.125",
+    },
 ];
 
 pub(super) fn matching_examples(query: &str) -> Vec<usize> {

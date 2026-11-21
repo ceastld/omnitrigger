@@ -6,6 +6,7 @@ mod color;
 mod conversion;
 mod duration;
 mod examples;
+mod fraction;
 mod operators;
 mod percentage;
 mod presets;
@@ -43,6 +44,7 @@ use color::{convert_color, ColorError};
 use conversion::{convert, suggested_targets, ConversionError};
 use duration::{convert_duration, DurationError};
 use examples::{matching_examples, EXAMPLES};
+use fraction::{simplify_fraction, FractionError};
 use omnitrigger_windows::ShortcutTarget;
 use presets::matching_presets;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -227,6 +229,7 @@ enum ValueError {
     Timestamp(TimestampError),
     Color(ColorError),
     TextCount(TextCountError),
+    Fraction(FractionError),
 }
 
 impl ValueError {
@@ -239,6 +242,7 @@ impl ValueError {
             Self::Timestamp(error) => error.message(),
             Self::Color(error) => error.message(),
             Self::TextCount(error) => error.message(),
+            Self::Fraction(error) => error.message(),
         }
     }
 
@@ -252,6 +256,7 @@ impl ValueError {
                 | Self::Timestamp(TimestampError::Incomplete)
                 | Self::Color(ColorError::Incomplete)
                 | Self::TextCount(_)
+                | Self::Fraction(FractionError::Incomplete)
         )
     }
 }
@@ -346,6 +351,9 @@ impl Results {
                 ),
                 Scope::TextCount => {
                     Self::text_value(count_text(term).map_err(ValueError::TextCount))
+                }
+                Scope::Fraction => {
+                    Self::text_value(simplify_fraction(term).map_err(ValueError::Fraction))
                 }
             };
         }
