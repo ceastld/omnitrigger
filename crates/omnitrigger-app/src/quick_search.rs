@@ -1,6 +1,7 @@
 mod calculator;
 mod calendar;
 mod conversion;
+mod examples;
 mod operators;
 mod radix;
 mod recent;
@@ -11,8 +12,8 @@ mod wheels;
 
 use gpui::{
     div, prelude::*, px, size, App, Bounds, ClipboardItem, Context, DisplayId, Div, Entity,
-    Focusable, FontWeight, KeyDownEvent, Subscription, TitlebarOptions, WeakEntity, Window,
-    WindowBounds, WindowHandle, WindowKind, WindowOptions,
+    Focusable, FontWeight, KeyDownEvent, Stateful, Subscription, TitlebarOptions, WeakEntity,
+    Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
 
 use crate::{
@@ -27,6 +28,7 @@ use crate::{
 use calculator::{calculate, looks_like_calculation, CalculationError, QUERY_LIMIT};
 use calendar::{calculate_date, DateError};
 use conversion::{convert, ConversionError};
+use examples::EXAMPLES;
 use omnitrigger_windows::ShortcutTarget;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 pub(super) use recent::RecentDestinations;
@@ -37,6 +39,7 @@ use wheels::{matching_wheels, SearchWheel};
 const WIDTH: f32 = 500.;
 const PAGE_ROW_HEIGHT: f32 = 38.;
 const PAGE_RESULT_LIMIT: usize = 4;
+const EXAMPLE_ROW_HEIGHT: f32 = 30.;
 const VALUE_COLUMNS: usize = 40;
 const VALUE_LINE_HEIGHT: f32 = 18.;
 
@@ -56,6 +59,7 @@ const PAGES: [(Page, &str); 9] = [
 enum Results {
     Value(Result<String, ValueError>),
     Destinations(Vec<Destination>),
+    Help,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,6 +140,9 @@ impl Results {
         if query.is_empty() {
             return Self::Destinations(recent.suggestions(triggers));
         }
+        if matches!(query, "?" | "？") {
+            return Self::Help;
+        }
         if let Some((scope, term)) = scoped_query(query) {
             return match scope {
                 Scope::Triggers => Self::Destinations(
@@ -211,6 +218,7 @@ impl Results {
                 132. + items.len() as f32 * PAGE_ROW_HEIGHT
             }
             Self::Value(Ok(value)) => 158. + value_extra_height(value),
+            Self::Help => 132. + EXAMPLES.len() as f32 * EXAMPLE_ROW_HEIGHT,
             _ => 158.,
         }
     }
@@ -376,8 +384,21 @@ impl QuickSearch {
                     self.open_destination(destination, window, cx);
                 }
             }
+            Results::Help => {
+                if let Some(example) = EXAMPLES.get(self.selected) {
+                    self.fill_example(example.query, window, cx);
+                }
+            }
             Results::Value(Err(_)) => {}
         }
+    }
+
+    fn fill_example(&self, query: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |input, cx| {
+            input.set_text(query, cx);
+            input.move_cursor_to_end(cx);
+        });
+        window.focus(&self.input.focus_handle(cx));
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -387,25 +408,87 @@ impl QuickSearch {
             return;
         }
         match event.keystroke.key.as_str() {
-            "enter" => self.confirm(window, cx),
+            "enter" => {
+                if !event.is_held {
+                    self.confirm(window, cx);
+                }
+            }
             "escape" => window.remove_window(),
             key @ ("up" | "down") => {
-                let Results::Destinations(items) = &self.results else {
-                    return;
+                let count = match &self.results {
+                    Results::Destinations(items) => items.len(),
+                    Results::Help => EXAMPLES.len(),
+                    Results::Value(_) => 0,
                 };
-                if items.is_empty() {
+                if count == 0 {
                     return;
                 }
                 self.selected = if key == "up" {
                     self.selected.saturating_sub(1)
                 } else {
-                    (self.selected + 1).min(items.len() - 1)
+                    (self.selected + 1).min(count - 1)
                 };
                 cx.notify();
             }
             _ => return,
         }
         cx.stop_propagation();
+    }
+
+    fn suggestion_row(&self, index: usize, height: f32) -> Stateful<Div> {
+        let selected = index == self.selected;
+        div()
+            .id(("quick-search-result", index))
+            .h(px(height))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(10.))
+            .rounded(px(5.))
+            .cursor_pointer()
+            .when(selected, |row| row.bg(rgb(theme::SELECTED)))
+            .when(!selected, |row| {
+                row.hover(|style| style.bg(rgb(theme::ROW)))
+            })
+    }
+
+    fn selection_hint(label: &'static str) -> Div {
+        div()
+            .mt(px(5.))
+            .px(px(10.))
+            .text_color(rgb(theme::TEXT_MUTED))
+            .child(label)
+    }
+
+    fn render_examples(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .children(EXAMPLES.iter().enumerate().map(|(index, example)| {
+                let query = example.query;
+                self.suggestion_row(index, EXAMPLE_ROW_HEIGHT)
+                    .child(icon(example.icon, 16., theme::ACCENT))
+                    .child(div().w(px(130.)).truncate().child(example.title))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(theme::MONO_FONT)
+                            .text_size(px(12.))
+                            .text_color(rgb(theme::TEXT_MUTED))
+                            .child(query.trim_end()),
+                    )
+                    .when(index == self.selected, |row| {
+                        row.child(div().text_color(rgb(theme::TEXT_MUTED)).child("Enter 填入"))
+                    })
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.fill_example(query, window, cx)
+                        }),
+                    )
+            }))
+            .child(Self::selection_hint("↑ ↓ 选择"))
     }
 
     fn render_result(&self, cx: &mut Context<Self>) -> Div {
@@ -453,6 +536,7 @@ impl QuickSearch {
                     theme::DANGER_TEXT
                 }))
                 .child(error.message()),
+            Results::Help => self.render_examples(cx),
             Results::Destinations(items) if items.is_empty() => {
                 row.text_color(rgb(theme::TEXT_MUTED)).child("未找到匹配项")
             }
@@ -504,19 +588,7 @@ impl QuickSearch {
                     let destination = destination.clone();
                     let selected = index == self.selected;
                     Some(
-                        div()
-                            .id(("quick-search-result", index))
-                            .h(px(PAGE_ROW_HEIGHT))
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .px(px(10.))
-                            .rounded(px(5.))
-                            .cursor_pointer()
-                            .when(selected, |row| row.bg(rgb(theme::SELECTED)))
-                            .when(!selected, |row| {
-                                row.hover(|style| style.bg(rgb(theme::ROW)))
-                            })
+                        self.suggestion_row(index, PAGE_ROW_HEIGHT)
                             .child(icon(glyph, 16., theme::ACCENT))
                             .child(
                                 div()
@@ -552,17 +624,11 @@ impl QuickSearch {
                 }))
                 .when(items.len() > 1, |list| {
                     let hint = if self.input.read(cx).text().trim().is_empty() {
-                        "↑ ↓ 选择  ·  例如 2**10、10 km to mi、剪贴板: 关键词、动作: 浏览器"
+                        "↑ ↓ 选择  ·  输入 ? 查看用法"
                     } else {
                         "↑ ↓ 选择"
                     };
-                    list.child(
-                        div()
-                            .mt(px(5.))
-                            .px(px(10.))
-                            .text_color(rgb(theme::TEXT_MUTED))
-                            .child(hint),
-                    )
+                    list.child(Self::selection_hint(hint))
                 }),
         }
     }
@@ -634,6 +700,32 @@ mod tests {
 
     fn for_query(query: &str, triggers: &[SearchTrigger]) -> Results {
         Results::for_query(query, triggers, &[], &RecentDestinations::default())
+    }
+
+    #[test]
+    fn quick_search_help_shows_only_supported_examples() {
+        for query in ["?", " ？ "] {
+            assert!(matches!(for_query(query, &[]), Results::Help));
+        }
+        let index = SearchIndex {
+            triggers: crate::settings::defaults()
+                .iter()
+                .map(SearchTrigger::from_binding)
+                .collect(),
+            wheels: crate::wheels::Wheels::default()
+                .wheels
+                .iter()
+                .map(SearchWheel::from_definition)
+                .collect(),
+            recent: RecentDestinations::default(),
+        };
+        for example in EXAMPLES {
+            match index.results(example.query) {
+                Results::Value(Ok(_)) => {}
+                Results::Destinations(items) if !items.is_empty() => {}
+                _ => panic!("用法示例没有可用结果：{}", example.query),
+            }
+        }
     }
 
     #[test]
