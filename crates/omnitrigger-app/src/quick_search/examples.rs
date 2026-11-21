@@ -501,6 +501,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按行去重",
+        query: "文本: 按行去重 苹果\n梨\n苹果",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按行排序",
+        query: "文本: 按行排序 B\nA\nC",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "移除空行",
+        query: "文本: 去空行 甲\n\n乙",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算文本 SHA-256",
         query: "文本: SHA-256 北京",
     },

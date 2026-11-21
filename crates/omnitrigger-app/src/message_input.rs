@@ -55,9 +55,16 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TextMode {
+    SingleLine,
+    Json,
+    PreserveWhitespace,
+}
+
 pub struct MessageInput {
     character_limit: usize,
-    json_text: bool,
+    mode: TextMode,
     focus: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
@@ -65,7 +72,7 @@ pub struct MessageInput {
     head: usize,
     marked: Option<Range<usize>>,
     dragging: bool,
-    layout: Option<ShapedLine>,
+    layout: Option<InputLayout>,
     bounds: Option<Bounds<Pixels>>,
     scroll_x: Pixels,
     blur_subscription: Option<gpui::Subscription>,
@@ -77,7 +84,7 @@ impl MessageInput {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             character_limit: MAX_CHARACTERS,
-            json_text: false,
+            mode: TextMode::SingleLine,
             focus: cx.focus_handle(),
             content: SharedString::default(),
             placeholder: "触发时显示的文字".into(),
@@ -125,18 +132,24 @@ impl MessageInput {
 
     /// JSON 字符串中的 Unicode 行分隔符必须转义，不能像提示文字一样改成空格。
     pub fn with_json_text(mut self) -> Self {
-        self.json_text = true;
+        self.mode = TextMode::Json;
+        self
+    }
+
+    /// 保留换行和制表符，绘制时在同一行展示对应符号。
+    pub(super) fn with_preserved_whitespace(mut self) -> Self {
+        self.mode = TextMode::PreserveWhitespace;
         self
     }
 
     pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
         let text = text.into();
-        let text = if self.json_text {
+        let text = if self.mode == TextMode::Json {
             json_line_separators(&text)
         } else {
             text.to_string()
         };
-        self.content = single_line(&text, self.character_limit).into();
+        self.content = prepare_input(&text, self.character_limit, self.mode).into();
         // 载入已有消息时从开头显示，避免长消息只露出结尾。
         self.anchor = 0;
         self.head = 0;
@@ -305,7 +318,7 @@ impl MessageInput {
             .or_else(|| self.marked.clone())
             .unwrap_or_else(|| self.selection());
         let escaped;
-        let (text, selected) = if self.json_text {
+        let (text, selected) = if self.mode == TextMode::Json {
             let selected = selected.map(|selection| {
                 let range = from_utf16(text, selection);
                 json_line_separators(&text[..range.start])
@@ -320,8 +333,14 @@ impl MessageInput {
         } else {
             (text, selected)
         };
-        let replacement =
-            replace_content(&self.content, range, text, selected, self.character_limit);
+        let replacement = replace_content(
+            &self.content,
+            range,
+            text,
+            selected,
+            self.character_limit,
+            self.mode,
+        );
         self.content = replacement.text.into();
         self.marked = (marked && !replacement.inserted.is_empty()).then_some(replacement.inserted);
         self.anchor = replacement.selection.start;
@@ -492,8 +511,25 @@ struct MessageLine {
     input: Entity<MessageInput>,
 }
 
+#[derive(Clone)]
+struct InputLayout {
+    shaped: ShapedLine,
+    offsets: LineOffsets,
+}
+
+impl InputLayout {
+    fn x_for_index(&self, index: usize) -> Pixels {
+        self.shaped.x_for_index(self.offsets.to_visible(index))
+    }
+
+    fn closest_index_for_x(&self, position: Pixels) -> usize {
+        self.offsets
+            .to_source(self.shaped.closest_index_for_x(position))
+    }
+}
+
 struct LinePaint {
-    line: ShapedLine,
+    line: InputLayout,
     placeholder: Option<ShapedLine>,
     scroll_x: Pixels,
 }
@@ -540,8 +576,9 @@ impl Element for MessageLine {
     ) -> LinePaint {
         let input = self.input.read(cx);
         let style = window.text_style();
+        let (display, offsets) = visible_input(&input.content);
         let base = TextRun {
-            len: input.content.len(),
+            len: display.len(),
             font: style.font(),
             color: style.color,
             background_color: None,
@@ -549,13 +586,15 @@ impl Element for MessageLine {
             strikethrough: None,
         };
         let runs = if let Some(marked) = &input.marked {
+            let start = offsets.to_visible(marked.start);
+            let end = offsets.to_visible(marked.end);
             vec![
                 TextRun {
-                    len: marked.start,
+                    len: start,
                     ..base.clone()
                 },
                 TextRun {
-                    len: marked.len(),
+                    len: end - start,
                     underline: Some(UnderlineStyle {
                         color: Some(style.color),
                         thickness: px(1.),
@@ -564,7 +603,7 @@ impl Element for MessageLine {
                     ..base.clone()
                 },
                 TextRun {
-                    len: input.content.len() - marked.end,
+                    len: display.len() - end,
                     ..base
                 },
             ]
@@ -574,12 +613,13 @@ impl Element for MessageLine {
         } else {
             vec![base]
         };
-        let line = window.text_system().shape_line(
-            input.content.clone(),
+        let shaped = window.text_system().shape_line(
+            display,
             style.font_size.to_pixels(window.rem_size()),
             &runs,
             None,
         );
+        let line = InputLayout { shaped, offsets };
         // 占位文字只绘制，不参与命中、选区或输入法坐标。
         let placeholder = (input.content.is_empty() && !input.placeholder.is_empty()).then(|| {
             window.text_system().shape_line(
@@ -609,8 +649,8 @@ impl Element for MessageLine {
         if caret > scroll_x + viewport {
             scroll_x = caret - viewport;
         }
-        let maximum = if line.width > viewport {
-            line.width - viewport
+        let maximum = if line.shaped.width > viewport {
+            line.shaped.width - viewport
         } else {
             px(0.)
         };
@@ -666,7 +706,10 @@ impl Element for MessageLine {
             if let Some(placeholder) = &paint.placeholder {
                 let _ = placeholder.paint(origin, window.line_height(), window, cx);
             }
-            let _ = paint.line.paint(origin, window.line_height(), window, cx);
+            let _ = paint
+                .line
+                .shaped
+                .paint(origin, window.line_height(), window, cx);
             if focus.is_focused(window) && selection.is_empty() {
                 window.paint_quad(fill(
                     Bounds::new(
@@ -685,6 +728,57 @@ impl Element for MessageLine {
     }
 }
 
+#[derive(Clone, Default)]
+struct LineOffsets(Vec<(usize, usize)>);
+
+impl LineOffsets {
+    fn to_visible(&self, source: usize) -> usize {
+        let count = self.0.partition_point(|&(end, _)| end <= source);
+        source
+            + self.0[..count]
+                .last()
+                .map_or(0, |&(end, visual)| visual - end)
+    }
+
+    fn to_source(&self, visible: usize) -> usize {
+        let count = self.0.partition_point(|&(_, end)| end <= visible);
+        let source = visible
+            - self.0[..count]
+                .last()
+                .map_or(0, |&(start, end)| end - start);
+        // 变化的字节数来自一个 ASCII 控制字符。其可见符号内部仍映射到原字符开头。
+        self.0
+            .get(count)
+            .map_or(source, |&(end, _)| source.min(end - 1))
+    }
+}
+
+fn visible_input(content: &SharedString) -> (SharedString, LineOffsets) {
+    if !content.contains(['\r', '\n', '\t', '\u{2028}', '\u{2029}']) {
+        return (content.clone(), LineOffsets::default());
+    }
+    let mut visible = String::with_capacity(content.len());
+    let mut offsets = Vec::new();
+    for (index, ch) in content.char_indices() {
+        let symbol = match ch {
+            '\r' => '␍',
+            '\n' => '␊',
+            '\t' => '⇥',
+            '\u{2028}' | '\u{2029}' => '↵',
+            _ => ch,
+        };
+        visible.push(symbol);
+        if ch.len_utf8() != symbol.len_utf8() {
+            offsets.push((index + ch.len_utf8(), visible.len()));
+        }
+    }
+    (visible.into(), LineOffsets(offsets))
+}
+
+pub(super) fn input_preview(text: &'static str) -> SharedString {
+    visible_input(&SharedString::from(text)).0
+}
+
 fn json_line_separators(text: &str) -> String {
     text.replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029")
@@ -699,9 +793,20 @@ fn single_line(text: &str, limit: usize) -> String {
             _ => ch,
         })
         .collect::<String>();
+    limit_text(&normalized, limit)
+}
+
+fn prepare_input(text: &str, limit: usize, mode: TextMode) -> String {
+    if mode == TextMode::PreserveWhitespace {
+        limit_text(text, limit)
+    } else {
+        single_line(text, limit)
+    }
+}
+
+fn limit_text(text: &str, limit: usize) -> String {
     let mut used = 0;
-    normalized
-        .graphemes(true)
+    text.graphemes(true)
         .take_while(|grapheme| {
             used += grapheme.chars().count();
             used <= limit
@@ -721,9 +826,10 @@ fn replace_content(
     text: &str,
     selected: Option<Range<usize>>,
     character_limit: usize,
+    mode: TextMode,
 ) -> Replacement {
     let outside = content[..range.start].chars().count() + content[range.end..].chars().count();
-    let insertion = single_line(text, character_limit.saturating_sub(outside));
+    let insertion = prepare_input(text, character_limit.saturating_sub(outside), mode);
     let mut updated = content[..range.start].to_owned();
     updated.push_str(&insertion);
     updated.push_str(&content[range.end..]);
@@ -786,6 +892,7 @@ mod tests {
             &json_line_separators(&serialized),
             None,
             128 * 1024,
+            TextMode::Json,
         );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&pasted.text).unwrap(),
@@ -822,6 +929,34 @@ mod tests {
     }
 
     #[test]
+    fn search_paste_preserves_whitespace_and_maps_edited_and_displayed_offsets() {
+        let fixture = "中\r\n\t🦀\u{2028}前";
+        let replacement =
+            replace_content("[]", 1..1, fixture, None, 50, TextMode::PreserveWhitespace);
+        assert_eq!(&replacement.text[replacement.inserted], fixture);
+        assert_eq!(
+            prepare_input("甲\r\n乙", 2, TextMode::PreserveWhitespace),
+            "甲"
+        );
+        let content = SharedString::from(replacement.text);
+        let (shown, offsets) = visible_input(&content);
+        assert_eq!(shown.as_ref(), "[中␍␊⇥🦀↵前]");
+        for source in content
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain([content.len()])
+        {
+            let visible = offsets.to_visible(source);
+            assert!(shown.is_char_boundary(visible));
+            assert_eq!(offsets.to_source(visible), source);
+        }
+        let carriage_return = "[中".len();
+        for byte in offsets.to_visible(carriage_return)..offsets.to_visible(carriage_return + 1) {
+            assert_eq!(offsets.to_source(byte), carriage_return);
+        }
+    }
+
+    #[test]
     fn ime_selection_is_relative_to_inserted_text_in_middle_of_content() {
         let replacement = replace_content(
             "前旧文后",
@@ -829,6 +964,7 @@ mod tests {
             "🦀中",
             Some(2..3),
             MAX_CHARACTERS,
+            TextMode::SingleLine,
         );
         assert_eq!(replacement.text, "前🦀中后");
         assert_eq!(&replacement.text[replacement.selection], "中");
@@ -838,7 +974,14 @@ mod tests {
     #[test]
     fn replacing_at_limit_preserves_existing_suffix() {
         let existing = format!("{}尾", "中".repeat(1999));
-        let replacement = replace_content(&existing, 0.."中".len(), "🦀新", None, MAX_CHARACTERS);
+        let replacement = replace_content(
+            &existing,
+            0.."中".len(),
+            "🦀新",
+            None,
+            MAX_CHARACTERS,
+            TextMode::SingleLine,
+        );
         assert_eq!(replacement.text.chars().count(), MAX_CHARACTERS);
         assert!(replacement.text.starts_with('🦀'));
         assert!(replacement.text.ends_with('尾'));

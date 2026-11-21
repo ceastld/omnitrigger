@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use base64::{
     engine::general_purpose::{
         GeneralPurpose, STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD,
@@ -76,6 +78,24 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "小写" | "lower" | "lowercase" => Ok(text.to_lowercase()),
         "合并空白" | "collapse" => Ok(text.split_whitespace().collect::<Vec<_>>().join(" ")),
         "倒序" | "reverse" => Ok(text.graphemes(true).rev().collect()),
+        "按行去重" | "unique-lines" => {
+            let mut seen = HashSet::new();
+            Ok(text
+                .lines()
+                .filter(|&line| seen.insert(line))
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+        "按行排序" | "sort-lines" => {
+            let mut lines: Vec<_> = text.lines().collect();
+            lines.sort_unstable();
+            Ok(lines.join("\n"))
+        }
+        "去空行" | "remove-empty-lines" => Ok(text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")),
         "sha256" | "sha-256" => Ok(format!("{:x}", Sha256::digest(text.as_bytes()))),
         "sha512" | "sha-512" => Ok(format!("{:x}", Sha512::digest(text.as_bytes()))),
         "base64编码" | "base64-encode" => Ok(STANDARD.encode(text)),
@@ -162,6 +182,19 @@ fn replace_text(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edits_pasted_lines_without_changing_text_on_each_line() {
+        for (query, expected) in [
+            ("按行去重 菠萝\r\n苹果\n菠萝\n苹果 ", "菠萝\n苹果"),
+            ("按行排序 B\r\nA\nb\nA", "A\nA\nB\nb"),
+            ("去空行 \" 甲\r\n  \t\r\n乙 \n\n丙\"", " 甲\n乙 \n丙"),
+            ("按行去重 \"A\nA \nA\"", "A\nA "),
+            ("去空行 \"\n\t\n \"", ""),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+    }
 
     #[test]
     fn base64_handles_utf8_both_alphabets_and_wrapped_input() {

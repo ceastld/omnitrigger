@@ -34,7 +34,7 @@ use crate::appearance_ui::SettingsSection;
 use crate::{
     appearance,
     assets::Icon,
-    message_input::MessageInput,
+    message_input::{input_preview, MessageInput},
     theme::{self, button, icon, rgb, Tone},
     wheel_scenes::WheelSlotKey,
     Page, Workspace,
@@ -623,6 +623,7 @@ impl QuickSearch {
         let input = cx.new(|cx| {
             let mut input = MessageInput::new(cx)
                 .embedded()
+                .with_preserved_whitespace()
                 .with_character_limit(INPUT_CHARACTER_LIMIT + 1);
             input.set_placeholder("搜索页面、触发器，或输入算式");
             input
@@ -911,7 +912,7 @@ impl QuickSearch {
                                     .font_family(theme::MONO_FONT)
                                     .text_size(px(12.))
                                     .text_color(rgb(theme::TEXT_MUTED))
-                                    .child(query.trim_end()),
+                                    .child(input_preview(query.trim_end())),
                             )
                             .when(index == self.selected, |row| {
                                 row.child(
