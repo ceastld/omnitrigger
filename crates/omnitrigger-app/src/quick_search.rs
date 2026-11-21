@@ -417,7 +417,10 @@ impl ValueError {
                 | Self::Duration(DurationError::Incomplete)
                 | Self::VideoFrames(VideoFrameError::Incomplete)
                 | Self::Timecode(TimecodeError::Incomplete)
-                | Self::Timestamp(TimestampError::Incomplete)
+                | Self::Timestamp(
+                    TimestampError::Incomplete
+                        | TimestampError::IntervalOutput(DurationError::Incomplete)
+                )
                 | Self::Identifier(IdentifierError::Incomplete)
                 | Self::Color(ColorError::Incomplete | ColorError::IncompleteContrast)
                 | Self::Text(

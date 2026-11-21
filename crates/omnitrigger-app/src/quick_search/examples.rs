@@ -66,6 +66,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "计算总体方差和标准差",
+        query: "统计: 总体 1,3,5",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "用半径计算圆周长和面积",
         query: "圆: 半径 3",
     },
@@ -504,6 +509,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         title: "计算跨夏令时的实际间隔",
         query:
             "时间戳: 间隔 2026-03-08 01:30 America/New_York 到 2026-03-08 03:30 America/New_York",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "把日期时间间隔转成 ISO 格式",
+        query: "时间戳: 间隔 1970-01-01T00:00:00Z 到 1970-01-02T00:00:02.5Z to iso",
     },
     Example {
         icon: Icon::Clock,

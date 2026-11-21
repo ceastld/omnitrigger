@@ -136,7 +136,11 @@ fn fraction_suffix(fraction: u128, digits: usize) -> String {
     }
 }
 
-fn format_duration_unit(nanos: u128, sign: &str, output: &str) -> Result<String, DurationError> {
+pub(super) fn format_duration_unit(
+    nanos: u128,
+    sign: &str,
+    output: &str,
+) -> Result<String, DurationError> {
     let (symbol, divisor, digits) = match output.trim() {
         "" => return Err(DurationError::Incomplete),
         "s" | "秒" => ("s", NANOS_PER_SECOND, Some(9)),

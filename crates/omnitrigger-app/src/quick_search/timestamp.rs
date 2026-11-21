@@ -10,7 +10,9 @@ use jiff::{
 
 use super::calculator::normalize;
 use super::conversion::split_conversion;
-use super::duration::{elapsed_duration, format_clock_duration, DurationError, NANOS_PER_SECOND};
+use super::duration::{
+    elapsed_duration, format_clock_duration, format_duration_unit, DurationError, NANOS_PER_SECOND,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum TimestampError {
@@ -22,6 +24,7 @@ pub(super) enum TimestampError {
     SourceClockFold,
     InvalidDuration,
     IntervalEndpoints,
+    IntervalOutput(DurationError),
     UnsupportedPrecision,
     OutOfRange,
 }
@@ -37,6 +40,7 @@ impl TimestampError {
             Self::SourceClockFold => "该地区的钟表时间出现两次，请用 UTC 偏移量指定其中一次",
             Self::InvalidDuration => "请输入要加减的时长，例如 时间戳: 现在 + 90分钟",
             Self::IntervalEndpoints => "用 到 或 至 隔开两个带时区的时间",
+            Self::IntervalOutput(error) => error.message(),
             Self::UnsupportedPrecision => "请输入可用 Unix 纳秒表示的时间",
             Self::OutOfRange => "结果超出四位年份的时间范围",
         }
@@ -258,6 +262,8 @@ fn parse_explicit_time(
 }
 
 fn timestamp_interval(input: &str) -> Result<String, TimestampError> {
+    let (input, output) =
+        split_conversion(input).map_or((input, None), |(input, output)| (input, Some(output)));
     let (start, end) = input
         .split_once(['到', '至'])
         .ok_or(TimestampError::IntervalEndpoints)?;
@@ -274,6 +280,10 @@ fn timestamp_interval(input: &str) -> Result<String, TimestampError> {
     let end = timeline_nanos(end)?;
     let delta = end - start;
     let sign = if delta.is_negative() { "-" } else { "" };
+    if let Some(unit) = output {
+        return format_duration_unit(delta.unsigned_abs(), sign, &unit.to_ascii_lowercase())
+            .map_err(TimestampError::IntervalOutput);
+    }
     Ok(format_clock_duration(delta.unsigned_abs(), sign))
 }
 
@@ -440,6 +450,14 @@ mod tests {
                 "间隔 1900-01-01T00:00:00Z 至 2300-01-01T00:00:00Z",
                 "3506328:00:00",
             ),
+            (
+                "间隔 1970-01-01T00:00:00Z 到 1970-01-02T00:00:02.5Z to iso",
+                "P1DT2.5S",
+            ),
+            (
+                "间隔 1970-01-01T00:00:00.5Z 到 1970-01-01T00:00:00Z TO MS",
+                "-500 ms",
+            ),
         ] {
             assert_eq!(
                 convert_timestamp(query, now).as_deref(),
@@ -452,6 +470,10 @@ mod tests {
             (
                 "间隔 到 2026-01-01T00:00:00Z",
                 TimestampError::IntervalEndpoints,
+            ),
+            (
+                "间隔 1970-01-01T00:00:00Z 到 1970-01-02T00:00:00Z to bytes",
+                TimestampError::IntervalOutput(DurationError::InvalidUnit),
             ),
             (
                 "间隔 2026-03-08 02:30 America/New_York 到 2026-03-08T08:00:00Z",
