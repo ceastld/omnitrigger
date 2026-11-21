@@ -1,5 +1,9 @@
 use std::f64::consts::{E, PI};
 
+use super::fraction::common_divisor;
+
+const MAX_SAFE_INTEGER: u128 = (1 << 53) - 1;
+
 pub(super) enum NamedValue {
     Constant(f64),
     Function(fn(f64) -> f64),
@@ -20,6 +24,13 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "sum" => return Some(NamedValue::Aggregate(|values| values.iter().sum())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
         "median" => return Some(NamedValue::Aggregate(median)),
+        "gcd" => {
+            return Some(NamedValue::Aggregate(|values| {
+                integer_pair(values)
+                    .map_or(f64::NAN, |[left, right]| common_divisor(left, right) as f64)
+            }));
+        }
+        "lcm" => return Some(NamedValue::Aggregate(least_common_multiple)),
         "log" => {
             return Some(NamedValue::Aggregate(|values| match values {
                 [value] => value.ln(),
@@ -77,6 +88,32 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         _ => return None,
     };
     Some(NamedValue::Function(function))
+}
+
+fn integer_pair(values: &[f64]) -> Option<[u128; 2]> {
+    let &[left, right] = values else {
+        return None;
+    };
+    let magnitudes = [left.abs(), right.abs()];
+    magnitudes
+        .iter()
+        .all(|&value| value <= MAX_SAFE_INTEGER as f64 && value.fract() == 0.)
+        .then(|| magnitudes.map(|value| value as u128))
+}
+
+fn least_common_multiple(values: &[f64]) -> f64 {
+    let Some([left, right]) = integer_pair(values) else {
+        return f64::NAN;
+    };
+    if left == 0 || right == 0 {
+        return 0.;
+    }
+    let multiple = left / common_divisor(left, right) * right;
+    if multiple > MAX_SAFE_INTEGER {
+        f64::INFINITY
+    } else {
+        multiple as f64
+    }
 }
 
 fn average(values: &[f64]) -> f64 {

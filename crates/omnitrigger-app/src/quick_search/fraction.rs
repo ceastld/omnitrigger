@@ -64,7 +64,7 @@ fn decimal(digits: &str) -> Result<(u128, u128), FractionError> {
     Ok((numerator, denominator))
 }
 
-fn common_divisor(mut left: u128, mut right: u128) -> u128 {
+pub(super) fn common_divisor(mut left: u128, mut right: u128) -> u128 {
     while right != 0 {
         (left, right) = (right, left % right);
     }

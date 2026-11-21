@@ -174,6 +174,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算最大公约数",
+        query: "gcd(48,18)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算最小公倍数",
+        query: "lcm(12,18)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算反三角函数",
         query: "degrees(asin(0.5))",
     },

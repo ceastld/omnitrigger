@@ -387,6 +387,11 @@ mod tests {
             ("median(9,1,4)", "4"),
             ("median(4,1,8,2)", "3"),
             ("median(1e308,1.6e308)", "1.3e308"),
+            ("gcd(2^6,-48)", "16"),
+            ("gcd(0,0)", "0"),
+            ("gcd(9007199254740991,1)", "1"),
+            ("lcm(-12,18)", "36"),
+            ("lcm(5,0)", "0"),
             ("hypot(3,4,12)", "13"),
             ("hypot(1e308,1e308)", "1.4142135623731e308"),
             ("degrees(atan2(1,-1))", "135"),
@@ -411,6 +416,9 @@ mod tests {
             "log(2,-1)",
             "log(1,2,3)",
             "pow(2)",
+            "gcd(2.5,1)",
+            "gcd(9007199254740992,2)",
+            "lcm(1,2,3)",
         ] {
             assert_eq!(
                 calculate(query),
@@ -420,6 +428,10 @@ mod tests {
         }
         assert_eq!(
             calculate("sum(1e308,1e308)"),
+            Err(CalculationError::OutOfRange)
+        );
+        assert_eq!(
+            calculate("lcm(9007199254740991,2)"),
             Err(CalculationError::OutOfRange)
         );
     }
