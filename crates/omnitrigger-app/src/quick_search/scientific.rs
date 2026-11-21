@@ -38,12 +38,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
                 standard_deviation(values, 0)
             }))
         }
-        "gcd" => {
-            return Some(NamedValue::Aggregate(|values| {
-                integer_pair(values)
-                    .map_or(f64::NAN, |[left, right]| common_divisor(left, right) as f64)
-            }));
-        }
+        "gcd" => return Some(NamedValue::Aggregate(greatest_common_divisor)),
         "lcm" => return Some(NamedValue::Aggregate(least_common_multiple)),
         "round" => return Some(NamedValue::Aggregate(round_to_places)),
         "bitand" => {
@@ -278,29 +273,33 @@ fn round_left_of_decimal(value: f64, places: i32) -> f64 {
     rounded.copysign(value)
 }
 
-fn integer_pair(values: &[f64]) -> Option<[u128; 2]> {
-    let &[left, right] = values else {
-        return None;
-    };
-    Some([
-        nonnegative_integer(left.abs())?,
-        nonnegative_integer(right.abs())?,
-    ])
+fn greatest_common_divisor(values: &[f64]) -> f64 {
+    values
+        .iter()
+        .try_fold(0, |divisor, value| {
+            Some(common_divisor(divisor, nonnegative_integer(value.abs())?))
+        })
+        .map_or(f64::NAN, |divisor| divisor as f64)
 }
 
 fn least_common_multiple(values: &[f64]) -> f64 {
-    let Some([left, right]) = integer_pair(values) else {
+    let Some(integers) = values
+        .iter()
+        .map(|value| nonnegative_integer(value.abs()))
+        .collect::<Option<Vec<_>>>()
+    else {
         return f64::NAN;
     };
-    if left == 0 || right == 0 {
+    if integers.contains(&0) {
         return 0.;
     }
-    let multiple = left / common_divisor(left, right) * right;
-    if multiple > MAX_SAFE_INTEGER {
-        f64::INFINITY
-    } else {
-        multiple as f64
-    }
+    integers
+        .into_iter()
+        .try_fold(1, |multiple, value| {
+            let multiple = multiple / common_divisor(multiple, value) * value;
+            (multiple <= MAX_SAFE_INTEGER).then_some(multiple)
+        })
+        .map_or(f64::INFINITY, |multiple| multiple as f64)
 }
 
 fn nonnegative_pair(values: &[f64]) -> Option<[u128; 2]> {

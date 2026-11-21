@@ -378,12 +378,12 @@ pub(super) const EXAMPLES: &[Example] = &[
     Example {
         icon: Icon::Terminal,
         title: "计算最大公约数",
-        query: "gcd(48,18)",
+        query: "gcd(24,-36,60)",
     },
     Example {
         icon: Icon::Terminal,
         title: "计算最小公倍数",
-        query: "lcm(12,18)",
+        query: "lcm(4,6,10)",
     },
     Example {
         icon: Icon::Terminal,

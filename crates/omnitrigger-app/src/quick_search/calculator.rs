@@ -758,8 +758,13 @@ mod tests {
             ("gcd(2^6,-48)", "16"),
             ("gcd(0,0)", "0"),
             ("gcd(9007199254740991,1)", "1"),
+            ("gcd(24,-36,60)", "12"),
+            ("gcd(-8)", "8"),
             ("lcm(-12,18)", "36"),
             ("lcm(5,0)", "0"),
+            ("lcm(4,6,10)", "60"),
+            ("lcm(-8)", "8"),
+            ("lcm(9007199254740991,2,0)", "0"),
             ("hypot(3,4,12)", "13"),
             ("hypot(1e308,1e308)", "1.4142135623731e308"),
             ("degrees(atan2(1,-1))", "135"),
@@ -788,7 +793,8 @@ mod tests {
             "pow(2)",
             "gcd(2.5,1)",
             "gcd(9007199254740992,2)",
-            "lcm(1,2,3)",
+            "gcd(8,6,0.5)",
+            "lcm(0,2,2.5)",
             "quantile(0.25)",
             "quantile(1.01,1,2)",
             "percentile(-5e-324,1,2)",
@@ -806,6 +812,10 @@ mod tests {
         );
         assert_eq!(
             calculate("lcm(9007199254740991,2)"),
+            Err(CalculationError::OutOfRange)
+        );
+        assert_eq!(
+            calculate("lcm(1,9007199254740991,2)"),
             Err(CalculationError::OutOfRange)
         );
     }
