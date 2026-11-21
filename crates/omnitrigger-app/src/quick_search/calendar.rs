@@ -122,11 +122,20 @@ fn iso_month_parts(input: &str) -> Option<(i32, u32)> {
     }
 }
 
-fn relative_month(input: &str) -> Option<i8> {
+enum RelativePeriod {
+    Week(i8),
+    Month(i8),
+}
+
+fn relative_period(input: &str) -> Option<RelativePeriod> {
+    use RelativePeriod::{Month, Week};
     match input.to_ascii_lowercase().as_str() {
-        "本月" | "这个月" | "this month" => Some(0),
-        "上月" | "上个月" | "last month" => Some(-1),
-        "下月" | "下个月" | "next month" => Some(1),
+        "本周" | "这周" | "本星期" | "this week" => Some(Week(0)),
+        "上周" | "上星期" | "last week" => Some(Week(-1)),
+        "下周" | "下星期" | "next week" => Some(Week(1)),
+        "本月" | "这个月" | "this month" => Some(Month(0)),
+        "上月" | "上个月" | "last month" => Some(Month(-1)),
+        "下月" | "下个月" | "next month" => Some(Month(1)),
         _ => None,
     }
 }
@@ -146,7 +155,7 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
             || relative_day(date).is_some_and(|(_, rest)| date_tail(rest))
             || iso_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest));
     }
-    relative_month(input).is_some() || relative_day(input).is_some_and(|(_, rest)| date_tail(rest))
+    relative_period(input).is_some() || relative_day(input).is_some_and(|(_, rest)| date_tail(rest))
 }
 
 fn is_workday_unit(unit: &str) -> bool {
@@ -170,6 +179,10 @@ fn iso_week_range(year: &str, week: &str) -> Result<String, DateError> {
     let week = week.parse().map_err(|_| DateError::InvalidWeek)?;
     let monday =
         NaiveDate::from_isoywd_opt(year, week, Weekday::Mon).ok_or(DateError::InvalidWeek)?;
+    week_range(monday)
+}
+
+fn week_range(monday: NaiveDate) -> Result<String, DateError> {
     let start = in_range(Some(monday))?;
     let end = in_range(monday.checked_add_days(Days::new(6)))?;
     Ok(format!("{start} 至 {end}"))
@@ -327,14 +340,24 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
             1,
         );
     }
-    if let Some(offset) = relative_month(input) {
-        let current = in_range(today.with_day(1))?;
-        let start = match offset {
-            -1 => current.checked_sub_months(Months::new(1)),
-            1 => current.checked_add_months(Months::new(1)),
-            _ => Some(current),
-        };
-        return month_range(in_range(start)?, 1);
+    match relative_period(input) {
+        Some(RelativePeriod::Week(offset)) => {
+            let days = i64::from(offset) * 7 - i64::from(today.weekday().num_days_from_monday());
+            let monday = today
+                .checked_add_signed(TimeDelta::days(days))
+                .ok_or(DateError::OutOfRange)?;
+            return week_range(monday);
+        }
+        Some(RelativePeriod::Month(offset)) => {
+            let current = in_range(today.with_day(1))?;
+            let start = match offset {
+                -1 => current.checked_sub_months(Months::new(1)),
+                1 => current.checked_add_months(Months::new(1)),
+                _ => Some(current),
+            };
+            return month_range(in_range(start)?, 1);
+        }
+        None => {}
     }
     let weekday = weekday_query(input);
     let week_number = week_number_query(input);
@@ -400,6 +423,25 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_relative_weeks_using_local_monday_across_years() {
+        let today = NaiveDate::from_ymd_opt(2027, 1, 1).unwrap();
+        for (query, expected) in [
+            ("本周", "2026-12-28 至 2027-01-03"),
+            ("上星期", "2026-12-21 至 2026-12-27"),
+            ("NEXT WEEK", "2027-01-04 至 2027-01-10"),
+        ] {
+            assert!(looks_like_date_query(query), "{query}");
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        let end = NaiveDate::from_ymd_opt(9999, 12, 31).unwrap();
+        assert_eq!(calculate_date("下周", end), Err(DateError::OutOfRange));
+    }
 
     #[test]
     fn checks_calendar_quarters_across_leap_years_and_year_boundaries() {

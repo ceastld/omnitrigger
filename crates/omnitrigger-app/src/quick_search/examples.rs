@@ -216,6 +216,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "查询本周的日期范围",
+        query: "日期: 本周",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按周推算日期",
         query: "日期: 今天 + 2周",
     },
