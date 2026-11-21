@@ -21,7 +21,7 @@ impl TimestampError {
     }
 }
 
-pub(super) fn convert_timestamp(query: &str) -> Result<String, TimestampError> {
+pub(super) fn convert_timestamp(query: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
     let input = normalize(query);
     let input = input.trim();
     if matches!(input, "" | "+" | "-") {
@@ -33,7 +33,15 @@ pub(super) fn convert_timestamp(query: &str) -> Result<String, TimestampError> {
         .strip_suffix("ms")
         .or_else(|| lower.strip_suffix("毫秒"));
     let seconds = lower.strip_suffix('s').or_else(|| lower.strip_suffix('秒'));
-    if let Some(number) = milliseconds.or(seconds) {
+    let quantity = milliseconds.or(seconds);
+    if matches!(quantity.unwrap_or(&lower).trim_end(), "现在" | "now") {
+        return Ok(if milliseconds.is_some() {
+            format!("{} ms", now.timestamp_millis())
+        } else {
+            now.timestamp().to_string()
+        });
+    }
+    if let Some(number) = quantity {
         return to_utc(number.trim_end(), milliseconds.is_some());
     }
     if integer(input) {
@@ -100,6 +108,8 @@ mod tests {
 
     #[test]
     fn converts_unix_seconds_and_milliseconds_in_both_directions() {
+        let now = DateTime::from_timestamp(1_700_000_000, 123_000_000).unwrap();
+        let convert = |query| convert_timestamp(query, now);
         for (query, expected) in [
             ("0", "1970-01-01T00:00:00Z"),
             ("+1700000000 秒", "2023-11-14T22:13:20Z"),
@@ -108,24 +118,39 @@ mod tests {
             ("1970-01-01T08:00:00+08:00", "0"),
             ("1969-12-31T23:59:59.999Z", "-1 ms"),
         ] {
-            assert_eq!(convert_timestamp(query), Ok(expected.into()), "{query}");
+            assert_eq!(convert(query), Ok(expected.into()), "{query}");
         }
-        assert_eq!(convert_timestamp(""), Err(TimestampError::Incomplete));
+        assert_eq!(convert(""), Err(TimestampError::Incomplete));
+        assert_eq!(convert("2026-11-21T00:00:00"), Err(TimestampError::Invalid));
         assert_eq!(
-            convert_timestamp("2026-11-21T00:00:00"),
-            Err(TimestampError::Invalid)
-        );
-        assert_eq!(
-            convert_timestamp("1970-01-01T00:00:00.0001Z"),
+            convert("1970-01-01T00:00:00.0001Z"),
             Err(TimestampError::UnsupportedPrecision)
         );
         assert_eq!(
-            convert_timestamp("1970-01-01T00:00:00.0000000001Z"),
+            convert("1970-01-01T00:00:00.0000000001Z"),
             Err(TimestampError::UnsupportedPrecision)
         );
         assert_eq!(
-            convert_timestamp("999999999999999999999"),
+            convert("999999999999999999999"),
             Err(TimestampError::OutOfRange)
         );
+    }
+
+    #[test]
+    fn returns_the_current_unix_time_in_requested_precision() {
+        let now = DateTime::from_timestamp(1_700_000_000, 123_456_000).unwrap();
+        for (query, expected) in [
+            ("现在", "1700000000"),
+            ("NOW", "1700000000"),
+            ("现在秒", "1700000000"),
+            ("现在毫秒", "1700000000123 ms"),
+            ("now ms", "1700000000123 ms"),
+        ] {
+            assert_eq!(
+                convert_timestamp(query, now),
+                Ok(expected.into()),
+                "{query}"
+            );
+        }
     }
 }

@@ -65,6 +65,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "时间戳: 1700000000123ms",
     },
     Example {
+        icon: Icon::Clock,
+        title: "当前 Unix 时间戳",
+        query: "unix: now",
+    },
+    Example {
         icon: Icon::Layers,
         title: "查找触发预设",
         query: "预设: 顶部边缘",

@@ -271,9 +271,9 @@ impl Results {
                 Scope::Duration => {
                     Self::Value(convert_duration(term).map_err(ValueError::Duration))
                 }
-                Scope::Timestamp => {
-                    Self::Value(convert_timestamp(term).map_err(ValueError::Timestamp))
-                }
+                Scope::Timestamp => Self::Value(
+                    convert_timestamp(term, chrono::Utc::now()).map_err(ValueError::Timestamp),
+                ),
             };
         }
         if let Some(result) = convert(query) {
@@ -859,7 +859,7 @@ mod tests {
         }
         for (query, expected) in [
             ("？ 速率", &["8Mbps to MB/s"][..]),
-            ("? UNIX", &["时间戳: 1700000000123ms"][..]),
+            ("? UNIX", &["时间戳: 1700000000123ms", "unix: now"][..]),
             ("? 时长", &["时长: 5400秒", "时长: 01:30:00 - 25分钟"][..]),
             ("? 无对应示例", &[][..]),
         ] {
