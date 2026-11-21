@@ -159,6 +159,10 @@ impl MessageInput {
         cx.notify();
     }
 
+    pub(super) fn move_cursor_to_end(&mut self, cx: &mut Context<Self>) {
+        self.move_to(self.content.len(), false, cx);
+    }
+
     fn previous(&self) -> usize {
         self.content
             .grapheme_indices(true)
@@ -213,7 +217,7 @@ impl MessageInput {
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.content.len(), false, cx);
+        self.move_cursor_to_end(cx);
     }
 
     fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {

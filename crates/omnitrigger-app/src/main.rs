@@ -2722,12 +2722,24 @@ impl Workspace {
         {
             return;
         }
+        let action_filter = matches!(
+            destination,
+            quick_search::Destination::ActionLibraryQuery(_)
+        )
+        .then(|| self.action_search.focus_handle(cx));
         self.quick_search_recent.record(&destination);
         match destination {
             quick_search::Destination::Page(page) => self.open_page(page, cx),
             quick_search::Destination::TextHistoryQuery(query) => {
                 self.text_history.search_from_quick_search(query, cx);
                 self.open_page(Page::TextHistory, cx);
+            }
+            quick_search::Destination::ActionLibraryQuery(query) => {
+                self.open_page(Page::Actions, cx);
+                self.action_search.update(cx, |input, cx| {
+                    input.set_text(query, cx);
+                    input.move_cursor_to_end(cx);
+                });
             }
             quick_search::Destination::Trigger(id) => {
                 self.open_page(Page::Triggers, cx);
@@ -2737,6 +2749,9 @@ impl Workspace {
         }
         let _ = self.main_window.update(cx, |_, window, _| {
             reveal_workspace_window(window);
+            if let Some(focus) = action_filter.as_ref() {
+                window.focus(focus);
+            }
         });
     }
 

@@ -3,6 +3,7 @@ mod conversion;
 mod radix;
 mod recent;
 mod scientific;
+mod scope;
 mod triggers;
 
 use gpui::{
@@ -24,6 +25,7 @@ use conversion::{convert, ConversionError};
 use omnitrigger_windows::ShortcutTarget;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 pub(super) use recent::RecentDestinations;
+use scope::{scoped_query, Scope};
 use triggers::{matching_triggers, SearchTrigger};
 
 const WIDTH: f32 = 500.;
@@ -55,6 +57,7 @@ pub(super) enum Destination {
     Page(Page),
     Trigger(u64),
     TextHistoryQuery(String),
+    ActionLibraryQuery(String),
 }
 
 fn title_rank(title: &str, query: &str) -> u8 {
@@ -106,21 +109,16 @@ impl Results {
         if query.is_empty() {
             return Self::Destinations(recent.suggestions(triggers));
         }
-        if let Some(prefix) = ["剪贴板:", "剪贴板：", "clipboard:"]
-            .into_iter()
-            .find(|prefix| {
-                query
-                    .get(..prefix.len())
-                    .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-            })
-        {
-            let term = query[prefix.len()..].trim();
-            let destination = if term.is_empty() {
-                Destination::Page(Page::TextHistory)
-            } else {
-                Destination::TextHistoryQuery(term.to_owned())
-            };
-            return Self::Destinations(vec![destination]);
+        if let Some((scope, term)) = scoped_query(query) {
+            return Self::Destinations(match scope {
+                Scope::Triggers => matching_triggers(triggers, term, PAGE_RESULT_LIMIT)
+                    .into_iter()
+                    .map(Destination::Trigger)
+                    .collect(),
+                Scope::TextHistory if term.is_empty() => vec![Destination::Page(Page::TextHistory)],
+                Scope::TextHistory => vec![Destination::TextHistoryQuery(term.to_owned())],
+                Scope::Actions => vec![Destination::ActionLibraryQuery(term.to_owned())],
+            });
         }
         if let Some(result) = convert(query) {
             return Self::Value(result.map_err(ValueError::Conversion));
@@ -130,17 +128,6 @@ impl Results {
         }
 
         let query = query.to_lowercase();
-        if let Some(query) = ["触发器:", "触发器：", "trigger:"]
-            .into_iter()
-            .find_map(|prefix| query.strip_prefix(prefix))
-        {
-            return Self::Destinations(
-                matching_triggers(triggers, query, PAGE_RESULT_LIMIT)
-                    .into_iter()
-                    .map(Destination::Trigger)
-                    .collect(),
-            );
-        }
         let mut pages: Vec<_> = PAGES
             .iter()
             .filter_map(|&(page, keywords)| {
@@ -439,6 +426,14 @@ impl QuickSearch {
                         Destination::TextHistoryQuery(_) => {
                             (Icon::Clock, "搜索文本历史正文".to_owned(), None)
                         }
+                        Destination::ActionLibraryQuery(term) => {
+                            let title = if term.is_empty() {
+                                "打开动作库"
+                            } else {
+                                "筛选动作库"
+                            };
+                            (Page::Actions.icon(), title.to_owned(), None)
+                        }
                     };
                     let destination = destination.clone();
                     let selected = index == self.selected;
@@ -475,12 +470,13 @@ impl QuickSearch {
                                     }),
                             )
                             .when(selected, |row| {
-                                let hint =
-                                    if matches!(destination, Destination::TextHistoryQuery(_)) {
-                                        "Enter 查找"
-                                    } else {
-                                        "Enter 打开"
-                                    };
+                                let hint = match &destination {
+                                    Destination::TextHistoryQuery(_) => "Enter 查找",
+                                    Destination::ActionLibraryQuery(term) if !term.is_empty() => {
+                                        "Enter 筛选"
+                                    }
+                                    _ => "Enter 打开",
+                                };
                                 row.child(div().text_color(rgb(theme::TEXT_MUTED)).child(hint))
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -490,7 +486,7 @@ impl QuickSearch {
                 }))
                 .when(items.len() > 1, |list| {
                     let hint = if self.input.read(cx).text().trim().is_empty() {
-                        "↑ ↓ 选择  ·  例如 2**10、10 km to mi、剪贴板: 关键词"
+                        "↑ ↓ 选择  ·  例如 2**10、10 km to mi、剪贴板: 关键词、动作: 浏览器"
                     } else {
                         "↑ ↓ 选择"
                     };
@@ -648,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn quick_search_routes_clipboard_prefix_to_an_explicit_full_text_query() {
+    fn quick_search_routes_text_history_and_actions_queries_to_their_pages() {
         for (query, destination) in [
             ("剪贴板:", Destination::Page(Page::TextHistory)),
             (
@@ -656,12 +652,21 @@ mod tests {
                 Destination::TextHistoryQuery("Rust 工程".into()),
             ),
             (
-                "CLIPBOARD: 2**10",
+                "CLIPBOARD： 2**10",
                 Destination::TextHistoryQuery("2**10".into()),
+            ),
+            ("ACTION:", Destination::ActionLibraryQuery(String::new())),
+            (
+                "动作库 ： 浏览器",
+                Destination::ActionLibraryQuery("浏览器".into()),
+            ),
+            (
+                "action: 2**10",
+                Destination::ActionLibraryQuery("2**10".into()),
             ),
         ] {
             let Results::Destinations(items) = for_query(query, &[]) else {
-                panic!("文本历史查询被解析成了算式：{query}");
+                panic!("页面筛选词被解析成了算式：{query}");
             };
             assert_eq!(items, vec![destination], "{query}");
         }
