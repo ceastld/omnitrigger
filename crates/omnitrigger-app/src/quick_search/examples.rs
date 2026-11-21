@@ -61,6 +61,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "用半径计算圆周长和面积",
+        query: "圆: 半径 3",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "用直径和圆心角计算扇形弧长与面积",
+        query: "圆: 直径 10 @ 90°",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "计算两个向量的点积",
         query: "向量: 点积 1,2,3; 4,5,6",
     },
@@ -1529,6 +1539,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Ulid
         | Scope::Vector
         | Scope::Matrix
+        | Scope::Circle
             if !term.contains(char::is_whitespace) => {}
         Scope::Date
         | Scope::Duration
