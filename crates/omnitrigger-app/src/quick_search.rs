@@ -17,6 +17,7 @@ mod identifiers;
 mod json_tools;
 mod linear_fit;
 mod local_files;
+mod matrix;
 mod open_windows;
 mod operators;
 mod paper;
@@ -82,6 +83,7 @@ use identifiers::{transform_ulid, transform_uuid, IdentifierError};
 use json_tools::{transform_json, JsonError};
 use linear_fit::{calculate_linear_fit, LinearFitError};
 use local_files::{directory_query, LocalFilesIndex, FOLDER_DEBOUNCE};
+use matrix::{calculate_matrix, MatrixError};
 use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
 use open_windows::OpenWindowsIndex;
 use paper::{calculate_paper, PaperError};
@@ -344,6 +346,7 @@ enum ValueError {
     Percentage(PercentageError),
     UrlEncoding(UrlEncodingError),
     Vector(VectorError),
+    Matrix(MatrixError),
     Path(PathError),
 }
 
@@ -378,6 +381,7 @@ impl ValueError {
             Self::Percentage(error) => error.message(),
             Self::UrlEncoding(error) => error.message(),
             Self::Vector(error) => error.message(),
+            Self::Matrix(error) => error.message(),
             Self::Path(error) => error.message(),
         }
     }
@@ -421,6 +425,7 @@ impl ValueError {
                 | Self::Percentage(PercentageError::Incomplete)
                 | Self::UrlEncoding(UrlEncodingError::Incomplete)
                 | Self::Vector(VectorError::Incomplete)
+                | Self::Matrix(MatrixError::Incomplete)
                 | Self::Path(PathError::Incomplete)
                 | Self::Json(JsonError::Incomplete)
                 | Self::Csv(CsvError::MissingInput | CsvError::UnclosedQuote)
@@ -638,6 +643,9 @@ impl Results {
                 }
                 Scope::Vector => {
                     Self::text_value(calculate_vector(term).map_err(ValueError::Vector))
+                }
+                Scope::Matrix => {
+                    Self::text_value(calculate_matrix(term).map_err(ValueError::Matrix))
                 }
                 Scope::Path => Self::text_value(path_component(term).map_err(ValueError::Path)),
             };

@@ -81,6 +81,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "计算方阵的行列式",
+        query: "矩阵: 行列式 0,2; 3,4",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "计算两个矩阵的乘积",
+        query: "矩阵: 乘法 1,2; 3,4 @ 5,6; 7,8",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "交换矩阵的行和列",
+        query: "矩阵: 转置 1,2,3; 4,5,6",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算单位",
         query: "10 km to mi",
     },
@@ -1513,6 +1528,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Uuid
         | Scope::Ulid
         | Scope::Vector
+        | Scope::Matrix
             if !term.contains(char::is_whitespace) => {}
         Scope::Date
         | Scope::Duration

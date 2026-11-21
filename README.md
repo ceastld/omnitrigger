@@ -74,6 +74,7 @@
 - 输入 `拟合: 0,1; 1,3; 2,5` 得到斜率 `2`、截距 `1`、R² `1`。每组按 x、y 输入，用分号或换行隔开，支持 2 至 64 组。输入 `拟合: 预测 10 @ 0,1; 1,3; 2,5` 得到 `21`。有限小数与分数以精确有理数计算。 [NIST 最小二乘法](https://www.itl.nist.gov/div898/handbook/pmd/section4/pmd431.htm)
 - 输入 `三角形: 3,4,5` 得到面积 `6`、周长 `12`，并标为直角三角形。三条边可用分数或有限小数输入，面积使用海伦公式。输入 `三角形: 2,2,2` 时，面积保留为 `√3`。
 - 输入 `向量: 点积 1,2,3; 4,5,6` 得到 `32`。可换用 `叉积` 计算三维向量的叉积，或用 `长度`、`距离` 计算向量的长度和两点间距离。分量支持精确算式，结果保留分数或根式，每个向量最多 32 个分量。
+- 输入 `矩阵: 行列式 0,2; 3,4` 得到 `-6`。用 `矩阵: 乘法 1,2; 3,4 @ 5,6; 7,8` 可求乘积，用 `转置` 可交换行列。逗号分隔元素，分号或换行分隔行，支持分数和精确算式，每个矩阵最多 8 行 8 列。 [MIT 行列式性质](https://ocw.mit.edu/courses/18-06sc-linear-algebra-fall-2011/5dd3f8ec0a398fd74264fef3fd591f81_MIT18_06SCF11_Ses2.5sum.pdf) [MIT 矩阵乘法](https://ocw.mit.edu/courses/18-065-matrix-methods-in-data-analysis-signal-processing-and-machine-learning-spring-2018/resources/lecture-2-multiplying-and-factoring-matrices/)
 - 分数算式可用 `**` 或 `^` 求整数次幂。`分数: 计算 2**80` 得到 `1208925819614629174706176`。指数绝对值最多为 1024，运算中分子和分母各最多 8192 个二进制位。[Python 幂运算优先级](https://docs.python.org/3/reference/expressions.html#the-power-operator)
 - 输入 `分数: 计算 50!` 可求精确阶乘。阶乘先于幂和一元正负号，参数为非负整数。参数最多为 1024，结果最多为 8192 个二进制位。
 - 输入 `分数: 计算 comb(100,50)` 得到精确组合数 `100891344545564193334812497256`。排列数用 `perm(n,k)`，省略 `k` 时计算 `n!`。参数为 0 至 4096 的整数，结果最多为 8192 个二进制位。 [Python 的组合数和排列数](https://docs.python.org/3/library/math.html#math.comb)
