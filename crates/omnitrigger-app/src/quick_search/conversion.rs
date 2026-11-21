@@ -2,6 +2,7 @@ use std::f64::consts::{PI, TAU};
 
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
 use super::radix::Base;
+use super::InputSuggestion;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ConversionError {
@@ -44,6 +45,27 @@ enum Dimension {
     Frequency,
     Energy,
     Power,
+}
+
+impl Dimension {
+    fn suggested_units(&self) -> &'static [&'static str] {
+        match self {
+            Self::Length => &["m", "mi", "km", "cm", "ft"],
+            Self::Mass => &["kg", "g", "lb", "oz", "mg"],
+            Self::Time => &["s", "min", "h", "ms", "d"],
+            Self::Temperature => &["°C", "°F", "K"],
+            Self::Area => &["m²", "ft²", "ha", "km²", "cm²"],
+            Self::Volume => &["L", "mL", "usgal", "m³"],
+            Self::Speed => &["km/h", "m/s", "mph", "kn"],
+            Self::Data => &["MB", "MiB", "GB", "GiB", "B"],
+            Self::DataRate => &["MB/s", "Mbps", "MiB/s", "kB/s", "Gbps"],
+            Self::Angle => &["°", "rad", "turn"],
+            Self::Pressure => &["Pa", "kPa", "bar", "psi", "atm"],
+            Self::Frequency => &["Hz", "kHz", "MHz", "GHz", "mHz"],
+            Self::Energy => &["J", "kJ", "MJ", "Wh", "kWh"],
+            Self::Power => &["W", "kW", "mW", "MW", "GW"],
+        }
+    }
 }
 
 struct Unit {
@@ -214,9 +236,7 @@ fn data_unit(name: &str) -> Option<Unit> {
     })
 }
 
-pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
-    let input = normalize(query).replace(char::is_whitespace, " ");
-    let input = input.trim();
+fn split_conversion(input: &str) -> Option<(&str, &str)> {
     let folded = input.to_ascii_lowercase();
     let (start, end) = [
         "换算成",
@@ -232,7 +252,6 @@ pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
         "→",
         "->",
         " to ",
-        " in ",
     ]
     .into_iter()
     .find_map(|separator| {
@@ -244,20 +263,32 @@ pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
         folded
             .strip_suffix(" to")
             .map(|source| (source.len(), input.len()))
+    })
+    .or_else(|| {
+        folded
+            .rfind(" in ")
+            .map(|start| (start, start + " in ".len()))
     })?;
-    let source = input[..start].trim();
-    let target = &input[end..];
+    Some((input[..start].trim(), &input[end..]))
+}
+
+fn split_quantity(source: &str) -> (&str, &str) {
+    source.rsplit_once(' ').unwrap_or_else(|| {
+        let unit_start = source
+            .find(|ch: char| !matches!(ch, '0'..='9' | '+' | '-' | '.' | 'e' | 'E' | '_'))
+            .unwrap_or(source.len());
+        source.split_at(unit_start)
+    })
+}
+
+pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
+    let input = normalize(query).replace(char::is_whitespace, " ");
+    let (source, target) = split_conversion(input.trim())?;
     let base = Base::parse(target);
     let (amount, unit) = if base.is_some() {
         (source, "")
-    } else if let Some(quantity) = source.rsplit_once(' ') {
-        quantity
     } else {
-        source.split_at(
-            source
-                .find(|ch: char| !matches!(ch, '0'..='9' | '+' | '-' | '.' | 'e' | 'E' | '_'))
-                .unwrap_or(source.len()),
-        )
+        split_quantity(source)
     };
     if !looks_like_calculation(amount) {
         return None;
@@ -271,10 +302,47 @@ pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     })
 }
 
+pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
+    let input = normalize(query).replace(char::is_whitespace, " ");
+    let input = input.trim();
+    let (source, target) = split_conversion(input)?;
+    if !target.trim().is_empty() {
+        return None;
+    }
+    let (amount, name) = split_quantity(source);
+    let amount = evaluate(amount).ok()?;
+    let source = Unit::parse(name).ok()?;
+    let items: Vec<_> = source
+        .dimension
+        .suggested_units()
+        .iter()
+        .filter_map(|name| {
+            let target = Unit::parse(name).ok()?;
+            if target.symbol == source.symbol {
+                return None;
+            }
+            let expression = format!("{input} {name}");
+            if expression.chars().count() > QUERY_LIMIT {
+                return None;
+            }
+            Some(InputSuggestion {
+                expression,
+                result: format_conversion(amount, &source, &target).ok()?,
+            })
+        })
+        .take(4)
+        .collect();
+    (!items.is_empty()).then_some(items)
+}
+
 fn convert_quantity(amount: &str, name: &str, target: &str) -> Result<String, ConversionError> {
     let amount = evaluate(amount).map_err(|_| ConversionError::InvalidAmount)?;
     let source = Unit::parse(name)?;
     let target = Unit::parse(target)?;
+    format_conversion(amount, &source, &target)
+}
+
+fn format_conversion(amount: f64, source: &Unit, target: &Unit) -> Result<String, ConversionError> {
     if source.dimension != target.dimension {
         return Err(ConversionError::DifferentDimensions);
     }
@@ -298,6 +366,31 @@ fn convert_quantity(amount: &str, name: &str, target: &str) -> Result<String, Co
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suggests_compatible_targets_and_previews_their_conversions() {
+        for (query, expression, result) in [
+            ("10 km to", "10 km to mi", "6.21371192237334 mi"),
+            ("10 in to", "10 in to m", "0.254 m"),
+            ("8Mbps转", "8Mbps转 MB/s", "1 MB/s"),
+            ("100°C to ", "100°C to °F", "212 °F"),
+            ("500mW to", "500mW to W", "0.5 W"),
+        ] {
+            let items = suggested_targets(query).unwrap();
+            assert!(
+                items
+                    .iter()
+                    .any(|item| item.expression == expression && item.result == result),
+                "{query}"
+            );
+            for item in items {
+                assert_eq!(convert(&item.expression), Some(Ok(item.result)));
+            }
+        }
+        for query in ["3 to", "10 km to mi", "0xff to", "100未知单位转"] {
+            assert!(suggested_targets(query).is_none(), "{query}");
+        }
+    }
 
     #[test]
     fn converts_compatible_units_with_chinese_and_ascii_syntax() {

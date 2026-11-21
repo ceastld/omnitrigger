@@ -199,6 +199,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         title: "找回用过的算式",
         query: "算式历史: ",
     },
+    Example {
+        icon: Icon::Layers,
+        title: "选择换算目标单位",
+        query: "10 km to",
+    },
 ];
 
 pub(super) fn matching_examples(query: &str) -> Vec<usize> {

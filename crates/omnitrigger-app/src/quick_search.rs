@@ -35,11 +35,11 @@ use crate::{
     Page, Workspace,
 };
 use actions::{matching_actions, SearchAction};
-use calculation_history::{RecentCalculations, SavedCalculation};
+use calculation_history::RecentCalculations;
 use calculator::{calculate, looks_like_calculation, CalculationError, QUERY_LIMIT};
 use calendar::{calculate_date, DateError};
 use color::{convert_color, ColorError};
-use conversion::{convert, ConversionError};
+use conversion::{convert, suggested_targets, ConversionError};
 use duration::{convert_duration, DurationError};
 use examples::{matching_examples, EXAMPLES};
 use omnitrigger_windows::ShortcutTarget;
@@ -77,7 +77,14 @@ enum Results {
     Value(Result<ResultValue, ValueError>),
     Destinations(Vec<Destination>),
     Help(Vec<usize>),
-    Calculations(Vec<SavedCalculation>),
+    Calculations(Vec<InputSuggestion>),
+    ConversionTargets(Vec<InputSuggestion>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InputSuggestion {
+    expression: String,
+    result: String,
 }
 
 #[derive(PartialEq, Eq)]
@@ -335,7 +342,13 @@ impl Results {
             };
         }
         if let Some(result) = convert(query) {
-            return Self::text_value(result.map_err(ValueError::Conversion));
+            return match result {
+                Err(ConversionError::Incomplete) => suggested_targets(query).map_or_else(
+                    || Self::Value(Err(ValueError::Conversion(ConversionError::Incomplete))),
+                    Self::ConversionTargets,
+                ),
+                result => Self::text_value(result.map_err(ValueError::Conversion)),
+            };
         }
         if looks_like_calculation(query) {
             return Self::Value(
@@ -439,7 +452,7 @@ impl Results {
             Self::Help(items) if !items.is_empty() => {
                 132. + items.len() as f32 * EXAMPLE_ROW_HEIGHT
             }
-            Self::Calculations(items) if !items.is_empty() => {
+            Self::Calculations(items) | Self::ConversionTargets(items) if !items.is_empty() => {
                 132. + items.len() as f32 * EXAMPLE_ROW_HEIGHT
             }
             _ => 158.,
@@ -619,7 +632,7 @@ impl QuickSearch {
                     self.fill_query(EXAMPLES[index].query, window, cx);
                 }
             }
-            Results::Calculations(items) => {
+            Results::Calculations(items) | Results::ConversionTargets(items) => {
                 if let Some(item) = items.get(self.selected) {
                     self.fill_query(item.expression.clone(), window, cx);
                 }
@@ -682,7 +695,7 @@ impl QuickSearch {
                 let count = match &self.results {
                     Results::Destinations(items) => items.len(),
                     Results::Help(items) => items.len(),
-                    Results::Calculations(items) => items.len(),
+                    Results::Calculations(items) | Results::ConversionTargets(items) => items.len(),
                     Results::Value(_) => 0,
                 };
                 if count == 0 {
@@ -762,14 +775,19 @@ impl QuickSearch {
             })
     }
 
-    fn render_calculations(&self, items: &[SavedCalculation], cx: &mut Context<Self>) -> Div {
+    fn render_input_suggestions(
+        &self,
+        items: &[InputSuggestion],
+        glyph: Icon,
+        cx: &mut Context<Self>,
+    ) -> Div {
         div()
             .flex()
             .flex_col()
             .children(items.iter().enumerate().map(|(index, item)| {
                 let expression = item.expression.clone();
                 self.suggestion_row(index, EXAMPLE_ROW_HEIGHT)
-                    .child(icon(Icon::Terminal, 16., theme::ACCENT))
+                    .child(icon(glyph, 16., theme::ACCENT))
                     .child(
                         div()
                             .flex_1()
@@ -882,7 +900,12 @@ impl QuickSearch {
             Results::Calculations(items) if items.is_empty() => row
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child("未找到用过的算式"),
-            Results::Calculations(items) => self.render_calculations(items, cx),
+            Results::Calculations(items) => {
+                self.render_input_suggestions(items, Icon::Terminal, cx)
+            }
+            Results::ConversionTargets(items) => {
+                self.render_input_suggestions(items, Icon::Layers, cx)
+            }
             Results::Destinations(items) if items.is_empty() => {
                 row.text_color(rgb(theme::TEXT_MUTED)).child("未找到匹配项")
             }
@@ -1126,6 +1149,7 @@ mod tests {
         for example in EXAMPLES {
             match index.results(example.query) {
                 Results::Value(Ok(_)) | Results::Calculations(_) => {}
+                Results::ConversionTargets(items) if !items.is_empty() => {}
                 Results::Destinations(items) if !items.is_empty() => {}
                 _ => panic!("用法示例没有可用结果：{}", example.query),
             }

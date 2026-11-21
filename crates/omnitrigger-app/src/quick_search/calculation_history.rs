@@ -1,17 +1,13 @@
 use std::{cell::RefCell, rc::Rc};
 
+use super::InputSuggestion;
+
 const HISTORY_LIMIT: usize = 12;
 const MATCH_LIMIT: usize = 6;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct SavedCalculation {
-    pub(super) expression: String,
-    pub(super) result: String,
-}
-
 /// 同一工作台打开的搜索框共享本次运行使用过的算式。
 #[derive(Clone, Default)]
-pub(super) struct RecentCalculations(Rc<RefCell<Vec<SavedCalculation>>>);
+pub(super) struct RecentCalculations(Rc<RefCell<Vec<InputSuggestion>>>);
 
 impl RecentCalculations {
     pub(super) fn record(&self, expression: &str, result: &str) {
@@ -20,7 +16,7 @@ impl RecentCalculations {
         items.retain(|item| item.expression != expression);
         items.insert(
             0,
-            SavedCalculation {
+            InputSuggestion {
                 expression: expression.to_owned(),
                 result: result.to_owned(),
             },
@@ -28,7 +24,7 @@ impl RecentCalculations {
         items.truncate(HISTORY_LIMIT);
     }
 
-    pub(super) fn matching(&self, query: &str) -> Vec<SavedCalculation> {
+    pub(super) fn matching(&self, query: &str) -> Vec<InputSuggestion> {
         let query = query.to_lowercase();
         self.0
             .borrow()
