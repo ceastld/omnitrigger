@@ -1,4 +1,5 @@
 use super::operators::Operator;
+use super::percentage::percentage_operands;
 use super::scientific::{named_value, split_name, NamedValue};
 
 pub(super) const QUERY_LIMIT: usize = 256;
@@ -29,6 +30,13 @@ impl CalculationError {
 pub(super) fn looks_like_calculation(query: &str) -> bool {
     let normalized = normalize(query);
     let query = normalized.trim();
+    looks_like_expression(query)
+        || percentage_operands(query).is_some_and(|(base, rate)| {
+            looks_like_expression(base) && (rate.is_empty() || looks_like_expression(rate))
+        })
+}
+
+fn looks_like_expression(query: &str) -> bool {
     if query.starts_with(|ch| matches!(ch, '0'..='9' | '=' | '+' | '-' | '.' | '(')) {
         return true;
     }
@@ -52,7 +60,15 @@ pub(super) fn evaluate(query: &str) -> Result<f64, CalculationError> {
 
     let normalized = normalize(query);
     let input = normalized.trim();
-    let mut parser = Parser(input.strip_prefix('=').unwrap_or(input));
+    evaluate_expression(input.strip_prefix('=').unwrap_or(input).trim())
+}
+
+fn evaluate_expression(input: &str) -> Result<f64, CalculationError> {
+    if let Some((base, rate)) = percentage_operands(input) {
+        let fraction = evaluate_expression(rate)? / 100.;
+        return finite(fraction * evaluate_expression(base)?);
+    }
+    let mut parser = Parser(input);
     let value = parser.expression(0)?;
     if !parser.0.trim().is_empty() {
         return Err(CalculationError::Invalid);
@@ -255,6 +271,23 @@ mod tests {
         for query in ["7 // 0", "7 % -0"] {
             assert_eq!(calculate(query), Err(CalculationError::DivisionByZero));
         }
+    }
+
+    #[test]
+    fn percentage_phrases_support_expressions_and_preserve_remainder() {
+        for (query, expected) in [
+            ("200 的 15%", "30"),
+            ("１５％ OF ２００", "30"),
+            ("(200 + 40)的12.5%", "30"),
+            ("15 % of (200 + 20)", "33"),
+            ("pi 的 50%", "1.5707963267949"),
+            ("7 % -3", "-2"),
+        ] {
+            assert!(looks_like_calculation(query), "{query}");
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(calculate("15% of"), Err(CalculationError::Incomplete));
+        assert!(!looks_like_calculation("用户的50%"));
     }
 
     #[test]

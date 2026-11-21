@@ -240,6 +240,7 @@ mod tests {
             ("2小时转分钟", "120 min"),
             ("(2+3) km to m", "5000 m"),
             ("sqrt(16) m to cm", "400 cm"),
+            ("15% of 200 km to m", "30000 m"),
         ] {
             assert_eq!(convert(query), Some(Ok(expected.into())), "{query}");
         }

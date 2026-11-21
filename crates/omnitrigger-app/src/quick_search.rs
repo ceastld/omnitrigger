@@ -3,6 +3,7 @@ mod calendar;
 mod conversion;
 mod examples;
 mod operators;
+mod percentage;
 mod radix;
 mod recent;
 mod scientific;
