@@ -1,5 +1,6 @@
 mod actions;
 mod applications;
+mod aspect_ratio;
 mod calculator;
 mod calendar;
 mod color;
@@ -42,6 +43,7 @@ use crate::{
 };
 use actions::{matching_actions, SearchAction};
 use applications::{ApplicationCache, ApplicationIndex};
+use aspect_ratio::{calculate_aspect_ratio, AspectRatioError};
 use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, looks_like_date_query, DateError};
 use color::{calculate_contrast, convert_color, ColorError};
@@ -240,6 +242,7 @@ enum ValueError {
     InputTooLong,
     Calculation(CalculationError),
     Conversion(ConversionError),
+    AspectRatio(AspectRatioError),
     Date(DateError),
     Duration(DurationError),
     Timestamp(TimestampError),
@@ -257,6 +260,7 @@ impl ValueError {
             Self::InputTooLong => "输入最多支持 4096 个字符",
             Self::Calculation(error) => error.message(),
             Self::Conversion(error) => error.message(),
+            Self::AspectRatio(error) => error.message(),
             Self::Date(error) => error.message(),
             Self::Duration(error) => error.message(),
             Self::Timestamp(error) => error.message(),
@@ -274,6 +278,7 @@ impl ValueError {
             self,
             Self::Calculation(CalculationError::Incomplete)
                 | Self::Conversion(ConversionError::Incomplete)
+                | Self::AspectRatio(AspectRatioError::Incomplete)
                 | Self::Date(DateError::Incomplete)
                 | Self::Duration(DurationError::Incomplete)
                 | Self::Timestamp(TimestampError::Incomplete)
@@ -385,6 +390,9 @@ impl Results {
                     Self::text_value(convert_duration(term).map_err(ValueError::Duration))
                 }
                 Scope::TransferTime => Self::conversion_value(estimate_transfer_time(term)),
+                Scope::AspectRatio => {
+                    Self::text_value(calculate_aspect_ratio(term).map_err(ValueError::AspectRatio))
+                }
                 Scope::Timestamp => Self::text_value(
                     convert_timestamp(term, chrono::Utc::now()).map_err(ValueError::Timestamp),
                 ),

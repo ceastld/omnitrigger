@@ -130,6 +130,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "下载: 1 GiB 按 100 Mbps",
     },
     Example {
+        icon: Icon::Layers,
+        title: "化简宽高比",
+        query: "宽高比: 1920×1080",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "按宽度等比缩放",
+        query: "宽高比: 1920×1080 按宽2560",
+    },
+    Example {
         icon: Icon::Clock,
         title: "Unix 时间戳",
         query: "时间戳: 1700000000123ms",
@@ -674,6 +684,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Date
         | Scope::Duration
         | Scope::TransferTime
+        | Scope::AspectRatio
         | Scope::Timestamp
         | Scope::Color
         | Scope::ColorContrast
@@ -706,6 +717,7 @@ mod tests {
             Scope::Date,
             Scope::Duration,
             Scope::TransferTime,
+            Scope::AspectRatio,
             Scope::Timestamp,
             Scope::Color,
             Scope::ColorContrast,
