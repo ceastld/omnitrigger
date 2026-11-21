@@ -30,6 +30,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "sin(pi/2)",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "按 a、b、c 解二次方程",
+        query: "方程: 1, -3, 2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用根式表示二次方程的解",
+        query: "方程: 1, -2, -1",
+    },
+    Example {
         icon: Icon::Layers,
         title: "换算单位",
         query: "10 km to mi",
@@ -203,6 +213,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Layers,
         title: "换算每百公里耗油量",
         query: "油耗: 32 mpg-us to L/100 km",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "把包装价格换算成每千克单价",
+        query: "单价: 36 元 / 750 g to kg",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "把包装价格换算到固定分量",
+        query: "单价: 37.5 元 / 750 g to 500 g",
     },
     Example {
         icon: Icon::Layers,
@@ -1201,6 +1221,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::TransferTime
         | Scope::Pace
         | Scope::FuelEconomy
+        | Scope::UnitPrice
         | Scope::AspectRatio
         | Scope::PixelDensity
         | Scope::Cidr
@@ -1209,6 +1230,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::ColorContrast
         | Scope::TextCount
         | Scope::Fraction
+        | Scope::Equation
             if term.is_empty() => {}
         _ => return None,
     }
@@ -1264,6 +1286,7 @@ mod tests {
             Scope::TransferTime,
             Scope::Pace,
             Scope::FuelEconomy,
+            Scope::UnitPrice,
             Scope::AspectRatio,
             Scope::PixelDensity,
             Scope::Cidr,
@@ -1272,6 +1295,7 @@ mod tests {
             Scope::ColorContrast,
             Scope::TextCount,
             Scope::Fraction,
+            Scope::Equation,
         ] {
             let items = tool_operation_examples(scope, "").unwrap();
             assert!(items.into_iter().all(|index| {

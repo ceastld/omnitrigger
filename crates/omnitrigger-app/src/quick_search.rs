@@ -7,6 +7,7 @@ mod cidr;
 mod color;
 mod conversion;
 mod duration;
+mod equation;
 mod examples;
 mod folders;
 mod fraction;
@@ -52,10 +53,11 @@ use calendar::{calculate_date, looks_like_date_query, DateError};
 use cidr::{calculate_cidr, CidrError};
 use color::{calculate_contrast, convert_color, ColorError};
 use conversion::{
-    calculate_fuel_economy, calculate_pace, calculate_pixel_density, conversion_target_input,
-    convert, estimate_transfer, suggested_targets, ConversionError,
+    calculate_fuel_economy, calculate_pace, calculate_pixel_density, calculate_unit_price,
+    conversion_target_input, convert, estimate_transfer, suggested_targets, ConversionError,
 };
 use duration::{convert_duration, DurationError};
+use equation::{solve_equation, EquationError};
 use examples::{function_examples, matching_examples, tool_operation_examples, EXAMPLES};
 use folders::{matching_folders, SearchFolder};
 use fraction::{simplify_fraction, FractionError};
@@ -286,6 +288,7 @@ enum ValueError {
     Text(TextError),
     Json(JsonError),
     Fraction(FractionError),
+    Equation(EquationError),
     Percentage(PercentageError),
     UrlEncoding(UrlEncodingError),
 }
@@ -305,6 +308,7 @@ impl ValueError {
             Self::Text(error) => error.message(),
             Self::Json(error) => error.message(),
             Self::Fraction(error) => error.message(),
+            Self::Equation(error) => error.message(),
             Self::Percentage(error) => error.message(),
             Self::UrlEncoding(error) => error.message(),
         }
@@ -330,6 +334,10 @@ impl ValueError {
                         | TextError::IncompleteLineComparison
                 )
                 | Self::Fraction(FractionError::Incomplete)
+                | Self::Equation(
+                    EquationError::Coefficients
+                        | EquationError::Evaluation(FractionError::Incomplete)
+                )
                 | Self::Percentage(PercentageError::Incomplete)
                 | Self::UrlEncoding(UrlEncodingError::Incomplete)
                 | Self::Json(JsonError::Incomplete)
@@ -439,6 +447,9 @@ impl Results {
                 Scope::FuelEconomy => {
                     Self::text_value(calculate_fuel_economy(term).map_err(ValueError::Conversion))
                 }
+                Scope::UnitPrice => {
+                    Self::text_value(calculate_unit_price(term).map_err(ValueError::Conversion))
+                }
                 Scope::AspectRatio => {
                     Self::text_value(calculate_aspect_ratio(term).map_err(ValueError::AspectRatio))
                 }
@@ -481,6 +492,9 @@ impl Results {
                         })
                         .map_err(ValueError::Fraction),
                 ),
+                Scope::Equation => {
+                    Self::text_value(solve_equation(term).map_err(ValueError::Equation))
+                }
                 Scope::Percentage => {
                     Self::text_value(compare_percentages(term).map_err(ValueError::Percentage))
                 }

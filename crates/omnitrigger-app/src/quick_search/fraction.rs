@@ -152,7 +152,7 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     })
 }
 
-fn calculate_fraction(input: &str) -> Result<BigRational, FractionError> {
+pub(super) fn calculate_fraction(input: &str) -> Result<BigRational, FractionError> {
     if input.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Err(FractionError::TooLong);
     }
@@ -190,7 +190,7 @@ fn rounded_decimal(value: BigRational, places: u32) -> String {
     }
 }
 
-fn ensure_exact_size(value: &BigRational) -> Result<(), FractionError> {
+pub(super) fn ensure_exact_size(value: &BigRational) -> Result<(), FractionError> {
     if value.numer().bits().max(value.denom().bits()) > MAX_EXACT_BITS {
         return Err(FractionError::ExactRange);
     }

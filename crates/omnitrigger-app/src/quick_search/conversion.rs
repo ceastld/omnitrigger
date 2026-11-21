@@ -18,6 +18,7 @@ pub(super) enum ConversionError {
     InvalidPace,
     InvalidPixelDensity,
     InvalidFuelEconomy,
+    InvalidUnitPrice,
     OutOfRange,
     TooLong,
 }
@@ -37,6 +38,7 @@ impl ConversionError {
             Self::InvalidPace => "距离、用时和速度须大于零，例如 配速: 10 km 用时 52:30",
             Self::InvalidPixelDensity => "输入正整数分辨率和正的对角线尺寸，例如 3840×2160 @ 27 in",
             Self::InvalidFuelEconomy => "输入正数及油耗单位，可用 L/100 km、km/L、mpg-us 或 mpg-uk",
+            Self::InvalidUnitPrice => "输入价格、正的数量和目标单位，例如 36 元 / 750 g to kg",
             Self::OutOfRange => "结果超出换算范围",
             Self::TooLong => "换算式过长",
         }
@@ -752,6 +754,81 @@ pub(super) fn calculate_fuel_economy(query: &str) -> Result<String, ConversionEr
     }
 }
 
+pub(super) fn calculate_unit_price(query: &str) -> Result<String, ConversionError> {
+    if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
+        return Err(ConversionError::TooLong);
+    }
+    let input = normalize(query).replace(char::is_whitespace, " ");
+    let (source, target) =
+        split_conversion(input.trim()).ok_or(ConversionError::InvalidUnitPrice)?;
+    let (price, quantity) = source
+        .split_once('/')
+        .ok_or(ConversionError::InvalidUnitPrice)?;
+    let price = price.trim();
+    let currency_mark = |ch| matches!(ch, '$' | '¥' | '￥' | '€' | '£' | '₩' | '₹');
+    let prefix = price.chars().next().filter(|&ch| currency_mark(ch));
+    let (amount, currency) = match prefix {
+        Some(mark) => {
+            let (currency, amount) = price.split_at(mark.len_utf8());
+            (amount, currency)
+        }
+        None => split_quantity(price),
+    };
+    let currency = currency.to_ascii_uppercase();
+    let is_symbol = currency.chars().count() == 1 && currency.starts_with(currency_mark);
+    let is_code = currency.len() == 3 && currency.bytes().all(|byte| byte.is_ascii_uppercase());
+    if currency != "元" && !is_symbol && !is_code {
+        return Err(ConversionError::InvalidUnitPrice);
+    }
+    let price = evaluate(amount).map_err(|_| ConversionError::InvalidAmount)?;
+    let (quantity, source_unit) = parse_quantity(quantity.trim())?;
+    let target = target.trim();
+    let (target_amount, target_unit, explicit_amount) = match Unit::parse(target) {
+        Ok(unit) => (1., unit, false),
+        Err(_) => {
+            let (amount, unit) = parse_quantity(target)?;
+            (amount, unit, true)
+        }
+    };
+    if source_unit.dimension != target_unit.dimension {
+        return Err(ConversionError::DifferentDimensions);
+    }
+    if !matches!(
+        source_unit.dimension,
+        Dimension::Length
+            | Dimension::Mass
+            | Dimension::Time
+            | Dimension::Area
+            | Dimension::Volume
+            | Dimension::Data
+            | Dimension::Energy
+    ) || price < 0.
+        || !quantity.is_finite()
+        || quantity <= 0.
+        || !target_amount.is_finite()
+        || target_amount <= 0.
+    {
+        return Err(ConversionError::InvalidUnitPrice);
+    }
+    let value = (target_amount / quantity) * (target_unit.scale / source_unit.scale) * price;
+    if value == 0. && price != 0. {
+        return Err(ConversionError::OutOfRange);
+    }
+    let display = |number| format_result(number).map_err(|_| ConversionError::OutOfRange);
+    let value = display(value)?;
+    let price = if prefix.is_some() {
+        format!("{currency}{value}")
+    } else {
+        format!("{value} {currency}")
+    };
+    let unit = target_unit.symbol;
+    if explicit_amount {
+        Ok(format!("{price} / {} {unit}", display(target_amount)?))
+    } else {
+        Ok(format!("{price} / {unit}"))
+    }
+}
+
 pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     let input = normalize(query).replace(char::is_whitespace, " ");
     let (source, target) = split_conversion(input.trim())?;
@@ -979,6 +1056,33 @@ mod tests {
             ("1920x1080 @ 1e308 km", ConversionError::OutOfRange),
         ] {
             assert_eq!(calculate_pixel_density(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn normalizes_prices_to_a_common_unit_or_quantity() {
+        for (query, expected) in [
+            ("36 元 / 750 g to kg", "48 元 / kg"),
+            ("３７．５元／７５０克转５００克", "25 元 / 500 g"),
+            ("$12 / 1.5 L to 250 mL", "$2 / 250 mL"),
+            ("18 cny / 3 h to min", "0.1 CNY / min"),
+            ("0 EUR / 50 cm to m", "0 EUR / m"),
+        ] {
+            assert_eq!(
+                calculate_unit_price(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            ("12 元 / 0 kg to g", ConversionError::InvalidUnitPrice),
+            ("12 元 / 1 kg to 0 g", ConversionError::InvalidUnitPrice),
+            ("-12 元 / 1 kg to g", ConversionError::InvalidUnitPrice),
+            ("12 元 / 1 kg to m", ConversionError::DifferentDimensions),
+            ("12 元 / 1 °C to °F", ConversionError::InvalidUnitPrice),
+            ("12 / 1 kg to g", ConversionError::InvalidUnitPrice),
+        ] {
+            assert_eq!(calculate_unit_price(query), Err(error), "{query}");
         }
     }
 
