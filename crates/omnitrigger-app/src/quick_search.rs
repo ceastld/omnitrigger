@@ -52,8 +52,8 @@ use calendar::{calculate_date, looks_like_date_query, DateError};
 use cidr::{calculate_cidr, CidrError};
 use color::{calculate_contrast, convert_color, ColorError};
 use conversion::{
-    calculate_pace, conversion_target_input, convert, estimate_transfer, suggested_targets,
-    ConversionError,
+    calculate_pace, calculate_pixel_density, conversion_target_input, convert, estimate_transfer,
+    suggested_targets, ConversionError,
 };
 use duration::{convert_duration, DurationError};
 use examples::{function_examples, matching_examples, tool_operation_examples, EXAMPLES};
@@ -438,6 +438,9 @@ impl Results {
                 }
                 Scope::AspectRatio => {
                     Self::text_value(calculate_aspect_ratio(term).map_err(ValueError::AspectRatio))
+                }
+                Scope::PixelDensity => {
+                    Self::text_value(calculate_pixel_density(term).map_err(ValueError::Conversion))
                 }
                 Scope::Cidr => Self::text_value(calculate_cidr(term).map_err(ValueError::Cidr)),
                 Scope::Timestamp => Self::text_value(

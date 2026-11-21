@@ -206,6 +206,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "计算屏幕像素密度和尺寸",
+        query: "像素密度: 3840×2160 @ 27 in",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "查看 IPv4 网段",
         query: "网段: 192.0.2.137/26",
     },
@@ -735,6 +740,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "颜色: color-mix(in srgb, #fff 25%, #000)",
     },
     Example {
+        icon: Icon::Layers,
+        title: "选对比度更高的文字色",
+        query: "颜色: 文字色 #3A86FF",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "找回用过的算式",
         query: "算式历史: ",
@@ -1181,6 +1191,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::TransferTime
         | Scope::Pace
         | Scope::AspectRatio
+        | Scope::PixelDensity
         | Scope::Cidr
         | Scope::Timestamp
         | Scope::Color
@@ -1242,6 +1253,7 @@ mod tests {
             Scope::TransferTime,
             Scope::Pace,
             Scope::AspectRatio,
+            Scope::PixelDensity,
             Scope::Cidr,
             Scope::Timestamp,
             Scope::Color,

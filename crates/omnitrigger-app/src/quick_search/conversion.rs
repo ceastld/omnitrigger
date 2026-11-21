@@ -1,5 +1,6 @@
 use std::f64::consts::{PI, TAU};
 
+use super::aspect_ratio::{pixel_dimensions, AspectRatioError};
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
 use super::duration::{convert_duration, elapsed_duration, DurationError};
 use super::radix::Base;
@@ -15,6 +16,7 @@ pub(super) enum ConversionError {
     InvalidTransfer,
     InvalidTransferDuration,
     InvalidPace,
+    InvalidPixelDensity,
     OutOfRange,
     TooLong,
 }
@@ -32,6 +34,7 @@ impl ConversionError {
                 "输入非负的数据量或速率。按数据量求速率时，用时须大于零。"
             }
             Self::InvalidPace => "距离、用时和速度须大于零，例如 配速: 10 km 用时 52:30",
+            Self::InvalidPixelDensity => "输入正整数分辨率和正的对角线尺寸，例如 3840×2160 @ 27 in",
             Self::OutOfRange => "结果超出换算范围",
             Self::TooLong => "换算式过长",
         }
@@ -609,6 +612,43 @@ pub(super) fn calculate_pace(query: &str) -> Result<String, ConversionError> {
     Ok(format!("{} · {}", result("km")?, result("mi")?))
 }
 
+pub(super) fn calculate_pixel_density(query: &str) -> Result<String, ConversionError> {
+    if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
+        return Err(ConversionError::TooLong);
+    }
+    let input = normalize(query).replace(char::is_whitespace, " ");
+    let (resolution, diagonal) = input
+        .split_once(['@', '按'])
+        .ok_or(ConversionError::Incomplete)?;
+    let (width, height) = pixel_dimensions(resolution).map_err(|error| match error {
+        AspectRatioError::Incomplete => ConversionError::Incomplete,
+        _ => ConversionError::InvalidPixelDensity,
+    })?;
+    let diagonal = diagonal.trim();
+    if diagonal.is_empty() {
+        return Err(ConversionError::Incomplete);
+    }
+    let (length, unit) = parse_quantity(diagonal)?;
+    if length <= 0. || unit.dimension != Dimension::Length {
+        return Err(ConversionError::InvalidPixelDensity);
+    }
+    let meters = length * unit.scale;
+    let (width, height) = (f64::from(width), f64::from(height));
+    let pixel_diagonal = width.hypot(height);
+    let density = pixel_diagonal / (meters / INCH_IN_METERS);
+    let width_cm = (width / pixel_diagonal) * meters * 100.;
+    let height_cm = (height / pixel_diagonal) * meters * 100.;
+    if [density, width_cm, height_cm]
+        .into_iter()
+        .any(|value| !value.is_finite() || value <= 0.)
+    {
+        return Err(ConversionError::OutOfRange);
+    }
+    Ok(format!(
+        "{density:.2} PPI · {width_cm:.2} × {height_cm:.2} cm"
+    ))
+}
+
 pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     let input = normalize(query).replace(char::is_whitespace, " ");
     let (source, target) = split_conversion(input.trim())?;
@@ -807,6 +847,35 @@ mod tests {
             ("1e-300 km/h", ConversionError::OutOfRange),
         ] {
             assert_eq!(calculate_pace(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn calculates_physical_pixel_density_with_a_length_unit_and_square_pixels() {
+        for (query, expected) in [
+            ("3840x2160 @ 27 in", "163.18 PPI · 59.77 × 33.62 cm"),
+            (
+                "１９２０×１０８０ 按 15.6英寸",
+                "141.21 PPI · 34.54 × 19.43 cm",
+            ),
+            ("800:600 @ 63.5 cm", "40.00 PPI · 50.80 × 38.10 cm"),
+            ("3 X 4 @ 10 in", "0.50 PPI · 15.24 × 20.32 cm"),
+        ] {
+            assert_eq!(
+                calculate_pixel_density(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            ("1920x1080", ConversionError::Incomplete),
+            ("1920x1080 @", ConversionError::Incomplete),
+            ("1920x1080 @ 15 kg", ConversionError::InvalidPixelDensity),
+            ("1920x1080 @ 0 in", ConversionError::InvalidPixelDensity),
+            ("0x1080 @ 15 in", ConversionError::InvalidPixelDensity),
+            ("1920x1080 @ 1e308 km", ConversionError::OutOfRange),
+        ] {
+            assert_eq!(calculate_pixel_density(query), Err(error), "{query}");
         }
     }
 

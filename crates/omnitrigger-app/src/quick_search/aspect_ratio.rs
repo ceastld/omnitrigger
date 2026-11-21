@@ -31,6 +31,13 @@ fn dimension(input: &str) -> Result<u32, AspectRatioError> {
         .ok_or(AspectRatioError::InvalidDimension)
 }
 
+pub(super) fn pixel_dimensions(input: &str) -> Result<(u32, u32), AspectRatioError> {
+    let (width, height) = input
+        .split_once(['×', 'x', 'X', ':'])
+        .ok_or(AspectRatioError::Incomplete)?;
+    Ok((dimension(width)?, dimension(height)?))
+}
+
 fn scale_dimension(value: u32, original: u32, target: u32) -> Result<u32, AspectRatioError> {
     let original = u64::from(original);
     let rounded = (u64::from(value) * u64::from(target) + original / 2) / original;
@@ -48,10 +55,7 @@ pub(super) fn calculate_aspect_ratio(query: &str) -> Result<String, AspectRatioE
         .map_or((input.as_str(), None), |(size, target)| {
             (size, Some(target.trim()))
         });
-    let (width, height) = size
-        .split_once(['×', 'x', 'X', ':'])
-        .ok_or(AspectRatioError::Incomplete)?;
-    let (width, height) = (dimension(width)?, dimension(height)?);
+    let (width, height) = pixel_dimensions(size)?;
     let Some(target) = target else {
         let (width, height) = (u128::from(width), u128::from(height));
         let divisor = common_divisor(width, height);

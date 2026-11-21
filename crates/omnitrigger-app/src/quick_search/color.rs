@@ -24,6 +24,7 @@ pub(super) enum ColorError {
     InvalidMix,
     MixColorSpace,
     TransparentContrast,
+    TransparentTextBackground,
 }
 
 impl ColorError {
@@ -36,6 +37,7 @@ impl ColorError {
             Self::InvalidMix => "输入两个颜色，权重范围为 0% 到 100%，总权重需大于 0%",
             Self::MixColorSpace => "颜色混合支持 in srgb",
             Self::TransparentContrast => "计算对比度需要两个不透明颜色",
+            Self::TransparentTextBackground => "需要不透明底色，也可先叠加到实际背景上",
         }
     }
 }
@@ -409,6 +411,9 @@ pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
     } else {
         (input, None)
     };
+    let (first, rest) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+    let choose_text = first == "文字色" || first.eq_ignore_ascii_case("text-color");
+    let input = if choose_text { rest.trim() } else { input };
     let mix_prefix = "color-mix(";
     let (channels, default) = if input
         .get(..mix_prefix.len())
@@ -427,6 +432,11 @@ pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
             ColorFormat::Hex
         };
         (Channels::parse(input)?, default)
+    };
+    let (channels, default) = if choose_text {
+        (pick_text_color(channels)?, ColorFormat::Hex)
+    } else {
+        (channels, default)
     };
     let [r, g, b] = channels.rgb;
     let output = match target.unwrap_or(default) {
@@ -465,6 +475,26 @@ fn relative_luminance(rgb: [u8; 3]) -> f64 {
     0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 
+fn contrast_ratio(first: f64, second: f64) -> f64 {
+    (first.max(second) + 0.05) / (first.min(second) + 0.05)
+}
+
+fn pick_text_color(background: Channels) -> Result<Channels, ColorError> {
+    if background.alpha.unwrap_or(255) != 255 {
+        return Err(ColorError::TransparentTextBackground);
+    }
+    let luminance = relative_luminance(background.rgb);
+    let channel = if contrast_ratio(luminance, 0.) >= contrast_ratio(luminance, 1.) {
+        0
+    } else {
+        255
+    };
+    Ok(Channels {
+        rgb: [channel; 3],
+        alpha: None,
+    })
+}
+
 fn color_pair<'a>(input: &'a str, local: &str, english: &str) -> Option<(&'a str, &'a str)> {
     input.split_once(local).or_else(|| {
         let start = input.to_ascii_lowercase().find(english)?;
@@ -483,8 +513,7 @@ pub(super) fn calculate_contrast(input: &str) -> Result<ColorContrast, ColorErro
     }
     let first_luminance = relative_luminance(first.rgb);
     let second_luminance = relative_luminance(second.rgb);
-    let ratio = (first_luminance.max(second_luminance) + 0.05)
-        / (first_luminance.min(second_luminance) + 0.05);
+    let ratio = contrast_ratio(first_luminance, second_luminance);
     let ratio = format_result(ratio).map_err(|_| ColorError::Invalid)?;
     Ok(ColorContrast {
         output: format!("{ratio}:1"),
@@ -495,6 +524,31 @@ pub(super) fn calculate_contrast(input: &str) -> Result<ColorContrast, ColorErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picks_the_higher_contrast_of_black_or_white_for_an_opaque_background() {
+        for (input, output, swatch) in [
+            ("文字色 #3A86FF", "#000000", 0x000000ff),
+            ("文字色 #757575", "#FFFFFF", 0xffffffff),
+            ("文字色 #767676", "#000000", 0x000000ff),
+            ("text-color #123 to rgb", "rgb(255, 255, 255)", 0xffffffff),
+            ("文字色 #fff8 over #000", "#000000", 0x000000ff),
+        ] {
+            assert_eq!(
+                convert_color(input),
+                Ok(Color {
+                    output: output.to_owned(),
+                    swatch,
+                }),
+                "{input}",
+            );
+        }
+        assert_eq!(
+            convert_color("文字色 transparent"),
+            Err(ColorError::TransparentTextBackground),
+        );
+        assert_eq!(convert_color("文字色"), Err(ColorError::Incomplete));
+    }
 
     #[test]
     fn mixes_two_srgb_colors_with_premultiplied_alpha_and_relative_weights() {
