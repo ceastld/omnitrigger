@@ -6,8 +6,6 @@ pub(super) struct Example {
     pub(super) query: &'static str,
 }
 
-const RESULT_LIMIT: usize = 8;
-
 pub(super) const EXAMPLES: &[Example] = &[
     Example {
         icon: Icon::Terminal,
@@ -289,6 +287,5 @@ pub(super) fn matching_examples(query: &str) -> Vec<usize> {
                 .all(|word| title.contains(word) || example_query.contains(word))
         })
         .map(|(index, _)| index)
-        .take(RESULT_LIMIT)
         .collect()
 }

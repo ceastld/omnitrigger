@@ -63,6 +63,7 @@ const WIDTH: f32 = 500.;
 const PAGE_ROW_HEIGHT: f32 = 38.;
 const PAGE_RESULT_LIMIT: usize = 4;
 const EXAMPLE_ROW_HEIGHT: f32 = 30.;
+const EXAMPLE_PAGE_SIZE: usize = 8;
 const VALUE_COLUMNS: usize = 40;
 const MAX_VALUE_LINES: usize = 6;
 const VALUE_LINE_HEIGHT: f32 = 18.;
@@ -486,7 +487,7 @@ impl Results {
                 158. + value_extra_height(&value.text) + hint_height
             }
             Self::Help(items) if !items.is_empty() => {
-                132. + items.len() as f32 * EXAMPLE_ROW_HEIGHT
+                132. + items.len().min(EXAMPLE_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
             }
             Self::Calculations(items) | Self::ConversionTargets(items) if !items.is_empty() => {
                 132. + items.len() as f32 * EXAMPLE_ROW_HEIGHT
@@ -719,6 +720,11 @@ impl QuickSearch {
                 }
             }
             "escape" => window.remove_window(),
+            key @ ("pageup" | "pagedown") => {
+                if !self.change_example_page(key == "pagedown", cx) {
+                    return;
+                }
+            }
             "tab" => {
                 if self.results.arithmetic_result().is_none() {
                     return;
@@ -749,6 +755,27 @@ impl QuickSearch {
         cx.stop_propagation();
     }
 
+    fn change_example_page(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
+        let Results::Help(items) = &self.results else {
+            return false;
+        };
+        if items.len() <= EXAMPLE_PAGE_SIZE {
+            return false;
+        }
+        let page = self.selected / EXAMPLE_PAGE_SIZE;
+        let last_page = (items.len() - 1) / EXAMPLE_PAGE_SIZE;
+        let next = if forward {
+            (page + 1).min(last_page)
+        } else {
+            page.saturating_sub(1)
+        };
+        if next != page {
+            self.selected = next * EXAMPLE_PAGE_SIZE;
+            cx.notify();
+        }
+        true
+    }
+
     fn suggestion_row(&self, index: usize, height: f32) -> Stateful<Div> {
         let selected = index == self.selected;
         div()
@@ -775,33 +802,69 @@ impl QuickSearch {
     }
 
     fn render_examples(&self, items: &[usize], cx: &mut Context<Self>) -> Div {
+        let page = self.selected / EXAMPLE_PAGE_SIZE;
+        let start = page * EXAMPLE_PAGE_SIZE;
+        let end = (start + EXAMPLE_PAGE_SIZE).min(items.len());
         div()
             .flex()
             .flex_col()
-            .children(items.iter().enumerate().map(|(index, &example)| {
-                let example = &EXAMPLES[example];
-                let query = example.query;
-                self.suggestion_row(index, EXAMPLE_ROW_HEIGHT)
-                    .child(icon(example.icon, 16., theme::ACCENT))
-                    .child(div().w(px(130.)).truncate().child(example.title))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(theme::MONO_FONT)
-                            .text_size(px(12.))
-                            .text_color(rgb(theme::TEXT_MUTED))
-                            .child(query.trim_end()),
-                    )
-                    .when(index == self.selected, |row| {
-                        row.child(div().text_color(rgb(theme::TEXT_MUTED)).child("Enter 填入"))
-                    })
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.fill_query(query, window, cx)),
-                    )
-            }))
-            .when(items.len() > 1, |list| {
+            .children(
+                items[start..end]
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, &example)| {
+                        let index = start + offset;
+                        let example = &EXAMPLES[example];
+                        let query = example.query;
+                        self.suggestion_row(index, EXAMPLE_ROW_HEIGHT)
+                            .child(icon(example.icon, 16., theme::ACCENT))
+                            .child(div().w(px(130.)).truncate().child(example.title))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_family(theme::MONO_FONT)
+                                    .text_size(px(12.))
+                                    .text_color(rgb(theme::TEXT_MUTED))
+                                    .child(query.trim_end()),
+                            )
+                            .when(index == self.selected, |row| {
+                                row.child(
+                                    div().text_color(rgb(theme::TEXT_MUTED)).child("Enter 填入"),
+                                )
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.fill_query(query, window, cx)
+                            }))
+                    }),
+            )
+            .when(items.len() > EXAMPLE_PAGE_SIZE, |list| {
+                let page_count = items.len().div_ceil(EXAMPLE_PAGE_SIZE);
+                list.child(
+                    Self::selection_hint("↑ ↓ 选择  ·  ? 后筛选  ·  PgUp / PgDn")
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(div().flex_1())
+                        .child(
+                            button("example-prev", "上一页", Tone::Ghost, page > 0)
+                                .h(px(20.))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.change_example_page(false, cx);
+                                })),
+                        )
+                        .child(format!("{} / {page_count}", page + 1))
+                        .child(
+                            button("example-next", "下一页", Tone::Ghost, page + 1 < page_count)
+                                .h(px(20.))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.change_example_page(true, cx);
+                                })),
+                        ),
+                )
+            })
+            .when((2..=EXAMPLE_PAGE_SIZE).contains(&items.len()), |list| {
                 let hint = if matches!(self.input.read(cx).text().trim(), "?" | "？") {
                     "↑ ↓ 选择  ·  ? 后可加关键词"
                 } else {
@@ -867,8 +930,8 @@ impl QuickSearch {
                     .font_family(theme::MONO_FONT)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(theme::ACCENT));
-                let columns = if swatch.is_some() { 20 } else { 28 };
-                let value = if result.is_ascii() && result.len() > columns {
+                let large_text_columns = if swatch.is_some() { 20 } else { 24 };
+                let value = if result.is_ascii() && result.len() > large_text_columns {
                     let clipped = result.len() > VALUE_COLUMNS * MAX_VALUE_LINES;
                     value
                         .flex()
@@ -1195,7 +1258,12 @@ mod tests {
     #[test]
     fn quick_search_help_shows_only_supported_examples() {
         for query in ["?", " ？ "] {
-            assert!(matches!(for_query(query, &[]), Results::Help(items) if items.len() == 8));
+            let results = for_query(query, &[]);
+            assert_eq!(
+                results.height(),
+                132. + EXAMPLE_PAGE_SIZE as f32 * EXAMPLE_ROW_HEIGHT
+            );
+            assert!(matches!(results, Results::Help(items) if items.len() == EXAMPLES.len()));
         }
         for (query, expected) in [
             ("？ 速率", &["8Mbps to MB/s"][..]),
