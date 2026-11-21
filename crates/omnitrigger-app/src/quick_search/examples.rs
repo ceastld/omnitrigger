@@ -1202,6 +1202,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "提取正则表达式指定的捕获组",
+        query: r#"文本: 正则取组 id "ID=(?<id>[0-9]+)" ID=001 ID=002"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用正则表达式替换文本",
         query: r#"文本: 正则替换 "([0-9]{4})/([0-9]{2})/([0-9]{2})" "$1-$2-$3" 2026/11/21"#,
     },
@@ -1389,6 +1394,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "删除 CSV 中内容重复的行",
         query: "CSV: 去重 编号,备注\n001,\"茶,咖啡\"\n\"001\",\"茶,咖啡\"\n002,梨",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按指定的 CSV 列去重并保留整行",
+        query: "CSV: 按列去重 1,2 编号,区域,备注\n001,东,\"茶,咖啡\"\n001,东,第二条\n001,西,第三条",
     },
     Example {
         icon: Icon::Layers,

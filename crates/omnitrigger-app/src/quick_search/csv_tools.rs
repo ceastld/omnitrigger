@@ -20,7 +20,7 @@ impl CsvError {
         match self {
             Self::MissingInput => "在操作名后粘贴表格，可用换行开始数据",
             Self::UnknownOperation => {
-                "可用 转JSON、对象、Markdown、转置、转TSV、从TSV、选列 或 去重"
+                "可用 转JSON、对象、Markdown、转置、转TSV、从TSV、选列、去重 或 按列去重"
             }
             Self::UnclosedQuote => "字段的双引号尚未闭合",
             Self::InvalidSeparator => "检查引号和分隔符，引号内的双引号用两个双引号表示",
@@ -42,6 +42,7 @@ enum Operation {
     FromTsv,
     SelectColumns(Vec<usize>),
     DeduplicateRows,
+    DeduplicateByColumns(Vec<usize>),
 }
 
 pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
@@ -55,9 +56,14 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         "从tsv" | "from-tsv" => Operation::FromTsv,
         "去重" | "deduplicate" => Operation::DeduplicateRows,
         "选列" | "pick-columns" => {
-            let (columns, data) = split_argument(input).ok_or(CsvError::MissingInput)?;
+            let (columns, data) = column_arguments(input)?;
             input = data;
-            Operation::SelectColumns(column_indices(columns)?)
+            Operation::SelectColumns(columns)
+        }
+        "按列去重" | "deduplicate-columns" => {
+            let (columns, data) = column_arguments(input)?;
+            input = data;
+            Operation::DeduplicateByColumns(columns)
         }
         _ => return Err(CsvError::UnknownOperation),
     };
@@ -81,13 +87,9 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::SelectColumns(columns) => select_columns(&rows, &columns),
         Operation::DeduplicateRows => {
             let mut seen = HashSet::new();
-            let rows: Vec<_> = rows
-                .iter()
-                .filter(|row| seen.insert(*row))
-                .cloned()
-                .collect();
-            Ok(write_rows(&rows, ','))
+            Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
         }
+        Operation::DeduplicateByColumns(columns) => deduplicate_by_columns(&rows, &columns),
     }
 }
 
@@ -97,6 +99,11 @@ fn split_argument(input: &str) -> Option<(&str, &str)> {
         argument,
         input[argument.len()..].strip_prefix("\r\n").unwrap_or(rest),
     ))
+}
+
+fn column_arguments(input: &str) -> Result<(Vec<usize>, &str), CsvError> {
+    let (columns, data) = split_argument(input).ok_or(CsvError::MissingInput)?;
+    Ok((column_indices(columns)?, data))
 }
 
 fn column_indices(input: &str) -> Result<Vec<usize>, CsvError> {
@@ -122,14 +129,33 @@ fn column_indices(input: &str) -> Result<Vec<usize>, CsvError> {
 
 fn select_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, CsvError> {
     let width = rows.first().ok_or(CsvError::MissingInput)?.len();
-    if columns.iter().any(|&index| index >= width) {
-        return Err(CsvError::ColumnOutOfRange);
-    }
+    validate_column_width(columns, width)?;
     let selected: Vec<_> = rows
         .iter()
         .map(|row| columns.iter().map(|&index| row[index].clone()).collect())
         .collect();
     Ok(write_rows(&selected, ','))
+}
+
+fn deduplicate_by_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    validate_column_width(columns, header.len())?;
+    let mut seen = HashSet::new();
+    let unique_records = records.iter().filter(|row| {
+        let key: Vec<_> = columns.iter().map(|&index| row[index].as_str()).collect();
+        seen.insert(key)
+    });
+    Ok(write_rows(
+        std::iter::once(header).chain(unique_records),
+        ',',
+    ))
+}
+
+fn validate_column_width(columns: &[usize], width: usize) -> Result<(), CsvError> {
+    if columns.iter().any(|&index| index >= width) {
+        return Err(CsvError::ColumnOutOfRange);
+    }
+    Ok(())
 }
 
 fn json_objects(rows: &[Vec<String>]) -> Result<String, CsvError> {
@@ -198,9 +224,9 @@ fn transpose(rows: &[Vec<String>]) -> String {
         .join("\r\n")
 }
 
-fn write_rows(rows: &[Vec<String>], delimiter: char) -> String {
+fn write_rows<'a>(rows: impl IntoIterator<Item = &'a Vec<String>>, delimiter: char) -> String {
     let separator = delimiter.to_string();
-    rows.iter()
+    rows.into_iter()
         .map(|row| {
             row.iter()
                 .map(|cell| separated_cell(cell, delimiter))
@@ -334,6 +360,31 @@ mod tests {
         assert_eq!(
             transform_csv("deduplicate x\nx \nx").as_deref(),
             Ok("x\r\nx ")
+        );
+    }
+
+    #[test]
+    fn deduplicates_selected_csv_columns_and_retains_first_record_and_header() {
+        let csv = "编号,区域,备注\r\n001,东,\"茶,咖啡\"\r\n001,东,第二条\r\n001,西,第三条\r\n编号,区域,数据\r\n编号,区域,重复";
+        assert_eq!(
+            transform_csv(&format!("按列去重 1,2\r\n{csv}")).as_deref(),
+            Ok("编号,区域,备注\r\n001,东,\"茶,咖啡\"\r\n001,西,第三条\r\n编号,区域,数据")
+        );
+        assert_eq!(
+            transform_csv("deduplicate-columns 1 组,值\n,首行\n\"\",重复\n ,空格").as_deref(),
+            Ok("组,值\r\n\"\",首行\r\n ,空格")
+        );
+        assert_eq!(
+            transform_csv("按列去重 2 编号,名称").as_deref(),
+            Ok("编号,名称")
+        );
+        assert_eq!(
+            transform_csv("按列去重 2 编号"),
+            Err(CsvError::ColumnOutOfRange)
+        );
+        assert_eq!(
+            transform_csv("按列去重 1,1 编号"),
+            Err(CsvError::InvalidColumns)
         );
     }
 

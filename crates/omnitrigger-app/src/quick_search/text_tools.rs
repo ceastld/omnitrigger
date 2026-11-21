@@ -35,6 +35,8 @@ pub(super) enum TextError {
     MissingColumn,
     EmptySearchText,
     InvalidRegex,
+    IncompleteRegexGroup,
+    UnknownRegexGroup,
     ResultTooLarge,
     NullCharacter,
     InvalidBase64,
@@ -62,6 +64,8 @@ impl TextError {
             Self::MissingColumn => "至少一行的列数不足",
             Self::EmptySearchText => "请输入要查找的文字",
             Self::InvalidRegex => "请检查或缩短正则表达式",
+            Self::IncompleteRegexGroup => "输入组名或组号、带引号的正则表达式和原文",
+            Self::UnknownRegexGroup => "正则表达式中没有指定的捕获组",
             Self::ResultTooLarge => "文本结果超过 1 MiB",
             Self::NullCharacter => "结果含空字符，无法完整复制",
             Self::InvalidBase64 => "Base64 编码无效",
@@ -133,6 +137,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
                 .collect::<Vec<_>>()
                 .join("\n"));
         }
+        "正则取组" | "regex-capture" => return extract_regex_group(text),
         "json还原" | "json-unquote" => return decode_json_string(text),
         _ => {}
     }
@@ -565,6 +570,31 @@ fn regex_text_argument(input: &str) -> Result<(Regex, &str), TextError> {
     Ok((compile_regex(&pattern)?, text))
 }
 
+fn extract_regex_group(input: &str) -> Result<String, TextError> {
+    let (group, input) = input
+        .trim_start()
+        .split_once(char::is_whitespace)
+        .ok_or(TextError::IncompleteRegexGroup)?;
+    let (pattern, text) = regex_text_argument(input).map_err(|error| match error {
+        TextError::IncompleteTextArgument => TextError::IncompleteRegexGroup,
+        _ => error,
+    })?;
+    let index = group
+        .parse::<usize>()
+        .ok()
+        .filter(|&index| index < pattern.captures_len())
+        .or_else(|| pattern.capture_names().position(|name| name == Some(group)))
+        .ok_or(TextError::UnknownRegexGroup)?;
+
+    Ok(pattern
+        .captures_iter(text)
+        .filter_map(|captures| captures.get(index))
+        .filter(|matched| !matched.is_empty())
+        .map(|matched| matched.as_str())
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 fn compile_regex(pattern: &str) -> Result<Regex, TextError> {
     if pattern.is_empty() {
         return Err(TextError::EmptySearchText);
@@ -810,6 +840,33 @@ mod tests {
             (r#"正则提取全部 "[0-9]+" 没有数字"#, ""),
         ] {
             assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn extracts_a_numbered_or_named_regex_group_in_match_order() {
+        for (query, expected) in [
+            (r#"正则取组 id "(?<id>[0-9]+)[A-Z]" 001A 002B"#, "001\n002"),
+            (r#"regex-capture 2 "([A-Z])([0-9]+)?" A12 B C03"#, "12\n03"),
+            (r#"regex-capture 1 "A([0-9]*)" A A7"#, "7"),
+            (r#"regex-capture 0 "[A-Z][0-9]+" A7 B03"#, "A7\nB03"),
+            (
+                "正则取组 1 “文件\\s+([0-9]+)” 文件\r\n004 文件 005",
+                "004\n005",
+            ),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            (
+                r#"正则取组 无 "(?<id>[0-9]+)" 7"#,
+                TextError::UnknownRegexGroup,
+            ),
+            (r#"正则取组 9 "([0-9]+)" 7"#, TextError::UnknownRegexGroup),
+            (r#"正则取组 1 "([0-9]+)""#, TextError::IncompleteRegexGroup),
+            (r#"正则取组 1 "[" 7"#, TextError::InvalidRegex),
+        ] {
+            assert_eq!(transform_text(query), Err(error), "{query}");
         }
     }
 
