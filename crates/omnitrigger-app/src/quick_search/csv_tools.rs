@@ -128,7 +128,7 @@ fn transpose(rows: &[Vec<String>]) -> String {
         .join("\r\n")
 }
 
-fn csv_cell(cell: &str) -> Cow<'_, str> {
+pub(super) fn csv_cell(cell: &str) -> Cow<'_, str> {
     if cell.is_empty() || cell.starts_with('\u{feff}') || cell.contains([',', '"', '\r', '\n']) {
         Cow::Owned(format!("\"{}\"", cell.replace('"', "\"\"")))
     } else {

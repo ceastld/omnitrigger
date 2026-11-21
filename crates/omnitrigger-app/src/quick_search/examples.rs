@@ -1246,6 +1246,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把 JSON 对象列表转换为 CSV",
+        query: r#"JSON: 转CSV [{"编号":"001","数量":1.20},{"编号":"002","备注":"甲,乙"}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "从键名和下标生成 JSON 指针",
         query: r#"JSON: 生成指针 ["商品",0,"a/b"]"#,
     },

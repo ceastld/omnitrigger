@@ -7,6 +7,8 @@ use std::{
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
+use super::csv_tools::csv_cell;
+
 const MAX_PRETTY_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,6 +29,9 @@ pub(super) enum JsonError {
     KeyArguments,
     MissingKey,
     RenameConflict,
+    CsvRows,
+    CsvDuplicateKey,
+    CsvNullCharacter,
 }
 
 impl JsonError {
@@ -48,6 +53,9 @@ impl JsonError {
             Self::KeyArguments => "用 JSON 字符串数组填写键名，改键需要两个键名",
             Self::MissingKey => "顶层对象中找不到要改名的键",
             Self::RenameConflict => "改键要求原键唯一且新键名可用",
+            Self::CsvRows => "输入等宽且有数据列的数组，或至少有一个键的对象列表",
+            Self::CsvDuplicateKey => "同一对象的 CSV 列名需要唯一",
+            Self::CsvNullCharacter => "CSV 单元格不能包含空字符 U+0000",
         }
     }
 }
@@ -71,6 +79,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "解析指针" | "parse-pointer" => return parse_json_pointer(source),
         "改键" | "rename-key" => return rename_json_key(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
+        "转csv" | "to-csv" => return json_to_csv(source),
         _ => return Err(JsonError::UnknownOperation),
     };
     if source.is_empty() {
@@ -287,6 +296,102 @@ fn remove_json_keys(query: &str) -> Result<String, JsonError> {
             .into_iter()
             .filter(|(key, _)| !names.contains(key)),
     )
+}
+
+fn json_to_csv(source: &str) -> Result<String, JsonError> {
+    let rows = read_json_array(source)?;
+    match rows.first().and_then(|row| row.get().chars().next()) {
+        None => Ok(String::new()),
+        Some('[') => json_array_rows_to_csv(rows),
+        Some('{') => json_object_rows_to_csv(rows),
+        _ => Err(JsonError::CsvRows),
+    }
+}
+
+fn json_array_rows_to_csv(rows: Vec<&RawValue>) -> Result<String, JsonError> {
+    let mut width = None;
+    let mut output = Vec::with_capacity(rows.len());
+    for row in rows {
+        if !row.get().starts_with('[') {
+            return Err(JsonError::CsvRows);
+        }
+        let cells = read_json_array(row.get())?;
+        if cells.is_empty()
+            || width
+                .replace(cells.len())
+                .is_some_and(|previous| previous != cells.len())
+        {
+            return Err(JsonError::CsvRows);
+        }
+        let record = cells
+            .into_iter()
+            .map(json_csv_cell)
+            .collect::<Result<Vec<_>, _>>()?;
+        output.push(record.join(","));
+    }
+    Ok(output.join("\r\n"))
+}
+
+fn json_object_rows_to_csv(rows: Vec<&RawValue>) -> Result<String, JsonError> {
+    let mut order = Vec::new();
+    let mut positions = HashMap::new();
+    let mut entries = Vec::with_capacity(rows.len());
+    for row in rows {
+        if !row.get().starts_with('{') {
+            return Err(JsonError::CsvRows);
+        }
+        let mut fields = HashMap::new();
+        for (name, value) in read_object_entries(row.get())? {
+            let next = positions.len();
+            let position = *positions.entry(name.clone()).or_insert_with(|| {
+                order.push(name);
+                next
+            });
+            if fields.insert(position, value).is_some() {
+                return Err(JsonError::CsvDuplicateKey);
+            }
+        }
+        entries.push(fields);
+    }
+    if order.is_empty() {
+        return Err(JsonError::CsvRows);
+    }
+
+    let mut output = Vec::with_capacity(entries.len() + 1);
+    let headers = order
+        .iter()
+        .map(|name| encode_csv_cell(name))
+        .collect::<Result<Vec<_>, _>>()?;
+    output.push(headers.join(","));
+    for fields in entries {
+        let record = (0..order.len())
+            .map(|index| match fields.get(&index) {
+                Some(value) => json_csv_cell(value),
+                None => encode_csv_cell(""),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        output.push(record.join(","));
+    }
+    Ok(output.join("\r\n"))
+}
+
+fn json_csv_cell(value: &RawValue) -> Result<String, JsonError> {
+    let raw = value.get();
+    if raw.starts_with('"') {
+        let decoded = serde_json::from_str::<String>(raw).map_err(json_parse_error)?;
+        return encode_csv_cell(&decoded);
+    }
+    if raw.starts_with(['{', '[']) {
+        return encode_csv_cell(&layout_json(raw, false)?);
+    }
+    encode_csv_cell(if raw == "null" { "" } else { raw })
+}
+
+fn encode_csv_cell(value: &str) -> Result<String, JsonError> {
+    if value.contains('\0') {
+        return Err(JsonError::CsvNullCharacter);
+    }
+    Ok(csv_cell(value).into_owned())
 }
 
 fn build_json_pointer(source: &str) -> Result<String, JsonError> {
@@ -660,6 +765,35 @@ mod tests {
             Err(JsonError::LayoutTooLarge)
         );
         assert_eq!(transform_json(&format!("压缩 {nested}")).unwrap(), nested);
+    }
+
+    #[test]
+    fn converts_json_arrays_and_objects_to_csv_with_original_number_spellings() {
+        assert_eq!(
+            transform_json(r#"转CSV [["编号","备注"],["001","茶,咖啡"],["002","他说\"好\"\n下一行"],[9007199254740993,1.20]]"#).as_deref(),
+            Ok("编号,备注\r\n001,\"茶,咖啡\"\r\n002,\"他说\"\"好\"\"\n下一行\"\r\n9007199254740993,1.20")
+        );
+        assert_eq!(
+            transform_json(r#"转CSV [{"编号":"001","数量":1.20},{"编号":"002","备注":"甲,乙"},{"编号":"003","数量":null,"备注":{ "x":2 }}]"#).as_deref(),
+            Ok("编号,数量,备注\r\n001,1.20,\"\"\r\n002,\"\",\"甲,乙\"\r\n003,\"\",\"{\"\"x\"\":2}\"")
+        );
+        assert_eq!(transform_json("转CSV []").as_deref(), Ok(""));
+    }
+
+    #[test]
+    fn rejects_json_rows_that_cannot_be_represented_as_a_csv_table() {
+        for (query, error) in [
+            ("转CSV [1,2]", JsonError::CsvRows),
+            ("转CSV [[1],[2,3]]", JsonError::CsvRows),
+            ("转CSV [[]]", JsonError::CsvRows),
+            ("转CSV [{}]", JsonError::CsvRows),
+            (r#"转CSV [[],{"a":1}]"#, JsonError::CsvRows),
+            (r#"转CSV [{"a":1,"a":2}]"#, JsonError::CsvDuplicateKey),
+            (r#"转CSV [["\u0000"]]"#, JsonError::CsvNullCharacter),
+            (r#"转CSV [{"\u0000":1}]"#, JsonError::CsvNullCharacter),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
     }
 
     #[test]
