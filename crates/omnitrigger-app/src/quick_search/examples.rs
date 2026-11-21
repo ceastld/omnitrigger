@@ -594,6 +594,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         title: "从小数求分数",
         query: "分数: 0.125",
     },
+    Example {
+        icon: Icon::Terminal,
+        title: "精确计算分数算式",
+        query: "分数: 计算 (1/2+1/3)*6",
+    },
 ];
 
 pub(super) fn matching_examples(query: &str) -> Vec<usize> {

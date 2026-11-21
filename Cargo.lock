@@ -2997,6 +2997,8 @@ dependencies = [
  "chrono",
  "embed-resource",
  "gpui",
+ "num-bigint",
+ "num-rational",
  "omnitrigger-actions",
  "omnitrigger-browser",
  "omnitrigger-core",
