@@ -488,9 +488,8 @@ pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
         (expression.chars().count() <= QUERY_LIMIT).then_some(expression)
     };
     let magnitude = source.strip_prefix(['-', '+']).unwrap_or(source);
-    let prefixed_integer =
-        Base::prefixed(magnitude).is_some_and(|(base, digits)| base.parse_digits(digits).is_ok());
-    if separator.is_empty() && prefixed_integer {
+    let (base, digits) = Base::prefixed(magnitude).unwrap_or((Base::Decimal, magnitude));
+    if separator.is_empty() && base.parse_digits(digits).is_ok() {
         if Base::parse(prefix).is_some() {
             return None;
         }
@@ -525,6 +524,13 @@ pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
         })
         .collect();
     (!items.is_empty()).then_some(items)
+}
+
+pub(super) fn conversion_target_input(query: &str) -> Option<String> {
+    let input = normalize(query).replace(char::is_whitespace, " ");
+    let (source, _) = split_conversion(input.trim())?;
+    let replacement = format!("{source} to ");
+    suggested_targets(&replacement).map(|_| replacement)
 }
 
 fn convert_quantity(source: &str, target: &str) -> Result<String, ConversionError> {
@@ -803,15 +809,17 @@ mod tests {
     }
 
     #[test]
-    fn suggests_exact_radix_targets_for_prefixed_integers() {
-        let items = suggested_targets("0xff to").unwrap();
-        assert_eq!(
-            items
-                .iter()
-                .map(|item| item.result.as_str())
-                .collect::<Vec<_>>(),
-            ["255", "0b11111111", "0o377", "0xff"]
-        );
+    fn suggests_exact_radix_targets_for_integers() {
+        for query in ["0xff to", "255 to"] {
+            let items = suggested_targets(query).unwrap();
+            assert_eq!(
+                items
+                    .iter()
+                    .map(|item| item.result.as_str())
+                    .collect::<Vec<_>>(),
+                ["255", "0b11111111", "0o377", "0xff"]
+            );
+        }
         assert_eq!(
             suggested_targets("-0xFF to Bi").unwrap()[0].result,
             "-0b11111111"
@@ -829,7 +837,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|item| item.result == "1600 cm"));
-        for query in ["0xff", "0xff to oct", "0x_1 to", "0xff to unknown"] {
+        for query in ["0xff", "255", "0xff to oct", "0x_1 to", "0xff to unknown"] {
             assert!(suggested_targets(query).is_none(), "{query}");
         }
     }
@@ -854,7 +862,7 @@ mod tests {
                 assert_eq!(convert(&item.expression), Some(Ok(item.result)));
             }
         }
-        for query in ["3 to", "10 km to mi", "100未知单位转"] {
+        for query in ["3.5 to", "10 km to mi", "100未知单位转"] {
             assert!(suggested_targets(query).is_none(), "{query}");
         }
     }

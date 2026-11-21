@@ -49,7 +49,9 @@ use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, looks_like_date_query, DateError};
 use cidr::{calculate_cidr, CidrError};
 use color::{calculate_contrast, convert_color, ColorError};
-use conversion::{convert, estimate_transfer_time, suggested_targets, ConversionError};
+use conversion::{
+    conversion_target_input, convert, estimate_transfer_time, suggested_targets, ConversionError,
+};
 use duration::{convert_duration, DurationError};
 use examples::{matching_examples, tool_operation_examples, EXAMPLES};
 use fraction::{simplify_fraction, FractionError};
@@ -116,11 +118,21 @@ struct ResultValue {
     kind: ValueKind,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+impl ResultValue {
+    fn continuation_hint(&self) -> Option<&'static str> {
+        match &self.kind {
+            ValueKind::Calculation => Some("Tab 继续计算"),
+            ValueKind::Conversion(Some(_)) => Some("Tab 换目标"),
+            _ => None,
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
 enum ValueKind {
     Text,
     Calculation,
-    Conversion,
+    Conversion(Option<String>),
     Color(u32),
     ColorContrast([u32; 2]),
 }
@@ -394,7 +406,7 @@ impl Results {
                 Scope::Duration => {
                     Self::text_value(convert_duration(term).map_err(ValueError::Duration))
                 }
-                Scope::TransferTime => Self::conversion_value(estimate_transfer_time(term)),
+                Scope::TransferTime => Self::conversion_value(estimate_transfer_time(term), None),
                 Scope::AspectRatio => {
                     Self::text_value(calculate_aspect_ratio(term).map_err(ValueError::AspectRatio))
                 }
@@ -442,7 +454,7 @@ impl Results {
                         Self::ConversionTargets,
                     )
                 }
-                result => Self::conversion_value(result),
+                result => Self::conversion_value(result, Some(query)),
             };
         }
         if let Some(targets) = suggested_targets(query) {
@@ -522,12 +534,12 @@ impl Results {
         }))
     }
 
-    fn conversion_value(result: Result<String, ConversionError>) -> Self {
+    fn conversion_value(result: Result<String, ConversionError>, query: Option<&str>) -> Self {
         Self::Value(
             result
                 .map(|text| ResultValue {
                     text,
-                    kind: ValueKind::Conversion,
+                    kind: ValueKind::Conversion(query.and_then(conversion_target_input)),
                 })
                 .map_err(ValueError::Conversion),
         )
@@ -555,6 +567,13 @@ impl Results {
     }
 
     fn continuation_query(&self) -> Option<String> {
+        if let Self::Value(Ok(ResultValue {
+            kind: ValueKind::Conversion(Some(query)),
+            ..
+        })) = self
+        {
+            return Some(query.clone());
+        }
         let text = self.arithmetic_result()?;
         Some(if text.starts_with('-') {
             format!("({text})")
@@ -569,7 +588,7 @@ impl Results {
                 132. + items.len().min(DESTINATION_PAGE_SIZE) as f32 * PAGE_ROW_HEIGHT
             }
             Self::Value(Ok(value)) => {
-                let hint_height = if value.kind == ValueKind::Calculation {
+                let hint_height = if value.continuation_hint().is_some() {
                     24.
                 } else {
                     0.
@@ -825,15 +844,15 @@ impl QuickSearch {
         let Results::Value(Ok(result)) = &self.results else {
             return;
         };
-        let history = match result.kind {
+        let history = match &result.kind {
             ValueKind::Calculation => &self.index.recent.calculations,
-            ValueKind::Conversion => &self.index.recent.conversions,
+            ValueKind::Conversion(_) => &self.index.recent.conversions,
             _ => return,
         };
         history.record(&self.input.read(cx).text(), &result.text);
     }
 
-    fn continue_calculation(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn continue_value(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(query) = self.results.continuation_query() {
             self.remember_value(cx);
             self.fill_query(query, window, cx);
@@ -884,14 +903,18 @@ impl QuickSearch {
             }
             "tab" => {
                 let suggestion = self.results.suggested_input(self.selected);
-                if suggestion.is_none() && self.results.arithmetic_result().is_none() {
+                let continues_value = matches!(
+                    &self.results,
+                    Results::Value(Ok(value)) if value.continuation_hint().is_some()
+                );
+                if suggestion.is_none() && !continues_value {
                     return;
                 }
                 if !event.is_held {
                     if let Some(query) = suggestion {
                         self.fill_query(query.to_owned(), window, cx);
                     } else {
-                        self.continue_calculation(window, cx);
+                        self.continue_value(window, cx);
                     }
                 }
             }
@@ -1188,16 +1211,16 @@ impl QuickSearch {
                             .flex_none()
                             .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
                     );
-                div().flex().flex_col().child(row).when(
-                    output.kind == ValueKind::Calculation,
-                    |result| {
+                div().flex().flex_col().child(row).when_some(
+                    output.continuation_hint(),
+                    |result, hint| {
                         result.child(
-                            Self::selection_hint("Tab 继续计算")
-                                .id("continue-calculation")
+                            Self::selection_hint(hint)
+                                .id("continue-value")
                                 .cursor_pointer()
                                 .hover(|style| style.text_color(rgb(theme::ACCENT)))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.continue_calculation(window, cx);
+                                    this.continue_value(window, cx);
                                 })),
                         )
                     },
@@ -1502,7 +1525,7 @@ mod tests {
         let Results::Value(Ok(value)) = for_query("8 Mbps to MB/s", &[]) else {
             panic!("换算没有生成结果");
         };
-        assert!(value.kind == ValueKind::Conversion);
+        assert!(matches!(value.kind, ValueKind::Conversion(_)));
         recent.conversions.record("8 Mbps to MB/s", &value.text);
         recent.conversions.record("1 GiB to MiB", "1024 MiB");
         recent.calculations.record("2**10", "1024");
@@ -1888,12 +1911,36 @@ mod tests {
             let operand = for_query(query, &[]).continuation_query().unwrap();
             assert_eq!(operand, expected);
         }
-        for query in ["255 to dec", "2+", "日期: 今天", "颜色: #3A86FF"] {
+        for query in [
+            "2+",
+            "日期: 今天",
+            "颜色: #3A86FF",
+            "下载: 1 GB 按 100 Mbps",
+        ] {
             assert!(
                 for_query(query, &[]).continuation_query().is_none(),
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn reopens_conversion_targets_from_the_original_source() {
+        for (query, expected) in [
+            ("10 km to mi", "10 km to "),
+            ("0xff to dec", "0xff to "),
+            ("255 to bin", "255 to "),
+            ("１２ km 转英里", "12 km to "),
+        ] {
+            let result = for_query(query, &[]);
+            let next = result.continuation_query().expect("换算可继续选目标");
+            assert_eq!(next, expected);
+            assert!(
+                matches!(for_query(&next, &[]), Results::ConversionTargets(items)
+                if items.len() > 1)
+            );
+        }
+        assert_eq!(for_query("255", &[]).arithmetic_result(), Some("255"));
     }
 
     #[test]
