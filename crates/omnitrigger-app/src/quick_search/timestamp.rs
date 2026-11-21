@@ -1,11 +1,13 @@
 use chrono::{DateTime, Datelike, FixedOffset, Local, SecondsFormat, Utc};
 
 use super::calculator::normalize;
+use super::conversion::split_conversion;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum TimestampError {
     Incomplete,
     Invalid,
+    InvalidOffset,
     UnsupportedPrecision,
     OutOfRange,
 }
@@ -15,6 +17,7 @@ impl TimestampError {
         match self {
             Self::Incomplete => "输入时间戳或带时区的时间，例如 时间戳: 1700000000000ms",
             Self::Invalid => "请输入 Unix 秒、毫秒或带时区的 RFC 3339 时间",
+            Self::InvalidOffset => "请输入目标时区偏移，例如 +08:00 或 -05:30",
             Self::UnsupportedPrecision => "请输入可以用整秒或毫秒表示的时间",
             Self::OutOfRange => "结果超出四位年份的时间范围",
         }
@@ -32,11 +35,21 @@ fn convert_timestamp_with_local(
 ) -> Result<String, TimestampError> {
     let input = normalize(query);
     let input = input.trim();
+    let (input, offset) = if let Some((source, target)) = split_conversion(input) {
+        (source, Some(parse_offset(target)?))
+    } else {
+        (input, None)
+    };
     let lower = input.to_ascii_lowercase();
-    let local_suffix = lower
-        .strip_suffix("本地")
-        .or_else(|| lower.strip_suffix(" local"))
-        .or_else(|| (lower == "local").then_some(""));
+    let local_suffix = if offset.is_none() {
+        lower
+            .strip_suffix("本地")
+            .or_else(|| lower.strip_suffix(" local"))
+            .or_else(|| (lower == "local").then_some(""))
+    } else {
+        None
+    };
+    let display_in_zone = local_suffix.is_some() || offset.is_some();
     let lower = local_suffix.unwrap_or(&lower).trim_end();
     let input = &input[..lower.len()];
     if matches!(input, "" | "+" | "-") {
@@ -45,10 +58,12 @@ fn convert_timestamp_with_local(
 
     let display_time = |time: DateTime<Utc>, format| {
         ensure_four_digit_year(time.year())?;
-        if local_suffix.is_some() {
-            let local = to_local(time);
-            ensure_four_digit_year(local.year())?;
-            Ok(local.to_rfc3339_opts(format, false))
+        let zoned = offset
+            .map(|offset| time.with_timezone(&offset))
+            .or_else(|| local_suffix.is_some().then(|| to_local(time)));
+        if let Some(zoned) = zoned {
+            ensure_four_digit_year(zoned.year())?;
+            Ok(zoned.to_rfc3339_opts(format, false))
         } else {
             Ok(time.to_rfc3339_opts(format, true))
         }
@@ -59,7 +74,7 @@ fn convert_timestamp_with_local(
     let seconds = lower.strip_suffix('s').or_else(|| lower.strip_suffix('秒'));
     let quantity = milliseconds.or(seconds);
     if matches!(quantity.unwrap_or(lower).trim_end(), "现在" | "now") {
-        if local_suffix.is_some() {
+        if display_in_zone {
             let format = if milliseconds.is_some() {
                 SecondsFormat::Millis
             } else {
@@ -95,7 +110,7 @@ fn convert_timestamp_with_local(
     if fraction >= 1_000_000_000 || extra_precision {
         return Err(TimestampError::UnsupportedPrecision);
     }
-    if local_suffix.is_some() {
+    if display_in_zone {
         let format = if fraction == 0 {
             SecondsFormat::Secs
         } else {
@@ -108,6 +123,24 @@ fn convert_timestamp_with_local(
     } else {
         Ok(format!("{} ms", date.timestamp_millis()))
     }
+}
+
+fn parse_offset(input: &str) -> Result<FixedOffset, TimestampError> {
+    let input = input.trim().to_ascii_lowercase();
+    let input = input.strip_prefix("utc").unwrap_or(&input).trim_start();
+    if input.is_empty() {
+        return Err(TimestampError::Incomplete);
+    }
+    let [b'+' | b'-', hour_tens, hours, b':', minute_tens, minutes] = input.as_bytes() else {
+        return Err(TimestampError::InvalidOffset);
+    };
+    if ![hour_tens, hours, minute_tens, minutes]
+        .iter()
+        .all(|digit| digit.is_ascii_digit())
+    {
+        return Err(TimestampError::InvalidOffset);
+    }
+    input.parse().map_err(|_| TimestampError::InvalidOffset)
 }
 
 fn integer(input: &str) -> bool {
@@ -149,6 +182,42 @@ fn ensure_four_digit_year(year: i32) -> Result<(), TimestampError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn displays_unix_and_rfc3339_times_at_explicit_offsets() {
+        let now = DateTime::from_timestamp_millis(1_700_000_000_123).unwrap();
+        for (input, expected) in [
+            (
+                "1700000000123ms to UTC+08:00",
+                "2023-11-15T06:13:20.123+08:00",
+            ),
+            (
+                "1970-01-01T00:00:00Z to -03:30",
+                "1969-12-31T20:30:00-03:30",
+            ),
+            (
+                "1970-01-01T01:00:00.123+01:00 转 +08:00",
+                "1970-01-01T08:00:00.123+08:00",
+            ),
+            ("now ms to +05:30", "2023-11-15T03:43:20.123+05:30"),
+            ("0 to +00:00", "1970-01-01T00:00:00+00:00"),
+        ] {
+            assert_eq!(
+                convert_timestamp(input, now).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for (input, error) in [
+            ("1700000000 to", TimestampError::Incomplete),
+            ("1700000000 to +24:00", TimestampError::InvalidOffset),
+            ("1700000000 to +00:60", TimestampError::InvalidOffset),
+            ("1700000000 to +0:00", TimestampError::InvalidOffset),
+            ("9999-12-31T23:30:00Z to +01:00", TimestampError::OutOfRange),
+        ] {
+            assert_eq!(convert_timestamp(input, now), Err(error), "{input}");
+        }
+    }
 
     #[test]
     fn converts_unix_seconds_and_milliseconds_in_both_directions() {

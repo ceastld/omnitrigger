@@ -84,6 +84,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "换算到指定时区偏移",
+        query: "时间戳: 1700000000123ms to +08:00",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查询日期是星期几",
         query: "日期: 2026-11-21 星期几",
     },
