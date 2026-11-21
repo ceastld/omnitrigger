@@ -481,6 +481,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "换算电压",
+        query: "3.3 V to mV",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "换算电流",
+        query: "500 mA to A",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "换算电阻",
+        query: "2.2 kΩ to Ω",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算密度",
         query: "1000 kg/m³ to g/cm³",
     },

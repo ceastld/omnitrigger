@@ -53,6 +53,9 @@ enum Dimension {
     VolumeFlow,
     Force,
     Acceleration,
+    ElectricCurrent,
+    Voltage,
+    Resistance,
 }
 
 impl Dimension {
@@ -91,6 +94,9 @@ impl Dimension {
             Self::VolumeFlow => &["L/min", "L/s", "m³/h", "m³/s", "mL/s"],
             Self::Force => &["N", "kN", "kgf", "lbf", "mN", "MN", "dyn"],
             Self::Acceleration => &["m/s²", "g₀", "ft/s²", "cm/s²", "in/s²"],
+            Self::ElectricCurrent => &["A", "mA", "μA", "nA", "kA", "MA"],
+            Self::Voltage => &["V", "mV", "kV", "μV", "MV"],
+            Self::Resistance => &["Ω", "kΩ", "MΩ", "mΩ", "GΩ"],
         }
     }
 }
@@ -144,6 +150,19 @@ impl Unit {
             "kN" => return Ok(Self::linear("kN", Force, 1000.)),
             "mN" => return Ok(Self::linear("mN", Force, 0.001)),
             "MN" => return Ok(Self::linear("MN", Force, 1_000_000.)),
+            "nA" => return Ok(Self::linear("nA", ElectricCurrent, 1e-9)),
+            "μA" | "µA" | "uA" => return Ok(Self::linear("μA", ElectricCurrent, 1e-6)),
+            "mA" => return Ok(Self::linear("mA", ElectricCurrent, 1e-3)),
+            "kA" => return Ok(Self::linear("kA", ElectricCurrent, 1e3)),
+            "MA" => return Ok(Self::linear("MA", ElectricCurrent, 1e6)),
+            "μV" | "µV" | "uV" => return Ok(Self::linear("μV", Voltage, 1e-6)),
+            "mV" => return Ok(Self::linear("mV", Voltage, 1e-3)),
+            "kV" => return Ok(Self::linear("kV", Voltage, 1e3)),
+            "MV" => return Ok(Self::linear("MV", Voltage, 1e6)),
+            "mΩ" | "mΩ" | "mohm" => return Ok(Self::linear("mΩ", Resistance, 1e-3)),
+            "kΩ" | "kΩ" | "kohm" => return Ok(Self::linear("kΩ", Resistance, 1e3)),
+            "MΩ" | "MΩ" | "Mohm" => return Ok(Self::linear("MΩ", Resistance, 1e6)),
+            "GΩ" | "GΩ" | "Gohm" => return Ok(Self::linear("GΩ", Resistance, 1e9)),
             _ => {}
         }
         let unit = match name.to_ascii_lowercase().as_str() {
@@ -274,6 +293,22 @@ impl Unit {
             "g0" | "g₀" | "gₙ" | "标准重力加速度" => {
                 Self::linear("g₀", Acceleration, STANDARD_GRAVITY)
             }
+            "a" | "amp" | "ampere" | "安" | "安培" => Self::linear("A", ElectricCurrent, 1.),
+            "纳安" | "纳安培" => Self::linear("nA", ElectricCurrent, 1e-9),
+            "微安" | "微安培" => Self::linear("μA", ElectricCurrent, 1e-6),
+            "毫安" | "毫安培" => Self::linear("mA", ElectricCurrent, 1e-3),
+            "千安" | "千安培" => Self::linear("kA", ElectricCurrent, 1e3),
+            "兆安" | "兆安培" => Self::linear("MA", ElectricCurrent, 1e6),
+            "v" | "volt" | "伏" | "伏特" => Self::linear("V", Voltage, 1.),
+            "微伏" | "微伏特" => Self::linear("μV", Voltage, 1e-6),
+            "毫伏" | "毫伏特" => Self::linear("mV", Voltage, 1e-3),
+            "千伏" | "千伏特" => Self::linear("kV", Voltage, 1e3),
+            "兆伏" | "兆伏特" => Self::linear("MV", Voltage, 1e6),
+            "Ω" | "Ω" | "ohm" | "欧" | "欧姆" => Self::linear("Ω", Resistance, 1.),
+            "毫欧" | "毫欧姆" => Self::linear("mΩ", Resistance, 1e-3),
+            "千欧" | "千欧姆" => Self::linear("kΩ", Resistance, 1e3),
+            "兆欧" | "兆欧姆" => Self::linear("MΩ", Resistance, 1e6),
+            "吉欧" | "吉欧姆" => Self::linear("GΩ", Resistance, 1e9),
             "" => return Err(ConversionError::Incomplete),
             _ => return Err(ConversionError::UnknownUnit),
         };
@@ -669,6 +704,30 @@ mod tests {
             let results = suggested_targets(query).unwrap();
             assert_eq!(results[0].result, expected, "{query}");
         }
+    }
+
+    #[test]
+    fn converts_electrical_units_with_case_sensitive_prefixes() {
+        for (query, expected) in [
+            ("3.3 V to mV", "3300 mV"),
+            ("500mA to A", "0.5 A"),
+            ("750 uA to mA", "0.75 mA"),
+            ("2 mV to μV", "2000 μV"),
+            ("1 MV to kV", "1000 kV"),
+            ("2.2 kΩ to Ω", "2200 Ω"),
+            ("1 MΩ to kohm", "1000 kΩ"),
+            ("250 mohm to Ω", "0.25 Ω"),
+            ("１.５ 千欧 转 欧姆", "1500 Ω"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.to_owned())), "{query}");
+        }
+        assert_eq!(
+            convert("1 V to mA"),
+            Some(Err(ConversionError::DifferentDimensions)),
+        );
+        let targets = suggested_targets("3.3 V to").unwrap();
+        assert_eq!(targets[0].expression, "3.3 V to mV");
+        assert_eq!(targets[0].result, "3300 mV");
     }
 
     #[test]
