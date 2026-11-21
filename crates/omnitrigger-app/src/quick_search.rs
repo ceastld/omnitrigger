@@ -35,7 +35,7 @@ use calculator::{calculate, looks_like_calculation, CalculationError, QUERY_LIMI
 use calendar::{calculate_date, DateError};
 use conversion::{convert, ConversionError};
 use duration::{convert_duration, DurationError};
-use examples::EXAMPLES;
+use examples::{matching_examples, EXAMPLES};
 use omnitrigger_windows::ShortcutTarget;
 use presets::matching_presets;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -69,7 +69,7 @@ const PAGES: [(Page, &str); 9] = [
 enum Results {
     Value(Result<String, ValueError>),
     Destinations(Vec<Destination>),
-    Help,
+    Help(Vec<usize>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -218,8 +218,8 @@ impl Results {
         if query.is_empty() {
             return Self::Destinations(recent.suggestions(triggers));
         }
-        if matches!(query, "?" | "？") {
-            return Self::Help;
+        if let Some(terms) = query.strip_prefix(['?', '？']) {
+            return Self::Help(matching_examples(terms));
         }
         if let Some((scope, term)) = scoped_query(query) {
             return match scope {
@@ -337,7 +337,9 @@ impl Results {
                 132. + items.len() as f32 * PAGE_ROW_HEIGHT
             }
             Self::Value(Ok(value)) => 158. + value_extra_height(value),
-            Self::Help => 132. + EXAMPLES.len() as f32 * EXAMPLE_ROW_HEIGHT,
+            Self::Help(items) if !items.is_empty() => {
+                132. + items.len() as f32 * EXAMPLE_ROW_HEIGHT
+            }
             _ => 158.,
         }
     }
@@ -496,9 +498,9 @@ impl QuickSearch {
                     self.open_destination(destination, window, cx);
                 }
             }
-            Results::Help => {
-                if let Some(example) = EXAMPLES.get(self.selected) {
-                    self.fill_example(example.query, window, cx);
+            Results::Help(items) => {
+                if let Some(&index) = items.get(self.selected) {
+                    self.fill_example(EXAMPLES[index].query, window, cx);
                 }
             }
             Results::Value(Err(_)) => {}
@@ -529,7 +531,7 @@ impl QuickSearch {
             key @ ("up" | "down") => {
                 let count = match &self.results {
                     Results::Destinations(items) => items.len(),
-                    Results::Help => EXAMPLES.len(),
+                    Results::Help(items) => items.len(),
                     Results::Value(_) => 0,
                 };
                 if count == 0 {
@@ -572,11 +574,12 @@ impl QuickSearch {
             .child(label)
     }
 
-    fn render_examples(&self, cx: &mut Context<Self>) -> Div {
+    fn render_examples(&self, items: &[usize], cx: &mut Context<Self>) -> Div {
         div()
             .flex()
             .flex_col()
-            .children(EXAMPLES.iter().enumerate().map(|(index, example)| {
+            .children(items.iter().enumerate().map(|(index, &example)| {
+                let example = &EXAMPLES[example];
                 let query = example.query;
                 self.suggestion_row(index, EXAMPLE_ROW_HEIGHT)
                     .child(icon(example.icon, 16., theme::ACCENT))
@@ -600,7 +603,14 @@ impl QuickSearch {
                         }),
                     )
             }))
-            .child(Self::selection_hint("↑ ↓ 选择"))
+            .when(items.len() > 1, |list| {
+                let hint = if matches!(self.input.read(cx).text().trim(), "?" | "？") {
+                    "↑ ↓ 选择  ·  ? 后可加关键词"
+                } else {
+                    "↑ ↓ 选择"
+                };
+                list.child(Self::selection_hint(hint))
+            })
     }
 
     fn render_result(&self, cx: &mut Context<Self>) -> Div {
@@ -648,7 +658,10 @@ impl QuickSearch {
                     theme::DANGER_TEXT
                 }))
                 .child(error.message()),
-            Results::Help => self.render_examples(cx),
+            Results::Help(items) if items.is_empty() => row
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child("未找到用法示例"),
+            Results::Help(items) => self.render_examples(items, cx),
             Results::Destinations(items) if items.is_empty() => {
                 row.text_color(rgb(theme::TEXT_MUTED)).child("未找到匹配项")
             }
@@ -842,7 +855,22 @@ mod tests {
     #[test]
     fn quick_search_help_shows_only_supported_examples() {
         for query in ["?", " ？ "] {
-            assert!(matches!(for_query(query, &[]), Results::Help));
+            assert!(matches!(for_query(query, &[]), Results::Help(items) if items.len() == 8));
+        }
+        for (query, expected) in [
+            ("？ 速率", &["8Mbps to MB/s"][..]),
+            ("? UNIX", &["时间戳: 1700000000123ms"][..]),
+            ("? 时长", &["时长: 5400秒", "时长: 01:30:00 - 25分钟"][..]),
+            ("? 无对应示例", &[][..]),
+        ] {
+            let Results::Help(items) = for_query(query, &[]) else {
+                panic!("未打开用法示例：{query}");
+            };
+            let displayed: Vec<_> = items
+                .into_iter()
+                .map(|index| EXAMPLES[index].query)
+                .collect();
+            assert_eq!(displayed, expected, "{query}");
         }
         let index = SearchIndex {
             triggers: crate::settings::defaults()
