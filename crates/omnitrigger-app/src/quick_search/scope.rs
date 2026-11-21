@@ -51,6 +51,7 @@ pub(super) enum Scope {
     Percentage,
     RatioAllocation,
     UrlEncoding,
+    Path,
 }
 
 pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
@@ -117,6 +118,7 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
         Scope::Percentage => Some("百分比:"),
         Scope::RatioAllocation => Some("配比:"),
         Scope::UrlEncoding => Some("URL:"),
+        Scope::Path => Some("路径:"),
         _ => None,
     }
 }
@@ -184,6 +186,7 @@ fn parse_scope(prefix: &str) -> Option<Scope> {
         "百分比" | "比例" | "percentage" => Scope::Percentage,
         "配比" | "按比例分配" | "ratio allocation" => Scope::RatioAllocation,
         "网址" | "url" => Scope::UrlEncoding,
+        "路径" | "path" => Scope::Path,
         _ => return None,
     };
     Some(scope)

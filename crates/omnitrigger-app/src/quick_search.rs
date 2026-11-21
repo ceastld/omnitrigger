@@ -20,6 +20,7 @@ mod local_files;
 mod open_windows;
 mod operators;
 mod paper;
+mod path_tools;
 mod percentage;
 mod presets;
 mod radix;
@@ -83,6 +84,7 @@ use local_files::{directory_query, LocalFilesIndex, FOLDER_DEBOUNCE};
 use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
 use open_windows::OpenWindowsIndex;
 use paper::{calculate_paper, PaperError};
+use path_tools::{path_component, PathError};
 use percentage::{compare_percentages, PercentageError};
 use presets::matching_presets;
 use radix::{convert_arbitrary_radix, RadixError};
@@ -339,6 +341,7 @@ enum ValueError {
     Equation(EquationError),
     Percentage(PercentageError),
     UrlEncoding(UrlEncodingError),
+    Path(PathError),
 }
 
 impl ValueError {
@@ -371,6 +374,7 @@ impl ValueError {
             Self::Equation(error) => error.message(),
             Self::Percentage(error) => error.message(),
             Self::UrlEncoding(error) => error.message(),
+            Self::Path(error) => error.message(),
         }
     }
 
@@ -412,6 +416,7 @@ impl ValueError {
                 )
                 | Self::Percentage(PercentageError::Incomplete)
                 | Self::UrlEncoding(UrlEncodingError::Incomplete)
+                | Self::Path(PathError::Incomplete)
                 | Self::Json(JsonError::Incomplete)
                 | Self::Csv(CsvError::MissingInput | CsvError::UnclosedQuote)
         )
@@ -626,6 +631,7 @@ impl Results {
                 Scope::UrlEncoding => {
                     Self::text_value(convert_url_component(term).map_err(ValueError::UrlEncoding))
                 }
+                Scope::Path => Self::text_value(path_component(term).map_err(ValueError::Path)),
             };
         }
         if let Some(result) = convert(query) {

@@ -171,11 +171,7 @@ impl LocalFilesIndex {
 
 fn split_query(query: &str) -> Option<(&str, &str)> {
     let (directory, filter) = query.split_once('|')?;
-    let directory = directory.trim();
-    let directory = directory
-        .strip_prefix('"')
-        .and_then(|path| path.strip_suffix('"'))
-        .unwrap_or(directory);
+    let directory = super::path_tools::strip_path_quotes(directory.trim());
     (!directory.is_empty()).then_some((directory, filter.trim()))
 }
 

@@ -151,6 +151,7 @@
 - 输入 `URL: 源 https://example.invalid:8443/doc?x=1#part` 得到 `https://example.invalid:8443`。结果由协议、主机和非默认端口组成。 [WHATWG URL 源的定义](https://url.spec.whatwg.org/#concept-url-origin)
 - 输入 `URL: 加参数 ["tag","茶"] https://example.invalid/doc?tag=first#part` 会在末尾追加一项。用 `URL: 设参数` 会替换第一个同名项并移除其余同名项。其他查询参数保留编码和顺序。 [WHATWG 表单编码规则](https://url.spec.whatwg.org/#concept-urlencoded-serializer)
 - 输入 `URL: 文件链接 "C:\Docs\a b.txt"` 得到 `file:///C:/Docs/a%20b.txt`。用 `URL: 文件路径` 加上链接可转回 Windows 路径。支持绝对盘符路径和 UNC 路径。 [Rust URL 文件路径转换](https://docs.rs/url/2.5.8/url/struct.Url.html#method.from_file_path)
+- 输入 `路径: 文件名 "C:\工作\发布 包.tar.gz"` 得到 `发布 包.tar.gz`。换用 `主名`、`扩展名` 或 `上一级`，可分别提取 `发布 包.tar`、`gz` 或 `C:\工作`。操作直接解析粘贴的路径文本。 [Rust 路径组件](https://doc.rust-lang.org/std/path/struct.Path.html)
 - 输入 `JSON: 格式化 {"名称":"北京","值":1}` 可添加两格缩进，输入 `JSON: 压缩` 加上 JSON 文本可移除结构空白。两种操作均检查语法，并保留原有键顺序、数字和字符串拼写。搜索框可输入最多 4096 个字符。
 - 输入 `JSON: 取值 /商品/0/价格 {"商品":[{"价格":9007199254740993}]}` 可提取原文中的 `9007199254740993`。路径中的 `~1` 表示键名内的斜杠，`~0` 表示波浪号。带空白的路径可用 JSON 双引号包住。参见 [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901.html#section-4)。
 - 输入 `JSON: 取列 /价格 [{"价格":9.90},{"价格":2e2}]` 得到 `[9.90,2e2]`。搜索框按同一个路径读取数组中的每一项，保留原始数字格式。路径缺项时会提示检查输入。

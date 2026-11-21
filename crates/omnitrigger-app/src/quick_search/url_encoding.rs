@@ -107,10 +107,7 @@ fn inspect_url(input: &str) -> Result<String, UrlEncodingError> {
 }
 
 fn encode_file_path(input: &str) -> Result<String, UrlEncodingError> {
-    let path = input
-        .strip_prefix('"')
-        .and_then(|input| input.strip_suffix('"'))
-        .unwrap_or(input);
+    let path = super::path_tools::strip_path_quotes(input);
     if path.contains(['\0', '"']) {
         return Err(UrlEncodingError::InvalidFilePath);
     }

@@ -1295,6 +1295,26 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 从TSV 编号\t备注\n001\t茶,咖啡",
     },
     Example {
+        icon: Icon::Layers,
+        title: "从路径提取文件名",
+        query: r#"路径: 文件名 "C:\工作\发布 包.tar.gz""#,
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "提取去掉扩展名的文件主名",
+        query: r"路径: 主名 C:\工作\发布 包.tar.gz",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "提取最后一个扩展名",
+        query: r"路径: 扩展名 C:\工作\发布 包.tar.gz",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "提取上一级目录",
+        query: r"路径: 上一级 C:\工作\发布 包.tar.gz",
+    },
+    Example {
         icon: Icon::Browser,
         title: "编码 URL 参数值",
         query: "URL: 编码 北京 A+B",
@@ -1468,6 +1488,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Csv
         | Scope::TextTools
         | Scope::UrlEncoding
+        | Scope::Path
         | Scope::Percentage
         | Scope::Uuid
         | Scope::Ulid
