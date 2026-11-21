@@ -1,6 +1,7 @@
 use std::f64::consts::TAU;
 
 use super::calculator::normalize;
+use super::conversion::split_conversion;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Color {
@@ -12,6 +13,7 @@ pub(super) struct Color {
 pub(super) enum ColorError {
     Incomplete,
     Invalid,
+    InvalidFormat,
 }
 
 impl ColorError {
@@ -19,8 +21,15 @@ impl ColorError {
         match self {
             Self::Incomplete => "输入 HEX、RGB 或 HSL 颜色",
             Self::Invalid => "检查 HEX 位数或颜色通道范围",
+            Self::InvalidFormat => "目标颜色格式可用 HEX、RGB 或 HSL",
         }
     }
+}
+
+enum ColorFormat {
+    Hex,
+    Rgb,
+    Hsl,
 }
 
 struct Channels {
@@ -165,35 +174,117 @@ fn rgb_from_hsl(hue: &str, saturation: &str, lightness: &str) -> Result<[u8; 3],
     Ok(rgb.map(|value| ((value + floor) * 255.).round() as u8))
 }
 
+fn css_number(value: f64) -> String {
+    format!("{value:.3}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_owned()
+}
+
+fn format_hsl([r, g, b]: [u8; 3], alpha: Option<u8>) -> String {
+    let (r, g, b) = (f64::from(r), f64::from(g), f64::from(b));
+    let peak = r.max(g).max(b);
+    let low = r.min(g).min(b);
+    let chroma = peak - low;
+    let sum = peak + low;
+    let lightness = sum * 100. / 510.;
+    // CSS Color 4 的 sRGB 转 HSL 公式，通道以 0–255 表示。
+    let (hue, saturation) = if chroma == 0. {
+        (0., 0.)
+    } else {
+        let sector = if peak == r {
+            (g - b) / chroma
+        } else if peak == g {
+            2. + (b - r) / chroma
+        } else {
+            4. + (r - g) / chroma
+        };
+        (
+            sector.rem_euclid(6.) * 60.,
+            chroma * 100. / (255. - (sum - 255.).abs()),
+        )
+    };
+    let hue = css_number(hue);
+    let saturation = css_number(saturation);
+    let lightness = css_number(lightness);
+    if let Some(alpha) = alpha {
+        let alpha = css_number(f64::from(alpha) / 255.);
+        format!("hsl({hue} {saturation}% {lightness}% / {alpha})")
+    } else {
+        format!("hsl({hue} {saturation}% {lightness}%)")
+    }
+}
+
 pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
     let normalized = normalize(input);
     let input = normalized.trim();
     if input.is_empty() {
         return Err(ColorError::Incomplete);
     }
-    if let Some(digits) = input.strip_prefix('#') {
-        let channels = Channels::hex(digits)?;
-        let [r, g, b] = channels.rgb;
-        let output = if let Some(alpha) = channels.alpha {
-            format!("rgba({r}, {g}, {b}, {:.3})", f64::from(alpha) / 255.)
-        } else {
-            format!("rgb({r}, {g}, {b})")
+    let (input, target) = if let Some((source, target)) = split_conversion(input) {
+        let target = match target.trim().to_ascii_lowercase().as_str() {
+            "hex" => ColorFormat::Hex,
+            "rgb" | "rgba" => ColorFormat::Rgb,
+            "hsl" | "hsla" => ColorFormat::Hsl,
+            "" => return Err(ColorError::Incomplete),
+            _ => return Err(ColorError::InvalidFormat),
         };
-        return Ok(channels.into_color(output));
-    }
-    let channels = Channels::function(input)?;
+        (source, Some(target))
+    } else {
+        (input, None)
+    };
+    let (channels, default) = if let Some(digits) = input.strip_prefix('#') {
+        (Channels::hex(digits)?, ColorFormat::Rgb)
+    } else {
+        (Channels::function(input)?, ColorFormat::Hex)
+    };
     let [r, g, b] = channels.rgb;
-    let mut output = format!("#{r:02X}{g:02X}{b:02X}");
-    if let Some(alpha) = channels.alpha {
-        use std::fmt::Write;
-        write!(output, "{alpha:02X}").expect("写入字符串");
-    }
+    let output = match target.unwrap_or(default) {
+        ColorFormat::Hex => {
+            if let Some(alpha) = channels.alpha {
+                format!("#{r:02X}{g:02X}{b:02X}{alpha:02X}")
+            } else {
+                format!("#{r:02X}{g:02X}{b:02X}")
+            }
+        }
+        ColorFormat::Rgb => {
+            if let Some(alpha) = channels.alpha {
+                format!("rgba({r}, {g}, {b}, {:.3})", f64::from(alpha) / 255.)
+            } else {
+                format!("rgb({r}, {g}, {b})")
+            }
+        }
+        ColorFormat::Hsl => format_hsl(channels.rgb, channels.alpha),
+    };
     Ok(channels.into_color(output))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_to_explicit_formats_and_round_trips_hsl_channels() {
+        for (input, output, swatch) in [
+            (
+                "#FF800080 to hsl",
+                "hsl(30.118 100% 50% / 0.502)",
+                0xff800080,
+            ),
+            ("#808080 转 HSL", "hsl(0 0% 50.196%)", 0x808080ff),
+            ("rgb(0 255 0) to HSL", "hsl(120 100% 50%)", 0x00ff00ff),
+            ("#f0f0 -> hsl", "hsl(300 100% 50% / 0)", 0xff00ff00),
+            ("hsl(0 100% 50%) to rgb", "rgb(255, 0, 0)", 0xff0000ff),
+            ("#abc to HEX", "#AABBCC", 0xaabbccff),
+        ] {
+            let result = convert_color(input).unwrap();
+            assert_eq!(result.output, output, "{input}");
+            assert_eq!(result.swatch, swatch, "{input}");
+            assert_eq!(convert_color(output).unwrap().swatch, swatch, "{output}");
+        }
+        assert_eq!(convert_color("#abc to"), Err(ColorError::Incomplete));
+        assert_eq!(convert_color("#abc to xyz"), Err(ColorError::InvalidFormat));
+    }
 
     #[test]
     fn converts_hsl_colors_with_wrapped_hues_and_optional_alpha() {

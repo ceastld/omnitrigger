@@ -255,7 +255,7 @@ fn data_unit(name: &str) -> Option<Unit> {
     })
 }
 
-fn split_conversion(input: &str) -> Option<(&str, &str)> {
+pub(super) fn split_conversion(input: &str) -> Option<(&str, &str)> {
     let folded = input.to_ascii_lowercase();
     let (start, end) = [
         "换算成",
