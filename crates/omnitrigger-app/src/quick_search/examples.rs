@@ -304,6 +304,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "换算角分和角秒",
+        query: "60′ to °",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "换算温差",
+        query: "10 dC to dF",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算压强",
         query: "1 atm to kPa",
     },

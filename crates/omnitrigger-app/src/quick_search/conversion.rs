@@ -35,6 +35,7 @@ enum Dimension {
     Mass,
     Time,
     Temperature,
+    TemperatureDifference,
     Area,
     Volume,
     Speed,
@@ -64,6 +65,7 @@ impl Dimension {
             }
             Self::Time => &["s", "min", "h", "ms", "d", "μs", "ns"],
             Self::Temperature => &["°C", "°F", "K"],
+            Self::TemperatureDifference => &["Δ°C", "Δ°F", "ΔK"],
             Self::Area => &["m²", "ft²", "ha", "km²", "cm²", "acre"],
             Self::Volume => &["L", "mL", "usgal", "m³"],
             Self::Speed => &["km/h", "m/s", "mph", "kn"],
@@ -75,7 +77,7 @@ impl Dimension {
                 "MB/s", "Mbps", "MiB/s", "kB/s", "Gbps", "b/s", "B/s", "kbps", "KiB/s", "Mib/s",
                 "GB/s", "GiB/s", "Gib/s", "TB/s", "TiB/s", "Tbps", "Tib/s", "Kib/s",
             ],
-            Self::Angle => &["°", "rad", "turn"],
+            Self::Angle => &["°", "rad", "turn", "′", "″"],
             Self::Pressure => &[
                 "Pa", "kPa", "bar", "psi", "atm", "hPa", "MPa", "mPa", "Torr",
             ],
@@ -167,6 +169,15 @@ impl Unit {
             "c" | "°c" | "℃" | "摄氏度" => Self::temperature("°C", 1., 0.),
             "f" | "°f" | "℉" | "华氏度" => Self::temperature("°F", 5. / 9., 32.),
             "k" | "开尔文" => Self::temperature("K", 1., 273.15),
+            "dc" | "deltac" | "Δ°c" | "δ°c" | "摄氏温差" => {
+                Self::linear("Δ°C", TemperatureDifference, 1.)
+            }
+            "df" | "deltaf" | "Δ°f" | "δ°f" | "华氏温差" => {
+                Self::linear("Δ°F", TemperatureDifference, 5. / 9.)
+            }
+            "dk" | "deltak" | "Δk" | "δk" | "开尔文温差" => {
+                Self::linear("ΔK", TemperatureDifference, 1.)
+            }
             "cm²" | "cm^2" | "cm2" | "平方厘米" => Self::linear("cm²", Area, 0.0001),
             "m²" | "m^2" | "m2" | "平方米" => Self::linear("m²", Area, 1.),
             "km²" | "km^2" | "km2" | "平方千米" => Self::linear("km²", Area, 1_000_000.),
@@ -189,6 +200,8 @@ impl Unit {
                 Self::linear("°", Angle, PI / 180.)
             }
             "rad" | "radian" | "radians" | "弧度" => Self::linear("rad", Angle, 1.),
+            "′" | "arcmin" | "角分" => Self::linear("′", Angle, PI / 10_800.),
+            "″" | "arcsec" | "角秒" => Self::linear("″", Angle, PI / 648_000.),
             "turn" | "turns" | "圈" => Self::linear("turn", Angle, TAU),
             "pa" | "帕" | "帕斯卡" => Self::linear("Pa", Pressure, 1.),
             "hpa" | "百帕" => Self::linear("hPa", Pressure, 100.),
@@ -577,6 +590,28 @@ mod tests {
             convert("1 L/min to kg/m³"),
             Some(Err(ConversionError::DifferentDimensions)),
         );
+    }
+
+    #[test]
+    fn converts_temperature_differences_and_sexagesimal_angle_units() {
+        for (query, expected) in [
+            ("10 dC to dF", "18 Δ°F"),
+            ("-18 Δ°F to ΔK", "-10 ΔK"),
+            ("1开尔文温差转摄氏温差", "1 Δ°C"),
+            ("10°C to °F", "50 °F"),
+            ("60′ to °", "1 °"),
+            ("3600″ to °", "1 °"),
+            ("1.5° to arcmin", "90 ′"),
+            ("0.5 turn to 角秒", "648000 ″"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.into())), "{query}");
+        }
+        for query in ["10°C to dF", "1 dK to K", "60 min to °"] {
+            assert_eq!(
+                convert(query),
+                Some(Err(ConversionError::DifferentDimensions))
+            );
+        }
     }
 
     #[test]
