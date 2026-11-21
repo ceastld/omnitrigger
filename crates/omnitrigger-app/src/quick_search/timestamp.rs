@@ -17,7 +17,7 @@ impl TimestampError {
         match self {
             Self::Incomplete => "输入时间戳或带时区的时间，例如 时间戳: 1700000000000ms",
             Self::Invalid => "请输入 Unix 秒、毫秒、微秒、纳秒或带时区的 RFC 3339 时间",
-            Self::InvalidOffset => "请输入目标时区偏移，例如 +08:00 或 -05:30",
+            Self::InvalidOffset => "请输入目标时区，例如 UTC、本地、UTC+8 或 -05:30",
             Self::UnsupportedPrecision => "请输入可用 Unix 纳秒表示的时间",
             Self::OutOfRange => "结果超出四位年份的时间范围",
         }
@@ -86,6 +86,13 @@ impl TimestampUnit {
     }
 }
 
+#[derive(Clone, Copy)]
+enum DisplayZone {
+    Utc,
+    Local,
+    Offset(FixedOffset),
+}
+
 pub(super) fn convert_timestamp(query: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
     convert_timestamp_with_local(query, now, |time| time.with_timezone(&Local).fixed_offset())
 }
@@ -97,13 +104,13 @@ fn convert_timestamp_with_local(
 ) -> Result<String, TimestampError> {
     let input = normalize(query);
     let input = input.trim();
-    let (input, offset) = if let Some((source, target)) = split_conversion(input) {
-        (source, Some(parse_offset(target)?))
+    let (input, target_zone) = if let Some((source, target)) = split_conversion(input) {
+        (source, Some(parse_display_zone(target)?))
     } else {
         (input, None)
     };
     let lower = input.to_ascii_lowercase();
-    let local_suffix = if offset.is_none() {
+    let local_suffix = if target_zone.is_none() {
         lower
             .strip_suffix("本地")
             .or_else(|| lower.strip_suffix(" local"))
@@ -111,7 +118,7 @@ fn convert_timestamp_with_local(
     } else {
         None
     };
-    let display_in_zone = local_suffix.is_some() || offset.is_some();
+    let target_zone = target_zone.or(local_suffix.map(|_| DisplayZone::Local));
     let lower = local_suffix.unwrap_or(&lower).trim_end();
     let input = &input[..lower.len()];
     if matches!(input, "" | "+" | "-") {
@@ -120,21 +127,19 @@ fn convert_timestamp_with_local(
 
     let display_time = |time: DateTime<Utc>, format| {
         ensure_four_digit_year(time.year())?;
-        let zoned = offset
-            .map(|offset| time.with_timezone(&offset))
-            .or_else(|| local_suffix.is_some().then(|| to_local(time)));
-        if let Some(zoned) = zoned {
-            ensure_four_digit_year(zoned.year())?;
-            Ok(zoned.to_rfc3339_opts(format, false))
-        } else {
-            Ok(time.to_rfc3339_opts(format, true))
-        }
+        let zoned = match target_zone.unwrap_or(DisplayZone::Utc) {
+            DisplayZone::Utc => return Ok(time.to_rfc3339_opts(format, true)),
+            DisplayZone::Local => to_local(time),
+            DisplayZone::Offset(offset) => time.with_timezone(&offset),
+        };
+        ensure_four_digit_year(zoned.year())?;
+        Ok(zoned.to_rfc3339_opts(format, false))
     };
     let suffixed = TimestampUnit::split_suffix(lower);
     let (unit, quantity) = suffixed.unwrap_or((TimestampUnit::Seconds, lower));
     let quantity = quantity.trim_end();
     if matches!(quantity, "现在" | "now") {
-        if display_in_zone {
+        if target_zone.is_some() {
             return display_time(now, unit.date_format());
         }
         return Ok(unit.format_unix(now));
@@ -158,29 +163,53 @@ fn convert_timestamp_with_local(
     }
     let unit = TimestampUnit::from_subsecond(fraction);
     let time = date.with_timezone(&Utc);
-    if display_in_zone {
+    if target_zone.is_some() {
         display_time(time, unit.date_format())
     } else {
         Ok(unit.format_unix(time))
     }
 }
 
-fn parse_offset(input: &str) -> Result<FixedOffset, TimestampError> {
+fn parse_display_zone(input: &str) -> Result<DisplayZone, TimestampError> {
     let input = input.trim().to_ascii_lowercase();
+    match input.as_str() {
+        "" => return Err(TimestampError::Incomplete),
+        "utc" | "z" => return Ok(DisplayZone::Utc),
+        "local" | "本地" => return Ok(DisplayZone::Local),
+        _ => {}
+    }
     let input = input.strip_prefix("utc").unwrap_or(&input).trim_start();
-    if input.is_empty() {
-        return Err(TimestampError::Incomplete);
-    }
-    let [b'+' | b'-', hour_tens, hours, b':', minute_tens, minutes] = input.as_bytes() else {
-        return Err(TimestampError::InvalidOffset);
+    let (sign, magnitude) = match input.as_bytes() {
+        [b'+', ..] => (1, &input[1..]),
+        [b'-', ..] => (-1, &input[1..]),
+        _ => return Err(TimestampError::InvalidOffset),
     };
-    if ![hour_tens, hours, minute_tens, minutes]
-        .iter()
-        .all(|digit| digit.is_ascii_digit())
-    {
+    if !magnitude.is_ascii() {
         return Err(TimestampError::InvalidOffset);
     }
-    input.parse().map_err(|_| TimestampError::InvalidOffset)
+    let (hours, minutes) = match magnitude.as_bytes() {
+        [_] | [_, _] => (magnitude, "00"),
+        [_, _, _, _] => magnitude.split_at(2),
+        [_, _, b':', _, _] => (&magnitude[..2], &magnitude[3..]),
+        _ => return Err(TimestampError::InvalidOffset),
+    };
+    let component = |digits: &str| {
+        if digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            digits
+                .parse::<i32>()
+                .map_err(|_| TimestampError::InvalidOffset)
+        } else {
+            Err(TimestampError::InvalidOffset)
+        }
+    };
+    let hours = component(hours)?;
+    let minutes = component(minutes)?;
+    if minutes >= 60 {
+        return Err(TimestampError::InvalidOffset);
+    }
+    FixedOffset::east_opt(sign * (hours * 3_600 + minutes * 60))
+        .map(DisplayZone::Offset)
+        .ok_or(TimestampError::InvalidOffset)
 }
 
 fn integer(input: &str) -> bool {
@@ -229,6 +258,15 @@ mod tests {
             ),
             ("now ms to +05:30", "2023-11-15T03:43:20.123+05:30"),
             ("0 to +00:00", "1970-01-01T00:00:00+00:00"),
+            ("0 to UTC+8", "1970-01-01T08:00:00+08:00"),
+            ("0 转 ＋０５３０", "1970-01-01T05:30:00+05:30"),
+            ("0 to UTC -0330", "1969-12-31T20:30:00-03:30"),
+            ("1970-01-01T08:00:00+08:00 to UTC", "1970-01-01T00:00:00Z"),
+            (
+                "1970-01-01T08:00:00.000000001+08:00 to Z",
+                "1970-01-01T00:00:00.000000001Z",
+            ),
+            ("now ms to utc", "2023-11-14T22:13:20.123Z"),
         ] {
             assert_eq!(
                 convert_timestamp(input, now).as_deref(),
@@ -241,6 +279,11 @@ mod tests {
             ("1700000000 to +24:00", TimestampError::InvalidOffset),
             ("1700000000 to +00:60", TimestampError::InvalidOffset),
             ("1700000000 to +0:00", TimestampError::InvalidOffset),
+            ("0 to +24", TimestampError::InvalidOffset),
+            ("0 to +0060", TimestampError::InvalidOffset),
+            ("0 to +080", TimestampError::InvalidOffset),
+            ("0 to +0+00", TimestampError::InvalidOffset),
+            ("0 to +八", TimestampError::InvalidOffset),
             ("9999-12-31T23:30:00Z to +01:00", TimestampError::OutOfRange),
         ] {
             assert_eq!(convert_timestamp(input, now), Err(error), "{input}");
@@ -324,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn displays_local_time_only_with_an_explicit_suffix() {
+    fn displays_local_time_with_an_explicit_target_or_suffix() {
         let now = DateTime::from_timestamp(1_700_000_000, 123_456_000).unwrap();
         let utc_plus_eight = FixedOffset::east_opt(8 * 3_600).unwrap();
         let convert = |query| {
@@ -334,6 +377,8 @@ mod tests {
             ("+0 本地", "1970-01-01T08:00:00+08:00"),
             ("-1ms LOCAL", "1970-01-01T07:59:59.999+08:00"),
             ("1970-01-01T00:00:00Z 本地", "1970-01-01T08:00:00+08:00"),
+            ("1970-01-01T00:00:00Z to local", "1970-01-01T08:00:00+08:00"),
+            ("-1 ms 转 本地", "1970-01-01T07:59:59.999+08:00"),
             ("now local", "2023-11-15T06:13:20+08:00"),
             ("现在毫秒本地", "2023-11-15T06:13:20.123+08:00"),
             ("0", "1970-01-01T00:00:00Z"),
