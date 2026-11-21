@@ -24,6 +24,8 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "wavg" => return Some(NamedValue::Aggregate(weighted_average)),
         "gmean" => return Some(NamedValue::Aggregate(geometric_mean)),
         "hmean" => return Some(NamedValue::Aggregate(harmonic_mean)),
+        "rms" => return Some(NamedValue::Aggregate(root_mean_square)),
+        "corr" => return Some(NamedValue::Aggregate(pearson_correlation)),
         "median" => return Some(NamedValue::Aggregate(median)),
         "quantile" => return Some(NamedValue::Aggregate(|values| quantile(values, 1.))),
         "percentile" => return Some(NamedValue::Aggregate(|values| quantile(values, 100.))),
@@ -81,6 +83,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "lerp" => return Some(NamedValue::Aggregate(linear_interpolation)),
         "root" => return Some(NamedValue::Aggregate(nth_root)),
         "invlerp" => return Some(NamedValue::Aggregate(interpolation_progress)),
+        "remap" => return Some(NamedValue::Aggregate(remap_range)),
         "clamp" => {
             return Some(NamedValue::Aggregate(|values| match values {
                 [value, min, max] if min <= max => value.clamp(*min, *max),
@@ -226,6 +229,14 @@ fn interpolation_progress(values: &[f64]) -> f64 {
     } else {
         (value - start) / span
     }
+}
+
+fn remap_range(values: &[f64]) -> f64 {
+    let &[value, source_start, source_end, target_start, target_end] = values else {
+        return f64::NAN;
+    };
+    let progress = interpolation_progress(&[source_start, source_end, value]);
+    linear_interpolation(&[target_start, target_end, progress])
 }
 
 fn round_to_places(values: &[f64]) -> f64 {
@@ -498,19 +509,62 @@ fn interpolated_quantile(sorted: &[f64], probability: f64) -> f64 {
     }
 }
 
+fn root_mean_square(values: &[f64]) -> f64 {
+    let scale = values.iter().map(|value| value.abs()).fold(0., f64::max);
+    if scale == 0. {
+        return 0.;
+    }
+    let squares: f64 = values.iter().map(|value| (value / scale).powi(2)).sum();
+    scale * (squares / values.len() as f64).sqrt()
+}
+
+fn centered_scale(values: impl Iterator<Item = f64>) -> (f64, f64) {
+    let (low, high) = values.fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), value| {
+        (low.min(value), high.max(value))
+    });
+    // 先平移再缩放，保留大数之间的微小差异，也避免平方溢出。
+    let center = low.midpoint(high);
+    (center, (high - center).max(center - low))
+}
+
+fn pearson_correlation(values: &[f64]) -> f64 {
+    let pairs = values.chunks_exact(2);
+    let count = pairs.len();
+    if count < 2 || !pairs.remainder().is_empty() {
+        return f64::NAN;
+    }
+    let (center_x, scale_x) = centered_scale(pairs.clone().map(|pair| pair[0]));
+    let (center_y, scale_y) = centered_scale(pairs.clone().map(|pair| pair[1]));
+    if scale_x == 0. || scale_y == 0. {
+        return f64::NAN;
+    }
+    let scaled = pairs.map(|pair| {
+        (
+            (pair[0] - center_x) / scale_x,
+            (pair[1] - center_y) / scale_y,
+        )
+    });
+    let (sum_x, sum_y) = scaled
+        .clone()
+        .fold((0., 0.), |(sum_x, sum_y), (x, y)| (sum_x + x, sum_y + y));
+    let (mean_x, mean_y) = (sum_x / count as f64, sum_y / count as f64);
+    let (mut squared_x, mut squared_y, mut products) = (0., 0., 0.);
+    for (x, y) in scaled {
+        let x = x - mean_x;
+        let y = y - mean_y;
+        squared_x += x * x;
+        squared_y += y * y;
+        products += x * y;
+    }
+    (products / (squared_x * squared_y).sqrt()).clamp(-1., 1.)
+}
+
 fn standard_deviation(values: &[f64], correction: usize) -> f64 {
     let count = values.len();
     if count <= correction {
         return f64::NAN;
     }
-    let (low, high) = values
-        .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &value| {
-            (low.min(value), high.max(value))
-        });
-    // 先平移再缩放，保留大数之间的微小差异，也避免平方溢出。
-    let center = low.midpoint(high);
-    let scale = (high - center).max(center - low);
+    let (center, scale) = centered_scale(values.iter().copied());
     if scale == 0. {
         return 0.;
     }

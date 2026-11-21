@@ -395,6 +395,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "将数值映射到另一个区间",
+        query: "remap(512,0,1024,0,100)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算正整数次方根",
         query: "root(-32,5)",
     },
@@ -457,6 +462,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "计算总体标准差",
         query: "pstdev(1,3)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算均方根",
+        query: "rms(0,6,0,-8)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算皮尔逊相关系数",
+        query: "corr(1,2,2,4,3,6)",
     },
     Example {
         icon: Icon::Terminal,
