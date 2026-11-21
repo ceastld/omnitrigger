@@ -1,9 +1,12 @@
 use std::{
     borrow::Cow,
+    cmp::Ordering,
     collections::{HashMap, HashSet},
 };
 
 use serde::ser::{Serialize, SerializeMap, Serializer};
+
+use super::text_tools::compare_natural;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CsvError {
@@ -52,6 +55,10 @@ enum Operation {
         keep_matches: bool,
     },
     CountByColumns(Vec<usize>),
+    SortByColumns {
+        columns: Vec<usize>,
+        descending: bool,
+    },
 }
 
 pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
@@ -89,6 +96,14 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             input = data;
             Operation::CountByColumns(columns)
         }
+        "排序" | "sort-columns" | "降序" | "sort-columns-desc" => {
+            let (columns, data) = column_arguments(input)?;
+            input = data;
+            Operation::SortByColumns {
+                columns,
+                descending: matches!(operation.as_str(), "降序" | "sort-columns-desc"),
+            }
+        }
         _ => return Err(CsvError::UnknownOperation),
     };
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
@@ -120,6 +135,10 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             keep_matches,
         } => filter_column(&rows, column, &value, keep_matches),
         Operation::CountByColumns(columns) => count_by_columns(&rows, &columns),
+        Operation::SortByColumns {
+            columns,
+            descending,
+        } => sort_by_columns(&rows, &columns, descending),
     }
 }
 
@@ -239,6 +258,29 @@ fn count_by_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, C
 
 fn column_key<'a>(row: &'a [String], columns: &[usize]) -> Vec<&'a str> {
     columns.iter().map(|&index| row[index].as_str()).collect()
+}
+
+fn sort_by_columns(
+    rows: &[Vec<String>],
+    columns: &[usize],
+    descending: bool,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    validate_column_width(columns, header.len())?;
+    let mut ordered: Vec<_> = records.iter().collect();
+    ordered.sort_by(|left, right| {
+        let order = columns
+            .iter()
+            .map(|&column| compare_natural(&left[column], &right[column]))
+            .find(|order| !order.is_eq())
+            .unwrap_or(Ordering::Equal);
+        if descending {
+            order.reverse()
+        } else {
+            order
+        }
+    });
+    Ok(write_rows(std::iter::once(header).chain(ordered), ','))
 }
 
 fn validate_column_width(columns: &[usize], width: usize) -> Result<(), CsvError> {
@@ -529,6 +571,21 @@ mod tests {
             transform_csv("分组计数 3 组,内容"),
             Err(CsvError::ColumnOutOfRange)
         );
+    }
+
+    #[test]
+    fn sorts_csv_by_natural_column_order_and_preserves_ties() {
+        let data = "编号,名称,区域,备注\n001,项目10,东,\"茶,咖啡\"\n002,项目2,西,甲\n003,项目02,东,乙\n004,项目2,东,丙";
+        assert_eq!(
+            transform_csv(&format!("排序 2,3\n{data}")).as_deref(),
+            Ok("编号,名称,区域,备注\r\n003,项目02,东,乙\r\n004,项目2,东,丙\r\n002,项目2,西,甲\r\n001,项目10,东,\"茶,咖啡\"")
+        );
+        assert_eq!(
+            transform_csv(&format!("sort-columns-desc 2,3\n{data}")).as_deref(),
+            Ok("编号,名称,区域,备注\r\n001,项目10,东,\"茶,咖啡\"\r\n002,项目2,西,甲\r\n003,项目02,东,乙\r\n004,项目2,东,丙")
+        );
+        assert_eq!(transform_csv("排序 1 a,b").as_deref(), Ok("a,b"));
+        assert_eq!(transform_csv("降序 3 a,b"), Err(CsvError::ColumnOutOfRange));
     }
 
     #[test]

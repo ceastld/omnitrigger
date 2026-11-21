@@ -185,7 +185,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         }
         "自然排序" | "natural-sort" => {
             let mut lines: Vec<_> = text.lines().collect();
-            lines.sort_by(|left, right| compare_natural_lines(left, right));
+            lines.sort_by(|left, right| compare_natural(left, right));
             Ok(lines.join("\n"))
         }
         "去空行" | "remove-empty-lines" => Ok(text
@@ -274,7 +274,7 @@ fn camel_case(text: &str, uppercase_first: bool) -> String {
     output
 }
 
-fn compare_natural_lines(left: &str, right: &str) -> Ordering {
+pub(super) fn compare_natural(left: &str, right: &str) -> Ordering {
     let (mut left, mut right) = (left.as_bytes(), right.as_bytes());
     while let (Some((&left_byte, left_tail)), Some((&right_byte, right_tail))) =
         (left.split_first(), right.split_first())

@@ -1456,6 +1456,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 分组计数 2 编号,状态\n001,完成\n002,待办\n003,完成",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "按指定列自然升序排列 CSV 行",
+        query: "CSV: 排序 2 编号,名称\n001,文件10\n002,文件2\n003,文件20",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按指定列自然降序排列 CSV 行",
+        query: "CSV: 降序 2 编号,名称\n001,文件10\n002,文件2\n003,文件20",
+    },
+    Example {
         icon: Icon::Layers,
         title: "从路径提取文件名",
         query: r#"路径: 文件名 "C:\工作\发布 包.tar.gz""#,
