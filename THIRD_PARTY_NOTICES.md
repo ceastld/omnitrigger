@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | GPUI | Windows 桌面界面 | Apache-2.0 |
 | windows | Windows API 绑定 | MIT OR Apache-2.0 |
-| serde / serde_json | 本地配置序列化 | MIT OR Apache-2.0 |
+| serde / serde_json | 本地配置序列化、JSON 文本处理 | MIT OR Apache-2.0 |
 | getrandom | 桌面桥接随机令牌与脚本工程稳定标识，复用锁定的 0.3.4 | MIT OR Apache-2.0 |
 | unicode-segmentation | 文本编辑的字素边界 | MIT OR Apache-2.0 |
 | percent-encoding | 快速搜索的 URL 参数值编解码，复用锁定的 2.3.2 | MIT OR Apache-2.0 |

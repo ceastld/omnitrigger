@@ -45,7 +45,7 @@ use calendar::{calculate_date, DateError};
 use color::{calculate_contrast, convert_color, ColorError};
 use conversion::{convert, suggested_targets, ConversionError};
 use duration::{convert_duration, DurationError};
-use examples::{matching_examples, EXAMPLES};
+use examples::{matching_examples, tool_operation_examples, EXAMPLES};
 use fraction::{simplify_fraction, FractionError};
 use json_tools::{transform_json, JsonError};
 use omnitrigger_windows::ShortcutTarget;
@@ -310,6 +310,9 @@ impl Results {
             return Self::Help(matching_examples(terms));
         }
         if let Some((scope, term)) = scoped_query(query) {
+            if let Some(examples) = tool_operation_examples(scope, term) {
+                return Self::Help(examples);
+            }
             return match scope {
                 Scope::Triggers(filter) => Self::Destinations(
                     matching_triggers(triggers, term, filter)
@@ -1461,6 +1464,37 @@ mod tests {
         assert!(matches!(
             for_query("分数", &triggers),
             Results::Destinations(items) if items == [Destination::Trigger(bindings[0].spec.id)]
+        ));
+    }
+
+    #[test]
+    fn tools_offer_operations_until_the_user_enters_their_payload() {
+        let examples_for = |query: &str| {
+            let Results::Help(items) = for_query(query, &[]) else {
+                panic!("未显示工具操作：{query}");
+            };
+            items
+                .into_iter()
+                .map(|index| EXAMPLES[index].query)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(examples_for("JSON：").len(), 3);
+        assert!(examples_for("JSON: 取")[0].starts_with("JSON: 取值 "));
+        assert_eq!(
+            examples_for("网址: 表单"),
+            [
+                "URL: 表单编码 北京 A+B",
+                "URL: 表单解码 %E5%8C%97%E4%BA%AC+A%2BB",
+            ]
+        );
+        assert_eq!(examples_for("文本: sha").len(), 2);
+        assert!(matches!(
+            for_query("JSON: 格式化 {", &[]),
+            Results::Value(Err(ValueError::Json(JsonError::Incomplete)))
+        ));
+        assert!(matches!(
+            for_query("文本: 大写 abc", &[]),
+            Results::Value(Ok(value)) if value.text == "ABC"
         ));
     }
 

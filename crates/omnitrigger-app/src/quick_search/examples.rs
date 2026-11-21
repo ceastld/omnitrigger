@@ -1,5 +1,7 @@
 use crate::assets::Icon;
 
+use super::scope::{scoped_query, Scope};
+
 pub(super) struct Example {
     pub(super) icon: Icon,
     pub(super) title: &'static str,
@@ -488,6 +490,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r#"JSON: 压缩 { "名称": "北京", "值": 1 }"#,
     },
     Example {
+        icon: Icon::Terminal,
+        title: "按路径提取 JSON 值",
+        query: r#"JSON: 取值 /商品/0/价格 {"商品":[{"价格":9007199254740993}]}"#,
+    },
+    Example {
         icon: Icon::Browser,
         title: "编码 URL 参数值",
         query: "URL: 编码 北京 A+B",
@@ -538,4 +545,24 @@ pub(super) fn matching_examples(query: &str) -> Vec<usize> {
         })
         .map(|(index, _)| index)
         .collect()
+}
+
+pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
+    if !matches!(scope, Scope::Json | Scope::TextTools | Scope::UrlEncoding)
+        || term.contains(char::is_whitespace)
+    {
+        return None;
+    }
+    let prefix = term.to_ascii_lowercase();
+    let items: Vec<_> = EXAMPLES
+        .iter()
+        .enumerate()
+        .filter_map(|(index, example)| {
+            let (example_scope, input) = scoped_query(example.query)?;
+            let operation = input.split_whitespace().next()?;
+            (example_scope == scope && operation.to_ascii_lowercase().starts_with(&prefix))
+                .then_some(index)
+        })
+        .collect();
+    (!items.is_empty()).then_some(items)
 }
