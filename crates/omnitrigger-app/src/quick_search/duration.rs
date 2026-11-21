@@ -42,13 +42,11 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
         Some((source, output)) => (source, Some(output)),
         None => (input, None),
     };
-    let (total, show_seconds) = if let Some((start, end)) = input.split_once(['到', '至']) {
-        let start = time_of_day(start)?;
-        let end = time_of_day(end)?;
-        let elapsed = (end + NANOS_PER_DAY - start) % NANOS_PER_DAY;
-        (elapsed as i128, false)
-    } else {
-        signed_duration(input)?
+    let (operation, values) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+    let (total, show_seconds) = match operation {
+        "合计" | "sum" => (aggregate_duration_list(values, false)?, false),
+        "平均" | "average" => (aggregate_duration_list(values, true)?, false),
+        _ => duration_value(input)?,
     };
     let nanos = bounded_duration(Some(total.unsigned_abs()))?;
     let sign = if total < 0 { "-" } else { "" };
@@ -62,6 +60,40 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     } else {
         Ok(format_clock_duration(nanos, sign))
     }
+}
+
+fn duration_value(input: &str) -> Result<(i128, bool), DurationError> {
+    if let Some((start, end)) = input.split_once(['到', '至']) {
+        let start = time_of_day(start)?;
+        let end = time_of_day(end)?;
+        let elapsed = (end + NANOS_PER_DAY - start) % NANOS_PER_DAY;
+        Ok((elapsed as i128, false))
+    } else {
+        signed_duration(input)
+    }
+}
+
+fn aggregate_duration_list(input: &str, average: bool) -> Result<i128, DurationError> {
+    let mut total = 0_i128;
+    let mut count = 0_i128;
+    for line in input.lines().filter(|line| !line.trim().is_empty()) {
+        for term in line.split(',') {
+            let (nanos, _) = duration_value(term.trim())?;
+            bounded_duration(Some(nanos.unsigned_abs()))?;
+            total = total.checked_add(nanos).ok_or(DurationError::OutOfRange)?;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return Err(DurationError::Incomplete);
+    }
+    if !average {
+        return Ok(total);
+    }
+    if total % count != 0 {
+        return Err(DurationError::Precision);
+    }
+    Ok(total / count)
 }
 
 pub(super) fn format_clock_duration(nanos: u128, sign: &str) -> String {
@@ -408,6 +440,29 @@ fn parse_units(mut input: &str) -> Result<u128, DurationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aggregates_duration_lists_exactly_with_existing_unit_and_clock_rules() {
+        for (query, expected) in [
+            ("合计 01:25,02:40,00:55", "00:05:00"),
+            ("平均 01:25,02:40,00:55", "00:01:40"),
+            ("合计 23:45 到 01:15，500ms to iso", "PT1H30M0.5S"),
+            ("average -2s,1s to ms", "-500 ms"),
+            ("sum 1秒\r\n\r\n500ms\n-250ms to ns", "1250000000 ns"),
+            ("合计 P1DT1S,2s * 3", "24:00:07"),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(convert_duration("合计"), Err(DurationError::Incomplete));
+        assert_eq!(
+            convert_duration("合计 1s,,2s"),
+            Err(DurationError::Incomplete)
+        );
+        assert_eq!(
+            convert_duration("平均 1ns,2ns"),
+            Err(DurationError::Precision)
+        );
+    }
 
     #[test]
     fn calculates_elapsed_time_between_clock_times_including_midnight() {

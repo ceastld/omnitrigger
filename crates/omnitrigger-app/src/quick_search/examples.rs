@@ -286,6 +286,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "合计多个时长",
+        query: "时长: 合计 01:25,02:40,00:55",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "求多个时长的平均值",
+        query: "时长: 平均 01:25,02:40,00:55",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按帧率把视频帧数换成时长",
         query: "帧数: 125 帧 @ 25 fps",
     },
@@ -1696,6 +1706,7 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
     match scope {
         Scope::Date if matches!(term, "列" | "列出") => {}
+        Scope::Duration if matches!(term, "合" | "合计" | "平" | "平均") => {}
         Scope::Statistics if matches!(term, "频" | "频数" | "分位" | "分位数" | "四分位") =>
             {}
         Scope::Json
