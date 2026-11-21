@@ -269,6 +269,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按小数位舍入",
+        query: "round(2.675, 2)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按整数位舍入",
+        query: "round(1250, -2)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算小量的 ln(1+x) 与 exp(x)−1",
+        query: "log1p(1e-20) + expm1(1e-20)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "向零取整",
         query: "trunc(-1.8)",
     },

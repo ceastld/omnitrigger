@@ -450,6 +450,35 @@ mod tests {
     }
 
     #[test]
+    fn rounds_at_decimal_places_and_preserves_precision_for_small_inputs() {
+        for (query, expected) in [
+            ("round(2.675,2)", "2.67"),
+            ("round(1.25,1)", "1.2"),
+            ("round(1250,-2)", "1200"),
+            ("round(-1350,-2)", "-1400"),
+            ("round(15,-1)", "20"),
+            ("round(25,-1)", "20"),
+            ("round(5e22,-23)", "0"),
+            ("round(5.0000000000000004e22,-23)", "1e23"),
+            ("round(5e24,-25)", "1e25"),
+            ("round(1.7e308,-309)", "0"),
+            ("round(1e-300,324)", "1e-300"),
+            ("log1p(-1e-20)", "-1e-20"),
+            ("expm1(1e-20)", "1e-20"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate("round(3,0.5)"),
+            Err(CalculationError::FunctionDomain)
+        );
+        assert_eq!(
+            calculate("round(1.7e308,-308)"),
+            Err(CalculationError::OutOfRange)
+        );
+    }
+
+    #[test]
     fn evaluates_factorials_combinations_and_permutations_in_the_safe_integer_range() {
         for (query, expected) in [
             ("factorial(10)", "3628800"),

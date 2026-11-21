@@ -39,6 +39,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
             }));
         }
         "lcm" => return Some(NamedValue::Aggregate(least_common_multiple)),
+        "round" => return Some(NamedValue::Aggregate(round_to_places)),
         "comb" => return Some(NamedValue::Aggregate(combinations)),
         "perm" => {
             return Some(NamedValue::Aggregate(|values| match values {
@@ -85,7 +86,6 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "cbrt" => f64::cbrt,
         "floor" => f64::floor,
         "ceil" => f64::ceil,
-        "round" => f64::round_ties_even,
         "trunc" => f64::trunc,
         "factorial" | "fact" => |n| permutations(&[n, n]),
         "sin" => f64::sin,
@@ -95,15 +95,68 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "acos" => f64::acos,
         "atan" => f64::atan,
         "ln" => f64::ln,
+        "log1p" => f64::ln_1p,
         "log2" => f64::log2,
         "log10" => f64::log10,
         "exp" => f64::exp,
+        "expm1" => f64::exp_m1,
         "radians" => f64::to_radians,
         "degrees" => f64::to_degrees,
         "percent" => |value| value / 100.,
         _ => return None,
     };
     Some(NamedValue::Function(function))
+}
+
+fn round_to_places(values: &[f64]) -> f64 {
+    let (value, digits) = match *values {
+        [value] | [value, 0.] => return value.round_ties_even(),
+        [value, digits] if digits.fract() == 0. => (value, digits),
+        _ => return f64::NAN,
+    };
+    if digits > 323. {
+        return value;
+    }
+    if digits < -308. {
+        return 0.0_f64.copysign(value);
+    }
+    if digits < 0. {
+        return round_left_of_decimal(value, -digits as i32);
+    }
+    let precision = digits as usize;
+    format!("{value:.precision$}")
+        .parse()
+        .expect("格式化的数字可解析")
+}
+
+fn round_left_of_decimal(value: f64, places: i32) -> f64 {
+    let scientific = format!("{value:e}");
+    let (_, exponent) = scientific.split_once('e').expect("科学计数法含有指数");
+    let exponent: i32 = exponent.parse().expect("科学计数法指数为整数");
+    if exponent >= places {
+        let precision = (exponent - places) as usize;
+        return format!("{value:.precision$e}")
+            .parse()
+            .expect("格式化的数字可解析");
+    }
+    if exponent < places - 1 {
+        return 0.0_f64.copysign(value);
+    }
+
+    let midpoint = format!("5{}", "0".repeat((places - 1) as usize));
+    let cutoff: f64 = midpoint.parse().expect("中点可表示为有限浮点数");
+    let magnitude = value.abs();
+    // 大的十进制中点可能在解析时舍入。浮点值相同时比较其精确整数。
+    let above = magnitude > cutoff
+        || (magnitude == cutoff && places >= 23 && format!("{magnitude:.0}") > midpoint);
+    let rounded = if above {
+        format!("1e{places}")
+            .parse::<f64>()
+            .expect("十进制幂可解析")
+    } else {
+        0.
+    };
+    rounded.copysign(value)
 }
 
 fn integer_pair(values: &[f64]) -> Option<[u128; 2]> {
