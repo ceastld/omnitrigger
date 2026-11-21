@@ -36,7 +36,7 @@ use crate::{
 use actions::{matching_actions, SearchAction};
 use calculator::{calculate, looks_like_calculation, CalculationError, QUERY_LIMIT};
 use calendar::{calculate_date, DateError};
-use color::{convert_color, Color, ColorError};
+use color::{convert_color, ColorError};
 use conversion::{convert, ConversionError};
 use duration::{convert_duration, DurationError};
 use examples::{matching_examples, EXAMPLES};
@@ -72,10 +72,22 @@ const PAGES: [(Page, &str); 9] = [
 
 #[derive(PartialEq, Eq)]
 enum Results {
-    Value(Result<String, ValueError>),
-    Color(Color),
+    Value(Result<ResultValue, ValueError>),
     Destinations(Vec<Destination>),
     Help(Vec<usize>),
+}
+
+#[derive(PartialEq, Eq)]
+struct ResultValue {
+    text: String,
+    kind: ValueKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ValueKind {
+    Text,
+    Calculation,
+    Color(u32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -288,27 +300,38 @@ impl Results {
                     entries.push(Destination::ActionLibraryQuery(term.to_owned()));
                     Self::Destinations(entries)
                 }
-                Scope::Date => Self::Value(
+                Scope::Date => Self::text_value(
                     calculate_date(term, chrono::Local::now().date_naive())
                         .map_err(ValueError::Date),
                 ),
                 Scope::Duration => {
-                    Self::Value(convert_duration(term).map_err(ValueError::Duration))
+                    Self::text_value(convert_duration(term).map_err(ValueError::Duration))
                 }
-                Scope::Timestamp => Self::Value(
+                Scope::Timestamp => Self::text_value(
                     convert_timestamp(term, chrono::Utc::now()).map_err(ValueError::Timestamp),
                 ),
-                Scope::Color => match convert_color(term) {
-                    Ok(color) => Self::Color(color),
-                    Err(error) => Self::Value(Err(ValueError::Color(error))),
-                },
+                Scope::Color => Self::Value(
+                    convert_color(term)
+                        .map(|color| ResultValue {
+                            text: color.output,
+                            kind: ValueKind::Color(color.swatch),
+                        })
+                        .map_err(ValueError::Color),
+                ),
             };
         }
         if let Some(result) = convert(query) {
-            return Self::Value(result.map_err(ValueError::Conversion));
+            return Self::text_value(result.map_err(ValueError::Conversion));
         }
         if looks_like_calculation(query) {
-            return Self::Value(calculate(query).map_err(ValueError::Calculation));
+            return Self::Value(
+                calculate(query)
+                    .map(|text| ResultValue {
+                        text,
+                        kind: ValueKind::Calculation,
+                    })
+                    .map_err(ValueError::Calculation),
+            );
         }
 
         let query = query.to_lowercase();
@@ -359,13 +382,40 @@ impl Results {
         Self::Destinations(destinations)
     }
 
+    fn text_value(result: Result<String, ValueError>) -> Self {
+        Self::Value(result.map(|text| ResultValue {
+            text,
+            kind: ValueKind::Text,
+        }))
+    }
+
+    fn continuation_query(&self) -> Option<String> {
+        let Self::Value(Ok(ResultValue {
+            text,
+            kind: ValueKind::Calculation,
+        })) = self
+        else {
+            return None;
+        };
+        Some(if text.starts_with('-') {
+            format!("({text})")
+        } else {
+            text.clone()
+        })
+    }
+
     fn height(&self) -> f32 {
         match self {
             Self::Destinations(items) if items.len() > 1 => {
                 132. + items.len() as f32 * PAGE_ROW_HEIGHT
             }
-            Self::Value(Ok(value)) | Self::Color(Color { output: value, .. }) => {
-                158. + value_extra_height(value)
+            Self::Value(Ok(value)) => {
+                let hint_height = if value.kind == ValueKind::Calculation {
+                    24.
+                } else {
+                    0.
+                };
+                158. + value_extra_height(&value.text) + hint_height
             }
             Self::Help(items) if !items.is_empty() => {
                 132. + items.len() as f32 * EXAMPLE_ROW_HEIGHT
@@ -532,8 +582,8 @@ impl QuickSearch {
 
     fn confirm(&self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.results {
-            Results::Value(Ok(result)) | Results::Color(Color { output: result, .. }) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(result.clone()));
+            Results::Value(Ok(result)) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(result.text.clone()));
                 window.remove_window();
             }
             Results::Destinations(items) => {
@@ -543,14 +593,19 @@ impl QuickSearch {
             }
             Results::Help(items) => {
                 if let Some(&index) = items.get(self.selected) {
-                    self.fill_example(EXAMPLES[index].query, window, cx);
+                    self.fill_query(EXAMPLES[index].query, window, cx);
                 }
             }
             Results::Value(Err(_)) => {}
         }
     }
 
-    fn fill_example(&self, query: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+    fn fill_query(
+        &self,
+        query: impl Into<gpui::SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.input.update(cx, |input, cx| {
             input.set_text(query, cx);
             input.move_cursor_to_end(cx);
@@ -571,11 +626,19 @@ impl QuickSearch {
                 }
             }
             "escape" => window.remove_window(),
+            "tab" => {
+                let Some(query) = self.results.continuation_query() else {
+                    return;
+                };
+                if !event.is_held {
+                    self.fill_query(query, window, cx);
+                }
+            }
             key @ ("up" | "down") => {
                 let count = match &self.results {
                     Results::Destinations(items) => items.len(),
                     Results::Help(items) => items.len(),
-                    Results::Value(_) | Results::Color(_) => 0,
+                    Results::Value(_) => 0,
                 };
                 if count == 0 {
                     return;
@@ -641,9 +704,7 @@ impl QuickSearch {
                         row.child(div().text_color(rgb(theme::TEXT_MUTED)).child("Enter 填入"))
                     })
                     .on_click(
-                        cx.listener(move |this, _, window, cx| {
-                            this.fill_example(query, window, cx)
-                        }),
+                        cx.listener(move |this, _, window, cx| this.fill_query(query, window, cx)),
                     )
             }))
             .when(items.len() > 1, |list| {
@@ -659,9 +720,10 @@ impl QuickSearch {
     fn render_result(&self, cx: &mut Context<Self>) -> Div {
         let row = div().h(px(38.)).flex().items_center().gap(px(12.));
         match &self.results {
-            Results::Value(Ok(result)) | Results::Color(Color { output: result, .. }) => {
-                let swatch = match &self.results {
-                    Results::Color(color) => Some(color.swatch),
+            Results::Value(Ok(output)) => {
+                let result = &output.text;
+                let swatch = match output.kind {
+                    ValueKind::Color(color) => Some(color),
                     _ => None,
                 };
                 let value = div()
@@ -691,7 +753,8 @@ impl QuickSearch {
                         .text_size(px(22.))
                         .child(format!("= {result}"))
                 };
-                row.h(px(38. + value_extra_height(result)))
+                let row = row
+                    .h(px(38. + value_extra_height(result)))
                     .when_some(swatch, |row, color| {
                         row.child(
                             div()
@@ -708,7 +771,23 @@ impl QuickSearch {
                         button("copy-calculation", "复制  Enter", Tone::Primary, true)
                             .flex_none()
                             .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
-                    )
+                    );
+                div().flex().flex_col().child(row).when(
+                    output.kind == ValueKind::Calculation,
+                    |result| {
+                        result.child(
+                            Self::selection_hint("Tab 继续计算")
+                                .id("continue-calculation")
+                                .cursor_pointer()
+                                .hover(|style| style.text_color(rgb(theme::ACCENT)))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    if let Some(query) = this.results.continuation_query() {
+                                        this.fill_query(query, window, cx);
+                                    }
+                                })),
+                        )
+                    },
+                )
             }
             Results::Value(Err(error)) => row
                 .text_color(rgb(if error.is_incomplete() {
@@ -952,7 +1031,7 @@ mod tests {
         };
         for example in EXAMPLES {
             match index.results(example.query) {
-                Results::Value(Ok(_)) | Results::Color(_) => {}
+                Results::Value(Ok(_)) => {}
                 Results::Destinations(items) if !items.is_empty() => {}
                 _ => panic!("用法示例没有可用结果：{}", example.query),
             }
@@ -1024,7 +1103,7 @@ mod tests {
     fn quick_search_keeps_ascii_and_fullwidth_calculations() {
         for query in ["2**10", "（２＾１０）", "＝２＾１０"] {
             assert!(
-                matches!(for_query(query, &[]), Results::Value(Ok(result)) if result == "1024")
+                matches!(for_query(query, &[]), Results::Value(Ok(result)) if result.text == "1024")
             );
         }
         assert!(matches!(
@@ -1032,23 +1111,39 @@ mod tests {
             Results::Value(Err(ValueError::Calculation(CalculationError::Incomplete)))
         ));
         assert!(
-            matches!(for_query("100厘米转米", &[]), Results::Value(Ok(result)) if result == "1 m")
+            matches!(for_query("100厘米转米", &[]), Results::Value(Ok(result)) if result.text == "1 m")
         );
         assert!(matches!(
             for_query("日期：2024-02-28 + 1天", &[]),
-            Results::Value(Ok(result)) if result == "2024-02-29"
+            Results::Value(Ok(result)) if result.text == "2024-02-29"
         ));
         assert!(matches!(
             for_query("时间戳：-1ms", &[]),
-            Results::Value(Ok(result)) if result == "1969-12-31T23:59:59.999Z"
+            Results::Value(Ok(result)) if result.text == "1969-12-31T23:59:59.999Z"
         ));
         assert!(matches!(
             for_query("时长：01:30:00", &[]),
-            Results::Value(Ok(result)) if result == "5400 秒"
+            Results::Value(Ok(result)) if result.text == "5400 秒"
         ));
-        assert!(
-            matches!(for_query("颜色：#3A86FF", &[]), Results::Color(color) if color.output == "rgb(58, 134, 255)")
-        );
+        assert!(matches!(
+            for_query("颜色：#3A86FF", &[]),
+            Results::Value(Ok(ResultValue { text, kind: ValueKind::Color(0x3a86ffff) }))
+                if text == "rgb(58, 134, 255)"
+        ));
+    }
+
+    #[test]
+    fn reuses_calculations_as_operands_without_changing_precedence() {
+        for (query, expected) in [("2**10", "1024"), ("1-4", "(-3)")] {
+            let operand = for_query(query, &[]).continuation_query().unwrap();
+            assert_eq!(operand, expected);
+        }
+        for query in ["255 to dec", "2+", "日期: 今天", "颜色: #3A86FF"] {
+            assert!(
+                for_query(query, &[]).continuation_query().is_none(),
+                "{query}"
+            );
+        }
     }
 
     #[test]
