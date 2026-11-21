@@ -8,6 +8,7 @@ mod radix;
 mod recent;
 mod scientific;
 mod scope;
+mod timestamp;
 mod triggers;
 mod wheels;
 
@@ -34,6 +35,7 @@ use omnitrigger_windows::ShortcutTarget;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 pub(super) use recent::RecentDestinations;
 use scope::{scoped_query, Scope};
+use timestamp::{convert_timestamp, TimestampError};
 use triggers::{matching_triggers, SearchTrigger};
 use wheels::{matching_wheels, SearchWheel};
 
@@ -109,6 +111,7 @@ enum ValueError {
     Calculation(CalculationError),
     Conversion(ConversionError),
     Date(DateError),
+    Timestamp(TimestampError),
 }
 
 impl ValueError {
@@ -117,6 +120,7 @@ impl ValueError {
             Self::Calculation(error) => error.message(),
             Self::Conversion(error) => error.message(),
             Self::Date(error) => error.message(),
+            Self::Timestamp(error) => error.message(),
         }
     }
 
@@ -126,6 +130,7 @@ impl ValueError {
             Self::Calculation(CalculationError::Incomplete)
                 | Self::Conversion(ConversionError::Incomplete)
                 | Self::Date(DateError::Incomplete)
+                | Self::Timestamp(TimestampError::Incomplete)
         )
     }
 }
@@ -171,6 +176,9 @@ impl Results {
                     calculate_date(term, chrono::Local::now().date_naive())
                         .map_err(ValueError::Date),
                 ),
+                Scope::Timestamp => {
+                    Self::Value(convert_timestamp(term).map_err(ValueError::Timestamp))
+                }
             };
         }
         if let Some(result) = convert(query) {
@@ -785,6 +793,10 @@ mod tests {
         assert!(matches!(
             for_query("日期：2024-02-28 + 1天", &[]),
             Results::Value(Ok(result)) if result == "2024-02-29"
+        ));
+        assert!(matches!(
+            for_query("时间戳：-1ms", &[]),
+            Results::Value(Ok(result)) if result == "1969-12-31T23:59:59.999Z"
         ));
     }
 
