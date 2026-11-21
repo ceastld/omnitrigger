@@ -10,6 +10,8 @@ pub(super) enum CsvError {
     InvalidSeparator,
     DifferentColumnCount,
     InvalidHeader,
+    InvalidColumns,
+    ColumnOutOfRange,
     Serialization,
 }
 
@@ -17,11 +19,13 @@ impl CsvError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::MissingInput => "在操作名后粘贴表格，可用换行开始数据",
-            Self::UnknownOperation => "可用 转JSON、对象、Markdown、转置、转TSV 或 从TSV",
+            Self::UnknownOperation => "可用 转JSON、对象、Markdown、转置、转TSV、从TSV 或 选列",
             Self::UnclosedQuote => "字段的双引号尚未闭合",
             Self::InvalidSeparator => "检查引号和分隔符，引号内的双引号用两个双引号表示",
             Self::DifferentColumnCount => "每行的列数须一致",
             Self::InvalidHeader => "CSV 表头的列名须非空且唯一",
+            Self::InvalidColumns => "用逗号隔开互不重复的列号，列号从 1 开始",
+            Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::Serialization => "无法生成 JSON",
         }
     }
@@ -34,12 +38,11 @@ enum Operation {
     Transpose,
     ToTsv,
     FromTsv,
+    SelectColumns(Vec<usize>),
 }
 
 pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
-    let (operation, input) = query
-        .split_once(char::is_whitespace)
-        .ok_or(CsvError::MissingInput)?;
+    let (operation, mut input) = split_argument(query).ok_or(CsvError::MissingInput)?;
     let kind = match operation.to_ascii_lowercase().as_str() {
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
@@ -47,11 +50,13 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         "转置" | "transpose" => Operation::Transpose,
         "转tsv" | "tsv" => Operation::ToTsv,
         "从tsv" | "from-tsv" => Operation::FromTsv,
+        "选列" | "pick-columns" => {
+            let (columns, data) = split_argument(input).ok_or(CsvError::MissingInput)?;
+            input = data;
+            Operation::SelectColumns(column_indices(columns)?)
+        }
         _ => return Err(CsvError::UnknownOperation),
     };
-    let input = query[operation.len()..]
-        .strip_prefix("\r\n")
-        .unwrap_or(input);
     let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     if input.is_empty() {
         return Err(CsvError::MissingInput);
@@ -69,7 +74,49 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::Transpose => Ok(transpose(&rows)),
         Operation::ToTsv => Ok(write_rows(&rows, '\t')),
         Operation::FromTsv => Ok(write_rows(&rows, ',')),
+        Operation::SelectColumns(columns) => select_columns(&rows, &columns),
     }
+}
+
+fn split_argument(input: &str) -> Option<(&str, &str)> {
+    let (argument, rest) = input.split_once(char::is_whitespace)?;
+    Some((
+        argument,
+        input[argument.len()..].strip_prefix("\r\n").unwrap_or(rest),
+    ))
+}
+
+fn column_indices(input: &str) -> Result<Vec<usize>, CsvError> {
+    let mut seen = HashSet::new();
+    input
+        .split(',')
+        .map(|part| {
+            if !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(CsvError::InvalidColumns);
+            }
+            let index = part
+                .parse::<usize>()
+                .ok()
+                .and_then(|number| number.checked_sub(1))
+                .ok_or(CsvError::InvalidColumns)?;
+            if !seen.insert(index) {
+                return Err(CsvError::InvalidColumns);
+            }
+            Ok(index)
+        })
+        .collect()
+}
+
+fn select_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, CsvError> {
+    let width = rows.first().ok_or(CsvError::MissingInput)?.len();
+    if columns.iter().any(|&index| index >= width) {
+        return Err(CsvError::ColumnOutOfRange);
+    }
+    let selected: Vec<_> = rows
+        .iter()
+        .map(|row| columns.iter().map(|&index| row[index].clone()).collect())
+        .collect();
+    Ok(write_rows(&selected, ','))
 }
 
 fn json_objects(rows: &[Vec<String>]) -> Result<String, CsvError> {
@@ -262,6 +309,29 @@ mod tests {
             transform_csv("transpose \"\u{feff}编号\"").as_deref(),
             Ok("\"\u{feff}编号\"")
         );
+    }
+
+    #[test]
+    fn selects_csv_columns_in_the_requested_order_and_keeps_quoted_fields() {
+        let csv = "编号,略过,备注\r\n001,未选,\"茶,咖啡\"\r\n002,,\"含\r\n换行\"\r\n003,未选,";
+        let result = transform_csv(&format!("选列 3,1\r\n\u{feff}{csv}")).unwrap();
+        assert_eq!(
+            result,
+            "备注,编号\r\n\"茶,咖啡\",001\r\n\"含\r\n换行\",002\r\n\"\",003"
+        );
+        assert_eq!(
+            transform_csv("pick-columns 1  保留前导空格,忽略").as_deref(),
+            Ok(" 保留前导空格"),
+        );
+        for (query, error) in [
+            ("选列 0 a,b", CsvError::InvalidColumns),
+            ("选列 1,1 a,b", CsvError::InvalidColumns),
+            ("选列 1, a,b", CsvError::InvalidColumns),
+            ("选列 3 a,b", CsvError::ColumnOutOfRange),
+            ("选列 1 a,b\nc", CsvError::DifferentColumnCount),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
     }
 
     #[test]

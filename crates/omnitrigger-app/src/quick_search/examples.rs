@@ -61,6 +61,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "求一组数值的摘要统计",
+        query: "统计: 1,3,5",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "用半径计算圆周长和面积",
         query: "圆: 半径 3",
     },
@@ -1356,6 +1361,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 从TSV 编号\t备注\n001\t茶,咖啡",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "按指定顺序选取 CSV 的列",
+        query: "CSV: 选列 3,1 编号,名称,备注\n001,茶,\"含,逗号\"",
+    },
+    Example {
         icon: Icon::Layers,
         title: "从路径提取文件名",
         query: r#"路径: 文件名 "C:\工作\发布 包.tar.gz""#,
@@ -1618,6 +1628,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::LinearSystem
         | Scope::Radix
         | Scope::LinearFit
+        | Scope::Statistics
         | Scope::Triangle
         | Scope::RatioAllocation
             if term.is_empty() => {}

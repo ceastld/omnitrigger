@@ -33,6 +33,7 @@ mod renminbi;
 mod scientific;
 mod scope;
 mod settings_sections;
+mod statistics;
 mod text_tools;
 mod timecode;
 mod timestamp;
@@ -102,6 +103,7 @@ use rectangle::{calculate_rectangle, RectangleError};
 use renminbi::{uppercase_renminbi, RenminbiError};
 use scope::{scoped_query, tool_example_keyword, Scope};
 use settings_sections::matching_settings;
+use statistics::{calculate_statistics, StatisticsError};
 use text_tools::{count_text, transform_text, TextError};
 use timecode::{convert_timecode, TimecodeError};
 use timestamp::{convert_timestamp, TimestampError};
@@ -335,6 +337,7 @@ enum ValueError {
     Renminbi(RenminbiError),
     Date(DateError),
     LinearFit(LinearFitError),
+    Statistics(StatisticsError),
     Triangle(TriangleError),
     Duration(DurationError),
     VideoFrames(VideoFrameError),
@@ -371,6 +374,7 @@ impl ValueError {
             Self::Renminbi(error) => error.message(),
             Self::Date(error) => error.message(),
             Self::LinearFit(error) => error.message(),
+            Self::Statistics(error) => error.message(),
             Self::Triangle(error) => error.message(),
             Self::Duration(error) => error.message(),
             Self::VideoFrames(error) => error.message(),
@@ -405,6 +409,7 @@ impl ValueError {
                 | Self::Renminbi(RenminbiError::Incomplete)
                 | Self::Date(DateError::Incomplete)
                 | Self::LinearFit(LinearFitError::Incomplete)
+                | Self::Statistics(StatisticsError::Incomplete)
                 | Self::Equation(EquationError::SystemRows)
                 | Self::Radix(RadixError::Incomplete)
                 | Self::RatioAllocation(RatioAllocationError::Incomplete)
@@ -636,6 +641,9 @@ impl Results {
                 }
                 Scope::LinearFit => {
                     Self::text_value(calculate_linear_fit(term).map_err(ValueError::LinearFit))
+                }
+                Scope::Statistics => {
+                    Self::text_value(calculate_statistics(term).map_err(ValueError::Statistics))
                 }
                 Scope::Triangle => {
                     Self::text_value(calculate_triangle(term).map_err(ValueError::Triangle))
