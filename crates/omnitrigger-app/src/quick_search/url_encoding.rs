@@ -54,6 +54,11 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "表单解码" | "form-decode" => decode_value(&value.replace('+', " ")),
         "参数" | "查询参数" | "params" => decode_parameters(value),
         "拆解" | "inspect" => inspect_url(value),
+        "去查询串" | "strip-query" => {
+            let mut url = Url::parse(value).map_err(|_| UrlEncodingError::InvalidUrl)?;
+            url.set_query(None);
+            Ok(url.into())
+        }
         _ => Err(UrlEncodingError::InvalidOperation),
     }
 }
@@ -133,6 +138,34 @@ fn decode_parameters(value: &str) -> Result<String, UrlEncodingError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removes_the_query_and_preserves_the_path_and_fragment() {
+        for (input, expected) in [
+            (
+                "去查询串 https://example.invalid/a%3Fb?tag=x&source=mail#part?view=1",
+                "https://example.invalid/a%3Fb#part?view=1",
+            ),
+            (
+                "STRIP-QUERY https://example.invalid:8443/a?",
+                "https://example.invalid:8443/a",
+            ),
+            (
+                "去查询串 https://example.invalid/#?",
+                "https://example.invalid/#?",
+            ),
+        ] {
+            assert_eq!(
+                convert_url_component(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            convert_url_component("去查询串 /doc?source=mail"),
+            Err(UrlEncodingError::InvalidUrl)
+        );
+    }
 
     #[test]
     fn shows_parsed_url_components_and_effective_ports() {

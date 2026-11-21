@@ -120,6 +120,7 @@
 - 输入 `URL: 表单编码 北京 A+B` 得到 `%E5%8C%97%E4%BA%AC+A%2BB`。用 `URL: 表单解码` 还原时，`+` 表示空格，`%2B` 表示加号。 [WHATWG 表单编码规则](https://url.spec.whatwg.org/#concept-urlencoded-serializer)
 - 输入 `URL: 参数 https://example.invalid/?tag=a+1&tag=b%2Bc` 可逐行查看解码后的名称和值。也可粘贴查询串，结果按原有顺序保留重名参数。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 输入 `URL: 拆解 https://example.invalid:8443/a%20b?x=1#part` 可查看协议、主机、有效端口、路径、查询串和片段。HTTP 与 HTTPS 会采用显式端口或协议的默认端口。 [WHATWG URL 组成](https://url.spec.whatwg.org/#concept-url)
+- 输入 `URL: 去查询串 https://example.invalid/doc?source=mail#part` 得到 `https://example.invalid/doc#part`。结果使用 URL 解析后的格式，保留路径和片段。
 - 输入 `JSON: 格式化 {"名称":"北京","值":1}` 可添加两格缩进，输入 `JSON: 压缩` 加上 JSON 文本可移除结构空白。两种操作均检查语法，并保留原有键顺序、数字和字符串拼写。搜索框可输入最多 4096 个字符。
 - 输入 `JSON: 取值 /商品/0/价格 {"商品":[{"价格":9007199254740993}]}` 可提取原文中的 `9007199254740993`。路径中的 `~1` 表示键名内的斜杠，`~0` 表示波浪号。带空白的路径可用 JSON 双引号包住。参见 [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901.html#section-4)。
 - 输入 `JSON: 键名 {"城市":{"名称":"北京"},"数量":1}` 得到 `["城市","数量"]`。结果按原顺序列出顶层键名，保留重复键名。
