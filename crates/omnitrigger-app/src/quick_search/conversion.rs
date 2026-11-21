@@ -65,6 +65,9 @@ enum Dimension {
 impl Dimension {
     fn suggested_units(&self, source: &str) -> &'static [&'static str] {
         match self {
+            Self::Length if matches!(source, "px" | "pt" | "pc" | "Q") => {
+                &["px", "pt", "pc", "in", "cm", "mm", "Q"]
+            }
             Self::Length if matches!(source, "nm" | "μm") => {
                 &["nm", "μm", "mm", "cm", "m", "km", "ft", "in", "yd", "mi"]
             }
@@ -113,6 +116,7 @@ struct Unit {
 }
 
 const STANDARD_GRAVITY: f64 = 9.806_65;
+const INCH_IN_METERS: f64 = 0.0254;
 
 impl Unit {
     fn linear(symbol: &'static str, dimension: Dimension, scale: f64) -> Self {
@@ -167,6 +171,7 @@ impl Unit {
             "kΩ" | "kΩ" | "kohm" => return Ok(Self::linear("kΩ", Resistance, 1e3)),
             "MΩ" | "MΩ" | "Mohm" => return Ok(Self::linear("MΩ", Resistance, 1e6)),
             "GΩ" | "GΩ" | "Gohm" => return Ok(Self::linear("GΩ", Resistance, 1e9)),
+            "Q" => return Ok(Self::linear("Q", Length, 0.00025)),
             _ => {}
         }
         let unit = match name.to_ascii_lowercase().as_str() {
@@ -176,7 +181,10 @@ impl Unit {
             "cm" | "厘米" => Self::linear("cm", Length, 0.01),
             "m" | "米" => Self::linear("m", Length, 1.),
             "km" | "千米" | "公里" => Self::linear("km", Length, 1000.),
-            "in" | "inch" | "inches" | "英寸" => Self::linear("in", Length, 0.0254),
+            "in" | "inch" | "inches" | "英寸" => Self::linear("in", Length, INCH_IN_METERS),
+            "px" | "csspx" => Self::linear("px", Length, INCH_IN_METERS / 96.),
+            "pt" | "csspt" | "排版点" => Self::linear("pt", Length, INCH_IN_METERS / 72.),
+            "pc" | "csspc" => Self::linear("pc", Length, INCH_IN_METERS / 6.),
             "ft" | "foot" | "feet" | "英尺" => Self::linear("ft", Length, 0.3048),
             "yd" | "码" => Self::linear("yd", Length, 0.9144),
             "mi" | "mile" | "miles" | "英里" => Self::linear("mi", Length, 1609.344),
@@ -687,6 +695,22 @@ fn format_conversion(amount: f64, source: &Unit, target: &Unit) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_css_absolute_lengths_and_suggests_related_units() {
+        for (query, expected) in [
+            ("12 pt to px", "16 px"),
+            ("96 csspx to in", "1 in"),
+            ("1 pc to pt", "12 pt"),
+            ("100 Q to cm", "2.5 cm"),
+            ("72 pt to mm", "25.4 mm"),
+        ] {
+            assert_eq!(convert(query).unwrap().as_deref(), Ok(expected), "{query}");
+        }
+        let suggestions = suggested_targets("12 pt").unwrap();
+        assert_eq!(suggestions[0].expression, "12 pt to px");
+        assert_eq!(suggestions[0].result, "16 px");
+    }
 
     #[test]
     fn converts_combinations_of_feet_and_inches_with_a_single_sign() {

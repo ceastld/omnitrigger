@@ -100,6 +100,7 @@
 - 输入 `30° 15′ 30″ to °` 可把组合角度换算成十进制度，`12.5° to dms` 得到 `12° 30′ 0″`。组合写法中角分与角秒均小于 60，角秒最多显示六位小数。
 - 输入 `1度电转MJ` 得到 `3.6 MJ`，输入 `500 mW to W` 得到 `0.5 W`。
 - 输入 `3.3 V to mV`、`500 mA to A` 或 `2.2 kΩ to Ω` 可换算电压、电流和电阻。前缀 `m` 表示毫，`M` 表示兆。 [NIST 电气单位和 SI 前缀](https://www.nist.gov/pml/special-publication-811/nist-guide-si-chapter-4-two-classes-si-units-and-si-prefixes)
+- 输入 `12 pt to px` 得到 `16 px`。搜索框按 CSS 绝对长度比例换算像素 `px`、点 `pt`、派卡 `pc` 和四分之一毫米 `Q`。 [W3C CSS 绝对长度定义](https://www.w3.org/TR/css-values-4/#absolute-lengths)
 - 输入 `1000 kg/m³ to g/cm³` 可换算密度，输入 `1 L/min to m³/h` 可换算体积流量，得到 `0.06 m³/h`。
 - 输入 `1 kgf to N` 可换算力，得到 `9.80665 N`。输入 `1 g0 to m/s²` 可将标准重力加速度换算为 `9.80665 m/s²`。换算系数见 [NIST SI 指南](https://www.nist.gov/pml/special-publication-811/nist-guide-si-appendix-b-conversion-factors/nist-guide-si-appendix-b9)。
 - 输入 `颜色: #3A86FF` 可预览颜色并得到 `rgb(58, 134, 255)`，输入 `颜色: rgba(58, 134, 255, 0.5)` 可转回 HEX，结果带透明度时保留其通道。
