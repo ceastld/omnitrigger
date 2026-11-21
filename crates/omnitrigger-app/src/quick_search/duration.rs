@@ -4,6 +4,7 @@ use super::calculator::{format_result, normalize};
 use super::conversion::split_conversion;
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
+const NANOS_PER_DAY: u128 = 86_400 * NANOS_PER_SECOND;
 const MAX_DURATION_NANOS: u128 = (u64::MAX as u128 + 1) * NANOS_PER_SECOND - 1;
 // 去掉末尾的零后，精度由单位纳秒数中的因子 2 和 5 决定。一天含有 16 个因子 2。
 const MAX_FRACTION_DIGITS: usize = 16;
@@ -13,6 +14,7 @@ const SCALE_OPERATORS: [char; 3] = ['*', '×', '/'];
 pub(super) enum DurationError {
     Incomplete,
     Invalid,
+    InvalidClockTime,
     InvalidUnit,
     OutOfRange,
     Precision,
@@ -24,6 +26,7 @@ impl DurationError {
         match self {
             Self::Incomplete => "输入时长，例如 时长: 01:30:00 或 时长: 5400秒",
             Self::Invalid => "使用分:秒、时:分:秒或带单位的时长，可加减或乘除整数",
+            Self::InvalidClockTime => "输入两个 24 小时时刻，例如 23:45 到 01:15",
             Self::InvalidUnit => "请选择时长单位 s、ms、µs、ns、min、h 或 d",
             Self::OutOfRange => "时长超出可转换范围",
             Self::Precision => "时长最小可精确到 1 纳秒",
@@ -39,6 +42,33 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
         Some((source, output)) => (source, Some(output)),
         None => (input, None),
     };
+    let (total, show_seconds) = if let Some((start, end)) = input.split_once(['到', '至']) {
+        let start = time_of_day(start)?;
+        let end = time_of_day(end)?;
+        let elapsed = (end + NANOS_PER_DAY - start) % NANOS_PER_DAY;
+        (elapsed as i128, false)
+    } else {
+        signed_duration(input)?
+    };
+    let nanos = bounded_duration(Some(total.unsigned_abs()))?;
+    let sign = if total < 0 { "-" } else { "" };
+    if let Some(output) = output {
+        return format_duration_unit(nanos, sign, output);
+    }
+    let seconds = nanos / NANOS_PER_SECOND;
+    let fraction = nanos % NANOS_PER_SECOND;
+    let suffix = fraction_suffix(fraction, 9);
+    if show_seconds {
+        Ok(format!("{sign}{seconds}{suffix} 秒"))
+    } else {
+        let (hours, minutes, remainder) = (seconds / 3_600, seconds / 60 % 60, seconds % 60);
+        Ok(format!(
+            "{sign}{hours:02}:{minutes:02}:{remainder:02}{suffix}"
+        ))
+    }
+}
+
+fn signed_duration(input: &str) -> Result<(i128, bool), DurationError> {
     let mut negative = input.starts_with('-');
     let mut remaining = input.strip_prefix(['-', '+']).unwrap_or(input);
     let show_seconds = remaining.contains(':')
@@ -66,22 +96,31 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
         remaining = &remaining[end + 1..];
     }
 
-    let nanos = bounded_duration(Some(total.unsigned_abs()))?;
-    let sign = if total < 0 { "-" } else { "" };
-    if let Some(output) = output {
-        return format_duration_unit(nanos, sign, output);
+    Ok((total, show_seconds))
+}
+
+fn time_of_day(input: &str) -> Result<u128, DurationError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(DurationError::Incomplete);
     }
-    let seconds = nanos / NANOS_PER_SECOND;
-    let fraction = nanos % NANOS_PER_SECOND;
-    let suffix = fraction_suffix(fraction, 9);
-    if show_seconds {
-        Ok(format!("{sign}{seconds}{suffix} 秒"))
+    let (_, remainder) = input
+        .split_once(':')
+        .ok_or(DurationError::InvalidClockTime)?;
+    // 时刻的两段写法是时分，parse_clock 的两段写法是分秒。
+    let nanos = if remainder.contains(':') {
+        parse_clock(input)
     } else {
-        let (hours, minutes, remainder) = (seconds / 3_600, seconds / 60 % 60, seconds % 60);
-        Ok(format!(
-            "{sign}{hours:02}:{minutes:02}:{remainder:02}{suffix}"
-        ))
+        parse_clock(&format!("{input}:00"))
     }
+    .map_err(|error| match error {
+        DurationError::Invalid | DurationError::OutOfRange => DurationError::InvalidClockTime,
+        error => error,
+    })?;
+    if nanos >= NANOS_PER_DAY {
+        return Err(DurationError::InvalidClockTime);
+    }
+    Ok(nanos)
 }
 
 fn fraction_suffix(fraction: u128, digits: usize) -> String {
@@ -103,7 +142,7 @@ fn format_duration_unit(nanos: u128, sign: &str, output: &str) -> Result<String,
         "ns" | "纳秒" => ("ns", 1, Some(0)),
         "min" | "m" | "分" | "分钟" => ("min", 60 * NANOS_PER_SECOND, None),
         "h" | "时" | "小时" => ("h", 3_600 * NANOS_PER_SECOND, None),
-        "d" | "天" => ("d", 86_400 * NANOS_PER_SECOND, None),
+        "d" | "天" => ("d", NANOS_PER_DAY, None),
         _ => return Err(DurationError::InvalidUnit),
     };
     let amount = if let Some(digits) = digits {
@@ -290,6 +329,27 @@ fn parse_units(mut input: &str) -> Result<u128, DurationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calculates_elapsed_time_between_clock_times_including_midnight() {
+        for (query, expected) in [
+            ("08:15 到 10:30", "02:15:00"),
+            ("23:45 到 01:15", "01:30:00"),
+            ("２３：４５ 至 ０１：１５ to min", "90 min"),
+            ("23:59:59.999999999 到 00:00", "00:00:00.000000001"),
+            ("03:45 到 03:45", "00:00:00"),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("24:00 到 01:15", DurationError::InvalidClockTime),
+            ("01:60 到 02:00", DurationError::InvalidClockTime),
+            ("01:00 到", DurationError::Incomplete),
+            ("8 到 9", DurationError::InvalidClockTime),
+        ] {
+            assert_eq!(convert_duration(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn converts_whole_duration_expressions_to_explicit_units() {

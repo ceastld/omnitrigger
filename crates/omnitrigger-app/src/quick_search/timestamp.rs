@@ -148,9 +148,10 @@ fn convert_timestamp_with_local(
             DurationError::Incomplete => TimestampError::Incomplete,
             DurationError::OutOfRange => TimestampError::OutOfRange,
             DurationError::Precision => TimestampError::UnsupportedPrecision,
-            DurationError::Invalid | DurationError::InvalidUnit | DurationError::DivisionByZero => {
-                TimestampError::InvalidDuration
-            }
+            DurationError::Invalid
+            | DurationError::InvalidClockTime
+            | DurationError::InvalidUnit
+            | DurationError::DivisionByZero => TimestampError::InvalidDuration,
         })?;
         let unit = TimestampUnit::from_subsecond(elapsed.subsec_nanos());
         let delta = TimeDelta::from_std(elapsed).map_err(|_| TimestampError::OutOfRange)?;

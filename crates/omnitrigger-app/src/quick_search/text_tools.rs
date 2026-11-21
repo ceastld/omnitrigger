@@ -119,12 +119,10 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
     match operation.as_str() {
         "大写" | "upper" | "uppercase" => Ok(text.to_uppercase()),
         "小写" | "lower" | "lowercase" => Ok(text.to_lowercase()),
-        "下划线命名" | "snake-case" => Ok(identifier_words(text)
-            .into_iter()
-            .map(str::to_lowercase)
-            .collect::<Vec<_>>()
-            .join("_")),
-        "小驼峰命名" | "camel-case" => Ok(lower_camel_case(text)),
+        "下划线命名" | "snake-case" => Ok(join_identifier_words(text, "_")),
+        "短横线命名" | "kebab-case" => Ok(join_identifier_words(text, "-")),
+        "小驼峰命名" | "camel-case" => Ok(camel_case(text, false)),
+        "大驼峰命名" | "pascal-case" => Ok(camel_case(text, true)),
         "转半角" | "halfwidth" => Ok(text
             .chars()
             .map(|ch| match ch {
@@ -226,9 +224,20 @@ fn identifier_words(text: &str) -> Vec<&str> {
     words
 }
 
-fn lower_camel_case(text: &str) -> String {
+fn join_identifier_words(text: &str, delimiter: &str) -> String {
+    identifier_words(text)
+        .into_iter()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(delimiter)
+}
+
+fn camel_case(text: &str, uppercase_first: bool) -> String {
     let mut words = identifier_words(text).into_iter();
-    let mut output = words.next().unwrap_or_default().to_lowercase();
+    let mut output = String::new();
+    if !uppercase_first {
+        output = words.next().unwrap_or_default().to_lowercase();
+    }
     for word in words {
         let mut characters = word.chars();
         let first = characters.next().expect("命名片段至少包含一个字符");
@@ -642,6 +651,11 @@ mod tests {
             ("下划线命名 Cafe\u{301}Name", "cafe\u{301}_name"),
             ("下划线命名 用户 ID", "用户_id"),
             ("小驼峰命名 --_--", ""),
+            ("短横线命名 HTTPServer2URL", "http-server2-url"),
+            ("kebab-case 用户_ID", "用户-id"),
+            ("大驼峰命名 http-server2-url", "HttpServer2Url"),
+            ("pascal-case cafe\u{301}_name", "Cafe\u{301}Name"),
+            ("大驼峰命名 --_--", ""),
         ] {
             assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");
         }

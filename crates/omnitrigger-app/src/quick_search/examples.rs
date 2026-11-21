@@ -36,7 +36,7 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Grid,
-        title: "按标题或程序名查找当前窗口",
+        title: "切换已打开的窗口",
         query: "窗口:",
     },
     Example {
@@ -153,6 +153,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Clock,
         title: "时长换算为指定单位",
         query: "时长: 01:30:00 to min",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "计算跨午夜的时长",
+        query: "时长: 23:45 到 01:15",
     },
     Example {
         icon: Icon::Clock,
@@ -753,6 +758,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "转为小驼峰命名",
         query: "文本: 小驼峰命名 http_server2_url",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "转为短横线命名",
+        query: "文本: 短横线命名 HTTPServer2URL",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "转为大驼峰命名",
+        query: "文本: 大驼峰命名 http-server2-url",
     },
     Example {
         icon: Icon::Terminal,
