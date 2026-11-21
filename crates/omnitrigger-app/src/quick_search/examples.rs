@@ -1236,6 +1236,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "改名一个顶层 JSON 键",
+        query: r#"JSON: 改键 ["旧","新"] {"旧":1,"名称":"北京"}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "删除指定的顶层 JSON 键",
+        query: r#"JSON: 去键 ["调试","备注"] {"值":1,"调试":true,"备注":"草稿"}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "从键名和下标生成 JSON 指针",
         query: r#"JSON: 生成指针 ["商品",0,"a/b"]"#,
     },

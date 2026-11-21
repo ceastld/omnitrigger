@@ -1,4 +1,8 @@
-use std::{borrow::Cow, collections::HashMap, fmt};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;
@@ -20,6 +24,9 @@ pub(super) enum JsonError {
     InvalidLine,
     MissingValue,
     DuplicateKey,
+    KeyArguments,
+    MissingKey,
+    RenameConflict,
 }
 
 impl JsonError {
@@ -31,13 +38,16 @@ impl JsonError {
             Self::LayoutTooLarge => "JSON 格式化结果超过 1 MiB",
             Self::InvalidPointer => "JSON 路径无效，示例 /商品/0/价格",
             Self::InvalidPointerSegment => "指针分段须为字符串或非负整数",
-            Self::ExpectedObject => "请输入 JSON 对象以查看顶层键名",
+            Self::ExpectedObject => "请输入 JSON 对象",
             Self::ExpectedCollection => "请输入 JSON 数组或对象以统计顶层条目数",
             Self::ExpectedArray => "请输入 JSON 数组",
             Self::ExpectedObjectItem => "数组中的每一项都应是 JSON 对象",
             Self::InvalidLine => "每个非空行需要一个完整的 JSON 值",
             Self::MissingValue => "JSON 路径没有对应的值",
             Self::DuplicateKey => "JSON 路径遇到了重复的键",
+            Self::KeyArguments => "用 JSON 字符串数组填写键名，改键需要两个键名",
+            Self::MissingKey => "顶层对象中找不到要改名的键",
+            Self::RenameConflict => "改键要求原键唯一且新键名可用",
         }
     }
 }
@@ -59,6 +69,8 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "合并对象" | "merge-objects" => return merge_json_objects(source),
         "生成指针" | "build-pointer" => return build_json_pointer(source),
         "解析指针" | "parse-pointer" => return parse_json_pointer(source),
+        "改键" | "rename-key" => return rename_json_key(source),
+        "去键" | "remove-keys" => return remove_json_keys(source),
         _ => return Err(JsonError::UnknownOperation),
     };
     if source.is_empty() {
@@ -186,11 +198,7 @@ fn merge_json_objects(source: &str) -> Result<String, JsonError> {
         if !raw.starts_with('{') {
             return Err(JsonError::ExpectedObjectItem);
         }
-        let mut parser = serde_json::Deserializer::from_str(raw);
-        let entries = serde::Deserializer::deserialize_map(&mut parser, ObjectEntries)
-            .map_err(json_parse_error)?;
-        parser.end().map_err(json_parse_error)?;
-        for (key, value) in entries {
+        for (key, value) in read_object_entries(raw)? {
             let next_position = members.len();
             members
                 .entry(key)
@@ -200,15 +208,85 @@ fn merge_json_objects(source: &str) -> Result<String, JsonError> {
     }
     let mut ordered: Vec<_> = members.into_iter().collect();
     ordered.sort_unstable_by_key(|(_, (position, _))| *position);
-    let entries = ordered
+    write_object_entries(ordered.into_iter().map(|(key, (_, value))| (key, value)))
+}
+
+fn read_object_entries(source: &str) -> Result<Vec<(String, &RawValue)>, JsonError> {
+    if !source.starts_with('{') {
+        serde_json::from_str::<IgnoredAny>(source).map_err(json_parse_error)?;
+        return Err(JsonError::ExpectedObject);
+    }
+    let mut parser = serde_json::Deserializer::from_str(source);
+    let entries = serde::Deserializer::deserialize_map(&mut parser, ObjectEntries)
+        .map_err(json_parse_error)?;
+    parser.end().map_err(json_parse_error)?;
+    Ok(entries)
+}
+
+fn write_object_entries<'a>(
+    entries: impl IntoIterator<Item = (String, &'a RawValue)>,
+) -> Result<String, JsonError> {
+    let entries = entries
         .into_iter()
-        .map(|(key, (_, value))| {
+        .map(|(key, value)| {
             let key = serde_json::to_string(&key).expect("JSON 键名可以序列化");
             let value = layout_json(value.get(), false)?;
             Ok(format!("{key}:{value}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(format!("{{{}}}", entries.join(",")))
+}
+
+fn key_names_and_source(query: &str) -> Result<(Vec<String>, &str), JsonError> {
+    let mut arguments = serde_json::Deserializer::from_str(query).into_iter::<Vec<String>>();
+    let names = arguments
+        .next()
+        .ok_or(JsonError::Incomplete)?
+        .map_err(|error| {
+            if error.is_eof() {
+                JsonError::Incomplete
+            } else {
+                JsonError::KeyArguments
+            }
+        })?;
+    let source = query[arguments.byte_offset()..].trim_start();
+    if source.is_empty() {
+        return Err(JsonError::Incomplete);
+    }
+    Ok((names, source))
+}
+
+fn rename_json_key(query: &str) -> Result<String, JsonError> {
+    let (names, source) = key_names_and_source(query)?;
+    let [original, replacement] = names.as_slice() else {
+        return Err(JsonError::KeyArguments);
+    };
+    let mut entries = read_object_entries(source)?;
+    let mut matches = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, (key, _))| key == original);
+    let (position, _) = matches.next().ok_or(JsonError::MissingKey)?;
+    if matches.next().is_some()
+        || (original != replacement && entries.iter().any(|(key, _)| key == replacement))
+    {
+        return Err(JsonError::RenameConflict);
+    }
+    entries[position].0.clone_from(replacement);
+    write_object_entries(entries)
+}
+
+fn remove_json_keys(query: &str) -> Result<String, JsonError> {
+    let (names, source) = key_names_and_source(query)?;
+    if names.is_empty() {
+        return Err(JsonError::KeyArguments);
+    }
+    let names: HashSet<_> = names.into_iter().collect();
+    write_object_entries(
+        read_object_entries(source)?
+            .into_iter()
+            .filter(|(key, _)| !names.contains(key)),
+    )
 }
 
 fn build_json_pointer(source: &str) -> Result<String, JsonError> {
@@ -582,6 +660,46 @@ mod tests {
             Err(JsonError::LayoutTooLarge)
         );
         assert_eq!(transform_json(&format!("压缩 {nested}")).unwrap(), nested);
+    }
+
+    #[test]
+    fn renames_and_removes_top_level_json_keys_without_reencoding_values() {
+        for (query, expected) in [
+            (
+                r#"改键 ["旧","新"] {"前":1e2,"旧":9007199254740993,"后":"\u4f60"}"#,
+                r#"{"前":1e2,"新":9007199254740993,"后":"\u4f60"}"#,
+            ),
+            (
+                r#"改键 ["","含 空格"]{"":{ "金额": 1.20 }, "其他":0,"其他":1}"#,
+                r#"{"含 空格":{"金额":1.20},"其他":0,"其他":1}"#,
+            ),
+            (r#"改键 ["同","同"] {"同":1}"#, r#"{"同":1}"#),
+            (
+                r#"去键 ["调试","备注"] {"调试":0,"调试":1,"数据":{"调试":1},"备注":"x"}"#,
+                r#"{"数据":{"调试":1}}"#,
+            ),
+            (r#"去键 ["已删除"] {"值":3.0}"#, r#"{"值":3.0}"#),
+            (r#"去键 ["值"] {"值":3.0}"#, "{}"),
+        ] {
+            assert_eq!(transform_json(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            (r#"改键 ["旧","新"] {"新":2}"#, JsonError::MissingKey),
+            (
+                r#"改键 ["旧","新"] {"旧":1,"新":2}"#,
+                JsonError::RenameConflict,
+            ),
+            (
+                r#"改键 ["旧","新"] {"旧":1,"旧":2}"#,
+                JsonError::RenameConflict,
+            ),
+            (r#"改键 ["旧"] {"旧":1}"#, JsonError::KeyArguments),
+            (r#"去键 [1] {"值":1}"#, JsonError::KeyArguments),
+            (r#"去键 [] {}"#, JsonError::KeyArguments),
+            (r#"去键 ["值"] []"#, JsonError::ExpectedObject),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
     }
 
     #[test]
