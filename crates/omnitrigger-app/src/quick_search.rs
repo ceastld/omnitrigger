@@ -324,6 +324,7 @@ impl ValueError {
                         | TextError::IncompleteTransform
                         | TextError::IncompleteReplacement
                         | TextError::IncompleteTextArgument
+                        | TextError::IncompleteLineComparison
                 )
                 | Self::Fraction(FractionError::Incomplete)
                 | Self::Percentage(PercentageError::Incomplete)

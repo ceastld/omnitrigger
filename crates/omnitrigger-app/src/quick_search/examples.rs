@@ -866,6 +866,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "找出两组文本共有的行",
+        query: r#"文本: 共有行 "苹果\n梨\n茶" "茶\n苹果\n柿子""#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "找出仅在第一组的行",
+        query: r#"文本: 行差集 "苹果\n梨\n茶" "茶\n苹果\n柿子""#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "保留符合正则表达式的行",
         query: "文本: 正则保留行 \"^[0-9]+$\" 42\nA3\n007",
     },

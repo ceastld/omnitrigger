@@ -28,6 +28,8 @@ pub(super) enum TextError {
     InvalidReplacementArguments,
     IncompleteTextArgument,
     InvalidTextArgument,
+    IncompleteLineComparison,
+    InvalidLineComparison,
     EmptyDelimiter,
     InvalidColumn,
     MissingColumn,
@@ -53,6 +55,8 @@ impl TextError {
             Self::InvalidReplacementArguments => "查找内容和替换内容要加引号，并用空格分隔",
             Self::IncompleteTextArgument => "输入带引号的内容和原文",
             Self::InvalidTextArgument => "第一个参数要加引号，并和原文用空格分开",
+            Self::IncompleteLineComparison => "输入两组加引号的文本，组间用空格分开",
+            Self::InvalidLineComparison => "用空格分隔两组加引号的文本",
             Self::EmptyDelimiter => "分隔符不能为空",
             Self::InvalidColumn => "输入从 1 开始的列号，例如 文本: 取列 \"\\t\" 2",
             Self::MissingColumn => "至少一行的列数不足",
@@ -104,6 +108,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "取列" | "column" => return select_text_column(text),
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
+        "共有行" | "行交集" | "intersect-lines" => return compare_line_sets(text, true),
+        "行差集" | "subtract-lines" => return compare_line_sets(text, false),
         "正则保留行" | "keep-regex-lines" => return filter_regex_lines(text, true),
         "正则排除行" | "exclude-regex-lines" => return filter_regex_lines(text, false),
         "正则提取" | "regex-extract" => {
@@ -563,6 +569,32 @@ fn select_lines(text: &str, matches: impl Fn(&str) -> bool) -> String {
         .join("\n")
 }
 
+fn compare_line_sets(input: &str, keep_common: bool) -> Result<String, TextError> {
+    let read_lists = || {
+        let (first, rest) = replacement_argument(input)?;
+        let (second, rest) = replacement_argument(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(TextError::InvalidReplacementArguments);
+        }
+        Ok((first, second))
+    };
+    let (first, second) = read_lists().map_err(|error| match error {
+        TextError::IncompleteReplacement => TextError::IncompleteLineComparison,
+        TextError::InvalidReplacementArguments => TextError::InvalidLineComparison,
+        _ => error,
+    })?;
+    if first.contains('\0') || second.contains('\0') {
+        return Err(TextError::NullCharacter);
+    }
+    let second: HashSet<_> = second.lines().collect();
+    let mut shown = HashSet::new();
+    Ok(first
+        .lines()
+        .filter(|&line| second.contains(line) == keep_common && shown.insert(line))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 fn replacement_parts(input: &str) -> Result<(String, String, &str), TextError> {
     let (needle, rest) = replacement_argument(input)?;
     let (replacement, rest) = replacement_argument(rest)?;
@@ -630,6 +662,34 @@ mod tests {
         }
         let large = format!("逐行加前缀 \"{}\" {}", "x".repeat(1024), "A\n".repeat(1100));
         assert_eq!(transform_text(&large), Err(TextError::ResultTooLarge));
+    }
+
+    #[test]
+    fn compares_two_quoted_line_lists_and_preserves_first_list_order() {
+        for (input, expected) in [
+            (
+                r#"共有行 "苹果\n梨\n苹果\n茶" "茶\r\n苹果\r\n柿子""#,
+                "苹果\n茶",
+            ),
+            (r#"行差集 "苹果\n梨\n苹果\n茶" "茶\n苹果\n柿子""#, "梨"),
+            ("行差集 “A\r\n A\r\nB \r\nA” “A\nB”", " A\nB "),
+            (r#"intersect-lines "A\nB" "a""#, ""),
+            (r#"subtract-lines "A\nB\nA" """#, "A\nB"),
+        ] {
+            assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");
+        }
+        for (input, error) in [
+            ("共有行 \"苹果\"", TextError::IncompleteLineComparison),
+            ("共有行 \"苹果\" \"梨", TextError::IncompleteLineComparison),
+            ("共有行 \"苹果\" 梨", TextError::InvalidLineComparison),
+            (
+                "行差集 \"苹果\" \"梨\" \"茶\"",
+                TextError::InvalidLineComparison,
+            ),
+            (r#"行差集 "苹果\u0000" "梨""#, TextError::NullCharacter),
+        ] {
+            assert_eq!(transform_text(input), Err(error), "{input}");
+        }
     }
 
     #[test]
