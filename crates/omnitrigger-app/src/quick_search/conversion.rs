@@ -38,6 +38,7 @@ enum Dimension {
     Volume,
     Speed,
     Data,
+    DataRate,
     Angle,
     Pressure,
     Frequency,
@@ -154,6 +155,16 @@ impl Unit {
 }
 
 fn data_unit(name: &str) -> Option<Unit> {
+    let rate_base = name
+        .strip_suffix("/s")
+        .or_else(|| name.strip_suffix("/秒"))
+        .or_else(|| name.strip_suffix("ps"));
+    let dimension = if rate_base.is_some() {
+        Dimension::DataRate
+    } else {
+        Dimension::Data
+    };
+    let name = rate_base.unwrap_or(name);
     // `B` 是字节、`b` 是比特，十进制和二进制前缀各自保持原比例。
     let (prefix, bytes) = if let Some(prefix) = name.strip_suffix('B') {
         (prefix, true)
@@ -175,9 +186,9 @@ fn data_unit(name: &str) -> Option<Unit> {
     .find(|(key, _, _, _)| prefix.eq_ignore_ascii_case(key))
     .map(|(_, bits, symbol, scale)| {
         if bytes {
-            Unit::linear(symbol, Dimension::Data, scale * 8.)
+            Unit::linear(symbol, dimension, scale * 8.)
         } else {
-            Unit::linear(bits, Dimension::Data, scale)
+            Unit::linear(bits, dimension, scale)
         }
     })
 }
@@ -255,7 +266,12 @@ fn convert_quantity(amount: &str, name: &str, target: &str) -> Result<String, Co
         amount * (source.scale / target.scale)
     };
     let value = format_result(converted).map_err(|_| ConversionError::OutOfRange)?;
-    Ok(format!("{value} {}", target.symbol))
+    let suffix = if target.dimension == Dimension::DataRate {
+        "/s"
+    } else {
+        ""
+    };
+    Ok(format!("{value} {}{suffix}", target.symbol))
 }
 
 #[cfg(test)]
@@ -346,6 +362,22 @@ mod tests {
         }
         assert_eq!(
             convert("10 GB to km/h"),
+            Some(Err(ConversionError::DifferentDimensions))
+        );
+    }
+
+    #[test]
+    fn converts_data_rates_with_bits_bytes_and_binary_prefixes() {
+        for (query, expected) in [
+            ("8Mbps to MB/s", "1 MB/s"),
+            ("1 MiB/s to kB/s", "1048.576 kB/s"),
+            ("500 kB/秒转Mb/s", "4 Mb/s"),
+            ("1 GiB/s to Mib/s", "8192 Mib/s"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.into())), "{query}");
+        }
+        assert_eq!(
+            convert("1 MB to MB/s"),
             Some(Err(ConversionError::DifferentDimensions))
         );
     }
