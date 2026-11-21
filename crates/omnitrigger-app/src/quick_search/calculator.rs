@@ -44,7 +44,9 @@ fn looks_like_expression(query: &str) -> bool {
     let tail = tail.trim_start();
     match named_value(name) {
         Some(NamedValue::Constant(_)) => tail.is_empty() || Operator::prefix(tail).is_some(),
-        Some(NamedValue::Function(_)) => tail.is_empty() || tail.starts_with('('),
+        Some(NamedValue::Function(_) | NamedValue::Aggregate(_)) => {
+            tail.is_empty() || tail.starts_with('(')
+        }
         None => false,
     }
 }
@@ -150,35 +152,47 @@ impl Parser<'_> {
     }
 
     fn parenthesized(&mut self) -> Result<f64, CalculationError> {
-        match self.peek() {
-            Some('(') => self.0 = &self.0[1..],
-            None => return Err(CalculationError::Incomplete),
-            _ => return Err(CalculationError::Invalid),
-        }
+        self.expect('(')?;
         let value = self.expression(0)?;
-        match self.peek() {
-            Some(')') => self.0 = &self.0[1..],
-            None => return Err(CalculationError::Incomplete),
-            _ => return Err(CalculationError::Invalid),
-        }
+        self.expect(')')?;
         Ok(value)
+    }
+
+    fn arguments(&mut self) -> Result<Vec<f64>, CalculationError> {
+        self.expect('(')?;
+        let mut values = vec![self.expression(0)?];
+        while self.peek() == Some(',') {
+            self.0 = &self.0[1..];
+            values.push(self.expression(0)?);
+        }
+        self.expect(')')?;
+        Ok(values)
+    }
+
+    fn expect(&mut self, expected: char) -> Result<(), CalculationError> {
+        match self.peek() {
+            Some(ch) if ch == expected => {
+                self.0 = &self.0[ch.len_utf8()..];
+                Ok(())
+            }
+            None => Err(CalculationError::Incomplete),
+            Some(_) => Err(CalculationError::Invalid),
+        }
     }
 
     fn named(&mut self) -> Result<f64, CalculationError> {
         let (name, rest) = split_name(self.0);
         self.0 = rest;
-        match named_value(name) {
-            Some(NamedValue::Constant(value)) => Ok(value),
-            Some(NamedValue::Function(function)) => {
-                let argument = self.parenthesized()?;
-                let value = function(argument);
-                if value.is_nan() {
-                    return Err(CalculationError::FunctionDomain);
-                }
-                finite(value)
-            }
-            None => Err(CalculationError::Invalid),
+        let value = match named_value(name) {
+            Some(NamedValue::Constant(value)) => return Ok(value),
+            Some(NamedValue::Function(function)) => function(self.parenthesized()?),
+            Some(NamedValue::Aggregate(function)) => function(&self.arguments()?),
+            None => return Err(CalculationError::Invalid),
+        };
+        if value.is_nan() {
+            return Err(CalculationError::FunctionDomain);
         }
+        finite(value)
     }
 
     fn number(&mut self) -> Result<f64, CalculationError> {
@@ -310,6 +324,29 @@ mod tests {
         assert_eq!(calculate("sqrt(-1)"), Err(CalculationError::FunctionDomain));
         assert_eq!(calculate("sqrt(1,2)"), Err(CalculationError::Invalid));
         assert_eq!(calculate("exp(10000)"), Err(CalculationError::OutOfRange));
+    }
+
+    #[test]
+    fn aggregate_functions_accept_expressions_and_require_arguments() {
+        for (query, expected) in [
+            ("avg(12,18,30)", "20"),
+            ("mean（１，２，３）", "2"),
+            ("sum(1,sqrt(4),min(3,4))", "6"),
+            ("max(-9,-4^2,-12)", "-9"),
+            ("min(4)", "4"),
+            ("avg(1e308,1e308)", "1e308"),
+        ] {
+            assert!(looks_like_calculation(query), "{query}");
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(calculate("avg(1,"), Err(CalculationError::Incomplete));
+        for query in ["min()", "max(,2)", "sum(2,)"] {
+            assert_eq!(calculate(query), Err(CalculationError::Invalid), "{query}");
+        }
+        assert_eq!(
+            calculate("sum(1e308,1e308)"),
+            Err(CalculationError::OutOfRange)
+        );
     }
 
     #[test]

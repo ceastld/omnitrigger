@@ -3,6 +3,7 @@ use std::f64::consts::{E, PI};
 pub(super) enum NamedValue {
     Constant(f64),
     Function(fn(f64) -> f64),
+    Aggregate(fn(&[f64]) -> f64),
 }
 
 pub(super) fn split_name(input: &str) -> (&str, &str) {
@@ -16,6 +17,18 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
     let function: fn(f64) -> f64 = match name.to_ascii_lowercase().as_str() {
         "pi" | "π" | "Π" => return Some(NamedValue::Constant(PI)),
         "e" => return Some(NamedValue::Constant(E)),
+        "sum" => return Some(NamedValue::Aggregate(|values| values.iter().sum())),
+        "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
+        "min" => {
+            return Some(NamedValue::Aggregate(|values| {
+                values.iter().copied().fold(f64::INFINITY, f64::min)
+            }));
+        }
+        "max" => {
+            return Some(NamedValue::Aggregate(|values| {
+                values.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+            }));
+        }
         "abs" => f64::abs,
         "sqrt" => f64::sqrt,
         "cbrt" => f64::cbrt,
@@ -34,4 +47,16 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         _ => return None,
     };
     Some(NamedValue::Function(function))
+}
+
+fn average(values: &[f64]) -> f64 {
+    let count = values.len() as f64;
+    let total: f64 = values.iter().sum();
+    if total.is_finite() {
+        return total / count;
+    }
+
+    // 中间和溢出时，缩放参数后再计算均值。
+    let scale = values.iter().map(|value| value.abs()).fold(0., f64::max);
+    scale * (values.iter().map(|value| value / scale).sum::<f64>() / count)
 }
