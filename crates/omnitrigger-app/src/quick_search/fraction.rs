@@ -1,12 +1,14 @@
-use num_bigint::{BigInt, Sign};
+use num_bigint::{BigInt, BigUint, Sign};
 use num_rational::BigRational;
 
 use super::calculator::{normalize, QUERY_LIMIT};
+use super::conversion::split_conversion;
 use super::operators::Operator;
 
 const MAX_POWER_EXPONENT: u32 = 1024;
 const MAX_FACTORIAL_ARGUMENT: u32 = 1024;
 const MAX_EXACT_BITS: u64 = 8192;
+const MAX_DECIMAL_PLACES: u32 = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FractionError {
@@ -18,6 +20,7 @@ pub(super) enum FractionError {
     NonIntegerExponent,
     FactorialDomain,
     FactorialRange,
+    DecimalPlaces,
     ExactRange,
 }
 
@@ -32,6 +35,7 @@ impl FractionError {
             Self::NonIntegerExponent => "精确分数幂的指数必须是整数",
             Self::FactorialDomain => "阶乘的参数必须是非负整数",
             Self::FactorialRange => "阶乘参数最多 1024，结果最多 8192 个二进制位",
+            Self::DecimalPlaces => "输入 0 至 100 的小数位数，例如 分数: 小数 1/3 to 8",
             Self::ExactRange => "指数绝对值最多 1024，分子和分母各最多 8192 个二进制位",
         }
     }
@@ -94,7 +98,25 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     let input = normalized.trim();
     let (verb, expression) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
     if verb == "计算" || verb.eq_ignore_ascii_case("calc") {
-        return calculate_fraction(expression.trim());
+        return calculate_fraction(expression.trim()).map(|value| value.to_string());
+    }
+    if verb == "小数" || verb.eq_ignore_ascii_case("decimal") {
+        let (source, places) =
+            split_conversion(expression.trim()).ok_or(FractionError::Incomplete)?;
+        let places = places.trim();
+        let places = places
+            .strip_suffix("位小数")
+            .or_else(|| places.strip_suffix("位"))
+            .unwrap_or(places)
+            .trim_end();
+        if places.is_empty() {
+            return Err(FractionError::Incomplete);
+        }
+        let places: u32 = places.parse().map_err(|_| FractionError::DecimalPlaces)?;
+        if places > MAX_DECIMAL_PLACES {
+            return Err(FractionError::DecimalPlaces);
+        }
+        return calculate_fraction(source).map(|value| rounded_decimal(value, places));
     }
     let (negative, numerator, denominator) =
         if let Some((numerator, denominator)) = input.split_once('/') {
@@ -125,7 +147,7 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     })
 }
 
-fn calculate_fraction(input: &str) -> Result<String, FractionError> {
+fn calculate_fraction(input: &str) -> Result<BigRational, FractionError> {
     if input.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Err(FractionError::TooLong);
     }
@@ -134,7 +156,33 @@ fn calculate_fraction(input: &str) -> Result<String, FractionError> {
     if !parser.remaining.trim().is_empty() {
         return Err(FractionError::Invalid);
     }
-    Ok(value.to_string())
+    Ok(value)
+}
+
+fn rounded_decimal(value: BigRational, places: u32) -> String {
+    let unit = BigUint::from(10u8).pow(places);
+    let numerator = value.numer().magnitude() * unit;
+    let denominator = value.denom().magnitude();
+    let mut rounded = &numerator / denominator;
+    let twice_remainder = (numerator - &rounded * denominator) << 1usize;
+    if &twice_remainder > denominator || (&twice_remainder == denominator && rounded.bit(0)) {
+        rounded += 1u8;
+    }
+    let sign = if value.numer().sign() == Sign::Minus && rounded.bits() != 0 {
+        "-"
+    } else {
+        ""
+    };
+    let digits = rounded.to_string();
+    let places = places as usize;
+    if places == 0 {
+        format!("{sign}{digits}")
+    } else if digits.len() <= places {
+        format!("{sign}0.{digits:0>places$}")
+    } else {
+        let (whole, fraction) = digits.split_at(digits.len() - places);
+        format!("{sign}{whole}.{fraction}")
+    }
 }
 
 fn ensure_exact_size(value: &BigRational) -> Result<(), FractionError> {
@@ -307,6 +355,34 @@ impl FractionParser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rounds_exact_expressions_to_decimal_places_with_ties_to_even() {
+        for (query, expected) in [
+            ("小数 1/3 to 8", "0.33333333"),
+            ("小数 1/8 转 ４位小数", "0.1250"),
+            ("decimal 1/2 to 0", "0"),
+            ("小数 -0.005 to 2", "0.00"),
+            ("小数 -2.675 to 2", "-2.68"),
+            ("小数 2.685 to 2", "2.68"),
+            ("小数 9.995 to 2", "10.00"),
+            (
+                "小数 100000000000000000001/3 to 2",
+                "33333333333333333333.67",
+            ),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("小数 1/3 to", FractionError::Incomplete),
+            ("小数 1/3 to 101", FractionError::DecimalPlaces),
+            ("小数 1/3 to -1", FractionError::DecimalPlaces),
+            ("小数 1/3 to 2.5", FractionError::DecimalPlaces),
+            ("小数 1/0 to 2", FractionError::ZeroDenominator),
+        ] {
+            assert_eq!(simplify_fraction(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn floors_division_and_uses_the_divisor_sign_for_exact_remainders() {
