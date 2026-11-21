@@ -196,6 +196,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "查询中文日期的星期",
+        query: "日期: 2026年11月21日 星期几",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查询日期的 ISO 周号",
         query: "日期: 2027-01-01 第几周",
     },

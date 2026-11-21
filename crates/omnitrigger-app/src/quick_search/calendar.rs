@@ -16,7 +16,7 @@ impl DateError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "可以输入日期、天数或星期几，例如 日期: 今天 星期几",
-            Self::InvalidDate => "请输入有效日期 YYYY-MM-DD 或月份 YYYY-MM",
+            Self::InvalidDate => "输入有效日期或月份，例如 2026年11月21日 或 2026-11",
             Self::InvalidWeek => "请输入有效的 ISO 周号，例如 2026-W47",
             Self::InvalidQuarter => "请输入季度编号 1 至 4，例如 2026-Q4",
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
@@ -61,10 +61,39 @@ fn iso_date_prefix(input: &str) -> Option<(&str, &str)> {
         .then_some((date, rest.trim()))
 }
 
+fn written_date_prefix(input: &str) -> Option<(i32, u32, u32, &str)> {
+    let (year, rest) = input.split_at_checked(4)?;
+    if !year.bytes().all(|digit| digit.is_ascii_digit()) {
+        return None;
+    }
+    let (month, day, rest) = if let Some(rest) = rest.strip_prefix('年') {
+        let (month, day) = rest.split_once('月')?;
+        let (day, rest) = day.split_once('日')?;
+        (month, day, rest)
+    } else {
+        let (month, tail) = rest.strip_prefix('/')?.split_once('/')?;
+        let day_length = tail.bytes().take_while(u8::is_ascii_digit).count();
+        let (day, rest) = tail.split_at(day_length);
+        (month, day, rest)
+    };
+    let part = |text: &str| {
+        if (1..=2).contains(&text.len()) && text.bytes().all(|digit| digit.is_ascii_digit()) {
+            text.parse::<u32>().ok()
+        } else {
+            None
+        }
+    };
+    Some((year.parse().ok()?, part(month)?, part(day)?, rest.trim()))
+}
+
 fn date_operand(input: &str, today: NaiveDate) -> Result<(NaiveDate, &str), DateError> {
     if let Some((offset, rest)) = relative_day(input) {
         let date = today.checked_add_signed(TimeDelta::days(i64::from(offset)));
         return Ok((in_range(date)?, rest));
+    }
+    if let Some((year, month, day, rest)) = written_date_prefix(input) {
+        let date = NaiveDate::from_ymd_opt(year, month, day).ok_or(DateError::InvalidDate)?;
+        return Ok((date, rest));
     }
     if input.is_empty()
         || input.len() < 10
@@ -153,9 +182,13 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
     if let Some(date) = weekday_query(input).or_else(|| week_number_query(input)) {
         return date.is_empty()
             || relative_day(date).is_some_and(|(_, rest)| date_tail(rest))
-            || iso_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest));
+            || iso_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest))
+            || written_date_prefix(date).is_some_and(|(_, _, _, rest)| date_tail(rest));
     }
-    relative_period(input).is_some() || relative_day(input).is_some_and(|(_, rest)| date_tail(rest))
+    relative_period(input).is_some()
+        || relative_day(input).is_some_and(|(_, rest)| date_tail(rest))
+        || (input.get(4..).is_some_and(|rest| rest.starts_with('年'))
+            && written_date_prefix(input).is_some_and(|(_, _, _, rest)| date_tail(rest)))
 }
 
 fn is_workday_unit(unit: &str) -> bool {
@@ -398,7 +431,11 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     if operand.is_empty() {
         return Err(DateError::Incomplete);
     }
-    if subtract && (operand.get(4..5) == Some("-") || relative_day(operand).is_some()) {
+    if subtract
+        && (operand.get(4..5) == Some("-")
+            || relative_day(operand).is_some()
+            || written_date_prefix(operand).is_some())
+    {
         let (other, suffix) = date_operand(operand, today)?;
         if display_query.is_some() {
             return Err(DateError::InvalidOperation);
@@ -423,6 +460,36 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_chinese_dates_and_slash_dates_in_calendar_queries() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            ("2024年2月29日", "2024-02-29"),
+            ("２０２６年１１月２１日 星期几", "星期六"),
+            ("2026/11/21 周几", "星期六"),
+            ("2026/11/21 - 2026年11月1日", "20 天"),
+            ("2026年11月21日 - 2026/11/1", "20 天"),
+            ("2026/1/1 + 2天", "2026-01-03"),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert!(looks_like_date_query("2024年2月29日"));
+        assert!(looks_like_date_query("2026/11/21 星期几"));
+        assert!(!looks_like_date_query("2026/11/21"));
+        assert_eq!(
+            calculate_date("2025年2月29日", today),
+            Err(DateError::InvalidDate)
+        );
+        assert_eq!(
+            calculate_date("2026/11/32", today),
+            Err(DateError::InvalidDate)
+        );
+    }
 
     #[test]
     fn reports_relative_weeks_using_local_monday_across_years() {
