@@ -29,6 +29,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "选择目标进制",
+        query: "0xff to",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在算式中混用进制",
         query: "0xFF + 0b1",
     },

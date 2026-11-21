@@ -443,14 +443,35 @@ pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
     let (source, stem, separator, prefix) = match split_conversion(input) {
         Some((source, target)) => {
             let prefix = target.trim();
-            if Unit::parse(prefix).is_ok() {
-                return None;
-            }
             let stem = input[..input.len() - target.len()].trim_end();
             (source, stem, "", prefix)
         }
         None => (input, input, " to", ""),
     };
+    let expression_for = |name: &str| {
+        let expression = format!("{stem}{separator} {name}");
+        (expression.chars().count() <= QUERY_LIMIT).then_some(expression)
+    };
+    let magnitude = source.strip_prefix(['-', '+']).unwrap_or(source);
+    let prefixed_integer =
+        Base::prefixed(magnitude).is_some_and(|(base, digits)| base.parse_digits(digits).is_ok());
+    if separator.is_empty() && prefixed_integer {
+        if Base::parse(prefix).is_some() {
+            return None;
+        }
+        let items: Vec<_> = Base::matching_targets(prefix)
+            .filter_map(|(name, base)| {
+                Some(InputSuggestion {
+                    expression: expression_for(name)?,
+                    result: base.convert(source).ok()?,
+                })
+            })
+            .collect();
+        return (!items.is_empty()).then_some(items);
+    }
+    if Unit::parse(prefix).is_ok() {
+        return None;
+    }
     let (amount, source) = parse_quantity(source).ok()?;
     let items: Vec<_> = source
         .dimension
@@ -462,12 +483,8 @@ pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
             if target.symbol == source.symbol {
                 return None;
             }
-            let expression = format!("{stem}{separator} {name}");
-            if expression.chars().count() > QUERY_LIMIT {
-                return None;
-            }
             Some(InputSuggestion {
-                expression,
+                expression: expression_for(name)?,
                 result: format_conversion(amount, &source, &target).ok()?,
             })
         })
@@ -724,6 +741,38 @@ mod tests {
     }
 
     #[test]
+    fn suggests_exact_radix_targets_for_prefixed_integers() {
+        let items = suggested_targets("0xff to").unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.result.as_str())
+                .collect::<Vec<_>>(),
+            ["255", "0b11111111", "0o377", "0xff"]
+        );
+        assert_eq!(
+            suggested_targets("-0xFF to Bi").unwrap()[0].result,
+            "-0b11111111"
+        );
+        assert_eq!(
+            suggested_targets("0o377 转十六").unwrap()[0].expression,
+            "0o377 转 hex"
+        );
+        let max = "0xffffffffffffffffffffffffffffffff to";
+        assert_eq!(
+            suggested_targets(max).unwrap()[0].result,
+            u128::MAX.to_string()
+        );
+        assert!(suggested_targets("0x10 m to")
+            .unwrap()
+            .iter()
+            .any(|item| item.result == "1600 cm"));
+        for query in ["0xff", "0xff to oct", "0x_1 to", "0xff to unknown"] {
+            assert!(suggested_targets(query).is_none(), "{query}");
+        }
+    }
+
+    #[test]
     fn suggests_compatible_targets_and_previews_their_conversions() {
         for (query, expression, result) in [
             ("10 km to", "10 km to mi", "6.21371192237334 mi"),
@@ -743,7 +792,7 @@ mod tests {
                 assert_eq!(convert(&item.expression), Some(Ok(item.result)));
             }
         }
-        for query in ["3 to", "10 km to mi", "0xff to", "100未知单位转"] {
+        for query in ["3 to", "10 km to mi", "100未知单位转"] {
             assert!(suggested_targets(query).is_none(), "{query}");
         }
     }

@@ -11,14 +11,30 @@ pub(super) enum Base {
 }
 
 impl Base {
+    const TARGETS: [(Self, &'static [&'static str]); 4] = [
+        (Self::Decimal, &["dec", "decimal", "十进制"]),
+        (Self::Binary, &["bin", "binary", "二进制"]),
+        (Self::Octal, &["oct", "octal", "八进制"]),
+        (Self::Hexadecimal, &["hex", "hexadecimal", "十六进制"]),
+    ];
+
     pub(super) fn parse(target: &str) -> Option<Self> {
-        match target.trim().to_ascii_lowercase().as_str() {
-            "bin" | "binary" | "二进制" => Some(Self::Binary),
-            "oct" | "octal" | "八进制" => Some(Self::Octal),
-            "dec" | "decimal" | "十进制" => Some(Self::Decimal),
-            "hex" | "hexadecimal" | "十六进制" => Some(Self::Hexadecimal),
-            _ => None,
-        }
+        let target = target.trim().to_ascii_lowercase();
+        Self::TARGETS
+            .into_iter()
+            .find_map(|(base, aliases)| aliases.contains(&target.as_str()).then_some(base))
+    }
+
+    pub(super) fn matching_targets(prefix: &str) -> impl Iterator<Item = (&'static str, Self)> {
+        let prefix = prefix.to_ascii_lowercase();
+        Self::TARGETS
+            .into_iter()
+            .filter_map(move |(base, aliases)| {
+                aliases
+                    .iter()
+                    .any(|alias| alias.starts_with(&prefix))
+                    .then_some((aliases[0], base))
+            })
     }
 
     pub(super) fn prefixed(input: &str) -> Option<(Self, &str)> {

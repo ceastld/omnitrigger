@@ -1408,6 +1408,11 @@ mod tests {
             Results::ConversionTargets(items) if items.len() == 2
         ));
         assert!(matches!(
+            for_query("0xff to b", &[]),
+            Results::ConversionTargets(items) if items.len() == 1 && items[0].result == "0b11111111"
+        ));
+        assert_eq!(for_query("0xff", &[]).arithmetic_result(), Some("255"));
+        assert!(matches!(
             for_query("10 km to nonexistent", &[]),
             Results::Value(Err(ValueError::Conversion(ConversionError::UnknownUnit)))
         ));
