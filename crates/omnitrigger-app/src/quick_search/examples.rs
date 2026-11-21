@@ -306,6 +306,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算几何平均值",
+        query: "gmean(1,16)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算调和平均值",
+        query: "hmean(1,4)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算中位数",
         query: "median(9,1,4)",
     },

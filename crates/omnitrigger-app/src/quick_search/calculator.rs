@@ -553,6 +553,27 @@ mod tests {
     }
 
     #[test]
+    fn computes_geometric_and_harmonic_means_for_positive_values() {
+        for (query, expected) in [
+            ("gmean(1,16)", "4"),
+            ("gmean(1e-308,1e308)", "1"),
+            ("gmean(1e308,1e308)", "1e308"),
+            ("hmean(1,4)", "1.6"),
+            ("hmean(1e-308,1e308)", "2e-308"),
+            ("hmean(1e-308,1e-308)", "1e-308"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["gmean(0,4)", "gmean(1,-1)", "hmean(0,1)", "hmean(-1,1)"] {
+            assert_eq!(
+                calculate(query),
+                Err(CalculationError::FunctionDomain),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn averages_values_by_nonnegative_weights_without_overflow() {
         for (query, expected) in [
             ("wavg(80,2,90,3)", "86"),

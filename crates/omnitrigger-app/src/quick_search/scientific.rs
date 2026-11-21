@@ -22,6 +22,8 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "sum" => return Some(NamedValue::Aggregate(|values| values.iter().sum())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
         "wavg" => return Some(NamedValue::Aggregate(weighted_average)),
+        "gmean" => return Some(NamedValue::Aggregate(geometric_mean)),
+        "hmean" => return Some(NamedValue::Aggregate(harmonic_mean)),
         "median" => return Some(NamedValue::Aggregate(median)),
         "quantile" => return Some(NamedValue::Aggregate(|values| quantile(values, 1.))),
         "percentile" => return Some(NamedValue::Aggregate(|values| quantile(values, 100.))),
@@ -386,6 +388,32 @@ fn weighted_average(values: &[f64]) -> f64 {
         };
     }
     mean.clamp(minimum, maximum)
+}
+
+fn positive_bounds(values: &[f64]) -> Option<(f64, f64)> {
+    let (&first, rest) = values.split_first()?;
+    let (minimum, maximum) = rest
+        .iter()
+        .fold((first, first), |(minimum, maximum), &value| {
+            (minimum.min(value), maximum.max(value))
+        });
+    (minimum > 0.).then_some((minimum, maximum))
+}
+
+fn geometric_mean(values: &[f64]) -> f64 {
+    let Some((minimum, maximum)) = positive_bounds(values) else {
+        return f64::NAN;
+    };
+    let logarithm = values.iter().map(|value| value.ln()).sum::<f64>() / values.len() as f64;
+    logarithm.exp().clamp(minimum, maximum)
+}
+
+fn harmonic_mean(values: &[f64]) -> f64 {
+    let Some((minimum, maximum)) = positive_bounds(values) else {
+        return f64::NAN;
+    };
+    let scaled = values.iter().map(|value| minimum / value).sum::<f64>() / values.len() as f64;
+    (minimum / scaled).clamp(minimum, maximum)
 }
 
 fn median(values: &[f64]) -> f64 {
