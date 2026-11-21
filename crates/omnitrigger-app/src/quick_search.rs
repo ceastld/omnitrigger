@@ -254,6 +254,13 @@ fn title_rank(title: &str, query: &str) -> u8 {
     }
 }
 
+fn is_application_name_query(query: &str) -> bool {
+    !query.contains([':', '：', '\r', '\n'])
+        && scoped_query(query).is_none()
+        && query.chars().take(2).count() == 2
+        && query.chars().any(char::is_alphabetic)
+}
+
 fn value_extra_height(value: &str) -> f32 {
     value_preview::lines(value)
         .take(MAX_VALUE_LINES)
@@ -557,10 +564,14 @@ impl Results {
             if let Some(examples) = function_examples(&query) {
                 return Self::Help(examples);
             }
-            return tool_example_keyword(&query).map_or_else(
-                || Self::Destinations(destinations),
-                |keyword| Self::Help(matching_examples(keyword)),
-            );
+            if let Some(keyword) = tool_example_keyword(&query) {
+                return Self::Help(matching_examples(keyword));
+            }
+            if is_application_name_query(&query)
+                && !matches!(applications, ApplicationIndex::Unavailable(_))
+            {
+                return applications.results(&query);
+            }
         }
         Self::Destinations(destinations)
     }
@@ -795,9 +806,14 @@ impl QuickSearch {
                 window.resize(size(px(WIDTH), px(self.results.height())));
             }
         }
+        let query = query.trim();
         if !self.requested_applications
             && !matches!(self.results, Results::Value(Err(ValueError::InputTooLong)))
-            && matches!(scoped_query(query.trim()), Some((Scope::Applications, _)))
+            && (matches!(scoped_query(query), Some((Scope::Applications, _)))
+                || matches!(self.results, Results::ApplicationsLoading)
+                || matches!(&self.results, Results::Destinations(items)
+                    if is_application_name_query(query)
+                        && items.iter().all(|item| matches!(item, Destination::InstalledApp(_)))))
             && self
                 .index
                 .applications
@@ -1984,18 +2000,49 @@ mod tests {
     }
 
     #[test]
-    fn installed_app_search_uses_an_explicit_scope() {
+    fn installed_app_search_supports_a_scope_and_fallback_after_local_results() {
         let index = SearchIndex::default();
-        for query in ["应用: 计算器", "apps: calculator", "程序：记事本"] {
+        for query in ["应用: 计算器", "apps: calculator", "程序：记事本", "记事本"] {
             assert!(matches!(index.results(query), Results::ApplicationsLoading));
         }
         assert!(matches!(
             index.results("动作: calculator"),
             Results::Destinations(_)
         ));
-        assert!(!matches!(
-            index.results("calculator"),
-            Results::ApplicationsLoading
+        assert!(matches!(index.results("calculator"), Results::Help(_)));
+        assert_eq!(index.results("2**10").arithmetic_result(), Some("1024"));
+        assert!(matches!(
+            index.results("文本历史"),
+            Results::Destinations(items) if items == [Destination::Page(Page::TextHistory)]
+        ));
+        for query in ["x", "无对应前缀: 记事本", "记事本\n第二行"] {
+            assert!(
+                !matches!(index.results(query), Results::ApplicationsLoading),
+                "{query}",
+            );
+        }
+        let ready = SearchIndex {
+            applications: ApplicationIndex::Ready {
+                apps: std::sync::Arc::from([]),
+                loaded_at: std::time::Instant::now(),
+            },
+            ..SearchIndex::default()
+        };
+        assert!(matches!(
+            ready.results("无对应应用"),
+            Results::Destinations(items) if items.is_empty()
+        ));
+        let unavailable = SearchIndex {
+            applications: ApplicationIndex::Unavailable("读取失败".into()),
+            ..SearchIndex::default()
+        };
+        assert!(matches!(
+            unavailable.results("记事本"),
+            Results::Destinations(items) if items.is_empty()
+        ));
+        assert!(matches!(
+            unavailable.results("应用: 记事本"),
+            Results::ApplicationsUnavailable(_)
         ));
     }
 
@@ -2067,7 +2114,6 @@ mod tests {
             ("clipBOARD", vec![Page::TextHistory]),
             ("TRIGGER history", vec![Page::History]),
             ("触发", vec![Page::Triggers, Page::Presets, Page::History]),
-            ("无对应页面", vec![]),
         ] {
             let Results::Destinations(items) = for_query(query, &[]) else {
                 panic!("页面查询被解析成了算式：{query}");
