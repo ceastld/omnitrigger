@@ -123,6 +123,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "日期: 2026-11-23 - 2026-11-20 工作日",
     },
     Example {
+        icon: Icon::Clock,
+        title: "按年月日计算日期差",
+        query: "日期: 2025-03-15 - 2024-01-31 年月日",
+    },
+    Example {
         icon: Icon::Layers,
         title: "查找触发预设",
         query: "预设: 顶部边缘",

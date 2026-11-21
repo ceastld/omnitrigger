@@ -126,6 +126,28 @@ fn workday_difference(date: NaiveDate, other: NaiveDate) -> i64 {
     difference.signum() * (days / 7 * 5 + remaining_workdays)
 }
 
+fn calendar_difference(date: NaiveDate, other: NaiveDate) -> Result<String, DateError> {
+    let (start, end, sign) = if date < other {
+        (date, other, "-")
+    } else {
+        (other, date, "")
+    };
+    let mut months =
+        ((end.year() - start.year()) * 12 + end.month() as i32 - start.month() as i32) as u32;
+    let after_months = |months| in_range(start.checked_add_months(Months::new(months)));
+    let mut anchor = after_months(months)?;
+    if anchor > end {
+        months -= 1;
+        anchor = after_months(months)?;
+    }
+    let days = end.signed_duration_since(anchor).num_days();
+    Ok(format!(
+        "{sign}{} 年 {} 个月 {days} 天",
+        months / 12,
+        months % 12
+    ))
+}
+
 fn shift_workdays(mut date: NaiveDate, mut amount: u64, subtract: bool) -> Option<NaiveDate> {
     let is_weekend = |date: NaiveDate| matches!(date.weekday(), Weekday::Sat | Weekday::Sun);
     let advance = |date: NaiveDate, count| {
@@ -259,13 +281,16 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         if display_query.is_some() {
             return Err(DateError::InvalidOperation);
         }
+        let suffix = suffix.to_ascii_lowercase();
         return if suffix.is_empty() {
             Ok(format!(
                 "{} 天",
                 date.signed_duration_since(other).num_days()
             ))
-        } else if is_workday_unit(&suffix.to_ascii_lowercase()) {
+        } else if is_workday_unit(&suffix) {
             Ok(format!("{} 工作日", workday_difference(date, other)))
+        } else if matches!(suffix.as_str(), "年月日" | "calendar") {
+            calendar_difference(date, other)
         } else {
             Err(DateError::InvalidOperation)
         };
@@ -331,6 +356,25 @@ mod tests {
             calculate_date("今天 + 18446744073709551615工作日", today),
             Err(DateError::OutOfRange)
         );
+    }
+
+    #[test]
+    fn decomposes_date_differences_into_calendar_months_then_days() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            ("2025-03-15 - 2024-01-31 年月日", "1 年 1 个月 15 天"),
+            ("2024-01-31 - 2025-03-15 年月日", "-1 年 1 个月 15 天"),
+            ("2024-02-29 - 2024-01-31 年月日", "0 年 1 个月 0 天"),
+            ("2025-02-28 - 2024-02-29 CALENDAR", "1 年 0 个月 0 天"),
+            ("今天 - 昨天 年月日", "0 年 0 个月 1 天"),
+            ("今天 - 今天 年月日", "0 年 0 个月 0 天"),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
     }
 
     #[test]
