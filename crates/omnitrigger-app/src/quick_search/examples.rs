@@ -423,6 +423,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "算式历史: ",
     },
     Example {
+        icon: Icon::Clock,
+        title: "找回本次已用换算",
+        query: "换算历史: ",
+    },
+    Example {
         icon: Icon::Layers,
         title: "选择换算目标单位",
         query: "10 km to",

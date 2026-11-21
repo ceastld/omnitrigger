@@ -10,6 +10,7 @@ pub(super) enum Scope {
     TextHistory,
     TriggerHistory,
     CalculationHistory,
+    ConversionHistory,
     Actions,
     Date,
     Duration,
@@ -41,6 +42,7 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
     }
     match parse_scope(query)? {
         Scope::CalculationHistory => Some("算式历史:"),
+        Scope::ConversionHistory => Some("换算历史:"),
         Scope::Date => Some("日期:"),
         Scope::Duration => Some("时长:"),
         Scope::Timestamp => Some("时间戳"),
@@ -77,6 +79,7 @@ fn parse_scope(prefix: &str) -> Option<Scope> {
         "剪贴板" | "文本历史" | "clipboard" => Scope::TextHistory,
         "触发记录" | "trigger history" | "hits" => Scope::TriggerHistory,
         "算式历史" | "calc history" => Scope::CalculationHistory,
+        "换算历史" | "conversion history" | "unit history" => Scope::ConversionHistory,
         "动作" | "动作库" | "action" | "actions" => Scope::Actions,
         "日期" | "date" => Scope::Date,
         "时长" | "duration" => Scope::Duration,

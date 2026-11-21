@@ -1,5 +1,4 @@
 mod actions;
-mod calculation_history;
 mod calculator;
 mod calendar;
 mod color;
@@ -20,6 +19,7 @@ mod text_tools;
 mod timestamp;
 mod triggers;
 mod url_encoding;
+mod value_history;
 mod value_preview;
 mod wheel_slots;
 mod wheels;
@@ -40,7 +40,6 @@ use crate::{
     Page, Workspace,
 };
 use actions::{matching_actions, SearchAction};
-use calculation_history::RecentCalculations;
 use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, DateError};
 use color::{calculate_contrast, convert_color, ColorError};
@@ -60,6 +59,7 @@ use timestamp::{convert_timestamp, TimestampError};
 use triggers::{matching_triggers, SearchTrigger};
 use unicode_segmentation::UnicodeSegmentation;
 use url_encoding::{convert_url_component, UrlEncodingError};
+use value_history::RecentValues;
 use wheel_slots::{index_slots, matching_slots, SearchWheelSlot};
 use wheels::{matching_wheels, SearchWheel};
 
@@ -91,6 +91,7 @@ enum Results {
     Destinations(Vec<Destination>),
     Help(Vec<usize>),
     Calculations(Vec<InputSuggestion>),
+    Conversions(Vec<InputSuggestion>),
     ConversionTargets(Vec<InputSuggestion>),
 }
 
@@ -110,6 +111,7 @@ struct ResultValue {
 enum ValueKind {
     Text,
     Calculation,
+    Conversion,
     Color(u32),
     ColorContrast([u32; 2]),
 }
@@ -148,7 +150,8 @@ pub(super) struct SearchIndex {
 #[derive(Clone, Default)]
 pub(super) struct RecentSearch {
     pub(super) destinations: RecentDestinations,
-    calculations: RecentCalculations,
+    calculations: RecentValues,
+    conversions: RecentValues,
 }
 
 impl SearchIndex {
@@ -352,6 +355,7 @@ impl Results {
                     Self::Destinations(vec![Destination::TriggerHistoryQuery(term.to_owned())])
                 }
                 Scope::CalculationHistory => Self::Calculations(recent.calculations.matching(term)),
+                Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
                 Scope::Actions => {
                     let mut entries = matching_actions(actions, term);
                     entries.insert(
@@ -407,7 +411,14 @@ impl Results {
                         Self::ConversionTargets,
                     )
                 }
-                result => Self::text_value(result.map_err(ValueError::Conversion)),
+                result => Self::Value(
+                    result
+                        .map(|text| ResultValue {
+                            text,
+                            kind: ValueKind::Conversion,
+                        })
+                        .map_err(ValueError::Conversion),
+                ),
             };
         }
         if let Some(targets) = suggested_targets(query) {
@@ -519,7 +530,7 @@ impl Results {
             Self::ConversionTargets(items) if !items.is_empty() => {
                 132. + items.len().min(CONVERSION_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
             }
-            Self::Calculations(items) if !items.is_empty() => {
+            Self::Calculations(items) | Self::Conversions(items) if !items.is_empty() => {
                 132. + items.len() as f32 * EXAMPLE_ROW_HEIGHT
             }
             _ => 158.,
@@ -685,7 +696,7 @@ impl QuickSearch {
     fn confirm(&self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.results {
             Results::Value(Ok(result)) => {
-                self.remember_calculation(cx);
+                self.remember_value(cx);
                 cx.write_to_clipboard(ClipboardItem::new_string(result.text.clone()));
                 window.remove_window();
             }
@@ -699,7 +710,9 @@ impl QuickSearch {
                     self.fill_query(EXAMPLES[index].query, window, cx);
                 }
             }
-            Results::Calculations(items) | Results::ConversionTargets(items) => {
+            Results::Calculations(items)
+            | Results::Conversions(items)
+            | Results::ConversionTargets(items) => {
                 if let Some(item) = items.get(self.selected) {
                     self.fill_query(item.expression.clone(), window, cx);
                 }
@@ -708,18 +721,21 @@ impl QuickSearch {
         }
     }
 
-    fn remember_calculation(&self, cx: &Context<Self>) {
-        if let Some(result) = self.results.arithmetic_result() {
-            self.index
-                .recent
-                .calculations
-                .record(&self.input.read(cx).text(), result);
-        }
+    fn remember_value(&self, cx: &Context<Self>) {
+        let Results::Value(Ok(result)) = &self.results else {
+            return;
+        };
+        let history = match result.kind {
+            ValueKind::Calculation => &self.index.recent.calculations,
+            ValueKind::Conversion => &self.index.recent.conversions,
+            _ => return,
+        };
+        history.record(&self.input.read(cx).text(), &result.text);
     }
 
     fn continue_calculation(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(query) = self.results.continuation_query() {
-            self.remember_calculation(cx);
+            self.remember_value(cx);
             self.fill_query(query, window, cx);
         }
     }
@@ -767,7 +783,9 @@ impl QuickSearch {
                 let count = match &self.results {
                     Results::Destinations(items) => items.len(),
                     Results::Help(items) => items.len(),
-                    Results::Calculations(items) | Results::ConversionTargets(items) => items.len(),
+                    Results::Calculations(items)
+                    | Results::Conversions(items)
+                    | Results::ConversionTargets(items) => items.len(),
                     Results::Value(_) => 0,
                 };
                 if count == 0 {
@@ -1084,6 +1102,12 @@ impl QuickSearch {
             Results::Calculations(items) => {
                 self.render_input_suggestions(items, Icon::Terminal, items.len(), cx)
             }
+            Results::Conversions(items) if items.is_empty() => row
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child("未找到用过的换算"),
+            Results::Conversions(items) => {
+                self.render_input_suggestions(items, Icon::Layers, items.len(), cx)
+            }
             Results::ConversionTargets(items) => {
                 self.render_input_suggestions(items, Icon::Layers, CONVERSION_PAGE_SIZE, cx)
             }
@@ -1344,6 +1368,31 @@ mod tests {
     }
 
     #[test]
+    fn quick_search_finds_session_conversions_by_expression_and_result() {
+        let recent = RecentSearch::default();
+        let Results::Value(Ok(value)) = for_query("8 Mbps to MB/s", &[]) else {
+            panic!("换算没有生成结果");
+        };
+        assert!(value.kind == ValueKind::Conversion);
+        recent.conversions.record("8 Mbps to MB/s", &value.text);
+        recent.conversions.record("1 GiB to MiB", "1024 MiB");
+        recent.calculations.record("2**10", "1024");
+        for (query, expected) in [
+            ("换算历史: MIB 1024", "1 GiB to MiB"),
+            ("conversion history: MBPS", "8 Mbps to MB/s"),
+        ] {
+            assert!(matches!(
+                Results::for_query(query, &[], &[], &[], &[], &[], &recent),
+                Results::Conversions(items) if items.len() == 1 && items[0].expression == expected
+            ));
+        }
+        assert!(matches!(
+            Results::for_query("算式历史:", &[], &[], &[], &[], &[], &recent),
+            Results::Calculations(items) if items.len() == 1 && items[0].expression == "2**10"
+        ));
+    }
+
+    #[test]
     fn conversion_suggestions_support_symbol_prefixes_and_later_pages() {
         let results = for_query("10 km to", &[]);
         assert_eq!(
@@ -1452,7 +1501,7 @@ mod tests {
         };
         for example in EXAMPLES {
             match index.results(example.query) {
-                Results::Value(Ok(_)) | Results::Calculations(_) => {}
+                Results::Value(Ok(_)) | Results::Calculations(_) | Results::Conversions(_) => {}
                 Results::ConversionTargets(items) if !items.is_empty() => {}
                 Results::Destinations(items) if !items.is_empty() => {}
                 _ => panic!("用法示例没有可用结果：{}", example.query),

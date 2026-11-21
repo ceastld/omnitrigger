@@ -5,11 +5,11 @@ use super::InputSuggestion;
 const HISTORY_LIMIT: usize = 12;
 const MATCH_LIMIT: usize = 6;
 
-/// 同一工作台打开的搜索框共享本次运行使用过的算式。
+/// 同一工作台打开的搜索框共享本次运行中确认过的查询。
 #[derive(Clone, Default)]
-pub(super) struct RecentCalculations(Rc<RefCell<Vec<InputSuggestion>>>);
+pub(super) struct RecentValues(Rc<RefCell<Vec<InputSuggestion>>>);
 
-impl RecentCalculations {
+impl RecentValues {
     pub(super) fn record(&self, expression: &str, result: &str) {
         let expression = expression.trim();
         let mut items = self.0.borrow_mut();
@@ -31,9 +31,10 @@ impl RecentCalculations {
             .iter()
             .filter(|item| {
                 let expression = item.expression.to_lowercase();
+                let result = item.result.to_lowercase();
                 query
                     .split_whitespace()
-                    .all(|term| expression.contains(term) || item.result.contains(term))
+                    .all(|term| expression.contains(term) || result.contains(term))
             })
             .take(MATCH_LIMIT)
             .cloned()
@@ -47,7 +48,7 @@ mod tests {
 
     #[test]
     fn shares_confirmed_calculations_in_recency_order_within_the_session() {
-        let history = RecentCalculations::default();
+        let history = RecentValues::default();
         let reopened = history.clone();
         history.record(" 2**10 ", "1024");
         history.record("sqrt(9)", "3");
@@ -62,7 +63,7 @@ mod tests {
         );
         assert_eq!(reopened.matching("SQRT 3")[0].expression, "sqrt(9)");
         assert_eq!(reopened.matching("1024")[0].expression, "2**10");
-        assert!(RecentCalculations::default().matching("").is_empty());
+        assert!(RecentValues::default().matching("").is_empty());
         for value in 0..HISTORY_LIMIT {
             history.record(&format!("1+{value}"), &(value + 1).to_string());
         }
