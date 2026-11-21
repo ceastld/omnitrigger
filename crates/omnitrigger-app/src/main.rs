@@ -2705,13 +2705,7 @@ impl Workspace {
             display,
             self.theme_mode,
             cx.weak_entity(),
-            self.triggers.bindings(),
-            if self.wheels_error.is_none() {
-                &self.wheels.wheels
-            } else {
-                &[]
-            },
-            &self.quick_search_recent,
+            quick_search::SearchIndex::from_workspace(self),
             cx,
         )?;
         self.quick_search = Some(search);
@@ -2739,6 +2733,7 @@ impl Workspace {
         let action_filter = matches!(
             destination,
             quick_search::Destination::ActionLibraryQuery(_)
+                | quick_search::Destination::ActionLibraryEntry { .. }
         )
         .then(|| self.action_search.focus_handle(cx));
         self.quick_search_recent.record(&destination);
@@ -2748,7 +2743,8 @@ impl Workspace {
                 self.text_history.search_from_quick_search(query, cx);
                 self.open_page(Page::TextHistory, cx);
             }
-            quick_search::Destination::ActionLibraryQuery(query) => {
+            quick_search::Destination::ActionLibraryQuery(query)
+            | quick_search::Destination::ActionLibraryEntry { filter: query, .. } => {
                 self.open_page(Page::Actions, cx);
                 self.action_search.update(cx, |input, cx| {
                     input.set_text(query, cx);

@@ -1,3 +1,4 @@
+mod actions;
 mod calculator;
 mod calendar;
 mod conversion;
@@ -24,11 +25,10 @@ use crate::{
     appearance,
     assets::Icon,
     message_input::MessageInput,
-    settings::Binding,
     theme::{self, button, icon, rgb, Tone},
-    wheels::WheelDefinition,
     Page, Workspace,
 };
+use actions::{matching_actions, SearchAction};
 use calculator::{calculate, looks_like_calculation, CalculationError, QUERY_LIMIT};
 use calendar::{calculate_date, DateError};
 use conversion::{convert, ConversionError};
@@ -77,17 +77,68 @@ pub(super) enum Destination {
     Preset(&'static str),
     TextHistoryQuery(String),
     ActionLibraryQuery(String),
+    ActionLibraryEntry {
+        title: String,
+        provider: String,
+        filter: String,
+    },
 }
 
-struct SearchIndex {
+pub(super) struct SearchIndex {
     triggers: Vec<SearchTrigger>,
     wheels: Vec<SearchWheel>,
+    actions: Vec<SearchAction>,
     recent: RecentDestinations,
 }
 
 impl SearchIndex {
+    pub(super) fn from_workspace(workspace: &Workspace) -> Self {
+        let mut actions: Vec<_> = workspace
+            .action_service
+            .catalog()
+            .actions
+            .iter()
+            .map(SearchAction::from_package)
+            .collect();
+        actions.extend(
+            workspace
+                .plugins
+                .catalogue()
+                .unwrap_or_default()
+                .iter()
+                .map(SearchAction::from_plugin),
+        );
+        let wheels = if workspace.wheels_error.is_none() {
+            workspace
+                .wheels
+                .wheels
+                .iter()
+                .map(SearchWheel::from_definition)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Self {
+            triggers: workspace
+                .triggers
+                .bindings()
+                .iter()
+                .map(SearchTrigger::from_binding)
+                .collect(),
+            wheels,
+            actions,
+            recent: workspace.quick_search_recent.clone(),
+        }
+    }
+
     fn results(&self, query: &str) -> Results {
-        Results::for_query(query, &self.triggers, &self.wheels, &self.recent)
+        Results::for_query(
+            query,
+            &self.triggers,
+            &self.wheels,
+            &self.actions,
+            &self.recent,
+        )
     }
 }
 
@@ -148,6 +199,7 @@ impl Results {
         query: &str,
         triggers: &[SearchTrigger],
         wheels: &[SearchWheel],
+        actions: &[SearchAction],
         recent: &RecentDestinations,
     ) -> Self {
         let query = query.trim();
@@ -187,7 +239,9 @@ impl Results {
                     Self::Destinations(vec![Destination::TextHistoryQuery(term.to_owned())])
                 }
                 Scope::Actions => {
-                    Self::Destinations(vec![Destination::ActionLibraryQuery(term.to_owned())])
+                    let mut entries = matching_actions(actions, term, PAGE_RESULT_LIMIT - 1);
+                    entries.push(Destination::ActionLibraryQuery(term.to_owned()));
+                    Self::Destinations(entries)
                 }
                 Scope::Date => Self::Value(
                     calculate_date(term, chrono::Local::now().date_naive())
@@ -243,6 +297,11 @@ impl Results {
                 .into_iter()
                 .map(|preset| Destination::Preset(preset.key)),
         );
+        destinations.extend(matching_actions(
+            actions,
+            &query,
+            PAGE_RESULT_LIMIT - destinations.len(),
+        ));
         Self::Destinations(destinations)
     }
 
@@ -304,16 +363,9 @@ impl QuickSearch {
         display: Option<DisplayId>,
         theme_mode: appearance::Mode,
         workspace: WeakEntity<Workspace>,
-        bindings: &[Binding],
-        wheels: &[WheelDefinition],
-        recent: &RecentDestinations,
+        index: SearchIndex,
         cx: &mut App,
     ) -> Result<WindowHandle<Self>, String> {
-        let index = SearchIndex {
-            triggers: bindings.iter().map(SearchTrigger::from_binding).collect(),
-            wheels: wheels.iter().map(SearchWheel::from_definition).collect(),
-            recent: recent.clone(),
-        };
         let results = index.results("");
         let bounds = Bounds::centered(display, size(px(WIDTH), px(results.height())), cx);
         cx.open_window(
@@ -628,6 +680,9 @@ impl QuickSearch {
                             };
                             (Page::Actions.icon(), title.to_owned(), None)
                         }
+                        Destination::ActionLibraryEntry {
+                            title, provider, ..
+                        } => (Page::Actions.icon(), title.clone(), Some(provider.clone())),
                     };
                     let destination = destination.clone();
                     let selected = index == self.selected;
@@ -743,7 +798,7 @@ mod tests {
     use super::*;
 
     fn for_query(query: &str, triggers: &[SearchTrigger]) -> Results {
-        Results::for_query(query, triggers, &[], &RecentDestinations::default())
+        Results::for_query(query, triggers, &[], &[], &RecentDestinations::default())
     }
 
     #[test]
@@ -761,6 +816,7 @@ mod tests {
                 .iter()
                 .map(SearchWheel::from_definition)
                 .collect(),
+            actions: Vec::new(),
             recent: RecentDestinations::default(),
         };
         for example in EXAMPLES {
@@ -777,7 +833,8 @@ mod tests {
         let settings = crate::wheels::Wheels::default();
         let wheels = [SearchWheel::from_definition(&settings.wheels[0])];
         for query in ["编辑轨道", "wheel: orbit-edit", "轮盘：", "轨道轮盘：编辑"] {
-            let result = Results::for_query(query, &[], &wheels, &RecentDestinations::default());
+            let result =
+                Results::for_query(query, &[], &wheels, &[], &RecentDestinations::default());
             assert!(
                 matches!(result, Results::Destinations(items) if items == [Destination::Wheel("orbit-edit".into())]),
                 "{query}"
