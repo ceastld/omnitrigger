@@ -199,6 +199,17 @@ pub(super) fn exact_abs_square_root(value: &BigRational) -> Option<BigRational> 
         .then(|| BigRational::new(top.into(), bottom.into()))
 }
 
+pub(super) fn format_square_root(value: &BigRational) -> String {
+    debug_assert!(value.numer().sign() != Sign::Minus);
+    if let Some(root) = exact_abs_square_root(value) {
+        root.to_string()
+    } else if value.is_integer() {
+        format!("√{value}")
+    } else {
+        format!("√({value})")
+    }
+}
+
 pub(super) fn ensure_exact_size(value: &BigRational) -> Result<(), FractionError> {
     if value.numer().bits().max(value.denom().bits()) > MAX_EXACT_BITS {
         return Err(FractionError::ExactRange);

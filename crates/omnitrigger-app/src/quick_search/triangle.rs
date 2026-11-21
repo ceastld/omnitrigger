@@ -3,9 +3,7 @@ use std::cmp::Ordering;
 use num_bigint::{BigInt, Sign};
 
 use super::calculator::normalize;
-use super::fraction::{
-    calculate_fraction, ensure_exact_size, exact_abs_square_root, FractionError,
-};
+use super::fraction::{calculate_fraction, ensure_exact_size, format_square_root, FractionError};
 use super::operators::split_top_level_commas;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,13 +55,7 @@ pub(super) fn calculate_triangle(query: &str) -> Result<String, TriangleError> {
     for value in [&perimeter, &area_squared] {
         ensure_exact_size(value).map_err(TriangleError::Evaluation)?;
     }
-    let area = if let Some(value) = exact_abs_square_root(&area_squared) {
-        value.to_string()
-    } else if area_squared.is_integer() {
-        format!("√{area_squared}")
-    } else {
-        format!("√({area_squared})")
-    };
+    let area = format_square_root(&area_squared);
     let shape = if a == c {
         "等边三角形"
     } else {

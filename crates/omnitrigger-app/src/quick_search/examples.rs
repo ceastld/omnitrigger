@@ -61,6 +61,26 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "计算两个向量的点积",
+        query: "向量: 点积 1,2,3; 4,5,6",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "计算三维向量的叉积",
+        query: "向量: 叉积 1/2,0,0; 0,1/3,0",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "计算向量的长度",
+        query: "向量: 长度 3/4,1",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "计算两个点的距离",
+        query: "向量: 距离 0,0; 1,1",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算单位",
         query: "10 km to mi",
     },
@@ -1492,6 +1512,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Percentage
         | Scope::Uuid
         | Scope::Ulid
+        | Scope::Vector
             if !term.contains(char::is_whitespace) => {}
         Scope::Date
         | Scope::Duration

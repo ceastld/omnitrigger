@@ -39,6 +39,7 @@ mod triggers;
 mod url_encoding;
 mod value_history;
 mod value_preview;
+mod vector;
 mod video_frames;
 mod wheel_slots;
 mod wheels;
@@ -103,6 +104,7 @@ use triggers::{matching_triggers, SearchTrigger};
 use unicode_segmentation::UnicodeSegmentation;
 use url_encoding::{convert_url_component, UrlEncodingError};
 use value_history::RecentValues;
+use vector::{calculate_vector, VectorError};
 use video_frames::{convert_video_frames, VideoFrameError};
 use wheel_slots::{index_slots, matching_slots, SearchWheelSlot};
 use wheels::{matching_wheels, SearchWheel};
@@ -341,6 +343,7 @@ enum ValueError {
     Equation(EquationError),
     Percentage(PercentageError),
     UrlEncoding(UrlEncodingError),
+    Vector(VectorError),
     Path(PathError),
 }
 
@@ -374,6 +377,7 @@ impl ValueError {
             Self::Equation(error) => error.message(),
             Self::Percentage(error) => error.message(),
             Self::UrlEncoding(error) => error.message(),
+            Self::Vector(error) => error.message(),
             Self::Path(error) => error.message(),
         }
     }
@@ -416,6 +420,7 @@ impl ValueError {
                 )
                 | Self::Percentage(PercentageError::Incomplete)
                 | Self::UrlEncoding(UrlEncodingError::Incomplete)
+                | Self::Vector(VectorError::Incomplete)
                 | Self::Path(PathError::Incomplete)
                 | Self::Json(JsonError::Incomplete)
                 | Self::Csv(CsvError::MissingInput | CsvError::UnclosedQuote)
@@ -630,6 +635,9 @@ impl Results {
                 }
                 Scope::UrlEncoding => {
                     Self::text_value(convert_url_component(term).map_err(ValueError::UrlEncoding))
+                }
+                Scope::Vector => {
+                    Self::text_value(calculate_vector(term).map_err(ValueError::Vector))
                 }
                 Scope::Path => Self::text_value(path_component(term).map_err(ValueError::Path)),
             };
