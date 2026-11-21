@@ -1,4 +1,4 @@
-use chrono::{Datelike, Days, NaiveDate};
+use chrono::{Datelike, Days, Months, NaiveDate};
 
 use super::calculator::normalize;
 
@@ -15,7 +15,7 @@ impl DateError {
         match self {
             Self::Incomplete => "可以输入日期、天数或星期几，例如 日期: 今天 星期几",
             Self::InvalidDate => "请输入有效日期，格式为 YYYY-MM-DD",
-            Self::InvalidOperation => "可查星期几、加减整天或整周，或用两个日期相减",
+            Self::InvalidOperation => "可查星期几、按天周月年加减，或用两个日期相减",
             Self::OutOfRange => "结果超出四位年份的日期范围",
         }
     }
@@ -88,6 +88,50 @@ fn weekday_query(input: &str) -> Option<&str> {
         .then_some(date.trim_end())
 }
 
+fn apply_date_offset(
+    date: NaiveDate,
+    operand: &str,
+    subtract: bool,
+) -> Result<NaiveDate, DateError> {
+    let unit_start = operand
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(operand.len());
+    let (amount, unit) = operand.split_at(unit_start);
+    let (is_months, multiplier) = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "天" | "d" | "day" | "days" => (false, 1),
+        "周" | "星期" | "w" | "week" | "weeks" => (false, 7),
+        "月" | "个月" | "mo" | "month" | "months" => (true, 1),
+        "年" | "y" | "yr" | "year" | "years" => (true, 12),
+        _ => return Err(DateError::InvalidOperation),
+    };
+    if amount.is_empty() {
+        return Err(DateError::InvalidOperation);
+    }
+    let amount = amount
+        .parse::<u64>()
+        .ok()
+        .and_then(|amount| amount.checked_mul(multiplier))
+        .ok_or(DateError::OutOfRange)?;
+    let adjusted = if is_months {
+        let months = u32::try_from(amount)
+            .map(Months::new)
+            .map_err(|_| DateError::OutOfRange)?;
+        if subtract {
+            date.checked_sub_months(months)
+        } else {
+            date.checked_add_months(months)
+        }
+    } else {
+        let days = Days::new(amount);
+        if subtract {
+            date.checked_sub_days(days)
+        } else {
+            date.checked_add_days(days)
+        }
+    };
+    in_range(adjusted)
+}
+
 pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, DateError> {
     let input = normalize(input);
     let input = input.trim();
@@ -131,29 +175,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
             date.signed_duration_since(other).num_days()
         ));
     }
-    let (days, multiplier) = operand
-        .strip_suffix("星期")
-        .or_else(|| operand.strip_suffix(['w', 'W', '周']))
-        .map_or_else(
-            || (operand.strip_suffix(['d', 'D', '天']).unwrap_or(operand), 1),
-            |weeks| (weeks, 7),
-        );
-    let days = days.trim_end();
-    if days.is_empty() || !days.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(DateError::InvalidOperation);
-    }
-    let days = days
-        .parse::<u64>()
-        .ok()
-        .and_then(|amount| amount.checked_mul(multiplier))
-        .map(Days::new)
-        .ok_or(DateError::OutOfRange)?;
-    let adjusted = if subtract {
-        date.checked_sub_days(days)
-    } else {
-        date.checked_add_days(days)
-    };
-    in_range(adjusted).map(display_date)
+    apply_date_offset(date, operand, subtract).map(display_date)
 }
 
 #[cfg(test)]
@@ -205,6 +227,34 @@ mod tests {
         assert_eq!(
             calculate_date("2026-11-21 + 18446744073709551615w", today),
             Err(DateError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn calendar_months_and_years_preserve_day_or_use_the_end_of_the_month() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            ("2024-01-31 + 1个月", "2024-02-29"),
+            ("2023-01-31 + 1 MONTH", "2023-02-28"),
+            ("2024-03-31 - 1mo", "2024-02-29"),
+            ("2024-02-29 + 1年", "2025-02-28"),
+            ("2024-02-29 + 4 years", "2028-02-29"),
+            ("2024-02-29 - 1Y 星期几", "星期二"),
+            ("今天 + 2 WEEKS", "2026-12-05"),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_date("9999-12-31 + 1月", today),
+            Err(DateError::OutOfRange)
+        );
+        assert_eq!(
+            calculate_date("2024-01-31 + 1.5月", today),
+            Err(DateError::InvalidOperation)
         );
     }
 }
