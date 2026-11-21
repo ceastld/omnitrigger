@@ -19,7 +19,9 @@ impl CsvError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::MissingInput => "在操作名后粘贴表格，可用换行开始数据",
-            Self::UnknownOperation => "可用 转JSON、对象、Markdown、转置、转TSV、从TSV 或 选列",
+            Self::UnknownOperation => {
+                "可用 转JSON、对象、Markdown、转置、转TSV、从TSV、选列 或 去重"
+            }
             Self::UnclosedQuote => "字段的双引号尚未闭合",
             Self::InvalidSeparator => "检查引号和分隔符，引号内的双引号用两个双引号表示",
             Self::DifferentColumnCount => "每行的列数须一致",
@@ -39,6 +41,7 @@ enum Operation {
     ToTsv,
     FromTsv,
     SelectColumns(Vec<usize>),
+    DeduplicateRows,
 }
 
 pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
@@ -50,6 +53,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         "转置" | "transpose" => Operation::Transpose,
         "转tsv" | "tsv" => Operation::ToTsv,
         "从tsv" | "from-tsv" => Operation::FromTsv,
+        "去重" | "deduplicate" => Operation::DeduplicateRows,
         "选列" | "pick-columns" => {
             let (columns, data) = split_argument(input).ok_or(CsvError::MissingInput)?;
             input = data;
@@ -75,6 +79,15 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::ToTsv => Ok(write_rows(&rows, '\t')),
         Operation::FromTsv => Ok(write_rows(&rows, ',')),
         Operation::SelectColumns(columns) => select_columns(&rows, &columns),
+        Operation::DeduplicateRows => {
+            let mut seen = HashSet::new();
+            let rows: Vec<_> = rows
+                .iter()
+                .filter(|row| seen.insert(*row))
+                .cloned()
+                .collect();
+            Ok(write_rows(&rows, ','))
+        }
     }
 }
 
@@ -308,6 +321,19 @@ mod tests {
         assert_eq!(
             transform_csv("transpose \"\u{feff}编号\"").as_deref(),
             Ok("\"\u{feff}编号\"")
+        );
+    }
+
+    #[test]
+    fn deduplicates_csv_rows_by_fields_in_first_seen_order() {
+        let csv = "编号,备注\n001,\"茶,咖啡\"\n\"001\",\"茶,咖啡\"\n002,未选\n001,\"茶,咖啡\"\n003,\n003,\"\"";
+        assert_eq!(
+            transform_csv(&format!("去重 {csv}")).as_deref(),
+            Ok("编号,备注\r\n001,\"茶,咖啡\"\r\n002,未选\r\n003,\"\""),
+        );
+        assert_eq!(
+            transform_csv("deduplicate x\nx \nx").as_deref(),
+            Ok("x\r\nx ")
         );
     }
 

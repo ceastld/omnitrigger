@@ -517,6 +517,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "求两个 Unix 时间戳之间的间隔",
+        query: "时间戳: 间隔 -1ns 到 1ns to ns",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "将时间戳换算成本地时间",
         query: "时间戳: 1700000000 本地",
     },
@@ -1374,6 +1379,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "按指定顺序选取 CSV 的列",
         query: "CSV: 选列 3,1 编号,名称,备注\n001,茶,\"含,逗号\"",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "删除 CSV 中内容重复的行",
+        query: "CSV: 去重 编号,备注\n001,\"茶,咖啡\"\n\"001\",\"茶,咖啡\"\n002,梨",
     },
     Example {
         icon: Icon::Layers,

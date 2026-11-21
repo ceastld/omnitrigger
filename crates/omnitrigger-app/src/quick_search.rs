@@ -2264,10 +2264,15 @@ mod tests {
             );
             assert!(matches!(results, Results::Help(items) if items.len() == EXAMPLES.len()));
         }
+        let unix_examples = [
+            "unix: now",
+            "时间戳: 1700000000123ms",
+            "时间戳: 间隔 -1ns 到 1ns to ns",
+        ];
         for (query, expected) in [
             ("？ 速率", &["下载: 600 MB 用时 2分钟", "8Mbps to MB/s"][..]),
-            ("? UNIX", &["unix: now", "时间戳: 1700000000123ms"][..]),
-            ("？ ＵＮＩＸ", &["unix: now", "时间戳: 1700000000123ms"][..]),
+            ("? UNIX", &unix_examples[..]),
+            ("？ ＵＮＩＸ", &unix_examples[..]),
             ("？ ２＊＊１０", &["2**10"][..]),
             (
                 "? 时长",

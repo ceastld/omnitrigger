@@ -129,7 +129,7 @@ fn convert_timestamp_with_local(
     let input = input.trim();
     let (operation, argument) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
     if operation == "间隔" || operation.eq_ignore_ascii_case("between") {
-        return timestamp_interval(argument);
+        return timestamp_interval(argument, now);
     }
     let (input, target_zone) = if let Some((source, target)) = split_conversion(input) {
         (source, Some(parse_display_zone(target)?))
@@ -261,7 +261,7 @@ fn parse_explicit_time(
     Ok(time)
 }
 
-fn timestamp_interval(input: &str) -> Result<String, TimestampError> {
+fn timestamp_interval(input: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
     let (input, output) =
         split_conversion(input).map_or((input, None), |(input, output)| (input, Some(output)));
     let (start, end) = input
@@ -272,7 +272,7 @@ fn timestamp_interval(input: &str) -> Result<String, TimestampError> {
         if value.is_empty() {
             return Err(TimestampError::IntervalEndpoints);
         }
-        let time = parse_explicit_time(value, named_time_source(value))?;
+        let time = interval_endpoint(value, now)?;
         Ok(i128::from(time.timestamp()) * NANOS_PER_SECOND as i128
             + i128::from(time.timestamp_subsec_nanos()))
     };
@@ -285,6 +285,24 @@ fn timestamp_interval(input: &str) -> Result<String, TimestampError> {
             .map_err(TimestampError::IntervalOutput);
     }
     Ok(format_clock_duration(delta.unsigned_abs(), sign))
+}
+
+fn interval_endpoint(value: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, TimestampError> {
+    let lower = value.to_ascii_lowercase();
+    let (unit, quantity) =
+        TimestampUnit::split_suffix(&lower).unwrap_or((TimestampUnit::Seconds, &lower));
+    let time = if matches!(lower.as_str(), "现在" | "now") {
+        now
+    } else if integer(quantity.trim_end()) {
+        parse_unix(quantity.trim_end(), unit)?
+    } else {
+        return parse_explicit_time(value, named_time_source(value));
+    };
+    ensure_four_digit_year(time.year())?;
+    if time.timestamp_subsec_nanos() >= NANOS_PER_SECOND as u32 {
+        return Err(TimestampError::UnsupportedPrecision);
+    }
+    Ok(time)
 }
 
 fn parse_named_source(clock: &str, name: &str) -> Result<DateTime<Utc>, TimestampError> {
@@ -429,6 +447,27 @@ fn ensure_four_digit_year(year: i32) -> Result<(), TimestampError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_unix_quantities_and_the_supplied_current_time_as_interval_endpoints() {
+        let now = DateTime::from_timestamp(1000, 250_000_000).unwrap();
+        for (query, expected) in [
+            ("间隔 现在 到 1500 to s", "499.75 s"),
+            ("between -1ns 至 +1NS to ns", "2 ns"),
+            ("间隔 -1毫秒 到 1970-01-01T00:00:00Z to ms", "1 ms"),
+            ("间隔 now 到 1970-01-01T00:16:40.25Z", "00:00:00"),
+        ] {
+            assert_eq!(
+                convert_timestamp(query, now).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            convert_timestamp("间隔 0 到 9999999999999999999999999999999999999999ns", now),
+            Err(TimestampError::OutOfRange)
+        );
+    }
 
     #[test]
     fn calculates_intervals_on_the_utc_timeline_with_nanosecond_precision() {
