@@ -211,6 +211,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "查某月第几个星期几",
+        query: "日期: 2026-11 第4个星期四",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查询季度范围与工作日数",
         query: "日期: 2026-Q4",
     },

@@ -8,6 +8,8 @@ pub(super) enum DateError {
     InvalidDate,
     InvalidWeek,
     InvalidQuarter,
+    InvalidWeekdayOccurrence,
+    MissingWeekdayOccurrence,
     InvalidOperation,
     OutOfRange,
 }
@@ -19,6 +21,10 @@ impl DateError {
             Self::InvalidDate => "输入有效日期或月份，例如 2026年11月21日 或 2026-11",
             Self::InvalidWeek => "请输入有效的 ISO 周号，例如 2026-W47",
             Self::InvalidQuarter => "请输入季度编号 1 至 4，例如 2026-Q4",
+            Self::InvalidWeekdayOccurrence => {
+                "请输入第 1 至第 5 个星期几，例如 日期: 2026-11 第4个星期四"
+            }
+            Self::MissingWeekdayOccurrence => "该月没有指定次序的星期",
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
             Self::OutOfRange => "结果超出四位年份的日期范围",
         }
@@ -151,6 +157,12 @@ fn iso_month_parts(input: &str) -> Option<(i32, u32)> {
     }
 }
 
+fn weekday_occurrence_parts(input: &str) -> Option<(i32, u32, &str)> {
+    let (month, rule) = input.split_once('第')?;
+    let (year, month) = iso_month_parts(month.trim_end())?;
+    Some((year, month, rule.trim()))
+}
+
 enum RelativePeriod {
     Week(i8),
     Month(i8),
@@ -173,6 +185,9 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
     let input = normalize(query);
     let input = input.trim();
     let date_tail = |rest: &str| rest.is_empty() || rest.starts_with(['+', '-']);
+    if weekday_occurrence_parts(input).is_some() {
+        return true;
+    }
     if let Some((year, ordinal)) = calendar_period_parts(input, ['W', 'w'])
         .or_else(|| calendar_period_parts(input, ['Q', 'q']))
     {
@@ -219,6 +234,43 @@ fn week_range(monday: NaiveDate) -> Result<String, DateError> {
     let start = in_range(Some(monday))?;
     let end = in_range(monday.checked_add_days(Days::new(6)))?;
     Ok(format!("{start} 至 {end}"))
+}
+
+fn weekday_occurrence(year: i32, month: u32, rule: &str) -> Result<String, DateError> {
+    if rule.is_empty() {
+        return Err(DateError::Incomplete);
+    }
+    let (ordinal, label) = rule
+        .split_once('个')
+        .ok_or(DateError::InvalidWeekdayOccurrence)?;
+    let ordinal = ordinal
+        .trim_end()
+        .parse::<u32>()
+        .ok()
+        .filter(|ordinal| (1..=5).contains(ordinal))
+        .ok_or(DateError::InvalidWeekdayOccurrence)?;
+    let label = label.trim_start();
+    let day = match label
+        .strip_prefix("星期")
+        .or_else(|| label.strip_prefix('周'))
+    {
+        Some("一") => Weekday::Mon,
+        Some("二") => Weekday::Tue,
+        Some("三") => Weekday::Wed,
+        Some("四") => Weekday::Thu,
+        Some("五") => Weekday::Fri,
+        Some("六") => Weekday::Sat,
+        Some("日" | "天") => Weekday::Sun,
+        _ => return Err(DateError::InvalidWeekdayOccurrence),
+    };
+    let start = NaiveDate::from_ymd_opt(year, month, 1).ok_or(DateError::InvalidDate)?;
+    let first = (day.num_days_from_monday() + 7 - start.weekday().num_days_from_monday()) % 7;
+    let days = Days::new(u64::from(first + (ordinal - 1) * 7));
+    let date = start
+        .checked_add_days(days)
+        .filter(|date| date.month() == month)
+        .ok_or(DateError::MissingWeekdayOccurrence)?;
+    Ok(date.to_string())
 }
 
 fn workday_difference(date: NaiveDate, other: NaiveDate) -> i64 {
@@ -361,6 +413,9 @@ fn apply_date_offset(
 pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, DateError> {
     let input = normalize(input);
     let input = input.trim();
+    if let Some((year, month, rule)) = weekday_occurrence_parts(input) {
+        return weekday_occurrence(year, month, rule);
+    }
     if let Some((year, week)) = calendar_period_parts(input, ['W', 'w']) {
         return iso_week_range(year, week);
     }
@@ -460,6 +515,33 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_nth_weekday_of_a_month_and_checks_for_missing_dates() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            ("2026-11 第4个星期四", "2026-11-26"),
+            ("2024-02 第５个周四", "2024-02-29"),
+            ("2026-11 第1个星期日", "2026-11-01"),
+            ("2026-11第1个周一", "2026-11-02"),
+        ] {
+            assert!(looks_like_date_query(query), "{query}");
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            ("2026-11 第", DateError::Incomplete),
+            ("2026-11 第5个星期四", DateError::MissingWeekdayOccurrence),
+            ("2026-11 第0个周四", DateError::InvalidWeekdayOccurrence),
+            ("2026-11 第4个周八", DateError::InvalidWeekdayOccurrence),
+            ("2026-13 第4个星期四", DateError::InvalidDate),
+        ] {
+            assert_eq!(calculate_date(query, today), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn recognizes_chinese_dates_and_slash_dates_in_calendar_queries() {
