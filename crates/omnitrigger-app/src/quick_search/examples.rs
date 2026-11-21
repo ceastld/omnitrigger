@@ -70,6 +70,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "unix: now",
     },
     Example {
+        icon: Icon::Clock,
+        title: "查询日期是星期几",
+        query: "日期: 2026-11-21 星期几",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "按周推算日期",
+        query: "日期: 今天 + 2周",
+    },
+    Example {
         icon: Icon::Layers,
         title: "查找触发预设",
         query: "预设: 顶部边缘",
