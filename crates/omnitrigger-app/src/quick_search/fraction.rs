@@ -3,6 +3,9 @@ use num_rational::BigRational;
 
 use super::calculator::{normalize, QUERY_LIMIT};
 
+const MAX_POWER_EXPONENT: u32 = 1024;
+const MAX_EXACT_BITS: u64 = 8192;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FractionError {
     Incomplete,
@@ -10,6 +13,8 @@ pub(super) enum FractionError {
     ZeroDenominator,
     OutOfRange,
     TooLong,
+    NonIntegerExponent,
+    ExactRange,
 }
 
 impl FractionError {
@@ -20,6 +25,8 @@ impl FractionError {
             Self::ZeroDenominator => "分母不能为零",
             Self::OutOfRange => "分子或分母超出整数范围",
             Self::TooLong => "分数算式最多支持 256 个字符",
+            Self::NonIntegerExponent => "精确分数幂的指数必须是整数",
+            Self::ExactRange => "指数绝对值最多 1024，分子和分母各最多 8192 个二进制位",
         }
     }
 }
@@ -124,6 +131,39 @@ fn calculate_fraction(input: &str) -> Result<String, FractionError> {
     Ok(value.to_string())
 }
 
+fn ensure_exact_size(value: &BigRational) -> Result<(), FractionError> {
+    if value.numer().bits().max(value.denom().bits()) > MAX_EXACT_BITS {
+        return Err(FractionError::ExactRange);
+    }
+    Ok(())
+}
+
+fn rational_power(base: BigRational, exponent: BigRational) -> Result<BigRational, FractionError> {
+    if !exponent.is_integer() {
+        return Err(FractionError::NonIntegerExponent);
+    }
+    let exponent = i32::try_from(exponent.numer()).map_err(|_| FractionError::ExactRange)?;
+    let magnitude = exponent.unsigned_abs();
+    if magnitude > MAX_POWER_EXPONENT {
+        return Err(FractionError::ExactRange);
+    }
+    if exponent < 0 && base.numer().sign() == Sign::NoSign {
+        return Err(FractionError::ZeroDenominator);
+    }
+    // 幂的二进制位数至少为 1 + (底数位数 - 1) × 指数绝对值。
+    let base_bits = base.numer().bits().max(base.denom().bits());
+    if base_bits
+        .saturating_sub(1)
+        .saturating_mul(u64::from(magnitude))
+        >= MAX_EXACT_BITS
+    {
+        return Err(FractionError::ExactRange);
+    }
+    let value = base.pow(exponent);
+    ensure_exact_size(&value)?;
+    Ok(value)
+}
+
 struct FractionParser<'a> {
     remaining: &'a str,
 }
@@ -147,6 +187,7 @@ impl FractionParser<'_> {
             } else {
                 return Ok(value);
             }
+            ensure_exact_size(&value)?;
         }
     }
 
@@ -164,6 +205,7 @@ impl FractionParser<'_> {
             } else {
                 return Ok(value);
             }
+            ensure_exact_size(&value)?;
         }
     }
 
@@ -176,7 +218,7 @@ impl FractionParser<'_> {
                 break;
             }
         }
-        let value = if self.consume('(') {
+        let mut value = if self.consume('(') {
             let value = self.sum()?;
             if !self.consume(')') {
                 return Err(self.expected_token());
@@ -185,6 +227,14 @@ impl FractionParser<'_> {
         } else {
             self.number()?
         };
+        let remaining = self.remaining.trim_start();
+        if let Some(exponent) = remaining
+            .strip_prefix("**")
+            .or_else(|| remaining.strip_prefix('^'))
+        {
+            self.remaining = exponent;
+            value = rational_power(value, self.factor()?)?;
+        }
         Ok(if negative { -value } else { value })
     }
 
@@ -285,5 +335,31 @@ mod tests {
             simplify_fraction(&format!("计算 {}", "9".repeat(QUERY_LIMIT + 1))),
             Err(FractionError::TooLong)
         );
+    }
+
+    #[test]
+    fn calculates_integer_powers_with_right_associativity_and_checked_size() {
+        for (query, expected) in [
+            ("计算 2**80", "1208925819614629174706176"),
+            ("计算 2**3^2", "512"),
+            ("计算 -2**2", "-4"),
+            ("计算 (-2)^2", "4"),
+            ("计算 2**-3^2", "1/512"),
+            ("计算 (2/3)^-2", "9/4"),
+            ("计算 3*2^2+1", "13"),
+            ("计算 0^0", "1"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, expected) in [
+            ("计算 2**", FractionError::Incomplete),
+            ("计算 0**-1", FractionError::ZeroDenominator),
+            ("计算 2**0.5", FractionError::NonIntegerExponent),
+            ("计算 2**1025", FractionError::ExactRange),
+            ("计算 2**(2**20)", FractionError::ExactRange),
+            ("计算 10^1024*10^1024*10^1024", FractionError::ExactRange),
+        ] {
+            assert_eq!(simplify_fraction(query), Err(expected), "{query}");
+        }
     }
 }
