@@ -76,6 +76,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "求精确分位数",
+        query: "统计: 分位数 25% 1/2,3/2",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "求四分位数和四分位距",
+        query: "统计: 四分位 4,1,3,2",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "用半径计算圆周长和面积",
         query: "圆: 半径 3",
     },
@@ -1656,7 +1666,8 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
     match scope {
         Scope::Date if matches!(term, "列" | "列出") => {}
-        Scope::Statistics if matches!(term, "频" | "频数") => {}
+        Scope::Statistics if matches!(term, "频" | "频数" | "分位" | "分位数" | "四分位") =>
+            {}
         Scope::Json
         | Scope::Csv
         | Scope::TextTools

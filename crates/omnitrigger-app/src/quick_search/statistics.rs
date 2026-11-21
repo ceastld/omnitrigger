@@ -1,4 +1,4 @@
-use num_bigint::BigInt;
+use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::calculator::normalize;
@@ -13,6 +13,7 @@ pub(super) enum StatisticsError {
     TooManyValues,
     InvalidFrequency,
     FrequencyOverflow,
+    InvalidProbability,
     Evaluation(FractionError),
 }
 
@@ -23,6 +24,7 @@ impl StatisticsError {
             Self::TooManyValues => "最多可统计 128 个值或频数组",
             Self::InvalidFrequency => "每组用 数值@次数，次数须为正整数",
             Self::FrequencyOverflow => "频数合计超出支持范围",
+            Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "请输入整数、有限小数、分数或精确算式"
             }
@@ -31,20 +33,32 @@ impl StatisticsError {
     }
 }
 
+enum StatisticsOperation {
+    Sample,
+    Population,
+    Quartiles,
+    Quantile(BigRational),
+}
+
 pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsError> {
     let normalized = normalize(query);
     let input = normalized.trim();
     let (operation, values) = operation_and_arguments(input);
-    let (sample, input) = match operation.to_ascii_lowercase().as_str() {
-        "总体" | "population" => (false, values.trim()),
-        "样本" | "sample" => (true, values.trim()),
-        _ => (true, input),
+    let (operation, input) = match operation.to_ascii_lowercase().as_str() {
+        "总体" | "population" => (StatisticsOperation::Population, values.trim()),
+        "样本" | "sample" => (StatisticsOperation::Sample, values.trim()),
+        "四分位" | "quartiles" => (StatisticsOperation::Quartiles, values.trim()),
+        "分位数" | "quantile" => {
+            let (probability, values) = operation_and_arguments(values.trim());
+            (
+                StatisticsOperation::Quantile(parse_probability(probability)?),
+                values.trim(),
+            )
+        }
+        _ => (StatisticsOperation::Sample, input),
     };
-    let (operation, values) = operation_and_arguments(input);
-    let use_frequencies = matches!(
-        operation.to_ascii_lowercase().as_str(),
-        "频数" | "frequency"
-    );
+    let (prefix, values) = operation_and_arguments(input);
+    let use_frequencies = matches!(prefix.to_ascii_lowercase().as_str(), "频数" | "frequency");
     let input = if use_frequencies {
         values.trim()
     } else {
@@ -61,7 +75,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
     if terms.len() > MAX_VALUES {
         return Err(StatisticsError::TooManyValues);
     }
-    let mut values = terms
+    let values = terms
         .into_iter()
         .map(|term| parse_observation(term, use_frequencies))
         .collect::<Result<Vec<_>, _>>()?;
@@ -70,6 +84,24 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             .checked_add(*repetitions)
             .ok_or(StatisticsError::FrequencyOverflow)
     })?;
+    match operation {
+        StatisticsOperation::Sample | StatisticsOperation::Population => summarize(
+            values,
+            count,
+            matches!(operation, StatisticsOperation::Sample),
+        ),
+        StatisticsOperation::Quartiles => report_quantiles(values, count, None),
+        StatisticsOperation::Quantile(probability) => {
+            report_quantiles(values, count, Some(&probability))
+        }
+    }
+}
+
+fn summarize(
+    mut values: Vec<(BigRational, u64)>,
+    count: u64,
+    sample: bool,
+) -> Result<String, StatisticsError> {
     let sum = values
         .iter()
         .try_fold(BigRational::default(), |sum, (value, repetitions)| {
@@ -107,6 +139,55 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         ));
     }
     Ok(result)
+}
+
+fn parse_probability(input: &str) -> Result<BigRational, StatisticsError> {
+    let probability = if let Some(percent) = input.strip_suffix('%') {
+        calculate_fraction(percent).map(|value| value / BigInt::from(100))
+    } else {
+        calculate_fraction(input)
+    }
+    .map_err(|_| StatisticsError::InvalidProbability)?;
+    if probability.numer().sign() == Sign::Minus || probability.numer() > probability.denom() {
+        return Err(StatisticsError::InvalidProbability);
+    }
+    Ok(probability)
+}
+
+fn report_quantiles(
+    mut values: Vec<(BigRational, u64)>,
+    count: u64,
+    probability: Option<&BigRational>,
+) -> Result<String, StatisticsError> {
+    values.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let quantile = |probability: &BigRational| interpolate_quantile(&values, count, probability);
+    if let Some(probability) = probability {
+        return quantile(probability).map(|value| value.to_string());
+    }
+    let lower = quantile(&BigRational::new(1.into(), 4.into()))?;
+    let middle = quantile(&BigRational::new(1.into(), 2.into()))?;
+    let upper = quantile(&BigRational::new(3.into(), 4.into()))?;
+    let spread = bounded(&upper - &lower)?;
+    Ok(format!(
+        "Q1 {lower} · 中位数 {middle} · Q3 {upper}\n四分位距 {spread}"
+    ))
+}
+
+fn interpolate_quantile(
+    values: &[(BigRational, u64)],
+    count: u64,
+    probability: &BigRational,
+) -> Result<BigRational, StatisticsError> {
+    let position = probability * BigInt::from(count - 1);
+    let rank =
+        u64::try_from(position.to_integer()).expect("quantile rank within observation count");
+    let lower = observation_at(values, rank);
+    if position.is_integer() {
+        return Ok(lower.clone());
+    }
+    let upper = observation_at(values, rank + 1);
+    let fraction = position - BigInt::from(rank);
+    bounded(lower + (upper - lower) * fraction)
 }
 
 fn operation_and_arguments(input: &str) -> (&str, &str) {
@@ -215,6 +296,41 @@ mod tests {
             calculate_statistics("频数 9@18446744073709551615,1@1"),
             Err(StatisticsError::FrequencyOverflow)
         );
+    }
+
+    #[test]
+    fn interpolates_exact_quantiles_across_observations_or_frequency_groups() {
+        for (query, expected) in [
+            (
+                "四分位 4,1,3,2",
+                "Q1 7/4 · 中位数 5/2 · Q3 13/4\n四分位距 3/2",
+            ),
+            (
+                "quartiles 频数 1@2,4@2",
+                "Q1 1 · 中位数 5/2 · Q3 4\n四分位距 3",
+            ),
+            ("分位数 1/4 1/2,3/2", "3/4"),
+            (
+                "分位数 25% 9007199254740993,9007199254740995",
+                "18014398509481987/2",
+            ),
+            ("quantile 0 6,-2,1", "-2"),
+            ("分位数 100% 频数 9@18446744073709551615", "9"),
+            ("分位数 60% 1", "1"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in ["分位数", "分位数 -1/4 1,2", "分位数 101% 1,2"] {
+            assert_eq!(
+                calculate_statistics(query),
+                Err(StatisticsError::InvalidProbability),
+                "{query}"
+            );
+        }
     }
 
     #[test]

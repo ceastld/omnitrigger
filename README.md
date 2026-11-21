@@ -106,6 +106,7 @@
 - 输入 `统计: 1,3,5` 可查看数量、合计、平均值、中位数、最小值和最大值。两个及以上的数值还可查看样本方差和标准差。支持分数、有限小数和精确算式，最多 128 个值，用逗号或换行分隔。结果保留分数或根式。 [NIST 方差和标准差](https://www.itl.nist.gov/div898/handbook/eda/section3/eda356.htm)
 - 输入 `统计: 总体 1,3,5` 可求总体方差 `8/3` 和标准差 `√(8/3)`。总体只有一个值时，方差和标准差均为 `0`。
 - 输入 `统计: 频数 1@2,3@1,5@2` 可把每组按出现次数计入统计，得到数量 5、合计 15、平均值 3 和中位数 3。次数须为正整数，最多输入 128 组。用 `总体 频数` 可改用总体方差。[频数权重定义](https://www.stata.com/manuals/u20.pdf)
+- 输入 `统计: 分位数 25% 1/2,3/2` 得到 `3/4`。用 `统计: 四分位 4,1,3,2` 可同时查看三个四分位数与四分位距。两种操作支持 `频数` 数据并保留精确分数。[R 的 Type 7 定义](https://stat.ethz.ch/R-manual/R-devel/library/stats/html/quantile.html#types)
 - 输入 `rms(0,6,0,-8)` 可求均方根 `5`。`corr(1,2,2,4,3,6)` 得到皮尔逊相关系数 `1`，输入至少两对数值，且两个变量都须有变化。 [NIST 相关系数公式](https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/correlat.htm)
 - 输入 `quantile(0.25,4,1,3,2)` 或 `percentile(25,4,1,3,2)` 得到下四分位数 `1.75`，`iqr(4,1,3,2)` 得到四分位距 `1.5`。分位数使用排序后相邻样本间的线性插值。[R 的 Type 7 定义](https://stat.ethz.ch/R-manual/R-devel/library/stats/html/quantile.html#types)
 - `degrees(asin(0.5))` 得到 `30`。用 `round(2.5)` 取最近整数时，恰好在中点会取偶数，结果为 `2`。`trunc(-1.8)` 向零取整得到 `-1`。
