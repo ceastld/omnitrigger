@@ -690,6 +690,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r#"JSON: 取值 /商品/0/价格 {"商品":[{"价格":9007199254740993}]}"#,
     },
     Example {
+        icon: Icon::Terminal,
+        title: "列出 JSON 对象的顶层键名",
+        query: r#"JSON: 键名 {"城市":{"名称":"北京"},"数量":1}"#,
+    },
+    Example {
         icon: Icon::Browser,
         title: "编码 URL 参数值",
         query: "URL: 编码 北京 A+B",
