@@ -10,6 +10,7 @@ pub(super) enum CidrError {
     Address,
     Prefix,
     DifferentFamilies,
+    ReversedRange,
 }
 
 impl CidrError {
@@ -19,6 +20,7 @@ impl CidrError {
             Self::Address => "请输入有效的 IPv4 或 IPv6 地址",
             Self::Prefix => "请输入有效的前缀长度或连续的 IPv4 掩码",
             Self::DifferentFamilies => "地址和网段须使用相同的 IP 版本",
+            Self::ReversedRange => "起始地址不得大于结束地址",
         }
     }
 }
@@ -55,8 +57,35 @@ fn bits(address: IpAddr) -> u128 {
     }
 }
 
+fn address_width(address: IpAddr) -> u32 {
+    if address.is_ipv4() {
+        32
+    } else {
+        128
+    }
+}
+
+fn as_address(bits: u128, width: u32) -> IpAddr {
+    if width == 32 {
+        IpAddr::V4(Ipv4Addr::from(bits as u32))
+    } else {
+        IpAddr::V6(Ipv6Addr::from(bits))
+    }
+}
+
+fn host_mask(host_bits: u32) -> u128 {
+    u128::MAX.checked_shr(128 - host_bits).unwrap_or(0)
+}
+
 pub(super) fn calculate_cidr(query: &str) -> Result<String, CidrError> {
     let input = normalize(query).replace(char::is_whitespace, " ");
+    if let Some((operation, range)) = input.split_once(' ') {
+        match operation.to_ascii_lowercase().as_str() {
+            "覆盖" | "cover" => return range_to_cidr(range, true),
+            "分解" | "range-to-cidr" => return range_to_cidr(range, false),
+            _ => {}
+        }
+    }
     let (network, member) = input
         .split_once("包含")
         .or_else(|| {
@@ -72,20 +101,13 @@ pub(super) fn calculate_cidr(query: &str) -> Result<String, CidrError> {
         return Err(CidrError::Incomplete);
     }
     let address = address.parse::<IpAddr>().map_err(|_| CidrError::Address)?;
-    let width = if address.is_ipv4() { 32 } else { 128 };
+    let width = address_width(address);
     let prefix = prefix_length(prefix, width)?;
     let host_bits = width - prefix;
-    let host_mask = u128::MAX.checked_shr(128 - host_bits).unwrap_or(0);
+    let host_mask = host_mask(host_bits);
     let first = bits(address) & !host_mask;
     let last = first | host_mask;
-    let as_address = |bits| {
-        if address.is_ipv4() {
-            IpAddr::V4(Ipv4Addr::from(bits as u32))
-        } else {
-            IpAddr::V6(Ipv6Addr::from(bits))
-        }
-    };
-    let network = format!("{}/{prefix}", as_address(first));
+    let network = format!("{}/{prefix}", as_address(first, width));
     if let Some(member) = member {
         if member.is_empty() {
             return Err(CidrError::Incomplete);
@@ -109,14 +131,78 @@ pub(super) fn calculate_cidr(query: &str) -> Result<String, CidrError> {
     let count = BigUint::from(1u8) << host_bits;
     Ok(format!(
         "网段 {network}\n{mask}范围 {} 至 {}\n地址数 {count}",
-        as_address(first),
-        as_address(last)
+        as_address(first, width),
+        as_address(last, width)
     ))
+}
+
+fn range_to_cidr(input: &str, cover_only: bool) -> Result<String, CidrError> {
+    let (first, last) = input.split_once(['至', ',']).ok_or(CidrError::Incomplete)?;
+    let (first, last) = (first.trim(), last.trim());
+    if first.is_empty() || last.is_empty() {
+        return Err(CidrError::Incomplete);
+    }
+    let first = first.parse::<IpAddr>().map_err(|_| CidrError::Address)?;
+    let last = last.parse::<IpAddr>().map_err(|_| CidrError::Address)?;
+    let width = address_width(first);
+    if address_width(last) != width {
+        return Err(CidrError::DifferentFamilies);
+    }
+    let (mut cursor, last) = (bits(first), bits(last));
+    if cursor > last {
+        return Err(CidrError::ReversedRange);
+    }
+
+    if cover_only {
+        let host_bits = 128 - (cursor ^ last).leading_zeros();
+        let start = as_address(cursor & !host_mask(host_bits), width);
+        return Ok(format!("{start}/{}", width - host_bits));
+    }
+
+    let mut networks = Vec::new();
+    loop {
+        // 选取起点对齐且完全位于剩余区间中的最大网段。
+        let remaining_bits = (last - cursor).checked_add(1).map_or(128, u128::ilog2);
+        let host_bits = cursor.trailing_zeros().min(remaining_bits).min(width);
+        let start = as_address(cursor, width);
+        networks.push(format!("{start}/{}", width - host_bits));
+        let block_last = cursor | host_mask(host_bits);
+        if block_last == last {
+            return Ok(networks.join("\n"));
+        }
+        cursor = block_last + 1;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_ranges_to_one_covering_network_or_exact_cidr_blocks() {
+        for (input, expected) in [
+            ("覆盖 192.0.2.1 至 192.0.2.6", "192.0.2.0/29"),
+            ("分解 192.0.2.1，192.0.2.6", "192.0.2.1/32\n192.0.2.2/31\n192.0.2.4/31\n192.0.2.6/32"),
+            ("cover 192.0.2.1, 192.0.2.1", "192.0.2.1/32"),
+            ("分解 192.0.2.128 至 192.0.2.191", "192.0.2.128/26"),
+            ("分解 0.0.0.0 至 255.255.255.255", "0.0.0.0/0"),
+            ("分解 2001:db8::1 至 2001:db8::3", "2001:db8::1/128\n2001:db8::2/127"),
+            ("覆盖 2001:db8::1 至 2001:db8::3", "2001:db8::/126"),
+            ("分解 :: 至 ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "::/0"),
+            ("覆盖 :: 至 8000::", "::/0"),
+            ("range-to-cidr ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe, ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe/127"),
+        ] {
+            assert_eq!(calculate_cidr(input).as_deref(), Ok(expected), "{input}");
+        }
+        for (input, expected) in [
+            ("分解 192.0.2.6 至 192.0.2.1", CidrError::ReversedRange),
+            ("覆盖 192.0.2.1 至 ::1", CidrError::DifferentFamilies),
+            ("分解 192.0.2.1 至", CidrError::Incomplete),
+            ("分解 192.0.2.1 至 192.0.2.300", CidrError::Address),
+        ] {
+            assert_eq!(calculate_cidr(input), Err(expected), "{input}");
+        }
+    }
 
     #[test]
     fn computes_address_ranges_and_membership_for_both_ip_versions() {

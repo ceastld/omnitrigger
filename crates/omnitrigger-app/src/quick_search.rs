@@ -28,6 +28,7 @@ mod scientific;
 mod scope;
 mod settings_sections;
 mod text_tools;
+mod timecode;
 mod timestamp;
 mod triggers;
 mod url_encoding;
@@ -85,6 +86,7 @@ use renminbi::{uppercase_renminbi, RenminbiError};
 use scope::{scoped_query, tool_example_keyword, Scope};
 use settings_sections::matching_settings;
 use text_tools::{count_text, transform_text, TextError};
+use timecode::{convert_timecode, TimecodeError};
 use timestamp::{convert_timestamp, TimestampError};
 use triggers::{matching_triggers, SearchTrigger};
 use unicode_segmentation::UnicodeSegmentation;
@@ -303,6 +305,7 @@ enum ValueError {
     Date(DateError),
     Duration(DurationError),
     VideoFrames(VideoFrameError),
+    Timecode(TimecodeError),
     Timestamp(TimestampError),
     Identifier(IdentifierError),
     Color(ColorError),
@@ -330,6 +333,7 @@ impl ValueError {
             Self::Date(error) => error.message(),
             Self::Duration(error) => error.message(),
             Self::VideoFrames(error) => error.message(),
+            Self::Timecode(error) => error.message(),
             Self::Timestamp(error) => error.message(),
             Self::Identifier(error) => error.message(),
             Self::Color(error) => error.message(),
@@ -357,6 +361,7 @@ impl ValueError {
                 | Self::Date(DateError::Incomplete)
                 | Self::Duration(DurationError::Incomplete)
                 | Self::VideoFrames(VideoFrameError::Incomplete)
+                | Self::Timecode(TimecodeError::Incomplete)
                 | Self::Timestamp(TimestampError::Incomplete)
                 | Self::Identifier(IdentifierError::Incomplete)
                 | Self::Color(ColorError::Incomplete | ColorError::IncompleteContrast)
@@ -479,6 +484,9 @@ impl Results {
                 }
                 Scope::VideoFrames => {
                     Self::text_value(convert_video_frames(term).map_err(ValueError::VideoFrames))
+                }
+                Scope::Timecode => {
+                    Self::text_value(convert_timecode(term).map_err(ValueError::Timecode))
                 }
                 Scope::TransferTime => Self::conversion_value(estimate_transfer(term), None),
                 Scope::Pace => {

@@ -186,6 +186,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "把帧数换成丢帧时间码",
+        query: "时间码: 1800 帧 @ 29.97 fps DF",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "把时间码换成从零开始的帧数",
+        query: "时间码: 00:00:05:00 @ 25 fps",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "估算下载时间",
         query: "下载: 1 GiB 按 100 Mbps",
     },
@@ -333,6 +343,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Layers,
         title: "判断地址是否在网段",
         query: "网段: 2001:db8::/64 包含 2001:db8::1",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求覆盖地址区间的最小网段",
+        query: "网段: 覆盖 192.0.2.1 至 192.0.2.6",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用 CIDR 网段精确表示地址区间",
+        query: "网段: 分解 192.0.2.1 至 192.0.2.6",
     },
     Example {
         icon: Icon::Clock,
@@ -1390,6 +1410,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Date
         | Scope::Duration
         | Scope::VideoFrames
+        | Scope::Timecode
         | Scope::TransferTime
         | Scope::Pace
         | Scope::FuelEconomy
@@ -1462,6 +1483,7 @@ mod tests {
             Scope::Date,
             Scope::Duration,
             Scope::VideoFrames,
+            Scope::Timecode,
             Scope::TransferTime,
             Scope::Pace,
             Scope::FuelEconomy,
