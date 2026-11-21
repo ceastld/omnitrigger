@@ -11,6 +11,7 @@ mod radix;
 mod recent;
 mod scientific;
 mod scope;
+mod settings_sections;
 mod timestamp;
 mod triggers;
 mod wheels;
@@ -21,6 +22,7 @@ use gpui::{
     Window, WindowBounds, WindowHandle, WindowKind, WindowOptions,
 };
 
+use crate::appearance_ui::SettingsSection;
 use crate::{
     appearance,
     assets::Icon,
@@ -39,6 +41,7 @@ use presets::matching_presets;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 pub(super) use recent::RecentDestinations;
 use scope::{scoped_query, Scope};
+use settings_sections::matching_settings;
 use timestamp::{convert_timestamp, TimestampError};
 use triggers::{matching_triggers, SearchTrigger};
 use wheels::{matching_wheels, SearchWheel};
@@ -75,6 +78,7 @@ pub(super) enum Destination {
     Trigger(u64),
     Wheel(String),
     Preset(&'static str),
+    SettingsSection(SettingsSection),
     TextHistoryQuery(String),
     ActionLibraryQuery(String),
     ActionLibraryEntry {
@@ -88,6 +92,7 @@ pub(super) struct SearchIndex {
     triggers: Vec<SearchTrigger>,
     wheels: Vec<SearchWheel>,
     actions: Vec<SearchAction>,
+    settings: Vec<SettingsSection>,
     recent: RecentDestinations,
 }
 
@@ -118,6 +123,7 @@ impl SearchIndex {
         } else {
             Vec::new()
         };
+        let standard_config = Workspace::settings_standard_config();
         Self {
             triggers: workspace
                 .triggers
@@ -127,6 +133,10 @@ impl SearchIndex {
                 .collect(),
             wheels,
             actions,
+            settings: SettingsSection::ALL
+                .into_iter()
+                .filter(|section| section.available(standard_config, workspace.test_data))
+                .collect(),
             recent: workspace.quick_search_recent.clone(),
         }
     }
@@ -137,6 +147,7 @@ impl SearchIndex {
             &self.triggers,
             &self.wheels,
             &self.actions,
+            &self.settings,
             &self.recent,
         )
     }
@@ -200,6 +211,7 @@ impl Results {
         triggers: &[SearchTrigger],
         wheels: &[SearchWheel],
         actions: &[SearchAction],
+        settings: &[SettingsSection],
         recent: &RecentDestinations,
     ) -> Self {
         let query = query.trim();
@@ -230,6 +242,15 @@ impl Results {
                     matching_presets(term, PAGE_RESULT_LIMIT)
                         .into_iter()
                         .map(|preset| Destination::Preset(preset.key))
+                        .collect(),
+                ),
+                Scope::Settings if term.is_empty() => {
+                    Self::Destinations(vec![Destination::Page(Page::Settings)])
+                }
+                Scope::Settings => Self::Destinations(
+                    matching_settings(settings, term, PAGE_RESULT_LIMIT)
+                        .into_iter()
+                        .map(Destination::SettingsSection)
                         .collect(),
                 ),
                 Scope::TextHistory if term.is_empty() => {
@@ -302,6 +323,11 @@ impl Results {
             &query,
             PAGE_RESULT_LIMIT - destinations.len(),
         ));
+        destinations.extend(
+            matching_settings(settings, &query, PAGE_RESULT_LIMIT - destinations.len())
+                .into_iter()
+                .map(Destination::SettingsSection),
+        );
         Self::Destinations(destinations)
     }
 
@@ -669,6 +695,11 @@ impl QuickSearch {
                                 Some(preset.group.to_owned()),
                             )
                         }
+                        Destination::SettingsSection(section) => (
+                            Page::Settings.icon(),
+                            section.title().to_owned(),
+                            Some(Page::Settings.title().to_owned()),
+                        ),
                         Destination::TextHistoryQuery(_) => {
                             (Icon::Clock, "搜索文本历史正文".to_owned(), None)
                         }
@@ -798,7 +829,14 @@ mod tests {
     use super::*;
 
     fn for_query(query: &str, triggers: &[SearchTrigger]) -> Results {
-        Results::for_query(query, triggers, &[], &[], &RecentDestinations::default())
+        Results::for_query(
+            query,
+            triggers,
+            &[],
+            &[],
+            &[],
+            &RecentDestinations::default(),
+        )
     }
 
     #[test]
@@ -817,6 +855,7 @@ mod tests {
                 .map(SearchWheel::from_definition)
                 .collect(),
             actions: Vec::new(),
+            settings: SettingsSection::ALL.to_vec(),
             recent: RecentDestinations::default(),
         };
         for example in EXAMPLES {
@@ -833,8 +872,14 @@ mod tests {
         let settings = crate::wheels::Wheels::default();
         let wheels = [SearchWheel::from_definition(&settings.wheels[0])];
         for query in ["编辑轨道", "wheel: orbit-edit", "轮盘：", "轨道轮盘：编辑"] {
-            let result =
-                Results::for_query(query, &[], &wheels, &[], &RecentDestinations::default());
+            let result = Results::for_query(
+                query,
+                &[],
+                &wheels,
+                &[],
+                &[],
+                &RecentDestinations::default(),
+            );
             assert!(
                 matches!(result, Results::Destinations(items) if items == [Destination::Wheel("orbit-edit".into())]),
                 "{query}"

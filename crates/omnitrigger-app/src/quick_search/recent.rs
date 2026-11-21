@@ -14,6 +14,7 @@ impl RecentDestinations {
             }
             Destination::Wheel(_) => Destination::Page(Page::Wheels),
             Destination::Preset(_) => Destination::Page(Page::Presets),
+            Destination::SettingsSection(_) => Destination::Page(Page::Settings),
             item => item.clone(),
         };
         self.0.retain(|existing| existing != &item);

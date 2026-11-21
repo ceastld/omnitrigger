@@ -111,6 +111,7 @@ mod tests {
             &[],
             &[],
             &actions,
+            &[],
             &RecentDestinations::default(),
         );
         assert!(matches!(

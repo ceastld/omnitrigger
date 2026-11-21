@@ -1,6 +1,35 @@
 //! 设置页提供外观选择和应用更新。
-use crate::{appearance::Mode, caption, card, heading, icon, profiles, theme, Workspace};
+use crate::{appearance::Mode, caption, card, heading, icon, profiles, theme, Page, Workspace};
 use gpui::{div, prelude::*, px, Context, Div, FontWeight, Window};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SettingsSection {
+    Theme,
+    Backup,
+    Profiles,
+    Updates,
+}
+
+impl SettingsSection {
+    pub(super) const ALL: [Self; 4] = [Self::Theme, Self::Backup, Self::Profiles, Self::Updates];
+
+    pub(super) fn available(self, standard_config: bool, test_data: bool) -> bool {
+        match self {
+            Self::Theme | Self::Backup => true,
+            Self::Profiles => standard_config || !test_data,
+            Self::Updates => !test_data,
+        }
+    }
+
+    pub(super) fn title(self) -> &'static str {
+        match self {
+            Self::Theme => "颜色主题",
+            Self::Backup => "配置备份",
+            Self::Profiles => "测试配置",
+            Self::Updates => "应用更新",
+        }
+    }
+}
 
 fn preview(dark: bool) -> Div {
     // 缩略图显示选项本身的颜色，不随当前主题反转。
@@ -234,15 +263,24 @@ impl Workspace {
         cx.notify();
     }
 
+    pub(super) fn settings_standard_config() -> bool {
+        crate::settings::path()
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json"))
+    }
+
     pub(super) fn render_appearance(
         &self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let standard = crate::settings::path()
-            .file_name()
-            .is_some_and(|name| name.eq_ignore_ascii_case("bindings.json"));
-        let test_profiles = (standard || !self.test_data)
+        let standard = Self::settings_standard_config();
+        let show_section = |section: SettingsSection| {
+            self.settings_section
+                .is_none_or(|selected| selected == section)
+                && section.available(standard, self.test_data)
+        };
+        let test_profiles = show_section(SettingsSection::Profiles)
             .then(|| self.render_test_profiles(standard && !self.test_data, cx));
         let choices = Mode::ALL.into_iter().enumerate().map(|(index, mode)| {
             let selected = self.theme_mode == mode;
@@ -291,17 +329,74 @@ impl Workspace {
         .on_click(cx.listener(|this, _, _, cx| {
             this.request_legacy_close(cx);
         }));
-        div().id("appearance-settings").flex_1().min_w_0().h_full().overflow_y_scroll()
-            .child(div().pt(px(6.)).pb(px(24.)).pl(px(20.)).pr(px(24.)).flex().flex_col().gap(px(24.))
-                .child(heading("设置", format!("{} · Windows x64 预览版", crate::BUILD_LABEL)))
-                .children(test_profiles)
-                .child(self.render_backup_settings(cx))
-                .child(div().flex().flex_col().gap(px(14.))
-                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("颜色主题"))
-                    .child(caption("选择后立即生效，自动保存。跟随系统会与 Windows 的浅色或深色模式保持一致。"))
-                    .child(div().flex().flex_wrap().gap(px(12.)).children(choices)))
-                .when_some(self.theme_error.clone(), |el, error| el.child(caption(error).text_color(theme::rgb(theme::DANGER))))
-                .when(!self.test_data, |el| el.child(self.render_update(cx)).child(div().flex().child(quit))))
-            .map(|el| self.smooth_scroll.wrap("appearance-settings", el))
+        let header = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .child(heading(
+                "设置",
+                format!("{} · Windows x64 预览版", crate::BUILD_LABEL),
+            ))
+            .when(self.settings_section.is_some(), |el| {
+                el.child(
+                    theme::button(
+                        "show-all-settings",
+                        "查看全部设置",
+                        theme::Tone::Secondary,
+                        true,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.open_page(Page::Settings, cx))),
+                )
+            });
+        let theme_controls = show_section(SettingsSection::Theme).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(14.))
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(SettingsSection::Theme.title()),
+                )
+                .child(caption(
+                    "选择后立即生效，自动保存。跟随系统会与 Windows 的浅色或深色模式保持一致。",
+                ))
+                .child(div().flex().flex_wrap().gap(px(12.)).children(choices))
+        });
+        let content = div()
+            .pt(px(6.))
+            .pb(px(24.))
+            .pl(px(20.))
+            .pr(px(24.))
+            .flex()
+            .flex_col()
+            .gap(px(24.))
+            .child(header)
+            .children(test_profiles)
+            .when(show_section(SettingsSection::Backup), |el| {
+                el.child(self.render_backup_settings(cx))
+            })
+            .children(theme_controls)
+            .when(show_section(SettingsSection::Theme), |el| {
+                el.when_some(self.theme_error.clone(), |el, error| {
+                    el.child(caption(error).text_color(theme::rgb(theme::DANGER)))
+                })
+            })
+            .when(show_section(SettingsSection::Updates), |el| {
+                el.child(self.render_update(cx))
+            })
+            .when(self.settings_section.is_none() && !self.test_data, |el| {
+                el.child(div().flex().child(quit))
+            });
+        let scroll = div()
+            .id("appearance-settings")
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_y_scroll()
+            .child(content);
+        self.smooth_scroll.wrap("appearance-settings", scroll)
     }
 }

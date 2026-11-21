@@ -754,6 +754,7 @@ struct Workspace {
     edited_spec: Option<TriggerSpec>,
     preset_edit_id: Option<u64>,
     preset_catalog_key: Option<&'static str>,
+    settings_section: Option<appearance_ui::SettingsSection>,
     conflict: Option<Conflict>,
     selected: Option<u64>,
     confirm_delete: Option<u64>,
@@ -1280,6 +1281,7 @@ impl Workspace {
             edited_spec: None,
             preset_edit_id: None,
             preset_catalog_key: None,
+            settings_section: None,
             conflict: None,
             selected,
             confirm_delete: None,
@@ -1502,6 +1504,7 @@ impl Workspace {
         self.package_picker_for_draft = false;
         self.preset_edit_id = None;
         self.preset_catalog_key = None;
+        self.settings_section = None;
         cx.notify();
     }
 
@@ -2758,6 +2761,10 @@ impl Workspace {
             quick_search::Destination::Preset(key) => {
                 self.open_page(Page::Presets, cx);
                 self.preset_catalog_key = Some(key);
+            }
+            quick_search::Destination::SettingsSection(section) => {
+                self.open_page(Page::Settings, cx);
+                self.settings_section = Some(section);
             }
             quick_search::Destination::Trigger(id) => {
                 self.open_page(Page::Triggers, cx);
