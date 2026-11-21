@@ -6,6 +6,7 @@ use super::calculator::normalize;
 pub(super) enum DateError {
     Incomplete,
     InvalidDate,
+    InvalidWeek,
     InvalidOperation,
     OutOfRange,
 }
@@ -15,6 +16,7 @@ impl DateError {
         match self {
             Self::Incomplete => "可以输入日期、天数或星期几，例如 日期: 今天 星期几",
             Self::InvalidDate => "请输入有效日期，格式为 YYYY-MM-DD",
+            Self::InvalidWeek => "请输入有效的 ISO 周号，例如 2026-W47",
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
             Self::OutOfRange => "结果超出四位年份的日期范围",
         }
@@ -93,6 +95,25 @@ fn is_workday_unit(unit: &str) -> bool {
         unit,
         "工作日" | "个工作日" | "business day" | "business days" | "workday" | "workdays"
     )
+}
+
+fn iso_week_range(year: &str, week: &str) -> Result<String, DateError> {
+    if week.is_empty() {
+        return Err(DateError::Incomplete);
+    }
+    if !year.bytes().all(|byte| byte.is_ascii_digit())
+        || week.len() > 2
+        || !week.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(DateError::InvalidWeek);
+    }
+    let year = year.parse().map_err(|_| DateError::InvalidWeek)?;
+    let week = week.parse().map_err(|_| DateError::InvalidWeek)?;
+    let monday =
+        NaiveDate::from_isoywd_opt(year, week, Weekday::Mon).ok_or(DateError::InvalidWeek)?;
+    let start = in_range(Some(monday))?;
+    let end = in_range(monday.checked_add_days(Days::new(6)))?;
+    Ok(format!("{start} 至 {end}"))
 }
 
 fn workday_difference(date: NaiveDate, other: NaiveDate) -> i64 {
@@ -185,8 +206,19 @@ fn apply_date_offset(
 pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, DateError> {
     let input = normalize(input);
     let input = input.trim();
+    if let Some((year, week)) = input
+        .split_at_checked(4)
+        .and_then(|(year, rest)| Some((year, rest.strip_prefix('-')?.strip_prefix(['W', 'w'])?)))
+    {
+        return iso_week_range(year, week);
+    }
     let weekday = weekday_query(input);
-    let input = weekday.map_or(input, |input| if input.is_empty() { "今天" } else { input });
+    let week_number = input
+        .strip_suffix("第几周")
+        .or_else(|| input.strip_suffix("周数"))
+        .map(str::trim_end);
+    let display_query = weekday.or(week_number);
+    let input = display_query.map_or(input, |input| if input.is_empty() { "今天" } else { input });
     let (date, rest) = date_operand(input, today)?;
     let display_date = |date: NaiveDate| {
         const DAYS: [&str; 7] = [
@@ -199,13 +231,20 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
             "星期日",
         ];
         if weekday.is_some() {
-            DAYS[date.weekday().num_days_from_monday() as usize].to_owned()
+            Ok(DAYS[date.weekday().num_days_from_monday() as usize].to_owned())
+        } else if week_number.is_some() {
+            let week = date.iso_week();
+            let year = week.year();
+            if !(0..=9999).contains(&year) {
+                return Err(DateError::OutOfRange);
+            }
+            Ok(format!("{year:04}-W{:02}", week.week()))
         } else {
-            date.to_string()
+            Ok(date.to_string())
         }
     };
     if rest.is_empty() {
-        return Ok(display_date(date));
+        return display_date(date);
     }
     let subtract = rest.starts_with('-');
     let operand = rest
@@ -217,7 +256,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     }
     if subtract && (operand.get(4..5) == Some("-") || relative_day(operand).is_some()) {
         let (other, suffix) = date_operand(operand, today)?;
-        if weekday.is_some() {
+        if display_query.is_some() {
             return Err(DateError::InvalidOperation);
         }
         return if suffix.is_empty() {
@@ -231,12 +270,41 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
             Err(DateError::InvalidOperation)
         };
     }
-    apply_date_offset(date, operand, subtract).map(display_date)
+    apply_date_offset(date, operand, subtract).and_then(display_date)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_dates_and_ranges_to_and_from_iso_weeks_across_year_boundaries() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (input, expected) in [
+            ("2027-01-01 第几周", "2026-W53"),
+            ("2025-12-29 周数", "2026-W01"),
+            ("第几周", "2026-W47"),
+            ("今天 + 1周 第几周", "2026-W48"),
+            ("2026-W47", "2026-11-16 至 2026-11-22"),
+            ("2026-w53", "2026-12-28 至 2027-01-03"),
+            ("２０２６－Ｗ０１", "2025-12-29 至 2026-01-04"),
+        ] {
+            assert_eq!(
+                calculate_date(input, today).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for (input, error) in [
+            ("2025-W53", DateError::InvalidWeek),
+            ("2026-W00", DateError::InvalidWeek),
+            ("2026-W", DateError::Incomplete),
+            ("9999-W52", DateError::OutOfRange),
+            ("0000-01-01 第几周", DateError::OutOfRange),
+        ] {
+            assert_eq!(calculate_date(input, today), Err(error), "{input}");
+        }
+    }
 
     #[test]
     fn shifts_workdays_in_both_directions_and_excludes_weekends() {
