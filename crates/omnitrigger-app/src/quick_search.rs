@@ -50,7 +50,7 @@ use calendar::{calculate_date, looks_like_date_query, DateError};
 use cidr::{calculate_cidr, CidrError};
 use color::{calculate_contrast, convert_color, ColorError};
 use conversion::{
-    conversion_target_input, convert, estimate_transfer_time, suggested_targets, ConversionError,
+    conversion_target_input, convert, estimate_transfer, suggested_targets, ConversionError,
 };
 use duration::{convert_duration, DurationError};
 use examples::{matching_examples, tool_operation_examples, EXAMPLES};
@@ -410,7 +410,7 @@ impl Results {
                 Scope::Duration => {
                     Self::text_value(convert_duration(term).map_err(ValueError::Duration))
                 }
-                Scope::TransferTime => Self::conversion_value(estimate_transfer_time(term), None),
+                Scope::TransferTime => Self::conversion_value(estimate_transfer(term), None),
                 Scope::AspectRatio => {
                     Self::text_value(calculate_aspect_ratio(term).map_err(ValueError::AspectRatio))
                 }
@@ -1754,7 +1754,7 @@ mod tests {
             assert!(matches!(results, Results::Help(items) if items.len() == EXAMPLES.len()));
         }
         for (query, expected) in [
-            ("？ 速率", &["8Mbps to MB/s"][..]),
+            ("？ 速率", &["下载: 600 MB 用时 2分钟", "8Mbps to MB/s"][..]),
             ("? UNIX", &["unix: now", "时间戳: 1700000000123ms"][..]),
             (
                 "? 时长",

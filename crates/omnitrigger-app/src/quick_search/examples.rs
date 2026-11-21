@@ -136,6 +136,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "下载: 1 GiB 按 100 Mbps",
     },
     Example {
+        icon: Icon::Clock,
+        title: "用传输量和耗时求平均速率",
+        query: "下载: 600 MB 用时 2分钟",
+    },
+    Example {
         icon: Icon::Layers,
         title: "化简宽高比",
         query: "宽高比: 1920×1080",

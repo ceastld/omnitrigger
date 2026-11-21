@@ -76,6 +76,11 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     }
 }
 
+pub(super) fn elapsed_seconds(input: &str) -> Result<f64, DurationError> {
+    let input = normalize(input).to_ascii_lowercase();
+    parse_term(input.trim()).map(|nanos| nanos as f64 / NANOS_PER_SECOND as f64)
+}
+
 fn parse_term(term: &str) -> Result<u128, DurationError> {
     let end = term.find(SCALE_OPERATORS).unwrap_or(term.len());
     let (duration, scale) = term.split_at(end);

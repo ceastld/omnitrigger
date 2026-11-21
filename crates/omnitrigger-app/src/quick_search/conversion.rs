@@ -1,7 +1,7 @@
 use std::f64::consts::{PI, TAU};
 
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
-use super::duration::convert_duration;
+use super::duration::{convert_duration, elapsed_seconds, DurationError};
 use super::radix::Base;
 use super::InputSuggestion;
 
@@ -13,6 +13,7 @@ pub(super) enum ConversionError {
     UnknownUnit,
     DifferentDimensions,
     InvalidTransfer,
+    InvalidTransferDuration,
     OutOfRange,
     TooLong,
 }
@@ -26,6 +27,9 @@ impl ConversionError {
             Self::UnknownUnit => "无法识别换算单位",
             Self::DifferentDimensions => "两个单位不属于同一类型",
             Self::InvalidTransfer => "输入非负的数据量和大于零的数据速率",
+            Self::InvalidTransferDuration => {
+                "输入非负的数据量和大于零的用时，例如 下载: 600 MB 用时 2分钟"
+            }
             Self::OutOfRange => "结果超出换算范围",
             Self::TooLong => "换算式过长",
         }
@@ -454,11 +458,14 @@ fn parse_quantity(source: &str) -> Result<(f64, Unit), ConversionError> {
     Ok((evaluate_amount(amount)?, unit))
 }
 
-pub(super) fn estimate_transfer_time(query: &str) -> Result<String, ConversionError> {
+pub(super) fn estimate_transfer(query: &str) -> Result<String, ConversionError> {
     if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Err(ConversionError::TooLong);
     }
     let input = normalize(query).replace(char::is_whitespace, " ");
+    if let Some((data, elapsed)) = input.split_once("用时") {
+        return estimate_transfer_rate(data.trim(), elapsed.trim());
+    }
     let (data, rate) = input
         .split_once('按')
         .or_else(|| {
@@ -484,6 +491,27 @@ pub(super) fn estimate_transfer_time(query: &str) -> Result<String, ConversionEr
         return Err(ConversionError::OutOfRange);
     }
     convert_duration(&format!("{seconds:.3}s")).map_err(|_| ConversionError::OutOfRange)
+}
+
+fn estimate_transfer_rate(data: &str, elapsed: &str) -> Result<String, ConversionError> {
+    if data.is_empty() || elapsed.is_empty() {
+        return Err(ConversionError::Incomplete);
+    }
+    let (size, size_unit) = parse_quantity(data)?;
+    let seconds = elapsed_seconds(elapsed).map_err(|error| match error {
+        DurationError::Incomplete => ConversionError::Incomplete,
+        DurationError::OutOfRange => ConversionError::OutOfRange,
+        _ => ConversionError::InvalidTransferDuration,
+    })?;
+    if size_unit.dimension != Dimension::Data || size < 0. || seconds == 0. {
+        return Err(ConversionError::InvalidTransferDuration);
+    }
+    let rate = |symbol| {
+        let target = Unit::parse(symbol)?;
+        format_result(size * (size_unit.scale / (seconds * target.scale)))
+            .map_err(|_| ConversionError::OutOfRange)
+    };
+    Ok(format!("{} MB/s · {} Mbps", rate("MB/s")?, rate("Mbps")?))
 }
 
 pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
@@ -849,11 +877,7 @@ mod tests {
             ("600 Mb按 10 MB/s", "00:00:07.5"),
             ("0 B at 5 B/s", "00:00:00"),
         ] {
-            assert_eq!(
-                estimate_transfer_time(query).as_deref(),
-                Ok(expected),
-                "{query}"
-            );
+            assert_eq!(estimate_transfer(query).as_deref(), Ok(expected), "{query}");
         }
         for (query, expected) in [
             ("1 GB 按", ConversionError::Incomplete),
@@ -863,7 +887,31 @@ mod tests {
             ("1 GB at 0 Mbps", ConversionError::InvalidTransfer),
             ("1e308 TB at 1 b/s", ConversionError::OutOfRange),
         ] {
-            assert_eq!(estimate_transfer_time(query), Err(expected), "{query}");
+            assert_eq!(estimate_transfer(query), Err(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn estimates_average_transfer_rate_from_data_and_elapsed_time() {
+        for (query, expected) in [
+            ("600 MB 用时 2分钟", "5 MB/s · 40 Mbps"),
+            ("16 Mb 用时 00:02", "1 MB/s · 8 Mbps"),
+            ("1 GiB 用时 2秒", "536.870912 MB/s · 4294.967296 Mbps"),
+            ("500 kB 用时 500ms", "1 MB/s · 8 Mbps"),
+            ("0 B 用时 1s", "0 MB/s · 0 Mbps"),
+        ] {
+            assert_eq!(estimate_transfer(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("600 MB 用时", ConversionError::Incomplete),
+            ("600 MB 用时 0秒", ConversionError::InvalidTransferDuration),
+            (
+                "600 MB 用时 -2分钟",
+                ConversionError::InvalidTransferDuration,
+            ),
+            ("600 m 用时 2分钟", ConversionError::InvalidTransferDuration),
+        ] {
+            assert_eq!(estimate_transfer(query), Err(error), "{query}");
         }
     }
 
