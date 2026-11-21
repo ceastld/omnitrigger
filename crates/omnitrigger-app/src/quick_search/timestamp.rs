@@ -10,7 +10,7 @@ use jiff::{
 
 use super::calculator::normalize;
 use super::conversion::split_conversion;
-use super::duration::{elapsed_duration, DurationError};
+use super::duration::{elapsed_duration, format_clock_duration, DurationError, NANOS_PER_SECOND};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum TimestampError {
@@ -21,6 +21,7 @@ pub(super) enum TimestampError {
     SourceClockGap,
     SourceClockFold,
     InvalidDuration,
+    IntervalEndpoints,
     UnsupportedPrecision,
     OutOfRange,
 }
@@ -35,6 +36,7 @@ impl TimestampError {
             Self::SourceClockGap => "该地区跳过了这一时刻，请检查输入的钟表时间",
             Self::SourceClockFold => "该地区的钟表时间出现两次，请用 UTC 偏移量指定其中一次",
             Self::InvalidDuration => "请输入要加减的时长，例如 时间戳: 现在 + 90分钟",
+            Self::IntervalEndpoints => "用 到 或 至 隔开两个带时区的时间",
             Self::UnsupportedPrecision => "请输入可用 Unix 纳秒表示的时间",
             Self::OutOfRange => "结果超出四位年份的时间范围",
         }
@@ -121,6 +123,10 @@ fn convert_timestamp_with_local(
 ) -> Result<String, TimestampError> {
     let input = normalize(query);
     let input = input.trim();
+    let (operation, argument) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+    if operation == "间隔" || operation.eq_ignore_ascii_case("between") {
+        return timestamp_interval(argument);
+    }
     let (input, target_zone) = if let Some((source, target)) = split_conversion(input) {
         (source, Some(parse_display_zone(target)?))
     } else {
@@ -207,14 +213,31 @@ fn convert_timestamp_with_local(
         }
         return Ok(unit.format_unix(now));
     }
-    let named_source = input
-        .rsplit_once(char::is_whitespace)
-        .filter(|(_, zone)| zone.contains('/') || zone.eq_ignore_ascii_case("utc"));
-    if named_source.is_none() && (suffixed.is_some() || integer(input)) {
+    let source = named_time_source(input);
+    if source.is_none() && (suffixed.is_some() || integer(input)) {
         return display_time(parse_unix(quantity, unit)?, unit.date_format());
     }
 
-    let time = if let Some((clock, name)) = named_source {
+    let time = parse_explicit_time(input, source)?;
+    let unit = TimestampUnit::from_subsecond(time.timestamp_subsec_nanos());
+    if target_zone.is_some() {
+        display_time(time, unit.date_format())
+    } else {
+        Ok(unit.format_unix(time))
+    }
+}
+
+fn named_time_source(input: &str) -> Option<(&str, &str)> {
+    input
+        .rsplit_once(char::is_whitespace)
+        .filter(|(_, zone)| zone.contains('/') || zone.eq_ignore_ascii_case("utc"))
+}
+
+fn parse_explicit_time(
+    input: &str,
+    source: Option<(&str, &str)>,
+) -> Result<DateTime<Utc>, TimestampError> {
+    let time = if let Some((clock, name)) = source {
         parse_named_source(clock.trim_end(), name)?
     } else {
         parse_offset_time(input)?
@@ -231,12 +254,27 @@ fn convert_timestamp_with_local(
     if fraction >= 1_000_000_000 || extra_precision {
         return Err(TimestampError::UnsupportedPrecision);
     }
-    let unit = TimestampUnit::from_subsecond(fraction);
-    if target_zone.is_some() {
-        display_time(time, unit.date_format())
-    } else {
-        Ok(unit.format_unix(time))
-    }
+    Ok(time)
+}
+
+fn timestamp_interval(input: &str) -> Result<String, TimestampError> {
+    let (start, end) = input
+        .split_once(['到', '至'])
+        .ok_or(TimestampError::IntervalEndpoints)?;
+    let timeline_nanos = |value: &str| {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(TimestampError::IntervalEndpoints);
+        }
+        let time = parse_explicit_time(value, named_time_source(value))?;
+        Ok(i128::from(time.timestamp()) * NANOS_PER_SECOND as i128
+            + i128::from(time.timestamp_subsec_nanos()))
+    };
+    let start = timeline_nanos(start)?;
+    let end = timeline_nanos(end)?;
+    let delta = end - start;
+    let sign = if delta.is_negative() { "-" } else { "" };
+    Ok(format_clock_duration(delta.unsigned_abs(), sign))
 }
 
 fn parse_named_source(clock: &str, name: &str) -> Result<DateTime<Utc>, TimestampError> {
@@ -381,6 +419,56 @@ fn ensure_four_digit_year(year: i32) -> Result<(), TimestampError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calculates_intervals_on_the_utc_timeline_with_nanosecond_precision() {
+        let now = DateTime::UNIX_EPOCH;
+        for (query, expected) in [
+            (
+                "间隔 2026-03-08 01:30 America/New_York 到 2026-03-08 03:30 America/New_York",
+                "01:00:00",
+            ),
+            (
+                "between 2026-11-01T01:30:00-04:00 至 2026-11-01T01:30:00-05:00",
+                "01:00:00",
+            ),
+            (
+                "间隔 1970-01-01T00:00:00Z 到 1969-12-31T23:59:59.999999999Z",
+                "-00:00:00.000000001",
+            ),
+            (
+                "间隔 1900-01-01T00:00:00Z 至 2300-01-01T00:00:00Z",
+                "3506328:00:00",
+            ),
+        ] {
+            assert_eq!(
+                convert_timestamp(query, now).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            ("间隔", TimestampError::IntervalEndpoints),
+            (
+                "间隔 到 2026-01-01T00:00:00Z",
+                TimestampError::IntervalEndpoints,
+            ),
+            (
+                "间隔 2026-03-08 02:30 America/New_York 到 2026-03-08T08:00:00Z",
+                TimestampError::SourceClockGap,
+            ),
+            (
+                "间隔 2026-11-01 01:30 America/New_York 到 2026-11-01T08:00:00Z",
+                TimestampError::SourceClockFold,
+            ),
+            (
+                "间隔 1970-01-01T00:00:00.0000000001Z 到 1970-01-01T00:00:00Z",
+                TimestampError::UnsupportedPrecision,
+            ),
+        ] {
+            assert_eq!(convert_timestamp(query, now), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn converts_to_named_time_zones_with_seasonal_and_historical_offsets() {

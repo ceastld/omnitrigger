@@ -496,6 +496,12 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "计算跨夏令时的实际间隔",
+        query:
+            "时间戳: 间隔 2026-03-08 01:30 America/New_York 到 2026-03-08 03:30 America/New_York",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "将时间戳换算成本地时间",
         query: "时间戳: 1700000000 本地",
     },
