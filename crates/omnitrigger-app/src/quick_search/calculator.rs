@@ -515,6 +515,38 @@ mod tests {
     }
 
     #[test]
+    fn interpolates_and_limits_values_in_ranges() {
+        for (query, expected) in [
+            ("lerp(10,20,0.25)", "12.5"),
+            ("lerp(20,10,percent(25))", "17.5"),
+            ("lerp(-1e308,1e308,0.75)", "5e307"),
+            ("lerp(1e308,1,1)", "1"),
+            ("invlerp(10,20,12.5)", "0.25"),
+            ("invlerp(20,10,12.5)", "0.75"),
+            ("invlerp(-1e308,1e308,0)", "0.5"),
+            ("clamp(18,0,10)", "10"),
+            ("clamp(-1,0,10)", "0"),
+            ("clamp(5,0,10)", "5"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in [
+            "lerp(1,2)",
+            "lerp(1,2,-1)",
+            "lerp(1,2,2)",
+            "invlerp(1,1,1)",
+            "invlerp(1,2,3)",
+            "clamp(1,2,0)",
+        ] {
+            assert_eq!(
+                calculate(query),
+                Err(CalculationError::FunctionDomain),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn evaluates_factorials_combinations_and_permutations_in_the_safe_integer_range() {
         for (query, expected) in [
             ("factorial(10)", "3628800"),

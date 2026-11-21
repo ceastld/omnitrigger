@@ -301,6 +301,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在两个端点之间线性插值",
+        query: "lerp(10,20,0.25)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算数值在线性区间中的位置",
+        query: "invlerp(10,20,12.5)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "将数值限制在区间内",
+        query: "clamp(18,0,10)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算指定底数的对数",
         query: "log(1024,2)",
     },

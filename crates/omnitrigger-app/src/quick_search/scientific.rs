@@ -80,6 +80,14 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
                 _ => f64::NAN,
             }));
         }
+        "lerp" => return Some(NamedValue::Aggregate(linear_interpolation)),
+        "invlerp" => return Some(NamedValue::Aggregate(interpolation_progress)),
+        "clamp" => {
+            return Some(NamedValue::Aggregate(|values| match values {
+                [value, min, max] if min <= max => value.clamp(*min, *max),
+                _ => f64::NAN,
+            }));
+        }
         "hypot" => {
             return Some(NamedValue::Aggregate(|values| {
                 values.iter().copied().fold(0., f64::hypot)
@@ -129,6 +137,44 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         _ => return None,
     };
     Some(NamedValue::Function(function))
+}
+
+fn linear_interpolation(values: &[f64]) -> f64 {
+    let &[start, end, progress] = values else {
+        return f64::NAN;
+    };
+    if !(0. ..=1.).contains(&progress) {
+        return f64::NAN;
+    }
+    if progress == 0. {
+        return start;
+    }
+    if progress == 1. {
+        return end;
+    }
+    if start.is_sign_negative() != end.is_sign_negative() {
+        // 异号端点的差可能溢出，直接计算两端的加权和。
+        start * (1. - progress) + end * progress
+    } else {
+        progress
+            .mul_add(end - start, start)
+            .clamp(start.min(end), start.max(end))
+    }
+}
+
+fn interpolation_progress(values: &[f64]) -> f64 {
+    let &[start, end, value] = values else {
+        return f64::NAN;
+    };
+    if start == end || !(start.min(end)..=start.max(end)).contains(&value) {
+        return f64::NAN;
+    }
+    let span = end - start;
+    if span.is_infinite() {
+        (value * 0.5 - start * 0.5) / (end * 0.5 - start * 0.5)
+    } else {
+        (value - start) / span
+    }
 }
 
 fn round_to_places(values: &[f64]) -> f64 {
