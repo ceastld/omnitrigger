@@ -596,6 +596,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "转成 JSON 字符串",
+        query: r#"文本: JSON转义 他写下 "你好""#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "还原 JSON 字符串",
+        query: r#"文本: JSON还原 "\u4F60\n好""#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "格式化 JSON",
         query: r#"JSON: 格式化 {"名称":"北京","值":1}"#,
     },

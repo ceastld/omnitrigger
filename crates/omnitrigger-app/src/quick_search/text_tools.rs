@@ -25,6 +25,7 @@ pub(super) enum TextError {
     InvalidBase64,
     InvalidUtf8,
     InvalidCodePoint,
+    InvalidJsonString,
 }
 
 impl TextError {
@@ -42,6 +43,7 @@ impl TextError {
             Self::InvalidBase64 => "Base64 编码无效",
             Self::InvalidUtf8 => "解码结果不是 UTF-8 文本",
             Self::InvalidCodePoint => "输入以空格分隔的 Unicode 码位，例如 U+5317 U+4EAC",
+            Self::InvalidJsonString => "请输入带双引号的 JSON 字符串",
         }
     }
 }
@@ -71,8 +73,10 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         .split_once(char::is_whitespace)
         .ok_or(TextError::IncompleteTransform)?;
     let operation = operation.to_ascii_lowercase();
-    if matches!(operation.as_str(), "替换" | "replace") {
-        return replace_text(text);
+    match operation.as_str() {
+        "替换" | "replace" => return replace_text(text),
+        "json还原" | "json-unquote" => return decode_json_string(text),
+        _ => {}
     }
     let text = text_payload(text)?;
     match operation.as_str() {
@@ -106,6 +110,9 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "base64url解码" | "base64url-decode" => decode_base64(text, &URL_SAFE, &URL_SAFE_NO_PAD),
         "码位" | "codepoints" => Ok(encode_code_points(text)),
         "码位解码" | "codepoints-decode" => decode_code_points(text),
+        "json转义" | "json-quote" => {
+            Ok(serde_json::to_string(text).expect("字符串可以序列化为 JSON"))
+        }
         _ => Err(TextError::UnknownOperation),
     }
 }
@@ -119,6 +126,15 @@ fn encode_code_points(text: &str) -> String {
         write!(encoded, "U+{:04X}", u32::from(character)).expect("写入 String 不会出错");
     }
     encoded
+}
+
+fn decode_json_string(text: &str) -> Result<String, TextError> {
+    let decoded: String =
+        serde_json::from_str(text.trim()).map_err(|_| TextError::InvalidJsonString)?;
+    if decoded.contains('\0') {
+        return Err(TextError::NullCharacter);
+    }
+    Ok(decoded)
 }
 
 fn decode_code_points(text: &str) -> Result<String, TextError> {
@@ -267,6 +283,36 @@ mod tests {
         );
         assert_eq!(
             transform_text("Base64解码 AA=="),
+            Err(TextError::NullCharacter)
+        );
+    }
+
+    #[test]
+    fn quotes_and_decodes_json_strings_with_unicode_and_control_characters() {
+        for (query, expected) in [
+            (r#"JSON转义 他写下 "你好""#, r#""他写下 \"你好\"""#),
+            ("JSON转义 “ 甲\r\n乙\t ”", r#"" 甲\r\n乙\t ""#),
+            (r#"JSON还原 "\u4F60\n好""#, "你\n好"),
+            (r#"json-unquote "He said \"hi\"""#, r#"He said "hi""#),
+            ("json-quote \"\"", "\"\""),
+            ("JSON还原 \"\"", ""),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in [
+            "JSON还原 123",
+            r#"JSON还原 ["你好"]"#,
+            r#"JSON还原 "\uD800""#,
+            r#"JSON还原 "A" "B""#,
+        ] {
+            assert_eq!(
+                transform_text(query),
+                Err(TextError::InvalidJsonString),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            transform_text(r#"JSON还原 "\u0000""#),
             Err(TextError::NullCharacter)
         );
     }
