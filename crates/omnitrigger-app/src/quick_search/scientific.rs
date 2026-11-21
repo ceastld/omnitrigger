@@ -1,8 +1,6 @@
 use std::f64::consts::{E, PI};
 
-use super::fraction::common_divisor;
-
-const MAX_SAFE_INTEGER: u128 = (1 << 53) - 1;
+use super::{calculator::MAX_SAFE_INTEGER, fraction::common_divisor};
 
 pub(super) enum NamedValue {
     Constant(f64),

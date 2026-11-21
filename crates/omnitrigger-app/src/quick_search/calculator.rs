@@ -1,8 +1,11 @@
+use super::conversion::ConversionError;
 use super::operators::Operator;
 use super::percentage::percentage_operands;
+use super::radix::Base;
 use super::scientific::{named_value, split_name, NamedValue};
 
 pub(super) const QUERY_LIMIT: usize = 256;
+pub(super) const MAX_SAFE_INTEGER: u128 = (1 << 53) - 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CalculationError {
@@ -37,7 +40,8 @@ pub(super) fn looks_like_calculation(query: &str) -> bool {
 }
 
 fn looks_like_expression(query: &str) -> bool {
-    if query.starts_with(|ch| matches!(ch, '0'..='9' | '=' | '+' | '-' | '.' | '(')) {
+    if query.starts_with(|ch| matches!(ch, '0'..='9' | '=' | '+' | '-' | '.' | '(' | '√' | '∛'))
+    {
         return true;
     }
     let (name, tail) = split_name(query);
@@ -127,6 +131,19 @@ impl Parser<'_> {
                 self.0 = &self.0[1..];
                 -self.expression(5)?
             }
+            Some(symbol @ ('√' | '∛')) => {
+                self.0 = &self.0[symbol.len_utf8()..];
+                let radicand = self.expression(5)?;
+                let root = if symbol == '√' {
+                    radicand.sqrt()
+                } else {
+                    radicand.cbrt()
+                };
+                if root.is_nan() {
+                    return Err(CalculationError::FunctionDomain);
+                }
+                root
+            }
             Some('(') => self.parenthesized()?,
             Some('0'..='9' | '.') => self.number()?,
             Some('a'..='z' | 'A'..='Z' | 'π' | 'Π') => self.named()?,
@@ -196,6 +213,26 @@ impl Parser<'_> {
     }
 
     fn number(&mut self) -> Result<f64, CalculationError> {
+        if let Some((base, rest)) = Base::prefixed(self.0) {
+            let rest = rest.strip_prefix('_').unwrap_or(rest);
+            let end = rest
+                .find(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                .unwrap_or(rest.len());
+            if rest.trim().is_empty() {
+                return Err(CalculationError::Incomplete);
+            }
+            let value = base
+                .parse_digits(&rest[..end])
+                .map_err(|error| match error {
+                    ConversionError::OutOfRange => CalculationError::OutOfRange,
+                    _ => CalculationError::Invalid,
+                })?;
+            if value > MAX_SAFE_INTEGER {
+                return Err(CalculationError::OutOfRange);
+            }
+            self.0 = &rest[end..];
+            return Ok(value as f64);
+        }
         let start = self.0;
         let has_integer = self.number_digits()?;
         let has_fraction = if let Some(rest) = self.0.strip_prefix('.') {
@@ -267,6 +304,27 @@ fn finite(value: f64) -> Result<f64, CalculationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evaluates_prefixed_integer_literals_inside_arithmetic() {
+        for (query, expected) in [
+            ("0xFF + 1", "256"),
+            ("0b1010 * 0o10", "80"),
+            ("-0B100 + 0X_FF", "251"),
+            ("0x12_34 + 0", "4660"),
+            ("gcd(0x30, 0o22)", "6"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, expected) in [
+            ("0x", CalculationError::Incomplete),
+            ("0x__ff", CalculationError::Invalid),
+            ("0b102", CalculationError::Invalid),
+            ("0x20000000000000", CalculationError::OutOfRange),
+        ] {
+            assert_eq!(calculate(query), Err(expected), "{query}");
+        }
+    }
 
     #[test]
     fn calculation_respects_precedence_and_numeric_notation() {
@@ -373,6 +431,22 @@ mod tests {
         assert_eq!(calculate("asin(2)"), Err(CalculationError::FunctionDomain));
         assert_eq!(calculate("sqrt(1,2)"), Err(CalculationError::Invalid));
         assert_eq!(calculate("exp(10000)"), Err(CalculationError::OutOfRange));
+    }
+
+    #[test]
+    fn accepts_square_and_cube_root_symbols_with_normal_expression_precedence() {
+        for (query, expected) in [
+            ("√16 + ∛(-27)", "1"),
+            ("√(9 + 16)", "5"),
+            ("2 * √16 + 1", "9"),
+            ("√2^6", "8"),
+            ("∛-27", "-3"),
+        ] {
+            assert!(looks_like_calculation(query), "{query}");
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(calculate("√-1"), Err(CalculationError::FunctionDomain));
+        assert_eq!(calculate("√"), Err(CalculationError::Incomplete));
     }
 
     #[test]

@@ -21,19 +21,17 @@ impl Base {
         }
     }
 
-    pub(super) fn convert(self, source: &str) -> Result<String, ConversionError> {
-        let source = source.to_ascii_lowercase();
-        let negative = source.starts_with('-');
-        let magnitude = source.strip_prefix(['-', '+']).unwrap_or(&source);
-        let (base, digits) = if let Some(digits) = magnitude.strip_prefix("0b") {
-            (Self::Binary, digits)
-        } else if let Some(digits) = magnitude.strip_prefix("0o") {
-            (Self::Octal, digits)
-        } else if let Some(digits) = magnitude.strip_prefix("0x") {
-            (Self::Hexadecimal, digits)
-        } else {
-            (Self::Decimal, magnitude)
+    pub(super) fn prefixed(input: &str) -> Option<(Self, &str)> {
+        let base = match input.as_bytes() {
+            [b'0', b'b' | b'B', ..] => Self::Binary,
+            [b'0', b'o' | b'O', ..] => Self::Octal,
+            [b'0', b'x' | b'X', ..] => Self::Hexadecimal,
+            _ => return None,
         };
+        Some((base, &input[2..]))
+    }
+
+    pub(super) fn parse_digits(self, digits: &str) -> Result<u128, ConversionError> {
         if !digits
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
@@ -41,14 +39,20 @@ impl Base {
         {
             return Err(ConversionError::InvalidInteger);
         }
-        let value =
-            u128::from_str_radix(&digits.replace('_', ""), base as u32).map_err(|error| {
-                if *error.kind() == IntErrorKind::PosOverflow {
-                    ConversionError::OutOfRange
-                } else {
-                    ConversionError::InvalidInteger
-                }
-            })?;
+        u128::from_str_radix(&digits.replace('_', ""), self as u32).map_err(|error| {
+            if *error.kind() == IntErrorKind::PosOverflow {
+                ConversionError::OutOfRange
+            } else {
+                ConversionError::InvalidInteger
+            }
+        })
+    }
+
+    pub(super) fn convert(self, source: &str) -> Result<String, ConversionError> {
+        let negative = source.starts_with('-');
+        let magnitude = source.strip_prefix(['-', '+']).unwrap_or(source);
+        let (base, digits) = Self::prefixed(magnitude).unwrap_or((Self::Decimal, magnitude));
+        let value = base.parse_digits(digits)?;
         let sign = if negative && value != 0 { "-" } else { "" };
         Ok(match self {
             Self::Binary => format!("{sign}0b{value:b}"),

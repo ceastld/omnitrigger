@@ -23,6 +23,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "0xff to dec",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "在算式中混用进制",
+        query: "0xFF + 0b1",
+    },
+    Example {
         icon: Icon::Clock,
         title: "计算日期",
         query: "日期: 今天 + 7天",
@@ -181,6 +186,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "用 pow 计算幂",
         query: "pow(2,10)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "使用根号计算",
+        query: "√16 + ∛(-27)",
     },
     Example {
         icon: Icon::Terminal,
