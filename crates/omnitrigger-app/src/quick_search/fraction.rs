@@ -190,6 +190,15 @@ fn rounded_decimal(value: BigRational, places: u32) -> String {
     }
 }
 
+pub(super) fn exact_abs_square_root(value: &BigRational) -> Option<BigRational> {
+    let numerator = value.numer().magnitude();
+    let denominator = value.denom().magnitude();
+    let top = numerator.sqrt();
+    let bottom = denominator.sqrt();
+    (&top * &top == *numerator && &bottom * &bottom == *denominator)
+        .then(|| BigRational::new(top.into(), bottom.into()))
+}
+
 pub(super) fn ensure_exact_size(value: &BigRational) -> Result<(), FractionError> {
     if value.numer().bits().max(value.denom().bits()) > MAX_EXACT_BITS {
         return Err(FractionError::ExactRange);

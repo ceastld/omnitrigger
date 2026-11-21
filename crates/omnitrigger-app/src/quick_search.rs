@@ -32,6 +32,7 @@ mod settings_sections;
 mod text_tools;
 mod timecode;
 mod timestamp;
+mod triangle;
 mod triggers;
 mod url_encoding;
 mod value_history;
@@ -77,7 +78,7 @@ use fraction::{simplify_fraction, FractionError};
 use identifiers::{transform_ulid, transform_uuid, IdentifierError};
 use json_tools::{transform_json, JsonError};
 use linear_fit::{calculate_linear_fit, LinearFitError};
-use local_files::{load_directory, LocalFilesIndex, FOLDER_DEBOUNCE};
+use local_files::{LocalFilesIndex, FOLDER_DEBOUNCE};
 use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
 use open_windows::OpenWindowsIndex;
 use paper::{calculate_paper, PaperError};
@@ -92,6 +93,7 @@ use settings_sections::matching_settings;
 use text_tools::{count_text, transform_text, TextError};
 use timecode::{convert_timecode, TimecodeError};
 use timestamp::{convert_timestamp, TimestampError};
+use triangle::{calculate_triangle, TriangleError};
 use triggers::{matching_triggers, SearchTrigger};
 use unicode_segmentation::UnicodeSegmentation;
 use url_encoding::{convert_url_component, UrlEncodingError};
@@ -318,6 +320,7 @@ enum ValueError {
     Renminbi(RenminbiError),
     Date(DateError),
     LinearFit(LinearFitError),
+    Triangle(TriangleError),
     Duration(DurationError),
     VideoFrames(VideoFrameError),
     Timecode(TimecodeError),
@@ -347,6 +350,7 @@ impl ValueError {
             Self::Renminbi(error) => error.message(),
             Self::Date(error) => error.message(),
             Self::LinearFit(error) => error.message(),
+            Self::Triangle(error) => error.message(),
             Self::Duration(error) => error.message(),
             Self::VideoFrames(error) => error.message(),
             Self::Timecode(error) => error.message(),
@@ -376,6 +380,7 @@ impl ValueError {
                 | Self::Renminbi(RenminbiError::Incomplete)
                 | Self::Date(DateError::Incomplete)
                 | Self::LinearFit(LinearFitError::Incomplete)
+                | Self::Triangle(TriangleError::Dimensions)
                 | Self::Duration(DurationError::Incomplete)
                 | Self::VideoFrames(VideoFrameError::Incomplete)
                 | Self::Timecode(TimecodeError::Incomplete)
@@ -588,6 +593,9 @@ impl Results {
                 Scope::LinearFit => {
                     Self::text_value(calculate_linear_fit(term).map_err(ValueError::LinearFit))
                 }
+                Scope::Triangle => {
+                    Self::text_value(calculate_triangle(term).map_err(ValueError::Triangle))
+                }
                 Scope::Percentage => {
                     Self::text_value(compare_percentages(term).map_err(ValueError::Percentage))
                 }
@@ -746,6 +754,22 @@ impl Results {
             }
             ValueKind::Conversion(Some(query)) => Some(query.clone()),
             _ => None,
+        }
+    }
+
+    fn subdirectory_query(&self, selected: usize) -> Option<String> {
+        let Self::Destinations(items) = self else {
+            return None;
+        };
+        if let Destination::LocalFile {
+            path,
+            is_directory: true,
+            ..
+        } = items.get(selected)?
+        {
+            Some(format!("文件: {path} |"))
+        } else {
+            None
         }
     }
 
@@ -1015,19 +1039,17 @@ impl QuickSearch {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((directory, cancelled)) = self.index.local_files.request(query) else {
+        let Some(load) = self.index.local_files.request(query) else {
             return;
         };
         cx.spawn_in(window, async move |this, cx| {
             let reader = cx.background_executor();
             reader.timer(FOLDER_DEBOUNCE).await;
-            let token = cancelled.clone();
-            let entries = reader
-                .spawn(async move { load_directory(&directory, &token) })
-                .await;
+            let task = load.clone();
+            let entries = reader.spawn(async move { task.read() }).await;
             let _ = cx.update(|window, cx| {
                 let _ = this.update(cx, |this, cx| {
-                    if this.index.local_files.finish(&cancelled, entries) {
+                    if this.index.local_files.finish(&load, entries) {
                         let query = this.input.read(cx).text();
                         this.refresh_results(&query, window, cx);
                     }
@@ -1195,7 +1217,11 @@ impl QuickSearch {
                 }
             }
             "tab" => {
-                let suggestion = self.results.suggested_input(self.selected);
+                let suggestion = self
+                    .results
+                    .suggested_input(self.selected)
+                    .map(str::to_owned)
+                    .or_else(|| self.results.subdirectory_query(self.selected));
                 let continues_value = matches!(
                     &self.results,
                     Results::Value(Ok(value)) if value.continuation_hint().is_some()
@@ -1205,7 +1231,7 @@ impl QuickSearch {
                 }
                 if !event.is_held {
                     if let Some(query) = suggestion {
-                        self.fill_query(query.to_owned(), window, cx);
+                        self.fill_query(query, window, cx);
                     } else {
                         self.continue_value(window, cx);
                     }
@@ -1701,6 +1727,9 @@ impl QuickSearch {
                                         let hint = match &destination {
                                             Destination::TextHistoryQuery(_) => "Enter 查找",
                                             Destination::OpenWindow(_) => "Enter 切换",
+                                            Destination::LocalFile {
+                                                is_directory: true, ..
+                                            } => "Tab 进入 · Enter 复制路径",
                                             Destination::LocalFile { .. } => "Enter 复制路径",
                                             Destination::ActionLibraryQuery(term)
                                             | Destination::TriggerHistoryQuery(term)

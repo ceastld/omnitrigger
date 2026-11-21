@@ -51,6 +51,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "由三条边求三角形面积和周长",
+        query: "三角形: 3,4,5",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算单位",
         query: "10 km to mi",
     },
@@ -1446,6 +1451,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Fraction
         | Scope::Equation
         | Scope::LinearFit
+        | Scope::Triangle
             if term.is_empty() => {}
         _ => return None,
     }
@@ -1520,6 +1526,7 @@ mod tests {
             Scope::Fraction,
             Scope::Equation,
             Scope::LinearFit,
+            Scope::Triangle,
         ] {
             let items = tool_operation_examples(scope, "").unwrap();
             assert!(items.into_iter().all(|index| {

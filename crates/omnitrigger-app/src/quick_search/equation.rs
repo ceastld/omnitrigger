@@ -2,7 +2,9 @@ use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::calculator::{normalize, QUERY_LIMIT};
-use super::fraction::{calculate_fraction, ensure_exact_size, FractionError};
+use super::fraction::{
+    calculate_fraction, ensure_exact_size, exact_abs_square_root, FractionError,
+};
 use super::operators::split_top_level_commas;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,14 +63,9 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
     if sign == Sign::NoSign {
         return Ok(format!("x = {center}（重根）"));
     }
-    let numerator = distance_squared.numer().magnitude();
-    let denominator = distance_squared.denom().magnitude();
-    let top = numerator.sqrt();
-    let bottom = denominator.sqrt();
-    let exact = &top * &top == *numerator && &bottom * &bottom == *denominator;
-    if sign == Sign::Plus && exact {
-        let distance = BigRational::new(top.into(), bottom.into());
-        let first = &center - &distance;
+    let exact_distance = exact_abs_square_root(&distance_squared);
+    if let (Sign::Plus, Some(distance)) = (sign, &exact_distance) {
+        let first = &center - distance;
         let second = center + distance;
         for root in [&first, &second] {
             ensure_exact_size(root).map_err(EquationError::Evaluation)?;
@@ -76,8 +73,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
         return Ok(format!("x₁ = {first} · x₂ = {second}"));
     }
 
-    let distance = if exact {
-        let root = BigRational::new(top.into(), bottom.into());
+    let distance = if let Some(root) = exact_distance {
         if root == BigRational::from_integer(BigInt::from(1)) {
             "i".to_owned()
         } else if root.is_integer() {

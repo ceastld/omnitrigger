@@ -7,7 +7,8 @@ use std::{
 };
 
 use omnitrigger_windows::{
-    read_local_directory, LocalDirectoryEntry, LocalStatError, MAX_DIRECTORY_ENTRIES,
+    read_local_directory_with_options, DirectoryEntryType, DirectoryOrder, LocalDirectoryEntry,
+    LocalDirectoryOptions, LocalStatError, MAX_DIRECTORY_ENTRIES,
 };
 
 use super::{title_rank, Destination, Results};
@@ -21,48 +22,88 @@ pub(super) struct LocalFilesIndex {
 }
 
 struct DirectoryRequest {
-    directory: String,
-    cancelled: Arc<AtomicBool>,
+    load: Arc<DirectoryLoad>,
     entries: Option<Result<Vec<LocalDirectoryEntry>, String>>,
 }
 
 impl Drop for DirectoryRequest {
     fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+        self.load.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+
+pub(super) struct DirectoryLoad {
+    directory: String,
+    pattern: Option<String>,
+    cancelled: AtomicBool,
+}
+
+impl DirectoryLoad {
+    fn matches(&self, directory: &str, pattern: Option<&str>) -> bool {
+        self.directory == directory && self.pattern.as_deref() == pattern
+    }
+
+    pub(super) fn read(&self) -> Result<Vec<LocalDirectoryEntry>, String> {
+        let deadline = Instant::now() + FOLDER_READ_TIMEOUT;
+        let options = LocalDirectoryOptions {
+            max_entries: MAX_DIRECTORY_ENTRIES,
+            order: DirectoryOrder::Name,
+            metadata: false,
+            entry_type: DirectoryEntryType::All,
+            search_pattern: self.pattern.clone(),
+        };
+        read_local_directory_with_options(&self.directory, &options, || {
+            let code = if self.cancelled.load(Ordering::Relaxed) {
+                "cancelled"
+            } else if Instant::now() >= deadline {
+                "timeout"
+            } else {
+                return Ok(());
+            };
+            Err(LocalStatError {
+                code,
+                message: String::new(),
+            })
+        })
+        .map_err(|error| error.message)
     }
 }
 
 impl LocalFilesIndex {
-    pub(super) fn request(&mut self, query: Option<&str>) -> Option<(String, Arc<AtomicBool>)> {
-        let Some((directory, _)) = query.and_then(split_query) else {
+    pub(super) fn request(&mut self, query: Option<&str>) -> Option<Arc<DirectoryLoad>> {
+        let Some((directory, filter)) = query.and_then(split_query) else {
             self.current = None;
             return None;
         };
+        let pattern = wildcard_pattern(filter);
         if self
             .current
             .as_ref()
-            .is_some_and(|request| request.directory == directory)
+            .is_some_and(|request| request.load.matches(directory, pattern))
         {
             return None;
         }
-        let cancelled = Arc::new(AtomicBool::new(false));
-        self.current = Some(DirectoryRequest {
+        let load = Arc::new(DirectoryLoad {
             directory: directory.to_owned(),
-            cancelled: cancelled.clone(),
+            pattern: pattern.map(str::to_owned),
+            cancelled: AtomicBool::new(false),
+        });
+        self.current = Some(DirectoryRequest {
+            load: load.clone(),
             entries: None,
         });
-        Some((directory.to_owned(), cancelled))
+        Some(load)
     }
 
     pub(super) fn finish(
         &mut self,
-        cancelled: &Arc<AtomicBool>,
+        load: &Arc<DirectoryLoad>,
         entries: Result<Vec<LocalDirectoryEntry>, String>,
     ) -> bool {
         let Some(current) = self.current.as_mut() else {
             return false;
         };
-        if !Arc::ptr_eq(cancelled, &current.cancelled) {
+        if !Arc::ptr_eq(load, &current.load) {
             return false;
         }
         current.entries = Some(entries);
@@ -73,10 +114,11 @@ impl LocalFilesIndex {
         let Some((directory, filter)) = split_query(query) else {
             return Results::LocalFilesPrompt;
         };
+        let pattern = wildcard_pattern(filter);
         let Some(entries) = self
             .current
             .as_ref()
-            .filter(|request| request.directory == directory)
+            .filter(|request| request.load.matches(directory, pattern))
             .and_then(|request| request.entries.as_ref())
         else {
             return Results::LocalFilesLoading;
@@ -85,7 +127,11 @@ impl LocalFilesIndex {
             Ok(entries) => entries,
             Err(error) => return Results::LocalFilesUnavailable(error.clone()),
         };
-        let filter = filter.to_lowercase();
+        let filter = if pattern.is_some() {
+            String::new()
+        } else {
+            filter.to_lowercase()
+        };
         let mut matches: Vec<_> = entries
             .iter()
             .filter(|entry| matches!(entry.kind, "file" | "directory"))
@@ -121,25 +167,8 @@ fn split_query(query: &str) -> Option<(&str, &str)> {
     (!directory.is_empty()).then_some((directory, filter.trim()))
 }
 
-pub(super) fn load_directory(
-    directory: &str,
-    cancelled: &AtomicBool,
-) -> Result<Vec<LocalDirectoryEntry>, String> {
-    let deadline = Instant::now() + FOLDER_READ_TIMEOUT;
-    read_local_directory(directory, MAX_DIRECTORY_ENTRIES, || {
-        let code = if cancelled.load(Ordering::Relaxed) {
-            "cancelled"
-        } else if Instant::now() >= deadline {
-            "timeout"
-        } else {
-            return Ok(());
-        };
-        Err(LocalStatError {
-            code,
-            message: String::new(),
-        })
-    })
-    .map_err(|error| error.message)
+fn wildcard_pattern(filter: &str) -> Option<&str> {
+    filter.contains(['*', '?']).then_some(filter)
 }
 
 #[cfg(test)]
@@ -164,8 +193,8 @@ mod tests {
             index.results(r"C:\Work"),
             Results::LocalFilesPrompt
         ));
-        let (directory, token) = index.request(Some(r"C:\Work |")).unwrap();
-        assert_eq!(directory, r"C:\Work");
+        let load = index.request(Some(r"C:\Work |")).unwrap();
+        assert_eq!(load.directory, r"C:\Work");
         assert!(matches!(
             index.results(r"C:\Work |"),
             Results::LocalFilesLoading
@@ -174,7 +203,7 @@ mod tests {
             .request(Some(r#" "C:\Work" | BUDGET 2026 "#))
             .is_none());
         assert!(index.finish(
-            &token,
+            &load,
             Ok(vec![
                 entry("2026 Budget Draft.txt", "file"),
                 entry("Budget 2026.xlsx", "file"),
@@ -201,20 +230,47 @@ mod tests {
                 r"C:\Work\2026 Budget Draft.txt",
             ]
         );
+        let results = Results::Destinations(items);
+        assert_eq!(
+            results.subdirectory_query(0).as_deref(),
+            Some(r"文件: C:\Work\Budget 2026 |")
+        );
+        assert_eq!(results.subdirectory_query(1), None);
     }
 
     #[test]
     fn discards_stale_reads_when_a_directory_changes_or_search_closes() {
         let mut index = LocalFilesIndex::default();
-        let (_, first) = index.request(Some(r"C:\Work |")).unwrap();
-        let (_, second) = index.request(Some(r"C:\Other |")).unwrap();
-        assert!(first.load(Ordering::Relaxed));
+        let first = index.request(Some(r"C:\Work |")).unwrap();
+        let second = index.request(Some(r"C:\Other |")).unwrap();
+        assert!(first.cancelled.load(Ordering::Relaxed));
         assert!(!index.finish(&first, Ok(vec![entry("old", "file")])));
         assert!(index.request(None).is_none());
-        assert!(second.load(Ordering::Relaxed));
+        assert!(second.cancelled.load(Ordering::Relaxed));
         assert!(!index.finish(&second, Err("过期错误".to_owned())));
-        let (_, closing) = index.request(Some(r"C:\Work |")).unwrap();
+        let closing = index.request(Some(r"C:\Work |")).unwrap();
         drop(index);
-        assert!(closing.load(Ordering::Relaxed));
+        assert!(closing.cancelled.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn delegates_explicit_filename_patterns_and_replaces_stale_results() {
+        let mut index = LocalFilesIndex::default();
+        let first = index.request(Some(r"C:\Work | *.txt")).unwrap();
+        assert_eq!(first.pattern.as_deref(), Some("*.txt"));
+        assert!(index.request(Some(r#" "C:\Work" | *.txt "#)).is_none());
+        let second = index.request(Some(r"C:\Work | Budget ?.txt")).unwrap();
+        assert!(first.cancelled.load(Ordering::Relaxed));
+        assert_eq!(second.pattern.as_deref(), Some("Budget ?.txt"));
+        assert!(!index.finish(&first, Ok(vec![entry("stale.txt", "file")])));
+        assert!(index.finish(&second, Ok(vec![entry("Budget 1.txt", "file")])));
+        assert!(matches!(
+            index.results(r"C:\Work | Budget ?.txt"),
+            Results::Destinations(items) if matches!(
+                items.as_slice(), [Destination::LocalFile { name, .. }] if name == "Budget 1.txt"
+            )
+        ));
+        let ordinary = index.request(Some(r"C:\Work | Budget")).unwrap();
+        assert_eq!(ordinary.pattern, None);
     }
 }
