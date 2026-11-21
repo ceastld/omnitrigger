@@ -40,6 +40,23 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         }
         "lcm" => return Some(NamedValue::Aggregate(least_common_multiple)),
         "round" => return Some(NamedValue::Aggregate(round_to_places)),
+        "bitand" => {
+            return Some(NamedValue::Aggregate(|values| {
+                bitwise(values, |a, b| (a & b) as f64)
+            }));
+        }
+        "bitor" => {
+            return Some(NamedValue::Aggregate(|values| {
+                bitwise(values, |a, b| (a | b) as f64)
+            }));
+        }
+        "bitxor" => {
+            return Some(NamedValue::Aggregate(|values| {
+                bitwise(values, |a, b| (a ^ b) as f64)
+            }));
+        }
+        "shl" => return Some(NamedValue::Aggregate(|values| bitwise(values, shift_left))),
+        "shr" => return Some(NamedValue::Aggregate(|values| bitwise(values, shift_right))),
         "comb" => return Some(NamedValue::Aggregate(combinations)),
         "perm" => {
             return Some(NamedValue::Aggregate(|values| match values {
@@ -88,6 +105,9 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "ceil" => f64::ceil,
         "trunc" => f64::trunc,
         "factorial" | "fact" => |n| permutations(&[n, n]),
+        "popcount" | "bit_count" => {
+            |n| nonnegative_integer(n).map_or(f64::NAN, |value| f64::from(value.count_ones()))
+        }
         "sin" => f64::sin,
         "cos" => f64::cos,
         "tan" => f64::tan,
@@ -163,11 +183,10 @@ fn integer_pair(values: &[f64]) -> Option<[u128; 2]> {
     let &[left, right] = values else {
         return None;
     };
-    let magnitudes = [left.abs(), right.abs()];
-    magnitudes
-        .iter()
-        .all(|&value| value <= MAX_SAFE_INTEGER as f64 && value.fract() == 0.)
-        .then(|| magnitudes.map(|value| value as u128))
+    Some([
+        nonnegative_integer(left.abs())?,
+        nonnegative_integer(right.abs())?,
+    ])
 }
 
 fn least_common_multiple(values: &[f64]) -> f64 {
@@ -186,10 +205,37 @@ fn least_common_multiple(values: &[f64]) -> f64 {
 }
 
 fn nonnegative_pair(values: &[f64]) -> Option<[u128; 2]> {
-    if values.iter().any(|&value| value < 0.) {
+    let &[left, right] = values else {
         return None;
+    };
+    Some([nonnegative_integer(left)?, nonnegative_integer(right)?])
+}
+
+fn nonnegative_integer(value: f64) -> Option<u128> {
+    (value >= 0. && value <= MAX_SAFE_INTEGER as f64 && value.fract() == 0.)
+        .then_some(value as u128)
+}
+
+fn bitwise(values: &[f64], operation: fn(u128, u128) -> f64) -> f64 {
+    nonnegative_pair(values).map_or(f64::NAN, |[left, right]| operation(left, right))
+}
+
+fn shift_left(value: u128, bits: u128) -> f64 {
+    if value == 0 {
+        return 0.;
     }
-    integer_pair(values)
+    if bits >= u128::from(MAX_SAFE_INTEGER.count_ones()) || value > MAX_SAFE_INTEGER >> bits {
+        return f64::INFINITY;
+    }
+    (value << bits) as f64
+}
+
+fn shift_right(value: u128, bits: u128) -> f64 {
+    if bits >= u128::from(MAX_SAFE_INTEGER.count_ones()) {
+        0.
+    } else {
+        (value >> bits) as f64
+    }
 }
 
 fn combinations(values: &[f64]) -> f64 {

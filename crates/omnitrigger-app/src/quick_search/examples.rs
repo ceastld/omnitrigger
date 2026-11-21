@@ -33,6 +33,21 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "0xFF + 0b1",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "计算按位与、或与异或",
+        query: "bitand(0xff,0x0f) + bitor(8,5) + bitxor(10,12)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按位移位",
+        query: "shl(0b101,3)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "统计二进制中的 1",
+        query: "popcount(0xff)",
+    },
+    Example {
         icon: Icon::Clock,
         title: "计算日期",
         query: "日期: 今天 + 7天",

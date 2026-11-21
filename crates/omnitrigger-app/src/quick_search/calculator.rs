@@ -450,6 +450,42 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_bitwise_functions_with_exact_nonnegative_integers() {
+        for (query, expected) in [
+            ("bitand(0xff, 0x0f)", "15"),
+            ("bitor(0b1000, 0b0101)", "13"),
+            ("bitxor(0b1010, 0b1100)", "6"),
+            ("popcount(0xff)", "8"),
+            ("bit_count(9007199254740991)", "53"),
+            ("shl(0b101,3)", "40"),
+            ("shl(1,52)", "4503599627370496"),
+            ("shl(0,1000)", "0"),
+            ("shr(0xff,4)", "15"),
+            ("shr(1,1000)", "0"),
+            ("2^10", "1024"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in [
+            "bitand(-1,3)",
+            "bitor(1.5,3)",
+            "popcount(9007199254740992)",
+            "shr(1,-1)",
+        ] {
+            assert_eq!(
+                calculate(query),
+                Err(CalculationError::FunctionDomain),
+                "{query}"
+            );
+        }
+        assert_eq!(calculate("shl(1,53)"), Err(CalculationError::OutOfRange));
+        assert_eq!(
+            calculate("shl(9007199254740991,1)"),
+            Err(CalculationError::OutOfRange)
+        );
+    }
+
+    #[test]
     fn rounds_at_decimal_places_and_preserves_precision_for_small_inputs() {
         for (query, expected) in [
             ("round(2.675,2)", "2.67"),
