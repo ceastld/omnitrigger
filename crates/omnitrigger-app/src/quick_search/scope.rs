@@ -2,6 +2,7 @@
 pub(super) enum Scope {
     Triggers,
     Wheels,
+    Presets,
     TextHistory,
     Actions,
     Date,
@@ -14,6 +15,7 @@ pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
     let scope = match prefix.trim().to_ascii_lowercase().as_str() {
         "触发器" | "trigger" | "triggers" => Scope::Triggers,
         "轮盘" | "轨道轮盘" | "wheel" | "wheels" => Scope::Wheels,
+        "预设" | "触发预设" | "preset" | "presets" => Scope::Presets,
         "剪贴板" | "文本历史" | "clipboard" => Scope::TextHistory,
         "动作" | "动作库" | "action" | "actions" => Scope::Actions,
         "日期" | "date" => Scope::Date,

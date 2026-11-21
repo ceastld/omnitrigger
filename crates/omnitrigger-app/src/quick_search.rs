@@ -5,6 +5,7 @@ mod duration;
 mod examples;
 mod operators;
 mod percentage;
+mod presets;
 mod radix;
 mod recent;
 mod scientific;
@@ -34,6 +35,7 @@ use conversion::{convert, ConversionError};
 use duration::{convert_duration, DurationError};
 use examples::EXAMPLES;
 use omnitrigger_windows::ShortcutTarget;
+use presets::matching_presets;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 pub(super) use recent::RecentDestinations;
 use scope::{scoped_query, Scope};
@@ -72,6 +74,7 @@ pub(super) enum Destination {
     Page(Page),
     Trigger(u64),
     Wheel(String),
+    Preset(&'static str),
     TextHistoryQuery(String),
     ActionLibraryQuery(String),
 }
@@ -168,6 +171,15 @@ impl Results {
                         .map(|wheel| Destination::Wheel(wheel.id.clone()))
                         .collect(),
                 ),
+                Scope::Presets if term.is_empty() => {
+                    Self::Destinations(vec![Destination::Page(Page::Presets)])
+                }
+                Scope::Presets => Self::Destinations(
+                    matching_presets(term, PAGE_RESULT_LIMIT)
+                        .into_iter()
+                        .map(|preset| Destination::Preset(preset.key))
+                        .collect(),
+                ),
                 Scope::TextHistory if term.is_empty() => {
                     Self::Destinations(vec![Destination::Page(Page::TextHistory)])
                 }
@@ -225,6 +237,11 @@ impl Results {
             matching_wheels(wheels, &query, PAGE_RESULT_LIMIT - destinations.len())
                 .into_iter()
                 .map(|wheel| Destination::Wheel(wheel.id.clone())),
+        );
+        destinations.extend(
+            matching_presets(&query, PAGE_RESULT_LIMIT - destinations.len())
+                .into_iter()
+                .map(|preset| Destination::Preset(preset.key)),
         );
         Self::Destinations(destinations)
     }
@@ -590,6 +607,16 @@ impl QuickSearch {
                             };
                             (Page::Wheels.icon(), wheel.name.clone(), Some(detail))
                         }
+                        Destination::Preset(key) => {
+                            let preset = crate::presets::PRESETS
+                                .iter()
+                                .find(|preset| preset.key == *key)?;
+                            (
+                                Page::Presets.icon(),
+                                preset.title.to_owned(),
+                                Some(preset.group.to_owned()),
+                            )
+                        }
                         Destination::TextHistoryQuery(_) => {
                             (Icon::Clock, "搜索文本历史正文".to_owned(), None)
                         }
@@ -756,6 +783,20 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn quick_search_routes_preset_names_and_scope_to_the_catalog() {
+        for query in ["顶部边缘", "预设：顶部 边缘", "preset: edge-top"] {
+            assert!(
+                matches!(for_query(query, &[]), Results::Destinations(items) if items == [Destination::Preset("edge-top")]),
+                "{query}"
+            );
+        }
+        assert!(matches!(
+            for_query("触发预设：", &[]),
+            Results::Destinations(items) if items == [Destination::Page(Page::Presets)]
+        ));
     }
 
     #[test]

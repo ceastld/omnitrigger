@@ -753,6 +753,7 @@ struct Workspace {
     pending: Option<TriggerSpec>,
     edited_spec: Option<TriggerSpec>,
     preset_edit_id: Option<u64>,
+    preset_catalog_key: Option<&'static str>,
     conflict: Option<Conflict>,
     selected: Option<u64>,
     confirm_delete: Option<u64>,
@@ -1278,6 +1279,7 @@ impl Workspace {
             pending: None,
             edited_spec: None,
             preset_edit_id: None,
+            preset_catalog_key: None,
             conflict: None,
             selected,
             confirm_delete: None,
@@ -1499,6 +1501,7 @@ impl Workspace {
         }
         self.package_picker_for_draft = false;
         self.preset_edit_id = None;
+        self.preset_catalog_key = None;
         cx.notify();
     }
 
@@ -2755,6 +2758,10 @@ impl Workspace {
             quick_search::Destination::Wheel(id) => {
                 self.open_page(Page::Wheels, cx);
                 self.switch_wheel(id, cx);
+            }
+            quick_search::Destination::Preset(key) => {
+                self.open_page(Page::Presets, cx);
+                self.preset_catalog_key = Some(key);
             }
             quick_search::Destination::Trigger(id) => {
                 self.open_page(Page::Triggers, cx);
@@ -6379,6 +6386,7 @@ impl Workspace {
                         None
                     };
                     this.text_history.cancel_send();
+                    this.preset_catalog_key = None;
                     this.page = Page::Presets;
                     cx.notify();
                 })),
@@ -6655,11 +6663,9 @@ impl Workspace {
         ] {
             let mut cards = div().grid().grid_cols(2).gap(px(12.));
             let mut count = 0;
-            for (index, preset) in PRESETS
-                .iter()
-                .enumerate()
-                .filter(|(_, preset)| preset.group == group)
-            {
+            for (index, preset) in PRESETS.iter().enumerate().filter(|(_, preset)| {
+                preset.group == group && self.preset_catalog_key.is_none_or(|key| key == preset.key)
+            }) {
                 count += 1;
                 let hover_group = SharedString::from(format!("preset-{}", preset.key));
                 cards =
@@ -6717,6 +6723,9 @@ impl Workspace {
                             ),
                     );
             }
+            if count == 0 {
+                continue;
+            }
             content = content.child(
                 div()
                     .flex_none()
@@ -6751,44 +6760,63 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(px(18.))
-            .child(heading(
-                "触发预设",
-                "选择触发方式并调整参数；保留已选动作，保存后生效。",
-            ))
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(14.))
-                    .p(px(14.))
-                    .rounded(px(14.))
-                    .bg(theme::tint_fill(theme::ACCENT, 0.13, 0.03))
-                    .border_1()
-                    .border_color(hsla(theme::ACCENT, 0.26))
-                    .child(icon_tile(Icon::Bolt, theme::ACCENT, 36.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(3.))
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("右键快拖与静止长按可以共存"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(theme::TEXT_MUTED))
-                                    .child(
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(heading(
+                        "触发预设",
+                        "选择触发方式并调整参数；保留已选动作，保存后生效。",
+                    ))
+                    .when(self.preset_catalog_key.is_some(), |el| {
+                        el.child(
+                            button("show-all-presets", "查看全部预设", Tone::Secondary, true)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.preset_catalog_key = None;
+                                    this.smooth_scroll.cancel("preset-catalog");
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            )
+            .when(self.preset_catalog_key.is_none(), |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(14.))
+                        .p(px(14.))
+                        .rounded(px(14.))
+                        .bg(theme::tint_fill(theme::ACCENT, 0.13, 0.03))
+                        .border_1()
+                        .border_color(hsla(theme::ACCENT, 0.26))
+                        .child(icon_tile(Icon::Bolt, theme::ACCENT, 36.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap(px(3.))
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child("右键快拖与静止长按可以共存"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(theme::TEXT_MUTED))
+                                        .child(
                                         "快拖时窗必须早于长按阈值；命中后由同一次按压互斥认领。",
                                     ),
-                            ),
-                    ),
-            )
+                                ),
+                        ),
+                )
+            })
             .child(self.smooth_scroll.wrap("preset-catalog", content))
             .child(caption(
                 "预设只填入草稿，保存后才生效。已有组合和前缀冲突会明确报告。",

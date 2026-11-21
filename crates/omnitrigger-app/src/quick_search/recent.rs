@@ -11,6 +11,7 @@ impl RecentDestinations {
             Destination::TextHistoryQuery(_) => Destination::Page(Page::TextHistory),
             Destination::ActionLibraryQuery(_) => Destination::Page(Page::Actions),
             Destination::Wheel(_) => Destination::Page(Page::Wheels),
+            Destination::Preset(_) => Destination::Page(Page::Presets),
             item => item.clone(),
         };
         self.0.retain(|existing| existing != &item);
