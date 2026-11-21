@@ -4,6 +4,7 @@ const NANOS_PER_SECOND: u128 = 1_000_000_000;
 const MAX_DURATION_NANOS: u128 = (u64::MAX as u128 + 1) * NANOS_PER_SECOND - 1;
 // 去掉末尾的零后，精度由单位纳秒数中的因子 2 和 5 决定。一天含有 16 个因子 2。
 const MAX_FRACTION_DIGITS: usize = 16;
+const SCALE_OPERATORS: [char; 3] = ['*', '×', '/'];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DurationError {
@@ -11,15 +12,17 @@ pub(super) enum DurationError {
     Invalid,
     OutOfRange,
     Precision,
+    DivisionByZero,
 }
 
 impl DurationError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入时长，例如 时长: 01:30:00 或 时长: 5400秒",
-            Self::Invalid => "使用分:秒、时:分:秒或带单位的时长，可用 + 或 - 计算",
+            Self::Invalid => "使用分:秒、时:分:秒或带单位的时长，可加减或乘除整数",
             Self::OutOfRange => "时长超出可转换范围",
             Self::Precision => "时长最小可精确到 1 纳秒",
+            Self::DivisionByZero => "时长不能除以零",
         }
     }
 }
@@ -29,7 +32,9 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     let input = input.trim();
     let mut negative = input.starts_with('-');
     let mut remaining = input.strip_prefix(['-', '+']).unwrap_or(input);
-    let show_seconds = !remaining.contains(['+', '-']) && remaining.contains(':');
+    let show_seconds = remaining.contains(':')
+        && !remaining.contains(['+', '-'])
+        && !remaining.contains(SCALE_OPERATORS);
     let mut total = 0i128;
     loop {
         let end = remaining.find(['+', '-']).unwrap_or(remaining.len());
@@ -41,11 +46,7 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
                 DurationError::Invalid
             });
         }
-        let nanos = if term.contains(':') {
-            parse_clock(term)?
-        } else {
-            parse_units(term)?
-        } as i128;
+        let nanos = parse_term(term)? as i128;
         total = total
             .checked_add(if negative { -nanos } else { nanos })
             .ok_or(DurationError::OutOfRange)?;
@@ -73,6 +74,31 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
             "{sign}{hours:02}:{minutes:02}:{remainder:02}{suffix}"
         ))
     }
+}
+
+fn parse_term(term: &str) -> Result<u128, DurationError> {
+    let end = term.find(SCALE_OPERATORS).unwrap_or(term.len());
+    let (duration, scale) = term.split_at(end);
+    let duration = duration.trim_end();
+    let nanos = if duration.contains(':') {
+        parse_clock(duration)?
+    } else {
+        parse_units(duration)?
+    };
+    let Some(operator) = scale.chars().next() else {
+        return Ok(nanos);
+    };
+    let factor = number(scale[operator.len_utf8()..].trim())?;
+    if operator != '/' {
+        return bounded_duration(nanos.checked_mul(factor));
+    }
+    if factor == 0 {
+        return Err(DurationError::DivisionByZero);
+    }
+    if !nanos.is_multiple_of(factor) {
+        return Err(DurationError::Precision);
+    }
+    Ok(nanos / factor)
 }
 
 fn bounded_duration(nanos: Option<u128>) -> Result<u128, DurationError> {
@@ -270,6 +296,31 @@ mod tests {
             convert_duration("18446744073709551616s"),
             Err(DurationError::OutOfRange)
         );
+    }
+
+    #[test]
+    fn scales_duration_terms_by_integers_before_adding_them() {
+        for (query, expected) in [
+            ("45分钟 * 12", "09:00:00"),
+            ("01:30:00 / 3", "00:30:00"),
+            ("1:00 + 20秒 × 3", "00:02:00"),
+            ("-3ns / 3 + 2ns", "00:00:00.000000001"),
+            ("5s * 0", "00:00:00"),
+            ("1h＊２", "02:00:00"),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("1h / 0", DurationError::DivisionByZero),
+            ("1ns / 2", DurationError::Precision),
+            ("1h *", DurationError::Incomplete),
+            ("1h */2", DurationError::Invalid),
+            ("1h * 1.5", DurationError::Invalid),
+            ("1h * 1h", DurationError::Invalid),
+            ("18446744073709551615s * 2", DurationError::OutOfRange),
+        ] {
+            assert_eq!(convert_duration(query), Err(error), "{query}");
+        }
     }
 
     #[test]

@@ -126,6 +126,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "时长乘以次数",
+        query: "时长: 45分钟 * 12",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "估算下载时间",
         query: "下载: 1 GiB 按 100 Mbps",
     },
