@@ -121,6 +121,9 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
             })
             .collect()),
         "合并空白" | "collapse" => Ok(text.split_whitespace().collect::<Vec<_>>().join(" ")),
+        "逐行去空白" | "trim-lines" => {
+            Ok(text.lines().map(str::trim).collect::<Vec<_>>().join("\n"))
+        }
         "倒序" | "reverse" => Ok(text.graphemes(true).rev().collect()),
         "按行去重" | "unique-lines" => {
             let mut seen = HashSet::new();
@@ -449,6 +452,20 @@ fn replace_text(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trims_each_line_and_keeps_internal_spaces_and_blank_rows() {
+        for (input, expected) in [
+            (
+                "逐行去空白 \"\t苹果  \r\n \r\n\u{3000}梨\t  \"",
+                "苹果\n\n梨",
+            ),
+            ("trim-lines \" a  b\n  c\t d \"", "a  b\nc\t d"),
+            ("逐行去空白 \"\"", ""),
+        ] {
+            assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");
+        }
+    }
 
     #[test]
     fn filters_individual_lines_with_a_quoted_regular_expression() {

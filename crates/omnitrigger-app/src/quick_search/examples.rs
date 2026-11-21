@@ -667,6 +667,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "清理每行首尾空白",
+        query: "文本: 逐行去空白 \"  苹果  \n 梨  \"",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按数字顺序排列文件名",
         query: "文本: 自然排序 照片10\n照片2\n照片1",
     },
