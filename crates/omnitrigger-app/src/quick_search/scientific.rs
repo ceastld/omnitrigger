@@ -20,6 +20,19 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "sum" => return Some(NamedValue::Aggregate(|values| values.iter().sum())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
         "median" => return Some(NamedValue::Aggregate(median)),
+        "log" => {
+            return Some(NamedValue::Aggregate(|values| match values {
+                [value] => value.ln(),
+                [value, base] if *base > 0. && *base != 1. => value.log(*base),
+                _ => f64::NAN,
+            }));
+        }
+        "pow" => {
+            return Some(NamedValue::Aggregate(|values| match values {
+                [base, exponent] => base.powf(*exponent),
+                _ => f64::NAN,
+            }));
+        }
         "hypot" => {
             return Some(NamedValue::Aggregate(|values| {
                 values.iter().copied().fold(0., f64::hypot)
@@ -54,7 +67,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "asin" => f64::asin,
         "acos" => f64::acos,
         "atan" => f64::atan,
-        "ln" | "log" => f64::ln,
+        "ln" => f64::ln,
         "log2" => f64::log2,
         "log10" => f64::log10,
         "exp" => f64::exp,

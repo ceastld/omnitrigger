@@ -390,6 +390,11 @@ mod tests {
             ("hypot(3,4,12)", "13"),
             ("hypot(1e308,1e308)", "1.4142135623731e308"),
             ("degrees(atan2(1,-1))", "135"),
+            ("log(1024,2)", "10"),
+            ("log(e)", "1"),
+            ("log(0.25,0.5)", "2"),
+            ("pow(-3,2)", "9"),
+            ("pow(2,-3)", "0.125"),
         ] {
             assert!(looks_like_calculation(query), "{query}");
             assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
@@ -398,7 +403,15 @@ mod tests {
         for query in ["min()", "max(,2)", "sum(2,)", "median()", "hypot()"] {
             assert_eq!(calculate(query), Err(CalculationError::Invalid), "{query}");
         }
-        for query in ["atan2(1)", "atan2(1,2,3)"] {
+        for query in [
+            "atan2(1)",
+            "atan2(1,2,3)",
+            "log(2,0)",
+            "log(2,1)",
+            "log(2,-1)",
+            "log(1,2,3)",
+            "pow(2)",
+        ] {
             assert_eq!(
                 calculate(query),
                 Err(CalculationError::FunctionDomain),

@@ -161,6 +161,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算指定底数的对数",
+        query: "log(1024,2)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用 pow 计算幂",
+        query: "pow(2,10)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算反三角函数",
         query: "degrees(asin(0.5))",
     },
