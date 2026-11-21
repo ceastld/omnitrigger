@@ -11,6 +11,8 @@ const MAX_VALUES: usize = 128;
 pub(super) enum StatisticsError {
     Incomplete,
     TooManyValues,
+    InvalidFrequency,
+    FrequencyOverflow,
     Evaluation(FractionError),
 }
 
@@ -18,7 +20,9 @@ impl StatisticsError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "用逗号或换行隔开数值，例如 1,3,5",
-            Self::TooManyValues => "最多可统计 128 个值",
+            Self::TooManyValues => "最多可统计 128 个值或频数组",
+            Self::InvalidFrequency => "每组用 数值@次数，次数须为正整数",
+            Self::FrequencyOverflow => "频数合计超出支持范围",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "请输入整数、有限小数、分数或精确算式"
             }
@@ -30,53 +34,71 @@ impl StatisticsError {
 pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsError> {
     let normalized = normalize(query);
     let input = normalized.trim();
-    let (operation, values) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
-    let (sample, values) = match operation.to_ascii_lowercase().as_str() {
+    let (operation, values) = operation_and_arguments(input);
+    let (sample, input) = match operation.to_ascii_lowercase().as_str() {
         "总体" | "population" => (false, values.trim()),
         "样本" | "sample" => (true, values.trim()),
         _ => (true, input),
     };
-    let terms: Vec<_> = values
+    let (operation, values) = operation_and_arguments(input);
+    let use_frequencies = matches!(
+        operation.to_ascii_lowercase().as_str(),
+        "频数" | "frequency"
+    );
+    let input = if use_frequencies {
+        values.trim()
+    } else {
+        input
+    };
+    let terms: Vec<_> = input
         .lines()
         .flat_map(split_top_level_commas)
         .take(MAX_VALUES + 1)
         .collect();
-    let count = terms.len();
-    if count == 0 {
+    if terms.is_empty() {
         return Err(StatisticsError::Incomplete);
     }
-    if count > MAX_VALUES {
+    if terms.len() > MAX_VALUES {
         return Err(StatisticsError::TooManyValues);
     }
     let mut values = terms
         .into_iter()
-        .map(|term| calculate_fraction(term).map_err(StatisticsError::Evaluation))
+        .map(|term| parse_observation(term, use_frequencies))
         .collect::<Result<Vec<_>, _>>()?;
+    let count = values.iter().try_fold(0_u64, |count, (_, repetitions)| {
+        count
+            .checked_add(*repetitions)
+            .ok_or(StatisticsError::FrequencyOverflow)
+    })?;
     let sum = values
         .iter()
-        .try_fold(BigRational::default(), |sum, value| bounded(sum + value))?;
+        .try_fold(BigRational::default(), |sum, (value, repetitions)| {
+            bounded(sum + value * BigInt::from(*repetitions))
+        })?;
     let average = bounded(&sum / BigInt::from(count))?;
 
-    values.sort();
-    let middle = count / 2;
+    values.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let middle = observation_at(&values, count / 2);
     let median = if count.is_multiple_of(2) {
-        bounded((&values[middle - 1] + &values[middle]) / BigInt::from(2))?
+        let previous = observation_at(&values, count / 2 - 1);
+        bounded((previous + middle) / BigInt::from(2))?
     } else {
-        values[middle].clone()
+        middle.clone()
     };
     let mut result = format!(
         "数量 {count} · 合计 {sum}\n平均值 {average} · 中位数 {median}\n最小值 {} · 最大值 {}",
-        values[0],
-        values[count - 1],
+        values[0].0,
+        values.last().expect("a nonempty sample").0,
     );
-    let variance_divisor = count - usize::from(sample);
+    let variance_divisor = count - u64::from(sample);
     if variance_divisor > 0 {
-        let deviation_sum = values
-            .iter()
-            .try_fold(BigRational::default(), |total, value| {
-                let difference = value - &average;
-                bounded(total + &difference * &difference)
-            })?;
+        let deviation_sum =
+            values
+                .iter()
+                .try_fold(BigRational::default(), |total, (value, repetitions)| {
+                    let difference = value - &average;
+                    bounded(total + &difference * &difference * BigInt::from(*repetitions))
+                })?;
         let variance = bounded(deviation_sum / BigInt::from(variance_divisor))?;
         let label = if sample { "样本" } else { "总体" };
         result.push_str(&format!(
@@ -85,6 +107,49 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         ));
     }
     Ok(result)
+}
+
+fn operation_and_arguments(input: &str) -> (&str, &str) {
+    input.split_once(char::is_whitespace).unwrap_or((input, ""))
+}
+
+fn parse_observation(
+    term: &str,
+    use_frequencies: bool,
+) -> Result<(BigRational, u64), StatisticsError> {
+    let (value, repetitions) = if use_frequencies {
+        let (value, frequency) = term
+            .split_once('@')
+            .ok_or(StatisticsError::InvalidFrequency)?;
+        let frequency = frequency.trim();
+        if !frequency
+            .split('_')
+            .all(|digits| !digits.is_empty() && digits.bytes().all(|digit| digit.is_ascii_digit()))
+        {
+            return Err(StatisticsError::InvalidFrequency);
+        }
+        let repetitions = frequency
+            .replace('_', "")
+            .parse::<u64>()
+            .ok()
+            .filter(|count| *count > 0)
+            .ok_or(StatisticsError::InvalidFrequency)?;
+        (value, repetitions)
+    } else {
+        (term, 1)
+    };
+    let value = calculate_fraction(value).map_err(StatisticsError::Evaluation)?;
+    Ok((value, repetitions))
+}
+
+fn observation_at(values: &[(BigRational, u64)], mut rank: u64) -> &BigRational {
+    for (value, repetitions) in values {
+        if rank < *repetitions {
+            return value;
+        }
+        rank -= *repetitions;
+    }
+    unreachable!("observation rank is within the total frequency")
 }
 
 fn bounded(value: BigRational) -> Result<BigRational, StatisticsError> {
@@ -113,6 +178,42 @@ mod tests {
         assert_eq!(
             calculate_statistics("总体"),
             Err(StatisticsError::Incomplete)
+        );
+    }
+
+    #[test]
+    fn summarizes_frequency_groups_as_repeated_observations_without_expanding_them() {
+        for (grouped, expanded) in [
+            ("频数 5@2,1@2,3@1", "1,1,3,5,5"),
+            ("总体 频数 1/2@2\n3/4@2", "总体 1/2,1/2,3/4,3/4"),
+            ("sample frequency ５＠１", "5"),
+            ("频数 comb(4,2)@2,-2@2,6@1", "-2,-2,6,6,6"),
+        ] {
+            assert_eq!(
+                calculate_statistics(grouped),
+                calculate_statistics(expanded)
+            );
+        }
+        let large = calculate_statistics("频数 5@1_000_000_000,7@1").unwrap();
+        assert!(large.contains("数量 1000000001 · 合计 5000000007"));
+        assert!(large.contains("中位数 5"));
+        assert!(large.contains("样本方差 4/1000000001"));
+        for query in [
+            "频数 1",
+            "频数 1@0",
+            "频数 1@-1",
+            "频数 1@1/2",
+            "频数 1@2@3",
+            "频数 1@1__2",
+        ] {
+            assert_eq!(
+                calculate_statistics(query),
+                Err(StatisticsError::InvalidFrequency)
+            );
+        }
+        assert_eq!(
+            calculate_statistics("频数 9@18446744073709551615,1@1"),
+            Err(StatisticsError::FrequencyOverflow)
         );
     }
 
