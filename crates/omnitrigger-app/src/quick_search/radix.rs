@@ -11,7 +11,7 @@ pub(super) enum Base {
 }
 
 impl Base {
-    const TARGETS: [(Self, &'static [&'static str]); 4] = [
+    const TARGETS: [(Self, &[&str]); 4] = [
         (Self::Decimal, &["dec", "decimal", "十进制"]),
         (Self::Binary, &["bin", "binary", "二进制"]),
         (Self::Octal, &["oct", "octal", "八进制"]),
