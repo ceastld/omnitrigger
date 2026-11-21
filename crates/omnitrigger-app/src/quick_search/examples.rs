@@ -276,6 +276,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把百分数转换为小数",
+        query: "12.5%",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按百分数增加",
         query: "200 增加 15%",
     },

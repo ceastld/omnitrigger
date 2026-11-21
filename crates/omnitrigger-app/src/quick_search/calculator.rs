@@ -74,12 +74,30 @@ fn evaluate_expression(input: &str) -> Result<f64, CalculationError> {
         let rate = evaluate_expression(rate)?;
         return finite(mode.apply(evaluate_expression(base)?, rate));
     }
+    if let Some(rate) = percentage_literal(input) {
+        return Ok(rate);
+    }
     let mut parser = Parser(input);
     let value = parser.expression(0)?;
     if !parser.0.trim().is_empty() {
         return Err(CalculationError::Invalid);
     }
     Ok(value)
+}
+
+fn percentage_literal(input: &str) -> Option<f64> {
+    let number = input.strip_suffix('%')?.trim_end();
+    let sign = if number.starts_with('-') { -1. } else { 1. };
+    let digits = number
+        .strip_prefix(['-', '+'])
+        .unwrap_or(number)
+        .trim_start();
+    if Base::prefixed(digits).is_some() {
+        return None;
+    }
+    let mut parser = Parser(digits);
+    let value = parser.number().ok()?;
+    parser.0.is_empty().then_some(sign * value / 100.)
 }
 
 pub(super) fn normalize(query: &str) -> String {
@@ -512,6 +530,26 @@ mod tests {
             calculate("round(1.7e308,-308)"),
             Err(CalculationError::OutOfRange)
         );
+    }
+
+    #[test]
+    fn converts_a_standalone_percentage_literal_without_changing_modulo() {
+        for (query, expected) in [
+            ("15%", "0.15"),
+            ("－１２．５ ％", "-0.125"),
+            ("+ 2.5e1%", "0.25"),
+            (".5%", "0.005"),
+            ("1_000%", "10"),
+            ("200 的 15%", "30"),
+            ("15% of 200", "30"),
+            ("15%2", "1"),
+            ("15%+2", "1"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["2+15%", "0xff%", "15%%"] {
+            assert!(calculate(query).is_err(), "{query}");
+        }
     }
 
     #[test]
