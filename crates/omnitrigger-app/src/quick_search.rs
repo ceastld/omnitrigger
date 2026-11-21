@@ -1,4 +1,5 @@
 mod calculator;
+mod calendar;
 mod conversion;
 mod radix;
 mod recent;
@@ -21,6 +22,7 @@ use crate::{
     Page, Workspace,
 };
 use calculator::{calculate, looks_like_calculation, CalculationError, QUERY_LIMIT};
+use calendar::{calculate_date, DateError};
 use conversion::{convert, ConversionError};
 use omnitrigger_windows::ShortcutTarget;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -84,6 +86,7 @@ fn value_extra_height(value: &str) -> f32 {
 enum ValueError {
     Calculation(CalculationError),
     Conversion(ConversionError),
+    Date(DateError),
 }
 
 impl ValueError {
@@ -91,6 +94,7 @@ impl ValueError {
         match self {
             Self::Calculation(error) => error.message(),
             Self::Conversion(error) => error.message(),
+            Self::Date(error) => error.message(),
         }
     }
 
@@ -99,6 +103,7 @@ impl ValueError {
             self,
             Self::Calculation(CalculationError::Incomplete)
                 | Self::Conversion(ConversionError::Incomplete)
+                | Self::Date(DateError::Incomplete)
         )
     }
 }
@@ -110,15 +115,27 @@ impl Results {
             return Self::Destinations(recent.suggestions(triggers));
         }
         if let Some((scope, term)) = scoped_query(query) {
-            return Self::Destinations(match scope {
-                Scope::Triggers => matching_triggers(triggers, term, PAGE_RESULT_LIMIT)
-                    .into_iter()
-                    .map(Destination::Trigger)
-                    .collect(),
-                Scope::TextHistory if term.is_empty() => vec![Destination::Page(Page::TextHistory)],
-                Scope::TextHistory => vec![Destination::TextHistoryQuery(term.to_owned())],
-                Scope::Actions => vec![Destination::ActionLibraryQuery(term.to_owned())],
-            });
+            return match scope {
+                Scope::Triggers => Self::Destinations(
+                    matching_triggers(triggers, term, PAGE_RESULT_LIMIT)
+                        .into_iter()
+                        .map(Destination::Trigger)
+                        .collect(),
+                ),
+                Scope::TextHistory if term.is_empty() => {
+                    Self::Destinations(vec![Destination::Page(Page::TextHistory)])
+                }
+                Scope::TextHistory => {
+                    Self::Destinations(vec![Destination::TextHistoryQuery(term.to_owned())])
+                }
+                Scope::Actions => {
+                    Self::Destinations(vec![Destination::ActionLibraryQuery(term.to_owned())])
+                }
+                Scope::Date => Self::Value(
+                    calculate_date(term, chrono::Local::now().date_naive())
+                        .map_err(ValueError::Date),
+                ),
+            };
         }
         if let Some(result) = convert(query) {
             return Self::Value(result.map_err(ValueError::Conversion));
@@ -610,6 +627,10 @@ mod tests {
         assert!(
             matches!(for_query("100厘米转米", &[]), Results::Value(Ok(result)) if result == "1 m")
         );
+        assert!(matches!(
+            for_query("日期：2024-02-28 + 1天", &[]),
+            Results::Value(Ok(result)) if result == "2024-02-29"
+        ));
     }
 
     #[test]
