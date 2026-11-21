@@ -286,6 +286,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算分位数",
+        query: "quantile(0.25,4,1,3,2)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算百分位数",
+        query: "percentile(90,10,20,30,40)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算四分位距",
+        query: "iqr(4,1,3,2)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算反三角函数",
         query: "degrees(asin(0.5))",
     },
@@ -478,6 +493,26 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "计算文本 SHA-512",
         query: "文本: SHA-512 abc",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "Base64 编码文本",
+        query: "文本: Base64编码 北京",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "Base64 解码文本",
+        query: "文本: Base64解码 5YyX5Lqs",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "Base64URL 编码文本",
+        query: "文本: Base64URL编码 😀",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "Base64URL 解码文本",
+        query: "文本: Base64URL解码 8J-YgA",
     },
     Example {
         icon: Icon::Terminal,

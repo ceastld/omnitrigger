@@ -19,6 +19,7 @@ omnitrigger-actions = { path = "../omnitrigger-actions" }
 omnitrigger-windows = { path = "../omnitrigger-windows" }
 omnitrigger-browser = { git = "https://github.com/ceastld/omnitrigger-browser", rev = "a5adc50022120cc4e6b0596bb56e14ed0ec2d02e" }
 percent-encoding = "=2.3.2"
+base64 = "=0.22.1"
 tokio = { version = "1", features = ["rt", "net", "time"] }
 gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 serde = { version = "=1.0.229", features = ["derive"] }

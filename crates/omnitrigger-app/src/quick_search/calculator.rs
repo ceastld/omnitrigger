@@ -575,6 +575,13 @@ mod tests {
             ("median(9,1,4)", "4"),
             ("median(4,1,8,2)", "3"),
             ("median(1e308,1.6e308)", "1.3e308"),
+            ("quantile(0.25,4,1,3,2)", "1.75"),
+            ("percentile(90,10,20,30,40)", "37"),
+            ("percentile(0,4,1,3,2) + percentile(100,4,1,3,2)", "5"),
+            ("quantile(0.75,42)", "42"),
+            ("quantile(0.5,-1e308,1e308)", "0"),
+            ("quantile(0.5,1e308,1.6e308)", "1.3e308"),
+            ("iqr(4,1,3,2)", "1.5"),
             ("gcd(2^6,-48)", "16"),
             ("gcd(0,0)", "0"),
             ("gcd(9007199254740991,1)", "1"),
@@ -593,7 +600,9 @@ mod tests {
             assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
         }
         assert_eq!(calculate("avg(1,"), Err(CalculationError::Incomplete));
-        for query in ["min()", "max(,2)", "sum(2,)", "median()", "hypot()"] {
+        for query in [
+            "min()", "max(,2)", "sum(2,)", "median()", "hypot()", "iqr()",
+        ] {
             assert_eq!(calculate(query), Err(CalculationError::Invalid), "{query}");
         }
         for query in [
@@ -607,6 +616,10 @@ mod tests {
             "gcd(2.5,1)",
             "gcd(9007199254740992,2)",
             "lcm(1,2,3)",
+            "quantile(0.25)",
+            "quantile(1.01,1,2)",
+            "percentile(-5e-324,1,2)",
+            "percentile(101,1,2)",
         ] {
             assert_eq!(
                 calculate(query),

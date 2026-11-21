@@ -1,3 +1,9 @@
+use base64::{
+    engine::general_purpose::{
+        GeneralPurpose, STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD,
+    },
+    Engine,
+};
 use sha2::{Digest, Sha256, Sha512};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -14,6 +20,8 @@ pub(super) enum TextError {
     EmptySearchText,
     ReplacementTooLarge,
     NullCharacter,
+    InvalidBase64,
+    InvalidUtf8,
 }
 
 impl TextError {
@@ -27,7 +35,9 @@ impl TextError {
             Self::InvalidReplacementArguments => "查找内容和替换内容要加引号，并用空格分隔",
             Self::EmptySearchText => "请输入要查找的文字",
             Self::ReplacementTooLarge => "替换结果超过 1 MiB",
-            Self::NullCharacter => "替换结果含空字符，无法完整复制",
+            Self::NullCharacter => "结果含空字符，无法完整复制",
+            Self::InvalidBase64 => "Base64 编码无效",
+            Self::InvalidUtf8 => "解码结果不是 UTF-8 文本",
         }
     }
 }
@@ -68,8 +78,36 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "倒序" | "reverse" => Ok(text.graphemes(true).rev().collect()),
         "sha256" | "sha-256" => Ok(format!("{:x}", Sha256::digest(text.as_bytes()))),
         "sha512" | "sha-512" => Ok(format!("{:x}", Sha512::digest(text.as_bytes()))),
+        "base64编码" | "base64-encode" => Ok(STANDARD.encode(text)),
+        "base64解码" | "base64-decode" => decode_base64(text, &STANDARD, &STANDARD_NO_PAD),
+        "base64url编码" | "base64url-encode" => Ok(URL_SAFE_NO_PAD.encode(text)),
+        "base64url解码" | "base64url-decode" => decode_base64(text, &URL_SAFE, &URL_SAFE_NO_PAD),
         _ => Err(TextError::UnknownOperation),
     }
+}
+
+fn decode_base64(
+    text: &str,
+    padded: &GeneralPurpose,
+    unpadded: &GeneralPurpose,
+) -> Result<String, TextError> {
+    let encoded: Vec<_> = text
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    let decoder = if encoded.ends_with(b"=") {
+        padded
+    } else {
+        unpadded
+    };
+    let bytes = decoder
+        .decode(encoded)
+        .map_err(|_| TextError::InvalidBase64)?;
+    let result = String::from_utf8(bytes).map_err(|_| TextError::InvalidUtf8)?;
+    if result.contains('\0') {
+        return Err(TextError::NullCharacter);
+    }
+    Ok(result)
 }
 
 fn replacement_argument(input: &str) -> Result<(String, &str), TextError> {
@@ -124,6 +162,42 @@ fn replace_text(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_handles_utf8_both_alphabets_and_wrapped_input() {
+        for (input, expected) in [
+            ("Base64编码 北京", "5YyX5Lqs"),
+            ("Base64解码 5YyX\r\n5Lqs", "北京"),
+            ("Base64编码 😀", "8J+YgA=="),
+            ("Base64解码 8J+YgA", "😀"),
+            ("Base64URL编码 😀", "8J-YgA"),
+            ("Base64URL解码 8J-YgA==", "😀"),
+            (r#"base64-encode " a ""#, "IGEg"),
+            (r#"base64-decode """#, ""),
+        ] {
+            assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");
+        }
+        for input in [
+            "Base64解码 8J-YgA",
+            "Base64URL解码 8J+YgA",
+            "Base64解码 AB==",
+            "Base64解码 AA=",
+        ] {
+            assert_eq!(
+                transform_text(input),
+                Err(TextError::InvalidBase64),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            transform_text("Base64解码 /w=="),
+            Err(TextError::InvalidUtf8)
+        );
+        assert_eq!(
+            transform_text("Base64解码 AA=="),
+            Err(TextError::NullCharacter)
+        );
+    }
 
     #[test]
     fn counts_graphemes_and_utf8_bytes_including_quoted_spaces() {

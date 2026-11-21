@@ -22,6 +22,9 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "sum" => return Some(NamedValue::Aggregate(|values| values.iter().sum())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
         "median" => return Some(NamedValue::Aggregate(median)),
+        "quantile" => return Some(NamedValue::Aggregate(|values| quantile(values, 1.))),
+        "percentile" => return Some(NamedValue::Aggregate(|values| quantile(values, 100.))),
+        "iqr" => return Some(NamedValue::Aggregate(interquartile_range)),
         "stdev" => {
             return Some(NamedValue::Aggregate(|values| {
                 standard_deviation(values, 1)
@@ -287,13 +290,51 @@ fn average(values: &[f64]) -> f64 {
 }
 
 fn median(values: &[f64]) -> f64 {
-    let mut sorted = values.to_vec();
-    sorted.sort_unstable_by(f64::total_cmp);
+    let sorted = sorted_samples(values);
     let middle = sorted.len() / 2;
     if sorted.len().is_multiple_of(2) {
         average(&sorted[middle - 1..=middle])
     } else {
         sorted[middle]
+    }
+}
+
+fn sorted_samples(values: &[f64]) -> Vec<f64> {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable_by(f64::total_cmp);
+    sorted
+}
+
+fn quantile(arguments: &[f64], maximum: f64) -> f64 {
+    let [percent, samples @ ..] = arguments else {
+        return f64::NAN;
+    };
+    if samples.is_empty() || !(0. ..=maximum).contains(percent) {
+        return f64::NAN;
+    }
+    interpolated_quantile(&sorted_samples(samples), percent / maximum)
+}
+
+fn interquartile_range(samples: &[f64]) -> f64 {
+    let sorted = sorted_samples(samples);
+    interpolated_quantile(&sorted, 0.75) - interpolated_quantile(&sorted, 0.25)
+}
+
+fn interpolated_quantile(sorted: &[f64], probability: f64) -> f64 {
+    let last = sorted.len() - 1;
+    let rank = last as f64 * probability;
+    let index = rank as usize;
+    let lower = sorted[index];
+    if index == last {
+        return lower;
+    }
+    let upper = sorted[index + 1];
+    let weight = rank.fract();
+    if lower.is_sign_negative() == upper.is_sign_negative() {
+        lower + (upper - lower) * weight
+    } else {
+        // 异号时分开加权，避免相减超出浮点数范围。
+        lower * (1. - weight) + upper * weight
     }
 }
 
