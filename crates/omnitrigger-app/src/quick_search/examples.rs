@@ -239,6 +239,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "换算力",
+        query: "1 kgf to N",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "换算加速度",
+        query: "1 g0 to m/s²",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算 HEX 和 RGB 颜色",
         query: "颜色: #3A86FF",
     },

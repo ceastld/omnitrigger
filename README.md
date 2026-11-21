@@ -67,6 +67,7 @@
 - 输入 `10 km to` 或 `8Mbps转` 会显示常见目标单位和换算预览。按方向键选择，再按回车填入完整换算式。
 - 输入 `1度电转MJ` 得到 `3.6 MJ`，输入 `500 mW to W` 得到 `0.5 W`。
 - 输入 `1000 kg/m³ to g/cm³` 可换算密度，输入 `1 L/min to m³/h` 可换算体积流量，得到 `0.06 m³/h`。
+- 输入 `1 kgf to N` 可换算力，得到 `9.80665 N`。输入 `1 g0 to m/s²` 可将标准重力加速度换算为 `9.80665 m/s²`。换算系数见 [NIST SI 指南](https://www.nist.gov/pml/special-publication-811/nist-guide-si-appendix-b-conversion-factors/nist-guide-si-appendix-b9)。
 - 输入 `颜色: #3A86FF` 可预览颜色并得到 `rgb(58, 134, 255)`，输入 `颜色: rgba(58, 134, 255, 0.5)` 可转回 HEX，结果带透明度时保留其通道。
 - 输入 `颜色: hsl(210 100% 50%)` 得到 `#0080FF`，也可以输入带透明度的 HSL 颜色。
 - 输入 `颜色: #FF800080 to hsl` 得到 `hsl(30.118 100% 50% / 0.502)`。用 `to hex`、`to rgb` 或 `to hsl` 可指定输出格式。

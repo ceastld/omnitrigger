@@ -47,6 +47,8 @@ enum Dimension {
     Power,
     Density,
     VolumeFlow,
+    Force,
+    Acceleration,
 }
 
 impl Dimension {
@@ -68,6 +70,8 @@ impl Dimension {
             Self::Power => &["W", "kW", "mW", "MW", "GW"],
             Self::Density => &["kg/m³", "g/cm³", "g/L", "kg/L"],
             Self::VolumeFlow => &["L/min", "L/s", "m³/h", "m³/s", "mL/s"],
+            Self::Force => &["N", "kN", "kgf", "lbf", "mN"],
+            Self::Acceleration => &["m/s²", "g₀", "ft/s²", "cm/s²", "in/s²"],
         }
     }
 }
@@ -78,6 +82,8 @@ struct Unit {
     scale: f64,
     origin: f64,
 }
+
+const STANDARD_GRAVITY: f64 = 9.806_65;
 
 impl Unit {
     fn linear(symbol: &'static str, dimension: Dimension, scale: f64) -> Self {
@@ -116,6 +122,9 @@ impl Unit {
             "MWh" => return Ok(Self::linear("MWh", Energy, 3_600_000_000.)),
             "mW" => return Ok(Self::linear("mW", Power, 0.001)),
             "MW" => return Ok(Self::linear("MW", Power, 1_000_000.)),
+            "kN" => return Ok(Self::linear("kN", Force, 1000.)),
+            "mN" => return Ok(Self::linear("mN", Force, 0.001)),
+            "MN" => return Ok(Self::linear("MN", Force, 1_000_000.)),
             _ => {}
         }
         let unit = match name.to_ascii_lowercase().as_str() {
@@ -209,6 +218,28 @@ impl Unit {
             "l/s" | "升/秒" => Self::linear("L/s", VolumeFlow, 0.001),
             "l/min" | "升/分钟" => Self::linear("L/min", VolumeFlow, 0.001 / 60.),
             "ml/s" | "毫升/秒" => Self::linear("mL/s", VolumeFlow, 0.000001),
+            "n" | "牛" | "牛顿" => Self::linear("N", Force, 1.),
+            "千牛" | "千牛顿" => Self::linear("kN", Force, 1000.),
+            "毫牛" | "毫牛顿" => Self::linear("mN", Force, 0.001),
+            "兆牛" | "兆牛顿" => Self::linear("MN", Force, 1_000_000.),
+            "kgf" | "千克力" | "公斤力" => Self::linear("kgf", Force, STANDARD_GRAVITY),
+            "lbf" | "磅力" => Self::linear("lbf", Force, 4.448_221_615_260_5),
+            "dyn" | "达因" => Self::linear("dyn", Force, 1e-5),
+            "m/s²" | "m/s^2" | "m/s2" | "米/秒²" | "米/秒平方" => {
+                Self::linear("m/s²", Acceleration, 1.)
+            }
+            "cm/s²" | "cm/s^2" | "cm/s2" | "gal" | "厘米/秒平方" => {
+                Self::linear("cm/s²", Acceleration, 0.01)
+            }
+            "ft/s²" | "ft/s^2" | "ft/s2" | "英尺/秒平方" => {
+                Self::linear("ft/s²", Acceleration, 0.3048)
+            }
+            "in/s²" | "in/s^2" | "in/s2" | "英寸/秒平方" => {
+                Self::linear("in/s²", Acceleration, 0.0254)
+            }
+            "g0" | "g₀" | "gₙ" | "标准重力加速度" => {
+                Self::linear("g₀", Acceleration, STANDARD_GRAVITY)
+            }
             "" => return Err(ConversionError::Incomplete),
             _ => return Err(ConversionError::UnknownUnit),
         };
@@ -385,6 +416,27 @@ fn format_conversion(amount: f64, source: &Unit, target: &Unit) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_force_and_acceleration_without_confusing_knots_or_mass() {
+        for (query, expected) in [
+            ("1 kgf to N", "9.80665 N"),
+            ("1 lbf to N", "4.4482216152605 N"),
+            ("2 kN to N", "2000 N"),
+            ("2 kn to km/h", "3.704 km/h"),
+            ("500 mN to N", "0.5 N"),
+            ("1 MN to N", "1000000 N"),
+            ("1 g0 to m/s^2", "9.80665 m/s²"),
+            ("1 ft/s² to cm/s²", "30.48 cm/s²"),
+            ("100 gal to m/s2", "1 m/s²"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.to_owned())), "{query}");
+        }
+        assert_eq!(
+            convert("1 g to m/s²"),
+            Some(Err(ConversionError::DifferentDimensions)),
+        );
+    }
 
     #[test]
     fn converts_density_and_volume_flow_using_separate_dimensions() {
