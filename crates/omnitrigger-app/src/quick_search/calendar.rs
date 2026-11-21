@@ -1,4 +1,4 @@
-use chrono::{Datelike, Days, Months, NaiveDate};
+use chrono::{Datelike, Days, Months, NaiveDate, Weekday};
 
 use super::calculator::normalize;
 
@@ -15,7 +15,7 @@ impl DateError {
         match self {
             Self::Incomplete => "可以输入日期、天数或星期几，例如 日期: 今天 星期几",
             Self::InvalidDate => "请输入有效日期，格式为 YYYY-MM-DD",
-            Self::InvalidOperation => "可查星期几、按天周月年加减，或用两个日期相减",
+            Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
             Self::OutOfRange => "结果超出四位年份的日期范围",
         }
     }
@@ -88,6 +88,36 @@ fn weekday_query(input: &str) -> Option<&str> {
         .then_some(date.trim_end())
 }
 
+fn shift_workdays(mut date: NaiveDate, mut amount: u64, subtract: bool) -> Option<NaiveDate> {
+    let is_weekend = |date: NaiveDate| matches!(date.weekday(), Weekday::Sat | Weekday::Sun);
+    let advance = |date: NaiveDate, count| {
+        if subtract {
+            date.checked_sub_days(Days::new(count))
+        } else {
+            date.checked_add_days(Days::new(count))
+        }
+    };
+    if amount == 0 {
+        return Some(date);
+    }
+
+    if is_weekend(date) {
+        // 先到第一天工作日，再整周推进，保留剩余天数的起始星期。
+        while is_weekend(date) {
+            date = advance(date, 1)?;
+        }
+        amount -= 1;
+    }
+    date = advance(date, (amount / 5).checked_mul(7)?)?;
+    for _ in 0..amount % 5 {
+        date = advance(date, 1)?;
+        while is_weekend(date) {
+            date = advance(date, 1)?;
+        }
+    }
+    Some(date)
+}
+
 fn apply_date_offset(
     date: NaiveDate,
     operand: &str,
@@ -97,20 +127,26 @@ fn apply_date_offset(
         .find(|ch: char| !ch.is_ascii_digit())
         .unwrap_or(operand.len());
     let (amount, unit) = operand.split_at(unit_start);
-    let (is_months, multiplier) = match unit.trim().to_ascii_lowercase().as_str() {
+    if amount.is_empty() {
+        return Err(DateError::InvalidOperation);
+    }
+    let count = || amount.parse::<u64>().map_err(|_| DateError::OutOfRange);
+    let unit = unit.trim().to_ascii_lowercase();
+    if matches!(
+        unit.as_str(),
+        "工作日" | "个工作日" | "business day" | "business days" | "workday" | "workdays"
+    ) {
+        return in_range(shift_workdays(date, count()?, subtract));
+    }
+    let (is_months, multiplier) = match unit.as_str() {
         "" | "天" | "d" | "day" | "days" => (false, 1),
         "周" | "星期" | "w" | "week" | "weeks" => (false, 7),
         "月" | "个月" | "mo" | "month" | "months" => (true, 1),
         "年" | "y" | "yr" | "year" | "years" => (true, 12),
         _ => return Err(DateError::InvalidOperation),
     };
-    if amount.is_empty() {
-        return Err(DateError::InvalidOperation);
-    }
-    let amount = amount
-        .parse::<u64>()
-        .ok()
-        .and_then(|amount| amount.checked_mul(multiplier))
+    let amount = count()?
+        .checked_mul(multiplier)
         .ok_or(DateError::OutOfRange)?;
     let adjusted = if is_months {
         let months = u32::try_from(amount)
@@ -181,6 +217,33 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shifts_workdays_in_both_directions_and_excludes_weekends() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            ("2026-11-20 + 1工作日", "2026-11-23"),
+            ("今天 + 5个工作日", "2026-11-27"),
+            ("2026-11-22 - 1 business day", "2026-11-20"),
+            ("2026-11-23 + 9 business days", "2026-12-04"),
+            ("今天 + 0工作日", "2026-11-21"),
+            ("2024-02-28 + 2 workdays", "2024-03-01"),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_date("9999-12-31 + 1工作日", today),
+            Err(DateError::OutOfRange)
+        );
+        assert_eq!(
+            calculate_date("今天 + 18446744073709551615工作日", today),
+            Err(DateError::OutOfRange)
+        );
+    }
 
     #[test]
     fn date_arithmetic_handles_day_offsets_and_signed_differences() {
