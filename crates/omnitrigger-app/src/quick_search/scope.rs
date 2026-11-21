@@ -53,6 +53,7 @@ pub(super) enum Scope {
     Matrix,
     Percentage,
     RatioAllocation,
+    ToolIndex,
     UrlEncoding,
     Path,
 }
@@ -129,7 +130,7 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
     }
 }
 
-fn parse_scope(prefix: &str) -> Option<Scope> {
+pub(super) fn parse_scope(prefix: &str) -> Option<Scope> {
     let scope = match prefix.trim().to_ascii_lowercase().as_str() {
         "触发器" | "trigger" | "triggers" => Scope::Triggers(None),
         "已启用触发器" | "enabled triggers" => {
@@ -194,6 +195,7 @@ fn parse_scope(prefix: &str) -> Option<Scope> {
         "矩阵" | "matrix" => Scope::Matrix,
         "百分比" | "比例" | "percentage" => Scope::Percentage,
         "配比" | "按比例分配" | "ratio allocation" => Scope::RatioAllocation,
+        "工具" | "工具目录" | "tools" => Scope::ToolIndex,
         "网址" | "url" => Scope::UrlEncoding,
         "路径" | "path" => Scope::Path,
         _ => return None,

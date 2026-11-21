@@ -4,7 +4,7 @@ use crate::assets::Icon;
 
 use super::calculator::narrow_ascii_graphic;
 use super::scientific::split_name;
-use super::scope::{scoped_query, Scope};
+use super::scope::{parse_scope, scoped_query, tool_example_keyword, Scope};
 use super::title_rank;
 
 pub(super) struct Example {
@@ -1541,6 +1541,41 @@ pub(super) fn matching_examples(query: &str) -> Vec<usize> {
         .collect();
     matches.sort_unstable();
     matches.into_iter().map(|(_, _, index)| index).collect()
+}
+
+pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
+    static EXAMPLE_SCOPES: OnceLock<Vec<Option<Scope>>> = OnceLock::new();
+    let scopes = EXAMPLE_SCOPES.get_or_init(|| {
+        EXAMPLES
+            .iter()
+            .map(|example| {
+                let (prefix, _) = example.query.split_once([':', '：'])?;
+                tool_example_keyword(prefix)?;
+                scoped_query(example.query).map(|(scope, _)| scope)
+            })
+            .collect()
+    });
+    if let Some(index) = parse_scope(&search_key(query)).and_then(|scope| {
+        scopes
+            .iter()
+            .position(|&candidate| candidate == Some(scope))
+    }) {
+        return vec![index];
+    }
+    let mut seen = Vec::new();
+    matching_examples(query)
+        .into_iter()
+        .filter(|&index| {
+            let Some(scope) = scopes[index] else {
+                return false;
+            };
+            if seen.contains(&scope) {
+                return false;
+            }
+            seen.push(scope);
+            true
+        })
+        .collect()
 }
 
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {

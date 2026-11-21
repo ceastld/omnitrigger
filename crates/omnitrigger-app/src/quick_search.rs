@@ -77,7 +77,9 @@ use conversion::{
 use csv_tools::{transform_csv, CsvError};
 use duration::{convert_duration, DurationError};
 use equation::{solve_equation, solve_linear_system, EquationError};
-use examples::{function_examples, matching_examples, tool_operation_examples, EXAMPLES};
+use examples::{
+    function_examples, matching_examples, tool_index_examples, tool_operation_examples, EXAMPLES,
+};
 use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
 use fraction::{simplify_fraction, FractionError};
@@ -469,6 +471,7 @@ impl Results {
                 return Self::Help(examples);
             }
             return match scope {
+                Scope::ToolIndex => Self::Help(tool_index_examples(term)),
                 Scope::Triggers(filter) => Self::Destinations(
                     matching_triggers(triggers, term, filter)
                         .into_iter()
@@ -2213,6 +2216,31 @@ mod tests {
             matches!(for_query("sqrt(9)", &[]), Results::Value(Ok(value)) if value.text == "3")
         );
         assert!(for_query("sq(", &[]).suggested_input(0).is_none());
+    }
+
+    #[test]
+    fn tool_index_shows_one_representative_example_per_matching_tool() {
+        let Results::Help(items) = for_query("工具：", &[]) else {
+            panic!("未打开工具目录");
+        };
+        let mut scopes = Vec::new();
+        for index in items {
+            let (scope, _) = scoped_query(EXAMPLES[index].query).expect("应有工具前缀");
+            assert!(!scopes.contains(&scope));
+            scopes.push(scope);
+        }
+        for scope in [Scope::Csv, Scope::Vector, Scope::Path, Scope::Date] {
+            assert!(scopes.contains(&scope), "{scope:?}");
+        }
+        let result = for_query("tools: 叉积", &[]);
+        assert_eq!(
+            result.suggested_input(0),
+            Some("向量: 叉积 1/2,0,0; 0,1/3,0")
+        );
+        assert_eq!(result.suggested_input(1), None);
+        let alias = for_query("tools: ＶＥＣＴＯＲ", &[]);
+        assert_eq!(alias.suggested_input(0), Some("向量: 点积 1,2,3; 4,5,6"));
+        assert_eq!(alias.suggested_input(1), None);
     }
 
     #[test]
