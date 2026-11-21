@@ -78,6 +78,7 @@ pub(super) enum PercentageError {
     Incomplete,
     UnknownOperation,
     InvalidOperands,
+    InvalidDiscount,
     ZeroReference,
     OutOfRange,
 }
@@ -86,8 +87,9 @@ impl PercentageError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入操作和两个值，例如 百分比: 变化 200 到 150",
-            Self::UnknownOperation => "可用的操作有 变化、占比 和 百分点",
+            Self::UnknownOperation => "可用的操作有变化、占比、百分点和折前价",
             Self::InvalidOperands => "请输入两个有效的数值，计算百分点时加上 %",
+            Self::InvalidDiscount => "折后金额须非负，折扣须大于 0% 且不超过 100%",
             Self::ZeroReference => "原值或总量不能为零",
             Self::OutOfRange => "结果超出可计算范围",
         }
@@ -106,6 +108,9 @@ pub(super) fn compare_percentages(input: &str) -> Result<String, PercentageError
     let (operation, operands) = input
         .split_once(char::is_whitespace)
         .ok_or(PercentageError::Incomplete)?;
+    if matches!(operation, "折前价" | "original-price") {
+        return original_price(operands);
+    }
     let comparison = match operation {
         "变化" | "change" => Comparison::Change,
         "占比" | "share" => Comparison::Share,
@@ -172,9 +177,75 @@ fn ratio_percent(value: f64, reference: f64) -> f64 {
     }
 }
 
+fn original_price(operands: &str) -> Result<String, PercentageError> {
+    let (paid, discount) = operands
+        .split_once('按')
+        .or_else(|| operands.split_once(" at "))
+        .ok_or(PercentageError::Incomplete)?;
+    let (paid, discount) = (paid.trim(), discount.trim());
+    if paid.is_empty() || discount.is_empty() {
+        return Err(PercentageError::Incomplete);
+    }
+    let (rate, scale) = if let Some(rate) = discount.strip_suffix('折') {
+        (rate, 10.)
+    } else if let Some(rate) = discount.strip_suffix('%') {
+        (rate, 100.)
+    } else {
+        return Err(PercentageError::InvalidDiscount);
+    };
+    let paid = evaluate(paid).map_err(|_| PercentageError::InvalidDiscount)?;
+    let rate = evaluate(rate.trim()).map_err(|_| PercentageError::InvalidDiscount)?;
+    if paid < 0. || !(0. ..=scale).contains(&rate) || rate == 0. {
+        return Err(PercentageError::InvalidDiscount);
+    }
+    let fraction = rate / scale;
+    let amount = if fraction < f64::MIN_POSITIVE {
+        // 折扣极小时先相除，避免比例下溢到零或损失有效位。
+        paid / rate * scale
+    } else {
+        paid / fraction
+    };
+    format_result(amount).map_err(|_| PercentageError::OutOfRange)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovers_an_original_amount_from_a_discounted_amount() {
+        for (query, expected) in [
+            ("折前价 170 按 8.5折", "200"),
+            ("original-price (160+10) at 85%", "200"),
+            ("折前价 85 按 １００％", "85"),
+            ("折前价 0 按 5e-324%", "0"),
+        ] {
+            assert_eq!(
+                compare_percentages(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in [
+            "折前价 170 按 0折",
+            "折前价 170 按 101%",
+            "折前价 -170 按 8.5折",
+        ] {
+            assert_eq!(
+                compare_percentages(query),
+                Err(PercentageError::InvalidDiscount),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            compare_percentages("折前价 170 按"),
+            Err(PercentageError::Incomplete)
+        );
+        assert_eq!(
+            compare_percentages("折前价 1e308 按 1%"),
+            Err(PercentageError::OutOfRange)
+        );
+    }
 
     #[test]
     fn calculates_signed_change_share_and_percentage_points() {

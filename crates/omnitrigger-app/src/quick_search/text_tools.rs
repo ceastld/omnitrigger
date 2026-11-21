@@ -99,6 +99,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "正则替换" | "regex-replace" => return replace_regex(text),
         "按行拼接" | "join-lines" => return join_lines(text),
         "拆分成行" | "split-lines" => return split_lines(text),
+        "逐行加前缀" | "prefix-lines" => return decorate_lines(text, true),
+        "逐行加后缀" | "suffix-lines" => return decorate_lines(text, false),
         "取列" | "column" => return select_text_column(text),
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
@@ -462,6 +464,33 @@ fn join_lines(input: &str) -> Result<String, TextError> {
     Ok(lines.join(&delimiter))
 }
 
+fn decorate_lines(input: &str, prepend: bool) -> Result<String, TextError> {
+    let (decoration, text) = quoted_text_argument(input)?;
+    let lines: Vec<_> = text.lines().collect();
+    let content_bytes = lines.iter().map(|line| line.len()).sum::<usize>();
+    let result_bytes = content_bytes
+        .saturating_add(lines.len().saturating_sub(1))
+        .saturating_add(decoration.len().saturating_mul(lines.len()));
+    if result_bytes > MAX_EXPANDED_TEXT_BYTES {
+        return Err(TextError::ResultTooLarge);
+    }
+    let (prefix, suffix) = if prepend {
+        (decoration.as_str(), "")
+    } else {
+        ("", decoration.as_str())
+    };
+    let mut result = String::with_capacity(result_bytes);
+    for (index, line) in lines.into_iter().enumerate() {
+        if index > 0 {
+            result.push('\n');
+        }
+        result.push_str(prefix);
+        result.push_str(line);
+        result.push_str(suffix);
+    }
+    Ok(result)
+}
+
 fn split_lines(input: &str) -> Result<String, TextError> {
     let (delimiter, text) = quoted_text_argument(input)?;
     if delimiter.is_empty() {
@@ -588,6 +617,20 @@ fn replace_regex(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decorates_each_line_and_bounds_the_expanded_text() {
+        for (query, expected) in [
+            ("逐行加前缀 \"- \" \"苹果\r\n\r\n梨\"", "- 苹果\n- \n- 梨"),
+            ("逐行加后缀 \"。\" 苹果\n梨", "苹果。\n梨。"),
+            ("prefix-lines \"\\t\" \" a \n b \"", "\t a \n\t b "),
+            ("suffix-lines \"!\" \"\"", ""),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+        let large = format!("逐行加前缀 \"{}\" {}", "x".repeat(1024), "A\n".repeat(1100));
+        assert_eq!(transform_text(&large), Err(TextError::ResultTooLarge));
+    }
 
     #[test]
     fn selects_a_one_based_column_in_each_line_including_empty_fields() {

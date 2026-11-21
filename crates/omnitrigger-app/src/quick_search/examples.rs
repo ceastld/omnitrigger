@@ -306,6 +306,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "查询下周五的日期",
+        query: "日期: 下周五",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按周推算日期",
         query: "日期: 今天 + 2周",
     },
@@ -826,6 +831,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "给每行加前缀",
+        query: "文本: 逐行加前缀 \"- \" 苹果\n梨",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "给每行加后缀",
+        query: "文本: 逐行加后缀 \"。\" 苹果\n梨",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "保留符合正则表达式的行",
         query: "文本: 正则保留行 \"^[0-9]+$\" 42\nA3\n007",
     },
@@ -1013,6 +1028,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "计算变化率",
         query: "百分比: 变化 200 到 150",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按折扣反推折前价",
+        query: "百分比: 折前价 170 按 8.5折",
     },
     Example {
         icon: Icon::Terminal,

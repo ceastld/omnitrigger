@@ -111,6 +111,11 @@ fn date_operand(input: &str, today: NaiveDate) -> Result<(NaiveDate, &str), Date
         let date = today.checked_add_signed(TimeDelta::days(i64::from(offset)));
         return Ok((in_range(date)?, rest));
     }
+    if let Some((week, weekday, rest)) = relative_weekday(input) {
+        let days = days_to_week_start(today, week) + i64::from(weekday.num_days_from_monday());
+        let date = today.checked_add_signed(TimeDelta::days(days));
+        return Ok((in_range(date)?, rest));
+    }
     if let Some((year, month, day, rest)) = written_date_prefix(input) {
         let date = NaiveDate::from_ymd_opt(year, month, day).ok_or(DateError::InvalidDate)?;
         return Ok((date, rest));
@@ -229,6 +234,38 @@ fn relative_period(input: &str) -> Option<RelativePeriod> {
     }
 }
 
+fn relative_weekday(input: &str) -> Option<(i8, Weekday, &str)> {
+    let (week, rest) = input.split_at_checked(3)?;
+    let week = match week {
+        "本" | "这" => 0,
+        "上" => -1,
+        "下" => 1,
+        _ => return None,
+    };
+    let rest = rest
+        .strip_prefix('周')
+        .or_else(|| rest.strip_prefix("星期"))?;
+    let (day, tail) = rest.trim_start().split_at_checked(3)?;
+    Some((week, chinese_weekday(day)?, tail.trim()))
+}
+
+fn days_to_week_start(today: NaiveDate, week: i8) -> i64 {
+    i64::from(week) * 7 - i64::from(today.weekday().num_days_from_monday())
+}
+
+fn chinese_weekday(input: &str) -> Option<Weekday> {
+    Some(match input {
+        "一" => Weekday::Mon,
+        "二" => Weekday::Tue,
+        "三" => Weekday::Wed,
+        "四" => Weekday::Thu,
+        "五" => Weekday::Fri,
+        "六" => Weekday::Sat,
+        "日" | "天" => Weekday::Sun,
+        _ => return None,
+    })
+}
+
 pub(super) fn looks_like_date_query(query: &str) -> bool {
     let input = normalize(query);
     let input = input.trim();
@@ -254,6 +291,7 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
     {
         return date.is_empty()
             || relative_day(date).is_some_and(|(_, rest)| date_tail(rest))
+            || relative_weekday(date).is_some_and(|(_, _, rest)| date_tail(rest))
             || iso_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest))
             || iso_week_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest))
             || written_date_prefix(date).is_some_and(|(_, _, _, rest)| date_tail(rest));
@@ -264,6 +302,7 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
             .and_then(|year| iso_year(year.trim_end()))
             .is_some()
         || relative_day(input).is_some_and(|(_, rest)| date_tail(rest))
+        || relative_weekday(input).is_some_and(|(_, _, rest)| date_tail(rest))
         || (input.get(4..).is_some_and(|rest| rest.starts_with('年'))
             && written_date_prefix(input).is_some_and(|(_, _, _, rest)| date_tail(rest)))
 }
@@ -315,19 +354,11 @@ fn weekday_occurrence(year: i32, month: u32, rule: &str) -> Result<String, DateE
         ),
     };
     let label = label.trim_start();
-    let day = match label
+    let day = label
         .strip_prefix("星期")
         .or_else(|| label.strip_prefix('周'))
-    {
-        Some("一") => Weekday::Mon,
-        Some("二") => Weekday::Tue,
-        Some("三") => Weekday::Wed,
-        Some("四") => Weekday::Thu,
-        Some("五") => Weekday::Fri,
-        Some("六") => Weekday::Sat,
-        Some("日" | "天") => Weekday::Sun,
-        _ => return Err(DateError::InvalidWeekdayOccurrence),
-    };
+        .and_then(chinese_weekday)
+        .ok_or(DateError::InvalidWeekdayOccurrence)?;
     let start = NaiveDate::from_ymd_opt(year, month, 1).ok_or(DateError::InvalidDate)?;
     let day_number = day.num_days_from_monday();
     let date = if let Some(ordinal) = ordinal {
@@ -523,7 +554,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     }
     match relative_period(input) {
         Some(RelativePeriod::Week(offset)) => {
-            let days = i64::from(offset) * 7 - i64::from(today.weekday().num_days_from_monday());
+            let days = days_to_week_start(today, offset);
             let monday = today
                 .checked_add_signed(TimeDelta::days(days))
                 .ok_or(DateError::OutOfRange)?;
@@ -592,6 +623,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     if subtract
         && (operand.get(4..5) == Some("-")
             || relative_day(operand).is_some()
+            || relative_weekday(operand).is_some()
             || written_date_prefix(operand).is_some())
     {
         let (other, suffix) = date_operand(operand, today)?;
@@ -771,6 +803,13 @@ mod tests {
             ("本周", "2026-12-28 至 2027-01-03"),
             ("上星期", "2026-12-21 至 2026-12-27"),
             ("NEXT WEEK", "2027-01-04 至 2027-01-10"),
+            ("本周一", "2026-12-28"),
+            ("上星期五", "2026-12-25"),
+            ("这周天", "2027-01-03"),
+            ("下周五", "2027-01-08"),
+            ("下周五 星期几", "星期五"),
+            ("下周三 + 2天", "2027-01-08"),
+            ("下周五 - 本周五", "7 天"),
         ] {
             assert!(looks_like_date_query(query), "{query}");
             assert_eq!(
