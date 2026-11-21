@@ -19,6 +19,28 @@ pub(super) enum Scope {
 
 pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
     let (prefix, term) = query.split_once([':', '：'])?;
+    Some((parse_scope(prefix)?, term.trim()))
+}
+
+pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
+    match query {
+        "计算器" | "calculator" => return Some("计算"),
+        "单位换算" | "换算" | "convert" | "units" => return Some("换算"),
+        _ => {}
+    }
+    match parse_scope(query)? {
+        Scope::CalculationHistory => Some("算式历史:"),
+        Scope::Date => Some("日期:"),
+        Scope::Duration => Some("时长:"),
+        Scope::Timestamp => Some("时间戳"),
+        Scope::Color => Some("颜色:"),
+        Scope::TextCount => Some("字数:"),
+        Scope::Fraction => Some("分数:"),
+        _ => None,
+    }
+}
+
+fn parse_scope(prefix: &str) -> Option<Scope> {
     let scope = match prefix.trim().to_ascii_lowercase().as_str() {
         "触发器" | "trigger" | "triggers" => Scope::Triggers,
         "轮盘" | "轨道轮盘" | "wheel" | "wheels" => Scope::Wheels,
@@ -37,5 +59,5 @@ pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
         "分数" | "fraction" => Scope::Fraction,
         _ => return None,
     };
-    Some((scope, term.trim()))
+    Some(scope)
 }

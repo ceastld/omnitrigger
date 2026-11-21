@@ -49,7 +49,7 @@ use omnitrigger_windows::ShortcutTarget;
 use presets::matching_presets;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use recent::RecentDestinations;
-use scope::{scoped_query, Scope};
+use scope::{scoped_query, tool_example_keyword, Scope};
 use settings_sections::matching_settings;
 use text_count::{count_text, TextCountError};
 use timestamp::{convert_timestamp, TimestampError};
@@ -422,6 +422,12 @@ impl Results {
                 .into_iter()
                 .map(Destination::SettingsSection),
         );
+        if destinations.is_empty() {
+            return tool_example_keyword(&query).map_or_else(
+                || Self::Destinations(destinations),
+                |keyword| Self::Help(matching_examples(keyword)),
+            );
+        }
         Self::Destinations(destinations)
     }
 
@@ -1125,6 +1131,39 @@ mod tests {
             &[],
             &RecentSearch::default(),
         )
+    }
+
+    #[test]
+    fn tool_names_offer_examples_when_there_are_no_page_matches() {
+        for (query, prefix) in [
+            ("字数", "字数:"),
+            ("FrAcTiOn", "分数:"),
+            ("date", "日期:"),
+            ("COLOUR", "颜色:"),
+        ] {
+            let Results::Help(items) = for_query(query, &[]) else {
+                panic!("未显示对应工具的示例：{query}");
+            };
+            assert!(!items.is_empty(), "{query}");
+            assert!(items
+                .iter()
+                .all(|&index| EXAMPLES[index].query.starts_with(prefix)));
+        }
+        let mut bindings = crate::settings::defaults();
+        bindings[0].message = "分数".into();
+        let triggers = [SearchTrigger::from_binding(&bindings[0])];
+        assert!(matches!(
+            for_query("计算器", &[]),
+            Results::Help(items) if items.iter().any(|&index| EXAMPLES[index].query == "2**10")
+        ));
+        assert!(matches!(
+            for_query("units", &[]),
+            Results::Help(items) if items.iter().any(|&index| EXAMPLES[index].query == "10 km to mi")
+        ));
+        assert!(matches!(
+            for_query("分数", &triggers),
+            Results::Destinations(items) if items == [Destination::Trigger(bindings[0].spec.id)]
+        ));
     }
 
     #[test]
