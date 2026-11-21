@@ -246,6 +246,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "读取 ISO 日时长",
+        query: "时长: P1DT2.5S",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "把时长转成 ISO 格式",
+        query: "时长: 1天2.5秒 to iso",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "计算跨午夜的时长",
         query: "时长: 23:45 到 01:15",
     },

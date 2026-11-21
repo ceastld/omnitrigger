@@ -25,9 +25,9 @@ impl DurationError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入时长，例如 时长: 01:30:00 或 时长: 5400秒",
-            Self::Invalid => "使用分:秒、时:分:秒或带单位的时长，可加减或乘除整数",
+            Self::Invalid => "使用分:秒、时:分:秒、带单位的时长或 PnDTnHnMnS",
             Self::InvalidClockTime => "输入两个 24 小时时刻，例如 23:45 到 01:15",
-            Self::InvalidUnit => "请选择时长单位 s、ms、µs、ns、min、h 或 d",
+            Self::InvalidUnit => "请选择 s、ms、µs、ns、min、h、d 或 iso",
             Self::OutOfRange => "时长超出可转换范围",
             Self::Precision => "时长最小可精确到 1 纳秒",
             Self::DivisionByZero => "时长不能除以零",
@@ -146,6 +146,7 @@ fn format_duration_unit(nanos: u128, sign: &str, output: &str) -> Result<String,
         "min" | "m" | "分" | "分钟" => ("min", 60 * NANOS_PER_SECOND, None),
         "h" | "时" | "小时" => ("h", 3_600 * NANOS_PER_SECOND, None),
         "d" | "天" => ("d", NANOS_PER_DAY, None),
+        "iso" | "iso8601" => return Ok(format_iso_duration(nanos, sign)),
         _ => return Err(DurationError::InvalidUnit),
     };
     let amount = if let Some(digits) = digits {
@@ -156,6 +157,34 @@ fn format_duration_unit(nanos: u128, sign: &str, output: &str) -> Result<String,
         format_result(nanos as f64 / divisor as f64).map_err(|_| DurationError::OutOfRange)?
     };
     Ok(format!("{sign}{amount} {symbol}"))
+}
+
+fn format_iso_duration(nanos: u128, sign: &str) -> String {
+    let days = nanos / NANOS_PER_DAY;
+    let rest = nanos % NANOS_PER_DAY;
+    let seconds = rest / NANOS_PER_SECOND;
+    let fraction = rest % NANOS_PER_SECOND;
+    let mut output = format!("{sign}P");
+    if days != 0 {
+        output.push_str(&format!("{days}D"));
+        if rest == 0 {
+            return output;
+        }
+    }
+    output.push('T');
+    let hours = seconds / 3_600;
+    let minutes = seconds / 60 % 60;
+    let seconds = seconds % 60;
+    if hours != 0 {
+        output.push_str(&format!("{hours}H"));
+    }
+    if minutes != 0 {
+        output.push_str(&format!("{minutes}M"));
+    }
+    if seconds != 0 || fraction != 0 || hours == 0 && minutes == 0 {
+        output.push_str(&format!("{seconds}{}S", fraction_suffix(fraction, 9)));
+    }
+    output
 }
 
 pub(super) fn elapsed_duration(input: &str) -> Result<Duration, DurationError> {
@@ -171,7 +200,9 @@ fn parse_term(term: &str) -> Result<u128, DurationError> {
     let end = term.find(SCALE_OPERATORS).unwrap_or(term.len());
     let (duration, scale) = term.split_at(end);
     let duration = duration.trim_end();
-    let nanos = if duration.contains(':') {
+    let nanos = if let Some(iso) = duration.strip_prefix('p') {
+        parse_iso_duration(iso)?
+    } else if duration.contains(':') {
         parse_clock(duration)?
     } else {
         parse_units(duration)?
@@ -190,6 +221,47 @@ fn parse_term(term: &str) -> Result<u128, DurationError> {
         return Err(DurationError::Precision);
     }
     Ok(nanos / factor)
+}
+
+fn parse_iso_duration(input: &str) -> Result<u128, DurationError> {
+    let (date, time) = input
+        .split_once('t')
+        .map_or((input, None), |(date, time)| (date, Some(time)));
+    let mut total = match date.strip_suffix('d') {
+        Some(days) => bounded_duration(number(days)?.checked_mul(NANOS_PER_DAY))?,
+        None if date.is_empty() => 0,
+        None => return Err(DurationError::Invalid),
+    };
+    let Some(mut time) = time else {
+        return if date.is_empty() {
+            Err(DurationError::Incomplete)
+        } else {
+            Ok(total)
+        };
+    };
+    if time.is_empty() {
+        return Err(DurationError::Incomplete);
+    }
+    for (suffix, nanos_per_unit) in [
+        ('h', 3_600 * NANOS_PER_SECOND),
+        ('m', 60 * NANOS_PER_SECOND),
+        ('s', NANOS_PER_SECOND),
+    ] {
+        if let Some((amount, next)) = time.split_once(suffix) {
+            let nanos = if suffix == 's' {
+                parse_amount(amount, nanos_per_unit)?
+            } else {
+                bounded_duration(number(amount)?.checked_mul(nanos_per_unit))?
+            };
+            total = bounded_duration(total.checked_add(nanos))?;
+            time = next;
+        }
+    }
+    if time.is_empty() {
+        Ok(total)
+    } else {
+        Err(DurationError::Invalid)
+    }
 }
 
 fn bounded_duration(nanos: Option<u128>) -> Result<u128, DurationError> {
@@ -398,6 +470,36 @@ mod tests {
             convert_duration("18446744073709551615h"),
             Err(DurationError::OutOfRange)
         );
+    }
+
+    #[test]
+    fn converts_iso_day_time_durations_without_rounding() {
+        for (query, expected) in [
+            ("P1DT2.5S", "24:00:02.5"),
+            ("PT.5S", "00:00:00.5"),
+            ("PT90M to iso", "PT1H30M"),
+            ("1天2.5秒 to iso", "P1DT2.5S"),
+            ("0ns to iso", "PT0S"),
+            ("-2d to iso8601", "-P2D"),
+            ("P1D - PT1S", "23:59:59"),
+            ("PT0.000000001S * 8 to iso", "PT0.000000008S"),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("P", DurationError::Incomplete),
+            ("P1DT", DurationError::Incomplete),
+            ("P2M", DurationError::Invalid),
+            ("P1W", DurationError::Invalid),
+            ("PT1M1H", DurationError::Invalid),
+            ("PT1.5H", DurationError::Invalid),
+            ("PT1H1H", DurationError::Invalid),
+            ("PT0.0000000001S", DurationError::Precision),
+        ] {
+            assert_eq!(convert_duration(query), Err(error), "{query}");
+        }
+        let max = format_iso_duration(MAX_DURATION_NANOS, "").to_ascii_lowercase();
+        assert_eq!(parse_term(&max), Ok(MAX_DURATION_NANOS));
     }
 
     #[test]
