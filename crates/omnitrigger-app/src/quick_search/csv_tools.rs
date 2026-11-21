@@ -1,4 +1,7 @@
-use std::{borrow::Cow, collections::HashSet};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use serde::ser::{Serialize, SerializeMap, Serializer};
 
@@ -11,6 +14,7 @@ pub(super) enum CsvError {
     DifferentColumnCount,
     InvalidHeader,
     InvalidColumns,
+    InvalidColumnValue,
     ColumnOutOfRange,
     Serialization,
 }
@@ -19,14 +23,13 @@ impl CsvError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::MissingInput => "在操作名后粘贴表格，可用换行开始数据",
-            Self::UnknownOperation => {
-                "可用 转JSON、对象、Markdown、转置、转TSV、从TSV、选列、去重 或 按列去重"
-            }
+            Self::UnknownOperation => "输入 ? CSV 查看可用操作",
             Self::UnclosedQuote => "字段的双引号尚未闭合",
             Self::InvalidSeparator => "检查引号和分隔符，引号内的双引号用两个双引号表示",
             Self::DifferentColumnCount => "每行的列数须一致",
             Self::InvalidHeader => "CSV 表头的列名须非空且唯一",
             Self::InvalidColumns => "用逗号隔开互不重复的列号，列号从 1 开始",
+            Self::InvalidColumnValue => "请输入列号和带双引号的值，再粘贴表格",
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::Serialization => "无法生成 JSON",
         }
@@ -43,11 +46,18 @@ enum Operation {
     SelectColumns(Vec<usize>),
     DeduplicateRows,
     DeduplicateByColumns(Vec<usize>),
+    FilterColumn {
+        column: usize,
+        value: String,
+        keep_matches: bool,
+    },
+    CountByColumns(Vec<usize>),
 }
 
 pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
     let (operation, mut input) = split_argument(query).ok_or(CsvError::MissingInput)?;
-    let kind = match operation.to_ascii_lowercase().as_str() {
+    let operation = operation.to_ascii_lowercase();
+    let kind = match operation.as_str() {
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
         "markdown" | "表格" => Operation::Markdown,
@@ -64,6 +74,20 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             let (columns, data) = column_arguments(input)?;
             input = data;
             Operation::DeduplicateByColumns(columns)
+        }
+        "筛选" | "filter" | "排除" | "exclude" => {
+            let (column, value, data) = column_value_arguments(input)?;
+            input = data;
+            Operation::FilterColumn {
+                column,
+                value,
+                keep_matches: matches!(operation.as_str(), "筛选" | "filter"),
+            }
+        }
+        "分组计数" | "group-count" => {
+            let (columns, data) = column_arguments(input)?;
+            input = data;
+            Operation::CountByColumns(columns)
         }
         _ => return Err(CsvError::UnknownOperation),
     };
@@ -90,6 +114,12 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
         }
         Operation::DeduplicateByColumns(columns) => deduplicate_by_columns(&rows, &columns),
+        Operation::FilterColumn {
+            column,
+            value,
+            keep_matches,
+        } => filter_column(&rows, column, &value, keep_matches),
+        Operation::CountByColumns(columns) => count_by_columns(&rows, &columns),
     }
 }
 
@@ -106,25 +136,44 @@ fn column_arguments(input: &str) -> Result<(Vec<usize>, &str), CsvError> {
     Ok((column_indices(columns)?, data))
 }
 
+fn column_value_arguments(input: &str) -> Result<(usize, String, &str), CsvError> {
+    let (column, input) = split_argument(input).ok_or(CsvError::InvalidColumnValue)?;
+    let column = column_index(column)?;
+    let input = input.trim_start();
+    let mut values = serde_json::Deserializer::from_str(input).into_iter::<String>();
+    let value = values
+        .next()
+        .ok_or(CsvError::InvalidColumnValue)?
+        .map_err(|_| CsvError::InvalidColumnValue)?;
+    let (_, data) = split_argument(&input[values.byte_offset()..])
+        .filter(|(argument, _)| argument.is_empty())
+        .ok_or(CsvError::InvalidColumnValue)?;
+    Ok((column, value, data))
+}
+
 fn column_indices(input: &str) -> Result<Vec<usize>, CsvError> {
     let mut seen = HashSet::new();
     input
         .split(',')
         .map(|part| {
-            if !part.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Err(CsvError::InvalidColumns);
-            }
-            let index = part
-                .parse::<usize>()
-                .ok()
-                .and_then(|number| number.checked_sub(1))
-                .ok_or(CsvError::InvalidColumns)?;
+            let index = column_index(part)?;
             if !seen.insert(index) {
                 return Err(CsvError::InvalidColumns);
             }
             Ok(index)
         })
         .collect()
+}
+
+fn column_index(input: &str) -> Result<usize, CsvError> {
+    if !input.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(CsvError::InvalidColumns);
+    }
+    input
+        .parse::<usize>()
+        .ok()
+        .and_then(|number| number.checked_sub(1))
+        .ok_or(CsvError::InvalidColumns)
 }
 
 fn select_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, CsvError> {
@@ -141,14 +190,55 @@ fn deduplicate_by_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<Str
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     validate_column_width(columns, header.len())?;
     let mut seen = HashSet::new();
-    let unique_records = records.iter().filter(|row| {
-        let key: Vec<_> = columns.iter().map(|&index| row[index].as_str()).collect();
-        seen.insert(key)
-    });
+    let unique_records = records
+        .iter()
+        .filter(|row| seen.insert(column_key(row, columns)));
     Ok(write_rows(
         std::iter::once(header).chain(unique_records),
         ',',
     ))
+}
+
+fn filter_column(
+    rows: &[Vec<String>],
+    column: usize,
+    value: &str,
+    keep_matches: bool,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    validate_column_width(&[column], header.len())?;
+    let matched = records
+        .iter()
+        .filter(|row| (row[column] == value) == keep_matches);
+    Ok(write_rows(std::iter::once(header).chain(matched), ','))
+}
+
+fn count_by_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    validate_column_width(columns, header.len())?;
+    let mut groups = HashMap::new();
+    for (position, row) in records.iter().enumerate() {
+        groups
+            .entry(column_key(row, columns))
+            .and_modify(|(_, count)| *count += 1)
+            .or_insert((position, 1_usize));
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_unstable_by_key(|(_, (position, _))| *position);
+    let mut output = Vec::with_capacity(groups.len() + 1);
+    let mut header: Vec<_> = columns.iter().map(|&index| header[index].clone()).collect();
+    header.push("计数".to_owned());
+    output.push(header);
+    output.extend(groups.into_iter().map(|(key, (_, count))| {
+        let mut row: Vec<_> = key.into_iter().map(str::to_owned).collect();
+        row.push(count.to_string());
+        row
+    }));
+    Ok(write_rows(&output, ','))
+}
+
+fn column_key<'a>(row: &'a [String], columns: &[usize]) -> Vec<&'a str> {
+    columns.iter().map(|&index| row[index].as_str()).collect()
 }
 
 fn validate_column_width(columns: &[usize], width: usize) -> Result<(), CsvError> {
@@ -385,6 +475,59 @@ mod tests {
         assert_eq!(
             transform_csv("按列去重 1,1 编号"),
             Err(CsvError::InvalidColumns)
+        );
+    }
+
+    #[test]
+    fn filters_csv_by_exact_quoted_column_value_and_retains_the_header() {
+        let csv =
+            "编号,状态,备注\r\n001,完成,\"茶,咖啡\"\r\n002,完成 ,待清理\r\n003,完成,\r\n004,,未填";
+        for (arguments, expected) in [
+            (
+                r#"筛选 2 "完成""#,
+                "编号,状态,备注\r\n001,完成,\"茶,咖啡\"\r\n003,完成,\"\"",
+            ),
+            (
+                r#"exclude 2 "完成""#,
+                "编号,状态,备注\r\n002,完成 ,待清理\r\n004,\"\",未填",
+            ),
+            (r#"filter 2 """#, "编号,状态,备注\r\n004,\"\",未填"),
+            (r#"筛选 2 "遗漏""#, "编号,状态,备注"),
+        ] {
+            assert_eq!(
+                transform_csv(&format!("{arguments}\r\n\u{feff}{csv}")).as_deref(),
+                Ok(expected)
+            );
+        }
+        assert_eq!(
+            transform_csv("筛选 1 \"值\"  有空格,状态\r\n值,完成").as_deref(),
+            Ok(" 有空格,状态\r\n值,完成")
+        );
+        assert_eq!(
+            transform_csv(r#"筛选 1 "值"a,b"#),
+            Err(CsvError::InvalidColumnValue)
+        );
+        assert_eq!(
+            transform_csv(r#"筛选 3 "值" a,b"#),
+            Err(CsvError::ColumnOutOfRange)
+        );
+    }
+
+    #[test]
+    fn counts_csv_column_combinations_in_first_seen_order() {
+        let input =
+            "分组计数 2,1 编号,地区,内容\n001,南,甲\n002,,乙\n001,北,丙\n001,南,丁\n002,\"\",戊";
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("地区,编号,计数\r\n南,001,2\r\n\"\",002,2\r\n北,001,1")
+        );
+        assert_eq!(
+            transform_csv("group-count 1 组,内容").as_deref(),
+            Ok("组,计数")
+        );
+        assert_eq!(
+            transform_csv("分组计数 3 组,内容"),
+            Err(CsvError::ColumnOutOfRange)
         );
     }
 

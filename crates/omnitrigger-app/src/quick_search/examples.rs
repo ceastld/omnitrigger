@@ -1401,6 +1401,21 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 按列去重 1,2 编号,区域,备注\n001,东,\"茶,咖啡\"\n001,东,第二条\n001,西,第三条",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "按单元格的完整内容筛选 CSV 行",
+        query: "CSV: 筛选 2 \"完成\" 编号,状态\n001,完成\n002,待办\n003,完成",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "排除单元格内容相同的 CSV 行",
+        query: "CSV: 排除 2 \"完成\" 编号,状态\n001,完成\n002,待办\n003,完成",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按指定 CSV 列的组合计数",
+        query: "CSV: 分组计数 2 编号,状态\n001,完成\n002,待办\n003,完成",
+    },
+    Example {
         icon: Icon::Layers,
         title: "从路径提取文件名",
         query: r#"路径: 文件名 "C:\工作\发布 包.tar.gz""#,
