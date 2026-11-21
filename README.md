@@ -204,6 +204,7 @@
 - 输入 `油耗: 7.5 L/100 km` 得到 `31.36 mpg US · 37.66 mpg UK`。用 `油耗: 32 mpg-us to L/100 km` 得到 `7.35 L/100 km`。英里每加仑可用 `mpg-us` 或 `mpg-uk` 指定制式，也支持 `km/L`，结果保留两位小数。单独换算容量时，`1 impgal to L` 得到 `4.54609 L`。 [NIST 油耗换算](https://www.nist.gov/pml/special-publication-811/nist-guide-si-appendix-b-conversion-factors/nist-guide-si-appendix-b9)
 - 输入 `宽高比: 1920×1080` 得到 `16:9`。加上 `按宽2560` 可按原宽高比得到 `2560 × 1440`，也可用 `按高720` 指定高度。另一边四舍五入到整数像素。
 - 输入 `单价: 36 元 / 750 g to kg` 得到 `48 元 / kg`，也可以指定分量，例如 `单价: 37.5 元 / 750 g to 500 g` 得到 `25 元 / 500 g`。支持长度、重量、时间、面积、体积、数据量和能量单位，结果沿用输入的货币符号或代码。
+- 输入 `人民币: 1409.50` 得到 `人民币壹仟肆佰零玖元伍角整`。支持 0 至 999,999,999,999.99 元、小数点后最多两位，以及用逗号分隔的千位。 [《支付结算办法》附一](https://policy.mofcom.gov.cn/claw/clawContent.shtml?id=38763)
 - 输入 `像素密度: 3840×2160 @ 27 in` 得到 `163.18 PPI · 59.77 × 33.62 cm`。尺寸指屏幕对角线，按正方形像素算出屏幕宽和高。也可使用 `按 27英寸` 或输入厘米尺寸。
 - 输入 `纸张: B5` 得到 `176 × 250 mm`，输入 `纸张: A4 @ 300 dpi` 得到 `2480 × 3508 px`。用 `纸张: A4 to A5` 可算出能放入目标纸张的等比缩放比例 `70.47%`，结果向下保留两位小数。纸型默认纵向，可加 `横向`。 [ISO 216 尺寸表](https://preview.sist.si/sist-preview/36631/c0883203ea25445c9992bb09343620c5/ISO-216-2007.pdf) [Letter 与 Legal 尺寸](https://www.ncbi.nlm.nih.gov/IEB/ToolBox/CPP_DOC/doxyhtml/print__media_8hpp_source.html#l00084)
 - 输入 `网段: 192.0.2.137/26` 可查看网段、掩码、地址范围和地址数。也可用点分十进制掩码或输入 IPv6 前缀，例如 `网段: 2001:db8::/64 包含 2001:db8::1`。 [IPv4 前缀](https://www.rfc-editor.org/rfc/rfc4632.html#section-3.1) [IPv6 前缀](https://www.rfc-editor.org/rfc/rfc4291.html#section-2.3)

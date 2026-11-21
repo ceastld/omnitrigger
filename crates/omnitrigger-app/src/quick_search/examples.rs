@@ -236,6 +236,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "把人民币金额转成中文大写",
+        query: "人民币: 1409.50",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "按电压和电阻求电流及功率",
         query: "电路: 5 V, 20 Ω",
     },
@@ -1389,6 +1394,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Pace
         | Scope::FuelEconomy
         | Scope::UnitPrice
+        | Scope::Renminbi
         | Scope::Circuit
         | Scope::Period
         | Scope::AspectRatio
@@ -1460,6 +1466,7 @@ mod tests {
             Scope::Pace,
             Scope::FuelEconomy,
             Scope::UnitPrice,
+            Scope::Renminbi,
             Scope::Circuit,
             Scope::Period,
             Scope::AspectRatio,

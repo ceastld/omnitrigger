@@ -23,6 +23,7 @@ mod presets;
 mod radix;
 mod recent;
 mod rectangle;
+mod renminbi;
 mod scientific;
 mod scope;
 mod settings_sections;
@@ -80,6 +81,7 @@ use presets::matching_presets;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use recent::RecentDestinations;
 use rectangle::{calculate_rectangle, RectangleError};
+use renminbi::{uppercase_renminbi, RenminbiError};
 use scope::{scoped_query, tool_example_keyword, Scope};
 use settings_sections::matching_settings;
 use text_tools::{count_text, transform_text, TextError};
@@ -297,6 +299,7 @@ enum ValueError {
     Rectangle(RectangleError),
     Cidr(CidrError),
     FileMode(FileModeError),
+    Renminbi(RenminbiError),
     Date(DateError),
     Duration(DurationError),
     VideoFrames(VideoFrameError),
@@ -323,6 +326,7 @@ impl ValueError {
             Self::Rectangle(error) => error.message(),
             Self::Cidr(error) => error.message(),
             Self::FileMode(error) => error.message(),
+            Self::Renminbi(error) => error.message(),
             Self::Date(error) => error.message(),
             Self::Duration(error) => error.message(),
             Self::VideoFrames(error) => error.message(),
@@ -349,6 +353,7 @@ impl ValueError {
                 | Self::Rectangle(RectangleError::Incomplete)
                 | Self::Cidr(CidrError::Incomplete)
                 | Self::FileMode(FileModeError::Incomplete)
+                | Self::Renminbi(RenminbiError::Incomplete)
                 | Self::Date(DateError::Incomplete)
                 | Self::Duration(DurationError::Incomplete)
                 | Self::VideoFrames(VideoFrameError::Incomplete)
@@ -484,6 +489,9 @@ impl Results {
                 }
                 Scope::UnitPrice => {
                     Self::text_value(calculate_unit_price(term).map_err(ValueError::Conversion))
+                }
+                Scope::Renminbi => {
+                    Self::text_value(uppercase_renminbi(term).map_err(ValueError::Renminbi))
                 }
                 Scope::Circuit => {
                     Self::text_value(calculate_circuit(term).map_err(ValueError::Conversion))
