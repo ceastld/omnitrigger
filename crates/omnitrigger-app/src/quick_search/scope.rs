@@ -21,6 +21,7 @@ pub(super) enum Scope {
     TextTools,
     Json,
     Fraction,
+    Percentage,
     UrlEncoding,
 }
 
@@ -52,6 +53,7 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
         Scope::TextTools => Some("文本:"),
         Scope::Json => Some("JSON:"),
         Scope::Fraction => Some("分数:"),
+        Scope::Percentage => Some("百分比:"),
         Scope::UrlEncoding => Some("URL:"),
         _ => None,
     }
@@ -90,6 +92,7 @@ fn parse_scope(prefix: &str) -> Option<Scope> {
         "文本" | "文本工具" | "text tools" => Scope::TextTools,
         "json" => Scope::Json,
         "分数" | "fraction" => Scope::Fraction,
+        "百分比" | "比例" | "percentage" => Scope::Percentage,
         "网址" | "url" => Scope::UrlEncoding,
         _ => return None,
     };

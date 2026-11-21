@@ -49,6 +49,7 @@ use examples::{matching_examples, tool_operation_examples, EXAMPLES};
 use fraction::{simplify_fraction, FractionError};
 use json_tools::{transform_json, JsonError};
 use omnitrigger_windows::ShortcutTarget;
+use percentage::{compare_percentages, PercentageError};
 use presets::matching_presets;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use recent::RecentDestinations;
@@ -245,6 +246,7 @@ enum ValueError {
     Text(TextError),
     Json(JsonError),
     Fraction(FractionError),
+    Percentage(PercentageError),
     UrlEncoding(UrlEncodingError),
 }
 
@@ -261,6 +263,7 @@ impl ValueError {
             Self::Text(error) => error.message(),
             Self::Json(error) => error.message(),
             Self::Fraction(error) => error.message(),
+            Self::Percentage(error) => error.message(),
             Self::UrlEncoding(error) => error.message(),
         }
     }
@@ -281,6 +284,7 @@ impl ValueError {
                         | TextError::IncompleteReplacement
                 )
                 | Self::Fraction(FractionError::Incomplete)
+                | Self::Percentage(PercentageError::Incomplete)
                 | Self::UrlEncoding(UrlEncodingError::Incomplete)
                 | Self::Json(JsonError::Incomplete)
         )
@@ -400,6 +404,9 @@ impl Results {
                 Scope::Json => Self::text_value(transform_json(term).map_err(ValueError::Json)),
                 Scope::Fraction => {
                     Self::text_value(simplify_fraction(term).map_err(ValueError::Fraction))
+                }
+                Scope::Percentage => {
+                    Self::text_value(compare_percentages(term).map_err(ValueError::Percentage))
                 }
                 Scope::UrlEncoding => {
                     Self::text_value(convert_url_component(term).map_err(ValueError::UrlEncoding))

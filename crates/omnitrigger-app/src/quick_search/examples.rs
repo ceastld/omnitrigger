@@ -596,6 +596,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算变化百分比",
+        query: "百分比: 变化 200 到 150",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算某个数占总量的百分比",
+        query: "百分比: 占比 18 占 60",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算百分点变化",
+        query: "百分比: 百分点 15% 到 21.5%",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "精确计算分数算式",
         query: "分数: 计算 (1/2+1/3)*6",
     },
@@ -618,8 +633,10 @@ pub(super) fn matching_examples(query: &str) -> Vec<usize> {
 }
 
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
-    if !matches!(scope, Scope::Json | Scope::TextTools | Scope::UrlEncoding)
-        || term.contains(char::is_whitespace)
+    if !matches!(
+        scope,
+        Scope::Json | Scope::TextTools | Scope::UrlEncoding | Scope::Percentage
+    ) || term.contains(char::is_whitespace)
     {
         return None;
     }
