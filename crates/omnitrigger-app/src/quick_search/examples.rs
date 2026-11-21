@@ -561,6 +561,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看 Unicode 码位",
+        query: "文本: 码位 北京",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "Unicode 码位转文字",
+        query: "文本: 码位解码 U+5317 U+4EAC",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "格式化 JSON",
         query: r#"JSON: 格式化 {"名称":"北京","值":1}"#,
     },
@@ -653,12 +663,19 @@ pub(super) fn matching_examples(query: &str) -> Vec<usize> {
 }
 
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
-    if !matches!(
-        scope,
+    match scope {
         Scope::Json | Scope::TextTools | Scope::UrlEncoding | Scope::Percentage
-    ) || term.contains(char::is_whitespace)
-    {
-        return None;
+            if !term.contains(char::is_whitespace) => {}
+        Scope::Date
+        | Scope::Duration
+        | Scope::TransferTime
+        | Scope::Timestamp
+        | Scope::Color
+        | Scope::ColorContrast
+        | Scope::TextCount
+        | Scope::Fraction
+            if term.is_empty() => {}
+        _ => return None,
     }
     let prefix = term.to_ascii_lowercase();
     let items: Vec<_> = EXAMPLES
@@ -672,4 +689,32 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         })
         .collect();
     (!items.is_empty()).then_some(items)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suggests_examples_for_empty_value_scopes_without_taking_over_the_input() {
+        for scope in [
+            Scope::Date,
+            Scope::Duration,
+            Scope::TransferTime,
+            Scope::Timestamp,
+            Scope::Color,
+            Scope::ColorContrast,
+            Scope::TextCount,
+            Scope::Fraction,
+        ] {
+            let items = tool_operation_examples(scope, "").unwrap();
+            assert!(items.into_iter().all(|index| {
+                scoped_query(EXAMPLES[index].query)
+                    .is_some_and(|(other, term)| other == scope && !term.is_empty())
+            }));
+            assert_eq!(tool_operation_examples(scope, "0"), None);
+        }
+        assert_eq!(tool_operation_examples(Scope::CalculationHistory, ""), None);
+        assert_eq!(tool_operation_examples(Scope::Actions, ""), None);
+    }
 }

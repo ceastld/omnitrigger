@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt::Write as _};
 
 use base64::{
     engine::general_purpose::{
@@ -24,6 +24,7 @@ pub(super) enum TextError {
     NullCharacter,
     InvalidBase64,
     InvalidUtf8,
+    InvalidCodePoint,
 }
 
 impl TextError {
@@ -40,6 +41,7 @@ impl TextError {
             Self::NullCharacter => "结果含空字符，无法完整复制",
             Self::InvalidBase64 => "Base64 编码无效",
             Self::InvalidUtf8 => "解码结果不是 UTF-8 文本",
+            Self::InvalidCodePoint => "输入以空格分隔的 Unicode 码位，例如 U+5317 U+4EAC",
         }
     }
 }
@@ -102,8 +104,45 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "base64解码" | "base64-decode" => decode_base64(text, &STANDARD, &STANDARD_NO_PAD),
         "base64url编码" | "base64url-encode" => Ok(URL_SAFE_NO_PAD.encode(text)),
         "base64url解码" | "base64url-decode" => decode_base64(text, &URL_SAFE, &URL_SAFE_NO_PAD),
+        "码位" | "codepoints" => Ok(encode_code_points(text)),
+        "码位解码" | "codepoints-decode" => decode_code_points(text),
         _ => Err(TextError::UnknownOperation),
     }
+}
+
+fn encode_code_points(text: &str) -> String {
+    let mut encoded = String::new();
+    for character in text.chars() {
+        if !encoded.is_empty() {
+            encoded.push(' ');
+        }
+        write!(encoded, "U+{:04X}", u32::from(character)).expect("写入 String 不会出错");
+    }
+    encoded
+}
+
+fn decode_code_points(text: &str) -> Result<String, TextError> {
+    text.split_whitespace()
+        .map(|code| {
+            let digits = code
+                .strip_prefix("U+")
+                .or_else(|| code.strip_prefix("u+"))
+                .ok_or(TextError::InvalidCodePoint)?;
+            if !(1..=6).contains(&digits.len())
+                || !digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(TextError::InvalidCodePoint);
+            }
+            let character = u32::from_str_radix(digits, 16)
+                .ok()
+                .and_then(char::from_u32)
+                .ok_or(TextError::InvalidCodePoint)?;
+            if character == '\0' {
+                return Err(TextError::NullCharacter);
+            }
+            Ok(character)
+        })
+        .collect()
 }
 
 fn decode_base64(
@@ -228,6 +267,30 @@ mod tests {
         );
         assert_eq!(
             transform_text("Base64解码 AA=="),
+            Err(TextError::NullCharacter)
+        );
+    }
+
+    #[test]
+    fn converts_unicode_code_points_without_combining_or_losing_scalars() {
+        for (query, expected) in [
+            ("码位 你👩‍💻", "U+4F60 U+1F469 U+200D U+1F4BB"),
+            ("码位 “ e\u{301} ”", "U+0020 U+0065 U+0301 U+0020"),
+            ("码位解码 u+4f60 U+1F469\nU+200D U+1F4BB", "你👩‍💻"),
+            ("codepoints-decode U+000A U+9", "\n\t"),
+            ("codepoints \"\"", ""),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+        for code in ["U+", "U++0041", "U+D800", "U+110000", "U+0000041", "0041"] {
+            assert_eq!(
+                transform_text(&format!("码位解码 {code}")),
+                Err(TextError::InvalidCodePoint),
+                "{code}"
+            );
+        }
+        assert_eq!(
+            transform_text("码位解码 U+0061 U+0000"),
             Err(TextError::NullCharacter)
         );
     }
