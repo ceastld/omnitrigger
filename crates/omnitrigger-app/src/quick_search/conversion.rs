@@ -28,7 +28,7 @@ impl ConversionError {
             Self::DifferentDimensions => "两个单位不属于同一类型",
             Self::InvalidTransfer => "输入非负的数据量和大于零的数据速率",
             Self::InvalidTransferDuration => {
-                "输入非负的数据量和大于零的用时，例如 下载: 600 MB 用时 2分钟"
+                "输入非负的数据量或速率。按数据量求速率时，用时须大于零。"
             }
             Self::OutOfRange => "结果超出换算范围",
             Self::TooLong => "换算式过长",
@@ -471,8 +471,8 @@ pub(super) fn estimate_transfer(query: &str) -> Result<String, ConversionError> 
         return Err(ConversionError::TooLong);
     }
     let input = normalize(query).replace(char::is_whitespace, " ");
-    if let Some((data, elapsed)) = input.split_once("用时") {
-        return estimate_transfer_rate(data.trim(), elapsed.trim());
+    if let Some((quantity, elapsed)) = input.split_once("用时") {
+        return estimate_transfer_by_elapsed(quantity.trim(), elapsed.trim());
     }
     let (data, rate) = input
         .split_once('按')
@@ -501,26 +501,39 @@ pub(super) fn estimate_transfer(query: &str) -> Result<String, ConversionError> 
     convert_duration(&format!("{seconds:.3}s")).map_err(|_| ConversionError::OutOfRange)
 }
 
-fn estimate_transfer_rate(data: &str, elapsed: &str) -> Result<String, ConversionError> {
-    if data.is_empty() || elapsed.is_empty() {
+fn estimate_transfer_by_elapsed(quantity: &str, elapsed: &str) -> Result<String, ConversionError> {
+    if quantity.is_empty() || elapsed.is_empty() {
         return Err(ConversionError::Incomplete);
     }
-    let (size, size_unit) = parse_quantity(data)?;
+    let (amount, unit) = parse_quantity(quantity)?;
     let elapsed = elapsed_duration(elapsed).map_err(|error| match error {
         DurationError::Incomplete => ConversionError::Incomplete,
         DurationError::OutOfRange => ConversionError::OutOfRange,
         _ => ConversionError::InvalidTransferDuration,
     })?;
     let seconds = elapsed.as_secs_f64();
-    if size_unit.dimension != Dimension::Data || size < 0. || seconds == 0. {
+    if amount < 0. {
         return Err(ConversionError::InvalidTransferDuration);
     }
-    let rate = |symbol| {
-        let target = Unit::parse(symbol)?;
-        format_result(size * (size_unit.scale / (seconds * target.scale)))
-            .map_err(|_| ConversionError::OutOfRange)
+    let (first, second) = match unit.dimension {
+        Dimension::Data if seconds > 0. => ("MB/s", "Mbps"),
+        Dimension::DataRate => ("MB", "MiB"),
+        _ => return Err(ConversionError::InvalidTransferDuration),
     };
-    Ok(format!("{} MB/s · {} Mbps", rate("MB/s")?, rate("Mbps")?))
+    let result = |symbol| {
+        let target = Unit::parse(symbol)?;
+        let scale = if unit.dimension == Dimension::DataRate {
+            unit.scale / target.scale * seconds
+        } else {
+            unit.scale / (seconds * target.scale)
+        };
+        format_result(amount * scale).map_err(|_| ConversionError::OutOfRange)
+    };
+    Ok(format!(
+        "{} {first} · {} {second}",
+        result(first)?,
+        result(second)?
+    ))
 }
 
 pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
@@ -938,6 +951,27 @@ mod tests {
         ] {
             assert_eq!(estimate_transfer(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn estimates_transfer_data_from_rate_and_elapsed_time() {
+        for (query, expected) in [
+            ("100 Mbps 用时 2分钟", "1500 MB · 1430.51147460938 MiB"),
+            ("1 MiB/s 用时 2秒", "2.097152 MB · 2 MiB"),
+            ("8 Mbps 用时 500ms", "0.5 MB · 0.476837158203125 MiB"),
+            ("8 Mbps 用时 0s", "0 MB · 0 MiB"),
+            ("0 Mbps 用时 2s", "0 MB · 0 MiB"),
+        ] {
+            assert_eq!(estimate_transfer(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            estimate_transfer("-8 Mbps 用时 2s"),
+            Err(ConversionError::InvalidTransferDuration)
+        );
+        assert_eq!(
+            estimate_transfer("1e308 MB/s 用时 1h"),
+            Err(ConversionError::OutOfRange)
+        );
     }
 
     #[test]

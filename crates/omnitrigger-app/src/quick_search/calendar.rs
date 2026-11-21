@@ -20,7 +20,7 @@ impl DateError {
         match self {
             Self::Incomplete => "可以输入日期、天数或星期几，例如 日期: 今天 星期几",
             Self::InvalidDate => "输入有效日期或月份，例如 2026年11月21日 或 2026-11",
-            Self::InvalidWeek => "请输入有效的 ISO 周号，例如 2026-W47",
+            Self::InvalidWeek => "请输入有效的 ISO 周号或周日期，例如 2026-W47 或 2026-W47-6",
             Self::InvalidQuarter => "请输入季度编号 1 至 4，例如 2026-Q4",
             Self::InvalidYearDay => "请输入该年有效的天数，例如 2024 第60天",
             Self::InvalidWeekdayOccurrence => {
@@ -69,6 +69,18 @@ fn iso_date_prefix(input: &str) -> Option<(&str, &str)> {
         .then_some((date, rest.trim()))
 }
 
+fn iso_week_date_prefix(input: &str) -> Option<(&str, &str)> {
+    let (date, rest) = input.split_at_checked(10)?;
+    date.bytes()
+        .enumerate()
+        .all(|(index, byte)| match index {
+            4 | 8 => byte == b'-',
+            5 => matches!(byte, b'W' | b'w'),
+            _ => byte.is_ascii_digit(),
+        })
+        .then_some((date, rest.trim()))
+}
+
 fn written_date_prefix(input: &str) -> Option<(i32, u32, u32, &str)> {
     let (year, rest) = input.split_at_checked(4)?;
     if !year.bytes().all(|digit| digit.is_ascii_digit()) {
@@ -102,6 +114,11 @@ fn date_operand(input: &str, today: NaiveDate) -> Result<(NaiveDate, &str), Date
     if let Some((year, month, day, rest)) = written_date_prefix(input) {
         let date = NaiveDate::from_ymd_opt(year, month, day).ok_or(DateError::InvalidDate)?;
         return Ok((date, rest));
+    }
+    if let Some((date, rest)) = iso_week_date_prefix(input) {
+        let date = NaiveDate::parse_from_str(&date.to_ascii_uppercase(), "%G-W%V-%u")
+            .map_err(|_| DateError::InvalidWeek)?;
+        return Ok((in_range(Some(date))?, rest));
     }
     if input.is_empty()
         || input.len() < 10
@@ -141,6 +158,10 @@ fn week_number_query(input: &str) -> Option<&str> {
 
 fn day_number_query(input: &str) -> Option<&str> {
     input.strip_suffix("第几天").map(str::trim_end)
+}
+
+fn week_date_query(input: &str) -> Option<&str> {
+    input.strip_suffix("周日期").map(str::trim_end)
 }
 
 fn calendar_period_parts(input: &str, marker: [char; 2]) -> Option<(&str, &str)> {
@@ -215,7 +236,12 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
     if weekday_occurrence_parts(input).is_some() || year_day_parts(input).is_some() {
         return true;
     }
+    let week_date = iso_week_date_prefix(input);
+    if week_date.is_some_and(|(_, rest)| date_tail(rest)) {
+        return true;
+    }
     if let Some((year, ordinal)) = calendar_period_parts(input, ['W', 'w'])
+        .filter(|_| week_date.is_none())
         .or_else(|| calendar_period_parts(input, ['Q', 'q']))
     {
         return year.bytes().all(|byte| byte.is_ascii_digit())
@@ -224,10 +250,12 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
     if let Some(date) = weekday_query(input)
         .or_else(|| week_number_query(input))
         .or_else(|| day_number_query(input))
+        .or_else(|| week_date_query(input))
     {
         return date.is_empty()
             || relative_day(date).is_some_and(|(_, rest)| date_tail(rest))
             || iso_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest))
+            || iso_week_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest))
             || written_date_prefix(date).is_some_and(|(_, _, _, rest)| date_tail(rest));
     }
     relative_period(input).is_some()
@@ -476,7 +504,9 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     if let Some((year, month, rule)) = weekday_occurrence_parts(input) {
         return weekday_occurrence(year, month, rule);
     }
-    if let Some((year, week)) = calendar_period_parts(input, ['W', 'w']) {
+    if let Some((year, week)) =
+        calendar_period_parts(input, ['W', 'w']).filter(|_| iso_week_date_prefix(input).is_none())
+    {
         return iso_week_range(year, week);
     }
     if let Some((year, quarter)) = calendar_period_parts(input, ['Q', 'q']) {
@@ -514,7 +544,8 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     let weekday = weekday_query(input);
     let week_number = week_number_query(input);
     let day_number = day_number_query(input);
-    let display_query = weekday.or(week_number).or(day_number);
+    let week_date = week_date_query(input);
+    let display_query = weekday.or(week_number).or(day_number).or(week_date);
     let input = display_query.map_or(input, |input| if input.is_empty() { "今天" } else { input });
     let (date, rest) = date_operand(input, today)?;
     let display_date = |date: NaiveDate| {
@@ -529,13 +560,18 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         ];
         if weekday.is_some() {
             Ok(DAYS[date.weekday().num_days_from_monday() as usize].to_owned())
-        } else if week_number.is_some() {
+        } else if week_number.is_some() || week_date.is_some() {
             let week = date.iso_week();
             let year = week.year();
             if !(0..=9999).contains(&year) {
                 return Err(DateError::OutOfRange);
             }
-            Ok(format!("{year:04}-W{:02}", week.week()))
+            let format = if week_date.is_some() {
+                "%G-W%V-%u"
+            } else {
+                "%G-W%V"
+            };
+            Ok(date.format(format).to_string())
         } else if day_number.is_some() {
             Ok(format!("第 {} 天", date.ordinal()))
         } else {
@@ -582,6 +618,34 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_iso_week_dates_and_supports_them_as_date_operands() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            ("2026-W53-5", "2027-01-01"),
+            ("２０２６-ｗ４７-６", "2026-11-21"),
+            ("2026-W47-6 星期几", "星期六"),
+            ("2026-W47-6 + 2天", "2026-11-23"),
+            ("2026-W47-6 - 2026-W47-4", "2 天"),
+            ("2027-01-01 周日期", "2026-W53-5"),
+            ("周日期", "2026-W47-6"),
+        ] {
+            assert!(looks_like_date_query(query), "{query}");
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in ["2027-W53-1", "2026-W47-0", "2026-W47-8"] {
+            assert_eq!(
+                calculate_date(query, today),
+                Err(DateError::InvalidWeek),
+                "{query}"
+            );
+        }
+    }
 
     #[test]
     fn converts_between_dates_and_one_based_days_of_the_year() {

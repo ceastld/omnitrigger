@@ -149,6 +149,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "下载: 600 MB 用时 2分钟",
     },
     Example {
+        icon: Icon::Clock,
+        title: "按带宽和用时估算传输量",
+        query: "下载: 1 MiB/s 用时 2秒",
+    },
+    Example {
         icon: Icon::Layers,
         title: "化简宽高比",
         query: "宽高比: 1920×1080",
@@ -262,6 +267,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Clock,
         title: "查询 ISO 周号的日期范围",
         query: "日期: 2026-W47",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "把 ISO 周日期转成日历日期",
+        query: "日期: 2026-W53-5",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "查询日期的 ISO 周日期",
+        query: "日期: 2027-01-01 周日期",
     },
     Example {
         icon: Icon::Clock,
