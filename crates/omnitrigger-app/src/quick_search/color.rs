@@ -1,6 +1,6 @@
 use std::f64::consts::TAU;
 
-use super::calculator::normalize;
+use super::calculator::{format_result, normalize};
 use super::conversion::split_conversion;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -9,19 +9,29 @@ pub(super) struct Color {
     pub(super) output: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ColorContrast {
+    pub(super) output: String,
+    pub(super) swatches: [u32; 2],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ColorError {
     Incomplete,
+    IncompleteContrast,
     Invalid,
     InvalidFormat,
+    TransparentContrast,
 }
 
 impl ColorError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入 HEX、RGB 或 HSL 颜色",
+            Self::IncompleteContrast => "输入两个颜色，例如 对比度: #fff vs #000",
             Self::Invalid => "检查 HEX 位数或颜色通道范围",
             Self::InvalidFormat => "目标颜色格式可用 HEX、RGB 或 HSL",
+            Self::TransparentContrast => "计算对比度需要两个不透明颜色",
         }
     }
 }
@@ -38,15 +48,40 @@ struct Channels {
 }
 
 impl Channels {
-    fn into_color(self, output: String) -> Color {
-        Color {
-            swatch: u32::from_be_bytes([
-                self.rgb[0],
-                self.rgb[1],
-                self.rgb[2],
-                self.alpha.unwrap_or(255),
-            ]),
-            output,
+    fn parse(input: &str) -> Result<Self, ColorError> {
+        if let Some(digits) = input.strip_prefix('#') {
+            Self::hex(digits)
+        } else if input.is_empty() {
+            Err(ColorError::Incomplete)
+        } else {
+            Self::function(input)
+        }
+    }
+
+    fn swatch(&self) -> u32 {
+        let [r, g, b] = self.rgb;
+        u32::from_be_bytes([r, g, b, self.alpha.unwrap_or(255)])
+    }
+
+    fn over(self, backdrop: Self) -> Self {
+        let alpha = u32::from(self.alpha.unwrap_or(255));
+        // Porter-Duff source-over，两层权重都以 255² 为分母。
+        let front_weight = alpha * 255;
+        let back_weight = u32::from(backdrop.alpha.unwrap_or(255)) * (255 - alpha);
+        let total = front_weight + back_weight;
+        let rgb = if total == 0 {
+            [0; 3]
+        } else {
+            std::array::from_fn(|index| {
+                let front = u32::from(self.rgb[index]) * front_weight;
+                let back = u32::from(backdrop.rgb[index]) * back_weight;
+                ((front + back + total / 2) / total) as u8
+            })
+        };
+        let alpha = ((total + 127) / 255) as u8;
+        Self {
+            rgb,
+            alpha: (alpha != 255).then_some(alpha),
         }
     }
 
@@ -233,10 +268,19 @@ pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
     } else {
         (input, None)
     };
-    let (channels, default) = if let Some(digits) = input.strip_prefix('#') {
-        (Channels::hex(digits)?, ColorFormat::Rgb)
+    let (channels, default) = if let Some((front, backdrop)) = color_pair(input, "叠加", " over ")
+    {
+        (
+            Channels::parse(front.trim())?.over(Channels::parse(backdrop.trim())?),
+            ColorFormat::Hex,
+        )
     } else {
-        (Channels::function(input)?, ColorFormat::Hex)
+        let default = if input.starts_with('#') {
+            ColorFormat::Rgb
+        } else {
+            ColorFormat::Hex
+        };
+        (Channels::parse(input)?, default)
     };
     let [r, g, b] = channels.rgb;
     let output = match target.unwrap_or(default) {
@@ -256,12 +300,101 @@ pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
         }
         ColorFormat::Hsl => format_hsl(channels.rgb, channels.alpha),
     };
-    Ok(channels.into_color(output))
+    Ok(Color {
+        swatch: channels.swatch(),
+        output,
+    })
+}
+
+fn relative_luminance(rgb: [u8; 3]) -> f64 {
+    let [r, g, b] = rgb.map(|value| {
+        let channel = f64::from(value) / 255.;
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    });
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+fn color_pair<'a>(input: &'a str, local: &str, english: &str) -> Option<(&'a str, &'a str)> {
+    input.split_once(local).or_else(|| {
+        let start = input.to_ascii_lowercase().find(english)?;
+        Some((&input[..start], &input[start + english.len()..]))
+    })
+}
+
+pub(super) fn calculate_contrast(input: &str) -> Result<ColorContrast, ColorError> {
+    let input = normalize(input);
+    let (first, second) =
+        color_pair(&input, "对比", " vs ").ok_or(ColorError::IncompleteContrast)?;
+    let first = Channels::parse(first.trim())?;
+    let second = Channels::parse(second.trim())?;
+    if first.alpha.unwrap_or(255) != 255 || second.alpha.unwrap_or(255) != 255 {
+        return Err(ColorError::TransparentContrast);
+    }
+    let first_luminance = relative_luminance(first.rgb);
+    let second_luminance = relative_luminance(second.rgb);
+    let ratio = (first_luminance.max(second_luminance) + 0.05)
+        / (first_luminance.min(second_luminance) + 0.05);
+    let ratio = format_result(ratio).map_err(|_| ColorError::Invalid)?;
+    Ok(ColorContrast {
+        output: format!("{ratio}:1"),
+        swatches: [first.swatch(), second.swatch()],
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composites_foreground_over_background_using_both_alpha_channels() {
+        for (input, output, swatch) in [
+            ("#0080FF80 叠加 #fff", "#7FBFFF", 0x7fbfffff),
+            ("#FF000080 OVER #0000FF80", "#AA0055C0", 0xaa0055c0),
+            ("#1230 over #4450", "#00000000", 0x00000000),
+            ("#123 over #456 to rgb", "rgb(17, 34, 51)", 0x112233ff),
+        ] {
+            assert_eq!(
+                convert_color(input),
+                Ok(Color {
+                    output: output.to_owned(),
+                    swatch
+                }),
+                "{input}",
+            );
+        }
+    }
+
+    #[test]
+    fn calculates_contrast_in_either_order_and_preserves_both_swatches() {
+        for (input, ratio, swatches) in [
+            ("#fff vs #000", "21:1", [0xffffffff, 0x000000ff]),
+            ("#000 对比 #fff", "21:1", [0x000000ff, 0xffffffff]),
+            ("#f00 VS rgb(0 0 0)", "5.252:1", [0xff0000ff, 0x000000ff]),
+            ("#888 vs #888f", "1:1", [0x888888ff, 0x888888ff]),
+            ("hsl(0 0% 100%) vs #000", "21:1", [0xffffffff, 0x000000ff]),
+        ] {
+            assert_eq!(
+                calculate_contrast(input),
+                Ok(ColorContrast {
+                    output: ratio.to_owned(),
+                    swatches
+                }),
+                "{input}",
+            );
+        }
+        assert_eq!(
+            calculate_contrast("#fff"),
+            Err(ColorError::IncompleteContrast)
+        );
+        assert_eq!(
+            calculate_contrast("#fff8 vs #000"),
+            Err(ColorError::TransparentContrast)
+        );
+    }
 
     #[test]
     fn converts_to_explicit_formats_and_round_trips_hsl_channels() {

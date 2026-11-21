@@ -41,7 +41,7 @@ use actions::{matching_actions, SearchAction};
 use calculation_history::RecentCalculations;
 use calculator::{calculate, looks_like_calculation, CalculationError, QUERY_LIMIT};
 use calendar::{calculate_date, DateError};
-use color::{convert_color, ColorError};
+use color::{calculate_contrast, convert_color, ColorError};
 use conversion::{convert, suggested_targets, ConversionError};
 use duration::{convert_duration, DurationError};
 use examples::{matching_examples, EXAMPLES};
@@ -106,6 +106,7 @@ enum ValueKind {
     Text,
     Calculation,
     Color(u32),
+    ColorContrast([u32; 2]),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -265,7 +266,7 @@ impl ValueError {
                 | Self::Date(DateError::Incomplete)
                 | Self::Duration(DurationError::Incomplete)
                 | Self::Timestamp(TimestampError::Incomplete)
-                | Self::Color(ColorError::Incomplete)
+                | Self::Color(ColorError::Incomplete | ColorError::IncompleteContrast)
                 | Self::Text(
                     TextError::MissingText
                         | TextError::UnclosedQuote
@@ -362,6 +363,14 @@ impl Results {
                         .map(|color| ResultValue {
                             text: color.output,
                             kind: ValueKind::Color(color.swatch),
+                        })
+                        .map_err(ValueError::Color),
+                ),
+                Scope::ColorContrast => Self::Value(
+                    calculate_contrast(term)
+                        .map(|contrast| ResultValue {
+                            text: contrast.output,
+                            kind: ValueKind::ColorContrast(contrast.swatches),
                         })
                         .map_err(ValueError::Color),
                 ),
@@ -928,9 +937,10 @@ impl QuickSearch {
         match &self.results {
             Results::Value(Ok(output)) => {
                 let result = &output.text;
-                let swatch = match output.kind {
-                    ValueKind::Color(color) => Some(color),
-                    _ => None,
+                let swatches: &[u32] = match &output.kind {
+                    ValueKind::Color(color) => std::slice::from_ref(color),
+                    ValueKind::ColorContrast(colors) => colors,
+                    _ => &[],
                 };
                 let value = div()
                     .flex_1()
@@ -938,7 +948,11 @@ impl QuickSearch {
                     .font_family(theme::MONO_FONT)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(theme::ACCENT));
-                let large_text_columns = if swatch.is_some() { 20 } else { 24 };
+                let large_text_columns = match swatches.len() {
+                    0 => 24,
+                    1 => 20,
+                    _ => 17,
+                };
                 let value = if result.is_ascii() && result.len() > large_text_columns {
                     let clipped = result.len() > VALUE_COLUMNS * MAX_VALUE_LINES;
                     value
@@ -972,17 +986,15 @@ impl QuickSearch {
                 };
                 let row = row
                     .h(px(38. + value_extra_height(result)))
-                    .when_some(swatch, |row, color| {
-                        row.child(
-                            div()
-                                .size(px(26.))
-                                .flex_none()
-                                .rounded(px(5.))
-                                .border_1()
-                                .border_color(rgb(theme::BORDER_HI))
-                                .bg(gpui::rgba(color)),
-                        )
-                    })
+                    .children(swatches.iter().map(|&color| {
+                        div()
+                            .size(px(26.))
+                            .flex_none()
+                            .rounded(px(5.))
+                            .border_1()
+                            .border_color(rgb(theme::BORDER_HI))
+                            .bg(gpui::rgba(color))
+                    }))
                     .child(value)
                     .child(
                         button("copy-calculation", "复制  Enter", Tone::Primary, true)
@@ -1246,6 +1258,7 @@ mod tests {
             ("FrAcTiOn", "分数:"),
             ("date", "日期:"),
             ("COLOUR", "颜色:"),
+            ("contrast", "对比度:"),
             ("URL", "URL:"),
             ("文本工具", "文本:"),
         ] {

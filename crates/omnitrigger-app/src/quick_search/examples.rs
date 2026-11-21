@@ -313,6 +313,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "颜色: #FF800080 to hsl",
     },
     Example {
+        icon: Icon::Layers,
+        title: "计算两个颜色的对比度",
+        query: "对比度: #fff vs #000",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "将半透明颜色叠加到底色",
+        query: "颜色: #0080FF80 叠加 #fff",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "找回用过的算式",
         query: "算式历史: ",
