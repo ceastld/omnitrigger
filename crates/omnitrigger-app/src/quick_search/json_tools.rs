@@ -15,6 +15,7 @@ pub(super) enum JsonError {
     ExpectedObject,
     ExpectedCollection,
     ExpectedArray,
+    InvalidLine,
     MissingValue,
     DuplicateKey,
 }
@@ -23,13 +24,16 @@ impl JsonError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入操作和 JSON 文本",
-            Self::UnknownOperation => "可用的操作有 格式化、压缩、取值、取列、键名 和 长度",
+            Self::UnknownOperation => {
+                "请选择格式化、压缩、取值、取列、键名、长度、展开数组或合并行"
+            }
             Self::Invalid => "JSON 语法无效",
             Self::LayoutTooLarge => "JSON 格式化结果超过 1 MiB",
             Self::InvalidPointer => "JSON 路径无效，示例 /商品/0/价格",
             Self::ExpectedObject => "请输入 JSON 对象以查看顶层键名",
             Self::ExpectedCollection => "请输入 JSON 数组或对象以统计顶层条目数",
-            Self::ExpectedArray => "请输入 JSON 数组以提取每项中的值",
+            Self::ExpectedArray => "请输入 JSON 数组",
+            Self::InvalidLine => "每个非空行需要一个完整的 JSON 值",
             Self::MissingValue => "JSON 路径没有对应的值",
             Self::DuplicateKey => "JSON 路径遇到了重复的键",
         }
@@ -40,22 +44,27 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
     let (operation, source) = query
         .split_once(char::is_whitespace)
         .ok_or(JsonError::Incomplete)?;
+    let source = source.trim_start();
     let pretty = match operation.to_ascii_lowercase().as_str() {
         "格式化" | "format" | "pretty" => true,
         "压缩" | "compact" | "minify" => false,
-        "取值" | "get" | "pointer" => return select_json_value(source.trim_start()),
-        "取列" | "column" => return select_json_column(source.trim_start()),
-        "键名" | "keys" => return json_keys(source.trim_start()),
-        "长度" | "length" => return json_length(source.trim_start()),
+        "取值" | "get" | "pointer" => return select_json_value(source),
+        "取列" | "column" => return select_json_column(source),
+        "键名" | "keys" => return json_keys(source),
+        "长度" | "length" => return json_length(source),
+        "展开数组" | "to-jsonl" => return json_array_to_lines(source),
+        "合并行" | "from-jsonl" => return json_lines_to_array(source),
         _ => return Err(JsonError::UnknownOperation),
     };
-    let source = source.trim_start();
     if source.is_empty() {
         return Err(JsonError::Incomplete);
     }
     // 通过解析验证语法，再调整原文空白，保留键顺序、数字和字符串拼写。
     serde_json::from_str::<IgnoredAny>(source).map_err(json_parse_error)?;
+    layout_json(source, pretty)
+}
 
+fn layout_json(source: &str, pretty: bool) -> Result<String, JsonError> {
     let mut result = String::with_capacity(source.len());
     let mut depth = 0;
     let mut previous = ' ';
@@ -121,11 +130,7 @@ fn select_json_value(query: &str) -> Result<String, JsonError> {
 
 fn select_json_column(query: &str) -> Result<String, JsonError> {
     let (pointer, source) = pointer_and_source(query)?;
-    if !source.starts_with('[') {
-        serde_json::from_str::<IgnoredAny>(source).map_err(json_parse_error)?;
-        return Err(JsonError::ExpectedArray);
-    }
-    let items = serde_json::from_str::<Vec<&RawValue>>(source).map_err(json_parse_error)?;
+    let items = read_json_array(source)?;
     let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
     let values = items
         .into_iter()
@@ -135,6 +140,38 @@ fn select_json_column(query: &str) -> Result<String, JsonError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(serde_json::to_string(&values).expect("有效的原始 JSON 值可以直接序列化"))
+}
+
+fn read_json_array(source: &str) -> Result<Vec<&RawValue>, JsonError> {
+    if !source.starts_with('[') {
+        serde_json::from_str::<IgnoredAny>(source).map_err(json_parse_error)?;
+        return Err(JsonError::ExpectedArray);
+    }
+    serde_json::from_str(source).map_err(json_parse_error)
+}
+
+fn json_array_to_lines(source: &str) -> Result<String, JsonError> {
+    let lines = read_json_array(source)?
+        .into_iter()
+        .map(|value| layout_json(value.get(), false))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(lines.join("\n"))
+}
+
+fn json_lines_to_array(source: &str) -> Result<String, JsonError> {
+    if source.is_empty() {
+        return Err(JsonError::Incomplete);
+    }
+    let values = source
+        .lines()
+        .filter(|line| !line.trim_matches([' ', '\t', '\r']).is_empty())
+        .map(|line| {
+            let value =
+                serde_json::from_str::<&RawValue>(line).map_err(|_| JsonError::InvalidLine)?;
+            layout_json(value.get(), false)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!("[{}]", values.join(",")))
 }
 
 fn pointer_and_source(query: &str) -> Result<(String, &str), JsonError> {
@@ -291,6 +328,34 @@ impl<'de> Visitor<'de> for ObjectMember<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_json_lines_without_changing_values_or_splitting_strings() {
+        let array = r#"[{"a":"\u5317\n京","a":9.90},9007199254740993,null]"#;
+        let lines = "{\"a\":\"\\u5317\\n京\",\"a\":9.90}\n9007199254740993\nnull";
+        assert_eq!(
+            transform_json(&format!("展开数组 {array}")).as_deref(),
+            Ok(lines)
+        );
+        assert_eq!(
+            transform_json(&format!("合并行 {}", lines.replace('\n', "\r\n \t\r\n"))).as_deref(),
+            Ok(array)
+        );
+        assert_eq!(
+            transform_json("to-jsonl [ {\n \"k\": \"a b\" \n}, [1,2] ]").as_deref(),
+            Ok("{\"k\":\"a b\"}\n[1,2]")
+        );
+        assert_eq!(
+            transform_json("from-jsonl 1 2\n3"),
+            Err(JsonError::InvalidLine)
+        );
+        assert_eq!(
+            transform_json("合并行 {\n\"x\":1\n}"),
+            Err(JsonError::InvalidLine)
+        );
+        assert_eq!(transform_json("展开数组 []").as_deref(), Ok(""));
+        assert_eq!(transform_json("展开数组 {}"), Err(JsonError::ExpectedArray));
+    }
 
     #[test]
     fn selects_a_json_pointer_from_each_array_entry_and_preserves_raw_values() {

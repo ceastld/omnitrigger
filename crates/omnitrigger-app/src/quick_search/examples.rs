@@ -864,6 +864,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r#"JSON: 长度 [1,{"数量":2},null]"#,
     },
     Example {
+        icon: Icon::Terminal,
+        title: "把数组展开为 JSONL",
+        query: r#"JSON: 展开数组 [{"城市":"北京"},{"城市":"上海"}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把 JSONL 合并成数组",
+        query: "JSON: 合并行 {\"城市\":\"北京\"}\n{\"城市\":\"上海\"}",
+    },
+    Example {
         icon: Icon::Browser,
         title: "编码 URL 参数值",
         query: "URL: 编码 北京 A+B",
