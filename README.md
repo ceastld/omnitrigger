@@ -54,6 +54,7 @@
 - 输入 `动作: 浏览器` 可打开动作库并填入筛选词。动作包和插件动作也会按名称出现在快速搜索结果中，回车可在动作库中查看。只输入 `动作:` 可清空筛选。
 - 输入 `应用:` 后加应用名可从 Windows 应用目录查找程序。用方向键选择，按回车启动。也可用 `app:`。 [Windows 应用目录](https://learn.microsoft.com/windows/win32/shell/knownfolderid)
 - 直接输入两个字符以上的应用名也可查找程序。快速搜索会先匹配工作台内容和工具，再从 Windows 应用目录查找。
+- 输入 `文件夹:` 可浏览桌面、下载、文档、图片、音乐和视频。也可用 `文件夹: 下载` 或 `folder: downloads` 筛选，按回车打开选中的文件夹。 [Windows 已知文件夹](https://learn.microsoft.com/windows/win32/shell/knownfolderid)
 - 输入 `窗口:` 可查看当前桌面的普通窗口，继续输入窗口标题或程序名可筛选。按回车切换，最小化窗口会请求还原。也可用 `window:`。每次打开搜索框后首次使用时读取窗口列表。 [Windows 前台切换规则](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setforegroundwindow)
 - 可以按名称搜索已配置的轮盘，回车打开对应编辑页。输入 `轮盘: 编辑` 可只搜索轮盘。
 - 输入 `槽位: 复制` 可查找轮盘槽位，回车打开对应布局并选中槽位。可以加上轮盘名或应用名来缩小结果。

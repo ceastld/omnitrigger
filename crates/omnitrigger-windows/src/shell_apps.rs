@@ -1,15 +1,18 @@
-//! 读取 Windows 的 Applications 虚拟目录，查询和启动均从工作线程调用。
+//! 读取 Windows 的 Applications 虚拟目录，并在工作线程上打开 Shell 条目。
 
 use std::{ffi::c_void, mem::size_of};
 
+use windows::core::GUID;
 use windows::Win32::{
     System::Com::CoTaskMemFree,
     UI::{
         Shell::{
-            BHID_EnumItems, FOLDERID_AppsFolder, IEnumShellItems, ILGetSize, IShellItem,
-            SHCreateItemFromIDList, SHGetIDListFromObject, SHGetKnownFolderIDList, ShellExecuteExW,
-            SEE_MASK_FLAG_NO_UI, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, SIGDN,
-            SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING,
+            BHID_EnumItems, FOLDERID_AppsFolder, FOLDERID_Desktop, FOLDERID_Documents,
+            FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_Videos,
+            IEnumShellItems, ILGetSize, IShellItem, SHCreateItemFromIDList, SHGetIDListFromObject,
+            SHGetKnownFolderIDList, ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_INVOKEIDLIST,
+            SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, SIGDN, SIGDN_NORMALDISPLAY,
+            SIGDN_PARENTRELATIVEPARSING,
         },
         WindowsAndMessaging::SW_SHOWNORMAL,
     },
@@ -36,16 +39,56 @@ impl ShellApp {
     /// 按 Windows 返回的条目 ID 调用该应用的默认操作。
     pub fn open(mut self) -> Result<(), String> {
         let _com = ShellApartment::enter()?;
-        let mut info = SHELLEXECUTEINFOW {
-            cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
-            fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_INVOKEIDLIST,
-            lpIDList: self.pidl.as_mut_ptr().cast(),
-            nShow: SW_SHOWNORMAL.0,
-            ..Default::default()
-        };
-        unsafe { ShellExecuteExW(&mut info) }
+        execute_shell_item(self.pidl.as_mut_ptr().cast(), 0)
             .map_err(|error| format!("系统未能启动应用（{error}）"))
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellFolder {
+    Desktop,
+    Downloads,
+    Documents,
+    Pictures,
+    Music,
+    Videos,
+}
+
+impl ShellFolder {
+    fn id(self) -> GUID {
+        match self {
+            Self::Desktop => FOLDERID_Desktop,
+            Self::Downloads => FOLDERID_Downloads,
+            Self::Documents => FOLDERID_Documents,
+            Self::Pictures => FOLDERID_Pictures,
+            Self::Music => FOLDERID_Music,
+            Self::Videos => FOLDERID_Videos,
+        }
+    }
+
+    pub fn open(self) -> Result<(), String> {
+        let _com = ShellApartment::enter()?;
+        let pidl = unsafe { SHGetKnownFolderIDList(&self.id(), 0, None) }
+            .map_err(|error| format!("系统未能找到文件夹（{error}）"))?;
+        if pidl.is_null() {
+            return Err("系统未能找到文件夹".into());
+        }
+        let _memory = ShellMemory(pidl.cast());
+        execute_shell_item(pidl.cast(), SEE_MASK_NOASYNC)
+            .map_err(|error| format!("系统未能打开文件夹（{error}）"))
+    }
+}
+
+fn execute_shell_item(pidl: *mut c_void, flags: u32) -> windows::core::Result<()> {
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_INVOKEIDLIST | flags,
+        lpIDList: pidl,
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // 调用方在整个 Shell 调用期间都持有有效的 ID 列表与 COM 初始化。
+    unsafe { ShellExecuteExW(&mut info) }
 }
 
 struct ShellMemory(*mut c_void);

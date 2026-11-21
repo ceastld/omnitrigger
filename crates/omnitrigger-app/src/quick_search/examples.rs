@@ -41,6 +41,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "打开 Windows 常用文件夹",
+        query: "文件夹:",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "按符号筛选换算单位",
         query: "1 GiB to Ti",
     },

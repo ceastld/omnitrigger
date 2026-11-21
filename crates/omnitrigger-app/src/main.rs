@@ -2767,22 +2767,11 @@ impl Workspace {
             quick_search::Destination::Page(page) => self.open_page(page, cx),
             quick_search::Destination::OpenWindow(_) => return,
             quick_search::Destination::InstalledApp(app) => {
-                cx.spawn(async move |this, cx| {
-                    let result = cx
-                        .background_executor()
-                        .spawn(async move { app.open() })
-                        .await;
-                    if let Err(error) = result {
-                        let _ = this.update(cx, |this, cx| {
-                            this.error = Some(error);
-                            let _ = this.main_window.update(cx, |_, window, _| {
-                                reveal_workspace_window(window);
-                            });
-                            cx.notify();
-                        });
-                    }
-                })
-                .detach();
+                Self::open_shell_search_target(move || app.open(), cx);
+                return;
+            }
+            quick_search::Destination::KnownFolder(folder) => {
+                Self::open_shell_search_target(move || folder.kind.open(), cx);
                 return;
             }
             quick_search::Destination::TextHistoryQuery(query) => {
@@ -2830,6 +2819,25 @@ impl Workspace {
                 window.focus(focus);
             }
         });
+    }
+
+    fn open_shell_search_target(
+        open: impl FnOnce() -> Result<(), String> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { open() }).await;
+            if let Err(error) = result {
+                let _ = this.update(cx, |this, cx| {
+                    this.error = Some(error);
+                    let _ = this.main_window.update(cx, |_, window, _| {
+                        reveal_workspace_window(window);
+                    });
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn reveal_trigger_in_list(&mut self, id: u64, cx: &mut Context<Self>) {

@@ -8,6 +8,7 @@ mod color;
 mod conversion;
 mod duration;
 mod examples;
+mod folders;
 mod fraction;
 mod json_tools;
 mod open_windows;
@@ -56,6 +57,7 @@ use conversion::{
 };
 use duration::{convert_duration, DurationError};
 use examples::{function_examples, matching_examples, tool_operation_examples, EXAMPLES};
+use folders::{matching_folders, SearchFolder};
 use fraction::{simplify_fraction, FractionError};
 use json_tools::{transform_json, JsonError};
 use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
@@ -149,6 +151,7 @@ enum ValueKind {
 pub(super) enum Destination {
     Page(Page),
     InstalledApp(ShellApp),
+    KnownFolder(SearchFolder),
     OpenWindow(OpenWindow),
     Trigger(u64),
     Wheel(String),
@@ -412,6 +415,7 @@ impl Results {
                 Scope::CalculationHistory => Self::Calculations(recent.calculations.matching(term)),
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
                 Scope::Applications => applications.results(term),
+                Scope::Folders => Self::Destinations(matching_folders(term)),
                 Scope::OpenWindows => open_windows.results(term),
                 Scope::Actions => {
                     let mut entries = matching_actions(actions, term);
@@ -1430,6 +1434,9 @@ impl QuickSearch {
                                         .has_namesake(app)
                                         .then(|| app.identifier().to_owned()),
                                 ),
+                                Destination::KnownFolder(folder) => {
+                                    (Icon::Layers, folder.title.to_owned(), None)
+                                }
                                 Destination::OpenWindow(window) => {
                                     (Icon::Grid, window.title.clone(), window.process.clone())
                                 }
@@ -2069,6 +2076,41 @@ mod tests {
         assert!(
             matches!(loaded.results("窗口: 浏览器"), Results::Destinations(items) if items.is_empty())
         );
+    }
+
+    #[test]
+    fn lists_windows_known_folders_and_filters_localized_names_and_aliases() {
+        use omnitrigger_windows::ShellFolder;
+
+        let index = SearchIndex::default();
+        let Results::Destinations(folders) = index.results("文件夹:") else {
+            panic!("未列出 Windows 常用文件夹");
+        };
+        assert_eq!(folders.len(), 6);
+        assert!(matches!(
+            folders.first(),
+            Some(Destination::KnownFolder(folder)) if folder.kind == ShellFolder::Desktop
+        ));
+        for (query, expected) in [
+            ("文件夹: 下载", ShellFolder::Downloads),
+            ("folder: ＤＯＷＮＬＯＡＤＳ", ShellFolder::Downloads),
+            ("目录: 我的文档", ShellFolder::Documents),
+            ("文件夹: 图片 photos", ShellFolder::Pictures),
+        ] {
+            assert!(
+                matches!(
+                    index.results(query),
+                    Results::Destinations(items)
+                        if matches!(items.as_slice(), [Destination::KnownFolder(folder)]
+                            if folder.kind == expected)
+                ),
+                "{query}"
+            );
+        }
+        assert!(matches!(
+            index.results("文件夹: 无匹配"),
+            Results::Destinations(items) if items.is_empty()
+        ));
     }
 
     #[test]

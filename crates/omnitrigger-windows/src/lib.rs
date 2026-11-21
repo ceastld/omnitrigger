@@ -52,7 +52,7 @@ pub use automation_basics::{
 #[cfg(windows)]
 mod shell_apps;
 #[cfg(windows)]
-pub use shell_apps::{list_shell_apps, ShellApp};
+pub use shell_apps::{list_shell_apps, ShellApp, ShellFolder};
 
 #[cfg(windows)]
 mod clipboard_history_child_job;
