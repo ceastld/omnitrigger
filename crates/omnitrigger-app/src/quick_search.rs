@@ -275,6 +275,7 @@ impl ValueError {
                     TextError::MissingText
                         | TextError::UnclosedQuote
                         | TextError::IncompleteTransform
+                        | TextError::IncompleteReplacement
                 )
                 | Self::Fraction(FractionError::Incomplete)
                 | Self::UrlEncoding(UrlEncodingError::Incomplete)

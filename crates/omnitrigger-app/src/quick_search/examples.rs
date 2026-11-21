@@ -434,6 +434,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "替换文字",
+        query: r#"文本: 替换 "北京" "上海" 北京 A+B"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "倒序文字",
+        query: "文本: 倒序 你好ABC",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算文本 SHA-256",
         query: "文本: SHA-256 北京",
     },
