@@ -308,6 +308,7 @@ impl ValueError {
                         | TextError::UnclosedQuote
                         | TextError::IncompleteTransform
                         | TextError::IncompleteReplacement
+                        | TextError::IncompleteDelimiter
                 )
                 | Self::Fraction(FractionError::Incomplete)
                 | Self::Percentage(PercentageError::Incomplete)

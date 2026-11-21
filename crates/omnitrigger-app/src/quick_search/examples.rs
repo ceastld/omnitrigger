@@ -606,6 +606,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用分隔符拼接多行",
+        query: "文本: 按行拼接 \", \" 苹果\n梨",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按分隔符拆分成行",
+        query: "文本: 拆分成行 \"、\" 苹果、梨",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算文本 SHA-256",
         query: "文本: SHA-256 北京",
     },

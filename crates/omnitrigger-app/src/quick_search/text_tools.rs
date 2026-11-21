@@ -13,7 +13,7 @@ use base64::{
 use sha2::{Digest, Sha256, Sha512};
 use unicode_segmentation::UnicodeSegmentation;
 
-const MAX_REPLACEMENT_BYTES: usize = 1024 * 1024;
+const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TextError {
@@ -23,8 +23,11 @@ pub(super) enum TextError {
     UnknownOperation,
     IncompleteReplacement,
     InvalidReplacementArguments,
+    IncompleteDelimiter,
+    InvalidDelimiter,
+    EmptyDelimiter,
     EmptySearchText,
-    ReplacementTooLarge,
+    ResultTooLarge,
     NullCharacter,
     InvalidBase64,
     InvalidHexBytes,
@@ -42,8 +45,11 @@ impl TextError {
             Self::UnknownOperation => "输入 ? 文本 查看可用操作",
             Self::IncompleteReplacement => "输入查找内容、替换内容和原文",
             Self::InvalidReplacementArguments => "查找内容和替换内容要加引号，并用空格分隔",
+            Self::IncompleteDelimiter => "输入带引号的分隔符和原文",
+            Self::InvalidDelimiter => "分隔符要加引号，并和原文用空格分开",
+            Self::EmptyDelimiter => "拆分成行时分隔符不能为空",
             Self::EmptySearchText => "请输入要查找的文字",
-            Self::ReplacementTooLarge => "替换结果超过 1 MiB",
+            Self::ResultTooLarge => "文本结果超过 1 MiB",
             Self::NullCharacter => "结果含空字符，无法完整复制",
             Self::InvalidBase64 => "Base64 编码无效",
             Self::InvalidHexBytes => "输入成对的十六进制数字，例如 E5 8C 97",
@@ -81,6 +87,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
     let operation = operation.to_ascii_lowercase();
     match operation.as_str() {
         "替换" | "replace" => return replace_text(text),
+        "按行拼接" | "join-lines" => return join_lines(text),
+        "拆分成行" | "split-lines" => return split_lines(text),
         "json还原" | "json-unquote" => return decode_json_string(text),
         _ => {}
     }
@@ -281,6 +289,43 @@ fn replacement_argument(input: &str) -> Result<(String, &str), TextError> {
     Ok((operand, rest))
 }
 
+fn delimiter_payload(input: &str) -> Result<(String, &str), TextError> {
+    let (delimiter, rest) = replacement_argument(input).map_err(|error| match error {
+        TextError::IncompleteReplacement => TextError::IncompleteDelimiter,
+        TextError::InvalidReplacementArguments => TextError::InvalidDelimiter,
+        _ => error,
+    })?;
+    let text = text_payload(rest).map_err(|error| match error {
+        TextError::MissingText => TextError::IncompleteDelimiter,
+        _ => error,
+    })?;
+    if delimiter.contains('\0') {
+        return Err(TextError::NullCharacter);
+    }
+    Ok((delimiter, text))
+}
+
+fn join_lines(input: &str) -> Result<String, TextError> {
+    let (delimiter, text) = delimiter_payload(input)?;
+    let lines: Vec<_> = text.lines().collect();
+    let content_bytes = lines.iter().map(|line| line.len()).sum::<usize>();
+    let delimiter_bytes = delimiter
+        .len()
+        .saturating_mul(lines.len().saturating_sub(1));
+    if content_bytes.saturating_add(delimiter_bytes) > MAX_EXPANDED_TEXT_BYTES {
+        return Err(TextError::ResultTooLarge);
+    }
+    Ok(lines.join(&delimiter))
+}
+
+fn split_lines(input: &str) -> Result<String, TextError> {
+    let (delimiter, text) = delimiter_payload(input)?;
+    if delimiter.is_empty() {
+        return Err(TextError::EmptyDelimiter);
+    }
+    Ok(text.replace(&delimiter, "\n"))
+}
+
 fn replace_text(input: &str) -> Result<String, TextError> {
     let (needle, rest) = replacement_argument(input)?;
     let (replacement, rest) = replacement_argument(rest)?;
@@ -294,8 +339,8 @@ fn replace_text(input: &str) -> Result<String, TextError> {
     let matches = text.matches(&needle).count();
     let kept_bytes = text.len() - matches * needle.len();
     let result_bytes = kept_bytes.saturating_add(matches.saturating_mul(replacement.len()));
-    if result_bytes > MAX_REPLACEMENT_BYTES {
-        return Err(TextError::ReplacementTooLarge);
+    if result_bytes > MAX_EXPANDED_TEXT_BYTES {
+        return Err(TextError::ResultTooLarge);
     }
     if matches != 0 && replacement.contains('\0') {
         return Err(TextError::NullCharacter);
@@ -481,7 +526,31 @@ mod tests {
             assert_eq!(transform_text(input), Err(expected), "{input}");
         }
         let large = format!(r#"替换 "x" "{}" {}"#, "Y".repeat(1500), "x".repeat(1500));
-        assert_eq!(transform_text(&large), Err(TextError::ReplacementTooLarge));
+        assert_eq!(transform_text(&large), Err(TextError::ResultTooLarge));
+    }
+
+    #[test]
+    fn joins_and_splits_lines_with_literal_quoted_delimiters() {
+        for (query, expected) in [
+            ("按行拼接 \", \" 苹果\r\n梨", "苹果, 梨"),
+            ("按行拼接 “” 甲\n乙", "甲乙"),
+            ("join-lines \"\\t\" \" 甲\n\n乙 \"", " 甲\t\t乙 "),
+            ("拆分成行 “、” 苹果、梨", "苹果\n梨"),
+            ("split-lines \"::\" ::A::::B::", "\nA\n\nB\n"),
+            ("拆分成行 \",\" \"\"", ""),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            (r#"拆分成行 "" A"#, TextError::EmptyDelimiter),
+            (r#"拆分成行 ",""#, TextError::IncompleteDelimiter),
+            (r#"按行拼接 ","A"#, TextError::InvalidDelimiter),
+            (r#"按行拼接 "\u0000" A"#, TextError::NullCharacter),
+        ] {
+            assert_eq!(transform_text(query), Err(error), "{query}");
+        }
+        let large = format!(r#"按行拼接 "{}" {}"#, ",".repeat(1500), "x\n".repeat(1000));
+        assert_eq!(transform_text(&large), Err(TextError::ResultTooLarge));
     }
 
     #[test]
