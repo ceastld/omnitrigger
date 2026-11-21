@@ -420,7 +420,7 @@ fn after_chord<'a>(mut query: &'a str, chord: &[String]) -> Option<&'a str> {
     }
 }
 
-fn matches_query(row: &Row, mut query: &str) -> bool {
+pub(super) fn matches_query(row: &Row, mut query: &str) -> bool {
     while !query.is_empty() {
         if let Some(rest) = after_chord(query, &row.chord) {
             query = rest;

@@ -1,5 +1,6 @@
 mod calculator;
 mod conversion;
+mod triggers;
 
 use gpui::{
     div, prelude::*, px, size, App, Bounds, ClipboardItem, Context, DisplayId, Div, Entity,
@@ -11,6 +12,7 @@ use crate::{
     appearance,
     assets::Icon,
     message_input::MessageInput,
+    settings::Binding,
     theme::{self, button, icon, rgb, Tone},
     Page, Workspace,
 };
@@ -18,6 +20,7 @@ use calculator::{calculate, CalculationError, QUERY_LIMIT};
 use conversion::{convert, ConversionError};
 use omnitrigger_windows::ShortcutTarget;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use triggers::{matching_triggers, SearchTrigger};
 
 const WIDTH: f32 = 500.;
 const PAGE_ROW_HEIGHT: f32 = 38.;
@@ -38,7 +41,25 @@ const PAGES: [(Page, &str); 9] = [
 #[derive(PartialEq, Eq)]
 enum Results {
     Value(Result<String, ValueError>),
-    Pages(Vec<Page>),
+    Destinations(Vec<Destination>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Destination {
+    Page(Page),
+    Trigger(u64),
+}
+
+fn title_rank(title: &str, query: &str) -> u8 {
+    if title == query {
+        0
+    } else if title.starts_with(query) {
+        1
+    } else if title.contains(query) {
+        2
+    } else {
+        3
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -65,7 +86,7 @@ impl ValueError {
 }
 
 impl Results {
-    fn for_query(query: &str) -> Self {
+    fn for_query(query: &str, triggers: &[SearchTrigger]) -> Self {
         let query = query.trim();
         if query.starts_with(|ch| {
             matches!(ch, '0'..='9' | '０'..='９' | '=' | '＝' | '+' | '＋' | '-' | '－' | '−' | '.' | '．' | '(' | '（')
@@ -77,6 +98,17 @@ impl Results {
         }
 
         let query = query.to_lowercase();
+        if let Some(query) = ["触发器:", "触发器：", "trigger:"]
+            .into_iter()
+            .find_map(|prefix| query.strip_prefix(prefix))
+        {
+            return Self::Destinations(
+                matching_triggers(triggers, query, PAGE_RESULT_LIMIT)
+                    .into_iter()
+                    .map(Destination::Trigger)
+                    .collect(),
+            );
+        }
         let mut pages: Vec<_> = PAGES
             .iter()
             .filter_map(|&(page, keywords)| {
@@ -87,31 +119,30 @@ impl Results {
                 {
                     return None;
                 }
-                let rank = if title == query {
-                    0
-                } else if title.starts_with(&query) {
-                    1
-                } else if title.contains(&query) {
-                    2
-                } else {
-                    3
-                };
-                Some((rank, page))
+                Some((title_rank(title, &query), page))
             })
             .collect();
         pages.sort_by_key(|&(rank, _)| rank);
-        Self::Pages(
-            pages
-                .into_iter()
-                .take(PAGE_RESULT_LIMIT)
-                .map(|(_, page)| page)
-                .collect(),
-        )
+        let mut destinations: Vec<_> = pages
+            .into_iter()
+            .take(PAGE_RESULT_LIMIT)
+            .map(|(_, page)| Destination::Page(page))
+            .collect();
+        if !query.is_empty() {
+            destinations.extend(
+                matching_triggers(triggers, &query, PAGE_RESULT_LIMIT - destinations.len())
+                    .into_iter()
+                    .map(Destination::Trigger),
+            );
+        }
+        Self::Destinations(destinations)
     }
 
     fn height(&self) -> f32 {
         match self {
-            Self::Pages(pages) if !pages.is_empty() => 132. + pages.len() as f32 * PAGE_ROW_HEIGHT,
+            Self::Destinations(items) if !items.is_empty() => {
+                132. + items.len() as f32 * PAGE_ROW_HEIGHT
+            }
             _ => 158.,
         }
     }
@@ -150,6 +181,7 @@ pub(super) struct QuickSearch {
     theme_mode: appearance::Mode,
     input: Entity<MessageInput>,
     workspace: WeakEntity<Workspace>,
+    triggers: Vec<SearchTrigger>,
     was_active: bool,
     results: Results,
     selected: usize,
@@ -162,9 +194,11 @@ impl QuickSearch {
         display: Option<DisplayId>,
         theme_mode: appearance::Mode,
         workspace: WeakEntity<Workspace>,
+        bindings: &[Binding],
         cx: &mut App,
     ) -> Result<WindowHandle<Self>, String> {
-        let results = Results::for_query("");
+        let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();
+        let results = Results::for_query("", &triggers);
         let bounds = Bounds::centered(display, size(px(WIDTH), px(results.height())), cx);
         cx.open_window(
             WindowOptions {
@@ -181,7 +215,9 @@ impl QuickSearch {
                 is_minimizable: false,
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| Self::new(theme_mode, workspace, results, window, cx)),
+            |window, cx| {
+                cx.new(|cx| Self::new(theme_mode, workspace, triggers, results, window, cx))
+            },
         )
         .map_err(|error| format!("无法打开快速搜索：{error}"))
     }
@@ -189,6 +225,7 @@ impl QuickSearch {
     fn new(
         theme_mode: appearance::Mode,
         workspace: WeakEntity<Workspace>,
+        triggers: Vec<SearchTrigger>,
         results: Results,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -197,11 +234,11 @@ impl QuickSearch {
             let mut input = MessageInput::new(cx)
                 .embedded()
                 .with_character_limit(QUERY_LIMIT + 1);
-            input.set_placeholder("搜索页面，或输入 2**10、10 km to mi");
+            input.set_placeholder("搜索页面和触发器，或输入算式与单位换算");
             input
         });
         let input_changes = cx.observe_in(&input, window, |this, input, window, cx| {
-            let next = Results::for_query(&input.read(cx).text());
+            let next = Results::for_query(&input.read(cx).text(), &this.triggers);
             if this.results != next {
                 let height_changed = this.results.height() != next.height();
                 this.results = next;
@@ -226,6 +263,7 @@ impl QuickSearch {
             theme_mode,
             input,
             workspace,
+            triggers,
             was_active: window.is_window_active(),
             results,
             selected: 0,
@@ -239,12 +277,17 @@ impl QuickSearch {
         window.focus(&self.input.focus_handle(cx));
     }
 
-    fn run_page(&self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_destination(
+        &self,
+        destination: Destination,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let workspace = self.workspace.clone();
         window.remove_window();
         cx.spawn(async move |_, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
-                workspace.open_quick_search_page(page, cx)
+                workspace.open_quick_search_destination(destination, cx)
             });
         })
         .detach();
@@ -256,9 +299,9 @@ impl QuickSearch {
                 cx.write_to_clipboard(ClipboardItem::new_string(result.clone()));
                 window.remove_window();
             }
-            Results::Pages(pages) => {
-                if let Some(&page) = pages.get(self.selected) {
-                    self.run_page(page, window, cx);
+            Results::Destinations(items) => {
+                if let Some(&destination) = items.get(self.selected) {
+                    self.open_destination(destination, window, cx);
                 }
             }
             Results::Value(Err(_)) => {}
@@ -275,16 +318,16 @@ impl QuickSearch {
             "enter" => self.confirm(window, cx),
             "escape" => window.remove_window(),
             key @ ("up" | "down") => {
-                let Results::Pages(pages) = &self.results else {
+                let Results::Destinations(items) = &self.results else {
                     return;
                 };
-                if pages.is_empty() {
+                if items.is_empty() {
                     return;
                 }
                 self.selected = if key == "up" {
                     self.selected.saturating_sub(1)
                 } else {
-                    (self.selected + 1).min(pages.len() - 1)
+                    (self.selected + 1).min(items.len() - 1)
                 };
                 cx.notify();
             }
@@ -320,36 +363,78 @@ impl QuickSearch {
                     theme::DANGER_TEXT
                 }))
                 .child(error.message()),
-            Results::Pages(pages) if pages.is_empty() => row
+            Results::Destinations(items) if items.is_empty() => row
                 .text_color(rgb(theme::TEXT_MUTED))
-                .child("未找到工作台页面"),
-            Results::Pages(pages) => div()
+                .child("未找到页面或触发器"),
+            Results::Destinations(items) => div()
                 .flex()
                 .flex_col()
-                .children(pages.iter().enumerate().map(|(index, &page)| {
-                    let selected = index == self.selected;
-                    div()
-                        .id(("quick-search-page", index))
-                        .h(px(PAGE_ROW_HEIGHT))
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .px(px(10.))
-                        .rounded(px(5.))
-                        .cursor_pointer()
-                        .when(selected, |row| row.bg(rgb(theme::SELECTED)))
-                        .when(!selected, |row| {
-                            row.hover(|style| style.bg(rgb(theme::ROW)))
-                        })
-                        .child(icon(page.icon(), 16., theme::ACCENT))
-                        .child(div().flex_1().child(page.title()))
-                        .when(selected, |row| {
-                            row.child(div().text_color(rgb(theme::TEXT_MUTED)).child("Enter 打开"))
-                        })
-                        .on_click(
-                            cx.listener(move |this, _, window, cx| this.run_page(page, window, cx)),
-                        )
-                }))
+                .children(
+                    items
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, &destination)| {
+                            let (glyph, title, detail) = match destination {
+                                Destination::Page(page) => {
+                                    (page.icon(), page.title().to_owned(), None)
+                                }
+                                Destination::Trigger(id) => {
+                                    let trigger =
+                                        self.triggers.iter().find(|trigger| trigger.id() == id)?;
+                                    let detail = if trigger.enabled {
+                                        trigger.shortcut.clone()
+                                    } else {
+                                        format!("{} · 已停用", trigger.shortcut)
+                                    };
+                                    (trigger.icon, trigger.title.clone(), Some(detail))
+                                }
+                            };
+                            let selected = index == self.selected;
+                            Some(
+                                div()
+                                    .id(("quick-search-result", index))
+                                    .h(px(PAGE_ROW_HEIGHT))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(10.))
+                                    .px(px(10.))
+                                    .rounded(px(5.))
+                                    .cursor_pointer()
+                                    .when(selected, |row| row.bg(rgb(theme::SELECTED)))
+                                    .when(!selected, |row| {
+                                        row.hover(|style| style.bg(rgb(theme::ROW)))
+                                    })
+                                    .child(icon(glyph, 16., theme::ACCENT))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .flex_col()
+                                            .child(div().truncate().child(title))
+                                            .when_some(detail, |label, detail| {
+                                                label.child(
+                                                    div()
+                                                        .truncate()
+                                                        .text_size(px(11.))
+                                                        .text_color(rgb(theme::TEXT_MUTED))
+                                                        .child(detail),
+                                                )
+                                            }),
+                                    )
+                                    .when(selected, |row| {
+                                        row.child(
+                                            div()
+                                                .text_color(rgb(theme::TEXT_MUTED))
+                                                .child("Enter 打开"),
+                                        )
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.open_destination(destination, window, cx)
+                                    })),
+                            )
+                        }),
+                )
                 .child(
                     div()
                         .mt(px(5.))
@@ -434,13 +519,20 @@ mod tests {
             ("触发", vec![Page::Triggers, Page::Presets, Page::History]),
             ("无对应页面", vec![]),
         ] {
-            let Results::Pages(pages) = Results::for_query(query) else {
+            let Results::Destinations(items) = Results::for_query(query, &[]) else {
                 panic!("页面查询被解析成了算式：{query}");
             };
-            assert_eq!(pages, expected, "{query}");
+            assert_eq!(
+                items,
+                expected
+                    .into_iter()
+                    .map(Destination::Page)
+                    .collect::<Vec<_>>(),
+                "{query}"
+            );
         }
         assert!(
-            matches!(Results::for_query(" "), Results::Pages(pages) if pages.len() == PAGE_RESULT_LIMIT)
+            matches!(Results::for_query(" ", &[]), Results::Destinations(items) if items.len() == PAGE_RESULT_LIMIT)
         );
     }
 
@@ -448,15 +540,46 @@ mod tests {
     fn quick_search_keeps_ascii_and_fullwidth_calculations() {
         for query in ["2**10", "（２＾１０）", "＝２＾１０"] {
             assert!(
-                matches!(Results::for_query(query), Results::Value(Ok(result)) if result == "1024")
+                matches!(Results::for_query(query, &[]), Results::Value(Ok(result)) if result == "1024")
             );
         }
         assert!(matches!(
-            Results::for_query("2+"),
+            Results::for_query("2+", &[]),
             Results::Value(Err(ValueError::Calculation(CalculationError::Incomplete)))
         ));
         assert!(
-            matches!(Results::for_query("100厘米转米"), Results::Value(Ok(result)) if result == "1 m")
+            matches!(Results::for_query("100厘米转米", &[]), Results::Value(Ok(result)) if result == "1 m")
         );
+    }
+
+    #[test]
+    fn quick_search_finds_configured_triggers_by_name_and_chord() {
+        let mut bindings = crate::settings::defaults();
+        bindings[0].message = "打开正文".into();
+        bindings[1].message = "打开正文预览".into();
+        let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();
+        let first = Destination::Trigger(bindings[0].spec.id);
+        let second = Destination::Trigger(bindings[1].spec.id);
+        let panel = bindings
+            .iter()
+            .find(|binding| {
+                binding.spec.held == [omnitrigger_core::Button::Key(20)]
+                    && matches!(binding.action, crate::settings::ActionSpec::ShowPanel)
+            })
+            .unwrap();
+        for (query, expected) in [
+            ("打开正文", vec![first, second]),
+            ("Caps ＋ W", vec![first]),
+            ("触发器：打开正文", vec![first, second]),
+            (
+                "TRIGGER: Caps+Space",
+                vec![Destination::Trigger(panel.spec.id)],
+            ),
+        ] {
+            let Results::Destinations(items) = Results::for_query(query, &triggers) else {
+                panic!("触发器查询被解析成了算式：{query}");
+            };
+            assert_eq!(items, expected, "{query}");
+        }
     }
 }

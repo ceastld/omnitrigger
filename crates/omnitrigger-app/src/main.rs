@@ -2696,20 +2696,60 @@ impl Workspace {
             }
             self.quick_search = None;
         }
-        let search =
-            quick_search::QuickSearch::open(display, self.theme_mode, cx.weak_entity(), cx)?;
+        let search = quick_search::QuickSearch::open(
+            display,
+            self.theme_mode,
+            cx.weak_entity(),
+            self.triggers.bindings(),
+            cx,
+        )?;
         self.quick_search = Some(search);
         Ok(Some(search))
     }
 
-    fn open_quick_search_page(&mut self, page: Page, cx: &mut Context<Self>) {
+    fn open_quick_search_destination(
+        &mut self,
+        destination: quick_search::Destination,
+        cx: &mut Context<Self>,
+    ) {
         if self.recording || self.mode.history_only() {
             return;
         }
-        self.open_page(page, cx);
+        match destination {
+            quick_search::Destination::Page(page) => self.open_page(page, cx),
+            quick_search::Destination::Trigger(id) => {
+                if self.binding(id).is_none() {
+                    return;
+                }
+                self.open_page(Page::Triggers, cx);
+                self.reveal_trigger_in_list(id, cx);
+                self.select(id, cx);
+            }
+        }
         let _ = self.main_window.update(cx, |_, window, _| {
             reveal_workspace_window(window);
         });
+    }
+
+    fn reveal_trigger_in_list(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.trigger_view = TriggerView::List;
+        self.trigger_menu = None;
+        let rows = self.trigger_rows();
+        let group_by = self.trigger_group;
+        let find_group = |query: &str, filter: &trigger_browse::Filter| {
+            trigger_browse::browse(&rows, query, filter, group_by)
+                .into_iter()
+                .find(|group| group.ids.contains(&id))
+        };
+        let query = trigger_browse::normalize_query(&self.trigger_search.read(cx).text());
+        let group = find_group(&query, &self.trigger_filter).or_else(|| {
+            self.clear_trigger_filters(cx);
+            find_group("", &self.trigger_filter)
+        });
+        if let Some(group) = group {
+            self.trigger_collapsed
+                .remove(&format!("{group_by:?}:{}", group.key));
+        }
     }
 
     fn toggle_panel(&mut self, cx: &mut Context<Self>) {
