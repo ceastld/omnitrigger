@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, SecondsFormat, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, Local, SecondsFormat, Utc};
 
 use super::calculator::normalize;
 
@@ -22,19 +22,51 @@ impl TimestampError {
 }
 
 pub(super) fn convert_timestamp(query: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
+    convert_timestamp_with_local(query, now, |time| time.with_timezone(&Local).fixed_offset())
+}
+
+fn convert_timestamp_with_local(
+    query: &str,
+    now: DateTime<Utc>,
+    to_local: impl Fn(DateTime<Utc>) -> DateTime<FixedOffset>,
+) -> Result<String, TimestampError> {
     let input = normalize(query);
     let input = input.trim();
+    let lower = input.to_ascii_lowercase();
+    let local_suffix = lower
+        .strip_suffix("本地")
+        .or_else(|| lower.strip_suffix(" local"))
+        .or_else(|| (lower == "local").then_some(""));
+    let lower = local_suffix.unwrap_or(&lower).trim_end();
+    let input = &input[..lower.len()];
     if matches!(input, "" | "+" | "-") {
         return Err(TimestampError::Incomplete);
     }
 
-    let lower = input.to_ascii_lowercase();
+    let display_time = |time: DateTime<Utc>, format| {
+        ensure_four_digit_year(time.year())?;
+        if local_suffix.is_some() {
+            let local = to_local(time);
+            ensure_four_digit_year(local.year())?;
+            Ok(local.to_rfc3339_opts(format, false))
+        } else {
+            Ok(time.to_rfc3339_opts(format, true))
+        }
+    };
     let milliseconds = lower
         .strip_suffix("ms")
         .or_else(|| lower.strip_suffix("毫秒"));
     let seconds = lower.strip_suffix('s').or_else(|| lower.strip_suffix('秒'));
     let quantity = milliseconds.or(seconds);
-    if matches!(quantity.unwrap_or(&lower).trim_end(), "现在" | "now") {
+    if matches!(quantity.unwrap_or(lower).trim_end(), "现在" | "now") {
+        if local_suffix.is_some() {
+            let format = if milliseconds.is_some() {
+                SecondsFormat::Millis
+            } else {
+                SecondsFormat::Secs
+            };
+            return display_time(now, format);
+        }
         return Ok(if milliseconds.is_some() {
             format!("{} ms", now.timestamp_millis())
         } else {
@@ -42,10 +74,12 @@ pub(super) fn convert_timestamp(query: &str, now: DateTime<Utc>) -> Result<Strin
         });
     }
     if let Some(number) = quantity {
-        return to_utc(number.trim_end(), milliseconds.is_some());
+        let (time, format) = parse_unix(number.trim_end(), milliseconds.is_some())?;
+        return display_time(time, format);
     }
     if integer(input) {
-        return to_utc(input, false);
+        let (time, format) = parse_unix(input, false)?;
+        return display_time(time, format);
     }
 
     let date = DateTime::parse_from_rfc3339(input).map_err(|_| TimestampError::Invalid)?;
@@ -61,6 +95,14 @@ pub(super) fn convert_timestamp(query: &str, now: DateTime<Utc>) -> Result<Strin
     if fraction >= 1_000_000_000 || extra_precision {
         return Err(TimestampError::UnsupportedPrecision);
     }
+    if local_suffix.is_some() {
+        let format = if fraction == 0 {
+            SecondsFormat::Secs
+        } else {
+            SecondsFormat::Millis
+        };
+        return display_time(date.with_timezone(&Utc), format);
+    }
     if fraction == 0 {
         Ok(date.timestamp().to_string())
     } else {
@@ -73,7 +115,10 @@ fn integer(input: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn to_utc(input: &str, milliseconds: bool) -> Result<String, TimestampError> {
+fn parse_unix(
+    input: &str,
+    milliseconds: bool,
+) -> Result<(DateTime<Utc>, SecondsFormat), TimestampError> {
     if !integer(input) {
         return Err(TimestampError::Invalid);
     }
@@ -90,8 +135,7 @@ fn to_utc(input: &str, milliseconds: bool) -> Result<String, TimestampError> {
         )
     };
     let time = time.ok_or(TimestampError::OutOfRange)?;
-    ensure_four_digit_year(time.year())?;
-    Ok(time.to_rfc3339_opts(format, true))
+    Ok((time, format))
 }
 
 fn ensure_four_digit_year(year: i32) -> Result<(), TimestampError> {
@@ -152,5 +196,30 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn displays_local_time_only_with_an_explicit_suffix() {
+        let now = DateTime::from_timestamp(1_700_000_000, 123_456_000).unwrap();
+        let utc_plus_eight = FixedOffset::east_opt(8 * 3_600).unwrap();
+        let convert = |query| {
+            convert_timestamp_with_local(query, now, |time| time.with_timezone(&utc_plus_eight))
+        };
+        for (query, expected) in [
+            ("+0 本地", "1970-01-01T08:00:00+08:00"),
+            ("-1ms LOCAL", "1970-01-01T07:59:59.999+08:00"),
+            ("1970-01-01T00:00:00Z 本地", "1970-01-01T08:00:00+08:00"),
+            ("now local", "2023-11-15T06:13:20+08:00"),
+            ("现在毫秒本地", "2023-11-15T06:13:20.123+08:00"),
+            ("0", "1970-01-01T00:00:00Z"),
+            ("now", "1700000000"),
+        ] {
+            assert_eq!(convert(query), Ok(expected.into()), "{query}");
+        }
+        assert_eq!(convert("本地"), Err(TimestampError::Incomplete));
+        assert_eq!(
+            convert("2026-11-21T00:00:00 local"),
+            Err(TimestampError::Invalid)
+        );
     }
 }

@@ -76,6 +76,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "将时间戳换算成本地时间",
+        query: "时间戳: 1700000000 本地",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查询日期是星期几",
         query: "日期: 2026-11-21 星期几",
     },
