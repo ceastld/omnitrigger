@@ -1,9 +1,11 @@
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
+use super::radix::Base;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ConversionError {
     Incomplete,
     InvalidAmount,
+    InvalidInteger,
     UnknownUnit,
     DifferentDimensions,
     OutOfRange,
@@ -15,6 +17,7 @@ impl ConversionError {
         match self {
             Self::Incomplete => "输入数值和两个单位，例如 10 km to mi",
             Self::InvalidAmount => "无法识别换算数值",
+            Self::InvalidInteger => "进制转换需要整数，例如 0xff to dec",
             Self::UnknownUnit => "无法识别换算单位",
             Self::DifferentDimensions => "两个单位不属于同一类型",
             Self::OutOfRange => "结果超出换算范围",
@@ -176,20 +179,28 @@ pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     })?;
     let source = input[..start].trim();
     let target = &input[end..];
-    let (amount, unit) = source.rsplit_once(char::is_whitespace).unwrap_or_else(|| {
+    let base = Base::parse(target);
+    let (amount, unit) = if base.is_some() {
+        (source, "")
+    } else if let Some(quantity) = source.rsplit_once(' ') {
+        quantity
+    } else {
         source.split_at(
             source
                 .find(|ch: char| !matches!(ch, '0'..='9' | '+' | '-' | '.' | 'e' | 'E'))
                 .unwrap_or(source.len()),
         )
-    });
+    };
     if !looks_like_calculation(amount) {
         return None;
     }
     if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Some(Err(ConversionError::TooLong));
     }
-    Some(convert_quantity(amount, unit, target))
+    Some(match base {
+        Some(base) => base.convert(amount),
+        None => convert_quantity(amount, unit, target),
+    })
 }
 
 fn convert_quantity(amount: &str, name: &str, target: &str) -> Result<String, ConversionError> {
@@ -273,5 +284,31 @@ mod tests {
             convert("10 GB to km/h"),
             Some(Err(ConversionError::DifferentDimensions))
         );
+    }
+
+    #[test]
+    fn converts_signed_integers_between_bases_without_losing_precision() {
+        for (query, expected) in [
+            ("0xff to dec", "255"),
+            ("255 to HEX", "0xff"),
+            ("-0XFF 转 二进制", "-0b11111111"),
+            ("0b1010_1111 to oct", "0o257"),
+            ("-0o0 to binary", "0b0"),
+            ("9007199254740993 to hex", "0x20000000000001"),
+            (
+                "0xffffffffffffffffffffffffffffffff to dec",
+                "340282366920938463463374607431768211455",
+            ),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.into())), "{query}");
+        }
+        for query in ["0b102 to dec", "3.5 to hex", "0x_42 to oct", "++2 to bin"] {
+            assert_eq!(convert(query), Some(Err(ConversionError::InvalidInteger)));
+        }
+        assert_eq!(
+            convert("340282366920938463463374607431768211456 to hex"),
+            Some(Err(ConversionError::OutOfRange))
+        );
+        assert_eq!(convert("转换为十六进制"), None);
     }
 }

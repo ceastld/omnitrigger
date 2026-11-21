@@ -1,5 +1,6 @@
 mod calculator;
 mod conversion;
+mod radix;
 mod recent;
 mod scientific;
 mod triggers;
@@ -28,6 +29,8 @@ use triggers::{matching_triggers, SearchTrigger};
 const WIDTH: f32 = 500.;
 const PAGE_ROW_HEIGHT: f32 = 38.;
 const PAGE_RESULT_LIMIT: usize = 4;
+const VALUE_COLUMNS: usize = 40;
+const VALUE_LINE_HEIGHT: f32 = 18.;
 
 const PAGES: [(Page, &str); 9] = [
     (Page::Triggers, "热键 快捷键 组合 trigger shortcut hotkey"),
@@ -63,6 +66,14 @@ fn title_rank(title: &str, query: &str) -> u8 {
         2
     } else {
         3
+    }
+}
+
+fn value_extra_height(value: &str) -> f32 {
+    if value.is_ascii() {
+        value.len().div_ceil(VALUE_COLUMNS).saturating_sub(2) as f32 * VALUE_LINE_HEIGHT
+    } else {
+        0.
     }
 }
 
@@ -162,6 +173,7 @@ impl Results {
             Self::Destinations(items) if items.len() > 1 => {
                 132. + items.len() as f32 * PAGE_ROW_HEIGHT
             }
+            Self::Value(Ok(value)) => 158. + value_extra_height(value),
             _ => 158.,
         }
     }
@@ -363,23 +375,41 @@ impl QuickSearch {
     fn render_result(&self, cx: &mut Context<Self>) -> Div {
         let row = div().h(px(38.)).flex().items_center().gap(px(12.));
         match &self.results {
-            Results::Value(Ok(result)) => row
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
+            Results::Value(Ok(result)) => {
+                let value = div()
+                    .flex_1()
+                    .min_w_0()
+                    .font_family(theme::MONO_FONT)
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme::ACCENT));
+                let value = if result.is_ascii() && result.len() > 28 {
+                    value
+                        .flex()
+                        .flex_col()
+                        .text_size(px(14.))
+                        .line_height(px(VALUE_LINE_HEIGHT))
+                        .children(result.as_bytes().chunks(VALUE_COLUMNS).enumerate().map(
+                            |(index, digits)| {
+                                let prefix = if index == 0 { "= " } else { "  " };
+                                let digits =
+                                    std::str::from_utf8(digits).expect("结果已核对为 ASCII");
+                                div().child(format!("{prefix}{digits}"))
+                            },
+                        ))
+                } else {
+                    value
                         .truncate()
-                        .font_family(theme::MONO_FONT)
-                        .font_weight(FontWeight::SEMIBOLD)
                         .text_size(px(22.))
-                        .text_color(rgb(theme::ACCENT))
-                        .child(format!("= {result}")),
-                )
-                .child(
-                    button("copy-calculation", "复制  Enter", Tone::Primary, true)
-                        .flex_none()
-                        .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
-                ),
+                        .child(format!("= {result}"))
+                };
+                row.h(px(38. + value_extra_height(result)))
+                    .child(value)
+                    .child(
+                        button("copy-calculation", "复制  Enter", Tone::Primary, true)
+                            .flex_none()
+                            .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
+                    )
+            }
             Results::Value(Err(error)) => row
                 .text_color(rgb(if error.is_incomplete() {
                     theme::TEXT_MUTED
