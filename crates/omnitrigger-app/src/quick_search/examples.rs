@@ -1176,6 +1176,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从键名和下标生成 JSON 指针",
+        query: r#"JSON: 生成指针 ["商品",0,"a/b"]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把 JSON 指针解析为路径分段",
+        query: "JSON: 解析指针 /商品/0/a~1b",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 CSV 转成 JSON 行数组",
         query: "CSV: 转JSON 编号,名称\n001,\"茶,咖啡\"",
     },

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt};
+use std::{borrow::Cow, collections::HashMap, fmt};
 
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;
@@ -12,6 +12,7 @@ pub(super) enum JsonError {
     Invalid,
     LayoutTooLarge,
     InvalidPointer,
+    InvalidPointerSegment,
     ExpectedObject,
     ExpectedCollection,
     ExpectedArray,
@@ -29,6 +30,7 @@ impl JsonError {
             Self::Invalid => "JSON 语法无效",
             Self::LayoutTooLarge => "JSON 格式化结果超过 1 MiB",
             Self::InvalidPointer => "JSON 路径无效，示例 /商品/0/价格",
+            Self::InvalidPointerSegment => "指针分段须为字符串或非负整数",
             Self::ExpectedObject => "请输入 JSON 对象以查看顶层键名",
             Self::ExpectedCollection => "请输入 JSON 数组或对象以统计顶层条目数",
             Self::ExpectedArray => "请输入 JSON 数组",
@@ -55,6 +57,8 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "展开数组" | "to-jsonl" => return json_array_to_lines(source),
         "合并行" | "from-jsonl" => return json_lines_to_array(source),
         "合并对象" | "merge-objects" => return merge_json_objects(source),
+        "生成指针" | "build-pointer" => return build_json_pointer(source),
+        "解析指针" | "parse-pointer" => return parse_json_pointer(source),
         _ => return Err(JsonError::UnknownOperation),
     };
     if source.is_empty() {
@@ -207,19 +211,55 @@ fn merge_json_objects(source: &str) -> Result<String, JsonError> {
     Ok(format!("{{{}}}", entries.join(",")))
 }
 
+fn build_json_pointer(source: &str) -> Result<String, JsonError> {
+    let mut pointer = String::new();
+    for segment in read_json_array(source)? {
+        let raw = segment.get();
+        let token = if raw.starts_with('"') {
+            Cow::Owned(serde_json::from_str::<String>(raw).map_err(json_parse_error)?)
+        } else if raw.bytes().all(|byte| byte.is_ascii_digit()) {
+            Cow::Borrowed(raw)
+        } else {
+            return Err(JsonError::InvalidPointerSegment);
+        };
+        pointer.push('/');
+        pointer.push_str(&token.replace('~', "~0").replace('/', "~1"));
+    }
+    if pointer.is_empty() || pointer.contains(|ch: char| ch.is_whitespace() || ch.is_control()) {
+        serde_json::to_string(&pointer).map_err(json_parse_error)
+    } else {
+        Ok(pointer)
+    }
+}
+
+fn parse_json_pointer(source: &str) -> Result<String, JsonError> {
+    if source.is_empty() {
+        return Err(JsonError::Incomplete);
+    }
+    let pointer = if source.starts_with('"') {
+        Cow::Owned(serde_json::from_str::<String>(source).map_err(pointer_parse_error)?)
+    } else {
+        Cow::Borrowed(source)
+    };
+    let tokens = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
+    serde_json::to_string(&tokens).map_err(json_parse_error)
+}
+
+fn pointer_parse_error(error: serde_json::Error) -> JsonError {
+    if error.is_eof() {
+        JsonError::Incomplete
+    } else {
+        JsonError::InvalidPointer
+    }
+}
+
 fn pointer_and_source(query: &str) -> Result<(String, &str), JsonError> {
     let (pointer, source) = if query.starts_with('"') {
         let mut strings = serde_json::Deserializer::from_str(query).into_iter::<String>();
         let pointer = strings
             .next()
             .ok_or(JsonError::Incomplete)?
-            .map_err(|error| {
-                if error.is_eof() {
-                    JsonError::Incomplete
-                } else {
-                    JsonError::InvalidPointer
-                }
-            })?;
+            .map_err(pointer_parse_error)?;
         let rest = &query[strings.byte_offset()..];
         if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
             return Err(JsonError::InvalidPointer);
@@ -542,6 +582,39 @@ mod tests {
             Err(JsonError::LayoutTooLarge)
         );
         assert_eq!(transform_json(&format!("压缩 {nested}")).unwrap(), nested);
+    }
+
+    #[test]
+    fn converts_between_json_pointer_tokens_and_query_ready_pointers() {
+        for (query, expected) in [
+            (
+                r#"生成指针 ["商品",0,"a/b","x~y",""]"#,
+                "/商品/0/a~1b/x~0y/",
+            ),
+            (r#"生成指针 [9007199254740993]"#, "/9007199254740993"),
+            (r#"生成指针 ["a\u0000","b c"]"#, r#""/a\u0000/b c""#),
+            ("生成指针 []", "\"\""),
+            (
+                "解析指针 /商品/0/a~1b/x~0y/",
+                r#"["商品","0","a/b","x~y",""]"#,
+            ),
+            ("解析指针 /a~01", r#"["a~1"]"#),
+            (r#"解析指针 """#, "[]"),
+            (r#"解析指针 "/a\u0000/b c""#, r#"["a\u0000","b c"]"#),
+        ] {
+            assert_eq!(transform_json(query).as_deref(), Ok(expected), "{query}");
+        }
+        let pointer = transform_json(r#"生成指针 ["a b",0]"#).unwrap();
+        let query = format!(r#"取值 {pointer} {{"a b":[42]}}"#);
+        assert_eq!(transform_json(&query).as_deref(), Ok("42"));
+        for (query, error) in [
+            ("生成指针 [true]", JsonError::InvalidPointerSegment),
+            ("生成指针 [-1]", JsonError::InvalidPointerSegment),
+            ("解析指针 /a~2b", JsonError::InvalidPointer),
+            ("解析指针 没有斜线", JsonError::InvalidPointer),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
     }
 
     #[test]
