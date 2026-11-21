@@ -1382,6 +1382,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "列出 JSON 标量与空容器的指针",
+        query: r#"JSON: 列指针 {"订单":[{"a/b":1},{}],"~":null}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 CSV 转成 JSON 行数组",
         query: "CSV: 转JSON 编号,名称\n001,\"茶,咖啡\"",
     },

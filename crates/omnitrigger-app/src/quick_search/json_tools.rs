@@ -19,6 +19,7 @@ pub(super) enum JsonError {
     LayoutTooLarge,
     InvalidPointer,
     InvalidPointerSegment,
+    PointerListTooLarge,
     ExpectedObject,
     ExpectedCollection,
     ExpectedArray,
@@ -45,6 +46,7 @@ impl JsonError {
             Self::LayoutTooLarge => "JSON 格式化结果超过 1 MiB",
             Self::InvalidPointer => "JSON 路径无效，示例 /商品/0/价格",
             Self::InvalidPointerSegment => "指针分段须为字符串或非负整数",
+            Self::PointerListTooLarge => "指针列表超过 1 MiB",
             Self::ExpectedObject => "请输入 JSON 对象",
             Self::ExpectedCollection => "请输入 JSON 数组或对象以统计顶层条目数",
             Self::ExpectedArray => "请输入 JSON 数组",
@@ -81,6 +83,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "合并对象" | "merge-objects" => return merge_json_objects(source),
         "生成指针" | "build-pointer" => return build_json_pointer(source),
         "解析指针" | "parse-pointer" => return parse_json_pointer(source),
+        "列指针" | "列路径" | "list-pointers" => return list_json_pointers(source),
         "改键" | "rename-key" => return rename_json_key(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
         "转csv" | "to-csv" => return json_to_csv(source),
@@ -442,14 +445,68 @@ fn build_json_pointer(source: &str) -> Result<String, JsonError> {
         } else {
             return Err(JsonError::InvalidPointerSegment);
         };
-        pointer.push('/');
-        pointer.push_str(&token.replace('~', "~0").replace('/', "~1"));
+        append_pointer_key(&mut pointer, &token);
     }
     if pointer.is_empty() || pointer.contains(|ch: char| ch.is_whitespace() || ch.is_control()) {
         serde_json::to_string(&pointer).map_err(json_parse_error)
     } else {
         Ok(pointer)
     }
+}
+
+fn append_pointer_key(pointer: &mut String, key: &str) {
+    pointer.push('/');
+    for ch in key.chars() {
+        match ch {
+            '~' => pointer.push_str("~0"),
+            '/' => pointer.push_str("~1"),
+            _ => pointer.push(ch),
+        }
+    }
+}
+
+fn list_json_pointers(source: &str) -> Result<String, JsonError> {
+    let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let mut pending = vec![(root, String::new())];
+    let mut result = String::from("[");
+    while let Some((value, path)) = pending.pop() {
+        let raw = value.get();
+        let children = match raw.as_bytes()[0] {
+            b'{' => {
+                let entries = read_object_entries(raw)?;
+                let mut seen = HashSet::with_capacity(entries.len());
+                if entries.iter().any(|(key, _)| !seen.insert(key)) {
+                    return Err(JsonError::DuplicateKey);
+                }
+                entries
+            }
+            b'[' => read_json_array(raw)?
+                .into_iter()
+                .enumerate()
+                .map(|(index, child)| (index.to_string(), child))
+                .collect(),
+            _ => Vec::new(),
+        };
+        if !children.is_empty() {
+            for (key, child) in children.into_iter().rev() {
+                let mut child_path = path.clone();
+                append_pointer_key(&mut child_path, &key);
+                pending.push((child, child_path));
+            }
+            continue;
+        }
+        let encoded = serde_json::to_string(&path).map_err(json_parse_error)?;
+        let has_previous = result.len() > 1;
+        if result.len() + encoded.len() + usize::from(has_previous) + 1 > MAX_PRETTY_BYTES {
+            return Err(JsonError::PointerListTooLarge);
+        }
+        if has_previous {
+            result.push(',');
+        }
+        result.push_str(&encoded);
+    }
+    result.push(']');
+    Ok(result)
 }
 
 fn parse_json_pointer(source: &str) -> Result<String, JsonError> {
@@ -639,6 +696,50 @@ impl<'de> Visitor<'de> for ObjectEntries {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enumerates_resolvable_leaf_pointers_in_document_order() {
+        let source = r#"{"商品":[{"a/b":9007199254740993},{"~":null},[]],"":"", "a\nb":{}}"#;
+        let listed = list_json_pointers(source).unwrap();
+        assert_eq!(
+            listed,
+            r#"["/商品/0/a~1b","/商品/1/~0","/商品/2","/","/a\nb"]"#
+        );
+        let paths: Vec<String> = serde_json::from_str(&listed).unwrap();
+        for (path, expected) in paths
+            .iter()
+            .zip(["9007199254740993", "null", "[]", r#""""#, "{}"])
+        {
+            let path = serde_json::to_string(path).unwrap();
+            assert_eq!(
+                select_json_value(&format!("{path} {source}")).as_deref(),
+                Ok(expected)
+            );
+        }
+        for source in ["[]", "{}", "23", "null"] {
+            assert_eq!(list_json_pointers(source).as_deref(), Ok(r#"[""]"#));
+        }
+        assert_eq!(
+            list_json_pointers(r#"{"a":{"x":1,"\u0078":2}}"#),
+            Err(JsonError::DuplicateKey)
+        );
+        assert_eq!(list_json_pointers("[1,]"), Err(JsonError::Invalid));
+    }
+
+    #[test]
+    fn lists_deep_pointers_iteratively_and_bounds_the_serialized_result() {
+        let depth = 256;
+        let nested = format!("{}null{}", "[".repeat(depth), "]".repeat(depth));
+        assert_eq!(
+            list_json_pointers(&nested).unwrap(),
+            format!(r#"["{}"]"#, "/0".repeat(depth))
+        );
+        let wide = format!(r#"{{"{}":[{}0]}}"#, "x".repeat(1500), "0,".repeat(849));
+        assert_eq!(
+            list_json_pointers(&wide),
+            Err(JsonError::PointerListTooLarge)
+        );
+    }
 
     #[test]
     fn merges_object_arrays_in_first_key_order_with_the_last_raw_value() {
