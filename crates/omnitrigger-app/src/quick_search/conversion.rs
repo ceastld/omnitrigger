@@ -19,6 +19,10 @@ pub(super) enum ConversionError {
     InvalidPixelDensity,
     InvalidFuelEconomy,
     InvalidUnitPrice,
+    InvalidCircuit,
+    InvalidResistanceOperands,
+    InvalidPeriod,
+    InvalidPeriodTarget,
     OutOfRange,
     TooLong,
 }
@@ -39,6 +43,12 @@ impl ConversionError {
             Self::InvalidPixelDensity => "输入正整数分辨率和正的对角线尺寸，例如 3840×2160 @ 27 in",
             Self::InvalidFuelEconomy => "输入正数及油耗单位，可用 L/100 km、km/L、mpg-us 或 mpg-uk",
             Self::InvalidUnitPrice => "输入价格、正的数量和目标单位，例如 36 元 / 750 g to kg",
+            Self::InvalidCircuit => {
+                "输入两种电学量，例如 5 V, 20 Ω。电压、电流须为非负值，电阻须大于零"
+            }
+            Self::InvalidResistanceOperands => "求电阻时，电压和电流均须大于零",
+            Self::InvalidPeriod => "输入大于零的频率或周期，例如 50 Hz to ms 或 2 ms to Hz",
+            Self::InvalidPeriodTarget => "频率请选择时间单位，周期请选择频率单位",
             Self::OutOfRange => "结果超出换算范围",
             Self::TooLong => "换算式过长",
         }
@@ -829,6 +839,138 @@ pub(super) fn calculate_unit_price(query: &str) -> Result<String, ConversionErro
     }
 }
 
+enum CircuitInput {
+    Voltage(f64),
+    Current(f64),
+    Resistance(f64),
+}
+
+impl CircuitInput {
+    fn parse(input: &str) -> Result<Self, ConversionError> {
+        let (amount, unit) = parse_quantity(input.trim())?;
+        let value = amount * unit.scale;
+        if !value.is_finite() || (value == 0. && amount != 0.) {
+            return Err(ConversionError::OutOfRange);
+        }
+        match unit.dimension {
+            Dimension::Voltage if value >= 0. => Ok(Self::Voltage(value)),
+            Dimension::ElectricCurrent if value >= 0. => Ok(Self::Current(value)),
+            Dimension::Resistance if value > 0. => Ok(Self::Resistance(value)),
+            _ => Err(ConversionError::InvalidCircuit),
+        }
+    }
+}
+
+pub(super) fn calculate_circuit(query: &str) -> Result<String, ConversionError> {
+    if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
+        return Err(ConversionError::TooLong);
+    }
+    let input = normalize(query).replace(char::is_whitespace, " ");
+    let (left, right) = input
+        .split_once(',')
+        .ok_or(ConversionError::InvalidCircuit)?;
+    use CircuitInput::{Current, Resistance, Voltage};
+    let (value, unit, power, positive) =
+        match (CircuitInput::parse(left)?, CircuitInput::parse(right)?) {
+            (Voltage(voltage), Current(current)) | (Current(current), Voltage(voltage))
+                if voltage > 0. && current > 0. =>
+            {
+                (voltage / current, "Ω", voltage * current, true)
+            }
+            (Voltage(_), Current(_)) | (Current(_), Voltage(_)) => {
+                return Err(ConversionError::InvalidResistanceOperands);
+            }
+            (Voltage(voltage), Resistance(resistance))
+            | (Resistance(resistance), Voltage(voltage)) => {
+                let current = voltage / resistance;
+                (current, "A", voltage * current, voltage > 0.)
+            }
+            (Current(current), Resistance(resistance))
+            | (Resistance(resistance), Current(current)) => {
+                let voltage = current * resistance;
+                (voltage, "V", voltage * current, current > 0.)
+            }
+            _ => return Err(ConversionError::InvalidCircuit),
+        };
+    if positive && (value == 0. || power == 0.) {
+        return Err(ConversionError::OutOfRange);
+    }
+    Ok(format!(
+        "{} · {}",
+        format_circuit_value(value, unit)?,
+        format_circuit_value(power, "W")?
+    ))
+}
+
+fn format_circuit_value(value: f64, unit: &str) -> Result<String, ConversionError> {
+    let (factor, prefix) = match value {
+        value if value >= 1e9 => (1e9, "G"),
+        value if value >= 1e6 => (1e6, "M"),
+        value if value >= 1e3 => (1e3, "k"),
+        value if value > 0. && value < 1e-3 => (1e-6, "μ"),
+        value if value > 0. && value < 1. => (1e-3, "m"),
+        _ => (1., ""),
+    };
+    let value = format_result(value / factor).map_err(|_| ConversionError::OutOfRange)?;
+    Ok(format!("{value} {prefix}{unit}"))
+}
+
+pub(super) fn convert_period(query: &str) -> Result<String, ConversionError> {
+    if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
+        return Err(ConversionError::TooLong);
+    }
+    let input = normalize(query).replace(char::is_whitespace, " ");
+    let input = input.trim();
+    let (source, target) = split_conversion(input).map_or((input, None), |(source, target)| {
+        (source, Some(target.trim()))
+    });
+    let (amount, source) = parse_quantity(source)?;
+    if amount <= 0. {
+        return Err(ConversionError::InvalidPeriod);
+    }
+    let base = amount * source.scale;
+    let reciprocal = base.recip();
+    if !reciprocal.is_finite() || reciprocal == 0. {
+        return Err(ConversionError::OutOfRange);
+    }
+    let (dimension, default) = match source.dimension {
+        Dimension::Frequency => (
+            Dimension::Time,
+            match reciprocal {
+                value if value >= 1. => "s",
+                value if value >= 1e-3 => "ms",
+                value if value >= 1e-6 => "us",
+                _ => "ns",
+            },
+        ),
+        Dimension::Time => (
+            Dimension::Frequency,
+            match reciprocal {
+                value if value >= 1e9 => "GHz",
+                value if value >= 1e6 => "MHz",
+                value if value >= 1e3 => "kHz",
+                value if value < 1. => "mHz",
+                _ => "Hz",
+            },
+        ),
+        _ => return Err(ConversionError::InvalidPeriod),
+    };
+    let target = target.unwrap_or(default);
+    if target.is_empty() {
+        return Err(ConversionError::Incomplete);
+    }
+    let target = Unit::parse(target)?;
+    if dimension != target.dimension {
+        return Err(ConversionError::InvalidPeriodTarget);
+    }
+    let result = reciprocal / target.scale;
+    if result == 0. {
+        return Err(ConversionError::OutOfRange);
+    }
+    let result = format_result(result).map_err(|_| ConversionError::OutOfRange)?;
+    Ok(format!("{result} {}", target.symbol))
+}
+
 pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     let input = normalize(query).replace(char::is_whitespace, " ");
     let (source, target) = split_conversion(input.trim())?;
@@ -1056,6 +1198,58 @@ mod tests {
             ("1920x1080 @ 1e308 km", ConversionError::OutOfRange),
         ] {
             assert_eq!(calculate_pixel_density(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn calculates_missing_resistor_measurement_and_power() {
+        for (query, expected) in [
+            ("5 V, 20 Ω", "250 mA · 1.25 W"),
+            ("12 V, 1.5 A", "8 Ω · 18 W"),
+            ("220Ω,20mA", "4.4 V · 88 mW"),
+            ("３００ｍＶ，３０ｍＡ", "10 Ω · 9 mW"),
+            ("0 V, 1 kΩ", "0 A · 0 W"),
+            ("0 A, 1 kΩ", "0 V · 0 W"),
+        ] {
+            assert_eq!(calculate_circuit(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["1 V, 2 V", "-1 V, 20 Ω", "5 V, 0 Ω", "1 m, 10 Ω"] {
+            assert_eq!(
+                calculate_circuit(query),
+                Err(ConversionError::InvalidCircuit),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_circuit("0 V, 0 A"),
+            Err(ConversionError::InvalidResistanceOperands)
+        );
+        assert_eq!(
+            calculate_circuit("1e-300 V, 1e300 Ω"),
+            Err(ConversionError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn converts_linearly_scaled_time_units_and_frequency_by_reciprocal() {
+        for (query, expected) in [
+            ("50 Hz to ms", "20 ms"),
+            ("2.5 ms to Hz", "400 Hz"),
+            ("１ＧＨｚ", "1 ns"),
+            ("1 us", "1 MHz"),
+            ("2.5 ms", "400 Hz"),
+            ("2 mHz", "500 s"),
+        ] {
+            assert_eq!(convert_period(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("50 Hz to kHz", ConversionError::InvalidPeriodTarget),
+            ("0 Hz", ConversionError::InvalidPeriod),
+            ("-5 ms", ConversionError::InvalidPeriod),
+            ("5 m", ConversionError::InvalidPeriod),
+            ("2e-308 ns", ConversionError::OutOfRange),
+        ] {
+            assert_eq!(convert_period(query), Err(error), "{query}");
         }
     }
 

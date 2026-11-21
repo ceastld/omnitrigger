@@ -57,8 +57,9 @@ use calendar::{calculate_date, looks_like_date_query, DateError};
 use cidr::{calculate_cidr, CidrError};
 use color::{calculate_contrast, convert_color, ColorError};
 use conversion::{
-    calculate_fuel_economy, calculate_pace, calculate_pixel_density, calculate_unit_price,
-    conversion_target_input, convert, estimate_transfer, suggested_targets, ConversionError,
+    calculate_circuit, calculate_fuel_economy, calculate_pace, calculate_pixel_density,
+    calculate_unit_price, conversion_target_input, convert, convert_period, estimate_transfer,
+    suggested_targets, ConversionError,
 };
 use csv_tools::{transform_csv, CsvError};
 use duration::{convert_duration, DurationError};
@@ -473,6 +474,12 @@ impl Results {
                 }
                 Scope::UnitPrice => {
                     Self::text_value(calculate_unit_price(term).map_err(ValueError::Conversion))
+                }
+                Scope::Circuit => {
+                    Self::text_value(calculate_circuit(term).map_err(ValueError::Conversion))
+                }
+                Scope::Period => {
+                    Self::text_value(convert_period(term).map_err(ValueError::Conversion))
                 }
                 Scope::AspectRatio => {
                     Self::text_value(calculate_aspect_ratio(term).map_err(ValueError::AspectRatio))

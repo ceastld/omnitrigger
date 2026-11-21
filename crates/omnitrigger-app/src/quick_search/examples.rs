@@ -236,6 +236,26 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "按电压和电阻求电流及功率",
+        query: "电路: 5 V, 20 Ω",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "按电压和电流求电阻及功率",
+        query: "电路: 12 V, 1.5 A",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "把频率换算为周期",
+        query: "周期: 50 Hz to ms",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "把周期换算为频率",
+        query: "周期: 2.5 ms to Hz",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "化简宽高比",
         query: "宽高比: 1920×1080",
     },
@@ -1298,6 +1318,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Pace
         | Scope::FuelEconomy
         | Scope::UnitPrice
+        | Scope::Circuit
+        | Scope::Period
         | Scope::AspectRatio
         | Scope::PixelDensity
         | Scope::Paper
@@ -1366,6 +1388,8 @@ mod tests {
             Scope::Pace,
             Scope::FuelEconomy,
             Scope::UnitPrice,
+            Scope::Circuit,
+            Scope::Period,
             Scope::AspectRatio,
             Scope::PixelDensity,
             Scope::Paper,
