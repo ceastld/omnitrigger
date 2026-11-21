@@ -1755,7 +1755,7 @@ mod tests {
         }
         for (query, expected) in [
             ("？ 速率", &["8Mbps to MB/s"][..]),
-            ("? UNIX", &["时间戳: 1700000000123ms", "unix: now"][..]),
+            ("? UNIX", &["unix: now", "时间戳: 1700000000123ms"][..]),
             (
                 "? 时长",
                 &[

@@ -1,6 +1,7 @@
 use crate::assets::Icon;
 
 use super::scope::{scoped_query, Scope};
+use super::title_rank;
 
 pub(super) struct Example {
     pub(super) icon: Icon,
@@ -868,18 +869,28 @@ pub(super) const EXAMPLES: &[Example] = &[
 
 pub(super) fn matching_examples(query: &str) -> Vec<usize> {
     let query = query.trim().to_lowercase();
-    EXAMPLES
+    if query.is_empty() {
+        return (0..EXAMPLES.len()).collect();
+    }
+    let mut matches: Vec<_> = EXAMPLES
         .iter()
         .enumerate()
-        .filter(|(_, example)| {
+        .filter_map(|(index, example)| {
             let title = example.title.to_lowercase();
             let example_query = example.query.to_lowercase();
-            query
+            if !query
                 .split_whitespace()
                 .all(|word| title.contains(word) || example_query.contains(word))
+            {
+                return None;
+            }
+            let command_rank = title_rank(&example_query, &query);
+            let rank = title_rank(&title, &query).min(command_rank);
+            Some((rank, command_rank, index))
         })
-        .map(|(index, _)| index)
-        .collect()
+        .collect();
+    matches.sort_unstable();
+    matches.into_iter().map(|(_, _, index)| index).collect()
 }
 
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
