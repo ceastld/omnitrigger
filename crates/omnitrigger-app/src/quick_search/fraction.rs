@@ -7,6 +7,7 @@ use super::operators::Operator;
 
 const MAX_POWER_EXPONENT: u32 = 1024;
 const MAX_FACTORIAL_ARGUMENT: u32 = 1024;
+const MAX_COMBINATORIAL_ARGUMENT: u32 = 4096;
 const MAX_EXACT_BITS: u64 = 8192;
 const MAX_DECIMAL_PLACES: u32 = 100;
 
@@ -20,6 +21,8 @@ pub(super) enum FractionError {
     NonIntegerExponent,
     FactorialDomain,
     FactorialRange,
+    CombinatorialDomain,
+    CombinatorialRange,
     DecimalPlaces,
     ExactRange,
 }
@@ -35,6 +38,8 @@ impl FractionError {
             Self::NonIntegerExponent => "精确分数幂的指数必须是整数",
             Self::FactorialDomain => "阶乘的参数必须是非负整数",
             Self::FactorialRange => "阶乘参数最多 1024，结果最多 8192 个二进制位",
+            Self::CombinatorialDomain => "组合数和排列数的参数必须是非负整数",
+            Self::CombinatorialRange => "组合数和排列数的参数最多 4096，结果最多 8192 个二进制位",
             Self::DecimalPlaces => "输入 0 至 100 的小数位数，例如 分数: 小数 1/3 to 8",
             Self::ExactRange => "指数绝对值最多 1024，分子和分母各最多 8192 个二进制位",
         }
@@ -232,6 +237,56 @@ fn rational_factorial(value: BigRational) -> Result<BigRational, FractionError> 
     Ok(value)
 }
 
+enum CombinatorialFunction {
+    Combination,
+    Permutation,
+}
+
+impl CombinatorialFunction {
+    fn calculate(
+        self,
+        n: BigRational,
+        k: Option<BigRational>,
+    ) -> Result<BigRational, FractionError> {
+        let argument = |value: &BigRational| {
+            if !value.is_integer() || value.numer().sign() == Sign::Minus {
+                return Err(FractionError::CombinatorialDomain);
+            }
+            u32::try_from(value.numer())
+                .ok()
+                .filter(|&value| value <= MAX_COMBINATORIAL_ARGUMENT)
+                .ok_or(FractionError::CombinatorialRange)
+        };
+        let n = argument(&n)?;
+        let k = k.as_ref().map(argument).transpose()?.unwrap_or(n);
+        if k > n {
+            return Ok(BigRational::from_integer(BigInt::from(0u8)));
+        }
+        let mut result = BigInt::from(1u8);
+        match self {
+            Self::Combination => {
+                let k = k.min(n - k);
+                // C(n-k+i, i) 在每一步都是整数。
+                for index in 1..=k {
+                    result *= n - k + index;
+                    result /= index;
+                }
+            }
+            Self::Permutation => {
+                for factor in n - k + 1..=n {
+                    result *= factor;
+                    if result.bits() > MAX_EXACT_BITS {
+                        return Err(FractionError::CombinatorialRange);
+                    }
+                }
+            }
+        }
+        let result = BigRational::from_integer(result);
+        ensure_exact_size(&result).map_err(|_| FractionError::CombinatorialRange)?;
+        Ok(result)
+    }
+}
+
 struct FractionParser<'a> {
     remaining: &'a str,
 }
@@ -307,6 +362,12 @@ impl FractionParser<'_> {
                 return Err(self.expected_token());
             }
             value
+        } else if self
+            .remaining
+            .trim_start()
+            .starts_with(|character: char| character.is_ascii_alphabetic())
+        {
+            self.combinatorial()?
         } else {
             self.number()?
         };
@@ -332,6 +393,36 @@ impl FractionParser<'_> {
         }
     }
 
+    fn combinatorial(&mut self) -> Result<BigRational, FractionError> {
+        let input = self.remaining.trim_start();
+        let length = input.bytes().take_while(u8::is_ascii_alphabetic).count();
+        let (name, rest) = input.split_at(length);
+        let function = if name.eq_ignore_ascii_case("comb") {
+            CombinatorialFunction::Combination
+        } else if name.eq_ignore_ascii_case("perm") {
+            CombinatorialFunction::Permutation
+        } else {
+            return Err(FractionError::Invalid);
+        };
+
+        self.remaining = rest;
+        if !self.consume('(') {
+            return Err(self.expected_token());
+        }
+        let n = self.sum()?;
+        let k = if self.consume(',') {
+            Some(self.sum()?)
+        } else if matches!(function, CombinatorialFunction::Permutation) {
+            None
+        } else {
+            return Err(self.expected_token());
+        };
+        if !self.consume(')') {
+            return Err(self.expected_token());
+        }
+        function.calculate(n, k)
+    }
+
     fn number(&mut self) -> Result<BigRational, FractionError> {
         let input = self.remaining.trim_start();
         let whole = input.bytes().take_while(u8::is_ascii_digit).count();
@@ -355,6 +446,35 @@ impl FractionParser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calculates_exact_combinations_and_permutations_with_expression_arguments() {
+        for (input, expected) in [
+            ("计算 comb(100,50)", "100891344545564193334812497256"),
+            ("计算 comb(100,50)/COMB(99,49)", "2"),
+            ("计算 comb(4+2,4/2)!", "1307674368000"),
+            ("计算 comb(3,4)", "0"),
+            ("计算 comb(0,0)", "1"),
+            ("计算 perm(24,4)", "255024"),
+            ("计算 perm(25)", "15511210043330985984000000"),
+            ("计算 perm(3,4)", "0"),
+            ("计算 perm(0)", "1"),
+        ] {
+            assert_eq!(simplify_fraction(input), Ok(expected.into()), "{input}");
+        }
+        for (input, expected) in [
+            ("计算 comb(4,1/2)", FractionError::CombinatorialDomain),
+            ("计算 perm(-1,1)", FractionError::CombinatorialDomain),
+            ("计算 comb(4097,1)", FractionError::CombinatorialRange),
+            ("计算 perm(4096,4096)", FractionError::CombinatorialRange),
+            ("计算 comb(10,", FractionError::Incomplete),
+            ("计算 comb(10)", FractionError::Invalid),
+            ("计算 perm(10,)", FractionError::Invalid),
+            ("计算 comb(8,2,1)", FractionError::Invalid),
+        ] {
+            assert_eq!(simplify_fraction(input), Err(expected), "{input}");
+        }
+    }
 
     #[test]
     fn rounds_exact_expressions_to_decimal_places_with_ties_to_even() {

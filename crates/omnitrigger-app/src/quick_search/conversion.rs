@@ -14,6 +14,7 @@ pub(super) enum ConversionError {
     DifferentDimensions,
     InvalidTransfer,
     InvalidTransferDuration,
+    InvalidPace,
     OutOfRange,
     TooLong,
 }
@@ -30,6 +31,7 @@ impl ConversionError {
             Self::InvalidTransferDuration => {
                 "输入非负的数据量或速率。按数据量求速率时，用时须大于零。"
             }
+            Self::InvalidPace => "距离、用时和速度须大于零，例如 配速: 10 km 用时 52:30",
             Self::OutOfRange => "结果超出换算范围",
             Self::TooLong => "换算式过长",
         }
@@ -536,6 +538,77 @@ fn estimate_transfer_by_elapsed(quantity: &str, elapsed: &str) -> Result<String,
     ))
 }
 
+pub(super) fn calculate_pace(query: &str) -> Result<String, ConversionError> {
+    if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
+        return Err(ConversionError::TooLong);
+    }
+    let input = normalize(query).replace(char::is_whitespace, " ");
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(ConversionError::Incomplete);
+    }
+    let seconds = |input: &str| {
+        if input.is_empty() {
+            return Err(ConversionError::Incomplete);
+        }
+        let elapsed = elapsed_duration(input).map_err(|error| match error {
+            DurationError::Incomplete => ConversionError::Incomplete,
+            DurationError::OutOfRange => ConversionError::OutOfRange,
+            _ => ConversionError::InvalidPace,
+        })?;
+        if elapsed.is_zero() {
+            return Err(ConversionError::InvalidPace);
+        }
+        Ok(elapsed.as_secs_f64())
+    };
+    let positive_quantity = |input: &str, dimension| {
+        if input.is_empty() {
+            return Err(ConversionError::Incomplete);
+        }
+        let (amount, unit) = parse_quantity(input)?;
+        if amount <= 0. || unit.dimension != dimension {
+            return Err(ConversionError::InvalidPace);
+        }
+        Ok(amount * unit.scale)
+    };
+
+    let distance_and_elapsed = input.split_once("用时").or_else(|| {
+        let start = input.to_ascii_lowercase().rfind(" in ")?;
+        Some((&input[..start], &input[start + 4..]))
+    });
+    let pace = input
+        .rsplit_once('/')
+        .and_then(|(elapsed, length)| Some((elapsed.trim(), Unit::parse(length).ok()?)))
+        .filter(|(_, length)| length.dimension == Dimension::Length);
+    if let Some((elapsed, length)) = pace {
+        let speed = length.scale / seconds(elapsed)?;
+        let result = |symbol| {
+            let unit = Unit::parse(symbol)?;
+            format_result(speed / unit.scale).map_err(|_| ConversionError::OutOfRange)
+        };
+        return Ok(format!("{} km/h · {} mph", result("km/h")?, result("mph")?));
+    }
+
+    let speed = if let Some((distance, elapsed)) = distance_and_elapsed {
+        positive_quantity(distance.trim(), Dimension::Length)? / seconds(elapsed.trim())?
+    } else {
+        positive_quantity(input, Dimension::Speed)?
+    };
+    if !speed.is_finite() || speed <= 0. {
+        return Err(ConversionError::OutOfRange);
+    }
+    let result = |symbol| {
+        let unit = Unit::parse(symbol)?;
+        let seconds = (unit.scale / speed).round();
+        if !(0. ..u64::MAX as f64).contains(&seconds) {
+            return Err(ConversionError::OutOfRange);
+        }
+        let seconds = seconds as u64;
+        Ok(format!("{}:{:02} /{symbol}", seconds / 60, seconds % 60))
+    };
+    Ok(format!("{} · {}", result("km")?, result("mi")?))
+}
+
 pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     let input = normalize(query).replace(char::is_whitespace, " ");
     let (source, target) = split_conversion(input.trim())?;
@@ -709,6 +782,33 @@ fn format_conversion(amount: f64, source: &Unit, target: &Unit) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calculates_pace_from_distance_and_time_and_converts_between_pace_and_speed() {
+        for (query, expected) in [
+            ("10 km 用时 52:30", "5:15 /km · 8:27 /mi"),
+            ("１０ km IN 00:52:30", "5:15 /km · 8:27 /mi"),
+            ("1 英里 用时 8分钟", "4:58 /km · 8:00 /mi"),
+            ("12 km/h", "5:00 /km · 8:03 /mi"),
+            ("5:00 /km", "12 km/h · 7.45645430684801 mph"),
+            ("8:00 /mi", "12.07008 km/h · 7.5 mph"),
+        ] {
+            assert_eq!(calculate_pace(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("", ConversionError::Incomplete),
+            ("10 km 用时", ConversionError::Incomplete),
+            ("0 km 用时 5:00", ConversionError::InvalidPace),
+            ("10 kg 用时 5:00", ConversionError::InvalidPace),
+            ("12 km", ConversionError::InvalidPace),
+            ("-12 km/h", ConversionError::InvalidPace),
+            ("5:60 /km", ConversionError::InvalidPace),
+            ("0:00 /mi", ConversionError::InvalidPace),
+            ("1e-300 km/h", ConversionError::OutOfRange),
+        ] {
+            assert_eq!(calculate_pace(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn converts_css_absolute_lengths_and_suggests_related_units() {

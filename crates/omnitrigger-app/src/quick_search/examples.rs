@@ -176,6 +176,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "按距离和用时计算配速",
+        query: "配速: 10 km 用时 52:30",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "把速度换算为配速",
+        query: "配速: 12 km/h",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "把配速换算为速度",
+        query: "配速: 5:00 /km",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "化简宽高比",
         query: "宽高比: 1920×1080",
     },
@@ -1066,6 +1081,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "精确计算组合数",
+        query: "分数: 计算 comb(100,50)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "精确计算排列数",
+        query: "分数: 计算 perm(100,20)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "精确整除并向下取整",
         query: "分数: 计算 2**80//3",
     },
@@ -1119,6 +1144,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Date
         | Scope::Duration
         | Scope::TransferTime
+        | Scope::Pace
         | Scope::AspectRatio
         | Scope::Cidr
         | Scope::Timestamp
@@ -1179,6 +1205,7 @@ mod tests {
             Scope::Date,
             Scope::Duration,
             Scope::TransferTime,
+            Scope::Pace,
             Scope::AspectRatio,
             Scope::Cidr,
             Scope::Timestamp,
