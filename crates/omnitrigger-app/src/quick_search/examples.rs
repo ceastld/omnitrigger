@@ -214,6 +214,31 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算阶乘",
+        query: "factorial(10)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算组合数",
+        query: "comb(52,5)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算排列数",
+        query: "perm(5,3)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算样本标准差",
+        query: "stdev(1,3,5)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算总体标准差",
+        query: "pstdev(1,3)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算反三角函数",
         query: "degrees(asin(0.5))",
     },

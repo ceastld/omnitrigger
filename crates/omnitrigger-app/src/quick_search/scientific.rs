@@ -22,6 +22,16 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "sum" => return Some(NamedValue::Aggregate(|values| values.iter().sum())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
         "median" => return Some(NamedValue::Aggregate(median)),
+        "stdev" => {
+            return Some(NamedValue::Aggregate(|values| {
+                standard_deviation(values, 1)
+            }))
+        }
+        "pstdev" => {
+            return Some(NamedValue::Aggregate(|values| {
+                standard_deviation(values, 0)
+            }))
+        }
         "gcd" => {
             return Some(NamedValue::Aggregate(|values| {
                 integer_pair(values)
@@ -29,6 +39,13 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
             }));
         }
         "lcm" => return Some(NamedValue::Aggregate(least_common_multiple)),
+        "comb" => return Some(NamedValue::Aggregate(combinations)),
+        "perm" => {
+            return Some(NamedValue::Aggregate(|values| match values {
+                [n] => permutations(&[*n, *n]),
+                _ => permutations(values),
+            }));
+        }
         "log" => {
             return Some(NamedValue::Aggregate(|values| match values {
                 [value] => value.ln(),
@@ -70,6 +87,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "ceil" => f64::ceil,
         "round" => f64::round_ties_even,
         "trunc" => f64::trunc,
+        "factorial" | "fact" => |n| permutations(&[n, n]),
         "sin" => f64::sin,
         "cos" => f64::cos,
         "tan" => f64::tan,
@@ -114,6 +132,49 @@ fn least_common_multiple(values: &[f64]) -> f64 {
     }
 }
 
+fn nonnegative_pair(values: &[f64]) -> Option<[u128; 2]> {
+    if values.iter().any(|&value| value < 0.) {
+        return None;
+    }
+    integer_pair(values)
+}
+
+fn combinations(values: &[f64]) -> f64 {
+    let Some([n, k]) = nonnegative_pair(values) else {
+        return f64::NAN;
+    };
+    if k > n {
+        return 0.;
+    }
+    let k = k.min(n - k);
+    let mut result = 1;
+    // 每次乘法前结果与因子都在安全整数范围内，中间乘积可用 u128 表示。
+    for index in 1..=k {
+        result = result * (n - k + index) / index;
+        if result > MAX_SAFE_INTEGER {
+            return f64::INFINITY;
+        }
+    }
+    result as f64
+}
+
+fn permutations(values: &[f64]) -> f64 {
+    let Some([n, k]) = nonnegative_pair(values) else {
+        return f64::NAN;
+    };
+    if k > n {
+        return 0.;
+    }
+    let mut result = 1;
+    for factor in n - k + 1..=n {
+        result *= factor;
+        if result > MAX_SAFE_INTEGER {
+            return f64::INFINITY;
+        }
+    }
+    result as f64
+}
+
 fn average(values: &[f64]) -> f64 {
     let count = values.len() as f64;
     let total: f64 = values.iter().sum();
@@ -135,4 +196,29 @@ fn median(values: &[f64]) -> f64 {
     } else {
         sorted[middle]
     }
+}
+
+fn standard_deviation(values: &[f64], correction: usize) -> f64 {
+    let count = values.len();
+    if count <= correction {
+        return f64::NAN;
+    }
+    let (low, high) = values
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &value| {
+            (low.min(value), high.max(value))
+        });
+    // 先平移再缩放，保留大数之间的微小差异，也避免平方溢出。
+    let center = low.midpoint(high);
+    let scale = (high - center).max(center - low);
+    if scale == 0. {
+        return 0.;
+    }
+    let scaled = |value: f64| (value - center) / scale;
+    let mean = values.iter().copied().map(scaled).sum::<f64>() / count as f64;
+    let squared_deviations: f64 = values
+        .iter()
+        .map(|&value| (scaled(value) - mean).powi(2))
+        .sum();
+    (squared_deviations / (count - correction) as f64).sqrt() * scale
 }

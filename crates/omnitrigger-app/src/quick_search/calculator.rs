@@ -450,6 +450,55 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_factorials_combinations_and_permutations_in_the_safe_integer_range() {
+        for (query, expected) in [
+            ("factorial(10)", "3628800"),
+            ("fact(0)", "1"),
+            ("fact(18)", "6402373705728000"),
+            ("comb(52,5)", "2598960"),
+            ("comb(3,5)", "0"),
+            ("comb(9007199254740991,1)", "9007199254740991"),
+            ("perm(5,3)", "60"),
+            ("perm(5)", "120"),
+            ("perm(3,5)", "0"),
+        ] {
+            assert!(looks_like_calculation(query), "{query}");
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["factorial(-1)", "comb(4,1.5)", "comb(4)", "perm(3,-1)"] {
+            assert_eq!(
+                calculate(query),
+                Err(CalculationError::FunctionDomain),
+                "{query}"
+            );
+        }
+        for query in ["factorial(19)", "comb(100,50)", "perm(100,100)"] {
+            assert_eq!(
+                calculate(query),
+                Err(CalculationError::OutOfRange),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn computes_population_and_sample_deviation_without_squaring_large_inputs() {
+        for (query, expected) in [
+            ("stdev(1,3,5)", "2"),
+            ("pstdev(1,3)", "1"),
+            ("pstdev(5)", "0"),
+            ("pstdev(1e16,1e16+2)", "1"),
+            ("pstdev(-1e308,1e308)", "1e308"),
+            ("stdev(-1e308,1e308)", "1.4142135623731e308"),
+            ("pstdev(-1e-300,1e-300)", "1e-300"),
+        ] {
+            assert!(looks_like_calculation(query), "{query}");
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(calculate("stdev(1)"), Err(CalculationError::FunctionDomain));
+    }
+
+    #[test]
     fn aggregate_functions_accept_expressions_and_require_arguments() {
         for (query, expected) in [
             ("avg(12,18,30)", "20"),
