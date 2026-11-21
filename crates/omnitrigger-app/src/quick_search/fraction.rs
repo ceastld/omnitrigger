@@ -4,6 +4,7 @@ use num_rational::BigRational;
 use super::calculator::{normalize, QUERY_LIMIT};
 
 const MAX_POWER_EXPONENT: u32 = 1024;
+const MAX_FACTORIAL_ARGUMENT: u32 = 1024;
 const MAX_EXACT_BITS: u64 = 8192;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,6 +15,8 @@ pub(super) enum FractionError {
     OutOfRange,
     TooLong,
     NonIntegerExponent,
+    FactorialDomain,
+    FactorialRange,
     ExactRange,
 }
 
@@ -26,6 +29,8 @@ impl FractionError {
             Self::OutOfRange => "分子或分母超出整数范围",
             Self::TooLong => "分数算式最多支持 256 个字符",
             Self::NonIntegerExponent => "精确分数幂的指数必须是整数",
+            Self::FactorialDomain => "阶乘的参数必须是非负整数",
+            Self::FactorialRange => "阶乘参数最多 1024，结果最多 8192 个二进制位",
             Self::ExactRange => "指数绝对值最多 1024，分子和分母各最多 8192 个二进制位",
         }
     }
@@ -164,6 +169,20 @@ fn rational_power(base: BigRational, exponent: BigRational) -> Result<BigRationa
     Ok(value)
 }
 
+fn rational_factorial(value: BigRational) -> Result<BigRational, FractionError> {
+    if !value.is_integer() || value.numer().sign() == Sign::Minus {
+        return Err(FractionError::FactorialDomain);
+    }
+    let argument = u32::try_from(value.numer()).map_err(|_| FractionError::FactorialRange)?;
+    if argument > MAX_FACTORIAL_ARGUMENT {
+        return Err(FractionError::FactorialRange);
+    }
+    let integer = (2..=argument).fold(BigInt::from(1u8), |product, factor| product * factor);
+    let value = BigRational::from_integer(integer);
+    ensure_exact_size(&value).map_err(|_| FractionError::FactorialRange)?;
+    Ok(value)
+}
+
 struct FractionParser<'a> {
     remaining: &'a str,
 }
@@ -227,6 +246,9 @@ impl FractionParser<'_> {
         } else {
             self.number()?
         };
+        if self.consume('!') {
+            value = rational_factorial(value)?;
+        }
         let remaining = self.remaining.trim_start();
         if let Some(exponent) = remaining
             .strip_prefix("**")
@@ -269,6 +291,33 @@ impl FractionParser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calculates_exact_factorials_before_powers_and_unary_signs() {
+        for (query, expected) in [
+            ("计算 0!", "1"),
+            ("计算 5.0!", "120"),
+            ("计算 (2+3)!/2**3", "15"),
+            ("计算 2**3!", "64"),
+            ("计算 3!**2", "36"),
+            ("计算 -3！", "-6"),
+            (
+                "计算 50!",
+                "30414093201713378043612608166064768844377641568960512000000000000",
+            ),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("计算 (-3)!", FractionError::FactorialDomain),
+            ("计算 (1/2)!", FractionError::FactorialDomain),
+            ("计算 3!!", FractionError::Invalid),
+            ("计算 1024!", FractionError::FactorialRange),
+            ("计算 1025!", FractionError::FactorialRange),
+        ] {
+            assert_eq!(simplify_fraction(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn converts_finite_decimals_and_reduces_integer_fractions_exactly() {

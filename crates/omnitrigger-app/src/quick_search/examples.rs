@@ -684,6 +684,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         title: "精确计算整数次幂",
         query: "分数: 计算 2**80",
     },
+    Example {
+        icon: Icon::Terminal,
+        title: "精确计算阶乘",
+        query: "分数: 计算 50!",
+    },
 ];
 
 pub(super) fn matching_examples(query: &str) -> Vec<usize> {
