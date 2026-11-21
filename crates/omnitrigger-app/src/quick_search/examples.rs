@@ -174,6 +174,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         title: "换算 HEX 和 RGB 颜色",
         query: "颜色: #3A86FF",
     },
+    Example {
+        icon: Icon::Terminal,
+        title: "找回用过的算式",
+        query: "算式历史: ",
+    },
 ];
 
 pub(super) fn matching_examples(query: &str) -> Vec<usize> {

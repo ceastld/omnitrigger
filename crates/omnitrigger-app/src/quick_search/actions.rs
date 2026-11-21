@@ -79,7 +79,7 @@ pub(super) fn matching_actions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quick_search::{RecentDestinations, Results};
+    use crate::quick_search::{RecentSearch, Results};
 
     #[test]
     fn ranks_action_names_and_builds_the_library_filter() {
@@ -113,7 +113,7 @@ mod tests {
             &[],
             &actions,
             &[],
-            &RecentDestinations::default(),
+            &RecentSearch::default(),
         );
         assert!(matches!(
             result,

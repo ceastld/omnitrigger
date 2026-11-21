@@ -32,7 +32,7 @@ pub(super) fn matching_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quick_search::{Destination, RecentDestinations, Results};
+    use crate::quick_search::{Destination, RecentSearch, Results};
 
     #[test]
     fn finds_settings_by_labels_and_matches_the_available_controls() {
@@ -65,7 +65,7 @@ mod tests {
                 &[],
                 &[],
                 &visible,
-                &RecentDestinations::default(),
+                &RecentSearch::default(),
             );
             assert!(
                 matches!(results, Results::Destinations(items) if items == [Destination::SettingsSection(SettingsSection::Theme)]),

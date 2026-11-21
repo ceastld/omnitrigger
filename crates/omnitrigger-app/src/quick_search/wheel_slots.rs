@@ -96,7 +96,7 @@ pub(super) fn matching_slots(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quick_search::{RecentDestinations, Results};
+    use crate::quick_search::{RecentSearch, Results};
     use crate::wheels::{WheelApplicationOverride, Wheels};
 
     #[test]
@@ -127,7 +127,7 @@ mod tests {
             &slots,
             &[],
             &[],
-            &RecentDestinations::default(),
+            &RecentSearch::default(),
         );
         assert!(
             matches!(results, Results::Destinations(items) if matches!(items.as_slice(), [

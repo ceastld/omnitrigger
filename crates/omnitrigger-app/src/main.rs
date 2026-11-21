@@ -915,7 +915,7 @@ struct Workspace {
     toast_time: Option<Instant>,
     panel: Option<WindowHandle<TriggerPanel>>,
     quick_search: Option<WindowHandle<quick_search::QuickSearch>>,
-    quick_search_recent: quick_search::RecentDestinations,
+    quick_search_recent: quick_search::RecentSearch,
     panel_prepared: bool,
     /// 已向输入采集登记的面板窗口；面板收起后撤销。
     panel_registered: Option<isize>,
@@ -1454,7 +1454,7 @@ impl Workspace {
             toast_time: None,
             panel: None,
             quick_search: None,
-            quick_search_recent: quick_search::RecentDestinations::default(),
+            quick_search_recent: quick_search::RecentSearch::default(),
             panel_prepared: false,
             panel_registered: None,
             panel_show_generation: 0,
@@ -2760,7 +2760,7 @@ impl Workspace {
                 | quick_search::Destination::ActionLibraryEntry { .. }
         )
         .then(|| self.action_search.focus_handle(cx));
-        self.quick_search_recent.record(&destination);
+        self.quick_search_recent.destinations.record(&destination);
         match destination {
             quick_search::Destination::Page(page) => self.open_page(page, cx),
             quick_search::Destination::TextHistoryQuery(query) => {
@@ -4144,7 +4144,7 @@ impl Workspace {
         }
         self.binding_reload_notice = None;
         for id in retired {
-            self.quick_search_recent.forget_trigger(id);
+            self.quick_search_recent.destinations.forget_trigger(id);
             self.cancel_mouse_shortcut_rule(id);
             self.action_status.remove(&id);
             if self
@@ -4357,7 +4357,7 @@ impl Workspace {
         }
         match self.triggers.remove(id) {
             Ok(next) => {
-                self.quick_search_recent.forget_trigger(id);
+                self.quick_search_recent.destinations.forget_trigger(id);
                 self.cancel_mouse_shortcut_rule(id);
                 self.applied();
                 self.local_executor.cancel_id(id);

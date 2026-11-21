@@ -1,4 +1,5 @@
 mod actions;
+mod calculation_history;
 mod calculator;
 mod calendar;
 mod color;
@@ -34,6 +35,7 @@ use crate::{
     Page, Workspace,
 };
 use actions::{matching_actions, SearchAction};
+use calculation_history::{RecentCalculations, SavedCalculation};
 use calculator::{calculate, looks_like_calculation, CalculationError, QUERY_LIMIT};
 use calendar::{calculate_date, DateError};
 use color::{convert_color, ColorError};
@@ -43,7 +45,7 @@ use examples::{matching_examples, EXAMPLES};
 use omnitrigger_windows::ShortcutTarget;
 use presets::matching_presets;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-pub(super) use recent::RecentDestinations;
+use recent::RecentDestinations;
 use scope::{scoped_query, Scope};
 use settings_sections::matching_settings;
 use timestamp::{convert_timestamp, TimestampError};
@@ -75,6 +77,7 @@ enum Results {
     Value(Result<ResultValue, ValueError>),
     Destinations(Vec<Destination>),
     Help(Vec<usize>),
+    Calculations(Vec<SavedCalculation>),
 }
 
 #[derive(PartialEq, Eq)]
@@ -118,7 +121,13 @@ pub(super) struct SearchIndex {
     wheel_slots: Option<Vec<SearchWheelSlot>>,
     actions: Vec<SearchAction>,
     settings: Vec<SettingsSection>,
-    recent: RecentDestinations,
+    recent: RecentSearch,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct RecentSearch {
+    pub(super) destinations: RecentDestinations,
+    calculations: RecentCalculations,
 }
 
 impl SearchIndex {
@@ -243,11 +252,11 @@ impl Results {
         wheel_slots: &[SearchWheelSlot],
         actions: &[SearchAction],
         settings: &[SettingsSection],
-        recent: &RecentDestinations,
+        recent: &RecentSearch,
     ) -> Self {
         let query = query.trim();
         if query.is_empty() {
-            return Self::Destinations(recent.suggestions(triggers));
+            return Self::Destinations(recent.destinations.suggestions(triggers));
         }
         if let Some(terms) = query.strip_prefix(['?', '？']) {
             return Self::Help(matching_examples(terms));
@@ -299,6 +308,7 @@ impl Results {
                 Scope::TriggerHistory => {
                     Self::Destinations(vec![Destination::TriggerHistoryQuery(term.to_owned())])
                 }
+                Scope::CalculationHistory => Self::Calculations(recent.calculations.matching(term)),
                 Scope::Actions => {
                     let mut entries = matching_actions(actions, term, PAGE_RESULT_LIMIT - 1);
                     entries.push(Destination::ActionLibraryQuery(term.to_owned()));
@@ -393,7 +403,7 @@ impl Results {
         }))
     }
 
-    fn continuation_query(&self) -> Option<String> {
+    fn arithmetic_result(&self) -> Option<&str> {
         let Self::Value(Ok(ResultValue {
             text,
             kind: ValueKind::Calculation,
@@ -401,10 +411,15 @@ impl Results {
         else {
             return None;
         };
+        Some(text)
+    }
+
+    fn continuation_query(&self) -> Option<String> {
+        let text = self.arithmetic_result()?;
         Some(if text.starts_with('-') {
             format!("({text})")
         } else {
-            text.clone()
+            text.to_owned()
         })
     }
 
@@ -422,6 +437,9 @@ impl Results {
                 158. + value_extra_height(&value.text) + hint_height
             }
             Self::Help(items) if !items.is_empty() => {
+                132. + items.len() as f32 * EXAMPLE_ROW_HEIGHT
+            }
+            Self::Calculations(items) if !items.is_empty() => {
                 132. + items.len() as f32 * EXAMPLE_ROW_HEIGHT
             }
             _ => 158.,
@@ -587,6 +605,7 @@ impl QuickSearch {
     fn confirm(&self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.results {
             Results::Value(Ok(result)) => {
+                self.remember_calculation(cx);
                 cx.write_to_clipboard(ClipboardItem::new_string(result.text.clone()));
                 window.remove_window();
             }
@@ -600,7 +619,28 @@ impl QuickSearch {
                     self.fill_query(EXAMPLES[index].query, window, cx);
                 }
             }
+            Results::Calculations(items) => {
+                if let Some(item) = items.get(self.selected) {
+                    self.fill_query(item.expression.clone(), window, cx);
+                }
+            }
             Results::Value(Err(_)) => {}
+        }
+    }
+
+    fn remember_calculation(&self, cx: &Context<Self>) {
+        if let Some(result) = self.results.arithmetic_result() {
+            self.index
+                .recent
+                .calculations
+                .record(&self.input.read(cx).text(), result);
+        }
+    }
+
+    fn continue_calculation(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(query) = self.results.continuation_query() {
+            self.remember_calculation(cx);
+            self.fill_query(query, window, cx);
         }
     }
 
@@ -631,17 +671,18 @@ impl QuickSearch {
             }
             "escape" => window.remove_window(),
             "tab" => {
-                let Some(query) = self.results.continuation_query() else {
+                if self.results.arithmetic_result().is_none() {
                     return;
-                };
+                }
                 if !event.is_held {
-                    self.fill_query(query, window, cx);
+                    self.continue_calculation(window, cx);
                 }
             }
             key @ ("up" | "down") => {
                 let count = match &self.results {
                     Results::Destinations(items) => items.len(),
                     Results::Help(items) => items.len(),
+                    Results::Calculations(items) => items.len(),
                     Results::Value(_) => 0,
                 };
                 if count == 0 {
@@ -721,6 +762,42 @@ impl QuickSearch {
             })
     }
 
+    fn render_calculations(&self, items: &[SavedCalculation], cx: &mut Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .children(items.iter().enumerate().map(|(index, item)| {
+                let expression = item.expression.clone();
+                self.suggestion_row(index, EXAMPLE_ROW_HEIGHT)
+                    .child(icon(Icon::Terminal, 16., theme::ACCENT))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(theme::MONO_FONT)
+                            .child(expression.clone()),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(140.))
+                            .truncate()
+                            .font_family(theme::MONO_FONT)
+                            .text_color(rgb(theme::ACCENT))
+                            .child(format!("= {}", item.result)),
+                    )
+                    .when(index == self.selected, |row| {
+                        row.child(div().text_color(rgb(theme::TEXT_MUTED)).child("Enter 填入"))
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.fill_query(expression.clone(), window, cx);
+                    }))
+            }))
+            .when(items.len() > 1, |list| {
+                list.child(Self::selection_hint("↑ ↓ 选择"))
+            })
+    }
+
     fn render_result(&self, cx: &mut Context<Self>) -> Div {
         let row = div().h(px(38.)).flex().items_center().gap(px(12.));
         match &self.results {
@@ -785,9 +862,7 @@ impl QuickSearch {
                                 .cursor_pointer()
                                 .hover(|style| style.text_color(rgb(theme::ACCENT)))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    if let Some(query) = this.results.continuation_query() {
-                                        this.fill_query(query, window, cx);
-                                    }
+                                    this.continue_calculation(window, cx);
                                 })),
                         )
                     },
@@ -804,6 +879,10 @@ impl QuickSearch {
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child("未找到用法示例"),
             Results::Help(items) => self.render_examples(items, cx),
+            Results::Calculations(items) if items.is_empty() => row
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child("未找到用过的算式"),
+            Results::Calculations(items) => self.render_calculations(items, cx),
             Results::Destinations(items) if items.is_empty() => {
                 row.text_color(rgb(theme::TEXT_MUTED)).child("未找到匹配项")
             }
@@ -1005,7 +1084,7 @@ mod tests {
             &[],
             &[],
             &[],
-            &RecentDestinations::default(),
+            &RecentSearch::default(),
         )
     }
 
@@ -1042,11 +1121,11 @@ mod tests {
             wheel_slots: None,
             actions: Vec::new(),
             settings: SettingsSection::ALL.to_vec(),
-            recent: RecentDestinations::default(),
+            recent: RecentSearch::default(),
         };
         for example in EXAMPLES {
             match index.results(example.query) {
-                Results::Value(Ok(_)) => {}
+                Results::Value(Ok(_)) | Results::Calculations(_) => {}
                 Results::Destinations(items) if !items.is_empty() => {}
                 _ => panic!("用法示例没有可用结果：{}", example.query),
             }
@@ -1058,15 +1137,8 @@ mod tests {
         let settings = crate::wheels::Wheels::default();
         let wheels = [SearchWheel::from_definition(&settings.wheels[0])];
         for query in ["编辑轨道", "wheel: orbit-edit", "轮盘：", "轨道轮盘：编辑"] {
-            let result = Results::for_query(
-                query,
-                &[],
-                &wheels,
-                &[],
-                &[],
-                &[],
-                &RecentDestinations::default(),
-            );
+            let result =
+                Results::for_query(query, &[], &wheels, &[], &[], &[], &RecentSearch::default());
             assert!(
                 matches!(result, Results::Destinations(items) if items == [Destination::Wheel("orbit-edit".into())]),
                 "{query}"
