@@ -15,6 +15,7 @@ pub(super) enum Scope {
     Color,
     TextCount,
     Fraction,
+    UrlEncoding,
 }
 
 pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
@@ -36,6 +37,7 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
         Scope::Color => Some("颜色:"),
         Scope::TextCount => Some("字数:"),
         Scope::Fraction => Some("分数:"),
+        Scope::UrlEncoding => Some("URL:"),
         _ => None,
     }
 }
@@ -57,6 +59,7 @@ fn parse_scope(prefix: &str) -> Option<Scope> {
         "颜色" | "color" | "colour" => Scope::Color,
         "字数" | "text count" | "text length" => Scope::TextCount,
         "分数" | "fraction" => Scope::Fraction,
+        "网址" | "url" => Scope::UrlEncoding,
         _ => return None,
     };
     Some(scope)

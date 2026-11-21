@@ -18,6 +18,7 @@ mod settings_sections;
 mod text_count;
 mod timestamp;
 mod triggers;
+mod url_encoding;
 mod wheel_slots;
 mod wheels;
 
@@ -54,6 +55,7 @@ use settings_sections::matching_settings;
 use text_count::{count_text, TextCountError};
 use timestamp::{convert_timestamp, TimestampError};
 use triggers::{matching_triggers, SearchTrigger};
+use url_encoding::{convert_url_component, UrlEncodingError};
 use wheel_slots::{index_slots, matching_slots, SearchWheelSlot};
 use wheels::{matching_wheels, SearchWheel};
 
@@ -62,6 +64,7 @@ const PAGE_ROW_HEIGHT: f32 = 38.;
 const PAGE_RESULT_LIMIT: usize = 4;
 const EXAMPLE_ROW_HEIGHT: f32 = 30.;
 const VALUE_COLUMNS: usize = 40;
+const MAX_VALUE_LINES: usize = 6;
 const VALUE_LINE_HEIGHT: f32 = 18.;
 
 const PAGES: [(Page, &str); 9] = [
@@ -214,7 +217,12 @@ fn title_rank(title: &str, query: &str) -> u8 {
 
 fn value_extra_height(value: &str) -> f32 {
     if value.is_ascii() {
-        value.len().div_ceil(VALUE_COLUMNS).saturating_sub(2) as f32 * VALUE_LINE_HEIGHT
+        value
+            .len()
+            .div_ceil(VALUE_COLUMNS)
+            .min(MAX_VALUE_LINES)
+            .saturating_sub(2) as f32
+            * VALUE_LINE_HEIGHT
     } else {
         0.
     }
@@ -230,6 +238,7 @@ enum ValueError {
     Color(ColorError),
     TextCount(TextCountError),
     Fraction(FractionError),
+    UrlEncoding(UrlEncodingError),
 }
 
 impl ValueError {
@@ -243,6 +252,7 @@ impl ValueError {
             Self::Color(error) => error.message(),
             Self::TextCount(error) => error.message(),
             Self::Fraction(error) => error.message(),
+            Self::UrlEncoding(error) => error.message(),
         }
     }
 
@@ -257,6 +267,7 @@ impl ValueError {
                 | Self::Color(ColorError::Incomplete)
                 | Self::TextCount(_)
                 | Self::Fraction(FractionError::Incomplete)
+                | Self::UrlEncoding(UrlEncodingError::Incomplete)
         )
     }
 }
@@ -354,6 +365,9 @@ impl Results {
                 }
                 Scope::Fraction => {
                     Self::text_value(simplify_fraction(term).map_err(ValueError::Fraction))
+                }
+                Scope::UrlEncoding => {
+                    Self::text_value(convert_url_component(term).map_err(ValueError::UrlEncoding))
                 }
             };
         }
@@ -855,19 +869,30 @@ impl QuickSearch {
                     .text_color(rgb(theme::ACCENT));
                 let columns = if swatch.is_some() { 20 } else { 28 };
                 let value = if result.is_ascii() && result.len() > columns {
+                    let clipped = result.len() > VALUE_COLUMNS * MAX_VALUE_LINES;
                     value
                         .flex()
                         .flex_col()
                         .text_size(px(14.))
                         .line_height(px(VALUE_LINE_HEIGHT))
-                        .children(result.as_bytes().chunks(VALUE_COLUMNS).enumerate().map(
-                            |(index, digits)| {
-                                let prefix = if index == 0 { "= " } else { "  " };
-                                let digits =
-                                    std::str::from_utf8(digits).expect("结果已核对为 ASCII");
-                                div().child(format!("{prefix}{digits}"))
-                            },
-                        ))
+                        .children(
+                            result
+                                .as_bytes()
+                                .chunks(VALUE_COLUMNS)
+                                .take(MAX_VALUE_LINES)
+                                .enumerate()
+                                .map(|(index, bytes)| {
+                                    let prefix = if index == 0 { "= " } else { "  " };
+                                    let text =
+                                        std::str::from_utf8(bytes).expect("结果已核对为 ASCII");
+                                    let line = if clipped && index + 1 == MAX_VALUE_LINES {
+                                        format!("{prefix}{}…", &text[..VALUE_COLUMNS - 1])
+                                    } else {
+                                        format!("{prefix}{text}")
+                                    };
+                                    div().child(line)
+                                }),
+                        )
                 } else {
                     value
                         .truncate()
@@ -1140,6 +1165,7 @@ mod tests {
             ("FrAcTiOn", "分数:"),
             ("date", "日期:"),
             ("COLOUR", "颜色:"),
+            ("URL", "URL:"),
         ] {
             let Results::Help(items) = for_query(query, &[]) else {
                 panic!("未显示对应工具的示例：{query}");

@@ -3000,6 +3000,7 @@ dependencies = [
  "omnitrigger-browser",
  "omnitrigger-core",
  "omnitrigger-windows",
+ "percent-encoding",
  "raw-window-handle",
  "semver",
  "serde",

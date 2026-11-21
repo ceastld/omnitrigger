@@ -255,6 +255,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "字数: 你好👩‍💻",
     },
     Example {
+        icon: Icon::Browser,
+        title: "编码 URL 参数值",
+        query: "URL: 编码 北京 A+B",
+    },
+    Example {
+        icon: Icon::Browser,
+        title: "解码 URL 参数值",
+        query: "URL: 解码 %E5%8C%97%E4%BA%AC%20A%2BB",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "约分",
         query: "分数: 42/56",
