@@ -20,6 +20,7 @@ mod percentage;
 mod presets;
 mod radix;
 mod recent;
+mod rectangle;
 mod scientific;
 mod scope;
 mod settings_sections;
@@ -73,6 +74,7 @@ use percentage::{compare_percentages, PercentageError};
 use presets::matching_presets;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use recent::RecentDestinations;
+use rectangle::{calculate_rectangle, RectangleError};
 use scope::{scoped_query, tool_example_keyword, Scope};
 use settings_sections::matching_settings;
 use text_tools::{count_text, transform_text, TextError};
@@ -287,6 +289,7 @@ enum ValueError {
     Conversion(ConversionError),
     AspectRatio(AspectRatioError),
     Paper(PaperError),
+    Rectangle(RectangleError),
     Cidr(CidrError),
     Date(DateError),
     Duration(DurationError),
@@ -310,6 +313,7 @@ impl ValueError {
             Self::Conversion(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
             Self::Paper(error) => error.message(),
+            Self::Rectangle(error) => error.message(),
             Self::Cidr(error) => error.message(),
             Self::Date(error) => error.message(),
             Self::Duration(error) => error.message(),
@@ -333,6 +337,7 @@ impl ValueError {
                 | Self::Conversion(ConversionError::Incomplete)
                 | Self::AspectRatio(AspectRatioError::Incomplete)
                 | Self::Paper(PaperError::Incomplete)
+                | Self::Rectangle(RectangleError::Incomplete)
                 | Self::Cidr(CidrError::Incomplete)
                 | Self::Date(DateError::Incomplete)
                 | Self::Duration(DurationError::Incomplete)
@@ -476,6 +481,9 @@ impl Results {
                     Self::text_value(calculate_pixel_density(term).map_err(ValueError::Conversion))
                 }
                 Scope::Paper => Self::text_value(calculate_paper(term).map_err(ValueError::Paper)),
+                Scope::Rectangle => {
+                    Self::text_value(calculate_rectangle(term).map_err(ValueError::Rectangle))
+                }
                 Scope::Cidr => Self::text_value(calculate_cidr(term).map_err(ValueError::Cidr)),
                 Scope::Timestamp => Self::text_value(
                     convert_timestamp(term, chrono::Utc::now()).map_err(ValueError::Timestamp),

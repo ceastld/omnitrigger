@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet};
 
 use serde::ser::{Serialize, SerializeMap, Serializer};
 
@@ -17,7 +17,7 @@ impl CsvError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::MissingInput => "在操作名后粘贴 CSV，可用换行开始数据",
-            Self::UnknownOperation => "可用 转JSON 保留行列，或用 对象 将首行用作键名",
+            Self::UnknownOperation => "可用 转JSON、对象、Markdown 或 转置",
             Self::UnclosedQuote => "CSV 字段的双引号尚未闭合",
             Self::InvalidSeparator => "检查 CSV 的引号和分隔符，引号内的双引号用两个双引号表示",
             Self::DifferentColumnCount => "CSV 每行的列数须一致",
@@ -27,13 +27,22 @@ impl CsvError {
     }
 }
 
+enum Operation {
+    JsonRows,
+    JsonObjects,
+    Markdown,
+    Transpose,
+}
+
 pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
     let (operation, input) = query
         .split_once(char::is_whitespace)
         .ok_or(CsvError::MissingInput)?;
-    let with_header = match operation.to_ascii_lowercase().as_str() {
-        "转json" | "json" => false,
-        "对象" | "表头" | "objects" => true,
+    let kind = match operation.to_ascii_lowercase().as_str() {
+        "转json" | "json" => Operation::JsonRows,
+        "对象" | "表头" | "objects" => Operation::JsonObjects,
+        "markdown" | "表格" => Operation::Markdown,
+        "转置" | "transpose" => Operation::Transpose,
         _ => return Err(CsvError::UnknownOperation),
     };
     let input = query[operation.len()..]
@@ -45,24 +54,86 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
     }
 
     let rows = read_rows(input)?;
-    let json = if with_header {
-        let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
-        let mut names = HashSet::new();
-        if header
+    match kind {
+        Operation::JsonRows => serde_json::to_string(&rows).map_err(|_| CsvError::Serialization),
+        Operation::JsonObjects => json_objects(&rows),
+        Operation::Markdown => Ok(markdown_table(&rows)),
+        Operation::Transpose => Ok(transpose(&rows)),
+    }
+}
+
+fn json_objects(rows: &[Vec<String>]) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let mut names = HashSet::new();
+    if header
+        .iter()
+        .any(|name| name.trim().is_empty() || !names.insert(name))
+    {
+        return Err(CsvError::InvalidHeader);
+    }
+    let objects: Vec<_> = records
+        .iter()
+        .map(|fields| CsvObject { header, fields })
+        .collect();
+    serde_json::to_string(&objects).map_err(|_| CsvError::Serialization)
+}
+
+fn markdown_table(rows: &[Vec<String>]) -> String {
+    let mut lines = Vec::with_capacity(rows.len() + 1);
+    for (index, row) in rows.iter().enumerate() {
+        let cells = row
             .iter()
-            .any(|name| name.trim().is_empty() || !names.insert(name))
-        {
-            return Err(CsvError::InvalidHeader);
+            .map(|cell| markdown_cell(cell))
+            .collect::<Vec<_>>();
+        lines.push(format!("| {} |", cells.join(" | ")));
+        if index == 0 {
+            lines.push(format!("|{}", " --- |".repeat(row.len())));
         }
-        let objects: Vec<_> = records
-            .iter()
-            .map(|fields| CsvObject { header, fields })
-            .collect();
-        serde_json::to_string(&objects)
+    }
+    lines.join("\n")
+}
+
+fn markdown_cell(cell: &str) -> String {
+    let mut result = String::with_capacity(cell.len());
+    let mut chars = cell.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if matches!(ch, '\r' | '\n') {
+            if ch == '\r' && chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            result.push_str("<br>");
+            continue;
+        }
+        if matches!(
+            ch,
+            '\\' | '|' | '`' | '*' | '_' | '~' | '[' | ']' | '<' | '>' | '&' | '$'
+        ) {
+            result.push('\\');
+        }
+        result.push(ch);
+    }
+    result
+}
+
+fn transpose(rows: &[Vec<String>]) -> String {
+    let columns = rows.first().map_or(0, Vec::len);
+    (0..columns)
+        .map(|column| {
+            rows.iter()
+                .map(|row| csv_cell(&row[column]))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
+fn csv_cell(cell: &str) -> Cow<'_, str> {
+    if cell.is_empty() || cell.starts_with('\u{feff}') || cell.contains([',', '"', '\r', '\n']) {
+        Cow::Owned(format!("\"{}\"", cell.replace('"', "\"\"")))
     } else {
-        serde_json::to_string(&rows)
-    };
-    json.map_err(|_| CsvError::Serialization)
+        Cow::Borrowed(cell)
+    }
 }
 
 fn read_rows(mut input: &str) -> Result<Vec<Vec<String>>, CsvError> {
@@ -134,6 +205,32 @@ impl Serialize for CsvObject<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turns_csv_rows_into_markdown_table_rows_without_interpreting_cell_content() {
+        assert_eq!(markdown_cell(r"前\|后"), r"前\\\|后");
+        assert_eq!(
+            transform_csv("Markdown 编号,备注\r\n001,\"甲|乙\r\n*斜体* <a> &\"").as_deref(),
+            Ok("| 编号 | 备注 |\n| --- | --- |\n| 001 | 甲\\|乙<br>\\*斜体\\* \\<a\\> \\& |")
+        );
+    }
+
+    #[test]
+    fn transposes_csv_and_keeps_empty_and_quoted_cells() {
+        let csv = "a,b\r\n\"含,逗号\",\"他说\"\"好\"\"\"\r\n,\r\n";
+        let transposed = transform_csv(&format!("转置 {csv}")).unwrap();
+        assert_eq!(
+            transposed,
+            "a,\"含,逗号\",\"\"\r\nb,\"他说\"\"好\"\"\",\"\""
+        );
+        let restored = transform_csv(&format!("转置 {transposed}")).unwrap();
+        assert_eq!(read_rows(&restored), read_rows(csv));
+        assert_eq!(transform_csv("transpose \"\"").as_deref(), Ok("\"\""));
+        assert_eq!(
+            transform_csv("transpose \"\u{feff}编号\"").as_deref(),
+            Ok("\"\u{feff}编号\"")
+        );
+    }
 
     #[test]
     fn converts_csv_to_json_without_losing_cell_text() {

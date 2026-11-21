@@ -266,6 +266,26 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "生成鼠标触发条件的矩形坐标",
+        query: "区域: -1920, 50 @ 100×200",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "计算矩形的宽高和中心",
+        query: "区域: -1920, 50, -1820, 250",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "按物理像素偏移移动鼠标区域",
+        query: "区域: -1920, 50, -1820, 250 移动 50, -10",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "求两个矩形重叠的鼠标区域",
+        query: "区域: -20, 0, 20, 30 交集 -10, -5, 30, 15",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "查看 IPv4 网段",
         query: "网段: 192.0.2.137/26",
     },
@@ -1090,6 +1110,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 对象 编号,名称\n001,茶",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "由 CSV 生成 Markdown 表格",
+        query: "CSV: Markdown 编号,备注\n001,茶|咖啡",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "交换 CSV 的行和列",
+        query: "CSV: 转置 名称,数量\n茶,2\n咖啡,3",
+    },
+    Example {
         icon: Icon::Browser,
         title: "编码 URL 参数值",
         query: "URL: 编码 北京 A+B",
@@ -1271,6 +1301,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::AspectRatio
         | Scope::PixelDensity
         | Scope::Paper
+        | Scope::Rectangle
         | Scope::Cidr
         | Scope::Timestamp
         | Scope::Color
@@ -1338,6 +1369,7 @@ mod tests {
             Scope::AspectRatio,
             Scope::PixelDensity,
             Scope::Paper,
+            Scope::Rectangle,
             Scope::Cidr,
             Scope::Timestamp,
             Scope::Color,
