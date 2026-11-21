@@ -1,5 +1,12 @@
-use chrono::{DateTime, Datelike, FixedOffset, Local, SecondsFormat, TimeDelta, Utc};
-use jiff::{tz::TimeZone, Timestamp};
+use chrono::{
+    DateTime, Datelike, FixedOffset, Local, NaiveDate, NaiveTime, SecondsFormat, TimeDelta,
+    Timelike, Utc,
+};
+use jiff::{
+    civil::DateTime as CivilDateTime,
+    tz::{AmbiguousOffset, TimeZone},
+    Timestamp,
+};
 
 use super::calculator::normalize;
 use super::conversion::split_conversion;
@@ -10,6 +17,9 @@ pub(super) enum TimestampError {
     Incomplete,
     Invalid,
     InvalidOffset,
+    InvalidSourceZone,
+    SourceClockGap,
+    SourceClockFold,
     InvalidDuration,
     UnsupportedPrecision,
     OutOfRange,
@@ -19,8 +29,11 @@ impl TimestampError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入时间戳或带时区的时间，例如 时间戳: 1700000000000ms",
-            Self::Invalid => "请输入 Unix 秒、毫秒、微秒、纳秒或带时区的 RFC 3339 时间",
+            Self::Invalid => "输入 Unix 时间戳或带 UTC 偏移量或地区时区的日期时间",
             Self::InvalidOffset => "输入目标时区，例如 本地、+08:00 或 Asia/Shanghai",
+            Self::InvalidSourceZone => "检查原时间的地区时区，例如 Asia/Shanghai",
+            Self::SourceClockGap => "该地区跳过了这一时刻，请检查输入的钟表时间",
+            Self::SourceClockFold => "该地区的钟表时间出现两次，请用 UTC 偏移量指定其中一次",
             Self::InvalidDuration => "请输入要加减的时长，例如 时间戳: 现在 + 90分钟",
             Self::UnsupportedPrecision => "请输入可用 Unix 纳秒表示的时间",
             Self::OutOfRange => "结果超出四位年份的时间范围",
@@ -194,13 +207,22 @@ fn convert_timestamp_with_local(
         }
         return Ok(unit.format_unix(now));
     }
-    if suffixed.is_some() || integer(input) {
+    let named_source = input
+        .rsplit_once(char::is_whitespace)
+        .filter(|(_, zone)| zone.contains('/') || zone.eq_ignore_ascii_case("utc"));
+    if named_source.is_none() && (suffixed.is_some() || integer(input)) {
         return display_time(parse_unix(quantity, unit)?, unit.date_format());
     }
 
-    let date = DateTime::parse_from_rfc3339(input).map_err(|_| TimestampError::Invalid)?;
-    ensure_four_digit_year(date.with_timezone(&Utc).year())?;
-    let fraction = date.timestamp_subsec_nanos();
+    let time = if let Some((clock, name)) = named_source {
+        parse_named_source(clock.trim_end(), name)?
+    } else {
+        DateTime::parse_from_rfc3339(input)
+            .map_err(|_| TimestampError::Invalid)?
+            .with_timezone(&Utc)
+    };
+    ensure_four_digit_year(time.year())?;
+    let fraction = time.timestamp_subsec_nanos();
     let extra_precision = input.split_once('.').is_some_and(|(_, digits)| {
         digits
             .bytes()
@@ -212,12 +234,51 @@ fn convert_timestamp_with_local(
         return Err(TimestampError::UnsupportedPrecision);
     }
     let unit = TimestampUnit::from_subsecond(fraction);
-    let time = date.with_timezone(&Utc);
     if target_zone.is_some() {
         display_time(time, unit.date_format())
     } else {
         Ok(unit.format_unix(time))
     }
+}
+
+fn parse_named_source(clock: &str, name: &str) -> Result<DateTime<Utc>, TimestampError> {
+    let zone = TimeZone::get(name).map_err(|_| TimestampError::InvalidSourceZone)?;
+    let (date, time) = clock
+        .split_once(|ch: char| matches!(ch, 'T' | 't') || ch.is_whitespace())
+        .ok_or(TimestampError::Invalid)?;
+    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| TimestampError::Invalid)?;
+    ensure_four_digit_year(date.year())?;
+    let time = time.trim();
+    let time = NaiveTime::parse_from_str(time, "%H:%M:%S%.f")
+        .or_else(|_| NaiveTime::parse_from_str(time, "%H:%M"))
+        .map_err(|_| TimestampError::Invalid)?;
+    if time.nanosecond() >= 1_000_000_000 {
+        return Err(TimestampError::UnsupportedPrecision);
+    }
+    let civil = CivilDateTime::new(
+        date.year() as i16,
+        date.month() as i8,
+        date.day() as i8,
+        time.hour() as i8,
+        time.minute() as i8,
+        time.second() as i8,
+        time.nanosecond() as i32,
+    )
+    .map_err(|_| TimestampError::OutOfRange)?;
+    let unresolved = zone.to_ambiguous_timestamp(civil);
+    match unresolved.offset() {
+        AmbiguousOffset::Gap { .. } => return Err(TimestampError::SourceClockGap),
+        AmbiguousOffset::Fold { .. } => return Err(TimestampError::SourceClockFold),
+        AmbiguousOffset::Unambiguous { .. } => {}
+    }
+    let instant = unresolved
+        .unambiguous()
+        .map_err(|_| TimestampError::OutOfRange)?;
+    let nanos = instant.as_nanosecond();
+    let seconds =
+        i64::try_from(nanos.div_euclid(1_000_000_000)).map_err(|_| TimestampError::OutOfRange)?;
+    DateTime::from_timestamp(seconds, nanos.rem_euclid(1_000_000_000) as u32)
+        .ok_or(TimestampError::OutOfRange)
 }
 
 fn parse_display_zone(input: &str) -> Result<DisplayZone, TimestampError> {
@@ -327,6 +388,54 @@ mod tests {
             convert_timestamp("0 to Asia/Unknown", now),
             Err(TimestampError::InvalidOffset),
         );
+    }
+
+    #[test]
+    fn accepts_a_named_source_zone_and_reports_skipped_or_repeated_local_times() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for (query, expected) in [
+            (
+                "2026-07-01 09:00 America/New_York to Asia/Shanghai",
+                "2026-07-01T21:00:00+08:00",
+            ),
+            (
+                "2026-11-21T08:45:00.125 America/Los_Angeles to UTC",
+                "2026-11-21T16:45:00.125Z",
+            ),
+            ("1970-01-01 08:00 Asia/Shanghai", "0"),
+            ("1969-12-31 23:59:59.999999999 UTC", "-1 ns"),
+        ] {
+            assert_eq!(
+                convert_timestamp(query, now).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            (
+                "2026-03-08 02:30 America/New_York",
+                TimestampError::SourceClockGap,
+            ),
+            (
+                "2026-11-01 01:30 America/New_York",
+                TimestampError::SourceClockFold,
+            ),
+            (
+                "2026-11-21 09:00 America/Unknown",
+                TimestampError::InvalidSourceZone,
+            ),
+            ("2026-11-21 25:00 Asia/Shanghai", TimestampError::Invalid),
+            (
+                "2026-11-21 09:00+08:00 Asia/Shanghai",
+                TimestampError::Invalid,
+            ),
+            (
+                "2016-12-31 23:59:60 UTC",
+                TimestampError::UnsupportedPrecision,
+            ),
+        ] {
+            assert_eq!(convert_timestamp(query, now), Err(error), "{query}");
+        }
     }
 
     #[test]

@@ -251,6 +251,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "输入当地时间和时区",
+        query: "时间戳: 1970-01-01 08:00 Asia/Shanghai",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "将带偏移量的时间换算为 UTC",
         query: "时间戳: 1970-01-01T08:00:00+08:00 to UTC",
     },
