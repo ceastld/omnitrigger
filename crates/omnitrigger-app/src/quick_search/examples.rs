@@ -305,6 +305,21 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "区域: -20, 0, 20, 30 交集 -10, -5, 30, 15",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "把八进制权限换算为 rwx",
+        query: "权限: 4755",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把 rwx 权限换算为八进制",
+        query: "权限: -rw-r-----",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按 umask 计算文件权限位",
+        query: "权限: 0666 umask 0022",
+    },
+    Example {
         icon: Icon::Layers,
         title: "查看 IPv4 网段",
         query: "网段: 192.0.2.137/26",
@@ -1046,6 +1061,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把文本转义为正则字面量",
+        query: "文本: 正则转义 a+b[0]",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "统计正则匹配总次数",
+        query: r#"文本: 正则计数 "[0-9]+" A12 B34 C"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算文本 SHA-256",
         query: "文本: SHA-256 北京",
     },
@@ -1361,6 +1386,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Paper
         | Scope::Rectangle
         | Scope::Cidr
+        | Scope::FileMode
         | Scope::Timestamp
         | Scope::Color
         | Scope::ColorContrast
@@ -1431,6 +1457,7 @@ mod tests {
             Scope::Paper,
             Scope::Rectangle,
             Scope::Cidr,
+            Scope::FileMode,
             Scope::Timestamp,
             Scope::Color,
             Scope::ColorContrast,

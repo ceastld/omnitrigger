@@ -112,6 +112,10 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "行差集" | "subtract-lines" => return compare_line_sets(text, false),
         "正则保留行" | "keep-regex-lines" => return filter_regex_lines(text, true),
         "正则排除行" | "exclude-regex-lines" => return filter_regex_lines(text, false),
+        "正则计数" | "regex-count" => {
+            let (pattern, text) = regex_text_argument(text)?;
+            return Ok(format!("{} 处匹配", pattern.find_iter(text).count()));
+        }
         "正则提取" | "regex-extract" => {
             let (pattern, text) = regex_text_argument(text)?;
             return Ok(text
@@ -147,6 +151,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
             })
             .collect()),
         "合并空白" | "collapse" => Ok(text.split_whitespace().collect::<Vec<_>>().join(" ")),
+        "正则转义" | "regex-escape" => Ok(regex::escape(text)),
         "逐行去空白" | "trim-lines" => {
             Ok(text.lines().map(str::trim).collect::<Vec<_>>().join("\n"))
         }
@@ -762,6 +767,26 @@ mod tests {
         ] {
             assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn escapes_regex_metacharacters_and_counts_matches_across_lines() {
+        assert_eq!(
+            transform_text("正则转义 a+b[0]").as_deref(),
+            Ok(r"a\+b\[0\]")
+        );
+        assert_eq!(
+            transform_text("正则计数 \"[0-9]+\" A12 B34\nC007").as_deref(),
+            Ok("3 处匹配")
+        );
+        assert_eq!(
+            transform_text(r#"regex-count "aa" aaa"#).as_deref(),
+            Ok("1 处匹配")
+        );
+        assert_eq!(
+            transform_text(r#"正则计数 "[0-9]+" 没有数字"#).as_deref(),
+            Ok("0 处匹配")
+        );
     }
 
     #[test]

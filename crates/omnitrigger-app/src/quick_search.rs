@@ -10,6 +10,7 @@ mod csv_tools;
 mod duration;
 mod equation;
 mod examples;
+mod file_mode;
 mod folders;
 mod fraction;
 mod identifiers;
@@ -66,6 +67,7 @@ use csv_tools::{transform_csv, CsvError};
 use duration::{convert_duration, DurationError};
 use equation::{solve_equation, EquationError};
 use examples::{function_examples, matching_examples, tool_operation_examples, EXAMPLES};
+use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
 use fraction::{simplify_fraction, FractionError};
 use identifiers::{transform_ulid, transform_uuid, IdentifierError};
@@ -294,6 +296,7 @@ enum ValueError {
     Paper(PaperError),
     Rectangle(RectangleError),
     Cidr(CidrError),
+    FileMode(FileModeError),
     Date(DateError),
     Duration(DurationError),
     VideoFrames(VideoFrameError),
@@ -319,6 +322,7 @@ impl ValueError {
             Self::Paper(error) => error.message(),
             Self::Rectangle(error) => error.message(),
             Self::Cidr(error) => error.message(),
+            Self::FileMode(error) => error.message(),
             Self::Date(error) => error.message(),
             Self::Duration(error) => error.message(),
             Self::VideoFrames(error) => error.message(),
@@ -344,6 +348,7 @@ impl ValueError {
                 | Self::Paper(PaperError::Incomplete)
                 | Self::Rectangle(RectangleError::Incomplete)
                 | Self::Cidr(CidrError::Incomplete)
+                | Self::FileMode(FileModeError::Incomplete)
                 | Self::Date(DateError::Incomplete)
                 | Self::Duration(DurationError::Incomplete)
                 | Self::VideoFrames(VideoFrameError::Incomplete)
@@ -497,6 +502,9 @@ impl Results {
                     Self::text_value(calculate_rectangle(term).map_err(ValueError::Rectangle))
                 }
                 Scope::Cidr => Self::text_value(calculate_cidr(term).map_err(ValueError::Cidr)),
+                Scope::FileMode => {
+                    Self::text_value(calculate_file_mode(term).map_err(ValueError::FileMode))
+                }
                 Scope::Timestamp => Self::text_value(
                     convert_timestamp(term, chrono::Utc::now()).map_err(ValueError::Timestamp),
                 ),
