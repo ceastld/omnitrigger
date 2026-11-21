@@ -1,3 +1,5 @@
+use std::f64::consts::{PI, TAU};
+
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
 use super::radix::Base;
 
@@ -36,6 +38,9 @@ enum Dimension {
     Volume,
     Speed,
     Data,
+    Angle,
+    Pressure,
+    Frequency,
 }
 
 struct Unit {
@@ -69,6 +74,14 @@ impl Unit {
         let name = name.trim();
         if let Some(unit) = data_unit(name) {
             return Ok(unit);
+        }
+        // 毫和兆的符号大小写不同。
+        match name {
+            "mPa" => return Ok(Self::linear("mPa", Pressure, 0.001)),
+            "MPa" => return Ok(Self::linear("MPa", Pressure, 1_000_000.)),
+            "mHz" => return Ok(Self::linear("mHz", Frequency, 0.001)),
+            "MHz" => return Ok(Self::linear("MHz", Frequency, 1_000_000.)),
+            _ => {}
         }
         let unit = match name.to_ascii_lowercase().as_str() {
             "mm" | "毫米" => Self::linear("mm", Length, 0.001),
@@ -110,6 +123,29 @@ impl Unit {
             "kn" | "knot" | "knots" | "节" => Self::linear("kn", Speed, 1_852. / 3_600.),
             "bit" | "bits" | "比特" => Self::linear("b", Data, 1.),
             "byte" | "bytes" | "字节" => Self::linear("B", Data, 8.),
+            "°" | "deg" | "degree" | "degrees" | "度" | "角度" => {
+                Self::linear("°", Angle, PI / 180.)
+            }
+            "rad" | "radian" | "radians" | "弧度" => Self::linear("rad", Angle, 1.),
+            "turn" | "turns" | "圈" => Self::linear("turn", Angle, TAU),
+            "pa" | "帕" | "帕斯卡" => Self::linear("Pa", Pressure, 1.),
+            "hpa" | "百帕" => Self::linear("hPa", Pressure, 100.),
+            "kpa" | "千帕" => Self::linear("kPa", Pressure, 1000.),
+            "毫帕" => Self::linear("mPa", Pressure, 0.001),
+            "兆帕" => Self::linear("MPa", Pressure, 1_000_000.),
+            "bar" | "巴" => Self::linear("bar", Pressure, 100_000.),
+            "atm" | "标准大气压" => Self::linear("atm", Pressure, 101_325.),
+            "torr" | "托" => Self::linear("Torr", Pressure, 101_325. / 760.),
+            "psi" => Self::linear(
+                "psi",
+                Pressure,
+                (0.453_592_37 * 9.806_65) / (0.0254 * 0.0254),
+            ),
+            "hz" | "赫兹" | "赫" => Self::linear("Hz", Frequency, 1.),
+            "khz" | "千赫兹" | "千赫" => Self::linear("kHz", Frequency, 1000.),
+            "毫赫兹" | "毫赫" => Self::linear("mHz", Frequency, 0.001),
+            "兆赫兹" | "兆赫" => Self::linear("MHz", Frequency, 1_000_000.),
+            "ghz" | "吉赫兹" | "吉赫" => Self::linear("GHz", Frequency, 1_000_000_000.),
             "" => return Err(ConversionError::Incomplete),
             _ => return Err(ConversionError::UnknownUnit),
         };
@@ -262,6 +298,31 @@ mod tests {
         assert_eq!(convert("2**10"), None);
         assert_eq!(convert("10 in"), None);
         assert_eq!(convert("页面转设置"), None);
+    }
+
+    #[test]
+    fn converts_angles_pressure_and_frequency_with_exact_unit_case() {
+        for (query, expected) in [
+            ("π rad to deg", "180 °"),
+            ("０．５圈转度", "180 °"),
+            ("180° to rad", "3.14159265358979 rad"),
+            ("1 atm to kPa", "101.325 kPa"),
+            ("760 Torr to atm", "1 atm"),
+            ("1 psi to kPa", "6.89475729316836 kPa"),
+            ("1 MPa to mPa", "1000000000 mPa"),
+            ("2 MHz to kHz", "2000 kHz"),
+            ("500 mHz to Hz", "0.5 Hz"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.into())), "{query}");
+        }
+        assert_eq!(
+            convert("1 mpa to Pa"),
+            Some(Err(ConversionError::UnknownUnit))
+        );
+        assert_eq!(
+            convert("10 Pa to Hz"),
+            Some(Err(ConversionError::DifferentDimensions))
+        );
     }
 
     #[test]
