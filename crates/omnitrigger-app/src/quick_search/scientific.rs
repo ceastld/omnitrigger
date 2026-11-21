@@ -19,6 +19,18 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "e" => return Some(NamedValue::Constant(E)),
         "sum" => return Some(NamedValue::Aggregate(|values| values.iter().sum())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
+        "median" => return Some(NamedValue::Aggregate(median)),
+        "hypot" => {
+            return Some(NamedValue::Aggregate(|values| {
+                values.iter().copied().fold(0., f64::hypot)
+            }));
+        }
+        "atan2" => {
+            return Some(NamedValue::Aggregate(|values| match values {
+                [y, x] => y.atan2(*x),
+                _ => f64::NAN,
+            }));
+        }
         "min" => {
             return Some(NamedValue::Aggregate(|values| {
                 values.iter().copied().fold(f64::INFINITY, f64::min)
@@ -64,4 +76,15 @@ fn average(values: &[f64]) -> f64 {
     // 中间和溢出时，缩放参数后再计算均值。
     let scale = values.iter().map(|value| value.abs()).fold(0., f64::max);
     scale * (values.iter().map(|value| value / scale).sum::<f64>() / count)
+}
+
+fn median(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable_by(f64::total_cmp);
+    let middle = sorted.len() / 2;
+    if sorted.len().is_multiple_of(2) {
+        average(&sorted[middle - 1..=middle])
+    } else {
+        sorted[middle]
+    }
 }

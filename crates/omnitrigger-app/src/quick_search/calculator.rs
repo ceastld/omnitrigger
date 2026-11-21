@@ -381,13 +381,26 @@ mod tests {
             ("max(-9,-4^2,-12)", "-9"),
             ("min(4)", "4"),
             ("avg(1e308,1e308)", "1e308"),
+            ("median(9,1,4)", "4"),
+            ("median(4,1,8,2)", "3"),
+            ("median(1e308,1.6e308)", "1.3e308"),
+            ("hypot(3,4,12)", "13"),
+            ("hypot(1e308,1e308)", "1.4142135623731e308"),
+            ("degrees(atan2(1,-1))", "135"),
         ] {
             assert!(looks_like_calculation(query), "{query}");
             assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
         }
         assert_eq!(calculate("avg(1,"), Err(CalculationError::Incomplete));
-        for query in ["min()", "max(,2)", "sum(2,)"] {
+        for query in ["min()", "max(,2)", "sum(2,)", "median()", "hypot()"] {
             assert_eq!(calculate(query), Err(CalculationError::Invalid), "{query}");
+        }
+        for query in ["atan2(1)", "atan2(1,2,3)"] {
+            assert_eq!(
+                calculate(query),
+                Err(CalculationError::FunctionDomain),
+                "{query}"
+            );
         }
         assert_eq!(
             calculate("sum(1e308,1e308)"),

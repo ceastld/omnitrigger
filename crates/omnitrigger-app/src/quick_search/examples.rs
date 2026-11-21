@@ -126,6 +126,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算中位数",
+        query: "median(9,1,4)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算斜边或向量长度",
+        query: "hypot(3,4,12)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按象限计算方向角",
+        query: "degrees(atan2(1,-1))",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算反三角函数",
         query: "degrees(asin(0.5))",
     },
