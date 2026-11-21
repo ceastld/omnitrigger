@@ -1,4 +1,5 @@
 use chrono::{DateTime, Datelike, FixedOffset, Local, SecondsFormat, TimeDelta, Utc};
+use jiff::{tz::TimeZone, Timestamp};
 
 use super::calculator::normalize;
 use super::conversion::split_conversion;
@@ -19,7 +20,7 @@ impl TimestampError {
         match self {
             Self::Incomplete => "输入时间戳或带时区的时间，例如 时间戳: 1700000000000ms",
             Self::Invalid => "请输入 Unix 秒、毫秒、微秒、纳秒或带时区的 RFC 3339 时间",
-            Self::InvalidOffset => "请输入目标时区，例如 UTC、本地、UTC+8 或 -05:30",
+            Self::InvalidOffset => "输入目标时区，例如 本地、+08:00 或 Asia/Shanghai",
             Self::InvalidDuration => "请输入要加减的时长，例如 时间戳: 现在 + 90分钟",
             Self::UnsupportedPrecision => "请输入可用 Unix 纳秒表示的时间",
             Self::OutOfRange => "结果超出四位年份的时间范围",
@@ -89,11 +90,11 @@ impl TimestampUnit {
     }
 }
 
-#[derive(Clone, Copy)]
 enum DisplayZone {
     Utc,
     Local,
     Offset(FixedOffset),
+    Named(TimeZone),
 }
 
 pub(super) fn convert_timestamp(query: &str, now: DateTime<Utc>) -> Result<String, TimestampError> {
@@ -130,13 +131,31 @@ fn convert_timestamp_with_local(
 
     let display_time = |time: DateTime<Utc>, format| {
         ensure_four_digit_year(time.year())?;
-        let zoned = match target_zone.unwrap_or(DisplayZone::Utc) {
-            DisplayZone::Utc => return Ok(time.to_rfc3339_opts(format, true)),
-            DisplayZone::Local => to_local(time),
-            DisplayZone::Offset(offset) => time.with_timezone(&offset),
+        let zoned = match &target_zone {
+            None | Some(DisplayZone::Utc) => return Ok(time.to_rfc3339_opts(format, true)),
+            Some(DisplayZone::Local) => to_local(time),
+            Some(DisplayZone::Offset(offset)) => time.with_timezone(offset),
+            Some(DisplayZone::Named(zone)) => {
+                let nanos = i128::from(time.timestamp()) * 1_000_000_000
+                    + i128::from(time.timestamp_subsec_nanos());
+                let instant =
+                    Timestamp::from_nanosecond(nanos).map_err(|_| TimestampError::OutOfRange)?;
+                let offset = FixedOffset::east_opt(zone.to_offset(instant).seconds())
+                    .ok_or(TimestampError::OutOfRange)?;
+                time.with_timezone(&offset)
+            }
         };
         ensure_four_digit_year(zoned.year())?;
-        Ok(zoned.to_rfc3339_opts(format, false))
+        if zoned.offset().local_minus_utc() % 60 == 0 {
+            return Ok(zoned.to_rfc3339_opts(format, false));
+        }
+        // 旧时区偏移可能包含秒，保留实际偏移量。
+        let clock = zoned.naive_local().and_utc().to_rfc3339_opts(format, true);
+        Ok(format!(
+            "{}{}",
+            clock.trim_end_matches('Z'),
+            zoned.format("%::z")
+        ))
     };
     if let Some((sign, input)) = lower
         .strip_prefix("now")
@@ -202,7 +221,8 @@ fn convert_timestamp_with_local(
 }
 
 fn parse_display_zone(input: &str) -> Result<DisplayZone, TimestampError> {
-    let input = input.trim().to_ascii_lowercase();
+    let original = input.trim();
+    let input = original.to_ascii_lowercase();
     match input.as_str() {
         "" => return Err(TimestampError::Incomplete),
         "utc" | "z" => return Ok(DisplayZone::Utc),
@@ -213,7 +233,11 @@ fn parse_display_zone(input: &str) -> Result<DisplayZone, TimestampError> {
     let (sign, magnitude) = match input.as_bytes() {
         [b'+', ..] => (1, &input[1..]),
         [b'-', ..] => (-1, &input[1..]),
-        _ => return Err(TimestampError::InvalidOffset),
+        _ => {
+            return TimeZone::get(original)
+                .map(DisplayZone::Named)
+                .map_err(|_| TimestampError::InvalidOffset);
+        }
     };
     if !magnitude.is_ascii() {
         return Err(TimestampError::InvalidOffset);
@@ -270,6 +294,40 @@ fn ensure_four_digit_year(year: i32) -> Result<(), TimestampError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_to_named_time_zones_with_seasonal_and_historical_offsets() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for (query, expected) in [
+            (
+                "2026-03-08T06:59:59Z to America/New_York",
+                "2026-03-08T01:59:59-05:00",
+            ),
+            (
+                "2026-03-08T07:00:00Z to america/new_york",
+                "2026-03-08T03:00:00-04:00",
+            ),
+            (
+                "1700000000123ms to Asia/Kolkata",
+                "2023-11-15T03:43:20.123+05:30",
+            ),
+            (
+                "1900-01-01T00:00:00.123Z to Europe/Paris",
+                "1900-01-01T00:09:21.123+00:09:21",
+            ),
+            ("现在 + 1s to Asia/Shanghai", "1970-01-01T08:00:01+08:00"),
+        ] {
+            assert_eq!(
+                convert_timestamp(query, now).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            convert_timestamp("0 to Asia/Unknown", now),
+            Err(TimestampError::InvalidOffset),
+        );
+    }
 
     #[test]
     fn shifts_current_time_by_a_duration_and_preserves_requested_precision() {

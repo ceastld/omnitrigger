@@ -27,6 +27,7 @@
 | sha2 | 脚本开发包及托管宿主映像完整性检查，复用锁定的 0.10.9 | MIT OR Apache-2.0 |
 | zip | 写入配置备份并逐项读回 ZIP | MIT |
 | chrono | 保留备份文件的本地修改时间 | MIT OR Apache-2.0 |
+| jiff | 从内置的 IANA 时区数据读取指定地区的时区偏移 | Unlicense OR MIT |
 | tempfile | 暂存并发布已校验的配置备份 | MIT OR Apache-2.0 |
 
 原生亮度提示通过现有 `windows` 绑定调用系统自带的 USER32、GDI 与 GDI+，没有增加第三方 Rust 包或捆绑系统 DLL。文字使用本机系统字体渲染，不分发字体文件。
