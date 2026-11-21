@@ -2717,6 +2717,10 @@ impl Workspace {
         }
         match destination {
             quick_search::Destination::Page(page) => self.open_page(page, cx),
+            quick_search::Destination::TextHistoryQuery(query) => {
+                self.text_history.search_from_quick_search(query, cx);
+                self.open_page(Page::TextHistory, cx);
+            }
             quick_search::Destination::Trigger(id) => {
                 if self.binding(id).is_none() {
                     return;

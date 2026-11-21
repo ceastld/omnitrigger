@@ -287,9 +287,24 @@ async fn exercise_profile_search(
                 || !input.focus_handle(cx).is_focused(w)
                 || v.executor.is_running(65)
             {
-                return Err("再次执行未保留筛选词和焦点，或启动了外部命令".into());
+                return Err("再次执行未保留筛选词和焦点，或启动了外部命令".to_owned());
             }
             Ok(())
         })
-        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())??;
+    window
+        .update(cx, |v, _, cx| {
+            use crate::quick_search::Destination;
+            v.open_quick_search_destination(Destination::TextHistoryQuery("无匹配项".into()), cx);
+            v.open_quick_search_destination(Destination::TextHistoryQuery("test-only".into()), cx);
+            assert!(v.text_history.queued_full_text);
+        })
+        .map_err(|e| e.to_string())?;
+    wait_for(
+        window,
+        cx,
+        "快速搜索未使用最后提交的正文查询",
+        |ui| ui.query.full_text_active() && ui.query.matching_indices(&ui.state.items) == [0],
+    )
+    .await
 }

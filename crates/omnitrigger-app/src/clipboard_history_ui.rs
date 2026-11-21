@@ -90,6 +90,8 @@ pub(super) struct ClipboardHistoryUi {
     state: HistoryUiState,
     sending: HistorySendSession,
     query: HistoryQueryView,
+    /// 快速搜索提交后，等正在处理的历史操作结束再开始查找正文。
+    queued_full_text: bool,
     search: Entity<MessageInput>,
     list_focus: FocusHandle,
     list_blur: Option<Subscription>,
@@ -118,14 +120,7 @@ impl ClipboardHistoryUi {
         });
         let search_changed = cx.observe(&search, |this, search, cx| {
             match SummaryQuery::new(&search.read(cx).text()) {
-                Ok(query) if &query != this.text_history.query.draft() => {
-                    this.text_history.cancel_send();
-                    this.text_history.enter_send.cancel();
-                    this.text_history.query.set_draft(query);
-                    this.text_history.scroll.scroll_to_item(0);
-                    this.text_history.state.selected = None;
-                }
-                Ok(_) => {}
+                Ok(query) => this.text_history.set_query_draft(query),
                 Err(_) => this.text_history.state.message = Some("筛选词过长，请缩短后重试。"),
             }
             cx.notify();
@@ -136,6 +131,7 @@ impl ClipboardHistoryUi {
             state: HistoryUiState::new(store.is_some()),
             sending: HistorySendSession::new(launch_target, ui_window),
             query: HistoryQueryView::default(),
+            queued_full_text: false,
             search,
             list_focus: cx.focus_handle(),
             list_blur: None,
@@ -243,6 +239,7 @@ impl ClipboardHistoryUi {
     }
 
     fn search_full_text(&mut self, cx: &mut Context<super::Workspace>) {
+        self.queued_full_text = false;
         self.enter_send.cancel();
         // 直接读本次控件值，不依赖observe是否已经交付，也不读取系统剪贴板。
         let query = match SummaryQuery::new(&self.search.read(cx).text()) {
@@ -254,12 +251,41 @@ impl ClipboardHistoryUi {
                 return;
             }
         };
+        self.set_query_draft(query);
+        self.begin_full_text_search();
+    }
+
+    pub fn search_from_quick_search(&mut self, text: String, cx: &mut Context<super::Workspace>) {
+        let Ok(query) = SummaryQuery::new(&text) else {
+            return;
+        };
+        self.search.update(cx, |input, cx| input.set_text(text, cx));
+        self.set_query_draft(query);
+        self.queued_full_text = self.store.is_some() && !self.state.popup_close_requested();
+        self.flush_queued_full_text();
+    }
+
+    fn set_query_draft(&mut self, query: SummaryQuery) {
         if &query != self.query.draft() {
             self.cancel_send();
+            self.enter_send.cancel();
+            self.queued_full_text = false;
             self.state.selected = None;
             self.scroll.scroll_to_item(0);
             self.query.set_draft(query);
         }
+    }
+
+    fn flush_queued_full_text(&mut self) -> bool {
+        if !self.queued_full_text || !self.state.can_query() {
+            return false;
+        }
+        self.queued_full_text = false;
+        self.begin_full_text_search();
+        true
+    }
+
+    fn begin_full_text_search(&mut self) {
         let Some(id) = self.state.query() else {
             return;
         };
@@ -521,11 +547,13 @@ impl ClipboardHistoryUi {
                     self.worker.take();
                     self.state.disconnected();
                     self.query.disconnected();
+                    self.queued_full_text = false;
                     changed = true;
                     break;
                 }
             }
         }
+        changed |= self.flush_queued_full_text();
         changed
     }
 }

@@ -29,6 +29,10 @@ enum Dimension {
     Mass,
     Time,
     Temperature,
+    Area,
+    Volume,
+    Speed,
+    Data,
 }
 
 struct Unit {
@@ -59,7 +63,11 @@ impl Unit {
 
     fn parse(name: &str) -> Result<Self, ConversionError> {
         use Dimension::*;
-        let unit = match name.trim() {
+        let name = name.trim();
+        if let Some(unit) = data_unit(name) {
+            return Ok(unit);
+        }
+        let unit = match name.to_ascii_lowercase().as_str() {
             "mm" | "毫米" => Self::linear("mm", Length, 0.001),
             "cm" | "厘米" => Self::linear("cm", Length, 0.01),
             "m" | "米" => Self::linear("m", Length, 1.),
@@ -81,6 +89,24 @@ impl Unit {
             "c" | "°c" | "℃" | "摄氏度" => Self::temperature("°C", 1., 0.),
             "f" | "°f" | "℉" | "华氏度" => Self::temperature("°F", 5. / 9., 32.),
             "k" | "开尔文" => Self::temperature("K", 1., 273.15),
+            "cm²" | "cm^2" | "cm2" | "平方厘米" => Self::linear("cm²", Area, 0.0001),
+            "m²" | "m^2" | "m2" | "平方米" => Self::linear("m²", Area, 1.),
+            "km²" | "km^2" | "km2" | "平方千米" => Self::linear("km²", Area, 1_000_000.),
+            "ft²" | "ft^2" | "ft2" | "平方英尺" => Self::linear("ft²", Area, 0.092_903_04),
+            "ha" | "公顷" => Self::linear("ha", Area, 10_000.),
+            "acre" | "acres" | "英亩" => Self::linear("acre", Area, 4_046.856_422_4),
+            "ml" | "cm³" | "cm^3" | "cm3" | "毫升" => Self::linear("mL", Volume, 0.001),
+            "l" | "liter" | "litre" | "升" => Self::linear("L", Volume, 1.),
+            "m³" | "m^3" | "m3" | "立方米" => Self::linear("m³", Volume, 1000.),
+            "usgal" | "美制加仑" => Self::linear("usgal", Volume, 3.785_411_784),
+            "m/s" | "米/秒" => Self::linear("m/s", Speed, 1.),
+            "km/h" | "kph" | "千米/小时" | "公里/小时" => {
+                Self::linear("km/h", Speed, 1. / 3.6)
+            }
+            "mph" | "英里/小时" => Self::linear("mph", Speed, 1_609.344 / 3_600.),
+            "kn" | "knot" | "knots" | "节" => Self::linear("kn", Speed, 1_852. / 3_600.),
+            "bit" | "bits" | "比特" => Self::linear("b", Data, 1.),
+            "byte" | "bytes" | "字节" => Self::linear("B", Data, 8.),
             "" => return Err(ConversionError::Incomplete),
             _ => return Err(ConversionError::UnknownUnit),
         };
@@ -88,18 +114,72 @@ impl Unit {
     }
 }
 
+fn data_unit(name: &str) -> Option<Unit> {
+    // `B` 是字节、`b` 是比特，十进制和二进制前缀各自保持原比例。
+    let (prefix, bytes) = if let Some(prefix) = name.strip_suffix('B') {
+        (prefix, true)
+    } else {
+        (name.strip_suffix('b')?, false)
+    };
+    [
+        ("", "b", "B", 1.),
+        ("k", "kb", "kB", 1_000.),
+        ("m", "Mb", "MB", 1_000_000.),
+        ("g", "Gb", "GB", 1_000_000_000.),
+        ("t", "Tb", "TB", 1_000_000_000_000.),
+        ("ki", "Kib", "KiB", 1_024.),
+        ("mi", "Mib", "MiB", 1_048_576.),
+        ("gi", "Gib", "GiB", 1_073_741_824.),
+        ("ti", "Tib", "TiB", 1_099_511_627_776.),
+    ]
+    .into_iter()
+    .find(|(key, _, _, _)| prefix.eq_ignore_ascii_case(key))
+    .map(|(_, bits, symbol, scale)| {
+        if bytes {
+            Unit::linear(symbol, Dimension::Data, scale * 8.)
+        } else {
+            Unit::linear(bits, Dimension::Data, scale)
+        }
+    })
+}
+
 pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
-    let input = normalize(query).to_ascii_lowercase();
+    let input = normalize(query).replace(char::is_whitespace, " ");
     let input = input.trim();
-    let (source, target) = ["换算成", "转换为", "换成", "转", "→", "->", " to ", " in "]
-        .into_iter()
-        .find_map(|separator| input.rsplit_once(separator))
-        .or_else(|| input.strip_suffix(" to").map(|source| (source, "")))?;
-    let source = source.trim();
+    let folded = input.to_ascii_lowercase();
+    let (start, end) = [
+        "换算成",
+        "换算为",
+        "转换成",
+        "转换为",
+        "换成",
+        "转成",
+        "转为",
+        "换算",
+        "转换",
+        "转",
+        "→",
+        "->",
+        " to ",
+        " in ",
+    ]
+    .into_iter()
+    .find_map(|separator| {
+        folded
+            .rfind(separator)
+            .map(|start| (start, start + separator.len()))
+    })
+    .or_else(|| {
+        folded
+            .strip_suffix(" to")
+            .map(|source| (source.len(), input.len()))
+    })?;
+    let source = input[..start].trim();
+    let target = &input[end..];
     let (amount, unit) = source.rsplit_once(char::is_whitespace).unwrap_or_else(|| {
         source.split_at(
             source
-                .find(|ch: char| !matches!(ch, '0'..='9' | '+' | '-' | '.' | 'e'))
+                .find(|ch: char| !matches!(ch, '0'..='9' | '+' | '-' | '.' | 'e' | 'E'))
                 .unwrap_or(source.len()),
         )
     });
@@ -169,5 +249,29 @@ mod tests {
         assert_eq!(convert("2**10"), None);
         assert_eq!(convert("10 in"), None);
         assert_eq!(convert("页面转设置"), None);
+    }
+
+    #[test]
+    fn converts_area_volume_speed_and_data_with_case_sensitive_symbols() {
+        for (query, expected) in [
+            ("2 公顷转平方米", "20000 m²"),
+            ("1 ft^2 to cm²", "929.0304 cm²"),
+            ("1000mL 转 L", "1 L"),
+            ("1 usgal to L", "3.785411784 L"),
+            ("36 km/h to m/s", "10 m/s"),
+            ("36 公里/小时转换为米/秒", "10 m/s"),
+            ("1 GB to MB", "1000 MB"),
+            ("1GiB to MiB", "1024 MiB"),
+            ("1 GiB to MB", "1073.741824 MB"),
+            ("8 Mb to MB", "1 MB"),
+            ("1E3kB\tTO\tMB", "1 MB"),
+            ("1字节转比特", "8 b"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.into())), "{query}");
+        }
+        assert_eq!(
+            convert("10 GB to km/h"),
+            Some(Err(ConversionError::DifferentDimensions))
+        );
     }
 }

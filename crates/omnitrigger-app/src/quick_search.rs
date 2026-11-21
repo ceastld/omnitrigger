@@ -45,10 +45,11 @@ enum Results {
     Destinations(Vec<Destination>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Destination {
     Page(Page),
     Trigger(u64),
+    TextHistoryQuery(String),
 }
 
 fn title_rank(title: &str, query: &str) -> u8 {
@@ -89,6 +90,22 @@ impl ValueError {
 impl Results {
     fn for_query(query: &str, triggers: &[SearchTrigger]) -> Self {
         let query = query.trim();
+        if let Some(prefix) = ["剪贴板:", "剪贴板：", "clipboard:"]
+            .into_iter()
+            .find(|prefix| {
+                query
+                    .get(..prefix.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+            })
+        {
+            let term = query[prefix.len()..].trim();
+            let destination = if term.is_empty() {
+                Destination::Page(Page::TextHistory)
+            } else {
+                Destination::TextHistoryQuery(term.to_owned())
+            };
+            return Self::Destinations(vec![destination]);
+        }
         if let Some(result) = convert(query) {
             return Self::Value(result.map_err(ValueError::Conversion));
         }
@@ -139,7 +156,7 @@ impl Results {
 
     fn height(&self) -> f32 {
         match self {
-            Self::Destinations(items) if !items.is_empty() => {
+            Self::Destinations(items) if items.len() > 1 => {
                 132. + items.len() as f32 * PAGE_ROW_HEIGHT
             }
             _ => 158.,
@@ -299,7 +316,7 @@ impl QuickSearch {
                 window.remove_window();
             }
             Results::Destinations(items) => {
-                if let Some(&destination) = items.get(self.selected) {
+                if let Some(destination) = items.get(self.selected).cloned() {
                     self.open_destination(destination, window, cx);
                 }
             }
@@ -368,79 +385,80 @@ impl QuickSearch {
             Results::Destinations(items) => div()
                 .flex()
                 .flex_col()
-                .children(
-                    items
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(index, &destination)| {
-                            let (glyph, title, detail) = match destination {
-                                Destination::Page(page) => {
-                                    (page.icon(), page.title().to_owned(), None)
-                                }
-                                Destination::Trigger(id) => {
-                                    let trigger =
-                                        self.triggers.iter().find(|trigger| trigger.id() == id)?;
-                                    let detail = if trigger.enabled {
-                                        trigger.shortcut.clone()
-                                    } else {
-                                        format!("{} · 已停用", trigger.shortcut)
-                                    };
-                                    (trigger.icon, trigger.title.clone(), Some(detail))
-                                }
+                .children(items.iter().enumerate().filter_map(|(index, destination)| {
+                    let (glyph, title, detail) = match destination {
+                        Destination::Page(page) => (page.icon(), page.title().to_owned(), None),
+                        Destination::Trigger(id) => {
+                            let trigger =
+                                self.triggers.iter().find(|trigger| trigger.id() == *id)?;
+                            let detail = if trigger.enabled {
+                                trigger.shortcut.clone()
+                            } else {
+                                format!("{} · 已停用", trigger.shortcut)
                             };
-                            let selected = index == self.selected;
-                            Some(
+                            (trigger.icon, trigger.title.clone(), Some(detail))
+                        }
+                        Destination::TextHistoryQuery(_) => {
+                            (Icon::Clock, "搜索文本历史正文".to_owned(), None)
+                        }
+                    };
+                    let destination = destination.clone();
+                    let selected = index == self.selected;
+                    Some(
+                        div()
+                            .id(("quick-search-result", index))
+                            .h(px(PAGE_ROW_HEIGHT))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .px(px(10.))
+                            .rounded(px(5.))
+                            .cursor_pointer()
+                            .when(selected, |row| row.bg(rgb(theme::SELECTED)))
+                            .when(!selected, |row| {
+                                row.hover(|style| style.bg(rgb(theme::ROW)))
+                            })
+                            .child(icon(glyph, 16., theme::ACCENT))
+                            .child(
                                 div()
-                                    .id(("quick-search-result", index))
-                                    .h(px(PAGE_ROW_HEIGHT))
+                                    .flex_1()
+                                    .min_w_0()
                                     .flex()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .px(px(10.))
-                                    .rounded(px(5.))
-                                    .cursor_pointer()
-                                    .when(selected, |row| row.bg(rgb(theme::SELECTED)))
-                                    .when(!selected, |row| {
-                                        row.hover(|style| style.bg(rgb(theme::ROW)))
-                                    })
-                                    .child(icon(glyph, 16., theme::ACCENT))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .flex()
-                                            .flex_col()
-                                            .child(div().truncate().child(title))
-                                            .when_some(detail, |label, detail| {
-                                                label.child(
-                                                    div()
-                                                        .truncate()
-                                                        .text_size(px(11.))
-                                                        .text_color(rgb(theme::TEXT_MUTED))
-                                                        .child(detail),
-                                                )
-                                            }),
-                                    )
-                                    .when(selected, |row| {
-                                        row.child(
+                                    .flex_col()
+                                    .child(div().truncate().child(title))
+                                    .when_some(detail, |label, detail| {
+                                        label.child(
                                             div()
+                                                .truncate()
+                                                .text_size(px(11.))
                                                 .text_color(rgb(theme::TEXT_MUTED))
-                                                .child("Enter 打开"),
+                                                .child(detail),
                                         )
-                                    })
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.open_destination(destination, window, cx)
-                                    })),
+                                    }),
                             )
-                        }),
-                )
-                .child(
-                    div()
-                        .mt(px(5.))
-                        .px(px(10.))
-                        .text_color(rgb(theme::TEXT_MUTED))
-                        .child("↑ ↓ 选择"),
-                ),
+                            .when(selected, |row| {
+                                let hint =
+                                    if matches!(destination, Destination::TextHistoryQuery(_)) {
+                                        "Enter 查找"
+                                    } else {
+                                        "Enter 打开"
+                                    };
+                                row.child(div().text_color(rgb(theme::TEXT_MUTED)).child(hint))
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_destination(destination.clone(), window, cx)
+                            })),
+                    )
+                }))
+                .when(items.len() > 1, |list| {
+                    list.child(
+                        div()
+                            .mt(px(5.))
+                            .px(px(10.))
+                            .text_color(rgb(theme::TEXT_MUTED))
+                            .child("↑ ↓ 选择"),
+                    )
+                }),
         }
     }
 }
@@ -567,8 +585,8 @@ mod tests {
             })
             .unwrap();
         for (query, expected) in [
-            ("打开正文", vec![first, second]),
-            ("Caps ＋ W", vec![first]),
+            ("打开正文", vec![first.clone(), second.clone()]),
+            ("Caps ＋ W", vec![first.clone()]),
             ("触发器：打开正文", vec![first, second]),
             (
                 "TRIGGER: Caps+Space",
@@ -579,6 +597,26 @@ mod tests {
                 panic!("触发器查询被解析成了算式：{query}");
             };
             assert_eq!(items, expected, "{query}");
+        }
+    }
+
+    #[test]
+    fn quick_search_routes_clipboard_prefix_to_an_explicit_full_text_query() {
+        for (query, destination) in [
+            ("剪贴板:", Destination::Page(Page::TextHistory)),
+            (
+                "剪贴板：Rust 工程",
+                Destination::TextHistoryQuery("Rust 工程".into()),
+            ),
+            (
+                "CLIPBOARD: 2**10",
+                Destination::TextHistoryQuery("2**10".into()),
+            ),
+        ] {
+            let Results::Destinations(items) = Results::for_query(query, &[]) else {
+                panic!("文本历史查询被解析成了算式：{query}");
+            };
+            assert_eq!(items, vec![destination], "{query}");
         }
     }
 }
