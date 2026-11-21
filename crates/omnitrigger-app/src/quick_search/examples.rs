@@ -1,5 +1,8 @@
+use std::sync::OnceLock;
+
 use crate::assets::Icon;
 
+use super::calculator::narrow_ascii_graphic;
 use super::scope::{scoped_query, Scope};
 use super::title_rank;
 
@@ -932,25 +935,35 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
 ];
 
+fn search_key(text: &str) -> String {
+    let narrowed: String = text.chars().map(narrow_ascii_graphic).collect();
+    narrowed.to_lowercase()
+}
+
 pub(super) fn matching_examples(query: &str) -> Vec<usize> {
-    let query = query.trim().to_lowercase();
+    let query = search_key(query.trim());
     if query.is_empty() {
         return (0..EXAMPLES.len()).collect();
     }
-    let mut matches: Vec<_> = EXAMPLES
+    static SEARCH_TEXT: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    let search_text = SEARCH_TEXT.get_or_init(|| {
+        EXAMPLES
+            .iter()
+            .map(|example| (search_key(example.title), search_key(example.query)))
+            .collect()
+    });
+    let mut matches: Vec<_> = search_text
         .iter()
         .enumerate()
-        .filter_map(|(index, example)| {
-            let title = example.title.to_lowercase();
-            let example_query = example.query.to_lowercase();
+        .filter_map(|(index, (title, example_query))| {
             if !query
                 .split_whitespace()
                 .all(|word| title.contains(word) || example_query.contains(word))
             {
                 return None;
             }
-            let command_rank = title_rank(&example_query, &query);
-            let rank = title_rank(&title, &query).min(command_rank);
+            let command_rank = title_rank(example_query, &query);
+            let rank = title_rank(title, &query).min(command_rank);
             Some((rank, command_rank, index))
         })
         .collect();
