@@ -16,6 +16,7 @@
 | percent-encoding | 快速搜索的 URL 参数值编解码，复用锁定的 2.3.2 | MIT OR Apache-2.0 |
 | base64 | 快速搜索的 Base64 与 Base64URL 文本编解码，复用锁定的 0.22.1 | MIT OR Apache-2.0 |
 | num-bigint / num-rational | 快速搜索的精确分数运算，复用锁定的 0.4.8 和 0.4.2 | MIT OR Apache-2.0 |
+| svgtypes | 快速搜索的 CSS 颜色名解析，复用锁定的 0.15.3 | Apache-2.0 OR MIT |
 | raw-window-handle | 原生窗口句柄 | MIT OR Apache-2.0 OR Zlib |
 | embed-resource | 构建时嵌入 Windows 图标资源 | MIT |
 | omnitrigger-browser | 固定 Git 修订的浏览器 RPC 客户端 | MIT |

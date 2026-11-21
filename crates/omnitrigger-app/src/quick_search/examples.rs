@@ -441,8 +441,18 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "查 CSS 色值",
+        query: "颜色: rebeccapurple",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "将 HEX 颜色转为 HSL",
         query: "颜色: #FF800080 to hsl",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "换算 HWB 颜色",
+        query: "颜色: hwb(210 10% 20%)",
     },
     Example {
         icon: Icon::Layers,

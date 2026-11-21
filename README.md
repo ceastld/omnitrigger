@@ -91,7 +91,9 @@
 - 输入 `1 kgf to N` 可换算力，得到 `9.80665 N`。输入 `1 g0 to m/s²` 可将标准重力加速度换算为 `9.80665 m/s²`。换算系数见 [NIST SI 指南](https://www.nist.gov/pml/special-publication-811/nist-guide-si-appendix-b-conversion-factors/nist-guide-si-appendix-b9)。
 - 输入 `颜色: #3A86FF` 可预览颜色并得到 `rgb(58, 134, 255)`，输入 `颜色: rgba(58, 134, 255, 0.5)` 可转回 HEX，结果带透明度时保留其通道。
 - 输入 `颜色: hsl(210 100% 50%)` 得到 `#0080FF`，也可以输入带透明度的 HSL 颜色。
+- 输入 `颜色: rebeccapurple` 得到 `#663399`。固定的 CSS 颜色名也可用于叠加和对比度查询，`transparent` 可用于带透明度的换算和叠加。参见 [CSS Color 4 的颜色名](https://www.w3.org/TR/css-color-4/#named-colors)。
 - 输入 `颜色: #FF800080 to hsl` 得到 `hsl(30.118 100% 50% / 0.502)`。用 `to hex`、`to rgb` 或 `to hsl` 可指定输出格式。
+- 输入 `颜色: hwb(210 10% 20%)` 得到 `#1A73CC`，也可用 `to hwb` 输出色相、白度和黑度。白度和黑度各可输入 0 至 100 的数值或百分数。参见 [CSS Color 4 的 HWB 语法](https://www.w3.org/TR/css-color-4/#the-hwb-notation)。
 - 输入 `对比度: #fff vs #000` 会预览两个不透明颜色，并显示 `21:1`。计算采用 [WCAG 2.2 的对比度定义](https://www.w3.org/TR/WCAG22/#dfn-contrast-ratio)。
 - 输入 `颜色: #0080FF80 叠加 #fff` 得到 `#7FBFFF`。前一种颜色覆盖在后一种颜色上，也可用 `over`，按 sRGB 通道计算 [透明度叠加](https://www.w3.org/TR/compositing-1/#simplealphacompositing)。
 - 输入 `字数: 你好👩‍💻` 得到 `3 字符 · 17 UTF-8 字节`。加引号可统计首尾空格，例如 `字数: " a "`。

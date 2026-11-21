@@ -27,10 +27,10 @@ pub(super) enum ColorError {
 impl ColorError {
     pub(super) fn message(self) -> &'static str {
         match self {
-            Self::Incomplete => "输入 HEX、RGB 或 HSL 颜色",
+            Self::Incomplete => "输入 HEX、RGB、HSL、HWB 或 CSS 颜色名",
             Self::IncompleteContrast => "输入两个颜色，例如 对比度: #fff vs #000",
-            Self::Invalid => "检查 HEX 位数或颜色通道范围",
-            Self::InvalidFormat => "目标颜色格式可用 HEX、RGB 或 HSL",
+            Self::Invalid => "检查颜色名、HEX 位数或颜色通道范围",
+            Self::InvalidFormat => "目标颜色格式可用 HEX、RGB、HSL 或 HWB",
             Self::TransparentContrast => "计算对比度需要两个不透明颜色",
         }
     }
@@ -40,6 +40,7 @@ enum ColorFormat {
     Hex,
     Rgb,
     Hsl,
+    Hwb,
 }
 
 struct Channels {
@@ -53,9 +54,25 @@ impl Channels {
             Self::hex(digits)
         } else if input.is_empty() {
             Err(ColorError::Incomplete)
+        } else if input.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+            Self::named(input)
         } else {
             Self::function(input)
         }
+    }
+
+    fn named(input: &str) -> Result<Self, ColorError> {
+        let name = input.to_ascii_lowercase();
+        let color = if name == "rebeccapurple" {
+            svgtypes::Color::new_rgb(102, 51, 153)
+        } else {
+            name.parse::<svgtypes::Color>()
+                .map_err(|_| ColorError::Invalid)?
+        };
+        Ok(Self {
+            rgb: [color.red, color.green, color.blue],
+            alpha: (color.alpha != 255).then_some(color.alpha),
+        })
     }
 
     fn swatch(&self) -> u32 {
@@ -117,13 +134,17 @@ impl Channels {
 
     fn function(input: &str) -> Result<Self, ColorError> {
         let (name, terms) = input.split_once('(').ok_or(ColorError::Invalid)?;
-        let hsl = match name.to_ascii_lowercase().as_str() {
-            "rgb" | "rgba" => false,
-            "hsl" | "hsla" => true,
+        let format = match name.to_ascii_lowercase().as_str() {
+            "rgb" | "rgba" => ColorFormat::Rgb,
+            "hsl" | "hsla" => ColorFormat::Hsl,
+            "hwb" => ColorFormat::Hwb,
             _ => return Err(ColorError::Invalid),
         };
         let terms = terms.strip_suffix(')').ok_or(ColorError::Incomplete)?;
         let (values, alpha) = if terms.contains(',') {
+            if matches!(format, ColorFormat::Hwb) {
+                return Err(ColorError::Invalid);
+            }
             let mut parts: Vec<_> = terms.split(',').collect();
             let alpha = (parts.len() == 4).then(|| parts.pop().expect("有四项"));
             (parts, alpha)
@@ -136,14 +157,15 @@ impl Channels {
         let &[first, second, third] = values.as_slice() else {
             return Err(ColorError::Invalid);
         };
-        let rgb = if hsl {
-            rgb_from_hsl(first, second, third)?
-        } else {
-            [
+        let rgb = match format {
+            ColorFormat::Hsl => rgb_from_hsl(first, second, third)?,
+            ColorFormat::Hwb => rgb_from_hwb(first, second, third)?,
+            ColorFormat::Rgb => [
                 component(first, 255.)?,
                 component(second, 255.)?,
                 component(third, 255.)?,
-            ]
+            ],
+            ColorFormat::Hex => unreachable!("HEX 不使用函数形式"),
         };
         Ok(Self {
             rgb,
@@ -196,17 +218,35 @@ fn rgb_from_hsl(hue: &str, saturation: &str, lightness: &str) -> Result<[u8; 3],
     let saturation = percentage(saturation)?;
     let lightness = percentage(lightness)?;
     let chroma = (1. - (2. * lightness - 1.).abs()) * saturation;
-    let middle = chroma * (1. - (sector % 2. - 1.).abs());
     let floor = lightness - chroma / 2.;
-    let rgb = match sector as u8 {
+    Ok(hue_channels(sector, chroma).map(|value| ((value + floor) * 255.).round() as u8))
+}
+
+fn rgb_from_hwb(hue: &str, white: &str, black: &str) -> Result<[u8; 3], ColorError> {
+    let sector = hue_sector(hue)?;
+    let percentage = |text: &str| {
+        let text = text.trim();
+        bounded_number(text.strip_suffix('%').unwrap_or(text), 100.).map(|value| value / 100.)
+    };
+    let white = percentage(white)?;
+    let black = percentage(black)?;
+    let total = white + black;
+    if total >= 1. {
+        return Ok([(white / total * 255.).round() as u8; 3]);
+    }
+    Ok(hue_channels(sector, 1. - total).map(|value| ((value + white) * 255.).round() as u8))
+}
+
+fn hue_channels(sector: f64, chroma: f64) -> [f64; 3] {
+    let middle = chroma * (1. - (sector % 2. - 1.).abs());
+    match sector as u8 {
         0 => [chroma, middle, 0.],
         1 => [middle, chroma, 0.],
         2 => [0., chroma, middle],
         3 => [0., middle, chroma],
         4 => [middle, 0., chroma],
         _ => [chroma, 0., middle],
-    };
-    Ok(rgb.map(|value| ((value + floor) * 255.).round() as u8))
+    }
 }
 
 fn css_number(value: f64) -> String {
@@ -216,16 +256,13 @@ fn css_number(value: f64) -> String {
         .to_owned()
 }
 
-fn format_hsl([r, g, b]: [u8; 3], alpha: Option<u8>) -> String {
+fn hue_and_extrema([r, g, b]: [u8; 3]) -> (f64, f64, f64) {
     let (r, g, b) = (f64::from(r), f64::from(g), f64::from(b));
     let peak = r.max(g).max(b);
     let low = r.min(g).min(b);
     let chroma = peak - low;
-    let sum = peak + low;
-    let lightness = sum * 100. / 510.;
-    // CSS Color 4 的 sRGB 转 HSL 公式，通道以 0–255 表示。
-    let (hue, saturation) = if chroma == 0. {
-        (0., 0.)
+    let hue = if chroma == 0. {
+        0.
     } else {
         let sector = if peak == r {
             (g - b) / chroma
@@ -234,19 +271,39 @@ fn format_hsl([r, g, b]: [u8; 3], alpha: Option<u8>) -> String {
         } else {
             4. + (r - g) / chroma
         };
-        (
-            sector.rem_euclid(6.) * 60.,
-            chroma * 100. / (255. - (sum - 255.).abs()),
-        )
+        sector.rem_euclid(6.) * 60.
     };
-    let hue = css_number(hue);
-    let saturation = css_number(saturation);
-    let lightness = css_number(lightness);
+    (hue, low, peak)
+}
+
+fn format_hsl(rgb: [u8; 3], alpha: Option<u8>) -> String {
+    let (hue, low, peak) = hue_and_extrema(rgb);
+    let chroma = peak - low;
+    let sum = peak + low;
+    let saturation = if chroma == 0. {
+        0.
+    } else {
+        chroma * 100. / (255. - (sum - 255.).abs())
+    };
+    format_hue_color("hsl", [hue, saturation, sum * 100. / 510.], alpha)
+}
+
+fn format_hwb(rgb: [u8; 3], alpha: Option<u8>) -> String {
+    let (hue, low, peak) = hue_and_extrema(rgb);
+    format_hue_color(
+        "hwb",
+        [hue, low * 100. / 255., (255. - peak) * 100. / 255.],
+        alpha,
+    )
+}
+
+fn format_hue_color(name: &str, values: [f64; 3], alpha: Option<u8>) -> String {
+    let [hue, first, second] = values.map(css_number);
     if let Some(alpha) = alpha {
         let alpha = css_number(f64::from(alpha) / 255.);
-        format!("hsl({hue} {saturation}% {lightness}% / {alpha})")
+        format!("{name}({hue} {first}% {second}% / {alpha})")
     } else {
-        format!("hsl({hue} {saturation}% {lightness}%)")
+        format!("{name}({hue} {first}% {second}%)")
     }
 }
 
@@ -261,6 +318,7 @@ pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
             "hex" => ColorFormat::Hex,
             "rgb" | "rgba" => ColorFormat::Rgb,
             "hsl" | "hsla" => ColorFormat::Hsl,
+            "hwb" => ColorFormat::Hwb,
             "" => return Err(ColorError::Incomplete),
             _ => return Err(ColorError::InvalidFormat),
         };
@@ -299,6 +357,7 @@ pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
             }
         }
         ColorFormat::Hsl => format_hsl(channels.rgb, channels.alpha),
+        ColorFormat::Hwb => format_hwb(channels.rgb, channels.alpha),
     };
     Ok(Color {
         swatch: channels.swatch(),
@@ -420,6 +479,32 @@ mod tests {
     }
 
     #[test]
+    fn converts_hwb_colors_with_whiteness_blackness_and_alpha() {
+        for (input, output) in [
+            ("hwb(210 10% 20%)", "#1A73CC"),
+            ("hwb(30deg 80% 40% / 50%)", "#AAAAAA80"),
+            ("hwb(.5turn 0 0)", "#00FFFF"),
+            ("#FF0000 to hwb", "hwb(0 0% 0%)"),
+            ("#00000080 to hwb", "hwb(0 0% 100% / 0.502)"),
+            ("navy to hwb", "hwb(240 0% 49.804%)"),
+        ] {
+            assert_eq!(convert_color(input).unwrap().output, output, "{input}");
+        }
+        assert_eq!(
+            calculate_contrast("hwb(0 100% 0%) vs black")
+                .unwrap()
+                .output,
+            "21:1"
+        );
+        for input in ["hwb(0, 10%, 20%)", "hwb(0 -1% 10%)", "hwb(0 10%)"] {
+            assert!(
+                matches!(convert_color(input), Err(ColorError::Invalid)),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
     fn converts_hsl_colors_with_wrapped_hues_and_optional_alpha() {
         for (input, output, swatch) in [
             ("hsl(210 100% 50%)", "#0080FF", 0x0080ffff),
@@ -437,6 +522,28 @@ mod tests {
                 "{input}",
             );
         }
+    }
+
+    #[test]
+    fn named_colors_work_in_conversion_compositing_and_contrast() {
+        for (input, output) in [
+            ("Navy", "#000080"),
+            ("RebeccaPurple", "#663399"),
+            ("PaleGoldenRod to rgb", "rgb(238, 232, 170)"),
+            ("transparent", "#00000000"),
+            ("transparent over tomato", "#FF6347"),
+        ] {
+            assert_eq!(convert_color(input).unwrap().output, output, "{input}");
+        }
+        assert_eq!(calculate_contrast("White vs BLACK").unwrap().output, "21:1");
+        assert!(matches!(
+            calculate_contrast("transparent vs white"),
+            Err(ColorError::TransparentContrast)
+        ));
+        assert!(matches!(
+            convert_color("currentColor"),
+            Err(ColorError::Invalid)
+        ));
     }
 
     #[test]
