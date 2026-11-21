@@ -291,6 +291,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算加权平均值",
+        query: "wavg(80,2,90,3)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算中位数",
         query: "median(9,1,4)",
     },

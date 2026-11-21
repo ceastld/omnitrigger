@@ -21,6 +21,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "e" => return Some(NamedValue::Constant(E)),
         "sum" => return Some(NamedValue::Aggregate(|values| values.iter().sum())),
         "avg" | "mean" => return Some(NamedValue::Aggregate(average)),
+        "wavg" => return Some(NamedValue::Aggregate(weighted_average)),
         "median" => return Some(NamedValue::Aggregate(median)),
         "quantile" => return Some(NamedValue::Aggregate(|values| quantile(values, 1.))),
         "percentile" => return Some(NamedValue::Aggregate(|values| quantile(values, 100.))),
@@ -352,6 +353,39 @@ fn average(values: &[f64]) -> f64 {
     // 中间和溢出时，缩放参数后再计算均值。
     let scale = values.iter().map(|value| value.abs()).fold(0., f64::max);
     scale * (values.iter().map(|value| value / scale).sum::<f64>() / count)
+}
+
+fn weighted_average(values: &[f64]) -> f64 {
+    let pairs = values.chunks_exact(2);
+    if !pairs.remainder().is_empty() || pairs.clone().any(|pair| pair[1] < 0.) {
+        return f64::NAN;
+    }
+    let active = pairs.filter(|pair| pair[1] > 0.);
+    let max_weight = active.clone().map(|pair| pair[1]).fold(0., f64::max);
+    if max_weight == 0. {
+        return f64::NAN;
+    }
+    let total_weight: f64 = active.clone().map(|pair| pair[1] / max_weight).sum();
+    let mut minimum = f64::INFINITY;
+    let mut maximum = f64::NEG_INFINITY;
+    let mut mean = 0.;
+    for pair in active {
+        let value = pair[0];
+        let weight = pair[1];
+        minimum = minimum.min(value);
+        maximum = maximum.max(value);
+        let scaled_weight = weight / max_weight;
+        let fraction = scaled_weight / total_weight;
+        mean += if fraction != 0. {
+            value * fraction
+        } else if scaled_weight != 0. {
+            value * scaled_weight / total_weight
+        } else {
+            // 权重比可能下溢，但先缩放数值仍可保留这个加权项。
+            value / max_weight * weight / total_weight
+        };
+    }
+    mean.clamp(minimum, maximum)
 }
 
 fn median(values: &[f64]) -> f64 {

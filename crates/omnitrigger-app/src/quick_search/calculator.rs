@@ -515,6 +515,26 @@ mod tests {
     }
 
     #[test]
+    fn averages_values_by_nonnegative_weights_without_overflow() {
+        for (query, expected) in [
+            ("wavg(80,2,90,3)", "86"),
+            ("wavg(100,0,20,1)", "20"),
+            ("wavg(-1e308,10,1e308,10)", "0"),
+            ("wavg(1e308,1e308,1e308,1e308)", "1e308"),
+            ("wavg(1e308,1e-308,0,1e308)", "1e-308"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["wavg(1,2,3)", "wavg(1,-1,2,1)", "wavg(1,0,2,0)"] {
+            assert_eq!(
+                calculate(query),
+                Err(CalculationError::FunctionDomain),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn takes_real_roots_at_positive_integer_degrees() {
         for (query, expected) in [
             ("root(81,4)", "3"),
