@@ -21,6 +21,7 @@ pub(super) enum UrlEncodingError {
     NullCharacter,
     MissingParameters,
     InvalidUrl,
+    OpaqueOrigin,
 }
 
 impl UrlEncodingError {
@@ -33,6 +34,7 @@ impl UrlEncodingError {
             Self::NullCharacter => "解码结果含空字符，无法完整复制",
             Self::MissingParameters => "没有可解析的查询参数",
             Self::InvalidUrl => "输入带协议的 URL，例如 https://example.invalid/",
+            Self::OpaqueOrigin => "请输入具有网络源的 URL，例如 https://example.invalid/",
         }
     }
 }
@@ -54,6 +56,15 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "表单解码" | "form-decode" => decode_value(&value.replace('+', " ")),
         "参数" | "查询参数" | "params" => decode_parameters(value),
         "拆解" | "inspect" => inspect_url(value),
+        "源" | "源站" | "origin" => {
+            let url = Url::parse(value).map_err(|_| UrlEncodingError::InvalidUrl)?;
+            let origin = url.origin();
+            if origin.is_tuple() {
+                Ok(origin.ascii_serialization())
+            } else {
+                Err(UrlEncodingError::OpaqueOrigin)
+            }
+        }
         "去查询串" | "strip-query" => {
             let mut url = Url::parse(value).map_err(|_| UrlEncodingError::InvalidUrl)?;
             url.set_query(None);
@@ -138,6 +149,38 @@ fn decode_parameters(value: &str) -> Result<String, UrlEncodingError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_the_normalized_network_origin() {
+        for (input, expected) in [
+            (
+                "源 HTTPS://user:sample@Example.INVALID:8443/doc?x=1#part",
+                "https://example.invalid:8443",
+            ),
+            (
+                "origin https://[2001:db8::1]:443/path",
+                "https://[2001:db8::1]",
+            ),
+            (
+                "源站 https://bücher.example/",
+                "https://xn--bcher-kva.example",
+            ),
+        ] {
+            assert_eq!(
+                convert_url_component(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            convert_url_component("源 mailto:dev@example.invalid"),
+            Err(UrlEncodingError::OpaqueOrigin)
+        );
+        assert_eq!(
+            convert_url_component("源 /doc"),
+            Err(UrlEncodingError::InvalidUrl)
+        );
+    }
 
     #[test]
     fn removes_the_query_and_preserves_the_path_and_fragment() {

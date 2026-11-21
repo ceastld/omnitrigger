@@ -851,6 +851,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "URL: 去查询串 https://example.invalid/doc?source=mail#part",
     },
     Example {
+        icon: Icon::Browser,
+        title: "提取 URL 的源",
+        query: "URL: 源 https://example.invalid:8443/doc?x=1#part",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "约分",
         query: "分数: 42/56",
