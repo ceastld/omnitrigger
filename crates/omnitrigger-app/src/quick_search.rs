@@ -1518,6 +1518,76 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
+    #[ignore = "需要 Windows 桌面会话"]
+    fn shift_enter_inserts_one_line_break_in_the_search_input() {
+        let (send, receive) = std::sync::mpsc::channel();
+        gpui::Application::new()
+            .with_assets(crate::Assets)
+            .run(move |cx| {
+                let index = SearchIndex {
+                    triggers: Vec::new(),
+                    wheels: Vec::new(),
+                    wheel_slots: None,
+                    actions: Vec::new(),
+                    settings: Vec::new(),
+                    recent: RecentSearch::default(),
+                };
+                let results = index.results("");
+                let window = cx
+                    .open_window(
+                        WindowOptions {
+                            show: false,
+                            focus: false,
+                            ..Default::default()
+                        },
+                        |window, cx| {
+                            cx.new(|cx| {
+                                QuickSearch::new(
+                                    appearance::Mode::Dark,
+                                    WeakEntity::new_invalid(),
+                                    index,
+                                    results,
+                                    window,
+                                    cx,
+                                )
+                            })
+                        },
+                    )
+                    .unwrap();
+                cx.spawn(async move |cx| {
+                    let states = window.update(cx, |search, window, cx| {
+                        search.input.update(cx, |input, cx| {
+                            input.set_text("换行验证甲", cx);
+                            input.move_cursor_to_end(cx);
+                        });
+                        [
+                            ("shift-enter", true),
+                            ("ctrl-shift-enter", false),
+                            ("shift-enter", false),
+                            ("shift-enter", true),
+                        ]
+                        .map(|(key, is_held)| {
+                            let event = KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse(key).unwrap(),
+                                is_held,
+                            };
+                            search.key_down(&event, window, cx);
+                            search.input.read(cx).text()
+                        })
+                    });
+                    send.send(states).unwrap();
+                    cx.update(|cx| cx.quit()).unwrap();
+                })
+                .detach();
+            });
+        assert_eq!(
+            receive.recv().unwrap().unwrap(),
+            ["换行验证甲", "换行验证甲", "换行验证甲\n", "换行验证甲\n"]
+        );
+    }
+
+    #[test]
     fn shared_input_suggestions_include_templates_and_compatible_targets() {
         let targets = for_query("0xff to", &[]);
         assert_eq!(targets.suggested_input(1), Some("0xff to bin"));
