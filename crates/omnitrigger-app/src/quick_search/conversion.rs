@@ -223,7 +223,7 @@ pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     } else {
         source.split_at(
             source
-                .find(|ch: char| !matches!(ch, '0'..='9' | '+' | '-' | '.' | 'e' | 'E'))
+                .find(|ch: char| !matches!(ch, '0'..='9' | '+' | '-' | '.' | 'e' | 'E' | '_'))
                 .unwrap_or(source.len()),
         )
     };
@@ -266,6 +266,7 @@ mod tests {
     fn converts_compatible_units_with_chinese_and_ascii_syntax() {
         for (query, expected) in [
             ("1 km to m", "1000 m"),
+            ("1_000ms to s", "1 s"),
             ("10 in in cm", "25.4 cm"),
             ("３千克转克", "3000 g"),
             ("1e3ms TO s", "1 s"),

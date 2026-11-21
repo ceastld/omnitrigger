@@ -197,11 +197,14 @@ impl Parser<'_> {
 
     fn number(&mut self) -> Result<f64, CalculationError> {
         let start = self.0;
-        self.0 = self.0.trim_start_matches(|ch: char| ch.is_ascii_digit());
-        if let Some(rest) = self.0.strip_prefix('.') {
-            self.0 = rest.trim_start_matches(|ch: char| ch.is_ascii_digit());
-        }
-        if &start[..start.len() - self.0.len()] == "." {
+        let has_integer = self.number_digits()?;
+        let has_fraction = if let Some(rest) = self.0.strip_prefix('.') {
+            self.0 = rest;
+            self.number_digits()?
+        } else {
+            false
+        };
+        if !has_integer && !has_fraction {
             return Err(if self.0.is_empty() {
                 CalculationError::Incomplete
             } else {
@@ -209,10 +212,9 @@ impl Parser<'_> {
             });
         }
         if let Some(rest) = self.0.strip_prefix(['e', 'E']) {
-            let digits = rest.strip_prefix(['+', '-']).unwrap_or(rest);
-            self.0 = digits.trim_start_matches(|ch: char| ch.is_ascii_digit());
-            if self.0.len() == digits.len() {
-                return Err(if digits.is_empty() {
+            self.0 = rest.strip_prefix(['+', '-']).unwrap_or(rest);
+            if !self.number_digits()? {
+                return Err(if self.0.is_empty() {
                     CalculationError::Incomplete
                 } else {
                     CalculationError::Invalid
@@ -220,10 +222,37 @@ impl Parser<'_> {
             }
         }
 
-        let value = start[..start.len() - self.0.len()]
-            .parse::<f64>()
-            .map_err(|_| CalculationError::Invalid)?;
+        let literal = &start[..start.len() - self.0.len()];
+        let value = if literal.contains('_') {
+            literal.replace('_', "").parse::<f64>()
+        } else {
+            literal.parse::<f64>()
+        }
+        .map_err(|_| CalculationError::Invalid)?;
         finite(value)
+    }
+
+    fn number_digits(&mut self) -> Result<bool, CalculationError> {
+        if !self.0.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+            return Ok(false);
+        }
+        let end = self
+            .0
+            .find(|ch: char| !ch.is_ascii_digit() && ch != '_')
+            .unwrap_or(self.0.len());
+        let digits = &self.0[..end];
+        if digits.contains("__") {
+            return Err(CalculationError::Invalid);
+        }
+        if digits.ends_with('_') {
+            return Err(if end == self.0.len() {
+                CalculationError::Incomplete
+            } else {
+                CalculationError::Invalid
+            });
+        }
+        self.0 = &self.0[end..];
+        Ok(true)
     }
 }
 
@@ -255,6 +284,9 @@ mod tests {
             ("２＊＊１０", "1024"),
             ("＝（１．５＋２．５）÷２", "2"),
             ("1e-3 + .002", "0.003"),
+            ("1_000 + 20_000", "21000"),
+            ("1_000.25_0", "1000.25"),
+            ("1.2_5e1_0", "12500000000"),
             ("0.1 + 0.2", "0.3"),
             ("2^53 - 1", "9007199254740991"),
             ("1e-8", "1e-8"),
@@ -359,6 +391,11 @@ mod tests {
             ("2 * * 3", CalculationError::Invalid),
             ("2×*3", CalculationError::Invalid),
             ("1e-", CalculationError::Incomplete),
+            ("1_", CalculationError::Incomplete),
+            ("1__2", CalculationError::Invalid),
+            ("1_.2", CalculationError::Invalid),
+            ("1._2", CalculationError::Invalid),
+            ("1e_2", CalculationError::Invalid),
             ("12 34", CalculationError::Invalid),
             ("2+3)", CalculationError::Invalid),
             ("1/(2-2)", CalculationError::DivisionByZero),
