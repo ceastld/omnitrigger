@@ -1285,6 +1285,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 转置 名称,数量\n茶,2\n咖啡,3",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "把 CSV 转成制表符分隔的表格",
+        query: "CSV: 转TSV 编号,备注\n001,\"茶,咖啡\"",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把制表符分隔的表格转成 CSV",
+        query: "CSV: 从TSV 编号\t备注\n001\t茶,咖啡",
+    },
+    Example {
         icon: Icon::Browser,
         title: "编码 URL 参数值",
         query: "URL: 编码 北京 A+B",

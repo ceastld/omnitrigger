@@ -1882,6 +1882,10 @@ mod tests {
             for_query(" CSV： 转JSON  001,茶\n002,末尾 ", &[]),
             Results::Value(Ok(value)) if value.text == r#"[[" 001","茶"],["002","末尾 "]]"#
         ));
+        assert!(matches!(
+            for_query("CSV: 从TSV \t茶\t", &[]),
+            Results::Value(Ok(value)) if value.text == r#""",茶,"""#
+        ));
         let suggestions = for_query("CSV: 对", &[]);
         assert!(suggestions
             .suggested_input(0)

@@ -16,11 +16,11 @@ pub(super) enum CsvError {
 impl CsvError {
     pub(super) fn message(self) -> &'static str {
         match self {
-            Self::MissingInput => "在操作名后粘贴 CSV，可用换行开始数据",
-            Self::UnknownOperation => "可用 转JSON、对象、Markdown 或 转置",
-            Self::UnclosedQuote => "CSV 字段的双引号尚未闭合",
-            Self::InvalidSeparator => "检查 CSV 的引号和分隔符，引号内的双引号用两个双引号表示",
-            Self::DifferentColumnCount => "CSV 每行的列数须一致",
+            Self::MissingInput => "在操作名后粘贴表格，可用换行开始数据",
+            Self::UnknownOperation => "可用 转JSON、对象、Markdown、转置、转TSV 或 从TSV",
+            Self::UnclosedQuote => "字段的双引号尚未闭合",
+            Self::InvalidSeparator => "检查引号和分隔符，引号内的双引号用两个双引号表示",
+            Self::DifferentColumnCount => "每行的列数须一致",
             Self::InvalidHeader => "CSV 表头的列名须非空且唯一",
             Self::Serialization => "无法生成 JSON",
         }
@@ -32,6 +32,8 @@ enum Operation {
     JsonObjects,
     Markdown,
     Transpose,
+    ToTsv,
+    FromTsv,
 }
 
 pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
@@ -43,6 +45,8 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         "对象" | "表头" | "objects" => Operation::JsonObjects,
         "markdown" | "表格" => Operation::Markdown,
         "转置" | "transpose" => Operation::Transpose,
+        "转tsv" | "tsv" => Operation::ToTsv,
+        "从tsv" | "from-tsv" => Operation::FromTsv,
         _ => return Err(CsvError::UnknownOperation),
     };
     let input = query[operation.len()..]
@@ -53,12 +57,18 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         return Err(CsvError::MissingInput);
     }
 
-    let rows = read_rows(input)?;
+    let delimiter = match kind {
+        Operation::FromTsv => '\t',
+        _ => ',',
+    };
+    let rows = read_rows(input, delimiter)?;
     match kind {
         Operation::JsonRows => serde_json::to_string(&rows).map_err(|_| CsvError::Serialization),
         Operation::JsonObjects => json_objects(&rows),
         Operation::Markdown => Ok(markdown_table(&rows)),
         Operation::Transpose => Ok(transpose(&rows)),
+        Operation::ToTsv => Ok(write_rows(&rows, '\t')),
+        Operation::FromTsv => Ok(write_rows(&rows, ',')),
     }
 }
 
@@ -128,21 +138,41 @@ fn transpose(rows: &[Vec<String>]) -> String {
         .join("\r\n")
 }
 
+fn write_rows(rows: &[Vec<String>], delimiter: char) -> String {
+    let separator = delimiter.to_string();
+    rows.iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| separated_cell(cell, delimiter))
+                .collect::<Vec<_>>()
+                .join(&separator)
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
 pub(super) fn csv_cell(cell: &str) -> Cow<'_, str> {
-    if cell.is_empty() || cell.starts_with('\u{feff}') || cell.contains([',', '"', '\r', '\n']) {
+    separated_cell(cell, ',')
+}
+
+fn separated_cell(cell: &str, delimiter: char) -> Cow<'_, str> {
+    if cell.is_empty()
+        || cell.starts_with('\u{feff}')
+        || cell.contains([delimiter, '"', '\r', '\n'])
+    {
         Cow::Owned(format!("\"{}\"", cell.replace('"', "\"\"")))
     } else {
         Cow::Borrowed(cell)
     }
 }
 
-fn read_rows(mut input: &str) -> Result<Vec<Vec<String>>, CsvError> {
+fn read_rows(mut input: &str, delimiter: char) -> Result<Vec<Vec<String>>, CsvError> {
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut fields = Vec::new();
     loop {
-        let (field, rest) = read_field(input)?;
+        let (field, rest) = read_field(input, delimiter)?;
         fields.push(field);
-        if let Some(next) = rest.strip_prefix(',') {
+        if let Some(next) = rest.strip_prefix(delimiter) {
             input = next;
             continue;
         }
@@ -166,7 +196,7 @@ fn read_rows(mut input: &str) -> Result<Vec<Vec<String>>, CsvError> {
     }
 }
 
-fn read_field(input: &str) -> Result<(String, &str), CsvError> {
+fn read_field(input: &str, delimiter: char) -> Result<(String, &str), CsvError> {
     if let Some(mut quoted) = input.strip_prefix('"') {
         let mut value = String::new();
         loop {
@@ -179,7 +209,9 @@ fn read_field(input: &str) -> Result<(String, &str), CsvError> {
             quoted = next;
         }
     }
-    let end = input.find([',', '\r', '\n', '"']).unwrap_or(input.len());
+    let end = input
+        .find([delimiter, '\r', '\n', '"'])
+        .unwrap_or(input.len());
     let (field, rest) = input.split_at(end);
     if rest.starts_with('"') {
         return Err(CsvError::InvalidSeparator);
@@ -224,11 +256,30 @@ mod tests {
             "a,\"含,逗号\",\"\"\r\nb,\"他说\"\"好\"\"\",\"\""
         );
         let restored = transform_csv(&format!("转置 {transposed}")).unwrap();
-        assert_eq!(read_rows(&restored), read_rows(csv));
+        assert_eq!(read_rows(&restored, ','), read_rows(csv, ','));
         assert_eq!(transform_csv("transpose \"\"").as_deref(), Ok("\"\""));
         assert_eq!(
             transform_csv("transpose \"\u{feff}编号\"").as_deref(),
             Ok("\"\u{feff}编号\"")
+        );
+    }
+
+    #[test]
+    fn translates_csv_and_quoted_tsv_without_changing_fields() {
+        let csv = "编号,备注,值\r\n001,\"含,逗号\",含\t制表符\r\n002,\"含\r\n换行\",";
+        let tsv = "编号\t备注\t值\r\n001\t含,逗号\t\"含\t制表符\"\r\n002\t\"含\r\n换行\"\t\"\"";
+        assert_eq!(transform_csv(&format!("转TSV {csv}")).as_deref(), Ok(tsv));
+        let restored = transform_csv(&format!("从TSV\n\u{feff}{tsv}")).unwrap();
+        assert_eq!(read_rows(&restored, ','), read_rows(csv, ','));
+        assert_eq!(transform_csv("tsv \"\"").as_deref(), Ok("\"\""));
+        assert_eq!(transform_csv("from-tsv \"\"").as_deref(), Ok("\"\""));
+        assert_eq!(
+            transform_csv("从TSV a\tb\nc"),
+            Err(CsvError::DifferentColumnCount)
+        );
+        assert_eq!(
+            transform_csv("从TSV \"甲\"x\t乙"),
+            Err(CsvError::InvalidSeparator)
         );
     }
 
