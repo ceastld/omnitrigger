@@ -41,7 +41,7 @@ use crate::{
     Page, Workspace,
 };
 use actions::{matching_actions, SearchAction};
-use applications::ApplicationIndex;
+use applications::{ApplicationCache, ApplicationIndex};
 use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, looks_like_date_query, DateError};
 use color::{calculate_contrast, convert_color, ColorError};
@@ -160,6 +160,7 @@ pub(super) struct RecentSearch {
     pub(super) destinations: RecentDestinations,
     calculations: RecentValues,
     conversions: RecentValues,
+    applications: ApplicationCache,
 }
 
 impl SearchIndex {
@@ -205,7 +206,7 @@ impl SearchIndex {
                 .filter(|section| section.available(standard_config, workspace.test_data))
                 .collect(),
             recent: workspace.quick_search_recent.clone(),
-            applications: ApplicationIndex::default(),
+            applications: workspace.quick_search_recent.applications.snapshot(),
         }
     }
 
@@ -612,6 +613,7 @@ pub(super) struct QuickSearch {
     was_active: bool,
     results: Results,
     selected: usize,
+    requested_applications: bool,
     _input_changes: Subscription,
     _activation: Subscription,
 }
@@ -696,6 +698,7 @@ impl QuickSearch {
             was_active: window.is_window_active(),
             results,
             selected: 0,
+            requested_applications: false,
             _input_changes: input_changes,
             _activation: activation,
         }
@@ -716,20 +719,50 @@ impl QuickSearch {
                 window.resize(size(px(WIDTH), px(self.results.height())));
             }
         }
-        if matches!(self.results, Results::ApplicationsLoading)
-            && matches!(self.index.applications, ApplicationIndex::Unloaded)
+        if !self.requested_applications
+            && !matches!(self.results, Results::Value(Err(ValueError::InputTooLong)))
+            && matches!(scoped_query(query.trim()), Some((Scope::Applications, _)))
+            && self
+                .index
+                .applications
+                .needs_refresh(std::time::Instant::now())
         {
-            self.index.applications = ApplicationIndex::Loading;
+            self.requested_applications = true;
+            let cached = self.index.recent.applications.clone();
             cx.spawn_in(window, async move |this, cx| {
                 let applications = cx
                     .background_executor()
                     .spawn(async { ApplicationIndex::load() })
                     .await;
+                cached.remember(&applications);
                 let _ = cx.update(|window, cx| {
                     let _ = this.update(cx, |this, cx| {
+                        if matches!(applications, ApplicationIndex::Unavailable(_))
+                            && matches!(this.index.applications, ApplicationIndex::Ready { .. })
+                        {
+                            return;
+                        }
+                        let previous = match &this.results {
+                            Results::Destinations(items) => items.get(this.selected).cloned(),
+                            _ => None,
+                        };
                         this.index.applications = applications;
                         let query = this.input.read(cx).text();
                         this.refresh_results(&query, window, cx);
+                        let Some(Destination::InstalledApp(previous)) = previous else {
+                            return;
+                        };
+                        let Results::Destinations(items) = &this.results else {
+                            return;
+                        };
+                        if let Some(index) = items.iter().position(|item| {
+                            matches!(item, Destination::InstalledApp(app) if app == &previous
+                                || (!app.identifier().is_empty()
+                                    && app.title() == previous.title()
+                                    && app.identifier() == previous.identifier()))
+                        }) {
+                            this.selected = index;
+                        }
                     });
                 });
             })
