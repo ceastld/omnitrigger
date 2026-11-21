@@ -220,6 +220,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "颜色: #3A86FF",
     },
     Example {
+        icon: Icon::Layers,
+        title: "将 HSL 颜色转为 HEX",
+        query: "颜色: hsl(210 100% 50%)",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "找回用过的算式",
         query: "算式历史: ",

@@ -1,3 +1,5 @@
+use std::f64::consts::TAU;
+
 use super::calculator::normalize;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -15,8 +17,8 @@ pub(super) enum ColorError {
 impl ColorError {
     pub(super) fn message(self) -> &'static str {
         match self {
-            Self::Incomplete => "输入 HEX 或 RGB 颜色",
-            Self::Invalid => "检查 HEX 位数或 RGB 通道范围",
+            Self::Incomplete => "输入 HEX、RGB 或 HSL 颜色",
+            Self::Invalid => "检查 HEX 位数或颜色通道范围",
         }
     }
 }
@@ -71,9 +73,11 @@ impl Channels {
 
     fn function(input: &str) -> Result<Self, ColorError> {
         let (name, terms) = input.split_once('(').ok_or(ColorError::Invalid)?;
-        if !name.eq_ignore_ascii_case("rgb") && !name.eq_ignore_ascii_case("rgba") {
-            return Err(ColorError::Invalid);
-        }
+        let hsl = match name.to_ascii_lowercase().as_str() {
+            "rgb" | "rgba" => false,
+            "hsl" | "hsla" => true,
+            _ => return Err(ColorError::Invalid),
+        };
         let terms = terms.strip_suffix(')').ok_or(ColorError::Incomplete)?;
         let (values, alpha) = if terms.contains(',') {
             let mut parts: Vec<_> = terms.split(',').collect();
@@ -85,18 +89,31 @@ impl Channels {
                 .map_or((terms, None), |(values, alpha)| (values, Some(alpha)));
             (values.split_whitespace().collect(), alpha)
         };
-        let &[r, g, b] = values.as_slice() else {
+        let &[first, second, third] = values.as_slice() else {
             return Err(ColorError::Invalid);
         };
+        let rgb = if hsl {
+            rgb_from_hsl(first, second, third)?
+        } else {
+            [
+                component(first, 255.)?,
+                component(second, 255.)?,
+                component(third, 255.)?,
+            ]
+        };
         Ok(Self {
-            rgb: [
-                component(r, 255.)?,
-                component(g, 255.)?,
-                component(b, 255.)?,
-            ],
+            rgb,
             alpha: alpha.map(|value| component(value, 1.)).transpose()?,
         })
     }
+}
+
+fn bounded_number(text: &str, max: f64) -> Result<f64, ColorError> {
+    let value = text.parse::<f64>().map_err(|_| ColorError::Invalid)?;
+    if !(0.0..=max).contains(&value) {
+        return Err(ColorError::Invalid);
+    }
+    Ok(value)
 }
 
 fn component(text: &str, max: f64) -> Result<u8, ColorError> {
@@ -104,16 +121,48 @@ fn component(text: &str, max: f64) -> Result<u8, ColorError> {
     let (text, max) = text
         .strip_suffix('%')
         .map_or((text, max), |number| (number, 100.));
-    let value = text.parse::<f64>().map_err(|_| ColorError::Invalid)?;
-    if !(0.0..=max).contains(&value) {
-        return Err(ColorError::Invalid);
-    }
+    let value = bounded_number(text, max)?;
     Ok(if max == 255. {
         value
     } else {
         value * 255. / max
     }
     .round() as u8)
+}
+
+fn hue_sector(input: &str) -> Result<f64, ColorError> {
+    let lower = input.trim().to_ascii_lowercase();
+    let (number, period) = [("deg", 360.), ("grad", 400.), ("rad", TAU), ("turn", 1.)]
+        .into_iter()
+        .find_map(|(unit, period)| lower.strip_suffix(unit).map(|number| (number, period)))
+        .unwrap_or((&lower, 360.));
+    let angle = number.parse::<f64>().map_err(|_| ColorError::Invalid)?;
+    if !angle.is_finite() {
+        return Err(ColorError::Invalid);
+    }
+    Ok((angle.rem_euclid(period) / period * 6.).rem_euclid(6.))
+}
+
+fn rgb_from_hsl(hue: &str, saturation: &str, lightness: &str) -> Result<[u8; 3], ColorError> {
+    let percentage = |text: &str| {
+        let number = text.trim().strip_suffix('%').ok_or(ColorError::Invalid)?;
+        bounded_number(number, 100.).map(|value| value / 100.)
+    };
+    let sector = hue_sector(hue)?;
+    let saturation = percentage(saturation)?;
+    let lightness = percentage(lightness)?;
+    let chroma = (1. - (2. * lightness - 1.).abs()) * saturation;
+    let middle = chroma * (1. - (sector % 2. - 1.).abs());
+    let floor = lightness - chroma / 2.;
+    let rgb = match sector as u8 {
+        0 => [chroma, middle, 0.],
+        1 => [middle, chroma, 0.],
+        2 => [0., chroma, middle],
+        3 => [0., middle, chroma],
+        4 => [middle, 0., chroma],
+        _ => [chroma, 0., middle],
+    };
+    Ok(rgb.map(|value| ((value + floor) * 255.).round() as u8))
 }
 
 pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
@@ -145,6 +194,26 @@ pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_hsl_colors_with_wrapped_hues_and_optional_alpha() {
+        for (input, output, swatch) in [
+            ("hsl(210 100% 50%)", "#0080FF", 0x0080ffff),
+            ("HSLA(-120deg, 100%, 50%, .5)", "#0000FF80", 0x0000ff80),
+            ("hsl(0.25turn 0% 50% / 25%)", "#80808040", 0x80808040),
+            ("hsl(400grad 100% 50%)", "#FF0000", 0xff0000ff),
+            ("hsl(0 0% 0%)", "#000000", 0x000000ff),
+        ] {
+            assert_eq!(
+                convert_color(input),
+                Ok(Color {
+                    swatch,
+                    output: output.to_owned()
+                }),
+                "{input}",
+            );
+        }
+    }
 
     #[test]
     fn converts_hex_and_rgb_with_optional_alpha() {
@@ -181,7 +250,9 @@ mod tests {
             "rgb(0 0 0 / 101%)",
             "rgb(0,0,0,NaN)",
             "rgb(0 0)",
-            "hsl(0 0% 0%)",
+            "hsl(120 101% 50%)",
+            "hsl(NaN 100% 50%)",
+            "hsl(120 50 50%)",
         ] {
             assert_eq!(convert_color(input), Err(ColorError::Invalid), "{input}");
         }
