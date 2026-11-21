@@ -67,8 +67,8 @@ pub(super) fn evaluate(query: &str) -> Result<f64, CalculationError> {
 
 fn evaluate_expression(input: &str) -> Result<f64, CalculationError> {
     if let Some((mode, base, rate)) = percentage_operands(input) {
-        let fraction = evaluate_expression(rate)? / 100.;
-        return finite(mode.apply(evaluate_expression(base)?, fraction));
+        let rate = evaluate_expression(rate)?;
+        return finite(mode.apply(evaluate_expression(base)?, rate));
     }
     let mut parser = Parser(input);
     let value = parser.expression(0)?;
@@ -333,6 +333,9 @@ mod tests {
             ("200 DECREASED BY 15%", "170"),
             ("(80+20)增加(5+5)%", "110"),
             ("200 增加 10% 减少 10%", "198"),
+            ("200打8折", "160"),
+            ("200 打 8.5 折", "170"),
+            ("(80+20)增加20% 打9折", "108"),
             ("7 % -3", "-2"),
         ] {
             assert!(looks_like_calculation(query), "{query}");

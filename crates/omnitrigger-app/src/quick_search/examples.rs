@@ -131,6 +131,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算打折后的价格",
+        query: "200 打 8.5 折",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算平均值",
         query: "avg(12,18,30)",
     },
