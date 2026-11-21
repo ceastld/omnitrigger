@@ -206,6 +206,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "换算密度",
+        query: "1000 kg/m³ to g/cm³",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "换算体积流量",
+        query: "1 L/min to m³/h",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算 HEX 和 RGB 颜色",
         query: "颜色: #3A86FF",
     },

@@ -45,6 +45,8 @@ enum Dimension {
     Frequency,
     Energy,
     Power,
+    Density,
+    VolumeFlow,
 }
 
 impl Dimension {
@@ -64,6 +66,8 @@ impl Dimension {
             Self::Frequency => &["Hz", "kHz", "MHz", "GHz", "mHz"],
             Self::Energy => &["J", "kJ", "MJ", "Wh", "kWh"],
             Self::Power => &["W", "kW", "mW", "MW", "GW"],
+            Self::Density => &["kg/m³", "g/cm³", "g/L", "kg/L"],
+            Self::VolumeFlow => &["L/min", "L/s", "m³/h", "m³/s", "mL/s"],
         }
     }
 }
@@ -190,6 +194,21 @@ impl Unit {
             "毫瓦" | "毫瓦特" => Self::linear("mW", Power, 0.001),
             "兆瓦" | "兆瓦特" => Self::linear("MW", Power, 1_000_000.),
             "gw" | "吉瓦" | "吉瓦特" => Self::linear("GW", Power, 1_000_000_000.),
+            "kg/m³" | "kg/m^3" | "kg/m3" | "千克/立方米" | "公斤/立方米" => {
+                Self::linear("kg/m³", Density, 1.)
+            }
+            "g/cm³" | "g/cm^3" | "g/cm3" | "克/立方厘米" => {
+                Self::linear("g/cm³", Density, 1000.)
+            }
+            "g/l" | "克/升" => Self::linear("g/L", Density, 1.),
+            "kg/l" | "千克/升" | "公斤/升" => Self::linear("kg/L", Density, 1000.),
+            "m³/s" | "m^3/s" | "m3/s" | "立方米/秒" => Self::linear("m³/s", VolumeFlow, 1.),
+            "m³/h" | "m^3/h" | "m3/h" | "立方米/小时" => {
+                Self::linear("m³/h", VolumeFlow, 1. / 3600.)
+            }
+            "l/s" | "升/秒" => Self::linear("L/s", VolumeFlow, 0.001),
+            "l/min" | "升/分钟" => Self::linear("L/min", VolumeFlow, 0.001 / 60.),
+            "ml/s" | "毫升/秒" => Self::linear("mL/s", VolumeFlow, 0.000001),
             "" => return Err(ConversionError::Incomplete),
             _ => return Err(ConversionError::UnknownUnit),
         };
@@ -366,6 +385,23 @@ fn format_conversion(amount: f64, source: &Unit, target: &Unit) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_density_and_volume_flow_using_separate_dimensions() {
+        for (query, expected) in [
+            ("1000 kg/m3 to g/cm3", "1 g/cm³"),
+            ("1克/升 转 千克/立方米", "1 kg/m³"),
+            ("1 L/min to m³/h", "0.06 m³/h"),
+            ("1立方米/秒 转 升/秒", "1000 L/s"),
+            ("1 mL/s to L/min", "0.06 L/min"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.to_owned())), "{query}");
+        }
+        assert_eq!(
+            convert("1 L/min to kg/m³"),
+            Some(Err(ConversionError::DifferentDimensions)),
+        );
+    }
 
     #[test]
     fn suggests_compatible_targets_and_previews_their_conversions() {
