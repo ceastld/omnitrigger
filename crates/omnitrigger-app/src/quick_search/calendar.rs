@@ -142,6 +142,14 @@ fn calendar_period_parts(input: &str, marker: [char; 2]) -> Option<(&str, &str)>
     Some((year, rest.strip_prefix('-')?.strip_prefix(marker)?))
 }
 
+fn iso_year(input: &str) -> Option<i32> {
+    if input.len() == 4 && input.bytes().all(|digit| digit.is_ascii_digit()) {
+        input.parse().ok()
+    } else {
+        None
+    }
+}
+
 fn iso_month_parts(input: &str) -> Option<(i32, u32)> {
     let (year, month) = input.split_once('-')?;
     if year.len() == 4
@@ -167,10 +175,11 @@ fn weekday_occurrence_parts(input: &str) -> Option<(i32, u32, &str)> {
 enum RelativePeriod {
     Week(i8),
     Month(i8),
+    Year(i8),
 }
 
 fn relative_period(input: &str) -> Option<RelativePeriod> {
-    use RelativePeriod::{Month, Week};
+    use RelativePeriod::{Month, Week, Year};
     match input.to_ascii_lowercase().as_str() {
         "本周" | "这周" | "本星期" | "this week" => Some(Week(0)),
         "上周" | "上星期" | "last week" => Some(Week(-1)),
@@ -178,6 +187,9 @@ fn relative_period(input: &str) -> Option<RelativePeriod> {
         "本月" | "这个月" | "this month" => Some(Month(0)),
         "上月" | "上个月" | "last month" => Some(Month(-1)),
         "下月" | "下个月" | "next month" => Some(Month(1)),
+        "今年" | "本年" | "this year" => Some(Year(0)),
+        "去年" | "上年" | "last year" => Some(Year(-1)),
+        "明年" | "下年" | "next year" => Some(Year(1)),
         _ => None,
     }
 }
@@ -202,6 +214,10 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
             || written_date_prefix(date).is_some_and(|(_, _, _, rest)| date_tail(rest));
     }
     relative_period(input).is_some()
+        || input
+            .strip_suffix('年')
+            .and_then(|year| iso_year(year.trim_end()))
+            .is_some()
         || relative_day(input).is_some_and(|(_, rest)| date_tail(rest))
         || (input.get(4..).is_some_and(|rest| rest.starts_with('年'))
             && written_date_prefix(input).is_some_and(|(_, _, _, rest)| date_tail(rest)))
@@ -326,6 +342,10 @@ fn quarter_range(year: &str, quarter: &str) -> Result<String, DateError> {
     month_range(start, 3)
 }
 
+fn year_range(year: i32) -> Result<String, DateError> {
+    month_range(in_range(NaiveDate::from_ymd_opt(year, 1, 1))?, 12)
+}
+
 fn calendar_difference(date: NaiveDate, other: NaiveDate) -> Result<String, DateError> {
     let (start, end, sign) = if date < other {
         (date, other, "-")
@@ -437,6 +457,9 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     if let Some((year, quarter)) = calendar_period_parts(input, ['Q', 'q']) {
         return quarter_range(year, quarter);
     }
+    if let Some(year) = iso_year(input.strip_suffix('年').unwrap_or(input).trim_end()) {
+        return year_range(year);
+    }
     if let Some((year, month)) = iso_month_parts(input) {
         return month_range(
             NaiveDate::from_ymd_opt(year, month, 1).ok_or(DateError::InvalidDate)?,
@@ -460,6 +483,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
             };
             return month_range(in_range(start)?, 1);
         }
+        Some(RelativePeriod::Year(offset)) => return year_range(today.year() + i32::from(offset)),
         None => {}
     }
     let weekday = weekday_query(input);
@@ -530,6 +554,34 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shows_absolute_and_relative_years_with_actual_day_counts() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            ("2024", "2024-01-01 至 2024-12-31\n366 天 · 262 工作日"),
+            (
+                "２０２４ 年",
+                "2024-01-01 至 2024-12-31\n366 天 · 262 工作日",
+            ),
+            ("今年", "2026-01-01 至 2026-12-31\n365 天 · 261 工作日"),
+            ("去年", "2025-01-01 至 2025-12-31\n365 天 · 261 工作日"),
+            ("明年", "2027-01-01 至 2027-12-31\n365 天 · 261 工作日"),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert!(looks_like_date_query("２０２４年"));
+        assert!(looks_like_date_query("Next Year"));
+        assert!(!looks_like_date_query("2024"));
+        assert_eq!(
+            calculate_date("明年", NaiveDate::from_ymd_opt(9999, 12, 1).unwrap()),
+            Err(DateError::OutOfRange)
+        );
+    }
 
     #[test]
     fn finds_the_nth_or_last_weekday_of_a_month() {
