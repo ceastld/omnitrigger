@@ -22,7 +22,7 @@ impl DateError {
             Self::InvalidWeek => "请输入有效的 ISO 周号，例如 2026-W47",
             Self::InvalidQuarter => "请输入季度编号 1 至 4，例如 2026-Q4",
             Self::InvalidWeekdayOccurrence => {
-                "请输入第 1 至第 5 个星期几，例如 日期: 2026-11 第4个星期四"
+                "请输入第 1 至第 5 个或最后一个星期几，例如 日期: 2026-11 最后一个星期四"
             }
             Self::MissingWeekdayOccurrence => "该月没有指定次序的星期",
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
@@ -158,9 +158,10 @@ fn iso_month_parts(input: &str) -> Option<(i32, u32)> {
 }
 
 fn weekday_occurrence_parts(input: &str) -> Option<(i32, u32, &str)> {
-    let (month, rule) = input.split_once('第')?;
-    let (year, month) = iso_month_parts(month.trim_end())?;
-    Some((year, month, rule.trim()))
+    let (month, rule) = input.split_at_checked(7)?;
+    let (year, month) = iso_month_parts(month)?;
+    let rule = rule.trim();
+    (rule.starts_with('第') || rule.starts_with("最后")).then_some((year, month, rule))
 }
 
 enum RelativePeriod {
@@ -237,18 +238,21 @@ fn week_range(monday: NaiveDate) -> Result<String, DateError> {
 }
 
 fn weekday_occurrence(year: i32, month: u32, rule: &str) -> Result<String, DateError> {
-    if rule.is_empty() {
+    if matches!(rule, "第" | "最后") {
         return Err(DateError::Incomplete);
     }
     let (ordinal, label) = rule
         .split_once('个')
         .ok_or(DateError::InvalidWeekdayOccurrence)?;
-    let ordinal = ordinal
-        .trim_end()
-        .parse::<u32>()
-        .ok()
-        .filter(|ordinal| (1..=5).contains(ordinal))
-        .ok_or(DateError::InvalidWeekdayOccurrence)?;
+    let ordinal = match ordinal.trim_end() {
+        "最后一" => None,
+        text => Some(
+            text.strip_prefix('第')
+                .and_then(|text| text.trim_start().parse::<u32>().ok())
+                .filter(|ordinal| (1..=5).contains(ordinal))
+                .ok_or(DateError::InvalidWeekdayOccurrence)?,
+        ),
+    };
     let label = label.trim_start();
     let day = match label
         .strip_prefix("星期")
@@ -264,12 +268,19 @@ fn weekday_occurrence(year: i32, month: u32, rule: &str) -> Result<String, DateE
         _ => return Err(DateError::InvalidWeekdayOccurrence),
     };
     let start = NaiveDate::from_ymd_opt(year, month, 1).ok_or(DateError::InvalidDate)?;
-    let first = (day.num_days_from_monday() + 7 - start.weekday().num_days_from_monday()) % 7;
-    let days = Days::new(u64::from(first + (ordinal - 1) * 7));
-    let date = start
-        .checked_add_days(days)
-        .filter(|date| date.month() == month)
-        .ok_or(DateError::MissingWeekdayOccurrence)?;
+    let day_number = day.num_days_from_monday();
+    let date = if let Some(ordinal) = ordinal {
+        let first = (day_number + 7 - start.weekday().num_days_from_monday()) % 7;
+        let days = Days::new(u64::from(first + (ordinal - 1) * 7));
+        start
+            .checked_add_days(days)
+            .filter(|date| date.month() == month)
+            .ok_or(DateError::MissingWeekdayOccurrence)?
+    } else {
+        let end = month_end(start, 1)?;
+        let offset = (end.weekday().num_days_from_monday() + 7 - day_number) % 7;
+        in_range(end.checked_sub_days(Days::new(u64::from(offset))))?
+    };
     Ok(date.to_string())
 }
 
@@ -283,12 +294,16 @@ fn workday_difference(date: NaiveDate, other: NaiveDate) -> i64 {
     difference.signum() * (days / 7 * 5 + remaining_workdays)
 }
 
-fn month_range(start: NaiveDate, months: u32) -> Result<String, DateError> {
-    let end = in_range(
+fn month_end(start: NaiveDate, months: u32) -> Result<NaiveDate, DateError> {
+    in_range(
         start
             .checked_add_months(Months::new(months))
             .and_then(|next| next.pred_opt()),
-    )?;
+    )
+}
+
+fn month_range(start: NaiveDate, months: u32) -> Result<String, DateError> {
+    let end = month_end(start, months)?;
     let workdays =
         workday_difference(end, start) + i64::from(start.weekday().number_from_monday() <= 5);
     let days = end.signed_duration_since(start).num_days() + 1;
@@ -517,13 +532,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finds_the_nth_weekday_of_a_month_and_checks_for_missing_dates() {
+    fn finds_the_nth_or_last_weekday_of_a_month() {
         let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
         for (query, expected) in [
             ("2026-11 第4个星期四", "2026-11-26"),
             ("2024-02 第５个周四", "2024-02-29"),
             ("2026-11 第1个星期日", "2026-11-01"),
             ("2026-11第1个周一", "2026-11-02"),
+            ("2026-11 第 4 个星期四", "2026-11-26"),
+            ("2026-11 最后一个星期日", "2026-11-29"),
+            ("2026-11最后一个周一", "2026-11-30"),
+            ("2024-02 最后一个周四", "2024-02-29"),
         ] {
             assert!(looks_like_date_query(query), "{query}");
             assert_eq!(
@@ -534,10 +553,12 @@ mod tests {
         }
         for (query, error) in [
             ("2026-11 第", DateError::Incomplete),
+            ("2026-11 最后", DateError::Incomplete),
             ("2026-11 第5个星期四", DateError::MissingWeekdayOccurrence),
             ("2026-11 第0个周四", DateError::InvalidWeekdayOccurrence),
             ("2026-11 第4个周八", DateError::InvalidWeekdayOccurrence),
             ("2026-13 第4个星期四", DateError::InvalidDate),
+            ("2026-13 最后一个星期四", DateError::InvalidDate),
         ] {
             assert_eq!(calculate_date(query, today), Err(error), "{query}");
         }
