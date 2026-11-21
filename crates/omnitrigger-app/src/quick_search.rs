@@ -900,6 +900,18 @@ impl QuickSearch {
                     });
                 }
                 cx.stop_propagation();
+            } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "r" {
+                if !event.is_held {
+                    let query = self.input.read(cx).text();
+                    const PREFIX: &str = "算式历史: ";
+                    let filter = query.strip_prefix(PREFIX).or_else(|| {
+                        let (scope, term) = scoped_query(&query)?;
+                        (scope == Scope::CalculationHistory).then_some(term)
+                    });
+                    let next = filter.map_or_else(|| format!("{PREFIX}{query}"), str::to_owned);
+                    self.fill_query(next, window, cx);
+                }
+                cx.stop_propagation();
             }
             return;
         }
@@ -1671,7 +1683,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     #[ignore = "需要 Windows 桌面会话"]
-    fn shift_enter_inserts_one_line_break_in_the_search_input() {
+    fn search_shortcuts_insert_one_line_break_and_toggle_history() {
         let (send, receive) = std::sync::mpsc::channel();
         gpui::Application::new()
             .with_assets(crate::Assets)
@@ -1710,6 +1722,11 @@ mod tests {
                             ("ctrl-shift-enter", false),
                             ("shift-enter", false),
                             ("shift-enter", true),
+                            ("ctrl-r", true),
+                            ("ctrl-shift-r", false),
+                            ("ctrl-r", false),
+                            ("ctrl-r", true),
+                            ("ctrl-r", false),
                         ]
                         .map(|(key, is_held)| {
                             let event = KeyDownEvent {
@@ -1727,7 +1744,17 @@ mod tests {
             });
         assert_eq!(
             receive.recv().unwrap().unwrap(),
-            ["换行验证甲", "换行验证甲", "换行验证甲\n", "换行验证甲\n"]
+            [
+                "换行验证甲",
+                "换行验证甲",
+                "换行验证甲\n",
+                "换行验证甲\n",
+                "换行验证甲\n",
+                "换行验证甲\n",
+                "算式历史: 换行验证甲\n",
+                "算式历史: 换行验证甲\n",
+                "换行验证甲\n",
+            ]
         );
     }
 
