@@ -822,6 +822,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "提取 JSON 数组的一列",
+        query: r#"JSON: 取列 /价格 [{"价格":9.90},{"价格":2e2}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "列出 JSON 对象的顶层键名",
         query: r#"JSON: 键名 {"城市":{"名称":"北京"},"数量":1}"#,
     },

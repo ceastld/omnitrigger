@@ -14,6 +14,7 @@ pub(super) enum JsonError {
     InvalidPointer,
     ExpectedObject,
     ExpectedCollection,
+    ExpectedArray,
     MissingValue,
     DuplicateKey,
 }
@@ -22,12 +23,13 @@ impl JsonError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入操作和 JSON 文本",
-            Self::UnknownOperation => "可用的操作有 格式化、压缩、取值、键名 和 长度",
+            Self::UnknownOperation => "可用的操作有 格式化、压缩、取值、取列、键名 和 长度",
             Self::Invalid => "JSON 语法无效",
             Self::LayoutTooLarge => "JSON 格式化结果超过 1 MiB",
             Self::InvalidPointer => "JSON 路径无效，示例 /商品/0/价格",
             Self::ExpectedObject => "请输入 JSON 对象以查看顶层键名",
             Self::ExpectedCollection => "请输入 JSON 数组或对象以统计顶层条目数",
+            Self::ExpectedArray => "请输入 JSON 数组以提取每项中的值",
             Self::MissingValue => "JSON 路径没有对应的值",
             Self::DuplicateKey => "JSON 路径遇到了重复的键",
         }
@@ -42,6 +44,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "格式化" | "format" | "pretty" => true,
         "压缩" | "compact" | "minify" => false,
         "取值" | "get" | "pointer" => return select_json_value(source.trim_start()),
+        "取列" | "column" => return select_json_column(source.trim_start()),
         "键名" | "keys" => return json_keys(source.trim_start()),
         "长度" | "length" => return json_length(source.trim_start()),
         _ => return Err(JsonError::UnknownOperation),
@@ -110,6 +113,31 @@ fn json_parse_error(error: serde_json::Error) -> JsonError {
 }
 
 fn select_json_value(query: &str) -> Result<String, JsonError> {
+    let (pointer, source) = pointer_and_source(query)?;
+    let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let value = pointer_keys(&pointer)?.try_fold(root, |value, key| select_member(value, &key?))?;
+    Ok(value.get().to_owned())
+}
+
+fn select_json_column(query: &str) -> Result<String, JsonError> {
+    let (pointer, source) = pointer_and_source(query)?;
+    if !source.starts_with('[') {
+        serde_json::from_str::<IgnoredAny>(source).map_err(json_parse_error)?;
+        return Err(JsonError::ExpectedArray);
+    }
+    let items = serde_json::from_str::<Vec<&RawValue>>(source).map_err(json_parse_error)?;
+    let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
+    let values = items
+        .into_iter()
+        .map(|item| {
+            keys.iter()
+                .try_fold(item, |value, key| select_member(value, key))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::to_string(&values).expect("有效的原始 JSON 值可以直接序列化"))
+}
+
+fn pointer_and_source(query: &str) -> Result<(String, &str), JsonError> {
     let (pointer, source) = if query.starts_with('"') {
         let mut strings = serde_json::Deserializer::from_str(query).into_iter::<String>();
         let pointer = strings
@@ -133,36 +161,43 @@ fn select_json_value(query: &str) -> Result<String, JsonError> {
             .ok_or(JsonError::Incomplete)?;
         (pointer.to_owned(), rest)
     };
-    let mut value =
-        serde_json::from_str::<&RawValue>(source.trim_start()).map_err(json_parse_error)?;
-    if let Some(path) = pointer.strip_prefix('/') {
-        for token in path.split('/') {
-            let key = decode_pointer_key(token)?;
-            let raw = value.get();
-            value = match raw.as_bytes()[0] {
-                b'{' => serde::Deserializer::deserialize_map(
-                    &mut serde_json::Deserializer::from_str(raw),
-                    ObjectMember(&key),
-                )
-                .map_err(json_parse_error)??,
-                b'[' => {
-                    if (key.len() > 1 && key.starts_with('0'))
-                        || !key.bytes().all(|byte| byte.is_ascii_digit())
-                    {
-                        return Err(JsonError::MissingValue);
-                    }
-                    let index = key.parse::<usize>().map_err(|_| JsonError::MissingValue)?;
-                    let items =
-                        serde_json::from_str::<Vec<&RawValue>>(raw).map_err(json_parse_error)?;
-                    items.get(index).copied().ok_or(JsonError::MissingValue)?
-                }
-                _ => return Err(JsonError::MissingValue),
-            };
+    Ok((pointer, source.trim_start()))
+}
+
+fn pointer_keys(
+    pointer: &str,
+) -> Result<impl Iterator<Item = Result<String, JsonError>> + '_, JsonError> {
+    let path = if pointer.is_empty() {
+        None
+    } else {
+        Some(pointer.strip_prefix('/').ok_or(JsonError::InvalidPointer)?)
+    };
+    Ok(path
+        .into_iter()
+        .flat_map(|path| path.split('/'))
+        .map(decode_pointer_key))
+}
+
+fn select_member<'a>(value: &'a RawValue, key: &str) -> Result<&'a RawValue, JsonError> {
+    let raw = value.get();
+    match raw.as_bytes()[0] {
+        b'{' => serde::Deserializer::deserialize_map(
+            &mut serde_json::Deserializer::from_str(raw),
+            ObjectMember(key),
+        )
+        .map_err(json_parse_error)?,
+        b'[' => {
+            if (key.len() > 1 && key.starts_with('0'))
+                || !key.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(JsonError::MissingValue);
+            }
+            let index = key.parse::<usize>().map_err(|_| JsonError::MissingValue)?;
+            let items = serde_json::from_str::<Vec<&RawValue>>(raw).map_err(json_parse_error)?;
+            items.get(index).copied().ok_or(JsonError::MissingValue)
         }
-    } else if !pointer.is_empty() {
-        return Err(JsonError::InvalidPointer);
+        _ => Err(JsonError::MissingValue),
     }
-    Ok(value.get().to_owned())
 }
 
 fn json_keys(source: &str) -> Result<String, JsonError> {
@@ -256,6 +291,29 @@ impl<'de> Visitor<'de> for ObjectMember<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selects_a_json_pointer_from_each_array_entry_and_preserves_raw_values() {
+        for (input, expected) in [
+            (r#"取列 /价格 [{"价格":9.90},{"价格":2e2}]"#, "[9.90,2e2]"),
+            (
+                r#"column "/a b/0" [{"a b":[9007199254740993]},{"a b":[null]}]"#,
+                "[9007199254740993,null]",
+            ),
+            (r#"取列 "" [1,"北京"]"#, r#"[1,"北京"]"#),
+            (r#"取列 /状态 []"#, "[]"),
+        ] {
+            assert_eq!(transform_json(input).as_deref(), Ok(expected), "{input}");
+        }
+        for (input, error) in [
+            (r#"取列 /x [{"x":1},{}]"#, JsonError::MissingValue),
+            (r#"取列 /x [{"x":1,"x":2}]"#, JsonError::DuplicateKey),
+            (r#"取列 /~2 []"#, JsonError::InvalidPointer),
+            (r#"取列 /x {"x":1}"#, JsonError::ExpectedArray),
+        ] {
+            assert_eq!(transform_json(input), Err(error), "{input}");
+        }
+    }
 
     #[test]
     fn counts_only_top_level_array_elements_or_object_entries() {
