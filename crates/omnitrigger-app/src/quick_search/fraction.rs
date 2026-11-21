@@ -2,6 +2,7 @@ use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::calculator::{normalize, QUERY_LIMIT};
+use super::operators::Operator;
 
 const MAX_POWER_EXPONENT: u32 = 1024;
 const MAX_FACTORIAL_ARGUMENT: u32 = 1024;
@@ -25,7 +26,7 @@ impl FractionError {
         match self {
             Self::Incomplete => "输入分数或有限小数，例如 42/56 或 0.125",
             Self::Invalid => "请输入分数、有限小数或用 计算 开头的算式",
-            Self::ZeroDenominator => "分母不能为零",
+            Self::ZeroDenominator => "分母或除数不能为零",
             Self::OutOfRange => "分子或分母超出整数范围",
             Self::TooLong => "分数算式最多支持 256 个字符",
             Self::NonIntegerExponent => "精确分数幂的指数必须是整数",
@@ -213,17 +214,32 @@ impl FractionParser<'_> {
     fn product(&mut self) -> Result<BigRational, FractionError> {
         let mut value = self.factor()?;
         loop {
-            if self.consume('*') || self.consume('×') {
-                value *= self.factor()?;
-            } else if self.consume('/') {
-                let divisor = self.factor()?;
-                if divisor.numer().sign() == Sign::NoSign {
-                    return Err(FractionError::ZeroDenominator);
-                }
-                value /= divisor;
-            } else {
+            let remaining = self.remaining.trim_start();
+            let Some((
+                operator @ (Operator::Multiply
+                | Operator::Divide
+                | Operator::FloorDivide
+                | Operator::Remainder),
+                width,
+            )) = Operator::prefix(remaining)
+            else {
                 return Ok(value);
+            };
+            self.remaining = &remaining[width..];
+            let right = self.factor()?;
+            if !matches!(operator, Operator::Multiply) && right.numer().sign() == Sign::NoSign {
+                return Err(FractionError::ZeroDenominator);
             }
+            value = match operator {
+                Operator::Multiply => value * right,
+                Operator::Divide => value / right,
+                Operator::FloorDivide => (value / right).floor(),
+                Operator::Remainder => {
+                    let quotient = (&value / &right).floor();
+                    value - right * quotient
+                }
+                _ => unreachable!("这里只处理乘除级运算符"),
+            };
             ensure_exact_size(&value)?;
         }
     }
@@ -291,6 +307,39 @@ impl FractionParser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn floors_division_and_uses_the_divisor_sign_for_exact_remainders() {
+        for (query, expected) in [
+            ("计算 2**80//3", "402975273204876391568725"),
+            ("计算 2**80%3", "1"),
+            ("计算 -7.5//2", "-4"),
+            ("计算 7.5//-2", "-4"),
+            ("计算 -7.5%2", "1/2"),
+            ("计算 7.5%-2", "-1/2"),
+            ("计算 (7/3) % (1/2)", "1/3"),
+            ("计算 3+9//2*2", "11"),
+            ("计算 2^8 ％ ３", "1"),
+            ("计算 0%2", "0"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["计算 1//0", "计算 1%(1-1)"] {
+            assert_eq!(
+                simplify_fraction(query),
+                Err(FractionError::ZeroDenominator),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            simplify_fraction("计算 1 / /2"),
+            Err(FractionError::Invalid)
+        );
+        assert_eq!(
+            simplify_fraction("计算 1//"),
+            Err(FractionError::Incomplete)
+        );
+    }
 
     #[test]
     fn calculates_exact_factorials_before_powers_and_unary_signs() {
