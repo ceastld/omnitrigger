@@ -36,19 +36,22 @@ impl Drop for DirectoryRequest {
 pub(super) struct DirectoryLoad {
     directory: String,
     pattern: Option<String>,
+    order: DirectoryOrder,
     cancelled: AtomicBool,
 }
 
 impl DirectoryLoad {
-    fn matches(&self, directory: &str, pattern: Option<&str>) -> bool {
-        self.directory == directory && self.pattern.as_deref() == pattern
+    fn matches(&self, query: FileQuery<'_>) -> bool {
+        self.directory == query.directory
+            && self.pattern.as_deref() == wildcard_pattern(query.filter)
+            && self.order == query.order
     }
 
     pub(super) fn read(&self) -> Result<Vec<LocalDirectoryEntry>, String> {
         let deadline = Instant::now() + FOLDER_READ_TIMEOUT;
         let options = LocalDirectoryOptions {
             max_entries: MAX_DIRECTORY_ENTRIES,
-            order: DirectoryOrder::Name,
+            order: self.order,
             metadata: false,
             entry_type: DirectoryEntryType::All,
             search_pattern: self.pattern.clone(),
@@ -72,32 +75,32 @@ impl DirectoryLoad {
 
 impl LocalFilesIndex {
     pub(super) fn parent_query(&self, query: &str) -> Option<String> {
-        let (directory, filter) = split_query(query)?;
+        let query = split_query(query)?;
         let request = self.current.as_ref()?;
-        if !request.load.matches(directory, wildcard_pattern(filter)) {
+        if !request.load.matches(query) {
             return None;
         }
         request.entries.as_ref()?.as_ref().ok()?;
-        let parent = Path::new(directory).parent()?.to_str()?;
+        let parent = Path::new(query.directory).parent()?.to_str()?;
         Some(directory_query(parent))
     }
 
     pub(super) fn request(&mut self, query: Option<&str>) -> Option<Arc<DirectoryLoad>> {
-        let Some((directory, filter)) = query.and_then(split_query) else {
+        let Some(query) = query.and_then(split_query) else {
             self.current = None;
             return None;
         };
-        let pattern = wildcard_pattern(filter);
         if self
             .current
             .as_ref()
-            .is_some_and(|request| request.load.matches(directory, pattern))
+            .is_some_and(|request| request.load.matches(query))
         {
             return None;
         }
         let load = Arc::new(DirectoryLoad {
-            directory: directory.to_owned(),
-            pattern: pattern.map(str::to_owned),
+            directory: query.directory.to_owned(),
+            pattern: wildcard_pattern(query.filter).map(str::to_owned),
+            order: query.order,
             cancelled: AtomicBool::new(false),
         });
         self.current = Some(DirectoryRequest {
@@ -123,14 +126,13 @@ impl LocalFilesIndex {
     }
 
     pub(super) fn results(&self, query: &str) -> Results {
-        let Some((directory, filter)) = split_query(query) else {
+        let Some(query) = split_query(query) else {
             return Results::LocalFilesPrompt;
         };
-        let pattern = wildcard_pattern(filter);
         let Some(entries) = self
             .current
             .as_ref()
-            .filter(|request| request.load.matches(directory, pattern))
+            .filter(|request| request.load.matches(query))
             .and_then(|request| request.entries.as_ref())
         else {
             return Results::LocalFilesLoading;
@@ -139,10 +141,10 @@ impl LocalFilesIndex {
             Ok(entries) => entries,
             Err(error) => return Results::LocalFilesUnavailable(error.clone()),
         };
-        let filter = if pattern.is_some() {
+        let filter = if wildcard_pattern(query.filter).is_some() {
             String::new()
         } else {
-            filter.to_lowercase()
+            query.filter.to_lowercase()
         };
         let mut matches: Vec<_> = entries
             .iter()
@@ -155,7 +157,9 @@ impl LocalFilesIndex {
                     .then(|| (title_rank(&name, &filter), entry))
             })
             .collect();
-        matches.sort_by_key(|(rank, _)| *rank);
+        if query.order == DirectoryOrder::Name {
+            matches.sort_by_key(|(rank, _)| *rank);
+        }
         Results::Destinations(
             matches
                 .into_iter()
@@ -169,10 +173,31 @@ impl LocalFilesIndex {
     }
 }
 
-fn split_query(query: &str) -> Option<(&str, &str)> {
+#[derive(Clone, Copy)]
+struct FileQuery<'a> {
+    directory: &'a str,
+    filter: &'a str,
+    order: DirectoryOrder,
+}
+
+fn split_query(query: &str) -> Option<FileQuery<'_>> {
     let (directory, filter) = query.split_once('|')?;
     let directory = super::path_tools::strip_path_quotes(directory.trim());
-    (!directory.is_empty()).then_some((directory, filter.trim()))
+    let (filter, order) = match filter.split_once('|') {
+        Some((filter, order))
+            if order.trim() == "最近修改" || order.trim().eq_ignore_ascii_case("modified") =>
+        {
+            (filter, DirectoryOrder::ModifiedDescending)
+        }
+        Some((filter, order)) if order.trim().is_empty() => (filter, DirectoryOrder::Name),
+        Some(_) => return None,
+        None => (filter, DirectoryOrder::Name),
+    };
+    (!directory.is_empty()).then_some(FileQuery {
+        directory,
+        filter: filter.trim(),
+        order,
+    })
 }
 
 fn wildcard_pattern(filter: &str) -> Option<&str> {
@@ -282,6 +307,35 @@ mod tests {
         let root = index.request(Some(root_query)).unwrap();
         assert!(index.finish(&root, Ok(Vec::new())));
         assert_eq!(index.parent_query(root_query), None);
+    }
+
+    #[test]
+    fn newest_order_replaces_the_snapshot_and_takes_priority_over_name_relevance() {
+        let mut index = LocalFilesIndex::default();
+        let ordinary = index.request(Some(r"C:\Work | report")).unwrap();
+        let sorted_query = r"C:\Work | report | 最近修改";
+        let sorted = index.request(Some(sorted_query)).unwrap();
+        assert_eq!(sorted.order, DirectoryOrder::ModifiedDescending);
+        assert!(ordinary.cancelled.load(Ordering::Relaxed));
+        assert!(index
+            .request(Some(r"C:\Work | report | modified"))
+            .is_none());
+        assert!(index.finish(
+            &sorted,
+            Ok(vec![
+                entry("Old unrelated.txt", "file"),
+                entry("Z report.txt", "file"),
+                entry("report.txt", "file"),
+            ])
+        ));
+        let Results::Destinations(items) = index.results(sorted_query) else {
+            panic!("预期按修改时间排列的文件列表");
+        };
+        assert!(matches!(
+            items.as_slice(),
+            [Destination::LocalFile { name: first, .. }, Destination::LocalFile { name: second, .. }]
+            if first == "Z report.txt" && second == "report.txt"
+        ));
     }
 
     #[test]

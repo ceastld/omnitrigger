@@ -177,6 +177,34 @@ fn read_directory_real_windows_options_preserve_metadata_precision_and_filters()
             .unwrap()
             .creation_time()
     );
+    let newer = fs::OpenOptions::new()
+        .write(true)
+        .open(fixture.root.join("z.txt"))
+        .unwrap();
+    newer
+        .set_times(fs::FileTimes::new().set_modified(timestamp + Duration::from_nanos(100)))
+        .unwrap();
+    drop(newer);
+    let latest = read_local_directory_with_options(
+        fixture.path(),
+        &LocalDirectoryOptions {
+            order: DirectoryOrder::ModifiedDescending,
+            metadata: false,
+            entry_type: DirectoryEntryType::File,
+            search_pattern: Some("*.txt".into()),
+            ..options.clone()
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    assert!(latest.iter().all(|entry| entry.metadata.is_none()));
+    assert_eq!(
+        latest
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["z.txt", "a.txt"]
+    );
     let filtered = read_local_directory_with_options(
         fixture.path(),
         &LocalDirectoryOptions {

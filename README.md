@@ -57,6 +57,7 @@
 - 输入 `文件夹:` 可浏览桌面、下载、文档、图片、音乐和视频。也可用 `文件夹: 下载` 或 `folder: downloads` 筛选，按回车打开选中的文件夹。 [Windows 已知文件夹](https://learn.microsoft.com/windows/win32/shell/knownfolderid)
 - 输入 `文件: C:\工作 | 报告` 可在指定本地目录的直接子项中按名称查找。按回车复制所选项的完整路径。分隔符后的名称可留空，多个关键词用空格隔开。匹配本地固定卷上的普通文件和文件夹。
 - 在文件搜索中选中文件夹后按 `Tab` 可进入该文件夹，按 `Alt+↑` 可回到上一级。也可用 `文件: C:\工作 | *.pdf` 或 `报告?.docx` 按 Windows 文件名通配规则匹配。 [Windows 文件名通配规则](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfilew)
+- 输入 `文件: C:\工作 | *.pdf | 最近修改` 可把匹配项按最后修改时间从新到旧排列。可留空中间的名称条件，修改时间相同的按名称排列。 [Windows 目录项的最后修改时间](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw)
 - 输入 `窗口:` 可查看当前桌面的普通窗口，继续输入窗口标题或程序名可筛选。按回车切换，最小化窗口会请求还原。也可用 `window:`。每次打开搜索框后首次使用时读取窗口列表。 [Windows 前台切换规则](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setforegroundwindow)
 - 可以按名称搜索已配置的轮盘，回车打开对应编辑页。输入 `轮盘: 编辑` 可只搜索轮盘。
 - 输入 `槽位: 复制` 可查找轮盘槽位，回车打开对应布局并选中槽位。可以加上轮盘名或应用名来缩小结果。

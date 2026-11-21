@@ -15,6 +15,10 @@ impl Drop for FindHandle {
     }
 }
 
+fn file_time_ticks(file_time: FILETIME) -> u64 {
+    (u64::from(file_time.dwHighDateTime) << 32) | u64::from(file_time.dwLowDateTime)
+}
+
 struct LocalClock {
     zone: DYNAMIC_TIME_ZONE_INFORMATION,
     key: String,
@@ -66,10 +70,9 @@ impl LocalClock {
         data: &WIN32_FIND_DATAW,
         ordinal: usize,
     ) -> Result<LocalDirectoryMetadata, LocalStatError> {
-        let value = |f: FILETIME| (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime);
-        let creation = value(data.ftCreationTime);
-        let access = value(data.ftLastAccessTime);
-        let write = value(data.ftLastWriteTime);
+        let creation = file_time_ticks(data.ftCreationTime);
+        let access = file_time_ticks(data.ftLastAccessTime);
+        let write = file_time_ticks(data.ftLastWriteTime);
         Ok(LocalDirectoryMetadata {
             ordinal,
             attributes: data.dwFileAttributes,
@@ -116,6 +119,7 @@ pub(super) fn read_options(
         unsafe { FindFirstFileW(PCWSTR(wide.as_ptr()), &mut data) }.map(FindHandle)
     });
     let mut collector = Collector::new(path, options.max_entries);
+    let mut write_times = Vec::new();
     // 成功句柄在system_step的闭包内建立RAII，迟到取消时也会释放。
     let find = match first? {
         Ok(handle) => Some(handle),
@@ -143,6 +147,9 @@ pub(super) fn read_options(
                 collector.add(name, data.dwFileAttributes)?;
             }
             if collector.entries.len() > before {
+                if options.order == DirectoryOrder::ModifiedDescending {
+                    write_times.push(file_time_ticks(data.ftLastWriteTime));
+                }
                 if let Some(clock) = &clock {
                     let metadata = system_step(check, || clock.metadata(&data, before))??;
                     collector.json_bound += 512 + json_string_bytes(&metadata.time_zone_key);
@@ -176,9 +183,15 @@ pub(super) fn read_options(
         }
     }
     checkpoint(check)?;
-    Ok(if options.order == DirectoryOrder::Name {
-        collector.finish()
-    } else {
-        collector.entries
+    Ok(match options.order {
+        DirectoryOrder::Name => collector.finish(),
+        DirectoryOrder::Native => collector.entries,
+        DirectoryOrder::ModifiedDescending => {
+            let mut entries: Vec<_> = write_times.into_iter().zip(collector.entries).collect();
+            entries.sort_by(|(left_time, left), (right_time, right)| {
+                right_time.cmp(left_time).then_with(|| left.name.cmp(&right.name))
+            });
+            entries.into_iter().map(|(_, entry)| entry).collect()
+        }
     })
 }

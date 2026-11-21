@@ -9,6 +9,7 @@ pub enum DirectoryOrder {
     #[default]
     Name,
     Native,
+    ModifiedDescending,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
