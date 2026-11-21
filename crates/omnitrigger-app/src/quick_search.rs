@@ -297,8 +297,8 @@ impl Results {
         }
         if let Some((scope, term)) = scoped_query(query) {
             return match scope {
-                Scope::Triggers => Self::Destinations(
-                    matching_triggers(triggers, term, PAGE_RESULT_LIMIT)
+                Scope::Triggers(filter) => Self::Destinations(
+                    matching_triggers(triggers, term, filter, PAGE_RESULT_LIMIT)
                         .into_iter()
                         .map(Destination::Trigger)
                         .collect(),
@@ -430,9 +430,14 @@ impl Results {
             .map(|(_, page)| Destination::Page(page))
             .collect();
         destinations.extend(
-            matching_triggers(triggers, &query, PAGE_RESULT_LIMIT - destinations.len())
-                .into_iter()
-                .map(Destination::Trigger),
+            matching_triggers(
+                triggers,
+                &query,
+                None,
+                PAGE_RESULT_LIMIT - destinations.len(),
+            )
+            .into_iter()
+            .map(Destination::Trigger),
         );
         destinations.extend(
             matching_wheels(wheels, &query, PAGE_RESULT_LIMIT - destinations.len())
@@ -1312,11 +1317,11 @@ mod tests {
                 .collect();
             assert_eq!(displayed, expected, "{query}");
         }
+        let mut bindings = crate::settings::defaults();
+        bindings[0].enabled = false;
+        bindings[0].spec.process_scope.allow = vec!["editor.exe".into()];
         let index = SearchIndex {
-            triggers: crate::settings::defaults()
-                .iter()
-                .map(SearchTrigger::from_binding)
-                .collect(),
+            triggers: bindings.iter().map(SearchTrigger::from_binding).collect(),
             wheels: crate::wheels::Wheels::default()
                 .wheels
                 .iter()
@@ -1464,6 +1469,33 @@ mod tests {
         ] {
             let Results::Destinations(items) = for_query(query, &triggers) else {
                 panic!("触发器查询被解析成了算式：{query}");
+            };
+            assert_eq!(items, expected, "{query}");
+        }
+    }
+
+    #[test]
+    fn quick_search_filters_triggers_by_enabled_status_and_application_scope() {
+        let mut bindings = crate::settings::defaults();
+        let bindings = &mut bindings[..2];
+        bindings[0].message = "发送正文".into();
+        bindings[1].message = "发送正文".into();
+        bindings[1].enabled = false;
+        bindings[1].spec.pointer_scope.allow = vec!["editor.exe".into()];
+        let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();
+        let global = Destination::Trigger(bindings[0].spec.id);
+        let app = Destination::Trigger(bindings[1].spec.id);
+        for (query, expected) in [
+            ("触发器: 发送正文", vec![global.clone(), app.clone()]),
+            ("已启用触发器: 发送正文", vec![global.clone()]),
+            ("已停用触发器：", vec![app.clone()]),
+            ("DISABLED TRIGGERS: editor", vec![app.clone()]),
+            ("全局触发器: 发送正文", vec![global]),
+            ("指定应用触发器: editor", vec![app]),
+            ("已启用触发器: editor", vec![]),
+        ] {
+            let Results::Destinations(items) = for_query(query, &triggers) else {
+                panic!("没有按触发器筛选：{query}");
             };
             assert_eq!(items, expected, "{query}");
         }

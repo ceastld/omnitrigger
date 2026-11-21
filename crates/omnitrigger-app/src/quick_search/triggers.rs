@@ -38,7 +38,12 @@ impl SearchTrigger {
     }
 }
 
-pub(super) fn matching_triggers(triggers: &[SearchTrigger], query: &str, limit: usize) -> Vec<u64> {
+pub(super) fn matching_triggers(
+    triggers: &[SearchTrigger],
+    query: &str,
+    filter: Option<trigger_browse::FacetValue>,
+    limit: usize,
+) -> Vec<u64> {
     if limit == 0 {
         return Vec::new();
     }
@@ -46,6 +51,7 @@ pub(super) fn matching_triggers(triggers: &[SearchTrigger], query: &str, limit: 
     let mut matches: Vec<_> = triggers
         .iter()
         .enumerate()
+        .filter(|(_, entry)| filter.is_none_or(|filter| filter.matches(&entry.row)))
         .filter(|(_, entry)| trigger_browse::matches_query(&entry.row, &query))
         .map(|(index, entry)| {
             let rank = super::title_rank(&entry.title_key, &query);

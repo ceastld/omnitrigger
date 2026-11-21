@@ -38,6 +38,26 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "触发器: ",
     },
     Example {
+        icon: Icon::Keyboard,
+        title: "搜索已启用的触发器",
+        query: "已启用触发器: ",
+    },
+    Example {
+        icon: Icon::Keyboard,
+        title: "搜索已停用的触发器",
+        query: "已停用触发器: ",
+    },
+    Example {
+        icon: Icon::Keyboard,
+        title: "搜索全局触发器",
+        query: "全局触发器: ",
+    },
+    Example {
+        icon: Icon::Keyboard,
+        title: "搜索指定应用的触发器",
+        query: "指定应用触发器: ",
+    },
+    Example {
         icon: Icon::Wheel,
         title: "搜索轮盘",
         query: "轮盘: ",

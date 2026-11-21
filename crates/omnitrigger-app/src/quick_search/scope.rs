@@ -1,6 +1,8 @@
+use crate::trigger_browse::{FacetValue, ScopeKind, StatusKind};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Scope {
-    Triggers,
+    Triggers(Option<FacetValue>),
     Wheels,
     WheelSlots,
     Presets,
@@ -48,7 +50,19 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
 
 fn parse_scope(prefix: &str) -> Option<Scope> {
     let scope = match prefix.trim().to_ascii_lowercase().as_str() {
-        "触发器" | "trigger" | "triggers" => Scope::Triggers,
+        "触发器" | "trigger" | "triggers" => Scope::Triggers(None),
+        "已启用触发器" | "enabled triggers" => {
+            Scope::Triggers(Some(FacetValue::Status(StatusKind::Enabled)))
+        }
+        "已停用触发器" | "disabled triggers" => {
+            Scope::Triggers(Some(FacetValue::Status(StatusKind::Disabled)))
+        }
+        "全局触发器" | "global triggers" => {
+            Scope::Triggers(Some(FacetValue::Scope(ScopeKind::Global)))
+        }
+        "指定应用触发器" | "app triggers" => {
+            Scope::Triggers(Some(FacetValue::Scope(ScopeKind::Scoped)))
+        }
         "轮盘" | "轨道轮盘" | "wheel" | "wheels" => Scope::Wheels,
         "槽位" | "轮盘槽位" | "slot" | "wheel-slot" => Scope::WheelSlots,
         "预设" | "触发预设" | "preset" | "presets" => Scope::Presets,

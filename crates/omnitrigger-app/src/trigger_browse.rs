@@ -262,7 +262,7 @@ impl FacetValue {
         }
     }
 
-    fn matches(self, row: &Row) -> bool {
+    pub(super) fn matches(self, row: &Row) -> bool {
         match self {
             Self::Input(value) => row.input == value,
             Self::Action(value) => row.action == value,
