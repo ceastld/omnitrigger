@@ -13,6 +13,7 @@ pub(super) enum JsonError {
     LayoutTooLarge,
     InvalidPointer,
     ExpectedObject,
+    ExpectedCollection,
     MissingValue,
     DuplicateKey,
 }
@@ -21,11 +22,12 @@ impl JsonError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入操作和 JSON 文本",
-            Self::UnknownOperation => "可用的操作有 格式化、压缩、取值 和 键名",
+            Self::UnknownOperation => "可用的操作有 格式化、压缩、取值、键名 和 长度",
             Self::Invalid => "JSON 语法无效",
             Self::LayoutTooLarge => "JSON 格式化结果超过 1 MiB",
             Self::InvalidPointer => "JSON 路径无效，示例 /商品/0/价格",
             Self::ExpectedObject => "请输入 JSON 对象以查看顶层键名",
+            Self::ExpectedCollection => "请输入 JSON 数组或对象以统计顶层条目数",
             Self::MissingValue => "JSON 路径没有对应的值",
             Self::DuplicateKey => "JSON 路径遇到了重复的键",
         }
@@ -41,6 +43,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "压缩" | "compact" | "minify" => false,
         "取值" | "get" | "pointer" => return select_json_value(source.trim_start()),
         "键名" | "keys" => return json_keys(source.trim_start()),
+        "长度" | "length" => return json_length(source.trim_start()),
         _ => return Err(JsonError::UnknownOperation),
     };
     let source = source.trim_start();
@@ -167,11 +170,30 @@ fn json_keys(source: &str) -> Result<String, JsonError> {
         serde_json::from_str::<IgnoredAny>(source).map_err(json_parse_error)?;
         return Err(JsonError::ExpectedObject);
     }
+    let keys = read_object_keys(source)?;
+    Ok(serde_json::to_string(&keys).expect("键名列表可以序列化为 JSON"))
+}
+
+fn read_object_keys(source: &str) -> Result<Vec<String>, JsonError> {
     let mut parser = serde_json::Deserializer::from_str(source);
     let keys =
         serde::Deserializer::deserialize_map(&mut parser, ObjectKeys).map_err(json_parse_error)?;
     parser.end().map_err(json_parse_error)?;
-    Ok(serde_json::to_string(&keys).expect("键名列表可以序列化为 JSON"))
+    Ok(keys)
+}
+
+fn json_length(source: &str) -> Result<String, JsonError> {
+    let length = match source.as_bytes().first().copied() {
+        Some(b'{') => read_object_keys(source)?.len(),
+        Some(b'[') => serde_json::from_str::<Vec<IgnoredAny>>(source)
+            .map_err(json_parse_error)?
+            .len(),
+        _ => {
+            serde_json::from_str::<IgnoredAny>(source).map_err(json_parse_error)?;
+            return Err(JsonError::ExpectedCollection);
+        }
+    };
+    Ok(length.to_string())
 }
 
 fn decode_pointer_key(token: &str) -> Result<String, JsonError> {
@@ -234,6 +256,26 @@ impl<'de> Visitor<'de> for ObjectMember<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_only_top_level_array_elements_or_object_entries() {
+        for (query, expected) in [
+            (r#"长度 [null, {"x":[1,2]}, 1e999]"#, "3"),
+            (r#"length {"x":1,"x":2,"y":{}}"#, "3"),
+            ("长度 []", "0"),
+            ("长度 {}", "0"),
+        ] {
+            assert_eq!(transform_json(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("长度 [1,", JsonError::Incomplete),
+            ("长度 [1,]", JsonError::Invalid),
+            ("长度 {} []", JsonError::Invalid),
+            ("长度 true", JsonError::ExpectedCollection),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn lists_top_level_object_keys_in_order_including_duplicate_names() {

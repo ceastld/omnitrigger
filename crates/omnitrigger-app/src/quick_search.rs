@@ -1644,9 +1644,10 @@ mod tests {
                 .map(|index| EXAMPLES[index].query)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(examples_for("JSON：").len(), 4);
+        assert_eq!(examples_for("JSON：").len(), 5);
         assert!(examples_for("JSON: 取")[0].starts_with("JSON: 取值 "));
         assert!(examples_for("JSON: 键")[0].starts_with("JSON: 键名 "));
+        assert!(examples_for("JSON: 长")[0].starts_with("JSON: 长度 "));
         assert_eq!(
             examples_for("网址: 表单"),
             [

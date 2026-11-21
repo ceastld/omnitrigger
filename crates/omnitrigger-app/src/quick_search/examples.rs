@@ -740,6 +740,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r#"JSON: 键名 {"城市":{"名称":"北京"},"数量":1}"#,
     },
     Example {
+        icon: Icon::Terminal,
+        title: "统计 JSON 顶层条目数",
+        query: r#"JSON: 长度 [1,{"数量":2},null]"#,
+    },
+    Example {
         icon: Icon::Browser,
         title: "编码 URL 参数值",
         query: "URL: 编码 北京 A+B",
