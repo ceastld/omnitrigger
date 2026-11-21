@@ -88,6 +88,23 @@ fn weekday_query(input: &str) -> Option<&str> {
         .then_some(date.trim_end())
 }
 
+fn is_workday_unit(unit: &str) -> bool {
+    matches!(
+        unit,
+        "工作日" | "个工作日" | "business day" | "business days" | "workday" | "workdays"
+    )
+}
+
+fn workday_difference(date: NaiveDate, other: NaiveDate) -> i64 {
+    let difference = date.signed_duration_since(other).num_days();
+    let days = difference.abs();
+    let start = i64::from(date.min(other).weekday().num_days_from_monday());
+    let remaining_workdays = (1..=days % 7)
+        .filter(|offset| (start + offset) % 7 < 5)
+        .count() as i64;
+    difference.signum() * (days / 7 * 5 + remaining_workdays)
+}
+
 fn shift_workdays(mut date: NaiveDate, mut amount: u64, subtract: bool) -> Option<NaiveDate> {
     let is_weekend = |date: NaiveDate| matches!(date.weekday(), Weekday::Sat | Weekday::Sun);
     let advance = |date: NaiveDate, count| {
@@ -132,10 +149,7 @@ fn apply_date_offset(
     }
     let count = || amount.parse::<u64>().map_err(|_| DateError::OutOfRange);
     let unit = unit.trim().to_ascii_lowercase();
-    if matches!(
-        unit.as_str(),
-        "工作日" | "个工作日" | "business day" | "business days" | "workday" | "workdays"
-    ) {
+    if is_workday_unit(&unit) {
         return in_range(shift_workdays(date, count()?, subtract));
     }
     let (is_months, multiplier) = match unit.as_str() {
@@ -203,13 +217,19 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     }
     if subtract && (operand.get(4..5) == Some("-") || relative_day(operand).is_some()) {
         let (other, suffix) = date_operand(operand, today)?;
-        if !suffix.is_empty() || weekday.is_some() {
+        if weekday.is_some() {
             return Err(DateError::InvalidOperation);
         }
-        return Ok(format!(
-            "{} 天",
-            date.signed_duration_since(other).num_days()
-        ));
+        return if suffix.is_empty() {
+            Ok(format!(
+                "{} 天",
+                date.signed_duration_since(other).num_days()
+            ))
+        } else if is_workday_unit(&suffix.to_ascii_lowercase()) {
+            Ok(format!("{} 工作日", workday_difference(date, other)))
+        } else {
+            Err(DateError::InvalidOperation)
+        };
     }
     apply_date_offset(date, operand, subtract).map(display_date)
 }
@@ -243,6 +263,26 @@ mod tests {
             calculate_date("今天 + 18446744073709551615工作日", today),
             Err(DateError::OutOfRange)
         );
+    }
+
+    #[test]
+    fn counts_signed_workday_differences_from_the_day_after_the_earlier_date() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            ("2026-11-23 - 2026-11-20 工作日", "1 工作日"),
+            ("2026-11-20 - 2026-11-23 WORKDAYS", "-1 工作日"),
+            ("2026-11-22 - 2026-11-20 business days", "0 工作日"),
+            ("2026-11-30 - 2026-11-20 工作日", "6 工作日"),
+            ("今天 - 昨天 个工作日", "0 工作日"),
+            ("明天 - 明天 工作日", "0 工作日"),
+            ("2024-03-01 - 2024-02-28 工作日", "2 工作日"),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
     }
 
     #[test]

@@ -100,6 +100,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "日期: 2026-11-20 + 1工作日",
     },
     Example {
+        icon: Icon::Clock,
+        title: "计算两个日期相差的工作日",
+        query: "日期: 2026-11-23 - 2026-11-20 工作日",
+    },
+    Example {
         icon: Icon::Layers,
         title: "查找触发预设",
         query: "预设: 顶部边缘",
