@@ -14,6 +14,7 @@ mod recent;
 mod scientific;
 mod scope;
 mod settings_sections;
+mod text_count;
 mod timestamp;
 mod triggers;
 mod wheel_slots;
@@ -48,6 +49,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use recent::RecentDestinations;
 use scope::{scoped_query, Scope};
 use settings_sections::matching_settings;
+use text_count::{count_text, TextCountError};
 use timestamp::{convert_timestamp, TimestampError};
 use triggers::{matching_triggers, SearchTrigger};
 use wheel_slots::{index_slots, matching_slots, SearchWheelSlot};
@@ -224,6 +226,7 @@ enum ValueError {
     Duration(DurationError),
     Timestamp(TimestampError),
     Color(ColorError),
+    TextCount(TextCountError),
 }
 
 impl ValueError {
@@ -235,6 +238,7 @@ impl ValueError {
             Self::Duration(error) => error.message(),
             Self::Timestamp(error) => error.message(),
             Self::Color(error) => error.message(),
+            Self::TextCount(error) => error.message(),
         }
     }
 
@@ -247,6 +251,7 @@ impl ValueError {
                 | Self::Duration(DurationError::Incomplete)
                 | Self::Timestamp(TimestampError::Incomplete)
                 | Self::Color(ColorError::Incomplete)
+                | Self::TextCount(_)
         )
     }
 }
@@ -339,6 +344,9 @@ impl Results {
                         })
                         .map_err(ValueError::Color),
                 ),
+                Scope::TextCount => {
+                    Self::text_value(count_text(term).map_err(ValueError::TextCount))
+                }
             };
         }
         if let Some(result) = convert(query) {
@@ -798,7 +806,7 @@ impl QuickSearch {
                     )
                     .child(
                         div()
-                            .max_w(px(140.))
+                            .max_w(px(200.))
                             .truncate()
                             .font_family(theme::MONO_FONT)
                             .text_color(rgb(theme::ACCENT))

@@ -204,6 +204,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         title: "选择换算目标单位",
         query: "10 km to",
     },
+    Example {
+        icon: Icon::Terminal,
+        title: "统计字符与 UTF-8 字节",
+        query: "字数: 你好👩‍💻",
+    },
 ];
 
 pub(super) fn matching_examples(query: &str) -> Vec<usize> {

@@ -13,6 +13,7 @@ pub(super) enum Scope {
     Duration,
     Timestamp,
     Color,
+    TextCount,
 }
 
 pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
@@ -31,6 +32,7 @@ pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
         "时长" | "duration" => Scope::Duration,
         "时间戳" | "unix" | "timestamp" => Scope::Timestamp,
         "颜色" | "color" | "colour" => Scope::Color,
+        "字数" | "text count" | "text length" => Scope::TextCount,
         _ => return None,
     };
     Some((scope, term.trim()))
