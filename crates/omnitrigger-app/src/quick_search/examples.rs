@@ -196,6 +196,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "换算美制和英制油耗",
+        query: "油耗: 7.5 L/100 km",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "换算每百公里耗油量",
+        query: "油耗: 32 mpg-us to L/100 km",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "化简宽高比",
         query: "宽高比: 1920×1080",
     },
@@ -1190,6 +1200,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Duration
         | Scope::TransferTime
         | Scope::Pace
+        | Scope::FuelEconomy
         | Scope::AspectRatio
         | Scope::PixelDensity
         | Scope::Cidr
@@ -1252,6 +1263,7 @@ mod tests {
             Scope::Duration,
             Scope::TransferTime,
             Scope::Pace,
+            Scope::FuelEconomy,
             Scope::AspectRatio,
             Scope::PixelDensity,
             Scope::Cidr,

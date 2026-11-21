@@ -17,6 +17,7 @@ pub(super) enum ConversionError {
     InvalidTransferDuration,
     InvalidPace,
     InvalidPixelDensity,
+    InvalidFuelEconomy,
     OutOfRange,
     TooLong,
 }
@@ -35,6 +36,7 @@ impl ConversionError {
             }
             Self::InvalidPace => "距离、用时和速度须大于零，例如 配速: 10 km 用时 52:30",
             Self::InvalidPixelDensity => "输入正整数分辨率和正的对角线尺寸，例如 3840×2160 @ 27 in",
+            Self::InvalidFuelEconomy => "输入正数及油耗单位，可用 L/100 km、km/L、mpg-us 或 mpg-uk",
             Self::OutOfRange => "结果超出换算范围",
             Self::TooLong => "换算式过长",
         }
@@ -85,7 +87,7 @@ impl Dimension {
             Self::Temperature => &["°C", "°F", "K"],
             Self::TemperatureDifference => &["Δ°C", "Δ°F", "ΔK"],
             Self::Area => &["m²", "ft²", "ha", "km²", "cm²", "acre"],
-            Self::Volume => &["L", "mL", "usgal", "m³"],
+            Self::Volume => &["L", "mL", "usgal", "impgal", "m³"],
             Self::Speed => &["km/h", "m/s", "mph", "kn"],
             Self::Data => &[
                 "MB", "MiB", "GB", "GiB", "B", "kB", "KiB", "TB", "TiB", "b", "kb", "Mb", "Gb",
@@ -122,6 +124,9 @@ struct Unit {
 
 const STANDARD_GRAVITY: f64 = 9.806_65;
 const INCH_IN_METERS: f64 = 0.0254;
+const METERS_PER_MILE: f64 = 1609.344;
+const LITERS_PER_US_GALLON: f64 = 3.785_411_784;
+const LITERS_PER_IMPERIAL_GALLON: f64 = 4.546_09;
 
 impl Unit {
     fn linear(symbol: &'static str, dimension: Dimension, scale: f64) -> Self {
@@ -192,7 +197,7 @@ impl Unit {
             "pc" | "csspc" => Self::linear("pc", Length, INCH_IN_METERS / 6.),
             "ft" | "foot" | "feet" | "英尺" => Self::linear("ft", Length, 0.3048),
             "yd" | "码" => Self::linear("yd", Length, 0.9144),
-            "mi" | "mile" | "miles" | "英里" => Self::linear("mi", Length, 1609.344),
+            "mi" | "mile" | "miles" | "英里" => Self::linear("mi", Length, METERS_PER_MILE),
             "mg" | "毫克" => Self::linear("mg", Mass, 0.001),
             "g" | "克" => Self::linear("g", Mass, 1.),
             "kg" | "千克" | "公斤" => Self::linear("kg", Mass, 1000.),
@@ -226,7 +231,8 @@ impl Unit {
             "ml" | "cm³" | "cm^3" | "cm3" | "毫升" => Self::linear("mL", Volume, 0.001),
             "l" | "liter" | "litre" | "升" => Self::linear("L", Volume, 1.),
             "m³" | "m^3" | "m3" | "立方米" => Self::linear("m³", Volume, 1000.),
-            "usgal" | "美制加仑" => Self::linear("usgal", Volume, 3.785_411_784),
+            "usgal" | "美制加仑" => Self::linear("usgal", Volume, LITERS_PER_US_GALLON),
+            "impgal" | "英制加仑" => Self::linear("impgal", Volume, LITERS_PER_IMPERIAL_GALLON),
             "m/s" | "米/秒" => Self::linear("m/s", Speed, 1.),
             "km/h" | "kph" | "千米/小时" | "公里/小时" => {
                 Self::linear("km/h", Speed, 1. / 3.6)
@@ -649,6 +655,103 @@ pub(super) fn calculate_pixel_density(query: &str) -> Result<String, ConversionE
     ))
 }
 
+#[derive(Clone, Copy)]
+struct FuelUnit {
+    aliases: &'static [&'static str],
+    label: &'static str,
+    factor: f64,
+    reciprocal: bool,
+}
+
+const LITERS_PER_100_KM: FuelUnit = FuelUnit {
+    aliases: &["l/100 km", "l/100km", "升/百公里", "升/100公里"],
+    label: "L/100 km",
+    factor: 100.,
+    reciprocal: true,
+};
+const KM_PER_LITER: FuelUnit = FuelUnit {
+    aliases: &["km/l", "公里/升", "千米/升"],
+    label: "km/L",
+    factor: 1.,
+    reciprocal: false,
+};
+const MPG_US: FuelUnit = FuelUnit {
+    aliases: &["mpg-us", "mpg us", "us mpg"],
+    label: "mpg US",
+    factor: METERS_PER_MILE / 1000. / LITERS_PER_US_GALLON,
+    reciprocal: false,
+};
+const MPG_UK: FuelUnit = FuelUnit {
+    aliases: &["mpg-uk", "mpg uk", "uk mpg", "imperial mpg"],
+    label: "mpg UK",
+    factor: METERS_PER_MILE / 1000. / LITERS_PER_IMPERIAL_GALLON,
+    reciprocal: false,
+};
+const FUEL_UNITS: [FuelUnit; 4] = [LITERS_PER_100_KM, KM_PER_LITER, MPG_US, MPG_UK];
+
+pub(super) fn calculate_fuel_economy(query: &str) -> Result<String, ConversionError> {
+    if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
+        return Err(ConversionError::TooLong);
+    }
+    let input = normalize(query).to_ascii_lowercase();
+    let input = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    if input.is_empty() {
+        return Err(ConversionError::Incomplete);
+    }
+    let (source, target) = split_conversion(&input)
+        .map_or((input.as_str(), None), |(source, target)| {
+            (source, Some(target.trim()))
+        });
+    let (amount, source) = FUEL_UNITS
+        .into_iter()
+        .find_map(|unit| {
+            unit.aliases.iter().find_map(|&name| {
+                source
+                    .strip_suffix(name)
+                    .map(|amount| (amount.trim_end(), unit))
+            })
+        })
+        .ok_or(ConversionError::InvalidFuelEconomy)?;
+    if amount.is_empty() {
+        return Err(ConversionError::Incomplete);
+    }
+    let amount = evaluate(amount).map_err(|_| ConversionError::InvalidAmount)?;
+    if amount <= 0. {
+        return Err(ConversionError::InvalidFuelEconomy);
+    }
+    let result = |target: FuelUnit| {
+        // 以每升公里数为基准。跨两种计量方向时对数值取倒数。
+        let scale = if target.reciprocal {
+            target.factor / source.factor
+        } else {
+            source.factor / target.factor
+        };
+        let value = if source.reciprocal == target.reciprocal {
+            amount * scale
+        } else {
+            scale / amount
+        };
+        if !value.is_finite() || value <= 0. {
+            return Err(ConversionError::OutOfRange);
+        }
+        Ok(format!("{value:.2} {}", target.label))
+    };
+    if let Some(target) = target {
+        if target.is_empty() {
+            return Err(ConversionError::Incomplete);
+        }
+        let unit = FUEL_UNITS
+            .into_iter()
+            .find(|unit| unit.aliases.contains(&target))
+            .ok_or(ConversionError::InvalidFuelEconomy)?;
+        result(unit)
+    } else if source.reciprocal {
+        Ok(format!("{} · {}", result(MPG_US)?, result(MPG_UK)?))
+    } else {
+        result(LITERS_PER_100_KM)
+    }
+}
+
 pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     let input = normalize(query).replace(char::is_whitespace, " ");
     let (source, target) = split_conversion(input.trim())?;
@@ -876,6 +979,35 @@ mod tests {
             ("1920x1080 @ 1e308 km", ConversionError::OutOfRange),
         ] {
             assert_eq!(calculate_pixel_density(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn converts_fuel_economy_with_explicit_us_and_imperial_gallons() {
+        for (query, expected) in [
+            ("7.5 L/100 km", "31.36 mpg US · 37.66 mpg UK"),
+            ("32 mpg-us to L/100 km", "7.35 L/100 km"),
+            ("40 mpg UK", "7.06 L/100 km"),
+            ("30 mpg UK to mpg-us", "24.98 mpg US"),
+            ("5 升/百公里 转 km/L", "20.00 km/L"),
+            ("２０ 公里/升", "5.00 L/100 km"),
+            ("(2+3) L/100   km to L/100km", "5.00 L/100 km"),
+        ] {
+            assert_eq!(
+                calculate_fuel_economy(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            ("", ConversionError::Incomplete),
+            ("7.5 L/100 km to", ConversionError::Incomplete),
+            ("30 mpg", ConversionError::InvalidFuelEconomy),
+            ("0 L/100km", ConversionError::InvalidFuelEconomy),
+            ("-10 km/L", ConversionError::InvalidFuelEconomy),
+            ("7.5 L/100km to kg", ConversionError::InvalidFuelEconomy),
+        ] {
+            assert_eq!(calculate_fuel_economy(query), Err(error), "{query}");
         }
     }
 
@@ -1274,6 +1406,7 @@ mod tests {
             ("1 ft^2 to cm²", "929.0304 cm²"),
             ("1000mL 转 L", "1 L"),
             ("1 usgal to L", "3.785411784 L"),
+            ("1 impgal to L", "4.54609 L"),
             ("36 km/h to m/s", "10 m/s"),
             ("36 公里/小时转换为米/秒", "10 m/s"),
             ("1 GB to MB", "1000 MB"),

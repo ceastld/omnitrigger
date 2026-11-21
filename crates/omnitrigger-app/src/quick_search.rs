@@ -52,8 +52,8 @@ use calendar::{calculate_date, looks_like_date_query, DateError};
 use cidr::{calculate_cidr, CidrError};
 use color::{calculate_contrast, convert_color, ColorError};
 use conversion::{
-    calculate_pace, calculate_pixel_density, conversion_target_input, convert, estimate_transfer,
-    suggested_targets, ConversionError,
+    calculate_fuel_economy, calculate_pace, calculate_pixel_density, conversion_target_input,
+    convert, estimate_transfer, suggested_targets, ConversionError,
 };
 use duration::{convert_duration, DurationError};
 use examples::{function_examples, matching_examples, tool_operation_examples, EXAMPLES};
@@ -435,6 +435,9 @@ impl Results {
                 Scope::TransferTime => Self::conversion_value(estimate_transfer(term), None),
                 Scope::Pace => {
                     Self::text_value(calculate_pace(term).map_err(ValueError::Conversion))
+                }
+                Scope::FuelEconomy => {
+                    Self::text_value(calculate_fuel_economy(term).map_err(ValueError::Conversion))
                 }
                 Scope::AspectRatio => {
                     Self::text_value(calculate_aspect_ratio(term).map_err(ValueError::AspectRatio))
