@@ -335,6 +335,36 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "unix: now",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "统一 UUID 的大小写和连字符",
+        query: "UUID: 格式 {550E8400-E29B-41D4-A716-446655440000}",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "去掉 UUID 的连字符",
+        query: "UUID: 紧凑 550e8400-e29b-41d4-a716-446655440000",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "生成 UUID 的 URN 表示",
+        query: "UUID: URN 550e8400-e29b-41d4-a716-446655440000",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "读取 UUID 中的 UTC 时间",
+        query: "UUID: 时间 017f22e2-79b0-7cc3-98c4-dc0c0c07398f",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "校验 ULID 并统一为大写",
+        query: "ULID: 格式 01arz3ndektsv4rrffq69g5fav",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "读取 ULID 中的 UTC 时间",
+        query: "ULID: 时间 01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    },
+    Example {
         icon: Icon::Clock,
         title: "计算指定时长后的时间",
         query: "时间戳: 现在 + 90分钟 to UTC+8",
@@ -1309,7 +1339,13 @@ pub(super) fn matching_examples(query: &str) -> Vec<usize> {
 
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
     match scope {
-        Scope::Json | Scope::Csv | Scope::TextTools | Scope::UrlEncoding | Scope::Percentage
+        Scope::Json
+        | Scope::Csv
+        | Scope::TextTools
+        | Scope::UrlEncoding
+        | Scope::Percentage
+        | Scope::Uuid
+        | Scope::Ulid
             if !term.contains(char::is_whitespace) => {}
         Scope::Date
         | Scope::Duration

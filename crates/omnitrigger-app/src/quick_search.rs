@@ -12,6 +12,7 @@ mod equation;
 mod examples;
 mod folders;
 mod fraction;
+mod identifiers;
 mod json_tools;
 mod open_windows;
 mod operators;
@@ -67,6 +68,7 @@ use equation::{solve_equation, EquationError};
 use examples::{function_examples, matching_examples, tool_operation_examples, EXAMPLES};
 use folders::{matching_folders, SearchFolder};
 use fraction::{simplify_fraction, FractionError};
+use identifiers::{transform_ulid, transform_uuid, IdentifierError};
 use json_tools::{transform_json, JsonError};
 use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
 use open_windows::OpenWindowsIndex;
@@ -296,6 +298,7 @@ enum ValueError {
     Duration(DurationError),
     VideoFrames(VideoFrameError),
     Timestamp(TimestampError),
+    Identifier(IdentifierError),
     Color(ColorError),
     Text(TextError),
     Json(JsonError),
@@ -320,6 +323,7 @@ impl ValueError {
             Self::Duration(error) => error.message(),
             Self::VideoFrames(error) => error.message(),
             Self::Timestamp(error) => error.message(),
+            Self::Identifier(error) => error.message(),
             Self::Color(error) => error.message(),
             Self::Text(error) => error.message(),
             Self::Json(error) => error.message(),
@@ -344,6 +348,7 @@ impl ValueError {
                 | Self::Duration(DurationError::Incomplete)
                 | Self::VideoFrames(VideoFrameError::Incomplete)
                 | Self::Timestamp(TimestampError::Incomplete)
+                | Self::Identifier(IdentifierError::Incomplete)
                 | Self::Color(ColorError::Incomplete | ColorError::IncompleteContrast)
                 | Self::Text(
                     TextError::MissingText
@@ -495,6 +500,12 @@ impl Results {
                 Scope::Timestamp => Self::text_value(
                     convert_timestamp(term, chrono::Utc::now()).map_err(ValueError::Timestamp),
                 ),
+                Scope::Uuid => {
+                    Self::text_value(transform_uuid(term).map_err(ValueError::Identifier))
+                }
+                Scope::Ulid => {
+                    Self::text_value(transform_ulid(term).map_err(ValueError::Identifier))
+                }
                 Scope::Color => Self::Value(
                     convert_color(term)
                         .map(|color| ResultValue {
