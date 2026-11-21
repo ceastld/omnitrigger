@@ -154,6 +154,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         title: "换算功率",
         query: "500 mW to W",
     },
+    Example {
+        icon: Icon::Layers,
+        title: "换算 HEX 和 RGB 颜色",
+        query: "颜色: #3A86FF",
+    },
 ];
 
 pub(super) fn matching_examples(query: &str) -> Vec<usize> {

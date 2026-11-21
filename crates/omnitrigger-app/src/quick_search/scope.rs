@@ -10,6 +10,7 @@ pub(super) enum Scope {
     Date,
     Duration,
     Timestamp,
+    Color,
 }
 
 pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
@@ -25,6 +26,7 @@ pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
         "日期" | "date" => Scope::Date,
         "时长" | "duration" => Scope::Duration,
         "时间戳" | "unix" | "timestamp" => Scope::Timestamp,
+        "颜色" | "color" | "colour" => Scope::Color,
         _ => return None,
     };
     Some((scope, term.trim()))

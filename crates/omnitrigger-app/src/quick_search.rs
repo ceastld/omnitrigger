@@ -1,6 +1,7 @@
 mod actions;
 mod calculator;
 mod calendar;
+mod color;
 mod conversion;
 mod duration;
 mod examples;
@@ -35,6 +36,7 @@ use crate::{
 use actions::{matching_actions, SearchAction};
 use calculator::{calculate, looks_like_calculation, CalculationError, QUERY_LIMIT};
 use calendar::{calculate_date, DateError};
+use color::{convert_color, Color, ColorError};
 use conversion::{convert, ConversionError};
 use duration::{convert_duration, DurationError};
 use examples::{matching_examples, EXAMPLES};
@@ -71,6 +73,7 @@ const PAGES: [(Page, &str); 9] = [
 #[derive(PartialEq, Eq)]
 enum Results {
     Value(Result<String, ValueError>),
+    Color(Color),
     Destinations(Vec<Destination>),
     Help(Vec<usize>),
 }
@@ -191,6 +194,7 @@ enum ValueError {
     Date(DateError),
     Duration(DurationError),
     Timestamp(TimestampError),
+    Color(ColorError),
 }
 
 impl ValueError {
@@ -201,6 +205,7 @@ impl ValueError {
             Self::Date(error) => error.message(),
             Self::Duration(error) => error.message(),
             Self::Timestamp(error) => error.message(),
+            Self::Color(error) => error.message(),
         }
     }
 
@@ -212,6 +217,7 @@ impl ValueError {
                 | Self::Date(DateError::Incomplete)
                 | Self::Duration(DurationError::Incomplete)
                 | Self::Timestamp(TimestampError::Incomplete)
+                | Self::Color(ColorError::Incomplete)
         )
     }
 }
@@ -292,6 +298,10 @@ impl Results {
                 Scope::Timestamp => Self::Value(
                     convert_timestamp(term, chrono::Utc::now()).map_err(ValueError::Timestamp),
                 ),
+                Scope::Color => match convert_color(term) {
+                    Ok(color) => Self::Color(color),
+                    Err(error) => Self::Value(Err(ValueError::Color(error))),
+                },
             };
         }
         if let Some(result) = convert(query) {
@@ -354,7 +364,9 @@ impl Results {
             Self::Destinations(items) if items.len() > 1 => {
                 132. + items.len() as f32 * PAGE_ROW_HEIGHT
             }
-            Self::Value(Ok(value)) => 158. + value_extra_height(value),
+            Self::Value(Ok(value)) | Self::Color(Color { output: value, .. }) => {
+                158. + value_extra_height(value)
+            }
             Self::Help(items) if !items.is_empty() => {
                 132. + items.len() as f32 * EXAMPLE_ROW_HEIGHT
             }
@@ -520,7 +532,7 @@ impl QuickSearch {
 
     fn confirm(&self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.results {
-            Results::Value(Ok(result)) => {
+            Results::Value(Ok(result)) | Results::Color(Color { output: result, .. }) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(result.clone()));
                 window.remove_window();
             }
@@ -563,7 +575,7 @@ impl QuickSearch {
                 let count = match &self.results {
                     Results::Destinations(items) => items.len(),
                     Results::Help(items) => items.len(),
-                    Results::Value(_) => 0,
+                    Results::Value(_) | Results::Color(_) => 0,
                 };
                 if count == 0 {
                     return;
@@ -647,14 +659,19 @@ impl QuickSearch {
     fn render_result(&self, cx: &mut Context<Self>) -> Div {
         let row = div().h(px(38.)).flex().items_center().gap(px(12.));
         match &self.results {
-            Results::Value(Ok(result)) => {
+            Results::Value(Ok(result)) | Results::Color(Color { output: result, .. }) => {
+                let swatch = match &self.results {
+                    Results::Color(color) => Some(color.swatch),
+                    _ => None,
+                };
                 let value = div()
                     .flex_1()
                     .min_w_0()
                     .font_family(theme::MONO_FONT)
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(theme::ACCENT));
-                let value = if result.is_ascii() && result.len() > 28 {
+                let columns = if swatch.is_some() { 20 } else { 28 };
+                let value = if result.is_ascii() && result.len() > columns {
                     value
                         .flex()
                         .flex_col()
@@ -675,6 +692,17 @@ impl QuickSearch {
                         .child(format!("= {result}"))
                 };
                 row.h(px(38. + value_extra_height(result)))
+                    .when_some(swatch, |row, color| {
+                        row.child(
+                            div()
+                                .size(px(26.))
+                                .flex_none()
+                                .rounded(px(5.))
+                                .border_1()
+                                .border_color(rgb(theme::BORDER_HI))
+                                .bg(gpui::rgba(color)),
+                        )
+                    })
                     .child(value)
                     .child(
                         button("copy-calculation", "复制  Enter", Tone::Primary, true)
@@ -924,7 +952,7 @@ mod tests {
         };
         for example in EXAMPLES {
             match index.results(example.query) {
-                Results::Value(Ok(_)) => {}
+                Results::Value(Ok(_)) | Results::Color(_) => {}
                 Results::Destinations(items) if !items.is_empty() => {}
                 _ => panic!("用法示例没有可用结果：{}", example.query),
             }
@@ -1018,6 +1046,9 @@ mod tests {
             for_query("时长：01:30:00", &[]),
             Results::Value(Ok(result)) if result == "5400 秒"
         ));
+        assert!(
+            matches!(for_query("颜色：#3A86FF", &[]), Results::Color(color) if color.output == "rgb(58, 134, 255)")
+        );
     }
 
     #[test]
