@@ -140,6 +140,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "宽高比: 1920×1080 按宽2560",
     },
     Example {
+        icon: Icon::Layers,
+        title: "查看 IPv4 网段",
+        query: "网段: 192.0.2.137/26",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "判断地址是否在网段",
+        query: "网段: 2001:db8::/64 包含 2001:db8::1",
+    },
+    Example {
         icon: Icon::Clock,
         title: "Unix 时间戳",
         query: "时间戳: 1700000000123ms",
@@ -685,6 +695,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Duration
         | Scope::TransferTime
         | Scope::AspectRatio
+        | Scope::Cidr
         | Scope::Timestamp
         | Scope::Color
         | Scope::ColorContrast
@@ -718,6 +729,7 @@ mod tests {
             Scope::Duration,
             Scope::TransferTime,
             Scope::AspectRatio,
+            Scope::Cidr,
             Scope::Timestamp,
             Scope::Color,
             Scope::ColorContrast,

@@ -3,6 +3,7 @@ mod applications;
 mod aspect_ratio;
 mod calculator;
 mod calendar;
+mod cidr;
 mod color;
 mod conversion;
 mod duration;
@@ -46,6 +47,7 @@ use applications::{ApplicationCache, ApplicationIndex};
 use aspect_ratio::{calculate_aspect_ratio, AspectRatioError};
 use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, looks_like_date_query, DateError};
+use cidr::{calculate_cidr, CidrError};
 use color::{calculate_contrast, convert_color, ColorError};
 use conversion::{convert, estimate_transfer_time, suggested_targets, ConversionError};
 use duration::{convert_duration, DurationError};
@@ -243,6 +245,7 @@ enum ValueError {
     Calculation(CalculationError),
     Conversion(ConversionError),
     AspectRatio(AspectRatioError),
+    Cidr(CidrError),
     Date(DateError),
     Duration(DurationError),
     Timestamp(TimestampError),
@@ -261,6 +264,7 @@ impl ValueError {
             Self::Calculation(error) => error.message(),
             Self::Conversion(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
+            Self::Cidr(error) => error.message(),
             Self::Date(error) => error.message(),
             Self::Duration(error) => error.message(),
             Self::Timestamp(error) => error.message(),
@@ -279,6 +283,7 @@ impl ValueError {
             Self::Calculation(CalculationError::Incomplete)
                 | Self::Conversion(ConversionError::Incomplete)
                 | Self::AspectRatio(AspectRatioError::Incomplete)
+                | Self::Cidr(CidrError::Incomplete)
                 | Self::Date(DateError::Incomplete)
                 | Self::Duration(DurationError::Incomplete)
                 | Self::Timestamp(TimestampError::Incomplete)
@@ -393,6 +398,7 @@ impl Results {
                 Scope::AspectRatio => {
                     Self::text_value(calculate_aspect_ratio(term).map_err(ValueError::AspectRatio))
                 }
+                Scope::Cidr => Self::text_value(calculate_cidr(term).map_err(ValueError::Cidr)),
                 Scope::Timestamp => Self::text_value(
                     convert_timestamp(term, chrono::Utc::now()).map_err(ValueError::Timestamp),
                 ),
