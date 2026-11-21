@@ -42,6 +42,8 @@ enum Dimension {
     Angle,
     Pressure,
     Frequency,
+    Energy,
+    Power,
 }
 
 struct Unit {
@@ -82,6 +84,12 @@ impl Unit {
             "MPa" => return Ok(Self::linear("MPa", Pressure, 1_000_000.)),
             "mHz" => return Ok(Self::linear("mHz", Frequency, 0.001)),
             "MHz" => return Ok(Self::linear("MHz", Frequency, 1_000_000.)),
+            "mJ" => return Ok(Self::linear("mJ", Energy, 0.001)),
+            "MJ" => return Ok(Self::linear("MJ", Energy, 1_000_000.)),
+            "mWh" => return Ok(Self::linear("mWh", Energy, 3.6)),
+            "MWh" => return Ok(Self::linear("MWh", Energy, 3_600_000_000.)),
+            "mW" => return Ok(Self::linear("mW", Power, 0.001)),
+            "MW" => return Ok(Self::linear("MW", Power, 1_000_000.)),
             _ => {}
         }
         let unit = match name.to_ascii_lowercase().as_str() {
@@ -147,6 +155,19 @@ impl Unit {
             "毫赫兹" | "毫赫" => Self::linear("mHz", Frequency, 0.001),
             "兆赫兹" | "兆赫" => Self::linear("MHz", Frequency, 1_000_000.),
             "ghz" | "吉赫兹" | "吉赫" => Self::linear("GHz", Frequency, 1_000_000_000.),
+            "j" | "焦" | "焦耳" => Self::linear("J", Energy, 1.),
+            "kj" | "千焦" | "千焦耳" => Self::linear("kJ", Energy, 1000.),
+            "毫焦" | "毫焦耳" => Self::linear("mJ", Energy, 0.001),
+            "兆焦" | "兆焦耳" => Self::linear("MJ", Energy, 1_000_000.),
+            "wh" | "瓦时" => Self::linear("Wh", Energy, 3_600.),
+            "kwh" | "千瓦时" | "度电" => Self::linear("kWh", Energy, 3_600_000.),
+            "毫瓦时" => Self::linear("mWh", Energy, 3.6),
+            "兆瓦时" => Self::linear("MWh", Energy, 3_600_000_000.),
+            "w" | "瓦" | "瓦特" => Self::linear("W", Power, 1.),
+            "kw" | "千瓦" | "千瓦特" => Self::linear("kW", Power, 1000.),
+            "毫瓦" | "毫瓦特" => Self::linear("mW", Power, 0.001),
+            "兆瓦" | "兆瓦特" => Self::linear("MW", Power, 1_000_000.),
+            "gw" | "吉瓦" | "吉瓦特" => Self::linear("GW", Power, 1_000_000_000.),
             "" => return Err(ConversionError::Incomplete),
             _ => return Err(ConversionError::UnknownUnit),
         };
@@ -378,6 +399,24 @@ mod tests {
         }
         assert_eq!(
             convert("1 MB to MB/s"),
+            Some(Err(ConversionError::DifferentDimensions))
+        );
+    }
+
+    #[test]
+    fn converts_energy_and_power_without_mixing_dimensions() {
+        for (query, expected) in [
+            ("1度电转MJ", "3.6 MJ"),
+            ("250 mWh to J", "900 J"),
+            ("1 MWh to kWh", "1000 kWh"),
+            ("1 MJ to mJ", "1000000000 mJ"),
+            ("500 mW to W", "0.5 W"),
+            ("2 MW to kW", "2000 kW"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.into())), "{query}");
+        }
+        assert_eq!(
+            convert("1 Wh to W"),
             Some(Err(ConversionError::DifferentDimensions))
         );
     }

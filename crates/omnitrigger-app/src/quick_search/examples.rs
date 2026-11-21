@@ -134,6 +134,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         title: "换算频率",
         query: "2 MHz to kHz",
     },
+    Example {
+        icon: Icon::Layers,
+        title: "换算能量",
+        query: "1 kWh to MJ",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "换算功率",
+        query: "500 mW to W",
+    },
 ];
 
 pub(super) fn matching_examples(query: &str) -> Vec<usize> {
