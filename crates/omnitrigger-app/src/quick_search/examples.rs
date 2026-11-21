@@ -306,6 +306,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算正整数次方根",
+        query: "root(-32,5)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算数值在线性区间中的位置",
         query: "invlerp(10,20,12.5)",
     },

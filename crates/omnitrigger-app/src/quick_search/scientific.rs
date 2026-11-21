@@ -81,6 +81,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
             }));
         }
         "lerp" => return Some(NamedValue::Aggregate(linear_interpolation)),
+        "root" => return Some(NamedValue::Aggregate(nth_root)),
         "invlerp" => return Some(NamedValue::Aggregate(interpolation_progress)),
         "clamp" => {
             return Some(NamedValue::Aggregate(|values| match values {
@@ -137,6 +138,24 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         _ => return None,
     };
     Some(NamedValue::Function(function))
+}
+
+fn nth_root(values: &[f64]) -> f64 {
+    let &[value, degree] = values else {
+        return f64::NAN;
+    };
+    let Some(degree) = nonnegative_integer(degree).filter(|&degree| degree != 0) else {
+        return f64::NAN;
+    };
+    if value < 0. && degree.is_multiple_of(2) {
+        return f64::NAN;
+    }
+    match degree {
+        1 => value,
+        2 => value.sqrt(),
+        3 => value.cbrt(),
+        _ => value.abs().powf(1. / degree as f64).copysign(value),
+    }
 }
 
 fn linear_interpolation(values: &[f64]) -> f64 {

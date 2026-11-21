@@ -515,6 +515,36 @@ mod tests {
     }
 
     #[test]
+    fn takes_real_roots_at_positive_integer_degrees() {
+        for (query, expected) in [
+            ("root(81,4)", "3"),
+            ("root(-32,5)", "-2"),
+            ("root(-27,3)", "-3"),
+            ("root((2+2)**3,3)", "4"),
+            ("root(2.5,1)", "2.5"),
+            ("root(0,200)", "0"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        let large = evaluate("root(1e300,6)").unwrap();
+        assert!((large / 1e50 - 1.).abs() < 1e-13);
+        for query in [
+            "root(-16,4)",
+            "root(2,0)",
+            "root(2,-1)",
+            "root(9,2.5)",
+            "root(2,9007199254740992)",
+            "root(81)",
+        ] {
+            assert_eq!(
+                calculate(query),
+                Err(CalculationError::FunctionDomain),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn interpolates_and_limits_values_in_ranges() {
         for (query, expected) in [
             ("lerp(10,20,0.25)", "12.5"),
