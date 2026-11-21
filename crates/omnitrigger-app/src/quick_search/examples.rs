@@ -41,6 +41,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "联立求解两个二元一次方程",
+        query: "联立: 2,1,5; 1,-1,1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用最小二乘法拟合直线",
         query: "拟合: 0,1; 1,3; 2,5",
     },
@@ -618,6 +623,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "计算加权平均值",
         query: "wavg(80,2,90,3)",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "按配比分配总量",
+        query: "配比: 120 @ 2:3:5",
     },
     Example {
         icon: Icon::Terminal,
@@ -1455,9 +1465,11 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::TextCount
         | Scope::Fraction
         | Scope::Equation
+        | Scope::LinearSystem
         | Scope::Radix
         | Scope::LinearFit
         | Scope::Triangle
+        | Scope::RatioAllocation
             if term.is_empty() => {}
         _ => return None,
     }
@@ -1531,9 +1543,11 @@ mod tests {
             Scope::TextCount,
             Scope::Fraction,
             Scope::Equation,
+            Scope::LinearSystem,
             Scope::LinearFit,
             Scope::Radix,
             Scope::Triangle,
+            Scope::RatioAllocation,
         ] {
             let items = tool_operation_examples(scope, "").unwrap();
             assert!(items.into_iter().all(|index| {

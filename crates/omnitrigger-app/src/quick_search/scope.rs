@@ -45,9 +45,11 @@ pub(super) enum Scope {
     Csv,
     Fraction,
     Equation,
+    LinearSystem,
     LinearFit,
     Triangle,
     Percentage,
+    RatioAllocation,
     UrlEncoding,
 }
 
@@ -109,9 +111,11 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
         Scope::Csv => Some("CSV:"),
         Scope::Fraction => Some("分数:"),
         Scope::Equation => Some("方程:"),
+        Scope::LinearSystem => Some("联立:"),
         Scope::LinearFit => Some("拟合:"),
         Scope::Triangle => Some("三角形:"),
         Scope::Percentage => Some("百分比:"),
+        Scope::RatioAllocation => Some("配比:"),
         Scope::UrlEncoding => Some("URL:"),
         _ => None,
     }
@@ -174,9 +178,11 @@ fn parse_scope(prefix: &str) -> Option<Scope> {
         "csv" => Scope::Csv,
         "分数" | "fraction" => Scope::Fraction,
         "方程" | "二次方程" | "equation" | "quadratic" => Scope::Equation,
+        "联立" | "方程组" | "线性方程组" | "linear system" => Scope::LinearSystem,
         "拟合" | "线性拟合" | "回归" | "linear fit" => Scope::LinearFit,
         "三角形" | "triangle" => Scope::Triangle,
         "百分比" | "比例" | "percentage" => Scope::Percentage,
+        "配比" | "按比例分配" | "ratio allocation" => Scope::RatioAllocation,
         "网址" | "url" => Scope::UrlEncoding,
         _ => return None,
     };

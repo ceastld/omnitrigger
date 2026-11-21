@@ -23,6 +23,7 @@ mod paper;
 mod percentage;
 mod presets;
 mod radix;
+mod ratio_allocation;
 mod recent;
 mod rectangle;
 mod renminbi;
@@ -70,7 +71,7 @@ use conversion::{
 };
 use csv_tools::{transform_csv, CsvError};
 use duration::{convert_duration, DurationError};
-use equation::{solve_equation, EquationError};
+use equation::{solve_equation, solve_linear_system, EquationError};
 use examples::{function_examples, matching_examples, tool_operation_examples, EXAMPLES};
 use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
@@ -85,6 +86,7 @@ use paper::{calculate_paper, PaperError};
 use percentage::{compare_percentages, PercentageError};
 use presets::matching_presets;
 use radix::{convert_arbitrary_radix, RadixError};
+use ratio_allocation::{allocate_ratio, RatioAllocationError};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use recent::RecentDestinations;
 use rectangle::{calculate_rectangle, RectangleError};
@@ -314,6 +316,7 @@ enum ValueError {
     Calculation(CalculationError),
     Conversion(ConversionError),
     Radix(RadixError),
+    RatioAllocation(RatioAllocationError),
     AspectRatio(AspectRatioError),
     Paper(PaperError),
     Rectangle(RectangleError),
@@ -345,6 +348,7 @@ impl ValueError {
             Self::Calculation(error) => error.message(),
             Self::Conversion(error) => error.message(),
             Self::Radix(error) => error.message(),
+            Self::RatioAllocation(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
             Self::Paper(error) => error.message(),
             Self::Rectangle(error) => error.message(),
@@ -383,7 +387,9 @@ impl ValueError {
                 | Self::Renminbi(RenminbiError::Incomplete)
                 | Self::Date(DateError::Incomplete)
                 | Self::LinearFit(LinearFitError::Incomplete)
+                | Self::Equation(EquationError::SystemRows)
                 | Self::Radix(RadixError::Incomplete)
+                | Self::RatioAllocation(RatioAllocationError::Incomplete)
                 | Self::Triangle(TriangleError::Dimensions)
                 | Self::Duration(DurationError::Incomplete)
                 | Self::VideoFrames(VideoFrameError::Incomplete)
@@ -602,6 +608,9 @@ impl Results {
                 Scope::Equation => {
                     Self::text_value(solve_equation(term).map_err(ValueError::Equation))
                 }
+                Scope::LinearSystem => {
+                    Self::text_value(solve_linear_system(term).map_err(ValueError::Equation))
+                }
                 Scope::LinearFit => {
                     Self::text_value(calculate_linear_fit(term).map_err(ValueError::LinearFit))
                 }
@@ -610,6 +619,9 @@ impl Results {
                 }
                 Scope::Percentage => {
                     Self::text_value(compare_percentages(term).map_err(ValueError::Percentage))
+                }
+                Scope::RatioAllocation => {
+                    Self::text_value(allocate_ratio(term).map_err(ValueError::RatioAllocation))
                 }
                 Scope::UrlEncoding => {
                     Self::text_value(convert_url_component(term).map_err(ValueError::UrlEncoding))

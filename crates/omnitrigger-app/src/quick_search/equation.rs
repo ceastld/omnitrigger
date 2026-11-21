@@ -10,6 +10,7 @@ use super::operators::split_top_level_commas;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EquationError {
     Coefficients,
+    SystemRows,
     Evaluation(FractionError),
 }
 
@@ -19,6 +20,7 @@ impl EquationError {
             Self::Coefficients | Self::Evaluation(FractionError::Invalid) => {
                 "按 a, b, c 输入 ax² + bx + c = 0 的三个系数"
             }
+            Self::SystemRows => "每行按 x 系数、y 系数、右侧常数输入，两行用分号隔开",
             Self::Evaluation(error) => error.message(),
         }
     }
@@ -29,17 +31,7 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
         return Err(EquationError::Evaluation(FractionError::TooLong));
     }
     let input = normalize(query);
-    let mut terms = split_top_level_commas(&input);
-    let (Some(a), Some(b), Some(c), None) =
-        (terms.next(), terms.next(), terms.next(), terms.next())
-    else {
-        return Err(EquationError::Coefficients);
-    };
-    if [a, b, c].into_iter().any(|term| term.trim().is_empty()) {
-        return Err(EquationError::Coefficients);
-    }
-    let coefficient = |term| calculate_fraction(term).map_err(EquationError::Evaluation);
-    let (a, b, c) = (coefficient(a)?, coefficient(b)?, coefficient(c)?);
+    let [a, b, c] = coefficient_row(&input)?;
     if a.numer().sign() == Sign::NoSign {
         if b.numer().sign() != Sign::NoSign {
             let root = -c / b;
@@ -98,9 +90,94 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
     }
 }
 
+fn coefficient_row(input: &str) -> Result<[BigRational; 3], EquationError> {
+    let mut terms = split_top_level_commas(input);
+    let (Some(a), Some(b), Some(c), None) =
+        (terms.next(), terms.next(), terms.next(), terms.next())
+    else {
+        return Err(EquationError::Coefficients);
+    };
+    if [a, b, c].into_iter().any(|term| term.trim().is_empty()) {
+        return Err(EquationError::Coefficients);
+    }
+    let coefficient = |term| calculate_fraction(term).map_err(EquationError::Evaluation);
+    Ok([coefficient(a)?, coefficient(b)?, coefficient(c)?])
+}
+
+pub(super) fn solve_linear_system(query: &str) -> Result<String, EquationError> {
+    if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
+        return Err(EquationError::Evaluation(FractionError::TooLong));
+    }
+    let input = normalize(query);
+    let (first, second) = input
+        .split_once([';', '\n'])
+        .ok_or(EquationError::SystemRows)?;
+    let row = |text| match coefficient_row(text) {
+        Err(
+            EquationError::Coefficients
+            | EquationError::Evaluation(FractionError::Invalid | FractionError::Incomplete),
+        ) => Err(EquationError::SystemRows),
+        result => result,
+    };
+    let [a, b, c] = row(first)?;
+    let [d, e, f] = row(second)?;
+    let det = &a * &e - &b * &d;
+    let numer_x = &c * &e - &b * &f;
+    let numer_y = &a * &f - &c * &d;
+    let is_zero = |value: &BigRational| value.numer().sign() == Sign::NoSign;
+    if is_zero(&det) {
+        // 系数全零的行须单独检查，右侧常数在该行不会通过二阶行列式体现。
+        let inconsistent_row = [(&a, &b, &c), (&d, &e, &f)]
+            .into_iter()
+            .any(|(x, y, rhs)| is_zero(x) && is_zero(y) && !is_zero(rhs));
+        let inconsistent = inconsistent_row || !is_zero(&numer_x) || !is_zero(&numer_y);
+        return Ok(if inconsistent {
+            "无解"
+        } else {
+            "无穷多解"
+        }
+        .to_owned());
+    }
+    for value in [&det, &numer_x, &numer_y] {
+        ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+    }
+    let x = numer_x / &det;
+    let y = numer_y / det;
+    for value in [&x, &y] {
+        ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+    }
+    Ok(format!("x = {x} · y = {y}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solves_exact_linear_systems_including_singular_cases() {
+        for (query, expected) in [
+            ("2,1,5; 1,-1,1", "x = 2 · y = 1"),
+            ("1/2,1,3\r\n1,-1,0", "x = 2 · y = 2"),
+            ("２，１，５；１，−１，１", "x = 2 · y = 1"),
+            ("comb(2,1),1,5; 1,-1,1", "x = 2 · y = 1"),
+            ("1,0,0; 0,1,-2", "x = 0 · y = -2"),
+            ("1,1,2; 2,2,4", "无穷多解"),
+            ("0,0,0; 0,0,0", "无穷多解"),
+            ("1,1,2; 2,2,5", "无解"),
+            ("0,0,0; 0,0,1", "无解"),
+        ] {
+            assert_eq!(
+                solve_linear_system(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(solve_linear_system("1,2,3"), Err(EquationError::SystemRows));
+        assert_eq!(
+            solve_linear_system("1,2; 4,5,6"),
+            Err(EquationError::SystemRows)
+        );
+    }
 
     #[test]
     fn solves_linear_and_quadratic_equations_with_exact_coefficients() {
