@@ -6,6 +6,7 @@ mod recent;
 mod scientific;
 mod scope;
 mod triggers;
+mod wheels;
 
 use gpui::{
     div, prelude::*, px, size, App, Bounds, ClipboardItem, Context, DisplayId, Div, Entity,
@@ -19,6 +20,7 @@ use crate::{
     message_input::MessageInput,
     settings::Binding,
     theme::{self, button, icon, rgb, Tone},
+    wheels::WheelDefinition,
     Page, Workspace,
 };
 use calculator::{calculate, looks_like_calculation, CalculationError, QUERY_LIMIT};
@@ -29,6 +31,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 pub(super) use recent::RecentDestinations;
 use scope::{scoped_query, Scope};
 use triggers::{matching_triggers, SearchTrigger};
+use wheels::{matching_wheels, SearchWheel};
 
 const WIDTH: f32 = 500.;
 const PAGE_ROW_HEIGHT: f32 = 38.;
@@ -58,8 +61,21 @@ enum Results {
 pub(super) enum Destination {
     Page(Page),
     Trigger(u64),
+    Wheel(String),
     TextHistoryQuery(String),
     ActionLibraryQuery(String),
+}
+
+struct SearchIndex {
+    triggers: Vec<SearchTrigger>,
+    wheels: Vec<SearchWheel>,
+    recent: RecentDestinations,
+}
+
+impl SearchIndex {
+    fn results(&self, query: &str) -> Results {
+        Results::for_query(query, &self.triggers, &self.wheels, &self.recent)
+    }
 }
 
 fn title_rank(title: &str, query: &str) -> u8 {
@@ -109,7 +125,12 @@ impl ValueError {
 }
 
 impl Results {
-    fn for_query(query: &str, triggers: &[SearchTrigger], recent: &RecentDestinations) -> Self {
+    fn for_query(
+        query: &str,
+        triggers: &[SearchTrigger],
+        wheels: &[SearchWheel],
+        recent: &RecentDestinations,
+    ) -> Self {
         let query = query.trim();
         if query.is_empty() {
             return Self::Destinations(recent.suggestions(triggers));
@@ -120,6 +141,12 @@ impl Results {
                     matching_triggers(triggers, term, PAGE_RESULT_LIMIT)
                         .into_iter()
                         .map(Destination::Trigger)
+                        .collect(),
+                ),
+                Scope::Wheels => Self::Destinations(
+                    matching_wheels(wheels, term, PAGE_RESULT_LIMIT)
+                        .into_iter()
+                        .map(|wheel| Destination::Wheel(wheel.id.clone()))
                         .collect(),
                 ),
                 Scope::TextHistory if term.is_empty() => {
@@ -169,6 +196,11 @@ impl Results {
                 .into_iter()
                 .map(Destination::Trigger),
         );
+        destinations.extend(
+            matching_wheels(wheels, &query, PAGE_RESULT_LIMIT - destinations.len())
+                .into_iter()
+                .map(|wheel| Destination::Wheel(wheel.id.clone())),
+        );
         Self::Destinations(destinations)
     }
 
@@ -216,8 +248,7 @@ pub(super) struct QuickSearch {
     theme_mode: appearance::Mode,
     input: Entity<MessageInput>,
     workspace: WeakEntity<Workspace>,
-    triggers: Vec<SearchTrigger>,
-    recent: RecentDestinations,
+    index: SearchIndex,
     was_active: bool,
     results: Results,
     selected: usize,
@@ -231,12 +262,16 @@ impl QuickSearch {
         theme_mode: appearance::Mode,
         workspace: WeakEntity<Workspace>,
         bindings: &[Binding],
+        wheels: &[WheelDefinition],
         recent: &RecentDestinations,
         cx: &mut App,
     ) -> Result<WindowHandle<Self>, String> {
-        let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();
-        let results = Results::for_query("", &triggers, recent);
-        let recent = recent.clone();
+        let index = SearchIndex {
+            triggers: bindings.iter().map(SearchTrigger::from_binding).collect(),
+            wheels: wheels.iter().map(SearchWheel::from_definition).collect(),
+            recent: recent.clone(),
+        };
+        let results = index.results("");
         let bounds = Bounds::centered(display, size(px(WIDTH), px(results.height())), cx);
         cx.open_window(
             WindowOptions {
@@ -253,9 +288,7 @@ impl QuickSearch {
                 is_minimizable: false,
                 ..Default::default()
             },
-            |window, cx| {
-                cx.new(|cx| Self::new(theme_mode, workspace, triggers, recent, results, window, cx))
-            },
+            |window, cx| cx.new(|cx| Self::new(theme_mode, workspace, index, results, window, cx)),
         )
         .map_err(|error| format!("无法打开快速搜索：{error}"))
     }
@@ -263,8 +296,7 @@ impl QuickSearch {
     fn new(
         theme_mode: appearance::Mode,
         workspace: WeakEntity<Workspace>,
-        triggers: Vec<SearchTrigger>,
-        recent: RecentDestinations,
+        index: SearchIndex,
         results: Results,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -277,7 +309,7 @@ impl QuickSearch {
             input
         });
         let input_changes = cx.observe_in(&input, window, |this, input, window, cx| {
-            let next = Results::for_query(&input.read(cx).text(), &this.triggers, &this.recent);
+            let next = this.index.results(&input.read(cx).text());
             if this.results != next {
                 let height_changed = this.results.height() != next.height();
                 this.results = next;
@@ -302,8 +334,7 @@ impl QuickSearch {
             theme_mode,
             input,
             workspace,
-            triggers,
-            recent,
+            index,
             was_active: window.is_window_active(),
             results,
             selected: 0,
@@ -421,9 +452,9 @@ impl QuickSearch {
                     theme::DANGER_TEXT
                 }))
                 .child(error.message()),
-            Results::Destinations(items) if items.is_empty() => row
-                .text_color(rgb(theme::TEXT_MUTED))
-                .child("未找到页面或触发器"),
+            Results::Destinations(items) if items.is_empty() => {
+                row.text_color(rgb(theme::TEXT_MUTED)).child("未找到匹配项")
+            }
             Results::Destinations(items) => div()
                 .flex()
                 .flex_col()
@@ -431,14 +462,31 @@ impl QuickSearch {
                     let (glyph, title, detail) = match destination {
                         Destination::Page(page) => (page.icon(), page.title().to_owned(), None),
                         Destination::Trigger(id) => {
-                            let trigger =
-                                self.triggers.iter().find(|trigger| trigger.id() == *id)?;
+                            let trigger = self
+                                .index
+                                .triggers
+                                .iter()
+                                .find(|trigger| trigger.id() == *id)?;
                             let detail = if trigger.enabled {
                                 trigger.shortcut.clone()
                             } else {
                                 format!("{} · 已停用", trigger.shortcut)
                             };
                             (trigger.icon, trigger.title.clone(), Some(detail))
+                        }
+                        Destination::Wheel(id) => {
+                            let wheel = self.index.wheels.iter().find(|wheel| &wheel.id == id)?;
+                            let duplicate = self
+                                .index
+                                .wheels
+                                .iter()
+                                .any(|other| other.id != *id && other.name == wheel.name);
+                            let detail = if duplicate {
+                                wheel.id.clone()
+                            } else {
+                                Page::Wheels.title().to_owned()
+                            };
+                            (Page::Wheels.icon(), wheel.name.clone(), Some(detail))
                         }
                         Destination::TextHistoryQuery(_) => {
                             (Icon::Clock, "搜索文本历史正文".to_owned(), None)
@@ -584,7 +632,20 @@ mod tests {
     use super::*;
 
     fn for_query(query: &str, triggers: &[SearchTrigger]) -> Results {
-        Results::for_query(query, triggers, &RecentDestinations::default())
+        Results::for_query(query, triggers, &[], &RecentDestinations::default())
+    }
+
+    #[test]
+    fn quick_search_routes_wheel_names_and_scope_to_wheel_entries() {
+        let settings = crate::wheels::Wheels::default();
+        let wheels = [SearchWheel::from_definition(&settings.wheels[0])];
+        for query in ["编辑轨道", "wheel: orbit-edit", "轮盘：", "轨道轮盘：编辑"] {
+            let result = Results::for_query(query, &[], &wheels, &RecentDestinations::default());
+            assert!(
+                matches!(result, Results::Destinations(items) if items == [Destination::Wheel("orbit-edit".into())]),
+                "{query}"
+            );
+        }
     }
 
     #[test]

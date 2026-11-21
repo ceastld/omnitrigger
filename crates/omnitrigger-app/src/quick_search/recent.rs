@@ -10,6 +10,7 @@ impl RecentDestinations {
         let item = match destination {
             Destination::TextHistoryQuery(_) => Destination::Page(Page::TextHistory),
             Destination::ActionLibraryQuery(_) => Destination::Page(Page::Actions),
+            Destination::Wheel(_) => Destination::Page(Page::Wheels),
             item => item.clone(),
         };
         self.0.retain(|existing| existing != &item);

@@ -2703,6 +2703,11 @@ impl Workspace {
             self.theme_mode,
             cx.weak_entity(),
             self.triggers.bindings(),
+            if self.wheels_error.is_none() {
+                &self.wheels.wheels
+            } else {
+                &[]
+            },
             &self.quick_search_recent,
             cx,
         )?;
@@ -2718,9 +2723,15 @@ impl Workspace {
         if self.recording || self.mode.history_only() {
             return;
         }
-        if matches!(destination, quick_search::Destination::Trigger(id) if self.binding(id).is_none())
-        {
-            return;
+        match &destination {
+            quick_search::Destination::Trigger(id) if self.binding(*id).is_none() => return,
+            quick_search::Destination::Wheel(id)
+                if self.wheels_error.is_some()
+                    || !self.wheels.wheels.iter().any(|wheel| &wheel.id == id) =>
+            {
+                return
+            }
+            _ => {}
         }
         let action_filter = matches!(
             destination,
@@ -2740,6 +2751,10 @@ impl Workspace {
                     input.set_text(query, cx);
                     input.move_cursor_to_end(cx);
                 });
+            }
+            quick_search::Destination::Wheel(id) => {
+                self.open_page(Page::Wheels, cx);
+                self.switch_wheel(id, cx);
             }
             quick_search::Destination::Trigger(id) => {
                 self.open_page(Page::Triggers, cx);
