@@ -1432,6 +1432,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按表头名称和指定顺序选 CSV 列",
+        query: "CSV: 选列名 [\"备注\",\"编号\"] 编号,名称,备注\n001,茶,\"含,逗号\"",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "删除 CSV 中内容重复的行",
         query: "CSV: 去重 编号,备注\n001,\"茶,咖啡\"\n\"001\",\"茶,咖啡\"\n002,梨",
     },

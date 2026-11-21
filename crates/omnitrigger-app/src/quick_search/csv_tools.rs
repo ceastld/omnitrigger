@@ -4,7 +4,10 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-use serde::ser::{Serialize, SerializeMap, Serializer};
+use serde::{
+    de::DeserializeOwned,
+    ser::{Serialize, SerializeMap, Serializer},
+};
 
 use super::text_tools::compare_natural;
 
@@ -17,6 +20,9 @@ pub(super) enum CsvError {
     DifferentColumnCount,
     InvalidHeader,
     InvalidColumns,
+    InvalidColumnNames,
+    MissingColumnName,
+    AmbiguousColumnName,
     InvalidColumnValue,
     ColumnOutOfRange,
     Serialization,
@@ -32,6 +38,9 @@ impl CsvError {
             Self::DifferentColumnCount => "每行的列数须一致",
             Self::InvalidHeader => "CSV 表头的列名须非空且唯一",
             Self::InvalidColumns => "用逗号隔开互不重复的列号，列号从 1 开始",
+            Self::InvalidColumnNames => "用 JSON 字符串数组输入互不重复的列名",
+            Self::MissingColumnName => "表头中找不到所选列名",
+            Self::AmbiguousColumnName => "所选列名在表头重复，请改用列号",
             Self::InvalidColumnValue => "请输入列号和带双引号的值，再粘贴表格",
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::Serialization => "无法生成 JSON",
@@ -47,6 +56,7 @@ enum Operation {
     ToTsv,
     FromTsv,
     SelectColumns(Vec<usize>),
+    SelectNamedColumns(Vec<String>),
     DeduplicateRows,
     DeduplicateByColumns(Vec<usize>),
     FilterColumn {
@@ -76,6 +86,11 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             let (columns, data) = column_arguments(input)?;
             input = data;
             Operation::SelectColumns(columns)
+        }
+        "选列名" | "pick-by-header" => {
+            let (names, data) = json_argument_and_data(input, CsvError::InvalidColumnNames)?;
+            input = data;
+            Operation::SelectNamedColumns(names)
         }
         "按列去重" | "deduplicate-columns" => {
             let (columns, data) = column_arguments(input)?;
@@ -124,6 +139,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::ToTsv => Ok(write_rows(&rows, '\t')),
         Operation::FromTsv => Ok(write_rows(&rows, ',')),
         Operation::SelectColumns(columns) => select_columns(&rows, &columns),
+        Operation::SelectNamedColumns(names) => select_named_columns(&rows, &names),
         Operation::DeduplicateRows => {
             let mut seen = HashSet::new();
             Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
@@ -158,16 +174,21 @@ fn column_arguments(input: &str) -> Result<(Vec<usize>, &str), CsvError> {
 fn column_value_arguments(input: &str) -> Result<(usize, String, &str), CsvError> {
     let (column, input) = split_argument(input).ok_or(CsvError::InvalidColumnValue)?;
     let column = column_index(column)?;
+    let (value, data) = json_argument_and_data(input, CsvError::InvalidColumnValue)?;
+    Ok((column, value, data))
+}
+
+fn json_argument_and_data<T: DeserializeOwned>(
+    input: &str,
+    error: CsvError,
+) -> Result<(T, &str), CsvError> {
     let input = input.trim_start();
-    let mut values = serde_json::Deserializer::from_str(input).into_iter::<String>();
-    let value = values
-        .next()
-        .ok_or(CsvError::InvalidColumnValue)?
-        .map_err(|_| CsvError::InvalidColumnValue)?;
+    let mut values = serde_json::Deserializer::from_str(input).into_iter::<T>();
+    let value = values.next().ok_or(error)?.map_err(|_| error)?;
     let (_, data) = split_argument(&input[values.byte_offset()..])
         .filter(|(argument, _)| argument.is_empty())
-        .ok_or(CsvError::InvalidColumnValue)?;
-    Ok((column, value, data))
+        .ok_or(error)?;
+    Ok((value, data))
 }
 
 fn column_indices(input: &str) -> Result<Vec<usize>, CsvError> {
@@ -203,6 +224,29 @@ fn select_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, Csv
         .map(|row| columns.iter().map(|&index| row[index].clone()).collect())
         .collect();
     Ok(write_rows(&selected, ','))
+}
+
+fn select_named_columns(rows: &[Vec<String>], names: &[String]) -> Result<String, CsvError> {
+    let header = rows.first().ok_or(CsvError::MissingInput)?;
+    let mut seen = HashSet::with_capacity(names.len());
+    if names.is_empty() || names.iter().any(|name| !seen.insert(name)) {
+        return Err(CsvError::InvalidColumnNames);
+    }
+    let columns = names
+        .iter()
+        .map(|name| {
+            let mut matches = header
+                .iter()
+                .enumerate()
+                .filter(|(_, value)| *value == name);
+            let (index, _) = matches.next().ok_or(CsvError::MissingColumnName)?;
+            if matches.next().is_some() {
+                return Err(CsvError::AmbiguousColumnName);
+            }
+            Ok(index)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    select_columns(rows, &columns)
 }
 
 fn deduplicate_by_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, CsvError> {
@@ -606,6 +650,34 @@ mod tests {
             ("选列 1, a,b", CsvError::InvalidColumns),
             ("选列 3 a,b", CsvError::ColumnOutOfRange),
             ("选列 1 a,b\nc", CsvError::DifferentColumnCount),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn selects_csv_columns_by_exact_header_and_preserves_requested_order() {
+        assert_eq!(
+            transform_csv(
+                "选列名 [\"备注,说明\",\"编号\"]\r\n编号,名称,\"备注,说明\"\r\n001,茶,\"含,逗号\""
+            )
+            .as_deref(),
+            Ok("\"备注,说明\",编号\r\n\"含,逗号\",001")
+        );
+        assert_eq!(
+            transform_csv("pick-by-header [\" \",\"\"]  ,\n末尾,空").as_deref(),
+            Ok(" ,\"\"\r\n末尾,空")
+        );
+        assert_eq!(
+            transform_csv("选列名 [\"编号\"] 编号,重复,重复\n001,甲,乙").as_deref(),
+            Ok("编号\r\n001")
+        );
+        for (query, error) in [
+            (r#"选列名 [] a,b"#, CsvError::InvalidColumnNames),
+            (r#"选列名 ["a","a"] a,b"#, CsvError::InvalidColumnNames),
+            (r#"选列名 ["a"]a,b"#, CsvError::InvalidColumnNames),
+            (r#"选列名 ["a"] A,b"#, CsvError::MissingColumnName),
+            (r#"选列名 ["a"] a,a"#, CsvError::AmbiguousColumnName),
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
