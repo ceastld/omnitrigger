@@ -21,6 +21,7 @@ pub(super) enum UrlEncodingError {
     NullCharacter,
     MissingParameters,
     InvalidUrl,
+    InvalidParameterPair,
     InvalidFilePath,
     InvalidFileUrl,
     OpaqueOrigin,
@@ -36,6 +37,7 @@ impl UrlEncodingError {
             Self::NullCharacter => "解码结果含空字符，无法完整复制",
             Self::MissingParameters => "没有可解析的查询参数",
             Self::InvalidUrl => "输入带协议的 URL，例如 https://example.invalid/",
+            Self::InvalidParameterPair => "用 JSON 填写名称和值，例如 [\"tag\",\"茶\"]，再输入 URL",
             Self::InvalidFilePath => "输入绝对文件路径，例如 C:\\文档\\示例.txt",
             Self::InvalidFileUrl => "输入带绝对路径的 file: URL，例如 file:///C:/Docs/example.txt",
             Self::OpaqueOrigin => "请输入具有网络源的 URL，例如 https://example.invalid/",
@@ -75,6 +77,8 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
             Ok(url.into())
         }
         "去参数" | "strip-param" => remove_parameter(value),
+        "加参数" | "append-param" => write_parameter(value, false),
+        "设参数" | "set-param" => write_parameter(value, true),
         "文件链接" | "file-url" => encode_file_path(value),
         "文件路径" | "file-path" => decode_file_path(value),
         _ => Err(UrlEncodingError::InvalidOperation),
@@ -165,8 +169,7 @@ fn remove_parameter(value: &str) -> Result<String, UrlEncodingError> {
     let mut parts = Vec::new();
     let mut removed = false;
     for part in query.split('&') {
-        let key = part.split_once('=').map_or(part, |(key, _)| key);
-        if decode_form_value(key).is_ok_and(|key| key == name) {
+        if parameter_name_matches(part, &name) {
             removed = true;
         } else {
             parts.push(part);
@@ -179,6 +182,55 @@ fn remove_parameter(value: &str) -> Result<String, UrlEncodingError> {
             .then(|| parts.join("&"));
         url.set_query(query.as_deref());
     }
+    Ok(url.into())
+}
+
+fn parameter_name_matches(part: &str, name: &str) -> bool {
+    let key = part.split_once('=').map_or(part, |(key, _)| key);
+    !part.is_empty() && decode_form_value(key).is_ok_and(|key| key == name)
+}
+
+fn write_parameter(input: &str, replace_existing: bool) -> Result<String, UrlEncodingError> {
+    let mut pairs = serde_json::Deserializer::from_str(input).into_iter::<[String; 2]>();
+    let [name, value] = pairs
+        .next()
+        .ok_or(UrlEncodingError::Incomplete)?
+        .map_err(|error| {
+            if error.is_eof() {
+                UrlEncodingError::Incomplete
+            } else {
+                UrlEncodingError::InvalidParameterPair
+            }
+        })?;
+    let address = &input[pairs.byte_offset()..];
+    if address.is_empty() {
+        return Err(UrlEncodingError::Incomplete);
+    }
+    if !address.starts_with(char::is_whitespace) {
+        return Err(UrlEncodingError::InvalidParameterPair);
+    }
+    let mut url = Url::parse(address.trim_start()).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair(&name, &value);
+    let pair = serializer.finish();
+    let mut parts: Vec<&str> = Vec::new();
+    let mut inserted = false;
+    if let Some(query) = url.query().filter(|query| !query.is_empty()) {
+        for part in query.split('&') {
+            if replace_existing && parameter_name_matches(part, &name) {
+                if !inserted {
+                    parts.push(&pair);
+                    inserted = true;
+                }
+            } else {
+                parts.push(part);
+            }
+        }
+    }
+    if !inserted {
+        parts.push(&pair);
+    }
+    url.set_query(Some(&parts.join("&")));
     Ok(url.into())
 }
 
@@ -253,6 +305,46 @@ mod tests {
         assert_eq!(
             convert_url_component("file-path file:///C:/bad%00name"),
             Err(UrlEncodingError::InvalidFileUrl)
+        );
+    }
+
+    #[test]
+    fn appends_or_sets_url_parameters_and_retains_unrelated_serialization() {
+        for (query, expected) in [
+            (
+                r#"加参数 ["tag","茶 + 咖啡"] https://example.invalid/doc?tag=first#part"#,
+                "https://example.invalid/doc?tag=first&tag=%E8%8C%B6+%2B+%E5%92%96%E5%95%A1#part",
+            ),
+            (
+                r#"设参数 ["page","2"] https://example.invalid/doc?first&%70age=1&q=a%20b&page=3#part"#,
+                "https://example.invalid/doc?first&page=2&q=a%20b#part",
+            ),
+            (
+                r#"append-param ["a b",""] https://example.invalid/?x=%7e&&#f"#,
+                "https://example.invalid/?x=%7e&&&a+b=#f",
+            ),
+            (
+                r#"set-param ["tag"," "] https://example.invalid/doc?"#,
+                "https://example.invalid/doc?tag=+",
+            ),
+            (
+                r#"set-param ["a +","新"] https://example.invalid/?a+%2B=0&a%20%2b=1&%FF=4&foo"#,
+                "https://example.invalid/?a+%2B=%E6%96%B0&%FF=4&foo",
+            ),
+        ] {
+            assert_eq!(
+                convert_url_component(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            convert_url_component(r#"set-param ["tag","val"]"#),
+            Err(UrlEncodingError::Incomplete)
+        );
+        assert_eq!(
+            convert_url_component(r#"set-param ["tag"] https://example.invalid/"#),
+            Err(UrlEncodingError::InvalidParameterPair)
         );
     }
 

@@ -1055,6 +1055,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: r#"JSON: 合并对象 [{"名称":"初稿","版本":1},{"版本":2}]"#,
     },
     Example {
+        icon: Icon::Terminal,
+        title: "把 CSV 转成 JSON 行数组",
+        query: "CSV: 转JSON 编号,名称\n001,\"茶,咖啡\"",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按 CSV 表头生成 JSON 对象",
+        query: "CSV: 对象 编号,名称\n001,茶",
+    },
+    Example {
         icon: Icon::Browser,
         title: "编码 URL 参数值",
         query: "URL: 编码 北京 A+B",
@@ -1093,6 +1103,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Browser,
         title: "移除指定名称的 URL 参数",
         query: "URL: 去参数 source https://example.invalid/doc?q=a%20b&source=mail#part",
+    },
+    Example {
+        icon: Icon::Browser,
+        title: "给网址追加一个查询参数",
+        query: r#"URL: 加参数 ["tag","茶 + 咖啡"] https://example.invalid/doc?tag=first#part"#,
+    },
+    Example {
+        icon: Icon::Browser,
+        title: "设置查询参数并合并同名项",
+        query: r#"URL: 设参数 ["page","2"] https://example.invalid/doc?page=1&q=a%20b&page=3#part"#,
     },
     Example {
         icon: Icon::Browser,
@@ -1214,7 +1234,7 @@ pub(super) fn matching_examples(query: &str) -> Vec<usize> {
 
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
     match scope {
-        Scope::Json | Scope::TextTools | Scope::UrlEncoding | Scope::Percentage
+        Scope::Json | Scope::Csv | Scope::TextTools | Scope::UrlEncoding | Scope::Percentage
             if !term.contains(char::is_whitespace) => {}
         Scope::Date
         | Scope::Duration

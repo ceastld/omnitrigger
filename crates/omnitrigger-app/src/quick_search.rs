@@ -6,6 +6,7 @@ mod calendar;
 mod cidr;
 mod color;
 mod conversion;
+mod csv_tools;
 mod duration;
 mod equation;
 mod examples;
@@ -56,6 +57,7 @@ use conversion::{
     calculate_fuel_economy, calculate_pace, calculate_pixel_density, calculate_unit_price,
     conversion_target_input, convert, estimate_transfer, suggested_targets, ConversionError,
 };
+use csv_tools::{transform_csv, CsvError};
 use duration::{convert_duration, DurationError};
 use equation::{solve_equation, EquationError};
 use examples::{function_examples, matching_examples, tool_operation_examples, EXAMPLES};
@@ -287,6 +289,7 @@ enum ValueError {
     Color(ColorError),
     Text(TextError),
     Json(JsonError),
+    Csv(CsvError),
     Fraction(FractionError),
     Equation(EquationError),
     Percentage(PercentageError),
@@ -307,6 +310,7 @@ impl ValueError {
             Self::Color(error) => error.message(),
             Self::Text(error) => error.message(),
             Self::Json(error) => error.message(),
+            Self::Csv(error) => error.message(),
             Self::Fraction(error) => error.message(),
             Self::Equation(error) => error.message(),
             Self::Percentage(error) => error.message(),
@@ -341,6 +345,7 @@ impl ValueError {
                 | Self::Percentage(PercentageError::Incomplete)
                 | Self::UrlEncoding(UrlEncodingError::Incomplete)
                 | Self::Json(JsonError::Incomplete)
+                | Self::Csv(CsvError::MissingInput | CsvError::UnclosedQuote)
         )
     }
 }
@@ -362,14 +367,15 @@ impl Results {
         {
             return Self::Value(Err(ValueError::InputTooLong));
         }
-        let query = query.trim();
+        let raw_query = query;
+        let query = raw_query.trim();
         if query.is_empty() {
             return Self::Destinations(recent.destinations.suggestions(triggers));
         }
         if let Some(terms) = query.strip_prefix(['?', '？']) {
             return Self::Help(matching_examples(terms));
         }
-        if let Some((scope, term)) = scoped_query(query) {
+        if let Some((scope, term)) = scoped_query(raw_query) {
             if let Some(examples) = tool_operation_examples(scope, term) {
                 return Self::Help(examples);
             }
@@ -481,6 +487,7 @@ impl Results {
                     Self::text_value(transform_text(term).map_err(ValueError::Text))
                 }
                 Scope::Json => Self::text_value(transform_json(term).map_err(ValueError::Json)),
+                Scope::Csv => Self::text_value(transform_csv(term).map_err(ValueError::Csv)),
                 Scope::Fraction => Self::Value(
                     simplify_fraction(term)
                         .map(|text| ResultValue {
@@ -1661,6 +1668,18 @@ mod tests {
             ..SearchIndex::default()
         }
         .results(query)
+    }
+
+    #[test]
+    fn csv_queries_preserve_significant_whitespace_and_suggest_operations() {
+        assert!(matches!(
+            for_query(" CSV： 转JSON  001,茶\n002,末尾 ", &[]),
+            Results::Value(Ok(value)) if value.text == r#"[[" 001","茶"],["002","末尾 "]]"#
+        ));
+        let suggestions = for_query("CSV: 对", &[]);
+        assert!(suggestions
+            .suggested_input(0)
+            .is_some_and(|query| query.starts_with("CSV: 对象 ")));
     }
 
     #[test]

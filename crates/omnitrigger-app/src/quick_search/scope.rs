@@ -30,6 +30,7 @@ pub(super) enum Scope {
     TextCount,
     TextTools,
     Json,
+    Csv,
     Fraction,
     Equation,
     Percentage,
@@ -38,7 +39,13 @@ pub(super) enum Scope {
 
 pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
     if let Some((prefix, term)) = query.split_once([':', '：']) {
-        return Some((parse_scope(prefix)?, term.trim()));
+        let scope = parse_scope(prefix)?;
+        let term = if scope == Scope::Csv {
+            term.trim_start()
+        } else {
+            term.trim()
+        };
+        return Some((scope, term));
     }
     match parse_scope(query)? {
         scope @ Scope::Triggers(Some(_)) => Some((scope, "")),
@@ -73,6 +80,7 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
         Scope::TextCount => Some("字数:"),
         Scope::TextTools => Some("文本:"),
         Scope::Json => Some("JSON:"),
+        Scope::Csv => Some("CSV:"),
         Scope::Fraction => Some("分数:"),
         Scope::Equation => Some("方程:"),
         Scope::Percentage => Some("百分比:"),
@@ -123,6 +131,7 @@ fn parse_scope(prefix: &str) -> Option<Scope> {
         "字数" | "text count" | "text length" => Scope::TextCount,
         "文本" | "文本工具" | "text tools" => Scope::TextTools,
         "json" => Scope::Json,
+        "csv" => Scope::Csv,
         "分数" | "fraction" => Scope::Fraction,
         "方程" | "二次方程" | "equation" | "quadratic" => Scope::Equation,
         "百分比" | "比例" | "percentage" => Scope::Percentage,

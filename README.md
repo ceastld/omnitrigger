@@ -140,6 +140,7 @@
 - 输入 `URL: 去查询串 https://example.invalid/doc?source=mail#part` 得到 `https://example.invalid/doc#part`。结果使用 URL 解析后的格式，保留路径和片段。
 - 输入 `URL: 去参数 source https://example.invalid/doc?q=a%20b&source=mail#part` 得到 `https://example.invalid/doc?q=a%20b#part`。同名参数会一起移除，其余参数保留编码和顺序。名称区分大小写，空格可写作 `%20`。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 输入 `URL: 源 https://example.invalid:8443/doc?x=1#part` 得到 `https://example.invalid:8443`。结果由协议、主机和非默认端口组成。 [WHATWG URL 源的定义](https://url.spec.whatwg.org/#concept-url-origin)
+- 输入 `URL: 加参数 ["tag","茶"] https://example.invalid/doc?tag=first#part` 会在末尾追加一项。用 `URL: 设参数` 会替换第一个同名项并移除其余同名项。其他查询参数保留编码和顺序。 [WHATWG 表单编码规则](https://url.spec.whatwg.org/#concept-urlencoded-serializer)
 - 输入 `URL: 文件链接 "C:\Docs\a b.txt"` 得到 `file:///C:/Docs/a%20b.txt`。用 `URL: 文件路径` 加上链接可转回 Windows 路径。支持绝对盘符路径和 UNC 路径。 [Rust URL 文件路径转换](https://docs.rs/url/2.5.8/url/struct.Url.html#method.from_file_path)
 - 输入 `JSON: 格式化 {"名称":"北京","值":1}` 可添加两格缩进，输入 `JSON: 压缩` 加上 JSON 文本可移除结构空白。两种操作均检查语法，并保留原有键顺序、数字和字符串拼写。搜索框可输入最多 4096 个字符。
 - 输入 `JSON: 取值 /商品/0/价格 {"商品":[{"价格":9007199254740993}]}` 可提取原文中的 `9007199254740993`。路径中的 `~1` 表示键名内的斜杠，`~0` 表示波浪号。带空白的路径可用 JSON 双引号包住。参见 [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901.html#section-4)。
@@ -148,7 +149,8 @@
 - 输入 `JSON: 长度 [1,{"数量":2},null]` 得到 `3`。数组按顶层元素计数，对象按顶层键值对计数，重复键各算一项。
 - 输入 `JSON: 展开数组 [1,{"数量":2},null]` 可将各元素展开为一行一个 JSON 值。用 `JSON: 合并行` 加上多行内容可合并成数组，粘贴时夹带的空白行会跳过。两种操作都保留数字和字符串的原始拼写。 [JSON Lines 格式](https://jsonlines.org/)
 - 输入 `JSON: 合并对象 [{"名称":"初稿","版本":1},{"版本":2}]` 得到 `{"名称":"初稿","版本":2}`。键按首次出现的顺序排列，同名键采用最后读到的完整值。数字和字符串值保留原来的拼写。
-- 输入 `日期:`、`时长:`、`颜色:`、`分数:` 等工具前缀可查看示例。`JSON:`、`URL:`、`文本:` 和 `百分比:` 还支持按操作名称筛选。用方向键选择后按回车或 Tab 填入示例。
+- 输入 `CSV: 转JSON` 加一个空格，再粘贴 CSV，可生成 JSON 行数组。输入 `CSV: 对象` 则用首行的列名生成对象。每个单元格都保留为字符串，编号 `001` 会保留前导零。支持用双引号包住含逗号、引号或换行的单元格。 [CSV 格式说明](https://www.rfc-editor.org/rfc/rfc4180.html#section-2)
+- 输入 `日期:`、`时长:`、`颜色:`、`分数:` 等工具前缀可查看示例。`JSON:`、`CSV:`、`URL:`、`文本:` 和 `百分比:` 还支持按操作名称筛选。用方向键选择后按回车或 Tab 填入示例。
 - 输入 `文本: Base64编码 北京` 得到 `5YyX5Lqs`，输入 `文本: Base64解码 5YyX5Lqs` 可还原文字。`Base64URL编码` 使用网址安全字母表并省略末尾的 `=`。两种解码均接受带或不带 `=` 的对应编码，可粘贴换行分隔的 UTF-8 文本编码。[RFC 4648](https://www.rfc-editor.org/rfc/rfc4648.html#section-4)
 - 搜索结果预览最多显示六行，按回车复制完整内容。
 - 粘贴到快速搜索的换行和制表符会保留，输入框用可见符号显示。文本工具中用引号包住内容，也可保留首尾空白。
