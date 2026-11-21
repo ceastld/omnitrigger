@@ -1,6 +1,7 @@
 mod calculator;
 mod calendar;
 mod conversion;
+mod operators;
 mod radix;
 mod recent;
 mod scientific;

@@ -1,3 +1,4 @@
+use super::operators::Operator;
 use super::scientific::{named_value, split_name, NamedValue};
 
 pub(super) const QUERY_LIMIT: usize = 256;
@@ -34,9 +35,7 @@ pub(super) fn looks_like_calculation(query: &str) -> bool {
     let (name, tail) = split_name(query);
     let tail = tail.trim_start();
     match named_value(name) {
-        Some(NamedValue::Constant(_)) => {
-            tail.is_empty() || tail.starts_with(['+', '-', '*', '×', '/', '^'])
-        }
+        Some(NamedValue::Constant(_)) => tail.is_empty() || Operator::prefix(tail).is_some(),
         Some(NamedValue::Function(_)) => tail.is_empty() || tail.starts_with('('),
         None => false,
     }
@@ -117,32 +116,14 @@ impl Parser<'_> {
             None => return Err(CalculationError::Incomplete),
         };
 
-        while let Some(op) = self.peek() {
-            let (op, width) = if self.0.starts_with("**") {
-                ('^', 2)
-            } else {
-                (op, op.len_utf8())
-            };
-            let (left, right) = match op {
-                '+' | '-' => (1, 2),
-                '*' | '×' | '/' => (3, 4),
-                '^' => (6, 5),
-                _ => break,
-            };
+        while let Some((operator, width)) = Operator::prefix(self.0.trim_start()) {
+            let (left, right) = operator.binding_power();
             if left < min_binding {
                 break;
             }
-            self.0 = &self.0[width..];
+            self.0 = &self.0.trim_start()[width..];
             let rhs = self.expression(right)?;
-            lhs = match op {
-                '+' => lhs + rhs,
-                '-' => lhs - rhs,
-                '*' | '×' => lhs * rhs,
-                '/' if rhs == 0.0 => return Err(CalculationError::DivisionByZero),
-                '/' => lhs / rhs,
-                _ => lhs.powf(rhs),
-            };
-            finite(lhs)?;
+            lhs = finite(operator.apply(lhs, rhs)?)?;
         }
         Ok(lhs)
     }
@@ -250,6 +231,29 @@ mod tests {
             ("-0", "0"),
         ] {
             assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn floor_division_and_remainder_follow_python_sign_and_precedence_rules() {
+        for (query, expected) in [
+            ("7 // 3", "2"),
+            ("-7 // 3", "-3"),
+            ("7 // -3", "-3"),
+            ("-7 % 3", "2"),
+            ("7 % -3", "-2"),
+            ("1.0 // 0.1", "9"),
+            ("-1e-300 // 1e300", "-1"),
+            ("2**5 % 3 + 1", "3"),
+            ("７％３", "1"),
+            ("percent(15) * 200", "30"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert!(looks_like_calculation("pi % 2"));
+        assert_eq!(calculate("7 //"), Err(CalculationError::Incomplete));
+        for query in ["7 // 0", "7 % -0"] {
+            assert_eq!(calculate(query), Err(CalculationError::DivisionByZero));
         }
     }
 

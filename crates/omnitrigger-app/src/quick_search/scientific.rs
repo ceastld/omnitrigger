@@ -30,6 +30,7 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "exp" => f64::exp,
         "radians" => f64::to_radians,
         "degrees" => f64::to_degrees,
+        "percent" => |value| value / 100.,
         _ => return None,
     };
     Some(NamedValue::Function(function))
