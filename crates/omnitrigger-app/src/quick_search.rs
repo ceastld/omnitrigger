@@ -1833,7 +1833,9 @@ mod tests {
         for (query, expected) in [
             ("2026-11-21 星期几", "星期六"),
             ("2026-W47", "2026-11-16 至 2026-11-22"),
+            ("2026-Q4", "2026-10-01 至 2026-12-31\n92 天 · 66 工作日"),
             ("2026-11-21", "1994"),
+            ("2024-02", "2022"),
         ] {
             assert!(
                 matches!(for_query(query, &[]), Results::Value(Ok(value)) if value.text == expected),

@@ -7,6 +7,7 @@ pub(super) enum DateError {
     Incomplete,
     InvalidDate,
     InvalidWeek,
+    InvalidQuarter,
     InvalidOperation,
     OutOfRange,
 }
@@ -17,6 +18,7 @@ impl DateError {
             Self::Incomplete => "可以输入日期、天数或星期几，例如 日期: 今天 星期几",
             Self::InvalidDate => "请输入有效日期 YYYY-MM-DD 或月份 YYYY-MM",
             Self::InvalidWeek => "请输入有效的 ISO 周号，例如 2026-W47",
+            Self::InvalidQuarter => "请输入季度编号 1 至 4，例如 2026-Q4",
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
             Self::OutOfRange => "结果超出四位年份的日期范围",
         }
@@ -100,9 +102,9 @@ fn week_number_query(input: &str) -> Option<&str> {
         .map(str::trim_end)
 }
 
-fn iso_week_parts(input: &str) -> Option<(&str, &str)> {
+fn calendar_period_parts(input: &str, marker: [char; 2]) -> Option<(&str, &str)> {
     let (year, rest) = input.split_at_checked(4)?;
-    Some((year, rest.strip_prefix('-')?.strip_prefix(['W', 'w'])?))
+    Some((year, rest.strip_prefix('-')?.strip_prefix(marker)?))
 }
 
 fn iso_month_parts(input: &str) -> Option<(i32, u32)> {
@@ -133,9 +135,11 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
     let input = normalize(query);
     let input = input.trim();
     let date_tail = |rest: &str| rest.is_empty() || rest.starts_with(['+', '-']);
-    if let Some((year, week)) = iso_week_parts(input) {
+    if let Some((year, ordinal)) = calendar_period_parts(input, ['W', 'w'])
+        .or_else(|| calendar_period_parts(input, ['Q', 'q']))
+    {
         return year.bytes().all(|byte| byte.is_ascii_digit())
-            && week.bytes().all(|byte| byte.is_ascii_digit());
+            && ordinal.bytes().all(|byte| byte.is_ascii_digit());
     }
     if let Some(date) = weekday_query(input).or_else(|| week_number_query(input)) {
         return date.is_empty()
@@ -181,18 +185,32 @@ fn workday_difference(date: NaiveDate, other: NaiveDate) -> i64 {
     difference.signum() * (days / 7 * 5 + remaining_workdays)
 }
 
-fn month_range(start: NaiveDate) -> Result<String, DateError> {
+fn month_range(start: NaiveDate, months: u32) -> Result<String, DateError> {
     let end = in_range(
         start
-            .checked_add_months(Months::new(1))
+            .checked_add_months(Months::new(months))
             .and_then(|next| next.pred_opt()),
     )?;
     let workdays =
         workday_difference(end, start) + i64::from(start.weekday().number_from_monday() <= 5);
-    Ok(format!(
-        "{start} 至 {end}\n{} 天 · {workdays} 工作日",
-        end.day()
-    ))
+    let days = end.signed_duration_since(start).num_days() + 1;
+    Ok(format!("{start} 至 {end}\n{days} 天 · {workdays} 工作日"))
+}
+
+fn quarter_range(year: &str, quarter: &str) -> Result<String, DateError> {
+    if quarter.is_empty() {
+        return Err(DateError::Incomplete);
+    }
+    let [quarter @ b'1'..=b'4'] = quarter.as_bytes() else {
+        return Err(DateError::InvalidQuarter);
+    };
+    if !year.bytes().all(|digit| digit.is_ascii_digit()) {
+        return Err(DateError::InvalidQuarter);
+    }
+    let year = year.parse().map_err(|_| DateError::InvalidQuarter)?;
+    let first_month = 1 + u32::from(*quarter - b'1') * 3;
+    let start = NaiveDate::from_ymd_opt(year, first_month, 1).ok_or(DateError::InvalidQuarter)?;
+    month_range(start, 3)
 }
 
 fn calendar_difference(date: NaiveDate, other: NaiveDate) -> Result<String, DateError> {
@@ -297,11 +315,17 @@ fn apply_date_offset(
 pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, DateError> {
     let input = normalize(input);
     let input = input.trim();
-    if let Some((year, week)) = iso_week_parts(input) {
+    if let Some((year, week)) = calendar_period_parts(input, ['W', 'w']) {
         return iso_week_range(year, week);
     }
+    if let Some((year, quarter)) = calendar_period_parts(input, ['Q', 'q']) {
+        return quarter_range(year, quarter);
+    }
     if let Some((year, month)) = iso_month_parts(input) {
-        return month_range(NaiveDate::from_ymd_opt(year, month, 1).ok_or(DateError::InvalidDate)?);
+        return month_range(
+            NaiveDate::from_ymd_opt(year, month, 1).ok_or(DateError::InvalidDate)?,
+            1,
+        );
     }
     if let Some(offset) = relative_month(input) {
         let current = in_range(today.with_day(1))?;
@@ -310,7 +334,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
             1 => current.checked_add_months(Months::new(1)),
             _ => Some(current),
         };
-        return month_range(in_range(start)?);
+        return month_range(in_range(start)?, 1);
     }
     let weekday = weekday_query(input);
     let week_number = week_number_query(input);
@@ -376,6 +400,37 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checks_calendar_quarters_across_leap_years_and_year_boundaries() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            ("2024-Q1", "2024-01-01 至 2024-03-31\n91 天 · 65 工作日"),
+            (
+                "２０２６－ｑ４",
+                "2026-10-01 至 2026-12-31\n92 天 · 66 工作日",
+            ),
+        ] {
+            assert!(looks_like_date_query(query));
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(calculate_date("2026-Q", today), Err(DateError::Incomplete));
+        assert_eq!(
+            calculate_date("2026-q5", today),
+            Err(DateError::InvalidQuarter)
+        );
+        assert_eq!(
+            calculate_date("2026-Q02", today),
+            Err(DateError::InvalidQuarter)
+        );
+        assert!(calculate_date("9999-Q4", today)
+            .unwrap()
+            .starts_with("9999-10-01 至 9999-12-31"));
+    }
 
     #[test]
     fn displays_month_ranges_with_inclusive_weekday_counts() {
