@@ -1197,6 +1197,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "依次提取全文中的正则匹配",
+        query: r#"文本: 正则提取全部 "[0-9]+" A01 B02 C03 D04 E05 F06 G07 H08 I09"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用正则表达式替换文本",
         query: r#"文本: 正则替换 "([0-9]{4})/([0-9]{2})/([0-9]{2})" "$1-$2-$3" 2026/11/21"#,
     },

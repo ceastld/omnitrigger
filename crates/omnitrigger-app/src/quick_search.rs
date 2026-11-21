@@ -125,6 +125,7 @@ const CONVERSION_PAGE_SIZE: usize = 4;
 const EXAMPLE_ROW_HEIGHT: f32 = 30.;
 const EXAMPLE_PAGE_SIZE: usize = 8;
 const MAX_VALUE_LINES: usize = 6;
+const EXPANDED_VALUE_LINES: usize = 12;
 const VALUE_LINE_HEIGHT: f32 = 18.;
 
 const PAGES: [(Page, &str); 9] = [
@@ -314,9 +315,9 @@ fn is_application_name_query(query: &str) -> bool {
         && query.chars().any(char::is_alphabetic)
 }
 
-fn value_extra_height(value: &str) -> f32 {
+fn value_extra_height(value: &str, line_limit: usize) -> f32 {
     value_preview::lines(value)
-        .take(MAX_VALUE_LINES)
+        .take(line_limit)
         .count()
         .saturating_sub(2) as f32
         * VALUE_LINE_HEIGHT
@@ -841,18 +842,22 @@ impl Results {
         }
     }
 
-    fn height(&self) -> f32 {
+    fn value_preview_expandable(&self) -> bool {
+        matches!(
+            self,
+            Self::Value(Ok(value)) if value_preview::lines(&value.text).nth(MAX_VALUE_LINES).is_some()
+        )
+    }
+
+    fn height(&self, value_line_limit: usize) -> f32 {
         match self {
             Self::Destinations(items) if items.len() > 1 => {
                 132. + items.len().min(DESTINATION_PAGE_SIZE) as f32 * PAGE_ROW_HEIGHT
             }
             Self::Value(Ok(value)) => {
-                let hint_height = if value.continuation_hint().is_some() {
-                    24.
-                } else {
-                    0.
-                };
-                158. + value_extra_height(&value.text) + hint_height
+                let hints = usize::from(value.continuation_hint().is_some())
+                    + usize::from(self.value_preview_expandable());
+                158. + value_extra_height(&value.text, value_line_limit) + hints as f32 * 24.
             }
             Self::Help(items) if !items.is_empty() => {
                 132. + items.len().min(EXAMPLE_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
@@ -904,6 +909,7 @@ pub(super) struct QuickSearch {
     index: SearchIndex,
     was_active: bool,
     results: Results,
+    expanded_value: bool,
     selected: usize,
     requested_applications: bool,
     input_before_help: Option<String>,
@@ -920,7 +926,11 @@ impl QuickSearch {
         cx: &mut App,
     ) -> Result<WindowHandle<Self>, String> {
         let results = index.results("");
-        let bounds = Bounds::centered(display, size(px(WIDTH), px(results.height())), cx);
+        let bounds = Bounds::centered(
+            display,
+            size(px(WIDTH), px(results.height(MAX_VALUE_LINES))),
+            cx,
+        );
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -990,6 +1000,7 @@ impl QuickSearch {
             index,
             was_active: window.is_window_active(),
             results,
+            expanded_value: false,
             selected: 0,
             requested_applications: false,
             input_before_help: None,
@@ -1003,17 +1014,39 @@ impl QuickSearch {
         window.focus(&self.input.focus_handle(cx));
     }
 
+    fn value_line_limit(&self) -> usize {
+        if self.expanded_value {
+            EXPANDED_VALUE_LINES
+        } else {
+            MAX_VALUE_LINES
+        }
+    }
+
+    fn toggle_value_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.results.value_preview_expandable() {
+            return;
+        }
+        self.expanded_value = !self.expanded_value;
+        window.resize(size(
+            px(WIDTH),
+            px(self.results.height(self.value_line_limit())),
+        ));
+        cx.notify();
+    }
+
     fn refresh_results(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         if !query.trim_start().starts_with(['?', '？']) {
             self.input_before_help = None;
         }
         let next = self.index.results(query);
         if self.results != next {
-            let height_changed = self.results.height() != next.height();
+            let previous_height = self.results.height(self.value_line_limit());
+            let next_height = next.height(MAX_VALUE_LINES);
             self.results = next;
+            self.expanded_value = false;
             self.selected = 0;
-            if height_changed {
-                window.resize(size(px(WIDTH), px(self.results.height())));
+            if previous_height != next_height {
+                window.resize(size(px(WIDTH), px(next_height)));
             }
         }
         let query = query.trim();
@@ -1157,7 +1190,8 @@ impl QuickSearch {
                         let _ = this.update(cx, |this, cx| {
                             this.results = Results::OpenWindowsUnavailable(error);
                             this.selected = 0;
-                            window.resize(size(px(WIDTH), px(this.results.height())));
+                            window
+                                .resize(size(px(WIDTH), px(this.results.height(MAX_VALUE_LINES))));
                             cx.notify();
                         });
                     }
@@ -1282,6 +1316,11 @@ impl QuickSearch {
                         self.input_before_help = Some(query);
                         self.fill_query("?".to_owned(), window, cx);
                     }
+                }
+            }
+            "f2" if self.results.value_preview_expandable() => {
+                if !event.is_held {
+                    self.toggle_value_preview(window, cx);
                 }
             }
             "enter" => {
@@ -1539,6 +1578,7 @@ impl QuickSearch {
         match &self.results {
             Results::Value(Ok(output)) => {
                 let result = &output.text;
+                let line_limit = self.value_line_limit();
                 let swatches: &[u32] = match &output.kind {
                     ValueKind::Color(color) => std::slice::from_ref(color),
                     ValueKind::ColorContrast(colors) => colors,
@@ -1564,7 +1604,7 @@ impl QuickSearch {
                         > large_text_columns;
                 let value = if compact {
                     let mut preview = value_preview::lines(result);
-                    let lines: Vec<_> = preview.by_ref().take(MAX_VALUE_LINES).collect();
+                    let lines: Vec<_> = preview.by_ref().take(line_limit).collect();
                     let clipped = preview.next().is_some();
                     value
                         .flex()
@@ -1573,7 +1613,7 @@ impl QuickSearch {
                         .line_height(px(VALUE_LINE_HEIGHT))
                         .children(lines.into_iter().enumerate().map(|(index, text)| {
                             let prefix = if index == 0 { "= " } else { "  " };
-                            let (text, suffix) = if clipped && index + 1 == MAX_VALUE_LINES {
+                            let (text, suffix) = if clipped && index + 1 == line_limit {
                                 let columns = text
                                     .graphemes(true)
                                     .map(value_preview::column_width)
@@ -1601,7 +1641,7 @@ impl QuickSearch {
                         .child(format!("= {}", value_preview::display_tabs(result)))
                 };
                 let row = row
-                    .h(px(38. + value_extra_height(result)))
+                    .h(px(38. + value_extra_height(result, line_limit)))
                     .children(swatches.iter().map(|&color| {
                         div()
                             .size(px(26.))
@@ -1617,9 +1657,11 @@ impl QuickSearch {
                             .flex_none()
                             .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
                     );
-                div().flex().flex_col().child(row).when_some(
-                    output.continuation_hint(),
-                    |result, hint| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(row)
+                    .when_some(output.continuation_hint(), |result, hint| {
                         result.child(
                             Self::selection_hint(hint)
                                 .id("continue-value")
@@ -1629,8 +1671,23 @@ impl QuickSearch {
                                     this.continue_value(window, cx);
                                 })),
                         )
-                    },
-                )
+                    })
+                    .when(self.results.value_preview_expandable(), |result| {
+                        let hint = if self.expanded_value {
+                            "F2 收起预览"
+                        } else {
+                            "F2 展开预览"
+                        };
+                        result.child(
+                            Self::selection_hint(hint)
+                                .id("toggle-value-preview")
+                                .cursor_pointer()
+                                .hover(|style| style.text_color(rgb(theme::ACCENT)))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_value_preview(window, cx);
+                                })),
+                        )
+                    })
             }
             Results::Value(Err(error)) => row
                 .text_color(rgb(if error.is_incomplete() {
@@ -1940,7 +1997,10 @@ mod tests {
     fn url_decoding_previews_each_line_and_preserves_the_copy_value() {
         let query = "URL: 解码 %E5%8C%97%E4%BA%AC%0D%0A%E4%B8%8A%E6%B5%B7%0A%E5%B9%BF%E5%B7%9E%0A%E6%B7%B1%E5%9C%B3";
         let results = for_query(query, &[]);
-        assert_eq!(results.height(), 158. + 2. * VALUE_LINE_HEIGHT);
+        assert_eq!(
+            results.height(MAX_VALUE_LINES),
+            158. + 2. * VALUE_LINE_HEIGHT
+        );
         assert!(matches!(
             results,
             Results::Value(Ok(output)) if output.text == "北京\r\n上海\n广州\n深圳"
@@ -1996,10 +2056,29 @@ mod tests {
     }
 
     #[test]
+    fn expands_long_value_previews_without_changing_the_copied_text() {
+        let results = for_query(r#"文本: 拆分成行 "," 一,二,三,四,五,六,七,八,九"#, &[]);
+        assert!(results.value_preview_expandable());
+        assert_eq!(
+            results.height(MAX_VALUE_LINES),
+            158. + 4. * VALUE_LINE_HEIGHT + 24.
+        );
+        assert_eq!(
+            results.height(EXPANDED_VALUE_LINES),
+            158. + 7. * VALUE_LINE_HEIGHT + 24.
+        );
+        assert!(matches!(
+            results,
+            Results::Value(Ok(output)) if output.text == "一\n二\n三\n四\n五\n六\n七\n八\n九"
+        ));
+        assert!(!for_query("2**10", &[]).value_preview_expandable());
+    }
+
+    #[test]
     fn conversion_suggestions_support_symbol_prefixes_and_later_pages() {
         let results = for_query("10 km to", &[]);
         assert_eq!(
-            results.height(),
+            results.height(MAX_VALUE_LINES),
             132. + CONVERSION_PAGE_SIZE as f32 * EXAMPLE_ROW_HEIGHT
         );
         assert!(matches!(
@@ -2259,7 +2338,7 @@ mod tests {
         for query in ["?", " ？ "] {
             let results = for_query(query, &[]);
             assert_eq!(
-                results.height(),
+                results.height(MAX_VALUE_LINES),
                 132. + EXAMPLE_PAGE_SIZE as f32 * EXAMPLE_ROW_HEIGHT
             );
             assert!(matches!(results, Results::Help(items) if items.len() == EXAMPLES.len()));
@@ -2672,7 +2751,7 @@ mod tests {
         let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();
         let results = for_query("trigger:", &triggers);
         assert_eq!(
-            results.height(),
+            results.height(MAX_VALUE_LINES),
             132. + DESTINATION_PAGE_SIZE as f32 * PAGE_ROW_HEIGHT
         );
         let Results::Destinations(items) = results else {

@@ -124,6 +124,15 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
                 .collect::<Vec<_>>()
                 .join("\n"));
         }
+        "正则提取全部" | "regex-extract-all" => {
+            let (pattern, text) = regex_text_argument(text)?;
+            return Ok(pattern
+                .find_iter(text)
+                .filter(|matched| !matched.is_empty())
+                .map(|matched| matched.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"));
+        }
         "json还原" | "json-unquote" => return decode_json_string(text),
         _ => {}
     }
@@ -787,6 +796,21 @@ mod tests {
             transform_text(r#"正则计数 "[0-9]+" 没有数字"#).as_deref(),
             Ok("0 处匹配")
         );
+    }
+
+    #[test]
+    fn extracts_all_nonempty_regex_matches_across_the_input() {
+        for (query, expected) in [
+            (
+                "正则提取全部 “\\d+” 文件 42 大小 12\r\n无编号\r\n文件 007",
+                "42\n12\n007",
+            ),
+            (r#"regex-extract-all "0*" A00B"#, "00"),
+            ("regex-extract-all \"(?s)甲.*?乙\" A甲\n乙B", "甲\n乙"),
+            (r#"正则提取全部 "[0-9]+" 没有数字"#, ""),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
     }
 
     #[test]
