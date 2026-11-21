@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::HashMap, fmt};
 
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;
@@ -15,6 +15,7 @@ pub(super) enum JsonError {
     ExpectedObject,
     ExpectedCollection,
     ExpectedArray,
+    ExpectedObjectItem,
     InvalidLine,
     MissingValue,
     DuplicateKey,
@@ -24,15 +25,14 @@ impl JsonError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入操作和 JSON 文本",
-            Self::UnknownOperation => {
-                "请选择格式化、压缩、取值、取列、键名、长度、展开数组或合并行"
-            }
+            Self::UnknownOperation => "输入 ? JSON 查看可用操作",
             Self::Invalid => "JSON 语法无效",
             Self::LayoutTooLarge => "JSON 格式化结果超过 1 MiB",
             Self::InvalidPointer => "JSON 路径无效，示例 /商品/0/价格",
             Self::ExpectedObject => "请输入 JSON 对象以查看顶层键名",
             Self::ExpectedCollection => "请输入 JSON 数组或对象以统计顶层条目数",
             Self::ExpectedArray => "请输入 JSON 数组",
+            Self::ExpectedObjectItem => "数组中的每一项都应是 JSON 对象",
             Self::InvalidLine => "每个非空行需要一个完整的 JSON 值",
             Self::MissingValue => "JSON 路径没有对应的值",
             Self::DuplicateKey => "JSON 路径遇到了重复的键",
@@ -54,6 +54,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "长度" | "length" => return json_length(source),
         "展开数组" | "to-jsonl" => return json_array_to_lines(source),
         "合并行" | "from-jsonl" => return json_lines_to_array(source),
+        "合并对象" | "merge-objects" => return merge_json_objects(source),
         _ => return Err(JsonError::UnknownOperation),
     };
     if source.is_empty() {
@@ -172,6 +173,38 @@ fn json_lines_to_array(source: &str) -> Result<String, JsonError> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(format!("[{}]", values.join(",")))
+}
+
+fn merge_json_objects(source: &str) -> Result<String, JsonError> {
+    let mut members = HashMap::new();
+    for object in read_json_array(source)? {
+        let raw = object.get();
+        if !raw.starts_with('{') {
+            return Err(JsonError::ExpectedObjectItem);
+        }
+        let mut parser = serde_json::Deserializer::from_str(raw);
+        let entries = serde::Deserializer::deserialize_map(&mut parser, ObjectEntries)
+            .map_err(json_parse_error)?;
+        parser.end().map_err(json_parse_error)?;
+        for (key, value) in entries {
+            let next_position = members.len();
+            members
+                .entry(key)
+                .and_modify(|(_, previous)| *previous = value)
+                .or_insert((next_position, value));
+        }
+    }
+    let mut ordered: Vec<_> = members.into_iter().collect();
+    ordered.sort_unstable_by_key(|(_, (position, _))| *position);
+    let entries = ordered
+        .into_iter()
+        .map(|(key, (_, value))| {
+            let key = serde_json::to_string(&key).expect("JSON 键名可以序列化");
+            let value = layout_json(value.get(), false)?;
+            Ok(format!("{key}:{value}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!("{{{}}}", entries.join(",")))
 }
 
 fn pointer_and_source(query: &str) -> Result<(String, &str), JsonError> {
@@ -325,9 +358,50 @@ impl<'de> Visitor<'de> for ObjectMember<'_> {
     }
 }
 
+struct ObjectEntries;
+
+impl<'de> Visitor<'de> for ObjectEntries {
+    type Value = Vec<(String, &'de RawValue)>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON object")
+    }
+
+    fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+        let mut entries = Vec::new();
+        while let Some(entry) = map.next_entry()? {
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merges_object_arrays_in_first_key_order_with_the_last_raw_value() {
+        let input = r#"合并对象 [{"z":9007199254740993,"a":[ 1 ]},{"a":1e3,"b":"\u0058","内层":{"x":1}},{"内层":{ "y":2 }}]"#;
+        assert_eq!(
+            transform_json(input).as_deref(),
+            Ok(r#"{"z":9007199254740993,"a":1e3,"b":"\u0058","内层":{"y":2}}"#),
+        );
+        assert_eq!(
+            transform_json(r#"merge-objects [{"\u0061":1,"a":2},{"a":3}]"#).as_deref(),
+            Ok(r#"{"a":3}"#),
+        );
+        assert_eq!(transform_json("合并对象 []").as_deref(), Ok("{}"));
+        assert_eq!(
+            transform_json(r#"合并对象 [{"x":1},2]"#),
+            Err(JsonError::ExpectedObjectItem),
+        );
+        assert_eq!(
+            transform_json(r#"合并对象 {"x":1}"#),
+            Err(JsonError::ExpectedArray),
+        );
+        assert_eq!(transform_json("合并对象 ["), Err(JsonError::Incomplete));
+    }
 
     #[test]
     fn converts_json_lines_without_changing_values_or_splitting_strings() {

@@ -217,9 +217,7 @@ fn convert_timestamp_with_local(
     let time = if let Some((clock, name)) = named_source {
         parse_named_source(clock.trim_end(), name)?
     } else {
-        DateTime::parse_from_rfc3339(input)
-            .map_err(|_| TimestampError::Invalid)?
-            .with_timezone(&Utc)
+        parse_offset_time(input)?
     };
     ensure_four_digit_year(time.year())?;
     let fraction = time.timestamp_subsec_nanos();
@@ -281,6 +279,32 @@ fn parse_named_source(clock: &str, name: &str) -> Result<DateTime<Utc>, Timestam
         .ok_or(TimestampError::OutOfRange)
 }
 
+fn parse_offset_time(input: &str) -> Result<DateTime<Utc>, TimestampError> {
+    if let Ok(value) = DateTime::parse_from_rfc3339(input) {
+        return Ok(value.with_timezone(&Utc));
+    }
+    let (clock, offset) = input
+        .len()
+        .checked_sub(9)
+        .and_then(|index| input.split_at_checked(index))
+        .filter(|(_, offset)| offset.starts_with(['+', '-']))
+        .ok_or(TimestampError::Invalid)?;
+    let DisplayZone::Offset(offset) =
+        parse_display_zone(offset).map_err(|_| TimestampError::Invalid)?
+    else {
+        return Err(TimestampError::Invalid);
+    };
+    // 仍用 RFC 3339 解析日期和钟表时间，秒级偏移单独应用。
+    let clock =
+        DateTime::parse_from_rfc3339(&format!("{clock}Z")).map_err(|_| TimestampError::Invalid)?;
+    clock
+        .naive_utc()
+        .and_local_timezone(offset)
+        .single()
+        .map(|date| date.with_timezone(&Utc))
+        .ok_or(TimestampError::OutOfRange)
+}
+
 fn parse_display_zone(input: &str) -> Result<DisplayZone, TimestampError> {
     let original = input.trim();
     let input = original.to_ascii_lowercase();
@@ -303,10 +327,11 @@ fn parse_display_zone(input: &str) -> Result<DisplayZone, TimestampError> {
     if !magnitude.is_ascii() {
         return Err(TimestampError::InvalidOffset);
     }
-    let (hours, minutes) = match magnitude.as_bytes() {
-        [_] | [_, _] => (magnitude, "00"),
-        [_, _, _, _] => magnitude.split_at(2),
-        [_, _, b':', _, _] => (&magnitude[..2], &magnitude[3..]),
+    let (hours, minutes, seconds) = match magnitude.as_bytes() {
+        [_] | [_, _] => (magnitude, "00", "00"),
+        [_, _, _, _] => (&magnitude[..2], &magnitude[2..], "00"),
+        [_, _, b':', _, _] => (&magnitude[..2], &magnitude[3..], "00"),
+        [_, _, b':', _, _, b':', _, _] => (&magnitude[..2], &magnitude[3..5], &magnitude[6..]),
         _ => return Err(TimestampError::InvalidOffset),
     };
     let component = |digits: &str| {
@@ -320,10 +345,11 @@ fn parse_display_zone(input: &str) -> Result<DisplayZone, TimestampError> {
     };
     let hours = component(hours)?;
     let minutes = component(minutes)?;
-    if minutes >= 60 {
+    let seconds = component(seconds)?;
+    if minutes >= 60 || seconds >= 60 {
         return Err(TimestampError::InvalidOffset);
     }
-    FixedOffset::east_opt(sign * (hours * 3_600 + minutes * 60))
+    FixedOffset::east_opt(sign * (hours * 3_600 + minutes * 60 + seconds))
         .map(DisplayZone::Offset)
         .ok_or(TimestampError::InvalidOffset)
 }
@@ -436,6 +462,36 @@ mod tests {
         ] {
             assert_eq!(convert_timestamp(query, now), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn parses_and_displays_offsets_with_seconds_without_losing_the_instant() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for (query, expected) in [
+            ("0 to +00:09:21", "1970-01-01T00:09:21+00:09:21"),
+            ("0 to -00:00:01", "1969-12-31T23:59:59-00:00:01"),
+            (
+                "1900-01-01T00:09:21.123+00:09:21 to UTC",
+                "1900-01-01T00:00:00.123Z",
+            ),
+            ("1969-12-31T23:59:59.999999999+00:00:00", "-1 ns"),
+        ] {
+            assert_eq!(
+                convert_timestamp(query, now).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in ["0 to +00:00:60", "0 to +00:60:00", "0 to -24:00:00"] {
+            assert_eq!(
+                convert_timestamp(query, now),
+                Err(TimestampError::InvalidOffset)
+            );
+        }
+        assert_eq!(
+            convert_timestamp("1900-01-01T00:00:00+00:09:60", now),
+            Err(TimestampError::Invalid),
+        );
     }
 
     #[test]

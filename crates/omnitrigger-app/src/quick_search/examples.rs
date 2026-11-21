@@ -261,6 +261,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "指定秒级时区偏移",
+        query: "时间戳: 0 to +00:09:21",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "将带偏移量的时间换算为 UTC",
         query: "时间戳: 1970-01-01T08:00:00+08:00 to UTC",
     },
@@ -1003,6 +1008,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "把 JSONL 合并成数组",
         query: "JSON: 合并行 {\"城市\":\"北京\"}\n{\"城市\":\"上海\"}",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "合并数组里的 JSON 对象",
+        query: r#"JSON: 合并对象 [{"名称":"初稿","版本":1},{"版本":2}]"#,
     },
     Example {
         icon: Icon::Browser,
