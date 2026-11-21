@@ -10,7 +10,7 @@ use base64::{
     },
     Engine,
 };
-use regex::RegexBuilder;
+use regex::{Regex, RegexBuilder};
 use sha2::{Digest, Sha256, Sha512};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -98,6 +98,14 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "排除行" | "exclude-lines" => return filter_lines(text, false),
         "正则保留行" | "keep-regex-lines" => return filter_regex_lines(text, true),
         "正则排除行" | "exclude-regex-lines" => return filter_regex_lines(text, false),
+        "正则提取" | "regex-extract" => {
+            let (pattern, text) = regex_text_argument(text)?;
+            return Ok(text
+                .lines()
+                .filter_map(|line| pattern.find(line).map(|matched| matched.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n"));
+        }
         "json还原" | "json-unquote" => return decode_json_string(text),
         _ => {}
     }
@@ -406,6 +414,13 @@ fn filter_lines(input: &str, keep_matches: bool) -> Result<String, TextError> {
 }
 
 fn filter_regex_lines(input: &str, keep_matches: bool) -> Result<String, TextError> {
+    let (pattern, text) = regex_text_argument(input)?;
+    Ok(select_lines(text, |line| {
+        pattern.is_match(line) == keep_matches
+    }))
+}
+
+fn regex_text_argument(input: &str) -> Result<(Regex, &str), TextError> {
     let (pattern, text) = quoted_text_argument(input)?;
     if pattern.is_empty() {
         return Err(TextError::EmptySearchText);
@@ -415,9 +430,7 @@ fn filter_regex_lines(input: &str, keep_matches: bool) -> Result<String, TextErr
         .dfa_size_limit(256 * 1024)
         .build()
         .map_err(|_| TextError::InvalidRegex)?;
-    Ok(select_lines(text, |line| {
-        pattern.is_match(line) == keep_matches
-    }))
+    Ok((pattern, text))
 }
 
 fn select_lines(text: &str, matches: impl Fn(&str) -> bool) -> String {
@@ -452,6 +465,22 @@ fn replace_text(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extracts_the_first_regex_match_from_each_line_in_order() {
+        assert_eq!(
+            transform_text("正则提取 “\\d+” 文件 42 大小 12\r\n无编号\r\n文件 007").as_deref(),
+            Ok("42\n007")
+        );
+        assert_eq!(
+            transform_text("regex-extract \"[A-Z]+\" aABCdDEF\n2\nDEF").as_deref(),
+            Ok("ABC\nDEF")
+        );
+        assert_eq!(
+            transform_text("正则提取 \"[\" 测试"),
+            Err(TextError::InvalidRegex)
+        );
+    }
 
     #[test]
     fn trims_each_line_and_keeps_internal_spaces_and_blank_rows() {

@@ -742,6 +742,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按行提取正则匹配",
+        query: "文本: 正则提取 \"[0-9]+\" 文件 42 大小 12\n无编号\n文件 007",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算文本 SHA-256",
         query: "文本: SHA-256 北京",
     },
