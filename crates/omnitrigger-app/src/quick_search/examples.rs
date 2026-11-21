@@ -421,6 +421,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "直接按度数求正弦",
+        query: "sind(30)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "取整（中点取偶）",
         query: "round(2.5)",
     },

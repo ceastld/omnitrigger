@@ -533,6 +533,30 @@ mod tests {
     }
 
     #[test]
+    fn evaluates_degree_trigonometry_at_regular_angles_and_axes() {
+        for (query, expected) in [
+            ("sind(30)", "0.5"),
+            ("cosd(60)", "0.5"),
+            ("tand(45)", "1"),
+            ("sind(-270)", "1"),
+            ("sind(180)", "0"),
+            ("sind(360000000090)", "1"),
+            ("cosd(270)", "0"),
+            ("cosd(-180)", "-1"),
+            ("tand(540)", "0"),
+        ] {
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["tand(90)", "tand(270)", "tand(-90)"] {
+            assert_eq!(
+                calculate(query),
+                Err(CalculationError::FunctionDomain),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn converts_a_standalone_percentage_literal_without_changing_modulo() {
         for (query, expected) in [
             ("15%", "0.15"),

@@ -126,6 +126,9 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         "sin" => f64::sin,
         "cos" => f64::cos,
         "tan" => f64::tan,
+        "sind" => sin_degrees,
+        "cosd" => cos_degrees,
+        "tand" => tan_degrees,
         "asin" => f64::asin,
         "acos" => f64::acos,
         "atan" => f64::atan,
@@ -141,6 +144,31 @@ pub(super) fn named_value(name: &str) -> Option<NamedValue> {
         _ => return None,
     };
     Some(NamedValue::Function(function))
+}
+
+fn sin_degrees(angle: f64) -> f64 {
+    match angle % 360. {
+        0. | 180. | -180. => 0.,
+        90. | -270. => 1.,
+        -90. | 270. => -1.,
+        reduced => reduced.to_radians().sin(),
+    }
+}
+
+fn cos_degrees(angle: f64) -> f64 {
+    match angle % 360. {
+        0. => 1.,
+        180. | -180. => -1.,
+        90. | -90. | 270. | -270. => 0.,
+        reduced => reduced.to_radians().cos(),
+    }
+}
+
+fn tan_degrees(angle: f64) -> f64 {
+    match angle % 180. {
+        90. | -90. => f64::NAN,
+        reduced => reduced.to_radians().tan(),
+    }
 }
 
 fn nth_root(values: &[f64]) -> f64 {
