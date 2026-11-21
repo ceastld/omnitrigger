@@ -95,6 +95,21 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "avg(12,18,30)",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "计算反三角函数",
+        query: "degrees(asin(0.5))",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "取整（中点取偶）",
+        query: "round(2.5)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "向零取整",
+        query: "trunc(-1.8)",
+    },
+    Example {
         icon: Icon::Layers,
         title: "换算数据速率",
         query: "8Mbps to MB/s",

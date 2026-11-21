@@ -342,9 +342,16 @@ mod tests {
             ("sqrt(2**6)", "8"),
             ("SQRT（９） + abs(-5)", "8"),
             ("sin(radians(90))", "1"),
+            ("degrees(asin(0.5))", "30"),
+            ("degrees(acos(0))", "90"),
+            ("degrees(atan(1))", "45"),
             ("degrees(π/2)", "90"),
             ("log(e) + log2(8) + log10(100)", "6"),
             ("floor(-1.2) + ceil(1.2)", "0"),
+            ("round(2.5)", "2"),
+            ("round(3.5)", "4"),
+            ("round(-2.5)", "-2"),
+            ("trunc(-1.8)", "-1"),
             ("-sqrt(4)^2", "-4"),
         ] {
             assert!(looks_like_calculation(query), "{query}");
@@ -354,6 +361,7 @@ mod tests {
         assert!(!looks_like_calculation("pi 工具"));
         assert_eq!(calculate("sqrt("), Err(CalculationError::Incomplete));
         assert_eq!(calculate("sqrt(-1)"), Err(CalculationError::FunctionDomain));
+        assert_eq!(calculate("asin(2)"), Err(CalculationError::FunctionDomain));
         assert_eq!(calculate("sqrt(1,2)"), Err(CalculationError::Invalid));
         assert_eq!(calculate("exp(10000)"), Err(CalculationError::OutOfRange));
     }
