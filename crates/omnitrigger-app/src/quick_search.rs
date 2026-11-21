@@ -19,6 +19,7 @@ mod text_tools;
 mod timestamp;
 mod triggers;
 mod url_encoding;
+mod value_preview;
 mod wheel_slots;
 mod wheels;
 
@@ -55,6 +56,7 @@ use settings_sections::matching_settings;
 use text_tools::{count_text, transform_text, TextError};
 use timestamp::{convert_timestamp, TimestampError};
 use triggers::{matching_triggers, SearchTrigger};
+use unicode_segmentation::UnicodeSegmentation;
 use url_encoding::{convert_url_component, UrlEncodingError};
 use wheel_slots::{index_slots, matching_slots, SearchWheelSlot};
 use wheels::{matching_wheels, SearchWheel};
@@ -64,7 +66,6 @@ const PAGE_ROW_HEIGHT: f32 = 38.;
 const DESTINATION_PAGE_SIZE: usize = 4;
 const EXAMPLE_ROW_HEIGHT: f32 = 30.;
 const EXAMPLE_PAGE_SIZE: usize = 8;
-const VALUE_COLUMNS: usize = 40;
 const MAX_VALUE_LINES: usize = 6;
 const VALUE_LINE_HEIGHT: f32 = 18.;
 
@@ -218,16 +219,11 @@ fn title_rank(title: &str, query: &str) -> u8 {
 }
 
 fn value_extra_height(value: &str) -> f32 {
-    if value.is_ascii() {
-        value
-            .len()
-            .div_ceil(VALUE_COLUMNS)
-            .min(MAX_VALUE_LINES)
-            .saturating_sub(2) as f32
-            * VALUE_LINE_HEIGHT
-    } else {
-        0.
-    }
+    value_preview::lines(value)
+        .take(MAX_VALUE_LINES)
+        .count()
+        .saturating_sub(2) as f32
+        * VALUE_LINE_HEIGHT
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -964,31 +960,42 @@ impl QuickSearch {
                     1 => 20,
                     _ => 17,
                 };
-                let value = if result.is_ascii() && result.len() > large_text_columns {
-                    let clipped = result.len() > VALUE_COLUMNS * MAX_VALUE_LINES;
+                let compact = result.contains('\n')
+                    || result
+                        .graphemes(true)
+                        .take(large_text_columns + 1)
+                        .map(value_preview::column_width)
+                        .sum::<usize>()
+                        > large_text_columns;
+                let value = if compact {
+                    let mut preview = value_preview::lines(result);
+                    let lines: Vec<_> = preview.by_ref().take(MAX_VALUE_LINES).collect();
+                    let clipped = preview.next().is_some();
                     value
                         .flex()
                         .flex_col()
                         .text_size(px(14.))
                         .line_height(px(VALUE_LINE_HEIGHT))
-                        .children(
-                            result
-                                .as_bytes()
-                                .chunks(VALUE_COLUMNS)
-                                .take(MAX_VALUE_LINES)
-                                .enumerate()
-                                .map(|(index, bytes)| {
-                                    let prefix = if index == 0 { "= " } else { "  " };
-                                    let text =
-                                        std::str::from_utf8(bytes).expect("结果已核对为 ASCII");
-                                    let line = if clipped && index + 1 == MAX_VALUE_LINES {
-                                        format!("{prefix}{}…", &text[..VALUE_COLUMNS - 1])
-                                    } else {
-                                        format!("{prefix}{text}")
-                                    };
-                                    div().child(line)
-                                }),
-                        )
+                        .children(lines.into_iter().enumerate().map(|(index, text)| {
+                            let prefix = if index == 0 { "= " } else { "  " };
+                            let line = if clipped && index + 1 == MAX_VALUE_LINES {
+                                let columns = text
+                                    .graphemes(true)
+                                    .map(value_preview::column_width)
+                                    .sum::<usize>();
+                                let end = if columns >= value_preview::COLUMNS {
+                                    text.grapheme_indices(true)
+                                        .next_back()
+                                        .map_or(0, |(index, _)| index)
+                                } else {
+                                    text.len()
+                                };
+                                format!("{prefix}{}…", &text[..end])
+                            } else {
+                                format!("{prefix}{text}")
+                            };
+                            div().truncate().child(line)
+                        }))
                 } else {
                     value
                         .truncate()
@@ -1269,6 +1276,17 @@ mod tests {
             &[],
             &RecentSearch::default(),
         )
+    }
+
+    #[test]
+    fn url_decoding_previews_each_line_and_preserves_the_copy_value() {
+        let query = "URL: 解码 %E5%8C%97%E4%BA%AC%0D%0A%E4%B8%8A%E6%B5%B7%0A%E5%B9%BF%E5%B7%9E%0A%E6%B7%B1%E5%9C%B3";
+        let results = for_query(query, &[]);
+        assert_eq!(results.height(), 158. + 2. * VALUE_LINE_HEIGHT);
+        assert!(matches!(
+            results,
+            Results::Value(Ok(output)) if output.text == "北京\r\n上海\n广州\n深圳"
+        ));
     }
 
     #[test]
