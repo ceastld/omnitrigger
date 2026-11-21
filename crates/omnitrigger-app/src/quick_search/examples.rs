@@ -1251,6 +1251,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按指定顺序选出 JSON 对象的字段",
+        query: r#"JSON: 选键 ["编号","状态"] [{"状态":true,"编号":"001","备注":"茶"},{"编号":"002"}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "从键名和下标生成 JSON 指针",
         query: r#"JSON: 生成指针 ["商品",0,"a/b"]"#,
     },

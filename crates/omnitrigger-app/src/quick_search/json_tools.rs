@@ -32,6 +32,8 @@ pub(super) enum JsonError {
     CsvRows,
     CsvDuplicateKey,
     CsvNullCharacter,
+    SelectionKeys,
+    SelectionConflict,
 }
 
 impl JsonError {
@@ -56,6 +58,8 @@ impl JsonError {
             Self::CsvRows => "输入等宽且有数据列的数组，或至少有一个键的对象列表",
             Self::CsvDuplicateKey => "同一对象的 CSV 列名需要唯一",
             Self::CsvNullCharacter => "CSV 单元格不能包含空字符 U+0000",
+            Self::SelectionKeys => "选键需要至少一个互不重复的键名",
+            Self::SelectionConflict => "待选键在同一对象中重复出现",
         }
     }
 }
@@ -80,6 +84,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "改键" | "rename-key" => return rename_json_key(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
         "转csv" | "to-csv" => return json_to_csv(source),
+        "选键" | "pick-keys" => return pick_json_keys(source),
         _ => return Err(JsonError::UnknownOperation),
     };
     if source.is_empty() {
@@ -306,6 +311,38 @@ fn json_to_csv(source: &str) -> Result<String, JsonError> {
         Some('{') => json_object_rows_to_csv(rows),
         _ => Err(JsonError::CsvRows),
     }
+}
+
+fn pick_json_keys(query: &str) -> Result<String, JsonError> {
+    let (names, source) = key_names_and_source(query)?;
+    let wanted: HashSet<_> = names.iter().map(String::as_str).collect();
+    if names.is_empty() || names.len() != wanted.len() {
+        return Err(JsonError::SelectionKeys);
+    }
+    let project = |raw: &str| {
+        let mut selected = HashMap::new();
+        for (key, value) in read_object_entries(raw)? {
+            if wanted.contains(key.as_str()) && selected.insert(key, value).is_some() {
+                return Err(JsonError::SelectionConflict);
+            }
+        }
+        write_object_entries(names.iter().filter_map(|key| selected.remove_entry(key)))
+    };
+    if !source.starts_with('[') {
+        return project(source);
+    }
+    let items = read_json_array(source)?
+        .into_iter()
+        .map(|item| {
+            let raw = item.get();
+            if raw.starts_with('{') {
+                project(raw)
+            } else {
+                Err(JsonError::ExpectedObjectItem)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!("[{}]", items.join(",")))
 }
 
 fn json_array_rows_to_csv(rows: Vec<&RawValue>) -> Result<String, JsonError> {
@@ -765,6 +802,32 @@ mod tests {
             Err(JsonError::LayoutTooLarge)
         );
         assert_eq!(transform_json(&format!("压缩 {nested}")).unwrap(), nested);
+    }
+
+    #[test]
+    fn projects_one_object_or_all_object_rows_in_requested_key_order() {
+        for (query, expected) in [
+            (
+                r#"选键 ["名","值"] {"值":2e2,"名":"\u4f60","调试":true}"#,
+                r#"{"名":"\u4f60","值":2e2}"#,
+            ),
+            (
+                r#"选键 ["编号","状态"] [{"状态":true,"编号":9007199254740993},{"编号":"002","备注":"茶"}]"#,
+                r#"[{"编号":9007199254740993,"状态":true},{"编号":"002"}]"#,
+            ),
+            (r#"选键 ["编号"] [{"名称":"茶","名称":"咖啡"}]"#, "[{}]"),
+            (r#"选键 ["空"] []"#, "[]"),
+        ] {
+            assert_eq!(transform_json(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            (r#"选键 ["a","a"] {}"#, JsonError::SelectionKeys),
+            (r#"选键 [] {}"#, JsonError::SelectionKeys),
+            (r#"选键 ["a"] {"a":1,"a":2}"#, JsonError::SelectionConflict),
+            (r#"选键 ["a"] [{},2]"#, JsonError::ExpectedObjectItem),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
     }
 
     #[test]
