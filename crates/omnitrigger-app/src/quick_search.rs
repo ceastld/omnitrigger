@@ -1,5 +1,6 @@
 mod calculator;
 mod conversion;
+mod scientific;
 mod triggers;
 
 use gpui::{
@@ -16,7 +17,7 @@ use crate::{
     theme::{self, button, icon, rgb, Tone},
     Page, Workspace,
 };
-use calculator::{calculate, CalculationError, QUERY_LIMIT};
+use calculator::{calculate, looks_like_calculation, CalculationError, QUERY_LIMIT};
 use conversion::{convert, ConversionError};
 use omnitrigger_windows::ShortcutTarget;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -88,13 +89,11 @@ impl ValueError {
 impl Results {
     fn for_query(query: &str, triggers: &[SearchTrigger]) -> Self {
         let query = query.trim();
-        if query.starts_with(|ch| {
-            matches!(ch, '0'..='9' | '０'..='９' | '=' | '＝' | '+' | '＋' | '-' | '－' | '−' | '.' | '．' | '(' | '（')
-        }) {
-            return Self::Value(match convert(query) {
-                Some(result) => result.map_err(ValueError::Conversion),
-                None => calculate(query).map_err(ValueError::Calculation),
-            });
+        if let Some(result) = convert(query) {
+            return Self::Value(result.map_err(ValueError::Conversion));
+        }
+        if looks_like_calculation(query) {
+            return Self::Value(calculate(query).map_err(ValueError::Calculation));
         }
 
         let query = query.to_lowercase();
@@ -234,7 +233,7 @@ impl QuickSearch {
             let mut input = MessageInput::new(cx)
                 .embedded()
                 .with_character_limit(QUERY_LIMIT + 1);
-            input.set_placeholder("搜索页面和触发器，或输入算式与单位换算");
+            input.set_placeholder("搜索页面或触发器，或输入 sqrt(2)、10 km to mi");
             input
         });
         let input_changes = cx.observe_in(&input, window, |this, input, window, cx| {

@@ -1,4 +1,4 @@
-use super::calculator::{format_result, normalize, QUERY_LIMIT};
+use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ConversionError {
@@ -93,22 +93,27 @@ pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     let input = input.trim();
     let (source, target) = ["换算成", "转换为", "换成", "转", "→", "->", " to ", " in "]
         .into_iter()
-        .find_map(|separator| input.rsplit_once(separator))?;
+        .find_map(|separator| input.rsplit_once(separator))
+        .or_else(|| input.strip_suffix(" to").map(|source| (source, "")))?;
+    let source = source.trim();
+    let (amount, unit) = source.rsplit_once(char::is_whitespace).unwrap_or_else(|| {
+        source.split_at(
+            source
+                .find(|ch: char| !matches!(ch, '0'..='9' | '+' | '-' | '.' | 'e'))
+                .unwrap_or(source.len()),
+        )
+    });
+    if !looks_like_calculation(amount) {
+        return None;
+    }
     if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Some(Err(ConversionError::TooLong));
     }
-    Some(convert_quantity(source.trim(), target))
+    Some(convert_quantity(amount, unit, target))
 }
 
-fn convert_quantity(source: &str, target: &str) -> Result<String, ConversionError> {
-    let (amount, name) = source.split_at(
-        source
-            .find(|ch: char| !matches!(ch, '0'..='9' | '+' | '-' | '.' | 'e'))
-            .unwrap_or(source.len()),
-    );
-    let amount = amount
-        .parse::<f64>()
-        .map_err(|_| ConversionError::InvalidAmount)?;
+fn convert_quantity(amount: &str, name: &str, target: &str) -> Result<String, ConversionError> {
+    let amount = evaluate(amount).map_err(|_| ConversionError::InvalidAmount)?;
     let source = Unit::parse(name)?;
     let target = Unit::parse(target)?;
     if source.dimension != target.dimension {
@@ -142,6 +147,8 @@ mod tests {
             ("-40摄氏度转华氏度", "-40 °F"),
             ("0 °C to K", "273.15 K"),
             ("2小时转分钟", "120 min"),
+            ("(2+3) km to m", "5000 m"),
+            ("sqrt(16) m to cm", "400 cm"),
         ] {
             assert_eq!(convert(query), Some(Ok(expected.into())), "{query}");
         }
@@ -153,6 +160,7 @@ mod tests {
             ("10 cm to kg", ConversionError::DifferentDimensions),
             ("2 不存在 to km", ConversionError::UnknownUnit),
             ("3 to km", ConversionError::Incomplete),
+            ("3 kg to", ConversionError::Incomplete),
             ("3e kg to g", ConversionError::InvalidAmount),
             ("1e308 km to mm", ConversionError::OutOfRange),
         ] {
@@ -160,5 +168,6 @@ mod tests {
         }
         assert_eq!(convert("2**10"), None);
         assert_eq!(convert("10 in"), None);
+        assert_eq!(convert("页面转设置"), None);
     }
 }

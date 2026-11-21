@@ -1,3 +1,5 @@
+use super::scientific::{named_value, split_name, NamedValue};
+
 pub(super) const QUERY_LIMIT: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5,6 +7,7 @@ pub(super) enum CalculationError {
     Incomplete,
     Invalid,
     DivisionByZero,
+    FunctionDomain,
     OutOfRange,
     TooLong,
 }
@@ -15,13 +18,35 @@ impl CalculationError {
             Self::Incomplete => "算式未完成",
             Self::Invalid => "无法识别算式",
             Self::DivisionByZero => "不能除以零",
+            Self::FunctionDomain => "参数超出函数定义域",
             Self::OutOfRange => "结果超出计算范围",
             Self::TooLong => "算式过长",
         }
     }
 }
 
+pub(super) fn looks_like_calculation(query: &str) -> bool {
+    let normalized = normalize(query);
+    let query = normalized.trim();
+    if query.starts_with(|ch| matches!(ch, '0'..='9' | '=' | '+' | '-' | '.' | '(')) {
+        return true;
+    }
+    let (name, tail) = split_name(query);
+    let tail = tail.trim_start();
+    match named_value(name) {
+        Some(NamedValue::Constant(_)) => {
+            tail.is_empty() || tail.starts_with(['+', '-', '*', '×', '/', '^'])
+        }
+        Some(NamedValue::Function(_)) => tail.is_empty() || tail.starts_with('('),
+        None => false,
+    }
+}
+
 pub(super) fn calculate(query: &str) -> Result<String, CalculationError> {
+    format_result(evaluate(query)?)
+}
+
+pub(super) fn evaluate(query: &str) -> Result<f64, CalculationError> {
     if query.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
         return Err(CalculationError::TooLong);
     }
@@ -33,7 +58,7 @@ pub(super) fn calculate(query: &str) -> Result<String, CalculationError> {
     if !parser.0.trim().is_empty() {
         return Err(CalculationError::Invalid);
     }
-    format_result(value)
+    Ok(value)
 }
 
 pub(super) fn normalize(query: &str) -> String {
@@ -85,17 +110,9 @@ impl Parser<'_> {
                 self.0 = &self.0[1..];
                 -self.expression(5)?
             }
-            Some('(') => {
-                self.0 = &self.0[1..];
-                let value = self.expression(0)?;
-                match self.peek() {
-                    Some(')') => self.0 = &self.0[1..],
-                    None => return Err(CalculationError::Incomplete),
-                    _ => return Err(CalculationError::Invalid),
-                }
-                value
-            }
+            Some('(') => self.parenthesized()?,
             Some('0'..='9' | '.') => self.number()?,
+            Some('a'..='z' | 'A'..='Z' | 'π' | 'Π') => self.named()?,
             Some(_) => return Err(CalculationError::Invalid),
             None => return Err(CalculationError::Incomplete),
         };
@@ -133,6 +150,38 @@ impl Parser<'_> {
     fn peek(&mut self) -> Option<char> {
         self.0 = self.0.trim_start();
         self.0.chars().next()
+    }
+
+    fn parenthesized(&mut self) -> Result<f64, CalculationError> {
+        match self.peek() {
+            Some('(') => self.0 = &self.0[1..],
+            None => return Err(CalculationError::Incomplete),
+            _ => return Err(CalculationError::Invalid),
+        }
+        let value = self.expression(0)?;
+        match self.peek() {
+            Some(')') => self.0 = &self.0[1..],
+            None => return Err(CalculationError::Incomplete),
+            _ => return Err(CalculationError::Invalid),
+        }
+        Ok(value)
+    }
+
+    fn named(&mut self) -> Result<f64, CalculationError> {
+        let (name, rest) = split_name(self.0);
+        self.0 = rest;
+        match named_value(name) {
+            Some(NamedValue::Constant(value)) => Ok(value),
+            Some(NamedValue::Function(function)) => {
+                let argument = self.parenthesized()?;
+                let value = function(argument);
+                if value.is_nan() {
+                    return Err(CalculationError::FunctionDomain);
+                }
+                finite(value)
+            }
+            None => Err(CalculationError::Invalid),
+        }
     }
 
     fn number(&mut self) -> Result<f64, CalculationError> {
@@ -202,6 +251,28 @@ mod tests {
         ] {
             assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn calculation_evaluates_constants_and_nested_functions() {
+        for (query, expected) in [
+            ("sqrt(2**6)", "8"),
+            ("SQRT（９） + abs(-5)", "8"),
+            ("sin(radians(90))", "1"),
+            ("degrees(π/2)", "90"),
+            ("log(e) + log2(8) + log10(100)", "6"),
+            ("floor(-1.2) + ceil(1.2)", "0"),
+            ("-sqrt(4)^2", "-4"),
+        ] {
+            assert!(looks_like_calculation(query), "{query}");
+            assert_eq!(calculate(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert!(!looks_like_calculation("extensions"));
+        assert!(!looks_like_calculation("pi 工具"));
+        assert_eq!(calculate("sqrt("), Err(CalculationError::Incomplete));
+        assert_eq!(calculate("sqrt(-1)"), Err(CalculationError::FunctionDomain));
+        assert_eq!(calculate("sqrt(1,2)"), Err(CalculationError::Invalid));
+        assert_eq!(calculate("exp(10000)"), Err(CalculationError::OutOfRange));
     }
 
     #[test]
