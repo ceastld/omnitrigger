@@ -503,6 +503,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "URL: 表单解码 %E5%8C%97%E4%BA%AC+A%2BB",
     },
     Example {
+        icon: Icon::Browser,
+        title: "拆解 URL 查询参数",
+        query: "URL: 参数 https://example.invalid/?tag=a+1&tag=b%2Bc",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "约分",
         query: "分数: 42/56",

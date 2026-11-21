@@ -18,16 +18,18 @@ pub(super) enum UrlEncodingError {
     InvalidEscape,
     InvalidUtf8,
     NullCharacter,
+    MissingParameters,
 }
 
 impl UrlEncodingError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入要编码或解码的文本，例如 URL: 编码 北京",
-            Self::InvalidOperation => "输入 编码、解码、表单编码 或 表单解码，再输入文本",
+            Self::InvalidOperation => "输入 ? URL 查看可用操作",
             Self::InvalidEscape => "每个 % 后需要两个十六进制数字",
             Self::InvalidUtf8 => "解码结果无法表示为 UTF-8 文本",
             Self::NullCharacter => "解码结果含空字符，无法完整复制",
+            Self::MissingParameters => "没有可解析的查询参数",
         }
     }
 }
@@ -47,6 +49,7 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
             .to_string()
             .replace("%20", "+")),
         "表单解码" | "form-decode" => decode_value(&value.replace('+', " ")),
+        "参数" | "查询参数" | "params" => decode_parameters(value),
         _ => Err(UrlEncodingError::InvalidOperation),
     }
 }
@@ -69,6 +72,39 @@ fn decode_value(value: &str) -> Result<String, UrlEncodingError> {
     Ok(decoded.into_owned())
 }
 
+fn query_text(value: &str) -> &str {
+    let is_url = value.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.starts_with(|ch: char| ch.is_ascii_alphabetic())
+            && scheme
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte))
+    });
+    if value.starts_with(['?', '/']) || is_url {
+        let before_fragment = value.split_once('#').map_or(value, |(prefix, _)| prefix);
+        before_fragment
+            .split_once('?')
+            .map_or("", |(_, query)| query)
+    } else {
+        value
+    }
+}
+
+fn decode_parameters(value: &str) -> Result<String, UrlEncodingError> {
+    let quote = |text: &str| {
+        let decoded = decode_value(&text.replace('+', " "))?;
+        Ok::<_, UrlEncodingError>(serde_json::to_string(&decoded).expect("字符串可序列化"))
+    };
+    let mut lines = Vec::new();
+    for parameter in query_text(value).split('&').filter(|part| !part.is_empty()) {
+        let (name, value) = parameter.split_once('=').unwrap_or((parameter, ""));
+        lines.push(format!("{} = {}", quote(name)?, quote(value)?));
+    }
+    if lines.is_empty() {
+        return Err(UrlEncodingError::MissingParameters);
+    }
+    Ok(lines.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,6 +120,38 @@ mod tests {
         ] {
             assert_eq!(convert_url_component(input).as_deref(), Ok(expected));
         }
+    }
+
+    #[test]
+    fn reads_form_query_pairs_in_order_and_retains_duplicates() {
+        let input = "参数 https://example.invalid/p?tag=a+1&tag=b%2Bc&empty=&q=a%3Db%23c#ignored";
+        assert_eq!(
+            convert_url_component(input).as_deref(),
+            Ok("\"tag\" = \"a 1\"\n\"tag\" = \"b+c\"\n\"empty\" = \"\"\n\"q\" = \"a=b#c\"")
+        );
+        for (input, expected) in [
+            ("params ?=value&flag", "\"\" = \"value\"\n\"flag\" = \"\""),
+            ("参数 q=a?b#c", "\"q\" = \"a?b#c\""),
+            ("参数 /p?line=x%0Ay", "\"line\" = \"x\\ny\""),
+            (
+                "参数 redirect=https://example.invalid/?x=y",
+                "\"redirect\" = \"https://example.invalid/?x=y\"",
+            ),
+        ] {
+            assert_eq!(
+                convert_url_component(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            convert_url_component("参数 https://example.invalid/#?a=b"),
+            Err(UrlEncodingError::MissingParameters)
+        );
+        assert_eq!(
+            convert_url_component("参数 ?bad=%2G"),
+            Err(UrlEncodingError::InvalidEscape)
+        );
     }
 
     #[test]
