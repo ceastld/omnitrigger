@@ -697,6 +697,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "保留符合正则表达式的行",
+        query: "文本: 正则保留行 \"^[0-9]+$\" 42\nA3\n007",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "排除符合正则表达式的行",
+        query: "文本: 正则排除行 \"^[0-9]+$\" 42\nA3\n007",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算文本 SHA-256",
         query: "文本: SHA-256 北京",
     },

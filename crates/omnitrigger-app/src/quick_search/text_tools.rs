@@ -10,6 +10,7 @@ use base64::{
     },
     Engine,
 };
+use regex::RegexBuilder;
 use sha2::{Digest, Sha256, Sha512};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -29,6 +30,7 @@ pub(super) enum TextError {
     InvalidTextArgument,
     EmptyDelimiter,
     EmptySearchText,
+    InvalidRegex,
     ResultTooLarge,
     NullCharacter,
     InvalidBase64,
@@ -51,6 +53,7 @@ impl TextError {
             Self::InvalidTextArgument => "第一个参数要加引号，并和原文用空格分开",
             Self::EmptyDelimiter => "拆分成行时分隔符不能为空",
             Self::EmptySearchText => "请输入要查找的文字",
+            Self::InvalidRegex => "请检查或缩短正则表达式",
             Self::ResultTooLarge => "文本结果超过 1 MiB",
             Self::NullCharacter => "结果含空字符，无法完整复制",
             Self::InvalidBase64 => "Base64 编码无效",
@@ -93,6 +96,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "拆分成行" | "split-lines" => return split_lines(text),
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
+        "正则保留行" | "keep-regex-lines" => return filter_regex_lines(text, true),
+        "正则排除行" | "exclude-regex-lines" => return filter_regex_lines(text, false),
         "json还原" | "json-unquote" => return decode_json_string(text),
         _ => {}
     }
@@ -392,11 +397,31 @@ fn filter_lines(input: &str, keep_matches: bool) -> Result<String, TextError> {
     if needle.is_empty() {
         return Err(TextError::EmptySearchText);
     }
-    Ok(text
-        .lines()
-        .filter(|line| line.contains(needle.as_str()) == keep_matches)
+    Ok(select_lines(text, |line| {
+        line.contains(needle.as_str()) == keep_matches
+    }))
+}
+
+fn filter_regex_lines(input: &str, keep_matches: bool) -> Result<String, TextError> {
+    let (pattern, text) = quoted_text_argument(input)?;
+    if pattern.is_empty() {
+        return Err(TextError::EmptySearchText);
+    }
+    let pattern = RegexBuilder::new(&pattern)
+        .size_limit(256 * 1024)
+        .dfa_size_limit(256 * 1024)
+        .build()
+        .map_err(|_| TextError::InvalidRegex)?;
+    Ok(select_lines(text, |line| {
+        pattern.is_match(line) == keep_matches
+    }))
+}
+
+fn select_lines(text: &str, matches: impl Fn(&str) -> bool) -> String {
+    text.lines()
+        .filter(|line| matches(line))
         .collect::<Vec<_>>()
-        .join("\n"))
+        .join("\n")
 }
 
 fn replace_text(input: &str) -> Result<String, TextError> {
@@ -424,6 +449,29 @@ fn replace_text(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filters_individual_lines_with_a_quoted_regular_expression() {
+        for (input, expected) in [
+            ("正则保留行 “^\\d+$” 42\r\nA3\r\n007", "42\n007"),
+            ("正则排除行 \"^[0-9]+$\" 42\nA3\n007\nA3", "A3\nA3"),
+            (
+                "keep-regex-lines \"^\\\\p{Han}+$\" 北京\nOslo\n上海",
+                "北京\n上海",
+            ),
+            ("exclude-regex-lines \"(?i)^ok$\" ok\n错误\nOK", "错误"),
+        ] {
+            assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");
+        }
+        for (input, error) in [
+            ("正则保留行 \"[\" A", TextError::InvalidRegex),
+            ("正则保留行 \"\" A", TextError::EmptySearchText),
+            ("正则排除行 “^\\d+", TextError::IncompleteTextArgument),
+            ("正则保留行 \"[0-9]{1000000}\" A1", TextError::InvalidRegex),
+        ] {
+            assert_eq!(transform_text(input), Err(error), "{input}");
+        }
+    }
 
     #[test]
     fn converts_ascii_width_including_space_and_preserves_other_characters() {
