@@ -96,6 +96,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按百分数增加",
+        query: "200 增加 15%",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按百分数减少",
+        query: "200 减少 15%",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算平均值",
         query: "avg(12,18,30)",
     },

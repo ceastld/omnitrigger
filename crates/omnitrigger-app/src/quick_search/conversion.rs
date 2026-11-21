@@ -316,6 +316,7 @@ mod tests {
             ("sqrt(16) m to cm", "400 cm"),
             ("avg(2, 6) h to min", "240 min"),
             ("15% of 200 km to m", "30000 m"),
+            ("100 增加 20% km to m", "120000 m"),
         ] {
             assert_eq!(convert(query), Some(Ok(expected.into())), "{query}");
         }

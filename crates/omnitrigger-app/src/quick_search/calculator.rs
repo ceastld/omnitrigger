@@ -31,7 +31,7 @@ pub(super) fn looks_like_calculation(query: &str) -> bool {
     let normalized = normalize(query);
     let query = normalized.trim();
     looks_like_expression(query)
-        || percentage_operands(query).is_some_and(|(base, rate)| {
+        || percentage_operands(query).is_some_and(|(_, base, rate)| {
             looks_like_expression(base) && (rate.is_empty() || looks_like_expression(rate))
         })
 }
@@ -66,9 +66,9 @@ pub(super) fn evaluate(query: &str) -> Result<f64, CalculationError> {
 }
 
 fn evaluate_expression(input: &str) -> Result<f64, CalculationError> {
-    if let Some((base, rate)) = percentage_operands(input) {
+    if let Some((mode, base, rate)) = percentage_operands(input) {
         let fraction = evaluate_expression(rate)? / 100.;
-        return finite(fraction * evaluate_expression(base)?);
+        return finite(mode.apply(evaluate_expression(base)?, fraction));
     }
     let mut parser = Parser(input);
     let value = parser.expression(0)?;
@@ -327,6 +327,12 @@ mod tests {
             ("(200 + 40)的12.5%", "30"),
             ("15 % of (200 + 20)", "33"),
             ("pi 的 50%", "1.5707963267949"),
+            ("200 增加 15%", "230"),
+            ("200 减少 15%", "170"),
+            ("200 increased by 15%", "230"),
+            ("200 DECREASED BY 15%", "170"),
+            ("(80+20)增加(5+5)%", "110"),
+            ("200 增加 10% 减少 10%", "198"),
             ("7 % -3", "-2"),
         ] {
             assert!(looks_like_calculation(query), "{query}");
