@@ -18,6 +18,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "10 km to mi",
     },
     Example {
+        icon: Icon::Layers,
+        title: "按符号筛选换算单位",
+        query: "1 GiB to Ti",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "转换整数进制",
         query: "0xff to dec",

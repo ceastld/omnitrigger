@@ -67,6 +67,7 @@ const WIDTH: f32 = 500.;
 const INPUT_CHARACTER_LIMIT: usize = 4096;
 const PAGE_ROW_HEIGHT: f32 = 38.;
 const DESTINATION_PAGE_SIZE: usize = 4;
+const CONVERSION_PAGE_SIZE: usize = 4;
 const EXAMPLE_ROW_HEIGHT: f32 = 30.;
 const EXAMPLE_PAGE_SIZE: usize = 8;
 const MAX_VALUE_LINES: usize = 6;
@@ -399,10 +400,12 @@ impl Results {
         }
         if let Some(result) = convert(query) {
             return match result {
-                Err(ConversionError::Incomplete) => suggested_targets(query).map_or_else(
-                    || Self::Value(Err(ValueError::Conversion(ConversionError::Incomplete))),
-                    Self::ConversionTargets,
-                ),
+                Err(error @ (ConversionError::Incomplete | ConversionError::UnknownUnit)) => {
+                    suggested_targets(query).map_or_else(
+                        || Self::Value(Err(ValueError::Conversion(error))),
+                        Self::ConversionTargets,
+                    )
+                }
                 result => Self::text_value(result.map_err(ValueError::Conversion)),
             };
         }
@@ -512,7 +515,10 @@ impl Results {
             Self::Help(items) if !items.is_empty() => {
                 132. + items.len().min(EXAMPLE_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
             }
-            Self::Calculations(items) | Self::ConversionTargets(items) if !items.is_empty() => {
+            Self::ConversionTargets(items) if !items.is_empty() => {
+                132. + items.len().min(CONVERSION_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
+            }
+            Self::Calculations(items) if !items.is_empty() => {
                 132. + items.len() as f32 * EXAMPLE_ROW_HEIGHT
             }
             _ => 158.,
@@ -781,6 +787,7 @@ impl QuickSearch {
     fn change_page(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
         let (count, page_size) = match &self.results {
             Results::Destinations(items) => (items.len(), DESTINATION_PAGE_SIZE),
+            Results::ConversionTargets(items) => (items.len(), CONVERSION_PAGE_SIZE),
             Results::Help(items) => (items.len(), EXAMPLE_PAGE_SIZE),
             _ => return false,
         };
@@ -916,12 +923,15 @@ impl QuickSearch {
         &self,
         items: &[InputSuggestion],
         glyph: Icon,
+        page_size: usize,
         cx: &mut Context<Self>,
     ) -> Div {
+        let start = self.selected / page_size * page_size;
+        let visible = items.iter().enumerate().skip(start).take(page_size);
         div()
             .flex()
             .flex_col()
-            .children(items.iter().enumerate().map(|(index, item)| {
+            .children(visible.map(|(index, item)| {
                 let expression = item.expression.clone();
                 self.suggestion_row(index, EXAMPLE_ROW_HEIGHT)
                     .child(icon(glyph, 16., theme::ACCENT))
@@ -948,7 +958,15 @@ impl QuickSearch {
                         this.fill_query(expression.clone(), window, cx);
                     }))
             }))
-            .when(items.len() > 1, |list| {
+            .when(items.len() > page_size, |list| {
+                list.child(self.render_pagination(
+                    items.len(),
+                    page_size,
+                    "↑ ↓ 选择  ·  PgUp / PgDn",
+                    cx,
+                ))
+            })
+            .when((2..=page_size).contains(&items.len()), |list| {
                 list.child(Self::selection_hint("↑ ↓ 选择"))
             })
     }
@@ -1063,10 +1081,10 @@ impl QuickSearch {
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child("未找到用过的算式"),
             Results::Calculations(items) => {
-                self.render_input_suggestions(items, Icon::Terminal, cx)
+                self.render_input_suggestions(items, Icon::Terminal, items.len(), cx)
             }
             Results::ConversionTargets(items) => {
-                self.render_input_suggestions(items, Icon::Layers, cx)
+                self.render_input_suggestions(items, Icon::Layers, CONVERSION_PAGE_SIZE, cx)
             }
             Results::Destinations(items) if items.is_empty() => {
                 row.text_color(rgb(theme::TEXT_MUTED)).child("未找到匹配项")
@@ -1321,6 +1339,27 @@ mod tests {
         assert!(matches!(
             for_query(&"1".repeat(calculator::QUERY_LIMIT + 1), &[]),
             Results::Value(Err(ValueError::Calculation(CalculationError::TooLong)))
+        ));
+    }
+
+    #[test]
+    fn conversion_suggestions_support_symbol_prefixes_and_later_pages() {
+        let results = for_query("10 km to", &[]);
+        assert_eq!(
+            results.height(),
+            132. + CONVERSION_PAGE_SIZE as f32 * EXAMPLE_ROW_HEIGHT
+        );
+        assert!(matches!(
+            results,
+            Results::ConversionTargets(items) if items.len() > CONVERSION_PAGE_SIZE
+        ));
+        assert!(matches!(
+            for_query("1 GiB to Ti", &[]),
+            Results::ConversionTargets(items) if items.len() == 2
+        ));
+        assert!(matches!(
+            for_query("10 km to nonexistent", &[]),
+            Results::Value(Err(ValueError::Conversion(ConversionError::UnknownUnit)))
         ));
     }
 

@@ -54,25 +54,37 @@ enum Dimension {
 impl Dimension {
     fn suggested_units(&self, source: &str) -> &'static [&'static str] {
         match self {
-            Self::Length if matches!(source, "nm" | "μm") => &["nm", "μm", "mm", "cm", "m"],
-            Self::Length => &["m", "mi", "km", "cm", "ft"],
+            Self::Length if matches!(source, "nm" | "μm") => {
+                &["nm", "μm", "mm", "cm", "m", "km", "ft", "in", "yd", "mi"]
+            }
+            Self::Length => &["m", "mi", "km", "cm", "ft", "mm", "in", "yd", "μm", "nm"],
             Self::Mass => &["kg", "g", "lb", "oz", "mg"],
-            Self::Time if matches!(source, "ns" | "μs") => &["ns", "μs", "ms", "s", "min"],
-            Self::Time => &["s", "min", "h", "ms", "d"],
+            Self::Time if matches!(source, "ns" | "μs") => {
+                &["ns", "μs", "ms", "s", "min", "h", "d"]
+            }
+            Self::Time => &["s", "min", "h", "ms", "d", "μs", "ns"],
             Self::Temperature => &["°C", "°F", "K"],
-            Self::Area => &["m²", "ft²", "ha", "km²", "cm²"],
+            Self::Area => &["m²", "ft²", "ha", "km²", "cm²", "acre"],
             Self::Volume => &["L", "mL", "usgal", "m³"],
             Self::Speed => &["km/h", "m/s", "mph", "kn"],
-            Self::Data => &["MB", "MiB", "GB", "GiB", "B"],
-            Self::DataRate => &["MB/s", "Mbps", "MiB/s", "kB/s", "Gbps"],
+            Self::Data => &[
+                "MB", "MiB", "GB", "GiB", "B", "kB", "KiB", "TB", "TiB", "b", "kb", "Mb", "Gb",
+                "Tb", "Kib", "Mib", "Gib", "Tib",
+            ],
+            Self::DataRate => &[
+                "MB/s", "Mbps", "MiB/s", "kB/s", "Gbps", "b/s", "B/s", "kbps", "KiB/s", "Mib/s",
+                "GB/s", "GiB/s", "Gib/s", "TB/s", "TiB/s", "Tbps", "Tib/s", "Kib/s",
+            ],
             Self::Angle => &["°", "rad", "turn"],
-            Self::Pressure => &["Pa", "kPa", "bar", "psi", "atm"],
+            Self::Pressure => &[
+                "Pa", "kPa", "bar", "psi", "atm", "hPa", "MPa", "mPa", "Torr",
+            ],
             Self::Frequency => &["Hz", "kHz", "MHz", "GHz", "mHz"],
-            Self::Energy => &["J", "kJ", "MJ", "Wh", "kWh"],
+            Self::Energy => &["J", "kJ", "MJ", "Wh", "kWh", "mJ", "mWh", "MWh"],
             Self::Power => &["W", "kW", "mW", "MW", "GW"],
             Self::Density => &["kg/m³", "g/cm³", "g/L", "kg/L"],
             Self::VolumeFlow => &["L/min", "L/s", "m³/h", "m³/s", "mL/s"],
-            Self::Force => &["N", "kN", "kgf", "lbf", "mN"],
+            Self::Force => &["N", "kN", "kgf", "lbf", "mN", "MN", "dyn"],
             Self::Acceleration => &["m/s²", "g₀", "ft/s²", "cm/s²", "in/s²"],
         }
     }
@@ -393,22 +405,29 @@ pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
 pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
     let input = normalize(query).replace(char::is_whitespace, " ");
     let input = input.trim();
-    let (source, separator) = match split_conversion(input) {
-        Some((source, target)) if target.trim().is_empty() => (source, ""),
-        Some(_) => return None,
-        None => (input, " to"),
+    let (source, stem, separator, prefix) = match split_conversion(input) {
+        Some((source, target)) => {
+            let prefix = target.trim();
+            if Unit::parse(prefix).is_ok() {
+                return None;
+            }
+            let stem = input[..input.len() - target.len()].trim_end();
+            (source, stem, "", prefix)
+        }
+        None => (input, input, " to", ""),
     };
     let (amount, source) = parse_quantity(source).ok()?;
     let items: Vec<_> = source
         .dimension
         .suggested_units(source.symbol)
         .iter()
+        .filter(|name| name.starts_with(prefix))
         .filter_map(|name| {
             let target = Unit::parse(name).ok()?;
             if target.symbol == source.symbol {
                 return None;
             }
-            let expression = format!("{input}{separator} {name}");
+            let expression = format!("{stem}{separator} {name}");
             if expression.chars().count() > QUERY_LIMIT {
                 return None;
             }
@@ -417,7 +436,6 @@ pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
                 result: format_conversion(amount, &source, &target).ok()?,
             })
         })
-        .take(4)
         .collect();
     (!items.is_empty()).then_some(items)
 }
@@ -559,6 +577,27 @@ mod tests {
             convert("1 L/min to kg/m³"),
             Some(Err(ConversionError::DifferentDimensions)),
         );
+    }
+
+    #[test]
+    fn extends_conversion_choices_and_filters_partial_unit_symbols() {
+        let items = suggested_targets("10 km to").unwrap();
+        assert_eq!(items.len(), 9);
+        assert_eq!(items[4].expression, "10 km to mm");
+        assert_eq!(items[4].result, "10000000 mm");
+        assert_eq!(suggested_targets("1 GiB to").unwrap().len(), 17);
+        assert_eq!(suggested_targets("1 GiB/s to").unwrap().len(), 17);
+        let items = suggested_targets("1 GiB to Ti").unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.expression.as_str())
+                .collect::<Vec<_>>(),
+            ["1 GiB to TiB", "1 GiB to Tib"],
+        );
+        let items = suggested_targets("1 m转y").unwrap();
+        assert_eq!(items[0].expression, "1 m转 yd");
+        assert!(suggested_targets("10 km to nonexistent").is_none());
     }
 
     #[test]
