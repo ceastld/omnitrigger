@@ -8,6 +8,7 @@ pub(super) enum DateError {
     InvalidDate,
     InvalidWeek,
     InvalidQuarter,
+    InvalidYearDay,
     InvalidWeekdayOccurrence,
     MissingWeekdayOccurrence,
     InvalidOperation,
@@ -21,6 +22,7 @@ impl DateError {
             Self::InvalidDate => "输入有效日期或月份，例如 2026年11月21日 或 2026-11",
             Self::InvalidWeek => "请输入有效的 ISO 周号，例如 2026-W47",
             Self::InvalidQuarter => "请输入季度编号 1 至 4，例如 2026-Q4",
+            Self::InvalidYearDay => "请输入该年有效的天数，例如 2024 第60天",
             Self::InvalidWeekdayOccurrence => {
                 "请输入第 1 至第 5 个或最后一个星期几，例如 日期: 2026-11 最后一个星期四"
             }
@@ -137,6 +139,10 @@ fn week_number_query(input: &str) -> Option<&str> {
         .map(str::trim_end)
 }
 
+fn day_number_query(input: &str) -> Option<&str> {
+    input.strip_suffix("第几天").map(str::trim_end)
+}
+
 fn calendar_period_parts(input: &str, marker: [char; 2]) -> Option<(&str, &str)> {
     let (year, rest) = input.split_at_checked(4)?;
     Some((year, rest.strip_prefix('-')?.strip_prefix(marker)?))
@@ -148,6 +154,14 @@ fn iso_year(input: &str) -> Option<i32> {
     } else {
         None
     }
+}
+
+fn year_day_parts(input: &str) -> Option<(i32, &str)> {
+    let (year, day) = input.split_once('第')?;
+    let year = year.trim_end();
+    let year = iso_year(year.strip_suffix('年').unwrap_or(year).trim_end())?;
+    let day = day.trim().strip_suffix('天')?.trim_end();
+    Some((year, day))
 }
 
 fn iso_month_parts(input: &str) -> Option<(i32, u32)> {
@@ -198,7 +212,7 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
     let input = normalize(query);
     let input = input.trim();
     let date_tail = |rest: &str| rest.is_empty() || rest.starts_with(['+', '-']);
-    if weekday_occurrence_parts(input).is_some() {
+    if weekday_occurrence_parts(input).is_some() || year_day_parts(input).is_some() {
         return true;
     }
     if let Some((year, ordinal)) = calendar_period_parts(input, ['W', 'w'])
@@ -207,7 +221,10 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
         return year.bytes().all(|byte| byte.is_ascii_digit())
             && ordinal.bytes().all(|byte| byte.is_ascii_digit());
     }
-    if let Some(date) = weekday_query(input).or_else(|| week_number_query(input)) {
+    if let Some(date) = weekday_query(input)
+        .or_else(|| week_number_query(input))
+        .or_else(|| day_number_query(input))
+    {
         return date.is_empty()
             || relative_day(date).is_some_and(|(_, rest)| date_tail(rest))
             || iso_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest))
@@ -448,6 +465,14 @@ fn apply_date_offset(
 pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, DateError> {
     let input = normalize(input);
     let input = input.trim();
+    if let Some((year, day)) = year_day_parts(input) {
+        let date = day
+            .parse()
+            .ok()
+            .and_then(|day| NaiveDate::from_yo_opt(year, day))
+            .ok_or(DateError::InvalidYearDay)?;
+        return Ok(date.to_string());
+    }
     if let Some((year, month, rule)) = weekday_occurrence_parts(input) {
         return weekday_occurrence(year, month, rule);
     }
@@ -488,7 +513,8 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     }
     let weekday = weekday_query(input);
     let week_number = week_number_query(input);
-    let display_query = weekday.or(week_number);
+    let day_number = day_number_query(input);
+    let display_query = weekday.or(week_number).or(day_number);
     let input = display_query.map_or(input, |input| if input.is_empty() { "今天" } else { input });
     let (date, rest) = date_operand(input, today)?;
     let display_date = |date: NaiveDate| {
@@ -510,6 +536,8 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
                 return Err(DateError::OutOfRange);
             }
             Ok(format!("{year:04}-W{:02}", week.week()))
+        } else if day_number.is_some() {
+            Ok(format!("第 {} 天", date.ordinal()))
         } else {
             Ok(date.to_string())
         }
@@ -554,6 +582,32 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_between_dates_and_one_based_days_of_the_year() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            ("2024 第60天", "2024-02-29"),
+            ("２０２４年 第 366 天", "2024-12-31"),
+            ("2024-02-29 第几天", "第 60 天"),
+            ("2024-02-28 + 1天 第几天", "第 60 天"),
+            ("第几天", "第 325 天"),
+        ] {
+            assert!(looks_like_date_query(query), "{query}");
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in ["2024 第0天", "2023 第366天", "2024 第367天"] {
+            assert_eq!(
+                calculate_date(query, today),
+                Err(DateError::InvalidYearDay),
+                "{query}"
+            );
+        }
+    }
 
     #[test]
     fn shows_absolute_and_relative_years_with_actual_day_counts() {

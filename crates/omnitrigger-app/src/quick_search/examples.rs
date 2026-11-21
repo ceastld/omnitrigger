@@ -225,6 +225,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "用年内天数查日期",
+        query: "日期: 2024 第60天",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "查询日期是一年第几天",
+        query: "日期: 2024-02-29 第几天",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查询月份范围与工作日数",
         query: "日期: 2024-02",
     },
