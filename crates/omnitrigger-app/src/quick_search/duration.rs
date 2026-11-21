@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::calculator::normalize;
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
@@ -76,9 +78,13 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     }
 }
 
-pub(super) fn elapsed_seconds(input: &str) -> Result<f64, DurationError> {
+pub(super) fn elapsed_duration(input: &str) -> Result<Duration, DurationError> {
     let input = normalize(input).to_ascii_lowercase();
-    parse_term(input.trim()).map(|nanos| nanos as f64 / NANOS_PER_SECOND as f64)
+    let nanos = parse_term(input.trim())?;
+    Ok(Duration::new(
+        (nanos / NANOS_PER_SECOND) as u64,
+        (nanos % NANOS_PER_SECOND) as u32,
+    ))
 }
 
 fn parse_term(term: &str) -> Result<u128, DurationError> {

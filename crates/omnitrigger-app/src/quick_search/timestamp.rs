@@ -1,13 +1,15 @@
-use chrono::{DateTime, Datelike, FixedOffset, Local, SecondsFormat, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, Local, SecondsFormat, TimeDelta, Utc};
 
 use super::calculator::normalize;
 use super::conversion::split_conversion;
+use super::duration::{elapsed_duration, DurationError};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum TimestampError {
     Incomplete,
     Invalid,
     InvalidOffset,
+    InvalidDuration,
     UnsupportedPrecision,
     OutOfRange,
 }
@@ -18,6 +20,7 @@ impl TimestampError {
             Self::Incomplete => "输入时间戳或带时区的时间，例如 时间戳: 1700000000000ms",
             Self::Invalid => "请输入 Unix 秒、毫秒、微秒、纳秒或带时区的 RFC 3339 时间",
             Self::InvalidOffset => "请输入目标时区，例如 UTC、本地、UTC+8 或 -05:30",
+            Self::InvalidDuration => "请输入要加减的时长，例如 时间戳: 现在 + 90分钟",
             Self::UnsupportedPrecision => "请输入可用 Unix 纳秒表示的时间",
             Self::OutOfRange => "结果超出四位年份的时间范围",
         }
@@ -135,6 +138,33 @@ fn convert_timestamp_with_local(
         ensure_four_digit_year(zoned.year())?;
         Ok(zoned.to_rfc3339_opts(format, false))
     };
+    if let Some((sign, input)) = lower
+        .strip_prefix("now")
+        .or_else(|| lower.strip_prefix("现在"))
+        .and_then(|rest| rest.trim_start().split_at_checked(1))
+        .filter(|(sign, _)| matches!(*sign, "+" | "-"))
+    {
+        let elapsed = elapsed_duration(input).map_err(|error| match error {
+            DurationError::Incomplete => TimestampError::Incomplete,
+            DurationError::OutOfRange => TimestampError::OutOfRange,
+            DurationError::Precision => TimestampError::UnsupportedPrecision,
+            DurationError::Invalid | DurationError::DivisionByZero => {
+                TimestampError::InvalidDuration
+            }
+        })?;
+        let unit = TimestampUnit::from_subsecond(elapsed.subsec_nanos());
+        let delta = TimeDelta::from_std(elapsed).map_err(|_| TimestampError::OutOfRange)?;
+        let signed_delta = if sign == "-" { -delta } else { delta };
+        let time = now
+            .checked_add_signed(signed_delta)
+            .ok_or(TimestampError::OutOfRange)?;
+        if target_zone.is_some() {
+            return display_time(time, unit.date_format());
+        }
+        ensure_four_digit_year(time.year())?;
+        return Ok(unit.format_unix(time));
+    }
+
     let suffixed = TimestampUnit::split_suffix(lower);
     let (unit, quantity) = suffixed.unwrap_or((TimestampUnit::Seconds, lower));
     let quantity = quantity.trim_end();
@@ -239,6 +269,31 @@ fn ensure_four_digit_year(year: i32) -> Result<(), TimestampError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shifts_current_time_by_a_duration_and_preserves_requested_precision() {
+        let now = DateTime::from_timestamp_millis(1_700_000_000_123).unwrap();
+        for (input, expected) in [
+            ("now + 90m", "1700005400"),
+            ("现在 − 250ms", "1699999999873 ms"),
+            ("now+1ns to UTC", "2023-11-14T22:13:20.123000001Z"),
+            ("NOW + 90m to UTC+8", "2023-11-15T07:43:20+08:00"),
+        ] {
+            assert_eq!(
+                convert_timestamp(input, now).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for (input, error) in [
+            ("现在 +", TimestampError::Incomplete),
+            ("now + abc", TimestampError::InvalidDuration),
+            ("now - 0.1ns", TimestampError::UnsupportedPrecision),
+            ("now + 4000000天", TimestampError::OutOfRange),
+        ] {
+            assert_eq!(convert_timestamp(input, now), Err(error), "{input}");
+        }
+    }
 
     #[test]
     fn displays_unix_and_rfc3339_times_at_explicit_offsets() {

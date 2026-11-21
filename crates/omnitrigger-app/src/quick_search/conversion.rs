@@ -1,7 +1,7 @@
 use std::f64::consts::{PI, TAU};
 
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
-use super::duration::{convert_duration, elapsed_seconds, DurationError};
+use super::duration::{convert_duration, elapsed_duration, DurationError};
 use super::radix::Base;
 use super::InputSuggestion;
 
@@ -506,11 +506,12 @@ fn estimate_transfer_rate(data: &str, elapsed: &str) -> Result<String, Conversio
         return Err(ConversionError::Incomplete);
     }
     let (size, size_unit) = parse_quantity(data)?;
-    let seconds = elapsed_seconds(elapsed).map_err(|error| match error {
+    let elapsed = elapsed_duration(elapsed).map_err(|error| match error {
         DurationError::Incomplete => ConversionError::Incomplete,
         DurationError::OutOfRange => ConversionError::OutOfRange,
         _ => ConversionError::InvalidTransferDuration,
     })?;
+    let seconds = elapsed.as_secs_f64();
     if size_unit.dimension != Dimension::Data || size < 0. || seconds == 0. {
         return Err(ConversionError::InvalidTransferDuration);
     }
