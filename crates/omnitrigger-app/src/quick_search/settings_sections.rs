@@ -63,6 +63,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                &[],
                 &visible,
                 &RecentDestinations::default(),
             );

@@ -14,6 +14,7 @@ mod scope;
 mod settings_sections;
 mod timestamp;
 mod triggers;
+mod wheel_slots;
 mod wheels;
 
 use gpui::{
@@ -28,6 +29,7 @@ use crate::{
     assets::Icon,
     message_input::MessageInput,
     theme::{self, button, icon, rgb, Tone},
+    wheel_scenes::WheelSlotKey,
     Page, Workspace,
 };
 use actions::{matching_actions, SearchAction};
@@ -44,6 +46,7 @@ use scope::{scoped_query, Scope};
 use settings_sections::matching_settings;
 use timestamp::{convert_timestamp, TimestampError};
 use triggers::{matching_triggers, SearchTrigger};
+use wheel_slots::{index_slots, matching_slots, SearchWheelSlot};
 use wheels::{matching_wheels, SearchWheel};
 
 const WIDTH: f32 = 500.;
@@ -77,6 +80,11 @@ pub(super) enum Destination {
     Page(Page),
     Trigger(u64),
     Wheel(String),
+    WheelSlot {
+        key: WheelSlotKey,
+        label: String,
+        detail: String,
+    },
     Preset(&'static str),
     SettingsSection(SettingsSection),
     TextHistoryQuery(String),
@@ -91,6 +99,7 @@ pub(super) enum Destination {
 pub(super) struct SearchIndex {
     triggers: Vec<SearchTrigger>,
     wheels: Vec<SearchWheel>,
+    wheel_slots: Option<Vec<SearchWheelSlot>>,
     actions: Vec<SearchAction>,
     settings: Vec<SettingsSection>,
     recent: RecentDestinations,
@@ -132,6 +141,7 @@ impl SearchIndex {
                 .map(SearchTrigger::from_binding)
                 .collect(),
             wheels,
+            wheel_slots: None,
             actions,
             settings: SettingsSection::ALL
                 .into_iter()
@@ -146,6 +156,7 @@ impl SearchIndex {
             query,
             &self.triggers,
             &self.wheels,
+            self.wheel_slots.as_deref().unwrap_or_default(),
             &self.actions,
             &self.settings,
             &self.recent,
@@ -210,6 +221,7 @@ impl Results {
         query: &str,
         triggers: &[SearchTrigger],
         wheels: &[SearchWheel],
+        wheel_slots: &[SearchWheelSlot],
         actions: &[SearchAction],
         settings: &[SettingsSection],
         recent: &RecentDestinations,
@@ -235,6 +247,12 @@ impl Results {
                         .map(|wheel| Destination::Wheel(wheel.id.clone()))
                         .collect(),
                 ),
+                Scope::WheelSlots if term.is_empty() => {
+                    Self::Destinations(vec![Destination::Page(Page::Wheels)])
+                }
+                Scope::WheelSlots => {
+                    Self::Destinations(matching_slots(wheel_slots, term, PAGE_RESULT_LIMIT))
+                }
                 Scope::Presets if term.is_empty() => {
                     Self::Destinations(vec![Destination::Page(Page::Presets)])
                 }
@@ -432,7 +450,20 @@ impl QuickSearch {
             input
         });
         let input_changes = cx.observe_in(&input, window, |this, input, window, cx| {
-            let next = this.index.results(&input.read(cx).text());
+            let query = input.read(cx).text();
+            if this.index.wheel_slots.is_none()
+                && matches!(scoped_query(query.trim()), Some((Scope::WheelSlots, term)) if !term.is_empty())
+            {
+                this.index.wheel_slots = Some(this.workspace.upgrade().map_or_else(Vec::new, |workspace| {
+                    let workspace = workspace.read(cx);
+                    if workspace.wheels_error.is_none() {
+                        index_slots(&workspace.wheels.wheels)
+                    } else {
+                        Vec::new()
+                    }
+                }));
+            }
+            let next = this.index.results(&query);
             if this.results != next {
                 let height_changed = this.results.height() != next.height();
                 this.results = next;
@@ -698,6 +729,9 @@ impl QuickSearch {
                             };
                             (Page::Wheels.icon(), wheel.name.clone(), Some(detail))
                         }
+                        Destination::WheelSlot { label, detail, .. } => {
+                            (Page::Wheels.icon(), label.clone(), Some(detail.clone()))
+                        }
                         Destination::Preset(key) => {
                             let preset = crate::presets::PRESETS
                                 .iter()
@@ -848,6 +882,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &RecentDestinations::default(),
         )
     }
@@ -882,6 +917,7 @@ mod tests {
                 .iter()
                 .map(SearchWheel::from_definition)
                 .collect(),
+            wheel_slots: None,
             actions: Vec::new(),
             settings: SettingsSection::ALL.to_vec(),
             recent: RecentDestinations::default(),
@@ -904,6 +940,7 @@ mod tests {
                 query,
                 &[],
                 &wheels,
+                &[],
                 &[],
                 &[],
                 &RecentDestinations::default(),

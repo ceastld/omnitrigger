@@ -347,6 +347,35 @@ fn editor_slot_key(
     ))
 }
 
+fn wheel_slot_view_location(
+    wheel: &WheelDefinition,
+    key: &WheelSlotKey,
+    label: &str,
+    scenes: &CompiledScenes,
+) -> Option<(Option<WheelScope>, (u8, u8))> {
+    let (slot, scope) = if let Some(process) = key.application.as_deref() {
+        let application = wheel.override_for_process(Some(process))?;
+        let slot = application.slots.get(key.source_index)?;
+        (slot, Some(WheelScope::App(application.process.clone())))
+    } else {
+        let slot = wheel.slots.get(key.source_index)?;
+        (slot, slot.scene.clone().map(WheelScope::Scene))
+    };
+    if slot.label != label {
+        return None;
+    }
+    let view = scope_view(wheel, scope.as_ref(), scenes);
+    let target = if slot.position.is_some() {
+        view.slots
+            .iter()
+            .find(|candidate| candidate.scene == slot.scene && same_cell(candidate, slot))?
+    } else {
+        view.slots.get(key.source_index)?
+    };
+    let position = target.position?;
+    Some((scope, (position.ring, position.sector)))
+}
+
 /// 编辑时取出一组槽位，均分布局转为方位布局：
 /// “通用”与应用覆盖只含通用槽位；场景视图显示通用布局中的场景槽位——
 /// 该场景的槽位，加上未被覆盖的通用槽位和必然同时命中的其他场景槽位（沿用的槽位），
@@ -1105,6 +1134,34 @@ impl Workspace {
         if self.flush_wheel_label(cx) {
             self.select_wheel(id, cx);
         }
+    }
+
+    pub(super) fn open_wheel_slot(
+        &mut self,
+        key: WheelSlotKey,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.wheels_error.is_some() {
+            return;
+        }
+        let location = self
+            .wheels
+            .wheels
+            .iter()
+            .find(|wheel| wheel.id == key.wheel_id)
+            .and_then(|wheel| wheel_slot_view_location(wheel, &key, label, &self.wheel_scenes));
+        let Some((scope, cell)) = location else {
+            return;
+        };
+        if !self.flush_wheel_label(cx) {
+            return;
+        }
+        self.select_wheel(key.wheel_id, cx);
+        if scope.is_some() {
+            self.set_wheel_scope(scope, cx);
+        }
+        self.select_wheel_cell(cell, cx);
     }
 
     pub(super) fn select_wheel(&mut self, id: String, cx: &mut Context<Self>) {
@@ -1887,6 +1944,43 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_the_editor_cell_for_legacy_application_and_scene_slots() {
+        let mut source = wheel(&[None, None]);
+        let scenes = CompiledScenes::default();
+        let key = WheelSlotKey::new(&source, None, 1);
+        assert_eq!(
+            wheel_slot_view_location(&source, &key, &source.slots[1].label, &scenes),
+            Some((None, (0, 1)))
+        );
+        assert!(wheel_slot_view_location(&source, &key, "已改名", &scenes).is_none());
+
+        let application = wheel(&[at(2, 3, 8)]);
+        let label = application.slots[0].label.clone();
+        source
+            .app_overrides
+            .push(crate::wheels::WheelApplicationOverride {
+                process: "Chrome.exe".into(),
+                slots: application.slots,
+            });
+        let key = WheelSlotKey::new(&source, Some("chrome.exe"), 0);
+        assert_eq!(
+            wheel_slot_view_location(&source, &key, &label, &scenes),
+            Some((Some(WheelScope::App("Chrome.exe".into())), (2, 3)))
+        );
+
+        convert_to_positions(&mut source);
+        let mut override_slot = source.slots[0].clone();
+        override_slot.label = "写作剪贴板".into();
+        override_slot.scene = Some("writing".into());
+        let key = WheelSlotKey::new(&source, None, source.slots.len());
+        source.slots.push(override_slot);
+        assert_eq!(
+            wheel_slot_view_location(&source, &key, "写作剪贴板", &scenes),
+            Some((Some(WheelScope::Scene("writing".into())), (0, 0)))
+        );
+    }
 
     #[test]
     fn displayed_wheel_binding_is_the_first_enabled_match_or_first_disabled_match() {

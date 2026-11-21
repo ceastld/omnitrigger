@@ -75,6 +75,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "预设: 顶部边缘",
     },
     Example {
+        icon: Icon::Wheel,
+        title: "查找轮盘槽位",
+        query: "槽位: ",
+    },
+    Example {
         icon: Icon::Sliders,
         title: "打开颜色主题设置",
         query: "设置: 主题",

@@ -2758,6 +2758,10 @@ impl Workspace {
                 self.open_page(Page::Wheels, cx);
                 self.switch_wheel(id, cx);
             }
+            quick_search::Destination::WheelSlot { key, label, .. } => {
+                self.open_page(Page::Wheels, cx);
+                self.open_wheel_slot(key, &label, cx);
+            }
             quick_search::Destination::Preset(key) => {
                 self.open_page(Page::Presets, cx);
                 self.preset_catalog_key = Some(key);

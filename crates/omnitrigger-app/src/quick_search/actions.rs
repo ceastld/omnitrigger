@@ -110,6 +110,7 @@ mod tests {
             "动作：文本工具 format-JSON",
             &[],
             &[],
+            &[],
             &actions,
             &[],
             &RecentDestinations::default(),

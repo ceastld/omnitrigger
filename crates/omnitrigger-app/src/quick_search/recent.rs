@@ -12,7 +12,9 @@ impl RecentDestinations {
             Destination::ActionLibraryQuery(_) | Destination::ActionLibraryEntry { .. } => {
                 Destination::Page(Page::Actions)
             }
-            Destination::Wheel(_) => Destination::Page(Page::Wheels),
+            Destination::Wheel(_) | Destination::WheelSlot { .. } => {
+                Destination::Page(Page::Wheels)
+            }
             Destination::Preset(_) => Destination::Page(Page::Presets),
             Destination::SettingsSection(_) => Destination::Page(Page::Settings),
             item => item.clone(),
