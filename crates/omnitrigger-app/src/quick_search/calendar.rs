@@ -15,7 +15,7 @@ impl DateError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "可以输入日期、天数或星期几，例如 日期: 今天 星期几",
-            Self::InvalidDate => "请输入有效日期，格式为 YYYY-MM-DD",
+            Self::InvalidDate => "请输入有效日期 YYYY-MM-DD 或月份 YYYY-MM",
             Self::InvalidWeek => "请输入有效的 ISO 周号，例如 2026-W47",
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
             Self::OutOfRange => "结果超出四位年份的日期范围",
@@ -105,6 +105,30 @@ fn iso_week_parts(input: &str) -> Option<(&str, &str)> {
     Some((year, rest.strip_prefix('-')?.strip_prefix(['W', 'w'])?))
 }
 
+fn iso_month_parts(input: &str) -> Option<(i32, u32)> {
+    let (year, month) = input.split_once('-')?;
+    if year.len() == 4
+        && month.len() == 2
+        && year
+            .bytes()
+            .chain(month.bytes())
+            .all(|digit| digit.is_ascii_digit())
+    {
+        Some((year.parse().ok()?, month.parse().ok()?))
+    } else {
+        None
+    }
+}
+
+fn relative_month(input: &str) -> Option<i8> {
+    match input.to_ascii_lowercase().as_str() {
+        "本月" | "这个月" | "this month" => Some(0),
+        "上月" | "上个月" | "last month" => Some(-1),
+        "下月" | "下个月" | "next month" => Some(1),
+        _ => None,
+    }
+}
+
 pub(super) fn looks_like_date_query(query: &str) -> bool {
     let input = normalize(query);
     let input = input.trim();
@@ -118,7 +142,7 @@ pub(super) fn looks_like_date_query(query: &str) -> bool {
             || relative_day(date).is_some_and(|(_, rest)| date_tail(rest))
             || iso_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest));
     }
-    relative_day(input).is_some_and(|(_, rest)| date_tail(rest))
+    relative_month(input).is_some() || relative_day(input).is_some_and(|(_, rest)| date_tail(rest))
 }
 
 fn is_workday_unit(unit: &str) -> bool {
@@ -155,6 +179,20 @@ fn workday_difference(date: NaiveDate, other: NaiveDate) -> i64 {
         .filter(|offset| (start + offset) % 7 < 5)
         .count() as i64;
     difference.signum() * (days / 7 * 5 + remaining_workdays)
+}
+
+fn month_range(start: NaiveDate) -> Result<String, DateError> {
+    let end = in_range(
+        start
+            .checked_add_months(Months::new(1))
+            .and_then(|next| next.pred_opt()),
+    )?;
+    let workdays =
+        workday_difference(end, start) + i64::from(start.weekday().number_from_monday() <= 5);
+    Ok(format!(
+        "{start} 至 {end}\n{} 天 · {workdays} 工作日",
+        end.day()
+    ))
 }
 
 fn calendar_difference(date: NaiveDate, other: NaiveDate) -> Result<String, DateError> {
@@ -262,6 +300,18 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     if let Some((year, week)) = iso_week_parts(input) {
         return iso_week_range(year, week);
     }
+    if let Some((year, month)) = iso_month_parts(input) {
+        return month_range(NaiveDate::from_ymd_opt(year, month, 1).ok_or(DateError::InvalidDate)?);
+    }
+    if let Some(offset) = relative_month(input) {
+        let current = in_range(today.with_day(1))?;
+        let start = match offset {
+            -1 => current.checked_sub_months(Months::new(1)),
+            1 => current.checked_add_months(Months::new(1)),
+            _ => Some(current),
+        };
+        return month_range(in_range(start)?);
+    }
     let weekday = weekday_query(input);
     let week_number = week_number_query(input);
     let display_query = weekday.or(week_number);
@@ -326,6 +376,41 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn displays_month_ranges_with_inclusive_weekday_counts() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            (
+                "２０２４－０２",
+                "2024-02-01 至 2024-02-29\n29 天 · 21 工作日",
+            ),
+            ("2026-02", "2026-02-01 至 2026-02-28\n28 天 · 20 工作日"),
+            ("本月", "2026-11-01 至 2026-11-30\n30 天 · 21 工作日"),
+            ("LAST MONTH", "2026-10-01 至 2026-10-31\n31 天 · 22 工作日"),
+            ("下个月", "2026-12-01 至 2026-12-31\n31 天 · 23 工作日"),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert!(!looks_like_date_query("2024-02"));
+        assert!(looks_like_date_query("本月"));
+        assert_eq!(
+            calculate_date("2024-13", today),
+            Err(DateError::InvalidDate)
+        );
+        assert!(calculate_date("9999-12", today)
+            .unwrap()
+            .starts_with("9999-12-01 至 9999-12-31"));
+        let last_month = NaiveDate::from_ymd_opt(9999, 12, 15).unwrap();
+        assert_eq!(
+            calculate_date("下月", last_month),
+            Err(DateError::OutOfRange)
+        );
+    }
 
     #[test]
     fn recognizes_unambiguous_calendar_requests_without_a_prefix() {

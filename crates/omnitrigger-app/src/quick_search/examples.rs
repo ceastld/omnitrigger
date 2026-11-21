@@ -201,6 +201,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "查询月份范围与工作日数",
+        query: "日期: 2024-02",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查询 ISO 周号的日期范围",
         query: "日期: 2026-W47",
     },
