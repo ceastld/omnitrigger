@@ -7,6 +7,7 @@ mod conversion;
 mod duration;
 mod examples;
 mod fraction;
+mod json_tools;
 mod operators;
 mod percentage;
 mod presets;
@@ -40,13 +41,14 @@ use crate::{
 };
 use actions::{matching_actions, SearchAction};
 use calculation_history::RecentCalculations;
-use calculator::{calculate, looks_like_calculation, CalculationError, QUERY_LIMIT};
+use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, DateError};
 use color::{calculate_contrast, convert_color, ColorError};
 use conversion::{convert, suggested_targets, ConversionError};
 use duration::{convert_duration, DurationError};
 use examples::{matching_examples, EXAMPLES};
 use fraction::{simplify_fraction, FractionError};
+use json_tools::{transform_json, JsonError};
 use omnitrigger_windows::ShortcutTarget;
 use presets::matching_presets;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -62,6 +64,7 @@ use wheel_slots::{index_slots, matching_slots, SearchWheelSlot};
 use wheels::{matching_wheels, SearchWheel};
 
 const WIDTH: f32 = 500.;
+const INPUT_CHARACTER_LIMIT: usize = 4096;
 const PAGE_ROW_HEIGHT: f32 = 38.;
 const DESTINATION_PAGE_SIZE: usize = 4;
 const EXAMPLE_ROW_HEIGHT: f32 = 30.;
@@ -228,6 +231,7 @@ fn value_extra_height(value: &str) -> f32 {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ValueError {
+    InputTooLong,
     Calculation(CalculationError),
     Conversion(ConversionError),
     Date(DateError),
@@ -235,6 +239,7 @@ enum ValueError {
     Timestamp(TimestampError),
     Color(ColorError),
     Text(TextError),
+    Json(JsonError),
     Fraction(FractionError),
     UrlEncoding(UrlEncodingError),
 }
@@ -242,6 +247,7 @@ enum ValueError {
 impl ValueError {
     fn message(self) -> &'static str {
         match self {
+            Self::InputTooLong => "输入最多支持 4096 个字符",
             Self::Calculation(error) => error.message(),
             Self::Conversion(error) => error.message(),
             Self::Date(error) => error.message(),
@@ -249,6 +255,7 @@ impl ValueError {
             Self::Timestamp(error) => error.message(),
             Self::Color(error) => error.message(),
             Self::Text(error) => error.message(),
+            Self::Json(error) => error.message(),
             Self::Fraction(error) => error.message(),
             Self::UrlEncoding(error) => error.message(),
         }
@@ -270,6 +277,7 @@ impl ValueError {
                 )
                 | Self::Fraction(FractionError::Incomplete)
                 | Self::UrlEncoding(UrlEncodingError::Incomplete)
+                | Self::Json(JsonError::Incomplete)
         )
     }
 }
@@ -284,6 +292,11 @@ impl Results {
         settings: &[SettingsSection],
         recent: &RecentSearch,
     ) -> Self {
+        if query.len() > INPUT_CHARACTER_LIMIT
+            && query.chars().take(INPUT_CHARACTER_LIMIT + 1).count() > INPUT_CHARACTER_LIMIT
+        {
+            return Self::Value(Err(ValueError::InputTooLong));
+        }
         let query = query.trim();
         if query.is_empty() {
             return Self::Destinations(recent.destinations.suggestions(triggers));
@@ -375,6 +388,7 @@ impl Results {
                 Scope::TextTools => {
                     Self::text_value(transform_text(term).map_err(ValueError::Text))
                 }
+                Scope::Json => Self::text_value(transform_json(term).map_err(ValueError::Json)),
                 Scope::Fraction => {
                     Self::text_value(simplify_fraction(term).map_err(ValueError::Fraction))
                 }
@@ -588,7 +602,7 @@ impl QuickSearch {
         let input = cx.new(|cx| {
             let mut input = MessageInput::new(cx)
                 .embedded()
-                .with_character_limit(QUERY_LIMIT + 1);
+                .with_character_limit(INPUT_CHARACTER_LIMIT + 1);
             input.set_placeholder("搜索页面、触发器，或输入算式");
             input
         });
@@ -1286,6 +1300,28 @@ mod tests {
         assert!(matches!(
             results,
             Results::Value(Ok(output)) if output.text == "北京\r\n上海\n广州\n深圳"
+        ));
+    }
+
+    #[test]
+    fn permits_text_snippets_beyond_the_calculation_limit() {
+        let value = "北京".repeat(512);
+        let json = format!(r#"{{"name":"{value}"}}"#);
+        let query = format!("JSON: 压缩 {json}");
+        assert!(matches!(
+            for_query(&query, &[]),
+            Results::Value(Ok(result)) if result.text == json
+        ));
+        assert!(matches!(
+            for_query(
+                &format!("JSON: 压缩 {}", "1".repeat(INPUT_CHARACTER_LIMIT)),
+                &[]
+            ),
+            Results::Value(Err(ValueError::InputTooLong))
+        ));
+        assert!(matches!(
+            for_query(&"1".repeat(calculator::QUERY_LIMIT + 1), &[]),
+            Results::Value(Err(ValueError::Calculation(CalculationError::TooLong)))
         ));
     }
 

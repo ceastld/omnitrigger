@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256, Sha512};
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,7 +15,7 @@ impl TextError {
             Self::MissingText => "输入要统计的文字",
             Self::UnclosedQuote => "补全引号后继续",
             Self::IncompleteTransform => "输入操作和文本，例如 文本: 大写 hello",
-            Self::UnknownOperation => "可用的操作有 大写、小写 和 合并空白",
+            Self::UnknownOperation => "可用的操作有 大写、小写、合并空白、SHA-256、SHA-512",
         }
     }
 }
@@ -48,6 +49,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "大写" | "upper" | "uppercase" => Ok(text.to_uppercase()),
         "小写" | "lower" | "lowercase" => Ok(text.to_lowercase()),
         "合并空白" | "collapse" => Ok(text.split_whitespace().collect::<Vec<_>>().join(" ")),
+        "sha256" | "sha-256" => Ok(format!("{:x}", Sha256::digest(text.as_bytes()))),
+        "sha512" | "sha-512" => Ok(format!("{:x}", Sha512::digest(text.as_bytes()))),
         _ => Err(TextError::UnknownOperation),
     }
 }
@@ -69,6 +72,29 @@ mod tests {
         }
         assert_eq!(count_text(""), Err(TextError::MissingText));
         assert_eq!(count_text("“你好"), Err(TextError::UnclosedQuote));
+    }
+
+    #[test]
+    fn hashes_the_exact_utf8_text() {
+        for (input, expected) in [
+            (
+                "SHA-256 北京",
+                "68c77e155132565e1cbbace574552fedbb9e769c147d0e9e5ed64701f0cdf82d",
+            ),
+            (
+                "sha512 abc",
+                concat!(
+                    "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a",
+                    "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+                ),
+            ),
+            (
+                "SHA256 \"\"",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+        ] {
+            assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");
+        }
     }
 
     #[test]

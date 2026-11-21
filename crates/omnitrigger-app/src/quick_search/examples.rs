@@ -398,6 +398,26 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "文本: 合并空白 A   B",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "计算文本 SHA-256",
+        query: "文本: SHA-256 北京",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算文本 SHA-512",
+        query: "文本: SHA-512 abc",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "格式化 JSON",
+        query: r#"JSON: 格式化 {"名称":"北京","值":1}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "压缩 JSON",
+        query: r#"JSON: 压缩 { "名称": "北京", "值": 1 }"#,
+    },
+    Example {
         icon: Icon::Browser,
         title: "编码 URL 参数值",
         query: "URL: 编码 北京 A+B",

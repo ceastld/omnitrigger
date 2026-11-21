@@ -18,6 +18,7 @@ pub(super) enum Scope {
     ColorContrast,
     TextCount,
     TextTools,
+    Json,
     Fraction,
     UrlEncoding,
 }
@@ -42,6 +43,7 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
         Scope::ColorContrast => Some("对比度:"),
         Scope::TextCount => Some("字数:"),
         Scope::TextTools => Some("文本:"),
+        Scope::Json => Some("JSON:"),
         Scope::Fraction => Some("分数:"),
         Scope::UrlEncoding => Some("URL:"),
         _ => None,
@@ -78,6 +80,7 @@ fn parse_scope(prefix: &str) -> Option<Scope> {
         "对比度" | "颜色对比" | "contrast" => Scope::ColorContrast,
         "字数" | "text count" | "text length" => Scope::TextCount,
         "文本" | "文本工具" | "text tools" => Scope::TextTools,
+        "json" => Scope::Json,
         "分数" | "fraction" => Scope::Fraction,
         "网址" | "url" => Scope::UrlEncoding,
         _ => return None,
