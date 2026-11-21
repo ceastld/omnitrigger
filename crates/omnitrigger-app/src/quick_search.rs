@@ -1,5 +1,6 @@
 mod calculator;
 mod conversion;
+mod recent;
 mod scientific;
 mod triggers;
 
@@ -21,6 +22,7 @@ use calculator::{calculate, looks_like_calculation, CalculationError, QUERY_LIMI
 use conversion::{convert, ConversionError};
 use omnitrigger_windows::ShortcutTarget;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+pub(super) use recent::RecentDestinations;
 use triggers::{matching_triggers, SearchTrigger};
 
 const WIDTH: f32 = 500.;
@@ -88,8 +90,11 @@ impl ValueError {
 }
 
 impl Results {
-    fn for_query(query: &str, triggers: &[SearchTrigger]) -> Self {
+    fn for_query(query: &str, triggers: &[SearchTrigger], recent: &RecentDestinations) -> Self {
         let query = query.trim();
+        if query.is_empty() {
+            return Self::Destinations(recent.suggestions(triggers));
+        }
         if let Some(prefix) = ["剪贴板:", "剪贴板：", "clipboard:"]
             .into_iter()
             .find(|prefix| {
@@ -144,13 +149,11 @@ impl Results {
             .take(PAGE_RESULT_LIMIT)
             .map(|(_, page)| Destination::Page(page))
             .collect();
-        if !query.is_empty() {
-            destinations.extend(
-                matching_triggers(triggers, &query, PAGE_RESULT_LIMIT - destinations.len())
-                    .into_iter()
-                    .map(Destination::Trigger),
-            );
-        }
+        destinations.extend(
+            matching_triggers(triggers, &query, PAGE_RESULT_LIMIT - destinations.len())
+                .into_iter()
+                .map(Destination::Trigger),
+        );
         Self::Destinations(destinations)
     }
 
@@ -198,6 +201,7 @@ pub(super) struct QuickSearch {
     input: Entity<MessageInput>,
     workspace: WeakEntity<Workspace>,
     triggers: Vec<SearchTrigger>,
+    recent: RecentDestinations,
     was_active: bool,
     results: Results,
     selected: usize,
@@ -211,10 +215,12 @@ impl QuickSearch {
         theme_mode: appearance::Mode,
         workspace: WeakEntity<Workspace>,
         bindings: &[Binding],
+        recent: &RecentDestinations,
         cx: &mut App,
     ) -> Result<WindowHandle<Self>, String> {
         let triggers: Vec<_> = bindings.iter().map(SearchTrigger::from_binding).collect();
-        let results = Results::for_query("", &triggers);
+        let results = Results::for_query("", &triggers, recent);
+        let recent = recent.clone();
         let bounds = Bounds::centered(display, size(px(WIDTH), px(results.height())), cx);
         cx.open_window(
             WindowOptions {
@@ -232,7 +238,7 @@ impl QuickSearch {
                 ..Default::default()
             },
             |window, cx| {
-                cx.new(|cx| Self::new(theme_mode, workspace, triggers, results, window, cx))
+                cx.new(|cx| Self::new(theme_mode, workspace, triggers, recent, results, window, cx))
             },
         )
         .map_err(|error| format!("无法打开快速搜索：{error}"))
@@ -242,6 +248,7 @@ impl QuickSearch {
         theme_mode: appearance::Mode,
         workspace: WeakEntity<Workspace>,
         triggers: Vec<SearchTrigger>,
+        recent: RecentDestinations,
         results: Results,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -250,11 +257,11 @@ impl QuickSearch {
             let mut input = MessageInput::new(cx)
                 .embedded()
                 .with_character_limit(QUERY_LIMIT + 1);
-            input.set_placeholder("搜索页面或触发器，或输入 sqrt(2)、10 km to mi");
+            input.set_placeholder("搜索页面、触发器，或输入算式");
             input
         });
         let input_changes = cx.observe_in(&input, window, |this, input, window, cx| {
-            let next = Results::for_query(&input.read(cx).text(), &this.triggers);
+            let next = Results::for_query(&input.read(cx).text(), &this.triggers, &this.recent);
             if this.results != next {
                 let height_changed = this.results.height() != next.height();
                 this.results = next;
@@ -262,8 +269,8 @@ impl QuickSearch {
                 if height_changed {
                     window.resize(size(px(WIDTH), px(this.results.height())));
                 }
-                cx.notify();
             }
+            cx.notify();
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
@@ -280,6 +287,7 @@ impl QuickSearch {
             input,
             workspace,
             triggers,
+            recent,
             was_active: window.is_window_active(),
             results,
             selected: 0,
@@ -451,12 +459,17 @@ impl QuickSearch {
                     )
                 }))
                 .when(items.len() > 1, |list| {
+                    let hint = if self.input.read(cx).text().trim().is_empty() {
+                        "↑ ↓ 选择  ·  例如 2**10、10 km to mi、剪贴板: 关键词"
+                    } else {
+                        "↑ ↓ 选择"
+                    };
                     list.child(
                         div()
                             .mt(px(5.))
                             .px(px(10.))
                             .text_color(rgb(theme::TEXT_MUTED))
-                            .child("↑ ↓ 选择"),
+                            .child(hint),
                     )
                 }),
         }
@@ -527,6 +540,10 @@ impl Render for QuickSearch {
 mod tests {
     use super::*;
 
+    fn for_query(query: &str, triggers: &[SearchTrigger]) -> Results {
+        Results::for_query(query, triggers, &RecentDestinations::default())
+    }
+
     #[test]
     fn quick_search_matches_page_names_and_aliases() {
         for (query, expected) in [
@@ -536,7 +553,7 @@ mod tests {
             ("触发", vec![Page::Triggers, Page::Presets, Page::History]),
             ("无对应页面", vec![]),
         ] {
-            let Results::Destinations(items) = Results::for_query(query, &[]) else {
+            let Results::Destinations(items) = for_query(query, &[]) else {
                 panic!("页面查询被解析成了算式：{query}");
             };
             assert_eq!(
@@ -549,7 +566,7 @@ mod tests {
             );
         }
         assert!(
-            matches!(Results::for_query(" ", &[]), Results::Destinations(items) if items.len() == PAGE_RESULT_LIMIT)
+            matches!(for_query(" ", &[]), Results::Destinations(items) if items.len() == PAGE_RESULT_LIMIT)
         );
     }
 
@@ -557,15 +574,15 @@ mod tests {
     fn quick_search_keeps_ascii_and_fullwidth_calculations() {
         for query in ["2**10", "（２＾１０）", "＝２＾１０"] {
             assert!(
-                matches!(Results::for_query(query, &[]), Results::Value(Ok(result)) if result == "1024")
+                matches!(for_query(query, &[]), Results::Value(Ok(result)) if result == "1024")
             );
         }
         assert!(matches!(
-            Results::for_query("2+", &[]),
+            for_query("2+", &[]),
             Results::Value(Err(ValueError::Calculation(CalculationError::Incomplete)))
         ));
         assert!(
-            matches!(Results::for_query("100厘米转米", &[]), Results::Value(Ok(result)) if result == "1 m")
+            matches!(for_query("100厘米转米", &[]), Results::Value(Ok(result)) if result == "1 m")
         );
     }
 
@@ -593,7 +610,7 @@ mod tests {
                 vec![Destination::Trigger(panel.spec.id)],
             ),
         ] {
-            let Results::Destinations(items) = Results::for_query(query, &triggers) else {
+            let Results::Destinations(items) = for_query(query, &triggers) else {
                 panic!("触发器查询被解析成了算式：{query}");
             };
             assert_eq!(items, expected, "{query}");
@@ -613,7 +630,7 @@ mod tests {
                 Destination::TextHistoryQuery("2**10".into()),
             ),
         ] {
-            let Results::Destinations(items) = Results::for_query(query, &[]) else {
+            let Results::Destinations(items) = for_query(query, &[]) else {
                 panic!("文本历史查询被解析成了算式：{query}");
             };
             assert_eq!(items, vec![destination], "{query}");
