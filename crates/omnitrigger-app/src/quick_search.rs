@@ -43,7 +43,7 @@ use crate::{
 use actions::{matching_actions, SearchAction};
 use applications::ApplicationIndex;
 use calculator::{calculate, looks_like_calculation, CalculationError};
-use calendar::{calculate_date, DateError};
+use calendar::{calculate_date, looks_like_date_query, DateError};
 use color::{calculate_contrast, convert_color, ColorError};
 use conversion::{convert, estimate_transfer_time, suggested_targets, ConversionError};
 use duration::{convert_duration, DurationError};
@@ -433,7 +433,8 @@ impl Results {
         if let Some(targets) = suggested_targets(query) {
             return Self::ConversionTargets(targets);
         }
-        if looks_like_calculation(query) {
+        let is_date = looks_like_date_query(query);
+        if !is_date && looks_like_calculation(query) {
             return Self::Value(
                 calculate(query)
                     .map(|text| ResultValue {
@@ -485,6 +486,12 @@ impl Results {
                 .map(Destination::SettingsSection),
         );
         if destinations.is_empty() {
+            if is_date {
+                return Self::text_value(
+                    calculate_date(&query, chrono::Local::now().date_naive())
+                        .map_err(ValueError::Date),
+                );
+            }
             return tool_example_keyword(&query).map_or_else(
                 || Self::Destinations(destinations),
                 |keyword| Self::Help(matching_examples(keyword)),
@@ -1731,6 +1738,27 @@ mod tests {
         assert!(!matches!(
             index.results("calculator"),
             Results::ApplicationsLoading
+        ));
+    }
+
+    #[test]
+    fn routes_obvious_date_queries_and_keeps_numeric_subtraction() {
+        for (query, expected) in [
+            ("2026-11-21 星期几", "星期六"),
+            ("2026-W47", "2026-11-16 至 2026-11-22"),
+            ("2026-11-21", "1994"),
+        ] {
+            assert!(
+                matches!(for_query(query, &[]), Results::Value(Ok(value)) if value.text == expected),
+                "{query}"
+            );
+        }
+        let mut binding = crate::settings::defaults().remove(0);
+        binding.message = "明天".into();
+        let trigger = SearchTrigger::from_binding(&binding);
+        assert!(matches!(
+            for_query("明天", &[trigger]),
+            Results::Destinations(items) if items == [Destination::Trigger(binding.spec.id)]
         ));
     }
 

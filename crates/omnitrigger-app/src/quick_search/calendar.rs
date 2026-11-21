@@ -1,4 +1,4 @@
-use chrono::{Datelike, Days, Months, NaiveDate, Weekday};
+use chrono::{Datelike, Days, Months, NaiveDate, TimeDelta, Weekday};
 
 use super::calculator::normalize;
 
@@ -29,8 +29,10 @@ fn relative_day(input: &str) -> Option<(i8, &str)> {
         ("today", 0),
         ("昨天", -1),
         ("yesterday", -1),
+        ("前天", -2),
         ("明天", 1),
         ("tomorrow", 1),
+        ("后天", 2),
     ]
     .into_iter()
     .find_map(|(name, offset)| {
@@ -46,13 +48,20 @@ fn in_range(date: Option<NaiveDate>) -> Result<NaiveDate, DateError> {
         .ok_or(DateError::OutOfRange)
 }
 
+fn iso_date_prefix(input: &str) -> Option<(&str, &str)> {
+    let (date, rest) = input.split_at_checked(10)?;
+    date.bytes()
+        .enumerate()
+        .all(|(index, byte)| match index {
+            4 | 7 => byte == b'-',
+            _ => byte.is_ascii_digit(),
+        })
+        .then_some((date, rest.trim()))
+}
+
 fn date_operand(input: &str, today: NaiveDate) -> Result<(NaiveDate, &str), DateError> {
     if let Some((offset, rest)) = relative_day(input) {
-        let date = match offset {
-            -1 => today.pred_opt(),
-            1 => today.succ_opt(),
-            _ => Some(today),
-        };
+        let date = today.checked_add_signed(TimeDelta::days(i64::from(offset)));
         return Ok((in_range(date)?, rest));
     }
     if input.is_empty()
@@ -63,15 +72,9 @@ fn date_operand(input: &str, today: NaiveDate) -> Result<(NaiveDate, &str), Date
     {
         return Err(DateError::Incomplete);
     }
-    let (date, rest) = input.split_at_checked(10).ok_or(DateError::InvalidDate)?;
-    if !date.bytes().enumerate().all(|(index, byte)| match index {
-        4 | 7 => byte == b'-',
-        _ => byte.is_ascii_digit(),
-    }) {
-        return Err(DateError::InvalidDate);
-    }
+    let (date, rest) = iso_date_prefix(input).ok_or(DateError::InvalidDate)?;
     let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| DateError::InvalidDate)?;
-    Ok((date, rest.trim()))
+    Ok((date, rest))
 }
 
 fn weekday_query(input: &str) -> Option<&str> {
@@ -88,6 +91,34 @@ fn weekday_query(input: &str) -> Option<&str> {
     suffix
         .eq_ignore_ascii_case("weekday")
         .then_some(date.trim_end())
+}
+
+fn week_number_query(input: &str) -> Option<&str> {
+    input
+        .strip_suffix("第几周")
+        .or_else(|| input.strip_suffix("周数"))
+        .map(str::trim_end)
+}
+
+fn iso_week_parts(input: &str) -> Option<(&str, &str)> {
+    let (year, rest) = input.split_at_checked(4)?;
+    Some((year, rest.strip_prefix('-')?.strip_prefix(['W', 'w'])?))
+}
+
+pub(super) fn looks_like_date_query(query: &str) -> bool {
+    let input = normalize(query);
+    let input = input.trim();
+    let date_tail = |rest: &str| rest.is_empty() || rest.starts_with(['+', '-']);
+    if let Some((year, week)) = iso_week_parts(input) {
+        return year.bytes().all(|byte| byte.is_ascii_digit())
+            && week.bytes().all(|byte| byte.is_ascii_digit());
+    }
+    if let Some(date) = weekday_query(input).or_else(|| week_number_query(input)) {
+        return date.is_empty()
+            || relative_day(date).is_some_and(|(_, rest)| date_tail(rest))
+            || iso_date_prefix(date).is_some_and(|(_, rest)| date_tail(rest));
+    }
+    relative_day(input).is_some_and(|(_, rest)| date_tail(rest))
 }
 
 fn is_workday_unit(unit: &str) -> bool {
@@ -228,17 +259,11 @@ fn apply_date_offset(
 pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, DateError> {
     let input = normalize(input);
     let input = input.trim();
-    if let Some((year, week)) = input
-        .split_at_checked(4)
-        .and_then(|(year, rest)| Some((year, rest.strip_prefix('-')?.strip_prefix(['W', 'w'])?)))
-    {
+    if let Some((year, week)) = iso_week_parts(input) {
         return iso_week_range(year, week);
     }
     let weekday = weekday_query(input);
-    let week_number = input
-        .strip_suffix("第几周")
-        .or_else(|| input.strip_suffix("周数"))
-        .map(str::trim_end);
+    let week_number = week_number_query(input);
     let display_query = weekday.or(week_number);
     let input = display_query.map_or(input, |input| if input.is_empty() { "今天" } else { input });
     let (date, rest) = date_operand(input, today)?;
@@ -301,6 +326,37 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_unambiguous_calendar_requests_without_a_prefix() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (input, expected) in [
+            ("前天", "2026-11-19"),
+            ("后天 周几", "星期一"),
+            ("TOMORROW + 1周", "2026-11-29"),
+            ("2026-11-21 星期几", "星期六"),
+            ("2026-W47", "2026-11-16 至 2026-11-22"),
+            ("２０２６－Ｗ４７", "2026-11-16 至 2026-11-22"),
+            ("第几周", "2026-W47"),
+        ] {
+            assert!(looks_like_date_query(input), "{input}");
+            assert_eq!(
+                calculate_date(input, today).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for input in [
+            "2026-11-21",
+            "2026-11-21 + 1",
+            "2026-West",
+            "明天提醒",
+            "会议星期几",
+            "todayish",
+        ] {
+            assert!(!looks_like_date_query(input), "{input}");
+        }
+    }
 
     #[test]
     fn converts_dates_and_ranges_to_and_from_iso_weeks_across_year_boundaries() {
