@@ -27,6 +27,7 @@ pub(super) enum TextError {
     ReplacementTooLarge,
     NullCharacter,
     InvalidBase64,
+    InvalidHexBytes,
     InvalidUtf8,
     InvalidCodePoint,
     InvalidJsonString,
@@ -45,6 +46,7 @@ impl TextError {
             Self::ReplacementTooLarge => "替换结果超过 1 MiB",
             Self::NullCharacter => "结果含空字符，无法完整复制",
             Self::InvalidBase64 => "Base64 编码无效",
+            Self::InvalidHexBytes => "输入成对的十六进制数字，例如 E5 8C 97",
             Self::InvalidUtf8 => "解码结果不是 UTF-8 文本",
             Self::InvalidCodePoint => "输入以空格分隔的 Unicode 码位，例如 U+5317 U+4EAC",
             Self::InvalidJsonString => "请输入带双引号的 JSON 字符串",
@@ -119,6 +121,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "base64解码" | "base64-decode" => decode_base64(text, &STANDARD, &STANDARD_NO_PAD),
         "base64url编码" | "base64url-encode" => Ok(URL_SAFE_NO_PAD.encode(text)),
         "base64url解码" | "base64url-decode" => decode_base64(text, &URL_SAFE, &URL_SAFE_NO_PAD),
+        "utf8编码" | "utf8-hex" => Ok(encode_utf8_bytes(text)),
+        "utf8解码" | "utf8-hex-decode" => decode_utf8_bytes(text),
         "码位" | "codepoints" => Ok(encode_code_points(text)),
         "码位解码" | "codepoints-decode" => decode_code_points(text),
         "json转义" | "json-quote" => {
@@ -144,6 +148,38 @@ fn count_lines(text: &str) -> String {
         .map(|(line, count)| format!("{count}\t{line}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn encode_utf8_bytes(text: &str) -> String {
+    let mut encoded = String::new();
+    for byte in text.bytes() {
+        if !encoded.is_empty() {
+            encoded.push(' ');
+        }
+        write!(encoded, "{byte:02X}").expect("写入 String 不会出错");
+    }
+    encoded
+}
+
+fn decode_utf8_bytes(text: &str) -> Result<String, TextError> {
+    let mut bytes = Vec::with_capacity(text.len() / 2);
+    for group in text.split_whitespace() {
+        let digits = group
+            .strip_prefix("0x")
+            .or_else(|| group.strip_prefix("0X"))
+            .unwrap_or(group);
+        if digits.is_empty()
+            || !digits.len().is_multiple_of(2)
+            || !digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(TextError::InvalidHexBytes);
+        }
+        for pair in digits.as_bytes().chunks_exact(2) {
+            let pair = std::str::from_utf8(pair).expect("十六进制数字为 ASCII");
+            bytes.push(u8::from_str_radix(pair, 16).expect("每两个十六进制数字为一个字节"));
+        }
+    }
+    decoded_utf8(bytes)
 }
 
 fn encode_code_points(text: &str) -> String {
@@ -207,6 +243,10 @@ fn decode_base64(
     let bytes = decoder
         .decode(encoded)
         .map_err(|_| TextError::InvalidBase64)?;
+    decoded_utf8(bytes)
+}
+
+fn decoded_utf8(bytes: Vec<u8>) -> Result<String, TextError> {
     let result = String::from_utf8(bytes).map_err(|_| TextError::InvalidUtf8)?;
     if result.contains('\0') {
         return Err(TextError::NullCharacter);
@@ -266,6 +306,31 @@ fn replace_text(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn round_trips_utf8_bytes_in_hex_and_validates_decoded_text() {
+        for (query, expected) in [
+            ("UTF8编码 北京", "E5 8C 97 E4 BA AC"),
+            ("UTF8编码 “ A ”", "20 41 20"),
+            ("UTF8解码 e58c97 E4BAAC", "北京"),
+            ("utf8-hex-decode 0xf0 0X9F\r\n98 80", "😀"),
+            ("UTF8解码 20 41 20", " A "),
+            ("UTF8编码 \"\"", ""),
+            ("UTF8解码 \"\"", ""),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("UTF8解码 4 1", TextError::InvalidHexBytes),
+            ("UTF8解码 0x", TextError::InvalidHexBytes),
+            ("UTF8解码 +A", TextError::InvalidHexBytes),
+            ("UTF8解码 FF", TextError::InvalidUtf8),
+            ("UTF8解码 E5 8C", TextError::InvalidUtf8),
+            ("UTF8解码 00", TextError::NullCharacter),
+        ] {
+            assert_eq!(transform_text(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn edits_pasted_lines_without_changing_text_on_each_line() {

@@ -641,6 +641,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看 UTF-8 十六进制字节",
+        query: "文本: UTF8编码 北京",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "将 UTF-8 十六进制字节转回文字",
+        query: "文本: UTF8解码 E5 8C 97 E4 BA AC",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "转成 JSON 字符串",
         query: r#"文本: JSON转义 他写下 "你好""#,
     },
