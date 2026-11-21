@@ -100,14 +100,22 @@ fn percentage_literal(input: &str) -> Option<f64> {
     parser.0.is_empty().then_some(sign * value / 100.)
 }
 
+pub(super) const FULLWIDTH_ASCII_OFFSET: u32 = 0xfee0;
+
+pub(super) fn narrow_ascii_graphic(ch: char) -> char {
+    match ch {
+        '！'..='～' => char::from_u32(u32::from(ch) - FULLWIDTH_ASCII_OFFSET).unwrap_or(ch),
+        _ => ch,
+    }
+}
+
 pub(super) fn normalize(query: &str) -> String {
     query
         .chars()
         .map(|ch| match ch {
             '÷' => '/',
             '−' => '-',
-            '！'..='～' => char::from_u32(u32::from(ch) - 0xfee0).unwrap_or(ch),
-            _ => ch,
+            _ => narrow_ascii_graphic(ch),
         })
         .collect()
 }

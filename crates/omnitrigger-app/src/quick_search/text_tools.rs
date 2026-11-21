@@ -13,6 +13,8 @@ use base64::{
 use sha2::{Digest, Sha256, Sha512};
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::calculator::{narrow_ascii_graphic, FULLWIDTH_ASCII_OFFSET};
+
 const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +100,21 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
     match operation.as_str() {
         "大写" | "upper" | "uppercase" => Ok(text.to_uppercase()),
         "小写" | "lower" | "lowercase" => Ok(text.to_lowercase()),
+        "转半角" | "halfwidth" => Ok(text
+            .chars()
+            .map(|ch| match ch {
+                '\u{3000}' => ' ',
+                _ => narrow_ascii_graphic(ch),
+            })
+            .collect()),
+        "转全角" | "fullwidth" => Ok(text
+            .chars()
+            .map(|ch| match ch {
+                ' ' => '\u{3000}',
+                '!'..='~' => char::from_u32(u32::from(ch) + FULLWIDTH_ASCII_OFFSET).unwrap_or(ch),
+                _ => ch,
+            })
+            .collect()),
         "合并空白" | "collapse" => Ok(text.split_whitespace().collect::<Vec<_>>().join(" ")),
         "倒序" | "reverse" => Ok(text.graphemes(true).rev().collect()),
         "按行去重" | "unique-lines" => {
@@ -407,6 +424,18 @@ fn replace_text(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_ascii_width_including_space_and_preserves_other_characters() {
+        for (input, expected) in [
+            ("转半角 ＡＢＣ１２３！\u{3000}北京。", "ABC123! 北京。"),
+            ("转全角 ABC123! 北京。", "ＡＢＣ１２３！\u{3000}北京。"),
+            ("halfwidth \"\u{3000}！～ｶ−\t\n\u{3000}\"", " !~ｶ−\t\n "),
+            ("fullwidth \" !~ｶ−\t\n \"", "\u{3000}！～ｶ−\t\n\u{3000}"),
+        ] {
+            assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");
+        }
+    }
 
     #[test]
     fn sorts_digit_runs_by_value_and_keeps_equivalent_lines_in_input_order() {

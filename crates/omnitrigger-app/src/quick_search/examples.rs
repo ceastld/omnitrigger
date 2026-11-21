@@ -641,6 +641,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把全角字母和数字转为半角",
+        query: "文本: 转半角 ＡＢＣ１２３！",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把半角字母和数字转为全角",
+        query: "文本: 转全角 ABC123!",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按行排序",
         query: "文本: 按行排序 B\nA\nC",
     },
