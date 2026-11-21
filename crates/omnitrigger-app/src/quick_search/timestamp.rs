@@ -148,7 +148,7 @@ fn convert_timestamp_with_local(
             DurationError::Incomplete => TimestampError::Incomplete,
             DurationError::OutOfRange => TimestampError::OutOfRange,
             DurationError::Precision => TimestampError::UnsupportedPrecision,
-            DurationError::Invalid | DurationError::DivisionByZero => {
+            DurationError::Invalid | DurationError::InvalidUnit | DurationError::DivisionByZero => {
                 TimestampError::InvalidDuration
             }
         })?;

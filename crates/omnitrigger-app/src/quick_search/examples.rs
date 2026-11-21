@@ -132,6 +132,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "时长换算为指定单位",
+        query: "时长: 01:30:00 to min",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "估算下载时间",
         query: "下载: 1 GiB 按 100 Mbps",
     },

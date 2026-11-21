@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use super::calculator::normalize;
+use super::calculator::{format_result, normalize};
+use super::conversion::split_conversion;
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 const MAX_DURATION_NANOS: u128 = (u64::MAX as u128 + 1) * NANOS_PER_SECOND - 1;
@@ -12,6 +13,7 @@ const SCALE_OPERATORS: [char; 3] = ['*', '×', '/'];
 pub(super) enum DurationError {
     Incomplete,
     Invalid,
+    InvalidUnit,
     OutOfRange,
     Precision,
     DivisionByZero,
@@ -22,6 +24,7 @@ impl DurationError {
         match self {
             Self::Incomplete => "输入时长，例如 时长: 01:30:00 或 时长: 5400秒",
             Self::Invalid => "使用分:秒、时:分:秒或带单位的时长，可加减或乘除整数",
+            Self::InvalidUnit => "请选择时长单位 s、ms、µs、ns、min、h 或 d",
             Self::OutOfRange => "时长超出可转换范围",
             Self::Precision => "时长最小可精确到 1 纳秒",
             Self::DivisionByZero => "时长不能除以零",
@@ -32,6 +35,10 @@ impl DurationError {
 pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     let input = normalize(query).to_ascii_lowercase();
     let input = input.trim();
+    let (input, output) = match split_conversion(input) {
+        Some((source, output)) => (source, Some(output)),
+        None => (input, None),
+    };
     let mut negative = input.starts_with('-');
     let mut remaining = input.strip_prefix(['-', '+']).unwrap_or(input);
     let show_seconds = remaining.contains(':')
@@ -60,14 +67,13 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     }
 
     let nanos = bounded_duration(Some(total.unsigned_abs()))?;
+    let sign = if total < 0 { "-" } else { "" };
+    if let Some(output) = output {
+        return format_duration_unit(nanos, sign, output);
+    }
     let seconds = nanos / NANOS_PER_SECOND;
     let fraction = nanos % NANOS_PER_SECOND;
-    let suffix = if fraction == 0 {
-        String::new()
-    } else {
-        format!(".{fraction:09}").trim_end_matches('0').to_owned()
-    };
-    let sign = if total < 0 { "-" } else { "" };
+    let suffix = fraction_suffix(fraction, 9);
     if show_seconds {
         Ok(format!("{sign}{seconds}{suffix} 秒"))
     } else {
@@ -76,6 +82,38 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
             "{sign}{hours:02}:{minutes:02}:{remainder:02}{suffix}"
         ))
     }
+}
+
+fn fraction_suffix(fraction: u128, digits: usize) -> String {
+    if fraction == 0 {
+        String::new()
+    } else {
+        format!(".{fraction:0digits$}")
+            .trim_end_matches('0')
+            .to_owned()
+    }
+}
+
+fn format_duration_unit(nanos: u128, sign: &str, output: &str) -> Result<String, DurationError> {
+    let (symbol, divisor, digits) = match output.trim() {
+        "" => return Err(DurationError::Incomplete),
+        "s" | "秒" => ("s", NANOS_PER_SECOND, Some(9)),
+        "ms" | "毫秒" => ("ms", 1_000_000, Some(6)),
+        "us" | "µs" | "μs" | "微秒" => ("µs", 1_000, Some(3)),
+        "ns" | "纳秒" => ("ns", 1, Some(0)),
+        "min" | "m" | "分" | "分钟" => ("min", 60 * NANOS_PER_SECOND, None),
+        "h" | "时" | "小时" => ("h", 3_600 * NANOS_PER_SECOND, None),
+        "d" | "天" => ("d", 86_400 * NANOS_PER_SECOND, None),
+        _ => return Err(DurationError::InvalidUnit),
+    };
+    let amount = if let Some(digits) = digits {
+        let whole = nanos / divisor;
+        let suffix = fraction_suffix(nanos % divisor, digits);
+        format!("{whole}{suffix}")
+    } else {
+        format_result(nanos as f64 / divisor as f64).map_err(|_| DurationError::OutOfRange)?
+    };
+    Ok(format!("{sign}{amount} {symbol}"))
 }
 
 pub(super) fn elapsed_duration(input: &str) -> Result<Duration, DurationError> {
@@ -252,6 +290,28 @@ fn parse_units(mut input: &str) -> Result<u128, DurationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_whole_duration_expressions_to_explicit_units() {
+        for (query, expected) in [
+            ("01:30:00 to min", "90 min"),
+            ("45分钟 * 12 转 小时", "9 h"),
+            ("-1s + 250ms to ms", "-750 ms"),
+            ("1ns to μs", "0.001 µs"),
+            ("1ns to min", "1.66666666666667e-11 min"),
+            (
+                "18446744073709551615999999999ns to ns",
+                "18446744073709551615999999999 ns",
+            ),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(convert_duration("05:00 to"), Err(DurationError::Incomplete));
+        assert_eq!(
+            convert_duration("05:00 to kg"),
+            Err(DurationError::InvalidUnit)
+        );
+    }
 
     #[test]
     fn converts_clock_and_unit_durations_using_exact_seconds() {
