@@ -337,14 +337,46 @@ fn split_quantity(source: &str) -> (&str, &str) {
     })
 }
 
+fn feet_and_inches(source: &str) -> Option<(&str, &str)> {
+    let folded = source.to_ascii_lowercase();
+    let (feet, rest) = ["英尺", "feet", "foot", "ft", "′", "'"]
+        .into_iter()
+        .find_map(|unit| folded.split_once(unit))?;
+    let inches_start = source.len() - rest.len();
+    let inches = ["英寸", "inches", "inch", "in", "″", "\""]
+        .into_iter()
+        .find_map(|unit| rest.trim_end().strip_suffix(unit))?;
+    Some((
+        &source[..feet.len()],
+        &source[inches_start..][..inches.len()],
+    ))
+}
+
+fn parse_quantity(source: &str) -> Result<(f64, Unit), ConversionError> {
+    let evaluate_amount =
+        |amount: &str| evaluate(amount).map_err(|_| ConversionError::InvalidAmount);
+    if let Some((feet, inches)) = feet_and_inches(source) {
+        let feet = evaluate_amount(feet)?;
+        let inches = evaluate_amount(inches)?;
+        if inches < 0. {
+            return Err(ConversionError::InvalidAmount);
+        }
+        let amount = (feet.abs() * 12. + inches).copysign(feet);
+        return Ok((amount, Unit::parse("in")?));
+    }
+    let (amount, name) = split_quantity(source);
+    let unit = Unit::parse(name)?;
+    Ok((evaluate_amount(amount)?, unit))
+}
+
 pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     let input = normalize(query).replace(char::is_whitespace, " ");
     let (source, target) = split_conversion(input.trim())?;
     let base = Base::parse(target);
-    let (amount, unit) = if base.is_some() {
-        (source, "")
+    let amount = if base.is_some() {
+        source
     } else {
-        split_quantity(source)
+        split_quantity(source).0
     };
     if !looks_like_calculation(amount) {
         return None;
@@ -354,7 +386,7 @@ pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     }
     Some(match base {
         Some(base) => base.convert(amount),
-        None => convert_quantity(amount, unit, target),
+        None => convert_quantity(source, target),
     })
 }
 
@@ -366,9 +398,7 @@ pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
         Some(_) => return None,
         None => (input, " to"),
     };
-    let (amount, name) = split_quantity(source);
-    let source = Unit::parse(name).ok()?;
-    let amount = evaluate(amount).ok()?;
+    let (amount, source) = parse_quantity(source).ok()?;
     let items: Vec<_> = source
         .dimension
         .suggested_units(source.symbol)
@@ -392,11 +422,34 @@ pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
     (!items.is_empty()).then_some(items)
 }
 
-fn convert_quantity(amount: &str, name: &str, target: &str) -> Result<String, ConversionError> {
-    let amount = evaluate(amount).map_err(|_| ConversionError::InvalidAmount)?;
-    let source = Unit::parse(name)?;
+fn convert_quantity(source: &str, target: &str) -> Result<String, ConversionError> {
+    let (amount, source) = parse_quantity(source)?;
+    if matches!(
+        target.trim().to_ascii_lowercase().as_str(),
+        "ft in" | "feet inches" | "英尺英寸" | "英尺 英寸"
+    ) {
+        return format_feet_and_inches(amount, &source);
+    }
     let target = Unit::parse(target)?;
     format_conversion(amount, &source, &target)
+}
+
+fn format_feet_and_inches(amount: f64, source: &Unit) -> Result<String, ConversionError> {
+    if source.dimension != Dimension::Length {
+        return Err(ConversionError::DifferentDimensions);
+    }
+    let inch = Unit::parse("in")?;
+    let total = amount.abs() * (source.scale / inch.scale);
+    let remainder = total % 12.;
+    let mut feet = ((total - remainder) / 12.).round();
+    let mut inches = format_result(remainder).map_err(|_| ConversionError::OutOfRange)?;
+    if inches == "12" {
+        feet += 1.;
+        inches = "0".to_owned();
+    }
+    let feet = format_result(feet).map_err(|_| ConversionError::OutOfRange)?;
+    let sign = if amount < 0. { "-" } else { "" };
+    Ok(format!("{sign}{feet} ft {inches} in"))
 }
 
 fn format_conversion(amount: f64, source: &Unit, target: &Unit) -> Result<String, ConversionError> {
@@ -423,6 +476,36 @@ fn format_conversion(amount: f64, source: &Unit, target: &Unit) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_combinations_of_feet_and_inches_with_a_single_sign() {
+        for (query, expected) in [
+            ("5 ft 10 in to cm", "177.8 cm"),
+            ("5ft10in to cm", "177.8 cm"),
+            ("5'10\" to cm", "177.8 cm"),
+            ("-5′10″ to cm", "-177.8 cm"),
+            ("5英尺10.5英寸转厘米", "179.07 cm"),
+            ("-0 ft 10 in to cm", "-25.4 cm"),
+            ("5 feet 10 inches to ft", "5.83333333333333 ft"),
+            ("177.8 cm to ft in", "5 ft 10 in"),
+            ("30.48 cm to ft in", "1 ft 0 in"),
+            ("-25.4 cm 转 英尺英寸", "-0 ft 10 in"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.to_owned())), "{query}");
+        }
+        assert_eq!(
+            convert("5 ft -10 in to cm"),
+            Some(Err(ConversionError::InvalidAmount))
+        );
+        assert_eq!(
+            convert("1 kg to ft in"),
+            Some(Err(ConversionError::DifferentDimensions))
+        );
+        assert!(suggested_targets("5 ft 10 in")
+            .unwrap()
+            .iter()
+            .any(|item| { item.expression == "5 ft 10 in to cm" && item.result == "177.8 cm" }));
+    }
 
     #[test]
     fn converts_micro_and_nano_units_and_suggests_nearby_scales() {

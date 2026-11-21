@@ -279,6 +279,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "换算英尺和英寸的组合长度",
+        query: "5 ft 10 in to cm",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "把厘米转成英尺与英寸",
+        query: "177.8 cm to ft in",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算纳秒与微秒",
         query: "125 ns to us",
     },
