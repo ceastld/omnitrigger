@@ -116,8 +116,23 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "毫秒时长相加",
+        query: "时长: 00:00:01.25 + 500ms",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "Unix 时间戳",
         query: "时间戳: 1700000000123ms",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "微秒时间戳",
+        query: "时间戳: 1700000000123456us",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "时间换算为纳秒",
+        query: "时间戳: 1970-01-01T00:00:00.000000001Z",
     },
     Example {
         icon: Icon::Clock,

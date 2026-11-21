@@ -16,10 +16,72 @@ impl TimestampError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入时间戳或带时区的时间，例如 时间戳: 1700000000000ms",
-            Self::Invalid => "请输入 Unix 秒、毫秒或带时区的 RFC 3339 时间",
+            Self::Invalid => "请输入 Unix 秒、毫秒、微秒、纳秒或带时区的 RFC 3339 时间",
             Self::InvalidOffset => "请输入目标时区偏移，例如 +08:00 或 -05:30",
-            Self::UnsupportedPrecision => "请输入可以用整秒或毫秒表示的时间",
+            Self::UnsupportedPrecision => "请输入可用 Unix 纳秒表示的时间",
             Self::OutOfRange => "结果超出四位年份的时间范围",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TimestampUnit {
+    Seconds = 1,
+    Milliseconds = 1_000,
+    Microseconds = 1_000_000,
+    Nanoseconds = 1_000_000_000,
+}
+
+impl TimestampUnit {
+    fn split_suffix(input: &str) -> Option<(Self, &str)> {
+        use TimestampUnit::*;
+        [
+            (Milliseconds, &["ms", "毫秒"][..]),
+            (Microseconds, &["us", "µs", "μs", "微秒"][..]),
+            (Nanoseconds, &["ns", "纳秒"][..]),
+            (Seconds, &["s", "秒"][..]),
+        ]
+        .into_iter()
+        .find_map(|(unit, suffixes)| {
+            suffixes
+                .iter()
+                .find_map(|&suffix| input.strip_suffix(suffix).map(|quantity| (unit, quantity)))
+        })
+    }
+
+    fn from_subsecond(nanos: u32) -> Self {
+        if nanos == 0 {
+            Self::Seconds
+        } else if nanos.is_multiple_of(1_000_000) {
+            Self::Milliseconds
+        } else if nanos.is_multiple_of(1_000) {
+            Self::Microseconds
+        } else {
+            Self::Nanoseconds
+        }
+    }
+
+    fn nanos_per_unit(self) -> i128 {
+        1_000_000_000 / self as i128
+    }
+
+    fn date_format(self) -> SecondsFormat {
+        match self {
+            Self::Seconds => SecondsFormat::Secs,
+            Self::Milliseconds => SecondsFormat::Millis,
+            Self::Microseconds => SecondsFormat::Micros,
+            Self::Nanoseconds => SecondsFormat::Nanos,
+        }
+    }
+
+    fn format_unix(self, time: DateTime<Utc>) -> String {
+        let whole = i128::from(time.timestamp()) * self as i128;
+        let count = whole + i128::from(time.timestamp_subsec_nanos()) / self.nanos_per_unit();
+        match self {
+            Self::Seconds => count.to_string(),
+            Self::Milliseconds => format!("{count} ms"),
+            Self::Microseconds => format!("{count} µs"),
+            Self::Nanoseconds => format!("{count} ns"),
         }
     }
 }
@@ -68,33 +130,17 @@ fn convert_timestamp_with_local(
             Ok(time.to_rfc3339_opts(format, true))
         }
     };
-    let milliseconds = lower
-        .strip_suffix("ms")
-        .or_else(|| lower.strip_suffix("毫秒"));
-    let seconds = lower.strip_suffix('s').or_else(|| lower.strip_suffix('秒'));
-    let quantity = milliseconds.or(seconds);
-    if matches!(quantity.unwrap_or(lower).trim_end(), "现在" | "now") {
+    let suffixed = TimestampUnit::split_suffix(lower);
+    let (unit, quantity) = suffixed.unwrap_or((TimestampUnit::Seconds, lower));
+    let quantity = quantity.trim_end();
+    if matches!(quantity, "现在" | "now") {
         if display_in_zone {
-            let format = if milliseconds.is_some() {
-                SecondsFormat::Millis
-            } else {
-                SecondsFormat::Secs
-            };
-            return display_time(now, format);
+            return display_time(now, unit.date_format());
         }
-        return Ok(if milliseconds.is_some() {
-            format!("{} ms", now.timestamp_millis())
-        } else {
-            now.timestamp().to_string()
-        });
+        return Ok(unit.format_unix(now));
     }
-    if let Some(number) = quantity {
-        let (time, format) = parse_unix(number.trim_end(), milliseconds.is_some())?;
-        return display_time(time, format);
-    }
-    if integer(input) {
-        let (time, format) = parse_unix(input, false)?;
-        return display_time(time, format);
+    if suffixed.is_some() || integer(input) {
+        return display_time(parse_unix(quantity, unit)?, unit.date_format());
     }
 
     let date = DateTime::parse_from_rfc3339(input).map_err(|_| TimestampError::Invalid)?;
@@ -104,24 +150,18 @@ fn convert_timestamp_with_local(
         digits
             .bytes()
             .take_while(u8::is_ascii_digit)
-            .skip(3)
+            .skip(9)
             .any(|digit| digit != b'0')
     });
     if fraction >= 1_000_000_000 || extra_precision {
         return Err(TimestampError::UnsupportedPrecision);
     }
+    let unit = TimestampUnit::from_subsecond(fraction);
+    let time = date.with_timezone(&Utc);
     if display_in_zone {
-        let format = if fraction == 0 {
-            SecondsFormat::Secs
-        } else {
-            SecondsFormat::Millis
-        };
-        return display_time(date.with_timezone(&Utc), format);
-    }
-    if fraction == 0 {
-        Ok(date.timestamp().to_string())
+        display_time(time, unit.date_format())
     } else {
-        Ok(format!("{} ms", date.timestamp_millis()))
+        Ok(unit.format_unix(time))
     }
 }
 
@@ -148,27 +188,15 @@ fn integer(input: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn parse_unix(
-    input: &str,
-    milliseconds: bool,
-) -> Result<(DateTime<Utc>, SecondsFormat), TimestampError> {
+fn parse_unix(input: &str, unit: TimestampUnit) -> Result<DateTime<Utc>, TimestampError> {
     if !integer(input) {
         return Err(TimestampError::Invalid);
     }
-    let value = input.parse().map_err(|_| TimestampError::OutOfRange)?;
-    let (time, format) = if milliseconds {
-        (
-            DateTime::<Utc>::from_timestamp_millis(value),
-            SecondsFormat::Millis,
-        )
-    } else {
-        (
-            DateTime::<Utc>::from_timestamp(value, 0),
-            SecondsFormat::Secs,
-        )
-    };
-    let time = time.ok_or(TimestampError::OutOfRange)?;
-    Ok((time, format))
+    let value: i128 = input.parse().map_err(|_| TimestampError::OutOfRange)?;
+    let scale = unit as i128;
+    let seconds = i64::try_from(value.div_euclid(scale)).map_err(|_| TimestampError::OutOfRange)?;
+    let nanos = (value.rem_euclid(scale) * unit.nanos_per_unit()) as u32;
+    DateTime::<Utc>::from_timestamp(seconds, nanos).ok_or(TimestampError::OutOfRange)
 }
 
 fn ensure_four_digit_year(year: i32) -> Result<(), TimestampError> {
@@ -236,16 +264,44 @@ mod tests {
         assert_eq!(convert(""), Err(TimestampError::Incomplete));
         assert_eq!(convert("2026-11-21T00:00:00"), Err(TimestampError::Invalid));
         assert_eq!(
-            convert("1970-01-01T00:00:00.0001Z"),
-            Err(TimestampError::UnsupportedPrecision)
-        );
-        assert_eq!(
             convert("1970-01-01T00:00:00.0000000001Z"),
             Err(TimestampError::UnsupportedPrecision)
         );
         assert_eq!(
             convert("999999999999999999999"),
             Err(TimestampError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn preserves_microseconds_and_nanoseconds_across_unix_time_and_offsets() {
+        let now = DateTime::from_timestamp(1_700_000_000, 123_456_789).unwrap();
+        for (query, expected) in [
+            ("1700000000123456µs", "2023-11-14T22:13:20.123456Z"),
+            ("-1 μs", "1969-12-31T23:59:59.999999Z"),
+            ("-1ns", "1969-12-31T23:59:59.999999999Z"),
+            ("1969-12-31T23:59:59.999999999Z", "-1 ns"),
+            ("1970-01-01T00:00:00.0001Z", "100 µs"),
+            ("1970-01-01T00:00:00.000000001000Z", "1 ns"),
+            (
+                "1970-01-01T00:00:00.000000001Z to -03:30",
+                "1969-12-31T20:30:00.000000001-03:30",
+            ),
+            ("9999-12-31T23:59:59.000000001Z", "253402300799000000001 ns"),
+            ("253402300799000000001ns", "9999-12-31T23:59:59.000000001Z"),
+            ("现在微秒", "1700000000123456 µs"),
+            ("现在纳秒", "1700000000123456789 ns"),
+            ("now ns to +08:00", "2023-11-15T06:13:20.123456789+08:00"),
+        ] {
+            assert_eq!(
+                convert_timestamp(query, now).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            convert_timestamp("2016-12-31T23:59:60Z", now),
+            Err(TimestampError::UnsupportedPrecision)
         );
     }
 
