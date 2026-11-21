@@ -420,9 +420,13 @@ fn after_chord<'a>(mut query: &'a str, chord: &[String]) -> Option<&'a str> {
     }
 }
 
-pub(super) fn matches_query(row: &Row, mut query: &str) -> bool {
+pub(super) fn matches_query(row: &Row, query: &str) -> bool {
+    matches_text_and_chord(&row.text, &row.chord, query)
+}
+
+pub(super) fn matches_text_and_chord(text: &str, chord: &[String], mut query: &str) -> bool {
     while !query.is_empty() {
-        if let Some(rest) = after_chord(query, &row.chord) {
+        if let Some(rest) = after_chord(query, chord) {
             query = rest;
             continue;
         }
@@ -435,7 +439,7 @@ pub(super) fn matches_query(row: &Row, mut query: &str) -> bool {
             length += 2 + separator.len() + key.len();
         }
         let (literal, rest) = query.split_at(length);
-        if !row.text.contains(literal) {
+        if !text.contains(literal) {
             return false;
         }
         query = rest.trim_start();

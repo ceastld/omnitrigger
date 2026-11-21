@@ -325,6 +325,25 @@ struct Hit {
     source: HitSource,
 }
 
+impl Hit {
+    fn matches_search(&self, query: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+        let chord: Vec<_> = self
+            .caps
+            .iter()
+            .map(|cap| cap.label.to_lowercase())
+            .collect();
+        let mut text = self.message.to_lowercase();
+        for key in &chord {
+            text.push(' ');
+            text.push_str(key);
+        }
+        trigger_browse::matches_text_and_chord(&text, &chord, query)
+    }
+}
+
 struct HoldTrace {
     id: u64,
     elapsed_ms: u64,
@@ -768,6 +787,7 @@ struct Workspace {
     backup_restore: backup_ui::BackupRestore,
     update_ui: update_ui::UpdateUi,
     history_filter: HistoryFilter,
+    history_search: String,
     smooth_scroll: smooth_scroll::ScrollRegions,
     message: Entity<MessageInput>,
     trigger_mode: TriggerMode,
@@ -1305,6 +1325,7 @@ impl Workspace {
                 Page::Triggers
             },
             history_filter: HistoryFilter::All,
+            history_search: String::new(),
             smooth_scroll: smooth_scroll::ScrollRegions::default(),
             message,
             trigger_mode,
@@ -2745,6 +2766,11 @@ impl Workspace {
             quick_search::Destination::TextHistoryQuery(query) => {
                 self.text_history.search_from_quick_search(query, cx);
                 self.open_page(Page::TextHistory, cx);
+            }
+            quick_search::Destination::TriggerHistoryQuery(query) => {
+                self.history_search = query;
+                self.history_filter = HistoryFilter::All;
+                self.open_page(Page::History, cx);
             }
             quick_search::Destination::ActionLibraryQuery(query)
             | quick_search::Destination::ActionLibraryEntry { filter: query, .. } => {
@@ -7706,6 +7732,7 @@ impl Workspace {
 
     fn render_history(&self, cx: &mut Context<Self>) -> Div {
         let filter = self.history_filter;
+        let query = trigger_browse::normalize_query(&self.history_search);
         let tab = |id: &'static str, label: &'static str, value: HistoryFilter| {
             segment(id, label, filter == value).on_click(cx.listener(move |this, _, _, cx| {
                 this.history_filter = value;
@@ -7722,11 +7749,14 @@ impl Workspace {
             .border_color(rgb(theme::BORDER))
             .bg(rgb(theme::ROW));
         let mut shown = 0;
-        for hit in self.hits.iter().filter(|hit| match filter {
-            HistoryFilter::All => true,
-            HistoryFilter::Real => hit.source == HitSource::Input,
-            HistoryFilter::Panel => matches!(hit.source, HitSource::Panel | HitSource::Wheel),
-            HistoryFilter::Preview => hit.source == HitSource::Preview,
+        for hit in self.hits.iter().filter(|hit| {
+            let source_matches = match filter {
+                HistoryFilter::All => true,
+                HistoryFilter::Real => hit.source == HitSource::Input,
+                HistoryFilter::Panel => matches!(hit.source, HitSource::Panel | HitSource::Wheel),
+                HistoryFilter::Preview => hit.source == HitSource::Preview,
+            };
+            source_matches && hit.matches_search(&query)
         }) {
             shown += 1;
             let (tag, color) = match hit.source {
@@ -7786,7 +7816,11 @@ impl Workspace {
                         div()
                             .text_size(px(13.))
                             .text_color(rgb(theme::TEXT_DIM))
-                            .child("按下一个组合，这里会出现触发记录。"),
+                            .child(if query.is_empty() {
+                                "按下一个组合，这里会出现触发记录。"
+                            } else {
+                                "没有符合筛选条件的触发记录。"
+                            }),
                     ),
             );
         }
@@ -7844,6 +7878,30 @@ impl Workspace {
                         "测试提示",
                     )),
             )
+            .when(!query.is_empty(), |page| {
+                page.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(rgb(theme::TEXT_MUTED))
+                                .child(format!("筛选「{}」 · {shown} 条", self.history_search)),
+                        )
+                        .child(
+                            button("clear-history-search", "清除筛选", Tone::Ghost, true)
+                                .flex_none()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.history_search.clear();
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
             .child(self.smooth_scroll.wrap("history-list", list))
             .when(!self.action_log.is_empty(), |el| {
                 el.child(
@@ -9385,8 +9443,31 @@ fn consume_owned_shortcut_receipt(
 
 #[cfg(test)]
 mod tests {
-    use super::{should_refresh_workspace_for_backend_event, thousands, Page};
+    use super::{should_refresh_workspace_for_backend_event, thousands, Hit, HitSource, Page};
     use omnitrigger_windows::{BackendEvent, PanelKey};
+
+    #[test]
+    fn quick_search_filters_hit_history_by_chord_and_message() {
+        let binding = &super::settings::defaults()[0];
+        let hit = Hit {
+            time: "12:00".into(),
+            caps: super::caps_for(&binding.spec),
+            message: "打开窗口".into(),
+            source: HitSource::Input,
+        };
+        for query in ["", "打开", "CAPS＋W", "CapsLock + W 窗口"] {
+            assert!(
+                hit.matches_search(&super::trigger_browse::normalize_query(query)),
+                "{query}"
+            );
+        }
+        for query in ["CAPS + Q", "CapsLock+W 保存"] {
+            assert!(
+                !hit.matches_search(&super::trigger_browse::normalize_query(query)),
+                "{query}"
+            );
+        }
+    }
 
     #[test]
     fn background_input_and_diagnostics_do_not_redraw_unrelated_pages() {

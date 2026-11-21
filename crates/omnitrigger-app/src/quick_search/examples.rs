@@ -51,6 +51,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "筛选触发记录",
+        query: "触发记录: ",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "时长换算",
         query: "时长: 5400秒",
     },

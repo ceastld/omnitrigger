@@ -103,6 +103,7 @@ pub(super) enum Destination {
     Preset(&'static str),
     SettingsSection(SettingsSection),
     TextHistoryQuery(String),
+    TriggerHistoryQuery(String),
     ActionLibraryQuery(String),
     ActionLibraryEntry {
         title: String,
@@ -294,6 +295,9 @@ impl Results {
                 }
                 Scope::TextHistory => {
                     Self::Destinations(vec![Destination::TextHistoryQuery(term.to_owned())])
+                }
+                Scope::TriggerHistory => {
+                    Self::Destinations(vec![Destination::TriggerHistoryQuery(term.to_owned())])
                 }
                 Scope::Actions => {
                     let mut entries = matching_actions(actions, term, PAGE_RESULT_LIMIT - 1);
@@ -857,6 +861,14 @@ impl QuickSearch {
                         Destination::TextHistoryQuery(_) => {
                             (Icon::Clock, "搜索文本历史正文".to_owned(), None)
                         }
+                        Destination::TriggerHistoryQuery(term) => {
+                            let title = if term.is_empty() {
+                                "打开触发记录"
+                            } else {
+                                "筛选触发记录"
+                            };
+                            (Page::History.icon(), title.to_owned(), None)
+                        }
                         Destination::ActionLibraryQuery(term) => {
                             let title = if term.is_empty() {
                                 "打开动作库"
@@ -894,7 +906,10 @@ impl QuickSearch {
                             .when(selected, |row| {
                                 let hint = match &destination {
                                     Destination::TextHistoryQuery(_) => "Enter 查找",
-                                    Destination::ActionLibraryQuery(term) if !term.is_empty() => {
+                                    Destination::ActionLibraryQuery(term)
+                                    | Destination::TriggerHistoryQuery(term)
+                                        if !term.is_empty() =>
+                                    {
                                         "Enter 筛选"
                                     }
                                     _ => "Enter 打开",
@@ -1190,6 +1205,11 @@ mod tests {
                 Destination::TextHistoryQuery("2**10".into()),
             ),
             ("ACTION:", Destination::ActionLibraryQuery(String::new())),
+            (
+                "触发记录：CapsLock+W",
+                Destination::TriggerHistoryQuery("CapsLock+W".into()),
+            ),
+            ("hits:", Destination::TriggerHistoryQuery(String::new())),
             (
                 "动作库 ： 浏览器",
                 Destination::ActionLibraryQuery("浏览器".into()),

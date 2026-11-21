@@ -9,6 +9,7 @@ impl RecentDestinations {
     pub(crate) fn record(&mut self, destination: &Destination) {
         let item = match destination {
             Destination::TextHistoryQuery(_) => Destination::Page(Page::TextHistory),
+            Destination::TriggerHistoryQuery(_) => Destination::Page(Page::History),
             Destination::ActionLibraryQuery(_) | Destination::ActionLibraryEntry { .. } => {
                 Destination::Page(Page::Actions)
             }
