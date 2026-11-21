@@ -652,6 +652,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "列出日期区间内的所有周一",
+        query: "日期: 列出 2026-11-01 到 2026-11-30 每周一",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "列出日期区间内的工作日",
+        query: "日期: 列出 2026-11-20 到 2026-11-23 工作日",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按年月日计算日期差",
         query: "日期: 2025-03-15 - 2024-01-31 年月日",
     },
@@ -1645,6 +1655,8 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
     match scope {
+        Scope::Date if matches!(term, "列" | "列出") => {}
+        Scope::Statistics if matches!(term, "频" | "频数") => {}
         Scope::Json
         | Scope::Csv
         | Scope::TextTools

@@ -2,6 +2,8 @@ use chrono::{Datelike, Days, Months, NaiveDate, TimeDelta, Weekday};
 
 use super::calculator::normalize;
 
+const MAX_LISTED_DATES: usize = 366;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DateError {
     Incomplete,
@@ -12,6 +14,10 @@ pub(super) enum DateError {
     InvalidWeekdayOccurrence,
     MissingWeekdayOccurrence,
     InvalidOperation,
+    InvalidDateList,
+    ReversedDateRange,
+    NoMatchingDates,
+    TooManyDates,
     OutOfRange,
 }
 
@@ -28,6 +34,10 @@ impl DateError {
             }
             Self::MissingWeekdayOccurrence => "该月没有指定次序的星期",
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
+            Self::InvalidDateList => "例如 日期: 列出 2026-11-01 到 2026-11-30 每周一",
+            Self::ReversedDateRange => "开始日期须早于或等于结束日期",
+            Self::NoMatchingDates => "区间内没有符合条件的日期",
+            Self::TooManyDates => "最多可列出 366 个日期，请缩短区间",
             Self::OutOfRange => "结果超出四位年份的日期范围",
         }
     }
@@ -314,6 +324,65 @@ fn is_workday_unit(unit: &str) -> bool {
     )
 }
 
+enum DateSelection {
+    Daily,
+    Workdays,
+    Weekends,
+    Weekday(Weekday),
+}
+
+fn date_selection(rule: &str) -> Result<DateSelection, DateError> {
+    let lower = rule.to_ascii_lowercase();
+    match lower.as_str() {
+        "每天" | "daily" => Ok(DateSelection::Daily),
+        "周末" | "weekend" | "weekends" => Ok(DateSelection::Weekends),
+        rule if is_workday_unit(rule) => Ok(DateSelection::Workdays),
+        rule => rule
+            .strip_prefix("每周")
+            .or_else(|| rule.strip_prefix("每星期"))
+            .and_then(chinese_weekday)
+            .or_else(|| rule.parse::<Weekday>().ok())
+            .map(DateSelection::Weekday)
+            .ok_or(DateError::InvalidDateList),
+    }
+}
+
+fn list_dates(input: &str, today: NaiveDate) -> Result<String, DateError> {
+    if input.is_empty() {
+        return Err(DateError::InvalidDateList);
+    }
+    let (start, rest) = date_operand(input, today)?;
+    let rest = rest
+        .strip_prefix(['到', '至'])
+        .or_else(|| {
+            let (separator, end) = rest.split_once(char::is_whitespace)?;
+            separator.eq_ignore_ascii_case("to").then_some(end)
+        })
+        .ok_or(DateError::InvalidDateList)?;
+    let (end, rule) = date_operand(rest.trim_start(), today)?;
+    let selection = date_selection(rule)?;
+    if end < start {
+        return Err(DateError::ReversedDateRange);
+    }
+    let days = end.signed_duration_since(start).num_days();
+    let dates: Vec<_> = (0..=days)
+        .map(|offset| start + TimeDelta::days(offset))
+        .filter(|date| match selection {
+            DateSelection::Daily => true,
+            DateSelection::Workdays => date.weekday().num_days_from_monday() < 5,
+            DateSelection::Weekends => date.weekday().num_days_from_monday() >= 5,
+            DateSelection::Weekday(day) => date.weekday() == day,
+        })
+        .take(MAX_LISTED_DATES + 1)
+        .map(|date| date.to_string())
+        .collect();
+    match dates.len() {
+        0 => Err(DateError::NoMatchingDates),
+        count if count > MAX_LISTED_DATES => Err(DateError::TooManyDates),
+        _ => Ok(dates.join("\n")),
+    }
+}
+
 fn iso_week_range(year: &str, week: &str) -> Result<String, DateError> {
     if week.is_empty() {
         return Err(DateError::Incomplete);
@@ -524,6 +593,10 @@ fn apply_date_offset(
 pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, DateError> {
     let input = normalize(input);
     let input = input.trim();
+    let (operation, rest) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+    if operation == "列出" || operation.eq_ignore_ascii_case("list") {
+        return list_dates(rest.trim_start(), today);
+    }
     if let Some((year, day)) = year_day_parts(input) {
         let date = day
             .parse()
@@ -650,6 +723,48 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_inclusive_date_ranges_filtered_by_day_type() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            (
+                "列出 2026-11-01 到 2026-11-30 每周一",
+                "2026-11-02\n2026-11-09\n2026-11-16\n2026-11-23\n2026-11-30",
+            ),
+            (
+                "list 2026-W47-5 TO 下周一 workdays",
+                "2026-11-20\n2026-11-23",
+            ),
+            (
+                "列出 2024年2月28日 至 2024/03/01 每天",
+                "2024-02-28\n2024-02-29\n2024-03-01",
+            ),
+            ("列出 今天 到 明天 周末", "2026-11-21\n2026-11-22"),
+            ("列出 9999-12-31 到 9999-12-31 每天", "9999-12-31"),
+            ("list 2026-11-01 to 2026-11-03 MON", "2026-11-02"),
+        ] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            ("列出", DateError::InvalidDateList),
+            ("列出 今天 到 明天 每周八", DateError::InvalidDateList),
+            ("列出 今天 到 明天 工作日", DateError::NoMatchingDates),
+            ("列出 明天 到 今天 每天", DateError::ReversedDateRange),
+            (
+                "列出 2024-01-01 到 2025-01-01 每天",
+                DateError::TooManyDates,
+            ),
+        ] {
+            assert_eq!(calculate_date(query, today), Err(error), "{query}");
+        }
+        let year = calculate_date("列出 2024-01-01 到 2024-12-31 每天", today).unwrap();
+        assert_eq!(year.lines().count(), MAX_LISTED_DATES);
+    }
 
     #[test]
     fn converts_iso_week_dates_and_supports_them_as_date_operands() {
