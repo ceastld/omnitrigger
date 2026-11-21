@@ -52,10 +52,12 @@ enum Dimension {
 }
 
 impl Dimension {
-    fn suggested_units(&self) -> &'static [&'static str] {
+    fn suggested_units(&self, source: &str) -> &'static [&'static str] {
         match self {
+            Self::Length if matches!(source, "nm" | "μm") => &["nm", "μm", "mm", "cm", "m"],
             Self::Length => &["m", "mi", "km", "cm", "ft"],
             Self::Mass => &["kg", "g", "lb", "oz", "mg"],
+            Self::Time if matches!(source, "ns" | "μs") => &["ns", "μs", "ms", "s", "min"],
             Self::Time => &["s", "min", "h", "ms", "d"],
             Self::Temperature => &["°C", "°F", "K"],
             Self::Area => &["m²", "ft²", "ha", "km²", "cm²"],
@@ -128,6 +130,8 @@ impl Unit {
             _ => {}
         }
         let unit = match name.to_ascii_lowercase().as_str() {
+            "nm" | "纳米" => Self::linear("nm", Length, 1e-9),
+            "μm" | "µm" | "um" | "微米" => Self::linear("μm", Length, 1e-6),
             "mm" | "毫米" => Self::linear("mm", Length, 0.001),
             "cm" | "厘米" => Self::linear("cm", Length, 0.01),
             "m" | "米" => Self::linear("m", Length, 1.),
@@ -141,6 +145,8 @@ impl Unit {
             "kg" | "千克" | "公斤" => Self::linear("kg", Mass, 1000.),
             "oz" | "盎司" => Self::linear("oz", Mass, 28.349523125),
             "lb" | "lbs" | "磅" => Self::linear("lb", Mass, 453.59237),
+            "ns" | "纳秒" => Self::linear("ns", Time, 1e-9),
+            "μs" | "µs" | "us" | "微秒" => Self::linear("μs", Time, 1e-6),
             "ms" | "毫秒" => Self::linear("ms", Time, 0.001),
             "s" | "sec" | "秒" => Self::linear("s", Time, 1.),
             "min" | "分钟" => Self::linear("min", Time, 60.),
@@ -355,23 +361,24 @@ pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
 pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
     let input = normalize(query).replace(char::is_whitespace, " ");
     let input = input.trim();
-    let (source, target) = split_conversion(input)?;
-    if !target.trim().is_empty() {
-        return None;
-    }
+    let (source, separator) = match split_conversion(input) {
+        Some((source, target)) if target.trim().is_empty() => (source, ""),
+        Some(_) => return None,
+        None => (input, " to"),
+    };
     let (amount, name) = split_quantity(source);
-    let amount = evaluate(amount).ok()?;
     let source = Unit::parse(name).ok()?;
+    let amount = evaluate(amount).ok()?;
     let items: Vec<_> = source
         .dimension
-        .suggested_units()
+        .suggested_units(source.symbol)
         .iter()
         .filter_map(|name| {
             let target = Unit::parse(name).ok()?;
             if target.symbol == source.symbol {
                 return None;
             }
-            let expression = format!("{input} {name}");
+            let expression = format!("{input}{separator} {name}");
             if expression.chars().count() > QUERY_LIMIT {
                 return None;
             }
@@ -416,6 +423,22 @@ fn format_conversion(amount: f64, source: &Unit, target: &Unit) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_micro_and_nano_units_and_suggests_nearby_scales() {
+        for (query, expected) in [
+            ("500 nm to um", "0.5 μm"),
+            ("1 µm to nm", "1000 nm"),
+            ("1000 μs to ms", "1 ms"),
+            ("125 纳秒 转 微秒", "0.125 μs"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.to_owned())), "{query}");
+        }
+        for (query, expected) in [("500 nm", "0.5 μm"), ("125 ns", "0.125 μs")] {
+            let results = suggested_targets(query).unwrap();
+            assert_eq!(results[0].result, expected, "{query}");
+        }
+    }
 
     #[test]
     fn converts_force_and_acceleration_without_confusing_knots_or_mass() {

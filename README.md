@@ -66,7 +66,8 @@
 - 算式可直接使用 `0b`、`0o`、`0x` 开头的整数，例如 `0xFF + 0b1` 得到 `256`。这些操作数的绝对值最大为 `2^53 - 1`。
 - 输入 `180° to rad`、`1 atm to kPa` 或 `2 MHz to kHz` 可换算角度、压强和频率。压强和频率的单位前缀区分 `m`（毫）与 `M`（兆）。
 - 输入 `8 Mbps to MB/s` 可换算数据速率，结果为 `1 MB/s`。
-- 输入 `10 km to` 或 `8Mbps转` 会显示常见目标单位和换算预览。按方向键选择，再按回车填入完整换算式。
+- 输入 `500 nm to um` 得到 `0.5 μm`，输入 `125 ns to us` 得到 `0.125 μs`。微米、纳米、微秒和纳秒会优先建议相近量级的单位。
+- 输入 `10 km` 或 `8Mbps` 就会显示常见目标单位和换算预览，也可以继续输入 `to` 或 `转`。按方向键选择，再按回车填入完整换算式。
 - 输入 `1度电转MJ` 得到 `3.6 MJ`，输入 `500 mW to W` 得到 `0.5 W`。
 - 输入 `1000 kg/m³ to g/cm³` 可换算密度，输入 `1 L/min to m³/h` 可换算体积流量，得到 `0.06 m³/h`。
 - 输入 `1 kgf to N` 可换算力，得到 `9.80665 N`。输入 `1 g0 to m/s²` 可将标准重力加速度换算为 `9.80665 m/s²`。换算系数见 [NIST SI 指南](https://www.nist.gov/pml/special-publication-811/nist-guide-si-appendix-b-conversion-factors/nist-guide-si-appendix-b9)。

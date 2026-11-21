@@ -274,6 +274,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "换算纳米与微米",
+        query: "500 nm to um",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "换算纳秒与微秒",
+        query: "125 ns to us",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算 HEX 和 RGB 颜色",
         query: "颜色: #3A86FF",
     },

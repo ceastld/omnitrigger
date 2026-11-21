@@ -386,6 +386,9 @@ impl Results {
                 result => Self::text_value(result.map_err(ValueError::Conversion)),
             };
         }
+        if let Some(targets) = suggested_targets(query) {
+            return Self::ConversionTargets(targets);
+        }
         if looks_like_calculation(query) {
             return Self::Value(
                 calculate(query)
@@ -1224,6 +1227,16 @@ mod tests {
             &[],
             &RecentSearch::default(),
         )
+    }
+
+    #[test]
+    fn suggests_unit_targets_as_soon_as_the_quantity_is_complete() {
+        let Results::ConversionTargets(items) = for_query("500 nm", &[]) else {
+            panic!("没有显示可选换算单位");
+        };
+        assert_eq!(items[0].expression, "500 nm to μm");
+        assert_eq!(items[0].result, "0.5 μm");
+        assert_eq!(for_query("2 + 3", &[]).arithmetic_result(), Some("5"));
     }
 
     #[test]
