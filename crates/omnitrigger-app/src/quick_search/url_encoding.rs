@@ -1,4 +1,5 @@
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use url::Url;
 
 const URL_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'-')
@@ -19,6 +20,7 @@ pub(super) enum UrlEncodingError {
     InvalidUtf8,
     NullCharacter,
     MissingParameters,
+    InvalidUrl,
 }
 
 impl UrlEncodingError {
@@ -30,6 +32,7 @@ impl UrlEncodingError {
             Self::InvalidUtf8 => "解码结果无法表示为 UTF-8 文本",
             Self::NullCharacter => "解码结果含空字符，无法完整复制",
             Self::MissingParameters => "没有可解析的查询参数",
+            Self::InvalidUrl => "输入带协议的 URL，例如 https://example.invalid/",
         }
     }
 }
@@ -50,8 +53,30 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
             .replace("%20", "+")),
         "表单解码" | "form-decode" => decode_value(&value.replace('+', " ")),
         "参数" | "查询参数" | "params" => decode_parameters(value),
+        "拆解" | "inspect" => inspect_url(value),
         _ => Err(UrlEncodingError::InvalidOperation),
     }
+}
+
+fn inspect_url(input: &str) -> Result<String, UrlEncodingError> {
+    let url = Url::parse(input).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    let mut lines = vec![format!("协议 {}", url.scheme())];
+    if let Some(host) = url.host_str() {
+        lines.push(format!("主机 {host}"));
+    }
+    if let Some(port) = url.port_or_known_default() {
+        lines.push(format!("有效端口 {port}"));
+    }
+    for (label, value) in [
+        ("路径", Some(url.path())),
+        ("查询串", url.query()),
+        ("片段", url.fragment()),
+    ] {
+        if let Some(value) = value {
+            lines.push(format!("{label} {value}"));
+        }
+    }
+    Ok(lines.join("\n"))
 }
 
 fn decode_value(value: &str) -> Result<String, UrlEncodingError> {
@@ -108,6 +133,26 @@ fn decode_parameters(value: &str) -> Result<String, UrlEncodingError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shows_parsed_url_components_and_effective_ports() {
+        assert_eq!(
+            convert_url_component("拆解 HTTPS://user:sample@Example.INVALID:8443/a%20b?x=a+b#part").as_deref(),
+            Ok("协议 https\n主机 example.invalid\n有效端口 8443\n路径 /a%20b\n查询串 x=a+b\n片段 part")
+        );
+        assert_eq!(
+            convert_url_component("inspect https://[::1]:443/").as_deref(),
+            Ok("协议 https\n主机 [::1]\n有效端口 443\n路径 /")
+        );
+        assert_eq!(
+            convert_url_component("拆解 mailto:dev@example.invalid").as_deref(),
+            Ok("协议 mailto\n路径 dev@example.invalid")
+        );
+        assert_eq!(
+            convert_url_component("拆解 /route?x=1"),
+            Err(UrlEncodingError::InvalidUrl)
+        );
+    }
 
     #[test]
     fn converts_url_components_with_unicode_spaces_and_literal_plus() {

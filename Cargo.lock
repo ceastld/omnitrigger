@@ -3013,6 +3013,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "unicode-segmentation",
+ "url",
  "windows",
  "zip",
 ]
