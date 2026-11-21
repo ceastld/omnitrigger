@@ -26,7 +26,18 @@ pub(super) fn calculate(query: &str) -> Result<String, CalculationError> {
         return Err(CalculationError::TooLong);
     }
 
-    let normalized: String = query
+    let normalized = normalize(query);
+    let input = normalized.trim();
+    let mut parser = Parser(input.strip_prefix('=').unwrap_or(input));
+    let value = parser.expression(0)?;
+    if !parser.0.trim().is_empty() {
+        return Err(CalculationError::Invalid);
+    }
+    format_result(value)
+}
+
+pub(super) fn normalize(query: &str) -> String {
+    query
         .chars()
         .map(|ch| match ch {
             '÷' => '/',
@@ -34,14 +45,11 @@ pub(super) fn calculate(query: &str) -> Result<String, CalculationError> {
             '！'..='～' => char::from_u32(u32::from(ch) - 0xfee0).unwrap_or(ch),
             _ => ch,
         })
-        .collect();
-    let input = normalized.trim();
-    let mut parser = Parser(input.strip_prefix('=').unwrap_or(input));
-    let value = parser.expression(0)?;
-    if !parser.0.trim().is_empty() {
-        return Err(CalculationError::Invalid);
-    }
+        .collect()
+}
 
+pub(super) fn format_result(value: f64) -> Result<String, CalculationError> {
+    let value = finite(value)?;
     if value == 0.0 {
         return Ok("0".into());
     }

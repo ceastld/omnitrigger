@@ -173,7 +173,7 @@ const TOAST_HEIGHT: f32 = 108.;
 /// GPUI 无边框窗口会自行收窄客户区，右下留出透明余量，避免浮层被裁切。
 const TOAST_MARGIN: f32 = 24.;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Actions,
     Wheels,
@@ -184,6 +184,35 @@ enum Page {
     TextHistory,
     Diagnostics,
     Settings,
+}
+
+impl Page {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Actions => "动作库",
+            Self::Wheels => "轨道轮盘",
+            Self::Triggers => "触发器",
+            Self::Presets => "触发预设",
+            Self::Extensions => "扩展",
+            Self::History => "触发记录",
+            Self::TextHistory => "文本历史",
+            Self::Diagnostics => "输入诊断",
+            Self::Settings => "设置",
+        }
+    }
+
+    fn icon(self) -> Icon {
+        match self {
+            Self::Actions => Icon::Grid,
+            Self::Wheels => Icon::Wheel,
+            Self::Triggers => Icon::Keyboard,
+            Self::Presets => Icon::Layers,
+            Self::Extensions => Icon::Plug,
+            Self::History | Self::TextHistory => Icon::Clock,
+            Self::Diagnostics => Icon::Pulse,
+            Self::Settings => Icon::Sliders,
+        }
+    }
 }
 
 fn reveal_workspace_window(window: &mut Window) {
@@ -2667,9 +2696,20 @@ impl Workspace {
             }
             self.quick_search = None;
         }
-        let search = quick_search::QuickSearch::open(display, self.theme_mode, cx)?;
+        let search =
+            quick_search::QuickSearch::open(display, self.theme_mode, cx.weak_entity(), cx)?;
         self.quick_search = Some(search);
         Ok(Some(search))
+    }
+
+    fn open_quick_search_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.recording || self.mode.history_only() {
+            return;
+        }
+        self.open_page(page, cx);
+        let _ = self.main_window.update(cx, |_, window, _| {
+            reveal_workspace_window(window);
+        });
     }
 
     fn toggle_panel(&mut self, cx: &mut Context<Self>) {
@@ -4407,11 +4447,7 @@ impl Workspace {
                     }),
             );
 
-        let nav = |id: &'static str,
-                   page: Page,
-                   glyph: Icon,
-                   label: &'static str,
-                   count: Option<usize>| {
+        let nav = |id: &'static str, page: Page, count: Option<usize>| {
             let active = self.page == page;
             div()
                 .id(id)
@@ -4447,7 +4483,7 @@ impl Workspace {
                     el.hover(|s| s.bg(rgb(theme::ROW)).text_color(rgb(theme::TEXT_SOFT)))
                 })
                 .child(icon(
-                    glyph,
+                    page.icon(),
                     16.,
                     if active {
                         theme::ACCENT
@@ -4455,7 +4491,7 @@ impl Workspace {
                         theme::TEXT_DIM
                     },
                 ))
-                .child(div().flex_1().child(label))
+                .child(div().flex_1().child(page.title()))
                 .when_some(count, |el, count| {
                     el.child(
                         div()
@@ -4550,70 +4586,28 @@ impl Workspace {
                             .child(nav(
                                 "nav-triggers",
                                 Page::Triggers,
-                                Icon::Keyboard,
-                                "触发器",
                                 Some(self.triggers.bindings().len()),
                             ))
-                            .child(nav(
-                                "nav-actions",
-                                Page::Actions,
-                                Icon::Grid,
-                                "动作库",
-                                None,
-                            ))
+                            .child(nav("nav-actions", Page::Actions, None))
                             .child(nav(
                                 "nav-wheels",
                                 Page::Wheels,
-                                Icon::Wheel,
-                                "轨道轮盘",
                                 Some(self.wheels.wheels.len()),
                             ))
-                            .child(nav(
-                                "nav-presets",
-                                Page::Presets,
-                                Icon::Layers,
-                                "触发预设",
-                                None,
-                            ))
-                            .child(nav(
-                                "nav-extensions",
-                                Page::Extensions,
-                                Icon::Plug,
-                                "扩展",
-                                None,
-                            ))
-                            .child(nav(
-                                "nav-text-history",
-                                Page::TextHistory,
-                                Icon::Clock,
-                                "文本历史",
-                                None,
-                            ))
+                            .child(nav("nav-presets", Page::Presets, None))
+                            .child(nav("nav-extensions", Page::Extensions, None))
+                            .child(nav("nav-text-history", Page::TextHistory, None))
                             .child(div().h(px(10.)))
                             .child(group("监控"))
                             .child(nav(
                                 "nav-history",
                                 Page::History,
-                                Icon::Clock,
-                                "触发记录",
                                 (!self.hits.is_empty()).then_some(self.hits.len()),
                             ))
-                            .child(nav(
-                                "nav-diagnostics",
-                                Page::Diagnostics,
-                                Icon::Pulse,
-                                "输入诊断",
-                                None,
-                            )),
+                            .child(nav("nav-diagnostics", Page::Diagnostics, None)),
                     )
                     .child(div().flex_1())
-                    .child(nav(
-                        "nav-settings",
-                        Page::Settings,
-                        Icon::Sliders,
-                        "设置",
-                        None,
-                    )),
+                    .child(nav("nav-settings", Page::Settings, None)),
             )
     }
 
