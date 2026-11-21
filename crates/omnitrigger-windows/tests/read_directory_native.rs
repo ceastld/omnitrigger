@@ -143,7 +143,7 @@ fn read_directory_real_windows_options_preserve_metadata_precision_and_filters()
     use std::time::{Duration, UNIX_EPOCH};
     let fixture = Fixture::new();
     fs::write(fixture.root.join("a.txt"), b"synthetic").unwrap();
-    fs::write(fixture.root.join("z.txt"), b"synthetic").unwrap();
+    fs::write(fixture.root.join("z.txt"), b"").unwrap();
     fs::create_dir(fixture.root.join("child")).unwrap();
     let file = fs::OpenOptions::new()
         .write(true)
@@ -204,6 +204,24 @@ fn read_directory_real_windows_options_preserve_metadata_precision_and_filters()
             .map(|entry| entry.name.as_str())
             .collect::<Vec<_>>(),
         ["z.txt", "a.txt"]
+    );
+    let largest = read_local_directory_with_options(
+        fixture.path(),
+        &LocalDirectoryOptions {
+            order: DirectoryOrder::SizeDescending,
+            metadata: false,
+            ..options.clone()
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    assert!(largest.iter().all(|entry| entry.metadata.is_none()));
+    assert_eq!(
+        largest
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        ["a.txt", "z.txt", "child"]
     );
     let filtered = read_local_directory_with_options(
         fixture.path(),

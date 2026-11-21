@@ -183,15 +183,12 @@ struct FileQuery<'a> {
 fn split_query(query: &str) -> Option<FileQuery<'_>> {
     let (directory, filter) = query.split_once('|')?;
     let directory = super::path_tools::strip_path_quotes(directory.trim());
-    let (filter, order) = match filter.split_once('|') {
-        Some((filter, order))
-            if order.trim() == "最近修改" || order.trim().eq_ignore_ascii_case("modified") =>
-        {
-            (filter, DirectoryOrder::ModifiedDescending)
-        }
-        Some((filter, order)) if order.trim().is_empty() => (filter, DirectoryOrder::Name),
-        Some(_) => return None,
-        None => (filter, DirectoryOrder::Name),
+    let (filter, order) = filter.split_once('|').unwrap_or((filter, ""));
+    let order = match order.trim().to_ascii_lowercase().as_str() {
+        "" => DirectoryOrder::Name,
+        "最近修改" | "modified" => DirectoryOrder::ModifiedDescending,
+        "大小" | "size" => DirectoryOrder::SizeDescending,
+        _ => return None,
     };
     (!directory.is_empty()).then_some(FileQuery {
         directory,
@@ -357,5 +354,16 @@ mod tests {
         ));
         let ordinary = index.request(Some(r"C:\Work | Budget")).unwrap();
         assert_eq!(ordinary.pattern, None);
+    }
+
+    #[test]
+    fn requests_file_size_order_with_the_same_filename_pattern() {
+        let mut index = LocalFilesIndex::default();
+        let newest = index.request(Some(r"C:\Work | *.txt | 最近修改")).unwrap();
+        let largest = index.request(Some(r"C:\Work | *.txt | 大小")).unwrap();
+        assert!(newest.cancelled.load(Ordering::Relaxed));
+        assert_eq!(largest.order, DirectoryOrder::SizeDescending);
+        assert_eq!(largest.pattern.as_deref(), Some("*.txt"));
+        assert!(index.request(Some(r"C:\Work | *.txt | SIZE")).is_none());
     }
 }

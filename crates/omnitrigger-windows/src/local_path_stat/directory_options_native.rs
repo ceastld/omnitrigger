@@ -119,7 +119,7 @@ pub(super) fn read_options(
         unsafe { FindFirstFileW(PCWSTR(wide.as_ptr()), &mut data) }.map(FindHandle)
     });
     let mut collector = Collector::new(path, options.max_entries);
-    let mut write_times = Vec::new();
+    let mut sort_keys = Vec::new();
     // 成功句柄在system_step的闭包内建立RAII，迟到取消时也会释放。
     let find = match first? {
         Ok(handle) => Some(handle),
@@ -147,8 +147,16 @@ pub(super) fn read_options(
                 collector.add(name, data.dwFileAttributes)?;
             }
             if collector.entries.len() > before {
-                if options.order == DirectoryOrder::ModifiedDescending {
-                    write_times.push(file_time_ticks(data.ftLastWriteTime));
+                match options.order {
+                    DirectoryOrder::ModifiedDescending => {
+                        sort_keys.push(Some(file_time_ticks(data.ftLastWriteTime)));
+                    }
+                    DirectoryOrder::SizeDescending => {
+                        let length =
+                            (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow);
+                        sort_keys.push((!directory).then_some(length));
+                    }
+                    DirectoryOrder::Name | DirectoryOrder::Native => {}
                 }
                 if let Some(clock) = &clock {
                     let metadata = system_step(check, || clock.metadata(&data, before))??;
@@ -186,10 +194,10 @@ pub(super) fn read_options(
     Ok(match options.order {
         DirectoryOrder::Name => collector.finish(),
         DirectoryOrder::Native => collector.entries,
-        DirectoryOrder::ModifiedDescending => {
-            let mut entries: Vec<_> = write_times.into_iter().zip(collector.entries).collect();
-            entries.sort_by(|(left_time, left), (right_time, right)| {
-                right_time.cmp(left_time).then_with(|| left.name.cmp(&right.name))
+        DirectoryOrder::ModifiedDescending | DirectoryOrder::SizeDescending => {
+            let mut entries: Vec<_> = sort_keys.into_iter().zip(collector.entries).collect();
+            entries.sort_by(|(left_key, left), (right_key, right)| {
+                right_key.cmp(left_key).then_with(|| left.name.cmp(&right.name))
             });
             entries.into_iter().map(|(_, entry)| entry).collect()
         }
