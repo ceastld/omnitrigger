@@ -125,7 +125,9 @@
 - 输入 `URL: 参数 https://example.invalid/?tag=a+1&tag=b%2Bc` 可逐行查看解码后的名称和值。也可粘贴查询串，结果按原有顺序保留重名参数。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 输入 `URL: 拆解 https://example.invalid:8443/a%20b?x=1#part` 可查看协议、主机、有效端口、路径、查询串和片段。HTTP 与 HTTPS 会采用显式端口或协议的默认端口。 [WHATWG URL 组成](https://url.spec.whatwg.org/#concept-url)
 - 输入 `URL: 去查询串 https://example.invalid/doc?source=mail#part` 得到 `https://example.invalid/doc#part`。结果使用 URL 解析后的格式，保留路径和片段。
+- 输入 `URL: 去参数 source https://example.invalid/doc?q=a%20b&source=mail#part` 得到 `https://example.invalid/doc?q=a%20b#part`。同名参数会一起移除，其余参数保留编码和顺序。名称区分大小写，空格可写作 `%20`。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 输入 `URL: 源 https://example.invalid:8443/doc?x=1#part` 得到 `https://example.invalid:8443`。结果由协议、主机和非默认端口组成。 [WHATWG URL 源的定义](https://url.spec.whatwg.org/#concept-url-origin)
+- 输入 `URL: 文件链接 "C:\Docs\a b.txt"` 得到 `file:///C:/Docs/a%20b.txt`。用 `URL: 文件路径` 加上链接可转回 Windows 路径。支持绝对盘符路径和 UNC 路径。 [Rust URL 文件路径转换](https://docs.rs/url/2.5.8/url/struct.Url.html#method.from_file_path)
 - 输入 `JSON: 格式化 {"名称":"北京","值":1}` 可添加两格缩进，输入 `JSON: 压缩` 加上 JSON 文本可移除结构空白。两种操作均检查语法，并保留原有键顺序、数字和字符串拼写。搜索框可输入最多 4096 个字符。
 - 输入 `JSON: 取值 /商品/0/价格 {"商品":[{"价格":9007199254740993}]}` 可提取原文中的 `9007199254740993`。路径中的 `~1` 表示键名内的斜杠，`~0` 表示波浪号。带空白的路径可用 JSON 双引号包住。参见 [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901.html#section-4)。
 - 输入 `JSON: 取列 /价格 [{"价格":9.90},{"价格":2e2}]` 得到 `[9.90,2e2]`。搜索框按同一个路径读取数组中的每一项，保留原始数字格式。路径缺项时会提示检查输入。
@@ -142,6 +144,7 @@
 - 用 `文本: 自然排序` 可按数字值排序行内的连续数字，例如将照片1、照片2、照片10 依次排列。比较相同的行保留输入顺序。
 - `文本: 按行编号` 给每行加上从 1 开始的行号。`文本: 按行计数` 按出现次数降序列出不同的行，次数相同的保留首次出现的顺序。结果用制表符分隔数字与原文。
 - 用 `文本: 按行拼接 ", "` 加上多行文本，可用逗号和空格连接各行。`文本: 拆分成行 "、" 苹果、梨` 可将分隔符换成换行。分隔符需要加引号，双引号内可用 `\t` 表示制表符。
+- 用 `文本: 取列 "\t" 2` 加上多行文本，可提取制表符分隔的第二列。列号从 1 开始，每行按指定分隔符拆开并保留空字段。任一行缺少指定列时会提示检查输入。
 - 在 `文本: 保留行 "错误"` 或 `文本: 排除行 "错误"` 后加上多行文本，可按含有关键词与否筛行。关键词按原样匹配，区分大小写，结果保留原行顺序。
 - 在 `文本: 正则保留行 "^[0-9]+$"` 后加上多行文本，可筛出纯数字行。也可用 `正则排除行` 跳过匹配的行。用中文引号包住正则时可直接写 `\d`。 [Rust regex 语法](https://docs.rs/regex/1.13.1/regex/#syntax)
 - 在 `文本: 正则提取 "[0-9]+"` 后加上多行文本，可提取每行的第一个数字串。有匹配的行按原顺序输出。

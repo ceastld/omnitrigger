@@ -21,6 +21,8 @@ pub(super) enum UrlEncodingError {
     NullCharacter,
     MissingParameters,
     InvalidUrl,
+    InvalidFilePath,
+    InvalidFileUrl,
     OpaqueOrigin,
 }
 
@@ -34,6 +36,8 @@ impl UrlEncodingError {
             Self::NullCharacter => "解码结果含空字符，无法完整复制",
             Self::MissingParameters => "没有可解析的查询参数",
             Self::InvalidUrl => "输入带协议的 URL，例如 https://example.invalid/",
+            Self::InvalidFilePath => "输入绝对文件路径，例如 C:\\文档\\示例.txt",
+            Self::InvalidFileUrl => "输入带绝对路径的 file: URL，例如 file:///C:/Docs/example.txt",
             Self::OpaqueOrigin => "请输入具有网络源的 URL，例如 https://example.invalid/",
         }
     }
@@ -53,7 +57,7 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "表单编码" | "form-encode" => Ok(utf8_percent_encode(value, FORM_VALUE)
             .to_string()
             .replace("%20", "+")),
-        "表单解码" | "form-decode" => decode_value(&value.replace('+', " ")),
+        "表单解码" | "form-decode" => decode_form_value(value),
         "参数" | "查询参数" | "params" => decode_parameters(value),
         "拆解" | "inspect" => inspect_url(value),
         "源" | "源站" | "origin" => {
@@ -70,6 +74,9 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
             url.set_query(None);
             Ok(url.into())
         }
+        "去参数" | "strip-param" => remove_parameter(value),
+        "文件链接" | "file-url" => encode_file_path(value),
+        "文件路径" | "file-path" => decode_file_path(value),
         _ => Err(UrlEncodingError::InvalidOperation),
     }
 }
@@ -95,6 +102,35 @@ fn inspect_url(input: &str) -> Result<String, UrlEncodingError> {
     Ok(lines.join("\n"))
 }
 
+fn encode_file_path(input: &str) -> Result<String, UrlEncodingError> {
+    let path = input
+        .strip_prefix('"')
+        .and_then(|input| input.strip_suffix('"'))
+        .unwrap_or(input);
+    if path.contains(['\0', '"']) {
+        return Err(UrlEncodingError::InvalidFilePath);
+    }
+    let url = if path.ends_with(['\\', '/']) {
+        Url::from_directory_path(path)
+    } else {
+        Url::from_file_path(path)
+    };
+    url.map(String::from)
+        .map_err(|_| UrlEncodingError::InvalidFilePath)
+}
+
+fn decode_file_path(input: &str) -> Result<String, UrlEncodingError> {
+    let url = Url::parse(input).map_err(|_| UrlEncodingError::InvalidFileUrl)?;
+    if url.scheme() != "file" {
+        return Err(UrlEncodingError::InvalidFileUrl);
+    }
+    url.to_file_path()
+        .ok()
+        .and_then(|path| path.into_os_string().into_string().ok())
+        .filter(|path| !path.contains('\0'))
+        .ok_or(UrlEncodingError::InvalidFileUrl)
+}
+
 fn decode_value(value: &str) -> Result<String, UrlEncodingError> {
     let mut rest = value;
     while let Some((_, suffix)) = rest.split_once('%') {
@@ -111,6 +147,39 @@ fn decode_value(value: &str) -> Result<String, UrlEncodingError> {
         return Err(UrlEncodingError::NullCharacter);
     }
     Ok(decoded.into_owned())
+}
+
+fn decode_form_value(value: &str) -> Result<String, UrlEncodingError> {
+    decode_value(&value.replace('+', " "))
+}
+
+fn remove_parameter(value: &str) -> Result<String, UrlEncodingError> {
+    let (name, address) = value
+        .split_once(char::is_whitespace)
+        .ok_or(UrlEncodingError::Incomplete)?;
+    let name = decode_form_value(name)?;
+    let mut url = Url::parse(address.trim_start()).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    let Some(query) = url.query() else {
+        return Ok(url.into());
+    };
+    let mut parts = Vec::new();
+    let mut removed = false;
+    for part in query.split('&') {
+        let key = part.split_once('=').map_or(part, |(key, _)| key);
+        if decode_form_value(key).is_ok_and(|key| key == name) {
+            removed = true;
+        } else {
+            parts.push(part);
+        }
+    }
+    if removed {
+        let query = parts
+            .iter()
+            .any(|part| !part.is_empty())
+            .then(|| parts.join("&"));
+        url.set_query(query.as_deref());
+    }
+    Ok(url.into())
 }
 
 fn query_text(value: &str) -> &str {
@@ -132,7 +201,7 @@ fn query_text(value: &str) -> &str {
 
 fn decode_parameters(value: &str) -> Result<String, UrlEncodingError> {
     let quote = |text: &str| {
-        let decoded = decode_value(&text.replace('+', " "))?;
+        let decoded = decode_form_value(text)?;
         Ok::<_, UrlEncodingError>(serde_json::to_string(&decoded).expect("字符串可序列化"))
     };
     let mut lines = Vec::new();
@@ -149,6 +218,83 @@ fn decode_parameters(value: &str) -> Result<String, UrlEncodingError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn round_trips_absolute_windows_and_unc_paths_as_file_urls() {
+        for (path, url) in [
+            (
+                r"C:\Docs\北京 #1.txt",
+                "file:///C:/Docs/%E5%8C%97%E4%BA%AC%20%231.txt",
+            ),
+            (
+                r"\\example.invalid\share\a b.txt",
+                "file://example.invalid/share/a%20b.txt",
+            ),
+            (r"C:\Docs\", "file:///C:/Docs/"),
+        ] {
+            assert_eq!(
+                convert_url_component(&format!("文件链接 \"{path}\"")).as_deref(),
+                Ok(url)
+            );
+            assert_eq!(
+                convert_url_component(&format!("文件路径 {url}")).as_deref(),
+                Ok(path)
+            );
+        }
+        assert_eq!(
+            convert_url_component(r"file-url C:Docs\a.txt"),
+            Err(UrlEncodingError::InvalidFilePath)
+        );
+        assert_eq!(
+            convert_url_component("file-path https://example.invalid/a"),
+            Err(UrlEncodingError::InvalidFileUrl)
+        );
+        assert_eq!(
+            convert_url_component("file-path file:///C:/bad%00name"),
+            Err(UrlEncodingError::InvalidFileUrl)
+        );
+    }
+
+    #[test]
+    fn removes_all_entries_for_one_decoded_parameter_and_keeps_the_other_pairs() {
+        for (input, expected) in [
+            (
+                "去参数 source https://example.invalid/doc?q=a%20b&source=mail&%73ource=other#part",
+                "https://example.invalid/doc?q=a%20b#part",
+            ),
+            (
+                "strip-param a+b https://example.invalid/?a%20b=1&a+b&a%2Bb=3&%FF=4",
+                "https://example.invalid/?a%2Bb=3&%FF=4",
+            ),
+            (
+                "去参数 tag https://example.invalid/?tag=1&tag#part",
+                "https://example.invalid/#part",
+            ),
+            (
+                "去参数 Tag https://example.invalid/?tag=%2f&q=a+b",
+                "https://example.invalid/?tag=%2f&q=a+b",
+            ),
+            (
+                "去参数 tag https://example.invalid/path",
+                "https://example.invalid/path",
+            ),
+        ] {
+            assert_eq!(
+                convert_url_component(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            convert_url_component("去参数 %GG https://example.invalid/"),
+            Err(UrlEncodingError::InvalidEscape)
+        );
+        assert_eq!(
+            convert_url_component("去参数 source /relative?source=mail"),
+            Err(UrlEncodingError::InvalidUrl)
+        );
+    }
 
     #[test]
     fn extracts_the_normalized_network_origin() {

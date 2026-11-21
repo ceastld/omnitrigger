@@ -1664,6 +1664,7 @@ mod tests {
         assert!(examples_for("JSON: 展")[0].starts_with("JSON: 展开数组 "));
         assert!(examples_for("JSON: 合")[0].starts_with("JSON: 合并行 "));
         assert!(examples_for("URL: 去")[0].starts_with("URL: 去查询串 "));
+        assert!(examples_for("URL: 去参")[0].starts_with("URL: 去参数 "));
         assert_eq!(
             examples_for("网址: 表单"),
             [

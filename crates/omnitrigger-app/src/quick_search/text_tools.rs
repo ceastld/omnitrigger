@@ -29,6 +29,8 @@ pub(super) enum TextError {
     IncompleteTextArgument,
     InvalidTextArgument,
     EmptyDelimiter,
+    InvalidColumn,
+    MissingColumn,
     EmptySearchText,
     InvalidRegex,
     ResultTooLarge,
@@ -51,7 +53,9 @@ impl TextError {
             Self::InvalidReplacementArguments => "查找内容和替换内容要加引号，并用空格分隔",
             Self::IncompleteTextArgument => "输入带引号的内容和原文",
             Self::InvalidTextArgument => "第一个参数要加引号，并和原文用空格分开",
-            Self::EmptyDelimiter => "拆分成行时分隔符不能为空",
+            Self::EmptyDelimiter => "分隔符不能为空",
+            Self::InvalidColumn => "输入从 1 开始的列号，例如 文本: 取列 \"\\t\" 2",
+            Self::MissingColumn => "至少一行的列数不足",
             Self::EmptySearchText => "请输入要查找的文字",
             Self::InvalidRegex => "请检查或缩短正则表达式",
             Self::ResultTooLarge => "文本结果超过 1 MiB",
@@ -95,6 +99,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "正则替换" | "regex-replace" => return replace_regex(text),
         "按行拼接" | "join-lines" => return join_lines(text),
         "拆分成行" | "split-lines" => return split_lines(text),
+        "取列" | "column" => return select_text_column(text),
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
         "正则保留行" | "keep-regex-lines" => return filter_regex_lines(text, true),
@@ -473,6 +478,30 @@ fn filter_regex_lines(input: &str, keep_matches: bool) -> Result<String, TextErr
     }))
 }
 
+fn select_text_column(input: &str) -> Result<String, TextError> {
+    let (delimiter, input) = quoted_text_argument(input)?;
+    if delimiter.is_empty() {
+        return Err(TextError::EmptyDelimiter);
+    }
+    let (column, text) = input
+        .split_once(char::is_whitespace)
+        .ok_or(TextError::IncompleteTextArgument)?;
+    let column = column
+        .parse::<usize>()
+        .ok()
+        .and_then(|value| value.checked_sub(1))
+        .ok_or(TextError::InvalidColumn)?;
+    let values = text_payload(text)?
+        .lines()
+        .map(|line| {
+            line.split(&delimiter)
+                .nth(column)
+                .ok_or(TextError::MissingColumn)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(values.join("\n"))
+}
+
 fn regex_text_argument(input: &str) -> Result<(Regex, &str), TextError> {
     let (pattern, text) = quoted_text_argument(input)?;
     Ok((compile_regex(&pattern)?, text))
@@ -550,6 +579,25 @@ fn replace_regex(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selects_a_one_based_column_in_each_line_including_empty_fields() {
+        for (input, expected) in [
+            ("取列 \"\\t\" 2 苹果\t42\r\n梨\t7", "42\n7"),
+            ("column \"||\" 2 A||||B\nC||D||E", "\nD"),
+            ("取列 \",\" 2 \"A, 示例 \"", " 示例 "),
+            ("取列 \",\" 3 \"A,B,\nC,D,尾巴\"", "\n尾巴"),
+        ] {
+            assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");
+        }
+        for (input, expected) in [
+            ("取列 \",\" 0 A,B", TextError::InvalidColumn),
+            ("取列 \",\" 2 A,B\nC", TextError::MissingColumn),
+            ("取列 \"\" 1 A,B", TextError::EmptyDelimiter),
+        ] {
+            assert_eq!(transform_text(input), Err(expected), "{input}");
+        }
+    }
 
     #[test]
     fn replaces_each_regex_match_with_expanded_captures_and_bounds_the_result() {

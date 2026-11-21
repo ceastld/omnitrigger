@@ -775,6 +775,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "提取制表符分隔文本的一列",
+        query: "文本: 取列 \"\\t\" 2 苹果\t42\n梨\t7",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "保留符合正则表达式的行",
         query: "文本: 正则保留行 \"^[0-9]+$\" 42\nA3\n007",
     },
@@ -930,8 +935,23 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Browser,
+        title: "移除指定名称的 URL 参数",
+        query: "URL: 去参数 source https://example.invalid/doc?q=a%20b&source=mail#part",
+    },
+    Example {
+        icon: Icon::Browser,
         title: "提取 URL 的源",
         query: "URL: 源 https://example.invalid:8443/doc?x=1#part",
+    },
+    Example {
+        icon: Icon::Browser,
+        title: "把 Windows 文件路径转为链接",
+        query: r#"URL: 文件链接 "C:\Docs\计划 #1.txt""#,
+    },
+    Example {
+        icon: Icon::Browser,
+        title: "从 file URL 提取 Windows 路径",
+        query: "URL: 文件路径 file:///C:/Docs/a%20b.txt",
     },
     Example {
         icon: Icon::Terminal,
