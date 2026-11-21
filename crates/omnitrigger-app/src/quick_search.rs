@@ -121,7 +121,9 @@ struct ResultValue {
 impl ResultValue {
     fn continuation_hint(&self) -> Option<&'static str> {
         match &self.kind {
-            ValueKind::Calculation => Some("Tab 继续计算"),
+            ValueKind::Calculation | ValueKind::ExactCalculation { can_continue: true } => {
+                Some("Tab 继续计算")
+            }
             ValueKind::Conversion(Some(_)) => Some("Tab 换目标"),
             _ => None,
         }
@@ -132,6 +134,7 @@ impl ResultValue {
 enum ValueKind {
     Text,
     Calculation,
+    ExactCalculation { can_continue: bool },
     Conversion(Option<String>),
     Color(u32),
     ColorContrast([u32; 2]),
@@ -435,9 +438,17 @@ impl Results {
                     Self::text_value(transform_text(term).map_err(ValueError::Text))
                 }
                 Scope::Json => Self::text_value(transform_json(term).map_err(ValueError::Json)),
-                Scope::Fraction => {
-                    Self::text_value(simplify_fraction(term).map_err(ValueError::Fraction))
-                }
+                Scope::Fraction => Self::Value(
+                    simplify_fraction(term)
+                        .map(|text| ResultValue {
+                            kind: ValueKind::ExactCalculation {
+                                // 为括号、运算符和至少一位操作数预留空间。
+                                can_continue: text.len() <= calculator::QUERY_LIMIT - 4,
+                            },
+                            text,
+                        })
+                        .map_err(ValueError::Fraction),
+                ),
                 Scope::Percentage => {
                     Self::text_value(compare_percentages(term).map_err(ValueError::Percentage))
                 }
@@ -545,6 +556,7 @@ impl Results {
         )
     }
 
+    #[cfg(test)]
     fn arithmetic_result(&self) -> Option<&str> {
         let Self::Value(Ok(ResultValue {
             text,
@@ -567,19 +579,18 @@ impl Results {
     }
 
     fn continuation_query(&self) -> Option<String> {
-        if let Self::Value(Ok(ResultValue {
-            kind: ValueKind::Conversion(Some(query)),
-            ..
-        })) = self
-        {
-            return Some(query.clone());
+        let Self::Value(Ok(ResultValue { kind, text })) = self else {
+            return None;
+        };
+        match kind {
+            ValueKind::Calculation if text.starts_with('-') => Some(format!("({text})")),
+            ValueKind::Calculation => Some(text.clone()),
+            ValueKind::ExactCalculation { can_continue: true } => {
+                Some(format!("分数: 计算 ({text})"))
+            }
+            ValueKind::Conversion(Some(query)) => Some(query.clone()),
+            _ => None,
         }
-        let text = self.arithmetic_result()?;
-        Some(if text.starts_with('-') {
-            format!("({text})")
-        } else {
-            text.to_owned()
-        })
     }
 
     fn height(&self) -> f32 {
@@ -845,7 +856,9 @@ impl QuickSearch {
             return;
         };
         let history = match &result.kind {
-            ValueKind::Calculation => &self.index.recent.calculations,
+            ValueKind::Calculation | ValueKind::ExactCalculation { .. } => {
+                &self.index.recent.calculations
+            }
             ValueKind::Conversion(_) => &self.index.recent.conversions,
             _ => return,
         };
@@ -1170,7 +1183,7 @@ impl QuickSearch {
                         .line_height(px(VALUE_LINE_HEIGHT))
                         .children(lines.into_iter().enumerate().map(|(index, text)| {
                             let prefix = if index == 0 { "= " } else { "  " };
-                            let line = if clipped && index + 1 == MAX_VALUE_LINES {
+                            let (text, suffix) = if clipped && index + 1 == MAX_VALUE_LINES {
                                 let columns = text
                                     .graphemes(true)
                                     .map(value_preview::column_width)
@@ -1182,17 +1195,20 @@ impl QuickSearch {
                                 } else {
                                     text.len()
                                 };
-                                format!("{prefix}{}…", &text[..end])
+                                (&text[..end], "…")
                             } else {
-                                format!("{prefix}{text}")
+                                (text, "")
                             };
-                            div().truncate().child(line)
+                            div().truncate().child(format!(
+                                "{prefix}{}{suffix}",
+                                value_preview::display_tabs(text)
+                            ))
                         }))
                 } else {
                     value
                         .truncate()
                         .text_size(px(22.))
-                        .child(format!("= {result}"))
+                        .child(format!("= {}", value_preview::display_tabs(result)))
                 };
                 let row = row
                     .h(px(38. + value_extra_height(result)))
@@ -1923,6 +1939,30 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn reuses_exact_results_as_grouped_operands() {
+        for (query, expected_operand, expected_result) in [
+            ("分数: 计算 1/2+1/3", "分数: 计算 (5/6)", "5"),
+            ("fraction: -42/56", "分数: 计算 (-3/4)", "-9/2"),
+        ] {
+            let result = for_query(query, &[]);
+            let operand = result.continuation_query().expect("分数结果可继续计算");
+            assert_eq!(operand, expected_operand);
+            assert!(matches!(
+                for_query(&format!("{operand}*6"), &[]),
+                Results::Value(Ok(ResultValue { text, .. })) if text == expected_result
+            ));
+        }
+        let large = for_query("分数: 计算 250!", &[]);
+        assert!(matches!(
+            &large,
+            Results::Value(Ok(value))
+                if value.text.len() > calculator::QUERY_LIMIT
+                    && value.continuation_hint().is_none()
+        ));
+        assert_eq!(large.continuation_query(), None);
     }
 
     #[test]
