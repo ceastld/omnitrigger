@@ -676,7 +676,7 @@ mod native {
         }
     }
 
-    pub(super) fn open(target: &str, directory: Option<&str>, flags: u32) -> Result<(), String> {
+    pub(super) fn open(target: &str, directory: Option<&str>) -> Result<(), String> {
         use windows::Win32::UI::{
             Shell::{ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW},
             WindowsAndMessaging::SW_SHOWNORMAL,
@@ -691,7 +691,7 @@ mod native {
         });
         let mut info = SHELLEXECUTEINFOW {
             cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
-            fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC | flags,
+            fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
             lpVerb: w!("open"),
             lpFile: PCWSTR(wide.as_ptr()),
             lpDirectory: directory_wide
@@ -733,18 +733,12 @@ impl Drop for ShellApartment {
     }
 }
 
-#[cfg(windows)]
-pub(super) fn open_shell_app(parsing_name: &str) -> Result<(), String> {
-    use windows::Win32::UI::Shell::SEE_MASK_INVOKEIDLIST;
-    native::open(parsing_name, None, SEE_MASK_INVOKEIDLIST)
-}
-
 /// 用系统默认处理程序打开地址或本地绝对路径；仅工作线程调用。
 /// 成功表示系统接纳打开请求，不代表外部应用已经完成加载。
 #[cfg(windows)]
 pub fn open_target(target: &str) -> Result<(), String> {
     validate_open_target(target)?;
-    native::open(target, None, 0)
+    native::open(target, None)
 }
 
 /// 仅打开已复验的普通本地文件，工作目录固定为该文件父目录。
@@ -800,7 +794,7 @@ pub fn open_file_in_parent_checked(
                 code: error.code,
                 started: false,
             })?;
-            native::open(file, Some(directory), 0).map_err(|_| OpenFileInParentError {
+            native::open(file, Some(directory)).map_err(|_| OpenFileInParentError {
                 code: "open_failed",
                 started: true,
             })
