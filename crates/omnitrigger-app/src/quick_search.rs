@@ -1,6 +1,7 @@
 mod calculator;
 mod calendar;
 mod conversion;
+mod duration;
 mod examples;
 mod operators;
 mod percentage;
@@ -30,6 +31,7 @@ use crate::{
 use calculator::{calculate, looks_like_calculation, CalculationError, QUERY_LIMIT};
 use calendar::{calculate_date, DateError};
 use conversion::{convert, ConversionError};
+use duration::{convert_duration, DurationError};
 use examples::EXAMPLES;
 use omnitrigger_windows::ShortcutTarget;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -111,6 +113,7 @@ enum ValueError {
     Calculation(CalculationError),
     Conversion(ConversionError),
     Date(DateError),
+    Duration(DurationError),
     Timestamp(TimestampError),
 }
 
@@ -120,6 +123,7 @@ impl ValueError {
             Self::Calculation(error) => error.message(),
             Self::Conversion(error) => error.message(),
             Self::Date(error) => error.message(),
+            Self::Duration(error) => error.message(),
             Self::Timestamp(error) => error.message(),
         }
     }
@@ -130,6 +134,7 @@ impl ValueError {
             Self::Calculation(CalculationError::Incomplete)
                 | Self::Conversion(ConversionError::Incomplete)
                 | Self::Date(DateError::Incomplete)
+                | Self::Duration(DurationError::Incomplete)
                 | Self::Timestamp(TimestampError::Incomplete)
         )
     }
@@ -176,6 +181,9 @@ impl Results {
                     calculate_date(term, chrono::Local::now().date_naive())
                         .map_err(ValueError::Date),
                 ),
+                Scope::Duration => {
+                    Self::Value(convert_duration(term).map_err(ValueError::Duration))
+                }
                 Scope::Timestamp => {
                     Self::Value(convert_timestamp(term).map_err(ValueError::Timestamp))
                 }
@@ -797,6 +805,10 @@ mod tests {
         assert!(matches!(
             for_query("时间戳：-1ms", &[]),
             Results::Value(Ok(result)) if result == "1969-12-31T23:59:59.999Z"
+        ));
+        assert!(matches!(
+            for_query("时长：01:30:00", &[]),
+            Results::Value(Ok(result)) if result == "5400 秒"
         ));
     }
 

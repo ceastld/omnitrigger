@@ -5,6 +5,7 @@ pub(super) enum Scope {
     TextHistory,
     Actions,
     Date,
+    Duration,
     Timestamp,
 }
 
@@ -16,6 +17,7 @@ pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
         "剪贴板" | "文本历史" | "clipboard" => Scope::TextHistory,
         "动作" | "动作库" | "action" | "actions" => Scope::Actions,
         "日期" | "date" => Scope::Date,
+        "时长" | "duration" => Scope::Duration,
         "时间戳" | "unix" | "timestamp" => Scope::Timestamp,
         _ => return None,
     };
