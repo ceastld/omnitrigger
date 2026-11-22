@@ -23,6 +23,8 @@ pub(super) enum RadixError {
     BitRangeArguments,
     WriteBitsArguments,
     WriteBitsWidthExceeded,
+    RotateBitsArguments,
+    RotateBitsWidthExceeded,
 }
 
 impl RadixError {
@@ -36,7 +38,7 @@ impl RadixError {
                 "填写位宽和整数，例如 字节序 32 @ 0x12345678。位宽为 8 至 128 的 8 倍数"
             }
             Self::ByteOrderInteger => "填写非负整数，可用十进制或 0x、0b、0o 前缀",
-            Self::ByteOrderWidthExceeded => "整数超出所填位宽",
+            Self::ByteOrderWidthExceeded | Self::RotateBitsWidthExceeded => "整数超出所填位宽",
             Self::SignedByteOrderInteger => "填写有符号整数，可用十进制或 0x、0b、0o 前缀",
             Self::SignedByteOrderWidthExceeded => "有符号整数超出所填位宽",
             Self::ReadByteOrderArguments => "填写大端或小端，例如 读字节序 小端 @ 78 56 34 12",
@@ -48,6 +50,7 @@ impl RadixError {
                 "填写位号范围、原整数和新值，例如 写位 8-15 @ 0x12345678 @ 0xAB。位号为 0 至 8191"
             }
             Self::WriteBitsWidthExceeded => "新值超出所选位宽",
+            Self::RotateBitsArguments => "填写位宽、移动位数和非负整数，例如 循环左移 8,3 @ 0xA5",
         }
     }
 }
@@ -150,6 +153,12 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     if operation == "写位" || operation.eq_ignore_ascii_case("write-bits") {
         return write_bits(arguments);
     }
+    if operation == "循环左移" || operation.eq_ignore_ascii_case("rotate-left") {
+        return rotate_bits(arguments, false);
+    }
+    if operation == "循环右移" || operation.eq_ignore_ascii_case("rotate-right") {
+        return rotate_bits(arguments, true);
+    }
     let tokens: Vec<_> = input.split_whitespace().take(6).collect();
     let [integer, from, source, to, target] = tokens.as_slice() else {
         return Err(RadixError::Incomplete);
@@ -188,8 +197,7 @@ fn bit_range(input: &str) -> Result<String, RadixError> {
     let (start, width) = bit_field_range(range, RadixError::BitRangeArguments)?;
     let value = unsigned_bit_value(number, RadixError::BitRangeArguments)?;
     let field = selected_bits(&value, start, width);
-    let hex_digits = width.div_ceil(4) as usize;
-    Ok(format!("十六进制 0x{field:0>hex_digits$X}\n十进制 {field}"))
+    Ok(format_padded_bit_value(&field, width))
 }
 
 fn write_bits(input: &str) -> Result<String, RadixError> {
@@ -206,6 +214,31 @@ fn write_bits(input: &str) -> Result<String, RadixError> {
     let cleared = value - (field << start);
     let result = cleared | (replacement << start);
     Ok(format!("十六进制 0x{result:X}\n十进制 {result}"))
+}
+
+fn rotate_bits(input: &str, right: bool) -> Result<String, RadixError> {
+    let error = RadixError::RotateBitsArguments;
+    let (settings, number) = input.split_once('@').ok_or(error)?;
+    let (width, count) = settings.split_once(',').ok_or(error)?;
+    let width = width
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|width| (1..=MAX_INTEGER_BITS).contains(width))
+        .ok_or(error)?;
+    let shift = count.trim().parse::<u64>().map_err(|_| error)? % width;
+    let value = unsigned_bit_value(number, error)?;
+    if value.bits() > width {
+        return Err(RadixError::RotateBitsWidthExceeded);
+    }
+    let shift = if right { width - shift } else { shift };
+    let rotated = ((&value << shift) | (&value >> (width - shift))) & bit_mask(width);
+    Ok(format_padded_bit_value(&rotated, width))
+}
+
+fn format_padded_bit_value(value: &BigUint, width: u64) -> String {
+    let hex_digits = width.div_ceil(4) as usize;
+    format!("十六进制 0x{value:0>hex_digits$X}\n十进制 {value}")
 }
 
 fn bit_field_range(range: &str, error: RadixError) -> Result<(u64, u64), RadixError> {
@@ -235,8 +268,11 @@ fn unsigned_bit_value(number: &str, error: RadixError) -> Result<BigUint, RadixE
 }
 
 fn selected_bits(value: &BigUint, start: u64, width: u64) -> BigUint {
-    let mask = (BigUint::from(1_u8) << width) - 1_u8;
-    (value >> start) & mask
+    (value >> start) & bit_mask(width)
+}
+
+fn bit_mask(width: u64) -> BigUint {
+    (BigUint::from(1_u8) << width) - 1_u8
 }
 
 fn bounded_magnitude(digits: &str, base: u32) -> Result<BigUint, RadixError> {
@@ -367,6 +403,33 @@ pub(super) fn ungroup_digits(digits: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rotates_within_the_requested_width_and_reduces_the_shift_count() {
+        for (query, expected) in [
+            ("循环左移 8,3 @ 0xA5", "十六进制 0x2D\n十进制 45"),
+            ("循环右移 8,3 @ 0xA5", "十六进制 0xB4\n十进制 180"),
+            ("rotate-right 8,9 @ 1", "十六进制 0x80\n十进制 128"),
+            ("rotate-left 12,12 @ 1", "十六进制 0x001\n十进制 1"),
+            ("循环右移 1,100 @ 1", "十六进制 0x1\n十进制 1"),
+        ] {
+            assert_eq!(convert_arbitrary_radix(query).as_deref(), Ok(expected));
+        }
+        assert_eq!(
+            convert_arbitrary_radix("循环左移 5,1 @ 32"),
+            Err(RadixError::RotateBitsWidthExceeded)
+        );
+        for query in [
+            "循环左移 0,1 @ 0",
+            "循环左移 8,-1 @ 0",
+            "循环右移 8193,1 @ 0",
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query),
+                Err(RadixError::RotateBitsArguments)
+            );
+        }
+    }
 
     #[test]
     fn writes_bit_ranges_without_changing_surrounding_bits() {

@@ -801,6 +801,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在指定位宽内向左循环移动整数的二进制位",
+        query: "进制: 循环左移 8,3 @ 0xA5",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "在指定位宽内向右循环移动整数的二进制位",
+        query: "进制: 循环右移 8,3 @ 0xA5",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "选择目标进制",
         query: "0xff to",
     },
@@ -3959,6 +3969,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "位统计",
                     "取位",
                     "写位",
+                    "循环左移",
+                    "循环右移",
                 ]
                 .iter()
                 .any(|operation| operation.starts_with(term)) => {}
