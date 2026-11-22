@@ -82,6 +82,7 @@
 - 在最后一栏加 `路径列表` 可预览全部匹配项的绝对路径，每行一条。可组合排序或类型筛选，例如 `文件: C:\工作 | *.pdf | 仅文件 路径列表`。按回车复制整份列表。
 - 在最后一栏用 `名称列表` 可逐行复制匹配项的文件名或文件夹名，例如 `文件: C:\工作 | *.pdf | 仅文件 最近修改 名称列表`。结果沿用筛选与排序，并包含文件扩展名。
 - 在最后一栏用 `路径JSON` 可将匹配路径输出为 JSON 字符串数组，例如 `文件: C:\工作 | *.pdf | 路径JSON`。结果沿用筛选和排序，无匹配项时输出 `[]`。
+- 在最后一栏用 `后缀统计` 可将匹配文件按扩展名计数并输出 CSV，例如 `文件: C:\工作 | | 后缀统计`。扩展名按最后一个句点后的内容取值，忽略大小写，按数量从多到少排列，无扩展名的文件单独计数。 [扩展名取值规则](https://doc.rust-lang.org/std/path/struct.Path.html#method.extension)
 - 输入 `窗口:` 可查看当前桌面的普通窗口，继续输入窗口标题或程序名可筛选。按回车切换，最小化窗口会请求还原。也可用 `window:`。每次打开搜索框后首次使用时读取窗口列表，按 `F5` 可用当前筛选条件刷新。 [Windows 前台切换规则](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setforegroundwindow)
 - 可以按名称搜索已配置的轮盘，回车打开对应编辑页。输入 `轮盘: 编辑` 可只搜索轮盘。
 - 输入 `槽位: 复制` 可查找轮盘槽位，回车打开对应布局并选中槽位。可以加上轮盘名或应用名来缩小结果。
@@ -221,6 +222,7 @@
 - 输入 `URL: 去参数组 ["source","campaign"]` 后加空格和网址，可同时移除指定名称的全部参数。列表填写解码后的名称，可直接写空格或加号。
 - 输入 `URL: 保留参数 ["q","page"] https://example.invalid/doc?source=mail&q=a%20b&page=2&q=a+b#part` 得到 `https://example.invalid/doc?q=a%20b&page=2&q=a+b#part`。列表填写解码后的名称并区分大小写。匹配项保留原有顺序和编码，同名项可以重复。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 用 `URL: 排序参数` 加上网址，可按解码后的名称排列查询参数。名称按 UTF‑16 码元比较，同名项保留原有顺序。各参数的编码和网址片段照原样保留。 [WHATWG 参数排序规则](https://url.spec.whatwg.org/#dom-urlsearchparams-sort)
+- 用 `URL: 去重参数` 加上网址，可移除解码后名称和值都相同的重复项，保留首次出现的写法和顺序。`a+b` 与 `a%20b` 解码后相同，同名但值不同的参数会保留。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 输入 `URL: 拼接 ["https://example.invalid/docs/api/","../guide?lang=zh#intro"]` 得到 `https://example.invalid/docs/guide?lang=zh#intro`。基准网址末尾的斜杠决定相对路径从哪个目录解析。 [Rust URL 相对链接解析](https://docs.rs/url/2.5.8/url/struct.Url.html#method.join)
 - 输入 `URL: 相对 ["https://example.invalid/docs/api/","https://example.invalid/docs/guide?lang=zh#intro"]` 得到 `../guide?lang=zh#intro`。两个 HTTP(S) 网址须使用相同协议、主机、端口和登录信息，生成的链接可以用原基准网址拼接还原。 [Rust URL 相对链接生成](https://docs.rs/url/2.5.8/url/struct.Url.html#method.make_relative)
 - 输入 `URL: 源 https://example.invalid:8443/doc?x=1#part` 得到 `https://example.invalid:8443`。结果由协议、主机和非默认端口组成。 [WHATWG URL 源的定义](https://url.spec.whatwg.org/#concept-url-origin)

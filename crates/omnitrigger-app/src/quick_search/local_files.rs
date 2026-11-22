@@ -1,4 +1,6 @@
 use std::{
+    collections::HashMap,
+    fmt::Write as _,
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -12,7 +14,9 @@ use omnitrigger_windows::{
     LocalDirectoryOptions, LocalStatError, MAX_DIRECTORY_ENTRIES,
 };
 
-use super::{conversion::exact_byte_quantity, title_rank, Destination, Results};
+use super::{
+    conversion::exact_byte_quantity, csv_tools::csv_cell, title_rank, Destination, Results,
+};
 
 pub(super) const FOLDER_DEBOUNCE: Duration = Duration::from_millis(150);
 const FOLDER_READ_TIMEOUT: Duration = Duration::from_secs(2);
@@ -171,6 +175,13 @@ impl LocalFilesIndex {
                     .then(|| (title_rank(&name, &filter), entry))
             })
             .collect();
+        if query.output == FileOutput::ExtensionCounts {
+            let names = matches
+                .iter()
+                .filter(|(_, entry)| entry.kind == "file")
+                .map(|(_, entry)| entry.name.as_str());
+            return Results::text_value(Ok(extension_counts(names)));
+        }
         if query.order == DirectoryOrder::Name {
             matches.sort_by_key(|(rank, _)| *rank);
         }
@@ -209,6 +220,32 @@ impl LocalFilesIndex {
     }
 }
 
+fn extension_counts<'a>(names: impl Iterator<Item = &'a str>) -> String {
+    let mut counts = HashMap::new();
+    for name in names {
+        let extension = Path::new(name)
+            .extension()
+            .and_then(|part| part.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        *counts.entry(extension).or_insert(0usize) += 1;
+    }
+    let mut rows = counts.into_iter().collect::<Vec<_>>();
+    rows.sort_unstable_by(|(left, left_count), (right, right_count)| {
+        right_count.cmp(left_count).then_with(|| left.cmp(right))
+    });
+    let mut output = String::from("扩展名,数量");
+    for (extension, count) in rows {
+        let label = if extension.is_empty() {
+            "无扩展名".to_owned()
+        } else {
+            format!(".{extension}")
+        };
+        write!(output, "\r\n{},{count}", csv_cell(&label)).expect("写入字符串不会失败");
+    }
+    output
+}
+
 #[derive(Clone, Copy)]
 struct FileQuery<'a> {
     directory: &'a str,
@@ -225,6 +262,7 @@ enum FileOutput {
     Lines,
     Names,
     Json,
+    ExtensionCounts,
 }
 
 fn split_query(query: &str) -> Option<FileQuery<'_>> {
@@ -257,6 +295,9 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             "路径json" | "json-paths" if output == FileOutput::Entries => {
                 output = FileOutput::Json
             }
+            "后缀统计" | "extension-counts" if output == FileOutput::Entries => {
+                output = FileOutput::ExtensionCounts
+            }
             _ => {
                 let (comparison, quantity) = option.split_once('=')?;
                 let bound = match comparison.to_ascii_lowercase().as_str() {
@@ -267,6 +308,12 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
                 *bound = Some(exact_byte_quantity(quantity)?);
             }
         }
+    }
+    if output == FileOutput::ExtensionCounts {
+        if entry_type == DirectoryEntryType::Directory {
+            return None;
+        }
+        entry_type = DirectoryEntryType::File;
     }
     let size_bounds = if minimum.is_some() || maximum.is_some() {
         let (minimum, maximum) = (minimum.unwrap_or(0), maximum.unwrap_or(u64::MAX));
@@ -557,6 +604,41 @@ mod tests {
         ] {
             assert!(split_query(invalid).is_none(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn counts_filtered_file_extensions_case_insensitively_and_outputs_csv() {
+        let mut index = LocalFilesIndex::default();
+        let query = r"C:\Work | | 后缀统计";
+        let load = index.request(Some(query)).unwrap();
+        assert_eq!(load.entry_type, DirectoryEntryType::File);
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                entry("a.tar.GZ", "file"),
+                entry("b.gz", "file"),
+                entry("c.TXT", "file"),
+                entry(".gitignore", "file"),
+                entry("README", "file"),
+                entry("d.csv,x", "file"),
+                entry("folder.gz", "directory"),
+                entry("cloud.gz", "unavailable"),
+            ])
+        ));
+        assert!(matches!(
+            index.results(query), Results::Value(Ok(value))
+                if value.text == "扩展名,数量\r\n无扩展名,2\r\n.gz,2\r\n\".csv,x\",1\r\n.txt,1"
+        ));
+        assert!(matches!(
+            index.results(r"C:\Work | README | extension-counts"), Results::Value(Ok(value))
+                if value.text == "扩展名,数量\r\n无扩展名,1"
+        ));
+        assert!(matches!(
+            index.results(r"C:\Work | missing | 后缀统计"), Results::Value(Ok(value))
+                if value.text == "扩展名,数量"
+        ));
+        assert!(split_query(r"C:\Work | | 后缀统计 仅文件夹").is_none());
+        assert!(split_query(r"C:\Work | | 后缀统计 路径列表").is_none());
     }
 
     #[test]

@@ -2217,6 +2217,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "URL: 排序参数 https://example.invalid/doc?z=a%20b&%61=a+b&a=%2B#part",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "去掉网址中名称和值均相同的参数",
+        query: "URL: 去重参数 https://example.invalid/doc?tag=a+b&&%74ag=a%20b&tag=a%2Bb&flag&flag=#part",
+    },
+    Example {
         icon: Icon::Browser,
         title: "将相对链接解析成完整 URL",
         query: r#"URL: 拼接 ["https://example.invalid/docs/api/","../guide?lang=zh#intro"]"#,

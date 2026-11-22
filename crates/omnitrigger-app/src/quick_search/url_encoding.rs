@@ -101,6 +101,7 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "去参数组" | "strip-params" => filter_parameter_group(value, false),
         "保留参数" | "keep-params" => filter_parameter_group(value, true),
         "排序参数" | "sort-params" => sort_query_parameters(value),
+        "去重参数" | "unique-params" => deduplicate_query_parameters(value),
         "加参数" | "append-param" => write_parameter(value, false),
         "设参数" | "set-param" => write_parameter(value, true),
         "文件链接" | "file-url" => encode_file_path(value),
@@ -293,6 +294,28 @@ fn parameter_name(part: &str) -> Option<String> {
     }
     let key = part.split_once('=').map_or(part, |(key, _)| key);
     decode_form_value(key).ok()
+}
+
+fn deduplicate_query_parameters(address: &str) -> Result<String, UrlEncodingError> {
+    let mut url = Url::parse(address).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    let Some(query) = url.query() else {
+        return Ok(url.into());
+    };
+    let mut seen = HashSet::new();
+    let mut retained = Vec::new();
+    for part in query.split('&') {
+        if part.is_empty() {
+            retained.push(part);
+            continue;
+        }
+        let (name, value) = part.split_once('=').unwrap_or((part, ""));
+        if seen.insert((decode_form_component(name)?, decode_form_component(value)?)) {
+            retained.push(part);
+        }
+    }
+    let query = retained.join("&");
+    url.set_query(Some(&query));
+    Ok(url.into())
 }
 
 fn sort_query_parameters(address: &str) -> Result<String, UrlEncodingError> {
@@ -733,6 +756,34 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    #[test]
+    fn keeps_the_first_spelling_of_each_decoded_parameter_pair() {
+        for (query, expected) in [
+            (
+                "去重参数 https://example.invalid/doc?tag=a+b&&%74ag=a%20b&tag=a%2Bb&flag&flag=#part",
+                "https://example.invalid/doc?tag=a+b&&tag=a%2Bb&flag#part",
+            ),
+            (
+                "unique-params https://example.invalid/?x=1&x=01&X=1&x=1",
+                "https://example.invalid/?x=1&x=01&X=1",
+            ),
+            (
+                "去重参数 https://example.invalid/p?#part",
+                "https://example.invalid/p?#part",
+            ),
+            (
+                "去重参数 https://example.invalid/p#part",
+                "https://example.invalid/p#part",
+            ),
+        ] {
+            assert_eq!(convert_url_component(query).as_deref(), Ok(expected));
+        }
+        assert_eq!(
+            convert_url_component("去重参数 https://example.invalid/?a=%ZZ"),
+            Err(UrlEncodingError::InvalidEscape)
+        );
     }
 
     #[test]
