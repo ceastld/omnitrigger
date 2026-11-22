@@ -4,13 +4,12 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-use num_rational::BigRational;
 use serde::{
     de::DeserializeOwned,
     ser::{Serialize, SerializeMap, Serializer},
 };
 
-use super::{fraction::calculate_fraction, text_tools::compare_natural};
+use super::{fraction::parse_fraction_literal, text_tools::compare_natural};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CsvError {
@@ -45,7 +44,7 @@ impl CsvError {
             Self::AmbiguousColumnName => "所选列名在表头重复，请改用列号",
             Self::InvalidColumnValue => "请输入列号和带双引号的值，再粘贴表格",
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
-            Self::InvalidNumber => "数值排序所选列须填写有限小数、整数或分数，例如 -2.5 或 1/3",
+            Self::InvalidNumber => "数值排序所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
             Self::Serialization => "无法生成 JSON",
         }
     }
@@ -338,7 +337,9 @@ fn sort_by_columns(
             .map(|row| {
                 let key = columns
                     .iter()
-                    .map(|&column| numeric_sort_value(&row[column]))
+                    .map(|&column| {
+                        parse_fraction_literal(&row[column]).map_err(|_| CsvError::InvalidNumber)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok((key, row))
             })
@@ -358,24 +359,6 @@ fn sort_by_columns(
         ordered
     };
     Ok(write_rows(std::iter::once(header).chain(ordered), ','))
-}
-
-fn numeric_sort_value(input: &str) -> Result<BigRational, CsvError> {
-    let (numerator, denominator) = input
-        .split_once('/')
-        .map_or((input, None), |(left, right)| (left, Some(right)));
-    for part in std::iter::once(numerator).chain(denominator) {
-        let part = part.trim();
-        let digits = part.strip_prefix(['+', '-']).unwrap_or(part);
-        if digits.is_empty()
-            || !digits
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || byte == b'.')
-        {
-            return Err(CsvError::InvalidNumber);
-        }
-    }
-    calculate_fraction(input.trim()).map_err(|_| CsvError::InvalidNumber)
 }
 
 fn validate_column_width(columns: &[usize], width: usize) -> Result<(), CsvError> {
@@ -695,6 +678,10 @@ mod tests {
             Ok("编号,金额,优先级\r\n005,9007199254740993,0\r\n004,9007199254740992,0\r\n001,01.50,2\r\n002,3/2,1\r\n006,+1.5,1\r\n003,-2.5,0")
         );
         assert_eq!(transform_csv("数值排序 1 a,b").as_deref(), Ok("a,b"));
+        assert_eq!(
+            transform_csv("数值排序 2 编号,金额\n001,2e2\n002,-1.5E-1\n003,.25").as_deref(),
+            Ok("编号,金额\r\n002,-1.5E-1\r\n003,.25\r\n001,2e2")
+        );
         assert_eq!(
             transform_csv("数值降序 3 a,b"),
             Err(CsvError::ColumnOutOfRange)

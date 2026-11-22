@@ -1667,6 +1667,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用科学计数法做精确运算",
+        query: "分数: 计算 2.5e-3 * 4e3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "精确计算阶乘",
         query: "分数: 计算 50!",
     },

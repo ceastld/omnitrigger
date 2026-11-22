@@ -41,7 +41,7 @@ impl FractionError {
             Self::CombinatorialDomain => "组合数和排列数的参数必须是非负整数",
             Self::CombinatorialRange => "组合数和排列数的参数最多 4096，结果最多 8192 个二进制位",
             Self::DecimalPlaces => "输入 0 至 100 的小数位数，例如 分数: 小数 1/3 to 8",
-            Self::ExactRange => "指数绝对值最多 1024，分子和分母各最多 8192 个二进制位",
+            Self::ExactRange => "幂指数绝对值最多 1024，分子和分母各最多 8192 个二进制位",
         }
     }
 }
@@ -158,6 +158,27 @@ pub(super) fn calculate_fraction(input: &str) -> Result<BigRational, FractionErr
     }
     let mut parser = FractionParser { remaining: input };
     let value = parser.sum()?;
+    if !parser.remaining.trim().is_empty() {
+        return Err(FractionError::Invalid);
+    }
+    Ok(value)
+}
+
+pub(super) fn parse_fraction_literal(input: &str) -> Result<BigRational, FractionError> {
+    let input = input.trim();
+    if input.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
+        return Err(FractionError::TooLong);
+    }
+    let mut parser = FractionParser { remaining: input };
+    let mut value = parser.signed_number()?;
+    if parser.consume('/') {
+        let denominator = parser.signed_number()?;
+        if denominator.numer().sign() == Sign::NoSign {
+            return Err(FractionError::ZeroDenominator);
+        }
+        value /= denominator;
+        ensure_exact_size(&value)?;
+    }
     if !parser.remaining.trim().is_empty() {
         return Err(FractionError::Invalid);
     }
@@ -443,6 +464,14 @@ impl FractionParser<'_> {
         function.calculate(n, k)
     }
 
+    fn signed_number(&mut self) -> Result<BigRational, FractionError> {
+        let input = self.remaining.trim_start();
+        let negative = input.starts_with('-');
+        self.remaining = input.strip_prefix(['+', '-']).unwrap_or(input);
+        let number = self.number()?;
+        Ok(if negative { -number } else { number })
+    }
+
     fn number(&mut self) -> Result<BigRational, FractionError> {
         let input = self.remaining.trim_start();
         let whole = input.bytes().take_while(u8::is_ascii_digit).count();
@@ -456,16 +485,73 @@ impl FractionParser<'_> {
             return Err(self.expected_token());
         }
         self.remaining = rest;
+        let exponent = if let Some(exponent) = rest.strip_prefix(['e', 'E']) {
+            let digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+            let length = digits.bytes().take_while(u8::is_ascii_digit).count();
+            if length == 0 {
+                self.remaining = digits;
+                return Err(self.expected_token());
+            }
+            let (exponent, rest) = exponent.split_at(exponent.len() - digits.len() + length);
+            self.remaining = rest;
+            Some(exponent)
+        } else {
+            None
+        };
         let digits = format!("{}{fraction}", &input[..whole]);
         let numerator = BigInt::parse_bytes(digits.as_bytes(), 10).ok_or(FractionError::Invalid)?;
-        let denominator = BigInt::from(10u8).pow(fraction.len() as u32);
-        Ok(BigRational::new(numerator, denominator))
+        if numerator.sign() == Sign::NoSign {
+            return Ok(BigRational::default());
+        }
+        let exponent = exponent
+            .map_or(Ok(0), str::parse::<i32>)
+            .ok()
+            .filter(|power| u64::from(power.unsigned_abs()) <= MAX_EXACT_BITS)
+            .ok_or(FractionError::ExactRange)?;
+        let shift = exponent - fraction.len() as i32;
+        let scale = BigInt::from(10u8).pow(shift.unsigned_abs());
+        let value = if shift < 0 {
+            BigRational::new(numerator, scale)
+        } else {
+            BigRational::from_integer(numerator * scale)
+        };
+        ensure_exact_size(&value)?;
+        Ok(value)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_scientific_notation_without_rounding_exact_operands() {
+        for (query, expected) in [
+            ("计算 2.5e-3 * 4e3", "10"),
+            ("计算 9.007199254740993e15 - 9007199254740992", "1"),
+            ("计算 .125E+1", "5/4"),
+            ("计算 2e2^2", "40000"),
+            ("计算 -0.000e-99999999999999999999", "0"),
+            ("小数 125e-4 to 4", "0.0125"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (input, error) in [
+            ("1e", FractionError::Incomplete),
+            ("1e+", FractionError::Incomplete),
+            ("1e+x", FractionError::Invalid),
+            ("1e99999999999999999999", FractionError::ExactRange),
+            ("1e-8192", FractionError::ExactRange),
+        ] {
+            assert_eq!(calculate_fraction(input), Err(error), "{input}");
+        }
+        let padding = " ".repeat(QUERY_LIMIT);
+        let padded = format!("{padding}75e-1{padding}");
+        assert_eq!(
+            parse_fraction_literal(&padded),
+            Ok(BigRational::new(15.into(), 2.into()))
+        );
+    }
 
     #[test]
     fn calculates_exact_combinations_and_permutations_with_expression_arguments() {
