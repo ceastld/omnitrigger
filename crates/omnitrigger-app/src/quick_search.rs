@@ -75,7 +75,9 @@ use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, looks_like_date_query, DateError};
 use cidr::{calculate_cidr, CidrError};
 use circle::{calculate_circle, CircleError};
-use color::{calculate_contrast, convert_color, make_color_palette, ColorError};
+use color::{
+    calculate_contrast, convert_color, convert_color_to_hex, make_color_palette, ColorError,
+};
 use complex::{calculate_complex, ComplexError};
 use conversion::{
     calculate_circuit, calculate_fuel_economy, calculate_pace, calculate_pixel_density,
@@ -353,6 +355,7 @@ enum ValueError {
     BatchPath(BatchError<PathError>),
     BatchUrl(BatchError<UrlEncodingError>),
     BatchDate(BatchError<DateError>),
+    BatchColor(BatchError<ColorError>),
     Radix(RadixError),
     RatioAllocation(RatioAllocationError),
     AspectRatio(AspectRatioError),
@@ -447,6 +450,13 @@ impl ValueError {
                     DateError::message,
                 );
             }
+            Self::BatchColor(error) => {
+                return batch_error_message(
+                    error,
+                    "逐行输入 HEX、RGB、HSL、HWB 或 CSS 颜色名",
+                    ColorError::message,
+                );
+            }
             Self::Radix(error) => error.message(),
             Self::RatioAllocation(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
@@ -500,6 +510,7 @@ impl ValueError {
                 | Self::BatchPath(BatchError::Empty)
                 | Self::BatchUrl(BatchError::Empty)
                 | Self::BatchDate(BatchError::Empty)
+                | Self::BatchColor(BatchError::Empty)
                 | Self::AspectRatio(AspectRatioError::Incomplete)
                 | Self::Paper(PaperError::Incomplete)
                 | Self::Rectangle(RectangleError::Incomplete)
@@ -723,6 +734,17 @@ impl Results {
                         Self::text_value(
                             map_batch_lines(arguments, convert_url_component)
                                 .map_err(ValueError::BatchUrl),
+                        )
+                    } else if let Some(arguments) = batch_arguments(term, "颜色对照", "color-csv")
+                    {
+                        Self::text_value(
+                            map_batch_csv(arguments, "输入", convert_color_to_hex)
+                                .map_err(ValueError::BatchColor),
+                        )
+                    } else if let Some(arguments) = batch_arguments(term, "颜色", "color") {
+                        Self::text_value(
+                            map_batch_lines(arguments, convert_color_to_hex)
+                                .map_err(ValueError::BatchColor),
                         )
                     } else if let Some(arguments) = batch_arguments(term, "日期对照", "date-csv")
                     {
@@ -2615,6 +2637,30 @@ mod tests {
         assert!(for_query("批量换算: 时间", &[])
             .suggested_input(0)
             .is_some_and(|query| query.starts_with("批量换算: 时间戳 ")));
+    }
+
+    #[test]
+    fn batches_colors_as_hex_and_preserves_alpha_and_csv_input_quoting() {
+        assert!(matches!(
+            for_query(
+                "批量换算: 颜色对照 rebeccapurple\nrgb(0, 255, 0)\nrgba(255,0,0,0.5)",
+                &[],
+            ),
+            Results::Value(Ok(value)) if value.text == concat!(
+                "输入,结果\r\n",
+                "rebeccapurple,#663399\r\n",
+                "\"rgb(0, 255, 0)\",#00FF00\r\n",
+                "\"rgba(255,0,0,0.5)\",#FF000080",
+            )
+        ));
+        assert!(matches!(
+            for_query("批量换算: 颜色 ＃ａｂｃ\ntransparent", &[]),
+            Results::Value(Ok(value)) if value.text == "#AABBCC\n#00000000"
+        ));
+        assert!(matches!(
+            for_query("批量换算: 颜色对照 #abc\n\nrgb(300,0,0)", &[]),
+            Results::Value(Err(ValueError::BatchColor(BatchError::Row { line: 3, .. })))
+        ));
     }
 
     #[test]

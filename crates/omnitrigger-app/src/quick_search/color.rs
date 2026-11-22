@@ -428,6 +428,11 @@ pub(super) fn make_color_palette(input: &str) -> Result<String, ColorError> {
     Ok(colors.join("\n"))
 }
 
+pub(super) fn convert_color_to_hex(input: &str) -> Result<String, ColorError> {
+    let normalized = normalize(input);
+    Ok(Channels::parse(normalized.trim())?.format_hex())
+}
+
 pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
     let normalized = normalize(input);
     let input = normalized.trim();

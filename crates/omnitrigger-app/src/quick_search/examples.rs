@@ -480,6 +480,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量换算: 网址对照 去查询串 https://example.invalid/doc?q=a#part\n表单解码 a%2Bb+c",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "把多种颜色写法逐行换算成 HEX",
+        query: "批量换算: 颜色 #abc\nrgb(255, 0, 0)\ntransparent",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "以 CSV 对照颜色原文和 HEX",
+        query: "批量换算: 颜色对照 rebeccapurple\nrgb(0, 255, 0)\nrgba(255,0,0,0.5)",
+    },
+    Example {
         icon: Icon::Clock,
         title: "逐行计算日期、工作日和周号",
         query: "批量换算: 日期 2026-11-20 + 1工作日\n2024-02-29 + 1年\n2027-01-01 第几周",
@@ -3011,7 +3021,17 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::BatchConversion
             if matches!(
                 term,
-                "时" | "时长" | "时间" | "时间戳" | "路" | "路径" | "网" | "网址" | "日" | "日期"
+                "时" | "时长"
+                    | "时间"
+                    | "时间戳"
+                    | "路"
+                    | "路径"
+                    | "网"
+                    | "网址"
+                    | "日"
+                    | "日期"
+                    | "颜"
+                    | "颜色"
             ) || (!term.is_empty()
                 && [
                     "对照",
@@ -3020,6 +3040,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "路径对照",
                     "网址对照",
                     "日期对照",
+                    "颜色对照",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term))) => {}
