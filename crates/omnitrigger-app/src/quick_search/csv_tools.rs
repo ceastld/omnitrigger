@@ -67,6 +67,9 @@ pub(super) enum CsvError {
     JoinArguments,
     JoinColumns,
     JoinTooLarge,
+    ColumnComparisonArguments,
+    DuplicateComparisonKey,
+    ColumnComparisonTooLarge,
     FillTooLarge,
     ConstantColumnArguments,
     RowNumberArguments,
@@ -146,6 +149,11 @@ impl CsvError {
             }
             Self::JoinColumns => "两侧连接列须具有相同列数，每一侧至少一列，列不可重复",
             Self::JoinTooLarge => "表格合并结果超过 1 MiB，请缩小表格范围",
+            Self::ColumnComparisonArguments => {
+                "填写键列和对比列，例如 [[\"编号\"],\"金额\"]，再输入包含原表和新表的 JSON 字符串数组"
+            }
+            Self::DuplicateComparisonKey => "对比列需要每张表中的键组合各出现一次",
+            Self::ColumnComparisonTooLarge => "表格对比结果超过 1 MiB，请缩小表格范围",
             Self::FillTooLarge => "填充结果超过 1 MiB，请缩小表格范围",
             Self::ConstantColumnArguments => {
                 "用 JSON 数组填写新列名和固定文本，例如 [\"来源\",\"人工复核\"]"
@@ -437,6 +445,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "全连接" | "full-join" => return join_csv(input, JoinKind::Full),
         "左表匹配" | "semi-join" => return join_csv(input, JoinKind::MatchedLeft),
         "左表独有" | "anti-join" => return join_csv(input, JoinKind::UnmatchedLeft),
+        "对比列" | "compare-column" => return compare_csv_column(input),
         "纵向合并" | "stack" => return stack_csv(input),
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
@@ -1015,10 +1024,7 @@ impl JoinKey {
 fn join_csv(input: &str, kind: JoinKind) -> Result<String, CsvError> {
     let ([left_key, right_key], data) =
         json_argument_and_data::<[JoinKey; 2]>(input, CsvError::JoinArguments)?;
-    let [left, right] =
-        serde_json::from_str::<[String; 2]>(data).map_err(|_| CsvError::JoinArguments)?;
-    let left = read_rows(left.strip_prefix('\u{feff}').unwrap_or(&left), ',')?;
-    let right = read_rows(right.strip_prefix('\u{feff}').unwrap_or(&right), ',')?;
+    let [left, right] = read_csv_pair(data, CsvError::JoinArguments)?;
     let (left_header, left_rows) = left.split_first().ok_or(CsvError::MissingInput)?;
     let (right_header, right_rows) = right.split_first().ok_or(CsvError::MissingInput)?;
     let left_key = left_key.resolve(left_header)?;
@@ -1168,6 +1174,90 @@ fn stack_csv(input: &str) -> Result<String, CsvError> {
                 &mut output,
                 row_fields.iter().copied(),
                 CsvError::JoinTooLarge,
+            )?;
+        }
+    }
+    Ok(output)
+}
+
+fn read_csv_pair(data: &str, invalid: CsvError) -> Result<[Vec<Vec<String>>; 2], CsvError> {
+    let [left, right] = serde_json::from_str::<[String; 2]>(data).map_err(|_| invalid)?;
+    Ok([
+        read_rows(left.strip_prefix('\u{feff}').unwrap_or(&left), ',')?,
+        read_rows(right.strip_prefix('\u{feff}').unwrap_or(&right), ',')?,
+    ])
+}
+
+fn compare_csv_column(input: &str) -> Result<String, CsvError> {
+    let ((key_columns, column), data) = json_argument_and_data::<(
+        Vec<ColumnReference>,
+        ColumnReference,
+    )>(input, CsvError::ColumnComparisonArguments)?;
+    if key_columns.is_empty() {
+        return Err(CsvError::ColumnComparisonArguments);
+    }
+    let [old, new] = read_csv_pair(data, CsvError::ColumnComparisonArguments)?;
+    let (old_header, old_rows) = old.split_first().ok_or(CsvError::MissingInput)?;
+    let (new_header, new_rows) = new.split_first().ok_or(CsvError::MissingInput)?;
+    let old_keys = resolve_distinct_columns(
+        old_header,
+        &key_columns,
+        CsvError::ColumnComparisonArguments,
+    )?;
+    let new_keys = resolve_distinct_columns(
+        new_header,
+        &key_columns,
+        CsvError::ColumnComparisonArguments,
+    )?;
+    let old_column = column.resolve(old_header)?;
+    let new_column = column.resolve(new_header)?;
+    validate_column_width(&[old_column], old_header.len())?;
+    validate_column_width(&[new_column], new_header.len())?;
+    let mut new_values = HashMap::new();
+    for row in new_rows {
+        let key = column_key(row, &new_keys);
+        if new_values.insert(key, row[new_column].as_str()).is_some() {
+            return Err(CsvError::DuplicateComparisonKey);
+        }
+    }
+    let mut output = String::new();
+    let key_labels: Vec<_> = (1..=key_columns.len())
+        .map(|index| format!("键{index}"))
+        .collect();
+    let too_large = CsvError::ColumnComparisonTooLarge;
+    append_bounded_csv_row(
+        &mut output,
+        key_labels
+            .iter()
+            .map(String::as_str)
+            .chain(["变更", "原值", "新值"]),
+        too_large,
+    )?;
+    let mut old_seen = HashSet::new();
+    for row in old_rows {
+        let key = column_key(row, &old_keys);
+        if !old_seen.insert(key.clone()) {
+            return Err(CsvError::DuplicateComparisonKey);
+        }
+        let old_value = row[old_column].as_str();
+        let (change, new_value) = match new_values.remove(&key) {
+            Some(new_value) if new_value == old_value => continue,
+            Some(new_value) => ("修改", new_value),
+            None => ("删除", ""),
+        };
+        append_bounded_csv_row(
+            &mut output,
+            key.into_iter().chain([change, old_value, new_value]),
+            too_large,
+        )?;
+    }
+    for row in new_rows {
+        let key = column_key(row, &new_keys);
+        if let Some(new_value) = new_values.remove(&key) {
+            append_bounded_csv_row(
+                &mut output,
+                key.into_iter().chain(["新增", "", new_value]),
+                too_large,
             )?;
         }
     }
@@ -2984,6 +3074,47 @@ mod tests {
                 transform_csv(&format!(r#"全连接 {keys} ["区,月,品","月份,区域,额"]"#)),
                 Err(CsvError::JoinColumns)
             );
+        }
+    }
+
+    #[test]
+    fn compares_named_columns_with_composite_keys_and_preserves_change_order() {
+        let query = r#"对比列 [["编号","班次"],"金额"] ["编号,班次,金额\n001,A,1.50\n002,B,3\n004,A,0\n001,B,","金额,班次,编号\n9,C,003\n1.5,A,001\n0,A,004\n2,B,001\n8,D,005"]"#;
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("键1,键2,变更,原值,新值\r\n001,A,修改,1.50,1.5\r\n002,B,删除,3,\"\"\r\n001,B,修改,\"\",2\r\n003,C,新增,\"\",9\r\n005,D,新增,\"\",8")
+        );
+        assert_eq!(
+            transform_csv(r#"compare-column [[1],2] ["编号,金额\n001,1","编号,金额\n001,1"]"#)
+                .as_deref(),
+            Ok("键1,变更,原值,新值"),
+        );
+        assert_eq!(
+            transform_csv(
+                r#"对比列 [[1],2] ["编号,说明\n\"a,b\",\"旧,值\"","编号,说明\n\"a,b\",\"新,值\""]"#,
+            )
+            .as_deref(),
+            Ok("键1,变更,原值,新值\r\n\"a,b\",修改,\"旧,值\",\"新,值\""),
+        );
+        for (query, error) in [
+            (
+                r#"对比列 [[],2] ["编号,金额","编号,金额"]"#,
+                CsvError::ColumnComparisonArguments,
+            ),
+            (
+                r#"对比列 [[1],2] ["编号,金额\n001,1\n001,2","编号,金额"]"#,
+                CsvError::DuplicateComparisonKey,
+            ),
+            (
+                r#"对比列 [[1],2] ["编号,金额","编号,金额\n001,1\n001,2"]"#,
+                CsvError::DuplicateComparisonKey,
+            ),
+            (
+                r#"对比列 [[1],"金额"] ["编号,金额","编号,备注"]"#,
+                CsvError::MissingColumnName,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
         }
     }
 

@@ -2668,6 +2668,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "根据编号列出金额修改、删除和新增的记录",
+        query: r#"CSV: 对比列 [["编号"],"金额"] ["编号,金额\n001,1.50\n002,3","金额,编号\n2e0,001\n4,003"]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按地区和月份保留右表能匹配的左表行",
         query: r#"CSV: 左表匹配 [["区","月"],["区域","月份"]] ["区,月,额\n北,01,1.50\n北,02,2\n南,01,3","月份,区域\n01,北\n01,北\n01,南"]"#,
     },
