@@ -691,6 +691,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计整数绝对值的二进制位数和置位数",
+        query: "进制: 位统计 -0xFF00",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "选择目标进制",
         query: "0xff to",
     },
@@ -3621,7 +3626,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Radix
             if !term.is_empty()
-                && ["字节序", "读字节序", "补码", "读补码"]
+                && ["字节序", "读字节序", "补码", "读补码", "位统计"]
                     .iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Triangle

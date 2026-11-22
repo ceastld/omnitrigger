@@ -131,6 +131,9 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     if operation == "读补码" || operation.eq_ignore_ascii_case("read-twos-complement") {
         return read_byte_order(arguments, true);
     }
+    if operation == "位统计" || operation.eq_ignore_ascii_case("bit-statistics") {
+        return bit_statistics(arguments);
+    }
     let tokens: Vec<_> = input.split_whitespace().take(6).collect();
     let [integer, from, source, to, target] = tokens.as_slice() else {
         return Err(RadixError::Incomplete);
@@ -144,16 +147,33 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     let target = arbitrary_base(target).ok_or(RadixError::Base)?;
     let negative = integer.starts_with('-');
     let digits = integer.strip_prefix(['+', '-']).unwrap_or(integer);
-    let digits = ungroup_digits(digits).ok_or(RadixError::Digits)?;
-    let value = BigUint::parse_bytes(digits.as_bytes(), source).ok_or(RadixError::Digits)?;
-    if value.bits() > MAX_INTEGER_BITS {
-        return Err(RadixError::OutOfRange);
-    }
+    let value = bounded_magnitude(digits, source)?;
     let mut text = value.to_str_radix(target);
     if negative && value.bits() > 0 {
         text.insert(0, '-');
     }
     Ok(text)
+}
+
+fn bit_statistics(input: &str) -> Result<String, RadixError> {
+    let input = input.trim();
+    let input = input.strip_prefix(['+', '-']).unwrap_or(input);
+    let (base, digits) = Base::prefixed(input).unwrap_or((Base::Decimal, input));
+    let value = bounded_magnitude(digits, base as u32)?;
+    Ok(format!(
+        "二进制位数 {}\n置位数 {}",
+        value.bits(),
+        value.count_ones()
+    ))
+}
+
+fn bounded_magnitude(digits: &str, base: u32) -> Result<BigUint, RadixError> {
+    let digits = ungroup_digits(digits).ok_or(RadixError::Digits)?;
+    let value = BigUint::parse_bytes(digits.as_bytes(), base).ok_or(RadixError::Digits)?;
+    if value.bits() > MAX_INTEGER_BITS {
+        return Err(RadixError::OutOfRange);
+    }
+    Ok(value)
 }
 
 fn byte_order(input: &str, signed: bool) -> Result<String, RadixError> {
@@ -275,6 +295,33 @@ pub(super) fn ungroup_digits(digits: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_absolute_integer_bits_and_enforces_the_existing_radix_limit() {
+        for (query, expected) in [
+            ("位统计 -0xFF00", "二进制位数 16\n置位数 8"),
+            ("BIT-STATISTICS +0b10_1101", "二进制位数 6\n置位数 4"),
+            ("位统计 0", "二进制位数 0\n置位数 0"),
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            convert_arbitrary_radix(&format!("位统计 0x{}", "f".repeat(2048))).as_deref(),
+            Ok("二进制位数 8192\n置位数 8192"),
+        );
+        assert_eq!(
+            convert_arbitrary_radix(&format!("位统计 0x{}", "f".repeat(2049))),
+            Err(RadixError::OutOfRange),
+        );
+        assert_eq!(
+            convert_arbitrary_radix("位统计 0b2"),
+            Err(RadixError::Digits)
+        );
+    }
 
     #[test]
     fn encodes_signed_twos_complement_without_overflow_or_truncation() {
