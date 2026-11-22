@@ -20,6 +20,7 @@ const MAX_SEQUENCE_VALUES: usize = 128;
 const MAX_APPROXIMATION_DENOMINATOR: u32 = 1_000_000;
 const MAX_RATIO_VALUES: usize = 16;
 const MAX_CONTINUED_FRACTION_TERMS: usize = 512;
+const MAX_PRIME_FACTORIZATION: u64 = 1_000_000_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FractionError {
@@ -44,6 +45,8 @@ pub(super) enum FractionError {
     RationalSquareRoot,
     IntegerSquareRoot,
     IntegerAggregate,
+    PrimeFactorizationDomain,
+    PrimeFactorizationRange,
     BitwiseArguments,
     RepeatingDecimalLength,
     RepeatingDecimalSyntax,
@@ -83,6 +86,8 @@ impl FractionError {
             Self::RationalSquareRoot => "精确开方需要非负数，且结果能表示为分数",
             Self::IntegerSquareRoot => "isqrt 需要非负整数",
             Self::IntegerAggregate => "gcd 和 lcm 的参数须为整数",
+            Self::PrimeFactorizationDomain => "质因数分解需要非零整数",
+            Self::PrimeFactorizationRange => "待分解整数的绝对值最多为 1000000000000",
             Self::BitwiseArguments => "位运算的数值和移位量须为非负整数",
             Self::RepeatingDecimalLength => "循环小数最多展开 512 个小数位",
             Self::RepeatingDecimalSyntax => "用括号填写循环节，例如 0.(142857) 或 -2.1(6)",
@@ -228,6 +233,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     if verb == "化简比例" || verb.eq_ignore_ascii_case("ratio") {
         return simplify_ratio(expression);
     }
+    if verb == "质因数分解" || verb.eq_ignore_ascii_case("factorize") {
+        return prime_factorization(calculate_fraction(expression)?);
+    }
     let alignment = match verb.to_ascii_lowercase().as_str() {
         "就近对齐" | "round-step" => Some(FractionAlignment::Nearest),
         "向下对齐" | "floor-step" => Some(FractionAlignment::Down),
@@ -285,6 +293,40 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     } else {
         format!("{sign}{numerator}/{denominator}")
     })
+}
+
+fn prime_factorization(value: BigRational) -> Result<String, FractionError> {
+    let sign = value.numer().sign();
+    if !value.is_integer() || sign == Sign::NoSign {
+        return Err(FractionError::PrimeFactorizationDomain);
+    }
+    let mut remaining = u64::try_from(value.numer().magnitude())
+        .ok()
+        .filter(|&value| value <= MAX_PRIME_FACTORIZATION)
+        .ok_or(FractionError::PrimeFactorizationRange)?;
+    let mut factors = Vec::new();
+    if sign == Sign::Minus {
+        factors.push("-1".to_owned());
+    }
+    for divisor in std::iter::once(2).chain((3..).step_by(2)) {
+        if divisor > remaining / divisor {
+            break;
+        }
+        let mut count = 0;
+        while remaining.is_multiple_of(divisor) {
+            remaining /= divisor;
+            count += 1;
+        }
+        match count {
+            0 => {}
+            1 => factors.push(divisor.to_string()),
+            _ => factors.push(format!("{divisor}**{count}")),
+        }
+    }
+    if remaining > 1 || factors.is_empty() {
+        factors.push(remaining.to_string());
+    }
+    Ok(factors.join(" * "))
 }
 
 fn simplify_ratio(input: &str) -> Result<String, FractionError> {
@@ -1445,6 +1487,31 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    #[test]
+    fn factors_nonzero_integers_as_bounded_exact_products() {
+        for (query, expected) in [
+            ("质因数分解 360", "2**3 * 3**2 * 5"),
+            ("质因数分解 -360", "-1 * 2**3 * 3**2 * 5"),
+            ("factorize 2**10-1", "3 * 11 * 31"),
+            ("质因数分解 1000000000000", "2**12 * 5**12"),
+            ("质因数分解 104729", "104729"),
+            ("质因数分解 -1", "-1"),
+            ("质因数分解 1", "1"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for value in ["0", "1/2"] {
+            assert_eq!(
+                simplify_fraction(&format!("质因数分解 {value}")),
+                Err(FractionError::PrimeFactorizationDomain)
+            );
+        }
+        assert_eq!(
+            simplify_fraction("质因数分解 -1000000000001"),
+            Err(FractionError::PrimeFactorizationRange)
+        );
     }
 
     #[test]

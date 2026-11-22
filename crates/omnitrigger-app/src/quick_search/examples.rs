@@ -3613,6 +3613,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把整数分解为质因数的乘积",
+        query: "分数: 质因数分解 360",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把多项精确数值化为最简整数比",
         query: "分数: 化简比例 0.5,3/4,1",
     },
@@ -3729,6 +3734,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "带分数",
                     "从带分数",
                     "限分母",
+                    "质因数分解",
                     "化简比例",
                     "就近对齐",
                     "向下对齐",
