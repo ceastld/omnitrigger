@@ -1652,6 +1652,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按 JSON 指针把嵌套字段导出为 CSV",
+        query: r#"JSON: 路径转CSV ["/订单/商品","/订单/金额"] [{"订单":{"商品":"茶,咖啡","金额":1.50}},{"订单":{"商品":"梨"}}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定顺序选出 JSON 对象的字段",
         query: r#"JSON: 选键 ["编号","状态"] [{"状态":true,"编号":"001","备注":"茶"},{"编号":"002"}]"#,
     },

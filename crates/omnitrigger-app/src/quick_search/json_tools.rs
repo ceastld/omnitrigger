@@ -40,6 +40,7 @@ pub(super) enum JsonError {
     CsvRows,
     CsvDuplicateKey,
     CsvNullCharacter,
+    CsvOutputTooLarge,
     SelectionKeys,
     SelectionConflict,
     FilterValue,
@@ -75,6 +76,7 @@ impl JsonError {
             Self::CsvRows => "输入等宽且有数据列的数组，或至少有一个键的对象列表",
             Self::CsvDuplicateKey => "同一对象的 CSV 列名需要唯一",
             Self::CsvNullCharacter => "CSV 单元格不能包含空字符 U+0000",
+            Self::CsvOutputTooLarge => "CSV 转换结果超过 1 MiB",
             Self::SelectionKeys => "选键需要至少一个互不重复的键名",
             Self::SelectionConflict => "待选键在同一对象中重复出现",
             Self::FilterValue => "路径后请输入 JSON 字符串、数字、布尔值或 null，再粘贴数组",
@@ -123,6 +125,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "改键" | "rename-key" => return rename_json_key(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
         "转csv" | "to-csv" => return json_to_csv(source),
+        "路径转csv" | "pointers-to-csv" => return json_paths_to_csv(source),
         "选键" | "pick-keys" => return pick_json_keys(source),
         _ => return Err(JsonError::UnknownOperation),
     };
@@ -199,10 +202,7 @@ fn select_json_value(query: &str) -> Result<String, JsonError> {
 }
 
 fn select_json_paths(query: &str) -> Result<String, JsonError> {
-    let (pointers, source) = strings_and_source(query, JsonError::PointerSelection)?;
-    if pointers.is_empty() || pointers.iter().collect::<HashSet<_>>().len() != pointers.len() {
-        return Err(JsonError::PointerSelection);
-    }
+    let (pointers, source) = selected_pointers(query)?;
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
     let entries = pointers
         .into_iter()
@@ -216,6 +216,14 @@ fn select_json_paths(query: &str) -> Result<String, JsonError> {
         return Err(JsonError::LayoutTooLarge);
     }
     Ok(result)
+}
+
+fn selected_pointers(query: &str) -> Result<(Vec<String>, &str), JsonError> {
+    let (pointers, source) = strings_and_source(query, JsonError::PointerSelection)?;
+    if pointers.is_empty() || pointers.iter().collect::<HashSet<_>>().len() != pointers.len() {
+        return Err(JsonError::PointerSelection);
+    }
+    Ok((pointers, source))
 }
 
 fn select_json_path<'a>(root: &'a RawValue, pointer: &str) -> Result<&'a RawValue, JsonError> {
@@ -718,6 +726,39 @@ fn json_to_csv(source: &str) -> Result<String, JsonError> {
     }
 }
 
+fn json_paths_to_csv(query: &str) -> Result<String, JsonError> {
+    let (pointers, source) = selected_pointers(query)?;
+    let columns = pointers
+        .iter()
+        .map(|pointer| pointer_keys(pointer)?.collect::<Result<Vec<_>, _>>())
+        .collect::<Result<Vec<_>, _>>()?;
+    let headers = pointers
+        .iter()
+        .map(|pointer| encode_csv_cell(pointer))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut output = headers.join(",");
+    if output.len() > MAX_PRETTY_BYTES {
+        return Err(JsonError::CsvOutputTooLarge);
+    }
+    for row in read_json_array(source)? {
+        let cells = columns
+            .iter()
+            .map(|keys| match select_pointer_keys(row, keys) {
+                Ok(value) => json_csv_cell(value),
+                Err(JsonError::MissingValue) => encode_csv_cell(""),
+                Err(error) => Err(error),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let record = cells.join(",");
+        if output.len().saturating_add(record.len()).saturating_add(2) > MAX_PRETTY_BYTES {
+            return Err(JsonError::CsvOutputTooLarge);
+        }
+        output.push_str("\r\n");
+        output.push_str(&record);
+    }
+    Ok(output)
+}
+
 fn pick_json_keys(query: &str) -> Result<String, JsonError> {
     let (names, source) = strings_and_source(query, JsonError::KeyArguments)?;
     let wanted: HashSet<_> = names.iter().map(String::as_str).collect();
@@ -1113,6 +1154,33 @@ impl<'de> Visitor<'de> for ObjectEntries {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_nested_json_paths_to_ordered_csv_columns() {
+        assert_eq!(
+            transform_json(r#"路径转CSV ["/订单/金额","/a~1b"] [{"订单":{"金额":1.50},"a/b":"茶,咖啡"},{"订单":{"金额":9007199254740993},"a/b":null},{}]"#).as_deref(),
+            Ok("/订单/金额,/a~1b\r\n1.50,\"茶,咖啡\"\r\n9007199254740993,\"\"\r\n\"\",\"\"")
+        );
+        assert_eq!(
+            transform_json(r#"pointers-to-csv ["","/0"] [[1e2],[]]"#).as_deref(),
+            Ok("\"\",/0\r\n[1e2],1e2\r\n[],\"\"")
+        );
+        assert_eq!(
+            transform_json(r#"路径转CSV ["/x"] []"#).as_deref(),
+            Ok("/x")
+        );
+        for (query, error) in [
+            (r#"路径转CSV ["/~2"] []"#, JsonError::InvalidPointer),
+            (r#"路径转CSV ["/x","/x"] []"#, JsonError::PointerSelection),
+            (
+                r#"路径转CSV ["/x"] [{"x":1,"x":2}]"#,
+                JsonError::DuplicateKey,
+            ),
+            (r#"路径转CSV ["/x"] {}"#, JsonError::ExpectedArray),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn lists_grouped_json_records_preserving_the_order_and_number_spellings() {
