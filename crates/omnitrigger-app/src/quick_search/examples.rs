@@ -580,6 +580,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "矩阵: 无穷范数 1/2,-2;3,1",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "用 1 范数求方阵的精确条件数",
+        query: "矩阵: 条件数 1 @ 2,0; 0,1/3",
+    },
+    Example {
         icon: Icon::Layers,
         title: "换算单位",
         query: "10 km to mi",
@@ -3964,7 +3969,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Matrix
             if matches!(term, "乘方" | "特" | "特征" | "特征值")
                 || (!term.is_empty()
-                    && ["最小二乘", "1范数", "无穷范数"]
+                    && ["最小二乘", "1范数", "无穷范数", "条件数"]
                         .iter()
                         .any(|op| op.starts_with(term))) => {}
         Scope::Duration

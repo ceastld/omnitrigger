@@ -21,6 +21,7 @@ pub(super) enum MatrixError {
     ElementwiseDimensions,
     ProductDimensions,
     PowerExponent,
+    ConditionNorm,
     SolveDimensions,
     Singular,
     LeastSquaresRank,
@@ -32,15 +33,16 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、1范数、无穷范数、行列式、迹、特征值、转置、求解、最小二乘、求逆、秩、行最简形、零空间、行空间和列空间"
+                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、1范数、无穷范数、条件数、行列式、迹、特征值、转置、求解、最小二乘、求逆、秩、行最简形、零空间、行空间和列空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
-            Self::SquareRequired => "行列式、迹、乘方、求解和求逆需要方阵",
+            Self::SquareRequired => "行列式、迹、乘方、求解、求逆和条件数需要方阵",
             Self::EigenvalueDimensions => "请输入 2 行 2 列的矩阵求特征值",
             Self::ElementwiseDimensions => "加减法和逐项乘法要求两个矩阵的行数和列数分别相同",
             Self::ProductDimensions => "左矩阵的列数须等于右矩阵的行数",
             Self::PowerExponent => "矩阵乘方的指数须为 -64 至 64 的整数",
+            Self::ConditionNorm => "填写 1 或 ∞，用 @ 隔开矩阵，例如 条件数 1 @ 2,0; 0,1/3",
             Self::SolveDimensions => "等号右侧的常数列或矩阵须与系数矩阵行数一致",
             Self::Singular => "系数矩阵不可逆，无法得到唯一解",
             Self::LeastSquaresRank => "系数矩阵的列线性相关，最小二乘解不唯一",
@@ -92,6 +94,7 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         "无穷范数" | "∞范数" | "infinity-norm" => {
             max_absolute_row_sum(parse_matrix(input)?).map(|norm| norm.to_string())
         }
+        "条件数" | "condition-number" => matrix_condition_number(input),
         "乘法" | "乘" | "multiply" => {
             let (left, right) = parse_pair(input)?;
             multiply(&left, &right).map(format_matrix)
@@ -426,6 +429,29 @@ fn frobenius_norm(matrix: Matrix) -> Result<String, MatrixError> {
     Ok(format_square_root(&squared_norm))
 }
 
+fn matrix_condition_number(input: &str) -> Result<String, MatrixError> {
+    let (norm, input) = input.split_once('@').ok_or(MatrixError::ConditionNorm)?;
+    let one_norm = match norm.trim().to_ascii_lowercase().as_str() {
+        "1" => true,
+        "∞" | "无穷" | "inf" | "infinity" => false,
+        _ => return Err(MatrixError::ConditionNorm),
+    };
+    let matrix = parse_matrix(input)?;
+    let inverse = match solve(matrix.clone(), identity(matrix.len())) {
+        Ok(inverse) => inverse,
+        Err(MatrixError::Singular) => return Ok("∞".to_owned()),
+        Err(error) => return Err(error),
+    };
+    let (matrix, inverse) = if one_norm {
+        (transpose(matrix), transpose(inverse))
+    } else {
+        (matrix, inverse)
+    };
+    let result = max_absolute_row_sum(matrix)? * max_absolute_row_sum(inverse)?;
+    ensure_exact_size(&result).map_err(MatrixError::Evaluation)?;
+    Ok(result.to_string())
+}
+
 fn max_absolute_row_sum(matrix: Matrix) -> Result<BigRational, MatrixError> {
     let mut maximum = BigRational::default();
     for row in matrix {
@@ -609,6 +635,25 @@ mod tests {
             );
         }
         assert_eq!(calculate_matrix("加法 1,2"), Err(MatrixError::Incomplete));
+    }
+
+    #[test]
+    fn calculates_exact_condition_numbers_and_detects_singular_matrices() {
+        for (query, expected) in [
+            ("条件数 1 @ 2,0; 0,1/3", "6"),
+            ("条件数 ∞ @ 1,1; 0,2", "3"),
+            ("condition-number INF @ -2", "1"),
+            ("条件数 1 @ 1,2; 2,4", "∞"),
+            ("条件数 ∞ @ 0", "∞"),
+        ] {
+            assert_eq!(calculate_matrix(query).as_deref(), Ok(expected));
+        }
+        for (query, error) in [
+            ("条件数 2 @ 1", MatrixError::ConditionNorm),
+            ("条件数 1 @ 1,2", MatrixError::SquareRequired),
+        ] {
+            assert_eq!(calculate_matrix(query), Err(error));
+        }
     }
 
     #[test]
