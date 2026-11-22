@@ -166,6 +166,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "计算方阵主对角线的和",
+        query: "矩阵: 迹 1/2,20; 3,-1/3",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "用同一个分数乘矩阵中的每个元素",
+        query: "矩阵: 数乘 -3/2 @ 1/3,2; -1,0",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "按元素精确相加两个矩阵",
         query: "矩阵: 加法 1/2,2; 3,4 @ 1/3,5; -3,1",
     },

@@ -26,10 +26,12 @@ impl MatrixError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
-            Self::UnknownOperation => "可用操作为加法、减法、乘法、行列式、转置、求解、求逆和秩",
+            Self::UnknownOperation => {
+                "可用加法、减法、乘法、数乘、行列式、迹、转置、求解、求逆和秩"
+            }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
-            Self::SquareRequired => "行列式、求解和求逆需要方阵",
+            Self::SquareRequired => "行列式、迹、求解和求逆需要方阵",
             Self::SumDimensions => "加减法要求两个矩阵的行数和列数分别相同",
             Self::ProductDimensions => "左矩阵的列数须等于右矩阵的行数",
             Self::SolveDimensions => "等号右侧的常数列或矩阵须与系数矩阵行数一致",
@@ -51,6 +53,7 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
     let operation = operation.to_ascii_lowercase();
     match operation.as_str() {
         "行列式" | "det" => determinant(parse_matrix(input)?).map(|value| value.to_string()),
+        "迹" | "trace" => trace(&parse_matrix(input)?).map(|value| value.to_string()),
         "秩" | "rank" => matrix_rank(parse_matrix(input)?).map(|value| value.to_string()),
         "加法" | "add" | "减法" | "subtract" => {
             let (left, right) = parse_pair(input)?;
@@ -60,6 +63,11 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         "乘法" | "乘" | "multiply" => {
             let (left, right) = parse_pair(input)?;
             multiply(&left, &right).map(format_matrix)
+        }
+        "数乘" | "scale" => {
+            let (factor, matrix) = input.split_once('@').ok_or(MatrixError::Incomplete)?;
+            let factor = calculate_fraction(factor).map_err(MatrixError::Evaluation)?;
+            scale_matrix(parse_matrix(matrix)?, &factor).map(format_matrix)
         }
         "转置" | "transpose" => Ok(format_matrix(transpose(parse_matrix(input)?))),
         "求解" | "solve" => {
@@ -117,6 +125,26 @@ fn parse_matrix(input: &str) -> Result<Matrix, MatrixError> {
         values.push(cells);
     }
     Ok(values)
+}
+
+fn trace(matrix: &[Vec<BigRational>]) -> Result<BigRational, MatrixError> {
+    if matrix.len() != matrix[0].len() {
+        return Err(MatrixError::SquareRequired);
+    }
+    let mut sum = BigRational::default();
+    for (index, row) in matrix.iter().enumerate() {
+        sum += &row[index];
+        ensure_exact_size(&sum).map_err(MatrixError::Evaluation)?;
+    }
+    Ok(sum)
+}
+
+fn scale_matrix(mut matrix: Matrix, factor: &BigRational) -> Result<Matrix, MatrixError> {
+    for element in matrix.iter_mut().flatten() {
+        *element *= factor;
+        ensure_exact_size(element).map_err(MatrixError::Evaluation)?;
+    }
+    Ok(matrix)
 }
 
 fn determinant(mut matrix: Matrix) -> Result<BigRational, MatrixError> {
@@ -281,6 +309,22 @@ fn format_matrix(matrix: Matrix) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calculates_exact_matrix_trace_and_scales_rectangular_matrices() {
+        for (query, expected) in [
+            ("迹 1/2,20; 3,-1/3", "1/6"),
+            ("trace 0", "0"),
+            ("数乘 -3/2 @ 1/3,2; -1,0", "-1/2, -3\n3/2, 0"),
+            ("scale 0 @ 1,-2,3", "0, 0, 0"),
+        ] {
+            assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_matrix("迹 1,2; 3,4; 5,6"),
+            Err(MatrixError::SquareRequired)
+        );
+    }
 
     #[test]
     fn adds_and_subtracts_equal_shape_matrices_exactly() {
