@@ -17,6 +17,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::calculator::{narrow_ascii_graphic, FULLWIDTH_ASCII_OFFSET};
 
 const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
+const MAX_DIFF_LINES: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TextError {
@@ -30,6 +31,7 @@ pub(super) enum TextError {
     InvalidTextArgument,
     IncompleteLineComparison,
     InvalidLineComparison,
+    TooManyDiffLines,
     EmptyDelimiter,
     InvalidColumn,
     MissingColumn,
@@ -61,6 +63,7 @@ impl TextError {
             Self::InvalidTextArgument => "第一个参数要加引号，并和原文用空格分开",
             Self::IncompleteLineComparison => "输入两组加引号的文本，组间用空格分开",
             Self::InvalidLineComparison => "用空格分隔两组加引号的文本",
+            Self::TooManyDiffLines => "逐行比较最多支持每组 512 行",
             Self::EmptyDelimiter => "分隔符不能为空",
             Self::InvalidColumn => "输入从 1 开始的列号，例如 文本: 取列 \"\\t\" 2",
             Self::MissingColumn => "至少一行的列数不足",
@@ -119,6 +122,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "排除行" | "exclude-lines" => return filter_lines(text, false),
         "共有行" | "行交集" | "intersect-lines" => return compare_line_sets(text, true),
         "行差集" | "subtract-lines" => return compare_line_sets(text, false),
+        "逐行比较" | "diff-lines" => return diff_lines(text),
         "正则保留行" | "keep-regex-lines" => return filter_regex_lines(text, true),
         "正则排除行" | "exclude-regex-lines" => return filter_regex_lines(text, false),
         "正则计数" | "regex-count" => {
@@ -748,7 +752,7 @@ fn select_lines(text: &str, matches: impl Fn(&str) -> bool) -> String {
         .join("\n")
 }
 
-fn compare_line_sets(input: &str, keep_common: bool) -> Result<String, TextError> {
+fn read_line_comparison(input: &str) -> Result<(String, String), TextError> {
     let read_lists = || {
         let (first, rest) = replacement_argument(input)?;
         let (second, rest) = replacement_argument(rest)?;
@@ -765,6 +769,11 @@ fn compare_line_sets(input: &str, keep_common: bool) -> Result<String, TextError
     if first.contains('\0') || second.contains('\0') {
         return Err(TextError::NullCharacter);
     }
+    Ok((first, second))
+}
+
+fn compare_line_sets(input: &str, keep_common: bool) -> Result<String, TextError> {
+    let (first, second) = read_line_comparison(input)?;
     let second: HashSet<_> = second.lines().collect();
     let mut shown = HashSet::new();
     Ok(first
@@ -772,6 +781,59 @@ fn compare_line_sets(input: &str, keep_common: bool) -> Result<String, TextError
         .filter(|&line| second.contains(line) == keep_common && shown.insert(line))
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+fn diff_lines(input: &str) -> Result<String, TextError> {
+    let (before, after) = read_line_comparison(input)?;
+    let before: Vec<_> = before.lines().take(MAX_DIFF_LINES + 1).collect();
+    let after: Vec<_> = after.lines().take(MAX_DIFF_LINES + 1).collect();
+    if before.len() > MAX_DIFF_LINES || after.len() > MAX_DIFF_LINES {
+        return Err(TextError::TooManyDiffLines);
+    }
+    if before == after {
+        return Ok("两组文本各行相同".to_owned());
+    }
+    let columns = after.len() + 1;
+    let index = |left, right| left * columns + right;
+    let mut common = vec![0_u16; (before.len() + 1) * columns];
+    // 记录两组后缀的最长公共子序列长度，从首行回溯增删。
+    for (left, before_line) in before.iter().enumerate().rev() {
+        for (right, after_line) in after.iter().enumerate().rev() {
+            common[index(left, right)] = if before_line == after_line {
+                common[index(left + 1, right + 1)] + 1
+            } else {
+                common[index(left + 1, right)].max(common[index(left, right + 1)])
+            };
+        }
+    }
+    let mut result = String::new();
+    let (mut left, mut right) = (0, 0);
+    while left < before.len() || right < after.len() {
+        let (prefix, line) =
+            if left < before.len() && right < after.len() && before[left] == after[right] {
+                let line = before[left];
+                left += 1;
+                right += 1;
+                ("  ", line)
+            } else if right == after.len()
+                || (left < before.len()
+                    && common[index(left + 1, right)] >= common[index(left, right + 1)])
+            {
+                let line = before[left];
+                left += 1;
+                ("- ", line)
+            } else {
+                let line = after[right];
+                right += 1;
+                ("+ ", line)
+            };
+        if result.len() + prefix.len() + line.len() + 1 > MAX_EXPANDED_TEXT_BYTES {
+            return Err(TextError::ResultTooLarge);
+        }
+        writeln!(result, "{prefix}{line}").expect("写入 String 不会出错");
+    }
+    result.pop();
+    Ok(result)
 }
 
 fn replacement_parts(input: &str) -> Result<(String, String, &str), TextError> {
@@ -841,6 +903,28 @@ mod tests {
         }
         let large = format!("逐行加前缀 \"{}\" {}", "x".repeat(1024), "A\n".repeat(1100));
         assert_eq!(transform_text(&large), Err(TextError::ResultTooLarge));
+    }
+
+    #[test]
+    fn reports_line_insertions_and_deletions_with_repetitions_and_blank_lines() {
+        for (query, expected) in [
+            (
+                r#"逐行比较 "苹果\n梨\n茶" "苹果\n柿子\n茶""#,
+                "  苹果\n- 梨\n+ 柿子\n  茶",
+            ),
+            (r#"diff-lines "a\n\na\n" "a\r\na""#, "  a\n- \n  a"),
+            (r#"diff-lines "" " a ""#, "+  a "),
+            (r#"diff-lines "b\na" "a\nb""#, "- b\n  a\n+ b"),
+            (r#"diff-lines "甲\r\n乙\r\n" "甲\n乙""#, "两组文本各行相同"),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected));
+        }
+        let oversize = format!("diff-lines \"{}\" \"\"", "a\\n".repeat(MAX_DIFF_LINES + 1));
+        assert_eq!(transform_text(&oversize), Err(TextError::TooManyDiffLines));
+        assert_eq!(
+            transform_text(r#"逐行比较 "一" 二"#),
+            Err(TextError::InvalidLineComparison)
+        );
     }
 
     #[test]

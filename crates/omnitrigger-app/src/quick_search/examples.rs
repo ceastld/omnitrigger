@@ -1272,6 +1272,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按顺序比较两段文本的新增与删除行",
+        query: r#"文本: 逐行比较 "苹果\n梨\n茶" "苹果\n柿子\n茶""#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "保留符合正则表达式的行",
         query: "文本: 正则保留行 \"^[0-9]+$\" 42\nA3\n007",
     },
