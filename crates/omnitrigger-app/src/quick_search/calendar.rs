@@ -603,7 +603,11 @@ fn combine_date_ranges(
     Ok(merged.join("\n"))
 }
 
-fn split_date_range_by_month(input: &str, today: NaiveDate) -> Result<String, DateError> {
+fn split_date_range_by_month(
+    input: &str,
+    today: NaiveDate,
+    csv: bool,
+) -> Result<String, DateError> {
     if input.is_empty() {
         return Err(DateError::MonthSplitArguments);
     }
@@ -616,12 +620,22 @@ fn split_date_range_by_month(input: &str, today: NaiveDate) -> Result<String, Da
         return Err(DateError::ReversedDateRange);
     }
     let mut ranges = Vec::new();
+    if csv {
+        ranges.push("开始,结束,天数,工作日".to_owned());
+    }
     for _ in 0..MAX_MONTH_RANGES {
         let first = in_range(start.with_day(1))?;
         let last = month_end(first, 1)?.min(end);
-        ranges.push(display_date_range((start, last)));
+        let row = if csv {
+            let days = last.signed_duration_since(start).num_days() + 1;
+            let workdays = inclusive_workdays(start, last);
+            format!("{start},{last},{days},{workdays}")
+        } else {
+            display_date_range((start, last))
+        };
+        ranges.push(row);
         if last == end {
-            return Ok(ranges.join("\n"));
+            return Ok(ranges.join(if csv { "\r\n" } else { "\n" }));
         }
         start = in_range(last.succ_opt())?;
     }
@@ -756,10 +770,13 @@ fn month_calendar(input: &str, today: NaiveDate) -> Result<String, DateError> {
 
 fn month_range(start: NaiveDate, months: u32) -> Result<String, DateError> {
     let end = month_end(start, months)?;
-    let workdays =
-        workday_difference(end, start) + i64::from(start.weekday().number_from_monday() <= 5);
+    let workdays = inclusive_workdays(start, end);
     let days = end.signed_duration_since(start).num_days() + 1;
     Ok(format!("{start} 至 {end}\n{days} 天 · {workdays} 工作日"))
+}
+
+fn inclusive_workdays(start: NaiveDate, end: NaiveDate) -> i64 {
+    workday_difference(end, start) + i64::from(start.weekday().number_from_monday() <= 5)
 }
 
 fn quarter_range(year: &str, quarter: &str) -> Result<String, DateError> {
@@ -921,7 +938,10 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         "月历" | "month-grid" => return month_calendar(rest.trim_start(), today),
         "合并区间" | "merge-ranges" => return combine_date_ranges(rest, today, false),
         "区间交集" | "intersect-ranges" => return combine_date_ranges(rest, today, true),
-        "按月拆分" | "split-months" => return split_date_range_by_month(rest, today),
+        "按月拆分" | "split-months" => return split_date_range_by_month(rest, today, false),
+        "按月拆分csv" | "split-months-csv" => {
+            return split_date_range_by_month(rest, today, true)
+        }
         _ => {}
     }
     if let Some((year, day)) = year_day_parts(input) {
@@ -1051,6 +1071,24 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exports_month_segments_with_inclusive_day_and_workday_counts() {
+        let today = NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
+        assert_eq!(
+            calculate_date("按月拆分CSV 2024-01-31 至 2024-03-02", today).as_deref(),
+            Ok(concat!(
+                "开始,结束,天数,工作日\r\n",
+                "2024-01-31,2024-01-31,1,1\r\n",
+                "2024-02-01,2024-02-29,29,21\r\n",
+                "2024-03-01,2024-03-02,2,1",
+            ))
+        );
+        assert_eq!(
+            calculate_date("split-months-csv 2024-03-02 to 2024-03-03", today).as_deref(),
+            Ok("开始,结束,天数,工作日\r\n2024-03-02,2024-03-03,2,0")
+        );
+    }
 
     #[test]
     fn splits_inclusive_date_ranges_at_month_boundaries_and_keeps_leap_days() {

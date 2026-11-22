@@ -26,6 +26,7 @@ use super::{
 const MAX_PIVOT_BYTES: usize = 1024 * 1024;
 const MAX_EXPANDED_CSV_BYTES: usize = 1024 * 1024;
 const MAX_STACK_TABLES: usize = 16;
+const MAX_VALUE_MAPPINGS: usize = 32;
 const MAX_FORMULA_RECORDS: usize = 32;
 const MAX_ADDED_CELLS: usize = 16_384;
 
@@ -50,6 +51,8 @@ pub(super) enum CsvError {
     AmbiguousColumnName,
     RenameArguments,
     ReplaceValueArguments,
+    MapValueArguments,
+    MapValueTooLarge,
     NullReplacementValue,
     HeaderNameConflict,
     JoinArguments,
@@ -101,6 +104,10 @@ impl CsvError {
             Self::AmbiguousColumnName => "表头中存在多个同名列",
             Self::RenameArguments => "用 JSON 数组填写原列名和非空的新列名",
             Self::ReplaceValueArguments => "用 JSON 数组填写列名或列号、旧值和新值",
+            Self::MapValueArguments => {
+                "用 JSON 数组填写列名或列号，以及 1 至 32 个互不重复的 [旧值,新值]"
+            }
+            Self::MapValueTooLarge => "映射结果超过 1 MiB，请缩小表格范围",
             Self::NullReplacementValue => "新值不能包含空字符 U+0000",
             Self::HeaderNameConflict => "表头中已经有这个新列名",
             Self::JoinArguments => "填写两个连接列，再填写包含两张 CSV 表格的 JSON 字符串数组",
@@ -160,6 +167,10 @@ enum Operation {
         column: ColumnReference,
         previous: String,
         replacement: String,
+    },
+    MapValues {
+        column: ColumnReference,
+        replacements: HashMap<String, String>,
     },
     ComputeColumn {
         name: String,
@@ -347,6 +358,29 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
                 replacement,
             }
         }
+        "映射值" | "map-values" => {
+            let ((column, pairs), data) = json_argument_and_data::<(
+                ColumnReference,
+                Vec<[String; 2]>,
+            )>(input, CsvError::MapValueArguments)?;
+            if !(1..=MAX_VALUE_MAPPINGS).contains(&pairs.len()) {
+                return Err(CsvError::MapValueArguments);
+            }
+            let mut replacements = HashMap::with_capacity(pairs.len());
+            for [previous, replacement] in pairs {
+                if replacement.contains('\0') {
+                    return Err(CsvError::NullReplacementValue);
+                }
+                if replacements.insert(previous, replacement).is_some() {
+                    return Err(CsvError::MapValueArguments);
+                }
+            }
+            input = data;
+            Operation::MapValues {
+                column,
+                replacements,
+            }
+        }
         "计算列" | "compute-column" => {
             let ((name, left, operator, right), data) =
                 json_argument_and_data::<(String, ColumnReference, String, ColumnReference)>(
@@ -518,6 +552,10 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             previous,
             replacement,
         } => replace_column_values(rows, column, &previous, &replacement),
+        Operation::MapValues {
+            column,
+            replacements,
+        } => map_column_values(&rows, column, &replacements),
         Operation::ComputeColumn {
             name,
             left,
@@ -901,6 +939,33 @@ fn replace_column_values(
         }
     }
     Ok(write_rows(&rows, ','))
+}
+
+fn map_column_values(
+    rows: &[Vec<String>],
+    column: ColumnReference,
+    replacements: &HashMap<String, String>,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let column = column.resolve(header)?;
+    validate_column_width(&[column], header.len())?;
+    let mut output = String::new();
+    append_bounded_csv_row(
+        &mut output,
+        header.iter().map(String::as_str),
+        CsvError::MapValueTooLarge,
+    )?;
+    for row in records {
+        let fields = row.iter().enumerate().map(|(index, value)| {
+            if index == column {
+                replacements.get(value).unwrap_or(value).as_str()
+            } else {
+                value.as_str()
+            }
+        });
+        append_bounded_csv_row(&mut output, fields, CsvError::MapValueTooLarge)?;
+    }
+    Ok(output)
 }
 
 fn trim_column_values(
@@ -1717,6 +1782,26 @@ mod tests {
         assert_eq!(
             transform_csv(r#"纵向合并 ["ID\n001"]"#),
             Err(CsvError::StackArguments)
+        );
+    }
+
+    #[test]
+    fn maps_whole_cells_once_per_row_and_preserves_unmatched_fields() {
+        let source = concat!(
+            "映射值 [\"状态\",[[\"P\",\"D\"],[\"D\",\"P\"],[\"\",\"未填\"]]] 状态,编号,备注\n",
+            "P,001,\"甲,乙\"\nD,002,原样\n,003,原样\n P,004,空格",
+        );
+        assert_eq!(
+            transform_csv(source).as_deref(),
+            Ok("状态,编号,备注\r\nD,001,\"甲,乙\"\r\nP,002,原样\r\n未填,003,原样\r\n P,004,空格")
+        );
+        assert_eq!(
+            transform_csv("map-values [1,[[\"P\",\"D\"],[\"P\",\"Q\"]]] 状态,编号\nP,001"),
+            Err(CsvError::MapValueArguments)
+        );
+        assert_eq!(
+            transform_csv(r#"map-values [1,[["P","\u0000"]]] 状态,编号"#),
+            Err(CsvError::NullReplacementValue)
         );
     }
 
