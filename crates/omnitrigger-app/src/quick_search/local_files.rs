@@ -37,6 +37,7 @@ pub(super) struct DirectoryLoad {
     directory: String,
     pattern: Option<String>,
     order: DirectoryOrder,
+    entry_type: DirectoryEntryType,
     cancelled: AtomicBool,
 }
 
@@ -45,6 +46,7 @@ impl DirectoryLoad {
         self.directory == query.directory
             && self.pattern.as_deref() == wildcard_pattern(query.filter)
             && self.order == query.order
+            && self.entry_type == query.entry_type
     }
 
     pub(super) fn read(&self) -> Result<Vec<LocalDirectoryEntry>, String> {
@@ -53,7 +55,7 @@ impl DirectoryLoad {
             max_entries: MAX_DIRECTORY_ENTRIES,
             order: self.order,
             metadata: false,
-            entry_type: DirectoryEntryType::All,
+            entry_type: self.entry_type,
             search_pattern: self.pattern.clone(),
         };
         read_local_directory_with_options(&self.directory, &options, || {
@@ -101,6 +103,7 @@ impl LocalFilesIndex {
             directory: query.directory.to_owned(),
             pattern: wildcard_pattern(query.filter).map(str::to_owned),
             order: query.order,
+            entry_type: query.entry_type,
             cancelled: AtomicBool::new(false),
         });
         self.current = Some(DirectoryRequest {
@@ -179,22 +182,37 @@ struct FileQuery<'a> {
     directory: &'a str,
     filter: &'a str,
     order: DirectoryOrder,
+    entry_type: DirectoryEntryType,
 }
 
 fn split_query(query: &str) -> Option<FileQuery<'_>> {
     let (directory, filter) = query.split_once('|')?;
     let directory = super::path_tools::strip_path_quotes(directory.trim());
-    let (filter, order) = filter.split_once('|').unwrap_or((filter, ""));
-    let order = match order.trim().to_ascii_lowercase().as_str() {
-        "" => DirectoryOrder::Name,
-        "最近修改" | "modified" => DirectoryOrder::ModifiedDescending,
-        "大小" | "size" => DirectoryOrder::SizeDescending,
-        _ => return None,
-    };
+    let (filter, options) = filter.split_once('|').unwrap_or((filter, ""));
+    let mut order = DirectoryOrder::Name;
+    let mut entry_type = DirectoryEntryType::All;
+    for option in options.split_whitespace() {
+        match option.to_ascii_lowercase().as_str() {
+            "最近修改" | "modified" if order == DirectoryOrder::Name => {
+                order = DirectoryOrder::ModifiedDescending;
+            }
+            "大小" | "size" if order == DirectoryOrder::Name => {
+                order = DirectoryOrder::SizeDescending;
+            }
+            "仅文件" | "files" if entry_type == DirectoryEntryType::All => {
+                entry_type = DirectoryEntryType::File;
+            }
+            "仅文件夹" | "folders" if entry_type == DirectoryEntryType::All => {
+                entry_type = DirectoryEntryType::Directory;
+            }
+            _ => return None,
+        }
+    }
     (!directory.is_empty()).then_some(FileQuery {
         directory,
         filter: filter.trim(),
         order,
+        entry_type,
     })
 }
 
@@ -335,6 +353,32 @@ mod tests {
             [Destination::LocalFile { name: first, .. }, Destination::LocalFile { name: second, .. }]
             if first == "Z report.txt" && second == "report.txt"
         ));
+    }
+
+    #[test]
+    fn combines_directory_entry_type_with_sort_and_pattern() {
+        let mut index = LocalFilesIndex::default();
+        let first = index.request(Some(r"C:\Work | *.txt | 大小")).unwrap();
+        let query = r"C:\Work | *.txt | 仅文件 大小";
+        let filtered = index.request(Some(query)).unwrap();
+        assert!(first.cancelled.load(Ordering::Relaxed));
+        assert_eq!(filtered.pattern.as_deref(), Some("*.txt"));
+        assert_eq!(filtered.order, DirectoryOrder::SizeDescending);
+        assert_eq!(filtered.entry_type, DirectoryEntryType::File);
+        assert!(index
+            .request(Some(r"C:\Work | *.txt | SIZE FILES"))
+            .is_none());
+        assert_eq!(
+            split_query(r"C:\Work | | 仅文件夹").map(|query| query.entry_type),
+            Some(DirectoryEntryType::Directory)
+        );
+        for invalid in [
+            r"C:\Work | | 仅文件 仅文件夹",
+            r"C:\Work | | 大小 最近修改",
+            r"C:\Work | | 未知选项",
+        ] {
+            assert!(split_query(invalid).is_none(), "{invalid}");
+        }
     }
 
     #[test]

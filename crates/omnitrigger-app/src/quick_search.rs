@@ -1829,7 +1829,7 @@ impl QuickSearch {
                 .child("正在读取当前窗口"),
             Results::LocalFilesPrompt => row
                 .text_color(rgb(theme::TEXT_MUTED))
-                .child(r"输入本地目录和名称，例如 文件: C:\工作 | 报告 | 最近修改"),
+                .child(r"输入目录和名称，例如 文件: C:\工作 | 报告 | 仅文件 最近修改"),
             Results::LocalFilesLoading => {
                 row.text_color(rgb(theme::TEXT_MUTED)).child("正在读取目录")
             }
