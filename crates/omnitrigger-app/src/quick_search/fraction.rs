@@ -21,6 +21,7 @@ const MAX_APPROXIMATION_DENOMINATOR: u32 = 1_000_000;
 const MAX_RATIO_VALUES: usize = 16;
 const MAX_CONTINUED_FRACTION_TERMS: usize = 512;
 const MAX_PRIME_FACTORIZATION: u64 = 1_000_000_000_000;
+const MAX_CONGRUENCES: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FractionError {
@@ -48,6 +49,7 @@ pub(super) enum FractionError {
     PrimeFactorizationDomain,
     PrimeFactorizationRange,
     QuotientRemainderArguments,
+    CongruenceArguments,
     BitwiseArguments,
     RepeatingDecimalLength,
     RepeatingDecimalSyntax,
@@ -90,6 +92,7 @@ impl FractionError {
             Self::PrimeFactorizationDomain => "请填写非零整数",
             Self::PrimeFactorizationRange => "整数的绝对值最多为 1000000000000",
             Self::QuotientRemainderArguments => "用逗号分开被除数和除数，例如 -7,3",
+            Self::CongruenceArguments => "填写 2 至 16 组余数和正模数，例如 2,3; 3,5; 2,7",
             Self::BitwiseArguments => "位运算的数值和移位量须为非负整数",
             Self::RepeatingDecimalLength => "循环小数最多展开 512 个小数位",
             Self::RepeatingDecimalSyntax => "用括号填写循环节，例如 0.(142857) 或 -2.1(6)",
@@ -244,6 +247,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     if verb == "商和余数" || verb.eq_ignore_ascii_case("divmod") {
         return describe_quotient_and_remainder(expression);
     }
+    if verb == "同余方程" || verb.eq_ignore_ascii_case("crt") {
+        return solve_congruences(expression);
+    }
     let alignment = match verb.to_ascii_lowercase().as_str() {
         "就近对齐" | "round-step" => Some(FractionAlignment::Nearest),
         "向下对齐" | "floor-step" => Some(FractionAlignment::Down),
@@ -392,6 +398,68 @@ fn quotient_and_remainder(
     let quotient = (&dividend / &divisor).floor();
     let remainder = dividend - divisor * &quotient;
     (quotient, remainder)
+}
+
+fn parse_congruence(input: &str) -> Result<(BigInt, BigInt), FractionError> {
+    let mut terms = split_top_level_commas(input);
+    let (Some(residue), Some(modulus), None) = (terms.next(), terms.next(), terms.next()) else {
+        return Err(FractionError::CongruenceArguments);
+    };
+    if residue.trim().is_empty() || modulus.trim().is_empty() {
+        return Err(FractionError::CongruenceArguments);
+    }
+    let residue = calculate_fraction(residue)?;
+    let modulus = calculate_fraction(modulus)?;
+    if !residue.is_integer() || !modulus.is_integer() || modulus.numer().sign() != Sign::Plus {
+        return Err(FractionError::CongruenceArguments);
+    }
+    Ok((residue.to_integer(), modulus.to_integer()))
+}
+
+fn solve_congruences(input: &str) -> Result<String, FractionError> {
+    let groups: Vec<_> = input
+        .trim()
+        .split([';', '\n'])
+        .take(MAX_CONGRUENCES + 1)
+        .collect();
+    if !(2..=MAX_CONGRUENCES).contains(&groups.len()) {
+        return Err(FractionError::CongruenceArguments);
+    }
+    let congruences = groups
+        .into_iter()
+        .map(parse_congruence)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut residue = BigInt::default();
+    let mut period = BigInt::from(1_u8);
+    for (next_residue, modulus) in congruences {
+        let gcd = BigInt::from(exact_gcd(
+            period.magnitude().clone(),
+            modulus.magnitude().clone(),
+        ));
+        let delta = next_residue - &residue;
+        if (&delta % &gcd).sign() != Sign::NoSign {
+            return Ok("无整数解".to_owned());
+        }
+        let reduced = modulus / &gcd;
+        if reduced.bits() == 1 {
+            continue;
+        }
+        let combined_period = &period * &reduced;
+        if combined_period.bits() > MAX_EXACT_BITS {
+            return Err(FractionError::ExactRange);
+        }
+        // 新解形如 residue + period * k，约去公因数后可用逆元求出 k。
+        let inverse = (&period / &gcd)
+            .modinv(&reduced)
+            .expect("约去最大公约数后，余下的模数互质");
+        let mut steps = ((delta / &gcd) * inverse) % &reduced;
+        if steps.sign() == Sign::Minus {
+            steps += &reduced;
+        }
+        residue += &period * steps;
+        period = combined_period;
+    }
+    Ok(format!("x ≡ {residue} (mod {period})"))
 }
 
 fn simplify_ratio(input: &str) -> Result<String, FractionError> {
@@ -1547,6 +1615,26 @@ mod tests {
                 simplify_fraction(input),
                 Err(FractionError::MixedFractionArguments),
                 "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn solves_exact_congruences_with_non_coprime_or_redundant_moduli() {
+        for (query, expected) in [
+            ("同余方程 2,3; 3,5; 2,7", "x ≡ 23 (mod 105)"),
+            ("同余方程 3,10; 1,8", "x ≡ 33 (mod 40)"),
+            ("同余方程 3,10; 2,8", "无整数解"),
+            ("crt -1,6; 5,12", "x ≡ 5 (mod 12)"),
+            ("同余方程 10,1; 20,1", "x ≡ 0 (mod 1)"),
+            ("同余方程 2,2**60; -1,3", "x ≡ 2 (mod 3458764513820540928)"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["同余方程 2,3", "同余方程 1,0; 1,2", "同余方程 1/2,3; 1,2"] {
+            assert_eq!(
+                simplify_fraction(query),
+                Err(FractionError::CongruenceArguments)
             );
         }
     }
