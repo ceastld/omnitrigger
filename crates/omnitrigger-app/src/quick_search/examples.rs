@@ -13,6 +13,21 @@ pub(super) struct Example {
     pub(super) query: &'static str,
 }
 
+impl Example {
+    pub(super) fn argument_start(&self) -> Option<usize> {
+        let (prefix, input) = self.query.split_once([':', '：'])?;
+        if !matches!(
+            parse_scope(prefix),
+            Some(Scope::Json | Scope::Csv | Scope::TextTools | Scope::UrlEncoding)
+        ) {
+            return None;
+        }
+        let (_, arguments) = input.trim_start().split_once(char::is_whitespace)?;
+        let arguments = arguments.trim_start();
+        (!arguments.is_empty()).then_some(self.query.len() - arguments.len())
+    }
+}
+
 pub(super) const EXAMPLES: &[Example] = &[
     Example {
         icon: Icon::Terminal,

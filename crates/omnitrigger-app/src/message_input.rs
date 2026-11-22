@@ -176,6 +176,13 @@ impl MessageInput {
         self.move_to(self.content.len(), false, cx);
     }
 
+    pub(super) fn select_suffix(&mut self, start: usize, cx: &mut Context<Self>) {
+        if self.content.is_char_boundary(start) {
+            self.anchor = self.content.len();
+            self.move_to(start, true, cx);
+        }
+    }
+
     fn previous(&self) -> usize {
         self.content
             .grapheme_indices(true)

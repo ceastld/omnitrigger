@@ -1994,6 +1994,24 @@ impl QuickSearch {
                     });
                 }
                 cx.stop_propagation();
+            } else if modifiers == 1 && keystroke.modifiers.shift && keystroke.key == "tab" {
+                let Results::Help(items) = &self.results else {
+                    return;
+                };
+                let Some(&index) = items.get(self.selected) else {
+                    return;
+                };
+                let example = &EXAMPLES[index];
+                let Some(start) = example.argument_start() else {
+                    return;
+                };
+                if !event.is_held {
+                    self.index.recent.examples.record(index);
+                    self.fill_query(example.query, window, cx);
+                    self.input
+                        .update(cx, |input, cx| input.select_suffix(start, cx));
+                }
+                cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "d" {
                 if !event.is_held {
                     self.toggle_bookmark(window, cx);
@@ -2313,13 +2331,14 @@ impl QuickSearch {
                                     .child(input_preview(query.trim_end())),
                             )
                             .when(index == self.selected, |row| {
-                                row.child(div().text_color(rgb(theme::TEXT_MUTED)).child(
-                                    if tool_index {
-                                        "F1 用法 · Tab 填入"
-                                    } else {
-                                        "Tab 填入"
-                                    },
-                                ))
+                                let hint = if tool_index {
+                                    "F1 用法 · Tab 填入"
+                                } else if example.argument_start().is_some() {
+                                    "Tab 填入 · Shift+Tab 改参数"
+                                } else {
+                                    "Tab 填入"
+                                };
+                                row.child(div().text_color(rgb(theme::TEXT_MUTED)).child(hint))
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.index.recent.examples.record(example_index);
@@ -3598,6 +3617,45 @@ mod tests {
     }
 
     #[test]
+    fn finds_the_replaceable_arguments_for_structured_example_commands() {
+        for (query, prefix, arguments) in [
+            (
+                "JSON: 取值 /价格 {\"价格\":1}",
+                "JSON: 取值 ",
+                "/价格 {\"价格\":1}",
+            ),
+            (
+                "ＣＳＶ： 压缩\n标题,值\r\n甲,1",
+                "ＣＳＶ： 压缩\n",
+                "标题,值\r\n甲,1",
+            ),
+            ("文本: 大写 👩‍💻 x", "文本: 大写 ", "👩‍💻 x"),
+            ("URL: 解码 %2B", "URL: 解码 ", "%2B"),
+        ] {
+            let example = examples::Example {
+                icon: Icon::Terminal,
+                title: "",
+                query,
+            };
+            let start = example.argument_start().expect("has example arguments");
+            assert_eq!(query.split_at(start), (prefix, arguments));
+        }
+        for query in [
+            "2**10",
+            "日期: 2024-01-01 + 1d",
+            "JSON: 取值",
+            "CSV: 转置  ",
+        ] {
+            let example = examples::Example {
+                icon: Icon::Terminal,
+                title: "",
+                query,
+            };
+            assert_eq!(example.argument_start(), None);
+        }
+    }
+
+    #[test]
     fn tools_offer_operations_until_the_user_enters_their_payload() {
         let examples_for = |query: &str| {
             let Results::Help(items) = for_query(query, &[]) else {
@@ -3909,6 +3967,32 @@ mod tests {
                             })
                         })
                         .unwrap();
+                    let replace_example_arguments = reopened
+                        .update(cx, |search, window, cx| {
+                            let prefix = "CSV: 截取列";
+                            search.fill_query(prefix, window, cx);
+                            search.refresh_results(prefix, window, cx);
+                            let mut invoke = |is_held| {
+                                search.key_down(
+                                    &KeyDownEvent {
+                                        keystroke: gpui::Keystroke::parse("shift-tab").unwrap(),
+                                        is_held,
+                                    },
+                                    window,
+                                    cx,
+                                );
+                                search.input.read(cx).text()
+                            };
+                            let held = invoke(true);
+                            let filled = invoke(false);
+                            let replacement = "[\"示例\",1,\"1\"]\n标题\n茶";
+                            search.input.update(cx, |input, cx| {
+                                input.replace_text_in_range(None, replacement, window, cx);
+                            });
+                            let edited = search.input.read(cx).text();
+                            [held, filled, edited]
+                        })
+                        .unwrap();
                     let file_help = reopened
                         .update(cx, |search, window, cx| {
                             search.fill_query(FILE_QUERY, window, cx);
@@ -4084,6 +4168,7 @@ mod tests {
                         app_refresh,
                         file_navigation,
                         file_help,
+                        replace_example_arguments,
                         scoped_help,
                         directory_help,
                         bookmark_states,
@@ -4102,6 +4187,7 @@ mod tests {
             app_refresh,
             file_navigation,
             file_help,
+            [after_held, after_fill, after_edit],
             (help_input, all_json_examples, restored_input),
             (directory_selection, directory_help, all_duration_examples, restored_directory),
             (
@@ -4127,6 +4213,9 @@ mod tests {
         assert_eq!(manual_history, "3**4");
         assert_eq!(history_filter_length, INPUT_CHARACTER_LIMIT);
         assert!(matched && long_restored);
+        assert_eq!(after_held, "CSV: 截取列");
+        assert!(after_fill.starts_with("CSV: 截取列 [\"摘要\",\"文本\",\"2-3\"]"));
+        assert_eq!(after_edit, "CSV: 截取列 [\"示例\",1,\"1\"]\n标题\n茶");
         assert_eq!(help_input, "? JSON:");
         assert!(all_json_examples);
         assert!(directory_selection > 0);
