@@ -1352,6 +1352,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用正则表达式匹配多种分隔符并拆分成行",
+        query: r#"文本: 正则拆分成行 "[,;\\s]+" 苹果, 梨;茶  咖啡"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "只保留含关键词的行",
         query: "文本: 保留行 \"错误\" 成功\n错误 A\n错误 B",
     },

@@ -119,6 +119,10 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "正则替换" | "regex-replace" => return replace_regex(text),
         "按行拼接" | "join-lines" => return join_lines(text),
         "拆分成行" | "split-lines" => return split_lines(text),
+        "正则拆分成行" | "regex-split-lines" => {
+            let (pattern, text) = regex_text_argument(text)?;
+            return Ok(pattern.split(text).collect::<Vec<_>>().join("\n"));
+        }
         "逐行加前缀" | "prefix-lines" => return decorate_lines(text, true),
         "逐行加后缀" | "suffix-lines" => return decorate_lines(text, false),
         "逐行去前缀" | "strip-line-prefix" => return strip_line_decoration(text, true),
@@ -976,6 +980,24 @@ mod tests {
         }
         let large = format!("逐行加前缀 \"{}\" {}", "x".repeat(1024), "A\n".repeat(1100));
         assert_eq!(transform_text(&large), Err(TextError::ResultTooLarge));
+    }
+
+    #[test]
+    fn splits_text_on_regex_matches_and_preserves_empty_fields() {
+        for (query, expected) in [
+            (
+                r#"正则拆分成行 "[,;\\s]+" 苹果, 梨;茶  咖啡"#,
+                "苹果\n梨\n茶\n咖啡",
+            ),
+            (r#"regex-split-lines "[,;]" ",甲,;乙;" "#, "\n甲\n\n乙\n"),
+            (r#"正则拆分成行 "\\d+" 北京"#, "北京"),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            transform_text(r#"正则拆分成行 "[" 北京"#),
+            Err(TextError::InvalidRegex)
+        );
     }
 
     #[test]
