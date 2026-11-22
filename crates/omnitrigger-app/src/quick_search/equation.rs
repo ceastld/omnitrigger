@@ -25,7 +25,7 @@ impl EquationError {
                 "按 a, b, c 输入 ax² + bx + c = 0 的三个系数"
             }
             Self::InequalityArguments => "先填写 >、>=、< 或 <=，再填写 a, b, c",
-            Self::NonQuadratic => "求抛物线顶点时，二次项系数 a 须非零",
+            Self::NonQuadratic => "二次项系数 a 须非零",
             Self::SystemRows => "每行按 x 系数、y 系数、右侧常数输入，两行用分号隔开",
             Self::Evaluation(error) => error.message(),
         }
@@ -40,7 +40,10 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
     if let Some((operation, arguments)) = input.trim().split_once(char::is_whitespace) {
         match operation.to_ascii_lowercase().as_str() {
             "不等式" | "inequality" => return solve_inequality(arguments.trim_start()),
-            "顶点" | "vertex" => return quadratic_vertex(arguments.trim_start()),
+            "顶点" | "vertex" => return describe_quadratic(arguments.trim_start(), false),
+            "配方" | "complete-the-square" => {
+                return describe_quadratic(arguments.trim_start(), true);
+            }
             _ => {}
         }
     }
@@ -69,7 +72,7 @@ fn quadratic_center(a: &BigRational, b: BigRational, c: BigRational) -> (BigRati
     (center, distance_squared)
 }
 
-fn quadratic_vertex(input: &str) -> Result<String, EquationError> {
+fn describe_quadratic(input: &str, complete_square: bool) -> Result<String, EquationError> {
     let [a, b, c] = coefficient_row(input)?;
     let extremum = match a.numer().sign() {
         Sign::Plus => "最小值",
@@ -77,11 +80,35 @@ fn quadratic_vertex(input: &str) -> Result<String, EquationError> {
         Sign::NoSign => return Err(EquationError::NonQuadratic),
     };
     let (x, distance_squared) = quadratic_center(&a, b, c);
-    let y = -a * distance_squared;
+    let y = -&a * distance_squared;
     for value in [&x, &y] {
         ensure_exact_size(value).map_err(EquationError::Evaluation)?;
     }
-    Ok(format!("x = {x} · y = {y}（{extremum}）"))
+    if !complete_square {
+        return Ok(format!("x = {x} · y = {y}（{extremum}）"));
+    }
+    let square = if x.numer().sign() == Sign::NoSign {
+        "x²".to_owned()
+    } else {
+        format!("(x{})²", signed_offset(&-x))
+    };
+    let unit = BigRational::from_integer(BigInt::from(1u8));
+    let factor = if a == unit {
+        String::new()
+    } else if a == -unit {
+        "-".to_owned()
+    } else {
+        format!("{a}·")
+    };
+    Ok(format!("{factor}{square}{}", signed_offset(&y)))
+}
+
+fn signed_offset(value: &BigRational) -> String {
+    match value.numer().sign() {
+        Sign::Plus => format!(" + {value}"),
+        Sign::Minus => format!(" - {}", -value),
+        Sign::NoSign => String::new(),
+    }
 }
 
 fn solve_inequality(input: &str) -> Result<String, EquationError> {
@@ -313,6 +340,23 @@ mod tests {
         }
         assert_eq!(
             solve_equation("顶点 0,1,2"),
+            Err(EquationError::NonQuadratic)
+        );
+    }
+
+    #[test]
+    fn rewrites_a_quadratic_in_exact_completed_square_form() {
+        for (query, expected) in [
+            ("配方 2,-3,1", "2·(x - 3/4)² - 1/8"),
+            ("complete-the-square -1,0,0", "-x²"),
+            ("配方 1,2,1", "(x + 1)²"),
+            ("配方 1,0,5", "x² + 5"),
+            ("配方 -1/2,3/2,0", "-1/2·(x - 3/2)² + 9/8"),
+        ] {
+            assert_eq!(solve_equation(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            solve_equation("配方 0,2,1"),
             Err(EquationError::NonQuadratic)
         );
     }

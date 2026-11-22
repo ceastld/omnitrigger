@@ -66,6 +66,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把二次式改写为配方后的形式",
+        query: "方程: 配方 2,-3,1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "联立求解两个二元一次方程",
         query: "联立: 2,1,5; 1,-1,1",
     },
@@ -3986,7 +3991,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Equation
             if !term.is_empty()
-                && ["不等式", "顶点"]
+                && ["不等式", "顶点", "配方"]
                     .iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::LinearFit
