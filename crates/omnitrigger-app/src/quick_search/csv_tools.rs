@@ -33,6 +33,7 @@ pub(super) enum CsvError {
     InvalidColumns,
     InvalidColumnNames,
     NamedColumnArguments,
+    NoColumnsRemain,
     InvalidRowRange,
     MissingDataRow,
     MissingColumnName,
@@ -71,6 +72,7 @@ impl CsvError {
             Self::InvalidColumns => "用逗号隔开互不重复的列号，列号从 1 开始",
             Self::InvalidColumnNames => "用 JSON 字符串数组输入互不重复的列名",
             Self::NamedColumnArguments => "用 JSON 数组填写互不重复的列名或列号，例如 [\"地区\",2]",
+            Self::NoColumnsRemain => "需要至少保留一列",
             Self::InvalidRowRange => "填写从 1 开始的数据行号或区间，例如 2,4-6",
             Self::MissingDataRow => "指定行号超出了表头之后的数据行数",
             Self::MissingColumnName => "表头中找不到所选列名",
@@ -112,6 +114,7 @@ enum Operation {
     FromTsv,
     SelectColumns(Vec<usize>),
     SelectNamedColumns(Vec<String>),
+    DropColumns(Vec<ColumnReference>),
     SelectRows(String),
     RenameColumn([String; 2]),
     ReplaceValue {
@@ -228,6 +231,12 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             let (names, data) = json_argument_and_data(input, CsvError::InvalidColumnNames)?;
             input = data;
             Operation::SelectNamedColumns(names)
+        }
+        "去列" | "drop-columns" => {
+            let (columns, data) =
+                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
+            input = data;
+            Operation::DropColumns(columns)
         }
         "改列名" | "rename-header" => {
             let (names, data) = json_argument_and_data(input, CsvError::RenameArguments)?;
@@ -371,6 +380,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::FromTsv => Ok(write_rows(&rows, ',')),
         Operation::SelectColumns(columns) => select_columns(&rows, &columns),
         Operation::SelectNamedColumns(names) => select_named_columns(&rows, &names),
+        Operation::DropColumns(columns) => drop_columns(&rows, &columns),
         Operation::SelectRows(ranges) => select_data_rows(&rows, &ranges),
         Operation::RenameColumn(names) => rename_column(rows, names),
         Operation::ReplaceValue {
@@ -529,6 +539,21 @@ fn select_data_rows(rows: &[Vec<String>], ranges: &str) -> Result<String, CsvErr
         .zip(selected)
         .filter_map(|(row, selected)| selected.then_some(row));
     Ok(write_rows(std::iter::once(header).chain(picked), ','))
+}
+
+fn drop_columns(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<String, CsvError> {
+    let header = rows.first().ok_or(CsvError::MissingInput)?;
+    let removed: HashSet<_> =
+        resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?
+            .into_iter()
+            .collect();
+    if removed.len() == header.len() {
+        return Err(CsvError::NoColumnsRemain);
+    }
+    let kept: Vec<_> = (0..header.len())
+        .filter(|column| !removed.contains(column))
+        .collect();
+    select_columns(rows, &kept)
 }
 
 fn select_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, CsvError> {
@@ -1052,6 +1077,28 @@ impl Serialize for CsvObject<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drops_csv_columns_by_name_or_index_in_original_column_order() {
+        let source = "编号,状态,备注,金额\n001,完成,原样,1.50\n002,待办,\"甲,乙\",2e0";
+        for operation in [r#"去列 ["备注",2]"#, "drop-columns 3,2"] {
+            assert_eq!(
+                transform_csv(&format!("{operation}\n{source}")).as_deref(),
+                Ok("编号,金额\r\n001,1.50\r\n002,2e0")
+            );
+        }
+        for (query, error) in [
+            (r#"去列 [1,"状态"] 编号,状态"#, CsvError::NoColumnsRemain),
+            (
+                r#"去列 [1,"编号"] 编号,状态"#,
+                CsvError::NamedColumnArguments,
+            ),
+            (r#"去列 ["备注"] 编号,状态"#, CsvError::MissingColumnName),
+            ("去列 3 编号,状态", CsvError::ColumnOutOfRange),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn replaces_only_matching_cells_in_a_selected_csv_column() {

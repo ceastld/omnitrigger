@@ -1802,6 +1802,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按名称或列号省去指定 CSV 列",
+        query: "CSV: 去列 [\"备注\",2] 编号,状态,备注,金额\n001,完成,原样,1.50\n002,待办,\"甲,乙\",2e0",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "改名 CSV 的一个表头",
         query: "CSV: 改列名 [\"旧名\",\"备注\"] 编号,旧名\n001,\"茶,咖啡\"",
     },
