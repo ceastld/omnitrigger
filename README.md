@@ -72,6 +72,7 @@
 - 输入 `系统设置: 蓝牙` 可查找并打开 Windows 的蓝牙设置。用 `系统设置:` 可浏览显示、声音、通知、存储、默认应用等常用页面，方向键选择后按回车打开。 [Microsoft 的 Windows 设置页面地址](https://learn.microsoft.com/en-us/windows/apps/develop/launch/launch-settings)
 - 输入 `文件夹:` 可浏览桌面、下载、文档、图片、音乐和视频。也可用 `文件夹: 下载` 或 `folder: downloads` 筛选，按回车打开选中的文件夹。 [Windows 已知文件夹](https://learn.microsoft.com/windows/win32/shell/knownfolderid)
 - 输入 `文件: C:\工作 | 报告` 可在指定本地目录的直接子项中按名称查找。按回车复制所选项的完整路径。分隔符后的名称可留空，多个关键词用空格隔开。匹配本地固定卷上的普通文件和文件夹。
+- 也可先输入 `文件: C:\工作`，按 `Tab` 即可浏览该目录。搜索框会自动补上分隔符，再继续输入名称即可筛选。
 - 在文件搜索中选中文件夹后按 `Tab` 可进入该文件夹，按 `Alt+↑` 可回到上一级。也可用 `文件: C:\工作 | *.pdf` 或 `报告?.docx` 按 Windows 文件名通配规则匹配。 [Windows 文件名通配规则](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfilew)
 - 通过 `Tab` 或 `Alt+↑` 切换文件夹后，可在同一个搜索框用 `Alt+←` 返回、用 `Alt+→` 前进。返回时恢复原查询的名称筛选、排序和输出选项。
 - 找到文件后可按 `Alt+Enter` 或点选中行的「定位」，在资源管理器中选中该文件或文件夹。

@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt::Write as _,
-    path::Path,
+    path::{Component, Path, Prefix},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -217,7 +217,8 @@ impl LocalFilesIndex {
             return Results::FileOptions(file_option_suggestions(prefix, current));
         }
         let Some(query) = split_query(query) else {
-            return Results::LocalFilesPrompt;
+            return directory_input(query)
+                .map_or(Results::LocalFilesPrompt, Results::DirectoryInput);
         };
         let Some(entries) = self
             .current
@@ -775,6 +776,26 @@ pub(super) fn directory_query(directory: &str) -> String {
     format!("文件: {directory} |")
 }
 
+fn directory_input(query: &str) -> Option<InputSuggestion> {
+    let directory = super::path_tools::strip_path_quotes(query.trim());
+    if directory.contains(['|', '<', '>', '?', '*']) {
+        return None;
+    }
+    let path = super::path_tools::absolute_path(directory)?;
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return None;
+    };
+    if !matches!(prefix.kind(), Prefix::Disk(_)) || directory.get(2..)?.contains(':') {
+        return None;
+    }
+    let expression = directory_query(directory);
+    (expression.chars().count() <= INPUT_CHARACTER_LIMIT).then_some(InputSuggestion {
+        expression,
+        label: Some("浏览目录"),
+        result: String::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,10 +832,7 @@ mod tests {
     fn reads_only_explicit_directories_and_filters_the_current_snapshot_by_name() {
         let mut index = LocalFilesIndex::default();
         assert!(index.request(Some(r"C:\Work")).is_none());
-        assert!(matches!(
-            index.results(r"C:\Work"),
-            Results::LocalFilesPrompt
-        ));
+        assert!(index.current.is_none());
         let load = index.request(Some(r"C:\Work |")).unwrap();
         assert_eq!(load.directory, r"C:\Work");
         assert!(matches!(
@@ -1349,6 +1367,30 @@ mod tests {
         }
         assert!(split_query(r"C:\Work | | 修改月份统计 仅文件夹").is_none());
         assert!(split_query(r"C:\Work | | 修改月份统计 创建月份统计").is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn suggests_browsing_a_bare_drive_path_without_requesting_directory_contents() {
+        let mut index = LocalFilesIndex::default();
+        let path = r#""C:\Work Folder""#;
+        let result = index.results(path);
+        assert_eq!(result.suggested_input(0), Some(r"文件: C:\Work Folder |"));
+        assert!(index.request(Some(path)).is_none());
+        assert!(index.current.is_none());
+        for path in [
+            r"C:Work",
+            r"C:\Work\..\Project",
+            r"\\server\share",
+            r"C:\Work?",
+            r"C:\Work:stream",
+        ] {
+            assert!(matches!(index.results(path), Results::LocalFilesPrompt));
+        }
+        assert!(matches!(
+            index.results(r"C:\Work |"),
+            Results::LocalFilesLoading
+        ));
     }
 
     #[test]

@@ -303,7 +303,7 @@ fn normalize_absolute_path(path: &Path) -> Result<String, PathError> {
     Ok(root)
 }
 
-fn absolute_path(input: &str) -> Option<&Path> {
+pub(super) fn absolute_path(input: &str) -> Option<&Path> {
     let path = Path::new(input);
     (!input.contains(INVALID_PATH_TEXT)
         && has_ordinary_root(path)

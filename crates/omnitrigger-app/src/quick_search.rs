@@ -156,6 +156,7 @@ enum Results {
     OpenWindowsLoading,
     OpenWindowsUnavailable(String),
     LocalFilesPrompt,
+    DirectoryInput(InputSuggestion),
     LocalFilesLoading,
     LocalFilesUnavailable(String),
     Help(Vec<usize>),
@@ -987,6 +988,7 @@ impl Results {
     fn suggested_input(&self, selected: usize) -> Option<&str> {
         match self {
             Self::Help(items) => Some(EXAMPLES[*items.get(selected)?].query),
+            Self::DirectoryInput(item) if selected == 0 => Some(&item.expression),
             Self::Calculations(items)
             | Self::Conversions(items)
             | Self::ConversionTargets(items)
@@ -1056,6 +1058,7 @@ impl Results {
             Self::Help(items) if !items.is_empty() => {
                 132. + items.len().min(EXAMPLE_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
             }
+            Self::DirectoryInput(_) => 132. + EXAMPLE_ROW_HEIGHT,
             Self::ConversionTargets(items) if !items.is_empty() => {
                 132. + items.len().min(CONVERSION_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
             }
@@ -1721,6 +1724,7 @@ impl QuickSearch {
                     | Results::OpenWindowsLoading
                     | Results::OpenWindowsUnavailable(_)
                     | Results::LocalFilesPrompt
+                    | Results::DirectoryInput(_)
                     | Results::LocalFilesLoading
                     | Results::LocalFilesUnavailable(_) => 0,
                 };
@@ -2124,6 +2128,9 @@ impl QuickSearch {
             Results::LocalFilesPrompt => row
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child(r"输入目录和名称，例如 文件: C:\工作 | 报告 | 仅文件 最近修改"),
+            Results::DirectoryInput(item) => {
+                self.render_input_suggestions(std::slice::from_ref(item), Icon::Layers, 1, cx)
+            }
             Results::LocalFilesLoading => {
                 row.text_color(rgb(theme::TEXT_MUTED)).child("正在读取目录")
             }
