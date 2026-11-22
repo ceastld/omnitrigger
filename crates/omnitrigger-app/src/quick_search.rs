@@ -2537,7 +2537,8 @@ impl Render for QuickSearch {
                     .child(div().flex_1())
                     .when_some(bookmark_action, |header, (label, hint)| {
                         header.child(
-                            button("bookmark-query", label, Tone::Ghost, true)
+                            // 操作改变时使用新的按钮标识，结束上一次的悬停提示。
+                            button(label, label, Tone::Ghost, true)
                                 .h(px(24.))
                                 .tooltip(theme::text_tooltip(hint.into()))
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -3270,6 +3271,13 @@ mod tests {
                     window
                         .update(cx, |search, window, cx| {
                             search.fill_query("3**4", window, cx);
+                            let mut bookmark = KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse("ctrl-d").unwrap(),
+                                is_held: false,
+                            };
+                            search.key_down(&bookmark, window, cx);
+                            bookmark.is_held = true;
+                            search.key_down(&bookmark, window, cx);
                         })
                         .unwrap();
                     window
@@ -3431,6 +3439,33 @@ mod tests {
                             (help, examples_match, search.input.read(cx).text())
                         })
                         .unwrap();
+                    let bookmark_states = reopened
+                        .update(cx, |search, window, cx| {
+                            search.fill_query("", window, cx);
+                            search.refresh_results("", window, cx);
+                            let bookmark = KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse("ctrl-d").unwrap(),
+                                is_held: false,
+                            };
+                            search.key_down(&bookmark, window, cx);
+                            let menu = search.input.read(cx).text();
+                            search.refresh_results(&menu, window, cx);
+                            search.key_down(
+                                &KeyDownEvent {
+                                    keystroke: gpui::Keystroke::parse("tab").unwrap(),
+                                    is_held: false,
+                                },
+                                window,
+                                cx,
+                            );
+                            let restored = search.input.read(cx).text();
+                            search.fill_query("收藏: 3**4", window, cx);
+                            search.refresh_results("收藏: 3**4", window, cx);
+                            search.key_down(&bookmark, window, cx);
+                            let removed = matches!(&search.results, Results::Bookmarks(items) if items.is_empty());
+                            (menu, restored, removed)
+                        })
+                        .unwrap();
                     send.send((
                         states,
                         reopened_states,
@@ -3440,6 +3475,7 @@ mod tests {
                         file_navigation,
                         file_help,
                         scoped_help,
+                        bookmark_states,
                     ))
                     .unwrap();
                     cx.update(|cx| cx.quit()).unwrap();
@@ -3455,11 +3491,15 @@ mod tests {
             file_navigation,
             file_help,
             (help_input, all_json_examples, restored_input),
+            (bookmark_menu, bookmark_restored, bookmark_removed),
         ) = receive.recv().unwrap();
         assert_eq!(help_input, "? JSON:");
         assert!(all_json_examples);
         assert_eq!(restored_input, "ＪＳＯＮ：取值 /城市 {\"城市\":\"北京\"}");
         assert_eq!(reopened_states, ["", "3**4"]);
+        assert_eq!(bookmark_menu, "收藏: ");
+        assert_eq!(bookmark_restored, "3**4");
+        assert!(bookmark_removed);
         assert_eq!(window_refresh, (true, true, true));
         assert_eq!(app_refresh, (true, true, true, true));
         assert_eq!(
