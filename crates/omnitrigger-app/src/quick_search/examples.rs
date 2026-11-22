@@ -3483,6 +3483,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "保留只属于其中一组的区间，计算对称差",
+        query: "区间: 对称差 [0,3]; [8,9] @ [2,5]",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在分数算式中精确开方并取绝对值",
         query: "分数: 计算 sqrt(81/16)+abs(-1/2)",
     },
@@ -3667,7 +3672,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
     }
     match scope {
         Scope::Intervals
-            if ["交集", "合并", "差集", "长度"]
+            if ["交集", "合并", "差集", "对称差", "长度"]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::BatchCalculation

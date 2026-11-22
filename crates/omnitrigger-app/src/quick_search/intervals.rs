@@ -16,6 +16,7 @@ pub(super) enum IntervalError {
     Incomplete,
     Operation,
     Count,
+    TwoGroups,
     Notation,
     Reversed,
     Evaluation(FractionError),
@@ -25,9 +26,10 @@ impl IntervalError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete | Self::Operation => {
-                "输入交集、合并、差集或长度，再填写区间，例如 交集 [1/2,3); (2,5]"
+                "输入交集、合并、差集、对称差或长度，再填写区间，例如 交集 [1/2,3); (2,5]"
             }
             Self::Count => "最多填写 32 个区间，用分号或换行分开",
+            Self::TwoGroups => "用 @ 分开两组区间，例如 [0,3]; [8,9] @ [2,5]",
             Self::Notation => "用方括号包含端点，用圆括号排除端点，两个端点用逗号分开",
             Self::Reversed => "区间的左端点须小于或等于右端点",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
@@ -42,6 +44,7 @@ enum IntervalOperation {
     Intersection,
     Union,
     Difference,
+    SymmetricDifference,
     Length,
 }
 
@@ -81,6 +84,9 @@ pub(super) fn calculate_intervals(query: &str) -> Result<String, IntervalError> 
         "交集" | "intersect" => IntervalOperation::Intersection,
         "合并" | "并集" | "union" => IntervalOperation::Union,
         "差集" | "difference" => IntervalOperation::Difference,
+        "对称差" | "对称差集" | "symmetric-difference" => {
+            IntervalOperation::SymmetricDifference
+        }
         "长度" | "总长度" | "length" | "total-length" => IntervalOperation::Length,
         "" => return Err(IntervalError::Incomplete),
         _ => return Err(IntervalError::Operation),
@@ -89,21 +95,22 @@ pub(super) fn calculate_intervals(query: &str) -> Result<String, IntervalError> 
     if arguments.is_empty() {
         return Err(IntervalError::Incomplete);
     }
-    let parts: Vec<_> = arguments
-        .split([';', '\n'])
-        .take(MAX_INTERVALS + 1)
-        .collect();
-    if parts.len() > MAX_INTERVALS {
-        return Err(IntervalError::Count);
-    }
-    let intervals = parts
-        .into_iter()
-        .map(parse_interval)
-        .collect::<Result<Vec<_>, _>>()?;
+    let (intervals, other) = if matches!(operation, IntervalOperation::SymmetricDifference) {
+        let (left, right) = arguments.split_once('@').ok_or(IntervalError::TwoGroups)?;
+        if left.trim().is_empty() || right.trim().is_empty() {
+            return Err(IntervalError::TwoGroups);
+        }
+        let left = parse_interval_list(left, MAX_INTERVALS)?;
+        let right = parse_interval_list(right, MAX_INTERVALS - left.len())?;
+        (left, right)
+    } else {
+        (parse_interval_list(arguments, MAX_INTERVALS)?, Vec::new())
+    };
     let result = match operation {
         IntervalOperation::Intersection => intersect_intervals(intervals).into_iter().collect(),
         IntervalOperation::Union => merge_intervals(intervals.into_iter().flatten().collect()),
-        IntervalOperation::Difference => subtract_intervals(intervals),
+        IntervalOperation::Difference => subtract_intervals(&intervals),
+        IntervalOperation::SymmetricDifference => symmetric_difference(intervals, other),
         IntervalOperation::Length => {
             return union_length(merge_intervals(intervals.into_iter().flatten().collect()));
         }
@@ -116,6 +123,14 @@ pub(super) fn calculate_intervals(query: &str) -> Result<String, IntervalError> 
         .map(Interval::notation)
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+fn parse_interval_list(input: &str, limit: usize) -> Result<Vec<Option<Interval>>, IntervalError> {
+    let parts: Vec<_> = input.trim().split([';', '\n']).take(limit + 1).collect();
+    if parts.len() > limit {
+        return Err(IntervalError::Count);
+    }
+    parts.into_iter().map(parse_interval).collect()
 }
 
 fn parse_interval(input: &str) -> Result<Option<Interval>, IntervalError> {
@@ -182,16 +197,32 @@ fn intersect_pair(mut result: Interval, interval: &Interval) -> Option<Interval>
     result.is_nonempty().then_some(result)
 }
 
-fn subtract_intervals(intervals: Vec<Option<Interval>>) -> Vec<Interval> {
-    let mut intervals = intervals.into_iter();
-    let Some(Some(first)) = intervals.next() else {
+fn subtract_intervals(intervals: &[Option<Interval>]) -> Vec<Interval> {
+    let Some((Some(first), cuts)) = intervals.split_first() else {
         return Vec::new();
     };
-    let mut remaining = vec![first];
-    for cut in intervals.flatten() {
+    subtract_ranges(vec![first.clone()], cuts.iter().flatten())
+}
+
+fn symmetric_difference(
+    left: Vec<Option<Interval>>,
+    right: Vec<Option<Interval>>,
+) -> Vec<Interval> {
+    let left = merge_intervals(left.into_iter().flatten().collect());
+    let right = merge_intervals(right.into_iter().flatten().collect());
+    let mut result = subtract_ranges(left.clone(), &right);
+    result.extend(subtract_ranges(right, &left));
+    merge_intervals(result)
+}
+
+fn subtract_ranges<'a>(
+    mut remaining: Vec<Interval>,
+    cuts: impl IntoIterator<Item = &'a Interval>,
+) -> Vec<Interval> {
+    for cut in cuts {
         remaining = remaining
             .into_iter()
-            .flat_map(|part| subtract_one_interval(part, &cut))
+            .flat_map(|part| subtract_one_interval(part, cut))
             .flatten()
             .collect();
     }
@@ -268,6 +299,33 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn symmetric_difference_preserves_singletons_and_merges_each_input_group() {
+        for (query, expected) in [
+            ("对称差 [0,3]; [8,9] @ [2,5]", "[0,2)\n(3,5]\n[8,9]"),
+            ("对称差集 [1/2,2]; [1,3] @ (1/2,3)", "[1/2,1/2]\n[3,3]"),
+            ("symmetric-difference [0,1]; [1,2] @ [0,2]", EMPTY_SET),
+            ("对称差 [0,0) @ [1,2)", "[1,2)"),
+            ("对称差 [0,1) ＠ [1,2]", "[0,2]"),
+            ("对称差 [0,1] @ [1,2]", "[0,1)\n(1,2]"),
+        ] {
+            assert_eq!(
+                calculate_intervals(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_intervals("对称差 [0,1] @"),
+            Err(IntervalError::TwoGroups)
+        );
+        let too_many = ["[0,1]"; MAX_INTERVALS].join(";");
+        assert_eq!(
+            calculate_intervals(&format!("对称差 {too_many} @ [2,3]")),
+            Err(IntervalError::Count)
+        );
     }
 
     #[test]
