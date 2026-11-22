@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     fmt,
 };
@@ -38,6 +39,7 @@ pub(super) enum JsonError {
     SelectionConflict,
     FilterValue,
     ExpectedScalar,
+    ExpectedNumber,
 }
 
 impl JsonError {
@@ -67,6 +69,7 @@ impl JsonError {
             Self::SelectionConflict => "待选键在同一对象中重复出现",
             Self::FilterValue => "路径后请输入 JSON 字符串、数字、布尔值或 null，再粘贴数组",
             Self::ExpectedScalar => "指定路径的值须为字符串、数字、布尔值或 null",
+            Self::ExpectedNumber => "数值排序需要每一项的指定路径都对应 JSON 数字",
         }
     }
 }
@@ -86,6 +89,8 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "筛选" | "filter" => return filter_json_by_scalar(source, true),
         "排除" | "exclude" => return filter_json_by_scalar(source, false),
         "按值去重" | "unique-by-pointer" => return deduplicate_json_by_scalar(source),
+        "数值排序" | "sort-numeric" => return sort_json_numbers(source, false),
+        "数值降序" | "sort-numeric-desc" => return sort_json_numbers(source, true),
         "键名" | "keys" => return json_keys(source),
         "长度" | "length" => return json_length(source),
         "展开数组" | "to-jsonl" => return json_array_to_lines(source),
@@ -225,6 +230,73 @@ fn deduplicate_json_by_scalar(query: &str) -> Result<String, JsonError> {
         let scalar = json_scalar(value)?.ok_or(JsonError::ExpectedScalar)?;
         Ok(seen.insert(scalar))
     })
+}
+
+fn sort_json_numbers(query: &str, descending: bool) -> Result<String, JsonError> {
+    let (pointer, source) = pointer_and_source(query)?;
+    let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
+    let mut items = read_json_array(source)?
+        .into_iter()
+        .map(|item| {
+            let value = select_pointer_keys(item, &keys)?;
+            let Some(JsonScalar::Number {
+                negative,
+                digits,
+                exponent,
+            }) = json_scalar(value)?
+            else {
+                return Err(JsonError::ExpectedNumber);
+            };
+            let sign = if digits.is_empty() {
+                0
+            } else if negative {
+                -1
+            } else {
+                1
+            };
+            let decimal_position = exponent + BigInt::from(digits.len());
+            Ok((
+                JsonNumericSortKey {
+                    sign,
+                    decimal_position,
+                    digits,
+                },
+                item,
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    items.sort_by(|(left, _), (right, _)| {
+        if descending {
+            right.compare(left)
+        } else {
+            left.compare(right)
+        }
+    });
+    let values: Vec<_> = items.into_iter().map(|(_, item)| item).collect();
+    Ok(serde_json::to_string(&values).expect("有效的原始 JSON 值可以直接序列化"))
+}
+
+struct JsonNumericSortKey {
+    sign: i8,
+    decimal_position: BigInt,
+    digits: String,
+}
+
+impl JsonNumericSortKey {
+    fn compare(&self, other: &Self) -> Ordering {
+        self.sign.cmp(&other.sign).then_with(|| {
+            // 相同位置的有效数位可直接比较，末尾的零已在规范化时移除。
+            let magnitude = self
+                .decimal_position
+                .cmp(&other.decimal_position)
+                .then_with(|| self.digits.cmp(&other.digits));
+            if self.sign < 0 {
+                magnitude.reverse()
+            } else {
+                magnitude
+            }
+        })
+    }
 }
 
 fn filter_json_items(
@@ -942,6 +1014,31 @@ mod tests {
             ("按值去重 /键 [{}]", JsonError::MissingValue),
             (r#"按值去重 /键 [{"键":[]}]"#, JsonError::ExpectedScalar),
             (r#"按值去重 /键 [{"键":1,"键":2}]"#, JsonError::DuplicateKey),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn sorts_json_numbers_by_exact_magnitude_and_keeps_tied_items_in_order() {
+        let values = "[0,-2.50,3e10000000000000000000,1.2,1e10000000000000000000,-1E-4,9007199254740993,9007199254740992,1.200,-0.0,1e-10000000000000000000]";
+        for (operation, expected) in [
+            ("数值排序", "[-2.50,-1E-4,0,-0.0,1e-10000000000000000000,1.2,1.200,9007199254740992,9007199254740993,1e10000000000000000000,3e10000000000000000000]"),
+            ("sort-numeric-desc", "[3e10000000000000000000,1e10000000000000000000,9007199254740993,9007199254740992,1.2,1.200,1e-10000000000000000000,0,-0.0,-1E-4,-2.50]"),
+        ] {
+            assert_eq!(
+                transform_json(&format!(r#"{operation} "" {values}"#)).as_deref(),
+                Ok(expected)
+            );
+        }
+        assert_eq!(
+            transform_json(r#"数值排序 /n [{"n":1.001,"id":"A"},{"n":1,"id":"B"}]"#).as_deref(),
+            Ok(r#"[{"n":1,"id":"B"},{"n":1.001,"id":"A"}]"#)
+        );
+        for (query, error) in [
+            (r#"数值排序 /n [{"n":"1"}]"#, JsonError::ExpectedNumber),
+            (r#"数值排序 /n [{}]"#, JsonError::MissingValue),
+            (r#"数值降序 /n [{"n":1,"n":2}]"#, JsonError::DuplicateKey),
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
         }

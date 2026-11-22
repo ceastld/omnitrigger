@@ -1472,6 +1472,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按路径上的数字升序排列 JSON 项",
+        query: r#"JSON: 数值排序 /价格 [{"编号":"001","价格":12.50},{"编号":"002","价格":-2.75},{"编号":"003","价格":1.5e0}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按路径上的数字降序排列 JSON 项",
+        query: r#"JSON: 数值降序 /价格 [{"编号":"001","价格":12.50},{"编号":"002","价格":-2.75},{"编号":"003","价格":1.5e0}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 CSV 转成 JSON 行数组",
         query: "CSV: 转JSON 编号,名称\n001,\"茶,咖啡\"",
     },
