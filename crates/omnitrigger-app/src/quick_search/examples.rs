@@ -3023,6 +3023,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把假分数转换成带分数",
+        query: "分数: 带分数 -7/3",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把带分数还原成精确分数",
+        query: "分数: 从带分数 -2 1/3",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "限制分母并找最接近的分数",
+        query: "分数: 限分母 0.3333 to 100",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把多项精确数值化为最简整数比",
         query: "分数: 化简比例 0.5,3/4,1",
     },
@@ -3126,6 +3141,9 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "从连分数",
                     "从循环小数",
                     "比较",
+                    "带分数",
+                    "从带分数",
+                    "限分母",
                     "化简比例",
                     "就近对齐",
                     "向下对齐",

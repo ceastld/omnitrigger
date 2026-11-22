@@ -17,6 +17,7 @@ pub(super) const MAX_DECIMAL_PLACES: u32 = 100;
 const MAX_REPEATING_DECIMAL_PLACES: usize = 512;
 const MAX_TABLE_INPUTS: usize = 12;
 const MAX_SEQUENCE_VALUES: usize = 128;
+const MAX_APPROXIMATION_DENOMINATOR: u32 = 1_000_000;
 const MAX_RATIO_VALUES: usize = 16;
 const MAX_CONTINUED_FRACTION_TERMS: usize = 512;
 
@@ -45,6 +46,8 @@ pub(super) enum FractionError {
     RepeatingDecimalSyntax,
     TableInputs,
     SequenceArguments,
+    MixedFractionArguments,
+    DenominatorLimit,
     ContinuedFractionArguments,
     ContinuedFractionLength,
     ComparisonArguments,
@@ -81,6 +84,10 @@ impl FractionError {
                 "用方括号填写 1 至 12 个数值，例如 分数: 取值表 [-2,0,3/2] x**2+1/3"
             }
             Self::SequenceArguments => "填写首项、公差或公比、项数，例如 1/3,1/6,5，最多 128 项",
+            Self::MixedFractionArguments => "填写整数部分和小于 1 的非负分数，例如 -2 1/3",
+            Self::DenominatorLimit => {
+                "填写 1 至 1000000 的分母上限，例如 分数: 限分母 0.3333 to 100"
+            }
             Self::ContinuedFractionArguments => {
                 "用方括号填写连分数整数项，例如 [3,7,16]。第一项之后须为正整数"
             }
@@ -195,6 +202,24 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     }
     if verb == "比较" || verb.eq_ignore_ascii_case("compare") {
         return compare_fraction_expressions(expression);
+    }
+    if verb == "带分数" || verb.eq_ignore_ascii_case("mixed") {
+        return calculate_fraction(expression).map(format_mixed_fraction);
+    }
+    if verb == "从带分数" || verb.eq_ignore_ascii_case("from-mixed") {
+        return parse_mixed_fraction(expression.trim()).map(|value| value.to_string());
+    }
+    if verb == "限分母" || verb.eq_ignore_ascii_case("limit-denominator") {
+        let (value, limit) =
+            split_conversion(expression.trim()).ok_or(FractionError::DenominatorLimit)?;
+        let limit = limit
+            .parse::<u32>()
+            .ok()
+            .filter(|limit| (1..=MAX_APPROXIMATION_DENOMINATOR).contains(limit))
+            .ok_or(FractionError::DenominatorLimit)?;
+        let approximation = approximate_fraction(calculate_fraction(value)?, limit);
+        ensure_exact_size(&approximation)?;
+        return Ok(approximation.to_string());
     }
     if verb == "化简比例" || verb.eq_ignore_ascii_case("ratio") {
         return simplify_ratio(expression);
@@ -369,6 +394,103 @@ fn fraction_table(input: &str) -> Result<String, FractionError> {
         rows.push(format!("{x}\t{y}"));
     }
     Ok(rows.join("\n"))
+}
+
+fn format_mixed_fraction(value: BigRational) -> String {
+    let numerator = value.numer().magnitude();
+    let denominator = value.denom().magnitude();
+    let whole = numerator / denominator;
+    let remainder = numerator % denominator;
+    if whole.bits() == 0 || remainder.bits() == 0 {
+        return value.to_string();
+    }
+    let sign = if value.numer().sign() == Sign::Minus {
+        "-"
+    } else {
+        ""
+    };
+    format!("{sign}{whole} {remainder}/{denominator}")
+}
+
+fn parse_mixed_fraction(input: &str) -> Result<BigRational, FractionError> {
+    if input.chars().take(QUERY_LIMIT + 1).count() > QUERY_LIMIT {
+        return Err(FractionError::TooLong);
+    }
+    let Some((whole, fraction)) = input.split_once(char::is_whitespace) else {
+        return parse_fraction_literal(input);
+    };
+    let digits = whole.strip_prefix(['-', '+']).unwrap_or(whole);
+    if digits.is_empty() || !digits.bytes().all(|digit| digit.is_ascii_digit()) {
+        return Err(FractionError::MixedFractionArguments);
+    }
+    let integer =
+        BigInt::parse_bytes(digits.as_bytes(), 10).ok_or(FractionError::MixedFractionArguments)?;
+    let fraction = parse_fraction_literal(fraction.trim_start())?;
+    if fraction.numer().sign() == Sign::Minus || fraction.numer() >= fraction.denom() {
+        return Err(FractionError::MixedFractionArguments);
+    }
+    let value = BigRational::from_integer(integer) + fraction;
+    ensure_exact_size(&value)?;
+    Ok(if whole.starts_with('-') {
+        -value
+    } else {
+        value
+    })
+}
+
+fn approximate_fraction(value: BigRational, max_denominator: u32) -> BigRational {
+    let limit = BigUint::from(max_denominator);
+    if value.denom().magnitude() <= &limit {
+        return value;
+    }
+    let negative = value.numer().sign() == Sign::Minus;
+    let magnitude = if negative { -value } else { value };
+    let mut dividend = magnitude.numer().magnitude().clone();
+    let mut divisor = magnitude.denom().magnitude().clone();
+    let mut preceding = (BigUint::from(0u8), BigUint::from(1u8));
+    let mut closest = (BigUint::from(1u8), BigUint::from(0u8));
+    let boundary = loop {
+        let coefficient = &dividend / &divisor;
+        let denominator = &closest.1 * &coefficient + &preceding.1;
+        if denominator > limit {
+            // 下一个收敛分数已超限，保留最大的仍然可用的中间系数。
+            let allowed = (&limit - &preceding.1) / &closest.1;
+            break BigRational::new(
+                (&closest.0 * &allowed + &preceding.0).into(),
+                (&closest.1 * &allowed + &preceding.1).into(),
+            );
+        }
+        let numerator = &closest.0 * coefficient + &preceding.0;
+        preceding = std::mem::replace(&mut closest, (numerator, denominator));
+        let remainder = dividend % &divisor;
+        dividend = divisor;
+        divisor = remainder;
+    };
+    let latest = BigRational::new(closest.0.into(), closest.1.into());
+    let distance = |candidate: &BigRational| {
+        let delta = &magnitude - candidate;
+        if delta.numer().sign() == Sign::Minus {
+            -delta
+        } else {
+            delta
+        }
+    };
+    let order = distance(&latest)
+        .cmp(&distance(&boundary))
+        .then_with(|| latest.denom().cmp(boundary.denom()))
+        .then_with(|| {
+            if negative {
+                boundary.cmp(&latest)
+            } else {
+                latest.cmp(&boundary)
+            }
+        });
+    let nearest = if order.is_gt() { boundary } else { latest };
+    if negative {
+        -nearest
+    } else {
+        nearest
+    }
 }
 
 fn fraction_sequence(input: &str, geometric: bool) -> Result<String, FractionError> {
@@ -1166,6 +1288,58 @@ mod tests {
             simplify_fraction("化简比例 1/1e1500,1/(1e1500-1)"),
             Err(FractionError::ExactRange)
         );
+    }
+
+    #[test]
+    fn converts_mixed_fractions_using_one_sign_for_the_whole_value() {
+        for (input, expected) in [
+            ("带分数 -7/3", "-2 1/3"),
+            ("带分数 (2**80+1)/2", "604462909807314587353088 1/2"),
+            ("mixed 3/4", "3/4"),
+            ("mixed -8/4", "-2"),
+            ("从带分数 -2 1/3", "-7/3"),
+            ("from-mixed +2 2/4", "5/2"),
+            ("从带分数 -0 1/3", "-1/3"),
+            ("从带分数 3/4", "3/4"),
+            ("从带分数 2 0.125", "17/8"),
+        ] {
+            assert_eq!(simplify_fraction(input).as_deref(), Ok(expected), "{input}");
+        }
+        for input in ["从带分数 -2 -1/3", "从带分数 2 3/2", "从带分数 0.5 1/3"] {
+            assert_eq!(
+                simplify_fraction(input),
+                Err(FractionError::MixedFractionArguments),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn finds_the_closest_fraction_with_a_bounded_denominator_and_stable_ties() {
+        for (input, expected) in [
+            ("限分母 0.3333 to 100", "1/3"),
+            ("limit-denominator 3.1415926535897932 to 1000", "355/113"),
+            ("限分母 355/113 to 100", "311/99"),
+            ("限分母 1/4 to 2", "0"),
+            ("限分母 -3/2 to 1", "-2"),
+            ("限分母 3/2 to 1", "1"),
+            ("限分母 -355/113 to 113", "-355/113"),
+            ("限分母 (2**80+1/3) to 3", "3626777458843887524118529/3"),
+        ] {
+            assert_eq!(simplify_fraction(input).as_deref(), Ok(expected), "{input}");
+        }
+        for input in [
+            "限分母 1",
+            "限分母 1 to 0",
+            "限分母 1 to 1000001",
+            "限分母 1 to 3/2",
+        ] {
+            assert_eq!(
+                simplify_fraction(input),
+                Err(FractionError::DenominatorLimit),
+                "{input}"
+            );
+        }
     }
 
     #[test]
