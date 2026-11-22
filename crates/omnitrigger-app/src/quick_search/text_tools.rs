@@ -33,6 +33,8 @@ pub(super) enum TextError {
     EmptyDelimiter,
     InvalidColumn,
     MissingColumn,
+    InvalidLineRange,
+    MissingLine,
     EmptySearchText,
     InvalidRegex,
     IncompleteRegexGroup,
@@ -62,6 +64,8 @@ impl TextError {
             Self::EmptyDelimiter => "分隔符不能为空",
             Self::InvalidColumn => "输入从 1 开始的列号，例如 文本: 取列 \"\\t\" 2",
             Self::MissingColumn => "至少一行的列数不足",
+            Self::InvalidLineRange => "输入从 1 开始的行号或区间，例如 文本: 取行 2,4-6",
+            Self::MissingLine => "指定行号超出了文本行数",
             Self::EmptySearchText => "请输入要查找的文字",
             Self::InvalidRegex => "请检查或缩短正则表达式",
             Self::IncompleteRegexGroup => "输入组名或组号、带引号的正则表达式和原文",
@@ -110,6 +114,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "逐行加前缀" | "prefix-lines" => return decorate_lines(text, true),
         "逐行加后缀" | "suffix-lines" => return decorate_lines(text, false),
         "取列" | "column" => return select_text_column(text),
+        "取行" | "pick-lines" => return select_text_line_ranges(text),
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
         "共有行" | "行交集" | "intersect-lines" => return compare_line_sets(text, true),
@@ -635,6 +640,40 @@ fn select_text_column(input: &str) -> Result<String, TextError> {
     Ok(values.join("\n"))
 }
 
+fn select_text_line_ranges(input: &str) -> Result<String, TextError> {
+    let (ranges, text) = input
+        .split_once(char::is_whitespace)
+        .ok_or(TextError::IncompleteTextArgument)?;
+    let text = text_payload(text)?;
+    let lines: Vec<_> = text.lines().collect();
+    let mut selected = vec![false; lines.len()];
+    let parse_line = |number: &str| {
+        number
+            .parse::<usize>()
+            .ok()
+            .filter(|&line| line > 0)
+            .ok_or(TextError::InvalidLineRange)
+    };
+    for range in ranges.split(',') {
+        let (first, last) = range.split_once('-').unwrap_or((range, range));
+        let start = parse_line(first)?;
+        let end = parse_line(last)?;
+        if end < start {
+            return Err(TextError::InvalidLineRange);
+        }
+        selected
+            .get_mut(start - 1..end)
+            .ok_or(TextError::MissingLine)?
+            .fill(true);
+    }
+    Ok(lines
+        .into_iter()
+        .zip(selected)
+        .filter_map(|(line, selected)| selected.then_some(line))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 fn regex_text_argument(input: &str) -> Result<(Regex, &str), TextError> {
     let (pattern, text) = quoted_text_argument(input)?;
     Ok((compile_regex(&pattern)?, text))
@@ -803,6 +842,24 @@ mod tests {
             (r#"行差集 "苹果\u0000" "梨""#, TextError::NullCharacter),
         ] {
             assert_eq!(transform_text(input), Err(error), "{input}");
+        }
+    }
+
+    #[test]
+    fn picks_one_based_line_ranges_in_source_order_without_repeats() {
+        assert_eq!(
+            transform_text("取行 4-5,2-4,2 顶行\r\n 二 \r\n\r\n四\r\n五\r\n末行").as_deref(),
+            Ok(" 二 \n\n四\n五")
+        );
+        assert_eq!(transform_text("pick-lines 1 A\n").as_deref(), Ok("A"));
+        for (query, error) in [
+            ("取行 0 A", TextError::InvalidLineRange),
+            ("取行 2-1 A\nB", TextError::InvalidLineRange),
+            ("取行 1, A", TextError::InvalidLineRange),
+            ("取行 2 A\n", TextError::MissingLine),
+            ("取行 1-9 A\nB", TextError::MissingLine),
+        ] {
+            assert_eq!(transform_text(query), Err(error), "{query}");
         }
     }
 

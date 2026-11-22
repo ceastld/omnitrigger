@@ -1217,6 +1217,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按行号取出文本中的几行",
+        query: "文本: 取行 2,4-5 标题\n苹果\n略过\n梨\n茶",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "给每行加前缀",
         query: "文本: 逐行加前缀 \"- \" 苹果\n梨",
     },
