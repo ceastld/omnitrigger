@@ -2283,6 +2283,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求大整数的平方根并向下取整",
+        query: "分数: 计算 isqrt(2**100 - 1)",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求大整数的最大公约数",
+        query: "分数: 计算 gcd(-3 * 2**80, 5 * 2**80)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "展开精确分数的循环小数",
         query: "分数: 循环小数 1/7",
     },

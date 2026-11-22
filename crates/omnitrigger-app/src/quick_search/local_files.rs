@@ -168,16 +168,23 @@ impl LocalFilesIndex {
             matches.sort_by_key(|(rank, _)| *rank);
         }
         if query.output == FileOutput::Json
-            || (query.output == FileOutput::Lines && !matches.is_empty())
+            || (matches!(query.output, FileOutput::Lines | FileOutput::Names)
+                && !matches.is_empty())
         {
-            let paths = matches
+            let values = matches
                 .iter()
-                .map(|(_, entry)| entry.path.as_str())
+                .map(|(_, entry)| {
+                    if query.output == FileOutput::Names {
+                        entry.name.as_str()
+                    } else {
+                        entry.path.as_str()
+                    }
+                })
                 .collect::<Vec<_>>();
             let output = if query.output == FileOutput::Json {
-                serde_json::to_string(&paths).expect("路径字符串可以序列化为 JSON")
+                serde_json::to_string(&values).expect("路径字符串可以序列化为 JSON")
             } else {
-                paths.join("\n")
+                values.join("\n")
             };
             return Results::text_value(Ok(output));
         }
@@ -208,6 +215,7 @@ struct FileQuery<'a> {
 enum FileOutput {
     Entries,
     Lines,
+    Names,
     Json,
 }
 
@@ -236,6 +244,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
                 entry_type = DirectoryEntryType::Directory;
             }
             "路径列表" | "paths" if output == FileOutput::Entries => output = FileOutput::Lines,
+            "名称列表" | "names" if output == FileOutput::Entries => output = FileOutput::Names,
             "路径json" | "json-paths" if output == FileOutput::Entries => {
                 output = FileOutput::Json
             }
@@ -463,6 +472,17 @@ mod tests {
             Results::Value(Ok(value)) if value.text == "[]"
         ));
         assert!(split_query(r"C:\Work | | 路径列表 路径JSON").is_none());
+        let names = r"C:\Work | report | 大小 名称列表";
+        assert!(index.request(Some(names)).is_none());
+        assert!(matches!(
+            index.results(names),
+            Results::Value(Ok(value)) if value.text == "z report.txt\nreport.txt"
+        ));
+        assert!(matches!(
+            index.results(r"C:\Work | omitted | names size"),
+            Results::Destinations(items) if items.is_empty()
+        ));
+        assert!(split_query(r"C:\Work | | 名称列表 paths").is_none());
     }
 
     #[test]

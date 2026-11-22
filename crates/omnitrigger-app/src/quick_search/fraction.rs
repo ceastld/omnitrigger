@@ -35,6 +35,8 @@ pub(super) enum FractionError {
     DecimalPlaces,
     RoundPlaces,
     RationalSquareRoot,
+    IntegerSquareRoot,
+    IntegerAggregate,
     RepeatingDecimalLength,
     RepeatingDecimalSyntax,
     TableInputs,
@@ -62,6 +64,8 @@ impl FractionError {
             Self::DecimalPlaces => "输入 0 至 100 的小数位数，例如 分数: 小数 1/3 to 8",
             Self::RoundPlaces => "round 的位数须为 -100 至 100 的整数",
             Self::RationalSquareRoot => "精确开方需要非负数，且结果能表示为分数",
+            Self::IntegerSquareRoot => "isqrt 需要非负整数",
+            Self::IntegerAggregate => "gcd 和 lcm 的参数须为整数",
             Self::RepeatingDecimalLength => "循环小数最多展开 512 个小数位",
             Self::RepeatingDecimalSyntax => "用括号填写循环节，例如 0.(142857) 或 -2.1(6)",
             Self::TableInputs => {
@@ -497,6 +501,15 @@ fn modular_power(
     Ok(BigRational::from_integer(value))
 }
 
+fn exact_gcd(mut left: BigUint, mut right: BigUint) -> BigUint {
+    while right.bits() != 0 {
+        let remainder = left % &right;
+        left = right;
+        right = remainder;
+    }
+    left
+}
+
 fn rational_power(base: BigRational, exponent: BigRational) -> Result<BigRational, FractionError> {
     if !exponent.is_integer() {
         return Err(FractionError::NonIntegerExponent);
@@ -716,8 +729,12 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return self.round_function();
         }
-        let square_root = name.eq_ignore_ascii_case("sqrt");
-        if square_root || name.eq_ignore_ascii_case("abs") {
+        let name = name.to_ascii_lowercase();
+        if matches!(name.as_str(), "gcd" | "lcm") {
+            self.remaining = rest;
+            return self.integer_aggregate(name == "lcm");
+        }
+        if matches!(name.as_str(), "sqrt" | "abs" | "isqrt") {
             self.remaining = rest;
             if !self.consume('(') {
                 return Err(self.expected_token());
@@ -727,20 +744,22 @@ impl FractionParser<'_> {
                 return Err(self.expected_token());
             }
             let negative = value.numer().sign() == Sign::Minus;
-            if !square_root {
-                return Ok(if negative { -value } else { value });
+            match name.as_str() {
+                "abs" => return Ok(if negative { -value } else { value }),
+                "isqrt" if !negative && value.is_integer() => {
+                    return Ok(BigRational::from_integer(
+                        value.numer().magnitude().sqrt().into(),
+                    ));
+                }
+                "isqrt" => return Err(FractionError::IntegerSquareRoot),
+                _ if negative => return Err(FractionError::RationalSquareRoot),
+                _ => return exact_abs_square_root(&value).ok_or(FractionError::RationalSquareRoot),
             }
-            if negative {
-                return Err(FractionError::RationalSquareRoot);
-            }
-            return exact_abs_square_root(&value).ok_or(FractionError::RationalSquareRoot);
         }
-        let function = if name.eq_ignore_ascii_case("comb") {
-            CombinatorialFunction::Combination
-        } else if name.eq_ignore_ascii_case("perm") {
-            CombinatorialFunction::Permutation
-        } else {
-            return Err(FractionError::Invalid);
+        let function = match name.as_str() {
+            "comb" => CombinatorialFunction::Combination,
+            "perm" => CombinatorialFunction::Permutation,
+            _ => return Err(FractionError::Invalid),
         };
 
         self.remaining = rest;
@@ -759,6 +778,47 @@ impl FractionParser<'_> {
             return Err(self.expected_token());
         }
         function.calculate(n, k)
+    }
+
+    fn integer_aggregate(
+        &mut self,
+        least_common_multiple: bool,
+    ) -> Result<BigRational, FractionError> {
+        if !self.consume('(') {
+            return Err(self.expected_token());
+        }
+        let mut values = Vec::new();
+        if !self.consume(')') {
+            loop {
+                let value = self.sum()?;
+                if !value.is_integer() {
+                    return Err(FractionError::IntegerAggregate);
+                }
+                values.push(value.numer().magnitude().clone());
+                if self.consume(')') {
+                    break;
+                }
+                if !self.consume(',') {
+                    return Err(self.expected_token());
+                }
+            }
+        }
+        if least_common_multiple && values.iter().any(|value| value.bits() == 0) {
+            return Ok(BigRational::default());
+        }
+        let mut result = BigUint::from(u8::from(least_common_multiple));
+        for value in values {
+            result = if least_common_multiple {
+                let divisor = exact_gcd(result.clone(), value.clone());
+                (result / divisor) * value
+            } else {
+                exact_gcd(result, value)
+            };
+            if result.bits() > MAX_EXACT_BITS {
+                return Err(FractionError::ExactRange);
+            }
+        }
+        Ok(BigRational::from_integer(result.into()))
     }
 
     fn power_function(&mut self) -> Result<BigRational, FractionError> {
@@ -1083,6 +1143,32 @@ mod tests {
             );
         }
         assert_eq!(calculate_fraction("abs(1,2)"), Err(FractionError::Invalid));
+    }
+
+    #[test]
+    fn evaluates_integer_root_and_divisibility_functions_beyond_float_precision() {
+        for (expression, expected) in [
+            ("isqrt(2**100 - 1)", "1125899906842623"),
+            ("ISQRT(0)", "0"),
+            ("gcd(0, -3 * 2**80, 5 * 2**80)", "1208925819614629174706176"),
+            ("lcm(-3 * 2**80, 5 * 2**80)", "18133887294219437620592640"),
+            ("gcd() + lcm()", "1"),
+            ("lcm(1e2000, 1e2000 - 1, 0)", "0"),
+        ] {
+            assert_eq!(
+                calculate_fraction(expression).unwrap().to_string(),
+                expected
+            );
+        }
+        for (expression, expected) in [
+            ("isqrt(-1)", FractionError::IntegerSquareRoot),
+            ("isqrt(1/2)", FractionError::IntegerSquareRoot),
+            ("gcd(1, 1/2)", FractionError::IntegerAggregate),
+            ("lcm(1e2000, 1e2000 - 1)", FractionError::ExactRange),
+            ("lcm(1,)", FractionError::Invalid),
+        ] {
+            assert_eq!(calculate_fraction(expression), Err(expected));
+        }
     }
 
     #[test]
