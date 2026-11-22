@@ -1898,6 +1898,16 @@ impl QuickSearch {
                     } else {
                         let help = match scoped_query(query.trim()) {
                             Some((Scope::LocalFiles, term)) => local_files::option_help_query(term),
+                            Some((Scope::ToolIndex, _)) => match &self.results {
+                                Results::Help(items) => items
+                                    .get(self.selected)
+                                    .and_then(|&index| {
+                                        EXAMPLES[index].query.split_once([':', '：'])
+                                    })
+                                    .and_then(|(prefix, _)| tool_example_keyword(prefix))
+                                    .map(|keyword| format!("? {keyword}")),
+                                _ => None,
+                            },
                             _ => None,
                         }
                         .or_else(|| {
@@ -2129,6 +2139,8 @@ impl QuickSearch {
     fn render_examples(&self, items: &[usize], cx: &mut Context<Self>) -> Div {
         let start = self.selected / EXAMPLE_PAGE_SIZE * EXAMPLE_PAGE_SIZE;
         let can_return = self.input_before_help.is_some();
+        let input = self.input.read(cx).text();
+        let tool_index = matches!(scoped_query(input.trim()), Some((Scope::ToolIndex, _)));
         div()
             .flex()
             .flex_col()
@@ -2155,9 +2167,13 @@ impl QuickSearch {
                                     .child(input_preview(query.trim_end())),
                             )
                             .when(index == self.selected, |row| {
-                                row.child(
-                                    div().text_color(rgb(theme::TEXT_MUTED)).child("Tab 填入"),
-                                )
+                                row.child(div().text_color(rgb(theme::TEXT_MUTED)).child(
+                                    if tool_index {
+                                        "F1 用法 · Tab 填入"
+                                    } else {
+                                        "Tab 填入"
+                                    },
+                                ))
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.index.recent.examples.record(example_index);
@@ -2171,6 +2187,8 @@ impl QuickSearch {
                     EXAMPLE_PAGE_SIZE,
                     if can_return {
                         "↑ ↓ 选择  ·  F1 返回  ·  PgUp / PgDn"
+                    } else if tool_index {
+                        "↑ ↓ 选择  ·  输入关键词筛选  ·  PgUp / PgDn"
                     } else {
                         "↑ ↓ 选择  ·  ? 后筛选  ·  PgUp / PgDn"
                     },
@@ -2180,7 +2198,7 @@ impl QuickSearch {
             .when((2..=EXAMPLE_PAGE_SIZE).contains(&items.len()), |list| {
                 let hint = if can_return {
                     "↑ ↓ 选择  ·  F1 返回"
-                } else if matches!(self.input.read(cx).text().trim(), "?" | "？") {
+                } else if matches!(input.trim(), "?" | "？") {
                     "↑ ↓ 选择  ·  ? 后可加关键词"
                 } else {
                     "↑ ↓ 选择"
@@ -3667,6 +3685,32 @@ mod tests {
                             (help, examples_match, search.input.read(cx).text())
                         })
                         .unwrap();
+                    let directory_help = reopened
+                        .update(cx, |search, window, cx| {
+                            const DIRECTORY: &str = "工具:";
+                            search.fill_query(DIRECTORY, window, cx);
+                            search.refresh_results(DIRECTORY, window, cx);
+                            let select_duration = match &search.results {
+                                Results::Help(items) => items.iter().position(|&index| {
+                                    EXAMPLES[index].query.starts_with("时长:")
+                                }).unwrap(),
+                                _ => unreachable!(),
+                            };
+                            search.selected = select_duration;
+                            let event = KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse("f1").unwrap(),
+                                is_held: false,
+                            };
+                            search.key_down(&event, window, cx);
+                            let help = search.input.read(cx).text();
+                            search.refresh_results(&help, window, cx);
+                            let examples_match = matches!(&search.results, Results::Help(items)
+                                if items.len() > 1
+                                    && items.iter().all(|&index| EXAMPLES[index].query.starts_with("时长:")));
+                            search.key_down(&event, window, cx);
+                            (select_duration, help, examples_match, search.input.read(cx).text())
+                        })
+                        .unwrap();
                     let bookmark_states = reopened
                         .update(cx, |search, window, cx| {
                             search.fill_query("", window, cx);
@@ -3721,6 +3765,7 @@ mod tests {
                         file_navigation,
                         file_help,
                         scoped_help,
+                        directory_help,
                         bookmark_states,
                     ))
                     .unwrap();
@@ -3737,10 +3782,15 @@ mod tests {
             file_navigation,
             file_help,
             (help_input, all_json_examples, restored_input),
+            (directory_selection, directory_help, all_duration_examples, restored_directory),
             (bookmark_menu, bookmark_restored, bookmark_removed, name_entry, canceled, named),
         ) = receive.recv().unwrap();
         assert_eq!(help_input, "? JSON:");
         assert!(all_json_examples);
+        assert!(directory_selection > 0);
+        assert_eq!(directory_help, "? 时长:");
+        assert!(all_duration_examples);
+        assert_eq!(restored_directory, "工具:");
         assert_eq!(restored_input, "ＪＳＯＮ：取值 /城市 {\"城市\":\"北京\"}");
         assert_eq!(reopened_states, ["", "3**4"]);
         assert_eq!(bookmark_menu, "收藏: ");
