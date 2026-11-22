@@ -1,6 +1,7 @@
 use std::f64::consts::{PI, TAU};
 
 use super::aspect_ratio::{pixel_dimensions, AspectRatioError};
+use super::batch::{map_batch_lines, BatchError};
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
 use super::duration::{convert_duration, elapsed_duration, DurationError};
 use super::radix::Base;
@@ -992,31 +993,10 @@ pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum BatchConversionError {
-    Empty,
-    Row { line: usize, cause: ConversionError },
-}
-
-pub(super) fn convert_batch(input: &str) -> Result<String, BatchConversionError> {
-    let mut converted = Vec::new();
-    for (index, line) in input.lines().enumerate() {
-        let query = line.trim();
-        if query.is_empty() {
-            continue;
-        }
-        let value = convert(query)
-            .unwrap_or(Err(ConversionError::Incomplete))
-            .map_err(|cause| BatchConversionError::Row {
-                line: index + 1,
-                cause,
-            })?;
-        converted.push(value);
-    }
-    if converted.is_empty() {
-        return Err(BatchConversionError::Empty);
-    }
-    Ok(converted.join("\n"))
+pub(super) fn convert_batch(input: &str) -> Result<String, BatchError<ConversionError>> {
+    map_batch_lines(input, |query| {
+        convert(query).unwrap_or(Err(ConversionError::Incomplete))
+    })
 }
 
 pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
@@ -1667,12 +1647,12 @@ mod tests {
         );
         assert_eq!(
             convert_batch("3 m to cm\n\n未知"),
-            Err(BatchConversionError::Row {
+            Err(BatchError::Row {
                 line: 3,
                 cause: ConversionError::Incomplete,
             })
         );
-        assert_eq!(convert_batch(" \r\n "), Err(BatchConversionError::Empty));
+        assert_eq!(convert_batch(" \r\n "), Err(BatchError::Empty));
     }
 
     #[test]

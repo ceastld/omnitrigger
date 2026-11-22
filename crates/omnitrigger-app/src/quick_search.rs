@@ -1,6 +1,7 @@
 mod actions;
 mod applications;
 mod aspect_ratio;
+mod batch;
 mod calculator;
 mod calendar;
 mod cidr;
@@ -65,6 +66,7 @@ use crate::{
 use actions::{matching_actions, SearchAction};
 use applications::{ApplicationCache, ApplicationIndex};
 use aspect_ratio::{calculate_aspect_ratio, AspectRatioError};
+use batch::{map_batch_lines, BatchError};
 use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, looks_like_date_query, DateError};
 use cidr::{calculate_cidr, CidrError};
@@ -73,7 +75,7 @@ use color::{calculate_contrast, convert_color, ColorError};
 use conversion::{
     calculate_circuit, calculate_fuel_economy, calculate_pace, calculate_pixel_density,
     calculate_unit_price, conversion_target_input, convert, convert_batch, convert_period,
-    estimate_transfer, suggested_targets, BatchConversionError, ConversionError,
+    estimate_transfer, suggested_targets, ConversionError,
 };
 use csv_tools::{transform_csv, CsvError};
 use duration::{convert_duration, DurationError};
@@ -328,8 +330,9 @@ fn value_extra_height(value: &str, line_limit: usize) -> f32 {
 enum ValueError {
     InputTooLong,
     Calculation(CalculationError),
+    BatchCalculation(BatchError<CalculationError>),
     Conversion(ConversionError),
-    BatchConversion(BatchConversionError),
+    BatchConversion(BatchError<ConversionError>),
     Radix(RadixError),
     RatioAllocation(RatioAllocationError),
     AspectRatio(AspectRatioError),
@@ -366,12 +369,20 @@ impl ValueError {
         let message = match self {
             Self::InputTooLong => "输入最多支持 4096 个字符",
             Self::Calculation(error) => error.message(),
-            Self::Conversion(error) => error.message(),
-            Self::BatchConversion(BatchConversionError::Empty) => {
-                "逐行输入完整换算，例如 10 km to mi"
+            Self::BatchCalculation(error) => {
+                return batch_error_message(
+                    error,
+                    "逐行输入算式，例如 2**8",
+                    CalculationError::message,
+                );
             }
-            Self::BatchConversion(BatchConversionError::Row { line, cause }) => {
-                return format!("第 {line} 行：{}", cause.message()).into();
+            Self::Conversion(error) => error.message(),
+            Self::BatchConversion(error) => {
+                return batch_error_message(
+                    error,
+                    "逐行输入完整换算，例如 10 km to mi",
+                    ConversionError::message,
+                );
             }
             Self::Radix(error) => error.message(),
             Self::RatioAllocation(error) => error.message(),
@@ -411,7 +422,8 @@ impl ValueError {
             self,
             Self::Calculation(CalculationError::Incomplete)
                 | Self::Conversion(ConversionError::Incomplete)
-                | Self::BatchConversion(BatchConversionError::Empty)
+                | Self::BatchCalculation(BatchError::Empty)
+                | Self::BatchConversion(BatchError::Empty)
                 | Self::AspectRatio(AspectRatioError::Incomplete)
                 | Self::Paper(PaperError::Incomplete)
                 | Self::Rectangle(RectangleError::Incomplete)
@@ -456,6 +468,17 @@ impl ValueError {
                 | Self::Json(JsonError::Incomplete)
                 | Self::Csv(CsvError::MissingInput | CsvError::UnclosedQuote)
         )
+    }
+}
+
+fn batch_error_message<E>(
+    error: BatchError<E>,
+    hint: &'static str,
+    message: impl FnOnce(E) -> &'static str,
+) -> gpui::SharedString {
+    match error {
+        BatchError::Empty => hint.into(),
+        BatchError::Row { line, cause } => format!("第 {line} 行：{}", message(cause)).into(),
     }
 }
 
@@ -538,6 +561,9 @@ impl Results {
                     Self::Destinations(vec![Destination::TriggerHistoryQuery(term.to_owned())])
                 }
                 Scope::CalculationHistory => Self::Calculations(recent.calculations.matching(term)),
+                Scope::BatchCalculation => Self::text_value(
+                    map_batch_lines(term, calculate).map_err(ValueError::BatchCalculation),
+                ),
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
                 Scope::BatchConversion => {
                     Self::text_value(convert_batch(term).map_err(ValueError::BatchConversion))
@@ -2035,6 +2061,18 @@ mod tests {
             ..SearchIndex::default()
         }
         .results(query)
+    }
+
+    #[test]
+    fn calculates_multiline_expressions_and_shows_the_failed_line() {
+        assert!(matches!(
+            for_query("批量计算: 2**8\n \n3^3\nsqrt(81)", &[]),
+            Results::Value(Ok(value)) if value.text == "256\n27\n9"
+        ));
+        assert!(matches!(
+            for_query("batch calculation: 2^10\n1/0", &[]),
+            Results::Value(Err(error)) if error.message().as_ref() == "第 2 行：不能除以零"
+        ));
     }
 
     #[test]

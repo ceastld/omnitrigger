@@ -200,6 +200,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量换算: 3 m to cm\n0xff to dec\n1 GiB to MiB",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "一次算出多行算式",
+        query: "批量计算: 2**8\n3^3\nsqrt(81)",
+    },
+    Example {
         icon: Icon::Grid,
         title: "切换已打开的窗口",
         query: "窗口:",
@@ -1983,6 +1988,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Date
         | Scope::Duration
         | Scope::BatchConversion
+        | Scope::BatchCalculation
         | Scope::VideoFrames
         | Scope::Timecode
         | Scope::TransferTime
