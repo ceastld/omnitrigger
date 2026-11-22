@@ -156,6 +156,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "精确计算矩阵的秩",
+        query: "矩阵: 秩 1,2,3; 2,4,6",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算单位",
         query: "10 km to mi",
     },

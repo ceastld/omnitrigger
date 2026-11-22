@@ -25,7 +25,7 @@ impl MatrixError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
-            Self::UnknownOperation => "可用 行列式、乘法、转置、求解 或 求逆",
+            Self::UnknownOperation => "可用操作为行列式、乘法、转置、求解、求逆和秩",
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
             Self::SquareRequired => "行列式、求解和求逆需要方阵",
@@ -48,6 +48,7 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         .ok_or(MatrixError::Incomplete)?;
     match operation.to_ascii_lowercase().as_str() {
         "行列式" | "det" => determinant(parse_matrix(input)?).map(|value| value.to_string()),
+        "秩" | "rank" => matrix_rank(parse_matrix(input)?).map(|value| value.to_string()),
         "乘法" | "乘" | "multiply" => {
             let (left, right) = input.split_once('@').ok_or(MatrixError::Incomplete)?;
             multiply(&parse_matrix(left)?, &parse_matrix(right)?).map(format_matrix)
@@ -112,9 +113,7 @@ fn determinant(mut matrix: Matrix) -> Result<BigRational, MatrixError> {
     }
     let mut result = BigRational::from_integer(1.into());
     for column in 0..dimension {
-        let Some(pivot_row) =
-            (column..dimension).find(|&row| matrix[row][column].numer().sign() != Sign::NoSign)
-        else {
+        let Some(pivot_row) = find_pivot(&matrix, column, column) else {
             return Ok(BigRational::default());
         };
         if pivot_row != column {
@@ -125,17 +124,47 @@ fn determinant(mut matrix: Matrix) -> Result<BigRational, MatrixError> {
         let pivot = &leading[column];
         result *= &pivot[column];
         ensure_exact_size(&result).map_err(MatrixError::Evaluation)?;
-        for row in remaining {
-            let factor = &row[column] / &pivot[column];
-            ensure_exact_size(&factor).map_err(MatrixError::Evaluation)?;
-            // 左侧列已完成，只更新剩余的待消元列。
-            for (target, source) in row.iter_mut().zip(pivot).skip(column + 1) {
-                *target -= &factor * source;
-                ensure_exact_size(target).map_err(MatrixError::Evaluation)?;
-            }
-        }
+        eliminate_below(pivot, remaining, column)?;
     }
     Ok(result)
+}
+
+fn matrix_rank(mut matrix: Matrix) -> Result<usize, MatrixError> {
+    let mut rank = 0;
+    for column in 0..matrix[0].len() {
+        let Some(pivot) = find_pivot(&matrix, rank, column) else {
+            continue;
+        };
+        matrix.swap(rank, pivot);
+        let (leading, remaining) = matrix.split_at_mut(rank + 1);
+        eliminate_below(&leading[rank], remaining, column)?;
+        rank += 1;
+        if rank == matrix.len() {
+            break;
+        }
+    }
+    Ok(rank)
+}
+
+fn find_pivot(matrix: &[Vec<BigRational>], start_row: usize, column: usize) -> Option<usize> {
+    (start_row..matrix.len()).find(|&row| matrix[row][column].numer().sign() != Sign::NoSign)
+}
+
+fn eliminate_below(
+    pivot: &[BigRational],
+    remaining: &mut [Vec<BigRational>],
+    column: usize,
+) -> Result<(), MatrixError> {
+    for row in remaining {
+        let factor = &row[column] / &pivot[column];
+        ensure_exact_size(&factor).map_err(MatrixError::Evaluation)?;
+        // 左侧列已完成，只更新剩余的待消元列。
+        for (target, source) in row.iter_mut().zip(pivot).skip(column + 1) {
+            *target -= &factor * source;
+            ensure_exact_size(target).map_err(MatrixError::Evaluation)?;
+        }
+    }
+    Ok(())
 }
 
 fn solve(mut left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
@@ -150,9 +179,7 @@ fn solve(mut left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
         row.extend(right_row);
     }
     for column in 0..dimension {
-        let pivot = (column..dimension)
-            .find(|&row| left[row][column].numer().sign() != Sign::NoSign)
-            .ok_or(MatrixError::Singular)?;
+        let pivot = find_pivot(&left, column, column).ok_or(MatrixError::Singular)?;
         left.swap(column, pivot);
         let (before, remaining) = left.split_at_mut(column);
         let (pivot_row, after) = remaining.split_first_mut().expect("主元行存在");
@@ -224,6 +251,23 @@ fn format_matrix(matrix: Matrix) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_exact_matrix_rank_with_skipped_columns_and_dependent_rows() {
+        for (query, expected) in [
+            ("秩 1,2,3; 2,4,6", "1"),
+            ("rank 0,0,1; 0,0,2; 0,1,0", "2"),
+            ("秩 0,0; 0,0", "0"),
+            ("秩 1; 2; 3", "1"),
+            ("秩 1/2,1/3; 3/2,1; 0,0", "1"),
+            (
+                "秩 9007199254740993,9007199254740992; 9007199254740992,9007199254740992",
+                "2",
+            ),
+        ] {
+            assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
+        }
+    }
 
     #[test]
     fn solves_exact_square_systems_and_inverts_matrices() {
