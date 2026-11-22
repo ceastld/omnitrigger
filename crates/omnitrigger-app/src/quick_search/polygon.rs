@@ -39,10 +39,14 @@ impl PolygonError {
 }
 
 pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
-    if query.trim().is_empty() {
+    let normalized = normalize(query);
+    let input = normalized.trim();
+    let (operation, arguments) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+    let centroid = operation == "重心" || operation.eq_ignore_ascii_case("centroid");
+    let input = if centroid { arguments.trim() } else { input };
+    if input.is_empty() {
         return Err(PolygonError::Incomplete);
     }
-    let input = normalize(query);
     let mut vertices = input
         .split(';')
         .take(MAX_VERTICES + 2)
@@ -70,10 +74,19 @@ pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
         twice_area += twice_triangle_area(origin, &pair[0], &pair[1])?;
         ensure_exact_size(&twice_area).map_err(PolygonError::Evaluation)?;
     }
-    let (magnitude, winding) = match twice_area.numer().sign() {
-        Sign::Plus => (twice_area, "逆时针"),
-        Sign::Minus => (-twice_area, "顺时针"),
+    let sign = twice_area.numer().sign();
+    let winding = match sign {
+        Sign::Plus => "逆时针",
+        Sign::Minus => "顺时针",
         Sign::NoSign => return Err(PolygonError::IntersectingEdges),
+    };
+    if centroid {
+        return area_centroid(&vertices, &twice_area);
+    }
+    let magnitude = if sign == Sign::Minus {
+        -twice_area
+    } else {
+        twice_area
     };
     let area = magnitude / BigInt::from(2);
     ensure_exact_size(&area).map_err(PolygonError::Evaluation)?;
@@ -81,6 +94,27 @@ pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
         "面积 {area} · 顶点 {}\n顶点顺序 {winding}",
         vertices.len()
     ))
+}
+
+fn area_centroid(vertices: &[Point2], twice_area: &BigRational) -> Result<String, PolygonError> {
+    let origin = &vertices[0];
+    let mut moments = [BigRational::default(), BigRational::default()];
+    for pair in vertices[1..].windows(2) {
+        let weight = twice_triangle_area(origin, &pair[0], &pair[1])?;
+        for (axis, moment) in moments.iter_mut().enumerate() {
+            let axis_offset_sum =
+                (&pair[0][axis] - &origin[axis]) + (&pair[1][axis] - &origin[axis]);
+            *moment += &weight * axis_offset_sum;
+            ensure_exact_size(moment).map_err(PolygonError::Evaluation)?;
+        }
+    }
+    let [x, y] = moments;
+    let divisor = twice_area * BigInt::from(3);
+    let x = &origin[0] + x / &divisor;
+    let y = &origin[1] + y / divisor;
+    ensure_exact_size(&x).map_err(PolygonError::Evaluation)?;
+    ensure_exact_size(&y).map_err(PolygonError::Evaluation)?;
+    Ok(format!("重心 ({x}, {y})"))
 }
 
 fn check_edges(vertices: &[Point2]) -> Result<(), PolygonError> {
@@ -161,6 +195,25 @@ mod tests {
         ] {
             assert_eq!(calculate_polygon(query).as_deref(), Ok(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn finds_exact_area_centroids_for_concave_and_translated_polygons() {
+        for (query, expected) in [
+            ("重心 0,0;3,0;3,1;1,1;1,3;0,3", "重心 (11/10, 11/10)"),
+            ("centroid 0,0;0,3;1,3;1,1;3,1;3,0", "重心 (11/10, 11/10)"),
+            (
+                "CENTROID 1/2,-1/4;5/2,-1/4;5/2,3/4;1/2,3/4",
+                "重心 (3/2, 1/4)",
+            ),
+        ] {
+            assert_eq!(calculate_polygon(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_polygon("重心 0,0;5,4;0,4;4,0"),
+            Err(PolygonError::IntersectingEdges)
+        );
+        assert_eq!(calculate_polygon("重心"), Err(PolygonError::Incomplete));
     }
 
     #[test]
