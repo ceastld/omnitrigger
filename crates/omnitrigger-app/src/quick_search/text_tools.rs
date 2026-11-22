@@ -42,6 +42,7 @@ pub(super) enum TextError {
     InvalidColumn,
     MissingColumn,
     InvalidLineRange,
+    InvalidGraphemeRange,
     MissingLine,
     InvalidNumberLine,
     InvalidLineEnding,
@@ -79,6 +80,7 @@ impl TextError {
             Self::InvalidColumn => "输入从 1 开始的列号，例如 文本: 取列 \"\\t\" 2",
             Self::MissingColumn => "至少一行的列数不足",
             Self::InvalidLineRange => "输入从 1 开始的行号或区间，例如 文本: 取行 2,4-6",
+            Self::InvalidGraphemeRange => "输入从 1 开始的字符位置或区间，例如 文本: 逐行截取 2-4",
             Self::MissingLine => "指定行号超出了文本行数",
             Self::InvalidNumberLine => "每行请输入一个数字或分数，例如 -2.5、3/2 或 1e2",
             Self::InvalidLineEnding => "填写 LF 或 CRLF，然后粘贴原文",
@@ -141,6 +143,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "逐行加后缀" | "suffix-lines" => return decorate_lines(text, false),
         "逐行去前缀" | "strip-line-prefix" => return strip_line_decoration(text, true),
         "逐行去后缀" | "strip-line-suffix" => return strip_line_decoration(text, false),
+        "逐行截取" | "slice-lines" => return slice_line_graphemes(text),
         "取列" | "column" => return select_text_column(text),
         "取行" | "pick-lines" => return select_text_line_ranges(text, true),
         "删行" | "drop-lines" => return select_text_line_ranges(text, false),
@@ -838,6 +841,36 @@ fn strip_line_decoration(input: &str, prefix: bool) -> Result<String, TextError>
     Ok(result)
 }
 
+fn slice_line_graphemes(input: &str) -> Result<String, TextError> {
+    let (range, text) = input
+        .trim_start()
+        .split_once(char::is_whitespace)
+        .ok_or(TextError::InvalidGraphemeRange)?;
+    let (start, end) = range.split_once('-').unwrap_or((range, range));
+    let start = start
+        .parse::<usize>()
+        .map_err(|_| TextError::InvalidGraphemeRange)?;
+    let end = end
+        .parse::<usize>()
+        .map_err(|_| TextError::InvalidGraphemeRange)?;
+    if start == 0 || end < start {
+        return Err(TextError::InvalidGraphemeRange);
+    }
+    let text = text_payload(text)?;
+    let mut result = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let slice = |line: &str, result: &mut String| {
+        result.extend(line.graphemes(true).skip(start - 1).take(end - start + 1));
+    };
+    for newline in newline_pattern().find_iter(text) {
+        slice(&text[cursor..newline.start()], &mut result);
+        result.push_str(newline.as_str());
+        cursor = newline.end();
+    }
+    slice(&text[cursor..], &mut result);
+    Ok(result)
+}
+
 fn split_lines(input: &str) -> Result<String, TextError> {
     let (delimiter, text) = quoted_text_argument(input)?;
     if delimiter.is_empty() {
@@ -1266,6 +1299,24 @@ mod tests {
             (r#"symmetric-difference-lines "梨\n茶" "茶\n梨""#, ""),
         ] {
             assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn slices_line_graphemes_and_preserves_each_line_ending() {
+        assert_eq!(
+            transform_text("逐行截取 2-3 \"A👩‍💻e\u{301}Z\r\n北\r甲乙丙丁\n\"").as_deref(),
+            Ok("👩‍💻e\u{301}\r\n\r乙丙\n")
+        );
+        assert_eq!(
+            transform_text("slice-lines 2 ABC\nXYZ").as_deref(),
+            Ok("B\nY")
+        );
+        for range in ["0", "3-2", "1-2-3", "一"] {
+            assert_eq!(
+                transform_text(&format!("逐行截取 {range} 文本")),
+                Err(TextError::InvalidGraphemeRange)
+            );
         }
     }
 

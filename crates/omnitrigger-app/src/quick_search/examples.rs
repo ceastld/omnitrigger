@@ -1967,6 +1967,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "逐行截取第几个字符到第几个字符",
+        query: "文本: 逐行截取 2-3 A👩‍💻茶Z\n甲乙丙丁\n北",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "找出两组文本共有的行",
         query: r#"文本: 共有行 "苹果\n梨\n茶" "茶\n苹果\n柿子""#,
     },
