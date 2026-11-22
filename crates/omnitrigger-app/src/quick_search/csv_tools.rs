@@ -24,7 +24,7 @@ use super::{
     operators::{
         select_index_ranges, FieldSortOrder, IndexRangeError, NumberComparison, MAX_SORT_FIELDS,
     },
-    statistics::{summarize_unweighted, StatisticsError},
+    statistics::{median_sorted_values, summarize_unweighted, StatisticsError, MAX_VALUES},
     text_tools::{compare_natural, compile_regex, newline_pattern, TextError},
 };
 
@@ -280,6 +280,10 @@ enum Operation {
         columns: Vec<ColumnReference>,
         amount: ColumnReference,
         aggregation: ColumnAggregation,
+    },
+    GroupMedian {
+        columns: Vec<ColumnReference>,
+        amount: ColumnReference,
     },
     PivotSum([ColumnReference; 3]),
     Unpivot(Vec<ColumnReference>, [String; 2]),
@@ -745,6 +749,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 },
             }
         }
+        "分组中位数" | "group-median" => {
+            let (columns, rest) = column_reference_arguments(input, CsvError::GroupingColumns)?;
+            let (amount, data) = single_column_argument(rest, CsvError::AggregateColumn)?;
+            input = data;
+            Operation::GroupMedian { columns, amount }
+        }
         "列统计" | "column-stats" | "列总体" | "column-population" => {
             let (column, data) = single_column_argument(input, CsvError::StatisticsColumn)?;
             input = data;
@@ -907,6 +917,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             amount,
             aggregation,
         } => aggregate_by_columns(&rows, &columns, amount, aggregation),
+        Operation::GroupMedian { columns, amount } => median_by_columns(&rows, &columns, amount),
         Operation::PivotSum(columns) => pivot_sum(&rows, &columns),
         Operation::Unpivot(columns, names) => unpivot(&rows, &columns, &names),
         Operation::ColumnStatistics { column, sample } => summarize_column(&rows, column, sample),
@@ -1940,6 +1951,37 @@ fn aggregate_by_columns(
     Ok(grouped_csv(header, &columns, groups, label))
 }
 
+fn median_by_columns(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+    amount: ColumnReference,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::GroupingColumns)?;
+    let amount = amount.resolve(header)?;
+    validate_column_width(&[amount], header.len())?;
+    let mut groups = HashMap::new();
+    for (position, row) in records.iter().enumerate() {
+        let (_, values) = groups
+            .entry(column_key(row, &columns))
+            .or_insert_with(|| (position, Vec::new()));
+        if values.len() == MAX_VALUES {
+            return Err(CsvError::Statistics(StatisticsError::TooManyValues));
+        }
+        let value = parse_fraction_literal(&row[amount]).map_err(|_| CsvError::InvalidNumber)?;
+        values.push(value);
+    }
+    let medians = groups
+        .into_iter()
+        .map(|(key, (position, mut values))| {
+            values.sort_unstable();
+            let median = median_sorted_values(&values).map_err(CsvError::Statistics)?;
+            Ok((key, (position, median)))
+        })
+        .collect::<Result<Vec<_>, CsvError>>()?;
+    Ok(grouped_csv(header, &columns, medians, "中位数"))
+}
+
 fn grouped_csv<'a, T: ToString>(
     header: &[String],
     columns: &[usize],
@@ -2564,6 +2606,30 @@ impl Serialize for CsvObject<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn groups_csv_medians_in_first_seen_order_with_exact_even_and_odd_counts() {
+        assert_eq!(
+            transform_csv("分组中位数 [\"地区\",2] \"金额\" 地区,班次,金额\n\"南,区\",B,1/2\n北,A,5\n\"南,区\",B,3/2\n北,A,2e0\n北,A,3\n北,B,1.50").as_deref(),
+            Ok("地区,班次,中位数\r\n\"南,区\",B,1\r\n北,A,3\r\n北,B,3/2"),
+        );
+        assert_eq!(
+            transform_csv("group-median 1 2 地区,金额").as_deref(),
+            Ok("地区,中位数"),
+        );
+        assert_eq!(
+            transform_csv("分组中位数 [1] 2 地区,金额\n甲,待确认"),
+            Err(CsvError::InvalidNumber),
+        );
+        let input = format!(
+            "分组中位数 [1] 2 地区,金额\n{}",
+            "甲,1\n".repeat(MAX_VALUES + 1)
+        );
+        assert_eq!(
+            transform_csv(&input),
+            Err(CsvError::Statistics(StatisticsError::TooManyValues)),
+        );
+    }
 
     #[test]
     fn writes_selected_csv_cells_as_raw_json_numbers_or_null() {

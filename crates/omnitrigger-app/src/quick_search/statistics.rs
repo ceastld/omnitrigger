@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{borrow::Borrow, collections::BTreeMap};
 
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
@@ -13,7 +13,7 @@ use super::linear_fit::{
 };
 use super::operators::split_top_level_commas;
 
-const MAX_VALUES: usize = 128;
+pub(super) const MAX_VALUES: usize = 128;
 const MAX_BIN_EDGES: usize = 16;
 const MAX_BINOMIAL_TRIALS: u32 = 128;
 
@@ -371,17 +371,23 @@ fn moving_median(input: &str) -> Result<String, StatisticsError> {
     for window in values.windows(width) {
         ordered.extend(window);
         ordered.sort_unstable();
-        let middle = ordered[width / 2];
-        let median = if width.is_multiple_of(2) {
-            let previous = ordered[width / 2 - 1];
-            bounded((previous + middle) / BigInt::from(2))?.to_string()
-        } else {
-            middle.to_string()
-        };
-        medians.push(median);
+        medians.push(median_sorted_values(&ordered)?.to_string());
         ordered.clear();
     }
     Ok(medians.join("\n"))
+}
+
+pub(super) fn median_sorted_values(
+    values: &[impl Borrow<BigRational>],
+) -> Result<BigRational, StatisticsError> {
+    let count = values.len();
+    let middle = values[count / 2].borrow();
+    if count.is_multiple_of(2) {
+        let previous = values[count / 2 - 1].borrow();
+        bounded((previous + middle) / BigInt::from(2))
+    } else {
+        Ok(middle.clone())
+    }
 }
 
 #[derive(Clone, Copy)]

@@ -2578,6 +2578,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按分组选出精确中位数",
+        query: "CSV: 分组中位数 [\"状态\"] \"金额\" 状态,金额\n完成,1/3\n待确认,2\n完成,1/2\n待确认,4\n待确认,3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按两个分类透视汇总 CSV 数值",
         query: "CSV: 透视合计 [\"地区\",\"状态\",\"金额\"] 地区,状态,金额\n北,完成,1/2\n南,待办,0\n北,完成,2/3\n南,完成,-1",
     },
