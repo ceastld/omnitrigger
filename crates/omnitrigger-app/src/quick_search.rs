@@ -76,7 +76,8 @@ use calendar::{calculate_date, looks_like_date_query, parse_complete_date, DateE
 use cidr::{calculate_cidr, CidrError};
 use circle::{calculate_circle, CircleError};
 use color::{
-    calculate_contrast, convert_color, convert_color_to_hex, make_color_palette, ColorError,
+    calculate_contrast, convert_color, convert_color_to_hex, hex_for_swatch, make_color_palette,
+    ColorError,
 };
 use complex::{calculate_complex, ComplexError};
 use conversion::{
@@ -194,6 +195,7 @@ impl ResultValue {
             ValueKind::CalendarDate => Some("Tab 继续日期计算"),
             ValueKind::ClockDuration => Some("Tab 继续时长计算"),
             ValueKind::TimestampInstant => Some("Tab 继续换时区"),
+            ValueKind::Color(_) => Some("Tab 继续处理颜色"),
             _ => None,
         }
     }
@@ -1136,6 +1138,7 @@ impl Results {
             ValueKind::CalendarDate => Some(format!("日期: {}", text.trim())),
             ValueKind::ClockDuration => Some(format!("时长: {text}")),
             ValueKind::TimestampInstant => Some(format!("时间戳: {text}")),
+            ValueKind::Color(swatch) => Some(format!("颜色: {}", hex_for_swatch(*swatch))),
             _ => None,
         }
     }
@@ -3041,6 +3044,30 @@ mod tests {
     }
 
     #[test]
+    fn reuses_a_single_color_as_exact_hex_including_transparency() {
+        for (query, expected) in [
+            ("颜色: #FF800080 to hsl", Some("颜色: #FF800080")),
+            (
+                "颜色: color-mix(in srgb-linear, transparent, blue)",
+                Some("颜色: #0000FF80"),
+            ),
+            ("颜色: red to rgb", Some("颜色: #FF0000")),
+            ("颜色: 色阶 #000 到 #fff @ 3", None),
+            ("对比度: #fff vs #000", None),
+        ] {
+            assert_eq!(
+                for_query(query, &[]).continuation_query().as_deref(),
+                expected,
+                "{query}"
+            );
+        }
+        assert!(matches!(
+            for_query("颜色: #0000FF80 叠加 #fff", &[]),
+            Results::Value(Ok(value)) if value.text == "#7F7FFF"
+        ));
+    }
+
+    #[test]
     fn continues_absolute_timestamps_without_reusing_tables_or_elapsed_durations() {
         for (query, expected) in [
             ("时间戳: 0", Some("时间戳: 1970-01-01T00:00:00Z")),
@@ -4402,7 +4429,7 @@ mod tests {
         for query in [
             "2+",
             "日期: 今天星期几",
-            "颜色: #3A86FF",
+            "颜色: #12",
             "下载: 1 GB 按 100 Mbps",
         ] {
             assert!(

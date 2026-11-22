@@ -473,6 +473,15 @@ pub(super) fn convert_color_to_hex(input: &str) -> Result<String, ColorError> {
     Ok(Channels::parse(normalized.trim())?.format_hex())
 }
 
+pub(super) fn hex_for_swatch(swatch: u32) -> String {
+    let [red, green, blue, alpha] = swatch.to_be_bytes();
+    Channels {
+        rgb: [red, green, blue],
+        alpha: (alpha != 255).then_some(alpha),
+    }
+    .format_hex()
+}
+
 pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
     let normalized = normalize(input);
     let input = normalized.trim();
