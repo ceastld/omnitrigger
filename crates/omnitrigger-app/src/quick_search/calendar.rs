@@ -6,6 +6,7 @@ use super::calculator::normalize;
 
 const MAX_LISTED_DATES: usize = 366;
 const MAX_DATE_RANGES: usize = 32;
+const MAX_MONTH_RANGES: usize = 366;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DateError {
@@ -20,6 +21,7 @@ pub(super) enum DateError {
     InvalidOperation,
     InvalidDateList,
     InvalidDateRanges,
+    MonthSplitArguments,
     InvalidDateInterval,
     WorkdayExceptions,
     PatternArguments,
@@ -28,6 +30,7 @@ pub(super) enum DateError {
     ReversedDateRange,
     NoMatchingDates,
     TooManyDates,
+    TooManyMonthRanges,
     OutOfRange,
 }
 
@@ -49,6 +52,9 @@ impl DateError {
             Self::InvalidDateRanges => {
                 "填写 2 至 32 个日期区间。每段用“至”连接日期，用分号或换行分隔各段"
             }
+            Self::MonthSplitArguments => {
+                "用“至”连接开始日期和结束日期，例如 2024-01-31 至 2024-03-02"
+            }
             Self::InvalidDateInterval => "请输入正整数间隔，例如 每隔 3 天或每隔 2 个工作日",
             Self::WorkdayExceptions => {
                 "工作日例外需要两个日期数组，先休息日再补班日，每个日期只填一次"
@@ -61,6 +67,7 @@ impl DateError {
             Self::ReversedDateRange => "开始日期须早于或等于结束日期",
             Self::NoMatchingDates => "区间内没有符合条件的日期",
             Self::TooManyDates => "最多可列出 366 个日期，请缩短区间",
+            Self::TooManyMonthRanges => "最多可拆分为 366 个月份，请缩短区间",
             Self::OutOfRange => "结果超出四位年份的日期范围",
         }
     }
@@ -596,6 +603,31 @@ fn combine_date_ranges(
     Ok(merged.join("\n"))
 }
 
+fn split_date_range_by_month(input: &str, today: NaiveDate) -> Result<String, DateError> {
+    if input.is_empty() {
+        return Err(DateError::MonthSplitArguments);
+    }
+    let (mut start, end, remaining) =
+        date_range_operands(input.trim_start(), today, DateError::MonthSplitArguments)?;
+    if !remaining.is_empty() {
+        return Err(DateError::MonthSplitArguments);
+    }
+    if end < start {
+        return Err(DateError::ReversedDateRange);
+    }
+    let mut ranges = Vec::new();
+    for _ in 0..MAX_MONTH_RANGES {
+        let first = in_range(start.with_day(1))?;
+        let last = month_end(first, 1)?.min(end);
+        ranges.push(display_date_range((start, last)));
+        if last == end {
+            return Ok(ranges.join("\n"));
+        }
+        start = in_range(last.succ_opt())?;
+    }
+    Err(DateError::TooManyMonthRanges)
+}
+
 fn display_date_range((start, end): (NaiveDate, NaiveDate)) -> String {
     let days = end.signed_duration_since(start).num_days() + 1;
     format!("{start} 至 {end} · {days} 天")
@@ -889,6 +921,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         "月历" | "month-grid" => return month_calendar(rest.trim_start(), today),
         "合并区间" | "merge-ranges" => return combine_date_ranges(rest, today, false),
         "区间交集" | "intersect-ranges" => return combine_date_ranges(rest, today, true),
+        "按月拆分" | "split-months" => return split_date_range_by_month(rest, today),
         _ => {}
     }
     if let Some((year, day)) = year_day_parts(input) {
@@ -1018,6 +1051,27 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splits_inclusive_date_ranges_at_month_boundaries_and_keeps_leap_days() {
+        let today = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        assert_eq!(
+            calculate_date("按月拆分 2024-01-31 至 2024-03-02", today).as_deref(),
+            Ok("2024-01-31 至 2024-01-31 · 1 天\n2024-02-01 至 2024-02-29 · 29 天\n2024-03-01 至 2024-03-02 · 2 天")
+        );
+        assert_eq!(
+            calculate_date("split-months 9999-12-31 to 9999-12-31", today).as_deref(),
+            Ok("9999-12-31 至 9999-12-31 · 1 天")
+        );
+        assert_eq!(
+            calculate_date("按月拆分 明天至昨天", today),
+            Err(DateError::ReversedDateRange)
+        );
+        assert_eq!(
+            calculate_date("按月拆分 2010-01-01 至 2100-01-01", today),
+            Err(DateError::TooManyMonthRanges)
+        );
+    }
 
     #[test]
     fn merges_contiguous_inclusive_ranges_and_intersects_all_date_ranges() {

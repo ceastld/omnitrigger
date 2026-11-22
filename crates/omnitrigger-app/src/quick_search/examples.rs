@@ -987,6 +987,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "按自然月拆分日期区间并计算各段天数",
+        query: "日期: 按月拆分 2024-01-31 至 2024-03-02",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查全年日期和工作日",
         query: "日期: 2024",
     },
@@ -2685,9 +2690,17 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
             ) => {}
         Scope::Date
             if !term.is_empty()
-                && ["列出", "格式化", "解析", "月历", "合并区间", "区间交集"]
-                    .into_iter()
-                    .any(|operation| operation.starts_with(term)) => {}
+                && [
+                    "列出",
+                    "格式化",
+                    "解析",
+                    "月历",
+                    "合并区间",
+                    "区间交集",
+                    "按月拆分",
+                ]
+                .into_iter()
+                .any(|operation| operation.starts_with(term)) => {}
         Scope::Color if !term.is_empty() && "色阶".starts_with(term) => {}
         Scope::Timestamp
             if !term.is_empty()
