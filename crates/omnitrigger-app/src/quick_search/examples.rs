@@ -2288,6 +2288,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看各组的最小金额",
+        query: "CSV: 分组最小 [\"状态\"] \"金额\" 状态,金额\n完成,1/2\n待办,-2.50\n完成,2/3\n待办,-1",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "查看各组的最大金额",
+        query: "CSV: 分组最大 [\"状态\"] \"金额\" 状态,金额\n完成,1/2\n待办,-2.50\n完成,2/3\n待办,-1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按两个分类透视汇总 CSV 数值",
         query: "CSV: 透视合计 [\"地区\",\"状态\",\"金额\"] 地区,状态,金额\n北,完成,1/2\n南,待办,0\n北,完成,2/3\n南,完成,-1",
     },

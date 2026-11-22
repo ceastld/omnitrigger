@@ -201,7 +201,7 @@ enum Operation {
     AggregateByColumns {
         columns: Vec<ColumnReference>,
         amount: ColumnReference,
-        average: bool,
+        aggregation: ColumnAggregation,
     },
     PivotSum([ColumnReference; 3]),
     Unpivot(Vec<ColumnReference>, [String; 2]),
@@ -286,6 +286,14 @@ impl ColumnArithmetic {
             }
         })
     }
+}
+
+#[derive(Clone, Copy)]
+enum ColumnAggregation {
+    Sum,
+    Average,
+    Minimum,
+    Maximum,
 }
 
 enum ColumnCondition {
@@ -475,14 +483,20 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             input = data;
             Operation::CountByColumns(columns)
         }
-        "分组合计" | "group-sum" | "分组平均" | "group-average" => {
+        "分组合计" | "group-sum" | "分组平均" | "group-average" | "分组最小" | "group-min"
+        | "分组最大" | "group-max" => {
             let (columns, rest) = column_reference_arguments(input, CsvError::GroupingColumns)?;
             let (amount, data) = single_column_argument(rest, CsvError::AggregateColumn)?;
             input = data;
             Operation::AggregateByColumns {
                 columns,
                 amount,
-                average: matches!(operation.as_str(), "分组平均" | "group-average"),
+                aggregation: match operation.as_str() {
+                    "分组平均" | "group-average" => ColumnAggregation::Average,
+                    "分组最小" | "group-min" => ColumnAggregation::Minimum,
+                    "分组最大" | "group-max" => ColumnAggregation::Maximum,
+                    _ => ColumnAggregation::Sum,
+                },
             }
         }
         "列统计" | "column-stats" | "列总体" | "column-population" => {
@@ -616,8 +630,8 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::AggregateByColumns {
             columns,
             amount,
-            average,
-        } => aggregate_by_columns(&rows, &columns, amount, average),
+            aggregation,
+        } => aggregate_by_columns(&rows, &columns, amount, aggregation),
         Operation::PivotSum(columns) => pivot_sum(&rows, &columns),
         Operation::Unpivot(columns, names) => unpivot(&rows, &columns, &names),
         Operation::ColumnStatistics { column, sample } => summarize_column(&rows, column, sample),
@@ -1209,7 +1223,7 @@ fn aggregate_by_columns(
     rows: &[Vec<String>],
     columns: &[ColumnReference],
     amount: ColumnReference,
-    average: bool,
+    aggregation: ColumnAggregation,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, columns, CsvError::GroupingColumns)?;
@@ -1218,15 +1232,24 @@ fn aggregate_by_columns(
     let mut groups = HashMap::new();
     for (position, row) in records.iter().enumerate() {
         let value = parse_fraction_literal(&row[amount]).map_err(|_| CsvError::InvalidNumber)?;
-        let (_, (total, count)) = groups
+        let (_, (aggregate, count)) = groups
             .entry(column_key(row, &columns))
             .or_insert_with(|| (position, (BigRational::default(), 0_usize)));
-        *total += value;
+        match aggregation {
+            ColumnAggregation::Sum | ColumnAggregation::Average => *aggregate += value,
+            ColumnAggregation::Minimum if *count == 0 || value < *aggregate => {
+                *aggregate = value;
+            }
+            ColumnAggregation::Maximum if *count == 0 || value > *aggregate => {
+                *aggregate = value;
+            }
+            _ => {}
+        }
         *count += 1;
-        ensure_exact_size(total)
+        ensure_exact_size(aggregate)
             .map_err(|error| CsvError::Statistics(StatisticsError::Evaluation(error)))?;
     }
-    if average {
+    if matches!(aggregation, ColumnAggregation::Average) {
         for (_, (total, count)) in groups.values_mut() {
             *total = std::mem::take(total) / BigInt::from(*count);
             ensure_exact_size(total)
@@ -1236,12 +1259,13 @@ fn aggregate_by_columns(
     let groups = groups
         .into_iter()
         .map(|(key, (position, (value, _)))| (key, (position, value)));
-    Ok(grouped_csv(
-        header,
-        &columns,
-        groups,
-        if average { "平均值" } else { "合计" },
-    ))
+    let label = match aggregation {
+        ColumnAggregation::Sum => "合计",
+        ColumnAggregation::Average => "平均值",
+        ColumnAggregation::Minimum => "最小值",
+        ColumnAggregation::Maximum => "最大值",
+    };
+    Ok(grouped_csv(header, &columns, groups, label))
 }
 
 fn grouped_csv<'a, T: ToString>(
@@ -2649,6 +2673,23 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn takes_group_minimum_and_maximum_by_exact_value_in_first_occurrence_order() {
+        let table = "地区,类别,金额\n北,甲,3/2\n南,乙,-1.50\n北,甲,2e0\n南,乙,-2.5\n北,乙,1";
+        assert_eq!(
+            transform_csv(&format!("分组最小 [\"地区\",2] \"金额\" {table}")).as_deref(),
+            Ok("地区,类别,最小值\r\n北,甲,3/2\r\n南,乙,-5/2\r\n北,乙,1")
+        );
+        assert_eq!(
+            transform_csv(&format!("group-max 1,2 3 {table}")).as_deref(),
+            Ok("地区,类别,最大值\r\n北,甲,2\r\n南,乙,-3/2\r\n北,乙,1")
+        );
+        assert_eq!(
+            transform_csv("分组最大 1 2 地区,金额\n北,无"),
+            Err(CsvError::InvalidNumber)
+        );
     }
 
     #[test]
