@@ -3,7 +3,7 @@ use num_rational::BigRational;
 
 use super::calculator::normalize;
 use super::equation::format_centered_roots;
-use super::fraction::{calculate_fraction, ensure_exact_size, FractionError};
+use super::fraction::{calculate_fraction, ensure_exact_size, format_square_root, FractionError};
 use super::operators::split_top_level_commas;
 
 const MAX_DIMENSION: usize = 8;
@@ -18,7 +18,7 @@ pub(super) enum MatrixError {
     TooLarge,
     SquareRequired,
     EigenvalueDimensions,
-    SumDimensions,
+    ElementwiseDimensions,
     ProductDimensions,
     PowerExponent,
     SolveDimensions,
@@ -31,13 +31,13 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、乘法、乘方、数乘、行列式、迹、特征值、转置、求解、求逆、秩、行最简形、零空间、行空间和列空间"
+                "可用加法、减法、逐项乘法、乘法、乘方、数乘、F范数、行列式、迹、特征值、转置、求解、求逆、秩、行最简形、零空间、行空间和列空间"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
             Self::SquareRequired => "行列式、迹、乘方、求解和求逆需要方阵",
             Self::EigenvalueDimensions => "请输入 2 行 2 列的矩阵求特征值",
-            Self::SumDimensions => "加减法要求两个矩阵的行数和列数分别相同",
+            Self::ElementwiseDimensions => "加减法和逐项乘法要求两个矩阵的行数和列数分别相同",
             Self::ProductDimensions => "左矩阵的列数须等于右矩阵的行数",
             Self::PowerExponent => "矩阵乘方的指数须为 -64 至 64 的整数",
             Self::SolveDimensions => "等号右侧的常数列或矩阵须与系数矩阵行数一致",
@@ -80,11 +80,10 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
                 .collect();
             Ok(format_basis("列空间", columns))
         }
-        "加法" | "add" | "减法" | "subtract" => {
-            let (left, right) = parse_pair(input)?;
-            let subtract = matches!(operation.as_str(), "减法" | "subtract");
-            add_or_subtract(left, right, subtract).map(format_matrix)
-        }
+        "加法" | "add" => elementwise(input, |left, right| *left += right),
+        "减法" | "subtract" => elementwise(input, |left, right| *left -= right),
+        "逐项乘法" | "hadamard" => elementwise(input, |left, right| *left *= right),
+        "f范数" | "frobenius" => frobenius_norm(parse_matrix(input)?),
         "乘法" | "乘" | "multiply" => {
             let (left, right) = parse_pair(input)?;
             multiply(&left, &right).map(format_matrix)
@@ -373,21 +372,30 @@ fn solve(mut left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
         .collect())
 }
 
-fn add_or_subtract(mut left: Matrix, right: Matrix, subtract: bool) -> Result<Matrix, MatrixError> {
+fn elementwise(
+    input: &str,
+    operation: impl Fn(&mut BigRational, BigRational),
+) -> Result<String, MatrixError> {
+    let (mut left, right) = parse_pair(input)?;
     if left.len() != right.len() || left[0].len() != right[0].len() {
-        return Err(MatrixError::SumDimensions);
+        return Err(MatrixError::ElementwiseDimensions);
     }
     for (left_row, right_row) in left.iter_mut().zip(right) {
         for (left, right) in left_row.iter_mut().zip(right_row) {
-            if subtract {
-                *left -= right;
-            } else {
-                *left += right;
-            }
+            operation(left, right);
             ensure_exact_size(left).map_err(MatrixError::Evaluation)?;
         }
     }
-    Ok(left)
+    Ok(format_matrix(left))
+}
+
+fn frobenius_norm(matrix: Matrix) -> Result<String, MatrixError> {
+    let mut squared_norm = BigRational::default();
+    for value in matrix.into_iter().flatten() {
+        squared_norm += &value * &value;
+        ensure_exact_size(&squared_norm).map_err(MatrixError::Evaluation)?;
+    }
+    Ok(format_square_root(&squared_norm))
 }
 
 fn multiply(left: &[Vec<BigRational>], right: &[Vec<BigRational>]) -> Result<Matrix, MatrixError> {
@@ -550,9 +558,29 @@ mod tests {
             assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
         }
         for query in ["加法 1,2 @ 1", "减法 1;2 @ 1", "add 1,2 @ 1;2"] {
-            assert_eq!(calculate_matrix(query), Err(MatrixError::SumDimensions));
+            assert_eq!(
+                calculate_matrix(query),
+                Err(MatrixError::ElementwiseDimensions)
+            );
         }
         assert_eq!(calculate_matrix("加法 1,2"), Err(MatrixError::Incomplete));
+    }
+
+    #[test]
+    fn calculates_elementwise_products_and_frobenius_norms_exactly() {
+        for (query, expected) in [
+            ("逐项乘法 1/2,2; 3,4 @ 3,1/3; 0,-1", "3/2, 2/3\n0, -4"),
+            ("hadamard 1,2,3 @ -4,5,6", "-4, 10, 18"),
+            ("F范数 1,2; 2,4", "5"),
+            ("frobenius 1/2,1/2", "√(1/2)"),
+            ("F范数 0,0,0; 0,0,0", "0"),
+        ] {
+            assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_matrix("逐项乘法 1,2 @ 3;4"),
+            Err(MatrixError::ElementwiseDimensions),
+        );
     }
 
     #[test]

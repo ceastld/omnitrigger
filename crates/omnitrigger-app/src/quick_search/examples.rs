@@ -436,6 +436,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "把两个同尺寸矩阵对应的元素相乘",
+        query: "矩阵: 逐项乘法 1/2,2; 3,4 @ 3,1/3; 0,-1",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "把矩阵各元素平方求和后开根号",
+        query: "矩阵: F范数 1/2,1/2",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算单位",
         query: "10 km to mi",
     },
