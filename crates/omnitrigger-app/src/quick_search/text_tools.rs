@@ -237,6 +237,16 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
             Ok(lines.join("\n"))
         }
         "数值排序" | "sort-numeric" => sort_numeric_lines(text, false),
+        order @ ("按长度排序" | "sort-line-length" | "按长度降序" | "sort-line-length-desc") =>
+        {
+            let mut lines: Vec<_> = text.lines().collect();
+            if matches!(order, "按长度降序" | "sort-line-length-desc") {
+                lines.sort_by_cached_key(|line| Reverse(line.graphemes(true).count()));
+            } else {
+                lines.sort_by_cached_key(|line| line.graphemes(true).count());
+            }
+            Ok(lines.join("\n"))
+        }
         "数值降序" | "sort-numeric-desc" => sort_numeric_lines(text, true),
         "去空行" | "remove-empty-lines" => Ok(text
             .lines()
@@ -1624,6 +1634,18 @@ mod tests {
         ] {
             assert_eq!(transform_text(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn sorts_lines_by_grapheme_count_and_preserves_input_order_for_equal_lengths() {
+        assert_eq!(
+            transform_text("按长度排序 医生\r\ne\u{0301}\n👩‍💻\nABC").as_deref(),
+            Ok("e\u{0301}\n👩‍💻\n医生\nABC")
+        );
+        assert_eq!(
+            transform_text("sort-line-length-desc \"医生\ne\u{0301}\n\n👩‍💻\nABC\"").as_deref(),
+            Ok("ABC\n医生\ne\u{0301}\n👩‍💻\n")
+        );
     }
 
     #[test]

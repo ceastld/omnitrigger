@@ -1647,6 +1647,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按每行的字符数从少到多排序",
+        query: "文本: 按长度排序 海边\n月\n青苹果",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按每行的字符数从多到少排序",
+        query: "文本: 按长度降序 海边\n月\n青苹果",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "从最后一行到第一行输出文本",
         query: "文本: 按行倒序 甲\n乙\n丙",
     },
