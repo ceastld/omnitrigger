@@ -209,6 +209,7 @@ enum Operation {
     DeduplicateRows,
     DeduplicateByColumns(Vec<ColumnReference>),
     DuplicatesByColumns(Vec<ColumnReference>),
+    DuplicatesByNumbers(Vec<ColumnReference>),
     DeduplicateByNumbers(Vec<ColumnReference>),
     FilterColumn {
         column: ColumnReference,
@@ -485,11 +486,15 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
                 Operation::DeduplicateByColumns(columns)
             }
         }
-        "查重复" | "duplicates-by-columns" => {
+        "查重复" | "duplicates-by-columns" | "数值查重复" | "duplicates-numeric" => {
             let (columns, data) =
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
-            Operation::DuplicatesByColumns(columns)
+            if matches!(operation.as_str(), "数值查重复" | "duplicates-numeric") {
+                Operation::DuplicatesByNumbers(columns)
+            } else {
+                Operation::DuplicatesByColumns(columns)
+            }
         }
         "筛选" | "filter" | "排除" | "exclude" | "正则筛选" | "regex-filter" | "正则排除"
         | "regex-exclude" => {
@@ -666,16 +671,14 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::DeduplicateByColumns(columns) => {
             deduplicate_by_columns(&rows, &columns, |row, columns| Ok(column_key(row, columns)))
         }
-        Operation::DuplicatesByColumns(columns) => find_duplicate_columns(&rows, &columns),
+        Operation::DuplicatesByColumns(columns) => {
+            find_duplicate_columns(&rows, &columns, |row, columns| Ok(column_key(row, columns)))
+        }
+        Operation::DuplicatesByNumbers(columns) => {
+            find_duplicate_columns(&rows, &columns, numeric_column_key)
+        }
         Operation::DeduplicateByNumbers(columns) => {
-            deduplicate_by_columns(&rows, &columns, |row, columns| {
-                columns
-                    .iter()
-                    .map(|&column| {
-                        parse_fraction_literal(&row[column]).map_err(|_| CsvError::InvalidNumber)
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
+            deduplicate_by_columns(&rows, &columns, numeric_column_key)
         }
         Operation::FilterColumn {
             column,
@@ -1308,16 +1311,17 @@ fn deduplicate_by_columns<'a, Key: Eq + Hash>(
     Ok(write_rows(unique_records, ','))
 }
 
-fn find_duplicate_columns(
-    rows: &[Vec<String>],
+fn find_duplicate_columns<'a, Key: Eq + Hash>(
+    rows: &'a [Vec<String>],
     columns: &[ColumnReference],
+    key: impl Fn(&'a [String], &[usize]) -> Result<Key, CsvError>,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
     let mut recent = HashMap::new();
     let mut duplicates = vec![false; records.len()];
     for (position, row) in records.iter().enumerate() {
-        if let Some(previous) = recent.insert(column_key(row, &columns), position) {
+        if let Some(previous) = recent.insert(key(row, &columns)?, position) {
             duplicates[previous] = true;
             duplicates[position] = true;
         }
@@ -1459,6 +1463,13 @@ fn grouped_csv<'a, T: ToString>(
         row
     }));
     write_rows(&output, ',')
+}
+
+fn numeric_column_key(row: &[String], columns: &[usize]) -> Result<Vec<BigRational>, CsvError> {
+    columns
+        .iter()
+        .map(|&column| parse_fraction_literal(&row[column]).map_err(|_| CsvError::InvalidNumber))
+        .collect()
 }
 
 fn column_key<'a>(row: &'a [String], columns: &[usize]) -> Vec<&'a str> {
@@ -2604,6 +2615,22 @@ mod tests {
         assert_eq!(
             transform_csv("deduplicate x\nx \nx").as_deref(),
             Ok("x\r\nx ")
+        );
+    }
+
+    #[test]
+    fn finds_csv_duplicates_with_exact_numeric_keys_and_keeps_original_values() {
+        assert_eq!(
+            transform_csv(concat!(
+                "数值查重复 [\"金额\",2] 编号,组,金额\n",
+                "001,1,1.50\n002,1e0,3/2\n003,2,1.50\n004,1,1.5e0\n005,1,5/4"
+            ))
+            .as_deref(),
+            Ok("编号,组,金额\r\n001,1,1.50\r\n002,1e0,3/2\r\n004,1,1.5e0")
+        );
+        assert_eq!(
+            transform_csv("duplicates-numeric 2 编号,金额\n001,未知"),
+            Err(CsvError::InvalidNumber)
         );
     }
 
