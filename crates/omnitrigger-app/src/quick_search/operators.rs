@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use super::calculator::CalculationError;
 
 pub(super) fn split_top_level_commas(input: &str) -> impl Iterator<Item = &str> {
@@ -10,6 +12,41 @@ pub(super) fn split_top_level_commas(input: &str) -> impl Iterator<Item = &str> 
         }
         depth == 0 && ch == ','
     })
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum NumberComparison {
+    Less,
+    LessOrEqual,
+    Equal,
+    Different,
+    GreaterOrEqual,
+    Greater,
+}
+
+impl NumberComparison {
+    pub(super) fn parse(operator: &str) -> Option<Self> {
+        match operator {
+            "<" => Some(Self::Less),
+            "<=" | "≤" => Some(Self::LessOrEqual),
+            "=" | "==" => Some(Self::Equal),
+            "!=" | "≠" => Some(Self::Different),
+            ">=" | "≥" => Some(Self::GreaterOrEqual),
+            ">" => Some(Self::Greater),
+            _ => None,
+        }
+    }
+
+    pub(super) fn accepts(self, order: Ordering) -> bool {
+        match self {
+            Self::Less => order.is_lt(),
+            Self::LessOrEqual => order.is_le(),
+            Self::Equal => order.is_eq(),
+            Self::Different => !order.is_eq(),
+            Self::GreaterOrEqual => order.is_ge(),
+            Self::Greater => order.is_gt(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

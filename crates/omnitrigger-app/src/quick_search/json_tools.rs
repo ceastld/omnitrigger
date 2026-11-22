@@ -10,6 +10,7 @@ use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
 use super::csv_tools::csv_cell;
+use super::operators::NumberComparison;
 
 const MAX_PRETTY_BYTES: usize = 1024 * 1024;
 
@@ -40,6 +41,7 @@ pub(super) enum JsonError {
     SelectionKeys,
     SelectionConflict,
     FilterValue,
+    NumberFilter,
     ExpectedScalar,
     ExpectedNumber,
 }
@@ -72,6 +74,7 @@ impl JsonError {
             Self::SelectionKeys => "选键需要至少一个互不重复的键名",
             Self::SelectionConflict => "待选键在同一对象中重复出现",
             Self::FilterValue => "路径后请输入 JSON 字符串、数字、布尔值或 null，再粘贴数组",
+            Self::NumberFilter => "路径后填写比较符和 JSON 数字，例如 /价格 >= 1.5",
             Self::ExpectedScalar => "指定路径的值须为字符串、数字、布尔值或 null",
             Self::ExpectedNumber => "数值排序需要每一项的指定路径都对应 JSON 数字",
         }
@@ -94,6 +97,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "缺路径" | "missing-pointer" => return filter_json_by_pointer(source, false),
         "筛选" | "filter" => return filter_json_by_scalar(source, true),
         "排除" | "exclude" => return filter_json_by_scalar(source, false),
+        "数值筛选" | "filter-numeric" => return filter_json_numbers(source),
         "按值去重" | "unique-by-pointer" => return deduplicate_json_by_scalar(source),
         "数值排序" | "sort-numeric" => return sort_json_numbers(source, false),
         "数值降序" | "sort-numeric-desc" => return sort_json_numbers(source, true),
@@ -253,6 +257,32 @@ fn filter_json_by_scalar(query: &str, keep_match: bool) -> Result<String, JsonEr
     })
 }
 
+fn filter_json_numbers(query: &str) -> Result<String, JsonError> {
+    let (pointer, query) = pointer_and_source(query)?;
+    let (operator, rest) = query
+        .split_once(char::is_whitespace)
+        .ok_or(JsonError::Incomplete)?;
+    let comparison = NumberComparison::parse(operator).ok_or(JsonError::NumberFilter)?;
+    let (threshold, source) = rest
+        .trim_start()
+        .split_once(char::is_whitespace)
+        .ok_or(JsonError::Incomplete)?;
+    let threshold: &RawValue =
+        serde_json::from_str(threshold).map_err(|_| JsonError::NumberFilter)?;
+    let Some(JsonScalar::Number(threshold)) = json_scalar(threshold)? else {
+        return Err(JsonError::NumberFilter);
+    };
+    filter_json_items(&pointer, source.trim_start(), true, |value| {
+        let Some(value) = value else {
+            return Ok(false);
+        };
+        Ok(matches!(
+            json_scalar(value)?,
+            Some(JsonScalar::Number(number)) if comparison.accepts(number.compare(&threshold))
+        ))
+    })
+}
+
 fn deduplicate_json_by_scalar(query: &str) -> Result<String, JsonError> {
     let (pointer, source) = pointer_and_source(query)?;
     let mut seen = HashSet::new();
@@ -270,30 +300,10 @@ fn sort_json_numbers(query: &str, descending: bool) -> Result<String, JsonError>
         .into_iter()
         .map(|item| {
             let value = select_pointer_keys(item, &keys)?;
-            let Some(JsonScalar::Number {
-                negative,
-                digits,
-                exponent,
-            }) = json_scalar(value)?
-            else {
+            let Some(JsonScalar::Number(number)) = json_scalar(value)? else {
                 return Err(JsonError::ExpectedNumber);
             };
-            let sign = if digits.is_empty() {
-                0
-            } else if negative {
-                -1
-            } else {
-                1
-            };
-            let decimal_position = exponent + BigInt::from(digits.len());
-            Ok((
-                JsonNumericSortKey {
-                    sign,
-                    decimal_position,
-                    digits,
-                },
-                item,
-            ))
+            Ok((number, item))
         })
         .collect::<Result<Vec<_>, _>>()?;
     items.sort_by(|(left, _), (right, _)| {
@@ -307,13 +317,14 @@ fn sort_json_numbers(query: &str, descending: bool) -> Result<String, JsonError>
     Ok(serde_json::to_string(&values).expect("有效的原始 JSON 值可以直接序列化"))
 }
 
-struct JsonNumericSortKey {
+#[derive(PartialEq, Eq, Hash)]
+struct JsonNumber {
     sign: i8,
     decimal_position: BigInt,
     digits: String,
 }
 
-impl JsonNumericSortKey {
+impl JsonNumber {
     fn compare(&self, other: &Self) -> Ordering {
         self.sign.cmp(&other.sign).then_with(|| {
             // 相同位置的有效数位可直接比较，末尾的零已在规范化时移除。
@@ -355,11 +366,7 @@ fn filter_json_items(
 #[derive(PartialEq, Eq, Hash)]
 enum JsonScalar {
     String(String),
-    Number {
-        negative: bool,
-        digits: String,
-        exponent: BigInt,
-    },
+    Number(JsonNumber),
     Boolean(bool),
     Null,
 }
@@ -379,19 +386,20 @@ fn json_scalar(value: &RawValue) -> Result<Option<JsonScalar>, JsonError> {
             let all_digits = format!("{whole}{fraction}");
             let without_trailing_zeros = all_digits.trim_end_matches('0');
             let digits = without_trailing_zeros.trim_start_matches('0');
-            let exponent = if digits.is_empty() {
-                BigInt::default()
+            let (sign, decimal_position) = if digits.is_empty() {
+                (0, BigInt::default())
             } else {
                 // 将十进制位置留在指数中，避免展开很长的零串。
                 let exponent: BigInt = exponent.parse().map_err(|_| JsonError::Invalid)?;
-                exponent + BigInt::from(all_digits.len() - without_trailing_zeros.len())
-                    - BigInt::from(fraction.len())
+                let decimal_position = exponent + BigInt::from(whole.len())
+                    - BigInt::from(without_trailing_zeros.len() - digits.len());
+                (if negative { -1 } else { 1 }, decimal_position)
             };
-            JsonScalar::Number {
-                negative: negative && !digits.is_empty(),
+            JsonScalar::Number(JsonNumber {
+                sign,
                 digits: digits.to_owned(),
-                exponent,
-            }
+                decimal_position,
+            })
         }
     };
     Ok(Some(scalar))
@@ -1173,6 +1181,33 @@ mod tests {
             (r#"按值去重 /键 [{"键":1,"键":2}]"#, JsonError::DuplicateKey),
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn filters_only_json_numbers_with_exact_comparisons() {
+        let source = r#"[{"价格":1.50},{"价格":1.49},{"价格":2e0},{"价格":"9"},{},{"价格":null}]"#;
+        assert_eq!(
+            transform_json(&format!("数值筛选 /价格 >= 1.5 {source}")).as_deref(),
+            Ok(r#"[{"价格":1.50},{"价格":2e0}]"#)
+        );
+        assert_eq!(
+            transform_json(&format!("数值筛选 /价格 != 1.5 {source}")).as_deref(),
+            Ok(r#"[{"价格":1.49},{"价格":2e0}]"#)
+        );
+        assert_eq!(
+            transform_json(
+                r#"filter-numeric "" > 9007199254740992 [9007199254740993,9007199254740992,1e10000000000000000000]"#
+            )
+            .as_deref(),
+            Ok("[9007199254740993,1e10000000000000000000]")
+        );
+        for query in [r#"数值筛选 "" => 1 [2]"#, r#"数值筛选 "" >= "1" [2]"#] {
+            assert_eq!(
+                transform_json(query),
+                Err(JsonError::NumberFilter),
+                "{query}"
+            );
         }
     }
 

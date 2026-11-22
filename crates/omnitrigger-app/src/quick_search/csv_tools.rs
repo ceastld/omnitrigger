@@ -15,6 +15,7 @@ use serde::{
 
 use super::{
     fraction::{ensure_exact_size, parse_fraction_literal},
+    operators::NumberComparison,
     statistics::{summarize_unweighted, StatisticsError},
     text_tools::{compare_natural, compile_regex, TextError},
 };
@@ -175,41 +176,6 @@ enum ColumnCondition {
     Number(NumberComparison, BigRational),
 }
 
-#[derive(Clone, Copy)]
-enum NumberComparison {
-    Less,
-    LessOrEqual,
-    Equal,
-    Different,
-    GreaterOrEqual,
-    Greater,
-}
-
-impl NumberComparison {
-    fn parse(operator: &str) -> Result<Self, CsvError> {
-        match operator {
-            "<" => Ok(Self::Less),
-            "<=" | "≤" => Ok(Self::LessOrEqual),
-            "=" | "==" => Ok(Self::Equal),
-            "!=" | "≠" => Ok(Self::Different),
-            ">=" | "≥" => Ok(Self::GreaterOrEqual),
-            ">" => Ok(Self::Greater),
-            _ => Err(CsvError::InvalidNumberFilter),
-        }
-    }
-
-    fn accepts(self, order: Ordering) -> bool {
-        match self {
-            Self::Less => order.is_lt(),
-            Self::LessOrEqual => order.is_le(),
-            Self::Equal => order.is_eq(),
-            Self::Different => !order.is_eq(),
-            Self::GreaterOrEqual => order.is_ge(),
-            Self::Greater => order.is_gt(),
-        }
-    }
-}
-
 pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
     let (operation, mut input) = split_argument(query).ok_or(CsvError::MissingInput)?;
     let operation = operation.to_ascii_lowercase();
@@ -279,7 +245,8 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
                 split_argument(rest.trim_start()).ok_or(CsvError::InvalidNumberFilter)?;
             let (threshold, data) =
                 split_argument(rest.trim_start()).ok_or(CsvError::InvalidNumberFilter)?;
-            let comparison = NumberComparison::parse(operator)?;
+            let comparison =
+                NumberComparison::parse(operator).ok_or(CsvError::InvalidNumberFilter)?;
             let threshold =
                 parse_fraction_literal(threshold).map_err(|_| CsvError::InvalidNumber)?;
             input = data;
