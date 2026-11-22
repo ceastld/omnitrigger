@@ -169,9 +169,7 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
         return repeating_decimal(&calculate_fraction(expression.trim())?);
     }
     if verb == "百分比" || verb.eq_ignore_ascii_case("percent") {
-        let scaled = calculate_fraction(expression.trim())? * BigInt::from(100u8);
-        ensure_exact_size(&scaled)?;
-        return repeating_decimal(&scaled).map(|percent| format!("{percent}%"));
+        return format_exact_percentage(calculate_fraction(expression.trim())?);
     }
     if verb == "从百分比" || verb.eq_ignore_ascii_case("from-percent") {
         let input = expression
@@ -598,7 +596,13 @@ pub(super) fn parse_fraction_literal(input: &str) -> Result<BigRational, Fractio
     Ok(value)
 }
 
-fn repeating_decimal(value: &BigRational) -> Result<String, FractionError> {
+pub(super) fn format_exact_percentage(value: BigRational) -> Result<String, FractionError> {
+    let scaled = value * BigInt::from(100u8);
+    ensure_exact_size(&scaled)?;
+    repeating_decimal(&scaled).map(|percent| format!("{percent}%"))
+}
+
+pub(super) fn repeating_decimal(value: &BigRational) -> Result<String, FractionError> {
     let numerator = value.numer().magnitude();
     let denominator = value.denom().magnitude();
     let mut text = (numerator / denominator).to_string();

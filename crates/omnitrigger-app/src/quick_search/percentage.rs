@@ -4,7 +4,10 @@ use num_rational::BigRational;
 use super::{
     calculator::{evaluate, format_result, normalize},
     conversion::split_conversion,
-    fraction::{calculate_fraction, ensure_exact_size, FractionError},
+    fraction::{
+        calculate_fraction, ensure_exact_size, format_exact_percentage, repeating_decimal,
+        FractionError,
+    },
     operators::split_top_level_commas,
 };
 
@@ -128,10 +131,13 @@ pub(super) fn compare_percentages(input: &str) -> Result<String, PercentageError
     if matches!(operation, "原值" | "reverse-compound") {
         return compound_percentages(operands, true);
     }
-    let comparison = match operation {
-        "变化" | "change" => Comparison::Change,
-        "占比" | "share" => Comparison::Share,
-        "百分点" | "points" => Comparison::Points,
+    let (comparison, exact) = match operation {
+        "变化" | "change" => (Comparison::Change, false),
+        "占比" | "share" => (Comparison::Share, false),
+        "百分点" | "points" => (Comparison::Points, false),
+        "精确变化" | "exact-change" => (Comparison::Change, true),
+        "精确占比" | "exact-share" => (Comparison::Share, true),
+        "精确百分点" | "exact-points" => (Comparison::Points, true),
         _ => return Err(PercentageError::UnknownOperation),
     };
     let operands = operands.trim();
@@ -144,19 +150,12 @@ pub(super) fn compare_percentages(input: &str) -> Result<String, PercentageError
             .or_else(|| split_conversion(operands)),
     };
     let (left, right) = sides.ok_or(PercentageError::Incomplete)?;
+    if exact {
+        return compare_exact_percentages(left, right, comparison);
+    }
     let eval = |input: &str| {
-        let input = input.trim();
-        if input.is_empty() {
-            return Err(PercentageError::Incomplete);
-        }
-        let input = if comparison == Comparison::Points {
-            input
-                .strip_suffix('%')
-                .ok_or(PercentageError::InvalidOperands)?
-        } else {
-            input
-        };
-        evaluate(input).map_err(|_| PercentageError::InvalidOperands)
+        evaluate(percentage_operand(input, comparison)?)
+            .map_err(|_| PercentageError::InvalidOperands)
     };
     let left = eval(left)?;
     let right = eval(right)?;
@@ -183,6 +182,46 @@ pub(super) fn compare_percentages(input: &str) -> Result<String, PercentageError
     };
     let value = format_result(value).map_err(|_| PercentageError::OutOfRange)?;
     Ok(format!("{value}{suffix}"))
+}
+
+fn percentage_operand(input: &str, comparison: Comparison) -> Result<&str, PercentageError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(PercentageError::Incomplete);
+    }
+    if comparison == Comparison::Points {
+        input
+            .strip_suffix('%')
+            .ok_or(PercentageError::InvalidOperands)
+    } else {
+        Ok(input)
+    }
+}
+
+fn compare_exact_percentages(
+    left: &str,
+    right: &str,
+    comparison: Comparison,
+) -> Result<String, PercentageError> {
+    let evaluate = |text| {
+        calculate_fraction(percentage_operand(text, comparison)?)
+            .map_err(PercentageError::Evaluation)
+    };
+    let left = evaluate(left)?;
+    let right = evaluate(right)?;
+    let part = match comparison {
+        Comparison::Change if left.numer().sign() != Sign::NoSign => (right - &left) / left,
+        Comparison::Share if right.numer().sign() != Sign::NoSign => left / right,
+        Comparison::Change | Comparison::Share => return Err(PercentageError::ZeroReference),
+        Comparison::Points => {
+            let difference = right - left;
+            ensure_exact_size(&difference).map_err(PercentageError::Evaluation)?;
+            return repeating_decimal(&difference)
+                .map(|value| format!("{value} 个百分点"))
+                .map_err(PercentageError::Evaluation);
+        }
+    };
+    format_exact_percentage(part).map_err(PercentageError::Evaluation)
 }
 
 fn compound_percentages(operands: &str, reverse: bool) -> Result<String, PercentageError> {
@@ -342,6 +381,34 @@ mod tests {
         assert_eq!(
             compare_percentages("折前价 1e308 按 1%"),
             Err(PercentageError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn reports_exact_change_share_and_points_with_repeating_digits() {
+        for (query, expected) in [
+            ("精确变化 3 到 4", "33.(3)%"),
+            ("exact-change 10 to 7", "-30%"),
+            ("精确占比 -1 占 6", "-16.(6)%"),
+            ("精确百分点 10% 到 31/3%", "0.(3) 个百分点"),
+            (
+                "exact-points 9007199254740992% to 9007199254740993%",
+                "1 个百分点",
+            ),
+        ] {
+            assert_eq!(
+                compare_percentages(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            compare_percentages("精确变化 0 到 1"),
+            Err(PercentageError::ZeroReference),
+        );
+        assert_eq!(
+            compare_percentages("精确百分点 10 到 20%"),
+            Err(PercentageError::InvalidOperands),
         );
     }
 

@@ -2888,6 +2888,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用精确分数求变化率并显示循环节",
+        query: "百分比: 精确变化 3 到 4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用精确分数计算占比",
+        query: "百分比: 精确占比 -1 占 6",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "精确计算两个百分比之间的百分点",
+        query: "百分比: 精确百分点 10% 到 31/3%",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "连续应用多个百分比变化",
         query: "百分比: 连续变化 100 @ +10%, -10%",
     },
