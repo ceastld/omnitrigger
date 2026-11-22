@@ -712,6 +712,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "列出给定区间内的多种星期",
+        query: "日期: 列出 2026-11-02 到 2026-11-08 每周一、三、五",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "列出日期区间内的工作日",
         query: "日期: 列出 2026-11-20 到 2026-11-23 工作日",
     },

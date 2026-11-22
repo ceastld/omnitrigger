@@ -34,7 +34,7 @@ impl DateError {
             }
             Self::MissingWeekdayOccurrence => "该月没有指定次序的星期",
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
-            Self::InvalidDateList => "例如 日期: 列出 2026-11-01 到 2026-11-30 每周一",
+            Self::InvalidDateList => "例如 日期: 列出 2026-11-01 到 2026-11-30 每周一、三、五",
             Self::ReversedDateRange => "开始日期须早于或等于结束日期",
             Self::NoMatchingDates => "区间内没有符合条件的日期",
             Self::TooManyDates => "最多可列出 366 个日期，请缩短区间",
@@ -328,7 +328,7 @@ enum DateSelection {
     Daily,
     Workdays,
     Weekends,
-    Weekday(Weekday),
+    Weekdays([bool; 7]),
 }
 
 fn date_selection(rule: &str) -> Result<DateSelection, DateError> {
@@ -337,13 +337,23 @@ fn date_selection(rule: &str) -> Result<DateSelection, DateError> {
         "每天" | "daily" => Ok(DateSelection::Daily),
         "周末" | "weekend" | "weekends" => Ok(DateSelection::Weekends),
         rule if is_workday_unit(rule) => Ok(DateSelection::Workdays),
-        rule => rule
-            .strip_prefix("每周")
-            .or_else(|| rule.strip_prefix("每星期"))
-            .and_then(chinese_weekday)
-            .or_else(|| rule.parse::<Weekday>().ok())
-            .map(DateSelection::Weekday)
-            .ok_or(DateError::InvalidDateList),
+        rule => {
+            let mut selected = [false; 7];
+            for term in rule.split([',', '，', '、']) {
+                let term = term.trim();
+                let name = term
+                    .strip_prefix("每周")
+                    .or_else(|| term.strip_prefix("每星期"))
+                    .or_else(|| term.strip_prefix("周"))
+                    .or_else(|| term.strip_prefix("星期"))
+                    .unwrap_or(term);
+                let weekday = chinese_weekday(name)
+                    .or_else(|| term.parse::<Weekday>().ok())
+                    .ok_or(DateError::InvalidDateList)?;
+                selected[weekday.num_days_from_monday() as usize] = true;
+            }
+            Ok(DateSelection::Weekdays(selected))
+        }
     }
 }
 
@@ -371,7 +381,7 @@ fn list_dates(input: &str, today: NaiveDate) -> Result<String, DateError> {
             DateSelection::Daily => true,
             DateSelection::Workdays => date.weekday().num_days_from_monday() < 5,
             DateSelection::Weekends => date.weekday().num_days_from_monday() >= 5,
-            DateSelection::Weekday(day) => date.weekday() == day,
+            DateSelection::Weekdays(days) => days[date.weekday().num_days_from_monday() as usize],
         })
         .take(MAX_LISTED_DATES + 1)
         .map(|date| date.to_string())
@@ -743,6 +753,18 @@ mod tests {
             ("列出 今天 到 明天 周末", "2026-11-21\n2026-11-22"),
             ("列出 9999-12-31 到 9999-12-31 每天", "9999-12-31"),
             ("list 2026-11-01 to 2026-11-03 MON", "2026-11-02"),
+            (
+                "列出 2026-11-02 到 2026-11-08 每周一、三、五",
+                "2026-11-02\n2026-11-04\n2026-11-06",
+            ),
+            (
+                "list 2026-11-02 TO 2026-11-08 FRI, MON, mon, Wed",
+                "2026-11-02\n2026-11-04\n2026-11-06",
+            ),
+            (
+                "列出 2026-11-07 至 2026-11-08 周六，星期日",
+                "2026-11-07\n2026-11-08",
+            ),
         ] {
             assert_eq!(
                 calculate_date(query, today).as_deref(),
@@ -753,6 +775,11 @@ mod tests {
         for (query, error) in [
             ("列出", DateError::InvalidDateList),
             ("列出 今天 到 明天 每周八", DateError::InvalidDateList),
+            ("列出 今天 到 明天 每周六、", DateError::InvalidDateList),
+            (
+                "列出 今天 到 明天 每周六、工作日",
+                DateError::InvalidDateList,
+            ),
             ("列出 今天 到 明天 工作日", DateError::NoMatchingDates),
             ("列出 明天 到 今天 每天", DateError::ReversedDateRange),
             (
