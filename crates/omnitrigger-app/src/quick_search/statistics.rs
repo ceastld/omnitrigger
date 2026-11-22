@@ -4,11 +4,14 @@ use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::calculator::normalize;
-use super::fraction::{calculate_fraction, ensure_exact_size, format_square_root, FractionError};
+use super::fraction::{
+    calculate_fraction, ensure_exact_size, format_square_root, rational_power, FractionError,
+};
 use super::linear_fit::{calculate_correlation, calculate_covariance, LinearFitError};
 use super::operators::split_top_level_commas;
 
 const MAX_VALUES: usize = 128;
+const MAX_BINOMIAL_TRIALS: u32 = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StatisticsError {
@@ -19,6 +22,7 @@ pub(super) enum StatisticsError {
     InvalidWeight,
     ZeroTotalWeight,
     InvalidProbability,
+    BinomialArguments,
     InvalidWindowWidth,
     AdjacentValueCount,
     ZeroPreviousValue,
@@ -38,6 +42,7 @@ impl StatisticsError {
             Self::InvalidWeight => "用 数值@非负权重，权重可写成分数或百分数",
             Self::ZeroTotalWeight => "权重合计须大于零",
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
+            Self::BinomialArguments => "依次输入试验次数、成功次数和单次成功概率，最多 128 次试验",
             Self::InvalidWindowWidth => "窗口大小须为正整数，且不能超过数值个数",
             Self::AdjacentValueCount => "计算相邻项的变化至少需要两个数值",
             Self::ZeroPreviousValue => "计算变化率时，每对数值的前一项须非零",
@@ -104,6 +109,8 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "移动中位数" | "moving-median" => return moving_median(values.trim()),
         "累计合计" | "running-sum" => return running_totals(values.trim(), false),
         "累计平均" | "running-average" => return running_totals(values.trim(), true),
+        "二项概率" | "binomial" => return binomial_probability(values, false),
+        "二项累计" | "binomial-cdf" => return binomial_probability(values, true),
         "差分" | "相邻差" | "difference" => return adjacent_changes(values.trim(), false),
         "变化率" | "relative-change" => return adjacent_changes(values.trim(), true),
         "协方差" | "样本协方差" | "covariance" => {
@@ -460,6 +467,55 @@ fn squared_deviation_sum(
         })
 }
 
+fn binomial_probability(input: &str, cumulative: bool) -> Result<String, StatisticsError> {
+    let mut terms = split_top_level_commas(input).map(str::trim);
+    let (Some(trials), Some(successes), Some(probability), None) =
+        (terms.next(), terms.next(), terms.next(), terms.next())
+    else {
+        return Err(StatisticsError::BinomialArguments);
+    };
+    let trials = trials
+        .parse::<u32>()
+        .ok()
+        .filter(|&trials| trials <= MAX_BINOMIAL_TRIALS)
+        .ok_or(StatisticsError::BinomialArguments)?;
+    let successes = successes
+        .parse::<u32>()
+        .ok()
+        .filter(|&successes| successes <= trials)
+        .ok_or(StatisticsError::BinomialArguments)?;
+    let probability = parse_probability(probability)?;
+    let one = BigRational::from_integer(BigInt::from(1u8));
+    if (cumulative && successes == trials) || trials == 0 {
+        return Ok("1".to_owned());
+    }
+    if probability == one {
+        return Ok(u8::from(successes == trials).to_string());
+    }
+    if probability.numer().sign() == Sign::NoSign {
+        return Ok(u8::from(cumulative || successes == 0).to_string());
+    }
+    let failures = probability.denom() - probability.numer();
+    let no_success = rational_power(
+        one - &probability,
+        BigRational::from_integer(BigInt::from(trials)),
+    )
+    .map_err(StatisticsError::Evaluation)?;
+    // 每项公用单次概率分母的 n 次幂，可对分子做整数递推。
+    let mut mass = no_success.numer().clone();
+    let mut sum = mass.clone();
+    for count in 0..successes {
+        let numerator = mass * probability.numer() * BigInt::from(trials - count);
+        let divisor = &failures * BigInt::from(count + 1);
+        mass = numerator / divisor;
+        if cumulative {
+            sum += &mass;
+        }
+    }
+    let numerator = if cumulative { sum } else { mass };
+    Ok(BigRational::new(numerator, no_success.denom().clone()).to_string())
+}
+
 fn parse_probability(input: &str) -> Result<BigRational, StatisticsError> {
     let probability = if let Some(percent) = input.strip_suffix('%') {
         calculate_fraction(percent).map(|value| value / BigInt::from(100))
@@ -560,6 +616,40 @@ fn bounded(value: BigRational) -> Result<BigRational, StatisticsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computes_exact_binomial_mass_and_lower_tail_including_endpoints() {
+        for (query, expected) in [
+            ("二项概率 ４，２，５０％", "3/8"),
+            ("二项累计 4,2,1/2", "11/16"),
+            ("binomial 3,1,1/3", "4/9"),
+            ("binomial-cdf 3,1,1/3", "20/27"),
+            ("二项概率 0,0,1/3", "1"),
+            ("二项概率 6,2,0", "0"),
+            ("二项累计 6,2,0", "1"),
+            ("二项累计 6,2,1", "0"),
+            ("二项概率 6,6,1", "1"),
+            ("二项累计 128,128,1/3", "1"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("二项概率 6,7,50%"),
+            Err(StatisticsError::BinomialArguments)
+        );
+        assert_eq!(
+            calculate_statistics("二项概率 129,0,1"),
+            Err(StatisticsError::BinomialArguments)
+        );
+        assert_eq!(
+            calculate_statistics("二项累计 0,0,101%"),
+            Err(StatisticsError::InvalidProbability)
+        );
+    }
 
     #[test]
     fn computes_unscaled_median_absolute_deviation_with_frequencies() {

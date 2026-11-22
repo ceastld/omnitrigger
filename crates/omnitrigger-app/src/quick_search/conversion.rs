@@ -75,6 +75,7 @@ enum Dimension {
     Data,
     DataRate,
     Angle,
+    AngularSpeed,
     Pressure,
     Frequency,
     Energy,
@@ -117,6 +118,7 @@ impl Dimension {
                 "GB/s", "GiB/s", "Gib/s", "TB/s", "TiB/s", "Tbps", "Tib/s", "Kib/s",
             ],
             Self::Angle => &["°", "rad", "turn", "′", "″"],
+            Self::AngularSpeed => &["rpm", "rev/s", "rad/s", "°/s", "rad/min", "°/min"],
             Self::Pressure => &[
                 "Pa", "kPa", "bar", "psi", "atm", "hPa", "MPa", "mPa", "Torr",
             ],
@@ -267,6 +269,18 @@ impl Unit {
             "′" | "arcmin" | "角分" => Self::linear("′", Angle, PI / 10_800.),
             "″" | "arcsec" | "角秒" => Self::linear("″", Angle, PI / 648_000.),
             "turn" | "turns" | "圈" => Self::linear("turn", Angle, TAU),
+            "rpm" | "rev/min" | "r/min" | "圈/分" | "圈/分钟" => {
+                Self::linear("rpm", AngularSpeed, TAU / 60.)
+            }
+            "rps" | "rev/s" | "r/s" | "圈/秒" => Self::linear("rev/s", AngularSpeed, TAU),
+            "rad/s" | "弧度/秒" => Self::linear("rad/s", AngularSpeed, 1.),
+            "°/s" | "deg/s" | "度/秒" => Self::linear("°/s", AngularSpeed, PI / 180.),
+            "rad/min" | "弧度/分" | "弧度/分钟" => {
+                Self::linear("rad/min", AngularSpeed, 1. / 60.)
+            }
+            "°/min" | "deg/min" | "度/分" | "度/分钟" => {
+                Self::linear("°/min", AngularSpeed, PI / 10_800.)
+            }
             "pa" | "帕" | "帕斯卡" => Self::linear("Pa", Pressure, 1.),
             "hpa" | "百帕" => Self::linear("hPa", Pressure, 100.),
             "kpa" | "千帕" => Self::linear("kPa", Pressure, 1000.),
@@ -1831,6 +1845,26 @@ mod tests {
             convert("10 Pa to Hz"),
             Some(Err(ConversionError::DifferentDimensions))
         );
+    }
+
+    #[test]
+    fn converts_rotation_speed_with_angle_and_time_units_together() {
+        for (query, expected) in [
+            ("120 rpm to °/s", "720 °/s"),
+            ("(pi)rad/s to rpm", "30 rpm"),
+            ("-0.5 圈/秒 to rpm", "-30 rpm"),
+            ("180 deg/min to rpm", "0.5 rpm"),
+            ("60 r/min to rev/s", "1 rev/s"),
+            ("0°/s to rad/min", "0 rad/min"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.into())), "{query}");
+        }
+        assert_eq!(
+            convert("1 rpm to rad"),
+            Some(Err(ConversionError::DifferentDimensions))
+        );
+        let suggestions = suggested_targets("120 rpm to rad/").unwrap();
+        assert_eq!(suggestions.len(), 2);
     }
 
     #[test]

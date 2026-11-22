@@ -510,7 +510,10 @@ fn exact_gcd(mut left: BigUint, mut right: BigUint) -> BigUint {
     left
 }
 
-fn rational_power(base: BigRational, exponent: BigRational) -> Result<BigRational, FractionError> {
+pub(super) fn rational_power(
+    base: BigRational,
+    exponent: BigRational,
+) -> Result<BigRational, FractionError> {
     if !exponent.is_integer() {
         return Err(FractionError::NonIntegerExponent);
     }

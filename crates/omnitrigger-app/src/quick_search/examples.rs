@@ -140,6 +140,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 累计分布 3,1/2,0.5,3,5",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "计算恰好成功指定次数的二项概率",
+        query: "统计: 二项概率 4,2,50%",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算成功次数不超过指定值的二项概率",
+        query: "统计: 二项累计 4,2,50%",
+    },
+    Example {
         icon: Icon::Layers,
         title: "保留分数和根式的均方根",
         query: "统计: 均方根 1/2,3/2",
@@ -1309,6 +1319,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Layers,
         title: "换算频率",
         query: "2 MHz to kHz",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "把每分钟转数换成每秒角度",
+        query: "120 rpm to °/s",
     },
     Example {
         icon: Icon::Layers,
@@ -2630,6 +2645,11 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
+        Scope::Statistics
+            if !term.is_empty()
+                && ["二项概率", "二项累计"]
+                    .into_iter()
+                    .any(|operation| operation.starts_with(term)) => {}
         Scope::Statistics
             if matches!(
                 term,
