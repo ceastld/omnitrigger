@@ -939,6 +939,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         | "json-type-column"
         | "json长度列"
         | "json-length-column"
+        | "json存在列"
+        | "json-exists-column"
         | "json展开行"
         | "json-expand-rows") => {
             let ((name, source, pointer), data) =
@@ -959,6 +961,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                     let content = match kind {
                         "json类型列" | "json-type-column" => JsonCellContent::Type,
                         "json长度列" | "json-length-column" => JsonCellContent::Length,
+                        "json存在列" | "json-exists-column" => JsonCellContent::Exists,
                         _ => JsonCellContent::Value,
                     };
                     Operation::JsonPointerColumn(name, source, keys, content)
@@ -5494,6 +5497,34 @@ mod tests {
             "a".repeat(7500),
         );
         assert_eq!(transform_csv(&query), Err(CsvError::AddedColumnTooLarge));
+    }
+
+    #[test]
+    fn marks_present_json_pointer_cells_even_when_the_value_is_null_or_zero() {
+        let query = r#"JSON存在列 ["有金额","数据","/金额"]
+编号,数据
+1,"{""金额"":null}"
+2,{}
+3,
+4,"{""金额"":0}""#;
+        let expected = [
+            "编号,数据,有金额",
+            r#"1,"{""金额"":null}",true"#,
+            "2,{},false",
+            r#"3,"",false"#,
+            r#"4,"{""金额"":0}",true"#,
+        ]
+        .join("\r\n");
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected.as_str()));
+        assert_eq!(
+            transform_csv(
+                r#"json-exists-column ["存在",1,""] 原列
+null
+false"#
+            )
+            .as_deref(),
+            Ok("原列,存在\r\nnull,true\r\nfalse,true")
+        );
     }
 
     #[test]

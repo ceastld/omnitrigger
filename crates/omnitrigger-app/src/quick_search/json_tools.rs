@@ -1790,6 +1790,7 @@ pub(super) enum JsonCellContent {
     Value,
     Type,
     Length,
+    Exists,
 }
 
 pub(super) fn json_cell_at_pointer<'a>(
@@ -1797,13 +1798,17 @@ pub(super) fn json_cell_at_pointer<'a>(
     keys: &[String],
     content: JsonCellContent,
 ) -> Result<Cow<'a, str>, JsonError> {
-    let Some(value) = json_cell_value_at_pointer(source, keys)? else {
-        return Ok(Cow::Borrowed(""));
-    };
-    match content {
-        JsonCellContent::Value => json_csv_text(value),
-        JsonCellContent::Type => Ok(Cow::Borrowed(json_type_name(value))),
-        JsonCellContent::Length => match value.get().as_bytes()[0] {
+    let value = json_cell_value_at_pointer(source, keys)?;
+    match (content, value) {
+        (JsonCellContent::Exists, value) => Ok(Cow::Borrowed(if value.is_some() {
+            "true"
+        } else {
+            "false"
+        })),
+        (_, None) => Ok(Cow::Borrowed("")),
+        (JsonCellContent::Value, Some(value)) => json_csv_text(value),
+        (JsonCellContent::Type, Some(value)) => Ok(Cow::Borrowed(json_type_name(value))),
+        (JsonCellContent::Length, Some(value)) => match value.get().as_bytes()[0] {
             b'{' | b'[' => json_length(value.get()).map(Cow::Owned),
             _ => Ok(Cow::Borrowed("")),
         },

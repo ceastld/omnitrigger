@@ -2998,6 +2998,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "将 CSV 单元格中 JSON 字段是否存在写成一列",
+        query: "CSV: JSON存在列 [\"有金额\",\"数据\",\"/金额\"]\n编号,数据\n1,\"{\"\"金额\"\":null}\"\n2,{}\n3,\n4,\"{\"\"金额\"\":0}\"",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 CSV 单元格中的 JSON 数组展开为多行",
         query: "CSV: JSON展开行 [\"商品\",\"数据\",\"/商品\"]\n订单,数据\n001,\"{\"\"商品\"\":[\"\"茶\"\",\"\"梨\"\"]}\"\n002,\"{\"\"商品\"\":[]}\"",
     },
