@@ -16,6 +16,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
     calculator::{narrow_ascii_graphic, FULLWIDTH_ASCII_OFFSET},
+    csv_tools::csv_cell,
     fraction::parse_fraction_literal,
 };
 
@@ -45,6 +46,7 @@ pub(super) enum TextError {
     InvalidRegex,
     IncompleteRegexGroup,
     UnknownRegexGroup,
+    MissingRegexCaptures,
     ResultTooLarge,
     NullCharacter,
     InvalidBase64,
@@ -78,6 +80,7 @@ impl TextError {
             Self::InvalidRegex => "请检查或缩短正则表达式",
             Self::IncompleteRegexGroup => "输入组名或组号、带引号的正则表达式和原文",
             Self::UnknownRegexGroup => "正则表达式中没有指定的捕获组",
+            Self::MissingRegexCaptures => "请用括号定义至少一个要输出为列的捕获组",
             Self::ResultTooLarge => "文本结果超过 1 MiB",
             Self::NullCharacter => "结果含空字符，无法完整复制",
             Self::InvalidBase64 => "Base64 编码无效",
@@ -166,6 +169,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
                 .join("\n"));
         }
         "正则取组" | "regex-capture" => return extract_regex_group(text),
+        "正则取表" | "regex-to-csv" => return regex_captures_to_csv(text),
         "json还原" | "json-unquote" => return decode_json_string(text),
         _ => {}
     }
@@ -812,6 +816,37 @@ fn extract_regex_group(input: &str) -> Result<String, TextError> {
         .join("\n"))
 }
 
+fn regex_captures_to_csv(input: &str) -> Result<String, TextError> {
+    let (pattern, text) = regex_text_argument(input)?;
+    if pattern.captures_len() <= 1 {
+        return Err(TextError::MissingRegexCaptures);
+    }
+    let mut result = pattern
+        .capture_names()
+        .enumerate()
+        .skip(1)
+        .map(|(index, name)| name.map_or_else(|| index.to_string(), str::to_owned))
+        .collect::<Vec<_>>()
+        .join(",");
+    for captures in pattern.captures_iter(text) {
+        result.push_str("\r\n");
+        for (column, matched) in captures.iter().skip(1).enumerate() {
+            if column > 0 {
+                result.push(',');
+            }
+            let value = matched.map_or("", |matched| matched.as_str());
+            if value.contains('\0') {
+                return Err(TextError::NullCharacter);
+            }
+            result.push_str(&csv_cell(value));
+        }
+        if result.len() > MAX_EXPANDED_TEXT_BYTES {
+            return Err(TextError::ResultTooLarge);
+        }
+    }
+    Ok(result)
+}
+
 pub(super) fn compile_regex(pattern: &str) -> Result<Regex, TextError> {
     if pattern.is_empty() {
         return Err(TextError::EmptySearchText);
@@ -992,6 +1027,31 @@ fn replace_regex(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exports_each_regex_match_as_one_csv_row_with_optional_groups() {
+        for (query, expected) in [
+            (
+                r#"正则取表 "(?<id>[0-9]+):([^;]+)" 001:茶,咖啡;002:梨"#,
+                "id,2\r\n001,\"茶,咖啡\"\r\n002,梨",
+            ),
+            (
+                r#"regex-to-csv "([0-9]+)(?:-([A-Z]))?" 007-A 08"#,
+                "1,2\r\n007,A\r\n08,\"\"",
+            ),
+            (r#"正则取表 "(?<id>[0-9]+)" 无编号"#, "id"),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            transform_text(r#"正则取表 "[0-9]+" 123"#),
+            Err(TextError::MissingRegexCaptures)
+        );
+        assert_eq!(
+            transform_text("正则取表 \"(A.)\" A\0"),
+            Err(TextError::NullCharacter)
+        );
+    }
 
     #[test]
     fn decorates_each_line_and_bounds_the_expanded_text() {

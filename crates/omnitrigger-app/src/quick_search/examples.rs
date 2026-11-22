@@ -1462,6 +1462,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把每次正则匹配的捕获组提取为 CSV",
+        query: r#"文本: 正则取表 "(?<id>[0-9]+):([^;]+)" 001:茶,咖啡;002:梨"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用正则表达式替换文本",
         query: r#"文本: 正则替换 "([0-9]{4})/([0-9]{2})/([0-9]{2})" "$1-$2-$3" 2026/11/21"#,
     },
