@@ -617,10 +617,16 @@ fn list_dates(input: &str, today: NaiveDate) -> Result<String, DateError> {
     format_date_list(dates)
 }
 
+enum DateRangeOperation {
+    Merge,
+    Intersect,
+    Subtract,
+}
+
 fn combine_date_ranges(
     input: &str,
     today: NaiveDate,
-    intersection: bool,
+    operation: DateRangeOperation,
 ) -> Result<String, DateError> {
     let terms = input.trim().split([';', '\n']);
     if !(2..=MAX_DATE_RANGES).contains(&terms.clone().count()) {
@@ -639,16 +645,23 @@ fn combine_date_ranges(
             Ok((start, end))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if intersection {
-        let mut overlap = ranges[0];
-        for &(start, end) in &ranges[1..] {
-            overlap = (overlap.0.max(start), overlap.1.min(end));
+    match operation {
+        DateRangeOperation::Intersect => {
+            let mut overlap = ranges[0];
+            for &(start, end) in &ranges[1..] {
+                overlap = (overlap.0.max(start), overlap.1.min(end));
+            }
+            return Ok(if overlap.0 <= overlap.1 {
+                display_date_range(overlap)
+            } else {
+                "无重叠日期".to_owned()
+            });
         }
-        return Ok(if overlap.0 <= overlap.1 {
-            display_date_range(overlap)
-        } else {
-            "无重叠日期".to_owned()
-        });
+        DateRangeOperation::Subtract => {
+            let (base, exclusions) = ranges.split_at_mut(1);
+            return Ok(subtract_date_ranges(base[0], exclusions));
+        }
+        DateRangeOperation::Merge => {}
     }
     ranges.sort_unstable();
     let mut merged = Vec::new();
@@ -663,6 +676,39 @@ fn combine_date_ranges(
     }
     merged.push(display_date_range(current));
     Ok(merged.join("\n"))
+}
+
+fn subtract_date_ranges(
+    (start, end): (NaiveDate, NaiveDate),
+    exclusions: &mut [(NaiveDate, NaiveDate)],
+) -> String {
+    exclusions.sort_unstable();
+    let mut remaining = Vec::new();
+    let mut cursor = Some(start);
+    for &(excluded_start, excluded_end) in exclusions.iter() {
+        let Some(next) = cursor else { break };
+        if excluded_start > end {
+            break;
+        }
+        if excluded_end < next {
+            continue;
+        }
+        if excluded_start > next {
+            remaining.push(display_date_range((
+                next,
+                excluded_start - TimeDelta::days(1),
+            )));
+        }
+        cursor = excluded_end.succ_opt().filter(|&date| date <= end);
+    }
+    if let Some(next) = cursor {
+        remaining.push(display_date_range((next, end)));
+    }
+    if remaining.is_empty() {
+        "无剩余日期".to_owned()
+    } else {
+        remaining.join("\n")
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1075,8 +1121,15 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     }
     match operation.to_ascii_lowercase().as_str() {
         "月历" | "month-grid" => return month_calendar(rest.trim_start(), today),
-        "合并区间" | "merge-ranges" => return combine_date_ranges(rest, today, false),
-        "区间交集" | "intersect-ranges" => return combine_date_ranges(rest, today, true),
+        "合并区间" | "merge-ranges" => {
+            return combine_date_ranges(rest, today, DateRangeOperation::Merge);
+        }
+        "区间交集" | "intersect-ranges" => {
+            return combine_date_ranges(rest, today, DateRangeOperation::Intersect);
+        }
+        "扣除区间" | "subtract-ranges" => {
+            return combine_date_ranges(rest, today, DateRangeOperation::Subtract);
+        }
         "按月拆分" | "split-months" => {
             return split_date_range(rest, today, DateRangeSplit::Months)
         }
@@ -1450,6 +1503,35 @@ mod tests {
         );
         assert_eq!(
             calculate_date(&excessive, today),
+            Err(DateError::InvalidDateRanges)
+        );
+    }
+
+    #[test]
+    fn subtracts_inclusive_date_ranges_in_order_without_counting_removed_endpoints() {
+        let today = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        for (query, expected) in [
+            (
+                "扣除区间 2024-02-26 至 2024-03-05; 2024-03-04 至 2024-03-08; 今天至2024-03-01; 2024-02-25至昨天; 2024-03-01至2024-03-02",
+                "2024-03-03 至 2024-03-03 · 1 天",
+            ),
+            (
+                "subtract-ranges 2024-02-28 to 2024-03-01\n今天至今天",
+                "2024-02-28 至 2024-02-28 · 1 天\n2024-03-01 至 2024-03-01 · 1 天",
+            ),
+            (
+                "扣除区间 9999-12-30至9999-12-31; 9999-12-29至9999-12-31",
+                "无剩余日期",
+            ),
+            (
+                "扣除区间 今天至今天; 2024-02-27至昨天; 明天至2024-03-02",
+                "2024-02-29 至 2024-02-29 · 1 天",
+            ),
+        ] {
+            assert_eq!(calculate_date(query, today).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_date("扣除区间 今天至明天", today),
             Err(DateError::InvalidDateRanges)
         );
     }

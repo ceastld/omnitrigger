@@ -1107,6 +1107,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "从日期区间扣除多个占用时段",
+        query: "日期: 扣除区间 2024-02-26 至 2024-03-05; 2024-02-28 至 2024-03-01; 2024-03-04 至 2024-03-07",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按自然月拆分日期区间并计算各段天数",
         query: "日期: 按月拆分 2024-01-31 至 2024-03-02",
     },
@@ -2568,6 +2573,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从左表找出右表没有的编号",
+        query: r#"CSV: 左表独有 ["编号","键"] ["编号,商品\n001,茶\n002,米\n003,盐","键,金额\n001,1.50\n003,2e0"]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按地区和月份保留右表能匹配的左表行",
+        query: r#"CSV: 左表匹配 [["区","月"],["区域","月份"]] ["区,月,额\n北,01,1.50\n北,02,2\n南,01,3","月份,区域\n01,北\n01,北\n01,南"]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按表头名称把多张 CSV 表纵向合并",
         query: r#"CSV: 纵向合并 ["编号,金额\n001,1.50","金额,编号,备注\n2e0,002,\"茶,热\""]"#,
     },
@@ -3083,6 +3098,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "月历",
                     "合并区间",
                     "区间交集",
+                    "扣除区间",
                     "按月拆分",
                     "按月拆分CSV",
                     "按周拆分CSV",

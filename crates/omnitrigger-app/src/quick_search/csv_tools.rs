@@ -377,6 +377,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         "左连接" | "left-join" => return join_csv(input, JoinKind::Left),
         "内连接" | "inner-join" => return join_csv(input, JoinKind::Inner),
         "全连接" | "full-join" => return join_csv(input, JoinKind::Full),
+        "左表匹配" | "semi-join" => return join_csv(input, JoinKind::MatchedLeft),
+        "左表独有" | "anti-join" => return join_csv(input, JoinKind::UnmatchedLeft),
         "纵向合并" | "stack" => return stack_csv(input),
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
@@ -815,6 +817,8 @@ enum JoinKind {
     Inner,
     Left,
     Full,
+    MatchedLeft,
+    UnmatchedLeft,
 }
 
 #[derive(Deserialize)]
@@ -851,6 +855,25 @@ fn join_csv(input: &str, kind: JoinKind) -> Result<String, CsvError> {
     let right_key = right_key.resolve(right_header)?;
     if left_key.len() != right_key.len() {
         return Err(CsvError::JoinColumns);
+    }
+    if matches!(kind, JoinKind::MatchedLeft | JoinKind::UnmatchedLeft) {
+        let keep_matched = matches!(kind, JoinKind::MatchedLeft);
+        let right_keys: HashSet<_> = right_rows
+            .iter()
+            .map(|row| column_key(row, &right_key))
+            .collect();
+        let selected = left_rows
+            .iter()
+            .filter(|row| right_keys.contains(&column_key(row, &left_key)) == keep_matched);
+        let mut output = String::new();
+        for row in std::iter::once(left_header).chain(selected) {
+            append_bounded_csv_row(
+                &mut output,
+                row.iter().map(String::as_str),
+                CsvError::JoinTooLarge,
+            )?;
+        }
+        return Ok(output);
     }
     let mut right_key_columns = vec![false; right_header.len()];
     for &column in &right_key {
@@ -2482,6 +2505,36 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query).as_deref(), Ok(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn selects_left_rows_by_key_presence_without_expanding_duplicate_matches() {
+        let inputs = r#"[["区",2],[2,"期"]] ["区,月,额\n北,01,1.50\n北,01,1e0\n北,02,2\n北,1,3\n南,,4","期,区域,额\n01,北,5\n01,北,6\n,南,7"]"#;
+        for (operation, expected) in [
+            (
+                "左表匹配",
+                "区,月,额\r\n北,01,1.50\r\n北,01,1e0\r\n南,\"\",4",
+            ),
+            ("左表独有", "区,月,额\r\n北,02,2\r\n北,1,3"),
+        ] {
+            assert_eq!(
+                transform_csv(&format!("{operation} {inputs}")).as_deref(),
+                Ok(expected),
+            );
+        }
+        let no_right_rows = r#"[1,1] ["编号,额\n001,1.50","键"]"#;
+        assert_eq!(
+            transform_csv(&format!("semi-join {no_right_rows}")).as_deref(),
+            Ok("编号,额"),
+        );
+        assert_eq!(
+            transform_csv(&format!("anti-join {no_right_rows}")).as_deref(),
+            Ok("编号,额\r\n001,1.50"),
+        );
+        assert_eq!(
+            transform_csv(r#"左表独有 [[1,2],1] ["编号,额","编号,值"]"#),
+            Err(CsvError::JoinColumns),
+        );
     }
 
     #[test]
