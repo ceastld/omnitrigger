@@ -2723,6 +2723,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把指定格式的 CSV 日期统一输出为 ISO 日期",
+        query: "CSV: 日期解析列 [\"标准日期\",\"原日期\",\"%d/%m/%Y\"]\n原日期,编号\n31/01/2024,甲\n29/02/2024,乙\n,丙",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按部门逐行累计 CSV 金额",
         query: "CSV: 累计合计列 [\"累计金额\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,0.5",
     },

@@ -6,7 +6,10 @@ use std::{
     hash::Hash,
 };
 
-use chrono::{format::StrftimeItems, NaiveDate};
+use chrono::{
+    format::{parse, Parsed, StrftimeItems},
+    Datelike, NaiveDate,
+};
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 use regex::Regex;
@@ -200,9 +203,9 @@ impl CsvError {
                 "填写新列名、来源日期列和整数天数列，例如 [\"到期日期\",\"日期\",\"天数\"]"
             }
             Self::DateFormatColumnArguments => {
-                "填写新列名、来源日期列和输出格式，例如 [\"年月\",\"日期\",\"%Y-%m\"]"
+                "填写新列名、日期源列和日期格式，例如 [\"标准日期\",\"日期\",\"%Y-%m-%d\"]"
             }
-            Self::DateFormatColumnPattern => "填写有效的日期格式，例如 %Y-%m 或 %Y%m%d",
+            Self::DateFormatColumnPattern => "填写有效的日期格式，例如 %Y-%m-%d 或 %d/%m/%Y",
             Self::DataConversionTarget(cause) => cause.message(),
             Self::GroupedColumnArguments => {
                 "填写新列名、数值列和分组列，例如 [\"结果\",\"金额\",[\"部门\"]]"
@@ -321,7 +324,12 @@ enum Operation {
     DateDifferenceColumn(String, ColumnReference, ColumnReference),
     ClockDifferenceColumn(String, ColumnReference, ColumnReference),
     DateOffsetColumn(String, ColumnReference, ColumnReference),
-    DateFormatColumn(String, ColumnReference, String),
+    DatePatternColumn {
+        name: String,
+        source: ColumnReference,
+        pattern: String,
+        parse_input: bool,
+    },
     RunningColumn {
         name: String,
         source: ColumnReference,
@@ -726,14 +734,20 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::DateOffsetColumn(name, date, days)
         }
-        "日期格式列" | "date-format-column" => {
+        kind @ ("日期格式列" | "date-format-column" | "日期解析列" | "date-parse-column") =>
+        {
             let ((name, source, pattern), data) =
                 json_argument_and_data::<(String, ColumnReference, String)>(
                     input,
                     CsvError::DateFormatColumnArguments,
                 )?;
             input = data;
-            Operation::DateFormatColumn(name, source, pattern)
+            Operation::DatePatternColumn {
+                name,
+                source,
+                pattern,
+                parse_input: matches!(kind, "日期解析列" | "date-parse-column"),
+            }
         }
         "日期差列" | "date-difference-column" => {
             let ((name, start, end), data) =
@@ -1214,9 +1228,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::DateOffsetColumn(name, date, days) => {
             date_offset_column(&rows, &name, date, days)
         }
-        Operation::DateFormatColumn(name, source, pattern) => {
-            date_format_column(&rows, &name, source, &pattern)
-        }
+        Operation::DatePatternColumn {
+            name,
+            source,
+            pattern,
+            parse_input,
+        } => date_pattern_column(&rows, &name, source, &pattern, parse_input),
         Operation::RunningColumn {
             name,
             source,
@@ -2106,11 +2123,12 @@ fn first_nonempty_csv_column(
     })
 }
 
-fn date_format_column(
+fn date_pattern_column(
     rows: &[Vec<String>],
     name: &str,
     source: ColumnReference,
     pattern: &str,
+    parse_input: bool,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     if name.trim().is_empty() || name.contains('\0') {
@@ -2130,8 +2148,10 @@ fn date_format_column(
             .map_err(|_| CsvError::DateFormatColumnPattern)?;
         Ok(result)
     };
-    // 只有表头时也检查格式是否需要日期之外的信息。
-    format_date(NaiveDate::default())?;
+    if !parse_input {
+        // 只有表头时也检查输出格式是否需要日期之外的信息。
+        format_date(NaiveDate::default())?;
+    }
     let mut row_number = 0;
     write_appended_column(header, records, name, |row| {
         row_number += 1;
@@ -2139,10 +2159,21 @@ fn date_format_column(
         if text.is_empty() {
             return Ok(String::new());
         }
-        let date = parse_complete_date(text).map_err(|error| CsvError::DataRowValue {
+        let data_error = |cause| CsvError::DataRowValue {
             row: row_number,
-            cause: error.message(),
-        })?;
+            cause,
+        };
+        if parse_input {
+            let mut parsed = Parsed::new();
+            let date = parse(&mut parsed, text, items.iter())
+                .and_then(|()| parsed.to_naive_date())
+                .map_err(|_| data_error("日期不符合指定格式"))?;
+            if !(0..=9999).contains(&date.year()) {
+                return Err(data_error("年份须在 0000 至 9999 之间"));
+            }
+            return Ok(date.to_string());
+        }
+        let date = parse_complete_date(text).map_err(|error| data_error(error.message()))?;
         format_date(date)
     })
 }
@@ -4784,6 +4815,28 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn parses_formatted_csv_dates_without_changing_blank_or_original_cells() {
+        let query = "日期解析列 [\"标准日期\",\"原日期\",\"%d/%m/%Y\"]\n原日期,编号\n31/01/2024,甲\n29/02/2024,乙\n,丙";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("原日期,编号,标准日期\r\n31/01/2024,甲,2024-01-31\r\n29/02/2024,乙,2024-02-29\r\n\"\",丙,\"\"")
+        );
+        assert_eq!(
+            transform_csv(
+                "date-parse-column [\"日\",1,\"%d/%m/%Y\"]\n日期\n31/01/2024\n29/02/2023"
+            ),
+            Err(CsvError::DataRowValue {
+                row: 2,
+                cause: "日期不符合指定格式"
+            })
+        );
+        assert_eq!(
+            transform_csv("日期解析列 [\"日\",1,\"%Q\"]\n日期"),
+            Err(CsvError::DateFormatColumnPattern)
+        );
     }
 
     #[test]
