@@ -14,6 +14,7 @@ const MAX_EXACT_BITS: u64 = 8192;
 const MAX_DECIMAL_PLACES: u32 = 100;
 const MAX_REPEATING_DECIMAL_PLACES: usize = 512;
 const MAX_TABLE_INPUTS: usize = 12;
+const MAX_CONTINUED_FRACTION_TERMS: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FractionError {
@@ -30,6 +31,8 @@ pub(super) enum FractionError {
     DecimalPlaces,
     RepeatingDecimalLength,
     TableInputs,
+    ContinuedFractionArguments,
+    ContinuedFractionLength,
     ExactRange,
 }
 
@@ -51,6 +54,10 @@ impl FractionError {
             Self::TableInputs => {
                 "用方括号填写 1 至 12 个数值，例如 分数: 取值表 [-2,0,3/2] x**2+1/3"
             }
+            Self::ContinuedFractionArguments => {
+                "用方括号填写连分数整数项，例如 [3,7,16]。第一项之后须为正整数"
+            }
+            Self::ContinuedFractionLength => "连分数最多支持 512 项",
             Self::ExactRange => "幂指数绝对值最多 1024，分子和分母各最多 8192 个二进制位",
         }
     }
@@ -120,6 +127,12 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     }
     if verb == "取值表" || verb.eq_ignore_ascii_case("table") {
         return fraction_table(expression.trim());
+    }
+    if verb == "连分数" || verb.eq_ignore_ascii_case("continued-fraction") {
+        return continued_fraction(calculate_fraction(expression.trim())?);
+    }
+    if verb == "从连分数" || verb.eq_ignore_ascii_case("from-continued-fraction") {
+        return from_continued_fraction(expression.trim()).map(|value| value.to_string());
     }
     if verb == "小数" || verb.eq_ignore_ascii_case("decimal") {
         let (source, places) =
@@ -208,6 +221,54 @@ fn fraction_table(input: &str) -> Result<String, FractionError> {
         rows.push(format!("{x}\t{y}"));
     }
     Ok(rows.join("\n"))
+}
+
+fn continued_fraction(mut value: BigRational) -> Result<String, FractionError> {
+    let mut terms = Vec::new();
+    for _ in 0..MAX_CONTINUED_FRACTION_TERMS {
+        let whole = value.floor();
+        value -= &whole;
+        terms.push(whole.to_string());
+        if value.numer().sign() == Sign::NoSign {
+            return Ok(format!("[{}]", terms.join(",")));
+        }
+        value = value.recip();
+    }
+    Err(FractionError::ContinuedFractionLength)
+}
+
+fn from_continued_fraction(input: &str) -> Result<BigRational, FractionError> {
+    let input = input
+        .strip_prefix('[')
+        .and_then(|input| input.strip_suffix(']'))
+        .ok_or(FractionError::ContinuedFractionArguments)?;
+    let terms: Vec<_> = input
+        .split(',')
+        .take(MAX_CONTINUED_FRACTION_TERMS + 1)
+        .collect();
+    if terms.len() > MAX_CONTINUED_FRACTION_TERMS {
+        return Err(FractionError::ContinuedFractionLength);
+    }
+    let mut numerator = BigInt::from(1);
+    let mut denominator = BigInt::default();
+    for (index, term) in terms.into_iter().enumerate().rev() {
+        let term: BigInt = term
+            .trim()
+            .parse()
+            .map_err(|_| FractionError::ContinuedFractionArguments)?;
+        if index != 0 && term.sign() != Sign::Plus {
+            return Err(FractionError::ContinuedFractionArguments);
+        }
+        if term.magnitude().bits() > MAX_EXACT_BITS {
+            return Err(FractionError::ExactRange);
+        }
+        let next = term * &numerator + denominator;
+        if next.magnitude().bits() > MAX_EXACT_BITS {
+            return Err(FractionError::ExactRange);
+        }
+        denominator = std::mem::replace(&mut numerator, next);
+    }
+    Ok(BigRational::new(numerator, denominator))
 }
 
 pub(super) fn parse_fraction_literal(input: &str) -> Result<BigRational, FractionError> {
@@ -649,6 +710,43 @@ mod tests {
         assert_eq!(
             simplify_fraction("取值表 [2] xx"),
             Err(FractionError::Invalid)
+        );
+    }
+
+    #[test]
+    fn round_trips_finite_continued_fractions_exactly() {
+        for (value, terms) in [
+            ("355/113", "[3,7,16]"),
+            ("-7/3", "[-3,1,2]"),
+            ("4/7", "[0,1,1,3]"),
+            ("-5", "[-5]"),
+            ("0", "[0]"),
+        ] {
+            assert_eq!(
+                simplify_fraction(&format!("连分数 {value}")).as_deref(),
+                Ok(terms)
+            );
+            assert_eq!(
+                simplify_fraction(&format!("从连分数 {terms}")).as_deref(),
+                Ok(value)
+            );
+        }
+        assert_eq!(
+            simplify_fraction("from-continued-fraction [1,2,1]").as_deref(),
+            Ok("4/3")
+        );
+        for terms in ["[]", "[1,0]", "[1,-2]", "[1,,2]", "[1,2.1]"] {
+            assert_eq!(
+                simplify_fraction(&format!("从连分数 {terms}")),
+                Err(FractionError::ContinuedFractionArguments)
+            );
+        }
+        assert_eq!(
+            simplify_fraction(&format!(
+                "从连分数 [0{}]",
+                ",1".repeat(MAX_CONTINUED_FRACTION_TERMS)
+            )),
+            Err(FractionError::ContinuedFractionLength)
         );
     }
 

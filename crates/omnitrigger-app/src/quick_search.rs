@@ -753,7 +753,7 @@ impl Results {
                         .map(|text| ResultValue {
                             kind: ValueKind::ExactCalculation {
                                 // 为括号、运算符和至少一位操作数预留空间。
-                                can_continue: !text.contains(['(', '\n'])
+                                can_continue: !text.contains(['(', '[', '\n'])
                                     && text.len() <= calculator::QUERY_LIMIT - 4,
                             },
                             text,
@@ -2460,6 +2460,11 @@ mod tests {
         assert!(examples_for("统计: 移动")[0].starts_with("统计: 移动平均 "));
         assert!(examples_for("分数: 循环")[0].starts_with("分数: 循环小数 "));
         assert!(examples_for("分数: 取值")[0].starts_with("分数: 取值表 "));
+        assert!(examples_for("分数: 连")[0].starts_with("分数: 连分数 "));
+        assert!(matches!(
+            for_query("分数: 连分数 355/113", &[]),
+            Results::Value(Ok(value)) if value.text == "[3,7,16]" && value.continuation_hint().is_none()
+        ));
         assert!(matches!(
             for_query("分数: 取值表 [0,1] 1/3+x", &[]),
             Results::Value(Ok(value)) if value.text == "x\ty\n0\t1/3\n1\t4/3" && value.continuation_hint().is_none()

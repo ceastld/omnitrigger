@@ -2146,6 +2146,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         title: "给同一算式批量代入不同的 x",
         query: "分数: 取值表 [-2,0,3/2] x**2+1/3",
     },
+    Example {
+        icon: Icon::Terminal,
+        title: "求有理数的有限连分数",
+        query: "分数: 连分数 355/113",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "将有限连分数还原为精确分数",
+        query: "分数: 从连分数 [3,7,16]",
+    },
 ];
 
 fn search_key(text: &str) -> String {
@@ -2224,7 +2234,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::BatchCalculation if matches!(term, "分" | "分数") => {}
         Scope::Fraction
             if !term.is_empty()
-                && ["循环小数", "取值表"]
+                && ["循环小数", "取值表", "连分数", "从连分数"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::BatchConversion
