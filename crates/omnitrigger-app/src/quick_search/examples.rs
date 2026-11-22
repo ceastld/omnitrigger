@@ -116,6 +116,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "用精确根式表示皮尔逊相关系数",
+        query: "统计: 相关系数 0,0; 1,-1; 2,-1",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "用半径计算圆周长和面积",
         query: "圆: 半径 3",
     },
@@ -2043,6 +2048,10 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "总体协"
                     | "总体协方"
                     | "总体协方差"
+                    | "相"
+                    | "相关"
+                    | "相关系"
+                    | "相关系数"
             ) => {}
         Scope::Json
         | Scope::Csv

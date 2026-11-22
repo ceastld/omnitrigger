@@ -5,7 +5,7 @@ use num_rational::BigRational;
 
 use super::calculator::normalize;
 use super::fraction::{calculate_fraction, ensure_exact_size, format_square_root, FractionError};
-use super::linear_fit::{calculate_covariance, LinearFitError};
+use super::linear_fit::{calculate_correlation, calculate_covariance, LinearFitError};
 use super::operators::split_top_level_commas;
 
 const MAX_VALUES: usize = 128;
@@ -69,6 +69,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         "总体协方差" | "population-covariance" => {
             return calculate_covariance(values, false).map_err(StatisticsError::Paired);
+        }
+        "相关系数" | "correlation" => {
+            return calculate_correlation(values).map_err(StatisticsError::Paired);
         }
         "分位数" | "quantile" => {
             let (probability, values) = operation_and_arguments(values.trim());
@@ -350,6 +353,28 @@ fn bounded(value: BigRational) -> Result<BigRational, StatisticsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_signed_exact_pearson_correlation() {
+        for (input, expected) in [
+            ("相关系数 0,0; 1,1; 2,1", "√(3/4)"),
+            ("相关系数 0,0; 1,-1; 2,-1", "-√(3/4)"),
+            ("correlation 0,0; 1,1; 2,0", "0"),
+            ("相关系数 9007199254740992,1/2; 9007199254740993,-1/2", "-1"),
+        ] {
+            assert_eq!(
+                calculate_statistics(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        for input in ["相关系数 1,1; 1,2", "相关系数 1,2; 2,2"] {
+            assert_eq!(
+                calculate_statistics(input),
+                Err(StatisticsError::Paired(LinearFitError::ConstantCoordinate))
+            );
+        }
+    }
 
     #[test]
     fn computes_sample_and_population_covariance_for_exact_pairs() {

@@ -2,7 +2,7 @@ use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::calculator::normalize;
-use super::fraction::{calculate_fraction, ensure_exact_size, FractionError};
+use super::fraction::{calculate_fraction, ensure_exact_size, format_square_root, FractionError};
 use super::operators::split_top_level_commas;
 
 const MAX_POINTS: usize = 64;
@@ -13,6 +13,7 @@ pub(super) enum LinearFitError {
     InvalidPoint,
     TooManyPoints,
     ConstantX,
+    ConstantCoordinate,
     Evaluation(FractionError),
 }
 
@@ -23,6 +24,7 @@ impl LinearFitError {
             Self::InvalidPoint => "每组须包含 x 和 y，用逗号隔开",
             Self::TooManyPoints => "最多可输入 64 对数值",
             Self::ConstantX => "所有 x 相同，无法求拟合斜率",
+            Self::ConstantCoordinate => "x 和 y 各自至少需要两个不同的值才能计算相关系数",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "坐标和预测值须为整数、有限小数、分数或精确算式"
             }
@@ -47,15 +49,11 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
         _ => (input, None),
     };
     let sums = paired_sums(points)?;
-    // 用样本数乘以中心化平方和与乘积和，保持后续计算为精确有理数。
-    let variance_x = &sums.xx * &sums.count - &sums.x * &sums.x;
-    let covariance = sums.centered_cross_product();
-    let variance_y = &sums.yy * &sums.count - &sums.y * &sums.y;
-    check_size([&variance_x, &covariance, &variance_y])?;
-    if variance_x.numer().sign() == Sign::NoSign {
+    let products = sums.centered_products()?;
+    if products.square_x.numer().sign() == Sign::NoSign {
         return Err(LinearFitError::ConstantX);
     }
-    let slope = &covariance / &variance_x;
+    let slope = &products.cross / &products.square_x;
     let intercept = (sums.y - &slope * sums.x) / sums.count;
     check_size([&slope, &intercept])?;
     if let Some(x) = predict {
@@ -63,12 +61,10 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
         check_size([&y])?;
         return Ok(y.to_string());
     }
-    let r_squared = if variance_y.numer().sign() == Sign::NoSign {
+    let r_squared = if products.square_y.numer().sign() == Sign::NoSign {
         "未定义".to_owned()
     } else {
-        let r_squared = (&covariance * &covariance) / (variance_x * variance_y);
-        check_size([&r_squared])?;
-        r_squared.to_string()
+        products.squared_correlation()?.to_string()
     };
     Ok(format!("斜率 {slope} · 截距 {intercept}\nR² {r_squared}"))
 }
@@ -81,6 +77,21 @@ pub(super) fn calculate_covariance(points: &str, sample: bool) -> Result<String,
     Ok(covariance.to_string())
 }
 
+pub(super) fn calculate_correlation(points: &str) -> Result<String, LinearFitError> {
+    let products = paired_sums(points.trim())?.centered_products()?;
+    if products.square_x.numer().sign() == Sign::NoSign
+        || products.square_y.numer().sign() == Sign::NoSign
+    {
+        return Err(LinearFitError::ConstantCoordinate);
+    }
+    let root = format_square_root(&products.squared_correlation()?);
+    if products.cross.numer().sign() == Sign::Minus {
+        Ok(format!("-{root}"))
+    } else {
+        Ok(root)
+    }
+}
+
 struct PairedSums {
     count: BigInt,
     x: BigRational,
@@ -91,8 +102,33 @@ struct PairedSums {
 }
 
 impl PairedSums {
+    fn centered_products(&self) -> Result<CenteredProducts, LinearFitError> {
+        // 每项乘以样本数，保留精确的中心化平方和与乘积和。
+        let products = CenteredProducts {
+            square_x: &self.xx * &self.count - &self.x * &self.x,
+            cross: self.centered_cross_product(),
+            square_y: &self.yy * &self.count - &self.y * &self.y,
+        };
+        check_size([&products.square_x, &products.cross, &products.square_y])?;
+        Ok(products)
+    }
+
     fn centered_cross_product(&self) -> BigRational {
         &self.xy * &self.count - &self.x * &self.y
+    }
+}
+
+struct CenteredProducts {
+    square_x: BigRational,
+    cross: BigRational,
+    square_y: BigRational,
+}
+
+impl CenteredProducts {
+    fn squared_correlation(&self) -> Result<BigRational, LinearFitError> {
+        let value = (&self.cross * &self.cross) / (&self.square_x * &self.square_y);
+        check_size([&value])?;
+        Ok(value)
     }
 }
 
