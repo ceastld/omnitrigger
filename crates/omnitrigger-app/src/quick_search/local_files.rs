@@ -53,6 +53,8 @@ const OPTION_HELP: &[(&str, &str)] = &[
     ("后缀大小", "按扩展名汇总字节数"),
     ("修改月份统计", "按本地修改月份计数"),
     ("创建月份统计", "按本地创建月份计数"),
+    ("修改周统计", "按本地修改日期的 ISO 周计数"),
+    ("创建周统计", "按本地创建日期的 ISO 周计数"),
     ("修改日期统计", "按本地修改日期计数"),
     ("创建日期统计", "按本地创建日期计数"),
 ];
@@ -510,19 +512,29 @@ fn file_date_counts<'a>(
             }
             let day = i32::try_from(local / TICKS_PER_DAY + 1).ok()?;
             let date = NaiveDate::from_num_days_from_ce_opt(day)?;
-            let day = (grouping == FileDateGrouping::Day).then_some(date.day());
-            Some((date.year(), date.month(), day))
+            Some(match grouping {
+                FileDateGrouping::Day => (date.year(), date.month(), Some(date.day())),
+                FileDateGrouping::Month => (date.year(), date.month(), None),
+                FileDateGrouping::Week => {
+                    let week = date.iso_week();
+                    (week.year(), week.week(), None)
+                }
+            })
         });
         *counts.entry(bucket).or_insert(0usize) += 1;
     }
     let mut output = String::from(match grouping {
         FileDateGrouping::Day => "日期,数量",
         FileDateGrouping::Month => "月份,数量",
+        FileDateGrouping::Week => "周,数量",
     });
     for (bucket, count) in counts.into_iter().rev() {
         match bucket {
             Some((year, month, Some(day))) => {
                 write!(output, "\r\n{year:04}-{month:02}-{day:02},{count}")
+            }
+            Some((year, week, None)) if grouping == FileDateGrouping::Week => {
+                write!(output, "\r\n{year:04}-W{week:02},{count}")
             }
             Some((year, month, None)) => write!(output, "\r\n{year:04}-{month:02},{count}"),
             None => write!(output, "\r\n时间未知,{count}"),
@@ -731,6 +743,7 @@ enum FileDateField {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FileDateGrouping {
     Month,
+    Week,
     Day,
 }
 
@@ -818,6 +831,12 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
             }
             "创建月份统计" | "created-month-counts" if output == FileOutput::Entries => {
                 output = FileOutput::DateCounts(FileDateField::Created, FileDateGrouping::Month)
+            }
+            "修改周统计" | "modified-week-counts" if output == FileOutput::Entries => {
+                output = FileOutput::DateCounts(FileDateField::Modified, FileDateGrouping::Week)
+            }
+            "创建周统计" | "created-week-counts" if output == FileOutput::Entries => {
+                output = FileOutput::DateCounts(FileDateField::Created, FileDateGrouping::Week)
             }
             "修改日期统计" | "modified-day-counts" if output == FileOutput::Entries => {
                 output = FileOutput::DateCounts(FileDateField::Modified, FileDateGrouping::Day)
@@ -1524,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_files_by_local_calendar_month_or_day_and_keeps_missing_times_separate() {
+    fn groups_files_by_local_month_week_or_day_and_keeps_missing_times_separate() {
         let modified = r"C:\Work | | 修改月份统计";
         let created = r"C:\Work | | created-month-counts";
         let modified_days = r"C:\Work | | 修改日期统计";
@@ -1551,9 +1570,9 @@ mod tests {
         assert!(index.finish(
             &load,
             Ok(vec![
-                timed_entry("a.txt", "file", "2023-12-31", "2024-01-31"),
-                timed_entry("b.txt", "file", "2024-01-01", "2024-02-01"),
-                timed_entry("c.pdf", "file", "2024-01-01", "2024-02-29"),
+                timed_entry("a.txt", "file", "2020-12-31", "2024-01-31"),
+                timed_entry("b.txt", "file", "2021-01-01", "2024-02-01"),
+                timed_entry("c.pdf", "file", "2021-01-01", "2024-02-29"),
                 timed_entry("ignored", "directory", "2024-02-01", "2024-02-01"),
                 entry("unknown.txt", "file"),
             ]),
@@ -1565,14 +1584,22 @@ mod tests {
                 modified,
                 "月份,数量\r\n2024-02,2\r\n2024-01,1\r\n时间未知,1",
             ),
-            (created, "月份,数量\r\n2024-01,2\r\n2023-12,1\r\n时间未知,1"),
+            (created, "月份,数量\r\n2021-01,2\r\n2020-12,1\r\n时间未知,1"),
             (
                 modified_days,
                 "日期,数量\r\n2024-02-29,1\r\n2024-02-01,1\r\n2024-01-31,1\r\n时间未知,1",
             ),
             (
                 created_days,
-                "日期,数量\r\n2024-01-01,2\r\n2023-12-31,1\r\n时间未知,1",
+                "日期,数量\r\n2021-01-01,2\r\n2020-12-31,1\r\n时间未知,1",
+            ),
+            (
+                r"C:\Work | | 修改周统计",
+                "周,数量\r\n2024-W09,1\r\n2024-W05,2\r\n时间未知,1",
+            ),
+            (
+                r"C:\Work | | created-week-counts",
+                "周,数量\r\n2020-W53,3\r\n时间未知,1",
             ),
             (
                 r"C:\Work | | 修改月份统计 修改>=2024-02-01 后缀=txt",
@@ -1580,6 +1607,7 @@ mod tests {
             ),
             (r"C:\Work | absent | 修改月份统计", "月份,数量"),
             (r"C:\Work | absent | 修改日期统计", "日期,数量"),
+            (r"C:\Work | absent | 修改周统计", "周,数量"),
         ] {
             assert!(
                 matches!(
