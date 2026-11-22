@@ -250,6 +250,36 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "矩阵: 特征值 2,1; 1,2",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "计算两个复数的和",
+        query: "复数: 加法 1,2 @ 3,4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算两个复数的差",
+        query: "复数: 减法 1,2 @ 3,4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "精确计算两个复数的积",
+        query: "复数: 乘法 1,2 @ 3,4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "精确计算两个复数的商",
+        query: "复数: 除法 1,2 @ 3,4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "计算复数的模",
+        query: "复数: 模 3,4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "求复数的共轭",
+        query: "复数: 共轭 -2,3/4",
+    },
+    Example {
         icon: Icon::Layers,
         title: "用同一个分数乘矩阵中的每个元素",
         query: "矩阵: 数乘 -3/2 @ 1/3,2; -1,0",
@@ -939,6 +969,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Clock,
         title: "列出日期区间内的工作日",
         query: "日期: 列出 2026-11-20 到 2026-11-23 工作日",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "按固定工作日间隔列出日期",
+        query: "日期: 列出 2026-11-21 到 2026-12-01 每隔 3 个工作日",
     },
     Example {
         icon: Icon::Terminal,
@@ -2560,6 +2595,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         | Scope::Ulid
         | Scope::Vector
         | Scope::Matrix
+        | Scope::Complex
         | Scope::Circle
             if !term.contains(char::is_whitespace) => {}
         Scope::Date

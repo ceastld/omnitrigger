@@ -7,6 +7,7 @@ mod calendar;
 mod cidr;
 mod circle;
 mod color;
+mod complex;
 mod conversion;
 mod csv_tools;
 mod duration;
@@ -75,6 +76,7 @@ use calendar::{calculate_date, looks_like_date_query, DateError};
 use cidr::{calculate_cidr, CidrError};
 use circle::{calculate_circle, CircleError};
 use color::{calculate_contrast, convert_color, make_color_palette, ColorError};
+use complex::{calculate_complex, ComplexError};
 use conversion::{
     calculate_circuit, calculate_fuel_economy, calculate_pace, calculate_pixel_density,
     calculate_unit_price, conversion_target_input, convert, convert_batch, convert_period,
@@ -376,6 +378,7 @@ enum ValueError {
     Vector(VectorError),
     Matrix(MatrixError),
     Circle(CircleError),
+    Complex(ComplexError),
     Path(PathError),
 }
 
@@ -469,6 +472,7 @@ impl ValueError {
             Self::Vector(error) => error.message(),
             Self::Matrix(error) => error.message(),
             Self::Circle(error) => error.message(),
+            Self::Complex(error) => error.message(),
             Self::Path(error) => error.message(),
         };
         message.into()
@@ -530,6 +534,7 @@ impl ValueError {
                 | Self::Vector(VectorError::Incomplete)
                 | Self::Matrix(MatrixError::Incomplete)
                 | Self::Circle(CircleError::Incomplete)
+                | Self::Complex(ComplexError::Incomplete)
                 | Self::Path(PathError::Incomplete)
                 | Self::Json(JsonError::Incomplete)
                 | Self::Csv(CsvError::MissingInput | CsvError::UnclosedQuote)
@@ -827,6 +832,9 @@ impl Results {
                 Scope::Path => Self::text_value(path_component(term).map_err(ValueError::Path)),
                 Scope::Circle => {
                     Self::text_value(calculate_circle(term).map_err(ValueError::Circle))
+                }
+                Scope::Complex => {
+                    Self::text_value(calculate_complex(term).map_err(ValueError::Complex))
                 }
             };
         }
