@@ -213,6 +213,20 @@ impl LocalFilesIndex {
                     .then(|| (title_rank(&name, &filter), entry))
             })
             .collect();
+        if query.output == FileOutput::SizeTotal {
+            let summary = matches
+                .iter()
+                .filter(|(_, entry)| entry.kind == "file")
+                .try_fold((0usize, 0u128), |(count, total), (_, entry)| {
+                    Some((count + 1, total + u128::from(entry.size_bytes?)))
+                });
+            return match summary {
+                Some((count, total)) => {
+                    Results::text_value(Ok(format!("{count} 个文件 · 合计 {total} B")))
+                }
+                None => Results::LocalFilesUnavailable("有文件的大小无法读取".to_owned()),
+            };
+        }
         if query.output == FileOutput::ExtensionCounts {
             let names = matches
                 .iter()
@@ -368,6 +382,7 @@ enum FileOutput {
     Names,
     Json,
     ExtensionCounts,
+    SizeTotal,
 }
 
 fn split_query(query: &str) -> Option<FileQuery<'_>> {
@@ -405,6 +420,9 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             "后缀统计" | "extension-counts" if output == FileOutput::Entries => {
                 output = FileOutput::ExtensionCounts
             }
+            "大小合计" | "size-total" if output == FileOutput::Entries => {
+                output = FileOutput::SizeTotal
+            }
             _ => {
                 let (comparison, quantity) = option.split_once('=')?;
                 match comparison.to_ascii_lowercase().as_str() {
@@ -436,11 +454,18 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             }
         }
     }
-    if output == FileOutput::ExtensionCounts || extensions.is_some() {
+    if matches!(output, FileOutput::ExtensionCounts | FileOutput::SizeTotal) || extensions.is_some()
+    {
         if entry_type == DirectoryEntryType::Directory {
             return None;
         }
         entry_type = DirectoryEntryType::File;
+    }
+    if output == FileOutput::SizeTotal {
+        if !matches!(order, DirectoryOrder::Name | DirectoryOrder::SizeDescending) {
+            return None;
+        }
+        order = DirectoryOrder::SizeDescending;
     }
     let size_bounds = if minimum.is_some() || maximum.is_some() {
         let (minimum, maximum) = (minimum.unwrap_or(0), maximum.unwrap_or(u64::MAX));
@@ -787,6 +812,44 @@ mod tests {
         assert!(split_query(r"C:\Work | | 修改>=2026-11-31").is_none());
         assert!(split_query(r"C:\Work | | 创建>=2026-11-22 创建<=2026-11-21").is_none());
         assert!(split_query(r"C:\Work | | 修改>=2026-11-21 modified>=2026-11-21").is_none());
+    }
+
+    #[test]
+    fn totals_exact_bytes_for_filtered_local_files() {
+        let mut index = LocalFilesIndex::default();
+        let query = r"C:\Work | 报告 | 大小合计";
+        let load = index.request(Some(query)).unwrap();
+        assert_eq!(load.order, DirectoryOrder::SizeDescending);
+        assert_eq!(load.entry_type, DirectoryEntryType::File);
+        let sized = |name, size| {
+            let mut file = entry(name, "file");
+            file.size_bytes = Some(size);
+            file
+        };
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                sized("报告一.txt", u64::MAX),
+                sized("报告二.txt", u64::MAX),
+                sized("草稿.md", 12),
+                entry("未知.bin", "file"),
+            ])
+        ));
+        assert!(matches!(index.results(query), Results::Value(Ok(value))
+            if value.text == "2 个文件 · 合计 36893488147419103230 B"));
+        assert!(
+            matches!(index.results(r"C:\Work | 草稿 | size-total"), Results::Value(Ok(value))
+            if value.text == "1 个文件 · 合计 12 B")
+        );
+        assert!(
+            matches!(index.results(r"C:\Work | 缺失 | 大小合计"), Results::Value(Ok(value))
+            if value.text == "0 个文件 · 合计 0 B")
+        );
+        assert!(matches!(
+            index.results(r"C:\Work | 未知 | 大小合计"),
+            Results::LocalFilesUnavailable(_)
+        ));
+        assert!(split_query(r"C:\Work | | 大小合计 仅文件夹").is_none());
     }
 
     #[test]

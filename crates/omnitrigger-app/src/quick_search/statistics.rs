@@ -20,6 +20,8 @@ pub(super) enum StatisticsError {
     ZeroTotalWeight,
     InvalidProbability,
     InvalidWindowWidth,
+    AdjacentValueCount,
+    ZeroPreviousValue,
     NonPositiveHarmonicValue,
     StandardErrorCount,
     Paired(LinearFitError),
@@ -37,6 +39,8 @@ impl StatisticsError {
             Self::ZeroTotalWeight => "权重合计须大于零",
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
             Self::InvalidWindowWidth => "窗口大小须为正整数，且不能超过数值个数",
+            Self::AdjacentValueCount => "计算相邻项的变化至少需要两个数值",
+            Self::ZeroPreviousValue => "计算变化率时，每对数值的前一项须非零",
             Self::NonPositiveHarmonicValue => "调和平均需要所有数值大于零",
             Self::StandardErrorCount => "均值标准误至少需要两个观测值",
             Self::Paired(error) => error.message(),
@@ -100,6 +104,8 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "移动中位数" | "moving-median" => return moving_median(values.trim()),
         "累计合计" | "running-sum" => return running_totals(values.trim(), false),
         "累计平均" | "running-average" => return running_totals(values.trim(), true),
+        "差分" | "相邻差" | "difference" => return adjacent_changes(values.trim(), false),
+        "变化率" | "relative-change" => return adjacent_changes(values.trim(), true),
         "协方差" | "样本协方差" | "covariance" => {
             return calculate_covariance(values, true).map_err(StatisticsError::Paired);
         }
@@ -209,6 +215,33 @@ fn running_totals(input: &str, average: bool) -> Result<String, StatisticsError>
         output.push(value);
     }
     Ok(output.join("\n"))
+}
+
+fn adjacent_changes(input: &str, relative: bool) -> Result<String, StatisticsError> {
+    let terms = observation_terms(input)?;
+    if terms.len() < 2 {
+        return Err(StatisticsError::AdjacentValueCount);
+    }
+    let values = terms
+        .into_iter()
+        .map(|term| calculate_fraction(term).map_err(StatisticsError::Evaluation))
+        .collect::<Result<Vec<_>, _>>()?;
+    values
+        .windows(2)
+        .map(|pair| {
+            let previous = &pair[0];
+            let difference = bounded(&pair[1] - previous)?;
+            if relative {
+                if previous.numer().sign() == Sign::NoSign {
+                    return Err(StatisticsError::ZeroPreviousValue);
+                }
+                bounded(difference / previous).map(|value| value.to_string())
+            } else {
+                Ok(difference.to_string())
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|lines| lines.join("\n"))
 }
 
 fn sliding_window_values(input: &str) -> Result<(usize, Vec<BigRational>), StatisticsError> {
@@ -543,6 +576,30 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn compares_adjacent_values_in_order_with_exact_directions() {
+        assert_eq!(
+            calculate_statistics("差分 3/2,1\n5/2").as_deref(),
+            Ok("-1/2\n3/2")
+        );
+        assert_eq!(
+            calculate_statistics("relative-change 20,15,45").as_deref(),
+            Ok("-1/4\n2")
+        );
+        assert_eq!(
+            calculate_statistics("变化率 -2,-1,0").as_deref(),
+            Ok("-1/2\n-1")
+        );
+        assert_eq!(
+            calculate_statistics("差分 1"),
+            Err(StatisticsError::AdjacentValueCount)
+        );
+        assert_eq!(
+            calculate_statistics("变化率 1,0,2"),
+            Err(StatisticsError::ZeroPreviousValue)
+        );
     }
 
     #[test]
