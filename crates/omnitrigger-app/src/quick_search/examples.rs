@@ -2878,6 +2878,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计 CSV 单元格中正则表达式的匹配次数",
+        query: "CSV: 正则计数列 [\"次数\",\"备注\",\"[0-9]+\"]\n编号,备注\n1,A12 B34 C5\n2,无编号\n3,",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按部门逐行累计 CSV 金额",
         query: "CSV: 累计合计列 [\"累计金额\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,0.5",
     },
