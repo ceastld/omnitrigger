@@ -1115,6 +1115,7 @@ pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
             .filter_map(|(name, base)| {
                 Some(InputSuggestion {
                     expression: expression_for(name)?,
+                    label: None,
                     result: base.convert(source).ok()?,
                 })
             })
@@ -1137,6 +1138,7 @@ pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
             }
             Some(InputSuggestion {
                 expression: expression_for(name)?,
+                label: None,
                 result: format_conversion(amount, &source, &target).ok()?,
             })
         })

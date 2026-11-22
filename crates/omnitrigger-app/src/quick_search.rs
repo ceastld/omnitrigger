@@ -162,11 +162,13 @@ enum Results {
     Calculations(Vec<InputSuggestion>),
     Conversions(Vec<InputSuggestion>),
     ConversionTargets(Vec<InputSuggestion>),
+    FileOptions(Vec<InputSuggestion>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InputSuggestion {
     expression: String,
+    label: Option<&'static str>,
     result: String,
 }
 
@@ -974,7 +976,8 @@ impl Results {
             Self::Help(items) => Some(EXAMPLES[*items.get(selected)?].query),
             Self::Calculations(items)
             | Self::Conversions(items)
-            | Self::ConversionTargets(items) => Some(&items.get(selected)?.expression),
+            | Self::ConversionTargets(items)
+            | Self::FileOptions(items) => Some(&items.get(selected)?.expression),
             _ => None,
         }
     }
@@ -1042,6 +1045,9 @@ impl Results {
             }
             Self::ConversionTargets(items) if !items.is_empty() => {
                 132. + items.len().min(CONVERSION_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
+            }
+            Self::FileOptions(items) if !items.is_empty() => {
+                132. + items.len().min(EXAMPLE_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
             }
             Self::Calculations(items) | Self::Conversions(items) if !items.is_empty() => {
                 132. + items.len() as f32 * EXAMPLE_ROW_HEIGHT
@@ -1240,10 +1246,11 @@ impl QuickSearch {
     }
 
     fn refresh_results(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if !query.trim_start().starts_with(['?', '？']) {
+        let next = self.index.results(query);
+        if !query.trim_start().starts_with(['?', '？']) && !matches!(&next, Results::FileOptions(_))
+        {
             self.input_before_help = None;
         }
-        let next = self.index.results(query);
         if self.results != next {
             let previous_height = self.results.height(self.value_line_limit());
             let next_height = next.height(MAX_VALUE_LINES);
@@ -1609,13 +1616,19 @@ impl QuickSearch {
             "f1" => {
                 if !event.is_held {
                     let query = self.input.read(cx).text();
-                    if query.trim_start().starts_with(['?', '？']) {
+                    if query.trim_start().starts_with(['?', '？'])
+                        || matches!(&self.results, Results::FileOptions(_))
+                    {
                         if let Some(previous) = self.input_before_help.take() {
                             self.fill_query(previous, window, cx);
                         }
                     } else {
+                        let help = match scoped_query(query.trim()) {
+                            Some((Scope::LocalFiles, term)) => local_files::option_help_query(term),
+                            _ => None,
+                        };
                         self.input_before_help = Some(query);
-                        self.fill_query("?".to_owned(), window, cx);
+                        self.fill_query(help.unwrap_or_else(|| "?".to_owned()), window, cx);
                     }
                 }
             }
@@ -1687,7 +1700,8 @@ impl QuickSearch {
                     Results::Help(items) => items.len(),
                     Results::Calculations(items)
                     | Results::Conversions(items)
-                    | Results::ConversionTargets(items) => items.len(),
+                    | Results::ConversionTargets(items)
+                    | Results::FileOptions(items) => items.len(),
                     Results::Value(_)
                     | Results::ApplicationsLoading
                     | Results::ApplicationsUnavailable(_)
@@ -1716,6 +1730,7 @@ impl QuickSearch {
         let (count, page_size) = match &self.results {
             Results::Destinations(items) => (items.len(), DESTINATION_PAGE_SIZE),
             Results::ConversionTargets(items) => (items.len(), CONVERSION_PAGE_SIZE),
+            Results::FileOptions(items) => (items.len(), EXAMPLE_PAGE_SIZE),
             Results::Help(items) => (items.len(), EXAMPLE_PAGE_SIZE),
             Results::Value(Ok(_)) => (self.expanded_value_pages.as_ref().map_or(0, Vec::len), 1),
             _ => return false,
@@ -1882,6 +1897,10 @@ impl QuickSearch {
             .flex_col()
             .children(visible.map(|(index, item)| {
                 let expression = item.expression.clone();
+                let (label, detail) = match item.label {
+                    Some(label) => (label.to_owned(), item.result.clone()),
+                    None => (expression.clone(), format!("= {}", item.result)),
+                };
                 self.suggestion_row(index, EXAMPLE_ROW_HEIGHT)
                     .child(icon(glyph, 16., theme::ACCENT))
                     .child(
@@ -1890,7 +1909,7 @@ impl QuickSearch {
                             .min_w_0()
                             .truncate()
                             .font_family(theme::MONO_FONT)
-                            .child(expression.clone()),
+                            .child(label),
                     )
                     .child(
                         div()
@@ -1898,7 +1917,7 @@ impl QuickSearch {
                             .truncate()
                             .font_family(theme::MONO_FONT)
                             .text_color(rgb(theme::ACCENT))
-                            .child(format!("= {}", item.result)),
+                            .child(detail),
                     )
                     .when(index == self.selected, |row| {
                         row.child(div().text_color(rgb(theme::TEXT_MUTED)).child("Tab 填入"))
@@ -2076,6 +2095,12 @@ impl QuickSearch {
             }
             Results::ConversionTargets(items) => {
                 self.render_input_suggestions(items, Icon::Layers, CONVERSION_PAGE_SIZE, cx)
+            }
+            Results::FileOptions(items) if items.is_empty() => row
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child("没有可追加的选项"),
+            Results::FileOptions(items) => {
+                self.render_input_suggestions(items, Icon::Layers, EXAMPLE_PAGE_SIZE, cx)
             }
             Results::ApplicationsLoading => row
                 .text_color(rgb(theme::TEXT_MUTED))
@@ -2810,6 +2835,8 @@ mod tests {
     fn search_shortcuts_handle_text_and_page_navigation() {
         const PARENT: &str = r"文件: C:\__omnitrigger_quick_search_test__ | child | 仅文件夹";
         const CHILD: &str = r"文件: C:\__omnitrigger_quick_search_test__\child |";
+        const FILE_QUERY: &str = r"文件: C:\__omnitrigger_quick_search_test__ | child | 大小";
+        const FILE_HELP: &str = r"文件: C:\__omnitrigger_quick_search_test__ | child | 大小 ?";
         let (send, receive) = std::sync::mpsc::channel();
         gpui::Application::new()
             .with_assets(crate::Assets)
@@ -2972,6 +2999,31 @@ mod tests {
                             })
                         })
                         .unwrap();
+                    let file_help = reopened
+                        .update(cx, |search, window, cx| {
+                            search.fill_query(FILE_QUERY, window, cx);
+                            search.refresh_results(FILE_QUERY, window, cx);
+                            [
+                                ("f1", true),
+                                ("f1", false),
+                                ("f1", true),
+                                ("f1", false),
+                                ("f1", false),
+                                ("down", false),
+                                ("tab", false),
+                            ]
+                            .map(|(key, is_held)| {
+                                let event = KeyDownEvent {
+                                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                                    is_held,
+                                };
+                                search.key_down(&event, window, cx);
+                                let input = search.input.read(cx).text();
+                                search.refresh_results(&input, window, cx);
+                                input
+                            })
+                        })
+                        .unwrap();
                     send.send((
                         states,
                         reopened_states,
@@ -2979,6 +3031,7 @@ mod tests {
                         window_refresh,
                         app_refresh,
                         file_navigation,
+                        file_help,
                     ))
                     .unwrap();
                     cx.update(|cx| cx.quit()).unwrap();
@@ -2992,6 +3045,7 @@ mod tests {
             window_refresh,
             app_refresh,
             file_navigation,
+            file_help,
         ) = receive.recv().unwrap();
         assert_eq!(reopened_states, ["", "3**4"]);
         assert_eq!(window_refresh, (true, true, true));
@@ -2999,6 +3053,18 @@ mod tests {
         assert_eq!(
             file_navigation,
             [PARENT, CHILD, CHILD, PARENT, PARENT, CHILD]
+        );
+        assert_eq!(
+            file_help,
+            [
+                FILE_QUERY,
+                FILE_HELP,
+                FILE_HELP,
+                FILE_QUERY,
+                FILE_HELP,
+                FILE_HELP,
+                r"文件: C:\__omnitrigger_quick_search_test__ | child | 大小 仅文件夹",
+            ]
         );
         let last_example_page = (EXAMPLES.len() - 1) / EXAMPLE_PAGE_SIZE * EXAMPLE_PAGE_SIZE;
         assert_eq!(

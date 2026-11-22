@@ -18,6 +18,7 @@ impl RecentValues {
             0,
             InputSuggestion {
                 expression: expression.to_owned(),
+                label: None,
                 result: result.to_owned(),
             },
         );

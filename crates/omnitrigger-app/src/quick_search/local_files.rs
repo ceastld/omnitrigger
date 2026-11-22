@@ -16,7 +16,8 @@ use omnitrigger_windows::{
 };
 
 use super::{
-    conversion::exact_byte_quantity, csv_tools::csv_cell, title_rank, Destination, Results,
+    conversion::exact_byte_quantity, csv_tools::csv_cell, title_rank, Destination, InputSuggestion,
+    Results, INPUT_CHARACTER_LIMIT,
 };
 
 pub(super) const FOLDER_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -25,6 +26,23 @@ const MAX_NAVIGATION_HISTORY: usize = 16;
 const TICKS_PER_DAY: u64 = 864_000_000_000;
 const FILETIME_TICKS_PER_SECOND: u64 = 10_000_000;
 const FILETIME_UNIX_EPOCH_SECONDS: i64 = 11_644_473_600;
+const OPTION_HELP: &[(&str, &str)] = &[
+    ("仅文件", "只匹配文件"),
+    ("仅文件夹", "只匹配文件夹"),
+    ("最近修改", "按修改时间从新到旧"),
+    ("最近创建", "按创建时间从新到旧"),
+    ("大小", "按字节数从大到小"),
+    ("前=10", "取排序后的前 10 项"),
+    ("路径列表", "每行一个绝对路径"),
+    ("名称列表", "每行一个名称"),
+    ("路径JSON", "导出路径数组"),
+    ("时间CSV", "导出 UTC 时间与路径"),
+    ("大小合计", "汇总文件数和字节数"),
+    ("后缀统计", "按扩展名汇总数量"),
+    ("后缀大小", "按扩展名汇总字节数"),
+    ("修改月份统计", "按本地修改月份计数"),
+    ("创建月份统计", "按本地创建月份计数"),
+];
 
 #[derive(Default)]
 pub(super) struct LocalFilesIndex {
@@ -129,6 +147,9 @@ impl LocalFilesIndex {
     }
 
     pub(super) fn request(&mut self, query: Option<&str>) -> Option<Arc<DirectoryLoad>> {
+        if query.is_some_and(|query| option_help_prefix(query).is_some()) {
+            return None;
+        }
         let Some(query) = query.and_then(split_query) else {
             self.invalidate();
             return None;
@@ -191,6 +212,9 @@ impl LocalFilesIndex {
     }
 
     pub(super) fn results(&self, query: &str) -> Results {
+        if let Some((prefix, current)) = option_help_prefix(query) {
+            return Results::FileOptions(file_option_suggestions(prefix, current));
+        }
         let Some(query) = split_query(query) else {
             return Results::LocalFilesPrompt;
         };
@@ -434,7 +458,46 @@ fn extension_options(list: &str) -> impl Iterator<Item = &str> {
         .map(|extension| extension.strip_prefix('.').unwrap_or(extension))
 }
 
-#[derive(Clone, Copy)]
+pub(super) fn option_help_query(query: &str) -> Option<String> {
+    split_query(query)?;
+    let separator = if query.split('|').nth(2).is_some() {
+        " "
+    } else {
+        " | "
+    };
+    let help = format!("文件: {query}{separator}?");
+    (help.chars().count() <= INPUT_CHARACTER_LIMIT).then_some(help)
+}
+
+fn option_help_prefix(query: &str) -> Option<(&str, FileQuery<'_>)> {
+    let prefix = query.trim_end().strip_suffix(['?', '？'])?;
+    if prefix.split('|').nth(2).is_none()
+        || !prefix.ends_with(|ch: char| ch == '|' || ch.is_whitespace())
+    {
+        return None;
+    }
+    Some((prefix.trim_end(), split_query(prefix)?))
+}
+
+fn file_option_suggestions(prefix: &str, current: FileQuery<'_>) -> Vec<InputSuggestion> {
+    OPTION_HELP
+        .iter()
+        .filter_map(|&(label, detail)| {
+            let term = format!("{prefix} {label}");
+            let candidate = split_query(&term)?;
+            let expression = format!("文件: {term}");
+            (candidate != current && expression.chars().count() <= INPUT_CHARACTER_LIMIT).then(
+                || InputSuggestion {
+                    expression,
+                    label: Some(label),
+                    result: detail.to_owned(),
+                },
+            )
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct FileQuery<'a> {
     directory: &'a str,
     filter: &'a str,
@@ -470,7 +533,7 @@ impl FileQuery<'_> {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct DateBounds {
     minimum: Option<u64>,
     maximum: Option<u64>,
@@ -1250,6 +1313,48 @@ mod tests {
         }
         assert!(split_query(r"C:\Work | | 修改月份统计 仅文件夹").is_none());
         assert!(split_query(r"C:\Work | | 修改月份统计 创建月份统计").is_none());
+    }
+
+    #[test]
+    fn offers_only_compatible_file_options_and_preserves_the_directory_query() {
+        let mut index = LocalFilesIndex::default();
+        let query = r#""C:\Work Folder" | report | 大小"#;
+        let help = r#""C:\Work Folder" | report | 大小 ？"#;
+        assert_eq!(
+            option_help_query(query).as_deref(),
+            Some(r#"文件: "C:\Work Folder" | report | 大小 ?"#)
+        );
+        assert_eq!(
+            option_help_query(r"C:\Work | report").as_deref(),
+            Some(r"文件: C:\Work | report | ?")
+        );
+        assert!(index.request(Some(help)).is_none());
+        assert!(index.current.is_none());
+        let Results::FileOptions(all) = index.results(r"C:\Work | | ?") else {
+            panic!("缺少文件选项");
+        };
+        assert_eq!(all.len(), OPTION_HELP.len());
+        let load = index.request(Some(query)).unwrap();
+        assert!(index.request(Some(help)).is_none());
+        assert!(Arc::ptr_eq(&load, &index.current.as_ref().unwrap().load));
+        let Results::FileOptions(items) = index.results(help) else {
+            panic!("缺少文件选项");
+        };
+        assert!(items.iter().any(|item| {
+            item.label == Some("大小合计")
+                && item.expression == r#"文件: "C:\Work Folder" | report | 大小 大小合计"#
+        }));
+        assert!(!items.iter().any(|item| {
+            matches!(item.label, Some("大小" | "最近修改" | "最近创建"))
+        }));
+        assert!(matches!(
+            index.results(r"C:\Work | report?"),
+            Results::LocalFilesLoading
+        ));
+        assert!(matches!(
+            index.results(r"C:\Work | report | 前=1?"),
+            Results::LocalFilesPrompt
+        ));
     }
 
     #[test]

@@ -24,7 +24,7 @@ use super::{
 };
 
 const MAX_PIVOT_BYTES: usize = 1024 * 1024;
-const MAX_COMBINED_BYTES: usize = 1024 * 1024;
+const MAX_EXPANDED_CSV_BYTES: usize = 1024 * 1024;
 const MAX_STACK_TABLES: usize = 16;
 const MAX_FORMULA_RECORDS: usize = 32;
 const MAX_ADDED_CELLS: usize = 16_384;
@@ -54,6 +54,7 @@ pub(super) enum CsvError {
     HeaderNameConflict,
     JoinArguments,
     JoinTooLarge,
+    FillTooLarge,
     StackArguments,
     ComputedColumnArguments,
     FormulaColumnArguments,
@@ -104,6 +105,7 @@ impl CsvError {
             Self::HeaderNameConflict => "表头中已经有这个新列名",
             Self::JoinArguments => "填写两个连接列，再填写包含两张 CSV 表格的 JSON 字符串数组",
             Self::JoinTooLarge => "表格合并结果超过 1 MiB，请缩小表格范围",
+            Self::FillTooLarge => "填充结果超过 1 MiB，请缩小表格范围",
             Self::StackArguments => "用 JSON 字符串数组填写 2 至 16 张含表头的 CSV 表格",
             Self::ComputedColumnArguments => {
                 "用 JSON 数组填写新列名、两列和运算，例如 [\"金额\",2,\"*\",3]"
@@ -151,6 +153,7 @@ enum Operation {
     SelectNamedColumns(Vec<String>),
     DropColumns(Vec<ColumnReference>),
     TrimColumns(Vec<ColumnReference>),
+    FillDown(Vec<ColumnReference>),
     SelectRows(String),
     RenameColumn([String; 2]),
     ReplaceValue {
@@ -316,6 +319,12 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
             Operation::TrimColumns(columns)
+        }
+        "向下填充" | "fill-down" => {
+            let (columns, data) =
+                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
+            input = data;
+            Operation::FillDown(columns)
         }
         "改列名" | "rename-header" => {
             let (names, data) = json_argument_and_data(input, CsvError::RenameArguments)?;
@@ -501,6 +510,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::SelectNamedColumns(names) => select_named_columns(&rows, &names),
         Operation::DropColumns(columns) => drop_columns(&rows, &columns),
         Operation::TrimColumns(columns) => trim_column_values(rows, &columns),
+        Operation::FillDown(columns) => fill_down_csv(&rows, &columns),
         Operation::SelectRows(ranges) => select_data_rows(&rows, &ranges),
         Operation::RenameColumn(names) => rename_column(rows, names),
         Operation::ReplaceValue {
@@ -575,26 +585,29 @@ fn join_csv(input: &str, kind: JoinKind) -> Result<String, CsvError> {
         by_key.entry(row[right_key].as_str()).or_default().push(row);
     }
     let mut output = String::new();
-    append_combined_csv_row(
+    append_bounded_csv_row(
         &mut output,
         left_header
             .iter()
             .map(String::as_str)
             .chain(joined_csv_columns(right_header, right_key)),
+        CsvError::JoinTooLarge,
     )?;
     for left in left_rows {
         let fields = left.iter().map(String::as_str);
         if let Some(matches) = by_key.get(left[left_key].as_str()) {
             for right in matches {
-                append_combined_csv_row(
+                append_bounded_csv_row(
                     &mut output,
                     fields.clone().chain(joined_csv_columns(right, right_key)),
+                    CsvError::JoinTooLarge,
                 )?;
             }
         } else if matches!(kind, JoinKind::Left | JoinKind::Full) {
-            append_combined_csv_row(
+            append_bounded_csv_row(
                 &mut output,
                 fields.chain(std::iter::repeat_n("", right_header.len() - 1)),
+                CsvError::JoinTooLarge,
             )?;
         }
     }
@@ -605,9 +618,10 @@ fn join_csv(input: &str, kind: JoinKind) -> Result<String, CsvError> {
             if !left_keys.contains(key) {
                 let fields =
                     (0..left_header.len()).map(|index| if index == left_key { key } else { "" });
-                append_combined_csv_row(
+                append_bounded_csv_row(
                     &mut output,
                     fields.chain(joined_csv_columns(right, right_key)),
+                    CsvError::JoinTooLarge,
                 )?;
             }
         }
@@ -647,14 +661,18 @@ fn stack_csv(input: &str) -> Result<String, CsvError> {
     }
     let mut row_fields = vec![""; header.len()];
     let mut output = String::new();
-    append_combined_csv_row(&mut output, header.into_iter())?;
+    append_bounded_csv_row(&mut output, header.into_iter(), CsvError::JoinTooLarge)?;
     for (table, projection) in tables.iter().zip(projections) {
         for row in &table[1..] {
             row_fields.fill("");
             for (&index, cell) in projection.iter().zip(row) {
                 row_fields[index] = cell.as_str();
             }
-            append_combined_csv_row(&mut output, row_fields.iter().copied())?;
+            append_bounded_csv_row(
+                &mut output,
+                row_fields.iter().copied(),
+                CsvError::JoinTooLarge,
+            )?;
         }
     }
     Ok(output)
@@ -667,17 +685,20 @@ fn joined_csv_columns(row: &[String], omitted: usize) -> impl Iterator<Item = &s
         .map(|(_, field)| field.as_str())
 }
 
-fn append_combined_csv_row<'a>(
+fn append_bounded_csv_row<'a>(
     output: &mut String,
     fields: impl Iterator<Item = &'a str>,
+    too_large: CsvError,
 ) -> Result<(), CsvError> {
-    let line = fields.map(csv_cell).collect::<Vec<_>>().join(",");
-    let separator = if output.is_empty() { "" } else { "\r\n" };
-    if output.len() + separator.len() + line.len() > MAX_COMBINED_BYTES {
-        return Err(CsvError::JoinTooLarge);
+    let mut separator = if output.is_empty() { "" } else { "\r\n" };
+    for field in fields.map(csv_cell) {
+        if output.len() + separator.len() + field.len() > MAX_EXPANDED_CSV_BYTES {
+            return Err(too_large);
+        }
+        output.push_str(separator);
+        output.push_str(&field);
+        separator = ",";
     }
-    output.push_str(separator);
-    output.push_str(&line);
     Ok(())
 }
 
@@ -898,6 +919,32 @@ fn trim_column_values(
         }
     }
     Ok(write_rows(&rows, ','))
+}
+
+fn fill_down_csv(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
+    let mut output = String::new();
+    append_bounded_csv_row(
+        &mut output,
+        header.iter().map(String::as_str),
+        CsvError::FillTooLarge,
+    )?;
+    let mut last = vec![""; columns.len()];
+    let mut fields = Vec::with_capacity(header.len());
+    for row in records {
+        fields.clear();
+        fields.extend(row.iter().map(String::as_str));
+        for (&column, latest) in columns.iter().zip(&mut last) {
+            if fields[column].is_empty() {
+                fields[column] = *latest;
+            } else {
+                *latest = fields[column];
+            }
+        }
+        append_bounded_csv_row(&mut output, fields.iter().copied(), CsvError::FillTooLarge)?;
+    }
+    Ok(output)
 }
 
 fn compute_column(
@@ -1691,6 +1738,32 @@ mod tests {
         assert_eq!(
             transform_csv("去空白 [\"名称\",1] 名称,编号\n茶,001"),
             Err(CsvError::NamedColumnArguments)
+        );
+    }
+
+    #[test]
+    fn fills_selected_empty_cells_from_the_previous_nonempty_value_with_a_size_limit() {
+        let input = concat!(
+            "向下填充 [\"地区\",2] 地区,月份,编号\n",
+            ",01,001\n\"华,北\",,002\n,,003\n ,02,004\n,,005",
+        );
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("地区,月份,编号\r\n\"\",01,001\r\n\"华,北\",01,002\r\n\"华,北\",01,003\r\n ,02,004\r\n ,02,005")
+        );
+        assert_eq!(
+            transform_csv("fill-down 1 地区,编号").as_deref(),
+            Ok("地区,编号")
+        );
+        assert_eq!(
+            transform_csv("向下填充 [1,\"地区\"] 地区,编号\n华北,001"),
+            Err(CsvError::NamedColumnArguments)
+        );
+        let large = "x".repeat(4096);
+        let many_blanks = "\n,002".repeat(260);
+        assert_eq!(
+            transform_csv(&format!("fill-down 1 地区,编号\n{large},001{many_blanks}")),
+            Err(CsvError::FillTooLarge)
         );
     }
 
