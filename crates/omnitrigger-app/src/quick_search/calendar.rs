@@ -7,6 +7,15 @@ use super::calculator::normalize;
 const MAX_LISTED_DATES: usize = 366;
 const MAX_DATE_RANGES: usize = 32;
 const MAX_SPLIT_RANGES: usize = 366;
+const WEEKDAY_LABELS: [&str; 7] = [
+    "星期一",
+    "星期二",
+    "星期三",
+    "星期四",
+    "星期五",
+    "星期六",
+    "星期日",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DateError {
@@ -620,6 +629,7 @@ enum DateRangeSplit {
     MonthsCsv,
     WeeksCsv,
     QuartersCsv,
+    DaysCsv,
 }
 
 fn split_date_range(
@@ -656,6 +666,7 @@ fn split_date_range(
         DateRangeSplit::MonthsCsv => ranges.push("开始,结束,天数,工作日".to_owned()),
         DateRangeSplit::WeeksCsv => ranges.push("周号,开始,结束,天数,工作日".to_owned()),
         DateRangeSplit::QuartersCsv => ranges.push("季度,开始,结束,天数,工作日".to_owned()),
+        DateRangeSplit::DaysCsv => ranges.push("日期,星期,工作日".to_owned()),
     }
     for _ in 0..MAX_SPLIT_RANGES {
         let quarter = start.month0() / 3;
@@ -673,6 +684,7 @@ fn split_date_range(
                 in_range(NaiveDate::from_ymd_opt(start.year(), quarter * 3 + 1, 1))?,
                 3,
             )?,
+            DateRangeSplit::DaysCsv => start,
         }
         .min(end);
         let row = if csv {
@@ -695,6 +707,10 @@ fn split_date_range(
                     let number = quarter + 1;
                     format!("{year:04}-Q{number},{start},{last},{days},{workdays}")
                 }
+                DateRangeSplit::DaysCsv => {
+                    let weekday = WEEKDAY_LABELS[start.weekday().num_days_from_monday() as usize];
+                    format!("{start},{weekday},{workdays}")
+                }
                 _ => format!("{start},{last},{days},{workdays}"),
             }
         } else {
@@ -710,6 +726,7 @@ fn split_date_range(
         DateRangeSplit::Months | DateRangeSplit::MonthsCsv => DateError::TooManyMonthRanges,
         DateRangeSplit::WeeksCsv => DateError::TooManyWeekRanges,
         DateRangeSplit::QuartersCsv => DateError::TooManyQuarterRanges,
+        DateRangeSplit::DaysCsv => DateError::TooManyDates,
     })
 }
 
@@ -1021,6 +1038,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         "按季拆分csv" | "按季度拆分csv" | "split-quarters-csv" => {
             return split_date_range(rest, today, DateRangeSplit::QuartersCsv)
         }
+        "逐日csv" | "days-csv" => return split_date_range(rest, today, DateRangeSplit::DaysCsv),
         _ => {}
     }
     if let Some((year, day)) = year_day_parts(input) {
@@ -1080,17 +1098,8 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     let input = display_query.map_or(input, |input| if input.is_empty() { "今天" } else { input });
     let (date, rest) = date_operand(input, today)?;
     let display_date = |date: NaiveDate| {
-        const DAYS: [&str; 7] = [
-            "星期一",
-            "星期二",
-            "星期三",
-            "星期四",
-            "星期五",
-            "星期六",
-            "星期日",
-        ];
         if weekday.is_some() {
-            Ok(DAYS[date.weekday().num_days_from_monday() as usize].to_owned())
+            Ok(WEEKDAY_LABELS[date.weekday().num_days_from_monday() as usize].to_owned())
         } else if week_number.is_some() || week_date.is_some() {
             let week = date.iso_week();
             let year = week.year();
@@ -1210,6 +1219,33 @@ mod tests {
         assert_eq!(
             calculate_date("按周拆分CSV 2020-01-01 至 2030-01-01", today),
             Err(DateError::TooManyWeekRanges)
+        );
+    }
+
+    #[test]
+    fn exports_every_date_with_its_weekday_and_explicit_workday_classification() {
+        let today = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        assert_eq!(
+            calculate_date(
+                r#"逐日CSV 今天 至 2024-03-03 例外 [["2024-03-01"],["2024-03-02"]]"#,
+                today
+            )
+            .as_deref(),
+            Ok(concat!(
+                "日期,星期,工作日\r\n",
+                "2024-02-29,星期四,1\r\n",
+                "2024-03-01,星期五,0\r\n",
+                "2024-03-02,星期六,1\r\n",
+                "2024-03-03,星期日,0",
+            ))
+        );
+        assert_eq!(
+            calculate_date("days-csv 2024-01-01 至 2025-01-01", today),
+            Err(DateError::TooManyDates)
+        );
+        assert_eq!(
+            calculate_date("days-csv 9999-12-31 至 9999-12-31", today).as_deref(),
+            Ok("日期,星期,工作日\r\n9999-12-31,星期五,1")
         );
     }
 

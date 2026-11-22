@@ -1111,6 +1111,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "日期: 按季度拆分CSV 2024-03-30 至 2024-04-02",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "逐日导出星期和工作日标记",
+        query: r#"日期: 逐日CSV 2024-02-29 至 2024-03-03 例外 [["2024-03-01"],["2024-03-02"]]"#,
+    },
+    Example {
         icon: Icon::Clock,
         title: "查全年日期和工作日",
         query: "日期: 2024",
@@ -2473,6 +2478,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求各组最大值和最小值的精确差",
+        query: "CSV: 分组极差 [\"状态\"] \"金额\" 状态,金额\n完成,1/2\n待办,-2.50\n完成,2/3\n待办,-1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按两个分类透视汇总 CSV 数值",
         query: "CSV: 透视合计 [\"地区\",\"状态\",\"金额\"] 地区,状态,金额\n北,完成,1/2\n南,待办,0\n北,完成,2/3\n南,完成,-1",
     },
@@ -3011,6 +3021,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "按月拆分CSV",
                     "按周拆分CSV",
                     "按季度拆分CSV",
+                    "逐日CSV",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}

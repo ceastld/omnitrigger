@@ -338,6 +338,7 @@ enum ColumnAggregation {
     Average,
     Minimum,
     Maximum,
+    Range,
 }
 
 enum ColumnCondition {
@@ -592,7 +593,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             Operation::CountByColumns(columns)
         }
         "分组合计" | "group-sum" | "分组平均" | "group-average" | "分组最小" | "group-min"
-        | "分组最大" | "group-max" => {
+        | "分组最大" | "group-max" | "分组极差" | "group-range" => {
             let (columns, rest) = column_reference_arguments(input, CsvError::GroupingColumns)?;
             let (amount, data) = single_column_argument(rest, CsvError::AggregateColumn)?;
             input = data;
@@ -603,6 +604,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                     "分组平均" | "group-average" => ColumnAggregation::Average,
                     "分组最小" | "group-min" => ColumnAggregation::Minimum,
                     "分组最大" | "group-max" => ColumnAggregation::Maximum,
+                    "分组极差" | "group-range" => ColumnAggregation::Range,
                     _ => ColumnAggregation::Sum,
                 },
             }
@@ -1592,9 +1594,9 @@ fn aggregate_by_columns(
     let mut groups = HashMap::new();
     for (position, row) in records.iter().enumerate() {
         let value = parse_fraction_literal(&row[amount]).map_err(|_| CsvError::InvalidNumber)?;
-        let (_, (aggregate, count)) = groups
+        let (_, (aggregate, count, minimum)) = groups
             .entry(column_key(row, &columns))
-            .or_insert_with(|| (position, (BigRational::default(), 0_usize)));
+            .or_insert_with(|| (position, (BigRational::default(), 0_usize, None)));
         match aggregation {
             ColumnAggregation::Sum | ColumnAggregation::Average => *aggregate += value,
             ColumnAggregation::Minimum if *count == 0 || value < *aggregate => {
@@ -1603,27 +1605,44 @@ fn aggregate_by_columns(
             ColumnAggregation::Maximum if *count == 0 || value > *aggregate => {
                 *aggregate = value;
             }
+            ColumnAggregation::Range => match minimum {
+                None => {
+                    *minimum = Some(value.clone());
+                    *aggregate = value;
+                }
+                Some(minimum) if value < *minimum => *minimum = value,
+                Some(_) if value > *aggregate => *aggregate = value,
+                _ => {}
+            },
             _ => {}
         }
         *count += 1;
         ensure_exact_size(aggregate)
             .map_err(|error| CsvError::Statistics(StatisticsError::Evaluation(error)))?;
     }
-    if matches!(aggregation, ColumnAggregation::Average) {
-        for (_, (total, count)) in groups.values_mut() {
-            *total = std::mem::take(total) / BigInt::from(*count);
+    if matches!(
+        aggregation,
+        ColumnAggregation::Average | ColumnAggregation::Range
+    ) {
+        for (_, (total, count, minimum)) in groups.values_mut() {
+            if matches!(aggregation, ColumnAggregation::Average) {
+                *total = std::mem::take(total) / BigInt::from(*count);
+            } else {
+                *total -= minimum.take().expect("每组至少包含一个数值");
+            }
             ensure_exact_size(total)
                 .map_err(|error| CsvError::Statistics(StatisticsError::Evaluation(error)))?;
         }
     }
     let groups = groups
         .into_iter()
-        .map(|(key, (position, (value, _)))| (key, (position, value)));
+        .map(|(key, (position, (value, _, _)))| (key, (position, value)));
     let label = match aggregation {
         ColumnAggregation::Sum => "合计",
         ColumnAggregation::Average => "平均值",
         ColumnAggregation::Minimum => "最小值",
         ColumnAggregation::Maximum => "最大值",
+        ColumnAggregation::Range => "极差",
     };
     Ok(grouped_csv(header, &columns, groups, label))
 }
@@ -3305,6 +3324,14 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("group-max 1,2 3 {table}")).as_deref(),
             Ok("地区,类别,最大值\r\n北,甲,2\r\n南,乙,-3/2\r\n北,乙,1")
+        );
+        assert_eq!(
+            transform_csv(&format!("分组极差 [\"地区\",2] \"金额\" {table}")).as_deref(),
+            Ok("地区,类别,极差\r\n北,甲,1/2\r\n南,乙,1\r\n北,乙,0")
+        );
+        assert_eq!(
+            transform_csv("group-range 1 2 地区,金额").as_deref(),
+            Ok("地区,极差")
         );
         assert_eq!(
             transform_csv("分组最大 1 2 地区,金额\n北,无"),
