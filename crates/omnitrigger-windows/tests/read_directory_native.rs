@@ -205,6 +205,7 @@ fn read_directory_real_windows_options_preserve_metadata_precision_and_filters()
     };
     let entries = read_local_directory_with_options(fixture.path(), &options, || Ok(())).unwrap();
     assert_eq!(entries.len(), 3);
+    assert!(entries.iter().all(|entry| entry.size_bytes.is_none()));
     for (ordinal, entry) in entries.iter().enumerate() {
         assert_eq!(entry.metadata.as_ref().unwrap().ordinal, ordinal);
     }
@@ -219,6 +220,23 @@ fn read_directory_real_windows_options_preserve_metadata_precision_and_filters()
         fs::metadata(fixture.root.join("a.txt"))
             .unwrap()
             .creation_time()
+    );
+    let inventory = LocalDirectoryOptions {
+        order: DirectoryOrder::Name,
+        ..options.clone()
+    }
+    .read_with_file_sizes(fixture.path(), || Ok(()))
+    .unwrap();
+    assert_eq!(
+        inventory
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.size_bytes))
+            .collect::<Vec<_>>(),
+        [("a.txt", Some(9)), ("child", None), ("z.txt", Some(0))]
+    );
+    assert_eq!(
+        inventory[0].metadata.as_ref().unwrap().write_utc_100ns,
+        expected,
     );
     let newer = fs::OpenOptions::new()
         .write(true)

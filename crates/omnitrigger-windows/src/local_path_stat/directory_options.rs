@@ -41,6 +41,15 @@ impl LocalDirectoryOptions {
         }
         Ok(())
     }
+
+    /// 读取普通文件的字节数，沿用当前筛选和排序。
+    pub fn read_with_file_sizes(
+        &self,
+        path: &str,
+        check: impl Fn() -> Result<(), LocalStatError>,
+    ) -> Result<Vec<LocalDirectoryEntry>, LocalStatError> {
+        read_projected_directory(path, self, true, check)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,10 +70,20 @@ pub fn read_local_directory_with_options(
     options: &LocalDirectoryOptions,
     check: impl Fn() -> Result<(), LocalStatError>,
 ) -> Result<Vec<LocalDirectoryEntry>, LocalStatError> {
+    read_projected_directory(path, options, false, check)
+}
+
+fn read_projected_directory(
+    path: &str,
+    options: &LocalDirectoryOptions,
+    include_file_sizes: bool,
+    check: impl Fn() -> Result<(), LocalStatError>,
+) -> Result<Vec<LocalDirectoryEntry>, LocalStatError> {
     checkpoint(&check)?;
     validate_local_path(path)?;
     options.validate()?;
-    if options.order == DirectoryOrder::Name
+    if !include_file_sizes
+        && options.order == DirectoryOrder::Name
         && !options.metadata
         && options.search_pattern.is_none()
         && options.entry_type == DirectoryEntryType::All
@@ -73,7 +92,7 @@ pub fn read_local_directory_with_options(
     }
     #[cfg(windows)]
     {
-        super::native::read_options(path, options, &check)
+        super::native::read_options(path, options, include_file_sizes, &check)
     }
     #[cfg(not(windows))]
     {

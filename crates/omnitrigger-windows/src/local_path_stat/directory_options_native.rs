@@ -90,6 +90,7 @@ impl LocalClock {
 pub(super) fn read_options(
     path: &str,
     options: &LocalDirectoryOptions,
+    include_file_sizes: bool,
     check: &impl Fn() -> Result<(), LocalStatError>,
 ) -> Result<Vec<LocalDirectoryEntry>, LocalStatError> {
     require_directory(stat_local_path(path, check)?)?;
@@ -147,6 +148,8 @@ pub(super) fn read_options(
                 collector.add(name, data.dwFileAttributes)?;
             }
             if collector.entries.len() > before {
+                let length =
+                    (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow);
                 match options.order {
                     DirectoryOrder::ModifiedDescending => {
                         sort_keys.push(Some(file_time_ticks(data.ftLastWriteTime)));
@@ -156,13 +159,13 @@ pub(super) fn read_options(
                         sort_keys.push((created != 0).then_some(created));
                     }
                     DirectoryOrder::SizeDescending => {
-                        let length =
-                            (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow);
                         sort_keys.push((!directory).then_some(length));
-                        let entry = collector.entries.last_mut().expect("entry added");
-                        entry.size_bytes = (entry.kind == "file").then_some(length);
                     }
                     DirectoryOrder::Name | DirectoryOrder::Native => {}
+                }
+                if include_file_sizes || options.order == DirectoryOrder::SizeDescending {
+                    let entry = collector.entries.last_mut().expect("entry added");
+                    entry.size_bytes = (entry.kind == "file").then_some(length);
                 }
                 if let Some(clock) = &clock {
                     let metadata = system_step(check, || clock.metadata(&data, before))??;

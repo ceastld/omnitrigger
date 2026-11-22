@@ -72,6 +72,7 @@ pub(super) struct DirectoryLoad {
     order: DirectoryOrder,
     entry_type: DirectoryEntryType,
     timestamps: bool,
+    file_sizes: bool,
     cancelled: AtomicBool,
 }
 
@@ -82,6 +83,7 @@ impl DirectoryLoad {
             && self.order == query.order
             && self.entry_type == query.entry_type
             && self.timestamps == query.needs_timestamps()
+            && self.file_sizes == query.needs_file_sizes()
     }
 
     pub(super) fn read(&self) -> Result<Vec<LocalDirectoryEntry>, String> {
@@ -93,7 +95,7 @@ impl DirectoryLoad {
             entry_type: self.entry_type,
             search_pattern: self.pattern.clone(),
         };
-        read_local_directory_with_options(&self.directory, &options, || {
+        let check = || {
             let code = if self.cancelled.load(Ordering::Relaxed) {
                 "cancelled"
             } else if Instant::now() >= deadline {
@@ -105,8 +107,13 @@ impl DirectoryLoad {
                 code,
                 message: String::new(),
             })
-        })
-        .map_err(|error| error.message)
+        };
+        let result = if self.file_sizes {
+            options.read_with_file_sizes(&self.directory, check)
+        } else {
+            read_local_directory_with_options(&self.directory, &options, check)
+        };
+        result.map_err(|error| error.message)
     }
 }
 
@@ -188,6 +195,7 @@ impl LocalFilesIndex {
             order: query.order,
             entry_type: query.entry_type,
             timestamps: query.needs_timestamps(),
+            file_sizes: query.needs_file_sizes(),
             cancelled: AtomicBool::new(false),
         });
         self.current = Some(DirectoryRequest {
@@ -590,6 +598,10 @@ struct FileQuery<'a> {
 }
 
 impl FileQuery<'_> {
+    fn needs_file_sizes(&self) -> bool {
+        self.output == FileOutput::InventoryCsv
+    }
+
     fn needs_timestamps(&self) -> bool {
         self.modified.is_active()
             || self.created.is_active()
@@ -1226,14 +1238,12 @@ mod tests {
             write_local_ticks: 0,
             time_zone_key: "测试".to_owned(),
         });
-        assert!(index.finish(
-            &load,
-            Ok(vec![
-                report,
-                entry("other.txt", "file"),
-                entry("report folder", "directory"),
-            ])
-        ));
+        let entries = vec![
+            report,
+            entry("other.txt", "file"),
+            entry("report folder", "directory"),
+        ];
+        assert!(index.finish(&load, Ok(entries.clone())));
         assert!(matches!(
             index.results(query),
             Results::Value(Ok(value))
@@ -1248,11 +1258,13 @@ mod tests {
             index.results(r"C:\Work | missing | 最近修改 时间CSV"),
             Results::Value(Ok(value)) if value.text == "名称,创建时间UTC,修改时间UTC,路径"
         ));
-        assert!(index
-            .request(Some(r"C:\Work | report | 最近修改 清单CSV"))
-            .is_none());
+        let inventory = r"C:\Work | report | 最近修改 清单CSV";
+        let inventory_load = index.request(Some(inventory)).unwrap();
+        assert!(inventory_load.file_sizes && inventory_load.timestamps);
+        assert_eq!(inventory_load.order, DirectoryOrder::ModifiedDescending);
+        assert!(index.finish(&inventory_load, Ok(entries)));
         assert!(matches!(
-            index.results(r"C:\Work | report | 最近修改 清单CSV"),
+            index.results(inventory),
             Results::Value(Ok(value))
                 if value.text == concat!(
                     "名称,类型,字节数,创建时间UTC,修改时间UTC,路径\r\n",
