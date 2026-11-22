@@ -14,7 +14,8 @@ pub(super) enum PathError {
     JoinArguments,
     RelativePartRequired,
     RelativeArguments,
-    RelativeDifferentRoot,
+    CommonPathArguments,
+    DifferentRoot,
     ExtensionArguments,
     InvalidExtension,
     MissingPart,
@@ -33,7 +34,10 @@ impl PathError {
             Self::RelativeArguments => {
                 "用 JSON 数组填写普通盘符或共享目录下的两个绝对路径，路径里省略 .."
             }
-            Self::RelativeDifferentRoot => "基准目录和目标须在同一盘符或同一共享根目录下",
+            Self::CommonPathArguments => {
+                "用 JSON 数组填写至少两个普通盘符或共享目录下的绝对路径，路径里省略 .."
+            }
+            Self::DifferentRoot => "输入路径须在同一盘符或同一共享根目录下",
             Self::ExtensionArguments => "用 JSON 字符串数组填写路径和新扩展名",
             Self::InvalidExtension => "扩展名须为文件名后缀，可用空字符串删除",
             Self::MissingPart => "这条路径没有所选部分",
@@ -50,6 +54,7 @@ pub(super) fn path_component(query: &str) -> Result<String, PathError> {
         "换扩展名" | "replace-extension" => return replace_extension(input.trim()),
         "拼接" | "join" => return join_paths(input.trim()),
         "相对路径" | "relative" => return relative_path(input.trim()),
+        "共同路径" | "common-path" => return common_path(input.trim()),
         _ => {}
     }
     let input = strip_path_quotes(input.trim());
@@ -134,26 +139,13 @@ fn relative_path(input: &str) -> Result<String, PathError> {
             PathError::RelativeArguments
         }
     })?;
-    for input in &paths {
-        let path = Path::new(input);
-        if input.contains(INVALID_PATH_TEXT)
-            || !path.is_absolute()
-            || path.components().any(|part| match part {
-                Component::ParentDir => true,
-                Component::Prefix(prefix) => {
-                    !matches!(prefix.kind(), Prefix::Disk(_) | Prefix::UNC(_, _))
-                }
-                _ => false,
-            })
-        {
-            return Err(PathError::RelativeArguments);
-        }
-    }
-    let [base, target] = paths.each_ref().map(Path::new);
+    let [Some(base), Some(target)] = paths.each_ref().map(String::as_str).map(absolute_path) else {
+        return Err(PathError::RelativeArguments);
+    };
     let mut base = base.components().peekable();
     let mut target = target.components().peekable();
     if base.next() != target.next() {
-        return Err(PathError::RelativeDifferentRoot);
+        return Err(PathError::DifferentRoot);
     }
     while base.peek().is_some() && base.peek() == target.peek() {
         base.next();
@@ -213,6 +205,44 @@ fn replace_extension(input: &str) -> Result<String, PathError> {
         .ok_or(PathError::InvalidPath)
 }
 
+fn absolute_path(input: &str) -> Option<&Path> {
+    let path = Path::new(input);
+    (!input.contains(INVALID_PATH_TEXT)
+        && path.is_absolute()
+        && path.components().all(|part| match part {
+            Component::ParentDir => false,
+            Component::Prefix(prefix) => {
+                matches!(prefix.kind(), Prefix::Disk(_) | Prefix::UNC(_, _))
+            }
+            _ => true,
+        }))
+    .then_some(path)
+}
+
+fn common_path(input: &str) -> Result<String, PathError> {
+    let paths = serde_json::from_str::<Vec<String>>(input).map_err(|error| {
+        if error.is_eof() {
+            PathError::Incomplete
+        } else {
+            PathError::CommonPathArguments
+        }
+    })?;
+    let [first, second, remaining @ ..] = paths.as_slice() else {
+        return Err(PathError::CommonPathArguments);
+    };
+    let mut common = absolute_path(first).ok_or(PathError::CommonPathArguments)?;
+    for path in std::iter::once(second).chain(remaining) {
+        let path = absolute_path(path).ok_or(PathError::CommonPathArguments)?;
+        while !path.starts_with(common) {
+            common = common.parent().ok_or(PathError::DifferentRoot)?;
+        }
+    }
+    common
+        .to_str()
+        .map(str::to_owned)
+        .ok_or(PathError::InvalidPath)
+}
+
 pub(super) fn strip_path_quotes(input: &str) -> &str {
     input
         .strip_prefix('"')
@@ -223,6 +253,44 @@ pub(super) fn strip_path_quotes(input: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn finds_the_longest_common_path_by_complete_components() {
+        for (input, expected) in [
+            (
+                r#"共同路径 ["C:\\工作\\发布\\A.txt","C:/工作/草稿/B.txt","C:\\工作\\设计图.png"]"#,
+                r"C:\工作",
+            ),
+            (r#"common-path ["C:\\work","C:\\worker"]"#, "C:\\"),
+            (
+                r#"common-path ["\\\\server\\share\\x","\\\\server\\share\\y"]"#,
+                r"\\server\share\",
+            ),
+            (
+                r#"common-path ["C:\\work\\a.txt","C:\\work\\a.txt"]"#,
+                r"C:\work\a.txt",
+            ),
+        ] {
+            assert_eq!(path_component(input).as_deref(), Ok(expected), "{input}");
+        }
+        for (input, expected) in [
+            (
+                r#"common-path ["C:\\work"]"#,
+                PathError::CommonPathArguments,
+            ),
+            (
+                r#"common-path ["C:\\work","C:\\..\\x"]"#,
+                PathError::CommonPathArguments,
+            ),
+            (
+                r#"common-path ["C:\\work","D:\\work"]"#,
+                PathError::DifferentRoot,
+            ),
+        ] {
+            assert_eq!(path_component(input), Err(expected), "{input}");
+        }
+    }
 
     #[test]
     fn requires_absolute_paths_without_parent_components_for_relative_calculation() {
@@ -254,11 +322,11 @@ mod tests {
         for (input, expected) in [
             (
                 r#"relative ["C:\\docs","D:\\docs"]"#,
-                PathError::RelativeDifferentRoot,
+                PathError::DifferentRoot,
             ),
             (
                 r#"relative ["\\\\server\\a","\\\\server\\b"]"#,
-                PathError::RelativeDifferentRoot,
+                PathError::DifferentRoot,
             ),
             (
                 r#"relative ["C:\\docs","C:\\docs\\..\\a"]"#,

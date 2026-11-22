@@ -191,6 +191,7 @@
 - 输入 `路径: 换扩展名 ["C:\\工作\\发布 包.tar.gz",".zip"]` 得到 `C:\工作\发布 包.tar.zip`。用空字符串可删除最后一个扩展名，结果是可复制的路径文本。 [Rust 路径扩展名替换](https://doc.rust-lang.org/std/path/struct.Path.html#method.with_extension)
 - 输入 `路径: 拼接 ["C:\\工作","报告 集","2026.txt"]` 得到 `C:\工作\报告 集\2026.txt`。数组首项为起始路径，后续各项为相对路径。 [Rust 路径拼接规则](https://doc.rust-lang.org/std/path/struct.PathBuf.html#method.push)
 - 输入 `路径: 相对路径 ["C:\\工作\\资料","C:\\工作\\发布\\2026.txt"]` 得到 `..\发布\2026.txt`。数组首项是基准目录，两项须为同一根下的绝对路径，支持普通盘符和 UNC 共享，路径中省略 `..`。搜索框按路径分段比较。 [Rust 路径分段规则](https://doc.rust-lang.org/std/path/struct.Path.html#method.components)
+- 输入 `路径: 共同路径 ["C:\\工作\\发布\\A.txt","C:\\工作\\草稿\\B.txt"]` 得到 `C:\工作`。输入两条或更多同盘符或同共享根的绝对路径，结果按完整路径分段保留最长公共前缀。 [Rust 路径前缀规则](https://doc.rust-lang.org/std/path/struct.Path.html#method.starts_with)
 - 输入 `路径: 转文件网址 C:\docs\report 2026.txt` 得到 `file:///C:/docs/report%202026.txt`。用 `路径: 从文件网址` 可转换回绝对路径。两种操作只转换文本，可处理盘符路径和 UNC 路径。 [Rust 文件网址转换规则](https://docs.rs/url/2.5.8/url/struct.Url.html#method.from_file_path)
 - 输入 `JSON: 格式化 {"名称":"北京","值":1}` 可添加两格缩进，输入 `JSON: 压缩` 加上 JSON 文本可移除结构空白。两种操作均检查语法，并保留原有键顺序、数字和字符串拼写。搜索框可输入最多 4096 个字符。
 - 输入 `JSON: 键排序 {"z":1.20,"a":{"y":2,"b":3}}` 得到 `{"a":{"b":3,"y":2},"z":1.20}`。数组内的对象也会逐一排序，数字沿用原始写法。

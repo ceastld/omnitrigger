@@ -1873,6 +1873,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "查找多条绝对路径共同的最长前缀",
+        query: r#"路径: 共同路径 ["C:\\工作\\发布\\A.txt","C:\\工作\\草稿\\B.txt"]"#,
+    },
+    Example {
+        icon: Icon::Layers,
         title: "把绝对路径转换为可复制的文件网址",
         query: r"路径: 转文件网址 C:\docs\report 2026.txt",
     },
