@@ -38,10 +38,13 @@ pub(super) enum FractionError {
     CombinatorialRange,
     DecimalPlaces,
     RoundPlaces,
+    InterpolationInterval,
+    InterpolationRange,
     AlignmentArguments,
     RationalSquareRoot,
     IntegerSquareRoot,
     IntegerAggregate,
+    BitwiseArguments,
     RepeatingDecimalLength,
     RepeatingDecimalSyntax,
     TableInputs,
@@ -74,10 +77,13 @@ impl FractionError {
             Self::CombinatorialRange => "组合数和排列数的参数最多 4096，结果最多 8192 个二进制位",
             Self::DecimalPlaces => "输入 0 至 100 的小数位数，例如 分数: 小数 1/3 to 8",
             Self::RoundPlaces => "round 的位数须为 -100 至 100 的整数",
+            Self::InterpolationInterval => "反查和映射的原区间须有两个不同端点",
+            Self::InterpolationRange => "进度须为 0 至 1，反查值须位于原区间内",
             Self::AlignmentArguments => "填写数值和正步长，例如 分数: 就近对齐 2.675 to 0.05",
             Self::RationalSquareRoot => "精确开方需要非负数，且结果能表示为分数",
             Self::IntegerSquareRoot => "isqrt 需要非负整数",
             Self::IntegerAggregate => "gcd 和 lcm 的参数须为整数",
+            Self::BitwiseArguments => "位运算的数值和移位量须为非负整数",
             Self::RepeatingDecimalLength => "循环小数最多展开 512 个小数位",
             Self::RepeatingDecimalSyntax => "用括号填写循环节，例如 0.(142857) 或 -2.1(6)",
             Self::TableInputs => {
@@ -687,6 +693,37 @@ pub(super) fn rounded_decimal(value: BigRational, places: u32) -> String {
     }
 }
 
+fn validate_fraction_progress(progress: &BigRational) -> Result<(), FractionError> {
+    if progress.numer().sign() == Sign::Minus || progress.numer() > progress.denom() {
+        return Err(FractionError::InterpolationRange);
+    }
+    ensure_exact_size(progress)
+}
+
+fn fraction_progress(
+    start: &BigRational,
+    end: &BigRational,
+    value: &BigRational,
+) -> Result<BigRational, FractionError> {
+    if start == end {
+        return Err(FractionError::InterpolationInterval);
+    }
+    let progress = (value - start) / (end - start);
+    validate_fraction_progress(&progress)?;
+    Ok(progress)
+}
+
+fn interpolate_fraction(
+    start: &BigRational,
+    end: &BigRational,
+    progress: &BigRational,
+) -> Result<BigRational, FractionError> {
+    validate_fraction_progress(progress)?;
+    let result = start + (end - start) * progress;
+    ensure_exact_size(&result)?;
+    Ok(result)
+}
+
 enum FractionAlignment {
     Nearest,
     Down,
@@ -797,6 +834,14 @@ fn modular_power(
         base.modpow(exponent, modulus)
     };
     Ok(BigRational::from_integer(value))
+}
+
+fn nonnegative_bits(value: &BigRational) -> Result<&BigUint, FractionError> {
+    if !value.is_integer() || value.numer().sign() == Sign::Minus {
+        return Err(FractionError::BitwiseArguments);
+    }
+    ensure_exact_size(value)?;
+    Ok(value.numer().magnitude())
 }
 
 fn exact_gcd(mut left: BigUint, mut right: BigUint) -> BigUint {
@@ -1039,9 +1084,20 @@ impl FractionParser<'_> {
             return self.round_function();
         }
         let name = name.to_ascii_lowercase();
+        if matches!(name.as_str(), "lerp" | "invlerp" | "remap") {
+            self.remaining = rest;
+            return self.interpolation_function(&name);
+        }
         if matches!(name.as_str(), "gcd" | "lcm") {
             self.remaining = rest;
             return self.integer_aggregate(name == "lcm");
+        }
+        if matches!(
+            name.as_str(),
+            "bitand" | "bitor" | "bitxor" | "shl" | "shr" | "popcount"
+        ) {
+            self.remaining = rest;
+            return self.bitwise_function(&name);
         }
         if matches!(name.as_str(), "sqrt" | "abs" | "isqrt") {
             self.remaining = rest;
@@ -1130,6 +1186,52 @@ impl FractionParser<'_> {
         Ok(BigRational::from_integer(result.into()))
     }
 
+    fn bitwise_function(&mut self, name: &str) -> Result<BigRational, FractionError> {
+        if !self.consume('(') {
+            return Err(self.expected_token());
+        }
+        let left = self.sum()?;
+        let left = nonnegative_bits(&left)?;
+        if name == "popcount" {
+            if !self.consume(')') {
+                return Err(self.expected_token());
+            }
+            let count: u32 = left.to_u32_digits().into_iter().map(u32::count_ones).sum();
+            return Ok(BigRational::from_integer(count.into()));
+        }
+        if !self.consume(',') {
+            return Err(self.expected_token());
+        }
+        let right = self.sum()?;
+        let right = nonnegative_bits(&right)?;
+        if !self.consume(')') {
+            return Err(self.expected_token());
+        }
+        let result = match name {
+            "bitand" => left & right,
+            "bitor" => left | right,
+            "bitxor" => left ^ right,
+            "shl" if left.bits() == 0 => BigUint::default(),
+            "shl" => {
+                let shift = u64::try_from(right)
+                    .ok()
+                    .filter(|&shift| shift <= MAX_EXACT_BITS - left.bits())
+                    .ok_or(FractionError::ExactRange)?;
+                left << shift as usize
+            }
+            "shr" => {
+                let shift = u64::try_from(right).unwrap_or(u64::MAX);
+                if shift >= left.bits() {
+                    BigUint::default()
+                } else {
+                    left >> shift as usize
+                }
+            }
+            _ => unreachable!("位运算函数名已检查"),
+        };
+        Ok(BigRational::from_integer(result.into()))
+    }
+
     fn power_function(&mut self) -> Result<BigRational, FractionError> {
         if !self.consume('(') {
             return Err(self.expected_token());
@@ -1146,6 +1248,33 @@ impl FractionParser<'_> {
         match modulus {
             Some(modulus) => modular_power(base, exponent, modulus),
             None => rational_power(base, exponent),
+        }
+    }
+
+    fn interpolation_function(&mut self, name: &str) -> Result<BigRational, FractionError> {
+        if !self.consume('(') {
+            return Err(self.expected_token());
+        }
+        let count = if name == "remap" { 5 } else { 3 };
+        let mut values = Vec::with_capacity(count);
+        values.push(self.sum()?);
+        for _ in 1..count {
+            if !self.consume(',') {
+                return Err(self.expected_token());
+            }
+            values.push(self.sum()?);
+        }
+        if !self.consume(')') {
+            return Err(self.expected_token());
+        }
+        match (name, values.as_slice()) {
+            ("lerp", [start, end, progress]) => interpolate_fraction(start, end, progress),
+            ("invlerp", [start, end, value]) => fraction_progress(start, end, value),
+            ("remap", [value, start, end, output_start, output_end]) => {
+                let progress = fraction_progress(start, end, value)?;
+                interpolate_fraction(output_start, output_end, &progress)
+            }
+            _ => unreachable!("插值函数参数数量已确定"),
         }
     }
 
@@ -1550,6 +1679,31 @@ mod tests {
     }
 
     #[test]
+    fn interpolates_progress_and_remaps_intervals_using_exact_fractions() {
+        for (query, expected) in [
+            ("计算 lerp(0,10,1/3)", "10/3"),
+            ("计算 LERP(2,2,1/2)", "2"),
+            ("计算 invlerp(10,0,7)", "3/10"),
+            ("计算 remap(1/3,0,1,10,20)", "40/3"),
+            ("计算 remap(2,3,1,4,0)", "2"),
+            (
+                "计算 remap(9007199254740993,9007199254740992,9007199254740995,0,1)",
+                "1/3",
+            ),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("invlerp(0,0,0)", FractionError::InterpolationInterval),
+            ("lerp(0,1,101/100)", FractionError::InterpolationRange),
+            ("remap(2,0,1,0,100)", FractionError::InterpolationRange),
+            ("invlerp(0,1,-1)", FractionError::InterpolationRange),
+        ] {
+            assert_eq!(calculate_fraction(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
     fn aligns_exact_fractions_to_positive_step_multiples_using_even_ties() {
         for (query, expected) in [
             ("就近对齐 2.625 to 0.05", "13/5"),
@@ -1648,6 +1802,37 @@ mod tests {
             );
         }
         assert_eq!(calculate_fraction("abs(1,2)"), Err(FractionError::Invalid));
+    }
+
+    #[test]
+    fn evaluates_bitwise_functions_on_exact_integers_wider_than_float_precision() {
+        for (query, expected) in [
+            ("计算 shl(1,100)", "1267650600228229401496703205376"),
+            ("计算 bitxor(0x2000_0000_0000_01,0b1)", "9007199254740992"),
+            ("计算 bitor(2**80,3)", "1208925819614629174706179"),
+            ("计算 bitand(2**80+7,3)", "3"),
+            ("计算 popcount(2**80 + 3)", "3"),
+            ("计算 shr(2**100+3,100)", "1"),
+            ("计算 shr(1,2**100)", "0"),
+            ("计算 shl(0,2**100)", "0"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["bitand(-1,3)", "bitor(1/2,3)", "shl(1,-1)", "popcount(-1)"] {
+            assert_eq!(
+                calculate_fraction(query),
+                Err(FractionError::BitwiseArguments),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_fraction("shl(1,8191)").unwrap().numer().bits(),
+            MAX_EXACT_BITS
+        );
+        assert_eq!(
+            calculate_fraction("shl(1,8192)"),
+            Err(FractionError::ExactRange)
+        );
     }
 
     #[test]

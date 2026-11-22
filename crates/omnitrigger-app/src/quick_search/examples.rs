@@ -2958,6 +2958,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用精确分数在两个区间之间映射",
+        query: "分数: 计算 remap(1/3,0,1,10,20)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在分数算式中精确开方并取绝对值",
         query: "分数: 计算 sqrt(81/16)+abs(-1/2)",
     },
@@ -3000,6 +3005,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "精确计算二进制、八进制和十六进制数",
         query: "分数: 计算 0x2000_0000_0000_01 + 0b10",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "对超出浮点整数精度的数值做按位运算",
+        query: "分数: 计算 bitxor(0x2000_0000_0000_01,0b1)",
     },
     Example {
         icon: Icon::Terminal,
