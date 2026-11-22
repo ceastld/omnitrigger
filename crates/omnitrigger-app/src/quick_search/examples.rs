@@ -2238,6 +2238,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按精确数值对 CSV 数据行去重",
+        query: "CSV: 数值去重 [\"金额\"] 编号,金额\n001,1.50\n002,3/2\n003,1.5e0\n004,5/4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按单元格的完整内容筛选 CSV 行",
         query: "CSV: 筛选 2 \"完成\" 编号,状态\n001,完成\n002,待办\n003,完成",
     },

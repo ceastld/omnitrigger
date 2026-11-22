@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     collections::{HashMap, HashSet},
+    hash::Hash,
 };
 
 use num_bigint::BigInt;
@@ -180,6 +181,7 @@ enum Operation {
     },
     DeduplicateRows,
     DeduplicateByColumns(Vec<ColumnReference>),
+    DeduplicateByNumbers(Vec<ColumnReference>),
     FilterColumn {
         column: ColumnReference,
         condition: ColumnCondition,
@@ -412,11 +414,15 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
                 arithmetic: ColumnArithmetic::Formula(normalize(&expression)),
             }
         }
-        "按列去重" | "deduplicate-columns" => {
+        "按列去重" | "deduplicate-columns" | "数值去重" | "deduplicate-numeric" => {
             let (columns, data) =
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
-            Operation::DeduplicateByColumns(columns)
+            if matches!(operation.as_str(), "数值去重" | "deduplicate-numeric") {
+                Operation::DeduplicateByNumbers(columns)
+            } else {
+                Operation::DeduplicateByColumns(columns)
+            }
         }
         "筛选" | "filter" | "排除" | "exclude" | "正则筛选" | "regex-filter" | "正则排除"
         | "regex-exclude" => {
@@ -566,7 +572,19 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             let mut seen = HashSet::new();
             Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
         }
-        Operation::DeduplicateByColumns(columns) => deduplicate_by_columns(&rows, &columns),
+        Operation::DeduplicateByColumns(columns) => {
+            deduplicate_by_columns(&rows, &columns, |row, columns| Ok(column_key(row, columns)))
+        }
+        Operation::DeduplicateByNumbers(columns) => {
+            deduplicate_by_columns(&rows, &columns, |row, columns| {
+                columns
+                    .iter()
+                    .map(|&column| {
+                        parse_fraction_literal(&row[column]).map_err(|_| CsvError::InvalidNumber)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+        }
         Operation::FilterColumn {
             column,
             condition,
@@ -1044,20 +1062,21 @@ fn compute_column(
     Ok(write_rows(&rows, ','))
 }
 
-fn deduplicate_by_columns(
-    rows: &[Vec<String>],
+fn deduplicate_by_columns<'a, Key: Eq + Hash>(
+    rows: &'a [Vec<String>],
     columns: &[ColumnReference],
+    key: impl Fn(&'a [String], &[usize]) -> Result<Key, CsvError>,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
     let mut seen = HashSet::new();
-    let unique_records = records
-        .iter()
-        .filter(|row| seen.insert(column_key(row, &columns)));
-    Ok(write_rows(
-        std::iter::once(header).chain(unique_records),
-        ',',
-    ))
+    let mut unique_records = vec![header];
+    for row in records {
+        if seen.insert(key(row, &columns)?) {
+            unique_records.push(row);
+        }
+    }
+    Ok(write_rows(unique_records, ','))
 }
 
 fn filter_column(
@@ -2203,6 +2222,27 @@ mod tests {
         assert_eq!(
             transform_csv("按列去重 1,1 编号"),
             Err(CsvError::InvalidColumns)
+        );
+    }
+
+    #[test]
+    fn deduplicates_numeric_csv_keys_exactly_and_preserves_the_first_rows_spelling() {
+        let table = "编号,金额,税率\n001,1.50,1/4\n002,3/2,0.25\n003,1.5e0,1/3\n004,5/4,1/4";
+        assert_eq!(
+            transform_csv(&format!("数值去重 [\"金额\",3] {table}")).as_deref(),
+            Ok("编号,金额,税率\r\n001,1.50,1/4\r\n003,1.5e0,1/3\r\n004,5/4,1/4")
+        );
+        assert_eq!(
+            transform_csv(&format!("deduplicate-numeric 2 {table}")).as_deref(),
+            Ok("编号,金额,税率\r\n001,1.50,1/4\r\n004,5/4,1/4")
+        );
+        assert_eq!(
+            transform_csv("数值去重 2 编号,金额\n001,"),
+            Err(CsvError::InvalidNumber)
+        );
+        assert_eq!(
+            transform_csv("数值去重 [\"金额\",2] 编号,金额\n001,1"),
+            Err(CsvError::NamedColumnArguments)
         );
     }
 

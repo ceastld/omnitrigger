@@ -462,9 +462,16 @@ fn positive_date_step(count: &str) -> Result<u32, DateError> {
 }
 
 fn workday_selection(step: u32, input: Option<&str>) -> Result<DateSelection, DateError> {
+    Ok(DateSelection::Workdays {
+        step,
+        exceptions: parse_workday_exceptions(input)?,
+    })
+}
+
+fn parse_workday_exceptions(input: Option<&str>) -> Result<HashMap<NaiveDate, bool>, DateError> {
     let mut exceptions = HashMap::new();
     let Some(input) = input else {
-        return Ok(DateSelection::Workdays { step, exceptions });
+        return Ok(exceptions);
     };
     let [days_off, days_on] = serde_json::from_str::<[Vec<String>; 2]>(input)
         .map_err(|_| DateError::WorkdayExceptions)?;
@@ -480,7 +487,7 @@ fn workday_selection(step: u32, input: Option<&str>) -> Result<DateSelection, Da
             }
         }
     }
-    Ok(DateSelection::Workdays { step, exceptions })
+    Ok(exceptions)
 }
 
 fn date_range_operands(
@@ -613,9 +620,20 @@ fn split_date_range_by_month(
     }
     let (mut start, end, remaining) =
         date_range_operands(input.trim_start(), today, DateError::MonthSplitArguments)?;
-    if !remaining.is_empty() {
-        return Err(DateError::MonthSplitArguments);
-    }
+    let exceptions = match (csv, remaining.trim_start()) {
+        (_, "") => HashMap::new(),
+        (true, remaining) => {
+            let (first, rest) = remaining
+                .split_once(char::is_whitespace)
+                .unwrap_or((remaining, ""));
+            let dates = remaining
+                .strip_prefix("例外")
+                .or_else(|| first.eq_ignore_ascii_case("except").then_some(rest))
+                .ok_or(DateError::MonthSplitArguments)?;
+            parse_workday_exceptions(Some(dates.trim_start()))?
+        }
+        _ => return Err(DateError::MonthSplitArguments),
+    };
     if end < start {
         return Err(DateError::ReversedDateRange);
     }
@@ -628,7 +646,14 @@ fn split_date_range_by_month(
         let last = month_end(first, 1)?.min(end);
         let row = if csv {
             let days = last.signed_duration_since(start).num_days() + 1;
-            let workdays = inclusive_workdays(start, last);
+            let adjustment: i64 = exceptions
+                .iter()
+                .filter(|(date, _)| (start..=last).contains(*date))
+                .map(|(&date, &workday)| {
+                    i64::from(workday) - i64::from(date.weekday().number_from_monday() <= 5)
+                })
+                .sum();
+            let workdays = inclusive_workdays(start, last) + adjustment;
             format!("{start},{last},{days},{workdays}")
         } else {
             display_date_range((start, last))
@@ -1071,6 +1096,39 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn applies_workday_overrides_to_their_months_without_changing_calendar_day_counts() {
+        let today = NaiveDate::from_ymd_opt(2024, 2, 1).unwrap();
+        assert_eq!(
+            calculate_date(
+                r#"按月拆分CSV 2024-01-31 至 2024-03-02 例外 [["2024-01-31","2024-02-03"],["2024-02-01","2024-03-02","2024-04-06"]]"#,
+                today
+            )
+            .as_deref(),
+            Ok(concat!(
+                "开始,结束,天数,工作日\r\n",
+                "2024-01-31,2024-01-31,1,0\r\n",
+                "2024-02-01,2024-02-29,29,21\r\n",
+                "2024-03-01,2024-03-02,2,2",
+            ))
+        );
+        assert_eq!(
+            calculate_date(
+                r#"split-months-csv 2024-03-02 to 2024-03-03 EXCEPT [[],["2024-03-02"]]"#,
+                today
+            )
+            .as_deref(),
+            Ok("开始,结束,天数,工作日\r\n2024-03-02,2024-03-03,2,1")
+        );
+        assert_eq!(
+            calculate_date(
+                r#"按月拆分CSV 2024-03-02 至 2024-03-03 例外 [["2024-03-02"],["2024-03-02"]]"#,
+                today
+            ),
+            Err(DateError::WorkdayExceptions)
+        );
+    }
 
     #[test]
     fn exports_month_segments_with_inclusive_day_and_workday_counts() {
