@@ -12,6 +12,7 @@ pub(super) enum VectorError {
     UnknownOperation,
     Dimensions,
     CrossDimensions,
+    ZeroDirection,
     TooManyDimensions,
     Evaluation(FractionError),
 }
@@ -20,9 +21,10 @@ impl VectorError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "用逗号隔开分量，用分号隔开两个向量",
-            Self::UnknownOperation => "可用 点积、叉积、长度 或 距离",
+            Self::UnknownOperation => "可用 点积、叉积、长度、距离 或 投影",
             Self::Dimensions => "两个向量的分量数须一致",
             Self::CrossDimensions => "叉积需要两个三维向量",
+            Self::ZeroDirection => "投影方向须为非零向量",
             Self::TooManyDimensions => "每个向量最多 32 个分量",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "分量须为整数、有限小数、分数或精确算式"
@@ -45,7 +47,7 @@ pub(super) fn calculate_vector(query: &str) -> Result<String, VectorError> {
     }
     if !matches!(
         operation.as_str(),
-        "点积" | "dot" | "叉积" | "cross" | "距离" | "distance"
+        "点积" | "dot" | "叉积" | "cross" | "距离" | "distance" | "投影" | "project"
     ) {
         return Err(VectorError::UnknownOperation);
     }
@@ -55,6 +57,7 @@ pub(super) fn calculate_vector(query: &str) -> Result<String, VectorError> {
     match operation.as_str() {
         "叉积" | "cross" => cross_product(&left, &right),
         _ if left.len() != right.len() => Err(VectorError::Dimensions),
+        "投影" | "project" => project_vector(&left, &right),
         "距离" | "distance" => {
             let differences: Vec<_> = left.iter().zip(&right).map(|(a, b)| a - b).collect();
             for value in &differences {
@@ -91,6 +94,27 @@ fn dot_product(left: &[BigRational], right: &[BigRational]) -> Result<BigRationa
     Ok(result)
 }
 
+fn project_vector(
+    vector: &[BigRational],
+    direction: &[BigRational],
+) -> Result<String, VectorError> {
+    let squared_length = dot_product(direction, direction)?;
+    if squared_length == BigRational::default() {
+        return Err(VectorError::ZeroDirection);
+    }
+    let scale = dot_product(vector, direction)? / squared_length;
+    ensure_exact_size(&scale).map_err(VectorError::Evaluation)?;
+    let components = direction
+        .iter()
+        .map(|component| {
+            let value = component * &scale;
+            ensure_exact_size(&value).map_err(VectorError::Evaluation)?;
+            Ok(value.to_string())
+        })
+        .collect::<Result<Vec<_>, VectorError>>()?;
+    Ok(components.join(", "))
+}
+
 fn cross_product(left: &[BigRational], right: &[BigRational]) -> Result<String, VectorError> {
     let ([ax, ay, az], [bx, by, bz]) = (left, right) else {
         return Err(VectorError::CrossDimensions);
@@ -118,6 +142,9 @@ mod tests {
             ("norm 1/2,1/2", "√(1/2)"),
             ("距离 0,0; 1,1", "√2"),
             ("distance 1,2; 1,2", "0"),
+            ("投影 2,1; 1,1", "3/2, 3/2"),
+            ("project 1,2,3; 0,-1,0", "0, 2, 0"),
+            ("project 1,2; 2,-1", "0, 0"),
         ] {
             assert_eq!(calculate_vector(query).as_deref(), Ok(expected), "{query}");
         }
@@ -126,6 +153,8 @@ mod tests {
             ("未知 1", VectorError::UnknownOperation),
             ("点积 1;1,2", VectorError::Dimensions),
             ("叉积 1,2;3,4", VectorError::CrossDimensions),
+            ("project 1,2; 0,0", VectorError::ZeroDirection),
+            ("project 1; 1,2", VectorError::Dimensions),
         ] {
             assert_eq!(calculate_vector(query), Err(error), "{query}");
         }

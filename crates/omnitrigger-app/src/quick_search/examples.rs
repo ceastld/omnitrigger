@@ -131,6 +131,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "把第一个向量投影到第二个向量上",
+        query: "向量: 投影 2,1; 1,1",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "计算方阵的行列式",
         query: "矩阵: 行列式 0,2; 3,4",
     },
