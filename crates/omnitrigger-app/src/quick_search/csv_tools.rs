@@ -51,6 +51,7 @@ const MAX_STACK_TABLES: usize = 16;
 const MAX_VALUE_MAPPINGS: usize = 32;
 const MAX_FORMULA_RECORDS: usize = 32;
 const MAX_ADDED_CELLS: usize = 16_384;
+const MAX_CELL_PADDING_WIDTH: usize = 4096;
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_FILTER_CONDITIONS: usize = 16;
 
@@ -104,6 +105,7 @@ pub(super) enum CsvError {
     DateFormatColumnPattern,
     TextLengthColumnArguments,
     TextSliceColumnArguments,
+    TextPadColumnArguments,
     DataConversionTarget(ConversionError),
     GroupedColumnArguments,
     GroupCountColumnArguments,
@@ -230,6 +232,9 @@ impl CsvError {
             }
             Self::TextSliceColumnArguments => {
                 "填写新列名、来源列和字素位置，例如 [\"摘要\",\"文本\",\"2-3\"]"
+            }
+            Self::TextPadColumnArguments => {
+                "填写新列名、来源列、0 至 4096 的宽度和一个填充字符，例如 [\"新编号\",\"编号\",4,\"0\"]"
             }
             Self::DataConversionTarget(cause) => cause.message(),
             Self::GroupedColumnArguments => {
@@ -850,6 +855,27 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::TextColumn(name, source, computation)
         }
+        kind @ ("左填充列" | "left-pad-column" | "右填充列" | "right-pad-column") => {
+            let ((name, source, width, fill), data) =
+                json_argument_and_data::<(String, ColumnReference, usize, char)>(
+                    input,
+                    CsvError::TextPadColumnArguments,
+                )?;
+            if name.trim().is_empty()
+                || name.contains('\0')
+                || width > MAX_CELL_PADDING_WIDTH
+                || fill == '\0'
+            {
+                return Err(CsvError::TextPadColumnArguments);
+            }
+            input = data;
+            let computation = TextColumnComputation::Pad {
+                width,
+                fill,
+                left: matches!(kind, "左填充列" | "left-pad-column"),
+            };
+            Operation::TextColumn(name, source, computation)
+        }
         kind @ ("日期格式列" | "date-format-column" | "日期解析列" | "date-parse-column") =>
         {
             let ((name, source, pattern), data) =
@@ -1375,6 +1401,24 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 Ok(match &computation {
                     TextColumnComputation::Length(unit) => Cow::Owned(unit.count(cell).to_string()),
                     TextColumnComputation::Slice(range) => Cow::Borrowed(range.slice(cell)),
+                    TextColumnComputation::Pad { width, fill, left } => {
+                        let missing = width.saturating_sub(TextLengthUnit::CodePoints.count(cell));
+                        if missing == 0 {
+                            Cow::Borrowed(cell.as_str())
+                        } else {
+                            let padding = std::iter::repeat_n(*fill, missing);
+                            let mut padded =
+                                String::with_capacity(cell.len() + missing * fill.len_utf8());
+                            if *left {
+                                padded.extend(padding);
+                                padded.push_str(cell);
+                            } else {
+                                padded.push_str(cell);
+                                padded.extend(padding);
+                            }
+                            Cow::Owned(padded)
+                        }
+                    }
                 })
             })
         }
@@ -2360,6 +2404,11 @@ fn date_pattern_column(
 enum TextColumnComputation {
     Length(TextLengthUnit),
     Slice(GraphemeRange),
+    Pad {
+        width: usize,
+        fill: char,
+        left: bool,
+    },
 }
 
 #[derive(Deserialize)]
@@ -5232,6 +5281,28 @@ mod tests {
                 Err(CsvError::TextSliceColumnArguments)
             );
         }
+    }
+
+    #[test]
+    fn pads_left_or_right_by_unicode_code_points_and_preserves_long_cells() {
+        let csv = "行,编号\n1,7\n2,12345\n3,\n4,e\u{301}";
+        let query = format!("左填充列 [\"新编号\",\"编号\",4,\"0\"]\n{csv}");
+        assert_eq!(
+            transform_csv(&query).as_deref(),
+            Ok("行,编号,新编号\r\n1,7,0007\r\n2,12345,12345\r\n3,\"\",0000\r\n4,e\u{301},00e\u{301}")
+        );
+        let query = format!("right-pad-column [\"新编号\",2,2,\"界\"]\n{csv}");
+        assert_eq!(
+            transform_csv(&query).as_deref(),
+            Ok("行,编号,新编号\r\n1,7,7界\r\n2,12345,12345\r\n3,\"\",界界\r\n4,e\u{301},e\u{301}")
+        );
+        for (width, fill) in [(4097, "0"), (2, ""), (2, "ab"), (2, r"\u0000")] {
+            let query = format!("左填充列 [\"新列\",1,{width},\"{fill}\"] 原列");
+            assert_eq!(transform_csv(&query), Err(CsvError::TextPadColumnArguments));
+        }
+        let rows = "\nx".repeat(300);
+        let query = format!("左填充列 [\"大列\",1,4096,\"界\"] 原列{rows}");
+        assert_eq!(transform_csv(&query), Err(CsvError::AddedColumnTooLarge));
     }
 
     #[test]
