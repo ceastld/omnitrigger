@@ -11,12 +11,15 @@ use super::operators::split_top_level_commas;
 use super::radix::Base;
 use super::InputSuggestion;
 
+const MAX_CONVERSION_TARGETS: usize = 8;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ConversionError {
     Incomplete,
     InvalidAmount,
     InvalidInteger,
     UnknownUnit,
+    InvalidTargets,
     DifferentDimensions,
     InvalidTransfer,
     InvalidTransferDuration,
@@ -41,6 +44,7 @@ impl ConversionError {
             Self::InvalidAmount => "无法识别换算数值",
             Self::InvalidInteger => "进制转换需要整数，例如 0xff to dec",
             Self::UnknownUnit => "无法识别换算单位",
+            Self::InvalidTargets => "用方括号和逗号填写 1 至 8 个目标单位，例如 [MiB, KiB, Gib]",
             Self::DifferentDimensions => "两个单位不属于同一类型",
             Self::InvalidTransfer => "输入非负的数据量和大于零的数据速率",
             Self::InvalidTransferDuration => {
@@ -1192,14 +1196,37 @@ pub(super) fn conversion_target_input(query: &str) -> Option<String> {
 
 fn convert_quantity(source: &str, target: &str) -> Result<String, ConversionError> {
     let (amount, source) = parse_quantity(source)?;
-    match target.trim().to_ascii_lowercase().as_str() {
-        "ft in" | "feet inches" | "英尺英寸" | "英尺 英寸" => {
-            format_feet_and_inches(amount, &source)
+    let target = target.trim();
+    if let Some(list) = target.strip_prefix('[') {
+        let list = list
+            .strip_suffix(']')
+            .ok_or(ConversionError::InvalidTargets)?;
+        let targets: Vec<_> = list.split(',').map(str::trim).collect();
+        if targets.len() > MAX_CONVERSION_TARGETS || targets.contains(&"") {
+            return Err(ConversionError::InvalidTargets);
         }
-        "dms" | "度分秒" => format_degrees_minutes_seconds(amount, &source),
+        return targets
+            .into_iter()
+            .map(|target| format_quantity_target(amount, &source, target))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|values| values.join("\n"));
+    }
+    format_quantity_target(amount, &source, target)
+}
+
+fn format_quantity_target(
+    amount: f64,
+    source: &Unit,
+    target: &str,
+) -> Result<String, ConversionError> {
+    match target.to_ascii_lowercase().as_str() {
+        "ft in" | "feet inches" | "英尺英寸" | "英尺 英寸" => {
+            format_feet_and_inches(amount, source)
+        }
+        "dms" | "度分秒" => format_degrees_minutes_seconds(amount, source),
         _ => {
             let target = Unit::parse(target)?;
-            format_conversion(amount, &source, &target)
+            format_conversion(amount, source, &target)
         }
     }
 }
@@ -1460,6 +1487,47 @@ mod tests {
         let suggestions = suggested_targets("12 pt").unwrap();
         assert_eq!(suggestions[0].expression, "12 pt to px");
         assert_eq!(suggestions[0].result, "16 px");
+    }
+
+    #[test]
+    fn converts_one_quantity_to_ordered_targets_including_batch_csv() {
+        for (query, expected) in [
+            ("1 GiB to [MiB, KiB, Gib]", "1024 MiB\n1048576 KiB\n8 Gib"),
+            ("0 °C to [°F,K]", "32 °F\n273.15 K"),
+            ("177.8 cm to [cm, ft in]", "177.8 cm\n5 ft 10 in"),
+            ("3 m to [cm]", "300 cm"),
+        ] {
+            assert_eq!(
+                convert(query).as_ref().map(|result| result.as_deref()),
+                Some(Ok(expected)),
+                "{query}"
+            );
+        }
+        for query in [
+            "3 m to [",
+            "3 m to []",
+            "3 m to [cm,]",
+            "3 m to [cm,,mm]",
+            "3 m to [m,m,m,m,m,m,m,m,m]",
+        ] {
+            assert_eq!(
+                convert(query),
+                Some(Err(ConversionError::InvalidTargets)),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            convert("3 m to [cm,kg]"),
+            Some(Err(ConversionError::DifferentDimensions))
+        );
+        assert_eq!(
+            convert("3 m to [unknown,cm]"),
+            Some(Err(ConversionError::UnknownUnit))
+        );
+        assert_eq!(
+            convert_batch_csv("3 m to [cm, mm]\n0xff to dec").as_deref(),
+            Ok("输入,结果\r\n\"3 m to [cm, mm]\",\"300 cm\n3000 mm\"\r\n0xff to dec,255")
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::{
 
 use omnitrigger_windows::{list_shell_apps, ShellApp};
 
-use super::{title_rank, Destination, Results};
+use super::{calculator::narrow_ascii_graphic, title_rank, Destination, Results};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -52,11 +52,14 @@ impl ApplicationIndex {
         };
         let mut apps: Vec<_> = apps
             .into_iter()
-            .map(|app| SearchApplication {
-                title_key: app.title().to_lowercase(),
-                identifier_key: app.identifier().to_lowercase(),
-                initials: application_initials(app.title()),
-                app,
+            .map(|app| {
+                let title_key = application_search_key(app.title());
+                SearchApplication {
+                    initials: application_initials(&title_key),
+                    title_key,
+                    identifier_key: application_search_key(app.identifier()),
+                    app,
+                }
             })
             .collect();
         apps.sort_unstable_by(|a, b| {
@@ -84,7 +87,7 @@ impl ApplicationIndex {
             Self::Unavailable(error) => return Results::ApplicationsUnavailable(error.clone()),
             Self::Ready { apps, .. } => apps,
         };
-        let query = query.to_lowercase();
+        let query = application_search_key(query);
         let mut matches: Vec<_> = apps
             .iter()
             .filter_map(|app| {
@@ -109,6 +112,13 @@ impl ApplicationIndex {
     }
 }
 
+fn application_search_key(text: &str) -> String {
+    text.chars()
+        .map(narrow_ascii_graphic)
+        .collect::<String>()
+        .to_lowercase()
+}
+
 fn application_initials(title: &str) -> String {
     title
         .split(|character: char| !character.is_ascii_alphanumeric())
@@ -118,16 +128,19 @@ fn application_initials(title: &str) -> String {
 }
 
 fn application_rank(title: &str, identifier: &str, initials: &str, query: &str) -> Option<u8> {
-    if query
+    let mut shorthand = query
         .split_whitespace()
-        .all(|word| title.contains(word) || identifier.contains(word))
-    {
+        .filter(|word| !title.contains(word) && !identifier.contains(word));
+    let Some(abbreviation) = shorthand.next() else {
         return Some(title_rank(title, query));
+    };
+    if abbreviation.len() < 2 || !initials.starts_with(abbreviation) || shorthand.next().is_some() {
+        return None;
     }
-    if query.len() >= 2 && initials.starts_with(query) {
-        return Some(if initials == query { 4 } else { 5 });
+    if abbreviation == query {
+        return Some(if initials == abbreviation { 4 } else { 5 });
     }
-    None
+    Some(6)
 }
 
 #[cfg(test)]
@@ -142,15 +155,22 @@ mod tests {
         assert_eq!(application_initials("Windows PowerShell (x86)"), "wpx");
         assert_eq!(application_initials("7-Zip File Manager"), "7zfm");
 
-        let rank = |query| application_rank("visual studio code", "installer", &initials, query);
+        let rank =
+            |query: &str| application_rank("visual studio code", "installer", &initials, query);
         assert_eq!(rank("visual studio code"), Some(0));
         assert_eq!(rank("visual"), Some(1));
         assert_eq!(rank("studio"), Some(2));
         assert_eq!(rank("code installer"), Some(3));
         assert_eq!(rank("vsc"), Some(4));
         assert_eq!(rank("vs"), Some(5));
+        assert_eq!(rank("vs code"), Some(6));
+        assert_eq!(rank("code vsc installer"), Some(6));
+        assert_eq!(rank(&application_search_key("ＶＳ　ＣＯＤＥ")), Some(6));
+        assert_eq!(application_search_key("ΟΣ"), "ος");
         assert_eq!(rank("sc"), None);
-        assert_eq!(rank("vs code"), None);
+        assert_eq!(rank("vs unknown"), None);
+        assert_eq!(rank("vs vsc code"), None);
+        assert_eq!(rank("vc code"), None);
     }
 
     #[test]

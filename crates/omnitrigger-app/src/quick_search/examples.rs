@@ -441,6 +441,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "把同一个数值换算成多个目标单位",
+        query: "1 GiB to [MiB, KiB, Gib]",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算括号算式计算出的数据量",
         query: "(2**10)B to KiB",
     },
