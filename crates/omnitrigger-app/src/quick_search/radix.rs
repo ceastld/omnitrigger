@@ -16,6 +16,8 @@ pub(super) enum RadixError {
     ByteOrderArguments,
     ByteOrderInteger,
     ByteOrderWidthExceeded,
+    ReadByteOrderArguments,
+    ReadByteOrderBytes,
 }
 
 impl RadixError {
@@ -30,6 +32,8 @@ impl RadixError {
             }
             Self::ByteOrderInteger => "填写非负整数，可用十进制或 0x、0b、0o 前缀",
             Self::ByteOrderWidthExceeded => "整数超出所填位宽",
+            Self::ReadByteOrderArguments => "填写大端或小端，例如 读字节序 小端 @ 78 56 34 12",
+            Self::ReadByteOrderBytes => "填写 1 至 16 个两位十六进制字节，字节之间用空格分开",
         }
     }
 }
@@ -114,6 +118,9 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     if operation == "字节序" || operation.eq_ignore_ascii_case("byte-order") {
         return byte_order(arguments);
     }
+    if operation == "读字节序" || operation.eq_ignore_ascii_case("read-byte-order") {
+        return read_byte_order(arguments);
+    }
     let tokens: Vec<_> = input.split_whitespace().take(6).collect();
     let [integer, from, source, to, target] = tokens.as_slice() else {
         return Err(RadixError::Incomplete);
@@ -177,6 +184,36 @@ fn byte_order(input: &str) -> Result<String, RadixError> {
     ))
 }
 
+fn read_byte_order(input: &str) -> Result<String, RadixError> {
+    let (order, bytes) = input
+        .split_once('@')
+        .ok_or(RadixError::ReadByteOrderArguments)?;
+    let little_endian = match order.trim().to_ascii_lowercase().as_str() {
+        "小端" | "le" => true,
+        "大端" | "be" => false,
+        _ => return Err(RadixError::ReadByteOrderArguments),
+    };
+    let bytes: Vec<_> = bytes.split_whitespace().take(17).collect();
+    if !(1..=16).contains(&bytes.len()) {
+        return Err(RadixError::ReadByteOrderBytes);
+    }
+    let mut value = 0_u128;
+    for (index, token) in bytes.iter().enumerate() {
+        if token.len() != 2 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(RadixError::ReadByteOrderBytes);
+        }
+        let byte = u8::from_str_radix(token, 16).map_err(|_| RadixError::ReadByteOrderBytes)?;
+        let offset = if little_endian {
+            index
+        } else {
+            bytes.len() - 1 - index
+        };
+        value |= u128::from(byte) << (8 * offset);
+    }
+    let width = bytes.len() * 2;
+    Ok(format!("十六进制 0x{value:0width$X}\n十进制 {value}"))
+}
+
 fn arbitrary_base(token: &str) -> Option<u32> {
     Base::parse(token)
         .map(|base| base as u32)
@@ -222,6 +259,32 @@ mod tests {
         ] {
             assert_eq!(convert_arbitrary_radix(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn reads_bytes_in_either_order_and_preserves_hexadecimal_width() {
+        for (query, expected) in [
+            ("读字节序 小端 @ 78 56 34 12", "十六进制 0x12345678\n十进制 305419896"),
+            ("read-byte-order BE @ 00 ab Cd", "十六进制 0x00ABCD\n十进制 43981"),
+            ("读字节序 大端 ＠ ＦＦ", "十六进制 0xFF\n十进制 255"),
+            ("读字节序 小端 @ FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF",
+             "十六进制 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF\n十进制 340282366920938463463374607431768211455"),
+        ] {
+            assert_eq!(convert_arbitrary_radix(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("读字节序 @ 10", RadixError::ReadByteOrderArguments),
+            ("读字节序 大端 @", RadixError::ReadByteOrderBytes),
+            ("读字节序 大端 @ 1", RadixError::ReadByteOrderBytes),
+            ("读字节序 大端 @ +F", RadixError::ReadByteOrderBytes),
+            ("读字节序 大端 @ GG", RadixError::ReadByteOrderBytes),
+        ] {
+            assert_eq!(convert_arbitrary_radix(query), Err(error), "{query}");
+        }
+        assert_eq!(
+            convert_arbitrary_radix(&format!("读字节序 小端 @ {}", " 00".repeat(17))),
+            Err(RadixError::ReadByteOrderBytes),
+        );
     }
 
     #[test]

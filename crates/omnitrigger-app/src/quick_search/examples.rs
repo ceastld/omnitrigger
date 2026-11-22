@@ -646,6 +646,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把大端或小端十六进制字节读成整数",
+        query: "进制: 读字节序 小端 @ 78 56 34 12",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "选择目标进制",
         query: "0xff to",
     },
@@ -3528,7 +3533,11 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 && ["预测", "残差", "误差"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
-        Scope::Radix if !term.is_empty() && "字节序".starts_with(term) => {}
+        Scope::Radix
+            if !term.is_empty()
+                && ["字节序", "读字节序"]
+                    .iter()
+                    .any(|operation| operation.starts_with(term)) => {}
         Scope::Triangle
             if !term.is_empty()
                 && ["斜边", "直角边"]
