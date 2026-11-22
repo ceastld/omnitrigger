@@ -1717,6 +1717,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "按视口宽和高换算 CSS vw 和 vh",
+        query: "2.5vw @ 1440×900 to px",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算密度",
         query: "1000 kg/m³ to g/cm³",
     },
