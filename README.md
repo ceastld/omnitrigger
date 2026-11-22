@@ -113,6 +113,7 @@
 - 输入 `分数: 小数 1/3 to 8` 可舍入为 `0.33333333`。支持 0 至 100 位小数并保留尾零，正好在中点时末位取偶数。
 - 输入 `分数: 计算 round(2.675,2)` 得到精确值 `67/25`，即 `2.68`。位数可用 -100 至 100 的整数，省略时舍入到整数，中点取偶数。可以把舍入结果直接用于精确算式。 [Python 分数舍入规则](https://docs.python.org/3/library/fractions.html#fractions.Fraction.__round__)
 - 输入 `分数: 循环小数 1/7` 得到 `0.(142857)`。括号内为最短循环节，有限小数直接显示，例如 `1/8` 得到 `0.125`。最多展开 512 位小数。
+- 输入 `分数: -2.1(6)` 或 `分数: 从循环小数 -2.1(6)` 可精确还原成 `-13/6`。固定小数位和循环节合计最多 512 位。 [循环小数与几何级数](https://openstax.org/books/intermediate-algebra-2e/pages/12-3-geometric-sequences-and-series)
 - 输入 `分数: 取值表 [-2,0,3/2] x**2+1/3` 可在同一算式中依次代入数值，得到 `13/3`、`1/3` 和 `31/12`。方括号内可填写 1 至 12 个整数、小数或分数，结果用制表符分隔两列，保留输入顺序。
 - 输入 `分数: 连分数 355/113` 得到 `[3,7,16]`，用 `分数: 从连分数 [3,7,16]` 可精确还原。第一项为整数，后续项须为正整数，最多 512 项。 [NIST 连分数定义](https://dlmf.nist.gov/1.12.i)
 - 分数结果可用 `Tab` 填回精确算式并继续计算。搜索框会在算式长度允许时显示续算提示。复制或续算过的分数算式也出现在 `算式历史:`。
@@ -201,6 +202,7 @@
 - 输入 `URL: 编码 北京 A+B` 可把文本转换为 URL 参数值，得到 `%E5%8C%97%E4%BA%AC%20A%2BB`。用 `URL: 解码` 加上编码后的值即可还原文本，解码保留原样写入的加号。
 - 输入 `URL: 表单编码 北京 A+B` 得到 `%E5%8C%97%E4%BA%AC+A%2BB`。用 `URL: 表单解码` 还原时，`+` 表示空格，`%2B` 表示加号。 [WHATWG 表单编码规则](https://url.spec.whatwg.org/#concept-urlencoded-serializer)
 - 输入 `URL: 参数 https://example.invalid/?tag=a+1&tag=b%2Bc` 可逐行查看解码后的名称和值。也可粘贴查询串，结果按原有顺序保留重名参数。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
+- 用 `URL: 参数JSON` 可把查询参数转成 `[["tag","a 1"],["tag","b+c"]]` 这样的名称和值数组。用 `URL: 生成查询串` 加上数组，可按表单编码生成 `tag=a+1&tag=b%2Bc`。两种操作都保留参数顺序和重名项。 [WHATWG 表单编码规则](https://url.spec.whatwg.org/#concept-urlencoded-serializer)
 - 输入 `URL: 拆解 https://example.invalid:8443/a%20b?x=1#part` 可查看协议、主机、有效端口、路径、查询串和片段。HTTP 与 HTTPS 会采用显式端口或协议的默认端口。 [WHATWG URL 组成](https://url.spec.whatwg.org/#concept-url)
 - 输入 `URL: 去查询串 https://example.invalid/doc?source=mail#part` 得到 `https://example.invalid/doc#part`。结果使用 URL 解析后的格式，保留路径和片段。
 - 输入 `URL: 去参数 source https://example.invalid/doc?q=a%20b&source=mail#part` 得到 `https://example.invalid/doc?q=a%20b#part`。同名参数会一起移除，其余参数保留编码和顺序。名称区分大小写，空格可写作 `%20`。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)

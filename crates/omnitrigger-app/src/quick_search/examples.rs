@@ -2077,6 +2077,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "URL: 参数 https://example.invalid/?tag=a+1&tag=b%2Bc",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "把网址查询参数转成有序 JSON 数组",
+        query: "URL: 参数JSON https://example.invalid/?tag=a+1&tag=b%2Bc",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "从名称和值生成网址查询串",
+        query: r#"URL: 生成查询串 [["tag","a 1"],["tag","b+c"]]"#,
+    },
+    Example {
         icon: Icon::Browser,
         title: "拆解 URL 组成",
         query: "URL: 拆解 https://example.invalid:8443/a%20b?x=1#part",
@@ -2223,6 +2233,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把带括号的循环小数精确还原成分数",
+        query: "分数: 从循环小数 -2.1(6)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "精确计算模幂或乘法逆元",
         query: "分数: 计算 pow(3,-1,11)",
     },
@@ -2323,7 +2338,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::BatchCalculation if matches!(term, "分" | "分数") => {}
         Scope::Fraction
             if !term.is_empty()
-                && ["循环小数", "取值表", "连分数", "从连分数"]
+                && ["循环小数", "取值表", "连分数", "从连分数", "从循环小数"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::BatchConversion

@@ -35,6 +35,7 @@ pub(super) enum FractionError {
     DecimalPlaces,
     RoundPlaces,
     RepeatingDecimalLength,
+    RepeatingDecimalSyntax,
     TableInputs,
     ContinuedFractionArguments,
     ContinuedFractionLength,
@@ -60,6 +61,7 @@ impl FractionError {
             Self::DecimalPlaces => "输入 0 至 100 的小数位数，例如 分数: 小数 1/3 to 8",
             Self::RoundPlaces => "round 的位数须为 -100 至 100 的整数",
             Self::RepeatingDecimalLength => "循环小数最多展开 512 个小数位",
+            Self::RepeatingDecimalSyntax => "用括号填写循环节，例如 0.(142857) 或 -2.1(6)",
             Self::TableInputs => {
                 "用方括号填写 1 至 12 个数值，例如 分数: 取值表 [-2,0,3/2] x**2+1/3"
             }
@@ -134,6 +136,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     if verb == "循环小数" || verb.eq_ignore_ascii_case("repeating-decimal") {
         return repeating_decimal(&calculate_fraction(expression.trim())?);
     }
+    if verb == "从循环小数" || verb.eq_ignore_ascii_case("from-repeating-decimal") {
+        return from_repeating_decimal(expression.trim()).map(|value| value.to_string());
+    }
     if verb == "取值表" || verb.eq_ignore_ascii_case("table") {
         return fraction_table(expression.trim());
     }
@@ -160,6 +165,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
             return Err(FractionError::DecimalPlaces);
         }
         return calculate_fraction(source).map(|value| rounded_decimal(value, places));
+    }
+    if input.contains('(') {
+        return from_repeating_decimal(input).map(|value| value.to_string());
     }
     let (negative, numerator, denominator) =
         if let Some((numerator, denominator)) = input.split_once('/') {
@@ -333,6 +341,41 @@ fn repeating_decimal(value: &BigRational) -> Result<String, FractionError> {
         remainder = scaled % denominator;
     }
     Ok(text)
+}
+
+fn from_repeating_decimal(input: &str) -> Result<BigRational, FractionError> {
+    let (negative, input) = sign_and_digits(input)?;
+    let (fixed, repeat) = input
+        .strip_suffix(')')
+        .and_then(|digits| digits.split_once('('))
+        .ok_or(FractionError::RepeatingDecimalSyntax)?;
+    let (whole, prefix) = fixed
+        .split_once('.')
+        .ok_or(FractionError::RepeatingDecimalSyntax)?;
+    if repeat.is_empty()
+        || ![whole, prefix, repeat]
+            .iter()
+            .all(|part| part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(FractionError::RepeatingDecimalSyntax);
+    }
+    if prefix.len() + repeat.len() > MAX_REPEATING_DECIMAL_PLACES {
+        return Err(FractionError::RepeatingDecimalLength);
+    }
+
+    let prefix_scale = BigUint::from(10u8).pow(prefix.len() as u32);
+    let period_scale = BigUint::from(10u8).pow(repeat.len() as u32) - 1u8;
+    let fixed = format!("{whole}{prefix}");
+    let fixed = BigUint::parse_bytes(fixed.as_bytes(), 10).unwrap_or_default();
+    let repeated = BigUint::parse_bytes(repeat.as_bytes(), 10).expect("循环节含十进制数字");
+    let numerator = fixed * &period_scale + repeated;
+    let sign = if negative { Sign::Minus } else { Sign::Plus };
+    let value = BigRational::new(
+        BigInt::from_biguint(sign, numerator),
+        (prefix_scale * period_scale).into(),
+    );
+    ensure_exact_size(&value)?;
+    Ok(value)
 }
 
 fn round_magnitude_to_even(numerator: &BigUint, denominator: &BigUint) -> BigUint {
@@ -824,6 +867,31 @@ mod tests {
         assert_eq!(
             simplify_fraction("取值表 [2] xx"),
             Err(FractionError::Invalid)
+        );
+    }
+
+    #[test]
+    fn converts_repeating_decimal_notation_to_reduced_fractions() {
+        for (input, expected) in [
+            ("从循环小数 0.(142857)", "1/7"),
+            ("from-repeating-decimal -2.1(6)", "-13/6"),
+            ("０．０８（３）", "1/12"),
+            ("+.0(09)", "1/110"),
+            ("0.(9)", "1"),
+            ("-0.(0)", "0"),
+        ] {
+            assert_eq!(simplify_fraction(input).as_deref(), Ok(expected), "{input}");
+        }
+        for input in ["0.1()", "1(3)", "0.(3)0", "0.(a)"] {
+            assert_eq!(
+                simplify_fraction(input),
+                Err(FractionError::RepeatingDecimalSyntax)
+            );
+        }
+        let overlong = format!("0.({})", "1".repeat(MAX_REPEATING_DECIMAL_PLACES + 1));
+        assert_eq!(
+            simplify_fraction(&overlong),
+            Err(FractionError::RepeatingDecimalLength)
         );
     }
 

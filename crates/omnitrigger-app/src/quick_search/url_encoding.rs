@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet};
 
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::de::DeserializeOwned;
@@ -30,6 +30,7 @@ pub(super) enum UrlEncodingError {
     RelativeUrlOrigin,
     RelativeUrlUnavailable,
     InvalidParameterPair,
+    InvalidParameterList,
     InvalidParameterNames,
     InvalidFilePath,
     InvalidFileUrl,
@@ -52,6 +53,7 @@ impl UrlEncodingError {
             Self::RelativeUrlOrigin => "两个 HTTP(S) 网址须使用相同协议、主机、端口和登录信息",
             Self::RelativeUrlUnavailable => "无法用该基准网址生成可还原的相对链接",
             Self::InvalidParameterPair => "用 JSON 填写名称和值，例如 [\"tag\",\"茶\"]，再输入 URL",
+            Self::InvalidParameterList => "用 JSON 数组填写多组名称和值，例如 [[\"tag\",\"茶\"]]",
             Self::InvalidParameterNames => "用 JSON 字符串数组填写参数名，再输入 URL",
             Self::InvalidFilePath => "输入绝对文件路径，例如 C:\\文档\\示例.txt",
             Self::InvalidFileUrl => "输入带绝对路径的 file: URL，例如 file:///C:/Docs/example.txt",
@@ -75,7 +77,9 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
             .to_string()
             .replace("%20", "+")),
         "表单解码" | "form-decode" => decode_form_value(value),
-        "参数" | "查询参数" | "params" => decode_parameters(value),
+        "参数" | "查询参数" | "params" => decode_parameters(value, false),
+        "参数json" | "params-json" => decode_parameters(value, true),
+        "生成查询串" | "build-query" => encode_parameters(value),
         "拆解" | "inspect" => inspect_url(value),
         "拼接" | "resolve" => resolve_url(value),
         "相对" | "relative" => relative_url(value),
@@ -206,7 +210,7 @@ fn decode_file_path(input: &str) -> Result<String, UrlEncodingError> {
         .ok_or(UrlEncodingError::InvalidFileUrl)
 }
 
-fn decode_value(value: &str) -> Result<String, UrlEncodingError> {
+fn decode_percent_escapes(value: &str) -> Result<Cow<'_, str>, UrlEncodingError> {
     let mut rest = value;
     while let Some((_, suffix)) = rest.split_once('%') {
         let digits = suffix
@@ -215,9 +219,13 @@ fn decode_value(value: &str) -> Result<String, UrlEncodingError> {
             .ok_or(UrlEncodingError::InvalidEscape)?;
         rest = &suffix[digits.len()..];
     }
-    let decoded = percent_decode_str(value)
+    percent_decode_str(value)
         .decode_utf8()
-        .map_err(|_| UrlEncodingError::InvalidUtf8)?;
+        .map_err(|_| UrlEncodingError::InvalidUtf8)
+}
+
+fn decode_value(value: &str) -> Result<String, UrlEncodingError> {
+    let decoded = decode_percent_escapes(value)?;
     if decoded.contains('\0') {
         return Err(UrlEncodingError::NullCharacter);
     }
@@ -352,20 +360,47 @@ fn query_text(value: &str) -> &str {
     }
 }
 
-fn decode_parameters(value: &str) -> Result<String, UrlEncodingError> {
-    let quote = |text: &str| {
-        let decoded = decode_form_value(text)?;
-        Ok::<_, UrlEncodingError>(serde_json::to_string(&decoded).expect("字符串可序列化"))
+fn decode_parameters(value: &str, json: bool) -> Result<String, UrlEncodingError> {
+    let decode = |value: &str| {
+        if json {
+            // JSON 转义可以表示空字符，生成的输出仍能作为文本复制。
+            Ok(decode_percent_escapes(&value.replace('+', " "))?.into_owned())
+        } else {
+            decode_form_value(value)
+        }
     };
-    let mut lines = Vec::new();
+    let mut pairs = Vec::new();
     for parameter in query_text(value).split('&').filter(|part| !part.is_empty()) {
         let (name, value) = parameter.split_once('=').unwrap_or((parameter, ""));
-        lines.push(format!("{} = {}", quote(name)?, quote(value)?));
+        pairs.push([decode(name)?, decode(value)?]);
     }
-    if lines.is_empty() {
+    if json {
+        return Ok(serde_json::to_string(&pairs).expect("字符串数组可序列化"));
+    }
+    if pairs.is_empty() {
         return Err(UrlEncodingError::MissingParameters);
     }
-    Ok(lines.join("\n"))
+    let quote = |value: &str| serde_json::to_string(value).expect("字符串可序列化");
+    Ok(pairs
+        .iter()
+        .map(|[name, value]| format!("{} = {}", quote(name), quote(value)))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn encode_parameters(input: &str) -> Result<String, UrlEncodingError> {
+    let pairs = serde_json::from_str::<Vec<[String; 2]>>(input).map_err(|error| {
+        if error.is_eof() {
+            UrlEncodingError::Incomplete
+        } else {
+            UrlEncodingError::InvalidParameterList
+        }
+    })?;
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for [name, value] in pairs {
+        serializer.append_pair(&name, &value);
+    }
+    Ok(serializer.finish())
 }
 
 #[cfg(test)]
@@ -757,6 +792,31 @@ mod tests {
         ] {
             assert_eq!(convert_url_component(input).as_deref(), Ok(expected));
         }
+    }
+
+    #[test]
+    fn round_trips_ordered_query_pairs_with_duplicates_and_empty_strings() {
+        let query = "tag=a+1&tag=b%2Bc&=blank&empty=&data=%00";
+        let pairs = r#"[["tag","a 1"],["tag","b+c"],["","blank"],["empty",""],["data","\u0000"]]"#;
+        assert_eq!(
+            convert_url_component(&format!("参数JSON https://example.invalid/?{query}#x"))
+                .as_deref(),
+            Ok(pairs)
+        );
+        assert_eq!(
+            convert_url_component(&format!("生成查询串 {pairs}")).as_deref(),
+            Ok(query)
+        );
+        assert_eq!(convert_url_component("params-json ?").as_deref(), Ok("[]"));
+        assert_eq!(convert_url_component("build-query []").as_deref(), Ok(""));
+        assert_eq!(
+            convert_url_component("参数JSON ?data=%GG"),
+            Err(UrlEncodingError::InvalidEscape)
+        );
+        assert_eq!(
+            convert_url_component(r#"生成查询串 [["tag",2]]"#),
+            Err(UrlEncodingError::InvalidParameterList)
+        );
     }
 
     #[test]
