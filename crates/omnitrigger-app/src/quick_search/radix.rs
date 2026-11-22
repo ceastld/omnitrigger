@@ -25,6 +25,9 @@ pub(super) enum RadixError {
     WriteBitsWidthExceeded,
     RotateBitsArguments,
     RotateBitsWidthExceeded,
+    ReverseBitsArguments,
+    ReverseBytesArguments,
+    ReverseWidthExceeded,
 }
 
 impl RadixError {
@@ -38,7 +41,9 @@ impl RadixError {
                 "填写位宽和整数，例如 字节序 32 @ 0x12345678。位宽为 8 至 128 的 8 倍数"
             }
             Self::ByteOrderInteger => "填写非负整数，可用十进制或 0x、0b、0o 前缀",
-            Self::ByteOrderWidthExceeded | Self::RotateBitsWidthExceeded => "整数超出所填位宽",
+            Self::ByteOrderWidthExceeded
+            | Self::RotateBitsWidthExceeded
+            | Self::ReverseWidthExceeded => "整数超出所填位宽",
             Self::SignedByteOrderInteger => "填写有符号整数，可用十进制或 0x、0b、0o 前缀",
             Self::SignedByteOrderWidthExceeded => "有符号整数超出所填位宽",
             Self::ReadByteOrderArguments => "填写大端或小端，例如 读字节序 小端 @ 78 56 34 12",
@@ -51,6 +56,10 @@ impl RadixError {
             }
             Self::WriteBitsWidthExceeded => "新值超出所选位宽",
             Self::RotateBitsArguments => "填写位宽、移动位数和非负整数，例如 循环左移 8,3 @ 0xA5",
+            Self::ReverseBitsArguments => "填写 1 至 8192 的位宽和非负整数，例如 位倒序 8 @ 0x06",
+            Self::ReverseBytesArguments => {
+                "填写 8 至 8192 的 8 倍数位宽和非负整数，例如 字节倒序 32 @ 0x12345678"
+            }
         }
     }
 }
@@ -159,6 +168,12 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     if operation == "循环右移" || operation.eq_ignore_ascii_case("rotate-right") {
         return rotate_bits(arguments, true);
     }
+    if operation == "位倒序" || operation.eq_ignore_ascii_case("reverse-bits") {
+        return reverse_bits_or_bytes(arguments, false);
+    }
+    if operation == "字节倒序" || operation.eq_ignore_ascii_case("reverse-bytes") {
+        return reverse_bits_or_bytes(arguments, true);
+    }
     let tokens: Vec<_> = input.split_whitespace().take(6).collect();
     let [integer, from, source, to, target] = tokens.as_slice() else {
         return Err(RadixError::Incomplete);
@@ -220,12 +235,7 @@ fn rotate_bits(input: &str, right: bool) -> Result<String, RadixError> {
     let error = RadixError::RotateBitsArguments;
     let (settings, number) = input.split_once('@').ok_or(error)?;
     let (width, count) = settings.split_once(',').ok_or(error)?;
-    let width = width
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .filter(|width| (1..=MAX_INTEGER_BITS).contains(width))
-        .ok_or(error)?;
+    let width = bit_width(width, error)?;
     let shift = count.trim().parse::<u64>().map_err(|_| error)? % width;
     let value = unsigned_bit_value(number, error)?;
     if value.bits() > width {
@@ -234,6 +244,43 @@ fn rotate_bits(input: &str, right: bool) -> Result<String, RadixError> {
     let shift = if right { width - shift } else { shift };
     let rotated = ((&value << shift) | (&value >> (width - shift))) & bit_mask(width);
     Ok(format_padded_bit_value(&rotated, width))
+}
+
+fn reverse_bits_or_bytes(input: &str, by_byte: bool) -> Result<String, RadixError> {
+    let error = if by_byte {
+        RadixError::ReverseBytesArguments
+    } else {
+        RadixError::ReverseBitsArguments
+    };
+    let (width, number) = input.split_once('@').ok_or(error)?;
+    let width = bit_width(width, error)?;
+    if by_byte && !width.is_multiple_of(8) {
+        return Err(error);
+    }
+    let value = unsigned_bit_value(number, error)?;
+    if value.bits() > width {
+        return Err(RadixError::ReverseWidthExceeded);
+    }
+    let bytes = width.div_ceil(8) as usize;
+    let mut data = value.to_bytes_le();
+    data.resize(bytes, 0);
+    if !by_byte {
+        for byte in &mut data {
+            *byte = byte.reverse_bits();
+        }
+    }
+    // 小端字节按大端读取，逐位反转时移除落到低位的补齐位。
+    let reversed = BigUint::from_bytes_be(&data) >> (bytes * 8 - width as usize);
+    Ok(format_padded_bit_value(&reversed, width))
+}
+
+fn bit_width(input: &str, error: RadixError) -> Result<u64, RadixError> {
+    input
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|width| (1..=MAX_INTEGER_BITS).contains(width))
+        .ok_or(error)
 }
 
 fn format_padded_bit_value(value: &BigUint, width: u64) -> String {
@@ -403,6 +450,37 @@ pub(super) fn ungroup_digits(digits: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reverses_bits_or_bytes_within_the_explicit_width() {
+        for (query, expected) in [
+            ("位倒序 8 @ 0x06", "十六进制 0x60\n十进制 96"),
+            ("reverse-bits 5 @ 0b00110", "十六进制 0x0C\n十进制 12"),
+            ("位倒序 5 @ 0x0C", "十六进制 0x06\n十进制 6"),
+            ("位倒序 1 @ 1", "十六进制 0x1\n十进制 1"),
+            (
+                "字节倒序 32 @ 0x12345678",
+                "十六进制 0x78563412\n十进制 2018915346",
+            ),
+            ("reverse-bytes 16 @ 1", "十六进制 0x0100\n十进制 256"),
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            ("位倒序 4 @ 16", RadixError::ReverseWidthExceeded),
+            ("字节倒序 8 @ 256", RadixError::ReverseWidthExceeded),
+            ("字节倒序 7 @ 1", RadixError::ReverseBytesArguments),
+            ("位倒序 0 @ 0", RadixError::ReverseBitsArguments),
+            ("位倒序 8193 @ 0", RadixError::ReverseBitsArguments),
+            ("位倒序 8 @ -1", RadixError::ReverseBitsArguments),
+        ] {
+            assert_eq!(convert_arbitrary_radix(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn rotates_within_the_requested_width_and_reduces_the_shift_count() {

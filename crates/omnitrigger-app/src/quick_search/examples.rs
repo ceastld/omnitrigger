@@ -831,6 +831,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "在指定位宽内按位倒序",
+        query: "进制: 位倒序 8 @ 0x06",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "在指定位宽内按字节倒序",
+        query: "进制: 字节倒序 32 @ 0x12345678",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "选择目标进制",
         query: "0xff to",
     },
@@ -4039,6 +4049,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "写位",
                     "循环左移",
                     "循环右移",
+                    "位倒序",
+                    "字节倒序",
                 ]
                 .iter()
                 .any(|operation| operation.starts_with(term)) => {}
