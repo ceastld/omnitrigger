@@ -55,6 +55,8 @@ pub(super) enum TextError {
     InvalidBase64,
     InvalidHexBytes,
     InvalidUtf8,
+    InvalidHexUtf16Units,
+    InvalidUtf16,
     InvalidCodePoint,
     InvalidJsonString,
 }
@@ -90,6 +92,10 @@ impl TextError {
             Self::InvalidBase64 => "Base64 编码无效",
             Self::InvalidHexBytes => "输入成对的十六进制数字，例如 E5 8C 97",
             Self::InvalidUtf8 => "解码结果不是 UTF-8 文本",
+            Self::InvalidHexUtf16Units => {
+                "每个 UTF-16 码元使用四位十六进制数字，例如 5317 D83D DE00"
+            }
+            Self::InvalidUtf16 => "UTF-16 代理码元必须成对且顺序正确",
             Self::InvalidCodePoint => "输入以空格分隔的 Unicode 码位，例如 U+5317 U+4EAC",
             Self::InvalidJsonString => "请输入带双引号的 JSON 字符串",
         }
@@ -248,8 +254,10 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "base64解码" | "base64-decode" => decode_base64(text, &STANDARD, &STANDARD_NO_PAD),
         "base64url编码" | "base64url-encode" => Ok(URL_SAFE_NO_PAD.encode(text)),
         "base64url解码" | "base64url-decode" => decode_base64(text, &URL_SAFE, &URL_SAFE_NO_PAD),
-        "utf8编码" | "utf8-hex" => Ok(encode_utf8_bytes(text)),
+        "utf8编码" | "utf8-hex" => Ok(encode_hex_units(text.bytes(), 2)),
         "utf8解码" | "utf8-hex-decode" => decode_utf8_bytes(text),
+        "utf16编码" | "utf16-hex" => Ok(encode_hex_units(text.encode_utf16(), 4)),
+        "utf16解码" | "utf16-hex-decode" => decode_utf16_units(text),
         "码位" | "codepoints" => Ok(encode_code_points(text)),
         "码位解码" | "codepoints-decode" => decode_code_points(text),
         "json转义" | "json-quote" => {
@@ -477,36 +485,50 @@ fn count_lines(text: &str) -> String {
         .join("\n")
 }
 
-fn encode_utf8_bytes(text: &str) -> String {
+fn encode_hex_units<T: std::fmt::UpperHex>(units: impl Iterator<Item = T>, width: usize) -> String {
     let mut encoded = String::new();
-    for byte in text.bytes() {
+    for unit in units {
         if !encoded.is_empty() {
             encoded.push(' ');
         }
-        write!(encoded, "{byte:02X}").expect("写入 String 不会出错");
+        write!(encoded, "{unit:0width$X}").expect("写入 String 不会出错");
     }
     encoded
 }
 
 fn decode_utf8_bytes(text: &str) -> Result<String, TextError> {
-    let mut bytes = Vec::with_capacity(text.len() / 2);
+    decoded_utf8(decode_hex_units(text, 2, TextError::InvalidHexBytes)?)
+}
+
+fn decode_utf16_units(text: &str) -> Result<String, TextError> {
+    let units = decode_hex_units(text, 4, TextError::InvalidHexUtf16Units)?;
+    decoded_text(String::from_utf16(&units).map_err(|_| TextError::InvalidUtf16)?)
+}
+
+fn decode_hex_units<T: TryFrom<u16>>(
+    text: &str,
+    width: usize,
+    invalid: TextError,
+) -> Result<Vec<T>, TextError> {
+    let mut units = Vec::with_capacity(text.len() / width);
     for group in text.split_whitespace() {
         let digits = group
             .strip_prefix("0x")
             .or_else(|| group.strip_prefix("0X"))
             .unwrap_or(group);
         if digits.is_empty()
-            || !digits.len().is_multiple_of(2)
+            || !digits.len().is_multiple_of(width)
             || !digits.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
-            return Err(TextError::InvalidHexBytes);
+            return Err(invalid);
         }
-        for pair in digits.as_bytes().chunks_exact(2) {
-            let pair = std::str::from_utf8(pair).expect("十六进制数字为 ASCII");
-            bytes.push(u8::from_str_radix(pair, 16).expect("每两个十六进制数字为一个字节"));
+        for chunk in digits.as_bytes().chunks_exact(width) {
+            let chunk = std::str::from_utf8(chunk).expect("十六进制数字为 ASCII");
+            let value = u16::from_str_radix(chunk, 16).map_err(|_| invalid)?;
+            units.push(T::try_from(value).map_err(|_| invalid)?);
         }
     }
-    decoded_utf8(bytes)
+    Ok(units)
 }
 
 fn encode_code_points(text: &str) -> String {
@@ -666,7 +688,10 @@ fn decode_base64(
 }
 
 fn decoded_utf8(bytes: Vec<u8>) -> Result<String, TextError> {
-    let result = String::from_utf8(bytes).map_err(|_| TextError::InvalidUtf8)?;
+    decoded_text(String::from_utf8(bytes).map_err(|_| TextError::InvalidUtf8)?)
+}
+
+fn decoded_text(result: String) -> Result<String, TextError> {
     if result.contains('\0') {
         return Err(TextError::NullCharacter);
     }
@@ -1080,6 +1105,27 @@ fn replace_regex(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_utf16_units_and_requires_ordered_surrogate_pairs() {
+        for (input, expected) in [
+            ("UTF16编码 北😀", "5317 D83D DE00"),
+            ("utf16-hex-decode 0X5317d83dDe00", "北😀"),
+            ("UTF16解码 5317\t0xD83D\nDE00", "北😀"),
+            ("UTF16编码 “ A ”", "0020 0041 0020"),
+            ("UTF16解码 \"\"", ""),
+        ] {
+            assert_eq!(transform_text(input).as_deref(), Ok(expected));
+        }
+        for (input, expected) in [
+            ("UTF16解码 D83", TextError::InvalidHexUtf16Units),
+            ("UTF16解码 D83D", TextError::InvalidUtf16),
+            ("UTF16解码 DE00 D83D", TextError::InvalidUtf16),
+            ("UTF16解码 0000", TextError::NullCharacter),
+        ] {
+            assert_eq!(transform_text(input), Err(expected));
+        }
+    }
 
     #[test]
     fn makes_ascii_and_unicode_whitespace_visible_without_changing_emoji() {

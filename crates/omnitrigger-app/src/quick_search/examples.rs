@@ -135,6 +135,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 调和平均 36,72",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "计算样本均值的标准误",
+        query: "统计: 标准误 1,3,5",
+    },
+    Example {
         icon: Icon::Layers,
         title: "精确计算两组数值的样本协方差",
         query: "统计: 协方差 0,0; 1,1; 2,1",
@@ -1647,6 +1652,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看 UTF-16 十六进制码元",
+        query: "文本: UTF16编码 北😀",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "将 UTF-16 十六进制码元转回文字",
+        query: "文本: UTF16解码 5317 D83D DE00",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "转成 JSON 字符串",
         query: r#"文本: JSON转义 他写下 "你好""#,
     },
@@ -2516,6 +2531,9 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "调和"
                     | "调和平"
                     | "调和平均"
+                    | "标"
+                    | "标准"
+                    | "标准误"
                     | "协"
                     | "协方"
                     | "协方差"

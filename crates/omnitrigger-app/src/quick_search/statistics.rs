@@ -21,6 +21,7 @@ pub(super) enum StatisticsError {
     InvalidProbability,
     InvalidWindowWidth,
     NonPositiveHarmonicValue,
+    StandardErrorCount,
     Paired(LinearFitError),
     Evaluation(FractionError),
 }
@@ -37,6 +38,7 @@ impl StatisticsError {
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
             Self::InvalidWindowWidth => "窗口大小须为正整数，且不能超过数值个数",
             Self::NonPositiveHarmonicValue => "调和平均需要所有数值大于零",
+            Self::StandardErrorCount => "均值标准误至少需要两个观测值",
             Self::Paired(error) => error.message(),
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "请输入整数、有限小数、分数或精确算式"
@@ -55,6 +57,7 @@ enum StatisticsOperation {
     Mode,
     RootMeanSquare,
     HarmonicMean,
+    StandardError,
     MedianAbsoluteDeviation,
 }
 
@@ -70,6 +73,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "众数" | "mode" => (StatisticsOperation::Mode, values.trim()),
         "均方根" | "rms" => (StatisticsOperation::RootMeanSquare, values.trim()),
         "调和平均" | "harmonic-mean" => (StatisticsOperation::HarmonicMean, values.trim()),
+        "标准误" | "均值标准误" | "sem" | "standard-error" => {
+            (StatisticsOperation::StandardError, values.trim())
+        }
         "中位绝对偏差" | "mad" | "median-absolute-deviation" => {
             (StatisticsOperation::MedianAbsoluteDeviation, values.trim())
         }
@@ -131,6 +137,16 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             let squares = squared_deviation_sum(&values, &BigRational::default())?;
             let mean_square = bounded(squares / BigInt::from(count))?;
             Ok(format_square_root(&mean_square))
+        }
+        StatisticsOperation::StandardError => {
+            if count < 2 {
+                return Err(StatisticsError::StandardErrorCount);
+            }
+            let average = bounded(observation_sum(&values)? / BigInt::from(count))?;
+            let deviation_sum = squared_deviation_sum(&values, &average)?;
+            let divisor = BigInt::from(count) * BigInt::from(count - 1);
+            let squared_error = bounded(deviation_sum / divisor)?;
+            Ok(format_square_root(&squared_error))
         }
         StatisticsOperation::HarmonicMean => {
             let reciprocal_sum = values.into_iter().try_fold(
@@ -305,16 +321,20 @@ pub(super) fn summarize_unweighted(
     )
 }
 
+fn observation_sum(values: &[(BigRational, u64)]) -> Result<BigRational, StatisticsError> {
+    values
+        .iter()
+        .try_fold(BigRational::default(), |sum, (value, repetitions)| {
+            bounded(sum + value * BigInt::from(*repetitions))
+        })
+}
+
 fn summarize(
     mut values: Vec<(BigRational, u64)>,
     count: u64,
     sample: bool,
 ) -> Result<String, StatisticsError> {
-    let sum = values
-        .iter()
-        .try_fold(BigRational::default(), |sum, (value, repetitions)| {
-            bounded(sum + value * BigInt::from(*repetitions))
-        })?;
+    let sum = observation_sum(&values)?;
     let average = bounded(&sum / BigInt::from(count))?;
 
     values.sort_by(|(left, _), (right, _)| left.cmp(right));
@@ -638,6 +658,32 @@ mod tests {
         ] {
             assert_eq!(calculate_statistics(query), Err(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn calculates_exact_standard_error_of_the_mean_for_samples_and_frequencies() {
+        for (query, expected) in [
+            ("标准误 1,3,5", "√(4/3)"),
+            ("sem 1,3", "1"),
+            ("均值标准误 频数 1@2,3@2", "√(1/3)"),
+            ("标准误 频数 4@18446744073709551615", "0"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in ["标准误 5", "标准误 频数 5@1"] {
+            assert_eq!(
+                calculate_statistics(query),
+                Err(StatisticsError::StandardErrorCount)
+            );
+        }
+        assert_eq!(
+            calculate_statistics("标准误"),
+            Err(StatisticsError::Incomplete)
+        );
     }
 
     #[test]

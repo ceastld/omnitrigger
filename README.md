@@ -158,6 +158,7 @@
 - 输入 `统计: 累计合计 1/2,1,2,4` 可依次得到 `1/2`、`3/2`、`7/2` 和 `15/2`。用 `累计平均` 可求截至每一项的精确平均值。
 - 输入 `统计: 均方根 1/2,3/2` 得到 `√(5/4)`。也可用频数组，例如 `统计: 均方根 频数 0@2,6@1,-8@1` 得到 `5`。
 - 输入 `统计: 调和平均 36,72` 得到 `48`，可用于按相同路程求两段的平均速度。数值须大于零，支持分数与 `频数` 数据，结果保留精确分数。 [调和平均定义](https://docs.python.org/3/library/statistics.html#statistics.harmonic_mean)
+- 输入 `统计: 标准误 1,3,5` 得到 `√(4/3)`，即样本标准差除以观测数的平方根。至少需要两个观测值，支持 `频数` 数据，结果保留精确分数或根式。 [NIST 均值标准误定义](https://www.itl.nist.gov/div898/software/dataplot/refman2/ch2/sd_mean.pdf)
 - 输入 `统计: 协方差 0,0; 1,1; 2,1` 可求样本协方差 `1/2`。用 `总体协方差` 得到 `1/3`。输入 2 至 64 对数值，每对填 `x,y`，用分号或换行分组，结果保留精确分数。
 - 输入 `统计: 相关系数 0,0; 1,-1; 2,-1` 得到精确的皮尔逊相关系数 `-√(3/4)`。输入格式与协方差相同，两个变量均须有变化。
 - 输入 `rms(0,6,0,-8)` 可求均方根 `5`。`corr(1,2,2,4,3,6)` 得到皮尔逊相关系数 `1`，输入至少两对数值，且两个变量都须有变化。 [NIST 相关系数公式](https://www.itl.nist.gov/div898/software/dataplot/refman2/auxillar/correlat.htm)
@@ -200,6 +201,7 @@
 - 用 `文本: 显示空白` 可把普通空格、制表符、回车和换行显示为 `␠`、`␉`、`␍` 和 `␊`。其他 Unicode 空白显示码位，例如不换行空格显示为 `<U+00A0>`。用引号可保留待转换文本首尾的空白。 [Unicode 控制字符图形](https://www.unicode.org/charts/PDF/U2400.pdf)
 - 输入 `文本: 码位 北京` 得到 `U+5317 U+4EAC`，用 `文本: 码位解码 U+5317 U+4EAC` 转回文字。组合字符按各自的 Unicode 码位显示。
 - 输入 `文本: UTF8编码 北京` 可查看 UTF-8 字节 `E5 8C 97 E4 BA AC`。用 `文本: UTF8解码` 加上十六进制字节可还原文字，接受连续数字、空白分隔或带 `0x` 的字节组。
+- 输入 `文本: UTF16编码 北😀` 可查看 UTF-16 码元 `5317 D83D DE00`。用 `文本: UTF16解码` 可还原文字。每个码元为四位十六进制数字，可连续输入或用空白分隔，代理码元须按顺序成对出现。 [Unicode UTF-16 规则](https://www.unicode.org/faq/utf_bom.html#utf16)
 - 输入 `文本: JSON转义 他写下 "你好"` 可把文字转成 JSON 字符串。输入 `文本: JSON还原 "\u4F60\n好"` 会还原为两行文字。 [RFC 8259 的字符串语法](https://www.rfc-editor.org/rfc/rfc8259.html#section-7)
 - 输入 `文本: HTML转义 <b>茶 & 咖啡</b>` 可转义尖括号、与号和单双引号。用 `HTML还原` 可解码带分号的 `amp`、`lt`、`gt`、`quot`、`apos`、`nbsp` 以及十进制或十六进制数字引用。 [WHATWG 数字字符引用规则](https://html.spec.whatwg.org/multipage/parsing.html#numeric-character-reference-end-state)
 - 输入 `文本: Markdown转义 *茶* [咖啡]` 得到 `\*茶\* \[咖啡\]`，可粘贴到 Markdown 正文。用 `Markdown还原` 可去掉 ASCII 标点前用作转义的反斜杠。 [CommonMark 反斜杠转义](https://spec.commonmark.org/0.31.2/#backslash-escapes)
