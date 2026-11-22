@@ -220,6 +220,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量换算: 3 m to cm\n0xff to dec\n1 GiB to MiB",
     },
     Example {
+        icon: Icon::Clock,
+        title: "逐行换算分秒、ISO 和带单位的时长",
+        query: "批量换算: 时长 01:30 to s\nPT1M30S to min\n1天2.5秒 to iso",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "一次算出多行算式",
         query: "批量计算: 2**8\n3^3\nsqrt(81)",
@@ -2067,6 +2072,7 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
     match scope {
         Scope::BatchCalculation if matches!(term, "分" | "分数") => {}
+        Scope::BatchConversion if matches!(term, "时" | "时长") => {}
         Scope::Date
             if !term.is_empty()
                 && ["列出", "格式化", "解析"]

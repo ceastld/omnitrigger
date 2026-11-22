@@ -66,7 +66,7 @@ use crate::{
 use actions::{matching_actions, SearchAction};
 use applications::{ApplicationCache, ApplicationIndex};
 use aspect_ratio::{calculate_aspect_ratio, AspectRatioError};
-use batch::{map_batch_lines, BatchError};
+use batch::{batch_arguments, map_batch_lines, BatchError};
 use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, looks_like_date_query, DateError};
 use cidr::{calculate_cidr, CidrError};
@@ -334,6 +334,7 @@ enum ValueError {
     BatchFraction(BatchError<FractionError>),
     Conversion(ConversionError),
     BatchConversion(BatchError<ConversionError>),
+    BatchDuration(BatchError<DurationError>),
     Radix(RadixError),
     RatioAllocation(RatioAllocationError),
     AspectRatio(AspectRatioError),
@@ -392,6 +393,13 @@ impl ValueError {
                     ConversionError::message,
                 );
             }
+            Self::BatchDuration(error) => {
+                return batch_error_message(
+                    error,
+                    "逐行输入时长换算，例如 01:30 to s",
+                    DurationError::message,
+                );
+            }
             Self::Radix(error) => error.message(),
             Self::RatioAllocation(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
@@ -433,6 +441,7 @@ impl ValueError {
                 | Self::BatchCalculation(BatchError::Empty)
                 | Self::BatchFraction(BatchError::Empty)
                 | Self::BatchConversion(BatchError::Empty)
+                | Self::BatchDuration(BatchError::Empty)
                 | Self::AspectRatio(AspectRatioError::Incomplete)
                 | Self::Paper(PaperError::Incomplete)
                 | Self::Rectangle(RectangleError::Incomplete)
@@ -574,9 +583,7 @@ impl Results {
                 }
                 Scope::CalculationHistory => Self::Calculations(recent.calculations.matching(term)),
                 Scope::BatchCalculation => {
-                    let (operation, arguments) =
-                        term.split_once(char::is_whitespace).unwrap_or((term, ""));
-                    if operation == "分数" || operation.eq_ignore_ascii_case("exact") {
+                    if let Some(arguments) = batch_arguments(term, "分数", "exact") {
                         Self::text_value(
                             map_batch_lines(arguments, |query| {
                                 calculate_fraction(query).map(|value| value.to_string())
@@ -591,7 +598,14 @@ impl Results {
                 }
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
                 Scope::BatchConversion => {
-                    Self::text_value(convert_batch(term).map_err(ValueError::BatchConversion))
+                    if let Some(arguments) = batch_arguments(term, "时长", "duration") {
+                        Self::text_value(
+                            map_batch_lines(arguments, convert_duration)
+                                .map_err(ValueError::BatchDuration),
+                        )
+                    } else {
+                        Self::text_value(convert_batch(term).map_err(ValueError::BatchConversion))
+                    }
                 }
                 Scope::Radix => Self::Value(
                     convert_arbitrary_radix(term)
@@ -2112,6 +2126,24 @@ mod tests {
     }
 
     #[test]
+    fn converts_duration_notations_line_by_line_and_identifies_failures() {
+        assert!(matches!(
+            for_query("批量换算: 时长 01:30 to s\r\nPT1M30S to min\n1天2.5秒 to iso", &[]),
+            Results::Value(Ok(value)) if value.text == "90 s\n1.5 min\nP1DT2.5S"
+        ));
+        assert!(matches!(
+            for_query("批量换算: duration 01:30 to s\n\n0.5ns", &[]),
+            Results::Value(Err(ValueError::BatchDuration(BatchError::Row {
+                line: 3,
+                cause: DurationError::Precision,
+            })))
+        ));
+        assert!(for_query("批量换算: 时", &[])
+            .suggested_input(0)
+            .is_some_and(|query| query.starts_with("批量换算: 时长 ")));
+    }
+
+    #[test]
     fn csv_queries_preserve_significant_whitespace_and_suggest_operations() {
         assert!(matches!(
             for_query(" CSV： 转JSON  001,茶\n002,末尾 ", &[]),
@@ -2519,6 +2551,7 @@ mod tests {
                     "时长: 极差 01:25,02:40,00:55",
                     "时长: 排序 02:40,PT2M,00:55,02:00",
                     "时长: 降序 02:40,PT2M,00:55,02:00",
+                    "批量换算: 时长 01:30 to s\nPT1M30S to min\n1天2.5秒 to iso",
                     "帧数: 125 帧 @ 25 fps",
                     "帧数: 10秒 @ 30000/1001 fps",
                     "时间戳: 现在 + 90分钟 to UTC+8",
