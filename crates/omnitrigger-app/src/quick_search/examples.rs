@@ -3428,6 +3428,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "合并重叠区间后计算总覆盖长度",
+        query: "区间: 长度 [0,3]; [2,5]; [8,9]",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在分数算式中精确开方并取绝对值",
         query: "分数: 计算 sqrt(81/16)+abs(-1/2)",
     },
@@ -3612,7 +3617,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
     }
     match scope {
         Scope::Intervals
-            if ["交集", "合并", "差集"]
+            if ["交集", "合并", "差集", "长度"]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::BatchCalculation

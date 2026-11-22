@@ -4,7 +4,7 @@ use num_rational::BigRational;
 
 use super::{
     calculator::normalize,
-    fraction::{calculate_fraction, FractionError},
+    fraction::{calculate_fraction, ensure_exact_size, FractionError},
     operators::split_top_level_commas,
 };
 
@@ -25,7 +25,7 @@ impl IntervalError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete | Self::Operation => {
-                "输入交集、合并或差集，再填写区间，例如 交集 [1/2,3); (2,5]"
+                "输入交集、合并、差集或长度，再填写区间，例如 交集 [1/2,3); (2,5]"
             }
             Self::Count => "最多填写 32 个区间，用分号或换行分开",
             Self::Notation => "用方括号包含端点，用圆括号排除端点，两个端点用逗号分开",
@@ -42,6 +42,7 @@ enum IntervalOperation {
     Intersection,
     Union,
     Difference,
+    Length,
 }
 
 #[derive(Clone)]
@@ -80,6 +81,7 @@ pub(super) fn calculate_intervals(query: &str) -> Result<String, IntervalError> 
         "交集" | "intersect" => IntervalOperation::Intersection,
         "合并" | "并集" | "union" => IntervalOperation::Union,
         "差集" | "difference" => IntervalOperation::Difference,
+        "长度" | "总长度" | "length" | "total-length" => IntervalOperation::Length,
         "" => return Err(IntervalError::Incomplete),
         _ => return Err(IntervalError::Operation),
     };
@@ -102,6 +104,9 @@ pub(super) fn calculate_intervals(query: &str) -> Result<String, IntervalError> 
         IntervalOperation::Intersection => intersect_intervals(intervals).into_iter().collect(),
         IntervalOperation::Union => merge_intervals(intervals.into_iter().flatten().collect()),
         IntervalOperation::Difference => subtract_intervals(intervals),
+        IntervalOperation::Length => {
+            return union_length(merge_intervals(intervals.into_iter().flatten().collect()));
+        }
     };
     if result.is_empty() {
         return Ok(EMPTY_SET.to_owned());
@@ -143,6 +148,15 @@ fn parse_interval(input: &str) -> Result<Option<Interval>, IntervalError> {
         return Err(IntervalError::Reversed);
     }
     Ok(interval.is_nonempty().then_some(interval))
+}
+
+fn union_length(intervals: Vec<Interval>) -> Result<String, IntervalError> {
+    let mut length = BigRational::default();
+    for interval in intervals {
+        length += interval.end.value - interval.start.value;
+        ensure_exact_size(&length).map_err(IntervalError::Evaluation)?;
+    }
+    Ok(length.to_string())
 }
 
 fn intersect_intervals(intervals: Vec<Option<Interval>>) -> Option<Interval> {
@@ -275,6 +289,23 @@ mod tests {
             calculate_intervals("差集 [0,4]; (1,1); [3,2]"),
             Err(IntervalError::Reversed)
         );
+    }
+
+    #[test]
+    fn sums_exact_coverage_lengths_after_merging_overlaps() {
+        for (query, expected) in [
+            ("长度 [0,3]; [2,5]; [8,9]", "6"),
+            ("总长度 [0,1/3]; (1/4,1/2]; [2,2]", "1/2"),
+            ("TOTAL-LENGTH (-3/2,-1/2); [0,2]", "3"),
+            ("长度 (0,1); (1,2)", "2"),
+            ("长度 (1,1); [2,2]", "0"),
+        ] {
+            assert_eq!(
+                calculate_intervals(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
     }
 
     #[test]
