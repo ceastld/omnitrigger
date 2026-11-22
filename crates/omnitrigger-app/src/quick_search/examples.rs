@@ -1317,6 +1317,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "转义 HTML 特殊字符",
+        query: "文本: HTML转义 <b>茶 & 咖啡</b>",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "还原常见 HTML 字符引用",
+        query: "文本: HTML还原 &lt;b&gt;茶 &amp; 咖啡&lt;/b&gt;",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "格式化 JSON",
         query: r#"JSON: 格式化 {"名称":"北京","值":1}"#,
     },

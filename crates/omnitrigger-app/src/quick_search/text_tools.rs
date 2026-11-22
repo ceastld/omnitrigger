@@ -213,6 +213,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "json转义" | "json-quote" => {
             Ok(serde_json::to_string(text).expect("字符串可以序列化为 JSON"))
         }
+        "html转义" | "html-escape" => Ok(escape_html(text)),
+        "html还原" | "html-unescape" => Ok(unescape_html(text)),
         _ => Err(TextError::UnknownOperation),
     }
 }
@@ -379,6 +381,74 @@ fn decode_json_string(text: &str) -> Result<String, TextError> {
         return Err(TextError::NullCharacter);
     }
     Ok(decoded)
+}
+
+fn escape_html(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn unescape_html(text: &str) -> String {
+    let mut decoded = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some((before, reference)) = remaining.split_once('&') {
+        decoded.push_str(before);
+        let character = reference
+            .find(['&', ';'])
+            .filter(|&end| reference.as_bytes()[end] == b';')
+            .and_then(|end| html_reference(&reference[..end]).map(|ch| (ch, end)));
+        remaining = if let Some((ch, end)) = character {
+            decoded.push(ch);
+            &reference[end + 1..]
+        } else {
+            decoded.push('&');
+            reference
+        };
+    }
+    decoded.push_str(remaining);
+    decoded
+}
+
+fn html_reference(reference: &str) -> Option<char> {
+    const C1_REFERENCES: [u32; 32] = [
+        0x20ac, 0x0081, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6, 0x2030, 0x0160,
+        0x2039, 0x0152, 0x008d, 0x017d, 0x008f, 0x0090, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022,
+        0x2013, 0x2014, 0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x009d, 0x017e, 0x0178,
+    ];
+    Some(match reference {
+        "amp" | "AMP" => '&',
+        "lt" | "LT" => '<',
+        "gt" | "GT" => '>',
+        "quot" | "QUOT" => '"',
+        "apos" => '\'',
+        "nbsp" => '\u{a0}',
+        _ => {
+            let number = reference.strip_prefix('#')?;
+            let (radix, digits) = number
+                .strip_prefix(['x', 'X'])
+                .map_or((10, number), |digits| (16, digits));
+            if digits.is_empty() || !digits.chars().all(|ch| ch.is_digit(radix)) {
+                return None;
+            }
+            let value = u32::from_str_radix(digits, radix).unwrap_or(u32::MAX);
+            let value = match value {
+                0 => 0xfffd,
+                0x80..=0x9f => C1_REFERENCES[(value - 0x80) as usize],
+                _ => value,
+            };
+            char::from_u32(value).unwrap_or(char::REPLACEMENT_CHARACTER)
+        }
+    })
 }
 
 fn decode_code_points(text: &str) -> Result<String, TextError> {
@@ -1065,6 +1135,31 @@ mod tests {
             transform_text(r#"JSON还原 "\u0000""#),
             Err(TextError::NullCharacter)
         );
+    }
+
+    #[test]
+    fn escapes_html_characters_and_decodes_supported_references_once() {
+        for (query, expected) in [
+            (
+                r#"HTML转义 <b title="甲">茶 & '咖啡'</b>"#,
+                "&lt;b title=&quot;甲&quot;&gt;茶 &amp; &#39;咖啡&#39;&lt;/b&gt;",
+            ),
+            (
+                "HTML还原 &lt;b&gt;茶 &amp; 咖啡&#X1F600;&lt;/b&gt;",
+                "<b>茶 & 咖啡😀</b>",
+            ),
+            (
+                "html-unescape &AMP;&apos;&nbsp;&#128;&#xD800;&#0;&#999999999999;",
+                "&'\u{a0}€���",
+            ),
+            (
+                "HTML还原 &amp;lt; &unknown; &#x; &#-1; &lt&GT;",
+                "&lt; &unknown; &#x; &#-1; &lt>",
+            ),
+            ("html-escape “ A & B ”", " A &amp; B "),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
     }
 
     #[test]
