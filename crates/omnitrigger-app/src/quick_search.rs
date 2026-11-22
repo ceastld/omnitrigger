@@ -17,6 +17,7 @@ mod file_mode;
 mod folders;
 mod fraction;
 mod identifiers;
+mod intervals;
 mod json_tools;
 mod linear_fit;
 mod local_files;
@@ -97,6 +98,7 @@ use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
 use fraction::{calculate_fraction, parse_fraction_literal, simplify_fraction, FractionError};
 use identifiers::{transform_ulid, transform_uuid, IdentifierError};
+use intervals::{calculate_intervals, IntervalError};
 use json_tools::{transform_json, JsonError};
 use linear_fit::{calculate_linear_fit, LinearFitError};
 use local_files::{directory_query, DirectoryLoad, LocalFilesIndex, FOLDER_DEBOUNCE};
@@ -383,6 +385,7 @@ enum ValueError {
     BatchRadix(BatchError<RadixError>),
     Radix(RadixError),
     RatioAllocation(RatioAllocationError),
+    Intervals(IntervalError),
     AspectRatio(AspectRatioError),
     Paper(PaperError),
     Rectangle(RectangleError),
@@ -492,6 +495,7 @@ impl ValueError {
             }
             Self::Radix(error) => error.message(),
             Self::RatioAllocation(error) => error.message(),
+            Self::Intervals(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
             Self::Paper(error) => error.message(),
             Self::Rectangle(error) => error.message(),
@@ -566,6 +570,7 @@ impl ValueError {
                 | Self::Equation(EquationError::SystemRows)
                 | Self::Radix(RadixError::Incomplete)
                 | Self::RatioAllocation(RatioAllocationError::Incomplete)
+                | Self::Intervals(IntervalError::Incomplete)
                 | Self::Triangle(
                     TriangleError::Dimensions | TriangleError::RightTriangleDimensions
                 )
@@ -959,6 +964,9 @@ impl Results {
                 }
                 Scope::RatioAllocation => {
                     Self::text_value(allocate_ratio(term).map_err(ValueError::RatioAllocation))
+                }
+                Scope::Intervals => {
+                    Self::text_value(calculate_intervals(term).map_err(ValueError::Intervals))
                 }
                 Scope::UrlEncoding => {
                     Self::text_value(convert_url_component(term).map_err(ValueError::UrlEncoding))

@@ -3413,6 +3413,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算精确数值区间的交集",
+        query: "区间: 交集 [1/2,3); (2,5]",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按端点是否包含合并数值区间",
+        query: "区间: 合并 [0,1); [1,2]; (3,4)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在分数算式中精确开方并取绝对值",
         query: "分数: 计算 sqrt(81/16)+abs(-1/2)",
     },
@@ -3596,6 +3606,10 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         return None;
     }
     match scope {
+        Scope::Intervals
+            if ["交集", "合并"]
+                .into_iter()
+                .any(|operation| operation.starts_with(term)) => {}
         Scope::BatchCalculation
             if matches!(term, "分" | "分数" | "分数对" | "分数对照" | "对" | "对照") =>
             {}
