@@ -2867,6 +2867,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用下方最近的值向上填充 CSV 空值",
+        query: "CSV: 向上填充 [\"地区\",2] 地区,月份,编号\n,,001\n华北,,002\n,2月,003\n华南,,004\n,,005",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "统计 CSV 各列的空单元格",
         query: "CSV: 空值统计 [\"备注\",1] 编号,备注\n001,\n,\" \"\n002,茶",
     },

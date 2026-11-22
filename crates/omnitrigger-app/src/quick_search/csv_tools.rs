@@ -327,6 +327,11 @@ impl CsvError {
     }
 }
 
+enum FillDirection {
+    Down,
+    Up,
+}
+
 enum Operation {
     Validate,
     PadRows,
@@ -341,7 +346,7 @@ enum Operation {
     SelectNamedColumns(Vec<String>),
     DropColumns(Vec<ColumnReference>),
     TrimColumns(Vec<ColumnReference>),
-    FillDown(Vec<ColumnReference>),
+    FillEmptyCells(Vec<ColumnReference>, FillDirection),
     CountEmptyCells(Vec<ColumnReference>),
     CheckNumericColumns(Vec<ColumnReference>),
     DecimalColumns(Vec<ColumnReference>, u32),
@@ -681,11 +686,16 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::TrimColumns(columns)
         }
-        "向下填充" | "fill-down" => {
+        kind @ ("向下填充" | "fill-down" | "向上填充" | "fill-up") => {
             let (columns, data) =
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
-            Operation::FillDown(columns)
+            let direction = if matches!(kind, "向上填充" | "fill-up") {
+                FillDirection::Up
+            } else {
+                FillDirection::Down
+            };
+            Operation::FillEmptyCells(columns, direction)
         }
         "空值统计" | "count-empty" => {
             let (columns, data) =
@@ -1427,7 +1437,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::SelectNamedColumns(names) => select_named_columns(&rows, &names),
         Operation::DropColumns(columns) => drop_columns(&rows, &columns),
         Operation::TrimColumns(columns) => trim_column_values(rows, &columns),
-        Operation::FillDown(columns) => fill_down_csv(&rows, &columns),
+        Operation::FillEmptyCells(columns, direction) => {
+            fill_empty_csv_cells(&rows, &columns, direction)
+        }
         Operation::CountEmptyCells(columns) => count_empty_cells(&rows, &columns),
         Operation::CheckNumericColumns(columns) => check_numeric_columns(&rows, &columns),
         Operation::DecimalColumns(columns, places) => {
@@ -2407,7 +2419,11 @@ fn check_numeric_columns(
     Ok(output)
 }
 
-fn fill_down_csv(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<String, CsvError> {
+fn fill_empty_csv_cells(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+    direction: FillDirection,
+) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
     let mut output = String::new();
@@ -2416,16 +2432,34 @@ fn fill_down_csv(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<St
         header.iter().map(String::as_str),
         CsvError::FillTooLarge,
     )?;
-    let mut last = vec![""; columns.len()];
+    let mut sources: Vec<_> = columns
+        .into_iter()
+        .map(|column| {
+            let following = matches!(direction, FillDirection::Up).then(|| {
+                records
+                    .iter()
+                    .map(move |row| row[column].as_str())
+                    .filter(|cell| !cell.is_empty())
+                    .peekable()
+            });
+            (column, "", following)
+        })
+        .collect();
     let mut fields = Vec::with_capacity(header.len());
     for row in records {
         fields.clear();
         fields.extend(row.iter().map(String::as_str));
-        for (&column, latest) in columns.iter().zip(&mut last) {
-            if fields[column].is_empty() {
-                fields[column] = *latest;
-            } else {
-                *latest = fields[column];
+        for (column, previous, following) in &mut sources {
+            let cell = &mut fields[*column];
+            match (cell.is_empty(), following) {
+                (true, Some(following)) => {
+                    *cell = following.peek().copied().unwrap_or_default();
+                }
+                (false, Some(following)) => {
+                    following.next();
+                }
+                (true, None) => *cell = *previous,
+                (false, None) => *previous = *cell,
             }
         }
         append_bounded_csv_row(&mut output, fields.iter().copied(), CsvError::FillTooLarge)?;
@@ -4446,6 +4480,28 @@ mod tests {
         let many_blanks = "\n,002".repeat(260);
         assert_eq!(
             transform_csv(&format!("fill-down 1 地区,编号\n{large},001{many_blanks}")),
+            Err(CsvError::FillTooLarge)
+        );
+    }
+
+    #[test]
+    fn fills_selected_empty_cells_from_the_following_nonempty_value() {
+        let input = concat!(
+            "向上填充 [\"地区\",2] 地区,月份,编号\n",
+            ",,001\n\"华,北\",,002\n,02,003\n ,03,004\n,,005",
+        );
+        assert_eq!(
+            transform_csv(input).as_deref(),
+            Ok("地区,月份,编号\r\n\"华,北\",02,001\r\n\"华,北\",02,002\r\n ,02,003\r\n ,03,004\r\n\"\",\"\",005")
+        );
+        assert_eq!(
+            transform_csv("fill-up 1 地区,编号").as_deref(),
+            Ok("地区,编号")
+        );
+        let large = "x".repeat(4096);
+        let many_blanks = ",001\n".repeat(260);
+        assert_eq!(
+            transform_csv(&format!("fill-up 1 地区,编号\n{many_blanks}{large},002")),
             Err(CsvError::FillTooLarge)
         );
     }
