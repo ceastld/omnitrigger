@@ -1,9 +1,16 @@
+use std::fmt::Write as _;
+
 use omnitrigger_windows::{list_open_windows, OpenWindow};
 use serde::Serialize;
 
-use super::{examples::search_key, title_rank, Destination, Results};
+use super::{csv_tools::csv_cell, examples::search_key, title_rank, Destination, Results};
 
-const MAX_WINDOW_JSON_BYTES: usize = 1024 * 1024;
+const MAX_WINDOW_EXPORT_BYTES: usize = 1024 * 1024;
+
+enum WindowExport {
+    Json,
+    Csv,
+}
 
 #[derive(Serialize)]
 struct WindowSummary<'a> {
@@ -67,11 +74,10 @@ impl OpenWindowsIndex {
         let (format, rest) = query
             .split_once(char::is_whitespace)
             .unwrap_or((&query, ""));
-        let export_json = matches!(format, "输出=json" | "output=json");
-        let filter = if export_json {
-            rest.trim_start()
-        } else {
-            &query
+        let (export, filter) = match format {
+            "输出=json" | "output=json" => (Some(WindowExport::Json), rest.trim_start()),
+            "输出=csv" | "output=csv" => (Some(WindowExport::Csv), rest.trim_start()),
+            _ => (None, query.as_str()),
         };
         let Some((process, query)) = window_query(filter) else {
             return Results::OpenWindowsUnavailable(
@@ -95,19 +101,12 @@ impl OpenWindowsIndex {
         if !terms.is_empty() {
             matches.sort_by_key(|(rank, _)| *rank);
         }
-        if export_json {
-            let windows: Vec<_> = matches
-                .into_iter()
-                .map(|(_, window)| WindowSummary {
-                    title: &window.window.title,
-                    process: window.window.process.as_deref(),
-                })
-                .collect();
-            return match serde_json::to_string_pretty(&windows) {
-                Ok(json) if json.len() <= MAX_WINDOW_JSON_BYTES => Results::text_value(Ok(json)),
-                Ok(_) => Results::OpenWindowsUnavailable("窗口列表超过 1 MiB".into()),
-                Err(error) => Results::OpenWindowsUnavailable(format!("生成窗口列表失败：{error}")),
-            };
+        if let Some(export) = export {
+            let windows = matches.into_iter().map(|(_, window)| WindowSummary {
+                title: &window.window.title,
+                process: window.window.process.as_deref(),
+            });
+            return export_windows(export, windows);
         }
         Results::Destinations(
             matches
@@ -115,6 +114,36 @@ impl OpenWindowsIndex {
                 .map(|(_, window)| Destination::OpenWindow(window.window.clone()))
                 .collect(),
         )
+    }
+}
+
+fn export_windows<'a>(
+    format: WindowExport,
+    windows: impl Iterator<Item = WindowSummary<'a>>,
+) -> Results {
+    let too_large = || Results::OpenWindowsUnavailable("窗口列表超过 1 MiB".into());
+    match format {
+        WindowExport::Json => match serde_json::to_string_pretty(&windows.collect::<Vec<_>>()) {
+            Ok(json) if json.len() <= MAX_WINDOW_EXPORT_BYTES => Results::text_value(Ok(json)),
+            Ok(_) => too_large(),
+            Err(error) => Results::OpenWindowsUnavailable(format!("生成窗口列表失败：{error}")),
+        },
+        WindowExport::Csv => {
+            let mut csv = String::from("标题,程序文件名");
+            for window in windows {
+                write!(
+                    csv,
+                    "\r\n{},{}",
+                    csv_cell(window.title),
+                    csv_cell(window.process.unwrap_or_default())
+                )
+                .expect("写入 String 不会出错");
+                if csv.len() > MAX_WINDOW_EXPORT_BYTES {
+                    return too_large();
+                }
+            }
+            Results::text_value(Ok(csv))
+        }
     }
 }
 
@@ -153,6 +182,29 @@ fn window_rank(title: &str, process: &str, query: &str, terms: &[&str]) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exports_window_titles_and_process_names_as_csv_in_match_order() {
+        let windows = [
+            WindowSummary {
+                title: "预算,\"复核\"",
+                process: Some("Example Tool.exe"),
+            },
+            WindowSummary {
+                title: "资料",
+                process: None,
+            },
+        ];
+        assert!(matches!(
+            export_windows(WindowExport::Csv, windows.into_iter()),
+            Results::Value(Ok(result)) if result.text == "标题,程序文件名\r\n\"预算,\"\"复核\"\"\",Example Tool.exe\r\n资料,\"\""
+        ));
+        let index = OpenWindowsIndex::Ready(Vec::new());
+        assert!(matches!(
+            index.results("输出＝ＣＳＶ　进程=notepad.exe 报告"),
+            Results::Value(Ok(result)) if result.text == "标题,程序文件名"
+        ));
+    }
 
     #[test]
     fn exports_empty_windows_as_json_and_retains_selector_errors() {
