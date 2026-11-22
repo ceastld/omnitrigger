@@ -264,6 +264,7 @@
 - 输入 `URL: 表单编码 北京 A+B` 得到 `%E5%8C%97%E4%BA%AC+A%2BB`。用 `URL: 表单解码` 还原时，`+` 表示空格，`%2B` 表示加号。 [WHATWG 表单编码规则](https://url.spec.whatwg.org/#concept-urlencoded-serializer)
 - 输入 `URL: 参数 https://example.invalid/?tag=a+1&tag=b%2Bc` 可逐行查看解码后的名称和值。也可粘贴查询串，结果按原有顺序保留重名参数。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 用 `URL: 参数JSON` 可把查询参数转成 `[["tag","a 1"],["tag","b+c"]]` 这样的名称和值数组。用 `URL: 生成查询串` 加上数组，可按表单编码生成 `tag=a+1&tag=b%2Bc`。两种操作都保留参数顺序和重名项。 [WHATWG 表单编码规则](https://url.spec.whatwg.org/#concept-urlencoded-serializer)
+- 用 `URL: 取参数 "tag"` 加上完整网址或查询串，可得到该名称的全部值，结果为 JSON 数组。名称按解码后内容匹配并区分大小写，空值保留原位置，没有匹配时返回 `[]`。
 - 输入 `URL: 拆解 https://example.invalid:8443/a%20b?x=1#part` 可查看协议、主机、有效端口、路径、查询串和片段。HTTP 与 HTTPS 会采用显式端口或协议的默认端口。 [WHATWG URL 组成](https://url.spec.whatwg.org/#concept-url)
 - 用 `URL: 路径分段 https://example.invalid/docs/a%2Fb/` 得到 `["docs","a/b",""]`。用 `URL: 设路径 ["新文档","a/b",""]` 加上网址，可替换路径并保留查询串与片段。末尾的空段保留斜杠，段内的斜杠会编码为 `%2F`。 [Rust URL 路径段](https://docs.rs/url/2.5.8/url/struct.Url.html#method.path_segments)
 - 输入 `URL: 去查询串 https://example.invalid/doc?source=mail#part` 得到 `https://example.invalid/doc#part`。结果使用 URL 解析后的格式，保留路径和片段。
@@ -344,6 +345,7 @@
 - 输入 `CSV: 选列名 ["备注","编号"]` 后粘贴含表头的 CSV，可依次输出「备注」和「编号」两列。列名按原样匹配，包括大小写和空格。表头重名时可用列号选取。
 - 用 `CSV: 去列 ["备注",2]` 加上含表头的 CSV，可省去“备注”和第二列，保留其余列的原顺序。也可直接填逗号分隔的列号，需要至少保留一列。
 - 用 `CSV: 改列名 ["旧名","备注"]` 加上含表头的 CSV，可重命名一列。原列名须唯一且精确匹配，新列名须非空且在表头中唯一。结果保留列顺序和数据单元格内容。
+- 用 `CSV: 批量改列名 [["代码","简称"],["简称","代码"]]` 可同时更新多个表头并交换列名。每项按原表头精确匹配，所有改动应用后列名须唯一，原数据顺序和内容会保留。
 - 用 `CSV: 替换值 ["状态","待办","进行中"]` 加上含表头的 CSV，可替换指定列中完整匹配的单元格。首项可用列名或列号，旧值和新值都可填空字符串。
 - 用 `CSV: 映射值 ["状态",[["P","待办"],["D","完成"],["","未填"]]]` 加上表格，可在一列中同时应用多组对应关系。每个单元格按原值匹配一次，保留未匹配的内容。最多 32 组，结果最多 1 MiB。
 - 用 `CSV: 去空白 ["名称",2]` 加上含表头的 CSV，可去掉所选列各单元格开头和末尾的空白。列名与列号可以混用，表头、其他列与单元格中间的空白原样保留。

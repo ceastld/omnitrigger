@@ -54,6 +54,7 @@ pub(super) enum CsvError {
     MissingColumnName,
     AmbiguousColumnName,
     RenameArguments,
+    BulkRenameArguments,
     ReplaceValueArguments,
     MapValueArguments,
     MapValueTooLarge,
@@ -117,6 +118,7 @@ impl CsvError {
             Self::MissingColumnName => "表头中找不到所选列名",
             Self::AmbiguousColumnName => "表头中存在多个同名列",
             Self::RenameArguments => "用 JSON 数组填写原列名和非空的新列名",
+            Self::BulkRenameArguments => "填写一组 [原列名,新列名]，原列名不可重复，新列名须非空",
             Self::ReplaceValueArguments => "用 JSON 数组填写列名或列号、旧值和新值",
             Self::MapValueArguments => {
                 "用 JSON 数组填写列名或列号，以及 1 至 32 个互不重复的 [旧值,新值]"
@@ -202,6 +204,7 @@ enum Operation {
         keep_selected: bool,
     },
     RenameColumn([String; 2]),
+    RenameColumns(Vec<[String; 2]>),
     ReplaceValue {
         column: ColumnReference,
         previous: String,
@@ -421,6 +424,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             let (names, data) = json_argument_and_data(input, CsvError::RenameArguments)?;
             input = data;
             Operation::RenameColumn(names)
+        }
+        "批量改列名" | "rename-headers" => {
+            let (names, data) = json_argument_and_data(input, CsvError::BulkRenameArguments)?;
+            input = data;
+            Operation::RenameColumns(names)
         }
         "替换值" | "replace-value" => {
             let ((column, previous, replacement), data) =
@@ -697,6 +705,7 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             keep_selected,
         } => select_data_rows(&rows, &ranges, keep_selected),
         Operation::RenameColumn(names) => rename_column(rows, names),
+        Operation::RenameColumns(names) => rename_columns(rows, names),
         Operation::ReplaceValue {
             column,
             previous,
@@ -1181,6 +1190,35 @@ fn rename_column(mut rows: Vec<Vec<String>>, [old, new]: [String; 2]) -> Result<
         return Err(CsvError::HeaderNameConflict);
     }
     header[column] = new;
+    Ok(write_rows(&rows, ','))
+}
+
+fn rename_columns(mut rows: Vec<Vec<String>>, names: Vec<[String; 2]>) -> Result<String, CsvError> {
+    let header = rows.first_mut().ok_or(CsvError::MissingInput)?;
+    if names.is_empty() {
+        return Err(CsvError::BulkRenameArguments);
+    }
+    let mut replacements = HashMap::with_capacity(names.len());
+    for [old, new] in names {
+        if new.trim().is_empty() || new.contains('\0') {
+            return Err(CsvError::BulkRenameArguments);
+        }
+        let index = header_column(header, &old)?;
+        if replacements.insert(index, new).is_some() {
+            return Err(CsvError::BulkRenameArguments);
+        }
+    }
+    let mut final_names = HashSet::new();
+    if header
+        .iter()
+        .enumerate()
+        .any(|(index, name)| !final_names.insert(replacements.get(&index).unwrap_or(name)))
+    {
+        return Err(CsvError::HeaderNameConflict);
+    }
+    for (index, name) in replacements {
+        header[index] = name;
+    }
     Ok(write_rows(&rows, ','))
 }
 
@@ -2623,6 +2661,42 @@ mod tests {
             (
                 r#"拆分列 [2,["省","市"],"/"] 地址"#,
                 CsvError::ColumnOutOfRange,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn renames_multiple_csv_headers_simultaneously_with_unchanged_records() {
+        assert_eq!(
+            transform_csv(concat!(
+                r#"批量改列名 [["代码","简称"],["简称","代码"],["说明","备注,简介"]] 代码,简称,说明"#,
+                "\n001,中文,\"带,逗号\""
+            ))
+            .as_deref(),
+            Ok("简称,代码,\"备注,简介\"\r\n001,中文,\"带,逗号\"")
+        );
+        for (query, error) in [
+            (
+                r#"rename-headers [["A","B"],["B","C"]] A,B,C"#,
+                CsvError::HeaderNameConflict,
+            ),
+            (
+                r#"rename-headers [["A","X"],["A","Y"]] A,B"#,
+                CsvError::BulkRenameArguments,
+            ),
+            (
+                r#"rename-headers [["A",""]] A,B"#,
+                CsvError::BulkRenameArguments,
+            ),
+            (
+                r#"rename-headers [["B","X"]] A,A"#,
+                CsvError::MissingColumnName,
+            ),
+            (
+                r#"rename-headers [["A","X"]] A,A"#,
+                CsvError::AmbiguousColumnName,
             ),
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");

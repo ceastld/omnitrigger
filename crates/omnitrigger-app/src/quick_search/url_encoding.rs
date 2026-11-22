@@ -32,6 +32,7 @@ pub(super) enum UrlEncodingError {
     InvalidParameterPair,
     InvalidParameterList,
     InvalidParameterNames,
+    ParameterLookupArguments,
     InvalidFilePath,
     InvalidFileUrl,
     OpaqueOrigin,
@@ -59,6 +60,7 @@ impl UrlEncodingError {
             Self::InvalidParameterPair => "用 JSON 填写名称和值，例如 [\"tag\",\"茶\"]，再输入 URL",
             Self::InvalidParameterList => "用 JSON 数组填写多组名称和值，例如 [[\"tag\",\"茶\"]]",
             Self::InvalidParameterNames => "用 JSON 字符串数组填写参数名，再输入 URL",
+            Self::ParameterLookupArguments => "用双引号填写参数名，再输入 URL 或查询串",
             Self::InvalidFilePath => "输入绝对文件路径，例如 C:\\文档\\示例.txt",
             Self::InvalidFileUrl => "输入带绝对路径的 file: URL，例如 file:///C:/Docs/example.txt",
             Self::OpaqueOrigin => "请输入具有网络源的 URL，例如 https://example.invalid/",
@@ -89,6 +91,7 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "表单解码" | "form-decode" => decode_form_value(value),
         "参数" | "查询参数" | "params" => decode_parameters(value, false),
         "参数json" | "params-json" => decode_parameters(value, true),
+        "取参数" | "get-param" => lookup_parameter_values(value),
         "生成查询串" | "build-query" => encode_parameters(value),
         "拆解" | "inspect" => inspect_url(value),
         "路径分段" | "path-segments" => decode_path_segments(value),
@@ -485,11 +488,7 @@ fn decode_parameters(value: &str, json: bool) -> Result<String, UrlEncodingError
             decode_form_value(value)
         }
     };
-    let mut pairs = Vec::new();
-    for parameter in query_text(value).split('&').filter(|part| !part.is_empty()) {
-        let (name, value) = parameter.split_once('=').unwrap_or((parameter, ""));
-        pairs.push([decode(name)?, decode(value)?]);
-    }
+    let pairs = decode_query_pairs(value, decode)?;
     if json {
         return Ok(serde_json::to_string(&pairs).expect("字符串数组可序列化"));
     }
@@ -502,6 +501,30 @@ fn decode_parameters(value: &str, json: bool) -> Result<String, UrlEncodingError
         .map(|[name, value]| format!("{} = {}", quote(name), quote(value)))
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+fn lookup_parameter_values(input: &str) -> Result<String, UrlEncodingError> {
+    let (name, source) =
+        parameter_argument::<String>(input, UrlEncodingError::ParameterLookupArguments)?;
+    let values: Vec<_> = decode_query_pairs(source, decode_form_component)?
+        .into_iter()
+        .filter_map(|[key, value]| (key == name).then_some(value))
+        .collect();
+    Ok(serde_json::to_string(&values).expect("字符串数组可序列化"))
+}
+
+fn decode_query_pairs(
+    source: &str,
+    decode: impl Fn(&str) -> Result<String, UrlEncodingError>,
+) -> Result<Vec<[String; 2]>, UrlEncodingError> {
+    query_text(source)
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let (name, value) = part.split_once('=').unwrap_or((part, ""));
+            Ok([decode(name)?, decode(value)?])
+        })
+        .collect()
 }
 
 fn encode_parameters(input: &str) -> Result<String, UrlEncodingError> {
@@ -522,6 +545,36 @@ fn encode_parameters(input: &str) -> Result<String, UrlEncodingError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gets_every_value_for_an_exact_decoded_query_parameter_name() {
+        for (input, expected) in [
+            (
+                r#"取参数 "tag" https://example.invalid/?tag=a+1&t%61g=b%2Bc&Tag=别的&tag=#part"#,
+                r#"["a 1","b+c",""]"#,
+            ),
+            (r#"get-param "q" ?x=1&q=%00&q=%0A"#, r#"["\u0000","\n"]"#),
+            (
+                r#"get-param "tag" https://example.invalid/?Tag=x#tag=a"#,
+                "[]",
+            ),
+            (r#"get-param "" =空名&plain&="#, r#"["空名",""]"#),
+        ] {
+            assert_eq!(
+                convert_url_component(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            convert_url_component(r#"取参数 "tag" tag=%GG"#),
+            Err(UrlEncodingError::InvalidEscape)
+        );
+        assert_eq!(
+            convert_url_component(r#"取参数 ["tag"] tag=x"#),
+            Err(UrlEncodingError::ParameterLookupArguments)
+        );
+    }
 
     #[cfg(windows)]
     #[test]

@@ -2327,6 +2327,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "同时重命名多列并可交换列名",
+        query: "CSV: 批量改列名 [[\"代码\",\"简称\"],[\"简称\",\"代码\"]] 代码,简称\n001,花茶",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "替换指定 CSV 列的完整单元格值",
         query: "CSV: 替换值 [\"状态\",\"待办\",\"进行中\"] 编号,状态,备注\n001,待办,待办\n002,完成,原样",
     },
@@ -2620,6 +2625,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "把网址查询参数转成有序 JSON 数组",
         query: "URL: 参数JSON https://example.invalid/?tag=a+1&tag=b%2Bc",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "提取指定 URL 查询参数的全部值",
+        query: r#"URL: 取参数 "tag" https://example.invalid/?tag=a+1&page=2&tag=b%2Bc&tag="#,
     },
     Example {
         icon: Icon::Terminal,
