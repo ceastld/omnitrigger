@@ -15,6 +15,7 @@ pub(super) enum DateError {
     MissingWeekdayOccurrence,
     InvalidOperation,
     InvalidDateList,
+    InvalidDateInterval,
     ReversedDateRange,
     NoMatchingDates,
     TooManyDates,
@@ -35,6 +36,7 @@ impl DateError {
             Self::MissingWeekdayOccurrence => "该月没有指定次序的星期",
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
             Self::InvalidDateList => "例如 日期: 列出 2026-11-01 到 2026-11-30 每周一、三、五",
+            Self::InvalidDateInterval => "请输入正整数间隔，例如 每隔 3 天",
             Self::ReversedDateRange => "开始日期须早于或等于结束日期",
             Self::NoMatchingDates => "区间内没有符合条件的日期",
             Self::TooManyDates => "最多可列出 366 个日期，请缩短区间",
@@ -325,7 +327,7 @@ fn is_workday_unit(unit: &str) -> bool {
 }
 
 enum DateSelection {
-    Daily,
+    EveryDays(u32),
     Workdays,
     Weekends,
     Weekdays([bool; 7]),
@@ -333,8 +335,31 @@ enum DateSelection {
 
 fn date_selection(rule: &str) -> Result<DateSelection, DateError> {
     let lower = rule.to_ascii_lowercase();
+    if matches!(lower.as_str(), "每天" | "daily") {
+        return Ok(DateSelection::EveryDays(1));
+    }
+    let interval = lower
+        .strip_prefix("每隔")
+        .or_else(|| lower.strip_prefix('每'))
+        .and_then(|value| value.trim_end().strip_suffix('天'))
+        .or_else(|| {
+            let (keyword, value) = lower.split_once(char::is_whitespace)?;
+            if keyword != "every" {
+                return None;
+            }
+            let (count, unit) = value.trim_start().split_once(char::is_whitespace)?;
+            matches!(unit.trim(), "day" | "days").then_some(count)
+        });
+    if let Some(count) = interval {
+        return count
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|&step| step > 0)
+            .map(DateSelection::EveryDays)
+            .ok_or(DateError::InvalidDateInterval);
+    }
     match lower.as_str() {
-        "每天" | "daily" => Ok(DateSelection::Daily),
         "周末" | "weekend" | "weekends" => Ok(DateSelection::Weekends),
         rule if is_workday_unit(rule) => Ok(DateSelection::Workdays),
         rule => {
@@ -375,10 +400,15 @@ fn list_dates(input: &str, today: NaiveDate) -> Result<String, DateError> {
         return Err(DateError::ReversedDateRange);
     }
     let days = end.signed_duration_since(start).num_days();
+    let step = match selection {
+        DateSelection::EveryDays(step) => step as usize,
+        _ => 1,
+    };
     let dates: Vec<_> = (0..=days)
+        .step_by(step)
         .map(|offset| start + TimeDelta::days(offset))
         .filter(|date| match selection {
-            DateSelection::Daily => true,
+            DateSelection::EveryDays(_) => true,
             DateSelection::Workdays => date.weekday().num_days_from_monday() < 5,
             DateSelection::Weekends => date.weekday().num_days_from_monday() >= 5,
             DateSelection::Weekdays(days) => days[date.weekday().num_days_from_monday() as usize],
@@ -765,6 +795,15 @@ mod tests {
                 "列出 2026-11-07 至 2026-11-08 周六，星期日",
                 "2026-11-07\n2026-11-08",
             ),
+            (
+                "列出 2024-02-27 到 2024-03-06 每隔 3 天",
+                "2024-02-27\n2024-03-01\n2024-03-04",
+            ),
+            (
+                "list 2024-02-27 to 2024-03-06 EVERY 4 days",
+                "2024-02-27\n2024-03-02\n2024-03-06",
+            ),
+            ("列出 今天 到 明天 每隔1000000000天", "2026-11-21"),
         ] {
             assert_eq!(
                 calculate_date(query, today).as_deref(),
@@ -775,6 +814,8 @@ mod tests {
         for (query, error) in [
             ("列出", DateError::InvalidDateList),
             ("列出 今天 到 明天 每周八", DateError::InvalidDateList),
+            ("列出 今天 到 明天 每隔0天", DateError::InvalidDateInterval),
+            ("列出 今天 到 明天 每隔-2天", DateError::InvalidDateInterval),
             ("列出 今天 到 明天 每周六、", DateError::InvalidDateList),
             (
                 "列出 今天 到 明天 每周六、工作日",
@@ -784,6 +825,10 @@ mod tests {
             ("列出 明天 到 今天 每天", DateError::ReversedDateRange),
             (
                 "列出 2024-01-01 到 2025-01-01 每天",
+                DateError::TooManyDates,
+            ),
+            (
+                "列出 2024-01-01 到 2027-01-04 每 3 天",
                 DateError::TooManyDates,
             ),
         ] {

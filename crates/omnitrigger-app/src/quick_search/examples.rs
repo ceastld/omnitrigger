@@ -727,6 +727,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "从开始日期每隔几天列出日期",
+        query: "日期: 列出 2024-02-27 到 2024-03-06 每隔 3 天",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "列出日期区间内的工作日",
         query: "日期: 列出 2026-11-20 到 2026-11-23 工作日",
     },
