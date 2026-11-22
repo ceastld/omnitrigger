@@ -1407,6 +1407,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "合并两组文本的行并去重",
+        query: r#"文本: 行并集 "苹果\n梨\n茶" "茶\n苹果\n柿子""#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "找出只出现在其中一组的行",
+        query: r#"文本: 行对称差 "苹果\n梨\n茶" "茶\n苹果\n柿子""#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按顺序比较两段文本的新增与删除行",
         query: r#"文本: 逐行比较 "苹果\n梨\n茶" "苹果\n柿子\n茶""#,
     },

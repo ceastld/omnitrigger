@@ -131,8 +131,16 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "取行" | "pick-lines" => return select_text_line_ranges(text),
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
-        "共有行" | "行交集" | "intersect-lines" => return compare_line_sets(text, true),
-        "行差集" | "subtract-lines" => return compare_line_sets(text, false),
+        "共有行" | "行交集" | "intersect-lines" => {
+            return compare_line_sets(text, LineSetOperation::Intersection);
+        }
+        "行差集" | "subtract-lines" => {
+            return compare_line_sets(text, LineSetOperation::FirstOnly);
+        }
+        "行并集" | "union-lines" => return compare_line_sets(text, LineSetOperation::Union),
+        "行对称差" | "symmetric-difference-lines" => {
+            return compare_line_sets(text, LineSetOperation::SymmetricDifference);
+        }
         "逐行比较" | "diff-lines" => return diff_lines(text),
         "正则保留行" | "keep-regex-lines" => return filter_regex_lines(text, true),
         "正则排除行" | "exclude-regex-lines" => return filter_regex_lines(text, false),
@@ -191,14 +199,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         }
         "去公共缩进" | "dedent" => Ok(remove_common_indent(text)),
         "倒序" | "reverse" => Ok(text.graphemes(true).rev().collect()),
-        "按行去重" | "unique-lines" => {
-            let mut seen = HashSet::new();
-            Ok(text
-                .lines()
-                .filter(|&line| seen.insert(line))
-                .collect::<Vec<_>>()
-                .join("\n"))
-        }
+        "按行去重" | "unique-lines" => Ok(join_distinct_lines(text.lines())),
         "按行排序" | "sort-lines" => {
             let mut lines: Vec<_> = text.lines().collect();
             lines.sort_unstable();
@@ -849,15 +850,39 @@ fn read_line_comparison(input: &str) -> Result<(String, String), TextError> {
     Ok((first, second))
 }
 
-fn compare_line_sets(input: &str, keep_common: bool) -> Result<String, TextError> {
+enum LineSetOperation {
+    Intersection,
+    FirstOnly,
+    Union,
+    SymmetricDifference,
+}
+
+fn compare_line_sets(input: &str, operation: LineSetOperation) -> Result<String, TextError> {
     let (first, second) = read_line_comparison(input)?;
-    let second: HashSet<_> = second.lines().collect();
-    let mut shown = HashSet::new();
-    Ok(first
+    if matches!(operation, LineSetOperation::Union) {
+        return Ok(join_distinct_lines(first.lines().chain(second.lines())));
+    }
+    let second_values: HashSet<_> = second.lines().collect();
+    let keep_common = matches!(operation, LineSetOperation::Intersection);
+    let selected_first_lines = first
         .lines()
-        .filter(|&line| second.contains(line) == keep_common && shown.insert(line))
+        .filter(|&line| second_values.contains(line) == keep_common);
+    if matches!(operation, LineSetOperation::SymmetricDifference) {
+        let first_values: HashSet<_> = first.lines().collect();
+        let selected_second_lines = second.lines().filter(|&line| !first_values.contains(line));
+        return Ok(join_distinct_lines(
+            selected_first_lines.chain(selected_second_lines),
+        ));
+    }
+    Ok(join_distinct_lines(selected_first_lines))
+}
+
+fn join_distinct_lines<'a>(lines: impl Iterator<Item = &'a str>) -> String {
+    let mut seen = HashSet::new();
+    lines
+        .filter(|&line| seen.insert(line))
         .collect::<Vec<_>>()
-        .join("\n"))
+        .join("\n")
 }
 
 fn diff_lines(input: &str) -> Result<String, TextError> {
@@ -998,6 +1023,18 @@ mod tests {
             transform_text(r#"正则拆分成行 "[" 北京"#),
             Err(TextError::InvalidRegex)
         );
+    }
+
+    #[test]
+    fn unions_line_sets_and_keeps_lines_unique_to_either_group_in_order() {
+        for (query, expected) in [
+            (r#"行并集 "A\r\nB\nA" "B\nC\nc""#, "A\nB\nC\nc"),
+            (r#"行对称差 "A\nB\nA\nX " "B\nC\nX\nC""#, "A\nX \nC\nX"),
+            (r#"union-lines "" "梨\n梨""#, "梨"),
+            (r#"symmetric-difference-lines "梨\n茶" "茶\n梨""#, ""),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
     }
 
     #[test]
