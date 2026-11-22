@@ -27,7 +27,8 @@ pub(super) enum JsonError {
     InvalidPointer,
     InvalidPointerSegment,
     PointerSelection,
-    CopyPaths,
+    SourceAndTargetPaths,
+    MoveIntoDescendant,
     ComparisonTooLarge,
     PointerListTooLarge,
     FlattenedObjectTooLarge,
@@ -70,7 +71,8 @@ impl JsonError {
             Self::InvalidPointer => "JSON 路径无效，示例 /商品/0/价格",
             Self::InvalidPointerSegment => "指针分段须为字符串或非负整数",
             Self::PointerSelection => "用 JSON 字符串数组填写互不重复的指针，再粘贴 JSON",
-            Self::CopyPaths => "用 JSON 数组填写来源和目标两个路径，再粘贴 JSON",
+            Self::SourceAndTargetPaths => "用 JSON 数组填写来源和目标两个路径，再粘贴 JSON",
+            Self::MoveIntoDescendant => "目标路径不能位于要移动的值内",
             Self::ComparisonTooLarge => "JSON 对比结果超过 1 MiB",
             Self::PointerListTooLarge => "指针列表超过 1 MiB",
             Self::FlattenedObjectTooLarge => "JSON 展平结果超过 1 MiB",
@@ -150,7 +152,8 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "改键" | "rename-key" => return rename_json_key(source),
         "改值" | "replace" => return write_json_value(source, false),
         "加路径" | "add-path" => return write_json_value(source, true),
-        "复制路径" | "copy-path" => return copy_json_value(source),
+        "复制路径" | "copy-path" => return transfer_json_value(source, false),
+        "移动路径" | "move-path" => return transfer_json_value(source, true),
         "对比" | "diff" => return compare_json_values(source),
         "删路径" | "remove-path" => return remove_json_path(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
@@ -313,14 +316,28 @@ fn write_json_value(query: &str, add: bool) -> Result<String, JsonError> {
     edit_json_value(source, root, &pointer, replacement.get(), add)
 }
 
-fn copy_json_value(query: &str) -> Result<String, JsonError> {
-    let (paths, source) = strings_and_source(query, JsonError::CopyPaths)?;
+fn transfer_json_value(query: &str, remove_source: bool) -> Result<String, JsonError> {
+    let (paths, source) = strings_and_source(query, JsonError::SourceAndTargetPaths)?;
     let [from, to] = paths.as_slice() else {
-        return Err(JsonError::CopyPaths);
+        return Err(JsonError::SourceAndTargetPaths);
     };
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
-    let copied = select_json_path(root, from)?.get();
-    edit_json_value(source, root, to, copied, true)
+    if !remove_source {
+        let value = select_json_path(root, from)?.get();
+        return edit_json_value(source, root, to, value, true);
+    }
+    let from_keys = pointer_keys(from)?.collect::<Result<Vec<_>, _>>()?;
+    let value = select_pointer_keys(root, &from_keys)?.get();
+    let to_keys = pointer_keys(to)?.collect::<Result<Vec<_>, _>>()?;
+    if from_keys == to_keys {
+        return Ok(source.to_owned());
+    }
+    if to_keys.starts_with(&from_keys) {
+        return Err(JsonError::MoveIntoDescendant);
+    }
+    let remaining = remove_json_value(source, root, &from_keys)?;
+    let remaining_root = serde_json::from_str::<&RawValue>(&remaining).map_err(json_parse_error)?;
+    edit_json_value(&remaining, remaining_root, to, value, true)
 }
 
 fn edit_json_value(
@@ -416,8 +433,15 @@ fn raw_value_span(source: &str, selected: &str) -> Result<Range<usize>, JsonErro
 fn remove_json_path(query: &str) -> Result<String, JsonError> {
     let (pointer, source) = pointer_and_source(query)?;
     let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
-    let (key, ancestors) = keys.split_last().ok_or(JsonError::RemoveRoot)?;
+    if keys.is_empty() {
+        return Err(JsonError::RemoveRoot);
+    }
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    remove_json_value(source, root, &keys)
+}
+
+fn remove_json_value(source: &str, root: &RawValue, keys: &[String]) -> Result<String, JsonError> {
+    let (key, ancestors) = keys.split_last().ok_or(JsonError::RemoveRoot)?;
     let parent = select_pointer_keys(root, ancestors)?.get();
     let (spans, index) = match parent.as_bytes()[0] {
         b'[' => {
@@ -2453,12 +2477,59 @@ mod tests {
             assert_eq!(transform_json(query).as_deref(), Ok(expected), "{query}");
         }
         for (query, error) in [
-            (r#"复制路径 ["/a"] {"a":1}"#, JsonError::CopyPaths),
+            (
+                r#"复制路径 ["/a"] {"a":1}"#,
+                JsonError::SourceAndTargetPaths,
+            ),
             (r#"复制路径 ["/a","/b"] {}"#, JsonError::MissingValue),
             (r#"复制路径 ["/a","/b/c"] {"a":1}"#, JsonError::MissingValue),
             (
                 r#"复制路径 ["/a","/b"] {"a":1,"a":2}"#,
                 JsonError::DuplicateKey,
+            ),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn moves_raw_values_and_applies_the_target_path_after_removal() {
+        for (query, expected) in [
+            (
+                r#"移动路径 ["/订单/0","/归档/-"] {"订单":[{"金额":1.50,"名字":"\u8336"}],"归档":[]}"#,
+                r#"{"订单":[],"归档":[{"金额":1.50,"名字":"\u8336"}]}"#,
+            ),
+            (
+                r#"move-path ["/0","/2"] [0.10,1.50,2e0]"#,
+                "[1.50,2e0,0.10]",
+            ),
+            (
+                r#"移动路径 ["/a","/ab"] {"a":1.50,"ab":0}"#,
+                r#"{"ab":1.50}"#,
+            ),
+            (r#"移动路径 ["/a","/a"] { "a": 1.50 }"#, r#"{ "a": 1.50 }"#),
+            (r#"移动路径 ["/0",""] [0.10]"#, "0.10"),
+            (r#"移动路径 ["",""] {"a":1}"#, r#"{"a":1}"#),
+        ] {
+            assert_eq!(transform_json(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            (
+                r#"移动路径 ["/a"] {"a":1}"#,
+                JsonError::SourceAndTargetPaths,
+            ),
+            (r#"移动路径 ["/a","/a"] {}"#, JsonError::MissingValue),
+            (
+                r#"移动路径 ["/a~1b","/a~1b/child"] {"a/b":{}}"#,
+                JsonError::MoveIntoDescendant,
+            ),
+            (
+                r#"移动路径 ["","/a"] {"a":1}"#,
+                JsonError::MoveIntoDescendant,
+            ),
+            (
+                r#"移动路径 ["/0","/2/a"] [1,{"a":2},{}]"#,
+                JsonError::MissingValue,
             ),
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");

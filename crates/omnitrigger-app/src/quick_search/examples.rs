@@ -1812,6 +1812,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按两个 JSON 路径移动值",
+        query: r#"JSON: 移动路径 ["/订单/0","/归档/-"] {"订单":[{"金额":1.50,"名字":"\u8336"}],"归档":[]}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按路径对比两份 JSON 的变化",
         query: r#"JSON: 对比 {"a/b":[1.00,null],"旧":2e0} {"a/b":[1,true],"新":null}"#,
     },

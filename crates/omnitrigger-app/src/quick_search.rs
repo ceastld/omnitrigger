@@ -50,7 +50,7 @@ mod wheel_slots;
 mod wheels;
 mod windows_settings;
 
-use std::{cell::RefCell, path::Path, rc::Rc};
+use std::{cell::RefCell, path::Path, rc::Rc, sync::Arc};
 
 use gpui::{
     div, prelude::*, px, size, App, Bounds, ClipboardItem, Context, DisplayId, Div, Entity,
@@ -94,7 +94,7 @@ use fraction::{calculate_fraction, simplify_fraction, FractionError};
 use identifiers::{transform_ulid, transform_uuid, IdentifierError};
 use json_tools::{transform_json, JsonError};
 use linear_fit::{calculate_linear_fit, LinearFitError};
-use local_files::{directory_query, LocalFilesIndex, FOLDER_DEBOUNCE};
+use local_files::{directory_query, DirectoryLoad, LocalFilesIndex, FOLDER_DEBOUNCE};
 use matrix::{calculate_matrix, MatrixError};
 use omnitrigger_windows::{OpenWindow, ShellApp, ShortcutTarget};
 use open_windows::OpenWindowsIndex;
@@ -1007,6 +1007,16 @@ impl Results {
         }
     }
 
+    fn local_file_path(&self, selected: usize) -> Option<&str> {
+        let Self::Destinations(items) = self else {
+            return None;
+        };
+        match items.get(selected)? {
+            Destination::LocalFile { path, .. } => Some(path),
+            _ => None,
+        }
+    }
+
     fn value_preview_expandable(&self) -> bool {
         matches!(
             self,
@@ -1250,7 +1260,9 @@ impl QuickSearch {
             }
             _ => None,
         };
-        self.refresh_local_files(local_files_query, window, cx);
+        if let Some(load) = self.index.local_files.request(local_files_query) {
+            self.load_local_files(load, window, cx);
+        }
         if self.application_refresh == ApplicationRefresh::NotRequested
             && !matches!(self.results, Results::Value(Err(ValueError::InputTooLong)))
             && (matches!(scoped_query(query), Some((Scope::Applications, _)))
@@ -1334,15 +1346,12 @@ impl QuickSearch {
         .detach();
     }
 
-    fn refresh_local_files(
+    fn load_local_files(
         &mut self,
-        query: Option<&str>,
+        load: Arc<DirectoryLoad>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(load) = self.index.local_files.request(query) else {
-            return;
-        };
         cx.spawn_in(window, async move |this, cx| {
             let reader = cx.background_executor();
             reader.timer(FOLDER_DEBOUNCE).await;
@@ -1351,8 +1360,16 @@ impl QuickSearch {
             let _ = cx.update(|window, cx| {
                 let _ = this.update(cx, |this, cx| {
                     if this.index.local_files.finish(&load, entries) {
+                        let previous = this.results.local_file_path(this.selected).map(str::to_owned);
                         let query = this.input.read(cx).text();
                         this.refresh_results(&query, window, cx);
+                        if let (Some(path), Results::Destinations(items)) = (previous, &this.results) {
+                            if let Some(index) = items.iter().position(|item| {
+                                matches!(item, Destination::LocalFile { path: current, .. } if current == &path)
+                            }) {
+                                this.selected = index;
+                            }
+                        }
                     }
                 });
             });
@@ -1411,10 +1428,7 @@ impl QuickSearch {
     }
 
     fn reveal_selected_file(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Results::Destinations(items) = &self.results else {
-            return false;
-        };
-        let Some(Destination::LocalFile { path, .. }) = items.get(self.selected) else {
+        let Some(path) = self.results.local_file_path(self.selected) else {
             return false;
         };
         cx.reveal_path(Path::new(path));
@@ -1577,10 +1591,10 @@ impl QuickSearch {
                         if event.is_held => {}
                     Some((Scope::OpenWindows, _))
                         if matches!(self.index.open_windows, OpenWindowsIndex::Loading) => {}
-                    Some((Scope::LocalFiles, _)) => {
-                        self.index.local_files.invalidate();
-                        self.refresh_results(&query, window, cx);
-                        cx.notify();
+                    Some((Scope::LocalFiles, term)) => {
+                        if let Some(load) = self.index.local_files.reload(term) {
+                            self.load_local_files(load, window, cx);
+                        }
                     }
                     Some((Scope::OpenWindows, _)) => {
                         self.index.open_windows = OpenWindowsIndex::Unloaded;
@@ -2630,7 +2644,7 @@ mod tests {
                 .map(|index| EXAMPLES[index].query)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(examples_for("JSON：").len(), 41);
+        assert_eq!(examples_for("JSON：").len(), 42);
         assert!(examples_for("JSON: 展平")[0].starts_with("JSON: 展平 "));
         assert!(examples_for("JSON: 取")[0].starts_with("JSON: 取值 "));
         assert!(examples_for("JSON: 取列")[0].starts_with("JSON: 取列 "));
@@ -2647,6 +2661,7 @@ mod tests {
         assert!(examples_for("JSON: 改值")[0].starts_with("JSON: 改值 "));
         assert!(examples_for("JSON: 加路")[0].starts_with("JSON: 加路径 "));
         assert!(examples_for("JSON: 复制路")[0].starts_with("JSON: 复制路径 "));
+        assert!(examples_for("JSON: 移动路")[0].starts_with("JSON: 移动路径 "));
         assert!(examples_for("JSON: 对比")[0].starts_with("JSON: 对比 "));
         assert!(examples_for("JSON: 删路")[0].starts_with("JSON: 删路径 "));
         assert!(examples_for("JSON: 去")[0].starts_with("JSON: 去键 "));

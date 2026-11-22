@@ -29,6 +29,7 @@ pub(super) struct LocalFilesIndex {
 struct DirectoryRequest {
     load: Arc<DirectoryLoad>,
     entries: Option<Result<Vec<LocalDirectoryEntry>, String>>,
+    loading: bool,
 }
 
 impl Drop for DirectoryRequest {
@@ -80,7 +81,7 @@ impl DirectoryLoad {
 }
 
 impl LocalFilesIndex {
-    pub(super) fn invalidate(&mut self) {
+    fn invalidate(&mut self) {
         self.current = None;
     }
 
@@ -107,6 +108,24 @@ impl LocalFilesIndex {
         {
             return None;
         }
+        Some(self.start_request(query, None))
+    }
+
+    pub(super) fn reload(&mut self, query: &str) -> Option<Arc<DirectoryLoad>> {
+        let query = split_query(query)?;
+        let current = self.current.as_mut()?;
+        if current.loading || !current.load.matches(query) {
+            return None;
+        }
+        let entries = current.entries.take();
+        Some(self.start_request(query, entries))
+    }
+
+    fn start_request(
+        &mut self,
+        query: FileQuery<'_>,
+        entries: Option<Result<Vec<LocalDirectoryEntry>, String>>,
+    ) -> Arc<DirectoryLoad> {
         let load = Arc::new(DirectoryLoad {
             directory: query.directory.to_owned(),
             pattern: wildcard_pattern(query.filter).map(str::to_owned),
@@ -116,9 +135,10 @@ impl LocalFilesIndex {
         });
         self.current = Some(DirectoryRequest {
             load: load.clone(),
-            entries: None,
+            entries,
+            loading: true,
         });
-        Some(load)
+        load
     }
 
     pub(super) fn finish(
@@ -129,10 +149,11 @@ impl LocalFilesIndex {
         let Some(current) = self.current.as_mut() else {
             return false;
         };
-        if !Arc::ptr_eq(load, &current.load) {
+        if !current.loading || !Arc::ptr_eq(load, &current.load) {
             return false;
         }
         current.entries = Some(entries);
+        current.loading = false;
         true
     }
 
@@ -639,6 +660,31 @@ mod tests {
         ));
         assert!(split_query(r"C:\Work | | 后缀统计 仅文件夹").is_none());
         assert!(split_query(r"C:\Work | | 后缀统计 路径列表").is_none());
+    }
+
+    #[test]
+    fn retains_ready_file_results_while_reloading() {
+        let mut index = LocalFilesIndex::default();
+        let query = r"C:\Work |";
+        let initial = index.request(Some(query)).unwrap();
+        assert!(index.reload(query).is_none());
+        assert!(index.finish(&initial, Ok(vec![entry("a.txt", "file")])));
+        let previous = index.results(query);
+        assert!(matches!(&previous, Results::Destinations(items) if items.len() == 1));
+        let reload = index.reload(query).unwrap();
+        assert!(index.reload(query).is_none());
+        assert!(index.request(Some(query)).is_none());
+        assert!(index.results(query) == previous);
+        assert!(!index.finish(&initial, Ok(Vec::new())));
+        assert!(index.results(query) == previous);
+        assert!(index.finish(&reload, Ok(vec![entry("b.txt", "file")])));
+        assert!(index.results(query) != previous);
+        assert!(!index.finish(&reload, Ok(Vec::new())));
+
+        let reload = index.reload(query).unwrap();
+        let other = index.request(Some(r"C:\Other |")).unwrap();
+        assert!(!index.finish(&reload, Ok(Vec::new())));
+        assert!(index.finish(&other, Ok(Vec::new())));
     }
 
     #[test]

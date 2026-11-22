@@ -73,7 +73,7 @@
 - 输入 `文件: C:\工作 | 报告` 可在指定本地目录的直接子项中按名称查找。按回车复制所选项的完整路径。分隔符后的名称可留空，多个关键词用空格隔开。匹配本地固定卷上的普通文件和文件夹。
 - 在文件搜索中选中文件夹后按 `Tab` 可进入该文件夹，按 `Alt+↑` 可回到上一级。也可用 `文件: C:\工作 | *.pdf` 或 `报告?.docx` 按 Windows 文件名通配规则匹配。 [Windows 文件名通配规则](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-findfirstfilew)
 - 找到文件后可按 `Alt+Enter` 或点选中行的「定位」，在资源管理器中选中该文件或文件夹。
-- 在文件搜索中按 `F5` 可用当前目录与筛选条件重新读取结果。
+- 在文件搜索中按 `F5` 可用当前目录与筛选条件重新读取结果。读取期间保留列表，原选中项仍存在时继续选中它。
 - 输入 `文件: C:\工作 | *.pdf | 最近修改` 可把匹配项按最后修改时间从新到旧排列。可留空中间的名称条件，修改时间相同的按名称排列。 [Windows 目录项的最后修改时间](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw)
 - 输入 `文件: C:\工作 | *.pdf | 最近创建` 可按创建时间从新到旧排列。创建时间相同的按名称排列，缺少创建时间的项排在最后。 [Windows 目录项的创建时间](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw#members)
 - 输入 `文件: C:\工作 | *.pdf | 大小` 可把匹配文件按字节数从大到小排列，并在每个文件下方显示字节数。同样大小的文件按名称排列，匹配的文件夹排在文件之后。 [Windows 目录项的文件大小](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw#members)
@@ -252,6 +252,7 @@
 - 输入 `JSON: 改值 /订单/0/金额 3.50 {"订单":[{"金额":1.00}]}` 可替换指定路径上的已有值。新值可用任意 JSON 类型，其他位置保留原文。空指针 `""` 可替换整个 JSON 值。 [JSON Patch 的值替换规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.3)
 - 输入 `JSON: 加路径 /订单/1 {"金额":3.50}` 后粘贴 JSON，可在数组的第 2 项前插入新值。用 `/订单/-` 可追加到数组末尾。路径也可指向对象字段，已有字段会更新，其他值保留原始写法。 [JSON Patch 的添加规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.1)
 - 输入 `JSON: 复制路径 ["/订单/0","/归档/-"]` 后粘贴 JSON，可把订单的第一项追加到已有的归档数组，保留其中数值和字符串的写法。目标也可指向对象字段。 [JSON Patch 的复制规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.5)
+- 输入 `JSON: 移动路径 ["/订单/0","/归档/-"]` 后粘贴 JSON，可从订单移出第一项并追加到归档数组，保留原值的写法。目标下标以移出后的数组为准。 [JSON Patch 的移动规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.4)
 - 输入 `JSON: 对比` 后粘贴两个用空白分隔的 JSON 值，可按指针列出差异。对象按键名比较，数组按位置比较，`1` 与 `1.00` 视为相等。输出保留变化值的写法，某侧缺少路径时省略该侧字段。 [JSON Patch 的值比较规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.6)
 - 输入 `JSON: 删路径 /订单/0/备注` 加上 JSON，可删除该路径对应的对象成员或数组项。结果同时移除相邻的分隔逗号，保留其他值和键的原始写法。 [JSON Patch 的删除规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.2)
 - 输入 `JSON: 转CSV` 加上行数组或对象列表，可生成 CSV。对象的字段按首次出现的顺序写入表头，缺失字段和 `null` 写为空单元格。数字保留原来的拼写，嵌套数组和对象写为紧凑 JSON。
