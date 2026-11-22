@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{DateTime, Datelike, NaiveDate, SecondsFormat};
+use chrono::{DateTime, Datelike, Local, NaiveDate, SecondsFormat};
 use omnitrigger_windows::{
     read_local_directory_with_options, DirectoryEntryType, DirectoryOrder, LocalDirectoryEntry,
     LocalDirectoryOptions, LocalStatError, MAX_DIRECTORY_ENTRIES,
@@ -33,6 +33,8 @@ const OPTION_HELP: &[(&str, &str)] = &[
     ("最早修改", "按修改时间从旧到新"),
     ("最近创建", "按创建时间从新到旧"),
     ("最早创建", "按创建时间从旧到新"),
+    ("修改近=7天", "只取含今天在内最近 7 天修改的项"),
+    ("创建近=7天", "只取含今天在内最近 7 天创建的项"),
     ("大小", "按字节数从大到小"),
     ("最小优先", "按字节数从小到大"),
     ("自然排序", "名称中的数字按数值排"),
@@ -644,6 +646,24 @@ struct DateBounds {
 }
 
 impl DateBounds {
+    fn set_recent(&mut self, count: &str, today: NaiveDate) -> Option<()> {
+        if self.is_active() {
+            return None;
+        }
+        let end = u64::try_from(today.num_days_from_ce() - 1).ok()?;
+        let count = count
+            .strip_suffix('天')
+            .unwrap_or(count)
+            .parse::<u64>()
+            .ok()?;
+        let start = end.checked_sub(count.checked_sub(1)?)?;
+        *self = Self {
+            minimum: Some(start),
+            maximum: Some(end),
+        };
+        Some(())
+    }
+
     fn is_active(self) -> bool {
         self.minimum.is_some() || self.maximum.is_some()
     }
@@ -700,6 +720,10 @@ enum FileOutput {
 }
 
 fn split_query(query: &str) -> Option<FileQuery<'_>> {
+    split_query_on(query, Local::now().date_naive())
+}
+
+fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
     let (directory, filter) = query.split_once('|')?;
     let directory = super::path_tools::strip_path_quotes(directory.trim());
     let (filter, options) = filter.split_once('|').unwrap_or((filter, ""));
@@ -800,12 +824,14 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
                     "修改<" | "modified<" => {
                         set_bound(&mut modified.maximum, calendar_day(quantity)?)?
                     }
+                    "修改近" | "modified-days" => modified.set_recent(quantity, today)?,
                     "创建>" | "created>" => {
                         set_bound(&mut created.minimum, calendar_day(quantity)?)?
                     }
                     "创建<" | "created<" => {
                         set_bound(&mut created.maximum, calendar_day(quantity)?)?
                     }
+                    "创建近" | "created-days" => created.set_recent(quantity, today)?,
                     _ => return None,
                 }
             }
@@ -1830,6 +1856,36 @@ mod tests {
         }
         for invalid in ["排除名称=", "排除名称=a,,b", "排除名称=a 排除名称=b"] {
             assert!(split_query(&format!("{original} | {invalid}")).is_none());
+        }
+    }
+
+    #[test]
+    fn recent_file_dates_include_today_across_year_boundaries() {
+        let today = NaiveDate::from_ymd_opt(2027, 1, 2).unwrap();
+        let query = split_query_on(
+            r"C:\Work | *.txt | 修改近=3天 创建近=1 最早修改 名称列表",
+            today,
+        )
+        .unwrap();
+        let day = |input| calendar_day(input).unwrap() * TICKS_PER_DAY;
+        assert!(query.needs_timestamps());
+        assert!(query.modified.contains(1, day("2026-12-31")));
+        assert!(query
+            .modified
+            .contains(1, day("2027-01-02") + TICKS_PER_DAY - 1));
+        assert!(!query.modified.contains(1, day("2026-12-30")));
+        assert!(!query.modified.contains(1, day("2027-01-03")));
+        assert!(!query.modified.contains(0, day("2027-01-02")));
+        assert!(!query.created.contains(1, day("2027-01-01")));
+        assert!(query.created.contains(1, day("2027-01-02")));
+        for options in [
+            "修改近=0",
+            "创建近=18446744073709551615",
+            "修改近=7天 修改>=2027-01-01",
+            "创建<=2027-01-02 创建近=5",
+            "修改近=3 修改近=2",
+        ] {
+            assert!(split_query_on(&format!(r"C:\Work | | {options}"), today).is_none());
         }
     }
 
