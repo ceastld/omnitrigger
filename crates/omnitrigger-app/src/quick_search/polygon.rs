@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::{
     calculator::normalize,
-    fraction::{ensure_exact_size, FractionError},
+    fraction::{ensure_exact_size, exact_abs_square_root, format_square_root, FractionError},
     plane::{parse_point, Point2, PointError},
 };
 
@@ -45,6 +45,7 @@ pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
     let input = normalized.trim();
     let (operation, arguments) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
     let centroid = operation == "重心" || operation.eq_ignore_ascii_case("centroid");
+    let perimeter = operation == "周长" || operation.eq_ignore_ascii_case("perimeter");
     let parse_coordinate = |part: &str| {
         parse_point(part).map_err(|error| match error {
             PointError::Arguments => PolygonError::PointArguments,
@@ -59,7 +60,7 @@ pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
             return Err(PolygonError::ContainmentArguments);
         }
         (vertices.trim(), Some(parse_coordinate(point)?))
-    } else if centroid {
+    } else if centroid || perimeter {
         (arguments.trim(), None)
     } else {
         (input, None)
@@ -85,6 +86,9 @@ pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
     check_edges(&vertices)?;
     if let Some(point) = point {
         return point_position(&point, &vertices).map(str::to_owned);
+    }
+    if perimeter {
+        return polygon_perimeter(&vertices);
     }
     let origin = &vertices[0];
     let mut twice_area = BigRational::default();
@@ -112,6 +116,36 @@ pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
         "面积 {area} · 顶点 {}\n顶点顺序 {winding}",
         vertices.len()
     ))
+}
+
+fn polygon_perimeter(vertices: &[Point2]) -> Result<String, PolygonError> {
+    let mut rational = BigRational::default();
+    let mut radicals = BTreeMap::<BigRational, usize>::new();
+    for (a, b) in vertices.iter().zip(vertices.iter().cycle().skip(1)) {
+        let dx = &a[0] - &b[0];
+        let dy = &a[1] - &b[1];
+        let squared_length = &dx * &dx + &dy * &dy;
+        ensure_exact_size(&squared_length).map_err(PolygonError::Evaluation)?;
+        if let Some(length) = exact_abs_square_root(&squared_length) {
+            rational += length;
+            ensure_exact_size(&rational).map_err(PolygonError::Evaluation)?;
+        } else {
+            *radicals.entry(squared_length).or_default() += 1;
+        }
+    }
+    let mut terms = Vec::new();
+    if rational.numer().sign() != Sign::NoSign {
+        terms.push(rational.to_string());
+    }
+    for (squared_length, count) in radicals {
+        let radical = format_square_root(&squared_length);
+        terms.push(if count == 1 {
+            radical
+        } else {
+            format!("{count}{radical}")
+        });
+    }
+    Ok(format!("周长 {}", terms.join(" + ")))
 }
 
 fn point_position(point: &Point2, vertices: &[Point2]) -> Result<&'static str, PolygonError> {
@@ -253,6 +287,23 @@ mod tests {
             Err(PolygonError::IntersectingEdges)
         );
         assert_eq!(calculate_polygon("重心"), Err(PolygonError::Incomplete));
+    }
+
+    #[test]
+    fn sums_exact_rational_and_radical_edge_lengths_including_the_last_edge() {
+        for (query, expected) in [
+            ("周长 0,0;3,0;3,4", "周长 12"),
+            ("周长 0,0;1,1;2,0", "周长 2 + 2√2"),
+            ("perimeter 2,0;1,1;0,0;2,0", "周长 2 + 2√2"),
+            ("周长 0,0;1/2,0;1/2,1/4;0,1/4", "周长 3/2"),
+            ("周长 0,0;1/2,1/2;1,0", "周长 1 + 2√(1/2)"),
+        ] {
+            assert_eq!(calculate_polygon(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_polygon("周长 0,0;4,4;0,4;4,0"),
+            Err(PolygonError::IntersectingEdges)
+        );
     }
 
     #[test]
