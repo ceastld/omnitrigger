@@ -1849,6 +1849,45 @@ impl QuickSearch {
         cx.notify();
     }
 
+    fn move_selected_bookmark(&mut self, down: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Results::Bookmarks(items) = &self.results else {
+            return;
+        };
+        let selected = self.selected;
+        let neighbor = if down {
+            selected.checked_add(1)
+        } else {
+            selected.checked_sub(1)
+        };
+        let (Some(current), Some(neighbor)) = (
+            items.get(selected),
+            neighbor.and_then(|index| items.get(index)),
+        ) else {
+            return;
+        };
+        let expression = current.expression.clone();
+        let (first, second) = if down {
+            (&expression, &neighbor.expression)
+        } else {
+            (&neighbor.expression, &expression)
+        };
+        self.bookmark_save_error = self
+            .index
+            .recent
+            .bookmarks
+            .swap_visible_items(first, second)
+            .err();
+        let query = self.input.read(cx).text();
+        self.refresh_results(&query, window, cx);
+        if let Results::Bookmarks(items) = &self.results {
+            self.selected = items
+                .iter()
+                .position(|item| item.expression == expression)
+                .unwrap_or_else(|| selected.min(items.len().saturating_sub(1)));
+        }
+        cx.notify();
+    }
+
     fn start_bookmark_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Results::Bookmarks(items) = &self.results else {
             return;
@@ -1981,6 +2020,15 @@ impl QuickSearch {
                 if !event.is_held && self.reveal_selected_file(window, cx) {
                     cx.stop_propagation();
                 }
+            } else if modifiers == 1
+                && keystroke.modifiers.alt
+                && matches!(keystroke.key.as_str(), "up" | "down")
+                && matches!(self.results, Results::Bookmarks(_))
+            {
+                if !event.is_held {
+                    self.move_selected_bookmark(keystroke.key == "down", window, cx);
+                }
+                cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.alt && keystroke.key == "up" {
                 let query = self.input.read(cx).text();
                 let Some((Scope::LocalFiles, term)) = scoped_query(&query) else {
@@ -2367,12 +2415,20 @@ impl QuickSearch {
                 list.child(self.render_pagination(
                     items.len(),
                     page_size,
-                    "↑ ↓ 选择  ·  PgUp / PgDn",
+                    if bookmarks {
+                        "↑ ↓ 选择  ·  Alt+↑/↓ 排序  ·  PgUp / PgDn"
+                    } else {
+                        "↑ ↓ 选择  ·  PgUp / PgDn"
+                    },
                     cx,
                 ))
             })
             .when((2..=page_size).contains(&items.len()), |list| {
-                list.child(Self::selection_hint("↑ ↓ 选择"))
+                list.child(Self::selection_hint(if bookmarks {
+                    "↑ ↓ 选择  ·  Alt+↑/↓ 排序"
+                } else {
+                    "↑ ↓ 选择"
+                }))
             })
     }
 
@@ -3964,7 +4020,20 @@ mod tests {
                             search.refresh_results("收藏: 3**4", window, cx);
                             search.key_down(&bookmark, window, cx);
                             let removed = matches!(&search.results, Results::Bookmarks(items) if items.is_empty());
-                            (menu, restored, removed, name_entry, canceled, named)
+                            for query in ["11 + 11", "2**3", "11 + 22"] {
+                                search.index.recent.bookmarks.toggle(query).unwrap();
+                            }
+                            let filter = "收藏: １１";
+                            search.fill_query(filter, window, cx);
+                            search.refresh_results(filter, window, cx);
+                            search.selected = 1;
+                            search.key_down(&key("alt-up"), window, cx);
+                            let moved_up = search.selected == 0 && matches!(&search.results, Results::Bookmarks(items)
+                                if items.len() == 2 && items[0].expression == "11 + 11");
+                            search.key_down(&key("alt-down"), window, cx);
+                            let moved_down = search.selected == 1 && matches!(&search.results, Results::Bookmarks(items)
+                                if items.len() == 2 && items[1].expression == "11 + 11");
+                            (menu, restored, removed, name_entry, canceled, named, moved_up && moved_down)
                         })
                         .unwrap();
                     let history_toggle = reopened
@@ -4035,7 +4104,15 @@ mod tests {
             file_help,
             (help_input, all_json_examples, restored_input),
             (directory_selection, directory_help, all_duration_examples, restored_directory),
-            (bookmark_menu, bookmark_restored, bookmark_removed, name_entry, canceled, named),
+            (
+                bookmark_menu,
+                bookmark_restored,
+                bookmark_removed,
+                name_entry,
+                canceled,
+                named,
+                reordered,
+            ),
             (
                 history_opened,
                 history_restored,
@@ -4064,6 +4141,7 @@ mod tests {
         assert!(name_entry);
         assert!(canceled);
         assert!(named);
+        assert!(reordered);
         assert_eq!(window_refresh, (true, true, true));
         assert_eq!(app_refresh, (true, true, true, true));
         assert_eq!(

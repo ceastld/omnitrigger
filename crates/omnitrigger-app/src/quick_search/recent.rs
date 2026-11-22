@@ -93,6 +93,22 @@ impl QueryBookmarks {
             .map(|outcome| outcome != BookmarkChange::Full)
     }
 
+    pub(super) fn swap_visible_items(&self, first: &str, second: &str) -> Result<(), String> {
+        self.update(|items| {
+            let first = items.iter().position(|item| item.query() == first);
+            let second = items.iter().position(|item| item.query() == second);
+            let (Some(first), Some(second)) = (first, second) else {
+                return Ok(BookmarkChange::Unchanged);
+            };
+            if first >= second {
+                return Ok(BookmarkChange::Unchanged);
+            }
+            items.swap(first, second);
+            Ok(BookmarkChange::Changed)
+        })
+        .map(|_| ())
+    }
+
     pub(super) fn rename(&self, query: &str, name: &str) -> Result<(), String> {
         let name = name.trim();
         if !valid_bookmark_name(name) {
@@ -360,6 +376,34 @@ mod tests {
         let reopened = QueryBookmarks::from_bindings_path(&bindings);
         assert!(!reopened.contains(multiline));
         assert!(reopened.contains("2**10"));
+    }
+
+    #[test]
+    fn persists_visible_swaps_and_reloads_during_concurrent_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let bindings = root.path().join("bindings.json");
+        let first = QueryBookmarks::from_bindings_path(&bindings);
+        for query in ["11 + 11", "2**3", "11 + 22"] {
+            first.toggle(query).unwrap();
+        }
+        first.rename("11 + 11", "保留名称").unwrap();
+        let stale = QueryBookmarks::from_bindings_path(&bindings);
+        first.swap_visible_items("11 + 22", "11 + 11").unwrap();
+        stale.swap_visible_items("11 + 22", "11 + 11").unwrap();
+        let reopened = QueryBookmarks::from_bindings_path(&bindings);
+        let items = reopened.matching("");
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.expression.as_str())
+                .collect::<Vec<_>>(),
+            ["11 + 11", "2**3", "11 + 22"]
+        );
+        assert_eq!(items[0].result, "保留名称");
+        assert_eq!(stale.matching("１１")[0].expression, "11 + 11");
+        reopened.toggle("11 + 22").unwrap();
+        stale.swap_visible_items("11 + 11", "11 + 22").unwrap();
+        assert!(!stale.contains("11 + 22"));
     }
 
     #[test]
