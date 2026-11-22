@@ -2628,6 +2628,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "给 CSV 追加两个钟表时刻之间的时长",
+        query: "CSV: 时刻差列 [\"经过时长\",\"开始\",\"结束\"]\n开始,结束\n23:45,01:15\n09:00:00.25,09:00:01",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "用 CSV 中每行的天数推算日期",
         query: "CSV: 日期加天列 [\"到期日期\",\"日期\",\"天数\"]\n日期,天数\n2024-02-28,2\n2024-03-01,-1",
     },

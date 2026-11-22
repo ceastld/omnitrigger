@@ -108,13 +108,16 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
 
 fn duration_value(input: &str) -> Result<(i128, bool), DurationError> {
     if let Some((start, end)) = input.split_once(['到', '至']) {
-        let start = time_of_day(start)?;
-        let end = time_of_day(end)?;
-        let elapsed = (end + NANOS_PER_DAY - start) % NANOS_PER_DAY;
-        Ok((elapsed as i128, false))
+        Ok((elapsed_clock_interval(start, end)? as i128, false))
     } else {
         signed_duration(input)
     }
+}
+
+pub(super) fn elapsed_clock_interval(start: &str, end: &str) -> Result<u128, DurationError> {
+    let start = time_of_day(start)?;
+    let end = time_of_day(end)?;
+    Ok((end + NANOS_PER_DAY - start) % NANOS_PER_DAY)
 }
 
 fn elapsed_after_break(input: &str) -> Result<i128, DurationError> {

@@ -20,6 +20,7 @@ use super::{
     calculator::normalize,
     calendar::{parse_complete_date, shift_calendar_days},
     conversion::{exact_data_converter, ConversionError},
+    duration::{elapsed_clock_interval, format_clock_duration},
     fraction::{
         calculate_fraction_with_variables, ensure_exact_size, parse_fraction_literal,
         rounded_decimal, FractionError, MAX_DECIMAL_PLACES,
@@ -83,6 +84,7 @@ pub(super) enum CsvError {
     SplitColumnArguments,
     DataConversionColumnArguments,
     DateDifferenceColumnArguments,
+    ClockDifferenceColumnArguments,
     DateOffsetColumnArguments,
     DataConversionTarget(ConversionError),
     RunningColumnArguments,
@@ -186,6 +188,9 @@ impl CsvError {
             }
             Self::DateDifferenceColumnArguments => {
                 "填写新列名、开始日期列和结束日期列，例如 [\"天数\",\"开始\",\"结束\"]"
+            }
+            Self::ClockDifferenceColumnArguments => {
+                "填写新列名、开始时刻列和结束时刻列，例如 [\"经过时长\",\"开始\",\"结束\"]"
             }
             Self::DateOffsetColumnArguments => {
                 "填写新列名、来源日期列和整数天数列，例如 [\"到期日期\",\"日期\",\"天数\"]"
@@ -306,6 +311,7 @@ enum Operation {
     },
     ConvertDataColumn(String, ColumnReference, String),
     DateDifferenceColumn(String, ColumnReference, ColumnReference),
+    ClockDifferenceColumn(String, ColumnReference, ColumnReference),
     DateOffsetColumn(String, ColumnReference, ColumnReference),
     RunningColumn {
         name: String,
@@ -708,6 +714,15 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::DateDifferenceColumn(name, start, end)
         }
+        "时刻差列" | "clock-difference-column" => {
+            let ((name, start, end), data) =
+                json_argument_and_data::<(String, ColumnReference, ColumnReference)>(
+                    input,
+                    CsvError::ClockDifferenceColumnArguments,
+                )?;
+            input = data;
+            Operation::ClockDifferenceColumn(name, start, end)
+        }
         "数据换算列" | "convert-data-column" => {
             let ((name, source, target), data) =
                 json_argument_and_data::<(String, ColumnReference, String)>(
@@ -1096,9 +1111,32 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::ConvertDataColumn(name, source, target) => {
             convert_data_column(&rows, &name, source, &target)
         }
-        Operation::DateDifferenceColumn(name, start, end) => {
-            date_difference_column(&rows, &name, start, end)
-        }
+        Operation::DateDifferenceColumn(name, start, end) => append_from_two_columns(
+            &rows,
+            &name,
+            start,
+            end,
+            CsvError::DateDifferenceColumnArguments,
+            |start, end| {
+                let parse_date = |date| parse_complete_date(date).map_err(|error| error.message());
+                let days = parse_date(end)?
+                    .signed_duration_since(parse_date(start)?)
+                    .num_days();
+                Ok(days.to_string())
+            },
+        ),
+        Operation::ClockDifferenceColumn(name, start, end) => append_from_two_columns(
+            &rows,
+            &name,
+            start,
+            end,
+            CsvError::ClockDifferenceColumnArguments,
+            |start, end| {
+                elapsed_clock_interval(&normalize(start), &normalize(end))
+                    .map(|nanos| format_clock_duration(nanos, ""))
+                    .map_err(|error| error.message())
+            },
+        ),
         Operation::DateOffsetColumn(name, date, days) => {
             date_offset_column(&rows, &name, date, days)
         }
@@ -2015,15 +2053,17 @@ fn date_offset_column(
     })
 }
 
-fn date_difference_column(
+fn append_from_two_columns(
     rows: &[Vec<String>],
     name: &str,
     start: ColumnReference,
     end: ColumnReference,
+    bad_arguments: CsvError,
+    compute: impl Fn(&str, &str) -> Result<String, &'static str>,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     if name.trim().is_empty() || name.contains('\0') {
-        return Err(CsvError::DateDifferenceColumnArguments);
+        return Err(bad_arguments);
     }
     let start = start.resolve(header)?;
     let end = end.resolve(header)?;
@@ -2035,16 +2075,10 @@ fn date_difference_column(
         if start.is_empty() || end.is_empty() {
             return Ok(String::new());
         }
-        let parse_date = |date| {
-            parse_complete_date(date).map_err(|error| CsvError::DataRowValue {
-                row: row_number,
-                cause: error.message(),
-            })
-        };
-        let days = parse_date(end)?
-            .signed_duration_since(parse_date(start)?)
-            .num_days();
-        Ok(days.to_string())
+        compute(start, end).map_err(|cause| CsvError::DataRowValue {
+            row: row_number,
+            cause,
+        })
     })
 }
 
@@ -4630,6 +4664,19 @@ mod tests {
                 Err(CsvError::MovingColumnArguments)
             );
         }
+    }
+
+    #[test]
+    fn appends_clock_differences_across_midnight_and_reports_invalid_times() {
+        let query = "时刻差列 [\"经过时长\",\"开始\",\"结束\"]\n开始,结束\n23:45,01:15\n０９：００：００．２５０,09:00:01\n12:00,12:00\n09:00,";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("开始,结束,经过时长\r\n23:45,01:15,01:30:00\r\n０９：００：００．２５０,09:00:01,00:00:00.75\r\n12:00,12:00,00:00:00\r\n09:00,\"\",\"\"")
+        );
+        assert!(matches!(
+            transform_csv("clock-difference-column [\"时长\",1,2]\n开始,结束\n09:00,24:00"),
+            Err(CsvError::DataRowValue { row: 1, .. })
+        ));
     }
 
     #[test]
