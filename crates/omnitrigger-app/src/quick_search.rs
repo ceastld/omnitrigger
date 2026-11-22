@@ -1914,6 +1914,7 @@ impl QuickSearch {
 
     fn render_examples(&self, items: &[usize], cx: &mut Context<Self>) -> Div {
         let start = self.selected / EXAMPLE_PAGE_SIZE * EXAMPLE_PAGE_SIZE;
+        let can_return = self.input_before_help.is_some();
         div()
             .flex()
             .flex_col()
@@ -1954,12 +1955,18 @@ impl QuickSearch {
                 list.child(self.render_pagination(
                     items.len(),
                     EXAMPLE_PAGE_SIZE,
-                    "↑ ↓ 选择  ·  ? 后筛选  ·  PgUp / PgDn",
+                    if can_return {
+                        "↑ ↓ 选择  ·  F1 返回  ·  PgUp / PgDn"
+                    } else {
+                        "↑ ↓ 选择  ·  ? 后筛选  ·  PgUp / PgDn"
+                    },
                     cx,
                 ))
             })
             .when((2..=EXAMPLE_PAGE_SIZE).contains(&items.len()), |list| {
-                let hint = if matches!(self.input.read(cx).text().trim(), "?" | "？") {
+                let hint = if can_return {
+                    "↑ ↓ 选择  ·  F1 返回"
+                } else if matches!(self.input.read(cx).text().trim(), "?" | "？") {
                     "↑ ↓ 选择  ·  ? 后可加关键词"
                 } else {
                     "↑ ↓ 选择"

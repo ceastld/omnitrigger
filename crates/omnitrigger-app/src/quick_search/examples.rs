@@ -2873,6 +2873,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按一次或多次百分比变化反推原值",
+        query: "百分比: 原值 99 @ +10%, -10%",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按折扣反推折前价",
         query: "百分比: 折前价 170 按 8.5折",
     },
@@ -2998,6 +3003,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按首项和公差生成精确等差数列",
+        query: "分数: 等差数列 1/3,1/6,5",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按首项和公比生成精确等比数列",
+        query: "分数: 等比数列 1,-1/2,4",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "求有理数的有限连分数",
         query: "分数: 连分数 355/113",
     },
@@ -3105,6 +3120,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "百分比",
                     "从百分比",
                     "取值表",
+                    "等差数列",
+                    "等比数列",
                     "连分数",
                     "从连分数",
                     "从循环小数",

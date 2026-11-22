@@ -16,6 +16,7 @@ const MAX_EXACT_BITS: u64 = 8192;
 pub(super) const MAX_DECIMAL_PLACES: u32 = 100;
 const MAX_REPEATING_DECIMAL_PLACES: usize = 512;
 const MAX_TABLE_INPUTS: usize = 12;
+const MAX_SEQUENCE_VALUES: usize = 128;
 const MAX_RATIO_VALUES: usize = 16;
 const MAX_CONTINUED_FRACTION_TERMS: usize = 512;
 
@@ -43,6 +44,7 @@ pub(super) enum FractionError {
     RepeatingDecimalLength,
     RepeatingDecimalSyntax,
     TableInputs,
+    SequenceArguments,
     ContinuedFractionArguments,
     ContinuedFractionLength,
     ComparisonArguments,
@@ -78,6 +80,7 @@ impl FractionError {
             Self::TableInputs => {
                 "用方括号填写 1 至 12 个数值，例如 分数: 取值表 [-2,0,3/2] x**2+1/3"
             }
+            Self::SequenceArguments => "填写首项、公差或公比、项数，例如 1/3,1/6,5，最多 128 项",
             Self::ContinuedFractionArguments => {
                 "用方括号填写连分数整数项，例如 [3,7,16]。第一项之后须为正整数"
             }
@@ -177,6 +180,12 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     }
     if verb == "取值表" || verb.eq_ignore_ascii_case("table") {
         return fraction_table(expression.trim());
+    }
+    if verb == "等差数列" || verb.eq_ignore_ascii_case("arithmetic-sequence") {
+        return fraction_sequence(expression, false);
+    }
+    if verb == "等比数列" || verb.eq_ignore_ascii_case("geometric-sequence") {
+        return fraction_sequence(expression, true);
     }
     if verb == "连分数" || verb.eq_ignore_ascii_case("continued-fraction") {
         return continued_fraction(calculate_fraction(expression.trim())?);
@@ -360,6 +369,32 @@ fn fraction_table(input: &str) -> Result<String, FractionError> {
         rows.push(format!("{x}\t{y}"));
     }
     Ok(rows.join("\n"))
+}
+
+fn fraction_sequence(input: &str, geometric: bool) -> Result<String, FractionError> {
+    let terms: Vec<_> = split_top_level_commas(input).take(4).collect();
+    let [first, change, count] = terms.as_slice() else {
+        return Err(FractionError::SequenceArguments);
+    };
+    let count = count
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|count| (1..=MAX_SEQUENCE_VALUES).contains(count))
+        .ok_or(FractionError::SequenceArguments)?;
+    let mut value = calculate_fraction(first)?;
+    let change = calculate_fraction(change)?;
+    let mut values = vec![value.to_string()];
+    for _ in 1..count {
+        if geometric {
+            value *= &change;
+        } else {
+            value += &change;
+        }
+        ensure_exact_size(&value)?;
+        values.push(value.to_string());
+    }
+    Ok(values.join("\n"))
 }
 
 fn continued_fraction(mut value: BigRational) -> Result<String, FractionError> {
@@ -1130,6 +1165,35 @@ mod tests {
         assert_eq!(
             simplify_fraction("化简比例 1/1e1500,1/(1e1500-1)"),
             Err(FractionError::ExactRange)
+        );
+    }
+
+    #[test]
+    fn generates_exact_progressions_in_order_without_computing_an_extra_term() {
+        for (query, expected) in [
+            ("等差数列 1/3,1/6,5", "1/3\n1/2\n2/3\n5/6\n1"),
+            ("arithmetic-sequence comb(4,2),-1/2,3", "6\n11/2\n5"),
+            ("等比数列 1,-1/2,4", "1\n-1/2\n1/4\n-1/8"),
+            ("geometric-sequence 2,0,3", "2\n0\n0"),
+            ("等比数列 1/7,1e2000,1", "1/7"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in [
+            "等差数列 1,2",
+            "等比数列 1,2,0",
+            "等差数列 1,2,129",
+            "等差数列 1,2,3,4",
+        ] {
+            assert_eq!(
+                simplify_fraction(query),
+                Err(FractionError::SequenceArguments),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            simplify_fraction("等比数列 1e1200,1e1200,3"),
+            Err(FractionError::ExactRange),
         );
     }
 
