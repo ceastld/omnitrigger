@@ -178,6 +178,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "逐行去空白" | "trim-lines" => {
             Ok(text.lines().map(str::trim).collect::<Vec<_>>().join("\n"))
         }
+        "去公共缩进" | "dedent" => Ok(remove_common_indent(text)),
         "倒序" | "reverse" => Ok(text.graphemes(true).rev().collect()),
         "按行去重" | "unique-lines" => {
             let mut seen = HashSet::new();
@@ -322,6 +323,30 @@ fn decimal_run(text: &[u8]) -> (&[u8], &[u8]) {
         .position(|&byte| byte != b'0')
         .unwrap_or(digits.len());
     (&digits[significant..], rest)
+}
+
+fn remove_common_indent(text: &str) -> String {
+    let mut indents = text.lines().filter_map(|line| {
+        let content = line.trim_start_matches([' ', '\t']);
+        (!content.is_empty()).then_some(&line[..line.len() - content.len()])
+    });
+    let Some(mut common) = indents.next() else {
+        return text.to_owned();
+    };
+    for indent in indents {
+        let length = common
+            .bytes()
+            .zip(indent.bytes())
+            .take_while(|(left, right)| left == right)
+            .count();
+        if length == 0 {
+            return text.to_owned();
+        }
+        common = &common[..length];
+    }
+    text.split_inclusive('\n')
+        .map(|line| line.strip_prefix(common).unwrap_or(line))
+        .collect()
 }
 
 fn count_lines(text: &str) -> String {
@@ -903,6 +928,21 @@ mod tests {
         }
         let large = format!("逐行加前缀 \"{}\" {}", "x".repeat(1024), "A\n".repeat(1100));
         assert_eq!(transform_text(&large), Err(TextError::ResultTooLarge));
+    }
+
+    #[test]
+    fn strips_only_matching_common_indentation_and_keeps_line_endings() {
+        for (query, expected) in [
+            (
+                "去公共缩进 \"    甲\r\n      乙\r\n\r\n    丙\n\"",
+                "甲\r\n  乙\r\n\r\n丙\n",
+            ),
+            ("dedent \"\t  甲\n\t  \t乙\"", "甲\n\t乙"),
+            ("dedent \"   甲\n\t乙\"", "   甲\n\t乙"),
+            ("dedent \" \n\t\"", " \n\t"),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected));
+        }
     }
 
     #[test]
