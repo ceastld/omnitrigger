@@ -1436,8 +1436,7 @@ impl QuickSearch {
             return;
         }
         let next = self.index.results(query);
-        if !query.trim_start().starts_with(['?', '？']) && !matches!(&next, Results::FileOptions(_))
-        {
+        if !Self::shows_help(query, &next) {
             self.input_before_help = None;
         }
         if !matches!(&next, Results::Calculations(_))
@@ -1872,6 +1871,41 @@ impl QuickSearch {
         self.refresh_results(&edit.filter, window, cx);
     }
 
+    fn shows_help(query: &str, results: &Results) -> bool {
+        query.trim_start().starts_with(['?', '？']) || matches!(results, Results::FileOptions(_))
+    }
+
+    fn toggle_help(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.input.read(cx).is_composing() {
+            return;
+        }
+        let query = self.input.read(cx).text();
+        if Self::shows_help(&query, &self.results) {
+            if let Some(previous) = self.input_before_help.take() {
+                self.fill_query(previous, window, cx);
+            }
+            return;
+        }
+        let help = match scoped_query(query.trim()) {
+            Some((Scope::LocalFiles, term)) => local_files::option_help_query(term),
+            Some((Scope::ToolIndex, _)) => match &self.results {
+                Results::Help(items) => items
+                    .get(self.selected)
+                    .and_then(|&index| EXAMPLES[index].query.split_once([':', '：']))
+                    .and_then(|(prefix, _)| tool_example_keyword(prefix))
+                    .map(|keyword| format!("? {keyword}")),
+                _ => None,
+            },
+            _ => None,
+        }
+        .or_else(|| {
+            let (prefix, _) = query.trim().split_once([':', '：'])?;
+            tool_example_keyword(prefix).map(|keyword| format!("? {keyword}"))
+        });
+        self.input_before_help = Some(query);
+        self.fill_query(help.unwrap_or_else(|| "?".to_owned()), window, cx);
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.input.read(cx).is_composing() {
             return;
@@ -1963,35 +1997,7 @@ impl QuickSearch {
         match keystroke.key.as_str() {
             "f1" => {
                 if !event.is_held {
-                    let query = self.input.read(cx).text();
-                    if query.trim_start().starts_with(['?', '？'])
-                        || matches!(&self.results, Results::FileOptions(_))
-                    {
-                        if let Some(previous) = self.input_before_help.take() {
-                            self.fill_query(previous, window, cx);
-                        }
-                    } else {
-                        let help = match scoped_query(query.trim()) {
-                            Some((Scope::LocalFiles, term)) => local_files::option_help_query(term),
-                            Some((Scope::ToolIndex, _)) => match &self.results {
-                                Results::Help(items) => items
-                                    .get(self.selected)
-                                    .and_then(|&index| {
-                                        EXAMPLES[index].query.split_once([':', '：'])
-                                    })
-                                    .and_then(|(prefix, _)| tool_example_keyword(prefix))
-                                    .map(|keyword| format!("? {keyword}")),
-                                _ => None,
-                            },
-                            _ => None,
-                        }
-                        .or_else(|| {
-                            let (prefix, _) = query.trim().split_once([':', '：'])?;
-                            tool_example_keyword(prefix).map(|keyword| format!("? {keyword}"))
-                        });
-                        self.input_before_help = Some(query);
-                        self.fill_query(help.unwrap_or_else(|| "?".to_owned()), window, cx);
-                    }
+                    self.toggle_help(window, cx);
                 }
             }
             "f2" if matches!(&self.results, Results::Bookmarks(items) if !items.is_empty()) => {
@@ -2214,7 +2220,6 @@ impl QuickSearch {
 
     fn render_examples(&self, items: &[usize], cx: &mut Context<Self>) -> Div {
         let start = self.selected / EXAMPLE_PAGE_SIZE * EXAMPLE_PAGE_SIZE;
-        let can_return = self.input_before_help.is_some();
         let input = self.input.read(cx).text();
         let tool_index = matches!(scoped_query(input.trim()), Some((Scope::ToolIndex, _)));
         div()
@@ -2261,9 +2266,7 @@ impl QuickSearch {
                 list.child(self.render_pagination(
                     items.len(),
                     EXAMPLE_PAGE_SIZE,
-                    if can_return {
-                        "↑ ↓ 选择  ·  F1 返回  ·  PgUp / PgDn"
-                    } else if tool_index {
+                    if tool_index {
                         "↑ ↓ 选择  ·  输入关键词筛选  ·  PgUp / PgDn"
                     } else {
                         "↑ ↓ 选择  ·  ? 后筛选  ·  PgUp / PgDn"
@@ -2272,9 +2275,7 @@ impl QuickSearch {
                 ))
             })
             .when((2..=EXAMPLE_PAGE_SIZE).contains(&items.len()), |list| {
-                let hint = if can_return {
-                    "↑ ↓ 选择  ·  F1 返回"
-                } else if matches!(input.trim(), "?" | "？") {
+                let hint = if matches!(input.trim(), "?" | "？") {
                     "↑ ↓ 选择  ·  ? 后可加关键词"
                 } else {
                     "↑ ↓ 选择"
@@ -2776,6 +2777,13 @@ impl Render for QuickSearch {
         let focused = self.input.focus_handle(cx).is_focused(window);
         let query = self.input.read(cx).text();
         let naming_bookmark = self.bookmark_name_edit.is_some();
+        let help_action = if naming_bookmark || query.trim().is_empty() {
+            None
+        } else if Self::shows_help(&query, &self.results) {
+            self.input_before_help.is_some().then_some("返回查询 F1")
+        } else {
+            Some("用法 F1")
+        };
         let bookmark_action = if naming_bookmark {
             None
         } else if query.trim().is_empty() {
@@ -2832,6 +2840,15 @@ impl Render for QuickSearch {
                                 .h(px(24.))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.fill_query("工具: ", window, cx);
+                                })),
+                        )
+                    })
+                    .when_some(help_action, |header, label| {
+                        header.child(
+                            button("toggle-quick-search-help", label, Tone::Ghost, true)
+                                .h(px(24.))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_help(window, cx);
                                 })),
                         )
                     })
