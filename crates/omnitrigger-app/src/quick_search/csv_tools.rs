@@ -4,13 +4,14 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
+use num_rational::BigRational;
 use serde::{
     de::DeserializeOwned,
     ser::{Serialize, SerializeMap, Serializer},
 };
 
 use super::{
-    fraction::parse_fraction_literal,
+    fraction::{ensure_exact_size, parse_fraction_literal},
     statistics::{summarize_unweighted, StatisticsError},
     text_tools::compare_natural,
 };
@@ -33,6 +34,7 @@ pub(super) enum CsvError {
     ColumnOutOfRange,
     InvalidNumber,
     StatisticsColumn,
+    TotalColumn,
     EmptyStatisticsColumn,
     Statistics(StatisticsError),
     Serialization,
@@ -57,6 +59,7 @@ impl CsvError {
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
             Self::StatisticsColumn => "列统计需要一个列号，列号从 1 开始",
+            Self::TotalColumn => "填写一个需要合计的列号，列号从 1 开始",
             Self::EmptyStatisticsColumn => "请在表头下至少提供一条数据",
             Self::Statistics(error) => error.message(),
             Self::Serialization => "无法生成 JSON",
@@ -82,6 +85,10 @@ enum Operation {
         keep_matches: bool,
     },
     CountByColumns(Vec<usize>),
+    SumByColumns {
+        columns: Vec<usize>,
+        amount: usize,
+    },
     ColumnStatistics {
         column: usize,
         sample: bool,
@@ -137,6 +144,18 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             let (columns, data) = column_arguments(input)?;
             input = data;
             Operation::CountByColumns(columns)
+        }
+        "分组合计" | "group-sum" => {
+            let (columns, rest) = column_arguments(input)?;
+            let (amounts, data) = column_arguments(rest)?;
+            let [amount] = amounts.as_slice() else {
+                return Err(CsvError::TotalColumn);
+            };
+            input = data;
+            Operation::SumByColumns {
+                columns,
+                amount: *amount,
+            }
         }
         "列统计" | "column-stats" | "列总体" | "column-population" => {
             let (columns, data) = column_arguments(input)?;
@@ -198,6 +217,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             keep_matches,
         } => filter_column(&rows, column, &value, keep_matches),
         Operation::CountByColumns(columns) => count_by_columns(&rows, &columns),
+        Operation::SumByColumns { columns, amount } => sum_by_columns(&rows, &columns, amount),
         Operation::ColumnStatistics { column, sample } => summarize_column(&rows, column, sample),
         Operation::SortByColumns {
             columns,
@@ -350,18 +370,48 @@ fn count_by_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, C
             .and_modify(|(_, count)| *count += 1)
             .or_insert((position, 1_usize));
     }
+    Ok(grouped_csv(header, columns, groups, "计数"))
+}
+
+fn sum_by_columns(
+    rows: &[Vec<String>],
+    columns: &[usize],
+    amount: usize,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    validate_column_width(columns, header.len())?;
+    validate_column_width(&[amount], header.len())?;
+    let mut groups = HashMap::new();
+    for (position, row) in records.iter().enumerate() {
+        let value = parse_fraction_literal(&row[amount]).map_err(|_| CsvError::InvalidNumber)?;
+        let (_, total) = groups
+            .entry(column_key(row, columns))
+            .or_insert_with(|| (position, BigRational::default()));
+        *total += value;
+        ensure_exact_size(total)
+            .map_err(|error| CsvError::Statistics(StatisticsError::Evaluation(error)))?;
+    }
+    Ok(grouped_csv(header, columns, groups, "合计"))
+}
+
+fn grouped_csv<T: ToString>(
+    header: &[String],
+    columns: &[usize],
+    groups: HashMap<Vec<&str>, (usize, T)>,
+    label: &str,
+) -> String {
     let mut groups: Vec<_> = groups.into_iter().collect();
     groups.sort_unstable_by_key(|(_, (position, _))| *position);
     let mut output = Vec::with_capacity(groups.len() + 1);
     let mut header: Vec<_> = columns.iter().map(|&index| header[index].clone()).collect();
-    header.push("计数".to_owned());
+    header.push(label.to_owned());
     output.push(header);
-    output.extend(groups.into_iter().map(|(key, (_, count))| {
+    output.extend(groups.into_iter().map(|(key, (_, value))| {
         let mut row: Vec<_> = key.into_iter().map(str::to_owned).collect();
-        row.push(count.to_string());
+        row.push(value.to_string());
         row
     }));
-    Ok(write_rows(&output, ','))
+    write_rows(&output, ',')
 }
 
 fn column_key<'a>(row: &'a [String], columns: &[usize]) -> Vec<&'a str> {
@@ -770,6 +820,26 @@ mod tests {
             (r#"改列名 ["A","B"] A,B"#, CsvError::RenameConflict),
             (r#"改列名 ["a","Z"] A,B"#, CsvError::MissingColumnName),
             (r#"改列名 ["A","Z"] A,A"#, CsvError::AmbiguousColumnName),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn sums_csv_values_by_column_tuple_in_first_occurrence_order() {
+        let data = "编号,地区,状态,金额\n001,\"东,区\",完成,1/2\n002,西,待办,2.5e0\n003,\"东,区\",完成,1.5\n004,\"东,区\",待办,-1";
+        assert_eq!(
+            transform_csv(&format!("分组合计 3,2 4\n{data}")).as_deref(),
+            Ok("状态,地区,合计\r\n完成,\"东,区\",2\r\n待办,西,5/2\r\n待办,\"东,区\",-1")
+        );
+        assert_eq!(
+            transform_csv("group-sum 1 2 名称,金额").as_deref(),
+            Ok("名称,合计")
+        );
+        for (query, error) in [
+            ("分组合计 1 1,2 名称,金额", CsvError::TotalColumn),
+            ("分组合计 1 3 名称,金额", CsvError::ColumnOutOfRange),
+            ("分组合计 1 2 名称,金额\n甲,待定", CsvError::InvalidNumber),
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
