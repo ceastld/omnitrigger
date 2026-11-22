@@ -676,6 +676,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按位宽查看有符号整数的补码",
+        query: "进制: 补码 16 @ -257",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把大端或小端十六进制字节读成整数",
         query: "进制: 读字节序 小端 @ 78 56 34 12",
     },
@@ -3611,7 +3616,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Radix
             if !term.is_empty()
-                && ["字节序", "读字节序"]
+                && ["字节序", "读字节序", "补码"]
                     .iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Triangle

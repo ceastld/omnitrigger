@@ -16,6 +16,8 @@ pub(super) enum RadixError {
     ByteOrderArguments,
     ByteOrderInteger,
     ByteOrderWidthExceeded,
+    SignedByteOrderInteger,
+    SignedByteOrderWidthExceeded,
     ReadByteOrderArguments,
     ReadByteOrderBytes,
 }
@@ -32,6 +34,8 @@ impl RadixError {
             }
             Self::ByteOrderInteger => "填写非负整数，可用十进制或 0x、0b、0o 前缀",
             Self::ByteOrderWidthExceeded => "整数超出所填位宽",
+            Self::SignedByteOrderInteger => "填写有符号整数，可用十进制或 0x、0b、0o 前缀",
+            Self::SignedByteOrderWidthExceeded => "有符号整数超出所填位宽",
             Self::ReadByteOrderArguments => "填写大端或小端，例如 读字节序 小端 @ 78 56 34 12",
             Self::ReadByteOrderBytes => "填写 1 至 16 个两位十六进制字节，字节之间用空格分开",
         }
@@ -116,7 +120,10 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
         .split_once(char::is_whitespace)
         .unwrap_or((input.trim(), ""));
     if operation == "字节序" || operation.eq_ignore_ascii_case("byte-order") {
-        return byte_order(arguments);
+        return byte_order(arguments, false);
+    }
+    if operation == "补码" || operation.eq_ignore_ascii_case("twos-complement") {
+        return byte_order(arguments, true);
     }
     if operation == "读字节序" || operation.eq_ignore_ascii_case("read-byte-order") {
         return read_byte_order(arguments);
@@ -146,7 +153,7 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     Ok(text)
 }
 
-fn byte_order(input: &str) -> Result<String, RadixError> {
+fn byte_order(input: &str, signed: bool) -> Result<String, RadixError> {
     let (bits, number) = input
         .split_once('@')
         .ok_or(RadixError::ByteOrderArguments)?;
@@ -157,15 +164,42 @@ fn byte_order(input: &str) -> Result<String, RadixError> {
         .filter(|bits| (8..=128).contains(bits) && bits.is_multiple_of(8))
         .ok_or(RadixError::ByteOrderArguments)?;
     let number = number.trim();
-    let number = number.strip_prefix('+').unwrap_or(number);
+    let negative = number.starts_with('-');
+    if negative && !signed {
+        return Err(RadixError::ByteOrderInteger);
+    }
+    let (integer_error, width_error) = if signed {
+        (
+            RadixError::SignedByteOrderInteger,
+            RadixError::SignedByteOrderWidthExceeded,
+        )
+    } else {
+        (
+            RadixError::ByteOrderInteger,
+            RadixError::ByteOrderWidthExceeded,
+        )
+    };
+    let number = number.strip_prefix(['+', '-']).unwrap_or(number);
     let (base, digits) = Base::prefixed(number).unwrap_or((Base::Decimal, number));
     let value = base.parse_digits(digits).map_err(|error| match error {
-        ConversionError::OutOfRange => RadixError::ByteOrderWidthExceeded,
-        _ => RadixError::ByteOrderInteger,
+        ConversionError::OutOfRange => width_error,
+        _ => integer_error,
     })?;
-    if u128::BITS - value.leading_zeros() > bits {
-        return Err(RadixError::ByteOrderWidthExceeded);
+    let fits = if signed {
+        let sign_bit = 1_u128 << (bits - 1);
+        let limit = if negative { sign_bit } else { sign_bit - 1 };
+        value <= limit
+    } else {
+        u128::BITS - value.leading_zeros() <= bits
+    };
+    if !fits {
+        return Err(width_error);
     }
+    let value = if negative {
+        0_u128.wrapping_sub(value)
+    } else {
+        value
+    };
     let bytes = value.to_be_bytes();
     let bytes = &bytes[bytes.len() - (bits / 8) as usize..];
     let big_endian = bytes
@@ -231,6 +265,38 @@ pub(super) fn ungroup_digits(digits: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encodes_signed_twos_complement_without_overflow_or_truncation() {
+        for (query, expected) in [
+            ("补码 16 @ -257", "大端 FE FF\n小端 FF FE"),
+            ("TWOS-COMPLEMENT 8 @ -0x80", "大端 80\n小端 80"),
+            ("补码 8 @ +127", "大端 7F\n小端 7F"),
+            ("补码 8 @ -0", "大端 00\n小端 00"),
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in [
+            "补码 8 @ -129",
+            "补码 8 @ 128",
+            "补码 128 @ 0x8000_0000_0000_0000_0000_0000_0000_0000",
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query),
+                Err(RadixError::SignedByteOrderWidthExceeded),
+                "{query}"
+            );
+        }
+        let minimum = convert_arbitrary_radix(&format!("补码 128 @ {}", i128::MIN)).unwrap();
+        assert_eq!(
+            minimum,
+            format!("大端 80{}\n小端{} 80", " 00".repeat(15), " 00".repeat(15))
+        );
+    }
 
     #[test]
     fn shows_both_byte_orders_with_exact_width_and_padding() {
