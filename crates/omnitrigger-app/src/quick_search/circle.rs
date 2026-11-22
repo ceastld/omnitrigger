@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
@@ -11,6 +13,7 @@ pub(super) enum CircleError {
     NonPositiveRadius,
     AngleOutOfRange,
     PointArguments,
+    TwoCircleArguments,
     CollinearPoints,
     CoincidentDiameterPoints,
     Evaluation(FractionError),
@@ -23,6 +26,7 @@ impl CircleError {
             Self::NonPositiveRadius => "半径和直径须大于零",
             Self::AngleOutOfRange => "圆心角须在 0 至 360 度之间",
             Self::PointArguments => "填写二维坐标，用逗号分隔每点的两个坐标，用分号分隔各点",
+            Self::TwoCircleArguments => "分别填写两个圆心和半径，例如 0,0 @ 1; 2,0 @ 1",
             Self::CollinearPoints => "三个点须互不重合且不在同一直线上",
             Self::CoincidentDiameterPoints => "直径的两个端点须互不重合",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
@@ -43,6 +47,9 @@ pub(super) fn calculate_circle(query: &str) -> Result<String, CircleError> {
     if operation == "直径端点" || operation.eq_ignore_ascii_case("diameter-points") {
         return circle_from_diameter_points(arguments);
     }
+    if operation == "两圆关系" || operation.eq_ignore_ascii_case("relation") {
+        return compare_circles(arguments);
+    }
     let (length, angle) = input
         .split_once('@')
         .map_or((input, None), |(length, angle)| {
@@ -60,10 +67,7 @@ pub(super) fn calculate_circle(query: &str) -> Result<String, CircleError> {
     if length.is_empty() {
         return Err(CircleError::Incomplete);
     }
-    let radius = calculate_fraction(length).map_err(CircleError::Evaluation)?;
-    if radius.numer().sign() != Sign::Plus {
-        return Err(CircleError::NonPositiveRadius);
-    }
+    let radius = parse_positive_length(length)?;
     let two = BigInt::from(2);
     let (radius, diameter) = if is_diameter {
         (&radius / &two, radius)
@@ -101,6 +105,58 @@ pub(super) fn calculate_circle(query: &str) -> Result<String, CircleError> {
         "弧长 {} · 扇形面积 {}",
         multiple_of_pi(&arc),
         multiple_of_pi(&sector),
+    ))
+}
+
+fn parse_positive_length(input: &str) -> Result<BigRational, CircleError> {
+    let length = calculate_fraction(input).map_err(CircleError::Evaluation)?;
+    if length.numer().sign() != Sign::Plus {
+        return Err(CircleError::NonPositiveRadius);
+    }
+    Ok(length)
+}
+
+fn circle_center_and_radius(input: &str) -> Result<(Point2, BigRational), CircleError> {
+    let (center, radius) = input
+        .split_once('@')
+        .ok_or(CircleError::TwoCircleArguments)?;
+    if center.trim().is_empty() || radius.trim().is_empty() {
+        return Err(CircleError::TwoCircleArguments);
+    }
+    Ok((circle_point(center)?, parse_positive_length(radius)?))
+}
+
+fn compare_circles(input: &str) -> Result<String, CircleError> {
+    let mut circles = input.split(';');
+    let (Some(first), Some(second), None) = (circles.next(), circles.next(), circles.next()) else {
+        return Err(CircleError::TwoCircleArguments);
+    };
+    let ([x1, y1], first_radius) = circle_center_and_radius(first)?;
+    let ([x2, y2], second_radius) = circle_center_and_radius(second)?;
+    let (dx, dy) = (x1 - x2, y1 - y2);
+    let distance_squared = &dx * &dx + &dy * &dy;
+    let sum = &first_radius + &second_radius;
+    let difference = first_radius - second_radius;
+    let outer_limit = &sum * &sum;
+    let inner_limit = &difference * &difference;
+    for value in [&distance_squared, &outer_limit, &inner_limit] {
+        ensure_exact_size(value).map_err(CircleError::Evaluation)?;
+    }
+    let relation = match distance_squared.cmp(&outer_limit) {
+        Ordering::Greater => "外离 · 0 个交点",
+        Ordering::Equal => "外切 · 1 个交点",
+        Ordering::Less => match distance_squared.cmp(&inner_limit) {
+            Ordering::Greater => "相交 · 2 个交点",
+            Ordering::Equal if distance_squared.numer().sign() == Sign::NoSign => {
+                "重合 · 无穷多个交点"
+            }
+            Ordering::Equal => "内切 · 1 个交点",
+            Ordering::Less => "内含 · 0 个交点",
+        },
+    };
+    Ok(format!(
+        "{relation}\n圆心距 {}",
+        format_square_root(&distance_squared)
     ))
 }
 
@@ -185,6 +241,32 @@ fn multiple_of_pi(value: &BigRational) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_two_circles_using_precise_distances_and_radii() {
+        for (query, expected) in [
+            ("两圆关系 0,0 @ 1; 3,0 @ 1", "外离 · 0 个交点\n圆心距 3"),
+            ("两圆关系 0,0 @ 1/2; 1,0 @ 1/2", "外切 · 1 个交点\n圆心距 1"),
+            ("两圆关系 0,0 @ 1; 1,1 @ 1", "相交 · 2 个交点\n圆心距 √2"),
+            ("relation 0,0 @ 3; 2,0 @ 1", "内切 · 1 个交点\n圆心距 2"),
+            ("两圆关系 0,0 @ 3; 1/2,0 @ 1", "内含 · 0 个交点\n圆心距 1/2"),
+            ("两圆关系 0,0 @ 3; 0,0 @ 1", "内含 · 0 个交点\n圆心距 0"),
+            (
+                "两圆关系 0,0 @ 1/2; 0,0 @ 0.5",
+                "重合 · 无穷多个交点\n圆心距 0",
+            ),
+        ] {
+            assert_eq!(calculate_circle(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_circle("两圆关系 0,0 @ 0; 1,0 @ 1"),
+            Err(CircleError::NonPositiveRadius)
+        );
+        assert_eq!(
+            calculate_circle("两圆关系 0,0 @ 1; 1,0"),
+            Err(CircleError::TwoCircleArguments)
+        );
+    }
 
     #[test]
     fn uses_the_midpoint_of_a_diameter_and_preserves_exact_coordinates() {

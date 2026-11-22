@@ -336,6 +336,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按圆心和半径判断两个圆的位置关系",
+        query: "圆: 两圆关系 0,0 @ 1/2; 1,0 @ 1/2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "由直径端点求圆心和半径",
         query: "圆: 直径端点 -1,0; 3,2",
     },
