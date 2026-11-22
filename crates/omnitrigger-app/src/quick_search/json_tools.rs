@@ -106,6 +106,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "数值筛选" | "filter-numeric" => return filter_json_numbers(source),
         "按值去重" | "unique-by-pointer" => return deduplicate_json_by_scalar(source),
         "分组计数" | "group-count" => return count_json_by_scalar(source),
+        "分组明细" | "group-records" => return group_json_records(source),
         "数值排序" | "sort-numeric" => return sort_json_numbers(source, false),
         "数值降序" | "sort-numeric-desc" => return sort_json_numbers(source, true),
         "文本排序" | "sort-text" => return sort_json_text(source, false),
@@ -325,6 +326,39 @@ fn count_json_by_scalar(query: &str) -> Result<String, JsonError> {
         count: usize,
     }
 
+    let groups = collect_json_groups(
+        query,
+        |value| Group { value, count: 0 },
+        |group, _| group.count += 1,
+    )?;
+    Ok(serde_json::to_string(&groups).expect("有效的原始 JSON 值和计数可直接序列化"))
+}
+
+fn group_json_records(query: &str) -> Result<String, JsonError> {
+    #[derive(serde::Serialize)]
+    struct Group<'a> {
+        #[serde(rename = "值")]
+        value: &'a RawValue,
+        #[serde(rename = "项目")]
+        records: Vec<&'a RawValue>,
+    }
+
+    let groups = collect_json_groups(
+        query,
+        |value| Group {
+            value,
+            records: Vec::new(),
+        },
+        |group, item| group.records.push(item),
+    )?;
+    Ok(serde_json::to_string(&groups).expect("有效的原始 JSON 值可以直接序列化"))
+}
+
+fn collect_json_groups<'a, Group>(
+    query: &'a str,
+    create: impl Fn(&'a RawValue) -> Group,
+    append: impl Fn(&mut Group, &'a RawValue),
+) -> Result<Vec<Group>, JsonError> {
     let (pointer, source) = pointer_and_source(query)?;
     let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
     let mut positions = HashMap::new();
@@ -334,12 +368,12 @@ fn count_json_by_scalar(query: &str) -> Result<String, JsonError> {
         let scalar = json_scalar(value)?.ok_or(JsonError::ExpectedScalar)?;
         let position = *positions.entry(scalar).or_insert_with(|| {
             let position = groups.len();
-            groups.push(Group { value, count: 0 });
+            groups.push(create(value));
             position
         });
-        groups[position].count += 1;
+        append(&mut groups[position], item);
     }
-    Ok(serde_json::to_string(&groups).expect("有效的原始 JSON 值和计数可直接序列化"))
+    Ok(groups)
 }
 
 fn sort_json_numbers(query: &str, descending: bool) -> Result<String, JsonError> {
@@ -1079,6 +1113,26 @@ impl<'de> Visitor<'de> for ObjectEntries {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_grouped_json_records_preserving_the_order_and_number_spellings() {
+        let query = r#"分组明细 /状态 [{"状态":"完成","金额":1.50},{"状态":"待办","金额":2e0},{"状态":"\u5b8c\u6210","金额":9007199254740993}]"#;
+        assert_eq!(
+            transform_json(query).as_deref(),
+            Ok(
+                r#"[{"值":"完成","项目":[{"状态":"完成","金额":1.50},{"状态":"\u5b8c\u6210","金额":9007199254740993}]},{"值":"待办","项目":[{"状态":"待办","金额":2e0}]}]"#
+            )
+        );
+        assert_eq!(
+            transform_json(r#"group-records "" [1,2,1.0,null]"#).as_deref(),
+            Ok(r#"[{"值":1,"项目":[1,1.0]},{"值":2,"项目":[2]},{"值":null,"项目":[null]}]"#)
+        );
+        assert_eq!(transform_json("分组明细 /状态 []").as_deref(), Ok("[]"));
+        assert_eq!(
+            transform_json("分组明细 /状态 [{}]"),
+            Err(JsonError::MissingValue)
+        );
+    }
 
     #[test]
     fn sorts_object_keys_through_arrays_and_preserves_raw_literal_values() {

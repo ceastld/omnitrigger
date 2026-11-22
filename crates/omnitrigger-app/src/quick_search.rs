@@ -2364,7 +2364,7 @@ mod tests {
                 .map(|index| EXAMPLES[index].query)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(examples_for("JSON：").len(), 31);
+        assert_eq!(examples_for("JSON：").len(), 32);
         assert!(examples_for("JSON: 展平")[0].starts_with("JSON: 展平 "));
         assert!(examples_for("JSON: 取")[0].starts_with("JSON: 取值 "));
         assert!(examples_for("JSON: 取列")[0].starts_with("JSON: 取列 "));
@@ -2389,6 +2389,7 @@ mod tests {
         assert!(examples_for("JSON: 排")[0].starts_with("JSON: 排除 "));
         assert!(examples_for("JSON: 按")[0].starts_with("JSON: 按值去重 "));
         assert!(examples_for("JSON: 分组")[0].starts_with("JSON: 分组计数 "));
+        assert!(examples_for("JSON: 分组明")[0].starts_with("JSON: 分组明细 "));
         assert!(examples_for("统计: 移动")[0].starts_with("统计: 移动平均 "));
         assert!(examples_for("分数: 循环")[0].starts_with("分数: 循环小数 "));
         assert!(matches!(
