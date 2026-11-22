@@ -4,6 +4,19 @@ use super::calculator::CalculationError;
 
 pub(super) const MAX_SORT_FIELDS: usize = 8;
 
+pub(super) fn json_argument_and_tail<T: serde::de::DeserializeOwned>(
+    input: &str,
+) -> Option<(T, &str)> {
+    let input = input.trim_start();
+    let mut values = serde_json::Deserializer::from_str(input).into_iter::<T>();
+    let value = values.next()?.ok()?;
+    let remaining = &input[values.byte_offset()..];
+    let data = remaining
+        .strip_prefix("\r\n")
+        .or_else(|| remaining.strip_prefix(char::is_whitespace))?;
+    Some((value, data))
+}
+
 #[derive(Clone, Copy, serde::Deserialize)]
 pub(super) enum FieldSortOrder {
     #[serde(rename = "文本升序", alias = "text-asc")]

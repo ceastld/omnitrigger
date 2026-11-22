@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cmp::{Ordering, Reverse},
     collections::{HashMap, HashSet},
     fmt::Write as _,
@@ -19,11 +20,12 @@ use super::{
     calculator::{narrow_ascii_graphic, FULLWIDTH_ASCII_OFFSET},
     csv_tools::csv_cell,
     fraction::parse_fraction_literal,
-    operators::{select_index_ranges, IndexRangeError},
+    operators::{json_argument_and_tail, select_index_ranges, IndexRangeError},
 };
 
 const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_DIFF_LINES: usize = 512;
+const MAX_PIPELINE_STEPS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TextError {
@@ -31,6 +33,8 @@ pub(super) enum TextError {
     UnclosedQuote,
     IncompleteTransform,
     UnknownOperation,
+    PipelineArguments,
+    PipelineStep { index: usize, cause: &'static str },
     IncompleteReplacement,
     InvalidReplacementArguments,
     IncompleteTextArgument,
@@ -69,6 +73,10 @@ impl TextError {
             Self::UnclosedQuote => "补全引号后继续",
             Self::IncompleteTransform => "输入操作和文本，例如 文本: 大写 hello",
             Self::UnknownOperation => "输入 ? 文本 查看可用操作",
+            Self::PipelineArguments => {
+                "填写 1 至 8 个文本操作名及原文，例如 [\"去空行\",\"按行去重\"]"
+            }
+            Self::PipelineStep { cause, .. } => cause,
             Self::IncompleteReplacement => "输入查找内容、替换内容和原文",
             Self::InvalidReplacementArguments => "查找内容和替换内容要加引号，并用空格分隔",
             Self::IncompleteTextArgument => "输入带引号的内容和原文",
@@ -130,6 +138,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         .ok_or(TextError::IncompleteTransform)?;
     let operation = operation.to_ascii_lowercase();
     match operation.as_str() {
+        "依次处理" | "pipeline" => return transform_text_pipeline(text),
         "替换" | "replace" => return replace_text(text),
         "正则替换" | "regex-replace" => return replace_regex(text),
         "按行拼接" | "join-lines" => return join_lines(text),
@@ -188,8 +197,11 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "json还原" | "json-unquote" => return decode_json_string(text),
         _ => {}
     }
-    let text = text_payload(text)?;
-    match operation.as_str() {
+    transform_text_payload(&operation, text_payload(text)?)
+}
+
+fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextError> {
+    match operation {
         "大写" | "upper" | "uppercase" => Ok(text.to_uppercase()),
         "小写" | "lower" | "lowercase" => Ok(text.to_lowercase()),
         "长度详情" | "length-details" => Ok(format!(
@@ -280,12 +292,46 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "json转义" | "json-quote" => {
             Ok(serde_json::to_string(text).expect("字符串可以序列化为 JSON"))
         }
+        "json还原" | "json-unquote" => decode_json_string(text),
         "html转义" | "html-escape" => Ok(escape_html(text)),
         "html还原" | "html-unescape" => Ok(unescape_html(text)),
         "markdown转义" | "markdown-escape" => Ok(escape_markdown(text)),
         "markdown还原" | "markdown-unescape" => Ok(unescape_markdown(text)),
         _ => Err(TextError::UnknownOperation),
     }
+}
+
+fn transform_text_pipeline(input: &str) -> Result<String, TextError> {
+    let (steps, data) =
+        json_argument_and_tail::<Vec<String>>(input).ok_or(TextError::PipelineArguments)?;
+    if !(1..=MAX_PIPELINE_STEPS).contains(&steps.len())
+        || steps
+            .iter()
+            .any(|step| step.trim().is_empty() || step.contains(['\r', '\n', '\0']))
+    {
+        return Err(TextError::PipelineArguments);
+    }
+    let mut current = Cow::Borrowed(text_payload(data)?);
+    for (index, step) in steps.iter().enumerate() {
+        let step = step.trim().to_ascii_lowercase();
+        let output =
+            transform_text_payload(&step, &current).map_err(|error| TextError::PipelineStep {
+                index: index + 1,
+                cause: if error == TextError::UnknownOperation {
+                    "请选择无需额外参数的文本操作，例如 逐行去空白"
+                } else {
+                    error.message()
+                },
+            })?;
+        if output.len() > MAX_EXPANDED_TEXT_BYTES {
+            return Err(TextError::PipelineStep {
+                index: index + 1,
+                cause: TextError::ResultTooLarge.message(),
+            });
+        }
+        current = Cow::Owned(output);
+    }
+    Ok(current.into_owned())
 }
 
 fn identifier_words(text: &str) -> Vec<&str> {
@@ -1300,6 +1346,34 @@ mod tests {
         ] {
             assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn chains_text_operations_without_reinterpreting_intermediate_whitespace_or_quotes() {
+        let cleanup = "依次处理 [\"逐行去空白\",\"去空行\",\"按行去重\",\"自然排序\"] \" report10 \nreport2\n\nreport2\n\"";
+        assert_eq!(transform_text(cleanup).as_deref(), Ok("report2\nreport10"));
+        let quoted = r#"依次处理 ["大写","JSON转义","JSON还原"] " a"b ""#;
+        assert_eq!(transform_text(quoted).as_deref(), Ok(" A\"B "));
+        assert_eq!(
+            transform_text("依次处理 [\"去空行\",\"JSON转义\"] \" \n \"").as_deref(),
+            Ok("\"\"")
+        );
+        assert_eq!(
+            transform_text("依次处理 [] 原文"),
+            Err(TextError::PipelineArguments)
+        );
+        assert!(matches!(
+            transform_text("依次处理 [\"大写\",\"依次处理\"] 原文"),
+            Err(TextError::PipelineStep { index: 2, .. })
+        ));
+        let large = format!(
+            "依次处理 [\"utf8编码\"] {}",
+            "A".repeat(MAX_EXPANDED_TEXT_BYTES / 2)
+        );
+        assert!(matches!(
+            transform_text(&large),
+            Err(TextError::PipelineStep { index: 1, .. })
+        ));
     }
 
     #[test]

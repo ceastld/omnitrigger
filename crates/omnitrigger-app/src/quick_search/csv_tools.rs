@@ -1506,13 +1506,7 @@ fn json_argument_and_data<T: DeserializeOwned>(
     input: &str,
     error: CsvError,
 ) -> Result<(T, &str), CsvError> {
-    let input = input.trim_start();
-    let mut values = serde_json::Deserializer::from_str(input).into_iter::<T>();
-    let value = values.next().ok_or(error)?.map_err(|_| error)?;
-    let (_, data) = split_argument(&input[values.byte_offset()..])
-        .filter(|(argument, _)| argument.is_empty())
-        .ok_or(error)?;
-    Ok((value, data))
+    super::operators::json_argument_and_tail(input).ok_or(error)
 }
 
 fn column_indices(input: &str) -> Result<Vec<usize>, CsvError> {

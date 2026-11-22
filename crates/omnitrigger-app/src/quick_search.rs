@@ -488,14 +488,15 @@ impl ValueError {
             Self::Timestamp(error) => error.message(),
             Self::Identifier(error) => error.message(),
             Self::Color(error) => error.message(),
-            Self::Text(error) => error.message(),
             Self::Json(JsonError::PatchStep { index, cause }) => {
                 return format!("第 {index} 步补丁失败 · {cause}").into();
             }
             Self::Json(JsonError::PipelineStep { index, cause })
-            | Self::Csv(CsvError::PipelineStep { index, cause }) => {
+            | Self::Csv(CsvError::PipelineStep { index, cause })
+            | Self::Text(TextError::PipelineStep { index, cause }) => {
                 return format!("第 {index} 步失败 · {cause}").into();
             }
+            Self::Text(error) => error.message(),
             Self::Csv(CsvError::DataRowValue { row, cause }) => {
                 return format!("第 {row} 个数据行 · {cause}").into();
             }

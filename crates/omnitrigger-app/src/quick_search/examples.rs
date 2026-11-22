@@ -1972,6 +1972,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "依次清理、去重和自然排序文本行",
+        query: "文本: 依次处理 [\"逐行去空白\",\"去空行\",\"按行去重\",\"自然排序\"] \" report10 \nreport2\n\nreport2\n\"",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "找出两组文本共有的行",
         query: r#"文本: 共有行 "苹果\n梨\n茶" "茶\n苹果\n柿子""#,
     },
