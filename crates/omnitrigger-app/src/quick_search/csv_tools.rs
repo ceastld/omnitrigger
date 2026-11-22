@@ -1895,11 +1895,11 @@ fn joined_csv_columns<'a>(row: &'a [String], omitted: &'a [bool]) -> impl Iterat
         .map(|(field, _)| field.as_str())
 }
 
-fn append_bounded_csv_row<'a>(
+pub(super) fn append_bounded_csv_row<'a, E: Copy>(
     output: &mut String,
     fields: impl Iterator<Item = &'a str>,
-    too_large: CsvError,
-) -> Result<(), CsvError> {
+    too_large: E,
+) -> Result<(), E> {
     let mut separator = if output.is_empty() { "" } else { "\r\n" };
     for field in fields {
         append_bounded_csv_field(output, separator, field, too_large)?;
@@ -1908,12 +1908,12 @@ fn append_bounded_csv_row<'a>(
     Ok(())
 }
 
-fn append_bounded_csv_field(
+fn append_bounded_csv_field<E>(
     output: &mut String,
     separator: &str,
     field: &str,
-    too_large: CsvError,
-) -> Result<(), CsvError> {
+    too_large: E,
+) -> Result<(), E> {
     let field = csv_cell(field);
     if output.len() + separator.len() + field.len() > MAX_EXPANDED_CSV_BYTES {
         return Err(too_large);

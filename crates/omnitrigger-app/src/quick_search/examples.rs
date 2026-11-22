@@ -2122,6 +2122,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按固定列数把连续文本行分组为 CSV",
+        query: "文本: 按行分组CSV 3 甲\n乙\n丙\n丁",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按分隔符拆分成行",
         query: "文本: 拆分成行 \"、\" 苹果、梨",
     },

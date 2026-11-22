@@ -18,7 +18,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::{
     calculator::{narrow_ascii_graphic, FULLWIDTH_ASCII_OFFSET},
-    csv_tools::csv_cell,
+    csv_tools::{append_bounded_csv_row, csv_cell},
     fraction::parse_fraction_literal,
     operators::{json_argument_and_tail, select_index_ranges, IndexRangeError},
 };
@@ -73,6 +73,7 @@ pub(super) enum TextError {
     TooManyDiffLines,
     EmptyDelimiter,
     InvalidColumn,
+    CsvColumnCount,
     MissingColumn,
     InvalidLineRange,
     InvalidGraphemeRange,
@@ -116,6 +117,7 @@ impl TextError {
             Self::EmptyDelimiter => "分隔符不能为空",
             Self::InvalidColumn => "输入从 1 开始的列号，例如 文本: 取列 \"\\t\" 2",
             Self::MissingColumn => "至少一行的列数不足",
+            Self::CsvColumnCount => "填写 1 至 128 的列数，例如 文本: 按行分组CSV 3",
             Self::InvalidLineRange => "输入从 1 开始的行号或区间，例如 文本: 取行 2,4-6",
             Self::InvalidGraphemeRange => "输入从 1 开始的字符位置或区间，例如 文本: 逐行截取 2-4",
             Self::MissingLine => "指定行号超出了文本行数",
@@ -172,6 +174,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "正则替换" | "regex-replace" => return replace_regex(text),
         "按行拼接" | "join-lines" => return join_lines(text),
         "逐行配对" | "zip-lines" => return pair_lines_as_csv(text),
+        "按行分组csv" | "chunk-lines-csv" => return chunk_lines_as_csv(text),
         "拆分成行" | "split-lines" => return split_lines(text),
         "转换换行" | "convert-line-endings" => return convert_line_endings(text),
         "正则拆分成行" | "regex-split-lines" => {
@@ -1167,19 +1170,35 @@ fn pair_lines_as_csv(input: &str) -> Result<String, TextError> {
         if first.is_none() && second.is_none() {
             return Ok(output);
         }
-        let first = csv_cell(first.unwrap_or_default());
-        let second = csv_cell(second.unwrap_or_default());
-        let separation = if output.is_empty() { "" } else { "\r\n" };
-        if output.len() + separation.len() + first.len() + 1 + second.len()
-            > MAX_EXPANDED_TEXT_BYTES
-        {
-            return Err(TextError::ResultTooLarge);
-        }
-        output.push_str(separation);
-        output.push_str(&first);
-        output.push(',');
-        output.push_str(&second);
+        append_bounded_csv_row(
+            &mut output,
+            [first.unwrap_or_default(), second.unwrap_or_default()].into_iter(),
+            TextError::ResultTooLarge,
+        )?;
     }
+}
+
+fn chunk_lines_as_csv(input: &str) -> Result<String, TextError> {
+    let (columns, text) = input
+        .trim_start()
+        .split_once(char::is_whitespace)
+        .ok_or(TextError::CsvColumnCount)?;
+    let columns = columns
+        .parse::<usize>()
+        .ok()
+        .filter(|columns| (1..=128).contains(columns))
+        .ok_or(TextError::CsvColumnCount)?;
+    let mut lines = text_payload(text)?.lines().peekable();
+    let mut output = String::new();
+    while lines.peek().is_some() {
+        let fields = lines
+            .by_ref()
+            .take(columns)
+            .chain(std::iter::repeat(""))
+            .take(columns);
+        append_bounded_csv_row(&mut output, fields, TextError::ResultTooLarge)?;
+    }
+    Ok(output)
 }
 
 enum LineSetOperation {
@@ -2162,6 +2181,27 @@ mod tests {
         }
         let large = format!(r#"替换 "x" "{}" {}"#, "Y".repeat(1500), "x".repeat(1500));
         assert_eq!(transform_text(&large), Err(TextError::ResultTooLarge));
+    }
+
+    #[test]
+    fn groups_lines_into_fixed_width_csv_records_and_pads_the_final_record() {
+        for (query, expected) in [
+            ("按行分组CSV 3 甲\n乙\n丙\n丁", "甲,乙,丙\r\n丁,\"\",\"\""),
+            (
+                "chunk-lines-csv 2 a,b\r\n\r\n\"c\"",
+                "\"a,b\",\"\"\r\n\"\"\"c\"\"\",\"\"",
+            ),
+            ("按行分组CSV 1 甲\r\n乙\n", "甲\r\n乙"),
+            ("按行分组CSV 2 \"\"", ""),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected), "{query}");
+        }
+        for width in ["0", "129", "2.5"] {
+            assert_eq!(
+                transform_text(&format!("按行分组CSV {width} 甲")),
+                Err(TextError::CsvColumnCount)
+            );
+        }
     }
 
     #[test]
