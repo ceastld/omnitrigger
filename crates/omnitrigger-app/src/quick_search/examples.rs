@@ -1808,6 +1808,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按两个分类透视汇总 CSV 数值",
+        query: "CSV: 透视合计 [\"地区\",\"状态\",\"金额\"] 地区,状态,金额\n北,完成,1/2\n南,待办,0\n北,完成,2/3\n南,完成,-1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定列自然升序排列 CSV 行",
         query: "CSV: 排序 2 编号,名称\n001,文件10\n002,文件2\n003,文件20",
     },
