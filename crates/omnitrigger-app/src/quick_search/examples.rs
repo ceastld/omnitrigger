@@ -300,6 +300,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "圆: 直径 10 @ 90°",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "由三个二维点求圆心和半径",
+        query: "圆: 三点 1,0; 3,0; 1,2",
+    },
+    Example {
         icon: Icon::Layers,
         title: "计算两个向量的点积",
         query: "向量: 点积 1,2,3; 4,5,6",
