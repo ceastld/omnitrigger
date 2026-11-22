@@ -1405,12 +1405,20 @@ pub(super) fn replace_literal_matches<'a>(
 fn replace_regex(input: &str) -> Result<String, TextError> {
     let (pattern, replacement, text) = replacement_parts(input)?;
     let pattern = compile_regex(&pattern)?;
+    replace_regex_matches(text, &pattern, &replacement)
+}
+
+pub(super) fn replace_regex_matches(
+    text: &str,
+    pattern: &Regex,
+    replacement: &str,
+) -> Result<String, TextError> {
     let mut result = String::with_capacity(text.len());
     let mut last_end = 0;
     for captures in pattern.captures_iter(text) {
         let matched = captures.get_match();
         result.push_str(&text[last_end..matched.start()]);
-        captures.expand(&replacement, &mut result);
+        captures.expand(replacement, &mut result);
         if result.len() > MAX_EXPANDED_TEXT_BYTES {
             return Err(TextError::ResultTooLarge);
         }

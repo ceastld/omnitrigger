@@ -45,7 +45,7 @@ use super::{
     },
     text_tools::{
         compare_natural, compile_regex, newline_pattern, regex_group_index,
-        replace_literal_matches, GraphemeRange, TextError, TextLengthUnit,
+        replace_literal_matches, replace_regex_matches, GraphemeRange, TextError, TextLengthUnit,
     },
 };
 
@@ -56,7 +56,7 @@ const MAX_VALUE_MAPPINGS: usize = 32;
 const MAX_FORMULA_RECORDS: usize = 32;
 const MAX_ADDED_CELLS: usize = 16_384;
 const MAX_CELL_PADDING_WIDTH: usize = 4096;
-const MAX_REGEX_COUNT_INPUT_BYTES: usize = 16 * 1024;
+const MAX_REGEX_COLUMN_INPUT_BYTES: usize = 16 * 1024;
 const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_FILTER_CONDITIONS: usize = 16;
 
@@ -114,6 +114,8 @@ pub(super) enum CsvError {
     TextReplaceColumnArguments,
     RegexCountColumnArguments,
     RegexCountColumnInputTooLarge,
+    RegexReplaceColumnArguments,
+    RegexReplaceColumnInputTooLarge,
     JsonPointerColumnArguments,
     JsonPointerColumn(JsonError),
     DataConversionTarget(ConversionError),
@@ -253,6 +255,10 @@ impl CsvError {
                 "填写新列名、来源列和正则表达式，例如 [\"次数\",\"备注\",\"\\\\d+\"]"
             }
             Self::RegexCountColumnInputTooLarge => "正则计数列的来源文本超过 16 KiB，请缩小表格范围",
+            Self::RegexReplaceColumnArguments => {
+                "填写新列名、来源列、正则和替换文本，例如 [\"结果\",\"备注\",\"([0-9]+)\",\"编号$1\"]"
+            }
+            Self::RegexReplaceColumnInputTooLarge => "正则替换列的来源文本超过 16 KiB，请缩小表格范围",
             Self::JsonPointerColumnArguments => {
                 "填写新列名、含 JSON 的来源列和指针，例如 [\"城市\",\"数据\",\"/城市\"]"
             }
@@ -933,6 +939,27 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::TextColumn(name, source, TextColumnComputation::RegexCount(pattern))
         }
+        "正则替换列" | "regex-replace-column" => {
+            let ((name, source, pattern, replacement), data) =
+                json_argument_and_data::<(String, ColumnReference, String, String)>(
+                    input,
+                    CsvError::RegexReplaceColumnArguments,
+                )?;
+            if name.trim().is_empty()
+                || [&name, &pattern, &replacement]
+                    .iter()
+                    .any(|text| text.contains('\0'))
+            {
+                return Err(CsvError::RegexReplaceColumnArguments);
+            }
+            let pattern = compile_regex(&pattern).map_err(CsvError::Regex)?;
+            input = data;
+            Operation::TextColumn(
+                name,
+                source,
+                TextColumnComputation::RegexReplace(pattern, replacement),
+            )
+        }
         kind @ ("json取值列"
         | "json-pointer-column"
         | "json类型列"
@@ -1518,11 +1545,20 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
             let source = source.resolve(header)?;
             validate_column_width(&[source], header.len())?;
-            if matches!(computation, TextColumnComputation::RegexCount(_))
-                && records.iter().map(|row| row[source].len()).sum::<usize>()
-                    > MAX_REGEX_COUNT_INPUT_BYTES
-            {
-                return Err(CsvError::RegexCountColumnInputTooLarge);
+            let size_error = match &computation {
+                TextColumnComputation::RegexCount(_) => {
+                    Some(CsvError::RegexCountColumnInputTooLarge)
+                }
+                TextColumnComputation::RegexReplace(..) => {
+                    Some(CsvError::RegexReplaceColumnInputTooLarge)
+                }
+                _ => None,
+            };
+            if let Some(error) = size_error.filter(|_| {
+                records.iter().map(|row| row[source].len()).sum::<usize>()
+                    > MAX_REGEX_COLUMN_INPUT_BYTES
+            }) {
+                return Err(error);
             }
             write_appended_column(header, records, &name, |row| {
                 let cell = &row[source];
@@ -1531,6 +1567,14 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                     TextColumnComputation::Slice(range) => Cow::Borrowed(range.slice(cell)),
                     TextColumnComputation::RegexCount(pattern) => {
                         Cow::Owned(pattern.find_iter(cell).count().to_string())
+                    }
+                    TextColumnComputation::RegexReplace(pattern, replacement) => {
+                        Cow::Owned(replace_regex_matches(cell, pattern, replacement).map_err(
+                            |error| match error {
+                                TextError::ResultTooLarge => CsvError::AddedColumnTooLarge,
+                                error => CsvError::Regex(error),
+                            },
+                        )?)
                     }
                     TextColumnComputation::Replace(needle, replacement) => {
                         replace_literal_matches(cell, needle, replacement).map_err(|error| {
@@ -2544,6 +2588,7 @@ enum TextColumnComputation {
     Length(TextLengthUnit),
     Slice(GraphemeRange),
     RegexCount(Regex),
+    RegexReplace(Regex, String),
     Replace(String, String),
     Pad {
         width: usize,
@@ -5634,6 +5679,31 @@ null"#
     }
 
     #[test]
+    fn replaces_regex_matches_in_each_csv_cell_and_expands_capture_groups() {
+        let query = r#"正则替换列 ["日期","原值","(?<y>[0-9]{4})/([0-9]{2})/([0-9]{2})","${y}-$2-$3"]
+编号,原值
+1,2026/11/21
+2,待确认
+3,"2024/01/02,2025/03/04""#;
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok(concat!(
+                "编号,原值,日期\r\n",
+                "1,2026/11/21,2026-11-21\r\n",
+                "2,待确认,待确认\r\n",
+                "3,\"2024/01/02,2025/03/04\",\"2024-01-02,2025-03-04\"",
+            ))
+        );
+        assert_eq!(
+            transform_csv(&format!(
+                "regex-replace-column [\"结果\",1,\"x\",\"y\"] 来源\n{}",
+                "x".repeat(MAX_REGEX_COLUMN_INPUT_BYTES + 1)
+            )),
+            Err(CsvError::RegexReplaceColumnInputTooLarge)
+        );
+    }
+
+    #[test]
     fn counts_nonoverlapping_regex_matches_separately_for_each_csv_cell() {
         let query = "正则计数列 [\"次数\",\"备注\",\"[0-9]+\"]\n编号,备注\n1,A12 B34 C5\n2,无编号\n3,\n4,\"上1\r\n下2\"";
         assert_eq!(
@@ -5654,7 +5724,7 @@ null"#
         );
         let csv = format!(
             "正则计数列 [\"次数\",1,\"x\"] 备注\n{}",
-            "x".repeat(MAX_REGEX_COUNT_INPUT_BYTES + 1)
+            "x".repeat(MAX_REGEX_COLUMN_INPUT_BYTES + 1)
         );
         assert_eq!(
             transform_csv(&csv),

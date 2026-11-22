@@ -3008,6 +3008,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用正则捕获组逐行转换 CSV 单元格",
+        query: "CSV: 正则替换列 [\"日期\",\"原值\",\"([0-9]{4})/([0-9]{2})/([0-9]{2})\",\"$1-$2-$3\"]\n编号,原值\n1,2026/11/21\n2,待确认",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "从 CSV 单元格的 JSON 中提取指定字段",
         query: "CSV: JSON取值列 [\"城市\",\"数据\",\"/城市\"]\n编号,数据\n1,\"{\"\"城市\"\":\"\"北京\"\"}\"\n2,\"{\"\"状态\"\":true}\"\n3,",
     },
