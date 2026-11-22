@@ -1,6 +1,11 @@
+use num_bigint::BigInt;
+use num_rational::BigRational;
+
 use super::{
     calculator::{evaluate, format_result, normalize},
     conversion::split_conversion,
+    fraction::{calculate_fraction, ensure_exact_size, FractionError},
+    operators::split_top_level_commas,
 };
 
 #[derive(Clone, Copy)]
@@ -79,19 +84,23 @@ pub(super) enum PercentageError {
     UnknownOperation,
     InvalidOperands,
     InvalidDiscount,
+    InvalidCompoundOperands,
     ZeroReference,
     OutOfRange,
+    Evaluation(FractionError),
 }
 
 impl PercentageError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入操作和两个值，例如 百分比: 变化 200 到 150",
-            Self::UnknownOperation => "可用的操作有变化、占比、百分点和折前价",
+            Self::UnknownOperation => "输入 ? 百分比 查看可用操作",
             Self::InvalidOperands => "请输入两个有效的数值，计算百分点时加上 %",
             Self::InvalidDiscount => "折后金额须非负，折扣须大于 0% 且不超过 100%",
+            Self::InvalidCompoundOperands => "输入起始值和带百分号的变动，例如 100 @ +10%, -10%",
             Self::ZeroReference => "原值或总量不能为零",
             Self::OutOfRange => "结果超出可计算范围",
+            Self::Evaluation(error) => error.message(),
         }
     }
 }
@@ -110,6 +119,9 @@ pub(super) fn compare_percentages(input: &str) -> Result<String, PercentageError
         .ok_or(PercentageError::Incomplete)?;
     if matches!(operation, "折前价" | "original-price") {
         return original_price(operands);
+    }
+    if matches!(operation, "连续变化" | "compound") {
+        return compound_percentages(operands);
     }
     let comparison = match operation {
         "变化" | "change" => Comparison::Change,
@@ -168,6 +180,25 @@ pub(super) fn compare_percentages(input: &str) -> Result<String, PercentageError
     Ok(format!("{value}{suffix}"))
 }
 
+fn compound_percentages(operands: &str) -> Result<String, PercentageError> {
+    let (base, rates) = operands
+        .split_once('@')
+        .ok_or(PercentageError::InvalidCompoundOperands)?;
+    let mut value = calculate_fraction(base).map_err(PercentageError::Evaluation)?;
+    let one = BigRational::from_integer(BigInt::from(1));
+    let hundred = BigInt::from(100);
+    for rate in split_top_level_commas(rates) {
+        let amount = rate
+            .trim()
+            .strip_suffix('%')
+            .ok_or(PercentageError::InvalidCompoundOperands)?;
+        let amount = calculate_fraction(amount).map_err(PercentageError::Evaluation)?;
+        value *= &one + amount / &hundred;
+        ensure_exact_size(&value).map_err(PercentageError::Evaluation)?;
+    }
+    Ok(value.to_string())
+}
+
 fn ratio_percent(value: f64, reference: f64) -> f64 {
     let scaled = value * 100.;
     if scaled.is_finite() {
@@ -211,6 +242,31 @@ fn original_price(operands: &str) -> Result<String, PercentageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn applies_successive_percentage_changes_without_rounding() {
+        for (query, expected) in [
+            ("连续变化 100 @ +10%, -10%", "99"),
+            ("compound 1/3 @ 50%, -25%", "3/8"),
+            ("连续变化 9007199254740993 @ 0%", "9007199254740993"),
+            ("连续变化 4 @ -100%, +20%", "0"),
+            ("连续变化 8 @ comb(4,2)%", "212/25"),
+        ] {
+            assert_eq!(
+                compare_percentages(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            compare_percentages("连续变化 100 @ 10"),
+            Err(PercentageError::InvalidCompoundOperands)
+        );
+        assert_eq!(
+            compare_percentages("compound 1/0 @ 15%"),
+            Err(PercentageError::Evaluation(FractionError::ZeroDenominator))
+        );
+    }
 
     #[test]
     fn recovers_an_original_amount_from_a_discounted_amount() {

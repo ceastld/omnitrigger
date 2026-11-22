@@ -1943,6 +1943,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "连续应用多个百分比变化",
+        query: "百分比: 连续变化 100 @ +10%, -10%",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按折扣反推折前价",
         query: "百分比: 折前价 170 按 8.5折",
     },
