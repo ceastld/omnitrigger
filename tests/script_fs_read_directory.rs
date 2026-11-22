@@ -13,6 +13,7 @@ fn entry(name: &str) -> LocalDirectoryEntry {
         path: format!("C:/synthetic/{name}"),
         kind: "file",
         reason: None,
+        size_bytes: None,
         metadata: None,
     }
 }

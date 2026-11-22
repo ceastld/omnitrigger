@@ -18,6 +18,8 @@ pub struct LocalDirectoryEntry {
     pub path: String,
     pub kind: &'static str,
     pub reason: Option<&'static str>,
+    /// 按大小排列时，普通文件的原生字节数。
+    pub size_bytes: Option<u64>,
     pub metadata: Option<LocalDirectoryMetadata>,
 }
 
@@ -150,6 +152,7 @@ impl<'a> Collector<'a> {
             path,
             kind,
             reason,
+            size_bytes: None,
             metadata: None,
         });
         Ok(())

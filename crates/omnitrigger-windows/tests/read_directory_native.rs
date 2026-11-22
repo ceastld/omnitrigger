@@ -198,6 +198,7 @@ fn read_directory_real_windows_options_preserve_metadata_precision_and_filters()
     )
     .unwrap();
     assert!(latest.iter().all(|entry| entry.metadata.is_none()));
+    assert!(latest.iter().all(|entry| entry.size_bytes.is_none()));
     assert_eq!(
         latest
             .iter()
@@ -219,9 +220,9 @@ fn read_directory_real_windows_options_preserve_metadata_precision_and_filters()
     assert_eq!(
         largest
             .iter()
-            .map(|entry| entry.name.as_str())
+            .map(|entry| (entry.name.as_str(), entry.size_bytes))
             .collect::<Vec<_>>(),
-        ["a.txt", "z.txt", "child"]
+        [("a.txt", Some(9)), ("z.txt", Some(0)), ("child", None)]
     );
     let filtered = read_local_directory_with_options(
         fixture.path(),

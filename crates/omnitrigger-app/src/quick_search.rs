@@ -200,6 +200,7 @@ pub(super) enum Destination {
         name: String,
         path: String,
         is_directory: bool,
+        size_bytes: Option<u64>,
     },
     OpenWindow(OpenWindow),
     Trigger(u64),
@@ -1803,11 +1804,16 @@ impl QuickSearch {
                                     (Icon::Layers, folder.title.to_owned(), None)
                                 }
                                 Destination::LocalFile {
-                                    name, is_directory, ..
+                                    name,
+                                    is_directory,
+                                    size_bytes,
+                                    ..
                                 } => (
                                     Icon::Layers,
                                     name.clone(),
-                                    is_directory.then(|| "文件夹".to_owned()),
+                                    size_bytes
+                                        .map(|bytes| format!("{bytes} 字节"))
+                                        .or_else(|| is_directory.then(|| "文件夹".to_owned())),
                                 ),
                                 Destination::OpenWindow(window) => {
                                     (Icon::Grid, window.title.clone(), window.process.clone())

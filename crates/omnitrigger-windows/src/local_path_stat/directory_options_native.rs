@@ -155,6 +155,8 @@ pub(super) fn read_options(
                         let length =
                             (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow);
                         sort_keys.push((!directory).then_some(length));
+                        let entry = collector.entries.last_mut().expect("entry added");
+                        entry.size_bytes = (entry.kind == "file").then_some(length);
                     }
                     DirectoryOrder::Name | DirectoryOrder::Native => {}
                 }

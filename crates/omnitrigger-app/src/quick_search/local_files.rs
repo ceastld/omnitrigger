@@ -167,6 +167,7 @@ impl LocalFilesIndex {
                     name: entry.name.clone(),
                     path: entry.path.clone(),
                     is_directory: entry.kind == "directory",
+                    size_bytes: entry.size_bytes,
                 })
                 .collect(),
         )
@@ -215,6 +216,7 @@ mod tests {
             path: format!(r"C:\Work\{name}"),
             kind,
             reason: None,
+            size_bytes: None,
             metadata: None,
         }
     }
