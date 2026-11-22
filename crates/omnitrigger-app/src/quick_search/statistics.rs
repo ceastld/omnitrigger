@@ -210,8 +210,13 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         "累计合计" | "running-sum" => return running_totals(values.trim(), false),
         "累计平均" | "running-average" => return running_totals(values.trim(), true),
-        "二项概率" | "binomial" => return binomial_probability(values, false),
-        "二项累计" | "binomial-cdf" => return binomial_probability(values, true),
+        "二项概率" | "binomial" => return binomial_probability(values, BinomialEvent::Exactly),
+        "二项累计" | "binomial-cdf" => {
+            return binomial_probability(values, BinomialEvent::AtMost)
+        }
+        "二项至少" | "binomial-at-least" => {
+            return binomial_probability(values, BinomialEvent::AtLeast)
+        }
         "超几何概率" | "hypergeometric" => return hypergeometric_probability(values),
         "差分" | "相邻差" | "difference" => return adjacent_changes(values.trim(), false),
         "变化率" | "relative-change" => return adjacent_changes(values.trim(), true),
@@ -818,7 +823,13 @@ fn squared_deviation_sum(
         })
 }
 
-fn binomial_probability(input: &str, cumulative: bool) -> Result<String, StatisticsError> {
+enum BinomialEvent {
+    Exactly,
+    AtMost,
+    AtLeast,
+}
+
+fn binomial_probability(input: &str, event: BinomialEvent) -> Result<String, StatisticsError> {
     let mut terms = split_top_level_commas(input).map(str::trim);
     let (Some(trials), Some(successes), Some(probability), None) =
         (terms.next(), terms.next(), terms.next(), terms.next())
@@ -837,6 +848,13 @@ fn binomial_probability(input: &str, cumulative: bool) -> Result<String, Statist
         .ok_or(StatisticsError::BinomialArguments)?;
     let probability = parse_probability(probability)?;
     let one = BigRational::from_integer(BigInt::from(1u8));
+    // 至少成功 k 次等价于至多失败 n-k 次。
+    let (successes, probability) = if matches!(event, BinomialEvent::AtLeast) {
+        (trials - successes, &one - probability)
+    } else {
+        (successes, probability)
+    };
+    let cumulative = !matches!(event, BinomialEvent::Exactly);
     if (cumulative && successes == trials) || trials == 0 {
         return Ok("1".to_owned());
     }
@@ -1044,12 +1062,19 @@ mod tests {
     }
 
     #[test]
-    fn computes_exact_binomial_mass_and_lower_tail_including_endpoints() {
+    fn computes_exact_binomial_mass_and_both_tails_including_endpoints() {
         for (query, expected) in [
             ("二项概率 ４，２，５０％", "3/8"),
             ("二项累计 4,2,1/2", "11/16"),
             ("binomial 3,1,1/3", "4/9"),
             ("binomial-cdf 3,1,1/3", "20/27"),
+            ("二项至少 4,3,25%", "13/256"),
+            ("binomial-at-least 3,2,1/3", "7/27"),
+            ("二项至少 0,0,1/3", "1"),
+            ("二项至少 6,0,0", "1"),
+            ("二项至少 6,1,0", "0"),
+            ("二项至少 6,6,1", "1"),
+            ("二项至少 6,6,1/2", "1/64"),
             ("二项概率 0,0,1/3", "1"),
             ("二项概率 6,2,0", "0"),
             ("二项累计 6,2,0", "1"),

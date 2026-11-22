@@ -261,6 +261,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算至少成功指定次数的二项概率",
+        query: "统计: 二项至少 4,3,25%",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "计算不放回抽取的精确概率",
         query: "统计: 超几何概率 10,4,3,2",
     },
@@ -4044,6 +4049,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 && [
                     "二项概率",
                     "二项累计",
+                    "二项至少",
                     "超几何概率",
                     "截尾平均",
                     "移动合计",
