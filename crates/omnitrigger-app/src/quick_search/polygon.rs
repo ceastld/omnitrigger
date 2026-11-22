@@ -45,6 +45,7 @@ enum PolygonOperation {
     Centroid,
     Perimeter,
     Bounds,
+    Convexity,
     Contains(Point2),
 }
 
@@ -63,6 +64,7 @@ pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
         "重心" | "centroid" => (arguments, PolygonOperation::Centroid),
         "周长" | "perimeter" => (arguments, PolygonOperation::Perimeter),
         "边界框" | "bounds" => (arguments, PolygonOperation::Bounds),
+        "凸性" | "convexity" => (arguments, PolygonOperation::Convexity),
         "包含" | "contains" => {
             let (point, vertices) = arguments
                 .split_once('@')
@@ -101,6 +103,7 @@ pub(super) fn calculate_polygon(query: &str) -> Result<String, PolygonError> {
         PolygonOperation::Centroid => polygon_area(&vertices, true),
         PolygonOperation::Perimeter => polygon_perimeter(&vertices),
         PolygonOperation::Bounds => polygon_bounds(&vertices),
+        PolygonOperation::Convexity => polygon_convexity(&vertices).map(str::to_owned),
         PolygonOperation::Contains(point) => point_position(&point, &vertices).map(str::to_owned),
     }
 }
@@ -132,6 +135,25 @@ fn polygon_area(vertices: &[Point2], centroid: bool) -> Result<String, PolygonEr
         "面积 {area} · 顶点 {}\n顶点顺序 {winding}",
         vertices.len()
     ))
+}
+
+fn polygon_convexity(vertices: &[Point2]) -> Result<&'static str, PolygonError> {
+    let count = vertices.len();
+    let mut direction = Sign::NoSign;
+    for (index, current) in vertices.iter().enumerate() {
+        let turn = orientation(
+            current,
+            &vertices[(index + 1) % count],
+            &vertices[(index + 2) % count],
+        )?;
+        if opposite_signs(direction, turn) {
+            return Ok("凹多边形");
+        }
+        if turn != Sign::NoSign {
+            direction = turn;
+        }
+    }
+    Ok("凸多边形")
 }
 
 fn polygon_bounds(vertices: &[Point2]) -> Result<String, PolygonError> {
@@ -289,6 +311,22 @@ fn edges_meet(a: &Point2, b: &Point2, c: &Point2, d: &Point2) -> Result<bool, Po
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_convex_and_concave_polygons_with_collinear_boundary_points() {
+        for (query, expected) in [
+            ("凸性 0,0;4,0;2,2;4,4;0,4", "凹多边形"),
+            ("凸性 0,0;0,4;4,4;2,2;4,0", "凹多边形"),
+            ("凸性 0,0;1/2,0;1,0;1,1;0,1;0,0", "凸多边形"),
+            ("convexity 0,0;0,1;1,1;1,0", "凸多边形"),
+        ] {
+            assert_eq!(calculate_polygon(query).as_deref(), Ok(expected));
+        }
+        assert_eq!(
+            calculate_polygon("凸性 0,0;2,2;2,0;0,2"),
+            Err(PolygonError::IntersectingEdges)
+        );
+    }
 
     #[test]
     fn finds_exact_area_and_winding_for_simple_polygons() {
