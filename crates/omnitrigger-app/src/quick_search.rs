@@ -2662,7 +2662,14 @@ mod tests {
                 .map(|index| EXAMPLES[index].query)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(examples_for("JSON：").len(), 43);
+        assert_eq!(
+            examples_for("JSON："),
+            EXAMPLES
+                .iter()
+                .map(|example| example.query)
+                .filter(|query| query.starts_with("JSON: "))
+                .collect::<Vec<_>>()
+        );
         assert!(examples_for("JSON: 展平")[0].starts_with("JSON: 展平 "));
         assert!(examples_for("JSON: 取")[0].starts_with("JSON: 取值 "));
         assert!(examples_for("JSON: 取列")[0].starts_with("JSON: 取列 "));
@@ -2716,8 +2723,10 @@ mod tests {
             Results::Value(Ok(value)) if value.text == "0.(3)" && value.continuation_hint().is_none()
         ));
         assert!(examples_for("JSON: 数值筛")[0].starts_with("JSON: 数值筛选 "));
+        assert!(examples_for("JSON: 多条件")[0].starts_with("JSON: 多条件筛选 "));
         assert!(examples_for("JSON: 数值排")[0].starts_with("JSON: 数值排序 "));
         assert!(examples_for("JSON: 文本排")[0].starts_with("JSON: 文本排序 "));
+        assert!(examples_for("CSV: 纵向")[0].starts_with("CSV: 纵向合并 "));
         assert!(examples_for("URL: 去")[0].starts_with("URL: 去查询串 "));
         assert!(examples_for("URL: 去参")[0].starts_with("URL: 去参数 "));
         assert_eq!(

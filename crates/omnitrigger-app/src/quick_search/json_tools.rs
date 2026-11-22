@@ -18,6 +18,7 @@ use super::text_tools::compare_natural;
 
 const MAX_PRETTY_BYTES: usize = 1024 * 1024;
 const MAX_PATCH_STEPS: usize = 32;
+const MAX_FILTER_CONDITIONS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum JsonError {
@@ -60,6 +61,7 @@ pub(super) enum JsonError {
     ReplacementValue,
     RemoveRoot,
     NumberFilter,
+    FilterConditions,
     ExpectedScalar,
     ExpectedNumber,
     GroupStatisticsPaths,
@@ -112,6 +114,9 @@ impl JsonError {
             Self::ReplacementValue => "路径后填入一个完整的新 JSON 值，再用空格隔开原 JSON",
             Self::RemoveRoot => "删路径需要指向一个对象成员或数组项",
             Self::NumberFilter => "路径后填写比较符和 JSON 数字，例如 /价格 >= 1.5",
+            Self::FilterConditions => {
+                "填写 1 至 16 个 [路径,比较符,值]，例如 [[\"/金额\",\">=\",1.5]]"
+            }
             Self::ExpectedScalar => "指定路径的值须为字符串、数字、布尔值或 null",
             Self::ExpectedNumber => "数值排序需要每一项的指定路径都对应 JSON 数字",
             Self::GroupStatisticsPaths => {
@@ -146,6 +151,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "筛选" | "filter" => return filter_json_by_scalar(source, true),
         "排除" | "exclude" => return filter_json_by_scalar(source, false),
         "数值筛选" | "filter-numeric" => return filter_json_numbers(source),
+        "多条件筛选" | "filter-all" => return filter_json_conditions(source),
         "按值去重" | "unique-by-pointer" => return deduplicate_json_by_scalar(source),
         "分组计数" | "group-count" => return count_json_by_scalar(source),
         "分组明细" | "group-records" => return group_json_records(source),
@@ -690,6 +696,69 @@ fn filter_json_numbers(query: &str) -> Result<String, JsonError> {
     })
 }
 
+struct JsonCondition {
+    keys: Vec<String>,
+    comparison: NumberComparison,
+    expected: JsonScalar,
+}
+
+impl JsonCondition {
+    fn matches(&self, item: &RawValue) -> Result<bool, JsonError> {
+        let Some(value) = optional_pointer_value(item, &self.keys)? else {
+            return Ok(false);
+        };
+        let Some(actual) = json_scalar(value)? else {
+            return Ok(false);
+        };
+        Ok(match (&actual, &self.expected) {
+            (JsonScalar::Number(actual), JsonScalar::Number(expected)) => {
+                self.comparison.accepts(actual.compare(expected))
+            }
+            _ if matches!(self.comparison, NumberComparison::Equal) => actual == self.expected,
+            _ if matches!(self.comparison, NumberComparison::Different) => actual != self.expected,
+            _ => false,
+        })
+    }
+}
+
+fn filter_json_conditions(query: &str) -> Result<String, JsonError> {
+    let (input, source) = json_value_and_source(query, JsonError::FilterConditions)?;
+    let conditions = serde_json::from_str::<Vec<(String, String, &RawValue)>>(input.get())
+        .map_err(|_| JsonError::FilterConditions)?;
+    if !(1..=MAX_FILTER_CONDITIONS).contains(&conditions.len()) {
+        return Err(JsonError::FilterConditions);
+    }
+    let conditions = conditions
+        .into_iter()
+        .map(|(pointer, comparison, raw)| {
+            let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
+            let comparison =
+                NumberComparison::parse(&comparison).ok_or(JsonError::FilterConditions)?;
+            let expected = json_scalar(raw)?.ok_or(JsonError::FilterConditions)?;
+            if !matches!(
+                comparison,
+                NumberComparison::Equal | NumberComparison::Different
+            ) && !matches!(expected, JsonScalar::Number(_))
+            {
+                return Err(JsonError::NumberFilter);
+            }
+            Ok(JsonCondition {
+                keys,
+                comparison,
+                expected,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    retain_json_items(read_json_array(source)?, |item| {
+        for condition in &conditions {
+            if !condition.matches(item)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })
+}
+
 fn deduplicate_json_by_scalar(query: &str) -> Result<String, JsonError> {
     let (pointer, source) = pointer_and_source(query)?;
     let mut seen = HashSet::new();
@@ -911,14 +980,29 @@ fn filter_json_items(
 ) -> Result<String, JsonError> {
     let items = read_json_array(source)?;
     let keys = pointer_keys(pointer)?.collect::<Result<Vec<_>, _>>()?;
+    retain_json_items(items, |item| {
+        Ok(matches_value(optional_pointer_value(item, &keys)?)? == keep_match)
+    })
+}
+
+fn optional_pointer_value<'a>(
+    item: &'a RawValue,
+    keys: &[String],
+) -> Result<Option<&'a RawValue>, JsonError> {
+    match select_pointer_keys(item, keys) {
+        Ok(value) => Ok(Some(value)),
+        Err(JsonError::MissingValue) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn retain_json_items(
+    items: Vec<&RawValue>,
+    mut retain: impl FnMut(&RawValue) -> Result<bool, JsonError>,
+) -> Result<String, JsonError> {
     let mut retained = Vec::new();
     for item in items {
-        let value = match select_pointer_keys(item, &keys) {
-            Ok(value) => Some(value),
-            Err(JsonError::MissingValue) => None,
-            Err(error) => return Err(error),
-        };
-        if matches_value(value)? == keep_match {
+        if retain(item)? {
             retained.push(item);
         }
     }
@@ -2056,6 +2140,34 @@ mod tests {
         ] {
             assert_eq!(transform_json(input), Err(error), "{input}");
         }
+    }
+
+    #[test]
+    fn filters_json_items_that_match_every_scalar_or_exact_number_condition() {
+        for (query, expected) in [
+            (
+                r#"多条件筛选 [["/状态","=","完成"],["/金额",">=",9007199254740993],["/批准","!=",null]] [{"状态":"完成","金额":9007199254740993.00,"批准":true},{"状态":"完成","金额":9007199254740992,"批准":true},{"状态":"待办","金额":9007199254740994,"批准":true},{"状态":"完成","金额":9007199254740993,"批准":null},{"状态":"完成","金额":9007199254740993}]"#,
+                r#"[{"状态":"完成","金额":9007199254740993.00,"批准":true}]"#,
+            ),
+            (
+                r#"filter-all [["","!=",null]] [null,["数据"],1.00,"true"]"#,
+                r#"[1.00,"true"]"#,
+            ),
+            (
+                r#"多条件筛选 [["/a~1b","=",1.5],["/a~1b","<",2]] [{"a/b":15e-1},{"a/b":"1.5"}]"#,
+                r#"[{"a/b":15e-1}]"#,
+            ),
+        ] {
+            assert_eq!(transform_json(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            transform_json(r#"多条件筛选 [["/金额",">",null]] []"#),
+            Err(JsonError::NumberFilter)
+        );
+        assert_eq!(
+            transform_json(r#"多条件筛选 [] []"#),
+            Err(JsonError::FilterConditions)
+        );
     }
 
     #[test]

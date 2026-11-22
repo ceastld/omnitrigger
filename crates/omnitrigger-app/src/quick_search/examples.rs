@@ -1992,6 +1992,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "同时按状态和金额筛选 JSON 数组",
+        query: r#"JSON: 多条件筛选 [["/状态","=","完成"],["/金额",">=",1.5]] [{"状态":"完成","金额":1.50},{"状态":"待办","金额":2},{"状态":"完成","金额":1.49}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "排除路径上具有指定标量值的 JSON 项",
         query: r#"JSON: 排除 /状态 "完成" [{"编号":"001","状态":"完成"},{"编号":"002","状态":"待办"}]"#,
     },
@@ -2205,6 +2210,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "合并两张 CSV 表并保留双方未匹配的行",
         query: r#"CSV: 全连接 ["编号","键"] ["编号,商品\n001,茶\n002,米","键,金额\n001,1.50\n003,2e0"]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按表头名称把多张 CSV 表纵向合并",
+        query: r#"CSV: 纵向合并 ["编号,金额\n001,1.50","金额,编号,备注\n2e0,002,\"茶,热\""]"#,
     },
     Example {
         icon: Icon::Terminal,

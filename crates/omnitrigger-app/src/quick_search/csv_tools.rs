@@ -24,7 +24,8 @@ use super::{
 };
 
 const MAX_PIVOT_BYTES: usize = 1024 * 1024;
-const MAX_JOIN_BYTES: usize = 1024 * 1024;
+const MAX_COMBINED_BYTES: usize = 1024 * 1024;
+const MAX_STACK_TABLES: usize = 16;
 const MAX_FORMULA_RECORDS: usize = 32;
 const MAX_ADDED_CELLS: usize = 16_384;
 
@@ -53,6 +54,7 @@ pub(super) enum CsvError {
     HeaderNameConflict,
     JoinArguments,
     JoinTooLarge,
+    StackArguments,
     ComputedColumnArguments,
     FormulaColumnArguments,
     FormulaColumnLimit,
@@ -101,7 +103,8 @@ impl CsvError {
             Self::NullReplacementValue => "新值不能包含空字符 U+0000",
             Self::HeaderNameConflict => "表头中已经有这个新列名",
             Self::JoinArguments => "填写两个连接列，再填写包含两张 CSV 表格的 JSON 字符串数组",
-            Self::JoinTooLarge => "连接结果超过 1 MiB，请缩小表格范围",
+            Self::JoinTooLarge => "表格合并结果超过 1 MiB，请缩小表格范围",
+            Self::StackArguments => "用 JSON 字符串数组填写 2 至 16 张含表头的 CSV 表格",
             Self::ComputedColumnArguments => {
                 "用 JSON 数组填写新列名、两列和运算，例如 [\"金额\",2,\"*\",3]"
             }
@@ -272,6 +275,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         "左连接" | "left-join" => return join_csv(input, JoinKind::Left),
         "内连接" | "inner-join" => return join_csv(input, JoinKind::Inner),
         "全连接" | "full-join" => return join_csv(input, JoinKind::Full),
+        "纵向合并" | "stack" => return stack_csv(input),
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
         "markdown" | "表格" => Operation::Markdown(None),
@@ -563,26 +567,26 @@ fn join_csv(input: &str, kind: JoinKind) -> Result<String, CsvError> {
         by_key.entry(row[right_key].as_str()).or_default().push(row);
     }
     let mut output = String::new();
-    append_joined_csv_row(
+    append_combined_csv_row(
         &mut output,
-        left_header.iter().map(String::as_str),
-        joined_csv_columns(right_header, right_key),
+        left_header
+            .iter()
+            .map(String::as_str)
+            .chain(joined_csv_columns(right_header, right_key)),
     )?;
     for left in left_rows {
         let fields = left.iter().map(String::as_str);
         if let Some(matches) = by_key.get(left[left_key].as_str()) {
             for right in matches {
-                append_joined_csv_row(
+                append_combined_csv_row(
                     &mut output,
-                    fields.clone(),
-                    joined_csv_columns(right, right_key),
+                    fields.clone().chain(joined_csv_columns(right, right_key)),
                 )?;
             }
         } else if matches!(kind, JoinKind::Left | JoinKind::Full) {
-            append_joined_csv_row(
+            append_combined_csv_row(
                 &mut output,
-                fields,
-                std::iter::repeat_n("", right_header.len() - 1),
+                fields.chain(std::iter::repeat_n("", right_header.len() - 1)),
             )?;
         }
     }
@@ -593,8 +597,56 @@ fn join_csv(input: &str, kind: JoinKind) -> Result<String, CsvError> {
             if !left_keys.contains(key) {
                 let fields =
                     (0..left_header.len()).map(|index| if index == left_key { key } else { "" });
-                append_joined_csv_row(&mut output, fields, joined_csv_columns(right, right_key))?;
+                append_combined_csv_row(
+                    &mut output,
+                    fields.chain(joined_csv_columns(right, right_key)),
+                )?;
             }
+        }
+    }
+    Ok(output)
+}
+
+fn stack_csv(input: &str) -> Result<String, CsvError> {
+    let inputs: Vec<String> = serde_json::from_str(input).map_err(|_| CsvError::StackArguments)?;
+    if !(2..=MAX_STACK_TABLES).contains(&inputs.len()) {
+        return Err(CsvError::StackArguments);
+    }
+    let tables = inputs
+        .iter()
+        .map(|table| read_rows(table.strip_prefix('\u{feff}').unwrap_or(table), ','))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut header = Vec::new();
+    let mut positions = HashMap::new();
+    let mut projections = Vec::with_capacity(tables.len());
+    for table in &tables {
+        let columns = table.first().ok_or(CsvError::MissingInput)?;
+        let mut seen = HashSet::new();
+        let mut projection = Vec::with_capacity(columns.len());
+        for name in columns {
+            let name = name.as_str();
+            if name.is_empty() || !seen.insert(name) {
+                return Err(CsvError::InvalidHeader);
+            }
+            let index = positions.entry(name).or_insert_with(|| {
+                let index = header.len();
+                header.push(name);
+                index
+            });
+            projection.push(*index);
+        }
+        projections.push(projection);
+    }
+    let mut row_fields = vec![""; header.len()];
+    let mut output = String::new();
+    append_combined_csv_row(&mut output, header.into_iter())?;
+    for (table, projection) in tables.iter().zip(projections) {
+        for row in &table[1..] {
+            row_fields.fill("");
+            for (&index, cell) in projection.iter().zip(row) {
+                row_fields[index] = cell.as_str();
+            }
+            append_combined_csv_row(&mut output, row_fields.iter().copied())?;
         }
     }
     Ok(output)
@@ -607,18 +659,13 @@ fn joined_csv_columns(row: &[String], omitted: usize) -> impl Iterator<Item = &s
         .map(|(_, field)| field.as_str())
 }
 
-fn append_joined_csv_row<'a>(
+fn append_combined_csv_row<'a>(
     output: &mut String,
-    left: impl Iterator<Item = &'a str>,
-    right: impl Iterator<Item = &'a str>,
+    fields: impl Iterator<Item = &'a str>,
 ) -> Result<(), CsvError> {
-    let line = left
-        .chain(right)
-        .map(csv_cell)
-        .collect::<Vec<_>>()
-        .join(",");
+    let line = fields.map(csv_cell).collect::<Vec<_>>().join(",");
     let separator = if output.is_empty() { "" } else { "\r\n" };
-    if output.len() + separator.len() + line.len() > MAX_JOIN_BYTES {
+    if output.len() + separator.len() + line.len() > MAX_COMBINED_BYTES {
         return Err(CsvError::JoinTooLarge);
     }
     output.push_str(separator);
@@ -1574,6 +1621,30 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query).as_deref(), Ok(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn stacks_tables_by_exact_header_and_fills_columns_missing_from_a_source() {
+        for (query, expected) in [
+            (
+                r#"纵向合并 ["编号,金额\n001,1.50","金额,编号,备注\n2e0,002,\"茶,热\"","状态,编号\n完成,003"]"#,
+                "编号,金额,备注,状态\r\n001,1.50,\"\",\"\"\r\n002,2e0,\"茶,热\",\"\"\r\n003,\"\",\"\",完成",
+            ),
+            (
+                r#"stack ["ID,字段","备注,id\n\"甲\n乙\",001"]"#,
+                "ID,字段,备注,id\r\n\"\",\"\",\"甲\n乙\",001",
+            ),
+        ] {
+            assert_eq!(transform_csv(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            transform_csv(r#"纵向合并 ["ID,ID","编号\n001"]"#),
+            Err(CsvError::InvalidHeader)
+        );
+        assert_eq!(
+            transform_csv(r#"纵向合并 ["ID\n001"]"#),
+            Err(CsvError::StackArguments)
+        );
     }
 
     #[test]
