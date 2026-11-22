@@ -325,6 +325,11 @@ enum Operation {
         groups: Vec<ColumnReference>,
         ascending: bool,
     },
+    ShareColumn {
+        name: String,
+        source: ColumnReference,
+        groups: Vec<ColumnReference>,
+    },
     DeduplicateRows,
     DeduplicateByColumns(Vec<ColumnReference>),
     DuplicatesByColumns(Vec<ColumnReference>),
@@ -789,18 +794,31 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 },
             }
         }
-        kind @ ("排名列" | "rank-column" | "升序排名列" | "ascending-rank-column") => {
+        kind @ ("排名列"
+        | "rank-column"
+        | "升序排名列"
+        | "ascending-rank-column"
+        | "占比列"
+        | "share-column") => {
             let ((name, source, groups), data) =
                 json_argument_and_data::<(String, ColumnReference, Vec<ColumnReference>)>(
                     input,
                     CsvError::GroupedColumnArguments,
                 )?;
             input = data;
-            Operation::RankColumn {
-                name,
-                source,
-                groups,
-                ascending: matches!(kind, "升序排名列" | "ascending-rank-column"),
+            if matches!(kind, "占比列" | "share-column") {
+                Operation::ShareColumn {
+                    name,
+                    source,
+                    groups,
+                }
+            } else {
+                Operation::RankColumn {
+                    name,
+                    source,
+                    groups,
+                    ascending: matches!(kind, "升序排名列" | "ascending-rank-column"),
+                }
             }
         }
         "计算列" | "compute-column" => {
@@ -1172,6 +1190,11 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             groups,
             ascending,
         } => rank_column(&rows, &name, source, &groups, ascending),
+        Operation::ShareColumn {
+            name,
+            source,
+            groups,
+        } => share_column(&rows, &name, source, &groups),
         Operation::DeduplicateRows => {
             let mut seen = HashSet::new();
             Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
@@ -2295,6 +2318,60 @@ fn rank_column(
             .next()
             .flatten()
             .map_or_else(String::new, |rank| rank.to_string()))
+    })
+}
+
+fn share_column(
+    rows: &[Vec<String>],
+    name: &str,
+    source: ColumnReference,
+    groups: &[ColumnReference],
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::GroupedColumnArguments);
+    }
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let groups = resolve_distinct_columns(header, groups, CsvError::GroupingColumns)?;
+    let mut totals: HashMap<_, BigRational> = HashMap::new();
+    let mut values = Vec::with_capacity(records.len());
+    for (index, record) in records.iter().enumerate() {
+        let cell = record[source].trim();
+        if cell.is_empty() {
+            values.push(None);
+            continue;
+        }
+        let data_error = |cause| CsvError::DataRowValue {
+            row: index + 1,
+            cause,
+        };
+        let value = parse_fraction_literal(cell).map_err(|error| data_error(error.message()))?;
+        let total = totals.entry(column_key(record, &groups)).or_default();
+        *total += &value;
+        ensure_exact_size(total).map_err(|error| data_error(error.message()))?;
+        values.push(Some(value));
+    }
+    let mut row_number = 0;
+    write_appended_column(header, records, name, |record| {
+        let value = values[row_number].as_ref();
+        row_number += 1;
+        let Some(value) = value else {
+            return Ok(String::new());
+        };
+        let total = &totals[&column_key(record, &groups)];
+        if total.numer().sign() == Sign::NoSign {
+            return Err(CsvError::DataRowValue {
+                row: row_number,
+                cause: "同组数值合计为零",
+            });
+        }
+        let share = value / total;
+        ensure_exact_size(&share).map_err(|error| CsvError::DataRowValue {
+            row: row_number,
+            cause: error.message(),
+        })?;
+        Ok(share.to_string())
     })
 }
 
@@ -4758,6 +4835,24 @@ mod tests {
             transform_csv("clock-difference-column [\"时长\",1,2]\n开始,结束\n09:00,24:00"),
             Err(CsvError::DataRowValue { row: 1, .. })
         ));
+    }
+
+    #[test]
+    fn appends_exact_shares_of_each_group_and_reports_zero_totals() {
+        let query =
+            "占比列 [\"占比\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,2/3\n南,6\n北,";
+        assert_eq!(transform_csv(query).as_deref(), Ok("部门,金额,占比\r\n北,1/3,1/3\r\n南,2,1/4\r\n北,2/3,2/3\r\n南,6,3/4\r\n北,\"\",\"\""));
+        assert_eq!(
+            transform_csv("share-column [\"占比\",1,[]]\n金额\n1\n-1"),
+            Err(CsvError::DataRowValue {
+                row: 1,
+                cause: "同组数值合计为零"
+            })
+        );
+        assert_eq!(
+            transform_csv("占比列 [\"占比\",1,[]]\n金额\n\"\"").as_deref(),
+            Ok("金额,占比\r\n\"\",\"\"")
+        );
     }
 
     #[test]
