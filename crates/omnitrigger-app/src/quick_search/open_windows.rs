@@ -1,6 +1,15 @@
 use omnitrigger_windows::{list_open_windows, OpenWindow};
+use serde::Serialize;
 
 use super::{examples::search_key, title_rank, Destination, Results};
+
+const MAX_WINDOW_JSON_BYTES: usize = 1024 * 1024;
+
+#[derive(Serialize)]
+struct WindowSummary<'a> {
+    title: &'a str,
+    process: Option<&'a str>,
+}
 
 pub(super) struct SearchWindow {
     window: OpenWindow,
@@ -55,7 +64,16 @@ impl OpenWindowsIndex {
             Self::Ready(windows) | Self::Refreshing(windows) => windows,
         };
         let query = search_key(query);
-        let Some((process, query)) = window_query(&query) else {
+        let (format, rest) = query
+            .split_once(char::is_whitespace)
+            .unwrap_or((&query, ""));
+        let export_json = matches!(format, "输出=json" | "output=json");
+        let filter = if export_json {
+            rest.trim_start()
+        } else {
+            &query
+        };
+        let Some((process, query)) = window_query(filter) else {
             return Results::OpenWindowsUnavailable(
                 "填写程序文件名，例如 进程=notepad.exe。文件名含空格时用双引号包住。".into(),
             );
@@ -76,6 +94,20 @@ impl OpenWindowsIndex {
             .collect();
         if !terms.is_empty() {
             matches.sort_by_key(|(rank, _)| *rank);
+        }
+        if export_json {
+            let windows: Vec<_> = matches
+                .into_iter()
+                .map(|(_, window)| WindowSummary {
+                    title: &window.window.title,
+                    process: window.window.process.as_deref(),
+                })
+                .collect();
+            return match serde_json::to_string_pretty(&windows) {
+                Ok(json) if json.len() <= MAX_WINDOW_JSON_BYTES => Results::text_value(Ok(json)),
+                Ok(_) => Results::OpenWindowsUnavailable("窗口列表超过 1 MiB".into()),
+                Err(error) => Results::OpenWindowsUnavailable(format!("生成窗口列表失败：{error}")),
+            };
         }
         Results::Destinations(
             matches
@@ -121,6 +153,29 @@ fn window_rank(title: &str, process: &str, query: &str, terms: &[&str]) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exports_empty_windows_as_json_and_retains_selector_errors() {
+        let index = OpenWindowsIndex::Ready(Vec::new());
+        for query in [
+            "输出=JSON",
+            "输出＝ＪＳＯＮ　进程=notepad.exe 报告",
+            "output=json process=\"example tool.exe\" Budget",
+        ] {
+            assert!(matches!(
+                index.results(query),
+                Results::Value(Ok(value)) if value.text == "[]"
+            ));
+        }
+        assert!(matches!(
+            index.results("output=json process="),
+            Results::OpenWindowsUnavailable(_)
+        ));
+        assert!(matches!(
+            index.results("output=json助理"),
+            Results::Destinations(items) if items.is_empty()
+        ));
+    }
 
     #[test]
     fn recognizes_exact_process_filters_and_separates_remaining_title_terms() {

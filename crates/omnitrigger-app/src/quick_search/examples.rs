@@ -571,6 +571,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Grid,
+        title: "把指定程序的窗口列表导出为 JSON",
+        query: "窗口: 输出=JSON 进程=notepad.exe",
+    },
+    Example {
+        icon: Icon::Grid,
         title: "打开 Windows 的蓝牙设置",
         query: "系统设置: 蓝牙",
     },
