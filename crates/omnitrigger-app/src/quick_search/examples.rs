@@ -2723,6 +2723,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按每行的整月数推算新的日期",
+        query: "CSV: 日期加月列 [\"到期日期\",\"日期\",\"月数\"]\n日期,月数\n2024-01-31,1\n2024-03-31,-1\n2023-01-31,1\n2024-02-29,12",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 CSV 中的日期按指定格式追加为一列",
         query: "CSV: 日期格式列 [\"年月\",\"日期\",\"%Y年%m月\"]\n日期,编号\n2024-02-29,甲\n2024-W09-5,乙\n2024年1月31日,丙",
     },

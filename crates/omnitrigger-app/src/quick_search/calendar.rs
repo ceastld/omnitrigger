@@ -1192,6 +1192,14 @@ fn apply_date_offset(
     if !is_months {
         return shift_calendar_days(date, amount, subtract);
     }
+    shift_calendar_months(date, amount, subtract)
+}
+
+pub(super) fn shift_calendar_months(
+    date: NaiveDate,
+    amount: u64,
+    subtract: bool,
+) -> Result<NaiveDate, DateError> {
     let months = u32::try_from(amount)
         .map(Months::new)
         .map_err(|_| DateError::OutOfRange)?;
