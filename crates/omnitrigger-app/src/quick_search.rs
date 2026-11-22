@@ -168,6 +168,7 @@ enum Results {
     FileOptions(Vec<InputSuggestion>),
     Bookmarks(Vec<InputSuggestion>),
     BookmarksUnavailable(String),
+    BookmarkNameInput(Option<String>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1201,6 +1202,13 @@ enum ApplicationRefresh {
     Finished,
 }
 
+const SEARCH_PLACEHOLDER: &str = "搜索页面、触发器，或输入算式";
+
+struct BookmarkNameEdit {
+    expression: String,
+    filter: String,
+}
+
 pub(super) struct QuickSearch {
     theme_mode: appearance::Mode,
     input: Entity<MessageInput>,
@@ -1215,6 +1223,7 @@ pub(super) struct QuickSearch {
     previous_input: String,
     bookmark_limit_reached: bool,
     bookmark_save_error: Option<String>,
+    bookmark_name_edit: Option<BookmarkNameEdit>,
     _input_changes: Subscription,
     _activation: Subscription,
 }
@@ -1266,10 +1275,15 @@ impl QuickSearch {
                 .embedded()
                 .with_preserved_whitespace()
                 .with_character_limit(INPUT_CHARACTER_LIMIT + 1);
-            input.set_placeholder("搜索页面、触发器，或输入算式");
+            input.set_placeholder(SEARCH_PLACEHOLDER);
             input
         });
         let input_changes = cx.observe_in(&input, window, |this, input, window, cx| {
+            if this.bookmark_name_edit.is_some() {
+                this.results = Results::BookmarkNameInput(None);
+                cx.notify();
+                return;
+            }
             let query = input.read(cx).text();
             this.bookmark_limit_reached = false;
             this.bookmark_save_error = None;
@@ -1315,6 +1329,7 @@ impl QuickSearch {
             previous_input,
             bookmark_limit_reached: false,
             bookmark_save_error: None,
+            bookmark_name_edit: None,
             _input_changes: input_changes,
             _activation: activation,
         }
@@ -1353,6 +1368,9 @@ impl QuickSearch {
     }
 
     fn refresh_results(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bookmark_name_edit.is_some() {
+            return;
+        }
         let next = self.index.results(query);
         if !query.trim_start().starts_with(['?', '？']) && !matches!(&next, Results::FileOptions(_))
         {
@@ -1721,12 +1739,60 @@ impl QuickSearch {
         cx.notify();
     }
 
+    fn start_bookmark_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Results::Bookmarks(items) = &self.results else {
+            return;
+        };
+        let Some(item) = items.get(self.selected) else {
+            return;
+        };
+        let name = item.result.clone();
+        self.bookmark_name_edit = Some(BookmarkNameEdit {
+            expression: item.expression.clone(),
+            filter: self.input.read(cx).text(),
+        });
+        self.results = Results::BookmarkNameInput(None);
+        self.input
+            .update(cx, |input, _| input.set_placeholder("输入收藏名"));
+        self.fill_query(name, window, cx);
+        window.resize(size(px(WIDTH), px(self.results.height(MAX_VALUE_LINES))));
+        cx.notify();
+    }
+
+    fn finish_bookmark_name(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = self.bookmark_name_edit.take() else {
+            return;
+        };
+        if save {
+            let name = self.input.read(cx).text();
+            if let Err(error) = self.index.recent.bookmarks.rename(&edit.expression, &name) {
+                self.bookmark_name_edit = Some(edit);
+                self.results = Results::BookmarkNameInput(Some(error));
+                cx.notify();
+                return;
+            }
+        }
+        self.input
+            .update(cx, |input, _| input.set_placeholder(SEARCH_PLACEHOLDER));
+        self.fill_query(edit.filter.clone(), window, cx);
+        self.refresh_results(&edit.filter, window, cx);
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.input.read(cx).is_composing() {
             return;
         }
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers.number_of_modifiers();
+        if self.bookmark_name_edit.is_some() {
+            if modifiers == 0 && matches!(keystroke.key.as_str(), "enter" | "escape") {
+                if !event.is_held {
+                    self.finish_bookmark_name(keystroke.key == "enter", window, cx);
+                }
+                cx.stop_propagation();
+            }
+            return;
+        }
         if modifiers != 0 {
             if modifiers == 2
                 && keystroke.modifiers.control
@@ -1831,6 +1897,11 @@ impl QuickSearch {
                     }
                 }
             }
+            "f2" if matches!(&self.results, Results::Bookmarks(items) if !items.is_empty()) => {
+                if !event.is_held {
+                    self.start_bookmark_name(window, cx);
+                }
+            }
             "f2" if self.results.value_preview_expandable() => {
                 if !event.is_held {
                     self.toggle_value_preview(window, cx);
@@ -1856,7 +1927,11 @@ impl QuickSearch {
                     self.confirm(window, cx);
                 }
             }
-            "escape" => window.remove_window(),
+            "escape" => {
+                if !event.is_held {
+                    window.remove_window();
+                }
+            }
             key @ ("pageup" | "pagedown") => {
                 let page = if key == "pageup" {
                     PageChange::Previous
@@ -1918,7 +1993,8 @@ impl QuickSearch {
                     | Results::DirectoryInput(_)
                     | Results::LocalFilesLoading
                     | Results::LocalFilesUnavailable(_)
-                    | Results::BookmarksUnavailable(_) => 0,
+                    | Results::BookmarksUnavailable(_)
+                    | Results::BookmarkNameInput(_) => 0,
                 };
                 if count == 0 {
                     return;
@@ -2110,6 +2186,7 @@ impl QuickSearch {
     ) -> Div {
         let start = self.selected / page_size * page_size;
         let visible = items.iter().enumerate().skip(start).take(page_size);
+        let bookmarks = matches!(self.results, Results::Bookmarks(_));
         div()
             .flex()
             .flex_col()
@@ -2117,9 +2194,11 @@ impl QuickSearch {
                 let expression = item.expression.clone();
                 let (label, detail) = match item.label {
                     Some(label) => (label.into(), Some(item.result.clone())),
-                    None if matches!(self.results, Results::Bookmarks(_)) => {
-                        (input_preview(expression.clone()), None)
-                    }
+                    None if bookmarks && !item.result.is_empty() => (
+                        item.result.clone().into(),
+                        Some(input_preview(expression.clone()).to_string()),
+                    ),
+                    None if bookmarks => (input_preview(expression.clone()), None),
                     None => (
                         expression.clone().into(),
                         Some(format!("= {}", item.result)),
@@ -2146,7 +2225,15 @@ impl QuickSearch {
                         )
                     })
                     .when(index == self.selected, |row| {
-                        row.child(div().text_color(rgb(theme::TEXT_MUTED)).child("Tab 填入"))
+                        row.child(
+                            div()
+                                .text_color(rgb(theme::TEXT_MUTED))
+                                .child(if bookmarks {
+                                    "F2 命名 · Tab 填入"
+                                } else {
+                                    "Tab 填入"
+                                }),
+                        )
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.fill_query(expression.clone(), window, cx);
@@ -2343,6 +2430,12 @@ impl QuickSearch {
             Results::Bookmarks(items) => {
                 self.render_input_suggestions(items, Icon::Layers, EXAMPLE_PAGE_SIZE, cx)
             }
+            Results::BookmarkNameInput(Some(error)) => {
+                row.text_color(rgb(theme::DANGER_TEXT)).child(error.clone())
+            }
+            Results::BookmarkNameInput(None) => row
+                .text_color(rgb(theme::TEXT_MUTED))
+                .child("Enter 保存 · 留空可移除名称"),
             Results::ApplicationsLoading => row
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child("正在读取 Windows 应用"),
@@ -2576,7 +2669,10 @@ impl Render for QuickSearch {
         theme::apply(self.theme_mode, window.appearance());
         let focused = self.input.focus_handle(cx).is_focused(window);
         let query = self.input.read(cx).text();
-        let bookmark_action = if query.trim().is_empty() {
+        let naming_bookmark = self.bookmark_name_edit.is_some();
+        let bookmark_action = if naming_bookmark {
+            None
+        } else if query.trim().is_empty() {
             Some(("查看收藏", "Ctrl+D 查看收藏".to_owned()))
         } else {
             self.bookmark_target(&query).map(|target| {
@@ -2614,7 +2710,15 @@ impl Render for QuickSearch {
                     .flex()
                     .justify_between()
                     .items_center()
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("快速搜索"))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(if naming_bookmark {
+                                "命名收藏"
+                            } else {
+                                "快速搜索"
+                            }),
+                    )
                     .child(div().flex_1())
                     .when_some(bookmark_action, |header, (label, hint)| {
                         header.child(
@@ -2636,8 +2740,18 @@ impl Render for QuickSearch {
                             .cursor_pointer()
                             .text_color(rgb(theme::TEXT_MUTED))
                             .hover(|style| style.bg(rgb(theme::ROW)))
-                            .on_click(|_, window, _| window.remove_window())
-                            .child("Esc 关闭"),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if this.bookmark_name_edit.is_some() {
+                                    this.finish_bookmark_name(false, window, cx);
+                                } else {
+                                    window.remove_window();
+                                }
+                            }))
+                            .child(if naming_bookmark {
+                                "Esc 返回"
+                            } else {
+                                "Esc 关闭"
+                            }),
                     ),
             )
             .child(
@@ -3531,6 +3645,24 @@ mod tests {
                             search.key_down(&bookmark, window, cx);
                             let menu = search.input.read(cx).text();
                             search.refresh_results(&menu, window, cx);
+                            let key = |name| KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse(name).unwrap(),
+                                is_held: false,
+                            };
+                            search.key_down(&key("f2"), window, cx);
+                            let name_entry = matches!(search.results, Results::BookmarkNameInput(None));
+                            search.fill_query("这个名字将取消", window, cx);
+                            search.key_down(&key("escape"), window, cx);
+                            let canceled = search.input.read(cx).text() == menu
+                                && search.index.recent.bookmarks.matching("这个名字将取消").is_empty();
+                            search.key_down(&key("f2"), window, cx);
+                            search.fill_query("每周预算", window, cx);
+                            search.key_down(&key("enter"), window, cx);
+                            let saved_to_list = search.input.read(cx).text() == menu;
+                            search.fill_query("收藏: 每周", window, cx);
+                            search.refresh_results("收藏: 每周", window, cx);
+                            let named = saved_to_list && matches!(&search.results, Results::Bookmarks(items)
+                                if items.len() == 1 && items[0].result == "每周预算");
                             search.key_down(
                                 &KeyDownEvent {
                                     keystroke: gpui::Keystroke::parse("tab").unwrap(),
@@ -3544,7 +3676,7 @@ mod tests {
                             search.refresh_results("收藏: 3**4", window, cx);
                             search.key_down(&bookmark, window, cx);
                             let removed = matches!(&search.results, Results::Bookmarks(items) if items.is_empty());
-                            (menu, restored, removed)
+                            (menu, restored, removed, name_entry, canceled, named)
                         })
                         .unwrap();
                     send.send((
@@ -3572,7 +3704,7 @@ mod tests {
             file_navigation,
             file_help,
             (help_input, all_json_examples, restored_input),
-            (bookmark_menu, bookmark_restored, bookmark_removed),
+            (bookmark_menu, bookmark_restored, bookmark_removed, name_entry, canceled, named),
         ) = receive.recv().unwrap();
         assert_eq!(help_input, "? JSON:");
         assert!(all_json_examples);
@@ -3581,6 +3713,9 @@ mod tests {
         assert_eq!(bookmark_menu, "收藏: ");
         assert_eq!(bookmark_restored, "3**4");
         assert!(bookmark_removed);
+        assert!(name_entry);
+        assert!(canceled);
+        assert!(named);
         assert_eq!(window_refresh, (true, true, true));
         assert_eq!(app_refresh, (true, true, true, true));
         assert_eq!(

@@ -6,6 +6,8 @@ use std::{
     rc::Rc,
 };
 
+use serde::{Deserialize, Serialize};
+
 use super::{
     examples::{matching_examples, search_key},
     Destination, InputSuggestion, SearchTrigger, DESTINATION_PAGE_SIZE, INPUT_CHARACTER_LIMIT,
@@ -15,8 +17,10 @@ use crate::Page;
 
 const EXAMPLE_HISTORY_LIMIT: usize = 12;
 const BOOKMARK_LIMIT: usize = 12;
+const BOOKMARK_NAME_LIMIT: usize = 80;
 const BOOKMARK_FILE: &str = "quick-search-bookmarks.json";
-const BOOKMARK_FILE_LIMIT: u64 = (BOOKMARK_LIMIT * (INPUT_CHARACTER_LIMIT * 6 + 4) + 8) as u64;
+const BOOKMARK_FILE_LIMIT: u64 =
+    (BOOKMARK_LIMIT * ((INPUT_CHARACTER_LIMIT + BOOKMARK_NAME_LIMIT) * 6 + 32) + 8) as u64;
 
 #[derive(Clone, Default)]
 pub(super) struct QueryBookmarks(Rc<RefCell<BookmarkStore>>);
@@ -24,8 +28,37 @@ pub(super) struct QueryBookmarks(Rc<RefCell<BookmarkStore>>);
 #[derive(Default)]
 struct BookmarkStore {
     path: Option<PathBuf>,
-    items: Vec<String>,
+    items: Vec<Bookmark>,
     load_error: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(untagged)]
+enum Bookmark {
+    Unnamed(String),
+    Named { query: String, name: String },
+}
+
+impl Bookmark {
+    fn query(&self) -> &str {
+        match self {
+            Self::Unnamed(query) | Self::Named { query, .. } => query,
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            Self::Unnamed(_) => "",
+            Self::Named { name, .. } => name,
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum BookmarkChange {
+    Changed,
+    Unchanged,
+    Full,
 }
 
 impl QueryBookmarks {
@@ -47,29 +80,66 @@ impl QueryBookmarks {
     }
 
     pub(super) fn contains(&self, query: &str) -> bool {
-        self.0.borrow().items.iter().any(|item| item == query)
+        self.0
+            .borrow()
+            .items
+            .iter()
+            .any(|item| item.query() == query)
     }
 
     pub(super) fn toggle(&self, query: &str) -> Result<bool, String> {
+        let add = !self.contains(query);
+        self.update(|items| Ok(toggle_bookmark_item(items, query, add)))
+            .map(|outcome| outcome != BookmarkChange::Full)
+    }
+
+    pub(super) fn rename(&self, query: &str, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if !valid_bookmark_name(name) {
+            return Err("收藏名最多 80 个字符，请填写一行文字".into());
+        }
+        self.update(|items| {
+            let item = items
+                .iter_mut()
+                .find(|item| item.query() == query)
+                .ok_or_else(|| "这条查询已从收藏中移除".to_owned())?;
+            if item.name() == name {
+                return Ok(BookmarkChange::Unchanged);
+            }
+            *item = if name.is_empty() {
+                Bookmark::Unnamed(query.to_owned())
+            } else {
+                Bookmark::Named {
+                    query: query.to_owned(),
+                    name: name.to_owned(),
+                }
+            };
+            Ok(BookmarkChange::Changed)
+        })
+        .map(|_| ())
+    }
+
+    fn update(
+        &self,
+        edit: impl FnOnce(&mut Vec<Bookmark>) -> Result<BookmarkChange, String>,
+    ) -> Result<BookmarkChange, String> {
         let mut store = self.0.borrow_mut();
-        let add = !store.items.iter().any(|item| item == query);
         let Some(path) = &store.path else {
-            return Ok(edit_bookmark_items(&mut store.items, query, add));
+            return edit(&mut store.items);
         };
         check_bookmark_path(path)?;
         check_bookmark_path(&crate::settings::config_lock_path(path)?)?;
         let _lock = crate::settings::lock_config(path, "搜索收藏")?;
         let mut items = read_bookmark_file(path)?;
-        let changed = items.iter().any(|item| item == query) != add;
-        let accepted = edit_bookmark_items(&mut items, query, add);
-        if accepted && changed {
+        let outcome = edit(&mut items)?;
+        if outcome == BookmarkChange::Changed {
             let bytes =
                 serde_json::to_vec(&items).map_err(|error| format!("生成搜索收藏失败：{error}"))?;
             crate::settings::atomic_write(path, &bytes)?;
         }
         store.items = items;
         store.load_error = None;
-        Ok(accepted)
+        Ok(outcome)
     }
 
     pub(super) fn matching(&self, filter: &str) -> Vec<InputSuggestion> {
@@ -78,29 +148,43 @@ impl QueryBookmarks {
             .borrow()
             .items
             .iter()
-            .filter(|query| {
-                let key = search_key(query);
-                filter.split_whitespace().all(|term| key.contains(term))
+            .filter(|item| {
+                let query = search_key(item.query());
+                let name = search_key(item.name());
+                filter
+                    .split_whitespace()
+                    .all(|term| query.contains(term) || name.contains(term))
             })
-            .map(|query| InputSuggestion {
-                expression: query.clone(),
+            .map(|item| InputSuggestion {
+                expression: item.query().to_owned(),
                 label: None,
-                result: String::new(),
+                result: item.name().to_owned(),
             })
             .collect()
     }
 }
 
-fn edit_bookmark_items(items: &mut Vec<String>, query: &str, add: bool) -> bool {
-    match (add, items.iter().position(|item| item == query)) {
-        (true, None) if items.len() == BOOKMARK_LIMIT => return false,
-        (true, None) => items.insert(0, query.to_owned()),
+fn toggle_bookmark_item(items: &mut Vec<Bookmark>, query: &str, add: bool) -> BookmarkChange {
+    match (add, items.iter().position(|item| item.query() == query)) {
+        (true, None) if items.len() == BOOKMARK_LIMIT => BookmarkChange::Full,
+        (true, None) => {
+            items.insert(0, Bookmark::Unnamed(query.to_owned()));
+            BookmarkChange::Changed
+        }
         (false, Some(index)) => {
             items.remove(index);
+            BookmarkChange::Changed
         }
-        _ => {}
+        _ => BookmarkChange::Unchanged,
     }
-    true
+}
+
+fn valid_bookmark_name(name: &str) -> bool {
+    name.trim() == name
+        && name.chars().count() <= BOOKMARK_NAME_LIMIT
+        && !name
+            .chars()
+            .any(|character| character.is_control() || matches!(character, '\u{2028}' | '\u{2029}'))
 }
 
 fn check_bookmark_path(path: &Path) -> Result<(), String> {
@@ -124,7 +208,7 @@ fn check_bookmark_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn read_bookmark_file(path: &Path) -> Result<Vec<String>, String> {
+fn read_bookmark_file(path: &Path) -> Result<Vec<Bookmark>, String> {
     check_bookmark_path(path)?;
     let file = match File::open(path) {
         Ok(file) => file,
@@ -138,13 +222,15 @@ fn read_bookmark_file(path: &Path) -> Result<Vec<String>, String> {
     if bytes.len() as u64 > BOOKMARK_FILE_LIMIT {
         return Err("搜索收藏文件超过大小上限".into());
     }
-    let items: Vec<String> = crate::local_files::parse_config_json_bytes(&bytes)
+    let items: Vec<Bookmark> = crate::local_files::parse_config_json_bytes(&bytes)
         .map_err(|error| format!("搜索收藏格式无效：{error}"))?;
     if items.len() > BOOKMARK_LIMIT
-        || items.iter().enumerate().any(|(index, query)| {
+        || items.iter().enumerate().any(|(index, item)| {
+            let query = item.query();
             query.trim().is_empty()
                 || query.chars().take(INPUT_CHARACTER_LIMIT + 1).count() > INPUT_CHARACTER_LIMIT
-                || items[..index].contains(query)
+                || !valid_bookmark_name(item.name())
+                || items[..index].iter().any(|other| other.query() == query)
         })
     {
         return Err("搜索收藏包含超出上限或重复的查询".into());
@@ -274,6 +360,34 @@ mod tests {
         let reopened = QueryBookmarks::from_bindings_path(&bindings);
         assert!(!reopened.contains(multiline));
         assert!(reopened.contains("2**10"));
+    }
+
+    #[test]
+    fn names_old_bookmarks_and_merges_with_a_later_addition() {
+        let root = tempfile::tempdir().unwrap();
+        let bindings = root.path().join("bindings.json");
+        std::fs::write(bindings.with_file_name(BOOKMARK_FILE), br#"["2**10"]"#).unwrap();
+        let original = QueryBookmarks::from_bindings_path(&bindings);
+        let other = QueryBookmarks::from_bindings_path(&bindings);
+        assert_eq!(original.matching("")[0].expression, "2**10");
+        assert!(other.toggle("3**4").unwrap());
+        assert!(original.rename("2**10", "  每周汇总  ").is_ok());
+        assert!(original.rename("2**10", "两\n行").is_err());
+        assert!(original
+            .rename("2**10", &"长".repeat(BOOKMARK_NAME_LIMIT + 1))
+            .is_err());
+        let reopened = QueryBookmarks::from_bindings_path(&bindings);
+        let matches = reopened.matching("每周 ２＊＊１０");
+        assert_eq!(matches[0].expression, "2**10");
+        assert_eq!(matches[0].result, "每周汇总");
+        assert!(reopened.contains("3**4"));
+        assert!(other.toggle("2**10").unwrap());
+        assert!(reopened.rename("2**10", "已移除").is_err());
+        assert!(reopened.rename("3**4", " 留着 ").is_ok());
+        assert!(reopened.rename("3**4", "").is_ok());
+        let final_store = QueryBookmarks::from_bindings_path(&bindings);
+        assert_eq!(final_store.matching("")[0].expression, "3**4");
+        assert!(final_store.matching("")[0].result.is_empty());
     }
 
     #[test]
