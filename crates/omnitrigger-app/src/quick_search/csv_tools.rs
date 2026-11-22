@@ -187,7 +187,10 @@ enum Operation {
     TrimColumns(Vec<ColumnReference>),
     FillDown(Vec<ColumnReference>),
     CountEmptyCells(Vec<ColumnReference>),
-    SelectRows(String),
+    SelectRows {
+        ranges: String,
+        keep_selected: bool,
+    },
     RenameColumn([String; 2]),
     ReplaceValue {
         column: ColumnReference,
@@ -353,10 +356,13 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         "转tsv" | "tsv" => Operation::ToTsv,
         "从tsv" | "from-tsv" => Operation::FromTsv,
         "去重" | "deduplicate" => Operation::DeduplicateRows,
-        "取行" | "pick-rows" => {
+        operation @ ("取行" | "pick-rows" | "删行" | "drop-rows") => {
             let (ranges, data) = split_argument(input).ok_or(CsvError::MissingInput)?;
             input = data;
-            Operation::SelectRows(ranges.to_owned())
+            Operation::SelectRows {
+                ranges: ranges.to_owned(),
+                keep_selected: matches!(operation, "取行" | "pick-rows"),
+            }
         }
         "选列" | "pick-columns" => {
             let (columns, data) = column_arguments(input)?;
@@ -663,7 +669,10 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::TrimColumns(columns) => trim_column_values(rows, &columns),
         Operation::FillDown(columns) => fill_down_csv(&rows, &columns),
         Operation::CountEmptyCells(columns) => count_empty_cells(&rows, &columns),
-        Operation::SelectRows(ranges) => select_data_rows(&rows, &ranges),
+        Operation::SelectRows {
+            ranges,
+            keep_selected,
+        } => select_data_rows(&rows, &ranges, keep_selected),
         Operation::RenameColumn(names) => rename_column(rows, names),
         Operation::ReplaceValue {
             column,
@@ -1032,7 +1041,11 @@ fn column_number(input: &str) -> Result<usize, CsvError> {
         .ok_or(CsvError::InvalidColumns)
 }
 
-fn select_data_rows(rows: &[Vec<String>], ranges: &str) -> Result<String, CsvError> {
+fn select_data_rows(
+    rows: &[Vec<String>],
+    ranges: &str,
+    keep_selected: bool,
+) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     let selected = select_index_ranges(ranges, records.len()).map_err(|error| match error {
         IndexRangeError::Invalid => CsvError::InvalidRowRange,
@@ -1041,7 +1054,7 @@ fn select_data_rows(rows: &[Vec<String>], ranges: &str) -> Result<String, CsvErr
     let picked = records
         .iter()
         .zip(selected)
-        .filter_map(|(row, selected)| selected.then_some(row));
+        .filter_map(|(row, selected)| (selected == keep_selected).then_some(row));
     Ok(write_rows(std::iter::once(header).chain(picked), ','))
 }
 
@@ -2596,11 +2609,21 @@ mod tests {
             transform_csv(&format!("取行 4,2-3,2\r\n{data}")).as_deref(),
             Ok("编号,备注\r\n002,\"梨\r\n苹果\"\r\n003,咖啡\r\n004,柿子")
         );
+        assert_eq!(
+            transform_csv("删行 1,3-4,4 编号,备注\n001,茶\n002,\"冷\n饮\"\n003,梨\n004,茶")
+                .as_deref(),
+            Ok("编号,备注\r\n002,\"冷\n饮\"")
+        );
+        assert_eq!(
+            transform_csv("drop-rows 1-2 编号,备注\n001,茶\n002,梨").as_deref(),
+            Ok("编号,备注")
+        );
         for (query, error) in [
             ("pick-rows 0 编号,备注\n001,茶", CsvError::InvalidRowRange),
             ("pick-rows 3-2 编号,备注\n001,茶", CsvError::InvalidRowRange),
             ("pick-rows 2 编号,备注\n001,茶", CsvError::MissingDataRow),
             ("pick-rows 1 编号,备注", CsvError::MissingDataRow),
+            ("drop-rows 2 编号,备注\n001,茶", CsvError::MissingDataRow),
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }

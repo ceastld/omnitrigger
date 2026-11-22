@@ -142,7 +142,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "逐行去前缀" | "strip-line-prefix" => return strip_line_decoration(text, true),
         "逐行去后缀" | "strip-line-suffix" => return strip_line_decoration(text, false),
         "取列" | "column" => return select_text_column(text),
-        "取行" | "pick-lines" => return select_text_line_ranges(text),
+        "取行" | "pick-lines" => return select_text_line_ranges(text, true),
+        "删行" | "drop-lines" => return select_text_line_ranges(text, false),
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
         "共有行" | "行交集" | "intersect-lines" => {
@@ -886,7 +887,7 @@ fn select_text_column(input: &str) -> Result<String, TextError> {
     Ok(values.join("\n"))
 }
 
-fn select_text_line_ranges(input: &str) -> Result<String, TextError> {
+fn select_text_line_ranges(input: &str, keep_selected: bool) -> Result<String, TextError> {
     let (ranges, text) = input
         .split_once(char::is_whitespace)
         .ok_or(TextError::IncompleteTextArgument)?;
@@ -899,7 +900,7 @@ fn select_text_line_ranges(input: &str) -> Result<String, TextError> {
     Ok(lines
         .into_iter()
         .zip(selected)
-        .filter_map(|(line, selected)| selected.then_some(line))
+        .filter_map(|(line, selected)| (selected == keep_selected).then_some(line))
         .collect::<Vec<_>>()
         .join("\n"))
 }
@@ -1383,12 +1384,18 @@ mod tests {
             Ok(" 二 \n\n四\n五")
         );
         assert_eq!(transform_text("pick-lines 1 A\n").as_deref(), Ok("A"));
+        assert_eq!(
+            transform_text("删行 2,4-5,4 \" A\r\n标题\r\n\r\n四\r\n五\r\n末行 \"").as_deref(),
+            Ok(" A\n\n末行 ")
+        );
+        assert_eq!(transform_text("drop-lines 1-2 A\r\nB").as_deref(), Ok(""));
         for (query, error) in [
             ("取行 0 A", TextError::InvalidLineRange),
             ("取行 2-1 A\nB", TextError::InvalidLineRange),
             ("取行 1, A", TextError::InvalidLineRange),
             ("取行 2 A\n", TextError::MissingLine),
             ("取行 1-9 A\nB", TextError::MissingLine),
+            ("删行 2 A", TextError::MissingLine),
         ] {
             assert_eq!(transform_text(query), Err(error), "{query}");
         }

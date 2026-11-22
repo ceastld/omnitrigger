@@ -1797,6 +1797,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按行号删除指定文本行",
+        query: "文本: 删行 1,3-4 标题\n苹果\n草稿\n注释\n梨",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "给每行加前缀",
         query: "文本: 逐行加前缀 \"- \" 苹果\n梨",
     },
@@ -2202,6 +2207,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "找出多个路径值组合重复的全部 JSON 项",
+        query: r#"JSON: 多路径查重复 ["/地区","/月份"] [{"地区":"北","月份":1.00,"编号":"001"},{"地区":"南","月份":1},{"地区":"北","月份":1e0,"编号":"002"}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按文件名的自然顺序排列 JSON 数组",
         query: r#"JSON: 文本排序 /文件名 [{"文件名":"文件10"},{"文件名":"文件2"},{"文件名":"文件1"}]"#,
     },
@@ -2279,6 +2289,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "按行号和区间取 CSV 数据行",
         query: "CSV: 取行 2,4 编号,备注\n001,茶\n002,梨\n003,苹果\n004,柿子",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按行号删除指定 CSV 数据行",
+        query: "CSV: 删行 2,4 编号,备注\n001,茶\n002,梨\n003,苹果\n004,柿子",
     },
     Example {
         icon: Icon::Terminal,

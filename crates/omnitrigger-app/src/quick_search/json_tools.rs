@@ -161,7 +161,10 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "多条件筛选" | "filter-all" => return filter_json_conditions(source, true),
         "任一条件筛选" | "filter-any" => return filter_json_conditions(source, false),
         "按值去重" | "unique-by-pointer" => return deduplicate_json_by_scalar(source),
-        "多路径去重" | "unique-by-pointers" => return deduplicate_json_by_pointers(source),
+        "多路径去重" | "unique-by-pointers" => return match_json_by_pointers(source, false),
+        "多路径查重复" | "duplicates-by-pointers" => {
+            return match_json_by_pointers(source, true)
+        }
         "分组计数" | "group-count" => return count_json_by_scalar(source),
         "分组明细" | "group-records" => return group_json_records(source),
         "分组统计" | "group-statistics" => return summarize_json_groups(source),
@@ -781,7 +784,7 @@ fn deduplicate_json_by_scalar(query: &str) -> Result<String, JsonError> {
     })
 }
 
-fn deduplicate_json_by_pointers(query: &str) -> Result<String, JsonError> {
+fn match_json_by_pointers(query: &str, duplicates_only: bool) -> Result<String, JsonError> {
     let (input, source) = json_value_and_source(query, JsonError::UniquePaths)?;
     let pointers =
         serde_json::from_str::<Vec<String>>(input.get()).map_err(|_| JsonError::UniquePaths)?;
@@ -798,17 +801,35 @@ fn deduplicate_json_by_pointers(query: &str) -> Result<String, JsonError> {
             pointer_keys(pointer)?.collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut seen = HashSet::new();
-    retain_json_items(read_json_array(source)?, |item| {
-        let key = paths
+    let key_for = |item: &RawValue| {
+        paths
             .iter()
             .map(|path| {
                 let value = select_pointer_keys(item, path)?;
                 json_scalar(value)?.ok_or(JsonError::ExpectedScalar)
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(seen.insert(key))
-    })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let items = read_json_array(source)?;
+    if !duplicates_only {
+        let mut seen = HashSet::new();
+        return retain_json_items(items, |item| Ok(seen.insert(key_for(item)?)));
+    }
+    let keys = items
+        .iter()
+        .map(|item| key_for(item))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut first_occurrences = HashSet::new();
+    let repeated: HashSet<_> = keys
+        .iter()
+        .filter(|key| !first_occurrences.insert(*key))
+        .collect();
+    let retained: Vec<_> = items
+        .into_iter()
+        .zip(&keys)
+        .filter_map(|(item, key)| repeated.contains(&key).then_some(item))
+        .collect();
+    Ok(serde_json::to_string(&retained).expect("有效的原始 JSON 值可以直接序列化"))
 }
 
 fn count_json_by_scalar(query: &str) -> Result<String, JsonError> {
@@ -2322,6 +2343,30 @@ mod tests {
         ] {
             assert_eq!(transform_json(input), Err(error), "{input}");
         }
+    }
+
+    #[test]
+    fn retains_every_item_in_each_repeated_tuple_and_keeps_original_order() {
+        assert_eq!(
+            transform_json(concat!(
+                r#"多路径查重复 ["/地区","/月份"] [{"地区":"北","月份":1.00,"编号":"001"},"#,
+                r#"{"地区":"南","月份":null},{"地区":"北","月份":"1"},"#,
+                r#"{"地区":"北","月份":1e0,"编号":"002"},{"地区":"南","月份":null,"编号":"003"}]"#,
+            ))
+            .as_deref(),
+            Ok(concat!(
+                r#"[{"地区":"北","月份":1.00,"编号":"001"},{"地区":"南","月份":null},"#,
+                r#"{"地区":"北","月份":1e0,"编号":"002"},{"地区":"南","月份":null,"编号":"003"}]"#,
+            ))
+        );
+        assert_eq!(
+            transform_json(r#"duplicates-by-pointers ["/a","/b"] [{"a":1,"b":2}]"#).as_deref(),
+            Ok("[]")
+        );
+        assert_eq!(
+            transform_json(r#"多路径查重复 ["/a","/b"] [{"a":1,"b":2},{"a":1}]"#),
+            Err(JsonError::MissingValue)
+        );
     }
 
     #[test]
