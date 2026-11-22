@@ -9,6 +9,7 @@ use regex::Regex;
 use serde::{
     de::DeserializeOwned,
     ser::{Serialize, SerializeMap, Serializer},
+    Deserialize,
 };
 
 use super::{
@@ -62,7 +63,7 @@ impl CsvError {
             Self::RenameArguments => "用 JSON 数组填写原列名和非空的新列名",
             Self::HeaderNameConflict => "表头中已经有这个新列名",
             Self::ComputedColumnArguments => {
-                "用 JSON 数组填写新列名、列号和运算，例如 [\"金额\",2,\"*\",3]"
+                "用 JSON 数组填写新列名、两列和运算，例如 [\"金额\",2,\"*\",3]"
             }
             Self::ComputedDivisionByZero => "计算列中遇到了除以零",
             Self::ComputedNumberRange => "计算列的结果超出精确计算范围",
@@ -92,8 +93,8 @@ enum Operation {
     RenameColumn([String; 2]),
     ComputeColumn {
         name: String,
-        left: usize,
-        right: usize,
+        left: ColumnReference,
+        right: ColumnReference,
         arithmetic: ColumnArithmetic,
     },
     DeduplicateRows,
@@ -117,6 +118,22 @@ enum Operation {
         descending: bool,
         numeric: bool,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ColumnReference {
+    Number(usize),
+    Name(String),
+}
+
+impl ColumnReference {
+    fn resolve(&self, header: &[String]) -> Result<usize, CsvError> {
+        match self {
+            Self::Number(number) => number.checked_sub(1).ok_or(CsvError::InvalidColumns),
+            Self::Name(name) => header_column(header, name),
+        }
+    }
 }
 
 enum ColumnArithmetic {
@@ -218,10 +235,11 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             Operation::RenameColumn(names)
         }
         "计算列" | "compute-column" => {
-            let ((name, left, operator, right), data): ((String, usize, String, usize), _) =
-                json_argument_and_data(input, CsvError::ComputedColumnArguments)?;
-            let left = left.checked_sub(1).ok_or(CsvError::InvalidColumns)?;
-            let right = right.checked_sub(1).ok_or(CsvError::InvalidColumns)?;
+            let ((name, left, operator, right), data) =
+                json_argument_and_data::<(String, ColumnReference, String, ColumnReference)>(
+                    input,
+                    CsvError::ComputedColumnArguments,
+                )?;
             input = data;
             Operation::ComputeColumn {
                 name,
@@ -471,14 +489,16 @@ fn rename_column(mut rows: Vec<Vec<String>>, [old, new]: [String; 2]) -> Result<
 fn compute_column(
     mut rows: Vec<Vec<String>>,
     name: String,
-    left: usize,
-    right: usize,
+    left: ColumnReference,
+    right: ColumnReference,
     arithmetic: ColumnArithmetic,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first_mut().ok_or(CsvError::MissingInput)?;
     if name.trim().is_empty() || name.contains('\0') {
         return Err(CsvError::ComputedColumnArguments);
     }
+    let left = left.resolve(header)?;
+    let right = right.resolve(header)?;
     validate_column_width(&[left, right], header.len())?;
     if header.contains(&name) {
         return Err(CsvError::HeaderNameConflict);
@@ -1034,6 +1054,20 @@ mod tests {
         assert_eq!(
             transform_csv(&format!("计算列 [\"金额\",2,\"*\",3]\n{table}")).as_deref(),
             Ok("商品,数量,单价,金额\r\n茶,3,2.50,15/2\r\n咖啡,2,1/3,2/3")
+        );
+        for arguments in [r#"["金额","数量","*","单价"]"#, r#"["金额",2,"*","单价"]"#] {
+            assert_eq!(
+                transform_csv(&format!("compute-column {arguments}\n{table}")).as_deref(),
+                Ok("商品,数量,单价,金额\r\n茶,3,2.50,15/2\r\n咖啡,2,1/3,2/3")
+            );
+        }
+        assert_eq!(
+            transform_csv("计算列 [\"金额\",\"价格\",\"*\",1]\n价格,价格\n1,2"),
+            Err(CsvError::AmbiguousColumnName)
+        );
+        assert_eq!(
+            transform_csv("计算列 [\"金额\",\"缺列\",\"*\",1]\n价格,数量\n1,2"),
+            Err(CsvError::MissingColumnName)
         );
         for (operator, expected) in [("+", "5/6"), ("-", "1/6"), ("/", "3/2")] {
             assert_eq!(
