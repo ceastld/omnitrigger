@@ -1773,6 +1773,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "把绝对路径转换为可复制的文件网址",
+        query: r"路径: 转文件网址 C:\docs\report 2026.txt",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "从文件网址还原绝对路径",
+        query: "路径: 从文件网址 file:///C:/docs/report%202026.txt",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "提取上一级目录",
         query: r"路径: 上一级 C:\工作\发布 包.tar.gz",
     },

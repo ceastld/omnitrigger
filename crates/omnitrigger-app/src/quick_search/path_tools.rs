@@ -1,5 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
+use url::Url;
+
 const INVALID_PATH_TEXT: [char; 5] = ['\0', '"', '\r', '\n', '\t'];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7,6 +9,8 @@ pub(super) enum PathError {
     Incomplete,
     UnknownOperation,
     InvalidPath,
+    AbsolutePathRequired,
+    InvalidFileUrl,
     JoinArguments,
     RelativePartRequired,
     ExtensionArguments,
@@ -18,8 +22,10 @@ impl PathError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "在操作名后粘贴路径",
-            Self::UnknownOperation => "可用文件名、主名、扩展名、换扩展名、上一级和拼接",
+            Self::UnknownOperation => "输入 ? 路径 查看可用操作",
             Self::InvalidPath => "输入单条路径，可用一对双引号包住",
+            Self::AbsolutePathRequired => "请输入可以转换为文件网址的绝对路径",
+            Self::InvalidFileUrl => "请填写能转换为绝对路径的 file:// 网址，省略查询串和片段",
             Self::JoinArguments => "用 JSON 字符串数组填写起始路径和至少一条相对路径",
             Self::RelativePartRequired => "起始路径后的每一条路径须为相对路径",
             Self::ExtensionArguments => "用 JSON 字符串数组填写路径和新扩展名",
@@ -48,6 +54,17 @@ pub(super) fn path_component(query: &str) -> Result<String, PathError> {
     }
     let path = Path::new(input);
     let component = match operation.as_str() {
+        "转文件网址" | "to-file-url" => {
+            let url = if input.ends_with(['/', '\\']) {
+                Url::from_directory_path(path)
+            } else {
+                Url::from_file_path(path)
+            };
+            return url
+                .map(String::from)
+                .map_err(|_| PathError::AbsolutePathRequired);
+        }
+        "从文件网址" | "from-file-url" => return path_from_file_url(input),
         "文件名" | "name" | "filename" => path.file_name().and_then(|part| part.to_str()),
         "主名" | "stem" => path.file_stem().and_then(|part| part.to_str()),
         "扩展名" | "ext" | "extension" => path.extension().and_then(|part| part.to_str()),
@@ -58,6 +75,18 @@ pub(super) fn path_component(query: &str) -> Result<String, PathError> {
         .filter(|part| !part.is_empty())
         .map(str::to_owned)
         .ok_or(PathError::MissingPart)
+}
+
+fn path_from_file_url(input: &str) -> Result<String, PathError> {
+    let url = Url::parse(input).map_err(|_| PathError::InvalidFileUrl)?;
+    if url.scheme() != "file" || url.query().is_some() || url.fragment().is_some() {
+        return Err(PathError::InvalidFileUrl);
+    }
+    let path = url.to_file_path().map_err(|_| PathError::InvalidFileUrl)?;
+    path.to_str()
+        .filter(|text| path.is_absolute() && !text.contains(INVALID_PATH_TEXT))
+        .map(str::to_owned)
+        .ok_or(PathError::InvalidFileUrl)
 }
 
 fn join_paths(input: &str) -> Result<String, PathError> {
@@ -134,6 +163,52 @@ pub(super) fn strip_path_quotes(input: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_relative_paths_and_file_urls_that_do_not_identify_plain_paths() {
+        assert_eq!(
+            path_component("转文件网址 ./report.txt"),
+            Err(PathError::AbsolutePathRequired)
+        );
+        for url in [
+            "https://example.invalid/report.txt",
+            "file:///C:/report.txt?download=1",
+            "file:///C:/report.txt#part",
+            "file:///C:/a%00b.txt",
+            "file:///C:/a%0Ab.txt",
+        ] {
+            assert_eq!(
+                path_component(&format!("从文件网址 {url}")),
+                Err(PathError::InvalidFileUrl),
+                "{url}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn round_trips_windows_disk_and_unc_paths_with_escaped_file_names() {
+        for (path, url) in [
+            (
+                r"C:\工作\报告 #.txt",
+                "file:///C:/%E5%B7%A5%E4%BD%9C/%E6%8A%A5%E5%91%8A%20%23.txt",
+            ),
+            (r"\\server\share\a b.txt", "file://server/share/a%20b.txt"),
+        ] {
+            assert_eq!(
+                path_component(&format!("转文件网址 {path}")).as_deref(),
+                Ok(url)
+            );
+            assert_eq!(
+                path_component(&format!("from-file-url {url}")).as_deref(),
+                Ok(path)
+            );
+        }
+        assert_eq!(
+            path_component(r"转文件网址 C:\docs\").as_deref(),
+            Ok("file:///C:/docs/")
+        );
+    }
 
     #[test]
     fn joins_multiple_paths_and_requires_relative_parts_after_the_base() {
