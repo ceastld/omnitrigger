@@ -27,6 +27,7 @@ pub(super) enum JsonError {
     InvalidPointer,
     InvalidPointerSegment,
     PointerSelection,
+    CopyPaths,
     PointerListTooLarge,
     FlattenedObjectTooLarge,
     ExpectedObject,
@@ -68,6 +69,7 @@ impl JsonError {
             Self::InvalidPointer => "JSON 路径无效，示例 /商品/0/价格",
             Self::InvalidPointerSegment => "指针分段须为字符串或非负整数",
             Self::PointerSelection => "用 JSON 字符串数组填写互不重复的指针，再粘贴 JSON",
+            Self::CopyPaths => "用 JSON 数组填写来源和目标两个路径，再粘贴 JSON",
             Self::PointerListTooLarge => "指针列表超过 1 MiB",
             Self::FlattenedObjectTooLarge => "JSON 展平结果超过 1 MiB",
             Self::ExpectedObject => "请输入 JSON 对象",
@@ -144,7 +146,9 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "列指针" | "列路径" | "list-pointers" => return write_pointer_leaves(source, false),
         "展平" | "flatten" => return write_pointer_leaves(source, true),
         "改键" | "rename-key" => return rename_json_key(source),
-        "改值" | "replace" => return replace_json_value(source),
+        "改值" | "replace" => return write_json_value(source, false),
+        "加路径" | "add-path" => return write_json_value(source, true),
+        "复制路径" | "copy-path" => return copy_json_value(source),
         "删路径" | "remove-path" => return remove_json_path(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
         "转csv" | "to-csv" => return json_to_csv(source),
@@ -299,15 +303,95 @@ fn select_json_path<'a>(root: &'a RawValue, pointer: &str) -> Result<&'a RawValu
     pointer_keys(pointer)?.try_fold(root, |value, key| select_member(value, &key?))
 }
 
-fn replace_json_value(query: &str) -> Result<String, JsonError> {
+fn write_json_value(query: &str, add: bool) -> Result<String, JsonError> {
     let (pointer, query) = pointer_and_source(query)?;
     let (replacement, source) = json_value_and_source(query, JsonError::ReplacementValue)?;
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
-    let selected = select_json_path(root, &pointer)?.get();
-    let range = raw_value_span(source, selected)?;
+    edit_json_value(source, root, &pointer, replacement.get(), add)
+}
+
+fn copy_json_value(query: &str) -> Result<String, JsonError> {
+    let (paths, source) = strings_and_source(query, JsonError::CopyPaths)?;
+    let [from, to] = paths.as_slice() else {
+        return Err(JsonError::CopyPaths);
+    };
+    let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let copied = select_json_path(root, from)?.get();
+    edit_json_value(source, root, to, copied, true)
+}
+
+fn edit_json_value(
+    source: &str,
+    root: &RawValue,
+    pointer: &str,
+    replacement: &str,
+    add: bool,
+) -> Result<String, JsonError> {
+    let (range, value) = if add && !pointer.is_empty() {
+        let keys = pointer_keys(pointer)?.collect::<Result<Vec<_>, _>>()?;
+        let (key, ancestors) = keys.split_last().ok_or(JsonError::InvalidPointer)?;
+        let parent = select_pointer_keys(root, ancestors)?.get();
+        json_addition(source, parent, key, replacement)?
+    } else {
+        let selected = select_json_path(root, pointer)?.get();
+        (
+            raw_value_span(source, selected)?,
+            Cow::Borrowed(replacement),
+        )
+    };
     let mut output = source.to_owned();
-    output.replace_range(range, replacement.get());
+    output.replace_range(range, &value);
     Ok(output)
+}
+
+fn json_addition<'a>(
+    source: &str,
+    parent: &str,
+    key: &str,
+    value: &'a str,
+) -> Result<(Range<usize>, Cow<'a, str>), JsonError> {
+    let (empty, member) = match parent.as_bytes()[0] {
+        b'[' => {
+            let items = read_json_array(parent)?;
+            let index = if key == "-" {
+                items.len()
+            } else {
+                json_array_index(key)?
+            };
+            if let Some(next) = items.get(index) {
+                let start = raw_value_span(source, next.get())?.start;
+                return Ok((start..start, Cow::Owned(format!("{value},"))));
+            }
+            if index != items.len() {
+                return Err(JsonError::MissingValue);
+            }
+            (items.is_empty(), Cow::Borrowed(value))
+        }
+        b'{' => {
+            let entries = read_object_entries(parent)?;
+            let mut existing = entries.iter().filter(|(name, _)| name == key);
+            if let Some((_, existing_value)) = existing.next() {
+                if existing.next().is_some() {
+                    return Err(JsonError::DuplicateKey);
+                }
+                return Ok((
+                    raw_value_span(source, existing_value.get())?,
+                    Cow::Borrowed(value),
+                ));
+            }
+            let key = serde_json::to_string(key).expect("对象键可以序列化为 JSON 字符串");
+            (entries.is_empty(), Cow::Owned(format!("{key}:{value}")))
+        }
+        _ => return Err(JsonError::MissingValue),
+    };
+    let before_close = parent[..parent.len() - 1].trim_end_matches([' ', '\t', '\r', '\n']);
+    let end = raw_value_span(source, parent)?.start + before_close.len();
+    let member = if empty {
+        member
+    } else {
+        Cow::Owned(format!(",{member}"))
+    };
+    Ok((end..end, member))
 }
 
 fn raw_value_span(source: &str, selected: &str) -> Result<Range<usize>, JsonError> {
@@ -2205,6 +2289,70 @@ mod tests {
             (r#"改值 /- 9 [1,2]"#, JsonError::MissingValue),
             (r#"改值 /x {}{"x":1}"#, JsonError::ReplacementValue),
             (r#"改值 /x 1"#, JsonError::Incomplete),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn adds_members_and_array_items_without_rewriting_existing_data() {
+        for (query, expected) in [
+            (
+                r#"加路径 /订单/1 {"金额":3.50} {"订单":[{"金额":1.00}, {"金额":2e0}],"税率":0.10}"#,
+                r#"{"订单":[{"金额":1.00}, {"金额":3.50},{"金额":2e0}],"税率":0.10}"#,
+            ),
+            (
+                r#"add-path /a~1b 1.50 { "x":0.10 }"#,
+                r#"{ "x":0.10,"a/b":1.50 }"#,
+            ),
+            (r#"加路径 /x false {"\u0078":null}"#, r#"{"\u0078":false}"#),
+            (r#"加路径 /- "\u597d" [  ]"#, r#"["\u597d"  ]"#),
+            (r#"加路径 /1 false [1 ]"#, r#"[1,false ]"#),
+            (r#"加路径 "/a/b" 1 {"a":{}}"#, r#"{"a":{"b":1}}"#),
+            (r#"加路径 "" 1.00 {"a":2}"#, r#"1.00"#),
+        ] {
+            let output = transform_json(query).unwrap();
+            assert_eq!(output, expected, "{query}");
+            assert!(serde_json::from_str::<&RawValue>(&output).is_ok());
+        }
+        for (query, error) in [
+            (r#"加路径 /x 3 {"x":1,"\u0078":2}"#, JsonError::DuplicateKey),
+            (r#"加路径 /2 3 [1]"#, JsonError::MissingValue),
+            (r#"加路径 /01 3 [1]"#, JsonError::MissingValue),
+            (r#"加路径 /a/b 3 {"b":2}"#, JsonError::MissingValue),
+            (r#"加路径 /a/b 3 {"a":null}"#, JsonError::MissingValue),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn copies_raw_values_into_an_existing_destination_container() {
+        for (query, expected) in [
+            (
+                r#"复制路径 ["/订单/0","/归档/-"] {"订单":[{"金额":1.50,"名字":"\u8336"}],"归档":[]}"#,
+                r#"{"订单":[{"金额":1.50,"名字":"\u8336"}],"归档":[{"金额":1.50,"名字":"\u8336"}]}"#,
+            ),
+            (
+                r#"copy-path ["/a","/b"] {"a":1.50,"b":0}"#,
+                r#"{"a":1.50,"b":1.50}"#,
+            ),
+            (
+                r#"复制路径 ["/0","/1"] [0.10, 1.50]"#,
+                r#"[0.10, 0.10,1.50]"#,
+            ),
+            (r#"复制路径 ["/0",""] [0.10]"#, r#"0.10"#),
+        ] {
+            assert_eq!(transform_json(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            (r#"复制路径 ["/a"] {"a":1}"#, JsonError::CopyPaths),
+            (r#"复制路径 ["/a","/b"] {}"#, JsonError::MissingValue),
+            (r#"复制路径 ["/a","/b/c"] {"a":1}"#, JsonError::MissingValue),
+            (
+                r#"复制路径 ["/a","/b"] {"a":1,"a":2}"#,
+                JsonError::DuplicateKey,
+            ),
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
         }

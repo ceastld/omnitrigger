@@ -1742,6 +1742,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按 JSON 路径新增字段或插入数组项",
+        query: r#"JSON: 加路径 /订单/1 {"金额":3.50} {"订单":[{"金额":1.00}, {"金额":2e0}],"税率":0.10}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把原始 JSON 值复制到另一条路径",
+        query: r#"JSON: 复制路径 ["/订单/0","/归档/-"] {"订单":[{"金额":1.50,"名字":"\u8336"}],"归档":[]}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "删除 JSON 深处的成员或数组项",
         query: r#"JSON: 删路径 /订单/0/备注 {"订单":[{"金额":1.50,"备注":"草稿"}],"税率":0.10}"#,
     },
