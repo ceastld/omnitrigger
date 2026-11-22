@@ -156,6 +156,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "求相邻数值每个窗口的最大值与最小值之差",
+        query: "统计: 移动极差 3 1/2,100,2,3,-1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "逐项计算精确累计合计",
         query: "统计: 累计合计 1/2,1,2,4",
     },
@@ -2931,6 +2936,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "截尾平均",
                     "移动最小",
                     "移动最大",
+                    "移动极差",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}

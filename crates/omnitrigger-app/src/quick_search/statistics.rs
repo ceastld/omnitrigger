@@ -117,8 +117,15 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "加权平均" | "weighted-mean" => return weighted_mean(values.trim()),
         "移动平均" | "moving-average" => return moving_average(values.trim()),
         "移动中位数" | "moving-median" => return moving_median(values.trim()),
-        "移动最小" | "moving-min" => return moving_extreme(values.trim(), false),
-        "移动最大" | "moving-max" => return moving_extreme(values.trim(), true),
+        "移动最小" | "moving-min" => {
+            return moving_extrema(values.trim(), MovingExtrema::Minimum)
+        }
+        "移动最大" | "moving-max" => {
+            return moving_extrema(values.trim(), MovingExtrema::Maximum)
+        }
+        "移动极差" | "moving-range" => {
+            return moving_extrema(values.trim(), MovingExtrema::Range)
+        }
         "累计合计" | "running-sum" => return running_totals(values.trim(), false),
         "累计平均" | "running-average" => return running_totals(values.trim(), true),
         "二项概率" | "binomial" => return binomial_probability(values, false),
@@ -333,19 +340,27 @@ fn moving_median(input: &str) -> Result<String, StatisticsError> {
     Ok(medians.join("\n"))
 }
 
-fn moving_extreme(input: &str, largest: bool) -> Result<String, StatisticsError> {
+#[derive(Clone, Copy)]
+enum MovingExtrema {
+    Minimum,
+    Maximum,
+    Range,
+}
+
+fn moving_extrema(input: &str, operation: MovingExtrema) -> Result<String, StatisticsError> {
     let (width, values) = sliding_window_values(input)?;
-    let results: Vec<_> = values
+    let results = values
         .windows(width)
         .map(|window| {
-            let value = if largest {
-                window.iter().max()
-            } else {
-                window.iter().min()
-            };
-            value.expect("窗口至少包含一个数值").to_string()
+            let minimum = || window.iter().min().expect("窗口至少包含一个数值");
+            let maximum = || window.iter().max().expect("窗口至少包含一个数值");
+            Ok(match operation {
+                MovingExtrema::Minimum => minimum().to_string(),
+                MovingExtrema::Maximum => maximum().to_string(),
+                MovingExtrema::Range => bounded(maximum() - minimum())?.to_string(),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, StatisticsError>>()?;
     Ok(results.join("\n"))
 }
 
@@ -823,12 +838,14 @@ mod tests {
     }
 
     #[test]
-    fn reports_each_complete_window_minimum_and_maximum_as_exact_values() {
+    fn reports_each_complete_window_minimum_maximum_and_range_as_exact_values() {
         for (query, expected) in [
             ("移动最小 3 1/2,100,2,3,-1", "1/2\n2\n-1"),
             ("moving-max 3 1/2,100,2,3,-1", "100\n100\n3"),
             ("移动最大 1 comb(4,2),-2,-2", "6\n-2\n-2"),
             ("moving-min 2 2/3,1,-1/2", "2/3\n-1/2"),
+            ("移动极差 3 1/2,100,2,3,-1", "199/2\n98\n4"),
+            ("moving-range 1 comb(4,2),-2,-2", "0\n0\n0"),
         ] {
             assert_eq!(
                 calculate_statistics(query).as_deref(),
