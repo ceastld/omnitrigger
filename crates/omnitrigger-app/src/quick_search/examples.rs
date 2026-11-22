@@ -1227,6 +1227,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按精确数值从小到大排列文本各行",
+        query: "文本: 数值排序 2e0\n-1/2\n1.50\n3/2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按精确数值从大到小排列文本各行",
+        query: "文本: 数值降序 2e0\n-1/2\n1.50\n3/2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "移除空行",
         query: "文本: 去空行 甲\n\n乙",
     },

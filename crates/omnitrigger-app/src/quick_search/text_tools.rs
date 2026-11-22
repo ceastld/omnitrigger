@@ -14,7 +14,10 @@ use regex::{Regex, RegexBuilder};
 use sha2::{Digest, Sha256, Sha512};
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::calculator::{narrow_ascii_graphic, FULLWIDTH_ASCII_OFFSET};
+use super::{
+    calculator::{narrow_ascii_graphic, FULLWIDTH_ASCII_OFFSET},
+    fraction::parse_fraction_literal,
+};
 
 const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_DIFF_LINES: usize = 512;
@@ -37,6 +40,7 @@ pub(super) enum TextError {
     MissingColumn,
     InvalidLineRange,
     MissingLine,
+    InvalidNumberLine,
     EmptySearchText,
     InvalidRegex,
     IncompleteRegexGroup,
@@ -69,6 +73,7 @@ impl TextError {
             Self::MissingColumn => "至少一行的列数不足",
             Self::InvalidLineRange => "输入从 1 开始的行号或区间，例如 文本: 取行 2,4-6",
             Self::MissingLine => "指定行号超出了文本行数",
+            Self::InvalidNumberLine => "每行请输入一个数字或分数，例如 -2.5、3/2 或 1e2",
             Self::EmptySearchText => "请输入要查找的文字",
             Self::InvalidRegex => "请检查或缩短正则表达式",
             Self::IncompleteRegexGroup => "输入组名或组号、带引号的正则表达式和原文",
@@ -198,6 +203,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
             lines.sort_by(|left, right| compare_natural(left, right));
             Ok(lines.join("\n"))
         }
+        "数值排序" | "sort-numeric" => sort_numeric_lines(text, false),
+        "数值降序" | "sort-numeric-desc" => sort_numeric_lines(text, true),
         "去空行" | "remove-empty-lines" => Ok(text
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -347,6 +354,29 @@ fn remove_common_indent(text: &str) -> String {
     text.split_inclusive('\n')
         .map(|line| line.strip_prefix(common).unwrap_or(line))
         .collect()
+}
+
+fn sort_numeric_lines(text: &str, descending: bool) -> Result<String, TextError> {
+    let mut values = text
+        .lines()
+        .map(|line| {
+            parse_fraction_literal(line)
+                .map(|value| (value, line))
+                .map_err(|_| TextError::InvalidNumberLine)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    values.sort_by(|(left, _), (right, _)| {
+        if descending {
+            right.cmp(left)
+        } else {
+            left.cmp(right)
+        }
+    });
+    Ok(values
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 fn count_lines(text: &str) -> String {
@@ -1210,6 +1240,27 @@ mod tests {
         ] {
             assert_eq!(transform_text(input).as_deref(), Ok(expected), "{input}");
         }
+    }
+
+    #[test]
+    fn sorts_signed_rational_lines_without_rounding_or_rewriting_equal_values() {
+        let numbers = "2e0\r\n-1/2\r\n1.50\r\n3/2\r\n1.499999999999999999";
+        assert_eq!(
+            transform_text(&format!("数值排序 {numbers}")).as_deref(),
+            Ok("-1/2\n1.499999999999999999\n1.50\n3/2\n2e0")
+        );
+        assert_eq!(
+            transform_text(&format!("sort-numeric-desc {numbers}")).as_deref(),
+            Ok("2e0\n1.50\n3/2\n1.499999999999999999\n-1/2")
+        );
+        assert_eq!(
+            transform_text("数值排序 \" 2 \n 1 \"").as_deref(),
+            Ok(" 1 \n 2 ")
+        );
+        assert_eq!(
+            transform_text("数值排序 2\n未知"),
+            Err(TextError::InvalidNumberLine)
+        );
     }
 
     #[test]
