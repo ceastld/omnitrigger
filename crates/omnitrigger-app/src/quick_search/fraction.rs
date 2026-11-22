@@ -45,6 +45,7 @@ pub(super) enum FractionError {
     ContinuedFractionLength,
     ComparisonArguments,
     RatioArguments,
+    PercentageNotation,
     ExactRange,
 }
 
@@ -80,6 +81,7 @@ impl FractionError {
             Self::ContinuedFractionLength => "连分数最多支持 512 项",
             Self::ComparisonArguments => "输入两个算式和一个比较符，例如 分数: 比较 1/3 < 0.34",
             Self::RatioArguments => "输入 2 至 16 个非负数，至少一个大于零，例如 0.5,3/4,1",
+            Self::PercentageNotation => "请填写带百分号的数值，例如 12.5% 或 33.(3)%",
             Self::ExactRange => "幂指数绝对值最多 1024，分子和分母各最多 8192 个二进制位",
         }
     }
@@ -146,6 +148,26 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     }
     if verb == "循环小数" || verb.eq_ignore_ascii_case("repeating-decimal") {
         return repeating_decimal(&calculate_fraction(expression.trim())?);
+    }
+    if verb == "百分比" || verb.eq_ignore_ascii_case("percent") {
+        let scaled = calculate_fraction(expression.trim())? * BigInt::from(100u8);
+        ensure_exact_size(&scaled)?;
+        return repeating_decimal(&scaled).map(|percent| format!("{percent}%"));
+    }
+    if verb == "从百分比" || verb.eq_ignore_ascii_case("from-percent") {
+        let input = expression
+            .trim()
+            .strip_suffix('%')
+            .ok_or(FractionError::PercentageNotation)?
+            .trim_end();
+        let value = if input.contains('(') {
+            from_repeating_decimal(input)?
+        } else {
+            parse_fraction_literal(input)?
+        };
+        let fraction = value / BigInt::from(100u8);
+        ensure_exact_size(&fraction)?;
+        return Ok(fraction.to_string());
     }
     if verb == "从循环小数" || verb.eq_ignore_ascii_case("from-repeating-decimal") {
         return from_repeating_decimal(expression.trim()).map(|value| value.to_string());
@@ -1092,6 +1114,9 @@ mod tests {
         for (input, expected) in [
             ("从循环小数 0.(142857)", "1/7"),
             ("from-repeating-decimal -2.1(6)", "-13/6"),
+            ("从百分比 33.(3)%", "1/3"),
+            ("from-percent １２．５％", "1/8"),
+            ("从百分比 -7/3%", "-7/300"),
             ("０．０８（３）", "1/12"),
             ("+.0(09)", "1/110"),
             ("0.(9)", "1"),
@@ -1191,6 +1216,10 @@ mod tests {
             ("循环小数 1/7", "0.(142857)"),
             ("循环小数 -7/6", "-1.1(6)"),
             ("repeating-decimal 1/90", "0.0(1)"),
+            ("百分比 1/8", "12.5%"),
+            ("百分比 1/3", "33.(3)%"),
+            ("percent -7/30", "-23.(3)%"),
+            ("百分比 0", "0%"),
             ("循环小数 1/8", "0.125"),
             ("循环小数 3-3", "0"),
         ] {

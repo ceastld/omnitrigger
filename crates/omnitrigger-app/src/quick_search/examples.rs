@@ -2753,6 +2753,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把分数转成精确百分比",
+        query: "分数: 百分比 1/3",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把百分比精确还原成分数",
+        query: "分数: 从百分比 33.(3)%",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把带括号的循环小数精确还原成分数",
         query: "分数: 从循环小数 -2.1(6)",
     },
@@ -2872,6 +2882,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
             if !term.is_empty()
                 && [
                     "循环小数",
+                    "百分比",
+                    "从百分比",
                     "取值表",
                     "连分数",
                     "从连分数",
