@@ -85,7 +85,7 @@ use examples::{
 };
 use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
-use fraction::{simplify_fraction, FractionError};
+use fraction::{calculate_fraction, simplify_fraction, FractionError};
 use identifiers::{transform_ulid, transform_uuid, IdentifierError};
 use json_tools::{transform_json, JsonError};
 use linear_fit::{calculate_linear_fit, LinearFitError};
@@ -331,6 +331,7 @@ enum ValueError {
     InputTooLong,
     Calculation(CalculationError),
     BatchCalculation(BatchError<CalculationError>),
+    BatchFraction(BatchError<FractionError>),
     Conversion(ConversionError),
     BatchConversion(BatchError<ConversionError>),
     Radix(RadixError),
@@ -374,6 +375,13 @@ impl ValueError {
                     error,
                     "逐行输入算式，例如 2**8",
                     CalculationError::message,
+                );
+            }
+            Self::BatchFraction(error) => {
+                return batch_error_message(
+                    error,
+                    "逐行输入精确算式，例如 1/3 + 1/6",
+                    FractionError::message,
                 );
             }
             Self::Conversion(error) => error.message(),
@@ -423,6 +431,7 @@ impl ValueError {
             Self::Calculation(CalculationError::Incomplete)
                 | Self::Conversion(ConversionError::Incomplete)
                 | Self::BatchCalculation(BatchError::Empty)
+                | Self::BatchFraction(BatchError::Empty)
                 | Self::BatchConversion(BatchError::Empty)
                 | Self::AspectRatio(AspectRatioError::Incomplete)
                 | Self::Paper(PaperError::Incomplete)
@@ -561,9 +570,22 @@ impl Results {
                     Self::Destinations(vec![Destination::TriggerHistoryQuery(term.to_owned())])
                 }
                 Scope::CalculationHistory => Self::Calculations(recent.calculations.matching(term)),
-                Scope::BatchCalculation => Self::text_value(
-                    map_batch_lines(term, calculate).map_err(ValueError::BatchCalculation),
-                ),
+                Scope::BatchCalculation => {
+                    let (operation, arguments) =
+                        term.split_once(char::is_whitespace).unwrap_or((term, ""));
+                    if operation == "分数" || operation.eq_ignore_ascii_case("exact") {
+                        Self::text_value(
+                            map_batch_lines(arguments, |query| {
+                                calculate_fraction(query).map(|value| value.to_string())
+                            })
+                            .map_err(ValueError::BatchFraction),
+                        )
+                    } else {
+                        Self::text_value(
+                            map_batch_lines(term, calculate).map_err(ValueError::BatchCalculation),
+                        )
+                    }
+                }
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
                 Scope::BatchConversion => {
                     Self::text_value(convert_batch(term).map_err(ValueError::BatchConversion))
@@ -2072,6 +2094,17 @@ mod tests {
         assert!(matches!(
             for_query("batch calculation: 2^10\n1/0", &[]),
             Results::Value(Err(error)) if error.message().as_ref() == "第 2 行：不能除以零"
+        ));
+        assert!(matches!(
+            for_query("批量计算: 分数 1/3+1/6\n2**80", &[]),
+            Results::Value(Ok(value)) if value.text == "1/2\n1208925819614629174706176"
+        ));
+        assert!(matches!(
+            for_query("batch calculation: exact 1/2\n1/0", &[]),
+            Results::Value(Err(ValueError::BatchFraction(BatchError::Row {
+                line: 2,
+                cause: FractionError::ZeroDenominator,
+            })))
         ));
     }
 

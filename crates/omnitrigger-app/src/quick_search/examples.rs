@@ -205,6 +205,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量计算: 2**8\n3^3\nsqrt(81)",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "一次计算多行精确分数算式",
+        query: "批量计算: 分数 1/3 + 1/6\n2**80",
+    },
+    Example {
         icon: Icon::Grid,
         title: "切换已打开的窗口",
         query: "窗口:",
@@ -1965,6 +1970,7 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
     match scope {
+        Scope::BatchCalculation if matches!(term, "分" | "分数") => {}
         Scope::Date
             if !term.is_empty()
                 && ["列出", "格式化", "解析"]
