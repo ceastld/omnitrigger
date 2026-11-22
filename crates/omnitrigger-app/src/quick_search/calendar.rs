@@ -188,6 +188,20 @@ fn date_operand(input: &str, today: NaiveDate) -> Result<(NaiveDate, &str), Date
         };
         return Ok((date, rest));
     }
+    absolute_date_operand(input)
+}
+
+pub(super) fn parse_complete_date(input: &str) -> Result<NaiveDate, DateError> {
+    let input = normalize(input);
+    let (date, rest) = absolute_date_operand(input.trim())?;
+    if rest.is_empty() {
+        Ok(date)
+    } else {
+        Err(DateError::InvalidDate)
+    }
+}
+
+fn absolute_date_operand(input: &str) -> Result<(NaiveDate, &str), DateError> {
     if let Some((year, month, day, rest)) = written_date_prefix(input) {
         let date = NaiveDate::from_ymd_opt(year, month, day).ok_or(DateError::InvalidDate)?;
         return Ok((date, rest));

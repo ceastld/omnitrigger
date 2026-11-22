@@ -18,6 +18,7 @@ use serde_json::value::RawValue;
 use super::statistics::{parse_bin_edges, report_binned_unweighted};
 use super::{
     calculator::normalize,
+    calendar::parse_complete_date,
     conversion::{exact_data_converter, ConversionError},
     fraction::{
         calculate_fraction_with_variables, ensure_exact_size, parse_fraction_literal,
@@ -81,6 +82,7 @@ pub(super) enum CsvError {
     FirstNonemptyColumnArguments,
     SplitColumnArguments,
     DataConversionColumnArguments,
+    DateDifferenceColumnArguments,
     DataConversionTarget(ConversionError),
     RunningColumnArguments,
     DataRowValue { row: usize, cause: &'static str },
@@ -179,6 +181,9 @@ impl CsvError {
             Self::AddedColumnTooLarge => "追加列后的结果超过 1 MiB，请缩小表格范围",
             Self::DataConversionColumnArguments => {
                 "填写新列名、来源列和目标单位，例如 [\"速率(MiB/s)\",\"速率\",\"MiB/s\"]"
+            }
+            Self::DateDifferenceColumnArguments => {
+                "填写新列名、开始日期列和结束日期列，例如 [\"天数\",\"开始\",\"结束\"]"
             }
             Self::DataConversionTarget(cause) => cause.message(),
             Self::RunningColumnArguments => {
@@ -292,6 +297,7 @@ enum Operation {
         arithmetic: ColumnArithmetic,
     },
     ConvertDataColumn(String, ColumnReference, String),
+    DateDifferenceColumn(String, ColumnReference, ColumnReference),
     RunningColumn {
         name: String,
         source: ColumnReference,
@@ -655,6 +661,15 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 separator,
             }
         }
+        "日期差列" | "date-difference-column" => {
+            let ((name, start, end), data) =
+                json_argument_and_data::<(String, ColumnReference, ColumnReference)>(
+                    input,
+                    CsvError::DateDifferenceColumnArguments,
+                )?;
+            input = data;
+            Operation::DateDifferenceColumn(name, start, end)
+        }
         "数据换算列" | "convert-data-column" => {
             let ((name, source, target), data) =
                 json_argument_and_data::<(String, ColumnReference, String)>(
@@ -1006,6 +1021,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         } => compute_column(rows, name, left, right, arithmetic),
         Operation::ConvertDataColumn(name, source, target) => {
             convert_data_column(&rows, &name, source, &target)
+        }
+        Operation::DateDifferenceColumn(name, start, end) => {
+            date_difference_column(&rows, &name, start, end)
         }
         Operation::RunningColumn {
             name,
@@ -1887,6 +1905,39 @@ fn first_nonempty_csv_column(
             .map(|&index| row[index].as_str())
             .find(|value| !value.is_empty())
             .unwrap_or(""))
+    })
+}
+
+fn date_difference_column(
+    rows: &[Vec<String>],
+    name: &str,
+    start: ColumnReference,
+    end: ColumnReference,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::DateDifferenceColumnArguments);
+    }
+    let start = start.resolve(header)?;
+    let end = end.resolve(header)?;
+    validate_column_width(&[start, end], header.len())?;
+    let mut row_number = 0;
+    write_appended_column(header, records, name, |row| {
+        row_number += 1;
+        let (start, end) = (row[start].trim(), row[end].trim());
+        if start.is_empty() || end.is_empty() {
+            return Ok(String::new());
+        }
+        let parse_date = |date| {
+            parse_complete_date(date).map_err(|error| CsvError::DataRowValue {
+                row: row_number,
+                cause: error.message(),
+            })
+        };
+        let days = parse_date(end)?
+            .signed_duration_since(parse_date(start)?)
+            .num_days();
+        Ok(days.to_string())
     })
 }
 
@@ -4282,6 +4333,24 @@ mod tests {
             ),
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn appends_signed_calendar_day_differences_and_preserves_blank_cells() {
+        let query = "日期差列 [\"间隔天数\",\"开始\",2]\n开始,结束\n2024-02-28,2024-03-01\n2024-03-03,2024年3月1日\n2024-W09-3,2024-W09-5\n2024-03-01,";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("开始,结束,间隔天数\r\n2024-02-28,2024-03-01,2\r\n2024-03-03,2024年3月1日,-2\r\n2024-W09-3,2024-W09-5,2\r\n2024-03-01,\"\",\"\"")
+        );
+        for invalid in ["2024-02-30", "2024-03-01 12:00", "今天"] {
+            let query = format!(
+                "日期差列 [\"天数\",1,2]\n开始,结束\n2024-02-28,2024-03-01\n{invalid},2024-03-01"
+            );
+            assert!(matches!(
+                transform_csv(&query),
+                Err(CsvError::DataRowValue { row: 2, .. })
+            ));
         }
     }
 
