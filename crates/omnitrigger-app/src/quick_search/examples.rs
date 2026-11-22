@@ -731,6 +731,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "按精确分数缩放时长",
+        query: "时长: 缩放 01:30:00 @ 2/3",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "合计多个时长",
         query: "时长: 合计 01:25,02:40,00:55",
     },
@@ -3372,6 +3377,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "频数中位数",
                     "扣除休息",
                     "比率",
+                    "缩放",
                     "中位数",
                     "最短",
                     "最长",

@@ -5,6 +5,7 @@ use num_rational::BigRational;
 
 use super::calculator::{format_result, normalize};
 use super::conversion::split_conversion;
+use super::fraction::calculate_fraction;
 
 pub(super) const NANOS_PER_SECOND: u128 = 1_000_000_000;
 const NANOS_PER_DAY: u128 = 86_400 * NANOS_PER_SECOND;
@@ -25,6 +26,7 @@ pub(super) enum DurationError {
     Precision,
     DivisionByZero,
     InvalidFrequency,
+    InvalidScaleFactor,
 }
 
 impl DurationError {
@@ -42,6 +44,7 @@ impl DurationError {
             Self::Precision => "时长最小可精确到 1 纳秒",
             Self::DivisionByZero => "时长不能除以零",
             Self::InvalidFrequency => "按 时长@次数 填写每组，次数须为正整数",
+            Self::InvalidScaleFactor => "用 @ 分隔时长和缩放系数，系数可写 2/3、50% 或精确算式",
         }
     }
 }
@@ -70,6 +73,7 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     }
     let (total, show_seconds) = match operation {
         "合计" | "sum" => (aggregate_duration_list(values, false)?, false),
+        "缩放" | "scale" => (scaled_duration(values)?, false),
         "平均" | "average" => (aggregate_duration_list(values, true)?, false),
         "频数平均" | "frequency-average" => (frequency_average(values)?, false),
         "频数中位数" | "frequency-median" => (median_duration_list(values, true)?, false),
@@ -138,6 +142,23 @@ fn bounded_duration_value(term: &str) -> Result<i128, DurationError> {
     let (nanos, _) = duration_value(term)?;
     bounded_duration(Some(nanos.unsigned_abs()))?;
     Ok(nanos)
+}
+
+fn scaled_duration(input: &str) -> Result<i128, DurationError> {
+    let (duration, factor) = input
+        .split_once('@')
+        .ok_or(DurationError::InvalidScaleFactor)?;
+    let nanos = bounded_duration_value(duration.trim())?;
+    let factor = factor.trim();
+    let (expression, denominator) = factor
+        .strip_suffix('%')
+        .map_or((factor, 1), |expression| (expression.trim(), 100));
+    let factor = calculate_fraction(expression).map_err(|_| DurationError::InvalidScaleFactor)?;
+    let scaled = factor * BigInt::from(nanos) / BigInt::from(denominator);
+    if !scaled.is_integer() {
+        return Err(DurationError::Precision);
+    }
+    i128::try_from(scaled.numer()).map_err(|_| DurationError::OutOfRange)
 }
 
 fn duration_ratio(input: &str) -> Result<String, DurationError> {
@@ -713,6 +734,26 @@ mod tests {
             ("频数中位数", DurationError::Incomplete),
             ("频数中位数 1s@0", DurationError::InvalidFrequency),
             ("频数中位数 1ns@1,2ns@1", DurationError::Precision),
+        ] {
+            assert_eq!(convert_duration(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn scales_durations_by_exact_fractions_percentages_and_expressions() {
+        for (query, expected) in [
+            ("缩放 01:30:00 @ 2/3", "01:00:00"),
+            ("缩放 23:45 到 01:15 @ 50% to min", "45 min"),
+            ("缩放 3ns @ -1/3", "-00:00:00.000000001"),
+            ("scale PT2H @ 1/(1+2) to s", "2400 s"),
+            ("缩放 1小时 @ 0%", "00:00:00"),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("缩放 2s", DurationError::InvalidScaleFactor),
+            ("缩放 2s @ 茶", DurationError::InvalidScaleFactor),
+            ("缩放 1ns @ 50%", DurationError::Precision),
         ] {
             assert_eq!(convert_duration(query), Err(error), "{query}");
         }
