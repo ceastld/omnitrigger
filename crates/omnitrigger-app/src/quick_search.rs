@@ -377,6 +377,7 @@ enum ValueError {
     BatchUrl(BatchError<UrlEncodingError>),
     BatchDate(BatchError<DateError>),
     BatchColor(BatchError<ColorError>),
+    BatchRadix(BatchError<RadixError>),
     Radix(RadixError),
     RatioAllocation(RatioAllocationError),
     AspectRatio(AspectRatioError),
@@ -478,6 +479,13 @@ impl ValueError {
                     ColorError::message,
                 );
             }
+            Self::BatchRadix(error) => {
+                return batch_error_message(
+                    error,
+                    "逐行输入进制换算或字节序操作，例如 ff 从 16 到 10",
+                    RadixError::message,
+                );
+            }
             Self::Radix(error) => error.message(),
             Self::RatioAllocation(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
@@ -537,6 +545,7 @@ impl ValueError {
                 | Self::BatchUrl(BatchError::Empty)
                 | Self::BatchDate(BatchError::Empty)
                 | Self::BatchColor(BatchError::Empty)
+                | Self::BatchRadix(BatchError::Empty)
                 | Self::AspectRatio(AspectRatioError::Incomplete)
                 | Self::Paper(PaperError::Incomplete)
                 | Self::Rectangle(RectangleError::Incomplete)
@@ -790,6 +799,12 @@ impl Results {
                         Self::text_value(
                             map_batch_lines(arguments, |line| calculate_date(line, today))
                                 .map_err(ValueError::BatchDate),
+                        )
+                    } else if let Some(arguments) = batch_arguments(term, "进制对照", "radix-csv")
+                    {
+                        Self::text_value(
+                            map_batch_csv(arguments, "输入", convert_arbitrary_radix)
+                                .map_err(ValueError::BatchRadix),
                         )
                     } else {
                         Self::text_value(convert_batch(term).map_err(ValueError::BatchConversion))
@@ -3020,6 +3035,32 @@ mod tests {
         assert!(for_query("批量换算: 时间", &[])
             .suggested_input(0)
             .is_some_and(|query| query.starts_with("批量换算: 时间戳 ")));
+    }
+
+    #[test]
+    fn batches_radix_and_byte_orders_in_csv_and_reports_the_original_line() {
+        assert!(matches!(
+            for_query(
+                "批量换算: 进制对照 ff 从 16 到 10\n字节序 16 @ 258\n读字节序 小端 @ 02 01",
+                &[],
+            ),
+            Results::Value(Ok(value)) if value.text == concat!(
+                "输入,结果\r\n",
+                "ff 从 16 到 10,255\r\n",
+                "字节序 16 @ 258,\"大端 01 02\n小端 02 01\"\r\n",
+                "读字节序 小端 @ 02 01,\"十六进制 0x0102\n十进制 258\"",
+            )
+        ));
+        assert!(matches!(
+            for_query(
+                "batch conversion: radix-csv ff from 16 to 10\n\n读字节序 大端 @ G0",
+                &[]
+            ),
+            Results::Value(Err(ValueError::BatchRadix(BatchError::Row {
+                line: 3,
+                cause: RadixError::ReadByteOrderBytes,
+            })))
+        ));
     }
 
     #[test]

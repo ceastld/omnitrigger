@@ -565,6 +565,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量换算: 颜色对照 rebeccapurple\nrgb(0, 255, 0)\nrgba(255,0,0,0.5)",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "以 CSV 对照进制和字节序操作的输入与结果",
+        query: "批量换算: 进制对照 ff 从 16 到 10\n字节序 16 @ 258\n读字节序 小端 @ 02 01",
+    },
+    Example {
         icon: Icon::Clock,
         title: "逐行计算日期、工作日和周号",
         query: "批量换算: 日期 2026-11-20 + 1工作日\n2024-02-29 + 1年\n2027-01-01 第几周",
@@ -3495,6 +3500,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "网址对照",
                     "日期对照",
                     "颜色对照",
+                    "进制对照",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term))) => {}
