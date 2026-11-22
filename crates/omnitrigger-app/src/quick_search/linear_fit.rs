@@ -8,12 +8,14 @@ use super::fraction::{
 use super::operators::split_top_level_commas;
 
 const MAX_POINTS: usize = 64;
+const MAX_PREDICTIONS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LinearFitError {
     Incomplete,
     InvalidPoint,
     TooManyPoints,
+    TooManyPredictions,
     ConstantX,
     ConstantCoordinate,
     Evaluation(FractionError),
@@ -25,6 +27,7 @@ impl LinearFitError {
             Self::Incomplete => "输入至少两组 x,y，例如 0,1; 1,3; 2,5",
             Self::InvalidPoint => "每组须包含 x 和 y，用逗号隔开",
             Self::TooManyPoints => "最多可输入 64 对数值",
+            Self::TooManyPredictions => "每次最多可预测 64 个 x 值",
             Self::ConstantX => "所有 x 相同，无法求拟合斜率",
             Self::ConstantCoordinate => "x 和 y 各自至少需要两个不同的值才能计算相关系数",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
@@ -46,7 +49,17 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
             if x.trim().is_empty() {
                 return Err(LinearFitError::Incomplete);
             }
-            (points.trim(), Some(evaluate(x)?))
+            let terms = split_top_level_commas(x)
+                .take(MAX_PREDICTIONS + 1)
+                .collect::<Vec<_>>();
+            if terms.len() > MAX_PREDICTIONS {
+                return Err(LinearFitError::TooManyPredictions);
+            }
+            let predictions = terms
+                .into_iter()
+                .map(evaluate)
+                .collect::<Result<Vec<_>, _>>()?;
+            (points.trim(), Some(predictions))
         }
         _ => (input, None),
     };
@@ -58,10 +71,20 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
     let slope = &products.cross / &products.square_x;
     let intercept = (sums.y - &slope * sums.x) / sums.count;
     check_size([&slope, &intercept])?;
-    if let Some(x) = predict {
-        let y = slope * x + intercept;
-        check_size([&y])?;
-        return Ok(y.to_string());
+    if let Some(xs) = predict {
+        let predict_y = |x: &BigRational| {
+            let y = &slope * x + &intercept;
+            check_size([&y])?;
+            Ok::<_, LinearFitError>(y)
+        };
+        if let [x] = xs.as_slice() {
+            return predict_y(x).map(|value| value.to_string());
+        }
+        let mut rows = vec!["x,预测值".to_owned()];
+        for x in &xs {
+            rows.push(format!("{x},{}", predict_y(x)?));
+        }
+        return Ok(rows.join("\r\n"));
     }
     let r_squared = if products.square_y.numer().sign() == Sign::NoSign {
         "未定义".to_owned()
@@ -183,6 +206,25 @@ fn check_size<'a>(values: impl IntoIterator<Item = &'a BigRational>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn predicts_several_exact_values_in_input_order_without_refitting() {
+        assert_eq!(
+            calculate_linear_fit("预测 1/2, 0, comb(4,2), 1/2 @ 0,1; 1,3; 2,5").as_deref(),
+            Ok("x,预测值\r\n1/2,2\r\n0,1\r\n6,13\r\n1/2,2")
+        );
+        assert_eq!(
+            calculate_linear_fit("predict comb(4,2) @ 0,1; 1,3").as_deref(),
+            Ok("13")
+        );
+        let xs = std::iter::repeat_n("2", MAX_PREDICTIONS + 1)
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(
+            calculate_linear_fit(&format!("预测 {xs} @ 0,1; 1,3")),
+            Err(LinearFitError::TooManyPredictions)
+        );
+    }
 
     #[test]
     fn fits_and_predicts_with_exact_rational_arithmetic() {

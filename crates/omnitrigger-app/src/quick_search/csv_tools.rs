@@ -269,8 +269,9 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
     let kind = match operation.as_str() {
         "校验" | "validate" => Operation::Validate,
         "补齐列" | "pad-columns" => Operation::PadRows,
-        "左连接" | "left-join" => return join_csv(input, true),
-        "内连接" | "inner-join" => return join_csv(input, false),
+        "左连接" | "left-join" => return join_csv(input, JoinKind::Left),
+        "内连接" | "inner-join" => return join_csv(input, JoinKind::Inner),
+        "全连接" | "full-join" => return join_csv(input, JoinKind::Full),
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
         "markdown" | "表格" => Operation::Markdown(None),
@@ -528,7 +529,13 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
     }
 }
 
-fn join_csv(input: &str, keep_unmatched: bool) -> Result<String, CsvError> {
+enum JoinKind {
+    Inner,
+    Left,
+    Full,
+}
+
+fn join_csv(input: &str, kind: JoinKind) -> Result<String, CsvError> {
     let ([left_key, right_key], data) =
         json_argument_and_data::<[ColumnReference; 2]>(input, CsvError::JoinArguments)?;
     let [left, right] =
@@ -558,20 +565,36 @@ fn join_csv(input: &str, keep_unmatched: bool) -> Result<String, CsvError> {
     let mut output = String::new();
     append_joined_csv_row(
         &mut output,
-        left_header,
+        left_header.iter().map(String::as_str),
         joined_csv_columns(right_header, right_key),
     )?;
     for left in left_rows {
+        let fields = left.iter().map(String::as_str);
         if let Some(matches) = by_key.get(left[left_key].as_str()) {
             for right in matches {
-                append_joined_csv_row(&mut output, left, joined_csv_columns(right, right_key))?;
+                append_joined_csv_row(
+                    &mut output,
+                    fields.clone(),
+                    joined_csv_columns(right, right_key),
+                )?;
             }
-        } else if keep_unmatched {
+        } else if matches!(kind, JoinKind::Left | JoinKind::Full) {
             append_joined_csv_row(
                 &mut output,
-                left,
+                fields,
                 std::iter::repeat_n("", right_header.len() - 1),
             )?;
+        }
+    }
+    if matches!(kind, JoinKind::Full) {
+        let left_keys: HashSet<_> = left_rows.iter().map(|row| row[left_key].as_str()).collect();
+        for right in right_rows {
+            let key = right[right_key].as_str();
+            if !left_keys.contains(key) {
+                let fields =
+                    (0..left_header.len()).map(|index| if index == left_key { key } else { "" });
+                append_joined_csv_row(&mut output, fields, joined_csv_columns(right, right_key))?;
+            }
         }
     }
     Ok(output)
@@ -586,12 +609,10 @@ fn joined_csv_columns(row: &[String], omitted: usize) -> impl Iterator<Item = &s
 
 fn append_joined_csv_row<'a>(
     output: &mut String,
-    left: &'a [String],
+    left: impl Iterator<Item = &'a str>,
     right: impl Iterator<Item = &'a str>,
 ) -> Result<(), CsvError> {
     let line = left
-        .iter()
-        .map(String::as_str)
         .chain(right)
         .map(csv_cell)
         .collect::<Vec<_>>()
@@ -1537,6 +1558,22 @@ mod tests {
             transform_csv(&format!("左连接 [1,1] {source}")),
             Err(CsvError::JoinTooLarge)
         );
+    }
+
+    #[test]
+    fn full_join_keeps_unmatched_rows_and_their_original_keys() {
+        for (query, expected) in [
+            (
+                r#"全连接 ["编号","键"] ["商品,编号\n茶,001\n米,002","键,金额\n003,2e0\n001,1.50\n003,4"]"#,
+                "商品,编号,金额\r\n茶,001,1.50\r\n米,002,\"\"\r\n\"\",003,2e0\r\n\"\",003,4",
+            ),
+            (
+                r#"full-join [1,2] ["编号","备注,键\n\"茶,热\",001\n末尾,"]"#,
+                "编号,备注\r\n001,\"茶,热\"\r\n\"\",末尾",
+            ),
+        ] {
+            assert_eq!(transform_csv(query).as_deref(), Ok(expected), "{query}");
+        }
     }
 
     #[test]
