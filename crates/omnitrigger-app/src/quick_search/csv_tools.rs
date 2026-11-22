@@ -194,7 +194,7 @@ impl CsvError {
                 "用 JSON 数组填写新列名、两列和运算，例如 [\"金额\",2,\"*\",3]"
             }
             Self::FormulaColumnArguments => {
-                "用 JSON 数组填写新列名、x 列、y 列和算式，例如 [\"金额\",2,3,\"x*y+1/6\"]"
+                "用 JSON 数组填写新列名、来源列和算式，例如 [\"平方\",2,\"x**2\"] 或 [\"金额\",2,3,\"x*y+1/6\"]"
             }
             Self::FormulaColumnLimit => "公式列每次最多处理 32 条数据",
             Self::FormulaEvaluation(error) => error.message(),
@@ -288,7 +288,7 @@ enum Operation {
     ComputeColumn {
         name: String,
         left: ColumnReference,
-        right: ColumnReference,
+        right: Option<ColumnReference>,
         arithmetic: ColumnArithmetic,
     },
     ConvertDataColumn(String, ColumnReference, String),
@@ -380,6 +380,13 @@ enum ColumnArithmetic {
     Formula(String),
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FormulaColumnArguments {
+    Single((String, ColumnReference, String)),
+    Pair((String, ColumnReference, ColumnReference, String)),
+}
+
 impl ColumnArithmetic {
     fn parse(operator: &str) -> Result<Self, CsvError> {
         match operator {
@@ -391,17 +398,21 @@ impl ColumnArithmetic {
         }
     }
 
-    fn apply(&self, left: BigRational, right: BigRational) -> Result<BigRational, CsvError> {
-        Ok(match self {
-            Self::Add => left + right,
-            Self::Subtract => left - right,
-            Self::Multiply => left * right,
-            Self::Divide if right == BigRational::default() => {
+    fn apply(
+        &self,
+        left: BigRational,
+        right: Option<BigRational>,
+    ) -> Result<BigRational, CsvError> {
+        Ok(match (self, right) {
+            (Self::Add, Some(right)) => left + right,
+            (Self::Subtract, Some(right)) => left - right,
+            (Self::Multiply, Some(right)) => left * right,
+            (Self::Divide, Some(right)) if right == BigRational::default() => {
                 return Err(CsvError::ComputedDivisionByZero);
             }
-            Self::Divide => left / right,
-            Self::Formula(expression) => {
-                return calculate_fraction_with_variables(expression, Some(&left), Some(&right))
+            (Self::Divide, Some(right)) => left / right,
+            (Self::Formula(expression), right) => {
+                return calculate_fraction_with_variables(expression, Some(&left), right.as_ref())
                     .map_err(|error| match error {
                         FractionError::ZeroDenominator => CsvError::ComputedDivisionByZero,
                         FractionError::Invalid | FractionError::Incomplete => {
@@ -410,6 +421,7 @@ impl ColumnArithmetic {
                         _ => CsvError::FormulaEvaluation(error),
                     });
             }
+            (_, None) => return Err(CsvError::ComputedColumnArguments),
         })
     }
 }
@@ -677,16 +689,23 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             Operation::ComputeColumn {
                 name,
                 left,
-                right,
+                right: Some(right),
                 arithmetic: ColumnArithmetic::parse(&operator)?,
             }
         }
         "公式列" | "formula-column" => {
-            let ((name, left, right, expression), data) =
-                json_argument_and_data::<(String, ColumnReference, ColumnReference, String)>(
-                    input,
-                    CsvError::FormulaColumnArguments,
-                )?;
+            let (arguments, data) = json_argument_and_data::<FormulaColumnArguments>(
+                input,
+                CsvError::FormulaColumnArguments,
+            )?;
+            let (name, left, right, expression) = match arguments {
+                FormulaColumnArguments::Single((name, left, expression)) => {
+                    (name, left, None, expression)
+                }
+                FormulaColumnArguments::Pair((name, left, right, expression)) => {
+                    (name, left, Some(right), expression)
+                }
+            };
             if name.trim().is_empty() || name.contains('\0') || expression.trim().is_empty() {
                 return Err(CsvError::FormulaColumnArguments);
             }
@@ -2014,7 +2033,7 @@ fn compute_column(
     mut rows: Vec<Vec<String>>,
     name: String,
     left: ColumnReference,
-    right: ColumnReference,
+    right: Option<ColumnReference>,
     arithmetic: ColumnArithmetic,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first_mut().ok_or(CsvError::MissingInput)?;
@@ -2022,8 +2041,8 @@ fn compute_column(
         return Err(CsvError::ComputedColumnArguments);
     }
     let left = left.resolve(header)?;
-    let right = right.resolve(header)?;
-    validate_column_width(&[left, right], header.len())?;
+    let right = right.map(|column| column.resolve(header)).transpose()?;
+    validate_column_width(&[left, right.unwrap_or(left)], header.len())?;
     if header.contains(&name) {
         return Err(CsvError::HeaderNameConflict);
     }
@@ -2033,8 +2052,10 @@ fn compute_column(
     header.push(name);
     for row in records {
         let left_value = parse_fraction_literal(&row[left]).map_err(|_| CsvError::InvalidNumber)?;
-        let right_value =
-            parse_fraction_literal(&row[right]).map_err(|_| CsvError::InvalidNumber)?;
+        let right_value = right
+            .map(|column| parse_fraction_literal(&row[column]))
+            .transpose()
+            .map_err(|_| CsvError::InvalidNumber)?;
         let result = arithmetic.apply(left_value, right_value)?;
         ensure_exact_size(&result).map_err(|_| CsvError::ComputedNumberRange)?;
         row.push(result.to_string());
@@ -4321,6 +4342,21 @@ mod tests {
             transform_csv("累计合计列 [\"累计\",1,[]]\n金额\n1\n坏值"),
             Err(CsvError::DataRowValue { row: 2, .. })
         ));
+    }
+
+    #[test]
+    fn computes_a_formula_column_using_a_single_named_or_numbered_column() {
+        for source in ["1", "\"数量\""] {
+            let expression = format!("公式列 [\"平方\",{source},\"x**2\"]\n数量\n1/3\n-3");
+            assert_eq!(
+                transform_csv(&expression).as_deref(),
+                Ok("数量,平方\r\n1/3,1/9\r\n-3,9")
+            );
+        }
+        assert_eq!(
+            transform_csv("公式列 [\"结果\",1,\"x+y\"]\n数量\n1"),
+            Err(CsvError::FormulaColumnArguments)
+        );
     }
 
     #[test]

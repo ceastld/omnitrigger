@@ -2568,6 +2568,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用单列公式逐行求平方",
+        query: "CSV: 公式列 [\"平方\",\"数量\",\"x**2\"]\n数量\n1/3\n-3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 CSV 中混用的容量单位换算为同一单位",
         query: "CSV: 数据换算列 [\"容量(KiB)\",\"容量\",\"KiB\"]\n文件,容量\n甲,9007199254740993 B\n乙,1/3 KiB\n丙,",
     },
