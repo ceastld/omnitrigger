@@ -72,8 +72,9 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
         "合计" | "sum" => (aggregate_duration_list(values, false)?, false),
         "平均" | "average" => (aggregate_duration_list(values, true)?, false),
         "频数平均" | "frequency-average" => (frequency_average(values)?, false),
+        "频数中位数" | "frequency-median" => (median_duration_list(values, true)?, false),
         "扣除休息" | "subtract-break" => (elapsed_after_break(values)?, false),
-        "中位数" | "median" => (median_duration_list(values)?, false),
+        "中位数" | "median" => (median_duration_list(values, false)?, false),
         "最短" | "min" => (duration_extremes(values)?.0, false),
         "最长" | "max" => (duration_extremes(values)?.1, false),
         "极差" | "range" => {
@@ -196,10 +197,10 @@ fn aggregate_duration_list(input: &str, average: bool) -> Result<i128, DurationE
     Ok(total / count)
 }
 
-fn frequency_average(input: &str) -> Result<i128, DurationError> {
-    let mut total = BigInt::default();
-    let mut count = BigInt::default();
-    for term in duration_terms(input) {
+fn frequency_duration_values(
+    input: &str,
+) -> impl Iterator<Item = Result<(i128, u64), DurationError>> + '_ {
+    duration_terms(input).map(|term| {
         let (value, repetitions) = term
             .split_once('@')
             .ok_or(DurationError::InvalidFrequency)?;
@@ -210,6 +211,15 @@ fn frequency_average(input: &str) -> Result<i128, DurationError> {
             .filter(|&count| count > 0)
             .ok_or(DurationError::InvalidFrequency)?;
         let nanos = bounded_duration_value(value.trim())?;
+        Ok((nanos, repetitions))
+    })
+}
+
+fn frequency_average(input: &str) -> Result<i128, DurationError> {
+    let mut total = BigInt::default();
+    let mut count = BigInt::default();
+    for term in frequency_duration_values(input) {
+        let (nanos, repetitions) = term?;
         total += BigInt::from(nanos) * BigInt::from(repetitions);
         count += repetitions;
     }
@@ -231,21 +241,38 @@ fn duration_extremes(input: &str) -> Result<(i128, i128), DurationError> {
     })
 }
 
-fn median_duration_list(input: &str) -> Result<i128, DurationError> {
-    let mut values = duration_list_values(input).collect::<Result<Vec<_>, _>>()?;
-    values.sort_unstable();
-    let middle = values.len() / 2;
-    let &right = values.get(middle).ok_or(DurationError::Incomplete)?;
-    if !values.len().is_multiple_of(2) {
-        return Ok(right);
+fn median_duration_list(input: &str, use_frequencies: bool) -> Result<i128, DurationError> {
+    let mut values = if use_frequencies {
+        frequency_duration_values(input).collect::<Result<Vec<_>, _>>()?
+    } else {
+        duration_list_values(input)
+            .map(|value| value.map(|value| (value, 1)))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let count: u128 = values.iter().map(|&(_, count)| u128::from(count)).sum();
+    if count == 0 {
+        return Err(DurationError::Incomplete);
     }
-    let sum = values[middle - 1]
-        .checked_add(right)
-        .ok_or(DurationError::OutOfRange)?;
-    if sum % 2 != 0 {
-        return Err(DurationError::Precision);
+    values.sort_unstable_by_key(|&(nanos, _)| nanos);
+    let mut center_rank = (count - 1) / 2;
+    for (index, &(nanos, repetitions)) in values.iter().enumerate() {
+        let repetitions = u128::from(repetitions);
+        if center_rank >= repetitions {
+            center_rank -= repetitions;
+            continue;
+        }
+        if !count.is_multiple_of(2) || center_rank + 1 < repetitions {
+            return Ok(nanos);
+        }
+        let sum = nanos
+            .checked_add(values[index + 1].0)
+            .ok_or(DurationError::OutOfRange)?;
+        if sum % 2 != 0 {
+            return Err(DurationError::Precision);
+        }
+        return Ok(sum / 2);
     }
-    Ok(sum / 2)
+    Err(DurationError::Incomplete)
 }
 
 pub(super) fn format_clock_duration(nanos: u128, sign: &str) -> String {
@@ -667,6 +694,28 @@ mod tests {
             convert_duration("中位数 0ns,1ns"),
             Err(DurationError::Precision)
         );
+    }
+
+    #[test]
+    fn calculates_exact_duration_medians_with_frequency_groups() {
+        for (query, expected) in [
+            ("频数中位数 01:00@2,02:00@2", "00:01:30"),
+            ("频数中位数 2s@2,-1s@1,1s@1 to ms", "1500 ms"),
+            ("frequency-median 2s@4,1s@1", "00:00:02"),
+            (
+                "频数中位数 01:00@18446744073709551615,02:00@18446744073709551615",
+                "00:01:30",
+            ),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("频数中位数", DurationError::Incomplete),
+            ("频数中位数 1s@0", DurationError::InvalidFrequency),
+            ("频数中位数 1ns@1,2ns@1", DurationError::Precision),
+        ] {
+            assert_eq!(convert_duration(query), Err(error), "{query}");
+        }
     }
 
     #[test]

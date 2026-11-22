@@ -746,6 +746,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "按各组出现次数求中位时长",
+        query: "时长: 频数中位数 01:00@2,02:00@2",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "从一组时长中取中位数",
         query: "时长: 中位数 01:25,02:40,00:55",
     },
@@ -3364,6 +3369,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "合计",
                     "平均",
                     "频数平均",
+                    "频数中位数",
                     "扣除休息",
                     "比率",
                     "中位数",
