@@ -1627,6 +1627,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用数量和单价算出新的一列",
+        query: "CSV: 计算列 [\"金额\",2,\"*\",3] 商品,数量,单价\n茶,3,2.50\n咖啡,2,1/3",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "删除 CSV 中内容重复的行",
         query: "CSV: 去重 编号,备注\n001,\"茶,咖啡\"\n\"001\",\"茶,咖啡\"\n002,梨",
     },

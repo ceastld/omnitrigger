@@ -30,7 +30,10 @@ pub(super) enum CsvError {
     MissingColumnName,
     AmbiguousColumnName,
     RenameArguments,
-    RenameConflict,
+    HeaderNameConflict,
+    ComputedColumnArguments,
+    ComputedDivisionByZero,
+    ComputedNumberRange,
     InvalidColumnValue,
     InvalidNumberFilter,
     Regex(TextError),
@@ -57,7 +60,12 @@ impl CsvError {
             Self::MissingColumnName => "表头中找不到所选列名",
             Self::AmbiguousColumnName => "表头中存在多个同名列",
             Self::RenameArguments => "用 JSON 数组填写原列名和非空的新列名",
-            Self::RenameConflict => "表头中已经有这个新列名",
+            Self::HeaderNameConflict => "表头中已经有这个新列名",
+            Self::ComputedColumnArguments => {
+                "用 JSON 数组填写新列名、列号和运算，例如 [\"金额\",2,\"*\",3]"
+            }
+            Self::ComputedDivisionByZero => "计算列中遇到了除以零",
+            Self::ComputedNumberRange => "计算列的结果超出精确计算范围",
             Self::InvalidColumnValue => "请输入列号和带双引号的值，再粘贴表格",
             Self::InvalidNumberFilter => "输入列号、比较符和数值，例如 CSV: 数值筛选 3 >= 1.5",
             Self::Regex(error) => error.message(),
@@ -82,6 +90,12 @@ enum Operation {
     SelectColumns(Vec<usize>),
     SelectNamedColumns(Vec<String>),
     RenameColumn([String; 2]),
+    ComputeColumn {
+        name: String,
+        left: usize,
+        right: usize,
+        arithmetic: ColumnArithmetic,
+    },
     DeduplicateRows,
     DeduplicateByColumns(Vec<usize>),
     FilterColumn {
@@ -103,6 +117,37 @@ enum Operation {
         descending: bool,
         numeric: bool,
     },
+}
+
+enum ColumnArithmetic {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+
+impl ColumnArithmetic {
+    fn parse(operator: &str) -> Result<Self, CsvError> {
+        match operator {
+            "+" => Ok(Self::Add),
+            "-" => Ok(Self::Subtract),
+            "*" | "×" => Ok(Self::Multiply),
+            "/" | "÷" => Ok(Self::Divide),
+            _ => Err(CsvError::ComputedColumnArguments),
+        }
+    }
+
+    fn apply(&self, left: BigRational, right: BigRational) -> Result<BigRational, CsvError> {
+        Ok(match self {
+            Self::Add => left + right,
+            Self::Subtract => left - right,
+            Self::Multiply => left * right,
+            Self::Divide if right == BigRational::default() => {
+                return Err(CsvError::ComputedDivisionByZero);
+            }
+            Self::Divide => left / right,
+        })
+    }
 }
 
 enum ColumnCondition {
@@ -171,6 +216,19 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             let (names, data) = json_argument_and_data(input, CsvError::RenameArguments)?;
             input = data;
             Operation::RenameColumn(names)
+        }
+        "计算列" | "compute-column" => {
+            let ((name, left, operator, right), data): ((String, usize, String, usize), _) =
+                json_argument_and_data(input, CsvError::ComputedColumnArguments)?;
+            let left = left.checked_sub(1).ok_or(CsvError::InvalidColumns)?;
+            let right = right.checked_sub(1).ok_or(CsvError::InvalidColumns)?;
+            input = data;
+            Operation::ComputeColumn {
+                name,
+                left,
+                right,
+                arithmetic: ColumnArithmetic::parse(&operator)?,
+            }
         }
         "按列去重" | "deduplicate-columns" => {
             let (columns, data) = column_arguments(input)?;
@@ -277,6 +335,12 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::SelectColumns(columns) => select_columns(&rows, &columns),
         Operation::SelectNamedColumns(names) => select_named_columns(&rows, &names),
         Operation::RenameColumn(names) => rename_column(rows, names),
+        Operation::ComputeColumn {
+            name,
+            left,
+            right,
+            arithmetic,
+        } => compute_column(rows, name, left, right, arithmetic),
         Operation::DeduplicateRows => {
             let mut seen = HashSet::new();
             Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
@@ -398,9 +462,36 @@ fn rename_column(mut rows: Vec<Vec<String>>, [old, new]: [String; 2]) -> Result<
     }
     let column = header_column(header, &old)?;
     if old != new && header.contains(&new) {
-        return Err(CsvError::RenameConflict);
+        return Err(CsvError::HeaderNameConflict);
     }
     header[column] = new;
+    Ok(write_rows(&rows, ','))
+}
+
+fn compute_column(
+    mut rows: Vec<Vec<String>>,
+    name: String,
+    left: usize,
+    right: usize,
+    arithmetic: ColumnArithmetic,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first_mut().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::ComputedColumnArguments);
+    }
+    validate_column_width(&[left, right], header.len())?;
+    if header.contains(&name) {
+        return Err(CsvError::HeaderNameConflict);
+    }
+    header.push(name);
+    for row in records {
+        let left_value = parse_fraction_literal(&row[left]).map_err(|_| CsvError::InvalidNumber)?;
+        let right_value =
+            parse_fraction_literal(&row[right]).map_err(|_| CsvError::InvalidNumber)?;
+        let result = arithmetic.apply(left_value, right_value)?;
+        ensure_exact_size(&result).map_err(|_| CsvError::ComputedNumberRange)?;
+        row.push(result.to_string());
+    }
     Ok(write_rows(&rows, ','))
 }
 
@@ -938,6 +1029,44 @@ mod tests {
     }
 
     #[test]
+    fn calculates_a_new_column_with_exact_cells_and_validates_operands() {
+        let table = "商品,数量,单价\n茶,3,2.50\n咖啡,2,1/3";
+        assert_eq!(
+            transform_csv(&format!("计算列 [\"金额\",2,\"*\",3]\n{table}")).as_deref(),
+            Ok("商品,数量,单价,金额\r\n茶,3,2.50,15/2\r\n咖啡,2,1/3,2/3")
+        );
+        for (operator, expected) in [("+", "5/6"), ("-", "1/6"), ("/", "3/2")] {
+            assert_eq!(
+                transform_csv(&format!(
+                    "计算列 [\"新列\",1,\"{operator}\",2] x,y\n1/2,1/3"
+                ))
+                .as_deref(),
+                Ok(format!("x,y,新列\r\n1/2,1/3,{expected}").as_str())
+            );
+        }
+        for (query, error) in [
+            (
+                "计算列 [\"数量\",2,\"+\",3]\nx,数量,z\n茶,3,2.50",
+                CsvError::HeaderNameConflict,
+            ),
+            (
+                "计算列 [\"商\",1,\"/\",2]\nx,y\n1,0",
+                CsvError::ComputedDivisionByZero,
+            ),
+            (
+                "计算列 [\"金额\",3,\"*\",2]\nx,y\n1,2",
+                CsvError::ColumnOutOfRange,
+            ),
+            (
+                "计算列 [\"金额\",1,\"-\",2]\nx,y\n1,空",
+                CsvError::InvalidNumber,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(error));
+        }
+    }
+
+    #[test]
     fn renames_one_unique_csv_header_without_rewriting_cell_contents() {
         assert_eq!(
             transform_csv("改列名 [\"旧名\",\"备注,说明\"] 编号,旧名\n001,\"茶,咖啡\"").as_deref(),
@@ -950,7 +1079,7 @@ mod tests {
         for (query, error) in [
             (r#"改列名 ["A"] A,B"#, CsvError::RenameArguments),
             (r#"改列名 ["A"," "] A,B"#, CsvError::RenameArguments),
-            (r#"改列名 ["A","B"] A,B"#, CsvError::RenameConflict),
+            (r#"改列名 ["A","B"] A,B"#, CsvError::HeaderNameConflict),
             (r#"改列名 ["a","Z"] A,B"#, CsvError::MissingColumnName),
             (r#"改列名 ["A","Z"] A,A"#, CsvError::AmbiguousColumnName),
         ] {
