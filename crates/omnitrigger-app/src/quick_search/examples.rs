@@ -85,6 +85,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 四分位 4,1,3,2",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "求绝对偏差的中位数",
+        query: "统计: 中位绝对偏差 0,1/2,1,10",
+    },
+    Example {
         icon: Icon::Layers,
         title: "按精确数值列出次数和频率",
         query: "统计: 频数表 3,1/2,0.5,3,5",
@@ -2229,6 +2234,12 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "分位"
                     | "分位数"
                     | "四分位"
+                    | "中"
+                    | "中位"
+                    | "中位绝"
+                    | "中位绝对"
+                    | "中位绝对偏"
+                    | "中位绝对偏差"
                     | "加权"
                     | "加权平均"
                     | "移"

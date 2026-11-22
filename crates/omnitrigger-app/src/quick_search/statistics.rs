@@ -52,6 +52,7 @@ enum StatisticsOperation {
     FrequencyTable,
     Mode,
     RootMeanSquare,
+    MedianAbsoluteDeviation,
 }
 
 pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsError> {
@@ -65,6 +66,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "频数表" | "frequency-table" => (StatisticsOperation::FrequencyTable, values.trim()),
         "众数" | "mode" => (StatisticsOperation::Mode, values.trim()),
         "均方根" | "rms" => (StatisticsOperation::RootMeanSquare, values.trim()),
+        "中位绝对偏差" | "mad" | "median-absolute-deviation" => {
+            (StatisticsOperation::MedianAbsoluteDeviation, values.trim())
+        }
         "加权平均" | "weighted-mean" => return weighted_mean(values.trim()),
         "移动平均" | "moving-average" => return moving_average(values.trim()),
         "累计合计" | "running-sum" => return running_totals(values.trim(), false),
@@ -115,6 +119,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         }
         StatisticsOperation::FrequencyTable => Ok(report_frequencies(values, count, false)),
         StatisticsOperation::Mode => Ok(report_frequencies(values, count, true)),
+        StatisticsOperation::MedianAbsoluteDeviation => {
+            median_absolute_deviation(values, count).map(|value| value.to_string())
+        }
         StatisticsOperation::RootMeanSquare => {
             let squares = squared_deviation_sum(&values, &BigRational::default())?;
             let mean_square = bounded(squares / BigInt::from(count))?;
@@ -268,13 +275,7 @@ fn summarize(
     let average = bounded(&sum / BigInt::from(count))?;
 
     values.sort_by(|(left, _), (right, _)| left.cmp(right));
-    let middle = observation_at(&values, count / 2);
-    let median = if count.is_multiple_of(2) {
-        let previous = observation_at(&values, count / 2 - 1);
-        bounded((previous + middle) / BigInt::from(2))?
-    } else {
-        middle.clone()
-    };
+    let median = sorted_median(&values, count)?;
     let mut result = format!(
         "数量 {count} · 合计 {sum}\n平均值 {average} · 中位数 {median}\n最小值 {} · 最大值 {}",
         values[0].0,
@@ -291,6 +292,36 @@ fn summarize(
         ));
     }
     Ok(result)
+}
+
+fn sorted_median(
+    values: &[(BigRational, u64)],
+    count: u64,
+) -> Result<BigRational, StatisticsError> {
+    let middle = observation_at(values, count / 2);
+    if count.is_multiple_of(2) {
+        let previous = observation_at(values, count / 2 - 1);
+        return bounded((previous + middle) / BigInt::from(2));
+    }
+    Ok(middle.clone())
+}
+
+fn median_absolute_deviation(
+    mut values: Vec<(BigRational, u64)>,
+    count: u64,
+) -> Result<BigRational, StatisticsError> {
+    values.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let center = sorted_median(&values, count)?;
+    for (value, _) in &mut values {
+        let deviation = std::mem::take(value) - &center;
+        *value = bounded(if deviation.numer().sign() == Sign::Minus {
+            -deviation
+        } else {
+            deviation
+        })?;
+    }
+    values.sort_by(|(left, _), (right, _)| left.cmp(right));
+    sorted_median(&values, count)
 }
 
 fn squared_deviation_sum(
@@ -405,6 +436,23 @@ fn bounded(value: BigRational) -> Result<BigRational, StatisticsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computes_unscaled_median_absolute_deviation_with_frequencies() {
+        for (query, expected) in [
+            ("中位绝对偏差 0,1/2,1,10", "1/2"),
+            ("mad 1,1,2,2,100", "1"),
+            ("中位绝对偏差 频数 0@2,3@2,100@1", "3"),
+            ("mad frequency 0@1000000000,2@1000000000", "1"),
+            ("中位绝对偏差 2**80", "0"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+    }
 
     #[test]
     fn computes_exact_running_totals_and_averages_in_input_order() {
