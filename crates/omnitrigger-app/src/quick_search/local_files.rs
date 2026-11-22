@@ -76,6 +76,10 @@ impl DirectoryLoad {
 }
 
 impl LocalFilesIndex {
+    pub(super) fn invalidate(&mut self) {
+        self.current = None;
+    }
+
     pub(super) fn parent_query(&self, query: &str) -> Option<String> {
         let query = split_query(query)?;
         let request = self.current.as_ref()?;
@@ -89,7 +93,7 @@ impl LocalFilesIndex {
 
     pub(super) fn request(&mut self, query: Option<&str>) -> Option<Arc<DirectoryLoad>> {
         let Some(query) = query.and_then(split_query) else {
-            self.current = None;
+            self.invalidate();
             return None;
         };
         if self
@@ -268,6 +272,23 @@ mod tests {
             size_bytes: None,
             metadata: None,
         }
+    }
+
+    #[test]
+    fn invalidating_a_directory_snapshot_reloads_the_same_query() {
+        let mut index = LocalFilesIndex::default();
+        let query = r"C:\Work | *.txt";
+        let previous = index.request(Some(query)).unwrap();
+        assert!(index.finish(&previous, Ok(vec![entry("a.txt", "file")])));
+        assert!(index.request(Some(query)).is_none());
+        index.invalidate();
+        assert!(previous.cancelled.load(Ordering::Relaxed));
+        let next = index.request(Some(query)).unwrap();
+        assert!(!Arc::ptr_eq(&previous, &next));
+        assert!(!index.finish(&previous, Ok(Vec::new())));
+        assert!(index.finish(&next, Ok(vec![entry("b.txt", "file")])));
+        assert!(matches!(index.results(query), Results::Destinations(items)
+            if matches!(items.as_slice(), [Destination::LocalFile { name, .. }] if name == "b.txt")));
     }
 
     #[test]

@@ -20,6 +20,7 @@ pub(super) enum StatisticsError {
     ZeroTotalWeight,
     InvalidProbability,
     InvalidWindowWidth,
+    NonPositiveHarmonicValue,
     Paired(LinearFitError),
     Evaluation(FractionError),
 }
@@ -35,6 +36,7 @@ impl StatisticsError {
             Self::ZeroTotalWeight => "权重合计须大于零",
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
             Self::InvalidWindowWidth => "窗口大小须为正整数，且不能超过数值个数",
+            Self::NonPositiveHarmonicValue => "调和平均需要所有数值大于零",
             Self::Paired(error) => error.message(),
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "请输入整数、有限小数、分数或精确算式"
@@ -52,6 +54,7 @@ enum StatisticsOperation {
     FrequencyTable,
     Mode,
     RootMeanSquare,
+    HarmonicMean,
     MedianAbsoluteDeviation,
 }
 
@@ -66,6 +69,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "频数表" | "frequency-table" => (StatisticsOperation::FrequencyTable, values.trim()),
         "众数" | "mode" => (StatisticsOperation::Mode, values.trim()),
         "均方根" | "rms" => (StatisticsOperation::RootMeanSquare, values.trim()),
+        "调和平均" | "harmonic-mean" => (StatisticsOperation::HarmonicMean, values.trim()),
         "中位绝对偏差" | "mad" | "median-absolute-deviation" => {
             (StatisticsOperation::MedianAbsoluteDeviation, values.trim())
         }
@@ -127,6 +131,19 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             let squares = squared_deviation_sum(&values, &BigRational::default())?;
             let mean_square = bounded(squares / BigInt::from(count))?;
             Ok(format_square_root(&mean_square))
+        }
+        StatisticsOperation::HarmonicMean => {
+            let reciprocal_sum = values.into_iter().try_fold(
+                BigRational::default(),
+                |sum, (value, repetitions)| {
+                    if value.numer().sign() != Sign::Plus {
+                        return Err(StatisticsError::NonPositiveHarmonicValue);
+                    }
+                    bounded(sum + value.recip() * BigInt::from(repetitions))
+                },
+            )?;
+            let mean = bounded(BigRational::from_integer(BigInt::from(count)) / reciprocal_sum)?;
+            Ok(mean.to_string())
         }
     }
 }
@@ -620,6 +637,23 @@ mod tests {
             ("加权平均", StatisticsError::Incomplete),
         ] {
             assert_eq!(calculate_statistics(query), Err(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn calculates_exact_harmonic_means_with_frequencies_and_requires_positive_values() {
+        for (query, expected) in [
+            ("调和平均 36,72", "48"),
+            ("harmonic-mean frequency 1/2@2,2@1", "2/3"),
+            ("调和平均 2/7", "2/7"),
+        ] {
+            assert_eq!(calculate_statistics(query).as_deref(), Ok(expected));
+        }
+        for query in ["调和平均 1,0", "调和平均 频数 -1@2,3@1"] {
+            assert_eq!(
+                calculate_statistics(query),
+                Err(StatisticsError::NonPositiveHarmonicValue)
+            );
         }
     }
 

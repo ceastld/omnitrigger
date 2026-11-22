@@ -130,6 +130,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 均方根 1/2,3/2",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "求两段等距离行程的平均速度",
+        query: "统计: 调和平均 36,72",
+    },
+    Example {
         icon: Icon::Layers,
         title: "精确计算两组数值的样本协方差",
         query: "统计: 协方差 0,0; 1,1; 2,1",
@@ -829,6 +834,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Clock,
         title: "查询季度范围与工作日数",
         query: "日期: 2026-Q4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "查询下个自然季度的范围和工作日",
+        query: "日期: 下季度",
     },
     Example {
         icon: Icon::Clock,
@@ -2375,6 +2385,10 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "均"
                     | "均方"
                     | "均方根"
+                    | "调"
+                    | "调和"
+                    | "调和平"
+                    | "调和平均"
                     | "协"
                     | "协方"
                     | "协方差"

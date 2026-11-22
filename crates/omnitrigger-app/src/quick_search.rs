@@ -1535,6 +1535,17 @@ impl QuickSearch {
                     self.toggle_value_preview(window, cx);
                 }
             }
+            "f5" => {
+                let query = self.input.read(cx).text();
+                if !matches!(scoped_query(query.trim()), Some((Scope::LocalFiles, _))) {
+                    return;
+                }
+                if !event.is_held {
+                    self.index.local_files.invalidate();
+                    self.refresh_results(&query, window, cx);
+                    cx.notify();
+                }
+            }
             "enter" => {
                 if !event.is_held {
                     self.confirm(window, cx);
@@ -2670,7 +2681,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "windows")]
     #[ignore = "需要 Windows 桌面会话"]
-    fn search_shortcuts_insert_one_line_break_and_toggle_history() {
+    fn search_shortcuts_handle_text_and_page_navigation() {
         let (send, receive) = std::sync::mpsc::channel();
         gpui::Application::new()
             .with_assets(crate::Assets)
@@ -2748,13 +2759,20 @@ mod tests {
                             [before, search.input.read(cx).text()]
                         })
                         .unwrap();
-                    send.send((states, reopened_states)).unwrap();
+                    let page_states = visit_search_pages(reopened, cx);
+                    send.send((states, reopened_states, page_states)).unwrap();
                     cx.update(|cx| cx.quit()).unwrap();
                 })
                 .detach();
             });
-        let (states, reopened_states) = receive.recv().unwrap();
+        let (states, reopened_states, (help_pages, output_pages)) = receive.recv().unwrap();
         assert_eq!(reopened_states, ["", "3**4"]);
+        let last_example_page = (EXAMPLES.len() - 1) / EXAMPLE_PAGE_SIZE * EXAMPLE_PAGE_SIZE;
+        assert_eq!(
+            help_pages,
+            [last_example_page, last_example_page - EXAMPLE_PAGE_SIZE, 0]
+        );
+        assert_eq!(output_pages, [3, 2, 0]);
         assert_eq!(
             states.unwrap(),
             [
@@ -2778,60 +2796,42 @@ mod tests {
         );
     }
 
-    #[test]
     #[cfg(target_os = "windows")]
-    #[ignore = "需要 Windows 桌面会话"]
-    fn search_pages_jump_to_edges_in_help_and_expanded_results() {
-        let (send, receive) = std::sync::mpsc::channel();
-        gpui::Application::new()
-            .with_assets(crate::Assets)
-            .run(move |cx| {
-                let window = open_test_search(SearchIndex::default(), cx);
-                cx.spawn(async move |cx| {
-                    let visit_pages =
-                        |search: &mut QuickSearch,
-                         window: &mut Window,
-                         cx: &mut Context<QuickSearch>| {
-                            ["ctrl-pagedown", "pageup", "ctrl-pageup"].map(|key| {
-                                search.key_down(
-                                    &KeyDownEvent {
-                                        keystroke: gpui::Keystroke::parse(key).unwrap(),
-                                        is_held: false,
-                                    },
-                                    window,
-                                    cx,
-                                );
-                                search.selected
-                            })
-                        };
-                    window
-                        .update(cx, |search, window, cx| search.fill_query("?", window, cx))
-                        .unwrap();
-                    let help = window.update(cx, visit_pages).unwrap();
-                    window
-                        .update(cx, |search, window, cx| {
-                            let lines = vec!["样例"; 40].join("\n");
-                            search.fill_query(format!("文本: 按行编号 {lines}"), window, cx);
-                        })
-                        .unwrap();
-                    let output = window
-                        .update(cx, |search, window, cx| {
-                            search.toggle_value_preview(window, cx);
-                            visit_pages(search, window, cx)
-                        })
-                        .unwrap();
-                    send.send((help, output)).unwrap();
-                    cx.update(|cx| cx.quit()).unwrap();
+    fn visit_search_pages(
+        handle: WindowHandle<QuickSearch>,
+        cx: &mut gpui::AsyncApp,
+    ) -> ([usize; 3], [usize; 3]) {
+        let visit_pages =
+            |search: &mut QuickSearch, window: &mut Window, cx: &mut Context<QuickSearch>| {
+                ["ctrl-pagedown", "pageup", "ctrl-pageup"].map(|key| {
+                    search.key_down(
+                        &KeyDownEvent {
+                            keystroke: gpui::Keystroke::parse(key).unwrap(),
+                            is_held: false,
+                        },
+                        window,
+                        cx,
+                    );
+                    search.selected
                 })
-                .detach();
-            });
-        let (help, output) = receive.recv().unwrap();
-        let last_example_page = (EXAMPLES.len() - 1) / EXAMPLE_PAGE_SIZE * EXAMPLE_PAGE_SIZE;
-        assert_eq!(
-            help,
-            [last_example_page, last_example_page - EXAMPLE_PAGE_SIZE, 0]
-        );
-        assert_eq!(output, [3, 2, 0]);
+            };
+        handle
+            .update(cx, |search, window, cx| search.fill_query("?", window, cx))
+            .unwrap();
+        let help = handle.update(cx, visit_pages).unwrap();
+        handle
+            .update(cx, |search, window, cx| {
+                let lines = vec!["样例"; 40].join("\n");
+                search.fill_query(format!("文本: 按行编号 {lines}"), window, cx);
+            })
+            .unwrap();
+        let output = handle
+            .update(cx, |search, window, cx| {
+                search.toggle_value_preview(window, cx);
+                visit_pages(search, window, cx)
+            })
+            .unwrap();
+        (help, output)
     }
 
     #[test]

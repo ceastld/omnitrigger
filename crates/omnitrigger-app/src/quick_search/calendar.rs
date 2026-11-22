@@ -243,11 +243,12 @@ fn weekday_occurrence_parts(input: &str) -> Option<(i32, u32, &str)> {
 enum RelativePeriod {
     Week(i8),
     Month(i8),
+    Quarter(i8),
     Year(i8),
 }
 
 fn relative_period(input: &str) -> Option<RelativePeriod> {
-    use RelativePeriod::{Month, Week, Year};
+    use RelativePeriod::{Month, Quarter, Week, Year};
     match input.to_ascii_lowercase().as_str() {
         "本周" | "这周" | "本星期" | "this week" => Some(Week(0)),
         "上周" | "上星期" | "last week" => Some(Week(-1)),
@@ -255,6 +256,9 @@ fn relative_period(input: &str) -> Option<RelativePeriod> {
         "本月" | "这个月" | "this month" => Some(Month(0)),
         "上月" | "上个月" | "last month" => Some(Month(-1)),
         "下月" | "下个月" | "next month" => Some(Month(1)),
+        "本季度" | "这季度" | "this quarter" => Some(Quarter(0)),
+        "上季度" | "上个季度" | "last quarter" => Some(Quarter(-1)),
+        "下季度" | "下个季度" | "next quarter" => Some(Quarter(1)),
         "今年" | "本年" | "this year" => Some(Year(0)),
         "去年" | "上年" | "last year" => Some(Year(-1)),
         "明年" | "下年" | "next year" => Some(Year(1)),
@@ -818,6 +822,13 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         Some(RelativePeriod::Month(offset)) => {
             return month_range(relative_month_start(today, offset)?, 1);
         }
+        Some(RelativePeriod::Quarter(offset)) => {
+            let quarter = 4 * today.year() + (today.month0() / 3) as i32 + i32::from(offset);
+            let year = quarter.div_euclid(4);
+            let start_month = 1 + 3 * quarter.rem_euclid(4) as u32;
+            let start = in_range(NaiveDate::from_ymd_opt(year, start_month, 1))?;
+            return month_range(start, 3);
+        }
         Some(RelativePeriod::Year(offset)) => return year_range(today.year() + i32::from(offset)),
         None => {}
     }
@@ -1242,6 +1253,28 @@ mod tests {
         }
         let end = NaiveDate::from_ymd_opt(9999, 12, 31).unwrap();
         assert_eq!(calculate_date("下周", end), Err(DateError::OutOfRange));
+    }
+
+    #[test]
+    fn finds_relative_calendar_quarters_across_year_boundaries() {
+        let today = NaiveDate::from_ymd_opt(2024, 1, 31).unwrap();
+        for (query, expected) in [
+            ("上季度", "2023-10-01 至 2023-12-31\n92 天 · 65 工作日"),
+            ("本季度", "2024-01-01 至 2024-03-31\n91 天 · 65 工作日"),
+            (
+                "NEXT QUARTER",
+                "2024-04-01 至 2024-06-30\n91 天 · 65 工作日",
+            ),
+        ] {
+            assert!(looks_like_date_query(query));
+            assert_eq!(calculate_date(query, today).as_deref(), Ok(expected));
+        }
+        for (query, today) in [
+            ("上季度", NaiveDate::from_ymd_opt(0, 1, 1).unwrap()),
+            ("下季度", NaiveDate::from_ymd_opt(9999, 12, 31).unwrap()),
+        ] {
+            assert_eq!(calculate_date(query, today), Err(DateError::OutOfRange));
+        }
     }
 
     #[test]
