@@ -225,6 +225,9 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "删路径" | "remove-path" => return remove_json_path(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
         "去空字段" | "remove-null-fields" => return remove_null_json_fields(source),
+        "递归去空字段" | "remove-null-fields-deep" => {
+            return rewrite_object_keys(source, ObjectKeyMode::DropNull);
+        }
         "补字段" | "fill-missing-field" => return fill_missing_json_fields(source),
         "转csv" | "to-csv" => return json_to_csv(source),
         "路径转csv" | "pointers-to-csv" => return json_paths_to_csv(source),
@@ -1382,6 +1385,7 @@ fn read_object_entries(source: &str) -> Result<Vec<(String, &RawValue)>, JsonErr
 enum ObjectKeyMode {
     Sort,
     Deduplicate { keep_last: bool },
+    DropNull,
 }
 
 fn remove_duplicate_json_keys(query: &str) -> Result<String, JsonError> {
@@ -1437,6 +1441,13 @@ fn rewrite_object_keys(source: &str, mode: ObjectKeyMode) -> Result<String, Json
                                 if keep_last {
                                     entries.reverse();
                                 }
+                            }
+                            ObjectKeyMode::DropNull => {
+                                let mut seen = HashSet::with_capacity(entries.len());
+                                if entries.iter().any(|(key, _)| !seen.insert(key)) {
+                                    return Err(JsonError::DuplicateKey);
+                                }
+                                entries.retain(|(_, value)| value.get() != "null");
                             }
                         }
                         result.push('{');
@@ -3134,6 +3145,30 @@ mod tests {
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn recursively_drops_null_object_fields_and_preserves_all_array_positions() {
+        let source =
+            r#"{"备注":null,"订单":[{"金额":1.50,"备注":null},null,{"说明":""}],"确认":false}"#;
+        assert_eq!(
+            transform_json(&format!("递归去空字段 {source}")).as_deref(),
+            Ok(r#"{"订单":[{"金额":1.50},null,{"说明":""}],"确认":false}"#)
+        );
+        assert_eq!(
+            transform_json(r#"remove-null-fields-deep [null,{"中":{"空":null}},{"数":1e0},false]"#)
+                .as_deref(),
+            Ok(r#"[null,{"中":{}},{"数":1e0},false]"#)
+        );
+        assert_eq!(
+            transform_json(r#"去空字段 {"备注":null,"订单":{"备注":null}}"#).as_deref(),
+            Ok(r#"{"订单":{"备注":null}}"#)
+        );
+        assert_eq!(
+            transform_json(r#"递归去空字段 {"订单":[{"a":null,"\u0061":1}]}"#),
+            Err(JsonError::DuplicateKey)
+        );
+        assert_eq!(transform_json("递归去空字段 null").as_deref(), Ok("null"));
     }
 
     #[test]

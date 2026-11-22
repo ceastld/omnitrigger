@@ -2382,6 +2382,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "递归移除 JSON 对象中的空值字段",
+        query: r#"JSON: 递归去空字段 {"备注":null,"订单":[{"金额":1.50,"备注":null},null],"确认":false}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把数组展开为 JSONL",
         query: r#"JSON: 展开数组 [{"城市":"北京"},{"城市":"上海"}]"#,
     },
