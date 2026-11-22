@@ -33,6 +33,7 @@ pub(super) enum ConversionError {
     InvalidResistanceOperands,
     InvalidResistanceList,
     InvalidEnergyUse,
+    InvalidBatteryEnergy,
     InvalidPeriod,
     InvalidPeriodTarget,
     OutOfRange,
@@ -65,6 +66,7 @@ impl ConversionError {
             Self::InvalidResistanceOperands => "求电阻时，电压和电流均须大于零",
             Self::InvalidResistanceList => "输入 2 至 32 个正电阻值，各项用逗号隔开",
             Self::InvalidEnergyUse => "填写非负功率和用时，例如 耗电 1.5 kW @ 2h",
+            Self::InvalidBatteryEnergy => "填写容量和标称电压，例如 电池能量 2500 mAh @ 3.7 V",
             Self::InvalidPeriod => "输入大于零的频率或周期，例如 50 Hz to ms 或 2 ms to Hz",
             Self::InvalidPeriodTarget => "频率请选择时间单位，周期请选择频率单位",
             Self::OutOfRange => "结果超出换算范围",
@@ -975,6 +977,7 @@ pub(super) fn calculate_circuit(query: &str) -> Result<String, ConversionError> 
             "串联" | "series" => return equivalent_resistance(values, false),
             "并联" | "parallel" => return equivalent_resistance(values, true),
             "耗电" | "energy-use" => return calculate_energy_use(values),
+            "电池能量" | "battery-energy" => return calculate_battery_energy(values),
             _ => {}
         }
     }
@@ -1012,6 +1015,40 @@ pub(super) fn calculate_circuit(query: &str) -> Result<String, ConversionError> 
         format_circuit_value(value, unit)?,
         format_circuit_value(power, "W")?
     ))
+}
+
+fn calculate_battery_energy(input: &str) -> Result<String, ConversionError> {
+    let (capacity, voltage) = input
+        .split_once('@')
+        .ok_or(ConversionError::InvalidBatteryEnergy)?;
+    let capacity = capacity.trim();
+    let (capacity, amp_hour_scale) = capacity
+        .strip_suffix("mAh")
+        .or_else(|| capacity.strip_suffix("mah"))
+        .map(|value| (value, 0.001))
+        .or_else(|| {
+            capacity
+                .strip_suffix("Ah")
+                .or_else(|| capacity.strip_suffix("ah"))
+                .map(|value| (value, 1.))
+        })
+        .ok_or(ConversionError::InvalidBatteryEnergy)?;
+    let capacity = evaluate(capacity.trim()).map_err(|_| ConversionError::InvalidBatteryEnergy)?;
+    let (voltage, unit) = parse_quantity(voltage.trim())?;
+    if capacity < 0. || voltage <= 0. || unit.dimension != Dimension::Voltage {
+        return Err(ConversionError::InvalidBatteryEnergy);
+    }
+    let watt_hours = (capacity * amp_hour_scale) * (voltage * unit.scale);
+    if !watt_hours.is_finite() || (capacity > 0. && watt_hours == 0.) {
+        return Err(ConversionError::OutOfRange);
+    }
+    let (value, unit) = if watt_hours >= 1_000. {
+        (watt_hours / 1_000., "kWh")
+    } else {
+        (watt_hours, "Wh")
+    };
+    let value = format_result(value).map_err(|_| ConversionError::OutOfRange)?;
+    Ok(format!("{value} {unit}"))
 }
 
 fn calculate_energy_use(input: &str) -> Result<String, ConversionError> {
@@ -2040,6 +2077,30 @@ mod tests {
             })
         );
         assert_eq!(convert_batch(" \r\n "), Err(BatchError::Empty));
+    }
+
+    #[test]
+    fn estimates_battery_energy_from_capacity_and_nominal_voltage() {
+        for (query, expected) in [
+            ("电池能量 2500 mAh @ 3.7 V", "9.25 Wh"),
+            ("battery-energy 5/2Ah @ 3700mV", "9.25 Wh"),
+            ("电池能量 5 Ah @ 250 V", "1.25 kWh"),
+            ("电池能量 0 mAh @ 5 V", "0 Wh"),
+        ] {
+            assert_eq!(calculate_circuit(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in [
+            "电池能量 2 Ah @ 0 V",
+            "电池能量 -2 Ah @ 3 V",
+            "电池能量 2 A @ 3 V",
+            "电池能量 2 Ah @ 3 W",
+        ] {
+            assert_eq!(
+                calculate_circuit(query),
+                Err(ConversionError::InvalidBatteryEnergy),
+                "{query}"
+            );
+        }
     }
 
     #[test]

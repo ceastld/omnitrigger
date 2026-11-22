@@ -920,6 +920,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "电路: 耗电 1.5 kW @ 2h",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "用电池容量和标称电压估算电能",
+        query: "电路: 电池能量 2500 mAh @ 3.7 V",
+    },
+    Example {
         icon: Icon::Clock,
         title: "把频率换算为周期",
         query: "周期: 50 Hz to ms",
@@ -3495,7 +3500,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Circuit
             if !term.is_empty()
-                && ["串联", "并联", "耗电"]
+                && ["串联", "并联", "耗电", "电池能量"]
                     .iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Equation

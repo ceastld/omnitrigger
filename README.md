@@ -262,6 +262,7 @@
 - 输入 `电路: 5 V, 20 Ω` 可求出 `250 mA · 1.25 W`，输入 `电路: 12 V, 1.5 A` 得到 `8 Ω · 18 W`。输入同一电阻上的两种电学量，可计算第三种和功率。求电阻时，电压和电流均须为正。 [欧姆定律与电功率](https://openstax.org/books/university-physics-volume-2/pages/9-5-electrical-energy-and-power)
 - 输入 `电路: 串联 220 Ω,330 Ω,1 kΩ` 得到 `1.55 kΩ`，输入 `电路: 并联 220 Ω,330 Ω` 得到 `132 Ω`。每组可填 2 至 32 个正电阻值，支持不同数量级的欧姆单位。 [OpenStax 串联与并联电阻](https://openstax.org/books/university-physics-volume-2/pages/10-2-resistors-in-series-and-parallel)
 - 输入 `电路: 耗电 1.5 kW @ 2h` 得到 `3 kWh`。用功率乘以时长，适用于恒定功率。时长也可写成 `30min` 或 `01:30:00`。结果满 1000 Wh 时用 kWh 表示。
+- 输入 `电路: 电池能量 2500 mAh @ 3.7 V` 得到 `9.25 Wh`。计算按安时容量乘以标称电压，容量可填 `Ah` 或 `mAh`。结果满 1000 Wh 时用 kWh 显示。 [FAA 电池能量换算公式](https://www.faa.gov/sites/faa.gov/files/2024-Interactive%20Guide%20to%20Shipping%20Litihum%20Batteries.pdf)
 - 单位可紧跟括号内的算式。例如 `(2**10)B to KiB` 得到 `1 KiB`，`((2 + 1/2) * 2)km to m` 得到 `5000 m`。只输入带单位的算式，也可选择换算目标。
 - 输入 `周期: 50 Hz to ms` 得到 `20 ms`，输入 `周期: 2.5 ms to Hz` 得到 `400 Hz`。周期与频率互为倒数，省略目标单位时会按结果大小选择单位。
 - 输入 `1000 kg/m³ to g/cm³` 可换算密度，输入 `1 L/min to m³/h` 可换算体积流量，得到 `0.06 m³/h`。
