@@ -156,6 +156,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "求两个向量的精确夹角余弦",
+        query: "向量: 夹角余弦 1,1; -1,0",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "计算方阵的行列式",
         query: "矩阵: 行列式 0,2; 3,4",
     },

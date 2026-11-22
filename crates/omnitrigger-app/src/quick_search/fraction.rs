@@ -238,6 +238,15 @@ pub(super) fn ensure_exact_size(value: &BigRational) -> Result<(), FractionError
     Ok(())
 }
 
+pub(super) fn format_signed_square_root(value: &BigRational, sign: Sign) -> String {
+    let root = format_square_root(value);
+    if sign == Sign::Minus {
+        format!("-{root}")
+    } else {
+        root
+    }
+}
+
 fn rational_power(base: BigRational, exponent: BigRational) -> Result<BigRational, FractionError> {
     if !exponent.is_integer() {
         return Err(FractionError::NonIntegerExponent);

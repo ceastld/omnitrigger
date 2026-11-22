@@ -2,7 +2,9 @@ use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::calculator::normalize;
-use super::fraction::{calculate_fraction, ensure_exact_size, format_square_root, FractionError};
+use super::fraction::{
+    calculate_fraction, ensure_exact_size, format_signed_square_root, FractionError,
+};
 use super::operators::split_top_level_commas;
 
 const MAX_POINTS: usize = 64;
@@ -84,12 +86,10 @@ pub(super) fn calculate_correlation(points: &str) -> Result<String, LinearFitErr
     {
         return Err(LinearFitError::ConstantCoordinate);
     }
-    let root = format_square_root(&products.squared_correlation()?);
-    if products.cross.numer().sign() == Sign::Minus {
-        Ok(format!("-{root}"))
-    } else {
-        Ok(root)
-    }
+    Ok(format_signed_square_root(
+        &products.squared_correlation()?,
+        products.cross.numer().sign(),
+    ))
 }
 
 struct PairedSums {

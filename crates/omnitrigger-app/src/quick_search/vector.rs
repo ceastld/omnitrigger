@@ -1,7 +1,10 @@
 use num_rational::BigRational;
 
 use super::calculator::normalize;
-use super::fraction::{calculate_fraction, ensure_exact_size, format_square_root, FractionError};
+use super::fraction::{
+    calculate_fraction, ensure_exact_size, format_signed_square_root, format_square_root,
+    FractionError,
+};
 use super::operators::split_top_level_commas;
 
 const MAX_DIMENSIONS: usize = 32;
@@ -13,6 +16,7 @@ pub(super) enum VectorError {
     Dimensions,
     CrossDimensions,
     ZeroDirection,
+    ZeroAngleVector,
     TooManyDimensions,
     Evaluation(FractionError),
 }
@@ -21,10 +25,11 @@ impl VectorError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "用逗号隔开分量，用分号隔开两个向量",
-            Self::UnknownOperation => "可用 点积、叉积、长度、距离 或 投影",
+            Self::UnknownOperation => "输入 ? 向量 查看可用操作",
             Self::Dimensions => "两个向量的分量数须一致",
             Self::CrossDimensions => "叉积需要两个三维向量",
             Self::ZeroDirection => "投影方向须为非零向量",
+            Self::ZeroAngleVector => "计算夹角余弦需要两个非零向量",
             Self::TooManyDimensions => "每个向量最多 32 个分量",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "分量须为整数、有限小数、分数或精确算式"
@@ -47,7 +52,17 @@ pub(super) fn calculate_vector(query: &str) -> Result<String, VectorError> {
     }
     if !matches!(
         operation.as_str(),
-        "点积" | "dot" | "叉积" | "cross" | "距离" | "distance" | "投影" | "project"
+        "点积"
+            | "dot"
+            | "叉积"
+            | "cross"
+            | "距离"
+            | "distance"
+            | "投影"
+            | "project"
+            | "夹角余弦"
+            | "余弦相似度"
+            | "cosine"
     ) {
         return Err(VectorError::UnknownOperation);
     }
@@ -58,6 +73,7 @@ pub(super) fn calculate_vector(query: &str) -> Result<String, VectorError> {
         "叉积" | "cross" => cross_product(&left, &right),
         _ if left.len() != right.len() => Err(VectorError::Dimensions),
         "投影" | "project" => project_vector(&left, &right),
+        "夹角余弦" | "余弦相似度" | "cosine" => vector_cosine(&left, &right),
         "距离" | "distance" => {
             let differences: Vec<_> = left.iter().zip(&right).map(|(a, b)| a - b).collect();
             for value in &differences {
@@ -115,6 +131,17 @@ fn project_vector(
     Ok(components.join(", "))
 }
 
+fn vector_cosine(left: &[BigRational], right: &[BigRational]) -> Result<String, VectorError> {
+    let squared_lengths = dot_product(left, left)? * dot_product(right, right)?;
+    if squared_lengths == BigRational::default() {
+        return Err(VectorError::ZeroAngleVector);
+    }
+    let dot = dot_product(left, right)?;
+    let squared = (&dot * &dot) / squared_lengths;
+    ensure_exact_size(&squared).map_err(VectorError::Evaluation)?;
+    Ok(format_signed_square_root(&squared, dot.numer().sign()))
+}
+
 fn cross_product(left: &[BigRational], right: &[BigRational]) -> Result<String, VectorError> {
     let ([ax, ay, az], [bx, by, bz]) = (left, right) else {
         return Err(VectorError::CrossDimensions);
@@ -145,6 +172,10 @@ mod tests {
             ("投影 2,1; 1,1", "3/2, 3/2"),
             ("project 1,2,3; 0,-1,0", "0, 2, 0"),
             ("project 1,2; 2,-1", "0, 0"),
+            ("夹角余弦 1,1; -1,0", "-√(1/2)"),
+            ("余弦相似度 1/2,0; 2,0", "1"),
+            ("cosine 1,0; -2,0", "-1"),
+            ("cosine 1,0; 0,1", "0"),
         ] {
             assert_eq!(calculate_vector(query).as_deref(), Ok(expected), "{query}");
         }
@@ -155,6 +186,9 @@ mod tests {
             ("叉积 1,2;3,4", VectorError::CrossDimensions),
             ("project 1,2; 0,0", VectorError::ZeroDirection),
             ("project 1; 1,2", VectorError::Dimensions),
+            ("cosine 0,0; 1,2", VectorError::ZeroAngleVector),
+            ("cosine 1,2; 0,0", VectorError::ZeroAngleVector),
+            ("cosine 1; 1,2", VectorError::Dimensions),
         ] {
             assert_eq!(calculate_vector(query), Err(error), "{query}");
         }
