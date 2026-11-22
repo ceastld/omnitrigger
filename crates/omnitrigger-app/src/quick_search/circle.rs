@@ -12,6 +12,7 @@ pub(super) enum CircleError {
     AngleOutOfRange,
     PointArguments,
     CollinearPoints,
+    CoincidentDiameterPoints,
     Evaluation(FractionError),
 }
 
@@ -21,8 +22,9 @@ impl CircleError {
             Self::Incomplete => "输入半径或直径，可加 @ 和圆心角",
             Self::NonPositiveRadius => "半径和直径须大于零",
             Self::AngleOutOfRange => "圆心角须在 0 至 360 度之间",
-            Self::PointArguments => "用分号填写三个二维坐标，例如 三点 1,0; 3,0; 1,2",
+            Self::PointArguments => "填写二维坐标，用逗号分隔每点的两个坐标，用分号分隔各点",
             Self::CollinearPoints => "三个点须互不重合且不在同一直线上",
+            Self::CoincidentDiameterPoints => "直径的两个端点须互不重合",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "长度、角度和坐标须用整数、有限小数、分数或精确算式"
             }
@@ -37,6 +39,9 @@ pub(super) fn calculate_circle(query: &str) -> Result<String, CircleError> {
     let (operation, arguments) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
     if operation == "三点" || operation.eq_ignore_ascii_case("three-points") {
         return circle_through_points(arguments);
+    }
+    if operation == "直径端点" || operation.eq_ignore_ascii_case("diameter-points") {
+        return circle_from_diameter_points(arguments);
     }
     let (length, angle) = input
         .split_once('@')
@@ -120,11 +125,38 @@ fn circle_through_points(input: &str) -> Result<String, CircleError> {
     let center_x = x + &offset_x;
     let center_y = y + &offset_y;
     let radius_squared = &offset_x * &offset_x + &offset_y * &offset_y;
-    for value in [&center_x, &center_y, &radius_squared] {
+    render_coordinate_circle(&center_x, &center_y, &radius_squared)
+}
+
+fn circle_from_diameter_points(input: &str) -> Result<String, CircleError> {
+    let mut points = input.split(';');
+    let (Some(start), Some(end), None) = (points.next(), points.next(), points.next()) else {
+        return Err(CircleError::PointArguments);
+    };
+    let [x, y] = circle_point(start)?;
+    let [end_x, end_y] = circle_point(end)?;
+    let two = BigInt::from(2);
+    let offset_x = (end_x - &x) / &two;
+    let offset_y = (end_y - &y) / &two;
+    let center_x = x + &offset_x;
+    let center_y = y + &offset_y;
+    let radius_squared = &offset_x * &offset_x + &offset_y * &offset_y;
+    if radius_squared.numer().sign() == Sign::NoSign {
+        return Err(CircleError::CoincidentDiameterPoints);
+    }
+    render_coordinate_circle(&center_x, &center_y, &radius_squared)
+}
+
+fn render_coordinate_circle(
+    center_x: &BigRational,
+    center_y: &BigRational,
+    radius_squared: &BigRational,
+) -> Result<String, CircleError> {
+    for value in [center_x, center_y, radius_squared] {
         ensure_exact_size(value).map_err(CircleError::Evaluation)?;
     }
-    let radius = format_square_root(&radius_squared);
-    let area = multiple_of_pi(&radius_squared);
+    let radius = format_square_root(radius_squared);
+    let area = multiple_of_pi(radius_squared);
     Ok(format!(
         "圆心 ({center_x}, {center_y})\n半径 {radius} · 面积 {area}"
     ))
@@ -160,6 +192,27 @@ fn multiple_of_pi(value: &BigRational) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uses_the_midpoint_of_a_diameter_and_preserves_exact_coordinates() {
+        for (query, expected) in [
+            ("直径端点 -1,0; 3,2", "圆心 (1, 1)\n半径 √5 · 面积 5π"),
+            (
+                "DIAMETER-POINTS 1/2,-1/3; 1/2,5/3",
+                "圆心 (1/2, 2/3)\n半径 1 · 面积 π",
+            ),
+        ] {
+            assert_eq!(calculate_circle(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_circle("直径端点 0,1; 0,1"),
+            Err(CircleError::CoincidentDiameterPoints),
+        );
+        assert_eq!(
+            calculate_circle("直径端点 1,0; 3,2; 1,2"),
+            Err(CircleError::PointArguments),
+        );
+    }
 
     #[test]
     fn finds_the_exact_circle_through_three_non_collinear_points() {
