@@ -335,6 +335,7 @@ enum ValueError {
     Conversion(ConversionError),
     BatchConversion(BatchError<ConversionError>),
     BatchDuration(BatchError<DurationError>),
+    BatchTimestamp(BatchError<TimestampError>),
     Radix(RadixError),
     RatioAllocation(RatioAllocationError),
     AspectRatio(AspectRatioError),
@@ -400,6 +401,13 @@ impl ValueError {
                     DurationError::message,
                 );
             }
+            Self::BatchTimestamp(error) => {
+                return batch_error_message(
+                    error,
+                    "逐行输入时间戳换算，例如 1700000000 to Asia/Shanghai",
+                    TimestampError::message,
+                );
+            }
             Self::Radix(error) => error.message(),
             Self::RatioAllocation(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
@@ -442,6 +450,7 @@ impl ValueError {
                 | Self::BatchFraction(BatchError::Empty)
                 | Self::BatchConversion(BatchError::Empty)
                 | Self::BatchDuration(BatchError::Empty)
+                | Self::BatchTimestamp(BatchError::Empty)
                 | Self::AspectRatio(AspectRatioError::Incomplete)
                 | Self::Paper(PaperError::Incomplete)
                 | Self::Rectangle(RectangleError::Incomplete)
@@ -602,6 +611,13 @@ impl Results {
                         Self::text_value(
                             map_batch_lines(arguments, convert_duration)
                                 .map_err(ValueError::BatchDuration),
+                        )
+                    } else if let Some(arguments) = batch_arguments(term, "时间戳", "timestamp")
+                    {
+                        let now = chrono::Utc::now();
+                        Self::text_value(
+                            map_batch_lines(arguments, |line| convert_timestamp(line, now))
+                                .map_err(ValueError::BatchTimestamp),
                         )
                     } else {
                         Self::text_value(convert_batch(term).map_err(ValueError::BatchConversion))
@@ -2141,6 +2157,30 @@ mod tests {
         assert!(for_query("批量换算: 时", &[])
             .suggested_input(0)
             .is_some_and(|query| query.starts_with("批量换算: 时长 ")));
+    }
+
+    #[test]
+    fn converts_timestamps_line_by_line_with_a_shared_reference_time() {
+        assert!(matches!(
+            for_query("批量换算: 时间戳 1700000000 to Asia/Shanghai\r\n1970-01-01T08:00:00+08:00", &[]),
+            Results::Value(Ok(value)) if value.text == "2023-11-15T06:13:20+08:00\n0"
+        ));
+        let Results::Value(Ok(now)) = for_query("批量换算: timestamp 现在 ns\nnow ns", &[])
+        else {
+            panic!("应返回两行参考时间");
+        };
+        let (first, second) = now.text.split_once('\n').unwrap();
+        assert_eq!(first, second);
+        assert!(matches!(
+            for_query("批量换算: timestamp 0\n\n0 to Asia/Unknown", &[]),
+            Results::Value(Err(ValueError::BatchTimestamp(BatchError::Row {
+                line: 3,
+                cause: TimestampError::InvalidOffset,
+            })))
+        ));
+        assert!(for_query("批量换算: 时间", &[])
+            .suggested_input(0)
+            .is_some_and(|query| query.starts_with("批量换算: 时间戳 ")));
     }
 
     #[test]

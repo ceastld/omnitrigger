@@ -230,6 +230,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量换算: 时长 01:30 to s\nPT1M30S to min\n1天2.5秒 to iso",
     },
     Example {
+        icon: Icon::Clock,
+        title: "逐行换算时间戳和带时区的日期时间",
+        query: "批量换算: 时间戳 1700000000 to Asia/Shanghai\n1970-01-01T08:00:00+08:00",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "一次算出多行算式",
         query: "批量计算: 2**8\n3^3\nsqrt(81)",
@@ -2107,7 +2112,7 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
     match scope {
         Scope::BatchCalculation if matches!(term, "分" | "分数") => {}
-        Scope::BatchConversion if matches!(term, "时" | "时长") => {}
+        Scope::BatchConversion if matches!(term, "时" | "时长" | "时间" | "时间戳") => {}
         Scope::Date
             if !term.is_empty()
                 && ["列出", "格式化", "解析"]
