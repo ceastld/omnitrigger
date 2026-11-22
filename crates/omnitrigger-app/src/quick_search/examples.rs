@@ -2308,6 +2308,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按地区和月份连接两张 CSV 表",
+        query: r#"CSV: 全连接 [["区","月"],["区域","月份"]] ["区,月,品\n北,01,茶\n北,02,米","月份,区域,额\n01,北,1.50\n01,南,2e0"]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按表头名称把多张 CSV 表纵向合并",
         query: r#"CSV: 纵向合并 ["编号,金额\n001,1.50","金额,编号,备注\n2e0,002,\"茶,热\""]"#,
     },

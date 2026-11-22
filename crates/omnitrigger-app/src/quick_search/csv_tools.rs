@@ -59,6 +59,7 @@ pub(super) enum CsvError {
     NullReplacementValue,
     HeaderNameConflict,
     JoinArguments,
+    JoinColumns,
     JoinTooLarge,
     FillTooLarge,
     StackArguments,
@@ -114,7 +115,10 @@ impl CsvError {
             Self::MapValueTooLarge => "映射结果超过 1 MiB，请缩小表格范围",
             Self::NullReplacementValue => "新值不能包含空字符 U+0000",
             Self::HeaderNameConflict => "表头中已经有这个新列名",
-            Self::JoinArguments => "填写两个连接列，再填写包含两张 CSV 表格的 JSON 字符串数组",
+            Self::JoinArguments => {
+                "填写左右两侧的连接列，再填写包含两张 CSV 表格的 JSON 字符串数组"
+            }
+            Self::JoinColumns => "两侧连接列须具有相同列数，每一侧至少一列，列不可重复",
             Self::JoinTooLarge => "表格合并结果超过 1 MiB，请缩小表格范围",
             Self::FillTooLarge => "填充结果超过 1 MiB，请缩小表格范围",
             Self::StackArguments => "用 JSON 字符串数组填写 2 至 16 张含表头的 CSV 表格",
@@ -632,9 +636,30 @@ enum JoinKind {
     Full,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum JoinKey {
+    One(ColumnReference),
+    Multiple(Vec<ColumnReference>),
+}
+
+impl JoinKey {
+    fn resolve(self, header: &[String]) -> Result<Vec<usize>, CsvError> {
+        match self {
+            Self::One(column) => resolve_distinct_columns(header, &[column], CsvError::JoinColumns),
+            Self::Multiple(columns) => {
+                if columns.is_empty() {
+                    return Err(CsvError::JoinColumns);
+                }
+                resolve_distinct_columns(header, &columns, CsvError::JoinColumns)
+            }
+        }
+    }
+}
+
 fn join_csv(input: &str, kind: JoinKind) -> Result<String, CsvError> {
     let ([left_key, right_key], data) =
-        json_argument_and_data::<[ColumnReference; 2]>(input, CsvError::JoinArguments)?;
+        json_argument_and_data::<[JoinKey; 2]>(input, CsvError::JoinArguments)?;
     let [left, right] =
         serde_json::from_str::<[String; 2]>(data).map_err(|_| CsvError::JoinArguments)?;
     let left = read_rows(left.strip_prefix('\u{feff}').unwrap_or(&left), ',')?;
@@ -643,21 +668,29 @@ fn join_csv(input: &str, kind: JoinKind) -> Result<String, CsvError> {
     let (right_header, right_rows) = right.split_first().ok_or(CsvError::MissingInput)?;
     let left_key = left_key.resolve(left_header)?;
     let right_key = right_key.resolve(right_header)?;
-    validate_column_width(&[left_key], left_header.len())?;
-    validate_column_width(&[right_key], right_header.len())?;
+    if left_key.len() != right_key.len() {
+        return Err(CsvError::JoinColumns);
+    }
+    let mut right_key_columns = vec![false; right_header.len()];
+    for &column in &right_key {
+        right_key_columns[column] = true;
+    }
 
     let mut headers = HashSet::new();
     if left_header
         .iter()
         .map(String::as_str)
-        .chain(joined_csv_columns(right_header, right_key))
+        .chain(joined_csv_columns(right_header, &right_key_columns))
         .any(|name| name.is_empty() || !headers.insert(name))
     {
         return Err(CsvError::InvalidHeader);
     }
-    let mut by_key = HashMap::<&str, Vec<&[String]>>::new();
+    let mut by_key = HashMap::<Vec<&str>, Vec<&[String]>>::new();
     for row in right_rows {
-        by_key.entry(row[right_key].as_str()).or_default().push(row);
+        by_key
+            .entry(column_key(row, &right_key))
+            .or_default()
+            .push(row);
     }
     let mut output = String::new();
     append_bounded_csv_row(
@@ -665,37 +698,51 @@ fn join_csv(input: &str, kind: JoinKind) -> Result<String, CsvError> {
         left_header
             .iter()
             .map(String::as_str)
-            .chain(joined_csv_columns(right_header, right_key)),
+            .chain(joined_csv_columns(right_header, &right_key_columns)),
         CsvError::JoinTooLarge,
     )?;
     for left in left_rows {
         let fields = left.iter().map(String::as_str);
-        if let Some(matches) = by_key.get(left[left_key].as_str()) {
+        if let Some(matches) = by_key.get(&column_key(left, &left_key)) {
             for right in matches {
                 append_bounded_csv_row(
                     &mut output,
-                    fields.clone().chain(joined_csv_columns(right, right_key)),
+                    fields
+                        .clone()
+                        .chain(joined_csv_columns(right, &right_key_columns)),
                     CsvError::JoinTooLarge,
                 )?;
             }
         } else if matches!(kind, JoinKind::Left | JoinKind::Full) {
             append_bounded_csv_row(
                 &mut output,
-                fields.chain(std::iter::repeat_n("", right_header.len() - 1)),
+                fields.chain(std::iter::repeat_n(
+                    "",
+                    right_header.len() - right_key.len(),
+                )),
                 CsvError::JoinTooLarge,
             )?;
         }
     }
     if matches!(kind, JoinKind::Full) {
-        let left_keys: HashSet<_> = left_rows.iter().map(|row| row[left_key].as_str()).collect();
+        let left_keys: HashSet<_> = left_rows
+            .iter()
+            .map(|row| column_key(row, &left_key))
+            .collect();
+        let mut fields = vec![""; left_header.len()];
         for right in right_rows {
-            let key = right[right_key].as_str();
-            if !left_keys.contains(key) {
-                let fields =
-                    (0..left_header.len()).map(|index| if index == left_key { key } else { "" });
+            let key = column_key(right, &right_key);
+            if !left_keys.contains(&key) {
+                fields.fill("");
+                for (&column, value) in left_key.iter().zip(key) {
+                    fields[column] = value;
+                }
                 append_bounded_csv_row(
                     &mut output,
-                    fields.chain(joined_csv_columns(right, right_key)),
+                    fields
+                        .iter()
+                        .copied()
+                        .chain(joined_csv_columns(right, &right_key_columns)),
                     CsvError::JoinTooLarge,
                 )?;
             }
@@ -753,11 +800,11 @@ fn stack_csv(input: &str) -> Result<String, CsvError> {
     Ok(output)
 }
 
-fn joined_csv_columns(row: &[String], omitted: usize) -> impl Iterator<Item = &str> {
+fn joined_csv_columns<'a>(row: &'a [String], omitted: &'a [bool]) -> impl Iterator<Item = &'a str> {
     row.iter()
-        .enumerate()
-        .filter(move |(index, _)| *index != omitted)
-        .map(|(_, field)| field.as_str())
+        .zip(omitted)
+        .filter(|(_, omitted)| !**omitted)
+        .map(|(field, _)| field.as_str())
 }
 
 fn append_bounded_csv_row<'a>(
@@ -1819,6 +1866,34 @@ mod tests {
             transform_csv(&format!("左连接 [1,1] {source}")),
             Err(CsvError::JoinTooLarge)
         );
+    }
+
+    #[test]
+    fn joins_by_multiple_columns_and_restores_every_right_only_key_in_left_column_order() {
+        let source = r#"[["区","月"],[2,"月份"]] ["区,月,品\n北,01,茶\n北,02,米","月份,区域,额\n01,北,1.50\n01,南,2e0\n03,北,3"]"#;
+        for (operation, expected) in [
+            (
+                "全连接",
+                "区,月,品,额\r\n北,01,茶,1.50\r\n北,02,米,\"\"\r\n南,01,\"\",2e0\r\n北,03,\"\",3",
+            ),
+            ("左连接", "区,月,品,额\r\n北,01,茶,1.50\r\n北,02,米,\"\""),
+            ("内连接", "区,月,品,额\r\n北,01,茶,1.50"),
+        ] {
+            assert_eq!(
+                transform_csv(&format!("{operation} {source}")).as_deref(),
+                Ok(expected)
+            );
+        }
+        for keys in [
+            r#"[["区","月"],"区域"]"#,
+            r#"[["区",1],["区域","月份"]]"#,
+            r#"[[],[]]"#,
+        ] {
+            assert_eq!(
+                transform_csv(&format!(r#"全连接 {keys} ["区,月,品","月份,区域,额"]"#)),
+                Err(CsvError::JoinColumns)
+            );
+        }
     }
 
     #[test]
