@@ -51,6 +51,8 @@ const OPTION_HELP: &[(&str, &str)] = &[
     ("后缀大小", "按扩展名汇总字节数"),
     ("修改月份统计", "按本地修改月份计数"),
     ("创建月份统计", "按本地创建月份计数"),
+    ("修改日期统计", "按本地修改日期计数"),
+    ("创建日期统计", "按本地创建日期计数"),
 ];
 
 #[derive(Default)]
@@ -344,10 +346,11 @@ impl LocalFilesIndex {
                 query.output == FileOutput::InventoryCsv,
             )));
         }
-        if let FileOutput::MonthCounts(field) = query.output {
-            return Results::text_value(Ok(file_month_counts(
+        if let FileOutput::DateCounts(field, grouping) = query.output {
+            return Results::text_value(Ok(file_date_counts(
                 matches.into_iter().map(|(_, entry)| entry),
                 field,
+                grouping,
             )));
         }
         if query.output == FileOutput::Json
@@ -478,30 +481,38 @@ fn format_filetime(ticks: u64) -> String {
         .unwrap_or_default()
 }
 
-fn file_month_counts<'a>(
+fn file_date_counts<'a>(
     entries: impl Iterator<Item = &'a LocalDirectoryEntry>,
-    field: FileMonth,
+    field: FileDateField,
+    grouping: FileDateGrouping,
 ) -> String {
     let mut counts = BTreeMap::new();
     for entry in entries.filter(|entry| entry.kind == "file") {
-        let month = entry.metadata.as_ref().and_then(|time| {
+        let bucket = entry.metadata.as_ref().and_then(|time| {
             let (raw, local) = match field {
-                FileMonth::Modified => (time.write_utc_100ns, time.write_local_ticks),
-                FileMonth::Created => (time.creation_utc_100ns, time.creation_local_ticks),
+                FileDateField::Modified => (time.write_utc_100ns, time.write_local_ticks),
+                FileDateField::Created => (time.creation_utc_100ns, time.creation_local_ticks),
             };
             if raw == 0 {
                 return None;
             }
             let day = i32::try_from(local / TICKS_PER_DAY + 1).ok()?;
             let date = NaiveDate::from_num_days_from_ce_opt(day)?;
-            Some((date.year(), date.month()))
+            let day = (grouping == FileDateGrouping::Day).then_some(date.day());
+            Some((date.year(), date.month(), day))
         });
-        *counts.entry(month).or_insert(0usize) += 1;
+        *counts.entry(bucket).or_insert(0usize) += 1;
     }
-    let mut output = String::from("月份,数量");
-    for (month, count) in counts.into_iter().rev() {
-        match month {
-            Some((year, month)) => write!(output, "\r\n{year:04}-{month:02},{count}"),
+    let mut output = String::from(match grouping {
+        FileDateGrouping::Day => "日期,数量",
+        FileDateGrouping::Month => "月份,数量",
+    });
+    for (bucket, count) in counts.into_iter().rev() {
+        match bucket {
+            Some((year, month, Some(day))) => {
+                write!(output, "\r\n{year:04}-{month:02}-{day:02},{count}")
+            }
+            Some((year, month, None)) => write!(output, "\r\n{year:04}-{month:02},{count}"),
             None => write!(output, "\r\n时间未知,{count}"),
         }
         .expect("写入字符串不会失败");
@@ -623,7 +634,7 @@ impl FileQuery<'_> {
             || self.created.is_active()
             || matches!(
                 self.output,
-                FileOutput::TimeCsv | FileOutput::InventoryCsv | FileOutput::MonthCounts(_)
+                FileOutput::TimeCsv | FileOutput::InventoryCsv | FileOutput::DateCounts(..)
             )
     }
 
@@ -700,9 +711,15 @@ fn set_bound(bound: &mut Option<u64>, value: u64) -> Option<()> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum FileMonth {
+enum FileDateField {
     Modified,
     Created,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileDateGrouping {
+    Month,
+    Day,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -713,7 +730,7 @@ enum FileOutput {
     Json,
     TimeCsv,
     InventoryCsv,
-    MonthCounts(FileMonth),
+    DateCounts(FileDateField, FileDateGrouping),
     ExtensionCounts,
     ExtensionSizes,
     SizeTotal,
@@ -781,10 +798,16 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
                 output = FileOutput::InventoryCsv
             }
             "修改月份统计" | "modified-month-counts" if output == FileOutput::Entries => {
-                output = FileOutput::MonthCounts(FileMonth::Modified)
+                output = FileOutput::DateCounts(FileDateField::Modified, FileDateGrouping::Month)
             }
             "创建月份统计" | "created-month-counts" if output == FileOutput::Entries => {
-                output = FileOutput::MonthCounts(FileMonth::Created)
+                output = FileOutput::DateCounts(FileDateField::Created, FileDateGrouping::Month)
+            }
+            "修改日期统计" | "modified-day-counts" if output == FileOutput::Entries => {
+                output = FileOutput::DateCounts(FileDateField::Modified, FileDateGrouping::Day)
+            }
+            "创建日期统计" | "created-day-counts" if output == FileOutput::Entries => {
+                output = FileOutput::DateCounts(FileDateField::Created, FileDateGrouping::Day)
             }
             "后缀统计" | "extension-counts" if output == FileOutput::Entries => {
                 output = FileOutput::ExtensionCounts
@@ -841,7 +864,7 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
         output,
         FileOutput::ExtensionCounts
             | FileOutput::ExtensionSizes
-            | FileOutput::MonthCounts(_)
+            | FileOutput::DateCounts(..)
             | FileOutput::SizeTotal
     ) || extensions.is_some()
         || excluded_extensions.is_some()
@@ -1459,9 +1482,11 @@ mod tests {
     }
 
     #[test]
-    fn groups_files_by_local_calendar_month_and_keeps_missing_times_separate() {
+    fn groups_files_by_local_calendar_month_or_day_and_keeps_missing_times_separate() {
         let modified = r"C:\Work | | 修改月份统计";
         let created = r"C:\Work | | created-month-counts";
+        let modified_days = r"C:\Work | | 修改日期统计";
+        let created_days = r"C:\Work | | created-day-counts";
         let mut index = LocalFilesIndex::default();
         let load = index.request(Some(modified)).unwrap();
         assert!(load.timestamps);
@@ -1492,6 +1517,7 @@ mod tests {
             ]),
         ));
         assert!(index.request(Some(created)).is_none());
+        assert!(index.request(Some(modified_days)).is_none());
         for (query, expected) in [
             (
                 modified,
@@ -1499,10 +1525,19 @@ mod tests {
             ),
             (created, "月份,数量\r\n2024-01,2\r\n2023-12,1\r\n时间未知,1"),
             (
+                modified_days,
+                "日期,数量\r\n2024-02-29,1\r\n2024-02-01,1\r\n2024-01-31,1\r\n时间未知,1",
+            ),
+            (
+                created_days,
+                "日期,数量\r\n2024-01-01,2\r\n2023-12-31,1\r\n时间未知,1",
+            ),
+            (
                 r"C:\Work | | 修改月份统计 修改>=2024-02-01 后缀=txt",
                 "月份,数量\r\n2024-02,1",
             ),
             (r"C:\Work | absent | 修改月份统计", "月份,数量"),
+            (r"C:\Work | absent | 修改日期统计", "日期,数量"),
         ] {
             assert!(
                 matches!(
