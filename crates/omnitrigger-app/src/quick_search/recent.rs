@@ -1,5 +1,36 @@
-use super::{Destination, SearchTrigger, DESTINATION_PAGE_SIZE, PAGES};
+use std::{cell::RefCell, rc::Rc};
+
+use super::{
+    examples::matching_examples, Destination, SearchTrigger, DESTINATION_PAGE_SIZE, PAGES,
+};
 use crate::Page;
+
+const EXAMPLE_HISTORY_LIMIT: usize = 12;
+
+#[derive(Clone, Default)]
+pub(super) struct RecentExamples(Rc<RefCell<Vec<usize>>>);
+
+impl RecentExamples {
+    pub(super) fn record(&self, index: usize) {
+        let mut recent = self.0.borrow_mut();
+        recent.retain(|&existing| existing != index);
+        recent.insert(0, index);
+        recent.truncate(EXAMPLE_HISTORY_LIMIT);
+    }
+
+    pub(super) fn matching(&self, query: &str) -> Vec<usize> {
+        let recent = self.0.borrow();
+        if query.trim().is_empty() {
+            return recent.clone();
+        }
+        let matching = matching_examples(query);
+        recent
+            .iter()
+            .copied()
+            .filter(|index| matching.contains(index))
+            .collect()
+    }
+}
 
 /// 当前工作台会话中，从快速搜索打开的页面或触发器。
 #[derive(Clone, Default)]
@@ -60,6 +91,34 @@ impl RecentDestinations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn example_history_is_shared_filters_in_recent_order_and_deduplicates() {
+        let examples = super::super::EXAMPLES;
+        let position = |query| {
+            examples
+                .iter()
+                .position(|example| example.query == query)
+                .unwrap()
+        };
+        let power = position("2**10");
+        let alternate = position("分数: 计算 isqrt(2**100 - 1)");
+        let history = RecentExamples::default();
+        let reopened = history.clone();
+        history.record(power);
+        history.record(alternate);
+        assert_eq!(reopened.matching("２＊＊１０"), [alternate, power]);
+        history.record(power);
+        assert_eq!(reopened.matching(""), [power, alternate]);
+        assert!(reopened.matching("无对应记录").is_empty());
+        for index in 0..EXAMPLE_HISTORY_LIMIT + 2 {
+            history.record(index);
+        }
+        assert_eq!(
+            history.matching(""),
+            (2..EXAMPLE_HISTORY_LIMIT + 2).rev().collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn empty_search_prioritizes_recent_valid_destinations() {

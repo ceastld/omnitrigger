@@ -58,6 +58,7 @@ pub(super) enum Scope {
     Percentage,
     RatioAllocation,
     ToolIndex,
+    ExampleHistory,
     UrlEncoding,
     Path,
 }
@@ -208,6 +209,7 @@ pub(super) fn parse_scope(prefix: &str) -> Option<Scope> {
         "百分比" | "比例" | "percentage" => Scope::Percentage,
         "配比" | "按比例分配" | "ratio allocation" => Scope::RatioAllocation,
         "工具" | "工具目录" | "tools" => Scope::ToolIndex,
+        "用法历史" | "example history" => Scope::ExampleHistory,
         "网址" | "url" => Scope::UrlEncoding,
         "路径" | "path" => Scope::Path,
         _ => return None,

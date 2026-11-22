@@ -103,7 +103,7 @@ use presets::matching_presets;
 use radix::{convert_arbitrary_radix, RadixError};
 use ratio_allocation::{allocate_ratio, RatioAllocationError};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use recent::RecentDestinations;
+use recent::{RecentDestinations, RecentExamples};
 use rectangle::{calculate_rectangle, RectangleError};
 use renminbi::{uppercase_renminbi, RenminbiError};
 use scope::{scoped_query, tool_example_keyword, Scope};
@@ -249,6 +249,7 @@ pub(super) struct RecentSearch {
     pub(super) destinations: RecentDestinations,
     calculations: RecentValues,
     conversions: RecentValues,
+    examples: RecentExamples,
     applications: ApplicationCache,
     last_input: Rc<RefCell<String>>,
 }
@@ -579,6 +580,7 @@ impl Results {
             }
             return match scope {
                 Scope::ToolIndex => Self::Help(tool_index_examples(term)),
+                Scope::ExampleHistory => Self::Help(recent.examples.matching(term)),
                 Scope::Triggers(filter) => Self::Destinations(
                     matching_triggers(triggers, term, filter)
                         .into_iter()
@@ -1064,6 +1066,13 @@ enum PageChange {
     Last,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ApplicationRefresh {
+    NotRequested,
+    Loading,
+    Finished,
+}
+
 pub(super) struct QuickSearch {
     theme_mode: appearance::Mode,
     input: Entity<MessageInput>,
@@ -1073,7 +1082,7 @@ pub(super) struct QuickSearch {
     results: Results,
     expanded_value_pages: Option<Vec<usize>>,
     selected: usize,
-    requested_applications: bool,
+    application_refresh: ApplicationRefresh,
     input_before_help: Option<String>,
     previous_input: String,
     _input_changes: Subscription,
@@ -1169,7 +1178,7 @@ impl QuickSearch {
             results,
             expanded_value_pages: None,
             selected: 0,
-            requested_applications: false,
+            application_refresh: ApplicationRefresh::NotRequested,
             input_before_help: None,
             previous_input,
             _input_changes: input_changes,
@@ -1234,7 +1243,7 @@ impl QuickSearch {
             _ => None,
         };
         self.refresh_local_files(local_files_query, window, cx);
-        if !self.requested_applications
+        if self.application_refresh == ApplicationRefresh::NotRequested
             && !matches!(self.results, Results::Value(Err(ValueError::InputTooLong)))
             && (matches!(scoped_query(query), Some((Scope::Applications, _)))
                 || matches!(self.results, Results::ApplicationsLoading)
@@ -1246,46 +1255,7 @@ impl QuickSearch {
                 .applications
                 .needs_refresh(std::time::Instant::now())
         {
-            self.requested_applications = true;
-            let cached = self.index.recent.applications.clone();
-            cx.spawn_in(window, async move |this, cx| {
-                let applications = cx
-                    .background_executor()
-                    .spawn(async { ApplicationIndex::load() })
-                    .await;
-                cached.remember(&applications);
-                let _ = cx.update(|window, cx| {
-                    let _ = this.update(cx, |this, cx| {
-                        if matches!(applications, ApplicationIndex::Unavailable(_))
-                            && matches!(this.index.applications, ApplicationIndex::Ready { .. })
-                        {
-                            return;
-                        }
-                        let previous = match &this.results {
-                            Results::Destinations(items) => items.get(this.selected).cloned(),
-                            _ => None,
-                        };
-                        this.index.applications = applications;
-                        let query = this.input.read(cx).text();
-                        this.refresh_results(&query, window, cx);
-                        let Some(Destination::InstalledApp(previous)) = previous else {
-                            return;
-                        };
-                        let Results::Destinations(items) = &this.results else {
-                            return;
-                        };
-                        if let Some(index) = items.iter().position(|item| {
-                            matches!(item, Destination::InstalledApp(app) if app == &previous
-                                || (!app.identifier().is_empty()
-                                    && app.title() == previous.title()
-                                    && app.identifier() == previous.identifier()))
-                        }) {
-                            this.selected = index;
-                        }
-                    });
-                });
-            })
-            .detach();
+            self.load_applications(window, cx);
         }
         if matches!(self.index.open_windows, OpenWindowsIndex::Unloaded)
             && matches!(self.results, Results::OpenWindowsLoading)
@@ -1307,6 +1277,53 @@ impl QuickSearch {
             .detach();
         }
         cx.notify();
+    }
+
+    fn load_applications(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.application_refresh == ApplicationRefresh::Loading {
+            return;
+        }
+        self.application_refresh = ApplicationRefresh::Loading;
+        let cached = self.index.recent.applications.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let applications = cx
+                .background_executor()
+                .spawn(async { ApplicationIndex::load() })
+                .await;
+            cached.remember(&applications);
+            let _ = cx.update(|window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    this.application_refresh = ApplicationRefresh::Finished;
+                    if matches!(applications, ApplicationIndex::Unavailable(_))
+                        && matches!(this.index.applications, ApplicationIndex::Ready { .. })
+                    {
+                        return;
+                    }
+                    let previous = match &this.results {
+                        Results::Destinations(items) => items.get(this.selected).cloned(),
+                        _ => None,
+                    };
+                    this.index.applications = applications;
+                    let query = this.input.read(cx).text();
+                    this.refresh_results(&query, window, cx);
+                    let Some(Destination::InstalledApp(previous)) = previous else {
+                        return;
+                    };
+                    let Results::Destinations(items) = &this.results else {
+                        return;
+                    };
+                    if let Some(index) = items.iter().position(|item| {
+                        matches!(item, Destination::InstalledApp(app) if app == &previous
+                            || (!app.identifier().is_empty()
+                                && app.title() == previous.title()
+                                && app.identifier() == previous.identifier()))
+                    }) {
+                        this.selected = index;
+                    }
+                });
+            });
+        })
+        .detach();
     }
 
     fn refresh_local_files(
@@ -1411,9 +1428,19 @@ impl QuickSearch {
             }
             _ => {
                 if let Some(query) = self.results.suggested_input(self.selected) {
+                    self.remember_selected_example();
                     self.fill_query(query.to_owned(), window, cx);
                 }
             }
+        }
+    }
+
+    fn remember_selected_example(&self) {
+        let Results::Help(items) = &self.results else {
+            return;
+        };
+        if let Some(&index) = items.get(self.selected) {
+            self.index.recent.examples.record(index);
         }
     }
 
@@ -1538,7 +1565,8 @@ impl QuickSearch {
             "f5" => {
                 let query = self.input.read(cx).text();
                 match scoped_query(query.trim()) {
-                    Some((Scope::LocalFiles | Scope::OpenWindows, _)) if event.is_held => {}
+                    Some((Scope::LocalFiles | Scope::OpenWindows | Scope::Applications, _))
+                        if event.is_held => {}
                     Some((Scope::OpenWindows, _))
                         if matches!(self.index.open_windows, OpenWindowsIndex::Loading) => {}
                     Some((Scope::LocalFiles, _)) => {
@@ -1551,6 +1579,7 @@ impl QuickSearch {
                         self.refresh_results(&query, window, cx);
                         cx.notify();
                     }
+                    Some((Scope::Applications, _)) => self.load_applications(window, cx),
                     _ => return,
                 }
             }
@@ -1585,6 +1614,7 @@ impl QuickSearch {
                 }
                 if !event.is_held {
                     if let Some(query) = suggestion {
+                        self.remember_selected_example();
                         self.fill_query(query, window, cx);
                     } else {
                         self.continue_value(window, cx);
@@ -1733,8 +1763,8 @@ impl QuickSearch {
                     .enumerate()
                     .skip(start)
                     .take(EXAMPLE_PAGE_SIZE)
-                    .map(|(index, &example)| {
-                        let example = &EXAMPLES[example];
+                    .map(|(index, &example_index)| {
+                        let example = &EXAMPLES[example_index];
                         let query = example.query;
                         self.suggestion_row(index, EXAMPLE_ROW_HEIGHT)
                             .child(icon(example.icon, 16., theme::ACCENT))
@@ -1755,7 +1785,8 @@ impl QuickSearch {
                                 )
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.fill_query(query, window, cx)
+                                this.index.recent.examples.record(example_index);
+                                this.fill_query(query, window, cx);
                             }))
                     }),
             )
@@ -2798,16 +2829,50 @@ mod tests {
                             )
                         })
                         .unwrap();
-                    send.send((states, reopened_states, page_states, window_refresh))
+                    let app_refresh = reopened
+                        .update(cx, |search, window, cx| {
+                            search.index.applications = ApplicationIndex::Ready {
+                                apps: Vec::new().into(),
+                                loaded_at: std::time::Instant::now(),
+                            };
+                            search.application_refresh = ApplicationRefresh::Finished;
+                            search.fill_query("应用: 测试", window, cx);
+                            let mut event = KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse("f5").unwrap(),
+                                is_held: true,
+                            };
+                            search.key_down(&event, window, cx);
+                            let finished =
+                                search.application_refresh == ApplicationRefresh::Finished;
+                            event.is_held = false;
+                            search.key_down(&event, window, cx);
+                            let loading = search.application_refresh == ApplicationRefresh::Loading;
+                            search.key_down(&event, window, cx);
+                            (
+                                finished,
+                                loading,
+                                search.application_refresh == ApplicationRefresh::Loading,
+                                matches!(search.index.applications, ApplicationIndex::Ready { .. }),
+                            )
+                        })
                         .unwrap();
+                    send.send((
+                        states,
+                        reopened_states,
+                        page_states,
+                        window_refresh,
+                        app_refresh,
+                    ))
+                    .unwrap();
                     cx.update(|cx| cx.quit()).unwrap();
                 })
                 .detach();
             });
-        let (states, reopened_states, (help_pages, output_pages), window_refresh) =
+        let (states, reopened_states, (help_pages, output_pages), window_refresh, app_refresh) =
             receive.recv().unwrap();
         assert_eq!(reopened_states, ["", "3**4"]);
         assert_eq!(window_refresh, (true, true, true));
+        assert_eq!(app_refresh, (true, true, true, true));
         let last_example_page = (EXAMPLES.len() - 1) / EXAMPLE_PAGE_SIZE * EXAMPLE_PAGE_SIZE;
         assert_eq!(
             help_pages,
