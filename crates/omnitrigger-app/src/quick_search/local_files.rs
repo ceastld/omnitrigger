@@ -163,6 +163,14 @@ impl LocalFilesIndex {
         if query.order == DirectoryOrder::Name {
             matches.sort_by_key(|(rank, _)| *rank);
         }
+        if query.path_list && !matches.is_empty() {
+            let paths = matches
+                .iter()
+                .map(|(_, entry)| entry.path.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Results::text_value(Ok(paths));
+        }
         Results::Destinations(
             matches
                 .into_iter()
@@ -183,6 +191,7 @@ struct FileQuery<'a> {
     filter: &'a str,
     order: DirectoryOrder,
     entry_type: DirectoryEntryType,
+    path_list: bool,
 }
 
 fn split_query(query: &str) -> Option<FileQuery<'_>> {
@@ -191,6 +200,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
     let (filter, options) = filter.split_once('|').unwrap_or((filter, ""));
     let mut order = DirectoryOrder::Name;
     let mut entry_type = DirectoryEntryType::All;
+    let mut path_list = false;
     for option in options.split_whitespace() {
         match option.to_ascii_lowercase().as_str() {
             "最近修改" | "modified" if order == DirectoryOrder::Name => {
@@ -205,6 +215,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             "仅文件夹" | "folders" if entry_type == DirectoryEntryType::All => {
                 entry_type = DirectoryEntryType::Directory;
             }
+            "路径列表" | "paths" if !path_list => path_list = true,
             _ => return None,
         }
     }
@@ -213,6 +224,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
         filter: filter.trim(),
         order,
         entry_type,
+        path_list,
     })
 }
 
@@ -353,6 +365,33 @@ mod tests {
             [Destination::LocalFile { name: first, .. }, Destination::LocalFile { name: second, .. }]
             if first == "Z report.txt" && second == "report.txt"
         ));
+    }
+
+    #[test]
+    fn previews_matching_paths_in_result_order_using_the_loaded_directory() {
+        let mut index = LocalFilesIndex::default();
+        let folder = r"C:\Work | report | 大小";
+        let load = index.request(Some(folder)).unwrap();
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                entry("z report.txt", "file"),
+                entry("report.txt", "file"),
+                entry("notes.txt", "file"),
+                entry("report.url", "unavailable"),
+            ]),
+        ));
+        let paths_query = r"C:\Work | report | 大小 路径列表";
+        assert!(index.request(Some(paths_query)).is_none());
+        assert!(matches!(
+            index.results(paths_query),
+            Results::Value(Ok(value)) if value.text == "C:\\Work\\z report.txt\nC:\\Work\\report.txt"
+        ));
+        assert!(matches!(
+            index.results(r"C:\Work | omitted | paths size"),
+            Results::Destinations(items) if items.is_empty()
+        ));
+        assert!(split_query(r"C:\Work | | 路径列表 paths").is_none());
     }
 
     #[test]
