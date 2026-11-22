@@ -105,6 +105,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 中位绝对偏差 0,1/2,1,10",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "去掉两端的观测后求截尾平均",
+        query: "统计: 截尾平均 25% 1,2,3,100",
+    },
+    Example {
         icon: Icon::Layers,
         title: "按精确数值列出次数和频率",
         query: "统计: 频数表 3,1/2,0.5,3,5",
@@ -2553,6 +2558,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "比较两个算式的精确分数值",
+        query: "分数: 比较 1/3 < 0.34",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "将有限连分数还原为精确分数",
         query: "分数: 从连分数 [3,7,16]",
     },
@@ -2638,9 +2648,16 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::BatchCalculation if matches!(term, "分" | "分数") => {}
         Scope::Fraction
             if !term.is_empty()
-                && ["循环小数", "取值表", "连分数", "从连分数", "从循环小数"]
-                    .into_iter()
-                    .any(|operation| operation.starts_with(term)) => {}
+                && [
+                    "循环小数",
+                    "取值表",
+                    "连分数",
+                    "从连分数",
+                    "从循环小数",
+                    "比较",
+                ]
+                .into_iter()
+                .any(|operation| operation.starts_with(term)) => {}
         Scope::BatchConversion
             if matches!(
                 term,
@@ -2691,7 +2708,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::Statistics
             if !term.is_empty()
-                && ["二项概率", "二项累计"]
+                && ["二项概率", "二项累计", "截尾平均"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Statistics

@@ -22,6 +22,7 @@ pub(super) enum StatisticsError {
     InvalidWeight,
     ZeroTotalWeight,
     InvalidProbability,
+    InvalidTrimShare,
     BinomialArguments,
     InvalidWindowWidth,
     AdjacentValueCount,
@@ -42,6 +43,7 @@ impl StatisticsError {
             Self::InvalidWeight => "用 数值@非负权重，权重可写成分数或百分数",
             Self::ZeroTotalWeight => "权重合计须大于零",
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
+            Self::InvalidTrimShare => "每端截去的比例须为 0 到小于 50%，例如 10%",
             Self::BinomialArguments => "依次输入试验次数、成功次数和单次成功概率，最多 128 次试验",
             Self::InvalidWindowWidth => "窗口大小须为正整数，且不能超过数值个数",
             Self::AdjacentValueCount => "计算相邻项的变化至少需要两个数值",
@@ -67,6 +69,7 @@ enum StatisticsOperation {
     HarmonicMean,
     StandardError,
     MedianAbsoluteDeviation,
+    TrimmedMean(BigRational),
 }
 
 #[derive(Clone, Copy)]
@@ -129,6 +132,14 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
                 values.trim(),
             )
         }
+        "截尾平均" | "trimmed-mean" => {
+            let (share, values) = operation_and_arguments(values.trim());
+            let share = parse_probability(share)?;
+            if share >= BigRational::new(BigInt::from(1u8), BigInt::from(2u8)) {
+                return Err(StatisticsError::InvalidTrimShare);
+            }
+            (StatisticsOperation::TrimmedMean(share), values.trim())
+        }
         _ => (StatisticsOperation::Sample, input),
     };
     let (prefix, values) = operation_and_arguments(input);
@@ -160,6 +171,9 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         StatisticsOperation::Frequencies(report) => Ok(report_frequencies(values, count, report)),
         StatisticsOperation::MedianAbsoluteDeviation => {
             median_absolute_deviation(values, count).map(|value| value.to_string())
+        }
+        StatisticsOperation::TrimmedMean(share) => {
+            trimmed_mean(values, count, share).map(|value| value.to_string())
         }
         StatisticsOperation::RootMeanSquare => {
             let squares = squared_deviation_sum(&values, &BigRational::default())?;
@@ -437,6 +451,24 @@ fn sorted_median(
     Ok(middle.clone())
 }
 
+fn trimmed_mean(
+    mut values: Vec<(BigRational, u64)>,
+    count: u64,
+    share: BigRational,
+) -> Result<BigRational, StatisticsError> {
+    let trim = u64::try_from((share * BigInt::from(count)).to_integer())
+        .map_err(|_| StatisticsError::FrequencyOverflow)?;
+    let limit = count - trim;
+    values.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    let mut rank = 0;
+    for (_, repetitions) in &mut values {
+        let next = rank + *repetitions;
+        *repetitions = next.min(limit).saturating_sub(rank.max(trim));
+        rank = next;
+    }
+    bounded(observation_sum(&values)? / BigInt::from(limit - trim))
+}
+
 fn median_absolute_deviation(
     mut values: Vec<(BigRational, u64)>,
     count: u64,
@@ -648,6 +680,27 @@ mod tests {
         assert_eq!(
             calculate_statistics("二项累计 0,0,101%"),
             Err(StatisticsError::InvalidProbability)
+        );
+    }
+
+    #[test]
+    fn trims_both_tails_by_exact_observation_count_without_expanding_frequencies() {
+        for (query, expected) in [
+            ("截尾平均 25% 100,1,3,2", "5/2"),
+            ("截尾平均 1/4 频数 10@2,0@4,2@2", "1"),
+            ("trimmed-mean 10% 1/2,1,2", "7/6"),
+            ("截尾平均 0 频数 0@1000000000,3@1000000000", "3/2"),
+            ("截尾平均 49% 1,1,2", "1"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("截尾平均 50% 1,2"),
+            Err(StatisticsError::InvalidTrimShare)
         );
     }
 

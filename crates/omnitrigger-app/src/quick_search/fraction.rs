@@ -5,7 +5,7 @@ use num_rational::BigRational;
 
 use super::calculator::{normalize, QUERY_LIMIT};
 use super::conversion::split_conversion;
-use super::operators::Operator;
+use super::operators::{NumberComparison, Operator};
 
 const MAX_POWER_EXPONENT: u32 = 1024;
 const MAX_MODULAR_POWER_BITS: u64 = 1024;
@@ -42,6 +42,7 @@ pub(super) enum FractionError {
     TableInputs,
     ContinuedFractionArguments,
     ContinuedFractionLength,
+    ComparisonArguments,
     ExactRange,
 }
 
@@ -75,6 +76,7 @@ impl FractionError {
                 "用方括号填写连分数整数项，例如 [3,7,16]。第一项之后须为正整数"
             }
             Self::ContinuedFractionLength => "连分数最多支持 512 项",
+            Self::ComparisonArguments => "输入两个算式和一个比较符，例如 分数: 比较 1/3 < 0.34",
             Self::ExactRange => "幂指数绝对值最多 1024，分子和分母各最多 8192 个二进制位",
         }
     }
@@ -154,6 +156,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     if verb == "从连分数" || verb.eq_ignore_ascii_case("from-continued-fraction") {
         return from_continued_fraction(expression.trim()).map(|value| value.to_string());
     }
+    if verb == "比较" || verb.eq_ignore_ascii_case("compare") {
+        return compare_fraction_expressions(expression);
+    }
     if verb == "小数" || verb.eq_ignore_ascii_case("decimal") {
         let (source, places) =
             split_conversion(expression.trim()).ok_or(FractionError::Incomplete)?;
@@ -202,6 +207,31 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     } else {
         format!("{sign}{numerator}/{denominator}")
     })
+}
+
+fn compare_fraction_expressions(input: &str) -> Result<String, FractionError> {
+    let (start, length, comparison) = input
+        .char_indices()
+        .find_map(|(index, character)| {
+            let remainder = &input[index..];
+            [2, character.len_utf8()].into_iter().find_map(|length| {
+                let operator = remainder.get(..length)?;
+                NumberComparison::parse(operator).map(|comparison| (index, length, comparison))
+            })
+        })
+        .ok_or(FractionError::ComparisonArguments)?;
+    let left = input[..start].trim();
+    let right = input[start + length..].trim();
+    if left.is_empty() || right.is_empty() {
+        return Err(FractionError::ComparisonArguments);
+    }
+    let order = calculate_fraction(left)?.cmp(&calculate_fraction(right)?);
+    Ok(if comparison.accepts(order) {
+        "成立"
+    } else {
+        "不成立"
+    }
+    .to_owned())
 }
 
 pub(super) fn calculate_fraction(input: &str) -> Result<BigRational, FractionError> {
@@ -925,6 +955,27 @@ impl FractionParser<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compares_fraction_expressions_exactly_including_factorials_and_unicode_operators() {
+        for (query, expected) in [
+            ("比较 1/3 < 0.34", "成立"),
+            ("比较 2**53+1 > 2**53", "成立"),
+            ("compare 5! == 120", "成立"),
+            ("比较 ３／２ ≤ １．５", "成立"),
+            ("compare 1.50e0 != 3/2", "不成立"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            simplify_fraction("比较 1/2 >"),
+            Err(FractionError::ComparisonArguments)
+        );
+        assert_eq!(
+            simplify_fraction("比较 2/0 = 1"),
+            Err(FractionError::ZeroDenominator)
+        );
+    }
 
     #[test]
     fn evaluates_a_formula_for_each_exact_table_input() {
