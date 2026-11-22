@@ -48,6 +48,8 @@ mod video_frames;
 mod wheel_slots;
 mod wheels;
 
+use std::{cell::RefCell, rc::Rc};
+
 use gpui::{
     div, prelude::*, px, size, App, Bounds, ClipboardItem, Context, DisplayId, Div, Entity,
     EntityInputHandler, Focusable, FontWeight, KeyDownEvent, Stateful, Subscription,
@@ -243,6 +245,7 @@ pub(super) struct RecentSearch {
     calculations: RecentValues,
     conversions: RecentValues,
     applications: ApplicationCache,
+    last_input: Rc<RefCell<String>>,
 }
 
 impl SearchIndex {
@@ -1036,6 +1039,7 @@ pub(super) struct QuickSearch {
     selected: usize,
     requested_applications: bool,
     input_before_help: Option<String>,
+    previous_input: String,
     _input_changes: Subscription,
     _activation: Subscription,
 }
@@ -1092,6 +1096,9 @@ impl QuickSearch {
         });
         let input_changes = cx.observe_in(&input, window, |this, input, window, cx| {
             let query = input.read(cx).text();
+            if !query.trim().is_empty() {
+                this.index.recent.last_input.borrow_mut().clone_from(&query);
+            }
             if this.index.wheel_slots.is_none()
                 && matches!(scoped_query(query.trim()), Some((Scope::WheelSlots, term)) if !term.is_empty())
             {
@@ -1116,6 +1123,7 @@ impl QuickSearch {
             }
         });
         window.focus(&input.focus_handle(cx));
+        let previous_input = index.recent.last_input.borrow().clone();
         Self {
             theme_mode,
             input,
@@ -1127,6 +1135,7 @@ impl QuickSearch {
             selected: 0,
             requested_applications: false,
             input_before_help: None,
+            previous_input,
             _input_changes: input_changes,
             _activation: activation,
         }
@@ -1401,7 +1410,16 @@ impl QuickSearch {
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers.number_of_modifiers();
         if modifiers != 0 {
-            if modifiers == 1 && keystroke.modifiers.shift && keystroke.key == "enter" {
+            if modifiers == 2
+                && keystroke.modifiers.control
+                && keystroke.modifiers.shift
+                && keystroke.key == "r"
+            {
+                if !event.is_held && !self.previous_input.is_empty() {
+                    self.fill_query(self.previous_input.clone(), window, cx);
+                }
+                cx.stop_propagation();
+            } else if modifiers == 1 && keystroke.modifiers.shift && keystroke.key == "enter" {
                 if !event.is_held {
                     self.input.update(cx, |input, cx| {
                         input.replace_text_in_range(None, "\n", window, cx);
@@ -2505,6 +2523,7 @@ mod tests {
             .with_assets(crate::Assets)
             .run(move |cx| {
                 let index = SearchIndex::default();
+                index.recent.last_input.borrow_mut().push_str("2**10");
                 let results = index.results("");
                 let window = cx
                     .open_window(
@@ -2539,7 +2558,6 @@ mod tests {
                             ("shift-enter", false),
                             ("shift-enter", true),
                             ("ctrl-r", true),
-                            ("ctrl-shift-r", false),
                             ("ctrl-r", false),
                             ("ctrl-r", true),
                             ("ctrl-r", false),
@@ -2548,6 +2566,9 @@ mod tests {
                             ("f1", false),
                             ("f1", true),
                             ("f1", false),
+                            ("ctrl-shift-r", true),
+                            ("ctrl-shift-r", false),
+                            ("ctrl-shift-r", true),
                         ]
                         .map(|(key, is_held)| {
                             let event = KeyDownEvent {
@@ -2571,7 +2592,6 @@ mod tests {
                 "换行验证甲\n",
                 "换行验证甲\n",
                 "换行验证甲\n",
-                "换行验证甲\n",
                 "算式历史: 换行验证甲\n",
                 "算式历史: 换行验证甲\n",
                 "换行验证甲\n",
@@ -2580,6 +2600,9 @@ mod tests {
                 "?",
                 "?",
                 "换行验证甲\n",
+                "换行验证甲\n",
+                "2**10",
+                "2**10",
             ]
         );
     }
