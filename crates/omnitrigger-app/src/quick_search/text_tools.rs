@@ -18,6 +18,7 @@ use super::{
     calculator::{narrow_ascii_graphic, FULLWIDTH_ASCII_OFFSET},
     csv_tools::csv_cell,
     fraction::parse_fraction_literal,
+    operators::{select_index_ranges, IndexRangeError},
 };
 
 const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
@@ -758,26 +759,10 @@ fn select_text_line_ranges(input: &str) -> Result<String, TextError> {
         .ok_or(TextError::IncompleteTextArgument)?;
     let text = text_payload(text)?;
     let lines: Vec<_> = text.lines().collect();
-    let mut selected = vec![false; lines.len()];
-    let parse_line = |number: &str| {
-        number
-            .parse::<usize>()
-            .ok()
-            .filter(|&line| line > 0)
-            .ok_or(TextError::InvalidLineRange)
-    };
-    for range in ranges.split(',') {
-        let (first, last) = range.split_once('-').unwrap_or((range, range));
-        let start = parse_line(first)?;
-        let end = parse_line(last)?;
-        if end < start {
-            return Err(TextError::InvalidLineRange);
-        }
-        selected
-            .get_mut(start - 1..end)
-            .ok_or(TextError::MissingLine)?
-            .fill(true);
-    }
+    let selected = select_index_ranges(ranges, lines.len()).map_err(|error| match error {
+        IndexRangeError::Invalid => TextError::InvalidLineRange,
+        IndexRangeError::OutOfBounds => TextError::MissingLine,
+    })?;
     Ok(lines
         .into_iter()
         .zip(selected)

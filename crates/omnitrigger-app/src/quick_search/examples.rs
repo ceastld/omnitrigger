@@ -1752,6 +1752,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按行号和区间取 CSV 数据行",
+        query: "CSV: 取行 2,4 编号,备注\n001,茶\n002,梨\n003,苹果\n004,柿子",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按表头名称和指定顺序选 CSV 列",
         query: "CSV: 选列名 [\"备注\",\"编号\"] 编号,名称,备注\n001,茶,\"含,逗号\"",
     },

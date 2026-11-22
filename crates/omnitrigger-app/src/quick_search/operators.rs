@@ -2,6 +2,38 @@ use std::cmp::Ordering;
 
 use super::calculator::CalculationError;
 
+pub(super) enum IndexRangeError {
+    Invalid,
+    OutOfBounds,
+}
+
+pub(super) fn select_index_ranges(
+    ranges: &str,
+    length: usize,
+) -> Result<Vec<bool>, IndexRangeError> {
+    let mut selected = vec![false; length];
+    let parse_index = |number: &str| {
+        number
+            .parse::<usize>()
+            .ok()
+            .filter(|&index| index > 0)
+            .ok_or(IndexRangeError::Invalid)
+    };
+    for range in ranges.split(',') {
+        let (first, last) = range.split_once('-').unwrap_or((range, range));
+        let start = parse_index(first)?;
+        let end = parse_index(last)?;
+        if end < start {
+            return Err(IndexRangeError::Invalid);
+        }
+        selected
+            .get_mut(start - 1..end)
+            .ok_or(IndexRangeError::OutOfBounds)?
+            .fill(true);
+    }
+    Ok(selected)
+}
+
 pub(super) fn split_top_level_commas(input: &str) -> impl Iterator<Item = &str> {
     let mut depth = 0usize;
     input.split(move |ch| {

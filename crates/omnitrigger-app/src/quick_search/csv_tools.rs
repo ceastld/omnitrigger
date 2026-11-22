@@ -15,7 +15,7 @@ use serde::{
 
 use super::{
     fraction::{ensure_exact_size, parse_fraction_literal},
-    operators::NumberComparison,
+    operators::{select_index_ranges, IndexRangeError, NumberComparison},
     statistics::{summarize_unweighted, StatisticsError},
     text_tools::{compare_natural, compile_regex, TextError},
 };
@@ -32,6 +32,8 @@ pub(super) enum CsvError {
     InvalidHeader,
     InvalidColumns,
     InvalidColumnNames,
+    InvalidRowRange,
+    MissingDataRow,
     MissingColumnName,
     AmbiguousColumnName,
     RenameArguments,
@@ -65,6 +67,8 @@ impl CsvError {
             Self::InvalidHeader => "CSV 表头的列名须非空且唯一",
             Self::InvalidColumns => "用逗号隔开互不重复的列号，列号从 1 开始",
             Self::InvalidColumnNames => "用 JSON 字符串数组输入互不重复的列名",
+            Self::InvalidRowRange => "填写从 1 开始的数据行号或区间，例如 2,4-6",
+            Self::MissingDataRow => "指定行号超出了表头之后的数据行数",
             Self::MissingColumnName => "表头中找不到所选列名",
             Self::AmbiguousColumnName => "表头中存在多个同名列",
             Self::RenameArguments => "用 JSON 数组填写原列名和非空的新列名",
@@ -102,6 +106,7 @@ enum Operation {
     FromTsv,
     SelectColumns(Vec<usize>),
     SelectNamedColumns(Vec<String>),
+    SelectRows(String),
     RenameColumn([String; 2]),
     ComputeColumn {
         name: String,
@@ -198,6 +203,11 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         "转tsv" | "tsv" => Operation::ToTsv,
         "从tsv" | "from-tsv" => Operation::FromTsv,
         "去重" | "deduplicate" => Operation::DeduplicateRows,
+        "取行" | "pick-rows" => {
+            let (ranges, data) = split_argument(input).ok_or(CsvError::MissingInput)?;
+            input = data;
+            Operation::SelectRows(ranges.to_owned())
+        }
         "选列" | "pick-columns" => {
             let (columns, data) = column_arguments(input)?;
             input = data;
@@ -332,6 +342,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::FromTsv => Ok(write_rows(&rows, ',')),
         Operation::SelectColumns(columns) => select_columns(&rows, &columns),
         Operation::SelectNamedColumns(names) => select_named_columns(&rows, &names),
+        Operation::SelectRows(ranges) => select_data_rows(&rows, &ranges),
         Operation::RenameColumn(names) => rename_column(rows, names),
         Operation::ComputeColumn {
             name,
@@ -469,6 +480,19 @@ fn column_number(input: &str) -> Result<usize, CsvError> {
         .ok()
         .filter(|&number| number > 0)
         .ok_or(CsvError::InvalidColumns)
+}
+
+fn select_data_rows(rows: &[Vec<String>], ranges: &str) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let selected = select_index_ranges(ranges, records.len()).map_err(|error| match error {
+        IndexRangeError::Invalid => CsvError::InvalidRowRange,
+        IndexRangeError::OutOfBounds => CsvError::MissingDataRow,
+    })?;
+    let picked = records
+        .iter()
+        .zip(selected)
+        .filter_map(|(row, selected)| selected.then_some(row));
+    Ok(write_rows(std::iter::once(header).chain(picked), ','))
 }
 
 fn select_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, CsvError> {
@@ -974,6 +998,23 @@ impl Serialize for CsvObject<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selects_csv_records_in_input_order_preserving_multiline_fields() {
+        let data = "编号,备注\r\n001,茶\r\n002,\"梨\r\n苹果\"\r\n003,咖啡\r\n004,柿子";
+        assert_eq!(
+            transform_csv(&format!("取行 4,2-3,2\r\n{data}")).as_deref(),
+            Ok("编号,备注\r\n002,\"梨\r\n苹果\"\r\n003,咖啡\r\n004,柿子")
+        );
+        for (query, error) in [
+            ("pick-rows 0 编号,备注\n001,茶", CsvError::InvalidRowRange),
+            ("pick-rows 3-2 编号,备注\n001,茶", CsvError::InvalidRowRange),
+            ("pick-rows 2 编号,备注\n001,茶", CsvError::MissingDataRow),
+            ("pick-rows 1 编号,备注", CsvError::MissingDataRow),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn pivots_csv_using_first_seen_labels_exact_sums_and_blank_missing_cells() {
