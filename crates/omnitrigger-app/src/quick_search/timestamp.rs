@@ -146,6 +146,10 @@ pub(super) fn convert_timestamp(query: &str, now: DateTime<Utc>) -> Result<Strin
     convert_timestamp_with_local(query, now, |time| time.with_timezone(&Local).fixed_offset())
 }
 
+pub(super) fn is_offset_timestamp(text: &str) -> bool {
+    text.as_bytes().get(10) == Some(&b'T') && parse_explicit_time(text, None).is_ok()
+}
+
 fn convert_timestamp_with_local(
     query: &str,
     now: DateTime<Utc>,

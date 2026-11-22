@@ -115,7 +115,7 @@ use settings_sections::matching_settings;
 use statistics::{calculate_statistics, StatisticsError};
 use text_tools::{count_text, transform_text, TextError};
 use timecode::{convert_timecode, TimecodeError};
-use timestamp::{convert_timestamp, TimestampError};
+use timestamp::{convert_timestamp, is_offset_timestamp, TimestampError};
 use triangle::{calculate_triangle, TriangleError};
 use triggers::{matching_triggers, SearchTrigger};
 use unicode_segmentation::UnicodeSegmentation;
@@ -193,6 +193,7 @@ impl ResultValue {
             ValueKind::Conversion(Some(_)) => Some("Tab 换目标"),
             ValueKind::CalendarDate => Some("Tab 继续日期计算"),
             ValueKind::ClockDuration => Some("Tab 继续时长计算"),
+            ValueKind::TimestampInstant => Some("Tab 继续换时区"),
             _ => None,
         }
     }
@@ -203,6 +204,7 @@ enum ValueKind {
     Text,
     CalendarDate,
     ClockDuration,
+    TimestampInstant,
     Calculation,
     ExactCalculation { can_continue: bool },
     Conversion(Option<String>),
@@ -854,8 +856,17 @@ impl Results {
                 Scope::FileMode => {
                     Self::text_value(calculate_file_mode(term).map_err(ValueError::FileMode))
                 }
-                Scope::Timestamp => Self::text_value(
-                    convert_timestamp(term, chrono::Utc::now()).map_err(ValueError::Timestamp),
+                Scope::Timestamp => Self::Value(
+                    convert_timestamp(term, chrono::Utc::now())
+                        .map_err(ValueError::Timestamp)
+                        .map(|text| {
+                            let kind = if is_offset_timestamp(&text) {
+                                ValueKind::TimestampInstant
+                            } else {
+                                ValueKind::Text
+                            };
+                            ResultValue { text, kind }
+                        }),
                 ),
                 Scope::Uuid => {
                     Self::text_value(transform_uuid(term).map_err(ValueError::Identifier))
@@ -1122,6 +1133,7 @@ impl Results {
             ValueKind::Conversion(Some(query)) => Some(query.clone()),
             ValueKind::CalendarDate => Some(format!("日期: {}", text.trim())),
             ValueKind::ClockDuration => Some(format!("时长: {text}")),
+            ValueKind::TimestampInstant => Some(format!("时间戳: {text}")),
             _ => None,
         }
     }
@@ -3015,6 +3027,27 @@ mod tests {
             for_query("批量换算: 颜色对照 #abc\n\nrgb(300,0,0)", &[]),
             Results::Value(Err(ValueError::BatchColor(BatchError::Row { line: 3, .. })))
         ));
+    }
+
+    #[test]
+    fn continues_absolute_timestamps_without_reusing_tables_or_elapsed_durations() {
+        for (query, expected) in [
+            ("时间戳: 0", Some("时间戳: 1970-01-01T00:00:00Z")),
+            (
+                "时间戳: 1970-01-01T00:00:00.123Z to +08:00",
+                Some("时间戳: 1970-01-01T08:00:00.123+08:00"),
+            ),
+            ("时间戳: 0 to UTC, Asia/Shanghai", None),
+            ("时间戳: 时区CSV 0 to UTC", None),
+            ("时间戳: 间隔 0 到 3", None),
+            ("时间戳: 1970-01-01T00:00:00Z", None),
+        ] {
+            assert_eq!(
+                for_query(query, &[]).continuation_query().as_deref(),
+                expected,
+                "{query}"
+            );
+        }
     }
 
     #[test]
