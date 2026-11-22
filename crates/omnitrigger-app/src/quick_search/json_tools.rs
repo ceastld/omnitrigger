@@ -46,6 +46,7 @@ pub(super) enum JsonError {
     PipelineStep { index: usize, cause: &'static str },
     ComparisonTooLarge,
     PointerListTooLarge,
+    DuplicateKeyReportTooLarge,
     FlattenedObjectTooLarge,
     ExpectedObject,
     ExpectedCollection,
@@ -108,6 +109,7 @@ impl JsonError {
             Self::PipelineStep { cause, .. } => cause,
             Self::ComparisonTooLarge => "JSON 对比结果超过 1 MiB",
             Self::PointerListTooLarge => "指针列表超过 1 MiB",
+            Self::DuplicateKeyReportTooLarge => "重复键报告超过 1 MiB，请缩小数据范围",
             Self::FlattenedObjectTooLarge => "JSON 展平结果超过 1 MiB",
             Self::ExpectedObject => "请输入 JSON 对象",
             Self::ExpectedCollection => "请输入 JSON 数组或对象以统计顶层条目数",
@@ -207,6 +209,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "生成指针" | "build-pointer" => return build_json_pointer(source),
         "解析指针" | "parse-pointer" => return parse_json_pointer(source),
         "列指针" | "列路径" | "list-pointers" => return write_pointer_leaves(source, false),
+        "重复键" | "duplicate-keys" => return report_duplicate_json_keys(source),
         "展平" | "flatten" => return write_pointer_leaves(source, true),
         "改键" | "rename-key" => return rename_json_key(source),
         "改值" | "replace" => return write_json_value(source, false),
@@ -1813,6 +1816,79 @@ fn write_pointer_leaves(source: &str, include_values: bool) -> Result<String, Js
     Ok(result)
 }
 
+fn report_duplicate_json_keys(source: &str) -> Result<String, JsonError> {
+    let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
+    let mut pending = vec![(root, None::<(usize, String)>)];
+    let mut path = String::new();
+    let mut result = String::from("[");
+    while let Some((value, key)) = pending.pop() {
+        if let Some((parent_length, key)) = key {
+            path.truncate(parent_length);
+            append_pointer_key(&mut path, &key);
+        }
+        let raw = value.get();
+        match raw.as_bytes()[0] {
+            b'{' => {
+                let entries = read_object_entries(raw)?;
+                append_duplicate_json_keys(&mut result, source, raw, &path, &entries)?;
+                for (key, child) in entries.into_iter().rev() {
+                    pending.push((child, Some((path.len(), key))));
+                }
+            }
+            b'[' => {
+                for (index, child) in read_json_array(raw)?.into_iter().enumerate().rev() {
+                    pending.push((child, Some((path.len(), index.to_string()))));
+                }
+            }
+            _ => {}
+        }
+    }
+    if result.len() > 1 {
+        result.push('\n');
+    }
+    result.push(']');
+    Ok(result)
+}
+
+fn append_duplicate_json_keys(
+    result: &mut String,
+    source: &str,
+    raw: &str,
+    path: &str,
+    entries: &[(String, &RawValue)],
+) -> Result<(), JsonError> {
+    let mut counts = HashMap::with_capacity(entries.len());
+    for (name, _) in entries {
+        *counts.entry(name.as_str()).or_insert(0usize) += 1;
+    }
+    if counts.len() == entries.len() {
+        return Ok(());
+    }
+    let object_start = raw_value_span(source, raw)?.start + 1;
+    for (name, _) in entries {
+        let Some(count) = counts.remove(name.as_str()).filter(|&count| count > 1) else {
+            continue;
+        };
+        let row = serde_json::json!({
+            "对象路径": path,
+            "对象起始字节": object_start,
+            "键": name,
+            "次数": count,
+        })
+        .to_string();
+        let has_previous = result.len() > 1;
+        if result.len() + row.len() + usize::from(has_previous) + 3 > MAX_PRETTY_BYTES {
+            return Err(JsonError::DuplicateKeyReportTooLarge);
+        }
+        if has_previous {
+            result.push(',');
+        }
+        result.push('\n');
+        result.push_str(&row);
+    }
+    Ok(())
+}
+
 fn parse_json_pointer(source: &str) -> Result<String, JsonError> {
     if source.is_empty() {
         return Err(JsonError::Incomplete);
@@ -2305,6 +2381,46 @@ mod tests {
             Err(JsonError::DuplicateKey)
         );
         assert_eq!(write_pointer_leaves("[1,]", false), Err(JsonError::Invalid));
+    }
+
+    #[test]
+    fn reports_each_duplicate_key_with_its_object_path_and_source_position() {
+        let first = r#"{"x":1,"\u0078":2,"y":0,"y":1,"x":3}"#;
+        let second = r#"{"\u0000":1,"\u0000":2}"#;
+        let source = format!(r#"{{"a/b~":[{first}],"a/b~":[{second}]}}"#);
+        let report = transform_json(&format!("重复键 {source}")).unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&report).unwrap();
+        assert_eq!(
+            rows,
+            [
+                serde_json::json!({
+                    "对象路径": "", "对象起始字节": 1, "键": "a/b~", "次数": 2
+                }),
+                serde_json::json!({
+                    "对象路径": "/a~1b~0/0", "对象起始字节": source.find(first).unwrap() + 1,
+                    "键": "x", "次数": 3
+                }),
+                serde_json::json!({
+                    "对象路径": "/a~1b~0/0", "对象起始字节": source.find(first).unwrap() + 1,
+                    "键": "y", "次数": 2
+                }),
+                serde_json::json!({
+                    "对象路径": "/a~1b~0/0", "对象起始字节": source.find(second).unwrap() + 1,
+                    "键": "\u{0}", "次数": 2
+                }),
+            ]
+        );
+        assert_eq!(
+            transform_json(r#"duplicate-keys [{"相同":1},{"相同":2}]"#).as_deref(),
+            Ok("[]")
+        );
+        assert_eq!(transform_json("重复键 [0,]"), Err(JsonError::Invalid));
+        let rows = [r#"{"x":0,"x":1}"#; 256].join(",");
+        let source = format!(r#"{{"{}":[{rows}]}}"#, "x".repeat(4096));
+        assert_eq!(
+            report_duplicate_json_keys(&source),
+            Err(JsonError::DuplicateKeyReportTooLarge)
+        );
     }
 
     #[test]

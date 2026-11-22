@@ -2467,6 +2467,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "定位 JSON 中同一对象内重复的键",
+        query: r#"JSON: 重复键 {"订单":[{"价格":1,"价格":2},{"价格":3}]}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用 JSON 指针作键展平数据",
         query: r#"JSON: 展平 {"订单":[{"a/b":9007199254740993},{}]}"#,
     },
