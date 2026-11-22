@@ -117,6 +117,8 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "加权平均" | "weighted-mean" => return weighted_mean(values.trim()),
         "移动平均" | "moving-average" => return moving_average(values.trim()),
         "移动中位数" | "moving-median" => return moving_median(values.trim()),
+        "移动最小" | "moving-min" => return moving_extreme(values.trim(), false),
+        "移动最大" | "moving-max" => return moving_extreme(values.trim(), true),
         "累计合计" | "running-sum" => return running_totals(values.trim(), false),
         "累计平均" | "running-average" => return running_totals(values.trim(), true),
         "二项概率" | "binomial" => return binomial_probability(values, false),
@@ -329,6 +331,22 @@ fn moving_median(input: &str) -> Result<String, StatisticsError> {
         ordered.clear();
     }
     Ok(medians.join("\n"))
+}
+
+fn moving_extreme(input: &str, largest: bool) -> Result<String, StatisticsError> {
+    let (width, values) = sliding_window_values(input)?;
+    let results: Vec<_> = values
+        .windows(width)
+        .map(|window| {
+            let value = if largest {
+                window.iter().max()
+            } else {
+                window.iter().min()
+            };
+            value.expect("窗口至少包含一个数值").to_string()
+        })
+        .collect();
+    Ok(results.join("\n"))
 }
 
 fn weighted_mean(input: &str) -> Result<String, StatisticsError> {
@@ -801,6 +819,26 @@ mod tests {
         assert_eq!(
             calculate_statistics("累计平均"),
             Err(StatisticsError::Incomplete)
+        );
+    }
+
+    #[test]
+    fn reports_each_complete_window_minimum_and_maximum_as_exact_values() {
+        for (query, expected) in [
+            ("移动最小 3 1/2,100,2,3,-1", "1/2\n2\n-1"),
+            ("moving-max 3 1/2,100,2,3,-1", "100\n100\n3"),
+            ("移动最大 1 comb(4,2),-2,-2", "6\n-2\n-2"),
+            ("moving-min 2 2/3,1,-1/2", "2/3\n-1/2"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("移动最大 3 1,2"),
+            Err(StatisticsError::InvalidWindowWidth)
         );
     }
 

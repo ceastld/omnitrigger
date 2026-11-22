@@ -146,6 +146,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查看相邻数值各窗口的最小值",
+        query: "统计: 移动最小 3 1/2,100,2,3,-1",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "查看相邻数值各窗口的最大值",
+        query: "统计: 移动最大 3 1/2,100,2,3,-1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "逐项计算精确累计合计",
         query: "统计: 累计合计 1/2,1,2,4",
     },
@@ -2298,6 +2308,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "找出 CSV 中有相同列值组合的记录",
+        query: "CSV: 查重复 [\"编号\",2] 编号,地区,备注\n001,北,首条\n001,南,独有\n001,北,再次",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按精确数值对 CSV 数据行去重",
         query: "CSV: 数值去重 [\"金额\"] 编号,金额\n001,1.50\n002,3/2\n003,1.5e0\n004,5/4",
     },
@@ -2896,9 +2911,16 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::Statistics
             if !term.is_empty()
-                && ["二项概率", "二项累计", "超几何概率", "截尾平均"]
-                    .into_iter()
-                    .any(|operation| operation.starts_with(term)) => {}
+                && [
+                    "二项概率",
+                    "二项累计",
+                    "超几何概率",
+                    "截尾平均",
+                    "移动最小",
+                    "移动最大",
+                ]
+                .into_iter()
+                .any(|operation| operation.starts_with(term)) => {}
         Scope::Statistics
             if matches!(
                 term,

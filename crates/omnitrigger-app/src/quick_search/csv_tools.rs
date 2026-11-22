@@ -208,6 +208,7 @@ enum Operation {
     },
     DeduplicateRows,
     DeduplicateByColumns(Vec<ColumnReference>),
+    DuplicatesByColumns(Vec<ColumnReference>),
     DeduplicateByNumbers(Vec<ColumnReference>),
     FilterColumn {
         column: ColumnReference,
@@ -484,6 +485,12 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
                 Operation::DeduplicateByColumns(columns)
             }
         }
+        "查重复" | "duplicates-by-columns" => {
+            let (columns, data) =
+                column_reference_arguments(input, CsvError::NamedColumnArguments)?;
+            input = data;
+            Operation::DuplicatesByColumns(columns)
+        }
         "筛选" | "filter" | "排除" | "exclude" | "正则筛选" | "regex-filter" | "正则排除"
         | "regex-exclude" => {
             let (column, value, data) = column_value_arguments(input)?;
@@ -659,6 +666,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::DeduplicateByColumns(columns) => {
             deduplicate_by_columns(&rows, &columns, |row, columns| Ok(column_key(row, columns)))
         }
+        Operation::DuplicatesByColumns(columns) => find_duplicate_columns(&rows, &columns),
         Operation::DeduplicateByNumbers(columns) => {
             deduplicate_by_columns(&rows, &columns, |row, columns| {
                 columns
@@ -1298,6 +1306,30 @@ fn deduplicate_by_columns<'a, Key: Eq + Hash>(
         }
     }
     Ok(write_rows(unique_records, ','))
+}
+
+fn find_duplicate_columns(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let columns = resolve_distinct_columns(header, columns, CsvError::NamedColumnArguments)?;
+    let mut recent = HashMap::new();
+    let mut duplicates = vec![false; records.len()];
+    for (position, row) in records.iter().enumerate() {
+        if let Some(previous) = recent.insert(column_key(row, &columns), position) {
+            duplicates[previous] = true;
+            duplicates[position] = true;
+        }
+    }
+    let duplicate_rows = records
+        .iter()
+        .zip(duplicates)
+        .filter_map(|(row, duplicate)| duplicate.then_some(row));
+    Ok(write_rows(
+        std::iter::once(header).chain(duplicate_rows),
+        ',',
+    ))
 }
 
 fn filter_column(
@@ -2572,6 +2604,26 @@ mod tests {
         assert_eq!(
             transform_csv("deduplicate x\nx \nx").as_deref(),
             Ok("x\r\nx ")
+        );
+    }
+
+    #[test]
+    fn finds_every_csv_row_with_a_duplicate_column_key_in_original_order() {
+        let source = concat!(
+            "查重复 [\"编号\",2] 编号,地区,记录\n",
+            "001,北,第一条\n001,南,单独\n002,北,第二组\n001,北,再次\n",
+            "1,北,前导零不同\n002,北,再次\n001,北,第 3 次"
+        );
+        assert_eq!(
+            transform_csv(source).as_deref(),
+            Ok(concat!(
+                "编号,地区,记录\r\n001,北,第一条\r\n002,北,第二组\r\n",
+                "001,北,再次\r\n002,北,再次\r\n001,北,第 3 次"
+            ))
+        );
+        assert_eq!(
+            transform_csv("duplicates-by-columns 1 编号,记录\n001,茶\n002,梨").as_deref(),
+            Ok("编号,记录")
         );
     }
 
