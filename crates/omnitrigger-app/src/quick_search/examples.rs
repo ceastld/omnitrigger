@@ -1106,6 +1106,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "日期: 合并区间 2026-11-01 至 2026-11-04; 2026-11-05 至 2026-11-08",
     },
     Example {
+        icon: Icon::Clock,
+        title: "按休息日和补班日调整工作日加减",
+        query: r#"日期: 2026-11-20 + 1工作日 例外 [["2026-11-23"],["2026-11-21"]]"#,
+    },
+    Example {
         icon: Icon::Terminal,
         title: "找出多个日期区间重叠的日期",
         query: "日期: 区间交集 2026-11-01 至 2026-11-15; 2026-11-10 至 2026-11-20",
@@ -2139,6 +2144,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "按顺序应用一组 JSON 补丁",
         query: r#"JSON: 应用补丁 [{"op":"test","path":"/状态","value":"初稿"},{"op":"replace","path":"/状态","value":"完成"}] {"版本":1.00,"状态":"初稿"}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "依次整理 JSON 字段并生成 CSV",
+        query: r#"JSON: 依次处理 ["补字段 {\"币种\":\"CNY\"}","选键 [\"编号\",\"金额\",\"币种\"]","转CSV"] [{"编号":"001","金额":1.50},{"编号":"002","金额":2e0,"币种":"USD"}]"#,
     },
     Example {
         icon: Icon::Terminal,

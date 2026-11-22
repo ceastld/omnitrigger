@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fmt::Write as _};
+use std::{
+    collections::HashMap,
+    fmt::Write as _,
+    ops::{Bound, RangeBounds},
+};
 
 use chrono::{Datelike, Days, Months, NaiveDate, TimeDelta, Weekday};
 
@@ -426,12 +430,7 @@ enum DateSelection {
 
 fn date_selection(rule: &str) -> Result<DateSelection, DateError> {
     let lower = rule.to_ascii_lowercase();
-    let exception_parts = lower
-        .split_once("例外")
-        .or_else(|| lower.split_once(" except "));
-    let (rule, exceptions) = exception_parts
-        .map(|(rule, dates)| (rule.trim_end(), Some(dates.trim_start())))
-        .unwrap_or((&lower, None));
+    let (rule, exceptions) = split_workday_exceptions(&lower);
     if is_workday_unit(rule) {
         return workday_selection(1, exceptions);
     }
@@ -523,6 +522,14 @@ fn workday_selection(step: u32, input: Option<&str>) -> Result<DateSelection, Da
     })
 }
 
+fn split_workday_exceptions(input: &str) -> (&str, Option<&str>) {
+    input
+        .split_once("例外")
+        .or_else(|| input.split_once(" except "))
+        .map(|(rule, dates)| (rule.trim_end(), Some(dates.trim_start())))
+        .unwrap_or((input, None))
+}
+
 fn parse_workday_exceptions(input: Option<&str>) -> Result<HashMap<NaiveDate, bool>, DateError> {
     let mut exceptions = HashMap::new();
     let Some(input) = input else {
@@ -543,6 +550,19 @@ fn parse_workday_exceptions(input: Option<&str>) -> Result<HashMap<NaiveDate, bo
         }
     }
     Ok(exceptions)
+}
+
+fn workday_adjustment(
+    exceptions: &HashMap<NaiveDate, bool>,
+    range: impl RangeBounds<NaiveDate>,
+) -> i64 {
+    exceptions
+        .iter()
+        .filter(|(date, _)| range.contains(*date))
+        .map(|(&date, &workday)| {
+            i64::from(workday) - i64::from(date.weekday().number_from_monday() <= 5)
+        })
+        .sum()
 }
 
 fn date_range_operands(
@@ -777,14 +797,8 @@ fn split_date_range(
         .min(end);
         let row = if csv {
             let days = last.signed_duration_since(start).num_days() + 1;
-            let adjustment: i64 = exceptions
-                .iter()
-                .filter(|(date, _)| (start..=last).contains(*date))
-                .map(|(&date, &workday)| {
-                    i64::from(workday) - i64::from(date.weekday().number_from_monday() <= 5)
-                })
-                .sum();
-            let workdays = inclusive_workdays(start, last) + adjustment;
+            let workdays =
+                inclusive_workdays(start, last) + workday_adjustment(&exceptions, start..=last);
             match split {
                 DateRangeSplit::WeeksCsv => {
                     let week = start.format("%G-W%V");
@@ -1036,6 +1050,46 @@ fn shift_workdays(mut date: NaiveDate, mut amount: u64, subtract: bool) -> Optio
     Some(date)
 }
 
+fn shift_workdays_with_exceptions(
+    mut date: NaiveDate,
+    mut amount: u64,
+    subtract: bool,
+    exceptions: HashMap<NaiveDate, bool>,
+) -> Option<NaiveDate> {
+    if amount == 0 {
+        return Some(date);
+    }
+    let mut exceptions: Vec<_> = exceptions
+        .into_iter()
+        .filter(|&(exception, _)| {
+            if subtract {
+                exception < date
+            } else {
+                exception > date
+            }
+        })
+        .collect();
+    exceptions.sort_unstable_by_key(|&(exception, _)| exception);
+    if subtract {
+        exceptions.reverse();
+    }
+    for (exception, is_workday) in exceptions {
+        let latest = date.max(exception);
+        // 两端之间的普通工作日可按整周计算，例外日期再单独处理。
+        let gap = workday_difference(latest, date.min(exception)) as u64
+            - u64::from(latest.weekday().number_from_monday() <= 5);
+        if amount <= gap {
+            return shift_workdays(date, amount, subtract);
+        }
+        date = exception;
+        amount -= gap + u64::from(is_workday);
+        if amount == 0 {
+            return Some(date);
+        }
+    }
+    shift_workdays(date, amount, subtract)
+}
+
 fn apply_date_offset(
     date: NaiveDate,
     operand: &str,
@@ -1049,11 +1103,25 @@ fn apply_date_offset(
         return Err(DateError::InvalidOperation);
     }
     let count = || amount.parse::<u64>().map_err(|_| DateError::OutOfRange);
-    let unit = unit.trim().to_ascii_lowercase();
-    if is_workday_unit(&unit) {
-        return in_range(shift_workdays(date, count()?, subtract));
+    let lower = unit.trim().to_ascii_lowercase();
+    let (unit, exceptions) = split_workday_exceptions(&lower);
+    if is_workday_unit(unit) {
+        let amount = count()?;
+        return in_range(if exceptions.is_some() {
+            shift_workdays_with_exceptions(
+                date,
+                amount,
+                subtract,
+                parse_workday_exceptions(exceptions)?,
+            )
+        } else {
+            shift_workdays(date, amount, subtract)
+        });
     }
-    let (is_months, multiplier) = match unit.as_str() {
+    if exceptions.is_some() {
+        return Err(DateError::InvalidOperation);
+    }
+    let (is_months, multiplier) = match unit {
         "" | "天" | "d" | "day" | "days" => (false, 1),
         "周" | "星期" | "w" | "week" | "weeks" => (false, 7),
         "月" | "个月" | "mo" | "month" | "months" => (true, 1),
@@ -1233,6 +1301,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         && (operand.get(4..5) == Some("-")
             || relative_day(operand).is_some()
             || relative_weekday(operand).is_some()
+            || relative_period_edge(operand).is_some()
             || written_date_prefix(operand).is_some())
     {
         let (other, suffix) = date_operand(operand, today)?;
@@ -1240,13 +1309,24 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
             return Err(DateError::InvalidOperation);
         }
         let suffix = suffix.to_ascii_lowercase();
+        let (unit, exceptions) = split_workday_exceptions(&suffix);
         return if suffix.is_empty() {
             Ok(format!(
                 "{} 天",
                 date.signed_duration_since(other).num_days()
             ))
-        } else if is_workday_unit(&suffix) {
-            Ok(format!("{} 工作日", workday_difference(date, other)))
+        } else if is_workday_unit(unit) {
+            let exceptions = parse_workday_exceptions(exceptions)?;
+            let range = (
+                Bound::Excluded(date.min(other)),
+                Bound::Included(date.max(other)),
+            );
+            let adjustment = workday_adjustment(&exceptions, range);
+            let sign = if date < other { -1 } else { 1 };
+            Ok(format!(
+                "{} 工作日",
+                workday_difference(date, other) + sign * adjustment
+            ))
         } else if matches!(suffix.as_str(), "年月日" | "calendar") {
             calendar_difference(date, other)
         } else {
@@ -2067,6 +2147,50 @@ mod tests {
         ] {
             assert_eq!(calculate_date(input, today), Err(error), "{input}");
         }
+    }
+
+    #[test]
+    fn adjusts_workday_arithmetic_in_both_directions_using_explicit_exceptions() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        let exceptions = r#"例外 [["2026-11-23","2026-11-26"],["2026-11-21","2026-11-28"]]"#;
+        for (input, expected) in [
+            ("2026-11-20 + 1工作日", "2026-11-21"),
+            ("2026-11-27 + 2工作日", "2026-11-30"),
+            ("2026-11-24 - 1工作日", "2026-11-21"),
+            ("2026-11-24 - 0工作日", "2026-11-24"),
+            ("2026-11-27 - 2026-11-24 工作日", "2 工作日"),
+            ("2026-11-24 - 2026-11-27 工作日", "-2 工作日"),
+            ("今天 - 今天 工作日", "0 工作日"),
+            ("2026-11-01 - 本月初 工作日", "0 工作日"),
+        ] {
+            let query = format!("{input} {exceptions}");
+            assert_eq!(
+                calculate_date(&query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_date(
+                r#"2026-11-20 + 1 BUSINESS DAY EXCEPT [["2026-11-23"],[]]"#,
+                today
+            )
+            .as_deref(),
+            Ok("2026-11-24"),
+        );
+        for query in [
+            r#"今天 + 1工作日 例外 [["2026-11-23"],["2026-11-23"]]"#,
+            "明天 - 今天 工作日 例外 null",
+        ] {
+            assert_eq!(
+                calculate_date(query, today),
+                Err(DateError::WorkdayExceptions)
+            );
+        }
+        assert_eq!(
+            calculate_date("今天 + 1天 例外 [[],[]]", today),
+            Err(DateError::InvalidOperation)
+        );
     }
 
     #[test]

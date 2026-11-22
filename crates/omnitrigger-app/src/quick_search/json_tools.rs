@@ -18,6 +18,7 @@ use super::text_tools::compare_natural;
 
 const MAX_PRETTY_BYTES: usize = 1024 * 1024;
 const MAX_PATCH_STEPS: usize = 32;
+const MAX_PIPELINE_STEPS: usize = 8;
 const MAX_FILTER_CONDITIONS: usize = 16;
 const MAX_UNIQUE_PATHS: usize = 8;
 
@@ -38,6 +39,10 @@ pub(super) enum JsonError {
     PatchOutputLimit,
     PatchTestFailed,
     PatchStep { index: usize, cause: &'static str },
+    PipelineArguments,
+    NestedPipeline,
+    PipelineOutputTooLarge,
+    PipelineStep { index: usize, cause: &'static str },
     ComparisonTooLarge,
     PointerListTooLarge,
     FlattenedObjectTooLarge,
@@ -95,6 +100,10 @@ impl JsonError {
             Self::PatchOutputLimit => "补丁中间结果超过 1 MiB",
             Self::PatchTestFailed => "指定路径上的 JSON 值与预期不同",
             Self::PatchStep { cause, .. } => cause,
+            Self::PipelineArguments => "填写 1 至 8 条单行 JSON 命令，再粘贴要处理的数据",
+            Self::NestedPipeline => "每一步填写一条 JSON 命令",
+            Self::PipelineOutputTooLarge => "处理结果超过 1 MiB，请缩小数据范围",
+            Self::PipelineStep { cause, .. } => cause,
             Self::ComparisonTooLarge => "JSON 对比结果超过 1 MiB",
             Self::PointerListTooLarge => "指针列表超过 1 MiB",
             Self::FlattenedObjectTooLarge => "JSON 展平结果超过 1 MiB",
@@ -143,6 +152,10 @@ impl JsonError {
 }
 
 pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
+    transform_json_operation(query, true)
+}
+
+fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String, JsonError> {
     let (operation, source) = query
         .split_once(char::is_whitespace)
         .ok_or(JsonError::Incomplete)?;
@@ -151,6 +164,8 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         .unwrap_or(source);
     let source = source.trim_start();
     let pretty = match operation.to_ascii_lowercase().as_str() {
+        "依次处理" | "pipeline" if allow_pipeline => return transform_json_pipeline(source),
+        "依次处理" | "pipeline" => return Err(JsonError::NestedPipeline),
         "格式化" | "format" | "pretty" => true,
         "压缩" | "compact" | "minify" => false,
         "去注释" | "strip-comments" => return format_json(&strip_json_comments(source)?, true),
@@ -206,6 +221,44 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         _ => return Err(JsonError::UnknownOperation),
     };
     format_json(source, pretty)
+}
+
+fn transform_json_pipeline(input: &str) -> Result<String, JsonError> {
+    let mut arguments = serde_json::Deserializer::from_str(input).into_iter::<Vec<String>>();
+    let steps = arguments
+        .next()
+        .ok_or(JsonError::PipelineArguments)?
+        .map_err(|_| JsonError::PipelineArguments)?;
+    let remaining = &input[arguments.byte_offset()..];
+    let data = remaining
+        .strip_prefix("\r\n")
+        .or_else(|| remaining.strip_prefix(char::is_whitespace))
+        .ok_or(JsonError::PipelineArguments)?;
+    if !(1..=MAX_PIPELINE_STEPS).contains(&steps.len())
+        || steps
+            .iter()
+            .any(|step| step.trim().is_empty() || step.contains(['\r', '\n', '\0']))
+        || data.trim().is_empty()
+    {
+        return Err(JsonError::PipelineArguments);
+    }
+    let mut current = Cow::Borrowed(data);
+    for (index, step) in steps.iter().enumerate() {
+        let query = format!("{}\n{current}", step.trim());
+        let output =
+            transform_json_operation(&query, false).map_err(|error| JsonError::PipelineStep {
+                index: index + 1,
+                cause: error.message(),
+            })?;
+        if output.len() > MAX_PRETTY_BYTES {
+            return Err(JsonError::PipelineStep {
+                index: index + 1,
+                cause: JsonError::PipelineOutputTooLarge.message(),
+            });
+        }
+        current = Cow::Owned(output);
+    }
+    Ok(current.into_owned())
 }
 
 fn format_json(source: &str, pretty: bool) -> Result<String, JsonError> {
@@ -3083,6 +3136,44 @@ mod tests {
             ),
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn pipelines_json_operations_and_keeps_literal_spelling_across_formats() {
+        assert_eq!(
+            transform_json(r#"依次处理 ["去空字段","补字段 {\"币种\":\"CNY\"}","选键 [\"编号\",\"金额\",\"币种\"]","转CSV"] [{"编号":"001","金额":1.50,"备注":null},{"编号":"002","金额":2e0,"币种":"USD"}]"#).as_deref(),
+            Ok("编号,金额,币种\r\n001,1.50,CNY\r\n002,2e0,USD"),
+        );
+        assert_eq!(
+            transform_json("pipeline [\"合并行\",\"展开数组\",\"合并行\"]\r\n{\"金额\":1.50}\r\n{\"金额\":2e0}").as_deref(),
+            Ok("[{\"金额\":1.50},{\"金额\":2e0}]"),
+        );
+        assert_eq!(
+            transform_json(r#"依次处理 ["压缩","取值 /缺失","格式化"] {"金额":1.50}"#),
+            Err(JsonError::PipelineStep {
+                index: 2,
+                cause: JsonError::MissingValue.message(),
+            }),
+        );
+        assert_eq!(
+            transform_json(r#"依次处理 ["pipeline []"] {}"#),
+            Err(JsonError::PipelineStep {
+                index: 1,
+                cause: JsonError::NestedPipeline.message(),
+            }),
+        );
+        for query in [
+            r#"依次处理 ["压缩"]{}"#,
+            r#"依次处理 [] {}"#,
+            r#"依次处理 ["压缩"] "#,
+            r#"依次处理 ["压缩\n格式化"] {}"#,
+        ] {
+            assert_eq!(
+                transform_json(query),
+                Err(JsonError::PipelineArguments),
+                "{query}"
+            );
         }
     }
 
