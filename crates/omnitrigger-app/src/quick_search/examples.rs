@@ -70,6 +70,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "拟合: 残差 0,0; 1,1; 2,1",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "从表格粘贴两列数据进行直线拟合",
+        query: "拟合: 0\t1\n1\t3\n2\t5",
+    },
+    Example {
         icon: Icon::Layers,
         title: "由三条边求三角形面积和周长",
         query: "三角形: 3,4,5",

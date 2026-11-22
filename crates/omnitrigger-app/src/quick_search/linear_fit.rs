@@ -25,7 +25,7 @@ impl LinearFitError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "输入至少两组 x,y，例如 0,1; 1,3; 2,5",
-            Self::InvalidPoint => "每组须包含 x 和 y，用逗号隔开",
+            Self::InvalidPoint => "每组须包含 x 和 y，用逗号或制表符隔开",
             Self::TooManyPoints => "最多可输入 64 对数值",
             Self::TooManyPredictions => "每次最多可预测 64 个 x 值",
             Self::ConstantX => "所有 x 相同，无法求拟合斜率",
@@ -193,9 +193,13 @@ fn paired_sums(points: &str, retain_points: bool) -> Result<PairedSums, LinearFi
     let mut observations = Vec::new();
     for point in points {
         let mut coordinates = split_top_level_commas(point);
-        let (Some(x), Some(y), None) = (coordinates.next(), coordinates.next(), coordinates.next())
-        else {
-            return Err(LinearFitError::InvalidPoint);
+        let (x, y) = match (coordinates.next(), coordinates.next(), coordinates.next()) {
+            (Some(x), Some(y), None) => (x, y),
+            (Some(row), None, None) => row
+                .split_once('\t')
+                .filter(|(_, y)| !y.contains('\t'))
+                .ok_or(LinearFitError::InvalidPoint)?,
+            _ => return Err(LinearFitError::InvalidPoint),
         };
         if x.trim().is_empty() || y.trim().is_empty() {
             return Err(LinearFitError::InvalidPoint);
@@ -236,6 +240,22 @@ fn check_size<'a>(values: impl IntoIterator<Item = &'a BigRational>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_two_spreadsheet_columns_for_fit_and_covariance() {
+        assert_eq!(
+            calculate_linear_fit("0\t1\r\n1\t3\r\ncomb(2,2)\t3\r\n2\t5").as_deref(),
+            Ok("斜率 2 · 截距 1\nR² 1")
+        );
+        assert_eq!(
+            calculate_covariance("0\t0\r\n1\t1\r\n2\t1", true).as_deref(),
+            Ok("1/2")
+        );
+        assert_eq!(
+            calculate_linear_fit("0\t1\t2\r\n1\t3\t4"),
+            Err(LinearFitError::InvalidPoint)
+        );
+    }
 
     #[test]
     fn reports_an_exact_fitted_value_and_residual_for_each_original_point() {
