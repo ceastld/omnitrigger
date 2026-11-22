@@ -1597,6 +1597,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按路径合并每项中的 JSON 子数组",
+        query: r#"JSON: 合并子数组 /商品 [{"商品":["茶",9.90]},{"商品":[]},{"商品":["咖啡",2e2]}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "改名一个顶层 JSON 键",
         query: r#"JSON: 改键 ["旧","新"] {"旧":1,"名称":"北京"}"#,
     },

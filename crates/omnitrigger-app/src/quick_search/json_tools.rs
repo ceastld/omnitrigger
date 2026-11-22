@@ -29,6 +29,7 @@ pub(super) enum JsonError {
     ExpectedObject,
     ExpectedCollection,
     ExpectedArray,
+    ExpectedArrayAtPointer,
     ExpectedObjectItem,
     InvalidLine,
     MissingValue,
@@ -63,6 +64,7 @@ impl JsonError {
             Self::ExpectedObject => "请输入 JSON 对象",
             Self::ExpectedCollection => "请输入 JSON 数组或对象以统计顶层条目数",
             Self::ExpectedArray => "请输入 JSON 数组",
+            Self::ExpectedArrayAtPointer => "每一项的指定 JSON 路径都须对应数组",
             Self::ExpectedObjectItem => "数组中的每一项都应是 JSON 对象",
             Self::InvalidLine => "每个非空行需要一个完整的 JSON 值",
             Self::MissingValue => "JSON 路径没有对应的值",
@@ -96,6 +98,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "取值" | "get" | "pointer" => return select_json_value(source),
         "取多路径" | "get-paths" => return select_json_paths(source),
         "取列" | "column" => return select_json_column(source),
+        "合并子数组" | "flatten-arrays" => return flatten_json_arrays(source),
         "有路径" | "has-pointer" => return filter_json_by_pointer(source, true),
         "缺路径" | "missing-pointer" => return filter_json_by_pointer(source, false),
         "筛选" | "filter" => return filter_json_by_scalar(source, true),
@@ -226,6 +229,20 @@ fn select_json_column(query: &str) -> Result<String, JsonError> {
         .into_iter()
         .map(|item| select_pointer_keys(item, &keys))
         .collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::to_string(&values).expect("有效的原始 JSON 值可以直接序列化"))
+}
+
+fn flatten_json_arrays(query: &str) -> Result<String, JsonError> {
+    let (pointer, source) = pointer_and_source(query)?;
+    let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
+    let mut values = Vec::new();
+    for item in read_json_array(source)? {
+        let selected = select_pointer_keys(item, &keys)?;
+        if !selected.get().starts_with('[') {
+            return Err(JsonError::ExpectedArrayAtPointer);
+        }
+        values.extend(read_json_array(selected.get())?);
+    }
     Ok(serde_json::to_string(&values).expect("有效的原始 JSON 值可以直接序列化"))
 }
 
@@ -1458,6 +1475,35 @@ mod tests {
             (r#"取列 /x {"x":1}"#, JsonError::ExpectedArray),
         ] {
             assert_eq!(transform_json(input), Err(error), "{input}");
+        }
+    }
+
+    #[test]
+    fn flattens_array_values_at_a_pointer_preserving_order_and_raw_values() {
+        for (query, expected) in [
+            (
+                r#"合并子数组 "/a b" [{"a b":[9007199254740993,1.50]},{"a b":[]},{"a b":[1e999,"\u8336",[2]]}]"#,
+                r#"[9007199254740993,1.50,1e999,"\u8336",[2]]"#,
+            ),
+            (r#"flatten-arrays "" [[1],[],[2,[3]]]"#, "[1,2,[3]]"),
+            ("合并子数组 /商品 []", "[]"),
+        ] {
+            assert_eq!(transform_json(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            (r#"合并子数组 /x [{"x":[]},{}]"#, JsonError::MissingValue),
+            (
+                r#"合并子数组 /x [{"x":null}]"#,
+                JsonError::ExpectedArrayAtPointer,
+            ),
+            (
+                r#"合并子数组 /x [{"x":[],"x":[]}]"#,
+                JsonError::DuplicateKey,
+            ),
+            ("合并子数组 /~2 []", JsonError::InvalidPointer),
+            ("合并子数组 /x {}", JsonError::ExpectedArray),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
         }
     }
 
