@@ -220,6 +220,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         }
         "html转义" | "html-escape" => Ok(escape_html(text)),
         "html还原" | "html-unescape" => Ok(unescape_html(text)),
+        "markdown转义" | "markdown-escape" => Ok(escape_markdown(text)),
+        "markdown还原" | "markdown-unescape" => Ok(unescape_markdown(text)),
         _ => Err(TextError::UnknownOperation),
     }
 }
@@ -386,6 +388,30 @@ fn decode_json_string(text: &str) -> Result<String, TextError> {
         return Err(TextError::NullCharacter);
     }
     Ok(decoded)
+}
+
+fn escape_markdown(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_ascii_punctuation() {
+            result.push('\\');
+        }
+        result.push(character);
+    }
+    result
+}
+
+fn unescape_markdown(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\\' && characters.peek().is_some_and(char::is_ascii_punctuation) {
+            result.push(characters.next().expect("下一个字符已检查"));
+        } else {
+            result.push(character);
+        }
+    }
+    result
 }
 
 fn escape_html(text: &str) -> String {
@@ -1192,6 +1218,29 @@ mod tests {
             transform_text(r#"JSON还原 "\u0000""#),
             Err(TextError::NullCharacter)
         );
+    }
+
+    #[test]
+    fn escapes_commonmark_punctuation_and_restores_only_ascii_escapes() {
+        assert_eq!(
+            transform_text("Markdown转义 *茶* [咖啡]").as_deref(),
+            Ok(r"\*茶\* \[咖啡\]")
+        );
+        assert_eq!(
+            transform_text(r"Markdown还原 \*茶\* \[咖啡\]").as_deref(),
+            Ok("*茶* [咖啡]")
+        );
+        assert_eq!(
+            transform_text(r"markdown-unescape \q \中 \? \\!").as_deref(),
+            Ok(r"\q \中 ? \!")
+        );
+        let punctuation: String = (b' '..=b'~')
+            .filter(u8::is_ascii_punctuation)
+            .map(char::from)
+            .collect();
+        let source = format!("茶 {punctuation}\n咖啡");
+        assert_eq!(unescape_markdown(&escape_markdown(&source)), source);
+        assert_eq!(unescape_markdown("\\\n"), "\\\n");
     }
 
     #[test]

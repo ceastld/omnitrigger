@@ -1357,6 +1357,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "转义 Markdown 正文中的标点",
+        query: "文本: Markdown转义 *茶* [咖啡]",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "还原 Markdown 的反斜杠转义",
+        query: r"文本: Markdown还原 \*茶\* \[咖啡\]",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "格式化 JSON",
         query: r#"JSON: 格式化 {"名称":"北京","值":1}"#,
     },

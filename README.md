@@ -151,6 +151,7 @@
 - 输入 `文本: UTF8编码 北京` 可查看 UTF-8 字节 `E5 8C 97 E4 BA AC`。用 `文本: UTF8解码` 加上十六进制字节可还原文字，接受连续数字、空白分隔或带 `0x` 的字节组。
 - 输入 `文本: JSON转义 他写下 "你好"` 可把文字转成 JSON 字符串。输入 `文本: JSON还原 "\u4F60\n好"` 会还原为两行文字。 [RFC 8259 的字符串语法](https://www.rfc-editor.org/rfc/rfc8259.html#section-7)
 - 输入 `文本: HTML转义 <b>茶 & 咖啡</b>` 可转义尖括号、与号和单双引号。用 `HTML还原` 可解码带分号的 `amp`、`lt`、`gt`、`quot`、`apos`、`nbsp` 以及十进制或十六进制数字引用。 [WHATWG 数字字符引用规则](https://html.spec.whatwg.org/multipage/parsing.html#numeric-character-reference-end-state)
+- 输入 `文本: Markdown转义 *茶* [咖啡]` 得到 `\*茶\* \[咖啡\]`，可粘贴到 Markdown 正文。用 `Markdown还原` 可去掉 ASCII 标点前用作转义的反斜杠。 [CommonMark 反斜杠转义](https://spec.commonmark.org/0.31.2/#backslash-escapes)
 - 输入 `文本: 大写 Straße` 得到 `STRASSE`。也可用 `文本: 小写 ÉTÉ` 转成小写，或用 `文本: 合并空白 A   B` 得到 `A B`。
 - 输入 `文本: 转半角 ＡＢＣ１２３！` 得到 `ABC123!`，用 `文本: 转全角 ABC123!` 可转回全角。支持有全角对应形式的 ASCII 字符和空格。 [Unicode 全角字符表](https://www.unicode.org/charts/PDF/UFF00.pdf) [Unicode 表意空格表](https://www.unicode.org/charts/PDF/U3000.pdf)
 - 输入 `文本: 下划线命名 HTTPServer2URL` 得到 `http_server2_url`。输入 `文本: 小驼峰命名 http_server2_url` 得到 `httpServer2Url`。
