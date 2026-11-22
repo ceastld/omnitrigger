@@ -2127,6 +2127,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按多个路径对 JSON 记录去重",
+        query: r#"JSON: 多路径去重 ["/地区","/月份"] [{"地区":"北","月份":1.00,"编号":"001"},{"地区":"南","月份":1},{"地区":"北","月份":1e0,"编号":"002"}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按文件名的自然顺序排列 JSON 数组",
         query: r#"JSON: 文本排序 /文件名 [{"文件名":"文件10"},{"文件名":"文件2"},{"文件名":"文件1"}]"#,
     },

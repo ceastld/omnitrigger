@@ -2857,6 +2857,7 @@ mod tests {
         assert!(examples_for("JSON: 数值筛")[0].starts_with("JSON: 数值筛选 "));
         assert!(examples_for("JSON: 多条件")[0].starts_with("JSON: 多条件筛选 "));
         assert!(examples_for("JSON: 多路径")[0].starts_with("JSON: 多路径排序 "));
+        assert!(examples_for("JSON: 多路径去")[0].starts_with("JSON: 多路径去重 "));
         assert!(examples_for("JSON: 数值排")[0].starts_with("JSON: 数值排序 "));
         assert!(examples_for("JSON: 文本排")[0].starts_with("JSON: 文本排序 "));
         assert!(examples_for("CSV: 纵向")[0].starts_with("CSV: 纵向合并 "));

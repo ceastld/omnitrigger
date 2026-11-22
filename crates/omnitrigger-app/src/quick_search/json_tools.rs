@@ -19,6 +19,7 @@ use super::text_tools::compare_natural;
 const MAX_PRETTY_BYTES: usize = 1024 * 1024;
 const MAX_PATCH_STEPS: usize = 32;
 const MAX_FILTER_CONDITIONS: usize = 16;
+const MAX_UNIQUE_PATHS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum JsonError {
@@ -63,6 +64,7 @@ pub(super) enum JsonError {
     NumberFilter,
     FilterConditions,
     SortFields,
+    UniquePaths,
     ExpectedScalar,
     ExpectedNumber,
     GroupStatisticsPaths,
@@ -121,6 +123,7 @@ impl JsonError {
             Self::SortFields => {
                 "填写 1 至 8 个 [路径,排序方式]，方式可为文本升序、文本降序、数值升序或数值降序"
             }
+            Self::UniquePaths => "填写 2 至 8 个不同路径，例如 [\"/地区\",\"/月份\"]",
             Self::ExpectedScalar => "指定路径的值须为字符串、数字、布尔值或 null",
             Self::ExpectedNumber => "数值排序需要每一项的指定路径都对应 JSON 数字",
             Self::GroupStatisticsPaths => {
@@ -158,6 +161,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "多条件筛选" | "filter-all" => return filter_json_conditions(source, true),
         "任一条件筛选" | "filter-any" => return filter_json_conditions(source, false),
         "按值去重" | "unique-by-pointer" => return deduplicate_json_by_scalar(source),
+        "多路径去重" | "unique-by-pointers" => return deduplicate_json_by_pointers(source),
         "分组计数" | "group-count" => return count_json_by_scalar(source),
         "分组明细" | "group-records" => return group_json_records(source),
         "分组统计" | "group-statistics" => return summarize_json_groups(source),
@@ -773,6 +777,36 @@ fn deduplicate_json_by_scalar(query: &str) -> Result<String, JsonError> {
         let value = value.ok_or(JsonError::MissingValue)?;
         let scalar = json_scalar(value)?.ok_or(JsonError::ExpectedScalar)?;
         Ok(seen.insert(scalar))
+    })
+}
+
+fn deduplicate_json_by_pointers(query: &str) -> Result<String, JsonError> {
+    let (input, source) = json_value_and_source(query, JsonError::UniquePaths)?;
+    let pointers =
+        serde_json::from_str::<Vec<String>>(input.get()).map_err(|_| JsonError::UniquePaths)?;
+    if !(2..=MAX_UNIQUE_PATHS).contains(&pointers.len()) {
+        return Err(JsonError::UniquePaths);
+    }
+    let mut distinct = HashSet::new();
+    let paths = pointers
+        .iter()
+        .map(|pointer| {
+            if !distinct.insert(pointer) {
+                return Err(JsonError::UniquePaths);
+            }
+            pointer_keys(pointer)?.collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut seen = HashSet::new();
+    retain_json_items(read_json_array(source)?, |item| {
+        let key = paths
+            .iter()
+            .map(|path| {
+                let value = select_pointer_keys(item, path)?;
+                json_scalar(value)?.ok_or(JsonError::ExpectedScalar)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(seen.insert(key))
     })
 }
 
@@ -2215,6 +2249,33 @@ mod tests {
             transform_json(r#"filter-any [] []"#),
             Err(JsonError::FilterConditions)
         );
+    }
+
+    #[test]
+    fn keeps_the_first_json_item_for_each_exact_tuple_of_pointer_values() {
+        assert_eq!(
+            transform_json(
+                r#"多路径去重 ["/地区","/月份"] [{"地区":"北","月份":1.00,"编号":"001"},{"地区":"南","月份":1},{"地区":"北","月份":1e0,"编号":"002"},{"地区":"北","月份":null}]"#
+            )
+            .as_deref(),
+            Ok(r#"[{"地区":"北","月份":1.00,"编号":"001"},{"地区":"南","月份":1},{"地区":"北","月份":null}]"#)
+        );
+        for (input, error) in [
+            (
+                r#"unique-by-pointers ["/a","/a"] []"#,
+                JsonError::UniquePaths,
+            ),
+            (
+                r#"unique-by-pointers ["/a","/b"] [{"a":0}]"#,
+                JsonError::MissingValue,
+            ),
+            (
+                r#"unique-by-pointers ["/a","/b"] [{"a":[],"b":null}]"#,
+                JsonError::ExpectedScalar,
+            ),
+        ] {
+            assert_eq!(transform_json(input), Err(error), "{input}");
+        }
     }
 
     #[test]
