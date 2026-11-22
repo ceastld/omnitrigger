@@ -1671,6 +1671,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "1 kgf to N",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "在牛米与英制扭矩单位之间换算",
+        query: "1 lbf·ft to N·m",
+    },
+    Example {
         icon: Icon::Layers,
         title: "换算加速度",
         query: "1 g0 to m/s²",

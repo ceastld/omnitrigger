@@ -94,6 +94,7 @@ enum Dimension {
     Density,
     VolumeFlow,
     Force,
+    Torque,
     Acceleration,
     ElectricCurrent,
     Voltage,
@@ -139,6 +140,7 @@ impl Dimension {
             Self::Density => &["kg/m³", "g/cm³", "g/L", "kg/L"],
             Self::VolumeFlow => &["L/min", "L/s", "m³/h", "m³/s", "mL/s"],
             Self::Force => &["N", "kN", "kgf", "lbf", "mN", "MN", "dyn"],
+            Self::Torque => &["N·m", "lbf·ft", "lbf·in", "N·cm", "kgf·m", "kN·m"],
             Self::Acceleration => &["m/s²", "g₀", "ft/s²", "cm/s²", "in/s²"],
             Self::ElectricCurrent => &["A", "mA", "μA", "nA", "kA", "MA"],
             Self::Voltage => &["V", "mV", "kV", "μV", "MV"],
@@ -155,6 +157,8 @@ struct Unit {
 }
 
 const STANDARD_GRAVITY: f64 = 9.806_65;
+const FOOT_IN_METERS: f64 = 0.3048;
+const NEWTONS_PER_POUND_FORCE: f64 = 4.448_221_615_260_5;
 pub(super) const INCH_IN_METERS: f64 = 0.0254;
 const METERS_PER_MILE: f64 = 1609.344;
 const LITERS_PER_US_GALLON: f64 = 3.785_411_784;
@@ -227,7 +231,7 @@ impl Unit {
             "px" | "csspx" => Self::linear("px", Length, INCH_IN_METERS / 96.),
             "pt" | "csspt" | "排版点" => Self::linear("pt", Length, INCH_IN_METERS / 72.),
             "pc" | "csspc" => Self::linear("pc", Length, INCH_IN_METERS / 6.),
-            "ft" | "foot" | "feet" | "英尺" => Self::linear("ft", Length, 0.3048),
+            "ft" | "foot" | "feet" | "英尺" => Self::linear("ft", Length, FOOT_IN_METERS),
             "yd" | "码" => Self::linear("yd", Length, 0.9144),
             "mi" | "mile" | "miles" | "英里" => Self::linear("mi", Length, METERS_PER_MILE),
             "mg" | "毫克" => Self::linear("mg", Mass, 0.001),
@@ -343,8 +347,26 @@ impl Unit {
             "毫牛" | "毫牛顿" => Self::linear("mN", Force, 0.001),
             "兆牛" | "兆牛顿" => Self::linear("MN", Force, 1_000_000.),
             "kgf" | "千克力" | "公斤力" => Self::linear("kgf", Force, STANDARD_GRAVITY),
-            "lbf" | "磅力" => Self::linear("lbf", Force, 4.448_221_615_260_5),
+            "lbf" | "磅力" => Self::linear("lbf", Force, NEWTONS_PER_POUND_FORCE),
             "dyn" | "达因" => Self::linear("dyn", Force, 1e-5),
+            "n·m" | "n⋅m" | "n*m" | "n m" | "牛米" | "牛顿米" => {
+                Self::linear("N·m", Torque, 1.)
+            }
+            "n·cm" | "n⋅cm" | "n*cm" | "n cm" | "牛厘米" => {
+                Self::linear("N·cm", Torque, 0.01)
+            }
+            "kn·m" | "kn⋅m" | "kn*m" | "kn m" | "千牛米" => {
+                Self::linear("kN·m", Torque, 1000.)
+            }
+            "kgf·m" | "kgf⋅m" | "kgf*m" | "kgf m" | "千克力米" | "公斤力米" => {
+                Self::linear("kgf·m", Torque, STANDARD_GRAVITY)
+            }
+            "lbf·ft" | "lbf⋅ft" | "lbf*ft" | "lbf ft" | "ft·lbf" | "lb-ft" | "磅力英尺" => {
+                Self::linear("lbf·ft", Torque, NEWTONS_PER_POUND_FORCE * FOOT_IN_METERS)
+            }
+            "lbf·in" | "lbf⋅in" | "lbf*in" | "lbf in" | "in·lbf" | "lb-in" | "磅力英寸" => {
+                Self::linear("lbf·in", Torque, NEWTONS_PER_POUND_FORCE * INCH_IN_METERS)
+            }
             "m/s²" | "m/s^2" | "m/s2" | "米/秒²" | "米/秒平方" => {
                 Self::linear("m/s²", Acceleration, 1.)
             }
@@ -352,10 +374,10 @@ impl Unit {
                 Self::linear("cm/s²", Acceleration, 0.01)
             }
             "ft/s²" | "ft/s^2" | "ft/s2" | "英尺/秒平方" => {
-                Self::linear("ft/s²", Acceleration, 0.3048)
+                Self::linear("ft/s²", Acceleration, FOOT_IN_METERS)
             }
             "in/s²" | "in/s^2" | "in/s2" | "英寸/秒平方" => {
-                Self::linear("in/s²", Acceleration, 0.0254)
+                Self::linear("in/s²", Acceleration, INCH_IN_METERS)
             }
             "g0" | "g₀" | "gₙ" | "标准重力加速度" => {
                 Self::linear("g₀", Acceleration, STANDARD_GRAVITY)
@@ -552,8 +574,15 @@ fn parse_quantity(source: &str) -> Result<(f64, Unit), ConversionError> {
         return Ok((amount, Unit::parse("in")?));
     }
     let (amount, name) = split_quantity(source);
-    let unit = Unit::parse(name)?;
-    Ok((evaluate_amount(amount)?, unit))
+    let quantity = Unit::parse(name).and_then(|unit| Ok((evaluate_amount(amount)?, unit)));
+    quantity.or_else(|error| {
+        let (amount, force) = amount.trim_end().rsplit_once(' ').ok_or(error)?;
+        let torque = Unit::parse(&format!("{force} {}", name.trim()))
+            .ok()
+            .filter(|unit| unit.dimension == Dimension::Torque)
+            .ok_or(error)?;
+        Ok((evaluate_amount(amount)?, torque))
+    })
 }
 
 pub(super) fn estimate_transfer(query: &str) -> Result<String, ConversionError> {
@@ -1707,6 +1736,30 @@ mod tests {
         let targets = suggested_targets("3.3 V to").unwrap();
         assert_eq!(targets[0].expression, "3.3 V to mV");
         assert_eq!(targets[0].result, "3300 mV");
+    }
+
+    #[test]
+    fn converts_torque_units_and_preserves_nanometer_and_energy_unit_types() {
+        for (query, expected) in [
+            ("100 N·cm to N·m", "1 N·m"),
+            ("1 lbf·ft to N·m", "1.3558179483314 N·m"),
+            ("12 lb-in to N*m", "1.3558179483314 N·m"),
+            ("1 kgf⋅m to 牛米", "9.80665 N·m"),
+            ("2 kN m to N·m", "2000 N·m"),
+            ("2   kN   m to N·m", "2000 N·m"),
+            ("500 nm to μm", "0.5 μm"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.to_owned())), "{query}");
+        }
+        assert_eq!(
+            convert("1 N·m to J"),
+            Some(Err(ConversionError::DifferentDimensions)),
+        );
+        let targets = suggested_targets("12 N·m to").unwrap();
+        assert_eq!(targets[0].expression, "12 N·m to lbf·ft");
+        assert!(targets
+            .iter()
+            .any(|target| target.expression == "12 N·m to kgf·m"));
     }
 
     #[test]
