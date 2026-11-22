@@ -2272,6 +2272,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把所选 CSV 单元格拼成一列",
+        query: "CSV: 拼接列 [\"地址\",[\"省\",3],\"-\"] 编号,省,市\n001,福建,福州\n002,浙江,杭州",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用数量和单价算出新的一列",
         query:
             "CSV: 计算列 [\"金额\",\"数量\",\"*\",\"单价\"] 商品,数量,单价\n茶,3,2.50\n咖啡,2,1/3",

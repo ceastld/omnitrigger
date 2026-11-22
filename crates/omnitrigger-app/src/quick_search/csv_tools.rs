@@ -63,7 +63,8 @@ pub(super) enum CsvError {
     JoinTooLarge,
     FillTooLarge,
     ConstantColumnArguments,
-    ConstantColumnTooLarge,
+    ConcatenatedColumnArguments,
+    AddedColumnTooLarge,
     StackArguments,
     ComputedColumnArguments,
     FormulaColumnArguments,
@@ -126,7 +127,10 @@ impl CsvError {
             Self::ConstantColumnArguments => {
                 "用 JSON 数组填写新列名和固定文本，例如 [\"来源\",\"人工复核\"]"
             }
-            Self::ConstantColumnTooLarge => "追加常量列后的结果超过 1 MiB，请缩小表格范围",
+            Self::ConcatenatedColumnArguments => {
+                "填写新列名、至少两列和分隔符，例如 [\"地址\",[\"省\",\"市\"],\"-\"]"
+            }
+            Self::AddedColumnTooLarge => "追加列后的结果超过 1 MiB，请缩小表格范围",
             Self::StackArguments => "用 JSON 字符串数组填写 2 至 16 张含表头的 CSV 表格",
             Self::ComputedColumnArguments => {
                 "用 JSON 数组填写新列名、两列和运算，例如 [\"金额\",2,\"*\",3]"
@@ -191,6 +195,11 @@ enum Operation {
         replacements: HashMap<String, String>,
     },
     ConstantColumn([String; 2]),
+    ConcatenateColumns {
+        name: String,
+        columns: Vec<ColumnReference>,
+        separator: String,
+    },
     ComputeColumn {
         name: String,
         left: ColumnReference,
@@ -421,6 +430,19 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             input = data;
             Operation::ConstantColumn(column)
         }
+        "拼接列" | "concat-columns" => {
+            let ((name, columns, separator), data) =
+                json_argument_and_data::<(String, Vec<ColumnReference>, String)>(
+                    input,
+                    CsvError::ConcatenatedColumnArguments,
+                )?;
+            input = data;
+            Operation::ConcatenateColumns {
+                name,
+                columns,
+                separator,
+            }
+        }
         "计算列" | "compute-column" => {
             let ((name, left, operator, right), data) =
                 json_argument_and_data::<(String, ColumnReference, String, ColumnReference)>(
@@ -619,6 +641,11 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             replacements,
         } => map_column_values(&rows, column, &replacements),
         Operation::ConstantColumn([name, value]) => add_constant_column(&rows, &name, &value),
+        Operation::ConcatenateColumns {
+            name,
+            columns,
+            separator,
+        } => concatenate_columns(&rows, &name, &columns, &separator),
         Operation::ComputeColumn {
             name,
             left,
@@ -1163,6 +1190,42 @@ fn add_constant_column(rows: &[Vec<String>], name: &str, value: &str) -> Result<
     if value.contains('\0') {
         return Err(CsvError::NullReplacementValue);
     }
+    write_appended_column(header, records, name, |_| Ok(value))
+}
+
+fn concatenate_columns(
+    rows: &[Vec<String>],
+    name: &str,
+    columns: &[ColumnReference],
+    separator: &str,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') || columns.len() < 2 {
+        return Err(CsvError::ConcatenatedColumnArguments);
+    }
+    if separator.contains('\0') {
+        return Err(CsvError::NullReplacementValue);
+    }
+    let columns = resolve_distinct_columns(header, columns, CsvError::ConcatenatedColumnArguments)?;
+    let separator_bytes = separator.len().saturating_mul(columns.len() - 1);
+    write_appended_column(header, records, name, |row| {
+        let parts = column_key(row, &columns);
+        let bytes = parts.iter().fold(separator_bytes, |sum, field| {
+            sum.saturating_add(field.len())
+        });
+        if bytes > MAX_EXPANDED_CSV_BYTES {
+            return Err(CsvError::AddedColumnTooLarge);
+        }
+        Ok(parts.join(separator))
+    })
+}
+
+fn write_appended_column<T: AsRef<str>>(
+    header: &[String],
+    records: &[Vec<String>],
+    name: &str,
+    mut cell_for: impl FnMut(&[String]) -> Result<T, CsvError>,
+) -> Result<String, CsvError> {
     if header.iter().any(|cell| cell == name) {
         return Err(CsvError::HeaderNameConflict);
     }
@@ -1173,13 +1236,16 @@ fn add_constant_column(rows: &[Vec<String>], name: &str, value: &str) -> Result<
             .iter()
             .map(String::as_str)
             .chain(std::iter::once(name)),
-        CsvError::ConstantColumnTooLarge,
+        CsvError::AddedColumnTooLarge,
     )?;
     for row in records {
+        let cell = cell_for(row)?;
         append_bounded_csv_row(
             &mut output,
-            row.iter().map(String::as_str).chain(std::iter::once(value)),
-            CsvError::ConstantColumnTooLarge,
+            row.iter()
+                .map(String::as_str)
+                .chain(std::iter::once(cell.as_ref())),
+            CsvError::AddedColumnTooLarge,
         )?;
     }
     Ok(output)
@@ -2274,7 +2340,31 @@ mod tests {
         let records = "\n001".repeat(260);
         assert_eq!(
             transform_csv(&format!("常量列 [\"来源\",\"{constant}\"] 编号{records}")),
-            Err(CsvError::ConstantColumnTooLarge)
+            Err(CsvError::AddedColumnTooLarge)
+        );
+    }
+
+    #[test]
+    fn concatenates_chosen_csv_columns_in_order_and_keeps_empty_values() {
+        assert_eq!(
+            transform_csv(concat!(
+                r#"拼接列 ["标签",["城市",2],", "] 编号,地区,城市"#,
+                "\n001,福建,福州\n002,浙江,"
+            ))
+            .as_deref(),
+            Ok("编号,地区,城市,标签\r\n001,福建,福州,\"福州, 福建\"\r\n002,浙江,\"\",\", 浙江\"")
+        );
+        assert_eq!(
+            transform_csv(r#"concat-columns ["地址",["省","市"],""] 省,市"#).as_deref(),
+            Ok("省,市,地址")
+        );
+        assert_eq!(
+            transform_csv(r#"拼接列 ["地址",["省",1],"-"] 省,市"#),
+            Err(CsvError::ConcatenatedColumnArguments)
+        );
+        assert_eq!(
+            transform_csv(r#"拼接列 ["省",[1,2],"-"] 省,市"#),
+            Err(CsvError::HeaderNameConflict)
         );
     }
 
