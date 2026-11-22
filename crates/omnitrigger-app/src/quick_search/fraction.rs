@@ -1,3 +1,5 @@
+use std::{collections::HashMap, fmt::Write as _};
+
 use num_bigint::{BigInt, BigUint, Sign};
 use num_rational::BigRational;
 
@@ -10,6 +12,7 @@ const MAX_FACTORIAL_ARGUMENT: u32 = 1024;
 const MAX_COMBINATORIAL_ARGUMENT: u32 = 4096;
 const MAX_EXACT_BITS: u64 = 8192;
 const MAX_DECIMAL_PLACES: u32 = 100;
+const MAX_REPEATING_DECIMAL_PLACES: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FractionError {
@@ -24,6 +27,7 @@ pub(super) enum FractionError {
     CombinatorialDomain,
     CombinatorialRange,
     DecimalPlaces,
+    RepeatingDecimalLength,
     ExactRange,
 }
 
@@ -41,6 +45,7 @@ impl FractionError {
             Self::CombinatorialDomain => "组合数和排列数的参数必须是非负整数",
             Self::CombinatorialRange => "组合数和排列数的参数最多 4096，结果最多 8192 个二进制位",
             Self::DecimalPlaces => "输入 0 至 100 的小数位数，例如 分数: 小数 1/3 to 8",
+            Self::RepeatingDecimalLength => "循环小数最多展开 512 个小数位",
             Self::ExactRange => "幂指数绝对值最多 1024，分子和分母各最多 8192 个二进制位",
         }
     }
@@ -104,6 +109,9 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     let (verb, expression) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
     if verb == "计算" || verb.eq_ignore_ascii_case("calc") {
         return calculate_fraction(expression.trim()).map(|value| value.to_string());
+    }
+    if verb == "循环小数" || verb.eq_ignore_ascii_case("repeating-decimal") {
+        return repeating_decimal(&calculate_fraction(expression.trim())?);
     }
     if verb == "小数" || verb.eq_ignore_ascii_case("decimal") {
         let (source, places) =
@@ -183,6 +191,36 @@ pub(super) fn parse_fraction_literal(input: &str) -> Result<BigRational, Fractio
         return Err(FractionError::Invalid);
     }
     Ok(value)
+}
+
+fn repeating_decimal(value: &BigRational) -> Result<String, FractionError> {
+    let numerator = value.numer().magnitude();
+    let denominator = value.denom().magnitude();
+    let mut text = (numerator / denominator).to_string();
+    if value.numer().sign() == Sign::Minus {
+        text.insert(0, '-');
+    }
+    let mut remainder = numerator % denominator;
+    if remainder.bits() == 0 {
+        return Ok(text);
+    }
+    text.push('.');
+    let decimal_start = text.len();
+    let mut positions = HashMap::new();
+    while remainder.bits() > 0 {
+        if let Some(start) = positions.insert(remainder.clone(), text.len()) {
+            text.insert(start, '(');
+            text.push(')');
+            break;
+        }
+        if text.len() - decimal_start >= MAX_REPEATING_DECIMAL_PLACES {
+            return Err(FractionError::RepeatingDecimalLength);
+        }
+        let scaled = remainder * 10_u8;
+        write!(text, "{}", &scaled / denominator).expect("可将一位数字写入字符串");
+        remainder = scaled % denominator;
+    }
+    Ok(text)
 }
 
 fn rounded_decimal(value: BigRational, places: u32) -> String {
@@ -533,6 +571,22 @@ impl FractionParser<'_> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn expands_exact_fractions_with_minimal_repeating_digits() {
+        for (query, expected) in [
+            ("循环小数 1/7", "0.(142857)"),
+            ("循环小数 -7/6", "-1.1(6)"),
+            ("repeating-decimal 1/90", "0.0(1)"),
+            ("循环小数 1/8", "0.125"),
+            ("循环小数 3-3", "0"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            simplify_fraction("循环小数 1/2**513"),
+            Err(FractionError::RepeatingDecimalLength)
+        );
+    }
     #[test]
     fn reads_scientific_notation_without_rounding_exact_operands() {
         for (query, expected) in [

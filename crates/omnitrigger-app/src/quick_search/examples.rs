@@ -2061,6 +2061,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         title: "把分数舍入为指定小数位",
         query: "分数: 小数 1/3 to 8",
     },
+    Example {
+        icon: Icon::Terminal,
+        title: "展开精确分数的循环小数",
+        query: "分数: 循环小数 1/7",
+    },
 ];
 
 fn search_key(text: &str) -> String {
@@ -2137,6 +2142,7 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
     match scope {
         Scope::BatchCalculation if matches!(term, "分" | "分数") => {}
+        Scope::Fraction if !term.is_empty() && "循环小数".starts_with(term) => {}
         Scope::BatchConversion if matches!(term, "时" | "时长" | "时间" | "时间戳") => {}
         Scope::Date
             if !term.is_empty()

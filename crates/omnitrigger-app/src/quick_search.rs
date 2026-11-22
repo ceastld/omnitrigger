@@ -725,7 +725,8 @@ impl Results {
                         .map(|text| ResultValue {
                             kind: ValueKind::ExactCalculation {
                                 // 为括号、运算符和至少一位操作数预留空间。
-                                can_continue: text.len() <= calculator::QUERY_LIMIT - 4,
+                                can_continue: !text.contains('(')
+                                    && text.len() <= calculator::QUERY_LIMIT - 4,
                             },
                             text,
                         })
@@ -2389,6 +2390,11 @@ mod tests {
         assert!(examples_for("JSON: 按")[0].starts_with("JSON: 按值去重 "));
         assert!(examples_for("JSON: 分组")[0].starts_with("JSON: 分组计数 "));
         assert!(examples_for("统计: 移动")[0].starts_with("统计: 移动平均 "));
+        assert!(examples_for("分数: 循环")[0].starts_with("分数: 循环小数 "));
+        assert!(matches!(
+            for_query("分数: 循环小数 1/3", &[]),
+            Results::Value(Ok(value)) if value.text == "0.(3)" && value.continuation_hint().is_none()
+        ));
         assert!(examples_for("JSON: 数值筛")[0].starts_with("JSON: 数值筛选 "));
         assert!(examples_for("JSON: 数值排")[0].starts_with("JSON: 数值排序 "));
         assert!(examples_for("JSON: 文本排")[0].starts_with("JSON: 文本排序 "));
