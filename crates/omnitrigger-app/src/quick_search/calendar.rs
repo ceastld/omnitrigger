@@ -551,12 +551,17 @@ fn split_workday_exceptions(input: &str) -> (&str, Option<&str>) {
 }
 
 fn parse_workday_exceptions(input: Option<&str>) -> Result<HashMap<NaiveDate, bool>, DateError> {
-    let mut exceptions = HashMap::new();
     let Some(input) = input else {
-        return Ok(exceptions);
+        return Ok(HashMap::new());
     };
-    let [days_off, days_on] = serde_json::from_str::<[Vec<String>; 2]>(input)
-        .map_err(|_| DateError::WorkdayExceptions)?;
+    let dates = serde_json::from_str(input).map_err(|_| DateError::WorkdayExceptions)?;
+    workday_exceptions_from_dates(dates)
+}
+
+pub(super) fn workday_exceptions_from_dates(
+    [days_off, days_on]: [Vec<String>; 2],
+) -> Result<HashMap<NaiveDate, bool>, DateError> {
+    let mut exceptions = HashMap::new();
     for (dates, is_workday) in [(days_off, false), (days_on, true)] {
         for date in dates {
             let (date, "") = iso_date_prefix(&date).ok_or(DateError::WorkdayExceptions)? else {
@@ -1112,13 +1117,14 @@ fn shift_workdays_with_exceptions(
     mut date: NaiveDate,
     mut amount: u64,
     subtract: bool,
-    exceptions: HashMap<NaiveDate, bool>,
+    exceptions: &HashMap<NaiveDate, bool>,
 ) -> Option<NaiveDate> {
     if amount == 0 {
         return Some(date);
     }
     let mut exceptions: Vec<_> = exceptions
-        .into_iter()
+        .iter()
+        .map(|(&date, &is_workday)| (date, is_workday))
         .filter(|&(exception, _)| {
             if subtract {
                 exception < date
@@ -1164,17 +1170,12 @@ fn apply_date_offset(
     let lower = unit.trim().to_ascii_lowercase();
     let (unit, exceptions) = split_workday_exceptions(&lower);
     if is_workday_unit(unit) {
-        let amount = count()?;
-        return in_range(if exceptions.is_some() {
-            shift_workdays_with_exceptions(
-                date,
-                amount,
-                subtract,
-                parse_workday_exceptions(exceptions)?,
-            )
-        } else {
-            shift_workdays(date, amount, subtract)
-        });
+        return shift_calendar_workdays(
+            date,
+            count()?,
+            subtract,
+            &parse_workday_exceptions(exceptions)?,
+        );
     }
     if exceptions.is_some() {
         return Err(DateError::InvalidOperation);
@@ -1227,8 +1228,11 @@ pub(super) fn shift_calendar_workdays(
     date: NaiveDate,
     amount: u64,
     subtract: bool,
+    exceptions: &HashMap<NaiveDate, bool>,
 ) -> Result<NaiveDate, DateError> {
-    in_range(shift_workdays(date, amount, subtract))
+    in_range(shift_workdays_with_exceptions(
+        date, amount, subtract, exceptions,
+    ))
 }
 
 fn convert_date_pattern(input: &str, today: NaiveDate, parse: bool) -> Result<String, DateError> {
