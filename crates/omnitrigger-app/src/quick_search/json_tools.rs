@@ -46,6 +46,7 @@ pub(super) enum JsonError {
     PipelineStep { index: usize, cause: &'static str },
     ComparisonTooLarge,
     PointerListTooLarge,
+    KeySearchArguments,
     DuplicateKeyReportTooLarge,
     DuplicateKeyPolicy,
     FlattenedObjectTooLarge,
@@ -110,6 +111,9 @@ impl JsonError {
             Self::PipelineStep { cause, .. } => cause,
             Self::ComparisonTooLarge => "JSON 对比结果超过 1 MiB",
             Self::PointerListTooLarge => "指针列表超过 1 MiB",
+            Self::KeySearchArguments => {
+                "先输入带双引号的键名，再输入 JSON，例如 \"编号\" {\"编号\":1}"
+            }
             Self::DuplicateKeyReportTooLarge => "重复键报告超过 1 MiB，请缩小数据范围",
             Self::DuplicateKeyPolicy => "在 JSON 前填写留首或留末，指定保留哪次出现的键",
             Self::FlattenedObjectTooLarge => "JSON 展平结果超过 1 MiB",
@@ -213,6 +217,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "生成指针" | "build-pointer" => return build_json_pointer(source),
         "解析指针" | "parse-pointer" => return parse_json_pointer(source),
         "列指针" | "列路径" | "list-pointers" => return write_pointer_leaves(source, false),
+        "找键" | "find-key" => return find_json_key_paths(source),
         "重复键" | "duplicate-keys" => return report_duplicate_json_keys(source),
         "去重复键" | "deduplicate-keys" => return remove_duplicate_json_keys(source),
         "展平" | "flatten" => return write_pointer_leaves(source, true),
@@ -1823,22 +1828,38 @@ fn append_pointer_key(pointer: &mut String, key: &str) {
 }
 
 fn write_pointer_leaves(source: &str, include_values: bool) -> Result<String, JsonError> {
+    write_json_pointer_results(source, include_values, None)
+}
+
+fn find_json_key_paths(query: &str) -> Result<String, JsonError> {
+    let (key, source) = json_value_and_source(query, JsonError::KeySearchArguments)?;
+    let key =
+        serde_json::from_str::<String>(key.get()).map_err(|_| JsonError::KeySearchArguments)?;
+    write_json_pointer_results(source, false, Some(&key))
+}
+
+fn write_json_pointer_results(
+    source: &str,
+    include_values: bool,
+    matching_key: Option<&str>,
+) -> Result<String, JsonError> {
     let (opening, closing, size_error) = if include_values {
         ('{', '}', JsonError::FlattenedObjectTooLarge)
     } else {
         ('[', ']', JsonError::PointerListTooLarge)
     };
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
-    let mut pending = vec![(root, None::<(usize, String)>)];
+    let mut pending = vec![(root, None::<(usize, String)>, false)];
     let mut path = String::new();
     let mut result = String::from(opening);
-    while let Some((value, key)) = pending.pop() {
+    while let Some((value, key, matches_key)) = pending.pop() {
         if let Some((parent_length, key)) = key {
             path.truncate(parent_length);
             append_pointer_key(&mut path, &key);
         }
         let raw = value.get();
-        let children = match raw.as_bytes()[0] {
+        let kind = raw.as_bytes()[0];
+        let children = match kind {
             b'{' => {
                 let entries = read_object_entries(raw)?;
                 let mut seen = HashSet::with_capacity(entries.len());
@@ -1854,10 +1875,12 @@ fn write_pointer_leaves(source: &str, include_values: bool) -> Result<String, Js
                 .collect(),
             _ => Vec::new(),
         };
-        if !children.is_empty() {
-            for (key, child) in children.into_iter().rev() {
-                pending.push((child, Some((path.len(), key))));
-            }
+        let emit = matching_key.map_or_else(|| children.is_empty(), |_| matches_key);
+        for (key, child) in children.into_iter().rev() {
+            let matches_key = kind == b'{' && matching_key == Some(key.as_str());
+            pending.push((child, Some((path.len(), key)), matches_key));
+        }
+        if !emit {
             continue;
         }
         let encoded = serde_json::to_string(&path).map_err(json_parse_error)?;
@@ -2584,6 +2607,37 @@ mod tests {
         assert_eq!(
             report_duplicate_json_keys(&source),
             Err(JsonError::DuplicateKeyReportTooLarge)
+        );
+    }
+
+    #[test]
+    fn finds_matching_object_keys_in_input_order_and_escapes_pointer_tokens() {
+        let source =
+            r#"{"订单":[{"条目":{"编号":1}},{"编号":2}],"编号":{"子":"x"},"别名":{"编/号":2}}"#;
+        assert_eq!(
+            transform_json(&format!("找键 \"编号\" {source}")).as_deref(),
+            Ok(r#"["/订单/0/条目/编号","/订单/1/编号","/编号"]"#)
+        );
+        assert_eq!(
+            transform_json(r#"find-key "a~b" [{"元/数据":{"a~b":[]}}]"#).as_deref(),
+            Ok(r#"["/0/元~1数据/a~0b"]"#)
+        );
+        assert_eq!(
+            transform_json(r#"找键 "0" [{"0":null}]"#).as_deref(),
+            Ok(r#"["/0/0"]"#)
+        );
+        assert_eq!(
+            transform_json(r#"找键 "" {"":1}"#).as_deref(),
+            Ok(r#"["/"]"#)
+        );
+        assert_eq!(transform_json(r#"找键 "缺失" [1,2]"#).as_deref(), Ok("[]"));
+        assert_eq!(
+            transform_json("找键 1 {}"),
+            Err(JsonError::KeySearchArguments)
+        );
+        assert_eq!(
+            transform_json(r#"找键 "x" {"对象":{"x":null,"\u0078":1}}"#),
+            Err(JsonError::DuplicateKey)
         );
     }
 

@@ -2522,6 +2522,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按键名查找 JSON 中所有匹配的指针",
+        query: r#"JSON: 找键 "编号" {"订单":[{"编号":1},{"编号":2}],"编号":"总表"}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "定位 JSON 中同一对象内重复的键",
         query: r#"JSON: 重复键 {"订单":[{"价格":1,"价格":2},{"价格":3}]}"#,
     },
