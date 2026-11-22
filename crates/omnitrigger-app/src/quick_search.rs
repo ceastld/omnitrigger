@@ -90,7 +90,7 @@ use examples::{
 };
 use file_mode::{calculate_file_mode, FileModeError};
 use folders::{matching_folders, SearchFolder};
-use fraction::{calculate_fraction, simplify_fraction, FractionError};
+use fraction::{calculate_fraction, parse_fraction_literal, simplify_fraction, FractionError};
 use identifiers::{transform_ulid, transform_uuid, IdentifierError};
 use json_tools::{transform_json, JsonError};
 use linear_fit::{calculate_linear_fit, LinearFitError};
@@ -795,8 +795,8 @@ impl Results {
                         .map(|text| ResultValue {
                             kind: ValueKind::ExactCalculation {
                                 // 为括号、运算符和至少一位操作数预留空间。
-                                can_continue: !text.contains(['(', '[', '\n'])
-                                    && text.len() <= calculator::QUERY_LIMIT - 4,
+                                can_continue: text.len() <= calculator::QUERY_LIMIT - 4
+                                    && parse_fraction_literal(&text).is_ok(),
                             },
                             text,
                         })
@@ -2730,6 +2730,18 @@ mod tests {
         assert!(examples_for("分数: 循环")[0].starts_with("分数: 循环小数 "));
         assert!(examples_for("分数: 取值")[0].starts_with("分数: 取值表 "));
         assert!(examples_for("分数: 连")[0].starts_with("分数: 连分数 "));
+        assert!(examples_for("分数: 比")[0].starts_with("分数: 比较 "));
+        for (query, expected) in [
+            ("分数: 比较 1/3 < 0.34", "成立"),
+            ("分数: 比较 1/3 > 0.34", "不成立"),
+        ] {
+            let result = for_query(query, &[]);
+            assert!(matches!(
+                &result,
+                Results::Value(Ok(value)) if value.text == expected && value.continuation_hint().is_none()
+            ));
+            assert!(result.continuation_query().is_none());
+        }
         assert!(matches!(
             for_query("分数: 连分数 355/113", &[]),
             Results::Value(Ok(value)) if value.text == "[3,7,16]" && value.continuation_hint().is_none()
