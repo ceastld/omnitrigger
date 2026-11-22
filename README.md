@@ -240,6 +240,7 @@
 - 输入 `URL: 参数 https://example.invalid/?tag=a+1&tag=b%2Bc` 可逐行查看解码后的名称和值。也可粘贴查询串，结果按原有顺序保留重名参数。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 用 `URL: 参数JSON` 可把查询参数转成 `[["tag","a 1"],["tag","b+c"]]` 这样的名称和值数组。用 `URL: 生成查询串` 加上数组，可按表单编码生成 `tag=a+1&tag=b%2Bc`。两种操作都保留参数顺序和重名项。 [WHATWG 表单编码规则](https://url.spec.whatwg.org/#concept-urlencoded-serializer)
 - 输入 `URL: 拆解 https://example.invalid:8443/a%20b?x=1#part` 可查看协议、主机、有效端口、路径、查询串和片段。HTTP 与 HTTPS 会采用显式端口或协议的默认端口。 [WHATWG URL 组成](https://url.spec.whatwg.org/#concept-url)
+- 用 `URL: 路径分段 https://example.invalid/docs/a%2Fb/` 得到 `["docs","a/b",""]`。用 `URL: 设路径 ["新文档","a/b",""]` 加上网址，可替换路径并保留查询串与片段。末尾的空段保留斜杠，段内的斜杠会编码为 `%2F`。 [Rust URL 路径段](https://docs.rs/url/2.5.8/url/struct.Url.html#method.path_segments)
 - 输入 `URL: 去查询串 https://example.invalid/doc?source=mail#part` 得到 `https://example.invalid/doc#part`。结果使用 URL 解析后的格式，保留路径和片段。
 - 输入 `URL: 去参数 source https://example.invalid/doc?q=a%20b&source=mail#part` 得到 `https://example.invalid/doc?q=a%20b#part`。同名参数会一起移除，其余参数保留编码和顺序。名称区分大小写，空格可写作 `%20`。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 输入 `URL: 去参数组 ["source","campaign"]` 后加空格和网址，可同时移除指定名称的全部参数。列表填写解码后的名称，可直接写空格或加号。

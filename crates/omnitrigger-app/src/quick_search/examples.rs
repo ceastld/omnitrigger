@@ -2378,6 +2378,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Browser,
+        title: "把 URL 路径拆分成已解码的路径段",
+        query: "URL: 路径分段 https://example.invalid/docs/a%2Fb/tea%20bag/",
+    },
+    Example {
+        icon: Icon::Browser,
+        title: "从独立路径段设置 URL 路径",
+        query: r#"URL: 设路径 ["文档","a/b",""] https://example.invalid/old?x=a%20b#keep"#,
+    },
+    Example {
+        icon: Icon::Browser,
         title: "移除 URL 查询串",
         query: "URL: 去查询串 https://example.invalid/doc?source=mail#part",
     },

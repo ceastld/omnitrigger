@@ -35,6 +35,8 @@ pub(super) enum UrlEncodingError {
     InvalidFilePath,
     InvalidFileUrl,
     OpaqueOrigin,
+    OpaquePath,
+    InvalidPathSegments,
 }
 
 impl UrlEncodingError {
@@ -58,6 +60,10 @@ impl UrlEncodingError {
             Self::InvalidFilePath => "输入绝对文件路径，例如 C:\\文档\\示例.txt",
             Self::InvalidFileUrl => "输入带绝对路径的 file: URL，例如 file:///C:/Docs/example.txt",
             Self::OpaqueOrigin => "请输入具有网络源的 URL，例如 https://example.invalid/",
+            Self::OpaquePath => "请输入有层级路径的 URL，例如 https://example.invalid/",
+            Self::InvalidPathSegments => {
+                "用 JSON 字符串数组填写路径段，再输入 URL。各段不能是 . 或 .."
+            }
         }
     }
 }
@@ -81,6 +87,8 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "参数json" | "params-json" => decode_parameters(value, true),
         "生成查询串" | "build-query" => encode_parameters(value),
         "拆解" | "inspect" => inspect_url(value),
+        "路径分段" | "path-segments" => decode_path_segments(value),
+        "设路径" | "set-path" => set_path_segments(value),
         "拼接" | "resolve" => resolve_url(value),
         "相对" | "relative" => relative_url(value),
         "源" | "源站" | "origin" => {
@@ -129,6 +137,33 @@ fn inspect_url(input: &str) -> Result<String, UrlEncodingError> {
         }
     }
     Ok(lines.join("\n"))
+}
+
+fn decode_path_segments(input: &str) -> Result<String, UrlEncodingError> {
+    let url = Url::parse(input).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    let segments = url
+        .path_segments()
+        .ok_or(UrlEncodingError::OpaquePath)?
+        .map(decode_percent_escapes)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::to_string(&segments).expect("路径段字符串可以序列化为 JSON"))
+}
+
+fn set_path_segments(input: &str) -> Result<String, UrlEncodingError> {
+    let (segments, address) =
+        parameter_argument::<Vec<String>>(input, UrlEncodingError::InvalidPathSegments)?;
+    if segments
+        .iter()
+        .any(|segment| matches!(segment.as_str(), "." | ".."))
+    {
+        return Err(UrlEncodingError::InvalidPathSegments);
+    }
+    let mut url = Url::parse(address).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    url.path_segments_mut()
+        .map_err(|()| UrlEncodingError::OpaquePath)?
+        .clear()
+        .extend(segments);
+    Ok(url.into())
 }
 
 fn resolve_url(input: &str) -> Result<String, UrlEncodingError> {
@@ -465,6 +500,43 @@ mod tests {
     use super::*;
 
     #[cfg(windows)]
+    #[test]
+    fn decodes_and_sets_hierarchical_path_segments_without_rewriting_the_query() {
+        for (input, expected) in [
+            (
+                "路径分段 https://example.invalid/a%2Fb/+%20/?original=1#part",
+                r#"["a/b","+ ",""]"#,
+            ),
+            (
+                r#"设路径 ["文档","a/b",""] https://example.invalid/old?x=a%20b#keep"#,
+                "https://example.invalid/%E6%96%87%E6%A1%A3/a%2Fb/?x=a%20b#keep",
+            ),
+            (
+                "set-path [] https://example.invalid/old#keep",
+                "https://example.invalid/#keep",
+            ),
+            ("path-segments https://example.invalid/", r#"[""]"#),
+        ] {
+            assert_eq!(
+                convert_url_component(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            convert_url_component(r#"设路径 [".."] https://example.invalid/"#),
+            Err(UrlEncodingError::InvalidPathSegments)
+        );
+        assert_eq!(
+            convert_url_component("路径分段 mailto:test@example.invalid"),
+            Err(UrlEncodingError::OpaquePath)
+        );
+        assert_eq!(
+            convert_url_component("路径分段 https://example.invalid/%FF"),
+            Err(UrlEncodingError::InvalidUtf8)
+        );
+    }
+
     #[test]
     fn round_trips_absolute_windows_and_unc_paths_as_file_urls() {
         for (path, url) in [
