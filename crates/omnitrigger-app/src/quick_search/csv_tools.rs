@@ -27,6 +27,8 @@ pub(super) enum CsvError {
     InvalidColumnNames,
     MissingColumnName,
     AmbiguousColumnName,
+    RenameArguments,
+    RenameConflict,
     InvalidColumnValue,
     ColumnOutOfRange,
     InvalidNumber,
@@ -48,7 +50,9 @@ impl CsvError {
             Self::InvalidColumns => "用逗号隔开互不重复的列号，列号从 1 开始",
             Self::InvalidColumnNames => "用 JSON 字符串数组输入互不重复的列名",
             Self::MissingColumnName => "表头中找不到所选列名",
-            Self::AmbiguousColumnName => "所选列名在表头重复，请改用列号",
+            Self::AmbiguousColumnName => "表头中存在多个同名列",
+            Self::RenameArguments => "用 JSON 数组填写原列名和非空的新列名",
+            Self::RenameConflict => "表头中已经有这个新列名",
             Self::InvalidColumnValue => "请输入列号和带双引号的值，再粘贴表格",
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
@@ -69,6 +73,7 @@ enum Operation {
     FromTsv,
     SelectColumns(Vec<usize>),
     SelectNamedColumns(Vec<String>),
+    RenameColumn([String; 2]),
     DeduplicateRows,
     DeduplicateByColumns(Vec<usize>),
     FilterColumn {
@@ -108,6 +113,11 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             let (names, data) = json_argument_and_data(input, CsvError::InvalidColumnNames)?;
             input = data;
             Operation::SelectNamedColumns(names)
+        }
+        "改列名" | "rename-header" => {
+            let (names, data) = json_argument_and_data(input, CsvError::RenameArguments)?;
+            input = data;
+            Operation::RenameColumn(names)
         }
         "按列去重" | "deduplicate-columns" => {
             let (columns, data) = column_arguments(input)?;
@@ -176,6 +186,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::FromTsv => Ok(write_rows(&rows, ',')),
         Operation::SelectColumns(columns) => select_columns(&rows, &columns),
         Operation::SelectNamedColumns(names) => select_named_columns(&rows, &names),
+        Operation::RenameColumn(names) => rename_column(rows, names),
         Operation::DeduplicateRows => {
             let mut seen = HashSet::new();
             Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
@@ -272,19 +283,34 @@ fn select_named_columns(rows: &[Vec<String>], names: &[String]) -> Result<String
     }
     let columns = names
         .iter()
-        .map(|name| {
-            let mut matches = header
-                .iter()
-                .enumerate()
-                .filter(|(_, value)| *value == name);
-            let (index, _) = matches.next().ok_or(CsvError::MissingColumnName)?;
-            if matches.next().is_some() {
-                return Err(CsvError::AmbiguousColumnName);
-            }
-            Ok(index)
-        })
+        .map(|name| header_column(header, name))
         .collect::<Result<Vec<_>, _>>()?;
     select_columns(rows, &columns)
+}
+
+fn header_column(header: &[String], name: &str) -> Result<usize, CsvError> {
+    let mut matches = header
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| value.as_str() == name);
+    let (index, _) = matches.next().ok_or(CsvError::MissingColumnName)?;
+    if matches.next().is_some() {
+        return Err(CsvError::AmbiguousColumnName);
+    }
+    Ok(index)
+}
+
+fn rename_column(mut rows: Vec<Vec<String>>, [old, new]: [String; 2]) -> Result<String, CsvError> {
+    let header = rows.first_mut().ok_or(CsvError::MissingInput)?;
+    if new.trim().is_empty() {
+        return Err(CsvError::RenameArguments);
+    }
+    let column = header_column(header, &old)?;
+    if old != new && header.contains(&new) {
+        return Err(CsvError::RenameConflict);
+    }
+    header[column] = new;
+    Ok(write_rows(&rows, ','))
 }
 
 fn deduplicate_by_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<String, CsvError> {
@@ -723,6 +749,27 @@ mod tests {
             ("列总体 2 编号,金额", CsvError::EmptyStatisticsColumn),
             ("列统计 2 编号,金额\n001,", CsvError::InvalidNumber),
             ("列统计 2 编号,金额\n001,1+2", CsvError::InvalidNumber),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn renames_one_unique_csv_header_without_rewriting_cell_contents() {
+        assert_eq!(
+            transform_csv("改列名 [\"旧名\",\"备注,说明\"] 编号,旧名\n001,\"茶,咖啡\"").as_deref(),
+            Ok("编号,\"备注,说明\"\r\n001,\"茶,咖啡\"")
+        );
+        assert_eq!(
+            transform_csv("rename-header [\"A\",\"A\"] A,B").as_deref(),
+            Ok("A,B")
+        );
+        for (query, error) in [
+            (r#"改列名 ["A"] A,B"#, CsvError::RenameArguments),
+            (r#"改列名 ["A"," "] A,B"#, CsvError::RenameArguments),
+            (r#"改列名 ["A","B"] A,B"#, CsvError::RenameConflict),
+            (r#"改列名 ["a","Z"] A,B"#, CsvError::MissingColumnName),
+            (r#"改列名 ["A","Z"] A,A"#, CsvError::AmbiguousColumnName),
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }

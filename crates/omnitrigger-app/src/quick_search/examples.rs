@@ -1492,6 +1492,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "改名 CSV 的一个表头",
+        query: "CSV: 改列名 [\"旧名\",\"备注\"] 编号,旧名\n001,\"茶,咖啡\"",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "删除 CSV 中内容重复的行",
         query: "CSV: 去重 编号,备注\n001,\"茶,咖啡\"\n\"001\",\"茶,咖啡\"\n002,梨",
     },
