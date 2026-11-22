@@ -1,7 +1,8 @@
-use num_bigint::Sign;
+use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::calculator::normalize;
+use super::equation::format_centered_roots;
 use super::fraction::{calculate_fraction, ensure_exact_size, FractionError};
 use super::operators::split_top_level_commas;
 
@@ -16,6 +17,7 @@ pub(super) enum MatrixError {
     UnevenRows,
     TooLarge,
     SquareRequired,
+    EigenvalueDimensions,
     SumDimensions,
     ProductDimensions,
     PowerExponent,
@@ -29,11 +31,12 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、乘法、乘方、数乘、行列式、迹、转置、求解、求逆、秩和行最简形"
+                "可用加法、减法、乘法、乘方、数乘、行列式、迹、特征值、转置、求解、求逆、秩和行最简形"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
             Self::SquareRequired => "行列式、迹、乘方、求解和求逆需要方阵",
+            Self::EigenvalueDimensions => "请输入 2 行 2 列的矩阵求特征值",
             Self::SumDimensions => "加减法要求两个矩阵的行数和列数分别相同",
             Self::ProductDimensions => "左矩阵的列数须等于右矩阵的行数",
             Self::PowerExponent => "矩阵乘方的指数须为 -64 至 64 的整数",
@@ -57,6 +60,7 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
     match operation.as_str() {
         "行列式" | "det" => determinant(parse_matrix(input)?).map(|value| value.to_string()),
         "迹" | "trace" => trace(&parse_matrix(input)?).map(|value| value.to_string()),
+        "特征值" | "eigenvalues" => eigenvalues(&parse_matrix(input)?),
         "秩" | "rank" => matrix_rank(parse_matrix(input)?).map(|value| value.to_string()),
         "行最简形" | "行最简" | "rref" => {
             reduced_row_echelon(parse_matrix(input)?).map(format_matrix)
@@ -180,6 +184,20 @@ fn trace(matrix: &[Vec<BigRational>]) -> Result<BigRational, MatrixError> {
         ensure_exact_size(&sum).map_err(MatrixError::Evaluation)?;
     }
     Ok(sum)
+}
+
+fn eigenvalues(matrix: &[Vec<BigRational>]) -> Result<String, MatrixError> {
+    let [first, second] = matrix else {
+        return Err(MatrixError::EigenvalueDimensions);
+    };
+    let ([a, b], [c, d]) = (first.as_slice(), second.as_slice()) else {
+        return Err(MatrixError::EigenvalueDimensions);
+    };
+    let two = BigInt::from(2);
+    let center = (a + d) / &two;
+    let half_difference = (a - d) / two;
+    let distance_squared = &half_difference * &half_difference + b * c;
+    format_centered_roots(center, distance_squared, "λ").map_err(MatrixError::Evaluation)
 }
 
 fn scale_matrix(mut matrix: Matrix, factor: &BigRational) -> Result<Matrix, MatrixError> {
@@ -377,6 +395,25 @@ fn format_matrix(matrix: Matrix) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calculates_real_complex_and_repeated_eigenvalues_exactly() {
+        for (query, expected) in [
+            ("特征值 2,1; 1,2", "λ₁ = 1 · λ₂ = 3"),
+            ("eigenvalues 0,-1; 1,0", "λ = ±i"),
+            ("特征值 0,1; 2,0", "λ = ±√2"),
+            ("特征值 3/2,1/4; 0,3/2", "λ = 3/2（重根）"),
+            ("特征值 1/3,0; 0,2/3", "λ₁ = 1/3 · λ₂ = 2/3"),
+        ] {
+            assert_eq!(calculate_matrix(query).as_deref(), Ok(expected));
+        }
+        for query in ["特征值 1", "特征值 1,2; 3,4; 5,6", "特征值 1,2,3; 4,5,6"] {
+            assert_eq!(
+                calculate_matrix(query),
+                Err(MatrixError::EigenvalueDimensions)
+            );
+        }
+    }
 
     #[test]
     fn reduces_rectangular_and_singular_matrices_with_exact_pivot_columns() {

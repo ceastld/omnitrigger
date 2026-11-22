@@ -12,7 +12,7 @@ use omnitrigger_windows::{
     LocalDirectoryOptions, LocalStatError, MAX_DIRECTORY_ENTRIES,
 };
 
-use super::{title_rank, Destination, Results};
+use super::{conversion::exact_byte_quantity, title_rank, Destination, Results};
 
 pub(super) const FOLDER_DEBOUNCE: Duration = Duration::from_millis(150);
 const FOLDER_READ_TIMEOUT: Duration = Duration::from_secs(2);
@@ -155,7 +155,14 @@ impl LocalFilesIndex {
         };
         let mut matches: Vec<_> = entries
             .iter()
-            .filter(|entry| matches!(entry.kind, "file" | "directory"))
+            .filter(|entry| {
+                matches!(entry.kind, "file" | "directory")
+                    && query.size_bounds.is_none_or(|(minimum, maximum)| {
+                        entry
+                            .size_bytes
+                            .is_some_and(|size| (minimum..=maximum).contains(&size))
+                    })
+            })
             .filter_map(|entry| {
                 let name = entry.name.to_lowercase();
                 filter
@@ -208,6 +215,7 @@ struct FileQuery<'a> {
     filter: &'a str,
     order: DirectoryOrder,
     entry_type: DirectoryEntryType,
+    size_bounds: Option<(u64, u64)>,
     output: FileOutput,
 }
 
@@ -225,6 +233,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
     let (filter, options) = filter.split_once('|').unwrap_or((filter, ""));
     let mut order = DirectoryOrder::Name;
     let mut entry_type = DirectoryEntryType::All;
+    let (mut minimum, mut maximum) = (None, None);
     let mut output = FileOutput::Entries;
     for option in options.split_whitespace() {
         match option.to_ascii_lowercase().as_str() {
@@ -248,14 +257,37 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             "路径json" | "json-paths" if output == FileOutput::Entries => {
                 output = FileOutput::Json
             }
-            _ => return None,
+            _ => {
+                let (comparison, quantity) = option.split_once('=')?;
+                let bound = match comparison.to_ascii_lowercase().as_str() {
+                    "大小>" | "size>" if minimum.is_none() => &mut minimum,
+                    "大小<" | "size<" if maximum.is_none() => &mut maximum,
+                    _ => return None,
+                };
+                *bound = Some(exact_byte_quantity(quantity)?);
+            }
         }
     }
+    let size_bounds = if minimum.is_some() || maximum.is_some() {
+        let (minimum, maximum) = (minimum.unwrap_or(0), maximum.unwrap_or(u64::MAX));
+        if minimum > maximum
+            || !matches!(order, DirectoryOrder::Name | DirectoryOrder::SizeDescending)
+            || entry_type == DirectoryEntryType::Directory
+        {
+            return None;
+        }
+        order = DirectoryOrder::SizeDescending;
+        entry_type = DirectoryEntryType::File;
+        Some((minimum, maximum))
+    } else {
+        None
+    };
     (!directory.is_empty()).then_some(FileQuery {
         directory,
         filter: filter.trim(),
         order,
         entry_type,
+        size_bounds,
         output,
     })
 }
@@ -483,6 +515,48 @@ mod tests {
             Results::Destinations(items) if items.is_empty()
         ));
         assert!(split_query(r"C:\Work | | 名称列表 paths").is_none());
+    }
+
+    #[test]
+    fn filters_files_by_inclusive_byte_bounds_without_reopening_the_directory() {
+        let mut index = LocalFilesIndex::default();
+        let query = r"C:\Work | *.txt | 大小>=1.5KiB 大小<=2kB 名称列表";
+        let load = index.request(Some(query)).unwrap();
+        assert_eq!(load.order, DirectoryOrder::SizeDescending);
+        assert_eq!(load.entry_type, DirectoryEntryType::File);
+        assert_eq!(split_query(query).unwrap().size_bounds, Some((1536, 2000)));
+        assert!(index.finish(
+            &load,
+            Ok([
+                ("over.txt", 2001),
+                ("high.txt", 2000),
+                ("low.txt", 1536),
+                ("under.txt", 1535)
+            ]
+            .into_iter()
+            .map(|(name, size)| LocalDirectoryEntry {
+                size_bytes: Some(size),
+                ..entry(name, "file")
+            })
+            .collect())
+        ));
+        assert!(matches!(index.results(query), Results::Value(Ok(value))
+            if value.text == "high.txt\nlow.txt"));
+        let changed = r"C:\Work | *.txt | size>=2000 names";
+        assert!(index.request(Some(changed)).is_none());
+        assert!(matches!(index.results(changed), Results::Value(Ok(value))
+            if value.text == "over.txt\nhigh.txt"));
+        for invalid in [
+            r"C:\Work | | 大小>=0.5B",
+            r"C:\Work | | 大小>=1Mib",
+            r"C:\Work | | 大小>=18446744073709551616",
+            r"C:\Work | | 大小>=2 大小<=1",
+            r"C:\Work | | 大小>=1 大小>=2",
+            r"C:\Work | | 大小>=1 最近修改",
+            r"C:\Work | | 大小>=1 仅文件夹",
+        ] {
+            assert!(split_query(invalid).is_none(), "{invalid}");
+        }
     }
 
     #[test]

@@ -48,21 +48,29 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
     // 配方后直接计算有理数和根式，有限小数系数也能精确判定重根。
     let center = -b / (&a * BigInt::from(2));
     let distance_squared = &center * &center - c / a;
+    format_centered_roots(center, distance_squared, "x").map_err(EquationError::Evaluation)
+}
+
+pub(super) fn format_centered_roots(
+    center: BigRational,
+    distance_squared: BigRational,
+    variable: &str,
+) -> Result<String, FractionError> {
     for value in [&center, &distance_squared] {
-        ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+        ensure_exact_size(value)?;
     }
     let sign = distance_squared.numer().sign();
     if sign == Sign::NoSign {
-        return Ok(format!("x = {center}（重根）"));
+        return Ok(format!("{variable} = {center}（重根）"));
     }
     let exact_distance = exact_abs_square_root(&distance_squared);
     if let (Sign::Plus, Some(distance)) = (sign, &exact_distance) {
         let first = &center - distance;
         let second = center + distance;
         for root in [&first, &second] {
-            ensure_exact_size(root).map_err(EquationError::Evaluation)?;
+            ensure_exact_size(root)?;
         }
-        return Ok(format!("x₁ = {first} · x₂ = {second}"));
+        return Ok(format!("{variable}₁ = {first} · {variable}₂ = {second}"));
     }
 
     let distance = if let Some(root) = exact_distance {
@@ -84,9 +92,9 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
         }
     };
     if center.numer().sign() == Sign::NoSign {
-        Ok(format!("x = ±{distance}"))
+        Ok(format!("{variable} = ±{distance}"))
     } else {
-        Ok(format!("x = {center} ± {distance}"))
+        Ok(format!("{variable} = {center} ± {distance}"))
     }
 }
 

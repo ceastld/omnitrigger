@@ -1,9 +1,12 @@
 use std::f64::consts::{PI, TAU};
 
+use num_bigint::BigInt;
+
 use super::aspect_ratio::{pixel_dimensions, AspectRatioError};
 use super::batch::{map_batch_lines, BatchError};
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
 use super::duration::{convert_duration, elapsed_duration, DurationError};
+use super::fraction::parse_fraction_literal;
 use super::radix::Base;
 use super::InputSuggestion;
 
@@ -434,6 +437,26 @@ fn split_quantity(source: &str) -> (&str, &str) {
             .unwrap_or(source.len());
         source.split_at(unit_start)
     })
+}
+
+pub(super) fn exact_byte_quantity(source: &str) -> Option<u64> {
+    let normalized = normalize(source);
+    let (amount, unit) = split_quantity(normalized.trim());
+    let multiplier = if unit.is_empty() {
+        1
+    } else {
+        let unit = Unit::parse(unit).ok()?;
+        if unit.dimension != Dimension::Data || !unit.symbol.ends_with('B') {
+            return None;
+        }
+        // 数据单位表中的字节倍数均为可以精确表示的小整数。
+        (unit.scale / 8.) as u64
+    };
+    let bytes = parse_fraction_literal(amount).ok()? * BigInt::from(multiplier);
+    if !bytes.is_integer() {
+        return None;
+    }
+    u64::try_from(bytes.numer()).ok()
 }
 
 fn feet_and_inches(source: &str) -> Option<(&str, &str)> {

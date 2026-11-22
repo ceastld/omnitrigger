@@ -241,6 +241,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "精确计算二维方阵的特征值",
+        query: "矩阵: 特征值 2,1; 1,2",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "用同一个分数乘矩阵中的每个元素",
         query: "矩阵: 数乘 -3/2 @ 1/3,2; -1,0",
     },
@@ -2432,7 +2437,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 && ["子网", "排除"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
-        Scope::Matrix if term == "乘方" => {}
+        Scope::Matrix if matches!(term, "乘方" | "特" | "特征" | "特征值") => {}
         Scope::Duration
             if !term.is_empty()
                 && [
