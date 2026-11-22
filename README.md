@@ -274,6 +274,7 @@
 - 输入 `对比度: #fff vs #000` 会预览两个不透明颜色，并显示 `21:1`。计算采用 [WCAG 2.2 的对比度定义](https://www.w3.org/TR/WCAG22/#dfn-contrast-ratio)。
 - 输入 `颜色: #0080FF80 叠加 #fff` 得到 `#7FBFFF`。前一种颜色覆盖在后一种颜色上，也可用 `over`，按 sRGB 通道计算 [透明度叠加](https://www.w3.org/TR/compositing-1/#simplealphacompositing)。
 - 输入 `颜色: color-mix(in srgb, #fff 25%, #000)` 得到 `#404040`。搜索框按 8 位 sRGB 通道混合两个颜色，支持在色值前后指定百分比。两个比例都省略时各占 50%，都指定且总和低于 100% 时会保留相应的透明度。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
+- 输入 `颜色: color-mix(in srgb-linear, white, black)` 得到 `#BCBCBC`。该模式先将 sRGB 通道转为线性光强，按权重与透明度混合，再转回 sRGB。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
 - 输入 `颜色: 色阶 #004080 到 #80C0FF @ 5`，可生成包含起止色的 5 个 HEX 色值。数量可填 2 至 32，按 sRGB 等间隔插值，半透明颜色使用预乘透明度插值。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
 - 输入 `颜色: 文字色 #3A86FF` 得到 `#000000` 和色样。搜索框比较黑字、白字在指定不透明底色上的对比度，返回对比度更高的颜色。半透明颜色可在同一条输入里用 `叠加` 合成底色。 [WCAG 2.2 的对比度定义](https://www.w3.org/TR/WCAG22/#dfn-contrast-ratio)
 - 输入 `字数: 你好👩‍💻` 得到 `3 字符 · 17 UTF-8 字节`。加引号可统计首尾空格，例如 `字数: " a "`。

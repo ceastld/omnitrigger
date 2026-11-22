@@ -1756,6 +1756,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "颜色: color-mix(in srgb, #fff 25%, #000)",
     },
     Example {
+        icon: Icon::Layers,
+        title: "在线性光空间混合颜色",
+        query: "颜色: color-mix(in srgb-linear, white, black)",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "按 sRGB 等距离生成两种颜色之间的色阶",
         query: "颜色: 色阶 #004080 到 #80C0FF @ 5",

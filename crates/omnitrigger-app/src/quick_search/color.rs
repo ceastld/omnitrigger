@@ -39,7 +39,7 @@ impl ColorError {
             Self::InvalidPalette => {
                 "填写起始颜色、结束颜色和 2 至 32 个色值，例如 #000 到 #fff @ 5"
             }
-            Self::MixColorSpace => "颜色混合支持 in srgb",
+            Self::MixColorSpace => "颜色混合支持 in srgb 或 in srgb-linear",
             Self::TransparentContrast => "计算对比度需要两个不透明颜色",
             Self::TransparentTextBackground => "需要不透明底色，也可先叠加到实际背景上",
         }
@@ -51,6 +51,33 @@ enum ColorFormat {
     Rgb,
     Hsl,
     Hwb,
+}
+
+#[derive(Clone, Copy)]
+enum ColorMixSpace {
+    Srgb,
+    LinearSrgb,
+}
+
+impl ColorMixSpace {
+    fn interpolate_channel(self, left: u8, right: u8, first: f64, second: f64, total: f64) -> u8 {
+        match self {
+            Self::Srgb => {
+                ((f64::from(left) * first + f64::from(right) * second) / total).round() as u8
+            }
+            Self::LinearSrgb => {
+                let linear = (srgb_channel_to_linear(left) * first
+                    + srgb_channel_to_linear(right) * second)
+                    / total;
+                let encoded = if linear <= 0.0031308 {
+                    linear * 12.92
+                } else {
+                    1.055 * linear.powf(1. / 2.4) - 0.055
+                };
+                (encoded * 255.).round() as u8
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -122,13 +149,19 @@ impl Channels {
         }
     }
 
-    fn mix(self, other: Self, first: f64, second: f64) -> Result<Self, ColorError> {
+    fn mix(
+        self,
+        other: Self,
+        first: f64,
+        second: f64,
+        space: ColorMixSpace,
+    ) -> Result<Self, ColorError> {
         let total = first + second;
         if total == 0. {
             return Err(ColorError::InvalidMix);
         }
 
-        // 用预乘 Alpha 的 sRGB 通道插值。总权重不足 100% 时保留剩余透明度。
+        // 用预乘 Alpha 的通道插值。总权重不足 100% 时保留剩余透明度。
         let first = first * f64::from(self.alpha.unwrap_or(255));
         let second = second * f64::from(other.alpha.unwrap_or(255));
         let combined = first + second;
@@ -136,9 +169,13 @@ impl Channels {
             [0; 3]
         } else {
             std::array::from_fn(|index| {
-                let left = f64::from(self.rgb[index]) * first;
-                let right = f64::from(other.rgb[index]) * second;
-                ((left + right) / combined).round() as u8
+                space.interpolate_channel(
+                    self.rgb[index],
+                    other.rgb[index],
+                    first,
+                    second,
+                    combined,
+                )
             })
         };
         let alpha = (combined / total.max(100.)).round() as u8;
@@ -356,14 +393,13 @@ fn format_hue_color(name: &str, values: [f64; 3], alpha: Option<u8>) -> String {
 fn mix_color(input: &str) -> Result<Channels, ColorError> {
     let input = input.strip_suffix(')').ok_or(ColorError::Incomplete)?;
     let (space, stops) = input.split_once(',').ok_or(ColorError::InvalidMix)?;
-    let mut space = space.split_whitespace();
-    if !matches!(
-        (space.next(), space.next(), space.next()),
-        (Some(keyword), Some(name), None)
-            if keyword.eq_ignore_ascii_case("in") && name.eq_ignore_ascii_case("srgb")
-    ) {
-        return Err(ColorError::MixColorSpace);
-    }
+    let space = space.to_ascii_lowercase();
+    let mut words = space.split_whitespace();
+    let space = match (words.next(), words.next(), words.next()) {
+        (Some("in"), Some("srgb"), None) => ColorMixSpace::Srgb,
+        (Some("in"), Some("srgb-linear"), None) => ColorMixSpace::LinearSrgb,
+        _ => return Err(ColorError::MixColorSpace),
+    };
 
     let mut depth = 0usize;
     let mut separator = None;
@@ -387,7 +423,7 @@ fn mix_color(input: &str) -> Result<Channels, ColorError> {
         (None, Some(right)) => (100. - right, right),
         (None, None) => (50., 50.),
     };
-    first.mix(second, left, right)
+    first.mix(second, left, right, space)
 }
 
 fn mix_stop(input: &str) -> Result<(Channels, Option<f64>), ColorError> {
@@ -422,7 +458,11 @@ pub(super) fn make_color_palette(input: &str) -> Result<String, ColorError> {
     colors.push(first.format_hex());
     for index in 1..count - 1 {
         let weight = f64::from(index) / f64::from(count - 1) * 100.;
-        colors.push(first.mix(last, 100. - weight, weight)?.format_hex());
+        colors.push(
+            first
+                .mix(last, 100. - weight, weight, ColorMixSpace::Srgb)?
+                .format_hex(),
+        );
     }
     colors.push(last.format_hex());
     Ok(colors.join("\n"))
@@ -498,15 +538,17 @@ pub(super) fn convert_color(input: &str) -> Result<Color, ColorError> {
     })
 }
 
+fn srgb_channel_to_linear(value: u8) -> f64 {
+    let channel = f64::from(value) / 255.;
+    if channel <= 0.04045 {
+        channel / 12.92
+    } else {
+        ((channel + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 fn relative_luminance(rgb: [u8; 3]) -> f64 {
-    let [r, g, b] = rgb.map(|value| {
-        let channel = f64::from(value) / 255.;
-        if channel <= 0.04045 {
-            channel / 12.92
-        } else {
-            ((channel + 0.055) / 1.055).powf(2.4)
-        }
-    });
+    let [r, g, b] = rgb.map(srgb_channel_to_linear);
     0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 
@@ -658,6 +700,41 @@ mod tests {
             convert_color("color-mix(in srgb, white, black"),
             Err(ColorError::Incomplete),
         );
+    }
+
+    #[test]
+    fn mixes_in_linear_light_and_retains_the_same_alpha_weighting() {
+        for (input, output, swatch) in [
+            (
+                "color-mix(in srgb-linear, white, black)",
+                "#BCBCBC",
+                0xbcbcbcff,
+            ),
+            (
+                "color-mix(IN SRGB-LINEAR, rgba(255, 0, 0, 0.5), blue)",
+                "#9C00D5C0",
+                0x9c00d5c0,
+            ),
+            (
+                "color-mix(in srgb-linear, #f00 20%, #00f 30%)",
+                "#AA00CB80",
+                0xaa00cb80,
+            ),
+            (
+                "color-mix(in srgb-linear, transparent, transparent)",
+                "#00000000",
+                0,
+            ),
+        ] {
+            assert_eq!(
+                convert_color(input),
+                Ok(Color {
+                    output: output.to_owned(),
+                    swatch
+                }),
+                "{input}"
+            );
+        }
     }
 
     #[test]
