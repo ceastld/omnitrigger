@@ -25,6 +25,7 @@ use super::{
 
 const MAX_PIVOT_BYTES: usize = 1024 * 1024;
 const MAX_FORMULA_RECORDS: usize = 32;
+const MAX_ADDED_CELLS: usize = 16_384;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CsvError {
@@ -33,6 +34,7 @@ pub(super) enum CsvError {
     UnclosedQuote,
     InvalidSeparator,
     DifferentColumnCount,
+    TooManyAddedCells,
     InvalidHeader,
     MarkdownAlignments,
     InvalidColumns,
@@ -78,6 +80,7 @@ impl CsvError {
             Self::UnclosedQuote => "字段的双引号尚未闭合",
             Self::InvalidSeparator => "检查引号和分隔符，引号内的双引号用两个双引号表示",
             Self::DifferentColumnCount => "每行的列数须一致",
+            Self::TooManyAddedCells => "每次最多补齐 16384 个空单元格，请缩小表格范围",
             Self::InvalidHeader => "CSV 表头的列名须非空且唯一",
             Self::MarkdownAlignments => "用 JSON 数组为每一列填写左、右、中或默认",
             Self::InvalidColumns => "用逗号隔开互不重复的列号，列号从 1 开始",
@@ -127,6 +130,7 @@ impl CsvError {
 
 enum Operation {
     Validate,
+    PadRows,
     JsonRows,
     JsonObjects,
     Markdown(Option<Vec<MarkdownAlignment>>),
@@ -257,6 +261,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
     let operation = operation.to_ascii_lowercase();
     let kind = match operation.as_str() {
         "校验" | "validate" => Operation::Validate,
+        "补齐列" | "pad-columns" => Operation::PadRows,
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
         "markdown" | "表格" => Operation::Markdown(None),
@@ -445,10 +450,10 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::FromTsv => '\t',
         _ => ',',
     };
-    let rows = if matches!(kind, Operation::Validate) {
+    let rows = if matches!(kind, Operation::Validate | Operation::PadRows) {
         match read_delimited_rows(input, delimiter, false) {
             Ok(rows) => rows,
-            Err(error) => {
+            Err(error) if matches!(kind, Operation::Validate) => {
                 return Ok(format!(
                     "CSV 语法错误 · 第 {} 条记录 · 第 {} 列\n{}",
                     error.record,
@@ -456,12 +461,14 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
                     error.kind.message()
                 ));
             }
+            Err(error) => return Err(error.kind),
         }
     } else {
         read_rows(input, delimiter)?
     };
     match kind {
         Operation::Validate => Ok(report_csv_columns(&rows)),
+        Operation::PadRows => pad_rows(rows),
         Operation::JsonRows => serde_json::to_string(&rows).map_err(|_| CsvError::Serialization),
         Operation::JsonObjects => json_objects(&rows),
         Operation::Markdown(alignments) => markdown_table(&rows, alignments.as_deref()),
@@ -1180,6 +1187,22 @@ fn separated_cell(cell: &str, delimiter: char) -> Cow<'_, str> {
     }
 }
 
+fn pad_rows(mut rows: Vec<Vec<String>>) -> Result<String, CsvError> {
+    let width = rows
+        .iter()
+        .map(Vec::len)
+        .max()
+        .ok_or(CsvError::MissingInput)?;
+    let missing: usize = rows.iter().map(|row| width - row.len()).sum();
+    if missing > MAX_ADDED_CELLS {
+        return Err(CsvError::TooManyAddedCells);
+    }
+    for row in &mut rows {
+        row.resize_with(width, String::new);
+    }
+    Ok(write_rows(&rows, ','))
+}
+
 fn report_csv_columns(rows: &[Vec<String>]) -> String {
     let width = rows[0].len();
     let mismatches: Vec<_> = rows
@@ -1293,6 +1316,28 @@ impl Serialize for CsvObject<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pads_short_csv_records_to_the_largest_width_and_keeps_cells_exact() {
+        assert_eq!(
+            transform_csv("补齐列 编号,备注\n001,\"上\n下\",1.50\n002").as_deref(),
+            Ok("编号,备注,\"\"\r\n001,\"上\n下\",1.50\r\n002,\"\",\"\"")
+        );
+        assert_eq!(
+            transform_csv("pad-columns A,B\n001,").as_deref(),
+            Ok("A,B\r\n001,\"\"")
+        );
+        assert_eq!(
+            transform_csv("补齐列 A,B\n001,\"未闭合"),
+            Err(CsvError::UnclosedQuote)
+        );
+        let header = format!("{}X", ",".repeat(256));
+        let short_rows = "Y\n".repeat(65);
+        assert_eq!(
+            transform_csv(&format!("补齐列 {header}\n{short_rows}")),
+            Err(CsvError::TooManyAddedCells)
+        );
+    }
 
     #[test]
     fn reports_csv_width_mismatches_by_record_including_multiline_fields() {

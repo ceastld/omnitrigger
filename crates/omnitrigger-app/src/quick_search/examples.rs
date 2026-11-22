@@ -205,6 +205,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "矩阵: 乘法 1,2; 3,4 @ 5,6; 7,8",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "精确计算矩阵的整数次幂",
+        query: "矩阵: 乘方 1,1; 1,0 @ 5",
+    },
+    Example {
         icon: Icon::Layers,
         title: "交换矩阵的行和列",
         query: "矩阵: 转置 1,2,3; 4,5,6",
@@ -1852,6 +1857,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "用空单元格补齐 CSV 各条记录的列数",
+        query: "CSV: 补齐列 编号,说明\n001,茶,1.50\n002",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按 CSV 表头生成 JSON 对象",
         query: "CSV: 对象 编号,名称\n001,茶",
     },
@@ -2373,6 +2383,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Color if !term.is_empty() && "色阶".starts_with(term) => {}
         Scope::Cidr if !term.is_empty() && "子网".starts_with(term) => {}
+        Scope::Matrix if term == "乘方" => {}
         Scope::Duration
             if !term.is_empty()
                 && [

@@ -6,6 +6,7 @@ use super::fraction::{calculate_fraction, ensure_exact_size, FractionError};
 use super::operators::split_top_level_commas;
 
 const MAX_DIMENSION: usize = 8;
+const MAX_POWER: u32 = 64;
 type Matrix = Vec<Vec<BigRational>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,6 +18,7 @@ pub(super) enum MatrixError {
     SquareRequired,
     SumDimensions,
     ProductDimensions,
+    PowerExponent,
     SolveDimensions,
     Singular,
     Evaluation(FractionError),
@@ -27,13 +29,14 @@ impl MatrixError {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
             Self::UnknownOperation => {
-                "可用加法、减法、乘法、数乘、行列式、迹、转置、求解、求逆、秩和行最简形"
+                "可用加法、减法、乘法、乘方、数乘、行列式、迹、转置、求解、求逆、秩和行最简形"
             }
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
-            Self::SquareRequired => "行列式、迹、求解和求逆需要方阵",
+            Self::SquareRequired => "行列式、迹、乘方、求解和求逆需要方阵",
             Self::SumDimensions => "加减法要求两个矩阵的行数和列数分别相同",
             Self::ProductDimensions => "左矩阵的列数须等于右矩阵的行数",
+            Self::PowerExponent => "矩阵乘方的指数须为 -64 至 64 的整数",
             Self::SolveDimensions => "等号右侧的常数列或矩阵须与系数矩阵行数一致",
             Self::Singular => "系数矩阵不可逆，无法得到唯一解",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
@@ -67,6 +70,16 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
             let (left, right) = parse_pair(input)?;
             multiply(&left, &right).map(format_matrix)
         }
+        "乘方" | "幂" | "power" => {
+            let (matrix, exponent) = input.split_once('@').ok_or(MatrixError::Incomplete)?;
+            let exponent = exponent
+                .trim()
+                .parse::<i32>()
+                .ok()
+                .filter(|exponent| exponent.unsigned_abs() <= MAX_POWER)
+                .ok_or(MatrixError::PowerExponent)?;
+            integer_power(parse_matrix(matrix)?, exponent).map(format_matrix)
+        }
         "数乘" | "scale" => {
             let (factor, matrix) = input.split_once('@').ok_or(MatrixError::Incomplete)?;
             let factor = calculate_fraction(factor).map_err(MatrixError::Evaluation)?;
@@ -80,14 +93,7 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
         "求逆" | "inverse" => {
             let matrix = parse_matrix(input)?;
             let dimension = matrix.len();
-            let identity = (0..dimension)
-                .map(|row| {
-                    (0..dimension)
-                        .map(|column| BigRational::from_integer(u8::from(row == column).into()))
-                        .collect()
-                })
-                .collect();
-            solve(matrix, identity).map(format_matrix)
+            solve(matrix, identity(dimension)).map(format_matrix)
         }
         _ => Err(MatrixError::UnknownOperation),
     }
@@ -128,6 +134,40 @@ fn parse_matrix(input: &str) -> Result<Matrix, MatrixError> {
         values.push(cells);
     }
     Ok(values)
+}
+
+fn identity(dimension: usize) -> Matrix {
+    (0..dimension)
+        .map(|row| {
+            (0..dimension)
+                .map(|column| BigRational::from_integer(u8::from(row == column).into()))
+                .collect()
+        })
+        .collect()
+}
+
+fn integer_power(matrix: Matrix, exponent: i32) -> Result<Matrix, MatrixError> {
+    let dimension = matrix.len();
+    if matrix[0].len() != dimension {
+        return Err(MatrixError::SquareRequired);
+    }
+    let mut base = if exponent < 0 {
+        solve(matrix, identity(dimension))?
+    } else {
+        matrix
+    };
+    let mut result = identity(dimension);
+    let mut exponent = exponent.unsigned_abs();
+    while exponent > 0 {
+        if exponent & 1 != 0 {
+            result = multiply(&result, &base)?;
+        }
+        exponent >>= 1;
+        if exponent > 0 {
+            base = multiply(&base, &base)?;
+        }
+    }
+    Ok(result)
 }
 
 fn trace(matrix: &[Vec<BigRational>]) -> Result<BigRational, MatrixError> {
@@ -351,6 +391,26 @@ mod tests {
             ("rref 1/3; -2/3; 5", "1\n0\n0"),
         ] {
             assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn raises_square_matrices_to_positive_zero_and_negative_integer_powers() {
+        for (query, expected) in [
+            ("乘方 1,1;1,0 @ 5", "8, 5\n5, 3"),
+            ("power 1,2;2,4 @ 0", "1, 0\n0, 1"),
+            ("幂 1,1;1,0 @ -2", "1, -1\n-1, 2"),
+            ("乘方 1/2,0;0,3 @ -1", "2, 0\n0, 1/3"),
+        ] {
+            assert_eq!(calculate_matrix(query).as_deref(), Ok(expected));
+        }
+        for (query, error) in [
+            ("乘方 1,2;2,4 @ -1", MatrixError::Singular),
+            ("乘方 1,2 @ 0", MatrixError::SquareRequired),
+            ("乘方 1 @ 65", MatrixError::PowerExponent),
+            ("乘方 1 @ 1/3", MatrixError::PowerExponent),
+        ] {
+            assert_eq!(calculate_matrix(query), Err(error));
         }
     }
 
