@@ -293,6 +293,7 @@
 - 输入 `字数: 你好👩‍💻` 得到 `3 字符 · 17 UTF-8 字节`。加引号可统计首尾空格，例如 `字数: " a "`。
 - 用 `文本: 长度详情` 可同时查看字素簇、Unicode 码位、UTF-16 单元和 UTF-8 字节。例如用引号输入 `"👩‍💻 é"`，分别得到 3、6、8 和 15。 [Unicode 字素簇规则](https://www.unicode.org/reports/tr29/#Grapheme_Cluster_Boundaries)
 - 输入 `文本: 字频 茶👩‍💻茶👩‍💻🍵` 可统计非空白字素并输出“字符”和“次数”两列 CSV。结果按次数降序排列，同次数按首次出现的位置排列。组合重音与连写的表情各按一个字符统计。 [Unicode 字素簇规则](https://www.unicode.org/reports/tr29/#Grapheme_Cluster_Boundaries)
+- 输入 `文本: 词频 tea, coffee. tea Tea` 可按 Unicode 单词边界统计出现次数并输出 CSV。计数区分大小写，例如 `tea` 有 2 次，`Tea` 有 1 次。数量相同的词语按首次出现的位置排列。 [Unicode 单词边界规则](https://www.unicode.org/reports/tr29/#Word_Boundaries)
 - 用 `文本: 显示空白` 可把普通空格、制表符、回车和换行显示为 `␠`、`␉`、`␍` 和 `␊`。其他 Unicode 空白显示码位，例如不换行空格显示为 `<U+00A0>`。用引号可保留待转换文本首尾的空白。 [Unicode 控制字符图形](https://www.unicode.org/charts/PDF/U2400.pdf)
 - 用 `文本: 去ANSI样式` 可清理终端日志中的颜色、粗体和下划线控制序列，保留日志正文。输入命令后可按 Tab 填入一条含样式的示例。 [Microsoft 终端文字样式](https://learn.microsoft.com/windows/console/console-virtual-terminal-sequences#text-formatting)
 - 输入 `文本: 码位 北京` 得到 `U+5317 U+4EAC`，用 `文本: 码位解码 U+5317 U+4EAC` 转回文字。组合字符按各自的 Unicode 码位显示。

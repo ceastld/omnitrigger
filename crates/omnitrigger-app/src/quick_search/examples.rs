@@ -1872,6 +1872,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计按 Unicode 单词边界划分的词频",
+        query: "文本: 词频 tea, coffee. tea Tea",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "显示普通空格、制表符和不换行空格",
         query: "文本: 显示空白 \" 茶\t椅\u{00A0}咖啡 \"",
     },

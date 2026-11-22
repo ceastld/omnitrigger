@@ -213,6 +213,7 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
         )),
         "显示空白" | "show-whitespace" => Ok(show_whitespace(text)),
         "字频" | "字符频数" | "grapheme-frequency" => Ok(count_graphemes(text)),
+        "词频" | "word-frequency" => Ok(frequency_csv("词语", text.unicode_words())),
         "去ansi样式" | "strip-ansi-style" => Ok(strip_ansi_styles(text)),
         "下划线命名" | "snake-case" => Ok(join_identifier_words(text, "_")),
         "短横线命名" | "kebab-case" => Ok(join_identifier_words(text, "-")),
@@ -570,9 +571,13 @@ fn count_graphemes(text: &str) -> String {
     let graphemes = text
         .graphemes(true)
         .filter(|grapheme| !grapheme.chars().all(char::is_whitespace));
-    let mut result = String::from("字符,次数");
-    for (grapheme, count) in frequency_counts(graphemes) {
-        write!(result, "\r\n{},{count}", csv_cell(grapheme)).expect("写入 String 不会出错");
+    frequency_csv("字符", graphemes)
+}
+
+fn frequency_csv<'a>(header: &str, items: impl Iterator<Item = &'a str>) -> String {
+    let mut result = format!("{header},次数");
+    for (item, count) in frequency_counts(items) {
+        write!(result, "\r\n{},{count}", csv_cell(item)).expect("写入 String 不会出错");
     }
     result
 }
@@ -2003,6 +2008,22 @@ mod tests {
         assert_eq!(
             transform_text("长度详情 \"\"").as_deref(),
             Ok("0 字素簇 · 0 Unicode 码位\n0 UTF-16 单元 · 0 UTF-8 字节")
+        );
+    }
+
+    #[test]
+    fn lists_unicode_word_counts_in_stable_frequency_order() {
+        assert_eq!(
+            transform_text("词频 tea, coffee. tea Tea").as_deref(),
+            Ok("词语,次数\r\ntea,2\r\ncoffee,1\r\nTea,1")
+        );
+        assert_eq!(
+            transform_text("word-frequency e\u{0301} e\u{0301} CAFÉ").as_deref(),
+            Ok("词语,次数\r\ne\u{0301},2\r\nCAFÉ,1")
+        );
+        assert_eq!(
+            transform_text("词频 ... -- !!!").as_deref(),
+            Ok("词语,次数")
         );
     }
 
