@@ -1282,6 +1282,7 @@ pub(super) struct QuickSearch {
     selected: usize,
     application_refresh: ApplicationRefresh,
     input_before_help: Option<String>,
+    input_before_calculation_history: Option<String>,
     previous_input: String,
     bookmark_limit_reached: bool,
     bookmark_save_error: Option<String>,
@@ -1388,6 +1389,7 @@ impl QuickSearch {
             selected: 0,
             application_refresh: ApplicationRefresh::NotRequested,
             input_before_help: None,
+            input_before_calculation_history: None,
             previous_input,
             bookmark_limit_reached: false,
             bookmark_save_error: None,
@@ -1437,6 +1439,16 @@ impl QuickSearch {
         if !query.trim_start().starts_with(['?', '？']) && !matches!(&next, Results::FileOptions(_))
         {
             self.input_before_help = None;
+        }
+        if !matches!(&next, Results::Calculations(_))
+            && !self.input_before_help.as_deref().is_some_and(|input| {
+                matches!(
+                    scoped_query(input.trim()),
+                    Some((Scope::CalculationHistory, _))
+                )
+            })
+        {
+            self.input_before_calculation_history = None;
         }
         if self.results != next {
             let previous_height = self.results.height(self.value_line_limit());
@@ -1763,6 +1775,26 @@ impl QuickSearch {
         window.focus(&self.input.focus_handle(cx));
     }
 
+    fn toggle_calculation_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.input.read(cx).text();
+        const PREFIX: &str = "算式历史: ";
+        match scoped_query(query.trim()) {
+            Some((Scope::CalculationHistory, term)) => {
+                let previous = self.input_before_calculation_history.take();
+                let filter = query.strip_prefix(PREFIX).unwrap_or(term);
+                self.fill_query(previous.unwrap_or_else(|| filter.to_owned()), window, cx);
+            }
+            _ => {
+                let filter: String = query
+                    .chars()
+                    .take(INPUT_CHARACTER_LIMIT - PREFIX.chars().count())
+                    .collect();
+                self.input_before_calculation_history = Some(query);
+                self.fill_query(format!("{PREFIX}{filter}"), window, cx);
+            }
+        }
+    }
+
     fn bookmark_target<'a>(&'a self, query: &'a str) -> Option<&'a str> {
         if let Results::Bookmarks(items) = &self.results {
             return Some(&items.get(self.selected)?.expression);
@@ -1879,14 +1911,7 @@ impl QuickSearch {
                 cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "r" {
                 if !event.is_held {
-                    let query = self.input.read(cx).text();
-                    const PREFIX: &str = "算式历史: ";
-                    let filter = query.strip_prefix(PREFIX).or_else(|| {
-                        let (scope, term) = scoped_query(&query)?;
-                        (scope == Scope::CalculationHistory).then_some(term)
-                    });
-                    let next = filter.map_or_else(|| format!("{PREFIX}{query}"), str::to_owned);
-                    self.fill_query(next, window, cx);
+                    self.toggle_calculation_history(window, cx);
                 }
                 cx.stop_propagation();
             } else if modifiers == 1
@@ -3908,6 +3933,46 @@ mod tests {
                             (menu, restored, removed, name_entry, canceled, named)
                         })
                         .unwrap();
+                    let history_toggle = reopened
+                        .update(cx, |search, window, cx| {
+                            let key = |name| KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse(name).unwrap(),
+                                is_held: false,
+                            };
+                            let history = key("ctrl-r");
+                            search.fill_query(" 2**10 ", window, cx);
+                            search.key_down(&history, window, cx);
+                            let opened = search.input.read(cx).text();
+                            let filter = "算式历史: １０２４";
+                            search.fill_query(filter, window, cx);
+                            search.refresh_results(filter, window, cx);
+                            search.key_down(&key("f1"), window, cx);
+                            let help = search.input.read(cx).text();
+                            search.refresh_results(&help, window, cx);
+                            search.key_down(&key("f1"), window, cx);
+                            search.refresh_results(filter, window, cx);
+                            search.key_down(&history, window, cx);
+                            let restored = search.input.read(cx).text();
+                            search.fill_query("算式历史： 3**4", window, cx);
+                            search.key_down(&history, window, cx);
+                            let manual = search.input.read(cx).text();
+                            let long = "1".repeat(INPUT_CHARACTER_LIMIT + 1);
+                            search.fill_query(long.clone(), window, cx);
+                            search.key_down(&history, window, cx);
+                            let limited = search.input.read(cx).text();
+                            search.refresh_results(&limited, window, cx);
+                            let matched = matches!(search.results, Results::Calculations(_));
+                            search.key_down(&history, window, cx);
+                            (
+                                opened,
+                                restored,
+                                manual,
+                                limited.chars().count(),
+                                matched,
+                                search.input.read(cx).text() == long,
+                            )
+                        })
+                        .unwrap();
                     send.send((
                         states,
                         reopened_states,
@@ -3919,6 +3984,7 @@ mod tests {
                         scoped_help,
                         directory_help,
                         bookmark_states,
+                        history_toggle,
                     ))
                     .unwrap();
                     cx.update(|cx| cx.quit()).unwrap();
@@ -3936,7 +4002,20 @@ mod tests {
             (help_input, all_json_examples, restored_input),
             (directory_selection, directory_help, all_duration_examples, restored_directory),
             (bookmark_menu, bookmark_restored, bookmark_removed, name_entry, canceled, named),
+            (
+                history_opened,
+                history_restored,
+                manual_history,
+                history_filter_length,
+                matched,
+                long_restored,
+            ),
         ) = receive.recv().unwrap();
+        assert_eq!(history_opened, "算式历史:  2**10 ");
+        assert_eq!(history_restored, " 2**10 ");
+        assert_eq!(manual_history, "3**4");
+        assert_eq!(history_filter_length, INPUT_CHARACTER_LIMIT);
+        assert!(matched && long_restored);
         assert_eq!(help_input, "? JSON:");
         assert!(all_json_examples);
         assert!(directory_selection > 0);
