@@ -16,6 +16,8 @@ pub(super) enum MatrixError {
     TooLarge,
     SquareRequired,
     ProductDimensions,
+    SolveDimensions,
+    Singular,
     Evaluation(FractionError),
 }
 
@@ -23,11 +25,13 @@ impl MatrixError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "用逗号隔开列，用分号或换行隔开行",
-            Self::UnknownOperation => "可用 行列式、乘法 或 转置",
+            Self::UnknownOperation => "可用 行列式、乘法、转置、求解 或 求逆",
             Self::UnevenRows => "每行的列数须一致",
             Self::TooLarge => "矩阵最多 8 行 8 列",
-            Self::SquareRequired => "行列式需要方阵",
+            Self::SquareRequired => "行列式、求解和求逆需要方阵",
             Self::ProductDimensions => "左矩阵的列数须等于右矩阵的行数",
+            Self::SolveDimensions => "等号右侧的常数列或矩阵须与系数矩阵行数一致",
+            Self::Singular => "系数矩阵不可逆，无法得到唯一解",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "矩阵元素须为整数、有限小数、分数或精确算式"
             }
@@ -49,6 +53,22 @@ pub(super) fn calculate_matrix(query: &str) -> Result<String, MatrixError> {
             multiply(&parse_matrix(left)?, &parse_matrix(right)?).map(format_matrix)
         }
         "转置" | "transpose" => Ok(format_matrix(transpose(parse_matrix(input)?))),
+        "求解" | "solve" => {
+            let (left, right) = input.split_once('@').ok_or(MatrixError::Incomplete)?;
+            solve(parse_matrix(left)?, parse_matrix(right)?).map(format_matrix)
+        }
+        "求逆" | "inverse" => {
+            let matrix = parse_matrix(input)?;
+            let dimension = matrix.len();
+            let identity = (0..dimension)
+                .map(|row| {
+                    (0..dimension)
+                        .map(|column| BigRational::from_integer(u8::from(row == column).into()))
+                        .collect()
+                })
+                .collect();
+            solve(matrix, identity).map(format_matrix)
+        }
         _ => Err(MatrixError::UnknownOperation),
     }
 }
@@ -118,6 +138,46 @@ fn determinant(mut matrix: Matrix) -> Result<BigRational, MatrixError> {
     Ok(result)
 }
 
+fn solve(mut left: Matrix, right: Matrix) -> Result<Matrix, MatrixError> {
+    let dimension = left.len();
+    if left[0].len() != dimension {
+        return Err(MatrixError::SquareRequired);
+    }
+    if right.len() != dimension {
+        return Err(MatrixError::SolveDimensions);
+    }
+    for (row, right_row) in left.iter_mut().zip(right) {
+        row.extend(right_row);
+    }
+    for column in 0..dimension {
+        let pivot = (column..dimension)
+            .find(|&row| left[row][column].numer().sign() != Sign::NoSign)
+            .ok_or(MatrixError::Singular)?;
+        left.swap(column, pivot);
+        let (before, remaining) = left.split_at_mut(column);
+        let (pivot_row, after) = remaining.split_first_mut().expect("主元行存在");
+        let scale = pivot_row[column].clone();
+        for cell in &mut pivot_row[column..] {
+            *cell /= &scale;
+            ensure_exact_size(cell).map_err(MatrixError::Evaluation)?;
+        }
+        for row in before.iter_mut().chain(after) {
+            let factor = std::mem::take(&mut row[column]);
+            if factor.numer().sign() == Sign::NoSign {
+                continue;
+            }
+            for (target, source) in row.iter_mut().zip(pivot_row.iter()).skip(column + 1) {
+                *target -= &factor * source;
+                ensure_exact_size(target).map_err(MatrixError::Evaluation)?;
+            }
+        }
+    }
+    Ok(left
+        .into_iter()
+        .map(|mut row| row.split_off(dimension))
+        .collect())
+}
+
 fn multiply(left: &[Vec<BigRational>], right: &[Vec<BigRational>]) -> Result<Matrix, MatrixError> {
     if left[0].len() != right.len() {
         return Err(MatrixError::ProductDimensions);
@@ -164,6 +224,28 @@ fn format_matrix(matrix: Matrix) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solves_exact_square_systems_and_inverts_matrices() {
+        for (query, expected) in [
+            ("求解 0,2; 3,4 @ 4; 11", "1\n2"),
+            ("求解 1/2,0; 0,3 @ 1/6; 2", "1/3\n2/3"),
+            ("solve 2,0; 0,4 @ 1,2; 3,4", "1/2, 1\n3/4, 1"),
+            ("求逆 1,2; 3,4", "-2, 1\n3/2, -1/2"),
+            ("inverse -3/2", "-2/3"),
+        ] {
+            assert_eq!(calculate_matrix(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("求逆 1,2; 2,4", MatrixError::Singular),
+            ("求解 1,2; 2,4 @ 3; 5", MatrixError::Singular),
+            ("求解 1,2; 2,4 @ 3; 6", MatrixError::Singular),
+            ("求逆 1,2,3; 4,5,6", MatrixError::SquareRequired),
+            ("求解 1,0; 0,1 @ 1", MatrixError::SolveDimensions),
+        ] {
+            assert_eq!(calculate_matrix(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn calculates_exact_determinants_products_and_transposes() {

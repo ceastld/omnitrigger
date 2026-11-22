@@ -131,6 +131,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "求线性方程组的唯一解",
+        query: "矩阵: 求解 2,1; 1,-1 @ 5; 1",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "计算方阵的逆矩阵",
+        query: "矩阵: 求逆 1,2; 3,4",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算单位",
         query: "10 km to mi",
     },
