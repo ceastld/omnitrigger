@@ -16,6 +16,7 @@ use super::duration::{
 };
 
 const MAX_TARGET_ZONES: usize = 8;
+const MAX_SERIES_TIMESTAMPS: usize = 128;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum TimestampError {
@@ -32,6 +33,7 @@ pub(super) enum TimestampError {
     IntervalEndpoints,
     IntervalOutput(DurationError),
     AlignmentArguments,
+    SeriesArguments,
     UnsupportedPrecision,
     OutOfRange,
 }
@@ -56,13 +58,14 @@ impl TimestampError {
             Self::IntervalEndpoints => "用 到 或 至 隔开两个带时区的时间",
             Self::IntervalOutput(error) => error.message(),
             Self::AlignmentArguments => "填写正的时间步长和时间，例如 15分钟 @ 1700000000",
+            Self::SeriesArguments => "填写起始时刻、正步长和 1 至 128 项，可指定一个目标时区",
             Self::UnsupportedPrecision => "请输入可用 Unix 纳秒表示的时间",
             Self::OutOfRange => "结果超出四位年份的时间范围",
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum TimestampUnit {
     Seconds = 1,
     Milliseconds = 1_000,
@@ -219,6 +222,12 @@ fn convert_timestamp_with_local(
         }
     };
     let operation = input.split_whitespace().next().unwrap_or("");
+    if operation == "序列" || operation.eq_ignore_ascii_case("timestamp-series") {
+        if matches!(target_zone.as_ref(), Some(DisplayTargets::Multiple(_))) {
+            return Err(TimestampError::SeriesArguments);
+        }
+        return timestamp_series(input[operation.len()..].trim_start(), now, display_time);
+    }
     let alignment = match operation.to_ascii_lowercase().as_str() {
         "向下对齐" | "floor-time" => Some(TimestampAlignment::Floor),
         "向上对齐" | "ceil-time" => Some(TimestampAlignment::Ceil),
@@ -406,6 +415,47 @@ fn align_timestamp(
     };
     let aligned = nanos - remainder + if use_later_boundary { step } else { 0 };
     timestamp_from_unix_units(aligned, TimestampUnit::Nanoseconds)
+}
+
+fn timestamp_series(
+    input: &str,
+    now: DateTime<Utc>,
+    display: impl Fn(DateTime<Utc>, SecondsFormat) -> Result<String, TimestampError>,
+) -> Result<String, TimestampError> {
+    let mut parts = input.split('@').map(str::trim);
+    let (Some(start), Some(step), Some(count), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(TimestampError::SeriesArguments);
+    };
+    if start.is_empty() {
+        return Err(TimestampError::SeriesArguments);
+    }
+    let step = elapsed_duration(step)
+        .ok()
+        .filter(|duration| !duration.is_zero())
+        .ok_or(TimestampError::SeriesArguments)?;
+    let count = count
+        .parse::<usize>()
+        .ok()
+        .filter(|count| (1..=MAX_SERIES_TIMESTAMPS).contains(count))
+        .ok_or(TimestampError::SeriesArguments)?;
+    let start = interval_endpoint(start, now)?;
+    let format = TimestampUnit::from_subsecond(start.timestamp_subsec_nanos())
+        .max(TimestampUnit::from_subsecond(step.subsec_nanos()))
+        .date_format();
+    let start = unix_nanos(start);
+    let step = step.as_nanos() as i128;
+    let lines = (0..count)
+        .map(|index| {
+            let time = timestamp_from_unix_units(
+                start + step * index as i128,
+                TimestampUnit::Nanoseconds,
+            )?;
+            display(time, format)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(lines.join("\n"))
 }
 
 fn unix_nanos(time: DateTime<Utc>) -> i128 {
@@ -633,6 +683,39 @@ fn ensure_four_digit_year(year: i32) -> Result<(), TimestampError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generates_timestamps_at_equal_elapsed_steps_with_consistent_precision() {
+        let now = DateTime::from_timestamp(1000, 123_000_000).unwrap();
+        for (query, expected) in [
+            (
+                "序列 0 @ 15分钟 @ 3 to UTC+8",
+                "1970-01-01T08:00:00+08:00\n1970-01-01T08:15:00+08:00\n1970-01-01T08:30:00+08:00",
+            ),
+            (
+                "timestamp-series -1ns @ 1ns @ 3",
+                "1969-12-31T23:59:59.999999999Z\n1970-01-01T00:00:00.000000000Z\n1970-01-01T00:00:00.000000001Z",
+            ),
+            ("序列 现在 @ 1秒 @ 1", "1970-01-01T00:16:40.123Z"),
+        ] {
+            assert_eq!(convert_timestamp(query, now).as_deref(), Ok(expected), "{query}");
+        }
+        for query in [
+            "序列 0 @ 0秒 @ 2",
+            "序列 0 @ 1秒 @ 0",
+            "序列 0 @ 1秒 @ 129",
+            "序列 0 @ 1秒 @ 2 to UTC,Asia/Shanghai",
+        ] {
+            assert_eq!(
+                convert_timestamp(query, now),
+                Err(TimestampError::SeriesArguments)
+            );
+        }
+        assert_eq!(
+            convert_timestamp("序列 9999-12-31T23:59:59Z @ 1秒 @ 2", now),
+            Err(TimestampError::OutOfRange)
+        );
+    }
 
     #[test]
     fn aligns_instants_to_epoch_steps_with_exact_negative_and_subsecond_values() {

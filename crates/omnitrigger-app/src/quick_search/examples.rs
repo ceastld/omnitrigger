@@ -1312,6 +1312,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "按固定时间间隔生成一组时刻",
+        query: "时间戳: 序列 0 @ 15分钟 @ 3 to UTC+8",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "将时间戳换算成本地时间",
         query: "时间戳: 1700000000 本地",
     },
@@ -3992,9 +3997,16 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::Color if !term.is_empty() && "色阶".starts_with(term) => {}
         Scope::Timestamp
             if !term.is_empty()
-                && ["向下对齐", "向上对齐", "就近对齐", "时区CSV", "时区候选"]
-                    .into_iter()
-                    .any(|operation| operation.starts_with(term)) => {}
+                && [
+                    "向下对齐",
+                    "向上对齐",
+                    "就近对齐",
+                    "时区CSV",
+                    "时区候选",
+                    "序列",
+                ]
+                .into_iter()
+                .any(|operation| operation.starts_with(term)) => {}
         Scope::Circuit
             if !term.is_empty()
                 && ["串联", "并联", "耗电", "电池能量"]
