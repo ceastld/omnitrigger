@@ -67,6 +67,8 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "均方根" | "rms" => (StatisticsOperation::RootMeanSquare, values.trim()),
         "加权平均" | "weighted-mean" => return weighted_mean(values.trim()),
         "移动平均" | "moving-average" => return moving_average(values.trim()),
+        "累计合计" | "running-sum" => return running_totals(values.trim(), false),
+        "累计平均" | "running-average" => return running_totals(values.trim(), true),
         "协方差" | "样本协方差" | "covariance" => {
             return calculate_covariance(values, true).map_err(StatisticsError::Paired);
         }
@@ -134,6 +136,23 @@ fn observation_terms(input: &str) -> Result<Vec<&str>, StatisticsError> {
         return Err(StatisticsError::TooManyValues);
     }
     Ok(terms)
+}
+
+fn running_totals(input: &str, average: bool) -> Result<String, StatisticsError> {
+    let terms = observation_terms(input)?;
+    let mut total = BigRational::default();
+    let mut output = Vec::with_capacity(terms.len());
+    for (index, term) in terms.into_iter().enumerate() {
+        let value = calculate_fraction(term).map_err(StatisticsError::Evaluation)?;
+        total = bounded(total + value)?;
+        let value = if average {
+            bounded(&total / BigRational::from_integer(BigInt::from(index + 1)))?.to_string()
+        } else {
+            total.to_string()
+        };
+        output.push(value);
+    }
+    Ok(output.join("\n"))
 }
 
 fn moving_average(input: &str) -> Result<String, StatisticsError> {
@@ -386,6 +405,29 @@ fn bounded(value: BigRational) -> Result<BigRational, StatisticsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computes_exact_running_totals_and_averages_in_input_order() {
+        for (query, expected) in [
+            ("累计合计 1/2,1,2,4", "1/2\n3/2\n7/2\n15/2"),
+            ("累计平均 1/2,1,2,4", "1/2\n3/4\n7/6\n15/8"),
+            (
+                "running-sum -1/3\r\n1/3\r\n2**80",
+                "-1/3\n0\n1208925819614629174706176",
+            ),
+            ("running-average 0,-1,0", "0\n-1/2\n-1/3"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("累计平均"),
+            Err(StatisticsError::Incomplete)
+        );
+    }
 
     #[test]
     fn reports_exact_averages_for_complete_sliding_windows() {

@@ -105,6 +105,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 移动平均 2 1/2,1,2,4",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "逐项计算精确累计合计",
+        query: "统计: 累计合计 1/2,1,2,4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "逐项计算精确累计平均",
+        query: "统计: 累计平均 1/2,1,2,4",
+    },
+    Example {
         icon: Icon::Layers,
         title: "保留分数和根式的均方根",
         query: "统计: 均方根 1/2,3/2",
@@ -2184,6 +2194,12 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "移动"
                     | "移动平"
                     | "移动平均"
+                    | "累"
+                    | "累计"
+                    | "累计合"
+                    | "累计合计"
+                    | "累计平"
+                    | "累计平均"
                     | "均"
                     | "均方"
                     | "均方根"
