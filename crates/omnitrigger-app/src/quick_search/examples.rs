@@ -265,6 +265,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量换算: 路径 文件名 \"C:\\工作\\报告 集.txt\"\n转文件网址 C:\\docs\\report 2026.txt\n扩展名 C:\\资料\\图.png",
     },
     Example {
+        icon: Icon::Browser,
+        title: "逐行处理网址、编码和查询参数",
+        query: "批量换算: 网址 去查询串 https://example.invalid/doc?q=a#part\n表单解码 a%2Bb+c\n源 https://example.invalid:8443/doc",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "一次算出多行算式",
         query: "批量计算: 2**8\n3^3\nsqrt(81)",
@@ -2218,7 +2223,10 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::BatchConversion
-            if matches!(term, "时" | "时长" | "时间" | "时间戳" | "路" | "路径") => {}
+            if matches!(
+                term,
+                "时" | "时长" | "时间" | "时间戳" | "路" | "路径" | "网" | "网址"
+            ) => {}
         Scope::Date
             if !term.is_empty()
                 && ["列出", "格式化", "解析", "月历"]

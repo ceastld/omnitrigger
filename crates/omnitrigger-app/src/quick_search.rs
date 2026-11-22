@@ -337,6 +337,7 @@ enum ValueError {
     BatchDuration(BatchError<DurationError>),
     BatchTimestamp(BatchError<TimestampError>),
     BatchPath(BatchError<PathError>),
+    BatchUrl(BatchError<UrlEncodingError>),
     Radix(RadixError),
     RatioAllocation(RatioAllocationError),
     AspectRatio(AspectRatioError),
@@ -416,6 +417,13 @@ impl ValueError {
                     PathError::message,
                 );
             }
+            Self::BatchUrl(error) => {
+                return batch_error_message(
+                    error,
+                    "逐行输入网址操作，例如 去查询串 https://example.invalid/?ref=mail",
+                    UrlEncodingError::message,
+                );
+            }
             Self::Radix(error) => error.message(),
             Self::RatioAllocation(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
@@ -460,6 +468,7 @@ impl ValueError {
                 | Self::BatchDuration(BatchError::Empty)
                 | Self::BatchTimestamp(BatchError::Empty)
                 | Self::BatchPath(BatchError::Empty)
+                | Self::BatchUrl(BatchError::Empty)
                 | Self::AspectRatio(AspectRatioError::Incomplete)
                 | Self::Paper(PaperError::Incomplete)
                 | Self::Rectangle(RectangleError::Incomplete)
@@ -632,6 +641,11 @@ impl Results {
                         Self::text_value(
                             map_batch_lines(arguments, path_component)
                                 .map_err(ValueError::BatchPath),
+                        )
+                    } else if let Some(arguments) = batch_arguments(term, "网址", "url") {
+                        Self::text_value(
+                            map_batch_lines(arguments, convert_url_component)
+                                .map_err(ValueError::BatchUrl),
                         )
                     } else {
                         Self::text_value(convert_batch(term).map_err(ValueError::BatchConversion))
@@ -2189,6 +2203,28 @@ mod tests {
         assert!(for_query("批量换算: 时间", &[])
             .suggested_input(0)
             .is_some_and(|query| query.starts_with("批量换算: 时间戳 ")));
+    }
+
+    #[test]
+    fn quick_search_batches_different_url_operations_and_reports_the_input_line() {
+        assert!(matches!(
+            for_query(
+                "批量换算: 网址 去查询串 https://example.invalid/doc?q=a#part\r\n表单解码 a%2Bb+c\n源 https://example.invalid:8443/doc",
+                &[],
+            ),
+            Results::Value(Ok(value))
+                if value.text == "https://example.invalid/doc#part\na+b c\nhttps://example.invalid:8443"
+        ));
+        assert!(matches!(
+            for_query("批量换算: URL 表单编码 茶\n\n表单解码 %GG", &[]),
+            Results::Value(Err(ValueError::BatchUrl(BatchError::Row {
+                line: 3,
+                cause: UrlEncodingError::InvalidEscape,
+            })))
+        ));
+        assert!(for_query("批量换算: 网", &[])
+            .suggested_input(0)
+            .is_some_and(|query| query.starts_with("批量换算: 网址 ")));
     }
 
     #[test]
