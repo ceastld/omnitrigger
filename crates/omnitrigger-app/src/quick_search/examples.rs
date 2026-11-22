@@ -3423,6 +3423,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从第一个区间扣除其余区间",
+        query: "区间: 差集 [0,10]; [2,4]; (6,8)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在分数算式中精确开方并取绝对值",
         query: "分数: 计算 sqrt(81/16)+abs(-1/2)",
     },
@@ -3607,7 +3612,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
     }
     match scope {
         Scope::Intervals
-            if ["交集", "合并"]
+            if ["交集", "合并", "差集"]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::BatchCalculation

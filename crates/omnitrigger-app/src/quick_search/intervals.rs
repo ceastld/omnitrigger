@@ -25,7 +25,7 @@ impl IntervalError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete | Self::Operation => {
-                "输入交集或合并，再填区间，例如 交集 [1/2,3); (2,5]"
+                "输入交集、合并或差集，再填写区间，例如 交集 [1/2,3); (2,5]"
             }
             Self::Count => "最多填写 32 个区间，用分号或换行分开",
             Self::Notation => "用方括号包含端点，用圆括号排除端点，两个端点用逗号分开",
@@ -38,11 +38,19 @@ impl IntervalError {
     }
 }
 
+enum IntervalOperation {
+    Intersection,
+    Union,
+    Difference,
+}
+
+#[derive(Clone)]
 struct Endpoint {
     value: BigRational,
     included: bool,
 }
 
+#[derive(Clone)]
 struct Interval {
     start: Endpoint,
     end: Endpoint,
@@ -68,9 +76,10 @@ pub(super) fn calculate_intervals(query: &str) -> Result<String, IntervalError> 
     let normalized = normalize(query);
     let input = normalized.trim();
     let (operation, arguments) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
-    let intersection = match operation.to_ascii_lowercase().as_str() {
-        "交集" | "intersect" => true,
-        "合并" | "并集" | "union" => false,
+    let operation = match operation.to_ascii_lowercase().as_str() {
+        "交集" | "intersect" => IntervalOperation::Intersection,
+        "合并" | "并集" | "union" => IntervalOperation::Union,
+        "差集" | "difference" => IntervalOperation::Difference,
         "" => return Err(IntervalError::Incomplete),
         _ => return Err(IntervalError::Operation),
     };
@@ -89,15 +98,15 @@ pub(super) fn calculate_intervals(query: &str) -> Result<String, IntervalError> 
         .into_iter()
         .map(parse_interval)
         .collect::<Result<Vec<_>, _>>()?;
-    if intersection {
-        return Ok(intersect_intervals(intervals)
-            .map_or_else(|| EMPTY_SET.to_owned(), |interval| interval.notation()));
-    }
-    let merged = merge_intervals(intervals.into_iter().flatten().collect());
-    if merged.is_empty() {
+    let result = match operation {
+        IntervalOperation::Intersection => intersect_intervals(intervals).into_iter().collect(),
+        IntervalOperation::Union => merge_intervals(intervals.into_iter().flatten().collect()),
+        IntervalOperation::Difference => subtract_intervals(intervals),
+    };
+    if result.is_empty() {
         return Ok(EMPTY_SET.to_owned());
     }
-    Ok(merged
+    Ok(result
         .iter()
         .map(Interval::notation)
         .collect::<Vec<_>>()
@@ -140,19 +149,63 @@ fn intersect_intervals(intervals: Vec<Option<Interval>>) -> Option<Interval> {
     let mut remaining = intervals.into_iter();
     let mut result = remaining.next()??;
     for interval in remaining {
-        let interval = interval?;
-        match result.start.value.cmp(&interval.start.value) {
-            Ordering::Less => result.start = interval.start,
-            Ordering::Equal => result.start.included &= interval.start.included,
-            Ordering::Greater => {}
-        }
-        match result.end.value.cmp(&interval.end.value) {
-            Ordering::Greater => result.end = interval.end,
-            Ordering::Equal => result.end.included &= interval.end.included,
-            Ordering::Less => {}
-        }
+        result = intersect_pair(result, &interval?)?;
+    }
+    Some(result)
+}
+
+fn intersect_pair(mut result: Interval, interval: &Interval) -> Option<Interval> {
+    match result.start.value.cmp(&interval.start.value) {
+        Ordering::Less => result.start = interval.start.clone(),
+        Ordering::Equal => result.start.included &= interval.start.included,
+        Ordering::Greater => {}
+    }
+    match result.end.value.cmp(&interval.end.value) {
+        Ordering::Greater => result.end = interval.end.clone(),
+        Ordering::Equal => result.end.included &= interval.end.included,
+        Ordering::Less => {}
     }
     result.is_nonempty().then_some(result)
+}
+
+fn subtract_intervals(intervals: Vec<Option<Interval>>) -> Vec<Interval> {
+    let mut intervals = intervals.into_iter();
+    let Some(Some(first)) = intervals.next() else {
+        return Vec::new();
+    };
+    let mut remaining = vec![first];
+    for cut in intervals.flatten() {
+        remaining = remaining
+            .into_iter()
+            .flat_map(|part| subtract_one_interval(part, &cut))
+            .flatten()
+            .collect();
+    }
+    remaining
+}
+
+fn subtract_one_interval(source: Interval, cut: &Interval) -> [Option<Interval>; 2] {
+    let Some(overlap) = intersect_pair(source.clone(), cut) else {
+        return [Some(source), None];
+    };
+    let left = Interval {
+        start: source.start,
+        end: Endpoint {
+            value: overlap.start.value,
+            included: !overlap.start.included,
+        },
+    };
+    let right = Interval {
+        start: Endpoint {
+            value: overlap.end.value,
+            included: !overlap.end.included,
+        },
+        end: source.end,
+    };
+    [
+        left.is_nonempty().then_some(left),
+        right.is_nonempty().then_some(right),
+    ]
 }
 
 fn merge_intervals(mut intervals: Vec<Interval>) -> Vec<Interval> {
@@ -201,6 +254,27 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn subtracts_multiple_ranges_and_preserves_unremoved_boundary_points() {
+        for (query, expected) in [
+            ("差集 [0,10]; [2,4]; (6,8)", "[0,2)\n(4,6]\n[8,10]"),
+            ("DIFFERENCE [0,1]; (0,1)", "[0,0]\n[1,1]"),
+            ("差集 (0,1); [0,0]; [1,1]", "(0,1)"),
+            ("差集 (0,1]; [0,2)", EMPTY_SET),
+            ("差集 [0,4]; [2,2]; (2,3]", "[0,2)\n(3,4]"),
+        ] {
+            assert_eq!(
+                calculate_intervals(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        assert_eq!(
+            calculate_intervals("差集 [0,4]; (1,1); [3,2]"),
+            Err(IntervalError::Reversed)
+        );
     }
 
     #[test]
