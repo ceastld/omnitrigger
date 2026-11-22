@@ -38,6 +38,8 @@ pub(super) enum CsvError {
     MissingColumnName,
     AmbiguousColumnName,
     RenameArguments,
+    ReplaceValueArguments,
+    NullReplacementValue,
     HeaderNameConflict,
     ComputedColumnArguments,
     ComputedDivisionByZero,
@@ -74,6 +76,8 @@ impl CsvError {
             Self::MissingColumnName => "表头中找不到所选列名",
             Self::AmbiguousColumnName => "表头中存在多个同名列",
             Self::RenameArguments => "用 JSON 数组填写原列名和非空的新列名",
+            Self::ReplaceValueArguments => "用 JSON 数组填写列名或列号、旧值和新值",
+            Self::NullReplacementValue => "新值不能包含空字符 U+0000",
             Self::HeaderNameConflict => "表头中已经有这个新列名",
             Self::ComputedColumnArguments => {
                 "用 JSON 数组填写新列名、两列和运算，例如 [\"金额\",2,\"*\",3]"
@@ -110,6 +114,11 @@ enum Operation {
     SelectNamedColumns(Vec<String>),
     SelectRows(String),
     RenameColumn([String; 2]),
+    ReplaceValue {
+        column: ColumnReference,
+        previous: String,
+        replacement: String,
+    },
     ComputeColumn {
         name: String,
         left: ColumnReference,
@@ -224,6 +233,22 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             let (names, data) = json_argument_and_data(input, CsvError::RenameArguments)?;
             input = data;
             Operation::RenameColumn(names)
+        }
+        "替换值" | "replace-value" => {
+            let ((column, previous, replacement), data) =
+                json_argument_and_data::<(ColumnReference, String, String)>(
+                    input,
+                    CsvError::ReplaceValueArguments,
+                )?;
+            if replacement.contains('\0') {
+                return Err(CsvError::NullReplacementValue);
+            }
+            input = data;
+            Operation::ReplaceValue {
+                column,
+                previous,
+                replacement,
+            }
         }
         "计算列" | "compute-column" => {
             let ((name, left, operator, right), data) =
@@ -348,6 +373,11 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::SelectNamedColumns(names) => select_named_columns(&rows, &names),
         Operation::SelectRows(ranges) => select_data_rows(&rows, &ranges),
         Operation::RenameColumn(names) => rename_column(rows, names),
+        Operation::ReplaceValue {
+            column,
+            previous,
+            replacement,
+        } => replace_column_values(rows, column, &previous, &replacement),
         Operation::ComputeColumn {
             name,
             left,
@@ -546,6 +576,23 @@ fn rename_column(mut rows: Vec<Vec<String>>, [old, new]: [String; 2]) -> Result<
         return Err(CsvError::HeaderNameConflict);
     }
     header[column] = new;
+    Ok(write_rows(&rows, ','))
+}
+
+fn replace_column_values(
+    mut rows: Vec<Vec<String>>,
+    column: ColumnReference,
+    previous: &str,
+    replacement: &str,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first_mut().ok_or(CsvError::MissingInput)?;
+    let column = column.resolve(header)?;
+    validate_column_width(&[column], header.len())?;
+    for row in records {
+        if row[column] == previous {
+            replacement.clone_into(&mut row[column]);
+        }
+    }
     Ok(write_rows(&rows, ','))
 }
 
@@ -1005,6 +1052,38 @@ impl Serialize for CsvObject<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replaces_only_matching_cells_in_a_selected_csv_column() {
+        let source = "编号,状态,备注\n001,待办,待办\n002,\"待办 \",记录\n003,完成,待办";
+        assert_eq!(
+            transform_csv(&format!(
+                "替换值 [\"状态\",\"待办\",\"进行,稍后\"]\n{source}"
+            ))
+            .as_deref(),
+            Ok("编号,状态,备注\r\n001,\"进行,稍后\",待办\r\n002,待办 ,记录\r\n003,完成,待办")
+        );
+        assert_eq!(
+            transform_csv("replace-value [2,\"\",\"补填\"] 编号,备注\n001,\n002,原值").as_deref(),
+            Ok("编号,备注\r\n001,补填\r\n002,原值")
+        );
+        for (query, error) in [
+            (
+                r#"替换值 ["状态","待办",1] 编号,状态"#,
+                CsvError::ReplaceValueArguments,
+            ),
+            (
+                r#"替换值 ["状态","待办","\u0000"] 编号,状态"#,
+                CsvError::NullReplacementValue,
+            ),
+            (
+                r#"替换值 ["状态","待办","完成"] 状态,状态"#,
+                CsvError::AmbiguousColumnName,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn resolves_named_columns_for_stable_sorting_and_deduplication() {
