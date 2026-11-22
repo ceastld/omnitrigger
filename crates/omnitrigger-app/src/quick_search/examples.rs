@@ -2718,6 +2718,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把 CSV 中的日期按指定格式追加为一列",
+        query: "CSV: 日期格式列 [\"年月\",\"日期\",\"%Y年%m月\"]\n日期,编号\n2024-02-29,甲\n2024-W09-5,乙\n2024年1月31日,丙",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按部门逐行累计 CSV 金额",
         query: "CSV: 累计合计列 [\"累计金额\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,0.5",
     },
