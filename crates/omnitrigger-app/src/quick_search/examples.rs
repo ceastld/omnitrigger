@@ -1792,6 +1792,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "检查 CSV 记录的列数",
+        query: "CSV: 校验 编号,说明\n001,\"茶\n咖啡\"\n002,梨,额外\n003",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按 CSV 表头生成 JSON 对象",
         query: "CSV: 对象 编号,名称\n001,茶",
     },

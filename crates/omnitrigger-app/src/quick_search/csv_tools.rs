@@ -118,6 +118,7 @@ impl CsvError {
 }
 
 enum Operation {
+    Validate,
     JsonRows,
     JsonObjects,
     Markdown,
@@ -233,6 +234,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
     let (operation, mut input) = split_argument(query).ok_or(CsvError::MissingInput)?;
     let operation = operation.to_ascii_lowercase();
     let kind = match operation.as_str() {
+        "校验" | "validate" => Operation::Validate,
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
         "markdown" | "表格" => Operation::Markdown,
@@ -410,8 +412,13 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         Operation::FromTsv => '\t',
         _ => ',',
     };
-    let rows = read_rows(input, delimiter)?;
+    let rows = if matches!(kind, Operation::Validate) {
+        read_delimited_rows(input, delimiter, false)?
+    } else {
+        read_rows(input, delimiter)?
+    };
     match kind {
+        Operation::Validate => Ok(report_csv_columns(&rows)),
         Operation::JsonRows => serde_json::to_string(&rows).map_err(|_| CsvError::Serialization),
         Operation::JsonObjects => json_objects(&rows),
         Operation::Markdown => Ok(markdown_table(&rows)),
@@ -1049,7 +1056,35 @@ fn separated_cell(cell: &str, delimiter: char) -> Cow<'_, str> {
     }
 }
 
-fn read_rows(mut input: &str, delimiter: char) -> Result<Vec<Vec<String>>, CsvError> {
+fn report_csv_columns(rows: &[Vec<String>]) -> String {
+    let width = rows[0].len();
+    let mismatches: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.len() != width)
+        .map(|(index, row)| format!("第 {} 条记录有 {} 列", index + 1, row.len()))
+        .collect();
+    if mismatches.is_empty() {
+        return format!("{} 条记录 · 每条 {} 列", rows.len(), width);
+    }
+    let header = format!(
+        "{} 条记录 · 首条 {} 列 · {} 条列数不一致",
+        rows.len(),
+        width,
+        mismatches.len()
+    );
+    format!("{header}\n{}", mismatches.join("\n"))
+}
+
+fn read_rows(input: &str, delimiter: char) -> Result<Vec<Vec<String>>, CsvError> {
+    read_delimited_rows(input, delimiter, true)
+}
+
+fn read_delimited_rows(
+    mut input: &str,
+    delimiter: char,
+    require_uniform_width: bool,
+) -> Result<Vec<Vec<String>>, CsvError> {
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut fields = Vec::new();
     loop {
@@ -1066,9 +1101,10 @@ fn read_rows(mut input: &str, delimiter: char) -> Result<Vec<Vec<String>>, CsvEr
                 .or_else(|| rest.strip_prefix('\n'))
                 .ok_or(CsvError::InvalidSeparator)?
         };
-        if rows
-            .first()
-            .is_some_and(|first| first.len() != fields.len())
+        if require_uniform_width
+            && rows
+                .first()
+                .is_some_and(|first| first.len() != fields.len())
         {
             return Err(CsvError::DifferentColumnCount);
         }
@@ -1120,6 +1156,23 @@ impl Serialize for CsvObject<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_csv_width_mismatches_by_record_including_multiline_fields() {
+        assert_eq!(
+            transform_csv("校验 编号,说明\r\n001,\"茶\n咖啡\"\r\n002,梨,额外\r\n003").as_deref(),
+            Ok("4 条记录 · 首条 2 列 · 2 条列数不一致\n第 3 条记录有 3 列\n第 4 条记录有 1 列")
+        );
+        assert_eq!(
+            transform_csv("validate \u{feff}编号,说明\r\n001,").as_deref(),
+            Ok("2 条记录 · 每条 2 列")
+        );
+        assert_eq!(
+            transform_csv("校验 a,b\n1,\"缺引号"),
+            Err(CsvError::UnclosedQuote)
+        );
+        assert_eq!(transform_csv("校验 "), Err(CsvError::MissingInput));
+    }
 
     #[test]
     fn drops_csv_columns_by_name_or_index_in_original_column_order() {
