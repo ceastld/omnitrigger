@@ -62,6 +62,8 @@ pub(super) enum CsvError {
     JoinColumns,
     JoinTooLarge,
     FillTooLarge,
+    ConstantColumnArguments,
+    ConstantColumnTooLarge,
     StackArguments,
     ComputedColumnArguments,
     FormulaColumnArguments,
@@ -121,6 +123,10 @@ impl CsvError {
             Self::JoinColumns => "两侧连接列须具有相同列数，每一侧至少一列，列不可重复",
             Self::JoinTooLarge => "表格合并结果超过 1 MiB，请缩小表格范围",
             Self::FillTooLarge => "填充结果超过 1 MiB，请缩小表格范围",
+            Self::ConstantColumnArguments => {
+                "用 JSON 数组填写新列名和固定文本，例如 [\"来源\",\"人工复核\"]"
+            }
+            Self::ConstantColumnTooLarge => "追加常量列后的结果超过 1 MiB，请缩小表格范围",
             Self::StackArguments => "用 JSON 字符串数组填写 2 至 16 张含表头的 CSV 表格",
             Self::ComputedColumnArguments => {
                 "用 JSON 数组填写新列名、两列和运算，例如 [\"金额\",2,\"*\",3]"
@@ -184,6 +190,7 @@ enum Operation {
         column: ColumnReference,
         replacements: HashMap<String, String>,
     },
+    ConstantColumn([String; 2]),
     ComputeColumn {
         name: String,
         left: ColumnReference,
@@ -409,6 +416,11 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
                 replacements,
             }
         }
+        "常量列" | "constant-column" => {
+            let (column, data) = json_argument_and_data(input, CsvError::ConstantColumnArguments)?;
+            input = data;
+            Operation::ConstantColumn(column)
+        }
         "计算列" | "compute-column" => {
             let ((name, left, operator, right), data) =
                 json_argument_and_data::<(String, ColumnReference, String, ColumnReference)>(
@@ -606,6 +618,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             column,
             replacements,
         } => map_column_values(&rows, column, &replacements),
+        Operation::ConstantColumn([name, value]) => add_constant_column(&rows, &name, &value),
         Operation::ComputeColumn {
             name,
             left,
@@ -1138,6 +1151,36 @@ fn fill_down_csv(rows: &[Vec<String>], columns: &[ColumnReference]) -> Result<St
             }
         }
         append_bounded_csv_row(&mut output, fields.iter().copied(), CsvError::FillTooLarge)?;
+    }
+    Ok(output)
+}
+
+fn add_constant_column(rows: &[Vec<String>], name: &str, value: &str) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::ConstantColumnArguments);
+    }
+    if value.contains('\0') {
+        return Err(CsvError::NullReplacementValue);
+    }
+    if header.iter().any(|cell| cell == name) {
+        return Err(CsvError::HeaderNameConflict);
+    }
+    let mut output = String::new();
+    append_bounded_csv_row(
+        &mut output,
+        header
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(name)),
+        CsvError::ConstantColumnTooLarge,
+    )?;
+    for row in records {
+        append_bounded_csv_row(
+            &mut output,
+            row.iter().map(String::as_str).chain(std::iter::once(value)),
+            CsvError::ConstantColumnTooLarge,
+        )?;
     }
     Ok(output)
 }
@@ -2199,6 +2242,40 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn appends_one_constant_csv_column_with_escaping_and_a_size_limit() {
+        assert_eq!(
+            transform_csv(concat!(
+                r#"常量列 ["复核,来源","人工,复核\n完成"] 编号,商品"#,
+                "\n001,茶\n002,梨"
+            ))
+            .as_deref(),
+            Ok("编号,商品,\"复核,来源\"\r\n001,茶,\"人工,复核\n完成\"\r\n002,梨,\"人工,复核\n完成\"")
+        );
+        assert_eq!(
+            transform_csv(r#"constant-column ["说明",""] 编号"#).as_deref(),
+            Ok("编号,说明")
+        );
+        assert_eq!(
+            transform_csv("常量列 [\"说明\",\"\"] 编号\n001").as_deref(),
+            Ok("编号,说明\r\n001,\"\"")
+        );
+        assert_eq!(
+            transform_csv(r#"常量列 ["编号","人工"] 编号"#),
+            Err(CsvError::HeaderNameConflict)
+        );
+        assert_eq!(
+            transform_csv(r#"常量列 ["来源","\u0000"] 编号"#),
+            Err(CsvError::NullReplacementValue)
+        );
+        let constant = "x".repeat(4096);
+        let records = "\n001".repeat(260);
+        assert_eq!(
+            transform_csv(&format!("常量列 [\"来源\",\"{constant}\"] 编号{records}")),
+            Err(CsvError::ConstantColumnTooLarge)
+        );
     }
 
     #[test]

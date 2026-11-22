@@ -1647,6 +1647,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "从最后一行到第一行输出文本",
+        query: "文本: 按行倒序 甲\n乙\n丙",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "清理每行首尾空白",
         query: "文本: 逐行去空白 \"  苹果  \n 梨  \"",
     },
@@ -2249,6 +2254,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "统计 CSV 各列的空单元格",
         query: "CSV: 空值统计 [\"备注\",1] 编号,备注\n001,\n,\" \"\n002,茶",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "为 CSV 每行追加固定文本列",
+        query: "CSV: 常量列 [\"来源\",\"人工,复核\"] 编号,商品\n001,茶\n002,梨",
     },
     Example {
         icon: Icon::Terminal,

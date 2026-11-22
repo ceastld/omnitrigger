@@ -224,6 +224,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "去公共缩进" | "dedent" => Ok(remove_common_indent(text)),
         "换行统计" | "line-ending-counts" => Ok(count_line_endings(text)),
         "倒序" | "reverse" => Ok(text.graphemes(true).rev().collect()),
+        "按行倒序" | "reverse-lines" => Ok(text.lines().rev().collect::<Vec<_>>().join("\n")),
         "按行去重" | "unique-lines" => Ok(join_distinct_lines(text.lines())),
         "按行排序" | "sort-lines" => {
             let mut lines: Vec<_> = text.lines().collect();
@@ -1630,6 +1631,8 @@ mod tests {
         for (query, expected) in [
             ("按行去重 菠萝\r\n苹果\n菠萝\n苹果 ", "菠萝\n苹果"),
             ("按行排序 B\r\nA\nb\nA", "A\nA\nB\nb"),
+            ("按行倒序 \" 甲\r\n\r\n乙 \n丙\"", "丙\n乙 \n\n 甲"),
+            ("reverse-lines \"\"", ""),
             ("去空行 \" 甲\r\n  \t\r\n乙 \n\n丙\"", " 甲\n乙 \n丙"),
             ("按行去重 \"A\nA \nA\"", "A\nA "),
             ("去空行 \"\n\t\n \"", ""),
