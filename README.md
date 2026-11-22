@@ -265,6 +265,7 @@
 - 输入 `1000 kg/m³ to g/cm³` 可换算密度，输入 `1 L/min to m³/h` 可换算体积流量，得到 `0.06 m³/h`。
 - 输入 `1 kgf to N` 可换算力，得到 `9.80665 N`。输入 `1 g0 to m/s²` 可将标准重力加速度换算为 `9.80665 m/s²`。换算系数见 [NIST SI 指南](https://www.nist.gov/pml/special-publication-811/nist-guide-si-appendix-b-conversion-factors/nist-guide-si-appendix-b9)。
 - 输入 `1 lbf·ft to N·m` 可将磅力英尺换算为牛米，得到约 `1.3558179483314 N·m`。也可使用 `lbf·in`、`kgf·m`、`N·cm` 或 `kN·m`。只填写数值和来源单位时可选择目标。 [NIST 力矩与扭矩换算](https://www.nist.gov/pml/special-publication-811/nist-guide-si-appendix-b-conversion-factors/nist-guide-si-appendix-b9)
+- 输入 `100 lx to fc` 可将照度从勒克斯换算成英尺烛光，得到 `9.290304 fc`。也支持 `klx` 和 `phot`。 [NIST 照度换算表](https://www.nist.gov/pml/special-publication-811/nist-guide-si-appendix-b-conversion-factors/nist-guide-si-appendix-b9)
 - 输入 `颜色: #3A86FF` 可预览颜色并得到 `rgb(58, 134, 255)`，输入 `颜色: rgba(58, 134, 255, 0.5)` 可转回 HEX，结果带透明度时保留其通道。
 - 输入 `颜色: hsl(210 100% 50%)` 得到 `#0080FF`，也可以输入带透明度的 HSL 颜色。
 - 输入 `颜色: rebeccapurple` 得到 `#663399`。固定的 CSS 颜色名也可用于叠加和对比度查询，`transparent` 可用于带透明度的换算和叠加。参见 [CSS Color 4 的颜色名](https://www.w3.org/TR/css-color-4/#named-colors)。

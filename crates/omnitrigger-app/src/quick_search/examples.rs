@@ -1686,6 +1686,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "1 lbf·ft to N·m",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "在勒克斯与英尺烛光之间换算照度",
+        query: "100 lx to fc",
+    },
+    Example {
         icon: Icon::Layers,
         title: "换算加速度",
         query: "1 g0 to m/s²",

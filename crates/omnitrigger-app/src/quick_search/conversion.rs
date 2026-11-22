@@ -96,6 +96,7 @@ enum Dimension {
     Force,
     Torque,
     Acceleration,
+    Illuminance,
     ElectricCurrent,
     Voltage,
     Resistance,
@@ -142,6 +143,7 @@ impl Dimension {
             Self::Force => &["N", "kN", "kgf", "lbf", "mN", "MN", "dyn"],
             Self::Torque => &["N·m", "lbf·ft", "lbf·in", "N·cm", "kgf·m", "kN·m"],
             Self::Acceleration => &["m/s²", "g₀", "ft/s²", "cm/s²", "in/s²"],
+            Self::Illuminance => &["lx", "fc", "klx", "phot"],
             Self::ElectricCurrent => &["A", "mA", "μA", "nA", "kA", "MA"],
             Self::Voltage => &["V", "mV", "kV", "μV", "MV"],
             Self::Resistance => &["Ω", "kΩ", "MΩ", "mΩ", "GΩ"],
@@ -382,6 +384,12 @@ impl Unit {
             "g0" | "g₀" | "gₙ" | "标准重力加速度" => {
                 Self::linear("g₀", Acceleration, STANDARD_GRAVITY)
             }
+            "lx" | "lux" | "勒克斯" => Self::linear("lx", Illuminance, 1.),
+            "klx" | "千勒克斯" => Self::linear("klx", Illuminance, 1_000.),
+            "fc" | "footcandle" | "foot-candle" | "英尺烛光" | "尺烛光" => {
+                Self::linear("fc", Illuminance, 1. / (FOOT_IN_METERS * FOOT_IN_METERS))
+            }
+            "phot" => Self::linear("phot", Illuminance, 10_000.),
             "a" | "amp" | "ampere" | "安" | "安培" => Self::linear("A", ElectricCurrent, 1.),
             "纳安" | "纳安培" => Self::linear("nA", ElectricCurrent, 1e-9),
             "微安" | "微安培" => Self::linear("μA", ElectricCurrent, 1e-6),
@@ -1760,6 +1768,25 @@ mod tests {
         assert!(targets
             .iter()
             .any(|target| target.expression == "12 N·m to kgf·m"));
+    }
+
+    #[test]
+    fn converts_illuminance_and_suggests_only_illuminance_units() {
+        for (query, expected) in [
+            ("1 foot-candle to lx", "10.7639104167097 lx"),
+            ("100 勒克斯 to fc", "9.290304 fc"),
+            ("2 klx to lux", "2000 lx"),
+            ("2 phot to klx", "20 klx"),
+        ] {
+            assert_eq!(convert(query), Some(Ok(expected.to_owned())), "{query}");
+        }
+        assert_eq!(
+            convert("100 lx to W"),
+            Some(Err(ConversionError::DifferentDimensions)),
+        );
+        let targets = suggested_targets("100 lx to").unwrap();
+        assert_eq!(targets.len(), 3);
+        assert_eq!(targets[0].expression, "100 lx to fc");
     }
 
     #[test]
