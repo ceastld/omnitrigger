@@ -151,19 +151,25 @@ pub(super) fn read_options(
                 let length =
                     (u64::from(data.nFileSizeHigh) << 32) | u64::from(data.nFileSizeLow);
                 match options.order {
-                    DirectoryOrder::ModifiedDescending => {
-                        sort_keys.push(Some(file_time_ticks(data.ftLastWriteTime)));
+                    DirectoryOrder::ModifiedDescending | DirectoryOrder::ModifiedAscending => {
+                        let modified = file_time_ticks(data.ftLastWriteTime);
+                        sort_keys.push((modified != 0).then_some(modified));
                     }
-                    DirectoryOrder::CreatedDescending => {
+                    DirectoryOrder::CreatedDescending | DirectoryOrder::CreatedAscending => {
                         let created = file_time_ticks(data.ftCreationTime);
                         sort_keys.push((created != 0).then_some(created));
                     }
-                    DirectoryOrder::SizeDescending => {
+                    DirectoryOrder::SizeDescending | DirectoryOrder::SizeAscending => {
                         sort_keys.push((!directory).then_some(length));
                     }
                     DirectoryOrder::Name | DirectoryOrder::Native => {}
                 }
-                if include_file_sizes || options.order == DirectoryOrder::SizeDescending {
+                if include_file_sizes
+                    || matches!(
+                        options.order,
+                        DirectoryOrder::SizeDescending | DirectoryOrder::SizeAscending
+                    )
+                {
                     let entry = collector.entries.last_mut().expect("entry added");
                     entry.size_bytes = (entry.kind == "file").then_some(length);
                 }
@@ -204,11 +210,25 @@ pub(super) fn read_options(
         DirectoryOrder::Name => collector.finish(),
         DirectoryOrder::Native => collector.entries,
         DirectoryOrder::ModifiedDescending
+        | DirectoryOrder::ModifiedAscending
         | DirectoryOrder::CreatedDescending
-        | DirectoryOrder::SizeDescending => {
+        | DirectoryOrder::CreatedAscending
+        | DirectoryOrder::SizeDescending
+        | DirectoryOrder::SizeAscending => {
+            let ascending = matches!(
+                options.order,
+                DirectoryOrder::ModifiedAscending
+                    | DirectoryOrder::CreatedAscending
+                    | DirectoryOrder::SizeAscending
+            );
             let mut entries: Vec<_> = sort_keys.into_iter().zip(collector.entries).collect();
             entries.sort_by(|(left_key, left), (right_key, right)| {
-                right_key.cmp(left_key).then_with(|| left.name.cmp(&right.name))
+                let by_value = if ascending {
+                    (left_key.is_none(), left_key).cmp(&(right_key.is_none(), right_key))
+                } else {
+                    right_key.cmp(left_key)
+                };
+                by_value.then_with(|| left.name.cmp(&right.name))
             });
             entries.into_iter().map(|(_, entry)| entry).collect()
         }

@@ -87,6 +87,7 @@
 - 输入 `文件: C:\工作 | *.pdf | 最近修改` 可把匹配项按最后修改时间从新到旧排列。可留空中间的名称条件，修改时间相同的按名称排列。 [Windows 目录项的最后修改时间](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw)
 - 输入 `文件: C:\工作 | *.pdf | 最近创建` 可按创建时间从新到旧排列。创建时间相同的按名称排列，缺少创建时间的项排在最后。 [Windows 目录项的创建时间](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw#members)
 - 输入 `文件: C:\工作 | *.pdf | 大小` 可把匹配文件按字节数从大到小排列，并在每个文件下方显示字节数。同样大小的文件按名称排列，匹配的文件夹排在文件之后。 [Windows 目录项的文件大小](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-win32_find_dataw#members)
+- 用 `最小优先` 可按字节数从小到大排列，用 `最早修改` 或 `最早创建` 可按时间从旧到新排列。相同大小或时间的项按名称排列。可与筛选、导出和 `前=N` 配合，例如 `文件: C:\工作 | *.pdf | 最小优先 前=3 名称列表`。
 - 输入 `文件: C:\工作 | 报告 | 自然排序` 可按名称中的数字值排列匹配项，例如“报告2”排在“报告10”之前。可与名称、扩展名、日期筛选和 `前=N` 一起使用。
 - 用 `文件: C:\工作 | | 按后缀` 可按扩展名排列。扩展名忽略大小写，同一扩展名内按名称排列，接着显示无扩展名的文件和文件夹。可与筛选、导出或 `前=N` 一起用。
 - 输入 `文件: C:\工作 | *.pdf | 大小>=1MiB 大小<=10MiB` 可筛选指定大小范围内的文件。两个条件可单独使用，包含边界，按大小从大到小排列。数字可直接表示字节数，也可与 B、MB 或 MiB 等单位连写，须能精确换算为整数个字节。

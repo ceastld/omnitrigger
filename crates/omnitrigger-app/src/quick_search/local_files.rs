@@ -30,8 +30,11 @@ const OPTION_HELP: &[(&str, &str)] = &[
     ("仅文件", "只匹配文件"),
     ("仅文件夹", "只匹配文件夹"),
     ("最近修改", "按修改时间从新到旧"),
+    ("最早修改", "按修改时间从旧到新"),
     ("最近创建", "按创建时间从新到旧"),
+    ("最早创建", "按创建时间从旧到新"),
     ("大小", "按字节数从大到小"),
+    ("最小优先", "按字节数从小到大"),
     ("自然排序", "名称中的数字按数值排"),
     ("按后缀", "相同扩展名的文件排在一起"),
     ("前=10", "取排序后的前 10 项"),
@@ -703,11 +706,20 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             "最近修改" | "modified" if order == DirectoryOrder::Name => {
                 order = DirectoryOrder::ModifiedDescending;
             }
+            "最早修改" | "oldest-modified" if order == DirectoryOrder::Name => {
+                order = DirectoryOrder::ModifiedAscending;
+            }
             "最近创建" | "created" if order == DirectoryOrder::Name => {
                 order = DirectoryOrder::CreatedDescending;
             }
+            "最早创建" | "oldest-created" if order == DirectoryOrder::Name => {
+                order = DirectoryOrder::CreatedAscending;
+            }
             "大小" | "size" if order == DirectoryOrder::Name => {
                 order = DirectoryOrder::SizeDescending;
+            }
+            "最小优先" | "smallest" if order == DirectoryOrder::Name => {
+                order = DirectoryOrder::SizeAscending;
             }
             "自然排序" | "natural-order" if name_order == NameOrder::Matching => {
                 name_order = NameOrder::Natural;
@@ -795,21 +807,23 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
         }
         entry_type = DirectoryEntryType::File;
     }
-    if matches!(output, FileOutput::SizeTotal | FileOutput::ExtensionSizes) {
-        if !matches!(order, DirectoryOrder::Name | DirectoryOrder::SizeDescending) {
+    let has_size_bounds = minimum.is_some() || maximum.is_some();
+    if has_size_bounds || matches!(output, FileOutput::SizeTotal | FileOutput::ExtensionSizes) {
+        if !matches!(
+            order,
+            DirectoryOrder::Name | DirectoryOrder::SizeDescending | DirectoryOrder::SizeAscending
+        ) {
             return None;
         }
-        order = DirectoryOrder::SizeDescending;
+        if order == DirectoryOrder::Name {
+            order = DirectoryOrder::SizeDescending;
+        }
     }
-    let size_bounds = if minimum.is_some() || maximum.is_some() {
+    let size_bounds = if has_size_bounds {
         let (minimum, maximum) = (minimum.unwrap_or(0), maximum.unwrap_or(u64::MAX));
-        if minimum > maximum
-            || !matches!(order, DirectoryOrder::Name | DirectoryOrder::SizeDescending)
-            || entry_type == DirectoryEntryType::Directory
-        {
+        if minimum > maximum || entry_type == DirectoryEntryType::Directory {
             return None;
         }
-        order = DirectoryOrder::SizeDescending;
         entry_type = DirectoryEntryType::File;
         Some((minimum, maximum))
     } else {
@@ -1605,7 +1619,10 @@ mod tests {
                 && item.expression == r#"文件: "C:\Work Folder" | report | 大小 大小合计"#
         }));
         assert!(!items.iter().any(|item| {
-            matches!(item.label, Some("大小" | "最近修改" | "最近创建"))
+            matches!(
+                item.label,
+                Some("大小" | "最小优先" | "最近修改" | "最早修改" | "最近创建" | "最早创建")
+            )
         }));
         assert!(matches!(
             index.results(r"C:\Work | report?"),
@@ -1734,6 +1751,43 @@ mod tests {
         ] {
             assert!(split_query(invalid).is_none(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn supports_ascending_file_sort_with_range_limit_and_export() {
+        let mut index = LocalFilesIndex::default();
+        let query = r"C:\Work | | 最小优先 大小>=1 前=1 名称列表";
+        let load = index.request(Some(query)).unwrap();
+        assert_eq!(load.order, DirectoryOrder::SizeAscending);
+        assert_eq!(load.entry_type, DirectoryEntryType::File);
+        let with_size = |name, size| {
+            let mut file = entry(name, "file");
+            file.size_bytes = Some(size);
+            file
+        };
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                with_size("empty.txt", 0),
+                with_size("small.txt", 1),
+                with_size("large.txt", 9),
+            ]),
+        ));
+        assert!(index.results(query) == Results::text_value(Ok("small.txt".into())));
+        for (options, order) in [
+            (
+                "最早修改 修改>=2026-01-01",
+                DirectoryOrder::ModifiedAscending,
+            ),
+            ("最早创建 仅文件夹", DirectoryOrder::CreatedAscending),
+            ("最小优先 大小合计", DirectoryOrder::SizeAscending),
+        ] {
+            assert_eq!(
+                split_query(&format!(r"C:\Work | | {options}")).map(|query| query.order),
+                Some(order)
+            );
+        }
+        assert!(split_query(r"C:\Work | | 大小 最小优先").is_none());
     }
 
     #[test]

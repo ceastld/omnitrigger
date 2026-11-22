@@ -38,7 +38,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         // 不递归清理；只移除已知文件/空目录，异常额外项保留供排查。
-        for name in ["a.txt", "z.txt"] {
+        for name in ["a.txt", "x.txt", "z.txt"] {
             let _ = fs::remove_file(self.root.join(name));
         }
         for index in 0..100 {
@@ -166,14 +166,34 @@ fn read_directory_real_windows_orders_by_creation_time_then_name() {
         entry_type: DirectoryEntryType::File,
         search_pattern: Some("*.txt".into()),
     };
-    let entries = read_local_directory_with_options(fixture.path(), &options, || Ok(())).unwrap();
-    assert_eq!(
-        entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>(),
-        ["x.txt", "z.txt", "a.txt"]
-    );
+    for (order, expected) in [
+        (
+            DirectoryOrder::CreatedDescending,
+            ["x.txt", "z.txt", "a.txt"],
+        ),
+        (
+            DirectoryOrder::CreatedAscending,
+            ["a.txt", "x.txt", "z.txt"],
+        ),
+        (
+            DirectoryOrder::ModifiedAscending,
+            ["z.txt", "a.txt", "x.txt"],
+        ),
+    ] {
+        let options = LocalDirectoryOptions {
+            order,
+            ..options.clone()
+        };
+        let entries =
+            read_local_directory_with_options(fixture.path(), &options, || Ok(())).unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
 }
 
 #[test]
@@ -284,6 +304,23 @@ fn read_directory_real_windows_options_preserve_metadata_precision_and_filters()
             .map(|entry| (entry.name.as_str(), entry.size_bytes))
             .collect::<Vec<_>>(),
         [("a.txt", Some(9)), ("z.txt", Some(0)), ("child", None)]
+    );
+    let smallest = read_local_directory_with_options(
+        fixture.path(),
+        &LocalDirectoryOptions {
+            order: DirectoryOrder::SizeAscending,
+            metadata: false,
+            ..options.clone()
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        smallest
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.size_bytes))
+            .collect::<Vec<_>>(),
+        [("z.txt", Some(0)), ("a.txt", Some(9)), ("child", None)]
     );
     let filtered = read_local_directory_with_options(
         fixture.path(),
