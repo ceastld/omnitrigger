@@ -641,6 +641,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按位宽查看整数的大端和小端字节序",
+        query: "进制: 字节序 32 @ 0x12345678",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "选择目标进制",
         query: "0xff to",
     },
@@ -3523,6 +3528,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 && ["预测", "残差", "误差"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
+        Scope::Radix if !term.is_empty() && "字节序".starts_with(term) => {}
         Scope::Triangle
             if !term.is_empty()
                 && ["斜边", "直角边"]

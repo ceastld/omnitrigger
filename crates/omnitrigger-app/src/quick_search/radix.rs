@@ -13,6 +13,9 @@ pub(super) enum RadixError {
     Base,
     Digits,
     OutOfRange,
+    ByteOrderArguments,
+    ByteOrderInteger,
+    ByteOrderWidthExceeded,
 }
 
 impl RadixError {
@@ -22,6 +25,11 @@ impl RadixError {
             Self::Base => "原进制和目标进制须为 2 至 36",
             Self::Digits => "输入包含原进制不支持的字符",
             Self::OutOfRange => "整数的绝对值最多支持 8192 个二进制位",
+            Self::ByteOrderArguments => {
+                "填写位宽和整数，例如 字节序 32 @ 0x12345678。位宽为 8 至 128 的 8 倍数"
+            }
+            Self::ByteOrderInteger => "填写非负整数，可用十进制或 0x、0b、0o 前缀",
+            Self::ByteOrderWidthExceeded => "整数超出所填位宽",
         }
     }
 }
@@ -99,6 +107,13 @@ impl Base {
 
 pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError> {
     let input = normalize(input);
+    let (operation, arguments) = input
+        .trim()
+        .split_once(char::is_whitespace)
+        .unwrap_or((input.trim(), ""));
+    if operation == "字节序" || operation.eq_ignore_ascii_case("byte-order") {
+        return byte_order(arguments);
+    }
     let tokens: Vec<_> = input.split_whitespace().take(6).collect();
     let [integer, from, source, to, target] = tokens.as_slice() else {
         return Err(RadixError::Incomplete);
@@ -124,6 +139,44 @@ pub(super) fn convert_arbitrary_radix(input: &str) -> Result<String, RadixError>
     Ok(text)
 }
 
+fn byte_order(input: &str) -> Result<String, RadixError> {
+    let (bits, number) = input
+        .split_once('@')
+        .ok_or(RadixError::ByteOrderArguments)?;
+    let bits = bits
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|bits| (8..=128).contains(bits) && bits.is_multiple_of(8))
+        .ok_or(RadixError::ByteOrderArguments)?;
+    let number = number.trim();
+    let number = number.strip_prefix('+').unwrap_or(number);
+    let (base, digits) = Base::prefixed(number).unwrap_or((Base::Decimal, number));
+    let value = base.parse_digits(digits).map_err(|error| match error {
+        ConversionError::OutOfRange => RadixError::ByteOrderWidthExceeded,
+        _ => RadixError::ByteOrderInteger,
+    })?;
+    if u128::BITS - value.leading_zeros() > bits {
+        return Err(RadixError::ByteOrderWidthExceeded);
+    }
+    let bytes = value.to_be_bytes();
+    let bytes = &bytes[bytes.len() - (bits / 8) as usize..];
+    let big_endian = bytes
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>();
+    let little_endian = big_endian
+        .iter()
+        .rev()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(format!(
+        "大端 {}\n小端 {little_endian}",
+        big_endian.join(" ")
+    ))
+}
+
 fn arbitrary_base(token: &str) -> Option<u32> {
     Base::parse(token)
         .map(|base| base as u32)
@@ -141,6 +194,35 @@ pub(super) fn ungroup_digits(digits: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shows_both_byte_orders_with_exact_width_and_padding() {
+        for (query, expected) in [
+            (
+                "字节序 32 @ 0x12345678",
+                "大端 12 34 56 78\n小端 78 56 34 12",
+            ),
+            ("BYTE-ORDER 24 @ 258", "大端 00 01 02\n小端 02 01 00"),
+            ("字节序 ８ ＠ ０ｂ１", "大端 01\n小端 01"),
+        ] {
+            assert_eq!(
+                convert_arbitrary_radix(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            ("字节序 8 @ 256", RadixError::ByteOrderWidthExceeded),
+            ("字节序 9 @ 1", RadixError::ByteOrderArguments),
+            ("字节序 16 @ -1", RadixError::ByteOrderInteger),
+            (
+                "字节序 128 @ 0x1_00000000_00000000_00000000_00000000",
+                RadixError::ByteOrderWidthExceeded,
+            ),
+        ] {
+            assert_eq!(convert_arbitrary_radix(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn converts_signed_and_large_integers_between_arbitrary_bases() {
