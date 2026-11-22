@@ -1817,6 +1817,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计字符出现次数并输出 CSV",
+        query: "文本: 字频 茶👩‍💻茶👩‍💻🍵",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "显示普通空格、制表符和不换行空格",
         query: "文本: 显示空白 \" 茶\t椅\u{00A0}咖啡 \"",
     },

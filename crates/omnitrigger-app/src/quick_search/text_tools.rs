@@ -212,6 +212,7 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
             text.len()
         )),
         "显示空白" | "show-whitespace" => Ok(show_whitespace(text)),
+        "字频" | "字符频数" | "grapheme-frequency" => Ok(count_graphemes(text)),
         "去ansi样式" | "strip-ansi-style" => Ok(strip_ansi_styles(text)),
         "下划线命名" | "snake-case" => Ok(join_identifier_words(text, "_")),
         "短横线命名" | "kebab-case" => Ok(join_identifier_words(text, "-")),
@@ -558,21 +559,36 @@ fn sort_numeric_lines(text: &str, descending: bool) -> Result<String, TextError>
 }
 
 fn count_lines(text: &str) -> String {
+    frequency_counts(text.lines())
+        .into_iter()
+        .map(|(line, count)| format!("{count}\t{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn count_graphemes(text: &str) -> String {
+    let graphemes = text
+        .graphemes(true)
+        .filter(|grapheme| !grapheme.chars().all(char::is_whitespace));
+    let mut result = String::from("字符,次数");
+    for (grapheme, count) in frequency_counts(graphemes) {
+        write!(result, "\r\n{},{count}", csv_cell(grapheme)).expect("写入 String 不会出错");
+    }
+    result
+}
+
+fn frequency_counts<'a>(items: impl Iterator<Item = &'a str>) -> Vec<(&'a str, usize)> {
     let mut indices = HashMap::new();
     let mut counts = Vec::new();
-    for line in text.lines() {
-        let index = *indices.entry(line).or_insert_with(|| {
-            counts.push((line, 0usize));
+    for item in items {
+        let index = *indices.entry(item).or_insert_with(|| {
+            counts.push((item, 0usize));
             counts.len() - 1
         });
         counts[index].1 += 1;
     }
     counts.sort_by_key(|&(_, count)| Reverse(count));
     counts
-        .into_iter()
-        .map(|(line, count)| format!("{count}\t{line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn encode_hex_units<T: std::fmt::UpperHex>(units: impl Iterator<Item = T>, width: usize) -> String {
@@ -1988,6 +2004,15 @@ mod tests {
             transform_text("长度详情 \"\"").as_deref(),
             Ok("0 字素簇 · 0 Unicode 码位\n0 UTF-16 单元 · 0 UTF-8 字节")
         );
+    }
+
+    #[test]
+    fn reports_frequencies_of_complete_non_whitespace_graphemes_as_csv() {
+        assert_eq!(
+            transform_text("字频 \"茶👩‍💻茶👩‍💻,e\u{0301}　a\"").as_deref(),
+            Ok("字符,次数\r\n茶,2\r\n👩‍💻,2\r\n\",\",1\r\ne\u{0301},1\r\na,1")
+        );
+        assert_eq!(transform_text("字频 \" \t \"").as_deref(), Ok("字符,次数"));
     }
 
     #[test]
