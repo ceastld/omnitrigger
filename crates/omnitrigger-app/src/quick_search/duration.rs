@@ -37,6 +37,14 @@ impl DurationError {
 
 pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     let input = normalize(query).to_ascii_lowercase();
+    let operation = input.split_whitespace().next().unwrap_or_default();
+    if matches!(operation, "排序" | "sort" | "降序" | "sort-desc") {
+        let values = query
+            .trim_start()
+            .split_once(char::is_whitespace)
+            .map_or("", |(_, values)| values);
+        return sort_durations(values, matches!(operation, "降序" | "sort-desc"));
+    }
     let input = input.trim();
     let (input, output) = match split_conversion(input) {
         Some((source, output)) => (source, Some(output)),
@@ -74,16 +82,46 @@ fn duration_value(input: &str) -> Result<(i128, bool), DurationError> {
     }
 }
 
-fn duration_list_values(input: &str) -> impl Iterator<Item = Result<i128, DurationError>> + '_ {
+fn duration_terms(input: &str) -> impl Iterator<Item = &str> {
     input
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .flat_map(|line| line.split(','))
+        .flat_map(|line| line.split([',', '，']))
+        .map(str::trim)
+}
+
+fn bounded_duration_value(term: &str) -> Result<i128, DurationError> {
+    let (nanos, _) = duration_value(term)?;
+    bounded_duration(Some(nanos.unsigned_abs()))?;
+    Ok(nanos)
+}
+
+fn duration_list_values(input: &str) -> impl Iterator<Item = Result<i128, DurationError>> + '_ {
+    duration_terms(input).map(bounded_duration_value)
+}
+
+fn sort_durations(input: &str, descending: bool) -> Result<String, DurationError> {
+    let mut values = duration_terms(input)
         .map(|term| {
-            let (nanos, _) = duration_value(term.trim())?;
-            bounded_duration(Some(nanos.unsigned_abs()))?;
-            Ok(nanos)
+            let normalized = normalize(term).to_ascii_lowercase();
+            bounded_duration_value(&normalized).map(|nanos| (nanos, term))
         })
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.is_empty() {
+        return Err(DurationError::Incomplete);
+    }
+    values.sort_by(|(left, _), (right, _)| {
+        if descending {
+            right.cmp(left)
+        } else {
+            left.cmp(right)
+        }
+    });
+    Ok(values
+        .into_iter()
+        .map(|(_, term)| term)
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 fn aggregate_duration_list(input: &str, average: bool) -> Result<i128, DurationError> {
@@ -466,6 +504,23 @@ fn parse_units(mut input: &str) -> Result<u128, DurationError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orders_mixed_duration_notation_by_nanoseconds_and_keeps_ties_stable() {
+        assert_eq!(
+            convert_duration("排序 02:40，PT2M\n00:55,02:00").as_deref(),
+            Ok("00:55\nPT2M\n02:00\n02:40")
+        );
+        assert_eq!(
+            convert_duration("ＳＯＲＴ－ＤＥＳＣ 1ns,-2ns,0.000000001s").as_deref(),
+            Ok("1ns\n0.000000001s\n-2ns")
+        );
+        assert_eq!(convert_duration("排序"), Err(DurationError::Incomplete));
+        assert_eq!(
+            convert_duration("排序 0.5ns,1ns"),
+            Err(DurationError::Precision)
+        );
+    }
 
     #[test]
     fn finds_the_exact_middle_duration_in_mixed_lists() {

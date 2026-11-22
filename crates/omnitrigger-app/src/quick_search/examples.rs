@@ -376,6 +376,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "按实际时长从短到长排列",
+        query: "时长: 排序 02:40,PT2M,00:55,02:00",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "按实际时长从长到短排列",
+        query: "时长: 降序 02:40,PT2M,00:55,02:00",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "按帧率把视频帧数换成时长",
         query: "帧数: 125 帧 @ 25 fps",
     },
@@ -1977,8 +1987,11 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 && ["列出", "格式化", "解析"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
-        Scope::Duration if matches!(term, "合" | "合计" | "平" | "平均" | "中位" | "中位数") =>
-            {}
+        Scope::Duration
+            if matches!(
+                term,
+                "合" | "合计" | "平" | "平均" | "中位" | "中位数" | "排" | "排序" | "降" | "降序"
+            ) => {}
         Scope::Statistics
             if matches!(
                 term,
