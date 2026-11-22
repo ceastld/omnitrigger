@@ -1352,6 +1352,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "显示普通空格、制表符和不换行空格",
+        query: "文本: 显示空白 \" 茶\t椅\u{00A0}咖啡 \"",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "转成大写",
         query: "文本: 大写 Straße",
     },
@@ -1754,6 +1759,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "把原始 JSON 值复制到另一条路径",
         query: r#"JSON: 复制路径 ["/订单/0","/归档/-"] {"订单":[{"金额":1.50,"名字":"\u8336"}],"归档":[]}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按路径对比两份 JSON 的变化",
+        query: r#"JSON: 对比 {"a/b":[1.00,null],"旧":2e0} {"a/b":[1,true],"新":null}"#,
     },
     Example {
         icon: Icon::Terminal,

@@ -195,6 +195,7 @@
 - 输入 `颜色: 文字色 #3A86FF` 得到 `#000000` 和色样。搜索框比较黑字、白字在指定不透明底色上的对比度，返回对比度更高的颜色。半透明颜色可在同一条输入里用 `叠加` 合成底色。 [WCAG 2.2 的对比度定义](https://www.w3.org/TR/WCAG22/#dfn-contrast-ratio)
 - 输入 `字数: 你好👩‍💻` 得到 `3 字符 · 17 UTF-8 字节`。加引号可统计首尾空格，例如 `字数: " a "`。
 - 用 `文本: 长度详情` 可同时查看字素簇、Unicode 码位、UTF-16 单元和 UTF-8 字节。例如用引号输入 `"👩‍💻 é"`，分别得到 3、6、8 和 15。 [Unicode 字素簇规则](https://www.unicode.org/reports/tr29/#Grapheme_Cluster_Boundaries)
+- 用 `文本: 显示空白` 可把普通空格、制表符、回车和换行显示为 `␠`、`␉`、`␍` 和 `␊`。其他 Unicode 空白显示码位，例如不换行空格显示为 `<U+00A0>`。用引号可保留待转换文本首尾的空白。 [Unicode 控制字符图形](https://www.unicode.org/charts/PDF/U2400.pdf)
 - 输入 `文本: 码位 北京` 得到 `U+5317 U+4EAC`，用 `文本: 码位解码 U+5317 U+4EAC` 转回文字。组合字符按各自的 Unicode 码位显示。
 - 输入 `文本: UTF8编码 北京` 可查看 UTF-8 字节 `E5 8C 97 E4 BA AC`。用 `文本: UTF8解码` 加上十六进制字节可还原文字，接受连续数字、空白分隔或带 `0x` 的字节组。
 - 输入 `文本: JSON转义 他写下 "你好"` 可把文字转成 JSON 字符串。输入 `文本: JSON还原 "\u4F60\n好"` 会还原为两行文字。 [RFC 8259 的字符串语法](https://www.rfc-editor.org/rfc/rfc8259.html#section-7)
@@ -243,6 +244,7 @@
 - 输入 `JSON: 改值 /订单/0/金额 3.50 {"订单":[{"金额":1.00}]}` 可替换指定路径上的已有值。新值可用任意 JSON 类型，其他位置保留原文。空指针 `""` 可替换整个 JSON 值。 [JSON Patch 的值替换规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.3)
 - 输入 `JSON: 加路径 /订单/1 {"金额":3.50}` 后粘贴 JSON，可在数组的第 2 项前插入新值。用 `/订单/-` 可追加到数组末尾。路径也可指向对象字段，已有字段会更新，其他值保留原始写法。 [JSON Patch 的添加规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.1)
 - 输入 `JSON: 复制路径 ["/订单/0","/归档/-"]` 后粘贴 JSON，可把订单的第一项追加到已有的归档数组，保留其中数值和字符串的写法。目标也可指向对象字段。 [JSON Patch 的复制规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.5)
+- 输入 `JSON: 对比` 后粘贴两个用空白分隔的 JSON 值，可按指针列出差异。对象按键名比较，数组按位置比较，`1` 与 `1.00` 视为相等。输出保留变化值的写法，某侧缺少路径时省略该侧字段。 [JSON Patch 的值比较规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.6)
 - 输入 `JSON: 删路径 /订单/0/备注` 加上 JSON，可删除该路径对应的对象成员或数组项。结果同时移除相邻的分隔逗号，保留其他值和键的原始写法。 [JSON Patch 的删除规则](https://www.rfc-editor.org/rfc/rfc6902.html#section-4.2)
 - 输入 `JSON: 转CSV` 加上行数组或对象列表，可生成 CSV。对象的字段按首次出现的顺序写入表头，缺失字段和 `null` 写为空单元格。数字保留原来的拼写，嵌套数组和对象写为紧凑 JSON。
 - 用 `JSON: 路径转CSV ["/订单/商品","/订单/金额"]` 加上 JSON 数组，可按指定顺序提取嵌套字段。指针原文用作表头，缺失路径和 `null` 生成空字段，数字保留原来的拼写。

@@ -189,6 +189,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
             text.encode_utf16().count(),
             text.len()
         )),
+        "显示空白" | "show-whitespace" => Ok(show_whitespace(text)),
         "下划线命名" | "snake-case" => Ok(join_identifier_words(text, "_")),
         "短横线命名" | "kebab-case" => Ok(join_identifier_words(text, "-")),
         "小驼峰命名" | "camel-case" => Ok(camel_case(text, false)),
@@ -354,6 +355,25 @@ fn decimal_run(text: &[u8]) -> (&[u8], &[u8]) {
         .position(|&byte| byte != b'0')
         .unwrap_or(digits.len());
     (&digits[significant..], rest)
+}
+
+fn show_whitespace(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            ' ' => result.push('␠'),
+            '\t' => result.push('␉'),
+            '\n' => result.push('␊'),
+            '\r' => result.push('␍'),
+            '\u{000B}' => result.push('␋'),
+            '\u{000C}' => result.push('␌'),
+            character if character.is_whitespace() => {
+                write!(result, "<U+{:04X}>", u32::from(character)).expect("写入字符串不会失败");
+            }
+            character => result.push(character),
+        }
+    }
+    result
 }
 
 fn newline_pattern() -> &'static Regex {
@@ -1060,6 +1080,18 @@ fn replace_regex(input: &str) -> Result<String, TextError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn makes_ascii_and_unicode_whitespace_visible_without_changing_emoji() {
+        for (input, expected) in [
+            ("显示空白 \" 茶\t椅\u{00A0}咖啡 \"", "␠茶␉椅<U+00A0>咖啡␠"),
+            ("show-whitespace \"a\r\nb\nc\rd\"", "a␍␊b␊c␍d"),
+            ("显示空白 \"\u{000B}\u{000C}👩‍💻\u{3000}\"", "␋␌👩‍💻<U+3000>"),
+            ("显示空白 \"\"", ""),
+        ] {
+            assert_eq!(transform_text(input).as_deref(), Ok(expected));
+        }
+    }
 
     #[test]
     fn exports_each_regex_match_as_one_csv_row_with_optional_groups() {

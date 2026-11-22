@@ -28,6 +28,7 @@ pub(super) enum JsonError {
     InvalidPointerSegment,
     PointerSelection,
     CopyPaths,
+    ComparisonTooLarge,
     PointerListTooLarge,
     FlattenedObjectTooLarge,
     ExpectedObject,
@@ -70,6 +71,7 @@ impl JsonError {
             Self::InvalidPointerSegment => "指针分段须为字符串或非负整数",
             Self::PointerSelection => "用 JSON 字符串数组填写互不重复的指针，再粘贴 JSON",
             Self::CopyPaths => "用 JSON 数组填写来源和目标两个路径，再粘贴 JSON",
+            Self::ComparisonTooLarge => "JSON 对比结果超过 1 MiB",
             Self::PointerListTooLarge => "指针列表超过 1 MiB",
             Self::FlattenedObjectTooLarge => "JSON 展平结果超过 1 MiB",
             Self::ExpectedObject => "请输入 JSON 对象",
@@ -149,6 +151,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "改值" | "replace" => return write_json_value(source, false),
         "加路径" | "add-path" => return write_json_value(source, true),
         "复制路径" | "copy-path" => return copy_json_value(source),
+        "对比" | "diff" => return compare_json_values(source),
         "删路径" | "remove-path" => return remove_json_path(source),
         "去键" | "remove-keys" => return remove_json_keys(source),
         "转csv" | "to-csv" => return json_to_csv(source),
@@ -1318,6 +1321,110 @@ fn parse_json_pointer(source: &str) -> Result<String, JsonError> {
     serde_json::to_string(&tokens).map_err(json_parse_error)
 }
 
+#[derive(serde::Serialize)]
+struct JsonDifference<'a> {
+    #[serde(rename = "路径")]
+    pointer: &'a str,
+    #[serde(rename = "左", skip_serializing_if = "Option::is_none")]
+    left: Option<&'a RawValue>,
+    #[serde(rename = "右", skip_serializing_if = "Option::is_none")]
+    right: Option<&'a RawValue>,
+}
+
+fn compare_json_values(source: &str) -> Result<String, JsonError> {
+    let (left, right) = json_value_and_source(source, JsonError::Invalid)?;
+    let right = serde_json::from_str::<&RawValue>(right).map_err(json_parse_error)?;
+    let mut pending = vec![(Some(left), Some(right), None::<(usize, String)>)];
+    let mut pointer = String::new();
+    let mut output = String::from("[");
+    while let Some((left, right, key)) = pending.pop() {
+        if let Some((parent_length, key)) = key {
+            pointer.truncate(parent_length);
+            append_pointer_key(&mut pointer, &key);
+        }
+        if let (Some(left), Some(right)) = (left, right) {
+            let children = match (left.get().as_bytes()[0], right.get().as_bytes()[0]) {
+                (b'{', b'{') => Some(compare_object_members(left, right)?),
+                (b'[', b'[') => {
+                    let left = read_json_array(left.get())?;
+                    let right = read_json_array(right.get())?;
+                    Some(
+                        (0..left.len().max(right.len()))
+                            .map(|index| {
+                                (
+                                    index.to_string(),
+                                    left.get(index).copied(),
+                                    right.get(index).copied(),
+                                )
+                            })
+                            .collect(),
+                    )
+                }
+                _ => None,
+            };
+            if let Some(children) = children {
+                pending.extend(
+                    children
+                        .into_iter()
+                        .rev()
+                        .map(|(key, left, right)| (left, right, Some((pointer.len(), key)))),
+                );
+                continue;
+            }
+            let left_scalar = json_scalar(left)?;
+            if left_scalar.is_some() && left_scalar == json_scalar(right)? {
+                continue;
+            }
+        }
+        let difference = JsonDifference {
+            pointer: &pointer,
+            left,
+            right,
+        };
+        let encoded = serde_json::to_string(&difference).map_err(json_parse_error)?;
+        if output.len() + encoded.len() + 2 > MAX_PRETTY_BYTES {
+            return Err(JsonError::ComparisonTooLarge);
+        }
+        if output.len() > 1 {
+            output.push(',');
+        }
+        output.push_str(&encoded);
+    }
+    output.push(']');
+    Ok(output)
+}
+
+type ComparedJsonMember<'a> = (String, Option<&'a RawValue>, Option<&'a RawValue>);
+
+fn compare_object_members<'a>(
+    left: &'a RawValue,
+    right: &'a RawValue,
+) -> Result<Vec<ComparedJsonMember<'a>>, JsonError> {
+    let right = read_object_entries(right.get())?;
+    let mut remaining = HashMap::with_capacity(right.len());
+    for (key, value) in &right {
+        if remaining.insert(key.as_str(), *value).is_some() {
+            return Err(JsonError::DuplicateKey);
+        }
+    }
+    let left = read_object_entries(left.get())?;
+    let mut seen = HashSet::with_capacity(left.len());
+    let mut children = Vec::with_capacity(left.len().max(right.len()));
+    for (key, value) in &left {
+        if !seen.insert(key) {
+            return Err(JsonError::DuplicateKey);
+        }
+        children.push((key.clone(), Some(*value), remaining.remove(key.as_str())));
+    }
+    children.extend(
+        right
+            .iter()
+            .filter(|(key, _)| remaining.contains_key(key.as_str()))
+            .map(|(key, value)| (key.clone(), None, Some(*value))),
+    );
+    Ok(children)
+}
+
 fn pointer_parse_error(error: serde_json::Error) -> JsonError {
     if error.is_eof() {
         JsonError::Incomplete
@@ -2386,6 +2493,30 @@ mod tests {
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn compares_two_documents_by_pointer_and_preserves_changed_lexemes() {
+        for (query, expected) in [
+            (
+                r#"对比 {"a/b":[1.00,null],"旧":2e0} {"a/b":[1,true],"新":null}"#,
+                r#"[{"路径":"/a~1b/1","左":null,"右":true},{"路径":"/旧","左":2e0},{"路径":"/新","右":null}]"#,
+            ),
+            (r#"diff {"b":-0e9,"a":"\u8336"} {"a":"茶","b":0}"#, "[]"),
+            (r#"对比 [1] [1,2.50]"#, r#"[{"路径":"/1","右":2.50}]"#),
+            (r#"对比 [] {}"#, r#"[{"路径":"","左":[],"右":{}}]"#),
+            (
+                r#"对比 "左" false"#,
+                r#"[{"路径":"","左":"左","右":false}]"#,
+            ),
+        ] {
+            assert_eq!(transform_json(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            transform_json(r#"对比 {"x":1,"\u0078":2} {"x":1}"#),
+            Err(JsonError::DuplicateKey)
+        );
+        assert_eq!(transform_json("对比 {}"), Err(JsonError::Incomplete));
     }
 
     #[test]
