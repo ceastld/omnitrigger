@@ -4,6 +4,7 @@ use std::{
     fmt,
 };
 
+use num_bigint::BigInt;
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
@@ -35,6 +36,7 @@ pub(super) enum JsonError {
     CsvNullCharacter,
     SelectionKeys,
     SelectionConflict,
+    FilterValue,
 }
 
 impl JsonError {
@@ -62,6 +64,7 @@ impl JsonError {
             Self::CsvNullCharacter => "CSV 单元格不能包含空字符 U+0000",
             Self::SelectionKeys => "选键需要至少一个互不重复的键名",
             Self::SelectionConflict => "待选键在同一对象中重复出现",
+            Self::FilterValue => "路径后请输入 JSON 字符串、数字、布尔值或 null，再粘贴数组",
         }
     }
 }
@@ -78,6 +81,8 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "取列" | "column" => return select_json_column(source),
         "有路径" | "has-pointer" => return filter_json_by_pointer(source, true),
         "缺路径" | "missing-pointer" => return filter_json_by_pointer(source, false),
+        "筛选" | "filter" => return filter_json_by_scalar(source, true),
+        "排除" | "exclude" => return filter_json_by_scalar(source, false),
         "键名" | "keys" => return json_keys(source),
         "长度" | "length" => return json_length(source),
         "展开数组" | "to-jsonl" => return json_array_to_lines(source),
@@ -177,20 +182,103 @@ fn select_json_column(query: &str) -> Result<String, JsonError> {
 
 fn filter_json_by_pointer(query: &str, keep_present: bool) -> Result<String, JsonError> {
     let (pointer, source) = pointer_and_source(query)?;
+    filter_json_items(&pointer, source, keep_present, |value| Ok(value.is_some()))
+}
+
+fn filter_json_by_scalar(query: &str, keep_match: bool) -> Result<String, JsonError> {
+    let (pointer, query) = pointer_and_source(query)?;
+    let mut values = serde_json::Deserializer::from_str(query).into_iter::<&RawValue>();
+    let value = values
+        .next()
+        .ok_or(JsonError::Incomplete)?
+        .map_err(|error| {
+            if error.is_eof() {
+                JsonError::Incomplete
+            } else {
+                JsonError::FilterValue
+            }
+        })?;
+    let source = &query[values.byte_offset()..];
+    if source.is_empty() {
+        return Err(JsonError::Incomplete);
+    }
+    if !source.starts_with(char::is_whitespace) {
+        return Err(JsonError::FilterValue);
+    }
+    let expected = json_scalar(value)?.ok_or(JsonError::FilterValue)?;
+    filter_json_items(&pointer, source.trim_start(), keep_match, |value| {
+        Ok(match value {
+            Some(value) => json_scalar(value)?.is_some_and(|scalar| scalar == expected),
+            None => false,
+        })
+    })
+}
+
+fn filter_json_items(
+    pointer: &str,
+    source: &str,
+    keep_match: bool,
+    matches_value: impl Fn(Option<&RawValue>) -> Result<bool, JsonError>,
+) -> Result<String, JsonError> {
     let items = read_json_array(source)?;
-    let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
+    let keys = pointer_keys(pointer)?.collect::<Result<Vec<_>, _>>()?;
     let mut retained = Vec::new();
     for item in items {
-        let present = match select_pointer_keys(item, &keys) {
-            Ok(_) => true,
-            Err(JsonError::MissingValue) => false,
+        let value = match select_pointer_keys(item, &keys) {
+            Ok(value) => Some(value),
+            Err(JsonError::MissingValue) => None,
             Err(error) => return Err(error),
         };
-        if present == keep_present {
+        if matches_value(value)? == keep_match {
             retained.push(item);
         }
     }
     Ok(serde_json::to_string(&retained).expect("有效的原始 JSON 值可以直接序列化"))
+}
+
+#[derive(PartialEq, Eq)]
+enum JsonScalar {
+    String(String),
+    Number {
+        negative: bool,
+        digits: String,
+        exponent: BigInt,
+    },
+    Boolean(bool),
+    Null,
+}
+
+fn json_scalar(value: &RawValue) -> Result<Option<JsonScalar>, JsonError> {
+    let raw = value.get();
+    let scalar = match raw.as_bytes()[0] {
+        b'{' | b'[' => return Ok(None),
+        b'"' => JsonScalar::String(serde_json::from_str(raw).map_err(json_parse_error)?),
+        b't' | b'f' => JsonScalar::Boolean(raw == "true"),
+        b'n' => JsonScalar::Null,
+        _ => {
+            let (mantissa, exponent) = raw.split_once(['e', 'E']).unwrap_or((raw, "0"));
+            let negative = mantissa.starts_with('-');
+            let mantissa = mantissa.strip_prefix('-').unwrap_or(mantissa);
+            let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+            let all_digits = format!("{whole}{fraction}");
+            let without_trailing_zeros = all_digits.trim_end_matches('0');
+            let digits = without_trailing_zeros.trim_start_matches('0');
+            let exponent = if digits.is_empty() {
+                BigInt::default()
+            } else {
+                // 将十进制位置留在指数中，避免展开很长的零串。
+                let exponent: BigInt = exponent.parse().map_err(|_| JsonError::Invalid)?;
+                exponent + BigInt::from(all_digits.len() - without_trailing_zeros.len())
+                    - BigInt::from(fraction.len())
+            };
+            JsonScalar::Number {
+                negative: negative && !digits.is_empty(),
+                digits: digits.to_owned(),
+                exponent,
+            }
+        }
+    };
+    Ok(Some(scalar))
 }
 
 fn select_pointer_keys<'a>(item: &'a RawValue, keys: &[String]) -> Result<&'a RawValue, JsonError> {
@@ -779,6 +867,49 @@ mod tests {
             transform_json(r#"缺路径 /a [{"a":1,"a":2}]"#),
             Err(JsonError::DuplicateKey)
         );
+    }
+
+    #[test]
+    fn filters_json_items_by_exact_scalar_value() {
+        let source = r#"[{"id":"001","a/b":"完成"},{"id":"002","a/b":"\u5b8c\u6210"},{"id":"003"},{"id":"004","a/b":null},{"id":"005","a/b":["完成"]}]"#;
+        assert_eq!(
+            transform_json(&format!(r#"筛选 /a~1b "完成" {source}"#)).as_deref(),
+            Ok(r#"[{"id":"001","a/b":"完成"},{"id":"002","a/b":"\u5b8c\u6210"}]"#)
+        );
+        assert_eq!(
+            transform_json(&format!(r#"exclude /a~1b "完成" {source}"#)).as_deref(),
+            Ok(r#"[{"id":"003"},{"id":"004","a/b":null},{"id":"005","a/b":["完成"]}]"#)
+        );
+        for (query, expected) in [
+            (
+                r#"filter "" 9007199254740993 [9007199254740992,"9007199254740993",9007199254740993.0,90071992547409930e-1]"#,
+                "[9007199254740993.0,90071992547409930e-1]",
+            ),
+            (
+                r#"filter "" 1e+99999999999999999999 [10e99999999999999999998,1e99999999999999999998]"#,
+                "[10e99999999999999999998]",
+            ),
+            (
+                r#"filter "" 0 [-0.00e-99999999999999999999,0,0.01,false]"#,
+                "[-0.00e-99999999999999999999,0]",
+            ),
+            (
+                r#"筛选 "/a b" null [{"a b":false},{"a b":null},{}]"#,
+                r#"[{"a b":null}]"#,
+            ),
+            (r#"filter "" true [1,"true",true,false,null]"#, "[true]"),
+        ] {
+            assert_eq!(transform_json(query).as_deref(), Ok(expected));
+        }
+        for (query, error) in [
+            ("筛选 /a {} []", JsonError::FilterValue),
+            (r#"筛选 /a "完成"[]"#, JsonError::FilterValue),
+            ("筛选 /a true", JsonError::Incomplete),
+            ("筛选 /a null {}", JsonError::ExpectedArray),
+            (r#"筛选 /a 1 [{"a":1,"a":2}]"#, JsonError::DuplicateKey),
+        ] {
+            assert_eq!(transform_json(query), Err(error), "{query}");
+        }
     }
 
     #[test]
