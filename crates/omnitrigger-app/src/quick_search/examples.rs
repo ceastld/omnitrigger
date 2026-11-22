@@ -1091,6 +1091,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "日期: 按周拆分CSV 2026-12-30 至 2027-01-05",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "按自然季度导出日期片段、天数和工作日",
+        query: "日期: 按季度拆分CSV 2024-03-30 至 2024-04-02",
+    },
+    Example {
         icon: Icon::Clock,
         title: "查全年日期和工作日",
         query: "日期: 2024",
@@ -2935,6 +2940,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "按月拆分",
                     "按月拆分CSV",
                     "按周拆分CSV",
+                    "按季度拆分CSV",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}

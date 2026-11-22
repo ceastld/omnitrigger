@@ -2876,6 +2876,8 @@ mod tests {
             ("COLOUR", "颜色:"),
             ("contrast", "对比度:"),
             ("URL", "URL:"),
+            ("ＪＳＯＮ", "JSON:"),
+            ("ｔｅｘｔ　ｔｏｏｌｓ", "文本:"),
             ("文本工具", "文本:"),
         ] {
             let Results::Help(items) = for_query(query, &[]) else {
@@ -2900,6 +2902,23 @@ mod tests {
         assert!(matches!(
             for_query("分数", &triggers),
             Results::Destinations(items) if items == [Destination::Trigger(bindings[0].spec.id)]
+        ));
+    }
+
+    #[test]
+    fn accepts_fullwidth_tool_prefixes_and_preserves_the_payload() {
+        let Results::Value(Ok(value)) = for_query(
+            r#"ＪＳＯＮ： 压缩 { "名称": "ＡＢＣ：１２３", "金额": 1.00 }"#,
+            &[],
+        ) else {
+            panic!("未识别全角 JSON 工具前缀");
+        };
+        assert_eq!(value.text, r#"{"名称":"ＡＢＣ：１２３","金额":1.00}"#);
+        assert!(matches!(
+            for_query("ＣｓＶ： 选列", &[]),
+            Results::Help(items) if items.iter().any(|&index| {
+                EXAMPLES[index].query.starts_with("CSV: 选列 ")
+            })
         ));
     }
 

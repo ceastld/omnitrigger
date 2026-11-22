@@ -1,5 +1,7 @@
 use crate::trigger_browse::{FacetValue, ScopeKind, StatusKind};
 
+use super::calculator::narrow_ascii_graphic;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Scope {
     Triggers(Option<FacetValue>),
@@ -142,7 +144,15 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
 }
 
 pub(super) fn parse_scope(prefix: &str) -> Option<Scope> {
-    let scope = match prefix.trim().to_ascii_lowercase().as_str() {
+    let prefix: String = prefix
+        .trim()
+        .chars()
+        .map(|character| match character {
+            '\u{3000}' => ' ',
+            _ => narrow_ascii_graphic(character).to_ascii_lowercase(),
+        })
+        .collect();
+    let scope = match prefix.as_str() {
         "触发器" | "trigger" | "triggers" => Scope::Triggers(None),
         "已启用触发器" | "enabled triggers" => {
             Scope::Triggers(Some(FacetValue::Status(StatusKind::Enabled)))
