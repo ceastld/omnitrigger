@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{Datelike, NaiveDate};
+use chrono::{DateTime, Datelike, NaiveDate, SecondsFormat};
 use omnitrigger_windows::{
     read_local_directory_with_options, DirectoryEntryType, DirectoryOrder, LocalDirectoryEntry,
     LocalDirectoryOptions, LocalStatError, MAX_DIRECTORY_ENTRIES,
@@ -22,6 +22,8 @@ use super::{
 pub(super) const FOLDER_DEBOUNCE: Duration = Duration::from_millis(150);
 const FOLDER_READ_TIMEOUT: Duration = Duration::from_secs(2);
 const TICKS_PER_DAY: u64 = 864_000_000_000;
+const FILETIME_TICKS_PER_SECOND: u64 = 10_000_000;
+const FILETIME_UNIX_EPOCH_SECONDS: i64 = 11_644_473_600;
 
 #[derive(Default)]
 pub(super) struct LocalFilesIndex {
@@ -237,6 +239,11 @@ impl LocalFilesIndex {
         if query.order == DirectoryOrder::Name {
             matches.sort_by_key(|(rank, _)| *rank);
         }
+        if query.output == FileOutput::TimeCsv {
+            return Results::text_value(Ok(file_times_csv(
+                matches.into_iter().map(|(_, entry)| entry),
+            )));
+        }
         if query.output == FileOutput::Json
             || (matches!(query.output, FileOutput::Lines | FileOutput::Names)
                 && !matches.is_empty())
@@ -294,6 +301,36 @@ fn extension_counts<'a>(names: impl Iterator<Item = &'a str>) -> String {
     output
 }
 
+fn file_times_csv<'a>(entries: impl Iterator<Item = &'a LocalDirectoryEntry>) -> String {
+    let mut output = String::from("名称,创建时间UTC,修改时间UTC,路径");
+    for entry in entries {
+        let (created, modified) = entry.metadata.as_ref().map_or((0, 0), |time| {
+            (time.creation_utc_100ns, time.write_utc_100ns)
+        });
+        write!(
+            output,
+            "\r\n{},{},{},{}",
+            csv_cell(&entry.name),
+            csv_cell(&format_filetime(created)),
+            csv_cell(&format_filetime(modified)),
+            csv_cell(&entry.path)
+        )
+        .expect("写入字符串不会失败");
+    }
+    output
+}
+
+fn format_filetime(ticks: u64) -> String {
+    if ticks == 0 {
+        return String::new();
+    }
+    let seconds = (ticks / FILETIME_TICKS_PER_SECOND) as i64 - FILETIME_UNIX_EPOCH_SECONDS;
+    let nanos = ((ticks % FILETIME_TICKS_PER_SECOND) * 100) as u32;
+    DateTime::from_timestamp(seconds, nanos)
+        .map(|time| time.to_rfc3339_opts(SecondsFormat::AutoSi, true))
+        .unwrap_or_default()
+}
+
 fn file_extension(name: &str) -> Option<&str> {
     Path::new(name).extension().and_then(|part| part.to_str())
 }
@@ -318,11 +355,11 @@ struct FileQuery<'a> {
 
 impl FileQuery<'_> {
     fn needs_timestamps(&self) -> bool {
-        self.modified.is_active() || self.created.is_active()
+        self.modified.is_active() || self.created.is_active() || self.output == FileOutput::TimeCsv
     }
 
     fn matches_dates(&self, entry: &LocalDirectoryEntry) -> bool {
-        !self.needs_timestamps()
+        (!self.modified.is_active() && !self.created.is_active())
             || entry.metadata.as_ref().is_some_and(|time| {
                 self.modified
                     .contains(time.write_utc_100ns, time.write_local_ticks)
@@ -381,6 +418,7 @@ enum FileOutput {
     Lines,
     Names,
     Json,
+    TimeCsv,
     ExtensionCounts,
     SizeTotal,
 }
@@ -416,6 +454,9 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             "名称列表" | "names" if output == FileOutput::Entries => output = FileOutput::Names,
             "路径json" | "json-paths" if output == FileOutput::Entries => {
                 output = FileOutput::Json
+            }
+            "时间csv" | "time-csv" if output == FileOutput::Entries => {
+                output = FileOutput::TimeCsv
             }
             "后缀统计" | "extension-counts" if output == FileOutput::Entries => {
                 output = FileOutput::ExtensionCounts
@@ -812,6 +853,48 @@ mod tests {
         assert!(split_query(r"C:\Work | | 修改>=2026-11-31").is_none());
         assert!(split_query(r"C:\Work | | 创建>=2026-11-22 创建<=2026-11-21").is_none());
         assert!(split_query(r"C:\Work | | 修改>=2026-11-21 modified>=2026-11-21").is_none());
+    }
+
+    #[test]
+    fn exports_precise_utc_timestamps_and_keeps_filtered_names_and_order() {
+        let mut index = LocalFilesIndex::default();
+        let query = r"C:\Work | report | 最近修改 时间CSV";
+        let load = index.request(Some(query)).unwrap();
+        assert!(load.timestamps);
+        let mut report = entry("report,final.txt", "file");
+        report.metadata = Some(omnitrigger_windows::LocalDirectoryMetadata {
+            ordinal: 0,
+            attributes: 0,
+            creation_utc_100ns: 116_444_735_999_999_999,
+            access_utc_100ns: 0,
+            write_utc_100ns: 116_444_736_000_000_000,
+            creation_local_ticks: 0,
+            access_local_ticks: 0,
+            write_local_ticks: 0,
+            time_zone_key: "测试".to_owned(),
+        });
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                report,
+                entry("other.txt", "file"),
+                entry("report folder", "directory"),
+            ])
+        ));
+        assert!(matches!(
+            index.results(query),
+            Results::Value(Ok(value))
+                if value.text == concat!(
+                    "名称,创建时间UTC,修改时间UTC,路径\r\n",
+                    "\"report,final.txt\",1969-12-31T23:59:59.999999900Z,",
+                    "1970-01-01T00:00:00Z,\"C:\\Work\\report,final.txt\"\r\n",
+                    "report folder,\"\",\"\",C:\\Work\\report folder",
+                )
+        ));
+        assert!(matches!(
+            index.results(r"C:\Work | missing | 最近修改 时间CSV"),
+            Results::Value(Ok(value)) if value.text == "名称,创建时间UTC,修改时间UTC,路径"
+        ));
     }
 
     #[test]

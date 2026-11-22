@@ -951,6 +951,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "日期: 月历 2024-02",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "将相邻或重叠的日期区间合并",
+        query: "日期: 合并区间 2026-11-01 至 2026-11-04; 2026-11-05 至 2026-11-08",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "找出多个日期区间重叠的日期",
+        query: "日期: 区间交集 2026-11-01 至 2026-11-15; 2026-11-10 至 2026-11-20",
+    },
+    Example {
         icon: Icon::Clock,
         title: "查全年日期和工作日",
         query: "日期: 2024",
@@ -2613,7 +2623,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
             ) => {}
         Scope::Date
             if !term.is_empty()
-                && ["列出", "格式化", "解析", "月历"]
+                && ["列出", "格式化", "解析", "月历", "合并区间", "区间交集"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Color if !term.is_empty() && "色阶".starts_with(term) => {}

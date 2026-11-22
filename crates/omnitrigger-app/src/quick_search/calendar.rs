@@ -5,6 +5,7 @@ use chrono::{Datelike, Days, Months, NaiveDate, TimeDelta, Weekday};
 use super::calculator::normalize;
 
 const MAX_LISTED_DATES: usize = 366;
+const MAX_DATE_RANGES: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DateError {
@@ -18,6 +19,7 @@ pub(super) enum DateError {
     MissingWeekdayOccurrence,
     InvalidOperation,
     InvalidDateList,
+    InvalidDateRanges,
     InvalidDateInterval,
     WorkdayExceptions,
     PatternArguments,
@@ -44,6 +46,9 @@ impl DateError {
             Self::MissingWeekdayOccurrence => "该月没有指定次序的星期",
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
             Self::InvalidDateList => "例如 日期: 列出 2026-11-01 到 2026-11-30 每周一、三、五",
+            Self::InvalidDateRanges => {
+                "填写 2 至 32 个日期区间。每段用“至”连接日期，用分号或换行分隔各段"
+            }
             Self::InvalidDateInterval => "请输入正整数间隔，例如 每隔 3 天或每隔 2 个工作日",
             Self::WorkdayExceptions => {
                 "工作日例外需要两个日期数组，先休息日再补班日，每个日期只填一次"
@@ -471,10 +476,11 @@ fn workday_selection(step: u32, input: Option<&str>) -> Result<DateSelection, Da
     Ok(DateSelection::Workdays { step, exceptions })
 }
 
-fn list_dates(input: &str, today: NaiveDate) -> Result<String, DateError> {
-    if input.is_empty() {
-        return Err(DateError::InvalidDateList);
-    }
+fn date_range_operands(
+    input: &str,
+    today: NaiveDate,
+    separator_error: DateError,
+) -> Result<(NaiveDate, NaiveDate, &str), DateError> {
     let (start, rest) = date_operand(input, today)?;
     let rest = rest
         .strip_prefix(['到', '至'])
@@ -482,8 +488,16 @@ fn list_dates(input: &str, today: NaiveDate) -> Result<String, DateError> {
             let (separator, end) = rest.split_once(char::is_whitespace)?;
             separator.eq_ignore_ascii_case("to").then_some(end)
         })
-        .ok_or(DateError::InvalidDateList)?;
-    let (end, rule) = date_operand(rest.trim_start(), today)?;
+        .ok_or(separator_error)?;
+    let (end, remaining) = date_operand(rest.trim_start(), today)?;
+    Ok((start, end, remaining))
+}
+
+fn list_dates(input: &str, today: NaiveDate) -> Result<String, DateError> {
+    if input.is_empty() {
+        return Err(DateError::InvalidDateList);
+    }
+    let (start, end, rule) = date_range_operands(input, today, DateError::InvalidDateList)?;
     let selection = date_selection(rule)?;
     if end < start {
         return Err(DateError::ReversedDateRange);
@@ -532,6 +546,59 @@ fn list_dates(input: &str, today: NaiveDate) -> Result<String, DateError> {
         })
         .step_by(filtered_step);
     format_date_list(dates)
+}
+
+fn combine_date_ranges(
+    input: &str,
+    today: NaiveDate,
+    intersection: bool,
+) -> Result<String, DateError> {
+    let terms = input.trim().split([';', '\n']);
+    if !(2..=MAX_DATE_RANGES).contains(&terms.clone().count()) {
+        return Err(DateError::InvalidDateRanges);
+    }
+    let mut ranges = terms
+        .map(|term| {
+            let (start, end, remaining) =
+                date_range_operands(term.trim(), today, DateError::InvalidDateRanges)?;
+            if !remaining.is_empty() {
+                return Err(DateError::InvalidDateRanges);
+            }
+            if end < start {
+                return Err(DateError::ReversedDateRange);
+            }
+            Ok((start, end))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if intersection {
+        let mut overlap = ranges[0];
+        for &(start, end) in &ranges[1..] {
+            overlap = (overlap.0.max(start), overlap.1.min(end));
+        }
+        return Ok(if overlap.0 <= overlap.1 {
+            display_date_range(overlap)
+        } else {
+            "无重叠日期".to_owned()
+        });
+    }
+    ranges.sort_unstable();
+    let mut merged = Vec::new();
+    let mut current = ranges[0];
+    for &(start, end) in &ranges[1..] {
+        if start.signed_duration_since(current.1).num_days() <= 1 {
+            current.1 = current.1.max(end);
+        } else {
+            merged.push(display_date_range(current));
+            current = (start, end);
+        }
+    }
+    merged.push(display_date_range(current));
+    Ok(merged.join("\n"))
+}
+
+fn display_date_range((start, end): (NaiveDate, NaiveDate)) -> String {
+    let days = end.signed_duration_since(start).num_days() + 1;
+    format!("{start} 至 {end} · {days} 天")
 }
 
 fn format_date_list(dates: impl Iterator<Item = NaiveDate>) -> Result<String, DateError> {
@@ -818,8 +885,11 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     if operation == "列出" || operation.eq_ignore_ascii_case("list") {
         return list_dates(rest.trim_start(), today);
     }
-    if operation == "月历" || operation.eq_ignore_ascii_case("month-grid") {
-        return month_calendar(rest.trim_start(), today);
+    match operation.to_ascii_lowercase().as_str() {
+        "月历" | "month-grid" => return month_calendar(rest.trim_start(), today),
+        "合并区间" | "merge-ranges" => return combine_date_ranges(rest, today, false),
+        "区间交集" | "intersect-ranges" => return combine_date_ranges(rest, today, true),
+        _ => {}
     }
     if let Some((year, day)) = year_day_parts(input) {
         let date = day
@@ -948,6 +1018,40 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merges_contiguous_inclusive_ranges_and_intersects_all_date_ranges() {
+        let today = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        for (query, expected) in [
+            (
+                "合并区间 2026-01-08 至 2026-01-10；2026-01-01 至 2026-01-03；2026-01-04 至 2026-01-06",
+                "2026-01-01 至 2026-01-06 · 6 天\n2026-01-08 至 2026-01-10 · 3 天",
+            ),
+            (
+                "区间交集 2024-02-28 到 2024-03-03\n今天 to 2024-03-01\n2024-02-28 至 今天",
+                "2024-02-29 至 2024-02-29 · 1 天",
+            ),
+            ("intersect-ranges 昨天至昨天; 今天至今天", "无重叠日期"),
+        ] {
+            assert_eq!(calculate_date(query, today).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_date("合并区间 明天至昨天; 今天至今天", today),
+            Err(DateError::ReversedDateRange)
+        );
+        assert_eq!(
+            calculate_date("区间交集 昨天到今天; 昨天到今天 工作日", today),
+            Err(DateError::InvalidDateRanges)
+        );
+        let excessive = format!(
+            "合并区间 {}今天至今天",
+            "今天至今天;".repeat(MAX_DATE_RANGES)
+        );
+        assert_eq!(
+            calculate_date(&excessive, today),
+            Err(DateError::InvalidDateRanges)
+        );
+    }
 
     #[test]
     fn lays_out_a_monday_first_calendar_with_leap_days_and_relative_months() {
