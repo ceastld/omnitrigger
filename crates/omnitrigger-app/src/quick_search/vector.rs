@@ -17,6 +17,9 @@ pub(super) enum VectorError {
     CrossDimensions,
     LineArguments,
     CoincidentLinePoints,
+    PlaneArguments,
+    PlaneDimensions,
+    CollinearPlanePoints,
     ZeroDirection,
     ZeroAngleVector,
     ZeroUnitVector,
@@ -33,6 +36,9 @@ impl VectorError {
             Self::CrossDimensions => "叉积需要两个三维向量",
             Self::LineArguments => "用 @ 隔开待测点和两个已知点，两个已知点用分号隔开",
             Self::CoincidentLinePoints => "直线需要两个不同的点",
+            Self::PlaneArguments => "用 @ 隔开待测点和三个平面点，平面点用分号隔开",
+            Self::PlaneDimensions => "待测点和平面上的三个点都须使用三维坐标",
+            Self::CollinearPlanePoints => "平面上的三个点须互不重合且不在同一直线上",
             Self::ZeroDirection => "投影方向须为非零向量",
             Self::ZeroAngleVector => "计算夹角余弦需要两个非零向量",
             Self::ZeroUnitVector => "计算单位向量需要非零向量",
@@ -60,6 +66,7 @@ pub(super) fn calculate_vector(query: &str) -> Result<String, VectorError> {
         "单位向量" | "unit-vector" => return unit_vector(&components(input)?),
         "线段距离" | "segment-distance" => return distance_to_line(input, true),
         "直线距离" | "line-distance" => return distance_to_line(input, false),
+        "平面距离" | "plane-distance" => return distance_to_plane(input),
         _ => {}
     }
     if !matches!(
@@ -84,7 +91,7 @@ pub(super) fn calculate_vector(query: &str) -> Result<String, VectorError> {
     let left = components(left)?;
     let right = components(right)?;
     match operation.as_str() {
-        "叉积" | "cross" => cross_product(&left, &right),
+        "叉积" | "cross" => Ok(format_vector(&cross_product(&left, &right)?)),
         _ if left.len() != right.len() => Err(VectorError::Dimensions),
         "投影" | "project" => Ok(format_vector(&project_vector(&left, &right)?)),
         "分解" | "decompose" => {
@@ -243,7 +250,40 @@ fn distance_to_line(input: &str, restrict_to_segment: bool) -> Result<String, Ve
     ))
 }
 
-fn cross_product(left: &[BigRational], right: &[BigRational]) -> Result<String, VectorError> {
+fn distance_to_plane(input: &str) -> Result<String, VectorError> {
+    let (point, plane) = input.split_once('@').ok_or(VectorError::PlaneArguments)?;
+    let points: Vec<_> = plane.split(';').take(4).collect();
+    let [origin, next, last] = points.as_slice() else {
+        return Err(VectorError::PlaneArguments);
+    };
+    let point = components(point)?;
+    let (origin, next, last) = (components(origin)?, components(next)?, components(last)?);
+    if [&point, &origin, &next, &last]
+        .iter()
+        .any(|point| point.len() != 3)
+    {
+        return Err(VectorError::PlaneDimensions);
+    }
+    let left = vector_difference(&next, &origin)?;
+    let right = vector_difference(&last, &origin)?;
+    let normal = cross_product(&left, &right)?;
+    let from_origin = vector_difference(&point, &origin)?;
+    let perpendicular = project_vector(&from_origin, &normal).map_err(|error| match error {
+        VectorError::ZeroDirection => VectorError::CollinearPlanePoints,
+        _ => error,
+    })?;
+    let closest = vector_difference(&point, &perpendicular)?;
+    let distance = format_square_root(&dot_product(&perpendicular, &perpendicular)?);
+    Ok(format!(
+        "距离 {distance}\n最近点 {}",
+        format_vector(&closest)
+    ))
+}
+
+fn cross_product(
+    left: &[BigRational],
+    right: &[BigRational],
+) -> Result<[BigRational; 3], VectorError> {
     let ([ax, ay, az], [bx, by, bz]) = (left, right) else {
         return Err(VectorError::CrossDimensions);
     };
@@ -251,7 +291,7 @@ fn cross_product(left: &[BigRational], right: &[BigRational]) -> Result<String, 
     for value in [&x, &y, &z] {
         ensure_exact_size(value).map_err(VectorError::Evaluation)?;
     }
-    Ok(format!("{x}, {y}, {z}"))
+    Ok([x, y, z])
 }
 
 #[cfg(test)]
@@ -309,6 +349,39 @@ mod tests {
             calculate_vector("直线距离 0,0 @ 3,4; 3,4"),
             Err(VectorError::CoincidentLinePoints)
         );
+    }
+
+    #[test]
+    fn finds_exact_distance_and_projection_to_a_plane_in_3d() {
+        for (query, expected) in [
+            (
+                "平面距离 3,4,5 @ 0,0,0; 1,0,0; 0,1,0",
+                "距离 5\n最近点 3, 4, 0",
+            ),
+            (
+                "PLANE-DISTANCE 1,1,1 @ 1,0,0; 0,1,0; 0,0,1",
+                "距离 √(4/3)\n最近点 1/3, 1/3, 1/3",
+            ),
+            (
+                "平面距离 １，１，０ ＠ ０，０，０；１，０，０；０，１，０",
+                "距离 0\n最近点 1, 1, 0",
+            ),
+        ] {
+            assert_eq!(calculate_vector(query).as_deref(), Ok(expected), "{query}");
+        }
+        for (query, error) in [
+            ("平面距离 3,4,5 @ 0,0,0; 1,0,0", VectorError::PlaneArguments),
+            (
+                "平面距离 3,4 @ 0,0,0; 1,0,0; 0,1,0",
+                VectorError::PlaneDimensions,
+            ),
+            (
+                "平面距离 3,4,5 @ 0,0,0; 1,0,0; 2,0,0",
+                VectorError::CollinearPlanePoints,
+            ),
+        ] {
+            assert_eq!(calculate_vector(query), Err(error), "{query}");
+        }
     }
 
     #[test]

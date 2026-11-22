@@ -335,6 +335,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "向量: 线段距离 3,4 @ 0,0; 2,0",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "求三维点到平面的距离和最近点",
+        query: "向量: 平面距离 3,4,5 @ 0,0,0; 1,0,0; 0,1,0",
+    },
+    Example {
         icon: Icon::Layers,
         title: "计算点到整条直线的距离和垂足",
         query: "向量: 直线距离 3,4 @ 0,0; 2,0",
