@@ -1722,6 +1722,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "把目录和文件名拼成完整路径",
+        query: r#"路径: 拼接 ["C:\\工作","报告 集","2026.txt"]"#,
+    },
+    Example {
+        icon: Icon::Layers,
         title: "提取上一级目录",
         query: r"路径: 上一级 C:\工作\发布 包.tar.gz",
     },

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 const INVALID_PATH_TEXT: [char; 5] = ['\0', '"', '\r', '\n', '\t'];
 
@@ -7,6 +7,8 @@ pub(super) enum PathError {
     Incomplete,
     UnknownOperation,
     InvalidPath,
+    JoinArguments,
+    RelativePartRequired,
     ExtensionArguments,
     InvalidExtension,
     MissingPart,
@@ -16,8 +18,10 @@ impl PathError {
     pub(super) fn message(self) -> &'static str {
         match self {
             Self::Incomplete => "在操作名后粘贴路径",
-            Self::UnknownOperation => "可用操作为文件名、主名、扩展名、换扩展名和上一级",
+            Self::UnknownOperation => "可用文件名、主名、扩展名、换扩展名、上一级和拼接",
             Self::InvalidPath => "输入单条路径，可用一对双引号包住",
+            Self::JoinArguments => "用 JSON 字符串数组填写起始路径和至少一条相对路径",
+            Self::RelativePartRequired => "起始路径后的每一条路径须为相对路径",
             Self::ExtensionArguments => "用 JSON 字符串数组填写路径和新扩展名",
             Self::InvalidExtension => "扩展名须为文件名后缀，可用空字符串删除",
             Self::MissingPart => "这条路径没有所选部分",
@@ -30,8 +34,10 @@ pub(super) fn path_component(query: &str) -> Result<String, PathError> {
         .split_once(char::is_whitespace)
         .ok_or(PathError::Incomplete)?;
     let operation = operation.to_ascii_lowercase();
-    if matches!(operation.as_str(), "换扩展名" | "replace-extension") {
-        return replace_extension(input.trim());
+    match operation.as_str() {
+        "换扩展名" | "replace-extension" => return replace_extension(input.trim()),
+        "拼接" | "join" => return join_paths(input.trim()),
+        _ => {}
     }
     let input = strip_path_quotes(input.trim());
     if input.is_empty() {
@@ -52,6 +58,36 @@ pub(super) fn path_component(query: &str) -> Result<String, PathError> {
         .filter(|part| !part.is_empty())
         .map(str::to_owned)
         .ok_or(PathError::MissingPart)
+}
+
+fn join_paths(input: &str) -> Result<String, PathError> {
+    let parts = serde_json::from_str::<Vec<String>>(input).map_err(|error| {
+        if error.is_eof() {
+            PathError::Incomplete
+        } else {
+            PathError::JoinArguments
+        }
+    })?;
+    let [base, first, rest @ ..] = parts.as_slice() else {
+        return Err(PathError::JoinArguments);
+    };
+    if parts
+        .iter()
+        .any(|part| part.is_empty() || part.contains(INVALID_PATH_TEXT))
+    {
+        return Err(PathError::JoinArguments);
+    }
+    let mut path = PathBuf::from(base.as_str());
+    for part in std::iter::once(first).chain(rest) {
+        let part = Path::new(part);
+        if part.has_root() || matches!(part.components().next(), Some(Component::Prefix(_))) {
+            return Err(PathError::RelativePartRequired);
+        }
+        path.push(part);
+    }
+    path.into_os_string()
+        .into_string()
+        .map_err(|_| PathError::InvalidPath)
 }
 
 fn replace_extension(input: &str) -> Result<String, PathError> {
@@ -98,6 +134,33 @@ pub(super) fn strip_path_quotes(input: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joins_multiple_paths_and_requires_relative_parts_after_the_base() {
+        let expected = PathBuf::from("base").join("目录 集").join("2026.txt");
+        assert_eq!(
+            path_component(r#"join ["base","目录 集","2026.txt"]"#).as_deref(),
+            Ok(expected.to_str().unwrap())
+        );
+        assert_eq!(
+            path_component(r#"拼接 ["base","/absolute"]"#),
+            Err(PathError::RelativePartRequired)
+        );
+        assert_eq!(
+            path_component(r#"拼接 ["base",""]"#),
+            Err(PathError::JoinArguments)
+        );
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                path_component(r#"拼接 ["C:\\工作","报告 集","2026.txt"]"#).as_deref(),
+                Ok(r"C:\工作\报告 集\2026.txt")
+            );
+            for query in [r#"拼接 ["base","C:child"]"#, r#"拼接 ["base","\\root"]"#] {
+                assert_eq!(path_component(query), Err(PathError::RelativePartRequired));
+            }
+        }
+    }
 
     #[test]
     fn changes_the_last_path_extension_and_preserves_the_directory() {
