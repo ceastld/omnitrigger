@@ -1257,10 +1257,18 @@ fn replacement_parts(input: &str) -> Result<(String, String, &str), TextError> {
 
 fn replace_text(input: &str) -> Result<String, TextError> {
     let (needle, replacement, text) = replacement_parts(input)?;
+    Ok(replace_literal_matches(text, &needle, &replacement)?.into_owned())
+}
+
+pub(super) fn replace_literal_matches<'a>(
+    text: &'a str,
+    needle: &str,
+    replacement: &str,
+) -> Result<Cow<'a, str>, TextError> {
     if needle.is_empty() {
         return Err(TextError::EmptySearchText);
     }
-    let matches = text.matches(&needle).count();
+    let matches = text.matches(needle).count();
     let kept_bytes = text.len() - matches * needle.len();
     let result_bytes = kept_bytes.saturating_add(matches.saturating_mul(replacement.len()));
     if result_bytes > MAX_EXPANDED_TEXT_BYTES {
@@ -1269,7 +1277,11 @@ fn replace_text(input: &str) -> Result<String, TextError> {
     if matches != 0 && replacement.contains('\0') {
         return Err(TextError::NullCharacter);
     }
-    Ok(text.replace(&needle, &replacement))
+    Ok(if matches == 0 {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(text.replace(needle, replacement))
+    })
 }
 
 fn replace_regex(input: &str) -> Result<String, TextError> {

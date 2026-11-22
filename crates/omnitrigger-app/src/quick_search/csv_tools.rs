@@ -40,8 +40,8 @@ use super::{
         median_sorted_values, summarize_unweighted, RunningTotals, StatisticsError, MAX_VALUES,
     },
     text_tools::{
-        compare_natural, compile_regex, newline_pattern, regex_group_index, GraphemeRange,
-        TextError, TextLengthUnit,
+        compare_natural, compile_regex, newline_pattern, regex_group_index,
+        replace_literal_matches, GraphemeRange, TextError, TextLengthUnit,
     },
 };
 
@@ -106,6 +106,7 @@ pub(super) enum CsvError {
     TextLengthColumnArguments,
     TextSliceColumnArguments,
     TextPadColumnArguments,
+    TextReplaceColumnArguments,
     DataConversionTarget(ConversionError),
     GroupedColumnArguments,
     GroupCountColumnArguments,
@@ -235,6 +236,9 @@ impl CsvError {
             }
             Self::TextPadColumnArguments => {
                 "填写新列名、来源列、0 至 4096 的宽度和一个填充字符，例如 [\"新编号\",\"编号\",4,\"0\"]"
+            }
+            Self::TextReplaceColumnArguments => {
+                "填写新列名、来源列、要查找的非空文字和替换文字，例如 [\"新地址\",\"地址\",\"旧路\",\"新路\"]"
             }
             Self::DataConversionTarget(cause) => cause.message(),
             Self::GroupedColumnArguments => {
@@ -876,6 +880,27 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             };
             Operation::TextColumn(name, source, computation)
         }
+        "替换列" | "replace-column" => {
+            let ((name, source, needle, replacement), data) =
+                json_argument_and_data::<(String, ColumnReference, String, String)>(
+                    input,
+                    CsvError::TextReplaceColumnArguments,
+                )?;
+            if name.trim().is_empty()
+                || needle.is_empty()
+                || [&name, &needle, &replacement]
+                    .iter()
+                    .any(|text| text.contains('\0'))
+            {
+                return Err(CsvError::TextReplaceColumnArguments);
+            }
+            input = data;
+            Operation::TextColumn(
+                name,
+                source,
+                TextColumnComputation::Replace(needle, replacement),
+            )
+        }
         kind @ ("日期格式列" | "date-format-column" | "日期解析列" | "date-parse-column") =>
         {
             let ((name, source, pattern), data) =
@@ -1401,6 +1426,14 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 Ok(match &computation {
                     TextColumnComputation::Length(unit) => Cow::Owned(unit.count(cell).to_string()),
                     TextColumnComputation::Slice(range) => Cow::Borrowed(range.slice(cell)),
+                    TextColumnComputation::Replace(needle, replacement) => {
+                        replace_literal_matches(cell, needle, replacement).map_err(|error| {
+                            match error {
+                                TextError::ResultTooLarge => CsvError::AddedColumnTooLarge,
+                                _ => CsvError::TextReplaceColumnArguments,
+                            }
+                        })?
+                    }
                     TextColumnComputation::Pad { width, fill, left } => {
                         let missing = width.saturating_sub(TextLengthUnit::CodePoints.count(cell));
                         if missing == 0 {
@@ -2404,6 +2437,7 @@ fn date_pattern_column(
 enum TextColumnComputation {
     Length(TextLengthUnit),
     Slice(GraphemeRange),
+    Replace(String, String),
     Pad {
         width: usize,
         fill: char,
@@ -5281,6 +5315,29 @@ mod tests {
                 Err(CsvError::TextSliceColumnArguments)
             );
         }
+    }
+
+    #[test]
+    fn replaces_every_exact_substring_and_keeps_original_csv_cells_intact() {
+        let query = "替换列 [\"新地址\",\"地址\",\"旧路\",\"新,路\"]\n编号,地址\n1,旧路12号旧路口\n2,\"北街\r\n南街\"\n3,";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("编号,地址,新地址\r\n1,旧路12号旧路口,\"新,路12号新,路口\"\r\n2,\"北街\r\n南街\",\"北街\r\n南街\"\r\n3,\"\",\"\"")
+        );
+        assert_eq!(
+            transform_csv("replace-column [\"简写\",1,\".\",\"\"] 源\nA.B.").as_deref(),
+            Ok("源,简写\r\nA.B.,AB")
+        );
+        assert_eq!(
+            transform_csv("替换列 [\"新列\",1,\"\",\"x\"] 原列"),
+            Err(CsvError::TextReplaceColumnArguments)
+        );
+        let query = format!(
+            "替换列 [\"新列\",1,\"a\",\"{}\"] 原列\n{}",
+            "x".repeat(1100),
+            "a".repeat(1100)
+        );
+        assert_eq!(transform_csv(&query), Err(CsvError::AddedColumnTooLarge));
     }
 
     #[test]
