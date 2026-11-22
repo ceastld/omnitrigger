@@ -465,6 +465,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "时长: 平均 01:25,02:40,00:55",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "按各组出现次数求平均时长",
+        query: "时长: 频数平均 01:00@3,02:00@1",
+    },
+    Example {
         icon: Icon::Clock,
         title: "从一组时长中取中位数",
         query: "时长: 中位数 01:25,02:40,00:55",
@@ -678,6 +683,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "按指定前缀长度划分子网",
         query: "网段: 子网 192.0.2.137/26 到 /28",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "从网段中排除指定子网",
+        query: "网段: 排除 192.0.2.0/28, 192.0.2.1/32",
     },
     Example {
         icon: Icon::Clock,
@@ -2397,13 +2407,18 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Color if !term.is_empty() && "色阶".starts_with(term) => {}
-        Scope::Cidr if !term.is_empty() && "子网".starts_with(term) => {}
+        Scope::Cidr
+            if !term.is_empty()
+                && ["子网", "排除"]
+                    .into_iter()
+                    .any(|operation| operation.starts_with(term)) => {}
         Scope::Matrix if term == "乘方" => {}
         Scope::Duration
             if !term.is_empty()
                 && [
                     "合计",
                     "平均",
+                    "频数平均",
                     "中位数",
                     "最短",
                     "最长",

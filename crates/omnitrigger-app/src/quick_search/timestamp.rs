@@ -193,6 +193,7 @@ fn convert_timestamp_with_local(
             DurationError::Invalid
             | DurationError::InvalidClockTime
             | DurationError::InvalidUnit
+            | DurationError::InvalidFrequency
             | DurationError::DivisionByZero => TimestampError::InvalidDuration,
         })?;
         let unit = TimestampUnit::from_subsecond(elapsed.subsec_nanos());

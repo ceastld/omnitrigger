@@ -14,6 +14,7 @@ pub(super) enum CidrError {
     DifferentFamilies,
     ReversedRange,
     ChildPrefix,
+    OutsideNetwork,
     TooManySubnets,
 }
 
@@ -26,6 +27,7 @@ impl CidrError {
             Self::DifferentFamilies => "地址和网段须使用相同的 IP 版本",
             Self::ReversedRange => "起始地址不得大于结束地址",
             Self::ChildPrefix => "子网的前缀长度须大于或等于原网段",
+            Self::OutsideNetwork => "要排除的网段须完全位于原网段内",
             Self::TooManySubnets => "每次最多列出 128 个子网，请减小前缀差",
         }
     }
@@ -90,6 +92,7 @@ pub(super) fn calculate_cidr(query: &str) -> Result<String, CidrError> {
             "覆盖" | "cover" => return range_to_cidr(range, true),
             "分解" | "range-to-cidr" => return range_to_cidr(range, false),
             "子网" | "subnets" => return split_subnets(range),
+            "排除" | "exclude" => return exclude_network(range),
             _ => {}
         }
     }
@@ -175,6 +178,38 @@ fn split_subnets(input: &str) -> Result<String, CidrError> {
     Ok(subnets.join("\n"))
 }
 
+fn exclude_network(input: &str) -> Result<String, CidrError> {
+    let (parent, excluded) = input.split_once(',').ok_or(CidrError::Incomplete)?;
+    let (parent, parent_prefix) = parse_network(parent)?;
+    let (excluded, excluded_prefix) = parse_network(excluded)?;
+    let width = address_width(parent);
+    if address_width(excluded) != width {
+        return Err(CidrError::DifferentFamilies);
+    }
+    let parent_mask = !host_mask(width - parent_prefix);
+    if excluded_prefix < parent_prefix || bits(parent) & parent_mask != bits(excluded) & parent_mask
+    {
+        return Err(CidrError::OutsideNetwork);
+    }
+    if excluded_prefix == parent_prefix {
+        return Ok("无剩余网段".into());
+    }
+
+    // 沿排除网段的前缀逐位下降，每一层保留不含该网段的另一半。
+    let mut networks = Vec::with_capacity((excluded_prefix - parent_prefix) as usize);
+    for prefix in parent_prefix + 1..=excluded_prefix {
+        let host_bits = width - prefix;
+        let start = (bits(excluded) & !host_mask(host_bits)) ^ (1u128 << host_bits);
+        networks.push((start, prefix));
+    }
+    networks.sort_unstable();
+    Ok(networks
+        .into_iter()
+        .map(|(start, prefix)| format!("{}/{prefix}", as_address(start, width)))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 fn range_to_cidr(input: &str, cover_only: bool) -> Result<String, CidrError> {
     let (first, last) = input.split_once(['至', ',']).ok_or(CidrError::Incomplete)?;
     let (first, last) = (first.trim(), last.trim());
@@ -216,6 +251,36 @@ fn range_to_cidr(input: &str, cover_only: bool) -> Result<String, CidrError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excludes_a_contained_subnet_without_enumerating_addresses() {
+        for (query, expected) in [
+            (
+                "排除 192.0.2.0/28，192.0.2.1/32",
+                "192.0.2.0/32\n192.0.2.2/31\n192.0.2.4/30\n192.0.2.8/29",
+            ),
+            ("exclude 2001:db8::3/126, 2001:db8::2/127", "2001:db8::/127"),
+            (
+                "排除 192.0.2.1/255.255.255.0, 192.0.2.128/25",
+                "192.0.2.0/25",
+            ),
+            ("排除 ::1/0, ffff::/0", "无剩余网段"),
+        ] {
+            assert_eq!(calculate_cidr(query).as_deref(), Ok(expected), "{query}");
+        }
+        let largest = calculate_cidr("排除 ::/0, ::/128").unwrap();
+        assert_eq!(largest.lines().count(), 128);
+        assert_eq!(largest.lines().next(), Some("::1/128"));
+        assert_eq!(largest.lines().last(), Some("8000::/1"));
+        for (query, expected) in [
+            ("排除 ::/0, 192.0.2.0/24", CidrError::DifferentFamilies),
+            ("排除 192.0.2.0/24, 192.0.3.0/25", CidrError::OutsideNetwork),
+            ("排除 192.0.2.0/25, 192.0.2.0/24", CidrError::OutsideNetwork),
+            ("排除 192.0.2.0/24,", CidrError::Incomplete),
+        ] {
+            assert_eq!(calculate_cidr(query), Err(expected), "{query}");
+        }
+    }
 
     #[test]
     fn splits_ipv4_and_ipv6_prefixes_into_ordered_subnets_with_bounded_output() {

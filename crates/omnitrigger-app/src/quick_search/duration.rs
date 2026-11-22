@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use num_bigint::BigInt;
+
 use super::calculator::{format_result, normalize};
 use super::conversion::split_conversion;
 
@@ -19,6 +21,7 @@ pub(super) enum DurationError {
     OutOfRange,
     Precision,
     DivisionByZero,
+    InvalidFrequency,
 }
 
 impl DurationError {
@@ -31,6 +34,7 @@ impl DurationError {
             Self::OutOfRange => "时长超出可转换范围",
             Self::Precision => "时长最小可精确到 1 纳秒",
             Self::DivisionByZero => "时长不能除以零",
+            Self::InvalidFrequency => "按 时长@次数 填写每组，次数须为正整数",
         }
     }
 }
@@ -54,6 +58,7 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
     let (total, show_seconds) = match operation {
         "合计" | "sum" => (aggregate_duration_list(values, false)?, false),
         "平均" | "average" => (aggregate_duration_list(values, true)?, false),
+        "频数平均" | "frequency-average" => (frequency_average(values)?, false),
         "中位数" | "median" => (median_duration_list(values)?, false),
         "最短" | "min" => (duration_extremes(values)?.0, false),
         "最长" | "max" => (duration_extremes(values)?.1, false),
@@ -152,6 +157,32 @@ fn aggregate_duration_list(input: &str, average: bool) -> Result<i128, DurationE
         return Err(DurationError::Precision);
     }
     Ok(total / count)
+}
+
+fn frequency_average(input: &str) -> Result<i128, DurationError> {
+    let mut total = BigInt::default();
+    let mut count = BigInt::default();
+    for term in duration_terms(input) {
+        let (value, repetitions) = term
+            .split_once('@')
+            .ok_or(DurationError::InvalidFrequency)?;
+        let repetitions = repetitions
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|&count| count > 0)
+            .ok_or(DurationError::InvalidFrequency)?;
+        let nanos = bounded_duration_value(value.trim())?;
+        total += BigInt::from(nanos) * BigInt::from(repetitions);
+        count += repetitions;
+    }
+    if count == BigInt::default() {
+        return Err(DurationError::Incomplete);
+    }
+    if &total % &count != BigInt::default() {
+        return Err(DurationError::Precision);
+    }
+    i128::try_from(total / count).map_err(|_| DurationError::OutOfRange)
 }
 
 fn duration_extremes(input: &str) -> Result<(i128, i128), DurationError> {
@@ -576,6 +607,28 @@ mod tests {
             convert_duration("中位数 0ns,1ns"),
             Err(DurationError::Precision)
         );
+    }
+
+    #[test]
+    fn calculates_exact_frequency_averages_without_expanding_observations() {
+        for (input, expected) in [
+            ("频数平均 01:00@3,02:00@1", "00:01:15"),
+            ("frequency-average -2s@1,1s@2 to ns", "0 ns"),
+            (
+                "频数平均 01:30@18446744073709551615,01:30@18446744073709551615",
+                "00:01:30",
+            ),
+        ] {
+            assert_eq!(convert_duration(input).as_deref(), Ok(expected));
+        }
+        for (input, error) in [
+            ("频数平均 2s@0", DurationError::InvalidFrequency),
+            ("频数平均 2s@1.5", DurationError::InvalidFrequency),
+            ("频数平均 1ns@1,2ns@1", DurationError::Precision),
+            ("频数平均", DurationError::Incomplete),
+        ] {
+            assert_eq!(convert_duration(input), Err(error));
+        }
     }
 
     #[test]
