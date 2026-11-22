@@ -40,6 +40,7 @@ pub(super) enum FractionError {
     CombinatorialDomain,
     CombinatorialRange,
     DecimalPlaces,
+    SignificantDigits,
     RoundPlaces,
     InterpolationInterval,
     InterpolationRange,
@@ -84,6 +85,7 @@ impl FractionError {
             Self::CombinatorialDomain => "组合数和排列数的参数必须是非负整数",
             Self::CombinatorialRange => "组合数和排列数的参数最多 4096，结果最多 8192 个二进制位",
             Self::DecimalPlaces => "输入 0 至 100 的小数位数，例如 分数: 小数 1/3 to 8",
+            Self::SignificantDigits => "输入 1 至 100 的有效数字位数，例如 分数: 有效数字 1/3 to 4",
             Self::RoundPlaces => "round 的位数须为 -100 至 100 的整数",
             Self::InterpolationInterval => "反查和映射的原区间须有两个不同端点",
             Self::InterpolationRange => "进度须为 0 至 1，反查值须位于原区间内",
@@ -282,6 +284,18 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
             return Err(FractionError::DecimalPlaces);
         }
         return calculate_fraction(source).map(|value| rounded_decimal(value, places));
+    }
+    if verb == "有效数字" || verb.eq_ignore_ascii_case("significant-digits") {
+        let (source, digits) =
+            split_conversion(expression.trim()).ok_or(FractionError::Incomplete)?;
+        let digits = digits.trim();
+        let digits = digits.strip_suffix('位').unwrap_or(digits).trim_end();
+        let digits = digits
+            .parse::<u32>()
+            .ok()
+            .filter(|digits| (1..=MAX_DECIMAL_PLACES).contains(digits))
+            .ok_or(FractionError::SignificantDigits)?;
+        return calculate_fraction(source).map(|value| format_significant_digits(value, digits));
     }
     if input.contains('(') {
         return from_repeating_decimal(input).map(|value| value.to_string());
@@ -891,7 +905,43 @@ pub(super) fn rounded_decimal(value: BigRational, places: u32) -> String {
     let unit = BigUint::from(10u8).pow(places);
     let numerator = value.numer().magnitude() * unit;
     let rounded = round_magnitude_to_even(&numerator, value.denom().magnitude());
-    let sign = if value.numer().sign() == Sign::Minus && rounded.bits() != 0 {
+    format_scaled_decimal(rounded, value.numer().sign() == Sign::Minus, places)
+}
+
+fn format_significant_digits(value: BigRational, digits: u32) -> String {
+    let numerator = value.numer().magnitude();
+    let denominator = value.denom().magnitude();
+    let places = digits - 1;
+    if numerator.bits() == 0 {
+        return format!("{}e0", rounded_decimal(value, places));
+    }
+    // 十进制位数差给出相邻两个候选指数，用整数比较确定边界。
+    let difference =
+        numerator.to_str_radix(10).len() as i32 - denominator.to_str_radix(10).len() as i32;
+    let scale = BigUint::from(10u8).pow(difference.unsigned_abs());
+    let below_estimate = if difference < 0 {
+        numerator * scale < *denominator
+    } else {
+        *numerator < denominator * scale
+    };
+    let mut exponent = difference - i32::from(below_estimate);
+    let shift = places as i32 - exponent;
+    let scale = BigUint::from(10u8).pow(shift.unsigned_abs());
+    let mut rounded = if shift < 0 {
+        round_magnitude_to_even(numerator, &(denominator * scale))
+    } else {
+        round_magnitude_to_even(&(numerator * scale), denominator)
+    };
+    if rounded == BigUint::from(10u8).pow(digits) {
+        rounded /= 10u8;
+        exponent += 1;
+    }
+    let coefficient = format_scaled_decimal(rounded, value.numer().sign() == Sign::Minus, places);
+    format!("{coefficient}e{exponent}")
+}
+
+fn format_scaled_decimal(rounded: BigUint, negative: bool, places: u32) -> String {
+    let sign = if negative && rounded.bits() != 0 {
         "-"
     } else {
         ""
@@ -2218,6 +2268,30 @@ mod tests {
             ("小数 1/0 to 2", FractionError::ZeroDenominator),
         ] {
             assert_eq!(simplify_fraction(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn rounds_exact_expressions_to_significant_digits_and_renormalizes_carry() {
+        for (query, expected) in [
+            ("有效数字 1/3 to 4", "3.333e-1"),
+            ("有效数字 0.0012345 转 ４位", "1.234e-3"),
+            ("significant-digits -1.255 to 3", "-1.26e0"),
+            ("有效数字 12345 to 3", "1.23e4"),
+            ("有效数字 9.995 to 3", "1.00e1"),
+            ("有效数字 1/8 to 1", "1e-1"),
+            ("有效数字 99/10 to 1", "1e1"),
+            ("有效数字 0 to 3", "0.00e0"),
+            ("有效数字 10**1000 to 2", "1.0e1000"),
+            ("有效数字 1/10**1000 to 2", "1.0e-1000"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["有效数字 2 to 0", "有效数字 2 to 101", "有效数字 2 to 2.5"] {
+            assert_eq!(
+                simplify_fraction(query),
+                Err(FractionError::SignificantDigits)
+            );
         }
     }
 
