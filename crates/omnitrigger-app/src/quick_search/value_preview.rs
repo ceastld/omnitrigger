@@ -3,22 +3,38 @@ use std::borrow::Cow;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub(super) const COLUMNS: usize = 40;
-const TAB_SPACING: &str = "  ";
+const TAB_STOP: usize = 8;
 
-pub(super) fn column_width(grapheme: &str) -> usize {
+fn column_width(grapheme: &str, column: usize) -> usize {
     match grapheme {
-        "\t" => TAB_SPACING.len(),
+        "\t" => TAB_STOP - column % TAB_STOP,
         _ if grapheme.is_ascii() => 1,
         _ => 2,
     }
 }
 
+pub(super) fn columns<'a>(graphemes: impl Iterator<Item = &'a str>) -> usize {
+    graphemes.fold(0, |column, grapheme| {
+        column + column_width(grapheme, column)
+    })
+}
+
 pub(super) fn display_tabs(text: &str) -> Cow<'_, str> {
-    if text.contains('\t') {
-        Cow::Owned(text.replace('\t', TAB_SPACING))
-    } else {
-        Cow::Borrowed(text)
+    if !text.contains('\t') {
+        return Cow::Borrowed(text);
     }
+    let mut display = String::with_capacity(text.len());
+    let mut column = 0;
+    for grapheme in text.graphemes(true) {
+        let width = column_width(grapheme, column);
+        if grapheme == "\t" {
+            display.extend(std::iter::repeat_n(' ', width));
+        } else {
+            display.push_str(grapheme);
+        }
+        column += width;
+    }
+    Cow::Owned(display)
 }
 
 pub(super) fn lines(text: &str) -> impl Iterator<Item = &str> {
@@ -42,7 +58,7 @@ fn positioned_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
             let (start, line) = pending.take()?;
             let mut columns = 0;
             let overflow = line.grapheme_indices(true).find_map(|(index, grapheme)| {
-                columns += column_width(grapheme);
+                columns += column_width(grapheme, columns);
                 (columns > COLUMNS).then_some(index)
             });
             if let Some(index) = overflow {
@@ -72,11 +88,27 @@ mod tests {
     }
 
     #[test]
-    fn tabs_are_visible_in_results_and_wrap_at_their_display_width() {
-        assert_eq!(display_tabs("2\t苹果"), "2  苹果");
-        let prefix = "x".repeat(39);
+    fn tabs_advance_to_fixed_columns_and_wrap_at_their_display_width() {
+        for (input, expected) in [
+            ("x\ty", "x       y"),
+            ("-2\t13/3", "-2      13/3"),
+            ("3/2\t31/12", "3/2     31/12"),
+            ("苹果\t2", "苹果    2"),
+            ("12345678\tx", "12345678        x"),
+        ] {
+            assert_eq!(display_tabs(input), expected, "{input}");
+            assert_eq!(
+                columns(input.graphemes(true)),
+                columns(expected.graphemes(true))
+            );
+        }
+
+        let prefix = "x".repeat(40);
         let text = format!("{prefix}\ta");
         assert_eq!(lines(&text).collect::<Vec<_>>(), [prefix.as_str(), "\ta"]);
+
+        let text = format!("{}\ta", "x".repeat(39));
+        assert_eq!(lines(&text).collect::<Vec<_>>(), [&text[..40], "a"]);
     }
 
     #[test]

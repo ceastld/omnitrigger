@@ -1726,11 +1726,7 @@ impl QuickSearch {
                     _ => 17,
                 };
                 let compact = result.contains('\n')
-                    || result
-                        .graphemes(true)
-                        .take(large_text_columns + 1)
-                        .map(value_preview::column_width)
-                        .sum::<usize>()
+                    || value_preview::columns(result.graphemes(true).take(large_text_columns + 1))
                         > large_text_columns;
                 let value = if compact {
                     let start = self
@@ -1751,10 +1747,7 @@ impl QuickSearch {
                         .children(lines.into_iter().enumerate().map(|(index, text)| {
                             let prefix = if index == 0 { "= " } else { "  " };
                             let (text, suffix) = if clipped && index + 1 == line_limit {
-                                let columns = text
-                                    .graphemes(true)
-                                    .map(value_preview::column_width)
-                                    .sum::<usize>();
+                                let columns = value_preview::columns(text.graphemes(true));
                                 let end = if columns >= value_preview::COLUMNS {
                                     text.grapheme_indices(true)
                                         .next_back()
