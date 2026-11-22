@@ -632,6 +632,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "按自定义格式显示日期",
+        query: r#"日期: 格式化 ["2026-11-21","%Y%m%d"]"#,
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "按自定义格式读取日期",
+        query: r#"日期: 解析 ["21/11/2026","%d/%m/%Y"]"#,
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查询日期的 ISO 周号",
         query: "日期: 2027-01-01 第几周",
     },
@@ -1890,7 +1900,11 @@ pub(super) fn tool_index_examples(query: &str) -> Vec<usize> {
 
 pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<usize>> {
     match scope {
-        Scope::Date if matches!(term, "列" | "列出") => {}
+        Scope::Date
+            if !term.is_empty()
+                && ["列出", "格式化", "解析"]
+                    .into_iter()
+                    .any(|operation| operation.starts_with(term)) => {}
         Scope::Duration if matches!(term, "合" | "合计" | "平" | "平均" | "中位" | "中位数") =>
             {}
         Scope::Statistics

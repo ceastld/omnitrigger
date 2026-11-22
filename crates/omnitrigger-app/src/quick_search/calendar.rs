@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use chrono::{Datelike, Days, Months, NaiveDate, TimeDelta, Weekday};
 
 use super::calculator::normalize;
@@ -16,6 +18,9 @@ pub(super) enum DateError {
     InvalidOperation,
     InvalidDateList,
     InvalidDateInterval,
+    PatternArguments,
+    InvalidDatePattern,
+    DatePatternMismatch,
     ReversedDateRange,
     NoMatchingDates,
     TooManyDates,
@@ -37,6 +42,11 @@ impl DateError {
             Self::InvalidOperation => "可查星期几、加减日期或工作日，或用两个日期相减",
             Self::InvalidDateList => "例如 日期: 列出 2026-11-01 到 2026-11-30 每周一、三、五",
             Self::InvalidDateInterval => "请输入正整数间隔，例如 每隔 3 天",
+            Self::PatternArguments => {
+                "用 JSON 数组填写日期和格式，例如 [\"2026-11-21\",\"%Y%m%d\"]"
+            }
+            Self::InvalidDatePattern => "请使用日期格式符，例如 %Y、%m、%d 或 %F",
+            Self::DatePatternMismatch => "日期文本与格式不符，或日期无效",
             Self::ReversedDateRange => "开始日期须早于或等于结束日期",
             Self::NoMatchingDates => "区间内没有符合条件的日期",
             Self::TooManyDates => "最多可列出 366 个日期，请缩短区间",
@@ -630,7 +640,36 @@ fn apply_date_offset(
     in_range(adjusted)
 }
 
+fn convert_date_pattern(input: &str, today: NaiveDate, parse: bool) -> Result<String, DateError> {
+    let [value, pattern] =
+        serde_json::from_str::<[String; 2]>(input).map_err(|_| DateError::PatternArguments)?;
+    if pattern.is_empty() || pattern.contains('\0') {
+        return Err(DateError::PatternArguments);
+    }
+    if parse {
+        let date = NaiveDate::parse_from_str(&value, &pattern)
+            .map_err(|_| DateError::DatePatternMismatch)?;
+        return in_range(Some(date)).map(|date| date.to_string());
+    }
+    let value = normalize(&value);
+    let (date, rest) = date_operand(value.trim(), today)?;
+    if !rest.is_empty() {
+        return Err(DateError::InvalidDate);
+    }
+    let mut result = String::new();
+    write!(result, "{}", date.format(&pattern)).map_err(|_| DateError::InvalidDatePattern)?;
+    Ok(result)
+}
+
 pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, DateError> {
+    let original = input.trim();
+    if let Some((operation, argument)) = original.split_once(char::is_whitespace) {
+        match operation.to_ascii_lowercase().as_str() {
+            "格式化" | "format" => return convert_date_pattern(argument, today, false),
+            "解析" | "parse-format" => return convert_date_pattern(argument, today, true),
+            _ => {}
+        }
+    }
     let input = normalize(input);
     let input = input.trim();
     let (operation, rest) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
@@ -763,6 +802,34 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formats_and_parses_dates_with_explicit_patterns() {
+        let today = NaiveDate::from_ymd_opt(2026, 11, 21).unwrap();
+        for (query, expected) in [
+            (r#"格式化 ["2026-11-21","%Y%m%d"]"#, "20261121"),
+            (
+                r#"FORMAT ["今天","（%Y年%m月%d日）"]"#,
+                "（2026年11月21日）",
+            ),
+            (r#"解析 ["20240229","%Y%m%d"]"#, "2024-02-29"),
+            (r#"parse-format ["21/11/2026","%d/%m/%Y"]"#, "2026-11-21"),
+        ] {
+            assert_eq!(calculate_date(query, today).as_deref(), Ok(expected));
+        }
+        for (query, expected) in [
+            (
+                r#"解析 ["20230229","%Y%m%d"]"#,
+                DateError::DatePatternMismatch,
+            ),
+            (r#"格式化 ["今天","%Q"]"#, DateError::InvalidDatePattern),
+            (r#"格式化 ["今天","%H"]"#, DateError::InvalidDatePattern),
+            (r#"格式化 ["今天","\u0000"]"#, DateError::PatternArguments),
+            (r#"格式化 ["今天"]"#, DateError::PatternArguments),
+        ] {
+            assert_eq!(calculate_date(query, today), Err(expected));
+        }
+    }
 
     #[test]
     fn lists_inclusive_date_ranges_filtered_by_day_type() {
