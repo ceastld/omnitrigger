@@ -1,15 +1,18 @@
+use std::cmp::Ordering;
+
 use num_bigint::{BigInt, Sign};
 use num_rational::BigRational;
 
 use super::calculator::{normalize, QUERY_LIMIT};
 use super::fraction::{
-    calculate_fraction, ensure_exact_size, exact_abs_square_root, FractionError,
+    calculate_fraction, ensure_exact_size, exact_abs_square_root, format_square_root, FractionError,
 };
-use super::operators::split_top_level_commas;
+use super::operators::{split_top_level_commas, NumberComparison};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum EquationError {
     Coefficients,
+    InequalityArguments,
     SystemRows,
     Evaluation(FractionError),
 }
@@ -20,6 +23,7 @@ impl EquationError {
             Self::Coefficients | Self::Evaluation(FractionError::Invalid) => {
                 "按 a, b, c 输入 ax² + bx + c = 0 的三个系数"
             }
+            Self::InequalityArguments => "先填写 >、>=、< 或 <=，再填写 a, b, c",
             Self::SystemRows => "每行按 x 系数、y 系数、右侧常数输入，两行用分号隔开",
             Self::Evaluation(error) => error.message(),
         }
@@ -31,6 +35,11 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
         return Err(EquationError::Evaluation(FractionError::TooLong));
     }
     let input = normalize(query);
+    if let Some((operation, arguments)) = input.trim().split_once(char::is_whitespace) {
+        if operation == "不等式" || operation.eq_ignore_ascii_case("inequality") {
+            return solve_inequality(arguments.trim_start());
+        }
+    }
     let [a, b, c] = coefficient_row(&input)?;
     if a.numer().sign() == Sign::NoSign {
         if b.numer().sign() != Sign::NoSign {
@@ -45,10 +54,101 @@ pub(super) fn solve_equation(query: &str) -> Result<String, EquationError> {
         });
     }
 
-    // 配方后直接计算有理数和根式，有限小数系数也能精确判定重根。
-    let center = -b / (&a * BigInt::from(2));
-    let distance_squared = &center * &center - c / a;
+    let (center, distance_squared) = quadratic_center(&a, b, c);
     format_centered_roots(center, distance_squared, "x").map_err(EquationError::Evaluation)
+}
+
+fn quadratic_center(a: &BigRational, b: BigRational, c: BigRational) -> (BigRational, BigRational) {
+    // 配方后直接计算有理数和根式，有限小数系数也能精确判定重根。
+    let center = -b / (a * BigInt::from(2));
+    let distance_squared = &center * &center - c / a;
+    (center, distance_squared)
+}
+
+fn solve_inequality(input: &str) -> Result<String, EquationError> {
+    let (operator, coefficients) = input
+        .split_once(char::is_whitespace)
+        .ok_or(EquationError::InequalityArguments)?;
+    let comparison = match NumberComparison::parse(operator) {
+        Some(
+            comparison @ (NumberComparison::Less
+            | NumberComparison::LessOrEqual
+            | NumberComparison::Greater
+            | NumberComparison::GreaterOrEqual),
+        ) => comparison,
+        _ => return Err(EquationError::InequalityArguments),
+    };
+    let [a, b, c] = coefficient_row(coefficients).map_err(|error| match error {
+        EquationError::Coefficients => EquationError::InequalityArguments,
+        _ => error,
+    })?;
+    let zero = BigRational::default();
+    let inclusive = comparison.accepts(Ordering::Equal);
+    let (opening, closing) = if inclusive { ('[', ']') } else { ('(', ')') };
+    if a == zero {
+        if b == zero {
+            return Ok(real_or_empty(comparison.accepts(c.cmp(&zero))));
+        }
+        let right_half = comparison.accepts(b.cmp(&zero));
+        let root = -c / b;
+        ensure_exact_size(&root).map_err(EquationError::Evaluation)?;
+        return Ok(if right_half {
+            format!("{opening}{root}, ∞)")
+        } else {
+            format!("(-∞, {root}{closing}")
+        });
+    }
+    let outside = comparison.accepts(a.cmp(&zero));
+    let (center, squared) = quadratic_center(&a, b, c);
+    for value in [&center, &squared] {
+        ensure_exact_size(value).map_err(EquationError::Evaluation)?;
+    }
+    match squared.numer().sign() {
+        Sign::Minus => Ok(real_or_empty(outside)),
+        Sign::NoSign => match (outside, inclusive) {
+            (true, true) => Ok(real_or_empty(true)),
+            (true, false) => Ok(format!("(-∞, {center}) ∪ ({center}, ∞)")),
+            (false, true) => Ok(format!("{{{center}}}")),
+            (false, false) => Ok(real_or_empty(false)),
+        },
+        Sign::Plus => {
+            let [left, right] = if let Some(distance) = exact_abs_square_root(&squared) {
+                exact_real_roots(&center, &distance).map_err(EquationError::Evaluation)?
+            } else {
+                let distance = format_square_root(&squared);
+                if center == zero {
+                    [format!("-{distance}"), distance]
+                } else {
+                    [
+                        format!("{center} - {distance}"),
+                        format!("{center} + {distance}"),
+                    ]
+                }
+            };
+            Ok(if outside {
+                format!("(-∞, {left}{closing} ∪ {opening}{right}, ∞)")
+            } else {
+                format!("{opening}{left}, {right}{closing}")
+            })
+        }
+    }
+}
+
+fn real_or_empty(all: bool) -> String {
+    let solution = if all { "ℝ" } else { "∅" };
+    solution.to_owned()
+}
+
+fn exact_real_roots(
+    center: &BigRational,
+    distance: &BigRational,
+) -> Result<[String; 2], FractionError> {
+    let left = center - distance;
+    let right = center + distance;
+    for root in [&left, &right] {
+        ensure_exact_size(root)?;
+    }
+    Ok([left.to_string(), right.to_string()])
 }
 
 pub(super) fn format_centered_roots(
@@ -65,11 +165,7 @@ pub(super) fn format_centered_roots(
     }
     let exact_distance = exact_abs_square_root(&distance_squared);
     if let (Sign::Plus, Some(distance)) = (sign, &exact_distance) {
-        let first = &center - distance;
-        let second = center + distance;
-        for root in [&first, &second] {
-            ensure_exact_size(root)?;
-        }
+        let [first, second] = exact_real_roots(&center, distance)?;
         return Ok(format!("{variable}₁ = {first} · {variable}₂ = {second}"));
     }
 
@@ -184,6 +280,33 @@ mod tests {
         assert_eq!(
             solve_linear_system("1,2; 4,5,6"),
             Err(EquationError::SystemRows)
+        );
+    }
+
+    #[test]
+    fn solves_exact_quadratic_linear_and_constant_inequalities() {
+        for (query, expected) in [
+            ("不等式 >= 1,-3,2", "(-∞, 1] ∪ [2, ∞)"),
+            ("inequality < 1,-3,2", "(1, 2)"),
+            ("不等式 ≤ -1,3,-2", "(-∞, 1] ∪ [2, ∞)"),
+            ("不等式 ≥ 1,0,-2", "(-∞, -√2] ∪ [√2, ∞)"),
+            ("不等式 < 1,-2,-1", "(1 - √2, 1 + √2)"),
+            ("不等式 > 1,-2,1", "(-∞, 1) ∪ (1, ∞)"),
+            ("不等式 <= 1,-2,1", "{1}"),
+            ("不等式 < 1,-2,1", "∅"),
+            ("不等式 >= 1,-2,1", "ℝ"),
+            ("不等式 > 1,0,1", "ℝ"),
+            ("不等式 >= -1,0,-1", "∅"),
+            ("不等式 ≤ 0,-2,1", "[1/2, ∞)"),
+            ("不等式 < 0,3,-1", "(-∞, 1/3)"),
+            ("不等式 ≥ 0,0,0", "ℝ"),
+            ("不等式 > 0,0,0", "∅"),
+        ] {
+            assert_eq!(solve_equation(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            solve_equation("不等式 = 1,-3,2"),
+            Err(EquationError::InequalityArguments)
         );
     }
 

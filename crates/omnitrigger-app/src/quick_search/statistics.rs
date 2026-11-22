@@ -53,12 +53,18 @@ enum StatisticsOperation {
     Population,
     Quartiles,
     Quantile(BigRational),
-    FrequencyTable,
-    Mode,
+    Frequencies(FrequencyReport),
     RootMeanSquare,
     HarmonicMean,
     StandardError,
     MedianAbsoluteDeviation,
+}
+
+#[derive(Clone, Copy)]
+enum FrequencyReport {
+    Table,
+    Cumulative,
+    Mode,
 }
 
 pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsError> {
@@ -69,8 +75,18 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "总体" | "population" => (StatisticsOperation::Population, values.trim()),
         "样本" | "sample" => (StatisticsOperation::Sample, values.trim()),
         "四分位" | "quartiles" => (StatisticsOperation::Quartiles, values.trim()),
-        "频数表" | "frequency-table" => (StatisticsOperation::FrequencyTable, values.trim()),
-        "众数" | "mode" => (StatisticsOperation::Mode, values.trim()),
+        "频数表" | "frequency-table" => (
+            StatisticsOperation::Frequencies(FrequencyReport::Table),
+            values.trim(),
+        ),
+        "累计分布" | "cumulative-distribution" | "ecdf" => (
+            StatisticsOperation::Frequencies(FrequencyReport::Cumulative),
+            values.trim(),
+        ),
+        "众数" | "mode" => (
+            StatisticsOperation::Frequencies(FrequencyReport::Mode),
+            values.trim(),
+        ),
         "均方根" | "rms" => (StatisticsOperation::RootMeanSquare, values.trim()),
         "调和平均" | "harmonic-mean" => (StatisticsOperation::HarmonicMean, values.trim()),
         "标准误" | "均值标准误" | "sem" | "standard-error" => {
@@ -128,8 +144,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         StatisticsOperation::Quantile(probability) => {
             report_quantiles(values, count, Some(&probability))
         }
-        StatisticsOperation::FrequencyTable => Ok(report_frequencies(values, count, false)),
-        StatisticsOperation::Mode => Ok(report_frequencies(values, count, true)),
+        StatisticsOperation::Frequencies(report) => Ok(report_frequencies(values, count, report)),
         StatisticsOperation::MedianAbsoluteDeviation => {
             median_absolute_deviation(values, count).map(|value| value.to_string())
         }
@@ -275,13 +290,17 @@ fn weighted_mean(input: &str) -> Result<String, StatisticsError> {
     bounded(total_value / total_weight).map(|value| value.to_string())
 }
 
-fn report_frequencies(values: Vec<(BigRational, u64)>, count: u64, modes_only: bool) -> String {
+fn report_frequencies(
+    values: Vec<(BigRational, u64)>,
+    count: u64,
+    report: FrequencyReport,
+) -> String {
     let mut frequencies = BTreeMap::<_, u64>::new();
     for (value, repetitions) in values {
         // 频数合计已在调用前检查，任一分组都不会超过合计。
         *frequencies.entry(value).or_default() += repetitions;
     }
-    if modes_only {
+    if matches!(report, FrequencyReport::Mode) {
         let highest = *frequencies.values().max().expect("至少有一个观测值");
         if highest == 1 {
             return "无众数 · 各值仅出现一次".to_owned();
@@ -294,10 +313,19 @@ fn report_frequencies(values: Vec<(BigRational, u64)>, count: u64, modes_only: b
             .join("、");
         return format!("众数 {modes} · 各出现 {highest} 次");
     }
-    std::iter::once("值\t次数\t频率".to_owned())
+    let cumulative = matches!(report, FrequencyReport::Cumulative);
+    let header = if cumulative {
+        "值\t累计次数\t累计频率"
+    } else {
+        "值\t次数\t频率"
+    };
+    let mut total = 0;
+    std::iter::once(header.to_owned())
         .chain(frequencies.into_iter().map(|(value, repetitions)| {
-            let share = BigRational::new(repetitions.into(), count.into());
-            format!("{value}\t{repetitions}\t{share}")
+            total += repetitions;
+            let occurrences = if cumulative { total } else { repetitions };
+            let share = BigRational::new(occurrences.into(), count.into());
+            format!("{value}\t{occurrences}\t{share}")
         }))
         .collect::<Vec<_>>()
         .join("\n")
@@ -737,6 +765,22 @@ mod tests {
         }
         assert_eq!(
             calculate_statistics("频数表 频数 5@18446744073709551615,5@1"),
+            Err(StatisticsError::FrequencyOverflow)
+        );
+    }
+
+    #[test]
+    fn reports_exact_cumulative_distribution_including_weighted_ties() {
+        assert_eq!(
+            calculate_statistics("累计分布 3,1/2,0.5,3,5").as_deref(),
+            Ok("值\t累计次数\t累计频率\n1/2\t2\t2/5\n3\t4\t4/5\n5\t5\t1")
+        );
+        assert_eq!(
+            calculate_statistics("ecdf 频数 2@18446744073709551614,1@1").as_deref(),
+            Ok("值\t累计次数\t累计频率\n1\t1\t1/18446744073709551615\n2\t18446744073709551615\t1")
+        );
+        assert_eq!(
+            calculate_statistics("累计分布 频数 2@18446744073709551615,1@1"),
             Err(StatisticsError::FrequencyOverflow)
         );
     }

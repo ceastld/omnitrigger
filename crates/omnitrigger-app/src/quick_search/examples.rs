@@ -41,6 +41,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "解一元二次不等式并返回区间",
+        query: "方程: 不等式 >= 1,-3,2",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "联立求解两个二元一次方程",
         query: "联立: 2,1,5; 1,-1,1",
     },
@@ -123,6 +128,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "逐项计算精确累计平均",
         query: "统计: 累计平均 1/2,1,2,4",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按数值查看累计次数和频率",
+        query: "统计: 累计分布 3,1/2,0.5,3,5",
     },
     Example {
         icon: Icon::Layers,
@@ -2537,6 +2547,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Color if !term.is_empty() && "色阶".starts_with(term) => {}
+        Scope::Equation if !term.is_empty() && "不等式".starts_with(term) => {}
         Scope::Cidr
             if !term.is_empty()
                 && ["子网", "排除"]
@@ -2589,6 +2600,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "累计合计"
                     | "累计平"
                     | "累计平均"
+                    | "累计分"
+                    | "累计分布"
                     | "均"
                     | "均方"
                     | "均方根"
