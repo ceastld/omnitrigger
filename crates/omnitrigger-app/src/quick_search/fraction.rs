@@ -86,8 +86,8 @@ impl FractionError {
             Self::RationalSquareRoot => "精确开方需要非负数，且结果能表示为分数",
             Self::IntegerSquareRoot => "isqrt 需要非负整数",
             Self::IntegerAggregate => "gcd 和 lcm 的参数须为整数",
-            Self::PrimeFactorizationDomain => "质因数分解需要非零整数",
-            Self::PrimeFactorizationRange => "待分解整数的绝对值最多为 1000000000000",
+            Self::PrimeFactorizationDomain => "请填写非零整数",
+            Self::PrimeFactorizationRange => "整数的绝对值最多为 1000000000000",
             Self::BitwiseArguments => "位运算的数值和移位量须为非负整数",
             Self::RepeatingDecimalLength => "循环小数最多展开 512 个小数位",
             Self::RepeatingDecimalSyntax => "用括号填写循环节，例如 0.(142857) 或 -2.1(6)",
@@ -234,7 +234,10 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
         return simplify_ratio(expression);
     }
     if verb == "质因数分解" || verb.eq_ignore_ascii_case("factorize") {
-        return prime_factorization(calculate_fraction(expression)?);
+        return prime_factorization(&calculate_fraction(expression)?);
+    }
+    if verb == "因数统计" || verb.eq_ignore_ascii_case("divisor-stats") {
+        return positive_divisor_stats(&calculate_fraction(expression)?);
     }
     let alignment = match verb.to_ascii_lowercase().as_str() {
         "就近对齐" | "round-step" => Some(FractionAlignment::Nearest),
@@ -295,9 +298,8 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     })
 }
 
-fn prime_factorization(value: BigRational) -> Result<String, FractionError> {
-    let sign = value.numer().sign();
-    if !value.is_integer() || sign == Sign::NoSign {
+fn prime_powers(value: &BigRational) -> Result<Vec<(u64, u32)>, FractionError> {
+    if !value.is_integer() || value.numer().sign() == Sign::NoSign {
         return Err(FractionError::PrimeFactorizationDomain);
     }
     let mut remaining = u64::try_from(value.numer().magnitude())
@@ -305,9 +307,6 @@ fn prime_factorization(value: BigRational) -> Result<String, FractionError> {
         .filter(|&value| value <= MAX_PRIME_FACTORIZATION)
         .ok_or(FractionError::PrimeFactorizationRange)?;
     let mut factors = Vec::new();
-    if sign == Sign::Minus {
-        factors.push("-1".to_owned());
-    }
     for divisor in std::iter::once(2).chain((3..).step_by(2)) {
         if divisor > remaining / divisor {
             break;
@@ -317,16 +316,49 @@ fn prime_factorization(value: BigRational) -> Result<String, FractionError> {
             remaining /= divisor;
             count += 1;
         }
-        match count {
-            0 => {}
-            1 => factors.push(divisor.to_string()),
-            _ => factors.push(format!("{divisor}**{count}")),
+        if count > 0 {
+            factors.push((divisor, count));
         }
     }
-    if remaining > 1 || factors.is_empty() {
-        factors.push(remaining.to_string());
+    if remaining > 1 {
+        factors.push((remaining, 1));
     }
-    Ok(factors.join(" * "))
+    Ok(factors)
+}
+
+fn prime_factorization(value: &BigRational) -> Result<String, FractionError> {
+    let powers = prime_powers(value)?;
+    let mut terms = Vec::new();
+    if value.numer().sign() == Sign::Minus {
+        terms.push("-1".to_owned());
+    }
+    for (prime, exponent) in powers {
+        terms.push(if exponent == 1 {
+            prime.to_string()
+        } else {
+            format!("{prime}**{exponent}")
+        });
+    }
+    if terms.is_empty() {
+        terms.push("1".to_owned());
+    }
+    Ok(terms.join(" * "))
+}
+
+fn positive_divisor_stats(value: &BigRational) -> Result<String, FractionError> {
+    let mut count = 1_u64;
+    let mut sum = 1_u64;
+    for (prime, exponent) in prime_powers(value)? {
+        count *= u64::from(exponent + 1);
+        let mut power = 1;
+        let mut prime_sum = 1;
+        for _ in 0..exponent {
+            power *= prime;
+            prime_sum += power;
+        }
+        sum *= prime_sum;
+    }
+    Ok(format!("正因数个数 {count}\n正因数之和 {sum}"))
 }
 
 fn simplify_ratio(input: &str) -> Result<String, FractionError> {
@@ -1487,6 +1519,22 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    #[test]
+    fn counts_and_sums_positive_divisors_of_signed_exact_integers() {
+        for (query, expected) in [
+            ("因数统计 12", "正因数个数 6\n正因数之和 28"),
+            ("因数统计 -360", "正因数个数 24\n正因数之和 1170"),
+            ("divisor-stats 1", "正因数个数 1\n正因数之和 1"),
+            ("因数统计 104729", "正因数个数 2\n正因数之和 104730"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            simplify_fraction("因数统计 0"),
+            Err(FractionError::PrimeFactorizationDomain)
+        );
     }
 
     #[test]

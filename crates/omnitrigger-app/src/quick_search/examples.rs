@@ -3618,6 +3618,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "计算正因数个数和总和",
+        query: "分数: 因数统计 12",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把多项精确数值化为最简整数比",
         query: "分数: 化简比例 0.5,3/4,1",
     },
@@ -3735,6 +3740,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "从带分数",
                     "限分母",
                     "质因数分解",
+                    "因数统计",
                     "化简比例",
                     "就近对齐",
                     "向下对齐",
