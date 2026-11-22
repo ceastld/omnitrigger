@@ -70,7 +70,7 @@ use crate::{
 use actions::{matching_actions, SearchAction};
 use applications::{ApplicationCache, ApplicationIndex};
 use aspect_ratio::{calculate_aspect_ratio, AspectRatioError};
-use batch::{batch_arguments, map_batch_lines, map_calculations_csv, BatchError};
+use batch::{batch_arguments, map_batch_csv, map_batch_lines, BatchError};
 use calculator::{calculate, looks_like_calculation, CalculationError};
 use calendar::{calculate_date, looks_like_date_query, DateError};
 use cidr::{calculate_cidr, CidrError};
@@ -650,14 +650,14 @@ impl Results {
                     } else if let Some(arguments) = batch_arguments(term, "分数对照", "exact-csv")
                     {
                         Self::text_value(
-                            map_calculations_csv(arguments, |query| {
+                            map_batch_csv(arguments, "算式", |query| {
                                 calculate_fraction(query).map(|value| value.to_string())
                             })
                             .map_err(ValueError::BatchFraction),
                         )
                     } else if let Some(arguments) = batch_arguments(term, "对照", "csv") {
                         Self::text_value(
-                            map_calculations_csv(arguments, calculate)
+                            map_batch_csv(arguments, "算式", calculate)
                                 .map_err(ValueError::BatchCalculation),
                         )
                     } else {
@@ -668,7 +668,12 @@ impl Results {
                 }
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
                 Scope::BatchConversion => {
-                    if let Some(arguments) = batch_arguments(term, "时长", "duration") {
+                    if let Some(arguments) = batch_arguments(term, "时长对照", "duration-csv") {
+                        Self::text_value(
+                            map_batch_csv(arguments, "输入", convert_duration)
+                                .map_err(ValueError::BatchDuration),
+                        )
+                    } else if let Some(arguments) = batch_arguments(term, "时长", "duration") {
                         Self::text_value(
                             map_batch_lines(arguments, convert_duration)
                                 .map_err(ValueError::BatchDuration),
@@ -2479,6 +2484,36 @@ mod tests {
     }
 
     #[test]
+    fn exports_duration_inputs_and_results_as_csv_with_original_error_line_numbers() {
+        assert!(matches!(
+            for_query(
+                "批量换算: 时长对照 扣除休息 23:45 到 01:15 | 30分钟\r\n平均 1min,3min to min",
+                &[]
+            ),
+            Results::Value(Ok(value))
+                if value.text == concat!(
+                    "输入,结果\r\n",
+                    "扣除休息 23:45 到 01:15 | 30分钟,01:00:00\r\n",
+                    "\"平均 1min,3min to min\",2 min"
+                )
+        ));
+        assert!(matches!(
+            for_query(
+                "批量换算: duration-csv 1s to ns\n\n扣除休息 08:00 到 08:15 | 30min",
+                &[]
+            ),
+            Results::Value(Err(ValueError::BatchDuration(BatchError::Row {
+                line: 3,
+                cause: DurationError::BreakOutOfRange
+            })))
+        ));
+        assert_eq!(
+            for_query("批量换算: 时长对", &[]).suggested_input(0),
+            Some("批量换算: 时长对照 扣除休息 23:45 到 01:15 | 30分钟\n08:00 到 10:15 to min")
+        );
+    }
+
+    #[test]
     fn converts_timestamps_line_by_line_with_a_shared_reference_time() {
         assert!(matches!(
             for_query("批量换算: 时间戳 1700000000 to Asia/Shanghai\r\n1970-01-01T08:00:00+08:00", &[]),
@@ -3278,6 +3313,7 @@ mod tests {
                     "时长: 排序 02:40,PT2M,00:55,02:00",
                     "时长: 降序 02:40,PT2M,00:55,02:00",
                     "批量换算: 时长 01:30 to s\nPT1M30S to min\n1天2.5秒 to iso",
+                    "批量换算: 时长对照 扣除休息 23:45 到 01:15 | 30分钟\n08:00 到 10:15 to min",
                     "帧数: 125 帧 @ 25 fps",
                     "帧数: 10秒 @ 30000/1001 fps",
                     "时间戳: 现在 + 90分钟 to UTC+8",

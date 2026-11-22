@@ -411,6 +411,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "逐行计算时长并导出输入与结果 CSV",
+        query: "批量换算: 时长对照 扣除休息 23:45 到 01:15 | 30分钟\n08:00 到 10:15 to min",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "逐行换算时间戳和带时区的日期时间",
         query: "批量换算: 时间戳 1700000000 to Asia/Shanghai\n1970-01-01T08:00:00+08:00",
     },
@@ -2800,7 +2805,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
             if matches!(
                 term,
                 "时" | "时长" | "时间" | "时间戳" | "路" | "路径" | "网" | "网址" | "日" | "日期"
-            ) => {}
+            ) || (!term.is_empty() && "时长对照".starts_with(term)) => {}
         Scope::Date
             if !term.is_empty()
                 && [

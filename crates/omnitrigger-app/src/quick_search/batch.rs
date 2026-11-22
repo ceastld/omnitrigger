@@ -18,15 +18,20 @@ pub(super) fn map_batch_lines<E>(
     batch_results(input, operation).map(|values| values.join("\n"))
 }
 
-pub(super) fn map_calculations_csv<E>(
+pub(super) fn map_batch_csv<E>(
     input: &str,
-    mut calculate: impl FnMut(&str) -> Result<String, E>,
+    input_header: &str,
+    mut operation: impl FnMut(&str) -> Result<String, E>,
 ) -> Result<String, BatchError<E>> {
     let rows = batch_results(input, |query| {
-        let result = calculate(query)?;
+        let result = operation(query)?;
         Ok(format!("{},{}", csv_cell(query), csv_cell(&result)))
     })?;
-    Ok(format!("算式,结果\r\n{}", rows.join("\r\n")))
+    Ok(format!(
+        "{},结果\r\n{}",
+        csv_cell(input_header),
+        rows.join("\r\n")
+    ))
 }
 
 fn batch_results<E>(
