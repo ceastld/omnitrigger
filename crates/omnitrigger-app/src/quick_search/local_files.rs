@@ -163,13 +163,19 @@ impl LocalFilesIndex {
         if query.order == DirectoryOrder::Name {
             matches.sort_by_key(|(rank, _)| *rank);
         }
-        if query.path_list && !matches.is_empty() {
+        if query.output == FileOutput::Json
+            || (query.output == FileOutput::Lines && !matches.is_empty())
+        {
             let paths = matches
                 .iter()
                 .map(|(_, entry)| entry.path.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-            return Results::text_value(Ok(paths));
+                .collect::<Vec<_>>();
+            let output = if query.output == FileOutput::Json {
+                serde_json::to_string(&paths).expect("路径字符串可以序列化为 JSON")
+            } else {
+                paths.join("\n")
+            };
+            return Results::text_value(Ok(output));
         }
         Results::Destinations(
             matches
@@ -191,7 +197,14 @@ struct FileQuery<'a> {
     filter: &'a str,
     order: DirectoryOrder,
     entry_type: DirectoryEntryType,
-    path_list: bool,
+    output: FileOutput,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileOutput {
+    Entries,
+    Lines,
+    Json,
 }
 
 fn split_query(query: &str) -> Option<FileQuery<'_>> {
@@ -200,7 +213,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
     let (filter, options) = filter.split_once('|').unwrap_or((filter, ""));
     let mut order = DirectoryOrder::Name;
     let mut entry_type = DirectoryEntryType::All;
-    let mut path_list = false;
+    let mut output = FileOutput::Entries;
     for option in options.split_whitespace() {
         match option.to_ascii_lowercase().as_str() {
             "最近修改" | "modified" if order == DirectoryOrder::Name => {
@@ -215,7 +228,10 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             "仅文件夹" | "folders" if entry_type == DirectoryEntryType::All => {
                 entry_type = DirectoryEntryType::Directory;
             }
-            "路径列表" | "paths" if !path_list => path_list = true,
+            "路径列表" | "paths" if output == FileOutput::Entries => output = FileOutput::Lines,
+            "路径json" | "json-paths" if output == FileOutput::Entries => {
+                output = FileOutput::Json
+            }
             _ => return None,
         }
     }
@@ -224,7 +240,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
         filter: filter.trim(),
         order,
         entry_type,
-        path_list,
+        output,
     })
 }
 
@@ -392,6 +408,18 @@ mod tests {
             Results::Destinations(items) if items.is_empty()
         ));
         assert!(split_query(r"C:\Work | | 路径列表 paths").is_none());
+        let json_query = r"C:\Work | report | 大小 路径JSON";
+        assert!(index.request(Some(json_query)).is_none());
+        assert!(matches!(
+            index.results(json_query),
+            Results::Value(Ok(value))
+                if value.text == r#"["C:\\Work\\z report.txt","C:\\Work\\report.txt"]"#
+        ));
+        assert!(matches!(
+            index.results(r"C:\Work | omitted | json-paths size"),
+            Results::Value(Ok(value)) if value.text == "[]"
+        ));
+        assert!(split_query(r"C:\Work | | 路径列表 路径JSON").is_none());
     }
 
     #[test]
