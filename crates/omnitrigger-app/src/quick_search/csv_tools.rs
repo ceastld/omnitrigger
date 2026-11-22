@@ -191,7 +191,7 @@ impl CsvError {
             }
             Self::DataConversionTarget(cause) => cause.message(),
             Self::RunningColumnArguments => {
-                "填写新列名、数值列和分组列，例如 [\"累计金额\",\"金额\",[\"部门\"]]"
+                "填写新列名、数值列和分组列，例如 [\"结果\",\"金额\",[\"部门\"]]"
             }
             Self::DataRowValue { cause, .. } => cause,
             Self::StackArguments => "用 JSON 字符串数组填写 2 至 16 张含表头的 CSV 表格",
@@ -307,7 +307,7 @@ enum Operation {
         name: String,
         source: ColumnReference,
         groups: Vec<ColumnReference>,
-        average: bool,
+        computation: RunningColumnComputation,
     },
     DeduplicateRows,
     DeduplicateByColumns(Vec<ColumnReference>),
@@ -389,6 +389,18 @@ enum ColumnArithmetic {
     Multiply,
     Divide,
     Formula(String),
+}
+
+#[derive(Clone, Copy)]
+enum RunningColumnComputation {
+    Sum,
+    Average,
+    Difference,
+}
+
+enum RunningColumnState {
+    Accumulation(RunningTotals),
+    Previous(Option<BigRational>),
 }
 
 #[derive(Deserialize)]
@@ -693,8 +705,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::ConvertDataColumn(name, source, target)
         }
-        kind @ ("累计合计列" | "running-sum-column" | "累计平均列" | "running-average-column") =>
-        {
+        kind @ ("累计合计列"
+        | "running-sum-column"
+        | "累计平均列"
+        | "running-average-column"
+        | "差分列"
+        | "difference-column") => {
             let ((name, source, groups), data) =
                 json_argument_and_data::<(String, ColumnReference, Vec<ColumnReference>)>(
                     input,
@@ -705,7 +721,13 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 name,
                 source,
                 groups,
-                average: matches!(kind, "累计平均列" | "running-average-column"),
+                computation: match kind {
+                    "差分列" | "difference-column" => RunningColumnComputation::Difference,
+                    "累计平均列" | "running-average-column" => {
+                        RunningColumnComputation::Average
+                    }
+                    _ => RunningColumnComputation::Sum,
+                },
             }
         }
         "计算列" | "compute-column" => {
@@ -1046,8 +1068,8 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             name,
             source,
             groups,
-            average,
-        } => running_column(&rows, &name, source, &groups, average),
+            computation,
+        } => running_column(&rows, &name, source, &groups, computation),
         Operation::DeduplicateRows => {
             let mut seen = HashSet::new();
             Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
@@ -2022,7 +2044,7 @@ fn running_column(
     name: &str,
     source: ColumnReference,
     groups: &[ColumnReference],
-    average: bool,
+    computation: RunningColumnComputation,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
     if name.trim().is_empty() || name.contains('\0') {
@@ -2031,7 +2053,7 @@ fn running_column(
     let source = source.resolve(header)?;
     validate_column_width(&[source], header.len())?;
     let groups = resolve_distinct_columns(header, groups, CsvError::GroupingColumns)?;
-    let mut totals = HashMap::<_, RunningTotals>::new();
+    let mut group_states = HashMap::new();
     let mut row_number = 0;
     write_appended_column(header, records, name, |row| {
         row_number += 1;
@@ -2039,18 +2061,44 @@ fn running_column(
             row: row_number,
             cause,
         };
-        let total = totals.entry(column_key(row, &groups)).or_default();
         let value = row[source].trim();
-        if !value.is_empty() {
-            let value =
-                parse_fraction_literal(value).map_err(|error| error_at_row(error.message()))?;
-            total
-                .push(value)
-                .map_err(|error| error_at_row(error.message()))?;
+        let value = (!value.is_empty())
+            .then(|| parse_fraction_literal(value))
+            .transpose()
+            .map_err(|error| error_at_row(error.message()))?;
+        let state =
+            group_states
+                .entry(column_key(row, &groups))
+                .or_insert_with(|| match computation {
+                    RunningColumnComputation::Difference => RunningColumnState::Previous(None),
+                    RunningColumnComputation::Sum | RunningColumnComputation::Average => {
+                        RunningColumnState::Accumulation(RunningTotals::default())
+                    }
+                });
+        match state {
+            RunningColumnState::Accumulation(total) => {
+                if let Some(value) = value {
+                    total
+                        .push(value)
+                        .map_err(|error| error_at_row(error.message()))?;
+                }
+                total
+                    .format(matches!(computation, RunningColumnComputation::Average))
+                    .map_err(|error| error_at_row(error.message()))
+            }
+            RunningColumnState::Previous(previous) => {
+                let Some(value) = value else {
+                    return Ok(String::new());
+                };
+                let difference = previous.as_ref().map(|previous| &value - previous);
+                *previous = Some(value);
+                let Some(difference) = difference else {
+                    return Ok(String::new());
+                };
+                ensure_exact_size(&difference).map_err(|error| error_at_row(error.message()))?;
+                Ok(difference.to_string())
+            }
         }
-        total
-            .format(average)
-            .map_err(|error| error_at_row(error.message()))
     })
 }
 
@@ -4453,6 +4501,19 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn computes_grouped_differences_from_the_previous_nonempty_value() {
+        let query = "差分列 [\"变化\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,\n北,0.5\n南,3/2\n北,2";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("部门,金额,变化\r\n北,1/3,\"\"\r\n南,2,\"\"\r\n北,\"\",\"\"\r\n北,0.5,1/6\r\n南,3/2,-1/2\r\n北,2,3/2")
+        );
+        assert!(matches!(
+            transform_csv("difference-column [\"差\",1,[]]\n金额\n2\n有误"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]
