@@ -18,6 +18,18 @@ struct WindowSummary<'a> {
     process: Option<&'a str>,
 }
 
+struct WindowFilter<'a> {
+    process: Option<&'a str>,
+    excluded_process: Option<&'a str>,
+    terms: &'a str,
+}
+
+impl WindowFilter<'_> {
+    fn matches_process(&self, process: &str) -> bool {
+        self.process.is_none_or(|name| process == name) && self.excluded_process != Some(process)
+    }
+}
+
 pub(super) struct SearchWindow {
     window: OpenWindow,
     title_key: String,
@@ -79,17 +91,18 @@ impl OpenWindowsIndex {
             "输出=csv" | "output=csv" => (Some(WindowExport::Csv), rest.trim_start()),
             _ => (None, query.as_str()),
         };
-        let Some((process, query)) = window_query(filter) else {
+        let Some(filter) = window_query(filter) else {
             return Results::OpenWindowsUnavailable(
-                "填写程序文件名，例如 进程=notepad.exe。文件名含空格时用双引号包住。".into(),
+                "进程和排除进程各接受一个程序文件名，例如 排除进程=notepad.exe。文件名含空格时用双引号包住。".into(),
             );
         };
+        let query = filter.terms;
         let terms: Vec<_> = query.split_whitespace().collect();
         let mut matches: Vec<_> = windows
             .iter()
-            .filter(|window| process.is_none_or(|name| window.process_key == name))
+            .filter(|window| filter.matches_process(&window.process_key))
             .filter_map(|window| {
-                let process_key = if process.is_some() {
+                let process_key = if filter.process.is_some() {
                     ""
                 } else {
                     &window.process_key
@@ -147,13 +160,38 @@ fn export_windows<'a>(
     }
 }
 
-fn window_query(query: &str) -> Option<(Option<&str>, &str)> {
-    let Some(input) = query
-        .strip_prefix("进程=")
-        .or_else(|| query.strip_prefix("process="))
-    else {
-        return Some((None, query));
-    };
+fn window_query(mut query: &str) -> Option<WindowFilter<'_>> {
+    let mut process = None;
+    let mut excluded_process = None;
+    loop {
+        let (slot, input) = if let Some(input) = query
+            .strip_prefix("进程=")
+            .or_else(|| query.strip_prefix("process="))
+        {
+            (&mut process, input)
+        } else if let Some(input) = query
+            .strip_prefix("排除进程=")
+            .or_else(|| query.strip_prefix("exclude-process="))
+        {
+            (&mut excluded_process, input)
+        } else {
+            break;
+        };
+        if slot.is_some() {
+            return None;
+        }
+        let (filename, terms) = parse_process_name(input)?;
+        *slot = Some(filename);
+        query = terms;
+    }
+    Some(WindowFilter {
+        process,
+        excluded_process,
+        terms: query,
+    })
+}
+
+fn parse_process_name(input: &str) -> Option<(&str, &str)> {
     let (process, terms) = if let Some(quoted) = input.strip_prefix('"') {
         let (name, terms) = quoted.split_once('"')?;
         if !terms.is_empty() && !terms.starts_with(char::is_whitespace) {
@@ -164,7 +202,7 @@ fn window_query(query: &str) -> Option<(Option<&str>, &str)> {
         input.split_at(input.find(char::is_whitespace).unwrap_or(input.len()))
     };
     (!process.trim().is_empty() && !process.contains(['/', '\\', ':', '"']))
-        .then_some((Some(process), terms.trim_start()))
+        .then_some((process, terms.trim_start()))
 }
 
 fn window_rank(title: &str, process: &str, query: &str, terms: &[&str]) -> Option<(u8, bool)> {
@@ -231,20 +269,22 @@ mod tests {
 
     #[test]
     fn recognizes_exact_process_filters_and_separates_remaining_title_terms() {
+        let process_and_terms =
+            |query| window_query(query).map(|filter| (filter.process, filter.terms));
         let query = search_key("进程＝ＯｍｎｉＴｒｉｇｇｅｒ．ｅｘｅ　报告");
         assert_eq!(
-            window_query(&query),
+            process_and_terms(&query),
             Some((Some("omnitrigger.exe"), "报告"))
         );
         assert_eq!(
-            window_query(r#"process="example tool.exe" 预算"#),
+            process_and_terms(r#"process="example tool.exe" 预算"#),
             Some((Some("example tool.exe"), "预算"))
         );
         assert_eq!(
-            window_query("process=notes.exe"),
+            process_and_terms("process=notes.exe"),
             Some((Some("notes.exe"), ""))
         );
-        assert_eq!(window_query("预算 notes"), Some((None, "预算 notes")));
+        assert_eq!(process_and_terms("预算 notes"), Some((None, "预算 notes")));
         for invalid in [
             "进程=",
             r#"process="" 标题"#,
@@ -258,6 +298,38 @@ mod tests {
             OpenWindowsIndex::Ready(Vec::new()).results("进程="),
             Results::OpenWindowsUnavailable(_)
         ));
+    }
+
+    #[test]
+    fn excludes_exact_process_names_without_losing_terms_or_export() {
+        let query = search_key("排除进程＝ＯｍｎｉＴｒｉｇｇｅｒ．ｅｘｅ　报告");
+        let filter = window_query(&query).unwrap();
+        assert_eq!(filter.terms, "报告");
+        assert!(!filter.matches_process("omnitrigger.exe"));
+        assert!(filter.matches_process("my-omnitrigger.exe"));
+        assert!(filter.matches_process(""));
+        for query in [
+            r#"process=notes.exe exclude-process="example tool.exe" budget"#,
+            r#"exclude-process="example tool.exe" process=notes.exe budget"#,
+        ] {
+            let filter = window_query(query).unwrap();
+            assert_eq!(filter.terms, "budget");
+            assert!(filter.matches_process("notes.exe"));
+            assert!(!filter.matches_process("example tool.exe"));
+        }
+        let filter = window_query("进程=notes.exe 排除进程=notes.exe").unwrap();
+        assert!(!filter.matches_process("notes.exe"));
+        let index = OpenWindowsIndex::Ready(Vec::new());
+        assert!(matches!(
+            index.results("输出=CSV 排除进程=notes.exe 标题"),
+            Results::Value(Ok(result)) if result.text == "标题,程序文件名"
+        ));
+        for query in ["排除进程=", "排除进程=a.exe 排除进程=b.exe"] {
+            assert!(matches!(
+                index.results(query),
+                Results::OpenWindowsUnavailable(_)
+            ));
+        }
     }
 
     #[test]
