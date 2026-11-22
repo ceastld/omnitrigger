@@ -99,6 +99,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
     let pretty = match operation.to_ascii_lowercase().as_str() {
         "格式化" | "format" | "pretty" => true,
         "压缩" | "compact" | "minify" => false,
+        "去注释" | "strip-comments" => return format_json(&strip_json_comments(source)?, true),
         "键排序" | "sort-keys" => return sort_json_keys(source),
         "取值" | "get" | "pointer" => return select_json_value(source),
         "取多路径" | "get-paths" => return select_json_paths(source),
@@ -133,12 +134,58 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "选键" | "pick-keys" => return pick_json_keys(source),
         _ => return Err(JsonError::UnknownOperation),
     };
+    format_json(source, pretty)
+}
+
+fn format_json(source: &str, pretty: bool) -> Result<String, JsonError> {
     if source.is_empty() {
         return Err(JsonError::Incomplete);
     }
     // 通过解析验证语法，再调整原文空白，保留键顺序、数字和字符串拼写。
     serde_json::from_str::<IgnoredAny>(source).map_err(json_parse_error)?;
     layout_json(source, pretty)
+}
+
+fn strip_json_comments(source: &str) -> Result<String, JsonError> {
+    let mut masked = source.as_bytes().to_vec();
+    let mut quoted = false;
+    let mut offset = 0;
+    while let Some(&byte) = masked.get(offset) {
+        match byte {
+            b'\\' if quoted => {
+                offset += 2;
+                continue;
+            }
+            b'"' => quoted = !quoted,
+            b'/' if !quoted => {
+                let end = match masked.get(offset + 1) {
+                    Some(b'/') => masked[offset + 2..]
+                        .iter()
+                        .position(|&byte| matches!(byte, b'\r' | b'\n'))
+                        .map_or(masked.len(), |length| offset + 2 + length),
+                    Some(b'*') => source[offset + 2..]
+                        .find("*/")
+                        .map(|length| offset + 4 + length)
+                        .ok_or(JsonError::Incomplete)?,
+                    _ => {
+                        offset += 1;
+                        continue;
+                    }
+                };
+                // 用空白隔开相邻标记，例如 1/*说明*/2 仍是两个数字。
+                for byte in &mut masked[offset..end] {
+                    if !matches!(*byte, b'\r' | b'\n') {
+                        *byte = b' ';
+                    }
+                }
+                offset = end;
+                continue;
+            }
+            _ => {}
+        }
+        offset += 1;
+    }
+    String::from_utf8(masked).map_err(|_| JsonError::Invalid)
 }
 
 fn layout_json(source: &str, pretty: bool) -> Result<String, JsonError> {
@@ -1185,6 +1232,33 @@ impl<'de> Visitor<'de> for ObjectEntries {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strips_json_comments_and_preserves_literals() {
+        let input = "去注释 {\r\n// 备注\r\n\"网址\":\"https://example.invalid/\",/* 跨行\r\n忽略 */\"数\":1.50,\"文字\":\"转义\\\" // /* 保留 */\"}";
+        let expected = r#"{
+  "网址": "https://example.invalid/",
+  "数": 1.50,
+  "文字": "转义\" // /* 保留 */"
+}"#;
+        assert_eq!(transform_json(input).as_deref(), Ok(expected));
+        assert_eq!(
+            transform_json("strip-comments 2e2 // 行尾").as_deref(),
+            Ok("2e2")
+        );
+        assert_eq!(
+            transform_json("去注释 [1/*说明*/2]"),
+            Err(JsonError::Invalid)
+        );
+        assert_eq!(
+            transform_json("去注释 [1,/* 未关闭"),
+            Err(JsonError::Incomplete)
+        );
+        assert_eq!(
+            transform_json("格式化 { /* 备注 */ }"),
+            Err(JsonError::Invalid)
+        );
+    }
 
     #[test]
     fn validates_every_json_line_and_retains_source_positions_after_blank_lines() {

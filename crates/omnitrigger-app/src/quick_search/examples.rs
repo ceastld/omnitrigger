@@ -1687,6 +1687,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "移除 JSONC 注释并格式化 JSON",
+        query: "JSON: 去注释 {\n// 说明\n\"网址\":\"https://example.invalid/\",/* 金额 */\n\"值\":1.50\n}",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把 JSON 对象列表转换为 CSV",
         query: r#"JSON: 转CSV [{"编号":"001","数量":1.20},{"编号":"002","备注":"甲,乙"}]"#,
     },
