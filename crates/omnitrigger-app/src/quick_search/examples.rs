@@ -255,6 +255,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量换算: 时间戳 1700000000 to Asia/Shanghai\n1970-01-01T08:00:00+08:00",
     },
     Example {
+        icon: Icon::Layers,
+        title: "逐行提取文件名、扩展名和转换文件网址",
+        query: "批量换算: 路径 文件名 \"C:\\工作\\报告 集.txt\"\n转文件网址 C:\\docs\\report 2026.txt\n扩展名 C:\\资料\\图.png",
+    },
+    Example {
         icon: Icon::Terminal,
         title: "一次算出多行算式",
         query: "批量计算: 2**8\n3^3\nsqrt(81)",
@@ -2183,7 +2188,8 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
     match scope {
         Scope::BatchCalculation if matches!(term, "分" | "分数") => {}
         Scope::Fraction if !term.is_empty() && "循环小数".starts_with(term) => {}
-        Scope::BatchConversion if matches!(term, "时" | "时长" | "时间" | "时间戳") => {}
+        Scope::BatchConversion
+            if matches!(term, "时" | "时长" | "时间" | "时间戳" | "路" | "路径") => {}
         Scope::Date
             if !term.is_empty()
                 && ["列出", "格式化", "解析", "月历"]

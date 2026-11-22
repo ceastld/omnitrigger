@@ -336,6 +336,7 @@ enum ValueError {
     BatchConversion(BatchError<ConversionError>),
     BatchDuration(BatchError<DurationError>),
     BatchTimestamp(BatchError<TimestampError>),
+    BatchPath(BatchError<PathError>),
     Radix(RadixError),
     RatioAllocation(RatioAllocationError),
     AspectRatio(AspectRatioError),
@@ -408,6 +409,13 @@ impl ValueError {
                     TimestampError::message,
                 );
             }
+            Self::BatchPath(error) => {
+                return batch_error_message(
+                    error,
+                    "逐行输入路径操作，例如 文件名 C:\\docs\\report.txt",
+                    PathError::message,
+                );
+            }
             Self::Radix(error) => error.message(),
             Self::RatioAllocation(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
@@ -451,6 +459,7 @@ impl ValueError {
                 | Self::BatchConversion(BatchError::Empty)
                 | Self::BatchDuration(BatchError::Empty)
                 | Self::BatchTimestamp(BatchError::Empty)
+                | Self::BatchPath(BatchError::Empty)
                 | Self::AspectRatio(AspectRatioError::Incomplete)
                 | Self::Paper(PaperError::Incomplete)
                 | Self::Rectangle(RectangleError::Incomplete)
@@ -618,6 +627,11 @@ impl Results {
                         Self::text_value(
                             map_batch_lines(arguments, |line| convert_timestamp(line, now))
                                 .map_err(ValueError::BatchTimestamp),
+                        )
+                    } else if let Some(arguments) = batch_arguments(term, "路径", "path") {
+                        Self::text_value(
+                            map_batch_lines(arguments, path_component)
+                                .map_err(ValueError::BatchPath),
                         )
                     } else {
                         Self::text_value(convert_batch(term).map_err(ValueError::BatchConversion))
@@ -2182,6 +2196,28 @@ mod tests {
         assert!(for_query("批量换算: 时间", &[])
             .suggested_input(0)
             .is_some_and(|query| query.starts_with("批量换算: 时间戳 ")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn transforms_multiple_path_queries_and_reports_invalid_input_with_a_line_number() {
+        assert!(matches!(
+            for_query(
+                "批量换算: 路径 文件名 \"C:\\工作\\报告 集.txt\"\r\n转文件网址 C:\\docs\\report 2026.txt\n扩展名 C:\\资料\\图.png",
+                &[],
+            ),
+            Results::Value(Ok(value)) if value.text == "报告 集.txt\nfile:///C:/docs/report%202026.txt\npng"
+        ));
+        assert!(matches!(
+            for_query("批量换算: path 文件名 C:\\ok.txt\n\n转文件网址 对照", &[]),
+            Results::Value(Err(ValueError::BatchPath(BatchError::Row {
+                line: 3,
+                cause: PathError::AbsolutePathRequired,
+            })))
+        ));
+        assert!(for_query("批量换算: 路", &[])
+            .suggested_input(0)
+            .is_some_and(|query| query.starts_with("批量换算: 路径 ")));
     }
 
     #[test]
