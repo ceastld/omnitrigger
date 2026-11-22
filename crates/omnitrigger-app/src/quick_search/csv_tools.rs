@@ -20,7 +20,7 @@ use super::{
     },
     operators::{select_index_ranges, IndexRangeError, NumberComparison},
     statistics::{summarize_unweighted, StatisticsError},
-    text_tools::{compare_natural, compile_regex, TextError},
+    text_tools::{compare_natural, compile_regex, newline_pattern, TextError},
 };
 
 const MAX_PIVOT_BYTES: usize = 1024 * 1024;
@@ -38,6 +38,7 @@ pub(super) enum CsvError {
     TooManyAddedCells,
     InvalidHeader,
     MarkdownAlignments,
+    MarkdownTable,
     InvalidColumns,
     InvalidColumnNames,
     NamedColumnArguments,
@@ -86,6 +87,7 @@ impl CsvError {
             Self::TooManyAddedCells => "每次最多补齐 16384 个空单元格，请缩小表格范围",
             Self::InvalidHeader => "CSV 表头的列名须非空且唯一",
             Self::MarkdownAlignments => "用 JSON 数组为每一列填写左、右、中或默认",
+            Self::MarkdownTable => "粘贴一张 Markdown 表格，首行是表头，第二行用短横线分隔",
             Self::InvalidColumns => "用逗号隔开互不重复的列号，列号从 1 开始",
             Self::InvalidColumnNames => "用 JSON 字符串数组输入互不重复的列名",
             Self::NamedColumnArguments => "用 JSON 数组填写互不重复的列名或列号，例如 [\"地区\",2]",
@@ -272,6 +274,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         "转json" | "json" => Operation::JsonRows,
         "对象" | "表头" | "objects" => Operation::JsonObjects,
         "markdown" | "表格" => Operation::Markdown(None),
+        "从markdown" | "from-markdown" => return read_markdown_table(input),
         "markdown对齐" | "markdown-align" => {
             let (alignments, data) = json_argument_and_data(input, CsvError::MarkdownAlignments)?;
             input = data;
@@ -1208,6 +1211,93 @@ fn markdown_table(
     Ok(lines.join("\n"))
 }
 
+fn read_markdown_table(input: &str) -> Result<String, CsvError> {
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input).trim();
+    let mut lines = newline_pattern().split(input);
+    let (Some(header), Some(alignment)) = (lines.next(), lines.next()) else {
+        return Err(CsvError::MarkdownTable);
+    };
+    let (header, header_has_pipe) = markdown_row(header);
+    let (alignment, alignment_has_pipe) = markdown_row(alignment);
+    let width = header.len();
+    if !(header_has_pipe || alignment_has_pipe)
+        || width == 0
+        || width != alignment.len()
+        || !alignment.iter().all(|cell| {
+            let dashes = cell.strip_prefix(':').unwrap_or(cell);
+            let dashes = dashes.strip_suffix(':').unwrap_or(dashes);
+            !dashes.is_empty() && dashes.bytes().all(|byte| byte == b'-')
+        })
+    {
+        return Err(CsvError::MarkdownTable);
+    }
+    let mut rows = vec![header];
+    for line in lines {
+        let (row, _) = markdown_row(line);
+        if row.is_empty() {
+            return Err(CsvError::MarkdownTable);
+        }
+        if row.len() > width {
+            return Err(CsvError::DifferentColumnCount);
+        }
+        rows.push(row);
+    }
+    pad_rows(rows)
+}
+
+fn markdown_row(line: &str) -> (Vec<String>, bool) {
+    let line = line.trim();
+    let inner = line.strip_prefix('|');
+    let line = inner.unwrap_or(line);
+    let mut escaped = false;
+    let mut cells = line
+        .split(move |character| {
+            let separator = character == '|' && !escaped;
+            escaped = character == '\\' && !escaped;
+            separator
+        })
+        .collect::<Vec<_>>();
+    let has_pipe = inner.is_some() || cells.len() > 1;
+    if cells.last() == Some(&"") {
+        cells.pop();
+    }
+    (
+        cells.into_iter().map(decode_markdown_cell).collect(),
+        has_pipe,
+    )
+}
+
+fn decode_markdown_cell(input: &str) -> String {
+    let mut input = input.trim();
+    let mut output = String::with_capacity(input.len());
+    while !input.is_empty() {
+        if let Some(rest) = ["<br>", "<br/>", "<br />"]
+            .into_iter()
+            .find_map(|tag| input.strip_prefix(tag))
+        {
+            output.push('\n');
+            input = rest;
+            continue;
+        }
+        let mut characters = input.chars();
+        let character = characters.next().expect("单元格还有字符");
+        if character == '\\' && characters.clone().next().is_some_and(markdown_needs_escape) {
+            output.push(characters.next().expect("转义符后还有字符"));
+        } else {
+            output.push(character);
+        }
+        input = characters.as_str();
+    }
+    output
+}
+
+fn markdown_needs_escape(character: char) -> bool {
+    matches!(
+        character,
+        '\\' | '|' | '`' | '*' | '_' | '~' | '[' | ']' | '<' | '>' | '&' | '$'
+    )
+}
+
 fn markdown_cell(cell: &str) -> String {
     let mut result = String::with_capacity(cell.len());
     let mut chars = cell.chars().peekable();
@@ -1219,10 +1309,7 @@ fn markdown_cell(cell: &str) -> String {
             result.push_str("<br>");
             continue;
         }
-        if matches!(
-            ch,
-            '\\' | '|' | '`' | '*' | '_' | '~' | '[' | ']' | '<' | '>' | '&' | '$'
-        ) {
+        if markdown_needs_escape(ch) {
             result.push('\\');
         }
         result.push(ch);
@@ -1515,6 +1602,40 @@ mod tests {
             r#"markdown-align ["unexpected"] 编号"#,
         ] {
             assert_eq!(transform_csv(query), Err(CsvError::MarkdownAlignments));
+        }
+    }
+
+    #[test]
+    fn reads_markdown_table_cells_with_escapes_breaks_and_missing_columns() {
+        assert_eq!(
+            transform_csv("从Markdown | 编号 | 商品 | 备注 |\n| :--- | :---: | ---: |\n| 001 | 茶\\|咖啡 | 上<br>下 |\n| 002 | **米** |").as_deref(),
+            Ok("编号,商品,备注\r\n001,茶|咖啡,\"上\n下\"\r\n002,**米**,\"\"")
+        );
+        assert_eq!(
+            transform_csv("from-markdown A | B\r\n--- | ---\rx").as_deref(),
+            Ok("A,B\r\nx,\"\"")
+        );
+        let csv = "编号,备注,原样\r\n001,\"茶|咖啡\n下一行\",<br> \\x *词*";
+        let markdown = transform_csv(&format!("Markdown {csv}")).unwrap();
+        assert_eq!(
+            transform_csv(&format!("从Markdown\n{markdown}")).as_deref(),
+            Ok(csv)
+        );
+        for (query, error) in [
+            ("从Markdown 标题\n---", CsvError::MarkdownTable),
+            ("从Markdown 标题\\|小节\n---", CsvError::MarkdownTable),
+            ("从Markdown A | B\n---", CsvError::MarkdownTable),
+            ("从Markdown | A |\n| : |\n| x |", CsvError::MarkdownTable),
+            (
+                "从Markdown | A |\n| --- |\n| x | y |",
+                CsvError::DifferentColumnCount,
+            ),
+            (
+                "从Markdown | A |\n| --- |\n\n| x |",
+                CsvError::MarkdownTable,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
         }
     }
 

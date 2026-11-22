@@ -280,6 +280,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "复数: 共轭 -2,3/4",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "计算复数的整数次幂",
+        query: "复数: 乘方 1,1 @ 5",
+    },
+    Example {
         icon: Icon::Layers,
         title: "用同一个分数乘矩阵中的每个元素",
         query: "矩阵: 数乘 -3/2 @ 1/3,2; -1,0",
@@ -1969,6 +1974,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Terminal,
         title: "给 Markdown 表格的每一列指定对齐方式",
         query: "CSV: Markdown对齐 [\"左\",\"中\",\"右\"] 编号,商品,数量\n001,茶|咖啡,2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "把 Markdown 表格转成 CSV",
+        query: "CSV: 从Markdown | 编号 | 商品 | 备注 |\n| :--- | :---: | ---: |\n| 001 | 茶\\|咖啡 | 上<br>下 |\n| 002 | 米 |",
     },
     Example {
         icon: Icon::Terminal,

@@ -384,7 +384,7 @@ fn show_whitespace(text: &str) -> String {
     result
 }
 
-fn newline_pattern() -> &'static Regex {
+pub(super) fn newline_pattern() -> &'static Regex {
     static NEWLINES: OnceLock<Regex> = OnceLock::new();
     NEWLINES.get_or_init(|| Regex::new(r"\r\n|\n|\r").expect("固定的换行表达式有效"))
 }
