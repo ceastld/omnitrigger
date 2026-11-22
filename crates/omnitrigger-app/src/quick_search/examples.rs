@@ -2477,6 +2477,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "保留 JSON 中每个重复键的首次出现",
+        query: r#"JSON: 去重复键 留首 {"状态":"草稿","编号":1,"状态":"完成"}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "保留 JSON 中每个重复键的最后一次出现",
+        query: r#"JSON: 去重复键 留末 {"状态":"草稿","编号":1,"状态":"完成"}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "用 JSON 指针作键展平数据",
         query: r#"JSON: 展平 {"订单":[{"a/b":9007199254740993},{}]}"#,
     },

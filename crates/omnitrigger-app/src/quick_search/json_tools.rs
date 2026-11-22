@@ -47,6 +47,7 @@ pub(super) enum JsonError {
     ComparisonTooLarge,
     PointerListTooLarge,
     DuplicateKeyReportTooLarge,
+    DuplicateKeyPolicy,
     FlattenedObjectTooLarge,
     ExpectedObject,
     ExpectedCollection,
@@ -110,6 +111,7 @@ impl JsonError {
             Self::ComparisonTooLarge => "JSON 对比结果超过 1 MiB",
             Self::PointerListTooLarge => "指针列表超过 1 MiB",
             Self::DuplicateKeyReportTooLarge => "重复键报告超过 1 MiB，请缩小数据范围",
+            Self::DuplicateKeyPolicy => "在 JSON 前填写留首或留末，指定保留哪次出现的键",
             Self::FlattenedObjectTooLarge => "JSON 展平结果超过 1 MiB",
             Self::ExpectedObject => "请输入 JSON 对象",
             Self::ExpectedCollection => "请输入 JSON 数组或对象以统计顶层条目数",
@@ -174,7 +176,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "格式化" | "format" | "pretty" => true,
         "压缩" | "compact" | "minify" => false,
         "去注释" | "strip-comments" => return format_json(&strip_json_comments(source)?, true),
-        "键排序" | "sort-keys" => return sort_json_keys(source),
+        "键排序" | "sort-keys" => return rewrite_object_keys(source, ObjectKeyMode::Sort),
         "取值" | "get" | "pointer" => return select_json_value(source),
         "取多路径" | "get-paths" => return select_json_paths(source),
         "取列" | "column" => return select_json_column(source),
@@ -210,6 +212,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "解析指针" | "parse-pointer" => return parse_json_pointer(source),
         "列指针" | "列路径" | "list-pointers" => return write_pointer_leaves(source, false),
         "重复键" | "duplicate-keys" => return report_duplicate_json_keys(source),
+        "去重复键" | "deduplicate-keys" => return remove_duplicate_json_keys(source),
         "展平" | "flatten" => return write_pointer_leaves(source, true),
         "改键" | "rename-key" => return rename_json_key(source),
         "改值" | "replace" => return write_json_value(source, false),
@@ -1375,7 +1378,27 @@ fn read_object_entries(source: &str) -> Result<Vec<(String, &RawValue)>, JsonErr
     Ok(entries)
 }
 
-fn sort_json_keys(source: &str) -> Result<String, JsonError> {
+enum ObjectKeyMode {
+    Sort,
+    Deduplicate { keep_last: bool },
+}
+
+fn remove_duplicate_json_keys(query: &str) -> Result<String, JsonError> {
+    let (policy, source) = query
+        .split_once(char::is_whitespace)
+        .ok_or(JsonError::DuplicateKeyPolicy)?;
+    let keep_last = match policy.to_ascii_lowercase().as_str() {
+        "留首" | "first" => false,
+        "留末" | "last" => true,
+        _ => return Err(JsonError::DuplicateKeyPolicy),
+    };
+    rewrite_object_keys(
+        source.trim_start(),
+        ObjectKeyMode::Deduplicate { keep_last },
+    )
+}
+
+fn rewrite_object_keys(source: &str, mode: ObjectKeyMode) -> Result<String, JsonError> {
     enum Part<'a> {
         Value(&'a RawValue),
         Key(String),
@@ -1397,9 +1420,23 @@ fn sort_json_keys(source: &str) -> Result<String, JsonError> {
                 match raw.as_bytes()[0] {
                     b'{' => {
                         let mut entries = read_object_entries(raw)?;
-                        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-                        if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-                            return Err(JsonError::DuplicateKey);
+                        match mode {
+                            ObjectKeyMode::Sort => {
+                                entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+                                if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                                    return Err(JsonError::DuplicateKey);
+                                }
+                            }
+                            ObjectKeyMode::Deduplicate { keep_last } => {
+                                if keep_last {
+                                    entries.reverse();
+                                }
+                                let mut seen = HashSet::with_capacity(entries.len());
+                                entries.retain(|(name, _)| seen.insert(name.clone()));
+                                if keep_last {
+                                    entries.reverse();
+                                }
+                            }
                         }
                         result.push('{');
                         pending.push(Part::Symbol('}'));
@@ -2381,6 +2418,31 @@ mod tests {
             Err(JsonError::DuplicateKey)
         );
         assert_eq!(write_pointer_leaves("[1,]", false), Err(JsonError::Invalid));
+    }
+
+    #[test]
+    fn keeps_the_explicit_first_or_last_occurrence_of_each_object_key() {
+        let source =
+            r#"{"a":1.00,"z":[{"k":1.20e+2,"k":9007199254740993}],"\u0061":-0.0,"b":"\u0062"}"#;
+        assert_eq!(
+            transform_json(&format!("去重复键 留首 {source}")).as_deref(),
+            Ok(r#"{"a":1.00,"z":[{"k":1.20e+2}],"b":"\u0062"}"#)
+        );
+        assert_eq!(
+            transform_json(&format!("deduplicate-keys LAST {source}")).as_deref(),
+            Ok(r#"{"z":[{"k":9007199254740993}],"a":-0.0,"b":"\u0062"}"#)
+        );
+        for query in ["去重复键 {\"z\":1}", "deduplicate-keys middle {}"] {
+            assert_eq!(transform_json(query), Err(JsonError::DuplicateKeyPolicy));
+        }
+        assert_eq!(
+            transform_json("去重复键 留首 [{\"a\":1},{\"a\":2}]").as_deref(),
+            Ok(r#"[{"a":1},{"a":2}]"#)
+        );
+        assert_eq!(
+            transform_json("去重复键 留末 [1,]"),
+            Err(JsonError::Invalid)
+        );
     }
 
     #[test]
