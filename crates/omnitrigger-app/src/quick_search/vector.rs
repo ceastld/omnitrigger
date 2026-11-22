@@ -15,7 +15,8 @@ pub(super) enum VectorError {
     UnknownOperation,
     Dimensions,
     CrossDimensions,
-    SegmentArguments,
+    LineArguments,
+    CoincidentLinePoints,
     ZeroDirection,
     ZeroAngleVector,
     ZeroUnitVector,
@@ -30,7 +31,8 @@ impl VectorError {
             Self::UnknownOperation => "输入 ? 向量 查看可用操作",
             Self::Dimensions => "各向量的分量数须一致",
             Self::CrossDimensions => "叉积需要两个三维向量",
-            Self::SegmentArguments => "用 @ 隔开点和线段，线段的两个端点用分号隔开",
+            Self::LineArguments => "用 @ 隔开待测点和两个已知点，两个已知点用分号隔开",
+            Self::CoincidentLinePoints => "直线需要两个不同的点",
             Self::ZeroDirection => "投影方向须为非零向量",
             Self::ZeroAngleVector => "计算夹角余弦需要两个非零向量",
             Self::ZeroUnitVector => "计算单位向量需要非零向量",
@@ -56,7 +58,8 @@ pub(super) fn calculate_vector(query: &str) -> Result<String, VectorError> {
             return Ok(format_square_root(&dot_product(&values, &values)?));
         }
         "单位向量" | "unit-vector" => return unit_vector(&components(input)?),
-        "线段距离" | "segment-distance" => return distance_to_segment(input),
+        "线段距离" | "segment-distance" => return distance_to_line(input, true),
+        "直线距离" | "line-distance" => return distance_to_line(input, false),
         _ => {}
     }
     if !matches!(
@@ -199,11 +202,9 @@ fn vector_cosine(left: &[BigRational], right: &[BigRational]) -> Result<String, 
     Ok(format_signed_square_root(&squared, dot.numer().sign()))
 }
 
-fn distance_to_segment(input: &str) -> Result<String, VectorError> {
-    let (point, segment) = input.split_once('@').ok_or(VectorError::SegmentArguments)?;
-    let (start, end) = segment
-        .split_once(';')
-        .ok_or(VectorError::SegmentArguments)?;
+fn distance_to_line(input: &str, restrict_to_segment: bool) -> Result<String, VectorError> {
+    let (point, line) = input.split_once('@').ok_or(VectorError::LineArguments)?;
+    let (start, end) = line.split_once(';').ok_or(VectorError::LineArguments)?;
     let (point, start, end) = (components(point)?, components(start)?, components(end)?);
     if point.len() != start.len() || start.len() != end.len() {
         return Err(VectorError::Dimensions);
@@ -212,11 +213,18 @@ fn distance_to_segment(input: &str) -> Result<String, VectorError> {
     let squared_length = dot_product(&direction, &direction)?;
     let zero = BigRational::default();
     let closest = if squared_length == zero {
+        if !restrict_to_segment {
+            return Err(VectorError::CoincidentLinePoints);
+        }
         start
     } else {
         let offset = vector_difference(&point, &start)?;
-        let weight = (dot_product(&offset, &direction)? / squared_length)
-            .clamp(zero, BigRational::from_integer(1.into()));
+        let weight = dot_product(&offset, &direction)? / squared_length;
+        let weight = if restrict_to_segment {
+            weight.clamp(zero, BigRational::from_integer(1.into()))
+        } else {
+            weight
+        };
         start
             .into_iter()
             .zip(direction)
@@ -282,6 +290,24 @@ mod tests {
         assert_eq!(
             calculate_vector("单位向量 0,0"),
             Err(VectorError::ZeroUnitVector)
+        );
+    }
+
+    #[test]
+    fn projects_onto_the_full_line_beyond_either_reference_point() {
+        for (query, expected) in [
+            ("直线距离 3,4 @ 0,0; 2,0", "距离 4\n最近点 3, 0"),
+            (
+                "line-distance -1/3,1/2 @ 2,0; 0,0",
+                "距离 1/2\n最近点 -1/3, 0",
+            ),
+            ("直线距离 1,2,3 @ 1,0,0; 1,1,0", "距离 3\n最近点 1, 2, 0"),
+        ] {
+            assert_eq!(calculate_vector(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            calculate_vector("直线距离 0,0 @ 3,4; 3,4"),
+            Err(VectorError::CoincidentLinePoints)
         );
     }
 

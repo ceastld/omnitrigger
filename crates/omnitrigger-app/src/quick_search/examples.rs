@@ -331,6 +331,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "计算点到整条直线的距离和垂足",
+        query: "向量: 直线距离 3,4 @ 0,0; 2,0",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "把第一个向量投影到第二个向量上",
         query: "向量: 投影 2,1; 1,1",
     },
