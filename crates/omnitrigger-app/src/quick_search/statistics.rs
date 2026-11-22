@@ -19,6 +19,7 @@ pub(super) enum StatisticsError {
     InvalidWeight,
     ZeroTotalWeight,
     InvalidProbability,
+    InvalidWindowWidth,
     Paired(LinearFitError),
     Evaluation(FractionError),
 }
@@ -33,6 +34,7 @@ impl StatisticsError {
             Self::InvalidWeight => "用 数值@非负权重，权重可写成分数或百分数",
             Self::ZeroTotalWeight => "权重合计须大于零",
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
+            Self::InvalidWindowWidth => "窗口大小须为正整数，且不能超过数值个数",
             Self::Paired(error) => error.message(),
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "请输入整数、有限小数、分数或精确算式"
@@ -64,6 +66,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "众数" | "mode" => (StatisticsOperation::Mode, values.trim()),
         "均方根" | "rms" => (StatisticsOperation::RootMeanSquare, values.trim()),
         "加权平均" | "weighted-mean" => return weighted_mean(values.trim()),
+        "移动平均" | "moving-average" => return moving_average(values.trim()),
         "协方差" | "样本协方差" | "covariance" => {
             return calculate_covariance(values, true).map_err(StatisticsError::Paired);
         }
@@ -131,6 +134,36 @@ fn observation_terms(input: &str) -> Result<Vec<&str>, StatisticsError> {
         return Err(StatisticsError::TooManyValues);
     }
     Ok(terms)
+}
+
+fn moving_average(input: &str) -> Result<String, StatisticsError> {
+    let (width, input) = operation_and_arguments(input);
+    let width = width
+        .parse::<usize>()
+        .ok()
+        .filter(|width| *width > 0)
+        .ok_or(StatisticsError::InvalidWindowWidth)?;
+    let terms = observation_terms(input.trim())?;
+    if width > terms.len() {
+        return Err(StatisticsError::InvalidWindowWidth);
+    }
+    let values = terms
+        .into_iter()
+        .map(|term| calculate_fraction(term).map_err(StatisticsError::Evaluation))
+        .collect::<Result<Vec<_>, _>>()?;
+    let divisor = BigRational::from_integer(BigInt::from(width));
+    let mut sum = BigRational::default();
+    let mut averages = Vec::with_capacity(values.len() - width + 1);
+    for (index, value) in values.iter().enumerate() {
+        if index >= width {
+            sum -= &values[index - width];
+        }
+        sum = bounded(sum + value)?;
+        if index + 1 >= width {
+            averages.push(bounded(&sum / &divisor)?.to_string());
+        }
+    }
+    Ok(averages.join("\n"))
 }
 
 fn weighted_mean(input: &str) -> Result<String, StatisticsError> {
@@ -353,6 +386,35 @@ fn bounded(value: BigRational) -> Result<BigRational, StatisticsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_exact_averages_for_complete_sliding_windows() {
+        for (query, expected) in [
+            ("移动平均 2 1/2,1,2,4", "3/4\n3/2\n3"),
+            ("moving-average 3 1/2\r\n1\r\n2\r\n4", "7/6\n7/3"),
+            ("移动平均 1 0,comb(4,2),-2", "0\n6\n-2"),
+            (
+                "移动平均 2 9007199254740992,9007199254740993",
+                "18014398509481985/2",
+            ),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in ["移动平均 0 1,2", "移动平均 1/2 1,2", "移动平均 3 1,2"] {
+            assert_eq!(
+                calculate_statistics(query),
+                Err(StatisticsError::InvalidWindowWidth)
+            );
+        }
+        assert_eq!(
+            calculate_statistics("移动平均 2"),
+            Err(StatisticsError::Incomplete)
+        );
+    }
 
     #[test]
     fn reports_signed_exact_pearson_correlation() {

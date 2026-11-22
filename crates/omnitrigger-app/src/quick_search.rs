@@ -2348,6 +2348,7 @@ mod tests {
         assert!(examples_for("JSON: 排")[0].starts_with("JSON: 排除 "));
         assert!(examples_for("JSON: 按")[0].starts_with("JSON: 按值去重 "));
         assert!(examples_for("JSON: 分组")[0].starts_with("JSON: 分组计数 "));
+        assert!(examples_for("统计: 移动")[0].starts_with("统计: 移动平均 "));
         assert!(examples_for("JSON: 数值筛")[0].starts_with("JSON: 数值筛选 "));
         assert!(examples_for("JSON: 数值排")[0].starts_with("JSON: 数值排序 "));
         assert!(examples_for("JSON: 文本排")[0].starts_with("JSON: 文本排序 "));
