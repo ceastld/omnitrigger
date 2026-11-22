@@ -2013,6 +2013,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Browser,
+        title: "只保留指定的 URL 参数",
+        query: r#"URL: 保留参数 ["q","page"] https://example.invalid/doc?source=mail&q=a%20b&page=2&q=a+b#part"#,
+    },
+    Example {
+        icon: Icon::Browser,
         title: "将相对链接解析成完整 URL",
         query: r#"URL: 拼接 ["https://example.invalid/docs/api/","../guide?lang=zh#intro"]"#,
     },

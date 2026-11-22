@@ -94,7 +94,8 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
             Ok(url.into())
         }
         "去参数" | "strip-param" => remove_parameter(value),
-        "去参数组" | "strip-params" => remove_parameter_group(value),
+        "去参数组" | "strip-params" => filter_parameter_group(value, false),
+        "保留参数" | "keep-params" => filter_parameter_group(value, true),
         "加参数" | "append-param" => write_parameter(value, false),
         "设参数" | "set-param" => write_parameter(value, true),
         "文件链接" | "file-url" => encode_file_path(value),
@@ -232,21 +233,23 @@ fn remove_parameter(value: &str) -> Result<String, UrlEncodingError> {
         .split_once(char::is_whitespace)
         .ok_or(UrlEncodingError::Incomplete)?;
     let name = decode_form_value(name)?;
-    remove_query_parameters(address.trim_start(), |key| key == name.as_str())
+    filter_query_parameters(address.trim_start(), |key| key != Some(name.as_str()))
 }
 
-fn remove_parameter_group(input: &str) -> Result<String, UrlEncodingError> {
+fn filter_parameter_group(input: &str, keep_matching: bool) -> Result<String, UrlEncodingError> {
     let (names, address) =
         parameter_argument::<HashSet<String>>(input, UrlEncodingError::InvalidParameterNames)?;
     if names.iter().any(|name| name.contains('\0')) {
         return Err(UrlEncodingError::InvalidParameterNames);
     }
-    remove_query_parameters(address, |key| names.contains(key))
+    filter_query_parameters(address, |key| {
+        key.is_some_and(|key| names.contains(key)) == keep_matching
+    })
 }
 
-fn remove_query_parameters(
+fn filter_query_parameters(
     address: &str,
-    matches_name: impl Fn(&str) -> bool,
+    keep: impl Fn(Option<&str>) -> bool,
 ) -> Result<String, UrlEncodingError> {
     let mut url = Url::parse(address).map_err(|_| UrlEncodingError::InvalidUrl)?;
     let Some(query) = url.query() else {
@@ -255,10 +258,10 @@ fn remove_query_parameters(
     let mut parts = Vec::new();
     let mut removed = false;
     for part in query.split('&') {
-        if parameter_name(part).is_some_and(|key| matches_name(&key)) {
-            removed = true;
-        } else {
+        if keep(parameter_name(part).as_deref()) {
             parts.push(part);
+        } else {
+            removed = true;
         }
     }
     if removed {
@@ -661,6 +664,38 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    #[test]
+    fn keeps_only_selected_query_names_in_their_original_order_and_spelling() {
+        for (input, expected) in [
+            (
+                r#"保留参数 ["q","page"] https://example.invalid/doc?source=mail&q=a%20b&page=2&q=a+b#part"#,
+                "https://example.invalid/doc?q=a%20b&page=2&q=a+b#part",
+            ),
+            (
+                r#"keep-params ["tag","a b",""] https://example.invalid/?tag&Tag=1&a+b=%2f&&%74ag=2&a%2Bb=3&=0&%FF=x"#,
+                "https://example.invalid/?tag&a+b=%2f&%74ag=2&=0",
+            ),
+            (
+                r#"保留参数 [] https://example.invalid/?q=1#part"#,
+                "https://example.invalid/#part",
+            ),
+            (
+                r#"keep-params ["q"] https://example.invalid/#part"#,
+                "https://example.invalid/#part",
+            ),
+        ] {
+            assert_eq!(
+                convert_url_component(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            convert_url_component(r#"保留参数 ["q",1] https://example.invalid/"#),
+            Err(UrlEncodingError::InvalidParameterNames)
+        );
     }
 
     #[test]
