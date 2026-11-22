@@ -1332,6 +1332,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按字素簇、码位和编码分别统计文本长度",
+        query: "文本: 长度详情 \"👩‍💻 e\u{0301}\"",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "转成大写",
         query: "文本: 大写 Straße",
     },
@@ -2140,6 +2145,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Browser,
         title: "只保留指定的 URL 参数",
         query: r#"URL: 保留参数 ["q","page"] https://example.invalid/doc?source=mail&q=a%20b&page=2&q=a+b#part"#,
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按解码后的参数名稳定排列网址查询",
+        query: "URL: 排序参数 https://example.invalid/doc?z=a%20b&%61=a+b&a=%2B#part",
     },
     Example {
         icon: Icon::Browser,

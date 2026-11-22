@@ -100,6 +100,7 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "去参数" | "strip-param" => remove_parameter(value),
         "去参数组" | "strip-params" => filter_parameter_group(value, false),
         "保留参数" | "keep-params" => filter_parameter_group(value, true),
+        "排序参数" | "sort-params" => sort_query_parameters(value),
         "加参数" | "append-param" => write_parameter(value, false),
         "设参数" | "set-param" => write_parameter(value, true),
         "文件链接" | "file-url" => encode_file_path(value),
@@ -236,6 +237,10 @@ fn decode_form_value(value: &str) -> Result<String, UrlEncodingError> {
     decode_value(&value.replace('+', " "))
 }
 
+fn decode_form_component(value: &str) -> Result<String, UrlEncodingError> {
+    Ok(decode_percent_escapes(&value.replace('+', " "))?.into_owned())
+}
+
 fn remove_parameter(value: &str) -> Result<String, UrlEncodingError> {
     let (name, address) = value
         .split_once(char::is_whitespace)
@@ -288,6 +293,35 @@ fn parameter_name(part: &str) -> Option<String> {
     }
     let key = part.split_once('=').map_or(part, |(key, _)| key);
     decode_form_value(key).ok()
+}
+
+fn sort_query_parameters(address: &str) -> Result<String, UrlEncodingError> {
+    let mut url = Url::parse(address).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    let Some(query) = url.query().filter(|query| !query.is_empty()) else {
+        return Ok(url.into());
+    };
+    let mut fields = Vec::new();
+    for part in query.split('&').filter(|part| !part.is_empty()) {
+        let name = part.split_once('=').map_or(part, |(name, _)| name);
+        let name = decode_form_component(name)?;
+        fields.push((name.encode_utf16().collect::<Vec<_>>(), part));
+    }
+    fields.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+    let mut sorted = fields.into_iter().map(|(_, part)| part);
+    let query = query
+        .split('&')
+        .map(|part| {
+            if part.is_empty() {
+                part
+            } else {
+                sorted.next().expect("每个非空参数在排序列表中出现一次")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    url.set_query(Some(&query));
+    Ok(url.into())
 }
 
 fn parameter_argument<T: DeserializeOwned>(
@@ -364,7 +398,7 @@ fn decode_parameters(value: &str, json: bool) -> Result<String, UrlEncodingError
     let decode = |value: &str| {
         if json {
             // JSON 转义可以表示空字符，生成的输出仍能作为文本复制。
-            Ok(decode_percent_escapes(&value.replace('+', " "))?.into_owned())
+            decode_form_component(value)
         } else {
             decode_form_value(value)
         }
@@ -699,6 +733,30 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    #[test]
+    fn sorts_decoded_names_stably_by_utf16_without_changing_raw_parameters() {
+        for (query, expected) in [
+            (
+                "排序参数 https://example.invalid/p?z=a%20b&&%61=a+b&a=%2B&b+z=%ZZ#part",
+                "https://example.invalid/p?%61=a+b&&a=%2B&b+z=%ZZ&z=a%20b#part",
+            ),
+            (
+                "sort-params https://example.invalid/?%EE%80%80=2&%F0%9F%98%80=1",
+                "https://example.invalid/?%F0%9F%98%80=1&%EE%80%80=2",
+            ),
+            (
+                "sort-params https://example.invalid/p?#part",
+                "https://example.invalid/p?#part",
+            ),
+        ] {
+            assert_eq!(convert_url_component(query).as_deref(), Ok(expected));
+        }
+        assert_eq!(
+            convert_url_component("排序参数 https://example.invalid/?%2G=1"),
+            Err(UrlEncodingError::InvalidEscape)
+        );
     }
 
     #[test]

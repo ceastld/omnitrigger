@@ -189,6 +189,7 @@
 - 输入 `颜色: 色阶 #004080 到 #80C0FF @ 5`，可生成包含起止色的 5 个 HEX 色值。数量可填 2 至 32，按 sRGB 等间隔插值，半透明颜色使用预乘透明度插值。 [CSS Color 5 的颜色混合](https://www.w3.org/TR/css-color-5/#color-mix)
 - 输入 `颜色: 文字色 #3A86FF` 得到 `#000000` 和色样。搜索框比较黑字、白字在指定不透明底色上的对比度，返回对比度更高的颜色。半透明颜色可在同一条输入里用 `叠加` 合成底色。 [WCAG 2.2 的对比度定义](https://www.w3.org/TR/WCAG22/#dfn-contrast-ratio)
 - 输入 `字数: 你好👩‍💻` 得到 `3 字符 · 17 UTF-8 字节`。加引号可统计首尾空格，例如 `字数: " a "`。
+- 用 `文本: 长度详情` 可同时查看字素簇、Unicode 码位、UTF-16 单元和 UTF-8 字节。例如用引号输入 `"👩‍💻 é"`，分别得到 3、6、8 和 15。 [Unicode 字素簇规则](https://www.unicode.org/reports/tr29/#Grapheme_Cluster_Boundaries)
 - 输入 `文本: 码位 北京` 得到 `U+5317 U+4EAC`，用 `文本: 码位解码 U+5317 U+4EAC` 转回文字。组合字符按各自的 Unicode 码位显示。
 - 输入 `文本: UTF8编码 北京` 可查看 UTF-8 字节 `E5 8C 97 E4 BA AC`。用 `文本: UTF8解码` 加上十六进制字节可还原文字，接受连续数字、空白分隔或带 `0x` 的字节组。
 - 输入 `文本: JSON转义 他写下 "你好"` 可把文字转成 JSON 字符串。输入 `文本: JSON还原 "\u4F60\n好"` 会还原为两行文字。 [RFC 8259 的字符串语法](https://www.rfc-editor.org/rfc/rfc8259.html#section-7)
@@ -209,6 +210,7 @@
 - 输入 `URL: 去参数 source https://example.invalid/doc?q=a%20b&source=mail#part` 得到 `https://example.invalid/doc?q=a%20b#part`。同名参数会一起移除，其余参数保留编码和顺序。名称区分大小写，空格可写作 `%20`。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 输入 `URL: 去参数组 ["source","campaign"]` 后加空格和网址，可同时移除指定名称的全部参数。列表填写解码后的名称，可直接写空格或加号。
 - 输入 `URL: 保留参数 ["q","page"] https://example.invalid/doc?source=mail&q=a%20b&page=2&q=a+b#part` 得到 `https://example.invalid/doc?q=a%20b&page=2&q=a+b#part`。列表填写解码后的名称并区分大小写。匹配项保留原有顺序和编码，同名项可以重复。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
+- 用 `URL: 排序参数` 加上网址，可按解码后的名称排列查询参数。名称按 UTF‑16 码元比较，同名项保留原有顺序。各参数的编码和网址片段照原样保留。 [WHATWG 参数排序规则](https://url.spec.whatwg.org/#dom-urlsearchparams-sort)
 - 输入 `URL: 拼接 ["https://example.invalid/docs/api/","../guide?lang=zh#intro"]` 得到 `https://example.invalid/docs/guide?lang=zh#intro`。基准网址末尾的斜杠决定相对路径从哪个目录解析。 [Rust URL 相对链接解析](https://docs.rs/url/2.5.8/url/struct.Url.html#method.join)
 - 输入 `URL: 相对 ["https://example.invalid/docs/api/","https://example.invalid/docs/guide?lang=zh#intro"]` 得到 `../guide?lang=zh#intro`。两个 HTTP(S) 网址须使用相同协议、主机、端口和登录信息，生成的链接可以用原基准网址拼接还原。 [Rust URL 相对链接生成](https://docs.rs/url/2.5.8/url/struct.Url.html#method.make_relative)
 - 输入 `URL: 源 https://example.invalid:8443/doc?x=1#part` 得到 `https://example.invalid:8443`。结果由协议、主机和非默认端口组成。 [WHATWG URL 源的定义](https://url.spec.whatwg.org/#concept-url-origin)

@@ -182,6 +182,13 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
     match operation.as_str() {
         "大写" | "upper" | "uppercase" => Ok(text.to_uppercase()),
         "小写" | "lower" | "lowercase" => Ok(text.to_lowercase()),
+        "长度详情" | "length-details" => Ok(format!(
+            "{} 字素簇 · {} Unicode 码位\n{} UTF-16 单元 · {} UTF-8 字节",
+            text.graphemes(true).count(),
+            text.chars().count(),
+            text.encode_utf16().count(),
+            text.len()
+        )),
         "下划线命名" | "snake-case" => Ok(join_identifier_words(text, "_")),
         "短横线命名" | "kebab-case" => Ok(join_identifier_words(text, "-")),
         "小驼峰命名" | "camel-case" => Ok(camel_case(text, false)),
@@ -1670,6 +1677,22 @@ mod tests {
         assert_eq!(
             transform_text("码位解码 U+0061 U+0000"),
             Err(TextError::NullCharacter)
+        );
+    }
+
+    #[test]
+    fn distinguishes_grapheme_scalar_utf16_and_utf8_lengths() {
+        assert_eq!(
+            transform_text("长度详情 \"👩‍💻 e\u{0301}\"").as_deref(),
+            Ok("3 字素簇 · 6 Unicode 码位\n8 UTF-16 单元 · 15 UTF-8 字节")
+        );
+        assert_eq!(
+            transform_text("length-details \"\r\n\"").as_deref(),
+            Ok("1 字素簇 · 2 Unicode 码位\n2 UTF-16 单元 · 2 UTF-8 字节")
+        );
+        assert_eq!(
+            transform_text("长度详情 \"\"").as_deref(),
+            Ok("0 字素簇 · 0 Unicode 码位\n0 UTF-16 单元 · 0 UTF-8 字节")
         );
     }
 
