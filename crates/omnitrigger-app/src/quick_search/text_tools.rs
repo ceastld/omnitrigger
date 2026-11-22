@@ -171,6 +171,7 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "替换" | "replace" => return replace_text(text),
         "正则替换" | "regex-replace" => return replace_regex(text),
         "按行拼接" | "join-lines" => return join_lines(text),
+        "逐行配对" | "zip-lines" => return pair_lines_as_csv(text),
         "拆分成行" | "split-lines" => return split_lines(text),
         "转换换行" | "convert-line-endings" => return convert_line_endings(text),
         "正则拆分成行" | "regex-split-lines" => {
@@ -1157,6 +1158,30 @@ fn read_line_comparison(input: &str) -> Result<(String, String), TextError> {
     Ok((first, second))
 }
 
+fn pair_lines_as_csv(input: &str) -> Result<String, TextError> {
+    let (left, right) = read_line_comparison(input)?;
+    let (mut left, mut right) = (left.lines(), right.lines());
+    let mut output = String::new();
+    loop {
+        let (first, second) = (left.next(), right.next());
+        if first.is_none() && second.is_none() {
+            return Ok(output);
+        }
+        let first = csv_cell(first.unwrap_or_default());
+        let second = csv_cell(second.unwrap_or_default());
+        let separation = if output.is_empty() { "" } else { "\r\n" };
+        if output.len() + separation.len() + first.len() + 1 + second.len()
+            > MAX_EXPANDED_TEXT_BYTES
+        {
+            return Err(TextError::ResultTooLarge);
+        }
+        output.push_str(separation);
+        output.push_str(&first);
+        output.push(',');
+        output.push_str(&second);
+    }
+}
+
 enum LineSetOperation {
     Intersection,
     FirstOnly,
@@ -2137,6 +2162,28 @@ mod tests {
         }
         let large = format!(r#"替换 "x" "{}" {}"#, "Y".repeat(1500), "x".repeat(1500));
         assert_eq!(transform_text(&large), Err(TextError::ResultTooLarge));
+    }
+
+    #[test]
+    fn pairs_text_lines_as_csv_with_empty_cells_and_escaped_quotes() {
+        assert_eq!(
+            transform_text(r#"逐行配对 "a,b\n\"quote\"" "甲\r\n乙\r\n丙""#).as_deref(),
+            Ok("\"a,b\",甲\r\n\"\"\"quote\"\"\",乙\r\n\"\",丙")
+        );
+        assert_eq!(
+            transform_text(r#"zip-lines "A\n\nB" "1\n2""#).as_deref(),
+            Ok("A,1\r\n\"\",2\r\nB,\"\"")
+        );
+        assert_eq!(transform_text(r#"逐行配对 "" """#).as_deref(), Ok(""));
+        assert_eq!(
+            transform_text(r#"逐行配对 "A" "B" "C""#),
+            Err(TextError::InvalidLineComparison)
+        );
+        let long = "a".repeat(MAX_EXPANDED_TEXT_BYTES / 2);
+        assert_eq!(
+            transform_text(&format!("逐行配对 \"{long}\" \"{long}\"")),
+            Err(TextError::ResultTooLarge)
+        );
     }
 
     #[test]

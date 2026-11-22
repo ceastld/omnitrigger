@@ -2117,6 +2117,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按行把两段文本配成两列 CSV",
+        query: r#"文本: 逐行配对 "苹果\n梨\n茶" "3\n2""#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按分隔符拆分成行",
         query: "文本: 拆分成行 \"、\" 苹果、梨",
     },
