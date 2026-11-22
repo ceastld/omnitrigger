@@ -1,11 +1,51 @@
 use std::{cell::RefCell, rc::Rc};
 
 use super::{
-    examples::matching_examples, Destination, SearchTrigger, DESTINATION_PAGE_SIZE, PAGES,
+    examples::{matching_examples, search_key},
+    Destination, InputSuggestion, SearchTrigger, DESTINATION_PAGE_SIZE, PAGES,
 };
 use crate::Page;
 
 const EXAMPLE_HISTORY_LIMIT: usize = 12;
+const BOOKMARK_LIMIT: usize = 12;
+
+#[derive(Clone, Default)]
+pub(super) struct QueryBookmarks(Rc<RefCell<Vec<String>>>);
+
+impl QueryBookmarks {
+    pub(super) fn contains(&self, query: &str) -> bool {
+        self.0.borrow().iter().any(|item| item == query)
+    }
+
+    pub(super) fn toggle(&self, query: &str) -> bool {
+        let mut items = self.0.borrow_mut();
+        if let Some(index) = items.iter().position(|item| item == query) {
+            items.remove(index);
+        } else if items.len() < BOOKMARK_LIMIT {
+            items.insert(0, query.to_owned());
+        } else {
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn matching(&self, filter: &str) -> Vec<InputSuggestion> {
+        let filter = search_key(filter);
+        self.0
+            .borrow()
+            .iter()
+            .filter(|query| {
+                let key = search_key(query);
+                filter.split_whitespace().all(|term| key.contains(term))
+            })
+            .map(|query| InputSuggestion {
+                expression: query.clone(),
+                label: None,
+                result: String::new(),
+            })
+            .collect()
+    }
+}
 
 #[derive(Clone, Default)]
 pub(super) struct RecentExamples(Rc<RefCell<Vec<usize>>>);
@@ -91,6 +131,26 @@ impl RecentDestinations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bookmarks_preserve_query_text_and_keep_items_until_explicitly_removed() {
+        let bookmarks = QueryBookmarks::default();
+        let reopened = bookmarks.clone();
+        let multiline = "CSV: 选择 1\n键,数值\n001,2  ";
+        assert!(bookmarks.toggle(multiline));
+        assert!(bookmarks.toggle("2**10"));
+        assert_eq!(reopened.matching("ｃｓｖ ００１")[0].expression, multiline);
+        assert!(reopened.contains("2**10"));
+        assert!(reopened.toggle("2**10"));
+        assert!(!bookmarks.contains("2**10"));
+        assert!(reopened.matching("1024").is_empty());
+        for index in 1..BOOKMARK_LIMIT {
+            assert!(bookmarks.toggle(&format!("1+{index}")));
+        }
+        assert!(!bookmarks.toggle("8+9999"));
+        assert_eq!(reopened.matching("").len(), BOOKMARK_LIMIT);
+        assert_eq!(reopened.matching("").last().unwrap().expression, multiline);
+    }
 
     #[test]
     fn example_history_is_shared_filters_in_recent_order_and_deduplicates() {

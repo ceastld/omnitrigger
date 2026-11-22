@@ -775,8 +775,8 @@ fn visible_input(content: &SharedString) -> (SharedString, LineOffsets) {
     (visible.into(), LineOffsets(offsets))
 }
 
-pub(super) fn input_preview(text: &'static str) -> SharedString {
-    visible_input(&SharedString::from(text)).0
+pub(super) fn input_preview(text: impl Into<SharedString>) -> SharedString {
+    visible_input(&text.into()).0
 }
 
 fn json_line_separators(text: &str) -> String {

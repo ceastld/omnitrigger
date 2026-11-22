@@ -63,6 +63,7 @@ pub(super) enum Scope {
     RatioAllocation,
     ToolIndex,
     ExampleHistory,
+    Bookmarks,
     UrlEncoding,
     Path,
 }
@@ -78,7 +79,7 @@ pub(super) fn scoped_query(query: &str) -> Option<(Scope, &str)> {
         return Some((scope, term));
     }
     match parse_scope(query)? {
-        scope @ Scope::Triggers(Some(_)) => Some((scope, "")),
+        scope @ (Scope::Triggers(Some(_)) | Scope::Bookmarks) => Some((scope, "")),
         _ => None,
     }
 }
@@ -93,6 +94,7 @@ pub(super) fn tool_example_keyword(query: &str) -> Option<&'static str> {
         Scope::CalculationHistory => Some("算式历史:"),
         Scope::BatchCalculation => Some("批量计算:"),
         Scope::ConversionHistory => Some("换算历史:"),
+        Scope::Bookmarks => Some("收藏:"),
         Scope::BatchConversion => Some("批量换算:"),
         Scope::Radix => Some("进制:"),
         Scope::Applications => Some("应用:"),
@@ -226,6 +228,7 @@ pub(super) fn parse_scope(prefix: &str) -> Option<Scope> {
         "配比" | "按比例分配" | "ratio allocation" => Scope::RatioAllocation,
         "工具" | "工具目录" | "tools" => Scope::ToolIndex,
         "用法历史" | "example history" => Scope::ExampleHistory,
+        "收藏" | "bookmarks" => Scope::Bookmarks,
         "网址" | "url" => Scope::UrlEncoding,
         "路径" | "path" => Scope::Path,
         _ => return None,

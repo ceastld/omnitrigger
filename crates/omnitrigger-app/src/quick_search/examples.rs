@@ -1742,6 +1742,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "找回用 Ctrl+D 收藏的查询",
+        query: "收藏:",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "选择换算目标单位",
         query: "10 km to",
     },
@@ -3193,7 +3198,7 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
 ];
 
-fn search_key(text: &str) -> String {
+pub(super) fn search_key(text: &str) -> String {
     let narrowed: String = text.chars().map(narrow_ascii_graphic).collect();
     narrowed.to_lowercase()
 }

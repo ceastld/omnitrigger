@@ -107,7 +107,7 @@ use presets::matching_presets;
 use radix::{convert_arbitrary_radix, RadixError};
 use ratio_allocation::{allocate_ratio, RatioAllocationError};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use recent::{RecentDestinations, RecentExamples};
+use recent::{QueryBookmarks, RecentDestinations, RecentExamples};
 use rectangle::{calculate_rectangle, RectangleError};
 use renminbi::{uppercase_renminbi, RenminbiError};
 use scope::{scoped_query, tool_example_keyword, Scope};
@@ -166,6 +166,7 @@ enum Results {
     Conversions(Vec<InputSuggestion>),
     ConversionTargets(Vec<InputSuggestion>),
     FileOptions(Vec<InputSuggestion>),
+    Bookmarks(Vec<InputSuggestion>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -257,6 +258,7 @@ pub(super) struct RecentSearch {
     calculations: RecentValues,
     conversions: RecentValues,
     examples: RecentExamples,
+    bookmarks: QueryBookmarks,
     applications: ApplicationCache,
     last_input: Rc<RefCell<String>>,
 }
@@ -607,6 +609,7 @@ impl Results {
             return match scope {
                 Scope::ToolIndex => Self::Help(tool_index_examples(term)),
                 Scope::ExampleHistory => Self::Help(recent.examples.matching(term)),
+                Scope::Bookmarks => Self::Bookmarks(recent.bookmarks.matching(term)),
                 Scope::Triggers(filter) => Self::Destinations(
                     matching_triggers(triggers, term, filter)
                         .into_iter()
@@ -1057,7 +1060,8 @@ impl Results {
             Self::Calculations(items)
             | Self::Conversions(items)
             | Self::ConversionTargets(items)
-            | Self::FileOptions(items) => Some(&items.get(selected)?.expression),
+            | Self::FileOptions(items)
+            | Self::Bookmarks(items) => Some(&items.get(selected)?.expression),
             _ => None,
         }
     }
@@ -1127,7 +1131,7 @@ impl Results {
             Self::ConversionTargets(items) if !items.is_empty() => {
                 132. + items.len().min(CONVERSION_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
             }
-            Self::FileOptions(items) if !items.is_empty() => {
+            Self::FileOptions(items) | Self::Bookmarks(items) if !items.is_empty() => {
                 132. + items.len().min(EXAMPLE_PAGE_SIZE) as f32 * EXAMPLE_ROW_HEIGHT
             }
             Self::Calculations(items) | Self::Conversions(items) if !items.is_empty() => {
@@ -1193,6 +1197,7 @@ pub(super) struct QuickSearch {
     application_refresh: ApplicationRefresh,
     input_before_help: Option<String>,
     previous_input: String,
+    bookmark_limit_reached: bool,
     _input_changes: Subscription,
     _activation: Subscription,
 }
@@ -1249,6 +1254,7 @@ impl QuickSearch {
         });
         let input_changes = cx.observe_in(&input, window, |this, input, window, cx| {
             let query = input.read(cx).text();
+            this.bookmark_limit_reached = false;
             if !query.trim().is_empty() {
                 this.index.recent.last_input.borrow_mut().clone_from(&query);
             }
@@ -1289,6 +1295,7 @@ impl QuickSearch {
             application_refresh: ApplicationRefresh::NotRequested,
             input_before_help: None,
             previous_input,
+            bookmark_limit_reached: false,
             _input_changes: input_changes,
             _activation: activation,
         }
@@ -1612,6 +1619,40 @@ impl QuickSearch {
         window.focus(&self.input.focus_handle(cx));
     }
 
+    fn bookmark_target<'a>(&'a self, query: &'a str) -> Option<&'a str> {
+        if let Results::Bookmarks(items) = &self.results {
+            return Some(&items.get(self.selected)?.expression);
+        }
+        let trimmed = query.trim();
+        (!trimmed.is_empty()
+            && !trimmed.starts_with(['?', '？'])
+            && !matches!(
+                self.results,
+                Results::FileOptions(_) | Results::Value(Err(ValueError::InputTooLong))
+            ))
+        .then_some(query)
+    }
+
+    fn toggle_bookmark(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = self.input.read(cx).text();
+        if query.trim().is_empty() {
+            self.fill_query("收藏: ", window, cx);
+            return;
+        }
+        let Some(target) = self.bookmark_target(&query) else {
+            return;
+        };
+        self.bookmark_limit_reached = !self.index.recent.bookmarks.toggle(target);
+        if matches!(self.results, Results::Bookmarks(_)) {
+            let selected = self.selected;
+            self.refresh_results(&query, window, cx);
+            if let Results::Bookmarks(items) = &self.results {
+                self.selected = selected.min(items.len().saturating_sub(1));
+            }
+        }
+        cx.notify();
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.input.read(cx).is_composing() {
             return;
@@ -1633,6 +1674,11 @@ impl QuickSearch {
                     self.input.update(cx, |input, cx| {
                         input.replace_text_in_range(None, "\n", window, cx);
                     });
+                }
+                cx.stop_propagation();
+            } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "d" {
+                if !event.is_held {
+                    self.toggle_bookmark(window, cx);
                 }
                 cx.stop_propagation();
             } else if modifiers == 1 && keystroke.modifiers.control && keystroke.key == "r" {
@@ -1786,7 +1832,8 @@ impl QuickSearch {
                     Results::Calculations(items)
                     | Results::Conversions(items)
                     | Results::ConversionTargets(items)
-                    | Results::FileOptions(items) => items.len(),
+                    | Results::FileOptions(items)
+                    | Results::Bookmarks(items) => items.len(),
                     Results::Value(_)
                     | Results::ApplicationsLoading
                     | Results::ApplicationsUnavailable(_)
@@ -1816,7 +1863,9 @@ impl QuickSearch {
         let (count, page_size) = match &self.results {
             Results::Destinations(items) => (items.len(), DESTINATION_PAGE_SIZE),
             Results::ConversionTargets(items) => (items.len(), CONVERSION_PAGE_SIZE),
-            Results::FileOptions(items) => (items.len(), EXAMPLE_PAGE_SIZE),
+            Results::FileOptions(items) | Results::Bookmarks(items) => {
+                (items.len(), EXAMPLE_PAGE_SIZE)
+            }
             Results::Help(items) => (items.len(), EXAMPLE_PAGE_SIZE),
             Results::Value(Ok(_)) => (self.expanded_value_pages.as_ref().map_or(0, Vec::len), 1),
             _ => return false,
@@ -1991,8 +2040,14 @@ impl QuickSearch {
             .children(visible.map(|(index, item)| {
                 let expression = item.expression.clone();
                 let (label, detail) = match item.label {
-                    Some(label) => (label.to_owned(), item.result.clone()),
-                    None => (expression.clone(), format!("= {}", item.result)),
+                    Some(label) => (label.into(), Some(item.result.clone())),
+                    None if matches!(self.results, Results::Bookmarks(_)) => {
+                        (input_preview(expression.clone()), None)
+                    }
+                    None => (
+                        expression.clone().into(),
+                        Some(format!("= {}", item.result)),
+                    ),
                 };
                 self.suggestion_row(index, EXAMPLE_ROW_HEIGHT)
                     .child(icon(glyph, 16., theme::ACCENT))
@@ -2004,14 +2059,16 @@ impl QuickSearch {
                             .font_family(theme::MONO_FONT)
                             .child(label),
                     )
-                    .child(
-                        div()
-                            .max_w(px(200.))
-                            .truncate()
-                            .font_family(theme::MONO_FONT)
-                            .text_color(rgb(theme::ACCENT))
-                            .child(detail),
-                    )
+                    .when_some(detail, |row, detail| {
+                        row.child(
+                            div()
+                                .max_w(px(200.))
+                                .truncate()
+                                .font_family(theme::MONO_FONT)
+                                .text_color(rgb(theme::ACCENT))
+                                .child(detail),
+                        )
+                    })
                     .when(index == self.selected, |row| {
                         row.child(div().text_color(rgb(theme::TEXT_MUTED)).child("Tab 填入"))
                     })
@@ -2193,6 +2250,21 @@ impl QuickSearch {
                 .text_color(rgb(theme::TEXT_MUTED))
                 .child("没有可追加的选项"),
             Results::FileOptions(items) => {
+                self.render_input_suggestions(items, Icon::Layers, EXAMPLE_PAGE_SIZE, cx)
+            }
+            Results::Bookmarks(items) if items.is_empty() => {
+                row.text_color(rgb(theme::TEXT_MUTED)).child(
+                    if matches!(
+                        scoped_query(&self.input.read(cx).text()),
+                        Some((Scope::Bookmarks, ""))
+                    ) {
+                        "用 Ctrl+D 收藏当前查询"
+                    } else {
+                        "未找到收藏的查询"
+                    },
+                )
+            }
+            Results::Bookmarks(items) => {
                 self.render_input_suggestions(items, Icon::Layers, EXAMPLE_PAGE_SIZE, cx)
             }
             Results::ApplicationsLoading => row
@@ -2425,6 +2497,22 @@ impl Render for QuickSearch {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         theme::apply(self.theme_mode, window.appearance());
         let focused = self.input.focus_handle(cx).is_focused(window);
+        let query = self.input.read(cx).text();
+        let bookmark_action = if query.trim().is_empty() {
+            Some(("查看收藏", "Ctrl+D 查看收藏"))
+        } else {
+            self.bookmark_target(&query).map(|target| {
+                if matches!(self.results, Results::Bookmarks(_)) {
+                    ("移除所选", "Ctrl+D 移除所选查询")
+                } else if self.index.recent.bookmarks.contains(target) {
+                    ("已收藏", "Ctrl+D 取消收藏")
+                } else if self.bookmark_limit_reached {
+                    ("最多收藏 12 项", "在收藏列表移除一项后再添加")
+                } else {
+                    ("收藏", "Ctrl+D 收藏当前查询")
+                }
+            })
+        };
         div()
             .id("quick-search")
             .size_full()
@@ -2446,6 +2534,17 @@ impl Render for QuickSearch {
                     .justify_between()
                     .items_center()
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("快速搜索"))
+                    .child(div().flex_1())
+                    .when_some(bookmark_action, |header, (label, hint)| {
+                        header.child(
+                            button("bookmark-query", label, Tone::Ghost, true)
+                                .h(px(24.))
+                                .tooltip(theme::text_tooltip(hint.into()))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_bookmark(window, cx);
+                                })),
+                        )
+                    })
                     .child(
                         div()
                             .id("close-quick-search")
@@ -3594,7 +3693,10 @@ mod tests {
         };
         for example in EXAMPLES {
             match index.results(example.query) {
-                Results::Value(Ok(_)) | Results::Calculations(_) | Results::Conversions(_) => {}
+                Results::Value(Ok(_))
+                | Results::Calculations(_)
+                | Results::Conversions(_)
+                | Results::Bookmarks(_) => {}
                 Results::ApplicationsLoading
                 | Results::OpenWindowsLoading
                 | Results::LocalFilesPrompt => {}
@@ -3603,6 +3705,24 @@ mod tests {
                 _ => panic!("用法示例没有可用结果：{}", example.query),
             }
         }
+    }
+
+    #[test]
+    fn quick_search_preserves_bookmarked_queries_when_the_index_is_reopened() {
+        let index = SearchIndex::default();
+        let query = "CSV: 选择 1\n编号,金额\n001,20  ";
+        assert!(index.recent.bookmarks.toggle(query));
+        let resumed = SearchIndex {
+            recent: index.recent.clone(),
+            ..SearchIndex::default()
+        };
+        let list = resumed.results("收藏：ＣＳＶ");
+        assert!(matches!(&list, Results::Bookmarks(items) if items.len() == 1));
+        assert_eq!(list.suggested_input(0), Some(query));
+        assert_eq!(list.suggested_input(1), None);
+        assert!(
+            matches!(resumed.results("bookmarks"), Results::Bookmarks(items) if items.len() == 1)
+        );
     }
 
     #[test]
