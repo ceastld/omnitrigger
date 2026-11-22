@@ -115,7 +115,8 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             (StatisticsOperation::MedianAbsoluteDeviation, values.trim())
         }
         "加权平均" | "weighted-mean" => return weighted_mean(values.trim()),
-        "移动平均" | "moving-average" => return moving_average(values.trim()),
+        "移动合计" | "moving-sum" => return moving_sum_or_average(values.trim(), false),
+        "移动平均" | "moving-average" => return moving_sum_or_average(values.trim(), true),
         "移动中位数" | "moving-median" => return moving_median(values.trim()),
         "移动最小" | "moving-min" => {
             return moving_extrema(values.trim(), MovingExtrema::Minimum)
@@ -303,21 +304,24 @@ fn sliding_window_values(input: &str) -> Result<(usize, Vec<BigRational>), Stati
     Ok((width, values))
 }
 
-fn moving_average(input: &str) -> Result<String, StatisticsError> {
+fn moving_sum_or_average(input: &str, average: bool) -> Result<String, StatisticsError> {
     let (width, values) = sliding_window_values(input)?;
-    let divisor = BigRational::from_integer(BigInt::from(width));
+    let divisor = average.then(|| BigRational::from_integer(BigInt::from(width)));
     let mut sum = BigRational::default();
-    let mut averages = Vec::with_capacity(values.len() - width + 1);
+    let mut results = Vec::with_capacity(values.len() - width + 1);
     for (index, value) in values.iter().enumerate() {
         if index >= width {
             sum -= &values[index - width];
         }
         sum = bounded(sum + value)?;
         if index + 1 >= width {
-            averages.push(bounded(&sum / &divisor)?.to_string());
+            results.push(match &divisor {
+                Some(divisor) => bounded(&sum / divisor)?.to_string(),
+                None => sum.to_string(),
+            });
         }
     }
-    Ok(averages.join("\n"))
+    Ok(results.join("\n"))
 }
 
 fn moving_median(input: &str) -> Result<String, StatisticsError> {
@@ -887,6 +891,12 @@ mod tests {
     fn reports_exact_averages_for_complete_sliding_windows() {
         for (query, expected) in [
             ("移动平均 2 1/2,1,2,4", "3/4\n3/2\n3"),
+            ("移动合计 2 1/2,1,2,4", "3/2\n3\n6"),
+            ("moving-sum 1 comb(4,2),-3/2,0", "6\n-3/2\n0"),
+            (
+                "移动合计 2 9007199254740992,9007199254740993",
+                "18014398509481985",
+            ),
             ("moving-average 3 1/2\r\n1\r\n2\r\n4", "7/6\n7/3"),
             ("移动平均 1 0,comb(4,2),-2", "0\n6\n-2"),
             (

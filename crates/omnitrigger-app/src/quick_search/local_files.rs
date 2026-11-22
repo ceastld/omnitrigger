@@ -39,6 +39,7 @@ const OPTION_HELP: &[(&str, &str)] = &[
     ("名称列表", "每行一个名称"),
     ("路径JSON", "导出路径数组"),
     ("时间CSV", "导出 UTC 时间与路径"),
+    ("清单CSV", "导出名称、类型、字节数、时间与路径"),
     ("大小合计", "汇总文件数和字节数"),
     ("后缀统计", "按扩展名汇总数量"),
     ("后缀大小", "按扩展名汇总字节数"),
@@ -314,9 +315,10 @@ impl LocalFilesIndex {
                 None => Results::LocalFilesUnavailable("有文件的大小无法读取".to_owned()),
             };
         }
-        if query.output == FileOutput::TimeCsv {
-            return Results::text_value(Ok(file_times_csv(
+        if matches!(query.output, FileOutput::TimeCsv | FileOutput::InventoryCsv) {
+            return Results::text_value(Ok(file_metadata_csv(
                 matches.into_iter().map(|(_, entry)| entry),
+                query.output == FileOutput::InventoryCsv,
             )));
         }
         if let FileOutput::MonthCounts(field) = query.output {
@@ -402,16 +404,37 @@ fn extension_summary<'a>(
     Some(output)
 }
 
-fn file_times_csv<'a>(entries: impl Iterator<Item = &'a LocalDirectoryEntry>) -> String {
-    let mut output = String::from("名称,创建时间UTC,修改时间UTC,路径");
+fn file_metadata_csv<'a>(
+    entries: impl Iterator<Item = &'a LocalDirectoryEntry>,
+    inventory: bool,
+) -> String {
+    let mut output = String::from(if inventory {
+        "名称,类型,字节数,创建时间UTC,修改时间UTC,路径"
+    } else {
+        "名称,创建时间UTC,修改时间UTC,路径"
+    });
     for entry in entries {
         let (created, modified) = entry.metadata.as_ref().map_or((0, 0), |time| {
             (time.creation_utc_100ns, time.write_utc_100ns)
         });
+        write!(output, "\r\n{},", csv_cell(&entry.name)).expect("写入字符串不会失败");
+        if inventory {
+            let (kind, size) = if entry.kind == "directory" {
+                ("文件夹", String::new())
+            } else {
+                (
+                    "文件",
+                    entry
+                        .size_bytes
+                        .map(|bytes| bytes.to_string())
+                        .unwrap_or_default(),
+                )
+            };
+            write!(output, "{kind},{},", csv_cell(&size)).expect("写入字符串不会失败");
+        }
         write!(
             output,
-            "\r\n{},{},{},{}",
-            csv_cell(&entry.name),
+            "{},{},{}",
             csv_cell(&format_filetime(created)),
             csv_cell(&format_filetime(modified)),
             csv_cell(&entry.path)
@@ -572,7 +595,7 @@ impl FileQuery<'_> {
             || self.created.is_active()
             || matches!(
                 self.output,
-                FileOutput::TimeCsv | FileOutput::MonthCounts(_)
+                FileOutput::TimeCsv | FileOutput::InventoryCsv | FileOutput::MonthCounts(_)
             )
     }
 
@@ -643,6 +666,7 @@ enum FileOutput {
     Names,
     Json,
     TimeCsv,
+    InventoryCsv,
     MonthCounts(FileMonth),
     ExtensionCounts,
     ExtensionSizes,
@@ -692,6 +716,9 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
             }
             "时间csv" | "time-csv" if output == FileOutput::Entries => {
                 output = FileOutput::TimeCsv
+            }
+            "清单csv" | "inventory-csv" if output == FileOutput::Entries => {
+                output = FileOutput::InventoryCsv
             }
             "修改月份统计" | "modified-month-counts" if output == FileOutput::Entries => {
                 output = FileOutput::MonthCounts(FileMonth::Modified)
@@ -1187,6 +1214,7 @@ mod tests {
         let load = index.request(Some(query)).unwrap();
         assert!(load.timestamps);
         let mut report = entry("report,final.txt", "file");
+        report.size_bytes = Some(0);
         report.metadata = Some(omnitrigger_windows::LocalDirectoryMetadata {
             ordinal: 0,
             attributes: 0,
@@ -1220,6 +1248,24 @@ mod tests {
             index.results(r"C:\Work | missing | 最近修改 时间CSV"),
             Results::Value(Ok(value)) if value.text == "名称,创建时间UTC,修改时间UTC,路径"
         ));
+        assert!(index
+            .request(Some(r"C:\Work | report | 最近修改 清单CSV"))
+            .is_none());
+        assert!(matches!(
+            index.results(r"C:\Work | report | 最近修改 清单CSV"),
+            Results::Value(Ok(value))
+                if value.text == concat!(
+                    "名称,类型,字节数,创建时间UTC,修改时间UTC,路径\r\n",
+                    "\"report,final.txt\",文件,0,1969-12-31T23:59:59.999999900Z,",
+                    "1970-01-01T00:00:00Z,\"C:\\Work\\report,final.txt\"\r\n",
+                    "report folder,文件夹,\"\",\"\",\"\",C:\\Work\\report folder",
+                )
+        ));
+        assert!(matches!(
+            index.results(r"C:\Work | missing | 最近修改 inventory-csv"),
+            Results::Value(Ok(value)) if value.text == "名称,类型,字节数,创建时间UTC,修改时间UTC,路径"
+        ));
+        assert!(split_query(r"C:\Work | | 时间CSV 清单CSV").is_none());
     }
 
     #[test]
