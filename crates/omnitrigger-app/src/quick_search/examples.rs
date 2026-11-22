@@ -1422,6 +1422,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按自然年汇总日期区间的天数和工作日",
+        query: "日期: 按年拆分CSV 2023-12-30 至 2024-01-02",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "逐日导出星期和工作日标记",
         query: r#"日期: 逐日CSV 2024-02-29 至 2024-03-03 例外 [["2024-03-01"],["2024-03-02"]]"#,
     },
@@ -3918,6 +3923,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "按月拆分CSV",
                     "按周拆分CSV",
                     "按季度拆分CSV",
+                    "按年拆分CSV",
                     "逐日CSV",
                 ]
                 .into_iter()

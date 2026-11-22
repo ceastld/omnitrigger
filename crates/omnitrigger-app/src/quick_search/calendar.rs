@@ -48,6 +48,7 @@ pub(super) enum DateError {
     TooManyMonthRanges,
     TooManyWeekRanges,
     TooManyQuarterRanges,
+    TooManyYearRanges,
     OutOfRange,
 }
 
@@ -91,6 +92,7 @@ impl DateError {
             Self::TooManyMonthRanges => "最多可拆分为 366 个月份，请缩短区间",
             Self::TooManyWeekRanges => "最多可拆分为 366 周，请缩短区间",
             Self::TooManyQuarterRanges => "最多可拆分为 366 个季度，请缩短区间",
+            Self::TooManyYearRanges => "最多可拆分为 366 年，请缩短区间",
             Self::OutOfRange => "结果超出四位年份的日期范围",
         }
     }
@@ -766,6 +768,7 @@ enum DateRangeSplit {
     MonthsCsv,
     WeeksCsv,
     QuartersCsv,
+    YearsCsv,
     DaysCsv,
 }
 
@@ -803,6 +806,7 @@ fn split_date_range(
         DateRangeSplit::MonthsCsv => ranges.push("开始,结束,天数,工作日".to_owned()),
         DateRangeSplit::WeeksCsv => ranges.push("周号,开始,结束,天数,工作日".to_owned()),
         DateRangeSplit::QuartersCsv => ranges.push("季度,开始,结束,天数,工作日".to_owned()),
+        DateRangeSplit::YearsCsv => ranges.push("年份,开始,结束,天数,工作日".to_owned()),
         DateRangeSplit::DaysCsv => ranges.push("日期,星期,工作日".to_owned()),
     }
     for _ in 0..MAX_SPLIT_RANGES {
@@ -821,6 +825,7 @@ fn split_date_range(
                 in_range(NaiveDate::from_ymd_opt(start.year(), quarter * 3 + 1, 1))?,
                 3,
             )?,
+            DateRangeSplit::YearsCsv => in_range(NaiveDate::from_ymd_opt(start.year(), 12, 31))?,
             DateRangeSplit::DaysCsv => start,
         }
         .min(end);
@@ -837,6 +842,10 @@ fn split_date_range(
                     let year = start.year();
                     let number = quarter + 1;
                     format!("{year:04}-Q{number},{start},{last},{days},{workdays}")
+                }
+                DateRangeSplit::YearsCsv => {
+                    let year = start.year();
+                    format!("{year:04},{start},{last},{days},{workdays}")
                 }
                 DateRangeSplit::DaysCsv => {
                     let weekday = WEEKDAY_LABELS[start.weekday().num_days_from_monday() as usize];
@@ -857,6 +866,7 @@ fn split_date_range(
         DateRangeSplit::Months | DateRangeSplit::MonthsCsv => DateError::TooManyMonthRanges,
         DateRangeSplit::WeeksCsv => DateError::TooManyWeekRanges,
         DateRangeSplit::QuartersCsv => DateError::TooManyQuarterRanges,
+        DateRangeSplit::YearsCsv => DateError::TooManyYearRanges,
         DateRangeSplit::DaysCsv => DateError::TooManyDates,
     })
 }
@@ -1295,6 +1305,9 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
         "按季拆分csv" | "按季度拆分csv" | "split-quarters-csv" => {
             return split_date_range(rest, today, DateRangeSplit::QuartersCsv)
         }
+        "按年拆分csv" | "split-years-csv" => {
+            return split_date_range(rest, today, DateRangeSplit::YearsCsv)
+        }
         "逐日csv" | "days-csv" => return split_date_range(rest, today, DateRangeSplit::DaysCsv),
         _ => {}
     }
@@ -1571,6 +1584,31 @@ mod tests {
         assert_eq!(
             calculate_date("下月初", last_month),
             Err(DateError::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn exports_year_segments_with_partial_years_leap_days_and_workday_exceptions() {
+        let today = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        assert_eq!(
+            calculate_date(
+                r#"按年拆分CSV 2023-12-30 至 2024-01-02 例外 [["2024-01-01"],["2023-12-30"]]"#,
+                today
+            )
+            .as_deref(),
+            Ok(concat!(
+                "年份,开始,结束,天数,工作日\r\n",
+                "2023,2023-12-30,2023-12-31,2,1\r\n",
+                "2024,2024-01-01,2024-01-02,2,1",
+            ))
+        );
+        assert_eq!(
+            calculate_date("split-years-csv 2024-01-01 to 2024-12-31", today).as_deref(),
+            Ok("年份,开始,结束,天数,工作日\r\n2024,2024-01-01,2024-12-31,366,262")
+        );
+        assert_eq!(
+            calculate_date("按年拆分CSV 2000-01-01 至 2366-01-01", today),
+            Err(DateError::TooManyYearRanges)
         );
     }
 
