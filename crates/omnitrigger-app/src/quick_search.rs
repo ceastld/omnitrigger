@@ -2514,6 +2514,31 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "windows")]
+    fn open_test_search(index: SearchIndex, cx: &mut App) -> WindowHandle<QuickSearch> {
+        let results = index.results("");
+        cx.open_window(
+            WindowOptions {
+                show: false,
+                focus: false,
+                ..Default::default()
+            },
+            |window, cx| {
+                cx.new(|cx| {
+                    QuickSearch::new(
+                        appearance::Mode::Dark,
+                        WeakEntity::new_invalid(),
+                        index,
+                        results,
+                        window,
+                        cx,
+                    )
+                })
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
     #[cfg(target_os = "windows")]
     #[ignore = "需要 Windows 桌面会话"]
@@ -2524,28 +2549,8 @@ mod tests {
             .run(move |cx| {
                 let index = SearchIndex::default();
                 index.recent.last_input.borrow_mut().push_str("2**10");
-                let results = index.results("");
-                let window = cx
-                    .open_window(
-                        WindowOptions {
-                            show: false,
-                            focus: false,
-                            ..Default::default()
-                        },
-                        |window, cx| {
-                            cx.new(|cx| {
-                                QuickSearch::new(
-                                    appearance::Mode::Dark,
-                                    WeakEntity::new_invalid(),
-                                    index,
-                                    results,
-                                    window,
-                                    cx,
-                                )
-                            })
-                        },
-                    )
-                    .unwrap();
+                let recent = index.recent.clone();
+                let window = open_test_search(index, cx);
                 cx.spawn(async move |cx| {
                     let states = window.update(cx, |search, window, cx| {
                         search.input.update(cx, |input, cx| {
@@ -2579,13 +2584,51 @@ mod tests {
                             search.input.read(cx).text()
                         })
                     });
-                    send.send(states).unwrap();
+                    window
+                        .update(cx, |search, window, cx| {
+                            search.fill_query("3**4", window, cx);
+                        })
+                        .unwrap();
+                    window
+                        .update(cx, |search, window, cx| {
+                            let event = KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse("escape").unwrap(),
+                                is_held: false,
+                            };
+                            search.key_down(&event, window, cx);
+                        })
+                        .unwrap();
+                    let reopened = cx
+                        .update(|cx| {
+                            open_test_search(
+                                SearchIndex {
+                                    recent,
+                                    ..Default::default()
+                                },
+                                cx,
+                            )
+                        })
+                        .unwrap();
+                    let reopened_states = reopened
+                        .update(cx, |search, window, cx| {
+                            let before = search.input.read(cx).text();
+                            let event = KeyDownEvent {
+                                keystroke: gpui::Keystroke::parse("ctrl-shift-r").unwrap(),
+                                is_held: false,
+                            };
+                            search.key_down(&event, window, cx);
+                            [before, search.input.read(cx).text()]
+                        })
+                        .unwrap();
+                    send.send((states, reopened_states)).unwrap();
                     cx.update(|cx| cx.quit()).unwrap();
                 })
                 .detach();
             });
+        let (states, reopened_states) = receive.recv().unwrap();
+        assert_eq!(reopened_states, ["", "3**4"]);
         assert_eq!(
-            receive.recv().unwrap().unwrap(),
+            states.unwrap(),
             [
                 "换行验证甲",
                 "换行验证甲",
