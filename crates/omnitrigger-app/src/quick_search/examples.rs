@@ -1732,6 +1732,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "按所填字号换算 CSS em",
+        query: "1.5em @ 18px to px",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "按所填行高换算 CSS lh",
+        query: "48px @ 24px to lh",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "按视口宽和高换算 CSS vw 和 vh",
         query: "2.5vw @ 1440×900 to px",
     },

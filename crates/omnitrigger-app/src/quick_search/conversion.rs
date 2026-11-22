@@ -21,7 +21,7 @@ pub(super) enum ConversionError {
     InvalidInteger,
     UnknownUnit,
     InvalidTargets,
-    InvalidRootFontSize,
+    InvalidFontRelativeLength,
     InvalidViewportLength,
     ExactDataUnit,
     DifferentDimensions,
@@ -50,8 +50,8 @@ impl ConversionError {
             Self::InvalidInteger => "进制转换需要整数，例如 0xff to dec",
             Self::UnknownUnit => "无法识别换算单位",
             Self::InvalidTargets => "用方括号和逗号填写 1 至 8 个目标单位，例如 [MiB, KiB, Gib]",
-            Self::InvalidRootFontSize => {
-                "用根元素的正字号换算 rem 与 px，例如 1.25rem @ 16px to px"
+            Self::InvalidFontRelativeLength => {
+                "用 px 填写正的参考字号或行高，例如 1.5em @ 18px to px"
             }
             Self::InvalidViewportLength => {
                 "填写视口宽和高，换算 vw、vh、vmin、vmax 与 px，例如 2.5vw @ 1440×900 to px"
@@ -1339,10 +1339,20 @@ fn convert_quantity(source: &str, target: &str) -> Result<String, ConversionErro
             (length.trim_end(), Some(reference))
         });
     let (amount, unit) = split_quantity(length);
-    if unit.trim().eq_ignore_ascii_case("rem") || target.trim().eq_ignore_ascii_case("rem") {
-        return convert_root_font_length(amount, unit, target, reference);
+    // 紧贴数值的 em 中，e 可能被当作科学计数法的一部分。
+    let (amount, unit) = amount
+        .strip_suffix(['e', 'E'])
+        .and_then(|number| {
+            let suffix = &length[number.len()..];
+            suffix
+                .eq_ignore_ascii_case("em")
+                .then_some((number, suffix))
+        })
+        .unwrap_or((amount, unit));
+    if let Some(font_unit) = css_relative_unit(unit, target, &["rem", "em", "lh", "rlh"]) {
+        return convert_font_relative_length(amount, unit, target, font_unit, reference);
     }
-    if let Some(viewport_unit) = css_viewport_unit(unit).or_else(|| css_viewport_unit(target)) {
+    if let Some(viewport_unit) = css_relative_unit(unit, target, &["vw", "vh", "vmin", "vmax"]) {
         return convert_viewport_length(amount, unit, target, viewport_unit, reference);
     }
     let (amount, source) = parse_quantity(source)?;
@@ -1351,39 +1361,43 @@ fn convert_quantity(source: &str, target: &str) -> Result<String, ConversionErro
     })
 }
 
-fn convert_root_font_length(
+fn convert_font_relative_length(
     amount: &str,
     source: &str,
     target: &str,
+    font_unit: &str,
     reference: Option<&str>,
 ) -> Result<String, ConversionError> {
-    let (root_size, root_unit) = split_quantity(
+    let (size, unit) = split_quantity(
         reference
-            .ok_or(ConversionError::InvalidRootFontSize)?
+            .ok_or(ConversionError::InvalidFontRelativeLength)?
             .trim(),
     );
-    let root_size = evaluate(root_size).map_err(|_| ConversionError::InvalidRootFontSize)?;
-    if !root_unit.trim().eq_ignore_ascii_case("px") || root_size <= 0. {
-        return Err(ConversionError::InvalidRootFontSize);
+    let size = evaluate(size).map_err(|_| ConversionError::InvalidFontRelativeLength)?;
+    if !unit.trim().eq_ignore_ascii_case("px") || size <= 0. {
+        return Err(ConversionError::InvalidFontRelativeLength);
     }
-    let amount = evaluate(amount).map_err(|_| ConversionError::InvalidAmount)?;
-    let (value, unit) = match (
-        source.trim().to_ascii_lowercase().as_str(),
-        target.trim().to_ascii_lowercase().as_str(),
-    ) {
-        ("rem", "px") => (amount * root_size, "px"),
-        ("px", "rem") => (amount / root_size, "rem"),
-        _ => return Err(ConversionError::InvalidRootFontSize),
-    };
-    let text = format_result(value).map_err(|_| ConversionError::OutOfRange)?;
-    Ok(format!("{text}{unit}"))
+    format_scaled_css_length(
+        amount,
+        source,
+        target,
+        font_unit,
+        size,
+        ConversionError::InvalidFontRelativeLength,
+    )
 }
 
-fn css_viewport_unit(unit: &str) -> Option<&'static str> {
-    let unit = unit.trim();
-    ["vw", "vh", "vmin", "vmax"]
-        .into_iter()
-        .find(|name| name.eq_ignore_ascii_case(unit))
+fn css_relative_unit(
+    source: &str,
+    target: &str,
+    candidates: &[&'static str],
+) -> Option<&'static str> {
+    let source = source.trim();
+    let target = target.trim();
+    candidates
+        .iter()
+        .copied()
+        .find(|name| name.eq_ignore_ascii_case(source) || name.eq_ignore_ascii_case(target))
 }
 
 fn convert_viewport_length(
@@ -1404,16 +1418,34 @@ fn convert_viewport_length(
         _ => return Err(ConversionError::InvalidViewportLength),
     };
     let scale = f64::from(pixels) / 100.;
+    format_scaled_css_length(
+        amount,
+        source,
+        target,
+        viewport_unit,
+        scale,
+        ConversionError::InvalidViewportLength,
+    )
+}
+
+fn format_scaled_css_length(
+    amount: &str,
+    source: &str,
+    target: &str,
+    relative_unit: &str,
+    scale: f64,
+    invalid_pair: ConversionError,
+) -> Result<String, ConversionError> {
     let amount = evaluate(amount).map_err(|_| ConversionError::InvalidAmount)?;
     let source = source.trim();
     let target = target.trim();
     let (value, unit) =
-        if source.eq_ignore_ascii_case("px") && target.eq_ignore_ascii_case(viewport_unit) {
-            (amount / scale, viewport_unit)
-        } else if source.eq_ignore_ascii_case(viewport_unit) && target.eq_ignore_ascii_case("px") {
+        if source.eq_ignore_ascii_case("px") && target.eq_ignore_ascii_case(relative_unit) {
+            (amount / scale, relative_unit)
+        } else if source.eq_ignore_ascii_case(relative_unit) && target.eq_ignore_ascii_case("px") {
             (amount * scale, "px")
         } else {
-            return Err(ConversionError::InvalidViewportLength);
+            return Err(invalid_pair);
         };
     let text = format_result(value).map_err(|_| ConversionError::OutOfRange)?;
     Ok(format!("{text}{unit}"))
@@ -1790,7 +1822,27 @@ mod tests {
         ] {
             assert_eq!(
                 convert(query),
-                Some(Err(ConversionError::InvalidRootFontSize)),
+                Some(Err(ConversionError::InvalidFontRelativeLength)),
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn converts_relative_font_sizes_and_line_heights_with_the_given_px_reference() {
+        for (query, expected) in [
+            ("1.5em @ 18px to px", "27px"),
+            ("1e1em @ 18px to px", "180px"),
+            ("48px @ 24px to lh", "2lh"),
+            ("3rlh @ 20px to px", "60px"),
+            ("-24px @ 12px to EM", "-2em"),
+        ] {
+            assert_eq!(convert(query).unwrap().as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["1em to px", "2lh @ 0px to px", "1em @ 16px to rem"] {
+            assert_eq!(
+                convert(query),
+                Some(Err(ConversionError::InvalidFontRelativeLength)),
                 "{query}"
             );
         }
