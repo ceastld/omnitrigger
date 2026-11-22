@@ -69,8 +69,8 @@ impl CsvError {
             }
             Self::ComputedDivisionByZero => "计算列中遇到了除以零",
             Self::ComputedNumberRange => "计算列的结果超出精确计算范围",
-            Self::InvalidColumnValue => "请输入列号和带双引号的值，再粘贴表格",
-            Self::InvalidNumberFilter => "输入列号、比较符和数值，例如 CSV: 数值筛选 3 >= 1.5",
+            Self::InvalidColumnValue => "输入列号或带双引号的列名，再输入带双引号的值",
+            Self::InvalidNumberFilter => "输入列号或带双引号的列名、比较符和数值",
             Self::Regex(error) => error.message(),
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
@@ -102,7 +102,7 @@ enum Operation {
     DeduplicateRows,
     DeduplicateByColumns(Vec<usize>),
     FilterColumn {
-        column: usize,
+        column: ColumnReference,
         condition: ColumnCondition,
         keep_matches: bool,
     },
@@ -240,7 +240,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
         }
         "数值筛选" | "filter-numeric" => {
             let (column, rest) =
-                split_argument(input.trim_start()).ok_or(CsvError::InvalidNumberFilter)?;
+                filter_column_argument(input.trim_start(), CsvError::InvalidNumberFilter)?;
             let (operator, rest) =
                 split_argument(rest.trim_start()).ok_or(CsvError::InvalidNumberFilter)?;
             let (threshold, data) =
@@ -251,7 +251,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
                 parse_fraction_literal(threshold).map_err(|_| CsvError::InvalidNumber)?;
             input = data;
             Operation::FilterColumn {
-                column: column_index(column)?,
+                column,
                 condition: ColumnCondition::Number(comparison, threshold),
                 keep_matches: true,
             }
@@ -367,11 +367,22 @@ fn column_arguments(input: &str) -> Result<(Vec<usize>, &str), CsvError> {
     Ok((column_indices(columns)?, data))
 }
 
-fn column_value_arguments(input: &str) -> Result<(usize, String, &str), CsvError> {
-    let (column, input) = split_argument(input).ok_or(CsvError::InvalidColumnValue)?;
-    let column = column_index(column)?;
+fn column_value_arguments(input: &str) -> Result<(ColumnReference, String, &str), CsvError> {
+    let (column, input) = filter_column_argument(input, CsvError::InvalidColumnValue)?;
     let (value, data) = json_argument_and_data(input, CsvError::InvalidColumnValue)?;
     Ok((column, value, data))
+}
+
+fn filter_column_argument(
+    input: &str,
+    error: CsvError,
+) -> Result<(ColumnReference, &str), CsvError> {
+    if input.trim_start().starts_with('"') {
+        let (name, rest) = json_argument_and_data(input, error)?;
+        return Ok((ColumnReference::Name(name), rest));
+    }
+    let (number, rest) = split_argument(input).ok_or(error)?;
+    Ok((ColumnReference::Number(column_number(number)?), rest))
 }
 
 fn json_argument_and_data<T: DeserializeOwned>(
@@ -402,13 +413,17 @@ fn column_indices(input: &str) -> Result<Vec<usize>, CsvError> {
 }
 
 fn column_index(input: &str) -> Result<usize, CsvError> {
+    column_number(input).map(|number| number - 1)
+}
+
+fn column_number(input: &str) -> Result<usize, CsvError> {
     if !input.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(CsvError::InvalidColumns);
     }
     input
         .parse::<usize>()
         .ok()
-        .and_then(|number| number.checked_sub(1))
+        .filter(|&number| number > 0)
         .ok_or(CsvError::InvalidColumns)
 }
 
@@ -504,11 +519,12 @@ fn deduplicate_by_columns(rows: &[Vec<String>], columns: &[usize]) -> Result<Str
 
 fn filter_column(
     rows: &[Vec<String>],
-    column: usize,
+    column: ColumnReference,
     condition: &ColumnCondition,
     keep_matches: bool,
 ) -> Result<String, CsvError> {
     let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let column = column.resolve(header)?;
     validate_column_width(&[column], header.len())?;
     let mut selected = vec![header];
     for row in records {
@@ -1139,6 +1155,39 @@ mod tests {
             ("分组合计 1 1,2 名称,金额", CsvError::AggregateColumn),
             ("分组合计 1 3 名称,金额", CsvError::ColumnOutOfRange),
             ("分组合计 1 2 名称,金额\n甲,待定", CsvError::InvalidNumber),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn filters_csv_by_exact_header_name_for_each_condition_kind() {
+        let data = "编号,当前 状态,单价\n001,完成,1.50\n002,待办,1.49\n003,已完成,2e0";
+        let header = "编号,当前 状态,单价";
+        for (operation, rows) in [
+            (r#"筛选 "当前 状态" "完成""#, "001,完成,1.50"),
+            (r#"正则排除 "当前 状态" "完成$""#, "002,待办,1.49"),
+            (
+                r#"数值筛选 "单价" >= 3/2"#,
+                "001,完成,1.50\r\n003,已完成,2e0",
+            ),
+        ] {
+            let expected = format!("{header}\r\n{rows}");
+            assert_eq!(
+                transform_csv(&format!("{operation} {data}")).as_deref(),
+                Ok(expected.as_str()),
+                "{operation}"
+            );
+        }
+        for (query, error) in [
+            (
+                r#"筛选 "状态" "完成" 编号,当前状态"#,
+                CsvError::MissingColumnName,
+            ),
+            (
+                r#"数值筛选 "价格" >= 1 价格,价格"#,
+                CsvError::AmbiguousColumnName,
+            ),
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
         }

@@ -1718,8 +1718,8 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
-        title: "按第二列的精确数值筛选 CSV 行",
-        query: "CSV: 数值筛选 2 >= 3/2 编号,价格\n001,1.50\n002,1.49\n003,2e0",
+        title: "按指定表头列的精确数值筛选 CSV 行",
+        query: "CSV: 数值筛选 \"价格\" >= 3/2 编号,价格\n001,1.50\n002,1.49\n003,2e0",
     },
     Example {
         icon: Icon::Terminal,
