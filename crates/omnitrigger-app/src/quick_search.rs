@@ -441,7 +441,10 @@ impl ValueError {
                 | Self::Renminbi(RenminbiError::Incomplete)
                 | Self::Date(DateError::Incomplete)
                 | Self::LinearFit(LinearFitError::Incomplete)
-                | Self::Statistics(StatisticsError::Incomplete)
+                | Self::Statistics(
+                    StatisticsError::Incomplete
+                        | StatisticsError::Paired(LinearFitError::Incomplete)
+                )
                 | Self::Equation(EquationError::SystemRows)
                 | Self::Radix(RadixError::Incomplete)
                 | Self::RatioAllocation(RatioAllocationError::Incomplete)

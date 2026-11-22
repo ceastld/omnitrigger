@@ -21,7 +21,7 @@ impl LinearFitError {
         match self {
             Self::Incomplete => "输入至少两组 x,y，例如 0,1; 1,3; 2,5",
             Self::InvalidPoint => "每组须包含 x 和 y，用逗号隔开",
-            Self::TooManyPoints => "最多可拟合 64 个点",
+            Self::TooManyPoints => "最多可输入 64 对数值",
             Self::ConstantX => "所有 x 相同，无法求拟合斜率",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "坐标和预测值须为整数、有限小数、分数或精确算式"
@@ -46,10 +46,57 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
         }
         _ => (input, None),
     };
-    if points.is_empty() {
-        return Err(LinearFitError::Incomplete);
+    let sums = paired_sums(points)?;
+    // 用样本数乘以中心化平方和与乘积和，保持后续计算为精确有理数。
+    let variance_x = &sums.xx * &sums.count - &sums.x * &sums.x;
+    let covariance = sums.centered_cross_product();
+    let variance_y = &sums.yy * &sums.count - &sums.y * &sums.y;
+    check_size([&variance_x, &covariance, &variance_y])?;
+    if variance_x.numer().sign() == Sign::NoSign {
+        return Err(LinearFitError::ConstantX);
     }
+    let slope = &covariance / &variance_x;
+    let intercept = (sums.y - &slope * sums.x) / sums.count;
+    check_size([&slope, &intercept])?;
+    if let Some(x) = predict {
+        let y = slope * x + intercept;
+        check_size([&y])?;
+        return Ok(y.to_string());
+    }
+    let r_squared = if variance_y.numer().sign() == Sign::NoSign {
+        "未定义".to_owned()
+    } else {
+        let r_squared = (&covariance * &covariance) / (variance_x * variance_y);
+        check_size([&r_squared])?;
+        r_squared.to_string()
+    };
+    Ok(format!("斜率 {slope} · 截距 {intercept}\nR² {r_squared}"))
+}
 
+pub(super) fn calculate_covariance(points: &str, sample: bool) -> Result<String, LinearFitError> {
+    let sums = paired_sums(points.trim())?;
+    let degrees_of_freedom = &sums.count - BigInt::from(u8::from(sample));
+    let covariance = sums.centered_cross_product() / (&sums.count * degrees_of_freedom);
+    check_size([&covariance])?;
+    Ok(covariance.to_string())
+}
+
+struct PairedSums {
+    count: BigInt,
+    x: BigRational,
+    y: BigRational,
+    xx: BigRational,
+    xy: BigRational,
+    yy: BigRational,
+}
+
+impl PairedSums {
+    fn centered_cross_product(&self) -> BigRational {
+        &self.xy * &self.count - &self.x * &self.y
+    }
+}
+
+fn paired_sums(points: &str) -> Result<PairedSums, LinearFitError> {
     let points = points.split([';', '\n']);
     let count = points.clone().count();
     if count < 2 {
@@ -77,31 +124,14 @@ pub(super) fn calculate_linear_fit(input: &str) -> Result<String, LinearFitError
         check_size([&sx, &sy, &sxx, &sxy, &syy])?;
     }
 
-    // 用样本数乘以中心化平方和与乘积和，保持后续计算为精确有理数。
-    let n = BigInt::from(count);
-    let variance_x = sxx * &n - &sx * &sx;
-    let covariance = sxy * &n - &sx * &sy;
-    let variance_y = syy * &n - &sy * &sy;
-    check_size([&variance_x, &covariance, &variance_y])?;
-    if variance_x.numer().sign() == Sign::NoSign {
-        return Err(LinearFitError::ConstantX);
-    }
-    let slope = &covariance / &variance_x;
-    let intercept = (sy - &slope * sx) / n;
-    check_size([&slope, &intercept])?;
-    if let Some(x) = predict {
-        let y = slope * x + intercept;
-        check_size([&y])?;
-        return Ok(y.to_string());
-    }
-    let r_squared = if variance_y.numer().sign() == Sign::NoSign {
-        "未定义".to_owned()
-    } else {
-        let r_squared = (&covariance * &covariance) / (variance_x * variance_y);
-        check_size([&r_squared])?;
-        r_squared.to_string()
-    };
-    Ok(format!("斜率 {slope} · 截距 {intercept}\nR² {r_squared}"))
+    Ok(PairedSums {
+        count: BigInt::from(count),
+        x: sx,
+        y: sy,
+        xx: sxx,
+        xy: sxy,
+        yy: syy,
+    })
 }
 
 fn evaluate(input: &str) -> Result<BigRational, LinearFitError> {

@@ -106,6 +106,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "精确计算两组数值的样本协方差",
+        query: "统计: 协方差 0,0; 1,1; 2,1",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "精确计算两组数值的总体协方差",
+        query: "统计: 总体协方差 0,0; 1,1; 2,1",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "用半径计算圆周长和面积",
         query: "圆: 半径 3",
     },
@@ -2007,6 +2017,12 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "均"
                     | "均方"
                     | "均方根"
+                    | "协"
+                    | "协方"
+                    | "协方差"
+                    | "总体协"
+                    | "总体协方"
+                    | "总体协方差"
             ) => {}
         Scope::Json
         | Scope::Csv

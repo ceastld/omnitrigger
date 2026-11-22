@@ -5,6 +5,7 @@ use num_rational::BigRational;
 
 use super::calculator::normalize;
 use super::fraction::{calculate_fraction, ensure_exact_size, format_square_root, FractionError};
+use super::linear_fit::{calculate_covariance, LinearFitError};
 use super::operators::split_top_level_commas;
 
 const MAX_VALUES: usize = 128;
@@ -18,6 +19,7 @@ pub(super) enum StatisticsError {
     InvalidWeight,
     ZeroTotalWeight,
     InvalidProbability,
+    Paired(LinearFitError),
     Evaluation(FractionError),
 }
 
@@ -31,6 +33,7 @@ impl StatisticsError {
             Self::InvalidWeight => "用 数值@非负权重，权重可写成分数或百分数",
             Self::ZeroTotalWeight => "权重合计须大于零",
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
+            Self::Paired(error) => error.message(),
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "请输入整数、有限小数、分数或精确算式"
             }
@@ -61,6 +64,12 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "众数" | "mode" => (StatisticsOperation::Mode, values.trim()),
         "均方根" | "rms" => (StatisticsOperation::RootMeanSquare, values.trim()),
         "加权平均" | "weighted-mean" => return weighted_mean(values.trim()),
+        "协方差" | "样本协方差" | "covariance" => {
+            return calculate_covariance(values, true).map_err(StatisticsError::Paired);
+        }
+        "总体协方差" | "population-covariance" => {
+            return calculate_covariance(values, false).map_err(StatisticsError::Paired);
+        }
         "分位数" | "quantile" => {
             let (probability, values) = operation_and_arguments(values.trim());
             (
@@ -341,6 +350,31 @@ fn bounded(value: BigRational) -> Result<BigRational, StatisticsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computes_sample_and_population_covariance_for_exact_pairs() {
+        for (input, expected) in [
+            ("协方差 0,0; 1,1; 2,1", "1/2"),
+            ("总体协方差 0,0; 1,1; 2,1", "1/3"),
+            ("样本协方差 0,1/2\r\n2,-1/2", "-1"),
+            ("COVARIANCE 9007199254740992,0; 9007199254740993,1", "1/2"),
+            ("总体协方差 1,1; 1,4", "0"),
+        ] {
+            assert_eq!(
+                calculate_statistics(input).as_deref(),
+                Ok(expected),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            calculate_statistics("协方差 1,2"),
+            Err(StatisticsError::Paired(LinearFitError::Incomplete))
+        );
+        assert_eq!(
+            calculate_statistics("协方差 1,2; 3,4,5"),
+            Err(StatisticsError::Paired(LinearFitError::InvalidPoint))
+        );
+    }
 
     #[test]
     fn computes_exact_weighted_means_with_fractional_and_percentage_weights() {
