@@ -28,6 +28,7 @@ pub(super) enum StatisticsError {
     InvalidProbability,
     InvalidTrimShare,
     InvalidBinEdges,
+    CumulativeThreshold,
     BinomialArguments,
     HypergeometricArguments,
     InvalidWindowWidth,
@@ -52,6 +53,7 @@ impl StatisticsError {
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
             Self::InvalidTrimShare => "每端截去的比例须为 0 到小于 50%，例如 10%",
             Self::InvalidBinEdges => "按升序填写 1 至 16 个不同的分箱边界，用 @ 隔开边界和数值",
+            Self::CumulativeThreshold => "用 @ 隔开阈值和观测值，例如 2 @ 1,2,2,3",
             Self::BinomialArguments => "依次输入试验次数、成功次数和单次成功概率，最多 128 次试验",
             Self::HypergeometricArguments => {
                 "依次填写总数、目标项数、抽取数和命中数，例如 10,4,3,2。总数最多 4096"
@@ -77,6 +79,10 @@ enum StatisticsOperation {
     Quartiles,
     Quantile(BigRational),
     Frequencies(FrequencyReport),
+    CumulativeAt {
+        threshold: BigRational,
+        frequency: bool,
+    },
     Bins(Vec<BigRational>),
     RootMeanSquare,
     HarmonicMean,
@@ -108,6 +114,22 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             StatisticsOperation::Frequencies(FrequencyReport::Cumulative),
             values.trim(),
         ),
+        operation @ ("累计次数" | "cumulative-count" | "累计频率" | "cumulative-frequency") =>
+        {
+            let (threshold, input) = values
+                .split_once('@')
+                .filter(|(threshold, _)| !threshold.trim().is_empty())
+                .ok_or(StatisticsError::CumulativeThreshold)?;
+            let threshold =
+                calculate_fraction(threshold.trim()).map_err(StatisticsError::Evaluation)?;
+            (
+                StatisticsOperation::CumulativeAt {
+                    threshold,
+                    frequency: matches!(operation, "累计频率" | "cumulative-frequency"),
+                },
+                input.trim(),
+            )
+        }
         "众数" | "mode" => (
             StatisticsOperation::Frequencies(FrequencyReport::Mode),
             values.trim(),
@@ -211,6 +233,21 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             report_quantiles(values, count, Some(&probability))
         }
         StatisticsOperation::Frequencies(report) => Ok(report_frequencies(values, count, report)),
+        StatisticsOperation::CumulativeAt {
+            threshold,
+            frequency,
+        } => {
+            let matching: u64 = values
+                .into_iter()
+                .filter(|(value, _)| value <= &threshold)
+                .map(|(_, repetitions)| repetitions)
+                .sum();
+            if frequency {
+                Ok(BigRational::new(BigInt::from(matching), BigInt::from(count)).to_string())
+            } else {
+                Ok(matching.to_string())
+            }
+        }
         StatisticsOperation::Bins(edges) => Ok(report_binned_frequencies(values, count, &edges)),
         StatisticsOperation::MedianAbsoluteDeviation => {
             median_absolute_deviation(values, count).map(|value| value.to_string())
@@ -1245,6 +1282,40 @@ mod tests {
             calculate_statistics("频数表 频数 5@18446744073709551615,5@1"),
             Err(StatisticsError::FrequencyOverflow)
         );
+    }
+
+    #[test]
+    fn reports_cumulative_count_and_frequency_at_any_exact_threshold() {
+        for (query, expected) in [
+            ("累计次数 2 @ 1,2,2,3", "3"),
+            ("累计频率 2 @ 1,2,2,3", "3/4"),
+            ("累计次数 5/4 @ 1,3/2,2", "1"),
+            ("累计次数 -1 @ 1,2,3", "0"),
+            ("累计频率 7 @ 1,2,3", "1"),
+            ("累计频率 1/2 @ 频数 0.50@3,3/2@1", "3/4"),
+            ("cumulative-count 1 + 1 @ frequency 1@2,3@2", "2"),
+            (
+                "累计频率 1 @ 频数 1@1,2@18446744073709551614",
+                "1/18446744073709551615",
+            ),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            ("累计频率 2 1,2", StatisticsError::CumulativeThreshold),
+            ("累计次数 @ 1,2", StatisticsError::CumulativeThreshold),
+            ("累计次数 2 @", StatisticsError::Incomplete),
+            (
+                "累计次数 2 @ 频数 1@18446744073709551615,3@1",
+                StatisticsError::FrequencyOverflow,
+            ),
+        ] {
+            assert_eq!(calculate_statistics(query), Err(error), "{query}");
+        }
     }
 
     #[test]

@@ -191,6 +191,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "查询小于或等于指定值的次数",
+        query: "统计: 累计次数 2 @ 1,2,2,3",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "查询小于或等于指定值的比例",
+        query: "统计: 累计频率 1/2 @ 频数 0.50@3,3/2@1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按指定边界分箱并导出精确次数和频率",
         query: "统计: 分箱 0,1/2,2 @ -1,0,0.50,1,2",
     },
@@ -683,6 +693,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         icon: Icon::Clock,
         title: "扣掉休息计算净时长",
         query: "时长: 扣除休息 23:45 到 01:15 | 20分钟 + 10分钟",
+    },
+    Example {
+        icon: Icon::Clock,
+        title: "计算两个时长的精确比率",
+        query: "时长: 比率 45分钟 @ 2小时",
     },
     Example {
         icon: Icon::Clock,
@@ -3274,6 +3289,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "平均",
                     "频数平均",
                     "扣除休息",
+                    "比率",
                     "中位数",
                     "最短",
                     "最长",
@@ -3332,6 +3348,10 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "累计平均"
                     | "累计分"
                     | "累计分布"
+                    | "累计次"
+                    | "累计次数"
+                    | "累计频"
+                    | "累计频率"
                     | "分箱"
                     | "均"
                     | "均方"

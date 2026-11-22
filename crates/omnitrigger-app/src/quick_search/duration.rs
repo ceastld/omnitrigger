@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use num_bigint::BigInt;
+use num_rational::BigRational;
 
 use super::calculator::{format_result, normalize};
 use super::conversion::split_conversion;
@@ -61,6 +62,12 @@ pub(super) fn convert_duration(query: &str) -> Result<String, DurationError> {
         None => (input, None),
     };
     let (operation, values) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
+    if matches!(operation, "比率" | "比例" | "ratio") {
+        if output.is_some() {
+            return Err(DurationError::Invalid);
+        }
+        return duration_ratio(values);
+    }
     let (total, show_seconds) = match operation {
         "合计" | "sum" => (aggregate_duration_list(values, false)?, false),
         "平均" | "average" => (aggregate_duration_list(values, true)?, false),
@@ -130,6 +137,16 @@ fn bounded_duration_value(term: &str) -> Result<i128, DurationError> {
     let (nanos, _) = duration_value(term)?;
     bounded_duration(Some(nanos.unsigned_abs()))?;
     Ok(nanos)
+}
+
+fn duration_ratio(input: &str) -> Result<String, DurationError> {
+    let (left, right) = input.split_once('@').ok_or(DurationError::Incomplete)?;
+    let left = bounded_duration_value(left.trim())?;
+    let right = bounded_duration_value(right.trim())?;
+    if right == 0 {
+        return Err(DurationError::DivisionByZero);
+    }
+    Ok(BigRational::new(left.into(), right.into()).to_string())
 }
 
 fn duration_list_values(input: &str) -> impl Iterator<Item = Result<i128, DurationError>> + '_ {
@@ -590,6 +607,29 @@ mod tests {
         assert_eq!(
             convert_duration("排序 0.5ns,1ns"),
             Err(DurationError::Precision)
+        );
+    }
+
+    #[test]
+    fn divides_two_durations_as_exact_ratios_without_rounding_to_nanoseconds() {
+        for (query, expected) in [
+            ("比率 45分钟 @ 2小时", "3/8"),
+            ("比率 23:45 到 01:15 @ 2小时", "3/4"),
+            ("比例 00:00:01.25 + 500ms @ 7秒", "1/4"),
+            ("ratio 1ns @ 3ns", "1/3"),
+            ("比率 2秒 @ -3秒", "-2/3"),
+            ("比率 0秒 @ 1ns", "0"),
+        ] {
+            assert_eq!(convert_duration(query).as_deref(), Ok(expected), "{query}");
+        }
+        assert_eq!(
+            convert_duration("比率 1秒 @ 0秒"),
+            Err(DurationError::DivisionByZero),
+        );
+        assert_eq!(convert_duration("比率 1秒"), Err(DurationError::Incomplete),);
+        assert_eq!(
+            convert_duration("比率 1秒 @ 2秒 to ms"),
+            Err(DurationError::Invalid),
         );
     }
 
