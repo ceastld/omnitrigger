@@ -9,7 +9,11 @@ use serde::{
     ser::{Serialize, SerializeMap, Serializer},
 };
 
-use super::{fraction::parse_fraction_literal, text_tools::compare_natural};
+use super::{
+    fraction::parse_fraction_literal,
+    statistics::{summarize_unweighted, StatisticsError},
+    text_tools::compare_natural,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CsvError {
@@ -26,6 +30,9 @@ pub(super) enum CsvError {
     InvalidColumnValue,
     ColumnOutOfRange,
     InvalidNumber,
+    StatisticsColumn,
+    EmptyStatisticsColumn,
+    Statistics(StatisticsError),
     Serialization,
 }
 
@@ -44,7 +51,10 @@ impl CsvError {
             Self::AmbiguousColumnName => "所选列名在表头重复，请改用列号",
             Self::InvalidColumnValue => "请输入列号和带双引号的值，再粘贴表格",
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
-            Self::InvalidNumber => "数值排序所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
+            Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
+            Self::StatisticsColumn => "列统计需要一个列号，列号从 1 开始",
+            Self::EmptyStatisticsColumn => "请在表头下至少提供一条数据",
+            Self::Statistics(error) => error.message(),
             Self::Serialization => "无法生成 JSON",
         }
     }
@@ -67,6 +77,10 @@ enum Operation {
         keep_matches: bool,
     },
     CountByColumns(Vec<usize>),
+    ColumnStatistics {
+        column: usize,
+        sample: bool,
+    },
     SortByColumns {
         columns: Vec<usize>,
         descending: bool,
@@ -113,6 +127,17 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             let (columns, data) = column_arguments(input)?;
             input = data;
             Operation::CountByColumns(columns)
+        }
+        "列统计" | "column-stats" | "列总体" | "column-population" => {
+            let (columns, data) = column_arguments(input)?;
+            let [column] = columns.as_slice() else {
+                return Err(CsvError::StatisticsColumn);
+            };
+            input = data;
+            Operation::ColumnStatistics {
+                column: *column,
+                sample: matches!(operation.as_str(), "列统计" | "column-stats"),
+            }
         }
         "排序" | "sort-columns" | "降序" | "sort-columns-desc" | "数值排序" | "sort-numeric"
         | "数值降序" | "sort-numeric-desc" => {
@@ -162,6 +187,7 @@ pub(super) fn transform_csv(query: &str) -> Result<String, CsvError> {
             keep_matches,
         } => filter_column(&rows, column, &value, keep_matches),
         Operation::CountByColumns(columns) => count_by_columns(&rows, &columns),
+        Operation::ColumnStatistics { column, sample } => summarize_column(&rows, column, sample),
         Operation::SortByColumns {
             columns,
             descending,
@@ -359,6 +385,19 @@ fn sort_by_columns(
         ordered
     };
     Ok(write_rows(std::iter::once(header).chain(ordered), ','))
+}
+
+fn summarize_column(rows: &[Vec<String>], column: usize, sample: bool) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    validate_column_width(&[column], header.len())?;
+    let values = records
+        .iter()
+        .map(|row| parse_fraction_literal(&row[column]).map_err(|_| CsvError::InvalidNumber))
+        .collect::<Result<Vec<_>, _>>()?;
+    summarize_unweighted(values, sample).map_err(|error| match error {
+        StatisticsError::Incomplete => CsvError::EmptyStatisticsColumn,
+        error => CsvError::Statistics(error),
+    })
 }
 
 fn validate_column_width(columns: &[usize], width: usize) -> Result<(), CsvError> {
@@ -664,6 +703,29 @@ mod tests {
         );
         assert_eq!(transform_csv("排序 1 a,b").as_deref(), Ok("a,b"));
         assert_eq!(transform_csv("降序 3 a,b"), Err(CsvError::ColumnOutOfRange));
+    }
+
+    #[test]
+    fn summarizes_only_the_selected_numeric_csv_column() {
+        let data = "编号,数值\n001,1/2\n002,1.5\n003,2.5e0";
+        for (query, last_line) in [
+            ("列统计 2", "样本方差 1 · 标准差 1"),
+            ("列总体 2", "总体方差 2/3 · 标准差 √(2/3)"),
+        ] {
+            assert_eq!(
+                transform_csv(&format!("{query}\n{data}")),
+                Ok(format!("数量 3 · 合计 9/2\n平均值 3/2 · 中位数 3/2\n最小值 1/2 · 最大值 5/2\n{last_line}"))
+            );
+        }
+        for (query, error) in [
+            ("列统计 1,2 编号,金额", CsvError::StatisticsColumn),
+            ("列统计 3 编号,金额", CsvError::ColumnOutOfRange),
+            ("列总体 2 编号,金额", CsvError::EmptyStatisticsColumn),
+            ("列统计 2 编号,金额\n001,", CsvError::InvalidNumber),
+            ("列统计 2 编号,金额\n001,1+2", CsvError::InvalidNumber),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
     }
 
     #[test]

@@ -1536,6 +1536,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "CSV: 数值降序 2 编号,金额\n001,12.50\n002,-2.75\n003,3/2",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "统计 CSV 一列中的精确数值",
+        query: "CSV: 列统计 2 编号,数值\n001,1/2\n002,1.5\n003,2.5e0",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按总体方差统计 CSV 数值列",
+        query: "CSV: 列总体 2 编号,数值\n001,1/2\n002,1.5\n003,2.5e0",
+    },
+    Example {
         icon: Icon::Layers,
         title: "从路径提取文件名",
         query: r#"路径: 文件名 "C:\工作\发布 包.tar.gz""#,

@@ -133,6 +133,24 @@ fn report_frequencies(values: Vec<(BigRational, u64)>, count: u64, modes_only: b
         .join("\n")
 }
 
+pub(super) fn summarize_unweighted(
+    values: Vec<BigRational>,
+    sample: bool,
+) -> Result<String, StatisticsError> {
+    if values.is_empty() {
+        return Err(StatisticsError::Incomplete);
+    }
+    if values.len() > MAX_VALUES {
+        return Err(StatisticsError::TooManyValues);
+    }
+    let count = values.len() as u64;
+    summarize(
+        values.into_iter().map(|value| (value, 1)).collect(),
+        count,
+        sample,
+    )
+}
+
 fn summarize(
     mut values: Vec<(BigRational, u64)>,
     count: u64,
