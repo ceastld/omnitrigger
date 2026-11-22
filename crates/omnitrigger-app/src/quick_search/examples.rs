@@ -2437,6 +2437,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "把选中的 CSV 数值列统一成固定小数位",
+        query: "CSV: 小数列 [[\"金额\",3],2] 编号,金额,比率\n001,2.675,1/8\n002,,-0.005",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "移除所有单元格都为空的 CSV 数据行",
         query: "CSV: 去空行 编号,备注\n001,茶\n\n,\n002,梨",
     },
@@ -2923,6 +2928,21 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "精确舍入到最近的步长倍数",
+        query: "分数: 就近对齐 2.675 to 0.05",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "向下对齐到指定步长的倍数",
+        query: "分数: 向下对齐 -2.675 to 0.05",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "向上对齐到指定步长的倍数",
+        query: "分数: 向上对齐 -2.675 to 0.05",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "在精确分数算式里按位舍入",
         query: "分数: 计算 round(2.675,2)",
     },
@@ -3090,6 +3110,9 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     "从循环小数",
                     "比较",
                     "化简比例",
+                    "就近对齐",
+                    "向下对齐",
+                    "向上对齐",
                 ]
                 .into_iter()
                 .any(|operation| operation.starts_with(term)) => {}

@@ -17,7 +17,8 @@ use serde::{
 use super::{
     calculator::normalize,
     fraction::{
-        calculate_fraction_with_variables, ensure_exact_size, parse_fraction_literal, FractionError,
+        calculate_fraction_with_variables, ensure_exact_size, parse_fraction_literal,
+        rounded_decimal, FractionError, MAX_DECIMAL_PLACES,
     },
     operators::{
         select_index_ranges, FieldSortOrder, IndexRangeError, NumberComparison, MAX_SORT_FIELDS,
@@ -90,6 +91,8 @@ pub(super) enum CsvError {
     ColumnOutOfRange,
     InvalidNumber,
     NumericIssuesTooLarge,
+    DecimalColumnsArguments,
+    DecimalColumnsTooLarge,
     StatisticsColumn,
     AggregateColumn,
     GroupingColumns,
@@ -177,6 +180,8 @@ impl CsvError {
             Self::ColumnOutOfRange => "选中的列号超出了表格列数",
             Self::InvalidNumber => "所选列须填写数字或分数，例如 -2.5、1/3 或 3e-2",
             Self::NumericIssuesTooLarge => "数值列检查结果超过 1 MiB，请缩小表格范围",
+            Self::DecimalColumnsArguments => "填写不同的列和 0 至 100 位小数，例如 [[\"金额\",3],2]",
+            Self::DecimalColumnsTooLarge => "小数列结果超过 1 MiB，请缩小表格范围",
             Self::StatisticsColumn => "列统计需要一个列号或带双引号的列名",
             Self::AggregateColumn => "填写一个要汇总的数值列号或带双引号的列名",
             Self::GroupingColumns => "分组列须非空且互不重复，例如 [\"地区\",\"状态\"]",
@@ -214,6 +219,7 @@ enum Operation {
     FillDown(Vec<ColumnReference>),
     CountEmptyCells(Vec<ColumnReference>),
     CheckNumericColumns(Vec<ColumnReference>),
+    DecimalColumns(Vec<ColumnReference>, u32),
     DropEmptyRecords,
     SelectRows {
         ranges: String,
@@ -469,6 +475,17 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 column_reference_arguments(input, CsvError::NamedColumnArguments)?;
             input = data;
             Operation::CheckNumericColumns(columns)
+        }
+        "小数列" | "decimal-columns" => {
+            let ((columns, places), data) = json_argument_and_data::<(Vec<ColumnReference>, u32)>(
+                input,
+                CsvError::DecimalColumnsArguments,
+            )?;
+            if columns.is_empty() || places > MAX_DECIMAL_PLACES {
+                return Err(CsvError::DecimalColumnsArguments);
+            }
+            input = data;
+            Operation::DecimalColumns(columns, places)
         }
         "改列名" | "rename-header" => {
             let (names, data) = json_argument_and_data(input, CsvError::RenameArguments)?;
@@ -809,6 +826,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::FillDown(columns) => fill_down_csv(&rows, &columns),
         Operation::CountEmptyCells(columns) => count_empty_cells(&rows, &columns),
         Operation::CheckNumericColumns(columns) => check_numeric_columns(&rows, &columns),
+        Operation::DecimalColumns(columns, places) => {
+            format_decimal_columns(&rows, &columns, places)
+        }
         Operation::DropEmptyRecords => drop_empty_csv_records(&rows),
         Operation::SelectRows {
             ranges,
@@ -1090,14 +1110,25 @@ fn append_bounded_csv_row<'a>(
     too_large: CsvError,
 ) -> Result<(), CsvError> {
     let mut separator = if output.is_empty() { "" } else { "\r\n" };
-    for field in fields.map(csv_cell) {
-        if output.len() + separator.len() + field.len() > MAX_EXPANDED_CSV_BYTES {
-            return Err(too_large);
-        }
-        output.push_str(separator);
-        output.push_str(&field);
+    for field in fields {
+        append_bounded_csv_field(output, separator, field, too_large)?;
         separator = ",";
     }
+    Ok(())
+}
+
+fn append_bounded_csv_field(
+    output: &mut String,
+    separator: &str,
+    field: &str,
+    too_large: CsvError,
+) -> Result<(), CsvError> {
+    let field = csv_cell(field);
+    if output.len() + separator.len() + field.len() > MAX_EXPANDED_CSV_BYTES {
+        return Err(too_large);
+    }
+    output.push_str(separator);
+    output.push_str(&field);
     Ok(())
 }
 
@@ -1442,6 +1473,35 @@ fn count_empty_cells(
         ]);
     }
     Ok(write_rows(&output, ','))
+}
+
+fn format_decimal_columns(
+    rows: &[Vec<String>],
+    columns: &[ColumnReference],
+    places: u32,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    let selected: HashSet<_> =
+        resolve_distinct_columns(header, columns, CsvError::DecimalColumnsArguments)?
+            .into_iter()
+            .collect();
+    let mut output = String::new();
+    let too_large = CsvError::DecimalColumnsTooLarge;
+    append_bounded_csv_row(&mut output, header.iter().map(String::as_str), too_large)?;
+    for row in records {
+        let mut separator = "\r\n";
+        for (index, field) in row.iter().enumerate() {
+            let value = if selected.contains(&index) && !field.is_empty() {
+                let number = parse_fraction_literal(field).map_err(|_| CsvError::InvalidNumber)?;
+                Cow::Owned(rounded_decimal(number, places))
+            } else {
+                Cow::Borrowed(field.as_str())
+            };
+            append_bounded_csv_field(&mut output, separator, &value, too_large)?;
+            separator = ",";
+        }
+    }
+    Ok(output)
 }
 
 fn check_numeric_columns(
@@ -2446,6 +2506,34 @@ impl Serialize for CsvObject<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formats_selected_csv_columns_with_exact_ties_to_even_and_preserves_empty_cells() {
+        assert_eq!(
+            transform_csv("小数列 [[\"金额\",3],2] 编号,金额,比率,备注\n001,2.675,1/8,\"茶,热\"\n002,,-0.005,\n003,100000000000000000001/3,-2.685,正常").as_deref(),
+            Ok("编号,金额,比率,备注\r\n001,2.68,0.12,\"茶,热\"\r\n002,\"\",0.00,\"\"\r\n003,33333333333333333333.67,-2.68,正常")
+        );
+        assert_eq!(
+            transform_csv("decimal-columns [[1],0] 金额\n0.5\n1.5\n2.5").as_deref(),
+            Ok("金额\r\n0\r\n2\r\n2"),
+        );
+        assert_eq!(
+            transform_csv("小数列 [[1,2],2] 金额,比例").as_deref(),
+            Ok("金额,比例"),
+        );
+        for (query, error) in [
+            (
+                "小数列 [[\"金额\",1],2] 金额",
+                CsvError::DecimalColumnsArguments,
+            ),
+            ("小数列 [[],2] 金额", CsvError::DecimalColumnsArguments),
+            ("小数列 [[1],101] 金额", CsvError::DecimalColumnsArguments),
+            ("小数列 [[2],2] 金额", CsvError::ColumnOutOfRange),
+            ("小数列 [[1],2] 金额\n坏", CsvError::InvalidNumber),
+        ] {
+            assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
 
     #[test]
     fn lists_invalid_exact_csv_values_by_data_row_and_requested_column_order() {

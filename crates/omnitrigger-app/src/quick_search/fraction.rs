@@ -13,7 +13,7 @@ const MAX_MODULAR_POWER_BITS: u64 = 1024;
 const MAX_FACTORIAL_ARGUMENT: u32 = 1024;
 pub(super) const MAX_COMBINATORIAL_ARGUMENT: u32 = 4096;
 const MAX_EXACT_BITS: u64 = 8192;
-const MAX_DECIMAL_PLACES: u32 = 100;
+pub(super) const MAX_DECIMAL_PLACES: u32 = 100;
 const MAX_REPEATING_DECIMAL_PLACES: usize = 512;
 const MAX_TABLE_INPUTS: usize = 12;
 const MAX_RATIO_VALUES: usize = 16;
@@ -36,6 +36,7 @@ pub(super) enum FractionError {
     CombinatorialRange,
     DecimalPlaces,
     RoundPlaces,
+    AlignmentArguments,
     RationalSquareRoot,
     IntegerSquareRoot,
     IntegerAggregate,
@@ -68,6 +69,7 @@ impl FractionError {
             Self::CombinatorialRange => "组合数和排列数的参数最多 4096，结果最多 8192 个二进制位",
             Self::DecimalPlaces => "输入 0 至 100 的小数位数，例如 分数: 小数 1/3 to 8",
             Self::RoundPlaces => "round 的位数须为 -100 至 100 的整数",
+            Self::AlignmentArguments => "填写数值和正步长，例如 分数: 就近对齐 2.675 to 0.05",
             Self::RationalSquareRoot => "精确开方需要非负数，且结果能表示为分数",
             Self::IntegerSquareRoot => "isqrt 需要非负整数",
             Self::IntegerAggregate => "gcd 和 lcm 的参数须为整数",
@@ -187,6 +189,15 @@ pub(super) fn simplify_fraction(input: &str) -> Result<String, FractionError> {
     }
     if verb == "化简比例" || verb.eq_ignore_ascii_case("ratio") {
         return simplify_ratio(expression);
+    }
+    let alignment = match verb.to_ascii_lowercase().as_str() {
+        "就近对齐" | "round-step" => Some(FractionAlignment::Nearest),
+        "向下对齐" | "floor-step" => Some(FractionAlignment::Down),
+        "向上对齐" | "ceil-step" => Some(FractionAlignment::Up),
+        _ => None,
+    };
+    if let Some(alignment) = alignment {
+        return align_fraction(expression.trim(), alignment).map(|value| value.to_string());
     }
     if verb == "小数" || verb.eq_ignore_ascii_case("decimal") {
         let (source, places) =
@@ -498,7 +509,7 @@ fn round_magnitude_to_even(numerator: &BigUint, denominator: &BigUint) -> BigUin
     rounded
 }
 
-fn rounded_decimal(value: BigRational, places: u32) -> String {
+pub(super) fn rounded_decimal(value: BigRational, places: u32) -> String {
     let unit = BigUint::from(10u8).pow(places);
     let numerator = value.numer().magnitude() * unit;
     let rounded = round_magnitude_to_even(&numerator, value.denom().magnitude());
@@ -517,6 +528,31 @@ fn rounded_decimal(value: BigRational, places: u32) -> String {
         let (whole, fraction) = digits.split_at(digits.len() - places);
         format!("{sign}{whole}.{fraction}")
     }
+}
+
+enum FractionAlignment {
+    Nearest,
+    Down,
+    Up,
+}
+
+fn align_fraction(input: &str, alignment: FractionAlignment) -> Result<BigRational, FractionError> {
+    let (value, step) = split_conversion(input).ok_or(FractionError::AlignmentArguments)?;
+    let value = calculate_fraction(value)?;
+    let step = calculate_fraction(step)?;
+    if step.numer().sign() != Sign::Plus {
+        return Err(FractionError::AlignmentArguments);
+    }
+    let ratio = value / &step;
+    ensure_exact_size(&ratio)?;
+    let multiple = match alignment {
+        FractionAlignment::Nearest => rational_round(ratio, 0)?,
+        FractionAlignment::Down => ratio.floor(),
+        FractionAlignment::Up => ratio.ceil(),
+    };
+    let result = multiple * step;
+    ensure_exact_size(&result)?;
+    Ok(result)
 }
 
 fn rational_round(value: BigRational, places: i32) -> Result<BigRational, FractionError> {
@@ -1273,6 +1309,29 @@ mod tests {
             parse_fraction_literal(&padded),
             Ok(BigRational::new(15.into(), 2.into()))
         );
+    }
+
+    #[test]
+    fn aligns_exact_fractions_to_positive_step_multiples_using_even_ties() {
+        for (query, expected) in [
+            ("就近对齐 2.625 to 0.05", "13/5"),
+            ("round-step 2.675 to 0.05", "27/10"),
+            ("就近对齐 -2.625 to 0.05", "-13/5"),
+            ("向下对齐 -2.675 to 0.05", "-27/10"),
+            ("向上对齐 -2.675 to 0.05", "-53/20"),
+            ("就近对齐 11/7 to 1/3", "5/3"),
+            ("floor-step 5/6 to 1/6", "5/6"),
+            ("ceil-step 0 to 1/8", "0"),
+        ] {
+            assert_eq!(simplify_fraction(query).as_deref(), Ok(expected), "{query}");
+        }
+        for query in ["就近对齐 1", "就近对齐 1 to 0", "floor-step 1 to -0.05"] {
+            assert_eq!(
+                simplify_fraction(query),
+                Err(FractionError::AlignmentArguments),
+                "{query}"
+            );
+        }
     }
 
     #[test]
