@@ -1,6 +1,7 @@
 use std::f64::consts::{PI, TAU};
 
 use num_bigint::BigInt;
+use num_rational::BigRational;
 
 use super::aspect_ratio::{pixel_dimensions, AspectRatioError};
 use super::batch::{map_batch_csv, map_batch_lines, BatchError};
@@ -1126,26 +1127,52 @@ pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
 pub(super) fn convert_exact_data(query: &str) -> Result<String, ConversionError> {
     let input = normalize(query).replace(char::is_whitespace, " ");
     let (source, target) = split_conversion(input.trim()).ok_or(ConversionError::Incomplete)?;
-    let (amount, source) = split_quantity(source);
-    let source = Unit::parse(source)?;
-    if !matches!(source.dimension, Dimension::Data | Dimension::DataRate) {
-        return Err(ConversionError::ExactDataUnit);
-    }
-    let amount = calculate_fraction(amount).map_err(|_| ConversionError::InvalidAmount)?;
-    // 数据量和数据速率单位表中的比例是可精确表示的整数。
-    let bits = amount * BigInt::from(source.scale as u64);
+    let (bits, dimension) = exact_data_source(source)?;
     format_targets(target, |target| {
-        let target = Unit::parse(target)?;
-        if !matches!(target.dimension, Dimension::Data | Dimension::DataRate) {
-            return Err(ConversionError::ExactDataUnit);
-        }
-        if source.dimension != target.dimension {
-            return Err(ConversionError::DifferentDimensions);
-        }
-        let converted = &bits / BigInt::from(target.scale as u64);
-        ensure_exact_size(&converted).map_err(|_| ConversionError::OutOfRange)?;
+        let target = exact_data_unit(target)?;
+        let converted = exact_data_target_amount(&bits, &dimension, &target)?;
         Ok(format_with_unit(converted, &target))
     })
+}
+
+pub(super) fn exact_data_converter(
+    target: &str,
+) -> Result<impl Fn(&str) -> Result<BigRational, ConversionError>, ConversionError> {
+    let target = exact_data_unit(normalize(target).trim())?;
+    Ok(move |source: &str| {
+        let source = normalize(source).replace(char::is_whitespace, " ");
+        let (bits, dimension) = exact_data_source(source.trim())?;
+        exact_data_target_amount(&bits, &dimension, &target)
+    })
+}
+
+fn exact_data_unit(input: &str) -> Result<Unit, ConversionError> {
+    let unit = Unit::parse(input)?;
+    if !matches!(unit.dimension, Dimension::Data | Dimension::DataRate) {
+        return Err(ConversionError::ExactDataUnit);
+    }
+    Ok(unit)
+}
+
+fn exact_data_source(source: &str) -> Result<(BigRational, Dimension), ConversionError> {
+    let (amount, source) = split_quantity(source);
+    let source = exact_data_unit(source)?;
+    let amount = calculate_fraction(amount).map_err(|_| ConversionError::InvalidAmount)?;
+    // 数据量和数据速率单位表中的比例是可精确表示的整数。
+    Ok((amount * BigInt::from(source.scale as u64), source.dimension))
+}
+
+fn exact_data_target_amount(
+    bits: &BigRational,
+    source_dimension: &Dimension,
+    target: &Unit,
+) -> Result<BigRational, ConversionError> {
+    if source_dimension != &target.dimension {
+        return Err(ConversionError::DifferentDimensions);
+    }
+    let converted = bits / BigInt::from(target.scale as u64);
+    ensure_exact_size(&converted).map_err(|_| ConversionError::OutOfRange)?;
+    Ok(converted)
 }
 
 pub(super) fn convert_batch(input: &str) -> Result<String, BatchError<ConversionError>> {

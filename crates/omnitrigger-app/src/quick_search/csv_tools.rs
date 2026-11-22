@@ -18,6 +18,7 @@ use serde_json::value::RawValue;
 use super::statistics::{parse_bin_edges, report_binned_unweighted};
 use super::{
     calculator::normalize,
+    conversion::{exact_data_converter, ConversionError},
     fraction::{
         calculate_fraction_with_variables, ensure_exact_size, parse_fraction_literal,
         rounded_decimal, FractionError, MAX_DECIMAL_PLACES,
@@ -77,6 +78,9 @@ pub(super) enum CsvError {
     ConcatenatedColumnArguments,
     FirstNonemptyColumnArguments,
     SplitColumnArguments,
+    DataConversionColumnArguments,
+    DataConversionTarget(ConversionError),
+    DataConversionCell { row: usize, cause: ConversionError },
     AddedColumnTooLarge,
     StackArguments,
     PipelineArguments,
@@ -170,6 +174,12 @@ impl CsvError {
                 "填写来源列、至少两个不同的新列名和非空分隔符，例如 [\"地址\",[\"省\",\"市\"],\"/\"]"
             }
             Self::AddedColumnTooLarge => "追加列后的结果超过 1 MiB，请缩小表格范围",
+            Self::DataConversionColumnArguments => {
+                "填写新列名、来源列和目标单位，例如 [\"速率(MiB/s)\",\"速率\",\"MiB/s\"]"
+            }
+            Self::DataConversionTarget(cause) | Self::DataConversionCell { cause, .. } => {
+                cause.message()
+            }
             Self::StackArguments => "用 JSON 字符串数组填写 2 至 16 张含表头的 CSV 表格",
             Self::PipelineArguments => "用 JSON 字符串数组填写 1 至 8 条单行 CSV 命令，再粘贴原表格",
             Self::NestedPipeline => "每一步填写一条 CSV 命令",
@@ -276,6 +286,7 @@ enum Operation {
         right: ColumnReference,
         arithmetic: ColumnArithmetic,
     },
+    ConvertDataColumn(String, ColumnReference, String),
     DeduplicateRows,
     DeduplicateByColumns(Vec<ColumnReference>),
     DuplicatesByColumns(Vec<ColumnReference>),
@@ -621,6 +632,15 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 separator,
             }
         }
+        "数据换算列" | "convert-data-column" => {
+            let ((name, source, target), data) =
+                json_argument_and_data::<(String, ColumnReference, String)>(
+                    input,
+                    CsvError::DataConversionColumnArguments,
+                )?;
+            input = data;
+            Operation::ConvertDataColumn(name, source, target)
+        }
         "计算列" | "compute-column" => {
             let ((name, left, operator, right), data) =
                 json_argument_and_data::<(String, ColumnReference, String, ColumnReference)>(
@@ -939,6 +959,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             right,
             arithmetic,
         } => compute_column(rows, name, left, right, arithmetic),
+        Operation::ConvertDataColumn(name, source, target) => {
+            convert_data_column(&rows, &name, source, &target)
+        }
         Operation::DeduplicateRows => {
             let mut seen = HashSet::new();
             Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
@@ -1813,6 +1836,35 @@ fn first_nonempty_csv_column(
             .map(|&index| row[index].as_str())
             .find(|value| !value.is_empty())
             .unwrap_or(""))
+    })
+}
+
+fn convert_data_column(
+    rows: &[Vec<String>],
+    name: &str,
+    source: ColumnReference,
+    target: &str,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::DataConversionColumnArguments);
+    }
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let convert = exact_data_converter(target).map_err(CsvError::DataConversionTarget)?;
+    let mut row_number = 0;
+    write_appended_column(header, records, name, |row| {
+        row_number += 1;
+        let value = row[source].trim();
+        if value.is_empty() {
+            return Ok(String::new());
+        }
+        convert(value)
+            .map(|value| value.to_string())
+            .map_err(|cause| CsvError::DataConversionCell {
+                row: row_number,
+                cause,
+            })
     })
 }
 
@@ -4140,6 +4192,39 @@ mod tests {
             ),
         ] {
             assert_eq!(transform_csv(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn appends_an_exact_data_conversion_column_with_mixed_units_and_blanks() {
+        let capacities = "数据换算列 [\"KiB\",\"容量\",\"KiB\"]\n编号,容量\n001,9007199254740993 B\n002,1/3 KiB\n003,";
+        assert_eq!(
+            transform_csv(capacities).as_deref(),
+            Ok("编号,容量,KiB\r\n001,9007199254740993 B,9007199254740993/1024\r\n002,1/3 KiB,1/3\r\n003,\"\",\"\"")
+        );
+        let rates = "数据换算列 [\"MiB/s\",2,\"MiB/s\"]\n编号,速率\n001,8 Mbps\n002,5/2 MiB/s";
+        assert_eq!(
+            transform_csv(rates).as_deref(),
+            Ok("编号,速率,MiB/s\r\n001,8 Mbps,15625/16384\r\n002,5/2 MiB/s,5/2")
+        );
+        for (query, expected) in [
+            (
+                "数据换算列 [\"KiB\",2,\"KiB\"]\n编号,容量\n001,1 KiB\n002,4 Mbps",
+                CsvError::DataConversionCell {
+                    row: 2,
+                    cause: ConversionError::DifferentDimensions,
+                },
+            ),
+            (
+                "数据换算列 [\"长度\",1,\"m\"]\n容量\n1 KiB",
+                CsvError::DataConversionTarget(ConversionError::ExactDataUnit),
+            ),
+            (
+                "数据换算列 [\"容量\",1,\"KiB\"]\n容量\n1 KiB",
+                CsvError::HeaderNameConflict,
+            ),
+        ] {
+            assert_eq!(transform_csv(query), Err(expected), "{query}");
         }
     }
 
