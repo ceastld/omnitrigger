@@ -91,6 +91,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "由两个直角边求斜边",
+        query: "三角形: 斜边 1,1",
+    },
+    Example {
+        icon: Icon::Layers,
+        title: "由斜边和一个直角边求另一条边",
+        query: "三角形: 直角边 5,3",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "求一组数值的摘要统计",
         query: "统计: 1,3,5",
     },
@@ -3486,6 +3496,11 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::LinearFit
             if !term.is_empty()
                 && ["预测", "残差", "误差"]
+                    .into_iter()
+                    .any(|operation| operation.starts_with(term)) => {}
+        Scope::Triangle
+            if !term.is_empty()
+                && ["斜边", "直角边"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Cidr

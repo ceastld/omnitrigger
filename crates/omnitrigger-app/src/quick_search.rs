@@ -550,7 +550,9 @@ impl ValueError {
                 | Self::Equation(EquationError::SystemRows)
                 | Self::Radix(RadixError::Incomplete)
                 | Self::RatioAllocation(RatioAllocationError::Incomplete)
-                | Self::Triangle(TriangleError::Dimensions)
+                | Self::Triangle(
+                    TriangleError::Dimensions | TriangleError::RightTriangleDimensions
+                )
                 | Self::Duration(DurationError::Incomplete)
                 | Self::VideoFrames(VideoFrameError::Incomplete)
                 | Self::Timecode(TimecodeError::Incomplete)
