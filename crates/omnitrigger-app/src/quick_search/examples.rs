@@ -346,6 +346,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "判断分数坐标的点位于圆内、圆周上还是圆外",
+        query: "圆: 包含 3/5,4/5 @ 0,0 @ 1",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "由直径端点求圆心和半径",
         query: "圆: 直径端点 -1,0; 3,2",
     },

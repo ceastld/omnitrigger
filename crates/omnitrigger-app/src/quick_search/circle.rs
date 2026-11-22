@@ -16,6 +16,7 @@ pub(super) enum CircleError {
     AngleOutOfRange,
     PointArguments,
     TwoCircleArguments,
+    PointCircleArguments,
     CollinearPoints,
     CoincidentDiameterPoints,
     Evaluation(FractionError),
@@ -29,6 +30,7 @@ impl CircleError {
             Self::AngleOutOfRange => "圆心角须在 0 至 360 度之间",
             Self::PointArguments => "填写二维坐标，用逗号分隔每点的两个坐标，用分号分隔各点",
             Self::TwoCircleArguments => "分别填写两个圆心和半径，例如 0,0 @ 1; 2,0 @ 1",
+            Self::PointCircleArguments => "填写待测点、圆心和半径，例如 包含 3/5,4/5 @ 0,0 @ 1",
             Self::CollinearPoints => "三个点须互不重合且不在同一直线上",
             Self::CoincidentDiameterPoints => "直径的两个端点须互不重合",
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
@@ -54,6 +56,9 @@ pub(super) fn calculate_circle(query: &str) -> Result<String, CircleError> {
     }
     if operation == "两圆交点" || operation.eq_ignore_ascii_case("intersections") {
         return circle_intersections(arguments);
+    }
+    if operation == "包含" || operation.eq_ignore_ascii_case("contains") {
+        return circle_contains(arguments);
     }
     let (length, angle) = input
         .split_once('@')
@@ -152,10 +157,7 @@ fn parse_two_circles(input: &str) -> Result<[CenteredCircle; 2], CircleError> {
 
 fn compare_circles(input: &str) -> Result<String, CircleError> {
     let [first, second] = parse_two_circles(input)?;
-    let [x1, y1] = first.center;
-    let [x2, y2] = second.center;
-    let (dx, dy) = (x1 - x2, y1 - y2);
-    let distance_squared = &dx * &dx + &dy * &dy;
+    let distance_squared = squared_point_distance(&first.center, &second.center);
     let sum = &first.radius + &second.radius;
     let difference = first.radius - second.radius;
     let outer_limit = &sum * &sum;
@@ -179,6 +181,33 @@ fn compare_circles(input: &str) -> Result<String, CircleError> {
         "{relation}\n圆心距 {}",
         format_square_root(&distance_squared)
     ))
+}
+
+fn squared_point_distance(first: &Point2, second: &Point2) -> BigRational {
+    let (dx, dy) = (&first[0] - &second[0], &first[1] - &second[1]);
+    &dx * &dx + &dy * &dy
+}
+
+fn circle_contains(input: &str) -> Result<String, CircleError> {
+    let (point, circle) = input
+        .split_once('@')
+        .ok_or(CircleError::PointCircleArguments)?;
+    let point = circle_point(point)?;
+    let circle = circle_center_and_radius(circle).map_err(|error| match error {
+        CircleError::TwoCircleArguments => CircleError::PointCircleArguments,
+        error => error,
+    })?;
+    let distance_squared = squared_point_distance(&point, &circle.center);
+    let radius_squared = &circle.radius * &circle.radius;
+    for value in [&distance_squared, &radius_squared] {
+        ensure_exact_size(value).map_err(CircleError::Evaluation)?;
+    }
+    Ok(match distance_squared.cmp(&radius_squared) {
+        Ordering::Less => "圆内",
+        Ordering::Equal => "圆周上",
+        Ordering::Greater => "圆外",
+    }
+    .to_owned())
 }
 
 fn circle_intersections(input: &str) -> Result<String, CircleError> {
@@ -328,6 +357,26 @@ fn multiple_of_pi(value: &BigRational) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_points_inside_on_or_outside_an_exact_circle() {
+        for (query, expected) in [
+            ("包含 3/5,4/5 @ 0,0 @ 1", "圆周上"),
+            ("contains 2/3,-3/4 @ 1/6,-3/4 @ 1/2", "圆周上"),
+            ("包含 -1/2,1/2 @ 0,0 @ 1", "圆内"),
+            ("包含 １，１ ＠ ０，０ ＠ １", "圆外"),
+        ] {
+            assert_eq!(calculate_circle(query).as_deref(), Ok(expected));
+        }
+        assert_eq!(
+            calculate_circle("包含 1,1 @ 0,0"),
+            Err(CircleError::PointCircleArguments)
+        );
+        assert_eq!(
+            calculate_circle("包含 1,1 @ 0,0 @ 0"),
+            Err(CircleError::NonPositiveRadius)
+        );
+    }
 
     #[test]
     fn finds_exact_circle_intersection_points_or_reports_their_absence() {
