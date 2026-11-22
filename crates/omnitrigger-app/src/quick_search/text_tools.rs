@@ -77,6 +77,7 @@ pub(super) enum TextError {
     CsvTextColumns,
     MissingColumn,
     InvalidLineRange,
+    EdgeLineCount,
     InvalidGraphemeRange,
     MissingLine,
     InvalidNumberLine,
@@ -121,6 +122,7 @@ impl TextError {
             Self::CsvColumnCount => "填写 1 至 128 的列数，例如 文本: 按行分组CSV 3",
             Self::CsvTextColumns => "用 JSON 数组填写 2 至 128 段文本，每段对应一列",
             Self::InvalidLineRange => "输入从 1 开始的行号或区间，例如 文本: 取行 2,4-6",
+            Self::EdgeLineCount => "填写正整数行数，例如 文本: 取末尾行 2",
             Self::InvalidGraphemeRange => "输入从 1 开始的字符位置或区间，例如 文本: 逐行截取 2-4",
             Self::MissingLine => "指定行号超出了文本行数",
             Self::InvalidNumberLine => "每行请输入一个数字或分数，例如 -2.5、3/2 或 1e2",
@@ -190,6 +192,8 @@ pub(super) fn transform_text(input: &str) -> Result<String, TextError> {
         "逐行截取" | "slice-lines" => return slice_line_graphemes(text),
         "取列" | "column" => return select_text_column(text),
         "取行" | "pick-lines" => return select_text_line_ranges(text, true),
+        "取开头行" | "head-lines" => return take_edge_lines(text, false),
+        "取末尾行" | "tail-lines" => return take_edge_lines(text, true),
         "删行" | "drop-lines" => return select_text_line_ranges(text, false),
         "保留行" | "keep-lines" => return filter_lines(text, true),
         "排除行" | "exclude-lines" => return filter_lines(text, false),
@@ -1072,6 +1076,29 @@ fn select_text_column(input: &str) -> Result<String, TextError> {
     Ok(values.join("\n"))
 }
 
+fn take_edge_lines(input: &str, from_end: bool) -> Result<String, TextError> {
+    let (count, text) = input
+        .trim_start()
+        .split_once(char::is_whitespace)
+        .ok_or(TextError::EdgeLineCount)?;
+    let count = count
+        .parse::<usize>()
+        .ok()
+        .filter(|&count| count > 0)
+        .ok_or(TextError::EdgeLineCount)?;
+    let text = text_payload(text)?;
+    let lines = text.lines();
+    let mut selected: Vec<_> = if from_end {
+        lines.rev().take(count).collect()
+    } else {
+        lines.take(count).collect()
+    };
+    if from_end {
+        selected.reverse();
+    }
+    Ok(selected.join("\n"))
+}
+
 fn select_text_line_ranges(input: &str, keep_selected: bool) -> Result<String, TextError> {
     let (ranges, text) = input
         .split_once(char::is_whitespace)
@@ -1696,6 +1723,23 @@ mod tests {
             (r#"行差集 "苹果\u0000" "梨""#, TextError::NullCharacter),
         ] {
             assert_eq!(transform_text(input), Err(error), "{input}");
+        }
+    }
+
+    #[test]
+    fn takes_leading_or_trailing_text_lines_in_original_order() {
+        for (query, expected) in [
+            ("取开头行 2 甲\n乙\n丙", "甲\n乙"),
+            ("取末尾行 2 甲\n乙\n丙", "乙\n丙"),
+            ("head-lines 3 \"甲\r\n\r\n乙\r\n丙\"", "甲\n\n乙"),
+            ("tail-lines 2 \"甲\n乙\n\n\"", "乙\n"),
+            ("取末尾行 99 甲", "甲"),
+            ("取开头行 1 \"\"", ""),
+        ] {
+            assert_eq!(transform_text(query).as_deref(), Ok(expected));
+        }
+        for input in ["取末尾行 0 甲", "取开头行 -1 甲", "取末尾行 两 甲"] {
+            assert_eq!(transform_text(input), Err(TextError::EdgeLineCount));
         }
     }
 
