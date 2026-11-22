@@ -5,7 +5,8 @@ use num_rational::BigRational;
 
 use super::calculator::normalize;
 use super::fraction::{
-    calculate_fraction, ensure_exact_size, format_square_root, rational_power, FractionError,
+    calculate_fraction, combination_count, ensure_exact_size, format_square_root, rational_power,
+    FractionError, MAX_COMBINATORIAL_ARGUMENT,
 };
 use super::linear_fit::{
     calculate_correlation, calculate_covariance, calculate_rank_correlation, LinearFitError,
@@ -26,6 +27,7 @@ pub(super) enum StatisticsError {
     InvalidProbability,
     InvalidTrimShare,
     BinomialArguments,
+    HypergeometricArguments,
     InvalidWindowWidth,
     AdjacentValueCount,
     ZeroPreviousValue,
@@ -47,6 +49,9 @@ impl StatisticsError {
             Self::InvalidProbability => "输入 0 到 1 的比例或百分数，例如 1/4 或 25%",
             Self::InvalidTrimShare => "每端截去的比例须为 0 到小于 50%，例如 10%",
             Self::BinomialArguments => "依次输入试验次数、成功次数和单次成功概率，最多 128 次试验",
+            Self::HypergeometricArguments => {
+                "依次填写总数、目标项数、抽取数和命中数，例如 10,4,3,2。总数最多 4096"
+            }
             Self::InvalidWindowWidth => "窗口大小须为正整数，且不能超过数值个数",
             Self::AdjacentValueCount => "计算相邻项的变化至少需要两个数值",
             Self::ZeroPreviousValue => "计算变化率时，每对数值的前一项须非零",
@@ -116,6 +121,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "累计平均" | "running-average" => return running_totals(values.trim(), true),
         "二项概率" | "binomial" => return binomial_probability(values, false),
         "二项累计" | "binomial-cdf" => return binomial_probability(values, true),
+        "超几何概率" | "hypergeometric" => return hypergeometric_probability(values),
         "差分" | "相邻差" | "difference" => return adjacent_changes(values.trim(), false),
         "变化率" | "relative-change" => return adjacent_changes(values.trim(), true),
         "协方差" | "样本协方差" | "covariance" => {
@@ -553,6 +559,31 @@ fn binomial_probability(input: &str, cumulative: bool) -> Result<String, Statist
     Ok(BigRational::new(numerator, no_success.denom().clone()).to_string())
 }
 
+fn hypergeometric_probability(input: &str) -> Result<String, StatisticsError> {
+    let values = input
+        .split(',')
+        .take(5)
+        .map(|term| {
+            term.trim()
+                .parse::<u32>()
+                .map_err(|_| StatisticsError::HypergeometricArguments)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let &[total, marked, draws, hits] = values.as_slice() else {
+        return Err(StatisticsError::HypergeometricArguments);
+    };
+    if total > MAX_COMBINATORIAL_ARGUMENT || marked > total || draws > total {
+        return Err(StatisticsError::HypergeometricArguments);
+    }
+    if hits > marked || hits > draws || draws - hits > total - marked {
+        return Ok("0".to_owned());
+    }
+    let numerator =
+        combination_count(marked, hits) * combination_count(total - marked, draws - hits);
+    let probability = BigRational::new(numerator, combination_count(total, draws));
+    Ok(bounded(probability)?.to_string())
+}
+
 fn parse_probability(input: &str) -> Result<BigRational, StatisticsError> {
     let probability = if let Some(percent) = input.strip_suffix('%') {
         calculate_fraction(percent).map(|value| value / BigInt::from(100))
@@ -824,6 +855,35 @@ mod tests {
             calculate_statistics("移动平均 2"),
             Err(StatisticsError::Incomplete)
         );
+    }
+
+    #[test]
+    fn calculates_exact_probabilities_for_sampling_without_replacement() {
+        for (query, expected) in [
+            ("超几何概率 10,4,3,2", "3/10"),
+            ("hypergeometric 10,4,3,0", "1/6"),
+            ("超几何概率 10,10,3,3", "1"),
+            ("超几何概率 10,4,3,4", "0"),
+            ("超几何概率 10,8,4,0", "0"),
+            ("超几何概率 0,0,0,0", "1"),
+        ] {
+            assert_eq!(
+                calculate_statistics(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for query in [
+            "超几何概率 10,11,1,0",
+            "超几何概率 10,1,11,0",
+            "超几何概率 4097,1,1,0",
+            "超几何概率 10,1,1,-1",
+        ] {
+            assert_eq!(
+                calculate_statistics(query),
+                Err(StatisticsError::HypergeometricArguments)
+            );
+        }
     }
 
     #[test]

@@ -170,6 +170,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 二项累计 4,2,50%",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "计算不放回抽取的精确概率",
+        query: "统计: 超几何概率 10,4,3,2",
+    },
+    Example {
         icon: Icon::Layers,
         title: "保留分数和根式的均方根",
         query: "统计: 均方根 1/2,3/2",
@@ -2818,7 +2823,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 .any(|operation| operation.starts_with(term)) => {}
         Scope::Statistics
             if !term.is_empty()
-                && ["二项概率", "二项累计", "截尾平均"]
+                && ["二项概率", "二项累计", "超几何概率", "截尾平均"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Statistics

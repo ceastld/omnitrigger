@@ -10,7 +10,7 @@ use super::operators::{NumberComparison, Operator};
 const MAX_POWER_EXPONENT: u32 = 1024;
 const MAX_MODULAR_POWER_BITS: u64 = 1024;
 const MAX_FACTORIAL_ARGUMENT: u32 = 1024;
-const MAX_COMBINATORIAL_ARGUMENT: u32 = 4096;
+pub(super) const MAX_COMBINATORIAL_ARGUMENT: u32 = 4096;
 const MAX_EXACT_BITS: u64 = 8192;
 const MAX_DECIMAL_PLACES: u32 = 100;
 const MAX_REPEATING_DECIMAL_PLACES: usize = 512;
@@ -608,29 +608,37 @@ impl CombinatorialFunction {
         if k > n {
             return Ok(BigRational::from_integer(BigInt::from(0u8)));
         }
-        let mut result = BigInt::from(1u8);
-        match self {
-            Self::Combination => {
-                let k = k.min(n - k);
-                // C(n-k+i, i) 在每一步都是整数。
-                for index in 1..=k {
-                    result *= n - k + index;
-                    result /= index;
-                }
-            }
+        let result = match self {
+            Self::Combination => combination_count(n, k),
             Self::Permutation => {
+                let mut result = BigInt::from(1u8);
                 for factor in n - k + 1..=n {
                     result *= factor;
                     if result.bits() > MAX_EXACT_BITS {
                         return Err(FractionError::CombinatorialRange);
                     }
                 }
+                result
             }
-        }
+        };
         let result = BigRational::from_integer(result);
         ensure_exact_size(&result).map_err(|_| FractionError::CombinatorialRange)?;
         Ok(result)
     }
+}
+
+pub(super) fn combination_count(n: u32, k: u32) -> BigInt {
+    if k > n {
+        return BigInt::default();
+    }
+    let k = k.min(n - k);
+    let mut result = BigInt::from(1u8);
+    // C(n-k+i, i) 在每一步都是整数。
+    for index in 1..=k {
+        result *= n - k + index;
+        result /= index;
+    }
+    result
 }
 
 struct FractionParser<'a> {
