@@ -204,6 +204,7 @@ fn transform_json_operation(query: &str, allow_pipeline: bool) -> Result<String,
         "多路径排序" | "sort-by-pointers" => return sort_json_by_pointers(source),
         "键名" | "keys" => return json_keys(source),
         "长度" | "length" => return json_length(source),
+        "结构统计" | "structure-stats" => return json_structure_stats(source),
         "展开数组" | "to-jsonl" => return json_array_to_lines(source),
         "合并行" | "from-jsonl" => return json_lines_to_array(source),
         "校验行" | "validate-jsonl" => return validate_json_lines(raw_source),
@@ -2155,6 +2156,80 @@ fn json_length(source: &str) -> Result<String, JsonError> {
     Ok(length.to_string())
 }
 
+#[derive(Default, serde::Serialize)]
+struct JsonStructureStats {
+    #[serde(rename = "最大深度")]
+    max_depth: usize,
+    #[serde(rename = "值总数")]
+    values: usize,
+    #[serde(rename = "对象")]
+    objects: usize,
+    #[serde(rename = "数组")]
+    arrays: usize,
+    #[serde(rename = "字符串")]
+    strings: usize,
+    #[serde(rename = "数字")]
+    numbers: usize,
+    #[serde(rename = "布尔")]
+    booleans: usize,
+    #[serde(rename = "空值")]
+    nulls: usize,
+    #[serde(rename = "对象字段")]
+    fields: usize,
+}
+
+fn json_structure_stats(source: &str) -> Result<String, JsonError> {
+    serde_json::from_str::<IgnoredAny>(source).map_err(json_parse_error)?;
+    // 校验后按原始字节统计，保留重复键，也无需将数字转换成机器数值。
+    let mut stats = JsonStructureStats::default();
+    let mut depth = 0;
+    let mut previous = b':';
+    let mut quoted = false;
+    let mut escaped = false;
+    for byte in source.bytes() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            continue;
+        }
+        let starts_value = matches!(previous, b':' | b'[' | b',');
+        let count = match byte {
+            b' ' | b'\t' | b'\n' | b'\r' => continue,
+            b'{' => Some(&mut stats.objects),
+            b'[' => Some(&mut stats.arrays),
+            b'"' => {
+                quoted = true;
+                Some(&mut stats.strings)
+            }
+            b'-' | b'0'..=b'9' if starts_value => Some(&mut stats.numbers),
+            b't' | b'f' if starts_value => Some(&mut stats.booleans),
+            b'n' if starts_value => Some(&mut stats.nulls),
+            _ => None,
+        };
+        if let Some(count) = count {
+            *count += 1;
+            stats.values += 1;
+            stats.max_depth = stats.max_depth.max(depth);
+        }
+        match byte {
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth -= 1,
+            b':' => stats.fields += 1,
+            _ => {}
+        }
+        previous = byte;
+    }
+    // 每个对象字段有一个已计入的键名，把它从字符串和值总数中扣除。
+    stats.strings -= stats.fields;
+    stats.values -= stats.fields;
+    serde_json::to_string_pretty(&stats).map_err(json_parse_error)
+}
+
 fn decode_pointer_key(token: &str) -> Result<String, JsonError> {
     let mut decoded = String::with_capacity(token.len());
     let mut chars = token.chars();
@@ -3059,6 +3134,35 @@ mod tests {
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn counts_nested_json_value_types_with_exact_numbers_and_repeated_fields() {
+        let result = transform_json(
+            r#"结构统计 {"x":[-1.2e-100000000000000000000,true,false,null,"a:\"[{}]"],"x":{}}"#,
+        )
+        .expect("valid statistics");
+        let stats: serde_json::Value = serde_json::from_str(&result).expect("statistics are JSON");
+        assert_eq!(stats["最大深度"], 2);
+        assert_eq!(stats["值总数"], 8);
+        assert_eq!(stats["对象"], 2);
+        assert_eq!(stats["数组"], 1);
+        assert_eq!(stats["数字"], 1);
+        assert_eq!(stats["布尔"], 2);
+        assert_eq!(stats["空值"], 1);
+        assert_eq!(stats["字符串"], 1);
+        assert_eq!(stats["对象字段"], 2);
+        for source in ["[]", "{}", "null", "-1.5e-2", "\"a:b\""] {
+            let result = transform_json(&format!("structure-stats {source}")).unwrap();
+            let stats = serde_json::from_str::<serde_json::Value>(&result).unwrap();
+            assert_eq!(stats["最大深度"], 0, "{source}");
+            assert_eq!(stats["值总数"], 1, "{source}");
+        }
+        assert_eq!(
+            transform_json("依次处理 [\"结构统计\",\"取值 /最大深度\"] [null,[]]").as_deref(),
+            Ok("1")
+        );
+        assert_eq!(transform_json("结构统计 [1,]"), Err(JsonError::Invalid));
     }
 
     #[test]

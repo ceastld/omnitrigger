@@ -2357,6 +2357,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "统计 JSON 嵌套深度和各类型的值",
+        query: r#"JSON: 结构统计 {"订单":[{"金额":1},{"金额":null}],"完成":true}"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "把数组展开为 JSONL",
         query: r#"JSON: 展开数组 [{"城市":"北京"},{"城市":"上海"}]"#,
     },
