@@ -940,16 +940,61 @@ fn match_json_by_pointers(query: &str, duplicates_only: bool) -> Result<String, 
 
 fn count_json_by_scalar(query: &str) -> Result<String, JsonError> {
     #[derive(serde::Serialize)]
-    struct Group<Value> {
+    struct Group<'a> {
         #[serde(rename = "值")]
-        value: Value,
+        value: JsonGroupValue<'a>,
         #[serde(rename = "计数")]
         count: usize,
     }
 
-    if query.trim_start().starts_with('[') {
+    write_json_groups_from_query(
+        query,
+        |value| Group { value, count: 0 },
+        |group, _| {
+            group.count += 1;
+            Ok(())
+        },
+    )
+}
+
+fn group_json_records(query: &str) -> Result<String, JsonError> {
+    #[derive(serde::Serialize)]
+    struct Group<'a> {
+        #[serde(rename = "值")]
+        value: JsonGroupValue<'a>,
+        #[serde(rename = "项目")]
+        records: Vec<&'a RawValue>,
+    }
+
+    write_json_groups_from_query(
+        query,
+        |value| Group {
+            value,
+            records: Vec::new(),
+        },
+        |group, item| {
+            group.records.push(item);
+            Ok(())
+        },
+    )
+}
+
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum JsonGroupValue<'a> {
+    Scalar(&'a RawValue),
+    Values(Vec<&'a RawValue>),
+}
+
+fn write_json_groups_from_query<'a, Group: serde::Serialize>(
+    query: &'a str,
+    create: impl Fn(JsonGroupValue<'a>) -> Group,
+    append: impl Fn(&mut Group, &'a RawValue) -> Result<(), JsonError>,
+) -> Result<String, JsonError> {
+    let multiple_paths = query.trim_start().starts_with('[');
+    let groups = if multiple_paths {
         let (paths, source) = distinct_json_paths_and_source(query)?;
-        let groups = collect_json_groups_by(
+        collect_json_groups_by(
             source,
             |item| {
                 let mut key = Vec::with_capacity(paths.len());
@@ -961,55 +1006,23 @@ fn count_json_by_scalar(query: &str) -> Result<String, JsonError> {
                 }
                 Ok((key, values))
             },
-            |value| Group { value, count: 0 },
-            |group, _| {
-                group.count += 1;
-                Ok(())
-            },
-        )?;
-        let output =
-            serde_json::to_string(&groups).expect("有效的原始 JSON 值数组和计数可直接序列化");
-        return (output.len() <= MAX_PRETTY_BYTES)
-            .then_some(output)
-            .ok_or(JsonError::ObjectOutputTooLarge);
+            |values| create(JsonGroupValue::Values(values)),
+            append,
+        )?
+    } else {
+        let (pointer, source) = pointer_and_source(query)?;
+        collect_json_groups(
+            &pointer,
+            source,
+            |value| create(JsonGroupValue::Scalar(value)),
+            append,
+        )?
+    };
+    let output = serde_json::to_string(&groups).expect("含原始 JSON 值的分组可以直接序列化");
+    if multiple_paths && output.len() > MAX_PRETTY_BYTES {
+        return Err(JsonError::ObjectOutputTooLarge);
     }
-
-    let (pointer, source) = pointer_and_source(query)?;
-    let groups = collect_json_groups(
-        &pointer,
-        source,
-        |value| Group { value, count: 0 },
-        |group, _| {
-            group.count += 1;
-            Ok(())
-        },
-    )?;
-    Ok(serde_json::to_string(&groups).expect("有效的原始 JSON 值和计数可直接序列化"))
-}
-
-fn group_json_records(query: &str) -> Result<String, JsonError> {
-    #[derive(serde::Serialize)]
-    struct Group<'a> {
-        #[serde(rename = "值")]
-        value: &'a RawValue,
-        #[serde(rename = "项目")]
-        records: Vec<&'a RawValue>,
-    }
-
-    let (pointer, source) = pointer_and_source(query)?;
-    let groups = collect_json_groups(
-        &pointer,
-        source,
-        |value| Group {
-            value,
-            records: Vec::new(),
-        },
-        |group, item| {
-            group.records.push(item);
-            Ok(())
-        },
-    )?;
-    Ok(serde_json::to_string(&groups).expect("有效的原始 JSON 值可以直接序列化"))
+    Ok(output)
 }
 
 fn summarize_json_groups(query: &str) -> Result<String, JsonError> {
@@ -2620,6 +2633,24 @@ mod tests {
         );
         assert_eq!(
             transform_json(r#"分组计数 ["/a","/b"] [{"a":1,"b":[]}]"#),
+            Err(JsonError::ExpectedScalar)
+        );
+    }
+
+    #[test]
+    fn groups_full_json_records_by_multiple_paths_without_reencoding_them() {
+        let query = concat!(
+            r#"分组明细 ["/地区","/状态"] [{"地区":"北","状态":"完成","金额":1.50},"#,
+            r#"{"地区":"北","状态":"待办","金额":2e0},{"地区":"北","状态":"完成","金额":3}]"#,
+        );
+        let expected = concat!(
+            r#"[{"值":["北","完成"],"项目":[{"地区":"北","状态":"完成","金额":1.50},"#,
+            r#"{"地区":"北","状态":"完成","金额":3}]},"#,
+            r#"{"值":["北","待办"],"项目":[{"地区":"北","状态":"待办","金额":2e0}]}]"#,
+        );
+        assert_eq!(transform_json(query).as_deref(), Ok(expected));
+        assert_eq!(
+            transform_json(r#"分组明细 ["/a","/b"] [{"a":1,"b":{}}]"#),
             Err(JsonError::ExpectedScalar)
         );
     }
