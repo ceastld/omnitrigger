@@ -241,6 +241,14 @@ impl LocalFilesIndex {
                     .then(|| (title_rank(&name, &filter), entry))
             })
             .collect();
+        if query.order == DirectoryOrder::Name
+            && (query.output != FileOutput::ExtensionCounts || query.limit.is_some())
+        {
+            matches.sort_by_key(|(rank, _)| *rank);
+        }
+        if let Some(limit) = query.limit {
+            matches.truncate(limit);
+        }
         if query.output == FileOutput::SizeTotal {
             let summary = matches
                 .iter()
@@ -267,9 +275,6 @@ impl LocalFilesIndex {
                 Some(output) => Results::text_value(Ok(output)),
                 None => Results::LocalFilesUnavailable("有文件的大小无法读取".to_owned()),
             };
-        }
-        if query.order == DirectoryOrder::Name {
-            matches.sort_by_key(|(rank, _)| *rank);
         }
         if query.output == FileOutput::TimeCsv {
             return Results::text_value(Ok(file_times_csv(
@@ -402,6 +407,7 @@ struct FileQuery<'a> {
     modified: DateBounds,
     created: DateBounds,
     extensions: Option<&'a str>,
+    limit: Option<usize>,
     output: FileOutput,
 }
 
@@ -485,6 +491,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
     let (mut minimum, mut maximum) = (None, None);
     let (mut modified, mut created) = (DateBounds::default(), DateBounds::default());
     let mut extensions = None;
+    let mut limit = None;
     let mut output = FileOutput::Entries;
     for option in options.split_whitespace() {
         match option.to_ascii_lowercase().as_str() {
@@ -531,6 +538,14 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
                             return None;
                         }
                         extensions = Some(quantity);
+                    }
+                    "前" | "limit" if limit.is_none() => {
+                        limit = Some(
+                            quantity
+                                .parse::<usize>()
+                                .ok()
+                                .filter(|count| (1..=MAX_DIRECTORY_ENTRIES).contains(count))?,
+                        );
                     }
                     "大小>" | "size>" => set_bound(&mut minimum, exact_byte_quantity(quantity)?)?,
                     "大小<" | "size<" => set_bound(&mut maximum, exact_byte_quantity(quantity)?)?,
@@ -590,6 +605,7 @@ fn split_query(query: &str) -> Option<FileQuery<'_>> {
         modified,
         created,
         extensions,
+        limit,
         output,
     })
 }
@@ -1070,6 +1086,55 @@ mod tests {
         );
         assert!(split_query(r"C:\Work | | 后缀=pdf,").is_none());
         assert!(split_query(r"C:\Work | | 后缀=pdf 仅文件夹").is_none());
+    }
+
+    #[test]
+    fn limits_the_ranked_matches_before_exporting_or_summarizing_them() {
+        let mut index = LocalFilesIndex::default();
+        let query = r"C:\Work | report | 前=1";
+        let load = index.request(Some(query)).unwrap();
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                entry("draft report.txt", "file"),
+                entry("report", "directory"),
+            ])
+        ));
+        assert!(matches!(
+            index.results(query),
+            Results::Destinations(items) if matches!(
+                items.as_slice(), [Destination::LocalFile { name, .. }] if name == "report"
+            )
+        ));
+        let list = r"C:\Work | report | limit=1 路径JSON";
+        assert!(index.request(Some(list)).is_none());
+        assert!(matches!(index.results(list), Results::Value(Ok(value))
+            if value.text == r#"["C:\\Work\\report"]"#));
+
+        let sum = r"C:\Work | | 大小合计 前=2";
+        let load = index.request(Some(sum)).unwrap();
+        let with_size = |name, size| {
+            let mut file = entry(name, "file");
+            file.size_bytes = Some(size);
+            file
+        };
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                with_size("b.docx", 7),
+                with_size("c.tmp", 4),
+                with_size("a.PDF", 3),
+            ])
+        ));
+        assert!(matches!(index.results(sum), Results::Value(Ok(value))
+            if value.text == "2 个文件 · 合计 11 B"));
+        for invalid in [
+            r"C:\Work | | 前=0",
+            r"C:\Work | | 前=2 limit=1",
+            r"C:\Work | | 前=1025",
+        ] {
+            assert!(split_query(invalid).is_none(), "{invalid}");
+        }
     }
 
     #[test]
