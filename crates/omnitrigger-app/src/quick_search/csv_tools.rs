@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     hash::Hash,
 };
 
@@ -86,6 +86,7 @@ pub(super) enum CsvError {
     DateOffsetColumnArguments,
     DataConversionTarget(ConversionError),
     RunningColumnArguments,
+    MovingColumnArguments,
     DataRowValue { row: usize, cause: &'static str },
     AddedColumnTooLarge,
     StackArguments,
@@ -192,6 +193,9 @@ impl CsvError {
             Self::DataConversionTarget(cause) => cause.message(),
             Self::RunningColumnArguments => {
                 "填写新列名、数值列和分组列，例如 [\"结果\",\"金额\",[\"部门\"]]"
+            }
+            Self::MovingColumnArguments => {
+                "填写新列名、数值列、分组列和窗口大小，例如 [\"近两笔\",\"金额\",[\"部门\"],2]。窗口为 1 至 128"
             }
             Self::DataRowValue { cause, .. } => cause,
             Self::StackArguments => "用 JSON 字符串数组填写 2 至 16 张含表头的 CSV 表格",
@@ -397,11 +401,18 @@ enum RunningColumnComputation {
     Average,
     Difference,
     RelativeChange,
+    Moving { width: usize, average: bool },
 }
 
 enum RunningColumnState {
     Accumulation(RunningTotals),
     Previous(Option<BigRational>),
+    Moving {
+        values: VecDeque<BigRational>,
+        sum: BigRational,
+        width: usize,
+        average: bool,
+    },
 }
 
 #[derive(Deserialize)]
@@ -733,6 +744,27 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                         RunningColumnComputation::Average
                     }
                     _ => RunningColumnComputation::Sum,
+                },
+            }
+        }
+        kind @ ("移动平均列" | "moving-average-column" | "移动合计列" | "moving-sum-column") =>
+        {
+            let ((name, source, groups, width), data) =
+                json_argument_and_data::<(String, ColumnReference, Vec<ColumnReference>, usize)>(
+                    input,
+                    CsvError::MovingColumnArguments,
+                )?;
+            if !(1..=MAX_VALUES).contains(&width) || name.trim().is_empty() || name.contains('\0') {
+                return Err(CsvError::MovingColumnArguments);
+            }
+            input = data;
+            Operation::RunningColumn {
+                name,
+                source,
+                groups,
+                computation: RunningColumnComputation::Moving {
+                    width,
+                    average: matches!(kind, "移动平均列" | "moving-average-column"),
                 },
             }
         }
@@ -2083,6 +2115,14 @@ fn running_column(
                     RunningColumnComputation::Sum | RunningColumnComputation::Average => {
                         RunningColumnState::Accumulation(RunningTotals::default())
                     }
+                    RunningColumnComputation::Moving { width, average } => {
+                        RunningColumnState::Moving {
+                            values: VecDeque::new(),
+                            sum: BigRational::default(),
+                            width,
+                            average,
+                        }
+                    }
                 });
         match state {
             RunningColumnState::Accumulation(total) => {
@@ -2113,6 +2153,31 @@ fn running_column(
                 *previous = Some(value);
                 ensure_exact_size(&change).map_err(|error| error_at_row(error.message()))?;
                 Ok(change.to_string())
+            }
+            RunningColumnState::Moving {
+                values,
+                sum,
+                width,
+                average,
+            } => {
+                let Some(value) = value else {
+                    return Ok(String::new());
+                };
+                if values.len() == *width {
+                    *sum -= values.pop_front().expect("非空窗口应有首项");
+                }
+                *sum += &value;
+                ensure_exact_size(sum).map_err(|error| error_at_row(error.message()))?;
+                values.push_back(value);
+                if values.len() < *width {
+                    return Ok(String::new());
+                }
+                if !*average {
+                    return Ok(sum.to_string());
+                }
+                let mean = &*sum / BigInt::from(*width);
+                ensure_exact_size(&mean).map_err(|error| error_at_row(error.message()))?;
+                Ok(mean.to_string())
             }
         }
     })
@@ -4546,6 +4611,25 @@ mod tests {
                 cause: StatisticsError::ZeroPreviousValue.message(),
             })
         );
+    }
+
+    #[test]
+    fn moves_a_bounded_window_per_group_without_counting_blank_rows() {
+        let query = "移动平均列 [\"近两笔\",\"金额\",[\"部门\"],2]\n部门,金额\n北,1/3\n南,2\n北,\n北,0.5\n南,3/2\n北,2";
+        assert_eq!(
+            transform_csv(query).as_deref(),
+            Ok("部门,金额,近两笔\r\n北,1/3,\"\"\r\n南,2,\"\"\r\n北,\"\",\"\"\r\n北,0.5,5/12\r\n南,3/2,7/4\r\n北,2,5/4")
+        );
+        assert_eq!(
+            transform_csv("moving-sum-column [\"结果\",1,[],2]\n金额\n1/3\n1/2\n2").as_deref(),
+            Ok("金额,结果\r\n1/3,\"\"\r\n1/2,5/6\r\n2,5/2")
+        );
+        for width in [0, MAX_VALUES + 1] {
+            assert_eq!(
+                transform_csv(&format!("移动平均列 [\"结果\",1,[],{width}]\n金额\n1")),
+                Err(CsvError::MovingColumnArguments)
+            );
+        }
     }
 
     #[test]
