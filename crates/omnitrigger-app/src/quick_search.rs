@@ -2780,6 +2780,15 @@ impl Render for QuickSearch {
                             }),
                     )
                     .child(div().flex_1())
+                    .when(!naming_bookmark && query.trim().is_empty(), |header| {
+                        header.child(
+                            button("open-quick-search-tools", "工具", Tone::Ghost, true)
+                                .h(px(24.))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.fill_query("工具: ", window, cx);
+                                })),
+                        )
+                    })
                     .when_some(bookmark_action, |header, (label, hint)| {
                         header.child(
                             // 操作改变时使用新的按钮标识，结束上一次的悬停提示。
