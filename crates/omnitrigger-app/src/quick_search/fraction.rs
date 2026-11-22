@@ -8,6 +8,7 @@ use super::conversion::split_conversion;
 use super::operators::Operator;
 
 const MAX_POWER_EXPONENT: u32 = 1024;
+const MAX_MODULAR_POWER_BITS: u64 = 1024;
 const MAX_FACTORIAL_ARGUMENT: u32 = 1024;
 const MAX_COMBINATORIAL_ARGUMENT: u32 = 4096;
 const MAX_EXACT_BITS: u64 = 8192;
@@ -24,6 +25,9 @@ pub(super) enum FractionError {
     OutOfRange,
     TooLong,
     NonIntegerExponent,
+    ModularPowerArguments,
+    ModularPowerRange,
+    ModularPowerInverse,
     FactorialDomain,
     FactorialRange,
     CombinatorialDomain,
@@ -45,6 +49,9 @@ impl FractionError {
             Self::OutOfRange => "分子或分母超出整数范围",
             Self::TooLong => "分数算式最多支持 256 个字符",
             Self::NonIntegerExponent => "精确分数幂的指数必须是整数",
+            Self::ModularPowerArguments => "三参数 pow 的参数须为整数，模数须非零",
+            Self::ModularPowerRange => "三参数 pow 的指数和模数各最多 1024 个二进制位",
+            Self::ModularPowerInverse => "负指数要求底数与模数互质",
             Self::FactorialDomain => "阶乘的参数必须是非负整数",
             Self::FactorialRange => "阶乘参数最多 1024，结果最多 8192 个二进制位",
             Self::CombinatorialDomain => "组合数和排列数的参数必须是非负整数",
@@ -388,6 +395,38 @@ pub(super) fn format_signed_square_root(value: &BigRational, sign: Sign) -> Stri
     }
 }
 
+fn modular_power(
+    base: BigRational,
+    exponent: BigRational,
+    modulus: BigRational,
+) -> Result<BigRational, FractionError> {
+    if !base.is_integer()
+        || !exponent.is_integer()
+        || !modulus.is_integer()
+        || modulus.numer().sign() == Sign::NoSign
+    {
+        return Err(FractionError::ModularPowerArguments);
+    }
+    let modulus = modulus.numer();
+    let exponent = exponent.numer();
+    if modulus.bits().max(exponent.bits()) > MAX_MODULAR_POWER_BITS {
+        return Err(FractionError::ModularPowerRange);
+    }
+    if modulus.bits() == 1 {
+        return Ok(BigRational::default());
+    }
+    let base = base.numer();
+    let value = if exponent.sign() == Sign::Minus {
+        let inverse = base
+            .modinv(modulus)
+            .ok_or(FractionError::ModularPowerInverse)?;
+        inverse.modpow(&-exponent, modulus)
+    } else {
+        base.modpow(exponent, modulus)
+    };
+    Ok(BigRational::from_integer(value))
+}
+
 fn rational_power(base: BigRational, exponent: BigRational) -> Result<BigRational, FractionError> {
     if !exponent.is_integer() {
         return Err(FractionError::NonIntegerExponent);
@@ -599,6 +638,10 @@ impl FractionParser<'_> {
             self.remaining = rest;
             return Ok(value.clone());
         }
+        if name.eq_ignore_ascii_case("pow") {
+            self.remaining = rest;
+            return self.power_function();
+        }
         let function = if name.eq_ignore_ascii_case("comb") {
             CombinatorialFunction::Combination
         } else if name.eq_ignore_ascii_case("perm") {
@@ -623,6 +666,25 @@ impl FractionParser<'_> {
             return Err(self.expected_token());
         }
         function.calculate(n, k)
+    }
+
+    fn power_function(&mut self) -> Result<BigRational, FractionError> {
+        if !self.consume('(') {
+            return Err(self.expected_token());
+        }
+        let base = self.sum()?;
+        if !self.consume(',') {
+            return Err(self.expected_token());
+        }
+        let exponent = self.sum()?;
+        let modulus = self.consume(',').then(|| self.sum()).transpose()?;
+        if !self.consume(')') {
+            return Err(self.expected_token());
+        }
+        match modulus {
+            Some(modulus) => modular_power(base, exponent, modulus),
+            None => rational_power(base, exponent),
+        }
     }
 
     fn signed_number(&mut self) -> Result<BigRational, FractionError> {
@@ -747,6 +809,42 @@ mod tests {
                 ",1".repeat(MAX_CONTINUED_FRACTION_TERMS)
             )),
             Err(FractionError::ContinuedFractionLength)
+        );
+    }
+
+    #[test]
+    fn evaluates_exact_power_functions_with_python_modulus_sign() {
+        for (input, expected) in [
+            ("pow(1/2,-3)", "8"),
+            ("pow(2,10,1000)", "24"),
+            ("pow(3,-1,11)", "4"),
+            ("pow(3,-1,-11)", "-7"),
+            ("pow(-3,3,11)", "6"),
+            ("pow(3,2,-11)", "-2"),
+            ("pow(0,-1,1)", "0"),
+            ("pow(3,-1,11)+pow(2,10)", "1028"),
+        ] {
+            assert_eq!(
+                calculate_fraction(input).unwrap().to_string(),
+                expected,
+                "{input}"
+            );
+        }
+        assert_eq!(
+            calculate_fraction("pow(6,-1,9)"),
+            Err(FractionError::ModularPowerInverse)
+        );
+        assert_eq!(
+            calculate_fraction("pow(2,3,0)"),
+            Err(FractionError::ModularPowerArguments)
+        );
+        assert_eq!(
+            calculate_fraction("pow(1/2,3,5)"),
+            Err(FractionError::ModularPowerArguments)
+        );
+        assert_eq!(
+            calculate_fraction("pow(2,2**1024,5)"),
+            Err(FractionError::ModularPowerRange)
         );
     }
 

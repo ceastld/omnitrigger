@@ -2143,6 +2143,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "精确计算模幂或乘法逆元",
+        query: "分数: 计算 pow(3,-1,11)",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "给同一算式批量代入不同的 x",
         query: "分数: 取值表 [-2,0,3/2] x**2+1/3",
     },
