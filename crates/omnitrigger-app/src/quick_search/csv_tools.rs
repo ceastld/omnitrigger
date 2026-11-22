@@ -39,7 +39,10 @@ use super::{
     statistics::{
         median_sorted_values, summarize_unweighted, RunningTotals, StatisticsError, MAX_VALUES,
     },
-    text_tools::{compare_natural, compile_regex, newline_pattern, regex_group_index, TextError},
+    text_tools::{
+        compare_natural, compile_regex, newline_pattern, regex_group_index, TextError,
+        TextLengthUnit,
+    },
 };
 
 const MAX_PIVOT_BYTES: usize = 1024 * 1024;
@@ -99,6 +102,7 @@ pub(super) enum CsvError {
     WorkdayOffsetExceptions,
     DateFormatColumnArguments,
     DateFormatColumnPattern,
+    TextLengthColumnArguments,
     DataConversionTarget(ConversionError),
     GroupedColumnArguments,
     GroupCountColumnArguments,
@@ -220,6 +224,9 @@ impl CsvError {
                 "填写新列名、日期源列和日期格式，例如 [\"标准日期\",\"日期\",\"%Y-%m-%d\"]"
             }
             Self::DateFormatColumnPattern => "填写有效的日期格式，例如 %Y-%m-%d 或 %d/%m/%Y",
+            Self::TextLengthColumnArguments => {
+                "填写新列名、来源列和单位，单位可用字素、码位、UTF-16 单元或 UTF-8 字节"
+            }
             Self::DataConversionTarget(cause) => cause.message(),
             Self::GroupedColumnArguments => {
                 "填写新列名、数值列和分组列，例如 [\"结果\",\"金额\",[\"部门\"]]"
@@ -352,6 +359,7 @@ enum Operation {
         amounts: ColumnReference,
         unit: DateOffsetUnit,
     },
+    TextLengthColumn(String, ColumnReference, TextLengthUnit),
     DatePatternColumn {
         name: String,
         source: ColumnReference,
@@ -815,6 +823,19 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
                 amounts,
                 unit: DateOffsetUnit::Workdays(exceptions),
             }
+        }
+        "长度列" | "length-column" => {
+            let ((name, source, unit), data) =
+                json_argument_and_data::<(String, ColumnReference, String)>(
+                    input,
+                    CsvError::TextLengthColumnArguments,
+                )?;
+            if name.trim().is_empty() || name.contains('\0') {
+                return Err(CsvError::TextLengthColumnArguments);
+            }
+            let unit = TextLengthUnit::parse(&unit).ok_or(CsvError::TextLengthColumnArguments)?;
+            input = data;
+            Operation::TextLengthColumn(name, source, unit)
         }
         kind @ ("日期格式列" | "date-format-column" | "日期解析列" | "date-parse-column") =>
         {
@@ -1332,6 +1353,14 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             amounts,
             unit,
         } => date_offset_column(&rows, &name, source, amounts, unit),
+        Operation::TextLengthColumn(name, source, unit) => {
+            let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+            let source = source.resolve(header)?;
+            validate_column_width(&[source], header.len())?;
+            write_appended_column(header, records, &name, |row| {
+                Ok(unit.count(&row[source]).to_string())
+            })
+        }
         Operation::DatePatternColumn {
             name,
             source,
@@ -5131,6 +5160,35 @@ mod tests {
         assert_eq!(
             transform_csv("workday-offset-column [\"结果\",1,2,[[]]] 日期,工作日数"),
             Err(CsvError::WorkdayOffsetColumnArguments)
+        );
+    }
+
+    #[test]
+    fn appends_csv_cell_lengths_for_each_unicode_unit() {
+        let csv = "编号,文本\n1,👩‍💻\n2,e\u{301}\n3,";
+        for (unit, first, second) in [
+            ("字素", 1, 1),
+            ("码位", 3, 2),
+            ("UTF-16 单元", 5, 2),
+            ("UTF-8 字节", 11, 3),
+        ] {
+            let query = format!("长度列 [\"长度\",\"文本\",\"{unit}\"]\n{csv}");
+            assert_eq!(
+                transform_csv(&query).unwrap(),
+                format!("编号,文本,长度\r\n1,👩‍💻,{first}\r\n2,e\u{301},{second}\r\n3,\"\",0")
+            );
+        }
+        assert_eq!(
+            transform_csv("length-column [\"长度\",1,\"未知\"] 文本"),
+            Err(CsvError::TextLengthColumnArguments)
+        );
+        assert_eq!(
+            transform_csv("length-column [\"文本\",1,\"utf16\"] 文本"),
+            Err(CsvError::HeaderNameConflict)
+        );
+        assert_eq!(
+            transform_csv("length-column [\"长度\",2,\"utf8\"] 文本"),
+            Err(CsvError::ColumnOutOfRange)
         );
     }
 

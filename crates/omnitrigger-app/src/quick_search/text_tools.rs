@@ -27,6 +27,35 @@ const MAX_EXPANDED_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_DIFF_LINES: usize = 512;
 const MAX_PIPELINE_STEPS: usize = 8;
 
+#[derive(Clone, Copy)]
+pub(super) enum TextLengthUnit {
+    Graphemes,
+    CodePoints,
+    Utf16Units,
+    Utf8Bytes,
+}
+
+impl TextLengthUnit {
+    pub(super) fn parse(label: &str) -> Option<Self> {
+        match label.trim().to_ascii_lowercase().as_str() {
+            "字素" | "字素簇" | "graphemes" => Some(Self::Graphemes),
+            "码位" | "codepoints" => Some(Self::CodePoints),
+            "utf-16 单元" | "utf16" => Some(Self::Utf16Units),
+            "utf-8 字节" | "utf8" | "bytes" => Some(Self::Utf8Bytes),
+            _ => None,
+        }
+    }
+
+    pub(super) fn count(self, text: &str) -> usize {
+        match self {
+            Self::Graphemes => text.graphemes(true).count(),
+            Self::CodePoints => text.chars().count(),
+            Self::Utf16Units => text.encode_utf16().count(),
+            Self::Utf8Bytes => text.len(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TextError {
     MissingText,
@@ -206,10 +235,10 @@ fn transform_text_payload(operation: &str, text: &str) -> Result<String, TextErr
         "小写" | "lower" | "lowercase" => Ok(text.to_lowercase()),
         "长度详情" | "length-details" => Ok(format!(
             "{} 字素簇 · {} Unicode 码位\n{} UTF-16 单元 · {} UTF-8 字节",
-            text.graphemes(true).count(),
-            text.chars().count(),
-            text.encode_utf16().count(),
-            text.len()
+            TextLengthUnit::Graphemes.count(text),
+            TextLengthUnit::CodePoints.count(text),
+            TextLengthUnit::Utf16Units.count(text),
+            TextLengthUnit::Utf8Bytes.count(text)
         )),
         "显示空白" | "show-whitespace" => Ok(show_whitespace(text)),
         "字频" | "字符频数" | "grapheme-frequency" => Ok(count_graphemes(text)),
