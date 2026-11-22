@@ -1617,6 +1617,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "替换或删除路径末尾的扩展名",
+        query: r#"路径: 换扩展名 ["C:\\工作\\发布 包.tar.gz",".zip"]"#,
+    },
+    Example {
+        icon: Icon::Layers,
         title: "提取上一级目录",
         query: r"路径: 上一级 C:\工作\发布 包.tar.gz",
     },
