@@ -24,6 +24,8 @@ pub(super) enum UrlEncodingError {
     NullCharacter,
     MissingParameters,
     InvalidUrl,
+    InvalidUrlPair,
+    InvalidUrlReference,
     InvalidParameterPair,
     InvalidParameterNames,
     InvalidFilePath,
@@ -41,6 +43,8 @@ impl UrlEncodingError {
             Self::NullCharacter => "解码结果含空字符，无法完整复制",
             Self::MissingParameters => "没有可解析的查询参数",
             Self::InvalidUrl => "输入带协议的 URL，例如 https://example.invalid/",
+            Self::InvalidUrlPair => "用 JSON 字符串数组填写基准网址和相对链接",
+            Self::InvalidUrlReference => "无法用该基准网址解析链接",
             Self::InvalidParameterPair => "用 JSON 填写名称和值，例如 [\"tag\",\"茶\"]，再输入 URL",
             Self::InvalidParameterNames => "用 JSON 字符串数组填写参数名，再输入 URL",
             Self::InvalidFilePath => "输入绝对文件路径，例如 C:\\文档\\示例.txt",
@@ -67,6 +71,7 @@ pub(super) fn convert_url_component(input: &str) -> Result<String, UrlEncodingEr
         "表单解码" | "form-decode" => decode_form_value(value),
         "参数" | "查询参数" | "params" => decode_parameters(value),
         "拆解" | "inspect" => inspect_url(value),
+        "拼接" | "resolve" => resolve_url(value),
         "源" | "源站" | "origin" => {
             let url = Url::parse(value).map_err(|_| UrlEncodingError::InvalidUrl)?;
             let origin = url.origin();
@@ -110,6 +115,20 @@ fn inspect_url(input: &str) -> Result<String, UrlEncodingError> {
         }
     }
     Ok(lines.join("\n"))
+}
+
+fn resolve_url(input: &str) -> Result<String, UrlEncodingError> {
+    let [base, reference] = serde_json::from_str::<[String; 2]>(input).map_err(|error| {
+        if error.is_eof() {
+            UrlEncodingError::Incomplete
+        } else {
+            UrlEncodingError::InvalidUrlPair
+        }
+    })?;
+    let base = Url::parse(&base).map_err(|_| UrlEncodingError::InvalidUrl)?;
+    base.join(&reference)
+        .map(Into::into)
+        .map_err(|_| UrlEncodingError::InvalidUrlReference)
 }
 
 fn encode_file_path(input: &str) -> Result<String, UrlEncodingError> {
@@ -449,6 +468,47 @@ mod tests {
             convert_url_component("源 /doc"),
             Err(UrlEncodingError::InvalidUrl)
         );
+    }
+
+    #[test]
+    fn resolves_url_references_with_the_base_urls_directory_and_query() {
+        for (query, expected) in [
+            (
+                r#"拼接 ["https://example.invalid/docs/api/","../guide?lang=zh#intro"]"#,
+                "https://example.invalid/docs/guide?lang=zh#intro",
+            ),
+            (
+                r#"resolve ["https://example.invalid/docs/index.html","入 门.html"]"#,
+                "https://example.invalid/docs/%E5%85%A5%20%E9%97%A8.html",
+            ),
+            (
+                r##"resolve ["https://example.invalid/doc?x=1#old","#new"]"##,
+                "https://example.invalid/doc?x=1#new",
+            ),
+            (
+                r#"resolve ["https://example.invalid/doc","//cdn.example.invalid/a"]"#,
+                "https://cdn.example.invalid/a",
+            ),
+        ] {
+            assert_eq!(
+                convert_url_component(query).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        for (query, error) in [
+            (
+                r#"拼接 ["https://example.invalid/"]"#,
+                UrlEncodingError::InvalidUrlPair,
+            ),
+            (r#"拼接 ["/docs/","file"]"#, UrlEncodingError::InvalidUrl),
+            (
+                r#"拼接 ["mailto:hello@example.invalid","file"]"#,
+                UrlEncodingError::InvalidUrlReference,
+            ),
+        ] {
+            assert_eq!(convert_url_component(query), Err(error), "{query}");
+        }
     }
 
     #[test]

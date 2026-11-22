@@ -159,6 +159,7 @@
 - 输入 `URL: 去查询串 https://example.invalid/doc?source=mail#part` 得到 `https://example.invalid/doc#part`。结果使用 URL 解析后的格式，保留路径和片段。
 - 输入 `URL: 去参数 source https://example.invalid/doc?q=a%20b&source=mail#part` 得到 `https://example.invalid/doc?q=a%20b#part`。同名参数会一起移除，其余参数保留编码和顺序。名称区分大小写，空格可写作 `%20`。 [WHATWG 查询参数解析规则](https://url.spec.whatwg.org/#concept-urlencoded-parser)
 - 输入 `URL: 去参数组 ["source","campaign"]` 后加空格和网址，可同时移除指定名称的全部参数。列表填写解码后的名称，可直接写空格或加号。
+- 输入 `URL: 拼接 ["https://example.invalid/docs/api/","../guide?lang=zh#intro"]` 得到 `https://example.invalid/docs/guide?lang=zh#intro`。基准网址末尾的斜杠决定相对路径从哪个目录解析。 [Rust URL 相对链接解析](https://docs.rs/url/2.5.8/url/struct.Url.html#method.join)
 - 输入 `URL: 源 https://example.invalid:8443/doc?x=1#part` 得到 `https://example.invalid:8443`。结果由协议、主机和非默认端口组成。 [WHATWG URL 源的定义](https://url.spec.whatwg.org/#concept-url-origin)
 - 输入 `URL: 加参数 ["tag","茶"] https://example.invalid/doc?tag=first#part` 会在末尾追加一项。用 `URL: 设参数` 会替换第一个同名项并移除其余同名项。其他查询参数保留编码和顺序。 [WHATWG 表单编码规则](https://url.spec.whatwg.org/#concept-urlencoded-serializer)
 - 输入 `URL: 文件链接 "C:\Docs\a b.txt"` 得到 `file:///C:/Docs/a%20b.txt`。用 `URL: 文件路径` 加上链接可转回 Windows 路径。支持绝对盘符路径和 UNC 路径。 [Rust URL 文件路径转换](https://docs.rs/url/2.5.8/url/struct.Url.html#method.from_file_path)

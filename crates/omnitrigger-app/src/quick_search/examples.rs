@@ -1547,6 +1547,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Browser,
+        title: "将相对链接解析成完整 URL",
+        query: r#"URL: 拼接 ["https://example.invalid/docs/api/","../guide?lang=zh#intro"]"#,
+    },
+    Example {
+        icon: Icon::Browser,
         title: "给网址追加一个查询参数",
         query: r#"URL: 加参数 ["tag","茶 + 咖啡"] https://example.invalid/doc?tag=first#part"#,
     },
