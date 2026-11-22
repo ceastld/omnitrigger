@@ -1565,6 +1565,51 @@ impl QuickSearch {
         .detach();
     }
 
+    fn selected_known_folder(&self) -> Option<SearchFolder> {
+        let Results::Destinations(items) = &self.results else {
+            return None;
+        };
+        match items.get(self.selected) {
+            Some(Destination::KnownFolder(folder)) => Some(*folder),
+            _ => None,
+        }
+    }
+
+    fn use_known_folder_for_file_search(
+        &self,
+        folder: SearchFolder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let original = self.input.read(cx).text();
+        cx.spawn_in(window, async move |this, cx| {
+            let path = cx
+                .background_executor()
+                .spawn(async move { folder.kind.filesystem_path() })
+                .await;
+            let _ = cx.update(|window, cx| {
+                let _ = this.update(cx, |this, cx| {
+                    if this.input.read(cx).text() != original
+                        || this.selected_known_folder() != Some(folder)
+                    {
+                        return;
+                    }
+                    match path {
+                        Ok(path) => this.fill_query(format!("文件: {path}"), window, cx),
+                        Err(error) => {
+                            this.results = Results::LocalFilesUnavailable(error);
+                            this.selected = 0;
+                            window
+                                .resize(size(px(WIDTH), px(this.results.height(MAX_VALUE_LINES))));
+                            cx.notify();
+                        }
+                    }
+                });
+            });
+        })
+        .detach();
+    }
+
     fn reveal_selected_file(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(path) = self.results.local_file_path(self.selected) else {
             return false;
@@ -1828,6 +1873,13 @@ impl QuickSearch {
                     .suggested_input(self.selected)
                     .map(str::to_owned);
                 let subdirectory = self.results.subdirectory_query(self.selected);
+                if let Some(folder) = self.selected_known_folder() {
+                    if !event.is_held {
+                        self.use_known_folder_for_file_search(folder, window, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 let continues_value = matches!(
                     &self.results,
                     Results::Value(Ok(value)) if value.continuation_hint().is_some()
@@ -2452,6 +2504,7 @@ impl QuickSearch {
                                     .when(selected, |row| {
                                         let hint = match &destination {
                                             Destination::TextHistoryQuery(_) => "Enter 查找",
+                                            Destination::KnownFolder(_) => "Tab 查找 · Enter 打开",
                                             Destination::OpenWindow(_) => "Enter 切换",
                                             Destination::LocalFile {
                                                 is_directory: true, ..

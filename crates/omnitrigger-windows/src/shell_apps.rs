@@ -10,9 +10,9 @@ use windows::Win32::{
             BHID_EnumItems, FOLDERID_AppsFolder, FOLDERID_Desktop, FOLDERID_Documents,
             FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_Videos,
             IEnumShellItems, ILGetSize, IShellItem, SHCreateItemFromIDList, SHGetIDListFromObject,
-            SHGetKnownFolderIDList, ShellExecuteExW, SEE_MASK_FLAG_NO_UI, SEE_MASK_INVOKEIDLIST,
-            SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, SIGDN, SIGDN_NORMALDISPLAY,
-            SIGDN_PARENTRELATIVEPARSING,
+            SHGetKnownFolderIDList, SHGetKnownFolderPath, ShellExecuteExW, KF_FLAG_DONT_VERIFY,
+            SEE_MASK_FLAG_NO_UI, SEE_MASK_INVOKEIDLIST, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, SIGDN,
+            SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING,
         },
         WindowsAndMessaging::SW_SHOWNORMAL,
     },
@@ -64,6 +64,20 @@ impl ShellFolder {
             Self::Music => FOLDERID_Music,
             Self::Videos => FOLDERID_Videos,
         }
+    }
+
+    /// 读取当前配置的文件夹路径，路径存在性由使用方检查。
+    pub fn filesystem_path(self) -> Result<String, String> {
+        let path = unsafe { SHGetKnownFolderPath(&self.id(), KF_FLAG_DONT_VERIFY, None) }
+            .map_err(|error| format!("系统未能读取文件夹路径（{error}）"))?;
+        let _memory = ShellMemory(path.0.cast());
+        if path.is_null() {
+            return Err("系统未能读取文件夹路径".into());
+        }
+        unsafe { path.to_string() }
+            .ok()
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| "系统未返回可用的文件夹路径".to_owned())
     }
 
     pub fn open(self) -> Result<(), String> {
