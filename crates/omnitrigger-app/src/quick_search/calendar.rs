@@ -10,6 +10,7 @@ const MAX_LISTED_DATES: usize = 366;
 pub(super) enum DateError {
     Incomplete,
     InvalidDate,
+    InvalidMonthCalendar,
     InvalidWeek,
     InvalidQuarter,
     InvalidYearDay,
@@ -32,6 +33,7 @@ impl DateError {
         match self {
             Self::Incomplete => "可以输入日期、天数或星期几，例如 日期: 今天 星期几",
             Self::InvalidDate => "输入有效日期或月份，例如 2026年11月21日 或 2026-11",
+            Self::InvalidMonthCalendar => "填写月份，例如 2024-02、本月、上月或下月",
             Self::InvalidWeek => "请输入有效的 ISO 周号或周日期，例如 2026-W47 或 2026-W47-6",
             Self::InvalidQuarter => "请输入季度编号 1 至 4，例如 2026-Q4",
             Self::InvalidYearDay => "请输入该年有效的天数，例如 2024 第60天",
@@ -547,6 +549,35 @@ fn month_end(start: NaiveDate, months: u32) -> Result<NaiveDate, DateError> {
     )
 }
 
+fn relative_month_start(today: NaiveDate, offset: i8) -> Result<NaiveDate, DateError> {
+    let current = in_range(today.with_day(1))?;
+    in_range(match offset {
+        -1 => current.checked_sub_months(Months::new(1)),
+        1 => current.checked_add_months(Months::new(1)),
+        _ => Some(current),
+    })
+}
+
+fn month_calendar(input: &str, today: NaiveDate) -> Result<String, DateError> {
+    let start = if let Some((year, month)) = iso_month_parts(input) {
+        NaiveDate::from_ymd_opt(year, month, 1).ok_or(DateError::InvalidMonthCalendar)?
+    } else if let Some(RelativePeriod::Month(offset)) = relative_period(input) {
+        relative_month_start(today, offset)?
+    } else {
+        return Err(DateError::InvalidMonthCalendar);
+    };
+    let last = month_end(start, 1)?.day();
+    let blank_days = start.weekday().num_days_from_monday() as usize;
+    let mut cells = vec!["  ".to_owned(); blank_days];
+    cells.extend((1..=last).map(|day| format!("{day:>2}")));
+    let mut grid = format!("一  二  三  四  五  六  日    {}", start.format("%Y-%m"));
+    for week in cells.chunks(7) {
+        grid.push('\n');
+        grid.push_str(&week.join("  "));
+    }
+    Ok(grid)
+}
+
 fn month_range(start: NaiveDate, months: u32) -> Result<String, DateError> {
     let end = month_end(start, months)?;
     let workdays =
@@ -710,6 +741,9 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
     if operation == "列出" || operation.eq_ignore_ascii_case("list") {
         return list_dates(rest.trim_start(), today);
     }
+    if operation == "月历" || operation.eq_ignore_ascii_case("month-grid") {
+        return month_calendar(rest.trim_start(), today);
+    }
     if let Some((year, day)) = year_day_parts(input) {
         let date = day
             .parse()
@@ -747,13 +781,7 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
             return week_range(monday);
         }
         Some(RelativePeriod::Month(offset)) => {
-            let current = in_range(today.with_day(1))?;
-            let start = match offset {
-                -1 => current.checked_sub_months(Months::new(1)),
-                1 => current.checked_add_months(Months::new(1)),
-                _ => Some(current),
-            };
-            return month_range(in_range(start)?, 1);
+            return month_range(relative_month_start(today, offset)?, 1);
         }
         Some(RelativePeriod::Year(offset)) => return year_range(today.year() + i32::from(offset)),
         None => {}
@@ -836,6 +864,33 @@ pub(super) fn calculate_date(input: &str, today: NaiveDate) -> Result<String, Da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lays_out_a_monday_first_calendar_with_leap_days_and_relative_months() {
+        let today = NaiveDate::from_ymd_opt(2024, 1, 31).unwrap();
+        let expected = concat!(
+            "一  二  三  四  五  六  日    2024-02\n",
+            "             1   2   3   4\n",
+            " 5   6   7   8   9  10  11\n",
+            "12  13  14  15  16  17  18\n",
+            "19  20  21  22  23  24  25\n",
+            "26  27  28  29",
+        );
+        for query in ["月历 2024-02", "月历 下月", "MONTH-GRID next month"] {
+            assert_eq!(
+                calculate_date(query, today).as_deref(),
+                Ok(expected),
+                "{query}"
+            );
+        }
+        let august = calculate_date("月历 2020-08", today).unwrap();
+        assert_eq!(august.lines().count(), 7);
+        assert_eq!(august.lines().last(), Some("31"));
+        assert_eq!(
+            calculate_date("月历 2024-13", today),
+            Err(DateError::InvalidMonthCalendar)
+        );
+    }
 
     #[test]
     fn formats_and_parses_dates_with_explicit_patterns() {

@@ -757,6 +757,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Clock,
+        title: "按周一开头查看整月日历",
+        query: "日期: 月历 2024-02",
+    },
+    Example {
+        icon: Icon::Clock,
         title: "查全年日期和工作日",
         query: "日期: 2024",
     },
@@ -2125,7 +2130,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
         Scope::BatchConversion if matches!(term, "时" | "时长" | "时间" | "时间戳") => {}
         Scope::Date
             if !term.is_empty()
-                && ["列出", "格式化", "解析"]
+                && ["列出", "格式化", "解析", "月历"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term)) => {}
         Scope::Duration
