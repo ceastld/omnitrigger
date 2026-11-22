@@ -420,6 +420,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "批量换算: 3 m to cm\n0xff to dec\n1 GiB to MiB",
     },
     Example {
+        icon: Icon::Layers,
+        title: "以 CSV 导出单位与进制换算的输入和结果",
+        query: "批量换算: 对照 3 m to cm\n0xff to dec\n1 GiB to MiB",
+    },
+    Example {
         icon: Icon::Clock,
         title: "逐行换算分秒、ISO 和带单位的时长",
         query: "批量换算: 时长 01:30 to s\nPT1M30S to min\n1天2.5秒 to iso",
@@ -2866,7 +2871,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                 term,
                 "时" | "时长" | "时间" | "时间戳" | "路" | "路径" | "网" | "网址" | "日" | "日期"
             ) || (!term.is_empty()
-                && ["时长对照", "日期对照"]
+                && ["对照", "时长对照", "日期对照"]
                     .into_iter()
                     .any(|operation| operation.starts_with(term))) => {}
         Scope::Date

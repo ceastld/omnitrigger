@@ -3,7 +3,7 @@ use std::f64::consts::{PI, TAU};
 use num_bigint::BigInt;
 
 use super::aspect_ratio::{pixel_dimensions, AspectRatioError};
-use super::batch::{map_batch_lines, BatchError};
+use super::batch::{map_batch_csv, map_batch_lines, BatchError};
 use super::calculator::{evaluate, format_result, looks_like_calculation, normalize, QUERY_LIMIT};
 use super::duration::{convert_duration, elapsed_duration, DurationError};
 use super::fraction::parse_fraction_literal;
@@ -1116,9 +1116,15 @@ pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
 }
 
 pub(super) fn convert_batch(input: &str) -> Result<String, BatchError<ConversionError>> {
-    map_batch_lines(input, |query| {
-        convert(query).unwrap_or(Err(ConversionError::Incomplete))
-    })
+    map_batch_lines(input, convert_batch_line)
+}
+
+pub(super) fn convert_batch_csv(input: &str) -> Result<String, BatchError<ConversionError>> {
+    map_batch_csv(input, "输入", convert_batch_line)
+}
+
+fn convert_batch_line(query: &str) -> Result<String, ConversionError> {
+    convert(query).unwrap_or(Err(ConversionError::Incomplete))
 }
 
 pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {

@@ -79,8 +79,8 @@ use color::{calculate_contrast, convert_color, make_color_palette, ColorError};
 use complex::{calculate_complex, ComplexError};
 use conversion::{
     calculate_circuit, calculate_fuel_economy, calculate_pace, calculate_pixel_density,
-    calculate_unit_price, conversion_target_input, convert, convert_batch, convert_period,
-    estimate_transfer, suggested_targets, ConversionError,
+    calculate_unit_price, conversion_target_input, convert, convert_batch, convert_batch_csv,
+    convert_period, estimate_transfer, suggested_targets, ConversionError,
 };
 use csv_tools::{transform_csv, CsvError};
 use duration::{convert_duration, DurationError};
@@ -668,7 +668,13 @@ impl Results {
                 }
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
                 Scope::BatchConversion => {
-                    if let Some(arguments) = batch_arguments(term, "时长对照", "duration-csv") {
+                    if let Some(arguments) = batch_arguments(term, "对照", "csv") {
+                        Self::text_value(
+                            convert_batch_csv(arguments).map_err(ValueError::BatchConversion),
+                        )
+                    } else if let Some(arguments) =
+                        batch_arguments(term, "时长对照", "duration-csv")
+                    {
                         Self::text_value(
                             map_batch_csv(arguments, "输入", convert_duration)
                                 .map_err(ValueError::BatchDuration),
@@ -2470,6 +2476,26 @@ mod tests {
                 ..
             })))
         ));
+    }
+
+    #[test]
+    fn exports_unit_and_radix_conversions_in_a_two_column_csv() {
+        assert!(matches!(
+            for_query("批量换算: 对照 3 m to cm\r\n0xff to dec\n1 GiB to MiB", &[]),
+            Results::Value(Ok(value))
+                if value.text == "输入,结果\r\n3 m to cm,300 cm\r\n0xff to dec,255\r\n1 GiB to MiB,1024 MiB"
+        ));
+        assert!(matches!(
+            for_query("批量换算: csv 3 m to cm\n\n未知", &[]),
+            Results::Value(Err(ValueError::BatchConversion(BatchError::Row {
+                line: 3,
+                cause: ConversionError::Incomplete
+            })))
+        ));
+        assert_eq!(
+            for_query("批量换算: 对", &[]).suggested_input(0),
+            Some("批量换算: 对照 3 m to cm\n0xff to dec\n1 GiB to MiB")
+        );
     }
 
     #[test]
