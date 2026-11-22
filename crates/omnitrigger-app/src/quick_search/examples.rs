@@ -1767,6 +1767,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按 JSON 路径分组计算精确合计与平均",
+        query: r#"JSON: 分组统计 ["/地区","/金额"] [{"地区":"北","金额":1.50},{"地区":"南","金额":4},{"地区":"北","金额":2e0}]"#,
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "按路径上的数字升序排列 JSON 项",
         query: r#"JSON: 数值排序 /价格 [{"编号":"001","价格":12.50},{"编号":"002","价格":-2.75},{"编号":"003","价格":1.5e0}]"#,
     },

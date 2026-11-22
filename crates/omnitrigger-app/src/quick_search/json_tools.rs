@@ -6,10 +6,12 @@ use std::{
 };
 
 use num_bigint::BigInt;
+use num_rational::BigRational;
 use serde::de::{IgnoredAny, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
 use super::csv_tools::csv_cell;
+use super::fraction::{ensure_exact_size, parse_fraction_literal};
 use super::operators::NumberComparison;
 use super::text_tools::compare_natural;
 
@@ -47,6 +49,9 @@ pub(super) enum JsonError {
     NumberFilter,
     ExpectedScalar,
     ExpectedNumber,
+    GroupStatisticsPaths,
+    GroupStatisticsNumber,
+    GroupStatisticsRange,
     ExpectedString,
 }
 
@@ -83,6 +88,11 @@ impl JsonError {
             Self::NumberFilter => "路径后填写比较符和 JSON 数字，例如 /价格 >= 1.5",
             Self::ExpectedScalar => "指定路径的值须为字符串、数字、布尔值或 null",
             Self::ExpectedNumber => "数值排序需要每一项的指定路径都对应 JSON 数字",
+            Self::GroupStatisticsPaths => {
+                "用 JSON 数组填写分组和数值路径，例如 [\"/地区\",\"/金额\"]"
+            }
+            Self::GroupStatisticsNumber => "数值路径须在每一项中对应 JSON 数字",
+            Self::GroupStatisticsRange => "分组数值或结果超出精确计算范围",
             Self::ExpectedString => "文本排序需要每一项的指定路径都对应 JSON 字符串",
         }
     }
@@ -113,6 +123,7 @@ pub(super) fn transform_json(query: &str) -> Result<String, JsonError> {
         "按值去重" | "unique-by-pointer" => return deduplicate_json_by_scalar(source),
         "分组计数" | "group-count" => return count_json_by_scalar(source),
         "分组明细" | "group-records" => return group_json_records(source),
+        "分组统计" | "group-statistics" => return summarize_json_groups(source),
         "数值排序" | "sort-numeric" => return sort_json_numbers(source, false),
         "数值降序" | "sort-numeric-desc" => return sort_json_numbers(source, true),
         "文本排序" | "sort-text" => return sort_json_text(source, false),
@@ -385,10 +396,15 @@ fn count_json_by_scalar(query: &str) -> Result<String, JsonError> {
         count: usize,
     }
 
+    let (pointer, source) = pointer_and_source(query)?;
     let groups = collect_json_groups(
-        query,
+        &pointer,
+        source,
         |value| Group { value, count: 0 },
-        |group, _| group.count += 1,
+        |group, _| {
+            group.count += 1;
+            Ok(())
+        },
     )?;
     Ok(serde_json::to_string(&groups).expect("有效的原始 JSON 值和计数可直接序列化"))
 }
@@ -402,24 +418,89 @@ fn group_json_records(query: &str) -> Result<String, JsonError> {
         records: Vec<&'a RawValue>,
     }
 
+    let (pointer, source) = pointer_and_source(query)?;
     let groups = collect_json_groups(
-        query,
+        &pointer,
+        source,
         |value| Group {
             value,
             records: Vec::new(),
         },
-        |group, item| group.records.push(item),
+        |group, item| {
+            group.records.push(item);
+            Ok(())
+        },
     )?;
     Ok(serde_json::to_string(&groups).expect("有效的原始 JSON 值可以直接序列化"))
 }
 
+fn summarize_json_groups(query: &str) -> Result<String, JsonError> {
+    struct Group<'a> {
+        value: &'a RawValue,
+        count: usize,
+        sum: BigRational,
+    }
+
+    #[derive(serde::Serialize)]
+    struct Summary<'a> {
+        #[serde(rename = "值")]
+        value: &'a RawValue,
+        #[serde(rename = "计数")]
+        count: usize,
+        #[serde(rename = "合计")]
+        sum: String,
+        #[serde(rename = "平均")]
+        mean: String,
+    }
+
+    let (pointers, source) = strings_and_source(query, JsonError::GroupStatisticsPaths)?;
+    let [group, amount] = pointers.as_slice() else {
+        return Err(JsonError::GroupStatisticsPaths);
+    };
+    let amount_keys = pointer_keys(amount)?.collect::<Result<Vec<_>, _>>()?;
+    let groups = collect_json_groups(
+        group,
+        source,
+        |value| Group {
+            value,
+            count: 0,
+            sum: BigRational::default(),
+        },
+        |group, item| {
+            let amount = select_pointer_keys(item, &amount_keys)?.get();
+            if !matches!(amount.as_bytes()[0], b'-' | b'0'..=b'9') {
+                return Err(JsonError::GroupStatisticsNumber);
+            }
+            group.sum +=
+                parse_fraction_literal(amount).map_err(|_| JsonError::GroupStatisticsRange)?;
+            ensure_exact_size(&group.sum).map_err(|_| JsonError::GroupStatisticsRange)?;
+            group.count += 1;
+            Ok(())
+        },
+    )?;
+    let summaries = groups
+        .into_iter()
+        .map(|group| {
+            let mean = &group.sum / BigInt::from(group.count);
+            ensure_exact_size(&mean).map_err(|_| JsonError::GroupStatisticsRange)?;
+            Ok(Summary {
+                value: group.value,
+                count: group.count,
+                sum: group.sum.to_string(),
+                mean: mean.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, JsonError>>()?;
+    Ok(serde_json::to_string(&summaries).expect("有效 JSON 值和字符串可以序列化"))
+}
+
 fn collect_json_groups<'a, Group>(
-    query: &'a str,
+    pointer: &str,
+    source: &'a str,
     create: impl Fn(&'a RawValue) -> Group,
-    append: impl Fn(&mut Group, &'a RawValue),
+    append: impl Fn(&mut Group, &'a RawValue) -> Result<(), JsonError>,
 ) -> Result<Vec<Group>, JsonError> {
-    let (pointer, source) = pointer_and_source(query)?;
-    let keys = pointer_keys(&pointer)?.collect::<Result<Vec<_>, _>>()?;
+    let keys = pointer_keys(pointer)?.collect::<Result<Vec<_>, _>>()?;
     let mut positions = HashMap::new();
     let mut groups = Vec::new();
     for item in read_json_array(source)? {
@@ -430,7 +511,7 @@ fn collect_json_groups<'a, Group>(
             groups.push(create(value));
             position
         });
-        append(&mut groups[position], item);
+        append(&mut groups[position], item)?;
     }
     Ok(groups)
 }
@@ -1298,6 +1379,29 @@ mod tests {
         ] {
             assert_eq!(transform_json(query), Err(error), "{query}");
         }
+    }
+
+    #[test]
+    fn summarizes_json_groups_with_exact_nested_amounts() {
+        let query = r#"分组统计 ["/组","/值/金额"] [{"组":1.0,"值":{"金额":1.50}},{"组":"北","值":{"金额":-2}},{"组":1e0,"值":{"金额":2e0}}]"#;
+        assert_eq!(
+            transform_json(query).as_deref(),
+            Ok(
+                r#"[{"值":1.0,"计数":2,"合计":"7/2","平均":"7/4"},{"值":"北","计数":1,"合计":"-2","平均":"-2"}]"#
+            )
+        );
+        assert_eq!(
+            transform_json(r#"group-statistics ["/组","/金额"] []"#).as_deref(),
+            Ok("[]")
+        );
+        assert_eq!(
+            transform_json(r#"分组统计 ["/组","/金额"] [{"组":"北","金额":"1.50"}]"#),
+            Err(JsonError::GroupStatisticsNumber)
+        );
+        assert_eq!(
+            transform_json(r#"分组统计 ["/组"] []"#),
+            Err(JsonError::GroupStatisticsPaths)
+        );
     }
 
     #[test]
