@@ -303,19 +303,38 @@ fn observation_terms(input: &str) -> Result<Vec<&str>, StatisticsError> {
 
 fn running_totals(input: &str, average: bool) -> Result<String, StatisticsError> {
     let terms = observation_terms(input)?;
-    let mut total = BigRational::default();
+    let mut totals = RunningTotals::default();
     let mut output = Vec::with_capacity(terms.len());
-    for (index, term) in terms.into_iter().enumerate() {
+    for term in terms {
         let value = calculate_fraction(term).map_err(StatisticsError::Evaluation)?;
-        total = bounded(total + value)?;
-        let value = if average {
-            bounded(&total / BigRational::from_integer(BigInt::from(index + 1)))?.to_string()
-        } else {
-            total.to_string()
-        };
-        output.push(value);
+        totals.push(value)?;
+        output.push(totals.format(average)?);
     }
     Ok(output.join("\n"))
+}
+
+#[derive(Default)]
+pub(super) struct RunningTotals {
+    total: BigRational,
+    count: usize,
+}
+
+impl RunningTotals {
+    pub(super) fn push(&mut self, value: BigRational) -> Result<(), StatisticsError> {
+        self.total = bounded(&self.total + value)?;
+        self.count += 1;
+        Ok(())
+    }
+
+    pub(super) fn format(&self, average: bool) -> Result<String, StatisticsError> {
+        if !average {
+            return Ok(self.total.to_string());
+        }
+        if self.count == 0 {
+            return Ok(String::new());
+        }
+        bounded(&self.total / BigInt::from(self.count)).map(|value| value.to_string())
+    }
 }
 
 fn adjacent_changes(input: &str, relative: bool) -> Result<String, StatisticsError> {

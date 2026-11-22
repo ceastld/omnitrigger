@@ -26,7 +26,9 @@ use super::{
     operators::{
         select_index_ranges, FieldSortOrder, IndexRangeError, NumberComparison, MAX_SORT_FIELDS,
     },
-    statistics::{median_sorted_values, summarize_unweighted, StatisticsError, MAX_VALUES},
+    statistics::{
+        median_sorted_values, summarize_unweighted, RunningTotals, StatisticsError, MAX_VALUES,
+    },
     text_tools::{compare_natural, compile_regex, newline_pattern, TextError},
 };
 
@@ -80,7 +82,8 @@ pub(super) enum CsvError {
     SplitColumnArguments,
     DataConversionColumnArguments,
     DataConversionTarget(ConversionError),
-    DataConversionCell { row: usize, cause: ConversionError },
+    RunningColumnArguments,
+    DataRowValue { row: usize, cause: &'static str },
     AddedColumnTooLarge,
     StackArguments,
     PipelineArguments,
@@ -177,9 +180,11 @@ impl CsvError {
             Self::DataConversionColumnArguments => {
                 "填写新列名、来源列和目标单位，例如 [\"速率(MiB/s)\",\"速率\",\"MiB/s\"]"
             }
-            Self::DataConversionTarget(cause) | Self::DataConversionCell { cause, .. } => {
-                cause.message()
+            Self::DataConversionTarget(cause) => cause.message(),
+            Self::RunningColumnArguments => {
+                "填写新列名、数值列和分组列，例如 [\"累计金额\",\"金额\",[\"部门\"]]"
             }
+            Self::DataRowValue { cause, .. } => cause,
             Self::StackArguments => "用 JSON 字符串数组填写 2 至 16 张含表头的 CSV 表格",
             Self::PipelineArguments => "用 JSON 字符串数组填写 1 至 8 条单行 CSV 命令，再粘贴原表格",
             Self::NestedPipeline => "每一步填写一条 CSV 命令",
@@ -287,6 +292,12 @@ enum Operation {
         arithmetic: ColumnArithmetic,
     },
     ConvertDataColumn(String, ColumnReference, String),
+    RunningColumn {
+        name: String,
+        source: ColumnReference,
+        groups: Vec<ColumnReference>,
+        average: bool,
+    },
     DeduplicateRows,
     DeduplicateByColumns(Vec<ColumnReference>),
     DuplicatesByColumns(Vec<ColumnReference>),
@@ -641,6 +652,21 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             input = data;
             Operation::ConvertDataColumn(name, source, target)
         }
+        kind @ ("累计合计列" | "running-sum-column" | "累计平均列" | "running-average-column") =>
+        {
+            let ((name, source, groups), data) =
+                json_argument_and_data::<(String, ColumnReference, Vec<ColumnReference>)>(
+                    input,
+                    CsvError::RunningColumnArguments,
+                )?;
+            input = data;
+            Operation::RunningColumn {
+                name,
+                source,
+                groups,
+                average: matches!(kind, "累计平均列" | "running-average-column"),
+            }
+        }
         "计算列" | "compute-column" => {
             let ((name, left, operator, right), data) =
                 json_argument_and_data::<(String, ColumnReference, String, ColumnReference)>(
@@ -962,6 +988,12 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         Operation::ConvertDataColumn(name, source, target) => {
             convert_data_column(&rows, &name, source, &target)
         }
+        Operation::RunningColumn {
+            name,
+            source,
+            groups,
+            average,
+        } => running_column(&rows, &name, source, &groups, average),
         Operation::DeduplicateRows => {
             let mut seen = HashSet::new();
             Ok(write_rows(rows.iter().filter(|row| seen.insert(*row)), ','))
@@ -1861,10 +1893,47 @@ fn convert_data_column(
         }
         convert(value)
             .map(|value| value.to_string())
-            .map_err(|cause| CsvError::DataConversionCell {
+            .map_err(|cause| CsvError::DataRowValue {
                 row: row_number,
-                cause,
+                cause: cause.message(),
             })
+    })
+}
+
+fn running_column(
+    rows: &[Vec<String>],
+    name: &str,
+    source: ColumnReference,
+    groups: &[ColumnReference],
+    average: bool,
+) -> Result<String, CsvError> {
+    let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(CsvError::RunningColumnArguments);
+    }
+    let source = source.resolve(header)?;
+    validate_column_width(&[source], header.len())?;
+    let groups = resolve_distinct_columns(header, groups, CsvError::GroupingColumns)?;
+    let mut totals = HashMap::<_, RunningTotals>::new();
+    let mut row_number = 0;
+    write_appended_column(header, records, name, |row| {
+        row_number += 1;
+        let error_at_row = |cause| CsvError::DataRowValue {
+            row: row_number,
+            cause,
+        };
+        let total = totals.entry(column_key(row, &groups)).or_default();
+        let value = row[source].trim();
+        if !value.is_empty() {
+            let value =
+                parse_fraction_literal(value).map_err(|error| error_at_row(error.message()))?;
+            total
+                .push(value)
+                .map_err(|error| error_at_row(error.message()))?;
+        }
+        total
+            .format(average)
+            .map_err(|error| error_at_row(error.message()))
     })
 }
 
@@ -4210,9 +4279,9 @@ mod tests {
         for (query, expected) in [
             (
                 "数据换算列 [\"KiB\",2,\"KiB\"]\n编号,容量\n001,1 KiB\n002,4 Mbps",
-                CsvError::DataConversionCell {
+                CsvError::DataRowValue {
                     row: 2,
-                    cause: ConversionError::DifferentDimensions,
+                    cause: ConversionError::DifferentDimensions.message(),
                 },
             ),
             (
@@ -4226,6 +4295,32 @@ mod tests {
         ] {
             assert_eq!(transform_csv(query), Err(expected), "{query}");
         }
+    }
+
+    #[test]
+    fn appends_grouped_running_sums_and_averages_in_original_csv_order() {
+        let data = "部门,金额\n北,1/3\n南,2\n北,0.5\n北,\n南,-1/2\n西,";
+        for (operation, expected) in [
+            (
+                "累计合计列",
+                "部门,金额,累计\r\n北,1/3,1/3\r\n南,2,2\r\n北,0.5,5/6\r\n北,\"\",5/6\r\n南,-1/2,3/2\r\n西,\"\",0",
+            ),
+            (
+                "累计平均列",
+                "部门,金额,累计\r\n北,1/3,1/3\r\n南,2,2\r\n北,0.5,5/12\r\n北,\"\",5/12\r\n南,-1/2,3/4\r\n西,\"\",\"\"",
+            ),
+        ] {
+            let query = format!("{operation} [\"累计\",2,[\"部门\"]]\n{data}");
+            assert_eq!(transform_csv(&query).as_deref(), Ok(expected));
+        }
+        assert_eq!(
+            transform_csv("累计合计列 [\"累计\",1,[]]\n金额\n1/3\n2/3").as_deref(),
+            Ok("金额,累计\r\n1/3,1/3\r\n2/3,1")
+        );
+        assert!(matches!(
+            transform_csv("累计合计列 [\"累计\",1,[]]\n金额\n1\n坏值"),
+            Err(CsvError::DataRowValue { row: 2, .. })
+        ));
     }
 
     #[test]

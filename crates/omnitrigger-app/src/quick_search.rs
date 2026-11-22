@@ -495,8 +495,8 @@ impl ValueError {
             | Self::Csv(CsvError::PipelineStep { index, cause }) => {
                 return format!("第 {index} 步失败 · {cause}").into();
             }
-            Self::Csv(CsvError::DataConversionCell { row, cause }) => {
-                return format!("第 {row} 个数据行 · {}", cause.message()).into();
+            Self::Csv(CsvError::DataRowValue { row, cause }) => {
+                return format!("第 {row} 个数据行 · {cause}").into();
             }
             Self::Json(error) => error.message(),
             Self::Csv(error) => error.message(),

@@ -2573,6 +2573,16 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Terminal,
+        title: "按部门逐行累计 CSV 金额",
+        query: "CSV: 累计合计列 [\"累计金额\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,0.5",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "按组逐行求 CSV 的累计平均值",
+        query: "CSV: 累计平均列 [\"累计平均\",\"金额\",[\"部门\"]]\n部门,金额\n北,1/3\n南,2\n北,0.5",
+    },
+    Example {
+        icon: Icon::Terminal,
         title: "删除 CSV 中内容重复的行",
         query: "CSV: 去重 编号,备注\n001,\"茶,咖啡\"\n\"001\",\"茶,咖啡\"\n002,梨",
     },
