@@ -72,8 +72,8 @@ use circle::{calculate_circle, CircleError};
 use color::{calculate_contrast, convert_color, ColorError};
 use conversion::{
     calculate_circuit, calculate_fuel_economy, calculate_pace, calculate_pixel_density,
-    calculate_unit_price, conversion_target_input, convert, convert_period, estimate_transfer,
-    suggested_targets, ConversionError,
+    calculate_unit_price, conversion_target_input, convert, convert_batch, convert_period,
+    estimate_transfer, suggested_targets, BatchConversionError, ConversionError,
 };
 use csv_tools::{transform_csv, CsvError};
 use duration::{convert_duration, DurationError};
@@ -329,6 +329,7 @@ enum ValueError {
     InputTooLong,
     Calculation(CalculationError),
     Conversion(ConversionError),
+    BatchConversion(BatchConversionError),
     Radix(RadixError),
     RatioAllocation(RatioAllocationError),
     AspectRatio(AspectRatioError),
@@ -361,11 +362,17 @@ enum ValueError {
 }
 
 impl ValueError {
-    fn message(self) -> &'static str {
-        match self {
+    fn message(self) -> gpui::SharedString {
+        let message = match self {
             Self::InputTooLong => "输入最多支持 4096 个字符",
             Self::Calculation(error) => error.message(),
             Self::Conversion(error) => error.message(),
+            Self::BatchConversion(BatchConversionError::Empty) => {
+                "逐行输入完整换算，例如 10 km to mi"
+            }
+            Self::BatchConversion(BatchConversionError::Row { line, cause }) => {
+                return format!("第 {line} 行：{}", cause.message()).into();
+            }
             Self::Radix(error) => error.message(),
             Self::RatioAllocation(error) => error.message(),
             Self::AspectRatio(error) => error.message(),
@@ -395,7 +402,8 @@ impl ValueError {
             Self::Matrix(error) => error.message(),
             Self::Circle(error) => error.message(),
             Self::Path(error) => error.message(),
-        }
+        };
+        message.into()
     }
 
     fn is_incomplete(self) -> bool {
@@ -403,6 +411,7 @@ impl ValueError {
             self,
             Self::Calculation(CalculationError::Incomplete)
                 | Self::Conversion(ConversionError::Incomplete)
+                | Self::BatchConversion(BatchConversionError::Empty)
                 | Self::AspectRatio(AspectRatioError::Incomplete)
                 | Self::Paper(PaperError::Incomplete)
                 | Self::Rectangle(RectangleError::Incomplete)
@@ -530,6 +539,9 @@ impl Results {
                 }
                 Scope::CalculationHistory => Self::Calculations(recent.calculations.matching(term)),
                 Scope::ConversionHistory => Self::Conversions(recent.conversions.matching(term)),
+                Scope::BatchConversion => {
+                    Self::text_value(convert_batch(term).map_err(ValueError::BatchConversion))
+                }
                 Scope::Radix => Self::Value(
                     convert_arbitrary_radix(term)
                         .map(|text| ResultValue {

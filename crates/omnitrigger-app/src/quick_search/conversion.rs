@@ -992,6 +992,33 @@ pub(super) fn convert(query: &str) -> Option<Result<String, ConversionError>> {
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BatchConversionError {
+    Empty,
+    Row { line: usize, cause: ConversionError },
+}
+
+pub(super) fn convert_batch(input: &str) -> Result<String, BatchConversionError> {
+    let mut converted = Vec::new();
+    for (index, line) in input.lines().enumerate() {
+        let query = line.trim();
+        if query.is_empty() {
+            continue;
+        }
+        let value = convert(query)
+            .unwrap_or(Err(ConversionError::Incomplete))
+            .map_err(|cause| BatchConversionError::Row {
+                line: index + 1,
+                cause,
+            })?;
+        converted.push(value);
+    }
+    if converted.is_empty() {
+        return Err(BatchConversionError::Empty);
+    }
+    Ok(converted.join("\n"))
+}
+
 pub(super) fn suggested_targets(query: &str) -> Option<Vec<InputSuggestion>> {
     let input = normalize(query).replace(char::is_whitespace, " ");
     let input = input.trim();
@@ -1630,6 +1657,22 @@ mod tests {
         for query in ["3.5 to", "10 km to mi", "100未知单位转"] {
             assert!(suggested_targets(query).is_none(), "{query}");
         }
+    }
+
+    #[test]
+    fn converts_multiple_units_and_radices_in_order_and_reports_the_invalid_line() {
+        assert_eq!(
+            convert_batch("3 m to cm\r\n \r\n0xff to dec\n1 GiB to MiB").as_deref(),
+            Ok("300 cm\n255\n1024 MiB")
+        );
+        assert_eq!(
+            convert_batch("3 m to cm\n\n未知"),
+            Err(BatchConversionError::Row {
+                line: 3,
+                cause: ConversionError::Incomplete,
+            })
+        );
+        assert_eq!(convert_batch(" \r\n "), Err(BatchConversionError::Empty));
     }
 
     #[test]

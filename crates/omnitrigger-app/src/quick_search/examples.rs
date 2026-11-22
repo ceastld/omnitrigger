@@ -175,6 +175,11 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "10 km to mi",
     },
     Example {
+        icon: Icon::Layers,
+        title: "把多条单位和进制换算合成一列结果",
+        query: "批量换算: 3 m to cm\n0xff to dec\n1 GiB to MiB",
+    },
+    Example {
         icon: Icon::Grid,
         title: "切换已打开的窗口",
         query: "窗口:",
@@ -1954,6 +1959,7 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
             if !term.contains(char::is_whitespace) => {}
         Scope::Date
         | Scope::Duration
+        | Scope::BatchConversion
         | Scope::VideoFrames
         | Scope::Timecode
         | Scope::TransferTime
