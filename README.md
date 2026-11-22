@@ -264,6 +264,7 @@
 - 输入 `1度电转MJ` 得到 `3.6 MJ`，输入 `500 mW to W` 得到 `0.5 W`。
 - 输入 `3.3 V to mV`、`500 mA to A` 或 `2.2 kΩ to Ω` 可换算电压、电流和电阻。前缀 `m` 表示毫，`M` 表示兆。 [NIST 电气单位和 SI 前缀](https://www.nist.gov/pml/special-publication-811/nist-guide-si-chapter-4-two-classes-si-units-and-si-prefixes)
 - 输入 `12 pt to px` 得到 `16 px`。搜索框按 CSS 绝对长度比例换算像素 `px`、点 `pt`、派卡 `pc` 和四分之一毫米 `Q`。 [W3C CSS 绝对长度定义](https://www.w3.org/TR/css-values-4/#absolute-lengths)
+- 输入 `1.25rem @ 16px to px` 得到 `20px`，输入 `20px @ 16px to rem` 得到 `1.25rem`。在 `@` 后填写根元素的正字号，使用 `px`。结果可直接粘贴为 CSS 长度。 [W3C CSS 相对字号单位](https://www.w3.org/TR/css-values-4/#font-relative-lengths)
 - 输入 `电路: 5 V, 20 Ω` 可求出 `250 mA · 1.25 W`，输入 `电路: 12 V, 1.5 A` 得到 `8 Ω · 18 W`。输入同一电阻上的两种电学量，可计算第三种和功率。求电阻时，电压和电流均须为正。 [欧姆定律与电功率](https://openstax.org/books/university-physics-volume-2/pages/9-5-electrical-energy-and-power)
 - 输入 `电路: 串联 220 Ω,330 Ω,1 kΩ` 得到 `1.55 kΩ`，输入 `电路: 并联 220 Ω,330 Ω` 得到 `132 Ω`。每组可填 2 至 32 个正电阻值，支持不同数量级的欧姆单位。 [OpenStax 串联与并联电阻](https://openstax.org/books/university-physics-volume-2/pages/10-2-resistors-in-series-and-parallel)
 - 输入 `电路: 耗电 1.5 kW @ 2h` 得到 `3 kWh`。用功率乘以时长，适用于恒定功率。时长也可写成 `30min` 或 `01:30:00`。结果满 1000 Wh 时用 kWh 表示。

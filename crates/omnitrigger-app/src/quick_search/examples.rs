@@ -1712,6 +1712,11 @@ pub(super) const EXAMPLES: &[Example] = &[
     },
     Example {
         icon: Icon::Layers,
+        title: "按根元素字号换算 CSS rem",
+        query: "1.25rem @ 16px to px",
+    },
+    Example {
+        icon: Icon::Layers,
         title: "换算密度",
         query: "1000 kg/m³ to g/cm³",
     },

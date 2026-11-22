@@ -21,6 +21,7 @@ pub(super) enum ConversionError {
     InvalidInteger,
     UnknownUnit,
     InvalidTargets,
+    InvalidRootFontSize,
     ExactDataUnit,
     DifferentDimensions,
     InvalidTransfer,
@@ -48,6 +49,9 @@ impl ConversionError {
             Self::InvalidInteger => "进制转换需要整数，例如 0xff to dec",
             Self::UnknownUnit => "无法识别换算单位",
             Self::InvalidTargets => "用方括号和逗号填写 1 至 8 个目标单位，例如 [MiB, KiB, Gib]",
+            Self::InvalidRootFontSize => {
+                "用根元素的正字号换算 rem 与 px，例如 1.25rem @ 16px to px"
+            }
             Self::ExactDataUnit => {
                 "可精确换算数据量或数据速率，例如 1/3 KiB to B 或 1 MiB/s to MB/s"
             }
@@ -1325,10 +1329,47 @@ pub(super) fn conversion_target_input(query: &str) -> Option<String> {
 }
 
 fn convert_quantity(source: &str, target: &str) -> Result<String, ConversionError> {
+    let (length, reference) = source
+        .split_once('@')
+        .map_or((source, None), |(length, reference)| {
+            (length.trim_end(), Some(reference))
+        });
+    let (amount, unit) = split_quantity(length);
+    if unit.trim().eq_ignore_ascii_case("rem") || target.trim().eq_ignore_ascii_case("rem") {
+        return convert_root_font_length(amount, unit, target, reference);
+    }
     let (amount, source) = parse_quantity(source)?;
     format_targets(target, |target| {
         format_quantity_target(amount, &source, target)
     })
+}
+
+fn convert_root_font_length(
+    amount: &str,
+    source: &str,
+    target: &str,
+    reference: Option<&str>,
+) -> Result<String, ConversionError> {
+    let (root_size, root_unit) = split_quantity(
+        reference
+            .ok_or(ConversionError::InvalidRootFontSize)?
+            .trim(),
+    );
+    let root_size = evaluate(root_size).map_err(|_| ConversionError::InvalidRootFontSize)?;
+    if !root_unit.trim().eq_ignore_ascii_case("px") || root_size <= 0. {
+        return Err(ConversionError::InvalidRootFontSize);
+    }
+    let amount = evaluate(amount).map_err(|_| ConversionError::InvalidAmount)?;
+    let (value, unit) = match (
+        source.trim().to_ascii_lowercase().as_str(),
+        target.trim().to_ascii_lowercase().as_str(),
+    ) {
+        ("rem", "px") => (amount * root_size, "px"),
+        ("px", "rem") => (amount / root_size, "rem"),
+        _ => return Err(ConversionError::InvalidRootFontSize),
+    };
+    let text = format_result(value).map_err(|_| ConversionError::OutOfRange)?;
+    Ok(format!("{text}{unit}"))
 }
 
 fn format_targets(
@@ -1653,6 +1694,32 @@ mod tests {
             ("7.5 L/100km to kg", ConversionError::InvalidFuelEconomy),
         ] {
             assert_eq!(calculate_fuel_economy(query), Err(error), "{query}");
+        }
+    }
+
+    #[test]
+    fn converts_root_font_lengths_to_css_dimensions_with_an_explicit_reference() {
+        for (query, expected) in [
+            ("1.25rem @ 16px to px", "20px"),
+            ("20 px @ 16 px to rem", "1.25rem"),
+            ("−１．５ＲＥＭ＠１８ＰＸ → px", "-27px"),
+            ("(1/4) rem @ 20px to px", "5px"),
+            ("0px @ 16px to rem", "0rem"),
+        ] {
+            assert_eq!(convert(query).unwrap().as_deref(), Ok(expected), "{query}");
+        }
+        for query in [
+            "1rem to px",
+            "1rem @ 0px to px",
+            "8px @ -16px to rem",
+            "1rem @ 12pt to px",
+            "1rem @ 16px to in",
+        ] {
+            assert_eq!(
+                convert(query),
+                Some(Err(ConversionError::InvalidRootFontSize)),
+                "{query}"
+            );
         }
     }
 
