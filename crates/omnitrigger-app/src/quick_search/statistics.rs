@@ -5,8 +5,8 @@ use num_rational::BigRational;
 
 use super::calculator::normalize;
 use super::fraction::{
-    calculate_fraction, combination_count, ensure_exact_size, format_square_root, rational_power,
-    FractionError, MAX_COMBINATORIAL_ARGUMENT,
+    calculate_fraction, combination_count, ensure_exact_size, format_signed_square_root,
+    format_square_root, rational_power, FractionError, MAX_COMBINATORIAL_ARGUMENT,
 };
 use super::linear_fit::{
     calculate_correlation, calculate_covariance, calculate_rank_correlation, LinearFitError,
@@ -37,6 +37,7 @@ pub(super) enum StatisticsError {
     ZeroPreviousValue,
     NonPositiveHarmonicValue,
     StandardErrorCount,
+    StandardScoresConstant,
     Paired(LinearFitError),
     Evaluation(FractionError),
 }
@@ -64,6 +65,7 @@ impl StatisticsError {
             Self::ZeroPreviousValue => "计算变化率时，每对数值的前一项须非零",
             Self::NonPositiveHarmonicValue => "调和平均需要所有数值大于零",
             Self::StandardErrorCount => "均值标准误至少需要两个观测值",
+            Self::StandardScoresConstant => "标准分需要至少两个不同的观测值",
             Self::Paired(error) => error.message(),
             Self::Evaluation(FractionError::Invalid | FractionError::Incomplete) => {
                 "请输入整数、有限小数、分数或精确算式"
@@ -87,6 +89,9 @@ enum StatisticsOperation {
     RootMeanSquare,
     HarmonicMean,
     StandardError,
+    StandardScores {
+        sample: bool,
+    },
     MedianAbsoluteDeviation,
     TrimmedMean(BigRational),
 }
@@ -148,6 +153,14 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
         "标准误" | "均值标准误" | "sem" | "standard-error" => {
             (StatisticsOperation::StandardError, values.trim())
         }
+        "标准分" | "z-score" => (
+            StatisticsOperation::StandardScores { sample: true },
+            values.trim(),
+        ),
+        "总体标准分" | "population-z-score" => (
+            StatisticsOperation::StandardScores { sample: false },
+            values.trim(),
+        ),
         "中位绝对偏差" | "mad" | "median-absolute-deviation" => {
             (StatisticsOperation::MedianAbsoluteDeviation, values.trim())
         }
@@ -270,6 +283,7 @@ pub(super) fn calculate_statistics(query: &str) -> Result<String, StatisticsErro
             let squared_error = bounded(deviation_sum / divisor)?;
             Ok(format_square_root(&squared_error))
         }
+        StatisticsOperation::StandardScores { sample } => standard_scores(&values, count, sample),
         StatisticsOperation::HarmonicMean => {
             let reciprocal_sum = values.into_iter().try_fold(
                 BigRational::default(),
@@ -615,6 +629,29 @@ fn observation_sum(values: &[(BigRational, u64)]) -> Result<BigRational, Statist
         .try_fold(BigRational::default(), |sum, (value, repetitions)| {
             bounded(sum + value * BigInt::from(*repetitions))
         })
+}
+
+fn standard_scores(
+    values: &[(BigRational, u64)],
+    count: u64,
+    sample: bool,
+) -> Result<String, StatisticsError> {
+    let average = bounded(observation_sum(values)? / BigInt::from(count))?;
+    let deviation_sum = squared_deviation_sum(values, &average)?;
+    if deviation_sum == BigRational::default() {
+        return Err(StatisticsError::StandardScoresConstant);
+    }
+    let variance = bounded(deviation_sum / BigInt::from(count - u64::from(sample)))?;
+    let mut rows = Vec::with_capacity(values.len());
+    for (value, _) in values {
+        let difference = value - &average;
+        let squared_score = bounded(&difference * &difference / &variance)?;
+        rows.push(format_signed_square_root(
+            &squared_score,
+            difference.numer().sign(),
+        ));
+    }
+    Ok(rows.join("\n"))
 }
 
 fn summarize(
@@ -1219,6 +1256,32 @@ mod tests {
             ("加权平均", StatisticsError::Incomplete),
         ] {
             assert_eq!(calculate_statistics(query), Err(expected), "{query}");
+        }
+    }
+
+    #[test]
+    fn reports_exact_standard_scores_in_original_order_with_optional_frequencies() {
+        assert_eq!(
+            calculate_statistics("标准分 3,1,2").as_deref(),
+            Ok("1\n-1\n0")
+        );
+        assert_eq!(
+            calculate_statistics("总体标准分 0,2").as_deref(),
+            Ok("-1\n1")
+        );
+        assert_eq!(
+            calculate_statistics("z-score 0,2").as_deref(),
+            Ok("-√(1/2)\n√(1/2)")
+        );
+        assert_eq!(
+            calculate_statistics("标准分 频数 1@2,4@1").as_deref(),
+            Ok("-√(1/3)\n√(4/3)")
+        );
+        for query in ["标准分 1", "总体标准分 2,2,2", "标准分 频数 3@5"] {
+            assert_eq!(
+                calculate_statistics(query),
+                Err(StatisticsError::StandardScoresConstant),
+            );
         }
     }
 

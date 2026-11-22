@@ -235,6 +235,16 @@ pub(super) const EXAMPLES: &[Example] = &[
         query: "统计: 标准误 1,3,5",
     },
     Example {
+        icon: Icon::Terminal,
+        title: "用样本标准差求每个值的标准分",
+        query: "统计: 标准分 3,1,2",
+    },
+    Example {
+        icon: Icon::Terminal,
+        title: "用总体标准差求每个值的标准分",
+        query: "统计: 总体标准分 0,2",
+    },
+    Example {
         icon: Icon::Layers,
         title: "精确计算两组数值的样本协方差",
         query: "统计: 协方差 0,0; 1,1; 2,1",
@@ -3502,6 +3512,10 @@ pub(super) fn tool_operation_examples(scope: Scope, term: &str) -> Option<Vec<us
                     | "标"
                     | "标准"
                     | "标准误"
+                    | "标准分"
+                    | "总体标"
+                    | "总体标准"
+                    | "总体标准分"
                     | "协"
                     | "协方"
                     | "协方差"
