@@ -1797,22 +1797,49 @@ pub(super) fn json_cell_at_pointer<'a>(
     keys: &[String],
     content: JsonCellContent,
 ) -> Result<Cow<'a, str>, JsonError> {
-    if source.trim().is_empty() {
+    let Some(value) = json_cell_value_at_pointer(source, keys)? else {
         return Ok(Cow::Borrowed(""));
+    };
+    match content {
+        JsonCellContent::Value => json_csv_text(value),
+        JsonCellContent::Type => Ok(Cow::Borrowed(json_type_name(value))),
+        JsonCellContent::Length => match value.get().as_bytes()[0] {
+            b'{' | b'[' => json_length(value.get()).map(Cow::Owned),
+            _ => Ok(Cow::Borrowed("")),
+        },
+    }
+}
+
+fn json_cell_value_at_pointer<'a>(
+    source: &'a str,
+    keys: &[String],
+) -> Result<Option<&'a RawValue>, JsonError> {
+    if source.trim().is_empty() {
+        return Ok(None);
     }
     let root = serde_json::from_str::<&RawValue>(source).map_err(json_parse_error)?;
     match select_pointer_keys(root, keys) {
-        Ok(value) => match content {
-            JsonCellContent::Value => json_csv_text(value),
-            JsonCellContent::Type => Ok(Cow::Borrowed(json_type_name(value))),
-            JsonCellContent::Length => match value.get().as_bytes()[0] {
-                b'{' | b'[' => json_length(value.get()).map(Cow::Owned),
-                _ => Ok(Cow::Borrowed("")),
-            },
-        },
-        Err(JsonError::MissingValue) => Ok(Cow::Borrowed("")),
+        Ok(value) => Ok(Some(value)),
+        Err(JsonError::MissingValue) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+pub(super) fn json_array_cells_at_pointer<'a>(
+    source: &'a str,
+    keys: &[String],
+) -> Result<Vec<Cow<'a, str>>, JsonError> {
+    let mut cells = match json_cell_value_at_pointer(source, keys)? {
+        Some(value) if value.get() != "null" => read_json_array(value.get())?
+            .into_iter()
+            .map(json_csv_text)
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => Vec::new(),
+    };
+    if cells.is_empty() {
+        cells.push(Cow::Borrowed(""));
+    }
+    Ok(cells)
 }
 
 fn json_csv_text(value: &RawValue) -> Result<Cow<'_, str>, JsonError> {

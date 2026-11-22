@@ -33,7 +33,10 @@ use super::{
         calculate_fraction_with_variables, ensure_exact_size, parse_fraction_literal,
         rounded_decimal, FractionError, MAX_DECIMAL_PLACES,
     },
-    json_tools::{json_cell_at_pointer, json_pointer_tokens, JsonCellContent, JsonError},
+    json_tools::{
+        json_array_cells_at_pointer, json_cell_at_pointer, json_pointer_tokens, JsonCellContent,
+        JsonError,
+    },
     operators::{
         select_index_ranges, FieldSortOrder, IndexRangeError, NumberComparison, MAX_SORT_FIELDS,
     },
@@ -388,6 +391,7 @@ enum Operation {
     },
     TextColumn(String, ColumnReference, TextColumnComputation),
     JsonPointerColumn(String, ColumnReference, Vec<String>, JsonCellContent),
+    JsonExpandRows(String, ColumnReference, Vec<String>),
     DatePatternColumn {
         name: String,
         source: ColumnReference,
@@ -934,7 +938,9 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
         | "json类型列"
         | "json-type-column"
         | "json长度列"
-        | "json-length-column") => {
+        | "json-length-column"
+        | "json展开行"
+        | "json-expand-rows") => {
             let ((name, source, pointer), data) =
                 json_argument_and_data::<(String, ColumnReference, String)>(
                     input,
@@ -945,12 +951,19 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             }
             let keys = json_pointer_tokens(&pointer).map_err(CsvError::JsonPointerColumn)?;
             input = data;
-            let content = match kind {
-                "json类型列" | "json-type-column" => JsonCellContent::Type,
-                "json长度列" | "json-length-column" => JsonCellContent::Length,
-                _ => JsonCellContent::Value,
-            };
-            Operation::JsonPointerColumn(name, source, keys, content)
+            match kind {
+                "json展开行" | "json-expand-rows" => {
+                    Operation::JsonExpandRows(name, source, keys)
+                }
+                _ => {
+                    let content = match kind {
+                        "json类型列" | "json-type-column" => JsonCellContent::Type,
+                        "json长度列" | "json-length-column" => JsonCellContent::Length,
+                        _ => JsonCellContent::Value,
+                    };
+                    Operation::JsonPointerColumn(name, source, keys, content)
+                }
+            }
         }
         kind @ ("日期格式列" | "date-format-column" | "日期解析列" | "date-parse-column") =>
         {
@@ -1476,6 +1489,21 @@ fn transform_csv_operation(operation: &str, mut input: &str) -> Result<String, C
             write_appended_column(header, records, &name, |row| {
                 row_number += 1;
                 json_cell_at_pointer(&row[source], &keys, content).map_err(|error| {
+                    CsvError::DataRowValue {
+                        row: row_number,
+                        cause: error.message(),
+                    }
+                })
+            })
+        }
+        Operation::JsonExpandRows(name, source, keys) => {
+            let (header, records) = rows.split_first().ok_or(CsvError::MissingInput)?;
+            let source = source.resolve(header)?;
+            validate_column_width(&[source], header.len())?;
+            let mut row_number = 0;
+            write_expanded_column(header, records, &name, |row| {
+                row_number += 1;
+                json_array_cells_at_pointer(&row[source], &keys).map_err(|error| {
                     CsvError::DataRowValue {
                         row: row_number,
                         cause: error.message(),
@@ -2893,6 +2921,17 @@ fn write_appended_column<'a, T: AsRef<str>>(
     name: &str,
     mut cell_for: impl FnMut(&'a [String]) -> Result<T, CsvError>,
 ) -> Result<String, CsvError> {
+    write_expanded_column(header, records, name, |row| {
+        cell_for(row).map(std::iter::once)
+    })
+}
+
+fn write_expanded_column<'a, T: AsRef<str>, I: IntoIterator<Item = T>>(
+    header: &[String],
+    records: &'a [Vec<String>],
+    name: &str,
+    mut cells_for: impl FnMut(&'a [String]) -> Result<I, CsvError>,
+) -> Result<String, CsvError> {
     if header.iter().any(|cell| cell == name) {
         return Err(CsvError::HeaderNameConflict);
     }
@@ -2906,14 +2945,15 @@ fn write_appended_column<'a, T: AsRef<str>>(
         CsvError::AddedColumnTooLarge,
     )?;
     for row in records {
-        let cell = cell_for(row)?;
-        append_bounded_csv_row(
-            &mut output,
-            row.iter()
-                .map(String::as_str)
-                .chain(std::iter::once(cell.as_ref())),
-            CsvError::AddedColumnTooLarge,
-        )?;
+        for cell in cells_for(row)? {
+            append_bounded_csv_row(
+                &mut output,
+                row.iter()
+                    .map(String::as_str)
+                    .chain(std::iter::once(cell.as_ref())),
+                CsvError::AddedColumnTooLarge,
+            )?;
+        }
     }
     Ok(output)
 }
@@ -5412,6 +5452,46 @@ mod tests {
             "替换列 [\"新列\",1,\"a\",\"{}\"] 原列\n{}",
             "x".repeat(1100),
             "a".repeat(1100)
+        );
+        assert_eq!(transform_csv(&query), Err(CsvError::AddedColumnTooLarge));
+    }
+
+    #[test]
+    fn expands_json_array_cells_into_rows_and_preserves_empty_origins() {
+        let query = r#"JSON展开行 ["商品","数据","/商品"]
+编号,数据
+001,"{""商品"":[""茶,热"",9007199254740993.00,null]}"
+002,"{""商品"":[]}"
+003,{}
+004,"{""商品"":null}"
+005,"#;
+        let expected = [
+            "编号,数据,商品",
+            r#"001,"{""商品"":[""茶,热"",9007199254740993.00,null]}","茶,热""#,
+            r#"001,"{""商品"":[""茶,热"",9007199254740993.00,null]}",9007199254740993.00"#,
+            r#"001,"{""商品"":[""茶,热"",9007199254740993.00,null]}","""#,
+            r#"002,"{""商品"":[]}","""#,
+            r#"003,{},"""#,
+            r#"004,"{""商品"":null}","""#,
+            r#"005,"","""#,
+        ]
+        .join("\r\n");
+        assert_eq!(transform_csv(query).as_deref(), Ok(expected.as_str()));
+        assert_eq!(
+            transform_csv(
+                r#"json-expand-rows ["商品","数据",""] 数据
+[]
+{}"#
+            ),
+            Err(CsvError::DataRowValue {
+                row: 2,
+                cause: JsonError::ExpectedArray.message(),
+            })
+        );
+        let array = format!("[{}0]", "0,".repeat(160));
+        let query = format!(
+            "JSON展开行 [\"产品\",\"数据\",\"\"] 文本,数据\n{},\"{array}\"",
+            "a".repeat(7500),
         );
         assert_eq!(transform_csv(&query), Err(CsvError::AddedColumnTooLarge));
     }
