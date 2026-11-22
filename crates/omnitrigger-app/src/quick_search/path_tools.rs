@@ -75,14 +75,7 @@ pub(super) fn path_component(query: &str) -> Result<String, PathError> {
     let path = Path::new(input);
     let component = match operation.as_str() {
         "转文件网址" | "to-file-url" => {
-            let url = if input.ends_with(['/', '\\']) {
-                Url::from_directory_path(path)
-            } else {
-                Url::from_file_path(path)
-            };
-            return url
-                .map(String::from)
-                .map_err(|_| PathError::AbsolutePathRequired);
+            return file_url(path, input.ends_with(['/', '\\']));
         }
         "从文件网址" | "from-file-url" => return path_from_file_url(input),
         "规范化" | "normalize" => return normalize_absolute_path(path),
@@ -149,6 +142,16 @@ fn safe_filename(input: &str) -> Result<String, PathError> {
         return Err(PathError::FilenameTooLong);
     }
     Ok(name)
+}
+
+pub(super) fn file_url(path: &Path, is_directory: bool) -> Result<String, PathError> {
+    let url = if is_directory {
+        Url::from_directory_path(path)
+    } else {
+        Url::from_file_path(path)
+    };
+    url.map(String::from)
+        .map_err(|_| PathError::AbsolutePathRequired)
 }
 
 fn path_from_file_url(input: &str) -> Result<String, PathError> {

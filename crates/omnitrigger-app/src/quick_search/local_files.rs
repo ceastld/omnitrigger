@@ -16,8 +16,9 @@ use omnitrigger_windows::{
 };
 
 use super::{
-    conversion::exact_byte_quantity, csv_tools::csv_cell, text_tools::compare_natural, title_rank,
-    Destination, InputSuggestion, Results, INPUT_CHARACTER_LIMIT,
+    conversion::exact_byte_quantity, csv_tools::csv_cell, path_tools::file_url,
+    text_tools::compare_natural, title_rank, Destination, InputSuggestion, Results,
+    INPUT_CHARACTER_LIMIT,
 };
 
 pub(super) const FOLDER_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -44,6 +45,7 @@ const OPTION_HELP: &[(&str, &str)] = &[
     ("路径列表", "每行一个绝对路径"),
     ("名称列表", "每行一个名称"),
     ("路径JSON", "导出路径数组"),
+    ("文件网址列表", "每行一个文件网址"),
     ("时间CSV", "导出 UTC 时间与路径"),
     ("清单CSV", "导出名称、类型、字节数、时间与路径"),
     ("大小合计", "汇总文件数和字节数"),
@@ -352,6 +354,16 @@ impl LocalFilesIndex {
                 field,
                 grouping,
             )));
+        }
+        if query.output == FileOutput::Urls && !matches.is_empty() {
+            let urls = matches
+                .iter()
+                .map(|(_, entry)| file_url(Path::new(&entry.path), entry.kind == "directory"))
+                .collect::<Result<Vec<_>, _>>();
+            return match urls {
+                Ok(values) => Results::text_value(Ok(values.join("\n"))),
+                Err(error) => Results::LocalFilesUnavailable(error.message().to_owned()),
+            };
         }
         if query.output == FileOutput::Json
             || (matches!(query.output, FileOutput::Lines | FileOutput::Names)
@@ -728,6 +740,7 @@ enum FileOutput {
     Lines,
     Names,
     Json,
+    Urls,
     TimeCsv,
     InventoryCsv,
     DateCounts(FileDateField, FileDateGrouping),
@@ -790,6 +803,9 @@ fn split_query_on(query: &str, today: NaiveDate) -> Option<FileQuery<'_>> {
             "名称列表" | "names" if output == FileOutput::Entries => output = FileOutput::Names,
             "路径json" | "json-paths" if output == FileOutput::Entries => {
                 output = FileOutput::Json
+            }
+            "文件网址列表" | "file-urls" if output == FileOutput::Entries => {
+                output = FileOutput::Urls
             }
             "时间csv" | "time-csv" if output == FileOutput::Entries => {
                 output = FileOutput::TimeCsv
@@ -1154,6 +1170,32 @@ mod tests {
         ));
         assert!(matches!(index.results(query), Results::Value(Ok(value))
             if value.text == r#"["C:\\Work\\z.txt","C:\\Work\\a.txt"]"#));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn exports_escaped_file_and_folder_urls_in_filtered_result_order() {
+        let mut index = LocalFilesIndex::default();
+        let query = r"C:\Work | | 文件网址列表";
+        let load = index.request(Some(query)).unwrap();
+        assert!(index.finish(
+            &load,
+            Ok(vec![
+                entry("a # folder", "directory"),
+                entry("z # report.txt", "file"),
+                entry("other.url", "unavailable"),
+            ]),
+        ));
+        assert!(matches!(
+            index.results(query),
+            Results::Value(Ok(value)) if value.text
+                == "file:///C:/Work/a%20%23%20folder/\nfile:///C:/Work/z%20%23%20report.txt"
+        ));
+        assert!(matches!(
+            index.results(r"C:\Work | omitted | file-urls"),
+            Results::Destinations(items) if items.is_empty()
+        ));
+        assert!(split_query(r"C:\Work | | 文件网址列表 路径列表").is_none());
     }
 
     #[test]
