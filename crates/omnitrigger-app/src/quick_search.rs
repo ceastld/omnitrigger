@@ -2796,6 +2796,8 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[ignore = "需要 Windows 桌面会话"]
     fn search_shortcuts_handle_text_and_page_navigation() {
+        const PARENT: &str = r"文件: C:\__omnitrigger_quick_search_test__ | child | 仅文件夹";
+        const CHILD: &str = r"文件: C:\__omnitrigger_quick_search_test__\child |";
         let (send, receive) = std::sync::mpsc::channel();
         gpui::Application::new()
             .with_assets(crate::Assets)
@@ -2930,23 +2932,62 @@ mod tests {
                             )
                         })
                         .unwrap();
+                    let file_navigation = reopened
+                        .update(cx, |search, window, cx| {
+                            search.fill_query(PARENT, window, cx);
+                            search.results = Results::Destinations(vec![Destination::LocalFile {
+                                name: "child".to_owned(),
+                                path: r"C:\__omnitrigger_quick_search_test__\child".to_owned(),
+                                is_directory: true,
+                                size_bytes: None,
+                            }]);
+                            search.selected = 0;
+                            [
+                                ("tab", true),
+                                ("tab", false),
+                                ("alt-left", true),
+                                ("alt-left", false),
+                                ("alt-right", true),
+                                ("alt-right", false),
+                            ]
+                            .map(|(key, is_held)| {
+                                let event = KeyDownEvent {
+                                    keystroke: gpui::Keystroke::parse(key).unwrap(),
+                                    is_held,
+                                };
+                                search.key_down(&event, window, cx);
+                                search.input.read(cx).text()
+                            })
+                        })
+                        .unwrap();
                     send.send((
                         states,
                         reopened_states,
                         page_states,
                         window_refresh,
                         app_refresh,
+                        file_navigation,
                     ))
                     .unwrap();
                     cx.update(|cx| cx.quit()).unwrap();
                 })
                 .detach();
             });
-        let (states, reopened_states, (help_pages, output_pages), window_refresh, app_refresh) =
-            receive.recv().unwrap();
+        let (
+            states,
+            reopened_states,
+            (help_pages, output_pages),
+            window_refresh,
+            app_refresh,
+            file_navigation,
+        ) = receive.recv().unwrap();
         assert_eq!(reopened_states, ["", "3**4"]);
         assert_eq!(window_refresh, (true, true, true));
         assert_eq!(app_refresh, (true, true, true, true));
+        assert_eq!(
+            file_navigation,
+            [PARENT, CHILD, CHILD, PARENT, PARENT, CHILD]
+        );
         let last_example_page = (EXAMPLES.len() - 1) / EXAMPLE_PAGE_SIZE * EXAMPLE_PAGE_SIZE;
         assert_eq!(
             help_pages,
